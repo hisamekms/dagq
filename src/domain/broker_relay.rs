@@ -71,10 +71,12 @@ pub fn socket_path() -> String {
 /// The arguments after `podman --connection dagq` that start the relay of
 /// `spec` in the machine, passing to the broker's `port` on the host. The
 /// relay is the only container that mounts the run's socket volume beside
-/// the run's own, with the shared SELinux label (`:z`); it runs as root in
-/// its container only to give the socket to the run's uid ([`SOCKET_MODE`]),
-/// with every capability dropped but `CHOWN`, a read-only root filesystem
-/// and no privilege escalation. It holds no token and no host file.
+/// the run's own, with the shared SELinux label (`:z`) and the volume given
+/// to its user (`U`); it runs as the run's container's user, mapped as the
+/// run's container maps it ([`super::run_container::worker_run_args`]'s
+/// `keep-id`), so the socket it binds with [`SOCKET_MODE`] is that user's
+/// alone, with every capability dropped, a read-only root filesystem and
+/// no privilege escalation. It holds no token and no host file.
 pub fn relay_run_args(
     queue: &QueueKey,
     spec: &RelaySpec,
@@ -93,17 +95,17 @@ pub fn relay_run_args(
         &format!("{RUN_LABEL}={}", spec.run),
         "--label",
         &format!("{TARGET_LABEL}={port}"),
+        "--userns",
+        &format!("keep-id:uid={},gid={}", spec.uid, spec.uid),
         "--user",
-        "0:0",
+        &format!("{}:{}", spec.uid, spec.uid),
         "--read-only",
         "--cap-drop",
         "all",
-        "--cap-add",
-        "CHOWN",
         "--security-opt",
         "no-new-privileges",
         "--volume",
-        &format!("{volume}:{SOCKET_DIR}:z"),
+        &format!("{volume}:{SOCKET_DIR}:z,U"),
         &spec.image,
     ]
     .iter()
@@ -158,7 +160,8 @@ pub fn forward_command() -> Vec<String> {
 /// The environment of a run's container that points its tools at the
 /// forwarder (ADR-t2114-3 decision 3, ADR-t2257-1 decision 3): the dagq
 /// client's broker ([`crate::domain::queue_service::URL_ENV`]), Claude
-/// Code's `ANTHROPIC_BASE_URL`, and the standard proxy variables a package
+/// Code's `ANTHROPIC_BASE_URL` (under the broker's
+/// [`CLAUDE_PATH`](super::queue_broker::CLAUDE_PATH)), and the standard proxy variables a package
 /// manager reads (`HTTPS_PROXY`, `HTTP_PROXY` and their lower-case forms),
 /// with the loopback kept off the proxy (`NO_PROXY`). No tool's own setting
 /// is here: a tool that reads no proxy variable cannot go out, which is the
@@ -168,7 +171,10 @@ pub fn container_env() -> Vec<(&'static str, String)> {
     let local = "127.0.0.1,localhost".to_owned();
     vec![
         (super::queue_service::URL_ENV, url.clone()),
-        ("ANTHROPIC_BASE_URL", url.clone()),
+        (
+            "ANTHROPIC_BASE_URL",
+            format!("{url}{}", super::queue_broker::CLAUDE_PATH),
+        ),
         ("HTTPS_PROXY", url.clone()),
         ("HTTP_PROXY", url.clone()),
         ("https_proxy", url.clone()),
@@ -333,15 +339,17 @@ mod tests {
             .collect();
         assert_eq!(
             volumes,
-            ["dagq-77067154921b9014-socket-r1:/run/dagq-broker:z"]
+            ["dagq-77067154921b9014-socket-r1:/run/dagq-broker:z,U"]
         );
+        assert!(!args.iter().any(|arg| arg == "--cap-add"), "{args:?}");
         let text = args.join(" ");
         for part in [
             "--name dagq-77067154921b9014-relay-r1",
             "--label dagq.queue=77067154921b9014",
             "--label dagq.relay.run=r1",
             "--label dagq.relay.target=4321",
-            "--cap-drop all --cap-add CHOWN",
+            "--userns keep-id:uid=10001,gid=10001 --user 10001:10001",
+            "--cap-drop all --security-opt",
             "--read-only",
             "no-new-privileges",
             "localhost/dagq-worker:abc dagq relay serve --socket /run/dagq-broker/broker.sock \
@@ -374,9 +382,11 @@ mod tests {
     fn a_run_s_tools_are_pointed_at_the_forwarder_by_standard_variables() {
         let env = container_env();
         let url = format!("http://127.0.0.1:{FORWARD_PORT}");
+        assert!(env.iter().any(
+            |(key, value)| *key == "ANTHROPIC_BASE_URL" && *value == format!("{url}/anthropic")
+        ));
         for name in [
             crate::domain::queue_service::URL_ENV,
-            "ANTHROPIC_BASE_URL",
             "HTTPS_PROXY",
             "https_proxy",
             "HTTP_PROXY",

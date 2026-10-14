@@ -460,6 +460,7 @@ pub fn run_planner_session(
             resume: false,
             sccache: None,
             runtimes: None,
+            containers: None,
             background,
             clock,
         }

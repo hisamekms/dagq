@@ -343,6 +343,7 @@ pub fn launch_background(
     let sccache = backend.sccache.clone();
     let inherited_env = backend.inherited_env.clone();
     let processes = backend.wrapper_processes.clone();
+    let containers = backend.containers.clone();
     let worker = thread::spawn(move || {
         let spawner = ReadySpawner {
             inner: StubSpawner { db: db.clone() },
@@ -356,19 +357,33 @@ pub fn launch_background(
                 Vec::new()
             },
         };
-        let returned = runtime::session_in_background_as_with_processes(
-            &db,
-            &id,
-            &token,
-            &provider,
-            Some(&other),
-            &spawner,
-            resume,
-            pid,
-            processes.as_deref().unwrap_or(&SystemProcesses),
-            sccache,
-            Some(Path::new(env!("CARGO_BIN_EXE_dagq"))),
-        );
+        let returned = if let Some(containers) = containers {
+            runtime::session_in_background_with_containers(
+                &db,
+                &id,
+                &token,
+                &provider,
+                &spawner,
+                resume,
+                pid,
+                processes.as_deref().unwrap_or(&SystemProcesses),
+                &*containers,
+            )
+        } else {
+            runtime::session_in_background_as_with_processes(
+                &db,
+                &id,
+                &token,
+                &provider,
+                Some(&other),
+                &spawner,
+                resume,
+                pid,
+                processes.as_deref().unwrap_or(&SystemProcesses),
+                sccache,
+                Some(Path::new(env!("CARGO_BIN_EXE_dagq"))),
+            )
+        };
         // The wrapper's process ends with it.
         drop(stand);
         returned

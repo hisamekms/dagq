@@ -1724,6 +1724,18 @@ fn stop_processes(sv: &Supervisor<'_>, run: &TaskRun, pids: &[u32]) -> Result<Ve
     for (pid, _) in gone {
         stopped.push(json!({"pid": pid, "gone": true}));
     }
+    // A run's processes in its container are the machine's, which no pid
+    // of the host names: stopping the run's processes removes its turn's
+    // container, whose `podman` was among them.
+    // Best effort as for a session's stop: a machine that is down took it
+    // with it, and the run's end removes one left.
+    if run.in_container() {
+        let removed = sv.run_containers.remove(run.id());
+        if let Err(error) = &removed {
+            warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "the container of run {} could not be removed: {error:#}", run.id());
+        }
+        stopped.push(json!({"container": removed.is_ok()}));
+    }
     Ok(stopped)
 }
 

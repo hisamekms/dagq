@@ -167,7 +167,7 @@ fn each_run_gets_its_own_socket_and_relay_and_its_end_removes_them() {
     assert_eq!(runs.len(), 2, "{runs:?}");
     for (call, run, other) in [(&runs[0], "r1", "r2"), (&runs[1], "r2", "r1")] {
         assert!(
-            call.contains(&format!("--volume {}:/run/dagq-broker:z ", volume(run))),
+            call.contains(&format!("--volume {}:/run/dagq-broker:z,U ", volume(run))),
             "{call}"
         );
         assert!(!call.contains(&volume(other)), "{call}");

@@ -47,6 +47,8 @@
 //! `[container.image]` names the project's Containerfile and the files it
 //! copies, on which the container runtime's image is built (ADR-t2257-1
 //! decision 2).
+//! `[container.build_output]` names the directory of a run's container its
+//! build output volume is mounted at ([`CONTAINER_BUILD_OUTPUT_TABLE`]).
 //! `[toolchains.<name>]` declares a toolchain profile the repository uses
 //! and the paths it applies to (ADR-t2268-1, [`TOOLCHAINS_PREFIX`]).
 //! `[verify_marks.<name>]` declares a mark of the project's own on its
@@ -255,6 +257,20 @@ pub const EGRESS_REGISTRIES: &str = "registries";
 /// base (ADR-t2257-1 decision 2); its keys and their meaning are on
 /// [`ProjectImage`].
 const CONTAINER_IMAGE_TABLE: &str = "container.image";
+/// `[container.build_output]`: where a worker's container mounts its run's
+/// build output (ADR-t2173-1 decision 2), a named volume of the dagq
+/// machine that only the run's containers mount and that is removed at the
+/// run's end and its landing. Its one key, `dir` (a string), is the
+/// directory in the container: absolute, not `/`, without `,`, `:` or
+/// `..`. Without the table no such volume is mounted, which is the
+/// default: the runtime knows no build tool, so the project points its
+/// tool there through `[run.env]` (for cargo, `CARGO_TARGET_DIR`). Build
+/// output on the clone (a mount of the host) is where links were seen to
+/// fail. A binary older than this table refuses it, so a repository adds
+/// it only once the binary that runs its queue reads it.
+pub const CONTAINER_BUILD_OUTPUT_TABLE: &str = "container.build_output";
+/// The key of [`CONTAINER_BUILD_OUTPUT_TABLE`].
+const CONTAINER_BUILD_OUTPUT_DIR: &str = "dir";
 /// `[toolchains.<name>]`: a toolchain profile the repository uses
 /// (ADR-t2268-1 decision 3), one table per declaration, read in file
 /// order. `<name>` is the declaration's own name, kebab-case (lowercase
@@ -336,7 +352,7 @@ const VERIFY_MARK_CLASS: &str = "class";
 const VERIFY_MARK_LINE: &str = "line";
 const CONTAINER_IMAGE_CONTAINERFILE: &str = "containerfile";
 const CONTAINER_IMAGE_INPUTS: &str = "inputs";
-const TABLES: [&str; 24] = [
+const TABLES: [&str; 25] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -361,6 +377,7 @@ const TABLES: [&str; 24] = [
     EVAL_TABLE,
     EGRESS_TABLE,
     CONTAINER_IMAGE_TABLE,
+    CONTAINER_BUILD_OUTPUT_TABLE,
 ];
 /// The keys of `[recheck]`.
 const RECHECK_COMMAND: &str = "command";
@@ -480,6 +497,9 @@ pub struct Config {
     /// `[container.image]` (ADR-t2257-1 decision 2); `None` without the
     /// table, which runs the container runtime's base alone.
     pub container_image: Option<ProjectImage>,
+    /// `[container.build_output] dir` ([`CONTAINER_BUILD_OUTPUT_TABLE`]);
+    /// `None` without the table.
+    pub container_build_output: Option<String>,
     /// `[toolchains.<name>]` in file order ([`TOOLCHAINS_PREFIX`]); empty
     /// without any. The profiles they name are looked up when they are
     /// resolved ([`load_toolchains`]).
@@ -539,6 +559,8 @@ pub fn parse_config(text: &str) -> Result<Config> {
     // whole.
     let mut container_image: Option<(usize, ProjectImage)> = None;
     let mut container_image_keys: Vec<String> = Vec::new();
+    // `[container.build_output]`'s header line; its `dir` is required.
+    let mut build_output: Option<usize> = None;
     let mut role: Option<ModelRole> = None;
     let mut roles_seen: Vec<ModelRole> = Vec::new();
     // `[roles.worker]` or `[roles.verification]` being read in place of a
@@ -827,7 +849,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -856,6 +878,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             if *known == CONTAINER_IMAGE_TABLE {
                 container_image = Some((number, ProjectImage::default()));
+            }
+            if *known == CONTAINER_BUILD_OUTPUT_TABLE {
+                build_output = Some(number);
             }
             continue;
         }
@@ -1138,6 +1163,27 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 let globs = parse_string_array(rest.trim()).with_context(with)?;
                 validate_path_globs(&globs).with_context(with)?;
                 config.e2e_paths = dedup_globs(&globs);
+            }
+            Some(CONTAINER_BUILD_OUTPUT_TABLE) => {
+                ensure!(
+                    key == CONTAINER_BUILD_OUTPUT_DIR,
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{CONTAINER_BUILD_OUTPUT_TABLE}]; the key is {CONTAINER_BUILD_OUTPUT_DIR}"
+                );
+                ensure!(
+                    config.container_build_output.is_none(),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let dir = parse_string(rest.trim()).with_context(with)?;
+                ensure!(
+                    dir.starts_with('/')
+                        && dir != "/"
+                        && !dir.contains([',', ':'])
+                        && !dir.split('/').any(|part| part == ".."),
+                    "{}: {dir:?} is not a directory of the container (absolute, not /, without , : or ..)",
+                    with()
+                );
+                config.container_build_output = Some(dir);
             }
             Some(CONTAINER_IMAGE_TABLE) => {
                 ensure!(
@@ -1778,6 +1824,12 @@ pub fn parse_config(text: &str) -> Result<Config> {
             "{CONFIG_FILE_NAME}:{line}: [{CI_WATCH_TABLE}] has no workflow"
         );
         config.ci_watch = Some(watch);
+    }
+    if let Some(line) = build_output {
+        ensure!(
+            config.container_build_output.is_some(),
+            "{CONFIG_FILE_NAME}:{line}: [{CONTAINER_BUILD_OUTPUT_TABLE}] has no {CONTAINER_BUILD_OUTPUT_DIR}"
+        );
     }
     if let Some((line, image)) = container_image {
         ensure!(
@@ -2439,6 +2491,19 @@ pub fn load_project_image(root: &Path) -> Result<Option<ProjectImage>> {
     Ok(parse_config(&text)
         .with_context(|| format!("parse {}", path.display()))?
         .container_image)
+}
+
+/// `[container.build_output] dir` of the `dagq.toml` in `root`, the main
+/// checkout ([`CONTAINER_BUILD_OUTPUT_TABLE`]); no file or no table is
+/// `None`, no build output volume.
+pub fn load_build_output_dir(root: &Path) -> Result<Option<String>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(None);
+    };
+    Ok(parse_config(&text)
+        .with_context(|| format!("parse {}", path.display()))?
+        .container_build_output)
 }
 
 /// The runtimes of the main checkout a queue is bound to (goal 38), read
@@ -3899,6 +3964,48 @@ LITERAL = 'no \n escapes # here'
         );
     }
 
+    /// `[container.build_output]` names the container's directory the run's
+    /// build output volume is mounted at; without it, none is.
+    #[test]
+    fn the_build_output_table_names_a_directory_of_the_container() {
+        let config = parse_config("[container.build_output]\ndir = \"/build/target\"\n").unwrap();
+        assert_eq!(
+            config.container_build_output.as_deref(),
+            Some("/build/target")
+        );
+        assert_eq!(parse_config("").unwrap().container_build_output, None);
+        for (text, error) in [
+            ("[container.build_output]\n", "has no dir"),
+            (
+                "[container.build_output]\ndir = 'build'\n",
+                "not a directory of the container",
+            ),
+            (
+                "[container.build_output]\ndir = '/'\n",
+                "not a directory of the container",
+            ),
+            (
+                "[container.build_output]\ndir = '/a,ro'\n",
+                "not a directory of the container",
+            ),
+            (
+                "[container.build_output]\ndir = '/a/../b'\n",
+                "not a directory of the container",
+            ),
+            (
+                "[container.build_output]\ndir = '/a'\ndir = '/b'\n",
+                "defined twice",
+            ),
+            (
+                "[container.build_output]\npath = '/a'\n",
+                "unknown key path",
+            ),
+        ] {
+            let message = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(message.contains(error), "{text}: {message}");
+        }
+    }
+
     /// `[container.image]` names the project's Containerfile and its
     /// inputs, repository paths only; without it the base runs alone.
     #[test]
@@ -5224,7 +5331,7 @@ LITERAL = 'no \n escapes # here'
         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
         assert!(
             error.contains(
-                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [review.jobs], [ci_watch], [landing_verification], [eval], [eval.providers.<provider>], [egress], [container.image] and [kpi]"
+                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [review.jobs], [ci_watch], [landing_verification], [eval], [eval.providers.<provider>], [egress], [container.image], [container.build_output] and [kpi]"
             ),
             "{error}"
         );

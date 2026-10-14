@@ -1059,7 +1059,7 @@ pub(super) fn container_parts(
     crate::infrastructure::claude_credential::ClaudeCredentialGate<
         crate::application::podman_machine::MachineGate<
             crate::application::container_image::ImageGate<
-                crate::infrastructure::container_runtime::UnbuiltContainer,
+                crate::infrastructure::container_runtime::ContainerExecutors,
             >,
         >,
     >,
@@ -1084,7 +1084,7 @@ pub(super) fn container_parts(
                         actor,
                     }),
                     now: Arc::new(move || clock.now()),
-                    container: crate::infrastructure::container_runtime::UnbuiltContainer,
+                    container: crate::infrastructure::container_runtime::ContainerExecutors,
                 },
             },
         ),

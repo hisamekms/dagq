@@ -270,6 +270,13 @@ pub struct SuperviseOptions {
     /// pass, the tests) keeps none. The container runtime is looked at
     /// through the relays' record either way.
     pub broker_relay: Option<QueueRelayOptions>,
+    /// The containers of the runs whose worker works in a clone; `None` is
+    /// podman's in the dagq machine. Tests set it (a fake podman).
+    pub run_containers: Option<RunContainersPort>,
+    /// Whether the container runtime can run a target, in place of its
+    /// parts (the broker, the relays, the credential, the machine and the
+    /// image); `None` asks them. Tests set it.
+    pub container: Option<ContainerRuntimePort>,
     /// Counts the supervisor loop's passes, one at the top of each; tests
     /// keep a clone and wait for passes past a threshold (task 1046).
     pub passes: Arc<AtomicU64>,
@@ -294,6 +301,26 @@ pub struct ProcessesPort(pub Arc<dyn ProcessControl + Send + Sync>);
 impl std::fmt::Debug for ProcessesPort {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ProcessesPort")
+    }
+}
+
+/// The container runtime [`SuperviseOptions::container`](super::SuperviseOptions::container) gives the supervisor.
+#[derive(Clone)]
+pub struct ContainerRuntimePort(pub Arc<dyn crate::application::ContainerRuntime + Send + Sync>);
+
+impl std::fmt::Debug for ContainerRuntimePort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ContainerRuntimePort")
+    }
+}
+
+/// The runs' containers [`SuperviseOptions::run_containers`](super::SuperviseOptions::run_containers) gives the supervisor.
+#[derive(Clone)]
+pub struct RunContainersPort(pub Arc<dyn crate::application::run_container::RunContainers>);
+
+impl std::fmt::Debug for RunContainersPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RunContainersPort")
     }
 }
 
@@ -369,6 +396,8 @@ impl SuperviseOptions {
             queue_service: None,
             queue_broker: None,
             broker_relay: None,
+            run_containers: None,
+            container: None,
             passes: Arc::new(AtomicU64::new(0)),
             sccache: None,
             ci_watch: None,
@@ -749,18 +778,30 @@ pub fn supervise_with_reviewer(
         // The queue broker, the Claude credential, the runs' relays, the
         // dagq machine and the image are the parts of the container runtime
         // built yet (goal 38): a target set to it waits, and says why.
-        container: Arc::new(crate::application::queue_broker::BrokerGate {
-            broker: host::queue_broker_control(&db, options.queue_broker.as_ref()),
-            container: host::container_parts(
-                &db,
-                &main_checkout,
-                generators.clock.clone(),
-                Some(crate::domain::actor::ActorContext::instance(
-                    crate::domain::actor::ActorRole::Supervisor,
-                    pid,
-                )),
-            ),
-        }),
+        container: match &options.container {
+            Some(port) => port.0.clone(),
+            None => Arc::new(crate::application::queue_broker::BrokerGate {
+                broker: host::queue_broker_control(&db, options.queue_broker.as_ref()),
+                container: host::container_parts(
+                    &db,
+                    &main_checkout,
+                    generators.clock.clone(),
+                    Some(crate::domain::actor::ActorContext::instance(
+                        crate::domain::actor::ActorRole::Supervisor,
+                        pid,
+                    )),
+                ),
+            }),
+        },
+        run_containers: options.run_containers.as_ref().map_or_else(
+            || {
+                Arc::new(crate::compose::run_containers(
+                    &db,
+                    Some(main_checkout.clone()),
+                )) as Arc<dyn crate::application::run_container::RunContainers>
+            },
+            |port| port.0.clone(),
+        ),
         verification_tokens: Arc::new(
             crate::infrastructure::queue_broker::SystemVerificationTokens { db: db.clone() },
         ),

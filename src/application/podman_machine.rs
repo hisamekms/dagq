@@ -2,8 +2,11 @@
 //! ADR-t2173-1): make it run before a container starts and before a test
 //! or a smoke that needs podman ([`ensure`]), stop it when its last user
 //! leaves ([`release`]), both under one host-wide lock; the named volumes
-//! inside it ([`MachineVolumes`]); and how the container runtime cannot be
-//! used while the machine cannot ([`MachineGate`]).
+//! inside it ([`MachineVolumes`]); a run's parts in the machine, made
+//! ready before each turn of a worker in the container ([`RunMachine`],
+//! the one entry this context lends the worker's executor); and how the
+//! container runtime cannot be used while the machine cannot
+//! ([`MachineGate`]).
 //!
 //! What is decided is [`crate::domain::podman_machine`]'s; the commands
 //! and the lock are the adapters' ([`PodmanMachine`], [`MachineUsers`]).
@@ -61,6 +64,20 @@ pub trait MachineVolumes {
     fn create_worker_cache(&self) -> Result<()>;
     fn remove_worker_cache(&self) -> Result<()>;
     fn worker_cache_exists(&self) -> Result<bool>;
+}
+
+/// A run's parts in the dagq machine, made ready before each turn of a
+/// worker in the container (ADR-t2113-3 decision 1): the machine running
+/// with the run among its users ([`ensure`]), the queue's image built
+/// ([`super::container_image::prepare`]), the run's relay open
+/// ([`super::broker_relay::open`]) and, when asked, the run's build output
+/// volume ([`MachineVolumes`]). This context does it; the worker's executor
+/// is given it as this port.
+pub trait RunMachine: Send + Sync {
+    /// Make the parts of the run `run` ready, its build output volume
+    /// only with `build_output`; the image its container runs. `Err` says
+    /// why the turn cannot run in the container (it runs nowhere else).
+    fn ready(&self, run: &str, build_output: bool) -> Result<String>;
 }
 
 /// What [`ensure`] and [`release`] act with.

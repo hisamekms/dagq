@@ -52,9 +52,9 @@ related:
 | productionの集合のファイル | 集合のケースの一覧とpatch | ビュー | queueのdirの`agent-cases/<set id>/`の`cases.json`と`patches/`。`agent_cases_*`とgitの`<base>...<head>`の差分から作り直し（`application::agent_cases::view`）、commitが辿れないケースは理由つきで飛ばす |
 | queueのbrokerの記録 | 動いているbrokerが起動ごとに書き、probeとrelayの見張りが読む自分の記録（欄は`BrokerRecord`） | 材料 | `<queue dir>/broker/state.json`（寿命はbrokerの1回の起動で、起動し直せば作り直せる） |
 | runのrelayの記録 | 開いたrunのrelay（containerを起動し直す材料。欄は`RelaySpec`）で、relayの見張りが読む | 材料 | `<queue dir>/relay/<run>.json`（寿命はrunのrelayを開いてから閉じるまで） |
-| run branchのbundle | containerのrunのrun branch 1本 | 材料 | run dir。executorが書き制御側が取り込む。cloneから作り直せる |
-| runの状態のファイル | containerのrunのHEADとstatus（workerの申告） | 材料 | run dir。executorが書き検証と復旧が読む。次のturnが書き直す |
-| mainのbundle | 今のmain 1本 | 材料 | run dir。制御側が書きexecutorが読む。mainから作り直せる |
+| run branchのbundle | containerのrunのrun branch 1本 | 材料 | run dir。turnの終わりにcontainerが書き制御側が取り込む |
+| runの状態のファイル | containerのrunのHEADとstatus（workerの申告） | 材料 | run dir。bundleの後にcontainerが書き直し、検証と復旧が読む |
+| mainのbundle | 今のmain 1本 | 材料 | run dir。制御側が書き、次のturnの始めにcontainerが取り込む |
 | 着地の検証の対応表のcache | 着地の検証が取った対応表の最新の1つと、取ったCIのrun・そのcommit・runの時刻・取った時刻 | 材料 | `scripts/landing-it.sh`がGitHub Actionsのartifact `it-coverage-map`から取り、新しいrunが無ければ取り直さない。置き場はqueueの外の`${XDG_CACHE_HOME:-$HOME/.cache}/dagq/landing-it/<run id>/`で、消えてもartifactから取り直せる |
 
 計測の層の論理ストアか、runtime・CI・`scripts/`が続けて書き他の仕組みが読む共有の記録を足すか変えるtaskは、同じ変更でこの表に行（中身・区分・今のアダプタ）を足すか直す（[ADR-t2065-1](../adr/2026-10-08-t2065-1-measurement-ssot-table-holds-stores-and-shared-records-only.md)、[文書の規則](../development/documents.md)の「design」）。

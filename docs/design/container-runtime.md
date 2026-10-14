@@ -48,13 +48,14 @@ containerを選んだ適用先が使えないとき、hostで動かさずに控�
   その奥では`infrastructure::claude_credential::ClaudeCredentialGate`が、workerの適用先について`host.toml`で人が選んだClaudeの資格情報（既定なし）を見て、未選択・欠け・0600でなければ選び方を添えて使えないと答える（[Queue broker](queue-broker.md#claudeの認証の差し替え)、[ADR-t2177-1](../adr/2026-10-12-t2177-1-broker-swaps-the-run-token-for-a-claude-credential-chosen-in-host-toml.md)決定3）。
   その奥で`application::podman_machine::MachineGate`がdagq専用のmachineを見て、使えなければ理由つきで使えないと答える（下の「dagq専用のmachine」）。
   machineの奥では`application::container_image::ImageGate`がimageを見る（下の「image」）。
-  その奥の、残りの部品が揃うまでの実装`infrastructure::container_runtime::UnbuiltContainer`は、常に理由つきで使えないと答える。
+  その奥の`infrastructure::container_runtime::ContainerExecutors`は、workerには使えると答え、verificationにはcontainerの実行がまだ無いので理由つきで使えないと答える。
 - worker: 各候補のclaimを控え、理由を`claim_deferred`に残す（[claimを控える](supervisor-lifecycle/claim-defer.md#workerを動かせないtask)）。
   resumeの候補からも外す（`Supervisor::container_deferral`）。
   resumeを使い切ったrunを人に渡すことは止めない。
   切り替えの前からhostで動いていたrunの次のturn（答えの配達・reviseなど）は、wrapperがturnを起動するところ（`headless_session`の`Turns`）で`dagq.toml`を読み直して拒み、wrapperはerrorで終わる。
   読めないときも、containerの設定かもしれないので同じく拒む。
-  supervisorが起動するactor（`Supervisor::actors`）も同じくworkerの`backend`をruntimeに合わせる。
+  逆にcloneで働くrunのturnも、workerがhostに戻った後はhostで起動せずに拒む。
+  supervisorが起動するactor（`Supervisor::actors`）も同じくworkerの`backend`をruntimeに合わせ、runのsession wrapperだけは制御側としてhostで起動する。
   containerが使えても、Codexに経路が向くrun（taskのproviderと`[provider_fallback]`で決まる行き先）は控える。
   queueのbrokerの宛先にOpenAIが無いため（[ADR-t2114-1](../adr/2026-10-08-t2114-1-queue-broker-is-a-host-process-with-three-destinations.md)決定2）。
 - verification: supervisorは着地を始めずに待ち（`domain::landing_hold`）、drainではleaseを返して人に渡す。
@@ -65,8 +66,8 @@ containerを選んだ適用先が使えないとき、hostで動かさずに控�
 - 知らせ: supervisorと、拒んだ`integrate`が、答えがqueueの最新の記録と違うとき（待つ適用先か理由が変わったときを含む、`ContainerCheck::transition`）に`container_runtime_unavailable` / `container_runtime_available`を記録し、前者はinbox宛てのattentionになる。
   supervisorを通さない`integrate`だけでもinboxに届く。
   人は部品が揃うのを待つか、runtimeをhostに戻すtaskを頼む。
-- 直接の起動: `ExecutorBackend::Container`へactorを起動する経路（`HostActorExecutor`・reviewのprogramのjob）は`ensure_implemented`が拒む。
-  containerが使えると答えても、workerのcontainerの実行が無い間はここで拒まれる。
+- 直接の起動: hostのexecutor（`HostActorExecutor`・reviewのprogramのjob）は`ExecutorBackend::Container`に置いたactorを起動せず、`ensure_implemented`が拒む。
+  containerで起動するのはworkerのturnだけで、wrapperが下の「workerの実行」で起動する。
 - 適用先の外: 着地の前のe2eとmacOSに固有のtestはhostに置く（[ADR-t2113-3](../adr/2026-10-08-t2113-3-only-workers-resume-and-integrate-verification-run-in-containers.md)決定3）。
   verificationをcontainerにしても、runのe2eはhostで流れる。
 
@@ -82,7 +83,7 @@ containerはdagq専用の名前のPodman machineだけで動かす（[ADR-t2113-
 - 名前と接続: machineと接続の名前は`domain::podman_machine::MACHINE_NAME`で、podmanのコマンドはmachineの名前か`--connection`でそれを名指す。
   人の既定のmachineと既定の接続は変えず、作らず、止めない。
   Podmanの版によってはinitとstartが既定の接続を変えるので、`PodmanCli`が前の既定に戻す（前に既定が無ければ戻す先が無く、dagqの接続が既定に残りうる）。
-- 起動と停止: `ensure`は無ければinitし、止まっていればstartし、使う者として数える入口で、containerの起動の前とpodmanを要るtestとスモークの前に呼ぶ（containerの実行の部品が揃うまでは呼ぶのは`#[ignore]`のtestだけ）。
+- 起動と停止: `ensure`は無ければinitし、止まっていればstartし、使う者として数える入口で、workerのturnのcontainerの起動の前（runを使う者にする）とpodmanを要るtestとスモークの前に呼ぶ。
   使い終えたら`release`を呼び、使う者が居なければ止める。
   どちらもhost全体のlock（data homeの`dagq/machine/`）の中で判定と操作を行うので、並行するrun・verification・testが同時に呼んでも作るのと起動するのは1回になる。
   使う者は記録したprocessが終わっていれば数えない。
@@ -100,7 +101,7 @@ containerはdagq専用の名前のPodman machineだけで動かす（[ADR-t2113-
 - machineの中のnamed volume: buildの出力はrunかverificationごと、workerのcacheはqueueごとのnamed volumeで、hostにmountしない（`MachineVolumes`、名前は`QueueKey`）。
   virtiofsのmountの上に置いたbuildの出力ではlinkが落ちたため（[ADR-t2173-1](../adr/2026-10-12-t2173-1-machine-mounts-only-run-and-clone-dirs-and-keeps-build-output-and-worker-cache-in-named-volumes.md)のContext）。
   名前がqueueとrunを含むので、あるqueueの操作は別のqueueのvolumeに届かない。
-  runの終わりと着地でrunのbuildの出力を消すのはcloneと同じ片付けの経路で、使う者が去る前に`MachineVolumes`のportを呼ぶ（呼ぶのはその経路の実装）。
+  runの終わりと着地でrunのbuildの出力を消すのは、relayの見張りが終わったrunを閉じる`RelayControl::close`で、runのcontainer・relay・socketのvolumeと一緒に消す（下の「brokerへの経路」）。
   machineを作り直すとvolumeは消え、workerのcacheは冷えた状態から始まる。
 - 食い違いと作り直し: volumeはinitでしか決まらない。
   `ensure`と`MachineGate`は、queueのdirがmountされていないか、3つの種類の外のdir（`$HOME`など）がmountされていれば、作り直しの手順を添えて使えないと答える。
@@ -129,8 +130,8 @@ containerのimageは、runtimeが持つbaseと、`dagq.toml`が名指すproject�
 - tag: baseはruntimeのbuild識別子・Claude Codeの版・baseのContainerfile、projectはbaseのreference・Containerfileと入力のpathと中身から決まり、どれかが変われば新しいimageになる。
   projectのimageの名前はqueueを含み、あるqueueの片付けは別のqueueのprojectのimageに届かない。
   baseはhostの全てのqueueが共有し、新しいbaseを作ったqueueが他のbaseを消す（使われているものはpodmanが残す）。
-- buildと片付け: `prepare`は、containerの実行（後続の部品）がmachineを動かしてから、containerの起動の前に呼ぶ。
-  その実行が揃うまで本番でimageを作る経路は無く、`ImageGate`は見るだけである。
+- buildと片付け: `prepare`は、workerのturnの前にmachineを動かしてから、containerの起動の前に呼ぶ（下の「workerの実行」）。
+  `ImageGate`は見るだけである。
   無いimageを作り（baseが無ければprojectもその上に作り直す）、baseと同じqueueの古いtagを消す。
   containerが使うimageはpodmanが消させないので次の機会に残す。
   buildのcontextはimageのファイルだけを置いた新しいdirで、buildの引数は版とsourceだけなので、秘密情報とhostのpathはimageに入らない。
@@ -144,8 +145,8 @@ containerのimageは、runtimeが持つbaseと、`dagq.toml`が名指すproject�
 runのcontainerは`--network none`で、外への経路はhostのqueueのbrokerへの1本だけにする（[ADR-t2114-3](../adr/2026-10-08-t2114-3-worker-containers-reach-the-broker-through-a-unix-socket-relay.md)決定1〜4）。
 判断は`domain::broker_relay`、use caseと門は`application::broker_relay`、relay・転送のprocessとpodmanのコマンドは`infrastructure::broker_relay`、見張りは`supervise::broker_relay`が持つ。
 
-- runのsocket: runのcontainerを起動する前に`application::broker_relay::open`が、machineの中にrunごとのnamed volumeを作ってそのrunのrelayを起動し、runの終わりに`close`がrelayとvolumeを消す（呼ぶのはcontainerの実行の実装）。
-  relayはvolumeの中にsocketを作り、mode 0600でrunのcontainerの非rootのuidに渡す。
+- runのsocket: runのturnのcontainerを起動する前に、開いていなければ`application::broker_relay::open`が、machineの中にrunごとのnamed volumeを作ってそのrunのrelayを起動し、runの終わりに`close`がrelayとvolumeを消す。
+  relayはrunのcontainerの非rootのuidで動き、そのcontainerと同じuidの対応（`keep-id`）でvolumeの中にsocketをmode 0600で作る。
   volumeをmountするのはrelayとそのrunのcontainerだけで、どちらも`:z`を付ける。
   開いたrelayは`<queue dir>/relay/`に記録するので、machineの停止で消えたrelayも見張りが見つける。
   記録は`close`が成功するまで残る。
@@ -153,7 +154,8 @@ runのcontainerは`--network none`で、外への経路はhostのqueueのbroker�
   hostへはmachineのgvproxy（`host.containers.internal`）を通る。
   tokenを持たず、認証も宛ての判定もしない（brokerが行う）。
 - 転送（`dagq relay forward`）: runのcontainerの中で`127.0.0.1`の決まったportを受け、socketへ流す。
-  containerのenv（`container_env`）がdagqのクライアントモードの宛て・Claude Codeの`ANTHROPIC_BASE_URL`・標準のproxyのenvをこのportに向け、道具に固有の設定を持たない（[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定3）。
+  containerのenv（`container_env`）がdagqのクライアントモードの宛て・Claude Codeの`ANTHROPIC_BASE_URL`（brokerの`/anthropic`）・標準のproxyのenvをこのportに向け、道具に固有の設定を持たない（[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定3）。
+  run tokenをClaude Codeとproxyのenvに入れるのは、containerの中の`dagq relay turn`である（下の「workerの実行」）。
   クライアントモードの宛ては[Queue service](queue-service.md#クライアントモード)。
 - DNSが無い: proxyのenvを見ない道具は名前を引けず外へ出られない。
   これは隔離の結果として扱い、要るものはhostのrunかqueue serviceのユースケースに回す。
@@ -191,11 +193,39 @@ adapterもcloneのpathでのgitを拒む。
 - run dirのファイル: symlinkを辿らずに読み書きする。
 - 片付け: worktreeと同じ契機で、clone・着地用のworktree・制御側のrun branch・run dirのbundleと状態のファイルを、gitを使わずsymlinkを辿らずに消す。
 
+## workerの実行
+
+cloneで働くrunの各turn（最初のturn・revise・答え・resume）は、hostのprocessの代わりにdagq専用のmachineのcontainerで動く（[ADR-t2113-3](../adr/2026-10-08-t2113-3-only-workers-resume-and-integrate-verification-run-in-containers.md)決定1、[ADR-t2114-2](../adr/2026-10-08-t2114-2-broker-swaps-the-run-token-for-the-claude-credential.md)決定1）。
+session wrapperはhostの制御側に残り、turnの出力・receipt・askをrun dirから今と同じく読み、`run log`で追える。
+executorは`application::run_container::PodmanActorExecutor`、設定の読み取り・tokenの受け渡し・podmanは`RunContainers`のport（adapterは`infrastructure::run_container::PodmanRunContainers`）、machine・image・relay・buildの出力の準備はhost運用が実行と着地に貸す`application::podman_machine::RunMachine`のport（adapterは`QueueRunMachine`）、`podman run`の引数・token・envの判断は`domain::run_container`、containerの中の処理は`infrastructure::container_turn`（`dagq relay turn`）が持つ。
+
+- 準備: 各turnの前に、machineを動かしてrunを使う者にし（`release`は呼ばず、使う者はwrapperのprocessが終われば数えない）、imageをbuildし、runのrelayを開き、`dagq.toml`が名指せばbuildの出力のvolumeを作り、`[run.env]`と`host.toml`のcontainerの上限を読む。
+  どれかが失敗すればturnを起動せず、hostにも戻さない。
+- token: supervisorが発行したworkerのtokenを、run dirのファイル（mode 0600、renameで置くのでworkerが置いたsymlinkを辿らない）にして、その場所をenvで渡す。
+  podmanの引数とcontainerの設定にtokenの値は無く、ファイルはcontainerを消すときに消す。
+- container: 非root（machineの中でmountの持ち主と同じuidの対応）・読み取り専用のroot filesystem（書けるのはmountと一時の`/tmp`だけ）・capabilityの削除・特権の昇格の禁止・memory/cpu/pidsの上限・`--network none`で、Podman / Dockerのsocketを渡さない。
+  上限の既定と`host.toml`の`[container]`での上書きは`ContainerLimits`のdoc commentが持つ。
+  mountはrunのclone・run dir・runのsocket・buildの出力のvolumeだけで、着地用のworktreeとverificationのcloneはmountしない（reviewの間も残るworkerのcontainerに、制御側が着地と検証に使う物を見せない）。
+  podmanのcwdはrun dirで、制御側はcloneでプログラムを起動しない（上の「git」）。
+- buildの出力: `dagq.toml`の`[container.build_output]`が名指すcontainerの中のdirに、runごとのvolumeをmountする（綴りと意味と既定の無しは`run_env::CONTAINER_BUILD_OUTPUT_TABLE`のdoc comment）。
+  runtimeは言語の道具を知らず、projectが`[run.env]`で道具をそこに向ける。
+  hostのmount（clone）の上に置いたbuildの出力ではlinkが落ちた（[Spike](../plans/container-runtime-spike.md)の(c)）。
+- containerの中: `dagq relay turn`がturnの始めにmainのbundleをcloneの`refs/remotes/dagq/main`に取り込み、転送を起動し、tokenのファイルを読んで`ANTHROPIC_AUTH_TOKEN`とproxyのURLに入れ、agentをcloneで動かす。
+  agentが終われば結果に依らず、run branchのbundleと状態のファイルを上の「git」の形で書く。
+  agentのhomeはrun dirの下に置き、次のturnがsessionをresumeできる。
+- 止める: turnの終わりごとにwrapperがcontainerを消す（podmanのprocessを止めてもcontainerは残るため）。
+  止める経路での消去はbest effortで、machineが止まって消せなければlogに残し、runの終わりの片付けに任せる。
+  runのsessionを止めるどの経路（reviewの後・着地・triageのstopとcancel・sweep・resumeの終わり）も`RecordingSessions`がcontainerを消し、復旧jobの`stop_processes`も消す。
+  supervisorの再起動の後にadoptしたrunも、名前がrunから決まるので同じ経路で消える。
+  runの終わりと着地では、relayの見張りがrelayを閉じるときにcontainerとbuildの出力も消す。
+- Codexに経路が向くrunは起動しない（上の「fail closedの境界」）。
+- 実物のpodmanで流すtestは`#[ignore]`で、関門に数えない。
+
 ## 後続の部品の置き場
 
 次の部品が揃ったら、それぞれが`ContainerRuntime`の答えを埋める。
 どれかが欠ければ使えないと答え、上の境界のまま控える。
 
 - containerの中のsccache（[ADR-t2114-4](../adr/2026-10-08-t2114-4-sccache-server-inside-the-run-container.md)）。
-- containerの中のexecutorがturnの終わりに書くrun branchのbundleと状態のファイル、turnの始めのmainのbundleの取り込み（上の「git」）。
-- worker・resumeとverificationのcontainerの実行（`ExecutorBackend::Container`の実装）。
+  それまでcontainerのturnには`[run.env]`の`RUSTC_WRAPPER`を渡さない。
+- verificationのcontainerの実行。

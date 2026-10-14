@@ -140,9 +140,9 @@ fn carry<S: End, D: End>(
 }
 
 /// Bind the run's socket at `path` in place of what is there, with mode
-/// [`SOCKET_MODE`], and give it to `owner` when that is another uid (the
-/// run's container's user; the relay runs as root in its container for
-/// this alone).
+/// [`SOCKET_MODE`], and give it to `owner` when that is another uid than
+/// this process's (the run's container's user, which the relay in the
+/// machine runs as already).
 pub fn bind_socket(path: &Path, owner: Option<u32>) -> Result<UnixListener> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_socket() => fs::remove_file(path)
@@ -295,6 +295,13 @@ impl PodmanRelays {
             .relay_container(run)
             .map_err(anyhow::Error::msg)?;
         Ok(self.dir().join(format!("{run}.json")))
+    }
+
+    /// Whether the run's relay is among the queue's open ones (its record
+    /// is kept until it is closed; the supervisor's watch starts one whose
+    /// container went again).
+    pub fn is_open(&self, run: &str) -> Result<bool> {
+        Ok(self.record(run)?.is_file())
     }
 
     fn specs(&self) -> Result<Vec<RelaySpec>> {
@@ -467,15 +474,26 @@ impl RelayControl for PodmanRelays {
         Ok(())
     }
 
+    /// The run's end in the machine: its turn's container, its relay, its
+    /// socket volume and its build output volume go (the run's container
+    /// first, which mounts the volumes).
     fn close(&self, run: &str) -> Result<()> {
         let record = self.record(run)?;
         let key = self.key()?;
+        let worker = key.run_container(run).map_err(anyhow::Error::msg)?;
         let container = key.relay_container(run).map_err(anyhow::Error::msg)?;
-        let volume = key.socket_volume(run).map_err(anyhow::Error::msg)?;
+        self.run(&strings(&[
+            "rm", "--force", "--ignore", "--time", "0", &worker,
+        ]))?;
         self.run(&strings(&["rm", "--force", "--ignore", &container]))?;
-        let exists = self.within(&strings(&["volume", "exists", &volume]))?;
-        if exists.status.success() {
-            self.run(&strings(&["volume", "rm", "--force", &volume]))?;
+        for volume in [
+            key.socket_volume(run).map_err(anyhow::Error::msg)?,
+            key.build_output_volume(run).map_err(anyhow::Error::msg)?,
+        ] {
+            let exists = self.within(&strings(&["volume", "exists", &volume]))?;
+            if exists.status.success() {
+                self.run(&strings(&["volume", "rm", "--force", &volume]))?;
+            }
         }
         match fs::remove_file(&record) {
             Ok(()) => Ok(()),

@@ -143,7 +143,9 @@ roleごとに拒まれる主なコマンド（skillとAGENTS.mdはこれを説�
 
 ## host実行は助言的（advisory）
 
-今のactorは全て同じユーザーとしてhostで動く。**host実行はsandboxでも隔離でもない。** この段の認可は、誤りと事故を止め、誰が何をしたかを記録するための論理的な境界で、security boundaryではなく移行の途中の状態である（ADR-t728-1の決定6）。
+containerに置いたworkerのturnを除き、actorは全て同じユーザーとしてhostで動く。
+**host実行はsandboxでも隔離でもない。**
+この段の認可は、誤りと事故を止め、誰が何をしたかを記録するための論理的な境界で、security boundaryではなく移行の途中の状態である（ADR-t728-1の決定6）。
 
 同じhostの敵対的なプロセスは次で迂回できる:
 
@@ -193,7 +195,8 @@ capabilityの模型（actor・`TrustLevel`・`Capability`・`Resource`・`Static
 
 1. **container**: `dagq.toml`がworker（resumeを含む）とintegrateのverificationの適用先ごとにhostかcontainerを選ぶ（[Container runtime](container-runtime.md)）。
    containerを使えない適用先は控えてattentionで知らせ、hostに黙って戻さない（fail closed、[Container runtime](container-runtime.md#fail-closedの境界)）。
-   containerはrunのcloneとrun dirだけをmountし（例外はbrokerへのrunのunix socket、そのrunかverificationだけのbuildの出力のnamed volume、worker・resumeだけのqueueごとのworkerのcacheのnamed volume、verificationの保護されたcache。[Container runtime](container-runtime.md#dagq専用のmachine)）、queue DB・main checkout・他のrunを見せず、`EnforcementLevel`は`sandbox`になる。
+   workerのturn（最初のturn・revise・resume）はこの段で動き、verificationのcontainerはまだ無い（[Container runtime](container-runtime.md#workerの実行)）。
+   containerはrunのcloneとrun dirだけをmountし（例外は同じ文書の節）、queue DB・main checkout・他のrunを見せず、`EnforcementLevel`は`sandbox`になる。
    machineはhostの`$HOME`をmountしない（[Container runtime](container-runtime.md#dagq専用のmachine)）。
    予約のcapability（filesystem・network・secret）はこのbackendが強制する。
    containerで動かすのは信頼しないコードを走らせるworker・resumeとintegrateのverificationだけで、読むだけのheadlessのjobの隔離はOSのsandboxにする（[ADR-t2113-3](../adr/2026-10-08-t2113-3-only-workers-resume-and-integrate-verification-run-in-containers.md)）。

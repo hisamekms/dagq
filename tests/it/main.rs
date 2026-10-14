@@ -103,6 +103,7 @@ mod request_planner_spike;
 mod review_builtins;
 mod review_programs;
 mod review_subagents;
+mod run_container;
 mod runtime_actor_env;
 mod runtime_adopt;
 mod runtime_already_satisfied;

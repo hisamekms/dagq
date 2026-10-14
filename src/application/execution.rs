@@ -10,8 +10,9 @@
 //! each target's runtime ([`runtime_executions`]). While the container
 //! cannot be used, what is set to it waits and never runs on the host
 //! instead (ADR-t2113-1 decision 4; the supervisor and `integrate` ask
-//! their `ContainerRuntime` port); an actor started directly on a backend
-//! that is not built is refused ([`ExecutorBackend::ensure_implemented`]).
+//! their `ContainerRuntime` port); an actor the host's executor is asked
+//! to start on the container is refused
+//! ([`ExecutorBackend::ensure_implemented`]).
 //!
 //! The worker's row also names each provider its supervisors run it on,
 //! once a Codex worker can run (ADR-t813-3 decision 7): the Claude worker
@@ -36,8 +37,10 @@ pub enum ExecutorBackend {
     /// Processes of this user on this host.
     #[default]
     Host,
-    /// A container per run (goal 38). Its parts are later tasks': nothing
-    /// is started on it yet, and never on the host instead.
+    /// A container of the dagq machine per turn of a run (goal 38): only a
+    /// worker's turns run there
+    /// ([`PodmanActorExecutor`](super::run_container::PodmanActorExecutor)),
+    /// and nothing set to it is started on the host instead.
     Container,
 }
 
@@ -74,14 +77,17 @@ impl ExecutorBackend {
         }
     }
 
-    /// Refuse a backend nothing can start an actor on yet (fail closed):
-    /// the actor is not started, on it or on the host.
+    /// Refuse a backend the host's executor cannot start an actor on (fail
+    /// closed): the actor is not started, on it or on the host. Only a
+    /// worker's turns run in the container, started there by the run's
+    /// session wrapper.
     pub fn ensure_implemented(self) -> Result<()> {
         match self {
             Self::Host => Ok(()),
             Self::Container => bail!(
-                "the container executor is not built yet; \
-                 dagq refuses to start the actor rather than run it on the host"
+                "the host's executor does not start an actor set to the container \
+                 (only a worker's turns run there, started by its session wrapper); \
+                 dagq refuses to start it rather than run it on the host"
             ),
         }
     }
@@ -564,7 +570,7 @@ mod tests {
             .ensure_implemented()
             .unwrap_err()
             .to_string();
-        assert!(error.contains("not built"), "{error}");
+        assert!(error.contains("refuses to start it"), "{error}");
         // `status` and `doctor` show a backend set to the container as it
         // is set, never as the host.
         let one = ExecutionConfig {

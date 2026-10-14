@@ -340,7 +340,7 @@ esac"#,
 fn a_host_run_switched_to_the_container_takes_no_next_turn_on_the_host() {
     host_run_takes_no_turn_after(
         "[roles.worker]\nruntime = \"container\"\n",
-        "container executor is not built",
+        "does not start an actor set to the container",
     );
 }
 

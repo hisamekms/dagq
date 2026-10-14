@@ -268,7 +268,7 @@ queue service（[Queue service](queue-service.md)、ADR-t1233-1決定4）は、�
   roleの`grants`がどれも持たないcommandを`Bash(dagq <command>:*)`で拒む（例: workerは`Bash(dagq integrate:*)`・`Bash(dagq answer:*)`・`Bash(dagq ready:*)`・`Bash(dagq ask close:*)`、plannerは`integrate`・`answer`・`ready`・`recover`・`supervise`・`run screen`・`run send`・`planner screen`・`planner send`）。
   読み取りの形を持つcommand（`observe`は`--history`が読み取りなので`observe`ごと、`graph`）は表に入れない。
   表と`src/main.rs`の`requests`が食い違わないことはunit testが確かめる。
-  clapの全subcommand（`goal close`のような入れ子を含む。`DAGQ_COMMANDS`の親の項目（`dependency`）はその下を覆い、subcommandを必ず取る親（`goal`・`finding`・`proposal`）は自分の項目が要らない。自分の形を持つ親（`ask`）は自分の項目が要る）が`DAGQ_COMMANDS`か、`src/main.rs`のtestの`LEFT_OUT_COMMANDS`（読み取り、読み取りの形を持つ`graph`・`observe`、queueを開かずbytesを運ぶだけの`relay`、queueを開かずgitの差分だけを読むbuilt-inのprogramの`review-program`）のどちらかにあることもunit test（`every_subcommand_is_denied_or_left_out_on_purpose`）が確かめ、どちらにも無いsubcommandを足すと落ちる。
+  clapの全subcommand（`goal close`のような入れ子を含む。`DAGQ_COMMANDS`の親の項目（`dependency`）はその下を覆い、subcommandを必ず取る親（`goal`・`finding`・`proposal`）は自分の項目が要らない。自分の形を持つ親（`ask`）は自分の項目が要る）が`DAGQ_COMMANDS`か、`src/main.rs`のtestの`LEFT_OUT_COMMANDS`（読み取り、読み取りの形を持つ`graph`・`observe`、queueを開かない`relay`、queueを開かずgitの差分だけを読むbuilt-inのprogramの`review-program`）のどちらかにあることもunit test（`every_subcommand_is_denied_or_left_out_on_purpose`）が確かめ、どちらにも無いsubcommandを足すと落ちる。
   roleによって拒まれうるsubcommandを足したら、読み取りの形を持つものを除いて表に入れる。
 - actorを名指す変数（`DAGQ_ROLE`・`DAGQ_ACTOR_ID`・`DAGQ_RUN_ID`・`DAGQ_TASK_ID`）の書き換え（`<名前>=...`・`export`・`env <名前>=`・`env -u`・`unset`）も全roleで拒む。
 - inboxとplannerには最後に`Bash(cmux:*)`（`RAW_CMUX_DENIED`、`RAW_CMUX_DENIED_ROLES`）も足す（[ADR-t1228-2](../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）。workerとjobには足さない（決定7）。

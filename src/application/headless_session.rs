@@ -135,6 +135,11 @@ pub(super) struct Turns<'a> {
     /// the host, a run started on the host before the change too, and so is
     /// a turn whose read fails (goal 38). `None` for a planner.
     pub(super) runtimes: Option<&'a RuntimesFile>,
+    /// The containers a run's turns run in when it works in a clone
+    /// (goal 38): each turn of such a run is started in its container and
+    /// the container removed at the turn's end. `None` runs no turn in a
+    /// container (a planner's wrapper), and refuses a run in a clone.
+    pub(super) containers: Option<&'a dyn super::run_container::RunContainers>,
 }
 
 /// Reads the runtimes of the main checkout's `dagq.toml` (goal 38).
@@ -719,9 +724,14 @@ impl<'a> Turns<'a> {
         let Some((target, server)) = self.sccache else {
             return (&[], Vec::new());
         };
+        // The host's server is not the container's: the container's
+        // environment leaves the compiler wrapper out instead.
         let TurnOwner::Run(run) = self.owner else {
             return (&[], Vec::new());
         };
+        if run.in_container() {
+            return (&[], Vec::new());
+        }
         let look = turn_look(target, server, run_dir);
         if let Some((port, why)) = look.removed() {
             crate::application::sccache::record_wrapper_removed(
@@ -829,25 +839,61 @@ impl<'a> Turns<'a> {
         }
         // A file that cannot be read may set the worker to the container:
         // the turn is not started, on the host or anywhere (fail closed).
-        if let (TurnOwner::Run(_), Some(read)) = (&self.owner, self.runtimes) {
-            let runtimes = read().context(
-                "the runtimes of dagq.toml could not be read; dagq refuses to start the worker's turn rather than run it on the host",
-            )?;
-            executor =
-                executor.with_config(super::execution::ExecutionConfig::of_runtimes(&runtimes));
+        let mut in_container = None;
+        if let TurnOwner::Run(run) = &self.owner {
+            let runtimes = self
+                .runtimes
+                .map(|read| read())
+                .transpose()
+                .context(
+                    "the runtimes of dagq.toml could not be read; dagq refuses to start the worker's turn rather than run it on the host",
+                )?;
+            // A run works where it was made to (`turn_place`); one on the
+            // host is refused by the host's executor once the worker is
+            // set to the container.
+            let place = crate::domain::run_container::turn_place(
+                run.in_container(),
+                runtimes.map(|runtimes| runtimes.worker),
+            )
+            .map_err(|why| anyhow::anyhow!("run {}: {why}", run.id()))?;
+            if place == crate::domain::run_container::TurnPlace::Container {
+                in_container = Some(*run);
+            }
+            if let Some(runtimes) = &runtimes {
+                executor =
+                    executor.with_config(super::execution::ExecutionConfig::of_runtimes(runtimes));
+            }
         }
-        let spawned = executor
-            .spawn(ActorExecutionSpec::new(
-                actor,
-                WorkspaceAccess::Write(cwd.clone()),
-                ActorProgram::SessionAgent {
-                    agent: agent_program,
-                    model: model
-                        .as_ref()
-                        .map(|(model, effort)| (model.as_str(), effort.as_str())),
-                },
-            ))
-            .and_then(|handle| handle.process());
+        let spec = ActorExecutionSpec::new(
+            actor,
+            WorkspaceAccess::Write(cwd.clone()),
+            ActorProgram::SessionAgent {
+                agent: agent_program,
+                model: model
+                    .as_ref()
+                    .map(|(model, effort)| (model.as_str(), effort.as_str())),
+            },
+        );
+        let spawned = match in_container {
+            Some(_) => {
+                let containers = self
+                    .containers
+                    .context("this wrapper has no container executor; dagq refuses to start the run's turn on the host")?;
+                let service = self
+                    .queue_service
+                    .context("this wrapper has no queue service to give the container")?;
+                super::run_container::PodmanActorExecutor::new(
+                    self.db,
+                    agent,
+                    self.spawner,
+                    service,
+                    containers,
+                )
+                .spawn(spec)
+            }
+            None => executor.spawn(spec),
+        }
+        .and_then(|handle| handle.process());
         let mut child = match spawned {
             Ok(child) => child,
             // The agent's executable cannot be run: its provider cannot be
@@ -871,7 +917,7 @@ impl<'a> Turns<'a> {
             (&stdout, &stderr),
             limits,
         );
-        match ended {
+        let ended = match ended {
             Ok(ended) => {
                 *child_may_be_alive = false;
                 Ok(ended)
@@ -883,7 +929,15 @@ impl<'a> Turns<'a> {
                 }
                 Err(error)
             }
+        };
+        // A container outlives its `podman` that was stopped: it is
+        // removed at every turn's end, however the turn ended.
+        if let (Some(run), Some(containers)) = (in_container, self.containers)
+            && let Err(error) = containers.remove(run.id())
+        {
+            tracing::warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "the container of run {} could not be removed: {error:#}", run.id());
         }
+        ended
     }
 
     /// Register, record and follow the started turn `turn` until it ended

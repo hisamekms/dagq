@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::{CommitSha, RunId};
 
@@ -125,7 +125,7 @@ fn queue_dir(runs_dir: &Path) -> &Path {
 /// clean). It is the worker's word: a false one only keeps uncommitted
 /// work from landing, since what lands is the imported commit the control
 /// side checks itself (ADR-t2179-1 decision 4).
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunState {
     pub branch: Option<String>,

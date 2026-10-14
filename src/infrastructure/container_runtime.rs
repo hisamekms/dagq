@@ -1,24 +1,30 @@
 //! The adapter of the [`ContainerRuntime`] port (goal 38) behind the parts
-//! built (the queue's broker, the Claude credential, the dagq machine and
-//! the image, which answer before it): the relay is a later task's,
-//! which answers for its part here. Until then nothing set to the
-//! container can run, and the answer says why.
+//! that answer before it (the queue's broker, the runs' relays, the Claude
+//! credential, the dagq machine and the image): the executors of the
+//! container. A worker's turns have theirs
+//! ([`crate::application::run_container::PodmanActorExecutor`]), so once
+//! every part answers, a worker set to the container can run; the
+//! verification of `integrate` has none yet, and the answer says why.
 
 use crate::application::ContainerRuntime;
 use crate::domain::container_runtime::{Availability, RuntimeTarget};
 
-/// The container runtime with none of its parts built: it can never be
-/// used, and says so.
+/// The container's executors as this dagq has them.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct UnbuiltContainer;
+pub struct ContainerExecutors;
 
-/// Why [`UnbuiltContainer`] cannot be used.
-pub const CONTAINER_NOT_BUILT: &str = "this dagq has no container runtime yet (the relay \
-and the container's executor are not built)";
+/// Why the verification cannot run in the container.
+pub const VERIFICATION_NOT_BUILT: &str = "this dagq has no container executor of the \
+verification of integrate yet";
 
-impl ContainerRuntime for UnbuiltContainer {
-    fn availability(&self, _target: RuntimeTarget) -> Availability {
-        Availability::Unavailable(CONTAINER_NOT_BUILT.to_owned())
+impl ContainerRuntime for ContainerExecutors {
+    fn availability(&self, target: RuntimeTarget) -> Availability {
+        match target {
+            RuntimeTarget::Worker => Availability::Available,
+            RuntimeTarget::Verification => {
+                Availability::Unavailable(VERIFICATION_NOT_BUILT.to_owned())
+            }
+        }
     }
 }
 
@@ -27,12 +33,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn without_its_parts_the_container_can_never_be_used_and_says_why() {
-        for target in RuntimeTarget::ALL {
-            assert_eq!(
-                UnbuiltContainer.availability(target),
-                Availability::Unavailable(CONTAINER_NOT_BUILT.to_owned())
-            );
-        }
+    fn the_worker_can_run_once_its_parts_answer_and_the_verification_cannot_and_says_why() {
+        assert_eq!(
+            ContainerExecutors.availability(RuntimeTarget::Worker),
+            Availability::Available
+        );
+        assert_eq!(
+            ContainerExecutors.availability(RuntimeTarget::Verification),
+            Availability::Unavailable(VERIFICATION_NOT_BUILT.to_owned())
+        );
     }
 }

@@ -1992,6 +1992,25 @@ enum RelayCommand {
         #[arg(long)]
         socket: PathBuf,
     },
+    /// A worker's turn in its container: fetch main's bundle into the clone, start the
+    /// forwarder, run the agent after `--` in the clone with the run token of
+    /// DAGQ_SERVICE_CREDENTIAL_FILE, then write the run branch's bundle and the run's state to
+    /// the run directory. Exits with the agent's code; its output is the agent's.
+    #[command(hide = true)]
+    Turn {
+        #[arg(long)]
+        run_dir: PathBuf,
+        #[arg(long)]
+        clone: PathBuf,
+        /// The run's base commit.
+        #[arg(long)]
+        base: String,
+        /// The run branch.
+        #[arg(long)]
+        branch: String,
+        #[arg(last = true, required = true)]
+        agent: Vec<String>,
+    },
 }
 
 #[derive(Subcommand, Clone)]
@@ -3377,6 +3396,28 @@ fn relay(command: &RelayCommand) -> Result<Value> {
             socket,
             dagq::infrastructure::queue_broker::PROBE_TIMEOUT,
         ),
+        // The turn's standard output is the agent's: nothing is printed,
+        // and the exit code is the agent's.
+        RelayCommand::Turn {
+            run_dir,
+            clone,
+            base,
+            branch,
+            agent,
+        } => {
+            let code = dagq::infrastructure::container_turn::run_turn(
+                &dagq::infrastructure::container_turn::TurnOptions {
+                    run_dir: run_dir.clone(),
+                    clone: clone.clone(),
+                    base: base.clone(),
+                    branch: branch.clone(),
+                    agent: agent.clone(),
+                    port: dagq::domain::broker_relay::FORWARD_PORT,
+                },
+                |name| env::var(name).ok(),
+            )?;
+            std::process::exit(code)
+        }
     }
 }
 
@@ -5671,8 +5712,10 @@ mod tests {
     /// The subcommands `DAGQ_COMMANDS` leaves out, each for a reason: the
     /// ones that only read; the ones with a form that reads, which a rule
     /// on the name would deny as well (the CLI refuses the other form); and
-    /// the ones that open no queue and only carry bytes to the queue
-    /// broker, which checks what passes (`relay`). A subcommand on neither
+    /// the ones that open no queue (`relay`): those that only carry bytes
+    /// to the queue broker, which checks what passes, and the turn the
+    /// executor starts in a run's container, which runs the agent there
+    /// with the run's own token. A subcommand on neither
     /// list fails
     /// [`every_subcommand_is_denied_or_left_out_on_purpose`].
     const LEFT_OUT_COMMANDS: &[&str] = &[
@@ -5715,6 +5758,9 @@ mod tests {
         // Read the worktree's Git and print what a built-in review program
         // found, and open no queue (ADR-t2259-1).
         "review-program",
+        // A worker's turn in its container (`dagq relay turn`): it opens no
+        // queue, and the agent it runs is the worker's own.
+        "relay turn",
     ];
 
     /// Every subcommand clap knows, nested ones by their path (`goal

@@ -83,10 +83,11 @@ actorをどこで動かし、specをどこまで守らせるかは`src/applicati
 - `ExecutorBackend`はactorを動かす場所、`EnforcementLevel`はそこでの強制の強さで、隔離は`sandbox`だけである。
   hostで動くCodexのworkerはOSのsandboxが書き込みと他のプロセスへのsignalを止めるが、隔離ではない（[ADR-t813-3](../../adr/2026-09-28-t813-3-codex-worker-permissions.md)の決定7）。
   workerのproviderごとの強制は`EnforcementLevel::of_worker`が決める。
-- containerへactorを起動する部品はまだ無く、`ensure_implemented`がerrorにする。
-  選ばれたactorは起動せず、hostに黙って戻さない（fail closed）。
+- containerで起動するのはworkerのturnだけで、runのsession wrapperが`run_container::PodmanActorExecutor`で起動する（[Container runtime](../container-runtime.md#workerの実行)）。
+  hostのexecutorはcontainerに置いたactorを起動せず`ensure_implemented`がerrorにし、hostに黙って戻さない（fail closed）。
   知らない名前も`ExecutorBackend::parse`がerrorにする。
 - `HostActorExecutor`は`ExecutionConfig`を持ち（`with_config`）、actorのroleのbackendがhostでなければ起動を拒む。
+  例外はcontainerに置いたworkerのrunのsession wrapperで、制御側としてhostで起動する。
   `status`・`doctor`とsupervisor・wrapperのactorの起動は`ExecutionConfig::of_runtimes`でworkerを`dagq.toml`のruntimeに置き、他のactorはhostのまま（[Container runtime](../container-runtime.md)）。
 - `status`と`doctor`は`actors`にAI actorごとのbackendと強制を出す（`ExecutionConfig::profiles`）。
   `dagq.toml`がworkerをcontainerにしない限り全てhostで、host実行がsandboxではないことを実行時にも明示する。

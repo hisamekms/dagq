@@ -28,8 +28,9 @@ pub trait RelayControl: Send + Sync {
     /// Make the run's socket volume and start its relay towards the
     /// broker's `port`, and remember it among the queue's relays.
     fn open(&self, spec: &RelaySpec, port: u16) -> Result<()>;
-    /// Stop the run's relay, remove its socket volume and forget it; a
-    /// relay that is not there is no error.
+    /// The run's end in the machine: stop and remove its turn's container
+    /// and its relay, remove its socket and build output volumes, and
+    /// forget the relay; what is not there is no error.
     fn close(&self, run: &str) -> Result<()>;
     /// Each relay the queue keeps open, as a look finds it: a relay whose
     /// container went (the machine stopped) is one that does not run.
@@ -88,7 +89,8 @@ pub fn open(
         .with_context(|| format!("open the relay of run {}", spec.run))
 }
 
-/// At the run's end: close its relay and remove its socket.
+/// At the run's end: close its relay, remove its socket and its build
+/// output, and stop its container if one is left.
 pub fn close(control: &dyn RelayControl, run: &str) -> Result<()> {
     control
         .close(run)

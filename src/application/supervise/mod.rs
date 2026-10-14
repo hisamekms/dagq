@@ -455,6 +455,9 @@ pub struct Ports<'a> {
     /// Whether the container runtime can run what `dagq.toml` sets to it
     /// (goal 38): asked every pass for each such target.
     pub container: Arc<dyn crate::application::ContainerRuntime + Send + Sync>,
+    /// The containers of the runs whose worker works in a clone (goal 38):
+    /// a stop of such a run's session or processes removes its container.
+    pub run_containers: Arc<dyn crate::application::run_container::RunContainers>,
     /// The tokens of the landings' verifications (ADR-t2114-1 decision 2).
     pub verification_tokens: Arc<dyn crate::application::queue_broker::VerificationTokens>,
     /// The session wrappers of the runs and the runtime's planners, which
@@ -962,7 +965,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         Some(token.clone()),
         ports.load_average,
     )
-    .stopping_left_turns(ports.processes.clone());
+    .stopping_left_turns(ports.processes.clone())
+    .removing_containers(ports.run_containers.clone());
     let mut supervisor = Supervisor {
         no_claude: settings.no_claude,
         queue,
@@ -972,6 +976,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         remote: ports.remote.clone(),
         verifier: ports.verifier.clone(),
         container: ports.container.clone(),
+        run_containers: ports.run_containers.clone(),
         verification_tokens: ports.verification_tokens.clone(),
         sessions: &sessions,
         reviewer: ports.reviewer,
@@ -1126,6 +1131,8 @@ struct Supervisor<'a> {
     verifier: Arc<dyn Verifier + Send + Sync>,
     /// Whether the container runtime can be used ([`Ports::container`]).
     container: Arc<dyn crate::application::ContainerRuntime + Send + Sync>,
+    /// The runs' containers ([`Ports::run_containers`]).
+    run_containers: Arc<dyn crate::application::run_container::RunContainers>,
     /// The tokens of the landings' verifications
     /// ([`Ports::verification_tokens`]).
     verification_tokens: Arc<dyn crate::application::queue_broker::VerificationTokens>,

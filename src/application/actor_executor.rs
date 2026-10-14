@@ -10,14 +10,17 @@
 //! to decide (ADR-t1063-1 decision 3): a headless job names only its intent
 //! ([`JobAccess`]).
 //!
-//! [`HostActorExecutor`] is the only backend: it starts the actor as a
-//! process of this user on this host, through the [`AgentProvider`] (Claude
-//! Code) and the background session wrappers ([`SessionWrappers`]). On a
-//! host the spec is advisory (ADR-t728-1 decision 6): the capabilities, the
-//! workspace access and the limits are recorded and checked for
-//! consistency, but nothing isolates the process, which can reach whatever
-//! this user can. A sandboxed backend (goal 38) would enforce the same
-//! spec. Nothing here names such a backend's details.
+//! [`HostActorExecutor`] starts the actor as a process of this user on this
+//! host, through the [`AgentProvider`] (Claude Code) and the background session
+//! wrappers ([`SessionWrappers`]).
+//! On a host the spec is advisory (ADR-t728-1 decision 6): the
+//! capabilities, the workspace access and the limits are recorded and
+//! checked for consistency, but nothing isolates the process, which can
+//! reach whatever this user can. The one sandboxed backend (goal 38) starts
+//! a worker's turns in their container
+//! ([`PodmanActorExecutor`](super::run_container::PodmanActorExecutor)),
+//! started by the run's session wrapper, which stays on the host. Nothing
+//! here names that backend's details.
 //!
 //! What starts outside the executor is not an AI actor: the supervisor
 //! (under launchd), the session wrappers (which then start their
@@ -211,7 +214,7 @@ pub enum ActorProgram<'a> {
 }
 
 impl ActorProgram<'_> {
-    fn provider(&self) -> crate::domain::Provider {
+    pub(crate) fn provider(&self) -> crate::domain::Provider {
         use crate::domain::Provider;
         match self {
             Self::RunSession { run, .. } => run.actual_provider(),
@@ -660,9 +663,13 @@ impl ActorExecutor for HostActorExecutor<'_> {
             "provider_disabled: Claude is disabled by --no-claude; handle this role manually"
         );
         // An actor configured for another backend is refused, never started
-        // on the host instead (fail closed).
+        // on the host instead (fail closed). A run's session wrapper is the
+        // control side's and starts on the host whatever its turns run on:
+        // the wrapper of a worker set to the container starts each turn in
+        // its container.
         let backend = self.config.backend_of(spec.role());
-        if backend != self.backend() {
+        let wrapper = matches!(spec.program, ActorProgram::RunSession { .. });
+        if backend != self.backend() && !wrapper {
             backend.ensure_implemented()?;
             bail!(
                 "{} is configured for the {} backend, not {}",
@@ -1811,7 +1818,7 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(error.contains("container"), "{error}");
-        assert!(error.contains("not built"), "{error}");
+        assert!(error.contains("refuses to start it"), "{error}");
         assert!(fake.spawned.lock().unwrap().is_empty());
         // The roles it does not name still run on the host.
         let dir = tempfile::tempdir().unwrap();

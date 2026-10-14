@@ -272,6 +272,39 @@ pub fn session_in_background_as_with_processes(
         pid,
         processes,
         dagq,
+        None,
+    )
+}
+
+/// A background wrapper as [`session_in_background_as_with_processes`]
+/// whose run's turns in a clone run in `containers`' containers rather
+/// than the dagq machine's: a test's fake podman.
+#[allow(clippy::too_many_arguments)]
+pub fn session_in_background_with_containers(
+    db: &Path,
+    id: &RunId,
+    token: &LeaseToken,
+    provider: &dyn AgentProvider,
+    spawner: &dyn Spawner,
+    resume: bool,
+    pid: u32,
+    processes: &dyn ProcessControl,
+    containers: &dyn crate::application::run_container::RunContainers,
+) -> Result<Value> {
+    run_session_as(
+        db,
+        id,
+        token,
+        provider,
+        None,
+        spawner,
+        resume,
+        WrapperStart::Background,
+        None,
+        pid,
+        processes,
+        None,
+        Some(containers),
     )
 }
 
@@ -300,6 +333,7 @@ fn run_session(
         std::process::id(),
         &SystemProcesses,
         std::env::current_exe().ok().as_deref(),
+        None,
     )
 }
 
@@ -318,6 +352,7 @@ fn run_session_as(
     pid: u32,
     processes: &dyn ProcessControl,
     dagq: Option<&Path>,
+    containers: Option<&dyn crate::application::run_container::RunContainers>,
 ) -> Result<Value> {
     // The wrapper's events are its own, not the worker's (ADR-t728-1).
     let mut queue = SqliteQueue::open(db)?.with_actor(
@@ -333,8 +368,11 @@ fn run_session_as(
         dagq: dagq.map(Path::to_path_buf),
     };
     // Read again before each turn (goal 38).
-    let bound =
-        crate::infrastructure::run_env::BoundRuntimes::new(crate::compose::bound_checkout(&queue));
+    let checkout = crate::compose::bound_checkout(&queue);
+    let machine_containers =
+        crate::compose::run_containers(db, checkout.as_ref().ok().cloned().flatten());
+    let containers = containers.unwrap_or(&machine_containers);
+    let bound = crate::infrastructure::run_env::BoundRuntimes::new(checkout);
     let runtimes = move || bound.read();
     wrapper::run_session(
         Session {
@@ -352,6 +390,7 @@ fn run_session_as(
                 .map(|target| (target, &looker as &dyn crate::application::SccacheServer)),
             clock: &crate::infrastructure::clock::SystemClock,
             runtimes: &runtimes,
+            containers,
         },
         id,
         token,
@@ -504,7 +543,7 @@ impl OneShot {
                                         Arc::new(move || clock.now())
                                     },
                                     container:
-                                        crate::infrastructure::container_runtime::UnbuiltContainer,
+                                        crate::infrastructure::container_runtime::ContainerExecutors,
                                 },
                             },
                         ),

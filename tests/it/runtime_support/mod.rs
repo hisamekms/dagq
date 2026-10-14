@@ -553,6 +553,9 @@ pub struct TestWorkspace {
     /// The `claude` a headless run's wrapper calls for its turns
     /// ([`headless_claude`]); a headless run fails its wrapper without one.
     pub headless: Option<PathBuf>,
+    /// The containers the turns of a run in a clone run in (a fake
+    /// podman's); `None` gives the wrapper the dagq machine's.
+    pub containers: Option<Arc<dyn dagq::application::run_container::RunContainers>>,
     /// Wait for this per-turn marker before the wrapper starts its timers.
     pub headless_ready: Option<PathBuf>,
     /// The `codex` a headless Codex run's wrapper calls for its turns
@@ -595,6 +598,7 @@ impl TestWorkspace {
             close_ends_session: false,
             close_times_out: false,
             headless: None,
+            containers: None,
             headless_ready: None,
             codex: None,
             sccache: None,
@@ -1061,7 +1065,30 @@ pub fn supervise_options(parallel: usize, once: bool) -> SuperviseOptions {
             cmux: Some(PathBuf::from("/usr/bin/true")),
             ..base.update.clone()
         },
+        // A stop of a run in a clone does not reach the host's podman.
+        run_containers: Some(runtime::RunContainersPort(Arc::new(NoContainers))),
         ..base
+    }
+}
+
+/// The runs' containers of a test that runs none: a stop removes nothing,
+/// and no turn is started in one.
+pub struct NoContainers;
+
+impl dagq::application::run_container::RunContainers for NoContainers {
+    fn prepare(&self, run: &TaskRun) -> Result<dagq::application::run_container::PreparedRun> {
+        bail!("this test runs no turn of run {} in a container", run.id())
+    }
+    fn prepare_run_dir(&self, _: &Path, _: &Path) -> Result<PathBuf> {
+        bail!("this test runs no turn in a container")
+    }
+    fn command(&self, args: &[String]) -> CommandSpec {
+        let mut command = CommandSpec::new("/nonexistent/podman");
+        command.args(args);
+        command
+    }
+    fn remove(&self, _: &RunId) -> Result<()> {
+        Ok(())
     }
 }
 

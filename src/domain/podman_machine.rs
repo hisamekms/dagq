@@ -230,6 +230,13 @@ impl QueueKey {
     pub fn relay_container(&self, run: &str) -> Result<String, String> {
         volume_part(run).map(|run| format!("dagq-{}-relay-{run}", self.0))
     }
+
+    /// The container a turn of the run `run`'s worker runs in
+    /// ([`super::run_container`]): one at a time, so whatever stops the run
+    /// removes it by this name.
+    pub fn run_container(&self, run: &str) -> Result<String, String> {
+        volume_part(run).map(|run| format!("dagq-{}-run-{run}", self.0))
+    }
 }
 
 fn volume_part(part: &str) -> Result<&str, String> {

@@ -915,3 +915,75 @@ mod tests {
         assert!(users.join("../x").is_err());
     }
 }
+
+/// A queue's runs' parts in the dagq machine ([`RunMachine`]): the
+/// machine of [`QueueMachine`], the image of the main checkout
+/// (`CheckoutImages`), the run's relay towards the queue's broker
+/// (`PodmanRelays`) and the run's build output volume ([`QueueVolumes`]).
+#[derive(Debug, Clone)]
+pub struct QueueRunMachine {
+    pub podman: PodmanCli,
+    pub db: PathBuf,
+    /// The main checkout the queue is bound to, whose `dagq.toml` and
+    /// files decide the image; `None` readies nothing.
+    pub main_checkout: Option<PathBuf>,
+    /// The host-wide `host.toml`: the machine's resources.
+    pub host_wide: Option<PathBuf>,
+}
+
+impl crate::application::podman_machine::RunMachine for QueueRunMachine {
+    fn ready(&self, run: &str, build_output: bool) -> Result<String> {
+        let checkout = self
+            .main_checkout
+            .as_deref()
+            .context("the queue is bound to no checkout, whose dagq.toml decides the image")?;
+        let queue_dir = super::queue_service::queue_dir_of(&self.db);
+        let data_root = queue_dir.parent().unwrap_or(Path::new("."));
+        let machine = QueueMachine::new(
+            self.podman.clone(),
+            data_root,
+            &queue_dir,
+            self.host_wide.as_deref(),
+        );
+        crate::application::podman_machine::ensure(&machine.machine(), run)
+            .map_err(anyhow::Error::msg)
+            .context("make the dagq machine run")?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+            });
+        let image = crate::application::container_image::prepare(
+            &super::container_image::CheckoutImages::new(checkout, &queue_dir),
+            &super::container_image::PodmanImages {
+                podman: self.podman.clone(),
+            },
+            &super::container_image::QueueImageRecords {
+                db: self.db.clone(),
+                actor: None,
+            },
+            now,
+        )
+        .map_err(anyhow::Error::msg)?;
+        let relays = super::broker_relay::PodmanRelays::of_queue(
+            self.podman.clone(),
+            &self.db,
+            self.host_wide.as_deref(),
+        );
+        if !relays.is_open(run)? {
+            crate::application::broker_relay::open(
+                &relays,
+                &super::queue_broker::SystemQueueBroker::new(&self.db, Path::new("dagq")),
+                &crate::domain::broker_relay::RelaySpec {
+                    run: run.to_owned(),
+                    image: image.clone(),
+                    uid: crate::domain::broker_relay::CONTAINER_UID,
+                },
+            )?;
+        }
+        if build_output {
+            QueueVolumes::of_queue(self.podman.clone(), &queue_dir)?.create_build_output(run)?;
+        }
+        Ok(image)
+    }
+}

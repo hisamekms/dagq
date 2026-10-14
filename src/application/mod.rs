@@ -56,6 +56,7 @@ pub mod release_update;
 pub mod report;
 pub mod review;
 pub mod review_programs;
+pub mod run_container;
 pub mod run_git;
 pub mod sccache;
 pub mod screen;

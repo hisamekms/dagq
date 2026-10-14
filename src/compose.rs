@@ -48,6 +48,7 @@ mod supervisor;
 pub use execution::{
     RunE2eOptions, ended_run_material, integrate, recover, review, review_in, session,
     session_in_background, session_in_background_as, session_in_background_as_with_processes,
+    session_in_background_with_containers,
 };
 pub use host::{
     AutoUpdateJob, COMMAND_TARGET, HostMetricsSettings, QueueBrokerControlPort, QueueBrokerOptions,
@@ -66,7 +67,8 @@ pub use planning::{
     PLANNER_TIMEOUT, PlannerEntry, planner_session, planner_session_with_provider, planners,
 };
 pub use supervisor::{
-    ProcessesPort, RunFilesPort, SuperviseOptions, supervise, supervise_with_reviewer,
+    ContainerRuntimePort, ProcessesPort, RunContainersPort, RunFilesPort, SuperviseOptions,
+    supervise, supervise_with_reviewer,
 };
 
 /// The one-shot entry points (`integrate`, `status`, `doctor`, `recover`,
@@ -100,6 +102,29 @@ pub struct OneShot {
 pub fn ask(db: &Path, ask: NewAsk) -> Result<Value> {
     let mut queue = SqliteQueue::open(db)?;
     crate::application::ask::ask(&mut queue, ask)
+}
+
+/// The containers of the worker's turns of the queue at `db`, bound to
+/// `main_checkout`, in the dagq machine: the run's parts there are made
+/// ready by the host's context ([`RunMachine`](crate::application::podman_machine::RunMachine)).
+pub(crate) fn run_containers(
+    db: &Path,
+    main_checkout: Option<PathBuf>,
+) -> crate::infrastructure::run_container::PodmanRunContainers {
+    let podman = crate::infrastructure::podman_machine::PodmanCli::default();
+    let host_wide = crate::infrastructure::kpi_config::host_wide_file();
+    crate::infrastructure::run_container::PodmanRunContainers::of_queue(
+        podman.clone(),
+        db,
+        main_checkout.clone(),
+        host_wide.clone(),
+        std::sync::Arc::new(crate::infrastructure::podman_machine::QueueRunMachine {
+            podman,
+            db: db.to_path_buf(),
+            main_checkout,
+            host_wide,
+        }),
+    )
 }
 
 /// The main checkout of the repository the queue is bound to; `None` for a

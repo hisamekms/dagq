@@ -89,7 +89,9 @@ impl Supervisor<'_> {
     /// session wrappers, the runs' and the planners', in the background
     /// through [`SessionWrappers`](crate::application::SessionWrappers), its agents through the review provider and
     /// the spawner, on the queue's environment. A worker set to the
-    /// container is refused there (goal 38): nothing starts it on the host.
+    /// container (goal 38) has its session wrapper started here, on the
+    /// host, and its turns in their container; any other actor set to it is
+    /// refused, never started on the host.
     pub(super) fn actors(&self) -> HostActorExecutor<'_> {
         self.actors_on(self.reviewer)
     }

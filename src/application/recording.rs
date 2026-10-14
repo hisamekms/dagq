@@ -293,6 +293,9 @@ pub struct RecordingSessions<'a> {
     /// Stops the turns background wrappers that died left running
     /// ([`Self::stopping_left_turns`]); `None` leaves them.
     left_turns: Option<Arc<dyn super::ProcessControl + Send + Sync>>,
+    /// Removes the container of a run's session it stops
+    /// ([`Self::removing_containers`]); `None` leaves it.
+    containers: Option<Arc<dyn super::run_container::RunContainers>>,
 }
 
 impl<'a> RecordingSessions<'a> {
@@ -312,6 +315,35 @@ impl<'a> RecordingSessions<'a> {
                 load_average,
             },
             left_turns: None,
+            containers: None,
+        }
+    }
+
+    /// `self`, removing through `containers` the container of the run whose
+    /// session it stops (goal 38): a turn's container outlives its `podman`
+    /// that was killed with the wrapper, so every stop of a run's session
+    /// (after its review, its triage, a cancel, the sweep, a resume's end)
+    /// removes it too.
+    pub fn removing_containers(
+        mut self,
+        containers: Arc<dyn super::run_container::RunContainers>,
+    ) -> Self {
+        self.containers = Some(containers);
+        self
+    }
+
+    /// Remove the container of the run whose session `handle` is, if any.
+    fn remove_container(&self, handle: &str) -> Result<()> {
+        let Some(containers) = self.containers.as_deref() else {
+            return Ok(());
+        };
+        if !crate::domain::background_wrapper::is_background(handle) {
+            return Ok(());
+        }
+        let queue = self.recorder.queues.open()?;
+        match queue.run_in_workspace(handle)? {
+            Some(run) => containers.remove(&run),
+            None => Ok(()),
         }
     }
 
@@ -414,6 +446,12 @@ impl SessionWrappers for RecordingSessions<'_> {
         }
         self.recorder
             .recorded(limits, "close", Some(handle), None, left)?;
+        // Best effort: a machine that is down took the container with it,
+        // and the run's end removes one left (`RelayControl::close`); the
+        // session's stop stands either way.
+        if let Err(error) = self.remove_container(handle) {
+            tracing::warn!(error = %format_args!("{error:#}"), "the container of the session {handle} could not be removed: {error:#}");
+        }
         Ok(stop)
     }
     /// A background session whose wrapper is gone still exists while the
@@ -662,6 +700,90 @@ mod tests {
             "{error:#}"
         );
         assert_eq!(backend.calls(), 0);
+    }
+
+    /// Every stop of a run's session removes the container of its run
+    /// (goal 38): after its review, at its landing, its triage (a stop or
+    /// a cancel answered), the sweep, a resume's end and before a reopen,
+    /// as the run's id the handle is recorded for names it. A handle of no
+    /// run (a planner's) removes nothing, and without the port nothing is
+    /// removed.
+    #[test]
+    fn a_stop_of_a_run_s_session_removes_its_container_whatever_the_route() {
+        use crate::application::port_fakes::SessionRecords;
+        struct Stops;
+        impl SessionWrappers for Stops {
+            fn launch_background(
+                &self,
+                _: &Path,
+                _: &str,
+                _: &[(String, String)],
+                _: &Path,
+            ) -> Result<String> {
+                bail!("this test starts no background wrapper")
+            }
+            /// A stop that tells nothing of how it ended, so none is
+            /// recorded.
+            fn stop_background(&self, _: &str, _: StopRoute) -> Result<Option<WrapperStop>> {
+                Ok(None)
+            }
+            fn exists(&self, _: &str) -> Result<bool> {
+                Ok(true)
+            }
+        }
+        #[derive(Default)]
+        struct Containers(std::sync::Mutex<Vec<RunId>>);
+        impl crate::application::run_container::RunContainers for Containers {
+            fn prepare(
+                &self,
+                _: &crate::domain::TaskRun,
+            ) -> Result<crate::application::run_container::PreparedRun> {
+                unimplemented!()
+            }
+            fn prepare_run_dir(&self, _: &Path, _: &Path) -> Result<std::path::PathBuf> {
+                unimplemented!()
+            }
+            fn command(&self, _: &[String]) -> crate::application::CommandSpec {
+                unimplemented!()
+            }
+            fn remove(&self, run: &RunId) -> Result<()> {
+                self.0.lock().unwrap().push(run.clone());
+                Ok(())
+            }
+        }
+        let records = SessionRecords {
+            runs: [("background:7:start".to_owned(), RunId::new("r1").unwrap())].into(),
+            ..SessionRecords::default()
+        };
+        let containers = Arc::new(Containers::default());
+        let recording = RecordingSessions::over(&Stops, Arc::new(records.clone()), None, || None)
+            .removing_containers(containers.clone());
+        let routes = [
+            StopRoute::AfterReview,
+            StopRoute::Landed,
+            StopRoute::Triage,
+            StopRoute::Sweep,
+            StopRoute::Resume,
+            StopRoute::Reopen,
+        ];
+        for route in routes {
+            recording
+                .stop_background("background:7:start", route)
+                .unwrap();
+        }
+        assert_eq!(
+            *containers.0.lock().unwrap(),
+            vec![RunId::new("r1").unwrap(); routes.len()]
+        );
+        recording
+            .stop_background("background:8:start", StopRoute::Planner)
+            .unwrap();
+        assert_eq!(containers.0.lock().unwrap().len(), routes.len());
+        let without = RecordingSessions::over(&Stops, Arc::new(records), None, || None);
+        without
+            .stop_background("background:7:start", StopRoute::AfterReview)
+            .unwrap();
+        assert_eq!(containers.0.lock().unwrap().len(), routes.len());
     }
 
     /// The recording of the session wrappers records each failed attempt

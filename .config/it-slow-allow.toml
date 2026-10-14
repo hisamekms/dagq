@@ -1141,3 +1141,39 @@ task = 2261
 name = "runtime_headless_jobs::a_review_program_runs_narrowed_in_the_worktree_and_is_stopped_past_its_limit"
 reason = "プロセス: programのjobを絞ったenvでworktreeに起動し、時間の上限でprocess groupごと止める境界"
 task = 2261
+
+# 5.9〜8.6s (stress 5 under the host's load of other runs, task 2180)
+[[test]]
+name = "run_container::a_worker_s_turn_runs_in_its_hardened_container_and_leaves_its_bundle_and_state"
+reason = "B 境界（プロセス・Git・SQLite）: background の wrapper が fake の podman を通して実の dagq relay turn を起動し、その中の実の git が main の bundle の取り込みと run branch の bundle・状態のファイルの書き出しを 2 turn（最初の turn と同じ session の resume）で行い、制御側がそれを clone_facts で読めることを確かめる。引数・env の判断は domain::run_container の unit test"
+task = 2180
+
+# 5.9〜8.4s (stress 5 under the host's load of other runs, task 2180)
+[[test]]
+name = "run_container::a_task_set_to_the_container_lands_through_the_supervisor_and_leaves_no_container"
+reason = "B 境界（supervisor の配線・Git・プロセス）: supervisor が container の worker の task を clone に claim し、fake の podman の中の実の dagq relay turn が書いた bundle と状態のファイルから receipt を検証し、review の後の停止で container を消して着地することを確かめる。止める経路ごとの判断は application::recording の unit test"
+task = 2180
+
+# 4.1〜7.2s (stress 5 under the host's load of other runs, task 2180)
+[[test]]
+name = "run_container::a_stop_answer_leaves_no_container_of_a_stalled_run"
+reason = "B 境界（supervisor の配線・復旧）: container の run の stalled の ask への stop の答えで、supervisor が session を終わらせ、fake の podman の container が残らないことを確かめる。止める経路ごとの判断は application::recording の unit test"
+task = 2180
+
+# 5.9〜7.5s (stress 5 under the host's load of other runs, task 2180)
+[[test]]
+name = "run_container::a_canceled_landing_leaves_no_container"
+reason = "B 境界（supervisor の配線・SQLite）: concern の review の後の停止で container を消し、着地の ask の cancel を次の supervisor が適用して run が失敗し task が取り消されても container が残らないことを確かめる。止める経路ごとの判断は application::recording の unit test"
+task = 2180
+
+# 7.3〜10.6s (stress 5 under the host's load of other runs, task 2180)
+[[test]]
+name = "run_container::stop_processes_removes_the_run_s_container"
+reason = "B 境界（復旧・プロセス）: idle_process の復旧 job の stop_processes が clone の孤児の process を実の process として止め、run の container を fake の podman で消し、run が着地することを確かめる。復旧の判断は domain::recovery の unit test"
+task = 2180
+
+# 6.0〜8.6s (stress 5 under the host's load of other runs, task 2180)
+[[test]]
+name = "run_container::an_adopted_run_s_container_is_removed_by_its_stop"
+reason = "B 境界（adopt・supervisor の配線）: 死んだ supervisor の container の run を新しい supervisor が adopt し、run の名前だけから review の後の停止で container を消すことを確かめる。adopt の判断は domain の unit test"
+task = 2180
