@@ -105,11 +105,10 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - `[review.jobs]`はrunのreviewの段のjobの種類ごとの時間の上限と、reviewのagentのjobの同時実行の上限で（ADR-t1895-1決定1。keyと既定値は`ReviewJobs`のdoc comment）。
   他のjobに効かず（evalのケースのprogramのjobはreviewの段に数える）、無いkeyは今の上限（既定600秒。[Headless job processes](headless-job-processes.md#記録)）。
   supervisorが起動時に読む。
-- `[review.programs.<name>]`はreviewのprogramのjobで（[プログラムのreview](review-programs.md)）、必須の`script`（と任意の`args`）、必須の`paths`、任意の`timeout_secs`を持つ（意味は`ReviewProgram`）。
-  `<name>`はkebab-caseで、表の重複・知らないkey・keyの欠けは行番号付きのエラーにする。
-  `command`は`script`で書くよう告げるエラーにする。
+- `[review.programs.<name>]`はreviewのprogramのjobで（[プログラムのreview](review-programs.md)）、keyと意味は`ReviewProgram`が持つ。
+  `<name>`はkebab-caseで、表の重複・知らないkey（`command`も）・keyの欠けは行番号付きのエラーにする。
+  `[review.programs."builtin:<名前>"]`はbuilt-inの`enabled`と`paths`（既定を置き換える）だけを持ち（`BuiltinProgramSetting`）、`script`・`args`・知らない名前・pjのprogramの`builtin:`の名前は誤り。
   読むのは作業ファイルでなく、reviewの試行ごとのlanding branchのcommitの`dagq.toml`と`script`（`Verifier::review_programs_in`）。
-  evalの周はその周のcommitのものを読む（[agentのeval](../agent-eval.md)）。
   旧バイナリは未知の表を拒むので、固定バイナリが対応してから足す。
 - `[tasks]`は`changes`だけを持ち、taskが宣言する変更の種類（change）の値の集合を1行の配列で書く（`changes = ["feature", "fix"]`。[ADR-t980-1](../../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)。`load_change_set`、`domain::ChangeSet`）。値は`TaskChange`の形（[domain-model](../domain-model.md)）で、空の配列・同じ値の重複・形の合わない値・他のkeyは行番号付きのエラーにする。書いてあれば`add`と`edit`は集合の外の`--change`を拒み（`DomainError::ChangeNotInSet`）、`lint`はchangeの無いtaskを`missing_change`、集合の外のchangeを`change_outside_set`にし、`submit`は動かすtaskのどれかがchangeを持たないか集合の外なら何も動かさずに拒む（`ChangeMissing` / `ChangeNotInSet`）。読むのはqueueが束縛されたmain checkoutの`dagq.toml`で、`add` / `edit` / `submit` / `lint`のたびに読む（`compose::task_changes`、`SqliteQueue::with_changes`）。`dagq.toml`のどこかが解析できなければ、この4つのコマンドもそのerrorで止まる。書いてなければ形だけを検査し、changeは省略できる。runtimeが自分で登録するdraft（follow_upなど）は検査しないので、planは`lint`と`submit`で揃える。旧バイナリは未知の表を拒むので、固定バイナリが対応してから足す。
 - `[goals]`は`tags`と`max_spike_cycles`を持ち、goalのラベル（tag）の値の集合を1行の配列で書く（`tags = ["codex", "throughput"]`。[ADR-t1639-1](../../adr/2026-10-04-t1639-1-goal-priority-is-the-source-tasks-inherit-and-goals-carry-tags.md)の決定6。`load_goal_tags`、`domain::TagSet`）。

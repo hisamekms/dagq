@@ -5,7 +5,9 @@
 //! branch's commit written under the attempt's scratch directory, never
 //! from the worktree, and the `PATH` it is given names neither the run's
 //! worktree and directory nor the main checkout ([`narrowed_path`]), so a
-//! worker's change to the script or a program put there does not run.
+//! worker's change to the script or a program put there does not run. A
+//! built-in program runs as the supervisor's own binary's hidden
+//! subcommand (`domain::review_programs::BuiltinProgram`), nothing written.
 
 use anyhow::{Context, Result};
 use std::{
@@ -48,29 +50,37 @@ pub const PROGRAM_ENV: PassedEnv<'static> = PassedEnv {
 
 /// Runs the program jobs on the host, given the environment of `inherited`
 /// narrowed by [`PROGRAM_ENV`] and its `PATH` by [`narrowed_path`] with
-/// `repository`, the main checkout's root, among what it leaves out.
+/// `repository`, the main checkout's root, among what it leaves out; a
+/// built-in program runs `dagq`, the supervisor's binary.
 pub struct HostPrograms {
     repository: PathBuf,
+    dagq: PathBuf,
     inherited: Vec<(OsString, OsString)>,
 }
 
 impl HostPrograms {
     /// With this process's environment.
-    pub fn new(repository: impl Into<PathBuf>) -> Self {
-        Self::inheriting(repository, env::vars_os())
+    pub fn new(repository: impl Into<PathBuf>, dagq: impl Into<PathBuf>) -> Self {
+        Self::inheriting(repository, dagq, env::vars_os())
     }
 
     /// With `inherited` as the starting process's environment.
     pub fn inheriting(
         repository: impl Into<PathBuf>,
+        dagq: impl Into<PathBuf>,
         inherited: impl IntoIterator<Item = (OsString, OsString)>,
     ) -> Self {
         Self {
             repository: repository.into(),
+            dagq: dagq.into(),
             inherited: inherited.into_iter().collect(),
         }
     }
 }
+
+/// The hidden subcommand of `dagq` a built-in program runs as:
+/// `dagq review-program <name> <its arguments>`.
+pub const BUILTIN_SUBCOMMAND: &str = "review-program";
 
 impl ReviewProgramBackend for HostPrograms {
     fn command(
@@ -80,8 +90,14 @@ impl ReviewProgramBackend for HostPrograms {
         run_dir: &Path,
         scratch: &Path,
     ) -> Result<CommandSpec> {
-        let path = &program.program.script;
-        let mut command = CommandSpec::new(write_script(scratch, path, &program.script)?);
+        let mut command = if program.program.builtin.is_some() {
+            let mut command = CommandSpec::new(&self.dagq);
+            command.arg(BUILTIN_SUBCOMMAND).arg(&program.program.name);
+            command
+        } else {
+            let path = &program.program.script;
+            CommandSpec::new(write_script(scratch, path, &program.script)?)
+        };
         command.args(&program.program.args);
         let mut given = PROGRAM_ENV.filter(self.inherited.iter().cloned());
         if let Some(value) = given.remove(OsStr::new("PATH"))
@@ -171,7 +187,7 @@ fn write_script(scratch: &Path, path: &str, text: &str) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::review_programs::ReviewProgram;
+    use crate::domain::review_programs::{BuiltinProgram, ReviewProgram};
 
     fn snapshot(text: &str) -> SnapshotProgram {
         SnapshotProgram {
@@ -181,6 +197,7 @@ mod tests {
                 args: vec!["--quiet".to_owned()],
                 paths: vec!["**".to_owned()],
                 timeout_secs: None,
+                builtin: None,
             },
             matched: vec!["a".to_owned()],
             script: text.to_owned(),
@@ -213,7 +230,7 @@ mod tests {
     }
 
     fn command(inherited: Vec<(OsString, OsString)>, scratch: &Path, text: &str) -> CommandSpec {
-        HostPrograms::inheriting("/repo", inherited)
+        HostPrograms::inheriting("/repo", "/bin/dagq", inherited)
             .command(
                 &snapshot(text),
                 Path::new("/runs/r/worktree"),
@@ -341,5 +358,50 @@ mod tests {
             fs::read_to_string(elsewhere.join("check.sh")).unwrap(),
             "kept"
         );
+    }
+
+    /// A built-in program runs the supervisor's binary's hidden subcommand
+    /// with its name and arguments, narrowed as a script is, and writes
+    /// nothing to the scratch directory.
+    #[test]
+    fn a_builtin_program_runs_the_supervisors_binary_and_writes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = root.path().join("review-program-1-builtin:secrets");
+        let builtin = SnapshotProgram {
+            program: ReviewProgram {
+                name: "builtin:secrets".to_owned(),
+                script: "builtin:secrets".to_owned(),
+                args: vec!["base".to_owned(), "head".to_owned()],
+                paths: vec!["**".to_owned()],
+                timeout_secs: None,
+                builtin: Some(BuiltinProgram::Secrets),
+            },
+            matched: vec!["a".to_owned()],
+            script: BuiltinProgram::Secrets.source().to_owned(),
+        };
+        let command = HostPrograms::inheriting("/repo", "/bin/dagq", inherited())
+            .command(
+                &builtin,
+                Path::new("/runs/r/worktree"),
+                Path::new("/runs/r"),
+                &scratch,
+            )
+            .unwrap();
+        assert_eq!(command.get_program(), OsStr::new("/bin/dagq"));
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["review-program", "builtin:secrets", "base", "head"]
+        );
+        assert!(command.get_env_clear());
+        assert!(
+            command
+                .get_envs()
+                .all(|(name, _)| PROGRAM_ENV.passes(&name.to_string_lossy()))
+        );
+        assert_eq!(
+            command.get_current_dir(),
+            Some(Path::new("/runs/r/worktree"))
+        );
+        assert!(!scratch.exists());
     }
 }

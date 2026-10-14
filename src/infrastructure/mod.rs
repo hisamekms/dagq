@@ -52,6 +52,7 @@ pub mod release_update;
 mod replans;
 pub mod report_config;
 pub mod review_programs;
+pub mod review_secrets;
 pub mod run_env;
 pub mod run_files;
 pub mod runtime_store;

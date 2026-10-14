@@ -207,7 +207,7 @@ fn an_adopter_stops_the_review_a_dead_supervisor_left_and_only_its_own_runs() {
     assert!(at("headless_job_stopped", 1) < at("review_started", 2));
     assert_eq!(reviewer.prompts().len(), 1);
     let rows = job_rows(&db);
-    assert_eq!(rows.len(), 6, "{rows:?}");
+    assert_eq!(rows.len(), 7, "{rows:?}");
     let outcomes: Vec<_> = rows.iter().map(|r| r.5.as_deref()).collect();
     assert_eq!(
         outcomes,
@@ -217,10 +217,13 @@ fn an_adopter_stops_the_review_a_dead_supervisor_left_and_only_its_own_runs() {
             Some("not_the_job"),
             Some("gone"),
             None,
+            // The adopter's review runs builtin:secrets before its agent.
+            Some("ended"),
             Some("ended")
         ]
     );
-    let (kind, run_id, attempt, _, token, _) = &rows[5];
+    assert_eq!(rows[5].0, "review_program");
+    let (kind, run_id, attempt, _, token, _) = &rows[6];
     assert_eq!(kind, "review");
     assert_eq!(run_id.as_deref(), Some(run.id().as_str()));
     assert_eq!(*attempt, 2);
@@ -426,7 +429,14 @@ fn a_timed_out_review_stops_the_processes_it_started() {
         }
         assert!(!running(child), "the review's child {child} outlived it");
     }
-    let rows = job_rows(&db);
+    // builtin:secrets ran before each review and ended.
+    let (programs, rows): (Vec<_>, Vec<_>) = job_rows(&db)
+        .into_iter()
+        .partition(|row| row.0 == "review_program");
+    assert!(
+        programs.iter().all(|row| row.5.as_deref() == Some("ended")),
+        "{programs:?}"
+    );
     assert_eq!(rows.len(), 2, "{rows:?}");
     for row in &rows {
         assert_eq!(row.0, "review");
@@ -627,7 +637,11 @@ fn a_review_program_runs_narrowed_in_the_worktree_and_is_stopped_past_its_limit(
     ] {
         inherited.push((name.into(), value.into()));
     }
-    let host = HostPrograms::inheriting(dir.path().join("repo"), inherited);
+    let host = HostPrograms::inheriting(
+        dir.path().join("repo"),
+        env!("CARGO_BIN_EXE_dagq"),
+        inherited,
+    );
     let backend = ProgramBackends::new(&host, ExecutionConfig::default());
     let run = RunId::new("run-1").unwrap();
     let start = |name: &str, args: &[&str], script: &str, timeout: Option<u64>| {
@@ -638,6 +652,7 @@ fn a_review_program_runs_narrowed_in_the_worktree_and_is_stopped_past_its_limit(
                 args: args.iter().map(|arg| (*arg).to_owned()).collect(),
                 paths: vec!["**".to_owned()],
                 timeout_secs: timeout,
+                builtin: None,
             },
             matched: vec!["a".to_owned()],
             script: script.to_owned(),
@@ -809,7 +824,8 @@ fn a_review_program_runs_the_landing_branchs_script_not_the_worktrees() {
     path.push("/usr/bin:/bin".to_owned());
 
     let repository = GitRepository::inspect(&repo).unwrap();
-    let parse = |text: &str| Ok(dagq::infrastructure::run_env::parse_config(text)?.review_programs);
+    let parse =
+        |text: &str| Ok(dagq::infrastructure::run_env::parse_config(text)?.review_programs());
     let range = |_: &dagq::domain::CommitSha| {
         Ok(ReviewRange {
             base: main.clone(),
@@ -820,9 +836,11 @@ fn a_review_program_runs_the_landing_branchs_script_not_the_worktrees() {
         .unwrap()
         .unwrap();
     assert_eq!(snapshot.commit, main);
-    let [program] = snapshot.programs.as_slice() else {
+    // builtin:secrets, on by default, goes first.
+    let [secrets, program] = snapshot.programs.as_slice() else {
         panic!("{:?}", snapshot.programs);
     };
+    assert_eq!(secrets.program.name, "builtin:secrets");
 
     let db = dir.path().join("q.db");
     let queue = SqliteQueue::init(&db).unwrap();
@@ -837,6 +855,7 @@ fn a_review_program_runs_the_landing_branchs_script_not_the_worktrees() {
     };
     let host = HostPrograms::inheriting(
         &repo,
+        env!("CARGO_BIN_EXE_dagq"),
         [(OsString::from("PATH"), OsString::from(path.join(":")))],
     );
     let backend = ProgramBackends::new(&host, ExecutionConfig::default());

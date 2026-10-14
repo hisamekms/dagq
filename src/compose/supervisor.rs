@@ -723,7 +723,8 @@ pub fn supervise_with_reviewer(
             }),
         )
     });
-    let host_programs = crate::infrastructure::review_programs::HostPrograms::new(&main_checkout);
+    let host_programs =
+        crate::infrastructure::review_programs::HostPrograms::new(&main_checkout, runner);
     let ports = Ports {
         queues: Arc::new(opener()),
         observation_queues: Arc::new(SqlitePorts {

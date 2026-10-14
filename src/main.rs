@@ -1571,6 +1571,16 @@ enum Command {
         #[command(subcommand)]
         command: RelayCommand,
     },
+    // ADR-t2259-1 decision 1.
+    /// A built-in program of a run's review, as its program job runs it in
+    /// the run's worktree: `builtin:secrets BASE HEAD [PATH...]`. Opens no
+    /// queue; exits 0 (passed), 1 (rejected) or 2 (could not check).
+    #[command(hide = true)]
+    ReviewProgram {
+        name: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Bind the queue to the repository containing the working directory (or
     /// --repo) after the repository moved; the one command that changes the
     /// binding. Refused while a supervisor runs. Pass --db for a queue still
@@ -2365,7 +2375,7 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
     match command {
         // Run before any actor is read (`execute`): it opens no queue and
         // carries bytes only (ADR-t2114-3).
-        Command::Relay { .. } => Vec::new(),
+        Command::Relay { .. } | Command::ReviewProgram { .. } => Vec::new(),
         Command::Locate
         | Command::List { .. }
         | Command::Show { .. }
@@ -3359,6 +3369,11 @@ fn execute(cli: Cli) -> Result<Value> {
     if let Command::Relay { command } = &cli.command {
         return relay(command);
     }
+    // A built-in review program reads the worktree's Git and prints its
+    // findings, and its exit code is its verdict: it opens no queue.
+    if let Command::ReviewProgram { name, args } = &cli.command {
+        std::process::exit(dagq::infrastructure::review_secrets::run(name, args));
+    }
     // A worker's or a job's `dagq` goes to the queue service, which
     // authorizes it for the principal of its token: neither `DAGQ_ROLE`
     // nor the queue's path is read (goal 82's stage (3)). An environment
@@ -3724,7 +3739,8 @@ fn execute(cli: Cli) -> Result<Value> {
         | Command::Inbox { .. }
         | Command::Service { .. }
         | Command::QueueBroker { .. }
-        | Command::Relay { .. } => {
+        | Command::Relay { .. }
+        | Command::ReviewProgram { .. } => {
             unreachable!()
         }
         // Answered above as reads.
@@ -5678,6 +5694,9 @@ mod tests {
         "relay serve",
         "relay forward",
         "relay probe",
+        // Read the worktree's Git and print what a built-in review program
+        // found, and open no queue (ADR-t2259-1).
+        "review-program",
     ];
 
     /// Every subcommand clap knows, nested ones by their path (`goal

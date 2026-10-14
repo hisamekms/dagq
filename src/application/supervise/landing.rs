@@ -167,9 +167,10 @@ impl Supervisor<'_> {
     /// those the landing branch's commit configures whose paths the
     /// reviewed range changes, each script read at that commit, run one
     /// program job at a time in the configured order against the run's
-    /// worktree. A review that needs none (no `[review.programs.*]`, or no
-    /// program whose paths the range touches) goes to its agents at once
-    /// and records nothing of them. `retried` is whether this is their one
+    /// worktree, the built-ins first. A review that needs none (every
+    /// built-in off and no `[review.programs.*]`, or no program whose paths
+    /// the range touches) goes to its agents at once and records nothing
+    /// of them. `retried` is whether this is their one
     /// retry, after a program that could not be read, start or finish.
     fn start_review_programs(
         &mut self,
@@ -197,6 +198,7 @@ impl Supervisor<'_> {
                     "name": selected.program.name,
                     "script": selected.program.script,
                     "matched": selected.matched,
+                    "builtin": selected.builtin_record(),
                 })
             })
             .collect();
@@ -229,7 +231,7 @@ impl Supervisor<'_> {
     }
     /// The program reviews of `run`'s review from the landing branch's
     /// commit ([`snapshot_programs`]), selected by the receipt's range as
-    /// the subagents are; `None` without `[review.programs.*]`.
+    /// the subagents are; `None` with no program on.
     fn review_programs(&self, run: &TaskRun) -> Result<Option<ProgramSnapshot>> {
         snapshot_programs(
             &*self.repository,

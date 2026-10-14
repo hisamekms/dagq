@@ -660,12 +660,16 @@ impl Supervisor<'_> {
         Ok(true)
     }
 
-    /// The program reviews `commit` configures, or why they do not read.
+    /// The project's program reviews `commit` configures, or why they do
+    /// not read. The built-in programs are not run over a case: they check
+    /// the lines a run's change adds before it lands, and a case's patch is
+    /// no such change.
     fn eval_programs(&self, commit: &str) -> std::result::Result<Vec<ReviewProgram>, String> {
         let verifier = &self.verifier;
         programs_at(&*self.repository, commit, &|text| {
             verifier.review_programs_in(text)
         })
+        .map(|configured| configured.programs)
         .map_err(|error| format!("{error:#}"))
     }
 

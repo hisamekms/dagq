@@ -1908,15 +1908,17 @@ pub trait Verifier {
         let _ = text;
         Ok(crate::domain::review_subagents::ReviewAgents::default())
     }
-    /// The program reviews (`[review.programs.<name>]`, ADR-t1895-2) of
-    /// `text`, a whole `dagq.toml` as committed; `Err` when it cannot be
-    /// parsed. None by default.
+    /// The program reviews (`[review.programs.<name>]`, ADR-t1895-2, and
+    /// `[review.programs."builtin:<name>"]`, ADR-t2259-1) of `text`, a
+    /// whole `dagq.toml` as committed; `Err` when it cannot be parsed.
+    /// None written by default, which leaves the built-ins to their
+    /// defaults.
     fn review_programs_in(
         &self,
         text: &str,
-    ) -> Result<Vec<crate::domain::review_programs::ReviewProgram>> {
+    ) -> Result<crate::domain::review_programs::ReviewPrograms> {
         let _ = text;
-        Ok(Vec::new())
+        Ok(crate::domain::review_programs::ReviewPrograms::default())
     }
     /// `[headless] wrapper` as `dagq.toml` writes it, `None` without the
     /// key: only to tell that a worker and a planner of the runtime's

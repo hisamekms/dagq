@@ -87,7 +87,9 @@ use crate::{
         recheck::RecheckConfig,
         resume::ResumeConfig,
         review_builtins::{self, BuiltinAgent, BuiltinSetting},
-        review_programs::{self, ReviewProgram},
+        review_programs::{
+            self, BuiltinProgram, BuiltinProgramSetting, ReviewProgram, ReviewPrograms,
+        },
         review_subagents::{self, ReviewAgents, ReviewSubagent},
         run_env::{RunEnvCheck, RunEnvProgram},
         scope::{dedup_globs, validate_path_globs},
@@ -189,6 +191,11 @@ const REVIEW_PROGRAMS_TABLE: &str = review_programs::SECTION;
 /// and an optional `timeout_secs`; what each means is on
 /// [`ReviewProgram`].
 const REVIEW_PROGRAM_KEYS: [&str; 4] = ["script", "args", "paths", "timeout_secs"];
+/// What [`parse_config`] calls the current table while in a
+/// `[review.programs."builtin:<name>"]`; its keys are the optional
+/// `enabled` and `paths` ([`BuiltinProgramSetting`]). `script` and `args`
+/// are mistakes: what a built-in runs is the binary's.
+const REVIEW_BUILTIN_PROGRAM_TABLE: &str = "review.programs.builtin";
 /// `[headless]`: `wrapper`, where a headless session's wrapper runs
 /// (ADR-t1404-1 decision 7).
 const HEADLESS_TABLE: &str = "headless";
@@ -443,6 +450,10 @@ pub struct Config {
     /// `[review.programs.<name>]` in file order (ADR-t1895-2); empty
     /// without any.
     pub review_programs: Vec<ReviewProgram>,
+    /// `[review.programs."builtin:<name>"]` of the built-in programs, in
+    /// file order (ADR-t2259-1 decision 4); empty without any, which
+    /// leaves each to its defaults.
+    pub review_builtin_programs: Vec<BuiltinProgramSetting>,
     /// `[headless] wrapper` (ADR-t1404-1 decision 7); `None` without it,
     /// which is the default, a workspace.
     pub headless_wrapper: Option<HeadlessWrapper>,
@@ -485,6 +496,15 @@ impl Config {
         ReviewAgents {
             agents: self.review_subagents.clone(),
             builtins: self.review_builtins.clone(),
+        }
+    }
+
+    /// The program reviews as this `dagq.toml` writes them: the
+    /// project's and the built-ins' tables.
+    pub fn review_programs(&self) -> ReviewPrograms {
+        ReviewPrograms {
+            programs: self.review_programs.clone(),
+            builtins: self.review_builtin_programs.clone(),
         }
     }
 }
@@ -549,6 +569,8 @@ pub fn parse_config(text: &str) -> Result<Config> {
     // The `[review.programs.<name>]` being read, finished at the next
     // table or the end of the file.
     let mut program_open: Option<ProgramTable> = None;
+    // The keys of the current `[review.programs."builtin:<name>"]` read.
+    let mut builtin_program_keys: Vec<String> = Vec::new();
     // The keys of the current `[toolchains.<name>]` read.
     let mut toolchain_keys: Vec<String> = Vec::new();
     // The `[verify_marks.<name>]` being read, finished at the next table
@@ -690,6 +712,27 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     !program.is_empty(),
                     "{CONFIG_FILE_NAME}:{number}: [{name}] names no program; write [{REVIEW_PROGRAMS_PREFIX}<name>]"
                 );
+                // A name of the built-ins' prefix is a built-in's, or a
+                // mistake: no project's program takes it.
+                if let Some(builtin) = BuiltinProgram::named(&program).map_err(|why| {
+                    anyhow::anyhow!("{CONFIG_FILE_NAME}:{number}: [{name}]: {why}")
+                })? {
+                    ensure!(
+                        config
+                            .review_builtin_programs
+                            .iter()
+                            .all(|b| b.program != builtin),
+                        "{CONFIG_FILE_NAME}:{number}: [{name}] is defined twice"
+                    );
+                    config.review_builtin_programs.push(BuiltinProgramSetting {
+                        program: builtin,
+                        enabled: None,
+                        paths: None,
+                    });
+                    builtin_program_keys.clear();
+                    table = Some(REVIEW_BUILTIN_PROGRAM_TABLE);
+                    continue;
+                }
                 ensure!(
                     review_subagents::valid_agent_name(&program),
                     "{CONFIG_FILE_NAME}:{number}: program {program:?} of [{name}] is not kebab-case (lowercase letters and digits joined by -)"
@@ -866,6 +909,39 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 .as_mut()
                 .expect("a [review.programs.*] table names its program")
                 .entry(number, key, rest.trim())?,
+            Some(REVIEW_BUILTIN_PROGRAM_TABLE) => {
+                let builtin = config
+                    .review_builtin_programs
+                    .last_mut()
+                    .expect("a builtin table names its built-in");
+                let section = format!("{REVIEW_PROGRAMS_PREFIX}\"{}\"", builtin.program.name());
+                ensure!(
+                    !builtin_program_keys.iter().any(|existing| existing == key),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                builtin_program_keys.push(key.to_owned());
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                match key {
+                    REVIEW_SUBAGENT_ENABLED => {
+                        builtin.enabled = Some(parse_bool(rest.trim()).with_context(with)?);
+                    }
+                    REVIEW_SUBAGENT_PATHS => {
+                        let globs = parse_string_array(rest.trim()).with_context(with)?;
+                        ensure!(
+                            !globs.is_empty(),
+                            "{CONFIG_FILE_NAME}:{number}: {key} of [{section}] names no glob; turn it off with {REVIEW_SUBAGENT_ENABLED} = false"
+                        );
+                        validate_path_globs(&globs).with_context(with)?;
+                        builtin.paths = Some(dedup_globs(&globs));
+                    }
+                    "script" | "args" => bail!(
+                        "{CONFIG_FILE_NAME}:{number}: [{section}] has {key}, which a built-in does not take: it runs the dagq binary's own script; turn it off with {REVIEW_SUBAGENT_ENABLED} = false and write a program of your own to run another"
+                    ),
+                    _ => bail!(
+                        "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{section}]; the keys are {REVIEW_SUBAGENT_ENABLED} and {REVIEW_SUBAGENT_PATHS}"
+                    ),
+                }
+            }
             Some(REVIEW_BUILTIN_TABLE) => {
                 let section = if in_acceptance {
                     review_builtins::ACCEPTANCE.to_owned()
@@ -1892,6 +1968,7 @@ impl ProgramTable {
                 .with_context(|| format!("{table} has no paths"))?,
             timeout_secs: self.timeout_secs,
             name: self.name,
+            builtin: None,
         })
     }
 }
@@ -2712,8 +2789,8 @@ impl Verifier for ShellVerifier {
     fn review_subagents_in(&self, text: &str) -> Result<ReviewAgents> {
         Ok(parse_config(text)?.review_agents())
     }
-    fn review_programs_in(&self, text: &str) -> Result<Vec<ReviewProgram>> {
-        Ok(parse_config(text)?.review_programs)
+    fn review_programs_in(&self, text: &str) -> Result<ReviewPrograms> {
+        Ok(parse_config(text)?.review_programs())
     }
     fn headless_wrapper_setting(&self) -> Result<Option<HeadlessWrapper>> {
         load_headless_wrapper_setting(&self.checkout)
@@ -3365,6 +3442,7 @@ mod tests {
                     args: Vec::new(),
                     paths: vec!["src/**".to_owned()],
                     timeout_secs: None,
+                    builtin: None,
                 },
                 ReviewProgram {
                     name: "links".to_owned(),
@@ -3372,6 +3450,7 @@ mod tests {
                     args: vec!["--quiet".to_owned()],
                     paths: vec!["docs/**".to_owned()],
                     timeout_secs: Some(30),
+                    builtin: None,
                 },
             ]
         );
@@ -3454,10 +3533,86 @@ mod tests {
             verifier
                 .review_programs_in("[review.programs.a]\nscript = \"s.sh\"\npaths = [\"a\"]\n")
                 .unwrap()
+                .programs
                 .len(),
             1
         );
         assert!(verifier.review_programs_in("[nope]\n").is_err());
+    }
+
+    /// `[review.programs."builtin:<name>"]` sets a built-in program's
+    /// `enabled` and `paths` (ADR-t2259-1 decision 4), apart from the
+    /// project's programs; `script` and `args` in it, a name of the prefix
+    /// that is no built-in's, and a project's program named with the
+    /// prefix are mistakes naming the line.
+    #[test]
+    fn parses_the_builtin_review_programs() {
+        let config = parse_config(
+            "[review.programs.\"builtin:secrets\"]\nenabled = true # on\npaths = [\"src/**\", \"src/**\"]\n\
+             [review.programs.fmt]\nscript = \"scripts/fmt.sh\"\npaths = [\"src/**\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.review_builtin_programs,
+            [BuiltinProgramSetting {
+                program: BuiltinProgram::Secrets,
+                enabled: Some(true),
+                paths: Some(vec!["src/**".to_owned()]),
+            }]
+        );
+        assert_eq!(config.review_programs.len(), 1);
+        let names: Vec<String> = config
+            .review_programs()
+            .effective()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, ["builtin:secrets", "fmt"]);
+        let off = parse_config("[review.programs.'builtin:secrets']\nenabled = false\n").unwrap();
+        assert!(off.review_programs().effective().is_empty());
+        let header = parse_config("[review.programs.\"builtin:secrets\"]\n[run.env]\n").unwrap();
+        assert_eq!(header.review_builtin_programs[0].enabled, None);
+        for (text, expected) in [
+            (
+                "[review.programs.\"builtin:secrets\"]\nscript = \"s.sh\"\n",
+                "dagq.toml:2: [review.programs.\"builtin:secrets\"] has script, which a built-in does not take",
+            ),
+            (
+                "[review.programs.\"builtin:secrets\"]\nargs = [\"x\"]\n",
+                "dagq.toml:2: [review.programs.\"builtin:secrets\"] has args, which a built-in does not take",
+            ),
+            (
+                "[review.programs.\"builtin:secrets\"]\ntimeout_secs = 5\n",
+                "dagq.toml:2: unknown key timeout_secs in [review.programs.\"builtin:secrets\"]; the keys are enabled and paths",
+            ),
+            (
+                "[review.programs.\"builtin:scope\"]\nenabled = true\n",
+                "dagq.toml:1: [review.programs.\"builtin:scope\"]: builtin:scope is no built-in program",
+            ),
+            (
+                "[review.programs.\"builtin:my-check\"]\nscript = \"s.sh\"\npaths = [\"a\"]\n",
+                "names starting with builtin: are the built-ins', so a project's program may not take one",
+            ),
+            (
+                "[review.programs.\"builtin:secrets\"]\npaths = []\n",
+                "dagq.toml:2: paths of [review.programs.\"builtin:secrets\"] names no glob",
+            ),
+            (
+                "[review.programs.\"builtin:secrets\"]\nenabled = 1\n",
+                "dagq.toml:2: value of enabled",
+            ),
+            (
+                "[review.programs.\"builtin:secrets\"]\nenabled = true\nenabled = false\n",
+                "dagq.toml:3: enabled is defined twice",
+            ),
+            (
+                "[review.programs.\"builtin:secrets\"]\n[review.programs.\"builtin:secrets\"]\n",
+                "dagq.toml:2: [review.programs.\"builtin:secrets\"] is defined twice",
+            ),
+        ] {
+            let error = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(error.contains(expected), "{text:?}: {error}");
+        }
     }
 
     /// `[e2e] paths` names the globs whose change requires e2e

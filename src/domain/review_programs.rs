@@ -5,8 +5,16 @@
 //! review needs is decided here, without side effects; the supervisor reads
 //! the configuration and the scripts from the landing branch's committed
 //! tree, never from the run's worktree (decision 2).
+//!
+//! The binary also carries built-in programs ([`BuiltinProgram`],
+//! ADR-t2259-1 decisions 1, 4, 5 and 9), configured by
+//! `[review.programs."builtin:<name>"]` ([`BuiltinProgramSetting`]) and run
+//! as a project's programs are, ahead of them ([`ReviewPrograms::effective`]).
 
+use super::review_builtins::PREFIX;
 use super::scope::{glob_matches, validate_path_globs};
+
+pub mod secrets;
 
 /// The configuration's section of the program reviews.
 pub const SECTION: &str = "review.programs";
@@ -27,6 +35,10 @@ pub const SECTION: &str = "review.programs";
 /// given, is the worktree's cannot be told from its words. Another
 /// repository script the script calls by a path from its working
 /// directory is the worktree's, which nothing here prevents.
+///
+/// A built-in program ([`Self::builtin`]) is named `builtin:<name>`, and
+/// its `script` is that name: its text is the binary's
+/// ([`BuiltinProgram::script`]), never a file of the repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReviewProgram {
     pub name: String,
@@ -34,6 +46,167 @@ pub struct ReviewProgram {
     pub args: Vec<String>,
     pub paths: Vec<String>,
     pub timeout_secs: Option<u64>,
+    /// The built-in it is, `None` for a project's program.
+    pub builtin: Option<BuiltinProgram>,
+}
+
+/// A built-in program the binary carries (ADR-t2259-1 decision 1).
+///
+/// Each is a hidden subcommand of the dagq binary, `dagq review-program
+/// <name> BASE HEAD [PATH...]`, whose judgement is a pure function of this
+/// layer ([`secrets`]), run as a project's script is: a program job on the
+/// review's backend, with the narrowed environment and `PATH`
+/// (ADR-t1895-2 decisions 5 and 6), the job's record, its time limit and
+/// the fail-fast of the programs' step. The program is the supervisor's own
+/// binary, which neither the worker nor the project can change. A shell
+/// script would leave its judgement to `awk`, which no unit test reads,
+/// and a function run inside the supervisor would have needed a second
+/// kind of program job beside the process one, with its own record, time
+/// limit and stop. It reads the change with `git` only, so it assumes no
+/// language or tool of the project.
+///
+/// What it checks it is given as arguments: the reviewed range's merge
+/// base and head (commit names, no secret) and, when `dagq.toml` narrowed
+/// its `paths`, the changed paths they matched ([`with_range`]), so it
+/// needs no variable beyond the narrowed environment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinProgram {
+    /// `builtin:secrets`: the lines the reviewed range adds that look like
+    /// a credential ([`secrets`], where the kinds and their patterns are).
+    /// On by default, on every changed path.
+    Secrets,
+}
+
+impl BuiltinProgram {
+    /// Every built-in program, in the order a review runs them.
+    pub const ALL: [Self; 1] = [Self::Secrets];
+
+    /// Its name without [`PREFIX`].
+    pub const fn short(self) -> &'static str {
+        match self {
+            Self::Secrets => "secrets",
+        }
+    }
+
+    /// Its name, `builtin:<short>`: the name of its table, its job and its
+    /// events.
+    pub fn name(self) -> String {
+        format!("{PREFIX}{}", self.short())
+    }
+
+    /// Whether it runs when `dagq.toml` does not say `enabled`.
+    pub const fn enabled_by_default(self) -> bool {
+        match self {
+            Self::Secrets => true,
+        }
+    }
+
+    /// The globs that select it when `dagq.toml` does not say `paths`:
+    /// every path. `paths` written replaces them, it is not added to them.
+    pub const fn default_paths(self) -> &'static [&'static str] {
+        match self {
+            Self::Secrets => &["**"],
+        }
+    }
+
+    /// What it runs as the binary carries it: the source of the module
+    /// that judges, whose digest the job's record keeps beside the build
+    /// identifier (ADR-t2259-1 decision 9).
+    pub const fn source(self) -> &'static str {
+        match self {
+            Self::Secrets => include_str!("review_programs/secrets.rs"),
+        }
+    }
+
+    /// The built-in program `name` names: `Ok(None)` for a name without
+    /// [`PREFIX`] (a project's program), `Err` with why for one with it
+    /// that names no built-in program.
+    pub fn named(name: &str) -> Result<Option<Self>, String> {
+        let Some(short) = name.strip_prefix(PREFIX) else {
+            return Ok(None);
+        };
+        Self::ALL
+            .into_iter()
+            .find(|program| program.short() == short)
+            .map(Some)
+            .ok_or_else(|| {
+                format!(
+                    "{name} is no built-in program (they are {}); names starting with {PREFIX} are the built-ins', so a project's program may not take one",
+                    Self::ALL.map(Self::name).join(", ")
+                )
+            })
+    }
+}
+
+/// One `[review.programs."builtin:<name>"]` as written: each key `None`
+/// when the table does not have it. It has no `script`, `args` or
+/// `timeout_secs`: what runs is the binary's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltinProgramSetting {
+    pub program: BuiltinProgram,
+    pub enabled: Option<bool>,
+    pub paths: Option<Vec<String>>,
+}
+
+/// The program reviews a `dagq.toml` configures: the project's programs in
+/// file order, and its settings of the built-ins (none leaves each to its
+/// defaults).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReviewPrograms {
+    pub programs: Vec<ReviewProgram>,
+    pub builtins: Vec<BuiltinProgramSetting>,
+}
+
+impl ReviewPrograms {
+    /// The programs a review selects from, in the order they run: each
+    /// enabled built-in in [`BuiltinProgram::ALL`]'s order, on the `paths`
+    /// written or its defaults, then the project's programs. The built-ins
+    /// go first: they are quick, need nothing of the project's tools, and a
+    /// change that adds a credential goes back before any project's
+    /// program runs over it.
+    pub fn effective(&self) -> Vec<ReviewProgram> {
+        BuiltinProgram::ALL
+            .into_iter()
+            .filter_map(|builtin| {
+                let setting = self.builtins.iter().find(|s| s.program == builtin);
+                setting
+                    .and_then(|s| s.enabled)
+                    .unwrap_or(builtin.enabled_by_default())
+                    .then(|| ReviewProgram {
+                        name: builtin.name(),
+                        script: builtin.name(),
+                        args: Vec::new(),
+                        paths: setting.and_then(|s| s.paths.clone()).unwrap_or_else(|| {
+                            builtin
+                                .default_paths()
+                                .iter()
+                                .map(|glob| (*glob).to_owned())
+                                .collect()
+                        }),
+                        timeout_secs: None,
+                        builtin: Some(builtin),
+                    })
+            })
+            .chain(self.programs.iter().cloned())
+            .collect()
+    }
+}
+
+/// What a built-in program of `selected` is given to check: `base` and
+/// `head` of the reviewed range, then, when its globs are not its defaults
+/// (which match every path), the changed paths they matched, as its
+/// arguments. On its defaults it reads the whole range, so a change of
+/// many files does not make its command line long. A project's program is
+/// left as configured.
+pub fn with_range(mut selected: SelectedProgram, base: &str, head: &str) -> SelectedProgram {
+    if let Some(builtin) = selected.program.builtin {
+        let narrowed = selected.program.paths != builtin.default_paths();
+        selected.program.args = [base.to_owned(), head.to_owned()]
+            .into_iter()
+            .chain(selected.matched.iter().filter(|_| narrowed).cloned())
+            .collect();
+    }
+    selected
 }
 
 /// A program a review needs, with the changed paths that made it so, in
@@ -204,6 +377,110 @@ mod tests {
             args: Vec::new(),
             paths: paths.iter().map(|p| (*p).to_owned()).collect(),
             timeout_secs: None,
+            builtin: None,
+        }
+    }
+
+    fn setting(enabled: Option<bool>, paths: Option<&[&str]>) -> BuiltinProgramSetting {
+        BuiltinProgramSetting {
+            program: BuiltinProgram::Secrets,
+            enabled,
+            paths: paths.map(|paths| paths.iter().map(|p| (*p).to_owned()).collect()),
+        }
+    }
+
+    /// Without a setting builtin:secrets runs first, on every changed
+    /// path, before the project's programs (ADR-t2259-1 decision 5).
+    #[test]
+    fn builtin_secrets_runs_first_on_every_path_by_default() {
+        let configured = ReviewPrograms {
+            programs: vec![program("fmt", &["src/**"])],
+            builtins: Vec::new(),
+        };
+        let effective = configured.effective();
+        assert_eq!(
+            effective
+                .iter()
+                .map(|p| (p.name.as_str(), p.builtin))
+                .collect::<Vec<_>>(),
+            [
+                ("builtin:secrets", Some(BuiltinProgram::Secrets)),
+                ("fmt", None)
+            ]
+        );
+        assert_eq!(effective[0].script, "builtin:secrets");
+        let changed = ["README.md", "a/b/c.txt", ".env"].map(str::to_owned);
+        let selected = select(&effective, &changed);
+        assert_eq!(selected[0].matched, changed);
+        // On its defaults it reads the whole range: no path is passed.
+        let given = with_range(selected[0].clone(), "base", "head");
+        assert_eq!(given.program.args, ["base", "head"]);
+        assert!(ReviewPrograms::default().effective()[0].builtin.is_some());
+    }
+
+    /// `enabled = false` leaves it out; `paths` written replaces its
+    /// globs, so only the paths they match select it and are checked.
+    #[test]
+    fn enabled_and_paths_of_a_builtin_program_are_taken_as_written() {
+        let off = ReviewPrograms {
+            programs: Vec::new(),
+            builtins: vec![setting(Some(false), Some(&["src/**"]))],
+        };
+        assert!(off.effective().is_empty());
+        let narrowed = ReviewPrograms {
+            programs: Vec::new(),
+            builtins: vec![setting(None, Some(&["src/**"]))],
+        };
+        let effective = narrowed.effective();
+        assert_eq!(effective[0].paths, ["src/**"]);
+        assert!(select(&effective, &["docs/a.md".to_owned()]).is_empty());
+        let selected = select(&effective, &["docs/a.md", "src/b.rs"].map(str::to_owned));
+        assert_eq!(selected[0].matched, ["src/b.rs"]);
+        // The range and the matched paths are its arguments; a project's
+        // program keeps its own.
+        let given = with_range(selected[0].clone(), "base", "head");
+        assert_eq!(given.program.args, ["base", "head", "src/b.rs"]);
+        let project = SelectedProgram {
+            program: ReviewProgram {
+                args: vec!["--quiet".to_owned()],
+                ..program("fmt", &["**"])
+            },
+            matched: vec!["a".to_owned()],
+        };
+        assert_eq!(with_range(project, "b", "h").program.args, ["--quiet"]);
+        let on = ReviewPrograms {
+            programs: Vec::new(),
+            builtins: vec![setting(Some(true), None)],
+        };
+        assert_eq!(on.effective()[0].paths, ["**"]);
+    }
+
+    /// A name with the prefix names a built-in program or is a mistake.
+    #[test]
+    fn names_with_the_prefix_are_the_builtin_programs() {
+        assert_eq!(
+            BuiltinProgram::named("builtin:secrets"),
+            Ok(Some(BuiltinProgram::Secrets))
+        );
+        assert_eq!(BuiltinProgram::named("fmt"), Ok(None));
+        for unknown in ["builtin:scope", "builtin:", "builtin:security"] {
+            let error = BuiltinProgram::named(unknown).unwrap_err();
+            assert!(
+                error.contains("is no built-in program (they are builtin:secrets)"),
+                "{error}"
+            );
+        }
+    }
+
+    /// What a built-in runs is the source of the module that judges, which
+    /// assumes no project's language or tool.
+    #[test]
+    fn the_secrets_source_is_its_judging_module_and_generic() {
+        let source = BuiltinProgram::Secrets.source();
+        assert!(source.contains("pub fn scan("), "{source}");
+        let lower = source.to_lowercase();
+        for word in ["cargo", "rust", "python", "npm install"] {
+            assert!(!lower.contains(word), "{word}");
         }
     }
 

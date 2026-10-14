@@ -1126,3 +1126,18 @@ task = 1820
 name = "runtime_already_satisfied::a_claim_without_its_base_checks_is_an_invalid_receipt"
 reason = "B 境界（守る境界）: supervisor wiring: a real worker turn's receipt without base_checks is refused by the supervisor's validation on SQLite (run failed, receipt_invalid, nothing verified); the refusal itself is receipt::tests and validation::tests"
 task = 1820
+
+[[test]]
+name = "review_programs::builtin_secrets_sends_an_added_key_back_without_any_configuration"
+reason = "supervisorの配線: 設定の無いrepositoryでbuilt-inのprogramのjobがagentより前にプロセスとして流れ、差し戻しとeventの記録まで通る境界"
+task = 2261
+
+[[test]]
+name = "review_subagents::a_run_rebased_onto_a_main_that_moved_on_is_reviewed_from_their_merge_base"
+reason = "Git: mainが進んだ後のrebaseしたrunのreviewの範囲をmerge baseから求め、agentとprogramの選び方とreview.mdが同じ範囲を読む境界"
+task = 2261
+
+[[test]]
+name = "runtime_headless_jobs::a_review_program_runs_narrowed_in_the_worktree_and_is_stopped_past_its_limit"
+reason = "プロセス: programのjobを絞ったenvでworktreeに起動し、時間の上限でprocess groupごと止める境界"
+task = 2261

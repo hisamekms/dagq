@@ -6,14 +6,19 @@
 //! run's worktree, on the backend of the review's actor
 //! ([`ProgramBackends`]). The eval of an agent reads and runs a case's
 //! programs the same way, at the commit its round reads its cases from
-//! (ADR-t1728-1 (i)).
+//! (ADR-t1728-1 (i)). A built-in program
+//! ([`crate::domain::review_programs::BuiltinProgram`]) runs what
+//! the binary carries instead of a script of the commit, and is given the
+//! range it checks ([`review_programs::with_range`]).
 
 use anyhow::{Context, Result, bail};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 use super::execution::{ExecutionConfig, ExecutorBackend};
 use super::review::{CONFIG_FILE, ReviewRange};
 use super::{Repository, ReviewProgramBackend};
-use crate::domain::review_programs::{self, ReviewProgram};
+use crate::domain::review_programs::{self, ReviewProgram, ReviewPrograms, SelectedProgram};
 use crate::domain::{ActorRole, CommitSha};
 
 /// The backends a program job can run on, and which the review's actor
@@ -50,13 +55,29 @@ impl<'a> ProgramBackends<'a> {
 
 /// One program a review attempt runs, as the landing branch's commit has
 /// it: its configuration, the changed paths that required it, and its
-/// script's text at that commit, which is what runs whatever the run's
-/// worktree holds.
+/// script's text at that commit (a built-in's, the source the binary
+/// carries of what it runs, `BuiltinProgram::source`), which is
+/// what runs whatever the run's worktree holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotProgram {
     pub program: ReviewProgram,
     pub matched: Vec<String>,
     pub script: String,
+}
+
+impl SnapshotProgram {
+    /// What `review_programs_started` records of which built-in program
+    /// ran (ADR-t2259-1 decision 9): its name, the build identifier of
+    /// this dagq and the SHA-256 of the source of what it runs; `None` for a
+    /// project's program, whose script is the landing branch's commit's.
+    pub fn builtin_record(&self) -> Option<Value> {
+        self.program.builtin?;
+        Some(json!({
+            "builtin": self.program.name,
+            "build": crate::VERSION,
+            "digest": format!("{:x}", Sha256::digest(self.script.as_bytes())),
+        }))
+    }
 }
 
 /// The program reviews of one attempt read from the landing branch's
@@ -71,19 +92,19 @@ pub struct ProgramSnapshot {
 }
 
 /// The program reviews `dagq.toml` configures in `commit`'s tree, as
-/// `parse` reads them: none when the commit has no `dagq.toml` or one
-/// without `[review.programs.*]`; `Err` when the file cannot be read or
-/// parsed.
+/// `parse` reads them: none written when the commit has no `dagq.toml` or
+/// one without `[review.programs.*]` (the built-ins then go by their
+/// defaults); `Err` when the file cannot be read or parsed.
 pub fn programs_at(
     repository: &dyn Repository,
     commit: &str,
-    parse: &dyn Fn(&str) -> Result<Vec<ReviewProgram>>,
-) -> Result<Vec<ReviewProgram>> {
+    parse: &dyn Fn(&str) -> Result<ReviewPrograms>,
+) -> Result<ReviewPrograms> {
     let Some(text) = repository
         .file_in(commit, CONFIG_FILE)
         .with_context(|| format!("read {CONFIG_FILE} in the landing branch's commit {commit}"))?
     else {
-        return Ok(Vec::new());
+        return Ok(ReviewPrograms::default());
     };
     parse(&text)
         .with_context(|| format!("parse {CONFIG_FILE} in the landing branch's commit {commit}"))
@@ -91,8 +112,8 @@ pub fn programs_at(
 
 /// The programs of `configured` the paths `changed` require
 /// ([`review_programs::select`]), each with its script read in `commit`'s
-/// tree, whatever the tree they run against holds. `Err` when a selected
-/// script is not in the commit.
+/// tree, whatever the tree they run against holds, or a built-in's from
+/// the binary. `Err` when a selected script is not in the commit.
 pub fn required_programs(
     repository: &dyn Repository,
     commit: &str,
@@ -101,6 +122,14 @@ pub fn required_programs(
 ) -> Result<Vec<SnapshotProgram>> {
     let mut programs = Vec::new();
     for selected in review_programs::select(configured, changed) {
+        if let Some(builtin) = selected.program.builtin {
+            programs.push(SnapshotProgram {
+                program: selected.program,
+                matched: selected.matched,
+                script: builtin.source().to_owned(),
+            });
+            continue;
+        }
         let path = &selected.program.script;
         let script = repository
             .file_in(commit, path)
@@ -122,20 +151,22 @@ pub fn required_programs(
 
 /// Read the program reviews from the landing branch's committed tree and
 /// select those the paths `<base>...<head>` changes require, each script
-/// read at the same commit. `Ok(None)` when the landing branch has no
-/// `dagq.toml` or one without `[review.programs.*]`: the review goes as
-/// before. `Err` when the file cannot be read or parsed, or a selected
-/// script is not in the commit: what to run is not known, which is the
-/// review's failure, not the worker's (ADR-t1895-2 decision 4). `range`
-/// is called only when programs are configured.
+/// read at the same commit, the built-ins ([`ReviewPrograms::effective`])
+/// first and each given the range from the merge base. `Ok(None)` when no
+/// program is on: the landing branch's `dagq.toml` turns every built-in off
+/// and names no program of its own, and the review goes as before. `Err`
+/// when the file cannot be read or parsed, or a selected script is not in
+/// the commit: what to run is not known, which is the review's failure,
+/// not the worker's (ADR-t1895-2 decision 4). `range` is called only when
+/// a program is on.
 pub fn snapshot_programs(
     repository: &dyn Repository,
-    parse: &dyn Fn(&str) -> Result<Vec<ReviewProgram>>,
+    parse: &dyn Fn(&str) -> Result<ReviewPrograms>,
     range: &dyn Fn(&CommitSha) -> Result<ReviewRange>,
 ) -> Result<Option<ProgramSnapshot>> {
     let main = repository.main_head()?;
     let commit = main.to_string();
-    let configured = programs_at(repository, &commit, parse)?;
+    let configured = programs_at(repository, &commit, parse)?.effective();
     if configured.is_empty() {
         return Ok(None);
     }
@@ -144,7 +175,24 @@ pub fn snapshot_programs(
         .merge_base(&range.base, &range.head)?
         .map_or_else(|| range.base.clone(), CommitSha::into_string);
     let changed = repository.changed_paths(&from, &range.head)?;
-    let programs = required_programs(repository, &commit, &configured, &changed)?;
+    let programs = required_programs(repository, &commit, &configured, &changed)?
+        .into_iter()
+        .map(|snapshot| {
+            let SelectedProgram { program, matched } = review_programs::with_range(
+                SelectedProgram {
+                    program: snapshot.program,
+                    matched: snapshot.matched,
+                },
+                &from,
+                &range.head,
+            );
+            SnapshotProgram {
+                program,
+                matched,
+                script: snapshot.script,
+            }
+        })
+        .collect();
     Ok(Some(ProgramSnapshot {
         commit,
         range,
@@ -296,25 +344,41 @@ mod tests {
     }
 
     /// `fmt` runs the script `scripts/fmt.sh` on `src/**`; `links` runs
-    /// `scripts/links.sh` on `docs/**`. A config of `bad` does not parse;
-    /// any other names no program.
-    fn parse(text: &str) -> Result<Vec<ReviewProgram>> {
+    /// `scripts/links.sh` on `docs/**`, and [`CONFIG`] turns
+    /// builtin:secrets off. [`OFF`] turns it off and names no program. A
+    /// config of `bad` does not parse; any other writes nothing.
+    fn parse(text: &str) -> Result<ReviewPrograms> {
         let program = |name: &str, script: &str, args: &[&str], glob: &str| ReviewProgram {
             name: name.to_owned(),
             script: script.to_owned(),
             args: args.iter().map(|arg| (*arg).to_owned()).collect(),
             paths: vec![glob.to_owned()],
             timeout_secs: None,
+            builtin: None,
         };
+        let off = vec![review_programs::BuiltinProgramSetting {
+            program: review_programs::BuiltinProgram::Secrets,
+            enabled: Some(false),
+            paths: None,
+        }];
         match text {
-            CONFIG => Ok(vec![
-                program("fmt", "scripts/fmt.sh", &[], "src/**"),
-                program("links", "scripts/links.sh", &["--quiet"], "docs/**"),
-            ]),
+            CONFIG => Ok(ReviewPrograms {
+                programs: vec![
+                    program("fmt", "scripts/fmt.sh", &[], "src/**"),
+                    program("links", "scripts/links.sh", &["--quiet"], "docs/**"),
+                ],
+                builtins: off,
+            }),
+            OFF => Ok(ReviewPrograms {
+                programs: Vec::new(),
+                builtins: off,
+            }),
             "bad" => anyhow::bail!("dagq.toml:1: [review.programs.fmt] has no paths"),
-            _ => Ok(Vec::new()),
+            _ => Ok(ReviewPrograms::default()),
         }
     }
+
+    const OFF: &str = "builtin:secrets off";
 
     fn snapshot(
         files: Vec<(&'static str, &'static str)>,
@@ -376,14 +440,38 @@ mod tests {
     }
 
     /// Without `[review.programs]` on the landing branch (no `dagq.toml`,
-    /// or one without the table, an older one) there is no snapshot and the
-    /// review is as before; with the table but a range it does not select,
-    /// the snapshot is empty.
+    /// or one without the table) builtin:secrets runs on every change,
+    /// its script the binary's, given the range from the merge base, and
+    /// its record names the build and the script's
+    /// digest (ADR-t2259-1 decisions 5 and 9). With every built-in off and
+    /// no program there is no snapshot and the review is as before; with
+    /// programs but a range they do not select, the snapshot is empty.
     #[test]
-    fn a_review_without_programs_reads_as_before() {
-        assert!(snapshot(Vec::new(), &["src/b.rs"]).unwrap().is_none());
+    fn builtin_secrets_runs_without_a_configuration_and_the_rest_as_before() {
+        use review_programs::BuiltinProgram;
+        for files in [Vec::new(), vec![(CONFIG_FILE, "[run.env]")]] {
+            let found = snapshot(files, &["README.md", "src/b.rs"])
+                .unwrap()
+                .unwrap();
+            assert_eq!(found.programs.len(), 1);
+            let secrets = &found.programs[0];
+            assert_eq!(secrets.program.name, "builtin:secrets");
+            assert_eq!(secrets.program.builtin, Some(BuiltinProgram::Secrets));
+            assert_eq!(secrets.script, BuiltinProgram::Secrets.source());
+            assert_eq!(secrets.program.args, ["base", "head"]);
+            let record = secrets.builtin_record().unwrap();
+            assert_eq!(record["builtin"], "builtin:secrets");
+            assert_eq!(record["build"], crate::VERSION);
+            assert_eq!(
+                record["digest"],
+                format!(
+                    "{:x}",
+                    Sha256::digest(BuiltinProgram::Secrets.source().as_bytes())
+                )
+            );
+        }
         assert!(
-            snapshot(vec![(CONFIG_FILE, "[run.env]")], &["src/b.rs"])
+            snapshot(vec![(CONFIG_FILE, OFF)], &["src/b.rs"])
                 .unwrap()
                 .is_none()
         );
@@ -391,6 +479,14 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(none.programs.is_empty());
+        let project = snapshot(
+            vec![(CONFIG_FILE, CONFIG), ("scripts/fmt.sh", FMT)],
+            &["src/b.rs"],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(project.programs[0].builtin_record(), None);
+        assert!(project.programs[0].program.args.is_empty());
     }
 
     /// What to run cannot be known: a committed `dagq.toml` that does not
@@ -435,7 +531,7 @@ mod tests {
             ],
             changed: Vec::new(),
         };
-        let configured = programs_at(&repository, SHA, &parse).unwrap();
+        let configured = programs_at(&repository, SHA, &parse).unwrap().programs;
         assert_eq!(configured.len(), 2);
         // The case's patch rewrote the script and the configuration.
         let changed = ["src/b.rs", "scripts/fmt.sh", CONFIG_FILE].map(str::to_owned);
@@ -447,7 +543,10 @@ mod tests {
             files: Vec::new(),
             changed: Vec::new(),
         };
-        assert!(programs_at(&none, SHA, &parse).unwrap().is_empty());
+        assert_eq!(
+            programs_at(&none, SHA, &parse).unwrap(),
+            ReviewPrograms::default()
+        );
     }
 
     /// A program backend that counts the commands it was asked for.
@@ -477,6 +576,7 @@ mod tests {
                 args: Vec::new(),
                 paths: vec!["**".to_owned()],
                 timeout_secs: None,
+                builtin: None,
             },
             matched: vec!["a".to_owned()],
             script: FMT.to_owned(),

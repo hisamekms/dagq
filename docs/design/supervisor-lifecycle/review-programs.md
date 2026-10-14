@@ -42,7 +42,9 @@ related:
 ## 段の流れ
 
 1. **選び方**: reviewを最初から始めるたび（validationの後、adoptがやり直すときなど）に、landing branchの今のcommitから`[review.programs.<name>]`とscriptを読み、receiptの範囲の変えたpathで選ぶ。
-   選ばれたものが無い（設定が無い、どのpathも当たらない）reviewは何も記録せず、今までどおりagentのreviewに進む（未実装の変更は[built-in](review-builtin.md)）。
+   dagqのバイナリが持つbuilt-inのprogram（`builtin:<名前>`。[ADR-t2259-1](../../adr/2026-10-12-t2259-1-builtin-review-agents-and-programs-configured-by-builtin-names.md)）も同じく選び、pjのprogramより先に流す（順番の理由は`ReviewPrograms::effective`）。
+   `dagq.toml`に設定が無いrepositoryでも、既定で有効なbuilt-inが流れる。
+   選ばれたものが無い（全てのbuilt-inが無効でpjのprogramも無い、どのpathも当たらない）reviewは何も記録せず、agentのreviewに進む。
    agentのjobのやり直し（読めないverdict・非0の終了・providerの移り）と控えの後の再開はagentのjobだけを始め直し、プログラムのreviewを流し直さない。
 2. **流し方**: `review_programs_started`を記録し、設定の順に1本ずつprogramのjobとして流し、各々の終わりに`review_program_finished`を記録する。
    supervisorのphaseは`Phase::ReviewPrograms`で、記録するphaseとrunの`progress`は`review`である。
@@ -54,6 +56,7 @@ related:
 5. **起動の失敗と時間切れ**: 一覧かscriptが読めない、起動できない（未実装のbackendも）、時間の上限を超えたときは、workerの変更のせいとせずreviewの失敗にする（決定4）。
    最初のprogramから1回だけ流し直し、なお失敗すればagentのjobを起動せずに`review_failed`と`approve_landing`のaskにする。
    この流し直しはreviewのやり直しの1回に数えるので、その後のagentのreviewは読めないverdictでもやり直さない（[Review](review.md)の不変条件）。
+   built-inのprogramもpjのprogramと同じく扱い、落ちればworkerへ返し、起動の失敗と時間切れはreviewの失敗にする。
 
 eventはrunのeventとして`events --run`と`timeline`（`--full`で欄）に出る。
 
@@ -66,7 +69,9 @@ eventはrunのeventとして`events --run`と`timeline`（`--full`で欄）に�
 
 ## 読む元・流す場所・env・結果
 
-- **snapshot**: 試行ごとにlanding branchの今のcommitのtreeから`[review.programs.<name>]`（書式は[Run environment](run-environment.md)）とその`script`の中身を読む（`review_programs::snapshot_programs`）（未実装の変更は[built-in](review-builtin.md)）。
+- **snapshot**: 試行ごとにlanding branchの今のcommitのtreeから`[review.programs.<name>]`（書式は[Run environment](run-environment.md)）とその`script`の中身を読む（`review_programs::snapshot_programs`）。
+  built-inのprogramはscriptを書き出さず、supervisorのdagqのバイナリの隠れたsubcommandとして流し（workerもpjも変えられない。形と理由は`BuiltinProgram`）、`review_programs_started`にbuilt-inの名前・dagqのbuild識別子・判定する中身のhashを残す（`SnapshotProgram::builtin_record`）。
+  調べる範囲（範囲のmerge baseとhead、`paths`を絞ったときは選んだpath）は引数で渡し、envは絞ったままで、差分はファイルに書かずメモリで読む。
   worktreeとmain checkoutのファイルは読まず、workerが変えた設定やscriptは着地まで効かない。
   scriptは読んだ中身をqueueの`review-programs/<run id>/`（workerが書けない場所）に書き出して実行し、出力はrun dirに書く（ファイルの名前は`start_review_program`）。
   programは`script`でだけ名指す（理由は`ReviewProgram`）。

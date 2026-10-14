@@ -210,9 +210,8 @@ agentはpjの`.dagq/agents/`のものとバイナリのbuilt-in（`domain::revie
 
 ## プログラムのreview<a id="プログラムのreview"></a>
 
-段の先頭で、landing branchの設定が挙げpathが差分に当たるprogramを、agentのjobの前に1本ずつ流す（[ADR-t1895-2](../../adr/2026-10-06-t1895-2-program-reviews-are-fast-format-checks-read-from-the-landing-branch.md)）。
-1本が落ちればagentを起動せずworkerに差し戻し、起動の失敗と時間切れはreviewの失敗にする。
-流れ・記録・読む元・envは[プログラムのreview](review-programs.md)が持つ。
+段の先頭で、dagqのバイナリのbuilt-in、次にlanding branchの設定のpjのprogramのうちpathが差分に当たるものを、agentのjobの前に1本ずつ流す（設定が無くても既定のbuilt-inは流れる。[ADR-t1895-2](../../adr/2026-10-06-t1895-2-program-reviews-are-fast-format-checks-read-from-the-landing-branch.md)）。
+落ちたときの差し戻しとreviewの失敗・流れ・記録・読む元・envは[プログラムのreview](review-programs.md)が持つ。
 
 ## 着地の前のe2e
 

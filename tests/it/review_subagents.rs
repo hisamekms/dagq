@@ -493,7 +493,8 @@ fn a_run_rebased_onto_a_main_that_moved_on_is_reviewed_from_their_merge_base() {
         prompt.contains(&format!("the commits from {b} to {rebased},")),
         "{prompt}"
     );
-    let parse = |text: &str| Ok(dagq::infrastructure::run_env::parse_config(text)?.review_programs);
+    let parse =
+        |text: &str| Ok(dagq::infrastructure::run_env::parse_config(text)?.review_programs());
     let programs = snapshot_programs(&repository, &parse, &range)
         .unwrap()
         .unwrap();
@@ -503,7 +504,13 @@ fn a_run_rebased_onto_a_main_that_moved_on_is_reviewed_from_their_merge_base() {
         .iter()
         .map(|p| (p.program.name.as_str(), p.matched.clone()))
         .collect();
-    assert_eq!(selected, [("change", vec!["change.txt".to_owned()])]);
+    assert_eq!(
+        selected,
+        [
+            ("builtin:secrets", vec!["change.txt".to_owned()]),
+            ("change", vec!["change.txt".to_owned()])
+        ]
+    );
 
     let material = |outcome: Value| {
         let text = fs::read_to_string(outcome["path"].as_str().unwrap()).unwrap();
@@ -667,6 +674,11 @@ fn a_review_runs_its_whole_review_and_each_agent_as_jobs_side_by_side() {
     assert_eq!(
         job_rows(&db),
         [
+            // builtin:secrets, on by default, before the agents.
+            (
+                "review_program".to_owned(),
+                Some("builtin:secrets".to_owned())
+            ),
             ("review".to_owned(), None),
             ("review".to_owned(), Some("design".to_owned())),
             ("review".to_owned(), Some("tests".to_owned())),

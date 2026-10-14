@@ -16,7 +16,7 @@ related:
 
 # built-inのreview（一部実装）
 
-**全体のreviewの`builtin:acceptance`とbuilt-inのagent（security・tests）は実装済みで、[Review](review.md)の今の節が持つ。**
+**全体のreviewの`builtin:acceptance`とbuilt-inのagent（security・tests）は実装済みで[Review](review.md)の今の節が、built-inのprogram（secrets）は実装済みで[プログラムのreview](review-programs.md)の今の節が持つ。**
 残りは決定済みの予定で、まだ実装していない。
 決定は[ADR-t2259-1](../../adr/2026-10-12-t2259-1-builtin-review-agents-and-programs-configured-by-builtin-names.md)と、それを直した[ADR-t2389-1](../../adr/2026-10-12-t2389-1-docs-check-only-in-the-overall-review.md)が持つ。
 未実装の部分の今の挙動は[Review](review.md)と[プログラムのreview](review-programs.md)の今の節のとおりである。
@@ -34,11 +34,6 @@ related:
 
 決定済みで、実装の着地まで今の節が正しい境界。
 
-- **設定の無いrepository**: 今は全体のreviewのjobと既定で有効なbuilt-inのagentのjobが流れ、programは流れない（[Review](review.md#reviewのsubagent)の「設定の無いrepository」、[プログラムのreview](review-programs.md#段の流れ)の「選び方」）。
-  決定後は、既定で有効なbuilt-inのprogramも流れる。
-- **定義と中身の読む元**: 今はprogramの`script`を試行ごとにlanding branchのcommitから読み、built-inのagentの定義だけはバイナリから取って記録を残す（[Review](review.md#reviewのsubagent)の「snapshot」、[プログラムのreview](review-programs.md#読む元流す場所env結果)の「snapshot」）。
-  決定後は、built-inのprogramの中身もdagqのバイナリから取り、jobの開始の記録にbuilt-inの名前・dagqのbuild識別子・中身のhashを残す。
-  `dagq.toml`とpjの規則のfile、pjのagentとprogramは今どおりlanding branchのcommitから読む。
 - **built-inのagentのeval**: 今のevalは定義とケースを`.dagq/agents/<name>/`から読み、ケースの集合のdigestをケースのidとpatchの中身から作り、landing branchのcommitのprogramをケースのtreeに先に流す（[Agent eval](../agent-eval.md)の「定義とケースの置き場」「hold-outの1回の制限」「programのreviewの当て方」）。
   決定後は、built-inのうちsecurity・testsだけを、dagqに同梱した定義とケースで測り、acceptance（全体のreview）は対象にしない。
   同梱のケースは小さなbaselineとpatchを持ち、evalは周ごとに対象のrepositoryと独立の一時のGit repositoryにbaselineをbase、patchを当てたcommitをheadとして作り、対象のrepositoryの履歴・ref・worktreeを読まず変えない。

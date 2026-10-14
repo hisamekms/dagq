@@ -177,6 +177,7 @@ mod tests {
             args: Vec::new(),
             paths: names(paths),
             timeout_secs: None,
+            builtin: None,
         }
     }
 

@@ -1026,7 +1026,9 @@ pub const REVIEW_OUTCOME: &str = EventKind::ReviewOutcome.as_str();
 /// run of the run's program reviews, from 1, that numbers their jobs and
 /// output files), whether they are the review's one `retried` run, and the landing branch's `commit`, the
 /// reviewed range's `base` and `head` and the `programs` it selected
-/// (`name`, `script`, `matched`), in the order they run.
+/// (`name`, `script`, `matched`, and `builtin`: for a built-in program its
+/// name, the dagq `build` and the `digest` of the source it runs, null for
+/// a project's), in the order they run.
 pub const REVIEW_PROGRAMS_STARTED: &str = EventKind::ReviewProgramsStarted.as_str();
 /// One program review of a run ended: its `attempt`, `round`, `program`,
 /// `outcome`
