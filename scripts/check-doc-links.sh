@@ -71,41 +71,41 @@ set -eu
 # the header). Blank lines and lines starting with "#" are skipped.
 removed_design=$(cat <<'EOF'
 docs/design/broker.md | docs/adr/2026-10-08-t2113-1-remove-the-resource-broker.md | final
-docs/design/supervisor-lifecycle/task-hold.md | docs/plans/task-hold.md |
-docs/design/supervisor-lifecycle/task-replanning.md | docs/plans/task-replanning.md |
-docs/design/manual-smoke.md | docs/development/manual-smoke.md (the procedures) and docs/plans/manual-smoke-results.md (the dated results) |
-docs/design/supervisor-lifecycle/kpi.md | docs/design/supervisor-lifecycle/commands.md and the doc comments of domain::kpi |
-docs/design/supervisor-lifecycle/stats.md | docs/design/supervisor-lifecycle/commands.md and the doc comments of domain::stats |
-docs/design/supervisor-lifecycle/marks.md | docs/design/supervisor-lifecycle/commands.md and the doc comments of domain::marks |
-docs/design/supervisor-lifecycle/report.md | docs/design/supervisor-lifecycle/commands.md and the doc comments of domain::kpi::report and application::report |
-docs/design/supervisor-lifecycle/timeline.md | docs/design/supervisor-lifecycle/commands.md and the doc comments of domain::timeline |
-docs/design/supervisor-lifecycle/prompt-waiting.md | docs/adr/2026-10-03-t1433-2-abolish-the-interactive-route.md |
-docs/design/supervisor-lifecycle/session-send.md | docs/design/authorization.md |
-docs/design/supervisor-lifecycle/implementation-status.md | docs/design/supervisor-lifecycle/receipt-and-session-exit.md |
-docs/design/supervisor-lifecycle/notification-route.md | docs/design/supervisor-lifecycle/ask-push.md |
-docs/design/supervisor-lifecycle/cmux-notify.md | docs/design/supervisor-lifecycle/ask-push.md |
-docs/design/supervisor-lifecycle/naming.md | docs/design/supervisor-lifecycle/headless-worker.md |
-docs/design/supervisor-lifecycle/run-workspaces.md | docs/design/supervisor-lifecycle/cleanup-and-recovery.md |
-docs/design/supervisor-lifecycle/session-prompts.md | docs/design/supervisor-lifecycle/roles.md |
-docs/design/supervisor-lifecycle/worker-question-answer.md | docs/design/supervisor-lifecycle/receipt-and-session-exit.md |
-docs/design/supervisor-lifecycle/silent-wrapper.md | docs/design/supervisor-lifecycle/receipt-and-session-exit.md |
-docs/design/supervisor-lifecycle/first-commit.md | the doc comment of watch_first_commit in src/application/supervise/session.rs |
-docs/design/supervisor-lifecycle/worktree-read-only-git.md | the doc comments of GitRepository in src/infrastructure/adapters.rs |
-docs/design/slow-tests.md | docs/development/testing.md and the headers of scripts/slow-tests.sh and scripts/check-it-test-time.sh |
-docs/design/stress-ci.md | docs/development/testing.md and the headers of .github/workflows/stress.yml and scripts/stress-recent-tests.sh |
-docs/design/linux-ci.md | docs/development/testing.md and the comments of .github/workflows/ci.yml |
-docs/design/ci-failure-issues.md | docs/development/testing.md and the header of .github/workflows/ci-failure.yml |
-docs/design/test-fixtures.md | docs/development/testing.md and the doc comment of tests/common/template.rs |
-docs/design/supervisor-lifecycle/status.md | docs/design/supervisor-lifecycle/commands.md |
-docs/design/supervisor-lifecycle/events-watch.md | docs/design/supervisor-lifecycle/commands.md |
-docs/design/supervisor-lifecycle/doctor.md | docs/design/supervisor-lifecycle/commands.md |
-docs/design/supervisor-lifecycle/logs.md | docs/design/supervisor-lifecycle/commands.md |
-docs/design/supervisor-lifecycle/review-command.md | docs/design/supervisor-lifecycle/commands.md |
-docs/design/supervisor-lifecycle/recover.md | docs/design/supervisor-lifecycle/commands.md |
-docs/design/supervisor-lifecycle/rebind.md | docs/design/supervisor-lifecycle/commands.md |
-docs/design/supervisor-lifecycle/dependency-diagram.md | docs/design/supervisor-lifecycle/commands.md |
-docs/design/supervisor-lifecycle/conflict-thresholds.md | the doc comments by the definitions |
-docs/design/supervisor-lifecycle/stall-thresholds.md | the doc comments by the definitions |
+docs/design/supervisor-lifecycle/task-hold.md | docs/plans/task-hold.md | final
+docs/design/supervisor-lifecycle/task-replanning.md | docs/plans/task-replanning.md | final
+docs/design/manual-smoke.md | docs/development/manual-smoke.md (the procedures) and docs/plans/manual-smoke-results.md (the dated results) | final
+docs/design/supervisor-lifecycle/kpi.md | docs/design/supervisor-lifecycle/commands.md and the doc comments of domain::kpi | final
+docs/design/supervisor-lifecycle/stats.md | docs/design/supervisor-lifecycle/commands.md and the doc comments of domain::stats | final
+docs/design/supervisor-lifecycle/marks.md | docs/design/supervisor-lifecycle/commands.md and the doc comments of domain::marks | final
+docs/design/supervisor-lifecycle/report.md | docs/design/supervisor-lifecycle/commands.md and the doc comments of domain::kpi::report and application::report | final
+docs/design/supervisor-lifecycle/timeline.md | docs/design/supervisor-lifecycle/commands.md and the doc comments of domain::timeline | final
+docs/design/supervisor-lifecycle/prompt-waiting.md | docs/adr/2026-10-03-t1433-2-abolish-the-interactive-route.md | final
+docs/design/supervisor-lifecycle/session-send.md | docs/design/authorization.md | final
+docs/design/supervisor-lifecycle/implementation-status.md | docs/design/supervisor-lifecycle/receipt-and-session-exit.md | final
+docs/design/supervisor-lifecycle/notification-route.md | docs/design/supervisor-lifecycle/ask-push.md | final
+docs/design/supervisor-lifecycle/cmux-notify.md | docs/design/supervisor-lifecycle/ask-push.md | final
+docs/design/supervisor-lifecycle/naming.md | docs/design/supervisor-lifecycle/headless-worker.md | final
+docs/design/supervisor-lifecycle/run-workspaces.md | docs/design/supervisor-lifecycle/cleanup-and-recovery.md | final
+docs/design/supervisor-lifecycle/session-prompts.md | docs/design/supervisor-lifecycle/roles.md | final
+docs/design/supervisor-lifecycle/worker-question-answer.md | docs/design/supervisor-lifecycle/receipt-and-session-exit.md | final
+docs/design/supervisor-lifecycle/silent-wrapper.md | docs/design/supervisor-lifecycle/receipt-and-session-exit.md | final
+docs/design/supervisor-lifecycle/first-commit.md | the doc comment of watch_first_commit in src/application/supervise/session.rs | final
+docs/design/supervisor-lifecycle/worktree-read-only-git.md | the doc comments of GitRepository in src/infrastructure/adapters.rs | final
+docs/design/slow-tests.md | docs/development/testing.md and the headers of scripts/slow-tests.sh and scripts/check-it-test-time.sh | final
+docs/design/stress-ci.md | docs/development/testing.md and the headers of .github/workflows/stress.yml and scripts/stress-recent-tests.sh | final
+docs/design/linux-ci.md | docs/development/testing.md and the comments of .github/workflows/ci.yml | final
+docs/design/ci-failure-issues.md | docs/development/testing.md and the header of .github/workflows/ci-failure.yml | final
+docs/design/test-fixtures.md | docs/development/testing.md and the doc comment of tests/common/template.rs | final
+docs/design/supervisor-lifecycle/status.md | docs/design/supervisor-lifecycle/commands.md | final
+docs/design/supervisor-lifecycle/events-watch.md | docs/design/supervisor-lifecycle/commands.md | final
+docs/design/supervisor-lifecycle/doctor.md | docs/design/supervisor-lifecycle/commands.md | final
+docs/design/supervisor-lifecycle/logs.md | docs/design/supervisor-lifecycle/commands.md | final
+docs/design/supervisor-lifecycle/review-command.md | docs/design/supervisor-lifecycle/commands.md | final
+docs/design/supervisor-lifecycle/recover.md | docs/design/supervisor-lifecycle/commands.md | final
+docs/design/supervisor-lifecycle/rebind.md | docs/design/supervisor-lifecycle/commands.md | final
+docs/design/supervisor-lifecycle/dependency-diagram.md | docs/design/supervisor-lifecycle/commands.md | final
+docs/design/supervisor-lifecycle/conflict-thresholds.md | the doc comments by the definitions | final
+docs/design/supervisor-lifecycle/stall-thresholds.md | the doc comments by the definitions | final
 EOF
 )
 
