@@ -136,12 +136,17 @@ pub struct EventActor {
 
 /// Which run events `events` reads (ADR-0044 decision 22): every field
 /// that is set narrows them. `since` / `until` are queue timestamps
-/// (`since <= created_at < until`).
+/// (`since <= created_at < until`). Without `kinds` and without `--all`,
+/// `events` sets `kinds` to the attention kinds, so the other fields narrow
+/// the attention events only.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EventFilter {
+    /// These kinds, attention or not.
     pub kinds: Option<Vec<String>>,
+    /// The run's events and those naming it as their `source_run_id`.
     pub run: Option<RunId>,
     pub task: Option<TaskId>,
+    /// The goal's events and those of its tasks and their runs.
     pub goal: Option<GoalId>,
     pub since: Option<String>,
     pub until: Option<String>,

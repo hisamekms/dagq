@@ -1,7 +1,7 @@
 ---
 id: design-supervisor-lifecycle-commands
 type: design
-title: コマンドをまたぐ約束（計測・recover・rebind・graph）
+title: コマンド（計測・status・events・watch・doctor・review・log・recover・rebind・graph）をまたぐ約束
 status: current
 created: 2026-10-13
 scope: runtime
@@ -14,11 +14,12 @@ related:
   - adr-0020
   - adr-0054
   - adr-0077
+  - adr-0033
 ---
 
 # コマンドをまたぐ約束
 
-記録から値を導いて返すコマンド（`stats`・`kpi`・`mark` / `marks`・`report`・`timeline`）と、`recover`・`rebind`・`graph`の依存図をまたぐ約束と、各コマンドのコードの入口の地図。
+記録から値を導いて返す計測のコマンド（`stats`・`kpi`・`mark` / `marks`・`report`・`timeline`）と、queueの今を見せるコマンド（`status`・`events`・`watch`・`doctor`・`review`）とprocessのlog、`recover`・`rebind`・`graph`の依存図をまたぐ約束と、各コマンドのコードの入口の地図。
 各コマンドの引数と出力の欄は`--help`と定義のそばのdoc comment、記録のモデルと台帳は[計測](../measurement.md)、決めた理由はリンクしたADRが持つ。
 
 ## 入口
@@ -30,6 +31,12 @@ related:
 | `mark` / `marks` | `domain::marks`のmodule doc、`application::marks` |
 | `report` | `domain::kpi::report`、`application::report`、supervisorの日次は`application::supervise::report` |
 | `timeline` | `domain::timeline`、`compose::observation::timeline` |
+| `status` | `application::health`の`status`とattentionの導出`attention`、`compose::OneShot::status_of` |
+| `doctor` | `application::health`の`doctor`、`compose::OneShot::doctor` |
+| `events` | `application::watch::events_in`、`domain::views::EventFilter`、`domain::event_attention` |
+| `watch` | `application::watch::watch`、`compose::watch_in`、inboxのwatcherの判定は`application::inbox_watcher` |
+| `review` | `application::review::review`、`compose::review` |
+| log | `infrastructure::telemetry`のmodule doc、`main`の`install_telemetry` |
 | `recover` | `application::health::recover`、`RunRecovery::recover_run` |
 | `rebind` | `application::rebind::rebind`、`compose::OneShot::rebind` |
 | `graph --format d2\|svg` | `application::diagram`のmodule doc、`application::queue_reads::planning::graph_diagram`、`infrastructure::d2` |
@@ -54,6 +61,29 @@ related:
 - KPIの目標の判定は`kpi`・レポート・push・observerが同じ設定（`dagq.toml`の`[kpi]`にhost.tomlを重ねたもの、`infrastructure::kpi_config`）から同じ関数で読む。
 - runのareaは保存せず、`stats`と`kpi`が読むたびに着地したcommitの差分を`dagq.toml`の`[areas]`に通して求めるので、`[areas]`を直せば過去のrunも分類し直され、`[areas]`が壊れていれば両方とも止まる。
 - dagqのソースでないrepositoryのqueueでは、cargo専用の計測をどのコマンドも出さない（[Source repository](source-repository.md#cargo専用の計測)）。
+
+## 表示とreviewのコマンドをまたぐ約束
+
+- `status`・`doctor`・`events`・`watch`はqueueを読み取り専用で開き、`review`もqueueを読むだけで、どれもqueueの状態もeventも変えない。
+  `watch --role inbox`が書くwatcherの生存の記録はqueueの外のファイルに置く。
+- inboxのwatcherが居るかは、`status`・`doctor`・pluginのStop hook・supervisorのinboxへの知らせが同じ判定（`application::inbox_watcher::judge_with`）で読む。
+- `status`・`doctor --full`・`watch`のsupervisorの項目は同じ基礎の情報（`application::health::SupervisorHealth`）から作り、`status`はそれにslotと待ちと控えの欄を足す。
+  `status`と`doctor`は一覧に並べるrunを同じ選び方で選ぶ。
+  その選び方は表示のためだけのもので、自動の復旧・adopt・`stats`は使わない。
+- 表示のコマンドはstaleな登録とleaseを報告するだけで消さない。
+- attentionは全てinbox宛てで、plannerはattentionを受けない。
+- `events`と`watch`は1つのeventの判定を返し、`status`は今の状態から判定するので、両者が食い違うときは`status`の判定を正とする。
+- `status`の`cursor`は状態を読む前に取るので、`watch --after <cursor>`はその後の遷移を取りこぼさない（重複はありうる）。
+- 知らせるだけのattentionはaskにならず、claimと着地を止めない。
+- 読む側はこのbinaryの知らないkindのeventを落とさずに読み、attentionにもclaimの保留にもしない。
+- `review`は資料をファイルに書いてpathと差分の大きさだけを返し、呼んだsessionはpathをsubagentに渡して差分の全文を自分のcontextで読まない。
+
+## log
+
+- runtimeの進行と診断は`tracing`の1系統で出す（[ADR-0033](../../adr/0033-one-tracing-pipeline-with-local-json-lines-and-optional-otlp.md)）。
+- 常駐・着地・jobのprocessと、queueがあるときの`up`・`down`・`rebind`はprocessごとのJSON Linesのファイルに書き、ほかのコマンドはstderrだけに出す。
+- logのファイルが開けない・書けないときもprocessは止めず、stderrだけで続ける。
+- 古いlogのファイルは、次にファイルを開くprocessが日数で消し、生きているprocessのファイルとruntimeが書かない名前のファイルは消さない。
 
 ## 復旧と束縛と依存図のコマンドをまたぐ約束
 

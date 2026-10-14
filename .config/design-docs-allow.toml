@@ -104,19 +104,10 @@ line = 3087
 tasks = 23
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/doctor.md"
-tasks = 3
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/draft-planners.md"
 size = 48695
 line = 4938
 tasks = 25
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/events-watch.md"
-line = 9002
-tasks = 23
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/finding-planners.md"
@@ -176,11 +167,6 @@ path = "docs/design/supervisor-lifecycle/language.md"
 tasks = 5
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/logs.md"
-line = 3447
-tasks = 2
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/needs-session.md"
 line = 3353
 tasks = 15
@@ -223,10 +209,6 @@ line = 1661
 tasks = 2
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/review-command.md"
-line = 1604
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/roles.md"
 line = 1752
 tasks = 18
@@ -254,11 +236,6 @@ line = 1174
 [[doc]]
 path = "docs/design/supervisor-lifecycle/stall-thresholds.md"
 tasks = 13
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/status.md"
-size = 32873
-line = 8523
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/supervise.md"

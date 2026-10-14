@@ -106,7 +106,9 @@ related:
 - やり直しが通れば次のコマンドへ進み、全部通れば着地する
 - やり直しがコードの分類で落ちたら、そのやり直しの結果で上と同じ`verification_failed`の`needs_session`にする（`last_error`はやり直しのlogを指す）
 - やり直しもhostの分類で落ちたら（と`disk_full`で容量が足りないとき）、runをresumeせずに`awaiting_integration`に戻す（`hold_integration`。`integration_held`イベント（code `verification_environment`、`index`、`main`、`head`、`command`、`exit_code`、`signal`、やり直しの`failure`と`log_path`、`retried`、最初の失敗の`first_failure`と`first_log_path`（やり直さなかったときはnull）、`disk`（容量不足のときだけ）、`status: awaiting_integration`、`reason`）と`lease_released`を記録してleaseとslotを返す）。`last_error`は`verification command "<command>" failed on the host after the rebase onto <main> (<class>: <evidence>); see <logs>. <hostを直す手がかり>, then land it with dagq integrate <task>; no session is resumed`。`needs_session`にしないのでresumeの回数（`resume_started`）は使わない
-- holdしたrunはleaseの無い`awaiting_integration`なので、inboxのattention（`next`は`review and integrate`、`kind`は`integration_held`、`last_error_code`は`verification_environment`）に1件出る（[`status`](status.md)の`run_attention`）。人がhostを直して（空き容量を空ける、負荷を下げる）`dagq integrate <task>`を打てば、新しい試行で検証からやり直す。supervisorはleaseの無い`awaiting_integration`のrunを自分では着地させない（ただし着地の後のlanding recheckはholdしたrunも確かめ、衝突かコードの分類の失敗なら`needs_session`、hostの分類の失敗なら控えたまま。[Landing recheck](landing-recheck.md)）
+- holdしたrunはleaseの無い`awaiting_integration`なので、inboxのattention（`next`は`review and integrate`、`kind`は`integration_held`、`last_error_code`は`verification_environment`）に1件出る（`domain::run_attention`）。
+  人がhostを直して（空き容量を空ける、負荷を下げる）`dagq integrate <task>`を打てば、新しい試行で検証からやり直す。
+  supervisorはleaseの無い`awaiting_integration`のrunを自分では着地させない（ただし着地の後のlanding recheckはholdしたrunも確かめ、衝突かコードの分類の失敗なら`needs_session`、hostの分類の失敗なら控えたまま。[Landing recheck](landing-recheck.md)）
 - 分類の集合（`disk_full`・`killed`・`timeout`）は人の判断なしに広げない（ADR-t639-1）
 
 **言語・道具の失敗の印**: Rustのprofileが読む印の一覧とnextestの失敗のstatusの集合は、その定義のそばのdoc comment（`domain::toolchain::rust`）が持つ。

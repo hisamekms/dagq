@@ -94,7 +94,10 @@ jobsを読めない実行の`ci_check_failed`は上の「実行の扱い」（`a
 
 - **`up`のpreflight**: `[ci_watch]`があれば、`[run.env]`の検査の後に`up`のPATHで上の「読む手段の確かめ」を行い（`lifecycle::Ports::ci_watch_preflight`、実装は`infrastructure::ci_watch::preflight`）、だめならsupervisorを起動せず、理由と対処（`gh`を入れる・`gh auth login`・remoteを直す、または`dagq.toml`から`[ci_watch]`を外すtaskを登録する）を挙げ`; the supervisor was not started`で終わるerrorで止まる。
 - **supervisor**: 確かめるたびに答えを見て、`[ci_watch]`があり、このプロセスがまだ答えを持たないか最後の答えがだめな間（`ci.held()`）は、各fill passのclaimをせず、reviewを通ったrunは着地slotを取らずに`awaiting_integration`で待たせ（`Phase::AwaitingSlot`。着地の列のrunの`start_approved_landings`も待つ）、drain・handoff・claimの停止の最中なら、最後の答えがだめなとき（`ci.unreadable()`）だけleaseを返す（理由`the CI [ci_watch] watches cannot be read`。最初の答えを待っている間は返さずに待つ）。どれも`[run.env]`のプログラムが見つからないとき（「着地の保留」）と同じで、走っているrun・review・triage・始まった着地・始まったresumeは止めず、新しいresumeは始めない。一覧はそのまま（最後に記録した状態）で読まれ続ける。戻れば`ci_watch_available`を記録して次のpassからclaimと着地を再開する。
-- **attention**: `ci_watch_unavailable`はinbox宛てのattentionで（`domain::event_attention`の`ATTENTION_KINDS`に足す。[`events` / `watch`](events-watch.md)）、`watch`はこのeventで起き、`ci_watch_available`では起きない。`next`は`reason`が`gh_missing`なら`install tool`、`gh_unauthenticated`なら`log in to gh`、`not_github`なら`fix dagq.toml`（後の2つは`AttentionNext`に足す）。`status`は最新が`ci_watch_unavailable`の間`kind: ci_watch_unavailable`、`status: unavailable`、その`next`、`last_error`に`message`を出す（`run_id` / `task_id`はnull。`run_env_program_missing`の`status: missing`の行と同じ形、[`status`](status.md)）。`ci_watch_available`で消える。
+- **attention**: `ci_watch_unavailable`はinbox宛てのattentionで（`domain::event_attention`の`ATTENTION_KINDS`に足す）、`watch`はこのeventで起き、`ci_watch_available`では起きない。
+  `next`は`reason`が`gh_missing`なら`install tool`、`gh_unauthenticated`なら`log in to gh`、`not_github`なら`fix dagq.toml`（後の2つは`AttentionNext`に足す）。
+  `status`は最新が`ci_watch_unavailable`の間`kind: ci_watch_unavailable`、`status: unavailable`、その`next`、`last_error`に`message`を出す（`run_id` / `task_id`はnull。`run_env_program_missing`の`status: missing`の行と同じ形、[`status`](commands.md)）。
+  `ci_watch_available`で消える。
 - **保留の記録**: `ci_watch_unavailable` / `ci_watch_available`はqueueの答えで、supervisorが保留していることは示さないので、supervisorは保留に入ったとき・理由が変わったとき・抜けたときだけ`ci_watch_held` / `ci_watch_resumed`を記録する（`domain::claim_hold::OwnHold`）。
   各supervisorは自分の最新の記録と比べ、passごとには記録せず、`[ci_watch]`の無いsupervisorは記録しない。
   `ci_check_failed`はこの保留の始まりと終わりではない。
@@ -196,8 +199,8 @@ eventの種類にはmigrationが要らないが（上の「eventの種類と欄�
 | `[ci_watch]` | [Run environment](run-environment.md)、[`supervise`](supervise.md)（passごとの読み直しとclaim・着地の保留） |
 | `dagq ci failures`（新しい読むコマンド） | [domain-model](../domain-model.md)の「Current operations」、[Authorization](../authorization.md)の「Policy」と「ほかのコマンド」（`ci.read`。workerとjobには許さない）と[Security](../security.md)、[Queue service](../queue-service.md)の「まだ無いもの」、pluginのdagqの`reference/inspect.md`と`reference/authority.md`（documents.mdの「権限の表を写す文書」） |
 | `finding dismiss --covered-by`・`covered_by_task` | [domain-model](../domain-model.md)の`finding dismiss`、[Queue service](../queue-service.md)の`finding_dismiss`（引数`covered_by`）、[Authorization](../authorization.md)（capabilityは`finding.dismiss`のままで、表は変えない）、[persistence](../persistence.md)の「findings」、pluginの`dagq-planner`の`SKILL.md`と`reference/register.md`の`finding dismiss`の書き方 |
-| `status`の`ci`、attention `ci_watch_unavailable`・`ci_jobs_missing`と`next`の値 | [`status`](status.md)、[`events` / `watch`](events-watch.md)、pluginの`dagq-inbox`の`reference/status.md`（`next`の手当て: `log in to gh`は人が`gh auth login`を打つ） |
-| `doctor`の`ci_watch` | [`doctor`](doctor.md)、pluginの`dagq-recover`の`reference/doctor.md` |
+| `status`の`ci`、attention `ci_watch_unavailable`・`ci_jobs_missing`と`next`の値 | `domain::event_attention`と`application::health`の`attention`、pluginの`dagq-inbox`の`reference/status.md`（`next`の手当て: `log in to gh`は人が`gh auth login`を打つ） |
+| `doctor`の`ci_watch` | `application::ci_watch::doctor`、pluginの`dagq-recover`の`reference/doctor.md` |
 | `up`のpreflightの`gh` | [`up` / `down`](up-down.md)、pluginの`dagq-recover`の`reference/up-down.md` |
 | eventの種類（`ci_checked`ほか） | `domain::event_kind`（`is_queue`）だけ（migrationは要らない） |
 | 着地の検証のコマンドに渡す一覧のenv（段3b。名前は`domain::landing_verification`） | [integrate](integrate.md)の着地の検証の置き換え、[Validation](validation.md#着地の検証)、[Run environment](run-environment.md)の`[landing_verification]`の項 |

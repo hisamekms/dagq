@@ -18,8 +18,7 @@ related:
   - design-security
   - design-authorization
   - design-persistence
-  - design-supervisor-lifecycle-status
-  - design-supervisor-lifecycle-doctor
+  - design-supervisor-lifecycle-commands
 ---
 
 # Queue service

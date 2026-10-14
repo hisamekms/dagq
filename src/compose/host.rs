@@ -336,7 +336,10 @@ pub const COMMAND_TARGET: &str = "dagq::telemetry::command";
 /// Record what `rebind`, `up` or `down` did through tracing (ADR-0033
 /// decision 2), next to `rebind.jsonl`, which `rebind` keeps writing: its
 /// `outcome` (for `up`, the supervisor's and the inbox's) and its whole
-/// report as JSON, or the error that stopped it.
+/// report as JSON, or the error that stopped it (a refused `rebind` too).
+/// A failure before the use case (opening the queue, inspecting the
+/// repository, `up`'s compatible migration) returns early, leaving only
+/// the `dagq::telemetry::exit` record `main` writes.
 fn trace_command(command: &str, result: &Result<Value>) {
     match result {
         Ok(report) => {

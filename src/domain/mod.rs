@@ -2541,6 +2541,22 @@ pub fn abandon_left_session_open(kind: &str, payload: &serde_json::Value) -> boo
 /// <reason>`, [`LandingAnswer`], for a run awaiting integration) is not one either, nor that of the recovery job's `decide`
 /// ask (`runtime_delivers: true`: one of the ask's options, [`TRIAGE_OPTIONS`]
 /// or the job's own, for a `failed` or `interrupted` run).
+/// `integration_retried` is not one: the landing verifies once more by
+/// itself. Neither are the supervisor's holds of its claims (`claim_held`,
+/// `ci_watch_held`, `landing_branch_unresolved` and their ends), which
+/// `candidates` shows as `held` and `status` on the supervisor's item as
+/// `claim_hold`, `ci_watch_hold` and `landing_branch_hold`: the cause a
+/// person acts on is its own attention (`ci_watch_unavailable`,
+/// `run_env_program_missing`).
+/// A kind this binary does not know is none, and its readers keep it.
+///
+/// This judges one event as it was written; whether the attention still
+/// stands now is `status`'s judgment of the queue
+/// (`application::health::attention`), and where the two differ `status`'s
+/// holds. An abandon after a validation (the session's wrapper could not be
+/// stopped) writes a `runtime_error` with `lease_released: true` though the
+/// run reached `awaiting_integration`: this says `recover run`, `status`
+/// says `review and integrate`.
 pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<AttentionNext> {
     let status = payload
         .get("status")
@@ -2558,11 +2574,15 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         // The supervisor triages a failed run and acts on the verdict
         // (ADR-0024 decision 3); only a triage that failed is a person's.
         // One whose provider could not be used starts again on the other
-        // provider by itself (ADR-t1063-1 decision 4, task 1225).
+        // provider by itself (ADR-t1063-1 decision 4, task 1225), or, with
+        // `[provider_fallback] jobs = false`, on the same one once its hold
+        // ends.
         ("triage_failed", _) if payload.get("provider_unusable").is_some() => None,
         ("triage_failed", _) => Some(AttentionNext::TriageByHand),
         // The recovery job of a live session's alert failed (ADR-0047
-        // decision 40): the session is a person's to recover by hand.
+        // decision 40): the session is a person's to recover by hand. Only
+        // past records hold it: the runtime now opens the alert's ask when
+        // the job fails, whose `ask_opened` is the attention.
         ("recovery_failed", _) => Some(AttentionNext::RecoverByHand),
         // The supervisor reviews a submitted proposal and acts on the
         // verdict (ADR-0041 decision 11); only a plan review that failed

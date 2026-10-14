@@ -269,6 +269,8 @@ pub fn timeline_in(
 #[derive(Debug, Clone)]
 pub struct WatchOptions {
     /// Cursor to wait past; `None` is the newest event when `watch` starts.
+    /// It is a `run_events` id whatever the role, so watches of different
+    /// roles may share it.
     pub after: Option<EventId>,
     /// How long to wait before returning with no events; `None`
     /// (`--until-attention`) waits until something comes, however long.

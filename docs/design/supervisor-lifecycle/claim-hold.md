@@ -10,7 +10,6 @@ related:
   - adr-t1591-1
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-supervise
-  - design-supervisor-lifecycle-status
   - design-supervisor-lifecycle-commands
   - design-supervisor-lifecycle-observer
   - design-supervisor-lifecycle-backend-call-failures
@@ -52,7 +51,8 @@ loadの保留が有効なsupervisorは、新しいclaimの間を空ける（[ADR
 - **設定**: `dagq.toml`の`[supervisor] claim_spacing`（0以上の整数の秒、既定180。`domain::claim_spacing::DEFAULT_CLAIM_SPACING_SECS`）。`parallel`と同じく起動時に読み、各passで読み直す（`ClaimState::reread_limits`、[Run environment](run-environment.md)の`[supervisor]`）。CLIのflagは無い。この repositoryの`dagq.toml`には置かない（既定が効き、`claim_spacing`を知らない固定バイナリは置くと`dagq.toml`を読めなくなる）。
 - **既定180秒の根拠**: 固定バイナリの読み取り専用のeventsとqueueのdirの`host/metrics-*.csv`で、2026-10-01〜02の`run_claimed`を「10秒以内に続いたclaimの組」で分けると、1本だけのclaim（91組）はclaim時のloadの中央値9.8・その後6分のload1の最大の中央値17.7（16を越えたのは48組）、2本続けたclaim（10組）はclaim時7.35・6分の最大の中央値26.9（16を越えたのは9組）。2026-09-30 00:57:32にtask 1165・1050・1058をload 5.8で1秒以内に、02:08:12に1166・1167・1110を2秒以内にclaimし、load1は01:10までに48に達した。claimの後2分でcargoとrustcのCPUが300〜600%に上がり、load1は2分後にはもう上がっている（10-01 16:43:12の2本は2分後に59、10-02 14:51:18の2本はload 15.3でclaimして2分後に33）。claimから約2分でload1に出るので、それに1分の余裕を足した。
 - **記録**: 間隔のための待ちは`claim_held` / `claim_resumed`にしない（observerと`stats`の`claim_holds`の控えの数え方に混ぜない）。待ち始めたときにlogにinfo（`claim_spaced`）を出す。間隔が効いているsupervisorの`run_claimed`のpayloadには、`claim_spacing`（秒）と`claim_spacing_wait_secs`（このprocessが間隔のためにそのclaimを待った秒。待たなければ0）が付く（`domain::measure::ClaimSpacing`）。待ちは、claimできる候補と空きslotがあるのに間隔で抜けた最初のpassから、claimしたpassまで。控え・空きslotが無い・候補が無いpassを挟むとそこで終わる。間隔の効いていないclaimには2つの欄が無い。
-- **登録と`status`**: supervisorは登録に`claim_spacing`と出どころ（`claim_spacing_source`）を`parallel`と一緒に書き、`--max-load`（無効ならNULL）を起動時に書く（migration 0063）。`status`のsupervisorの項目の`claim_spacing`がそれと次にclaimできる時刻を出す（[`status`](status.md)）。
+- **登録と`status`**: supervisorは登録に`claim_spacing`と出どころ（`claim_spacing_source`）を`parallel`と一緒に書き、`--max-load`（無効ならNULL）を起動時に書く（migration 0063）。
+  `status`のsupervisorの項目の`claim_spacing`がそれと次にclaimできる時刻を出す（[`status`](commands.md)）。
 - `--once`のsupervisorは、runが無く次のclaimが間隔を待つpassで終わる（控えと同じ扱い）。
 
 ## 着地待ちが空けた軽い枠
@@ -68,7 +68,8 @@ reviewとe2eを終えて着地の順番を待つだけのrun（着地待ち）�
   `slots`はclaimの前の`used_slots()`（着地待ちを含む）。
   着地待ちに出入りするeventは無い。
 - **設定**: `dagq.toml`の`[supervisor] light_changes`（[Run environment](run-environment.md)の`[supervisor]`）。各passで読み直し、変わったら`supervisor_config_changed`の`from` / `to`の`light_changes`に記録する。flagは無く、全てのflagを与えたsupervisorも読む。
-- **見え方**: `status`のsupervisorの`slots.landing_queue`とrunの`progress.slot: landing_queue`（[`status`](status.md)）。`stats`の`idle_slots`の空きと`kpi`の`slot_usage`は軽い枠を数えない（着地待ちを含めて数える今のまま）。
+- **見え方**: `status`のsupervisorの`slots.landing_queue`とrunの`progress.slot: landing_queue`（[`status`](commands.md)）。
+  `stats`の`idle_slots`の空きと`kpi`の`slot_usage`は軽い枠を数えない（着地待ちを含めて数える今のまま）。
 - test: `src/domain/light_slots.rs`のunit test（`light_changes`の検査・`admits`・`claim_room`・戻り待ちとresumeが通常の枠を待つこと・`gated`がloadの控えと間隔を軽い枠にも当てること）、`tests/it/runtime_light_slots.rs`（`light_changes = ["docs"]`・`parallel` 1で、着地待ちのrunが枠を埋めたとき`--paths`を宣言したdocsのtaskはclaimされ、interruptのfeatureと`--paths`の無いdocsのtaskはclaimされない。`a_parked_run_waits_for_a_normal_slot_while_the_landing_queue_fills_it`は、着地待ちが枠を埋めるあいだ`needs_session`のrunをresumeせずに軽いtaskだけをclaimし、枠が空くとinterruptのtaskのclaimより先にresumeすること）。
 
 ## 調査中の計画の上限
@@ -98,7 +99,8 @@ supervisorのlogにも`claim_held`はwarn、`claim_resumed`はinfoで出る。
 
 ## `status`と`stats`
 
-- `status`: 最新の`claim_held` / `claim_resumed`が`claim_held`なら、その`supervisor`の登録の項目に`claim_hold`（`claim_held`のpayloadと`since`（記録の時刻））を付ける（[`status`](status.md)）。着地の検証の控えは同じ形の`landing_hold`
+- `status`: 最新の`claim_held` / `claim_resumed`が`claim_held`なら、その`supervisor`の登録の項目に`claim_hold`（`claim_held`のpayloadと`since`（記録の時刻））を付ける（[`status`](commands.md)）。
+  着地の検証の控えは同じ形の`landing_hold`
 - `stats`: `claim_holds`に、windowの中で始まった控えの`count`と`secs`（合計秒）、理由ごとの`by_reason: {<reason>: {count, secs}}`、今の控え`held`（`{reason, supervisor, since, value, threshold}`、無ければnull）を出す。
   控えは次の`claim_held` / `claim_resumed`か、同じsupervisorの`supervisor_stopped`で終わり、まだ終わっていない控えとwindowの後に終わった控えはwindowの終わりまでを数える。
   `--goal`では件数を数えない（taskを持たないため）が、`held`は出す。

@@ -91,7 +91,10 @@ pub(super) fn inbox_nudge_pass(
 
 /// Record the watcher's state unless the latest record holds it: the
 /// queue's write transaction compares, so a second supervisor and the
-/// process after an exec do not record the same change again.
+/// process after an exec do not record the same change again. The record
+/// files are pruned after a week and `kpi` reads only `run_events`, so the
+/// changes live in the queue, for `ask_seen_wait`; neither kind is an
+/// attention. A queue with neither records the first judgment as it is.
 fn record_watcher_change(
     queue: &(impl InboxWatchLog + ?Sized),
     watcher: &InboxWatcher,

@@ -35,7 +35,7 @@ supervisor・queue service・observerは知らせず、askを開く経路（`ask
   `watch`はqueueを読むだけで、`integrate`などの操作を呼ばない。
 
 通知は人への知らせで、inboxのClaudeのsessionを起こさない（sessionはwatchの返りで起きる）。
-watchが張られていないあいだは通知も出ないので、その後ろ盾は[ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)の層が持つ: watcherの記録（[`events` / `watch`](events-watch.md#inboxのwatcherの記録adr-t906-1)）、pluginのSessionStart / Stop hook（[plugin integration](../plugin-integration.md)）、watcherが居ないまま閾値を超えてaskが待つときのsupervisorの`inbox_nudged`と`[push]`（下の「supervisorによるinboxへの知らせ」）。
+watchが張られていないあいだは通知も出ないので、その後ろ盾は[ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)の層が持つ: watcherの記録（[`events` / `watch`](commands.md)）、pluginのSessionStart / Stop hook（[plugin integration](../plugin-integration.md)）、watcherが居ないまま閾値を超えてaskが待つときのsupervisorの`inbox_nudged`と`[push]`（下の「supervisorによるinboxへの知らせ」）。
 supervisorはinboxの画面を読まず、どのterminalにも打ち込まない。
 
 ## supervisorによるinboxへの知らせ<a id="supervisorによるinboxへの知らせ"></a>

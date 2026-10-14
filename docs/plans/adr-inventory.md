@@ -96,7 +96,7 @@ related:
 | 箇条3 `supervise --parallel N`の常駐ループ、`--once`、signal | 有効（一部上書き） | ADR-0027 決定1 | 「`awaiting_integration`になったrunのleaseを解放する」は、reviewの後までleaseとslotを持つに変わった | [supervise](../design/supervisor-lifecycle/supervise.md)・[review](../design/supervisor-lifecycle/review.md) |
 | 箇条4 1 runのruntime error（exit要求のtimeoutを含む）はそのrunだけをabandonしleaseを削除する | 上書き | ADR-0019 決定2 | `exit_request_timed_out`ではleaseを手放さない。ほかのruntime errorのabandonは有効 | [abandon](../design/supervisor-lifecycle/abandon.md)・[receipt-and-session-exit](../design/supervisor-lifecycle/receipt-and-session-exit.md) |
 | 箇条5 provisioningの失敗でclaimを止めdrainして非0で終わる | 有効 | — | | [supervise](../design/supervisor-lifecycle/supervise.md) |
-| 箇条6 `doctor` / `recover`はrunごとに判定する | 有効 | — | ADR-0041 決定3でwrapperの死んだrunの`recover`はsupervisorが自動で行うようになったが、判定の単位は変わらない | [doctor](../design/supervisor-lifecycle/doctor.md)・[recover](../design/supervisor-lifecycle/commands.md) |
+| 箇条6 `doctor` / `recover`はrunごとに判定する | 有効 | — | ADR-0041 決定3でwrapperの死んだrunの`recover`はsupervisorが自動で行うようになったが、判定の単位は変わらない | [doctor](../design/supervisor-lifecycle/commands.md)・[recover](../design/supervisor-lifecycle/commands.md) |
 
 ### ADR-0008 merge queueが最新mainへrebase・再検証し、1 task = 1 commitにsquashして着地させる
 
@@ -141,7 +141,7 @@ goal 1で実装済みのため、最初の棚卸しで`status: accepted`にし�
 | 3 `down`（bootout・drain、`--wait`、`--force`）、maintainer workspaceは閉じない | 有効（読み替え） | — | `down`はinboxとplannerを閉じない（AGENTS.md） | [up-down](../design/supervisor-lifecycle/up-down.md) |
 | 4 `up`はPIDの死んだ`supervisors`登録を消す（`up`だけの例外） | 有効 | — | ADR-0045 決定16も生きているが黙った登録はpruneしないとしており整合 | [up-down](../design/supervisor-lifecycle/up-down.md) |
 | 5 workspace名 `taskq <repo> maintainer` / `taskq <repo> <task-id> <run-id>` | 上書き | ADR-0011 決定3、ADR-0015、ADR-0018 決定1、ADR-0021 決定1、ADR-0028 決定1 | 今は`[<repo>]<role>` | naming |
-| 6 supervisorのlogを起動ごとに`<queue dir>/logs/supervisor-<started_at>.log`へ | 失効 | ADRなし（task 194、proposedの[ADR-0033](../adr/0033-one-tracing-pipeline-with-local-json-lines-and-optional-otlp.md)の実装） | 今は`logs/<process>-<YYYYMMDDTHHMMSSZ>-<pid>.jsonl`（[supervisor-lifecycle](../design/supervisor-lifecycle.md)）。queue dirの`logs/`に置くことと`locate`のlog dirは有効。下の「ADRの外で変わった実装」 | [logs](../design/supervisor-lifecycle/logs.md) |
+| 6 supervisorのlogを起動ごとに`<queue dir>/logs/supervisor-<started_at>.log`へ | 失効 | ADRなし（task 194、proposedの[ADR-0033](../adr/0033-one-tracing-pipeline-with-local-json-lines-and-optional-otlp.md)の実装） | 今は`logs/<process>-<YYYYMMDDTHHMMSSZ>-<pid>.jsonl`（[supervisor-lifecycle](../design/supervisor-lifecycle.md)）。queue dirの`logs/`に置くことと`locate`のlog dirは有効。下の「ADRの外で変わった実装」 | [logs](../design/supervisor-lifecycle/commands.md) |
 | 7 maintainerの初期promptはruntime生成、CLIの使い方はskill `taskq-maintain`、AGENTS.mdはrepository固有の注意だけ | 上書き | ADR-0041 決定1、ADR-0015（skill名）、ADR-0016 決定8、ADR-0022 | 初期promptは`inbox_prompt` / `planner_prompt`。「使い方はskill、AGENTS.mdは固有の注意」は有効 | session-prompts・[plugin-integration](../design/plugin-integration.md) |
 | 末尾 taskへの分割（T2・T3） | 記録 | — | 完了 | designに無い（一度きりの記録・制約、または文書運用の規則） |
 
@@ -191,13 +191,13 @@ goal 1で実装済みのため、最初の棚卸しで`status: accepted`にし�
 | 決定 | 現在 | 上書き | 根拠 | 今の姿（design） |
 | --- | --- | --- | --- | --- |
 | 原則 maintainerは使い捨て、runtimeは起き直しに要る情報を上限のある大きさで返す | 有効（読み替え） | ADR-0041 決定1 | 対象はinboxとplanner | notification-route・session-prompts |
-| 1 情報源は`status` / `watch` / `doctor`、`watch --after <cursor>` | 有効 | — | `--role`はADR-0022 決定1が足した | [events-watch](../design/supervisor-lifecycle/events-watch.md)・[doctor](../design/supervisor-lifecycle/doctor.md) |
-| 2 run_eventsのkind名は公開契約、attentionの判定はdomain、attentionの一覧 | 有効（一部上書き） | ADR-0040 決定2、ADR-0041 決定3・17 | `awaiting_integration`はreview job、`failed`はtriage jobに回り、attentionにならない。一覧はADR-0022・0025・0041が足した | [domain-model](../design/domain-model.md)・[status](../design/supervisor-lifecycle/status.md) |
+| 1 情報源は`status` / `watch` / `doctor`、`watch --after <cursor>` | 有効 | — | `--role`はADR-0022 決定1が足した | [events-watch](../design/supervisor-lifecycle/commands.md)・[doctor](../design/supervisor-lifecycle/commands.md) |
+| 2 run_eventsのkind名は公開契約、attentionの判定はdomain、attentionの一覧 | 有効（一部上書き） | ADR-0040 決定2、ADR-0041 決定3・17 | `awaiting_integration`はreview job、`failed`はtriage jobに回り、attentionにならない。一覧はADR-0022・0025・0041が足した | [domain-model](../design/domain-model.md)・[status](../design/supervisor-lifecycle/commands.md) |
 | 3 runtimeはmaintainerのterminalに打ち込まない | 上書き | ADR-0041 決定1・12・13 | maintainerは無い。plannerにはrevise・answerを送る | [plan-planners](../design/supervisor-lifecycle/plan-planners.md)・session-send |
 | 4 attentionのたびにmaintainer workspaceへ`cmux notify` | 上書き | ADR-0022 決定5 | `ask_opened`のときだけinbox宛て | [ask-push](../design/supervisor-lifecycle/ask-push.md) |
 | 5 `integrate`は自動で呼ばれない、着地の承認はユーザーに残す | 上書き | ADR-0022 決定3、ADR-0040 決定2 | review jobのpassでsupervisorが着地させる | [review](../design/supervisor-lifecycle/review.md)・[integrate](../design/supervisor-lifecycle/integrate.md) |
-| 6 既定は圧縮、`--full`でopt-in | 有効 | — | | [status](../design/supervisor-lifecycle/status.md)・[review-command](../design/supervisor-lifecycle/review-command.md) |
-| 7 `review ID`が`review.md`を書く | 有効 | — | review jobの入力（ADR-0040 決定2） | [review-command](../design/supervisor-lifecycle/review-command.md) |
+| 6 既定は圧縮、`--full`でopt-in | 有効 | — | | [status](../design/supervisor-lifecycle/commands.md)・[review-command](../design/supervisor-lifecycle/commands.md) |
+| 7 `review ID`が`review.md`を書く | 有効 | — | review jobの入力（ADR-0040 決定2） | [review-command](../design/supervisor-lifecycle/commands.md) |
 | 8 SessionStart hookは`DAGQ_ROLE=maintainer`のときだけ`status`、`dagq-maintain`の分割、`maintainer_prompt`の縮約 | 上書き | ADR-0041 決定1・6 | hookは`status --role <role>`（inbox / planner）。skillはinbox / planner / recoverに分かれた | [plugin-integration](../design/plugin-integration.md)・session-prompts |
 
 ### ADR-0017 runのpathをqueueディレクトリから解決する
@@ -259,7 +259,7 @@ ADR-0053へ置き換え済み（下の組Bの記録）。
 | 原則 runtimeはどのsessionにも打ち込まない、例外はworkerへのanswer | 上書き | ADR-0041 決定12・13 | plannerにもrevise・answerを送る。worker宛てにはresume・revise・rebaseの依頼（ADR-0019、ADR-0027）も送る | session-send・[plan-planners](../design/supervisor-lifecycle/plan-planners.md) |
 | 1 `asks`表、`ask` / `answer` / `asks`、一意性、`ask_opened` / `ask_answered` | 有効 | — | | [ask](../design/supervisor-lifecycle/ask.md) |
 | 1 `kind`は4つ | 上書き | ADR-0041 決定4・11・13、ADR-0043 決定3 | `blocked`・`approve_plan`・`planner_question`・`stalled`が足された | [ask](../design/supervisor-lifecycle/ask.md) |
-| 1 `watch --role maintainer`、`ask_answered`はmaintainer向け | 上書き | ADR-0041 決定6 | `--role maintainer`は無い。`ask_answered`はinbox | [events-watch](../design/supervisor-lifecycle/events-watch.md)・[status](../design/supervisor-lifecycle/status.md) |
+| 1 `watch --role maintainer`、`ask_answered`はmaintainer向け | 上書き | ADR-0041 決定6 | `--role maintainer`は無い。`ask_answered`はinbox | [events-watch](../design/supervisor-lifecycle/commands.md)・[status](../design/supervisor-lifecycle/commands.md) |
 | 2 workerは`worker_question`で聞いて止まり、answerはruntimeが送る | 有効 | — | | worker-question-answer |
 | 3 着地は疑義のあるときだけ人に聞く。maintainerが`integrate`を呼ぶ | 上書き | ADR-0040 決定2 | 疑義の観点は有効。判断はreview job、concernの`approve_landing`のanswerはsupervisorが適用する | [review](../design/supervisor-lifecycle/review.md) |
 | 4 `up`がinboxとplannerを開く、各役割の定義 | 上書き | ADR-0041 決定1・6 | `up`はinboxだけ（とsupervisor）。inboxの定義は有効 | [roles](../design/supervisor-lifecycle/roles.md)・[up-down](../design/supervisor-lifecycle/up-down.md)・[plan-planners](../design/supervisor-lifecycle/plan-planners.md) |
@@ -273,10 +273,10 @@ ADR-0053へ置き換え済み（下の組Bの記録）。
 
 | 決定 | 現在 | 上書き | 根拠 | 今の姿（design） |
 | --- | --- | --- | --- | --- |
-| 1 leaseの無い未完了runを`recover run`のattentionにする | 有効 | — | | [status](../design/supervisor-lifecycle/status.md)・[recover](../design/supervisor-lifecycle/commands.md) |
-| 2 attentionは`lease_released: true`の`runtime_error`だけ | 有効 | — | | [status](../design/supervisor-lifecycle/status.md)・[abandon](../design/supervisor-lifecycle/abandon.md) |
-| 3 通知は足さない、maintainerは`watch`で受ける | 有効（一部上書き） | ADR-0041 決定17 | attentionはinboxが受ける | [events-watch](../design/supervisor-lifecycle/events-watch.md) |
-| 4 maintainerが`doctor`を見て`recover`する | 上書き | ADR-0041 決定17 | inboxが人に知らせ、人の指示で`dagq-recover`の手順を行う | [doctor](../design/supervisor-lifecycle/doctor.md)・[recover](../design/supervisor-lifecycle/commands.md) |
+| 1 leaseの無い未完了runを`recover run`のattentionにする | 有効 | — | | [status](../design/supervisor-lifecycle/commands.md)・[recover](../design/supervisor-lifecycle/commands.md) |
+| 2 attentionは`lease_released: true`の`runtime_error`だけ | 有効 | — | | [status](../design/supervisor-lifecycle/commands.md)・[abandon](../design/supervisor-lifecycle/abandon.md) |
+| 3 通知は足さない、maintainerは`watch`で受ける | 有効（一部上書き） | ADR-0041 決定17 | attentionはinboxが受ける | [events-watch](../design/supervisor-lifecycle/commands.md) |
+| 4 maintainerが`doctor`を見て`recover`する | 上書き | ADR-0041 決定17 | inboxが人に知らせ、人の指示で`dagq-recover`の手順を行う | [doctor](../design/supervisor-lifecycle/commands.md)・[recover](../design/supervisor-lifecycle/commands.md) |
 
 ### ADR-0026 workspaceをUUID・`--env`・workspace groupで扱う
 
@@ -364,7 +364,7 @@ ADR-0053へ置き換え済み（下の組Bの記録）。
 
 | 棚卸しで見つけた差分 | 今の参照先と扱い |
 | --- | --- |
-| supervisorなどのlog（ADR-0010決定6、task 194） | [Logs](../design/supervisor-lifecycle/logs.md)はJSON Linesのファイル名・書式を記載済み。細部の差分が残ればこのdesignを直す候補にする。ADR-0033がproposedであることだけを理由にacceptや新ADRを求めない。ログの収集・外部送信など人の判断が要る方針を変えるなら、その範囲だけをplannerが人と決め、小さなamendsの候補にする。 |
+| supervisorなどのlog（ADR-0010決定6、task 194） | `infrastructure::telemetry`のdoc commentがJSON Linesのファイル名・書式を持つ（[commands](../design/supervisor-lifecycle/commands.md#log)）。細部の差分が残ればこのdesignを直す候補にする。ADR-0033がproposedであることだけを理由にacceptや新ADRを求めない。ログの収集・外部送信など人の判断が要る方針を変えるなら、その範囲だけをplannerが人と決め、小さなamendsの候補にする。 |
 | exit要求のtimeout（旧ADR-0019決定2、task 104） | 後継ADR-0047決定25・40、[Receipt and session exit](../design/supervisor-lifecycle/receipt-and-session-exit.md)・[Background recovery job](../design/supervisor-lifecycle/background-recovery-job.md)を読む。復旧jobの後にaskへ渡す方針は記録済み。生きているrunの復旧job自体が失敗した場合も[ADR-t609-1](../adr/2026-09-27-t609-1-failed-live-recovery-job-opens-the-alert-ask.md)が決定40をamendsしている。残る実装・記述の差分はdesignに実装状況を書く候補で、新しい決定の候補ではない。 |
 | resumeの上限とprompt待ち（旧ADR-0019決定1・6、task 100） | 後継ADR-0047決定24・29・40、[Needs session](../design/supervisor-lifecycle/needs-session.md)・Prompt waiting・[Triage](../design/supervisor-lifecycle/triage.md)を読む。復旧job・人へのaskの境界は後継ADRが持つ。回数・askの形などの細部の差分はdesignを直す候補とし、旧記述を統合ADRへ書き直さない。 |
 

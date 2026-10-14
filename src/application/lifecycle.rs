@@ -101,7 +101,9 @@ pub const ACTOR_ID_ENV: &str = crate::domain::actor::ACTOR_ID_ENV;
 /// The run a worker works on.
 pub const RUN_ID_ENV: &str = crate::domain::actor::RUN_ID_ENV;
 /// File under the queue's log directory that launchd appends the
-/// supervisor's stdout and stderr to.
+/// supervisor's stdout and stderr to: one file for every start of the
+/// agent, never split, rotated or pruned by retention (the runtime's own
+/// per-process logs are the ones split by start).
 pub const LAUNCHD_LOG_NAME: &str = "launchd.log";
 
 /// What `up` reads from the process that runs it.

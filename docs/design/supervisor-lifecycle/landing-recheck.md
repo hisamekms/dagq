@@ -77,7 +77,7 @@ targetの中身は、空き容量のための掃除だけがrecheckの走って�
 - 待つrunごとの結果は、着地しなくなったrunとhostの失敗で判断できなかったrunの`landing_recheck_failed`（上の「見つかったとき」）と、きれいなrunの`landing_recheck_clean`（ADR-t1311-1）がrunに持つ。
 - recheckが終わるたびに、mainを動かした着地のrun（着地のrunの無いmainの動きなら確かめた最初のrun）に`landing_recheck_finished`（`main`、`landed_run_id`、`landed_task_id`、`command`、`checked`、`clean`、`conflicts`、`check_failed`、`errors`、`resumed`、`held`、`failed_runs`（`run_id`・`code`・`action`）、`duration_secs`、`supervisor`）を記録する。
   hostの失敗はコードの失敗とは別に数え、resumeにもheldにも数えない（`supervise::recheck`の`Tally`）。
-- [`status`](status.md)は最新の`landing_recheck_finished`のpayloadを`landing_recheck`（`at`付き。まだ無ければnull）として出す。
+- [`status`](commands.md)は最新の`landing_recheck_finished`のpayloadを`landing_recheck`（`at`付き。まだ無ければnull）として出す。
 - [`stats`](commands.md)の`landing_rechecks`は、`backend_failures`と同じ窓の`rechecks`、`runs_checked`、`conflicts`、`check_failures`、`resumed`と、findingごとの`runs`（`task_id`、`run_id`、`code`、`action`、`landed_task_id`）。
   `repeat`は新しいfindingに数えず、`resumed`には数える。
   hostの失敗も同じく、コードの失敗にもresumeにも数えず別に数える（`domain::stats::LandingRechecks`）。

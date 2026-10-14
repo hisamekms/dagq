@@ -122,7 +122,9 @@ pub const PROCESS_START_LAG_SECS: i64 = 5;
 /// What runs under a record's pid, as the system says at the judgment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WatcherProcess {
-    /// A process started at this unix second.
+    /// A process started at this unix second. A killed watch its parent
+    /// has not reaped yet (a zombie) still counts as running; the parent
+    /// shell reaps it at once.
     Running { started_at: i64 },
     /// No process has the pid.
     Gone,

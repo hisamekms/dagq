@@ -153,6 +153,13 @@ impl Phase {
 /// (`landing_queue`, ADR-t1591-1) leaves room for a light task, one that
 /// waits for a person is out of it (`waiting`), one whose wait ended waits
 /// to go back (`returning`). A run nobody leases has none (`None`).
+/// Counting the `slot` of a supervisor's `run_ids` gives its `slots` and
+/// `waiting`, but for a landing queue longer than `parallel`, whose runs
+/// past `parallel` `slots` counts in `used`; the number of `run_ids` is not `slots.used`.
+/// The supervisor counts its landing queue only for a run whose last look
+/// found another run landing, so while it holds its landings (and its
+/// claims), and before a needed e2e starts, `status`' `landing_queue` may
+/// be more than the supervisor's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SlotUse {

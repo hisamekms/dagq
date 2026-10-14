@@ -3,8 +3,10 @@
 //! `dagq locate`'s `db` is), never the queue DB, which `watch` only reads.
 //! A file is named by its watch's start in milliseconds and pid, so a pid
 //! the system reuses for a later watch gets a file of its own; a watch
-//! rewrites only its own file, atomically (a temporary file and a rename).
-//! The judgment on the records is [`crate::application::inbox_watcher`].
+//! rewrites only its own file, atomically (a temporary file and a rename),
+//! and several watches may run at once. A record that cannot be written is
+//! warned of and stops no watch. A watch of another role or none writes no
+//! record. The judgment on the records is [`crate::application::inbox_watcher`].
 
 use crate::application::inbox_watcher::WatcherRecord;
 use anyhow::{Context, Result};

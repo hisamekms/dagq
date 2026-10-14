@@ -133,10 +133,6 @@ live worker alert (stalled, idle_process)
 
 - [Build identifier](supervisor-lifecycle/build-identifier.md)
 
-### Logs
-
-- [Logs](supervisor-lifecycle/logs.md)
-
 ## `supervise`
 
 - [`supervise`](supervisor-lifecycle/supervise.md)
@@ -270,10 +266,6 @@ live worker alert (stalled, idle_process)
 
 - [Goal review (supervisor)](supervisor-lifecycle/goal-review.md)（所属taskがすべて終わったgoalをacceptanceと照合し、achievedで閉じるか、gapをdraftにするか、人に聞く）
 
-## `review`
-
-- [`review`](supervisor-lifecycle/review-command.md)
-
 ## `integrate`
 
 - [`integrate`](supervisor-lifecycle/integrate.md)
@@ -298,28 +290,16 @@ live worker alert (stalled, idle_process)
 
 - [backendの呼び出しの失敗](supervisor-lifecycle/backend-call-failures.md)
 
-### `status`
-
-- [`status`](supervisor-lifecycle/status.md)
-
-### `events` / `watch`
-
-- [`events` / `watch`](supervisor-lifecycle/events-watch.md)
-
 ### `ask` / `answer` / `asks`
 
 - [`ask` / `answer` / `asks`](supervisor-lifecycle/ask.md)
 
-### `stats` / `kpi` / `mark` / `marks` / `report` / `timeline`
+### コマンドとlog
 
-- [計測のコマンド](supervisor-lifecycle/commands.md)（記録から値を導くコマンドをまたぐ約束と、各コマンドのコードの入口）
+- [コマンドをまたぐ約束](supervisor-lifecycle/commands.md)（計測の`stats`・`kpi`・`mark`・`marks`・`report`・`timeline`と、`status`・`events`・`watch`・`doctor`・`review`・processのlogをまたぐ約束と、各コマンドのコードの入口）
 - [hostの負荷の連続の記録](supervisor-lifecycle/host-metrics.md)（supervisorがload average・プロセスの種類ごとのCPUとメモリ・メモリ・swap・pageout・ディスクの空きをqueue.dbのNodeSampleStoreと人が読む写しの`<queue dir>/host/metrics-YYYYMMDD.csv`に書き、保持の日数を過ぎた行とファイルを消す。`stats`の`host`が窓の要約を出す。外部のsamplerを止める手順）
   保持の期間のCSVは一度だけNodeSampleStoreに取り込む。
 - [KPIのpush](supervisor-lifecycle/push.md)（レポートの後に目標割れの始まりと解消を記録し、host.tomlの`[push]`のコマンドのstdinに日次・週次のまとめと目標割れの即時通知を渡す。失敗の再試行とinboxのattention。ADR-0051の決定18・22・23）
-
-### `doctor`
-
-- [`doctor`](supervisor-lifecycle/doctor.md)
 
 ### `recover` / `rebind` / `graph --format d2|svg`
 

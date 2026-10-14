@@ -67,7 +67,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 - 直すのはworkerのsessionで、supervisorは依頼を次のturnとしてrun dirの`turns/`に書くだけ（[非対話のworker](headless-worker.md#run-dirのturns)）。
 - 着地は`integrate`と同じ処理をsupervisorが別threadで走らせる（[integrate](integrate.md)）。
   review中のrun（supervisorのleaseがある）を人の`integrate`は拒む。
-- 資料`review.md`は[`review`](review-command.md#review)が、promptの組み立てと上限は[Prompt](prompt.md#headlessのjobのprompt)が持つ。
+- 資料`review.md`は[`review`](commands.md)が、promptの組み立てと上限は[Prompt](prompt.md#headlessのjobのprompt)が持つ。
   既に落ちているtestは全体のreviewだけが材料に持つ（[CI watch](ci-watch.md)）。
 - providerの一般の規則は[Agent provider lifecycle](../provider-lifecycle.md)と[Actor model](actor-model.md)が持つ。
 
@@ -192,7 +192,7 @@ agentはpjの`.dagq/agents/`のものとバイナリのbuilt-in（`domain::revie
   workerがrun branchで設定や定義を変えても、選ばれるagentは変わらない。
   built-inの定義だけはバイナリから取り、pjの規則（`.dagq/review/builtin-<名前>.md`）は同じcommitから読む。
 - **選び方**: reviewする範囲の変えたpath（renameは旧と新の両方）を各agentのglobに照らし、当たったagentを設定の順に1回だけ選ぶ（`domain::review_subagents::select`）。
-  範囲（基点は[review](review-command.md)）は試行ごとに1回決め、`review.md`も同じ範囲で書くので、mainが進んでも選んだ差分と資料は食い違わない。
+  範囲（基点は[review](commands.md)）は試行ごとに1回決め、`review.md`も同じ範囲で書くので、mainが進んでも選んだ差分と資料は食い違わない。
 - **agentのjob**: snapshotが返した定義の本文をそのままpromptに持ち、定義のpathは書かず、1つのverdictを返させる（`application::agent_job::build`、evalと同じ組み立て）。
   built-inのjobは定義の後にpjの規則を持ち、開始の記録にどのbuildと中身で判断したかを残す。
   起動は`AgentProvider::agent_job_command`で、道具の変換は宣言から（Claudeはjob自身の引数、Codexは今のreviewのread-onlyのsandboxとjobのpermission profileに足す設定）。
@@ -227,7 +227,7 @@ runのreviewのpromptは、acceptanceの前に`REVIEW_DOCS_CHECK`の1段落を�
 - 両方向: 古い文書と変わった流れ・境界・不変条件・約束の書き漏れを`docs_drift`で指摘し、加えて差分が文書に入れたコードの書き写しと経緯も指摘する。
   名前が文書に無いことだけでは古いとしない。
 - このrepositoryでは、名前の確かめと書き写し・経緯は全体のreviewが`REVIEW_DOCS_CHECK`と`.dagq/review/builtin-acceptance.md`の規則で、形式（1文1行・予算・1行の長さ・task番号）は`[review.programs]`が見る。
-- `review.md`のTaskの節はcontextを持つので、plannerがcontextに書いた関連文書もreviewが読む（[`review`](review-command.md#review)）。
+- `review.md`のTaskの節はcontextを持つので、plannerがcontextに書いた関連文書もreviewが読む（[`review`](commands.md)）。
 
 ## 差し戻しの分類コード<a id="差し戻しの分類コード未実装"></a>
 

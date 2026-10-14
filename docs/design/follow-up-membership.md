@@ -97,7 +97,7 @@ follow_upのdraft、`draft_planner_exhausted`のdraft、closeされていないa
 `goal_review_failed`で人を待つGには出さない（判定は`follow_up::unshown_unsettled`）。
 inboxはplanning requestでplannerに`judge-follow-up`を頼み、判断を記録すれば消える。
 runtimeは所属を判定も移動もしない（ADR-t1504-1決定5）。項目の全体は
-[`status`](supervisor-lifecycle/status.md)のattentionの一覧。
+`application::health::attention`の一覧。
 
 ## submit・lint・plan review
 

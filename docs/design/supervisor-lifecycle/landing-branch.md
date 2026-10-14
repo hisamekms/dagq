@@ -10,7 +10,7 @@ related:
   - design-supervisor-lifecycle-integrate
   - design-supervisor-lifecycle-run-environment
   - design-supervisor-lifecycle-up-down
-  - design-supervisor-lifecycle-doctor
+  - design-supervisor-lifecycle-commands
   - adr-t615-1
   - adr-0008
   - adr-0047

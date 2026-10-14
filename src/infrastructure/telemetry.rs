@@ -11,9 +11,18 @@
 //! to the file only. A file that cannot be opened or written leaves the
 //! process running on stderr alone.
 //!
+//! Application code logs with the `tracing` macros directly, with no port
+//! between: progress at INFO, a failure or a hold at WARN, and a failed
+//! heartbeat or a supervisor's abnormal end at ERROR. An event about a run
+//! carries `run_id` (a field or its span's), so
+//! `jq 'select(.fields.run_id == "<run-id>")'` follows one run.
+//!
 //! Opening a file also prunes the directory: log files of this runtime
 //! last written more than [`LOG_RETENTION`] ago are removed, except those
-//! of a process that is still alive.
+//! of a process that is still alive. Retention goes by age, not by count:
+//! the number of files follows the runs and sessions of a day, and a cap
+//! would drop the recent files a busy day's investigation needs. A file is
+//! never rotated by size; it grows only for its one process's lifetime.
 
 use std::{
     fmt,
@@ -53,8 +62,9 @@ pub struct Telemetry {
 impl Telemetry {
     /// Records to `<log_dir>/<process>-<YYYYMMDDTHHMMSSZ>-<pid>.jsonl`
     /// (the directory created if missing) and messages to stderr. The
-    /// file starts with a record of the process, its pid and version.
-    /// Log files older than [`LOG_RETENTION`] are pruned first (see
+    /// file starts with a record of the process, its pid and version. The
+    /// time in the name is this process's start, not the supervisor row's
+    /// `started_at`; the pid ties a file to its row. Log files older than [`LOG_RETENTION`] are pruned first (see
     /// [`prune_logs`]). A file that cannot be opened is reported on stderr
     /// once, and the process goes on with stderr alone.
     pub fn open(log_dir: &Path, process: &str) -> Self {

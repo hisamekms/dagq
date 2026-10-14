@@ -129,7 +129,8 @@ enum Command {
         #[arg(long, hide = true, default_value_t = dagq::application::update::WATCH_TIMEOUT.as_secs())]
         watch_timeout: u64,
     },
-    /// Show which queue this directory resolves to, without opening it.
+    /// Show which queue this directory resolves to, without opening it: its database, log
+    /// directory, LaunchAgent label and plist path (given even before `up` writes it).
     Locate,
     /// Register a draft task; verification commands are stored, not executed.
     Add {
@@ -764,7 +765,8 @@ enum Command {
         codex: PathBuf,
         /// Write this start's JSON Lines log (supervise-<UTC time>-<pid>.jsonl)
         /// into this directory (created if missing) instead of the queue's
-        /// logs/; messages also go to stderr.
+        /// logs/; messages also go to stderr. Logs older than 14 days are pruned from it
+        /// at start. A directory that cannot be made leaves the logs on stderr alone.
         #[arg(long)]
         log_dir: Option<PathBuf>,
         /// Start the observer job (`observe`) when this many seconds passed
@@ -1254,6 +1256,8 @@ enum Command {
         id: i64,
     },
     /// List supervisors, unfinished runs, what waits for a person (attention), the open asks and the event cursor, without changing anything.
+    /// The cursor is read before the state, so `watch --after <cursor>` misses no change after it
+    /// (it may repeat one).
     Status {
         /// Only the attention addressed to this role: inbox gets all of it, planner none.
         #[arg(long, value_parser = ROLES)]
@@ -1352,7 +1356,8 @@ enum Command {
         /// Maximum number of events returned; the cursor then points at the last one.
         #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u32).range(1..))]
         limit: u32,
-        /// Every event kind, not only attention.
+        /// Every event kind, not only attention. Without it and --kind, the other filters
+        /// narrow the attention events only.
         #[arg(long)]
         all: bool,
         /// Every field (run_id included) and the whole payload instead of the compact form.
@@ -1550,6 +1555,8 @@ enum Command {
     /// builtin:acceptance, the whole review, and `without_rules` names the enabled built-ins
     /// that judge without the project's rules, the landing branch having no
     /// .dagq/review/builtin-<name>.md for them.
+    /// `schema` is reported even for a queue that needs `migrate` or refuses this binary; the
+    /// latter has `error` in place of its supervisors and runs.
     Doctor {
         /// Include each run's lease, processes, heartbeats and paths, and every supervisor field.
         #[arg(long)]

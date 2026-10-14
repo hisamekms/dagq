@@ -119,15 +119,6 @@ pub fn compact_event(event: &RunEvent) -> Value {
     value
 }
 
-/// What waits for a person now: stale or missing supervisors first,
-/// then the latest run of every `in_progress` task that rests where only a
-/// person or the supervisor moves it on or that is unfinished without a lease,
-/// then every landed run whose push of `main` failed with no successful push
-/// since, then every ask nobody closed: an open one as `ask_opened` for the
-/// inbox, an answered one as `ask_answered` for the person to act on
-/// through the inbox (ADR-0022, ADR-0024 decision 6).
-/// `kind` is the event that brought the run there (for a run without
-/// a lease, its latest `runtime_error`).
 /// Whether a live supervisor applies the answer of the `update_failed` ask
 /// `ask`: one with the automatic update for a build's failure, one of a
 /// release build for a release's job's (ADR-t618-1).
@@ -161,7 +152,23 @@ pub(super) fn update_failure_applied(
     )
 }
 
-/// What waits for a person. `ci_named_jobs` is the jobs `required_jobs`
+/// What waits for a person now: stale or missing supervisors first,
+/// then the latest run of every `in_progress` task that rests where only a
+/// person or the supervisor moves it on or that is unfinished without a lease,
+/// then every landed run whose push of `main` failed with no successful push
+/// since, then what the queue, the planning and the goals hold, then every
+/// ask nobody closed: an open one as `ask_opened` for the
+/// inbox, an answered one as `ask_answered` for the person to act on
+/// through the inbox (ADR-0022, ADR-0024 decision 6).
+/// `kind` is the event that brought the run there (for a run without
+/// a lease, its latest `runtime_error`).
+/// By the run's own judgement (`run_attention_of`), an unfinished run whose
+/// lease is stale is no attention: its dead supervisor's is, or an adoption
+/// takes it, and a lease a dead `integrate` left is none. The run-level
+/// notices judged before it are not bound by the lease: an `integrating`
+/// run's `landing_release_stuck` and a past `recovery_failed` of a live
+/// session still show.
+/// `ci_named_jobs` is the jobs `required_jobs`
 /// of `[ci_watch]` names now (empty without the table, `None` when
 /// `dagq.toml` cannot be read): a `ci_jobs_missing` stands only while it
 /// names a missing job ([`crate::domain::ci_watch::WatchState::standing_jobs_missing`]).

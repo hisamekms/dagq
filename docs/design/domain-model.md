@@ -346,7 +346,7 @@ runtimeやjobが作ったdraftに、runtimeが同じきっかけの束ごとに1
 - 落とし穴: コードが入る前のeventには`code`が無く、読む側はそれを許す。
 - 落とし穴: validationの保留に添えるeventと`backend_call_failed`は、別のeventと同じコードを重ねて持つので、`stats`の`reason_codes`は数えない（`REPEATED_CODE_KINDS`）。
 - runの`last_error`のコードは`domain::reason::last_error_code`が、`last_error`を書いたか中断したeventのうち最新のものから導く（どのeventが当たるかは`explains_last_error`）。
-  `status`・`show`の`last_error_code`と`stats`の`reason_codes`がこれを読む（[status](supervisor-lifecycle/status.md#status)）。
+  `status`・`show`の`last_error_code`と`stats`の`reason_codes`がこれを読む（[status](supervisor-lifecycle/commands.md)）。
 
 ## CIの見張り（ADR-t1920-1）
 

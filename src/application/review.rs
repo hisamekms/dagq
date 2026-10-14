@@ -31,7 +31,11 @@ pub struct Review<'a> {
 /// `<base>...<head>`, `head` being the receipt's commit and `base` where
 /// the run's own commits start ([`range_base`]), so the review does not
 /// repeat what other tasks landed while the run took in a main. The diff itself is never returned, so the caller
-/// hands the path to a subagent instead of reading it. `range`, when
+/// hands the path to a subagent instead of reading it. The queue is only
+/// read: no event, no state change; without such a run nothing is
+/// written. The diff is Git's bytes as they are, so review.md holds
+/// non-UTF-8 bytes when the run changes a file in another encoding. The
+/// temporary files are removed on success and on failure. `range`, when
 /// given, is the attempt's range already fixed ([`SubagentSnapshot::range`])
 /// and is used as it is, so that the material shows the diff its required
 /// agents were selected from even when `main` moved since.

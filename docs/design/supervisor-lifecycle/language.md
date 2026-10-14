@@ -8,7 +8,7 @@ scope: runtime
 related:
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-run-environment
-  - design-supervisor-lifecycle-doctor
+  - design-supervisor-lifecycle-commands
   - design-supervisor-lifecycle-prompt
   - design-plugin-integration
   - adr-t616-1
@@ -93,6 +93,7 @@ workerには起き直しのhookが無い（`session-start.sh`はinboxとplanner�
 - `up`のpreflight: `dagq.toml`の`[language]`と`config.toml`を読み、書式の誤りならsupervisorを起動せず、ファイルのpathと誤りを挙げたerrorで止まる（どちらかで決まっても両方を読むので、使われない側の誤りも止める）。`up`の出力に解決した`language`（`{"tag", "source"}`か、未設定ならnull）を付け、inboxの初期promptに指示を足す。
 - `dagq.toml`の他の表を読む処理（claimのprovisioningの`[run.env]`、`integrate`の検証、supervisorの`[stall]`・`[disk]`など）は、`[language]`を既知の表として受け付けるだけで、中のkeyと値も表の重複も検査しない。`[language]`の書式の誤りでprovisioningや着地を失敗させないためで、誤りを見せるのは`up`・`doctor`・promptの組み立てだけにする。
 - supervisor: promptを組み立てる時点で`[language]`か`config.toml`が読めなければ指示を足さずに進み、`tracing`のwarnを出す。runもplannerも止めない。
-- `doctor`（既定の出力にも出す）: `language`の欄に`tag`（未設定ならnull）、`source`（`repository` / `user` / `unset`）、読んだ`user_config`のpath、promptに足す`instruction`、書式の誤りがあれば`error`を出す（誤りのときは`source`が`unset`）（[doctor](doctor.md)）。このbinaryが読めない（migrateが要る・拒まれる）queueの`doctor`には出ない。
+- `doctor`（既定の出力にも出す）: `language`の欄に`tag`（未設定ならnull）、`source`（`repository` / `user` / `unset`）、読んだ`user_config`のpath、promptに足す`instruction`、書式の誤りがあれば`error`を出す（誤りのときは`source`が`unset`）（[doctor](commands.md)）。
+  このbinaryが読めない（migrateが要る・拒まれる）queueの`doctor`には出ない。
 
 testは`src/domain/language.rs`と`src/infrastructure/language.rs`のunit test（タグの形・優先順・誤り）、`tests/it/language.rs`（設定なし・利用者ごと・`dagq.toml`の上書きの3通りでworkerとreviewのpromptと`doctor`・`status --role inbox`）、`tests/it/lifecycle_up.rs`（preflightの誤りとinboxのprompt）、`tests/it/lifecycle_plan.rs`（runtimeのplanner）、`tests/it/runtime_observer.rs`（observer）、`tests/plugin.rs`（hookの出力）。

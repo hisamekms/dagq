@@ -14,7 +14,7 @@ related:
   - design-supervisor-lifecycle-claim-hold
   - design-supervisor-lifecycle-disk-space
   - design-supervisor-lifecycle-waiting
-  - design-supervisor-lifecycle-status
+  - design-supervisor-lifecycle-commands
 ---
 
 # 認証と利用上限のaskの待ちとanswer

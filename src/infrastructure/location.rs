@@ -29,7 +29,8 @@ pub const AGENT_EVALS_DIR_NAME: &str = "agent-evals";
 /// The directory beside the database where the program reviews of the
 /// runs' reviews keep the scripts they run ([`review_programs_dir`]).
 pub const REVIEW_PROGRAMS_DIR_NAME: &str = "review-programs";
-/// Supervisor logs (`supervisor-<started_at>-<pid>.log`, `launchd.log`).
+/// Process logs (`<process>-<YYYYMMDDTHHMMSSZ>-<pid>.jsonl`, see
+/// [`super::telemetry`]), `launchd.log` and `rebind.jsonl`.
 pub const LOGS_DIR_NAME: &str = "logs";
 /// LaunchAgent labels are `com.dagq.<queue hash>`.
 pub const LAUNCH_AGENT_PREFIX: &str = "com.dagq";

@@ -336,7 +336,9 @@ impl Toolchains {
 pub const UNDECLARED_WARNING: &str = "dagq.toml declares no [toolchains.<name>]: the Rust profile reads the verification's output until the repository declares the profiles it uses";
 
 /// [`Toolchains::view`] of a declaration that could be read, else the
-/// mistake as `error`.
+/// mistake as `error` alone: a profile no registry has, or a `dagq.toml`
+/// that cannot be read, which stops every landing with an error meanwhile,
+/// so `doctor` shows it first.
 pub fn view(toolchains: Result<Toolchains, String>) -> Value {
     match toolchains {
         Ok(toolchains) => toolchains.view(),
