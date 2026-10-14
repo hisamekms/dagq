@@ -284,7 +284,7 @@ $XDG_DATA_HOME/dagq/<hash>/          未設定・空・相対pathなら $HOME/.l
 - `--db PATH`は明示のoverrideで、run dirとlog dirはそのDBの隣に置く。
   LaunchAgentのlabelはDBのpathを正規化してからhashするので、相対と絶対のpathが同じlabelを指す。
 - repositoryを移すとhashが変わり、新しいqueueに解決される。
-  付け替えは明示の`rebind`だけが行う（[ADR-0020](../adr/0020-rebind-queue-to-a-moved-repository.md)、[rebind](supervisor-lifecycle/rebind.md)）。
+  付け替えは明示の`rebind`だけが行う（[ADR-0020](../adr/0020-rebind-queue-to-a-moved-repository.md)、[コマンドをまたぐ約束](supervisor-lifecycle/commands.md)）。
 - queueのディレクトリは丸ごと移せる: runのpathは開いた場所から解決し直し、worktreeのGitの管理情報は`integrate`が直す（[ADR-0017](../adr/0017-resolve-run-paths-from-the-queue-directory.md)）。
 - `logs/`の書式と消す時期は[Logs](supervisor-lifecycle/logs.md#logs)。
 

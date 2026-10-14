@@ -22,7 +22,7 @@ leaseがないので他のsupervisorも引き継がない。
 `status` / `watch`はこのrunを`recover run`のattentionとして出す（[ADR-0054](../../adr/0054-run-lease-ownership-parallel-supervisors-and-recover.md)の決定8・12。`kind`は`runtime_error`）。
 sessionのprocessが残っていなければ（未登録、`exited_at`が記録済み、PIDが死んでいる）、次のfill passでsupervisor自身がrecoverして`interrupted`にし、triageに回す（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定3・ADR-0054の決定11。[Triage (supervisor)](triage.md#triage-supervisor)）。
 processが生きている間は`recover run`のまま人を待つ。
-人は`dagq-recover` skillに従い、`show`と`doctor`で確認して[recover](recover.md#recover-run_id)で扱う（supervisorが居ないときだけ。居ればprocessが止まった時点でsupervisorが行う）。
+人は`dagq-recover` skillに従い、`show`と`doctor`で確認して`recover`で扱う（supervisorが居ないときだけ。居ればprocessが止まった時点でsupervisorが行う）。
 recoverすればrunは`interrupted`（`integrating`だったものは`awaiting_integration`）になりattentionから消える。
 wrapperの登録を待つ時間は`SessionWrappers::registration_timeout`（既定45秒）。
 verdictの後の終了の待ち（`ExitWatch`）と最初のsessionの終了の依頼には時間切れが無く（task 1437より前の`exit_request_timed_out`はもう記録しない）、abandonせずleaseを持ったままsessionの終了を待つ（resumeのsessionだけはexit timeoutで手放す。[`needs_session`](needs-session.md)。[Receipt and session exit](receipt-and-session-exit.md#receipt-and-session-exit)）。

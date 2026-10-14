@@ -11,7 +11,6 @@ related:
   - design-supervisor-lifecycle-actor-model
   - design-supervisor-lifecycle-goal-review
   - design-supervisor-lifecycle-commands
-  - design-supervisor-lifecycle-dependency-diagram
   - design-supervisor-lifecycle-claim-hold
   - design-supervisor-lifecycle-claim-defer
   - design-supervisor-lifecycle-disk-space
@@ -318,18 +317,10 @@ live worker alert (stalled, idle_process)
   保持の期間のCSVは一度だけNodeSampleStoreに取り込む。
 - [KPIのpush](supervisor-lifecycle/push.md)（レポートの後に目標割れの始まりと解消を記録し、host.tomlの`[push]`のコマンドのstdinに日次・週次のまとめと目標割れの即時通知を渡す。失敗の再試行とinboxのattention。ADR-0051の決定18・22・23）
 
-### `graph --format d2|svg`
-
-- [当面の依存図](supervisor-lifecycle/dependency-diagram.md)（`graph`の結果から当面のtaskを選び、列・goalの帯・固定座標のd2のソースを組み立て、hostの`d2 --layout=tala`でSVGを描く。ADR-0077）
-
 ### `doctor`
 
 - [`doctor`](supervisor-lifecycle/doctor.md)
 
-### `recover RUN_ID`
+### `recover` / `rebind` / `graph --format d2|svg`
 
-- [`recover RUN_ID`](supervisor-lifecycle/recover.md)
-
-### `rebind`
-
-- [`rebind`](supervisor-lifecycle/rebind.md)
+- [コマンドをまたぐ約束](supervisor-lifecycle/commands.md#復旧と束縛と依存図のコマンドをまたぐ約束)（supervisorの自動の回収と人の`recover`の分担、束縛の検査を通らない`rebind`、依存図とレポートの共有）

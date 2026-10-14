@@ -187,7 +187,7 @@ Do not copy a new binary over the running one: on macOS that can kill the proces
 
 ## When something goes wrong
 
-Ask the inbox; the `dagq-recover` skill has the procedures (`up` / `down`, `doctor` and `recover` when no supervisor serves the queue, reviewing a run by hand, pushing after a failed push). The design documents explain each state: [Recover](docs/design/supervisor-lifecycle/recover.md), [Needs session](docs/design/supervisor-lifecycle/needs-session.md), [Integrate](docs/design/supervisor-lifecycle/integrate.md), [Rebind](docs/design/supervisor-lifecycle/rebind.md) (after moving the repository).
+Ask the inbox; the `dagq-recover` skill has the procedures (`up` / `down`, `doctor` and `recover` when no supervisor serves the queue, reviewing a run by hand, pushing after a failed push). The design documents explain each state: [Needs session](docs/design/supervisor-lifecycle/needs-session.md), [Integrate](docs/design/supervisor-lifecycle/integrate.md), and [Commands](docs/design/supervisor-lifecycle/commands.md) for `recover` and `rebind` (after moving the repository); `dagq recover --help` and `dagq rebind --help` describe each command.
 
 ## Developing dagq
 

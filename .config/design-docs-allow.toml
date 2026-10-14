@@ -99,10 +99,6 @@ path = "docs/design/supervisor-lifecycle/conflict-thresholds.md"
 line = 1565
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/dependency-diagram.md"
-tasks = 3
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/disk-space.md"
 line = 3087
 tasks = 23
@@ -217,17 +213,8 @@ line = 1616
 tasks = 19
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/rebind.md"
-tasks = 1
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/receipt-and-session-exit.md"
 tasks = 15
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/recover.md"
-line = 1257
-tasks = 3
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/release-update.md"

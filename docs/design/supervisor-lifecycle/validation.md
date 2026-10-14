@@ -73,7 +73,7 @@ verifyが通れば人のaskに上げ、人の答えで閉じる。
   verificationのruntimeがcontainerで使えない間は、hostで流さずに検証を始めず、runは受理のまま休み、使えるようになった後のpassが始める（[container runtime](../container-runtime.md#fail-closedの境界)、`satisfied::awaits_verification`）。
 - **ask**: verifyの後に`approve_close`のask（理由は`scope`）を開き、questionにsnapshotのheadを載せ、leaseを外してrunを`validating`のまま休ませる。
   verifyが落ちていればoptionsから`close`を外し、questionに落ちたことを書く。
-  休む間は開いたask（検証の前ならcontainerの知らせ）がattentionで、supervisorの死んだrunの回収も、人の`recover`と`doctor`も、このrunを取らない（`satisfied::blocks_recovery`、[recover](recover.md)）。
+  休む間は開いたask（検証の前ならcontainerの知らせ）がattentionで、supervisorの死んだrunの回収も、人の`recover`と`doctor`も、このrunを取らない（`satisfied::blocks_recovery`）。
 - **答えの適用**（`apply_satisfied_answers`、passごと）: `retry`はrunを`failed`にしてtaskを`ready`に、`cancel`はrunを`failed`にしてtaskを`canceled`にする。
   `close`は今のmainのheadを最後の`run_satisfied_verified`と比べる（`satisfied::close_step`）。
   同じheadで通っていれば、runを`succeeded`（commitなし）、taskを`completed`にし、依存するtaskがclaimの候補になる（`run_satisfied_closed`）。

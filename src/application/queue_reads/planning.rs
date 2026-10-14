@@ -179,7 +179,9 @@ pub fn graph<Q: TaskStore + RunLog + ?Sized>(
 }
 
 /// The near-term dependency diagram of `graph --format d2|svg` (ADR-0077)
-/// as d2 source, and the tasks it shows.
+/// as d2 source, and the tasks it shows. It is drawn from the graph before
+/// the supervisor's deferred tasks are split from `candidates`, so a
+/// deferred task is still marked startable.
 pub fn graph_diagram(
     queue: &(impl TaskStore + ?Sized),
     goal_id: Option<GoalId>,

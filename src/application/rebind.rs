@@ -41,7 +41,8 @@ pub struct RebindTarget {
 }
 
 /// Bind the queue to the repository at `target.common_dir` after the
-/// repository moved. Refused while a registered supervisor or an
+/// repository moved. Refused while a registered supervisor (a hung one with
+/// an old heartbeat too; a dead pid's registration is ignored) or an
 /// `integrate` still lives, since both hold paths of the old repository.
 /// The change is appended to `logs/rebind.jsonl`, the queue directory's
 /// `repository` file (if any) is rewritten, and every run worktree still on

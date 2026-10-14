@@ -3,7 +3,8 @@
 //! PATH (the supervisor's, fixed by `up`), the d2 source goes to `d2
 //! --layout=tala - -` on stdin, and the SVG comes back on stdout. A missing
 //! tool, a failure or a run past the timeout is an error with the reason;
-//! no SVG is made then.
+//! no SVG is made then. TALA's license is not checked: an unlicensed TALA
+//! draws its watermark into the SVG.
 use std::{
     ffi::OsStr,
     io::{Read, Write},

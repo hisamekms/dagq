@@ -84,7 +84,7 @@ related:
 | 箇条1 `$XDG_DATA_HOME/cmux-taskq/<hash>/queue.db`に置く、hashの規則、`repository`ファイル | 上書き | ADR-0015（データディレクトリ行） | ディレクトリ名は`dagq`。hashと`repository`ファイルは有効 | [persistence](../design/persistence.md) |
 | 箇条2 run dir・worktree・logを`runs/<run-id>/`に置く | 有効 | — | ADR-0017が読むたびに解決する規則を足した | [persistence](../design/persistence.md) |
 | 箇条3 cwdの`git rev-parse --git-common-dir`で解決、`--db`はoverride、`--repo`は任意 | 有効 | — | | [persistence](../design/persistence.md) |
-| 箇条4 `init`で束縛し、以後の全コマンドがopen直後に検査する | 上書き | ADR-0020 決定1 | `rebind`だけは検査を通らず束縛を付け替える | [rebind](../design/supervisor-lifecycle/rebind.md) |
+| 箇条4 `init`で束縛し、以後の全コマンドがopen直後に検査する | 上書き | ADR-0020 決定1 | `rebind`だけは検査を通らず束縛を付け替える | [rebind](../design/supervisor-lifecycle/commands.md) |
 | 箇条5 `locate`、launcherは`CMUX_TASKQ_DB`のときだけ`--db` | 上書き | ADR-0015（環境変数行） | `DAGQ_DB`。`locate`は有効 | [persistence](../design/persistence.md)・[plugin-integration](../design/plugin-integration.md) |
 
 ### ADR-0007 leaseをrun単位にし、依存が解けたtaskを上限付きで並列に実行する
@@ -96,7 +96,7 @@ related:
 | 箇条3 `supervise --parallel N`の常駐ループ、`--once`、signal | 有効（一部上書き） | ADR-0027 決定1 | 「`awaiting_integration`になったrunのleaseを解放する」は、reviewの後までleaseとslotを持つに変わった | [supervise](../design/supervisor-lifecycle/supervise.md)・[review](../design/supervisor-lifecycle/review.md) |
 | 箇条4 1 runのruntime error（exit要求のtimeoutを含む）はそのrunだけをabandonしleaseを削除する | 上書き | ADR-0019 決定2 | `exit_request_timed_out`ではleaseを手放さない。ほかのruntime errorのabandonは有効 | [abandon](../design/supervisor-lifecycle/abandon.md)・[receipt-and-session-exit](../design/supervisor-lifecycle/receipt-and-session-exit.md) |
 | 箇条5 provisioningの失敗でclaimを止めdrainして非0で終わる | 有効 | — | | [supervise](../design/supervisor-lifecycle/supervise.md) |
-| 箇条6 `doctor` / `recover`はrunごとに判定する | 有効 | — | ADR-0041 決定3でwrapperの死んだrunの`recover`はsupervisorが自動で行うようになったが、判定の単位は変わらない | [doctor](../design/supervisor-lifecycle/doctor.md)・[recover](../design/supervisor-lifecycle/recover.md) |
+| 箇条6 `doctor` / `recover`はrunごとに判定する | 有効 | — | ADR-0041 決定3でwrapperの死んだrunの`recover`はsupervisorが自動で行うようになったが、判定の単位は変わらない | [doctor](../design/supervisor-lifecycle/doctor.md)・[recover](../design/supervisor-lifecycle/commands.md) |
 
 ### ADR-0008 merge queueが最新mainへrebase・再検証し、1 task = 1 commitにsquashして着地させる
 
@@ -155,7 +155,7 @@ goal 1で実装済みのため、最初の棚卸しで`status: accepted`にし�
 
 ### ADR-0012
 
-置き換え済み（→ [ADR-0039](../adr/0039-adopt-stale-lease-of-live-wrapper-and-renew-own-stale-lease.md)、2026-09-25）。棚卸しの間に着地したtask 259が、段落2の自動`recover`（ADR-0041 決定3）を含む生きている決定を引き継いで丸ごと置き換えた。今の姿は[cleanup-and-recovery](../design/supervisor-lifecycle/cleanup-and-recovery.md)・[recover](../design/supervisor-lifecycle/recover.md)。
+置き換え済み（→ [ADR-0039](../adr/0039-adopt-stale-lease-of-live-wrapper-and-renew-own-stale-lease.md)、2026-09-25）。棚卸しの間に着地したtask 259が、段落2の自動`recover`（ADR-0041 決定3）を含む生きている決定を引き継いで丸ごと置き換えた。今の姿は[cleanup-and-recovery](../design/supervisor-lifecycle/cleanup-and-recovery.md)・[recover](../design/supervisor-lifecycle/commands.md)。
 
 ### ADR-0013 レイヤーと「型＋関数」
 
@@ -184,7 +184,7 @@ goal 1で実装済みのため、最初の棚卸しで`status: accepted`にし�
 | 3 schemaとAPPLICATION_IDを変えない、versionを0.2.0に | 記録 | — | 一度きり | designに無い（一度きりの記録・制約、または文書運用の規則） |
 | 4 互換shimを作らない | 有効 | — | | designに無い（一度きりの記録・制約、または文書運用の規則） |
 | 5 `docs/journal/`と既存ADRは凍結、旧名はADR-0015だけ | 失効 | ADR-0036 決定1（journal削除）、ADR-0042（ADRの置き換え規則） | 当時の根拠はADR-0042 決定6。今のappend-onlyの規則はADR-t598-1 決定9 | designに無い（一度きりの記録・制約、または文書運用の規則） |
-| Consequences 1 切り替え手順の4（DBを直接触る例外） | 失効 | ADR-0020 決定7 | 例外は無くなった | [rebind](../design/supervisor-lifecycle/rebind.md) |
+| Consequences 1 切り替え手順の4（DBを直接触る例外） | 失効 | ADR-0020 決定7 | 例外は無くなった | [rebind](../design/supervisor-lifecycle/commands.md) |
 
 ### ADR-0016 status / watch / doctorの通知経路と圧縮出力、起き直しhook
 
@@ -207,7 +207,7 @@ goal 1で実装済みのため、最初の棚卸しで`status: accepted`にし�
 | 1 queue配下のpathはrun IDとqueueディレクトリから解決する | 有効 | — | | [persistence](../design/persistence.md) |
 | 2 列と書き込みは残し、schemaは変えない | 有効 | — | | [persistence](../design/persistence.md) |
 | 3 `integrate`が`git worktree repair`する | 有効 | — | | [integrate](../design/supervisor-lifecycle/integrate.md) |
-| 4 移動の手順 | 有効 | — | | [rebind](../design/supervisor-lifecycle/rebind.md) |
+| 4 移動の手順 | 有効 | — | | [rebind](../design/supervisor-lifecycle/commands.md) |
 
 ADR-0053へ置き換え済み（下の組Bの記録）。
 
@@ -236,7 +236,7 @@ ADR-0053へ置き換え済み（下の組Bの記録）。
 
 | 決定 | 現在 | 上書き | 根拠 | 今の姿（design） |
 | --- | --- | --- | --- | --- |
-| 1〜7 `rebind`、出力、記録、worktreeのrepair、走行中の拒否、手順、DBの直接操作の例外が無くなる | 有効 | — | | [rebind](../design/supervisor-lifecycle/rebind.md) |
+| 1〜7 `rebind`、出力、記録、worktreeのrepair、走行中の拒否、手順、DBの直接操作の例外が無くなる | 有効 | — | | [rebind](../design/supervisor-lifecycle/commands.md) |
 
 ADR-0053へ置き換え済み（下の組Bの記録）。
 
@@ -267,16 +267,16 @@ ADR-0053へ置き換え済み（下の組Bの記録）。
 
 ### ADR-0023・ADR-0024
 
-置き換え済み（0023 → ADR-0040 → ADR-0049、0024 → ADR-0041 → ADR-0044 → ADR-0047）。0023の今の姿は[validation](../design/supervisor-lifecycle/validation.md)・[review](../design/supervisor-lifecycle/review.md)・[run-environment](../design/supervisor-lifecycle/run-environment.md)・[dependency-diagram](../design/supervisor-lifecycle/dependency-diagram.md)・[stats](../design/supervisor-lifecycle/commands.md)、0024は[roles](../design/supervisor-lifecycle/roles.md)・[triage](../design/supervisor-lifecycle/triage.md)・[observer](../design/supervisor-lifecycle/observer.md)・[plan-planners](../design/supervisor-lifecycle/plan-planners.md)。
+置き換え済み（0023 → ADR-0040 → ADR-0049、0024 → ADR-0041 → ADR-0044 → ADR-0047）。0023の今の姿は[validation](../design/supervisor-lifecycle/validation.md)・[review](../design/supervisor-lifecycle/review.md)・[run-environment](../design/supervisor-lifecycle/run-environment.md)・[dependency-diagram](../design/supervisor-lifecycle/commands.md)・[stats](../design/supervisor-lifecycle/commands.md)、0024は[roles](../design/supervisor-lifecycle/roles.md)・[triage](../design/supervisor-lifecycle/triage.md)・[observer](../design/supervisor-lifecycle/observer.md)・[plan-planners](../design/supervisor-lifecycle/plan-planners.md)。
 
 ### ADR-0025 leaseの無い未完了runを`recover run`のattentionにする
 
 | 決定 | 現在 | 上書き | 根拠 | 今の姿（design） |
 | --- | --- | --- | --- | --- |
-| 1 leaseの無い未完了runを`recover run`のattentionにする | 有効 | — | | [status](../design/supervisor-lifecycle/status.md)・[recover](../design/supervisor-lifecycle/recover.md) |
+| 1 leaseの無い未完了runを`recover run`のattentionにする | 有効 | — | | [status](../design/supervisor-lifecycle/status.md)・[recover](../design/supervisor-lifecycle/commands.md) |
 | 2 attentionは`lease_released: true`の`runtime_error`だけ | 有効 | — | | [status](../design/supervisor-lifecycle/status.md)・[abandon](../design/supervisor-lifecycle/abandon.md) |
 | 3 通知は足さない、maintainerは`watch`で受ける | 有効（一部上書き） | ADR-0041 決定17 | attentionはinboxが受ける | [events-watch](../design/supervisor-lifecycle/events-watch.md) |
-| 4 maintainerが`doctor`を見て`recover`する | 上書き | ADR-0041 決定17 | inboxが人に知らせ、人の指示で`dagq-recover`の手順を行う | [doctor](../design/supervisor-lifecycle/doctor.md)・[recover](../design/supervisor-lifecycle/recover.md) |
+| 4 maintainerが`doctor`を見て`recover`する | 上書き | ADR-0041 決定17 | inboxが人に知らせ、人の指示で`dagq-recover`の手順を行う | [doctor](../design/supervisor-lifecycle/doctor.md)・[recover](../design/supervisor-lifecycle/commands.md) |
 
 ### ADR-0026 workspaceをUUID・`--env`・workspace groupで扱う
 

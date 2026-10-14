@@ -703,14 +703,18 @@ enum Command {
     /// the near-term dependency diagram instead: the d2 source, or the SVG the host's `d2
     /// --layout=tala` draws from it.
     Graph {
-        /// Only this goal's tasks and candidates; counts still span every goal.
+        /// Only this goal's tasks and candidates; counts still span every goal. With `d2` or
+        /// `svg`, only the tasks drawn for being in progress or of high priority are narrowed to
+        /// the goal: its critical chain and the prerequisites one level up are drawn even outside
+        /// it, each in its own goal's frame.
         #[arg(long = "goal")]
         goal_id: Option<i64>,
         /// `json` (the dependency view), `d2` (the diagram's source) or `svg` (drawn by d2 and TALA
         /// from PATH).
         #[arg(long, default_value = "json", value_parser = ["json", "d2", "svg"])]
         format: String,
-        /// Write the d2 source or the SVG to this file instead of stdout.
+        /// Write the d2 source or the SVG to this file instead of stdout, and print
+        /// `{"format", "out", "tasks"}` (the IDs of the tasks drawn). Refused with `--format json`.
         #[arg(long)]
         out: Option<PathBuf>,
     },
@@ -1585,12 +1589,26 @@ enum Command {
     /// --repo) after the repository moved; the one command that changes the
     /// binding. Refused while a supervisor runs. Pass --db for a queue still
     /// in its old directory; `move_to` names where the repository now looks for it.
+    ///
+    /// Every other command on a queue resolved from the repository refuses a repository other
+    /// than the bound one. A live supervisor counts even when its heartbeat is old, and so does
+    /// an `integrate` still landing. A worktree whose repair fails is reported in
+    /// `worktrees[].error` and the rebind still succeeds; the supervisor repairs it again before
+    /// removing it. `move_to` does not check whether its directory already exists.
     Rebind {
         /// Checkout of the repository to bind to; defaults to the working directory.
         #[arg(long)]
         repo: Option<PathBuf>,
     },
     /// Mark one unfinished run interrupted once its processes and supervisor are gone; keeps its worktree and workspace and leaves other runs alone.
+    ///
+    /// An `integrating` run goes back to `awaiting_integration`, and a run awaiting integration
+    /// that a dead supervisor still leases only loses the lease. A live wrapper's run is the
+    /// supervisor's to adopt, and a live supervisor's lease is never taken: stop it first. The
+    /// task stays `in_progress`: the supervisor's recovery job decides the next step, and a
+    /// retry a person decides is `ready ID` (with `--inherit` to keep the run's commits). A
+    /// running supervisor recovers such runs by itself, so this is for a queue no supervisor
+    /// serves.
     Recover {
         /// Run ID from `show` or `doctor`.
         run: String,
