@@ -57,9 +57,8 @@ related:
 ```text
 ready task (dependencies completed)
   → claim TaskRun + run lease      ─┐
-  → create Git worktree              │ up to --parallel N runs at once,
-  → create cmux workspace            │ each with this state machine
-  → start session wrapper            │
+  → create Git worktree              │ up to the parallel limit at once,
+  → start session wrapper            │ each with this state machine
   → start Claude/Codex               │
   → running                          │
   → completion receipt, session idle │ (the session stays open)
@@ -70,7 +69,7 @@ ready task (dependencies completed)
   → awaiting_integration: program reviews, the binary's built-ins then the
     landing branch's [review.programs], one at a time
       first non-zero exit → revise (no agent starts); start failure / timeout → review failed
-  → headless review (claude -p, or codex exec --json read-only when
+  → headless review (Claude, or Codex read-only when
     [roles.review] says provider = "codex"; an agent's job on its
     [review.subagents.<agent>] provider when set) → verdict
       pass    → exit request → close workspace → land (single slot, push)
@@ -86,26 +85,26 @@ ready task (dependencies completed)
       → run integrated (result_commit = landed commit), task completed
       → worktree and branch removed; history kept at refs/dagq/runs/<run-id>
     conflict / failed re-validation → needs_session
-      → the supervisor resumes the session in the worktree (up to 3 attempts); it resolves,
+      → the supervisor resumes the session in the worktree (up to MAX_RESUME_ATTEMPTS); it resolves,
         reruns verification, rewrites the receipt → the supervisor lands the run whose
         integrate was called, or validates and reviews it with the resumed session open
         (failed receipt → run failed)
   → dependents become candidates; the resident loop claims them from the landed main
 failed / interrupted run (a dead run nobody leases is recovered to interrupted first;
 a run whose resumes are used up is failed with its resume_exhausted alert)
-  → headless recovery job (claude -p, or codex exec --json read-only when
+  → headless recovery job (Claude, or Codex read-only when
     [roles.recovery] says provider = "codex") → verdict; the runtime checks the action again,
     then closes its workspaces
       retry          → task ready → a new run (only without commits of its own)
       retry_inherit  → task ready → a new run carrying the branch over (once per task)
       resume         → needs_session → resumed like above (while resumes are left)
       wait           → the job runs again after recheck_after_secs
-      escalate / low confidence / refused / 3 jobs used → decide ask
+      escalate / low confidence / refused / jobs used up → decide ask
                        (retry / resume / cancel + the job's options), applied once answered;
                        a job's option goes back to the job
       job failed → triage_failed (triage by hand, read as recover by hand);
                    its provider could not be used (provider_unusable, a role that names its
-                   provider) → the next round on the other provider (task 1225),
+                   provider) → the next round on the other provider,
                    or on the same one once its hold ends ([provider_fallback] jobs = false)
 live worker alert (stalled, idle_process)
   → the same recovery job in the session's slot → repair applied, or the alert's ask;
@@ -115,7 +114,8 @@ live worker alert (stalled, idle_process)
       (or on the same one once its hold ends with [provider_fallback] jobs = false)
 ```
 
-各節は`supervisor-lifecycle/`の下の別のファイルにある。下の見出しは各ファイルへの目次で、以前この文書の中にあった節へのリンク（見出しのanchor）もここに届く。
+各節は`supervisor-lifecycle/`の下の別のファイルにある。
+下の見出しは各ファイルへの目次で、見出しのanchorへのリンクもここに届く。
 
 ## Roles
 
@@ -143,7 +143,7 @@ live worker alert (stalled, idle_process)
 
 ### headless jobのプロセス（記録と引き継ぎ）
 
-- [Headless job processes](supervisor-lifecycle/headless-job-processes.md)（task 443）
+- [Headless job processes](supervisor-lifecycle/headless-job-processes.md)
 
 ### claimを控える（load average）
 
@@ -155,11 +155,11 @@ live worker alert (stalled, idle_process)
 
 ### 空き容量を確かめる（claimと着地の検証の前）
 
-- [空き容量を確かめる](supervisor-lifecycle/disk-space.md)（[ADR-0047](../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定44、task 377）
+- [空き容量を確かめる](supervisor-lifecycle/disk-space.md)（[ADR-0047](../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定44）
 
 ### 認証と利用上限のaskの待ちとanswer
 
-- [認証と利用上限のaskの待ちとanswer](supervisor-lifecycle/queue-hold.md)（[ADR-0047](../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定42、task 437）
+- [認証と利用上限のaskの待ちとanswer](supervisor-lifecycle/queue-hold.md)（[ADR-0047](../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定42）
 
 ### 人の答えを待つrun（slotの外の待ち）
 
@@ -172,13 +172,13 @@ live worker alert (stalled, idle_process)
 ### Auto-update
 
 - [Auto-update](supervisor-lifecycle/auto-update.md)
-- [Release update](supervisor-lifecycle/release-update.md)（外部のprojectのリリースのバイナリを、crates.ioの新しいリリースの検知とinboxのaskで入れ替え、pluginも揃える。未実装）
+- [Release update](supervisor-lifecycle/release-update.md)（外部のprojectのリリースのバイナリを、crates.ioの新しいリリースの検知とinboxのaskで入れ替え、pluginも揃える）
 
 ### Source repository
 
 - [Source repository](supervisor-lifecycle/source-repository.md)（dagqのソースのrepositoryでだけ動く機能と判定）
 - [Language](supervisor-lifecycle/language.md)（runtimeの固定の文字列は英語、AIが人に向けて書く文の言語の`[language]`の設定とpromptへの渡し方）
-- [Landing branch](supervisor-lifecycle/landing-branch.md)（着地先のbranchとpushのremoteの`dagq.toml`の`[repository]`と、指定が無いときの推定。未実装）
+- [Landing branch](supervisor-lifecycle/landing-branch.md)（着地先のbranchとpushのremoteの`dagq.toml`の`[repository]`と、指定が無いときの推定）
 
 ### 人へのaskの通知（`[push]`）
 
@@ -218,7 +218,7 @@ live worker alert (stalled, idle_process)
 ## `session` wrapper
 
 - [`session` wrapper](supervisor-lifecycle/session-wrapper.md)
-- [非対話のworker](supervisor-lifecycle/headless-worker.md)（1 turnを1回の`claude -p`にする経路、`turns/`の依頼、turnの記録と停止、促しと復旧job）
+- [非対話のworker](supervisor-lifecycle/headless-worker.md)（1 turnを1回の非対話の呼び出しにする経路、`turns/`の依頼、turnの記録と停止、促しと復旧job）
 
 ## Receipt and session exit
 
@@ -253,7 +253,7 @@ live worker alert (stalled, idle_process)
 ## Finding planners (supervisor)
 
 - [Finding planners (supervisor)](supervisor-lifecycle/finding-planners.md)（proposalを求める印の付いたfindingとaskの`propose`のanswerからplannerを立てる）
-- [CI watch](supervisor-lifecycle/ci-watch.md)（設定で有効にしたrepositoryで、supervisorが着地先のbranchのCIを`gh`で見張り、既に落ちているtestの一覧を持ち、赤で`ci_failure`のfindingを記録する。task 1921）
+- [CI watch](supervisor-lifecycle/ci-watch.md)（設定で有効にしたrepositoryで、supervisorが着地先のbranchのCIを`gh`で見張り、既に落ちているtestの一覧を持ち、赤で`ci_failure`のfindingを記録する）
 
 ## Plan review (supervisor)
 
@@ -298,6 +298,6 @@ live worker alert (stalled, idle_process)
   保持の期間のCSVは一度だけNodeSampleStoreに取り込む。
 - [KPIのpush](supervisor-lifecycle/push.md)（レポートの後に目標割れの始まりと解消を記録し、host.tomlの`[push]`のコマンドのstdinに日次・週次のまとめと目標割れの即時通知を渡す。失敗の再試行とinboxのattention。ADR-0051の決定18・22・23）
 
-### `recover` / `rebind` / `graph --format d2|svg`
+### `recover` / `rebind` / `graph`の依存図
 
 - [コマンドをまたぐ約束](supervisor-lifecycle/commands.md#復旧と束縛と依存図のコマンドをまたぐ約束)（supervisorの自動の回収と人の`recover`の分担、束縛の検査を通らない`rebind`、依存図とレポートの共有）

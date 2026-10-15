@@ -38,19 +38,9 @@ size = 35535
 line = 1502
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle.md"
-tasks = 8
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/abandon.md"
 line = 2808
 tasks = 6
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/actor-model.md"
-size = 32930
-line = 1807
-tasks = 44
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/ask.md"
@@ -107,16 +97,6 @@ line = 3988
 tasks = 18
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/handoff.md"
-line = 3519
-tasks = 13
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/headless-job-processes.md"
-line = 1111
-tasks = 10
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/host-metrics.md"
 tasks = 7
 
@@ -147,10 +127,6 @@ tasks = 8
 [[doc]]
 path = "docs/design/supervisor-lifecycle/landing-recheck.md"
 line = 2853
-tasks = 5
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/language.md"
 tasks = 5
 
 [[doc]]
@@ -196,11 +172,6 @@ line = 1661
 tasks = 2
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/roles.md"
-line = 1752
-tasks = 18
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/run-environment.md"
 size = 53375
 line = 3131
@@ -222,8 +193,8 @@ line = 1174
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/supervise.md"
-size = 42997
-line = 5419
+size = 33096
+line = 1261
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/throughput-review.md"
@@ -251,7 +222,3 @@ path = "docs/design/supervisor-lifecycle/waiting.md"
 line = 2014
 tasks = 14
 
-[[doc]]
-path = "docs/design/supervisor-lifecycle/worker-model.md"
-line = 1345
-tasks = 5
