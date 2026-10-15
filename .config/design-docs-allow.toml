@@ -38,11 +38,6 @@ size = 35535
 line = 1502
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/abandon.md"
-line = 2808
-tasks = 6
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/ask.md"
 line = 2679
 tasks = 24
@@ -58,11 +53,6 @@ path = "docs/design/supervisor-lifecycle/backend-call-failures.md"
 tasks = 10
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/background-recovery-job.md"
-line = 3871
-tasks = 14
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/claim-defer.md"
 tasks = 6
 
@@ -70,10 +60,6 @@ tasks = 6
 path = "docs/design/supervisor-lifecycle/claim-hold.md"
 line = 1621
 tasks = 10
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/cleanup-and-recovery.md"
-line = 1782
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/disk-space.md"
@@ -101,11 +87,6 @@ path = "docs/design/supervisor-lifecycle/host-metrics.md"
 tasks = 7
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/idle-without-receipt.md"
-line = 1480
-tasks = 8
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/install.md"
 line = 5110
 tasks = 9
@@ -130,11 +111,6 @@ line = 2853
 tasks = 5
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/needs-session.md"
-line = 3353
-tasks = 15
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/observer.md"
 size = 55866
 line = 5229
@@ -151,10 +127,6 @@ size = 41468
 [[doc]]
 path = "docs/design/supervisor-lifecycle/push.md"
 tasks = 3
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/receipt-and-session-exit.md"
-tasks = 15
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/release-update.md"
@@ -174,11 +146,6 @@ line = 2575
 tasks = 27
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/session-wrapper.md"
-line = 1193
-tasks = 5
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/source-repository.md"
 line = 1174
 
@@ -194,11 +161,6 @@ line = 3093
 tasks = 29
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/triage.md"
-line = 3615
-tasks = 10
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/up-down.md"
 size = 53638
 line = 5846
@@ -207,9 +169,4 @@ line = 5846
 path = "docs/design/supervisor-lifecycle/validation.md"
 line = 2027
 tasks = 4
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/waiting.md"
-line = 2014
-tasks = 14
 
