@@ -197,8 +197,8 @@ eventの種類にはmigrationが要らないが（上の「eventの種類と欄�
 | 名前 | 直す文書 |
 | --- | --- |
 | `[ci_watch]` | [Run environment](run-environment.md)、[`supervise`](supervise.md)（passごとの読み直しとclaim・着地の保留） |
-| `dagq ci failures`（新しい読むコマンド） | [domain-model](../domain-model.md)の「Current operations」、[Authorization](../authorization.md)の「Policy」と「ほかのコマンド」（`ci.read`。workerとjobには許さない）と[Security](../security.md)、[Queue service](../queue-service.md)の「まだ無いもの」、pluginのdagqの`reference/inspect.md`と`reference/authority.md`（documents.mdの「権限の表を写す文書」） |
-| `finding dismiss --covered-by`・`covered_by_task` | [domain-model](../domain-model.md)の`finding dismiss`、[Queue service](../queue-service.md)の`finding_dismiss`（引数`covered_by`）、[Authorization](../authorization.md)（capabilityは`finding.dismiss`のままで、表は変えない）、[persistence](../persistence.md)の「findings」、pluginの`dagq-planner`の`SKILL.md`と`reference/register.md`の`finding dismiss`の書き方 |
+| `dagq ci failures`（新しい読むコマンド） | `src/main.rs`のclapの定義（`--help`）、[Authorization](../authorization.md)の「Policy」と「ほかのコマンド」（`ci.read`。workerとjobには許さない）と[Security](../security.md)、[Queue service](../queue-service.md)の「まだ無いもの」、pluginのdagqの`reference/inspect.md`と`reference/authority.md`（documents.mdの「権限の表を写す文書」） |
+| `finding dismiss --covered-by`・`covered_by_task` | `--help`と`domain::finding::check_covered_by`のdoc comment、[Queue service](../queue-service.md)の`finding_dismiss`（引数`covered_by`）、[Authorization](../authorization.md)（capabilityは`finding.dismiss`のままで、表は変えない）、[persistence](../persistence.md)の「findings」、pluginの`dagq-planner`の`SKILL.md`と`reference/register.md`の`finding dismiss`の書き方 |
 | `status`の`ci`、attention `ci_watch_unavailable`・`ci_jobs_missing`と`next`の値 | `domain::event_attention`と`application::health`の`attention`、pluginの`dagq-inbox`の`reference/status.md`（`next`の手当て: `log in to gh`は人が`gh auth login`を打つ） |
 | `doctor`の`ci_watch` | `application::ci_watch::doctor`、pluginの`dagq-recover`の`reference/doctor.md` |
 | `up`のpreflightの`gh` | [`up` / `down`](up-down.md)、pluginの`dagq-recover`の`reference/up-down.md` |

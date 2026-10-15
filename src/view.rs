@@ -1,7 +1,8 @@
 //! Compact views of `show` and `goal show` for the sessions (ADR-0016):
 //! a size bounded by the number of runs or tasks, not by their history.
 //! Keys keep the names of the full output; a view only omits keys or
-//! truncates strings. An object with a truncated string carries
+//! truncates strings, and adds what the full output lacks, such as a
+//! task's `claim_deferral`. An object with a truncated string carries
 //! `truncated: true`, and `--full` prints the stored records unchanged.
 
 use serde_json::{Map, Value, json};

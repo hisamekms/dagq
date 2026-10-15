@@ -239,6 +239,7 @@ pub(crate) fn explains_last_error(event: &RunEvent) -> bool {
 /// The code of the run's `last_error` (or of its interruption): that of the
 /// latest of `events` (the run's, oldest first) that set it and carries a
 /// code. `None` when that event predates the codes or nothing set it.
+/// `status` and `show` print it as `last_error_code`.
 pub fn last_error_code(events: &[RunEvent]) -> Option<ReasonCode> {
     events
         .iter()
@@ -259,7 +260,8 @@ pub fn run_error_code(run: &TaskRun, events: &[RunEvent]) -> Option<ReasonCode> 
 /// counting both would count one failure twice: the park's
 /// `evidence_missing` / `scope_violation` beside `validation_finished`,
 /// and `backend_call_failed` beside the step that failed with it (which
-/// `stats` counts in `backend_failures`).
+/// `stats` counts in `backend_failures`). `stats` leaves them out of its
+/// `reason_codes`.
 pub const REPEATED_CODE_KINDS: [&str; 3] =
     ["evidence_missing", "scope_violation", "backend_call_failed"];
 

@@ -2132,7 +2132,9 @@ pub(super) fn next_id(conn: &Connection, table: &str) -> Result<i64> {
 }
 
 /// Close `goal_id` with `verdict` as `goal close` does (`achieved` only
-/// when its follow-ups' membership is settled), recording
+/// when its follow-ups' membership is settled), in the caller's
+/// transaction: the one check of `goal close`, a goal review's `achieved`
+/// and an `approve_goal` answer alike. Records
 /// `goal_closed` with the task counts and the fields of `extra` (who closed
 /// it and why, for a goal review), and `dependency_stranded` on each task
 /// an `abandoned` close leaves that others wait on.

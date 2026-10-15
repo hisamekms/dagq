@@ -125,60 +125,53 @@ pathは`src/domain/`から。
 
 ## Current operations
 
-CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と`--help`が持ち、ここには判断の入口と約束だけを置く。
+CLIの各コマンドが許すstatus・記録するevent・flagごとの振る舞いは`src/main.rs`のclapの定義（`--help`）と、判断の定義のそばのdoc commentが持つ。
+ここには判断の入口と、コードから読めない約束だけを置く。
 
 ### taskの遷移と編集
 
 - 遷移の判断: `TaskStatus::transition`（`TaskAction`ごとに許す元のstatus）。
-- `submitted → ready`はplan reviewの経路（`proposal::accept`）だけが行い、bypassの無い`ready`はdraftとsubmittedを拒む。
-  人の`ready --bypass-review`は`review_bypassed`を記録して飛ばす。
-- 中身の編集（`edit`）はdraftとsubmittedだけで、readyのtaskはsubmittedに戻してから直す（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)決定9・14）。
-  例外として、最新のrunが終わり生きているrunの無い`in_progress`のtaskのverifyだけはuserとinboxが変えられる（[ADR-t883-1](../adr/2026-09-30-t883-1-edit-ended-run-verification-before-inherited-retry.md)）。
-- 走っているrunは`prompt.txt`の写しのままで、編集は次のclaimから効く。
-- 重複のcancel（`cancel --duplicate-of`）の重複先は`canceled`でないtaskに限り、記録が連鎖も循環もしない（[ADR-0063](../adr/0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md)決定5）。
+- `submitted → ready`の道はplan review（`proposal::accept`）と人のbypassの2つだけ。
+- 中身の編集は`task::edit`（`TaskStatus::content_editable`）が決め、plan reviewを通った中身は直さずに戻してから直す（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)決定9・14）。
+  例外は終わったrunのverifyだけの直し（`task::edit_ended_verify`、[ADR-t883-1](../adr/2026-09-30-t883-1-edit-ended-run-verification-before-inherited-retry.md)）。
+- 重複のcancelの判断は`task::duplicate_refusal`で、重複の記録は連鎖も循環もしない（[ADR-0063](../adr/0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md)決定5）。
 
 ### 優先度
 
-- 基の値は個別の指定、無ければ所属goalの優先度、goalが無ければ`normal`で、1か所の`domain::base_priority`が決める（[ADR-t1639-1](../adr/2026-10-04-t1639-1-goal-priority-is-the-source-tasks-inherit-and-goals-carry-tags.md)決定2）。
+- 基の値は1か所の`domain::base_priority`が決める（[ADR-t1639-1](../adr/2026-10-04-t1639-1-goal-priority-is-the-source-tasks-inherit-and-goals-carry-tags.md)決定2）。
 - 個別の指定の無いtaskは状態によらずgoalの今の値に追随し、claimの時に凍らせない（[ADR-t1811-1](../adr/2026-10-05-t1811-1-tasks-without-own-priority-follow-the-goal-in-every-status.md)）。
-  runがclaimされた優先度は表示でなく`run_claimed`の記録で読む。
 - plan reviewはAI由来のtaskの個別の優先度を外す（人が置いた値と人間由来は残す。[Plan review](supervisor-lifecycle/plan-review.md)の6）。
-- 誰が置いたか（`PriorityBy`。`human`は人・inbox・依頼の値）は効く段（`PrioritySource`）と別の軸で、goal・taskの由来（`RecordedOrigin`）は作成時に1回だけ書く（`domain::plan_request`、ADR-t1975-1決定2・5）。
-- AIの移動は継いだ`human`の値を残し`out_of_scope`は外す（`task::set_goal`）。
+- 誰が置いたか（`PriorityBy`）は効く段（`PrioritySource`）と別の軸で、goal・taskの由来（`RecordedOrigin`）は作成時に1回だけ書く（`domain::plan_request`、ADR-t1975-1決定2・5）。
+  goalを移るときの扱いは`task::set_goal`。
 - 効く優先度（`application::effective_priority`）は自分を推移的に待つ`ready`のtaskの値も継ぐが、永久にclaimされないtaskからは継がない（[ADR-t791-1](../adr/2026-09-28-t791-1-effective-priority-ignores-tasks-waiting-on-abandoned-goals.md)）。
 - claimの順・`needs_session`の再開・復旧jobは効く優先度で1つの列に並ぶ（`domain::slot_order`、[ADR-t1850-1](../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)）。
   goal間のrankは作らない。
 
 ### proposalとplan review
 
-- `submit`はdraftのtaskとgoalを1つのproposalにする入口で、判断は`proposal.rs`、保存は`TaskStore::submit`。
+- 判断は`proposal.rs`、保存は`TaskStore::submit`。
 - taskとgoalは同時に1つのactiveな（`submitted` / `revising`の）proposalにだけ属する（`proposal::check_task_joins` / `check_goal_joins`）。
-- 所属の判断の無いfollow_upのdraftは、`submit`・`lint`・`ready --bypass-review`が同じ条件で止める（[ADR-t1504-2](../adr/2026-10-04-t1504-2-runtime-records-and-enforces-follow-up-membership-judgements.md)決定7、判定は[所属の判断](follow-up-membership.md)の「submit・lint・plan review」）。
+- 所属の判断の無いfollow_upのdraftは、plan reviewへの入口と、それを飛ばす入口と、その検査で同じ条件で止まる（[ADR-t1504-2](../adr/2026-10-04-t1504-2-runtime-records-and-enforces-follow-up-membership-judgements.md)決定7、判定は[所属の判断](follow-up-membership.md)の「submit・lint・plan review」）。
 - `lint`はrepositoryに依存しない決まった規則だけを持つ純粋関数`domain::lint::lint`で、repository固有の規則はplan reviewのpromptが文書から読む。
-- approveは、submitの後に所属goalが閉じたtaskを`ready`にせず`draft`に戻す（閉じたgoalのtaskはclaimされないため）。
-- `proposal withdraw`は閉じていない`approve_plan`のaskも閉じる。
-  開いたままだと、taskが次に入ったproposalにその回答が当たるため。
+- plan reviewのapproveは閉じたgoalのtaskをreadyにしない（`infrastructure::proposals::approve`）。
+  閉じたgoalのtaskはclaimされないため。
 
 ### claimと実行の順
 
 - `claim`だけが`ready → in_progress`へ動かし、同じトランザクションで`TaskRun::new`がrunを作る。
 - 候補は依存が全て`completed`、goal依存が全て`achieved`で閉じ、draftのgoalに属さず再計画中でもholdでもないreadyのtask（`READY_QUERY`）。
-- 規則の順は`dependency_graph`の`candidates`（効く優先度 → 解放する数 → ID）、claimと表示は`claim_order`がagingを足す。
-  stats・KPIの標本は控えを除かない。
-  規則の順は`candidates --ignore-deferrals`で読む。
-- CLIの`candidates`と`graph`の`candidates`は共有の`claim_view`で、supervisorが最後に記録したclaimの控えを除き`deferred`に理由・ファイル・原因のrunと出す（[ADR-t1992-1](../adr/2026-10-07-t1992-1-candidates-show-the-order-as-claimed-from-the-supervisor-s-deferral-records.md)）。
-  CLIは記録を読むだけで、claimを止める条件と生きたsupervisorの不在は`candidates`だけの`held`に出す。
-- `wait_for_build`のtaskは、判定したsupervisorが順に名指したときだけclaimされ、順を渡さないclaimは取らない（[ADR-t1632-1](../adr/2026-10-05-t1632-1-claim-waits-for-a-build-that-contains-the-dependencies-landings.md)）。
+- 規則の順は`dependency_graph`の`candidates`、agingは`domain::claim_order`が足す。
+- 読む口はsupervisorが記録したclaimの控えを読むだけで、自分では判定しない（`application::claim_view`、[ADR-t1992-1](../adr/2026-10-07-t1992-1-candidates-show-the-order-as-claimed-from-the-supervisor-s-deferral-records.md)）。
+- `wait_for_build`のtaskは、判定したsupervisorが順に名指したときだけclaimされる（[ADR-t1632-1](../adr/2026-10-05-t1632-1-claim-waits-for-a-build-that-contains-the-dependencies-landings.md)）。
 - canceled・失敗・中断・統合待ち・着地中・セッション待ちは、依存の完了の条件を満たさない。
 
 ### goal
 
 - close: `goal::close`が所属taskのstatusをverdictが許すかを決め、`goal::check_follow_ups`が`achieved`の前に元goalのfollow_upの所属の判断を求める（ADR-t1504-2決定8）。
-  `goal close`・goal reviewの`achieved`・`approve_goal`の答えは同じトランザクションの検査を通る。
-- 開き直し: `achieved`で閉じたgoalだけを、`correct_goal`のaskへの人の`reopen`で開き直す（`goal::reopen`、ADR-t1504-2決定9）。
-  開き直したgoalを待つtaskのうちまだclaimされていないものは再び待ち、走っているrunは止めない。
+  閉じる経路はどれも同じトランザクションの検査を通る。
+- 開き直し: `achieved`で閉じたgoalだけを人が開き直す（`goal::reopen`、ADR-t1504-2決定9）。
+  開き直しは走っているrunを止めない。
 - `abandoned`で閉じたgoalへの依存は新しく張れない（`goal::check_accepts_dependents`）。
-  張ったtaskは永久にclaimされないため。
 - acceptanceの版は集約の欄ではなく`GoalDetail`の欄で、文が変わったときだけ増え、所属の判断が判定時の版を持つ。
 - 所属taskが全部終わったopenのgoalは、supervisorのgoal reviewが閉じるか、足りないものをdraftにするか、人に聞く（[Goal review](supervisor-lifecycle/goal-review.md)）。
 
@@ -191,17 +184,14 @@ CLIの各コマンドの引数と出力の欄は`src/main.rs`のclapの定義と
 
 ### taskのhold
 
-- holdはdraftと別の印で、taskのstatusを変えず、plan reviewを通った扱いを失わせない（ADR-t1879-1）。
-- ready・submitted・in_progressのtaskだけが受け、draft・editでは外れず、終端で効きを失う。
-- claim・resume・復旧jobの開始は、再計画の保護と同じ`task_replan::check_step`が拒み、片方の解除はもう片方を外さない。
-- 走っているrunをturnの境界で止めることと解除の続け方は予定（[taskのhold](../plans/task-hold.md)）。
+判断の入口は`domain::task_hold`、予定の部分は[taskのhold](../plans/task-hold.md)が持つ。
 
 ### attentionと読む口
 
 - attentionの判定は`event_attention`・`run_attention`・`supervisor_attention`、次の一手は`AttentionNext`（`src/domain/mod.rs`）。
   attentionは全てinboxのもので、plannerのものは無い（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)決定17）。
-- `show`・`goal show`の圧縮形（`view`）は`--full`のキー名を変えずに省くか切り、全文に無い`claim_deferral`などを足す。
-- `ci failures`は`ci_checked`のeventを畳み込んだビュー（`domain::ci_watch::WatchState::fold`）で、表を持たない（[CI watch](supervisor-lifecycle/ci-watch.md)）。
+- 圧縮した表示（`src/view.rs`）は全文のキー名を変えない（[ADR-0016](../adr/0016-maintainer-notification-and-compact-output.md)）。
+- CIの見張りの状態は`run_events`を畳み込んだビュー（`domain::ci_watch::WatchState::fold`）で、表を持たない（[CI watch](supervisor-lifecycle/ci-watch.md)）。
 
 ### 役割の柵
 
@@ -303,7 +293,7 @@ runtimeやjobが作ったdraftに、runtimeが同じきっかけの束ごとに1
 - 人の答えだけを待って終わったplanner（`PlannerSession::answer_wait_at`、draftの結末`DraftOutcome::AnswerWait`）はどの上限にも数えない（[ADR-t1704-1](../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定5）。
 - 同時に立つplannerの数の上限は束1つを1と数え、他の種類のplannerと共有する。
 - 人を経ずに採用できるfollow_upの上限は`adopt_needs_person`（深さは[ADR-t808-1](../adr/2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md)）。
-- 落とし穴: follow_upの深さは`add`・人のsubmit・人の`adopt`を経たsubmit・`ready --bypass-review`で0に戻り、runtimeのplannerが人を経ずにsubmitしたtaskではそのまま残る。
+- 落とし穴: follow_upの深さは人を経ると0に戻り、runtimeのplannerが人を経ずにsubmitしたtaskではそのまま残る（`DraftPlannerStore::follow_up_depth`）。
 - 知らない`AskKind`は`Other`として読み、記録はするがruntimeは適用しない（[ADR-0073](../adr/0073-kind-additions-are-compatible.md)決定21）。
 
 ## Planning requests
@@ -344,12 +334,11 @@ runtimeやjobが作ったdraftに、runtimeが同じきっかけの束ごとに1
 - コードに添える値にpath・workspace ID・pidなどマシンに依る値を入れない（[ADR-0032](../adr/0032-classify-records-into-domain-events-diagnostics-coordination-and-bodies.md)）。
 - どのeventがどのコードを書くかは記録する経路のコードが持ち、cmuxの失敗の`backend_*`は`application::reason_of_error`が決める。
 - 落とし穴: コードが入る前のeventには`code`が無く、読む側はそれを許す。
-- 落とし穴: validationの保留に添えるeventと`backend_call_failed`は、別のeventと同じコードを重ねて持つので、`stats`の`reason_codes`は数えない（`REPEATED_CODE_KINDS`）。
+- 落とし穴: validationの保留に添えるeventと`backend_call_failed`は、別のeventと同じコードを重ねて持つので、数えるときは除く（`REPEATED_CODE_KINDS`）。
 - runの`last_error`のコードは`domain::reason::last_error_code`が、`last_error`を書いたか中断したeventのうち最新のものから導く（どのeventが当たるかは`explains_last_error`）。
-  `status`・`show`の`last_error_code`と`stats`の`reason_codes`がこれを読む（[status](supervisor-lifecycle/commands.md)）。
 
 ## CIの見張り（ADR-t1920-1）
 
 - 着地先のbranchで既に落ちているtestの一覧は`domain::ci_watch::WatchState`が持つ（[ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)）。
-- `finding dismiss --covered-by`は`ci_failure`のfindingにだけ、閉じていないtaskだけを受ける（`domain::finding::check_covered_by`）。
+- 既に直しているtaskでfindingを閉じる判断は`domain::finding::check_covered_by`。
 - 見張りの流れと設定は[CI watch](supervisor-lifecycle/ci-watch.md)。

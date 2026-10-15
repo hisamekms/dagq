@@ -37,7 +37,8 @@ pub trait TaskStore {
     fn add_goal_dependency(&mut self, task_id: TaskId, goal_id: GoalId) -> Result<()>;
     fn remove_goal_dependency(&mut self, task_id: TaskId, goal_id: GoalId) -> Result<()>;
     /// Dependency-ready tasks in claim order (ADR-0040 decision 4); each
-    /// task is limited to one unfinished run.
+    /// task is limited to one unfinished run. No claim deferral is left
+    /// out: the supervisor leaves out its own, and the stats count them all.
     fn candidates(&self) -> Result<Vec<Task>>;
     /// The ready tasks that wait for a build containing their
     /// dependencies' landings (ADR-t1632-1), each with the landed commits
@@ -321,7 +322,10 @@ pub trait DraftPlannerStore {
     /// Drafts still `draft` whose planners were used up
     /// (`draft_planner_exhausted`), by ID.
     fn exhausted_drafts(&self) -> Result<Vec<Task>>;
-    /// The `follow_up_depth` of a task (ADR-0037 decision 6).
+    /// The `follow_up_depth` of a task (ADR-0037 decision 6). It goes back
+    /// to 0 when a person registers, submits (an adopted draft included) or
+    /// readies past plan review; a task a planner of the runtime's
+    /// submitted without a person keeps it.
     fn follow_up_depth(&self, task: TaskId) -> Result<i64>;
     fn set_follow_up_depth(&mut self, task: TaskId, depth: i64) -> Result<()>;
     /// The findings waiting for a planner of the runtime's (ADR-0044

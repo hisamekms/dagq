@@ -921,7 +921,9 @@ string_enum!(PrioritySource {
 /// A task's priority before the claim order raises it (ADR-t1639-1
 /// decision 2), and where it comes from: `own`, the task's own setting,
 /// when it has one, else `goal`, the priority of the goal it belongs to,
-/// else `normal`. The effective priority starts from this value.
+/// else `normal`. The effective priority starts from this value. A task
+/// without its own follows its goal's current value in every status; the
+/// priority a run was claimed at is the one its `run_claimed` event records.
 pub fn base_priority(own: Option<Priority>, goal: Option<Priority>) -> (Priority, PrioritySource) {
     match (own, goal) {
         (Some(own), _) => (own, PrioritySource::Task),

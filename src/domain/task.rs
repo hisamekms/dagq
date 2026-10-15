@@ -679,7 +679,8 @@ pub fn check_not_self(task_id: TaskId, predecessor_id: TaskId) -> Result<(), Dom
 
 /// Why `task_id` may not be canceled as a duplicate of `duplicate_of`
 /// (ADR-0046 decision 5), `None` when it may: not of itself, and of a task
-/// that exists and is not canceled. `target` is `duplicate_of`'s status
+/// that exists and is not canceled, so the records never chain or loop.
+/// `target` is `duplicate_of`'s status
 /// and, when a cancel made it a duplicate, its original, which the refusal
 /// names; `None` when it does not exist.
 pub fn duplicate_refusal(

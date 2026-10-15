@@ -246,7 +246,8 @@ enum Command {
     /// in-progress task whose runs all failed or were interrupted returns to ready (a retry).
     Ready {
         id: i64,
-        /// Skip plan review (recorded as a review_bypassed event).
+        /// Skip plan review (recorded as a review_bypassed event). A follow-up without a current
+        /// membership judgement is refused, as submit refuses it.
         #[arg(long, conflicts_with = "inherit")]
         bypass_review: bool,
         /// Retry an in-progress task whose latest run failed or was interrupted, carrying that
@@ -262,7 +263,8 @@ enum Command {
     Draft { id: i64 },
     /// Submit draft tasks for plan review as one proposal owned by this planner session: TASKs,
     /// and with --goal a goal and its draft tasks. The tasks become submitted, which no claim
-    /// takes; plan review makes them ready. Prints the proposal.
+    /// takes; plan review makes them ready. A follow-up draft without a current membership
+    /// judgement is refused. Prints the proposal.
     #[command(group = clap::ArgGroup::new("members").multiple(true).required(true))]
     Submit {
         /// Draft task to submit; repeatable.
@@ -364,9 +366,11 @@ enum Command {
         #[arg(long)]
         none: bool,
     },
-    /// Replace fields of a draft or submitted task. User or inbox may replace only --verify
-    /// on an in_progress task after its latest run ended and no live run remains. Each given
-    /// field replaces the old value; `task_edited` records old and new values and actor.
+    /// Replace fields of a draft or submitted task; a ready task is refused until it goes back
+    /// (`draft`, or plan review's reopen to submitted). User or inbox may replace only --verify on an in_progress task after its latest run ended and
+    /// no live run remains. Each given field replaces the old value; `task_edited` records old
+    /// and new values and actor. A run already started keeps its prompt; the edit takes effect
+    /// from the next claim.
     #[command(group = clap::ArgGroup::new("field").multiple(true).required(true))]
     Edit {
         /// Draft or submitted task, or an eligible in_progress task for --verify only.
