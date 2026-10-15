@@ -53,20 +53,6 @@ path = "docs/design/supervisor-lifecycle/backend-call-failures.md"
 tasks = 10
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/claim-defer.md"
-tasks = 6
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/claim-hold.md"
-line = 1621
-tasks = 10
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/disk-space.md"
-line = 3087
-tasks = 23
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/draft-planners.md"
 size = 48695
 line = 4938
@@ -90,25 +76,6 @@ tasks = 7
 path = "docs/design/supervisor-lifecycle/install.md"
 line = 5110
 tasks = 9
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/integrate-errors.md"
-tasks = 5
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/integrate.md"
-size = 42841
-line = 11174
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/landing-branch.md"
-line = 1388
-tasks = 8
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/landing-recheck.md"
-line = 2853
-tasks = 5
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/observer.md"
@@ -164,9 +131,4 @@ tasks = 29
 path = "docs/design/supervisor-lifecycle/up-down.md"
 size = 53638
 line = 5846
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/validation.md"
-line = 2027
-tasks = 4
 
