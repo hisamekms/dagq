@@ -153,11 +153,6 @@ path = "docs/design/supervisor-lifecycle/push.md"
 tasks = 3
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/queue-hold.md"
-line = 1616
-tasks = 19
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/receipt-and-session-exit.md"
 tasks = 15
 
