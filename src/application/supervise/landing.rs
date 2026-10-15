@@ -98,6 +98,7 @@ impl Supervisor<'_> {
         let verifier = self.verifier.clone();
         let container = self.container.clone();
         let verification_tokens = self.verification_tokens.clone();
+        let verification_containers = self.verification_containers.clone();
         let processes = self.processes.clone();
         let files = self.files.clone();
         let pid = self.layout.pid;
@@ -145,6 +146,7 @@ impl Supervisor<'_> {
                         &**server as &dyn crate::application::SccacheServer
                     }),
                     verification_tokens: &*verification_tokens,
+                    verification_containers: &*verification_containers,
                 },
                 &request,
             )

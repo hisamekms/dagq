@@ -932,7 +932,7 @@ pub struct QueueRunMachine {
 }
 
 impl crate::application::podman_machine::RunMachine for QueueRunMachine {
-    fn ready(&self, run: &str, build_output: bool) -> Result<String> {
+    fn ready(&self, run: &str, build_output: Option<&str>) -> Result<String> {
         let checkout = self
             .main_checkout
             .as_deref()
@@ -981,9 +981,14 @@ impl crate::application::podman_machine::RunMachine for QueueRunMachine {
                 },
             )?;
         }
-        if build_output {
-            QueueVolumes::of_queue(self.podman.clone(), &queue_dir)?.create_build_output(run)?;
+        if let Some(volume) = build_output {
+            QueueVolumes::of_queue(self.podman.clone(), &queue_dir)?.create_build_output(volume)?;
         }
         Ok(image)
+    }
+
+    fn remove_build_output(&self, build_output: &str) -> Result<()> {
+        let queue_dir = super::queue_service::queue_dir_of(&self.db);
+        QueueVolumes::of_queue(self.podman.clone(), &queue_dir)?.remove_build_output(build_output)
     }
 }

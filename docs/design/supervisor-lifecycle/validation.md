@@ -71,6 +71,7 @@ verifyが通れば人のaskに上げ、人の答えで閉じる。
   結果は同じheadとともに`run_satisfied_verified`に残す（欄の意味は`event_kind`のdoc comment）。
   流す間はslotとleaseを持ち、handoffはこれを待つ。
   verificationのruntimeがcontainerで使えない間は、hostで流さずに検証を始めず、runは受理のまま休み、使えるようになった後のpassが始める（[container runtime](../container-runtime.md#fail-closedの境界)、`satisfied::awaits_verification`）。
+  使えるようになっても、snapshotの検証はcontainerで流さず、hostでも流さずに拒み、流せなかった失敗として記録してaskに進む。
 - **ask**: verifyの後に`approve_close`のask（理由は`scope`）を開き、questionにsnapshotのheadを載せ、leaseを外してrunを`validating`のまま休ませる。
   verifyが落ちていればoptionsから`close`を外し、questionに落ちたことを書く。
   休む間は開いたask（検証の前ならcontainerの知らせ）がattentionで、supervisorの死んだrunの回収も、人の`recover`と`doctor`も、このrunを取らない（`satisfied::blocks_recovery`）。
@@ -115,6 +116,9 @@ validatingは今と同じく検証のコマンドを流さず、置き換えも`
 - **既に落ちているtest**: [CI watch](ci-watch.md)の一覧のtestは着地の検証から外す。
   CIの修正taskのrunでは、そのfindingのtestを外さない（他のfindingのtestは外す）。
   runtimeはrunのtaskについて読んだ一覧（修正taskのrunではそのfindingの項目を外す対象から除いたもの）を渡し、外す適用は設定のコマンドとscriptが受け持つ。
+- **containerのverification**: verificationがcontainerなら、置き換えたコマンドも登録のままのコマンドもそのcontainerで流れ、既に落ちているtestの一覧は材料のdirに置く（[Container runtime](../container-runtime.md#verificationの実行)）。
+  containerはLinuxなので、OSに固有のtestは着地の検証で流れない。
+  このrepositoryのmacOSに固有のtestは、mainのCIのmacOSのjobだけが流す（[ADR-t2182-1](../../adr/2026-10-14-t2182-1-macos-specific-tests-are-left-to-the-ci-macos-job-not-the-container-verification.md)）。
 - **最終関門**: 着地の検証が見逃した壊れはmainのCIが拾い、CIの見張りが修正taskにする。
   mainの前でCIを通す仕組みと着地のrevertは無く、自動更新にもCIの確かめや全testを足さない。
   全部のe2eの関門（下の節と[Auto-update](auto-update.md)）と固定バイナリを前のものに戻す手順は変わらない。

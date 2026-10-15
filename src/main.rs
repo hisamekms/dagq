@@ -2022,6 +2022,17 @@ enum RelayCommand {
         #[arg(last = true, required = true)]
         agent: Vec<String>,
     },
+    /// One command of integrate's verification in its container: start the forwarder, give the
+    /// command after `--` the proxy variables with the verification's token of --token-file
+    /// and the run of DAGQ_RUN_ID, and run it in the current directory. Exits with its code;
+    /// its output is the command's.
+    #[command(hide = true)]
+    Verify {
+        #[arg(long)]
+        token_file: PathBuf,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
 }
 
 #[derive(Subcommand, Clone)]
@@ -3423,6 +3434,21 @@ fn relay(command: &RelayCommand) -> Result<Value> {
                     base: base.clone(),
                     branch: branch.clone(),
                     agent: agent.clone(),
+                    port: dagq::domain::broker_relay::FORWARD_PORT,
+                },
+                |name| env::var(name).ok(),
+            )?;
+            std::process::exit(code)
+        }
+        // The command's output and exit code are the verification's.
+        RelayCommand::Verify {
+            token_file,
+            command,
+        } => {
+            let code = dagq::infrastructure::container_turn::run_verification(
+                &dagq::infrastructure::container_turn::VerifyOptions {
+                    token_file: token_file.clone(),
+                    command: command.clone(),
                     port: dagq::domain::broker_relay::FORWARD_PORT,
                 },
                 |name| env::var(name).ok(),
@@ -5772,6 +5798,9 @@ mod tests {
         // A worker's turn in its container (`dagq relay turn`): it opens no
         // queue, and the agent it runs is the worker's own.
         "relay turn",
+        // A command of integrate's verification in its container (`dagq
+        // relay verify`): it opens no queue, and runs the task's command.
+        "relay verify",
     ];
 
     /// Every subcommand clap knows, nested ones by their path (`goal

@@ -9,12 +9,25 @@
 # run fixes a CI failure).
 #
 # Usage: sh scripts/landing-it.sh
+#        sh scripts/landing-it.sh --prepare
 #        sh scripts/landing-it.sh --self-test
+#   --prepare    the preparation of a verification in the container
+#                (ADR-t2257-1 decision 4 (b)): on the host, in the main
+#                checkout, fetch the table into the cache as below and copy
+#                it to $DAGQ_VERIFICATION_MATERIALS/it-coverage-map.json, a
+#                directory of the control side's alone that the runtime
+#                makes for the verification; the runtime copies it into the
+#                run directory's materials, which the verification's
+#                container mounts read-only. Without a table nothing is
+#                copied, and the choice in the container runs every IT. It
+#                runs no cargo and fails only when the materials cannot be
+#                written.
 #   --self-test  check the choice (the tests chosen, including the IT not in
 #                the table, running every IT and why, and the tests left
 #                out) on the fixtures under scripts/landing-it-fixtures/
-#                (a table, a tree, a nextest list and cases.json). Needs only
-#                sh and python3.
+#                (a table, a tree, a nextest list and cases.json), and the
+#                hand-over of --prepare's table to a run in the container.
+#                Needs only sh and python3.
 #
 # Which IT (scripts/landing-it.py, choose()): over the files of
 # git diff $DAGQ_LANDING_BASE..HEAD, the union of
@@ -43,6 +56,9 @@
 # downloads a table only when a newer run is there; the older ones are
 # removed. Without gh, or when gh fails, the newest cached table is used. The
 # cache is listed in docs/design/measurement.md, section 「SSOTとビュー」.
+# In the verification's container (DAGQ_VERIFICATION_MATERIALS set, no gh and
+# no network) nothing is fetched: the table is the one --prepare copied into
+# the materials, and without one every IT runs.
 #
 # Exit status: cargo nextest's; 2 when the run cannot be prepared.
 set -eu
@@ -51,8 +67,52 @@ me=landing-it
 root=$(git rev-parse --show-toplevel 2>/dev/null) || root=$(cd "$(dirname "$0")/.." && pwd)
 py="$root/scripts/landing-it.py"
 
+# --self-test's hand-over: --prepare on the host copies the cached table into
+# the materials, and a run with the materials (as in the container) reads it
+# from there and asks gh nothing. gh and cargo are stubs: no network, no build.
+self_test_handover() {
+  t=$(mktemp -d "${TMPDIR:-/tmp}/landing-it-self-test.XXXXXX")
+  mkdir -p "$t/bin" "$t/cache/1" "$t/empty" "$t/materials"
+  printf '#!/bin/sh\n: > "%s/gh-asked"\nexit 1\n' "$t" >"$t/bin/gh"
+  printf '#!/bin/sh\necho "cargo $*"\n' >"$t/bin/cargo"
+  chmod +x "$t/bin/gh" "$t/bin/cargo"
+  fixture="$root/scripts/landing-it-fixtures/table.json"
+  cp "$fixture" "$t/cache/1/it-coverage-map.json"
+  ok=1
+  if ! PATH="$t/bin:$PATH" LANDING_IT_CACHE="$t/cache" DAGQ_VERIFICATION_MATERIALS="$t/materials" \
+      sh "$root/scripts/landing-it.sh" --prepare >"$t/prepare" 2>&1 ||
+    ! cmp -s "$fixture" "$t/materials/it-coverage-map.json"; then
+    echo "$me: self-test: --prepare did not hand the cached table over" >&2
+    cat "$t/prepare" >&2
+    ok=
+  fi
+  rm -f "$t/gh-asked"
+  PATH="$t/bin:$PATH" LANDING_IT_CACHE="$t/empty" DAGQ_VERIFICATION_MATERIALS="$t/materials" \
+    sh "$root/scripts/landing-it.sh" >"$t/run" 2>&1 || true
+  if ! grep -qF "$me: table $t/materials/it-coverage-map.json" "$t/run" || [ -e "$t/gh-asked" ]; then
+    echo "$me: self-test: a run with the materials did not read their table alone" >&2
+    cat "$t/run" >&2
+    ok=
+  fi
+  rm -rf "$t"
+  [ -n "$ok" ] && echo "$me: self-test: the hand-over of the table holds"
+  [ -n "$ok" ]
+}
+
 if [ "${1:-}" = "--self-test" ]; then
-  exec python3 "$py" self-test "$root/scripts/landing-it-fixtures"
+  python3 "$py" self-test "$root/scripts/landing-it-fixtures" || exit 1
+  self_test_handover
+  exit $?
+fi
+prepare=
+if [ "${1:-}" = "--prepare" ]; then
+  prepare=1
+  shift
+  materials=${DAGQ_VERIFICATION_MATERIALS:-}
+  if [ -z "$materials" ] || [ ! -d "$materials" ]; then
+    echo "$me: --prepare needs DAGQ_VERIFICATION_MATERIALS, a directory" >&2
+    exit 2
+  fi
 fi
 if [ $# -gt 0 ]; then
   echo "$me: unknown argument: $1" >&2
@@ -111,12 +171,27 @@ fetch_table() {
   done
   return 0
 }
-fetch_table || table_error="the cache $cache cannot be made"
-for dir in "$cache"/*; do
-  if [ -f "$dir/$artifact.json" ]; then
-    table="$dir/$artifact.json"
+if [ -n "$prepare" ] || [ -z "${DAGQ_VERIFICATION_MATERIALS:-}" ]; then
+  fetch_table || table_error="the cache $cache cannot be made"
+  for dir in "$cache"/*; do
+    if [ -f "$dir/$artifact.json" ]; then
+      table="$dir/$artifact.json"
+    fi
+  done
+elif [ -f "$DAGQ_VERIFICATION_MATERIALS/$artifact.json" ]; then
+  table="$DAGQ_VERIFICATION_MATERIALS/$artifact.json"
+else
+  table_error="the verification's materials have no table"
+fi
+if [ -n "$prepare" ]; then
+  if [ "$table" = - ]; then
+    echo "$me: no table to hand over (${table_error:-none cached}); every IT runs" >&2
+    exit 0
   fi
-done
+  cp "$table" "$DAGQ_VERIFICATION_MATERIALS/$artifact.json" || exit 2
+  echo "$me: handed over $table"
+  exit 0
+fi
 if [ "$table" != - ]; then
   [ -n "$table_error" ] && echo "$me: $table_error; using the cached table" >&2
   table_error=

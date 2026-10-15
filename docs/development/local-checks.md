@@ -17,6 +17,7 @@ related:
   - adr-t1420-1
   - adr-t1707-1
   - adr-t1480-1
+  - adr-t2182-1
   - development-documents
 ---
 
@@ -45,7 +46,11 @@ dagqのworkerは全体の`cargo test --locked`を流さず、`cargo llvm-cov`（
 - 足した・変えたtestのstress（下の「stress」）
 - `tests/it`のtestを足した・変えたら、そのstressのnextestの出力に時間の関門のscript（下の「itのtestの時間の関門」）
 
-着地の関門は`integrate`の検証がrebase後に1回だけ流す。runtimeのtaskではverifyのcoverageの関門を`dagq.toml`の`[landing_verification]`がunit test全件と影響範囲で絞ったIT（既に落ちているtestを除く）に置き換え、llvm-covを含めないtaskではverifyにあれば`cargo test --locked`を流す（[testの制約](testing.md)の「test binary」、仕組みは[integrate](../design/supervisor-lifecycle/integrate.md)と[Validation](../design/supervisor-lifecycle/validation.md#着地の検証)）。全部のtestとcoverageの80%はmainのCIが最終関門として見る。着地の検証が軽くなっても、workerの手元の検証は上のとおりで変わらない（[ADR-t1925-1](../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)決定6）。workerのpromptがverification_commandsを`integrate`が流すものとして見せ、手元の検証をこの文書に委ねる仕組みは[prompt](../design/supervisor-lifecycle/prompt.md#workerのprompt)の「workerのprompt」のverification commandsの項が持つ。例外は「resumeでの再現」の1つだけ。
+containerで動くworker（resumeを含む）の手元のtestはLinuxでbuildされ、macOSに固有のtestは流れない（[testの制約](testing.md)の「macOSに固有のtest」）。
+それを変えたときは、流せなかったことをreceiptの`tests`のevidenceに書き、確かめはmainのCIの`checks`に任せる。
+
+着地の関門は`integrate`の検証がrebase後に1回だけ流す。runtimeのtaskではverifyのcoverageの関門を`dagq.toml`の`[landing_verification]`がunit test全件と影響範囲で絞ったIT（既に落ちているtestを除く）に置き換え、llvm-covを含めないtaskではverifyにあれば`cargo test --locked`を流す（[testの制約](testing.md)の「test binary」、仕組みは[integrate](../design/supervisor-lifecycle/integrate.md)と[Validation](../design/supervisor-lifecycle/validation.md#着地の検証)）。全部のtestとcoverageの80%はmainのCIが最終関門として見る。
+`dagq.toml`がverificationをcontainerにしたときは、着地の検証はLinuxのcontainerで流れ、macOSに固有のtestはmainのCIの`checks`だけが流す（[ADR-t2182-1](../adr/2026-10-14-t2182-1-macos-specific-tests-are-left-to-the-ci-macos-job-not-the-container-verification.md)）。着地の検証が軽くなっても、workerの手元の検証は上のとおりで変わらない（[ADR-t1925-1](../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)決定6）。workerのpromptがverification_commandsを`integrate`が流すものとして見せ、手元の検証をこの文書に委ねる仕組みは[prompt](../design/supervisor-lifecycle/prompt.md#workerのprompt)の「workerのprompt」のverification commandsの項が持つ。例外は「resumeでの再現」の1つだけ。
 
 buildは原則としてworktreeの既定の`target/`で行う。例外として、worktreeの外にtargetが要るとき（使い捨てのrepositoryのbuildなど）だけ`CARGO_TARGET_DIR`を`$TMPDIR`の下に向け、`/tmp`や`/private/tmp`に直接置かない（Codexのworkerにruntimeが渡す`$TMPDIR`はrunごとに作られ、runの後に消える）。
 

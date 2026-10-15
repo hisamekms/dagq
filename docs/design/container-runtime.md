@@ -19,6 +19,7 @@ related:
   - adr-t2173-1
   - adr-t2179-1
   - adr-t2257-1
+  - adr-t2182-1
   - design-security
   - design-supervisor-lifecycle-run-environment
 ---
@@ -48,7 +49,7 @@ containerを選んだ適用先が使えないとき、hostで動かさずに控�
   その奥では`infrastructure::claude_credential::ClaudeCredentialGate`が、workerの適用先について`host.toml`で人が選んだClaudeの資格情報（既定なし）を見て、未選択・欠け・0600でなければ選び方を添えて使えないと答える（[Queue broker](queue-broker.md#claudeの認証の差し替え)、[ADR-t2177-1](../adr/2026-10-12-t2177-1-broker-swaps-the-run-token-for-a-claude-credential-chosen-in-host-toml.md)決定3）。
   その奥で`application::podman_machine::MachineGate`がdagq専用のmachineを見て、使えなければ理由つきで使えないと答える（下の「dagq専用のmachine」）。
   machineの奥では`application::container_image::ImageGate`がimageを見る（下の「image」）。
-  その奥の`infrastructure::container_runtime::ContainerExecutors`は、workerには使えると答え、verificationにはcontainerの実行がまだ無いので理由つきで使えないと答える。
+  その奥の`infrastructure::container_runtime::ContainerExecutors`は、workerにもverificationにも使えると答える。
 - worker: 各候補のclaimを控え、理由を`claim_deferred`に残す（[claimを控える](supervisor-lifecycle/claim-defer.md#workerを動かせないtask)）。
   resumeの候補からも外す（`Supervisor::container_deferral`）。
   resumeを使い切ったrunを人に渡すことは止めない。
@@ -60,16 +61,17 @@ containerを選んだ適用先が使えないとき、hostで動かさずに控�
   queueのbrokerの宛先にOpenAIが無いため（[ADR-t2114-1](../adr/2026-10-08-t2114-1-queue-broker-is-a-host-process-with-three-destinations.md)決定2）。
 - verification: supervisorは着地を始めずに待ち（`domain::landing_hold`）、drainではleaseを返して人に渡す。
   supervisorはtaskの検証のコマンドの有無を見ず、全ての着地を待たせる。
-  `integrate`自身も検証のコマンドの前に確かめ（`integrate::container_refusal`）、どのコマンドもhostで流さずにrunを元のstatusへ戻す。
-  containerが使えると答えても、verificationのcontainerの実行がまだ無いので同じく拒む。
-  `already_satisfied`の主張のmainのsnapshotの検証も同じく始めずに待ち（[Validation](supervisor-lifecycle/validation.md#already_satisfiedの検証)）、`integrate::verify_snapshot`自身も検証のコマンドの前に拒む。
+  `integrate`自身も検証のコマンドの前に確かめ（`integrate::verification_runtime`）、どのコマンドもhostで流さずにrunを元のstatusへ戻す。
+  `already_satisfied`の主張のmainのsnapshotの検証はcontainerで流さない。
+  使えない間は同じく始めずに待ち（[Validation](supervisor-lifecycle/validation.md#already_satisfiedの検証)）、使えても`integrate::verify_snapshot`が拒み、hostで流さない。
 - 知らせ: supervisorと、拒んだ`integrate`が、答えがqueueの最新の記録と違うとき（待つ適用先か理由が変わったときを含む、`ContainerCheck::transition`）に`container_runtime_unavailable` / `container_runtime_available`を記録し、前者はinbox宛てのattentionになる。
   supervisorを通さない`integrate`だけでもinboxに届く。
   人は部品が揃うのを待つか、runtimeをhostに戻すtaskを頼む。
 - 直接の起動: hostのexecutor（`HostActorExecutor`・reviewのprogramのjob）は`ExecutorBackend::Container`に置いたactorを起動せず、`ensure_implemented`が拒む。
-  containerで起動するのはworkerのturnだけで、wrapperが下の「workerの実行」で起動する。
-- 適用先の外: 着地の前のe2eとmacOSに固有のtestはhostに置く（[ADR-t2113-3](../adr/2026-10-08-t2113-3-only-workers-resume-and-integrate-verification-run-in-containers.md)決定3）。
-  verificationをcontainerにしても、runのe2eはhostで流れる。
+  containerで起動するのはworkerのturnとverificationのコマンドだけで、wrapperが下の「workerの実行」で、`integrate`が下の「verificationの実行」で起動する。
+- 適用先の外: 着地の前のe2eはhostに置き（`[e2e]`の宣言、[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定4）、verificationをcontainerにしてもrunのe2eはhostで流れる。
+  containerはLinuxなので、OSに固有のtest（このrepositoryならmacOSのもの）はcontainerのverificationでbuildされず流れず、runtimeはhostに回さない。
+  このrepositoryはそれをmainのCIのmacOSのjobに任せる（[ADR-t2182-1](../adr/2026-10-14-t2182-1-macos-specific-tests-are-left-to-the-ci-macos-job-not-the-container-verification.md)）。
 
 ## 見せ方
 
@@ -83,7 +85,7 @@ containerはdagq専用の名前のPodman machineだけで動かす（[ADR-t2113-
 - 名前と接続: machineと接続の名前は`domain::podman_machine::MACHINE_NAME`で、podmanのコマンドはmachineの名前か`--connection`でそれを名指す。
   人の既定のmachineと既定の接続は変えず、作らず、止めない。
   Podmanの版によってはinitとstartが既定の接続を変えるので、`PodmanCli`が前の既定に戻す（前に既定が無ければ戻す先が無く、dagqの接続が既定に残りうる）。
-- 起動と停止: `ensure`は無ければinitし、止まっていればstartし、使う者として数える入口で、workerのturnのcontainerの起動の前（runを使う者にする）とpodmanを要るtestとスモークの前に呼ぶ。
+- 起動と停止: `ensure`は無ければinitし、止まっていればstartし、使う者として数える入口で、workerのturnとverificationのcontainerの起動の前（runを使う者にする）とpodmanを要るtestとスモークの前に呼ぶ。
   使い終えたら`release`を呼び、使う者が居なければ止める。
   どちらもhost全体のlock（data homeの`dagq/machine/`）の中で判定と操作を行うので、並行するrun・verification・testが同時に呼んでも作るのと起動するのは1回になる。
   使う者は記録したprocessが終わっていれば数えない。
@@ -130,7 +132,7 @@ containerのimageは、runtimeが持つbaseと、`dagq.toml`が名指すproject�
 - tag: baseはruntimeのbuild識別子・Claude Codeの版・baseのContainerfile、projectはbaseのreference・Containerfileと入力のpathと中身から決まり、どれかが変われば新しいimageになる。
   projectのimageの名前はqueueを含み、あるqueueの片付けは別のqueueのprojectのimageに届かない。
   baseはhostの全てのqueueが共有し、新しいbaseを作ったqueueが他のbaseを消す（使われているものはpodmanが残す）。
-- buildと片付け: `prepare`は、workerのturnの前にmachineを動かしてから、containerの起動の前に呼ぶ（下の「workerの実行」）。
+- buildと片付け: `prepare`は、workerのturnとverificationの前にmachineを動かしてから、containerの起動の前に呼ぶ（下の「workerの実行」と「verificationの実行」）。
   `ImageGate`は見るだけである。
   無いimageを作り（baseが無ければprojectもその上に作り直す）、baseと同じqueueの古いtagを消す。
   containerが使うimageはpodmanが消させないので次の機会に残す。
@@ -145,7 +147,7 @@ containerのimageは、runtimeが持つbaseと、`dagq.toml`が名指すproject�
 runのcontainerは`--network none`で、外への経路はhostのqueueのbrokerへの1本だけにする（[ADR-t2114-3](../adr/2026-10-08-t2114-3-worker-containers-reach-the-broker-through-a-unix-socket-relay.md)決定1〜4）。
 判断は`domain::broker_relay`、use caseと門は`application::broker_relay`、relay・転送のprocessとpodmanのコマンドは`infrastructure::broker_relay`、見張りは`supervise::broker_relay`が持つ。
 
-- runのsocket: runのturnのcontainerを起動する前に、開いていなければ`application::broker_relay::open`が、machineの中にrunごとのnamed volumeを作ってそのrunのrelayを起動し、runの終わりに`close`がrelayとvolumeを消す。
+- runのsocket: runのturnかverificationのcontainerを起動する前に、開いていなければ`application::broker_relay::open`が、machineの中にrunごとのnamed volumeを作ってそのrunのrelayを起動し、runの終わりに`close`がrelayとvolumeを消す。
   relayはrunのcontainerの非rootのuidで動き、そのcontainerと同じuidの対応（`keep-id`）でvolumeの中にsocketをmode 0600で作る。
   volumeをmountするのはrelayとそのrunのcontainerだけで、どちらも`:z`を付ける。
   開いたrelayは`<queue dir>/relay/`に記録するので、machineの停止で消えたrelayも見張りが見つける。
@@ -221,6 +223,32 @@ executorは`application::run_container::PodmanActorExecutor`、設定の読み�
 - Codexに経路が向くrunは起動しない（上の「fail closedの境界」）。
 - 実物のpodmanで流すtestは`#[ignore]`で、関門に数えない。
 
+## verificationの実行
+
+`dagq.toml`がverificationをcontainerにしたrunの着地では、rebaseの後の検証のコマンドを1本ずつ、そのverificationのcontainerで流す（[ADR-t2113-3](../adr/2026-10-08-t2113-3-only-workers-resume-and-integrate-verification-run-in-containers.md)決定1）。
+結果・時間・失敗の分類の記録はhostと同じである。
+`integrate`の`ContainerVerification`が流れを持ち、準備・podman・片付けは`application::run_container::VerificationContainers`のport（adapterは`infrastructure::run_container::PodmanVerificationContainers`）、`podman run`の引数は`domain::run_container::verification_run_args`、containerの中は`dagq relay verify`が持つ。
+
+- 準備: machine・image・runのrelayをworkerのturnと同じ`RunMachine`で用意し、`dagq.toml`がbuildの出力のdirを名指せば、そのverificationごとの新しいvolumeを作る（workerのrunのvolumeと共有しない）。
+  名指さなければvolumeを作らずmountもしない。
+- verificationのdir: 制御側だけのverificationのcloneの親のdirの下に、verificationごとの新しいdirを作る。
+  dirのpathに既に物が在るか、親のdirが制御側だけのdirでなければ作らずに拒み、条件を満たす親のdirは複数のverificationが共有する（条件は`GitRepository::create_verification_clone`のdoc comment）。
+  中にrebaseの後のcommitのclone（上の「git」の上書きでhookとdriverを止めた制御側のgitで作る）、tokenの写し（0600）、コマンドのhomeを置く。
+  containerが始まった後は、制御側はこのcloneでgitを走らせない。
+- 準備のコマンド: `dagq.toml`の`[container.verification]`が宣言したコマンド（`run_env::CONTAINER_VERIFICATION_TABLE`のdoc comment）を、制御側がmainのcheckoutからhostで流し、verificationのdirに材料を置かせる。
+  runのコードは走らせず、宣言が無ければ流さず、落ちれば検証のコマンドを流さない。
+  既知の失敗も書き、run dirの材料のdirへfdから写す（workerのsymlinkは辿らず置き換える）。
+- container: workerのturnと同じhardeningと`--network none`で、mountはverificationのdir・run dirの材料のdir（読み取り専用）・runのsocket・そのverificationのbuildの出力のvolumeだけにする。
+  着地用のworktree・workerのclone・run dirの他のファイル・workerのcache・hostのsupervisorのcacheはmountしない（[ADR-t2114-4](../adr/2026-10-08-t2114-4-sccache-server-inside-the-run-container.md)決定4）。
+  時間の上限はhostと同じく1本のコマンドに掛かり、上限で止めたcontainerは次のコマンドの前と終わりに消す。
+- token: verificationのtokenを写しのファイルで渡し（podmanの引数に値は無い）、`dagq relay verify`が標準のproxyのenvに入れる。
+  queueのbrokerはこのtokenを`dagq.toml`のregistryのallowlistへのtunnelにだけ通し、verificationの終わりに取り消す（[Queue broker](queue-broker.md)）。
+- cache: `[run.env]`がsccacheを名指せば、保護されたcacheが無い今は`RUSTC_WRAPPER`を外してcacheなしでcompileし、`sccache_wrapper_removed`に残す（他のwrapperは触らない）。
+- 片付け: verificationがどう終わっても、container・buildの出力のvolume・dirを消す。
+  dirはgitを使わずfdから辿り、残ったcontainerがsymlinkに差し替えても外に届かない。
+- hostの絶対pathを名指すverifyは、containerにそのpathが無いので落ち、hostに回さない。
+  verifyはimageの`PATH`の道具を名前で名指し、要る道具はprojectのimageに入れる（[ADR-t2182-1](../adr/2026-10-14-t2182-1-macos-specific-tests-are-left-to-the-ci-macos-job-not-the-container-verification.md)決定3）。
+
 ## 後続の部品の置き場
 
 次の部品が揃ったら、それぞれが`ContainerRuntime`の答えを埋める。
@@ -228,4 +256,4 @@ executorは`application::run_container::PodmanActorExecutor`、設定の読み�
 
 - containerの中のsccache（[ADR-t2114-4](../adr/2026-10-08-t2114-4-sccache-server-inside-the-run-container.md)）。
   それまでcontainerのturnには`[run.env]`の`RUSTC_WRAPPER`を渡さない。
-- verificationのcontainerの実行。
+- verificationの保護されたcache。

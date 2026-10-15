@@ -190,6 +190,7 @@ mod supervisor_without_cmux;
 mod task_replanning;
 mod test_actor_env;
 mod throughput_review_codex;
+mod verification_container;
 mod worker_escalation;
 mod worker_model;
 

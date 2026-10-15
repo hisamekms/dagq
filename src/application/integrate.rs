@@ -326,11 +326,12 @@ pub fn verify_snapshot(
         return Ok(verification);
     }
     let run_dir = Path::new(run.run_dir().context("missing run directory")?);
-    // Set to the container, which does not run a verification yet, the
-    // commands do not run on the host instead (ADR-t2113-1 decision 4).
+    // Set to the container, which does not run the verification of a
+    // snapshot, the commands do not run on the host instead (ADR-t2113-1
+    // decision 4).
     if verifier.runtimes()?.verification != crate::domain::container_runtime::Runtime::Host {
         bail!(
-            "dagq.toml sets the verification's runtime to the container, which cannot run it; no verification command runs on the host instead"
+            "dagq.toml sets the verification's runtime to the container, which does not verify a snapshot of main; no verification command runs on the host instead"
         );
     }
     if let Some(message) = verifier.run_env_programs(Some(run_dir))?.missing_message() {
@@ -477,6 +478,11 @@ pub struct Integration<'a> {
     /// end, its principal the run's verification, reaching through the
     /// queue broker only the registries `dagq.toml` names.
     pub verification_tokens: &'a dyn super::queue_broker::VerificationTokens,
+    /// The containers of the verifications `dagq.toml` sets to the
+    /// container (ADR-t2113-3 decision 1): each verification's commands run
+    /// in a container of its own on a clone of the commit that lands, never
+    /// on the host.
+    pub verification_containers: &'a dyn super::run_container::VerificationContainers,
 }
 
 /// The free disk space integrate checks before it retries a verification
@@ -913,6 +919,7 @@ fn land_integrating(
             ctx.retry_disk.as_ref(),
             ctx.sccache,
             ctx.verification_tokens,
+            ctx.verification_containers,
             ctx.clock,
             &task,
             run,
@@ -1439,6 +1446,7 @@ fn land(
     retry_disk: Option<&RetryDisk<'_>>,
     sccache: Option<&dyn super::SccacheServer>,
     verification_tokens: &dyn super::queue_broker::VerificationTokens,
+    verification_containers: &dyn super::run_container::VerificationContainers,
     clock: &dyn Clock,
     task: &Task,
     run: &TaskRun,
@@ -1702,20 +1710,34 @@ fn land(
     } else {
         verifier.toolchains()?
     };
-    let landing_env = if commands.iter().any(landing_verification::Planned::replaced) {
+    // Set to a container that cannot be used, the commands do not run on
+    // the host instead (goal 38, ADR-t2113-1 decision 4): stop before them,
+    // so the run goes back without using a resume.
+    // On the host the landing's command reads its known failures from the
+    // run directory, written before anything else runs.
+    let replaced = commands.iter().any(landing_verification::Planned::replaced);
+    let host_landing_env = if replaced && !verification_in_container(verifier, &commands)? {
         landing_env(&*queue, verifier, files, task, run_dir, main)?
     } else {
         Vec::new()
     };
+    let in_container = if commands.is_empty() {
+        false
+    } else {
+        match verification_runtime(&*queue, verifier, container)? {
+            Ok(runtime) => runtime == crate::domain::container_runtime::Runtime::Container,
+            Err(message) => bail!("{message}"),
+        }
+    };
     let mut run_env = if commands.is_empty() {
         Vec::new()
+    } else if in_container {
+        // No program of the host runs the commands, and no cache of the
+        // host's or the workers' is theirs (ADR-t2114-4 decision 4).
+        let mut env = verifier.run_env(run_dir)?;
+        without_wrapper(&*queue, clock, run, &mut env);
+        env
     } else {
-        // Set to the container, the commands do not run on the host instead
-        // (goal 38, ADR-t2113-1 decision 4): stop before them, so the run
-        // goes back without using a resume.
-        if let Some(message) = container_refusal(&*queue, verifier, container)? {
-            bail!("{message}");
-        }
         // A program [run.env] names that cannot be executed would fail
         // every command: stop before them, like an unreadable dagq.toml,
         // so the run goes back without using a resume (ADR-0049 decision 9).
@@ -1747,6 +1769,41 @@ fn land(
             run.id(),
         )?)
     };
+    // The container of the verification, on a clone of the rebased commit,
+    // removed with what it left when it goes, however the verification
+    // ends.
+    let container_verification = match (&verification_token, in_container) {
+        (Some(token), true) => Some(ContainerVerification::start(
+            verification_containers,
+            verifier,
+            run,
+            &rebased,
+            &token.file,
+        )?),
+        (None, true) => bail!("the verification in the container has no token"),
+        (_, false) => None,
+    };
+    // In a container, the landing's own command reads its known failures
+    // from the materials it mounts: staged with the preparation command's,
+    // then copied into the run directory with them.
+    let landing_env = match &container_verification {
+        Some(verification) if replaced => landing_env_written(
+            &*queue,
+            verifier,
+            files,
+            task,
+            &verification.prepared.staged,
+            &verification.prepared.materials,
+            main,
+        )?,
+        _ => host_landing_env,
+    };
+    if let Some(verification) = &container_verification {
+        verification
+            .containers
+            .publish_materials(&verification.prepared)
+            .context("copy the verification's materials into the run directory")?;
+    }
     // The landing's verification, done once more when only flaky tests
     // failed (task 768, ADR-t768-1): a new attempt of every command on the
     // same rebased head, in the slot it holds (main does not move meanwhile).
@@ -1760,6 +1817,7 @@ fn land(
             let command = &planned.command;
             let step = VerifyStep {
                 verifier,
+                container: container_verification.as_ref(),
                 load_average,
                 files,
                 run,
@@ -1879,6 +1937,7 @@ fn land(
         }
         break;
     }
+    drop(container_verification);
     drop(verification_token);
     // One commit on main with the rebased tree; the run's own history stays
     // reachable under refs/dagq/runs/<run-id>.
@@ -1993,7 +2052,21 @@ fn landing_env<Q: RunLog + QueueRecords + ?Sized>(
     verifier: &dyn Verifier,
     files: &dyn RunFiles,
     task: &Task,
-    run_dir: &Path,
+    dir: &Path,
+    main: &CommitSha,
+) -> Result<Vec<(String, String)>> {
+    landing_env_written(queue, verifier, files, task, dir, dir, main)
+}
+
+/// [`landing_env`] with the known failures' file written in `written` and
+/// named in the environment as it will be in `named` (its copy).
+fn landing_env_written<Q: RunLog + QueueRecords + ?Sized>(
+    queue: &Q,
+    verifier: &dyn Verifier,
+    files: &dyn RunFiles,
+    task: &Task,
+    written: &Path,
+    named: &Path,
     main: &CommitSha,
 ) -> Result<Vec<(String, String)>> {
     let watch = verifier.ci_watch_config()?;
@@ -2001,46 +2074,36 @@ fn landing_env<Q: RunLog + QueueRecords + ?Sized>(
     let failures =
         super::ci_watch::known_failures(queue, watch.as_ref(), branch.as_deref(), Some(task.id()))?;
     let fix_run = !queue.ci_failure_findings_of(task.id())?.is_empty();
-    let path = run_dir.join(landing_verification::KNOWN_FAILURES_FILE);
+    let path = written.join(landing_verification::KNOWN_FAILURES_FILE);
     files
         .write(&path, serde_json::to_string_pretty(&failures)?.as_bytes())
         .with_context(|| format!("write {}", path.display()))?;
     Ok(landing_verification::env(
         main.as_str(),
-        &path_text(&path)?,
+        &path_text(&named.join(landing_verification::KNOWN_FAILURES_FILE))?,
         fix_run,
     ))
 }
 
-/// Why the verification commands do not start, when `dagq.toml` sets the
-/// verification to the container: one that cannot be used says why, and
-/// one that can has no executor of the verification here yet. `None` on
-/// the host. A refusal records `container_runtime_unavailable` as the
+/// Where the verification commands run: the runtime `dagq.toml` sets the
+/// verification to, or why they do not start (`Err`), when it sets the
+/// container and the container cannot be used. A look at the container
+/// records `container_runtime_unavailable` (or `_available`) as the
 /// supervisor does, where the queue's latest one does not say it already,
 /// so the inbox is told without a supervisor too.
-fn container_refusal(
+fn verification_runtime(
     queue: &dyn EventStore,
     verifier: &dyn Verifier,
     container: &dyn super::ContainerRuntime,
-) -> Result<Option<String>> {
+) -> Result<std::result::Result<crate::domain::container_runtime::Runtime, String>> {
     use crate::domain::container_runtime::{
         CONTAINER_RUNTIME_KINDS, ContainerCheck, Runtime, RuntimeTarget,
     };
     let runtimes = verifier.runtimes()?;
     if runtimes.verification == Runtime::Host {
-        return Ok(None);
+        return Ok(Ok(Runtime::Host));
     }
-    let mut check = ContainerCheck::of(&runtimes, |target| container.availability(target));
-    if check.why(RuntimeTarget::Verification).is_none() {
-        check.unavailable.push((
-            RuntimeTarget::Verification,
-            "this dagq does not run the verification in a container yet".to_owned(),
-        ));
-    }
-    let why = check
-        .why(RuntimeTarget::Verification)
-        .unwrap_or_default()
-        .to_owned();
+    let check = ContainerCheck::of(&runtimes, |target| container.availability(target));
     let last = queue.latest_queue_event(&CONTAINER_RUNTIME_KINDS)?;
     if let Some((kind, mut payload)) =
         check.transition(last.as_ref().map(|e| (e.kind.as_str(), &e.payload)))
@@ -2048,10 +2111,156 @@ fn container_refusal(
         payload["by"] = json!("integrate");
         queue.record_queue_event(kind, payload)?;
     }
-    Ok(Some(format!(
-        "dagq.toml sets the verification's runtime to the container, which cannot run it: {why}; \
+    Ok(match check.why(RuntimeTarget::Verification) {
+        None => Ok(Runtime::Container),
+        Some(why) => Err(format!(
+            "dagq.toml sets the verification's runtime to the container, which cannot run it: {why}; \
 no verification command runs on the host instead"
-    )))
+        )),
+    })
+}
+
+/// Whether `dagq.toml` sets the verification of `commands` to the
+/// container (none to run is never in a container).
+fn verification_in_container(
+    verifier: &dyn Verifier,
+    commands: &[landing_verification::Planned],
+) -> Result<bool> {
+    Ok(!commands.is_empty()
+        && verifier.runtimes()?.verification
+            == crate::domain::container_runtime::Runtime::Container)
+}
+
+/// Take the sccache wrapper out of `env`, the `[run.env]` of a
+/// verification in the container
+/// ([`crate::domain::run_container::without_sccache_wrapper`]), and record
+/// it as `sccache_wrapper_removed` (`by` `integrate`).
+fn without_wrapper(
+    queue: &dyn Queue,
+    clock: &dyn Clock,
+    run: &TaskRun,
+    env: &mut Vec<(String, String)>,
+) {
+    if let Some(target) = crate::domain::run_container::without_sccache_wrapper(env) {
+        super::sccache::record_wrapper_removed(
+            queue,
+            run.id(),
+            clock.now(),
+            "integrate",
+            target.port,
+            "the verification runs in a container, which has no protected cache to compile with",
+            json!({"job": "verification", "runtime": "container"}),
+        );
+    }
+}
+
+/// The log of the preparation command of a verification in the container,
+/// in the run directory.
+pub const PREPARE_LOG: &str = "verification-prepare.log";
+
+/// A verification of a run in its container (ADR-t2113-3 decision 1): its
+/// parts made ready and its materials prepared by [`Self::start`], each
+/// command run in a container of its own by [`Self::run_to_log`], and what
+/// it left removed when it goes, however the verification ends.
+struct ContainerVerification<'a> {
+    containers: &'a dyn super::run_container::VerificationContainers,
+    prepared: super::run_container::PreparedVerification,
+    run: RunId,
+    run_dir: PathBuf,
+}
+
+impl<'a> ContainerVerification<'a> {
+    /// Make the verification of `run`'s commit `commit` ready with the
+    /// token whose file is `token`, then run the preparation command
+    /// `dagq.toml` declares, if any, on the host: one that fails runs no
+    /// verification command.
+    fn start(
+        containers: &'a dyn super::run_container::VerificationContainers,
+        verifier: &dyn Verifier,
+        run: &TaskRun,
+        commit: &CommitSha,
+        token: &Path,
+    ) -> Result<Self> {
+        let run_dir = PathBuf::from(run.run_dir().context("missing run directory")?);
+        let prepared = containers
+            .prepare(run, commit, token)
+            .context("make the verification's container ready")?;
+        let verification = Self {
+            containers,
+            prepared,
+            run: run.id().clone(),
+            run_dir,
+        };
+        let log = verification.run_dir.join(PREPARE_LOG);
+        if let Some(exit) = verifier.prepare_verification(&verification.prepared.staged, &log)? {
+            ensure!(
+                exit.success,
+                "the preparation command [container.verification] of dagq.toml declares exited with {}; see {}; no verification command ran",
+                exit.code
+                    .map_or_else(|| "a signal".to_owned(), |code| code.to_string()),
+                log.display()
+            );
+        }
+        Ok(verification)
+    }
+
+    /// Run `command` with `env` in the verification's container, its
+    /// output in `log`: through `podman` on the host, whose limit for the
+    /// whole command is the verifier's. A container an earlier command
+    /// left (one stopped at its limit) is removed first.
+    fn run_to_log(
+        &self,
+        verifier: &dyn Verifier,
+        command: &str,
+        env: &[(String, String)],
+        log: &Path,
+    ) -> Result<super::Exit> {
+        use crate::domain::run_container::{
+            HOME_DIR, MATERIALS_ENV, VerificationContainer, verification_command,
+            verification_run_args,
+        };
+        if let Err(error) = self.containers.remove_container(&self.prepared) {
+            warn!(run_id = %self.run, "run {}: the verification's container could not be removed before its command: {error:#}", self.run);
+        }
+        let prepared = &self.prepared;
+        let mut env = env.to_vec();
+        env.extend([
+            (MATERIALS_ENV.to_owned(), path_text(&prepared.materials)?),
+            (
+                crate::domain::actor::RUN_ID_ENV.to_owned(),
+                self.run.as_str().to_owned(),
+            ),
+            ("HOME".to_owned(), path_text(&prepared.dir.join(HOME_DIR))?),
+        ]);
+        let command = verification_command(&prepared.dir, command);
+        let args = verification_run_args(&VerificationContainer {
+            queue: &prepared.queue,
+            run: self.run.as_str(),
+            verification: &prepared.id,
+            image: &prepared.image,
+            dir: &prepared.dir,
+            materials: &prepared.materials,
+            build_output: prepared.build_output.as_deref(),
+            limits: prepared.limits,
+            env: &env,
+            command: &command,
+        })
+        .map_err(|why| anyhow::anyhow!("the verification's container cannot be made: {why}"))?;
+        verifier.run_to_log(
+            &self.containers.command_line(&args),
+            &self.run_dir,
+            &[],
+            log,
+        )
+    }
+}
+
+impl Drop for ContainerVerification<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = self.containers.finish(&self.prepared) {
+            warn!(run_id = %self.run, "run {}: what the verification {} left could not all be removed: {error:#}", self.run, self.prepared.id);
+        }
+    }
 }
 
 /// Put into `env`, the `[run.env]` of the verification commands, what the
@@ -2079,6 +2288,8 @@ fn guard_verification(
 /// it as `verification_command`.
 struct VerifyStep<'a> {
     verifier: &'a dyn Verifier,
+    /// The container the commands run in; `None` runs them on the host.
+    container: Option<&'a ContainerVerification<'a>>,
     load_average: fn() -> Option<f64>,
     files: &'a dyn RunFiles,
     run: &'a TaskRun,
@@ -2136,7 +2347,10 @@ impl VerifyStep<'_> {
             self.run_env.iter().chain(self.extra_env).cloned().collect();
         let started = Instant::now();
         let (status, load) = sampled(self.load_average, LOAD_SAMPLE_INTERVAL, || {
-            self.verifier.run_to_log(command, self.worktree, &env, log)
+            match self.container {
+                Some(container) => container.run_to_log(self.verifier, command, &env, log),
+                None => self.verifier.run_to_log(command, self.worktree, &env, log),
+            }
         });
         let duration_secs = (started.elapsed().as_secs_f64() * 1000.0).round() / 1000.0;
         let (code, signal, timed_out) = match status {

@@ -12,6 +12,9 @@
 //! state at the turn's end. Whatever stops a run's session stops its
 //! container too ([`RunContainers::remove`]).
 //!
+//! The verification of `integrate` set to the container runs its commands
+//! in containers through the [`VerificationContainers`] port.
+//!
 //! [Container runtime]: ../../docs/design/container-runtime.md
 
 use std::path::{Path, PathBuf};
@@ -31,7 +34,7 @@ use crate::domain::run_container::{
     AGENT, ContainerLimits, HOME_DIR, WITHOUT_ENV, WorkerContainer, launcher_command,
     worker_run_args,
 };
-use crate::domain::{ActorRole, Provider, RunId, TaskRun};
+use crate::domain::{ActorRole, CommitSha, Provider, RunId, TaskRun};
 
 /// What a turn's container runs with, once [`RunContainers::prepare`] made
 /// its parts ready.
@@ -70,6 +73,92 @@ pub trait RunContainers: Send + Sync {
     /// Stop and remove the container of the run `run`; nothing when there
     /// is none.
     fn remove(&self, run: &RunId) -> Result<()>;
+}
+
+/// One verification of `integrate` in the container, once
+/// [`VerificationContainers::prepare`] made its parts ready.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedVerification {
+    /// The verification's ID: its container's and build output's name.
+    pub id: String,
+    pub queue: QueueKey,
+    pub image: String,
+    /// The verification's directory: its clone
+    /// ([`VERIFICATION_CLONE`](crate::domain::run_container::VERIFICATION_CLONE))
+    /// and its token's copy.
+    pub dir: PathBuf,
+    /// Where the preparation command writes the materials, in the
+    /// verification's directory
+    /// ([`STAGED_MATERIALS`](crate::domain::run_container::STAGED_MATERIALS)),
+    /// made empty.
+    pub staged: PathBuf,
+    /// The materials' copy in the run directory
+    /// ([`MATERIALS_DIR`](crate::domain::run_container::MATERIALS_DIR)),
+    /// which [`VerificationContainers::publish_materials`] makes and the
+    /// container mounts.
+    pub materials: PathBuf,
+    /// The directory in the container the verification's build output
+    /// volume is mounted at; `None` mounts none.
+    pub build_output: Option<String>,
+    pub limits: ContainerLimits,
+}
+
+/// The containers of the verifications of `integrate` set to the container
+/// (ADR-t2113-3 decision 1, ADR-t2114-4 decision 4, ADR-t2173-1 decisions
+/// 1 and 4, ADR-t2179-1 decisions 7 and 8): what makes a verification's
+/// parts ready, starts its commands' containers and removes what it left.
+pub trait VerificationContainers: Send + Sync {
+    /// Make the parts of a verification of `run`'s commit `commit` ready:
+    /// the dagq machine, the image, the run's relay and the verification's
+    /// own build output volume (when `dagq.toml` names its directory); a
+    /// new directory of its own under the queue's verification directory,
+    /// holding a clone of `commit` the control side makes with its git
+    /// guarded, a copy of the verification's token `token` and an empty
+    /// directory for the materials. A path of the verification's
+    /// directory that is there already, or a parent that is a symlink or no
+    /// directory, is refused. `Err` says why no command runs; nothing runs
+    /// on the host instead.
+    fn prepare(
+        &self,
+        run: &TaskRun,
+        commit: &CommitSha,
+        token: &Path,
+    ) -> Result<PreparedVerification>;
+    /// Copy the staged materials of `verification` into the run
+    /// directory's materials, made anew: through the run directory's
+    /// descriptors, removing what is there first and following no symlink
+    /// the worker put there, so no file outside the run directory is
+    /// written.
+    fn publish_materials(&self, verification: &PreparedVerification) -> Result<()>;
+    /// The shell's command line of `podman --connection dagq` with `args`.
+    fn command_line(&self, args: &[String]) -> String;
+    /// Stop and remove the container of `verification`, if it is there.
+    fn remove_container(&self, verification: &PreparedVerification) -> Result<()>;
+    /// Remove what `verification` left: its container, its build output
+    /// volume and its directory, without git and following no symlink.
+    fn finish(&self, verification: &PreparedVerification) -> Result<()>;
+}
+
+/// The verification containers of a queue that has none: every verification
+/// set to the container is refused.
+pub struct NoVerificationContainers;
+
+impl VerificationContainers for NoVerificationContainers {
+    fn prepare(&self, _: &TaskRun, _: &CommitSha, _: &Path) -> Result<PreparedVerification> {
+        bail!("this process runs no verification in a container")
+    }
+    fn publish_materials(&self, _: &PreparedVerification) -> Result<()> {
+        bail!("this process runs no verification in a container")
+    }
+    fn command_line(&self, _: &[String]) -> String {
+        String::new()
+    }
+    fn remove_container(&self, _: &PreparedVerification) -> Result<()> {
+        Ok(())
+    }
+    fn finish(&self, _: &PreparedVerification) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Starts a worker's turns in their container. Only a Claude worker's

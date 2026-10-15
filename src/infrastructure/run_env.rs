@@ -271,6 +271,23 @@ const CONTAINER_IMAGE_TABLE: &str = "container.image";
 pub const CONTAINER_BUILD_OUTPUT_TABLE: &str = "container.build_output";
 /// The key of [`CONTAINER_BUILD_OUTPUT_TABLE`].
 const CONTAINER_BUILD_OUTPUT_DIR: &str = "dir";
+/// `[container.verification]`: what the verification of `integrate` set to
+/// the container is given beside its clone (ADR-t2257-1 decision 4 (b)).
+/// Its one key, `prepare` (a non-blank string), is a shell command the
+/// control side runs on the host before each such verification, in the
+/// main checkout (never the run's code), with
+/// [`MATERIALS_ENV`](crate::domain::run_container::MATERIALS_ENV) naming
+/// an empty directory of the verification's that only the control side
+/// writes: what it puts there (data the commands read, fetched where the
+/// container cannot reach) the runtime copies into the run directory's
+/// materials, following no symlink, and the verification's container
+/// mounts that copy read-only, named by the same variable. A command that fails runs no
+/// verification command. Without the table nothing runs, which is the
+/// default. A binary older than this table refuses it, so a repository
+/// adds it only once the binary that runs its queue reads it.
+pub const CONTAINER_VERIFICATION_TABLE: &str = "container.verification";
+/// The key of [`CONTAINER_VERIFICATION_TABLE`].
+const CONTAINER_VERIFICATION_PREPARE: &str = "prepare";
 /// `[toolchains.<name>]`: a toolchain profile the repository uses
 /// (ADR-t2268-1 decision 3), one table per declaration, read in file
 /// order. `<name>` is the declaration's own name, kebab-case (lowercase
@@ -352,7 +369,7 @@ const VERIFY_MARK_CLASS: &str = "class";
 const VERIFY_MARK_LINE: &str = "line";
 const CONTAINER_IMAGE_CONTAINERFILE: &str = "containerfile";
 const CONTAINER_IMAGE_INPUTS: &str = "inputs";
-const TABLES: [&str; 25] = [
+const TABLES: [&str; 26] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -378,6 +395,7 @@ const TABLES: [&str; 25] = [
     EGRESS_TABLE,
     CONTAINER_IMAGE_TABLE,
     CONTAINER_BUILD_OUTPUT_TABLE,
+    CONTAINER_VERIFICATION_TABLE,
 ];
 /// The keys of `[recheck]`.
 const RECHECK_COMMAND: &str = "command";
@@ -504,6 +522,9 @@ pub struct Config {
     /// `[container.build_output] dir` ([`CONTAINER_BUILD_OUTPUT_TABLE`]);
     /// `None` without the table.
     pub container_build_output: Option<String>,
+    /// `[container.verification] prepare`
+    /// ([`CONTAINER_VERIFICATION_TABLE`]); `None` without the table.
+    pub container_verification_prepare: Option<String>,
     /// `[toolchains.<name>]` in file order ([`TOOLCHAINS_PREFIX`]); empty
     /// without any. The profiles they name are looked up when they are
     /// resolved ([`load_toolchains`]).
@@ -565,6 +586,8 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut container_image_keys: Vec<String> = Vec::new();
     // `[container.build_output]`'s header line; its `dir` is required.
     let mut build_output: Option<usize> = None;
+    // `[container.verification]`'s header line; its `prepare` is required.
+    let mut verification_prepare: Option<usize> = None;
     let mut role: Option<ModelRole> = None;
     let mut roles_seen: Vec<ModelRole> = Vec::new();
     // `[roles.worker]` or `[roles.verification]` being read in place of a
@@ -853,7 +876,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}], [{CONTAINER_VERIFICATION_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -885,6 +908,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             if *known == CONTAINER_BUILD_OUTPUT_TABLE {
                 build_output = Some(number);
+            }
+            if *known == CONTAINER_VERIFICATION_TABLE {
+                verification_prepare = Some(number);
             }
             continue;
         }
@@ -1188,6 +1214,20 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     with()
                 );
                 config.container_build_output = Some(dir);
+            }
+            Some(CONTAINER_VERIFICATION_TABLE) => {
+                ensure!(
+                    key == CONTAINER_VERIFICATION_PREPARE,
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{CONTAINER_VERIFICATION_TABLE}]; the key is {CONTAINER_VERIFICATION_PREPARE}"
+                );
+                ensure!(
+                    config.container_verification_prepare.is_none(),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let command = parse_string(rest.trim()).with_context(with)?;
+                ensure!(!command.trim().is_empty(), "{}: it is blank", with());
+                config.container_verification_prepare = Some(command);
             }
             Some(CONTAINER_IMAGE_TABLE) => {
                 ensure!(
@@ -1833,6 +1873,12 @@ pub fn parse_config(text: &str) -> Result<Config> {
         ensure!(
             config.container_build_output.is_some(),
             "{CONFIG_FILE_NAME}:{line}: [{CONTAINER_BUILD_OUTPUT_TABLE}] has no {CONTAINER_BUILD_OUTPUT_DIR}"
+        );
+    }
+    if let Some(line) = verification_prepare {
+        ensure!(
+            config.container_verification_prepare.is_some(),
+            "{CONFIG_FILE_NAME}:{line}: [{CONTAINER_VERIFICATION_TABLE}] has no {CONTAINER_VERIFICATION_PREPARE}"
         );
     }
     if let Some((line, image)) = container_image {
@@ -2519,6 +2565,19 @@ pub fn load_project_image(root: &Path) -> Result<Option<ProjectImage>> {
         .container_image)
 }
 
+/// `[container.verification] prepare` of the `dagq.toml` in `root`
+/// ([`CONTAINER_VERIFICATION_TABLE`]); `None` without the file or the
+/// table.
+pub fn load_verification_prepare(root: &Path) -> Result<Option<String>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    let Some(text) = read_config(&path)? else {
+        return Ok(None);
+    };
+    Ok(parse_config(&text)
+        .with_context(|| format!("parse {}", path.display()))?
+        .container_verification_prepare)
+}
+
 /// `[container.build_output] dir` of the `dagq.toml` in `root`, the main
 /// checkout ([`CONTAINER_BUILD_OUTPUT_TABLE`]); no file or no table is
 /// `None`, no build output volume.
@@ -2867,6 +2926,17 @@ impl Verifier for ShellVerifier {
     }
     fn landing_verification(&self) -> Result<Option<LandingVerification>> {
         load_landing_verification(&self.checkout)
+    }
+    fn prepare_verification(&self, materials: &Path, log: &Path) -> Result<Option<Exit>> {
+        let Some(command) = load_verification_prepare(&self.checkout)? else {
+            return Ok(None);
+        };
+        let env = [(
+            crate::domain::run_container::MATERIALS_ENV.to_owned(),
+            path_str(materials)?.to_owned(),
+        )];
+        self.run_to_log(&command, &self.checkout, &env, log)
+            .map(Some)
     }
     fn toolchains(&self) -> Result<Toolchains> {
         load_toolchains(&self.checkout, self.profiles)
@@ -3988,6 +4058,34 @@ LITERAL = 'no \n escapes # here'
                 ("LITERAL", "no \\n escapes # here"),
             ])
         );
+    }
+
+    /// `[container.verification]` declares the command that prepares a
+    /// verification's materials on the host; without it, none runs.
+    #[test]
+    fn the_verification_table_declares_the_preparation_command() {
+        let config =
+            parse_config("[container.verification]\nprepare = \"sh scripts/p.sh\"\n").unwrap();
+        assert_eq!(
+            config.container_verification_prepare.as_deref(),
+            Some("sh scripts/p.sh")
+        );
+        assert_eq!(
+            parse_config("").unwrap().container_verification_prepare,
+            None
+        );
+        for (text, error) in [
+            ("[container.verification]\n", "has no prepare"),
+            ("[container.verification]\nprepare = ' '\n", "blank"),
+            (
+                "[container.verification]\nprepare = 'a'\nprepare = 'b'\n",
+                "defined twice",
+            ),
+            ("[container.verification]\nrun = 'a'\n", "unknown key run"),
+        ] {
+            let message = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(message.contains(error), "{text}: {message}");
+        }
     }
 
     /// `[container.build_output]` names the container's directory the run's
@@ -5357,7 +5455,7 @@ LITERAL = 'no \n escapes # here'
         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
         assert!(
             error.contains(
-                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [review.jobs], [ci_watch], [landing_verification], [eval], [eval.providers.<provider>], [egress], [container.image], [container.build_output] and [kpi]"
+                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [review.jobs], [ci_watch], [landing_verification], [eval], [eval.providers.<provider>], [egress], [container.image], [container.build_output], [container.verification] and [kpi]"
             ),
             "{error}"
         );

@@ -588,6 +588,10 @@ impl OneShot {
             verification_tokens: &crate::infrastructure::queue_broker::SystemVerificationTokens {
                 db: db.clone(),
             },
+            verification_containers: &crate::compose::verification_containers(
+                &db,
+                Some(main_checkout.clone()),
+            ),
         };
         let integrator = Integrator::of_process(std::process::id());
         let Some(request) = integrator.approve(&mut integration, &requester, target, repo)? else {

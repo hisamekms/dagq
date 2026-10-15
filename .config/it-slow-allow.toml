@@ -1237,3 +1237,9 @@ task = 2129
 name = "runtime_handoff::a_new_sessions_request_adopted_after_a_handoff_is_sent_once_whole"
 reason = "B 境界（adopt・supervisor の引き継ぎ）: handoff.json の無い handoff の後に run の event と resume-1.txt から resume を組み直した process が、引き継ぎを引き継ぎの上限で 1 度だけ送ることを確かめる。上限の判断は prompt の unit test"
 task = 2129
+
+# 9.5〜10.9s (stress 5 under the host's load of other runs, task 2182)
+[[test]]
+name = "verification_container::a_verification_set_to_the_container_runs_its_commands_there_and_leaves_nothing"
+reason = "B 境界（supervisor の配線・Git・プロセス）: supervisor の着地が fake の podman を通して実の dagq relay verify で検証のコマンドを rebase の後の commit の clone で流し、準備のコマンドの材料・token・RUSTC_WRAPPER の外しと event・片付けを、build の出力の設定がある着地と無い着地の 2 本で確かめる。引数と env の判断は domain::run_container の unit test"
+task = 2182

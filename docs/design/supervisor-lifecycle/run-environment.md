@@ -182,12 +182,12 @@ clientは自分を起動し直してserverにし、その子はlistenの前に�
 開始の直前にserverを確かめたものは、`RUSTC_WRAPPER`をguard（dagqへのlink）にする。
 guardはcompileごとにportを確かめ、listenしていれば`[run.env]`のsccacheを通してcacheを使う。
 listenしていないとき、確認の直後に止まったserverの起動を拒まれてclientが自分のerrorで失敗したときは、compilerを直接実行する。
-serverを確かめられないもの、guardを作れなかったものはwrapperを外してcacheなしでbuildを通し、eventに残す。
+serverを確かめられないもの、guardを作れなかったもの、containerのverificationはwrapperを外してcacheなしでbuildを通し、eventに残す。
 supervisorが始めるものの前の確認は、居ないserverをsupervisorが起動する機会でもある。
 wrapperのturnの前・人の`integrate`・e2eのgateの確認とguardはportを見るだけで起動しない。
 runtimeの外からの起動までは防げず、下の検知が扱う。
 containerの中のserverは未実装で、`[run.env]`がsccacheを名指すときだけsupervisorがcontainerの中に起動し、guardはその中のloopbackを確かめる（[ADR-t2114-4](../../adr/2026-10-08-t2114-4-sccache-server-inside-the-run-container.md)・[ADR-t2257-1](../../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)）。
-workerのcacheのdirは`dagq.toml`が与え、queueごとにworker・resumeだけが共有し、hostのcacheはmountせず、verificationは保護されたcacheが無ければcacheなしにする。
+workerのcacheのdirは`dagq.toml`が与え、queueごとにworker・resumeが共有し、hostのcacheはcontainerに、workerのcacheはverificationにmountしない。
 
 ### 外部serverと失敗の偏り
 

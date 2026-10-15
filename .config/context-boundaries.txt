@@ -286,7 +286,7 @@ outer-port | src/application/queue_broker.rs | BrokerBackend | host | internal |
 outer-port | src/application/podman_machine.rs | PodmanMachine | host | internal | - | the podman commands on the dagq machine
 outer-port | src/application/podman_machine.rs | MachineUsers | host | internal | - | the host-wide lock and users of the dagq machine
 outer-port | src/application/podman_machine.rs | MachineVolumes | host | public | execution | the named volumes of a queue in the dagq machine; the cleanup at a run's end and the landing removes a run's build output
-outer-port | src/application/podman_machine.rs | RunMachine | host | public | execution | a run's parts in the dagq machine (the machine with the run as a user, the image, the run's relay, its build output volume), made ready before each turn of a worker in the container
+outer-port | src/application/podman_machine.rs | RunMachine | host | public | execution | a run's parts in the dagq machine (the machine with the run as a user, the image, the run's relay, a build output volume), made ready before each turn of a worker and each verification in the container
 outer-port | src/application/queue_broker.rs | VerificationTokens | host | public | execution | how integrate issues and revokes the token of each verification
 outer-port | src/application/container_image.rs | ImageSpecs | host | internal | - | the images of a queue as its main checkout decides them
 outer-port | src/application/container_image.rs | ImageBuilder | host | internal | - | the podman commands on the images in the dagq machine
@@ -294,6 +294,7 @@ outer-port | src/application/container_image.rs | ImageRecords | host | internal
 outer-port | src/application/broker_relay.rs | RelayControl | host | public | execution | the relays of the runs' containers in the dagq machine; a run's container opens its relay before it starts and closes it at its end
 outer-port | src/application/broker_relay.rs | RelayRecords | host | internal | - | the supervisor's record of the relays, read by the gate
 outer-port | src/application/run_container.rs | RunContainers | execution | internal | - | the containers a worker's turns run in; the wrapper starts and removes them, and every stop of a run's session or processes removes its container
+outer-port | src/application/run_container.rs | VerificationContainers | execution | internal | - | the containers the commands of integrate's verification run in, on a clone of the commit that lands; integrate removes what each verification left
 outer-port | src/application/queue_service.rs | ServiceAccess | host | public | execution | not classified by architecture.md; the supervisor issues a token at the claim and the resume
 outer-port | src/application/ci_watch.rs | CiSource | observation | internal | - |
 outer-port | src/application/throughput_review.rs | ThroughputReviewSources | observation | internal | - |

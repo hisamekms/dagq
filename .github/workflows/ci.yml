@@ -3,6 +3,11 @@ name: CI
 # A push run on main that fails opens or updates the ci-failure issue, and a
 # later one that passes closes it (ci-failure.yml, which keys on this
 # workflow's name; the rules in docs/development/testing.md, section "CI").
+# The macOS job (checks) is the only place the tests split out with
+# #[cfg(target_os = "macos")] run: a landing's verification set to the
+# container runs on Linux, which builds none of them, and they are not run on
+# the host instead, which would run a worker's code outside the container; a
+# failure here is the CI watch's to turn into a fix task (ADR-t2182-1).
 on:
   push:
     branches: [main]

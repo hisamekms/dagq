@@ -195,7 +195,7 @@ capabilityの模型（actor・`TrustLevel`・`Capability`・`Resource`・`Static
 
 1. **container**: `dagq.toml`がworker（resumeを含む）とintegrateのverificationの適用先ごとにhostかcontainerを選ぶ（[Container runtime](container-runtime.md)）。
    containerを使えない適用先は控えてattentionで知らせ、hostに黙って戻さない（fail closed、[Container runtime](container-runtime.md#fail-closedの境界)）。
-   workerのturn（最初のturn・revise・resume）はこの段で動き、verificationのcontainerはまだ無い（[Container runtime](container-runtime.md#workerの実行)）。
+   workerのturn（最初のturn・revise・resume）とintegrateのverificationのコマンドはこの段で動く（[Container runtime](container-runtime.md#verificationの実行)）。
    containerはrunのcloneとrun dirだけをmountし（例外は同じ文書の節）、queue DB・main checkout・他のrunを見せず、`EnforcementLevel`は`sandbox`になる。
    machineはhostの`$HOME`をmountしない（[Container runtime](container-runtime.md#dagq専用のmachine)）。
    予約のcapability（filesystem・network・secret）はこのbackendが強制する。

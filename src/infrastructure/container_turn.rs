@@ -34,7 +34,7 @@ use crate::domain::queue_service::CREDENTIAL_FILE_ENV;
 use crate::domain::run_clone::{
     CLONE_MAIN_REF, MAIN_BUNDLE_FILE, RUN_BUNDLE_FILE, RUN_STATE_FILE, RunState,
 };
-use crate::domain::run_container::{TOKEN_FILE, turn_env};
+use crate::domain::run_container::{TOKEN_FILE, turn_env, verification_env};
 
 /// How `dagq relay turn` runs.
 #[derive(Debug, Clone)]
@@ -95,6 +95,67 @@ pub fn run_turn(options: &TurnOptions, env: impl Fn(&str) -> Option<String>) -> 
         &options.branch,
     ) {
         eprintln!("dagq: the run's bundle and state were not written: {error:#}");
+    }
+    let status = status?;
+    Ok(status
+        .code()
+        .or_else(|| status.signal().map(|signal| 128 + signal))
+        .unwrap_or(1))
+}
+
+/// How `dagq relay verify` runs.
+#[derive(Debug, Clone)]
+pub struct VerifyOptions {
+    /// The copy of the verification's token.
+    pub token_file: PathBuf,
+    /// The verification command's line.
+    pub command: Vec<String>,
+    /// The forwarder's port: [`FORWARD_PORT`].
+    pub port: u16,
+}
+
+/// Run one verification command of `integrate` in its container
+/// ([Container runtime]): start the forwarder, give the command the proxy
+/// variables of [`verification_env`] from the token's file and the run
+/// [`RUN_ID_ENV`] names (read with `env`), and run it in the current
+/// directory (the verification's clone). Its output is the command's, and
+/// so is its exit code (128 and the signal's number for a command killed
+/// by one). An error before the command starts (no run, no token) runs no
+/// command.
+///
+/// [Container runtime]: ../../docs/design/container-runtime.md
+pub fn run_verification(
+    options: &VerifyOptions,
+    env: impl Fn(&str) -> Option<String>,
+) -> Result<i32> {
+    let run = env(RUN_ID_ENV).with_context(|| format!("{RUN_ID_ENV} names no run"))?;
+    let token = fs::read_to_string(&options.token_file).with_context(|| {
+        format!(
+            "read the verification token's file {}",
+            options.token_file.display()
+        )
+    })?;
+    let token = token.trim();
+    ensure!(
+        !token.is_empty(),
+        "{} holds no token",
+        options.token_file.display()
+    );
+    let (program, args) = options
+        .command
+        .split_first()
+        .context("no verification command to run")?;
+    let stop = Arc::new(AtomicBool::new(false));
+    let forwarder = start_forwarder(options.port, stop.clone());
+    let status = Command::new(program)
+        .args(args)
+        .envs(verification_env(&run, token))
+        .stdin(Stdio::null())
+        .status()
+        .with_context(|| format!("run {program}"));
+    stop.store(true, Ordering::SeqCst);
+    if let Some(forwarder) = forwarder {
+        let _ = forwarder.join();
     }
     let status = status?;
     Ok(status

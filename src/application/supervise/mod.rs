@@ -460,6 +460,9 @@ pub struct Ports<'a> {
     pub run_containers: Arc<dyn crate::application::run_container::RunContainers>,
     /// The tokens of the landings' verifications (ADR-t2114-1 decision 2).
     pub verification_tokens: Arc<dyn crate::application::queue_broker::VerificationTokens>,
+    /// The containers of the landings' verifications `dagq.toml` sets to
+    /// the container (ADR-t2113-3 decision 1).
+    pub verification_containers: Arc<dyn crate::application::run_container::VerificationContainers>,
     /// The session wrappers of the runs and the runtime's planners, which
     /// the supervisor starts, stops and checks without cmux (ADR-t1433-1).
     pub sessions: &'a dyn SessionWrappers,
@@ -978,6 +981,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         container: ports.container.clone(),
         run_containers: ports.run_containers.clone(),
         verification_tokens: ports.verification_tokens.clone(),
+        verification_containers: ports.verification_containers.clone(),
         sessions: &sessions,
         reviewer: ports.reviewer,
         codex_jobs: ports.codex_jobs,
@@ -1136,6 +1140,9 @@ struct Supervisor<'a> {
     /// The tokens of the landings' verifications
     /// ([`Ports::verification_tokens`]).
     verification_tokens: Arc<dyn crate::application::queue_broker::VerificationTokens>,
+    /// The containers of the landings' verifications
+    /// ([`Ports::verification_containers`]).
+    verification_containers: Arc<dyn crate::application::run_container::VerificationContainers>,
     sessions: &'a dyn SessionWrappers,
     /// Starts the headless review of accepted runs (ADR-0027).
     reviewer: &'a dyn AgentProvider,

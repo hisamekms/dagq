@@ -67,17 +67,25 @@ pub trait MachineVolumes {
 }
 
 /// A run's parts in the dagq machine, made ready before each turn of a
-/// worker in the container (ADR-t2113-3 decision 1): the machine running
-/// with the run among its users ([`ensure`]), the queue's image built
+/// worker in the container and before each verification of `integrate` in
+/// the container (ADR-t2113-3 decision 1): the machine running with the
+/// run among its users ([`ensure`]), the queue's image built
 /// ([`super::container_image::prepare`]), the run's relay open
-/// ([`super::broker_relay::open`]) and, when asked, the run's build output
-/// volume ([`MachineVolumes`]). This context does it; the worker's executor
-/// is given it as this port.
+/// ([`super::broker_relay::open`]) and, when asked, a build output volume
+/// ([`MachineVolumes`]): the run's for a worker, the verification's own
+/// for a verification (ADR-t2173-1 decision 4). This context does it; the
+/// executors of the worker and of the verification are given it as this
+/// port.
 pub trait RunMachine: Send + Sync {
-    /// Make the parts of the run `run` ready, its build output volume
-    /// only with `build_output`; the image its container runs. `Err` says
-    /// why the turn cannot run in the container (it runs nowhere else).
-    fn ready(&self, run: &str, build_output: bool) -> Result<String>;
+    /// Make the parts of the run `run` ready, and the build output volume
+    /// named after `build_output` (the run's ID, or a verification's) when
+    /// it is given; the image its container runs. `Err` says why the turn
+    /// or the verification cannot run in the container (it runs nowhere
+    /// else).
+    fn ready(&self, run: &str, build_output: Option<&str>) -> Result<String>;
+    /// Remove the build output volume named after `build_output`, if it is
+    /// there: a verification's, at its end.
+    fn remove_build_output(&self, build_output: &str) -> Result<()>;
 }
 
 /// What [`ensure`] and [`release`] act with.

@@ -1956,6 +1956,18 @@ pub trait Verifier {
     fn language(&self) -> Option<crate::domain::language::Language> {
         None
     }
+    /// Run the preparation command `dagq.toml` declares for a verification
+    /// in the container (`[container.verification] prepare`, ADR-t2257-1
+    /// decision 4 (b)) on the host, in the main checkout, with
+    /// `materials` (the verification's staged materials, the control
+    /// side's alone) in
+    /// [`MATERIALS_ENV`](crate::domain::run_container::MATERIALS_ENV), its
+    /// output in `log`; `None` when none is declared, which is the
+    /// default, and then nothing runs.
+    fn prepare_verification(&self, materials: &Path, log: &Path) -> Result<Option<Exit>> {
+        let _ = (materials, log);
+        Ok(None)
+    }
     /// Run `command` in a shell in `cwd` with `env`, its output in `log`.
     fn run_to_log(
         &self,

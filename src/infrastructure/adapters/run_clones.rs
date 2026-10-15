@@ -11,8 +11,11 @@
 //! symlink.
 
 use std::{
+    ffi::{CStr, CString},
     fs::{DirBuilder, OpenOptions},
     io::Write,
+    os::fd::{AsFd, BorrowedFd, OwnedFd},
+    os::unix::ffi::OsStrExt,
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     sync::{Arc, Mutex},
 };
@@ -77,6 +80,138 @@ fn remove_entry(path: &Path) -> Result<()> {
         fs::remove_file(path)
     }
     .with_context(|| format!("remove {}", path.display()))
+}
+
+/// Remove the entry `name` of the directory `parent` (shown as `shown` in
+/// errors), also when the commands that ran in it left directories nobody
+/// may write or read (a module cache of 0555 directories), and while a
+/// process still running there may swap a directory for a symlink: every
+/// step works from a directory's descriptor and an entry's name
+/// (`fstatat`, `openat` with `O_NOFOLLOW`, `unlinkat`), never through a
+/// path, so no symlink is followed and nothing outside `parent` is
+/// reached. A directory is made its owner's to read, write and enter
+/// (`fchmod` on its descriptor, or `fchmodat` with `AT_SYMLINK_NOFOLLOW`
+/// on one it cannot open) before what is in it goes. No git runs. Nothing
+/// there is not an error.
+fn remove_at(parent: BorrowedFd<'_>, name: &CStr, shown: &Path) -> Result<()> {
+    use std::os::fd::AsRawFd;
+    let failed = |what: &str| {
+        let error = io::Error::last_os_error();
+        anyhow::Error::new(error).context(format!("{what} {}", shown.display()))
+    };
+    let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: `name` is NUL-terminated and `stat` is written by the call.
+    let looked = unsafe {
+        libc::fstatat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    if looked != 0 {
+        if io::Error::last_os_error().kind() == io::ErrorKind::NotFound {
+            return Ok(());
+        }
+        return Err(failed("look at"));
+    }
+    // SAFETY: fstatat succeeded, so `stat` is initialized.
+    let stat = unsafe { stat.assume_init() };
+    if stat.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        // SAFETY: `name` is NUL-terminated; the entry itself is unlinked.
+        if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } != 0
+            && io::Error::last_os_error().kind() != io::ErrorKind::NotFound
+        {
+            return Err(failed("remove"));
+        }
+        return Ok(());
+    }
+    let dir = match open_dir_at(parent, name) {
+        Ok(dir) => dir,
+        // A directory its owner may not read: made its owner's without
+        // following a symlink put there meanwhile, then opened again.
+        Err(error) if error.raw_os_error() == Some(libc::EACCES) => {
+            // SAFETY: `name` is NUL-terminated.
+            let changed = unsafe {
+                libc::fchmodat(
+                    parent.as_raw_fd(),
+                    name.as_ptr(),
+                    0o700,
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if changed != 0 {
+                return Err(failed("make its owner's"));
+            }
+            open_dir_at(parent, name).with_context(|| format!("open {}", shown.display()))?
+        }
+        Err(error) => return Err(error).with_context(|| format!("open {}", shown.display())),
+    };
+    // Write and search, to unlink what is in it.
+    // SAFETY: `dir` is an open descriptor.
+    if unsafe { libc::fchmod(dir.as_raw_fd(), 0o700) } != 0 {
+        return Err(failed("make its owner's"));
+    }
+    for child in names_in(dir.as_fd()).with_context(|| format!("read {}", shown.display()))? {
+        let path = shown.join(std::ffi::OsStr::from_bytes(child.to_bytes()));
+        remove_at(dir.as_fd(), &child, &path)?;
+    }
+    drop(dir);
+    // SAFETY: `name` is NUL-terminated; an empty directory is removed.
+    if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
+        return Err(failed("remove"));
+    }
+    Ok(())
+}
+
+/// The directory `name` of `parent`, opened only when it is a directory
+/// and not a symlink.
+fn open_dir_at(parent: BorrowedFd<'_>, name: &CStr) -> io::Result<OwnedFd> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+    // SAFETY: `name` is NUL-terminated.
+    let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: openat returned a new descriptor this owns.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// The names in the directory `dir` but `.` and `..`, read through a
+/// copy of its descriptor.
+fn names_in(dir: BorrowedFd<'_>) -> io::Result<Vec<CString>> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: `dir` is an open descriptor; the copy is the stream's.
+    let copy = unsafe { libc::dup(dir.as_raw_fd()) };
+    if copy < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `copy` is an open directory descriptor, owned by the stream
+    // once fdopendir succeeds.
+    let stream = unsafe { libc::fdopendir(copy) };
+    if stream.is_null() {
+        let error = io::Error::last_os_error();
+        // SAFETY: the stream did not take `copy`.
+        unsafe { libc::close(copy) };
+        return Err(error);
+    }
+    let mut names = Vec::new();
+    loop {
+        // SAFETY: `stream` is open; the entry is read before the next call.
+        let entry = unsafe { libc::readdir(stream) };
+        if entry.is_null() {
+            break;
+        }
+        // SAFETY: `d_name` is NUL-terminated.
+        let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
+        if name != c"." && name != c".." {
+            names.push(name.to_owned());
+        }
+    }
+    // SAFETY: `stream` is open and closed once, with `copy`.
+    unsafe { libc::closedir(stream) };
+    Ok(names)
 }
 
 /// The bytes of the run directory's file at `path`, opened without
@@ -341,6 +476,137 @@ impl GitRepository {
                 .args(["update-ref", &format!("refs/heads/{branch}"), base]),
         )?;
         Ok(log)
+    }
+
+    /// Make the directory of a verification in the container at `dir`
+    /// (ADR-t2173-1 decision 1, ADR-t2179-1 decisions 5 and 8), holding
+    /// the clone of `commit` at
+    /// [`VERIFICATION_CLONE`](crate::domain::run_container::VERIFICATION_CLONE),
+    /// made over `file://` with every git guarded so no tracked hook and no
+    /// driver `.gitattributes` selects runs, the drivers a configuration
+    /// includes only for the clone (its gitdir, its branch) among them. The parent of `dir` (the
+    /// queue's verification directory, which verifications share) is made
+    /// when it is not there, and when it is, it is to be a directory, no
+    /// symlink, the control side's and writable by neither its group nor
+    /// others; whatever is at `dir` already (a file, a directory, a
+    /// symlink) is refused, and nothing is made. A directory this leaves
+    /// half made is removed before its error returns.
+    pub fn create_verification_clone(&self, dir: &Path, commit: &CommitSha) -> Result<PathBuf> {
+        let parent = dir.parent().context("no verification directory")?;
+        let queue_dir = parent.parent().context("no queue directory")?;
+        match entry(queue_dir)? {
+            Some(meta) if meta.is_dir() && !meta.file_type().is_symlink() => (),
+            _ => bail!(
+                "the queue's directory {} is a symlink, no directory or gone, so no verification is made in it",
+                queue_dir.display()
+            ),
+        }
+        match entry(parent)? {
+            None => DirBuilder::new()
+                .mode(0o700)
+                .create(parent)
+                .with_context(|| format!("create {}", parent.display()))?,
+            Some(meta) if meta.file_type().is_symlink() || !meta.is_dir() => bail!(
+                "{} is a symlink or no directory, so no verification is made in it",
+                parent.display()
+            ),
+            // SAFETY: geteuid reads the process's own effective user ID.
+            Some(meta) if meta.uid() != unsafe { libc::geteuid() } || meta.mode() & 0o022 != 0 => {
+                bail!(
+                    "{} is not the control side's alone (another owner, or writable by its group or others), so no verification is made in it",
+                    parent.display()
+                )
+            }
+            Some(_) => (),
+        }
+        ensure!(
+            entry(dir)?.is_none(),
+            "{} is there already, so no verification is made there",
+            dir.display()
+        );
+        // Fails when something came there meanwhile.
+        DirBuilder::new()
+            .mode(0o700)
+            .create(dir)
+            .with_context(|| format!("create {}", dir.display()))?;
+        let clone = dir.join(crate::domain::run_container::VERIFICATION_CLONE);
+        let made = self
+            .guarded_repository()
+            .and_then(|guarded| guarded.fill_verification_clone(&clone, commit));
+        if let Err(error) = made {
+            if let Err(left) = remove_entry(dir) {
+                tracing::warn!(error = %format_args!("{left:#}"), "the half made verification {} could not be removed: {left:#}", dir.display());
+            }
+            return Err(error);
+        }
+        Ok(clone)
+    }
+
+    /// Fill the verification's clone at `clone` with `commit`, checked out
+    /// on a branch of the clone's own, with this repository guarded.
+    fn fill_verification_clone(&self, clone: &Path, commit: &CommitSha) -> Result<()> {
+        const BRANCH: &str = "refs/heads/verification";
+        output(
+            self.command()
+                .args(["init", "--quiet", "--template="])
+                .arg(clone),
+        )?;
+        // A configuration only the clone reads (a conditional include on
+        // its gitdir) is guarded before git runs there.
+        self.widen_guard(clone)?;
+        let in_clone = || {
+            let mut command = self.command();
+            command.arg("-C").arg(clone);
+            command
+        };
+        output(
+            in_clone()
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .args(["fetch", "--quiet", "--no-tags", "--no-write-fetch-head"])
+                .arg(format!("file://{}", self.root.display()))
+                .arg(format!("{commit}:{BRANCH}")),
+        )?;
+        output(in_clone().args(["symbolic-ref", "HEAD", BRANCH]))?;
+        // And one on its branch, before its files are written.
+        self.widen_guard(clone)?;
+        output(in_clone().args(["reset", "--quiet", "--hard"]))?;
+        Ok(())
+    }
+
+    /// Remove a verification's directory at `dir` without git and
+    /// following no symlink (ADR-t2179-1 decision 7), from the descriptor
+    /// of its parent ([`remove_at`]), so a container that could not be
+    /// removed and still runs there reaches nothing outside it by swapping
+    /// a directory for a symlink: nothing is removed through a parent that
+    /// is a symlink or no directory.
+    pub fn remove_verification_dir(dir: &Path) -> Result<()> {
+        if let Some(meta) = entry(dir.parent().context("no verification directory")?)?
+            && (meta.file_type().is_symlink() || !meta.is_dir())
+        {
+            bail!(
+                "{} is a symlink or no directory; nothing is removed through it",
+                dir.parent().unwrap_or(dir).display()
+            );
+        }
+        let parent = dir.parent().context("no verification directory")?;
+        let parent = match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(parent)
+        {
+            Ok(parent) => parent,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error).with_context(|| format!("open {}", parent.display()));
+            }
+        };
+        let name = CString::new(
+            dir.file_name()
+                .context("no verification's name")?
+                .as_bytes(),
+        )
+        .with_context(|| format!("{} holds a NUL", dir.display()))?;
+        remove_at(parent.as_fd(), &name, dir)
     }
 
     /// See [`Repository::clone_facts`].

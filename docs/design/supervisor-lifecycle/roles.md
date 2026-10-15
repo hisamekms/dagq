@@ -83,7 +83,8 @@ actorをどこで動かし、specをどこまで守らせるかは`src/applicati
 - `ExecutorBackend`はactorを動かす場所、`EnforcementLevel`はそこでの強制の強さで、隔離は`sandbox`だけである。
   hostで動くCodexのworkerはOSのsandboxが書き込みと他のプロセスへのsignalを止めるが、隔離ではない（[ADR-t813-3](../../adr/2026-09-28-t813-3-codex-worker-permissions.md)の決定7）。
   workerのproviderごとの強制は`EnforcementLevel::of_worker`が決める。
-- containerで起動するのはworkerのturnだけで、runのsession wrapperが`run_container::PodmanActorExecutor`で起動する（[Container runtime](../container-runtime.md#workerの実行)）。
+- containerで起動するactorはworkerのturnだけで、runのsession wrapperが`run_container::PodmanActorExecutor`で起動する（[Container runtime](../container-runtime.md#workerの実行)）。
+  integrateのverificationのコマンドはactorでなく、`integrate`がcontainerで流す（[Container runtime](../container-runtime.md#verificationの実行)）。
   hostのexecutorはcontainerに置いたactorを起動せず`ensure_implemented`がerrorにし、hostに黙って戻さない（fail closed）。
   知らない名前も`ExecutorBackend::parse`がerrorにする。
 - `HostActorExecutor`は`ExecutionConfig`を持ち（`with_config`）、actorのroleのbackendがhostでなければ起動を拒む。

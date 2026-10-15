@@ -237,6 +237,14 @@ impl QueueKey {
     pub fn run_container(&self, run: &str) -> Result<String, String> {
         volume_part(run).map(|run| format!("dagq-{}-run-{run}", self.0))
     }
+
+    /// The container the verification `verification` of `integrate` runs
+    /// its commands in ([`super::run_container::verification_run_args`]):
+    /// one command at a time, so the verification's end removes it by this
+    /// name.
+    pub fn verification_container(&self, verification: &str) -> Result<String, String> {
+        volume_part(verification).map(|id| format!("dagq-{}-verify-{id}", self.0))
+    }
 }
 
 fn volume_part(part: &str) -> Result<&str, String> {

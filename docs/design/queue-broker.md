@@ -121,6 +121,5 @@ queue serviceと同じ手順に乗せる（[Queue service](queue-service.md#起�
 ## まだ無いもの
 
 - Claudeの資格情報のkeychainからの読み取り（今はファイルだけ）。
-- containerのverificationへのtokenのfileの受け渡し。
 - `status`・`doctor`でのbrokerの見せ方と、人の手での起動・停止のコマンド。
 - 拒否の記録の量の上限。

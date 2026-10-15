@@ -273,6 +273,10 @@ pub struct SuperviseOptions {
     /// The containers of the runs whose worker works in a clone; `None` is
     /// podman's in the dagq machine. Tests set it (a fake podman).
     pub run_containers: Option<RunContainersPort>,
+    /// The containers of the verifications `dagq.toml` sets to the
+    /// container; `None` is podman's in the dagq machine. Tests set it (a
+    /// fake podman).
+    pub verification_containers: Option<VerificationContainersPort>,
     /// Whether the container runtime can run a target, in place of its
     /// parts (the broker, the relays, the credential, the machine and the
     /// image); `None` asks them. Tests set it.
@@ -321,6 +325,18 @@ pub struct RunContainersPort(pub Arc<dyn crate::application::run_container::RunC
 impl std::fmt::Debug for RunContainersPort {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("RunContainersPort")
+    }
+}
+
+/// The verifications' containers [`SuperviseOptions::verification_containers`](super::SuperviseOptions::verification_containers) gives the supervisor.
+#[derive(Clone)]
+pub struct VerificationContainersPort(
+    pub Arc<dyn crate::application::run_container::VerificationContainers>,
+);
+
+impl std::fmt::Debug for VerificationContainersPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VerificationContainersPort")
     }
 }
 
@@ -397,6 +413,7 @@ impl SuperviseOptions {
             queue_broker: None,
             broker_relay: None,
             run_containers: None,
+            verification_containers: None,
             container: None,
             passes: Arc::new(AtomicU64::new(0)),
             sccache: None,
@@ -804,6 +821,16 @@ pub fn supervise_with_reviewer(
         ),
         verification_tokens: Arc::new(
             crate::infrastructure::queue_broker::SystemVerificationTokens { db: db.clone() },
+        ),
+        verification_containers: options.verification_containers.as_ref().map_or_else(
+            || {
+                Arc::new(crate::compose::verification_containers(
+                    &db,
+                    Some(main_checkout.clone()),
+                ))
+                    as Arc<dyn crate::application::run_container::VerificationContainers>
+            },
+            |port| port.0.clone(),
         ),
         remote: Arc::new(repository.clone()),
         repository: Arc::new(repository),

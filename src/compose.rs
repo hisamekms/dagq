@@ -68,7 +68,7 @@ pub use planning::{
 };
 pub use supervisor::{
     ContainerRuntimePort, ProcessesPort, RunContainersPort, RunFilesPort, SuperviseOptions,
-    supervise, supervise_with_reviewer,
+    VerificationContainersPort, supervise, supervise_with_reviewer,
 };
 
 /// The one-shot entry points (`integrate`, `status`, `doctor`, `recover`,
@@ -125,6 +125,29 @@ pub(crate) fn run_containers(
             host_wide,
         }),
     )
+}
+
+/// The verifications' containers of the queue at `db`, whose parts the
+/// host's context makes ready as it does a worker's
+/// ([`run_containers`]).
+pub(crate) fn verification_containers(
+    db: &Path,
+    main_checkout: Option<PathBuf>,
+) -> crate::infrastructure::run_container::PodmanVerificationContainers {
+    let podman = crate::infrastructure::podman_machine::PodmanCli::default();
+    let host_wide = crate::infrastructure::kpi_config::host_wide_file();
+    crate::infrastructure::run_container::PodmanVerificationContainers {
+        podman: podman.clone(),
+        db: db.to_path_buf(),
+        main_checkout: main_checkout.clone(),
+        host_wide: host_wide.clone(),
+        machine: std::sync::Arc::new(crate::infrastructure::podman_machine::QueueRunMachine {
+            podman,
+            db: db.to_path_buf(),
+            main_checkout,
+            host_wide,
+        }),
+    }
 }
 
 /// The main checkout of the repository the queue is bound to; `None` for a

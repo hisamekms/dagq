@@ -10,6 +10,10 @@
 //! name. The limits are the `[container]` table of the host-wide
 //! `host.toml` ([`load_container_limits`]).
 //!
+//! The verifications of `integrate` set to the container have
+//! [`PodmanVerificationContainers`], the adapter of the
+//! [`VerificationContainers`] port.
+//!
 //! [Container runtime]: ../../docs/design/container-runtime.md
 
 use std::fs;
@@ -20,16 +24,24 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 
+use std::os::unix::fs::DirBuilderExt;
+
+use super::adapters::GitRepository;
+use super::agent_dir::Directory;
 use super::podman_machine::PodmanCli;
 use super::queue_service::{queue_dir_of, write_private};
 use super::run_env::{load_build_output_dir, load_run_env, parse_positive, strip_comment};
 use crate::application::CommandSpec;
 use crate::application::podman_machine::RunMachine;
-use crate::application::run_container::{PreparedRun, RunContainers};
-use crate::domain::podman_machine::{MACHINE_NAME, QueueKey};
+use crate::application::run_container::{
+    PreparedRun, PreparedVerification, RunContainers, VerificationContainers,
+};
+use crate::domain::podman_machine::{MACHINE_NAME, MachineMounts, QueueKey};
 use crate::domain::run_clone::CLONES_DIR;
-use crate::domain::run_container::{ContainerLimits, HOME_DIR, TOKEN_FILE};
-use crate::domain::{RunId, TaskRun};
+use crate::domain::run_container::{
+    ContainerLimits, HOME_DIR, MATERIALS_DIR, STAGED_MATERIALS, TOKEN_FILE, VERIFICATION_TOKEN,
+};
+use crate::domain::{CommitSha, RunId, TaskRun};
 
 /// How long the removal of a run's container may take: a podman whose
 /// machine hangs does not hold a stop of the run.
@@ -88,9 +100,10 @@ impl RunContainers for PodmanRunContainers {
             .context("the queue is bound to no checkout, whose dagq.toml decides the container")?;
         let run_dir = Path::new(run.run_dir().context("missing run directory")?);
         let build_output = load_build_output_dir(checkout)?;
-        let image = self
-            .machine
-            .ready(run.id().as_str(), build_output.is_some())?;
+        let image = self.machine.ready(
+            run.id().as_str(),
+            build_output.is_some().then_some(run.id().as_str()),
+        )?;
         Ok(PreparedRun {
             queue: self.key()?,
             image,
@@ -177,6 +190,208 @@ impl RunContainers for PodmanRunContainers {
             );
         }
         Ok(())
+    }
+}
+
+/// The containers of the verifications of `integrate` of the queue at
+/// `db` set to the container: the adapter of the
+/// [`VerificationContainers`] port. A verification's directory is
+/// `<queue dir>/verification/<verification>`, which the dagq machine
+/// mounts (ADR-t2173-1 decision 1), its clone made by the repository the
+/// queue is bound to with its git guarded.
+#[derive(Clone)]
+pub struct PodmanVerificationContainers {
+    pub podman: PodmanCli,
+    pub db: PathBuf,
+    /// The main checkout the queue is bound to: where `dagq.toml` is read
+    /// and the repository the clones are made from; `None` when it is
+    /// bound to none, which runs no verification in the container.
+    pub main_checkout: Option<PathBuf>,
+    /// The host-wide `host.toml`: the containers' limits.
+    pub host_wide: Option<PathBuf>,
+    /// Makes the run's parts in the machine ready.
+    pub machine: Arc<dyn RunMachine>,
+}
+
+impl PodmanVerificationContainers {
+    fn key(&self) -> Result<QueueKey> {
+        let queue_dir = queue_dir_of(&self.db);
+        let name = queue_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .with_context(|| format!("{} names no queue", queue_dir.display()))?;
+        QueueKey::new(name).map_err(anyhow::Error::msg)
+    }
+
+    /// Copy what is in the control side's directory `from` into the run
+    /// directory's directory `into`, opened through descriptors: regular
+    /// files are written to new inodes renamed into place (a symlink there
+    /// is replaced, never followed), directories made and descended into
+    /// without following a symlink; a symlink or any other entry in `from`
+    /// is not copied.
+    fn copy_into(from: &Path, into: &Directory) -> Result<()> {
+        for entry in fs::read_dir(from).with_context(|| format!("read {}", from.display()))? {
+            let entry = entry?;
+            let (name, path) = (entry.file_name(), entry.path());
+            let kind = entry.file_type()?;
+            if kind.is_file() {
+                let mut source =
+                    fs::File::open(&path).with_context(|| format!("read {}", path.display()))?;
+                into.replace(&name, |target| std::io::copy(&mut source, target).map(drop))
+                    .with_context(|| format!("copy {}", path.display()))?;
+            } else if kind.is_dir() {
+                if into.kind(&name)?.is_some() {
+                    into.remove_tree(&name)?;
+                }
+                into.mkdir(&name)?;
+                Self::copy_into(&path, &into.child(&name)?)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn remove_named(&self, name: &str) -> Result<()> {
+        let args = [
+            "rm".to_owned(),
+            "--force".to_owned(),
+            "--ignore".to_owned(),
+            "--time".to_owned(),
+            "0".to_owned(),
+            name.to_owned(),
+        ];
+        let output = self
+            .podman
+            .inside_within(&args, REMOVE_TIMEOUT)?
+            .with_context(|| {
+                format!("podman rm {name} did not end within {REMOVE_TIMEOUT:?}: it was stopped")
+            })?;
+        if !output.status.success() {
+            bail!(
+                "podman rm {name} exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+}
+
+impl VerificationContainers for PodmanVerificationContainers {
+    fn prepare(
+        &self,
+        run: &TaskRun,
+        commit: &CommitSha,
+        token: &Path,
+    ) -> Result<PreparedVerification> {
+        let queue_dir = queue_dir_of(&self.db);
+        let checkout = self.main_checkout.as_deref().context(
+            "the queue is bound to no checkout, whose dagq.toml decides the verification's container",
+        )?;
+        let run_dir = Path::new(run.run_dir().context("missing run directory")?);
+        let queue = self.key()?;
+        // Unique: a directory there already is refused, never reused.
+        let id = format!(
+            "{}-{}",
+            run.id(),
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        );
+        let build_output = load_build_output_dir(checkout)?;
+        let image = self.machine.ready(
+            run.id().as_str(),
+            build_output.is_some().then_some(id.as_str()),
+        )?;
+        let dir = MachineMounts::of_queue(&queue_dir).verifications.join(&id);
+        let prepared = PreparedVerification {
+            id,
+            queue,
+            image,
+            staged: dir.join(STAGED_MATERIALS),
+            materials: run_dir.join(MATERIALS_DIR),
+            dir,
+            build_output,
+            limits: load_container_limits(self.host_wide.as_deref()).0,
+        };
+        // A directory refused (something there already) is not this
+        // verification's, and is left as it is: only the volume goes.
+        let cloned = GitRepository::inspect(checkout)
+            .and_then(|repository| repository.create_verification_clone(&prepared.dir, commit));
+        if let Err(error) = cloned {
+            if prepared.build_output.is_some()
+                && let Err(left) = self.machine.remove_build_output(&prepared.id)
+            {
+                tracing::warn!(error = %format_args!("{left:#}"), "the build output of the verification {} was not removed: {left:#}", prepared.id);
+            }
+            return Err(error);
+        }
+        let made = (|| -> Result<()> {
+            let value = fs::read(token)
+                .with_context(|| format!("read the verification's token {}", token.display()))?;
+            write_private(&prepared.dir.join(VERIFICATION_TOKEN), &value)?;
+            // The commands' home: the root filesystem is read-only.
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(prepared.dir.join(HOME_DIR))
+                .context("create the verification's home")?;
+            fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&prepared.staged)
+                .context("create the verification's materials")
+        })();
+        if let Err(error) = made {
+            if let Err(left) = self.finish(&prepared) {
+                tracing::warn!(error = %format_args!("{left:#}"), "the verification {} was not removed: {left:#}", prepared.id);
+            }
+            return Err(error);
+        }
+        Ok(prepared)
+    }
+
+    fn publish_materials(&self, verification: &PreparedVerification) -> Result<()> {
+        let materials = &verification.materials;
+        let (run_dir, name) = Directory::parent(materials)
+            .with_context(|| format!("open the directory of {}", materials.display()))?;
+        if run_dir.kind(name)?.is_some() {
+            run_dir
+                .remove_tree(name)
+                .with_context(|| format!("remove {}", materials.display()))?;
+        }
+        run_dir
+            .mkdir(name)
+            .with_context(|| format!("create {}", materials.display()))?;
+        let into = run_dir
+            .child(name)
+            .with_context(|| format!("open {}", materials.display()))?;
+        Self::copy_into(&verification.staged, &into)
+    }
+
+    fn command_line(&self, args: &[String]) -> String {
+        let mut line = vec![
+            self.podman.program.to_string_lossy().into_owned(),
+            "--connection".to_owned(),
+            MACHINE_NAME.to_owned(),
+        ];
+        line.extend(args.iter().cloned());
+        crate::application::naming::shell_join(&line)
+    }
+
+    fn remove_container(&self, verification: &PreparedVerification) -> Result<()> {
+        let name = verification
+            .queue
+            .verification_container(&verification.id)
+            .map_err(anyhow::Error::msg)?;
+        self.remove_named(&name)
+    }
+
+    /// Every part is tried, and the first failure is returned: a container
+    /// that cannot be removed leaves no directory or volume behind for it.
+    fn finish(&self, verification: &PreparedVerification) -> Result<()> {
+        let container = self.remove_container(verification);
+        let volume = match verification.build_output {
+            Some(_) => self.machine.remove_build_output(&verification.id),
+            None => Ok(()),
+        };
+        let dir = GitRepository::remove_verification_dir(&verification.dir);
+        container.and(volume).and(dir)
     }
 }
 
@@ -286,7 +501,10 @@ mod tests {
         std::os::unix::fs::symlink(&elsewhere, run_dir.join(TOKEN_FILE)).unwrap();
         struct NoMachine;
         impl RunMachine for NoMachine {
-            fn ready(&self, _: &str, _: bool) -> Result<String> {
+            fn ready(&self, _: &str, _: Option<&str>) -> Result<String> {
+                bail!("no machine in this test")
+            }
+            fn remove_build_output(&self, _: &str) -> Result<()> {
                 bail!("no machine in this test")
             }
         }

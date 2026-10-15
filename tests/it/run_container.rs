@@ -220,8 +220,12 @@ fn claim_in_container(db: &Path, repo: &Path, lease: &str) -> (TaskRun, LeaseTok
 struct FakeMachine;
 
 impl RunMachine for FakeMachine {
-    fn ready(&self, _: &str, _: bool) -> Result<String> {
+    fn ready(&self, _: &str, _: Option<&str>) -> Result<String> {
         Ok("localhost/dagq-test-image:t".to_owned())
+    }
+
+    fn remove_build_output(&self, _: &str) -> Result<()> {
+        Ok(())
     }
 }
 
