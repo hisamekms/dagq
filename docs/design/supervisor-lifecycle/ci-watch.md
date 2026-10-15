@@ -54,6 +54,7 @@ GitHubのURLでない・remoteが無いときは設定の誤りとして`ci_watc
    落とすのはglobごとに1回で、重なるglobがぶつからないようglobごとのdirに落とし、落とせないglobはwarnを出して残りを読む。
    読み終えたらdirを消す。
    成果物が無い・落とせない・XMLが読めないときはその実行のtestの成否を「分からない」とし、jobとstepだけを使う（`domain::ci_watch::Junit`）。
+   宣言したprofileがJUnitを読まなければ落とさず、jobとstepだけを使う（下の「testの名前」）。
 
 ## 実行の扱い
 
@@ -71,9 +72,10 @@ GitHubのURLでない・remoteが無いときは設定の誤りとして`ci_watc
 - **re-run**: 先頭の実行の新しいattemptは、新しい実行と同じに扱う。
   赤だった先頭をre-runして緑になれば一覧の全ての項目を外して`ci_turned_green`を書き、赤のままなら他の赤の実行と同じに、一覧に無い落ちたtestを足し、JUnitで通ったtestを外す（下の「一覧」）。
   先頭より前に作られた実行のre-runは上の遅れて終わった実行と同じに記録だけする。
-- **testの名前**: JUnitの`testcase`の`classname`（nextestではbinary id）と`name`を空白1つでつないだ名前で、nextestの表示と同じ（`domain::ci_watch::parse_junit`）。
+- **testの名前**: JUnitの`testcase`の`classname`と`name`から、JUnitを読む最初の宣言したprofileが道具の表示と同じ名前を作る（`Toolchains::junit_test_name`、[Toolchain profiles](../toolchain-profiles.md)）。
+  宣言の無いrepositoryでは移行の間、暗黙のRustのprofileがnextestの表示と同じ名前にする（ADR-t2268-1決定9）。
   同じ名前が複数のファイルにあれば（macOSとLinuxのjob）、`domain::ci_watch::merge_outcomes`がまとめる。
-- **testの名前が取れない失敗**: 赤の実行で、JUnitが無いか読めないか、JUnitが落ちたtestを1つも名指さないときは、落ちたjobの落ちたstepごとに`job:<job名>/step:<step名>`（落ちたstepの無い落ちたjobは`job:<job名>`）を一覧の項目にする。
+- **testの名前が取れない失敗**: 赤の実行で、JUnitが無いか読めないか読むprofileが無いか、JUnitが落ちたtestを1つも名指さないときは、落ちたjobの落ちたstepごとに`job:<job名>/step:<step名>`（落ちたstepの無い落ちたjobは`job:<job名>`）を一覧の項目にする。
   JUnitのファイルとjobを結びつけられないので、jobごとではなく実行ごとに決める。
 
 ## 一覧
@@ -81,7 +83,7 @@ GitHubのURLでない・remoteが無いときは設定の誤りとして`ci_watc
 一覧はqueueのeventから求めるビューで、正本は`ci_checked`の`added` / `removed`の積み重ね（表を足さない。畳み込みは`domain::ci_watch::WatchState::fold`）。
 
 - **足す**: 赤の実行で落ちたtest（とtestの名前が取れない失敗の項目）のうち、一覧に無いもの。
-- **外す**: 後の赤の実行のJUnitでそのtestが通ったとき（JUnitが無いか読めない実行と、そのtestを流していない実行では外さない）。
+- **外す**: 後の赤の実行のJUnitでそのtestが通ったとき（JUnitが無いか読めないか読むprofileの無い実行と、そのtestを流していない実行では外さない）。
   緑の実行では、一覧の全ての項目を外す。
   jobとstepの項目は緑の実行でだけ外す。
   外したことは`removed`に理由付きで記録する。

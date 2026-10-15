@@ -296,13 +296,17 @@ fn doctor_repository(queue: &SqliteQueue) -> Result<Option<serde_json::Value>> {
 /// `host.toml` (the queue's, over the host-wide one) over it, the host's
 /// time zone and cores, the `[report]` retention of `host.toml`, the
 /// reports' root (`out`, else `<queue dir>/reports/`), and the host's d2
-/// and TALA on this process's PATH for the dependency diagram.
+/// and TALA on this process's PATH for the dependency diagram; and whether
+/// the `toolchain` axis has strata, as the profiles of `checkout`'s
+/// `dagq.toml` resolved against `profiles` say
+/// ([`crate::domain::toolchain::Toolchains::records_rust_toolchain`]).
 fn report_setup(
     db: &Path,
     checkout: Option<&Path>,
     out: Option<&Path>,
     host_wide: Option<&Path>,
     now: i64,
+    profiles: &crate::domain::toolchain::ProfileRegistry,
 ) -> Result<crate::application::report::ReportSetup> {
     use crate::infrastructure::{kpi_config::load_host_kpi, report_config::load_host_report};
     let repository = match checkout {
@@ -316,7 +320,10 @@ fn report_setup(
         host: crate::application::kpi::Host {
             utc_offset_secs: clock::local_utc_offset(now),
             cores: clock::logical_cores(),
-            dagq_source: checkout.is_some_and(is_dagq_source),
+            rust_toolchain: checkout.is_some_and(|checkout| {
+                crate::infrastructure::run_env::toolchains_in_use(checkout, profiles)
+                    .records_rust_toolchain(|| is_dagq_source(checkout))
+            }),
         },
         config: crate::domain::kpi::KpiConfig::merge(repository.as_ref(), host.as_ref()),
         keep: load_host_report(queue_dir, host_wide)?,
@@ -1178,6 +1185,7 @@ impl OneShot {
             None,
             host_wide.as_deref(),
             now,
+            self.profiles,
         )?;
         Ok(serde_json::to_value(crate::application::kpi::kpi(
             queue,
@@ -1210,6 +1218,7 @@ impl OneShot {
             None,
             host_wide.as_deref(),
             now,
+            self.profiles,
         )?;
         Ok(serde_json::to_value(
             crate::application::forecast::forecast(
@@ -1236,6 +1245,7 @@ impl OneShot {
             None,
             host_wide.as_deref(),
             now,
+            self.profiles,
         )?;
         let of = |period, last| {
             crate::application::kpi::kpi(
@@ -1292,6 +1302,7 @@ impl OneShot {
             out,
             host_wide.as_deref(),
             now,
+            self.profiles,
         )?;
         let made = report::make(queue, &setup, now, period, at)?;
         if print {
@@ -1310,13 +1321,15 @@ impl OneShot {
 /// The daily KPI reports' port of the supervisor (ADR-0051 decision 20):
 /// made with [`report_setup`] of the queue at `db` and `checkout` at each
 /// pass, its diagram drawn on `diagram_path` when given, and pushed as the
-/// queue's `host.toml` (over `host_wide`) says.
+/// queue's `host.toml` (over `host_wide`) says; the `toolchain` axis by
+/// the profiles of `profiles` the `dagq.toml` declares.
 pub(super) fn report_port(
     db: &Path,
     checkout: &Path,
     host_wide: Option<PathBuf>,
     diagram_path: Option<std::ffi::OsString>,
     push_retry: [Duration; 2],
+    profiles: &'static crate::domain::toolchain::ProfileRegistry,
 ) -> crate::application::supervise::ReportPort {
     let (db, checkout) = (db.to_path_buf(), checkout.to_path_buf());
     let name = checkout.file_name().map_or_else(
@@ -1332,8 +1345,14 @@ pub(super) fn report_port(
     crate::application::supervise::ReportPort {
         utc_offset: clock::local_utc_offset,
         setup: Arc::new(move |now| {
-            let mut setup =
-                report_setup(&setup_db, Some(&checkout), None, setup_wide.as_deref(), now)?;
+            let mut setup = report_setup(
+                &setup_db,
+                Some(&checkout),
+                None,
+                setup_wide.as_deref(),
+                now,
+                profiles,
+            )?;
             if let Some(path) = &diagram_path {
                 setup.diagram = d2_renderer(Some(path.clone()));
             }
@@ -1361,8 +1380,15 @@ pub(super) fn forecast_port(
     crate::application::supervise::ForecastPort {
         utc_offset: clock::local_utc_offset,
         min_samples: Arc::new(move |now| {
-            report_setup(&db, Some(&checkout), None, host_wide.as_deref(), now)
-                .map(|setup| setup.config.min_samples)
+            report_setup(
+                &db,
+                Some(&checkout),
+                None,
+                host_wide.as_deref(),
+                now,
+                &crate::domain::toolchain::BUILTIN,
+            )
+            .map(|setup| setup.config.min_samples)
         }),
         check,
     }
@@ -1370,11 +1396,14 @@ pub(super) fn forecast_port(
 
 /// The CI watch's port of the supervisor: `[ci_watch]` of `checkout`'s
 /// `dagq.toml` read again each pass, its checks through `settings`'
-/// `gh` in the main checkout (ADR-t1920-1).
+/// `gh` in the main checkout (ADR-t1920-1), each naming the JUnit's tests
+/// as the profiles the `dagq.toml` declares then do, resolved against
+/// `profiles` ([`crate::infrastructure::run_env::toolchains_in_use`]).
 pub(super) fn ci_watch_port(
     db: &Path,
     checkout: &Path,
     settings: &CiWatchOptions,
+    profiles: &'static crate::domain::toolchain::ProfileRegistry,
 ) -> crate::application::supervise::CiWatchPort {
     let file_checkout = checkout.to_path_buf();
     let file = Arc::new(move || crate::infrastructure::run_env::load_ci_watch(&file_checkout))
@@ -1387,15 +1416,21 @@ pub(super) fn ci_watch_port(
             let remote = crate::infrastructure::run_env::load_repository_config(&checkout)?
                 .remote()
                 .to_owned();
-            Ok(Arc::new(crate::infrastructure::ci_watch::GhSource::new(
-                &program,
-                std::env::var_os("PATH"),
-                &checkout,
-                &remote,
-                config.clone(),
-                branch,
-                &queue_dir,
-            ))
+            Ok(Arc::new(
+                crate::infrastructure::ci_watch::GhSource::new(
+                    &program,
+                    std::env::var_os("PATH"),
+                    &checkout,
+                    &remote,
+                    config.clone(),
+                    branch,
+                    &queue_dir,
+                )
+                .with_junit_test_name(
+                    crate::infrastructure::run_env::toolchains_in_use(&checkout, profiles)
+                        .junit_test_name(),
+                ),
+            )
                 as Arc<dyn crate::application::ci_watch::CiSource>)
         },
     ) as crate::application::supervise::CiSourceMaker;

@@ -1,69 +1,15 @@
 //! Runtime tests: the toolchain profiles a repository declares in
 //! `[toolchains.<name>]` of `dagq.toml` read its verification's output
-//! (ADR-t2268-1). A second profile, made up here and registered beside
-//! the built-in one, classifies, names its tests and gives its retry env
+//! (ADR-t2268-1). A second profile, made up in `tests/common` and
+//! registered beside the built-in one, classifies, names its tests and gives its retry env
 //! with no other code; the runtime's own host marks hold whatever is
-//! declared, and an output no declared profile reads is `unknown`.
+//! declared, and an output no declared profile reads is `unknown`. The
+//! host's Rust toolchain is recorded at a claim where the Rust profile is
+//! declared (the KPIs' `toolchain` axis is `cli_read`'s).
 use crate::runtime_support;
 
-use dagq::domain::toolchain::{
-    ProfileRegistry, ToolCodeClass, ToolHostClass, ToolchainProfile, rust,
-};
+use crate::common::toolchain::PROFILES;
 use runtime_support::*;
-
-/// A made-up tool: `BROKEN <test>` failed, `WOBBLY <test>` passed on its
-/// retry, `HUNG <test>` ran out of time; its retry runs with
-/// `MADE_FLAKY=accept`.
-struct Made;
-
-static MADE: Made = Made;
-
-/// The built-in profiles and the made-up one.
-static PROFILES: ProfileRegistry = ProfileRegistry::new(&[&rust::RUST, &MADE]);
-
-fn named<'a>(line: &'a str, mark: &str) -> Option<&'a str> {
-    line.trim().strip_prefix(mark)?.strip_prefix(' ')
-}
-
-impl ToolchainProfile for Made {
-    fn name(&self) -> &'static str {
-        "made-up"
-    }
-    fn killed_line(&self, _: &[&str]) -> Option<usize> {
-        None
-    }
-    fn failed_tests(&self, text: &str) -> Vec<(usize, String)> {
-        text.lines()
-            .enumerate()
-            .filter_map(|(index, line)| named(line, "BROKEN").map(|t| (index, t.to_owned())))
-            .collect()
-    }
-    fn flaky_tests(&self, text: &str) -> Vec<String> {
-        text.lines()
-            .filter_map(|line| named(line, "WOBBLY").map(str::to_owned))
-            .collect()
-    }
-    fn flaky_line(&self, lines: &[&str]) -> Option<usize> {
-        lines
-            .iter()
-            .position(|line| named(line, "WOBBLY").is_some())
-    }
-    fn test_host_line(&self, lines: &[&str]) -> Option<(ToolHostClass, usize)> {
-        lines
-            .iter()
-            .position(|line| named(line, "HUNG").is_some())
-            .map(|at| (ToolHostClass::Timeout, at))
-    }
-    fn code_failure(&self, _: &str, lines: &[&str]) -> Option<(ToolCodeClass, String)> {
-        lines
-            .iter()
-            .find(|line| named(line, "BROKEN").is_some())
-            .map(|line| (ToolCodeClass::TestFailure, (*line).to_owned()))
-    }
-    fn flaky_retry_env(&self) -> &'static [(&'static str, &'static str)] {
-        &[("MADE_FLAKY", "accept")]
-    }
-}
 
 /// The one-shot entry points with the made-up profile registered.
 fn with_made_up() -> runtime::OneShot {
@@ -264,4 +210,32 @@ fn doctor_and_status_show_the_declared_profiles() {
         error.contains("[toolchains.tool]: unknown profile \"made-up\"; the profiles are rust"),
         "{error}"
     );
+}
+
+/// A repository that is not dagq's source and declares the Rust profile:
+/// the supervisor's claim records the host's `rustc` release and host,
+/// from the declaration and not the source judgement. The cases of the
+/// judgement (no Rust profile resolved, even in dagq's source) are the unit
+/// test's of `domain::toolchain`.
+#[test]
+fn a_claim_records_the_rust_toolchain_where_the_profile_is_declared() {
+    warm_dagq();
+    let (_dir, repo, db) = fixture();
+    declare(&repo, "[toolchains.rust]\nprofile = \"rust\"\n");
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let options = SuperviseOptions {
+        profiles: &PROFILES,
+        ..supervise_options(1, true)
+    };
+    let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let claimed = payloads(&show(&db), "run_claimed")[0].clone();
+    assert!(
+        claimed["rustc_release"]
+            .as_str()
+            .is_some_and(|release| !release.is_empty()),
+        "{claimed}"
+    );
+    assert!(claimed["rustc_host"].is_string(), "{claimed}");
 }

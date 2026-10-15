@@ -369,6 +369,63 @@ fn timeline_and_stats_show_the_work_breakdown() {
     assert_eq!(landings["all"]["value"], 1.0);
 }
 
+/// The `toolchain` axis outside dagq's source follows the profiles its
+/// `dagq.toml` declares (ADR-t2268-1): none with only another profile
+/// declared (the made-up one of `tests/common`), a stratum with the
+/// Rust profile declared. Undeclared, it keeps the source judgement
+/// (`timeline_and_stats_show_the_work_breakdown`).
+#[test]
+fn the_toolchain_axis_follows_the_declared_rust_profile() {
+    use dagq::domain::kpi::{Axis, KpiQuery, Period};
+    use dagq::domain::stats::Cursor;
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("queue.db");
+    run_with_events(&db, &[("run_integrated", json!({}), "00:40:00")]);
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE run_events SET payload=json_set(payload,'$.rustc_release','1.93.0',
+               '$.rustc_host','aarch64-apple-darwin') WHERE kind='run_claimed'",
+            [],
+        )
+        .unwrap();
+    bind(&db, dir.path(), "other");
+    let one_shot = dagq::runtime::OneShot {
+        profiles: &crate::common::toolchain::PROFILES,
+        ..dagq::runtime::OneShot::system()
+    };
+    let strata = |toml: &str| -> Vec<String> {
+        std::fs::write(dir.path().join("repo-other").join("dagq.toml"), toml).unwrap();
+        let since = 1_790_208_000_000;
+        let kpi = one_shot
+            .kpi_of(
+                &SqliteQueue::open(&db).unwrap(),
+                &db,
+                &KpiQuery {
+                    period: Period::Day,
+                    since: Some(Cursor::Time(since)),
+                    until: Some(Cursor::Time(since + 3_600_000)),
+                    by: vec![Axis::Toolchain],
+                    ..KpiQuery::default()
+                },
+            )
+            .unwrap();
+        kpi["periods"][0]["kpis"]["landings"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .filter(|stratum| stratum.starts_with("toolchain="))
+            .cloned()
+            .collect()
+    };
+    assert!(strata("[toolchains.tool]\nprofile = \"made-up\"\n").is_empty());
+    assert_eq!(
+        strata("[toolchains.core]\nprofile = \"rust\"\npaths = [\"src/**\"]\n"),
+        ["toolchain=1.93.0 aarch64-apple-darwin"]
+    );
+}
+
 #[test]
 fn timeline_names_the_long_gap_before_the_receipt() {
     use serde_json::json;

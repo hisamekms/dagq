@@ -277,7 +277,7 @@ fn one_window_of_any_length() {
             now: MONDAY + DAY,
             utc_offset_secs: 0,
             cores: None,
-            dagq_source: true,
+            rust_toolchain: true,
             config: &KpiConfig::default(),
             host: None,
         },

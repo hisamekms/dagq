@@ -842,7 +842,7 @@ mod review_verdicts {
     /// handoff waiting (it waits for a sample in progress).
     static HOLD_SAMPLE: AtomicBool = AtomicBool::new(true);
 
-    fn held_host(now: i64) -> HostSample {
+    fn held_host(now: i64, _: &dagq::domain::toolchain::Toolchains) -> HostSample {
         let started = Instant::now();
         while HOLD_SAMPLE.load(Ordering::SeqCst) && started.elapsed() < crate::common::STEP_LIMIT {
             thread::sleep(Duration::from_millis(10));

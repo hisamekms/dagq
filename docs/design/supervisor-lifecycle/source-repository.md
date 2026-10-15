@@ -38,9 +38,9 @@ dagqの開発でだけ要る機能は、queueのrepositoryが「dagqのソース
 この判定に置くのはdagq自身の配布の事情（表の上の3行と、そのinstallと自動更新の前のe2eの関門）だけで、言語・道具の知識は置かない（[ADR-t2268-1](../../adr/2026-10-12-t2268-1-toolchain-knowledge-behind-declared-profiles.md)決定2）。
 言語・道具の知識は`dagq.toml`で宣言したtoolchainのprofile、projectの値は`dagq.toml`、hostの値は`host.toml`、言語に依らない知識（hostの分類の汎用の印、待ち・dagq・gitのコマンドの分類）はruntimeの共通の既定に置く。
 **実装状況**: profileのportと`[toolchains.<名前>]`の宣言はある（[Toolchain profiles](../toolchain-profiles.md)）。
-検証の失敗の分類・落ちたtestとflakyのtestの抜き出し・flakyのやり直しのenvは、宣言したprofileを通して働く。
+検証の失敗の分類・落ちたtestとflakyのtestの抜き出し・flakyのやり直しのenv、CIの見張りのJUnitのtestの名前、hostの負荷のprocessの種類、hostの`rustc`とtoolchainの記録とKPIの`toolchain`の軸は、宣言したprofileを通して働く。
 宣言の無いrepositoryではRustのprofileが暗黙に当たり、`doctor`と`status`が警告する（ADR-t2268-1決定9）。
-buildの出力の置き場と掃除・計測・CIの見張りの読み方・processの種類はまだprofileに移っておらず、表の4行目はこの判定で分け、下の「言語・道具の知識の今の場所」はcargoの前提でどのrepositoryでも働く。
+buildの出力の置き場と掃除・計測のコマンドの分類と回数はまだprofileに移っておらず、表の4行目のうちそれらはこの判定で分け、下の「言語・道具の知識の今の場所」はcargoの前提でどのrepositoryでも働く。
 移行の間も、宣言の無いrepositoryは今のRustの振る舞いのままで、旧い分け方を外すのはこのrepositoryの`dagq.toml`に宣言と規則が入った後である（ADR-t2268-1決定9）。
 
 | 機能 | 決定 | dagqのソース | ソースでないrepository |
@@ -54,14 +54,15 @@ buildの出力の置き場と掃除・計測・CIの見張りの読み方・proc
 
 ソースでないrepositoryのqueueで記録も出力もしないもの。
 決まった形では、コマンドの分類と回数は`dagq.toml`の規則・宣言したprofileの既定の規則・runtimeの共通の既定の規則の重ね合わせ（[計測](../measurement.md#コマンドの形と分類)）、hostの`rustc`とtoolchainの記録と分け方は宣言したRustのprofileが持ち、この判定を使わない（ADR-t2268-1決定2・5）。
-今はどれも次のとおりこの判定で分ける。
+今は、hostの`rustc`とtoolchainの記録とKPIの`toolchain`の軸を除き、次のとおりこの判定で分ける。
 
 - worktime（`src/domain/worktime.rs`）: commandの分類のうち`e2e`（`--test e2e`）・`llvm_cov`・`test`（`cargo test`と`cargo nextest`）の判定と、`full_tests`（全体の`cargo test`。filterの無い`--test it`も含む）・`llvm_cov_runs`・`verification_repeats`（integrateと重なるllvm-cov・全体のtest・e2e）の数。ソースでなければ、区間を閉じるときにこの3つの分類を付けず（そのコマンドは他の規則に落ちる）、3つの数を`work`に書かない（落ちたtestの名前も、testを流す分類のコマンドが無いので読まない）。判定は区間を閉じるたびに`infrastructure::sessions::dagq_source`が、queueの束縛（`queue_repository`）からmain checkoutを求めて行う（書き込みトランザクションの中で閉じる区間は、transcriptと同じく`read_before`がトランザクションの前に判定しておく）。束縛の無いqueueはソースでない。
 - `stats`の`work_breakdown`の`verification_repeats`・`runs_with_repeats`・`test_with_llvm_cov`（`src/domain/stats/work.rs`）: ソースでなければ`runs`と全ての群で欄ごと出さない（`domain::stats::without_cargo_measures`）。
-- claimの属性の`rustc_release`・`rustc_host`（`run_claimed`）: ソースでなければsupervisorは`rustc -vV`を実行せず、欄ごと書かない（`Ports::host_versions`のcheckoutを`None`にする）。
-  `stats`の`runs`の`rustc_release`・`rustc_host`と`versions.rustc`はソースでなければ欄ごと出さない。
-  [`kpi`](commands.md)の`toolchain=`の層はソースでなければ`--by toolchain`でも出さない。
-- 出力の判定は`stats`・`kpi`・日次のレポート・observerの入力を出すたびに`compose`がmain checkoutの`Cargo.toml`で行う（`stats`は`StatsSources::dagq_source`、KPIは`application::kpi::Host::dagq_source`）。
+- claimの属性の`rustc_release`・`rustc_host`（`run_claimed`）と[`kpi`](commands.md)の`toolchain=`の層: この判定ではなく、宣言したprofileにRustのprofileがあるかで分ける（`Toolchains::records_rust_toolchain`）。
+  当たらなければsupervisorはRustのprofileの`rustc -vV`を実行せず欄ごと書かず（`Ports::host_versions`のcheckoutを`None`にする）、`kpi`は`--by toolchain`でも層を出さない。
+  宣言の無いrepositoryには移行の間Rustのprofileが暗黙に当たり、そのあいだはこの判定のまま分ける（ADR-t2268-1決定9）。
+- `stats`の`runs`の`rustc_release`・`rustc_host`と`versions.rustc`はソースでなければ欄ごと出さない（`without_cargo_measures`）。
+- 出力の判定は`stats`・`kpi`・日次のレポート・observerの入力を出すたびに`compose`がmain checkoutの`Cargo.toml`と`dagq.toml`で行う（`stats`は`StatsSources::dagq_source`、KPIは`application::kpi::Host::rust_toolchain`）。
 
 ### 言語・道具の知識の今の場所
 
@@ -74,9 +75,8 @@ buildの出力の置き場と掃除・計測・CIの見張りの読み方・proc
   このrepositoryの`dagq.toml`が宣言するまでは、profileも印も宣言しないrepositoryの暗黙の扱いとして当たり、Rustのprofileの暗黙の扱いと一緒に外れる。
 - buildの出力の置き場と掃除: landing recheckの`application::supervise::recheck`と自動更新の`application::update`。
   workerとintegrateのbuildの出力の置き場は`[run.env]`のprojectの値を`infrastructure::run_env`が読むだけで、runtimeに雛形は無い（決まった形ではprofileの推奨の案として出す。ADR-t2268-1決定1・7）。
-- CIの見張りの読み方: `domain::ci_watch`。
-- processの種類: `domain::host_metrics`。
-  cargo・rustcの種類はRustのprofileに移し、claude・dagq・そのほかの種類はruntimeの共通の既定に残す。
+- CIの見張りのJUnitのtestの名前とprocessのcargo・rustcの種類はprofileに移った（`ToolchainProfile::junit_test_name`・`process_kind`）。
+  jobとstepの名前は道具に依らずGitHubのものを読み、claude・dagq・そのほかのprocessの種類はruntimeの共通の既定（`domain::host_metrics::process_kind`）に残す。
 
 ## テスト
 

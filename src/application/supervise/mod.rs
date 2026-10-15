@@ -2357,11 +2357,16 @@ impl Supervisor<'_> {
                     .iter()
                     .any(|worker| worker.provider == crate::domain::Provider::Codex)
                     .then_some(self.layout.codex.as_path());
-                // The toolchain only for dagq's source (ADR-t614-1).
-                let rustc_in = self
-                    .repository
-                    .is_dagq_source()
-                    .then_some(self.layout.repo_root.as_path());
+                // The Rust toolchain only where the declared profiles record
+                // it, and while none is declared only in dagq's source
+                // (ADR-t2268-1 decision 9); a `dagq.toml` that cannot be
+                // read or resolved gives no profile, as for the other
+                // readers outside the landing.
+                let rustc_in = crate::domain::toolchain::Toolchains::for_measures(Some(
+                    self.verifier.toolchains(),
+                ))
+                .records_rust_toolchain(|| self.repository.is_dagq_source())
+                .then_some(self.layout.repo_root.as_path());
                 (self.host.host_versions)(&self.layout.claude, codex, rustc_in)
             });
             let host = host.clone();

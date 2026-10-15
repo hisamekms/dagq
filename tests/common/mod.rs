@@ -22,6 +22,7 @@ pub mod lifecycle;
 pub mod queue;
 pub mod service;
 pub mod template;
+pub mod toolchain;
 
 pub use actor::WithoutActor;
 

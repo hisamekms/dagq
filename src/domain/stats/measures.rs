@@ -92,7 +92,11 @@ pub struct RunMeasures {
     /// their seconds from `turn_started` to `turn_finished`; null for a run
     /// without one.
     pub turns: Option<RunTurns>,
-    /// The host's `rustc` at the claim: cargo-only (ADR-t614-1).
+    /// The host's `rustc` at the claim, recorded where the repository's
+    /// profiles record the Rust toolchain
+    /// ([`crate::domain::toolchain::Toolchains::records_rust_toolchain`]);
+    /// shown with the cargo-only measures, outside dagq's source left out
+    /// (ADR-t614-1).
     #[serde(skip_serializing_if = "CargoOnly::is_hidden")]
     pub rustc_release: CargoOnly<Option<String>>,
     #[serde(skip_serializing_if = "CargoOnly::is_hidden")]

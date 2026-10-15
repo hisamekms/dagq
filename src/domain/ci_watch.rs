@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::event_kind::EventKind;
+use super::toolchain::JunitTestName;
 use super::{AttentionNext, RunEvent};
 
 /// A finished run of the watched workflow was read (one per run whose
@@ -314,10 +315,15 @@ pub enum TestOutcome {
     Failed,
 }
 
-/// The test cases of one JUnit XML file, each named by its `classname`
-/// and `name` joined by one space (as nextest prints them; `name` alone
-/// without a `classname`). An error when the text holds no test suite.
-pub fn parse_junit(xml: &str) -> Result<Vec<(String, TestOutcome)>, String> {
+/// The test cases of one JUnit XML file, each named by `test_name` of its
+/// `classname` (empty without one) and `name`: as the declared profile
+/// whose tool wrote it prints the test
+/// ([`crate::domain::toolchain::Toolchains::junit_test_name`]). An error
+/// when the text holds no test suite.
+pub fn parse_junit(
+    xml: &str,
+    test_name: JunitTestName,
+) -> Result<Vec<(String, TestOutcome)>, String> {
     if !xml.contains("<testsuite") {
         return Err("no <testsuite> element".to_owned());
     }
@@ -333,11 +339,7 @@ pub fn parse_junit(xml: &str) -> Result<Vec<(String, TestOutcome)>, String> {
         let classname = attribute(attributes, "classname").unwrap_or_default();
         let name = attribute(attributes, "name")
             .ok_or_else(|| "a <testcase> without a name".to_owned())?;
-        let full = if classname.is_empty() {
-            name
-        } else {
-            format!("{classname} {name}")
-        };
+        let full = test_name(&classname, &name);
         let body_start = &after[end + 1..];
         let (body, next) = if self_closing {
             ("", body_start)
@@ -458,6 +460,10 @@ pub enum Junit {
     /// No artifact, one that could not be downloaded, or XML that could
     /// not be read: the run's test outcomes are not known.
     Missing,
+    /// No declared profile names the tests of a JUnit
+    /// ([`crate::domain::toolchain::Toolchains::junit_test_name`]): none is
+    /// downloaded, and the failed jobs and steps are listed.
+    Unnamed,
     Read(BTreeMap<String, TestOutcome>),
 }
 
@@ -466,6 +472,7 @@ impl Junit {
         match self {
             Self::NotConfigured => "not_configured",
             Self::Missing => "missing",
+            Self::Unnamed => "unnamed",
             Self::Read(_) => "read",
         }
     }
@@ -1714,8 +1721,13 @@ mod tests {
   </testsuite>
   <testsuite name="dagq"><testcase name="a &amp; b" classname=""></testcase></testsuite>
 </testsuites>"#;
+        // Named as the Rust profile's nextest prints them, implied while
+        // the repository declares none (ADR-t2268-1 decision 9).
+        let rust = crate::domain::toolchain::Toolchains::undeclared()
+            .junit_test_name()
+            .unwrap();
         assert_eq!(
-            parse_junit(xml).unwrap(),
+            parse_junit(xml, rust).unwrap(),
             vec![
                 (
                     "dagq::it runtime_claim::claims_in_order".to_owned(),
@@ -1731,9 +1743,20 @@ mod tests {
                 ("a & b".to_owned(), TestOutcome::Passed),
             ]
         );
-        assert!(parse_junit("not xml at all").is_err());
-        assert!(parse_junit("<testsuite><testcase classname='x'/></testsuite>").is_err());
-        assert!(parse_junit("<testsuite><testcase name='x'>").is_err());
+        assert!(parse_junit("not xml at all", rust).is_err());
+        assert!(parse_junit("<testsuite><testcase classname='x'/></testsuite>", rust).is_err());
+        assert!(parse_junit("<testsuite><testcase name='x'>", rust).is_err());
+        // A second profile names them its own way, with no other change.
+        let fake = crate::domain::toolchain::fake::only_fake()
+            .junit_test_name()
+            .unwrap();
+        assert_eq!(
+            parse_junit(xml, fake).unwrap()[1],
+            (
+                "dagq::it/runtime_claim::fails".to_owned(),
+                TestOutcome::Failed
+            )
+        );
     }
 
     #[test]
@@ -1778,7 +1801,7 @@ mod tests {
         let junit = tests(&[("t a", TestOutcome::Failed), ("t b", TestOutcome::Passed)]);
         let jobs = [FailedJob {
             job: "test".into(),
-            steps: vec!["nextest".into()],
+            steps: vec!["tests".into()],
         }];
         let decision = decide(
             &watch,
@@ -1879,8 +1902,8 @@ mod tests {
         let mut watch = WatchState::default();
         let mut decisions = Vec::new();
         let jobs = [FailedJob {
-            job: "clippy".into(),
-            steps: vec!["cargo clippy".into()],
+            job: "lint".into(),
+            steps: vec!["lints".into()],
         }];
         let red = run(1, "failure", "2026-10-06T01:00:00Z");
         process(
@@ -1915,7 +1938,7 @@ mod tests {
         assert_eq!(decisions[1].checked["removed"], json!([]));
         assert_eq!(
             decisions[1].checked["added"],
-            json!(["job:clippy/step:cargo clippy"])
+            json!(["job:lint/step:lints"])
         );
         assert_eq!(watch.failures.len(), 3);
         // `t a` passes, `t b` did not run: only `t a` leaves; its finding
@@ -2027,7 +2050,7 @@ mod tests {
         let jobs = [
             FailedJob {
                 job: "lint".into(),
-                steps: vec!["fmt".into(), "clippy".into()],
+                steps: vec!["format".into(), "lints".into()],
             },
             FailedJob {
                 job: "build".into(),
@@ -2050,11 +2073,29 @@ mod tests {
             "ci.yml",
             "main",
         );
-        assert_eq!(
-            decision.checked["added"],
-            json!(["job:build", "job:lint/step:clippy", "job:lint/step:fmt"])
-        );
+        let steps = json!(["job:build", "job:lint/step:format", "job:lint/step:lints"]);
+        assert_eq!(decision.checked["added"], steps);
         assert_eq!(decision.checked["gap"], true);
+        // No declared profile names the tests: the failed jobs and steps
+        // are listed alike.
+        let unnamed = decide(
+            &WatchState::default(),
+            &RunInput {
+                run: &red,
+                state: CiState::Red,
+                skipped: &[],
+                undecided: &[],
+                junit: &Junit::Unnamed,
+                failed_jobs: &jobs,
+                gap: false,
+            },
+            &RangeFacts::default(),
+            "ci.yml",
+            "main",
+        );
+        assert_eq!(unnamed.checked["added"], steps);
+        assert_eq!(unnamed.checked["junit"], "unnamed");
+        assert_eq!(unnamed.checked["failed_tests"], json!([]));
         // No last green: the range starts nowhere and the turn has none.
         assert_eq!(decision.turned_red.unwrap()["last_green"], Value::Null);
         assert_eq!(

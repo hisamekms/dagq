@@ -1243,3 +1243,9 @@ task = 2129
 name = "verification_container::a_verification_set_to_the_container_runs_its_commands_there_and_leaves_nothing"
 reason = "B 境界（supervisor の配線・Git・プロセス）: supervisor の着地が fake の podman を通して実の dagq relay verify で検証のコマンドを rebase の後の commit の clone で流し、準備のコマンドの材料・token・RUSTC_WRAPPER の外しと event・片付けを、build の出力の設定がある着地と無い着地の 2 本で確かめる。引数と env の判断は domain::run_container の unit test"
 task = 2182
+
+# 5.7〜8.1s, 17.7s once (stress 5 under the host's load of other runs, task 2271)
+[[test]]
+name = "runtime_toolchains::a_claim_records_the_rust_toolchain_where_the_profile_is_declared"
+reason = "B 境界（supervisor の配線）: supervisor の claim が main checkout の dagq.toml の宣言した Rust の profile を verifier から読み、host_versions に rustc を聞かせて run_claimed に rustc_release・rustc_host を書くことを、dagq のソースでない repository の 1 本で確かめる。判定の場合分けは domain::toolchain の unit test"
+task = 2271

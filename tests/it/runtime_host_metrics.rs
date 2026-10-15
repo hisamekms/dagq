@@ -4,23 +4,33 @@ use crate::runtime_support;
 
 use dagq::{
     compose::HostMetricsSettings,
-    domain::host_metrics::{DiskSpace, HostSample},
+    domain::{
+        host_metrics::{DiskSpace, HostSample, processes},
+        toolchain::Toolchains,
+    },
 };
 use runtime_support::*;
 use std::sync::atomic::AtomicBool;
 
-/// A sample of a host with a fixed load and memory.
-fn steady_host(now: i64) -> HostSample {
-    let mut sample = HostSample::new(now).with_loads([Some(1.5), Some(2.0), None]);
+/// A sample of a host with a fixed load, memory and processes (a cargo
+/// and a shell), split by the profiles the supervisor read.
+fn steady_host(now: i64, toolchains: &Toolchains) -> HostSample {
+    let usage = processes(" 10.0 1024 cargo\n 4.0 1024 zsh\n", toolchains);
+    let mut sample = HostSample::new(now)
+        .with_loads([Some(1.5), Some(2.0), None])
+        .with_processes(usage.as_ref());
     sample.set("mem_used_mb", Some(8192.0));
     sample
 }
 
-fn broken_host(_now: i64) -> HostSample {
+fn broken_host(_now: i64, _: &Toolchains) -> HostSample {
     panic!("the host's tools could not be read");
 }
 
-fn settings(interval: Duration, sample: fn(i64) -> HostSample) -> Option<HostMetricsSettings> {
+fn settings(
+    interval: Duration,
+    sample: fn(i64, &Toolchains) -> HostSample,
+) -> Option<HostMetricsSettings> {
     Some(HostMetricsSettings {
         sample,
         // 10 GiB free of 100.
@@ -138,6 +148,10 @@ fn supervisor_records_the_host_load_while_it_runs_and_prunes_old_files() {
     let stats = runtime::stats(&db, &Default::default()).unwrap();
     assert!(stats["host"]["samples"].as_u64().unwrap() >= 3, "{stats}");
     assert_eq!(stats["host"]["metrics"]["mem_used_mb"]["max"], 8192.0);
+    // The cargo is the Rust profile's, implied while the repository
+    // declares none (ADR-t2268-1 decision 9).
+    assert_eq!(stats["host"]["metrics"]["cpu_cargo"]["max"], 10.0);
+    assert_eq!(stats["host"]["metrics"]["cpu_other"]["max"], 4.0);
     // The free space of the runs' filesystem, its least and median too
     // (task 1371).
     let disk = &stats["host"]["metrics"]["disk_free_bytes"];

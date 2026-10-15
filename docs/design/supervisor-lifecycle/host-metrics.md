@@ -63,7 +63,7 @@ eventにはしない（連続の値でrun_eventsを膨らませない）。
 | `unix` | 取った時刻（unix秒） |
 | `load1` `load5` `load15` | getloadavg(3)の1・5・15分のload average |
 | `cpu_total` | `ps -A -o pcpu=,rss=,comm=`の`%cpu`の合計（1コアを100とする%） |
-| `cpu_<kind>` `rss_<kind>_mb` | プロセスの種類ごとの`%cpu`の合計と常駐メモリ（MB）。kindは`cargo`・`rustc`・`claude`・`dagq`・`other` |
+| `cpu_<kind>` `rss_<kind>_mb` | プロセスの種類ごとの`%cpu`の合計と常駐メモリ（MB）。kindは`cargo`・`rustc`・`claude`・`dagq`・`other`で、`cargo`と`rustc`は宣言したprofileの道具のbuildの道具とcompilerの列 |
 | `mem_total_mb` | 物理メモリ |
 | `mem_used_mb` | macOSはwired + active + compressorが占めるページ、Linuxは`MemTotal - MemAvailable` |
 | `mem_compressed_mb` | macOSのcompressorが占めるページ（Linuxは空） |
@@ -71,7 +71,14 @@ eventにはしない（連続の値でrun_eventsを膨らませない）。
 | `pageouts` | 起動からの累計。macOSは`vm_stat`の`Pageouts`、Linuxは`/proc/vmstat`の`pswpout` |
 | `disk_free_bytes` `disk_total_bytes` `disk_free_pct` | runのworktreeを置くファイルシステムの空き（一般のprocessが使える量）・全体（bytes。丸めない）と、空きの割合（%、小数2桁）。下の[ディスクの空き](#ディスクの空き) |
 
-プロセスの種類はコマンド（`ps -o comm`のpathか名前）で分ける: 名前が`dagq`（`dagq.previous`なども）は`dagq`、名前が`claude`かClaude Codeの`<...>/claude/versions/<version>`は`claude`、`rustc`・`clippy-driver`・`sccache`は`rustc`、`cargo`・`cargo-*`と`target/`の下から走るもの（build scriptとtest binary）は`cargo`、それ以外は`other`。macOSの`%cpu`は減衰する平均なので瞬間の値ではない。
+プロセスの種類はコマンド（`ps -o comm`のpathか名前）で分ける（`domain::host_metrics::process_kind`）。
+言語に依らないruntimeの共通の分類が先で、名前が`dagq`（`dagq.previous`なども）は`dagq`、名前が`claude`かClaude Codeの`<...>/claude/versions/<version>`は`claude`。
+次に、main checkoutの`dagq.toml`が宣言したprofileを宣言の順に当て、最初に当たったprofileが道具のprocessをbuildの道具（`cargo`の列）かcompiler（`rustc`の列）に分ける（`ToolchainProfile::process_kind`、各profileの印はその実装のdoc comment。[Toolchain profiles](../toolchain-profiles.md)）。
+どれにも当たらなければ`other`で、宣言したprofileの無い道具のprocessもここに数える。
+列の名前は、ストアの列とファイルのheaderの名前を変えずに読み続けるために固定のままで、`ToolProcess`のdoc commentが理由を持つ。
+宣言の無いrepositoryには移行の間Rustのprofileが暗黙に当たり（ADR-t2268-1決定9）、その印（`domain::toolchain::rust`）で分ける。
+`dagq.toml`は取るたびに読み、読めないか知らないprofileを名指すときはどのprofileにも当てない（`run_env::toolchains_in_use`）。
+macOSの`%cpu`は減衰する平均なので瞬間の値ではない。
 
 macOSでは`vm_stat`・`sysctl -n hw.memsize`・`sysctl -n vm.swapusage`・`ps -A -o pcpu=,rss=,comm=`を、Linuxでは`/proc/meminfo`・`/proc/vmstat`・`ps -A -o pcpu=,rss=,args=`を使う（`/proc/meminfo`があればLinuxの読み方にする）。Linuxの`comm`は15バイトに切った名前でpathを持たないので、`args`の最初の語（起動したpath）で種類を分ける。各ツールは10秒で打ち切り、UTF-8でないバイトは置き換えて読む。
 

@@ -104,8 +104,9 @@ pub(super) struct Context<'a> {
     /// Unix seconds.
     now: i64,
     cores: Option<usize>,
-    /// Whether the queue's repository is dagq's source (ADR-t614-1).
-    dagq_source: bool,
+    /// Whether the repository's profiles record the Rust toolchain
+    /// ([`KpiInput::rust_toolchain`]).
+    rust_toolchain: bool,
     /// When each task first became `ready`.
     first_ready: HashMap<TaskId, i64>,
     runs_per_task: HashMap<TaskId, HashSet<RunId>>,
@@ -350,7 +351,7 @@ impl<'a> Context<'a> {
             },
             now: input.now,
             cores: input.cores,
-            dagq_source: input.dagq_source,
+            rust_toolchain: input.rust_toolchain,
             first_ready,
             runs_per_task,
             revises,
@@ -415,10 +416,10 @@ impl<'a> Context<'a> {
 
     /// The values of `axis` for `run`: one, but for the area, the run's
     /// every area (`unknown` without one), and none without `[areas]`; and
-    /// none for the cargo-only toolchain outside dagq's source
-    /// (ADR-t614-1).
+    /// none for the toolchain unless the repository's profiles record the
+    /// Rust toolchain.
     fn axis_values(&self, run: &RunStats, axis: Axis) -> Vec<String> {
-        if axis == Axis::Toolchain && !self.dagq_source {
+        if axis == Axis::Toolchain && !self.rust_toolchain {
             return Vec::new();
         }
         if axis != Axis::Area {

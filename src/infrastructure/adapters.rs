@@ -580,17 +580,18 @@ pub fn disk_space(path: &Path) -> Option<crate::domain::host_metrics::DiskSpace>
     })
 }
 
-/// How long [`host_versions`] lets `rustc -vV` run.
-const RUSTC_VERSION_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long [`host_versions`] lets each version command run.
+const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The versions a claim records (task 197): Claude Code's from the file
 /// `claude` resolves to (`<...>/versions/<version>`, where its installer
 /// keeps each version; null for any other path), Codex's from `codex
 /// --version` when `codex` is given (null when it cannot be run;
-/// ADR-t813-2 decision 7), and `release` and `host` of `rustc -vV` run in
-/// `rustc_in`, so that its toolchain file applies (null when it cannot be
-/// run, and none asked without a checkout: only dagq's source records the
-/// toolchain, ADR-t614-1).
+/// ADR-t813-2 decision 7), and `release` and `host` of the Rust profile's
+/// toolchain version run in `rustc_in`, so that its toolchain file applies
+/// (null when it cannot be run, and none asked without a checkout: the
+/// claim asks only where the profiles record the Rust toolchain,
+/// [`crate::domain::toolchain::Toolchains::records_rust_toolchain`]).
 pub fn host_versions(claude: &Path, codex: Option<&Path>, rustc_in: Option<&Path>) -> HostVersions {
     let mut versions = HostVersions {
         claude_version: claude_version(claude),
@@ -599,7 +600,7 @@ pub fn host_versions(claude: &Path, codex: Option<&Path>, rustc_in: Option<&Path
     if let Some(codex) = codex {
         versions = match capture(
             Command::new(codex).arg("--version").stdin(Stdio::null()),
-            RUSTC_VERSION_TIMEOUT,
+            VERSION_TIMEOUT,
         ) {
             Ok((status, stdout, _)) if status.success() => versions.with_codex_version(&stdout),
             _ => versions,
@@ -608,9 +609,10 @@ pub fn host_versions(claude: &Path, codex: Option<&Path>, rustc_in: Option<&Path
     let Some(checkout) = rustc_in else {
         return versions;
     };
+    let (program, arguments) = crate::domain::toolchain::rust::RUSTC_VERSION;
     match capture(
-        Command::new("rustc").arg("-vV").current_dir(checkout),
-        RUSTC_VERSION_TIMEOUT,
+        Command::new(program).args(arguments).current_dir(checkout),
+        VERSION_TIMEOUT,
     ) {
         Ok((status, stdout, _)) if status.success() => versions.with_rustc_verbose(&stdout),
         _ => versions,

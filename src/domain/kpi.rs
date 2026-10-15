@@ -161,8 +161,9 @@ pub enum Axis {
     /// `mid` (< 2), `high` (< 4) or `extreme`. The claim records no cores:
     /// they are the host's when the KPIs are read.
     Load,
-    /// `rustc`'s release and host: cargo-only (ADR-t614-1), no stratum
-    /// outside dagq's source.
+    /// `rustc`'s release and host, as the claim recorded them: no stratum
+    /// unless the repository's profiles record the Rust toolchain
+    /// ([`KpiInput::rust_toolchain`]).
     Toolchain,
     /// Claude Code's version; `none` for a run that worked on Codex.
     Claude,
@@ -396,9 +397,11 @@ pub struct KpiInput<'a> {
     pub utc_offset_secs: i64,
     /// The host's logical cores, for the `load` axis.
     pub cores: Option<usize>,
-    /// Whether the queue's repository is dagq's source (ADR-t614-1): the
-    /// `toolchain` axis has strata only then.
-    pub dagq_source: bool,
+    /// Whether the profiles of the queue's repository record the Rust
+    /// toolchain
+    /// ([`Toolchains::records_rust_toolchain`](crate::domain::toolchain::Toolchains::records_rust_toolchain)):
+    /// the `toolchain` axis has strata only then.
+    pub rust_toolchain: bool,
     pub config: &'a KpiConfig,
     /// The host's load, a reference next to each window's KPIs (task 872):
     /// never a KPI, judged or pushed; `None` reads none.

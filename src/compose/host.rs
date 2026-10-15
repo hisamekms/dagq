@@ -248,8 +248,11 @@ pub struct HostMetricsSettings {
     /// How many local days of files are kept, today's included; zero
     /// removes none.
     pub retention_days: u32,
-    /// Takes one sample at a unix second; tests set it.
-    pub sample: fn(i64) -> crate::domain::host_metrics::HostSample,
+    /// Takes one sample at a unix second, its processes split by the kinds
+    /// of the profiles given (those the main checkout's `dagq.toml`
+    /// declares, read again for each sample); tests set it.
+    pub sample:
+        fn(i64, &crate::domain::toolchain::Toolchains) -> crate::domain::host_metrics::HostSample,
     /// Reads the space of the filesystem of a path, put in each sample for
     /// the queue's `runs/` (task 1371); tests set it.
     pub disk: fn(&Path) -> Option<crate::domain::host_metrics::DiskSpace>,
@@ -979,9 +982,13 @@ pub(super) fn release_port(
 /// in the queue's NodeSampleStore (opened by `store`) and under the
 /// queue's `host/`, each with the space of the filesystem of the run
 /// worktrees and their builds, the one the disk checks read (task 1371):
-/// `runs/`, else the queue's dir.
+/// `runs/`, else the queue's dir; the processes split by the profiles
+/// `checkout`'s `dagq.toml` declares, resolved against `profiles`
+/// ([`crate::infrastructure::run_env::toolchains_in_use`]).
 pub(super) fn host_metrics_port(
     db: &Path,
+    checkout: &Path,
+    profiles: &'static crate::domain::toolchain::ProfileRegistry,
     settings: HostMetricsSettings,
     store: Arc<dyn QueueOpener<dyn crate::application::NodeSampleStore + Send>>,
 ) -> crate::application::supervise::HostMetricsPort {
@@ -989,10 +996,14 @@ pub(super) fn host_metrics_port(
     let dir = queue_dir.join(crate::domain::host_metrics::HOST_DIR);
     let runs = runs_dir(db);
     let (take, disk) = (settings.sample, settings.disk);
+    let checkout = checkout.to_path_buf();
     crate::application::supervise::HostMetricsPort {
         interval: settings.interval,
         retention_days: settings.retention_days,
-        sample: Arc::new(move |now| take(now).with_disk(disk(&runs).or_else(|| disk(&queue_dir)))),
+        sample: Arc::new(move |now| {
+            let toolchains = crate::infrastructure::run_env::toolchains_in_use(&checkout, profiles);
+            take(now, &toolchains).with_disk(disk(&runs).or_else(|| disk(&queue_dir)))
+        }),
         utc_offset: clock::local_utc_offset,
         files: Arc::new(crate::infrastructure::host_metrics::HostMetricsDir(dir)),
         store,

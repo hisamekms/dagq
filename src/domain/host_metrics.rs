@@ -14,6 +14,8 @@ use std::collections::BTreeMap;
 
 use serde::Serialize;
 
+use super::toolchain::{ToolProcess, Toolchains};
+
 /// The directory under the queue's directory the files are written in.
 pub const HOST_DIR: &str = "host";
 
@@ -26,7 +28,10 @@ pub const DEFAULT_INTERVAL_SECS: u64 = 30;
 pub const DEFAULT_RETENTION_DAYS: u32 = 30;
 
 /// The kinds of processes the CPU and the memory are split by, in the
-/// order of the columns.
+/// order of the columns: `cargo` and `rustc` are the kinds a declared
+/// profile gives its tools ([`ToolProcess`], named for the Rust tools they
+/// were first made for, so the NodeSampleStore's columns and every file's
+/// header keep reading), the others of no language's tools.
 pub const PROCESS_KINDS: [&str; 5] = ["cargo", "rustc", "claude", "dagq", "other"];
 
 /// The columns of a file, in order. `time` is the host's local time of
@@ -294,24 +299,25 @@ pub struct KindUsage {
 }
 
 /// The kind of a process by its command (`ps -o comm`, a path or a
-/// name): `dagq` (the name `dagq`, the fixed binary's `dagq.previous`
-/// too), `claude` (the name `claude`, or Claude Code's
-/// `<...>/claude/versions/<version>`), `rustc` (`rustc`, `clippy-driver`,
-/// `sccache`), `cargo` (`cargo`, `cargo-*`, and what runs from a `target/`
-/// directory: build scripts and test binaries), else `other`.
-pub fn process_kind(command: &str) -> usize {
+/// name): of no language's tools, `dagq` (the name `dagq`, the fixed
+/// binary's `dagq.previous` too) and `claude` (the name `claude`, or Claude
+/// Code's `<...>/claude/versions/<version>`); then the kind the declared
+/// profiles give a process of their tools
+/// ([`Toolchains::process_kind`]: the build tool in `cargo`, the compiler
+/// in `rustc`, the Rust profile's own tools while the repository declares
+/// none, ADR-t2268-1 decision 9); else `other`, where the tools of no
+/// declared profile count.
+pub fn process_kind(command: &str, toolchains: &Toolchains) -> usize {
     let command = command.trim().trim_start_matches('(').trim_end_matches(')');
     let name = command.rsplit('/').next().unwrap_or(command);
     let kind = if name == "dagq" || name.starts_with("dagq.") {
         "dagq"
     } else if name == "claude" || command.contains("/claude/versions/") {
         "claude"
-    } else if matches!(name, "rustc" | "clippy-driver" | "sccache") {
-        "rustc"
-    } else if name == "cargo" || name.starts_with("cargo-") || command.contains("/target/") {
-        "cargo"
     } else {
-        "other"
+        toolchains
+            .process_kind(command, name)
+            .map_or("other", ToolProcess::column_kind)
     };
     PROCESS_KINDS
         .iter()
@@ -319,9 +325,10 @@ pub fn process_kind(command: &str) -> usize {
         .unwrap_or(PROCESS_KINDS.len() - 1)
 }
 
-/// The CPU and memory per kind of `ps -A -o pcpu=,rss=,comm=` (rss in
-/// KiB); `None` when no line could be read.
-pub fn processes(ps: &str) -> Option<[KindUsage; 5]> {
+/// The CPU and memory per kind ([`process_kind`] with `toolchains`) of
+/// `ps -A -o pcpu=,rss=,comm=` (rss in KiB); `None` when no line could be
+/// read.
+pub fn processes(ps: &str, toolchains: &Toolchains) -> Option<[KindUsage; 5]> {
     let mut usage = [KindUsage::default(); 5];
     let mut read = false;
     for line in ps.lines() {
@@ -333,7 +340,7 @@ pub fn processes(ps: &str) -> Option<[KindUsage; 5]> {
             continue;
         };
         let command = fields.collect::<Vec<_>>().join(" ");
-        let kind = &mut usage[process_kind(&command)];
+        let kind = &mut usage[process_kind(&command, toolchains)];
         kind.cpu += cpu;
         kind.rss_mb += rss / 1024.0;
         read = true;
@@ -921,7 +928,9 @@ Swapouts:                               1047356.
  5.5  2048 /usr/libexec/logd
 garbage line
 ";
-        let usage = processes(ps).unwrap();
+        // Undeclared: the Rust profile implied (ADR-t2268-1 decision 9).
+        let undeclared = Toolchains::undeclared();
+        let usage = processes(ps, &undeclared).unwrap();
         assert_eq!(usage[0].cpu, 21.5);
         assert_eq!(usage[0].rss_mb, 5.0);
         assert_eq!(usage[1].cpu, 150.0);
@@ -930,15 +939,47 @@ garbage line
         assert_eq!(usage[2].rss_mb, 400.0);
         assert_eq!(usage[3].cpu, 4.0);
         assert_eq!(usage[4].cpu, 5.5);
-        assert_eq!(processes("nothing here\n"), None);
-        assert_eq!(PROCESS_KINDS[process_kind("claude")], "claude");
-        assert_eq!(PROCESS_KINDS[process_kind("dagq.previous")], "dagq");
-        assert_eq!(PROCESS_KINDS[process_kind("clippy-driver")], "rustc");
+        assert_eq!(processes("nothing here\n", &undeclared), None);
+        assert_eq!(PROCESS_KINDS[process_kind("claude", &undeclared)], "claude");
+        assert_eq!(
+            PROCESS_KINDS[process_kind("dagq.previous", &undeclared)],
+            "dagq"
+        );
+        assert_eq!(
+            PROCESS_KINDS[process_kind("clippy-driver", &undeclared)],
+            "rustc"
+        );
+        // Without the Rust profile its tools are `other`; `claude` and
+        // `dagq` are the runtime's own kinds whatever is declared.
+        for toolchains in [
+            Toolchains::none(),
+            crate::domain::toolchain::fake::only_fake(),
+        ] {
+            let usage = processes(ps, &toolchains).unwrap();
+            assert_eq!((usage[0].cpu, usage[1].cpu), (0.0, 0.0));
+            assert_eq!(usage[2].cpu, 20.0);
+            assert_eq!(usage[3].cpu, 4.0);
+            assert_eq!(usage[4].cpu, 5.5 + 21.5 + 150.0);
+        }
+    }
+
+    #[test]
+    fn a_second_profile_s_processes_are_split_by_its_kinds() {
+        let ps = " 10.0 1024 /opt/fake/bin/fakebuild\n 30.0 2048 fakec\n 4.0 1024 cargo\n";
+        let usage = processes(ps, &crate::domain::toolchain::fake::only_fake()).unwrap();
+        assert_eq!(usage[0].cpu, 10.0);
+        assert_eq!(usage[1].cpu, 30.0);
+        assert_eq!(usage[4].cpu, 4.0);
+        assert_eq!(header(), COLUMNS.join(","));
     }
 
     #[test]
     fn a_sample_is_written_and_read_back_by_its_header() {
-        let usage = processes(" 10.0 2048 cargo\n 5.0 1024 zsh\n").unwrap();
+        let usage = processes(
+            " 10.0 2048 cargo\n 5.0 1024 zsh\n",
+            &Toolchains::undeclared(),
+        )
+        .unwrap();
         let memory = Memory {
             total_mb: Some(16384.0),
             used_mb: Some(9000.0),

@@ -210,7 +210,7 @@ fn the_toolchain_axis_splits_only_dagqs_source() {
         Some(1.0)
     );
     assert_eq!(landings(&result, "toolchain=unknown"), Some(1.0));
-    queue.not_source = true;
+    queue.no_rust_toolchain = true;
     let result = queue.kpi(MONDAY + DAY + HOUR, &KpiConfig::default(), &query);
     let strata = &result.periods[0].window.kpis["landings"];
     assert!(

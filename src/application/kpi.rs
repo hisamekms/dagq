@@ -6,13 +6,15 @@ use super::{EventStore, PlanningRecords, SupervisorRegistry, areas::AreaReader};
 use crate::domain::kpi::{HostReader, Kpi, KpiConfig, KpiInput, KpiQuery, kpi as derive};
 
 /// Where the host is: the time zone at `now` (seconds east of UTC) and the
-/// logical cores; and whether the queue's repository is dagq's source
-/// (ADR-t614-1), for the cargo-only `toolchain` axis.
+/// logical cores; and whether the profiles of the queue's repository
+/// record the Rust toolchain
+/// ([`crate::domain::toolchain::Toolchains::records_rust_toolchain`]), for
+/// the `toolchain` axis.
 #[derive(Debug, Clone, Copy)]
 pub struct Host {
     pub utc_offset_secs: i64,
     pub cores: Option<usize>,
-    pub dagq_source: bool,
+    pub rust_toolchain: bool,
 }
 
 /// The KPIs `query` asks for, at the unix second `now`, judged by `config`,
@@ -53,7 +55,7 @@ pub fn kpi(
             now,
             utc_offset_secs: host.utc_offset_secs,
             cores: host.cores,
-            dagq_source: host.dagq_source,
+            rust_toolchain: host.rust_toolchain,
             config,
             host: host_metrics,
         },

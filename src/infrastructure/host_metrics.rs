@@ -20,6 +20,7 @@ use super::adapters::capture_bytes;
 use crate::domain::host_metrics::{
     self, HostSample, HostSummary, darwin_memory, header, linux_memory, processes,
 };
+use crate::domain::toolchain::Toolchains;
 
 /// How long each of the host's tools may run.
 const TOOL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -72,8 +73,9 @@ fn loads() -> [Option<f64>; 3] {
     out
 }
 
-/// One sample of the host now, at the unix second `now`.
-pub fn sample(now: i64) -> HostSample {
+/// One sample of the host now, at the unix second `now`, its processes
+/// split by the kinds of `toolchains`' profiles.
+pub fn sample(now: i64, toolchains: &Toolchains) -> HostSample {
     let memory = if Path::new("/proc/meminfo").exists() {
         linux_memory(
             fs::read_to_string("/proc/meminfo").ok().as_deref(),
@@ -86,7 +88,7 @@ pub fn sample(now: i64) -> HostSample {
             tool("sysctl", &["-n", "vm.swapusage"]).as_deref(),
         )
     };
-    let usage = ps().as_deref().and_then(processes);
+    let usage = ps().as_deref().and_then(|ps| processes(ps, toolchains));
     HostSample::new(now)
         .with_loads(loads())
         .with_processes(usage.as_ref())
@@ -290,7 +292,7 @@ mod tests {
 
     #[test]
     fn a_sample_of_this_host_has_the_load_and_the_processes() {
-        let sample = sample(1_790_000_000);
+        let sample = sample(1_790_000_000, &Toolchains::undeclared());
         assert_eq!(sample.unix, 1_790_000_000);
         assert!(sample.values.contains_key("load1"), "{sample:?}");
         assert!(sample.values.contains_key("cpu_total"), "{sample:?}");

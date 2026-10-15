@@ -64,7 +64,20 @@
 //! `integrate` in its process inside a flaky retry would otherwise see
 //! `pass` on its first verification, and a supervisor started with the
 //! variable set would turn the first gate off.
-use super::{ToolCodeClass, ToolHostClass, ToolchainProfile};
+//!
+//! The CI watch names a test case of nextest's JUnit by its `classname`
+//! (the test binary, `dagq::it`) and `name` joined by one space, as
+//! nextest prints the test, and by `name` alone without a `classname`.
+//!
+//! The host's load counts as the compiler `rustc`, `clippy-driver` and
+//! the `sccache` that wraps them, and as the build tool `cargo`, its
+//! subcommands `cargo-*` and what runs from a `target/` directory (build
+//! scripts and test binaries).
+//!
+//! The host's toolchain a claim records is `release` and `host` of
+//! [`RUSTC_VERSION`] ([`rustc_version`]), run in the main checkout so
+//! that its toolchain file applies.
+use super::{JunitTestName, ToolCodeClass, ToolHostClass, ToolProcess, ToolchainProfile};
 use crate::domain::verify_failure::test_name;
 
 /// The Rust profile, `profile = "rust"`.
@@ -220,6 +233,42 @@ impl ToolchainProfile for Rust {
     fn flaky_retry_env(&self) -> &'static [(&'static str, &'static str)] {
         &[("NEXTEST_FLAKY_RESULT", "pass")]
     }
+
+    fn junit_test_name(&self) -> Option<JunitTestName> {
+        Some(|classname, name| {
+            if classname.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{classname} {name}")
+            }
+        })
+    }
+
+    fn process_kind(&self, command: &str, name: &str) -> Option<ToolProcess> {
+        if matches!(name, "rustc" | "clippy-driver" | "sccache") {
+            Some(ToolProcess::Compiler)
+        } else if name == "cargo" || name.starts_with("cargo-") || command.contains("/target/") {
+            Some(ToolProcess::Build)
+        } else {
+            None
+        }
+    }
+}
+
+/// The program and arguments that print the host's Rust toolchain.
+pub const RUSTC_VERSION: (&str, &[&str]) = ("rustc", &["-vV"]);
+
+/// `release` and `host` of the output of [`RUSTC_VERSION`].
+pub fn rustc_version(output: &str) -> (Option<String>, Option<String>) {
+    let field = |name: &str| {
+        output.lines().find_map(|line| {
+            line.strip_prefix(name)
+                .and_then(|rest| rest.strip_prefix(':'))
+                .map(|value| value.trim().to_owned())
+                .filter(|value| !value.is_empty())
+        })
+    };
+    (field("release"), field("host"))
 }
 
 /// The test of a nextest status line that says it passed on a retry.
@@ -940,5 +989,54 @@ assertion `left == right` failed\n";
             let failed = failed_tests(log);
             assert!(failed.is_empty(), "{log:?}: {failed:?}");
         }
+    }
+
+    #[test]
+    fn nextest_s_junit_names_a_test_as_it_prints_it() {
+        use crate::domain::toolchain::ToolchainProfile;
+        let name = super::RUST.junit_test_name().unwrap();
+        assert_eq!(
+            name("dagq::it", "runtime_claim::claims_in_order"),
+            "dagq::it runtime_claim::claims_in_order"
+        );
+        assert_eq!(name("", "alone"), "alone");
+    }
+
+    #[test]
+    fn the_compiler_and_the_build_tool_are_told_by_their_commands() {
+        use super::RUST;
+        use crate::domain::toolchain::{ToolProcess, ToolchainProfile};
+        for (command, name, kind) in [
+            ("/usr/bin/rustc", "rustc", Some(ToolProcess::Compiler)),
+            (
+                "clippy-driver",
+                "clippy-driver",
+                Some(ToolProcess::Compiler),
+            ),
+            ("sccache", "sccache", Some(ToolProcess::Compiler)),
+            ("/h/.cargo/bin/cargo", "cargo", Some(ToolProcess::Build)),
+            ("cargo-nextest", "cargo-nextest", Some(ToolProcess::Build)),
+            (
+                "/r/target/debug/deps/it-0a1b",
+                "it-0a1b",
+                Some(ToolProcess::Build),
+            ),
+            ("/bin/zsh", "zsh", None),
+        ] {
+            assert_eq!(RUST.process_kind(command, name), kind, "{command}");
+        }
+    }
+
+    #[test]
+    fn rustc_s_release_and_host_are_read() {
+        let output = "rustc 1.90.0 (abc 2025-09-14)\nbinary: rustc\nhost: aarch64-apple-darwin\nrelease: 1.90.0\n";
+        assert_eq!(
+            super::rustc_version(output),
+            (
+                Some("1.90.0".to_owned()),
+                Some("aarch64-apple-darwin".to_owned())
+            )
+        );
+        assert_eq!(super::rustc_version("release:\n"), (None, None));
     }
 }

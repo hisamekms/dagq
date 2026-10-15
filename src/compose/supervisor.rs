@@ -255,6 +255,10 @@ pub struct SuperviseOptions {
     /// unless asked for (`supervise --host-metrics-interval`, 30 seconds
     /// by default in the CLI).
     pub host_metrics: Option<HostMetricsSettings>,
+    /// The toolchain profiles `[toolchains.<name>]` of `dagq.toml` may
+    /// name (ADR-t2268-1): the built-in ones; tests register a made-up one
+    /// beside them.
+    pub profiles: &'static crate::domain::toolchain::ProfileRegistry,
     /// Keep the queue's service running (ADR-t1233-4 decision 2): the
     /// supervisor `up` starts gets it; `None` (a `--once` pass, the tests)
     /// keeps none and holds nothing for it.
@@ -409,6 +413,7 @@ impl SuperviseOptions {
             codex: PathBuf::from("codex"),
             codex_home: None,
             host_metrics: None,
+            profiles: &crate::domain::toolchain::BUILTIN,
             queue_service: None,
             queue_broker: None,
             broker_relay: None,
@@ -697,6 +702,7 @@ pub fn supervise_with_reviewer(
             host_wide.clone(),
             options.diagram_path.clone(),
             options.push_retry,
+            options.profiles,
         )
     });
     // Read again each pass (ADR-0080), unless the options set the
@@ -729,10 +735,9 @@ pub fn supervise_with_reviewer(
         options.release_current.clone(),
     );
     let run_e2e = execution::run_e2e_port(&db, &main_checkout, &options.run_e2e);
-    let ci_watch = options
-        .ci_watch
-        .as_ref()
-        .map(|settings| observation::ci_watch_port(&db, &main_checkout, settings));
+    let ci_watch = options.ci_watch.as_ref().map(|settings| {
+        observation::ci_watch_port(&db, &main_checkout, settings, options.profiles)
+    });
     // The supervisor's own transitions (ADR-t728-1 decision 4).
     let opener = || SqliteOpener {
         db: db.clone(),
@@ -745,6 +750,8 @@ pub fn supervise_with_reviewer(
     let host_metrics = options.host_metrics.clone().map(|settings| {
         host::host_metrics_port(
             &db,
+            &main_checkout,
+            options.profiles,
             settings,
             Arc::new(SqlitePorts {
                 opener: opener(),
@@ -790,7 +797,7 @@ pub fn supervise_with_reviewer(
             db: db.clone(),
             user_config: options.user_config.clone(),
             verification_timeout: options.verification_timeout,
-            profiles: &crate::domain::toolchain::BUILTIN,
+            profiles: options.profiles,
         }),
         // The queue broker, the Claude credential, the runs' relays, the
         // dagq machine and the image are the parts of the container runtime

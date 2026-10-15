@@ -2438,6 +2438,18 @@ pub fn measured_toolchains(checkout: Option<Result<&Path, &str>>) -> Toolchains 
     Toolchains::for_measures(loaded)
 }
 
+/// The profiles the readers outside the landing read with (the CI watch's
+/// test names, the host's load, a claim's toolchain record and the KPIs'
+/// `toolchain` axis): those [`load_toolchains`] resolves against
+/// `registry`, or, when `dagq.toml` cannot be read or names a profile
+/// `registry` does not have, no profile, as the measures read
+/// ([`Toolchains::for_measures`]): a broken file does not say which
+/// profile applies, so none is guessed. The landing stops on the mistake,
+/// and `doctor` and `status` show it.
+pub fn toolchains_in_use(root: &Path, registry: &ProfileRegistry) -> Toolchains {
+    Toolchains::for_measures(Some(load_toolchains(root, registry)))
+}
+
 /// `[areas]` of the `dagq.toml` in `root` (ADR-t980-1), `None` when there
 /// is no file or no `[areas]` table.
 pub fn load_area_map(root: &Path) -> Result<Option<AreaMap>> {

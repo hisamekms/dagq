@@ -14,11 +14,12 @@ use std::collections::BTreeMap;
 /// versioned file `--claude` resolves to; null when that path names no
 /// version), Codex's (of `codex --version` of `--codex`, when the
 /// supervisor runs Codex workers; left out otherwise, ADR-t813-2 decision
-/// 7) and the host's `rustc` (`release` and `host` of `rustc -vV`, run in
-/// the main checkout with a 10-second limit so its toolchain file applies;
-/// asked only in dagq's
-/// source repository (ADR-t614-1), and left out when not asked or it
-/// cannot be run).
+/// 7) and the host's Rust toolchain (`release` and `host` of the Rust
+/// profile's [`RUSTC_VERSION`](crate::domain::toolchain::rust::RUSTC_VERSION),
+/// run in the main checkout with a 10-second limit so its toolchain file
+/// applies; asked only where
+/// [`Toolchains::records_rust_toolchain`](crate::domain::toolchain::Toolchains::records_rust_toolchain)
+/// says, and left out when not asked or it cannot be run).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct HostVersions {
     pub claude_version: Option<String>,
@@ -43,18 +44,11 @@ impl HostVersions {
         self
     }
 
-    /// `release` and `host` of the output of `rustc -vV`.
+    /// `release` and `host` of the Rust profile's toolchain version
+    /// ([`crate::domain::toolchain::rust::rustc_version`]).
     pub fn with_rustc_verbose(mut self, output: &str) -> Self {
-        let field = |name: &str| {
-            output.lines().find_map(|line| {
-                line.strip_prefix(name)
-                    .and_then(|rest| rest.strip_prefix(':'))
-                    .map(|value| value.trim().to_owned())
-                    .filter(|value| !value.is_empty())
-            })
-        };
-        self.rustc_release = field("release");
-        self.rustc_host = field("host");
+        (self.rustc_release, self.rustc_host) =
+            crate::domain::toolchain::rust::rustc_version(output);
         self
     }
 }

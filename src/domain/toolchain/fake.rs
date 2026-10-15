@@ -1,12 +1,14 @@
 //! A second profile only the tests have: a made-up tool whose output says
 //! `BROKEN <test>` for a failed test, `WOBBLY <test>` for one that passed
 //! on its retry, `HUNG <test>` for one out of time and `NO BUILD` for a
-//! build that failed, and whose retry runs with `FAKE_FLAKY=accept`. It
+//! build that failed, and whose retry runs with `FAKE_FLAKY=accept`; whose
+//! JUnit names a test `<classname>/<name>`; and whose processes are the
+//! build tool `fakebuild` and the compiler `fakec`. It
 //! is registered beside the built-in ones in [`REGISTRY`], and nothing
 //! else of the runtime knows it (ADR-t2268-1 decision 8).
 use super::{
-    ProfileRegistry, ToolCodeClass, ToolHostClass, ToolchainDeclaration, ToolchainProfile,
-    Toolchains, rust,
+    JunitTestName, ProfileRegistry, ToolCodeClass, ToolHostClass, ToolProcess,
+    ToolchainDeclaration, ToolchainProfile, Toolchains, rust,
 };
 
 pub static FAKE: Fake = Fake;
@@ -71,6 +73,18 @@ impl ToolchainProfile for Fake {
 
     fn flaky_retry_env(&self) -> &'static [(&'static str, &'static str)] {
         &[("FAKE_FLAKY", "accept")]
+    }
+
+    fn junit_test_name(&self) -> Option<JunitTestName> {
+        Some(|classname, name| format!("{classname}/{name}"))
+    }
+
+    fn process_kind(&self, _: &str, name: &str) -> Option<ToolProcess> {
+        match name {
+            "fakebuild" => Some(ToolProcess::Build),
+            "fakec" => Some(ToolProcess::Compiler),
+            _ => None,
+        }
     }
 }
 

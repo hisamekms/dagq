@@ -4,13 +4,18 @@
 //! place a name is looked up), and a repository declares in `dagq.toml`
 //! which to use ([`ToolchainDeclaration`], resolved to [`Toolchains`]).
 //!
-//! What a profile reads so far is a verification command's output: the
-//! marks of its tools that put a failure down to a class of
-//! [`FailureClass`], the tests it names as failed and as passed on a retry,
-//! and the environment a retry of flaky tests runs with. The runtime's own
-//! marks (a full disk, a signal, the conventional exit of a timeout, the
-//! limit of the whole command) and the order the marks are tried in are
-//! [`crate::domain::verify_failure`]'s, and work whatever is declared.
+//! What a profile reads is a verification command's output (the marks of
+//! its tools that put a failure down to a class of [`FailureClass`], the
+//! tests it names as failed and as passed on a retry, and the environment
+//! a retry of flaky tests runs with), the names of the tests of its JUnit
+//! the CI watch lists ([`ToolchainProfile::junit_test_name`]) and the
+//! processes of its tools the host's load is split by
+//! ([`ToolchainProfile::process_kind`]). The runtime's own marks (a full
+//! disk, a signal, the conventional exit of a timeout, the limit of the
+//! whole command) and the order the marks are tried in are
+//! [`crate::domain::verify_failure`]'s, and work whatever is declared; so
+//! are the kinds of process of no language's tools (`claude`, `dagq`,
+//! `other`, [`crate::domain::host_metrics::process_kind`]).
 //!
 //! A new language is one implementation of [`ToolchainProfile`] and one
 //! line in [`BUILTIN`].
@@ -67,6 +72,34 @@ impl From<ToolCodeClass> for FailureClass {
     }
 }
 
+/// A kind of process of a language's tools the host's load is split by
+/// ([`crate::domain::host_metrics`]). Its columns keep the names of the
+/// Rust tools they were first made for (`cpu_cargo`, `cpu_rustc` and their
+/// `rss_*_mb`), since the NodeSampleStore has a column of each name and
+/// every file is read by its header's names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolProcess {
+    /// The build tool and what it runs (build scripts, test binaries):
+    /// the `cargo` columns.
+    Build,
+    /// The compiler and what wraps it: the `rustc` columns.
+    Compiler,
+}
+
+impl ToolProcess {
+    /// The kind of process the columns are named by.
+    pub const fn column_kind(self) -> &'static str {
+        match self {
+            Self::Build => "cargo",
+            Self::Compiler => "rustc",
+        }
+    }
+}
+
+/// How a profile names a test case of its tool's JUnit XML, given its
+/// `classname` and `name`.
+pub type JunitTestName = fn(&str, &str) -> String;
+
 /// The knowledge of one language's tools (ADR-t2268-1 decision 1). Each
 /// method reads a verification command's output without the terminal's
 /// colors: `text` whole, or `lines`, its lines trimmed (the same lines,
@@ -108,6 +141,17 @@ pub trait ToolchainProfile: Sync {
     /// variables are never passed on from the process that runs the first
     /// verification.
     fn flaky_retry_env(&self) -> &'static [(&'static str, &'static str)];
+
+    /// How the CI watch names a test case of the tool's JUnit XML: as the
+    /// tool prints the test, so the list of the failing tests compares
+    /// with the landing's verification output. `None` when the tool writes
+    /// no JUnit the CI watch reads.
+    fn junit_test_name(&self) -> Option<JunitTestName>;
+
+    /// The kind of a process of the tool's by its command (`command`, a
+    /// path or a name as `ps` gives it, `name` its last part), counted in
+    /// the host's load; `None` for a process not the tool's.
+    fn process_kind(&self, command: &str, name: &str) -> Option<ToolProcess>;
 }
 
 /// The profiles a declaration may name, looked up by name.
@@ -331,6 +375,36 @@ impl Toolchains {
             .unwrap_or_default()
     }
 
+    /// How the CI watch names the test cases of a run's JUnit: as the
+    /// first profile declared that reads JUnit does; `None` when none
+    /// does, and the watch lists the failed jobs and steps instead.
+    pub fn junit_test_name(&self) -> Option<JunitTestName> {
+        self.profiles()
+            .find_map(|profile| profile.junit_test_name())
+    }
+
+    /// The kind of a process of a declared profile's tools, by the first
+    /// profile declared that knows it; `None` when none does.
+    pub fn process_kind(&self, command: &str, name: &str) -> Option<ToolProcess> {
+        self.profiles()
+            .find_map(|profile| profile.process_kind(command, name))
+    }
+
+    /// Whether the host's Rust toolchain (`rustc -vV`'s release and host)
+    /// is recorded at a claim and the KPIs' `toolchain` axis has strata:
+    /// when the Rust profile is declared (whatever its paths, since the
+    /// toolchain is asked once for the main checkout). While the
+    /// repository declares none, the Rust profile implied keeps them as
+    /// before the declarations: only in dagq's source, `dagq_source`
+    /// (ADR-t2268-1 decision 9, ADR-t614-1).
+    pub fn records_rust_toolchain(&self, dagq_source: impl FnOnce() -> bool) -> bool {
+        if self.implicit {
+            return dagq_source();
+        }
+        self.profiles()
+            .any(|profile| profile.name() == rust::RUST.name())
+    }
+
     /// What `doctor` and `status` show: each declaration with its profile
     /// and the paths it applies to (`**` for the whole repository), the
     /// profile implied while none is declared, and a warning then; and
@@ -529,6 +603,66 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(toolchains.flaky_retry_env("other").is_empty());
+    }
+
+    #[test]
+    fn the_rust_toolchain_is_recorded_by_the_declared_profiles() {
+        // Undeclared: the implied Rust profile keeps the judgement of
+        // dagq's source (ADR-t2268-1 decision 9).
+        let undeclared = Toolchains::undeclared();
+        assert!(undeclared.records_rust_toolchain(|| true));
+        assert!(!undeclared.records_rust_toolchain(|| false));
+        // Declared: the Rust profile, whatever the source and its paths.
+        let rust =
+            Toolchains::resolve(&BUILTIN, &[declaration("core", "rust", &["src/**"])]).unwrap();
+        assert!(rust.records_rust_toolchain(|| false));
+        let both = Toolchains::resolve(
+            &fake::REGISTRY,
+            &[
+                declaration("tool", "fake", &[]),
+                declaration("core", "rust", &[]),
+            ],
+        )
+        .unwrap();
+        assert!(both.records_rust_toolchain(|| false));
+        // No Rust profile resolved: none, even in dagq's source.
+        assert!(!fake::only_fake().records_rust_toolchain(|| true));
+        assert!(!Toolchains::none().records_rust_toolchain(|| true));
+    }
+
+    #[test]
+    fn the_junit_names_and_the_processes_are_the_first_declared_profiles() {
+        let rust_first = Toolchains::resolve(
+            &fake::REGISTRY,
+            &[
+                declaration("core", "rust", &[]),
+                declaration("tool", "fake", &[]),
+            ],
+        )
+        .unwrap();
+        let name = rust_first.junit_test_name().unwrap();
+        assert_eq!(name("dagq::it", "a::b"), "dagq::it a::b");
+        assert_eq!(
+            rust_first.process_kind("/x/fakec", "fakec"),
+            Some(ToolProcess::Compiler)
+        );
+        assert_eq!(
+            rust_first.process_kind("cargo", "cargo"),
+            Some(ToolProcess::Build)
+        );
+        let fake_only = fake::only_fake();
+        assert_eq!(
+            fake_only.junit_test_name().unwrap()("suite", "t"),
+            "suite/t"
+        );
+        assert_eq!(fake_only.process_kind("cargo", "cargo"), None);
+        assert_eq!(
+            fake_only.process_kind("fakebuild", "fakebuild"),
+            Some(ToolProcess::Build)
+        );
+        let none = Toolchains::none();
+        assert!(none.junit_test_name().is_none());
+        assert_eq!(none.process_kind("rustc", "rustc"), None);
     }
 
     #[test]

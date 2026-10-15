@@ -21,6 +21,7 @@ use crate::domain::ci_watch::{
     Access, CI_WATCH_CALL_TIMEOUT, CiJob, CiRun, CiWatchConfig, FailedJob, Junit, RUN_LIST_LIMIT,
     Unavailable, github_repo, job_failed, merge_outcomes, parse_junit, remote_repo,
 };
+use crate::domain::toolchain::JunitTestName;
 
 /// The program `[ci_watch]` reads GitHub with when no other is given.
 pub const GH: &str = "gh";
@@ -41,6 +42,10 @@ pub struct GhSource {
     /// Where the artifacts are downloaded (`<queue dir>/ci-watch`).
     pub scratch: PathBuf,
     pub timeout: Duration,
+    /// How the declared profiles name a JUnit's test cases
+    /// ([`crate::domain::toolchain::Toolchains::junit_test_name`]); `None`
+    /// downloads no JUnit and reads it [`Junit::Unnamed`].
+    pub junit_test_name: Option<JunitTestName>,
     /// The `gh` and `<owner>/<name>` of the last look that found them.
     found: Mutex<Option<(PathBuf, String)>>,
 }
@@ -64,8 +69,16 @@ impl GhSource {
             branch: branch.to_owned(),
             scratch: queue_dir.join("ci-watch"),
             timeout: CI_WATCH_CALL_TIMEOUT,
+            junit_test_name: None,
             found: Mutex::new(None),
         }
+    }
+
+    /// With the JUnit's test cases named by `test_name`.
+    #[must_use]
+    pub fn with_junit_test_name(mut self, test_name: Option<JunitTestName>) -> Self {
+        self.junit_test_name = test_name;
+        self
     }
 
     fn path_text(&self) -> String {
@@ -113,6 +126,7 @@ impl GhSource {
         &self,
         run_id: i64,
         dir: &Path,
+        test_name: JunitTestName,
     ) -> Result<Vec<Vec<(String, crate::domain::ci_watch::TestOutcome)>>> {
         let id = run_id.to_string();
         let target = dir.to_string_lossy().into_owned();
@@ -136,7 +150,8 @@ impl GhSource {
             .map(|file| {
                 let text =
                     fs::read_to_string(file).with_context(|| format!("read {}", file.display()))?;
-                parse_junit(&text).map_err(|error| anyhow::anyhow!("{}: {error}", file.display()))
+                parse_junit(&text, test_name)
+                    .map_err(|error| anyhow::anyhow!("{}: {error}", file.display()))
             })
             .collect()
     }
@@ -304,11 +319,14 @@ impl CiSource for GhSource {
         if self.config.junit_artifacts.is_empty() {
             return Junit::NotConfigured;
         }
+        let Some(test_name) = self.junit_test_name else {
+            return Junit::Unnamed;
+        };
         let dir = self.scratch.join(run_id.to_string());
         let _ = fs::remove_dir_all(&dir);
         let read = fs::create_dir_all(&dir)
             .map_err(anyhow::Error::from)
-            .and_then(|()| self.download(run_id, &dir));
+            .and_then(|()| self.download(run_id, &dir, test_name));
         let _ = fs::remove_dir_all(&dir);
         match read {
             Ok(files) => Junit::Read(merge_outcomes(files)),

@@ -272,7 +272,7 @@ fn compares_two_explicit_windows() {
             now: MONDAY + 2 * DAY,
             utc_offset_secs: 0,
             cores: None,
-            dagq_source: true,
+            rust_toolchain: true,
             config: &KpiConfig::default(),
             host: None,
         },

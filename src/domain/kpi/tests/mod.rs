@@ -39,7 +39,7 @@ struct Queue {
     /// The landed runs' areas; `None` without `[areas]`.
     areas: Option<crate::domain::areas::RunAreas>,
     /// The repository is not dagq's source (ADR-t614-1).
-    not_source: bool,
+    no_rust_toolchain: bool,
 }
 
 /// How one run went.
@@ -286,7 +286,7 @@ impl Queue {
                 now,
                 utc_offset_secs: JST,
                 cores: Some(4),
-                dagq_source: !self.not_source,
+                rust_toolchain: !self.no_rust_toolchain,
                 config,
                 host,
             },
