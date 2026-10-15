@@ -38,7 +38,7 @@ related:
 AI agent（Claude Code・Codex）の起動・出力の読み取り・失敗の分類・記録を、providerに依らない契約にまとめる。
 applicationはCLIの引数や出力の形式を直接扱わず、providerの違いはadapterだけが持つ。
 providerが使えないとき（実行ファイルが無い・起動できない・認証・利用上限）は、runやjobを失敗にせず、もう一方のproviderへ移るか待つ。
-引数・出力の欄・既定値の意味は定義のそばのdoc comment（主に`src/application/ports/`・`src/infrastructure/adapters.rs`・`claude.rs`・`claude_turns.rs`・`codex.rs`・`codex_turns.rs`・`src/domain/provider_switch.rs`・`src/domain/actor_model.rs`・`src/application/supervise/provider.rs`）が持つ。
+引数・出力の欄・既定値の意味は定義のそばのdoc comment（`src/application/ports/`とproviderのadapterの`src/infrastructure/`）が持つ。
 
 ## 全体の流れ
 
@@ -46,18 +46,18 @@ providerが使えないとき（実行ファイルが無い・起動できない
 claim（domain::provider_switch::routes）── taskのproviderか、使えなければもう一方 ──► run（requested / actual provider）
         │
 session wrapper ── AgentProvider::turn_command ──► claude -p / codex exec（1 turn = 1回の呼び出し）
-        │  TurnReader が出力を TurnSignal / TurnResult に写す
+        │  TurnReader が出力をturnの合図と結果に写す
         ▼
-turn_finished（failure・tokens・model）── authentication / usage_limit / launch ──► supervisor の turn_at_wall
-        │                                                    ├─ もう一方へ切り替え（provider_switched）
-        │                                                    ├─ 控えが解けたら同じsessionへもう一度
-        │                                                    └─ 人が要る壁は queue_hold の ask
+turn_finished ── 使えない理由（SwitchReason）──► supervisor（supervise::provider）
+        │                                          ├─ もう一方へ切り替え（provider_switched）
+        │                                          ├─ 控えが解けたら同じsessionへもう一度
+        │                                          └─ 人が要る壁は queue_hold の ask
         ▼
-session_opened / session_turns / session_closed（区間・稼働時間・tokens・model・作業の内訳）
+sessionの区間の記録（稼働時間・tokens・model・作業の内訳）
 
 headless job（runのreview・復旧・plan review・goal review・observerなど）
-  ── domain::actor_model::job_route ──► headless_command / review_command（promptはstdin）
-  ── job_reply・job_failure・job_session ──► verdict の適用 / 失敗の分類と控え
+  ── domain::actor_model::job_route ──► jobのコマンド（AgentProvider::headless_command、promptはstdin）
+  ── 最終の返答・失敗の分類・session ──► verdict の適用 / 失敗の分類と控え
 ```
 
 ## 責務と境界
@@ -66,7 +66,7 @@ headless job（runのreview・復旧・plan review・goal review・observerな�
 - コマンドは`std::process::Command`でなく値の`CommandSpec`で返し、起動は`Spawner` port（実装は`infrastructure::process::LocalSpawner`）が行う。
   supervisorとsession wrapperのユースケースはプロセスを直接扱わない。
 - AI actorの起動は全て`ActorExecutor`（`HostActorExecutor`、`src/application/actor_executor.rs`）を通り、roleとcapabilityと環境はroleごとに1か所で決まる（[Roles](supervisor-lifecycle/roles.md#actorの起動actorexecutor)）。
-- Claude Codeのsettings（hook・`permissions.deny`）はClaude Codeの実装のものなので、どれを書くかもadapter（`src/infrastructure/adapters.rs`の`agent_settings`・`write_settings`）が持つ。
+- Claude Codeのsettings（hook・`permissions.deny`）はClaude Codeの実装のものなので、どれを書くかもadapter（`src/infrastructure/adapters.rs`）が持つ。
   headless jobの側は権限の意図（`JobAccess`）だけを渡す（[ADR-t1063-1](../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)）。
 - どの失敗がproviderを切り替えるかの判断は`domain::provider_switch`と`domain::actor_model`の副作用の無い関数が持ち、supervisorの`supervise::provider`は観測を読んでそれを呼び、記録と依頼だけを行う。
 
@@ -87,18 +87,18 @@ worker以外のheadless jobは、providerに権限の意図・promptの渡し方
 
 | 知りたいこと | コードの入口 |
 | --- | --- |
-| 権限の意図とproviderごとの訳 | `domain::headless_job::JobAccess`、Claudeは`adapters.rs`の`claude_tools`、Codexは`codex.rs`の`JOB_SANDBOX` |
-| jobとreviewのコマンド | `AgentProvider::headless_command`・`review_command`（`adapters.rs`・`codex.rs`） |
-| promptをstdinに渡す仕組み | `CommandSpec::stdin`と`infrastructure::process::LocalSpawner` |
-| 最終の返答 | `AgentProvider::job_reply`（Codexは`codex::last_message`） |
-| 失敗の分類 | `domain::headless_job::JobFailure`、起動は`application::job_start_failure`、出力は`claude::job_failure`・`Codex::job_failure` |
-| sessionのidと実際のmodel、jobのトークン数 | `AgentProvider::assign_session_id`（Claude）と`job_session`、`domain::headless_job::JobSession` |
+| 権限の意図とproviderごとの訳 | `domain::headless_job::JobAccess` |
+| jobとreviewのコマンド | `AgentProvider::headless_command` |
+| promptをstdinに渡す仕組み | `CommandSpec::stdin` |
+| 最終の返答 | `AgentProvider::job_reply` |
+| 失敗の分類 | `domain::headless_job::JobFailure` |
+| sessionのidと実際のmodel、jobのトークン数 | `domain::headless_job::JobSession` |
 
 約束と落とし穴:
 
 - promptはargvに載せずstdinで渡す。
-  引数とenvの合計はhostの`ARG_MAX`（macOSで約1MiB）を超えられず、大きなplan reviewのpromptが起動できなかったため。
-  workerとplannerのturnは今もpromptを位置引数で渡す。
+  引数とenvの合計はhostの`ARG_MAX`を超えられないため。
+  workerとplannerのturnはpromptを位置引数で渡す。
 - 引数の上限（`E2BIG`）とstdinを用意できない失敗はjobの入力かsupervisorの環境の問題なので、そのjobだけの失敗にしてproviderを控えない。
   実行ファイルが無いなどproviderそのものの起動の失敗は控える。
 - runのreviewを`headless_command`と別のportにするのは、reviewがrunに属し、run dirの設定・debug fileと、workerのsessionが持つworktreeを変える道具の拒否を要るため。
@@ -114,16 +114,13 @@ worker以外のheadless jobは、providerに権限の意図・promptの渡し方
 `provider = "codex"`の役割のjobは、supervisorが見つけて`--version`の通ったCodex（`Ports::codex_jobs`）の`infrastructure::codex::Codex`で起動する（設定の最小形は[codex-headless-jobs-spike](../plans/codex-headless-jobs-spike.md)）。
 役割ごとの流れは[Plan review](supervisor-lifecycle/plan-review.md#codexで動かす)・[Throughput review](supervisor-lifecycle/throughput-review.md#codexで動かすtask-1220)・[Observer](supervisor-lifecycle/observer.md#codexで動かす)・[Triage](supervisor-lifecycle/triage.md#codexで動かす)・[生きているsessionの復旧job](supervisor-lifecycle/background-recovery-job.md#codexで動かす)と[ADR-t1207-1](../adr/2026-09-30-t1207-1-codex-run-review.md)が持つ。
 
-- 入口: `Codex::headless_command`・`review_command`・`apply_launch`（modelとeffort）、`codex::last_message`、`codex_turns::rollout_model`。
+- 入口: modelとeffortは`Codex::apply_launch`。
 - どの`JobAccess`も読み取りだけのsandboxに訳す。
   queue serviceに届く必要があるときは、executorがsandboxをそのsocketだけを許すpermission profileに置き換える（[Queue service](queue-service.md#codexのsandboxからの到達adr-t1233-5決定4)）。
-- `--skip-git-repo-check`をどのjobにも付ける。
-  スループットの見直し・observer・復旧jobのcwdはGitの外で、flagが無いと`codex exec`が起動を拒むため。
-  flagはGitの検査を飛ばすだけで、sandbox・承認・trustは変えない。
 - jobにはtrustを渡さず、人の`~/.codex/config.toml`のtrustを継ぐ。
   runのreviewだけはworktreeを`untrusted`にする（`codex::distrust_config`）。
   main checkoutのtrustを継ぐと、workerが書けるworktreeの`.codex/config.toml`と`.codex/rules`がreviewに読まれるため（[ADR-t1570-1](../adr/2026-10-04-t1570-1-codex-run-review-distrusts-the-worktree-project.md)）。
-- Codexにはsession idを付けられないので、開始のeventの`session_id`はnullで、終わりのeventがthreadのidと実際のmodelを持つ。
+- Codexにはsession idを付けられないので、threadのidと実際のmodelは終わりのeventが持つ。
 
 ## Claude sessionの区間
 
@@ -132,9 +129,9 @@ runtimeが起動するsessionとjobは、kindごとの区間（`session_opened` 
 | 知りたいこと | コードの入口 |
 | --- | --- |
 | どのeventがどのkindの区間を開き閉じるか | `domain::sessions::changes`（純粋関数） |
-| 区間を書く場所 | `infrastructure::sessions::follow`・`follow_goal`（`infrastructure::sqlite`のevent書き込みの後に呼ぶ） |
-| hookが記録するinboxと人のplannerの区間 | `domain::sessions::hook_changes`、`infrastructure::sessions::record_hook`、hookは[plugin-integration](plugin-integration.md#sessionの区間hookadr-0048) |
-| 失敗したreviewの区間を閉じる | `SessionRegistry::close_review_session`（`infrastructure::sessions::close_review`） |
+| 区間を書く場所 | `infrastructure::sessions::follow`（`infrastructure::sqlite`のevent書き込みの後に呼ぶ） |
+| hookが記録するinboxと人のplannerの区間 | `domain::sessions::hook_changes`、hookは[plugin-integration](plugin-integration.md#sessionの区間hookadr-0048) |
+| 失敗したreviewの区間を閉じる | `SessionRegistry::close_review_session` |
 
 約束と落とし穴:
 
@@ -152,39 +149,39 @@ runtimeが起動するsessionとjobは、kindごとの区間（`session_opened` 
 
 区間の稼働時間は、区間に属するturn（実際の入力から次の実際の入力の前の最後の出力まで）の長さの合計。
 
-- 入口: `infrastructure::transcripts::ClaudeTranscripts`（port`Transcripts`）、`domain::transcript`（レコードとturn）、閉じは`infrastructure::sessions::read_before`と`close`。
+- 入口: `infrastructure::transcripts::ClaudeTranscripts`。
 - transcriptは書き込みのロックの外で前もって読み、解析までしておく（`read_before`）。
-  workerのtranscriptは10 MBほどになり、ロックの中で読むと他のprocessの書き込みがbusy timeoutを超えるため（ADR-0048決定10）。
+  workerのtranscriptは大きく、ロックの中で読むと他のprocessの書き込みがbusy timeoutを超えるため（ADR-0048決定10）。
   前もって読めなかった区間は稼働時間なしで閉じる。
 - 前もった解析は閉じの実際の終わりへ動かすだけで、トランザクションの中でtranscriptを解析し直さない。
 - `worktime.jsonl`の明細はトランザクションのcommitを確かめてから書く（`sessions::watch_commits`）。
   SQLiteはrollbackしたeventのidを次の書き込みに振り直すので、閉じをeventのidで見分けると行が二重になりうるため。
-- hookの`SessionEnd`はtranscriptを読まずに先に閉じ、稼働時間・tokens・modelは後でsupervisorの取り込みが最終の`session_turns`（`final: true`）に書く（ADR-t655-1）。
+- hookの`SessionEnd`はtranscriptを読まずに先に閉じ、稼働時間・tokens・modelは後でsupervisorの取り込みが最終の`session_turns`に書く（ADR-t655-1）。
   短い`SessionEnd`の実行枠をファイルの読み取りに使わないため。
 - 開いている区間の終わったturnは、supervisorが一定間隔とobserverの起動前に`session_turns`に書く（`SessionRegistry::record_session_turns`）。
 - 非対話の区間（`route: headless`）とClaude以外のproviderの区間はtranscriptでなくturnのeventから取る（下の[非対話のworkerの区間](#非対話のworkerの区間)）。
 
 ### 作業の内訳
 
-runのsessionの区間は、閉じるときに作業の内訳（foregroundのtool > backgroundのコマンド > subagent > model > idleの分類と、コマンドの分類ごとの時間）を`session_closed`の`work`とrun dirの`worktime.jsonl`に記録する。
+runのsessionの区間は、閉じるときに作業の内訳（foregroundのtool > backgroundのコマンド > subagent > model > idleの分類と、コマンドの分類ごとの時間）を`session_closed`とrun dirの`worktime.jsonl`に記録する。
 
-- 入口: 分類は`domain::worktime`（`classify`・`breakdown`・`headless_breakdown`）、落ちたtestの名前は`domain::verify_failure::failed_tests`。
+- 入口: 分類は`domain::worktime`、落ちたtestの名前は`domain::verify_failure::failed_tests`。
 - hook（PreToolUse / PostToolUse）は使わない。
   backgroundのコマンドの終わりが取れないため。
 - コマンドの分類はコマンド位置の語だけで見るので、引数や引用符・heredocの本文に`cargo`を含むだけのコマンドは数えない。
-- cargo専用の分類（`e2e`・`llvm_cov`・`test`）はqueueのrepositoryがdagqのソース（[Source repository](supervisor-lifecycle/source-repository.md)）のときだけ付ける。
+- cargo専用の分類はqueueのrepositoryがdagqのソース（[Source repository](supervisor-lifecycle/source-repository.md)）のときだけ付ける。
   判定はGitを実行するので`read_before`がトランザクションの前に済ませる。
 - 落ちたtestの名前はtestを流すforegroundのコマンドの出力からだけ読む。
   ファイルの表示や検索の出力はtestの印を引用しうるため。
-- Codexにはtranscriptが無いので、wrapperがturnごとに書くコマンドのfile（`turns/turn-NNNNNN.commands.jsonl`）から同じ形の内訳を作る（`domain::turn::codex_span_turns`）。
-  Codexの出力は時刻を持たず、時刻は読んだ時刻なので約1秒の粒度になる（`TurnReader::stamp`）。
+- Codexにはtranscriptが無いので、wrapperがturnごとに書くコマンドのfileから同じ形の内訳を作る（`domain::turn::codex_span_turns`）。
+  Codexの出力は時刻を持たず、時刻は読んだ時刻になる（`TurnReader::stamp`）。
   この記録より前に閉じたCodexの区間は、時刻を後から決められないので遡って作らない。
 
 ### トークン数とコスト
 
-区間で使ったトークン数を`session_closed`の`tokens`に記録する。
+区間で使ったトークン数を`session_closed`に記録する。
 
-- 入口: `domain::tokens`（`TokenUsage`・`span_usage`）。
+- 入口: `domain::tokens`。
   非対話のturnとheadlessのjobの1回ごとの記録（contextの大きさとcompactionを含む）、inboxと人のplannerの区切り、今の穴は[Executionのトークン数](execution-tokens.md)。
 - transcriptでは同じ`message.id`のレコードを1つのmessageとして1回だけ数え、sidechain（subagent）も数える。
 - コストはClaude Codeがレコードに`costUSD`を書いた版だけ記録し、単価表からは計算しない。
@@ -194,17 +191,16 @@ runのsessionの区間は、閉じるときに作業の内訳（foregroundのtoo
 非対話の区間（`route: headless`）は、transcriptを読まずにrunの`turn_started` / `turn_finished`から記録する（[ADR-t813-2](../adr/2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md)決定7）。
 Claudeもtranscriptは読めるが、区間の数え方をproviderで分けないためstreamから取る。
 
-- 入口: `domain::turn::HeadlessSpan`、`infrastructure::sessions::close_headless`、turnのトークンは`TurnResult::tokens`、コストは`domain::turn::turn_own_cost`。
+- 入口: `domain::turn::HeadlessSpan`。
 - Codexのturnのトークン数はthreadのrolloutから数え、数えられないときだけ`turn.completed`のthreadの累計と前のturnの累計との差に落とす（規則は[Executionのトークン数](execution-tokens.md#codexの数える元)）。
 - Claudeの`total_cost_usd`と`modelUsage`はsessionの累計なので、同じく差をturnの分にする（`TurnResult::cost_cumulative`、規則は[Executionのトークン数](execution-tokens.md#claudeの数える元)）。
-  差を取る前に記録されたturnのcostは補正しないので、その期間のcostはresumeのあるrunを重ねて数える。
-- Codexの区間はmodelを区間に書かず、各turnの`turn_finished`の`model`に持つ。
+- Codexの区間はmodelを区間に書かず、各turnの`turn_finished`に持つ。
 
 ### modelとeffort
 
 区間を閉じるとき、区間のmessageを書いたmodelとeffortをtranscriptから読んで記録する（[ADR-0079](../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)決定7）。
 
-- 入口: `domain::tokens::span_models`、非対話のruntimeのplannerは`domain::turn::turns_model`。
+- 入口: `domain::tokens::span_models`。
 - 既定で起動したjobの`launch`はmodelもeffortも持たないので、実際の値はここで読む値になる（[Actor model](supervisor-lifecycle/actor-model.md)）。
 - 読み口は[stats](supervisor-lifecycle/commands.md)。
 
@@ -215,18 +211,17 @@ workerのproviderはtaskが選び、経路は非対話だけ（[ADR-t813-2](../a
 
 | 知りたいこと | コードの入口 |
 | --- | --- |
-| taskのworkerの型と既定 | `domain::worker`（`Worker`・`Worker::resolve`・`refuse_interactive`） |
-| workerごとのadapterの組 | `WorkerAdapters`（`ports/`）、組み立ては`compose::worker_adapters` |
+| taskのworkerの型と既定 | `domain::worker` |
+| workerごとのadapterの組 | `WorkerAdapters`（`ports/`） |
 | claimの経路 | `domain::provider_switch::routes` |
-| turnのコマンド | `AgentProvider::turn_command`・`turn_session_exists`（`adapters.rs`・`codex.rs`） |
-| turnの出力の読み手 | `TurnReader`、`claude_turns::ClaudeTurnReader`・`codex_turns::CodexTurnReader` |
+| turnのコマンド | `AgentProvider::turn_command` |
+| turnの出力の読み手 | `TurnReader` |
 | providerごとの文面 | [Prompt](supervisor-lifecycle/prompt.md#経路とproviderごとの文面) |
 | 実行ファイルの解決 | [Provider executables](provider-executables.md)、`up`での固定は[運用](../development/operations.md)の「`up`のコマンド」 |
 
 約束と落とし穴:
 
 - `tasks.worker_mode`は経路を明示したときだけ値を持ち、NULLは読むときにproviderの既定に解く。
-  古い固定バイナリはNULLを対話のClaudeとして読む。
 - `interactive`と記録されたtaskと過去のrunは書き換えず、claimとresumeで非対話で動く。
 - Codexが見つからなくても`up`とsupervisorは止まらず、Codexのtaskを非対話のClaudeで始める。
 - Claudeのsettingsの`permissions.deny`は名前やパターンでsignalを送るコマンドを拒む（`SIGNAL_BY_NAME_DENIED`）。
@@ -235,9 +230,9 @@ workerのproviderはtaskが選び、経路は非対話だけ（[ADR-t813-2](../a
 
 ### Codexの非対話のworker
 
-`--provider codex`のturnは`infrastructure::codex::Codex`が組み立て、`CodexTurnReader`が読む（権限は[ADR-t813-3](../adr/2026-09-28-t813-3-codex-worker-permissions.md)、測定は[headless-worker-spike](../plans/headless-worker-spike.md)）。
+providerがCodexのturnは`infrastructure::codex::Codex`が組み立て、`CodexTurnReader`が読む（権限は[ADR-t813-3](../adr/2026-09-28-t813-3-codex-worker-permissions.md)、測定は[headless-worker-spike](../plans/headless-worker-spike.md)）。
 
-- 入口: `Codex::turn_command`、権限の`-c`は`codex.rs`の`SANDBOX_CONFIG`と`writable_roots`、trustは`trust_config`、一時ファイルは`run_tmp_dir`、rulesは`RULES_PATH`、失敗の分類は`codex_turns::classify`、modelは`codex_turns::rollout_model`。
+- 入口: `Codex::turn_command`。
 - `codex`の名前は、cmuxがPATHの先頭に置く一時的なshimを飛ばして解決する。
 - `exec resume`は最初の呼び出しの権限を引き継がないので、権限とtrustの`-c`は毎回同じものを渡す。
 - 書ける場所はworktree・worktreeの管理dirとdagqのbranchのref・run dir・cargoのregistry・一時ファイルの場所で、repository全体・`main`のref・`$HOME`・queueのdirは入れない。
@@ -264,13 +259,13 @@ workerのproviderはtaskが選び、経路は非対話だけ（[ADR-t813-2](../a
 
 | 知りたいこと | コードの入口 |
 | --- | --- |
-| 使えない理由と控えの長さ | `domain::provider_switch::SwitchReason`（`hold_secs`）、[domain-model](domain-model.md#providerの切り替えの理由switchreason) |
-| 控えとその解ける時刻 | `ProviderHold`、`provider_switch::reset_at` |
-| claimの経路と止める設定 | `provider_switch::routes`・`stopped_by_fallback`、`ProviderFallback`、読み手は`infrastructure::run_env::load_provider_fallback` |
-| turnの壁での判断 | `provider_switch::wall_move`・`wall_to_raise`、supervisorは`supervise::provider`の`turn_at_wall` |
-| 切り替えとやり直しの文 | `supervise::provider::switch_text`・`retry_text` |
-| headless jobの行き先 | `domain::actor_model::job_route`・`job_wait_text`、runのreviewは`supervise::provider::review_route` |
-| timer job（observer・スループットの見直し）の使えない終わり | `domain::actor_model::records_unusable`、`supervise::observer::retries_unusable`、`supervise::provider::hold_unusable` |
+| 使えない理由と控えの長さ | `domain::provider_switch::SwitchReason`、[domain-model](domain-model.md#providerの切り替えの理由switchreason) |
+| 控えとその解ける時刻 | `ProviderHold` |
+| claimの経路と止める設定 | `provider_switch::routes` |
+| turnの壁での判断 | `provider_switch::wall_move` |
+| 切り替えとやり直しの文 | `supervise::provider::switch_text` |
+| headless jobの行き先 | `domain::actor_model::job_route` |
+| timer job（observer・スループットの見直し）の使えない終わり | `domain::actor_model::records_unusable` |
 
 約束と落とし穴:
 
@@ -289,16 +284,16 @@ workerのproviderはtaskが選び、経路は非対話だけ（[ADR-t813-2](../a
   `--no-claude`は止めない。
   設定の読み直しと書式は[Run environment](supervisor-lifecycle/run-environment.md)。
 - timer jobの使えない終わりの読み取りは観測と分析の側（`supervise::observer`）が値にし、控えは実行と着地の側（`supervise::provider`）が行う（[Architecture](architecture.md)）。
-- 記録と集計（`provider_switched`・`stats`の`provider_switches`・`kpi`の`provider=`）は[stats](supervisor-lifecycle/commands.md)と[kpi](supervisor-lifecycle/commands.md)。
+- 切り替えの記録と集計の読み口は[stats と kpi](supervisor-lifecycle/commands.md)。
   集計のproviderは切り替えの後のactualで数える。
 
 ## 大きなcontextからの新しいsession
 
 [ADR-t2080-1](../adr/2026-10-08-t2080-1-fresh-session-on-send-back-and-resume-when-peak-context-exceeds-threshold.md)。
 
-判定は`domain::fresh_session::next_session`（直前のturnの`peak_context`と閾値だけ）、入口は`supervise::session`の`session_request`と`renew_session`で、区切りと理由を`session_renewed`に残す。
+判定は`domain::fresh_session::next_session`（直前のturnの`peak_context`と閾値だけ）、入口は`supervise::session`で、区切りと理由を`session_renewed`に残す。
 
-- 判定するのは`send_revise`と`start_resume`（triageのresumeと人の`send_back`も通る）で、passの後の衝突の依頼は判定しない。
+- 判定するのはreviseの依頼とresumeの開始（triageのresumeと人の`send_back`も通る）で、passの後の衝突の依頼は判定しない。
 - `session_renewed`は依頼より前に記録し、依頼をまだ書いていない区切りは記録し直さずにそこへ引き継ぐ。
 - wrapperは`provider_switched`と同じ区切りとし、providerを変えず新しいsessionにする。
   どちらの後もClaudeのsessionは新しい名前（`domain::turn::session_name`。Claude Codeは使われた`--session-id`を拒む）。
@@ -309,7 +304,7 @@ Claude Codeのfolder trust dialogがrun worktreeで出るかは、worktreeの親
 worktreeの置き場所、adapterが渡す引数、`--dangerously-skip-permissions`は関係しない。
 承認のときに書かれるkeyもrepositoryのrootで、worktreeのpathは書かれない。
 
-- 入口: `adapters.rs`の`claude_trusts_repository`と`claude_global_config`、`up`のpreflight（[`up` / `down`](supervisor-lifecycle/up-down.md)）。
+- 入口: `adapters.rs`の`claude_trusts_repository`、`up`のpreflight（[`up` / `down`](supervisor-lifecycle/up-down.md)）。
 - dialogを抑止するflagは無く、runtimeが承認を書くのは人の判断の代行になるので、`up`が未信頼のrepositoryを案内つきのerrorで止める。
 - main checkoutの決め方は[Run environment](supervisor-lifecycle/run-environment.md#main-checkoutの決め方)、止まったsessionの扱いは`dagq-recover` skillの`reference/session.md`。
 - `supervise`自体は検査しないので、`up`を経ない起動は未信頼ならdialogで止まり`prompt_waiting`になる。
@@ -320,12 +315,12 @@ worktreeの置き場所、adapterが渡す引数、`--dangerously-skip-permissio
 Claude Codeの起動直後に出うるダイアログと扱い:
 
 - folder trust: 上の[Trust prompt](#trust-prompt)のとおり`up`のpreflightで止める。
-- auto modeの初回案内（Teach auto mode）: run sessionの設定の`autoMode.environment: ["$defaults"]`で出なくなる（`stop_hook_settings`のdoc comment）。
-- LSP pluginの推奨: settingsでもflagでも抑止できず、30秒で閉じるので何もしない。
+- auto modeの初回案内（Teach auto mode）: run sessionの設定で出なくなる（`stop_hook_settings`のdoc comment）。
+- LSP pluginの推奨: settingsでもflagでも抑止できず、時間で閉じるので何もしない（同じdoc comment）。
 
 ## Claude を使わない運転
 
-`up --no-claude` / `supervise --no-claude`はClaudeを起動しない明示的な運転方針で、既定は無効（[ADR-t1204-1](../adr/2026-09-30-t1204-1-explicit-no-claude-operation.md)）。
+`--no-claude`はClaudeを起動しない明示的な運転方針で、既定は無効（[ADR-t1204-1](../adr/2026-09-30-t1204-1-explicit-no-claude-operation.md)）。
 
 - 方針の違うsupervisorは再利用・引き継ぎせず、先にdrainを求める。
 - workerはClaudeを頼んだtaskもCodexへ振り分け、Codexの障害をClaudeの`queue_hold`にせず、Claudeへ戻さない。
