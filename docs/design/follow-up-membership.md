@@ -27,9 +27,7 @@ out_of_scopeは`--destination-goal ID`で元と別の、閉じていないgoal�
 requiredの所属先は元goalで、別の所属先は拒む。undecidedは調べても決まらない理由を残せる。
 未知の分類、follow_up以外、元goalが無いと確定しているfollow_upは拒む。
 
-`follow_up_judgements`は追記の行で、id、task_id、source_goal_id、source_kind、
-classification、acceptance_items、reason、evidence、destination_goal_id、
-acceptance_version、corrects、actor_role、created_atを持つ。最後の行が今の判断。
+`follow_up_judgements`は追記の行で、最後の行が今の判断。
 分類・必須の欄・遷移はdomainの`MembershipJudgement::validate`とstoreが検査する。
 UPDATEとDELETEはtriggerで拒む。判断が無い状態から3分類へ、undecidedから
 required/out_of_scopeへ進める。同じ分類の確かめ直しも許す。requiredとout_of_scopeの
@@ -53,12 +51,12 @@ required/out_of_scopeの判断を持つtaskの`set-goal`は、最後の判断の
 違うgoal（`--none`も）へ移すのを拒み、訂正を促す。未判定の移動は判断にならない。
 元のtask/run/goal、登録時の状態、provenanceと`follow_up_depth`はどの所属変更でも保つ。
 登録時に元goalが無い・閉じていた・不明、現在の所属goalが無い・閉じている、
-深さ3以上のいずれかなら、runtimeのplannerのsubmitは人のadoptなしに拒む。
-既存の人のadoptは聞き直さず、adopt後のsubmitは今までどおり深さを0に戻す。
+深さ`FOLLOW_UP_ASK_DEPTH`以上のいずれかなら、runtimeのplannerのsubmitは人のadoptなしに拒む。
+既存の人のadoptは聞き直さず、adopt後のsubmitは深さを0に戻す。
 
 ## acceptanceの版と読み取り
 
-`goals.acceptance_version`は初期値1で、acceptanceの文が変わったときだけtriggerが
+`goals.acceptance_version`は、acceptanceの文が変わったときだけtriggerが
 1増やす。`goal_updated`は`old_acceptance_version`と`new_acceptance_version`を残す。
 判断はtransactionの版を保存する。`needs_recheck`は保存した版と現在の版の比較で導く。
 `show`は`membership_judgements`に履歴と現在の版・要再確認を載せる。
@@ -79,7 +77,8 @@ required/out_of_scopeの判断を持つtaskの`set-goal`は、最後の判断の
 undecided・要再確認・requiredなのにGの外、のどれかがあれば、Gは
 achievedで閉じられない（`domain::goal::check_follow_ups`、
 `GoalFollowUpsUnsettled`）。out_of_scopeの判断を持つものの未完了は妨げない
-（Gの所属taskのままなら所属taskとして今までどおり閉鎖を待たせる）。requiredで
+（Gの所属taskのままなら所属taskとして閉鎖を待たせる）。
+requiredで
 Gの所属のものは所属taskの規則で待つ。abandonedは達成を言わないので検査しない。
 acceptanceを変えると判定時の版が古くなり、同じ分類を記録し直すまで閉じない。
 
@@ -88,13 +87,8 @@ acceptanceを変えると判定時の版が古くなり、同じ分類を記録�
 answerの`achieved`が同じtransactionで同じ条件を使う。goal reviewの起動の条件と
 fingerprintにも入る（[Goal review](supervisor-lifecycle/goal-review.md)の2・5）。
 
-所属taskが全て終わり（`goal_review::tasks_done`）、この検査だけでgoal reviewが起動しないopenのGは、
-`status`のattentionに`goal_follow_ups_unsettled`（`next: request a plan for the
-follow-ups of goal G`）として1件出る（task 1660）。止めているfollow-upのtask IDと
-理由の分類（`unjudged`・`undecided`・`needs_recheck`・`required_outside`。
-`SourceFollowUp::unsettled_reason`）を並べ、runtimeのplannerが扱う途中の判断の無い
-follow_upのdraft、`draft_planner_exhausted`のdraft、closeされていないaskのあるtaskは数えず、
-`goal_review_failed`で人を待つGには出さない（判定は`follow_up::unshown_unsettled`）。
+所属taskが全て終わり（`goal_review::tasks_done`）、この検査だけでgoal reviewが起動しないopenのGは、`status`のattentionに`goal_follow_ups_unsettled`として1件出る。
+止めているfollow-upのtask IDと理由の分類（`SourceFollowUp::unsettled_reason`）を並べ、runtimeのplannerが扱う途中の判断の無いfollow_upのdraft、`draft_planner_exhausted`のdraft、closeされていないaskのあるtaskは数えず、`goal_review_failed`で人を待つGには出さない（判定は`follow_up::unshown_unsettled`）。
 inboxはplanning requestでplannerに`judge-follow-up`を頼み、判断を記録すれば消える。
 runtimeは所属を判定も移動もしない（ADR-t1504-1決定5）。項目の全体は
 `application::health::attention`の一覧。
@@ -102,8 +96,7 @@ runtimeは所属を判定も移動もしない（ADR-t1504-1決定5）。項目�
 ## submit・lint・plan review
 
 `follow_up_membership::membership_gap`がfollow_upのtaskの欠けを読み、domainの
-`follow_up::membership_gap`が決める。欠けは`missing`（判断が無い）、`undecided`
-（最新の判断がundecided）、`needs_recheck`（最新の判断の版が元goalの今の版より古い）。
+`follow_up::membership_gap`が決める（欠けの種類と意味は`MembershipGap`）。
 登録時に元goalが無い（`source_goal_state: none`）もの、元goal（登録時の材料か
 判断した者が名指したもの）が`abandoned`で閉じたものは欠けにしない。元goalが不明で
 判断の無いものは`missing`。goal_gapとreopenedのdraftは対象にしない。
@@ -113,7 +106,7 @@ runtimeは所属を判定も移動もしない（ADR-t1504-1決定5）。項目�
 エラーはtaskごとの欠けと`judge-follow-up`を示す。人の`ready --bypass-review`も
 draft / submittedのfollow_upに同じ検査をする。`lint`は同じ欠けをdraft / submittedのtaskについて
 `follow_up_membership_unjudged`で出す。plan reviewのpromptはfollow_upのtaskに
-`follow_up_membership`（登録時の材料、判断の行、最新の分類、版の一致）を載せ、
+`follow_up_membership`を載せ、
 元goalを材料のgoalに足し、plannerの対応づけを起点に検査し疑わしいものは周辺の
 証拠も読むよう指示する（[Plan review](supervisor-lifecycle/plan-review.md)）。
 
@@ -128,22 +121,9 @@ requiredの確かめ直しは問わない。`follow_up::opens_correction`）は�
 自動で開き直さず、follow_upも動かさない。abandonedで閉じたgoalへのrequiredはaskを開かない。
 
 askが閉じるまで、そのfollow_upの`judge-follow-up`と`set-goal`は拒む。askの中身と
-`reopen` / `correct_verdict` / `keep_achieved`の適用は
+答えの適用は
 [Goal review](supervisor-lifecycle/goal-review.md)の9が持つ。
 
 ## 旧schemaの移行
 
-migration 0064は既存のfollow_upを未判定のまま残す。現在の所属と深さと
-`follow_up_adopted` / `draft_adopted`のpersonの記録は変えない。
-材料のtask/run/indexに一致する一意の`follow_up_registered`を登録の出どころとし、
-source taskとdraft双方の、その登録の後の`task_goal_changed`を新しい順に巻き戻す。
-各変更のtoが次の値（最後は現在の所属）と一致すること、from/toが整数かnullで
-あることを検査する。同時刻のeventもid順で区別する。
-復元した元goalと、`goal_closed`・goalの`closed_at`と登録時刻の比較、draftの
-登録時の所属が一致すれば、材料に`source_goal_id`、`source_goal_state`
-（open/closed/none）、`source_goal_provenance: restored`と登録event id・時刻を残す。
-
-eventの欠落・複数の登録、履歴の矛盾、時刻の不明、閉じた状態の食い違いは
-`source_goal_id: null`、`source_goal_state: unknown`、provenance unknownにする。
-今の所属を元の所属と確定しない。unknownは人のadoptを要する側に倒し、判断した者の
-元goalの名指しでも登録時のunknownを解消しない。migrationは判断の行を作らない。
+既存のfollow_upの移行の契約は[ADR-t1504-2](../adr/2026-10-04-t1504-2-runtime-records-and-enforces-follow-up-membership-judgements.md)決定12とmigration 0064が持つ。

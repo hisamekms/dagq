@@ -14,7 +14,7 @@ related:
 
 # taskとgoalとfindingの属性の記録
 
-`stats`・`kpi`・`report`が状態の表から読むtaskとgoalの属性（`task_goals`・`task_titles`・`task_changes`・`draft_origins`・`list_goals`・`graph_input`）を、計測の層がEventStoreだけから作れるよう、状態の変更と同じtransactionで新しい値をeventに書く（[計測](measurement.md)の「SSOTとビュー」、ADR-t1662-2）。
+`stats`・`kpi`・`report`が状態の表から読むtaskとgoalの属性を、計測の層がEventStoreだけから作れるよう、状態の変更と同じtransactionで新しい値をeventに書く（[計測](measurement.md)の「SSOTとビュー」、ADR-t1662-2）。
 畳むのは`domain::ledger::attributes::fold`で、eventと窓の終わりだけを読み、StateStoreを読まない。
 `application::GraphInput::folded`が畳んだ値から`graph_input`と同じ形（tasksとcandidates）を作る。
 runtimeの制御はこの畳みを使わず、読み手を移すのは段3（[計測](measurement.md)の「段と後続のtask」）。

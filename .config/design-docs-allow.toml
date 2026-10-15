@@ -23,14 +23,9 @@ size = 49549
 line = 2281
 
 [[doc]]
-path = "docs/design/follow-up-membership.md"
-tasks = 1
-
-[[doc]]
 path = "docs/design/overview.md"
-size = 30324
-line = 6880
-tasks = 27
+size = 16782
+line = 1105
 
 [[doc]]
 path = "docs/design/plugin-integration.md"

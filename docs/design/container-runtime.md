@@ -33,7 +33,7 @@ containerを選ばない限りhostのrunの振る舞いは変わらない。
 ## 適用先と設定の読み込み
 
 - 適用先ごとのruntimeは`dagq.toml`が持ち、読み込みの型は`domain::container_runtime::RuntimeConfig`で、設定の綴りと値はそのdoc commentが持つ。
-- 読むのは`infrastructure::run_env::parse_config`（`load_runtimes`、`Verifier::runtimes`）。
+- 読むのは`infrastructure::run_env::parse_config`。
   適用先でない役割にcontainerを書いた`dagq.toml`は、読み込みが理由つきで拒む（`refuse_container`）。
   inboxは`dagq.toml`の役割の表に無く、表を書けば知らない役割として拒む。
 - supervisorは各passで読み直し（`supervise::container`）、`status`・`doctor`・`integrate`はそのたびにmain checkoutのファイルを読む。
@@ -46,7 +46,7 @@ containerを選んだ適用先が使えないとき、hostで動かさずに控�
 - 使えるかは`ContainerRuntime`のport（`application::ports`）に問う。
   supervisorと`integrate`は`application::queue_broker::BrokerGate`越しに問い、queueのbrokerが動いていなければそれを理由に使えないと答える（[Queue broker](queue-broker.md#見張りと知らせ)）。
   brokerの奥では`application::broker_relay::RelayGate`がrunのrelayの見張りの記録を見て、relayを動かし続けられない間は理由つきで使えないと答える（下の「brokerへの経路」）。
-  その奥では`infrastructure::claude_credential::ClaudeCredentialGate`が、workerの適用先について`host.toml`で人が選んだClaudeの資格情報（既定なし）を見て、未選択・欠け・0600でなければ選び方を添えて使えないと答える（[Queue broker](queue-broker.md#claudeの認証の差し替え)、[ADR-t2177-1](../adr/2026-10-12-t2177-1-broker-swaps-the-run-token-for-a-claude-credential-chosen-in-host-toml.md)決定3）。
+  その奥では`infrastructure::claude_credential::ClaudeCredentialGate`が、workerの適用先について`host.toml`で人が選んだClaudeの資格情報を見て、未選択・欠け・0600でなければ選び方を添えて使えないと答える（[Queue broker](queue-broker.md#claudeの認証の差し替え)、[ADR-t2177-1](../adr/2026-10-12-t2177-1-broker-swaps-the-run-token-for-a-claude-credential-chosen-in-host-toml.md)決定3）。
   その奥で`application::podman_machine::MachineGate`がdagq専用のmachineを見て、使えなければ理由つきで使えないと答える（下の「dagq専用のmachine」）。
   machineの奥では`application::container_image::ImageGate`がimageを見る（下の「image」）。
   その奥の`infrastructure::container_runtime::ContainerExecutors`は、workerにもverificationにも使えると答える。
@@ -75,7 +75,7 @@ containerを選んだ適用先が使えないとき、hostで動かさずに控�
 
 ## 見せ方
 
-`status`と`doctor`は`runtimes`に適用先ごとのruntimeとenforcement（hostは`advisory`、containerは`sandbox`）を出し、`actors`のworkerの行の`backend`もworkerのruntimeに従う（`health::add_runtimes`、`execution::runtime_executions`）。
+`status`と`doctor`は`runtimes`に適用先ごとのruntimeとenforcement（hostは`advisory`、containerは`sandbox`）を出し、`actors`のworkerの行の`backend`もworkerのruntimeに従う（`health::add_runtimes`）。
 
 ## dagq専用のmachine
 
@@ -101,7 +101,7 @@ containerはdagq専用の名前のPodman machineだけで動かす（[ADR-t2113-
   initはhostの全てのqueue（data homeの`dagq/`の下でqueueのDBを持つdir）のdirをmountするので、作った時点のqueueがmachineを共有する。
   machineにmountしても、containerに見せるかはcontainerごとのmountで決まる。
 - machineの中のnamed volume: buildの出力はrunかverificationごと、workerのcacheはqueueごとのnamed volumeで、hostにmountしない（`MachineVolumes`、名前は`QueueKey`）。
-  virtiofsのmountの上に置いたbuildの出力ではlinkが落ちたため（[ADR-t2173-1](../adr/2026-10-12-t2173-1-machine-mounts-only-run-and-clone-dirs-and-keeps-build-output-and-worker-cache-in-named-volumes.md)のContext）。
+  決めた理由は[ADR-t2173-1](../adr/2026-10-12-t2173-1-machine-mounts-only-run-and-clone-dirs-and-keeps-build-output-and-worker-cache-in-named-volumes.md)が持つ。
   名前がqueueとrunを含むので、あるqueueの操作は別のqueueのvolumeに届かない。
   runの終わりと着地でrunのbuildの出力を消すのは、relayの見張りが終わったrunを閉じる`RelayControl::close`で、runのcontainer・relay・socketのvolumeと一緒に消す（下の「brokerへの経路」）。
   machineを作り直すとvolumeは消え、workerのcacheは冷えた状態から始まる。
@@ -199,7 +199,7 @@ adapterもcloneのpathでのgitを拒む。
 
 cloneで働くrunの各turn（最初のturn・revise・答え・resume）は、hostのprocessの代わりにdagq専用のmachineのcontainerで動く（[ADR-t2113-3](../adr/2026-10-08-t2113-3-only-workers-resume-and-integrate-verification-run-in-containers.md)決定1、[ADR-t2114-2](../adr/2026-10-08-t2114-2-broker-swaps-the-run-token-for-the-claude-credential.md)決定1）。
 session wrapperはhostの制御側に残り、turnの出力・receipt・askをrun dirから今と同じく読み、`run log`で追える。
-executorは`application::run_container::PodmanActorExecutor`、設定の読み取り・tokenの受け渡し・podmanは`RunContainers`のport（adapterは`infrastructure::run_container::PodmanRunContainers`）、machine・image・relay・buildの出力の準備はhost運用が実行と着地に貸す`application::podman_machine::RunMachine`のport（adapterは`QueueRunMachine`）、`podman run`の引数・token・envの判断は`domain::run_container`、containerの中の処理は`infrastructure::container_turn`（`dagq relay turn`）が持つ。
+executorは`application::run_container::PodmanActorExecutor`、設定の読み取り・tokenの受け渡し・podmanは`RunContainers`のport、machine・image・relay・buildの出力の準備はhost運用が実行と着地に貸す`application::podman_machine::RunMachine`のport、`podman run`の引数・token・envの判断は`domain::run_container`、containerの中の処理は`infrastructure::container_turn`（`dagq relay turn`）が持つ。
 
 - 準備: 各turnの前に、machineを動かしてrunを使う者にし（`release`は呼ばず、使う者はwrapperのprocessが終われば数えない）、imageをbuildし、runのrelayを開き、`dagq.toml`が名指せばbuildの出力のvolumeを作り、`[run.env]`と`host.toml`のcontainerの上限を読む。
   どれかが失敗すればturnを起動せず、hostにも戻さない。
@@ -211,7 +211,6 @@ executorは`application::run_container::PodmanActorExecutor`、設定の読み�
   podmanのcwdはrun dirで、制御側はcloneでプログラムを起動しない（上の「git」）。
 - buildの出力: `dagq.toml`の`[container.build_output]`が名指すcontainerの中のdirに、runごとのvolumeをmountする（綴りと意味と既定の無しは`run_env::CONTAINER_BUILD_OUTPUT_TABLE`のdoc comment）。
   runtimeは言語の道具を知らず、projectが`[run.env]`で道具をそこに向ける。
-  hostのmount（clone）の上に置いたbuildの出力ではlinkが落ちた（[Spike](../plans/container-runtime-spike.md)の(c)）。
 - containerの中: `dagq relay turn`がturnの始めにmainのbundleをcloneの`refs/remotes/dagq/main`に取り込み、転送を起動し、tokenのファイルを読んで`ANTHROPIC_AUTH_TOKEN`とproxyのURLに入れ、agentをcloneで動かす。
   agentが終われば結果に依らず、run branchのbundleと状態のファイルを上の「git」の形で書く。
   agentのhomeはrun dirの下に置き、次のturnがsessionをresumeできる。
@@ -227,7 +226,7 @@ executorは`application::run_container::PodmanActorExecutor`、設定の読み�
 
 `dagq.toml`がverificationをcontainerにしたrunの着地では、rebaseの後の検証のコマンドを1本ずつ、そのverificationのcontainerで流す（[ADR-t2113-3](../adr/2026-10-08-t2113-3-only-workers-resume-and-integrate-verification-run-in-containers.md)決定1）。
 結果・時間・失敗の分類の記録はhostと同じである。
-`integrate`の`ContainerVerification`が流れを持ち、準備・podman・片付けは`application::run_container::VerificationContainers`のport（adapterは`infrastructure::run_container::PodmanVerificationContainers`）、`podman run`の引数は`domain::run_container::verification_run_args`、containerの中は`dagq relay verify`が持つ。
+`integrate`の`ContainerVerification`が流れを持ち、準備・podman・片付けは`application::run_container::VerificationContainers`のport、`podman run`の引数は`domain::run_container::verification_run_args`、containerの中は`dagq relay verify`が持つ。
 
 - 準備: machine・image・runのrelayをworkerのturnと同じ`RunMachine`で用意し、`dagq.toml`がbuildの出力のdirを名指せば、そのverificationごとの新しいvolumeを作る（workerのrunのvolumeと共有しない）。
   名指さなければvolumeを作らずmountもしない。

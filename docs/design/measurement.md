@@ -26,9 +26,9 @@ related:
 
 # 計測
 
-> **一部だけ実装済み（2026-10-13）**: 「SSOTとビュー」のport・「区間とタグ」のrunの工程の記録（`run_phase_changed`）・「終端」・「claimの前」・「supervisorの一生」・「今の判定の記録」と「runの比較の軸」の記録、run・task・session・queue・nodeの台帳と「畳む関数」・「台帳を作る係」・「共通の読み取り関数」・「並走の比較と照合」は実装済みで、今の姿を書く。
+> **一部だけ実装済み**: 「SSOTとビュー」のport・「区間とタグ」のrunの工程の記録（`run_phase_changed`）・「終端」・「claimの前」・「supervisorの一生」・「今の判定の記録」と「runの比較の軸」の記録、run・task・session・queue・nodeの台帳と「畳む関数」・「台帳を作る係」・「共通の読み取り関数」・「並走の比較と照合」は実装済みで、今の姿を書く。
 > ほかの節は計測の作り直しの今の予定で、まだ`src/`に無い。
-> 今動いている計測は[計測のコマンド](supervisor-lifecycle/commands.md)（`stats`・`timeline`・`kpi`・`report`）と最初のcommitの観測（`first_commit_observed`）が持ち、この文書はそれらを変えない。
+> 今動いている計測は[計測のコマンド](supervisor-lifecycle/commands.md)と最初のcommitの観測（`first_commit_observed`）が持ち、この文書はそれらを変えない。
 > 後続のtaskが実装したら、この注記と各節を今の姿に直す。
 
 決めた理由はADR-t1662-1（計測のモデル）・ADR-t1662-2（ストアの抽象化）・ADR-t1662-3（実行する側と送る口とコマンドの分類）が持つ。ここはeventの欄・列とJSONの形・数値・関数の名前の予定を持つ。
@@ -42,12 +42,12 @@ related:
 | --- | --- | --- | --- |
 | StateStore | 今の状態（task・goal・run・ask・proposal・planner・lease・supervisorなど） | SSOT | queue.dbの状態の表 |
 | EventStore | 起きたことのappend-onlyの記録（runの遷移・`run_phase_changed`・claimの前の区間・今の判定の記録・queueの出来事・mainの履歴・[task/goal/findingの属性](attribute-records.md)・Executionのtoken） | SSOT | queue.dbの`run_events`（runの無いqueueのeventを含む）。EventStoreとStateStoreは同じtransactionで確定する |
-| SessionStepStore | sessionのstep（turn・tool・コマンドのshape）。`(session_id, seq)`で重複を除き、抜けを残す。90日 | SSOT | 未実装（queue.dbの新しい表の予定） |
+| SessionStepStore | sessionのstep（turn・tool・コマンドのshape）。`(session_id, seq)`で重複を除き、抜けを残す | SSOT | 未実装（queue.dbの新しい表の予定） |
 | NodeSampleStore | nodeの資源の連続の値（load average・CPU・メモリ・swap・pageout・ファイルシステムの空き） | SSOT | queue.dbの`node_samples`（hostのCSVは写しで、保持の期間の分を一度取り込む。[hostの負荷](supervisor-lifecycle/host-metrics.md)） |
 | LedgerStore | 台帳（run・task・session・queue・nodeの行）。旧方式の行のlegacyのJSONは凍結して捨てない | ビュー | queue.dbの`ledger_rows` |
 | ReportStore | 統計の出力（日次・週次のレポート） | ビュー | queueのdirの`reports/`のファイルと`report_written`のevent |
 | （材料） | run dir（receipt・prompt・`worktime.jsonl`ほか）・log・hostのCSV・Claude Codeのtranscript・Codexのrollout | 材料 | queueのdirとrun dirのファイル、`~/.claude`（取り込んだ値はEventStore・SessionStepStore・NodeSampleStoreに入る） |
-| 統合テストのcoverageの対応表 | 「repositoryのファイル → 当たった統合テスト」の対応表（ファイルの粒度。統合テストのbinaryのテストだけで、unit testとe2eは除く）・テストごとの所要時間と結果（nextestのJUnit）・作ったcommitと時刻 | ビュー | CIの夜間のjob（`.github/workflows/it-coverage-map.yml`）が統合テストをテストごとのcoverageつきで流して作り直せる。GitHub Actionsのartifact `it-coverage-map`、保持30日で、過ぎて消えてもよい。作るのは`scripts/it-coverage-map.sh`。着地の検証は下の「着地の検証の対応表のcache」から読む |
+| 統合テストのcoverageの対応表 | 「repositoryのファイル → 当たった統合テスト」の対応表（ファイルの粒度。統合テストのbinaryのテストだけで、unit testとe2eは除く）・テストごとの所要時間と結果（nextestのJUnit）・作ったcommitと時刻 | ビュー | CIの夜間のjob（`.github/workflows/it-coverage-map.yml`）が統合テストをテストごとのcoverageつきで流して作り直せる。GitHub Actionsのartifact `it-coverage-map`で、保持の期間を過ぎて消えてもよい。作るのは`scripts/it-coverage-map.sh`。着地の検証は下の「着地の検証の対応表のcache」から読む |
 | agentのevalの記録 | evalの依頼・周・実行と費用・成績、productionのケースの集合の依頼・準備・ラベル・組み立てとdigest・disputedの人の決定（[Agent eval](agent-eval.md)） | SSOT | `run_events`の`agent_eval_*`と`agent_cases_*`で、周と集合の状態はこれだけから作り直す（`domain::agent_eval::record`・`production`）。queueのdirの`agent-evals/`とラベルのjobの出力（`agent-cases/<set id>/labels/`）は材料 |
 | productionの集合のファイル | 集合のケースの一覧とpatch | ビュー | queueのdirの`agent-cases/<set id>/`の`cases.json`と`patches/`。`agent_cases_*`とgitの`<base>...<head>`の差分から作り直し（`application::agent_cases::view`）、commitが辿れないケースは理由つきで飛ばす |
 | queueのbrokerの記録 | 動いているbrokerが起動ごとに書き、probeとrelayの見張りが読む自分の記録（欄は`BrokerRecord`） | 材料 | `<queue dir>/broker/state.json`（寿命はbrokerの1回の起動で、起動し直せば作り直せる） |
@@ -80,17 +80,17 @@ runの一生を、重ならず隙間なく全体を覆う区間の列で表す�
 - **`Phase::tags()`**: 記録の工程の定義（`domain::run_phase`）の隣で網羅的な`match`がタグを返す。
   supervisorの工程も網羅的な`match`で記録の工程に対応し、どちらも工程を足して書き忘れるとコンパイルが止まる。
 - **unattributed**: 区間の列に当たらない時間（記録の抜け）はunattributedの区間として出す。
-  KPIは所要時間に対する割合を見張り、2%以上を目標割れにする（予定）。
+  KPIは所要時間に対する割合を見張り、閾値以上を目標割れにする（予定）。
 - **物差し**: 所要時間（区間の和）と、slotを握った時間（`holds`が`none`でない区間の和）。
 
 工程ごとの中身とタグは`domain::run_phase::Phase`の定義と`Phase::tags()`が持つ。
 
 ### 終端
 
-`run_integrated`の後は工程`push`（`run_integrated`と同じtransactionで記録）で、pushの結果の記録と同じ所で、`push_finished`（`already_delivered`を含む）か`push_skipped`なら`ended`（`cause`は`pushed`・`push_skipped`）を、`push_failed`なら`push_pending`（`blocker: human`）を記録する。
+`run_integrated`の後は工程`push`（`run_integrated`と同じtransactionで記録）で、pushの結果の記録と同じ所で、`push_finished`（`already_delivered`を含む）か`push_skipped`なら`ended`を、`push_failed`なら`push_pending`を記録する。
 人の`integrate`も同じ`Integrator`を通るので同じ記録になる。
 `push_pending`を同じremote・branchへの後の`push_finished`で閉じるのは畳む関数で、人が手で打った`git push`はeventが無いので次の`push_finished`まで`push_pending`のまま。
-着地しないrunは`ended`（`cause`は失敗のstatus・`canceled`・`run_recovered`など）で閉じ、`failed`のrunを復旧jobが動かせば次の工程に移る。
+着地しないrunは`ended`で閉じ、`failed`のrunを復旧jobが動かせば次の工程に移る。
 taskは`completed`（着地したrunがあればそのpushの終わり）か`canceled`で閉じる（ADR-t1662-1決定16）。
 
 ### claimの前
@@ -101,7 +101,7 @@ claimの前の待ちの理由はsupervisor単位の区間をtaskの区間に重�
 - **区間の行**: `domain::pre_claim::pre_claim_intervals`がeventの列と今の時刻だけから`PreClaimInterval`の行を作り、StateStoreを読まない。
   どの区間も始まりを書いた1つのsupervisorに属し、終わりは下の規則で1通りに決まる。
 - **`slots_full`**: supervisorのfill passは、始めと終わりに自分のslotを見て、classの枠が全部埋まれば`slots_full_started`を、空けば`slots_full_ended`を書く（`domain::pre_claim::slots_full_payload`）。
-  classは`heavy`と`light`で（`SlotClass`）、classごとに別の区間になる。
+  classは`SlotClass`で、classごとに別の区間になる。
   slotはsupervisorごとなので他のsupervisorは書きも閉じもせず、別のsupervisorの`supervisor_started`でも閉じない。
   execの引き継ぎは同じtokenの続きで、開いた区間を自分の記録から読み直して続ける。
   終わりを書かずに止まったsupervisorの区間は、下の「supervisorの一生」の終わりで閉じる。
@@ -110,7 +110,7 @@ claimの前の待ちの理由はsupervisor単位の区間をtaskの区間に重�
   控えはqueueの全てのsupervisorのclaimを止めるので、taskに重ねるときは区間のsupervisorに依らずqueueの待ちとして読む。
 - **`claim_deferral`**: 既存の`claim_deferred` / `claim_deferral_ended`（taskの控え）が区間の始まりと終わりを兼ねる。
   終わりは`stats`の`claim_deferrals`の`by_end`と同じ規則（`domain::claim_defer::deferral_spans`）。
-- **`run_claimed`の欄**: claimはtaskがreadyになった時刻と、claimの判断で並べた候補の中の位置と優先度を書く（`domain::claim_facts`）。
+- **`run_claimed`の欄**: claimが書く欄と意味は`domain::claim_facts`のmodule docが持つ。
   supervisorは候補ごとの値をclaimに渡し、claimは取ったtaskの値だけを残す。
 - **`blocked_by`**: 着地の順番だけを待つ間の`run_phase_changed`（工程`landing_queue`）は、そのとき着地slotを握っていたrunを`blocked_by`に持ち、握るrunが変われば記録し直す。
 
@@ -131,18 +131,18 @@ supervisorの生存と停止の証拠はEventStoreに残し、一生の終わり
 
 ### 今の判定の記録
 
-statsのslotの`alerts`・`running_alerts`・`workspace_check`は状態表・run dirのmarker・processを入力に今を判定するので、supervisorの周回がその入力を観測してEventStoreに記録し、統計はeventだけから同じ値を作れる（`domain::live_alerts`、`application::supervise::live_alerts`）。
+statsのslotの今の判定は状態表・run dirのmarker・processを入力に今を判定するので、supervisorの周回がその入力を観測してEventStoreに記録し、統計はeventだけから同じ値を作れる（`domain::live_alerts`、`application::supervise::live_alerts`）。
 
-- **観測**: どのsupervisorも`OBSERVE_INTERVAL_SECS`（60秒）ごとに、自分のslotやleaseに限らずqueue全体をstatsと同じ読み方で読み、statsと同じ判定の関数（`live_alerts::judge`）で判定する。
-  警告の鍵は判定・種類・run・理由で、leaseの持ち主を含めないので、leaseが移っても何も書かない。
-- **判定の入力と警告の開閉**: 入力はslot（空き・候補・ready）・閾値とその出どころ・未完了のrunごとの離散の時刻と値（警告でないrunも）で、経過で伸びる長さは持たない。
+- **観測**: どのsupervisorも`OBSERVE_INTERVAL_SECS`ごとに、自分のslotやleaseに限らずqueue全体をstatsと同じ読み方で読み、statsと同じ判定の関数（`live_alerts::judge`）で判定する。
+  警告の鍵（`AlertKey`）はleaseの持ち主を含めないので、leaseが移っても何も書かない。
+- **判定の入力と警告の開閉**: 入力は離散の時刻と値で、経過で伸びる長さは持たない（入力の中身は`domain::live_alerts`のmodule doc）。
   開閉のeventは警告がいつ立ち消えたかの記録で、値の再現には使わない。
-- **記録**（流れはsupervisorのtokenごと）: 起動の後の最初の成功した観測が`live_alert_baseline`（全ての入力と開いた警告で、入力の版1）。
-  入力の値が変わった対象ごとに`live_alert_input_changed`（その対象の今の値の全体で、版を1つ進める）。
+- **記録**（流れはsupervisorのtokenごと）: 起動の後の最初の成功した観測が`live_alert_baseline`。
+  入力の値が変わった対象ごとに`live_alert_input_changed`。
   警告の鍵の集合が変わったときだけ`live_alert_started`・`live_alert_ended`。
-  `REACH_INTERVAL_SECS`（300秒）ごとと、観測の失敗の始まり・成功への戻りに`live_alert_reached`（成否・失敗の理由・その時の入力の版）。
+  `REACH_INTERVAL_SECS`ごとと、観測の失敗の始まり・成功への戻りに`live_alert_reached`。
   書けなかった記録の後は基準からやり直す。
-- **畳み**: `live_alerts::fold`はeventと窓の終わりだけから、窓の終わりまでの最後に成功した観測が`GRACE_SECS`（900秒、到達点の3回分）以内の流れのうち最も新しい1つ（同じ時刻はevent idの大きい方）を選ぶ。
+- **畳み**: `live_alerts::fold`はeventと窓の終わりだけから、窓の終わりまでの最後に成功した観測が`GRACE_SECS`以内の流れのうち最も新しい1つ（同じ時刻はevent idの大きい方）を選ぶ。
   その流れの基準と入力の更新を版の順に当てた入力を、窓の終わりで`judge`に渡す。
   流れどうしは足さない。
 - **観測が無い**: 選べる流れが無いときの理由は、基準が無い・記録の欠け（到達点が確かめた版に入力の記録が届かない）・supervisorの停止（全ての流れの`supervisor_life_end`）・観測の失敗・到達点が古い。
@@ -153,7 +153,7 @@ statsのslotの`alerts`・`running_alerts`・`workspace_check`は状態表・run
 
 台帳は対象ごとに1行（ADR-t1662-1決定10）。
 区切りの値は列、フローで形が変わるものはJSON。
-全ての行は、種類の中で対象を1つに決める鍵・畳み方の版・畳んだ入力の到達点・確定の印・旧方式の印を持つ（項目と意味は`LedgerRow`のdoc commentとmigrationのコメント）。
+全ての行が持つ項目と意味は`LedgerRow`のdoc commentとmigrationのコメントが持つ。
 
 - **作り直し**: 版が上がった行と、到達点より後に入力が届いた行は畳み直す（`ledger::rebuilds`、確定の印の後と旧方式の行も同じ）。
 - **旧方式**: 切り替え前のrunとそれを持つtaskの行は、今のstatsの値を一度だけ書き、storeは上書きしない。
@@ -180,7 +180,7 @@ statsのslotの`alerts`・`running_alerts`・`workspace_check`は状態表・run
 - **task**: statusの移りを工程にし、runの間はそのrunの区間を差し込み、readyの間は`ready_at`で依存の待ちを分けてsupervisor単位の区間を重ねる。
 - **claimの後の事実**は`domain::after_claim`が作り、statsの`MeasureTrack`も同じものを使う。
 
-置き換える今の組み立て（段3で撤去）: `domain::stats::landing::LandClock`、`application::supervise`の`Phase`、`domain::run_progress::Phase`、`domain::forecast::Phase`、timelineの空白の理由。
+置き換える今の組み立て（段3で撤去）はADR-t1662-1決定20が挙げる。
 
 ## 台帳を作る係
 
@@ -203,7 +203,7 @@ statsのslotの`alerts`・`running_alerts`・`workspace_check`は状態表・run
   telemetryのtokenの失効と資源の最後の記録の条件は、それを記録するtaskが足す（予定）。
 - **旧方式**: 切り替え前のrun（`run_phase_changed`が無い）とそのtaskは区間に畳まず、`legacy`に今の`RunMeasures`から値を一度だけ書く。
   storeは値と版を上書きせず、後の入力では記録だけを追う。
-- **保持**: nodeの行はhostの負荷と同じ日数で1日に1度消す。
+- **保持**: nodeの行はhostの負荷と同じ日数で消す。
 - **失敗**: 読めない・書けない周回は印を残して次に任せ、続く失敗の初めにwarnを1度出し、決まった回数続けば`ledger_build_failed`を1度記録する。
   runとtaskの結果は変えない。
 
@@ -215,9 +215,9 @@ stats・kpi・reportの全ての欄は、行を今のstatsの期間の窓（時�
 段3の統計のmoduleはこの関数が返す値だけを取り、StateStore・run dir・process・Gitを読まない（D1）。
 欄・指標・節と今のuse caseの入力ごとの元の行は、同じmoduleのdoc commentの表が持つ。
 
-- 今の`work`・`wait_to_land`・`land_phases`・`startup`は、段3の後の1期間は台帳から同じ名前で作り、その後廃止する。`startup`は`first_commit`に改名する。1期間の長さは段3のtaskが決める。
+- 今の値を残す1期間（ADR-t1662-1決定19）の長さは段3のtaskが決める。
 - kpiの`phase.<工程>`と`land_phase.<工程>`も同じ1期間は同じ名前で作り、その後はタグごとの値と`phase.first_commit`に置き換える。hostの設定の`[kpi.targets."phase.startup"]`は`phase.first_commit`に読み替える（ADR-t1662-1が[ADR-0051](../adr/0051-kpi-time-series-report-and-push.md)決定1をamends）。
-- 新しい出力は所要時間とslotを握った時間の2本で、`blocker`・`holds`・`attempt`ごとの内訳を出し、`change`と`area`で層に分ける。
+- 新しい出力は所要時間とslotを握った時間の2本でタグごとの内訳を出し、`change`と`area`で層に分ける。
 
 ### 欠測と集約の契約
 
@@ -234,30 +234,36 @@ stats・kpi・reportの全ての欄は、行を今のstatsの期間の窓（時�
 
 段2の並走で使い、段3で今の値を台帳から作った後に消す読み取り（`stats --ledger`、`domain::ledger::compare`。欄と分類はdoc comment）。
 
-- runごとに、今の`work`・`wait_to_land`・`startup`・`land_phases`と台帳の同じ意味の値（`wait_to_land`は`run_integrated`まで、pushは別の欄）、差（秒）と理由の分類。
+- runごとに、今のstatsの値と台帳の同じ意味の値（`wait_to_land`は`run_integrated`まで、pushは別の欄）、差（秒）と理由の分類。
 - run・taskを持たない欄は、台帳の行が返すeventに今の`stats`の関数を当てた値と並べる。
 - hostの欄は、`stats`の窓とkpiの日ごとの期間ごとに、nodeの行のsampleの要約と今のCSVの要約を並べ、片方にだけあるsampleを理由で分ける。
 - 照合は、窓に終わった対象の数と台帳の行の数、行の無い・確定していない（`push_pending`は別）・dirtyの対象と、行ごとに照合の時点の入力の到達点まで畳んであるか（`up_to_date`）。
 
 ## runの比較の軸
 
-claimの属性は`run_claimed`の`attributes`（キーと値の開いた組）に持ち、記録・台帳・`kpi --by <キー>`と`--compare`はキーを知らずに運ぶ（ADR-t1662-1決定21〜26）。
+claimの属性は`run_claimed`の`attributes`（キーと値の開いた組）に持ち、記録・台帳・kpiはキーを知らずに運ぶ（ADR-t1662-1決定21〜26）。
 
 - 記録（実装済み）: claimは`run_claimed`の他の欄を書いた後に、その欄から`domain::claim_facts::attributes`で組を作る。
   キーと元の欄の対応は同じmoduleの表`KEYS`だけが持ち、新しいキーはそこに足す。
 - キーは`^[a-z][a-z0-9_.]{0,63}$`、値は文字列で256 byteまで、1つのrunに64キーまで（予定の値）。
-- 予約名（派生の軸。属性のキーにしない）: `provider`・`claude`・`model`・`group`・`slot`・`load`・`toolchain`・`change`・`area`・`nature`。kpiが今の`axis_value`と同じ規則で作る。
-  組を作る関数は予約名のキーを入れない（`claim_facts::RESERVED`）。
+- 予約名（派生の軸。属性のキーにしない）は`claim_facts::RESERVED`が持ち、kpiが今の`axis_value`と同じ規則で作る。
+  組を作る関数は予約名のキーを入れない。
 - 読み取りの優先: 層のキーが予約名なら派生の値、それ以外は属性の値、無ければ`unknown`。
 
 ## 送る口
 
 （ADR-t1662-3決定1〜13）
 
-- **送る側**: executor（session wrapper・runner、非対話のjobを起動するプロセス、`integrate`とe2eの検証）がstepを30秒ごとにまとめてTelemetrySinkに送る。agentは送らない。supervisorは工程・claim・slot・ask・`environment_attached`・nodeの時系列・外から測れる資源を自分で書く。
+- **送る側**: executor（session wrapper・runner、非対話のjobを起動するプロセス、`integrate`とe2eの検証）がstepをまとめてTelemetrySinkに送る。
+  agentは送らない。
+  supervisorは工程・claim・slot・ask・`environment_attached`・nodeの時系列・外から測れる資源を自分で書く。
 - **TelemetrySink**: 今のアダプタはqueue serviceのユースケース`telemetry_report`（APIの版つき。[Queue service](queue-service.md)）。stepは`(session_id, seq)`と対象を持つ。送れなくても結果を変えない。
-- **principal**: role `executor_telemetry`（予定の名前）。呼べるのは`telemetry_report`だけ。対象は1つで、runの対象は`run_id`、runを持たない対象は種類とid（`planner_id`・`plan_review_id`・jobのid）。supervisorがclaim・resume・jobの起動・plannerを開くときに発行し、runの終わり・leaseの喪失・jobの終わり・`planner_closed`で失効させる。tokenのファイルはagentのworktree・run dir・plannerのdirの外に置き、agentのenvとargvに渡さない。
-- **所属**: runの対象のstepはrunの行に畳み、runを持たない対象のstepはSessionStepStoreに90日だけ持ってsessionの行で読む。
+- **principal**: role `executor_telemetry`（予定の名前）。
+  呼べるのは`telemetry_report`だけ。
+  対象は1つで、runか、runを持たない対象の種類とid。
+  supervisorがclaim・resume・jobの起動・plannerを開くときに発行し、runの終わり・leaseの喪失・jobの終わり・`planner_closed`で失効させる。
+  tokenのファイルはagentのworktree・run dir・plannerのdirの外に置き、agentのenvとargvに渡さない。
+- **所属**: runの対象のstepはrunの行に畳み、runを持たない対象のstepはSessionStepStoreに持ってsessionの行で読む。
 - **差し替える口**: 実行環境の口・資源の口・送る口。資源の共通の単位はCPU時間（秒）・メモリの最大（byte）・読み書きの量（byte）・壁時計の時間（ミリ秒）とnodeのid。3つの口のアダプタは同じ適合test一式を通す。
 - **OpenTelemetry**: 区間はspan、stepは子のspan、タグと属性はattributeに写す。記録の経路にはしない。
 
@@ -267,4 +273,4 @@ sessionのstepのコマンドの形（shape）と、台帳を作るときの分�
 
 ## 段と後続のtask
 
-段0（ADR 3本とこの文書）→段1（`run_phase_changed`・claimの前の区間・`run_claimed`の欄・`blocked_by`の記録）→段2（ストアのport・台帳と畳む関数・1週間の並走比較。差は`docs/plans/`に説明する）→段3（読み手を台帳と畳む関数へ移し`LandClock`を撤去）。
+段0（ADR 3本とこの文書）→段1（`run_phase_changed`・claimの前の区間・`run_claimed`の欄・`blocked_by`の記録）→段2（ストアのport・台帳と畳む関数・並走比較。差は`docs/plans/`に説明する）→段3（読み手を台帳と畳む関数へ移し`LandClock`を撤去）。

@@ -82,48 +82,7 @@ SqliteQueue（src/infrastructure/）── BEGIN IMMEDIATE ──► queue.db（
 
 ## 表
 
-表ごとの役割と、列についてコードから読めない約束。
-
-```text
-tasks                  -- task 1つに1行。priorityのnullは所属goalの優先度を継ぐ。worker_modeのnullはproviderの既定（ADR-t1340-1）、
-                       --   保存された'interactive'はclaimとresumeで非対話と読む（ADR-t1433-2）。follow_up_depthは人の判断を経ずに続いたfollow-upの段数
-                       --   origin*は作成時だけ書き、priority_byは誰が置いたか（ADR-t1975-1）
-task_dependencies      -- taskの依存（task → predecessor）
-task_goal_dependencies -- taskからgoalへの依存。goalがachievedで閉じるまでclaimしない（ADR-0038）
-task_runs              -- run 1つに1行（試行ごとに新しい行）。pathの列は記録時の絶対pathで、読むときは開いたqueueのruns/から解決し直す（ADR-0017）
-run_events             -- event（task / goal / run、またはどれにも属さないqueueのevent）と書いたactor（ADR-t728-1）。追記だけ
-run_leases             -- 実行中のrunの所有者（supervisorかintegrateのtoken）とheartbeat
-run_processes          -- runのwrapperとagentのPID。(run, role)ごとに1回だけ登録
-queue_repository       -- queueを束縛するGit common directory（1行）
-schema_floor           -- 受け入れるバイナリのschemaの下限（1行。ADR-0045）
-supervisors            -- 常駐superviseの登録（run無しでもstatus・doctorに出す）。providers以降のnullは旧binaryの登録（max_spikesは出どころ有りなら無制限）
-session_workspaces     -- upが開いた常駐sessionのworkspace（role主キー）
-goals                  -- goal 1つに1行。acceptance_versionはacceptanceの文が変わったときだけtriggerが増やす（ADR-t1504-2）。priorityは個別の指定の無いtaskが継ぎ、tagsはgoalのラベル（ADR-t1639-1）。origin* / priority_byはtasksと同じ
-proposals              -- plan reviewに出したgoalとtaskの束。memberは表を持たず、tasks / goalsのproposal_idが今の所属を指す
-plan_reviews           -- plan review job 1つに1行。未完了は1行まで（部分unique index）
-goal_reviews           -- goal review job 1つに1行。未完了は1行まで（indexでなくBEGIN IMMEDIATEの中の検査）
-headless_jobs          -- headless jobのプロセスと出力。始めたsupervisorが消えた後に別のsupervisorが止め、Executionを数えるため
-planners               -- plannerのsession 1つに1行。workspace_idはruntimeのplannerならbackgroundのwrapperのhandle、人のplannerと古い行はcmux workspace。answer_wait_atは人の答えだけを待って終わる行（ADR-t1704-1）
-plan_requests          -- inboxが記録した計画の依頼。text / note / refsは記録の後に書き換えない（言い直しは新しい依頼）。spike_task_idはSpike起点の依頼（Spikeごとに1件）
-spike_cycles           -- 調査中の計画の周期
-replan_operations      -- runの再計画（ADR-t1521-2）。開いた操作はrunごとに1つ。読まないバイナリはfloorが拒む
-task_holds             -- taskのhold（ADR-t1879-1）。開いた行はtaskごとに1つ（BEGIN IMMEDIATEの中の検査）
-plan_request_proposals -- 依頼から出たproposal
-draft_origins          -- runtimeやjobが作ったdraftの出どころと材料（JSON object）。1つのdraftに1回だけ書く
-draft_reopens          -- plan reviewがreopenしたtaskのproposalを取り下げたときの出どころ
-draft_revisits         -- draftの再検討の時刻（ADR-t1540-1）。使ったときにopened_atを書く
-draft_bundles          -- 束のplanner（同じきっかけのdraftを1人のplannerが持つ。ADR-t807-1）
-draft_bundle_members   -- 束のdraftと、plannerを閉じたときに決めた結末。outcomeのnullはplannerが生きている
-follow_up_judgements   -- follow-upの所属の判断と訂正。追記だけ（follow-up-membership.md）
-asks                   -- 人に答えを求める相談。answered_byの値は書いた者のroleで、権限の出どころはanswer_authorityが別に持つ（Authorization）
-findings               -- observerの検出。同じ問題の閉じていない行は1つ（部分unique index）
-search_index           -- 全文検索の索引（FTS5）。triggerが保つ
-landed_commits         -- 着地したcommit。run_integratedのeventからtriggerが書く
-ledger_rows            -- 計測の台帳（ビュー）
-node_samples           -- nodeの負荷（NodeSampleStore）。保持の日数で消す
-node_sample_imports    -- 取り込み済みのCSV
-binary_updates         -- 使っていない（自動更新の経過はupdate_*のevent）
-```
+表ごとの役割と列の意味は、その表を作る`migrations/*.sql`のコメントと、表を持つstoreと`src/domain/`の型のdoc commentが持つ（上の「目的」）。
 
 ## 集約の読み書き
 
@@ -147,7 +106,7 @@ binary_updates         -- 使っていない（自動更新の経過はupdate_*�
 `asks`は人の判断を要る相談を1行で持つ（[ADR-0022](../adr/0022-ask-answer-inbox-planner-and-landing-on-doubt.md)、[ask](supervisor-lifecycle/ask.md)）。
 入口は`src/infrastructure/asks.rs`と`runtime_store/ask_store.rs`、行の型は`src/domain/`の`Ask`と`NewAsk`。
 
-- openは回答もcloseも無い行で、部分UNIQUE index `asks_open`が（task・run・kind・理由・subject・finding）ごとに1件に限る。
+- openは回答もcloseも無い行で、部分UNIQUE index `asks_open`が同じaskのopenな行を1件に限る。
   同じaskを開こうとすると既存の行を返して何も書かない。
 - 登録・回答・close・運んだ印は、それぞれ行とevent（`ask_opened`・`ask_answered`・`ask_closed`・`ask_delivered`）を1トランザクションで書くので、`watch`のcursorに乗る。
 - askを終えるeventは`ask_answered`だけで、`stats`はそれで未回答を判定する。
@@ -174,12 +133,12 @@ runtimeやjobが作ったdraftに立てるplannerの記録（[draft planners](su
 - 人の答え待ちの印はaskが未回答か配送に失敗したときだけ書き、印の付いた行は回答の行き先とdraft・finding・依頼の上限の数から外れる（[ADR-t1704-1](../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)）。
 - 回答の行き先は、生きているplanner・新しいplanner・人・閉じるのどれかで、`answer`も同じ判定で`runtime_delivers`を書く。
   依頼のplannerが作り由来もproposalも持たないdraftの回答は、依頼の回答の経路に乗せる（作成のeventのactorで依頼を引く、[ADR-t2015-1](../adr/2026-10-07-t2015-1-answers-about-a-request-planners-draft-go-the-requests-way.md)）。
-- runtimeのplannerがfollow-upをsubmitできる深さの上限は[ADR-t808-1](../adr/2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md)で、`proposals::submit`の中の`check_adoptions`が拒む。
+- runtimeのplannerがfollow-upをsubmitできる深さの上限は[ADR-t808-1](../adr/2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md)で、`proposals::submit`が拒む。
 
 ### planning requests（`plan_requests.rs`）
 
 人がinboxに頼んだ計画の依頼と、依頼ごとに立てるruntimeのplanner（[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)、[inboxからの計画の依頼](supervisor-lifecycle/plan-planners.md#inboxからの計画の依頼)）。
-入口は`src/infrastructure/plan_requests.rs`（port `PlanRequestStore`と`RequestStore`）。
+入口は`src/infrastructure/plan_requests.rs`。
 
 - 依頼のeventはtask・goal・runに付かないqueueのeventで、payloadに`request_id`を持つ。
 - 立てる（`open_request_planner`）は対象であることをトランザクションの中で再検査し、上限に達した依頼を`exhausted`にする。
@@ -211,8 +170,8 @@ runの所有・supervisorの登録・runのファイルの約束（[ADR-0007](..
   自分の更新と引き継ぎはどちらもlease行への書き込みなので、SQLiteが直列化して片方だけが通る。
 - `supervisor_token`は今そのrunを動かしているsupervisorで、claimしたsupervisorは`run_adopted`のeventに残る。
 - `integrate`は登録せずにleaseだけを持つので、`run_leases.token`から`supervisors`へ外部キーを張らない。
-- `supervisors`の行はそのプロセスの性質（`mode`・`binary_version`・引き継ぎの印）を持ち、行と寿命を共にする。
-  `binary_version`は登録するプロセス自身だけが書き、`mode`は`up`が`launchd`を書く（`in_cmux`は廃止前の登録）。
+- `supervisors`の行はそのプロセスの性質を持ち、行と寿命を共にする。
+  `binary_version`は登録するプロセス自身だけが書き、`mode`は`up`が`launchd`を書く。
 - 登録の行を消すのは`supervise`自身の終了と`up`・`down`の掃除（`prune_supervisor`）だけで、どちらも同じトランザクションで`supervisor_stopped`を書く。
   heartbeatか停止の記録に失敗したときは消さず、staleとして次の掃除に任せる。
   `status`・`doctor`・`recover`は消さない。
@@ -242,7 +201,7 @@ follow-upの所属の判断・訂正とdraft / readyの所属の変更は同じ`
 ## Transactions and constraints
 
 - `BEGIN IMMEDIATE`で状態の変更・依存グラフの検証・claimを直列化する。
-  ロックの待ちは最大5秒で、超えればerrorを返す。
+  ロックの待ちは`QUEUE_BUSY_TIMEOUT`までで、超えればerrorを返す。
   supervisorのheartbeatは`QueueBusy`を次の間隔で書き直す（[supervise](supervisor-lifecycle/supervise.md#supervise)）。
 - claimは候補の選択・taskの更新・runの作成・event・lease行を1つのトランザクションにまとめ、同時のclaimは別々のtaskを取る。
   holdの行と`task_held` / `task_released`も1つのトランザクションで書き、claim・resume・復旧jobの開始と結果の適用はそれぞれのトランザクションでholdを読むので、先に確定した側だけが効く。
@@ -257,13 +216,13 @@ schemaが安定したと人が決めるまで、SQLiteのCHECK制約を使わな
 
 - 対象はCHECKだけで、NOT NULL・UNIQUE・主キー・外部キー・DEFAULTはDBに残す。
 - 規則の置き場所: 値の一覧はdomainの型（`string_enum!`）、型で表せない規則は書き込みのportが書く前に検査し、破れていれば書かずにerrorにする（`src/domain/write_rules.rs`）。
-- 読むとき: askとeventのkind、taskの`change`と`execution_class`は知らない値を寛容に読む（区分の追加を互換にするため）。
+- 読むとき: askとeventのkindと、`src/domain/write_rules.rs`のmodule docが挙げる列は知らない値を寛容に読む（区分の追加を互換にするため）。
   それ以外の列で規則の外の値を読むと、その読み込みはerrorで止まり（fail closed）、DBの行はその場で直さない。
 - 値を足すとき: kindの列への追加はmigrationを要さない。
   読む側がfail closedの列への追加は、古いバイナリが読めないので非互換の宣言のmigrationで下限を上げる（表は作り直さない）。
-- kindの規則（[ADR-0073](../adr/0073-kind-additions-are-compatible.md)）: 書き込み口はkindを`EventKind`で受け、kindに結び付く規則は`check_ask_kind` / `check_event_target`が書く前に検査する。
+- kindの規則（[ADR-0073](../adr/0073-kind-additions-are-compatible.md)）: 書き込み口はkindを`EventKind`で受け、kindに結び付く規則は書く前に検査する。
   queueのeventのkindは`EventKind::is_queue`にも足す。
-- 新しいmigrationにCHECKを書かないことは`scripts/check-migration-numbers.sh`と`schema.rs`の`kind_enumerations`が検査する。
+- 新しいmigrationにCHECKを書かないことは`scripts/check-migration-numbers.sh`が検査する。
 
 ## Queue location
 
@@ -290,7 +249,7 @@ $XDG_DATA_HOME/dagq/<hash>/          未設定・空・相対pathなら $HOME/.l
 
 ## Database setup and migrations
 
-入口は`src/infrastructure/schema.rs`（`MIGRATIONS`と互換の判定）、`SqliteQueue::open` / `open_read_only` / `open_watch` / `migrate`（`src/infrastructure/sqlite.rs`）。
+入口は`src/infrastructure/schema.rs`（`MIGRATIONS`と互換の判定）と`src/infrastructure/sqlite.rs`の`SqliteQueue`。
 migrationを足すtaskの規則は[migrations.md](../development/migrations.md)が持つ。
 
 - `init`だけがDBを作る（cwdのqueueなら`queue_repository`も束縛する）。
@@ -324,7 +283,7 @@ migrationを足すtaskの規則は[migrations.md](../development/migrations.md)�
 
 - 1つのFTS5の表にtask・goal・note・着地のcommitをまとめる（表を分けると`bm25`の統計が分かれ、kindをまたいで順位を比べられない）。
 - tokenizerは`trigram`で、空白で語を区切らない日本語とpathの部分一致を引く。
-  3文字未満の語は索引で引けないので`LIKE`で絞り、`OR` / `NOT` / 括弧とは組み合わせられない。
+  `domain::search::TRIGRAM`の文字数に満たない語は索引で引けないので`LIKE`で絞り、`OR` / `NOT` / 括弧とは組み合わせられない。
 - 索引はDBのtriggerが同じトランザクションで保つので、索引を知らない古いバイナリの書き込みにも追いつく。
   `tasks` / `goals` / `run_events`を作り直すmigrationはtriggerを作り直す。
 - `landed_commits`は`run_integrated`のeventからtriggerが書き（欠けたpayloadは着地を止めずに行を飛ばす）、messageの無い行は`dagq migrate`がGitから埋める。

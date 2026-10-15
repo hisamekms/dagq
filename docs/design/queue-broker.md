@@ -33,12 +33,12 @@ containerからbrokerまでの経路（containerの中の転送・runごとのun
 
 ## 入口
 
-- 要求と応答の形（method・path・run tokenとrunのheader・bodyの`ServiceRequest`・応答の`ServiceResponse`・拒否のcodeとHTTPのstatus）は`domain::queue_broker`のmodule docと定数が持つ。
+- 要求と応答の形は`domain::queue_broker`のmodule docと定数が持つ。
   拒否のcodeの綴りと意味は`domain::queue_service::ServiceErrorCode`のdoc commentが持つ。
   clientはこの型と定数に従い、ここに書き写さない。
-- 1つの要求の判断（宛先・run tokenの検証・serviceへの転送・tunnelを開くか・拒否の記録）は`application::queue_broker::QueueBroker::handle`、tokenの判定は`domain::queue_broker::judge_run_token`と`judge_verification_token`、tunnelの宛ての判定は`judge_tunnel`。
+- 1つの要求の判断（宛先・run tokenの検証・serviceへの転送・tunnelを開くか・拒否の記録）は`application::queue_broker::QueueBroker::handle`、tokenとtunnelの宛ての判定は`domain::queue_broker`。
 - registryのallowlistの設定の綴り・置き場・意味・既定は`infrastructure::run_env::EGRESS_REGISTRIES`のdoc comment、1つのhostの書き方は`domain::queue_broker::RegistryHost`が持つ。
-- Claudeの資格情報の`host.toml`の表の綴り・置き場・意味（既定なし）は`infrastructure::claude_credential`のmodule doc、種類は`domain::queue_broker::ClaudeCredentialKind`、送るheaderは`claude_headers`、上流へ送って応答を流すところは`infrastructure::queue_broker::forward_claude`が持つ。
+- Claudeの資格情報の`host.toml`の表の綴り・置き場・意味は`infrastructure::claude_credential`のmodule doc、上流へ送って応答を流すところは`infrastructure::queue_broker::forward_claude`が持つ。
 - brokerのプロセスがHTTPを読み書きしてserviceのsocketへ転送するところと、`up`・`down`・supervisorが起動・停止・生死を見る口は`infrastructure::queue_broker`のmodule docから辿る。
   clientの要求の送り方はそのmoduleの送る側の関数が、上の形のまま持つ。
   containerの中のクライアントモードのdagqもこの形で送る（[Queue service](queue-service.md#クライアントモード)）。
@@ -51,7 +51,7 @@ containerからbrokerまでの経路（containerの中の転送・runごとのun
 - 宛先: queue serviceの決まったpathと`/anthropic`の下への、loopbackのhostを名指す（か`Host`の無い）要求と、registryのallowlistのhostとportへの`CONNECT`だけを通す。
   それ以外（allowlistの外への`CONNECT`・別のpath・同じpathでも別のhostを名指すもの）は`forbidden_destination`で拒む（`domain::queue_broker::Destination::of`）。
   宛先は要求が名指すhost（`CONNECT`の宛先・絶対URIのhost・`Host`の値）か、無ければmethodとpathで記録する。
-- registryのallowlist: runtimeが組み込みで持つ宛先はqueue serviceと`api.anthropic.com`だけで、registryのhostはコードに持たず`dagq.toml`だけが与える（既定は空で、どの`CONNECT`も通らない）。
+- registryのallowlist: runtimeが組み込みで持つ宛先はqueue serviceと`api.anthropic.com`だけで、registryのhostはコードに持たず`dagq.toml`だけが与える。
   brokerは`CONNECT`のたびに、queueが結びついたrepositoryのmain checkoutの`dagq.toml`から読み、runのcloneからは読まない（着地前のworkerの変更でallowlistを変えさせない）。
   上流のgitのremoteのhost（main checkoutのremoteのURLから求める）は書いても拒み、理由を答えとeventに出す（[ADR-t2113-2](../adr/2026-10-08-t2113-2-git-is-guarded-by-the-mount-design.md)決定3）。
   `api.anthropic.com`は書いても`CONNECT`では通さない。
