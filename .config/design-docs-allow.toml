@@ -148,9 +148,7 @@ tasks = 55
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/plan-review.md"
-size = 68947
-line = 9809
-tasks = 46
+size = 41468
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/push.md"
