@@ -1669,20 +1669,30 @@ impl Supervisor<'_> {
             )?;
         }
         let findings_file = run_dir.join(format!("revise-{attempt}-findings.txt"));
-        let message = revise_request(
+        let request = revise_request(
             &task,
             run,
             round,
             &verdict.reasons,
             Some(&findings_file.to_string_lossy()),
-        )?
-        .with_language(self.verifier.language().as_ref());
+        )?;
+        let cut_findings = request.bytes.omitted.contains_key("findings");
+        // Past `[fresh_session]`, the request goes to a new session in a
+        // handoff that carries the findings too (ADR-t2080-1).
+        let findings = revise_findings(&verdict.reasons);
+        let (message, fresh) = self.session_request(
+            run,
+            request,
+            &run_dir.join(format!("revise-{attempt}-request.txt")),
+            Some((&findings, Some(&findings_file))),
+        )?;
         // The request names the file as where the cut findings are whole
         // (ADR-t2072-1).
-        if message.bytes.omitted.contains_key("findings") {
-            self.files
-                .write(&findings_file, revise_findings(&verdict.reasons).as_bytes())?;
+        if cut_findings || message.bytes.omitted.contains_key("review") {
+            self.files.write(&findings_file, findings.as_bytes())?;
         }
+        // What was written is what an adopter writes once more when it was
+        // not taken.
         self.files.write(
             &run_dir.join(format!("revise-{attempt}.txt")),
             message.text.as_bytes(),
@@ -1702,6 +1712,13 @@ impl Supervisor<'_> {
                 }),
             ),
         };
+        // The new session is recorded before the request that is its
+        // first: an adopter of the request finds it recorded, and one that
+        // finds no request asks a person, whose send-back resumes the run
+        // in that session without a second record.
+        if let Some(fresh) = fresh {
+            self.renew_session(run, fresh)?;
+        }
         let sent_at = self.files.now();
         // Recorded before it is written to `turns/`: a supervisor that
         // stops in between leaves an adopter that writes it once when

@@ -601,7 +601,7 @@ impl Supervisor<'_> {
         };
         // Written whole by the supervisor that recorded it, or held to its
         // limit by an earlier adopter: either is its delivery.
-        let request = restored_request(&text, limit, &path);
+        let request = restored_request(&text, kept_request_limit(&text, limit), &path);
         match turn::adopted_delivery(&requests, what, &[&text, &request.text], after) {
             turn::AdoptedDelivery::Delivered(seq) => {
                 info!(run_id = %run.id(), "the adopted {what} of {} was written as request {seq}; it is not written again", run.id());

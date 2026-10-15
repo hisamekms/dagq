@@ -5504,6 +5504,34 @@ fn a_handoff_with_the_largest_material_stays_within_its_limits() {
     assert!(first.len() <= WORKER_PROMPT_LIMIT + HANDOFF_LIMIT);
 }
 
+/// A handoff kept in a run file in place of a revise's or a resume's
+/// request is held to its own limit when another supervisor sends it, so
+/// none of it is cut there; any other request keeps its kind's limit.
+#[test]
+fn a_kept_handoff_is_held_to_the_handoffs_limit() {
+    let run = run_on(Provider::Claude, WorkerMode::Headless);
+    let handoff = handoff_text(
+        &run,
+        &HandoffMaterial {
+            peak_context: 200_000,
+            threshold: 150_000,
+            commits: "",
+            changes: "",
+            review: None,
+            receipt_summary: None,
+            request: "the resolution request",
+            request_file: None,
+        },
+    );
+    for limit in [REVISE_REQUEST_LIMIT, RESUME_REQUEST_LIMIT] {
+        assert_eq!(kept_request_limit(&handoff.text, limit), HANDOFF_LIMIT);
+        assert_eq!(
+            kept_request_limit("dagq: the supervisor's review", limit),
+            limit
+        );
+    }
+}
+
 /// The file the known failures' tests write the whole list to.
 const KNOWN_FILE: &str = "/runs/r/known-failures.json";
 

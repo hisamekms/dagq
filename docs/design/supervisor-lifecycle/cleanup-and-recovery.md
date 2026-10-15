@@ -31,7 +31,7 @@ goal 54の片付け（plannerの行と`runner`）はこれと重ならない。
 
 - runが開いたsessionは、最初のsession・resumeごとのsession・開き直しのどれもrun_eventsに残り、止めたかはsessionごとに判じる（`domain::run::run_workspaces`）。
   `task_runs.workspace_closed_at`は最初のsessionの分だけを表す。
-- reviseは生きているsessionに送るので、新しいsessionを開かない。
+- reviseは生きているwrapperに送るので、wrapperのsessionを新しく開かない（閾値を超えたcontextの後に新しく始まるのはproviderのsessionで、wrapperは同じ。[Agent provider lifecycle](../provider-lifecycle.md#大きなcontextからの新しいsession)）。
 
 ## 終わったrunの掃除<a id="終わったrunの掃除"></a>
 

@@ -549,6 +549,21 @@ pub const HANDOFF_RECEIPT_BYTES: usize = 6_000;
 /// request held to its limit is carried whole.
 pub const HANDOFF_REQUEST_BYTES: usize = RESUME_REQUEST_LIMIT;
 
+/// How every handoff prompt ([`handoff_text`]) starts.
+const HANDOFF_OPENING: &str = "dagq: this run's worker goes on in a new session";
+
+/// The whole limit a request kept in a run file is held to again when a
+/// supervisor that did not write it sends it (an adopted revise, an
+/// adopted or handed-off resume): [`HANDOFF_LIMIT`] for a handoff prompt
+/// written in place of the request of its kind, `limit` for that request.
+pub(crate) fn kept_request_limit(text: &str, limit: usize) -> usize {
+    if text.starts_with(HANDOFF_OPENING) {
+        HANDOFF_LIMIT.max(limit)
+    } else {
+        limit
+    }
+}
+
 /// The handoff prompt of a new session of `run`'s worker for a large
 /// context ([`HandoffMaterial`]), held to [`HANDOFF_LIMIT`]. Each part is
 /// one section cut to its bytes keeping its start, with the bytes left out
@@ -567,7 +582,7 @@ pub fn handoff_text(run: &TaskRun, material: &HandoffMaterial<'_>) -> FittedProm
         )
     };
     let mut text = format!(
-        "dagq: this run's worker goes on in a new session: its previous turn's context took {} tokens, above the {} tokens this repository sets, so nothing of the earlier conversation carries over. The task's prompt is above; the run, its worktree, its branch and its provider are the same. The work so far is in this worktree and its branch: go on from it rather than starting over.",
+        "{HANDOFF_OPENING}: its previous turn's context took {} tokens, above the {} tokens this repository sets, so nothing of the earlier conversation carries over. The task's prompt is above; the run, its worktree, its branch and its provider are the same. The work so far is in this worktree and its branch: go on from it rather than starting over.",
         material.peak_context, material.threshold,
     );
     let commits = fit.text(

@@ -185,3 +185,35 @@ pub fn revise_efforts(backend: &TestWorkspace) -> Vec<String> {
         .map(|turn| format!("/effort {}", turn["effort"].as_str().unwrap()))
         .collect()
 }
+
+/// How the handoff prompt of every new session for a large context starts
+/// (ADR-t2080-1, `prompt::handoff_text`).
+pub const HANDOFF_OPENING: &str = "dagq: this run's worker goes on in a new session";
+
+/// Commit `dagq.toml` with `[fresh_session] peak_context_above =
+/// threshold` on the main checkout of `repo`, which the supervisor reads.
+pub fn set_fresh_session_threshold(repo: &Path, threshold: u64) {
+    fs::write(
+        repo.join("dagq.toml"),
+        format!("[fresh_session]\npeak_context_above = {threshold}\n"),
+    )
+    .unwrap();
+    git(repo, &["add", "dagq.toml"]);
+    git(
+        repo,
+        &["commit", "-q", "-m", "set the fresh session's threshold"],
+    );
+}
+
+/// Record a `turn_finished` of `run` on `db` whose context took `peak`
+/// tokens: the previous turn a later send-back or resume is judged by.
+pub fn record_previous_peak(db: &Path, run: &TaskRun, peak: u64) {
+    SqliteQueue::open(db)
+        .unwrap()
+        .record_runtime_event(
+            run.id(),
+            dagq::domain::EventKind::TurnFinished,
+            json!({"turn": 1, "peak_context": peak}),
+        )
+        .unwrap();
+}

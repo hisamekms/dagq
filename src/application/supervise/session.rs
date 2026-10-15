@@ -823,17 +823,56 @@ impl Supervisor<'_> {
 
     /// Whether a send-back or resume of `run`'s worker goes on in its
     /// session or in a new one (ADR-t2080-1 decisions 1 and 4): by its
-    /// previous turn's `peak_context` and `[fresh_session]` alone.
-    #[allow(
-        dead_code,
-        reason = "the revise, the needs_session resume and the triage's resume call it once connected"
-    )]
+    /// previous turn's `peak_context` and `[fresh_session]` alone. A new
+    /// session recorded and asked nothing yet
+    /// ([`fresh_session::unrequested_renewal`]) is the one it goes on in,
+    /// whatever the threshold is now: the session wrapper starts it anew.
     pub(super) fn next_session(&self, run: &TaskRun) -> Result<NextSession> {
         let events = self.queue.run_events(run.id())?;
+        if let Some((peak_context, threshold)) = fresh_session::unrequested_renewal(&events) {
+            return Ok(NextSession::Fresh {
+                peak_context,
+                threshold,
+            });
+        }
         Ok(fresh_session::next_session(
             fresh_session::previous_peak_context(&events),
             self.fresh_session.peak_context_above,
         ))
+    }
+
+    /// What a send-back or resume writes to `run`'s worker as its next
+    /// request ([`Self::next_session`]): `request` (built without the
+    /// language's instruction) with it, for the same session; for a new
+    /// one, the handoff prompt ([`Self::handoff_prompt`]) that carries
+    /// `request` and `review`, with why the session is new. `request_file`
+    /// is where the handoff says the whole request is, written only when
+    /// the handoff cut it. The caller records the new session
+    /// ([`Self::renew_session`]) before it writes the request.
+    pub(super) fn session_request(
+        &mut self,
+        run: &TaskRun,
+        request: FittedPrompt,
+        request_file: &Path,
+        review: Option<(&str, Option<&Path>)>,
+    ) -> Result<(FittedPrompt, Option<(u64, u64)>)> {
+        let NextSession::Fresh {
+            peak_context,
+            threshold,
+        } = self.next_session(run)?
+        else {
+            return Ok((
+                request.with_language(self.verifier.language().as_ref()),
+                None,
+            ));
+        };
+        let fresh = (peak_context, threshold);
+        let handoff =
+            self.handoff_prompt(run, fresh, review, (&request.text, Some(request_file)))?;
+        if handoff.bytes.omitted.contains_key("request") {
+            self.files.write(request_file, request.text.as_bytes())?;
+        }
+        Ok((handoff, Some(fresh)))
     }
 
     /// The handoff prompt of a new session of `run`'s worker
@@ -843,10 +882,6 @@ impl Supervisor<'_> {
     /// whole). What git cannot show is said, not an error: the session
     /// reads it in its worktree. The language's instruction is added here
     /// once, so `request` is passed without it.
-    #[allow(
-        dead_code,
-        reason = "the revise, the needs_session resume and the triage's resume call it once connected"
-    )]
     pub(super) fn handoff_prompt(
         &self,
         run: &TaskRun,
@@ -883,26 +918,19 @@ impl Supervisor<'_> {
         Ok(prompt.with_language(self.verifier.language().as_ref()))
     }
 
-    /// Start `run`'s worker over in a new session (ADR-t2080-1 decision
-    /// 5): record the boundary as `session_renewed` (why, the provider it
-    /// stays on, the new session's name) and write `handoff` as the
-    /// session's next request (`what`). The run, its worktree, its branch
-    /// and its provider stay; the session wrapper starts the request as the
-    /// first turn of a new session with the task's prompt before it, and
-    /// carries no conversation over.
-    #[allow(
-        dead_code,
-        reason = "the revise, the needs_session resume and the triage's resume call it once connected"
-    )]
-    pub(super) fn start_fresh_session(
-        &mut self,
-        run: &TaskRun,
-        workspace: &str,
-        fresh: (u64, u64),
-        handoff: &FittedPrompt,
-        what: &str,
-    ) -> Result<()> {
+    /// Record that `run`'s worker goes on in a new session (ADR-t2080-1
+    /// decision 5) as `session_renewed` (why, the provider it stays on, the
+    /// new session's name), before its handoff is written: the session
+    /// wrapper starts the next request it takes after the record as the
+    /// first turn of a new session, with the task's prompt before it, and
+    /// carries no conversation over. The run, its worktree, its branch and
+    /// its provider stay. A new session recorded and asked nothing yet
+    /// ([`fresh_session::unrequested_renewal`]) is not recorded again.
+    pub(super) fn renew_session(&mut self, run: &TaskRun, fresh: (u64, u64)) -> Result<()> {
         let events = self.queue.run_events(run.id())?;
+        if fresh_session::unrequested_renewal(&events).is_some() {
+            return Ok(());
+        }
         let payload = fresh_session::renewed_payload(
             run.id().as_str(),
             run.actual_provider(),
@@ -912,7 +940,6 @@ impl Supervisor<'_> {
         info!(run_id = %run.id(), "run {}'s worker goes on in a new session ({}): its previous turn's context took {} tokens, above {}", run.id(), payload["session"], fresh.0, fresh.1);
         self.queue
             .record_runtime_event(run.id(), EventKind::SessionRenewed, payload)?;
-        request_turn(self, run, workspace, Input::from(handoff), what)?;
         Ok(())
     }
 }

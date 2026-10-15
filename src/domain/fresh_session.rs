@@ -77,6 +77,34 @@ pub fn previous_peak_context(events: &[RunEvent]) -> Option<i64> {
         .and_then(|e| e.payload["peak_context"].as_i64())
 }
 
+/// The new session recorded and asked nothing yet: the last
+/// `session_renewed` when it is the run's last session boundary (no switch
+/// after it) and no request was written to the run's session after it
+/// (`turn_requested`, or a `turn_started`, for a request whose record was
+/// lost), with the `peak_context` and `threshold` it was
+/// recorded for. A send-back or resume that finds one writes its handoff to
+/// that session rather than judging again and recording a second one: a
+/// supervisor that stopped between the record and the request, or a
+/// request that could not be sent, leaves it so.
+pub fn unrequested_renewal(events: &[RunEvent]) -> Option<(u64, u64)> {
+    let at = events
+        .iter()
+        .rposition(|e| e.kind == event_kind::SESSION_RENEWED)?;
+    let renewal = &events[at];
+    let after = &events[at + 1..];
+    if after.iter().any(|e| {
+        e.kind == event_kind::PROVIDER_SWITCHED
+            || e.kind == event_kind::TURN_REQUESTED
+            || e.kind == event_kind::TURN_STARTED
+    }) {
+        return None;
+    }
+    Some((
+        renewal.payload["peak_context"].as_u64()?,
+        renewal.payload["threshold"].as_u64()?,
+    ))
+}
+
 /// The run's new sessions started for a large context, as recorded.
 pub fn renewals(events: &[RunEvent]) -> usize {
     events
@@ -203,6 +231,41 @@ mod tests {
             ));
             assert_eq!(previous_peak_context(&renewed), Some(160_000));
         }
+    }
+
+    /// A renewal is unrequested until a request is written after it, a
+    /// turn starts or the provider switches; only the last renewal counts.
+    #[test]
+    fn a_renewal_is_unrequested_until_a_request_follows_it() {
+        let renewal = |peak: u64| {
+            event(
+                event_kind::SESSION_RENEWED,
+                json!({"peak_context": peak, "threshold": 150_000}),
+            )
+        };
+        let finished = event(
+            event_kind::TURN_FINISHED,
+            json!({"turn": 1, "peak_context": 200_000}),
+        );
+        assert_eq!(unrequested_renewal(&[]), None);
+        assert_eq!(unrequested_renewal(std::slice::from_ref(&finished)), None);
+        let mut events = vec![finished, renewal(200_000)];
+        assert_eq!(unrequested_renewal(&events), Some((200_000, 150_000)));
+        // An answer recorded on the run is no request to its session.
+        events.push(event(event_kind::ASK_CLOSED, json!({})));
+        assert_eq!(unrequested_renewal(&events), Some((200_000, 150_000)));
+        let mut requested = events.clone();
+        requested.push(event(event_kind::TURN_REQUESTED, json!({"seq": 2})));
+        assert_eq!(unrequested_renewal(&requested), None);
+        // A turn the new session ran is its request, recorded or not.
+        let mut started = events.clone();
+        started.push(event(event_kind::TURN_STARTED, json!({"turn": 2})));
+        assert_eq!(unrequested_renewal(&started), None);
+        let mut switched = events.clone();
+        switched.push(event(event_kind::PROVIDER_SWITCHED, json!({"turn": 1})));
+        assert_eq!(unrequested_renewal(&switched), None);
+        requested.push(renewal(300_000));
+        assert_eq!(unrequested_renewal(&requested), Some((300_000, 150_000)));
     }
 
     /// The record names the boundary (the last finished turn), why, the

@@ -77,7 +77,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 - やり直しはjobごとに1回まで、プログラムのreviewをやり直したreviewのjobはやり直さない。
 - 全jobが終わるまで判定せず、答えの無いjobが残れば`pass`にしない。
 - AIのjobが他のjobの判定をまとめることはない。
-- reviseは回（区切りの後）ごとに`MAX_REVISE_ATTEMPTS`回まで生きているsessionに返し、concernの`send_back`もこれに数える（[ADR-0050](../../adr/0050-revise-count-scope-per-review-round.md)、上限は[ADR-t2256-1](../../adr/2026-10-11-t2256-1-raise-the-run-review-revise-limit-and-decouple-plan-review.md)）。
+- reviseは回（区切りの後）ごとに`MAX_REVISE_ATTEMPTS`回までworkerに返し、concernの`send_back`もこれに数える（[ADR-0050](../../adr/0050-revise-count-scope-per-review-round.md)、上限は[ADR-t2256-1](../../adr/2026-10-11-t2256-1-raise-the-run-review-revise-limit-and-decouple-plan-review.md)）。
   上限に達した後のreviseとconcernの`send_back`は`approve_landing`のask（`revise_limit`）にし、concernのほかの判断は上限に依らない。
 - 依頼（revise・衝突の解消）はeventを記録してから`turns/`に書くので、二重には書かない。
 - 1つのrunに開いた`approve_landing`のaskは1つ。
@@ -118,6 +118,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
    全てのjobが答えれば、全体のreviewのverdictにagentごとの結果を並べて`review_finished`を記録し、判定ごとに最も重い行き先を機械で取る（`domain::review_jobs::assemble`、下の「判定ごとの行き先」）。
    やり直しの使い方はjobごとにsupervisorの状態（`ReviewJob::again`）が持ち、待ちを挟んでも保つ。
 4. **reviseの往復**: `revise`と、適用する`send_back`のconcernは、回にreviseが残り、sessionが生きていれば、直す依頼を生きているsessionの次のturnに書く（`revise_requested`）。
+   直前のturnの`peak_context`が閾値を超えれば、新しいsessionへの引き継ぎで書く。
    文面と手順は`application::prompt::revise_request`が持つ。
    書き込みに失敗したら`revise_unsent`で取り消し、回数から引く。
    sessionがreceiptを依頼より後に書き直し、その後のidle markerが出て、receiptの`commit`がcleanなworktreeのHEADと一致したら、`revise_finished`を記録して[Validation](validation.md#validation)からやり直す。

@@ -447,13 +447,27 @@ impl Supervisor<'_> {
         // A clone reaches main only through its bundle (ADR-t2179-1
         // decision 6).
         run_git::hand_main(&*self.repository, run, &request.main)?;
-        let message = resume_request(&task, run, request, &landed)?
-            .with_language(self.verifier.language().as_ref());
-        self.write_reason_file(request, &message)?;
+        let built = resume_request(&task, run, request, &landed)?;
+        self.write_reason_file(request, &built)?;
+        // Past `[fresh_session]`, the reopened session is a new one that
+        // starts with a handoff carrying the request (ADR-t2080-1): a
+        // triage's instruction and a person's send-back are its reason.
+        let (message, fresh) = self.session_request(
+            run,
+            built,
+            &run_dir.join(format!("resume-{attempt}-request.txt")),
+            None,
+        )?;
+        // What an adopter or the next process sends when it was not sent.
         self.files.write(
             &run_dir.join(format!("resume-{attempt}.txt")),
             message.text.as_bytes(),
         )?;
+        // Recorded before the wrapper starts, so that its first request
+        // opens the new session rather than resuming the one it left.
+        if let Some(fresh) = fresh {
+            self.renew_session(run, fresh)?;
+        }
         self.files
             .copy(&self.layout.runner, &run_dir.join(RUN_RUNNER_FILE))
             .context("snapshot runtime binary")?;
@@ -577,7 +591,8 @@ impl Supervisor<'_> {
             Some(bytes) => (message, bytes),
             None => {
                 let file = run_dir.join(format!("resume-{attempt}.txt"));
-                let fitted = restored_request(&message, RESUME_REQUEST_LIMIT, &file);
+                let limit = kept_request_limit(&message, RESUME_REQUEST_LIMIT);
+                let fitted = restored_request(&message, limit, &file);
                 (fitted.text, fitted.bytes)
             }
         };

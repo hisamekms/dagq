@@ -459,6 +459,95 @@ fn an_adopted_revise_recorded_but_not_written_is_written_once() {
     assert_exit_sent(&backend, &run, 1);
 }
 
+/// A headless run whose supervisor stopped after it recorded a new
+/// session for the worker's large context (`session_renewed`, ADR-t2080-1)
+/// and the revise request, and before it wrote the request, has the
+/// handoff kept in `revise-1.txt` written once by its adopter, whole, held
+/// to the handoff's limit rather than the revise request's; the live
+/// session wrapper starts it as the first turn of the new session, the
+/// adopter records no second `session_renewed`, and the run lands. A
+/// request of the earlier session taken with the same `what` is not its
+/// delivery.
+#[test]
+fn an_adopted_revise_to_a_new_session_writes_its_handoff_once_into_it() {
+    let handoff = format!(
+        "{HANDOFF_OPENING}: its previous turn's context took 500 tokens, above the 100 tokens this repository sets.\n{}\n\ndagq: the supervisor's review asks for changes (revise 1 of 2).",
+        "引".repeat(12_000)
+    );
+    assert!(handoff.len() > dagq::application::prompt::REVISE_REQUEST_LIMIT);
+    let (_dir, repo, db) = fixture();
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let backend = TestWorkspace::new(&db, false, &crate::runtime_review::revising_agent(1));
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "fixed")]);
+    let message = handoff.clone();
+    let detail = adopt_pending_request(
+        &repo,
+        &db,
+        &backend,
+        &reviewer,
+        |_, sent_at| {
+            vec![
+                (
+                    "validation_finished",
+                    json!({"status": "awaiting_integration"}),
+                ),
+                ("review_started", json!({"attempt": 1})),
+                (
+                    "review_finished",
+                    json!({"verdict": "revise", "reasons": ["add a line"], "summary": "one gap", "attempt": 1}),
+                ),
+                (
+                    "session_renewed",
+                    json!({"after_turn": 1, "peak_context": 500, "threshold": 100, "provider": "claude", "count": 1}),
+                ),
+                (
+                    "revise_requested",
+                    json!({"attempt": 1, "reasons": ["add a line"], "sent_at": sent_at}),
+                ),
+            ]
+        },
+        move || message,
+        false,
+        // A request with the same `what` the earlier session took is no
+        // delivery of the handoff.
+        &[(
+            "dagq: the supervisor's review asks for changes (revise 1 of 2).",
+            "revise request",
+        )],
+    );
+    let run = detail.runs[0].clone();
+    assert_landed(&repo, &run, "test task", &base);
+    assert_eq!(payloads(&detail, "session_renewed").len(), 1);
+    let requested: Vec<&Value> = payloads(&detail, "turn_requested")
+        .into_iter()
+        .filter(|p| p["what"] == "revise request")
+        .collect();
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    let bytes = &requested[0]["prompt_bytes"];
+    assert_eq!(
+        bytes["limit"],
+        dagq::application::prompt::HANDOFF_LIMIT,
+        "{bytes}"
+    );
+    assert!(bytes["omitted"]["request"].is_null(), "{bytes}");
+    let run_dir = Path::new(run.run_dir().unwrap());
+    let written: dagq::domain::turn::TurnRequest = serde_json::from_str(
+        &fs::read_to_string(dagq::domain::turn::taken_path(
+            run_dir,
+            requested[0]["seq"].as_u64().unwrap(),
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(written.prompt, handoff);
+    let calls = stub_calls(&run);
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    let name = dagq::domain::turn::session_name(run.id().as_str(), 1);
+    assert!(calls[1].starts_with(&format!("start {name} ")), "{calls:?}");
+    assert_eq!(payloads(&detail, "revise_finished").len(), 1);
+    assert_exit_sent(&backend, &run, 1);
+}
+
 /// The adopted request `what` was taken as one turn and never written
 /// again: the session ran its first turn and the turn of the dead
 /// supervisor's request, one request file holds it, and only the dead

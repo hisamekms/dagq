@@ -1529,6 +1529,126 @@ fn handoff_before_the_resume_request(unsent: Unsent) {
     );
 }
 
+/// A resume that opens a new session for the worker's large context
+/// (ADR-t2080-1), handed off after its workspace opened and before its
+/// request was sent: the next process, from the `handoff.json` that keeps
+/// the handoff and what it took, sends the handoff once, whole, held to the
+/// handoff's limit, into the new session the first process recorded,
+/// recording no second `session_renewed`; the run lands.
+#[test]
+fn a_handoff_before_a_new_sessions_request_lets_the_next_supervisor_send_it_once() {
+    handoff_before_a_new_sessions_request(false);
+}
+
+/// The same resume adopted from the run's events after a handoff that left
+/// no `handoff.json`: the next process reads the handoff from
+/// `resume-1.txt`, measures it anew against the handoff's limit rather
+/// than the resolution request's, and sends it once, whole, into the new
+/// session, recording no second `session_renewed`.
+#[test]
+fn a_new_sessions_request_adopted_after_a_handoff_is_sent_once_whole() {
+    handoff_before_a_new_sessions_request(true);
+}
+
+/// [`a_handoff_before_a_new_sessions_request_lets_the_next_supervisor_send_it_once`]
+/// from `handoff.json`, or `adopted` from the run's events.
+fn handoff_before_a_new_sessions_request(adopted: bool) {
+    let (_dir, repo, db) = fixture();
+    let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let (run, _) = parked_conflict(&repo, &db, &backend);
+    set_fresh_session_threshold(&repo, 100);
+    let main = git_out(&repo, &["rev-parse", "main"]);
+    record_previous_peak(&db, &run, 500);
+    backend.resume_no_session = true;
+    backend.resume_script_for(
+        2,
+        "await_message; resolve; receipt \"$(git rev-parse HEAD)\"",
+    );
+    let backend = Arc::new(backend);
+    let (outcome, token) = hand_off_when(&db, &repo, &backend, |queue| {
+        payloads(&queue.show(TaskId::new(2)).unwrap(), "workspace_created")
+            .iter()
+            .any(|p| p["resume_attempt"] == 1)
+    });
+    assert_eq!(outcome["handed_over"], 1, "{outcome}");
+    let run_dir = Path::new(run.run_dir().unwrap());
+    let snapshot = run_dir.join("handoff.json");
+    let written: Value = serde_json::from_slice(&fs::read(&snapshot).unwrap()).unwrap();
+    assert_eq!(written["message_sent_at"], Value::Null, "{written}");
+    assert_eq!(
+        written["message_bytes"]["limit"],
+        dagq::application::prompt::HANDOFF_LIMIT,
+        "{written}"
+    );
+    let handoff = fs::read_to_string(run_dir.join("resume-1.txt")).unwrap();
+    assert_eq!(written["message"], json!(handoff));
+    assert!(handoff.starts_with(HANDOFF_OPENING));
+    let early = adopted.then(|| {
+        fs::remove_file(&snapshot).unwrap();
+        let wrapper = start_resume_wrapper(&backend, &run);
+        wait_until(&db, crate::common::STEP_LIMIT, |queue| {
+            queue
+                .processes(run.id())
+                .unwrap()
+                .iter()
+                .any(|p| p.role == "wrapper" && p.exited_at.is_none())
+        });
+        wrapper
+    });
+    let next = {
+        let (db, repo, backend, token) = (db.clone(), repo.clone(), backend.clone(), token.clone());
+        thread::spawn(move || supervise_after_handoff(&db, &repo, &backend, &token))
+    };
+    wait_until(&db, crate::common::STEP_LIMIT, |_| !snapshot.exists());
+    let wrapper = early.unwrap_or_else(|| start_resume_wrapper(&backend, &run));
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        !payloads(&queue.show(TaskId::new(2)).unwrap(), "resume_request_sent").is_empty()
+    });
+    let outcome = joined(next, "the supervisor after the handoff").unwrap();
+    joined(wrapper, "the resumed session's wrapper to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(2))
+        .unwrap();
+    assert_landed(&repo, &detail.runs[0], "second", &main);
+    let kinds = event_kinds(&detail);
+    assert_eq!(payloads(&detail, "session_renewed").len(), 1, "{kinds:?}");
+    assert_eq!(
+        payloads(&detail, "resume_request_sent").len(),
+        1,
+        "{kinds:?}"
+    );
+    let requests: Vec<&Value> = payloads(&detail, "turn_requested")
+        .into_iter()
+        .filter(|p| p["what"] == "resolution request")
+        .collect();
+    assert_eq!(requests.len(), 1, "{kinds:?}");
+    let bytes = &requests[0]["prompt_bytes"];
+    assert_eq!(
+        bytes["limit"],
+        dagq::application::prompt::HANDOFF_LIMIT,
+        "{bytes}"
+    );
+    assert!(bytes["omitted"]["request"].is_null(), "{bytes}");
+    let taken: dagq::domain::turn::TurnRequest = serde_json::from_str(
+        &fs::read_to_string(dagq::domain::turn::taken_path(
+            run_dir,
+            requests[0]["seq"].as_u64().unwrap(),
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(taken.prompt, handoff);
+    let name = dagq::domain::turn::session_name(run.id().as_str(), 1);
+    let calls = stub_calls(&detail.runs[0]);
+    assert!(
+        calls.last().unwrap().starts_with(&format!("start {name} ")),
+        "{adopted}: {calls:?}"
+    );
+}
+
 /// Point the live wrapper row of `run_id` at the process `stand_in`: the
 /// session it stands for stays after its exit request until the test
 /// records that process's exit, while the in-test wrapper, which ends at

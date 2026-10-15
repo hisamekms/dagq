@@ -54,6 +54,8 @@ ADR-0071の決定15〜18。
 
 - **計時の再開**: slot の外では timeout を止め、戻った時点で restart_clocks を呼ぶ。回答と続行の依頼を file に書いた時刻を新しい起点にする。stale receipt の書き直しは元の依頼の時刻で比較する。対話 worker の入力欄待ちの時計は廃止した。
 - **`worker_question`のidle**（決定16）: `ReviseWatch`（task 238）と同じく、`ResumeWatch`もcloseされていない`worker_question`があるあいだは、idleでも段を終えず、`resume_timeout`も数えず、古いreceiptの書き直しも頼まない（`has_unclosed_worker_question`の判定がそれらより前にある）。ただし`ReviseWatch`は、依頼より後に書き直したreceiptの後のidleだけは質問のcloseを待たずに判定する（task 583、ADR-t583-1）。上限でslotに居るとき（`run_waiting_deferred`）と`--max-waiting 0`でも同じ。答えを送ったときはその時刻を、手で配送されてaskがcloseされたとき（closeの秒が最後の入力の秒より後）はcloseの時刻を最後の入力（`live.input_at`）にし、段の計時をそこから数え直す。以後のidleはそれより新しいmarkerだけを数える。
+- **新しいsession**: 差し戻しかresumeが大きなcontextの後に新しいsessionで続くとき（[Agent provider lifecycle](../provider-lifecycle.md#大きなcontextからの新しいsession)）も、段は同じrunのidle marker・receipt・質問を追う。
+  依頼より古いreceipt・idle marker・質問は前のsessionのものとして段を終えず、待ちにも入れない。
 - **Resume の配送**: ResumeWatch の live は SessionWatch を持つ。解消依頼から終了の依頼まで deliver_answers を回し、回答は次の turn に書く。request_exit は exit_requested を記録して終了の依頼を書く。session_takes_answers は resume 中で終了要求前の needs_session も配送対象にする。ダイアログの監視・入力欄待ち・exit_typed の判断は廃止した。
 - **phase**: `run_waiting_started`の`phase`と`status`の`waiting[].phase`は`revise` / `resume`。
   `status`はrunの今のstatus（`awaiting_integration` / `needs_session`）。

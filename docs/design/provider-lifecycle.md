@@ -296,8 +296,10 @@ workerのproviderはtaskが選び、経路は非対話だけ（[ADR-t813-2](../a
 
 [ADR-t2080-1](../adr/2026-10-08-t2080-1-fresh-session-on-send-back-and-resume-when-peak-context-exceeds-threshold.md)。
 
-判定は`domain::fresh_session::next_session`（直前のturnの`peak_context`と閾値だけ）、入口は`supervise::session`の`start_fresh_session`で、区切りと理由を`session_renewed`に残す。
+判定は`domain::fresh_session::next_session`（直前のturnの`peak_context`と閾値だけ）、入口は`supervise::session`の`session_request`と`renew_session`で、区切りと理由を`session_renewed`に残す。
 
+- 判定するのは`send_revise`と`start_resume`（triageのresumeと人の`send_back`も通る）で、passの後の衝突の依頼は判定しない。
+- `session_renewed`は依頼より前に記録し、依頼をまだ書いていない区切りは記録し直さずにそこへ引き継ぐ。
 - wrapperは`provider_switched`と同じ区切りとし、providerを変えず新しいsessionにする。
   どちらの後もClaudeのsessionは新しい名前（`domain::turn::session_name`。Claude Codeは使われた`--session-id`を拒む）。
 

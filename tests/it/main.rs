@@ -132,6 +132,7 @@ mod runtime_disk;
 mod runtime_e2e;
 mod runtime_evidence;
 mod runtime_forecast;
+mod runtime_fresh_session;
 mod runtime_handoff;
 mod runtime_headless;
 mod runtime_headless_jobs;
