@@ -195,7 +195,7 @@ impl HostOpsState {
     }
 
     /// Log once per head that a look at main's `head` builds nothing, and
-    /// why.
+    /// why. Tests wait for this line rather than for a fixed sleep.
     fn log_nothing_built(&mut self, head: &str, why: &str) {
         if self.update.passed.as_deref() != Some(head) {
             info!("automatic update: main's {head} builds nothing: {why}");

@@ -2430,7 +2430,9 @@ pub const UPDATE_FAILED: &str = crate::domain::event_kind::EventKind::UpdateFail
 /// `source` of the `update_failed` a person's `dagq install` records
 /// (ADR-0073 decision 14): no step of a job, so neither the automatic
 /// update's state, its `retry`, `stats`' failures of the jobs nor a
-/// supervisor's answer reads it.
+/// supervisor's answer reads it. It is the `subject` of that failure's
+/// `update_failed` ask too: the unique index of the open asks includes
+/// `subject`, so the ask opens beside a job's open `update_failed`.
 pub const INSTALL_SOURCE: &str = "install";
 /// The job put the replaced binary back after a failed watch (`version`,
 /// `restored_version`): the rollback, before its `update_failed`.

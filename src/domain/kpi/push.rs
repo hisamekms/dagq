@@ -18,8 +18,11 @@ use super::{ALL, Measure, PeriodKpis, TargetReport, report::Report};
 pub const KPI_BREACH_STARTED: &str =
     crate::domain::event_kind::EventKind::KpiBreachStarted.as_str();
 /// A breach ended: its `period`, `kpi` and `stratum`, the `label` of the
-/// period that met the target and the `reason` (`met`, or
-/// `target_removed` when the target is no longer set).
+/// last judged period and the `reason` (`met`, or
+/// `target_removed` when the target is no longer set). The `label` is the
+/// last judged period: for a judgement of `ok` the period that met the
+/// target, for `missed` the period that missed it again after the streak
+/// broke.
 pub const KPI_BREACH_RESOLVED: &str =
     crate::domain::event_kind::EventKind::KpiBreachResolved.as_str();
 /// The breaches' start and end, the latest of a target telling its state.

@@ -349,7 +349,8 @@ pub struct UpOptions {
     /// Passed to the supervisor, whose planners load it with `--plugin-dir`.
     pub plugin_dir: Option<PathBuf>,
     /// Resolved executables; the agent runs the supervisor with these. The
-    /// cmux is only passed on for the supervisor's older command line.
+    /// cmux is only passed on for the supervisor's older command line, and
+    /// one not found does not stop `up` (the supervisor uses none).
     pub cmux: PathBuf,
     pub claude: PathBuf,
     /// The Codex CLI the supervisor's Codex workers start (ADR-t813-2),
@@ -676,7 +677,11 @@ or IDE, in the repository); it starts the inbox's agent there in the foreground"
 /// `report` is what it reports, with the supervisor's outcome
 /// `partially_handed_off` (or `handoff_failed` when none took it) and each
 /// supervisor's result in `replaced`, for the command to print beside the
-/// error. `up` replaces no file, so nothing was put back.
+/// error: the command prints `report` to stdout, then the error JSON to
+/// stderr, and exits 1. `up` replaces no file, so nothing was put back.
+/// A supervisor that failed goes on with its binary; when that binary has
+/// auto-update, it builds and installs itself at the next landing and asks
+/// for the handoff again.
 #[derive(Debug)]
 pub struct PartialHandoff {
     pub message: String,
@@ -822,7 +827,10 @@ fn replace_supervisors(
 
 /// Wait until every one of `draining`, already asked to stop, has
 /// deregistered or its process died, and prune the rows of those that died
-/// with them.
+/// with them. The drain can end by the process dying with its row intact
+/// (launchd's `ExitTimeOut` SIGKILL, or the heartbeat failure that keeps
+/// the row on purpose because the database may be unreachable); those rows
+/// go the way `down --force` drops them.
 fn drain_supervisors(
     up: &Up<impl LifecycleQueue + ?Sized>,
     draining: &[SupervisorRegistration],
@@ -867,10 +875,6 @@ once `status` shows it gone",
         }
         thread::sleep(options.poll);
     }
-    // The drain can also end because the process died with its row intact
-    // (launchd's `ExitTimeOut` SIGKILL, or the heartbeat failure that keeps
-    // the row on purpose because the database may be unreachable). Those
-    // rows go the way `down --force` drops them.
     let surviving: Vec<LeaseToken> = queue
         .supervisors()?
         .into_iter()
@@ -1371,9 +1375,14 @@ pub const HANDOFF_GRACE: Duration = Duration::from_secs(30);
 /// deregistered without its pid registering again under `version` (which
 /// takes its place, under its new token), came back under another build (an
 /// exec that failed, after which the old binary goes on) or is still asked
-/// at the timeout. One failing does not stop the wait for the others
+/// at the timeout. Only a registration with a fresh heartbeat counts as
+/// back, so a process that died just after it took its registration back
+/// is not a success. One failing does not stop the wait for the others
 /// (ADR-t632-1): the result names what became of each, and the request of
-/// each one that failed is withdrawn. One still asked at the timeout whose
+/// each one that failed is withdrawn, since a request left behind would
+/// have the supervisor exec that path later, after the caller put another
+/// binary there; the request of one that succeeded is not withdrawn for
+/// another's failure. One still asked at the timeout whose
 /// request is gone by the withdrawal took it just then: it is looked at
 /// again for up to [`HANDOFF_GRACE`] (at most `timeout`), and takes the
 /// handoff when it registers again under `version` meanwhile. An error is
@@ -1417,8 +1426,6 @@ pub fn hand_off(
     let mut taken_late = Vec::new();
     for (index, (one, timed_out)) in waited.into_iter().enumerate() {
         if one.error.is_some() {
-            // A request left behind would have the supervisor exec that path
-            // later, after the caller put another binary there.
             let withdrawn = queue.cancel_handoff(&one.registration.token, &binary_text);
             // Nothing left to withdraw from one still asked a moment ago:
             // its new binary cleared the request by registering again (or
@@ -1722,7 +1729,8 @@ pub(crate) fn registered_again(
 
 /// One look at `registration`'s handoff: the token it serves under once it
 /// took it, `None` while it is still asked, an error when it cannot take
-/// it any more.
+/// it any more. It is back only when the registration it serves under
+/// heartbeats freshly under `version` with the same pid.
 fn look_at_handoff(
     registrations: &[SupervisorRegistration],
     registration: &SupervisorRegistration,
@@ -1829,6 +1837,14 @@ fn start_under_launchd(
 /// what the planners the runtime opens load. `--mode` is what its start
 /// mark records (ADR-0051 decision 10): `up` writes the registration's
 /// mode only after it sees the registration.
+///
+/// Only the values given are passed, so one not given follows
+/// `[supervisor]` of `dagq.toml` rather than a default baked in. A
+/// supervisor started with such a flag does not follow later changes to
+/// `dagq.toml`: to decide by `[supervisor]`, start it again with `up`
+/// without the flag after `down --wait`. A `--max-load` of 0 or below
+/// (which disables the hold) is passed as 0, since a negative value would
+/// read as a flag.
 fn supervise_arguments(
     location: &QueuePaths,
     db: &Path,
@@ -1860,8 +1876,6 @@ fn supervise_arguments(
             &dir.canonicalize().unwrap_or_else(|_| dir.clone()),
         )?);
     }
-    // Only a value given is passed, so one not given follows `[supervisor]`
-    // of `dagq.toml` rather than a default baked in (task 698).
     if let Some(parallel) = options.parallel {
         arguments.push("--parallel".into());
         arguments.push(parallel.to_string());
@@ -1874,8 +1888,6 @@ fn supervise_arguments(
         arguments.push("--runtime-planners".into());
         arguments.push(runtime_planners.to_string());
     }
-    // 0 or below disables the hold; it is passed as 0, since a negative
-    // value would read as a flag.
     if let Some(max_load) = options.max_load {
         arguments.push("--max-load".into());
         arguments.push(max_load.max(0.0).to_string());
@@ -2270,7 +2282,9 @@ pub struct DownOptions {
 /// on either. The queue's agents under another label than its own (whose
 /// `--db` is its database) are unloaded and their definitions removed
 /// too, reported as `stray_agents`, and their supervisors are waited for
-/// like the rest.
+/// like the rest. With no registration to signal it is `not_running`, and
+/// `--force` still drops the rows of the registrations whose pid is dead,
+/// reported in `pruned_supervisors`.
 ///
 /// `down` closes no cmux workspace (ADR-t2159-1 decision 3): the one an
 /// `in_cmux` supervisor runs in is reported `left_open` for a person to

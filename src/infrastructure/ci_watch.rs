@@ -374,7 +374,12 @@ fn remote_of(checkout: &Path) -> String {
 
 /// `up`'s preflight (ADR-t1920-1 decision 2): with `[ci_watch]` in the
 /// `dagq.toml` of `checkout`, why `gh` on `path` cannot read the CI, or
-/// `None` when it can (or there is no table).
+/// `None` when it can (or there is no table). `up` runs it after the check
+/// of the `[run.env]` programs, on its own PATH: `gh` must resolve, the URL
+/// of `[repository] remote` must be GitHub's and `gh` must be logged in.
+/// The message names the remedy (install `gh`, `gh auth login`, fix the
+/// remote, or register a task that takes `[ci_watch]` out of `dagq.toml`),
+/// and `up` stops without starting the supervisor.
 pub fn preflight(checkout: &Path, path: Option<OsString>) -> Result<Option<String>> {
     let Some(config) = super::run_env::load_ci_watch(checkout)? else {
         return Ok(None);

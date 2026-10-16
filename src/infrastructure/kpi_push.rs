@@ -75,7 +75,14 @@ impl SqliteQueue {
     /// `payload` unless the breach of its period, KPI and stratum already
     /// stands so; returns the payload recorded. A start is marked
     /// `pushed` when `push_day` (the host's local day and the day's limit)
-    /// allows one more immediate push that day.
+    /// allows one more immediate push that day: the starts marked on that
+    /// day are counted in the same transaction, the day's and the week's
+    /// breaches together.
+    ///
+    /// Each `period` is a breach of its own: the same KPI and stratum in
+    /// breach for both the day and the week are two starts, each up for an
+    /// immediate push within the day's limit, since the day's streak and
+    /// the week's are judged apart and start at different times.
     pub fn record_kpi_breach(
         &self,
         kind: EventKind,

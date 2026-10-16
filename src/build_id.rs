@@ -73,23 +73,27 @@ pub struct Build {
 
 /// The build identifier of `package` at `version` whose repository root is
 /// `root`, and the directives a build script prints for it.
+///
+/// For a pre-release, the reruns on [`SOURCES`] are registered before the
+/// Git query, so a build that fell back to `unknown` is looked at again once
+/// the sources change rather than kept until build.rs itself does.
+///
+/// `cargo package` and `cargo publish --dry-run` verify the copy unpacked in
+/// `target/package/` with the checkout's own target directory, and cargo
+/// takes that build for the checkout's (the unit hash does not depend on
+/// where the package sits), so the copy's `unknown` output could be reused
+/// by the checkout's next build. When the identifier is `unknown`, the
+/// copy's missing `.git` at its repository root is watched too; a watched
+/// path that is missing always reruns the script, so the checkout's next
+/// build names its commit again.
 pub fn compute(package: &str, version: &str, root: &Path) -> Build {
     let mut directives = vec!["cargo:rerun-if-changed=build.rs".to_owned()];
     let state = if is_prerelease(version) {
-        // Registered before anything can fail, so a build that fell back to
-        // `unknown` is looked at again once the sources change rather than
-        // kept until build.rs itself does.
         for path in SOURCES {
             directives.push(rerun(&root.join(path)));
         }
         let state = git_state(root, &mut directives);
         if state.is_none() {
-            // `cargo package` verifies the unpacked copy in
-            // target/package/ with the checkout's own target directory, and
-            // cargo takes that build for the checkout's (the unit hash does
-            // not depend on where the package sits). The copy has no `.git`,
-            // and a watched path that is missing always reruns the script,
-            // so the checkout's next build names its commit again.
             directives.push(rerun(&root.join(".git")));
             directives.push(format!(
                 "cargo:warning={package} {version} is built outside a Git worktree or without git; \
@@ -120,18 +124,19 @@ fn rerun(path: &Path) -> String {
 /// or `None` when `root` is not the root of a Git worktree (a crates.io
 /// source unpacked somewhere, possibly inside another repository) or `git`
 /// cannot answer.
+///
+/// It reruns the script when this worktree moves to another commit (`HEAD`,
+/// `packed-refs` and the ref of the branch it is on) or its index changes,
+/// so the identifier follows commits, checkouts and staging. Only this
+/// branch's ref is watched, not all of `refs`: the refs directory is shared
+/// by every worktree, and a commit in another one must not rebuild this one.
+/// A worktree where only other files changed (docs, say) is not `.dirty`
+/// until something else reruns this script.
 fn git_state(root: &Path, directives: &mut Vec<String>) -> Option<(String, bool)> {
     let toplevel = git(root, &["rev-parse", "--show-toplevel"])?;
     if !same_path(Path::new(&toplevel), root) {
         return None;
     }
-    // Rerun when this worktree moves to another commit (HEAD, and the ref of
-    // the branch it is on) or its index changes, so the identifier follows
-    // commits and checkouts. Only this branch's ref is watched: the refs
-    // directory is shared by every worktree, and a commit in another one
-    // must not rebuild this one. An edit elsewhere in the worktree (docs,
-    // say) marks the next build dirty only once something else reruns this
-    // script.
     let mut watched = vec![
         "HEAD".to_owned(),
         "index".to_owned(),

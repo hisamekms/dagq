@@ -257,6 +257,15 @@ pub const DROPPED_ALREADY_INSTALLED: &str = "already_installed";
 /// request for a supervisor whose build is older than the requested release.
 /// Legacy requests without a purpose retain their previous behavior.
 /// `updates` is newest first.
+///
+/// A binary drop records that this build starts no job for the request,
+/// not that the queue used it up: a supervisor of an older build on the
+/// same queue can still start its job, and when they share the fixed
+/// binary, that binary can go back to the dropped release (taken as what
+/// the person who answered meant). The first pass of a new build drops
+/// the old binary requests no job followed, once each, so the
+/// `auto_update` of `status` just after a replacement can say `dropped`
+/// rather than `installed`. A plugin drop does use the request up.
 pub fn dropped_requests(current: &str, latest: Option<&str>, updates: &[RunEvent]) -> Vec<Value> {
     if !is_release_build(current) {
         return Vec::new();
@@ -307,7 +316,9 @@ pub fn dropped_requests(current: &str, latest: Option<&str>, updates: &[RunEvent
 /// about the binary skipped is installed (`auto`) or asked about (`ask`,
 /// unless its ask is open). Whether an answer is about the binary or the
 /// plugin alone is its `plugin_only`, recorded from the ask it answered,
-/// never `current`.
+/// never `current`. A request starts one job: a job of its release (or a
+/// newer one) started after it follows it, and an answer about another
+/// release written in the same pass does not hide it.
 pub fn next_action(
     mode: ReleaseMode,
     current: &str,

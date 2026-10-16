@@ -48,14 +48,12 @@ runtimeはntfyやSlackなどのサービスに依存せず、秘密（webhookの
 - 状態が`breach`の目標（KPIと層）は`kpi_breach_started`を、開いた目標割れのうち今の判定が`ok`か`missed`のもの（判定できる期間が目標を満たした）は解消を、目標の設定から消えたものも解消を`kpi_breach_resolved`で記録する。
   `not_judged`の間は開いたまま。
   どれもtaskの無いqueueのevent。
-  payloadの欄は`domain::kpi::push`の`KPI_BREACH_STARTED`・`KPI_BREACH_RESOLVED`のdoc commentが持つ。
-  `kpi_breach_resolved`の`label`は最後に判定できた期間で、`ok`なら目標を満たした期間、`missed`なら連続が切れた後にまた外れた期間。
-- 目標割れは`period`ごとに別に扱う。
-  同じKPIと層が日と週の両方で目標割れになれば、それぞれ`kpi_breach_started`になり、それぞれ即時通知の対象になる（日の連続と週の連続は別の判定で、始まりの時期も違うため。どちらも1日の上限に数える）。
+  payloadの欄と`label`の意味は`domain::kpi::push`の`KPI_BREACH_STARTED`・`KPI_BREACH_RESOLVED`のdoc commentが持つ。
 - 記録は、同じ期間・KPI・層の最新のeventを読んで状態が変わるときだけ入れることを1つの`BEGIN IMMEDIATE`の中で行う（`SqliteQueue::record_kpi_breach`）ので、2つのsupervisorが同じ判定をしても記録は1つで、同じ状態を二度記録しない。
   解消した後に再び目標割れになれば、また`kpi_breach_started`になる。
+  目標割れは期間ごとに別に扱い、その扱いは`record_kpi_breach`のdoc commentが持つ。
   開いた目標割れは`SqliteQueue::kpi_breaches_open`。
-- 即時通知の印は、即時通知を送る設定で、同じlocal dayに印を付けて記録した`kpi_breach_started`が1日の上限に満たないときだけ付く（同じトランザクションで数える。日と週の目標割れを合わせて数える）。
+- 即時通知の印は、即時通知を送る設定で、同じlocal dayに印を付けて記録した`kpi_breach_started`が1日の上限に満たないときだけ付く（数え方は`record_kpi_breach`のdoc comment）。
   上限を超えた分と`[push]`が無いときはfalseで、日次のまとめにだけ載る。
 - これらのeventはobserverの「変化が無ければ起動しない」の判定で数える（記帳のeventではない。ADR-0051の決定24）。
 
@@ -84,9 +82,7 @@ messageごとの欄と文面は`domain::kpi::push`のそれぞれを作る関数
 ## 実行・再試行・失敗
 
 - supervisorはレポートのjobが作ったメッセージをプロセスのメモリの列に積み、周回ごとに期日の来た1通をjob threadで送る（`application::supervise::push`）。
-  コマンドは`infrastructure::push::run_push`がshellを通さずに、自分のprocess groupで起動し、stdinにメッセージを書き、stdoutは捨て、stderrの末尾を読む。
-  stderrはpipeではなくunlinkした一時ファイル（`O_CLOEXEC`）で受け、コマンドが終わってから末尾を読む。
-  macOSではpipeの作成とclose-on-execの設定が2段で、その間に別のthreadがspawnしたプロセス（sessionやagent）がpipeの書き口を受け継ぐと、pipeを終わりまで読む待ちがそのプロセスが終わるまで続くため（同じ理由でsupervisorの他の子の出力も`adapters::unpiped_output`で受ける）。
+  コマンドは`infrastructure::push::run_push`がshellを通さずに、自分のprocess groupで起動し、stdinにメッセージを書き、stdoutは捨て、stderrの末尾を読む（stderrをpipeで受けない理由は`run_push`のdoc comment）。
   期限を過ぎたらprocess groupごとSIGKILLで止める。
 - 終了コード0なら`kpi_push_sent`、0でない・signalで終わった・timeout・起動できなかったら`kpi_push_failed`を記録する（欄は`domain::kpi::push`のdoc comment）。
   同じメッセージを決まった間隔（`RETRY_DELAYS_SECS`）でもう一度送り、最後の試みも失敗したら捨てて`kpi_push_abandoned`を記録する。

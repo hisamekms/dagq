@@ -195,10 +195,14 @@ pub fn load_host_push(queue_dir: &Path, host_wide: Option<&Path>) -> Result<Opti
 
 /// Run `request`'s command once: its message on stdin, its stdout
 /// dropped, the tail of its stderr kept; past the timeout its process
-/// group is killed. Its stderr goes to an unlinked file, not a pipe: a
-/// child it left behind, or a process the supervisor spawned meanwhile
-/// that inherited the pipe, would hold a read to the pipe's end (task
-/// 1273), and the file is complete once the command exits.
+/// group is killed. Its stderr goes to an unlinked file (`O_CLOEXEC`), not
+/// a pipe, and its tail is read once the command exits: a child it left
+/// behind, or a process the supervisor spawned meanwhile that inherited the
+/// pipe, would hold a read to the pipe's end. On macOS a pipe is made and
+/// set close-on-exec in two steps, so a process another thread spawns in
+/// between (a session or an agent) inherits its write end and the read
+/// waits until that process ends; the supervisor's other children's output
+/// is taken by `adapters::unpiped_output` for the same reason.
 pub fn run_push(request: &PushRequest) -> PushOutcome {
     let Some((program, args)) = request.command.split_first() else {
         return PushOutcome::error("the push command is empty");

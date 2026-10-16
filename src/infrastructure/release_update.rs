@@ -11,7 +11,12 @@
 //! ```
 //!
 //! A value of the wrong shape is taken as its default and reported as a
-//! warning (`doctor`), so a mistake never turns the check off.
+//! warning (`doctor`), and the table's other values still hold: unlike
+//! `[push]` it is no error, so a mistake never turns the check off. Only
+//! `release` decides whether to look; there is no switch that turns the
+//! check off by its interval. A supervisor reads the table at each look of
+//! its check and carries none of it in its registration or its flags, so
+//! neither an exec's handoff nor another `up` changes it.
 
 use std::{
     fs,
@@ -155,7 +160,8 @@ pub fn releases_on(queue_dir: &Path) -> bool {
 }
 
 /// Reads the index with `curl -fsS --max-time 10`, the response's headers
-/// on stdout before its body (`-D -`).
+/// on stdout before its body (`-D -`). The runtime has no HTTP client of
+/// its own: it runs `curl` (standard on macOS) as a child process.
 #[derive(Debug, Clone)]
 pub struct CurlIndex {
     pub program: PathBuf,
@@ -196,8 +202,10 @@ impl ReleaseIndex for CurlIndex {
     }
 }
 
-/// The status, `ETag` and body of `curl -D -`'s output: header blocks (a
-/// `1xx` one before the final) and then the body.
+/// The status, `ETag` and body of `curl -D -`'s output: header blocks and
+/// then the body. A `1xx` block, or a proxy's `200 Connection
+/// established`, is followed by another block, so those are skipped and
+/// the status and `ETag` are read from the last one, the response's.
 fn parse_response(output: &str) -> Result<IndexFetch> {
     let mut rest = output;
     loop {
@@ -212,8 +220,6 @@ fn parse_response(output: &str) -> Result<IndexFetch> {
             .nth(1)
             .and_then(|code| code.parse().ok())
             .with_context(|| format!("no HTTP status in curl's output: {status_line:?}"))?;
-        // A `1xx`, or a proxy's `200 Connection established`, is followed
-        // by another block: the last one is the response.
         if (100..200).contains(&code) || body.starts_with("HTTP/") {
             rest = body;
             continue;

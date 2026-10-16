@@ -40,7 +40,7 @@ related:
      `base`は最新の`update_started`のcommit、無ければ自分のbuild識別子が名乗るcommit、それも無ければ（リリースのビルド）このプロセスが最初に見たmain。
      headが`base`と同じなら何もしない。
   4. `base`からheadまでの差分がruntimeのpath（`RUNTIME_PATHS`）を変えていれば、headのjobを起動する。
-     変えていなければそのheadを覚えて見直さず、何もビルドしないことをheadごとに1回logに出す（testは固定のsleepの代わりにこの行を待つ）。
+     変えていなければそのheadを覚えて見直さず、何もビルドしないことをheadごとに1回logに出す（`log_nothing_built`）。
      `base`をGitが知らない（別のcloneのビルド）ときは、headを1回ビルドして、それが次の`base`になる。
      `retry`の答えが最新の`update_started`より新しければ、差分を見ずにheadをビルドする。
   - supervisorの着地でも、人が手で打った`integrate`でも、mainが進めば同じように拾う。
@@ -161,14 +161,13 @@ related:
   - `approve_update`（options `install` / `skip`）: 非互換のmigrationを含むビルドのversionとmigrationを示す。
     drainはsupervisor自身を止めるので、runtimeは適用しない。
     `install`なら人がinboxから問いに書かれた`dagq install`のコマンドを打つ（[`install`](install.md#install)の6）。
-    drainが起動し直すsupervisorには止めた登録の`--auto-update`と`--max-waiting`が引き継がれるので、その後に`up --auto-update`を打ち直す必要はない。
+    drainが起動し直すsupervisorへの値の引き継ぎは`install_breaking`のdoc commentが持つ。
     どちらもinboxが閉じる。
 - **待ちの見直し**: 引き継いだsupervisorは、execした新しいprocessの最初のpassで、`wait_for_build`のtaskの待ち（[claimを控える](claim-defer.md#依存先の着地を含むbuildを待つtask)、ADR-t1632-1）を自分の新しいbuild識別子で判定し直し、依存先の着地を含めばclaimする（含むかの答えはprocessの中だけでcacheするので、引き継ぎの後は空から読む）。
   `update_installed`そのものは待ちを変えない: 待ちを決めるのは固定バイナリのfileではなくsupervisorの走っているbuildで、引き継いだsupervisorのbuildはそのfileと同じになる。
 - **queue serviceとqueueのbroker**: 3の引き継ぎはどちらも止めず、引き継いだsupervisorの最初の見張りが前のbuildのものを1回だけ入れ替える（[Queue service](../queue-service.md#起動と停止adr-t1233-4決定12)・[Queue broker](../queue-broker.md#起動と停止)）。
 - **status**: `status`は打った`dagq`のbuild識別子と、自動更新（liveな登録のどれかが有効か、最新の段）と、登録ごとの設定と今のbuild識別子を出す。
-  `state`の値の意味は`application::update::status`のdoc commentが持つ。
-  人の`dagq install`の`update_failed`は自動更新の最新の段にも、途中で死んだjobの判定にも数えない。
+  `state`の値の意味と、人の`dagq install`の`update_failed`を数えないことは`application::update::status`のdoc commentが持つ。
 - **test**: 判断（askのkind・attention・`stats`の`updates`・印の読み取りと関門の判定・`status`の段）はunit test、関門の実行と後始末、jobの各分岐、supervisorのきっかけと実プロセスの入れ替えはintegration test、作業中のrunの入れ替えと着地はe2eが確かめる。
 
 ## dagqのソースのrepositoryだけ

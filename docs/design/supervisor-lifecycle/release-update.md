@@ -31,22 +31,15 @@ dagqのソースのrepositoryの`-dev`のビルドは[Auto-update](auto-update.m
 ## 設定（host.tomlの`[update]`）
 
 - 置き場所と優先は[push](push.md)の`[push]`と同じで、`dagq.toml`からは読まない。
-  値と既定は`infrastructure::release_update`のmodule docが持つ。
+  値と既定、形の違う値と読めないファイルの扱い、supervisorが設定を読む時期は`infrastructure::release_update`のmodule docと`load_host_update`のdoc commentが持つ。
 - `"auto"`はaskを開かずに入れ替える（非互換のmigrationは除く）。
-  調べるかどうかは`release`だけが決め、間隔で切る手段は置かない。
-- 形の違う値は、その値だけを既定として扱い、表のほかの値は効く。
-  `[push]`と違ってerrorにしないので、書き損じで検知が止まることはない。
-  読めないファイル（権限など）も警告にして次のファイルを読む。
-  効いている値・読んだファイル・既定にした値の警告は`doctor`の`release_update`に出る。
-- supervisorは設定を検知の見直しのたびに読み、登録にもflagにも持たない。
-  execの引き継ぎや`up`の打ち直しで設定は変わらない。
+- 効いている値・読んだファイル・既定にした値の警告は`doctor`の`release_update`に出る。
 
 ## 検知
 
 - 読むのはcrates.ioのsparse indexのdagqのファイルで、yankedとpre-releaseを除いた最大のversion（SemVerの順）が最新。
   読み方は`domain::release_update`のdoc commentが持つ。
-- runtimeにHTTPのclientは足さず、`curl`を子プロセスで打つ（macOSに標準である）。
-  読むのは最後のheaderの塊のstatusと`ETag`で、`1xx`とproxyの`200 Connection established`の後には次の塊が続くので飛ばす。
+- `curl`で読む（打ち方と応答の読み方は`CurlIndex`と`parse_response`のdoc comment）。
   前回の`ETag`で問い、`304`なら前の結果を使う。
   呼び出しはport（`application::release_update::ReleaseIndex`、hostでは`infrastructure::release_update::CurlIndex`）の後ろにある。
 - supervisorは起動の後の最初のpassと一定の間隔ごとに、hostの設定を読み、`off`でなければjob threadで調べるかを決める（claimも着地も止めない。loopは待たないが、終わる前とexecの前には待つ）。
@@ -73,7 +66,7 @@ supervisorは前に見てから一定の間隔が経ったpassで、自分のbui
    リリースのjobの段だけの最新が途中の段でそのpidが死んでいれば、`update_failed`を書いて`update_failed`のaskを開く。
    pluginだけのjobの問いはバイナリに触っていないことも書く。
    source buildのpassも同じく自分の段だけを見る。
-3. **次の一手**（`next_action`）: jobの続いていないバイナリの頼み（`install`の答えか`retry`）のうち今のbuild識別子より新しい版があれば、その中で最も新しい版のjobを起動する（答えとretryは1回だけjobを起動する。同じpassに別の版の答えが書かれても頼みは消えない）。
+3. **次の一手**（`next_action`）: jobの続いていないバイナリの頼み（`install`の答えか`retry`）のうち今のbuild識別子より新しい版があれば、その中で最も新しい版のjobを起動する（頼みがjobを起動する回数は`next_action`のdoc comment）。
    pluginだけの頼みは、今のbuildがその版より古くてもバイナリのjobを起動しない。
    それ以外は、最新の検知の`latest`が今のbuildより新しく、その版のjobもバイナリについての答えも無いとき（jobが試した版は、失敗しても`update_failed`のaskが受け持つので改めて聞かない。`skip`した版も同じ）、`auto`ならaskを開かずにjobを起動し、`ask`なら同じ版の閉じられていないaskが無ければaskを開く。
 4. **pluginだけの一手**（`next_plugin_action`、ADR-t618-2決定4）: 3が何もしないとき、supervisorがpluginをdirectoryから読み込んでおらず、最新の検知の`latest`が今のbuildと同じ（バイナリが最新のリリース）ときだけ見る。
@@ -89,11 +82,7 @@ supervisorは前に見てから一定の間隔が経ったpassで、自分のbui
    - 目的を明記したバイナリの頼みは、今のbuildがその版か新しい版なら落とす。
      `latest`だけが新しくてもバイナリの頼みは落とさない。
      目的の無い古いruntimeの頼みの扱いは変えない。
-   - バイナリのdropは「このbuildでは起動しない」という記録で、queue全体で頼みを消費したものではない。
-     同じqueueの古いbuildのsupervisorは、その頼みでjobを起動できる。
-     新しいbuildが落とした版でも、古いbuildのsupervisorはその版を入れるので、固定バイナリを共有していればそのバイナリはその版に戻りうる（頼みを答えた人の意図どおりとする）。
-     新しいbuildの最初のpassは、jobの続いていない古いバイナリの頼みをまとめて1回ずつ落とすので、入れ替えの直後の`status`の`auto_update`は`installed`でなく`dropped`を出しうる。
-     pluginだけのdropは消費したものと数える。
+   - dropが頼みを消費するかとその帰結は`dropped_requests`のdoc commentが持つ。
    - バイナリの頼みをpluginの頼みに変えない。
      引き継ぎの失敗などでバイナリだけ上がりpluginが古ければ、4の独立した検知が`auto`のjobかpluginの`approve_release`とその答えで上げる（既にpluginを試した失敗はそのpluginのretryで扱う）。
      バイナリの失敗・中断のretryの問いも、古いbuildでのみinstallし、同じ版以降ではdropを記録しpluginは別に扱うと説明する。
@@ -139,4 +128,4 @@ source buildの自動更新の見直しはこれらの段を数えない。
 
 - [installしたpluginの確認](../plugin-integration.md#installしたpluginの確認)と同じ出力と読み取りで、dagqのpluginのentryの`version`を読む（`adapters::plugin_version`）。
 - portは`application::InstalledPlugin`、hostでは`adapters::ClaudePlugin`（cwdはsupervisorのmain checkout、jobではそのcwd）。
-- 比べるのは`X.Y.Z`どうしで、`-dev`などのversionは比べられないので「古くない」とする（askを開かない）。
+- 比べるのは`X.Y.Z`どうしで、比べられないversionの扱いは`domain::release_update::is_newer`のdoc commentが持つ。

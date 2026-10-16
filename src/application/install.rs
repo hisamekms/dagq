@@ -11,6 +11,11 @@
 //! instead, and only when asked to. `--rollback` does the same with
 //! `<name>.previous`.
 //!
+//! It reads the queue's schema through the new binary (`migrate --check`)
+//! before it opens the queue itself (apart from a best-effort read of the
+//! e2e gate's history, whose failure is ignored), so it works whether the queue is older
+//! or newer than this binary.
+//!
 //! The binaries are built, run and moved through [`Binaries`], the queue
 //! is read through [`QueueOpener`]; [`crate::compose`] builds the adapters.
 
@@ -240,7 +245,10 @@ pub enum E2eGate {
     NotApplicable,
     /// A person skipped it (`--skip-e2e`): `{"status": "skipped"}`.
     Skip,
-    /// Run it; the report's `e2e` is [`E2eOutcome::report`]'s.
+    /// Run it; the report's `e2e` is [`E2eOutcome::report`]'s. The gate
+    /// writes no event of its own, so the failures in a row of a marked
+    /// test are counted, when there is a queue, from its events of the
+    /// automatic update's gates and of the runtime's e2e of the runs.
     Run(E2eSettings),
 }
 
@@ -280,7 +288,10 @@ pub enum Source {
     /// A binary built already: given by a person, or built or installed by
     /// dagq itself (the automatic update's build, a release).
     Binary(PathBuf),
-    /// The binary the last install replaced (`<target>.previous`).
+    /// The binary the last install replaced (`<target>.previous`). Going
+    /// back to a binary that does not refuse an unknown `DAGQ_ROLE` and
+    /// knows no newer role leaves a window: a job the newer binary started
+    /// and still runs is not restricted by the binary its calls now reach.
     Rollback,
 }
 
@@ -705,6 +716,15 @@ impl HandoffFailed {
 /// backs the queue up first), replace the binary, and start the supervisor
 /// again with the new binary's `up`, in the mode and with the parallelism
 /// the drained one had.
+///
+/// The started supervisor's `up` carries over the drained ones' values, so
+/// no second `up` is needed after the drain: `--auto-update` when any of
+/// them had it, and the parallelism, wait limit and limit of the runtime's
+/// planners each took from a flag, as the same flags. A value one took from
+/// `dagq.toml` or the default is left for the started one to resolve again.
+/// A registration that records no source for its values (from a binary
+/// older than the source columns) carries them over as flag-sourced ones
+/// do. A flag the restart's arguments hold already is not added again.
 fn install_breaking(
     ports: &Ports<'_, impl HostOpsQueue + ?Sized>,
     db: &Path,
@@ -733,11 +753,6 @@ replaced, and `up` starts the old binary again"
     let started = match live.first() {
         None => Value::Null,
         Some(drained) => {
-            // A value the drained supervisor took from a flag carries over
-            // as that flag; one it took from `dagq.toml` or the default is
-            // left for the started one to resolve again (task 698). A
-            // registration of an older binary says nothing, and was given
-            // its values.
             let flagged = |source: Option<SettingSource>| {
                 source.is_none_or(|source| source == SettingSource::Flag)
             };
@@ -755,9 +770,6 @@ replaced, and `up` starts the old binary again"
             if flagged(drained.parallel_source) {
                 arguments.extend(["--parallel".to_owned(), drained.parallel.to_string()]);
             }
-            // The drained supervisor's automatic update, wait limit and
-            // limit of the runtime's planners carry over, so no second `up`
-            // is needed to put them back.
             let restarts = |flag: &str| options.restart.iter().any(|argument| argument == flag);
             if live.iter().any(|registration| registration.auto_update)
                 && !restarts("--auto-update")

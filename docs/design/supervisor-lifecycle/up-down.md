@@ -69,12 +69,9 @@ in-cmux modeの起動の指定は何にも触る前に拒み、廃止と次の�
      書くのは`up`だけで、`supervise`自身は書かない。
      modeはプロセスの性質なので登録行と寿命を共にし、supervisorがgracefulに終われば行ごと消える（queue dirのsidecar fileにしなかった理由は[persistence](../persistence.md)のRuntime ownership）。
      `down`はこれを見てSIGTERM（launchd mode / 手起動）とSIGINT（登録済みのin-cmux）を使い分ける。
-   - **並列数・待ちの上限・runtimeのplannerの上限・claimを控えるload**（[ADR-0062](../../adr/0062-runs-waiting-for-a-person-leave-the-slot.md)の決定7、ADR-0041の決定12、[claimを控える](claim-hold.md)）: 明示されたときだけsupervisorの引数に足し、無ければsupervisorがmain checkoutの`dagq.toml`の`[supervisor]`かhostから決める（`up`のhelp）。
-     flagで起動したsupervisorは`dagq.toml`の変更に従わないので、`[supervisor]`で決めるなら`up`にflagを付けない（付けて起動したものは`down --wait`の後にflagなしの`up`で起動し直す）。
+   - **並列数・待ちの上限・runtimeのplannerの上限・claimを控えるload**（[ADR-0062](../../adr/0062-runs-waiting-for-a-person-leave-the-slot.md)の決定7、ADR-0041の決定12、[claimを控える](claim-hold.md)）: 明示されたときだけsupervisorの引数に足し、無ければsupervisorがmain checkoutの`dagq.toml`の`[supervisor]`かhostから決める（`up`のhelpと`supervise_arguments`のdoc comment）。
      supervisorが値と出どころを登録に書く（[人の答えを待つrun](waiting.md)）。
-     loadの0未満は負の数がflagに読まれないよう`0`として渡す。
    - **自動更新**（[ADR-0045](../../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定17）: 自動更新は`up`の指定（`--auto-update`）のときだけ有効で、指定した`up`が起動するsupervisorは自動更新付きで起動し、reuseや引き継ぎで残す登録にも`up`の指定をそろえて書く（書く先は`set_auto_update`のdoc comment、[Auto-update](auto-update.md#auto-update)）。
-     前のbinaryが自動更新を持っていれば、引き継ぎに失敗して前のbinaryのまま動いているsupervisorは、次の着地で自分でbuildして`install`し、もう一度引き継ぎを試みる。
    - **buildの違うsupervisorの入れ替え**（[ADR-0045](../../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定10・12・15・16）: 登録の`binary_version`は`supervise`プロセス自身が書いた自分のbuild識別子で、`up`はliveな登録のどれか1つでも自分のbuild識別子と違えば（nullを含む。package versionが同じでもcommitやdirtyが違えば違う）入れ替える。
      liveな登録が全部引き継ぎを受けられるなら**引き継ぎ**、そうでなければ**drain**で入れ替える。
      launchd modeの登録は、LaunchAgentの`ProgramArguments`の先頭が`up`自身の絶対pathのときだけ引き継ぐ（execはplistを変えないので、pathの違うagentはlaunchdの次の再起動で前のbinaryに戻る。そのときはdrainし、`up`がplistを書き直す）。
@@ -84,17 +81,13 @@ in-cmux modeの起動の指定は何にも触る前に拒み、廃止と次の�
      - **引き継ぎ**（[Handoff](handoff.md#handoff)）: liveな登録それぞれに`up`自身の絶対pathへのexecを頼み、各登録が同じpidのまま`up`のbuild識別子で戻るのを待つ（`lifecycle::hand_off`）。
        何もsignalせず、LaunchAgentもcmuxのworkspaceも触らず、走っているrunのsessionもleaseもそのまま。
        待ちの上限は全員で1つで、supervisorは進行中の検証と着地の区切りまで待ってからexecするので、integrateの検証1回分に及ぶことがある。
-       失敗の条件・猶予の見直し・要求の取り消しは`hand_off`と`HANDOFF_GRACE`のdoc commentと[Handoff](handoff.md#handoff)にある。
+       戻ったと見なす条件・失敗の条件・猶予の見直し・要求の取り消しは`hand_off`と`HANDOFF_GRACE`のdoc commentと[Handoff](handoff.md#handoff)にある。
        1つの失敗で待ちを止めず、全員の成功か失敗を待つ（[ADR-t632-1](../../adr/2026-09-27-t632-1-handoff-restores-only-when-every-supervisor-failed.md)）。
-       戻ったと見なすのはheartbeatが新しい登録だけ（取り戻した直後に死んだプロセスを成功と数えない）。
-       失敗したsupervisorの要求だけを取り消し（残すと、呼び出し側が別のbinaryを置き戻した後でsupervisorがそのpathをexecする）、成功したsupervisorの要求は他の失敗で取り消さない。
-       1つでも失敗があっても、`up`はそこで止まらず、残りの段を最後まで行ってから失敗する（`lifecycle::PartialHandoff`）。
+       1つでも失敗があっても、`up`はそこで止まらず、残りの段を最後まで行ってから失敗する（出力と失敗したsupervisorのその後は`lifecycle::PartialHandoff`のdoc comment）。
        fileを差し替えていないので戻すものは無い。
-       `main.rs`はその`report`をstdoutに出し、errorのJSONをstderrに出してexit 1で終える。
        launchdへ移すときは`down --wait`と`up`。
      - **drain**（引き継ぎを受けられない前のbinaryの登録、またはpathの違うlaunchd agentの登録）: live全部をdrainしてから1つ起動し直す。
-       停止は`down --wait`と同じ順序で、手順は`replace_supervisors`のdoc commentにある。
-       drainは登録が消えるのではなくPIDが死んで終わることがあり（launchdの強制終了や、heartbeatの失敗であえて行を残す経路）、その登録行は`down --force`と同じようにここで消す。
+       停止は`down --wait`と同じ順序で、手順は`replace_supervisors`と`drain_supervisors`のdoc commentにある。
        それからlaunchd modeで起動する（入れ替えられる側がin-cmuxでも同じ）。
        待つ相手の除外集合はdrainの後に取り直すので、生き残った「生きているが黙っている」登録を自分の起動したものと取り違えない。
        drainに上限は置かない（runはClaude sessionなので待ち時間はrunの長さそのもの）。
@@ -105,10 +98,7 @@ in-cmux modeの起動の指定は何にも触る前に拒み、廃止と次の�
      `status`がstaleとして報告するので、人が`down --force`で止めてから`up`をやり直す（[ADR-0014](../../adr/0014-up-replaces-a-supervisor-of-another-binary-version.md)のConsequences。[ADR-0045](../../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定16が引き継ぐ）。
    - **二重のsupervisorの警告**: 同じqueueに引き継ぎの組でないliveな登録が2つ以上あるか、queueのLaunchAgent（自分のlabelと、同じDBの別のlabel）が2つ以上loadされていれば、`doctor`と`status`が同じ判定（`health::duplicate_supervisors`）でwarningを出し、`status`はinboxのattentionにも載せる。
      引き継ぎの元の登録とexecが同じpidで作り直した後継の登録は1つのsupervisorと数えて知らせない（意味と直し方は判定のdoc comment）。
-   - plist: `~/Library/LaunchAgents/com.dagq.<queue hash>.plist`で、queue hashの決め方は`QueueLocation::hash`のdoc comment、中身は`src/application/lifecycle.rs`の`LaunchAgentSpec::xml`と`supervise_arguments`のdoc commentにある。
-     cmuxは見つからなくても`up`は止まらない（supervisorは使わない）。
-     `EnvironmentVariables`の`XDG_CONFIG_HOME`は、launchdのsupervisorが利用者の`config.toml`（[言語](language.md)）とhost全体の`host.toml`（[push](push.md)・[レポート](commands.md)・[KPI](commands.md)・[リリースの更新](release-update.md)）を、`up`を打ったshellと同じ`$XDG_CONFIG_HOME/dagq/`から読むため（`up`がpreflightで読む`config.toml`とずれない）。
-     exportしていなければ入れず、supervisorは`~/.config/dagq/`を読む。
+   - plist: `~/Library/LaunchAgents/com.dagq.<queue hash>.plist`で、queue hashの決め方は`QueueLocation::hash`のdoc comment、中身は`src/application/lifecycle.rs`の`LaunchAgentSpec::xml`と`supervise_arguments`と`SupervisorEnvironment`のdoc commentにある。
    - 起動: agentをbootoutしてからbootstrapし直し、既にbootstrap済みでも定義を差し替える。
      bootoutは即返り、旧プロセスが終わるまでのbootstrapは失敗するので、serviceが消えるまで待ち、消えなければSIGKILLを送る（hangしたsupervisorがlabelを`ExitTimeOut`の間占有しないため）。
    - macOSの外（launchdの無いhost）: `Launchctl`は`launchctl`を起動しない。
@@ -159,7 +149,7 @@ PIDが生きていてもheartbeatの古い登録は、`up`と共通の`pid_taken
 次にLaunchAgentを必ず外す（bootoutしてplistも消す。`RunAtLoad`のため残すと次のloginで復活する）。
 同じqueueの別のlabelのagent（`up`の3と同じ探し方）も同じく外し、結果に出す。
 そのsupervisorの登録も他の登録と同じくsignalと待ちの対象になる。
-signalの対象の登録が1件もなければ`not_running`を返す（強制終了ならPIDの死んだ登録行も消して結果に出す）。
+signalの対象の登録が1件もなければ`not_running`を返す（強制終了での登録行の扱いは`lifecycle::down`のdoc comment）。
 あれば登録ごとにsignalを選ぶ: `mode` が`in_cmux`ならSIGINT（cmuxのterminalでCtrl-Cを押したのと同じ。runtimeはSIGTERMと同じくdrainに入る。このmodeにはsignalを届けてくれるservice managerがない）、そうでなければSIGTERM——ただしbootoutでlaunchdが外したagentそれぞれのプロセスにSIGTERMを届けるので、そのPIDには送らない（runtimeは1回目のsignalでdispositionを既定に戻すので、2回目は即死になる。`lifecycle::signalled_by_bootout`）。
 外したagentのどれかがloadされているのにPIDが読めないときは誰にも送らない。
 既定は即返り、待つ指定はその登録が消えるかPIDが死ぬまで待ち、強制終了はSIGKILLを送って登録行を消す（leaseはやがてstaleになり、runは`doctor` / `recover`で扱う）。
@@ -177,4 +167,4 @@ inboxは人のterminalで、`down`は触らない。
 ## CIの見張り（ADR-t1920-1）
 
 [ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](ci-watch.md)。
-`[ci_watch]`があれば、`up`のpreflightは`[run.env]`のプログラムの検査の後に（`infrastructure::ci_watch::preflight`）、`up`のPATHで`gh`を解決し、`[repository] remote`のURLがGitHubかと`gh`の認証を確かめ、だめならsupervisorを起動せず、理由と対処（`gh`を入れる・`gh auth login`・remoteを直す、または`[ci_watch]`を`dagq.toml`から外すtaskを登録する）を挙げたerrorで止まる。
+`[ci_watch]`があれば、`up`のpreflightは`gh`でCIを読めるかを確かめ、だめならsupervisorを起動せず、理由と対処を挙げたerrorで止まる（確かめるものと対処は`infrastructure::ci_watch::preflight`のdoc comment）。

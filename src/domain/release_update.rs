@@ -82,7 +82,10 @@ fn parse_version(version: &str) -> Option<(u64, u64, u64)> {
     parts.next().is_none().then_some((major, minor, patch))
 }
 
-/// Whether release `latest` is newer than `current` (both `X.Y.Z`).
+/// Whether release `latest` is newer than `current` (both `X.Y.Z`). A
+/// version that is not `X.Y.Z` (a `-dev` plugin, say) cannot be compared
+/// and is neither newer nor older: an installed plugin of such a version
+/// counts as not older than a release, so no ask opens about it.
 pub fn is_newer(latest: &str, current: &str) -> bool {
     match (parse_version(latest), parse_version(current)) {
         (Some(latest), Some(current)) => latest > current,

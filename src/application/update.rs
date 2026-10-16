@@ -382,7 +382,10 @@ pub fn job_pid(update: &RunEvent) -> Option<u32> {
 /// release without replacing the binary, `failed`, `awaiting_approval`,
 /// `retry_requested`, `skipped`, `dropped` when the release update left a
 /// request it no longer needed; `idle` when none ran), with its commit,
-/// time and details. `updates` is newest first.
+/// time and details. `updates` is newest first. The `update_failed` of a
+/// person's `dagq install` is no step of a job (ADR-0073 decision 14): it
+/// counts neither as the latest step nor in the check of a job that died
+/// on the way, since its failure is its own ask's.
 pub fn status(
     registrations: &[SupervisorRegistration],
     updates: &[RunEvent],
@@ -394,8 +397,6 @@ pub fn status(
             && processes.alive(registration.pid)
             && now - registration.heartbeat_at <= HEARTBEAT_TIMEOUT_SECS
     });
-    // A person's install is no step of the update (ADR-0073 decision 14):
-    // its failure is its own ask's.
     let updates: Vec<RunEvent> = updates
         .iter()
         .filter(|update| !step_install(update))
