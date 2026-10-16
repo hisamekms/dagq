@@ -2393,7 +2393,12 @@ impl<'a> ContainerVerification<'a> {
     /// Run `command` with `env` in the verification's container, its
     /// output in `log`: through `podman` on the host, whose limit for the
     /// whole command is the verifier's. A container an earlier command
-    /// left (one stopped at its limit) is removed first.
+    /// left (one stopped at its limit) is removed first. When podman made
+    /// or started no container ([`podman_failed`]), the command did not
+    /// run: that is an error, as a container [`Self::start`] could not make
+    /// ready, not the command's failure.
+    ///
+    /// [`podman_failed`]: crate::domain::run_container::podman_failed
     fn run_to_log(
         &self,
         verifier: &dyn Verifier,
@@ -2411,7 +2416,13 @@ impl<'a> ContainerVerification<'a> {
             command,
             env,
         )?;
-        verifier.run_to_log(&line, &self.run_dir, &[], log)
+        let exit = verifier.run_to_log(&line, &self.run_dir, &[], log)?;
+        ensure!(
+            !crate::domain::run_container::podman_failed(exit.code),
+            "podman did not start the verification's container for {command:?} ({exit}); see {}; nothing was judged, and it did not run on the host instead",
+            log.display()
+        );
+        Ok(exit)
     }
 }
 

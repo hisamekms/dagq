@@ -229,9 +229,10 @@ executorは`application::run_container::PodmanActorExecutor`、設定の読み�
 
 `dagq.toml`がverificationをcontainerにしたrunの着地では、rebaseの後の検証のコマンドを1本ずつ、そのverificationのcontainerで流す（[ADR-t2113-3](../adr/2026-10-08-t2113-3-only-workers-resume-and-integrate-verification-run-in-containers.md)決定1）。
 結果・時間・失敗の分類の記録はhostと同じである。
-`integrate`の`ContainerVerification`が流れを持ち、準備・podman・片付けは`application::run_container::VerificationContainers`のport、`podman run`の引数は`domain::run_container::verification_run_args`、containerの中は`dagq relay verify`が持つ。
-containerのrunの着地の再確認のcommandも同じ形で流し、流せなければどこにも流さない（[Landing recheck](supervisor-lifecycle/landing-recheck.md#確かめ方)）。
+`integrate`の`ContainerVerification`が流れを持ち、準備・podman・片付けは`application::run_container::VerificationContainers`のport、containerの中は`dagq relay verify`が持つ。
+着地の再確認のcommandも同じ形で流す（[Landing recheck](supervisor-lifecycle/landing-recheck.md#確かめ方)）。
 `already_satisfied`のsnapshotの検証も同じ部品で、mainのheadのcloneで流す。
+podmanがcontainerを起動しなかった（`podman_failed`）commandは判定せずhostで流さず、`integrate`は準備が落ちたときと同じくerrorで終える。
 
 - 準備: machine・image・runのrelayをworkerのturnと同じ`RunMachine`で用意し、`dagq.toml`がbuildの出力のdirを名指せば、そのverificationごとの新しいvolumeを作る（workerのrunのvolumeと共有しない）。
 - verificationのdir: 制御側だけのverificationのcloneの親のdirの下に、verificationごとの新しいdirを作る。

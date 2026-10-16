@@ -1425,3 +1425,66 @@ fn an_already_satisfied_claim_failing_in_the_container_is_not_offered_the_close(
         0
     );
 }
+
+/// When podman starts no container for a landing's verification command
+/// (it exits 125, as when it cannot make the container), the command did
+/// not run, in the container or on the host: integrate fails as when the
+/// verification's container could not be made ready, judging nothing. No
+/// `verification_command` is recorded, the later command is not started,
+/// the run is neither resumed nor sent to a session and keeps waiting to
+/// land, and the error says podman started no container.
+#[test]
+fn a_verification_whose_container_podman_does_not_start_fails_the_landing_judging_nothing() {
+    let _test = crate::common::test();
+    let queue = VerifyQueue::new();
+    fs::write(queue.state.join("refuse-run"), "").unwrap();
+    queue.set_config("[roles.verification]\nruntime = \"container\"\n");
+    let mark = queue.dir.path().join("ran");
+    let task = add_task(
+        &queue.db,
+        &[
+            format!(": > {}", shell_path(&mark)),
+            "test -f seed.txt".to_owned(),
+        ],
+    );
+    let backend = TestWorkspace::new(&queue.db, false, VALID_AGENT);
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "fine")]);
+    let outcome =
+        supervise_reviewed_with(&queue.db, &queue.repo, &backend, &reviewer, &queue.options);
+    let errors = outcome["errors"].to_string();
+    assert!(
+        errors.contains("podman did not start the verification's container"),
+        "{outcome}"
+    );
+    // podman was asked once, and the command ran neither there nor on the
+    // host; the second command was not started.
+    let all = runs(&queue.state);
+    assert_eq!(all.len(), 1, "{all:?}");
+    assert!(!mark.exists());
+    let detail = SqliteQueue::open(&queue.db).unwrap().show(task).unwrap();
+    let run = detail.runs.last().unwrap().clone();
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration, "{outcome}");
+    for kind in [
+        "verification_command",
+        "resume_started",
+        "integration_deferred",
+    ] {
+        assert!(payloads(&detail, kind).is_empty(), "{kind}: {outcome}");
+    }
+    // Recorded as an error of integrate's, as a container not made ready.
+    let errors = payloads(&detail, "integration_error");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0]
+            .to_string()
+            .contains("podman did not start the verification's container"),
+        "{errors:?}"
+    );
+    // What the verification left goes.
+    assert_eq!(
+        fs::read_dir(queue.queue_dir().join("verification"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
