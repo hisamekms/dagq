@@ -671,7 +671,8 @@ pub(super) fn revisit_section(fit: &mut Fit, material: &DraftPlannerMaterial<'_>
 
 /// The line of a follow_up draft's section that shows the category its
 /// worker gave it (ADR-t947-3), with what the category means when it is
-/// one of the list; empty for a draft of another origin.
+/// one of the list; empty for a draft of another origin. The planner does
+/// not rewrite the category, so it does not lean to fit its decision.
 pub(super) fn follow_up_category_line(target: &DraftTarget) -> String {
     if target.origin != DraftOrigin::FollowUp {
         return String::new();

@@ -37,7 +37,7 @@ run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-sup
    材料に所属の提案の無いdraftはpromptが`(none)`として、種類の無いdraftはpromptと集計が`unlabeled`として扱う。
    `goal_gap`は、[goal review](goal-review.md)のjobの`gaps`のverdict（と人の`approve_goal`の`gaps`のanswer）からruntimeが登録するdraftの出どころとする。
    人が`add`で作ったdraftとobserverのdraft goalのtaskには行が無く、plannerは立たない（再検討の時刻が来たときだけ、出どころ`revisit`として立つ。[再検討の時刻](#再検討の時刻)）。
-   出どころ`reopened`は、plan reviewがreadyから戻して自分のproposalに入れたtask（ADR-0044の決定14）が、そのproposalのwithdrawで`draft`に戻ったときにwithdrawが`draft_reopens`に書く（材料は`reason`（verdictのreopenのreason）、`proposal_id`、`reviewed_proposal_id`（reopenしたplan reviewのproposal））。
+   出どころ`reopened`は、plan reviewがreadyから戻して自分のproposalに入れたtask（ADR-0044の決定14）が、そのproposalのwithdrawで`draft`に戻ったときにwithdrawが`draft_reopens`に書く。
    人が作ったtaskで`draft_origins`の行が無くても、これで誰かが拾う。
    行が効くのはtaskがまだそのproposalのものであるあいだだけで、後で別のproposalに入ったtaskのwithdrawには古い行が効かない。
    同じproposalの他のmember（plannerがsubmitしたdraft）には書かず、`draft`に戻るだけとする。
@@ -56,7 +56,7 @@ run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-sup
 3. **立てる**（`open_draft_planners`）: runtimeが立てたplannerで生きているものが上限`runtime_planners`（[Run environment](run-environment.md)の`[supervisor]`）未満のあいだ、束ごとに`open_draft_planner`で立てる（束1つで1と数える）。
    上限はrevise・finding・計画の依頼（[inboxからの計画の依頼](plan-planners.md#inboxからの計画の依頼)）のplannerと共有し、run slotとは別とする。
    依頼のplannerはdraftより先に立てる。
-   storeは`BEGIN IMMEDIATE`で束の全てのdraftの対象の条件を再検査し、条件を外れたdraftは束から落として残りで、`planners`の行（`draft_task_id`は束の最も古いdraft）、束の行、draftごとの`draft_planner_opened`を書く（[Persistence](../persistence.md#draft-plannersdraft_plannersrs)）ので、2つのsupervisorが同じdraftに立てない。
+   storeは`BEGIN IMMEDIATE`で束の全てのdraftの対象の条件を再検査し、条件を外れたdraftは束から落として残りで、`planners`の行、束の行、draftごとの`draft_planner_opened`を書く（[Persistence](../persistence.md#draft-plannersdraft_plannersrs)）ので、2つのsupervisorが同じdraftに立てない。
    plannerはworkspaceを持たず、非対話のwrapperがbackgroundで起動する（[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)）。
    初期promptは`draft_planner_prompt`（`prompt::repository_rules`を含む。[Prompt](prompt.md#repositoryの規則を読む順)）で、draftごとの中身、出どころ（1回だけ）、束のdraftのgoalと同じgoalの束の外のtask、手順を載せる。
    束が2件以上なら、束の中の重複・依存と、採用するものを1つのproposalで出すことを先に考えさせる。
@@ -83,7 +83,7 @@ run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-sup
      これで引き継ぎの間に同じqueueを扱う2つのsupervisorが重なっても、answerは1回しか送られない。
      送れなかったときは`ask_delivery_failed`を残してそのplannerには送り直さず、人の答えだけを待つplannerと同じく終わらせ、answerは(b)が運ぶ（[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)）。
      claimの後、送る前にsupervisorが落ちたaskは、claimが`PLANNER_ANSWER_CLAIM_SECS`より古くなった後の周回で別のsupervisorがclaimし直して送る（依頼を書くのは数秒で終わるので、生きているsupervisorのclaimを奪わない）。
-   - (b) plannerが居ないdraft: 上限の中で新しいplannerを立て（そのdraftを先頭に、同じ束の鍵で対象のdraftを束に加える。同じ鍵の束のplannerが開いていれば、それが終わるまで待つ）、初期promptに元の質問とanswerを載せ（先頭のdraftの`draft_planner_opened`の`ask_id`）、askを閉じる。
+   - (b) plannerが居ないdraft: 上限の中で新しいplannerを立て（そのdraftを先頭に、同じ束の鍵で対象のdraftを束に加える。同じ鍵の束のplannerが開いていれば、それが終わるまで待つ）、初期promptに元の質問とanswerを載せ、askを閉じる。
      依頼のplannerが作り由来もproposalも無いdraftは依頼のplannerに届け、居なければ依頼の状態に依らず答えを載せたplannerを依頼に立てる（ADR-t2015-1）。
    - (c) `keep_draft`のanswerでplannerが居ない、またはdraftが先に進んだ（submit、cancel）: supervisorが`planner_answer_closed`でaskを閉じる。
      `keep_draft`で残したdraftにはruntimeのplannerを立て直さず、人の言葉を受けたinboxがそのdraftを参照にした計画の依頼を記録するまでdraftのまま待つ（`PLANNER_QUESTION_OPTIONS`のdoc comment）。
@@ -148,8 +148,7 @@ draftに再検討の時刻を1つ持たせ、時刻が来たらruntimeのplanner
   `open`の計画の依頼が`task:N`で参照するdraftは対象にしない（依頼のplannerが決める。時刻は残る）。
   そのdraftへの`planner_question`のanswerを運ぶ新しいplannerも立てず、answerは依頼が`open`でなくなるまで待つ（`named_by_open_request`）。
   依頼のplanner（[inboxからの計画の依頼](plan-planners.md#inboxからの計画の依頼)）は、参照する`task:N`に開いているruntimeのdraftのplanner（再検討のものを含む）がある間は立たない（`plan_requests`の`TARGETS`）。
-- **時刻の無い`keep_draft`**: 対象から外れ、依頼を待つ。
-  `status`には出さず、`show`の`revisit`がnullで`asks`に`keep_draft`のanswerがあることで見分ける（ADR-t1540-1決定6）。
+- **時刻の無い`keep_draft`**: 対象から外れ、依頼を待つ（ADR-t1540-1決定6）。
 - **記録**: 付ける・消す・使い切るのはどれもtaskのevent（`draft_revisit_set`・`draft_revisit_cleared`・`draft_revisit_due`）で、actorはそのCLIを打ったrole（`draft_revisit_due`はsupervisor）。
   `show`は`revisit`（無ければnull）を出す。
   束のplannerの結末（8）は、まだ使っていない時刻を持つdraftを`keep_draft`にする。
@@ -160,7 +159,6 @@ draftに再検討の時刻を1つ持たせ、時刻が来たらruntimeのplanner
 新しいeventは足さず、既存のeventから引く。
 
 - **plannerへの材料**: 2の対象のdraftをplannerに渡すとき、出どころの材料の種類（[Receipt and session exit](receipt-and-session-exit.md#follow_upsの分類コード)）とその定義を、promptのdraftごとの節に載せる（一覧に無い値と`unlabeled`はその旨を添える。`follow_up_category_line`）。
-  plannerは種類を書き換えない（判断に合わせて種類が寄らないように。ADR-t947-3の代替案）。
 - **判断との突き合わせ**: 8の束のdraftごとの結末と、plannerがそのdraftについて開いた`planner_question`とその答えを、draftの種類で並べる。
   不採用（`canceled`）の理由は[cancelの理由の分類コード](../domain-model.md#cancelの理由の分類コード未実装)（ADR-t947-4）で読む。
 - **集計**: [Stats](commands.md)の`follow_up_categories`。

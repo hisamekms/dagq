@@ -187,6 +187,8 @@ pub struct TaskDetail {
     pub follow_up_drafts: Vec<FollowUpDraft>,
     /// The draft's revisit time (ADR-t1540-1): when the runtime opens a
     /// planner for it again, or when it did (`opened_at`); null without one.
+    /// A draft kept by a `keep_draft` answer without a revisit time is not
+    /// shown in `status`: it has this null while `asks` holds that answer.
     pub revisit: Option<crate::domain::DraftRevisit>,
     /// The asks about the task (`task_id`) or one of its runs (`run_id`),
     /// open and closed, oldest first, with the asking AI's recommendation

@@ -29,7 +29,7 @@ line = 1105
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/draft-planners.md"
-size = 34857
+size = 34374
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/observer.md"

@@ -407,7 +407,8 @@ impl SqliteQueue {
     /// See [`DraftPlannerStore::open_draft_planner`]. A draft of the
     /// bundle that had [`MAX_DRAFT_PLANNERS`] planners records
     /// `draft_planner_exhausted` (the inbox's attention) and is left out
-    /// of it.
+    /// of it. Each member's `draft_planner_opened` carries `ask_id` only
+    /// on the lead draft: the ask whose `answer` the planner carries to it.
     pub fn open_draft_planner(
         &mut self,
         drafts: &[TaskId],
@@ -1214,6 +1215,8 @@ fn use_revisit(
 /// Record that the draft `task` is a ready task plan review reopened and
 /// whose proposal was withdrawn (origin `reopened`, task 418), inside the
 /// caller's write transaction; a later withdrawal replaces the material.
+/// The material's `reason` is the reason of the verdict's reopen, and
+/// `reviewed_proposal_id` the proposal of the plan review that reopened it.
 ///
 /// `draft_reopens` is a table of its own, not an origin in `draft_origins`,
 /// because widening that origin would rebuild the table (a breaking

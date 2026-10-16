@@ -25,7 +25,9 @@ pub struct PlannerSession {
     /// until it submits (the proposal then names its workspace).
     pub proposal_id: Option<ProposalId>,
     /// The draft the runtime opened it for (ADR-0041 decision 16): a
-    /// follow_up or another draft the runtime or a job registered.
+    /// follow_up or another draft the runtime or a job registered; for a
+    /// bundle, its lead: the draft whose answer it carries, else the
+    /// oldest draft of the bundle.
     pub draft_task_id: Option<TaskId>,
     /// The finding the runtime opened it for (ADR-0044 decision 19): one
     /// marked for a proposal.
