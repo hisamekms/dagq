@@ -28,29 +28,12 @@ size = 16782
 line = 1105
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/ask.md"
-line = 2679
-tasks = 24
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/backend-call-failures.md"
 tasks = 10
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/draft-planners.md"
-size = 48695
-line = 4938
-tasks = 25
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/finding-planners.md"
-line = 2824
-tasks = 12
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/goal-review.md"
-line = 3988
-tasks = 18
+size = 34857
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/host-metrics.md"
@@ -58,9 +41,7 @@ tasks = 7
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/observer.md"
-size = 55866
-line = 5229
-tasks = 41
+size = 36750
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/plan-planners.md"
