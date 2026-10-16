@@ -132,6 +132,5 @@ supervisorはagentの完了レシート、コミット、テスト、worktreeの
 macOSで解決先が`/usr/bin/git`（Command Line Tools / Xcodeのxcrun shim）のときだけ、`/usr/bin/xcrun --find git`で選択中のdeveloper toolsの実体を求める。
 絶対pathで、正規化できる実行可能な通常fileならそれを使う。
 Homebrew・Linuxなどのgitには追加の探索をしない。
-xcrunの起動失敗・非zero終了・30秒の探索期限・不正な出力・実体の不在や実行権限の不足では、最初に見つけたgitへfallbackする。
 最初のPATHにもgitが無ければエラーになる。
 解決結果（fallbackとエラーを含む）はprocessの寿命中固定で、PATHやdeveloper toolsを変えた場合は次のprocessから反映される。

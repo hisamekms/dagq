@@ -178,6 +178,13 @@ pub(super) fn check_judged(
 }
 
 impl SqliteQueue {
+    /// Record a membership judgement of `task` and return its row. A
+    /// judgement that opens a correction of a goal closed as achieved
+    /// ([`follow_up::opens_correction`]) opens a `correct_goal` ask in the
+    /// same transaction and keeps its id as `correction_ask_id` in the
+    /// returned row, which is the `follow_up_judged` payload and the output
+    /// (the stored `follow_up_judgements` row has none); the goal is not
+    /// reopened and the follow_up does not move.
     pub fn judge_follow_up(
         &mut self,
         task: TaskId,

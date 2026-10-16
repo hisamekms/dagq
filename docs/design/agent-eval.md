@@ -53,7 +53,6 @@ workerもjobもLLMのCLIを直接打たない。
 
 ファイルの形と欄の意味は`domain::agent_eval`の`CaseFile`と`Case`のdoc commentが持つ。
 
-- 共通の欄のうち`made_by`は作った道具と版（productionはラベルを付けたproviderと版）、`base_commit`はpatchを当てるcommit。
 - `handmade`はdevだけに置く。改善するsessionが中身を読んだケースはholdoutに置かない。
 - 読み手は形の誤りを、最初の1つでなく全て返す。
 - 起動・形の検査・採点・productionのケースの作り方は役割ごとのharnessが持つ。今作るのはreviewのharnessだけ。

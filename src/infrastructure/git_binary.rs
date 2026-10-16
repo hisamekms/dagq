@@ -21,6 +21,10 @@ pub fn git_executable() -> Result<PathBuf> {
     GIT.clone().map_err(anyhow::Error::msg)
 }
 
+/// The real Git of the selected developer tools, by `/usr/bin/xcrun --find git`,
+/// given up after 30 seconds. A failed launch, a nonzero exit or the timeout
+/// gives none, and [`resolve_shim`] then keeps the Git found first, as it does
+/// for an output that is not an absolute path to an executable file.
 fn find_developer_git() -> Option<PathBuf> {
     let (status, stdout, _) = capture(
         Command::new("/usr/bin/xcrun").args(["--find", "git"]),

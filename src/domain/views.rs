@@ -68,7 +68,14 @@ pub struct GoalTask {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GoalDetail {
+    /// The version of the goal's acceptance, raised by one only when its
+    /// text changes; a membership judgement keeps the version it was made
+    /// against.
     pub acceptance_version: i64,
+    /// Each follow_up whose source goal is this goal, or that belongs to
+    /// it or was judged against it (moved ones included): its current goal
+    /// and status, its registration material, its `follow_up_depth` and
+    /// its judgements as in [`TaskDetail::membership_judgements`].
     pub follow_up_memberships: Vec<serde_json::Value>,
     pub goal: Goal,
     pub closed: bool,
@@ -154,6 +161,10 @@ pub struct EventFilter {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskDetail {
+    /// The task's follow-up membership judgements, oldest first (the last
+    /// is the current one), each with the source goal's current acceptance
+    /// version and `needs_recheck`, true when that differs from the version
+    /// the judgement was made against.
     pub membership_judgements: Vec<serde_json::Value>,
     pub task: Task,
     pub dependencies: Vec<TaskId>,

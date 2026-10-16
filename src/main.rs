@@ -323,20 +323,33 @@ enum Command {
         command: GoalCommand,
     },
     /// Record or correct a follow-up membership judgement against its source goal acceptance.
+    ///
+    /// `judge-follow-up TASK --classification required|out_of_scope|undecided --reason TEXT`.
+    /// required needs at least one --acceptance-item, and required and out_of_scope at least one
+    /// --evidence; the reason and each item and reference must not be blank. undecided may record
+    /// why it could not be decided. A judgement is appended and the latest one is the current one.
     JudgeFollowUp {
+        /// The follow_up task judged, in any status.
         task: i64,
+        /// required, out_of_scope or undecided.
         #[arg(long)]
         classification: String,
+        /// An item of the source goal's acceptance the follow_up bears on; repeatable. required needs one or more.
         #[arg(long = "acceptance-item")]
         acceptance_items: Vec<String>,
+        /// Why; for undecided, why it could not be decided.
         #[arg(long)]
         reason: String,
+        /// A reference the judgement rests on; repeatable. required and out_of_scope need one or more.
         #[arg(long = "evidence")]
         evidence: Vec<String>,
+        /// For out_of_scope, the open goal other than the source goal the follow_up moves to; required belongs to the source goal and takes no other.
         #[arg(long = "destination-goal")]
         destination_goal: Option<i64>,
+        /// The source goal, found from the evidence, when the registration did not record one; later judgements use the same source goal.
         #[arg(long = "source-goal")]
         source_goal: Option<i64>,
+        /// The id of the latest judgement this one corrects; needed to change between required and out_of_scope (going back to undecided is refused).
         #[arg(long)]
         corrects: Option<i64>,
     },

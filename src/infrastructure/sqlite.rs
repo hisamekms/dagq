@@ -1467,6 +1467,10 @@ impl TaskStore for SqliteQueue {
         })
     }
 
+    /// Edit a goal and record `goal_updated` with the goal before and after,
+    /// and the goal's acceptance version before (`old_acceptance_version`)
+    /// and after (`new_acceptance_version`) the edit, which differ only when
+    /// the acceptance text changed.
     fn edit_goal(&mut self, goal_id: GoalId, edit: GoalEdit) -> Result<Goal> {
         ensure!(!edit.is_empty(), "goal edit changes nothing");
         if let (Some(set), Some(tags)) = (&self.goal_tags, &edit.tags) {

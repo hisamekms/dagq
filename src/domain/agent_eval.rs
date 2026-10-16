@@ -167,7 +167,10 @@ pub struct Case {
     /// Unique in its file; the same id may be in another split's file.
     pub id: String,
     pub source: Source,
+    /// The tool and its version that made the case; for a production case,
+    /// the provider and version that labelled it.
     pub made_by: String,
+    /// The commit the case's patch applies to.
     pub base_commit: String,
     /// The SHA-256 of the patch in [`PATCH_DIR`].
     pub patch: String,
