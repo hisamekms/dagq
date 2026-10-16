@@ -33,12 +33,6 @@ line = 2679
 tasks = 24
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/auto-update.md"
-size = 50052
-line = 6480
-tasks = 21
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/backend-call-failures.md"
 tasks = 10
 
@@ -63,11 +57,6 @@ path = "docs/design/supervisor-lifecycle/host-metrics.md"
 tasks = 7
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/install.md"
-line = 5110
-tasks = 9
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/observer.md"
 size = 55866
 line = 5229
@@ -80,16 +69,6 @@ size = 46299
 [[doc]]
 path = "docs/design/supervisor-lifecycle/plan-review.md"
 size = 41468
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/push.md"
-tasks = 3
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/release-update.md"
-size = 31600
-line = 1661
-tasks = 2
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/run-environment.md"
@@ -116,9 +95,4 @@ path = "docs/design/supervisor-lifecycle/throughput-review.md"
 size = 39731
 line = 3093
 tasks = 29
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/up-down.md"
-size = 53638
-line = 5846
 

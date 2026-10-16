@@ -26,36 +26,49 @@ related:
 
 [ADR-0045](../../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定13・17。`up --auto-update`のsupervisorは、runtimeを変えるcommitがmainに着地するたびに、queueのdirの下でそのcommitをビルドし、同じcheckoutで全部のe2eを流して通ったときだけ（[ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)決定1）、[`install`](install.md#install)と同じ手順で固定バイナリを置き換えて自分を[引き継ぎ](handoff.md#handoff)で入れ替える。走っているsessionは止まらない。supervisor側は`src/application/supervise/update.rs`、ビルドから見張りまでのjobは`src/application/update.rs`（`run`）、CLIは隠しコマンド`dagq auto-update`、配線は`src/compose/host.rs`の`OneShot::auto_update`。
 
-- **有効にする**: `up --auto-update`は、起動するsupervisorを`supervise --auto-update`で起動し（登録の直後に`supervisors.auto_update`を1にする。launchdの再起動でも同じ引数なので残る）、reuseや引き継ぎで残すliveな登録には`set_auto_update`で1を書く。`--auto-update`の無い`up`は同じ登録の`auto_update`を0にする。結果の`supervisor.auto_update`に出る。execの引き継ぎは登録の行を変えないので、設定は残る。この repository は`dagq.toml`を置かないので、設定ファイルではなく`up`のフラグにした（ADR-0045のAlternatives）。
-- **きっかけ**（`auto_update_pass`）: supervisorはループの各passで、前に見てから`--update-interval`（既定30秒）経っていて、自分の登録の`auto_update`が1なら、mainを見る。停止要求の後、claimを止めた後、引き継ぎの要求を受けた後は見ない。
+- **有効にする**: `up --auto-update`は、起動するsupervisorの登録の`auto_update`を1にし（launchdの再起動でも同じ引数なので残る）、reuseや引き継ぎで残すliveな登録には`set_auto_update`で1を書く。
+  `--auto-update`の無い`up`は同じ登録の`auto_update`を0にする。
+  execの引き継ぎは登録の行を変えないので、設定は残る。
+  設定ファイルではなく`up`のフラグにした理由はADR-0045のAlternativesが持つ。
+- **きっかけ**（`auto_update_pass`）: supervisorはループの各passで、前に見てから見直しの間隔が経っていて、自分の登録の`auto_update`が1なら、mainを見る。
+  停止要求の後、claimを止めた後、引き継ぎの要求を受けた後は見ない。
   1. まず`update_failed`のaskの答え（下記）を適用する。
-  2. 自分が起動したjobが生きているか、jobが書いた最新の段（askの答えの`update_answered` / `update_retry`は飛ばす）が`update_started` / `update_built` / `update_restored`でそのjobのpidが生きていれば、何もしない（同時に1つ。execの後の新しいプロセスもDBの行で判定する）。execの前に起動したjobはexec後のプロセスの子のままで他に回収する者がいないので、そのpidを`waitpid(WNOHANG)`で回収してから生死を見る（`ProcessControl::reap`）。その行のjobが死んでいれば（kill、再起動）、どこまで進んだか分からないので自分ではやり直さず、`update_failed`（`stage: interrupted`）を書いて`update_failed`のaskを開く。
-  3. mainのhead（`refs/heads/<branch>`）と、比べる元（`base`）を決める。`base`は最新の`update_started`のcommit、無ければ自分のbuild識別子が名乗るcommit（`X.Y.Z-dev+<commit>[.dirty]`の`<commit>`）、それも無ければ（リリースのビルド、`+unknown`）このプロセスが最初に見たmain。headが`base`と同じなら何もしない。
-  4. `git diff --name-only <base> <head>`のどれかが`src/`・`migrations/`・`Cargo.toml`・`Cargo.lock`・`build.rs`・`rust-toolchain.toml`（`RUNTIME_PATHS`。`build.rs`はbuild識別子を埋め込む）なら、headのjobを起動する。変えていなければそのheadを覚えて見直さず、`automatic update: main's <head> builds nothing: it changes no runtime path`をheadごとに1回logに出す（testは固定のsleepの代わりにこの行を待つ。task 1048）。`base`をGitが知らない（別のcloneのビルド）ときは、headを1回ビルドして、それが次の`base`になる。`update_retry`（`retry`の答え）が最新の`update_started`より新しければ、差分を見ずにheadをビルドする。
-  - supervisorの着地でも、人が手で打った`integrate`でも、mainが進めば同じように拾う。ビルド中に次の着地があっても積まず、jobが終わった後の最初の見直しで、そのときのheadを1回ビルドする。
-- **job**（`dagq --db <db> auto-update --commit <head> --token <supervisor> --to <supervisorのbinary> --repo <checkout> --log <build log> --claude … --codex … [--cmux …] [--plugin-dir …] [--build-command …] [--e2e-command …] [--e2e-timeout …] [--poll-ms …]`。`--claude`と`--codex`はsupervisorの`Layout`の値で、jobがsupervisorを起動し直す`up`にも渡す）: supervisorが自分のbinary（`current_exe`）で起動する。
+  2. 自分が起動したjobが生きているか、jobが書いた最新の段（askの答えの段は飛ばす。`JOB_STEPS`）でそのjobのpidが生きていれば、何もしない（同時に1つ。execの後の新しいプロセスもDBの行で判定する）。
+     execの前に起動したjobはexec後のプロセスの子のままで他に回収する者がいないので、そのpidを回収してから生死を見る（`ProcessControl::reap`）。
+     その行のjobが死んでいれば（kill、再起動）、どこまで進んだか分からないので自分ではやり直さず、中断の段の`update_failed`を書いて`update_failed`のaskを開く。
+  3. mainのheadと、比べる元（`base`）を決める。
+     `base`は最新の`update_started`のcommit、無ければ自分のbuild識別子が名乗るcommit、それも無ければ（リリースのビルド）このプロセスが最初に見たmain。
+     headが`base`と同じなら何もしない。
+  4. `base`からheadまでの差分がruntimeのpath（`RUNTIME_PATHS`）を変えていれば、headのjobを起動する。
+     変えていなければそのheadを覚えて見直さず、何もビルドしないことをheadごとに1回logに出す（testは固定のsleepの代わりにこの行を待つ）。
+     `base`をGitが知らない（別のcloneのビルド）ときは、headを1回ビルドして、それが次の`base`になる。
+     `retry`の答えが最新の`update_started`より新しければ、差分を見ずにheadをビルドする。
+  - supervisorの着地でも、人が手で打った`integrate`でも、mainが進めば同じように拾う。
+    ビルド中に次の着地があっても積まず、jobが終わった後の最初の見直しで、そのときのheadを1回ビルドする。
+- **job**（隠しコマンド`dagq auto-update`。引数は`--help`が持つ）: supervisorが自分のbinary（`current_exe`）で起動する。
   setsidで新しいsessionとprocess groupに入れる（supervisorのexecにも、登録済みのin-cmuxのsupervisorのworkspaceが閉じられることにも巻き込まれないため）。
-  stdoutは`<queue dir>/logs/update-<unix時刻>-<commit 12桁>.json`（結果）、stderrは同じ名前の`.log`、ビルドの出力は`.build.log`、jobのtracingは`auto-update-*.jsonl`（どれも最後の書き込みから14日で消える。[Logs](commands.md#log)）。
-  hiddenの`--poll-ms`（既定500）は3の引き継ぎの待ちと4の見張りがqueueを見る間隔で、supervisorはhiddenの`supervise --update-poll-ms`を渡されたときだけそれを付ける（testが短くする。task 1048）。
-  起動したら、supervisorが`update_started`（`pid`・`base`・`supervisor`・`version`・logのpath）を書く。
-  1. **ビルド**: `<queue dir>/update/checkout`をheadに合わせる（無ければ`git worktree add --detach --force`、あれば`checkout --detach --force`と`clean -fdx`）。`CARGO_TARGET_DIR=<queue dir>/update/target`で`cargo build --release --locked -p dagq`を走らせる（`--update-build-command`で渡したshellのコマンドに置き換えられる。testが使う）。人のmainのcheckoutと`target/`は使わない。成功すれば`update_built`。
+  結果・stderr・ビルドの出力・tracingのlogは`<queue dir>/logs/`の下に置き、古いものは消える（[Logs](commands.md#log)）。
+  起動したら、supervisorが`update_started`を書く。
+  1. **ビルド**: `<queue dir>/update/checkout`をheadに合わせ、`CARGO_TARGET_DIR=<queue dir>/update/target`でreleaseのビルドを走らせる。
+     人のmainのcheckoutと`target/`は使わない。
+     成功すれば`update_built`。
      - **`update/target`の排他**: jobはcheckoutの前にqueueの`update/lock`を待って取り（`update::hold_target`）、jobが終わるまで持つ（e2eの関門は同じtargetを使い、入れ替えるbinaryもそこにある）。
        release更新のjobと`install --release`も同じlockを取るので、queueの中で`update/target`を使うのは1つだけ。
        持つ間は空き容量の掃除が`update/target`を消さず、掃除が消す間はjobが待つ（[空き容量を確かめる](disk-space.md)の「queueのdirのビルドのキャッシュ」）。
-       lockを取れなければ（errorのとき）`update_failed`（`stage: build`）。
-     - **e2eの関門**（ADR-t963-1決定1、`e2e_gate::run`）: 続けて同じcheckoutで、ビルドと同じ`CARGO_TARGET_DIR`のまま全部のe2eを流す（`--e2e-command`はtestがe2eの代わりに流すshellのコマンド）。
+       lockを取れなければ（errorのとき）buildの段の`update_failed`。
+     - **e2eの関門**（ADR-t963-1決定1、`e2e_gate::run`）: 続けて同じcheckoutで、ビルドと同じ`CARGO_TARGET_DIR`のまま全部のe2eを流す。
        envはjobのprocessのenvを引き継がず、許す名前（資格情報を除く）だけにmain checkoutの`dagq.toml`の`[run.env]`（[Run environment](run-environment.md)）と1回ごとの`TMPDIR`を重ね、logの冒頭に渡した名前だけを書く。
-       許す名前・資格情報を除く規則・足りないときの見え方と`dagq install --rollback`での戻し方は、runのe2eと同じで[着地の前のe2e](landing-e2e.md)の「環境」が持つ。
+       許す名前・資格情報を除く規則・足りないときの見え方と戻し方は、runのe2eと同じで[着地の前のe2e](landing-e2e.md)の「環境」が持つ。
        流す前に、hostで1本ずつ流すためのlock（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)決定4、`install::e2e_lock_path`）を取り、流し直しが終わるまで持つ。
        runtimeがreviewのpassの後に流すrunのe2e（[着地の前のe2e](landing-e2e.md)）と`install`の関門も同じlockを取るので、先に取ったものが流し、後のものは空くまで待つ。
-       出力はbuild logに並ぶe2eのlogで、上限（`install::E2E_TIMEOUT`。supervisorの隠しflagで変えられる）を超えたらprocess groupを止めて落ちた扱いにする（`stop_group`）。
+       出力はbuild logに並ぶe2eのlogで、上限（`install::E2E_TIMEOUT`）を超えたらprocess groupを止めて落ちた扱いにする（`stop_group`）。
        落ちたtestはlogの`test <name> ... FAILED`の行から読む。
        hostの道具の有無で外すe2eは無く、全部のe2eで判定する（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定7）。
      - **期間限定で外したケース**（[ADR-t1582-1](../../adr/2026-10-04-t1582-1-temporarily-leave-broker-and-cmux-only-e2e-cases-out.md)）: 今は関門の「全部のe2e」から外したケースは無い。
        外したケースは登録に無いので`update_e2e_passed`には出ない。
        一覧と規則は[testの制約](../../development/testing.md#e2e)。
      - **後始末**: 通っても落ちても、そのe2eの`TMPDIR`を使い捨ての場所として片付ける。
-       command lineの引数にその`TMPDIR`の中のpathを持つprocess（e2eが起動したsupervisorやstubのagent。時間切れで止めたときに残る）をSIGTERM（3秒でSIGKILL）で止める。
+       command lineの引数にその`TMPDIR`の中のpathを持つprocess（e2eが起動したsupervisorやstubのagent。時間切れで止めたときに残る）をSIGTERM（待って止まらなければSIGKILL）で止める。
        続けて`TMPDIR`を消す。
        processは`ps`で列挙して探し、cmuxは呼ばない（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定7）。
        - 消せなければ`TMPDIR`を残す。
@@ -64,67 +77,107 @@ related:
          何をしたかは`cleanup`に残す（欄の意味は`e2e_gate::clean_up`）。
      - **流し直し**（[ADR-t1165-1](../../adr/2026-09-30-t1165-1-e2e-gate-reruns-failed-e2e-once-and-records-quarantined-failures.md)決定1、`e2e_gate::run`）: e2eが上限の内に落ち、logに落ちたtestとlibtestのまとめの行があれば、落ちたtestだけを同じcheckout・env・targetで名前で絞って1回だけ流し直す。
        まとめの行が無い（途中でexitした）e2eは結果の無いtestを残すので流し直さない。
-       流し直しは1回目と別の同じ長さの上限と、自分の`TMPDIR`・後始末・log（`E2eSettings::rerun_log`）を持つ。
+       流し直しは1回目と別の同じ長さの上限と、自分の`TMPDIR`・後始末・logを持つ。
        流し直しで通ったと出たtestだけを通ったとし、それをflakyとする。
        それ以外（落ちた・結果の出ないtest、上限切れと始められないときは流し直した全部）は流し直しでも落ちたtestとし（`E2eRerun`）、流し直しの上限切れと始められないときは印に依らず関門は落ちる。
-     - **印**（決定2・3、`domain::e2e_quarantine`）: 関門が流すcheckoutの`.config/e2e-quarantine.toml`（`e2e_quarantine::FILE`。無ければ印は無い）を読む。走っている旧バイナリが読む`dagq.toml`には置かない。書式は`[[test]]`の配列で、どれも必須の`name`（cargoが出すe2eのtestの名前。`tests/e2e/`の下のmoduleのtestはmoduleのpathを含む）・`reason`（文字列）・`task`（直すtaskのID、正の整数）・`until`（期限の日付`YYYY-MM-DD`。TOMLの日付か文字列。hostのlocalの日付でその日の終わりまで効く。offsetは`E2eSettings::utc_offset_secs`）を持つ。`#`のcommentと`"…"`（`\"`・`\\`・`\n`・`\t`）・`'…'`の文字列を読み、知らない表・key、欠けたkey、同じkeyや同じ`name`の重複は読めないファイルとする。
-
-       ```toml
-       [[test]]
-       name = "happy_path_runs_a_stub_agent_in_the_background_and_lands_on_main"
-       reason = "書式の例: 不安定な失敗の理由と頻度"
-       task = 1234 # 書式の例: 実際に直すtaskのIDを書く
-       until = 2026-10-15
-       ```
-
-       `scripts/check-e2e-quarantine.sh`（CIが実行し、印を変えるtaskのverifyに付ける）がcommitの時点でこのファイルを検査する: 上の書式（`[[test]]`だけ、4つのkeyが1つずつ、`task`は正の整数、`until`は実在する日付）、`name`の重複、`name`のtestが`tests/e2e.rs`（moduleのpathを含む名前は`tests/e2e/<module>.rs`か`tests/e2e/<module>/`）に`#[test]`のfnとしてあること、印が`LIMIT`（3本）以下であることを見て、違反を名前か行つきで出してexit 1にする。期限切れの印は関門が効かせないだけなので警告を出してexit 0。ファイルが無ければexit 0。印の付け外しの規則は[testの制約](../../development/testing.md#e2eの印)が持つ。
-
-       流し直しでも落ちたtestが全て効いている印を持てば関門は通り、そのtestは印で通した（quarantined）とする。印の無いtestが1つでも流し直しで落ちれば落ちる。効かない印: `until`を過ぎた印（`expired`）、印が上限`e2e_quarantine::LIMIT`（3本）を超えるファイルの全部の印（`over_limit`）、印の付いたtestが今回を含めて`e2e_quarantine::FAILURES_IN_A_ROW`（3回）続けて流し直しでも落ちた印（`failed_in_a_row`）。読めないファイルでは印を1つも効かせない。続けての失敗は、直前までの関門のevent（queueの`e2e_gate_events`の新しい順に最大`e2e_verdict::HISTORY`（200）件。runtimeがrunに流すe2eの`run_e2e_finished`（`outcome: passed`）と`run_e2e_failed`も関門として合わせて数える。ADR-t1233-2決定5）の`update_e2e_passed`と`stage: e2e`の`update_failed`（とrunのそれら）を新しい方から見て、`rerun.failed`にそのtestがある関門を数える（`e2e_verdict::failures_in_a_row`）。`rerun`があってそのtestが無い関門と、`rerun`の無い`update_e2e_passed`で数えるのをやめ、`rerun`の無い`update_failed`（上限切れ・始められない・古いruntimeの記録）と、`rerun`の`timed_out`がtrueか`error`のある関門（流し直しがtestについて何も言っていない）は飛ばす。印の有無に依らず数えるので、関門を落とした後もそのtestが流し直しで通るまで落ち続ける。判定は`application::e2e_verdict::judge`（自動更新のjobと`install`と、runtimeがrunに流すe2eが共有する。runのe2eは印をrunのworktreeではなくlanding branchの着地したcommitのtreeから読み、runが変えたtestと直すtaskの印を外す。[着地の前のe2e](landing-e2e.md)）。落ちたときの`error`と`update_failed`のaskの問いには、落ちたtest、流し直しでも落ちたtest、flaky・quarantinedのtest、印が効かなかったtestとその理由（`<name>: its mark expired after <until>`・`<name>: it failed the rerun of 3 gates in a row …`）とファイルの理由（`.config/e2e-quarantine.toml has 4 marks, more than 3`・`.config/e2e-quarantine.toml could not be read: …`）、1回目と流し直しのlogのpathが載る。
+     - **印**（決定2・3、`domain::e2e_quarantine`）: 関門が流すcheckoutの`.config/e2e-quarantine.toml`（無ければ印は無い）を読む。
+       走っている旧バイナリが読む`dagq.toml`には置かない。
+       書式と例は`domain::e2e_quarantine`のmoduleのdoc comment、commitの時点の検査は`scripts/check-e2e-quarantine.sh`（CIが実行し、印を変えるtaskのverifyに付ける）の冒頭のcommentが持つ。
+       期限切れの印は関門が効かせないだけなので、検査は警告だけで通す。
+       印の付け外しの規則は[testの制約](../../development/testing.md#e2eの印)が持つ。
+       流し直しでも落ちたtestが全て効いている印を持てば関門は通り、そのtestは印で通した（quarantined）とする。
+       印の無いtestが1つでも流し直しで落ちれば落ちる。
+       効かない印は、期限を過ぎた印、印が上限を超えるファイルの全部の印、印の付いたtestが今回を含めて決まった回数続けて流し直しでも落ちた印で、読めないファイルでは印を1つも効かせない（`e2e_quarantine`のdoc comment）。
+       続けての失敗は、queueの関門のeventを新しい方から見て数え、runtimeがrunに流すe2eの結果も関門として合わせて数える（ADR-t1233-2決定5、数え方は`e2e_quarantine::failures_in_a_row`のdoc comment）。
+       印の有無に依らず数えるので、関門を落とした後もそのtestが流し直しで通るまで落ち続ける。
+       判定は`application::e2e_verdict::judge`で、自動更新のjobと`install`と、runtimeがrunに流すe2eが共有する（runのe2eが印を読むcommitと外す印は[着地の前のe2e](landing-e2e.md)）。
+       落ちたときの`error`と`update_failed`のaskの問いには、落ちたtest、流し直しでも落ちたtest、flaky・quarantinedのtest、印が効かなかったtestとその理由とファイルの理由、1回目と流し直しのlogのpathが載る。
      - 通れば`update_e2e_passed`を書いて2へ進む。
-       関門の判定の欄（流し直しで通ったflakyなtest、印で通したtest、流し直しと印のファイルの読み取り。ADR-t1165-1決定4）は`update_e2e_passed`と`stage: e2e`の`update_failed`の両方に載り、欄の意味は`e2e_verdict::E2eVerdict`の`fields`のdoc commentが持つ。
+       関門の判定の欄（ADR-t1165-1決定4）は`update_e2e_passed`とe2eの段の`update_failed`の両方に載り、欄の意味は`e2e_verdict::E2eVerdict`の`fields`のdoc commentが持つ。
        `stats`はこれをtestごとに数え（下の`stats`）、observerは`flaky_test`のfindingにする（[Observer](observer.md)）。
        落ちれば（流し直しでも落ちたtestに効いている印の無いものがある、上限切れ、始められない）何も置き換えず、非互換のmigrationのビルドも`staged`に置かず`approve_update`を開かない。
-       `update_failed`（`stage: e2e`）に落ちたtestかその理由とlogのpathを書き、`update_failed`のask（`retry` / `skip`）を開く。
+       e2eの段の`update_failed`に落ちたtestかその理由とlogのpathを書き、`update_failed`のask（`retry` / `skip`）を開く。
        新しいaskのkindは作らない。
        同じcommitでは繰り返さず（`base`が進むので、次にruntimeを変える着地のheadで試す）、`retry`の答えは同じheadをもう一度ビルドしてe2eを流す。
        [Release update](release-update.md)のjobはリリースのバイナリなので関門を持たない。
-  2. **非互換のmigration**: 新しいbinaryの`migrate --check`に非互換のmigrationがあれば、`install`と同じ確認（`--version`と使い捨てのqueueでの起動）をして`<queue dir>/update/staged/dagq`にcopyし、`approve_update`のask（下記）を開いて`update_awaiting_approval`（`version`・`migrations`・`binary`・`command`）で終わる。何も置き換えない。
-  3. **入れ替え**: それ以外は`install::install`（`Source::Binary`、drainはしない）を呼ぶ: 確認、互換のmigration、renameでの差し替え（`.previous`を残す）、このqueueのliveなsupervisorへの引き継ぎの要求と、同じpidとtokenで戻るまでの待ち（tokenの登録が消えても、同じpidが引き継ぎを頼んだ後に新しいbuild識別子で登録し直していれば、その新しいtokenで戻ったとする（`lifecycle::successor`。候補は引き継ぎを頼んだ時刻以降に`started_at`を持つ登録に限り、複数なら`started_at`の最も新しいもの。pidが再利用されて同じpidとbuild識別子の古い行が残っていても、それを後継とみなさない。task 633）。`--handoff-timeout`、既定1800秒。execしたプロセスが死ねばheartbeatが止まった時点で失敗。停止要求でdrainに入ったsupervisor（`supervisor_draining`を記録したもの）は上限を待たずに失敗にし、要求を取り消す（`update_failed`の`supervisors[]`の要素に`stopping: true`。全員の失敗の`HandoffFailed`の経路でも、一部の失敗の`KeptBinary`の経路（`refused`）でも`install`の結果から写す。errorは`is stopping (a stop request wins over the handoff) and was not handed off`。task 1277、[Handoff](handoff.md#handoff)）。上限の直後にsupervisorがexec直前の条件付きUPDATEで要求を受け取れば取り消しが要求を見つけないので、`lifecycle::HANDOFF_GRACE`の猶予のあいだ見直し、新しいbuild識別子で戻れば引き継いだとして4で見張る。task 715、[`up` / `down`](up-down.md)の引き継ぎ）。引き継ぎは最初の失敗で止まらず全員の結果を待ち、全員が失敗すれば`install`がfileを戻して`install::HandoffFailed`のerror（supervisorごとの結果と戻したかどうか）を返すので、jobは引き継がせたsupervisorのそれぞれを5で戻す（stageは`install`、`kept: false`。task 716）。一部だけが失敗すれば`install`はfileを残して`install::KeptBinary`のerrorを返すので（[ADR-t632-1](../../adr/2026-09-27-t632-1-handoff-restores-only-when-every-supervisor-failed.md)）、jobはその結果から、引き継いだsupervisorを4で見張り、引き継がなかったsupervisorをその理由で失敗にして4の一部の失敗と同じく扱う（stageは`handoff`）。
-  4. **見張り**（決定13、task 497）: 3の`install`の結果から4・5と6の失敗の記録までは`settle`（`src/application/update.rs`）で、人の`dagq install`の見張り（[`install`](install.md#install)の7、`install_watched`）と共有する（人の`install`では起動したsupervisorが無く、jobの段の`update_restored`を書かず、`update_failed`は`source: "install"`）。引き継ぎの後、`install`が引き継がせたsupervisor（結果の`supervisors`のtokenとpid。空ならjobを起動したsupervisor）のすべてについて、同じtokenの登録が新しいbuild識別子のまま、取り戻したときより後のheartbeatを`--watch-timeout`（既定60秒）の内に書くのを待つ。`heartbeat_at`はunix秒で、supervisorは`HEARTBEAT_INTERVAL`（2秒）ごとに書くので、取り戻してから最大で約2秒と次の秒まで待つ。testはhiddenの`supervise --heartbeat-interval-ms`でheartbeatの間隔を短くし（見張りは次の秒で進む）、in-processのtestは次のheartbeatを1秒先の時計で書いて、秒をまたぐsleepを置かない（productionの間隔と判定は変えない。task 1048）。tokenの登録が消えても、同じpidが`install`を呼ぶ前の時刻以降に新しいbuild識別子で登録し直していれば（照合は3と同じ`lifecycle::successor`）、その登録を追い（heartbeatの比べる元はその登録で取り直す）、進めば成功とする。PIDが死んだ、登録が消えて同じpidの登録も無い、build識別子が違う、heartbeatが進まない、のどれかでそのsupervisorを失敗にし、他のsupervisorは最後まで見張る。fileは全員で1つなので、全員が失敗したときだけ、`.previous`が置き換えた前のbuild識別子と同じなら`restore`で戻す（違えば戻さず、その旨をaskに書く）。一部だけが失敗したときは、新しいbinaryで動いているsupervisorがあるので戻さず（`kept: true`）、失敗したsupervisorだけを5で戻し（止まったものは置いたままの新しいbinaryで起動し直し、execに失敗して前のbinaryのまま動くものはそのまま）、`update_failed`のaskで人に判断を渡す（[ADR-t632-1](../../adr/2026-09-27-t632-1-handoff-restores-only-when-every-supervisor-failed.md)。askは前のbinaryのまま動くsupervisorを`down --force`と`up`で揃えるか、`install --rollback`で全員を戻すかを案内する）。戻したら、supervisorを戻した（5）後に`update_restored`（`version`・`restored_version`）を書く（書けなくても続ける）。`update_restored`は`update_started` / `update_built` / `update_e2e_passed`と同じくjobの途中の段（`JOB_STEPS`）で、jobが死んで最新の段のまま残れば2のinterruptedになる。
-  5. **supervisorを戻す**（`bring_back`）: 3の引き継ぎより前の失敗（差し替えの失敗など、supervisorごとの結果が無いもの）の後はjobを起動したsupervisorだけを、3の全員の引き継ぎの失敗（`HandoffFailed`）と4の失敗の後は失敗したsupervisorのそれぞれを（入れ替え前の登録は結果のtoken、無ければpidで引く。全員の引き継ぎの失敗で、jobを起動したsupervisorが引き継がせた中に居なければ（`install`が見たときliveでなかった）、それも戻して`supervisor`に載せる）、見張りが追った今の登録（同じpidが登録し直した新しいtokenの登録なら、modeとworkspaceは入れ替え前の登録のもの）で戻す。
+  2. **非互換のmigration**: 新しいbinaryに非互換のmigrationがあれば、`install`と同じ確認をして`<queue dir>/update/staged/dagq`にcopyし、`approve_update`のask（下記）を開いて`update_awaiting_approval`で終わる。
+     何も置き換えない。
+  3. **入れ替え**: それ以外は`install::install`（`Source::Binary`、drainはしない）を呼ぶ: 確認、互換のmigration、renameでの差し替え（`.previous`を残す）、このqueueのliveなsupervisorへの引き継ぎの要求と、同じpidとtokenで戻るまでの待ち。
+     tokenの登録が消えても、同じpidが引き継ぎを頼んだ後に新しいbuild識別子で登録し直していれば、その新しいtokenで戻ったとする（`lifecycle::successor`。pidが再利用されて残った古い行は後継とみなさない）。
+     execしたプロセスが死ねばheartbeatが止まった時点で失敗。
+     停止要求でdrainに入ったsupervisorは上限を待たずに失敗にし、要求を取り消す（[Handoff](handoff.md#handoff)）。
+     上限の直後にsupervisorがexec直前に要求を受け取れば取り消しが要求を見つけないので、`lifecycle::HANDOFF_GRACE`の猶予のあいだ見直し、新しいbuild識別子で戻れば引き継いだとして4で見張る（[`up` / `down`](up-down.md)の引き継ぎ）。
+     引き継ぎは最初の失敗で止まらず全員の結果を待つ。
+     全員が失敗すれば`install`がfileを戻して`install::HandoffFailed`を返すので、jobは引き継がせたsupervisorのそれぞれを5で戻す（stageは`install`）。
+     一部だけが失敗すれば`install`はfileを残して`install::KeptBinary`を返すので（[ADR-t632-1](../../adr/2026-09-27-t632-1-handoff-restores-only-when-every-supervisor-failed.md)）、jobは引き継いだsupervisorを4で見張り、引き継がなかったsupervisorをその理由で失敗にして4の一部の失敗と同じく扱う（stageは`handoff`）。
+  4. **見張り**（決定13）: 3の`install`の結果から4・5と6の失敗の記録までは`settle`（`src/application/update.rs`）で、人の`dagq install`の見張り（[`install`](install.md#install)の7、`install_watched`）と共有する（人の`install`では起動したsupervisorが無く、jobの段の`update_restored`を書かず、`update_failed`は人の`install`のものと分かる形で書く）。
+     引き継ぎの後、`install`が引き継がせたsupervisor（空ならjobを起動したsupervisor）のすべてについて、同じtokenの登録が新しいbuild識別子のまま、取り戻したときより後のheartbeatを見張りの上限の内に書くのを待つ。
+     tokenの登録が消えても、同じpidが`install`を呼ぶ前の時刻以降に新しいbuild識別子で登録し直していれば（照合は3と同じ`lifecycle::successor`）、その登録を追い、進めば成功とする。
+     PIDが死んだ、登録が消えて同じpidの登録も無い、build識別子が違う、heartbeatが進まない、のどれかでそのsupervisorを失敗にし、他のsupervisorは最後まで見張る。
+     fileは全員で1つなので、全員が失敗したときだけ、`.previous`が置き換えた前のbuild識別子と同じなら`restore`で戻す（違えば戻さず、その旨をaskに書く）。
+     一部だけが失敗したときは、新しいbinaryで動いているsupervisorがあるので戻さず、失敗したsupervisorだけを5で戻し（止まったものは置いたままの新しいbinaryで起動し直し、execに失敗して前のbinaryのまま動くものはそのまま）、`update_failed`のaskで人に判断を渡す（[ADR-t632-1](../../adr/2026-09-27-t632-1-handoff-restores-only-when-every-supervisor-failed.md)。askは前のbinaryのまま動くsupervisorを`down --force`と`up`で揃えるか、`install --rollback`で全員を戻すかを案内する）。
+     戻したら、supervisorを戻した（5）後に`update_restored`を書く（書けなくても続ける）。
+     `update_restored`はjobの途中の段（`JOB_STEPS`）で、jobが死んで最新の段のまま残れば2のinterruptedになる。
+  5. **supervisorを戻す**（`bring_back`）: 3の引き継ぎより前の失敗（差し替えの失敗など、supervisorごとの結果が無いもの）の後はjobを起動したsupervisorだけを、3の全員の引き継ぎの失敗と4の失敗の後は失敗したsupervisorのそれぞれを戻す。
+     全員の引き継ぎの失敗で、jobを起動したsupervisorが引き継がせた中に居なければ（`install`が見たときliveでなかった）、それも戻す。
+     戻すのは見張りが追った今の登録（同じpidが登録し直した新しいtokenの登録なら、modeとworkspaceは入れ替え前の登録のもの）で行う。
      その登録が前のbuild識別子のままheartbeatしていれば（execが失敗して前のbinaryが続けた）何もしない。
-     PIDが生きていてheartbeatしていなければSIGTERM（10秒で止まらなければSIGKILL）で止め、止めたか死んでいた登録を起動し直す: launchd modeの登録は`KeepAlive`が戻したbinaryで起動し直すので任せ、登録済みのin-cmuxのsupervisorは記録したworkspaceを閉じず（人が閉じる）、戻したbinaryの`--in-cmux`を付けない`up [--auto-update] --parallel <登録のparallel> --cmux … --claude … --codex … [--plugin-dir …]`でlaunchd modeとして起動する（`--auto-update`はその登録が`auto_update`を持つときだけ付け、ほかは登録から取ったflag。source buildのjobもリリースのjobも同じ`application::update::restart`）。
+     PIDが生きていてheartbeatしていなければSIGTERM（止まらなければSIGKILL）で止め、止めたか死んでいた登録を起動し直す（`application::update::restart`、source buildのjobもリリースのjobも同じ）。
+     launchd modeの登録は`KeepAlive`が戻したbinaryで起動し直すので任せ、登録済みのin-cmuxのsupervisorは記録したworkspaceを閉じず（人が閉じる）、戻したbinaryの`up`でlaunchd modeとして起動する（`--auto-update`はその登録が`auto_update`を持つときだけ付ける）。
      この`up`が失敗したときは`update_failed`のaskと`supervisor_stopped`で人に知らせ、人かinboxが`down --wait`の後に`--in-cmux`を付けない`up`を打つ。
      手で起動した（modeの無い）supervisorは起動し直さない。
   6. 成功すれば`update_installed`を書く。
      失敗すれば、失敗した段と理由、binaryを戻したか残したか、supervisorごとの引き継ぎと戻した結果を載せた`update_failed`を書き、`update_failed`のaskを開く。
      欄の意味は`application::update`の`put_in_place`と`failed`のdoc commentが持つ。
-- **経過の記録**（[ADR-0073](../../adr/0073-kind-additions-are-compatible.md)の決定17・19〜22、task 496）: 上の各段は、task・goal・runのどれにも属さないqueueの`run_events`（`update_started` / `update_built` / `update_e2e_passed` / `update_installed` / `update_failed` / `update_restored` / `update_awaiting_approval` / `update_answered` / `update_retry`、[Release update](release-update.md)の`update_dropped`（バイナリの`already_installed`・`newer_release`とpluginだけの`newer_release`。jobの段でもattentionでもない）。`domain::UPDATE_EVENT_KINDS`で、`EventKind::is_queue`が真）で、payloadの`commit`が対象のmainのcommit（askの答えの2つには無い）。`application::update::record`が`record_queue_event`で書き、supervisorと`status`は`update_events`（新しい順）で読む。kindのCHECKを外した0039の後なので、kindを足してもmigrationは要らない。task 310が作った表`binary_updates`（schema v33）は残すが、書きも読みもしない。
-  supervisorはjobを起こしてから`update_started`を書くので、すぐ終わるjob（buildが始めで落ちるなど）は終わりの段を先に書きうる。
-  `update_events`は各jobの`update_started`を、同じ`pid`・`commit`・`release`でそのjobが先に書いた段（前のjobの`update_started`、askの答え、`update_dropped`より後のもの）より古い位置に置いて返し、終わったjobを中断したjobと読まない。
-  - `events --kind update_installed`などで経過を読める（compactの形は`commit`・`version`・`stage`を持つ）。
-    `update_installed`はinbox宛てのattention（`next: report the update`。人に入れ替えを知らせるだけ）で、roleなしの`watch`は起きるが、`watch --role inbox`は単独では起きず、inboxが次に別の件で起きたときにその`events`に古い順に載る（[ADR-t1418-1](../../adr/2026-10-03-t1418-1-quiet-notices-do-not-wake-the-inbox-watch.md)、[Events and watch](commands.md)）。
+- **経過の記録**（[ADR-0073](../../adr/0073-kind-additions-are-compatible.md)の決定17・19〜22）: 上の各段は、task・goal・runのどれにも属さないqueueの`run_events`（kindの一覧は`domain::UPDATE_EVENT_KINDS`）で、payloadの`commit`が対象のmainのcommit（askの答えには無い）。
+  `application::update::record`が書き、supervisorと`status`は`update_events`（新しい順）で読む。
+  kindを足してもmigrationは要らない。
+  表`binary_updates`は残すが、書きも読みもしない。
+  すぐ終わるjobは`update_started`より先に終わりの段を書きうるので、`update_events`はjobの段の順に並べ直して返す（どの段をどのjobのものと見るかは`domain::in_job_order`のdoc comment）。
+  - `events`で経過を読める。
+    `update_installed`はinbox宛てのattention（人に入れ替えを知らせるだけ）で、roleなしの`watch`は起きるが、inboxの`watch`は単独では起きず、inboxが次に別の件で起きたときにその`events`に古い順に載る（[ADR-t1418-1](../../adr/2026-10-03-t1418-1-quiet-notices-do-not-wake-the-inbox-watch.md)、[Events and watch](commands.md)）。
     `update_failed`と`update_awaiting_approval`は下のaskの`ask_opened`がattentionになるので、それ自体はattentionにしない。
-  - `timeline RUN`はrunの最初のeventから最後のevent（進行中なら今）までの`update_*`を、runのeventの間にidの順で並べる（引き継ぎがsupervisorの間を説明する）。gapはrun自身のeventだけから求める。
-  - `stats`の`updates`は`asks`と同じ窓の`update_*`を数える: `count`、`by_kind`、`update_failed`の`stage`ごとの`failed_by_stage`、e2eの関門の`e2e`（`passed`: `update_e2e_passed`の数、`failed`: `stage: e2e`の`update_failed`の数、`timed_out`: そのうち上限切れ、`secs_total` / `secs_max`: 流したe2eの`secs`の合計と最長、`tests`: 関門のtestの名前ごとの`E2eTestStats`（下の`e2e.tests`の数え方）。`domain::stats::updates::E2eGateStats`）、バイナリを入れ替えた`update_installed`の`version`を古い順に並べた`installed`、[Release update](release-update.md)のpluginだけのjobの`update_installed`（`plugin_only: true`。バイナリを入れ替えていない）の`version`を古い順に並べた`plugin_installed`。pluginだけのjobの`update_installed`は`installed`に入れず、`by_kind`でも`update_installed`ではなく`update_installed_plugin_only`（`domain::stats::updates::PLUGIN_ONLY_INSTALLED`）で数える。taskを持たないので`--goal`では空になる。人の`dagq install`の失敗（`source: "install"`の`update_failed`、[`install`](install.md#install)の7）はjobのものと分け、`by_kind`の`update_failed_install`（`domain::stats::updates::INSTALL_FAILED`）と`install_failed_by_stage`に数え、`update_failed`と`failed_by_stage`には入れない。
-    - `e2e.tests`: windowの関門のevent（`update_e2e_passed`と`stage: e2e`の`update_failed`）ごとに、落ちたtest（`rerun`があればその`tests`、無ければ`failed_tests`）の`failed`を1足し、`flaky`にあれば`passed_on_rerun`、流し直しが終わった（`rerun`の`timed_out`がtrueでなく`error`も無い）関門で`quarantined`にあれば`quarantined`、どちらでもなく関門が落ちた（`update_failed`）なら`failed_gate`を1足す（流し直しの上限切れ・始められない関門では印が効かないので`failed_gate`）。`event_ids`はそのtestが落ちた関門のeventを新しい順に5件（`TEST_EVENT_IDS`）まで。`failures_in_a_row`はwindowの関門を新しい方から関門の印と同じ規則（`e2e_quarantine::failures_in_a_row`。関門の判定と共有する）で数えた今の続けての失敗。`marked` / `mark_task`はwindowの最後の関門の`quarantine.marks`に印があるかと印の`task`で、落ちていない印のtestも載る。
-- **inboxに知らせる**: 失敗と非互換のビルドは、task・runの無い専用のkindのask（`update_failed` / `approve_update`）で知らせる（askは`ask_opened`を書くので`watch --role inbox`が起きる）。同じkindの開いたaskは古いビルドのものなので、新しいaskを開く前に`superseded`と答えて閉じる（`open_update_ask`）。ただし人の`dagq install`の失敗のask（[`install`](install.md#install)の7）とjobのaskは互いに閉じ合わず、それぞれ同じ側の古いものだけを閉じる。`reason_category`は`scope`、`asked_by`は`supervisor`で、jobのaskは`subject`を持たない。
+  - `timeline RUN`はrunの最初のeventから最後のevent（進行中なら今）までの`update_*`を、runのeventの間にidの順で並べる（引き継ぎがsupervisorの間を説明する）。
+    gapはrun自身のeventだけから求める。
+  - `stats`の`updates`は`asks`と同じ窓の`update_*`を数え、欄と数え方の意味は`domain::stats::updates`のdoc commentが持つ。
+    pluginだけのjobの`update_installed`はバイナリを入れ替えていないので、バイナリの入れ替えとは分けて数える。
+    人の`dagq install`の失敗（[`install`](install.md#install)の7）はjobのものと分けて数える。
+    関門のtestごとの続けての失敗は関門の印と同じ規則（`e2e_quarantine::failures_in_a_row`）で数える。
+- **inboxに知らせる**: 失敗と非互換のビルドは、task・runの無い専用のkindのask（`update_failed` / `approve_update`）で知らせる（askは`ask_opened`を書くのでinboxの`watch`が起きる）。
+  同じkindの開いたaskは古いビルドのものなので、新しいaskを開く前に`superseded`と答えて閉じる（`open_update_ask`）。
+  ただし人の`dagq install`の失敗のask（[`install`](install.md#install)の7）とjobのaskは互いに閉じ合わず、それぞれ同じ側の古いものだけを閉じる。
   jobの入れ替えが`update_installed`を書いた後、入れたcommitが失敗のcommitを含むjobの開いた`update_failed`のaskはruntimeが答えて閉じる（`update::close_settled_failures`）。
   commitの分からない失敗（リリースのjob・人の`install`）と含まない・答えのあるaskは閉じず、リリースと人の`install`の入れ替えは何も閉じない。
   閉じる失敗は警告のlogだけで、入れ替えは成功のまま。
-  - `update_failed`（options `retry` / `skip`）: 何が失敗し、binaryとsupervisorがどうなったかとlogを問う。答えはsupervisorが適用する（`answer`は`runtime_delivers: true`を書き、`status`は`applying the answer`にする。どちらも`auto_update`のliveな登録（pidが生きていてheartbeatが`HEARTBEAT_TIMEOUT_SECS`以内）が居るときだけで、判定は`SupervisorRegistration::applies_updates`の1つ（リリースのjobの失敗の`update_failed`は[Release update](release-update.md)の`applies_releases`で決める）。居なければ`answer`は`runtime_delivers: false`を書き、人がinboxで読む答えとして残る）: `retry`は`update_retry`を書いて次の見直しでheadをビルドし直し、`skip`は`update_answered`を書いて次のruntimeの着地を待つ。どちらもaskを閉じる。リリースのjobの失敗が開いた`update_failed`（その`update_failed`のeventが`source: "release"`を持つ）の答えはリリースのpassが適用するので、このpassは飛ばす（`application::update::failed_release`）。リリースのjobの段は`base_commit`と`retry_requested`も数えない。人の`dagq install`の失敗が開いた`update_failed`（eventが`source: "install"`を持つ。`update::step_install`）の答えはどのpassも適用せず、`answer`は`auto_update`のliveな登録が居ても`runtime_delivers: false`を書くので、inboxが読んで閉じる（`retry`は人が`install`を打ち直すことで、ビルドを起こさない。[`install`](install.md#install)の7）。
-  - `approve_update`（options `install` / `skip`）: 非互換のmigrationを含むビルドのversionとmigrationを示す。drainはsupervisor自身を止めるので、runtimeは適用しない。`install`なら人がinboxから問いに書かれた`dagq --db <db> install --from <queue dir>/update/staged/dagq --to <binary> --allow-breaking --cmux … --claude …`を打つ（[`install`](install.md#install)の6）。drainが起動し直すsupervisorには止めた登録の`--auto-update`と`--max-waiting`が引き継がれるので、その後に`up --auto-update`を打ち直す必要はない。どちらもinboxが閉じる。
-- **待ちの見直し**: 引き継いだsupervisorは、execした新しいprocessの最初のpassで、`wait_for_build`のtaskの待ち（[claimを控える](claim-defer.md#依存先の着地を含むbuildを待つtask)、ADR-t1632-1）を自分の新しいbuild識別子で判定し直し、依存先の着地を含めばclaimする（含むかの答えはprocessの中だけでcacheするので、`supervisor_handed_off`の後は空から読む）。`update_installed`そのものは待ちを変えない: 待ちを決めるのは固定バイナリのfileではなくsupervisorの走っているbuildで、引き継いだsupervisorのbuildはそのfileと同じになる。
+  - `update_failed`（options `retry` / `skip`）: 何が失敗し、binaryとsupervisorがどうなったかとlogを問う。
+    答えはsupervisorが適用する。
+    `answer`が答えをruntimeが適用するものと記録し、`status`を適用中にするのは、自動更新を持つliveな登録が居るときだけで、判定は`SupervisorRegistration::applies_updates`の1つ（リリースのjobの失敗の`update_failed`は[Release update](release-update.md)の`applies_releases`で決める）。
+    居なければ人がinboxで読む答えとして残る。
+    `retry`は`update_retry`を書いて次の見直しでheadをビルドし直し、`skip`は`update_answered`を書いて次のruntimeの着地を待つ。
+    どちらもaskを閉じる。
+    リリースのjobの失敗が開いた`update_failed`の答えはリリースのpassが適用するので、このpassは飛ばす（`application::update::failed_release`）。
+    リリースのjobの段は`base_commit`と`retry_requested`も数えない。
+    人の`dagq install`の失敗が開いた`update_failed`（`update::step_install`）の答えはどのpassも適用せず、自動更新を持つliveな登録が居ても`answer`はruntimeが適用するものと記録しないので、inboxが読んで閉じる（`retry`は人が`install`を打ち直すことで、ビルドを起こさない。[`install`](install.md#install)の7）。
+  - `approve_update`（options `install` / `skip`）: 非互換のmigrationを含むビルドのversionとmigrationを示す。
+    drainはsupervisor自身を止めるので、runtimeは適用しない。
+    `install`なら人がinboxから問いに書かれた`dagq install`のコマンドを打つ（[`install`](install.md#install)の6）。
+    drainが起動し直すsupervisorには止めた登録の`--auto-update`と`--max-waiting`が引き継がれるので、その後に`up --auto-update`を打ち直す必要はない。
+    どちらもinboxが閉じる。
+- **待ちの見直し**: 引き継いだsupervisorは、execした新しいprocessの最初のpassで、`wait_for_build`のtaskの待ち（[claimを控える](claim-defer.md#依存先の着地を含むbuildを待つtask)、ADR-t1632-1）を自分の新しいbuild識別子で判定し直し、依存先の着地を含めばclaimする（含むかの答えはprocessの中だけでcacheするので、引き継ぎの後は空から読む）。
+  `update_installed`そのものは待ちを変えない: 待ちを決めるのは固定バイナリのfileではなくsupervisorの走っているbuildで、引き継いだsupervisorのbuildはそのfileと同じになる。
 - **queue serviceとqueueのbroker**: 3の引き継ぎはどちらも止めず、引き継いだsupervisorの最初の見張りが前のbuildのものを1回だけ入れ替える（[Queue service](../queue-service.md#起動と停止adr-t1233-4決定12)・[Queue broker](../queue-broker.md#起動と停止)）。
-- **status**: `status`は`version`（打った`dagq`のbuild識別子）と`auto_update`（`enabled`: liveな登録のどれかが有効か、`state`: `idle` / `building` / `testing`（mainのビルドの`update_built`の後、e2eの最中）/ `installing`（`update_e2e_passed`か、リリースの`update_built`の後）/ `restoring` / `interrupted`（jobが途中で死んだ）/ `installed` / `plugin_installed`（最新が[Release update](release-update.md)のpluginだけのjobの`update_installed`で、バイナリは入れ替えていない）/ `failed` / `awaiting_approval` / `retry_requested` / `skipped` / `dropped`（最新が[Release update](release-update.md)の実行しなかったバイナリまたはpluginだけの頼みの`update_dropped`。理由は`last.reason`の`already_installed` / `newer_release`、要求の版と適用側のbuildは`last.release`・`last.current`）、`commit`、`event_id`と`at`: 最新の`update_*`のidと時刻、`last`: そのpayload）を出し、`supervisors[].auto_update`に登録ごとの設定を出す。人の`dagq install`の`update_failed`（`source: "install"`）は`auto_update`の`state`・`last`にも、`latest_job_step`（途中で死んだjobの判定）にも数えない。supervisorごとの今のbuild識別子は従来どおり`supervisors[].binary_version`。
-- **test**: 判断（askのkind・attention・`stats`の`updates`・印の読み取りと関門の判定・`status`の段）は`src/domain/mod.rs`・`src/domain/stats/updates.rs`・`src/domain/e2e_quarantine.rs`・`src/application/e2e_verdict.rs`・`src/application/update.rs`のunit testが確かめる。
-  関門が流すコマンド・e2eに渡すenv・流し直すtestと流し直しでも落ちたtestの判断は`src/infrastructure/e2e_gate.rs`のunit testが確かめる。
-  関門の実行（絞ったenvでの実行と名前での流し直し、hostのlock）と後始末（終わった関門の残り、`TMPDIR`の中のprocess）は`tests/it/e2e_gate.rs`が確かめる。
-  jobの各分岐（入れ替え・非互換のask・ビルドと関門の失敗・引き継ぎの一部と全員の失敗・`restore`とsupervisorの起動し直し）は`tests/it/lifecycle_install.rs`がfakeのbinaryで、in-processのsupervisorのきっかけは`tests/it/runtime_*.rs`が確かめる。
-  実プロセスのsupervisorの入れ替えと`restore`は`tests/it/cli_version.rs`、作業中のrunの入れ替えと着地は`tests/e2e.rs`が確かめる。
+- **status**: `status`は打った`dagq`のbuild識別子と、自動更新（liveな登録のどれかが有効か、最新の段）と、登録ごとの設定と今のbuild識別子を出す。
+  `state`の値の意味は`application::update::status`のdoc commentが持つ。
+  人の`dagq install`の`update_failed`は自動更新の最新の段にも、途中で死んだjobの判定にも数えない。
+- **test**: 判断（askのkind・attention・`stats`の`updates`・印の読み取りと関門の判定・`status`の段）はunit test、関門の実行と後始末、jobの各分岐、supervisorのきっかけと実プロセスの入れ替えはintegration test、作業中のrunの入れ替えと着地はe2eが確かめる。
 
 ## dagqのソースのrepositoryだけ
 
-リリースのバイナリ（`X.Y.Z`）で動く外部のprojectの更新は、source buildではなくcrates.ioのリリースの検知とaskで行う（[Release update](release-update.md)、ADR-t618-1）。jobの確認から見張りまでは同じ`put_in_place`（`src/application/update.rs`）を通る。
+リリースのバイナリ（`X.Y.Z`）で動く外部のprojectの更新は、source buildではなくcrates.ioのリリースの検知とaskで行う（[Release update](release-update.md)、ADR-t618-1）。
+jobの確認から見張りまでは同じ`put_in_place`（`src/application/update.rs`）を通る。
 
-`up --auto-update`のsource buildは、queueのrepositoryがdagqのソースのときだけ動く（[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)）。ソースでないrepositoryでは`up --auto-update`がerrorで止まり、自動更新の設定を持つsupervisorもbuildに進まない。判定と対象の一覧は[Source repository](source-repository.md)にある。`up`はpreflightで`--auto-update`とソースでないrepositoryの組み合わせを`--auto-update builds dagq from the repository's sources, and <checkout> is not dagq's source (...); leave --auto-update off and update dagq with `cargo install dagq`, or with `dagq install --from <binary or checkout>`; the supervisor was not started`で止める（`lifecycle::auto_update_refused`）。登録の`auto_update`が真のsupervisorは、見る回ごとに判定し、ソースでなければ`update_failed`のaskの答えの適用もjobの起動もせずに戻り、ソースでなくなった最初の回だけ警告をlogに出す。続けてそのときのmainのheadを読み、`automatic update: main's <head> builds nothing: the repository is not dagq's source`をheadごとに1回出す（task 1048）。
+`up --auto-update`のsource buildは、queueのrepositoryがdagqのソースのときだけ動く（[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)）。
+ソースでないrepositoryでは`up --auto-update`がerrorで止まり（`lifecycle::auto_update_refused`）、自動更新の設定を持つsupervisorもbuildに進まない。
+判定と対象の一覧は[Source repository](source-repository.md)にある。
+登録の`auto_update`が真のsupervisorは、見る回ごとに判定し、ソースでなければ`update_failed`のaskの答えの適用もjobの起動もせずに戻り、ソースでなくなった最初の回だけ警告をlogに出す。
+続けてそのときのmainのheadを読み、何もビルドしないことをheadごとに1回出す。
