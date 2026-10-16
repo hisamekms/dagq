@@ -17,6 +17,7 @@ related:
   - adr-t1662-2
   - adr-t1942-1
   - adr-t1942-2
+  - adr-t2352-1
   - docs-frontmatter
   - development-task-registration
 ---
@@ -202,6 +203,8 @@ workerはreceiptの前に、受け入れ条件の対応づけ（[手元の検証
   その意味は定義のそばのdoc commentに書く。
   直すときは経緯（task番号・「以前は」・変遷）を書き込まず、上の「design」の形と予算に従う。
 - runのreviewは、欠けに加えて差分が文書に入れたコードの書き写しと経緯の混入を指摘する（ADR-t1942-2決定4）。
+  差し戻すのは、差分が変えた文書と差分の食い違い（差分が入れた書き写しと経緯の混入を含む）と、差分と文書の述べる不変条件・約束・境界の食い違いだけである（[ADR-t2352-1](../adr/2026-10-16-t2352-1-review-sends-back-only-documents-the-diff-touched-and-follows-up-the-rest.md)）。
+  差分が触っていない文書の古い記述（差分が変えた挙動の説明がその文書に無いか古いことを含む）は差し戻さず、reviewがverdictの`follow_ups`で返し、runtimeが`docs_drift`のfollow_upのdraftにする。
   このrepositoryではそれとsummaryの探した名前の確かめを全体のreviewが全ての差分でこの節の規則により行い、`.dagq/review/builtin-acceptance.md`の「文書の照合」はその要点を`builtin:acceptance`の規則として持つ。
 - 見落としやすい型: 役割・権限の説明は複数の文書に散らばる（task 1400: `docs/design/overview.md`の用語集の役割の行・`docs/design/authorization.md`・`docs/design/supervisor-lifecycle/roles.md`・`triage.md`）。testやscriptが何を検査するかを列挙する節も古くなりやすい（task 1462: `docs/design/plugin-integration.md`「読み込みと検証」）。
 
