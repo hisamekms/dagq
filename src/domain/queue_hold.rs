@@ -23,7 +23,11 @@ pub const CANCEL_AFFECTED: &str = "cancel_affected";
 /// Recorded on the queue when the supervisor applied the answer of a
 /// `queue_hold` ask (`ask_id`, `answer`, `reason_category`, `subject`,
 /// `continued`, `released`, `moved_on`, `restarted`, `elsewhere`,
-/// `unwatched`, `runs`, `jobs`, `supervisor`).
+/// `unwatched`, `runs`, `jobs`, `supervisor`). Each run of the ask is in
+/// exactly one of `continued`, `released`, `moved_on`, `elsewhere` and
+/// `unwatched`. Its `runs[].supervisor` is the supervisor that applied the
+/// answer to it; for `elsewhere` and `unwatched` it is the token of the
+/// run's lease, and null when the run has no lease.
 pub const QUEUE_HOLD_APPLIED: &str = super::event_kind::QUEUE_HOLD_APPLIED;
 /// Recorded on a held run by the supervisor whose slot has it when that
 /// supervisor applied the answer of a `queue_hold` ask to it (task 754):

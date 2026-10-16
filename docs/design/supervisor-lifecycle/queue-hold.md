@@ -166,7 +166,6 @@ leaseがstaleなrunも待つ時間までは待つ（生きているsupervisorが
 回答済みのaskは控えないので、claimとheadless jobは答えた時点で再開する。
 
 閉じたsupervisorだけが（askを閉じるのに負けたsupervisorは何もしない）、`done`なら失敗したjobを起動し直し、queueに`queue_hold_applied`を書く。
-どのrunも`continued`・`released`・`moved_on`・`elsewhere`・`unwatched`のどれか1つにだけ載り、runごとの`supervisor`は適用したsupervisorか、`elsewhere` / `unwatched`ではleaseのtoken、leaseが無ければnull。
 `done`で起動し直すのは、askが開く少し前（askはsessionかjobがエラーを見せてから開くので、その直前に記録された失敗を含める）以後に失敗したjob（`Supervisor::restart_failed_jobs`）:
 
 - 終わったrunの復旧job: runが`failed` / `interrupted`でleaseが無く、triageの最新が失敗なら、runに`job_restarted`を書き、次のpassのtriageが拾う（試行回数は数え続け、上限を超えればaskになる）
