@@ -68,7 +68,8 @@ fn latest<T>(items: &[T], count: usize) -> &[T] {
 /// `show` without `--full`: the task with long texts truncated, the latest
 /// run's identity and outcome, its processes, the latest `events`
 /// events with their run and the gist of their payload (no paths), and the
-/// latest [`DEFAULT_ASKS`] asks about the task or its runs.
+/// latest [`DEFAULT_ASKS`] asks about the task or its runs. `asks_total`
+/// is the number of all its asks, however few `asks` shows.
 pub fn task_detail(detail: &TaskDetail, events: usize) -> Value {
     let mut task = object(&detail.task);
     truncate_fields(&mut task, &["description", "acceptance", "context"]);

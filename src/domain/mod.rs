@@ -194,15 +194,20 @@ string_enum!(GoalVerdict {
 // one this binary does not know, which reads as `Other` (decision 21).
 known_ask_kinds!(AskKind {
     ApproveLanding => "approve_landing",
+    /// A worker's session waiting at a prompt. The runtime opens it no more
+    /// (ADR-t1433-2) and old ones still read; the CLI's `--kind
+    /// answer_prompt` stays for compatibility.
     AnswerPrompt => "answer_prompt",
     Decide => "decide",
     WorkerQuestion => "worker_question",
     // A threshold crossing the observer raises (ADR-0024 decision 4); the
     // one kind that may belong to no task.
     Blocked => "blocked",
-    // A session that did not answer `/exit` within the exit timeout: the
-    // supervisor asks the inbox to clear what holds it and send `/exit`,
-    // and closes the ask itself once the session exits.
+    /// A session that did not answer `/exit` within the exit timeout: the
+    /// supervisor asks the inbox to clear what holds it and send `/exit`,
+    /// and closes the ask itself once the session exits. The runtime opens
+    /// it no more (ADR-t1433-2) and old ones still read; the CLI cannot
+    /// create it.
     StuckExit => "stuck_exit",
     // The retired follow-up triage's ask about a follow_up draft (ADR-0037):
     // no longer opened, kept so the asks it may have left still read. A
@@ -336,10 +341,22 @@ impl<'de> Deserialize<'de> for AskKind {
     }
 }
 
-// Why an ask needs a person (ADR-0047 decision 41). Every ask carries one;
-// what fits none of them is no ask (a note, a receipt or a finding).
-// Adding a value needs an ADR.
-string_enum!(AskReason {
+string_enum!(
+    /// Why an ask needs a person (ADR-0047 decision 41). Every ask carries one;
+    /// what fits none of them is no ask (a note, a receipt or a finding).
+    /// Adding a value needs an ADR.
+    ///
+    /// The runtime's asks take theirs by kind: `approve_landing`,
+    /// `approve_plan`, `approve_close` and `correct_goal` are `scope`,
+    /// `approve_goal` is `discard` when its verdict says so and `scope`
+    /// otherwise, `decide` and `stalled` are `recovery_failed`; a review's,
+    /// a plan review's or a recovery job's judgement behind the ask may
+    /// give `scope` or `discard` instead. A `worker_question`,
+    /// `planner_question` or `blocked` ask carries the one its asker gives
+    /// with `--because`. The retired `stuck_exit` and `answer_prompt` asks
+    /// carry `recovery_failed`, and the reasons migration 0029 filled in
+    /// for the asks before it read like any other.
+    AskReason {
     // A login or an authentication that ran out.
     Authentication => "authentication",
     // Cost and resources: a usage limit, the free disk space.
@@ -1361,6 +1378,8 @@ pub struct NewAsk {
     pub topics: Vec<String>,
     /// The option the asking AI recommends (ADR-t451-1 decision 1): one of
     /// the ask's options, those the runtime adds included ([`Self::offered_options`]).
+    /// It is compared trimmed, and a blank one counts as none
+    /// ([`Self::recommended_option`]).
     pub recommendation: Option<String>,
     /// How sure the asking AI is of its judgement.
     pub confidence: Option<AskConfidence>,
@@ -1374,9 +1393,11 @@ pub struct NewAsk {
     pub request_id: Option<RequestId>,
 }
 
-// How sure an AI is of the judgement behind an ask's recommendation
-// (ADR-t451-1 decision 1).
-string_enum!(AskConfidence {
+string_enum!(
+    /// How sure an AI is of the judgement behind an ask's recommendation
+    /// (ADR-t451-1 decision 1). A stored value this binary does not know (a
+    /// newer binary's) reads as none, shown as null.
+    AskConfidence {
     High => "high",
     Low => "low",
 });

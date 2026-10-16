@@ -20,8 +20,7 @@ related:
 
 - runtime は `stuck_exit` と `answer_prompt` を新しく開かない（対話の worker を廃止した [ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）。
   過去の ask は読める。
-  `stuck_exit` は CLI からは作れない。
-  CLI の `--kind answer_prompt` は互換のため残し、権限の判定は[Authorization](../authorization.md#対話と記録のコマンドapplication)のとおり（worker は worker_question だけ）。
+  権限の判定は[Authorization](../authorization.md#対話と記録のコマンドapplication)のとおり（worker は worker_question だけ）。
   `follow_up`はfollow-up triageのaskで、新しく作られない（残ったものは人が読む）。
   `planner_question`はruntimeのplannerがtaskについて作り、supervisorがanswerをそのplannerに届ける（[Draft planners (supervisor)](draft-planners.md#draft-planners-supervisor)）。
   `correct_goal`はachievedで閉じたgoalのfollow_upにrequiredが記録されたときにruntimeがそのfollow_upのtaskについて作り、supervisorがanswerを適用する（[Goal review](goal-review.md)の9、ADR-t1504-2決定9）。
@@ -43,9 +42,7 @@ related:
 - **人が要る理由**（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定41）: askは人が要る理由`reason_category`を必ず持つ。
   CLIの`ask`は`--because`が必須で、無いか一覧に無い値、`authentication` / `cost`（下のqueue_holdだけのもの）は拒否する。
   当てはまらない相談はaskにせず、noteかreceiptに書く。
-  runtime の approve_landing / approve_plan / approve_close は scope、approve_goal は verdict の理由、correct_goal は scope、decide と stalled は recovery_failed を使う。
-  worker_question / planner_question / blocked は作る者が --because を付ける。
-  過去の stuck_exit / answer_prompt の recovery_failed と、migration が補った値は読める。
+  runtime の ask の理由は主に kind で決まり（`AskReason`）、worker_question / planner_question / blocked は作る者が --because を付ける。
   reason_category は ask と event と表示に残る。
 - **認証のaskは1件**: queue_hold は task と run の無い ask で、authentication / cost と subject ごとに open なものは1件。
   失敗した worker の turn と headless job の出力から provider の壁を検知し、affected に run と job を足す。
@@ -103,14 +100,14 @@ runのreview（[Review](review.md#差し戻しの分類コード)）と同じ種
 AIが作るask（`planner_question`・`blocked`・`approve_landing`・`approve_plan`）に推奨と確信度を載せる。
 それぞれのaskに推奨を載せるのはreview・plan review・observer・plannerで、この節の欄と集計を使う。
 
-- **欄**: askの行の`recommendation`と`confidence`（`domain::AskConfidence`）で、行を読むときは知らない`confidence`の値をnullとして読む。
-- **CLI**: `--recommend`は前後の空白を除いて比べ、空なら無しとして扱い、askのoptions（runtimeが足すものを含む。`NewAsk::offered_options`）のどれでもなければ`NewAsk::validate`が理由（推奨とoptionsの一覧）つきで拒む。
+- **欄**: askの行の`recommendation`と`confidence`（`domain::AskConfidence`）。
+- **CLI**: `--recommend`がaskのoptions（runtimeが足すものを含む。`NewAsk::offered_options`）のどれでもなければ`NewAsk::validate`が理由（推奨とoptionsの一覧）つきで拒む。
   queue serviceのクライアントモードの`ask`も同じ欄を運ぶ。
   同じ（task、run、kind、finding）のopenなaskを返すとき（`created: false`）は、既存のaskの推奨を書き換えない。
   `blocked`のaskは推奨が無い（空白だけを含む）と、`Dialogue::ask`（CLIとqueue serviceの`ask`が通る）が`NewAsk::check_asker`で理由つきで拒み、askを書かない（拒否は権限の判定の後で、`authorization_denied`には記録しない）。
   推奨がleave it / waitに当たるかはCLIでは判定しない（[Observer](observer.md#人が要る見立てだけをblockedにする未実装)のpromptの規則。ADR-t451-1決定2）。
 - **表示**: 推奨と確信度はaskの出力・`ask_opened`・`status`と`watch`のaskの行に載る（無ければnull）。
-  `show ID`の`asks`は`TaskDetail::asks`で、`--full`なしでは新しい方から`view::DEFAULT_ASKS`件に絞って長い文を切り、全件の数を`asks_total`に出す。
+  `show ID`の`asks`は`TaskDetail::asks`で、`--full`なしでは新しい方から`view::DEFAULT_ASKS`件に絞って長い文を切る。
   openか閉じたかは`answered_at`・`closed_at`で分かる。
   queue serviceのクライアントモードの`show`も同じview。
   inboxは人にaskを見せるとき、推奨と確信度があれば尋ねたAIのものとして添え、自分の推奨は足さない（`dagq-inbox` skill）。
