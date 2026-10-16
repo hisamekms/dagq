@@ -47,12 +47,9 @@ GitHubのURLでない・remoteが無いときは設定の誤りとして`ci_watc
 1. **読む手段の確かめ**（毎回）: `gh`を`[run.env]`のプログラムの検査と同じ規則（`resolve_program`）で解決し、`gh auth status`の終了コードを見る。
 2. **実行の一覧**: 着地先のbranchへのpushの終わった実行を読み、`ci_checked`がまだ記録していない実行とattemptを作られた順に処理する（`domain::ci_watch::runs_to_process`）。
    遅れて終わった実行・re-run・見張りの最初の確かめ・返った実行より前に残る未処理の実行（`gap`）の扱いは、そのdoc commentが持つ。
-   未処理の実行が返った実行の外に残るときは遡らず、`range`の`from`はqueueに記録した最後の緑のままにする。
 3. **落ちたjobとstep**: 赤の実行ごとにjobsを読み、落ちたjobとそのstepを取る（`domain::ci_watch::job_failed`）。
    読めなければwarnを出してjobなしで続ける（1つの実行で見張りが止まらない）（`ci-failure.yml`のissueの本文と同じ読み方）。
 4. **JUnit**: `junit_artifacts`があれば、成否の決まった実行ごとに成果物をqueue dirの下に落とし、その下の`*.xml`を全部読む（`domain::ci_watch::parse_junit`）。
-   落とすのはglobごとに1回で、重なるglobがぶつからないようglobごとのdirに落とし、落とせないglobはwarnを出して残りを読む。
-   読み終えたらdirを消す。
    成果物が無い・落とせない・XMLが読めないときはその実行のtestの成否を「分からない」とし、jobとstepだけを使う（`domain::ci_watch::Junit`）。
    宣言したprofileがJUnitを読まなければ落とさず、jobとstepだけを使う（下の「testの名前」）。
 
@@ -92,7 +89,6 @@ GitHubのURLでない・remoteが無いときは設定の誤りとして`ci_watc
 ## eventの種類と欄
 
 どれもqueueのevent（taskにもrunにも付かない）で、種類ごとのいつ書くかは`domain::ci_watch`の各kindの定数と`Access::transition`のdoc commentが持ち、kindは`domain::event_kind`に足す（kindの追加は互換、[ADR-0073](../../adr/0073-kind-additions-are-compatible.md)）。
-`ci_checked`の`run_id`はGitHubの`databaseId`、`known_failures`は処理の後の一覧の件数、`ci_turned_green`の`red_secs`は最初の赤の`created_at`からこの実行の`created_at`までの秒、`ci_watch_available`の`resolved`は解決した`gh`のpath。
 
 通信の失敗・`gh`の非0の終了（認証以外）・時間切れは`ci_watch_unavailable`にせず、logにwarnを出して次の間隔でやり直す。
 この失敗はclaimも着地も止めない（その後はqueueの最新の`ci_watch_unavailable` / `ci_watch_available`の答えに従う。失敗の前に`ci_watch_available`を記録した確かめなら、そこで保留が解ける）。
@@ -161,7 +157,7 @@ taskに印や欄は足さない。
 
 - **列**: findingsの`covered_by_task`は、互換のmigrationが`REFERENCES`を足せないので外部キーを持たず（[persistence](../persistence.md)の「CIの見張り」）、CHECKも持たず（ADR-t876-1）、taskの存在と状態は書く前に確かめる。
   値の規則は`domain::finding::check_covered_by`が持つ。
-- **書き手**: `finding dismiss --covered-by`（capabilityは`finding.dismiss`のまま）とqueue serviceの`finding_dismiss`で、`set_finding_status_covered`が同じトランザクションで状態・列と`finding_status_changed`（`covered_by_task`を載せ、無ければ欄を書かない）を書く。
+- **書き手**: `finding dismiss --covered-by`（capabilityは`finding.dismiss`のまま）とqueue serviceの`finding_dismiss`で、`set_finding_status_covered`が同じトランザクションで状態・列と`finding_status_changed`を書く。
 - **読み手**: 上の「修正taskのrun」と、[Finding planners](finding-planners.md)の`settle_findings`（`dismissed`は対象外）。
 
 ## 既存の仕組みとの関係

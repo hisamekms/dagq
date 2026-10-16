@@ -121,7 +121,9 @@ impl GhSource {
     }
 
     /// The JUnit XML files of one run's artifacts, downloaded under
-    /// `dir`.
+    /// `dir`: each glob once, into a directory of its own, so overlapping
+    /// globs do not collide; a glob that cannot be downloaded is warned
+    /// about and the others are still read.
     fn download(
         &self,
         run_id: i64,
@@ -130,8 +132,6 @@ impl GhSource {
     ) -> Result<Vec<Vec<(String, crate::domain::ci_watch::TestOutcome)>>> {
         let id = run_id.to_string();
         let target = dir.to_string_lossy().into_owned();
-        // Each glob into a directory of its own, so overlapping globs do
-        // not collide; one that matches nothing leaves the others read.
         for (index, glob) in self.config.junit_artifacts.iter().enumerate() {
             let into = format!("{target}/{index}");
             if let Err(error) =
@@ -315,6 +315,9 @@ impl CiSource for GhSource {
             .collect()
     }
 
+    /// The test outcomes of one run's JUnit artifacts ([`Self::download`]),
+    /// read from a directory under the scratch dir that is removed once
+    /// read.
     fn junit(&self, run_id: i64) -> Junit {
         if self.config.junit_artifacts.is_empty() {
             return Junit::NotConfigured;

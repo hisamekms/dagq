@@ -266,6 +266,7 @@ impl JobsUnread {
 /// One finished run of the watched workflow, as `gh run list` gives it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CiRun {
+    /// GitHub's `databaseId` of the run, written as `run_id`.
     pub run_id: i64,
     pub run_number: i64,
     pub sha: String,
@@ -899,7 +900,8 @@ pub struct RunInput<'a> {
     pub junit: &'a Junit,
     pub failed_jobs: &'a [FailedJob],
     /// The list returned was full and its oldest run came after the last
-    /// recorded one.
+    /// recorded one. The runs left unread are not gone back for, and the
+    /// finding's `range.from` stays the last green the queue recorded.
     pub gap: bool,
 }
 
@@ -913,6 +915,10 @@ pub struct RunInput<'a> {
 /// `late` and changes nothing: no item added or removed, no turn, no
 /// finding, so it neither rolls the list back nor overrides the later
 /// run's decision. A re-run of the latest one is decided like a new run.
+///
+/// `ci_checked`'s `known_failures` is the size of the list after this run
+/// is processed; `ci_turned_green`'s `red_secs` is the seconds from the
+/// `created_at` of the first red run to this run's `created_at`.
 pub fn decide(
     watch: &WatchState,
     input: &RunInput<'_>,
@@ -1164,6 +1170,7 @@ impl Unavailable {
 pub enum Access {
     Available {
         program: String,
+        /// The path `gh` resolved to (`ci_watch_available`'s `resolved`).
         resolved: String,
         repo: String,
     },
