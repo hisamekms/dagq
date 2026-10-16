@@ -29,14 +29,17 @@ related:
 
 # Run environment
 
-repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定3。ADR-0040の決定3を引き継ぐ）が、runごとの環境変数になる。読み込みは`src/infrastructure/run_env.rs`の純粋関数（`parse_run_env`と`expand`、fileを読む`load_run_env`）で、ファイルが無ければ空。
+repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定3。ADR-0040の決定3を引き継ぐ）が、runごとの環境変数になる。
+読み込みの入口は`src/infrastructure/run_env.rs`の`load_run_env`で、ファイルが無ければ空。
 
-- 書式はTOMLの部分集合: 表は`run_env::parse_config`が受け付けるもの（各表は下の項と各文書、一覧はその誤りの文）だけを持ち（`[language]`はここでは表として受け付けるだけで中を見ず、誤りでclaimや着地を止めないよう[Language](language.md)の読み手が検査する）、`[run.env]`の各行は`KEY = 'literal'`か`KEY = "basic"`（`\\` `\"` `\n` `\t`のescape）。
+- 書式はTOMLの部分集合で、表は`run_env::parse_config`が受け付けるものだけを持ち、`[run.env]`の各行は`KEY = 'literal'`か`KEY = "basic"`（`\\` `\"` `\n` `\t`のescape）。
   `#`以降はcomment。
-  ほかの表、表の外のkey、環境変数名でないkey、重複したkey、`DAGQ_`で始まるkey（runtimeが`DAGQ_ROLE` / `DAGQ_QUEUE`に使う）はエラーにする。
-- 外したresource brokerの`[broker]`と`[broker.package]`は中を問わず読み飛ばし、残したrepositoryを止めない（ほかの未知の表はエラー。[ADR-t2125-1](../../adr/2026-10-08-t2125-1-e2e-gate-checks-only-cmux-after-the-broker-removal.md)）。
-- 値の`${DAGQ_QUEUE_DIR}`はqueue directory（DBのある directory）、`${DAGQ_RUN_DIR}`はそのrunのrun directoryに展開する。ほかの`$`は書いたまま残す（shellの展開はしない）。
-- 読むのはrepositoryのmain checkout（下の「main checkoutの決め方」）の作業ファイルで、run worktreeのものではない。`integrate`をどのworktreeから呼んでも同じファイルを読む。検証コマンドが1件も無ければ読まない。
+  ほかの表（外したresource brokerの`[broker]`と`[broker.package]`は中を問わず読み飛ばし、残したrepositoryを止めない。[ADR-t2125-1](../../adr/2026-10-08-t2125-1-e2e-gate-checks-only-cmux-after-the-broker-removal.md)）、表の外のkey、環境変数名でないkey、重複したkey、`DAGQ_`で始まるkey（runtimeが`DAGQ_ROLE` / `DAGQ_QUEUE`に使う）はエラーにする。
+  下の各表でも（中を読まない`[language]`を除く）、知らないkey・keyの重複・型や範囲の合わない値は行番号付きのエラーにする。
+  旧バイナリは知らない表とkeyを含む`dagq.toml`全体を読めなくなり本番のqueueのrunがすべて止まるので、下の表とkeyは固定バイナリが読めるようになってから足す。
+- 読むのはrepositoryのmain checkout（下の「main checkoutの決め方」）の作業ファイルで、run worktreeのものではない。
+  `integrate`をどのworktreeから呼んでも同じファイルを読む。
+  検証コマンドが1件も無ければ読まない。
 - 渡し先: (a) `provision`がworkerのsession wrapperをbackgroundで起動するとき、`DAGQ_ROLE`ほかのworkerの変数の後ろにwrapperのprocessのenvとして足す（ADR-0026の仕組みを[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)決定3でprocessのenvと読む）。
   worktreeを作る前に読むので、壊れた`dagq.toml`はprovisioningの失敗になり、wrapperは起動せずsupervisorはclaimを止める。
   (b) `integrate`と`already_satisfied`の検証の`verification_commands`を`Command`のenvに足す（それ以外のvalidatingは流さない）。
@@ -45,14 +48,14 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   (d) `needs_session`のresumeが起動するwrapperのprocessのenvに、(a)と同じくworkerのenv（`DAGQ_ROLE` / `DAGQ_QUEUE`とworkerのactorの名前）の後ろに並べる。
   resumeのsessionはworkerと同じ手元の検証（fmt・clippy・関係するtest・e2e）を回すので、workerと同じ`[run.env]`（sccache、buildとtestの並列度）が要るため。
   ADR-0049の決定3（ADR-0040の決定3を引き継ぐ）は渡し先をworkerのworkspace・`integrate`の検証・reviewの3つと書くが、resumeのsessionはrunのworkerのsessionの続きで、その「workerのworkspace」に含まれると読む。
-  値は`begin_resume`の前に読み（`start_resume`に渡す）、landing branchと同じく読めなければ試行を使わずrunは`needs_session`のまま（landing branchの読み込みが同じfileを先に検査するので、壊れた`dagq.toml`はそこで止まる）。
+  値はresumeの試行を始める前に読み、landing branchと同じく読めなければ試行を使わずrunは`needs_session`のまま（landing branchの読み込みが同じfileを先に検査するので、壊れた`dagq.toml`はそこで止まる）。
   `[run.env]`が名指すプログラムが見つからない間は、claimと同じくresumeも始めない（下の「`[run.env]`が名指すプログラムの検査」。始めるとsessionのcargoがすべて失敗して試行を使うため）。
   resumeの時点のmain checkoutの`dagq.toml`を読むので、workerの起動の後に変えた値はresumeのsessionで効く。
 - `dagq.toml`はrepositoryにcommitされ、値はworkerのwrapperとturnのprocessのenvに渡るので、secretは入れない。
-- この repositoryの`dagq.toml`の`[run.env]`は、sccache（`RUSTC_WRAPPER = "sccache"`と`SCCACHE_IGNORE_SERVER_IO_ERROR = "1"`。[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定6・7）と、buildとtestの並列度（`CARGO_BUILD_JOBS`・`RUST_TEST_THREADS`・`NEXTEST_TEST_THREADS`）を置く。値と理由の要点、置かないもの（`CARGO_TARGET_DIR`・`CARGO_INCREMENTAL`）とsccacheの入れ方の規則は`dagq.toml`の`[run.env]`のコメント、`.config/nextest.toml`に並列度を書かない理由はその冒頭のコメント、その補足とほかのhostのツールの入れ方は[運用の開発文書](../../development/operations.md)の「`[run.env]`とtestの並列度の置き場」と「hostのツール」、並列度の経緯と測定は[NEXTEST_TEST_THREADS の測定](../../plans/nextest-test-threads.md)・[nextest の測定](../../plans/nextest-measurement.md)・[運用の規則の経緯](../../plans/operation-rules-history.md)が持つ。
-- 実装の振る舞い: serverはsupervisorがsandboxの外で起動して持ち、`[run.env]`を受けるprocessがserverと話せないときにcompilerを直接実行するのはclientではなくguardで、起動に失敗したclientは`sccache: error:`で失敗する（下の「sccacheのserver」）。`[run.env]`の値は渡し先(a)〜(d)のすべてに効く。`RUST_TEST_THREADS`は1つのtest binaryの中のtestのthread数で、cargo-nextestはそれを読まず既定でCPU数だけprocessを走らせるので、coverageの関門（`cargo llvm-cov nextest`）が同時に走らせるtestのprocess数は`NEXTEST_TEST_THREADS`で決まる（[ADR-0076](../../adr/0076-run-the-coverage-gate-tests-with-nextest.md)の決定2）。cargo-nextestは`[run.env]`が名指すプログラムではないので決定9の検査の対象ではなく、無いhostでは`integrate`の検証の失敗になる（ADR-0076の決定3。hostに入れる手順は[運用](../../development/operations.md)の「hostのツール」）。
-- `[recheck]`は`command`（文字列。空白だけは拒否）と`paths`（globの配列）を持ち、`command`は着地のたびにsupervisorが着地待ちのrunをmainに載せた木で実行する軽い検査になる（[Landing recheck](landing-recheck.md)、[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)の決定2。`load_recheck_config`、`Verifier::recheck_config`、`domain::recheck::RecheckConfig`）。表が無ければmerge-treeだけを見る。commandには`[run.env]`と、queue dirの`recheck/target`を指す`CARGO_TARGET_DIR`が渡る。この repositoryの`dagq.toml`には`command = "cargo check --locked --all-targets"`と、Rustのファイルと、Rustのcompileが`include_str!`・`include_bytes!`・`build.rs`で読むRust以外のファイルのglobの`paths`がある。
-  - `paths`があればmergeした木とmainの差分がどれかのglobに当たるrunにだけcommandを流し、無ければ全てのrunに流す（[ADR-t2032-1](../../adr/2026-10-07-t2032-1-run-the-recheck-command-only-on-runs-touching-recheck-paths.md)）。
+- この repositoryの`[run.env]`の値と理由、置かないものとsccacheの入れ方の規則は`dagq.toml`の`[run.env]`のコメント、`.config/nextest.toml`に並列度を書かない理由はその冒頭のコメント、その補足とほかのhostのツールの入れ方は[運用の開発文書](../../development/operations.md)の「`[run.env]`とtestの並列度の置き場」と「hostのツール」が持つ。
+- cargo-nextestは`[run.env]`が名指すプログラムではないので下の検査の対象ではなく、無いhostでは着地の検証の失敗になる（[ADR-t1925-1](../../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)の決定8がADR-0076から引き継ぐ）。
+- `[recheck]`は着地のたびにsupervisorが着地待ちのrunをmainに載せた木で実行する軽い検査で、keyの意味は`domain::recheck::RecheckConfig`、流れとcommandに渡るenvは[Landing recheck](landing-recheck.md)が持つ（[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)の決定2、[ADR-t2032-1](../../adr/2026-10-07-t2032-1-run-the-recheck-command-only-on-runs-touching-recheck-paths.md)）。
+  - 空白だけの`command`は拒む。
   - globの規則と、受け付けないglob・配列でない値・重複のエラーは`[e2e] paths`と同じで、空の配列もエラーにする。
 
 - `[review.subagents.<agent>]`はreviewのsubagentを必須にするglobで、`paths`（`--paths`・`[e2e] paths`と同じglobの規則の、1つ以上の文字列の配列）と任意の`provider`（[Review](review.md#agentのjobのprovider)）を持つ（[ADR-t1453-1](../../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md)の決定1）。
@@ -61,116 +64,105 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   - 書き方の誤り（知らないbuilt-inの名前・真偽でない`enabled`・`builtin:acceptance`の`enabled = false`と`paths`・`provider`）は`dagq.toml`全体の誤り。
   - 定義の無いagentと複数の役割の節が名指すagentは`dagq doctor`の`agents`の`errors`が出す（reviewでの扱いは[Review](review.md#reviewのsubagent)の「誤り」）。
   - 読むのはreviewを始めるときのlanding branchのcommitの`dagq.toml`で、選び方とsnapshotは[Review](review.md#reviewのsubagent)。
-  - 旧バイナリは知らない表とkeyを含む`dagq.toml`全体を読めなくなるので、固定バイナリが対応してから足す。
 
-- `[disk]`はclaimと着地の検証の前に確かめる空き容量の閾値で、`sample_runs`（正の整数、既定20）、`claim_factor`（正の数、既定2）、`integrate_factor`（正の数、既定1.5）、`min_free_bytes`（正の整数、既定なし）を持つ（[空き容量を確かめる](disk-space.md)、ADR-0047の決定44。`load_disk_config`）。supervisorが起動時に読み、読めなければ既定値で動く。`[recheck]`と同じく、旧バイナリは未知の表を拒むので、固定バイナリを`[disk]`を知るものに入れ替えてから足す
+- `[disk]`はclaimと着地の検証の前に確かめる空き容量の閾値で、keyと既定は`domain::disk::DiskConfig`、読む時と読めないときの扱いは[空き容量を確かめる](disk-space.md)が持つ（ADR-0047の決定44）。
 
-- `[resume]`は`needs_session`のrunの衝突だけの試行の上限で、`conflict_only_limit`（正の整数、既定5）の1 keyだけを持つ（[Needs session](needs-session.md)の「試行の数え方」、ADR-0047の決定24。`load_resume_config`、`domain::resume::ResumeConfig`）。未知のkey・0以下・整数でない値・重複は他の表と同じく行番号付きのエラーにする。数える試行の上限`MAX_RESUME_ATTEMPTS`（3）は設定にしない。supervisorが起動時に読み（`SuperviseOptions::resume`で上書きできる）、読めなければ既定値で動く。起動の後の変更はsupervisorを起動し直すまで効かない。`[recheck]`と同じく、旧バイナリは未知の表を拒むので、固定バイナリを`[resume]`を知るものに入れ替えてから足す
-- `[exit]`はsessionが止めた`/exit`の再試行の設定だった（[Receipt and session exit](receipt-and-session-exit.md#exitの再試行)、ADR-0047の決定25。`domain::exit::ExitConfig`）。再試行は無く、`dagq.toml`を読むときに検査するだけで（古いfileもそのまま通る）、supervisorは読まず、何も使わない。`retries`（0以上の整数）と`retry_intervals_secs`（正の整数の秒の配列）の2 keyを持つ（意味と既定は`ExitConfig`のdoc comment）。未知のkey・負の数・整数でない値・空の配列・配列でない値・重複は行番号付きのエラーにする。旧バイナリは未知の表を拒むので、固定バイナリを`[exit]`を知るものに入れ替えてから足す
+- `[resume]`は`needs_session`のrunの衝突だけの試行の上限で、keyと既定、設定にしない上限は`domain::resume::ResumeConfig`が持つ（[Needs session](needs-session.md)の「試行の数え方」、ADR-0047の決定24）。
+  supervisorが起動時に読み（`SuperviseOptions::resume`で上書きできる）、読めなければ既定値で動く。
+  起動の後の変更はsupervisorを起動し直すまで効かない。
+- `[exit]`はsessionが止めた`/exit`の再試行の設定だった表で、`dagq.toml`を読むときに検査するだけで何も使わない（keyと意味は`domain::exit::ExitConfig`、[Receipt and session exit](receipt-and-session-exit.md#exitの再試行)、ADR-0047の決定25）。
 
-- `[supervisor]`はsupervisorの同時に走らせるrunの数`parallel`（1以上の整数）と、人の答えを待つrunの上限`max_waiting`（0以上の整数。0で待ちを使わない。[人の答えを待つrun](waiting.md)）と、runtimeが同時に立てるplannerの上限`runtime_planners`（1以上の整数。依頼・draft・finding・reviseのplannerで共有し、run slotとは別。[Draft planners](draft-planners.md)・[Finding planners](finding-planners.md)・[Plan review (supervisor)](plan-review.md#plan-review-supervisor)）と、loadの保留が有効なときの新しいclaimの間隔`claim_spacing`（0以上の整数の秒。0で間を空けない。[claimを控える](claim-hold.md#claimの間隔)、ADR-t1479-1）と、着地の順番を待つだけのrunが空けた枠でclaimする軽いchangeの集合`light_changes`（文字列の配列で、値は`[tasks] changes`の中のもの。書かなければ空で、空なら軽い枠を使わない。runtimeは値の意味を持たない。[claimを控える](claim-hold.md#着地待ちが空けた軽い枠)、ADR-t1591-1）を持つ（`load_supervisor_config`、`domain::slot_limits::SupervisorConfig`、`domain::light_slots::LightChanges`）。
+- `[supervisor]`はsupervisorの同時に走らせるrunの数・人の答えを待つrunの上限・runtimeが同時に立てるplannerの上限・claimの間隔・軽い枠のchange・実行区分の上限とaging・調査中の計画の上限を持ち、keyと意味は`domain::slot_limits::SupervisorConfig`が持つ（[人の答えを待つrun](waiting.md)・[Draft planners](draft-planners.md)・[Finding planners](finding-planners.md)・[Plan review (supervisor)](plan-review.md#plan-review-supervisor)・[claimを控える](claim-hold.md)・[実行区分の上限とaging](claim-defer.md#実行区分の上限とaging)、ADR-t1479-1、ADR-t1591-1）。
   projectごとのbuildの重さに合わせた並列数と、答えを待つplannerが枠をふさいでもdraftとreviseが進む数と、buildのloadが出るまでの間をrepositoryに置くため。
-  未知のkey・範囲外や整数でない値・重複は他の表と同じく行番号付きのエラーにする。
   `light_changes`の誤り（`[tasks] changes`の外の値を含む）は、ファイルを読み終えた後に`light_changes`の行の番号付きのエラーにする（`[tasks]`は`[supervisor]`の後にあってもよい）。
-  `[supervisor]`は、slotを持てるSpikeの数`max_spikes`と区分をまたぐagingの閾値の秒`class_aging`も持つ（[実行区分の上限とaging](claim-defer.md#実行区分の上限とaging)。flagは無い）。
-  `max_spikes`が無ければ上限は無く、`class_aging`の既定は`DEFAULT_CLASS_AGING_SECS`で0は拒み、どちらも出どころとともに登録・`status`に出る。
-  調査中の計画の同時の数`max_investigations`も持ち、無ければ上限は無い（[claimを控える](claim-hold.md#調査中の計画の上限)。flagは無い）。
-  知らない固定バイナリは置くと`dagq.toml`を読めなくなる。
-  - **優先順**: どのkeyも、`supervise`のflag（`--parallel` / `--max-waiting` / `--runtime-planners`）の明示 > `[supervisor]` > 既定（値は`SlotLimits::resolve`）。
-    `claim_spacing`にCLIのflagは無く、libraryの`SuperviseOptions::claim_spacing`だけがflagの位置で与える。
-    `light_changes`にはflagが無く、`[supervisor]`か既定（空）で決まる。
+  `max_spikes`と`class_aging`は出どころとともに登録・`status`に出る。
+  - **優先順**: flagの明示 > `[supervisor]` > 既定で、keyごとのflagの有無は`domain::slot_limits`のdoc commentが持つ。
     `up`はflagを明示されたときだけ`supervise`の引数に渡し、明示が無ければ焼き込まない（[`up` / `down`](up-down.md)）ので、`up`で起動したsupervisorもこの順で決まる。
   - **効くとき**: supervisorが起動時（引き継ぎのexecの後も）に読み、続けてループの各passで`[conflicts]`の読み直しの後に読み直す（[`supervise`](supervise.md)）。
     `light_changes`にflagが無いので、どのsupervisorも（4つともflagの位置で与えたlibraryのsupervisorも）毎passで読み、flagで与えた値はflagのまま使う。
-    読み直した値が使っている値と違えば、そのpassから新しいclaimと待ちとplannerを立てる判定とclaimの間隔に使い、登録の`parallel` / `max_waiting` / `runtime_planners` / `claim_spacing`と出どころを書き換え、queue event `supervisor_config_changed`（`slot_limits::supervisor_config_change`と`supervisor`）を記録する（`light_changes`だけが変わったときも記録し、登録は書き換えない）。
+    読み直した値が使っている値と違えば、そのpassから新しいclaimと待ちとplannerを立てる判定とclaimの間隔に使い、登録の値と出どころを書き換え、queue event `supervisor_config_changed`を記録する（`light_changes`だけが変わったときも記録し、登録は書き換えない）。
     main checkoutに着地した変更は`up`し直さずに効く。
     下げた値を超えて走っているrunと待っているrunと開いているruntimeのplannerはそのまま続き、下回るまで新しいclaimと待ちとplannerが控えられる。
     表を消すと既定（`default`）に戻る。
     ファイルが無いか読めない・値が誤っているときは使っている値のまま続ける（起動時に読めなければ既定値で起動する。どちらもlogにwarnを出す）。
     ただし誤った`dagq.toml`は`[repository]`などの読み手も止めるので、claimと着地も止まる。
-  - **見え方**: `status`の`supervisors[]`の値と`*_source`の欄と、`slots.source` / `waiting.source`（`flag` / `dagq.toml` / `default`。列より古いbinaryの登録はnull）。
-    `doctor`の既定の出力も`parallel`・`max_waiting`・`runtime_planners`とその出どころを出す。
-  - 起動し直すときの引き継ぎ: `install --allow-breaking`のdrainと自動更新の見張りがsupervisorを`up`で起動し直すときは、止めた登録の値のうち出どころが`flag`のもの（と、出どころの列より古いbinaryの登録の値）だけを`--parallel` / `--max-waiting` / `--runtime-planners`で渡し、`dagq.toml`か既定から決めた値は渡さない（`SupervisorRegistration::flag_arguments`。`runtime_planners`は値を記録しない古いbinaryの登録からは渡さない）。引き継ぎのexecは元のargvのまま続くので、この変更より前の`up`が`--parallel N`を付けて起動したsupervisorは、入れ替わっても`flag`のままで`[supervisor]`を読まない。`[supervisor]`に従わせるには、`down --wait`の後にflagなしの`up`で起動し直す。
-  - `[recheck]`と同じく、旧バイナリは未知の表を拒むので、固定バイナリを`[supervisor]`を知るものに入れ替えてから足す。この repositoryの`dagq.toml`には、`[supervisor]`に`runtime_planners = 2`を足した（経緯は[運用の規則の経緯](../../plans/operation-rules-history.md)）。`parallel = 3`を置く（`[run.env]`の`CARGO_BUILD_JOBS`などが並列3を前提にする）。`max_waiting`は既定の4のままなので置かない。`claim_spacing`も既定の180秒が効くので置かない（`claim_spacing`を知らない固定バイナリは、置くと`dagq.toml`を読めなくなる）。`light_changes`は`["docs", "config"]`を置く。値の理由は`dagq.toml`のcommentにある。
-- `[provider_fallback]`は使えないproviderからもう一方への切り替えを止める設定で（[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)。`load_provider_fallback`、`domain::provider_switch::ProviderFallback`）、`workers`と`jobs`（どちらも`true` / `false`、既定`true`）を受け付ける。
-  `workers = false`でworkerの切り替え（claimの経路とturnの途中）を止め、切り替えずに頼んだproviderの控えが解けるのを待って同じproviderで続ける（`--no-claude`による行き先は止めない）。
-  `jobs = false`で、`[roles.<role>]`に`provider`を書いたheadlessのjob（goal review・plan review・runのreview・throughput review・observer・終わったrunと生きているrunの復旧job）と`[review.subagents.<agent>]`に`provider`を書いたagentのjobの切り替えを止め、使えない理由ではもう一方で起動せずに控えが解けるのを待って同じproviderで起動する（`--no-claude`による行き先は止めない。`provider`を書かない役割は変わらない）。
+  - **見え方**: `status`と`doctor`は各値とその出どころを出す（欄は`domain::views`のdoc comment）。
+  - 起動し直すときの引き継ぎ: `install --allow-breaking`のdrainと自動更新の見張りが`up`で起動し直すときに渡すflagは`SupervisorRegistration::flag_arguments`のdoc commentが持つ。
+    引き継ぎのexecは元のargvのまま続くので、`--parallel N`などのflagを付けて起動したsupervisorは入れ替わっても`flag`のままで、`[supervisor]`に従わせるには`down --wait`の後にflagなしの`up`で起動し直す。
+- `[provider_fallback]`は使えないproviderからもう一方への切り替えを止める設定で（[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)。`domain::provider_switch::ProviderFallback`）、`workers`と`jobs`を受け付ける。
   振る舞いと優先順位は[Provider lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)の「切り替えを止める設定」。
-  `true` / `false`でない値・keyの重複・表の知らないkeyは行番号付きのエラーにする。
   読み手は`compose::supervisor`で、supervisorが起動時に読み（読めなければ既定で起動する）、各passで`[supervisor]`の後に読み直す（再起動なしで効く。ファイルが無いときは黙って、読めない・値が誤っているときはerrorごとに1回logにwarnを出して、使っている値のまま続ける）。
-  旧バイナリは未知の表を拒むので、固定バイナリが対応してから足す。
-- `[fresh_session]`は`peak_context_above`（0より大きい整数のtoken数。意味は`domain::fresh_session::FreshSessionConfig`）だけを持つ（[ADR-t2080-1](../../adr/2026-10-08-t2080-1-fresh-session-on-send-back-and-resume-when-peak-context-exceeds-threshold.md)、振る舞いは[Provider lifecycle](../provider-lifecycle.md#大きなcontextからの新しいsession)）。
+- `[fresh_session]`は`peak_context_above`（意味は`domain::fresh_session::FreshSessionConfig`）だけを持つ（[ADR-t2080-1](../../adr/2026-10-08-t2080-1-fresh-session-on-send-back-and-resume-when-peak-context-exceeds-threshold.md)、振る舞いは[Provider lifecycle](../provider-lifecycle.md#大きなcontextからの新しいsession)）。
   keyが無ければ新しいsessionを始めない。
   値とkeyの誤り、読む時と読めないときの扱い（読み手は`load_fresh_session`）は`[provider_fallback]`と同じ。
 - `[review.jobs]`はrunのreviewの段のjobの種類ごとの時間の上限と、reviewのagentのjobの同時実行の上限で（ADR-t1895-1決定1。keyと既定値は`ReviewJobs`のdoc comment）。
-  他のjobに効かず（evalのケースのprogramのjobはreviewの段に数える）、無いkeyは今の上限（既定600秒。[Headless job processes](headless-job-processes.md#記録)）。
+  他のjobに効かず（evalのケースのprogramのjobはreviewの段に数える）、無いkeyは今の上限（[Headless job processes](headless-job-processes.md#記録)）。
   supervisorが起動時に読む。
 - `[review.programs.<name>]`はreviewのprogramのjobで（[プログラムのreview](review-programs.md)）、keyと意味は`ReviewProgram`が持つ。
   `<name>`はkebab-caseで、表の重複・知らないkey（`command`も）・keyの欠けは行番号付きのエラーにする。
   `[review.programs."builtin:<名前>"]`はbuilt-inの`enabled`と`paths`（既定を置き換える）だけを持ち（`BuiltinProgramSetting`）、`script`・`args`・知らない名前・pjのprogramの`builtin:`の名前は誤り。
   読むのは作業ファイルでなく、reviewの試行ごとのlanding branchのcommitの`dagq.toml`と`script`（`Verifier::review_programs_in`）。
-  旧バイナリは未知の表を拒むので、固定バイナリが対応してから足す。
-- `[tasks]`は`changes`だけを持ち、taskが宣言する変更の種類（change）の値の集合を1行の配列で書く（`changes = ["feature", "fix"]`。[ADR-t980-1](../../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)。`load_change_set`、`domain::ChangeSet`）。値は`TaskChange`の形（[domain-model](../domain-model.md)）で、空の配列・同じ値の重複・形の合わない値・他のkeyは行番号付きのエラーにする。書いてあれば`add`と`edit`は集合の外の`--change`を拒み（`DomainError::ChangeNotInSet`）、`lint`はchangeの無いtaskを`missing_change`、集合の外のchangeを`change_outside_set`にし、`submit`は動かすtaskのどれかがchangeを持たないか集合の外なら何も動かさずに拒む（`ChangeMissing` / `ChangeNotInSet`）。読むのはqueueが束縛されたmain checkoutの`dagq.toml`で、`add` / `edit` / `submit` / `lint`のたびに読む（`compose::task_changes`、`SqliteQueue::with_changes`）。`dagq.toml`のどこかが解析できなければ、この4つのコマンドもそのerrorで止まる。書いてなければ形だけを検査し、changeは省略できる。runtimeが自分で登録するdraft（follow_upなど）は検査しないので、planは`lint`と`submit`で揃える。旧バイナリは未知の表を拒むので、固定バイナリが対応してから足す。
-- `[goals]`は`tags`と`max_spike_cycles`を持ち、goalのラベル（tag）の値の集合を1行の配列で書く（`tags = ["codex", "throughput"]`。[ADR-t1639-1](../../adr/2026-10-04-t1639-1-goal-priority-is-the-source-tasks-inherit-and-goals-carry-tags.md)の決定6。`load_goal_tags`、`domain::TagSet`）。
-  値は`GoalTag`の形（[domain-model](../domain-model.md)の`Goal`）で、形の合わない値・重複・他のkeyは行番号付きのエラーにする。
-  書いてあれば`goal add`と`goal edit`は集合の外の`--tag`を拒み、`lint`は所属のgoalがラベルの無いdraftのtaskを`missing_goal_tag`、集合の外のラベルを持つdraftのtaskを`goal_tag_outside_set`にし、`submit`は与えたgoalと動かすtaskの所属のgoalのうち閉じていないdraftのgoalがラベルを持たないか集合の外なら何も動かさずに拒む。
-  読み方は`[tasks] changes`と同じで、`goal add` / `goal edit` / `submit` / `lint`のたびに読む（`compose::goal_tags`、`SqliteQueue::with_goal_tags`）。
+- `[tasks]`は`changes`だけを持ち、taskが宣言する変更の種類（change）の値の集合を1行の配列で書く（[ADR-t980-1](../../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)。`domain::ChangeSet`）。
+  値は`TaskChange`の形（[domain-model](../domain-model.md)）で、空の配列・同じ値の重複・形の合わない値は誤り。
+  書いてあれば`add`と`edit`は集合の外の`--change`を拒み、`lint`はchangeの無いtaskと集合の外のchangeを指摘し、`submit`は動かすtaskのどれかがchangeを持たないか集合の外なら何も動かさずに拒む。
+  読むのはqueueが束縛されたmain checkoutの`dagq.toml`で、`add` / `edit` / `submit` / `lint`のたびに読み（`compose::task_changes`）、`dagq.toml`のどこかが解析できなければこの4つのコマンドもそのerrorで止まる。
+  書いてなければ形だけを検査し、changeは省略できる。
+  runtimeが自分で登録するdraft（follow_upなど）は検査しないので、planは`lint`と`submit`で揃える。
+- `[goals]`は`tags`と`max_spike_cycles`を持ち、goalのラベル（tag）の値の集合を1行の配列で書く（[ADR-t1639-1](../../adr/2026-10-04-t1639-1-goal-priority-is-the-source-tasks-inherit-and-goals-carry-tags.md)の決定6。`domain::TagSet`）。
+  値は`GoalTag`の形（[domain-model](../domain-model.md)）で、形の合わない値と重複は誤り。
+  書いてあれば`goal add`と`goal edit`は集合の外の`--tag`を拒み、`lint`は所属のgoalがラベルを持たないか集合の外のラベルを持つdraftのtaskを指摘し、`submit`は与えたgoalと動かすtaskの所属のgoalのうち閉じていないdraftのgoalがラベルを持たないか集合の外なら何も動かさずに拒む。
+  読み方は`[tasks] changes`と同じで、`goal add` / `goal edit` / `submit` / `lint`のたびに読む（`compose::goal_tags`）。
   書いてなければ形だけを検査し、goalはラベルを持たなくてよい。
   `max_spike_cycles`はgoalのSpikeの周期の上限で、`submit`だけが読む（`investigation::check_spike_cycles`）。
-  旧バイナリは未知の表を拒むので、固定バイナリが対応してから足す（値は`dagq.toml`、各ラベルの意味と付け方は[taskの登録](../../development/task-registration.md#goal-の優先度とラベル)が持つ）。
-- `[e2e]`は`paths`だけを持ち、変えるとrunに`e2e`のevidenceを求めるpathをglobの1行の配列で書く（`paths = ["src/infrastructure/process.rs", "tests/e2e.rs"]`。[ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)の決定2。`load_e2e_paths`、`Verifier::e2e_paths`）。globの書式は`add --paths`と同じ（`domain::scope`。repository rootから、`*`は1階層、`**`は任意の深さ）で、同じglobの重複は1つにまとめる。配列でない値・`--paths`の受け付けないglob（空、`/`始まり、`.`や`..`の段、空の段）・keyの重複・他のkeyは行番号付きのエラーにする。無ければ空で、差分からは何も求めない（taskの`--evidence`だけ）。読むのはsupervisorがvalidatingとworkerのpromptを作るたびのmain checkoutの作業ファイルで、読めなければ警告を出して空として扱う（本番を守るのは[Auto-update](auto-update.md)の入れ替え前のe2eの関門）。使い方は[Validation](validation.md)の8。旧バイナリは未知の表を拒むので、固定バイナリが対応してから足す（この repositoryの範囲は[Validation](validation.md)の「この repository で置く範囲」）。
-- `[areas]`は`stats`と`kpi`がrunを分けるareaの名前→globの1行の配列（`name = ["src/**", "migrations/**"]`。[ADR-t980-1](../../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)。`load_area_map`、`domain::areas::AreaMap`）。
+  値は`dagq.toml`、各ラベルの意味と付け方は[taskの登録](../../development/task-registration.md#goal-の優先度とラベル)が持つ。
+- `[e2e]`は`paths`だけを持ち、変えるとrunに`e2e`のevidenceを求めるpathをglobの1行の配列で書く（[ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)の決定2。`Verifier::e2e_paths`）。
+  globの書式は`add --paths`と同じ（`domain::scope`。repository rootから、`*`は1階層、`**`は任意の深さ）で、同じglobの重複は1つにまとめる。
+  配列でない値と`--paths`の受け付けないglob（空、`/`始まり、`.`や`..`の段、空の段）は行番号付きのエラーにする。
+  読むのはsupervisorがvalidatingとworkerのpromptを作るたびのmain checkoutの作業ファイルで、読めなければ警告を出して空として扱う（本番を守るのは[Auto-update](auto-update.md)の入れ替え前のe2eの関門）。
+  使い方と無いときの扱い、この repositoryの範囲は[Validation](validation.md)の8と「この repository で置く範囲」。
+- `[areas]`は`stats`と`kpi`がrunを分けるareaの名前→globの1行の配列（[ADR-t980-1](../../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)。`domain::areas::AreaMap`）。
   名前の形、空の配列、`--paths`の受け付けないglob、重複は行番号付きのエラーにする。
-  書式と求め方は`AreaMap`と`application::areas::AreaReader`のdoc comment。
-  旧バイナリは未知の表を拒むので、固定バイナリが対応してから足す。
+  書式は上の型、求め方は`application::areas::AreaReader`のdoc commentが持つ。
 
-- `[kpi]`と`[kpi.targets."<KPI>"]`はKPIの判定の設定と目標で、KPIの計算（`kpi`・レポート・push・observerの入力）だけが読む（[計測のコマンド](commands.md)、[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定17・19。`load_kpi_settings`、解析は`src/infrastructure/kpi_config.rs`の`KpiTables`）。
-  `[recheck]`と同じく、旧バイナリは未知の表を拒むので、固定バイナリを`[kpi]`を知るものに入れ替えてから足す（先に足すとqueue全体が止まる）。
-  この repositoryの`dagq.toml`には`all`の層の率と値の目標を置く（値と理由は`dagq.toml`のcomment）。
+- `[kpi]`と`[kpi.targets."<KPI>"]`はKPIの判定の設定と目標で、KPIの計算（`kpi`・レポート・push・observerの入力）だけが読む（[計測のコマンド](commands.md)、[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定17・19。解析は`src/infrastructure/kpi_config.rs`の`KpiTables`）。
   `[kpi]`の設定の数値は既定のまま書かない。
 
-- `[headless]`は`wrapper`だけを持ち、`"workspace"`か`"background"`を書く（[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)決定7）。他の値・keyの重複・他のkeyは今までどおり行番号付きのエラーにする。[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)決定2から、欄は受け付けるがworkerには効かず、workerのwrapperは値に関わらずbackgroundで起動する。値が`"workspace"`なら、supervisorはprocessごとに1回だけ`[headless] wrapper = "workspace" of dagq.toml is ignored for workers: a worker's session wrapper always starts in the background`を警告する（`load_headless_wrapper_setting`、`Verifier::headless_wrapper_setting`）。runtimeのplannerにも効かず（plannerを開くときにこの欄を読まない）、plannerのwrapperは値に関わらずbackgroundで起動する（[Plan planners](plan-planners.md)）。workerのwrapperには`[run.env]`がprocessのenvで渡る（[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)）。旧バイナリは表ごと拒む。この repositoryの`dagq.toml`は`wrapper = "background"`を置く（理由は`dagq.toml`のcomment）。欄を消すのは、古い固定バイナリが欄の無い`dagq.toml`を読めることを確かめた後のtask。
-- `[worker.trial]`はworkerのmodelの限定の試しの設定で、`enabled`（`true` / `false`、既定`false`）と`window`（正の整数、既定60。対象の判定で比べる直近の予測の件数）を持つ（[Worker model](worker-model.md)、[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定4。`load_worker_trial`、`Verifier::worker_trial`）。supervisorがclaimのpassごとに読み、読めなければ試しの外でclaimする。既定は無効で、有効にするのは人の判断。この repositoryの`dagq.toml`には置かない。旧バイナリは表ごと拒むので、足すのはそれを知るバイナリに入れ替えた後にする。taskに由来する失敗の後のworkerのsessionの段上げ（決定5、[Worker model](worker-model.md#段上げ決定5)）は設定を持たず、`[worker.trial]`の有無に関係なく働く。
+- `[headless]`は`wrapper`だけを持ち、`"workspace"`か`"background"`を書く（[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)決定7）。
+  欄は受け付けるがworkerにもruntimeのplannerにも効かず、wrapperは値に関わらずbackgroundで起動する（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)決定2、[非対話のworker](headless-worker.md#workspaceなしのbackgroundのwrapper)、[Plan planners](plan-planners.md)）。
+  値が`"workspace"`なら、supervisorはworkerに効かないことをprocessごとに1回だけ警告する（`Verifier::headless_wrapper_setting`）。
+  欄を消すのは、古い固定バイナリが欄の無い`dagq.toml`を読めることを確かめた後にする。
+- `[worker.trial]`はworkerのmodelの限定の試しの設定で、keyと既定は`domain::worker_model::WorkerTrial`が持つ（[Worker model](worker-model.md)、[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定4）。
+  supervisorがclaimのpassごとに読み（`Verifier::worker_trial`）、読めなければ試しの外でclaimする。
+  taskに由来する失敗の後のworkerのsessionの段上げ（決定5、[Worker model](worker-model.md#段上げ決定5)）は設定を持たず、`[worker.trial]`の有無に関係なく働く。
 
 - `[roles.<role>]`はworker以外のアクターのsessionのprovider・model・effortを持つ（[Actor model](actor-model.md)、[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定7、[ADR-t1063-1](../../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)の決定1）。
-  役割・key・値と読み込みが拒むものは、`domain::actor_model`の`ModelRole`・`RoleModel`・`RoleModels`・`CODEX_ROLES`のdoc commentが持つ。
-  読み込みの入口は`load_role_models`と`Verifier::role_models`で、supervisorとobserverはjobやplannerを起動するたびに読み、読めなければ今までと同じ起動にする。
-  keyの無い表と表の無い役割も今までと同じ起動になる。
+  役割・key・値と読み込みが拒むものは、`domain::actor_model`のdoc commentが持つ。
+  読み込みの入口は`Verifier::role_models`で、読む時点と、読めないときと表の無いときの起動は[Actor model](actor-model.md)が持つ。
   runtimeのplannerの古い経路の欄は受け付けて無視し、runtimeのplannerは常に非対話で動く（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)の決定3）。
-  人が開いたplannerの表は受け付けるが、`dagq plan`は何も開かずに拒むので新しいplannerには読まれない（ADR-t1394-1）。
   この repositoryの節の一覧と経緯は[Actor model](actor-model.md#役割とrolesrole)。
   旧バイナリは表ごと拒み、その役割をCodexで動かす実装を持たないバイナリはCodexを拒むので、各節は固定バイナリがその役割の実装の着地commitを含むことを切り替えのverifyの関門で確かめてから足す。
 - workerとintegrateのverificationを動かす場所の設定は、綴りと値を`RuntimeConfig`のdoc commentが、読み込みの入口と流れを[Container runtime](../container-runtime.md)が持つ。
 - `[container.image]`はcontainerのimageに足すprojectのContainerfileと入力のファイルを名指し、keyの綴りと意味は`ProjectImage`のdoc commentが、buildと読む場所は[Container runtime](../container-runtime.md#image)が持つ。
-  旧バイナリは表ごと拒むので、足すのは固定バイナリがそれを読めるようになってからにする。
 
-- `[language]`はAIが人に向けて書く文の言語（`tag`、BCP 47の言語タグ、既定は無しで指示しない）を持ち、利用者ごとの`config.toml`の同じ表より優先する（[Language](language.md)、[ADR-t616-2](../../adr/2026-09-27-t616-2-language-of-text-ai-writes-for-people-is-configurable.md)）。旧バイナリは表ごと拒むので、足すのはそれを知るバイナリに入れ替えた後にする。
+- `[language]`はAIが人に向けて書く文の言語（`tag`、BCP 47の言語タグ、既定は無しで指示しない）を持ち、利用者ごとの`config.toml`の同じ表より優先する（[Language](language.md)、[ADR-t616-2](../../adr/2026-09-27-t616-2-language-of-text-ai-writes-for-people-is-configurable.md)）。
+  表は`run_env::parse_config`が中を見ずに受け付け、誤りでclaimや着地を止めないよう[Language](language.md)の読み手が検査する。
 
-- `[repository]`は着地先のbranch（`branch`、既定は推定）、pushのremote（`remote`、既定`"origin"`）、pushするか（`push`、既定`true`）を持つ（[Landing branch](landing-branch.md)、[ADR-t615-1](../../adr/2026-09-27-t615-1-landing-branch-and-push-remote-per-repository.md)）。3つのkeyはどれも読み（`load_repository_config`）、ほかのkeyは未知のkeyとして拒む。`[repository]`を知らない旧バイナリは表ごと拒むので、足すのはそれを知るバイナリに入れ替えた後にする。dagq自身のrepositoryは既定で今までどおり`main`と`origin`になるので足さない。
+- `[repository]`は着地先のbranch・pushのremote・pushするかを持ち、欄と既定は[Landing branch](landing-branch.md)の「`[repository]`の欄」と`domain::landing_branch::RepositoryConfig`が持つ（[ADR-t615-1](../../adr/2026-09-27-t615-1-landing-branch-and-push-remote-per-repository.md)）。
 
-- `[ci_watch]`はsupervisorが着地先のbranchのCIの結果を`gh`で読む見張りの設定で（[ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)。振る舞いは[CI watch](ci-watch.md)）、表があるときだけ有効になる（表が無ければ無効で、何も読まず何も記録しない）。`parse_config`が読み、`load_ci_watch`が返す。旧バイナリは未知の表やkeyを拒むので、固定バイナリが対応してから足す。
-
-  | key | 型 | 既定 | 意味 |
-  | --- | --- | --- | --- |
-  | `workflow` | 空でない文字列（必須） | なし | 見るworkflow。`gh run list --workflow`に渡すファイル名かworkflowの名前（この repositoryでは`"ci.yml"`） |
-  | `branch` | 空でない文字列 | `[repository] branch`の着地先のbranch（[Landing branch](landing-branch.md)） | 見るbranch。pushの実行だけを見る |
-  | `interval_secs` | 60以上の整数 | 600 | 確かめる間隔の秒。推奨は600（CIの1回の実行より短くしても、終わった実行が増えないので読むだけ無駄になる） |
-  | `junit_artifacts` | 文字列の配列 | `[]` | JUnitのXMLを持つ成果物の名前のglob（`gh run download --pattern`に渡す）。空ならtestの名前を取らず、落ちたjobとstepだけを使う |
-
-  `workflow`の無い表、範囲外や整数でない`interval_secs`、空の文字列、配列でない`junit_artifacts`・空の要素・重複、keyの重複、知らないkeyは行番号付きのエラーにする（`load_ci_watch`、`domain::ci_watch::CiWatchConfig`）。supervisorが各passで読み直し（[CI watch](ci-watch.md)の「いつ確かめるか」）、ファイルが無いときは黙って無効、読めない・値が誤っているときはerrorごとに1回logにwarnを出して使っている値のまま続ける。`up`は表があればpreflightで`gh`を確かめる（[CI watch](ci-watch.md)の「読む手段が無いとき」）。`[run.env]`は`gh`の呼び出しに渡さない（supervisorのenvのまま）。この repositoryの値は`dagq.toml`の`[ci_watch]`が持ち、`ci.yml`で成果物やRustのjobの名前（`required_jobs`、[CI watch](ci-watch.md)の「実行の扱い」）を変えたら同じ変更で合わせる。
+- `[ci_watch]`はsupervisorが着地先のbranchのCIの結果を`gh`で読む見張りの設定で（[ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)。振る舞いは[CI watch](ci-watch.md)）、表があるときだけ有効になる（表が無ければ無効で、何も読まず何も記録しない）。
+  keyの型・既定・意味は`domain::ci_watch::CiWatchConfig`のdoc commentが持ち、読み直しと`up`のpreflightは[CI watch](ci-watch.md)の「いつ確かめるか」と「読む手段が無いとき」が持つ。
+  `interval_secs`はCIの1回の実行より短くしても、終わった実行が増えないので読むだけ無駄になる。
+  `[run.env]`は`gh`の呼び出しに渡さない（supervisorのenvのまま）。
+  この repositoryの値は`dagq.toml`の`[ci_watch]`が持ち、`ci.yml`で成果物やRustのjobの名前（`required_jobs`、[CI watch](ci-watch.md)の「実行の扱い」）を変えたら同じ変更で合わせる。
 - `[landing_verification]`は`integrate`がtaskの検証のコマンドの一部をrepositoryの着地の検証のコマンドに置き換える設定で（[ADR-t1925-1](../../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)。流れと境界は[Validation](validation.md#着地の検証)）、表があるときだけ働く。
-  `parse_config`が読み、`integrate`が着地のたびにmain checkoutから`Verifier::landing_verification`で読む（読めなければ`[run.env]`と同じく着地処理のエラー）。
+  `integrate`が着地のたびにmain checkoutから読む（`Verifier::landing_verification`。読めなければ`[run.env]`と同じく着地処理のエラー）。
   書式（key・型・既定値・検査）と、置き換えたコマンドにだけ`[run.env]`の後ろに足すenvの意味は`domain::landing_verification`のdoc commentが持つ。
   そのenvは`DAGQ_`で始まり、`[run.env]`は`DAGQ_`のkeyを拒むので衝突しない。
   何を置き換え、ITをどう選ぶかはrepositoryの設定とscriptが持ち、runtimeは知らない。
-  旧バイナリは未知の表を拒むので、固定バイナリが対応してから足す。
 - `[egress]`は`registries`だけを持ち、containerのrunが[queueのbroker](../queue-broker.md)を通って届くpackage registryのhostを挙げる（[ADR-t2257-1](../../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定3）。
   書式・意味・既定（空）は`run_env::EGRESS_REGISTRIES`のdoc commentが持ち、brokerは`CONNECT`のたびにmain checkoutから読む。
-  旧バイナリは未知の表を拒み、`dagq.toml`を読めなくなって本番のqueueのrunがすべて止まるので、固定バイナリが`[egress]`を知るものに入れ替わってから足す。
 - `[toolchains.<name>]`は使うtoolchainのprofileと当てるpathsの宣言で、宣言したprofileはpathsに依らず`integrate`とlanding recheckの検証の出力の読み方に効く（書式と誤りの扱いは`run_env::TOOLCHAINS_PREFIX`のdoc comment、当て方は[Toolchain profiles](../toolchain-profiles.md)）。
-  旧バイナリは未知の表を拒むので、宣言は固定バイナリが読めるようになってから足す。
 - `[verify_marks.<name>]`は検証の出力のprojectに固有の印で、既存の分類に印を足し、宣言したprofileに依らず`integrate`とlanding recheckに効く（書式は`run_env::VERIFY_MARKS_PREFIX`のdoc comment）。
-  旧バイナリが拒むので、足す時期は`[toolchains.<name>]`と同じ。
 
 ## sccacheのserver
 
@@ -186,16 +178,15 @@ serverを確かめられないもの、guardを作れなかったもの、contai
 supervisorが始めるものの前の確認は、居ないserverをsupervisorが起動する機会でもある。
 wrapperのturnの前・人の`integrate`・e2eのgateの確認とguardはportを見るだけで起動しない。
 runtimeの外からの起動までは防げず、下の検知が扱う。
-containerの中のserverは未実装で、`[run.env]`がsccacheを名指すときだけsupervisorがcontainerの中に起動し、guardはその中のloopbackを確かめる（[ADR-t2114-4](../../adr/2026-10-08-t2114-4-sccache-server-inside-the-run-container.md)・[ADR-t2257-1](../../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)）。
 workerのcacheのdirは`dagq.toml`が与え、queueごとにworker・resumeが共有し、hostのcacheはcontainerに、workerのcacheはverificationにmountしない。
 
 ### 外部serverと失敗の偏り
 
 起動の記録と現在のidentityが一致しなければ、serverの出どころは不明として扱う。
-起動の記録が起動時刻を持たないときは、pidとportが一致し、processの起動時刻が記録の`at`と合えばその記録のsupervisorを起動者とする（照合は`application::sccache::owner`、時刻の幅は`domain::sccache::started_near`）。
+起動の記録が起動時刻を持たないときは、pidとportが一致し、processの起動時刻が記録の`at`と合えばその記録のsupervisorを起動者とする（照合は`application::sccache::owner`）。
 親processは付け替わるため、sandboxの印が読めないことはsandboxの外で起動した証拠にならない。
 既存の失敗率だけで壊れたserverとは決めず、同じidentityの新しい失敗の偏りか、確かめられたsandboxの印で判断する。
-成功なしの新しい失敗の差分が累計3以上なら壊れた印とし、成功・identityの変更・統計のリセットで取り直す。
+成功なしの新しい失敗の差分が閾値（`domain::sccache`のdoc comment）に達すれば壊れた印とし、成功・identityの変更・統計のリセットで取り直す。
 processや統計を読めないことだけでも壊れたものとは決めない。
 統計を読む前に存在を確かめ、診断の読み取りでserverを起動させない。
 
@@ -203,48 +194,59 @@ processや統計を読めないことだけでも壊れたものとは決めな�
 同じidentity・program・errorの再起動の失敗は、supervisorが起動を記録するまで再通知せず、再試行は続ける。
 同じidentityと理由の壊れた印も繰り返し記録せず、故障の変化とsupervisorの起動を区別する。
 再起動に失敗した知らせを受けた人はdoctorでidentityとportを確かめ、hostでserverを止め、起動をsupervisorに任せる。
-この知らせのkindは`sccache_server_restart_failed`、nextは`stop sccache on the host; the supervisor starts it`。
 supervisorが置換の起動を記録すると知らせが消え、人が別のserverを起動して検知されただけでは消えない。
 
 - 監視と再試行の入口は`application::supervise::sccache`。
   drain中も監視し、待ちの経過は注入した時計で測る。
-- identityと失敗の判断は`domain::sccache`、出どころと再起動の記録は`application::sccache`。
-  再起動の失敗の通知は、稼働中とserver不在の両経路から`record_restart_failure`で照合する。
-- hostへの問い合わせと起動、guardのlinkは`infrastructure::sccache::SystemSccache`、guardの実行は`run_guard`、その判断は`domain::sccache::GuardStep`。
-  確認の結果は`domain::sccache::GuardLook`、確認は`application::sccache::look`と起動もする`Supervisor::sccache_look`、eventは`application::sccache::record_wrapper_removed`。
-  適用はturnが`application::headless_session`、ほかは`[run.env]`を組む各所（review・`integrate`・recheck・`e2e_gate`）。
-- doctor/statusの表示条件と読み取りは`application::sccache::add_diagnostics`と`report`。
+- 判断はdomain、出どころと再起動の記録と確認はapplication、hostへの問い合わせと起動とguardのlinkはinfrastructureの、それぞれ`sccache`のmoduleが持つ。
+  再起動の失敗の通知は、稼働中とserver不在の両経路から同じ照合を通る。
+  guardの適用はturnが`application::headless_session`、ほかは`[run.env]`を組む各所（review・`integrate`・recheck・着地の前のe2eの関門）。
+- doctor/statusの表示条件と読み取りは`application::sccache::add_diagnostics`。
   statusは統計clientを呼ばず、doctorが統計を読む。
 
 ## main checkoutの決め方
 
-`dagq.toml`を読むmain checkoutは、repositoryのmain worktree（`git worktree list --porcelain`の最初のentry）で、決めるのは`src/infrastructure/adapters.rs`の`main_checkout_of`の1か所だけ。`GitRepository::inspect`（`checkout()`）、`supervise`・`integrate`・`up`（`RepositoryPaths.checkout`。Claude Codeのtrustの確認も同じpathで引く）、queueの束縛から引く`doctor`・`stats`・`observer`など（`bound_checkout`）、`--from`なしの`install`の既定のcheckout、askの通知のrepositoryの名前（`naming_checkout`）が、どれもこの結果を使う。Git common directoryの名前（`.git`かどうか）では決めない。
+`dagq.toml`を読むmain checkoutは、repositoryのmain worktree（`git worktree list --porcelain`の最初のentry）で、決めるのは`src/infrastructure/adapters.rs`の`main_checkout_of`の1か所だけ（bareと`git init --separate-git-dir`の構成の扱いはそのdoc comment）。
+`dagq.toml`を読むコマンドとaskの通知のrepositoryの名前はどれもこの結果を使い、Git common directoryの名前（`.git`かどうか）では決めない。
 
-| 構成 | main checkout |
-| --- | --- |
-| 通常（common directoryが`<checkout>/.git`） | その`<checkout>`。どのworktreeからでも、common directory自体からでも同じ |
-| bare（main worktreeに作業ファイルが無い。bareのrepositoryに`git worktree add`した構成を含む） | 無い。理由（`... is bare ...`）とbareでないcloneを使う案内のerror |
-| `git init --separate-git-dir`（common directoryがmain worktreeの外） | Gitはmain worktreeの場所を記録せず、`worktree list`はcommon directoryそのものを出す。実行したcheckoutがmain worktree（`--absolute-git-dir`がcommon directory）ならそれ、linked worktreeやcommon directoryからは分からず、main worktreeで打つよう案内するerror（ask 142で人が決めた） |
-
-main checkoutが無いとき、実行したcheckoutやrun worktreeの`dagq.toml`で代わりにしない（runごとに設定が変わりうるため）。`up`はpreflightで`...; the supervisor was not started`で止まり、`supervise`と`integrate`は起動時に同じerrorで止まり、`doctor`の`repository`は`error`を出して`run_env`は出さない。`dagq plan`はmain checkoutを読まずに拒む。`--from`なしの`install`は`--from`を求めるerrorになる。inboxのwatchのaskの通知は、queueが束縛されたcommon directoryの名前で出す（束縛の無いqueueでは実行したcheckout）。
+main checkoutが無いとき、実行したcheckoutやrun worktreeの`dagq.toml`で代わりにしない（runごとに設定が変わりうるため）。
+`up`はpreflightで止まってsupervisorを起動せず、`supervise`と`integrate`は起動時に同じerrorで止まり、`doctor`の`repository`は`error`を出して`run_env`は出さない。
+`dagq plan`はmain checkoutを読まずに拒む。
+`--from`なしの`install`は`--from`を求めるerrorになる。
+inboxのwatchのaskの通知は、queueが束縛されたcommon directoryの名前で出す（束縛の無いqueueでは実行したcheckout）。
 
 ## `[run.env]`が名指すプログラムの検査
 
 [ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定8・9。`[run.env]`の`RUSTC_WRAPPER`などが実行できないと、runのcargoは`could not execute process`ですぐ失敗し、そのまま流すとworkerの検証も`integrate`の検証も全部落ちてresumeを使い切る。そこでruntimeが、cargoを走らせる前に解決できるかを見る。
 
-- **検査する変数**: cargoがプログラムとして実行する`RUSTC_WRAPPER`・`RUSTC_WORKSPACE_WRAPPER`・`RUSTC`・`RUSTDOC`と、その`CARGO_BUILD_`付きの形の8つ（`src/infrastructure/run_env.rs`の`PROGRAM_VARIABLES`）。それ以外の変数は見ない。
-- **解決の規則**（`resolve_program`・`check_programs`・`check_run_env_programs`）: 値が空なら検査しない。`/`を含む値はそのpathが実行可能なfile、含まない値は検査するプロセスのPATHの各directoryに実行可能なfileがあること。`${DAGQ_QUEUE_DIR}` / `${DAGQ_RUN_DIR}`は展開してから見る。runの無い検査（`up`・claim・`doctor`）では`${DAGQ_RUN_DIR}`を含む値は検査しない（runの前にはrun directoryに何も無いため）。`dagq.toml`が無ければ何も検査せず、今までどおりに動く。結果は`domain::run_env::RunEnvCheck`（`config`、`path`、`programs[]`の`variable` / `value` / `resolved`）。
-- **`up`のpreflight**: cmux・Claude・trustの後に、`up`のPATH（supervisorに渡す`UpEnvironment.path`）で検査する（`lifecycle::Ports::run_env_programs`）。見つからなければsupervisorを起動せず、変数名・値・PATHと対処（入れるか、`dagq.toml`から外すtaskを登録する）を挙げたerrorで止まる。`dagq.toml`があるrepositoryでは`up`の出力に`run_env`（検査の結果）が付く。
-- **supervisorのclaimの前**: 各fill passのclaimの前に自分のPATHで検査する（`Verifier::run_env_programs`）。見つからなければそのpassではclaimしない。走っているrun、review、triage、すでに始まったresumeのsessionは止めないが、`needs_session`のrunの新しいresumeはclaimと同じく始めない（resumeのwrapperにも`[run.env]`が渡るため。task 303）。queueの最新の`run_env_program_missing` / `run_env_program_found`と答えが変わったときだけ記録する（見つからなくなったら`run_env_program_missing`、payloadは最初に見つからなかった`variable` / `value`と`path`、全部の`programs`、`message`、`supervisor`。見つかるようになったら`run_env_program_found`）。queueの記録と比べるので、supervisorを起動し直しても繰り返さない。`dagq.toml`が読めないときは前の答えのまま（provisioningがそのfileのerrorを出す）。
-- **着地の保留**: 見つからない間、passしたrunは`awaiting_integration`のままleaseを持って着地slotを待ち（`Phase::AwaitingSlot`）、統合slotは取らない。見つかれば次のpassで着地に進む。検査はpassごとに（drain・handoff中も）行う。drain・handoff・claimの停止の最中に見つからなければ、supervisorは待たずにそのrunのleaseを返し、runは`awaiting_integration`のまま人の`review and integrate`になる。`approve_landing`の`land`の答えは見つからない間もその場で適用してaskを閉じ、runを着地の列に並べる。列のrunの着地の開始（`start_approved_landings`）だけが、見つかるまで待つ（task 949、[Review](review.md#review-supervisor)の6）。
+- **検査する変数**: cargoがプログラムとして実行する変数（`src/infrastructure/run_env.rs`の`PROGRAM_VARIABLES`）だけで、それ以外の変数は見ない。
+- **解決の規則**（入口は`check_run_env_programs`）: 値が空なら検査せず、`/`を含む値はそのpathが実行可能なfile、含まない値は検査するプロセスのPATHの各directoryに実行可能なfileがあること。
+  `${DAGQ_QUEUE_DIR}` / `${DAGQ_RUN_DIR}`は展開してから見る。
+  runの無い検査（`up`・claim・`doctor`）では`${DAGQ_RUN_DIR}`を含む値は検査しない（runの前にはrun directoryに何も無いため）。
+  `dagq.toml`が無ければ何も検査しない。
+  結果は`domain::run_env::RunEnvCheck`。
+- **`up`のpreflight**: cmux・Claude・trustの後に、`up`のPATH（supervisorに渡すPATH）で検査する（`lifecycle::Ports::run_env_programs`）。
+  見つからなければsupervisorを起動せず、変数名・値・PATHと対処（入れるか、`dagq.toml`から外すtaskを登録する）を挙げたerrorで止まる。
+  `dagq.toml`があるrepositoryでは`up`の出力に検査の結果が付く。
+- **supervisorのclaimの前**: 各fill passのclaimの前に自分のPATHで検査し（`Verifier::run_env_programs`）、見つからなければそのpassではclaimしない。
+  走っているrun、review、triage、すでに始まったresumeのsessionは止めないが、`needs_session`のrunの新しいresumeはclaimと同じく始めない（resumeのwrapperにも`[run.env]`が渡るため）。
+  queueの最新の`run_env_program_missing` / `run_env_program_found`と答えが変わったときだけ、見つからなくなったら`run_env_program_missing`、見つかるようになったら`run_env_program_found`を記録する。
+  queueの記録と比べるので、supervisorを起動し直しても繰り返さない。
+  `dagq.toml`が読めないときは前の答えのまま（provisioningがそのfileのerrorを出す）。
+- **着地の保留**: 見つからない間、passしたrunは`awaiting_integration`のままleaseを持って着地slotを待ち（`Phase::AwaitingSlot`）、統合slotは取らない。
+  見つかれば次のpassで着地に進む。
+  検査はpassごとに（drain・handoff中も）行う。
+  drain・handoff・claimの停止の最中に見つからなければ、supervisorは待たずにそのrunのleaseを返し、runは`awaiting_integration`のまま人の`review and integrate`になる。
+  `approve_landing`の`land`の答えは見つからない間もその場で適用してaskを閉じ、runを着地の列に並べる。
+  列のrunの着地の開始（`start_approved_landings`）だけが、見つかるまで待つ（[Review](review.md#review-supervisor)の6）。
 - **`integrate`の検証の前**: 検証コマンドを実行する前に同じ検査をrunの`run_dir`で行い、見つからなければ検証コマンドを実行せず、`dagq.toml`が読めないときと同じく着地処理のエラーにする（runは元の状態に戻り、`needs_session`にしないのでresumeを使わない。`last_error`に変数名と値とPATHが入る）。検証コマンドが無いtaskは検査しない。
 - **変更の印**: supervisorは同じ周回で`[run.env]`を展開せずに読み（`Verifier::run_env_table`）、queueの秘密のsaltで鍵付けして正規化したhashがqueueの最新の`run_env_changed`と違うときだけ`run_env_changed`（hashと変わったキーの名前。値は書かない）を記録する。
   `RUSTC_WRAPPER = "sccache"`の追加・削除や`CARGO_BUILD_JOBS`の変更はこの印に表れる（[変更の印](commands.md)、[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定11）。
   attentionにはならない。
-- **attention**: `run_env_program_missing`はinbox宛てのattention（`next: install tool`）で、`watch`はこのeventで起き、`status`は最新がmissingの間`kind: run_env_program_missing`、`status: missing`、`last_error`にその`message`を出す（`run_id` / `task_id`はnull）。`run_env_program_found`で消える。
-- **`doctor`**: `run_env`の欄に`config`、`doctor`を打ったプロセスのPATH（`path`）、`programs`（`resolved`は見つからなければnull）、`missing`（件数）、supervisorが最後に記録した`run_env_program_missing` / `run_env_program_found`（`supervisor_last`）を出す。`dagq.toml`が無く記録も無ければ欄ごと出さない。
+- **attention**: `run_env_program_missing`はinbox宛てのattentionで、`watch`はこのeventで起き、`status`は最新がmissingの間その行を出し、`run_env_program_found`で消える。
+- **`doctor`**: `run_env`の欄に`doctor`を打ったプロセスのPATHでの検査の結果と、supervisorが最後に記録した答えを出し、`dagq.toml`が無く記録も無ければ欄ごと出さない。
 - workerのwrapperのPATHは`[run.env]`で変わりうるので、supervisorの検査と同じとは限らない。workerのPATHでだけ見つからない場合は、workerの検証が失敗してreceiptかtriageで分かる。
-- 2つのkindはtaskにもgoalにも紐づかない行なので、`0032_run_env_program_events.sql`が`run_events`を作り直してCHECKに足した（[persistence](../persistence.md)）。
+- 2つのkindはtaskにもgoalにも紐づかない行として`run_events`に入る（[persistence](../persistence.md)）。
 
 
 ## 予定: 定期draft（未実装）
@@ -263,6 +265,6 @@ main checkoutが無いとき、実行したcheckoutやrun worktreeの`dagq.toml`
 
 keyの重複、未知の欄、必須欄の欠け、型・値の不正を拒否する。設定を読めないpassは定期draftを登録せず、エラーを記録する。設定の誤りだけを人の判断のaskにはしない。既存のdraftの材料は登録時のsnapshotで、設定の変更は次の登録から効く。keyの削除で既存のdraftをcancelしない。
 
-期限はqueueの同じkeyの最後の登録時刻（UTC）に`interval_days × 86400`秒を足す。履歴が無ければ即時に対象。前の同じkeyのdraft/taskがcompletedかcanceledでなければ登録しない。終わった時点で既に期限を過ぎていれば次のpassで1件登録し、実際に登録した時刻から次を数える。停止中の複数の期限を1件にまとめるので、再起動時にも連続して取り戻さない。登録履歴はqueueが持ち、keyの再追加でも残す。登録時のtransactionとplannerへの材料は[定期draftの予定](draft-planners.md#予定-recurringのdraft未実装)。
-
-最初の設定の予定は`key = "rust-toolchain-upgrade"`、`interval_days = 42`。titleはRust stableへの引き上げ、descriptionは公式stableと今の固定版の比較、acceptanceは完全固定・MSRVの整合・fmt/clippy/test/CI/releaseの成功を求める。verification・paths・evidenceにはtoolchainの引き上げの検証と変更範囲・証拠を提案し、plannerが採用時にrepositoryの規則に照らして補う。恒久設定のgoalは省略し、goal 46の終了後も提案を続ける。具体的なコマンドとglobの配置は対応後の`dagq.toml`が持つ。
+期限はqueueの同じkeyの最後の登録時刻（UTC）に`interval_days`の日数を足す。
+重複の防止、履歴の無いkey、停止中の期限の取り戻し、登録履歴の扱いと最初の設定の予定は[ADR-0072](../../adr/0072-recurring-drafts-from-dagq-toml.md)の決定2・5が持つ。
+登録時のtransactionとplannerへの材料は[定期draftの予定](draft-planners.md#予定-recurringのdraft未実装)。

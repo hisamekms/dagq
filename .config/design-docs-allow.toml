@@ -28,16 +28,8 @@ size = 16782
 line = 1105
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/backend-call-failures.md"
-tasks = 10
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/draft-planners.md"
 size = 34857
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/host-metrics.md"
-tasks = 7
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/observer.md"
@@ -53,27 +45,9 @@ size = 41468
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/run-environment.md"
-size = 53375
-line = 3131
-tasks = 2
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/run-worktrees.md"
-line = 2575
-tasks = 27
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/source-repository.md"
-line = 1174
+size = 38322
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/supervise.md"
 size = 33096
 line = 1261
-
-[[doc]]
-path = "docs/design/supervisor-lifecycle/throughput-review.md"
-size = 39731
-line = 3093
-tasks = 29
-

@@ -112,7 +112,7 @@ worker以外のheadless jobは、providerに権限の意図・promptの渡し方
 ### Codexのheadless job
 
 `provider = "codex"`の役割のjobは、supervisorが見つけて`--version`の通ったCodex（`Ports::codex_jobs`）の`infrastructure::codex::Codex`で起動する（設定の最小形は[codex-headless-jobs-spike](../plans/codex-headless-jobs-spike.md)）。
-役割ごとの流れは[Plan review](supervisor-lifecycle/plan-review.md#codexで動かす)・[Throughput review](supervisor-lifecycle/throughput-review.md#codexで動かすtask-1220)・[Observer](supervisor-lifecycle/observer.md#codexで動かす)・[Triage](supervisor-lifecycle/triage.md#codexで動かす)・[生きているsessionの復旧job](supervisor-lifecycle/background-recovery-job.md#codexで動かす)と[ADR-t1207-1](../adr/2026-09-30-t1207-1-codex-run-review.md)が持つ。
+役割ごとの流れは[Plan review](supervisor-lifecycle/plan-review.md#codexで動かす)・[Throughput review](supervisor-lifecycle/throughput-review.md#codexで動かす)・[Observer](supervisor-lifecycle/observer.md#codexで動かす)・[Triage](supervisor-lifecycle/triage.md#codexで動かす)・[生きているsessionの復旧job](supervisor-lifecycle/background-recovery-job.md#codexで動かす)と[ADR-t1207-1](../adr/2026-09-30-t1207-1-codex-run-review.md)が持つ。
 
 - 入口: modelとeffortは`Codex::apply_launch`。
 - どの`JobAccess`も読み取りだけのsandboxに訳す。
