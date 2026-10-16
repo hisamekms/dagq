@@ -1018,7 +1018,8 @@ pub const GOAL_REVIEW_GOAL_BYTES: usize = 16_000;
 
 /// The bytes of the goal's tasks, each with what landed for it, and of
 /// one task: in production a task took 4,000 bytes on average and 12,126
-/// at most, most of it its landed receipt.
+/// at most, most of it its landed receipt. The tasks that landed are
+/// taken first, then the others, each newest first.
 pub const GOAL_REVIEW_TASKS_BYTES: usize = 110_000;
 pub const GOAL_REVIEW_TASK_BYTES: usize = 8_000;
 

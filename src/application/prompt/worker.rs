@@ -1201,6 +1201,10 @@ pub fn prompt(
 /// followed by the same task with every section empty (and the run carried
 /// over by hand), so both branches of each section are in it. Its text is fixed by this binary, so its hash changes with the prompt's
 /// headings and sentences and never with a task's values.
+///
+/// So the hash leaves out the prompt after a task's values went in (each
+/// task's differs), the language instruction appended to it, and the
+/// resume and revise requests, which are built apart.
 pub fn worker_template(provider: Provider) -> Result<String> {
     use crate::domain::{
         GoalRecord, GoalStatus, RunRecord, TaskRecord, TaskStatus,

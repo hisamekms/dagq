@@ -57,7 +57,7 @@ queueはcwdから解決し（[persistence](../persistence.md)のQueue location�
    busy / locked でない失敗（書き込みの拒否、I/O errorなど）はその場で止める。
    書き込みが通っても登録の行が無かったとき（PIDが死んだかstaleと見なされ`up`か強制の`down`で消された）はleaseを失ったとして止める（登録を持たない`integrate`のheartbeatはこの判定をしない）。
    runのlease行が他のtokenに移ったことは、下の7の各tickの確認がrunごとに見て、そのrunだけをslotから外す。
-   止めるときはループで検知し、全runに`runtime_error`（`lease_lost`、文に失敗の回数と時間を含む）を記録してleaseと登録を残したまま終了する（プロセス終了後にstaleになる）。
+   止めるときはループで検知し、全runに`runtime_error`（`lease_lost`。`Heartbeat::check`）を記録してleaseと登録を残したまま終了する（プロセス終了後にstaleになる）。
    `parallel`・`max_waiting`・`runtime_planners`の値と出どころは`SlotLimits::resolve`が決め、登録の行を作るのと同じトランザクションで書く（引き継ぎでは取り戻しの直後に書き直す（`set_slot_limits`）。[Run environment](run-environment.md)の`[supervisor]`）。
    登録の後、`stall_config_loaded`に続けて変更の印`supervisor_started`を1件記録する（`domain::marks::SUPERVISOR_STARTED`）。
    停止要求（SIGINT/SIGTERM）に最初に気づいたpassでは、drainに入ったことをqueueのevent `supervisor_draining`で1回だけ記録する（[Handoff](handoff.md#handoff)の停止要求の記録と引き継ぎの待ち）。
@@ -112,7 +112,7 @@ workerのsessionはclaimでもresumeでも非対話で、supervisorは依頼をr
     手の`claim`（supervisorの無いclaim）の`run_claimed`はこれらを持たない。
     `integrate`で依存が解けたtaskは次のループで、先行taskを含む`main`から始まる。
     fill passは始めと終わりにslotの埋まりの変化を`slots_full_*`に書く（[計測](../measurement.md)の「claimの前」）。
-   **candidatesの標本**（ADR-0051の決定3）: claimを止めておらず停止要求も無いpassでは、このfill pass（claimを控えたpassも含む）の後に標本（`domain::kpi::CandidatesSample`。`candidates`は衝突の多いファイルで控えた候補も数える）を数え、このプロセスが前に記録した標本と違えば`candidates_sampled`をqueueのeventとして1件記録する。
+   **candidatesの標本**（ADR-0051の決定3）: claimを止めておらず停止要求も無いpassでは、このfill pass（claimを控えたpassも含む）の後に標本（`domain::kpi::CandidatesSample`）を数え、このプロセスが前に記録した標本と違えば`candidates_sampled`をqueueのeventとして1件記録する。
    読み書きの失敗はlogに出すだけで、次のpassでやり直す。
    `kpi`の`candidates`がこれを読む（[`kpi`](commands.md)）。
 6. **provision**: run管理領域（DBと同じdirの`runs/<run-id>/`）のpath、branch `dagq/<run-id>`、worktree（`runs/<run-id>/worktree`）、receipt、logのpathを`run_planned`として先にDBへ保存し、ディレクトリ、`prompt.txt`、runtimeバイナリのスナップショット`runner`、worktreeを作り、session wrapperを起動する（起動の仕方は`ActorProgram::RunSession`、環境変数は`domain::actor`のmodule doc。[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)、[非対話のworker](headless-worker.md)）。
@@ -164,7 +164,7 @@ workerのsessionはclaimでもresumeでも非対話で、supervisorは依頼をr
     ループを抜けたら（claimやGitのエラーで抜ける場合も含む）自分の登録の削除と`supervisor_stopped`の記録を1つのトランザクションで行う。
     heartbeat失敗で終わるときと記録に失敗したときは消さず、staleとして次の`up`・`down`の掃除（同じく1つのトランザクション）に任せる。
 
-結果は`{"outcome": "finished" | "stopped", "runs": [休止したrun], "errors": [{run_id, task_id, message}], "triaged": [{run_id, task_id, status}]}`（`triaged`はこのプロセスがtriageを終えたrunとその後のstatus）。
+結果の欄の意味は`Supervisor::run_loop`のdoc commentが持つ。
 SIGINT/SIGTERMは1回目でclaimを止めてactive runの終了を待ち（graceful drain）、2回目で既定の動作（即終了）になる。
 即終了した（killされた）supervisorのleaseはPIDが死んだ時点で（遅くともheartbeatの`HEARTBEAT_TIMEOUT_SECS`で）staleになり、wrapperが生きているrunは次のfill passで別のsupervisorが引き継ぐ（5）。
 登録はPIDが死んだ時点から`stale`として`status`/`doctor`に残る。

@@ -125,6 +125,8 @@ pub struct RunEvent {
     pub created_at: String,
     /// Who wrote it (ADR-t728-1 decision 4); `None` for an event written
     /// before the queue recorded actors, or by an older binary.
+    /// `events --full`, `show --full` and `show`'s summary of the events
+    /// carry it; the summary of `events` and `watch` do not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<EventActor>,
 }

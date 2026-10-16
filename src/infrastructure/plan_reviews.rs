@@ -860,6 +860,12 @@ impl PlanReviewStore for SqliteQueue {
         )? == 1)
     }
 
+    /// Records `plan_revise_sent`. `opened` is the launch of a planner the
+    /// runtime opened for the findings, whose effort is raised a step;
+    /// findings delivered to a live planner raise nothing, since the runtime
+    /// switches no model or effort inside a running session. So
+    /// `effort_raised` says whether an opened planner's effort went up, and
+    /// `effort_not_raised` says why a live planner's did not.
     fn revise_sent(
         &mut self,
         proposal_id: ProposalId,

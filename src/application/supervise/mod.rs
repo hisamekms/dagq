@@ -699,6 +699,10 @@ impl Heartbeat {
         }
     }
 
+    /// The failure that stopped the heartbeat, if any; the loop records it
+    /// on every run as a `runtime_error` with the reason `lease_lost`.
+    /// When writes failed, its message carries how many failed in a row
+    /// and over how many seconds since the last one written (`beat`).
     pub fn check(&self) -> Result<()> {
         match &*self.failed.lock().unwrap_or_else(|e| e.into_inner()) {
             Some(error) => {
@@ -1174,7 +1178,10 @@ struct Supervisor<'a> {
     /// The error the last read of `[fresh_session]` failed with, warned of
     /// once until it changes or a read succeeds.
     fresh_session_error: Option<String>,
+    /// The runs that came to rest in this process's slots (a step ended
+    /// them in a status the loop no longer drives); the result's `runs`.
     finished: Vec<TaskRun>,
+    /// The runs this process gave up on; the result's `errors`.
     errors: Vec<RunError>,
     /// When this process last recorded the transcript turns of the open
     /// session spans (ADR-0048 decision 8); `None` until the first pass.
@@ -1614,6 +1621,14 @@ impl Supervisor<'_> {
     /// heartbeat failure (the database may be unreachable) or a stop that
     /// could not be recorded keeps the row, which goes stale with the
     /// leases for the next `up` or `down` to prune.
+    ///
+    /// The result, from `drive`: `outcome` is `stopped` when a stop
+    /// was asked, `finished` when the loop ran out of work, and `handoff`
+    /// when it hands over to another binary (with what the exec needs),
+    /// `runs` the
+    /// runs that came to rest (the `finished` field), `errors` those given up
+    /// on ([`RunError`]), and `triaged` each run this process triaged with
+    /// the status it went to.
     fn run_loop(&mut self, options: &LoopSettings) -> Result<Value> {
         let result = self.drive(options);
         self.host.host_metrics.finish();
@@ -2433,7 +2448,8 @@ impl Supervisor<'_> {
         }
     }
     /// Record `candidates_sampled` (ADR-0051 decision 3) when this pass's
-    /// claimable ready tasks (`graph`'s `candidates`), free slots or ready
+    /// claimable ready tasks (by the rule's order, the deferred ones
+    /// included: [`CandidatesSample::candidates`]), free slots or ready
     /// tasks differ from the sample this process recorded last, and on its
     /// first claim pass ([`contexts::ObservationState::record_candidates`]).
     fn sample_candidates(&mut self, parallel: usize) {

@@ -56,7 +56,6 @@ related:
 - **取り戻し**: exec 後は同じ token と pid の登録を取り戻し、version と heartbeat を更新する。
   lease と開始時刻を保ち、supervisor_handed_off を記録して slot を復元する。
   handoff.json の resume と終了要求、送った依頼を復元し、依頼を二重に送らない。
-  古い対話用の exit_typed / not_ready_asked 等の欄は互換のため読めるが監視には使わない。
   snapshot が無ければ生きている wrapper の run を adopt と同じ条件で復元する。
   復元した resume は resume_adopted を記録する。
   review 中（`awaiting_integration`）の run は adopt と同じ `adopt_review` で組み立て直すので、記録した revise・衝突の依頼が `turns/` に無ければ、その試行の依頼だけを照合して 1 回だけ書く（[Review](review.md) の 7）。

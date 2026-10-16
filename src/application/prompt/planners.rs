@@ -7,7 +7,9 @@ use super::*;
 /// `[<repo>]inbox` workspace (ADR-0022): it relays each open ask to a person
 /// and writes the person's answer back, deciding nothing itself. Every
 /// other attention is the inbox's too (ADR-0024 decision 6): it reports it
-/// and does only what the person says.
+/// and does only what the person says. It stays within 5 lines; the
+/// language instruction appended after it (`with_instruction`) is not
+/// counted in them.
 pub fn inbox_prompt(db: &Path) -> Result<String> {
     Ok(format!(
         "You are the inbox of the dagq queue at {db}: you relay its asks and attention to a person and never decide anything yourself.\n\
@@ -292,7 +294,8 @@ pub const BEFORE_YOU_STOP_AT_A_QUESTION: &str = "Before you stop at a planner_qu
 
 /// The bytes of what the planner before a planner the runtime opens left
 /// for it (ADR-t1704-1 decision 3): its notes, the newest first, and the
-/// lines of the drafts it created or edited; and of one note.
+/// lines of the drafts it created or edited; and of one note. The drafts'
+/// lines are taken after the notes, newest first too.
 pub const PLANNER_HANDOVER_BYTES: usize = 8_000;
 pub const PLANNER_HANDOVER_NOTE_BYTES: usize = 2_000;
 
@@ -407,7 +410,10 @@ pub const RUNTIME_PLANNER_TASKS_BYTES: usize = 8_000;
 /// 12): the proposal, its tasks, and the reasons to fix. No person watches
 /// the session, so what needs one goes to the inbox as an ask (decision 13).
 /// The reasons and the tasks are held to their limits and the whole to
-/// [`RUNTIME_PLANNER_PROMPT_LIMIT`] (task 1571, ADR-t1566-1).
+/// [`RUNTIME_PLANNER_PROMPT_LIMIT`] (task 1571, ADR-t1566-1). Unlike
+/// [`inbox_prompt`] it is held by bytes, not to a few lines; the language
+/// instruction is appended after the fit (`FittedPrompt::with_language`),
+/// outside the limit, and counted as its own `language` section.
 pub fn runtime_planner_prompt(
     db: &Path,
     proposal: ProposalId,
@@ -748,7 +754,7 @@ pub(super) const DECIDE_YOURSELF: &str = "decide what you can recommend yourself
 pub const DRAFT_PLANNER_PROMPT_LIMIT: usize = 80_000 + PLANNER_HANDOVER_BYTES;
 
 /// The bytes of the drafts' sections, and of one draft's title,
-/// description and context.
+/// description and context. The drafts are taken in the bundle's order.
 pub const DRAFT_MEMBERS_BYTES: usize = 20_000;
 pub const DRAFT_TITLE_BYTES: usize = 1_000;
 pub const DRAFT_DESCRIPTION_BYTES: usize = 6_000;

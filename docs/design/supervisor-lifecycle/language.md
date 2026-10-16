@@ -45,7 +45,6 @@ tag = "ja"
 
 - 解決は表ごとではなく`tag`ごとに見る（表だけあって`tag`が無ければ次へ。`resolve_language`）。
 - 書式の誤りはerrorにする（`infrastructure::language`）。
-  大文字小文字は書いたまま渡す。
 - `config.toml`はほかの表をerrorにする（KPI・レポート・pushは[`host.toml`](push.md)）。
 - 解決は使うたびに行い、queueにもsupervisorの登録にも保存しない。
   変えたら次に立つsessionとjobから効き、走っているsessionのpromptは変わらない（workerの`prompt.txt`はclaim時点のスナップショット。resumeとreviseの依頼文には依頼の時点の指示が入る）。
@@ -65,7 +64,6 @@ supervisorは`Verifier::language`で、promptを組み立てるたびに解決�
 停滞の催促やaskの答えの配送など、立ったsessionに送る短い定型文には足さない（最初のpromptが指示を持つ）。
 指示の文面は`domain::language`が持つ。
 
-inboxとplannerの初期promptは5行以内だが、この1行は数えない。
 compactionと`/clear`で初期promptが失われるので、inboxとplannerについてはその役割の`status`の出力に言語を足し、pluginの`SessionStart` hook（`session-start.sh`、[plugin-integration](../plugin-integration.md#起き直しhookadr-0016)）が出す起き直しの出力に同じ指示が入るようにする。
 hookは先頭の1行で「statusの`language.instruction`があればそれに従って人に向けて書く」と指し、その後のstatusのJSONが指示の文面を持つ（shで JSONから文面を抜き出さない）。
 pluginのskillには、promptか起き直しの出力に言語の指示があればその範囲の文をその言語で書き、無ければ会話とrepositoryの規則に従うと書く（範囲と置き場所は`dagq` skillの「Language」が持ち、ほかのskillはそこを指す）。
@@ -79,5 +77,5 @@ workerには起き直しのhookが無い（`session-start.sh`はinboxとplanner�
   `[language]`の書式の誤りでprovisioningや着地を失敗させないためで、誤りを見せるのは`up`・`doctor`・promptの組み立てだけにする。
 - supervisor: promptを組み立てる時点で`[language]`か`config.toml`が読めなければ指示を足さずに進み、`tracing`のwarnを出す。
   runもplannerも止めない。
-- `doctor`（既定の出力にも出す）: 解決した言語と書式の誤りを出し、誤りのときは出所を`unset`にする（`LanguageReport`、[doctor](commands.md)）。
+- `doctor`（既定の出力にも出す）: 解決した言語と書式の誤りを出す（`LanguageReport`、[doctor](commands.md)）。
   このbinaryが読めない（migrateが要る・拒まれる）queueの`doctor`には出ない。

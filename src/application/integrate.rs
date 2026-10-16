@@ -509,6 +509,11 @@ pub struct DiskRoom {
 /// (the supervisor, or the person or the inbox behind `integrate`),
 /// `previous` the status the run returns to when the landing stops before
 /// `main` moves, and `main` the head it lands on.
+///
+/// The approval behind it, `integration_approved` when there is one (a
+/// person's `integrate`, or an `approve_landing` answered `land`), is
+/// recorded as the requester; a supervisor that lands a run takes the slot itself, so the
+/// `integration_started` of its landing is the supervisor's.
 #[derive(Debug, Clone)]
 pub struct IntegrationRequest {
     pub requester: ActorContext,

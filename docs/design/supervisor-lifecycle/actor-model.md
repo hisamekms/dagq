@@ -83,7 +83,7 @@ effort = "high"         # 省けば既定
 plan reviewの`revise`（と`reopen`）の指摘を配るとき、持ち主のplannerが居ないのでruntimeが新しくplannerを立てる（`open_runtime_planner`、[Plan review](plan-review.md)の9）と、そのplannerのeffortを`[roles.runtime_planner]`の値（無ければ既定）から1段上げる（`domain::actor_model::raise`）。
 modelは表の値（無ければ既定を明示）のまま変えない。
 
-生きているplannerへの配送（指摘を次のturnの依頼として`turns/`に置く）は新しく起動しないので上げない。runtimeは動いているsessionの中でmodel / effortを切り替えないので、`plan_revise_sent`に上げなかった理由（`effort_not_raised`）を残す。
+生きているplannerへの配送（指摘を次のturnの依頼として`turns/`に置く）は上げず、理由と記録は`infrastructure::plan_reviews`の`revise_sent`のdoc commentが持つ。
 
 ## 記録（`launch`）
 
@@ -105,8 +105,7 @@ modelは表の値（無ければ既定を明示）のまま変えない。
   区間の`session_closed`も同じ値を持つ（[Agent provider lifecycle](../provider-lifecycle.md#claude-sessionの区間)）。
   上の「写さない」はClaudeのjobの話で、Codexのjobは終わりのeventしか値の出どころが無いので写す。
   `stats`のjobの`by_model`は、開始の`session_id`の`session_closed`が無ければ終わりのeventの`model`を読む
-- **`headless_jobs.provider`**（`migrations/0055_headless_job_provider.sql`）: supervisorが起動するheadlessのjobのプロセスの行に、行き先で実際に起動したprovider（launchの`provider`。切り替えた後ならその先。`JobSubject::provider`）を書く。
-  `NOT NULL DEFAULT 'claude'`なので、migrationより前の行と、列を知らない古いバイナリが書く行は`claude`と読める（[Headless job processes](headless-job-processes.md)）
+- **`headless_jobs.provider`**（`migrations/0055_headless_job_provider.sql`）: supervisorが起動するheadlessのjobのプロセスの行に、行き先で実際に起動したprovider（launchの`provider`。切り替えた後ならその先。`JobSubject::provider`）を書く（古い行の読み方は`JobSubject::provider`のdoc comment、[Headless job processes](headless-job-processes.md)）。
 
 ## runtimeのplannerの経路<a id="runtimeのplannerの経路"></a>
 

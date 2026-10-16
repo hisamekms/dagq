@@ -64,7 +64,7 @@ runtimeが起動するAI actorは全て、環境にroleとactor idを持つ。
 | plan review job | proposalのplan review | |
 | goal review job | goalのgoal review | |
 | throughput review job | 毎時・日次・週次のスループットの見直し | 読むだけ。結論はsupervisorの`throughput-review`コマンドが保存しinboxに知らせる（[スループットの見直し](throughput-review.md)） |
-| observer | `dagq observe`が起動するagent | actor idはobservationごと（Claudeではsession idと同じ値。Codexはthreadを自分で名付けるのでsession idとは別） |
+| observer | `dagq observe`が起動するagent | actor idは`observer_actor`（`src/application/observer/mod.rs`）が決める |
 
 inboxとplanner（と登録済みのin-cmuxのsupervisor）は`DAGQ_QUEUE`（queue DBのpath）も持つ。
 workerとresume、headlessのjob、observerは持たず（`domain::queue_service::client_role`）、agentのプロセスはqueue serviceのsocketの`DAGQ_SERVICE_SOCKET`とtokenのfileの`DAGQ_SERVICE_CREDENTIAL_FILE`を持ち、その`dagq`はクライアントモードで動く（[Queue service](../queue-service.md#クライアントモード)）。
@@ -141,14 +141,13 @@ askとanswerが持つ書き手の欄とは別で、それらの値は変えな�
   例外は制御側のプロセス（`supervise`、runとplannerのsession wrapper、session hook）で、eventはsessionのactorでなくsupervisorかwrapperのactorになる（`main.rs`の`event_actor`）。
   supervisorが起動する`observe`と`auto-update`には`supervisor:<pid>`の環境を渡すので、そのeventもsupervisorになる（observerのagentはobserverのactorのまま）。
 - 着地（rebase・検証・squash・mainの更新・push）のeventはactorがIntegratorで、`requested_by`が依頼者。
-  依頼の`integration_approved`は依頼者、slotを取る`integration_started`はsupervisorの記録（[Authorization](../authorization.md#着地とpushintegrator)）。
+  依頼と`integration_started`の記録の主は[Authorization](../authorization.md#着地とpushintegrator)と`IntegrationRequest`のdoc commentが持つ。
 - review・recovery（終わったrunと生きているrun）・plan review・goal reviewのverdictをsupervisorが適用する間（`Supervisor::for_job`）、書かれるeventはactorがsupervisorのまま、`requested_by`にjobのactor idを持つ。
   抜けるときは（適用が失敗しても）入る前の値に戻すので、`for_job`が入れ子になっても内側を抜けた後の外側のeventは外側のjobの`requested_by`を持ち、外側を抜けると元の値（ふつうは無し）に戻る（Integratorの着地も同じく依頼者を入る前の値に戻す）。
   生きているrunのrecovery jobのverdictが適用されずにescalateするとき（`escalate`・confidence lowの`repair`・適用の時点で前提を満たさない`repair`）も、そのescalationの`recovery_finished`と開く ask（`stalled`）の`ask_opened`は`Supervisor::for_escalation`の中で書かれ、`requested_by`にjobのactor id（`recovery-job:<run>:<alert>:<attempt>`）を持つ（`Escalation::requester`）。
   jobの失敗と、alertのjobを使い切ったとき（`UsedUp`）のescalationはjobの依頼ではないので`requested_by`を持たない。
   review passの後の着地のeventは上のとおりIntegratorのactorで、`requested_by`が依頼したsupervisor。
 - 読み方: `RunEvent.actor`で、migrationより前の行と古いバイナリが書いた行は`None`（JSONでは`actor`の欄が無い）。
-  `events`・`show`の全文の出力と`show`の要約のeventは`actor`を持ち、`events`の要約と`watch`は持たない。
   secretやpromptの全文は入れない（入るのはroleとidだけ）。
 
 ### headlessのjobのverdictと遷移

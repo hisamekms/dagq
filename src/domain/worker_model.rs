@@ -381,7 +381,8 @@ pub struct TrialChoice {
 /// the [`LOWER_THIRD`] percentile of the last prediction of the
 /// `trial.window` latest other tasks; with fewer predictions than that, or
 /// without its own, it does not. A task that joins takes the group other
-/// than the last task that joined; the first is the control.
+/// than the last task that joined; the first is the control. The
+/// prediction's `rework_probability` plays no part in the choice.
 pub fn choose(trial: &WorkerTrial, task: TaskId, events: &[RunEvent]) -> TrialChoice {
     let outside = |percentile| TrialChoice {
         session: WorkerSession::default(),

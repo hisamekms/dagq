@@ -217,7 +217,10 @@ pub struct JobSubject {
     pub(super) proposal_id: Option<crate::domain::ProposalId>,
     pub(super) goal_id: Option<crate::domain::GoalId>,
     pub(super) attempt: usize,
-    /// The provider the job was started on (ADR-t1063-1).
+    /// The provider the job was started on (ADR-t1063-1), written to the
+    /// row's `headless_jobs.provider`. That column is `NOT NULL DEFAULT
+    /// 'claude'`, so a row from before it, or one an older binary that does
+    /// not know it writes, reads as `claude`.
     pub(super) provider: Provider,
 }
 

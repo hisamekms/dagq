@@ -39,7 +39,7 @@ fn user_config_file_from(
 /// `[language] tag` of a file's text. `only_language`: every other table
 /// and any key outside a table is an error (the user's `config.toml`);
 /// otherwise they are skipped (`dagq.toml`, whose other tables its own
-/// reader checks).
+/// reader checks). The tag is passed on with its case as written.
 fn parse_tag(text: &str, file: &str, only_language: bool) -> Result<Option<String>> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let mut in_language = false;
@@ -158,7 +158,8 @@ pub fn language_for_prompt(
 
 /// The `language` field of `doctor` and `status --role`: the tag in force,
 /// where it came from (`repository`, `user` or `unset`), the user's file
-/// read, the instruction the prompts carry, and the mistake if any.
+/// read, the instruction the prompts carry, and the mistake if any. On a
+/// mistake no language is in force, so `source` is `unset`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LanguageReport {
     pub tag: Option<String>,

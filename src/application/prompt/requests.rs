@@ -570,5 +570,6 @@ pub const REVISE_REQUEST_LIMIT: usize = 30_000;
 
 /// The bytes of a revise request's findings, all of them as one section:
 /// about twice the longest request seen ([`REVISE_REQUEST_LIMIT`]). What is
-/// cut is in the request's findings file in the run directory.
+/// cut is in the request's findings file in the run directory. The
+/// findings keep the order the review gave them, and the end is cut.
 pub const REVISE_FINDINGS_BYTES: usize = 20_000;

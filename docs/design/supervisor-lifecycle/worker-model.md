@@ -89,7 +89,6 @@ Codexのworkerは段のClaudeのmodelを使わず（[provider-lifecycle](../prov
   試しを無効に戻すと、群を持ったtaskも既定で起動する。
 - **対象と割り当て**: 群を持たないtaskのうち、`choose`の条件に当たるものが、前に群を持ったtaskと交互の群になる。
 - **対象外**: 条件に当たらないtaskは既定のまま（群はnull）。
-  `rework_probability`は選択に使わない。
 
 ## 判定
 

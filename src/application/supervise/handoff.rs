@@ -217,8 +217,12 @@ pub(super) enum Snapshot {
         #[serde(default)]
         message_bytes: Option<PromptBytes>,
         message_sent_at: Option<f64>,
+        /// A field of the interactive sessions' watch, kept so that the
+        /// files of every binary still parse; the restore ignores it and
+        /// does not watch with it.
         not_ready_asked: bool,
         exit_requested: bool,
+        /// Like `not_ready_asked`: read for compatibility, not used to watch.
         #[serde(default)]
         exit_typed: bool,
         exit_for_silence: bool,

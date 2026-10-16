@@ -9,7 +9,12 @@ use super::CANDIDATES_SAMPLED;
 /// One pass's `candidates`, `free_slots` and `ready`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CandidatesSample {
-    /// The ready tasks the supervisor could claim: `graph`'s `candidates`.
+    /// The ready tasks the supervisor could claim by the rule's order
+    /// (`crate::application::dependency_graph`'s `candidates`), every task
+    /// whose claim it deferred included (for a conflict hotspot or a class
+    /// limit): unlike the `candidates` that the `graph` and `candidates`
+    /// commands show by default, which leave the deferred tasks out
+    /// (`crate::application::claim_view`).
     pub candidates: usize,
     /// `--parallel` less the slots in use.
     pub free_slots: usize,

@@ -165,8 +165,7 @@ reviewの側は[Review](review.md#文書の照合)が持つ（`REVIEW_DOCS_CHECK
 claimのたびに、supervisorはworkerが読む指示の内容のhashを3つ求め、runのproviderの値を`run_claimed`に別々のキーで記録する（`domain::instructions`）。
 
 - promptの雛形: taskとrunの値の代わりにplaceholderを入れたworkerのpromptで、providerごとに1つある（`worker_template`）。
-  taskの値を差し込んだ後のpromptは、taskごとに違って層にならないので対象にしない。
-  言語の指示とresume・reviseなどの依頼も対象にしない。
+  対象にしないものは`worker_template`のdoc commentが持つ。
 - plugin: ClaudeのworkerがClaude Codeから読むdagqのpluginのファイルの内容（`infrastructure::adapters::worker_plugin_hash`）。
 - repositoryの指示の文書: runのbaseのcommitでのその内容（`domain::instructions::REPOSITORY_INSTRUCTIONS`）。
 
@@ -268,14 +267,13 @@ workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2
 - 入口: 値は`src/application/prompt/`の各jobの定数（上の表）、仕組みは`src/application/prompt_fit.rs`。
   値の理由と本番の大きさは各定数のdoc commentが持つ。
 - 選ぶ順: 一覧の節は決まった順で取り、入らない項目は飛ばして次を試し（1件の巨大な項目が残りを隠さない）、残したものはもとの順で載せる。
-  多くの節は新しい順に取り、goal reviewのtaskは着地したものを先に、復旧jobの依存先は今のbuildが含まないか言えないものを先に取る。
-  draftの束・依頼の参照先・reviseの指摘は与えられた順のまま取る。
+  多くの節は新しい順に取り、それと違う順の節の取る順はその上限の定数のdoc commentが持つ。
 - 切り方: 長い文は先頭を残して切り、省いたbyte数と読む方法の注記を付ける。
   JSONの項目は長い文字列から切り、それでも入らなければIDと読む方法だけの行にする。
 - 読む方法: 読めるファイルにも打てるコマンドにも無いもの（復旧jobのalertの事実・プロセス・過去のverdict、読めなかった依頼の参照）は、読む方法が無いと書き、読めない場所に退避しない。
 - 前のplannerからの引き継ぎ: 人の答えだけを待って終わったplanner（[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定3）の後に立つruntimeのplannerの4種類のpromptは、元の質問とanswerを`answer`の節に、前のplannerのnoteと、それが作った・編集したまだdraftのtaskを`handover`の節に載せる。
   材料はsupervisorがqueueの記録から集める（sessionはresumeしない）。
-  `handover`はnoteを新しい順に取って1件ずつ切り、draftの行はその後に新しい順に取り、どちらも節の上限の中に収める（値と理由は定数のdoc comment）。
+  `handover`のnoteとdraftの行の取る順と上限は`PLANNER_HANDOVER_BYTES`のdoc commentが持つ。
   省いたnote・draft・answerは、plannerが打てる読むだけの`dagq`で読むと書く（コマンドは組み立ての関数が持つ）。
   どのplannerの文面も、質問で止まる前に決められることを決め、draftの編集とnoteを残すように言う。
 - 必須の節は省かず、自分の上限で切って`over_limit`に書く（`Fit::required`）。
