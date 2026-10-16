@@ -151,7 +151,10 @@ const GOALS_TABLE: &str = "goals";
 const GOALS_TAGS: &str = "tags";
 const GOALS_SPIKE_CYCLES: &str = "max_spike_cycles";
 /// `[e2e]`: `paths`, the globs whose change requires `e2e` of a run
-/// (ADR-t963-1 decision 2).
+/// (ADR-t963-1 decision 2). The globs are written as `add --paths` takes
+/// them ([`crate::domain::scope`]: from the repository root, `*` within one
+/// segment, `**` at any depth), and the same glob written twice is kept
+/// once.
 const E2E_TABLE: &str = "e2e";
 /// The one key of `[e2e]`.
 const E2E_PATHS: &str = "paths";
@@ -555,6 +558,16 @@ impl Config {
 }
 
 /// Parse the whole file.
+///
+/// A `[run.env]` value is a literal string (`'...'`, without escapes) or a
+/// basic one (`"..."`, whose escapes are `\\`, `\"`, `\n` and `\t`; any
+/// other is an error). A key before any table header, and a `[run.env]`
+/// key that is not an environment variable name (a letter or `_`, then
+/// letters, digits or `_`), are errors with their line number.
+///
+/// `[supervisor] light_changes` is checked against `[tasks] changes` only
+/// after the whole file is read, so `[tasks]` may come after
+/// `[supervisor]`; its error carries the line of `light_changes`.
 pub fn parse_config(text: &str) -> Result<Config> {
     let mut table: Option<&str> = None;
     let mut seen: Vec<&str> = Vec::new();

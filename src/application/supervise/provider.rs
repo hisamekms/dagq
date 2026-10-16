@@ -521,7 +521,15 @@ pub(super) fn review_moves(route: &ReviewRoute, provider: Provider) -> bool {
 /// (a throughput review, an observation) says could not be used
 /// (`provider_unusable`), so that the job waits for that provider and
 /// starts again: never the other provider (ADR-t1063-1 decision 5,
-/// ADR-t1857-1).
+/// ADR-t1857-1). A Claude one is held so only with `[provider_fallback]
+/// jobs` off, as only then does a job of a role that names Claude record
+/// `provider_unusable` ([`crate::domain::actor_model::records_unusable`];
+/// the job reads it off its start's error or Claude's wall,
+/// [`crate::application::observer::read_failure`]), and Codex is not held
+/// for it. Once held, the period leaves what the
+/// process started, waits while the hold lasts, and starts again on the
+/// same provider at the first pass after the hold ends (for the hold ask,
+/// its `done` or `retry_at`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum UnusableHold {
     /// Record the provider's [`ProviderHold`] for the reason: Codex's, and

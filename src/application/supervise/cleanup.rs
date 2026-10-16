@@ -793,12 +793,16 @@ impl HostOpsState {
     ///   before its removal, or `processes_unlisted` when the processes
     ///   could not be listed, task 1590). A worktree whose directory is already gone
     ///   loses its branch (after `git worktree prune`), recorded the same
-    ///   with `bytes` 0 and `worktree_missing: true`;
+    ///   with `bytes` 0 and `worktree_missing: true`. The run directory and
+    ///   its records, and the landed commit's `refs/dagq/runs/<run-id>`,
+    ///   stay;
     /// - otherwise (the task may run it again, or retry it on a new run):
     ///   only the build outputs ([`BUILD_OUTPUT_DIRS`]) go, and the sources,
     ///   commits and run directory stay; recorded as
     ///   `build_outputs_removed` (`paths`, `bytes`, `by: supervisor`,
-    ///   `reason: run_ended`).
+    ///   `reason: run_ended`). A link in their place is not followed (its
+    ///   size reads as none and it stays), and a run waiting for triage is
+    ///   a target too: its build outputs are made again once it resumes.
     ///
     /// The build outputs of an `awaiting_integration` or `needs_session`
     /// run of a task that goes on, with no lease and no live session, go
@@ -813,6 +817,11 @@ impl HostOpsState {
     /// supervisor was given. A failure records `cleanup_failed` (`path`,
     /// `message`, `by: supervisor`) once per worktree and process, is
     /// retried on the next sweep, and the others go on.
+    ///
+    /// Each of these events is a repair the runtime makes in a person's
+    /// place, but `stats`' automatic repairs count only `auto_repaired`:
+    /// a cleanup counts there only through the `auto_repaired` of a
+    /// cleanup for disk space ([`super::disk`]).
     pub(super) fn request_cleanup(
         &mut self,
         env: &mut HostEnv<'_>,
@@ -1097,7 +1106,8 @@ impl HostOpsState {
 }
 
 /// Clean each candidate in turn (see the module), then `git worktree
-/// prune` for disk space.
+/// prune` for disk space. The repository's branches are listed at most
+/// once per job, when a candidate first needs them.
 fn run_job(ports: &JobPorts, candidates: Vec<EndedRunWorktree>) -> Vec<Outcome> {
     let queue = match ports.queues.open() {
         Ok(queue) => queue,
@@ -1333,6 +1343,8 @@ fn runner_goes(cleanup: WorktreeCleanup) -> bool {
 /// which needs the lease, copies it again. The run stays reserved while
 /// this runs, so the loop cannot lease it and copy one in between. A
 /// failure is logged and retried on the next cleanup; `false` for one.
+/// The removal records no event (a log line only), and its size counts in
+/// no event's `bytes`.
 fn remove_run_runner(ports: &JobPorts, candidate: &EndedRunWorktree) -> bool {
     let runner = ports
         .runs_dir

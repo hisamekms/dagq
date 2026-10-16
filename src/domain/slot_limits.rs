@@ -73,13 +73,19 @@ pub struct SupervisorConfig {
     /// Seconds; 0 spaces no claim.
     pub claim_spacing: Option<usize>,
     /// The changes claimed in the room the landing queue leaves
-    /// (ADR-t1591-1); none claims nothing there. It has no flag.
+    /// (ADR-t1591-1); none claims nothing there. It has no flag, so every
+    /// supervisor reads it again on each pass, even one given all four
+    /// flags. It is checked against `[tasks] changes` once the whole file
+    /// is read.
     pub light_changes: Option<LightChanges>,
     /// At least 1: the Spikes that may hold a slot at once (ADR-t1487-2
-    /// decision 1). It has no flag.
+    /// decision 1). It has no flag. The value and its source are recorded
+    /// in the supervisor's registration and shown by `status`.
     pub max_spikes: Option<usize>,
     /// Seconds, at least 1: the wait after which a candidate goes ahead of
-    /// the other class's (ADR-t1487-2 decision 2). It has no flag.
+    /// the other class's (ADR-t1487-2 decision 2). It has no flag. The
+    /// value and its source are recorded in the supervisor's registration
+    /// and shown by `status`.
     pub class_aging: Option<usize>,
     /// At least 1: the investigations open at once before a Spike that
     /// opens another is deferred (ADR-t1487-1 decision 7,

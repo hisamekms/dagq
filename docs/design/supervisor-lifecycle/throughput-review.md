@@ -31,7 +31,7 @@ supervisorがtimerで毎時・日次・週次のスループットの見直し�
 - supervisorが見直しを始めるかは`SuperviseOptions::throughput_review`が決め、既定は`--help`が持つ。
   `up`が起動するsupervisorは既定で有効で、時間帯は既定でhostのもの（`clock::local_utc_offset`）。
 - 各passで走るものを回収し、無ければ期限の来たものを1つ子processで始める（`supervise::throughput_review`）。
-  observerと同じくrunの枠を使わず、1度に1つで、claimを止めたsupervisor・停止中・queue serviceが動いていないあいだは始めない。
+  observerと同じくrunの枠を使わず、1度に1つで、始めない間は`Supervisor::start_throughput_review`のdoc commentが持つ。
   どのproviderで始めるか（始めないか）は下の「Codexで動かす」の行き先（`Supervisor::job_start_route`）が決め、`[roles.throughput_review]`にproviderの無い見直しは、queueのhold（loginとusageの壁）のあいだと`--no-claude`では始めない。
 - 期限: 時（期間が最も早く過ぎる）→日→週の順に、最後の確定した期間に終わりの記録も走っている始まりも無いものが期限で、期間・ラベル・数え方は`domain::throughput_review`のdoc commentが持つ。
   失敗した期間はやり直さない（例外はCodexが使えなかった見直しで、下の「Codexで動かす」のとおりもう一方のproviderで始め直す。`[provider_fallback] jobs = false`なら、Codexが使えなかった期間と、Claudeを書いた役割でClaudeが使えなかった期間は、控えが解けた後に同じproviderで始め直す（期限の窓に収まる限り））。
@@ -77,23 +77,12 @@ supervisorが行き先を渡さないCLIの起動は`compose::throughput_review_
 7. `throughput_review_reported`を記録する。
    これがinbox宛ての知らせるだけのattention（`report the review`）で、平常の毎時（`reasons`が空）のものはattentionにならない。
    規則に当たった毎時のものは`watch --role inbox`を単独では起こさず、inboxが次に別の件で起きたときにその`events`に古い順に載る（daily / weeklyは起こす。[ADR-t1418-1](../../adr/2026-10-03-t1418-1-quiet-notices-do-not-wake-the-inbox-watch.md)、[Events and watch](commands.md)）。
-8. `throughput_review_finished`を記録し、`outcome`は`succeeded` / `failed`（非0終了）/ `error`（起動できない・時間切れ・保存や記録の失敗）。
+8. `throughput_review_finished`を記録する（`outcome`の値と記録の規則は`application::throughput_review::review`のdoc comment）。
    `outcome`が`error`か`failed`のもの（modeを問わない）はinbox宛ての知らせるだけのattention（`check the failed review`）になり、askにはならず、claimと着地を止めない。
    失敗した期間はやり直さない（上の「期限」）。
    例外は`provider_unusable`を持つ終わり（Codexが認証・利用上限・起動の失敗・実行ファイルが無いことで使えなかった見直し。下の「Codexで動かす」）で、attentionにならず、supervisorがCodexを控えてその期間をもう一方のproviderで始め直す（`--no-claude`では始め直しが理由付きの`error`の終わりになり、それがattentionになる）。
    `succeeded`はattentionではない。
    attentionなので、KPIの`attentions_per_landing`（queueのeventのattentionも数える）にも加わる。
-
-手順8のfinishは、期間が決まった後の処理の出口で1回だけ記録する。
-agentの起動前の着地の読み取り・入力の収集・checkoutの解決・dirの作成・promptと入力の保存・startedの記録の失敗も、`outcome: error`・`exit_code: null`・原因を含む失敗の文（`{:#}`）の`error`を持つpayloadとして記録して返す。
-分かれば`dir`・`session_id`も残し、`pid`・`parent_pid`は常に残す。
-dirの作成前なら`dir`はnullで、ログもまだ無い。
-queueを開く前・期間が決まる前（DBのcanonicalize・open）の失敗は、記録先や期間が無いので対象外でErrを返す。
-finish自体を記録できないときもErrを返し、記録を再試行しない。
-supervisorは子の非0終了からfinishを補わない。
-dry runは失敗時もeventを記録しない。
-
-runtimeは完了した見直しの出力を再parseせず、保存した`review.md` / `review.json`とeventを読む。
 
 ## sessionの区間
 
@@ -101,9 +90,9 @@ jobのsessionは、他のheadlessのjob（review・triage・plan review・goal r
 区間はobserverと同じqueueのevent（task・goal・runを持たない）で、kindは`throughput_review`（`domain::sessions::THROUGHPUT_REVIEW`）。
 queueのeventの区間はjobごとのkindで探し（`domain::sessions::queue_span_kind`）、observerのeventはobserverの区間だけを、見直しのeventは見直しの区間だけを開け閉めする。
 
-- 開く: `throughput_review_started`が開き、区間の`cwd`は見直しのdirで、Claude Codeのtranscriptはこのcwdとsession idで探す。
+- 開く: `throughput_review_started`が開く（区間の`cwd`とtranscriptの探し方は`domain::sessions::THROUGHPUT_REVIEW`のdoc comment）。
 - 閉じる（`job_finished`）: `session_id`か`dir`（区間の`cwd`）の一致する`throughput_review_finished`が閉じる。
-  Codexの見直しは開くときsession idを持たないので`dir`で閉じ、`session_closed`に終わりのeventのthreadとmodelを写す。
+  Codexの見直しは`session_closed`に終わりのeventのthreadとmodelを写す。
   Claudeの見直しは閉じるときtranscriptの実際のmodel / effort・turn・active time・tokensが他のjobと同じ経路（書き込みの前に読む）で`session_closed`に入る。
 - 重なり: 見直しは同時に複数走りうる。
   execの引き継ぎではjobを殺さないので、前のprocessが残したjob（例: 週次）が走るあいだに次のprocessが別の期間（例: 毎時）を始め、supervisorが複数あれば別のsupervisorのjobも走る（同じ期間は`running`のあいだ始めさせない）。
@@ -111,9 +100,7 @@ queueのeventの区間はjobごとのkindで探し（`domain::sessions::queue_sp
 - 終わりの無い区間（jobが死んだ・supervisorの停止で殺された・記録の前に落ちた）は`inferred`で閉じる。
   規則の1つ目: 同じ`mode`と`period`の`throughput_review_started`が来たら、前の区間を閉じる（`RUNNING_MS`を過ぎて始め直されたので、前のjobは終わっている）。
   規則の2つ目: 見直しのevent（`throughput_review_started`・`throughput_review_finished`）が記録されたとき、開いてから`RUNNING_MS`以上たった区間を閉じ、その時までにjobは終わったか時間切れで殺されている。
-  毎時の見直しは毎時`throughput_review_finished`を書くので、supervisorが動いていれば残った区間は`RUNNING_MS`を過ぎた後の次の毎時の記録で閉じる。
   `inferred`の区間はtranscriptの最後の記録で終わる（ADR-0048 決定 7）。
-  supervisorが居ないあいだは閉じない。
 
 ## promptの入力
 
@@ -127,14 +114,10 @@ queueのeventの区間はjobごとのkindで探し（`domain::sessions::queue_sp
   `period`と`hourly`は落とさない。
 - promptは要約だと明かし、入力の全体が見直しのdirの`input.json`にあること（人が読むためのもの）と、細部は読むコマンドで取りに行くことを指示する。
   dry runはdirを作らず、作るはずのdirの`input.json`を名指す。
-- jobの権限（`ACCESS`の`queue_cli`）は広げない。
-  `input.json`を読ませるにはClaude Codeの`Read`を許すことになり、queueの外のファイルも読めるようになる。
-  要約から外したものはどれも読むコマンドで同じものが得られるので、ファイルを読む必要はない。
-  Codexの見直しは読み取りだけのsandboxがファイルの読み取りを許すが、promptはClaudeと同じで、細部は同じ読むコマンドで取りに行かせる。
+- jobの権限（`ACCESS`の`queue_cli`）は広げない（理由は`ACCESS`のdoc comment）。
 - この節の上限・要約・省いたものを読むコマンドの示し方は、headlessのjobに共通の方針（[ADR-t1566-1](../../adr/2026-10-03-t1566-1-headless-job-prompts-carry-decision-material-within-limits.md)）の先行の例で、全jobの渡し方と上限は[Prompt](prompt.md#headlessのjobのprompt)の「headlessのjobのprompt」の節の表が持つ。
 - byte数の記録（ADR-t1566-1の決定6）: promptを作った後の見直しのeventとdry runの出力に同じ記録を載せ、欄の意味は`ReviewPrompt::record`のdoc commentが持つ。
   promptを作る前に終わったもの（使えるproviderが無い・入力の準備の失敗）には無い。
-  `PromptBytes`の形より前に記録したeventの`prompt_bytes`は数値のまま残る。
 
 ## Codexで動かす
 
@@ -149,7 +132,6 @@ promptは変えず、Claudeのplugin・skill・hookに頼らない。
   子processは期間を決めて毎時の判定をした後、agentを起動せずに`throughput_review_finished`（`outcome: error`、`error`に理由）を記録し、inboxの`check the failed review`になる。
 - 子process: supervisorは行き先のlaunchを渡し、コマンドはその`provider`のagentで起動する。
   launchが無い（人が手で打つ）ときは束縛されたcheckoutの`[roles.throughput_review]`（`compose::throughput_review_launch`）。
-  実行ファイルを解決できない（supervisorが見つけた後に消えた）ときもコマンドは`review`の前で失敗せず、与えられたpathのまま起動を試み、起動の失敗を下の`provider_unusable`（`executable_missing`）として終わりに記録する（期間の記録が残らずにこのprocessで期間が落ちることがないように）。
   Codexのjobはsession idを持たずに始め、終わりにproviderが読んだthreadとrolloutの実際のmodelを`throughput_review_finished`に書く（`JobSession::record`）。
   結論はproviderの返答（Codexは最後の`agent_message`）を`parse_output`で読み、保存・週次のfinding・`throughput_review_reported`はClaudeと同じ。
 - Codexが使えなかったとき: 役割がproviderを書いた見直しでCodexのjobが成功しなかったとき、providerの`job_failure`（agentが起動しなかったときは起動のerrorを分類する）が使えないこと（認証・利用上限・起動の失敗・実行ファイルが無い）を示せば、`throughput_review_finished`に`provider_unusable`を書く。
@@ -160,10 +142,7 @@ promptは変えず、Claudeのplugin・skill・hookに頼らない。
   控えを書けなかったときは期間をやり直さない（同じCodexをすぐ起動し直さないため）。
   ClaudeのjobはClaudeの壁に当たっても失敗として記録する（queueのhold askには入れない）。
   `[provider_fallback] jobs = false`のとき、Codexを書いた役割は上と同じく`provider_unusable`（`codex`）を記録してCodexを控え、その期間を始めた記録から外すが、次のpassはClaudeで始めず、Codexの控えが解けた後のpassで同じ期間をCodexで始め直す。
-  Claudeを書いた役割は、Claudeが使えずに終わったとき（起動の失敗は起動のerrorから、認証・利用上限はobserverと同じClaudeの出力の壁の読みから）に`provider_unusable`（`claude`）を記録する。
-  supervisorはその`provider`を読み、認証・利用上限なら今のClaudeの控えのask、起動の失敗なら`ProviderHold`（控えのaskが既にClaudeを控えていれば重ねない）でClaudeを控え、Codexは控えない。
-  控えられたら期間を始めた記録から外し、控えのあいだは待ち、控えが解けた後（askの`done`か`retry_at`）のpassで同じ期間をClaudeで始め直す。
-  onのClaudeを書いた役割は`provider_unusable`を記録しない。
+  Claudeを書いた役割の扱いは`UnusableHold`のdoc commentが持つ。
 - 時間の上限: Claudeと同じく時間の上限を過ぎたらjobと子孫をpidで止める（Codexが別のprocess groupで走らせたコマンドも、killの前に列挙した子孫として止まる）。
 - 記録: `stats`と`kpi`のjobのproviderの層でClaudeと分けて読め、jobの始まりと終わりは期間とdirで結ぶ（`domain::stats::jobs`）。
 

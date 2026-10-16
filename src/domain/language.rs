@@ -1,7 +1,8 @@
 //! The language AI writes in for people (ADR-t616-2): a BCP 47 tag from
 //! the repository's `dagq.toml` or the user's `config.toml`, and the one
 //! instruction the runtime adds to every session's and job's prompt. The
-//! runtime's own fixed strings stay English (ADR-t616-1).
+//! runtime's own fixed strings stay English (ADR-t616-1). The default is
+//! no tag: without one in either file, no instruction is added.
 use serde::Serialize;
 
 /// Where the language in force came from.

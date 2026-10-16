@@ -20,7 +20,8 @@ use super::toolchain::{ToolProcess, Toolchains};
 pub const HOST_DIR: &str = "host";
 
 /// How often the supervisor samples by default (`supervise
-/// --host-metrics-interval`).
+/// --host-metrics-interval`). `dagq.toml` sets neither the interval nor
+/// the retention, and `up` starts its supervisor with both defaults.
 pub const DEFAULT_INTERVAL_SECS: u64 = 30;
 
 /// How many local days of files are kept by default (`supervise
@@ -35,13 +36,15 @@ pub const DEFAULT_RETENTION_DAYS: u32 = 30;
 pub const PROCESS_KINDS: [&str; 5] = ["cargo", "rustc", "claude", "dagq", "other"];
 
 /// The columns of a file, in order. `time` is the host's local time of
-/// `unix` (seconds); `cpu_*` are percents of one core (`ps`'s `%cpu`,
-/// summed per kind), `rss_*_mb` the resident memory per kind;
-/// `mem_used_mb` is wired + active + the compressor's pages; `pageouts`
-/// counts since the host booted (the summary reads it per minute);
+/// `unix` (seconds), as `YYYY-MM-DDTHH:MM:SS+HH:MM`; `cpu_*` are percents
+/// of one core (`ps`'s `%cpu`, summed per kind), `rss_*_mb` the resident
+/// memory per kind; `mem_used_mb` is wired + active + the compressor's
+/// pages; `mem_compressed_mb` the pages macOS's compressor holds (empty on
+/// Linux); `pageouts` counts since the host booted (the summary reads it
+/// per minute);
 /// `disk_*` are the space of the filesystem the run worktrees are on
 /// (task 1371): free for a process that is not root and the total, in
-/// bytes, and the share free in percent.
+/// bytes, and the share free in percent (empty when the total is 0).
 pub const COLUMNS: [&str; 25] = [
     "time",
     "unix",
@@ -238,7 +241,9 @@ fn header_names(header: &str) -> Vec<Option<&'static str>> {
 /// file's header in force (its last header) is not this binary's, or it
 /// has none. A binary that added columns (task 1371) starts its rows under
 /// its own header in the day's file an older one began, once, and
-/// [`parse_file`] reads each row by the header above it.
+/// [`parse_file`] reads each row by the header above it. The writer reads
+/// a file whole for it only when the file's first line is not this
+/// binary's header; with that first line the whole file is not read.
 pub fn needs_header(text: &str) -> bool {
     text.lines()
         .rev()

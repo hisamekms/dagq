@@ -54,10 +54,14 @@ pub const SKIPPED_BY_PATHS: &str = "paths";
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RecheckConfig {
     /// The command run on main's tree with a waiting run merged in; none
-    /// checks the merge only.
+    /// checks the merge only. A command of only whitespace is refused when
+    /// `dagq.toml` is read.
     pub command: Option<String>,
     /// The globs a run's diff against main must touch for the command to
-    /// run on it; empty (no `paths`) runs it on every run.
+    /// run on it; empty (no `paths`) runs it on every run. The globs follow
+    /// the rules of `[e2e] paths`, and so do the errors for a glob it does
+    /// not take, a value that is not an array and a duplicate key; an empty
+    /// array is an error too (leave `paths` out instead).
     pub paths: Vec<String>,
 }
 

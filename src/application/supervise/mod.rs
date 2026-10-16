@@ -2858,7 +2858,9 @@ impl Supervisor<'_> {
         });
     }
     /// Start the throughput review due, on the route 実行と着地's holds give
-    /// it, when `start` and none runs.
+    /// it, when `start` and none runs. The loop gives `start` false while
+    /// claiming is stopped, the supervisor is stopping or the queue service
+    /// is down, so no review starts then.
     fn start_throughput_review(&mut self, options: &LoopSettings, start: bool) {
         let Some(due) = self.on_observation(|observation, env| {
             observation.throughput_review_due(env, options, start)

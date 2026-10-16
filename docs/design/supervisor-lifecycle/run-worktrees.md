@@ -17,20 +17,16 @@ worktreeのpathはrun_dirの下の`<runs>/<run-id>/worktree`で、`--repo`のche
 消したものはもう無いので、何度見てもよい。
 ただし片付けるものが何も残っていないrunは、同じsupervisorのプロセスの次の掃除からは候補にしない（下の「片付け終わったrun」）。
 
-- **taskが`completed` / `canceled`**: worktreeとbranchを消し、`worktree_removed`を記録する（payloadは`HostOpsState::request_cleanup`）。
+- **taskが`completed` / `canceled`**: worktreeとbranchを消し、`worktree_removed`を記録する（payloadと残すものは`HostOpsState::request_cleanup`）。
   前のrunのworktreeも、着地した（`integrate`がworktreeを消せなかった）runのものも同じ。
-  run_dirとその記録、着地したcommitの`refs/dagq/runs/<run-id>`は残す。
   - 消す前に（下の`.git`の壊れたdirを消す前とも）、worktreeがそのrun自身の`<runs>/<run-id>/worktree`（`--repo`のcheckoutとその祖先でない）なら、実行ファイルのpathがその下にあるプロセスを止める（止めるものは`domain::disk::worktree_executables`）。
     一覧を取れなければ止めずに消す。
   - `git worktree remove`が失敗したら（queueの`rebind`の後などで、worktreeの`.git`が古いcommon dirを指している）、`git worktree repair <worktree>`で直してからもう一度removeし、repairか2回目のremoveも失敗すれば、最初の失敗と合わせて`cleanup_failed`にする。
   - repairも失敗し、その理由が`.git`の壊れ（Gitがそのdirをworktreeとして扱えない）で、worktreeがそのrun自身のものなら、dirをfilesystemで消し、`git worktree prune`の後にbranchを消す（判断は`may_remove_broken`）。
-    remove・repairのstderrのmessageは英語で照合するため、この2つのGitの呼び出しに`LC_ALL=C`を付けて言語を固定する。
     別の理由の失敗と、dirかbranchを消せなかったときは上と同じく`cleanup_failed`にする（taskが終わっていないrunはworktreeを消さないので、この経路に来ない）。
   - worktreeのディレクトリがもう無いのにbranch `dagq/<run-id>`が残っていれば、`git worktree prune`（Gitはpruneするまで消えたworktreeを覚えていて、そこにcheckoutされたbranchを消させない）の後にbranchを消す。
-    branchが無ければ何もせず、branchの一覧は1回の掃除で1回だけ読む。
+    branchが無ければ何もしない。
 - **それ以外（taskがまだ`in_progress` / `ready`など）**: 次のrunやresumeが引き継ぐかもしれないのでworktreeとbranchは残し、worktree直下のビルド成果物（`BUILD_OUTPUT_DIRS`）だけを消して`build_outputs_removed`を記録する。
-  linkはたどらない。
-  triageを待つrunも対象で、resumeされたら作り直す。
   worktreeが無ければ何もしない。
 
 ## 終わっていないrunのビルド成果物
@@ -49,7 +45,6 @@ worktreeのpathはrun_dirの下の`<runs>/<run-id>/worktree`で、`--repo`のche
   人が打つ`integrate`はこの予約を見ない。
 
 - **runの`runner`**: 上のどちらでも、同じjobがrun_dirの`runner`（claimとresumeのたびに写すバイナリの写し）を消し、消してよい理由と失敗のやり直しは`remove_run_runner`が持つ。
-  eventは記録せず（logの1行だけ）、`bytes`にも数えない。
   worktreeの有無を問わず、run_dirの他のfile（`receipt.json`・検証のlogなど）は残す。
 
 - **runのClaude Codeのscratchpad**: taskが`completed` / `canceled`のrunについて、同じjobが、そのrunのsession（worker）がClaude Codeのscratchpadを置くディレクトリを消す。
@@ -71,8 +66,6 @@ worktreeのpathはrun_dirの下の`<runs>/<run-id>/worktree`で、`--repo`のche
   - Codexのheadlessのjob（review・goal review・plan reviewなどを`[roles.<role>]`の`provider = "codex"`で動かすもの）は対象外にする: jobはread-onlyのsandbox（`JOB_SANDBOX`か、queue serviceに届くときはそれを広げたjobの権限）で動き、どこにも書けないので、一時ファイルのdirを渡しても使えず、残るものも無い
   - queue serviceのクライアントモードとの関係: worker・jobの`dagq`のクライアントモードはDBのpathを渡さないだけでworkerはhostのままなので、置き場所と片付けはこのまま変わらない。
     実行側のコンテナの隔離ではworkerの`/tmp`はコンテナと一緒に消えるが、ビルドの出力とrun_dirはコンテナにmountされるhostのdirに残るので、`TMPDIR`をそのmountの中の同じdirに向ければ、run_dirの側から片付けるこの形をそのまま引き継げる（コンテナの中の`/tmp`を片付ける仕組みは要らない）。
-
-どのeventも人の手の代わりにruntimeが直したもので、自動修正の件数に数える。
 
 空き容量がclaimか着地の検証に足りないときも、supervisorは同じ掃除と`git worktree prune`を走らせる（閾値と`auto_repaired`は[空き容量を確かめる](disk-space.md)）。
 

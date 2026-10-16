@@ -28,7 +28,10 @@ pub const OBSERVER: &str = "observer";
 pub const PLAN_REVIEW: &str = "plan_review";
 pub const GOAL_REVIEW: &str = "goal_review";
 /// The throughput review's job (ADR-t996-1), of the queue like the
-/// observer's.
+/// observer's. `throughput_review_started` opens its span with the
+/// review's directory as `cwd`, and Claude Code's transcript is found by
+/// that `cwd` and the session id. A Codex review starts without a session
+/// id, so its finish closes the span of its directory.
 pub const THROUGHPUT_REVIEW: &str = "throughput_review";
 pub const RUNTIME_PLANNER: &str = "runtime_planner";
 pub const INBOX: &str = "inbox";
@@ -118,7 +121,9 @@ pub fn queue_span_kind(kind: &str) -> Option<&'static str> {
 /// How long a throughput review's span may stay open without its finish
 /// before an event of the throughput review closes it as `inferred`: as
 /// long as its start counts as running (the job's timeout and a margin),
-/// by when the job finished or was killed.
+/// by when the job finished or was killed. An hourly review records an
+/// event every hour, so while a supervisor runs a span left open closes
+/// at the next hourly record past this; while none runs it stays open.
 pub const THROUGHPUT_REVIEW_OPEN_MS: i64 = super::throughput_review::RUNNING_MS;
 
 /// What an event says of the span or the runtime planner it is of,

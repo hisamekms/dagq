@@ -292,6 +292,9 @@ pub struct ReviewOutput {
 /// the next heading or fence (or, without that heading, its first lines), at most
 /// [`MAX_CONCLUSION_LINES`]; the text without the next move's block; and
 /// the JSON of the block fenced as [`NEXT_MOVE_FENCE`], when there is one.
+/// It reads the output once, when the review ends: the runtime never parses
+/// a saved output again, and reads the saved `review.md` / `review.json` and
+/// the events instead.
 pub fn parse_output(output: &str) -> ReviewOutput {
     let mut text = Vec::new();
     let mut block: Option<Vec<&str>> = None;

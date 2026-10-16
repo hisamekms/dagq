@@ -31,7 +31,6 @@ dagqの開発でだけ要る機能は、queueのrepositoryが「dagqのソース
 - ファイルが無い、読めない、TOMLとして読めない、`[package]`が無い（`[workspace]`だけ）、`name`が`"dagq"`でない、のどれかならソースではない。
 - 機能を使うたびにその時点のファイルで判定し、DBにもsupervisorの登録にも保存しない。
 - 実装: 判定は`domain::source_repository::is_source`、ファイルを読むのは`infrastructure::adapters::is_dagq_source(dir)`で、main checkout（`dagq.toml`を読むのと同じ`checkout`）を渡す。
-  TOMLを完全には解釈せず行単位で読むので、`[ package ]`のように空白を含む表の見出しや、dotted keyの`package.name`はソースでない側に倒れる。
 
 ## 対象
 

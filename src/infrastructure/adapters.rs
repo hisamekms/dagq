@@ -2309,7 +2309,8 @@ impl GitRepository {
         Ok(())
     }
 
-    // Cleanup reads repair's English stderr in `may_remove_broken`.
+    /// `git worktree repair` with `LC_ALL=C`: cleanup matches its stderr
+    /// as English in `may_remove_broken`.
     fn repair_worktree_command(&self, primary: &Path, worktree: &Path) -> Command {
         let mut command = self.command();
         command
@@ -2321,8 +2322,10 @@ impl GitRepository {
         command
     }
 
-    // Keep the locale override on remove and repair only: other Git output
-    // (including paths and commit messages) retains the caller's locale.
+    /// `git worktree remove --force` with `LC_ALL=C`, as repair is: cleanup
+    /// matches its stderr as English. Only these two calls fix the locale;
+    /// other Git output (including paths and commit messages) keeps the
+    /// caller's.
     fn remove_worktree_command(&self, primary: &Path, worktree: &Path) -> Command {
         let mut command = self.command();
         command

@@ -45,7 +45,7 @@ size = 41468
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/run-environment.md"
-size = 38322
+size = 36394
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/supervise.md"

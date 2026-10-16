@@ -74,7 +74,8 @@ fn loads() -> [Option<f64>; 3] {
 }
 
 /// One sample of the host now, at the unix second `now`, its processes
-/// split by the kinds of `toolchains`' profiles.
+/// split by the kinds of `toolchains`' profiles. The memory is read the
+/// Linux way when `/proc/meminfo` exists, else the macOS way.
 pub fn sample(now: i64, toolchains: &Toolchains) -> HostSample {
     let memory = if Path::new("/proc/meminfo").exists() {
         linux_memory(

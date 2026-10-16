@@ -12,7 +12,10 @@ pub const PACKAGE: &str = "dagq";
 /// (`None` when it is missing or unreadable), makes the repository dagq's
 /// source. Anything that is not a plain `name = "dagq"` in the
 /// `[package]` table is not: no file, no `[package]` (a workspace only),
-/// another name, or a value this reading does not understand.
+/// another name, or a value this reading does not understand. The file is
+/// read line by line, not as full TOML, so a table header with spaces
+/// (`[ package ]`) and the dotted key `package.name` fall on the side of
+/// not the source.
 pub fn is_source(manifest: Option<&str>) -> bool {
     let Some(text) = manifest else {
         return false;

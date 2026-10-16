@@ -26,7 +26,7 @@ eventにはしない（連続の値でrun_eventsを膨らませない）。
 
 ## 記録
 
-- **間隔と保持**: `supervise`のflagで決め（flagと既定値は`supervise --help`）、`dagq.toml`では設定せず、`up`は既定値のsupervisorを立てる。
+- **間隔と保持**: `supervise`のflagで決める（flagと既定値は`supervise --help`、`dagq.toml`と`up`との関係は`DEFAULT_INTERVAL_SECS`のdoc comment）。
 - **取り方**: supervisorのloopが毎pass（drain中・引き継ぎ待ちも）間隔が過ぎたかを見て、過ぎていればjobのthreadで1回取り、ストアとファイルに1行ずつ書く。
   jobは同時に1つで、遅いツールは次の取得を遅らせるだけで積み重ならない。
   引き継ぎ（exec）は走っているjobの終わりを待ち、引き継ぎを求められた後は新しいjobを始めない（遅い取得がexecを先延ばしにしない）。
@@ -58,11 +58,6 @@ eventにはしない（連続の値でrun_eventsを膨らませない）。
 
 列の意味は`domain::host_metrics::COLUMNS`とOSごとの読み手のdoc commentが持つ。
 
-| 列 | 中身 |
-| --- | --- |
-| `time` | `unix`のhostのlocal時刻（`YYYY-MM-DDTHH:MM:SS+HH:MM`） |
-| `mem_compressed_mb` | macOSのcompressorが占めるページ（Linuxは空） |
-
 プロセスの種類はコマンド（`ps -o comm`のpathか名前）で分ける（`domain::host_metrics::process_kind`）。
 次に、main checkoutの`dagq.toml`が宣言したprofileを宣言の順に当て、最初に当たったprofileが道具のprocessをbuildの道具（`cargo`の列）かcompiler（`rustc`の列）に分ける（`ToolchainProfile::process_kind`、各profileの印はその実装のdoc comment。[Toolchain profiles](../toolchain-profiles.md)）。
 列の名前は、ストアの列とファイルのheaderの名前を変えずに読み続けるために固定のままで、`ToolProcess`のdoc commentが理由を持つ。
@@ -70,17 +65,18 @@ eventにはしない（連続の値でrun_eventsを膨らませない）。
 `dagq.toml`は取るたびに読み、読めないか知らないprofileを名指すときはどのprofileにも当てない（`run_env::toolchains_in_use`）。
 macOSの`%cpu`は減衰する平均なので瞬間の値ではない。
 
-ツールの読み方はOSごとの読み手（`domain::host_metrics`）のdoc commentが持ち、`/proc/meminfo`があればLinuxの読み方にする。
+ツールの読み方はOSごとの読み手（`domain::host_metrics`）のdoc comment、読み手の選び方は`infrastructure::host_metrics::sample`のdoc commentが持つ。
 
 ## ディスクの空き
 
 `queue_hold`（`cost`）でclaimと着地が止まるときの空きの推移を読めるように、上の行ごとに空きを記録する。
 
 - **対象**: queueの`runs/`（runのworktreeとそのビルド成果物を置く場所。[空き容量を確かめる](disk-space.md)の判定と同じ）のファイルシステム。`runs/`が無ければqueueのディレクトリ（DBのあるディレクトリ）。queueのディレクトリとworktreeは同じ`runs/`の上にあるので1つで足りる
-- **取り方**: `statvfs(3)`の`f_bavail × f_frsize`を空き、`f_blocks × f_frsize`を全体とする（`infrastructure::adapters::disk_space`）。読めなければ3列とも空のセル。全体が0なら割合は空
+- **取り方**: `statvfs(3)`の`f_bavail × f_frsize`を空き、`f_blocks × f_frsize`を全体とする（`infrastructure::adapters::disk_space`）。
+  読めなければ3列とも空のセル
 - **間隔と形**: 他の列と同じ行で、同じ間隔ごとに取る。
   eventにはしない（冒頭と同じ理由で、空きの控えと掃除の記録（`claim_held`・`landing_held`・`auto_repaired`の`disk_cleanup`）はeventのまま、ここは連続の値だけ）。
-- **列が増えた日**: 列を足す前のバイナリが始めた日のファイルに追記するときは、行の前にこのバイナリのheaderを1度だけ書く（`domain::host_metrics::needs_header`。ファイルの1行目が今のheaderと違うときだけファイルの全体を読み、その中の最後のheaderが今のheaderと違えば書く。1行目が今のheaderなら全体は読まない）。
+- **列が増えた日**: 列を足す前のバイナリが始めた日のファイルに追記するときは、行の前にこのバイナリのheaderを1度だけ書く（`domain::host_metrics::needs_header`）。
   読み手は各行をその上にある最後のheaderで読むので、入れ替えた日の前半の行は古い列で、後半の行は新しい列で読める。
 
 ## 読み口

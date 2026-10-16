@@ -60,6 +60,11 @@ use crate::{
 /// How long one review may take before it is killed.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// What the job may do: run the queue CLI only (ADR-t1063-1 decision 2).
+/// It is not widened to read `input.json`: that would take Claude Code's
+/// `Read`, which reads files outside the queue too, and whatever the
+/// prompt's summary leaves out the read commands give the same. A Codex
+/// review's read-only sandbox can read files, but its prompt is Claude's
+/// and sends it to the same read commands for the details.
 pub const ACCESS: JobAccess = JobAccess::QueueCli;
 /// The runs landed in the period whose timelines the input carries, the
 /// longest first.
@@ -234,6 +239,23 @@ pub struct ThroughputReviewEnvironment<'a, Q: ?Sized> {
 /// agent headless on `provider` (the provider of the launch), save what it
 /// printed and tell the inbox. `db` is the queue's canonical path, which
 /// names its directory.
+///
+/// Its `throughput_review_finished` has the `outcome` `succeeded`,
+/// `failed` (the agent exited non-zero) or `error` (it could not start,
+/// timed out, or saving or recording failed). The finish is recorded once,
+/// at the exit of what follows the period being known: a failure before
+/// the agent starts (reading the landings, gathering the inputs, resolving
+/// the checkout, making the directory, saving the prompt and the inputs,
+/// recording the start) is recorded too, with `outcome: error`,
+/// `exit_code: null` and an `error` holding the whole chain of the cause
+/// (`{:#}`), with `dir` and `session_id` when known (`dir` is null before
+/// the directory is made, and there is no log yet) and always `pid` and
+/// `parent_pid`. A failure before the queue is open (the caller's
+/// canonicalization or opening of the database,
+/// `compose::observation::throughput_review`) has nowhere to be recorded
+/// and returns `Err`; so does a finish that cannot be recorded, which is
+/// not tried again. The supervisor makes up no finish from a child's
+/// non-zero exit. A dry run records no event, failing or not.
 pub fn review<Q: AskStore + RunLog>(
     queue: &mut Q,
     db: &Path,
@@ -273,8 +295,7 @@ pub fn review<Q: AskStore + RunLog>(
         failure["error"] = json!(format!("{error:#}"));
         failure
     });
-    // The only finish write: preparation errors and agent outcomes share
-    // this path. A failed finish write propagates without trying it again.
+    // The only finish write (see the doc comment).
     queue.record_queue_event(EventKind::ThroughputReviewFinished, payload.clone())?;
     tracing::info!(
         mode = options.mode.as_str(),
@@ -837,7 +858,8 @@ pub struct ReviewPrompt {
     ///   it, 0 without one). `omitted` counts each name of `omitted_to_fit`
     ///   once, not the items of a section as the other jobs do, and
     ///   `over_limit` says why the prompt is still over [`PROMPT_LIMIT`]
-    ///   after [`DROP_ORDER`] (null when within it).
+    ///   after [`DROP_ORDER`] (null when within it). An event recorded
+    ///   before this shape keeps a number as its `prompt_bytes`.
     /// - `input_bytes`, the summary of the inputs as pretty JSON, and
     ///   `input_limit`, [`PROMPT_INPUT_LIMIT`].
     /// - `omitted_to_fit`, the parts [`DROP_ORDER`] left out (empty when

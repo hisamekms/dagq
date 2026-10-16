@@ -87,6 +87,8 @@ pub struct CiWatchConfig {
     pub workflow: String,
     /// The watched branch; `None` is the landing branch.
     pub branch: Option<String>,
+    /// Seconds between checks. Set it no shorter than one CI run: checking
+    /// more often finds no more finished runs and only reads in vain.
     pub interval_secs: u64,
     /// The globs of the artifacts holding JUnit XML; empty reads none.
     pub junit_artifacts: Vec<String>,

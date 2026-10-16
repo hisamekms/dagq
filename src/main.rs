@@ -1089,7 +1089,10 @@ enum Command {
         #[arg(long, default_value = "codex")]
         codex: PathBuf,
         /// What the job starts with, as the supervisor routed it (an actor launch as JSON);
-        /// `[roles.throughput_review]` of dagq.toml without.
+        /// `[roles.throughput_review]` of dagq.toml without. Its executable that cannot be
+        /// resolved (gone since the supervisor found it) is tried as given, so the review
+        /// records its finish as the provider not usable (`executable_missing`) instead of the
+        /// command failing with no record of the period.
         #[arg(long, hide = true)]
         launch: Option<String>,
         /// Codex's home, whose rollouts name the model (tests); Codex's own without.
