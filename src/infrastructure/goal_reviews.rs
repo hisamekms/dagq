@@ -175,7 +175,11 @@ fn gaps_in_a_row(conn: &Connection, goal: GoalId) -> Result<usize> {
 }
 
 /// Register `gaps` as draft tasks of the goal, each with the origin
-/// `goal_gap` and the material its planner is shown.
+/// `goal_gap` and the material its planner is shown. A draft takes the
+/// gap's title and description, with `Missing for the goal's acceptance:
+/// <criterion>` added when the gap names one; its acceptance is empty, and
+/// its context is `goal_gap: goal review <review> of goal <goal> found this
+/// missing`.
 fn register_gaps(
     conn: &Connection,
     goal: GoalId,

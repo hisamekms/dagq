@@ -299,7 +299,9 @@ pub fn ready(mut goal: Goal) -> Result<Goal, DomainError> {
 /// decision 9, the one exception to ADR-0009's closed goal): a goal closed
 /// as achieved opens again, so it can be closed again. Its `goal_closed`
 /// event stays; the store adds the reopening one. A goal that is open, or
-/// was abandoned, is not reopened. The unclaimed tasks that wait on it wait
+/// was abandoned, is not reopened. Its verdict and `closed_at` are cleared;
+/// the store keeps them in `goal_reopened` as `previous_verdict` and
+/// `previous_closed_at`. The unclaimed tasks that wait on it wait
 /// again; a running run is not stopped.
 pub fn reopen(mut goal: Goal, reopened_at: String) -> Result<Goal, DomainError> {
     require(goal.verdict == Some(GoalVerdict::Achieved), || {

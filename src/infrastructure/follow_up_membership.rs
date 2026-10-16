@@ -433,13 +433,15 @@ pub(super) fn correction_answers(conn: &Connection) -> Result<Vec<Ask>> {
 
 /// Apply a person's answer to a `correct_goal` ask in one transaction
 /// and close it (ADR-t1504-2 decision 9): `reopen` opens the goal again
-/// (`goal_reopened`; its `goal_closed` stays) and moves a draft or
-/// ready follow-up back into it; `correct_verdict` and `keep_achieved`
-/// leave the goal closed. Each records `goal_correction_decided` on the
-/// goal and the follow-up; no running task is stopped and no event is
-/// rewritten. `None` when the answer is not one the runtime applies now
-/// (left for the inbox); a goal no longer closed as achieved closes the
-/// ask without a change.
+/// (`goal_reopened`, with the `previous_verdict` and `previous_closed_at`
+/// it loses; its `goal_closed` stays) and moves a draft or ready follow-up
+/// back into it; `correct_verdict` and `keep_achieved` leave the goal
+/// closed. Each records `goal_correction_decided` on the goal and the
+/// follow-up; its payload's `move_refused` holds why the follow-up could
+/// not be moved into the reopened goal and stays where it is; no running
+/// task is stopped and no event is rewritten. `None` when the answer is
+/// not one the runtime applies now (left for the inbox); a goal no longer
+/// closed as achieved closes the ask without a change.
 pub(super) fn decide_correction(
     conn: &mut Connection,
     ask_id: AskId,

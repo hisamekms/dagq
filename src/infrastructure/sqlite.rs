@@ -2140,8 +2140,11 @@ pub(super) fn next_id(conn: &Connection, table: &str) -> Result<i64> {
 /// transaction: the one check of `goal close`, a goal review's `achieved`
 /// and an `approve_goal` answer alike. Records
 /// `goal_closed` with the task counts and the fields of `extra` (who closed
-/// it and why, for a goal review), and `dependency_stranded` on each task
-/// an `abandoned` close leaves that others wait on.
+/// it and why), and `dependency_stranded` on each task an `abandoned` close
+/// leaves that others wait on. A goal review's `achieved` passes `by:
+/// "goal_review"`, its `goal_review_id` and `reason` (the verdict's
+/// `summary`); an `approve_goal` answer passes `by: "person"`, the
+/// `ask_id` answered and the `goal_review_id` of the review that asked.
 pub(super) fn close_goal_in(
     conn: &Connection,
     goal_id: GoalId,

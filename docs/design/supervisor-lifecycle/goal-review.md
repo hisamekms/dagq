@@ -69,8 +69,7 @@ execの[引き継ぎ](handoff.md)のあいだの回収と止め方は引き継�
    reviewの間のfollow_upの登録、判断の記録・訂正、acceptanceの変更の後のverdictはこれで使われない。
    検査はtransactionの中のqueueの状態だけで行うので、execの引き継ぎで回収したverdictも、supervisorの再起動の後も、同じ`finish_goal_review`で同じ結果になる。
    - **achieved**: `goal close --verdict achieved`と同じ検査でgoalを閉じる（`close_goal_in`）。
-     `goal_closed`のpayloadに`by: "goal_review"`、`goal_review_id`、`reason`（verdictの`summary`）を足す。
-   - **gaps**: 各gapを、そのgoalの`draft`のtaskとして登録する（title、descriptionに`Missing for the goal's acceptance: <criterion>`を足したもの、acceptanceは空、contextは`goal_gap: goal review <行のID> of goal <ID> found this missing`）。
+   - **gaps**: 各gapを、そのgoalの`draft`のtaskとして登録する（`register_gaps`）。
      `draft_origins`に出どころ`goal_gap`を書くので、以後は[Draft planners](draft-planners.md)の経路でruntimeのplannerが採否を決める。
      goalは開けたまま。
      draftがある間は2の条件を満たさず、draftが終われば（採用されて着地する、cancelされる）状態が変わって再び起動する。
@@ -102,7 +101,7 @@ execの[引き継ぎ](handoff.md)のあいだの回収と止め方は引き継�
 7. **answer**（`goal_answers` → `decide_goal`、1トランザクション）: `GoalAnswer::parse`で`GOAL_OPTIONS`の答えを読む。
    適用できるのは、goalが閉じておらず、`achieved`は所属taskがすべて終わりfollow_upの所属の判断が済んでいて（2の条件のうちこの2つだけ）、`abandoned`は`in_progress`が無く、`gaps`はreviewのverdictにgapがあるとき（`gaps: <text>`は人のtextを1件のgapにする）。
    適用するとaskを閉じ、`goal_decided`を記録する。
-   `achieved` / `abandoned`はgoalを閉じ（`goal_closed`に`by: "person"`、`ask_id`、`goal_review_id`）、`gaps`は5と同じ手順でdraftを登録し、`keep_open`は何もしない（2の入力が同じなので、2の入力（所属task・acceptanceの版・follow_upとその判断）が変わるまで起動しない）。
+   `achieved` / `abandoned`はgoalを閉じ、`gaps`は5と同じ手順でdraftを登録し、`keep_open`は何もしない（2の入力が同じなので、2の入力（所属task・acceptanceの版・follow_upとその判断）が変わるまで起動しない）。
    goalが先に閉じていたらaskを閉じ、`ask_closed`だけを記録する。
    適用できないanswer（verdictが足した独自のoption、書き足しの自由文、条件の崩れた`achieved`など）は閉じずに残し、inboxの人が読んで`ask close`する。
    `goal_answers`は答えた時点の`ask_answered`が`runtime_delivers: true`のaskだけを返すので、inboxに渡したanswerを後で条件がそろってからruntimeが適用することはない。
@@ -117,7 +116,7 @@ execの[引き継ぎ](handoff.md)のあいだの回収と止め方は引き継�
    questionは所属の判断の中身と、goalを待っていて閉じたときに解放されたtaskとそのrunを載せる（`follow_up::correction_question`。runtimeはどれも止めない）。
    goalの閉じた状態とverdict、`goal_closed`と前の判断の行は変えない。
    answer（`correction_answers` → `decide_correction`、1トランザクション）は、goalがまだachievedで閉じていてanswerがoptionのどれかのときだけsupervisorが適用し（`ask_answered`の`runtime_delivers`はanswer時に`correction_answer_applies`で決める。supervisorの`correction_answers`は最新の`ask_answered`の`runtime_delivers`がtrueでaskがcloseされていないものだけを選ぶ。`status`の`applying the answer of ask N (runtime)`もこの選択を読み、現在のgoalの状態で判定し直さない）、askを閉じて`ask_closed`と`goal_correction_decided`をgoalとfollow_upに記録する。
-   `reopen`はgoalを開き直し（`goal::reopen`。statusを`open`に、`closed_at`と`verdict`を消す。`goal_reopened`に`previous_verdict`・`previous_closed_at`。`goal_closed`は残る）、`draft` / `ready`のfollow_upをgoalに戻す（それより先のstatusのものと、goalを待つ依存があって移せないもの（`move_refused`に理由）は動かさず、閉じる条件の「requiredなのにgoalの外」で閉鎖を待たせる）。
+   `reopen`はgoalを開き直し（`goal::reopen`。statusを`open`に、`closed_at`と`verdict`を消す。`goal_closed`は残る）、`draft` / `ready`のfollow_upをgoalに戻す（それより先のstatusのものと、goalを待つ依存があって移せないものは動かさず、閉じる条件の「requiredなのにgoalの外」で閉鎖を待たせる）。
    同じgoalについて閉じていないほかの`correct_goal`のaskと、閉じる前から残った`approve_goal`のaskは、runtimeが閉じる（未回答なら`ask_answered`をruntimeの答えとして書き、回答済みなら`ask_closed`。`asks::close_by_runtime`）。
    閉じたaskは`goal_correction_decided`に載せる（そのfollow_upの所属は判断の記録か`set-goal`で開いたgoalへ移せるようになる）。
    開き直したgoalはまた閉じられ、それを待つtaskのうちまだclaimされていないものは閉じるまで待つ（走っているrunは止めない）。
