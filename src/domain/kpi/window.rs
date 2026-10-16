@@ -1278,7 +1278,8 @@ impl<'a> Context<'a> {
     /// the targets that finished in the window, into `put`: `all`, by
     /// `target`, by the task's `change`, by the `band` of the remaining time
     /// the p50 gave, by `method`, and by the change marks between the
-    /// snapshot and the finish (`marks=0` is the method's own error). The
+    /// snapshot and the finish (`marks=0` is the method's own error,
+    /// `marks=1+` includes the plan's changes). The
     /// counts of the rows left out and of the marks go to the details.
     /// Every stratum is listed whatever `--by` says, and `all` even without
     /// a sample; `change=` is of the tasks only. With `--goal`, the samples

@@ -2768,7 +2768,9 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
 }
 
 /// The key of `observe_finished` that counts the observations that ended
-/// `error` or `failed` in a row up to this one (task 1574).
+/// `error` or `failed` in a row up to this one (task 1574), of either mode.
+/// A `succeeded` or a `skipped` one puts it back to 0, and an `error` where
+/// no provider could start the agent counts too.
 pub const CONSECUTIVE_FAILURES: &str = "consecutive_failures";
 /// The failure in a row that makes `observe_finished` an attention
 /// ([`AttentionNext::CheckObserver`]).

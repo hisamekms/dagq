@@ -39,6 +39,8 @@ pub use window::{CANDIDATES_SAMPLED, WindowKpis};
 /// quiet check does not count them as others' events, so they alone never
 /// start its agent. A task that adds one lists it here. A push's failures
 /// reach the inbox as an attention, so they are not counted either.
+/// `kpi_breach_started` and `kpi_breach_resolved` are no bookkeeping: they
+/// count, and wake the observer.
 pub const BOOKKEEPING_KINDS: &[&str] = &[
     CANDIDATES_SAMPLED,
     report::REPORT_WRITTEN,

@@ -134,7 +134,8 @@ fn target_entry(period: &str, target: &TargetReport) -> Value {
 
 /// A breach as its finding is recorded: the kind, subject and evidence
 /// (the open `kpi_breach_started` of the same period, KPI and stratum;
-/// null before the supervisor recorded it), the latest judged value, and
+/// null before the supervisor recorded it, and the observer leaves such a
+/// breach to the next observation), the latest judged value, and
 /// the marks of the periods since the breach started.
 fn breach_entry(
     period: &str,

@@ -186,6 +186,9 @@ const STATS_ORDER: &[&str] = &[
 const KPI_ORDER: &[&str] = &["error", "config", "targets", "trend", "forecast"];
 
 /// What the prompt's sections came to, as `observe_started` records it.
+/// A section's `bytes` include its heading and notes, and the sections'
+/// bytes add up to the prompt without the language instruction; the
+/// `prompt_bytes` recorded beside them include that instruction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SectionSize {
     pub name: String,

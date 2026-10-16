@@ -39,9 +39,7 @@ serviceはobserverのprincipal（tokenのrole `observer`とjobのactor id）をa
 providerによらずagentの`dagq`はserviceに送り、queueのDBを開かない。
 tokenはjobの起動ごとに`HostActorExecutor`が発行してfileに書き、そのpathを`DAGQ_SERVICE_CREDENTIAL_FILE`で渡し、jobのprocessが終われば失効させる（4）。
 Codexのsandboxに足すのはserviceのsocketへの到達だけ（下の「Codexで動かす」）。
-書き込みがserviceのerror（serviceが居ない・`unreachable`など）で通らなかったことを、runtimeはobservationの失敗に数えない（ADR-t1222-1のConsequencesが委ねた判断）。
-`outcome`はagentの終わり方だけで決まり、agentはerrorのJSONを見て非0で終われば`failed`になって次のobservationが同じwindowを読み直し、0で終われば読み直さない。
-supervisorはserviceが居ない間observerを起動しない（ADR-t1233-4決定2）ので、書けないのは走っている間にserviceが落ちたときだけで、その件数とidは`observe_finished`に入らない（書かれていないので）。
+supervisorはserviceが居ない間observerを起動しない（ADR-t1233-4決定2）ので、agentの書き込みがserviceに届かないのは走っている間にserviceが落ちたときだけで、その件数とidは`observe_finished`に入らない（書かれていないので）。
 
 - **`dagq observe`**: 1回のobservation。
   supervisorは行き先のlaunchなどを隠したflagで渡す（下の「Codexで動かす」）。
@@ -50,7 +48,6 @@ supervisorはserviceが居ない間observerを起動しない（ADR-t1233-4決�
      alertの識別は`observer::alert_keys`が持ち（時間とともに伸びる値は含めない）、前回に無かった識別が1つでもあれば起動し、同じか減っただけなら起動しない。
      `alerts`を持たない`observe_finished`の後は、alertが1つでもあれば起動する。
      observer自身のものとして数えないeventは`SqliteQueue::events_besides`と、KPIの記帳のevent（`domain::kpi::BOOKKEEPING_KINDS`、ADR-0051の決定24）のdoc commentが持ち、記帳のeventだけではobserverを起こさない。
-     目標割れの`kpi_breach_started` / `kpi_breach_resolved`は記帳ではなく数える。
      直前が`failed` / `error`なら（何も観察できていないので）起動する。
      skippedの`observe_finished`もtimerの期日の起点になる。
   1. 入力を集める: `stats --since <cursor>`（cursorは`--since`、無ければ前回のobserveが保存した`<queue dir>/observer/cursor`、それも無ければ`stats`の既定で、`--daily`は日次の窓（`DAILY_WINDOW_SECS`）より前の最後のevent id）、未決のfinding、直近のnote、openなask、`graph`、KPIと改善のproposalの数（下の「KPIの目標割れと改善の上限」）。
@@ -80,7 +77,7 @@ supervisorはserviceが居ない間observerを起動しない（ADR-t1233-4決�
      killの前にagentの子孫（`ProcessControl::descendants`。agentのBashとそれが起動したもの）を読み、agentの後にそれらもSIGKILLするので、agentの子プロセスは残らない。
      Codexのjobも同じ`run_agent`で止め、Codexがコマンドごとに別のprocess groupで走らせたものも、killの前に列挙した子孫としてpidで止まる。
   5. 終了後、`observe_started`より後にobserverが記録・更新したfindingと、observerが閉じたfinding（`resolved`か`dismissed`にしたもの。再記録による開き直しと、人やplannerの`resolve` / `dismiss`は数えない）とobserverのaskを集め、`observe_finished`を記録して返す。
-     `outcome`は`succeeded`、`failed`（非0終了）、`error`（起動できない・timeout）のどれかで、`consecutive_failures`はmodeを問わず続く`error` / `failed`の回数（`succeeded`と`skipped`で0に戻り、providerが無く起動しなかった`error`も数える）。
+     `outcome`は`succeeded`、`failed`（非0終了）、`error`（起動できない・timeout）のどれかで、`consecutive_failures`はmodeを問わず続く`error` / `failed`の回数。
      `succeeded`のhourlyのときだけ`cursor`を`<queue dir>/observer/cursor`に保存する（一時ファイルからrename）。
      失敗したobservationのwindowは次のobservationが読み直す。
      dailyはcursorを動かさない。
@@ -92,7 +89,6 @@ supervisorはserviceが居ない間observerを起動しない（ADR-t1233-4決�
      askにせず、claimと着地を止めず、`status`にも残らない（`domain::event_attention`）。
 - **`dagq observe --history`**: 過去のobservationを新しい順に返す（`observe_finished`ごとに1件で、各件の中身は`observer::history`）。
   読むだけなのでqueueを読み取り専用で開き、observerのenvからも打てる。
-  古い観測のdirの`output.log`は移行も削除もせず、historyはeventの`dir`を返し本文を読まないため、そのdirの`output.log`を人が読める。
   終了した観測の出力をruntimeが読み直して分類することはない。
   失敗時の分類は、Claudeのjobは`AgentSignals::job_failure`に両streamを改行でつないで渡し（壁ならqueueのhold askに入る）、Codexのjobは役割がproviderを書いたときだけ`AgentProvider::job_failure(stdout, stderr)`で読む（下の「Codexで動かす」の`provider_unusable`）。
   成功時は分類しない。
@@ -139,12 +135,9 @@ promptと打たせるコマンドと出力の形は変えず、Claudeのplugin�
   `[provider_fallback] jobs = false`（[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)）のときは、使えない理由ではもう一方で起動せず、控えのあいだ待つ（[Provider lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)の「切り替えを止める設定」）。
   `--no-claude`ではClaudeは使えないので、Codexを設定したobserverはCodexで起動し、Codexも使えなければ子プロセスに`--unavailable`で理由を渡す。
   子プロセスは0の判定でskipしなければ、agentを起動せずdirも`observe_started`も作らずに、理由を持つ`outcome: error`の`observe_finished`を記録する。
-  `observe_finished`はattentionではなく、`stats`の`jobs`はこれをjobに数えない（agentが走っていない）。
-  次のobservationは直前が`error`なので0でskipしない。
-  そのため`--no-claude`でCodexが控えられている間は、何も起きていなくても間隔ごとにこの記録が1件ずつ残る（スループットの見直しが期間ごとに記録するのと同じく、どのobservationが起動できなかったかを残すため）
 - **子プロセス**: supervisorは行き先のlaunchを`--launch`で渡し、コマンドはその`provider`のagent（`ClaudeCode`か`Codex`）で起動する。
   `--launch`が無い（人が手で打つ）ときは束縛されたcheckoutの`[roles.observer]`（`compose::observer_launch`）。
-  Codexの実行ファイルを解決できない（supervisorが見つけた後に消えた）ときもコマンドは失敗せず、与えられたpathのまま起動を試み、起動の失敗を`provider_unusable`（`executable_missing`、`application::job_start_failure`）として終わりに記録する。
+  Codexの実行ファイルを解決できない（supervisorが見つけた後に消えた）ときもコマンドは失敗せず、与えられたpathのまま起動を試み、起動の失敗を`provider_unusable`（`executable_missing`、`application::job_start_failure`）として`--switchable`のとき終わりに記録する。
   Claudeの実行ファイルは解決できなければ失敗し（`--switchable`と`--no-provider-fallback`のときはCodexと同じく与えられたpathのまま起動を試み、`executable_missing`を記録する）、起動しない側のproviderの実行ファイルは解決しない
 - **記録**: Codexのthreadは始まりの記録に無く、終わりが記録する（threadはCodexが名付けるので）。
   actorはobservationごとのid。
@@ -153,7 +146,6 @@ promptと打たせるコマンドと出力の形は変えず、Claudeのplugin�
   Codexの失敗はClaudeのqueueのhold askに入れない。
   supervisorは自分の子のその終わり（起動時のevent idより後の同じmodeの`observe_finished`）を見てCodexを控え（`hold_provider`。利用上限はCodexの出力から再開の時刻を読む）、そのmodeをこのprocessの起動の記録から外して期日にする（`observer_again`）ので、次のpassでもう一方のproviderで起動し、`--no-claude`では上の`--unavailable`で理由を記録する。
   控えを書けなかったときは間隔を待つ（同じCodexをすぐ起動し直さないため）。
-  `--switchable`の無いCodexのjobは`provider_unusable`を書かず、Claudeのjobは壁に当たればqueueのhold askに入る。
   `[provider_fallback] jobs = false`のとき（supervisorは`--switchable`に加えて`--no-provider-fallback`を渡す）: Codexを書いた役割は上と同じくCodexを控えてmodeを期日にするが、次のpassはClaudeで起動せず、Codexの控えが解けた後にCodexで起動し直す。
   Claudeを書いた役割は、Claudeが使えずに終わったとき（起動の失敗は起動のerrorから、認証・利用上限は`signals.job_failure`の壁の読みから。`read_failure`）に`provider_unusable`（`claude`）を記録し（壁では子プロセスが`hold_wall`で控えのaskを開く）、supervisorは認証・利用上限なら同じ控えのask（`HoldJob::Observer`。既に入っていれば重ねない）、起動の失敗なら`ProviderHold`（控えのaskが既にClaudeを控えていれば重ねない）でClaudeを控え（`hold_timer_jobs_unusable`。Codexは控えない）、`observer_again`で期日にし、控えのあいだ待って、控えが解けた後（askの`done`か`retry_at`）のpassでClaudeで観測し直す。
   onのClaudeを書いた役割は`provider_unusable`を記録しない
@@ -194,7 +186,6 @@ promptと打たせるコマンドと出力の形は変えず、Claudeのplugin�
 - **省いたことの明示**: 節ごとの見出しに残した数と全体の数を書き、省いたら`observe --input`でその節の続きを読む方法と表の今の読み方を（keyの節は省いたkeyの名前も）書き、要約したkeyと縮めた項目にもそれを読む`observe --input`を書く。
   `observe --input`はobservationの時点の入力をそのまま返し、表の今の読み方は今の状態を返す。
 - **記録**: `observe_started`がpromptの大きさと節ごとの内訳を残し、`observe --history`と`--dry-run`も同じものを返す。
-  全体の大きさは言語の指示を含み、節ごとの大きさは見出しと注記を含み、節ごとの大きさの合計は言語の指示の無いpromptの大きさになる。
   起動に失敗したobservation（引数の大きさなど）も`observe_started`に残る。
 
 ## KPIの目標割れと改善の上限
@@ -205,7 +196,7 @@ observerはKPIの目標割れの継続を種類`kpi`のfindingにし、そこか
 - **入力の`kpi`**（`OneShot::observer_kpi`、純粋関数と載せるものは`domain::kpi::observe`）: [`kpi`](commands.md)を直近の日と週の期間で`dagq kpi`と同じ設定（main checkoutの`dagq.toml`の`[kpi]`にhost.tomlを重ねたもの）で計算し、目標ごとの判定、目標割れごとのfindingの種類・subject・根拠のevent・印、期間ごとの傾向と見込みの答え合わせを載せる。
   数字は`kpi`の出力をそのまま引き、observerは作らない。
   読めなければ`{"error": ...}`にして他の入力で観察を続ける。
-  目標割れの根拠は同じ期間・KPI・層の閉じていない`kpi_breach_started`のevent ID（`SqliteQueue::kpi_breach_events_open`）で、supervisorがまだ記録していなければnull。
+  目標割れの根拠は同じ期間・KPI・層の閉じていない`kpi_breach_started`のevent ID（`SqliteQueue::kpi_breach_events_open`）。
 - **入力の`improvements`**（`application::kpi::improvements`）: 動いている改善の数と上限、上限に達しているときにplannerを待つfinding。
   `dagq findings`も同じものを`improvements`として返す。
 - **promptの読み方**（`observer::observer_prompt`）: `breaches`の各項を、その種類・subject・根拠のeventでqueueのfindingに記録し、目標割れの値は`kpi`の出力をそのまま写す。
@@ -224,7 +215,6 @@ observerはKPIの目標割れの継続を種類`kpi`のfindingにし、そこか
 [ADR-0070](../../adr/0070-forecast-snapshots-and-scoring.md)の決定5。
 
 - **入力**: 入力の`kpi.forecast`（上）に、日と週の期間ごとの答え合わせの指標と件数が層ごとに載る。
-  `marks=0`は見積もり方法そのものの誤差、`marks=1+`は計画の変更を含む。
 - **偏りの判定**: 「偏りが続く」は`forecast.*`の目標（`dagq.toml`の`[kpi.targets]`。planner が書く）の目標割れ（`breach`）だけで、別の経路は作らない。
   observerは`kpi.forecast`の数字から自分で偏りを判定しない。
 - **finding**: `forecast.*`のKPIの目標割れは`kpi.breaches`に`finding_kind: forecast`、`subject`は接頭辞`forecast.`を除いた`<指標>/<層>`で載り（`domain::kpi::observe`）、observerは種類`forecast`・対象`queue`のfindingを記録か更新する。

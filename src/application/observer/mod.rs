@@ -83,6 +83,7 @@ pub struct ObserveOptions {
     /// usage limit, a launch that failed, the executable gone) records
     /// `provider_unusable`, and the supervisor holds Codex and starts the
     /// observation again on the other provider (ADR-t1063-1 decision 4).
+    /// A Codex observation without it records no `provider_unusable`.
     pub switchable: bool,
     /// `[provider_fallback] jobs` (ADR-t1857-1): with it off (`false`) a
     /// Claude observation of a role that names its provider that stopped
@@ -151,6 +152,10 @@ pub struct ObserverEnvironment<'a, Q: ?Sized> {
 /// (a Codex one is read by `provider`'s `job_failure`); they must belong to
 /// `provider` when it is Claude's. `db` is the queue's canonical path,
 /// which names its directory.
+/// The outcome follows only how the agent ended: a write the queue service
+/// refused (it is gone, `unreachable`) is no failure of the observation,
+/// and only when the agent exits non-zero on its error does the next one
+/// read the window again.
 pub fn observe<Q: AskStore + ObserverLog + QueueRecords + RunLog + TaskStore>(
     queue: &mut Q,
     db: &Path,
@@ -459,7 +464,12 @@ pub(crate) fn read_failure(
 
 /// Record the finish of an observation no provider can run (`why`), with
 /// no agent started and no directory, and return its payload: an `error`,
-/// so the next observation reads its window again.
+/// so the next observation reads its window again and is not skipped.
+/// While `--no-claude` runs with Codex held, one such finish is left every
+/// interval though nothing happened, to show which observations could not
+/// start; one alone is no attention (the failures in a row still make
+/// one, as [`crate::domain::OBSERVER_FAILURES_TOLD`] says), and `stats`'
+/// `jobs` does not count it (no agent ran).
 fn unavailable(
     queue: &(impl RunLog + ObserverLog),
     mode: ObserveMode,
@@ -703,6 +713,9 @@ fn skip(
 /// it recorded, updated and closed and the asks it wrote, how long it took
 /// and whether it was skipped.
 /// Observations recorded before the ids were kept give the counts only.
+/// It returns each observation's `dir` and reads none of its files, so
+/// the `output.log` an old observation's directory keeps is neither
+/// migrated nor deleted, and a person reads it there.
 pub fn history(queue: &dyn ObserverLog, limit: usize) -> Result<Value> {
     let observations = queue
         .observations(limit)?
