@@ -301,10 +301,14 @@ fn unguarded_rejection(facts: ReceiptFacts<'_>, run: &TaskRun, error: &anyhow::E
 
 /// Run the task's verification commands, every one as registered (a
 /// coverage gate included, ADR-t1818-1 decision 2), on `head`, the snapshot
-/// of main an `already_satisfied` claim is verified on. They run in a
+/// of main an `already_satisfied` claim is verified on, with the run's
+/// `[run.env]`; nothing is rebased, committed or pushed, and the run's own
+/// worktree keeps the base its receipt names. On the host they run in a
 /// scratch worktree of the run's directory with `head` checked out
-/// detached, so the run's own worktree keeps the base its receipt names,
-/// with the run's `[run.env]`; nothing is rebased, committed or pushed. The
+/// detached. Set to the container (ADR-t2113-3 decision 1), they run as
+/// the landing's verification does: each in a container of its own on a
+/// clone of `head` made by `containers`, with a token of the snapshot's
+/// own and without the sccache wrapper, never on the host instead. The
 /// first command that fails ends it, its log kept in the run's directory.
 /// `Err` is a verification that could not run at all.
 pub fn verify_snapshot(
@@ -314,6 +318,7 @@ pub fn verify_snapshot(
     task: &Task,
     run: &TaskRun,
     head: &CommitSha,
+    containers: SnapshotContainers<'_>,
 ) -> Result<SnapshotVerification> {
     let commands = task.verification_commands();
     let mut verification = SnapshotVerification {
@@ -325,13 +330,33 @@ pub fn verify_snapshot(
         return Ok(verification);
     }
     let run_dir = Path::new(run.run_dir().context("missing run directory")?);
-    // Set to the container, which does not run the verification of a
-    // snapshot, the commands do not run on the host instead (ADR-t2113-1
-    // decision 4).
-    if verifier.runtimes()?.verification != crate::domain::container_runtime::Runtime::Host {
-        bail!(
-            "dagq.toml sets the verification's runtime to the container, which does not verify a snapshot of main; no verification command runs on the host instead"
-        );
+    if verifier.runtimes()?.verification == crate::domain::container_runtime::Runtime::Container {
+        // No program of the host runs the commands, and no cache of the
+        // host's or the workers' is theirs (ADR-t2114-4 decision 4).
+        let mut env = verifier.run_env(run_dir)?;
+        crate::domain::run_container::without_sccache_wrapper(&mut env);
+        // Declared before the container, so revoked after what the
+        // container left is removed.
+        let token = super::queue_broker::VerificationToken::issue(
+            containers.tokens,
+            run.id(),
+            super::queue_broker::TokenFor::Snapshot,
+        )?;
+        let container =
+            ContainerVerification::start(containers.containers, verifier, run, head, &token.file)?;
+        containers
+            .containers
+            .publish_materials(&container.prepared)
+            .context("copy the verification's materials into the run directory")?;
+        verification.failure = snapshot_commands(
+            files,
+            run_dir,
+            head,
+            commands,
+            &mut verification.commands,
+            |command, log| container.run_to_log(verifier, command, &env, log),
+        )?;
+        return Ok(verification);
     }
     if let Some(message) = verifier.run_env_programs(Some(run_dir))?.missing_message() {
         bail!("{message}");
@@ -339,35 +364,65 @@ pub fn verify_snapshot(
     let env = verifier.run_env(run_dir)?;
     let scratch = satisfied_scratch(run_dir);
     // The scratch worktree goes whatever the commands did.
-    let mut ran = || -> Result<Option<SnapshotFailure>> {
-        repository.checkout_scratch(&scratch, head.as_str())?;
-        for (index, command) in commands.iter().enumerate() {
-            let log = run_dir.join(format!(
-                "satisfied-{}-{}.log",
-                &head.as_str()[..12],
-                index + 1
-            ));
-            let exit = verifier.run_to_log(command, &scratch, &env, &log)?;
-            if !exit.success {
-                // The commands after it do not run.
-                verification.commands = index + 1;
-                let output = files.read_to_string(&log).unwrap_or_default();
-                return Ok(Some(SnapshotFailure {
-                    command: command.clone(),
-                    exit_code: exit.code.unwrap_or(128),
-                    log_path: path_text(&log)?,
-                    output_tail: tail(&output, 2000).to_owned(),
-                }));
-            }
-        }
-        Ok(None)
-    };
-    let ran = ran();
+    let ran = repository
+        .checkout_scratch(&scratch, head.as_str())
+        .and_then(|()| {
+            snapshot_commands(
+                files,
+                run_dir,
+                head,
+                commands,
+                &mut verification.commands,
+                |command, log| verifier.run_to_log(command, &scratch, &env, log),
+            )
+        });
     if let Err(error) = repository.remove_case_tree(&scratch) {
         warn!(run_id = %run.id(), "run {}: the scratch worktree {} could not be removed: {error:#}", run.id(), scratch.display());
     }
     verification.failure = ran?;
     Ok(verification)
+}
+
+/// What [`verify_snapshot`] runs a snapshot's commands with when
+/// `dagq.toml` sets the verification to the container: the containers of
+/// the verifications and the tokens they are handed.
+#[derive(Clone, Copy)]
+pub struct SnapshotContainers<'a> {
+    pub containers: &'a dyn super::run_container::VerificationContainers,
+    pub tokens: &'a dyn super::queue_broker::VerificationTokens,
+}
+
+/// Run `commands` of the snapshot `head` in order through `run_to_log`,
+/// each with its log in `run_dir`, until one fails: that one's failure,
+/// with `ran` set to how many ran; none when every one passed.
+fn snapshot_commands(
+    files: &dyn RunFiles,
+    run_dir: &Path,
+    head: &CommitSha,
+    commands: &[String],
+    ran: &mut usize,
+    mut run_to_log: impl FnMut(&str, &Path) -> Result<super::Exit>,
+) -> Result<Option<SnapshotFailure>> {
+    for (index, command) in commands.iter().enumerate() {
+        let log = run_dir.join(format!(
+            "satisfied-{}-{}.log",
+            &head.as_str()[..12],
+            index + 1
+        ));
+        let exit = run_to_log(command, &log)?;
+        if !exit.success {
+            // The commands after it do not run.
+            *ran = index + 1;
+            let output = files.read_to_string(&log).unwrap_or_default();
+            return Ok(Some(SnapshotFailure {
+                command: command.clone(),
+                exit_code: exit.code.unwrap_or(128),
+                log_path: path_text(&log)?,
+                output_tail: tail(&output, 2000).to_owned(),
+            }));
+        }
+    }
+    Ok(None)
 }
 
 /// The scratch worktree of `run_dir` [`verify_snapshot`] checks a snapshot
@@ -3629,8 +3684,16 @@ mod tests {
                 ran: RefCell::new(Vec::new()),
                 container: false,
             };
-            let verification =
-                verify_snapshot(&repository, &verifier, &files, &task, &run, &sha(HEAD)).unwrap();
+            let verification = verify_snapshot(
+                &repository,
+                &verifier,
+                &files,
+                &task,
+                &run,
+                &sha(HEAD),
+                NoContainers::parts(&NoContainers::default()),
+            )
+            .unwrap();
             (
                 verification,
                 verifier.ran.into_inner(),
@@ -3655,27 +3718,139 @@ mod tests {
         assert_eq!((passed.commands, passed.failure, ran.len()), (3, None, 3));
     }
 
+    /// The containers and the tokens of a snapshot's verification in a
+    /// unit test: what each was asked is recorded, and a container's
+    /// command line is the command alone, which the scripted verifier runs.
+    #[derive(Default)]
+    struct NoContainers {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl NoContainers {
+        fn parts(&self) -> SnapshotContainers<'_> {
+            SnapshotContainers {
+                containers: self,
+                tokens: self,
+            }
+        }
+        fn note(&self, call: String) {
+            self.calls.lock().unwrap().push(call);
+        }
+    }
+
+    impl super::super::queue_broker::VerificationTokens for NoContainers {
+        fn issue(&self, run: &RunId, of: super::super::queue_broker::TokenFor) -> Result<PathBuf> {
+            self.note(format!("issue {run} {of:?}"));
+            Ok(PathBuf::from("/q/token"))
+        }
+        fn revoke(&self, run: &RunId, of: super::super::queue_broker::TokenFor) -> Result<bool> {
+            self.note(format!("revoke {run} {of:?}"));
+            Ok(true)
+        }
+    }
+
+    impl super::super::run_container::VerificationContainers for NoContainers {
+        fn prepare(
+            &self,
+            run: &TaskRun,
+            commit: &CommitSha,
+            token: &Path,
+        ) -> Result<super::super::run_container::PreparedVerification> {
+            self.note(format!("prepare {} {commit} {}", run.id(), token.display()));
+            Ok(super::super::run_container::PreparedVerification {
+                id: "v".to_owned(),
+                queue: crate::domain::podman_machine::QueueKey::new("q").unwrap(),
+                image: "image".to_owned(),
+                dir: PathBuf::from("/q/verification/v"),
+                staged: PathBuf::from("/q/verification/v/staged"),
+                materials: PathBuf::from("/q/run/materials"),
+                build_output: None,
+                limits: Default::default(),
+            })
+        }
+        fn publish_materials(
+            &self,
+            _: &super::super::run_container::PreparedVerification,
+        ) -> Result<()> {
+            self.note("publish_materials".to_owned());
+            Ok(())
+        }
+        fn command_line(&self, _: &[String]) -> String {
+            "in container".to_owned()
+        }
+        fn remove_container(
+            &self,
+            _: &super::super::run_container::PreparedVerification,
+        ) -> Result<()> {
+            Ok(())
+        }
+        fn finish(&self, _: &super::super::run_container::PreparedVerification) -> Result<()> {
+            self.note("finish".to_owned());
+            Ok(())
+        }
+        fn remove_left(&self, _: &RunId) -> Result<Vec<String>> {
+            unreachable!("the supervisor removes what an earlier verification left")
+        }
+    }
+
     /// With the verification set to the container, the snapshot's
-    /// verification refuses before anything: no worktree is checked out
-    /// and no command runs on the host (ADR-t2113-1 decision 4).
+    /// commands run through the verification's container on a clone of the
+    /// head with a token of the snapshot's own, never on the host: no
+    /// worktree is checked out, and what the container left and the token
+    /// go at the end, the container's first; the first that fails ends it
+    /// (ADR-t2113-3 decision 1, ADR-t2113-1 decision 4).
     #[test]
-    fn a_snapshot_verification_set_to_the_container_runs_nothing_on_the_host() {
+    fn a_snapshot_verification_set_to_the_container_runs_its_commands_in_containers() {
         let mut record = task_record(&[], &[]);
-        record.verification_commands = vec!["first".into()];
+        record.verification_commands = vec!["first".into(), "second".into()];
         let task = Task::restore(record).unwrap();
         let (files, dir) = (MemoryFiles::default(), Path::new(DIR));
-        let repository = FakeRepository::sound();
-        let verifier = ScriptedVerifier {
-            passes: vec![true],
-            ran: RefCell::new(Vec::new()),
-            container: true,
+        let verify = |passes: Vec<bool>| {
+            let repository = FakeRepository::sound();
+            let verifier = ScriptedVerifier {
+                passes,
+                ran: RefCell::new(Vec::new()),
+                container: true,
+            };
+            let containers = NoContainers::default();
+            let verification = verify_snapshot(
+                &repository,
+                &verifier,
+                &files,
+                &task,
+                &run(dir),
+                &sha(HEAD),
+                containers.parts(),
+            )
+            .unwrap();
+            assert!(repository.calls.into_inner().is_empty());
+            (
+                verification,
+                verifier.ran.into_inner(),
+                containers.calls.into_inner().unwrap(),
+            )
         };
-        let error = verify_snapshot(&repository, &verifier, &files, &task, &run(dir), &sha(HEAD))
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("runtime to the container"), "{error}");
-        assert!(verifier.ran.into_inner().is_empty());
-        assert!(repository.calls.into_inner().is_empty());
+        let (passed, ran, calls) = verify(vec![true, true]);
+        assert_eq!((passed.commands, passed.failure), (2, None));
+        assert_eq!(ran, ["in container", "in container"]);
+        assert_eq!(
+            calls,
+            [
+                format!("issue {RUN} Snapshot"),
+                format!("prepare {RUN} {HEAD} /q/token"),
+                "publish_materials".to_owned(),
+                "finish".to_owned(),
+                format!("revoke {RUN} Snapshot"),
+            ]
+        );
+        let (failed, ran, calls) = verify(vec![false, true]);
+        assert_eq!(failed.commands, 1);
+        assert_eq!(ran.len(), 1);
+        assert_eq!(failed.failure.unwrap().exit_code, 1);
+        assert_eq!(
+            calls[calls.len() - 2..],
+            ["finish".to_owned(), format!("revoke {RUN} Snapshot")]
+        );
     }
 
     /// A receipt `integrate` reads lands only when it is `succeeded`: a

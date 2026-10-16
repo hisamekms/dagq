@@ -1441,3 +1441,9 @@ task = 2424
 name = "runtime_integrate::a_verification_s_token_lives_only_while_its_commands_run"
 reason = "B 境界（integrate の配線・ファイル）: 着地の verification の token が検証の間だけ在り、終わりに失効することを実の integrate で確かめる"
 task = 2424
+
+# 8.3s (stress 5, task 2480)
+[[test]]
+name = "verification_container::an_already_satisfied_claim_is_verified_in_the_container_and_closes"
+reason = "B 境界（supervisor の配線・Git・プロセス）: already_satisfied の run の snapshot の検証が supervisor の 2 回の pass（検証と close の答えの後の流し直し）を通して fake の podman と実の dagq relay verify で main の head の clone で流れ、引数・token・RUSTC_WRAPPER の外しと event・前の検証の残りの片付け・close を確かめる。container で流すかの判断と部品の呼び順は integrate の unit test"
+task = 2480

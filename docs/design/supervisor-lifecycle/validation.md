@@ -82,12 +82,12 @@ verifyが通れば人のaskに上げ、人の答えで閉じる。
   sessionに終了を依頼してworkspaceを閉じる。
 - **snapshot**: 検証の時点のmainのheadを1つ決めて`run_satisfied_snapshot`に残し、そのheadでtaskの`verification_commands`を登録のまま全部流す（`integrate::verify_snapshot`）。
   coverageの関門も流し、[着地の検証](#着地の検証)の置き換えはしない。
-  流す場所はrun directoryのscratch worktreeで、runのworktreeはreceiptの名指すbaseのままにする。
+  hostでは流す場所はrun directoryのscratch worktreeで、runのworktreeはreceiptの名指すbaseのままにする。
+  verificationのruntimeがcontainerなら、着地の検証と同じ部品で、snapshotのheadのcloneを置いたverificationごとのcontainerで流す（[container runtime](../container-runtime.md#verificationの実行)、tokenはsnapshotの検証のもの）。
   rebase・commit・push・e2eは無い。
   結果は同じheadとともに`run_satisfied_verified`に残す（欄の意味は`event_kind`のdoc comment）。
   流す間はslotとleaseを持ち、handoffはこれを待つ。
   verificationのruntimeがcontainerで使えない間は、hostで流さずに検証を始めず、runは受理のまま休み、使えるようになった後のpassが始める（[container runtime](../container-runtime.md#fail-closedの境界)、`satisfied::awaits_verification`）。
-  使えるようになっても、snapshotの検証はcontainerで流さず、hostでも流さずに拒み、流せなかった失敗として記録してaskに進む。
 - **ask**: verifyの後に`approve_close`のask（理由は`scope`）を開き、questionにsnapshotのheadを載せ、leaseを外してrunを`validating`のまま休ませる。
   verifyが落ちていればoptionsから`close`を外し、questionに落ちたことを書く。
   休む間は開いたask（検証の前ならcontainerの知らせ）がattentionで、supervisorの死んだrunの回収も、人の`recover`と`doctor`も、このrunを取らない（`satisfied::blocks_recovery`）。
@@ -101,6 +101,7 @@ verifyが通れば人のaskに上げ、人の答えで閉じる。
   流し直しの途中で死んだrunは、adopterの再validationが開いたaskを見て休ませ、次のpassの答えの適用がもう一度流し直す。
   検証のコマンドは自分のprocess groupで動き、supervisorが死んでも残りうる。
   そこでscratch worktreeを使い直す前に、そこで動く前の検証のprocessを止め（`auto_repaired`の`satisfied_verification_stopped`）、止まらないか一覧が読めなければ検証せず、askに落ちたことを書く。
+  containerで流すときは、verificationのcloneの親のdirに残るそのrunのverificationのcontainer・buildの出力のvolume・dirを先に消し（同じ`auto_repaired`）、消せなければ同じく検証しない。
 - **再計画**: taskを再計画の操作が保護する間は、検証の結果でaskを開かずtaskも閉じず、答えも適用せず、closeのtransactionも拒む。
   休むrunもそのまま保留され、開いた`approve_close`は閉じる（[taskの再計画](../../plans/task-replanning.md#実装の状態)）。
 - **集計**: 閉じたrunは着地（`run_integrated`）に数えず、`stats`の`already_satisfied`で別に数える（[stats](commands.md)）。

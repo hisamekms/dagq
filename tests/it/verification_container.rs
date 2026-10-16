@@ -1186,3 +1186,242 @@ fn a_waiting_run_in_a_container_whose_recheck_container_does_not_start_is_not_ju
         ask.question
     );
 }
+
+/// The agent of a task whose base already meets it: no commit, and an
+/// `already_satisfied` receipt naming the base with the check it ran there.
+const SATISFIED_AGENT: &str = r#"printf '{"run_id":"%s","result":"already_satisfied","commit":"%s","tests":{"status":"passed","evidence_or_reason":"test -f seed.txt on the base"},"e2e":{"status":"not_applicable","evidence_or_reason":"the runtime runs it"},"subagent_review":{"status":"not_applicable","evidence_or_reason":"no change to review"},"summary":"the base meets it","base_checks":[{"command":"test -f seed.txt","result":"passed"}]}' "$RUN_ID" "$(git rev-parse HEAD)" > "$RECEIPT.tmp"; mv "$RECEIPT.tmp" "$RECEIPT""#;
+
+impl VerifyQueue {
+    /// Supervise once, the workers on the host claiming their tasks are
+    /// met already.
+    fn supervise_satisfied(&self) {
+        let backend = TestWorkspace::new(&self.db, false, SATISFIED_AGENT);
+        let reviewer = TestReviewer::new(&[verdict("pass", &[], "fine")]);
+        let outcome =
+            supervise_reviewed_with(&self.db, &self.repo, &backend, &reviewer, &self.options);
+        assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    }
+
+    /// The single open ask, an `approve_close`.
+    fn close_ask(&self) -> dagq::domain::Ask {
+        let asks = SqliteQueue::open(&self.db)
+            .unwrap()
+            .asks(Default::default())
+            .unwrap();
+        let open: Vec<_> = asks.into_iter().filter(|a| a.closed_at.is_none()).collect();
+        assert_eq!(open.len(), 1, "{open:?}");
+        assert_eq!(open[0].kind, dagq::domain::AskKind::ApproveClose);
+        open[0].clone()
+    }
+}
+
+/// Acceptance (1) to (4) of the snapshot's verification in the container:
+/// an `already_satisfied` claim's commands run on main's head in
+/// containers of their own, as a landing's do (hardened, mounting only the
+/// verification's directory, the materials read-only, the run's socket and
+/// its own build output; on a clone of the head; the token in the proxies
+/// alone, revoked at the end; no `RUSTC_WRAPPER`, whose removal is
+/// recorded), its result is `run_satisfied_verified`, and the ask offers
+/// the close. What an earlier one left (a dead supervisor's) is removed
+/// before the next; the close answered after main moved verifies the new
+/// head in the container again and closes; nothing of the verifications
+/// is left.
+#[test]
+fn an_already_satisfied_claim_is_verified_in_the_container_and_closes() {
+    let _test = crate::common::test();
+    let queue = VerifyQueue::new();
+    fs::create_dir(queue.dir.path().join("bin")).unwrap();
+    let sccache = queue.dir.path().join("bin").join("sccache");
+    crate::common::template::script(&sccache, "#!/bin/sh\nexit 0\n");
+    let prepare = queue.dir.path().join("prepare.sh");
+    fs::write(
+        &prepare,
+        "echo table > \"$DAGQ_VERIFICATION_MATERIALS/it.json\"\n",
+    )
+    .unwrap();
+    queue.set_config(&format!(
+        "[roles.verification]\nruntime = \"container\"\n\
+         [container.build_output]\ndir = \"/build\"\n\
+         [container.verification]\nprepare = {}\n\
+         [run.env]\nRUSTC_WRAPPER = {}\n",
+        toml_string(&format!("sh {}", shell_path(&prepare))),
+        toml_string(&sccache.display().to_string())
+    ));
+    let task = add_task(&queue.db, &commands(&queue.state));
+    queue.supervise_satisfied();
+    let queue_dir = queue.queue_dir();
+    let head = git_out(&queue.repo, &["rev-parse", "main"]);
+    let detail = SqliteQueue::open(&queue.db).unwrap().show(task).unwrap();
+    let run = detail.runs[0].clone();
+    assert_eq!(run.status(), RunStatus::Validating);
+    assert_eq!(
+        payloads(&detail, "run_satisfied_verified"),
+        [&json!({"head": head, "passed": true, "commands": 2})]
+    );
+    assert_eq!(queue.close_ask().options, ["close", "retry", "cancel"]);
+
+    let run_dir = PathBuf::from(run.run_dir().unwrap());
+    let materials = run_dir.join(MATERIALS_DIR);
+    let all = runs(&queue.state);
+    assert_eq!(all.len(), 2, "{all:?}");
+    let args = &all[0];
+    let text = args.join(" ");
+    let id = values(args, "--name")[0]
+        .strip_prefix(&format!("dagq-{QUEUE}-verify-"))
+        .unwrap_or_else(|| panic!("{text}"))
+        .to_owned();
+    assert!(id.starts_with(run.id().as_str()), "{id}");
+    let dir = queue_dir.join("verification").join(&id);
+    for part in [
+        "--read-only",
+        "--cap-drop all",
+        "--security-opt no-new-privileges",
+        "--network none",
+        &format!("--workdir {}", dir.join(VERIFICATION_CLONE).display()),
+        &format!(
+            "dagq relay verify --token-file {}",
+            dir.join("token").display()
+        ),
+    ] {
+        assert!(text.contains(part), "{part}: {text}");
+    }
+    assert_eq!(
+        values(args, "--volume"),
+        [
+            format!("{0}:{0}", dir.display()),
+            format!("{0}:{0}:ro", materials.display()),
+            format!("dagq-{QUEUE}-socket-{}:/run/dagq-broker:z", run.id()),
+            format!("dagq-{QUEUE}-build-{id}:/build"),
+        ]
+    );
+    let home = std::env::var("HOME").unwrap();
+    for absent in [
+        format!("dagq-{QUEUE}-cache"),
+        format!("{0}:{0}", run_dir.display()),
+        run.worktree_path().unwrap().to_owned(),
+        format!("{home}:"),
+        "RUSTC_WRAPPER".to_owned(),
+    ] {
+        assert!(!text.contains(&absent), "{absent}: {text}");
+    }
+    // Inside: the clone of main's head, the preparation's materials and
+    // the snapshot's token, revoked at its end.
+    assert_eq!(
+        fs::read_to_string(queue.state.join("pwd")).unwrap().trim(),
+        dir.join(VERIFICATION_CLONE).display().to_string()
+    );
+    assert_eq!(
+        fs::read_to_string(queue.state.join("head")).unwrap().trim(),
+        head
+    );
+    assert_eq!(
+        fs::read_to_string(queue.state.join("materials")).unwrap(),
+        "it.json\n"
+    );
+    let seen = seen_env(&queue.state);
+    let proxy = &seen["HTTPS_PROXY"];
+    let token = proxy
+        .strip_prefix(&format!("http://{}:", run.id()))
+        .and_then(|rest| rest.strip_suffix("@127.0.0.1:47310"))
+        .unwrap_or_else(|| panic!("{proxy}"));
+    assert!(!text.contains(token), "{text}");
+    assert!(!seen.contains_key("RUSTC_WRAPPER"), "{seen:?}");
+    assert_eq!(
+        dagq::infrastructure::queue_broker::verification_run(&queue_dir, token).unwrap(),
+        None
+    );
+    let removed = payloads(&detail, "sccache_wrapper_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(removed[0]["job"], "satisfied");
+    assert_eq!(removed[0]["runtime"], "container");
+    // What it left goes.
+    assert!(!dir.exists());
+    assert_eq!(
+        *queue.machine.removed.lock().unwrap(),
+        std::slice::from_ref(&id)
+    );
+    let calls = fs::read_to_string(queue.state.join("calls")).unwrap();
+    assert!(
+        calls.contains(&format!(
+            "rm --force --ignore --time 0 dagq-{QUEUE}-verify-{id}"
+        )),
+        "{calls}"
+    );
+
+    // A verification a dead supervisor left, and another run's, which
+    // stays; main moves, and the close is answered.
+    let left = format!("{}-0123456789ab", run.id());
+    let others = "00000000-0000-4000-8000-0000000000ff-0123456789ab".to_owned();
+    for name in [&left, &others] {
+        fs::create_dir_all(queue_dir.join("verification").join(name).join("clone")).unwrap();
+    }
+    git(
+        &queue.repo,
+        &["commit", "-q", "--allow-empty", "-m", "main moves"],
+    );
+    let moved = git_out(&queue.repo, &["rev-parse", "main"]);
+    let ask = queue.close_ask();
+    SqliteQueue::open(&queue.db)
+        .unwrap()
+        .answer(ask.id, "close")
+        .unwrap();
+    queue.supervise_satisfied();
+    let detail = SqliteQueue::open(&queue.db).unwrap().show(task).unwrap();
+    assert_eq!(detail.task.status(), TaskStatus::Completed);
+    let verified = payloads(&detail, "run_satisfied_verified");
+    assert_eq!(verified.len(), 2);
+    assert_eq!(verified[1]["head"], json!(moved));
+    assert_eq!(verified[1]["passed"], true);
+    assert_eq!(
+        payloads(&detail, "run_satisfied_closed")[0]["rechecked"],
+        true
+    );
+    assert_eq!(runs(&queue.state).len(), 4);
+    assert_eq!(
+        fs::read_to_string(queue.state.join("head")).unwrap().trim(),
+        moved
+    );
+    let stopped: Vec<_> = payloads(&detail, "auto_repaired")
+        .into_iter()
+        .filter(|p| p["repair"] == "satisfied_verification_stopped")
+        .collect();
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    assert_eq!(stopped[0]["conditions"]["verifications"], json!([left]));
+    let calls = fs::read_to_string(queue.state.join("calls")).unwrap();
+    assert!(
+        calls.contains(&format!(
+            "rm --force --ignore --time 0 dagq-{QUEUE}-verify-{left}"
+        )),
+        "{calls}"
+    );
+    assert!(queue.machine.removed.lock().unwrap().contains(&left));
+    let remaining: Vec<_> = fs::read_dir(queue_dir.join("verification"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(remaining, [others]);
+}
+
+/// Acceptance (2): a claim whose verification fails in the container is
+/// asked about without the close, and its container leaves nothing.
+#[test]
+fn an_already_satisfied_claim_failing_in_the_container_is_not_offered_the_close() {
+    let _test = crate::common::test();
+    let queue = VerifyQueue::new();
+    queue.set_config("[roles.verification]\nruntime = \"container\"\n");
+    let task = add_task(&queue.db, &["test -f absent.txt".to_owned()]);
+    queue.supervise_satisfied();
+    let detail = SqliteQueue::open(&queue.db).unwrap().show(task).unwrap();
+    let verified = payloads(&detail, "run_satisfied_verified");
+    assert_eq!(verified.len(), 1);
+    assert_eq!(verified[0]["passed"], false);
+    assert_eq!(verified[0]["command"], "test -f absent.txt");
+    assert_eq!(queue.close_ask().options, ["retry", "cancel"]);
+    assert_eq!(runs(&queue.state).len(), 1);
+    assert_eq!(
+        fs::read_dir(queue.queue_dir().join("verification"))
+            .unwrap()
+            .count(),
+        0
+    );
+}

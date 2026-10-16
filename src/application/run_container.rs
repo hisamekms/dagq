@@ -137,6 +137,11 @@ pub trait VerificationContainers: Send + Sync {
     /// Remove what `verification` left: its container, its build output
     /// volume and its directory, without git and following no symlink.
     fn finish(&self, verification: &PreparedVerification) -> Result<()>;
+    /// Remove, as [`Self::finish`] does, what the verifications of `run`
+    /// an earlier process made left (its supervisor died while they ran):
+    /// those whose directory is still in the queue's verification
+    /// directory. The IDs of those removed.
+    fn remove_left(&self, run: &RunId) -> Result<Vec<String>>;
 }
 
 /// The verification containers of a queue that has none: every verification
@@ -158,6 +163,9 @@ impl VerificationContainers for NoVerificationContainers {
     }
     fn finish(&self, _: &PreparedVerification) -> Result<()> {
         Ok(())
+    }
+    fn remove_left(&self, _: &RunId) -> Result<Vec<String>> {
+        Ok(Vec::new())
     }
 }
 

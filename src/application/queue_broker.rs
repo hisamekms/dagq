@@ -153,10 +153,13 @@ pub enum TokenFor {
     Landing,
     /// The `[recheck] command` of the landing recheck (ADR-t2424-1).
     Recheck,
+    /// The verification of an `already_satisfied` claim on a snapshot of
+    /// main (ADR-t1818-1).
+    Snapshot,
 }
 
-/// How `integrate` and the landing recheck issue the token of a run's
-/// verification and revoke it (ADR-t2114-1 decision 2): the control
+/// How `integrate`, the landing recheck and the verification of a
+/// snapshot issue the token of a run's verification and revoke it (ADR-t2114-1 decision 2): the control
 /// side's only.
 pub trait VerificationTokens: Send + Sync {
     /// Issue the token of `run`'s verification for `of`, revoking the one

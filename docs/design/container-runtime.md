@@ -63,8 +63,7 @@ containerを選んだ適用先が使えないとき、hostで動かさずに控�
 - verification: supervisorは着地を始めずに待ち（`domain::landing_hold`）、drainではleaseを返して人に渡す。
   supervisorはtaskの検証のコマンドの有無を見ず、全ての着地を待たせる。
   `integrate`自身も検証のコマンドの前に確かめ（`integrate::verification_runtime`）、どのコマンドもhostで流さずにrunを元のstatusへ戻す。
-  `already_satisfied`の主張のmainのsnapshotの検証はcontainerで流さない。
-  使えない間は同じく始めずに待ち（[Validation](supervisor-lifecycle/validation.md#already_satisfiedの検証)）、使えても`integrate::verify_snapshot`が拒み、hostで流さない。
+  `already_satisfied`のsnapshotの検証も使えない間は始めずに待ち（[Validation](supervisor-lifecycle/validation.md#already_satisfiedの検証)）、hostで流さない。
 - 知らせ: supervisorと、拒んだ`integrate`が、答えがqueueの最新の記録と違うとき（待つ適用先か理由が変わったときを含む、`ContainerCheck::transition`）に`container_runtime_unavailable` / `container_runtime_available`を記録し、前者はinbox宛てのattentionになる。
   supervisorを通さない`integrate`だけでもinboxに届く。
   人は部品が揃うのを待つか、runtimeをhostに戻すtaskを頼む。
@@ -232,6 +231,7 @@ executorは`application::run_container::PodmanActorExecutor`、設定の読み�
 結果・時間・失敗の分類の記録はhostと同じである。
 `integrate`の`ContainerVerification`が流れを持ち、準備・podman・片付けは`application::run_container::VerificationContainers`のport、`podman run`の引数は`domain::run_container::verification_run_args`、containerの中は`dagq relay verify`が持つ。
 containerのrunの着地の再確認のcommandも同じ形で流し、流せなければどこにも流さない（[Landing recheck](supervisor-lifecycle/landing-recheck.md#確かめ方)）。
+`already_satisfied`のsnapshotの検証も同じ部品で、mainのheadのcloneで流す。
 
 - 準備: machine・image・runのrelayをworkerのturnと同じ`RunMachine`で用意し、`dagq.toml`がbuildの出力のdirを名指せば、そのverificationごとの新しいvolumeを作る（workerのrunのvolumeと共有しない）。
 - verificationのdir: 制御側だけのverificationのcloneの親のdirの下に、verificationごとの新しいdirを作る。

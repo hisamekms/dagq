@@ -155,16 +155,60 @@ impl Supervisor<'_> {
         Ok(())
     }
 
+    /// Stop and remove what an earlier verification of `run` in the
+    /// container left (its supervisor died while it ran): its container,
+    /// its build output volume and its directory, recorded as
+    /// `auto_repaired` (`repair: satisfied_verification_stopped`). `Err`
+    /// says why the next may not start.
+    fn stop_stale_container(&self, run: &TaskRun) -> std::result::Result<(), String> {
+        let removed = self
+            .verification_containers
+            .remove_left(run.id())
+            .map_err(|error| {
+                format!("what an earlier verification in the container left could not be removed: {error:#}")
+            })?;
+        if removed.is_empty() {
+            return Ok(());
+        }
+        if let Err(error) = self.queue.record_runtime_event(
+            run.id(),
+            EventKind::AutoRepaired,
+            json!({
+                "layer": "runtime",
+                "repair": "satisfied_verification_stopped",
+                "conditions": {"verifications": removed},
+                "detail": {"runtime": "container"},
+            }),
+        ) {
+            warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "auto_repaired of {} could not be recorded: {error:#}", run.id());
+        }
+        info!(run_id = %run.id(), "run {}: removed the verifications {removed:?} an earlier one left in the container", run.id());
+        Ok(())
+    }
+
     /// Take main's head as the snapshot, record it, and run the task's
     /// verification commands on it off the loop (for the answer `ask` when
-    /// it runs again for one).
+    /// it runs again for one): on the host or, set so by `dagq.toml`, in
+    /// the container, where the commands run without the sccache wrapper,
+    /// recorded as `sccache_wrapper_removed` (`job` `satisfied`).
     pub(super) fn verify_satisfied(&mut self, run: &TaskRun, ask: Option<AskId>) -> Result<Phase> {
+        let run_dir = Path::new(run.run_dir().context("missing run directory")?);
+        // The task is read here, so the thread takes no connection.
+        let task = self.queue.show(run.task_id())?.task;
+        let in_container = !task.verification_commands().is_empty()
+            && self.verifier.runtimes().is_ok_and(|runtimes| {
+                runtimes.verification == crate::domain::container_runtime::Runtime::Container
+            });
         // One verification of the run at a time in its scratch worktree,
         // so the files verified are the snapshot's.
-        let scratch = integration::satisfied_scratch(Path::new(
-            run.run_dir().context("missing run directory")?,
-        ));
-        let stale = self.stop_stale_verification(run, &scratch);
+        let scratch = integration::satisfied_scratch(run_dir);
+        let stale = self.stop_stale_verification(run, &scratch).and_then(|()| {
+            if in_container {
+                self.stop_stale_container(run)
+            } else {
+                Ok(())
+            }
+        });
         let head = self.repository.main_head()?;
         self.queue.record_runtime_event(
             run.id(),
@@ -172,11 +216,27 @@ impl Supervisor<'_> {
             satisfied::snapshot_payload(&head, ask),
         )?;
         info!(run_id = %run.id(), "run {}: verifying its already_satisfied claim on main {head}", run.id());
-        // The task is read here, so the thread takes no connection.
-        let task = self.queue.show(run.task_id())?.task;
+        if in_container
+            && let Ok(mut env) = self.verifier.run_env(run_dir)
+            && let Some(target) = crate::domain::run_container::without_sccache_wrapper(&mut env)
+        {
+            self.with_env(|env| {
+                crate::application::sccache::record_wrapper_removed(
+                    &*env.queue,
+                    run.id(),
+                    env.generators.clock.now(),
+                    "supervisor",
+                    target.port,
+                    "the verification of an already_satisfied claim runs in a container, which has no protected cache to compile with",
+                    json!({"job": "satisfied", "runtime": "container"}),
+                );
+            });
+        }
         let repository = self.repository.clone();
         let verifier = self.verifier.clone();
         let files = self.files.clone();
+        let containers = self.verification_containers.clone();
+        let tokens = self.verification_tokens.clone();
         let (target, snapshot) = (run.clone(), head.clone());
         let handle = spawn_traced(move || {
             if let Err(why) = stale {
@@ -189,6 +249,10 @@ impl Supervisor<'_> {
                 &task,
                 &target,
                 &snapshot,
+                integration::SnapshotContainers {
+                    containers: &*containers,
+                    tokens: &*tokens,
+                },
             )
         });
         Ok(Phase::Satisfied(SatisfiedWatch {

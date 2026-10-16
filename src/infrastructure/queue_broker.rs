@@ -621,11 +621,12 @@ struct VerificationRecord {
 }
 
 /// Where the value of `run`'s token for `of` is: the hash of the run's ID,
-/// with the landing recheck's apart from the landing's.
+/// with the landing recheck's and the snapshot's apart from the landing's.
 fn verification_credential_path(queue_dir: &Path, run: &RunId, of: TokenFor) -> PathBuf {
     let key = match of {
         TokenFor::Landing => run.as_str().to_owned(),
         TokenFor::Recheck => format!("recheck:{run}"),
+        TokenFor::Snapshot => format!("satisfied:{run}"),
     };
     broker_dir(queue_dir)
         .join(VERIFICATION_CREDENTIALS_DIR)
@@ -643,8 +644,8 @@ fn verification_record_path(queue_dir: &Path, token: &str) -> PathBuf {
 /// random bytes in hex, its value in the broker's
 /// [`VERIFICATION_CREDENTIALS_DIR`], its run in [`VERIFICATION_TOKENS_DIR`]
 /// under the value's hash, apart from the queue service's tokens. The file
-/// its value is in. Only the control side (`integrate` and the landing
-/// recheck) calls this.
+/// its value is in. Only the control side (`integrate`, the landing
+/// recheck and the verification of a snapshot) calls this.
 pub fn issue_verification(
     queue_dir: &Path,
     run: &RunId,

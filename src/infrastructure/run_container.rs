@@ -293,7 +293,7 @@ impl VerificationContainers for PodmanVerificationContainers {
         let id = format!(
             "{}-{}",
             run.id(),
-            &uuid::Uuid::new_v4().simple().to_string()[..12]
+            &uuid::Uuid::new_v4().simple().to_string()[..VERIFICATION_SUFFIX]
         );
         let build_output = load_build_output_dir(checkout)?;
         let image = self.machine.ready(
@@ -393,7 +393,56 @@ impl VerificationContainers for PodmanVerificationContainers {
         let dir = GitRepository::remove_verification_dir(&verification.dir);
         container.and(volume).and(dir)
     }
+
+    /// The directories named as [`Self::prepare`] names a verification of
+    /// `run`; any other is left as it is. The build output volume is
+    /// removed when it is there, whatever `dagq.toml` names now.
+    fn remove_left(&self, run: &RunId) -> Result<Vec<String>> {
+        let parent = MachineMounts::of_queue(&queue_dir_of(&self.db)).verifications;
+        let entries = match fs::read_dir(&parent) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error).with_context(|| format!("read {}", parent.display())),
+        };
+        let queue = self.key()?;
+        let prefix = format!("{run}-");
+        let mut left = Vec::new();
+        for entry in entries {
+            let name = entry?.file_name();
+            let Some(id) = name.to_str() else {
+                continue;
+            };
+            let ours = id.strip_prefix(&prefix).is_some_and(|suffix| {
+                suffix.len() == VERIFICATION_SUFFIX
+                    && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+            });
+            if ours {
+                left.push(id.to_owned());
+            }
+        }
+        if left.is_empty() {
+            return Ok(left);
+        }
+        // The machine may have stopped since: podman reaches it only
+        // running, as for a verification of its own.
+        self.machine.ready(run.as_str(), None)?;
+        let mut removed = Vec::new();
+        for id in &left {
+            let id = id.as_str();
+            let container = queue
+                .verification_container(id)
+                .map_err(anyhow::Error::msg)?;
+            self.remove_named(&container)?;
+            self.machine.remove_build_output(id)?;
+            GitRepository::remove_verification_dir(&parent.join(id))?;
+            removed.push(id.to_owned());
+        }
+        Ok(removed)
+    }
 }
+
+/// How many hex digits follow the run's ID in a verification's ID.
+const VERIFICATION_SUFFIX: usize = 12;
 
 /// The `[container]` table of a `host.toml`'s text, `label` naming the
 /// file in the warnings: the containers' limits ([`ContainerLimits`]);
