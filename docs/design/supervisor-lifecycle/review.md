@@ -155,7 +155,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
      記録の後・書く前に止まったときのため、依頼が`turns/`に届いているかを照合し、無ければ1回だけ書く（`domain::turn::adopted_delivery`）。
    - `review_finished`の後ならそのverdictで進み、concernは決め直す。
    - askにするはずの錨の後に、閉じていないsupervisorの`approve_landing`のaskがあれば、開き直さずにそのaskを待つ。
-     reviewの失敗のaskを開いて`review_failed`の前に止まったときも同じで、`adopted: true`の`review_failed`を補う。
+     reviewの失敗のaskを開いて`review_failed`の前に止まったときも同じで、adoptした側が`review_failed`を補って記録する。
    - それ以外はreviewを最初から全てのjobでやり直し、前のsupervisorのjobは結果を使わず先に止める（[Headless job processes](headless-job-processes.md#引き継ぎ)）。
    - sessionもwrapperの終了の記録も無く消えたrunは、sessionが終わったものとして扱い、reviseはaskになる。
    - review・revise・終了の途中のerrorはrunをabandonし、leaseの無い`awaiting_integration`として`review and integrate`のattentionになる。

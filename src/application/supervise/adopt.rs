@@ -467,6 +467,8 @@ impl Supervisor<'_> {
                 "error": error,
                 "status": run.status().as_str(),
                 "ask_id": ask.id,
+                // Filled in by the adopter, not recorded when the review
+                // failed (`adopted_review_failed`).
                 "adopted": true,
             });
             // Its agent's Execution, read from the output it left.
@@ -1137,6 +1139,11 @@ fn last_request_before(events: &[RunEvent], anchor: EventId) -> Option<u64> {
 /// agent was (ADR-t1486-1), from `ran` (what its output named; `None` when
 /// its agent never started, as no or empty output tells), unless an event after its
 /// start recorded that Execution already.
+///
+/// `payload` carries `adopted: true`: the supervisor adopted from opened
+/// the review's failure ask but stopped before it recorded `review_failed`,
+/// so this `review_failed` is the one the adopter filled in for it, not one
+/// recorded when the review failed.
 fn adopted_review_failed(
     mut payload: Value,
     events: &[RunEvent],
