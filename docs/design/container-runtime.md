@@ -200,7 +200,7 @@ adapterもcloneのpathでのgitを拒む。
 
 cloneで働くrunの各turn（最初のturn・revise・答え・resume）は、hostのprocessの代わりにdagq専用のmachineのcontainerで動く（[ADR-t2113-3](../adr/2026-10-08-t2113-3-only-workers-resume-and-integrate-verification-run-in-containers.md)決定1、[ADR-t2114-2](../adr/2026-10-08-t2114-2-broker-swaps-the-run-token-for-the-claude-credential.md)決定1）。
 session wrapperはhostの制御側に残り、turnの出力・receipt・askをrun dirから今と同じく読み、`run log`で追える。
-executorは`application::run_container::PodmanActorExecutor`、設定の読み取り・tokenの受け渡し・podmanは`RunContainers`のport、machine・image・relay・buildの出力の準備はhost運用が実行と着地に貸す`application::podman_machine::RunMachine`のport、`podman run`の引数・token・envの判断は`domain::run_container`、containerの中の処理は`infrastructure::container_turn`（`dagq relay turn`）が持つ。
+executorは`application::run_container::PodmanActorExecutor`、設定の読み取り・tokenの受け渡し・podmanは`RunContainers`のport、machine・image・relay・buildの出力の準備はhost運用が実行と着地に貸す`application::podman_machine::RunMachine`のport、`podman run`の引数・token・env・transcriptの置き場の判断は`domain::run_container`、containerの中の処理は`infrastructure::container_turn`（`dagq relay turn`）が持つ。
 
 - 準備: 各turnの前に、machineを動かしてrunを使う者にし（`release`は呼ばず、使う者はwrapperのprocessが終われば数えない）、imageをbuildし、runのrelayを開き、`dagq.toml`が名指せばbuildの出力のvolumeを作り、`[run.env]`と`host.toml`のcontainerの上限を読む。
   どれかが失敗すればturnを起動せず、hostにも戻さない。
@@ -215,6 +215,9 @@ executorは`application::run_container::PodmanActorExecutor`、設定の読み�
 - containerの中: `dagq relay turn`がturnの始めにmainのbundleをcloneの`refs/remotes/dagq/main`に取り込み、転送を起動し、tokenのファイルを読んで`ANTHROPIC_AUTH_TOKEN`とproxyのURLに入れ、agentをcloneで動かす。
   agentが終われば結果に依らず、run branchのbundleと状態のファイルを上の「git」の形で書く。
   agentのhomeはrun dirの下に置き、次のturnがsessionをresumeできる。
+- transcript: agentのhomeの`.claude`の下に、containerの中のcwd（clone）を名にしたprojectのdirでできる。
+  sessionの有無の判断とmodel・コマンドの計測は、cloneのrunのworkerのsessionをhostに無ければそこで探す。
+  どの段もsymlinkを辿らず、通常のファイルでない物や読めない物は無いものとする（ADR-t2179-1決定9）。
 - 止める: turnの終わりごとにwrapperがcontainerを消す（podmanのprocessを止めてもcontainerは残るため）。
   止める経路での消去はbest effortで、machineが止まって消せなければlogに残し、runの終わりの片付けに任せる。
   runのsessionを止めるどの経路（reviewの後・着地・triageのstopとcancel・sweep・resumeの終わり）も`RecordingSessions`がcontainerを消し、復旧jobの`stop_processes`も消す。

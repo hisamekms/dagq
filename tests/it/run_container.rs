@@ -733,6 +733,188 @@ impl ContainerQueue {
     }
 }
 
+/// The lines of a turn's script (see [`fake_podman`]) that add `lines`
+/// (each a JSON object of the transcript, which may use `$NOW` and
+/// `$SESSION`) to the session's transcript where Claude Code in the
+/// container writes it: under `$HOME` (the run directory's agent home), in
+/// the project directory named after the container's working directory
+/// (the clone). `$NOW` is the time to the millisecond, so that a line is
+/// inside the session's span.
+fn write_transcript(lines: &[&str]) -> String {
+    let lines: String = lines
+        .iter()
+        .map(|line| format!("printf '%s\\n' \"{}\"\n", line.replace('"', "\\\"")))
+        .collect();
+    format!(
+        r#"PROJECT="$HOME/.claude/projects/$(printf '%s' "$PWD" | sed 's/[^A-Za-z0-9]/-/g')"
+mkdir -p "$PROJECT"
+NOW=$(perl -MTime::HiRes=time -MPOSIX=strftime -e '$t = time; printf "%s.%03dZ", strftime("%Y-%m-%dT%H:%M:%S", gmtime($t)), ($t - int($t)) * 1000')
+{{
+{lines}}} >> "$PROJECT/$SESSION.jsonl"
+"#
+    )
+}
+
+/// A line of the session's transcript (see [`write_transcript`]) of
+/// `kind` with `content`, said by the model `claude-in-the-container`.
+fn transcript_line(kind: &str, content: &str) -> String {
+    format!(
+        r#"{{"type":"{kind}","timestamp":"$NOW","sessionId":"$SESSION","version":"2.1.283","message":{{"model":"claude-in-the-container","content":{content}}}}}"#
+    )
+}
+
+/// Acceptance (1) and (2) of task 2470: a run in a container whose turn
+/// ended before its model answered (a login that ran out, before any
+/// `result`) left its session in the run directory's agent home, not in
+/// the host's `~/.claude`; the next turn finds it there and resumes it
+/// rather than starting the same name again, which Claude Code would
+/// refuse. The worker span's close takes its model and its commands from
+/// that transcript, as a host run's from the host's.
+#[test]
+fn a_container_turn_ended_before_its_result_is_resumed_and_measured_from_the_agent_home() {
+    let _test = crate::common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let (repo, db) = queue_fixture(dir.path());
+    fs::write(
+        repo.join("dagq.toml"),
+        "[roles.worker]\nruntime = \"container\"\n",
+    )
+    .unwrap();
+    let (run, token) = claim_in_container(&db, &repo, "container-run");
+    let run_dir = PathBuf::from(run.run_dir().unwrap());
+    let stand = Stand::start().unwrap();
+    let start = BackgroundHandle::parse(&stand.handle).unwrap().start;
+    {
+        let mut queue = SqliteQueue::open(&db).unwrap();
+        queue
+            .workspace_created(run.id(), &token, &stand.handle)
+            .unwrap();
+        queue
+            .record_runtime_event(
+                run.id(),
+                EventKind::WrapperLaunched,
+                json!({"pid": stand.pid, "start": start, "workspace_id": stand.handle,
+                       "log": run_dir.join("session.log").to_string_lossy()}),
+            )
+            .unwrap();
+    }
+    let state = dir.path().join("podman");
+    let containers = containers(&state, &db, &repo);
+    // The first turn writes its transcript and ends before its `result`
+    // with Claude Code's words for a login that ran out; the next one
+    // finishes.
+    let go = transcript_line("user", r#""go""#);
+    let build = transcript_line(
+        "assistant",
+        r#"[{"type":"tool_use","id":"a","name":"Bash","input":{"command":"cargo build"}}]"#,
+    );
+    let built = transcript_line(
+        "user",
+        r#"[{"type":"tool_result","tool_use_id":"a","content":"ok"}]"#,
+    );
+    let done = transcript_line("assistant", r#"[{"type":"text","text":"done"}]"#);
+    fs::write(
+        state.join("turn.sh"),
+        format!(
+            "if [ ! -f \"$RUN_DIR/ended\" ]; then\ntouch \"$RUN_DIR/ended\"\n{}echo 'Invalid API key · Please run /login' >&2\nexit 1\nfi\n{}finish\n",
+            write_transcript(&[&go]),
+            write_transcript(&[&build, &built, &done]),
+        ),
+    )
+    .unwrap();
+    let provider = dagq::infrastructure::adapters::ClaudeCode {
+        executable: PathBuf::from("/nonexistent/claude-on-the-host"),
+    };
+    let session = run.id().to_string();
+    let turns_finished = |count: usize| {
+        wait_until(&db, crate::common::STEP_LIMIT, |queue| {
+            queue
+                .show(TaskId::new(1))
+                .unwrap()
+                .events
+                .iter()
+                .filter(|event| event.kind == "turn_finished")
+                .count()
+                >= count
+        });
+    };
+    // The scope's join of the wrapper, implicit on a panic too, is bounded.
+    let waiting = crate::common::within(
+        crate::common::STEP_LIMIT,
+        "the wrapper of the container's turns to return",
+    );
+    let ended = thread::scope(|scope| {
+        let wrapper = scope.spawn(|| {
+            runtime::session_in_background_with_containers(
+                &db,
+                run.id(),
+                &token,
+                &provider,
+                &process::LocalSpawner,
+                false,
+                stand.pid,
+                &dagq::infrastructure::adapters::SystemProcesses,
+                &containers,
+            )
+        });
+        turns_finished(1);
+        // The session was left in the agent home, never in the host's.
+        let project = run_dir.join("container-home/.claude/projects").join(
+            dagq::infrastructure::transcripts::encode_cwd(run.worktree_path().unwrap()),
+        );
+        assert!(project.join(format!("{session}.jsonl")).is_file());
+        // The provider's hold ended: the same session is asked again.
+        runtime_support::headless::write_turn_request(
+            &run,
+            "go on",
+            dagq::domain::turn::PROVIDER_RETRY,
+        );
+        turns_finished(2);
+        fs::write(dagq::domain::turn::exit_path(&run_dir), "").unwrap();
+        wrapper.join().unwrap()
+    })
+    .unwrap();
+    drop(waiting);
+    assert_eq!(ended["exit_code"], 0, "{ended}");
+    let finished = payloads(
+        &SqliteQueue::open(&db)
+            .unwrap()
+            .show(TaskId::new(1))
+            .unwrap(),
+        "turn_finished",
+    )
+    .into_iter()
+    .cloned()
+    .collect::<Vec<_>>();
+    assert_eq!(finished[0]["failure"], "authentication", "{finished:?}");
+    // The first turn did not say it made the session: only its transcript
+    // in the agent home makes the next one resume.
+    assert_eq!(finished[0]["session_created"], false, "{finished:?}");
+    assert_eq!(finished[1]["outcome"], "succeeded", "{finished:?}");
+    assert_eq!(
+        fs::read_to_string(run_dir.join("stub-calls")).unwrap(),
+        format!("start {session}\nresume {session}\n")
+    );
+    // The worker span's close read the agent home's transcript.
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    let spans: Vec<&Value> = payloads(&detail, "session_closed")
+        .into_iter()
+        .filter(|span| span["kind"] == "worker")
+        .collect();
+    assert_eq!(spans.len(), 1, "{spans:?}");
+    assert_eq!(spans[0]["model"], "claude-in-the-container", "{}", spans[0]);
+    let work = &spans[0]["work"];
+    assert_eq!(
+        work["commands"]["build"],
+        json!({"runs": 1, "failed": 0}),
+        "{}",
+        spans[0]
+    );
+}
+
 /// Acceptance (3) to (5) through the supervisor: once every part of the
 /// container answers, a task whose worker `dagq.toml` sets to the
 /// container is claimed into a clone, its turn runs in its container, its

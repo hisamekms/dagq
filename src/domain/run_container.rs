@@ -23,7 +23,7 @@
 //!
 //! [Container runtime]: ../../docs/design/container-runtime.md
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::broker_relay::{CONTAINER_UID, FORWARD_PORT, container_env, run_socket_mount};
 use super::podman_machine::QueueKey;
@@ -40,6 +40,41 @@ pub const TOKEN_FILE: &str = "run-token";
 /// filesystem is read-only, and the session the next turn resumes must
 /// outlive the turn's container.
 pub const HOME_DIR: &str = "container-home";
+
+/// Claude Code's configuration directory under [`HOME_DIR`]: the agent in
+/// the container has `HOME` and no `CLAUDE_CONFIG_DIR` (the executor sets
+/// neither from `[run.env]`), so its sessions' transcripts are under
+/// `<run dir>/container-home/.claude/projects`.
+pub const CLAUDE_DIR: &str = ".claude";
+
+/// Where the transcripts of a container run's sessions are, as the control
+/// side reads them ([`container_transcripts`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerTranscripts {
+    /// The agent's home in the run directory ([`HOME_DIR`]): the container
+    /// writes it, so it and everything under it are read without
+    /// following a link (ADR-t2179-1 decision 9).
+    pub home: PathBuf,
+    /// The directory the container's turns run in, which names the
+    /// session's project directory: the clone, mounted at its own path
+    /// and the container's `--workdir` ([`worker_run_args`]).
+    pub cwd: PathBuf,
+}
+
+/// Where the transcripts of the sessions a run's turns started in
+/// `workplace` (the run's stored worktree path) are: for a run in a
+/// clone, under the agent's home in its run directory and named after the
+/// clone, the container's working directory; `None` for a run on the
+/// host, whose transcripts are the host's Claude Code's
+/// (`$CLAUDE_CONFIG_DIR`, else `~/.claude`). The reader looks at the
+/// host's first, where a container run's review is.
+pub fn container_transcripts(workplace: &Path) -> Option<ContainerTranscripts> {
+    let run_dir = super::run_clone::run_dir_of(workplace)?;
+    Some(ContainerTranscripts {
+        home: run_dir.join(HOME_DIR),
+        cwd: workplace.to_path_buf(),
+    })
+}
 
 /// The agent's executable on the image's `PATH`.
 pub const AGENT: &str = "claude";
@@ -709,6 +744,24 @@ mod tests {
         for worker in [None, Some(Runtime::Host), Some(Runtime::Container)] {
             assert_eq!(turn_place(false, worker), Ok(TurnPlace::Host), "{worker:?}");
         }
+    }
+
+    #[test]
+    fn a_clone_s_transcripts_are_in_its_run_s_container_home_named_after_the_clone() {
+        let clone = PathBuf::from("/q/clones/r1");
+        assert_eq!(
+            container_transcripts(&clone),
+            Some(ContainerTranscripts {
+                home: PathBuf::from("/q/runs/r1/container-home"),
+                cwd: clone,
+            })
+        );
+        // A run on the host reads the host's transcripts.
+        assert_eq!(
+            container_transcripts(Path::new("/q/runs/r1/worktree")),
+            None
+        );
+        assert_eq!(container_transcripts(Path::new("/elsewhere")), None);
     }
 
     #[test]

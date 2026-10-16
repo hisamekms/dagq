@@ -88,6 +88,7 @@ supervisor
 | supervisorから見たsession・依頼の書き込み | `src/application/supervise/headless.rs` |
 | `turns/`のfileの名前・依頼・idle marker・turnのcostとトークン数 | `src/domain/turn.rs`の`TurnRequest` |
 | Claudeの呼び出しと出力の読み | `src/infrastructure/claude_turns.rs` |
+| Claudeのsessionの有無とtranscriptの置き場（hostのClaude Codeの設定のdirと、containerのrunのrun dirのagentのhome） | `src/infrastructure/transcripts.rs`の`ClaudeTranscripts` |
 | Codexの呼び出しと出力の読み | `src/infrastructure/codex_turns.rs` |
 | turnの設定（拒否の規則） | `src/infrastructure/adapters.rs`の`headless_worker_settings` |
 | run dirのfileの境界 | `src/infrastructure/agent_dir.rs` |
@@ -152,6 +153,7 @@ run dirのI/Oの約束と落とし穴:
   `result`の前に止められたturnの分は次のresumeのturnに入り、過去の記録は補正しない。
 - 次のturnをresumeするか始め直すかは、sessionが作られたか、providerがsessionを持っているか（`turn_session_exists`）で決める。
   Claude Codeは使われている名前のsessionを拒むので、答える前に失敗したturnが残したsessionもresumeする。
+  containerで動くrunのsessionは、hostに無ければrun dirのagentのhomeのtranscriptで探す（[Container runtime](../container-runtime.md#workerの実行)）。
   Codexは名乗ったthreadがあるかだけで決める。
 - wrapperはturnの要約を`[dagq]`の行でrunのlogに書き、人は`dagq run log`で読む（下の「出力」）。
 

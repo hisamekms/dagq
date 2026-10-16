@@ -1328,6 +1328,12 @@ name = "run_container::an_adopted_run_s_container_is_removed_by_its_stop"
 reason = "B 境界（adopt・supervisor の配線）: 死んだ supervisor の container の run を新しい supervisor が adopt し、run の名前だけから review の後の停止で container を消すことを確かめる。adopt の判断は domain の unit test"
 task = 2180
 
+# 2.7〜9.1s (stress 5 under the host's load of other runs, task 2470)
+[[test]]
+name = "run_container::a_container_turn_ended_before_its_result_is_resumed_and_measured_from_the_agent_home"
+reason = "B 境界（プロセス・SQLite）: background の wrapper が fake の podman の turn を 2 回起動し、result の前に終わった turn が run dir の agent の home に残した transcript を次の turn の session の有無の判断が見つけて --resume にし、worker の区間の閉じが同じ transcript から model とコマンドを queue に書くことを確かめる。置き場・host を先に見る順・symlink の判断は domain::run_container と infrastructure::transcripts の unit test"
+task = 2470
+
 # 10.8〜12.8s (stress 60s under the host's load of other runs, task 2129)
 [[test]]
 name = "runtime_fresh_session::a_revise_past_the_threshold_goes_on_in_a_new_session_that_the_wait_follows"

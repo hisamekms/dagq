@@ -3667,8 +3667,12 @@ impl AgentProvider for ClaudeCode {
     fn turn_reader(&self, _: &crate::domain::toolchain::Toolchains) -> Result<Box<dyn TurnReader>> {
         Ok(Box::new(ClaudeTurnReader::default()))
     }
-    /// Its transcript under `$CLAUDE_CONFIG_DIR` (or `~/.claude`): Claude
-    /// Code refuses a `--session-id` in use.
+    /// Its transcript under `$CLAUDE_CONFIG_DIR` (or `~/.claude`), or, for
+    /// a run in a container (`cwd` its clone), under the run directory's
+    /// agent home ([`ClaudeTranscripts::exists`]): Claude Code refuses a
+    /// `--session-id` in use.
+    ///
+    /// [`ClaudeTranscripts::exists`]: crate::infrastructure::transcripts::ClaudeTranscripts::exists
     fn turn_session_exists(&self, cwd: &Path, name: &str) -> bool {
         cwd.to_str().is_some_and(|cwd| {
             crate::infrastructure::transcripts::ClaudeTranscripts::from_env().exists(cwd, name)

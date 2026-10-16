@@ -370,13 +370,16 @@ impl ActorExecutor for PodmanActorExecutor<'_> {
 /// The variables a turn's container is given beside the actor's and the
 /// token file's: `[run.env]` but [`WITHOUT_ENV`], then what the agent's
 /// command sets; none naming the actor, the queue service or the home,
-/// which the executor sets itself.
+/// which the executor sets itself, nor Claude Code's configuration
+/// directory, which stays the home's for the control side to find the
+/// sessions there ([`crate::domain::run_container::CLAUDE_DIR`]).
 fn turn_variables(run_env: &[(String, String)], agent: &CommandSpec) -> Vec<(String, String)> {
     let reserved = |key: &str| {
         WITHOUT_ENV.contains(&key)
             || ACTOR_ENV.contains(&key)
             || CLIENT_ENV.contains(&key)
             || key == "HOME"
+            || key == "CLAUDE_CONFIG_DIR"
     };
     let from_agent = agent
         .get_envs()
@@ -401,6 +404,10 @@ mod tests {
             ("DAGQ_RUN_ID".to_owned(), "other".to_owned()),
             ("DAGQ_SERVICE_SOCKET".to_owned(), "/x".to_owned()),
             ("HOME".to_owned(), "/Users/me".to_owned()),
+            (
+                "CLAUDE_CONFIG_DIR".to_owned(),
+                "/Users/me/.claude".to_owned(),
+            ),
         ];
         let mut agent = CommandSpec::new("claude");
         agent.env("CLAUDE_X", "1").env_remove("GONE");
