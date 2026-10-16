@@ -64,6 +64,8 @@ pub const FOLLOW_UP_ASK_DEPTH: i64 = 3;
 /// (`category`, ADR-t947-3), with what each means; the design's list
 /// (receipt-and-session-exit) is the one of record. The runtime records a
 /// value it does not know as it is, and never rejects a receipt for one.
+/// The field is not named `kind`, so that it is not mixed up with the
+/// `kind` of the events and asks it is recorded with.
 pub const FOLLOW_UP_CATEGORIES: &[(&str, &str)] = &[
     (
         "defect",

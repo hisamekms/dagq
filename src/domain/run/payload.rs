@@ -102,14 +102,19 @@ fn present<'de, D: Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error>
     IgnoredAny::deserialize(deserializer).map(|_| true)
 }
 
-/// `integration_approved`.
+/// `integration_approved`: the approval to land, recorded by `integrate`
+/// when it is called (once per run, even on a run it then parks with
+/// `defer_integration`) or by the `land` answer to `approve_landing`.
+/// The supervisor landing an approved run pushes `main` as the first one
+/// says (`RunHistory::landing_pushes`).
 #[derive(Debug, Default, Deserialize)]
 pub(super) struct IntegrationApproved {
     /// The `approve_landing` ask whose answer approved the run; absent
     /// when missing or `null`, kept (of whatever type) otherwise.
     #[serde(default)]
     ask_id: Option<Lenient<i64>>,
-    /// `false` from `integrate --no-push`.
+    /// `false` from `integrate --no-push`; `integrate` writes `true`
+    /// otherwise.
     #[serde(default, deserialize_with = "typed")]
     pub(super) push: Option<bool>,
 }

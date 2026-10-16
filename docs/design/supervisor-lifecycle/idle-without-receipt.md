@@ -20,10 +20,7 @@ worker はすべて非対話の turn で動く（[ADR-t1433-2](../../adr/2026-10
   詳細は[非対話のworker](headless-worker.md#turnの後の扱い)。
   `stalled`のaskの選択肢は`intervene`の代わりに`stop`を持つ（`wait` / `stop` / `propose`とjobの足したもの）。
   questionは答える前にturnの記録を読むことを書く。
-  `stop`と答えるとsupervisorがsessionに終了の依頼を1回だけ書いてaskを閉じ（`stall_resolved`の`answered_stop`）、runはreceiptの無いまま終わったsessionとして`failed`になり復旧job（alert `failed`）にかかる。
-  `stop`は次のturnに送らない。
-  それでも届いた`intervene`はheldにせず、askを閉じて`answered_intervene`を1回記録し、すぐに非対話のoptionsで新しいaskを開き直す（次のturnに送らない）。
-  `wait`・`intervene`・`stop`・`propose`以外の答えは次のturnの依頼にし、supervisorが依頼を書いた後に止まっても引き継いだsupervisorは同じ答えを2回送らない。
+  答えごとの扱いは`stall.rs`の`AskStep`。
 
 - **対象**: 最初の session の turn が receipt も未回答の worker_question も残さずに終わったとき。resume は解消依頼の turn の後に receipt を判定し、revise は差し戻し依頼の turn の後に書き直しを判定する。
 - **答えずに閉じた質問**: `closed_undelivered` の質問は `closed_question_notice` を次の turn として一度届ける。

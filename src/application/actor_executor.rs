@@ -622,7 +622,9 @@ impl<'a> HostActorExecutor<'a> {
     /// supervisor issued at the claim or the resume is handed over, and
     /// one is issued only when there is none (a wrapper started without
     /// the claim's). The socket is returned for the provider to let its
-    /// sandbox reach it.
+    /// sandbox reach it. The caller also drops `DAGQ_QUEUE` from the
+    /// agent's environment (a worker's turn included), so its `dagq` never
+    /// opens the queue's file.
     fn client_env(
         &self,
         actor: &ActorContext,

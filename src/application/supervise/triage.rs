@@ -410,7 +410,9 @@ impl Supervisor<'_> {
     /// (ADR-t1850-1). The alert is that of the run's latest
     /// `recovery_requested` since its last resume (`resume_exhausted`, or
     /// the alert a `wait` or a stopped round left), else its status; a
-    /// round records its own request unless one is pending. An alert that
+    /// round records its own request unless one is pending, whose
+    /// `evidence` is the ID of the event that put the run into its status.
+    /// An alert that
     /// got its [`MAX_RECOVERY_ATTEMPTS`] jobs is escalated without one (but
     /// for a person's verify fix after an edit, [`verify_fix_round`]), and a
     /// job that cannot even start fails its round right away. The job starts

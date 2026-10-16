@@ -1548,6 +1548,11 @@ enum Verdict {
     /// Landed with the receipt's `follow_ups`.
     Landed(Landing, Option<Value>),
     /// Re-validation did not pass; the worktree is left for a session.
+    /// `detail` becomes the `integration_deferred` payload: the reason's
+    /// code and what the case has of the conflicting files, the tail of
+    /// Git's output and the head after the rebase, to which `integrate`
+    /// adds `resumes_left`, how many counted resumes the supervisor still
+    /// makes.
     Deferred { reason: String, detail: Value },
     /// The session's rewritten receipt reports `failed`; `receipt` is its
     /// JSON, kept with the `integration_failed` event.

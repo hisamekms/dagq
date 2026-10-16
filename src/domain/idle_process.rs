@@ -115,7 +115,9 @@ impl CpuWatch {
     /// that of its subtree in the previous sample, so the next step of a
     /// pipeline caught at birth after a busy step ended is not idle at once. Its own later progress is
     /// measured from when it was first seen, not from the ancestor's
-    /// progress. A process whose CPU time could not be read is left out,
+    /// progress. A process whose CPU time could not be read is left out
+    /// (so [`Self::idle`] counts it, and the subtrees it is in, as making
+    /// progress),
     /// and a quiet child of it starts over.
     pub fn observe(&mut self, processes: &[ProcessInfo], now_ms: i64) {
         let by_pid: HashMap<u32, &ProcessInfo> = processes.iter().map(|p| (p.pid, p)).collect();

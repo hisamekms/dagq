@@ -1145,8 +1145,9 @@ fn fill_transcript(
 /// Claude session's transcript, when it can be read, still gives the model
 /// and effort and the work breakdown. A Codex worker's session has no
 /// transcript: its work breakdown is made from the commands files its
-/// turns' wrapper wrote ([`codex_breakdown`], task 1354), else it is
-/// `null` with why. Returns the work's `worktime.jsonl` lines.
+/// turns' wrapper wrote ([`codex_breakdown`], task 1354), else (such a
+/// file cannot be read or parsed, a turn has none, or the run directory is
+/// unknown) it is `null` with why in `work_unavailable`. Returns the work's `worktime.jsonl` lines.
 fn close_headless(
     conn: &Connection,
     now: &str,

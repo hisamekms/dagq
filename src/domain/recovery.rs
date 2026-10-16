@@ -188,11 +188,15 @@ pub fn current_alert(events: &[RunEvent]) -> Option<RecoveryAlert> {
 }
 
 /// The events after which a live session's failed recovery job
-/// (`recovery_failed`) no longer waits for a person: the session ended or
-/// was closed, the run was given up, or (for its own alert) what raised the
-/// alert went away: a `stalled` session wrote its receipt, or the
-/// supervisor recorded how the stalled detection ended (`stall_resolved`
-/// of `detection: recovery`, once the session moved on).
+/// (`recovery_failed`) no longer waits for a person. For every alert:
+/// `session_exited`, `workspace_closed` (the session ended or was closed),
+/// `supervision_finished`, `run_recovered` and `runtime_error` (the run was
+/// given up or moved on). For its own alert, what raised it went away:
+/// `prompt_cleared` for `prompt_waiting`, `receipt_observed` for
+/// `long_background`, and for `stalled` either `receipt_observed` (the
+/// session wrote its receipt) or `stall_resolved` of `detection: recovery`
+/// (the supervisor recorded how the stalled detection ended, once the
+/// session moved on).
 fn clears(event: &RunEvent, alert: &str) -> bool {
     matches!(
         event.kind.as_str(),
@@ -378,7 +382,9 @@ pub struct RecoveryVerdict {
 }
 
 impl RecoveryVerdict {
-    /// The verdict in the job's stdout, found the way the review's is.
+    /// The verdict in the job's stdout, found the way the review's is: the
+    /// whole text, or else the outermost `{...}` in it. A field it does not
+    /// know is refused, and so is a `repair` that names no action.
     pub fn parse(stdout: &str) -> Result<Self, String> {
         let verdict: Self = parse_json_object(stdout)
             .map_err(|error| format!("the recovery job printed no verdict JSON: {error}"))?;

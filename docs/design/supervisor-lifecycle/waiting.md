@@ -35,7 +35,7 @@ use caseは`src/application/supervise/waiting.rs`、イベントからの状態�
 ## 待ちの出入り
 
 - **印**: `Slot`は`waiting: Option<Waiting>`を持つ。
-  sessionが動いたかを比べる基準の時刻は、最初のaskを開いた秒の次の秒と待ちを始めた時刻の早い方で、askの時刻は秒なので、askと同じ秒のmarkerは古いとみなす。
+  sessionが動いたかを比べる基準の時刻は`Waiting::since`。
   runのstatusとphase（`SessionWatch` / `ExitWatch` / `ReviseWatch` / `ResumeWatch`）は変えないので、戻ればphaseの続きから進む（`Revise` / `Resume`の段の計時だけは戻るときにやり直す。下の「段の計時」）。
   `used_slots()`は印の無いslotの数（着地中と着地の順番待ちのrunも数える）で、slotの空きの判定はこれを使う（軽い枠の判定だけが着地の順番待ちを除く）。
   `stats`と`status`も同じ集合で数え、`status`は着地の順番待ちを分けて出す（[ADR-t610-1](../../adr/2026-09-27-t610-1-landing-runs-fill-the-slot-in-status-and-stats.md)、ADR-t1591-1）。
@@ -126,7 +126,7 @@ ADR-0062の決定2の`cause`に、この実装は`wrapper_silent`（`Session`で
 ## 登録と見せ方
 
 - 待ちの上限は起動の引数か`dagq.toml`の`[supervisor]`で決まる（[Run environment](run-environment.md)の`[supervisor]`）。
-- `status`と`stats`は待ちを出す（[`status`](commands.md)・[`stats`](commands.md)。`stats`の窓はrunのpageではなく求めた窓の全体）。
+- `status`と`stats`は待ちを出す（[`status`](commands.md)・[`stats`](commands.md)）。
   待ちの数の数え方は`src/domain/waiting.rs`の`WaitCount`の1つで、supervisorと`status`の両方が使う。
 
 ## test

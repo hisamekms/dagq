@@ -535,7 +535,8 @@ pub struct TurnResult {
     /// `cost_usd` (and the cost of `tokens`) is the running total of the
     /// session so far rather than the turn's own (Claude's result's
     /// `total_cost_usd`, task 1199): the wrapper records the turn's own as
-    /// what it adds to the total the session's last turn recorded.
+    /// what it adds to the total the session's last turn recorded. Read as
+    /// the turn's own, it would count every earlier turn again.
     #[serde(skip)]
     pub cost_cumulative: bool,
     pub usage: Value,
@@ -547,7 +548,8 @@ pub struct TurnResult {
     #[serde(skip)]
     pub tokens: Option<TokenUsage>,
     /// `tokens` is the running total of the session so far rather than the
-    /// turn's own (Codex's `turn.completed` carries the thread's total):
+    /// turn's own (Codex's `turn.completed` carries the thread's total, and
+    /// Claude's `modelUsage` the session's, like its `total_cost_usd`):
     /// the wrapper records the turn's own as what it adds to the total the
     /// session's last turn recorded.
     #[serde(skip)]

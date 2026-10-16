@@ -436,7 +436,8 @@ impl StopRoute {
 
 /// The log in the run dir the background wrapper of a session writes its
 /// output to: `session.log` for the worker's session, one per resume and
-/// per reopening (`resume` is the attempt).
+/// per reopening (`resume` is the attempt): `session-resume-<attempt>.log`
+/// and `session-reopen-<attempt>.log`.
 pub fn session_log_name(resume: Option<usize>, reopen: bool) -> String {
     match (resume, reopen) {
         (Some(attempt), true) => format!("session-reopen-{attempt}.log"),

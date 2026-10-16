@@ -136,7 +136,7 @@ run dirのI/Oの約束と落とし穴:
   任意の深さのpathを安全にするAPIではない。
 - 読めない・書けないrun dirのfileは既存の失敗の経路に乗る（不正な依頼ならwrapperはerrorで終わり、復旧へ渡る）。
   診断のlogとturnのコマンドのfileが書けないときはwarnだけで、turnは続く。
-- Codexのturnのコマンドのfileは区間の作業の内訳の元で、読めないときは区間の`work`をnullにして理由を書く（[provider-lifecycle](../provider-lifecycle.md#非対話のworkerの区間)）。
+- Codexのturnのコマンドのfileは区間の作業の内訳の元（[provider-lifecycle](../provider-lifecycle.md#非対話のworkerの区間)）。
 
 ## turnの記録
 
@@ -146,7 +146,7 @@ run dirのI/Oの約束と落とし穴:
 - wrapperはsessionの最初のturnのprocessをrunの`agent`として登録し、後のturnは同じ行のpidを差し替える（`register_turn_agent`）。
   runの状態遷移は最初のturnだけで、turnの間は行が終わったturnのpidのまま残る。
 - runのsessionの区間の稼働時間とトークン数は`turn_finished`から取る（[provider-lifecycle](../provider-lifecycle.md#非対話のworkerの区間)）。
-- Claudeの`total_cost_usd`と`modelUsage`はsessionの累計なので、wrapperは前の累計を引いてturnの分にする（`domain::turn`）。
+- turnの費用とトークン数の数え方は`domain::turn`。
   turnのトークン数は`modelUsage`から取り、subagentの分を含む。
   `turn_finished`のトークン数の欄と、`modelUsage`の無い出力の扱いは[Executionのトークン数](../execution-tokens.md)。
   `result`の前に止められたturnの分は次のresumeのturnに入り、過去の記録は補正しない。

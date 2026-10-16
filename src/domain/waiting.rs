@@ -425,7 +425,8 @@ pub struct RouteWaits {
 pub const UNKNOWN_ROUTE: &str = "unknown";
 
 /// Aggregate the waits with `after < id <= upto` whose task `counts`
-/// accepts.
+/// accepts: one of the period aggregates of `stats`, so the window is the
+/// whole window asked, not the page of runs.
 pub fn waiting_stats(
     events: &[RunEvent],
     after: EventId,

@@ -28,7 +28,7 @@ backgroundでない入口（TTYを確かめ、パイプからは起動しない�
    leaseが無効なら登録できない。
 2. `prompt.txt`を読み、`src/application/headless_session.rs`の`Turns`が1 turnごとにproviderの非対話の呼び出しを起動する: run dirの`turns/`の依頼を待ってsessionをresumeし、turnを記録してidle markerを書き、終了の依頼で終わる（[非対話のworker](headless-worker.md)）。
    最初のturnのprocessを`agent`として登録し（`agent_started`、runが`running`になる）、後のturnは起動のたびに同じ`agent`の行の`pid`をそのturnのprocessに差し替える（eventも状態遷移も無い）。
-   turnの環境は、workerのactorの変数に、queue serviceのsocketとsupervisorがclaimかresumeで発行したworkerのtokenのfile（無ければwrapperが発行する）を足し、`DAGQ_QUEUE`を外したもので、agentの`dagq`はクライアントモードで動く（[Queue service](../queue-service.md#クライアントモード)）。
+   turnの環境は、workerのactorの変数に、queue serviceのsocketとsupervisorがclaimかresumeで発行したworkerのtokenのfile（無ければwrapperが発行する）を足したもので、agentの`dagq`はクライアントモードで動く（[Queue service](../queue-service.md#クライアントモード)）。
    wrapper自身はqueueを直接開き、wrapperのprocessのenvにはどちらも無い。
 3. heartbeatを更新しながらturnのプロセスをwaitする。
    DB障害中も子プロセスの所有を手放さない。

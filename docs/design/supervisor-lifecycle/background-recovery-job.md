@@ -37,7 +37,6 @@ runtimeの自動修正（決定25・29など）が直さなかったものを、
 プロセスの一覧は全 run が共有する。
 各 watch は1間隔待ってから標本を取り始め、新しい標本の run のプロセスを `domain::idle_process::CpuWatch` へ渡す。
 CPU 時間の伸びが経過時間の一定の割合を超えれば進んだとし、子が進んでいる親は idle にしない。
-CPU 時間が読めないものは進んでいると扱う。
 session の起動の直後に始まった agent の子の補助プロセスは除く。
 
 job に渡した idle の部分木は、進むか `wait` の再確認の時刻になるまで再び渡さない。
@@ -105,7 +104,6 @@ askの文面の材料と`recovery_finished`は副作用のない関数が組み�
 
 ADR-t609-1より前のruntimeが記録してまだ解消していない`recovery_failed`（`domain::recovery::failed_live`）は、adoptしたruntimeも読む。
 `status`はleaseのある生きているrunでもそのrunのattention（`recover by hand`）を出し、そのalertのjobは立てない。
-解消するのは、その後に`session_exited`・`workspace_closed`・`supervision_finished`・`run_recovered`・`runtime_error`か、`prompt_waiting`なら`prompt_cleared`、`long_background`なら`receipt_observed`、`stalled`なら`receipt_observed`か復旧jobによる`stall_resolved`が記録されたとき。
 
 ## Codexで動かす
 

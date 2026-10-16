@@ -87,7 +87,8 @@ impl Supervisor<'_> {
                 continue;
             }
             // Out of attempts: the run is retried with its branch carried
-            // over, or a person decides, whether or not a slot is free.
+            // over, or goes to its recovery job, whether or not a slot is
+            // free.
             if candidate.resumes.exhausted(self.resume.config) {
                 if let Err(error) = self.exhaust_resumes(run, candidate.resumes) {
                     warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: its used-up resumes could not be handed to a person: {error:#}", run.id());
@@ -728,7 +729,8 @@ impl Supervisor<'_> {
     /// resolved run keeps its session and lease and goes through
     /// validation and review like the worker's (ADR-0027 decision 3); a
     /// `failed` receipt ends the run; anything else leaves it
-    /// `needs_session` for the next attempt, or for a human after the last.
+    /// `needs_session` for the next attempt, or for the recovery job after the
+    /// last.
     pub(super) fn finish_resumed_session(
         &mut self,
         slot: &mut Slot,
@@ -957,8 +959,9 @@ pub(super) fn resume_reason(
 
 /// The file in `run`'s directory that holds the whole reason of the
 /// request named `request` (`resume-<attempt>`, `conflict-<attempt>`) when
-/// the request cuts it, next to the request's own file; `None` without a
-/// run directory.
+/// the request cuts it, next to the request's own file:
+/// `<request>-reason.txt` (`resume-<attempt>-reason.txt` for a resume);
+/// `None` without a run directory.
 pub(super) fn reason_file(run: &TaskRun, request: &str) -> Option<String> {
     run.run_dir().map(|dir| {
         Path::new(dir)

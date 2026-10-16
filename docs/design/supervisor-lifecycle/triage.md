@@ -28,7 +28,6 @@ related:
    active runが上限未満のときだけ始め、jobの間はrun slotを1つ使う。
 3. **開始**: 2の候補は、`needs_session`の再開・readyのclaimと1つの列で、taskの効く優先度の降順（同じ優先度では再開 → 復旧job → claim）に空きslotを受け、順が来たものから始める（[supervise](supervise.md#supervise)の5の「slotを渡す順」、[ADR-t1850-1](../../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)）。
    同じrunでそのalertの`recovery_requested`が上限に達していなければ、`begin_triage`が`BEGIN IMMEDIATE`の中で上の条件（runがtaskの最新runであることを含む）を再検査し（staleなleaseは置き換える。slotにあるrunは2で飛ばしてあるので、置き換えるのはslotの外のrunのleaseだけ）、runにleaseを取って`lease_acquired`、`recovery_requested`と`triage_started`を記録する。
-   `recovery_requested`の`evidence`は、runをそのstatusにしたeventのIDを指す。
    同じrunを2つのsupervisorが取ろうとしても1つしか通らない。
    runのdirectory（無ければ`runs/<run-id>/`）に`recovery-<alert>-<attempt>.prompt.txt`を書いて、run eventの`recovery_prompt_written`を記録する。
    `triage_started`の`launch`のproviderのheadlessのコマンドをそのdirectoryで、`DAGQ_ROLE=recovery-job`（CLIはreviewと同じく読み取りだけを許す。[Roles](roles.md#actors)）と、queue serviceのsocketとjobのtokenのfile付き（`DAGQ_QUEUE`は渡さない。[Queue service](../queue-service.md#クライアントモード)）で起動し、stdout / stderrを`recovery-<alert>-<attempt>.out` / `.err`に書く（promptと一緒に、promptの固定バイナリの節の全体を`recovery-<alert>-<attempt>.binary.json`に書く）。
@@ -39,10 +38,10 @@ related:
    editの無い回答は他のoptionと同じで、上限に達していればすぐescalateになり、同じ選択肢のaskがまた開く（人が直して答えるまで進まない）。
 4. **prompt**（`prompt::recovery_prompt`。決定39の入力）: 載せる資料はこの関数のdoc commentが持つ。
    alertの事実の直後に、supervisorの固定バイナリの節を置く（中身は[復旧job](background-recovery-job.md)のprompt）。
-   その節に続けて`retry` / `retry_inherit`の選び方を書く: 固定バイナリが依存先の着地を含まないことで関門（verifyの「build識別子のcommitがtask Xの着地を含む」など）に落ちたrunは、今のbuildがそれを含めば入れ替えで直っているので、人に聞かずに`retry`（自分のcommitのあるrunは`retry_inherit`）を`confidence: high`で選んでよく（retryの上限でruntimeがretryを適用しないときはescalateでretryを推奨する）、まだ含まなければ同じように落ちるので`wait`かescalateにする。
+   その節に続けて、固定バイナリが依存先の着地を含まないことで落ちたrunの`retry` / `retry_inherit`の選び方を書く（`RECOVERY_BINARY_RULE`）。
    promptは全体（言語の指示を含む）と節ごとの上限の中に収め、終わったrunの資料は先頭を残して切る。
    値・理由・切り方と、切ったものに付ける読む方法は[Prompt](prompt.md#goal-reviewrunのreview復旧jobruntimeのplannerの上限)、生きているsessionの復旧jobと共通の節は[復旧job](background-recovery-job.md)のpromptが持つ。
-5. **verdictの適用**（`act_on_recovery`）: stdoutからverdictを読む（全体か、最外の`{...}`、未知のfieldは拒否）。
+5. **verdictの適用**（`act_on_recovery`）: stdoutからverdictを読む（`RecoveryVerdict::parse`）。
    `confidence: high`の`repair`で、`actions`がちょうど1つ、かつその前提が今成り立つときだけ適用する。
    前提:
    - `retry`: taskの`failed` / `interrupted`のrunがretryの上限未満で、runのbranchに自分のcommitが無い（`result_commit`、無ければworktreeのHEAD、worktreeを作る前に止まったrunなら無し、がmainの祖先。worktreeが消えていて`result_commit`も無ければ判断できないので崩れとする）。
@@ -62,7 +61,6 @@ related:
    適用する前にleaseをまだ持っているかを確かめ、失っていれば（止まっていた間に別のsupervisorが引き継いだ）何も書かずにそのrunを手放す。
 6. **escalate**: `escalate`、`confidence: low`の`repair`、前提の崩れた`repair`（操作が1つでない、許されない操作を含む）、alertの回数の使い切りは、`kind: decide`のaskをrunに作る（`asked_by: supervisor`）。
    optionsは`retry` / `resume` / `cancel`（resumeを使い切ったrunは`retry` / `cancel`）にjobの`options`を足し、runの`integrate`の検証が落ちたことがあるrun（`integration_deferred`の`code: verification_failed`）では最後に`edit the task's --verify, then retry_inherit`をruntimeが足したもの（使い切りのaskにも足す）。
-   `reason_category`はjobの`discard` / `scope`、それ以外は`recovery_failed`。
    questionは各optionの意味を持ち、jobの足したoptionは復旧jobにもう一度渡ること、verifyのoptionを足したaskでは、userかinboxが先にtaskのverifyを直してから答えれば、使い切った後でも復旧jobがもう1回、直したコマンドで走ることを書く。
    askを作った後で`finish_triage`が失敗したら、このpassが開いたaskは取り下げて閉じ、8の失敗にする。
    人にはinboxのwatchが`ask_opened`として知らせる。

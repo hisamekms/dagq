@@ -336,7 +336,9 @@ impl SqliteQueue {
     /// session still heartbeating, lease it to `token`, clear the previous
     /// session's process rows, make `token` its supervisor and record
     /// `resume_started` (`attempt`, the number of every resume so far and
-    /// this one, `counted`, `reason`, `main`). `Ok(None)` means another
+    /// this one, `counted`, `reason`, which is the run's `last_error` when
+    /// none is given, and `main`, the commit `refs/heads/<branch>` of the
+    /// landing branch named when the resume began). `Ok(None)` means another
     /// process took it, it changed meanwhile, or a replanning operation
     /// guards its task.
     pub fn begin_resume(

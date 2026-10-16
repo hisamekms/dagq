@@ -35,7 +35,10 @@ pub fn supervisor_input_path(idle_marker: &Path) -> PathBuf {
 }
 
 /// Leave the stamp of a text the supervisor typed into the session whose
-/// idle marker is `idle_marker`.
+/// idle marker is `idle_marker`. For a planner it is written before every
+/// request the supervisor writes for it (a revise, an answer to its
+/// `planner_question`, a retry) and again by the wrapper before it takes a
+/// request, so an idle marker from before the request ends no turn.
 pub fn record_supervisor_input(files: &dyn RunFiles, idle_marker: &Path) -> io::Result<()> {
     files.write(
         &supervisor_input_path(idle_marker),

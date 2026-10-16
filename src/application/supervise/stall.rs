@@ -173,11 +173,19 @@ enum AskStep {
     Moved,
     /// Answered `wait`: closed, and the count starts again.
     Wait,
-    /// Answered `intervene`: closed, and opened again.
+    /// Answered `intervene`, which a headless session cannot take: closed
+    /// with `answered_intervene` recorded once, and opened again with the
+    /// headless options; nothing is sent to the session.
     Intervene,
-    /// Answered `stop`: the session's exit request.
+    /// Answered `stop`: the session's exit request, written once and never
+    /// as a turn; the ask is closed and `stall_resolved` (`answered_stop`)
+    /// recorded. The run then ends without a receipt, so it fails and its
+    /// recovery job (alert `failed`) takes it.
     Stop,
-    /// Answered an instruction: the session's next turn.
+    /// Answered anything but `wait` (or `propose`), `intervene` and `stop`:
+    /// the session's next turn. The request names the ask and is written
+    /// before the ask is closed, so a supervisor that takes the run over
+    /// does not send the same answer twice.
     Instruction,
 }
 

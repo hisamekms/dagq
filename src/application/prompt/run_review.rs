@@ -660,7 +660,12 @@ pub fn binary_facts(
 }
 
 /// How the recovery job judges a run the fixed binary failed (task 1633),
-/// for the jobs that may retry.
+/// for the jobs that may retry: a build that now holds the dependency's
+/// landing has fixed it, so `retry` (`retry_inherit` for a run with
+/// commits of its own) is chosen with high confidence without a person,
+/// or recommended in an escalation when the runtime would not apply it; a
+/// build that does not hold it yet fails the same way, so `wait` or
+/// escalate.
 pub(super) const RECOVERY_BINARY_RULE: &str = "A run that failed because the fixed binary did not yet hold a task's landing (its error, receipt or a verification gate says the build identifier's commit does not contain that landing) is fixed by the binary's replacement: when the current build above holds that landing (held true, or the replacements above show a build at or after it), choose retry (retry_inherit for a run with commits of its own) with confidence high and do not ask a person, unless the rules above say the runtime does not apply retry (then recommend it in an escalation); while the current build does not hold it, a retry fails the same way, so choose wait or escalate.";
 
 /// The recovery prompt's part on the supervisor's binary (task 1633): the

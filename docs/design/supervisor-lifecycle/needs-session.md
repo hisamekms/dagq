@@ -21,7 +21,7 @@ related:
 
 # `needs_session`
 
-衝突（4）と再検証の失敗（5。宣言外のパスを含む）は`defer_integration`でrunを`needs_session`にし、理由を`last_error`、詳細（衝突ファイル、Gitの出力の末尾、rebase後のheadなど）を`integration_deferred`イベントに書いて、lease行を消しスロットを空ける。
+衝突（4）と再検証の失敗（5。宣言外のパスを含む）は`defer_integration`でrunを`needs_session`にし、理由を`last_error`、詳細を`integration_deferred`イベントに書いて、lease行を消しスロットを空ける。
 worktreeは衝突なら検証済みhead、再検証の失敗ならrebase済みのheadに置いたまま残す。
 検証コマンドの失敗のうちhostの分類は`needs_session`にせず、integrateが同じ試行で1回やり直し、なお落ちればrunを`awaiting_integration`に戻して（`integration_held`）inboxに知らせる（[`integrate`](integrate.md#integrate)の5）。
 resumeの回数は使わない。
@@ -44,7 +44,7 @@ resumeで開くworkerのsessionは、直前のsessionのmodel / effortを引き�
 runを`needs_session`にした最新のeventのcodeが`verification_failed`（integrateかlanding recheckの検証の失敗）か`sent_back`（`approve_landing`の`send_back`）なら1段上げ、衝突（`rebase_conflict`）・kill・`evidence_missing`・`scope_violation`などでは上げない。
 `begin_resume`が`resume_started`に選んだmodelと、上げたなら前の値と理由を書く（[Worker model](worker-model.md#段上げ決定5)、[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定5）。
 
-`integrate`は呼ばれた時点で、runに`integration_approved`イベント（`push`: `--no-push`でなければtrue）を1回だけ記録する。
+`integrate`は呼ばれた時点で、runに`integration_approved`イベントを1回だけ記録する。
 supervisorが承認済みのrunを着地させるときは、この`push`に従ってmainを`origin`へpushする（`integrate`と同じ`push_main`）。
 `integrate`を呼ぶことが着地の承認で（ADR-0016の決定5）、runtimeが自分で着地させるのは承認済みのrun、reviewがpassしたrun、`approve_landing`に`land`と答えたrunだけ（[ADR-0027](../../adr/0027-keep-worker-session-through-review-revise-verdict-and-merge-tree-precheck.md)）。
 
@@ -56,7 +56,6 @@ supervisorが承認済みのrunを着地させるときは、この`push`に従�
 使い切りの判定と、askやlast_error・復旧jobのpromptの文面は、supervisorが起動時に読んだ設定の値を使う。
 数える試行が上限に達したか、衝突だけのresumeが衝突だけの上限に達したrun、または衝突だけで`needs_session`になっている（次のresumeが衝突だけの試行になる）runで衝突だけの試行（precheckの依頼を含む）が衝突だけの上限に達したものは、試行を使い切っている。
 precheckの依頼で衝突だけの上限に達したrunでも、検証の失敗・`evidence_missing`・`scope_violation`など別の理由でparkしたなら、数える試行が残っていればresumeする。
-`integration_deferred`のpayloadには`resumes_left`（supervisorが残り何回resumeするか。上限から数える試行の件数を引いた値で、0未満にならない）が付く。
 triageのresumeの上限と`resumes_left`は数える試行だけを見る。
 precheckは、数える試行が上限に達していればaskにし、衝突だけの試行が上限に達していれば依頼を送らずに着地へ進め、着地のrebaseの衝突で`needs_session`になったrunは試行を使い切っているので下の「引き継ぐretry」に進む（引き継げなければprecheckがaskにする）。
 
@@ -79,7 +78,7 @@ resumeの前に、このrunに記録されたresumeのsession（backgroundのwra
 ADR-t1433-3より前にworkspaceで開いたresumeのsessionのIDは動いていないとみなし、閉じずに人に任せる（人が自分のterminalで閉じる）。
 resume中に死んだsupervisorが起動したwrapper（handleの記録が無い）は見つけないが、wrapperが生きている間は上の条件で飛ばす。
 `dagq.toml`がworkerをcontainerで動かすときは、containerが使えないか、containerの届かないproviderで動くrunを候補から飛ばし、hostで再開しない（[Container runtime](../container-runtime.md#fail-closedの境界)）。
-試行を使い切ったrunを人に渡すことは止めない。
+試行を使い切ったrunを復旧jobに渡すことは止めない。
 
 0. **解消済みの確認**（`resolved_head`）: resumeを始める前に、前の試行で解消済みかを確かめる。
    前の試行のsessionがreceiptを書き直した後に判定された（rebaseもreceiptも済んでいて、次の試行のsessionが何もせずにidleになる）runは、`rewritten_receipt`がresume開始より新しいreceiptを要求するので`unresolved`になり、試行を空費する。
@@ -95,21 +94,19 @@ resume中に死んだsupervisorが起動したwrapper（handleの記録が無い
    そのrunのsessionは無いものとして扱う。
    `resume_skipped`はattentionにしない。
 1. **開始**: `begin_resume`が1トランザクションで、runがまだ`needs_session`で試行を使い切っておらず、leaseが無いかstale（staleなら置き換える）で、heartbeatしている未終了のprocessが無いことを確かめ、runをこのsupervisorのtokenでleaseし、`supervisor_token`を移し、前のsessionの`run_processes`の行を消し（履歴はイベントに残る）、`resume_started`を記録する。
-   `reason`は最後のparkのイベントの`reason`（無ければ`last_error`）。
-   そのイベントが`scope_violation`か、`scope_violation`を持つ`integration_deferred`なら、下の3の依頼を宣言パス用の文面にする。
-   そのイベントが`evidence_missing`か、`checks`を持つ`integration_deferred`（上の要求evidenceで着地しなかった）なら、下の3の依頼をevidence用の文面にする。
-   `main`はその時点の`refs/heads/<branch>`。
+   runを`needs_session`にした最後のイベントが`scope_violation`か、`scope_violation`を持つ`integration_deferred`なら、下の3の依頼を宣言パス用の文面にする。
+   その最後のイベントが`evidence_missing`か、`checks`を持つ`integration_deferred`（上の要求evidenceで着地しなかった）なら、下の3の依頼をevidence用の文面にする。
    runの状態は`needs_session`のままで、新しい状態は足さない。
    進行は`resume_started` / `resume_finished`で読む。
 2. **起動**: worker と同じ非対話の wrapper を起動する。
    begin_resume は interactive と記録された run も headless に変換し、worker_mode_convertedを同じ transaction で記録する。
-   runtime の snapshot を置き換え、resume の wrapper を background で起動する（`SessionWrappers::launch_background`。output は run dir の `session-resume-<attempt>.log`。[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)。run は workspace を開かない）。
+   runtime の snapshot を置き換え、resume の wrapper を background で起動する（`SessionWrappers::launch_background`。[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)。run は workspace を開かない）。
    handle を `workspace_created` で記録し、`wrapper_launched` を記録してから、wrapper の登録を待つ。
    記録できなければ wrapper を止めてエラーにし、起動できなければ `backend_call_failed` を run に記録して下の6の error になる。
 3. **解消依頼**: wrapper が登録されたら、定型の解消依頼を次の turn の request file として書き、resume_request_sent を記録する。
    起動中の入力欄や固定の paste 待ちは使わない。
    依頼は現在の task と検証、前の失敗と修正すべき理由を含む。
-   理由が上限を超えるときは先頭だけを載せ、全文を run dir の `resume-<attempt>-reason.txt` に書いてその path を示す（[Prompt](prompt.md#次のturnの文の上限)）。
+   理由が上限を超えるときは先頭だけを載せ、全文を run dir の file に書いてその path を示す（[Prompt](prompt.md#次のturnの文の上限)）。
    直前のturnの`peak_context`が`[fresh_session]`の閾値を超えれば、2の起動の前に`session_renewed`を記録し、wrapperは前のsessionを開き直さず新しいsessionを依頼を持つ引き継ぎで始める（`resume-<attempt>.txt`はその引き継ぎ。[Agent provider lifecycle](../provider-lifecycle.md#大きなcontextからの新しいsession)）。
 4. **監視と終了**: 依頼より新しい receipt と turn の終了、wrapper の生存を確認する。
    worker_question の回答は次の turn として届け、stalled の待ちも slot の外で保持する。
@@ -123,15 +120,15 @@ resume中に死んだsupervisorが起動したwrapper（handleの記録が無い
    `integration_approved`が無ければ、上の4のとおりsessionを開いたままrunを`validating`にしてreviewに進む（resumeしたsessionが自分で終わっていた場合も同じ経路で、wrapperはreviewの後に止める）。
    `failed`ならrunを`failed`にする。
    `unresolved`は`needs_session`のままleaseを外し、試行が残っていれば次の回に再びresumeする。
-6. **打ち切りとerror**: 試行を使い切った後の`resume_finished`が未解消で、次の`resume_candidates`でそのrunにstaleでないleaseも生きているwrapperも無ければ（slotの空きに関わらず）、supervisorは次の**引き継ぐretry**か、人に渡すかを決める。
+6. **打ち切りとerror**: 試行を使い切った後の`resume_finished`が未解消で、次の`resume_candidates`でそのrunにstaleでないleaseも生きているwrapperも無ければ（slotの空きに関わらず）、supervisorは次の**引き継ぐretry**か、復旧jobに渡すかを決める。
 
    **引き継ぐretry**（ADR-0047の決定24）: runが今も衝突だけで`needs_session`（上の(a)(b)がすべてのイベントについて成り立つ）で、同じtaskのどのrunもこのretryをしていなければ（taskごとに1回まで。人の手での引き継ぎ（[Triage](triage.md#人の手での引き継ぎ)）は数えない。`inherits_on_exhaustion`）、人に聞かずにretryする。
    runの`result_commit`（reviewがpassした検証済みのcommit。無ければ、rebaseの途中でないworktreeのHEAD）がbaseと違えば、それを`refs/dagq/runs/<run-id>`に向け（branchを消されても残るように）、1トランザクションで下と同じ確認と、衝突だけで止まっていることとtaskごとに1回までであることの再確認をしてrunを`failed`にし、taskを`in_progress`から`ready`に戻し（中身は変えないのでplan reviewにはかけない。triageの`retry`と同じ例外）、`auto_repaired`と`triage_finished`を記録する。
    askは開かない。
    残したresumeのwrapperはtriageと同じく止め、worktreeとbranchはtaskが`ready`なので残る。
    次のrunのclaimでsupervisorは、前のrunのうち最も新しい引き継ぐretryで終わったrunがあれば（直前のrunが早くに失敗してtriageでretryされても引き継ぐ）、worker promptに引き継ぎの節（前のrunのreviewはpassしたが衝突で試行を使い切ったこと、commit（`refs/dagq/runs/<id>`とbranch）と、そのrun自身のcommitの範囲（headと新しいrunのbaseのmerge-baseから。途中までrebaseしたresumeがmainのcommitを下に積んでいても、それを含めない）、今のmain（新しいrunのbase）に載せ直して衝突を解き、検証を再実行して自分のheadでreceiptを書くこと、前のreceiptのpathとsummary）を足し、新しいrunに`run_inherited`を記録する。
-   commitがbaseと同じ（載せ直すものが無い）か、refを作れなければ人に渡す。
-   2回目の使い切りも人に渡す（ADR-0047は復旧jobに回すとするが、`resume_exhausted`の復旧jobは未実装）。
+   commitがbaseと同じ（載せ直すものが無い）か、refを作れなければ、次の「復旧jobに渡す」に進む。
+   2回目の使い切りも復旧jobに渡す。
 
    **復旧jobに渡す**（`exhaust_resumes`。ADR-0047の決定39）: 1トランザクションで、runがまだ`needs_session`で試行を使い切り、taskが`in_progress`でrunがその最新で、staleでないleaseが無いことを確かめ、runを`failed`にし（`last_error`は元の`last_error`に試行の回数を添え、衝突だけの試行やprecheckの依頼があればその内訳と上限も書く）、`recovery_requested`（`alert: resume_exhausted`）を記録する。
    `triage_finished`は書かないので、[Triage](triage.md#triage-supervisor)の復旧jobがこのalertでrunを取る（resumeはもう選べない。jobの`retry_inherit`や`retry`は前提を満たせば適用され、escalateなら`decide`のask（`retry` / `cancel`とjobのoptions））。

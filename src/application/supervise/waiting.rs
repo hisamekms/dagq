@@ -25,6 +25,8 @@ pub(super) struct Waiting {
     pub(super) started_at: i64,
     /// When its first ask was opened (or it started, if earlier), on the
     /// run files' clock: a marker newer than this is a session that moved.
+    /// It is the second after the ask's ([`asked_since`]): ask times are
+    /// whole seconds, so a marker in the ask's second is taken as older.
     pub(super) since: SystemTime,
     /// When and how it ended, for a run that waits for a free slot.
     pub(super) ended: Option<(i64, WaitCause)>,

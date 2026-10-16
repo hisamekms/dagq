@@ -50,7 +50,6 @@ idleはwrapperのidle markerだけで判じる。
 
 - **最後の入力**: idle markerは最後の入力より新しいときだけturnの終わりを示す。
   最後の入力は`screen_idle::last_input`が読む。
-  plannerではreviseと`planner_question`のanswerの依頼の前に印を書く。
 - **workerのsession**<a id="workerのsession"></a>: `Supervisor::session_idle` は wrapper の idle marker だけを読む。
 
 ## 黙ったwrapper<a id="黙ったwrapper"></a>
@@ -83,7 +82,6 @@ runtimeがworkerのsessionに渡すのは終了の依頼・resumeの解消の依
 runのreview（[Review](review.md#差し戻しの分類コード)）と同じ種類の問題には同じ名前を使う。
 
 - **receiptの形**: `follow_ups`の各要素に`category`（コード1つ）を足す。
-  欄名は`kind`にしない（名前の重なるeventやaskのkindと混ざらないようにするため）。
   `category`の無い要素と一覧に無い値もreceiptの受理を変えない（validationは拒まない）。
 - **記録**: `integrate`がdraftを登録するとき（[integrate](integrate.md)の10）、`follow_up_registered`のpayloadとdraftの出どころの`material`に`category`を載せる（欠けの判定は`domain::follow_up::follow_up_category`）。
   draftから出るeventの出どころの欄にも`category`が載る。
