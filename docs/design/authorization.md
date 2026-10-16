@@ -19,19 +19,29 @@ related:
 
 # Authorization
 
-actorが何をしてよいかは、`src/domain/authorization.rs`の`Authorizer`（`authorize(actor, capability, resource) -> Result<(), AuthorizationError>`）が決める（[ADR-t728-1](../adr/2026-09-27-t728-1-trust-domains-actors-and-default-deny-capability-authorization.md)の決定5）。実装は静的なpolicyの`StaticPolicy`で、roleごとの許可の一覧（`grants(role)`）と、いくつかのroleのresourceの規則でできている。一覧に無い組み合わせは拒む（default deny）。resourceの持ち主や状態を規則が要るのに呼び出し元が知らない（`None`、`Resource::Unresolved`）ときも拒む（fail closed）。判定はClaudeを起動せずにunit testできる。
+actorが何をしてよいかは、`src/domain/authorization.rs`の`Authorizer`が決める（[ADR-t728-1](../adr/2026-09-27-t728-1-trust-domains-actors-and-default-deny-capability-authorization.md)の決定5）。
+実装は静的なpolicyの`StaticPolicy`で、roleごとの許可の一覧（`grants(role)`）と、いくつかのroleのresourceの規則でできている。
+一覧に無い組み合わせは拒む（default deny）。
+resourceの持ち主や状態を規則が要るのに呼び出し元が知らない（`None`、`Resource::Unresolved`）ときも拒む（fail closed）。
+判定はClaudeを起動せずにunit testできる。
 
-host実行ではこの判定は助言的（advisory）で、sandboxでも隔離でもない。どのプロセスも`DAGQ_ROLE`を偽れる（ADR-t728-1の決定6）。信頼の区分・actorごとのcapabilityの要約・迂回できる経路・Podmanとqueue serviceへの道筋は[Security](security.md)。actorの型と環境変数は[Roles](supervisor-lifecycle/roles.md#actors)。
+host実行ではこの判定は助言的（advisory）で、sandboxでも隔離でもない。
+どのプロセスも`DAGQ_ROLE`を偽れる（ADR-t728-1の決定6）。
+信頼の区分・actorごとのcapabilityの要約・迂回できる経路・Podmanとqueue serviceへの道筋は[Security](security.md)。
+actorの型と環境変数は[Roles](supervisor-lifecycle/roles.md#actors)。
 
 ## 固定バイナリを戻したときの窓
 
 判定は、呼ばれた`dagq`のバイナリが持つpolicyで決まる。
 固定バイナリを前のものに戻すと（[`install --rollback`](supervisor-lifecycle/install.md)、自動更新の見張りの`restore`（[Auto-update](supervisor-lifecycle/auto-update.md)））、新しいバイナリが起動してまだ走っているjobの`dagq`の呼び出しは戻したバイナリに届く。
 戻したバイナリが`DAGQ_ROLE`の未知の値をfail closedにするparseを持たず、新しいroleを知らなければ、そのroleは制限を受けない。
-jobのroleを知らない古いバイナリは`reviewer`だけを読み取りに制限し、ほかのjobの状態を変える呼び出しを拒まない（今のバイナリは知らないroleを`unknown DAGQ_ROLE`で拒む）。
+jobのroleを知らない古いバイナリは`reviewer`だけを読み取りに制限し、ほかのjobの状態を変える呼び出しを拒まない（今のバイナリは知らないroleを拒む）。
 
-- 窓は、戻したrenameから、新しいバイナリが起動したjobが居なくなるまで。supervisorの引き継ぎはexecの前にheadlessのjobを止めるが（[Handoff](supervisor-lifecycle/handoff.md)、[Headless job processes](supervisor-lifecycle/headless-job-processes.md)）、それは検証と着地の進行中のslotを進め終えた区切りなので、それまでjobは走り続ける。引き継ぎを受けなかったsupervisor（`not_handed_off`）のjobと、supervisorが死んで起動し直すまでに残ったjob（引き継ぐsupervisorが`orphaned_headless_jobs`で止める）は、終わるか止められるまで走る
-- これは新しい弱点ではなく、host実行が助言的（advisory）であることの既知の限界の一例として受け入れる。どのプロセスも`DAGQ_ROLE`を偽れる（ADR-t728-1の決定6）ので、古いバイナリに新しいroleを教えるコードは足さない
+- 窓は、戻したrenameから、新しいバイナリが起動したjobが居なくなるまで。
+  supervisorの引き継ぎはexecの前にheadlessのjobを止めるが（[Handoff](supervisor-lifecycle/handoff.md)、[Headless job processes](supervisor-lifecycle/headless-job-processes.md)）、それは検証と着地の進行中のslotを進め終えた区切りなので、それまでjobは走り続ける。
+  引き継ぎを受けなかったsupervisorのjobと、supervisorが死んで起動し直すまでに残ったjob（引き継ぐsupervisorが止める）は、終わるか止められるまで走る
+- これは新しい弱点ではなく、host実行が助言的（advisory）であることの既知の限界の一例として受け入れる。
+  どのプロセスも`DAGQ_ROLE`を偽れる（ADR-t728-1の決定6）ので、古いバイナリに新しいroleを教えるコードは足さない
 - 気になるときは、戻す前に`down --wait`でjobを終わらせるか、戻した後に走っているjobを止める
 
 ## Capability
@@ -71,7 +81,7 @@ jobのroleを知らない古いバイナリは`reviewer`だけを読み取りに
 | eval | `eval.request` / `eval.request_held_out` / `eval.rerun` / `eval.read` / `eval.cases` | `agent eval`（dev / holdout・production / `--rerun`） / 読み取り / `agent cases` `agent decide`（[Agent eval](agent-eval.md)） |
 | schedulerの遷移 | `scheduler.supervise` | `supervise` |
 | | `run.recover` | `recover` |
-| | `workspace.cleanup` | `run close-workspaces`（終わったrunの残ったworkspaceの片付けだったが、runtimeがrunのworkspaceを開かなくなったので、認可の後に理由を示して拒む。[ADR-t1433-3](../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)の決定3。認可はもとの[ADR-t1228-1](../adr/2026-10-02-t1228-1-inbox-and-planner-reach-sessions-through-the-dagq-cli.md)の決定6・7のまま） |
+| | `workspace.cleanup` | `run close-workspaces`（認可の後に理由を示して拒む。[ADR-t1433-3](../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)の決定3） |
 | | `service.lifecycle` | `up` `down` `inbox` |
 | | `service.install` | `install` `auto-update` |
 | | `queue.admin` | `init` `migrate` `rebind` |
@@ -79,18 +89,19 @@ jobのroleを知らない古いバイナリは`reviewer`だけを読み取りに
 | | `landing.land` / `landing.push` | Integratorの内側 |
 | 予約 | `reserved.filesystem_read` `reserved.filesystem_write` `reserved.network` `reserved.secret_read` | 後の段（sandbox）。この段では誰にも与えない |
 
-CLIのコマンドからcapabilityとresourceへの写しは`src/main.rs`の`requests`で、matchに既定の枝を置かないので、コマンドを足すと写しを書くまでcompileが通らない。`queue.read`だけのコマンドはqueueをread-onlyの接続で開く（`reads_only`）。
+CLIのコマンドからcapabilityとresourceへの写しは`src/main.rs`の`requests`で、matchに既定の枝を置かないので、コマンドを足すと写しを書くまでcompileが通らない。
+`queue.read`だけのコマンドはqueueをread-onlyの接続で開く（`reads_only`）。
 
 ## Resource
 
 種類と各々が持つ持ち主・状態は`src/domain/authorization.rs`の`Resource`のdoc commentが持つ。
 CLIの写し（`requests`）は引数にあるものだけを入れ、持ち主と状態は`None`のまま渡す。
 計画系のコマンドはapplicationの層（下の[適用の範囲](#適用の範囲)）がqueueからtaskの状態とproposalの持ち主を読んで埋めてから判定する。
-proposalの持ち主は`proposals.owner_actor_id`（`0046_proposal_owner_actor.sql`）で、`submit`（新しいproposalと、差し戻しの後の出し直し）が出したactorのid（`planner:<id>`など）を書く。
-plan reviewが人を待つproposalをそのまま出し直す`submit --proposal`は持ち主を変えない（古いバイナリの出し直しも列を書かない）。
-plan reviewが差し戻して`revising`のproposalは、reviseを送ったplanner（`revise_planner_id`。持ち主が閉じていたときにruntimeが立てたplannerや、reopenしたproposalを受け取ったplanner）を持ち主とする。
-migrationより前に出したproposalは`NULL`で、plannerは取り下げられない（fail closed。userとinboxは取り下げられる）。
-`DAGQ_ACTOR_ID`より前に開いたplannerのid `planner`（roleの名前だけでactorを名指さない）は、どのproposalの持ち主にもならない。
+proposalの持ち主は、`submit`（新しいproposalと、差し戻しの後の出し直し）が出したactorとする（入口は`infrastructure::proposals`の`owner_actor`）。
+plan reviewが人を待つproposalをそのまま出し直す`submit --proposal`は持ち主を変えない。
+plan reviewが差し戻して`revising`のproposalは、reviseを送ったplannerを持ち主とする。
+持ち主を記録していないproposalは、plannerは取り下げられない（fail closed。userとinboxは取り下げられる）。
+roleの名前だけでactorを名指さないplannerのidは、どのproposalの持ち主にもならない。
 
 ## Policy
 
@@ -108,21 +119,27 @@ migrationより前に出したproposalは`NULL`で、plannerは取り下げら�
 | wrapper | 読み取り・`session.run`・`session.record` | なし |
 | integrator | 読み取り・`landing.land`・`landing.push` | なし |
 
-旧値の`DAGQ_ROLE=reviewer`はreview-jobとして読む（[Roles](supervisor-lifecycle/roles.md#cliでの解釈)）。jobの環境には今`DAGQ_RUN_ID`が無いので、`review.submit`・`triage.submit`は持ち主が分からず拒まれる。verdictは今までどおりデータとしてsupervisorが読む。
+旧値の`DAGQ_ROLE=reviewer`はreview-jobとして読む（[Roles](supervisor-lifecycle/roles.md#cliでの解釈)）。
+jobの環境には`DAGQ_RUN_ID`が無いので、`review.submit`・`triage.submit`は持ち主が分からず拒まれる。
+verdictはデータとしてsupervisorが読む。
 
-人の出どころの優先度（`priority_by: human`）はuserとinboxだけが変える。
+人の出どころの優先度はuserとinboxだけが変える。
 例外は`out_of_scope`の判断を記録するAIのactorの移動で、goalから継いだだけの値は移動先を継ぎ、taskに直接付いた値は残る（[ADR-t2373-1](../adr/2026-10-12-t2373-1-out-of-scope-follow-up-move-takes-the-destination-goals-priority.md)）。
-他のroleの`set-priority`・`goal edit`と依頼と違う優先度の`goal add`・`add`はstoreが同じtransactionで拒み、理由`a person's priority`の`authorization_denied`を記録し、`denied`の無い人の値を名指すerrorを返す。
+他のroleの`set-priority`・`goal edit`と依頼と違う優先度の`goal add`・`add`はstoreが同じtransactionで拒み、`authorization_denied`を記録し、`denied`の無い人の値を名指すerrorを返す。
 
-askのkindはroleごとに決まる（`opens_ask`）: userとinboxとsupervisorはCLIが開けるどのkindも、workerは`worker_question`、plannerは`planner_question`だけを開ける。observerの`ask --kind blocked --finding`は`ask.open`ではなく`finding.ask`で、finding（`Resource::Finding`）に対して判定する。kindがroleに合わなければ理由`not of this kind`で拒む。
+askのkindはroleごとに決まる（`opens_ask`）。
+observerの`ask --kind blocked --finding`は`ask.open`ではなく`finding.ask`で、finding（`Resource::Finding`）に対して判定する。
+kindがroleに合わなければ拒む。
 
-`AuthorizationError`はroleと拒んだcapabilityと理由（`not granted`・`reserved`・`not on this resource`・`not of this kind`）だけを出し、actor id（session idを含みうる）やresourceのid・本文を出さない。
+`AuthorizationError`はroleと拒んだcapabilityと理由（`DenyReason`）だけを出し、actor id（session idを含みうる）やresourceのid・本文を出さない。
 
 ## 適用の範囲
 
 ### 計画系のコマンド（application）
 
-計画系のコマンド（`add`・`edit`・`submit`・`draft`・`ready`（`--bypass-review`を含む）・`cancel`・`dependency add/remove`・`goal add/edit/ready/close/review`・`set-goal`・`judge-follow-up`・`set-paths`・`set-priority`・`revisit`・`proposal withdraw`）は、`src/application/commands/planning.rs`の`Planning`が全てのroleについて判定してからstoreを呼ぶ。CLI（`src/main.rs`の`execute()`）はparseと出力だけをし、これらのコマンドでstoreの変更を直接呼ばない。`Planning`は呼び出し元の`ActorContext`・`Authorizer`（`StaticPolicy`）・port `PlanningStore`（`SqliteQueue`が`src/infrastructure/planning.rs`で実装する）を受け取り、コマンドごとに次のcapabilityとresourceを問う。
+計画系のコマンド（下の表）は、`src/application/commands/planning.rs`の`Planning`が全てのroleについて判定してからstoreを呼ぶ。
+CLI（`src/main.rs`の`execute()`）はparseと出力だけをし、これらのコマンドでstoreの変更を直接呼ばない。
+`Planning`は呼び出し元の`ActorContext`・`Authorizer`・port `PlanningStore`を受け取り、コマンドごとに次のcapabilityとresourceを問う。
 
 | コマンド | capability | resource |
 | --- | --- | --- |
@@ -138,19 +155,35 @@ askのkindはroleごとに決まる（`opens_ask`）: userとinboxとsupervisor�
 | `proposal withdraw` | `proposal.withdraw` | proposal（持ち主） |
 | `goal add` / `goal edit` / `goal ready` / `goal close` / `goal review` | `goal.write` / `goal.write` / `goal.ready` / `goal.close` / `goal.review_request` | queue / goal |
 
-終了runのverifyだけはuserとinboxが`task.verify_edit`で直せる（[ADR-t883-1](../adr/2026-09-30-t883-1-edit-ended-run-verification-before-inherited-retry.md)）。planner・worker・jobはこの権限を持たない。`required_evidence`と`paths`は変更できず、`task_edited`の`from`/`to`とactorに修正が残る。`edit`のcapabilityは`Planning`がtransactionの外で読んだtaskの状態から選ぶので、`Planning`はその状態をstoreの`edit_task`に渡し、storeは同じtransactionで読んだ状態と照合する。食い違えば（例: `ready`で`task.write`を通った後にclaimされ、runが失敗して`in_progress`になった）、taskも`task_edited`も変えずに状態が変わったことを理由に拒む。taskの状態で認可する他のコマンド（`set-goal`・`set-paths`・`set-priority`・`draft`・`ready`（`--bypass-review`を含む）・`cancel`（`--duplicate-of`を含む）・`dependency add` / `remove`）も同じく、認可に使った状態をstoreに渡し、storeは書く前に同じtransactionで照合して、食い違えばtask・依存・eventを変えずに拒む。domainの遷移はrunの終わった`in_progress`からの`draft`と`cancel`を許すので、照合が無いと`ready`で認可したplannerの`cancel` / `draft`が、その間にclaimされてrunが失敗した`in_progress`のtaskに当たる。
+終了runのverifyだけはuserとinboxが`task.verify_edit`で直せる（[ADR-t883-1](../adr/2026-09-30-t883-1-edit-ended-run-verification-before-inherited-retry.md)）。
+planner・worker・jobはこの権限を持たない。
+`required_evidence`と`paths`は変更できず、修正は`task_edited`とそのactorに残る。
+`edit`のcapabilityは`Planning`がtransactionの外で読んだtaskの状態から選ぶので、`Planning`はその状態をstoreの`edit_task`に渡し、storeは同じtransactionで読んだ状態と照合する。
+食い違えば（例: `ready`で`task.write`を通った後にclaimされ、runが失敗して`in_progress`になった）、taskも`task_edited`も変えずに状態が変わったことを理由に拒む。
+taskの状態で認可する他のコマンド（`set-goal`・`set-paths`・`set-priority`・`draft`・`ready`・`cancel`・`dependency add` / `remove`）も同じく、認可に使った状態をstoreに渡し、storeは書く前に同じtransactionで照合して、食い違えばtask・依存・eventを変えずに拒む。
+domainの遷移はrunの終わった`in_progress`からの`draft`と`cancel`を許すので、照合が無いと`ready`で認可したplannerの`cancel` / `draft`が、その間にclaimされてrunが失敗した`in_progress`のtaskに当たる。
 
-`judge-follow-up`は`follow_up.judge`をtask resourceで判定し、user・inbox・plannerだけに許す。taskの状態による制限は無く、submitted以降の訂正も記録できる（所属を動かすのはdraft/readyだけ。[所属の判断](follow-up-membership.md)）。
+`judge-follow-up`は`follow_up.judge`をtask resourceで判定し、user・inbox・plannerだけに許す。
+taskの状態による制限は無く、submitted以降の訂正も記録できる（所属を動かすのはdraft/readyだけ。[所属の判断](follow-up-membership.md)）。
 
-policyは上の表のまま: plannerは今の権限（draft・submitted・readyのtaskの変更と`cancel`、goalの追加・編集・close、自分のproposalの取り下げ）を持ち、`ready`（`--bypass-review`を含む）・`goal ready`・`goal review`とin_progress以降のtaskの変更（follow_upの所属判断の記録を除く。`in_progress`のtaskの`set-priority`もuserとinboxだけ）は持たない。`ready`はuserとinbox（人の言葉での代行。区別はeventのactorが持つ）。worker・headlessのjob（review・recovery・plan review・goal review・throughput review、一覧は`src/domain/actor.rs`の`ActorRole::is_headless_job`）・observer・wrapper・integratorは計画系を何もできない。supervisorはCLIからは`ready`・`cancel`・`goal close`だけ。capabilityをどのresourceにも持たないroleは、storeを読む前に拒む（taskやproposalが無くても拒否になり、記録のresourceは状態と持ち主が`null`）。capabilityを持つroleで、taskやproposalが見つからないときは拒否ではなく、そのerror（`task N does not exist`など）になる。
+policyは上の表のまま: plannerはdraft・submitted・readyのtaskの変更と`cancel`、goalの追加・編集・close、自分のproposalの取り下げを持ち、`ready`・`goal ready`・`goal review`とin_progress以降のtaskの変更（follow_upの所属判断の記録を除く。`in_progress`のtaskの`set-priority`もuserとinboxだけ）は持たない。
+`ready`はuserとinbox（人の言葉での代行。区別はeventのactorが持つ）。
+worker・headlessのjob（一覧は`src/domain/actor.rs`の`ActorRole::is_headless_job`）・observer・wrapper・integratorは計画系を何もできない。
+supervisorはCLIからは`ready`・`cancel`・`goal close`だけ。
+capabilityをどのresourceにも持たないroleは、storeを読む前に拒む（taskやproposalが無くても拒否になる）。
+capabilityを持つroleで、taskやproposalが見つからないときは拒否ではなく、そのerrorになる。
 
-拒んだときは、queueのevent `authorization_denied`（taskにもgoalにも紐づかないqueueのevent。actorの列は拒まれた呼び出し元）を記録し、`AuthorizationError`を返す。payloadは`role`・`capability`・`reason`（上の理由）・`resource`（`kind`と`id`、taskなら`status`、proposalなら`owner`、依頼なら`planner`。開くask（`new_ask`）はidの代わりに`ask_kind`・`run`・`task`を持ち、`--request`付きなら`request`と依頼の`planner`も持つ）。記録に失敗しても拒否は拒否のまま返す。observerのこのeventは、observerの次の起動を決める「自分以外のevent」に数えない。
-
-CLIのerrorは`{"error": ..., "denied": {"role", "capability", "reason"}}`で、`error`はobserverなら`observer may not change queue state`、headlessのjob（と`reviewer`）なら`reviewer may not change queue state`（今までの文言）、それ以外は`<role> may not <capability> (<reason>)`。
+拒んだときは、queueのevent `authorization_denied`（taskにもgoalにも紐づかないqueueのevent。actorの列は拒まれた呼び出し元）を記録し、`AuthorizationError`を返す。
+payloadは`src/application/commands/mod.rs`の`Gate`の記録と`Resource::record`が決める。
+記録に失敗しても拒否は拒否のまま返す。
+CLIのerrorの形はpluginの`dagq`の`reference/authority.md`が持つ。
+observerのこのeventは、observerの次の起動を決める「自分以外のevent」に数えない。
 
 ### 対話と記録のコマンド（application）
 
-`ask`・`ask close`・`answer`・`note`・`mark`（`--retract`を含む）・`finding record/resolve/dismiss`は、`src/application/commands/dialogue.rs`の`Dialogue`が全てのroleについて判定してからstoreを呼ぶ。port `DialogueStore`は`src/infrastructure/dialogue.rs`の`DialogueQueue`（`SqliteQueue`を包む）が実装する。拒否の記録（`authorization_denied`）とerrorの形は計画系と同じで、判定と記録の共通の部分は`src/application/commands/mod.rs`の`Gate`が持つ。
+対話と記録のコマンド（下の表）は、`src/application/commands/dialogue.rs`の`Dialogue`が全てのroleについて判定してからstoreを呼ぶ。
+port `DialogueStore`は`src/infrastructure/dialogue.rs`の`DialogueQueue`が実装する。
+拒否の記録（`authorization_denied`）とerrorの形は計画系と同じで、判定と記録の共通の部分は`src/application/commands/mod.rs`の`Gate`が持つ。
 
 | コマンド | capability | resource |
 | --- | --- | --- |
@@ -162,41 +195,40 @@ CLIのerrorは`{"error": ..., "denied": {"role", "capability", "reason"}}`で、
 | `finding record` | `finding.record` | 対象のtask・run・goal、`--queue`ならqueue |
 | `finding resolve` / `finding dismiss` | `finding.resolve` / `finding.dismiss` | finding |
 
-計画の依頼（[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)の決定3・6）の`request add`と`request decline`は、`src/application/commands/requests.rs`の`Requests`が全てのroleについて判定してからstoreを呼ぶ（port `RequestStore`は`SqliteQueue`が実装し、拒否は同じ`authorization_denied`に残る）。`ask --request ID`（`planner_question`）は上の`ask`と同じ`ask.open`で判定し、`request decline`と同じくその依頼のplannerをstoreから読んで（port `DialogueStore::request_planner`）、plannerにはその依頼のplanner自身だけを許す。`requests`は読み取り（`queue.read`）。
+計画の依頼（[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)の決定3・6）の`request add`と`request decline`は、`src/application/commands/requests.rs`の`Requests`が全てのroleについて判定してからstoreを呼ぶ（拒否は同じ`authorization_denied`に残る）。
+`ask --request ID`（`planner_question`）は上の`ask`と同じ`ask.open`で判定し、`request decline`と同じくその依頼のplannerをstoreから読んで、plannerにはその依頼のplanner自身だけを許す。
+`requests`は読み取り（`queue.read`）。
 
-`request add`はCLIの`check_access`でも同じ`request.record`（queue）を`Gate`に通し、`request_words`でファイルやstdinを読む前に拒む。
-拒否はそこで記録して直ちに返すため、`Requests::record`の検査は残しても`authorization_denied`は1回だけになる。
+`request add`はCLIの入口でも同じ`request.record`（queue）を判定し、ファイルやstdinを読む前に拒む。
+拒否はそこで記録して直ちに返すため、`authorization_denied`は1回だけになる。
 
 | コマンド | capability | resource |
 | --- | --- | --- |
-| `request add` | `request.record` | queue。userとinboxだけが持つ（inboxの記録は人の言葉の代行で、`requested_by`とeventのactorが`inbox`）。planner・worker・observer・全てのjob・supervisor・wrapper・integratorは拒む |
+| `request add` | `request.record` | queue。userとinboxだけが持つ（inboxの記録は人の言葉の代行で、`requested_by`とeventのactorが`inbox`） |
 | `request decline ID` | `request.decline` | `Request`（id、その依頼の閉じていないruntimeのplanner）。capabilityを持たないroleは依頼を読む前に拒み、plannerはその依頼のplanner自身でなければ`not on this resource`で拒む |
 | `replan request` / `replan propose` | `replan.request` / `replan.propose` | `Run`（storeが読むtask）。`Replans`が判定し、proposeは自分のrunだけ |
 | `hold` / `release` | `task.hold` | `Task`か`Run`（storeが読むtask）。`Holds`が判定 |
 
-`asked_by`・noteとfindingの`by`・markの`by`は、呼び出し元が渡した値ではなく`Dialogue`がactorから入れる（roleの名前、userは`human`）。
-answerはuserとinboxだけで（[ADR-t728-3](../adr/2026-09-27-t728-3-answer-and-delegated-authority-of-the-inbox.md)の決定4）、worker・headlessのjob・observer・planner・supervisor・wrapper・integratorは`ask.answer`を、worker・headlessのjob・observer・planner・wrapper・integratorは`ask.close`を持たない（supervisorは閉じられる）。
+`asked_by`・noteとfindingの`by`・markの`by`は、呼び出し元が渡した値ではなく`Dialogue`がactorから入れる。
+answerはuserとinboxだけで（[ADR-t728-3](../adr/2026-09-27-t728-3-answer-and-delegated-authority-of-the-inbox.md)の決定4）、`ask.close`はそれにsupervisorを足したroleだけが持つ。
 
 #### answerの権限の出どころと承認の分類
 
-answerは誰の権限で書かれたか（`AnswerAuthority`）を記録する（ADR-t728-3の決定2）。値はactorの型（`ActorContext::answerer`）から決め、answerの文やinboxのpromptから推さない。
+answerは誰の権限で書かれたか（`AnswerAuthority`）を記録する（ADR-t728-3の決定2）。
+値はactorの型（`ActorContext::answerer`）から決め、answerの文やinboxのpromptから推さない。
+`answered_by`と`asked_by`の値の綴りは変えない。
+eventのactorの列（roleとid）も同じ区別を持つ。
 
-| 値 | 書くもの | `answered_by` |
-| --- | --- | --- |
-| `user` | `DAGQ_ROLE`の無い呼び出し（人自身） | `person` |
-| `delegated` | inbox（人の言葉での代行） | `inbox` |
-| `runtime` | runtimeが自分で閉じる・取り下げる・置き換えるask | `runtime` |
-
-askの行には`answer_authority`と`answer_approval`（`0047_answer_authority.sql`）を、`ask_answered`のpayloadには`authority`と`approval`を書く。`answered_by`と`asked_by`の値の綴りは変えない。eventのactorの列（roleとid）も同じ区別を持つ。migrationより前のanswerと古いバイナリのanswerは両方とも`NULL`で、JSONには出ない。
-
-承認に当たるask（後のgoalで人だけに限るときの土台。ADR-t728-3の決定3）はdomainが分類する（`AskKind::is_approval`と`answer_approves`）: kindが`AskKind::is_approval`の名指すもの（landing・失敗したrun・計画・goal・更新・`already_satisfied`の閉じ方）のaskのanswer、または`blocked`・`stalled`のaskがoptionに出した`propose` / `dismiss`（runtimeがfindingに適用する答え）。
-そのanswerは`answer_approval`が`1`、payloadの`approval`が`true`になる。
-runtimeが自分で閉じる・取り下げる・置き換えるanswer（`authority`が`runtime`）は何も承認しないので、kindに関わらず`0` / `false`にする。
+承認に当たるask（ADR-t728-3の決定3）はdomainが分類する（`answer_approves`）。
+runtimeが自分で閉じる・取り下げる・置き換えるanswerは、kindに関わらず何も承認しない。
 この段では承認を人だけに限る強制はしない。
 
 ### runtimeの操作系のコマンド（application）
 
-runtimeの操作系のコマンドは、`src/application/commands/operations.rs`の`Operation`が名指すcapabilityとresourceで、全てのroleについてコマンドが何かをする前に判定する。CLI（`src/main.rs`の`execute()`）はqueueの場所を決めた直後、queueを開く・作る・移す前、ログを開く前に`operations::authorize`を呼び、`requests`もこれらのコマンドの写しを`Operation::request`から取る。操作そのもの（`up`・`install`など）は今の場所のままで、ここはその入口の判定だけ。着地はこの入口の後で[Integrator](#着地とpushintegrator)がもう一度判定する。
+runtimeの操作系のコマンドは、`src/application/commands/operations.rs`の`Operation`が名指すcapabilityとresourceで、全てのroleについてコマンドが何かをする前に判定する。
+CLI（`src/main.rs`の`execute()`）はqueueの場所を決めた直後、queueを開く・作る・移す前、ログを開く前に`operations::authorize`を呼び、`requests`もこれらのコマンドの写しを`Operation::request`から取る。
+操作そのもの（`up`・`install`など）は今の場所のままで、ここはその入口の判定だけ。
+着地はこの入口の後で[Integrator](#着地とpushintegrator)がもう一度判定する。
 
 | コマンド | capability | resource |
 | --- | --- | --- |
@@ -220,73 +252,123 @@ runtimeの操作系のコマンドは、`src/application/commands/operations.rs`
 結果（上のPolicyの表から決まる）:
 
 - userとinboxは全てを打てる（inboxは人の言葉での代行で、dagq-recoverの手作業の`integrate`・`recover`・`review`を含む。区別は記録のactorが持つ）
-- `run screen` / `run send` / `planner screen` / `planner send`と、backgroundのsessionのlogを読む`run log` / `planner log`はuserとinboxだけ（ADR-t1228-1の決定7）。plannerは自分のplannerのものも拒み（`screen.read`・`screen.send`を持たない）、supervisorも持たない（自分の送信の経路を使う）
-- `planner request`（`planner.request`）はuserとinboxだけ（ADR-t1533-1）。plannerは自分のplannerへのものも拒み、supervisorも持たない（自分の依頼は`send_to_planner`で置く）。成功した依頼は`turn_requested`と`planner_request_handed`を呼び出し元をactorにして記録する
+- `run screen` / `run send` / `planner screen` / `planner send`と、backgroundのsessionのlogを読む`run log` / `planner log`はuserとinboxだけ（ADR-t1228-1の決定7）。
+  plannerは自分のplannerのものも拒み（`screen.read`・`screen.send`を持たない）、supervisorも持たない（自分の送信の経路を使う）
+- `planner request`（`planner.request`）はuserとinboxだけ（ADR-t1533-1）。
+  plannerは自分のplannerへのものも拒み、supervisorも持たない（自分の依頼は`send_to_planner`で置く）。
+  成功した依頼は`turn_requested`と`planner_request_handed`を呼び出し元をactorにして記録する
 - `run close-workspaces`（`workspace.cleanup`）を通すのはuserとinboxだけ（ADR-t1228-1の決定7）で、plannerとsupervisorを含むほかのroleは`authorization_denied`で拒む。
   通ったuserとinboxにも、runtimeはrunのworkspaceを開かず、runのbackgroundのwrapperは自分で止めることを理由に拒み（引数は受け付けて使わない。ADR-t1433-3の決定3）、何も閉じず記録しない。
-  過去に作られて残ったrunのworkspaceは人が自分のterminalで閉じる。
+  残ったrunのworkspaceは人が自分のterminalで閉じる。
   supervisorは終わったrunに残ったwrapperを自分の掃除（[終わったrunの掃除](supervisor-lifecycle/cleanup-and-recovery.md#終わったrunの掃除)）で止める
-- `run screen`は`screen.read`を通った後、どのrunにも画面を読まずに理由と`run log RUN [--follow]`を示して拒む（ADR-t1433-3の決定4）
-- plannerの権限は`up`・`down`・`inbox`・`install`・`init`・`migrate`・`rebind`・`plan`と、自分のplannerの`planner-session`と`session-event`を許す（ADR-t728-1の決定7のとおり今の権限のまま）。plannerはruntimeだけが立て、人が頼む相手ではないので（[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)）、`up`・`down`・`inbox`・`install`は使わない（打つのはinboxか人の`DAGQ_ROLE`の無いterminal。[Roles](supervisor-lifecycle/roles.md)）。`plan`は権限の判定を通っても誰が打っても何も開かず、inboxへの依頼の案内（`PLAN_REFUSED`）で失敗する。`integrate`・`recover`・`review`・`supervise`・`observe`・`session`は拒む
-- worker・headlessのjob・observerは`integrate`・`recover`・`install`・`auto-update`・`up`・`down`・`inbox`・`init`・`migrate`・`rebind`・`plan`・`supervise`・`observe`・`review`を拒む。workerは自分のrunの`session`と`session-event`だけを打てる。別のrunのもの、inboxやplannerのspanを名乗るもの（`DAGQ_SESSION_KIND`）、`planner-session`は拒む
-- 拒否は`authorization_denied`として、拒まれた呼び出し元をactorにしてqueueに記録する（`src/infrastructure/denials.rs`の`QueueDenials`が、判定の後でだけqueueを開く）。queueが無い・このバイナリが開けない（`init`の前、`migrate`の前）ときは記録できず、拒否は拒否のまま返す。errorの形は計画系と同じ
-- 生の`cmux`はこのpolicyの外にある（dagqのCLIを通らない）。inboxとplannerには、Claudeのsettingsの`permissions.deny`の`Bash(cmux:*)`（`permission_deny(Inbox|Planner)`の最後の規則）を置き、上の`run` / `planner`のCLIを使わせる（[ADR-t1228-2](../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）。これは**guardrailであってenforcementではない**: hostの判定は助言的なまま（ADR-t728-1決定6）で、絶対pathやscriptからの`cmux`は通り、`dagq inbox`を通さずに開いたinboxと`claude`を打ち直したsessionには効かない。拒むのはあくまでCLIの判定で、cmuxを拒んだことでCLIの権限は変わらない。workerとjobの`cmux`は拒まない（隔離が扱う）。Codexのinboxは同じ趣旨をCodexの手段で持たせ、無ければguardrailが無いと[Security](security.md#判定の場所)に書く（決定6。今のinboxはClaudeだけ）。settingsの場所・中身と`status` / `doctor`の`inbox_guardrail`は[`up` / `down`](supervisor-lifecycle/up-down.md)と[Security](security.md)が持つ
+- `run screen`は`screen.read`を通った後、どのrunにも画面を読まずに理由と`run log`を示して拒む（ADR-t1433-3の決定4）
+- plannerの`service.lifecycle`・`service.install`・`queue.admin`・`planner.open`と、自分のplannerの`planner-session`と`session-event`は、ADR-t728-1の決定7のとおり許す。
+  plannerはruntimeだけが立て、人が頼む相手ではないので（[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)）、`up`・`down`・`inbox`・`install`は使わない（打つのはinboxか人の`DAGQ_ROLE`の無いterminal。[Roles](supervisor-lifecycle/roles.md)）。
+  `plan`は権限の判定を通っても誰が打っても何も開かず、inboxへの依頼の案内（`PLAN_REFUSED`）で失敗する
+- workerは自分のrunの`session`と`session-event`だけを打てる。
+  別のrunのもの、inboxやplannerのspanを名乗るもの（`DAGQ_SESSION_KIND`）、`planner-session`は拒む
+- 拒否は`authorization_denied`として、拒まれた呼び出し元をactorにしてqueueに記録する（`src/infrastructure/denials.rs`の`QueueDenials`が、判定の後でだけqueueを開く）。
+  queueが無い・このバイナリが開けない（`init`の前、`migrate`の前）ときは記録できず、拒否は拒否のまま返す。
+  errorの形は計画系と同じ
+- 生の`cmux`はこのpolicyの外にある（dagqのCLIを通らない）。
+  inboxとplannerには、Claudeのsettingsの`permissions.deny`の`Bash(cmux:*)`を置き、上の`run` / `planner`のCLIを使わせる（[ADR-t1228-2](../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）。
+  これは**guardrailであってenforcementではない**: hostの判定は助言的なまま（ADR-t728-1決定6）で、絶対pathやscriptからの`cmux`は通り、`dagq inbox`を通さずに開いたinboxと`claude`を打ち直したsessionには効かない。
+  拒むのはあくまでCLIの判定で、cmuxを拒んだことでCLIの権限は変わらない。
+  workerとjobの`cmux`は拒まない（隔離が扱う）。
+  Codexのinboxは同じ趣旨をCodexの手段で持たせ、無ければguardrailが無いと[Security](security.md#判定の場所)に書く（決定6）。
+  settingsの場所・中身と`status` / `doctor`の`inbox_guardrail`は[`up` / `down`](supervisor-lifecycle/up-down.md)と[Security](security.md)が持つ
 
 #### 制御側の起動としての`supervise`と`auto-update`
 
 `supervise`と`auto-update`はruntimeの制御側（信頼する制御側。ADR-t728-1の決定2）のプロセスを始めるコマンドで、呼び出し元の環境で判定する:
 
-- `supervise`は`scheduler.supervise`を持つuser・inbox・supervisorだけが打てる。launchdのsupervisorは`DAGQ_ROLE`を持たない（user）ので、`up`を打ったのがplannerでも起動は通る（登録済みのin-cmuxのものは`DAGQ_ROLE=supervisor`で動く）。exec の引き継ぎ（`--handoff-token`）は同じ環境のまま自分をexecするので、同じroleで判定される。plannerは`supervise`を直接打てない（ADR-t728-1の決定7の表にschedulerは無い）。起動したプロセスのeventのactorは、呼び出し元ではなく`supervisor:<pid>`（`event_actor`）
-- `auto-update`は`install`と同じ`service.install`で、supervisorが自分の環境（`supervisor:<pid>`）で起動する。`install`と`auto-update`は新しいバイナリで`migrate --check`・`migrate`・使い捨てのqueueの`init`と`list`・`up`を子プロセスとして同じ環境のまま打つので、それを打つroleは`queue.admin`と`service.lifecycle`も持つ（supervisorに`queue.admin`を足したのはこのため）。人とinboxとplannerも`install`と同じ権限で打てる（手順の再現と復旧）。`observe`（`observe.run`）もsupervisorが自分の環境で起動し、その中のagentだけがobserverになる
+- `supervise`は`scheduler.supervise`を持つuser・inbox・supervisorだけが打てる。
+  launchdのsupervisorは`DAGQ_ROLE`を持たない（user）ので、`up`を打ったのがplannerでも起動は通る（登録済みのin-cmuxのものは`DAGQ_ROLE=supervisor`で動く）。
+  exec の引き継ぎは同じ環境のまま自分をexecするので、同じroleで判定される。
+  plannerは`supervise`を直接打てない（ADR-t728-1の決定7の表にschedulerは無い）。
+  起動したプロセスのeventのactorは、呼び出し元ではなく`supervisor:<pid>`（`event_actor`）
+- `auto-update`は`install`と同じ`service.install`で、supervisorが自分の環境（`supervisor:<pid>`）で起動する。
+  `install`と`auto-update`は新しいバイナリでの確認と`up`を子プロセスとして同じ環境のまま打つので、それを打つroleは`queue.admin`と`service.lifecycle`も持つ。
+  人とinboxとplannerも`install`と同じ権限で打てる（手順の再現と復旧）。
+  `observe`（`observe.run`）もsupervisorが自分の環境で起動し、その中のagentだけがobserverになる
 
-host実行ではこれも助言的で、`DAGQ_ROLE`を外せば誰でもuserになる（ADR-t728-1の決定6）。wrapperとhookをworkerの環境から分けて、信頼する制御側のwrapperのactor（`ActorRole::Wrapper`）として判定することは、queue service / brokerのgoal 38の後続にする。
+host実行ではこれも助言的で、`DAGQ_ROLE`を外せば誰でもuserになる（ADR-t728-1の決定6）。
+wrapperとhookをworkerの環境から分けて、信頼する制御側のwrapperのactor（`ActorRole::Wrapper`）として判定することは、queue service / brokerの後続にする。
 
 ### 着地とpush（Integrator）
 
-着地（rebase・再検証・squash・mainの更新）とpushは`src/application/integrate.rs`の`Integrator`だけが行う（[ADR-t728-2](../adr/2026-09-27-t728-2-landing-only-by-the-trusted-integrator.md)）。Integratorはrole `integrator`のactor（`integrator:<pid>`）で、`landing.land`と`landing.push`を持つのはこのroleだけ。`Integrator::acting_as(actor)`は`StaticPolicy`がこの2つを許すactorでなければ拒み（integrator以外の全てのroleが拒まれることをunit testが確かめる）、着地の関数（`begin`・`land_integrating`・`push_main`）はmoduleの外から呼べない。
+着地（rebase・再検証・squash・mainの更新）とpushは`src/application/integrate.rs`の`Integrator`だけが行う（[ADR-t728-2](../adr/2026-09-27-t728-2-landing-only-by-the-trusted-integrator.md)）。
+Integratorはrole `integrator`のactor（`integrator:<pid>`）で、`landing.land`と`landing.push`を持つのはこのroleだけ。
+`Integrator::acting_as(actor)`は`StaticPolicy`がこの2つを許すactorでなければ拒み、着地の関数はmoduleの外から呼べない。
 
-- **依頼**: supervisorの着地のthreadと、人（とinboxの代行）の`integrate`は`IntegrationRequest`（`requester`＝依頼者のactor、run、戻り先のstatus、着地先のmain、integrationのslotのtoken）を作り、`Integrator::land`に渡す。`integrate`は`Integrator::approve`がrunを選び、依頼者が`landing.request`を持つことを確かめてから（持たなければ何も記録せずに拒む）`integration_approved`を依頼者として記録し、slotを取って依頼を返す。supervisorはslotを自分で取り（`integration_started`はsupervisorの記録）、依頼者は`supervisor:<pid>`
-- **Integratorの検査**（`landing_refusal`）: 依頼者が`StaticPolicy`でそのrunに`landing.request`を持つこと（user・inbox・supervisor）、runが`integrating`で依頼のtokenがleaseを持つこと、runが着地を承認されている（`integration_approved`。人の`integrate`か`approve_landing`の`land`）か最新のreviewのverdictが`pass`であること。どれかが欠ければ着地せず、slotを持っていれば`abort_integration`で返して（`integration_error`、`code: other`）errorにする。reviewの`pass`は着地の必要条件で、この後のreceiptの再検査・rebase・検証コマンド・scopeの判定が落ちれば着地しない（ADR-t728-2の決定3）
-- **記録**: `Integrator::land`の間、queueのeventのactorはIntegrator（role `integrator`、id `integrator:<pid>`）で、`requested_by`は依頼者のactor id（人は`user`、inboxは`inbox`、supervisorは`supervisor:<pid>`）。`verification_command`・`integration_rebased`・`integration_deferred`・`run_integrated`・`push_finished` / `push_skipped` / `push_failed`などがこれにあたる。依頼と記録を切り替えるのはport `EventStore::act_as`と`EventStore::request_as`（抜けるときに`EventStore::restore_request`で入る前の依頼者に戻す）
+- **依頼**: supervisorの着地のthreadと、人（とinboxの代行）の`integrate`は`IntegrationRequest`を作り、`Integrator::land`に渡す。
+  `integrate`は`Integrator::approve`がrunを選び、依頼者が`landing.request`を持つことを確かめてから（持たなければ何も記録せずに拒む）`integration_approved`を依頼者として記録し、slotを取って依頼を返す。
+  supervisorはslotを自分で取り（`integration_started`はsupervisorの記録）、依頼者は`supervisor:<pid>`
+- **Integratorの検査**（`landing_refusal`）: 依頼者が`StaticPolicy`でそのrunに`landing.request`を持つこと（user・inbox・supervisor）、runが`integrating`で依頼のtokenがleaseを持つこと、runが着地を承認されている（`integration_approved`。人の`integrate`か`approve_landing`の`land`）か最新のreviewのverdictが`pass`であること。
+  どれかが欠ければ着地せず、slotを持っていれば`abort_integration`で返して（`integration_error`）errorにする。
+  reviewの`pass`は着地の必要条件で、この後のreceiptの再検査・rebase・検証コマンド・scopeの判定が落ちれば着地しない（ADR-t728-2の決定3）
+- **記録**: `Integrator::land`の間、queueのeventのactorはIntegrator（role `integrator`、id `integrator:<pid>`）で、`requested_by`は依頼者のactor id。
+  依頼と記録を切り替える入口はport `EventStore::act_as`
 - **push**: `MainRemote::push_main`は`PushGrant`を引数に取り、`PushGrant`はIntegratorが`landing.push`を確かめてからしか作れない（fieldがmoduleの外から見えない）ので、`GitRepository`のpushはIntegratorの外から呼べない
 
 host実行ではIntegratorはsupervisorや`integrate`と同じプロセスとユーザーで動き、この境界は論理的なもの（ADR-t728-2の決定4）。
 
 ### queue serviceのユースケース（service側）
 
-queue service（[Queue service](queue-service.md)、ADR-t1233-1決定4）は、要求のtokenから決めたprincipal（role・actor id・run・task）をactorにして、`ask`・`note`・`finding_record`・`finding_resolve`・`finding_dismiss`を上の「対話と記録のコマンド」と同じ`Dialogue`に、`show`を`Gate`の`queue.read`（task）に、`proposal_list`・`proposal_show`を`queue.read`（queue。CLIの`proposal list|show`と同じ）に通す。findingの書き込みもCLIと同じpolicyで判定する（ADR-t1222-1決定2）: observerは`finding.record`・`finding.resolve`と、findingに紐づく`blocked`のaskの`finding.ask`だけを持ち、`finding.dismiss`・`note.write`・findingに紐づかないaskの`ask.open`は拒まれる。workerとjobはfindingを書けない。inboxとplannerは上の表のとおり（inboxは全て、plannerは`finding.resolve`・`finding.dismiss`）。クライアントが名乗るroleは使わない（workerとjobのクライアントモードのdagqは`DAGQ_ROLE`を読まず、そのtokenのprincipalで判定される。[クライアントモード](queue-service.md#クライアントモード)）。拒否は同じ`authorization_denied`（拒まれたprincipalがactor）に残る。tokenを発行するのは制御側だけで、AI actorにtokenを作るコマンドは無い。goal 82では読み取りを狭めず、全roleがqueue全体を読める（ADR-t1233-5決定3）。queue全体の読み取りのユースケース（`list`・`events`・`timeline`・`stats`・`kpi`・`forecast`・`marks`・`search`・`related`・`findings`・`goal_show`など。一覧は[Queue service](queue-service.md#読み取りのユースケース)）は、CLIがその読み取りのコマンドに求めるのと同じ`queue.read`（queue）を`Gate`でprincipalに通してから答えるので、workerとjob（review・復旧・plan review・goal review・スループットの見直し・observer）も読める。CLIで`queue.watch`の`watch`と`export.file`の`report`・`graph --out`はユースケースが無く（`bad_request`）、paramsは書き出すファイルも実行するprogram（`stats`の`--cmux`など）も受け取らず、hostのd2を起動する`graph --format svg`も受け取らない。
+queue service（[Queue service](queue-service.md)、ADR-t1233-1決定4）は、要求のtokenから決めたprincipalをactorにして、対話と記録のユースケースを上の「対話と記録のコマンド」と同じ`Dialogue`に、`show`を`Gate`の`queue.read`（task）に、`proposal_list`・`proposal_show`を`queue.read`（queue。CLIの`proposal list|show`と同じ）に通す。
+findingの書き込みもCLIと同じpolicyで判定する（ADR-t1222-1決定2）。
+クライアントが名乗るroleは使わない（workerとjobのクライアントモードのdagqは`DAGQ_ROLE`を読まず、そのtokenのprincipalで判定される。[クライアントモード](queue-service.md#クライアントモード)）。
+拒否は同じ`authorization_denied`（拒まれたprincipalがactor）に残る。
+tokenを発行するのは制御側だけで、AI actorにtokenを作るコマンドは無い。
+読み取りは狭めず、全roleがqueue全体を読める（ADR-t1233-5決定3）。
+queue全体の読み取りのユースケース（一覧は[Queue service](queue-service.md#読み取りのユースケース)）は、CLIがその読み取りのコマンドに求めるのと同じ`queue.read`（queue）を`Gate`でprincipalに通してから答えるので、workerとjobも読める。
+CLIで`queue.watch`の`watch`と`queue.export`の`report`・`graph --out`はユースケースが無く（`bad_request`）、paramsは書き出すファイルも実行するprogramも受け取らず、hostのd2を起動する`graph --format svg`も受け取らない。
 
 ### ほかのコマンド（CLIの入口）
 
-上の3つ以外のコマンド（読み取り・`watch`・`graph --out`・`report`・`ci failures`）は状態を変えない。これらはroleを問わず（default deny）`src/main.rs`の`check_access`が`requests`の全てで`StaticPolicy`に通す。拒んだときだけ、runtimeの操作と同じ`src/infrastructure/denials.rs`の`QueueDenials`（判定の後でだけqueueを開く）で`authorization_denied`を、拒まれた呼び出し元をactorにして記録する（payloadは計画系と同じ`role`・`capability`・`reason`・`resource`）。queueが無い・このバイナリが開けないときは記録せず、拒否は拒否のまま返す。通った読み取りは今までどおりqueueを読み取り専用で開き、書かない（ADR-0073決定5・7・18）。読み取り（`queue.read`）は全roleが持つ。`watch`（`queue.watch`）はuser・inbox・planner・supervisor・observer、`graph --out`と`report`（`queue.export`）はuser・inbox・planner・supervisorだけが持ち、`ci failures`（`ci.read`）はuser・inbox・planner・observer・supervisorだけが持ち、worker・wrapper・integratorとheadlessのjob（と旧値`reviewer`）のそれらは拒まれる。observerとjobの拒否のerrorの文は以前の`observer_access` / `reviewer_access`のもの（`observer may not change queue state`など）のまま。
+上の3つ以外のコマンド（読み取り・`watch`・`graph --out`・`report`・`ci failures`）は状態を変えない。
+これらはroleを問わず（default deny）`src/main.rs`の`check_access`が`requests`の全てで`StaticPolicy`に通す。
+拒んだときだけ、runtimeの操作と同じ`src/infrastructure/denials.rs`の`QueueDenials`（判定の後でだけqueueを開く）で`authorization_denied`を、拒まれた呼び出し元をactorにして記録する（payloadは計画系と同じ）。
+queueが無い・このバイナリが開けないときは記録せず、拒否は拒否のまま返す。
+通った読み取りはqueueを読み取り専用で開き、書かない（ADR-0073決定5・7・18）。
+誰が持つかは上のPolicyの表のとおり。
+observerとjobの拒否のerrorの文は計画系と同じ。
 
 ## Claudeのpermissions.deny（guardrail）
 
-多層防御の1枚として、runtimeがClaude Codeの設定を書くactor（worker・planner・review job・inbox。[Roles](supervisor-lifecycle/roles.md#actorの起動actorexecutor)）の`permissions.deny`に、roleのpolicyから作った規則を入れる（`src/application/execution.rs`の`permission_deny(role)`）。
+多層防御の1枚として、runtimeがClaude Codeの設定を書くactor（worker・planner・review job・inbox。[Roles](supervisor-lifecycle/roles.md#actorの起動actorexecutor)）の`permissions.deny`に、roleのpolicyから作った規則を入れる（`src/application/execution.rs`の`permission_deny(role)`。規則の中身はそのdoc comment）。
 
-- `DAGQ_COMMANDS`はroleによって拒まれうる`dagq`のsubcommand（状態を変えるものと`watch`（`queue.watch`）・`report`（`queue.export`）・`ci failures`（`ci.read`））と、その形のどれかが要るcapabilityの表（`ready`は`task.ready`と`task.ready_bypass_review`、`ask`は`ask.open`・`finding.ask`・`ask.close`など）。
-  roleの`grants`がどれも持たないcommandを`Bash(dagq <command>:*)`で拒む（例: workerは`Bash(dagq integrate:*)`・`Bash(dagq answer:*)`・`Bash(dagq ready:*)`・`Bash(dagq ask close:*)`、plannerは`integrate`・`answer`・`ready`・`recover`・`supervise`・`run screen`・`run send`・`planner screen`・`planner send`）。
-  読み取りの形を持つcommand（`observe`は`--history`が読み取りなので`observe`ごと、`graph`）は表に入れない。
+- `DAGQ_COMMANDS`はroleによって拒まれうる`dagq`のsubcommandと、その形のどれかが要るcapabilityの表。
+  roleの`grants`がどれも持たないcommandを`Bash(dagq <command>:*)`で拒む。
   表と`src/main.rs`の`requests`が食い違わないことはunit testが確かめる。
-  clapの全subcommand（`goal close`のような入れ子を含む。`DAGQ_COMMANDS`の親の項目（`dependency`）はその下を覆い、subcommandを必ず取る親（`goal`・`finding`・`proposal`）は自分の項目が要らない。自分の形を持つ親（`ask`）は自分の項目が要る）が`DAGQ_COMMANDS`か、`src/main.rs`のtestの`LEFT_OUT_COMMANDS`（読み取り、読み取りの形を持つ`graph`・`observe`、queueを開かない`relay`、queueを開かずgitの差分だけを読むbuilt-inのprogramの`review-program`）のどちらかにあることもunit test（`every_subcommand_is_denied_or_left_out_on_purpose`）が確かめ、どちらにも無いsubcommandを足すと落ちる。
+  clapの全subcommandが`DAGQ_COMMANDS`か、`src/main.rs`のtestの`LEFT_OUT_COMMANDS`のどちらかにあることもunit testが確かめ、どちらにも無いsubcommandを足すと落ちる。
   roleによって拒まれうるsubcommandを足したら、読み取りの形を持つものを除いて表に入れる。
-- actorを名指す変数（`DAGQ_ROLE`・`DAGQ_ACTOR_ID`・`DAGQ_RUN_ID`・`DAGQ_TASK_ID`）の書き換え（`<名前>=...`・`export`・`env <名前>=`・`env -u`・`unset`）も全roleで拒む。
-- inboxとplannerには最後に`Bash(cmux:*)`（`RAW_CMUX_DENIED`、`RAW_CMUX_DENIED_ROLES`）も足す（[ADR-t1228-2](../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）。workerとjobには足さない（決定7）。
-- workerとplannerのsession・turnの設定とreview jobの設定では、`SIGNAL_BY_NAME_DENIED`（`pkill`・`killall`）の後に置く（turnの設定（`claude-headless-settings.json`）ではその間に`AskUserQuestion`と予約の道具（`PRINT_MODE_DENIED_TOOLS`）を挟む。[非対話のworker](supervisor-lifecycle/headless-worker.md)。review jobの設定はroleの規則だけ）。inboxの設定（`up`が書く`claude-inbox-settings.json`、[`up` / `down`](supervisor-lifecycle/up-down.md)）は`permissions.deny`だけで、roleの規則だけを持ち、`SIGNAL_BY_NAME_DENIED`は入れない。
+- actorを名指す変数（`IDENTITY_ENV`）の書き換えも全roleで拒む。
+- inboxとplannerには最後に`Bash(cmux:*)`（`RAW_CMUX_DENIED`）も足す（[ADR-t1228-2](../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）。
+  workerとjobには足さない（決定7）。
+- workerとplannerのsession・turnの設定とreview jobの設定では、`SIGNAL_BY_NAME_DENIED`の後に置く（turnの設定ではその間に`AskUserQuestion`と予約の道具を挟む。[非対話のworker](supervisor-lifecycle/headless-worker.md)。review jobの設定はroleの規則だけ）。
+  inboxの設定（[`up` / `down`](supervisor-lifecycle/up-down.md)）は`permissions.deny`だけで、roleの規則だけを持ち、`SIGNAL_BY_NAME_DENIED`は入れない。
 
-これはguardrailでenforcementではない。Claude Codeの規則はコマンドの先頭の形しか見ないので、pathで打つ`~/.local/bin/dagq integrate`、pluginのskillが使う`"$DAGQ" ...`や`${CLAUDE_PLUGIN_ROOT}/bin/dagq ...`、subcommandの前にglobalのflagを置く`dagq --db X integrate`、`sh -c`、scriptの中からの呼び出しは通る。拒む判定はCLIの`Authorizer`（上の「適用の範囲」）がする。どちらもhostではadvisoryで、隔離は将来のsandboxのbackend（[Roles](supervisor-lifecycle/roles.md#実行のbackendとenforcement)）が担う。
+これはguardrailでenforcementではない。
+Claude Codeの規則はコマンドの先頭の形しか見ないので、pathで打つ`~/.local/bin/dagq integrate`、pluginのskillが使う`"$DAGQ" ...`や`${CLAUDE_PLUGIN_ROOT}/bin/dagq ...`、subcommandの前にglobalのflagを置く`dagq --db X integrate`、`sh -c`、scriptの中からの呼び出しは通る。
+拒む判定はCLIの`Authorizer`（上の「適用の範囲」）がする。
+どちらもhostではadvisoryで、隔離は将来のsandboxのbackend（[Roles](supervisor-lifecycle/roles.md#実行のbackendとenforcement)）が担う。
 
-このすり抜けを塞ぐために、規則をwildcardで広げること（例: `Bash(* integrate*)`や`Bash(*dagq* integrate:*)`で`"$DAGQ" integrate`・`${CLAUDE_PLUGIN_ROOT}/bin/dagq integrate`・`dagq --db X integrate`も拒む）はしない（2026-09-28 plannerの判断）。理由:
+このすり抜けを塞ぐために、規則をwildcardで広げること（例: `Bash(* integrate*)`や`Bash(*dagq* integrate:*)`）はしない。
+理由:
 
-1. 誤検出が大きい。subcommandの名前は日常の語なので、workerが作業で打つ`cargo test --locked --test it integrate::`・`git log --grep integrate`・`rg integrate`・`rg 'ready'`なども拒まれ、作業が止まる。
-2. 広げてもenforcementにならない。`sh -c`・script・変数に入れたcommandの名前からは今までどおり通るので、守れる範囲は少ししか増えない。
-3. 拒む判定はCLIの`Authorizer`がすでにする。guardrailは「間違いで打つのを先に止める」ためのもので、pathやglobal flagの形で打った呼び出しもCLIが拒み、`authorization_denied`に記録する。
+1. 誤検出が大きい。
+   subcommandの名前は日常の語なので、workerが作業で打つ`git log --grep integrate`や`rg 'ready'`なども拒まれ、作業が止まる。
+2. 広げてもenforcementにならない。
+   `sh -c`・script・変数に入れたcommandの名前からは通るので、守れる範囲は少ししか増えない。
+3. 拒む判定はCLIの`Authorizer`がすでにする。
+   guardrailは「間違いで打つのを先に止める」ためのもので、pathやglobal flagの形で打った呼び出しもCLIが拒み、`authorization_denied`に記録する。
 
 規則の形は`Bash(dagq <command>:*)`と識別の変数の書き換えのままにする。
 
 ## CIの見張り（ADR-t1920-1）
 
 [ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)と[CI watch](supervisor-lifecycle/ci-watch.md)。
-読むコマンド`dagq ci failures`のcapabilityは`ci.read`（`Capability::CiRead`）で、user・inbox・planner・observer・supervisorが持ち、worker・wrapper・integratorとjob（review・recovery・plan review・goal review・throughput review）には許さない（一覧はworkerとrunの全体のreviewにはpromptとrun directoryのファイルで渡す）。
-`DAGQ_COMMANDS`の`("ci failures", &[C::CiRead])`により、workerとjobのClaudeの`permissions.deny`に`Bash(dagq ci failures:*)`が入る。
-`finding dismiss --covered-by`は今の`finding.dismiss`のままで、表は変えない。
+読むコマンド`dagq ci failures`のcapabilityは`ci.read`（`Capability::CiRead`）で、誰が持つかはPolicyの表のとおり（一覧はworkerとrunの全体のreviewにはpromptとrun directoryのファイルで渡す）。
+`DAGQ_COMMANDS`により、`ci.read`を持たないroleのClaudeの`permissions.deny`に`Bash(dagq ci failures:*)`が入る。
+`finding dismiss --covered-by`も`finding.dismiss`で判定する。

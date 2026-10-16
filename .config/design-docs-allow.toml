@@ -19,23 +19,13 @@
 
 [[doc]]
 path = "docs/design/authorization.md"
-size = 49549
-line = 2281
+size = 41453
+line = 1659
 
 [[doc]]
 path = "docs/design/overview.md"
 size = 16782
 line = 1105
-
-[[doc]]
-path = "docs/design/plugin-integration.md"
-size = 55208
-line = 4652
-
-[[doc]]
-path = "docs/design/queue-service.md"
-size = 35535
-line = 1502
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/ask.md"
