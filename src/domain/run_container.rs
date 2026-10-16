@@ -67,6 +67,17 @@ pub fn without_sccache_wrapper(
     Some(named)
 }
 
+/// The exit code `podman run` gives when podman itself failed: the
+/// container was not made or not started, so its command did not run.
+pub const PODMAN_ERROR_EXIT: i32 = 125;
+
+/// Whether `podman run`'s exit `code` says podman itself failed
+/// ([`PODMAN_ERROR_EXIT`]) rather than the container's command: a command
+/// that ran exits with its own code, and one cut off by a signal has none.
+pub const fn podman_failed(code: Option<i32>) -> bool {
+    matches!(code, Some(PODMAN_ERROR_EXIT))
+}
+
 /// The limits of each run's container (ADR-t2257-1 decision 6), from the
 /// `[container]` table of the host-wide `host.toml` (`memory_mib`, `cpus`,
 /// `pids`); a key left out keeps its default. The defaults are modest so
@@ -468,6 +479,17 @@ pub fn turn_env(run: &str, token: &str) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only podman's own failure says the command did not run: the
+    /// command's codes, 126 and 127 of a shell among them, and a signal are
+    /// the command's.
+    #[test]
+    fn only_podman_s_own_exit_code_says_the_container_did_not_start() {
+        assert!(podman_failed(Some(PODMAN_ERROR_EXIT)));
+        for code in [Some(0), Some(1), Some(101), Some(126), Some(127), None] {
+            assert!(!podman_failed(code), "{code:?}");
+        }
+    }
     use std::path::PathBuf;
 
     fn key() -> QueueKey {

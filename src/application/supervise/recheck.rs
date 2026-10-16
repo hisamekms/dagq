@@ -14,6 +14,10 @@
 //! its time limit; ADR-t639-1) judges nothing: the run keeps waiting to
 //! land, neither parked nor held. A run found still landing records that
 //! (ADR-t1311-1). Either way the run's open asks show the latest finding.
+//! The command of a run whose worker works in a container runs in a
+//! verification's container, as `integrate`'s verification does, never on
+//! the host; with no such container it is not run and judges nothing, as
+//! a command that failed on the host (ADR-t2424-1).
 
 use super::*;
 use crate::domain::EventKind;
@@ -178,9 +182,9 @@ struct Tally {
     command_skipped: u64,
     conflicts: u64,
     check_failed: u64,
-    /// Of the failed commands, those that failed on the host
-    /// ([`RecheckFailure::is_environmental`]): counted apart from
-    /// `check_failed`, they resumed and held nothing.
+    /// Of the failed commands, those that failed on the host or found no
+    /// container to run in ([`RecheckFailure::is_environmental`]): counted
+    /// apart from `check_failed`, they resumed and held nothing.
     environment: u64,
     errors: u64,
     resumed: u64,
@@ -212,10 +216,10 @@ impl Tally {
         self.checked += 1;
         match failure {
             RecheckFailure::Conflict { .. } => self.conflicts += 1,
-            RecheckFailure::CheckFailed { .. } if failure.is_environmental() => {
-                self.environment += 1;
+            _ if failure.is_environmental() => self.environment += 1,
+            RecheckFailure::CheckFailed { .. } | RecheckFailure::ContainerRefused { .. } => {
+                self.check_failed += 1;
             }
-            RecheckFailure::CheckFailed { .. } => self.check_failed += 1,
         }
         let Some(action) = action else {
             return;
@@ -295,10 +299,29 @@ pub(super) struct Target {
     run_dir: PathBuf,
     /// Held in a slot of this supervisor to land (not waiting unleased).
     held: bool,
-    /// A run in a container, whose commits the git of the recheck handles
-    /// guarded (ADR-t2179-1 decision 8).
-    in_container: bool,
+    /// The run when its worker works in a container: the git of the
+    /// recheck handles its commits guarded (ADR-t2179-1 decision 8), and
+    /// its command runs in a verification's container (ADR-t2424-1).
+    container: Option<TaskRun>,
 }
+
+/// Where the commands of the runs in a container run (ADR-t2424-1): in a
+/// verification's container of their own, or, when `dagq.toml` does not
+/// set the verification to the container or the container cannot be used,
+/// nowhere, for `Refused`'s reason; never on the host instead.
+#[derive(Clone)]
+enum InContainer {
+    Run {
+        containers: Arc<dyn crate::application::run_container::VerificationContainers>,
+        tokens: Arc<dyn crate::application::queue_broker::VerificationTokens>,
+    },
+    Refused(String),
+}
+
+/// One run the recheck checked: what it found, and the port of the
+/// sccache whose wrapper was taken out of the command's environment in a
+/// container (a run in a container whose command ran).
+type Checked = (Target, Finding, Option<u16>);
 
 /// What the recheck found for one run.
 #[derive(Debug)]
@@ -323,7 +346,7 @@ pub(super) struct RecheckWatch {
     main: CommitSha,
     command: Option<String>,
     started: Instant,
-    handle: Option<thread::JoinHandle<Vec<(Target, Finding)>>>,
+    handle: Option<thread::JoinHandle<Vec<Checked>>>,
     /// The queue's recheck lock, held until the recheck is recorded.
     _lock: Box<dyn std::any::Any + Send>,
 }
@@ -568,7 +591,7 @@ impl Supervisor<'_> {
                 head: head.clone(),
                 run_dir: PathBuf::from(run_dir),
                 held,
-                in_container: run.in_container(),
+                container: run.in_container().then(|| run.clone()),
             });
         }
         Ok(targets)
@@ -614,19 +637,25 @@ impl Supervisor<'_> {
                 .map(|c| format!("; command {c:?}"))
                 .unwrap_or_default()
         );
+        let in_container = (command.is_some()
+            && targets.iter().any(|target| target.container.is_some()))
+        .then(|| self.recheck_container());
         let repository = self.repository.clone();
         let verifier = self.verifier.clone();
         let files = self.files.clone();
         let on = main.clone();
         let handle = spawn_traced(move || {
             recheck_runs(
-                &*repository,
-                &*verifier,
-                &*files,
-                &on,
-                &config,
-                &dir,
-                &look,
+                &Recheck {
+                    repository: &*repository,
+                    verifier: &*verifier,
+                    files: &*files,
+                    main: &on,
+                    config: &config,
+                    dir: &dir,
+                    look: &look,
+                    in_container: in_container.as_ref(),
+                },
                 targets,
             )
         });
@@ -642,12 +671,40 @@ impl Supervisor<'_> {
         Ok(())
     }
 
+    /// Where the commands of the runs in a container run ([`InContainer`]):
+    /// in a verification's container when `dagq.toml` sets the verification
+    /// to the container and it can be used now, refused otherwise.
+    fn recheck_container(&self) -> InContainer {
+        match container_refusal(self.verifier.runtimes(), |target| {
+            self.container.availability(target)
+        }) {
+            Some(why) => InContainer::Refused(why),
+            None => InContainer::Run {
+                containers: self.verification_containers.clone(),
+                tokens: self.verification_tokens.clone(),
+            },
+        }
+    }
+
     /// Record what a recheck found: each finding, failed or clean, on its
     /// run (and its open asks), and `landing_recheck_finished` with the counts on the run
     /// whose landing it followed (or the first run it checked).
-    fn apply_recheck(&mut self, watch: &RecheckWatch, found: Vec<(Target, Finding)>) -> Result<()> {
+    fn apply_recheck(&mut self, watch: &RecheckWatch, found: Vec<Checked>) -> Result<()> {
         let mut tally = Tally::default();
-        for (target, finding) in found {
+        for (target, finding, removed) in found {
+            if let Some(port) = removed {
+                self.with_env(|env| {
+                    crate::application::sccache::record_wrapper_removed(
+                        &*env.queue,
+                        &target.run_id,
+                        env.generators.clock.now(),
+                        "supervisor",
+                        port,
+                        "the landing recheck's command runs in a container, which has no protected cache to compile with",
+                        json!({"job": "recheck", "runtime": "container"}),
+                    );
+                });
+            }
             let failure = match finding {
                 Finding::Clean { skipped_by_paths } => {
                     tally.clean(skipped_by_paths);
@@ -750,7 +807,8 @@ impl Supervisor<'_> {
     /// nobody leases is parked for a resume in the same transaction; one
     /// this supervisor holds in a slot records it as held and is parked
     /// when it would land. A command that failed on the host does neither
-    /// (ADR-t639-1): the finding is recorded as [`SKIPPED`] and the run
+    /// (ADR-t639-1), nor does one with no container to run in
+    /// (ADR-t2424-1): the finding is recorded as [`SKIPPED`] and the run
     /// keeps waiting to land as it was, held by integrate's control of a
     /// host failure or not. Every way its open asks get the finding.
     /// `None` when the run moved on since it was checked (another head,
@@ -779,8 +837,13 @@ impl Supervisor<'_> {
             payload["status"] = json!(run.status());
             self.queue
                 .record_runtime_event(run.id(), EventKind::LandingRecheckFailed, payload)?;
-            warn!(run_id = %run.id(), "run {}: {reason}; the host kept the command from judging the code, so the run keeps waiting to land", run.id());
-            let note = recheck::skipped_ask_note(&reason);
+            let note = if matches!(failure, RecheckFailure::ContainerRefused { .. }) {
+                warn!(run_id = %run.id(), "run {}: {reason}; nothing judged the code, so the run keeps waiting to land", run.id());
+                recheck::refused_ask_note(&reason)
+            } else {
+                warn!(run_id = %run.id(), "run {}: {reason}; the host kept the command from judging the code, so the run keeps waiting to land", run.id());
+                recheck::skipped_ask_note(&reason)
+            };
             for ask in self
                 .queue
                 .note_on_asks(run.id(), &note, LANDING_RECHECK_FAILED)?
@@ -864,54 +927,95 @@ impl Supervisor<'_> {
     }
 }
 
+/// Why the commands of the runs in a container have no container to run
+/// in (ADR-t2424-1), given the runtimes `dagq.toml` sets (`runtimes`) and
+/// whether the container runtime can run a target (`available`): the
+/// runtimes cannot be read, the verification is set to the host, or its
+/// container cannot be used. `None` when it can run them.
+fn container_refusal(
+    runtimes: Result<crate::domain::container_runtime::RuntimeConfig>,
+    available: impl Fn(
+        crate::domain::container_runtime::RuntimeTarget,
+    ) -> crate::domain::container_runtime::Availability,
+) -> Option<String> {
+    use crate::domain::container_runtime::{ContainerCheck, Runtime, RuntimeTarget};
+    let runtimes = match runtimes {
+        Ok(runtimes) => runtimes,
+        Err(error) => {
+            return Some(format!(
+                "the runtimes of dagq.toml cannot be read: {error:#}"
+            ));
+        }
+    };
+    if runtimes.verification == Runtime::Host {
+        return Some(
+            "dagq.toml sets the verification's runtime to the host, whose verification does not run the code of a run in a container".to_owned(),
+        );
+    }
+    ContainerCheck::of(&runtimes, available)
+        .why(RuntimeTarget::Verification)
+        .map(|why| format!("the verification's container cannot be used: {why}"))
+}
+
+/// What a recheck checks its targets with, on its thread.
+struct Recheck<'a> {
+    repository: &'a dyn Repository,
+    verifier: &'a dyn Verifier,
+    files: &'a dyn RunFiles,
+    main: &'a CommitSha,
+    config: &'a RecheckConfig,
+    dir: &'a Path,
+    look: &'a GuardLook,
+    /// Where the commands of the runs in a container run; `None` when no
+    /// command of such a run is to run.
+    in_container: Option<&'a InContainer>,
+}
+
 /// Check each target against `main`, one after another (ADR-0068 decision
 /// 2): `git merge-tree` first; a clean merge, when there is a `command`
 /// and the merged tree differs from main in a path of `[recheck] paths`
-/// (or there are none, ADR-t2032-1), is committed on top of main, checked out in the scratch worktree under
-/// `dir` and the command run there in `/bin/sh` with the run's `[run.env]`
+/// (or there are none, ADR-t2032-1), is committed on top of main and the
+/// command run on it, its output in `recheck-<main>.log` of the run
+/// directory. A run on the host has it checked out in the scratch worktree
+/// under `dir` and run there in `/bin/sh` with the run's `[run.env]`
 /// (refused the sccache server's start and guarded as `look` says,
 /// ADR-t2086-1) and `CARGO_TARGET_DIR` set to the one target directory
-/// under `dir`, its output in `recheck-<main>.log` of the run directory.
-#[allow(clippy::too_many_arguments)]
-fn recheck_runs(
-    repository: &dyn Repository,
-    verifier: &dyn Verifier,
-    files: &dyn RunFiles,
-    main: &CommitSha,
-    config: &RecheckConfig,
-    dir: &Path,
-    look: &GuardLook,
-    targets: Vec<Target>,
-) -> Vec<(Target, Finding)> {
+/// under `dir`. A run in a container has it run in a verification's
+/// container, as `in_container` says ([`run_in_container`]).
+fn recheck_runs(recheck: &Recheck<'_>, targets: Vec<Target>) -> Vec<Checked> {
     targets
         .into_iter()
         .map(|target| {
-            let finding = recheck_run(
-                repository, verifier, files, main, config, dir, look, &target,
-            )
-            .unwrap_or_else(|error| Finding::Error(format!("{error:#}")));
-            (target, finding)
+            let mut removed = None;
+            let finding = recheck_run(recheck, &target, &mut removed)
+                .unwrap_or_else(|error| Finding::Error(format!("{error:#}")));
+            (target, finding, removed)
         })
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
+/// `removed` is set to the port of the sccache whose wrapper a container's
+/// command was run without.
 fn recheck_run(
-    repository: &dyn Repository,
-    verifier: &dyn Verifier,
-    files: &dyn RunFiles,
-    main: &CommitSha,
-    config: &RecheckConfig,
-    dir: &Path,
-    look: &GuardLook,
+    recheck: &Recheck<'_>,
     target: &Target,
+    removed: &mut Option<u16>,
 ) -> Result<Finding> {
+    let Recheck {
+        verifier,
+        files,
+        main,
+        config,
+        dir,
+        look,
+        ..
+    } = *recheck;
     let guarded;
-    let repository = if target.in_container {
-        guarded = repository.guarded()?;
+    let repository = if target.container.is_some() {
+        guarded = recheck.repository.guarded()?;
         &*guarded
     } else {
-        repository
+        recheck.repository
     };
     let tree = match repository.merged_tree(main.as_str(), target.head.as_str())? {
         Ok(tree) => tree,
@@ -932,6 +1036,21 @@ fn recheck_run(
             skipped_by_paths: true,
         });
     }
+    let refused = |why: String| {
+        Ok(Finding::Failed(RecheckFailure::ContainerRefused {
+            command: command.to_owned(),
+            why,
+        }))
+    };
+    // Refused before anything is made for it.
+    let in_container = match (&target.container, recheck.in_container) {
+        (None, _) => None,
+        (Some(_), Some(InContainer::Refused(why))) => return refused(why.clone()),
+        (Some(_), None) => return refused("no container was looked at".to_owned()),
+        (Some(run), Some(InContainer::Run { containers, tokens })) => {
+            Some((run, &**containers, &**tokens))
+        }
+    };
     let merged = repository.commit_tree(
         &tree,
         main.as_str(),
@@ -940,17 +1059,51 @@ fn recheck_run(
             target.run_id
         )],
     )?;
-    let scratch = dir.join("worktree");
-    files.create_dir_all(dir)?;
-    repository.checkout_scratch(&scratch, merged.as_str())?;
-    let env = recheck_env(verifier.run_env(&target.run_dir)?, dir, look)?;
     // The profiles the repository declares read the output (ADR-t2268-1),
     // resolved before the command so a mistake in them does not cost it.
     let toolchains = verifier.toolchains()?;
     let log = target
         .run_dir
         .join(format!("recheck-{}.log", &main.as_str()[..12]));
-    let (code, signal, timed_out) = match verifier.run_to_log(command, &scratch, &env, &log) {
+    let status = match in_container {
+        None => {
+            let scratch = dir.join("worktree");
+            files.create_dir_all(dir)?;
+            repository.checkout_scratch(&scratch, merged.as_str())?;
+            let env = recheck_env(verifier.run_env(&target.run_dir)?, dir, look)?;
+            verifier.run_to_log(command, &scratch, &env, &log)
+        }
+        Some((run, containers, tokens)) => {
+            let ran = run_in_container(
+                &InRecheck {
+                    containers,
+                    tokens,
+                    verifier,
+                },
+                run,
+                &merged,
+                command,
+                &log,
+                removed,
+            );
+            match ran {
+                // Its limit is the command's, as on the host.
+                Err(error) if error.downcast_ref::<CommandTimedOut>().is_none() => {
+                    return refused(format!("{error:#}"));
+                }
+                // podman made or started no container: the command did not
+                // run, so nothing was judged.
+                Ok(exit) if crate::domain::run_container::podman_failed(exit.code) => {
+                    return refused(format!(
+                        "podman did not start the container ({exit}); see {}",
+                        log.display()
+                    ));
+                }
+                status => status,
+            }
+        }
+    };
+    let (code, signal, timed_out) = match status {
         Ok(exit) if exit.success => {
             return Ok(Finding::Clean {
                 skipped_by_paths: false,
@@ -980,6 +1133,85 @@ fn recheck_run(
         output_tail: tail(&output, 2000).to_owned(),
         failure,
     }))
+}
+
+/// Run `command` of the run `run` in a container in the dagq machine on a
+/// clone of `merged`, main with the run merged in (ADR-t2424-1), as
+/// `integrate`'s verification runs its commands: with a token of the
+/// recheck's own that reaches the registries alone, the run's `[run.env]`
+/// without the sccache wrapper (no protected cache, ADR-t2114-4 decision
+/// 4), no cache of the workers' or the host's and no materials (the
+/// verification's empty staged directory in their place, so nothing is
+/// written in the run directory but the log), its output in `log`. What
+/// the container left and the token go when it ends, however it ends.
+/// `Err` when it could not be made ready or started. `removed` is set to
+/// the port of the sccache whose wrapper the command ran without.
+fn run_in_container(
+    with: &InRecheck<'_>,
+    run: &TaskRun,
+    merged: &CommitSha,
+    command: &str,
+    log: &Path,
+    removed: &mut Option<u16>,
+) -> Result<crate::application::Exit> {
+    let InRecheck {
+        containers,
+        tokens,
+        verifier,
+    } = *with;
+    use crate::application::queue_broker::{TokenFor, VerificationToken};
+    use crate::application::run_container::{PreparedVerification, verification_line};
+    let run_dir = Path::new(run.run_dir().context("missing run directory")?);
+    let token = VerificationToken::issue(tokens, run.id(), TokenFor::Recheck)?;
+    let prepared = containers
+        .prepare(run, merged, &token.file)
+        .context("make the verification's container ready")?;
+    let prepared = PreparedVerification {
+        materials: prepared.staged.clone(),
+        ..prepared
+    };
+    let finished = Finished {
+        containers,
+        prepared: &prepared,
+        run: run.id(),
+    };
+    let mut env = verifier.run_env(run_dir)?;
+    let wrapper = crate::domain::run_container::without_sccache_wrapper(&mut env).map(|t| t.port);
+    let line = verification_line(containers, &prepared, run.id(), command, &env)?;
+    let status = verifier.run_to_log(&line, run_dir, &[], log);
+    // Only a command that ran went without the wrapper.
+    let ran = match &status {
+        Ok(exit) => !crate::domain::run_container::podman_failed(exit.code),
+        Err(error) => error.downcast_ref::<CommandTimedOut>().is_some(),
+    };
+    if ran {
+        *removed = wrapper;
+    }
+    drop(finished);
+    drop(token);
+    status
+}
+
+/// What runs a recheck's command in a container.
+struct InRecheck<'a> {
+    containers: &'a dyn crate::application::run_container::VerificationContainers,
+    tokens: &'a dyn crate::application::queue_broker::VerificationTokens,
+    verifier: &'a dyn Verifier,
+}
+
+/// Removes what a recheck's container left when it goes.
+struct Finished<'a> {
+    containers: &'a dyn crate::application::run_container::VerificationContainers,
+    prepared: &'a crate::application::run_container::PreparedVerification,
+    run: &'a RunId,
+}
+
+impl Drop for Finished<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = self.containers.finish(self.prepared) {
+            warn!(run_id = %self.run, "run {}: what the landing recheck's container {} left could not all be removed: {error:#}", self.run, self.prepared.id);
+        }
+    }
 }
 
 /// The command's environment: the run's `[run.env]` with the recheck's one
@@ -1049,6 +1281,35 @@ mod tests {
         );
     }
 
+    /// The commands of the runs in a container have a container only when
+    /// `dagq.toml` sets the verification to the container and it can be
+    /// used; otherwise the refusal says why (ADR-t2424-1).
+    #[test]
+    fn a_run_in_a_container_has_a_container_only_when_the_verification_can_use_one() {
+        use crate::domain::container_runtime::{Availability, Runtime, RuntimeConfig};
+        let config = |verification| {
+            Ok(RuntimeConfig {
+                worker: Runtime::Container,
+                verification,
+            })
+        };
+        let usable = |_| Availability::Available;
+        let unusable = |_| Availability::Unavailable("the dagq machine is not running".to_owned());
+        assert_eq!(container_refusal(config(Runtime::Container), usable), None);
+        let host = container_refusal(config(Runtime::Host), usable).unwrap();
+        assert!(
+            host.contains("sets the verification's runtime to the host"),
+            "{host}"
+        );
+        let down = container_refusal(config(Runtime::Container), unusable).unwrap();
+        assert!(
+            down.ends_with("cannot be used: the dagq machine is not running"),
+            "{down}"
+        );
+        let unread = container_refusal(Err(anyhow::anyhow!("bad toml")), usable).unwrap();
+        assert!(unread.ends_with("cannot be read: bad toml"), "{unread}");
+    }
+
     fn sha(c: char) -> CommitSha {
         CommitSha::parse(c.to_string().repeat(40), "commit").unwrap()
     }
@@ -1059,7 +1320,7 @@ mod tests {
             head: sha(head),
             run_dir: PathBuf::from(format!("/runs/{run}")),
             held,
-            in_container: false,
+            container: None,
         }
     }
 

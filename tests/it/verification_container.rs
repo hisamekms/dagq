@@ -28,7 +28,9 @@ const QUEUE: &str = "cccccccccccccccc";
 /// writes its arguments one per line to `state/run-args-<n>`, and runs the
 /// container's command on the host as the container would: in
 /// `--workdir`, with the `--env` variables alone (none of the test's), and
-/// `dagq` found in `state/bin`. Its `rm` removes nothing but is recorded.
+/// `dagq` found in `state/bin`; with `state/refuse-run` there, its `run`
+/// starts nothing and exits as podman does when it cannot make the
+/// container (125). Its `rm` removes nothing but is recorded.
 fn fake_podman(state: &Path) -> PathBuf {
     fs::create_dir_all(state.join("bin")).unwrap();
     let s = shell_path(state);
@@ -47,6 +49,10 @@ run)
   shift
   n=$(ls "$S" | grep -c '^run-args-')
   printf '%s\n' "$@" > "$S/run-args-$((n + 1))"
+  if [ -e "$S/refuse-run" ]; then
+    echo "Error: the container could not be started" >&2
+    exit 125
+  fi
   workdir=
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -933,4 +939,250 @@ fn the_materials_are_copied_into_the_run_directory_following_no_symlink() {
     symlink(&victim, materials.join("sub")).unwrap();
     containers.publish_materials(&verification).unwrap();
     copied();
+}
+
+/// With `config` committed (its `[recheck]` and the verification's
+/// runtime), task 1's run waits for a person's answer, made a run of a
+/// worker in a container (its stored workplace a clone's path, as such a
+/// run's is); then main moves outside dagq in another file, and the next
+/// supervisor, whose container runtime is `container`, rechecks task 1's
+/// run against it. Task 1's run, and the count of `podman run` before the
+/// recheck.
+fn rechecked_in_a_container(
+    queue: &VerifyQueue,
+    config: &str,
+    container: Arc<dyn dagq::application::ContainerRuntime + Send + Sync>,
+) -> (TaskRun, usize) {
+    queue.set_config(config);
+    let first = add_task(&queue.db, &[]);
+    let backend = TestWorkspace::new(&queue.db, false, IDLE_AGENT);
+    backend.script_for(
+        1,
+        "printf 'one\\n' > one.txt && git add one.txt && git commit -q -m one; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+    );
+    let reviewer = TestReviewer::new(&[verdict("concern", &["a person should look"], "unsure")]);
+    let outcome =
+        supervise_reviewed_with(&queue.db, &queue.repo, &backend, &reviewer, &queue.options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let waiting = SqliteQueue::open(&queue.db)
+        .unwrap()
+        .show(first)
+        .unwrap()
+        .runs[0]
+        .clone();
+    assert_eq!(waiting.status(), RunStatus::AwaitingIntegration);
+    let clone = queue.queue_dir().join("clones").join(waiting.id().as_str());
+    Connection::open(&queue.db)
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET worktree_path=?1 WHERE id=?2",
+            [clone.display().to_string(), waiting.id().to_string()],
+        )
+        .unwrap();
+    let before = runs(&queue.state).len();
+    fs::write(queue.repo.join("two.txt"), "two\n").unwrap();
+    git(&queue.repo, &["add", "two.txt"]);
+    git(&queue.repo, &["commit", "-qm", "main moves"]);
+    let mut options = queue.options.clone();
+    options.container = Some(runtime::ContainerRuntimePort(container));
+    let outcome = supervise_reviewed_with(&queue.db, &queue.repo, &backend, &reviewer, &options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let waiting = SqliteQueue::open(&queue.db)
+        .unwrap()
+        .show(first)
+        .unwrap()
+        .runs[0]
+        .clone();
+    assert!(waiting.in_container());
+    (waiting, before)
+}
+
+/// The landing recheck's command of a run in a container runs in a
+/// verification's container (ADR-t2424-1): `podman run`, hardened as
+/// `integrate`'s verification, on a clone of main with the run merged in,
+/// mounting no cache, the run directory or the scratch worktree, with a
+/// token of its own in the proxies, no materials and no sccache wrapper
+/// (whose removal is recorded); never as a process of
+/// the host's in the scratch worktree. What it left and its token go, and
+/// the run is found still landing.
+#[test]
+fn a_waiting_run_in_a_container_has_its_recheck_command_run_in_a_verification_s_container() {
+    let _test = crate::common::test();
+    let queue = VerifyQueue::new();
+    let m = shell_path(&queue.state);
+    let command = format!(
+        "pwd > {m}/recheck-pwd; git log --format=%s -1 > {m}/recheck-head; \
+         ls -A \"$DAGQ_VERIFICATION_MATERIALS\" > {m}/recheck-materials; env > {m}/env"
+    );
+    let (waiting, before) = rechecked_in_a_container(
+        &queue,
+        &format!(
+            "[roles.verification]\nruntime = \"container\"\n[recheck]\ncommand = {}\n\
+             [run.env]\nRUSTC_WRAPPER = 'sccache'\n",
+            toml_string(&command)
+        ),
+        Arc::new(Usable),
+    );
+    let queue_dir = queue.queue_dir();
+    let all = runs(&queue.state);
+    assert_eq!(all.len(), before + 1, "{all:?}");
+    let args = all.last().unwrap();
+    let text = args.join(" ");
+    let id = values(args, "--name")[0]
+        .strip_prefix(&format!("dagq-{QUEUE}-verify-"))
+        .unwrap_or_else(|| panic!("{text}"))
+        .to_owned();
+    assert!(id.starts_with(waiting.id().as_str()), "{id}");
+    let dir = queue_dir.join("verification").join(&id);
+    for part in [
+        "--read-only",
+        "--cap-drop all",
+        "--network none",
+        &format!("--workdir {}", dir.join(VERIFICATION_CLONE).display()),
+        &format!(
+            "dagq relay verify --token-file {} -- sh -c {command}",
+            dir.join("token").display()
+        ),
+    ] {
+        assert!(text.contains(part), "{part}: {text}");
+    }
+    assert_eq!(
+        values(args, "--volume"),
+        [
+            format!("{0}:{0}", dir.display()),
+            format!("{0}:{0}:ro", dir.join("materials").display()),
+            format!("dagq-{QUEUE}-socket-{}:/run/dagq-broker:z", waiting.id()),
+        ]
+    );
+    let run_dir = PathBuf::from(waiting.run_dir().unwrap());
+    for absent in [
+        format!("dagq-{QUEUE}-cache"),
+        format!("{0}:{0}", run_dir.display()),
+        queue_dir.join("recheck").display().to_string(),
+        "RUSTC_WRAPPER".to_owned(),
+    ] {
+        assert!(!text.contains(&absent), "{absent}: {text}");
+    }
+    // Inside: the clone of main with the run merged in, no materials, the
+    // recheck's own token in the proxies.
+    assert_eq!(
+        fs::read_to_string(queue.state.join("recheck-pwd"))
+            .unwrap()
+            .trim(),
+        dir.join(VERIFICATION_CLONE).display().to_string()
+    );
+    assert!(
+        fs::read_to_string(queue.state.join("recheck-head"))
+            .unwrap()
+            .starts_with(&format!("dagq landing recheck of run {}", waiting.id()))
+    );
+    assert_eq!(
+        fs::read_to_string(queue.state.join("recheck-materials")).unwrap(),
+        ""
+    );
+    let seen = seen_env(&queue.state);
+    let proxy = &seen["HTTPS_PROXY"];
+    let token = proxy
+        .strip_prefix(&format!("http://{}:", waiting.id()))
+        .and_then(|rest| rest.strip_suffix("@127.0.0.1:47310"))
+        .unwrap_or_else(|| panic!("{proxy}"));
+    assert!(!text.contains(token), "{text}");
+    assert!(!seen.contains_key("RUSTC_WRAPPER"), "{seen:?}");
+    let removed = events_of(&queue.db, waiting.id(), "sccache_wrapper_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(removed[0]["job"], "recheck");
+    assert_eq!(removed[0]["runtime"], "container");
+    assert_eq!(
+        dagq::infrastructure::queue_broker::verification_run(&queue_dir, token).unwrap(),
+        None
+    );
+    // Not on the host: no scratch worktree, nothing in the run directory's
+    // materials.
+    assert!(!queue_dir.join("recheck").join("worktree").exists());
+    assert!(!run_dir.join(MATERIALS_DIR).exists());
+    // What it left goes.
+    let calls = fs::read_to_string(queue.state.join("calls")).unwrap();
+    assert!(
+        calls.contains(&format!(
+            "--connection dagq rm --force --ignore --time 0 dagq-{QUEUE}-verify-{id}"
+        )),
+        "{calls}"
+    );
+    assert!(!dir.exists());
+    let clean = events_of(&queue.db, waiting.id(), "landing_recheck_clean");
+    assert_eq!(clean.len(), 1, "{clean:?}");
+    assert_eq!(clean[0]["command"], command.as_str());
+    assert!(events_of(&queue.db, waiting.id(), "landing_recheck_failed").is_empty());
+}
+
+/// When podman starts no container for it (it exits 125, as when it
+/// cannot make the container), the landing recheck's command of a run in a
+/// container did not run, on the host or anywhere (ADR-t2424-1): the
+/// finding judges nothing, as a command that failed on the host. The run
+/// keeps waiting to land, neither resumed nor held, and the event and its
+/// ask say why; what the container left and its token go. Which runtimes
+/// and availabilities refuse it before any container is made is decided
+/// in `supervise::recheck`'s unit test.
+#[test]
+fn a_waiting_run_in_a_container_whose_recheck_container_does_not_start_is_not_judged() {
+    let _test = crate::common::test();
+    let queue = VerifyQueue::new();
+    fs::write(queue.state.join("refuse-run"), "").unwrap();
+    let mark = queue.dir.path().join("ran");
+    let command = format!(": > {}", shell_path(&mark));
+    let (waiting, before) = rechecked_in_a_container(
+        &queue,
+        &format!(
+            "[roles.verification]\nruntime = \"container\"\n[recheck]\ncommand = {}\n",
+            toml_string(&command)
+        ),
+        Arc::new(Usable),
+    );
+    // podman was asked, and the command ran neither there nor on the host.
+    let all = runs(&queue.state);
+    assert_eq!(all.len(), before + 1, "{all:?}");
+    assert!(all.last().unwrap().join(" ").contains(&command));
+    assert!(!mark.exists());
+    let queue_dir = queue.queue_dir();
+    assert!(!queue_dir.join("recheck").join("worktree").exists());
+    assert_eq!(
+        fs::read_dir(queue_dir.join("verification"))
+            .unwrap()
+            .count(),
+        0
+    );
+    assert_eq!(waiting.status(), RunStatus::AwaitingIntegration);
+    assert!(events_of(&queue.db, waiting.id(), "resume_started").is_empty());
+    let found = events_of(&queue.db, waiting.id(), "landing_recheck_failed");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0]["action"], "skipped");
+    assert_eq!(found[0]["command"], command.as_str());
+    let refused = found[0]["container_refused"].as_str().unwrap();
+    assert!(
+        refused.starts_with("podman did not start the container"),
+        "{refused}"
+    );
+    assert!(
+        found[0]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("it did not run on the host instead")
+    );
+    let counts = &runtime::status(&queue.db).unwrap()["landing_recheck"];
+    assert_eq!(counts["environment"], 1, "{counts}");
+    assert_eq!(counts["resumed"], 0);
+    assert_eq!(counts["held"], 0);
+    assert_eq!(counts["check_failed"], 0);
+    let ask = SqliteQueue::open(&queue.db)
+        .unwrap()
+        .asks(Default::default())
+        .unwrap()
+        .into_iter()
+        .find(|ask| ask.run_id.as_ref() == Some(waiting.id()))
+        .unwrap();
+    assert!(
+        ask.question.contains("Nothing judged the code"),
+        "{}",
+        ask.question
+    );
 }

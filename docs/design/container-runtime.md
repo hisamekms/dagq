@@ -20,6 +20,7 @@ related:
   - adr-t2179-1
   - adr-t2257-1
   - adr-t2182-1
+  - adr-t2424-1
   - design-security
   - design-supervisor-lifecycle-run-environment
 ---
@@ -227,9 +228,9 @@ executorは`application::run_container::PodmanActorExecutor`、設定の読み�
 `dagq.toml`がverificationをcontainerにしたrunの着地では、rebaseの後の検証のコマンドを1本ずつ、そのverificationのcontainerで流す（[ADR-t2113-3](../adr/2026-10-08-t2113-3-only-workers-resume-and-integrate-verification-run-in-containers.md)決定1）。
 結果・時間・失敗の分類の記録はhostと同じである。
 `integrate`の`ContainerVerification`が流れを持ち、準備・podman・片付けは`application::run_container::VerificationContainers`のport、`podman run`の引数は`domain::run_container::verification_run_args`、containerの中は`dagq relay verify`が持つ。
+containerのrunの着地の再確認のcommandも同じ形で流し、流せなければどこにも流さない（[Landing recheck](supervisor-lifecycle/landing-recheck.md#確かめ方)）。
 
 - 準備: machine・image・runのrelayをworkerのturnと同じ`RunMachine`で用意し、`dagq.toml`がbuildの出力のdirを名指せば、そのverificationごとの新しいvolumeを作る（workerのrunのvolumeと共有しない）。
-  名指さなければvolumeを作らずmountもしない。
 - verificationのdir: 制御側だけのverificationのcloneの親のdirの下に、verificationごとの新しいdirを作る。
   dirのpathに既に物が在るか、親のdirが制御側だけのdirでなければ作らずに拒み、条件を満たす親のdirは複数のverificationが共有する（条件は`GitRepository::create_verification_clone`のdoc comment）。
   中にrebaseの後のcommitのclone（上の「git」の上書きでhookとdriverを止めた制御側のgitで作る）、tokenの写し（0600）、コマンドのhomeを置く。
@@ -242,7 +243,7 @@ executorは`application::run_container::PodmanActorExecutor`、設定の読み�
   時間の上限はhostと同じく1本のコマンドに掛かり、上限で止めたcontainerは次のコマンドの前と終わりに消す。
 - token: verificationのtokenを写しのファイルで渡し（podmanの引数に値は無い）、`dagq relay verify`が標準のproxyのenvに入れる。
   queueのbrokerはこのtokenを`dagq.toml`のregistryのallowlistへのtunnelにだけ通し、verificationの終わりに取り消す（[Queue broker](queue-broker.md)）。
-- cache: `[run.env]`がsccacheを名指せば、保護されたcacheが無い今は`RUSTC_WRAPPER`を外してcacheなしでcompileし、`sccache_wrapper_removed`に残す（他のwrapperは触らない）。
+- cache: `[run.env]`がsccacheを名指せば、保護されたcacheが無い今は`RUSTC_WRAPPER`を外してcacheなしでcompileし、`sccache_wrapper_removed`に残す。
 - 片付け: verificationがどう終わっても、container・buildの出力のvolume・dirを消す。
   dirはgitを使わずfdから辿り、残ったcontainerがsymlinkに差し替えても外に届かない。
 - hostの絶対pathを名指すverifyは、containerにそのpathが無いので落ち、hostに回さない。
@@ -254,5 +255,4 @@ executorは`application::run_container::PodmanActorExecutor`、設定の読み�
 どれかが欠ければ使えないと答え、上の境界のまま控える。
 
 - containerの中のsccache（[ADR-t2114-4](../adr/2026-10-08-t2114-4-sccache-server-inside-the-run-container.md)）。
-  それまでcontainerのturnには`[run.env]`の`RUSTC_WRAPPER`を渡さない。
 - verificationの保護されたcache。

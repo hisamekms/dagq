@@ -20,6 +20,7 @@ use std::time::Duration;
 use common::cli::ok;
 use common::lifecycle::{FakeLaunchd, FakeProcesses, git};
 use dagq::application::EventStore;
+use dagq::application::queue_broker::TokenFor;
 use dagq::application::queue_broker::{BrokerProbe, QueueBrokerControl};
 use dagq::domain::queue_broker::{BEARER, HEALTH_PATH, RUN_HEADER};
 use dagq::domain::queue_service::{
@@ -723,8 +724,16 @@ fn a_tunnel_opens_only_to_the_registries_of_the_main_checkout_s_dagq_toml() {
     };
     let run = queue.run.id().clone();
     let own = token(&queue, &Principal::worker(&run, queue.run.task_id()));
-    let verification =
-        service::read_token(&broker::issue_verification(queue.dir(), &run, 1).unwrap()).unwrap();
+    let verification = service::read_token(
+        &broker::issue_verification(queue.dir(), &run, TokenFor::Landing, 1).unwrap(),
+    )
+    .unwrap();
+    // The landing recheck's token of the same run: one of its own.
+    let recheck = service::read_token(
+        &broker::issue_verification(queue.dir(), &run, TokenFor::Recheck, 1).unwrap(),
+    )
+    .unwrap();
+    assert_ne!(recheck, verification);
     let basic = |token: &str| format!("Basic {}", base64(&format!("{run}:{token}")));
     let registry = echo_host();
     let elsewhere = echo_host();
@@ -794,9 +803,9 @@ fn a_tunnel_opens_only_to_the_registries_of_the_main_checkout_s_dagq_toml() {
         .bind_repository(common_dir.to_str().unwrap())
         .unwrap();
 
-    // The run's token and its verification's open the tunnel, in a proxy
-    // URL's credentials.
-    for credentials in [basic(&own), basic(&verification)] {
+    // The run's token, its verification's and its landing recheck's open
+    // the tunnel, in a proxy URL's credentials.
+    for credentials in [basic(&own), basic(&verification), basic(&recheck)] {
         let (status, tunnel) = connect(&address, &target, &credentials);
         assert_eq!(status, 200);
         echoes(tunnel.unwrap());
@@ -848,7 +857,8 @@ fn a_tunnel_opens_only_to_the_registries_of_the_main_checkout_s_dagq_toml() {
     last_denied("not_allowed", "api.anthropic.com");
 
     // Revoked at the verification's end, it opens no tunnel.
-    assert!(broker::revoke_verification(queue.dir(), &run).unwrap());
+    // The landing recheck's is left as it is, until it is revoked.
+    assert!(broker::revoke_verification(queue.dir(), &run, TokenFor::Landing).unwrap());
     assert_eq!(
         broker::verification_run(queue.dir(), &verification).unwrap(),
         None
@@ -856,6 +866,12 @@ fn a_tunnel_opens_only_to_the_registries_of_the_main_checkout_s_dagq_toml() {
     let (status, _) = connect(&address, &target, &basic(&verification));
     assert_eq!(status, 401);
     last_denied("unknown_token", "127.0.0.1");
+    let (status, tunnel) = connect(&address, &target, &basic(&recheck));
+    assert_eq!(status, 200);
+    echoes(tunnel.unwrap());
+    assert!(broker::revoke_verification(queue.dir(), &run, TokenFor::Recheck).unwrap());
+    let (status, _) = connect(&address, &target, &basic(&recheck));
+    assert_eq!(status, 401);
 }
 
 /// One request the fake Claude API took: its request line, headers and

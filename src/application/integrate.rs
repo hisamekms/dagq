@@ -1898,6 +1898,7 @@ fn land(
         Some(super::queue_broker::VerificationToken::issue(
             verification_tokens,
             run.id(),
+            super::queue_broker::TokenFor::Landing,
         )?)
     };
     // The container of the verification, on a clone of the rebased commit,
@@ -2346,43 +2347,17 @@ impl<'a> ContainerVerification<'a> {
         env: &[(String, String)],
         log: &Path,
     ) -> Result<super::Exit> {
-        use crate::domain::run_container::{
-            HOME_DIR, MATERIALS_ENV, VerificationContainer, verification_command,
-            verification_run_args,
-        };
         if let Err(error) = self.containers.remove_container(&self.prepared) {
             warn!(run_id = %self.run, "run {}: the verification's container could not be removed before its command: {error:#}", self.run);
         }
-        let prepared = &self.prepared;
-        let mut env = env.to_vec();
-        env.extend([
-            (MATERIALS_ENV.to_owned(), path_text(&prepared.materials)?),
-            (
-                crate::domain::actor::RUN_ID_ENV.to_owned(),
-                self.run.as_str().to_owned(),
-            ),
-            ("HOME".to_owned(), path_text(&prepared.dir.join(HOME_DIR))?),
-        ]);
-        let command = verification_command(&prepared.dir, command);
-        let args = verification_run_args(&VerificationContainer {
-            queue: &prepared.queue,
-            run: self.run.as_str(),
-            verification: &prepared.id,
-            image: &prepared.image,
-            dir: &prepared.dir,
-            materials: &prepared.materials,
-            build_output: prepared.build_output.as_deref(),
-            limits: prepared.limits,
-            env: &env,
-            command: &command,
-        })
-        .map_err(|why| anyhow::anyhow!("the verification's container cannot be made: {why}"))?;
-        verifier.run_to_log(
-            &self.containers.command_line(&args),
-            &self.run_dir,
-            &[],
-            log,
-        )
+        let line = super::run_container::verification_line(
+            self.containers,
+            &self.prepared,
+            &self.run,
+            command,
+            env,
+        )?;
+        verifier.run_to_log(&line, &self.run_dir, &[], log)
     }
 }
 

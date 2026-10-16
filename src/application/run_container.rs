@@ -161,6 +161,55 @@ impl VerificationContainers for NoVerificationContainers {
     }
 }
 
+/// The shell's command line that runs `command` of `run` with `env` in the
+/// container of `verification`: `dagq relay verify` in a container
+/// [`verification_run_args`](crate::domain::run_container::verification_run_args)
+/// hardens, its environment naming the materials, the run and the
+/// verification's home besides `env`. What `integrate`'s verification and
+/// the landing recheck of a run in a container run through `podman` on
+/// the host.
+pub fn verification_line(
+    containers: &dyn VerificationContainers,
+    verification: &PreparedVerification,
+    run: &RunId,
+    command: &str,
+    env: &[(String, String)],
+) -> Result<String> {
+    use crate::domain::run_container::{
+        MATERIALS_ENV, VerificationContainer, verification_command, verification_run_args,
+    };
+    let mut env = env.to_vec();
+    env.extend([
+        (
+            MATERIALS_ENV.to_owned(),
+            super::path_text(&verification.materials)?,
+        ),
+        (
+            crate::domain::actor::RUN_ID_ENV.to_owned(),
+            run.as_str().to_owned(),
+        ),
+        (
+            "HOME".to_owned(),
+            super::path_text(&verification.dir.join(HOME_DIR))?,
+        ),
+    ]);
+    let command = verification_command(&verification.dir, command);
+    let args = verification_run_args(&VerificationContainer {
+        queue: &verification.queue,
+        run: run.as_str(),
+        verification: &verification.id,
+        image: &verification.image,
+        dir: &verification.dir,
+        materials: &verification.materials,
+        build_output: verification.build_output.as_deref(),
+        limits: verification.limits,
+        env: &env,
+        command: &command,
+    })
+    .map_err(|why| anyhow!("the verification's container cannot be made: {why}"))?;
+    Ok(containers.command_line(&args))
+}
+
 /// Starts a worker's turns in their container. Only a Claude worker's
 /// turn of a run in a clone is started: any other program, role or
 /// provider is refused, and never started on the host instead.

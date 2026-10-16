@@ -48,7 +48,7 @@ use super::sqlite::SqliteQueue;
 use crate::application::queue_broker::ClaudeForward;
 use crate::application::queue_broker::{
     BrokerAnswer, BrokerBackend, BrokerProbe, BrokerRequest, QueueBroker, QueueBrokerControl,
-    VerificationTokens,
+    TokenFor, VerificationTokens,
 };
 use crate::application::{EventStore, Generators, RunNotFound, RunReads};
 use crate::domain::queue_broker::{
@@ -620,10 +620,16 @@ struct VerificationRecord {
     issued_at: i64,
 }
 
-fn verification_credential_path(queue_dir: &Path, run: &RunId) -> PathBuf {
+/// Where the value of `run`'s token for `of` is: the hash of the run's ID,
+/// with the landing recheck's apart from the landing's.
+fn verification_credential_path(queue_dir: &Path, run: &RunId, of: TokenFor) -> PathBuf {
+    let key = match of {
+        TokenFor::Landing => run.as_str().to_owned(),
+        TokenFor::Recheck => format!("recheck:{run}"),
+    };
     broker_dir(queue_dir)
         .join(VERIFICATION_CREDENTIALS_DIR)
-        .join(sha256_hex(run.as_str().as_bytes()))
+        .join(sha256_hex(key.as_bytes()))
 }
 
 fn verification_record_path(queue_dir: &Path, token: &str) -> PathBuf {
@@ -632,13 +638,20 @@ fn verification_record_path(queue_dir: &Path, token: &str) -> PathBuf {
         .join(format!("{}.json", sha256_hex(token.as_bytes())))
 }
 
-/// Issue the token of `run`'s verification, revoking the one it held: 32
+/// Issue the token of `run`'s verification for `of`, revoking the one it
+/// held for `of`: 32
 /// random bytes in hex, its value in the broker's
 /// [`VERIFICATION_CREDENTIALS_DIR`], its run in [`VERIFICATION_TOKENS_DIR`]
 /// under the value's hash, apart from the queue service's tokens. The file
-/// its value is in. Only the control side (`integrate`) calls this.
-pub fn issue_verification(queue_dir: &Path, run: &RunId, now: i64) -> Result<PathBuf> {
-    revoke_verification(queue_dir, run)?;
+/// its value is in. Only the control side (`integrate` and the landing
+/// recheck) calls this.
+pub fn issue_verification(
+    queue_dir: &Path,
+    run: &RunId,
+    of: TokenFor,
+    now: i64,
+) -> Result<PathBuf> {
+    revoke_verification(queue_dir, run, of)?;
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes)
         .map_err(|error| anyhow::anyhow!("draw a token's random bytes: {error}"))?;
@@ -648,7 +661,7 @@ pub fn issue_verification(queue_dir: &Path, run: &RunId, now: i64) -> Result<Pat
         private_dir(&broker_dir(queue_dir).join(dir))?;
     }
     // The value first: one whose value is written can always be revoked.
-    let file = verification_credential_path(queue_dir, run);
+    let file = verification_credential_path(queue_dir, run, of);
     write_private(&file, token.as_bytes())?;
     write_private(
         &verification_record_path(queue_dir, &token),
@@ -660,9 +673,10 @@ pub fn issue_verification(queue_dir: &Path, run: &RunId, now: i64) -> Result<Pat
     Ok(file)
 }
 
-/// Revoke the token of `run`'s verification; whether there was one.
-pub fn revoke_verification(queue_dir: &Path, run: &RunId) -> Result<bool> {
-    let file = verification_credential_path(queue_dir, run);
+/// Revoke the token of `run`'s verification for `of`; whether there was
+/// one.
+pub fn revoke_verification(queue_dir: &Path, run: &RunId, of: TokenFor) -> Result<bool> {
+    let file = verification_credential_path(queue_dir, run, of);
     let token = match fs::read_to_string(&file) {
         Ok(token) => token,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
@@ -701,12 +715,12 @@ pub struct SystemVerificationTokens {
 }
 
 impl VerificationTokens for SystemVerificationTokens {
-    fn issue(&self, run: &RunId) -> Result<PathBuf> {
-        issue_verification(&queue_dir_of(&self.db), run, unix_now())
+    fn issue(&self, run: &RunId, of: TokenFor) -> Result<PathBuf> {
+        issue_verification(&queue_dir_of(&self.db), run, of, unix_now())
     }
 
-    fn revoke(&self, run: &RunId) -> Result<bool> {
-        revoke_verification(&queue_dir_of(&self.db), run)
+    fn revoke(&self, run: &RunId, of: TokenFor) -> Result<bool> {
+        revoke_verification(&queue_dir_of(&self.db), run, of)
     }
 }
 

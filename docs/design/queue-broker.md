@@ -89,8 +89,10 @@ containerからbrokerまでの経路（containerの中の転送・runごとのun
 ## verificationのtoken
 
 - `integrate`は検証コマンドを流すverificationごとに、制御側としてそのrunのverificationのtokenを発行し、verificationの終わりで（通っても落ちても）失効させる（ADR-t2114-1決定2、`application::queue_broker::VerificationToken`）。
-- 落とし穴: 失効は`integrate`のプロセスの中でだけ行うので、verificationの途中で`integrate`かsupervisorが殺されるとtokenのファイルが残る。
-  brokerはそのrunの次の発行か、runがtokenを持たない状態になるまで、そのtokenの`CONNECT`を通し続ける（残ったtokenの片付けはまだ無い）。
+  containerのrunの着地の再確認のcommandも、supervisorが同じく自分のtokenを発行して失効させる。
+  tokenは用途（`application::queue_broker::TokenFor`）ごとに別に持ち、同じrunの同じ用途の次の発行がそれを失効させるので、着地と再確認が同時に走ってもお互いを失効させない。
+- 落とし穴: 失効は発行した`integrate`かsupervisorのプロセスの中でだけ行うので、途中でそのプロセスが殺されるとtokenのファイルが残る。
+  brokerはそのrunの同じ用途の次の発行か、runがtokenを持たない状態になるまで、そのtokenの`CONNECT`を通し続ける（残ったtokenの片付けはまだ無い）。
 - principalはそのrunのverificationで、queue serviceのtokenとは別の置き場（`<queue dir>/broker/`の下、`infrastructure::queue_broker::issue_verification`）に持つので、serviceはこのtokenを受けない。
 - brokerはこのtokenでregistryのallowlistへの`CONNECT`だけを通し、queue serviceと`/anthropic`の下への要求は`unauthenticated`で拒む。
   runが終わったtokenも拒む。

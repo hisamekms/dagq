@@ -143,15 +143,29 @@ pub trait BrokerBackend: Send + Sync {
     fn claude_credential(&self) -> Result<ClaudeCredential, ClaudeCredentialProblem>;
 }
 
-/// How `integrate` issues the token of a run's verification and revokes it
-/// (ADR-t2114-1 decision 2): the control side's only.
+/// Which check of a run's commit in a container a verification token is
+/// for: each holds a token of its own, so the landing's verification and
+/// the landing recheck's command, which may run at once for the same run,
+/// never revoke each other's. Both reach the same registries alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenFor {
+    /// The verification of `integrate`.
+    Landing,
+    /// The `[recheck] command` of the landing recheck (ADR-t2424-1).
+    Recheck,
+}
+
+/// How `integrate` and the landing recheck issue the token of a run's
+/// verification and revoke it (ADR-t2114-1 decision 2): the control
+/// side's only.
 pub trait VerificationTokens: Send + Sync {
-    /// Issue the token of `run`'s verification, revoking one it held: the
-    /// file its value is in, for the verification to be handed the path
-    /// of (never the value).
-    fn issue(&self, run: &RunId) -> Result<PathBuf>;
-    /// Revoke the token of `run`'s verification; whether there was one.
-    fn revoke(&self, run: &RunId) -> Result<bool>;
+    /// Issue the token of `run`'s verification for `of`, revoking the one
+    /// it held for `of`: the file its value is in, for the verification
+    /// to be handed the path of (never the value).
+    fn issue(&self, run: &RunId, of: TokenFor) -> Result<PathBuf>;
+    /// Revoke the token of `run`'s verification for `of`; whether there
+    /// was one.
+    fn revoke(&self, run: &RunId, of: TokenFor) -> Result<bool>;
 }
 
 /// The token of one verification of a run: issued by [`Self::issue`] and
@@ -159,18 +173,20 @@ pub trait VerificationTokens: Send + Sync {
 pub struct VerificationToken<'a> {
     tokens: &'a dyn VerificationTokens,
     run: RunId,
+    of: TokenFor,
     /// The file the token's value is in.
     pub file: PathBuf,
 }
 
 impl<'a> VerificationToken<'a> {
-    pub fn issue(tokens: &'a dyn VerificationTokens, run: &RunId) -> Result<Self> {
+    pub fn issue(tokens: &'a dyn VerificationTokens, run: &RunId, of: TokenFor) -> Result<Self> {
         let file = tokens
-            .issue(run)
+            .issue(run, of)
             .with_context(|| format!("issue the token of run {run}'s verification"))?;
         Ok(Self {
             tokens,
             run: run.clone(),
+            of,
             file,
         })
     }
@@ -178,7 +194,7 @@ impl<'a> VerificationToken<'a> {
 
 impl Drop for VerificationToken<'_> {
     fn drop(&mut self) {
-        if let Err(error) = self.tokens.revoke(&self.run) {
+        if let Err(error) = self.tokens.revoke(&self.run, self.of) {
             warn!(
                 "could not revoke the token of run {}'s verification: {error:#}",
                 self.run
@@ -1287,11 +1303,11 @@ mod tests {
     }
 
     impl VerificationTokens for Tokens {
-        fn issue(&self, run: &RunId) -> Result<PathBuf> {
+        fn issue(&self, run: &RunId, _: TokenFor) -> Result<PathBuf> {
             self.issued.lock().unwrap().push(run.to_string());
             Ok(PathBuf::from(format!("/tokens/{run}")))
         }
-        fn revoke(&self, run: &RunId) -> Result<bool> {
+        fn revoke(&self, run: &RunId, _: TokenFor) -> Result<bool> {
             self.revoked.lock().unwrap().push(run.to_string());
             if self.fail_revoke {
                 return Err(anyhow!("gone"));
@@ -1310,7 +1326,7 @@ mod tests {
             };
             let run = RunId::new("r1").unwrap();
             {
-                let token = VerificationToken::issue(&tokens, &run).unwrap();
+                let token = VerificationToken::issue(&tokens, &run, TokenFor::Landing).unwrap();
                 assert_eq!(token.file, PathBuf::from("/tokens/r1"));
                 assert_eq!(*tokens.issued.lock().unwrap(), ["r1"]);
                 assert!(tokens.revoked.lock().unwrap().is_empty());

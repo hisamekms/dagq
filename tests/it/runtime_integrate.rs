@@ -617,7 +617,14 @@ fn a_verification_s_token_lives_only_while_its_commands_run() {
         let token = fs::read_to_string(out).unwrap();
         assert_eq!(token.len(), 64, "{token}");
         assert_eq!(broker::verification_run(&queue_dir, &token).unwrap(), None);
-        assert!(!broker::revoke_verification(&queue_dir, run).unwrap());
+        assert!(
+            !broker::revoke_verification(
+                &queue_dir,
+                run,
+                dagq::application::queue_broker::TokenFor::Landing
+            )
+            .unwrap()
+        );
     }
     assert_eq!(fs::read_dir(&credentials).unwrap().count(), 0);
 }

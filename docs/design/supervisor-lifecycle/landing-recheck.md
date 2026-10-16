@@ -15,6 +15,7 @@ related:
   - adr-0049
   - adr-t2032-1
   - adr-t639-1
+  - adr-t2424-1
 ---
 
 # Landing recheck
@@ -80,6 +81,8 @@ recheckのthreadが対象を1件ずつ確かめる（`recheck_runs`）。
    verifierの上限での打ち切りは実行できなかったものとせず、時間切れのhostの失敗として扱う。
    `[recheck] paths`があれば、2はmergeした木とmainの差分のpathがどれかのglobに当たるrunにだけ行う（`recheck::runs_command`、[ADR-t2032-1](../../adr/2026-10-07-t2032-1-run-the-recheck-command-only-on-runs-touching-recheck-paths.md)）。
    当たらないrunは1だけを見て、scratch worktreeも出さない。
+   workerがcontainerで動くrunでは、mergeした木のcommitをscratch worktreeに出さず、commandをintegrateのverificationと同じ形のcontainer（[Container runtime](../container-runtime.md)の「verificationの実行」）で流す（[ADR-t2424-1](../../adr/2026-10-17-t2424-1-a-container-runs-landing-recheck-command-runs-in-the-verification-container.md)）。
+   そのcontainerを使えないとき（verificationのruntimeがhost、containerが使えない、用意できない、podmanがcontainerを起動しない）はhostにもどこにも流さない（下の「見つかったとき」）。
 3. `[recheck]`が無いか、`[run.env]`のprogramが見つからない間（ADR-0049の決定9）は1だけを見る。Gitやcommandが実行できなかったrunは`errors`に数え、runには何も記録しない。
 
 target（`recheck/target`）は1つで、recheckは直列なので、同時にそれを使うのは1本だけ。
@@ -94,6 +97,7 @@ targetの中身は、空き容量のための掃除だけがrecheckの走って�
   leaseの無いrunもこのsupervisorがslotに持つrunも、parkせず（resumeを使わず）`held`にもせず、`awaiting_integration`のまま置く。
   `landing_recheck_failed`はparkもholdもしなかった失敗として残り、`park_held_by_recheck`はこれを読まないので、slotのrunはそのまま着地へ進む。
   integrateがhostの失敗で控えたrun（`integration_held`）は、控えとinboxのattentionを保つ。
+  containerのrunのcommandを流すcontainerが無かったfindingも同じに扱い、`landing_recheck_failed`に流さなかった理由を残す（ADR-t2424-1）。
   衝突とコードの分類の失敗だけが次の2つに進む。
 - **leaseの無いrun**: `park_rechecked`が1 transactionでrunを`awaiting_integration` → `needs_session`にし、parkした失敗として`landing_recheck_failed`を記録する。
   次のpassの`resume_candidates`（[`needs_session`](needs-session.md)）が、ふつうのresumeとして拾い、効く優先度の順で空いたslotを受ける。
@@ -110,6 +114,7 @@ targetの中身は、空き容量のための掃除だけがrecheckの走って�
   置き換えた結果が前のquestionと同じなら書き直さず、`ask_updated`も記録しない。
   askは閉じない。
   - hostの失敗（`recheck::skipped_ask_note`）: hostがcommandにコードを判断させなかったので、runはresumeせず着地を待ち続けることを伝える。
+    containerが無かったfinding（`recheck::refused_ask_note`）は、流さなかった理由と、何も判定せずに着地を待ち続けることを伝える。
   - 失敗（`recheck::ask_note`）: 見つかったことと、答えを待たずにrunをresumeすること（`held`ならsessionが終わったときに着地の代わりにresumeへparkすること）を伝える。
   - きれい（`recheck::clean_ask_note`）: 確かめたmainの短いcommitでrunがまだきれいに着地することと、commandを流したかを伝える。
 - **resumeの後**: resumeが解決して`validating`を通ったrunに閉じていない`approve_landing`のaskがあれば、reviewをやり直さず、sessionに終了を依頼し（`turns/exit`）、wrapperが終わったことを確かめて残りをhandleで止め（`stop_run_session`。ADR-t1433-3より前にworkspaceで開いたsessionのIDは閉じずに人に任せる）、leaseを手放して`awaiting_integration`で答えを待つ。

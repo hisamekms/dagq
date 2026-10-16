@@ -96,6 +96,10 @@ pub enum RecheckFailure {
         output_tail: String,
         failure: VerifyFailure,
     },
+    /// The command of a run in a container could not be run in the
+    /// verification's container, for `why` (ADR-t2424-1): it was not run
+    /// on the host instead, so nothing was judged.
+    ContainerRefused { command: String, why: String },
 }
 
 impl RecheckFailure {
@@ -104,7 +108,11 @@ impl RecheckFailure {
     /// ADR-t639-1): such a finding says nothing of whether the run lands,
     /// so it neither resumes nor holds the run.
     pub fn is_environmental(&self) -> bool {
-        matches!(self, Self::CheckFailed { failure, .. } if failure.class.is_environmental())
+        match self {
+            Self::Conflict { .. } => false,
+            Self::CheckFailed { failure, .. } => failure.class.is_environmental(),
+            Self::ContainerRefused { .. } => true,
+        }
     }
 
     /// A conflict is the landing's `rebase_conflict`, a failed command its
@@ -112,7 +120,9 @@ impl RecheckFailure {
     pub const fn code(&self) -> ReasonCode {
         match self {
             Self::Conflict { .. } => ReasonCode::RebaseConflict,
-            Self::CheckFailed { .. } => ReasonCode::VerificationFailed,
+            Self::CheckFailed { .. } | Self::ContainerRefused { .. } => {
+                ReasonCode::VerificationFailed
+            }
         }
     }
 
@@ -132,6 +142,9 @@ impl RecheckFailure {
                 ..
             } => format!(
                 "{after} that {command:?} exits with {exit_code} on main {main} with the run merged in (git merges it without a conflict); see {log_path}"
+            ),
+            Self::ContainerRefused { command, why } => format!(
+                "{after} no container to run {command:?} in on main {main} with the run, whose worker works in a container, merged in: {why}; it did not run on the host instead"
             ),
         }
     }
@@ -164,6 +177,10 @@ impl RecheckFailure {
                 payload["output_tail"] = json!(output_tail);
                 payload["class"] = json!(failure.class);
                 payload["evidence"] = json!(failure.evidence);
+            }
+            Self::ContainerRefused { command, why } => {
+                payload["command"] = json!(command);
+                payload["container_refused"] = json!(why);
             }
         }
         payload
@@ -228,6 +245,15 @@ pub fn ask_note(reason: &str, resumed: bool) -> String {
 pub fn skipped_ask_note(reason: &str) -> String {
     format!(
         "{ASK_NOTE_PREFIX}{reason}. The host kept the command from judging the code: the run is not resumed and keeps waiting to land."
+    )
+}
+
+/// The paragraph a command refused its container
+/// ([`RecheckFailure::ContainerRefused`]) puts in the run's open asks: why
+/// it did not run, and that the run keeps waiting to land as it was.
+pub fn refused_ask_note(reason: &str) -> String {
+    format!(
+        "{ASK_NOTE_PREFIX}{reason}. Nothing judged the code: the run is not resumed and keeps waiting to land."
     )
 }
 
@@ -480,6 +506,36 @@ mod tests {
         assert_eq!(payload["output_tail"], "error[E0063]");
         assert_eq!(payload["class"], "build_error");
         assert!(!failure.is_environmental());
+    }
+
+    /// A command of a run in a container with no container to run in
+    /// judges nothing (ADR-t2424-1): it skips the resume and the hold like
+    /// a failure on the host, and says why it did not run.
+    #[test]
+    fn a_command_refused_its_container_judges_nothing_and_says_why() {
+        let main = CommitSha::parse("a".repeat(40), "commit").unwrap();
+        let head = CommitSha::parse("b".repeat(40), "commit").unwrap();
+        let failure = RecheckFailure::ContainerRefused {
+            command: "cargo check".into(),
+            why: "the dagq machine is not running".into(),
+        };
+        assert!(failure.is_environmental());
+        assert_eq!(failure.code(), ReasonCode::VerificationFailed);
+        let reason = failure.reason(Some(&landed()), &main);
+        assert!(reason.contains("\"cargo check\""), "{reason}");
+        assert!(
+            reason.contains("the dagq machine is not running; it did not run on the host instead"),
+            "{reason}"
+        );
+        let payload = failure.payload(Some(&landed()), &main, &head);
+        assert_eq!(payload["code"], "verification_failed");
+        assert_eq!(payload["command"], "cargo check");
+        assert_eq!(
+            payload["container_refused"],
+            "the dagq machine is not running"
+        );
+        assert!(payload.get("exit_code").is_none());
+        assert!(refused_ask_note(&reason).ends_with("keeps waiting to land."));
     }
 
     /// Only the host's classes skip the resume and the hold; a conflict

@@ -1267,3 +1267,21 @@ task = 2352
 name = "runtime_review::a_passing_review_exits_the_live_session_and_lands_it"
 reason = "B 境界（プロセス・supervisor の配線）: pass の review が生きている session を終わらせて着地するまでの event の順と、review の prompt に載る verdict の形を実際の supervisor で確かめる"
 task = 2352
+
+# 9.9s (stress 5 under the host's load of other runs, task 2424)
+[[test]]
+name = "verification_container::a_waiting_run_in_a_container_has_its_recheck_command_run_in_a_verification_s_container"
+reason = "B 境界（supervisor の配線・Git・プロセス）: 着地待ちの container の run の landing recheck が supervisor の 2 回の pass を通して fake の podman と実の dagq relay verify で command を merge した commit の clone で流し、引数・token・RUSTC_WRAPPER の外しと event・片付けを確かめる。拒む判断は domain::recheck の unit test"
+task = 2424
+
+# about 10s (stress 5 under the host's load of other runs, task 2424)
+[[test]]
+name = "verification_container::a_waiting_run_in_a_container_whose_recheck_container_does_not_start_is_not_judged"
+reason = "B 境界（supervisor の配線・プロセス）: fake の podman が container を起動しない（125）とき、container の run の recheck の command が host でもどこでも走らず（印のファイルが無い）、run が着地待ちのまま skipped の event と ask の段落が残り片付くことを supervisor を通して確かめる。拒む条件の判断は supervise::recheck と domain::run_container の unit test"
+task = 2424
+
+# 10.5s (stress 5 under the host's load of other runs; only the token's call changed, task 2424)
+[[test]]
+name = "runtime_integrate::a_verification_s_token_lives_only_while_its_commands_run"
+reason = "B 境界（integrate の配線・ファイル）: 着地の verification の token が検証の間だけ在り、終わりに失効することを実の integrate で確かめる"
+task = 2424
