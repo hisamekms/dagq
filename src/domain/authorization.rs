@@ -31,6 +31,9 @@ string_enum!(Capability {
     GoalReady => "goal.ready",
     GoalClose => "goal.close",
     GoalReviewRequest => "goal.review_request",
+    /// Changing a task before it starts. `revisit` (a draft's time to be
+    /// looked at again) is one of them rather than a capability of its
+    /// own, since the roles allowed it are the same.
     TaskWrite => "task.write",
     FollowUpJudge => "follow_up.judge",
     TaskVerifyEdit => "task.verify_edit",

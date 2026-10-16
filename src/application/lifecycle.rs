@@ -2276,6 +2276,13 @@ pub struct DownOptions {
 /// `in_cmux` supervisor runs in is reported `left_open` for a person to
 /// close, and its record in `session_workspaces` is forgotten without a
 /// call to cmux. The inbox is the person's own terminal.
+///
+/// The queue's service (and its broker) stops once no supervisor is left:
+/// when none ran, after `--force` killed them, and after the drain `--wait`
+/// waited for, each recorded `queue_service_stopped`. A `down` that does
+/// not wait asks for the stop with `queue_service_stop_requested` before
+/// the signal and leaves it to the last supervisor to end its drain. A
+/// service that was not running gets no `queue_service` in the report.
 pub fn down(ports: &Ports, location: &QueuePaths, options: &DownOptions) -> Result<Value> {
     let (launchd, processes) = (ports.launchd, ports.processes);
     let queue = (ports.queues)(&location.db).open()?;

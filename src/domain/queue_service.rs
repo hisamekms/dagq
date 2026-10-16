@@ -396,7 +396,8 @@ pub const fn client_role(role: ActorRole) -> bool {
 
 /// Whether a token issued on a run still holds while the run is in
 /// `status`: one ended (landed, succeeded, failed, interrupted) ends its
-/// tokens (ADR-t1233-4 decision 4).
+/// tokens (ADR-t1233-4 decision 4). The service refuses as well a token
+/// whose run is not in the queue, which has no status to ask this of.
 pub const fn run_holds_token(status: RunStatus) -> bool {
     !matches!(
         status,
@@ -413,7 +414,10 @@ pub const QUEUE_SERVICE_DOWN: &str =
 pub const QUEUE_SERVICE_RUNNING: &str =
     crate::domain::event_kind::EventKind::QueueServiceRunning.as_str();
 /// `up` or the supervisor started the service (`pid`, `build`, `by`,
-/// `replaced`).
+/// `replaced`). `restart` is true once the starting supervisor has seen
+/// the service running, whether a look found its build answering or one of
+/// its own starts succeeded (the second start on); `up` and
+/// `service start` always write false.
 pub const QUEUE_SERVICE_STARTED: &str =
     crate::domain::event_kind::EventKind::QueueServiceStarted.as_str();
 /// `down`, or a supervisor at the end of the drain `down` asked for,

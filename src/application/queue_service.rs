@@ -75,7 +75,7 @@ pub trait ServiceBackend: Send + Sync {
     /// The queue, written as `actor`.
     fn open(&self, actor: &ActorContext) -> Result<Box<dyn ServiceQueue>>;
     /// Record a request that named no principal
-    /// (`queue_service_unauthenticated`).
+    /// (`queue_service_unauthenticated`), written as the service itself.
     fn record_unauthenticated(&self, payload: Value) -> Result<()>;
 }
 
@@ -138,8 +138,11 @@ impl QueueService<'_> {
     }
 
     /// The principal of the request's token, whose run, when it names
-    /// one, has not ended. A refusal is recorded with the use case and
-    /// the reason, never the token.
+    /// one, has not ended. A refusal is `unauthenticated`, recorded with
+    /// the use case and the reason, never the token: `missing_token` for
+    /// no token or an empty one, `unknown_token` for one the control side
+    /// did not issue or has revoked, `run_ended` for one whose run has
+    /// ended or is not in the queue.
     fn authenticate(&self, request: &ServiceRequest) -> Result<Principal, ServiceResponse> {
         let refuse = |reason: &str, message: &str| {
             let payload = json!({"use_case": request.use_case, "reason": reason});

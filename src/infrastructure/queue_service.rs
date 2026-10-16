@@ -875,7 +875,8 @@ pub struct SqliteServiceBackend {
 
 impl SqliteServiceBackend {
     /// The service itself, as the records name it: a part of the control
-    /// side (ADR-t1233-1 decision 1).
+    /// side (ADR-t1233-1 decision 1), with role `supervisor` and actor id
+    /// `supervisor:queue-service:<pid>`.
     fn own_actor() -> ActorContext {
         ActorContext::instance(
             ActorRole::Supervisor,

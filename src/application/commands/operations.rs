@@ -20,15 +20,19 @@ use super::{DenialLog, Gate};
 use crate::domain::{ActorContext, Authorizer, Capability, PlannerId, Resource, RunId, TaskId};
 
 /// The session a `session-event` hook reports on, as its environment and
-/// arguments name it.
+/// arguments name it: the span the hook would record decides the resource
+/// `session.record` is asked on, and a session with no span is a run's.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HookSession {
-    /// The inbox's, or a planner's of a workspace that names no planner.
+    /// The inbox's span, or a planner's of a workspace that names no
+    /// planner (no `DAGQ_PLANNER_ID`, or a workspace opened before
+    /// `DAGQ_ACTOR_ID`): the queue.
     Queue,
-    /// The planner's of `DAGQ_PLANNER_ID`.
+    /// The planner's span of `DAGQ_PLANNER_ID`: that planner.
     Planner(PlannerId),
-    /// A run's session (`--run`, else the caller's `DAGQ_RUN_ID`); `None`
-    /// when it names none or one that cannot be read.
+    /// A run's session (`--run`, else the caller's `DAGQ_RUN_ID`): that
+    /// run; `None`, resolved to no resource, when it names none or one
+    /// that cannot be read.
     Run(Option<RunId>),
 }
 

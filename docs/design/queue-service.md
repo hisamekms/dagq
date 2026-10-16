@@ -75,10 +75,9 @@ serviceは呼び出しのprincipal（`Principal`）をtokenから決め、クラ
     fileが無いとき（claimの発行を経ずに起動したwrapper）だけwrapperが発行する（wrapperも制御側）
   - jobのtoken: jobを起動するプロセス（supervisor、`observe`・`throughput-review`のコマンド）が起動のときに発行し、jobのプロセスが終わったとき（それを見たwaitか、handleを捨てたとき）に失効させる（`ServiceAccess::revoke_on_exit`）
 - 失効: `queue_service::revoke`（actor id）が値とprincipalの記録を消す。
-  加えてserviceは、principalがrunを名指すtokenを、そのrunが終わった状態のとき、またはqueueに無いときに断る（runの終わりで失効。`run_holds_token`）。
+  加えてserviceは、principalがrunを名指すtokenを、そのrunが終わったときに断る（runの終わりで失効。`run_holds_token`）。
   workerのtokenのfileはresumeの発行し直しまで残るが、使えない
-- 断り: tokenが無い（`missing_token`）・発行していない値か失効した（`unknown_token`）・runが終わった（`run_ended`）要求は`unauthenticated`で断り、queueのevent `queue_service_unauthenticated`（tokenの値は書かない）に残す。
-  actorはservice自身（role `supervisor`、id `queue-service:<pid>`。制御側の一部）
+- 断り: 認証できない要求は`unauthenticated`で断り、queueのevent `queue_service_unauthenticated`（tokenの値は書かない）に残す（理由は`QueueService::authenticate`のdoc comment）。
 - hostの呼び出し元に渡すenvはsocketのpathとtokenのfileのpathで、containerのrunにはsocketの代わりにbrokerのURLを渡す（[クライアントモード](#クライアントモード)、`domain::queue_service::CLIENT_ENV`）。
   envの名前の落とし穴は`CREDENTIAL_FILE_ENV`のdoc comment
 - host構成では同じユーザーのプロセスが他のrunのtokenのfileもDBも読めるので、tokenは誤りを止めて記録を正しくするためのもので、security boundaryではない（ADR-t1233-4決定5、[Security](security.md#host実行は助言的advisory)）
@@ -200,16 +199,15 @@ queueのDBが消えれば（使い捨てのqueueの片付け）自分で終わ�
 - `up`: preflightの後、supervisorより先に`application::queue_service::ensure`を打つ。
   起動できなければ`up`はsupervisorを起動せずに止まる。
   結果は`up`の出力の`queue_service`で、起動か入れ替えはevent `queue_service_started`に残す
-- supervisor: `up`が起動したsupervisor（`--once`でないもの）は一定の間隔でserviceを見て、居ない・答えないものは起動し直し、別のbuildのもの（`install`や自動更新の引き継ぎの前のバイナリが残したもの）は入れ替える（`queue_service_started`、2回目からは`restart: true`）。
+- supervisor: `up`が起動したsupervisor（`--once`でないもの）は一定の間隔でserviceを見て、居ない・答えないものは起動し直し、別のbuildのもの（`install`や自動更新の引き継ぎの前のバイナリが残したもの）は入れ替える（`queue_service_started`）。
   起動し直しは窓の中で回数に上限がある（`application::supervise::queue_service`の定数）。
   別のbuildの入れ替えは数えない。
   制限: 起動の成功は自分のbuildの答えだけなので（`SystemQueueService::start`）、`install`が新しいバイナリを置いた後でexecの前のsupervisorの起動は失敗して`queue_service_down`を書き、次の見張りでまた入れ替える。
   drainと引き継ぎの間は見ない（execはserviceを次のプロセスに残し、次のプロセスがbuildの違いで入れ替える）
 - serviceが居ない間、supervisorは新しいclaimと、queueのjob（plan review・goal review・observer・スループットの見直し）の起動を控える。
   走っているrunとそのreview・復旧は止めない（ADR-t1233-4決定2）
-- `down`: supervisorが居なければ（`--force`の後、`--wait`のdrainの後も）serviceを止めて`queue_service_stopped`に残す。
-  drainを待たない`down`は、signalの前に`queue_service_stop_requested`を書き、drainを終えた最後のsupervisorが止める（`queue_service_stopped`）。
-  serviceが動いていなければ`down`の出力に`queue_service`の欄を出さない
+- `down`: supervisorが居なければserviceを止めて`queue_service_stopped`に残す（`application::lifecycle::down`）。
+  drainを待たない`down`は、signalの前に`queue_service_stop_requested`を書き、drainを終えた最後のsupervisorが止める（`queue_service_stopped`）
 - `install`と`install --allow-breaking`: `install`のdrain（`down --wait`）の後の`up`が新しいバイナリで起動する。
   drainしない引き継ぎでは、新しいバイナリのsupervisorの最初の見張りが入れ替える
 - 人の手: `dagq service start`（`service.lifecycle`。`ensure`と同じ）・`dagq service stop`（supervisorが動いていれば次の見張りで起動し直す）・`dagq service status`（`queue.read`）

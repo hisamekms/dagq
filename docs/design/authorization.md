@@ -146,7 +146,7 @@ CLI（`src/main.rs`の`execute()`）はparseと出力だけをし、これらの
 | `add` | `task.write` | `--goal`のgoal、無ければqueue |
 | `edit` `set-goal` `set-paths` `draft` `dependency add/remove` | `task.write` | task（queueにある状態） |
 | `set-priority` | `task.write` | task（queueにある状態）。`in_progress`のtask（再開待ちか復旧を待つrunを持つもの）にも置け・外せ、次の再開と復旧jobの順に効く（[ADR-t1850-1](../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)の決定7）。`in_progress`のtaskではplannerは`not on this resource`で拒まれ、user・inboxだけが通る。`completed` / `canceled`は全てのroleでdomainが拒む |
-| `revisit ID --at` / `revisit ID --clear` | `task.write` | task（queueにある状態）。draftの再検討の時刻を付け・変え・外す（[ADR-t1540-1](../adr/2026-10-05-t1540-1-a-kept-draft-returns-to-runtime-planners-at-its-revisit-time.md)）。開始前のtaskの変更と同じroleの集合なので、新しいcapabilityを作らず`task.write`に含めた。storeは同じtransactionでtaskが`draft`であることを確かめ（認可に使った状態は渡さない。draft以外は全てのroleに拒む）、`user` / `inbox`以外が`draft_planner_exhausted`のあるdraftに付けるのを拒む |
+| `revisit ID --at` / `revisit ID --clear` | `task.write` | task（queueにある状態）。draftの再検討の時刻を付け・変え・外す（[ADR-t1540-1](../adr/2026-10-05-t1540-1-a-kept-draft-returns-to-runtime-planners-at-its-revisit-time.md)）。storeは同じtransactionでtaskが`draft`であることを確かめ（認可に使った状態は渡さない。draft以外は全てのroleに拒む）、`user` / `inbox`以外が`draft_planner_exhausted`のあるdraftに付けるのを拒む |
 | `judge-follow-up` | `follow_up.judge` | task（状態による制限なし。follow_upの出どころと必須の欄・遷移をstoreが同一transactionで検査） |
 | `edit --verify` / `edit --no-verify`（`in_progress`のみ） | `task.verify_edit` | task（最新runが終了し、生きているrunが無いことをstoreが同一transactionで検査） |
 | `ready` / `ready --bypass-review`・`ready --inherit` | `task.ready` / `task.ready_bypass_review` | task（状態） |
@@ -247,7 +247,7 @@ CLI（`src/main.rs`の`execute()`）はqueueの場所を決めた直後、queue�
 | `run screen RUN`（認可の後に拒む） `run log RUN` / `run send RUN` | `screen.read` / `screen.send` | run（数字はtask。読めないidは`Unresolved`） |
 | `planner screen ID` `planner log ID` / `planner send ID` | `screen.read` / `screen.send` | planner |
 | `planner request ID` | `planner.request` | planner |
-| `session-event open/close` | `session.record` | hookが記録するspan: inboxのspanはqueue、plannerのspanは`DAGQ_PLANNER_ID`のplanner（無いか、`DAGQ_ACTOR_ID`より前に開いたworkspaceならqueue）、spanの無いsession（run）は`--run`、無ければ`DAGQ_RUN_ID`のrun（どちらも無ければ`Unresolved`） |
+| `session-event open/close` | `session.record` | hookが記録するspanから決める（`HookSession`） |
 
 結果（上のPolicyの表から決まる）:
 

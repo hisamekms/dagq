@@ -50,9 +50,12 @@ pub const LEGACY_REVIEWER_ROLE: &str = "reviewer";
 /// What a note, mark, finding or ask records as its writer for the user.
 pub const WRITTEN_BY_USER: &str = "human";
 
-// The actors of ADR-t728-1 decision 2, spelled as there. `User` has no
-// `DAGQ_ROLE`; `desk` joins when goal 48 makes it.
-string_enum!(ActorRole {
+string_enum!(
+    /// The actors of ADR-t728-1 decision 2, spelled as there. `User` has no
+    /// `DAGQ_ROLE`. `desk` and `update-job` are names kept for actors not
+    /// made yet: they are no variant here, so a `DAGQ_ROLE` naming them is
+    /// refused as unknown.
+    ActorRole {
     User => "user",
     Inbox => "inbox",
     Planner => "planner",

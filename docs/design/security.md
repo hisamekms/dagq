@@ -37,7 +37,6 @@ dagqのセキュリティの模型の全体を1か所にまとめる。決定の
 
 `TrustLevel`はroleだけから決まり（`src/domain/actor.rs`）、promptや名前から推し量らない。
 `DAGQ_ROLE`の未知の値ではコマンドが止まり、queueを開かない（fail closed）。
-`desk`と`update-job`は予約の名前で、`ActorRole`に無い。
 
 AI actorの出力は全てデータで、制御側が決定的に遷移へ写す:
 
