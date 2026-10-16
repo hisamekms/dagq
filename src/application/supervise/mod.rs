@@ -150,6 +150,7 @@ mod recheck;
 mod recovery;
 mod release;
 mod reopen;
+mod replan_park;
 mod report;
 mod request_planner;
 mod resume;
@@ -429,6 +430,9 @@ pub struct Layout {
     /// program reviews of its review write the scripts they run, outside
     /// what its worker can write (ADR-t1895-2 decision 2).
     pub review_programs_dir: PathBuf,
+    /// `replans/` of the queue: the snapshot of each run parked for a
+    /// replanning, outside what its worker can write (ADR-t1521-2).
+    pub replans_dir: PathBuf,
 }
 
 impl Layout {
@@ -438,6 +442,24 @@ impl Layout {
         ActorContext::instance(crate::domain::ActorRole::Supervisor, self.pid)
     }
 }
+
+/// A point where a test pauses a supervisor ([`Ports::pauses`]) to change
+/// the queue meanwhile, as another supervisor or a person would.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PausePoint {
+    /// A replanning's park, before it looks at the run's writer (and stops
+    /// one past its limit).
+    ParkLook,
+    /// The delivery of an answer, before it is written as the session's
+    /// next turn.
+    AnswerSend,
+    /// A resume, once its session's earlier requests were set aside,
+    /// before its wrapper starts.
+    ResumeLaunch,
+}
+
+/// What a supervisor calls at each [`PausePoint`] with the run's ID.
+pub type Pauses = Arc<dyn Fn(PausePoint, &RunId) + Send + Sync>;
 
 /// The ports the supervisor works through, and where it works.
 pub struct Ports<'a> {
@@ -485,6 +507,8 @@ pub struct Ports<'a> {
     /// The queue service's tokens and socket, which the workers and the
     /// jobs are given instead of the queue's path (goal 82's stage (3)).
     pub service_access: &'a dyn super::queue_service::ServiceAccess,
+    /// Where tests pause the supervisor ([`PausePoint`]); none outside them.
+    pub pauses: Option<Pauses>,
     pub files: Arc<dyn RunFiles>,
     pub processes: Arc<dyn ProcessControl + Send + Sync>,
     pub generators: Generators,
@@ -993,6 +1017,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         spawner: ports.spawner,
         programs: &ports.programs,
         service_access: ports.service_access,
+        pauses: ports.pauses.clone(),
         files: ports.files.clone(),
         processes: ports.processes.clone(),
         review_material: ports.review_material,
@@ -1160,6 +1185,8 @@ struct Supervisor<'a> {
     /// Where the program jobs of a review run ([`Ports::programs`]).
     programs: &'a crate::application::review_programs::ProgramBackends<'a>,
     service_access: &'a dyn super::queue_service::ServiceAccess,
+    /// Where tests pause it ([`Ports::pauses`]).
+    pauses: Option<Pauses>,
     files: Arc<dyn RunFiles>,
     processes: Arc<dyn ProcessControl + Send + Sync>,
     review_material:
@@ -2061,6 +2088,11 @@ impl Supervisor<'_> {
         // A run that waits for a person is adopted without a free slot
         // (ADR-0062 decision 11): the check is per run.
         self.adopt_stale_runs(parallel)?;
+        // Takes no slot: the runs no supervisor holds whose task is being
+        // replanned are parked where they wait (ADR-t1521-2).
+        if let Err(error) = self.park_idle_runs() {
+            warn!(error = %format_args!("{error:#}"), "the runs waiting for a replanning's park could not all be parked: {error:#}");
+        }
         // Takes no slot: a dead run goes to the triage below.
         self.recover_dead_runs()?;
         // Whatever the slots: a `land` answer only queues the run, which
@@ -3245,6 +3277,12 @@ impl Supervisor<'_> {
         {
             return Ok(Step::Disowned);
         }
+        // A run whose task is being replanned goes no further than its
+        // park (ADR-t1521-2 decision 1): no next turn, review, revise or
+        // landing starts, and the park gives its slot back.
+        if let Some(step) = self.park_step(slot)? {
+            return Ok(step);
+        }
         match &mut slot.phase {
             Phase::Resume(watch) => {
                 let Some(verdict) = watch.poll(self, &slot.run)? else {
@@ -3489,6 +3527,12 @@ impl Supervisor<'_> {
                 Ok(Step::Continue)
             }
             Phase::Validating(handle, session) => {
+                // A validation a park joined and set aside, whose park
+                // did not happen after all, is made again.
+                if handle.is_none() {
+                    *handle = Some(self.validate(slot.run.clone()));
+                    return Ok(Step::Continue);
+                }
                 if !handle.as_ref().is_some_and(|h| h.is_finished()) {
                     return Ok(Step::Continue);
                 }
@@ -3793,6 +3837,20 @@ impl Supervisor<'_> {
                 }
             }
             Phase::Satisfied(watch) => {
+                // While a replanning guards the task (ADR-t1521-2), the
+                // verification's end is acted on neither by an ask nor by a
+                // close: the slot holds it for the park, which withholds it,
+                // or for the operation's end.
+                if self.queue.replan_guard(slot.run.task_id())?.is_some() {
+                    return Ok(Step::Continue);
+                }
+                // A verification a park joined and set aside, whose park
+                // did not happen after all, runs again.
+                if watch.handle.is_none() {
+                    let ask = watch.ask;
+                    slot.phase = self.verify_satisfied(&slot.run, ask)?;
+                    return Ok(Step::Continue);
+                }
                 if !watch.handle.as_ref().is_some_and(|h| h.is_finished()) {
                     return Ok(Step::Continue);
                 }

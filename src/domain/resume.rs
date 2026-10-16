@@ -56,7 +56,7 @@ pub const RETRY_INHERIT: &str = "retry_inherit";
 
 /// The events that park a run for a session, or decide what it resumes
 /// with: the latest of them before a resume is why it was resumed.
-const PARKING: [&str; 9] = [
+const PARKING: [&str; 10] = [
     "integration_deferred",
     "integration_error",
     "evidence_missing",
@@ -66,6 +66,7 @@ const PARKING: [&str; 9] = [
     "triage_decided",
     "session_gone_parked",
     "run_e2e_failed",
+    "replan_parked",
 ];
 
 /// What the events so far say about the run: whether its landing was
@@ -501,6 +502,9 @@ mod tests {
             event("landing_decided", json!({"answer": "send_back"})),
             event("triage_finished", json!({"action": "resume"})),
             event("triage_decided", json!({"answer": "resume"})),
+            // A continuation after a replanning's park is counted, whatever
+            // parked the run before it.
+            event("replan_parked", json!({"code": "replan_parked"})),
         ] {
             let events = [pass(), conflict(), parking.clone(), resume()];
             assert_eq!(ResumeCount::of(&events).counted, 1, "{}", parking.kind);

@@ -74,8 +74,10 @@ impl ReplanStatus {
         Self::Blocked,
     ];
 
-    /// Whether the operation has ended: nothing moves it on again, and a
-    /// new request on the run opens a new one.
+    /// Whether the operation has ended: a new request on the run opens a
+    /// new one. Only a continuation or a withdrawal whose run's work cannot
+    /// be restored is moved again, back to `blocked`
+    /// ([`Self::reopens`]).
     pub const fn is_closed(self) -> bool {
         matches!(
             self,
@@ -88,6 +90,16 @@ impl ReplanStatus {
     /// work it saved stay as they are.
     pub const fn guards(self) -> bool {
         !self.is_closed() && !matches!(self, Self::Candidate | Self::Diagnosing)
+    }
+
+    /// Whether the trusted runtime is parking the operation's run: from
+    /// the pause's fence until the snapshot is recorded, the run's writer
+    /// is waited for and stopped and its work saved.
+    pub const fn parks(self) -> bool {
+        matches!(
+            self,
+            Self::PauseRequested | Self::Quiescing | Self::Snapshotting
+        )
     }
 
     /// Whether the operation holds a complete snapshot from here on: the
@@ -104,6 +116,14 @@ impl ReplanStatus {
         )
     }
 
+    /// Whether an operation in this status, closed, is moved again: a
+    /// continuation or a withdrawal whose run's resume finds the work the
+    /// park saved cannot be restored goes back to `blocked`, with the work
+    /// kept, rather than leave the run waiting with nothing to say why.
+    pub const fn reopens(self) -> bool {
+        matches!(self, Self::ContinuingAfterPark | Self::Withdrawn)
+    }
+
     /// The statuses the trusted runtime moves an operation in this one to.
     /// A proposal under review stays `reviewing` across its revises;
     /// `blocked` goes back to the step it failed at, or ends as a
@@ -113,9 +133,11 @@ impl ReplanStatus {
         match self {
             S::Candidate => &[S::Diagnosing, S::Continuing, S::PauseRequested],
             S::Diagnosing => &[S::Continuing, S::PauseRequested, S::Blocked],
-            S::PauseRequested => &[S::Quiescing, S::Snapshotting, S::Blocked],
-            S::Quiescing => &[S::Snapshotting, S::Blocked],
-            S::Snapshotting => &[S::Parked, S::Blocked],
+            // `continuing` before the park: the run landed first, its
+            // landing begun before the fence (the operation is not needed).
+            S::PauseRequested => &[S::Quiescing, S::Snapshotting, S::Continuing, S::Blocked],
+            S::Quiescing => &[S::Snapshotting, S::Continuing, S::Blocked],
+            S::Snapshotting => &[S::Parked, S::Continuing, S::Blocked],
             S::Parked => &[S::Planning, S::ContinuingAfterPark, S::Blocked],
             S::Planning => &[
                 S::Reviewing,
@@ -143,7 +165,9 @@ impl ReplanStatus {
                 S::ContinuingAfterPark,
                 S::Withdrawn,
             ],
-            S::Continuing | S::Applied | S::ContinuingAfterPark | S::Withdrawn => &[],
+            // A restore that failed (see `reopens`).
+            S::ContinuingAfterPark | S::Withdrawn => &[S::Blocked],
+            S::Continuing | S::Applied => &[],
         }
     }
 
@@ -553,7 +577,15 @@ mod tests {
         );
         for status in ReplanStatus::ALL {
             assert!(!(status.guards() && status.is_closed()), "{status:?}");
-            assert_eq!(status.is_closed(), status.next().is_empty(), "{status:?}");
+            assert_eq!(
+                status.is_closed() && !status.reopens(),
+                status.next().is_empty(),
+                "{status:?}"
+            );
+            if status.reopens() {
+                assert!(status.is_closed());
+                assert_eq!(status.next(), [ReplanStatus::Blocked]);
+            }
         }
     }
 
@@ -725,6 +757,35 @@ mod tests {
         applying.snapshot_id = Some("snap".into());
         assert!(check_move(&applying, 1, &step(ReplanStatus::Applied)).is_err());
         assert!(check_move(&reviewing, 1, &step(ReplanStatus::Reviewing)).is_ok());
+    }
+
+    #[test]
+    fn the_runtime_parks_from_the_fence_to_the_snapshot_and_a_landing_first_ends_it() {
+        let parking: Vec<_> = ReplanStatus::ALL
+            .into_iter()
+            .filter(|status| status.parks())
+            .map(ReplanStatus::as_str)
+            .collect();
+        assert_eq!(parking, ["pause_requested", "quiescing", "snapshotting"]);
+        for status in ReplanStatus::ALL.into_iter().filter(|s| s.parks()) {
+            assert!(status.guards(), "{status:?}");
+            assert!(!status.needs_snapshot(), "{status:?}");
+        }
+        assert!(ReplanStatus::PauseRequested.can_move_to(ReplanStatus::Continuing));
+        assert!(ReplanStatus::Quiescing.can_move_to(ReplanStatus::Continuing));
+        assert!(ReplanStatus::Snapshotting.can_move_to(ReplanStatus::Continuing));
+        // A continuation or a withdrawal whose restore failed is blocked
+        // again, by the generation it was read under; nothing else moves it.
+        for closed in [ReplanStatus::ContinuingAfterPark, ReplanStatus::Withdrawn] {
+            let mut ended = op(closed);
+            ended.snapshot_id = Some("snap".into());
+            assert!(check_move(&ended, 1, &step(ReplanStatus::Blocked)).is_ok());
+            assert!(check_move(&ended, 0, &step(ReplanStatus::Blocked)).is_err());
+            assert!(check_move(&ended, 1, &step(ReplanStatus::Planning)).is_err());
+        }
+        assert!(!ReplanStatus::Applied.reopens());
+        assert!(!ReplanStatus::Continuing.reopens());
+        assert!(!ReplanStatus::Parked.can_move_to(ReplanStatus::Continuing));
     }
 
     #[test]

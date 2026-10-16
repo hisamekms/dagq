@@ -86,10 +86,24 @@ impl Supervisor<'_> {
             )? {
                 continue;
             }
+            // Nor while a replanning guards its task (ADR-t1521-2): the
+            // run waits for the operation's outcome, its resumes kept.
+            if self.queue.replan_guard(run.task_id())?.is_some() {
+                continue;
+            }
             // Out of attempts: the run is retried with its branch carried
             // over, or goes to its recovery job, whether or not a slot is
-            // free.
+            // free; the work a replanning saved comes back first, as before
+            // a resume.
             if candidate.resumes.exhausted(self.resume.config) {
+                match self.restore_parked(run) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(error) => {
+                        warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {} is not handed on: {error:#}", run.id());
+                        continue;
+                    }
+                }
                 if let Err(error) = self.exhaust_resumes(run, candidate.resumes) {
                     warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: its used-up resumes could not be handed to a person: {error:#}", run.id());
                 }
@@ -123,6 +137,18 @@ impl Supervisor<'_> {
             Some(run_dir) => self.verifier.run_env(Path::new(run_dir))?,
             None => Vec::new(),
         };
+        // The work a replanning saved comes back first (ADR-t1521-2): one
+        // that cannot blocks the operation again, which keeps the run from
+        // resuming (its resumes not spent) and shows in `replans`; one
+        // another supervisor restores is its to resume.
+        match self.restore_parked(&run) {
+            Ok(true) => {}
+            Ok(false) => return Ok(()),
+            Err(error) => {
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {} does not resume: {error:#}", run.id());
+                return Ok(());
+            }
+        }
         let (reason, kind) = resume_reason(&self.queue.run_events(run.id())?, run.last_error());
         // Not while the cleanup job clears the run's worktree (task 405).
         let cleaning = self.host.cleanup.cleaning();
@@ -143,6 +169,13 @@ impl Supervisor<'_> {
             return Ok(());
         };
         self.ensure_sccache(crate::domain::sccache::CheckReason::BeforeResume);
+        // The answers a replanning's park caught untaken go to the session
+        // the continuation opens, once (ADR-t1521-2).
+        let carried_answers = if kind == ResumeKind::Replan {
+            RunHistory::from_events(&self.queue.run_events(run.id())?).answers_to_carry()
+        } else {
+            Vec::new()
+        };
         let request = ResumeRequest {
             main,
             branch,
@@ -150,6 +183,8 @@ impl Supervisor<'_> {
             kind,
             reason_file: reason_file(&run, &format!("resume-{attempt}")),
             known_failures: self.request_known_failures(&run, &format!("resume-{attempt}")),
+            carried_answers,
+            answers_file: answers_file(&run, &format!("resume-{attempt}")),
         };
         match self.start_resume(&run, attempt, &request, run_env) {
             Ok(watch) => {
@@ -244,9 +279,7 @@ impl Supervisor<'_> {
         head: &CommitSha,
         main: &CommitSha,
     ) -> Result<()> {
-        let approved = self
-            .queue
-            .has_run_event(run.id(), event_kind::INTEGRATION_APPROVED)?;
+        let approved = RunHistory::from_events(&self.queue.run_events(run.id())?).approved();
         // Not while the cleanup job clears the run's build outputs (task
         // 1289): it lands or is validated from its worktree.
         let cleaning = self.host.cleanup.cleaning();
@@ -425,6 +458,28 @@ impl Supervisor<'_> {
         }
         Ok(())
     }
+    /// Write the whole carried answers of `request` to its `answers_file`
+    /// when `message` cut them: the request names that file as where the
+    /// session reads every answer, so none is lost to the request's limit.
+    pub(super) fn write_answers_file(
+        &mut self,
+        request: &ResumeRequest,
+        message: &FittedPrompt,
+    ) -> Result<()> {
+        if let Some(file) = request
+            .answers_file
+            .as_ref()
+            .filter(|_| message.bytes.omitted.contains_key("answers"))
+        {
+            self.files
+                .write(
+                    Path::new(file),
+                    request.carried_answers.join("\n").as_bytes(),
+                )
+                .context("write the whole carried answers of the resolution request")?;
+        }
+        Ok(())
+    }
     /// Write the resolution request, refresh the runtime snapshot (the one
     /// the worker ran may predate `session --resume`) and start the resume
     /// wrapper in the background with the same settings and `run_env` as
@@ -450,6 +505,7 @@ impl Supervisor<'_> {
         run_git::hand_main(&*self.repository, run, &request.main)?;
         let built = resume_request(&task, run, request, &landed)?;
         self.write_reason_file(request, &built)?;
+        self.write_answers_file(request, &built)?;
         // Past `[fresh_session]`, the reopened session is a new one that
         // starts with a handoff carrying the request (ADR-t2080-1): a
         // triage's instruction and a person's send-back are its reason.
@@ -473,6 +529,7 @@ impl Supervisor<'_> {
             .copy(&self.layout.runner, &run_dir.join(RUN_RUNNER_FILE))
             .context("snapshot runtime binary")?;
         self.prepare_turns(run, &run_dir)?;
+        self.pause_at(PausePoint::ResumeLaunch, run.id());
         self.warn_ignored_wrapper_setting();
         let log = self.session_log(&run_dir, Some(attempt), false);
         let command = background::wrapper_command(vec![
@@ -545,9 +602,7 @@ impl Supervisor<'_> {
 
             required_evidence: resume_required(&task, run),
             spike: task.execution_class().is_spike(),
-            approved: self
-                .queue
-                .has_run_event(run.id(), event_kind::INTEGRATION_APPROVED)?,
+            approved: RunHistory::from_events(&self.queue.run_events(run.id())?).approved(),
             silent: false,
             exit_for_silence: false,
             stale: None,
@@ -716,9 +771,7 @@ impl Supervisor<'_> {
                 exit_requested: exit.is_some(),
 
                 exit_for_silence,
-                approved: self
-                    .queue
-                    .has_run_event(run.id(), event_kind::INTEGRATION_APPROVED)?,
+                approved: RunHistory::from_events(&self.queue.run_events(run.id())?).approved(),
             },
         )
     }
@@ -738,9 +791,7 @@ impl Supervisor<'_> {
         workspace: &str,
         verdict: ResumeVerdict,
     ) -> Result<Step> {
-        let approved = self
-            .queue
-            .has_run_event(slot.run.id(), event_kind::INTEGRATION_APPROVED)?;
+        let approved = RunHistory::from_events(&self.queue.run_events(slot.run.id())?).approved();
         let reviewed = matches!(verdict.kind, ResumeOutcome::Resolved) && !approved;
         // A session let go after the exit timeout still runs: its
         // wrapper stays, and blocks the next attempt until it ends. A
@@ -952,6 +1003,7 @@ pub(super) fn resume_reason(
         Some(ParkCause::Recheck) => ResumeKind::Recheck,
         Some(ParkCause::SessionGone) => ResumeKind::SessionGone,
         Some(ParkCause::E2e) => ResumeKind::E2e,
+        Some(ParkCause::Replan) => ResumeKind::Replan,
         Some(ParkCause::Landing) | None => ResumeKind::Landing,
     };
     (reason, kind)
@@ -966,6 +1018,19 @@ pub(super) fn reason_file(run: &TaskRun, request: &str) -> Option<String> {
     run.run_dir().map(|dir| {
         Path::new(dir)
             .join(format!("{request}-reason.txt"))
+            .to_string_lossy()
+            .into_owned()
+    })
+}
+
+/// The file in `run`'s directory that holds the whole answers a
+/// continuation's request named `request` (`resume-<attempt>`) carries when
+/// the request cuts them: `<request>-answers.txt`; `None` without a run
+/// directory.
+pub(super) fn answers_file(run: &TaskRun, request: &str) -> Option<String> {
+    run.run_dir().map(|dir| {
+        Path::new(dir)
+            .join(format!("{request}-answers.txt"))
             .to_string_lossy()
             .into_owned()
     })
@@ -1913,6 +1978,7 @@ mod tests {
                 ResumeKind::SessionGone,
             ),
             ("run_e2e_failed", json!({"reason": "r"}), ResumeKind::E2e),
+            ("replan_parked", json!({"reason": "r"}), ResumeKind::Replan),
         ] {
             assert_eq!(
                 of(kind, payload),

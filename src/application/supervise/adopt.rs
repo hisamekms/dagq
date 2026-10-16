@@ -1081,14 +1081,7 @@ fn review_resumption(
             }),
             None => None,
         },
-        event_kind::VALIDATION_FINISHED
-            if history
-                .events()
-                .iter()
-                .any(|e| e.kind == event_kind::INTEGRATION_APPROVED) =>
-        {
-            Some(AfterExit::Land)
-        }
+        event_kind::VALIDATION_FINISHED if history.approved() => Some(AfterExit::Land),
         // A rebased run a landing recheck resumed waits for the answer
         // to its approve_landing ask, not a review (ADR-0068 decision 4).
         event_kind::VALIDATION_FINISHED

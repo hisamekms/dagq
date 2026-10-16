@@ -465,3 +465,131 @@ fn a_verification_a_dead_supervisor_left_running_is_stopped_before_the_next() {
     );
     assert_eq!(detail.task.status(), TaskStatus::Completed);
 }
+
+/// Open a replanning operation on `run` and move it past the pause's fence,
+/// as the trusted runtime's diagnosis would (ADR-t1521-2).
+fn pause_replan(db: &Path, run: &RunId) -> dagq::domain::task_replan::ReplanOperation {
+    use dagq::domain::task_replan::{NewReplan, ReplanMove, ReplanOrigin, ReplanStatus};
+    let mut queue = SqliteQueue::open(db).unwrap();
+    let op = queue
+        .record_replan(
+            &NewReplan {
+                run: run.clone(),
+                reason: "two independent parts".into(),
+                evidence: Vec::new(),
+            },
+            ReplanOrigin::Runtime,
+            "supervisor",
+            "supervisor",
+        )
+        .unwrap()
+        .operation;
+    queue
+        .move_replan(
+            op.id,
+            op.generation,
+            &ReplanMove {
+                to: ReplanStatus::PauseRequested,
+                reason: "the test pauses it".into(),
+                snapshot_id: None,
+                diagnosis: None,
+            },
+        )
+        .unwrap()
+}
+
+/// What a replanning's park leaves of task 1's claim: the operation
+/// parked, the run waiting for a session, no close, the task in progress
+/// and task 2 (which waits for it) not claimed.
+fn assert_parked_unclosed(db: &Path, op: &dagq::domain::task_replan::ReplanOperation) {
+    let mut queue = SqliteQueue::open(db).unwrap();
+    assert_eq!(
+        queue.replan_operation(op.id).unwrap().status,
+        dagq::domain::task_replan::ReplanStatus::Parked
+    );
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.task.status(), TaskStatus::InProgress);
+    assert_eq!(detail.runs[0].status(), RunStatus::NeedsSession);
+    assert_eq!(payloads(&detail, "replan_parked").len(), 1);
+    assert!(payloads(&detail, "run_satisfied_closed").is_empty());
+    assert!(queue.run_lease(detail.runs[0].id()).unwrap().is_none());
+    assert!(queue.show(TaskId::new(2)).unwrap().runs.is_empty());
+}
+
+/// Acceptance (ADR-t1521-2, the park): an operation opened while the
+/// claim's verification runs lets the verification end, but its result
+/// opens no `approve_close` ask (`replan_result_withheld`): the run is
+/// parked out of its slot with its work saved, and its task stays in
+/// progress.
+#[test]
+fn a_claim_whose_verification_runs_at_the_fence_is_parked_without_its_ask() {
+    let (fixture, repo, db) = fixture();
+    let gate = fixture.path().join("verification-gate");
+    let verify = json!(["test -f seed.txt", common::await_path(&gate)]);
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET verification_commands=?1 WHERE id=1",
+            [verify.to_string()],
+        )
+        .unwrap();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    add_ready_task(&mut queue, "after it", &[TaskId::new(1)]);
+    let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+    backend.script_for(1, SATISFIED_AGENT);
+    let (_reviewer, supervisor) = runtime_support::headless::supervise_thread(
+        &db,
+        &repo,
+        backend.clone(),
+        Default::default(),
+        &[],
+    );
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        !payloads(
+            &queue.show(TaskId::new(1)).unwrap(),
+            "run_satisfied_snapshot",
+        )
+        .is_empty()
+    });
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let op = pause_replan(&db, run.id());
+    fs::write(&gate, "").unwrap();
+    finished(&db, &backend, supervisor);
+    assert_parked_unclosed(&db, &op);
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let withheld = payloads(&detail, "replan_result_withheld");
+    assert_eq!(withheld.len(), 1, "{withheld:?}");
+    assert_eq!(withheld[0]["what"], "satisfied_verification");
+    assert_eq!(withheld[0]["result"]["passed"], true);
+    assert!(payloads(&detail, "run_satisfied_verified").is_empty());
+    assert!(
+        queue
+            .asks(Default::default())
+            .unwrap()
+            .iter()
+            .all(|ask| ask.kind != dagq::domain::AskKind::ApproveClose)
+    );
+}
+
+/// Acceptance (ADR-t1521-2, the park): a claim waiting unleased for the
+/// answer to its close question is parked where it rests once an
+/// operation is opened on its run. A `close` answered after the fence does
+/// not close the task nor free its dependent: the park closes the ask, and
+/// the close's own transaction refuses a task being replanned.
+#[test]
+fn a_claim_waiting_for_its_close_answer_is_parked_and_the_answer_does_not_close_it() {
+    let (_fixture, repo, db, backend, reviewer) = claimed();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let ask = close_ask(&mut queue);
+    let op = pause_replan(&db, run.id());
+    queue.answer(ask.id, "close").unwrap();
+    supervise_reviewed(&db, &repo, &backend, &reviewer, 2);
+    assert_parked_unclosed(&db, &op);
+    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
+    let refused = queue
+        .close_satisfied(run.id(), None, json!({}))
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("being replanned"), "{refused}");
+}

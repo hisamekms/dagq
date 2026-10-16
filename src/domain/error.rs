@@ -350,6 +350,20 @@ pub enum DomainError {
     ReplanApplyUnavailable {
         operation: ReplanId,
     },
+    /// A snapshot of a run's work could not save `path` whole
+    /// ([`super::replan_snapshot`]): the save fails rather than leave it
+    /// out.
+    SnapshotRefused {
+        path: String,
+        why: String,
+    },
+    /// A snapshot's manifest names `path` for a file of its directory or
+    /// of the worktree that is not a relative path staying inside it
+    /// ([`super::replan_snapshot::check_relative`]): the restore refuses
+    /// it rather than read or write outside.
+    SnapshotPathRefused {
+        path: String,
+    },
     /// A reference of a planning request is not `<kind>:<id>` of a kind it
     /// takes (ADR-t1394-1 decision 2).
     RequestRefInvalid {
@@ -902,6 +916,14 @@ impl fmt::Display for DomainError {
             Self::ReplanApplyUnavailable { operation } => write!(
                 f,
                 "replan operation {operation} cannot be applied: this binary has no atomic replacement yet"
+            ),
+            Self::SnapshotRefused { path, why } => write!(
+                f,
+                "the snapshot cannot save {path}: {why}"
+            ),
+            Self::SnapshotPathRefused { path } => write!(
+                f,
+                "the snapshot names {path:?}, which is not a relative path inside its directory or the worktree; it is not restored"
             ),
             Self::RequestRefInvalid { value } => write!(
                 f,

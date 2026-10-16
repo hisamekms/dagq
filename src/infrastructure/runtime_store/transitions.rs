@@ -350,7 +350,9 @@ impl SqliteQueue {
     /// without a commit, recorded as `run_satisfied_closed` with `payload`,
     /// and the task `completed`, so its dependents may be claimed. `token`
     /// is the lease the run holds after a verification run again for the
-    /// answer, released here; `None` closes a run nobody leases.
+    /// answer, released here; `None` closes a run nobody leases. Refused
+    /// while a replanning guards the task (ADR-t1521-2): a task being
+    /// replanned is not completed.
     pub fn close_satisfied(
         &mut self,
         id: &RunId,
@@ -365,6 +367,15 @@ impl SqliteQueue {
             Some(token) => renew_lease(&tx, id, token, unix_seconds(at))?,
             None => ensure!(!run_leased(&tx, id)?, "run {id} is leased"),
         }
+        let task: crate::domain::TaskId =
+            tx.query_row("SELECT task_id FROM task_runs WHERE id=?1", [id], |r| {
+                r.get(0)
+            })?;
+        crate::infrastructure::replans::check_task_step(
+            &tx,
+            task,
+            crate::domain::task_replan::GuardedStep::Integrate,
+        )?;
         let run = apply_recorded(
             &tx,
             refusals(&self.runs_dir, &self.generators),
@@ -458,6 +469,101 @@ impl SqliteQueue {
         )?;
         tx.commit()?;
         Ok(run.relocated(&self.runs_dir))
+    }
+
+    /// Settle the park of operation `op`'s run, read under `generation`, as
+    /// `step` says (ADR-t1521-2 decision 2): `parked` with its complete
+    /// snapshot, or `blocked` with why the stop or the save failed. In one
+    /// transaction the operation moves and, for a run leased to `token`
+    /// (one the supervisor held in a slot), the run becomes `needs_session`
+    /// recorded as `replan_parked` with `payload` and `step`'s reason and
+    /// gives the lease back, so its slot is free while the operation keeps
+    /// its task from going on. A run nobody leases (`token` `None`: one
+    /// waiting for a person, its resume or its triage) is parked the same
+    /// way, so the continuation's resume, which restores the work, is its
+    /// next step; one another process leases is refused. The run's open
+    /// `approve_landing` and `approve_close` asks are closed in the same
+    /// transaction. A stale generation or a lease lost writes nothing.
+    pub fn settle_replan(
+        &mut self,
+        op: crate::domain::ReplanId,
+        generation: i64,
+        step: &crate::domain::task_replan::ReplanMove,
+        token: Option<&LeaseToken>,
+        payload: serde_json::Value,
+    ) -> Result<(crate::domain::task_replan::ReplanOperation, TaskRun)> {
+        let now = self.generators.clock.now();
+        let reason = step.reason.as_str();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let parked = crate::infrastructure::replans::move_in(&tx, op, generation, step, now)?;
+        let id = parked.run_id.clone();
+        let run = match token {
+            Some(token) => {
+                renew_lease(&tx, &id, token, now)?;
+                let run = apply_recorded(
+                    &tx,
+                    refusals(&self.runs_dir, &self.generators),
+                    &id,
+                    Some(token),
+                    || "run cannot be parked for its replanning".to_owned(),
+                    |run| run::record_replan_park(run, reason, payload),
+                )?;
+                ensure!(
+                    tx.execute(
+                        "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
+                        params![id, token]
+                    )? == 1,
+                    "run lease was lost"
+                );
+                run_event(
+                    &tx,
+                    &id,
+                    EventKind::LeaseReleased,
+                    json!({"reason": "replan_parked", "operation_id": op}),
+                )?;
+                run
+            }
+            // A run nobody holds (one waiting for a person, its resume or
+            // its triage) is parked the same way, so that its next step is
+            // the continuation's resume, which restores the work first.
+            None => {
+                ensure!(
+                    !run_leased(&tx, &id)?,
+                    "run {id} is leased: its holder parks it"
+                );
+                apply_recorded(
+                    &tx,
+                    refusals(&self.runs_dir, &self.generators),
+                    &id,
+                    None,
+                    || "run cannot be parked for its replanning".to_owned(),
+                    |run| run::record_replan_park(run, reason, payload),
+                )?
+            }
+        };
+        // The run's open landing or close question was asked of the work
+        // before the park: it is closed with the park, so no answer to it
+        // lands the run or closes its task after the continuation, whose
+        // validation and review ask afresh.
+        for kind in [
+            crate::domain::AskKind::ApproveLanding,
+            crate::domain::AskKind::ApproveClose,
+        ] {
+            crate::infrastructure::asks::close_asks_in(
+                &tx,
+                &id,
+                None,
+                kind,
+                &format!(
+                    "the run was parked for replan operation {op}; this question no longer applies to it"
+                ),
+                now,
+            )?;
+        }
+        tx.commit()?;
+        Ok((parked, run.relocated(&self.runs_dir)))
     }
 
     /// Park a run awaiting integration leased to `token` whose session's
@@ -1022,6 +1128,61 @@ impl RunTransitions for SqliteQueue {
         task: crate::domain::TaskId,
     ) -> Result<Option<crate::domain::task_replan::ReplanGuard>> {
         SqliteQueue::replan_guard(self, task)
+    }
+    fn parking_replans(&self) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
+        SqliteQueue::parking_replans(self)
+    }
+    fn replans_of_run(
+        &self,
+        run: &RunId,
+    ) -> Result<Vec<crate::domain::task_replan::ReplanOperation>> {
+        SqliteQueue::replans_of_run(self, run)
+    }
+    fn move_replan(
+        &mut self,
+        id: crate::domain::ReplanId,
+        generation: i64,
+        step: &crate::domain::task_replan::ReplanMove,
+    ) -> Result<crate::domain::task_replan::ReplanOperation> {
+        SqliteQueue::move_replan(self, id, generation, step)
+    }
+    fn settle_replan(
+        &mut self,
+        op: crate::domain::ReplanId,
+        generation: i64,
+        step: &crate::domain::task_replan::ReplanMove,
+        token: Option<&LeaseToken>,
+        payload: serde_json::Value,
+    ) -> Result<(crate::domain::task_replan::ReplanOperation, TaskRun)> {
+        SqliteQueue::settle_replan(self, op, generation, step, token, payload)
+    }
+    fn begin_restore(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        op: crate::domain::ReplanId,
+        generation: i64,
+    ) -> Result<crate::domain::replan_snapshot::RestoreStart> {
+        SqliteQueue::begin_restore(self, id, token, op, generation)
+    }
+    fn lease_for_park(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        op: crate::domain::ReplanId,
+        generation: i64,
+    ) -> Result<Option<TaskRun>> {
+        SqliteQueue::lease_for_park(self, id, token, op, generation)
+    }
+    fn finish_restore(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        op: crate::domain::ReplanId,
+        generation: i64,
+        restored: std::result::Result<serde_json::Value, String>,
+    ) -> Result<bool> {
+        SqliteQueue::finish_restore(self, id, token, op, generation, restored)
     }
     fn claim_for_supervisor(
         &mut self,

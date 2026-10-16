@@ -1205,7 +1205,7 @@ fn codex_review_with_design(repo: &Path, extra: &str) {
 /// with the narrowing of its declared tools, and the run lands.
 #[test]
 fn a_codex_review_runs_its_whole_review_and_its_agents_on_codex() {
-    use crate::runtime_codex::{FINISH, TASK, codex_fixture};
+    use crate::runtime_support::codex::{FINISH, TASK, codex_fixture};
     let (dir, repo, db, backend, codex) = codex_fixture();
     codex_review_with_design(&repo, "");
     set_turns(dir.path(), FINISH);
@@ -1245,7 +1245,7 @@ fn a_codex_review_runs_its_whole_review_and_its_agents_on_codex() {
 /// is never held nor started.
 #[test]
 fn with_the_fallback_off_an_agents_job_waits_for_its_provider_and_lands() {
-    use crate::runtime_codex::{FINISH, TASK, codex_fixture};
+    use crate::runtime_support::codex::{FINISH, TASK, codex_fixture};
     let (dir, repo, db, backend, codex) = codex_fixture();
     codex_review_with_design(&repo, "[provider_fallback]\njobs = false\n");
     set_turns(dir.path(), FINISH);
@@ -1377,7 +1377,7 @@ fn job_launches(detail: &dagq::domain::TaskDetail) -> Vec<(Value, Value, Value, 
 /// records its launch's provider and where it came from, and the run lands.
 #[test]
 fn an_agent_that_names_codex_runs_its_job_on_codex_and_the_others_on_the_roles_provider() {
-    use crate::runtime_codex::{FINISH, TASK, codex_fixture};
+    use crate::runtime_support::codex::{FINISH, TASK, codex_fixture};
     let (dir, repo, db, backend, codex) = codex_fixture();
     design_on_codex(&repo, "");
     set_turns(dir.path(), FINISH);
@@ -1427,7 +1427,7 @@ fn an_agent_that_names_codex_runs_its_job_on_codex_and_the_others_on_the_roles_p
 /// agent's table named its provider; the run lands.
 #[test]
 fn an_agent_that_names_codex_moves_alone_to_claude_and_keeps_where_its_provider_came_from() {
-    use crate::runtime_codex::{FINISH, TASK, codex_fixture};
+    use crate::runtime_support::codex::{FINISH, TASK, codex_fixture};
     let (dir, repo, db, backend, codex) = codex_fixture();
     design_on_codex(&repo, "");
     set_turns(dir.path(), FINISH);
@@ -1487,7 +1487,7 @@ fn an_agent_that_names_codex_moves_alone_to_claude_and_keeps_where_its_provider_
 /// run lands.
 #[test]
 fn with_the_fallback_off_an_agent_that_names_codex_waits_alone_and_the_review_lands() {
-    use crate::runtime_codex::{FINISH, TASK, codex_fixture};
+    use crate::runtime_support::codex::{FINISH, TASK, codex_fixture};
     let (dir, repo, db, backend, codex) = codex_fixture();
     design_on_codex(&repo, "[provider_fallback]\njobs = false\n");
     set_turns(dir.path(), FINISH);
@@ -1600,7 +1600,7 @@ fn with_the_fallback_off_an_agent_that_names_codex_waits_alone_and_the_review_la
 /// review's job starts on Codex, not moved, and the run lands.
 #[test]
 fn a_hold_before_the_review_begins_holds_only_the_jobs_of_its_provider() {
-    use crate::runtime_codex::{FINISH, TASK, codex_fixture};
+    use crate::runtime_support::codex::{FINISH, TASK, codex_fixture};
     use dagq::domain::provider_switch::{ProviderHold, SwitchReason};
     let (dir, repo, db, backend, codex) = codex_fixture();
     commit_on_main(
@@ -1715,7 +1715,7 @@ fn a_hold_before_the_review_begins_holds_only_the_jobs_of_its_provider() {
 /// Claude is held (its agent did not start) while the worker works.
 #[test]
 fn a_whole_review_that_waited_for_claude_starts_in_the_session_its_span_names() {
-    use crate::runtime_codex::{FINISH, TASK, codex_fixture};
+    use crate::runtime_support::codex::{FINISH, TASK, codex_fixture};
     use dagq::domain::provider_switch::{ProviderHold, SwitchReason};
     let (dir, repo, db, backend, codex) = codex_fixture();
     commit_on_main(
@@ -2011,4 +2011,91 @@ fn the_eval_and_a_review_start_an_agents_job_the_one_way_within_their_own_limits
             assert!(!launch.prompt.contains(word), "{word}");
         }
     }
+}
+
+/// Open a replanning operation on `run` and move it past the pause's fence,
+/// as the trusted runtime's diagnosis would (ADR-t1521-2).
+fn pause_replan(db: &Path, run: &RunId) -> dagq::domain::task_replan::ReplanOperation {
+    use dagq::domain::task_replan::{NewReplan, ReplanMove, ReplanOrigin, ReplanStatus};
+    let mut queue = SqliteQueue::open(db).unwrap();
+    let op = queue
+        .record_replan(
+            &NewReplan {
+                run: run.clone(),
+                reason: "two independent parts".into(),
+                evidence: Vec::new(),
+            },
+            ReplanOrigin::Runtime,
+            "supervisor",
+            "supervisor",
+        )
+        .unwrap()
+        .operation;
+    queue
+        .move_replan(
+            op.id,
+            op.generation,
+            &ReplanMove {
+                to: ReplanStatus::PauseRequested,
+                reason: "the test pauses it".into(),
+                snapshot_id: None,
+                diagnosis: None,
+            },
+        )
+        .unwrap()
+}
+
+/// Acceptance (ADR-t1521-2, the park): an agent's job that waits for its
+/// provider (Codex held at its usage limit, the fallback off) does not keep
+/// a run a replanning parks in its slot. Once the operation passes its
+/// fence, the job that ran ends, the waiting one starts no more, the review
+/// is withheld (`replan_result_withheld`), and the run is parked with Codex
+/// still held.
+#[test]
+fn a_review_whose_agent_waits_for_its_provider_is_parked_without_starting_it() {
+    use crate::runtime_support::codex::{FINISH, TASK, codex_fixture};
+    let (dir, repo, db, backend, codex) = codex_fixture();
+    codex_review_with_design(&repo, "[provider_fallback]\njobs = false\n");
+    set_turns(dir.path(), FINISH);
+    fs::write(
+        dir.path().join("codex-agent-design-failure.jsonl"),
+        "{\"type\":\"error\",\"message\":\"unexpected status 429 Too Many Requests: You have hit your usage limit. Try again later.\"}\n",
+    )
+    .unwrap();
+    let options = SuperviseOptions {
+        codex,
+        codex_home: Some(dir.path().join(CODEX_HOME)),
+        ..supervise_options(1, true)
+    };
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "from Claude")]);
+    let supervisor = {
+        let (db, repo) = (db.clone(), repo.clone());
+        thread::spawn(move || supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options))
+    };
+    wait_until(&db, Duration::from_secs(60), |queue| {
+        queue
+            .all_events()
+            .unwrap()
+            .iter()
+            .any(|event| event.kind == "provider_held")
+    });
+    let run = SqliteQueue::open(&db).unwrap().show(TASK).unwrap().runs[0].clone();
+    let op = pause_replan(&db, run.id());
+    let outcome = joined(supervisor, "the supervisor to return");
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    assert_eq!(
+        queue.replan_operation(op.id).unwrap().status,
+        dagq::domain::task_replan::ReplanStatus::Parked
+    );
+    let detail = queue.show(TASK).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::NeedsSession);
+    let withheld = payloads(&detail, "replan_result_withheld");
+    assert_eq!(withheld.len(), 1, "{withheld:?}");
+    assert_eq!(withheld[0]["what"], "review");
+    assert_eq!(withheld[0]["waiting"], 1);
+    // The whole review's job and the agent's first run, not its run once
+    // Codex is back.
+    assert_eq!(payloads(&detail, "review_job_started").len(), 2);
+    assert!(payloads(&detail, "review_finished").is_empty());
 }

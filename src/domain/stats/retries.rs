@@ -23,7 +23,7 @@ pub const BREAKING_CODES: [&str; 3] = ["rebase_conflict", "verification_failed",
 
 /// The events that park a run for a resume, whose code is the resume's
 /// reason (as the supervisor's `resume_reason` picks them).
-const PARKING: [&str; 8] = [
+const PARKING: [&str; 9] = [
     "integration_deferred",
     "integration_error",
     "evidence_missing",
@@ -32,6 +32,7 @@ const PARKING: [&str; 8] = [
     "triage_finished",
     "triage_decided",
     "session_gone_parked",
+    "replan_parked",
 ];
 
 /// The reason of a deferral or resume whose event carries no code.
@@ -483,6 +484,33 @@ mod tests {
             created_at: format!("2026-09-26T00:{:02}:{:02}.000Z", secs / 60, secs % 60),
             actor: None,
         }
+    }
+
+    #[test]
+    fn a_resume_after_a_replannings_park_is_counted_under_that_park() {
+        let events = [
+            event(
+                1,
+                A,
+                1,
+                "integration_deferred",
+                json!({"code": "rebase_conflict", "status": "needs_session"}),
+                10,
+            ),
+            event(
+                2,
+                A,
+                1,
+                "replan_parked",
+                json!({"code": "replan_parked", "status": "needs_session"}),
+                20,
+            ),
+            event(3, A, 1, "resume_started", json!({"attempt": 1}), 30),
+        ];
+        let all = retries(&events);
+        let attempts = &all[&RunId::new(A).unwrap()].resume_attempts;
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].reason, "replan_parked");
     }
 
     #[test]

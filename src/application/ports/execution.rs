@@ -85,6 +85,31 @@ pub trait RunFiles: Send + Sync {
     fn read_stamped(&self, path: &Path) -> Result<Option<(SystemTime, Vec<u8>)>>;
     fn is_file(&self, path: &Path) -> bool;
     fn is_dir(&self, path: &Path) -> bool;
+    /// Whether the regular file `path` is executable (its owner's execute
+    /// bit), without following a link; a store with no modes says no.
+    fn executable(&self, path: &Path) -> io::Result<bool> {
+        let _ = path;
+        Ok(false)
+    }
+    /// Set or clear the execute bits of the regular file `path`; a store
+    /// with no modes keeps none.
+    fn set_executable(&self, path: &Path, executable: bool) -> io::Result<()> {
+        let _ = (path, executable);
+        Ok(())
+    }
+    /// What `path` is, without following a link: a store that cannot tell
+    /// a link calls a file a file and a directory a directory.
+    fn entry_kind(&self, path: &Path) -> io::Result<EntryKind> {
+        if self.is_dir(path) {
+            Ok(EntryKind::Dir)
+        } else if self.is_file(path) {
+            Ok(EntryKind::File)
+        } else if self.exists(path) {
+            Ok(EntryKind::Other)
+        } else {
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        }
+    }
     fn exists(&self, path: &Path) -> bool;
     /// The paths of the entries of `dir`, in no particular order.
     fn read_dir(&self, dir: &Path) -> io::Result<Vec<PathBuf>>;
@@ -942,6 +967,67 @@ pub trait RunTransitions {
         &self,
         task: crate::domain::TaskId,
     ) -> Result<Option<crate::domain::task_replan::ReplanGuard>>;
+    /// The open operations whose run the trusted runtime parks now
+    /// ([`crate::domain::task_replan::ReplanStatus::parks`]), oldest first.
+    fn parking_replans(&self) -> Result<Vec<crate::domain::task_replan::ReplanOperation>>;
+    /// Every replanning operation on run `run`, oldest first.
+    fn replans_of_run(
+        &self,
+        run: &RunId,
+    ) -> Result<Vec<crate::domain::task_replan::ReplanOperation>>;
+    /// Move operation `id`, read under `generation`, as `step` says: the
+    /// trusted runtime's write of an operation.
+    fn move_replan(
+        &mut self,
+        id: crate::domain::ReplanId,
+        generation: i64,
+        step: &crate::domain::task_replan::ReplanMove,
+    ) -> Result<crate::domain::task_replan::ReplanOperation>;
+    /// Move operation `op` as `step` says (`parked` with its snapshot, or
+    /// `blocked`) and, for a run leased to `token`, park the run
+    /// (`needs_session`, `replan_parked` with `payload`) and give its lease
+    /// back, in one transaction.
+    fn settle_replan(
+        &mut self,
+        op: crate::domain::ReplanId,
+        generation: i64,
+        step: &crate::domain::task_replan::ReplanMove,
+        token: Option<&LeaseToken>,
+        payload: serde_json::Value,
+    ) -> Result<(crate::domain::task_replan::ReplanOperation, TaskRun)>;
+    /// Lease run `id`, resting unleased, to `token` for the park of
+    /// operation `op` (read under `generation`); `None` once `op` no longer
+    /// parks it or another process holds it.
+    fn lease_for_park(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        op: crate::domain::ReplanId,
+        generation: i64,
+    ) -> Result<Option<TaskRun>>;
+    /// Start the restore of the work operation `op` (read under
+    /// `generation`) saved for parked run `id`: the run leased to `token`
+    /// for it, the work restored already, or held elsewhere.
+    fn begin_restore(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        op: crate::domain::ReplanId,
+        generation: i64,
+    ) -> Result<crate::domain::replan_snapshot::RestoreStart>;
+    /// Record the end of the restore `token` owns (`replan_restored` with
+    /// the payload, or `replan_restore_failed` with why and the operation
+    /// back to `blocked`), unless `token` lost the run or `op` moved;
+    /// whether it was recorded. The lease `token` still holds is given back
+    /// either way.
+    fn finish_restore(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        op: crate::domain::ReplanId,
+        generation: i64,
+        restored: std::result::Result<serde_json::Value, String>,
+    ) -> Result<bool>;
     fn workspace_closed(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun>;
     fn cleanup_failed(
         &mut self,
@@ -1595,6 +1681,56 @@ pub trait Repository {
     fn merge_base(&self, a: &str, b: &str) -> Result<Option<CommitSha>>;
     /// `git status --porcelain` of the worktree; blank when clean.
     fn status(&self, worktree: &Path) -> Result<String>;
+    /// The diff of the worktree against its head, as `git diff --binary`
+    /// writes it: the staged one (`cached`, index against head) or the
+    /// unstaged one (worktree against index). What a snapshot of a parked
+    /// run saves (ADR-t1521-2).
+    fn worktree_diff(&self, worktree: &Path, cached: bool) -> Result<Vec<u8>> {
+        let _ = (worktree, cached);
+        anyhow::bail!("this repository reads no worktree diff")
+    }
+    /// The untracked files of the worktree that Git does not ignore, by
+    /// their path in it.
+    fn untracked_paths(&self, worktree: &Path) -> Result<Vec<String>> {
+        let _ = worktree;
+        anyhow::bail!("this repository lists no untracked files")
+    }
+    /// The Git operation half done in the worktree (`rebase`, `merge`,
+    /// `cherry-pick`, `revert`), if any.
+    fn git_operation(&self, worktree: &Path) -> Result<Option<&'static str>> {
+        Ok(self.rebase_in_progress(worktree)?.then_some("rebase"))
+    }
+    /// Make the worktree `worktree` again on branch `branch` at `head`
+    /// (the branch made or moved there), and apply the staged diff
+    /// `index` to its index and worktree and the unstaged `unstaged` to
+    /// its worktree: the work a snapshot saved (ADR-t1521-2). The diffs go
+    /// to Git on its standard input, through no file another process can
+    /// name.
+    fn restore_worktree(
+        &self,
+        worktree: &Path,
+        branch: &str,
+        head: &str,
+        index: &[u8],
+        unstaged: &[u8],
+    ) -> Result<()> {
+        let _ = (worktree, branch, head, index, unstaged);
+        anyhow::bail!("this repository restores no worktree")
+    }
+    /// Move the worktree `from` to `to`, which must not exist
+    /// (`git worktree move`).
+    fn move_worktree(&self, from: &Path, to: &Path) -> Result<()> {
+        let _ = (from, to);
+        anyhow::bail!("this repository moves no worktree")
+    }
+    /// Remove the worktree `path` and its registration, whatever it holds,
+    /// keeping its branch; nothing for a path that is not there. A link at
+    /// the path, a path that resolves elsewhere, or a worktree registered
+    /// there on a branch other than `branch` is refused.
+    fn discard_worktree(&self, path: &Path, branch: &str) -> Result<()> {
+        let _ = (path, branch);
+        anyhow::bail!("this repository discards no worktree")
+    }
     fn rebase_in_progress(&self, worktree: &Path) -> Result<bool>;
     fn rebase_abort(&self, worktree: &Path) -> Result<()>;
     /// Rebase the worktree's branch onto `onto`; `Ok(Err(output))` is a

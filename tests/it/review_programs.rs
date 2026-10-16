@@ -377,3 +377,106 @@ fn builtin_secrets_reads_gits_diff_whatever_the_repository_configures() {
     }
     assert!(!repo.join("x").exists());
 }
+
+/// Open a replanning operation on `run` and move it past the pause's fence,
+/// as the trusted runtime's diagnosis would (ADR-t1521-2).
+fn pause_replan(db: &Path, run: &RunId) -> dagq::domain::task_replan::ReplanOperation {
+    use dagq::domain::task_replan::{NewReplan, ReplanMove, ReplanOrigin, ReplanStatus};
+    let mut queue = SqliteQueue::open(db).unwrap();
+    let op = queue
+        .record_replan(
+            &NewReplan {
+                run: run.clone(),
+                reason: "two independent parts".into(),
+                evidence: Vec::new(),
+            },
+            ReplanOrigin::Runtime,
+            "supervisor",
+            "supervisor",
+        )
+        .unwrap()
+        .operation;
+    queue
+        .move_replan(
+            op.id,
+            op.generation,
+            &ReplanMove {
+                to: ReplanStatus::PauseRequested,
+                reason: "the test pauses it".into(),
+                snapshot_id: None,
+                diagnosis: None,
+            },
+        )
+        .unwrap()
+}
+
+/// Acceptance (ADR-t1521-2, the park): a program review that runs when a
+/// replanning passes its fence ends and its end is recorded, but neither
+/// the next program nor the agents' review starts: the review is withheld
+/// (`replan_result_withheld`) and the run is parked.
+#[test]
+fn a_program_that_ends_past_the_fence_starts_no_next_program_nor_the_agents() {
+    let (fixture, repo, db) = fixture();
+    let marks = fixture.dir.path().join("marks");
+    fs::create_dir(&marks).unwrap();
+    let mark = |name: &str| marks.join(name);
+    let gate = fixture.dir.path().join("program-gate");
+    commit_on_main(
+        &repo,
+        "[review.programs.first]\nscript = \"scripts/first.sh\"\npaths = [\"change.txt\"]\n\
+         [review.programs.later]\nscript = \"scripts/later.sh\"\npaths = [\"change.txt\"]\n",
+        &[
+            (
+                "scripts/first.sh",
+                format!(
+                    "#!/bin/sh\n{}\necho ran >> {}\n",
+                    crate::common::await_path(&gate),
+                    crate::common::shell_path(mark("first"))
+                ),
+            ),
+            ("scripts/later.sh", marking(&mark("later"))),
+        ],
+    );
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "unused")]);
+    let supervisor = {
+        let (db, repo) = (db.clone(), repo.clone());
+        thread::spawn(move || {
+            let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+            (outcome, reviewer.prompts().len())
+        })
+    };
+    wait_until(&db, crate::common::STEP_LIMIT, |queue| {
+        !payloads(
+            &queue.show(TaskId::new(1)).unwrap(),
+            "review_programs_started",
+        )
+        .is_empty()
+    });
+    let run = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap()
+        .runs[0]
+        .clone();
+    let op = pause_replan(&db, run.id());
+    fs::write(&gate, "").unwrap();
+    let (outcome, prompts) = joined(supervisor, "the supervisor to return");
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(prompts, 0, "no agent reviewed it");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    assert_eq!(
+        queue.replan_operation(op.id).unwrap().status,
+        dagq::domain::task_replan::ReplanStatus::Parked
+    );
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::NeedsSession);
+    assert_eq!(
+        program_outcomes(&detail),
+        [("first".to_owned(), "passed".to_owned())]
+    );
+    assert_eq!((runs_of(&mark("first")), runs_of(&mark("later"))), (1, 0));
+    let withheld = payloads(&detail, "replan_result_withheld");
+    assert_eq!(withheld.len(), 1, "{withheld:?}");
+    assert_eq!(withheld[0]["what"], "review_programs");
+}

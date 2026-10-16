@@ -446,6 +446,7 @@ pub fn background_session(run: &TaskRun) -> String {
     session
 }
 
+pub mod codex;
 mod turns;
 pub use turns::*;
 mod headless_stubs;

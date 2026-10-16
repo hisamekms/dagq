@@ -704,8 +704,9 @@ mod tests {
 
     /// Every stop of a run's session removes the container of its run
     /// (goal 38): after its review, at its landing, its triage (a stop or
-    /// a cancel answered), the sweep, a resume's end and before a reopen,
-    /// as the run's id the handle is recorded for names it. A handle of no
+    /// a cancel answered), the sweep, a resume's end, before a reopen and
+    /// at a replanning's park, as the run's id the handle is recorded for
+    /// names it. A handle of no
     /// run (a planner's) removes nothing, and without the port nothing is
     /// removed.
     #[test]
@@ -765,6 +766,7 @@ mod tests {
             StopRoute::Sweep,
             StopRoute::Resume,
             StopRoute::Reopen,
+            StopRoute::Replan,
         ];
         for route in routes {
             recording

@@ -29,8 +29,8 @@ pub use payload::{
 pub use recorded::{
     NewRunEvent, Recorded, end_session, finish_validation, record_e2e_park,
     record_exhausted_resumes, record_gone_session_park, record_landing_decision, record_live_park,
-    record_recheck_park, record_satisfied_close, record_satisfied_decision, resume_finished,
-    unfinished_change,
+    record_recheck_park, record_replan_park, record_satisfied_close, record_satisfied_decision,
+    resume_finished, unfinished_change,
 };
 
 /// A run of a task. `Serialize` is the JSON the CLI prints; there is no
@@ -559,6 +559,33 @@ pub fn park_after_e2e(mut run: TaskRun, reason: String) -> Result<TaskRun, Domai
 /// asked to exit.
 pub fn park_live(mut run: TaskRun, reason: String) -> Result<TaskRun, DomainError> {
     require_status(&run, &[RunStatus::Running], "park a live session")?;
+    run.status = RunStatus::NeedsSession;
+    run.last_error = Some(reason);
+    Ok(run)
+}
+
+/// Park a run whose writer stopped at the pause of a replanning
+/// (ADR-t1521-2 decision 1): an executing run, one waiting to land or one
+/// that ended waiting for its triage now waits for a session (one already
+/// waiting stays so), with `reason` as `last_error`. Its next step is the
+/// continuation's resume, which restores the saved work first and which
+/// the operation's guard keeps from starting until the operation ends: no
+/// earlier approval, receipt or triage moves it on.
+pub fn park_for_replan(mut run: TaskRun, reason: String) -> Result<TaskRun, DomainError> {
+    require_status(
+        &run,
+        &[
+            RunStatus::Claimed,
+            RunStatus::Starting,
+            RunStatus::Running,
+            RunStatus::Validating,
+            RunStatus::AwaitingIntegration,
+            RunStatus::NeedsSession,
+            RunStatus::Failed,
+            RunStatus::Interrupted,
+        ],
+        "park for a replanning",
+    )?;
     run.status = RunStatus::NeedsSession;
     run.last_error = Some(reason);
     Ok(run)
@@ -1108,6 +1135,27 @@ mod tests {
         let parked = park_live(run(RunStatus::Running), "live".into()).unwrap();
         assert_eq!(parked.status(), RunStatus::NeedsSession);
         assert_eq!(parked.last_error(), Some("live"));
+        // A replanning parks a run wherever it waits short of its landing,
+        // one that ended for its triage included.
+        for status in [
+            RunStatus::Claimed,
+            RunStatus::Starting,
+            RunStatus::Running,
+            RunStatus::Validating,
+            RunStatus::AwaitingIntegration,
+            RunStatus::NeedsSession,
+            RunStatus::Failed,
+            RunStatus::Interrupted,
+        ] {
+            let parked = park_for_replan(run(status), "replan".into()).unwrap();
+            assert_eq!(parked.status(), RunStatus::NeedsSession, "{status:?}");
+            assert_eq!(parked.last_error(), Some("replan"));
+        }
+        // A landing begun goes on: the operation waits for its outcome.
+        refused(
+            park_for_replan(run(RunStatus::Integrating), "r".into()),
+            RunStatus::Integrating,
+        );
         refused(
             park_gone_session(run(RunStatus::Running), "r".into()),
             RunStatus::Running,

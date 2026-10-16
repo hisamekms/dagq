@@ -2,8 +2,10 @@
 //! client mode (ADR-t1233-5 decision 5, amending ADR-t813-3 decision 3),
 //! which opens it at once for the worker's principal.
 use crate::common;
-use crate::runtime_codex::{FINISH, codex_fixture, detail, finished, open_ask, supervise_thread};
 use crate::runtime_support;
+use crate::runtime_support::codex::{
+    FINISH, codex_fixture, detail, finished, open_ask, supervise_thread,
+};
 
 use dagq::domain::AskReason;
 use runtime_support::*;

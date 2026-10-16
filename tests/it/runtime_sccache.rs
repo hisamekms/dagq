@@ -10,8 +10,8 @@
 //! runs gets past to start a server when the server stops meanwhile: in a
 //! sandbox or not, only the supervisor starts it (ADR-t2086-1).
 use crate::common;
-use crate::runtime_codex::{FINISH, TASK, codex_fixture, detail};
 use crate::runtime_support;
+use crate::runtime_support::codex::{FINISH, TASK, codex_fixture, detail};
 
 use dagq::{
     domain::sccache::{GUARD_NAME, REFUSED_ERROR_LOG, SccacheTarget},

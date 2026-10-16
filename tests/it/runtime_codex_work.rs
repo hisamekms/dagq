@@ -4,8 +4,8 @@
 //! turn's commands file, and the span's close makes the same `work` and
 //! `worktime.jsonl` lines a Claude span's transcript gives.
 use crate::common;
-use crate::runtime_codex::{FINISH, codex_fixture, detail, finished, supervise_thread};
 use crate::runtime_support;
+use crate::runtime_support::codex::{FINISH, codex_fixture, detail, finished, supervise_thread};
 
 use runtime_support::*;
 

@@ -319,6 +319,8 @@ fn the_worker_and_resume_prompts_leave_the_e2e_to_the_runtime() {
         kind: ResumeKind::E2e,
         reason_file: None,
         known_failures: None,
+        carried_answers: Vec::new(),
+        answers_file: None,
     };
     for worker in [&own_run, &codex] {
         let resumed = resume_request(&open, worker, &request, &[]).unwrap().text;
@@ -435,6 +437,8 @@ fn worker_and_resume_prompts_name_no_cargo_build_or_e2e_specifics() {
             kind: ResumeKind::E2e,
             reason_file: None,
             known_failures: None,
+            carried_answers: Vec::new(),
+            answers_file: None,
         };
         let resumed = resume_request(&open, &worker, &request, &[]).unwrap().text;
         for step in [
@@ -468,6 +472,7 @@ fn a_container_runs_resume_names_the_clones_main_ref() {
         ResumeKind::E2e,
         ResumeKind::SessionGone,
         ResumeKind::ScopeViolation,
+        ResumeKind::Replan,
     ] {
         let request = ResumeRequest {
             main: CommitSha::try_from(SHA).unwrap(),
@@ -476,6 +481,8 @@ fn a_container_runs_resume_names_the_clones_main_ref() {
             kind,
             reason_file: None,
             known_failures: None,
+            carried_answers: Vec::new(),
+            answers_file: None,
         };
         let text = resume_request(&task, &container, &request, &[])
             .unwrap()
@@ -584,6 +591,8 @@ fn sessions_run_the_repository_checks_and_leave_the_verification_to_integrate() 
             kind,
             reason_file: None,
             known_failures: None,
+            carried_answers: Vec::new(),
+            answers_file: None,
         };
         let text = resume_request(&verified, &own_run, &request, &[])
             .unwrap()
@@ -1621,6 +1630,7 @@ fn session_texts(task: &Task, run: &TaskRun) -> Vec<String> {
         ResumeKind::Recheck,
         ResumeKind::SessionGone,
         ResumeKind::E2e,
+        ResumeKind::Replan,
     ] {
         let request = ResumeRequest {
             main: CommitSha::try_from(SHA).unwrap(),
@@ -1629,6 +1639,8 @@ fn session_texts(task: &Task, run: &TaskRun) -> Vec<String> {
             kind,
             reason_file: None,
             known_failures: None,
+            carried_answers: Vec::new(),
+            answers_file: None,
         };
         texts.push(resume_request(task, run, &request, &[]).unwrap().text);
     }
@@ -1707,7 +1719,7 @@ fn headless_sessions_are_told_to_finish_in_a_turn_and_never_about_exit() {
                 "{provider:?}: {text}"
             );
         }
-        for request in &texts[1..13] {
+        for request in &texts[1..14] {
             assert!(request.starts_with(HEADLESS_NEXT_TURN), "{request}");
             assert!(request.contains(HEADLESS_STOP), "{request}");
             assert!(request.contains("pkill"), "{request}");
@@ -1718,13 +1730,13 @@ fn headless_sessions_are_told_to_finish_in_a_turn_and_never_about_exit() {
             );
             assert!(request.contains("and end the turn"), "{request}");
         }
-        assert!(texts[16].ends_with(HEADLESS_GO_ON));
-        assert!(texts[13].starts_with(HEADLESS_NEXT_TURN));
-        assert!(texts[13].contains("dagq: the previous turn of run"));
-        assert!(texts[14].starts_with("answer to ask 3: blue\n\n"));
-        assert!(texts[14].ends_with(HEADLESS_GO_ON));
-        assert!(texts[15].starts_with("dagq: the supervisor's recovery job for run"));
+        assert!(texts[17].ends_with(HEADLESS_GO_ON));
+        assert!(texts[14].starts_with(HEADLESS_NEXT_TURN));
+        assert!(texts[14].contains("dagq: the previous turn of run"));
+        assert!(texts[15].starts_with("answer to ask 3: blue\n\n"));
         assert!(texts[15].ends_with(HEADLESS_GO_ON));
+        assert!(texts[16].starts_with("dagq: the supervisor's recovery job for run"));
+        assert!(texts[16].ends_with(HEADLESS_GO_ON));
     }
     // Codex reviews its own diff and does not owe subagent_review.
     let codex = session_texts(&task, &run_on(Provider::Codex, WorkerMode::Headless));
@@ -1772,8 +1784,8 @@ fn every_worker_text_that_writes_a_receipt_maps_the_acceptance_once() {
             "{first}"
         );
         assert!(!first.contains(ACCEPTANCE_REMAP), "{first}");
-        // The nine resume requests and the revise request.
-        for request in &texts[1..11] {
+        // The ten resume requests and the revise request.
+        for request in &texts[1..12] {
             assert!(
                 request.contains(&format!("renaming it. {ACCEPTANCE_REMAP}")),
                 "{provider:?} {mode:?}: {request}"
@@ -1847,7 +1859,7 @@ fn every_worker_text_that_writes_a_receipt_proposes_follow_up_membership() {
                 "{first}"
             );
         assert!(!first.contains(FOLLOW_UP_PROPOSAL_AGAIN), "{first}");
-        for request in &texts[1..11] {
+        for request in &texts[1..12] {
             assert!(
                 request.contains(&format!("{ACCEPTANCE_REMAP} {FOLLOW_UP_PROPOSAL_AGAIN}")),
                 "{provider:?} {mode:?}: {request}"
@@ -1899,7 +1911,7 @@ fn every_worker_text_that_writes_a_receipt_checks_the_documents_once() {
                 "{provider:?} {mode:?}: {first}"
             );
         }
-        for request in &texts[1..11] {
+        for request in &texts[1..12] {
             assert!(!request.contains(DOCS_CHECK), "{request}");
             assert_eq!(
                 request
@@ -5039,7 +5051,7 @@ fn task_with_lists(paths: Vec<String>, verification_commands: Vec<String>) -> Ta
     .unwrap()
 }
 
-const RESUME_KINDS: [ResumeKind; 9] = [
+const RESUME_KINDS: [ResumeKind; 10] = [
     ResumeKind::Landing,
     ResumeKind::EvidenceMissing,
     ResumeKind::SentBack,
@@ -5049,12 +5061,66 @@ const RESUME_KINDS: [ResumeKind; 9] = [
     ResumeKind::Recheck,
     ResumeKind::SessionGone,
     ResumeKind::E2e,
+    ResumeKind::Replan,
 ];
 
 /// The bytes a next-turn message held to `limit` may take before the
 /// language's instruction is added.
 fn room(limit: usize) -> usize {
     limit - prompt_fit::LANGUAGE_ROOM
+}
+
+/// The answers a continuation after a replanning's park carries take at
+/// most their own budget of the resolution request: six answers of about
+/// 8 KB each are cut to it, the request names the file the supervisor
+/// writes them whole to as where the session reads every one, and it stays
+/// within its limit; answers within the budget are carried whole.
+#[test]
+fn carried_answers_past_their_budget_are_cut_and_named_whole_in_their_file() {
+    let task = task_with_lists(vec!["src/".into()], vec!["cargo test".into()]);
+    let run = run_on(Provider::Claude, WorkerMode::Headless);
+    let file = "/runs/run/resume-1-answers.txt";
+    let request = |answers: Vec<String>| ResumeRequest {
+        main: CommitSha::try_from("2".repeat(40).as_str()).unwrap(),
+        branch: "main".into(),
+        reason: "parked for replan operation 1".into(),
+        kind: ResumeKind::Replan,
+        reason_file: None,
+        known_failures: None,
+        carried_answers: answers,
+        answers_file: Some(file.into()),
+    };
+    let large: Vec<String> = (1..=6)
+        .map(|n| format!("answer to ask {n}: {}", "答".repeat(2_700)))
+        .collect();
+    let fitted = resume_request(&task, &run, &request(large), &[]).unwrap();
+    assert!(
+        fitted.text.len() <= room(RESUME_REQUEST_LIMIT),
+        "{}",
+        fitted.text.len()
+    );
+    assert!(
+        fitted.bytes.omitted.contains_key("answers"),
+        "{:?}",
+        fitted.bytes
+    );
+    assert!(
+        fitted
+            .text
+            .contains(&format!("every answer is whole in {file}")),
+        "{}",
+        fitted.text
+    );
+    assert!(fitted.text.contains("answer to ask 1: "));
+    let small = vec!["answer to ask 1: use notes.txt".to_owned()];
+    let fitted = resume_request(&task, &run, &request(small), &[]).unwrap();
+    assert!(
+        !fitted.bytes.omitted.contains_key("answers"),
+        "{:?}",
+        fitted.bytes
+    );
+    assert!(fitted.text.contains("answer to ask 1: use notes.txt"));
+    assert!(!fitted.text.contains(file));
 }
 
 /// ADR-t2072-1: with the largest input (a huge reason, paths and
@@ -5088,6 +5154,8 @@ fn a_resolution_request_stays_within_its_limit_with_the_largest_input() {
                 kind,
                 reason_file: Some(file.into()),
                 known_failures: None,
+                carried_answers: vec!["答".repeat(100_000), "答".repeat(100_000)],
+                answers_file: Some("/runs/run/resume-1-answers.txt".into()),
             };
             let fitted = resume_request(&task, &run, &request, &landed).unwrap();
             let text = &fitted.text;
@@ -5137,6 +5205,8 @@ fn a_resolution_request_stays_within_its_limit_with_the_largest_input() {
         kind: ResumeKind::Triage,
         reason_file: None,
         known_failures: None,
+        carried_answers: Vec::new(),
+        answers_file: None,
     };
     let run = run_on(Provider::Claude, WorkerMode::Headless);
     let text = resume_request(&task, &run, &request, &[]).unwrap().text;
@@ -5163,6 +5233,8 @@ fn within_its_limits_a_next_turn_message_carries_its_texts_whole() {
                 kind,
                 reason_file: Some("/runs/run/resume-1-reason.txt".into()),
                 known_failures: None,
+                carried_answers: Vec::new(),
+                answers_file: None,
             };
             let fitted = resume_request(&task, &run, &request, &[]).unwrap();
             assert!(fitted.text.contains(&format!("\nReason: {reason}\n")));
@@ -5694,6 +5766,8 @@ fn the_worker_prompt_and_its_requests_carry_the_known_failures_only_when_there_a
                 kind,
                 reason_file: None,
                 known_failures: list.clone(),
+                carried_answers: Vec::new(),
+                answers_file: None,
             };
             let text = resume_request(&task, &run, &request, &[]).unwrap().text;
             for line in lines {
@@ -5849,6 +5923,8 @@ fn a_thousand_known_failures_stay_within_each_prompts_limit_and_name_their_file(
             kind,
             reason_file: Some("/runs/r/resume-1-reason.txt".into()),
             known_failures: Some(list.clone()),
+            carried_answers: Vec::new(),
+            answers_file: None,
         };
         let fitted = resume_request(&big, &run, &request, &landed).unwrap();
         check(&fitted, RESUME_REQUEST_LIMIT);

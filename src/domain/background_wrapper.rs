@@ -414,6 +414,9 @@ pub enum StopRoute {
     Unrecorded,
     /// A headless planner's wrapper.
     Planner,
+    /// A run's session at the park of a replanning (ADR-t1521-2): one that
+    /// ended at its turn's end, or one stopped past the wait for it.
+    Replan,
     /// Any other close of a background handle.
     Close,
 }
@@ -429,6 +432,7 @@ impl StopRoute {
             Self::Reopen => "reopen",
             Self::Unrecorded => "unrecorded",
             Self::Planner => "planner",
+            Self::Replan => "replan",
             Self::Close => "close",
         }
     }

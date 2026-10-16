@@ -1095,6 +1095,7 @@ pub mod recheck;
 pub mod recovery;
 pub mod related;
 pub mod release_update;
+pub mod replan_snapshot;
 pub mod resume;
 pub mod review_builtins;
 pub mod review_jobs;

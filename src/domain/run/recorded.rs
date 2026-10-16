@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use super::{
     TaskRun, decide_landing, exhaust_resumes, finish_session, park_after_e2e, park_after_recheck,
-    park_gone_session, park_live,
+    park_for_replan, park_gone_session, park_live,
 };
 use crate::domain::{
     DomainError, Reason, ReasonCode, RunEvent, RunStatus, event_kind, recheck,
@@ -214,6 +214,26 @@ pub fn record_live_park(
     Ok((
         run,
         vec![NewRunEvent::new(EventKind::RecoveryParked, payload)],
+    ))
+}
+
+/// [`park_for_replan`], recorded as `replan_parked` with the caller's
+/// `payload` (the operation, its generation and snapshot), the new status
+/// and the reason.
+pub fn record_replan_park(
+    run: TaskRun,
+    reason: &str,
+    payload: Value,
+) -> Result<Recorded, DomainError> {
+    let run = park_for_replan(run, reason.to_owned())?;
+    let payload = with_status_and_reason(
+        Reason::new(ReasonCode::ReplanParked).on(payload),
+        &run,
+        reason,
+    );
+    Ok((
+        run,
+        vec![NewRunEvent::new(EventKind::ReplanParked, payload)],
     ))
 }
 
@@ -618,6 +638,20 @@ mod tests {
         assert_eq!(
             events[0].payload,
             json!({"ask_id": 4, "status": "failed", "reason": "canceled"})
+        );
+
+        let (parked, events) = record_replan_park(
+            run(RunStatus::AwaitingIntegration),
+            "parked for replan operation 3",
+            json!({"operation_id": 3}),
+        )
+        .unwrap();
+        assert_eq!(parked.status(), RunStatus::NeedsSession);
+        assert_eq!(kinds(&events), [event_kind::REPLAN_PARKED]);
+        assert_eq!(
+            events[0].payload,
+            json!({"operation_id": 3, "code": "replan_parked", "status": "needs_session",
+                   "reason": "parked for replan operation 3"})
         );
 
         let (_, events) =

@@ -274,6 +274,6 @@ runのreviewのpromptは、acceptanceの前に`REVIEW_DOCS_CHECK`の1段落を�
 
 ## 再計画の操作が保護するrun
 
-保護中のrunには`revise`を送らず（`revise_withheld`）、verdictを`approve_landing`のaskに回し、着地は操作の結末まで始めない。
-着地のslotではslotを持ったまま待ち、承認の列と`integrate --next`はそのrunを飛ばす。
-予定は[taskの再計画](../../plans/task-replanning.md)が持つ。
+保護中のrunは走っているreviewとe2eの終了を待ち、そのverdictでrevise（`revise_withheld`に記録）・ask・着地を始めない。
+runは[保留](headless-worker.md#再計画の保留)されてslotを返し、承認の列と`integrate --next`は飛ばす。
+契約と予定は[taskの再計画](../../plans/task-replanning.md)が持つ。

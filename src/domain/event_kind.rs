@@ -295,7 +295,11 @@ event_kinds! {
     RecoveryRequested => "recovery_requested",
     ReleaseCheckFailed => "release_check_failed",
     ReleaseChecked => "release_checked",
+    ReplanParked => "replan_parked",
     ReplanRequested => "replan_requested",
+    ReplanRestoreFailed => "replan_restore_failed",
+    ReplanRestored => "replan_restored",
+    ReplanResultWithheld => "replan_result_withheld",
     ReplanStatusChanged => "replan_status_changed",
     ReportWritten => "report_written",
     RequestDeclined => "request_declined",
@@ -412,6 +416,7 @@ event_kinds! {
     TurnRequested => "turn_requested",
     TurnSessionIdentified => "turn_session_identified",
     TurnStarted => "turn_started",
+    TurnWithheld => "turn_withheld",
     UpdateAnswered => "update_answered",
     UpdateAwaitingApproval => "update_awaiting_approval",
     UpdateBuilt => "update_built",
@@ -978,6 +983,7 @@ pub const PROVIDER_WAITING: &str = EventKind::ProviderWaiting.as_str();
 pub const RECOVERY_FAILED: &str = EventKind::RecoveryFailed.as_str();
 pub const RECOVERY_FINISHED: &str = EventKind::RecoveryFinished.as_str();
 pub const RECOVERY_PARKED: &str = EventKind::RecoveryParked.as_str();
+pub const REPLAN_PARKED: &str = EventKind::ReplanParked.as_str();
 pub const RECOVERY_REQUESTED: &str = EventKind::RecoveryRequested.as_str();
 pub const RESUME_FINISHED: &str = EventKind::ResumeFinished.as_str();
 pub const RESUME_SKIPPED: &str = EventKind::ResumeSkipped.as_str();
@@ -1480,7 +1486,11 @@ mod tests {
             (EventKind::RecoveryRequested, "recovery_requested"),
             (EventKind::ReleaseCheckFailed, "release_check_failed"),
             (EventKind::ReleaseChecked, "release_checked"),
+            (EventKind::ReplanParked, "replan_parked"),
             (EventKind::ReplanRequested, "replan_requested"),
+            (EventKind::ReplanRestoreFailed, "replan_restore_failed"),
+            (EventKind::ReplanRestored, "replan_restored"),
+            (EventKind::ReplanResultWithheld, "replan_result_withheld"),
             (EventKind::ReplanStatusChanged, "replan_status_changed"),
             (EventKind::ReportWritten, "report_written"),
             (EventKind::RequestDeclined, "request_declined"),
@@ -1627,6 +1637,7 @@ mod tests {
             (EventKind::TurnRequested, "turn_requested"),
             (EventKind::TurnSessionIdentified, "turn_session_identified"),
             (EventKind::TurnStarted, "turn_started"),
+            (EventKind::TurnWithheld, "turn_withheld"),
             (EventKind::UpdateAnswered, "update_answered"),
             (
                 EventKind::UpdateAwaitingApproval,

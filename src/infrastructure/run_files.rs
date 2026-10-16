@@ -52,6 +52,29 @@ pub struct LocalRunFiles;
 
 use agent_dir::in_run_dir;
 
+/// Open the regular file `path` without following a link: through its
+/// pinned parent in a run directory ([`agent_dir::read_file`]), with
+/// `O_NOFOLLOW` elsewhere; a link or anything but a regular file is an
+/// error.
+fn open_regular(path: &Path) -> io::Result<fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = if in_run_dir(path) {
+        agent_dir::read_file(path)?
+    } else {
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path)?
+    };
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    Ok(file)
+}
+
 /// Open `path` to read it: [`agent_dir::read_file`] in a run directory,
 /// following links elsewhere.
 fn open_to_read(path: &Path) -> io::Result<fs::File> {
@@ -212,6 +235,42 @@ impl RunFiles for LocalRunFiles {
             }
             _ => false,
         }
+    }
+    fn executable(&self, path: &Path) -> io::Result<bool> {
+        use std::os::unix::fs::PermissionsExt;
+        let file = open_regular(path)?;
+        Ok(file.metadata()?.permissions().mode() & 0o100 != 0)
+    }
+    fn set_executable(&self, path: &Path, executable: bool) -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        // The mode is read and changed on the one descriptor opened without
+        // following a link, so a link put at the path after the check
+        // never takes the change elsewhere.
+        let file = open_regular(path)?;
+        let mode = file.metadata()?.permissions().mode();
+        let mode = if executable {
+            mode | ((mode & 0o444) >> 2)
+        } else {
+            mode & !0o111
+        };
+        file.set_permissions(fs::Permissions::from_mode(mode))
+    }
+    fn entry_kind(&self, path: &Path) -> io::Result<EntryKind> {
+        if !in_run_dir(path) {
+            let file_type = fs::symlink_metadata(path)?.file_type();
+            return Ok(if file_type.is_symlink() {
+                EntryKind::Link
+            } else if file_type.is_dir() {
+                EntryKind::Dir
+            } else if file_type.is_file() {
+                EntryKind::File
+            } else {
+                EntryKind::Other
+            });
+        }
+        let (dir, name) = Directory::parent(path)?;
+        dir.kind(name)?
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))
     }
     fn is_dir(&self, path: &Path) -> bool {
         if !in_run_dir(path) {

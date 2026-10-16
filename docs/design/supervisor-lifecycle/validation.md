@@ -101,6 +101,8 @@ verifyが通れば人のaskに上げ、人の答えで閉じる。
   流し直しの途中で死んだrunは、adopterの再validationが開いたaskを見て休ませ、次のpassの答えの適用がもう一度流し直す。
   検証のコマンドは自分のprocess groupで動き、supervisorが死んでも残りうる。
   そこでscratch worktreeを使い直す前に、そこで動く前の検証のprocessを止め（`auto_repaired`の`satisfied_verification_stopped`）、止まらないか一覧が読めなければ検証せず、askに落ちたことを書く。
+- **再計画**: taskを再計画の操作が保護する間は、検証の結果でaskを開かずtaskも閉じず、答えも適用せず、closeのtransactionも拒む。
+  休むrunもそのまま保留され、開いた`approve_close`は閉じる（[taskの再計画](../../plans/task-replanning.md#実装の状態)）。
 - **集計**: 閉じたrunは着地（`run_integrated`）に数えず、`stats`の`already_satisfied`で別に数える（[stats](commands.md)）。
 
 ## 着地の検証

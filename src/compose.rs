@@ -67,8 +67,8 @@ pub use planning::{
     PLANNER_TIMEOUT, PlannerEntry, planner_session, planner_session_with_provider, planners,
 };
 pub use supervisor::{
-    ContainerRuntimePort, ProcessesPort, RunContainersPort, RunFilesPort, SuperviseOptions,
-    VerificationContainersPort, supervise, supervise_with_reviewer,
+    ContainerRuntimePort, PausesPort, ProcessesPort, RunContainersPort, RunFilesPort,
+    SuperviseOptions, VerificationContainersPort, supervise, supervise_with_reviewer,
 };
 
 /// The one-shot entry points (`integrate`, `status`, `doctor`, `recover`,

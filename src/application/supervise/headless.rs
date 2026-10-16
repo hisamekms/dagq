@@ -18,6 +18,20 @@ use crate::domain::turn::{
     TurnRequest, exit_path, next_seq, request_path, turns_dir,
 };
 
+/// A turn [`request_turn`] refused because a replanning guards the run's
+/// task (ADR-t1521-2): nothing was written, and nothing failed; what it
+/// carried waits for the session the operation's end resumes.
+#[derive(Debug)]
+pub(super) struct TurnFenced(String);
+
+impl std::fmt::Display for TurnFenced {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for TurnFenced {}
+
 /// Write `input` for the headless session of `run` (in `workspace`, for
 /// the records): a text becomes its next request, recorded as
 /// `turn_requested` (with the `prompt_bytes` of a message held to its
@@ -42,6 +56,17 @@ pub(super) fn request_turn(
         Input::Text(text) => (text, None),
         Input::Prompt { text, bytes } => (text, Some(bytes)),
     };
+    // No next turn of a run whose task is being replanned (ADR-t1521-2
+    // decision 1): the request is refused, whatever sends it.
+    if let Some(guard) = sv.queue.replan_guard(run.task_id())? {
+        return Err(TurnFenced(format!(
+            "{what} withheld: task {} is being replanned (replan operation {}, {})",
+            guard.task,
+            guard.operation,
+            guard.status.as_str()
+        ))
+        .into());
+    }
     let seq = write_request(&*sv.files, run_dir, text, what)?;
     // Written: a record that fails is only noted, as for a typed text.
     let mut payload = json!({"seq": seq, "what": what, "workspace_id": workspace});

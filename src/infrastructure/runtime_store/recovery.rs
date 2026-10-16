@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::application::KeptOutcome;
+use crate::domain::replan_snapshot::RestoreStart;
 use crate::domain::task_hold::{
     self, DiscardReason, Disposition, HoldGuard, KeptSource, ProgressVersion,
 };
@@ -172,9 +173,224 @@ impl SqliteQueue {
 
     /// Lease a `validating` run nobody holds to `token` to verify its
     /// `already_satisfied` claim again (ADR-t1818-1 decision 3), recorded
-    /// with `reason: already_satisfied`.
+    /// with `reason: already_satisfied`; refused while a replanning guards
+    /// its task (ADR-t1521-2), whose park takes the run as it rests.
     pub fn lease_satisfied(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>> {
-        self.lease_unheld(id, token, "already_satisfied", RunStatus::Validating)
+        self.lease_unheld(
+            id,
+            token,
+            "already_satisfied",
+            RunStatus::Validating,
+            Some(GuardedStep::Integrate),
+        )
+    }
+
+    /// Lease run `id`, waiting where it rests (`needs_session`,
+    /// `awaiting_integration`, `validating`, `failed` or `interrupted`), to
+    /// `token` for the park of replanning operation `op` (read under
+    /// `generation`), so that the park is one supervisor's from the stop to
+    /// the settle (ADR-t1521-2): in one transaction, refused (`None`) when
+    /// `op` no longer parks the run, or another process holds it; a lease
+    /// that is stale is replaced, and one `token` holds already (its own
+    /// park going on) is kept. Recorded as `lease_acquired` with `reason:
+    /// replan_park`.
+    pub fn lease_for_park(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        op: crate::domain::ReplanId,
+        generation: i64,
+    ) -> Result<Option<TaskRun>> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = self.generators.clock.now();
+        let operation = crate::infrastructure::replans::read_operation(&tx, op)?;
+        if operation.run_id != *id
+            || operation.generation != generation
+            || !operation.status.parks()
+        {
+            return Ok(None);
+        }
+        let Some(run) = stored_run(&tx, id)?.filter(|run| {
+            matches!(
+                run.status(),
+                RunStatus::NeedsSession
+                    | RunStatus::AwaitingIntegration
+                    | RunStatus::Validating
+                    | RunStatus::Failed
+                    | RunStatus::Interrupted
+            )
+        }) else {
+            return Ok(None);
+        };
+        let own = tx.execute(
+            "UPDATE run_leases SET heartbeat_at=?3 WHERE run_id=?1 AND token=?2",
+            params![id, token, now],
+        )? == 1;
+        if !own
+            && !lease_in(
+                &tx,
+                id,
+                token,
+                now,
+                json!({"reason": "replan_park", "operation_id": op, "generation": generation}),
+            )?
+        {
+            return Ok(None);
+        }
+        let run = stored_run(&tx, id)?.unwrap_or(run);
+        tx.commit()?;
+        Ok(Some(run.relocated(&self.runs_dir)))
+    }
+
+    /// Start the restore of the work replanning operation `op` (read under
+    /// `generation`) saved for parked run `id` (ADR-t1521-2): in one
+    /// transaction, [`RestoreStart::Done`] when a `replan_restored` of the
+    /// operation is recorded already; else the run, `needs_session` with no
+    /// lease but a stale one, is leased to `token` (`lease_acquired` with
+    /// `reason: replan_restore`) and the restore is `token`'s alone
+    /// ([`RestoreStart::Owned`]) until [`Self::finish_restore`]. A lease
+    /// `token` holds already (a restore of its own whose end could not give
+    /// it back) is taken up again. Another holder, a run or an operation
+    /// that moved is [`RestoreStart::Elsewhere`].
+    pub fn begin_restore(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        op: crate::domain::ReplanId,
+        generation: i64,
+    ) -> Result<RestoreStart> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = self.generators.clock.now();
+        let operation = crate::infrastructure::replans::read_operation(&tx, op)?;
+        if operation.run_id != *id
+            || operation.generation != generation
+            || !operation.status.reopens()
+        {
+            return Ok(RestoreStart::Elsewhere);
+        }
+        if restored_by(&tx, id, op)? {
+            return Ok(RestoreStart::Done);
+        }
+        if stored_run(&tx, id)?.is_none_or(|run| run.status() != RunStatus::NeedsSession) {
+            return Ok(RestoreStart::Elsewhere);
+        }
+        let own = tx.execute(
+            "UPDATE run_leases SET heartbeat_at=?3 WHERE run_id=?1 AND token=?2",
+            params![id, token, now],
+        )? == 1;
+        if !own
+            && !lease_in(
+                &tx,
+                id,
+                token,
+                now,
+                json!({"reason": "replan_restore", "operation_id": op, "generation": generation}),
+            )?
+        {
+            return Ok(RestoreStart::Elsewhere);
+        }
+        tx.commit()?;
+        Ok(RestoreStart::Owned)
+    }
+
+    /// Record the end of the restore [`Self::begin_restore`] gave `token`:
+    /// `restored` is the `replan_restored` payload, or why it failed, which
+    /// records `replan_restore_failed` and moves operation `op` back to
+    /// `blocked`, with the lease given back, in one transaction; whether it
+    /// was recorded. Only while `token` still holds the run and `op` is
+    /// still at `generation` and closed: a restore whose owner lost the run
+    /// (its lease taken over as stale) or whose operation moved records
+    /// nothing. Whatever was recorded, the lease `token` still holds is
+    /// given back, so the run is held no longer than its restore.
+    pub fn finish_restore(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        op: crate::domain::ReplanId,
+        generation: i64,
+        restored: std::result::Result<serde_json::Value, String>,
+    ) -> Result<bool> {
+        let recorded = self.record_restore(id, token, op, generation, restored);
+        if matches!(recorded, Ok(true)) {
+            return recorded;
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if tx.execute(
+            "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
+            params![id, token],
+        )? == 1
+        {
+            run_event(
+                &tx,
+                id,
+                EventKind::LeaseReleased,
+                json!({"reason": "replan_restore", "operation_id": op, "recorded": false}),
+            )?;
+        }
+        tx.commit()?;
+        recorded
+    }
+
+    fn record_restore(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        op: crate::domain::ReplanId,
+        generation: i64,
+        restored: std::result::Result<serde_json::Value, String>,
+    ) -> Result<bool> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = self.generators.clock.now();
+        if renew_lease(&tx, id, token, now).is_err() {
+            return Ok(false);
+        }
+        let operation = crate::infrastructure::replans::read_operation(&tx, op)?;
+        if operation.generation != generation || !operation.status.reopens() {
+            return Ok(false);
+        }
+        match restored {
+            Ok(payload) => run_event(&tx, id, EventKind::ReplanRestored, payload)?,
+            Err(why) => {
+                run_event(
+                    &tx,
+                    id,
+                    EventKind::ReplanRestoreFailed,
+                    json!({"operation_id": op, "snapshot_id": operation.snapshot_id, "reason": why}),
+                )?;
+                crate::infrastructure::replans::move_in(
+                    &tx,
+                    op,
+                    generation,
+                    &crate::domain::task_replan::ReplanMove {
+                        to: crate::domain::task_replan::ReplanStatus::Blocked,
+                        reason: why,
+                        snapshot_id: None,
+                        diagnosis: None,
+                    },
+                    now,
+                )?;
+            }
+        }
+        tx.execute(
+            "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
+            params![id, token],
+        )?;
+        run_event(
+            &tx,
+            id,
+            EventKind::LeaseReleased,
+            json!({"reason": "replan_restore", "operation_id": op}),
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 
     fn lease_awaiting(
@@ -183,15 +399,20 @@ impl SqliteQueue {
         token: &LeaseToken,
         reason: &str,
     ) -> Result<Option<TaskRun>> {
-        self.lease_unheld(id, token, reason, RunStatus::AwaitingIntegration)
+        self.lease_unheld(id, token, reason, RunStatus::AwaitingIntegration, None)
     }
 
+    /// Lease a run in `status` nobody holds (or whose lease is stale) to
+    /// `token`, recorded with `reason`; `None` when another process holds
+    /// it, it changed, or `guarded` is a step a replanning or a hold of its
+    /// task refuses now.
     fn lease_unheld(
         &mut self,
         id: &RunId,
         token: &LeaseToken,
         reason: &str,
         status: RunStatus,
+        guarded: Option<GuardedStep>,
     ) -> Result<Option<TaskRun>> {
         let tx = self
             .conn
@@ -200,33 +421,14 @@ impl SqliteQueue {
         let Some(run) = stored_run(&tx, id)?.filter(|run| run.status() == status) else {
             return Ok(None);
         };
-        let lease = tx
-            .query_row(
-                "SELECT run_id,token,pid,heartbeat_at FROM run_leases WHERE run_id=?1",
-                [id],
-                lease_row,
-            )
-            .optional()?;
-        if let Some(lease) = &lease {
-            if !lease_is_stale(lease, now) {
-                return Ok(None);
-            }
-            tx.execute("DELETE FROM run_leases WHERE run_id=?1", [id])?;
+        if let Some(step) = guarded
+            && replanning(&tx, id, step)?
+        {
+            return Ok(None);
         }
-        tx.execute(
-            "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,?2,?3,?4)",
-            params![id, token, std::process::id(), now],
-        )?;
-        tx.execute(
-            "UPDATE task_runs SET supervisor_token=?2 WHERE id=?1",
-            params![id, token],
-        )?;
-        run_event(
-            &tx,
-            id,
-            EventKind::LeaseAcquired,
-            json!({"pid": std::process::id(), "reason": reason, "previous_token": lease.map(|l| l.token)}),
-        )?;
+        if !lease_in(&tx, id, token, now, json!({"reason": reason}))? {
+            return Ok(None);
+        }
         let run = stored_run(&tx, id)?.unwrap_or(run);
         tx.commit()?;
         Ok(Some(run.relocated(&self.runs_dir)))
@@ -719,7 +921,8 @@ impl SqliteQueue {
     /// `ready` again for a run that carries this run's branch over, recorded
     /// as `triage_finished` (action `retry_inherit`, `by: runtime`) with
     /// `auto_repaired` (`repair: inherit_retry`), so no round takes it.
-    /// `Ok(None)` means it changed.
+    /// `Ok(None)` means it changed, or a hold or a replanning guards its
+    /// task.
     pub fn exhaust_resumes(
         &mut self,
         id: &RunId,
@@ -745,8 +948,12 @@ impl SqliteQueue {
         let Some(run) = run else {
             return Ok(None);
         };
-        // Neither failed nor retried while its task is held (ADR-t1879-1).
-        if crate::infrastructure::task_holds::guard_of(&tx, run.task_id())?.is_some() {
+        // Neither failed nor retried while its task is held (ADR-t1879-1),
+        // nor while a replanning guards it (ADR-t1521-2): the park keeps
+        // the run, its work and its resumes for the operation's outcome.
+        if crate::infrastructure::task_holds::guard_of(&tx, run.task_id())?.is_some()
+            || crate::infrastructure::replans::guard_of(&tx, run.task_id())?.is_some()
+        {
             return Ok(None);
         }
         let events = run_events_of(&tx, id)?;
@@ -1652,6 +1859,54 @@ fn decide_triage_in(
     }
     run_event(conn, id, EventKind::TriageDecided, payload)?;
     Ok(result)
+}
+
+/// Lease run `id` to `token` inside the caller's transaction unless a lease
+/// that is not stale holds it (a stale one is replaced): the lease row, the
+/// run's supervisor and `lease_acquired` with `payload`, its pid and the
+/// previous token. Whether it was leased.
+fn lease_in(
+    conn: &Connection,
+    id: &RunId,
+    token: &LeaseToken,
+    now: i64,
+    mut payload: serde_json::Value,
+) -> Result<bool> {
+    let lease = conn
+        .query_row(
+            "SELECT run_id,token,pid,heartbeat_at FROM run_leases WHERE run_id=?1",
+            [id],
+            lease_row,
+        )
+        .optional()?;
+    if let Some(lease) = &lease {
+        if !lease_is_stale(lease, now) {
+            return Ok(false);
+        }
+        conn.execute("DELETE FROM run_leases WHERE run_id=?1", [id])?;
+    }
+    conn.execute(
+        "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,?2,?3,?4)",
+        params![id, token, std::process::id(), now],
+    )?;
+    conn.execute(
+        "UPDATE task_runs SET supervisor_token=?2 WHERE id=?1",
+        params![id, token],
+    )?;
+    payload["pid"] = json!(std::process::id());
+    payload["previous_token"] = json!(lease.map(|l| l.token));
+    run_event(conn, id, EventKind::LeaseAcquired, payload)?;
+    Ok(true)
+}
+
+/// Whether run `id` records the restore of operation `op`'s work.
+fn restored_by(conn: &Connection, id: &RunId, op: crate::domain::ReplanId) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM run_events WHERE run_id=?1 AND kind=?2
+         AND json_extract(payload,'$.operation_id')=?3)",
+        params![id, EventKind::ReplanRestored.as_str(), op],
+        |r| r.get(0),
+    )?)
 }
 
 /// Whether a replanning operation or a hold guards the task of run `id`,

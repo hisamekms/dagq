@@ -180,6 +180,9 @@ impl Supervisor<'_> {
         session: Option<SessionRef>,
         retried: bool,
     ) -> Result<Phase> {
+        if let Some(held) = self.review_held_for_replanning(run, &session, retried)? {
+            return Ok(held);
+        }
         let events = self.queue.run_events(run.id())?;
         let history = RunHistory::from_events(&events);
         let attempt = history.review_attempts() + 1;
@@ -398,6 +401,18 @@ impl Supervisor<'_> {
         end: &ProgramEnd,
         (duration_secs, timeout_secs): (u64, u64),
     ) -> Result<Phase> {
+        self.record_review_program_end(run, &mut state, end, (duration_secs, timeout_secs))?;
+        self.go_on_with_programs(run, state)
+    }
+    /// Record the end `end` of the program `state` ran last
+    /// (`review_program_finished`) and keep its outcome in `state`.
+    pub(super) fn record_review_program_end(
+        &mut self,
+        run: &TaskRun,
+        state: &mut ReviewPrograms,
+        end: &ProgramEnd,
+        (duration_secs, timeout_secs): (u64, u64),
+    ) -> Result<()> {
         let name = state.snapshot.programs[state.outcomes.len()]
             .program
             .name
@@ -435,7 +450,7 @@ impl Supervisor<'_> {
             _ => error,
         };
         state.outcomes.push(outcome);
-        self.go_on_with_programs(run, state)
+        Ok(())
     }
     /// Start the program at `index` of `state`'s programs as a program job
     /// against the run's worktree, its output in the run's directory and
@@ -490,7 +505,31 @@ impl Supervisor<'_> {
         session: Option<SessionRef>,
         retried: bool,
     ) -> Result<Phase> {
+        if let Some(held) = self.review_held_for_replanning(run, &session, retried)? {
+            return Ok(held);
+        }
         self.begin_review(run, session, retried)
+    }
+    /// Past a replanning's fence (ADR-t1521-2) no review of `run` starts,
+    /// whoever starts it (the step after validation, an adopter, the
+    /// process an exec hands the run to): no program or agent's job, and no
+    /// run once more. The review waits held (`ReviewHeld`), which the park
+    /// takes as it stands; `None` while no replanning guards the task.
+    fn review_held_for_replanning(
+        &mut self,
+        run: &TaskRun,
+        session: &Option<SessionRef>,
+        retried: bool,
+    ) -> Result<Option<Phase>> {
+        if self.queue.replan_guard(run.task_id())?.is_none() {
+            return Ok(None);
+        }
+        info!(run_id = %run.id(), "run {}: its task is being replanned; its review does not start", run.id());
+        Ok(Some(Phase::ReviewHeld {
+            session: session.clone(),
+            retried,
+            providers: Vec::new(),
+        }))
     }
     /// Where the next review goes (ADR-t1207-1). A `[roles.review]` that
     /// names no provider reviews on Claude as before: under `--no-claude`
@@ -762,20 +801,14 @@ impl Supervisor<'_> {
             None => Phase::Review(watch),
         })
     }
-    /// One pass over the jobs of `run`'s review in `watch`, `elsewhere`
-    /// the agent jobs of the other runs' reviews that run now: reap the
-    /// jobs that ended ([`Self::review_job_ended`]), start those that
-    /// wait while the limit of jobs at once leaves room and a provider can
-    /// run them ([`Self::start_review_jobs`]), and once every job ended,
-    /// judge the review ([`Self::judge_review`]) or, when one gave no
-    /// answer, fail it to the person, never passing it on fewer judgments
-    /// (ADR-t1895-1 decision 5). `None` while a job waits or runs.
-    pub(super) fn tend_review(
+    /// Reap the jobs of `run`'s review in `watch` whose process ended
+    /// ([`Self::review_job_ended`]), starting none: what a replanning's
+    /// park does before it parks the run.
+    pub(super) fn reap_review_jobs(
         &mut self,
         run: &TaskRun,
         watch: &mut ReviewWatch,
-        elsewhere: usize,
-    ) -> Result<Option<Phase>> {
+    ) -> Result<()> {
         let (attempt, retried) = (watch.attempt, watch.retried);
         for job in &mut watch.jobs {
             let ReviewJobState::Running { job: running, .. } = &mut job.state else {
@@ -796,7 +829,25 @@ impl Supervisor<'_> {
             };
             self.review_job_ended(run, (attempt, retried), job, (ended, switchable), end)?;
         }
+        Ok(())
+    }
+    /// One pass over the jobs of `run`'s review in `watch`, `elsewhere`
+    /// the agent jobs of the other runs' reviews that run now: reap the
+    /// jobs that ended ([`Self::review_job_ended`]), start those that
+    /// wait while the limit of jobs at once leaves room and a provider can
+    /// run them ([`Self::start_review_jobs`]), and once every job ended,
+    /// judge the review ([`Self::judge_review`]) or, when one gave no
+    /// answer, fail it to the person, never passing it on fewer judgments
+    /// (ADR-t1895-1 decision 5). `None` while a job waits or runs.
+    pub(super) fn tend_review(
+        &mut self,
+        run: &TaskRun,
+        watch: &mut ReviewWatch,
+        elsewhere: usize,
+    ) -> Result<Option<Phase>> {
+        self.reap_review_jobs(run, watch)?;
         self.start_review_jobs(run, watch, elsewhere)?;
+        let attempt = watch.attempt;
         match watch.standing() {
             review_jobs::ReviewStanding::Open => Ok(None),
             review_jobs::ReviewStanding::Answered => self.judge_review(run, watch).map(Some),
@@ -1929,6 +1980,8 @@ impl Supervisor<'_> {
                     reason_file: super::resume::reason_file(run, &format!("conflict-{attempt}")),
                     known_failures: self
                         .request_known_failures(run, &format!("conflict-{attempt}")),
+                    carried_answers: Vec::new(),
+                    answers_file: None,
                 };
                 crate::application::run_git::hand_main(&*self.repository, run, &main)?;
                 let message = resume_request(&task, run, &request, &landed)?

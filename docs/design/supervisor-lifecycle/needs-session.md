@@ -149,6 +149,15 @@ resumeのwrapperを起動するのはsupervisorだけ。
 worktreeは残る。
 `failed`になったrunはsupervisorがtriageする（[Triage](triage.md#triage-supervisor)。triageのresumeは`needs_session`に戻し、ここの試行の上限を通算で共有する）。
 
+## 再計画で保留したrun
+
+保留したrunは`needs_session`（`replan_parked`）になり、保護のあいだ自動resume・`resolved_head`・使い切りの後始末の対象にならない。
+継続か案の撤回で操作が閉じると、resumeか使い切りの後始末の前にworktreeをsnapshotと照合するか作り直す（`replan_restored`）。
+保留の時にturnが始まっていなかった回答は継続のresumeの依頼に載せ、柵に拒まれて配れなかった回答は継続のsessionが届ける。
+`replan_parked`はresumeの区分・統計・`resolved_head`で一つのparkで、resume/reviseの回数は引き継ぐ。
+保留より前の承認とreviewのpassは、継続の後の着地に使わない。
+保存の順と照合の失敗は[taskの再計画](../../plans/task-replanning.md#実装の状態)が持つ。
+
 ## supervisorの入れ替わり
 
 - 解消依頼と終了依頼は file に書く。

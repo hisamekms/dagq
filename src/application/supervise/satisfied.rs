@@ -53,6 +53,7 @@ impl Supervisor<'_> {
             }
             if self.in_slot(run.id())
                 || self.queue.run_lease(run.id())?.is_some()
+                || self.queue.replan_guard(run.task_id())?.is_some()
                 || !satisfied::awaits_verification(&self.queue.run_events(run.id())?)
                 || self
                     .queue
@@ -157,7 +158,7 @@ impl Supervisor<'_> {
     /// Take main's head as the snapshot, record it, and run the task's
     /// verification commands on it off the loop (for the answer `ask` when
     /// it runs again for one).
-    fn verify_satisfied(&mut self, run: &TaskRun, ask: Option<AskId>) -> Result<Phase> {
+    pub(super) fn verify_satisfied(&mut self, run: &TaskRun, ask: Option<AskId>) -> Result<Phase> {
         // One verification of the run at a time in its scratch worktree,
         // so the files verified are the snapshot's.
         let scratch = integration::satisfied_scratch(Path::new(
@@ -203,7 +204,9 @@ impl Supervisor<'_> {
     /// closes the task when it passed (ADR-t1818-1 decision 3: even if
     /// main moved meanwhile); otherwise the `approve_close` ask opens on
     /// the snapshot (closing the answered one, whose close could not be
-    /// applied), and the run rests unleased.
+    /// applied), and the run rests unleased. Not called while a replanning
+    /// guards the task (ADR-t1521-2): the run's slot holds the result for
+    /// the park, which withholds it, or for the operation's end.
     pub(super) fn satisfied_verified(
         &mut self,
         run: &TaskRun,
@@ -302,7 +305,8 @@ impl Supervisor<'_> {
     /// it, likewise only closes once a verification passes); `retry`
     /// fails the run and puts the task back to `ready`; `cancel` fails the
     /// run and cancels the task. Any other answer is left to the inbox; an
-    /// error is noted and the ask tried again on a later pass.
+    /// error is noted and the ask tried again on a later pass. No answer is
+    /// applied while a replanning guards the task.
     pub(super) fn apply_satisfied_answers(&mut self, parallel: usize) -> Result<()> {
         let asks: Vec<Ask> = self
             .queue
@@ -318,7 +322,12 @@ impl Supervisor<'_> {
                 continue;
             };
             let run = self.queue.run(&run_id)?;
-            if run.status() != RunStatus::Validating || self.queue.run_lease(&run_id)?.is_some() {
+            // A task being replanned takes no answer: the park closes the
+            // ask, and the close's transaction refuses it besides.
+            if run.status() != RunStatus::Validating
+                || self.queue.run_lease(&run_id)?.is_some()
+                || self.queue.replan_guard(run.task_id())?.is_some()
+            {
                 continue;
             }
             if let Err(error) = self.apply_satisfied_answer(&run, ask.id, answer, parallel) {

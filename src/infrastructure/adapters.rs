@@ -23,7 +23,7 @@ use serde_json::Value;
 use std::{
     collections::HashMap,
     env, fs,
-    io::{self, Read, Seek, SeekFrom},
+    io::{self, Read, Seek, SeekFrom, Write},
     os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Output, Stdio},
@@ -723,6 +723,32 @@ pub(crate) fn capture_bytes(
         .stdout(stdout.try_clone()?)
         .stderr(stderr.try_clone()?)
         .stdin(Stdio::null())
+        .spawn()
+        .with_context(|| format!("start {label}"))?;
+    let status = wait_with_deadline(&mut child, &label, timeout)?;
+    let stderr = read_back(stderr)?;
+    Ok((
+        status,
+        read_back(stdout)?,
+        String::from_utf8_lossy(&stderr).into_owned(),
+    ))
+}
+
+/// [`capture_bytes`] with `input` as the command's standard input: a file
+/// read from its current position, such as an [`output_file`] written
+/// and rewound.
+pub(crate) fn capture_with_input(
+    command: &mut Command,
+    input: fs::File,
+    timeout: Duration,
+) -> Result<(ExitStatus, Vec<u8>, String)> {
+    let label = format!("{:?}", command.get_program());
+    let stdout = output_file()?;
+    let stderr = output_file()?;
+    let mut child = command
+        .stdout(stdout.try_clone()?)
+        .stderr(stderr.try_clone()?)
+        .stdin(input)
         .spawn()
         .with_context(|| format!("start {label}"))?;
     let status = wait_with_deadline(&mut child, &label, timeout)?;
@@ -1857,6 +1883,188 @@ impl GitRepository {
         Ok(paths.lines().any(|p| worktree.join(p.trim()).exists()))
     }
 
+    /// The worktree's diff against its head as `git diff --binary` writes
+    /// it: the staged one with `cached`, else the unstaged one.
+    pub fn worktree_diff(&self, worktree: &Path, cached: bool) -> Result<Vec<u8>> {
+        run_clones::refuse_clone(worktree)?;
+        let mut command = self.read_worktree(worktree);
+        // Fixed prefixes and no textconv, whatever the user's config, so
+        // `git apply` takes the diff back.
+        command.args([
+            "diff",
+            "--binary",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+        ]);
+        if cached {
+            command.arg("--cached");
+        }
+        let (status, stdout, stderr) = capture_bytes(&mut command, OUTPUT_TIMEOUT)?;
+        ensure!(status.success(), "git diff failed ({status}): {stderr}");
+        Ok(stdout)
+    }
+
+    /// The worktree's untracked files Git does not ignore.
+    pub fn untracked_paths(&self, worktree: &Path) -> Result<Vec<String>> {
+        run_clones::refuse_clone(worktree)?;
+        let listed = output(self.read_worktree(worktree).args([
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ]))?;
+        Ok(listed
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
+
+    /// The Git operation half done in the worktree, if any.
+    pub fn git_operation(&self, worktree: &Path) -> Result<Option<&'static str>> {
+        if self.rebase_in_progress(worktree)? {
+            return Ok(Some("rebase"));
+        }
+        let paths = output(self.read_worktree(worktree).args([
+            "rev-parse",
+            "--git-path",
+            "MERGE_HEAD",
+            "--git-path",
+            "CHERRY_PICK_HEAD",
+            "--git-path",
+            "REVERT_HEAD",
+        ]))?;
+        Ok(paths
+            .lines()
+            .zip(["merge", "cherry-pick", "revert"])
+            .find(|(path, _)| worktree.join(path.trim()).exists())
+            .map(|(_, operation)| operation))
+    }
+
+    /// Make the worktree `worktree` again on `branch` at `head` and apply
+    /// the staged diff `index` (to the index and the worktree) and the
+    /// unstaged one `unstaged` (to the worktree). Each diff goes to
+    /// `git apply` on its standard input, from an unlinked file only this
+    /// process holds ([`output_file`]): no path another process could
+    /// replace or point elsewhere.
+    pub fn restore_worktree(
+        &self,
+        worktree: &Path,
+        branch: &str,
+        head: &str,
+        index: &[u8],
+        unstaged: &[u8],
+    ) -> Result<()> {
+        run_clones::refuse_clone(worktree)?;
+        let _ = self.prune_worktrees();
+        output(
+            self.command()
+                .arg("-C")
+                .arg(&self.root)
+                .args(["worktree", "add", "-B", branch])
+                .arg(worktree)
+                .arg(head),
+        )?;
+        for (patch, args) in [
+            (index, &["apply", "--index", "--binary", "-"][..]),
+            (unstaged, &["apply", "--binary", "-"][..]),
+        ] {
+            if patch.is_empty() {
+                continue;
+            }
+            let mut input = output_file()?;
+            input.write_all(patch)?;
+            input.seek(io::SeekFrom::Start(0))?;
+            let mut command = self.command();
+            command.arg("-C").arg(worktree).args(args);
+            let (status, _, stderr) = capture_with_input(&mut command, input, OUTPUT_TIMEOUT)?;
+            ensure!(
+                status.success(),
+                "apply the saved diff ({status}): {stderr}"
+            );
+        }
+        Ok(())
+    }
+
+    /// Move the worktree `from` to `to` (`git worktree move`).
+    pub fn move_worktree(&self, from: &Path, to: &Path) -> Result<()> {
+        run_clones::refuse_clone(from)?;
+        output(
+            self.command()
+                .arg("-C")
+                .arg(&self.root)
+                .args(["worktree", "move"])
+                .arg(from)
+                .arg(to),
+        )?;
+        Ok(())
+    }
+
+    /// Remove the worktree `path` and its registration, keeping its
+    /// branch: nothing for a path that is not there. The path must be the
+    /// directory it names: a link, or a path that resolves elsewhere (a
+    /// link among its parents), is refused, so a link planted there never
+    /// takes the removal to another worktree. A worktree registered there
+    /// on a branch other than `branch` is refused too; a registered one is
+    /// removed with `git worktree remove --force`, an unregistered
+    /// directory as a directory.
+    pub fn discard_worktree(&self, path: &Path, branch: &str) -> Result<()> {
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let _ = self.prune_worktrees();
+                return Ok(());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        ensure!(
+            !metadata.file_type().is_symlink() && metadata.is_dir(),
+            "{} is not a directory of its own (a link, or a file): it is not removed",
+            path.display()
+        );
+        let resolved = fs::canonicalize(path)?;
+        let named = fs::canonicalize(path.parent().context("the path has no parent")?)?
+            .join(path.file_name().context("the path has no name")?);
+        ensure!(
+            resolved == named,
+            "{} resolves to {}: it is not removed",
+            path.display(),
+            resolved.display()
+        );
+        let registered = self
+            .worktrees()?
+            .into_iter()
+            .find(|(listed, _)| fs::canonicalize(listed).is_ok_and(|listed| listed == resolved));
+        match registered {
+            Some((_, block)) => {
+                if let Some(other) = block
+                    .lines()
+                    .find_map(|line| line.strip_prefix("branch refs/heads/"))
+                    .filter(|other| *other != branch)
+                {
+                    bail!(
+                        "{} is the worktree of branch {other}, not {branch}: it is not removed",
+                        path.display()
+                    );
+                }
+                output(
+                    self.command()
+                        .arg("-C")
+                        .arg(&self.root)
+                        .args(["worktree", "remove", "--force", "--force"])
+                        .arg(&resolved),
+                )?;
+            }
+            None => fs::remove_dir_all(&resolved)
+                .with_context(|| format!("remove {}", resolved.display()))?,
+        }
+        let _ = self.prune_worktrees();
+        Ok(())
+    }
+
     pub fn rebase_abort(&self, worktree: &Path) -> Result<()> {
         run_clones::refuse_clone(worktree)?;
         output(
@@ -2680,6 +2888,31 @@ impl Repository for GitRepository {
     }
     fn rebase_abort(&self, worktree: &Path) -> Result<()> {
         GitRepository::rebase_abort(self, worktree)
+    }
+    fn worktree_diff(&self, worktree: &Path, cached: bool) -> Result<Vec<u8>> {
+        GitRepository::worktree_diff(self, worktree, cached)
+    }
+    fn untracked_paths(&self, worktree: &Path) -> Result<Vec<String>> {
+        GitRepository::untracked_paths(self, worktree)
+    }
+    fn git_operation(&self, worktree: &Path) -> Result<Option<&'static str>> {
+        GitRepository::git_operation(self, worktree)
+    }
+    fn restore_worktree(
+        &self,
+        worktree: &Path,
+        branch: &str,
+        head: &str,
+        index: &[u8],
+        unstaged: &[u8],
+    ) -> Result<()> {
+        GitRepository::restore_worktree(self, worktree, branch, head, index, unstaged)
+    }
+    fn move_worktree(&self, from: &Path, to: &Path) -> Result<()> {
+        GitRepository::move_worktree(self, from, to)
+    }
+    fn discard_worktree(&self, path: &Path, branch: &str) -> Result<()> {
+        GitRepository::discard_worktree(self, path, branch)
     }
     fn rebase(&self, worktree: &Path, onto: &str) -> Result<std::result::Result<(), String>> {
         GitRepository::rebase(self, worktree, onto)

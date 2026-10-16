@@ -409,7 +409,7 @@ impl Drop for StubCommand {
 /// reply is `prepare`'s. No Claude job runs. Returns the fixture (which
 /// holds the queue), the queue and the run's task detail.
 fn no_claude_recovery(prepare: impl FnOnce(&Path)) -> (Fixture, PathBuf, dagq::domain::TaskDetail) {
-    let (dir, repo, db, backend, codex) = crate::runtime_codex::codex_fixture();
+    let (dir, repo, db, backend, codex) = crate::runtime_support::codex::codex_fixture();
     select_codex_recovery(&repo);
     set_turns(dir.path(), "exit 1");
     prepare(dir.path());
@@ -431,7 +431,7 @@ fn no_claude_recovery(prepare: impl FnOnce(&Path)) -> (Fixture, PathBuf, dagq::d
     )
     .unwrap();
     backend.join();
-    let detail = crate::runtime_codex::detail(&db);
+    let detail = crate::runtime_support::codex::detail(&db);
     assert_eq!(detail.runs[0].status(), RunStatus::Failed);
     assert!(reviewer.triage_prompts().is_empty(), "no Claude job");
     (dir, db, detail)
@@ -720,7 +720,7 @@ fn a_failed_codex_recovery_job_of_a_stalled_run_asks_a_person() {
 /// after it.
 #[test]
 fn a_no_claude_live_run_with_codex_held_asks_a_person_and_starts_no_recovery_job() {
-    let (dir, repo, db, backend, codex) = crate::runtime_codex::codex_fixture();
+    let (dir, repo, db, backend, codex) = crate::runtime_support::codex::codex_fixture();
     select_codex_recovery(&repo);
     let gate = dir.path().join("codex-held");
     set_turns(
@@ -756,7 +756,7 @@ fn a_no_claude_live_run_with_codex_held_asks_a_person_and_starts_no_recovery_job
     };
     wait_until(&db, common::STEP_LIMIT, |queue| {
         queue
-            .show(crate::runtime_codex::TASK)
+            .show(crate::runtime_support::codex::TASK)
             .unwrap()
             .runs
             .first()
@@ -786,7 +786,7 @@ fn a_no_claude_live_run_with_codex_held_asks_a_person_and_starts_no_recovery_job
         "{}",
         ask.question
     );
-    let asked = crate::runtime_codex::detail(&db);
+    let asked = crate::runtime_support::codex::detail(&db);
     let requested = payloads(&asked, "recovery_requested");
     assert_eq!(requested.len(), 1, "{requested:?}");
     assert_eq!(requested[0]["alert"], "stalled");
@@ -806,7 +806,7 @@ fn a_no_claude_live_run_with_codex_held_asks_a_person_and_starts_no_recovery_job
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert_eq!(
-        crate::runtime_codex::detail(&db).runs[0].status(),
+        crate::runtime_support::codex::detail(&db).runs[0].status(),
         RunStatus::Failed
     );
 }

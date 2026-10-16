@@ -49,7 +49,7 @@ use crate::{
         codex::Codex,
         location::{
             QueueLocation, agent_cases_dir, agent_evals_dir, goal_reviews_dir, plan_reviews_dir,
-            planners_dir, review_programs_dir, runs_dir,
+            planners_dir, replans_dir, review_programs_dir, runs_dir,
         },
         process::LocalSpawner,
         run_env::{
@@ -233,6 +233,9 @@ pub struct SuperviseOptions {
     /// the system's. Tests set it (their sessions run inside the test
     /// process, which a supervisor never counts as a run's).
     pub processes: Option<ProcessesPort>,
+    /// Where a test pauses the supervisor to change the queue meanwhile;
+    /// none outside the tests.
+    pub pauses: Option<PausesPort>,
     /// Reads crates.io's sparse index for the release check (ADR-t618-1);
     /// `None` is `curl`. Tests set it.
     pub release_index: Option<ReleaseIndexPort>,
@@ -305,6 +308,16 @@ pub struct SuperviseOptions {
 /// The processes [`SuperviseOptions::processes`](super::SuperviseOptions::processes) gives the supervisor.
 #[derive(Clone)]
 pub struct ProcessesPort(pub Arc<dyn ProcessControl + Send + Sync>);
+
+/// Where a test pauses the supervisor ([`crate::application::supervise::PausePoint`]).
+#[derive(Clone)]
+pub struct PausesPort(pub crate::application::supervise::Pauses);
+
+impl std::fmt::Debug for PausesPort {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PausesPort")
+    }
+}
 
 impl std::fmt::Debug for ProcessesPort {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -407,6 +420,7 @@ impl SuperviseOptions {
             push_retry: crate::domain::kpi::push::RETRY_DELAYS_SECS.map(Duration::from_secs),
             files: None,
             processes: None,
+            pauses: None,
             release_index: None,
             release_current: None,
             build: None,
@@ -685,6 +699,7 @@ pub fn supervise_with_reviewer(
         agent_evals_dir: agent_evals_dir(&db),
         agent_cases_dir: agent_cases_dir(&db),
         review_programs_dir: review_programs_dir(&db),
+        replans_dir: replans_dir(&db),
         db: db.clone(),
     };
     let review_db = db.clone();
@@ -865,6 +880,7 @@ pub fn supervise_with_reviewer(
             || Arc::new(SystemProcesses) as Arc<dyn ProcessControl + Send + Sync>,
             |port| port.0.clone(),
         ),
+        pauses: options.pauses.as_ref().map(|port| port.0.clone()),
         generators,
         review_material: &review_material,
         load_average: options.load_average,

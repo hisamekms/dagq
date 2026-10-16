@@ -430,6 +430,17 @@ pub fn pending<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<u64> {
     pending
 }
 
+/// The `what` of the request that gives a session the answer to ask `ask`.
+pub fn answer_what(ask: impl std::fmt::Display) -> String {
+    format!("answer of ask {ask}")
+}
+
+/// The ask whose answer a request named `what` gives, if it is one
+/// ([`answer_what`]).
+pub fn answered_ask(what: &str) -> Option<u64> {
+    what.strip_prefix("answer of ask ")?.parse().ok()
+}
+
 /// Where a request file stands: waiting to be taken, taken by the wrapper,
 /// or dropped untaken when a later session started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -451,6 +462,26 @@ pub fn request_state(name: &str) -> Option<(u64, RequestState)> {
         (rest.strip_suffix(".json")?, RequestState::Pending)
     };
     seq.parse().ok().map(|seq| (seq, state))
+}
+
+/// The answer requests of `listed` whose turn never started (`started`:
+/// the requests the run's `turn_started` name): waiting, or taken by a
+/// wrapper that met a replanning's fence before the turn
+/// ([`answered_ask`] names their ask), oldest first, as `(seq, ask,
+/// prompt)`. A dropped one was left untaken by an earlier session and is
+/// not among them.
+pub fn answers_not_started(listed: &[ListedRequest], started: &[u64]) -> Vec<(u64, u64, String)> {
+    let mut answers: Vec<(u64, u64, String)> = listed
+        .iter()
+        .filter(|listed| listed.state != RequestState::Dropped)
+        .filter(|listed| !started.contains(&listed.request.seq))
+        .filter_map(|listed| {
+            answered_ask(&listed.request.what)
+                .map(|ask| (listed.request.seq, ask, listed.request.prompt.clone()))
+        })
+        .collect();
+    answers.sort_by_key(|(seq, _, _)| *seq);
+    answers
 }
 
 /// A request found in a session's `turns/`, with its state.
@@ -1033,6 +1064,47 @@ impl std::fmt::Display for TurnOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_answers_whose_turn_never_started_are_waiting_or_taken_but_not_dropped() {
+        let listed = |seq: u64, state: RequestState, what: &str| ListedRequest {
+            state,
+            request: TurnRequest {
+                seq,
+                what: what.to_owned(),
+                prompt: format!("prompt {seq}"),
+            },
+        };
+        let requests = [
+            listed(5, RequestState::Taken, &answer_what(9)),
+            listed(2, RequestState::Taken, &answer_what(7)),
+            listed(3, RequestState::Pending, &answer_what(8)),
+            listed(4, RequestState::Dropped, &answer_what(6)),
+            listed(6, RequestState::Pending, "revise"),
+        ];
+        // Request 2's turn started; 5 was taken and met the fence before
+        // its turn; 3 still waits.
+        assert_eq!(
+            answers_not_started(&requests, &[1, 2]),
+            [(3, 8, "prompt 3".to_owned()), (5, 9, "prompt 5".to_owned())]
+        );
+        assert!(answers_not_started(&requests, &[2, 3, 5]).is_empty());
+    }
+
+    #[test]
+    fn an_answer_request_names_its_ask_and_nothing_else_does() {
+        assert_eq!(answer_what(17), "answer of ask 17");
+        assert_eq!(answered_ask(&answer_what(17)), Some(17));
+        for what in [
+            "resume",
+            "revise",
+            "answer of ask",
+            "answer of ask x",
+            "answer of asks 3",
+        ] {
+            assert_eq!(answered_ask(what), None, "{what}");
+        }
+    }
 
     #[test]
     fn a_session_is_named_by_the_run_until_its_provider_switched() {

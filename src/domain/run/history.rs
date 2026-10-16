@@ -26,7 +26,7 @@ pub struct RunHistory<'a> {
 /// (the landing or validation, or a person's `send_back`), the triage's
 /// resume, an adopter's park of a run whose workspace was gone, and the
 /// runtime's e2e that failed after the review (ADR-t1233-2).
-const PARKING: [&str; 10] = [
+const PARKING: [&str; 11] = [
     event_kind::INTEGRATION_DEFERRED,
     event_kind::INTEGRATION_ERROR,
     event_kind::EVIDENCE_MISSING,
@@ -37,14 +37,17 @@ const PARKING: [&str; 10] = [
     event_kind::RECOVERY_PARKED,
     event_kind::SESSION_GONE_PARKED,
     event_kind::RUN_E2E_FAILED,
+    event_kind::REPLAN_PARKED,
 ];
 
-/// The first five of [`PARKING`], the landing recheck's failures and the
-/// runtime's failed e2e: what parks a run that a resumed session may have
-/// resolved already. A recheck failure the host kept from judging the code
+/// The first five of [`PARKING`], the landing recheck's failures, the
+/// runtime's failed e2e and the park for a replanning: what parks a run
+/// that a resumed session may have resolved already. The park for a
+/// replanning is one so that a resume that ended unresolved before it
+/// does not let the receipt written after its fence move the run on. A recheck failure the host kept from judging the code
 /// ([`recheck::RecordedFailure::skipped`]) parks nothing, and
 /// [`RunHistory::unresolved_since_park`] passes it over.
-const RESOLVABLE_PARKING: [&str; 7] = [
+const RESOLVABLE_PARKING: [&str; 8] = [
     event_kind::INTEGRATION_DEFERRED,
     event_kind::INTEGRATION_ERROR,
     event_kind::EVIDENCE_MISSING,
@@ -52,6 +55,7 @@ const RESOLVABLE_PARKING: [&str; 7] = [
     event_kind::LANDING_DECIDED,
     event_kind::LANDING_RECHECK_FAILED,
     event_kind::RUN_E2E_FAILED,
+    event_kind::REPLAN_PARKED,
 ];
 
 const RESUMES: [&str; 3] = [
@@ -83,6 +87,10 @@ pub enum ParkCause {
     /// The e2e the runtime ran on the host after the review failed
     /// (ADR-t1233-2 decision 3).
     E2e,
+    /// The trusted runtime parked it for a replanning at a turn's end and
+    /// saved its work (ADR-t1521-2 decision 1); it resumes once the
+    /// operation ends in a continuation or a withdrawal.
+    Replan,
 }
 
 /// Why a run waits for a session, from its latest parking event.
@@ -161,9 +169,25 @@ impl<'a> RunHistory<'a> {
     }
 
     /// Whether `integrate` was called on the run (`integration_approved`):
-    /// the approval to land it (ADR-0016 decision 5).
+    /// the approval to land it (ADR-0016 decision 5). An approval from
+    /// before the run's latest park for a replanning (`replan_parked`) does
+    /// not count: it approved the work before the park, not what the
+    /// continuation adds (ADR-t1521-2).
     pub fn approved(&self) -> bool {
-        self.has(event_kind::INTEGRATION_APPROVED)
+        self.since_replan_park()
+            .iter()
+            .any(|e| e.kind == event_kind::INTEGRATION_APPROVED)
+    }
+
+    /// The events after the run's latest park for a replanning, or all of
+    /// them when it was never parked so.
+    fn since_replan_park(&self) -> &'a [RunEvent] {
+        let start = self
+            .events
+            .iter()
+            .rposition(|e| e.kind == event_kind::REPLAN_PARKED)
+            .map_or(0, |at| at + 1);
+        &self.events[start..]
     }
 
     /// The approval of an `approve_landing` answer that queues the run to
@@ -264,9 +288,13 @@ impl<'a> RunHistory<'a> {
     }
 
     /// Whether the latest review lets the run land without a person
-    /// ([`crate::domain::concern::lets_land`]).
+    /// ([`crate::domain::concern::lets_land`]); a review from before the
+    /// run's latest park for a replanning does not.
     pub fn review_lets_land(&self) -> bool {
-        self.last(event_kind::REVIEW_FINISHED)
+        self.since_replan_park()
+            .iter()
+            .rev()
+            .find(|e| e.kind == event_kind::REVIEW_FINISHED)
             .is_some_and(|review| crate::domain::concern::lets_land(&review.payload))
     }
 
@@ -397,6 +425,8 @@ impl<'a> RunHistory<'a> {
             ParkCause::SessionGone
         } else if event.kind == event_kind::RUN_E2E_FAILED {
             ParkCause::E2e
+        } else if event.kind == event_kind::REPLAN_PARKED {
+            ParkCause::Replan
         } else {
             ParkCause::Landing
         };
@@ -427,6 +457,69 @@ impl<'a> RunHistory<'a> {
                 e.kind == event_kind::RESUME_FINISHED
                     && restore::<ResumeFinished>(&e.payload).outcome == Some("unresolved")
             })
+    }
+
+    /// The requests a turn of the run's sessions ran (`turn_started`'s
+    /// `request`): a turn whose agent kept no thread of the session it
+    /// resumed (`turn_session_identified` with `missing`) did not run its
+    /// request, which the wrapper runs again as a new session's.
+    pub fn requests_run(&self) -> Vec<u64> {
+        self.turns_run(0)
+            .filter_map(|event| event.payload["request"].as_u64())
+            .collect()
+    }
+
+    /// The `turn_started` from `from` on whose turn ran its request
+    /// ([`Self::requests_run`]).
+    fn turns_run(&self, from: usize) -> impl Iterator<Item = &'a RunEvent> + '_ {
+        let missing: Vec<u64> = self
+            .events
+            .iter()
+            .filter(|e| {
+                e.kind == event_kind::TURN_SESSION_IDENTIFIED && !e.payload["missing"].is_null()
+            })
+            .filter_map(|e| e.payload["turn"].as_u64())
+            .collect();
+        self.events[from.min(self.events.len())..]
+            .iter()
+            .filter(|e| e.kind == event_kind::TURN_STARTED)
+            .filter(move |e| {
+                e.payload["turn"]
+                    .as_u64()
+                    .is_none_or(|turn| !missing.contains(&turn))
+            })
+    }
+
+    /// The answers to the run's questions its session had been sent but
+    /// had not run when a replanning parked it (`replan_parked`'s
+    /// `carried_answers`, each `{ask_id, seq, prompt}`), oldest first: the
+    /// continuation's resume gives them to its session, and they stay owed
+    /// until a turn after that park runs its request
+    /// ([`Self::requests_run`]); a park that comes before one keeps them.
+    /// Empty when the run was never parked so, or owes nothing.
+    pub fn owed_answers(&self) -> Vec<serde_json::Value> {
+        let Some(parked) = self
+            .events
+            .iter()
+            .rposition(|e| e.kind == event_kind::REPLAN_PARKED)
+        else {
+            return Vec::new();
+        };
+        if self.turns_run(parked + 1).next().is_some() {
+            return Vec::new();
+        }
+        self.events[parked].payload["carried_answers"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// The texts of [`Self::owed_answers`], as each was sent.
+    pub fn answers_to_carry(&self) -> Vec<String> {
+        self.owed_answers()
+            .iter()
+            .filter_map(|answer| answer["prompt"].as_str().map(str::to_owned))
+            .collect()
     }
 
     /// Whether the last resume event is `resume_skipped`: the run was
@@ -1198,6 +1291,128 @@ mod tests {
             )]),
             Some((ParkCause::SessionGone, Some("gone".into())))
         );
+        assert_eq!(
+            park(vec![event(
+                1,
+                "replan_parked",
+                json!({"operation_id": 3, "reason": "parked for replan operation 3"})
+            )]),
+            Some((
+                ParkCause::Replan,
+                Some("parked for replan operation 3".into())
+            ))
+        );
+    }
+
+    #[test]
+    fn an_approval_or_a_pass_before_a_replannings_park_does_not_let_the_run_land() {
+        let history = |events: &[RunEvent]| {
+            let h = RunHistory::from_events(events);
+            (h.approved(), h.review_lets_land(), h.landable())
+        };
+        let approved = event(1, "integration_approved", json!({"ask_id": 4}));
+        let passed = event(2, "review_finished", json!({"verdict": "pass"}));
+        let parked = event(3, "replan_parked", json!({"code": "replan_parked"}));
+        assert_eq!(
+            history(&[approved.clone(), passed.clone()]),
+            (true, true, true)
+        );
+        assert_eq!(
+            history(&[approved.clone(), passed.clone(), parked.clone()]),
+            (false, false, false)
+        );
+        // What comes after the park counts again.
+        assert_eq!(
+            history(&[
+                approved.clone(),
+                parked.clone(),
+                event(4, "review_finished", json!({"verdict": "pass"}))
+            ]),
+            (false, true, true)
+        );
+        assert_eq!(
+            history(&[passed, parked, event(5, "integration_approved", json!({}))]),
+            (true, false, true)
+        );
+    }
+
+    #[test]
+    fn answers_a_replanning_parked_untaken_are_carried_until_a_turn_starts() {
+        let parked = |answers: Value| {
+            event(
+                3,
+                "replan_parked",
+                json!({"operation_id": 1, "carried_answers": answers}),
+            )
+        };
+        let carried = json!([
+            {"ask_id": 7, "seq": 4, "prompt": "answer to ask 7: yes"},
+            {"ask_id": 8, "seq": 5, "prompt": "answer to ask 8: no"},
+        ]);
+        let carry = |events: &[RunEvent]| RunHistory::from_events(events).answers_to_carry();
+        assert!(carry(&[event(1, "turn_started", json!({"turn": 1}))]).is_empty());
+        assert_eq!(
+            carry(&[parked(carried.clone())]),
+            ["answer to ask 7: yes", "answer to ask 8: no"]
+        );
+        // A resume that started no turn still owes them.
+        assert_eq!(
+            carry(&[
+                parked(carried.clone()),
+                event(4, "resume_started", json!({"attempt": 1})),
+                event(5, "resume_finished", json!({"outcome": "error"})),
+            ])
+            .len(),
+            2
+        );
+        assert!(
+            carry(&[
+                parked(carried.clone()),
+                event(4, "turn_started", json!({"turn": 2}))
+            ])
+            .is_empty()
+        );
+        // A turn whose resumed thread was gone ran nothing: they are still
+        // owed, until the turn run again as a new session's starts.
+        let missing = event(
+            5,
+            "turn_session_identified",
+            json!({"turn": 2, "session_id": null, "missing": "t1"}),
+        );
+        assert_eq!(
+            carry(&[
+                parked(carried.clone()),
+                event(4, "turn_started", json!({"turn": 2, "request": 9})),
+                missing.clone(),
+            ])
+            .len(),
+            2
+        );
+        assert!(
+            carry(&[
+                parked(carried.clone()),
+                event(4, "turn_started", json!({"turn": 2, "request": 9})),
+                missing.clone(),
+                event(6, "turn_started", json!({"turn": 3, "request": 9})),
+            ])
+            .is_empty()
+        );
+        let history = [
+            event(1, "turn_started", json!({"turn": 1, "request": 1})),
+            event(2, "turn_started", json!({"turn": 2, "request": 9})),
+            missing,
+        ];
+        assert_eq!(RunHistory::from_events(&history).requests_run(), [1]);
+        assert!(carry(&[parked(json!(null))]).is_empty());
+        // Only the last park counts.
+        assert!(
+            carry(&[
+                parked(carried),
+                event(4, "turn_started", json!({"turn": 2})),
+                event(5, "replan_parked", json!({"operation_id": 2})),
+            ])
+            .is_empty()
+        );
     }
 
     #[test]
@@ -1215,6 +1430,21 @@ mod tests {
             deferred(1),
             finished(2, "unresolved"),
             event(3, "resume_skipped", json!({}))
+        ]));
+        // A park for a replanning after the unresolved resume: the receipt
+        // written after its fence moves nothing on; a resume after it that
+        // ended unresolved is read as after any system park.
+        let replanned = |id| event(id, "replan_parked", json!({"code": "replan_parked"}));
+        assert!(!unresolved(vec![
+            deferred(1),
+            finished(2, "unresolved"),
+            replanned(3)
+        ]));
+        assert!(unresolved(vec![
+            deferred(1),
+            finished(2, "unresolved"),
+            replanned(3),
+            finished(4, "unresolved")
         ]));
         assert!(!unresolved(vec![
             event(1, "landing_decided", json!({})),

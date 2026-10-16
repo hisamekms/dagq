@@ -1079,17 +1079,167 @@ name = "runtime_clone::a_host_runs_landing_of_the_same_commit_runs_the_tracked_h
 reason = "B 境界（Git・プロセス）: hostのrunから着地した同じcommitがtrackedのhooksを今までどおり走らせることを、実のgitと印のファイルで確かめる。上のtestがhookの無さで通っているのではないことの対照"
 task = 1820
 
-# 10.1s to 12.1s (stress 5 under the host's load of other runs, task 1523)
+# 5.7s to 15.2s (stress 5 under the host's load of other runs, task 1524)
 [[test]]
-name = "runtime_replanning::a_guarded_runs_revise_is_withheld_and_its_approved_landing_lets_another_land"
-reason = "B 境界（supervisor の配線・SQLite・Git）: 保護中の task の run の review の revise の verdict が送られず revise_withheld と approve_landing の ask になり、land の答えで承認されても着地を始めず、後に承認された別の run が実際の integrate で着地することを、実際の worker の session と review の job で確かめる。保護の判断は domain::task_replan の unit test"
-task = 1523
+name = "runtime_replan_park::a_continuation_resumes_the_parked_run_on_its_saved_work_and_lands"
+reason = "B 境界（supervisor の配線・SQLite・Git・wrapper）: 保留した run が継続で既存の resume に戻り、worktree を snapshot と照合してから session を開き、validation・review・integrate を通って着地することを、実際の wrapper と Git で確かめる。照合の判断は domain::replan_snapshot の unit test"
+task = 1524
 
-# 5.9s to 8.0s (stress 5 under the host's load of other runs, task 1523)
+# 5.9s to 15.1s (stress 5 under the host's load of other runs, task 1524)
 [[test]]
-name = "runtime_replanning::a_guarded_run_in_the_landing_slot_waits_for_the_outcome_and_then_lands"
-reason = "B 境界（supervisor の配線・SQLite）: review の pass の後に着地の slot に来た保護中の run が lease を持ったまま begin_integration を呼ばず runtime_error にもならず、操作が終わった後の pass で着地することを、実際の supervisor の loop で確かめる。保護の判断は domain::task_replan の unit test"
-task = 1523
+name = "runtime_replan_park::a_withdrawal_makes_the_lost_worktree_again_from_the_snapshot"
+reason = "B 境界（Git の worktree と差分の適用・wrapper）: 撤回の後に失われた worktree を snapshot の固定した head・staged と unstaged の差分・untracked から作り直し、その成果ごと着地することを、実際の git worktree と git apply で確かめる。照合の判断は domain::replan_snapshot の unit test"
+task = 1524
+
+# 6.1s to 8.8s (stress 5 under the host's load of other runs, task 1524)
+[[test]]
+name = "runtime_replan_park::a_request_during_a_turn_parks_the_run_at_its_end_with_its_dirty_work_saved"
+reason = "B 境界（supervisor の配線・wrapper・Git・SQLite）: turn の途中で柵を越えた run が turn の終わりで wrapper を止め、commit・staged・unstaged・untracked と receipt を snapshot に保存し、needs_session と lease の返却を一つの transaction で記録して slot を別の task に渡すことを、実際の wrapper と Git で確かめる。段の判断は domain::task_replan と domain::replan_snapshot の unit test"
+task = 1524
+
+# 6.8s to 10.1s (stress 5 under the host's load of other runs, task 1524)
+[[test]]
+name = "runtime_replan_park::a_save_that_fails_keeps_the_work_and_blocks_the_operation"
+reason = "B 境界（ファイルシステムの link と Git の untracked）: 追わない link を含む worktree の保存が失敗して操作が blocked になり、worktree の成果が全部残ることを、実際の symlink と git ls-files で確かめる。保存してよい entry の判断は domain::replan_snapshot の unit test"
+task = 1524
+
+# 5.1s to 7.7s (stress 5 under the host's load of other runs, task 1524)
+[[test]]
+name = "runtime_replan_park::the_park_touches_no_other_runs_session"
+reason = "B 境界（process の handle と wrapper）: 保留が止めて閉じるのは保留した run の記録した handle だけで、隣の slot で動く別の run の session はそのまま着地することを、二つの実際の wrapper の process で確かめる"
+task = 1524
+
+# 7.6s to 11.2s (stress 5 under the host's load of other runs, task 1524)
+[[test]]
+name = "runtime_replan_park::a_worktree_changed_since_its_snapshot_keeps_the_run_from_resuming"
+reason = "B 境界（Git の worktree・SQLite・status の出力）: 継続の後に snapshot と食い違う worktree を上書きせず、操作を blocked に戻して resume を始めず、status の replans の problems に出すことを、実際の supervisor の二度の起動と CLI で確かめる。照合の判断は domain::replan_snapshot の unit test"
+task = 1524
+
+# 4.7s to 8.0s (stress 5 under the host's load of other runs, task 1524)
+[[test]]
+name = "runtime_replanning::a_guarded_runs_revise_is_withheld_and_the_run_is_parked"
+reason = "B 境界（supervisor の配線・review の job・SQLite）: 柵を越えた run の review の revise の verdict を送らず revise_withheld として記録し、landing の ask を開かずに run を保留して、slot を別の task に渡して着地させることを、実際の review の job と worker の session で確かめる。保護の判断は domain::task_replan の unit test"
+task = 1524
+
+# 14.8s to 17.6s (stress 5 under the host's load of other runs, task 1524)
+[[test]]
+name = "runtime_replan_park::a_restore_stopped_half_way_starts_again_from_the_snapshot"
+reason = "B 境界（Git の worktree の作成・移動・削除と差分の適用・wrapper）: 途中で止まった復元が残した scratch worktree を捨てて snapshot から組み立て直し、照合してから元の path へ移して着地することを、実際の git worktree add・move・remove と git apply で確かめる。照合の判断は domain::replan_snapshot の unit test"
+task = 1524
+
+# 10.3s to 11.9s (stress 5 under the host's load of other runs, task 1524)
+[[test]]
+name = "runtime_replan_park::a_helper_left_running_in_the_worktree_blocks_the_park"
+reason = "B 境界（process group の外の process・ps の作業 directory）: turn が group の外に残した helper が worktree で動くあいだ保存せず操作を blocked にすることを、実際の setpgrp した process と process の一覧で確かめる。待つ猶予の判断は replan_park の unit test"
+task = 1524
+
+# 4.4s to 6.1s (stress 5 under the host's load of other runs, task 1524)
+[[test]]
+name = "runtime_replan_park::a_turn_run_again_as_a_new_session_does_not_start_once_the_park_began"
+reason = "B 境界（wrapper の turn の繰り返しと Codex の thread）: resume した thread が無く新しい session でやり直す turn を、保留の柵の後は始めずに wrapper が終わることを、実際の wrapper と stub の Codex の失敗で確かめる"
+task = 1524
+
+# 6.2s to 8.1s (stress 60s under the host's load of other runs, task 1524)
+[[test]]
+name = "runtime_replan_park::a_run_waiting_for_its_landing_answer_is_parked_and_lands_only_after_a_new_review"
+reason = "B 境界（supervisor の三度の起動・review の job・ask・Git）: 着地の答えを待つ lease の無い run が保留されて needs_session になり、開いた approve_landing が閉じ、継続の後は復元・resume・新しい validation と review を通ってだけ着地することを、実際の supervisor の経路で確かめる。保留の段の判断は domain::task_replan の unit test"
+task = 1524
+
+# 4.8s to 9.8s (stress 60s under the host's load of other runs, task 1524)
+[[test]]
+name = "runtime_replan_park::a_run_waiting_for_its_resume_is_parked_and_the_continuation_resumes_it"
+reason = "B 境界（supervisor の三度の起動・run の event・Git）: resume を待つ lease の無い run に unresolved の resume が先にあっても、保留の記録で resolved_head が receipt で飛ばさず、継続で復元してから resume することを、実際の supervisor の経路で確かめる。unresolved_since_park の判断は domain::run::history の unit test"
+task = 1524
+
+# 11.6s (stress 60s under the host's load of other runs, task 1524)
+[[test]]
+name = "runtime_replan_park::an_approval_from_before_the_park_does_not_land_the_continuations_work"
+reason = "B 境界（supervisor の三度の起動・review の job・Git）: 保留より前の着地の承認がある run を保留して継続すると、再開した成果が新しい validation と review を通ってから着地することを、実際の supervisor の経路で確かめる。承認の判断は domain::run::history の unit test"
+task = 1524
+
+# 5.4s (stress 60s under the host's load of other runs, task 1524)
+[[test]]
+name = "runtime_replanning::a_guarded_run_that_passed_is_parked_rather_than_landed"
+reason = "B 境界（supervisor の配線・review の job・SQLite）: review の pass の後に柵を越えた run が着地を始めず保留されて lease を返すことを、実際の review の job と worker の session で確かめる。保護の判断は domain::task_replan の unit test"
+task = 1524
+
+# 6.0s to 7.1s (stress 60s under the host's load of other runs, task 1524)
+[[test]]
+name = "runtime_replan_park::an_idle_run_is_parked_and_a_later_answer_is_not_delivered"
+reason = "B 境界（supervisor の配線・wrapper・ask・SQLite）: 人の答えを待つ idle の run が柵の後に wrapper を次の turn なしで終わらせて保留され、柵の後の答えが古い session に届かず turn も始めないことを、実際の wrapper と supervisor の loop で確かめる。保留の段の判断は domain::task_replan の unit test"
+task = 1524
+
+# 5.6s to 12.6s (stress 5 under the host's load of other runs, task 1524)
+[[test]]
+name = "runtime_replan_park::a_run_out_of_resumes_is_handed_on_only_after_its_park_ends_and_its_work_is_restored"
+reason = "B 境界（supervisor の四度の起動・復旧の job・SQLite・Git）: resume を使い切った lease の無い run が保留のあいだ failed にも復旧 job にもならず、継続の後に worktree を snapshot と照合してから resume_exhausted で復旧 job に渡ることを、実際の supervisor の経路で確かめる。transaction の中の拒否は task_replanning の SQLite の test、使い切りの判断は domain::resume の unit test"
+task = 1524
+
+# 14.1s to 17.8s (stress 60s under the host's load of other runs, task 1524)
+[[test]]
+name = "runtime_replan_park::a_restore_another_supervisor_holds_is_left_to_it_until_its_lease_is_stale"
+reason = "B 境界（supervisor の二度の起動・SQLite の lease・Git の worktree）: 別の supervisor が復元のために run の lease を持つあいだは supervisor がその scratch も run も操作も変えず、その lease が stale になってから snapshot から復元を引き継いで一度だけ着地することを、実際の supervisor の経路と git worktree で確かめる。所有権の判断は task_replanning の SQLite の test"
+task = 1524
+
+# 5.5s to 6.2s (stress 60s under the host's load of other runs, task 1524)
+[[test]]
+name = "runtime_replan_park::a_park_another_supervisor_holds_is_left_to_it_and_none_starts_after_the_settle"
+reason = "B 境界（supervisor の三度の起動・SQLite の lease・Git の ref）: 別の supervisor が保留のために run の lease を持つあいだは supervisor が操作も ref も snapshot も変えず、その lease が stale になってから保留を引き継いで一度だけ確定し、確定の後は保留の lease を取れずに固定の ref が変わらないことを、実際の supervisor の経路と git の ref で確かめる。所有の判断は lease_for_park の SQLite の transaction"
+task = 1524
+
+# 11.2s to 12.3s (stress 60s under the host's load of other runs, task 1524)
+[[test]]
+name = "runtime_replan_park::an_answer_sent_but_untaken_at_the_park_reaches_the_continuations_session"
+reason = "B 境界（supervisor の配線・wrapper の turns/ の依頼・SQLite の ask）: 柵の前に turn の依頼として書かれ wrapper が取らなかった回答を保留が replan_parked に残し、継続の resume の依頼で再開した session が受け取って着地することを、実際の wrapper と supervisor の二度の起動で確かめる。引き継ぐかの判断は domain::run::history の unit test"
+task = 1524
+
+# 13.5s to 14.2s (stress 60s under the host's load of other runs, task 1524)
+[[test]]
+name = "runtime_replan_park::a_park_resumed_after_another_took_the_run_over_stops_none_of_its_sessions"
+reason = "B 境界（三つの supervisor の配線・SQLite の lease・wrapper の process）: 保留の途中で止まった supervisor の lease を別の supervisor が引き継いで保留と継続の resume を済ませた後、戻った supervisor が lease と操作の位置を確かめて新しい session を止めも close もしないことを、test が supervisor を止める点と実際の wrapper で確かめる。所有の判断は lease_for_park の SQLite の transaction"
+task = 1524
+
+# 11.0s to 12.8s (stress 60s under the host's load of other runs, task 1524)
+[[test]]
+name = "runtime_replan_park::an_answer_whose_send_meets_the_fence_is_delivered_after_the_continuation"
+reason = "B 境界（supervisor の配線・wrapper の turns/・SQLite の ask）: 回答の配送が guard を見た後に立った柵で拒まれても ask_delivery_failed を記録せず ask を開いたまま残し、継続の resume の session の見張りが一度だけ届けて着地することを、test が supervisor を止める点と実際の wrapper で確かめる"
+task = 1524
+
+# 17.5s (stress 60s under the host's load of other runs, task 1524)
+[[test]]
+name = "runtime_replan_park::an_answer_a_park_carried_stays_owed_when_the_continuation_is_parked_before_its_turn"
+reason = "B 境界（supervisor の四度の起動・wrapper の turns/・SQLite の event）: 保留が引き継いだ回答が、継続の resume が前の依頼を捨てた後その最初の turn の前にもう一度保留されても次の保留に残り、二度目の継続の session が受け取って着地することを、test が supervisor を止める点と実際の wrapper で確かめる。未消費の判断は domain::run::history の unit test"
+task = 1524
+
+# 7.9s (stress 60s under the host's load of other runs, task 1524)
+[[test]]
+name = "review_subagents::a_review_whose_agent_waits_for_its_provider_is_parked_without_starting_it"
+reason = "B 境界（supervisor の配線・review の job・stub の Codex・SQLite の provider の hold）: provider を待つ agent の job が柵の後に始まらず、走った job の終わりだけを回収して review を保留し run を保留することを、実際の review の job と Codex の hold で確かめる。保留の段の判断は domain::task_replan の unit test"
+task = 1524
+
+# 6.3s (stress 60s under the host's load of other runs, task 1524)
+[[test]]
+name = "review_programs::a_program_that_ends_past_the_fence_starts_no_next_program_nor_the_agents"
+reason = "B 境界（supervisor の配線・program の job の process・SQLite）: 柵の後に終わった program の終わりだけを記録し、次の program も agent の review も始めずに review を保留して run を保留することを、実際の program の script と supervisor の thread で確かめる"
+task = 1524
+
+# 1.7s to 5.2s (stress 60s under the host's load of other runs, task 1524)
+[[test]]
+name = "runtime_already_satisfied::a_claim_whose_verification_runs_at_the_fence_is_parked_without_its_ask"
+reason = "B 境界（supervisor の配線・検証の command・SQLite・Git）: already_satisfied の主張の検証が走るあいだに柵を越えた run が検証の終わりを待ってその結果で approve_close を開かず、snapshot を保存して slot を返すことを、実際の検証の command と supervisor の thread で確かめる。保留の段の判断は domain::task_replan の unit test"
+task = 1524
+
+# 2.1s to 5.7s (stress 60s under the host's load of other runs, task 1524)
+[[test]]
+name = "runtime_already_satisfied::a_claim_waiting_for_its_close_answer_is_parked_and_the_answer_does_not_close_it"
+reason = "B 境界（supervisor の配線・ask・SQLite の transaction）: close の答えを待って lease の無い validating の run が保留され、柵の後の close の答えで task を閉じず、ask を保留の transaction で閉じ、close の transaction も拒むことを、実際の supervisor の経路と SQLite で確かめる。保留の段の判断は domain::task_replan の unit test"
+task = 1524
+
+# 6.2s to 6.9s (stress 60s under the host's load of other runs, task 1524, which moved only its Codex helpers' path)
+[[test]]
+name = "recovery_codex::a_no_claude_live_run_with_codex_held_asks_a_person_and_starts_no_recovery_job"
+reason = "B 境界（守る境界）: supervisor wiring and process: a live stub codex run's stalled alert comes while Codex is held in SQLite under --no-claude, no recovery job starts on either provider and the stalled ask tells a person why (the provider choice is a unit test in domain::provider_switch)"
+task = 1524
 
 # 9.317s (stress max), class B
 [[test]]

@@ -31,6 +31,9 @@ pub const AGENT_EVALS_DIR_NAME: &str = "agent-evals";
 /// The directory beside the database where the program reviews of the
 /// runs' reviews keep the scripts they run ([`review_programs_dir`]).
 pub const REVIEW_PROGRAMS_DIR_NAME: &str = "review-programs";
+/// The directory beside the database where the snapshots of the runs
+/// parked for a replanning are kept ([`replans_dir`]).
+pub const REPLANS_DIR_NAME: &str = "replans";
 /// Process logs (`<process>-<YYYYMMDDTHHMMSSZ>-<pid>.jsonl`, see
 /// [`super::telemetry`]), `launchd.log` and `rebind.jsonl`.
 pub const LOGS_DIR_NAME: &str = "logs";
@@ -239,6 +242,13 @@ pub fn review_programs_dir(db: &Path) -> PathBuf {
     QueueLocation::explicit(db)
         .queue_dir
         .join(REVIEW_PROGRAMS_DIR_NAME)
+}
+
+/// `replans/` next to the database: the snapshot of each run parked for a
+/// replanning (ADR-t1521-2 decision 2), outside what the run's worker can
+/// write.
+pub fn replans_dir(db: &Path) -> PathBuf {
+    QueueLocation::explicit(db).queue_dir.join(REPLANS_DIR_NAME)
 }
 
 /// The canonical form of `path` when it exists, else of its nearest existing

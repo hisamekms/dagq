@@ -1,6 +1,8 @@
 //! A worker's run directory is not a way out of its sandbox (task 1184).
 use crate::common;
-use crate::runtime_codex::{FINISH, TASK, codex_fixture, detail, finished, supervise_thread};
+use crate::runtime_support::codex::{
+    FINISH, TASK, codex_fixture, detail, finished, supervise_thread,
+};
 use crate::runtime_support::*;
 
 /// Check real supervisor passes while the live worker leaves unreadable

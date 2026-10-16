@@ -725,6 +725,12 @@ impl SessionWatch {
         if answers.is_empty() {
             return Ok(None);
         }
+        // Not while a replanning guards the task (ADR-t1521-2): its fence
+        // refuses the turn, which would be no failure of the delivery; the
+        // answer stays open for the session the continuation resumes.
+        if sv.queue.replan_guard(run.task_id())?.is_some() {
+            return Ok(None);
+        }
         let events = sv.queue.run_events(run.id())?;
         let failed = RunHistory::from_events(&events).failed_deliveries();
         answers.retain(|ask| !failed.contains(&ask.id));
@@ -751,9 +757,10 @@ impl SessionWatch {
                 continue;
             }
             let text = answer_text(run, ask.id, ask.answer.as_deref().unwrap_or_default());
-            let what = format!("answer of ask {}", ask.id);
+            let what = crate::domain::turn::answer_what(ask.id);
             let sent_at = sv.files.now();
             let workspace = self.workspace.clone();
+            sv.pause_at(super::PausePoint::AnswerSend, run.id());
             match submit(sv, run, &workspace, Input::from(&text), &what) {
                 // Sent: failing to record it must not cost the live run its
                 // lease, so it is only noted (the ask then shows unclosed).
@@ -769,6 +776,16 @@ impl SessionWatch {
                             warn!(ask_id = %ask.id, run_id = %run.id(), error = %format_args!("{error:#}"), "answer of ask {} was sent to run {} but could not be recorded: {error:#}", ask.id, run.id())
                         }
                     }
+                }
+                // A replanning's fence that came after the check above: the
+                // delivery waits for the session the operation's end
+                // resumes, and is no failure that would keep it from it.
+                Err(error)
+                    if error
+                        .chain()
+                        .any(|cause| cause.is::<super::headless::TurnFenced>()) =>
+                {
+                    info!(ask_id = %ask.id, run_id = %run.id(), "answer of ask {} waits: {error:#}", ask.id);
                 }
                 Err(error) => {
                     sv.queue.record_runtime_event(

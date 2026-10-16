@@ -30,14 +30,49 @@ Claude/Codexで同じ状態機械を使う。
 - 保留の判定（`check_step`）は、操作が保留の柵より後の状態にある間、claimと候補・resume・復旧の回・revise・`ready`・`edit`・`cancel`・依存の変更・着地を、どのroleにも拒む。
   各経路はその工程のtransactionの中で同じ行を読む。
 - 古いruntimeを止める柵: 済み（非互換のschema。floorが再計画の表を読まないバイナリを拒む）。
-- 未実装: 診断・保留と書き手の停止・snapshot・plannerのprompt・置換の適用・goal closeの判定。
-  今はruntimeのどの経路も操作を進めないので、記録した操作は`candidate`のままで、runを止めない。
+- 保留とsnapshot・復元: 済み（`src/application/supervise/replan_park.rs`、`src/domain/replan_snapshot.rs`）。
+  柵の後はturnを送らず（送信が拒む）、wrapperも次の依頼を取らずturnの間で終わる（`turn_withheld`）。
+  走っているjobは有界な終了を待ち、そのverdictと柵の後の受理（`replan_result_withheld`）でrevise・ask・着地を始めない。
+  wrapperは各turnの開始の前（最初のturnと新sessionでのやり直しを含む）にも柵を見る。
+  柵を読めないあいだはturnを始めず（柵の前の依頼も取らない）、`turn_withheld`に読めない理由を残して待つ。
+  turnの上限と猶予を過ぎた書き手は、runが記録したhandleとturnだけを止める。
+  その後もturnがprocess groupの外に残したprocessがworktreeで猶予を過ぎて動いていれば、保存せず`blocked`にする。
+  snapshotは`replans/`の作業dirで作り、manifestと読み戻しで照合してrenameで確定し、headを`refs/dagq/replans/<操作>`で固定する。
+  snapshotはrun dirのlogとturns/の依頼・turnの出力も全体を保存し、linkや特殊なfileは辿らずmanifestに名を残す。
+  1つのfileか全体の上限を超えるものは切らずに保存の失敗（`blocked`）とする。
+  `parked`とsnapshotの参照、runの`needs_session`（`replan_parked`）とleaseの返却は一つのtransactionで確定する。
+  slotを持たないrun（人の答え・resume・triageを待つrun）も同じく`needs_session`にし、開いた`approve_landing`のaskを同じtransactionで閉じるので、前の承認やreceiptで復元を飛ばして進まない。
+  保留より前の着地の承認（`integration_approved`）とreviewのpassは、継続の後の成果の着地の根拠にしない（新しいvalidationとreviewを通す）。
+  保存の失敗は`blocked`で、worktreeに手を付けずslotは返す。
+  保留も一つのsupervisorが止めるところから確定まで持つ。
+  slotを持たないrunはその前にleaseを取り（ほかのsupervisorが持つ間と、保留が確定した後は取れない）、sessionを止めるか閉じる前ごと、headの固定とsnapshotの確定の前に、leaseと操作の位置が変わっていないことを確かめる。
+  そのため、止まっている間に引き継がれたsupervisorは、戻っても新しいsessionを止めない。
+  柵が来た時にturnが走らせていなかった回答の依頼（待っていたもの、wrapperが取った直後に柵に会ったもの、resumeしたthreadが無く何も走らなかったturnのもの）は`replan_parked`に残し、継続のresumeの依頼に載せる。
+  保留の後にその依頼を走らせたturnがあるまで回答は未消費で、その前にもう一度保留されたときは前の保留の回答を次の保留にも残す。
+  reviewの走っているjobとprogramは終わりを待つが、待っているjob（同時の上限・providerの待ち・もう一度の実行）と次のprogram・agentのreviewは柵の後に始めず、reviewを保留して（`replan_result_withheld`）runを保留する。
+  reviewを始める側（validationの後、adopt、exec引き継ぎの後の組み直し）も、保護のあいだはprogramもjobも始めず、reviewを待たせたまま保留に渡す。
+  継続のresumeの依頼に載せる回答は依頼の中の上限までで、超えた分も含めた全体を`resume-<回>-answers.txt`に書き、依頼がそのfileを名指す。
+  保護のあいだ柵に拒まれた回答の配送は失敗とせず、askを開いたまま残して、継続のresumeのsessionが届ける。
+  `already_satisfied`の主張のrunも同じく保留する。
+  走っている検証は終わりを待つが、その結果では`approve_close`を開かずtaskも閉じない（`replan_result_withheld`）。
+  答えを待って休むrunも保留し、開いた`approve_close`を同じtransactionで閉じる。
+  closeと再検証のleaseのtransactionは保護のあいだ拒む。
+  各段は永続の状態から再開する（再起動・adopt・exec引き継ぎ）。
+  untrackedは実行権限も保存・復元・照合する。
+  保護のあいだはresumeを使い切ったrunも`failed`にせず、復旧jobにも継承retryにも渡さない。
+  継続・撤回で閉じた操作のrunは、resumeの前（使い切ったrunは復旧jobか継承retryに渡す前）にworktreeをsnapshotと照合し、無ければ作り直す（`replan_restored`）。
+  作り直しは隣のscratch worktreeで組み立て（差分はgitの標準入力へ渡す）、snapshotと照合してから元のpathへ移し、途中で止まったscratchは次の試みが捨ててやり直す。
+  作り直しはmanifestが記録したheadから始め、固定したrefは到達を保つだけにする。
+  復元は一つのsupervisorが始めから結果の記録まで持つ。
+  runのleaseを取ってから始め、scratchやworktreeを変える前ごとにleaseがまだ自分のものかを確かめ、結果はleaseと操作の世代が変わっていないときだけ記録してleaseを返す。
+  leaseを失ったsupervisorはscratchも操作も変えない。
+  manifestが名指すpath（各fileの名前とuntrackedの元のpath）は、空・絶対・`.`・`..`を含まない相対pathであることを確かめてからjoinし、外れたmanifestはsnapshotのfileにもworktreeにも触れずに復元の失敗とする。
+  照合か復元の失敗（食い違うworktreeは上書きしない）は`replan_restore_failed`を記録し、操作を`blocked`に戻す（下の「復元や起動の失敗はblockedのまま」）。
+  resumeは始まらず、`replans`の`problems`に出る。
+  `replan_parked`はresumeの区分・統計・`resolved_head`で一つのparkとして読む。
+  containerのcloneのrunは未対応で`blocked`になる。
+- 未実装: 診断（`pause_requested`へ進める判断）・plannerのprompt・置換の適用・goal closeの判定。
   適用（`applying`・`applied`）へはどの経路も動かせない。
-- 保留の正式な経路（runのslotを返して保留する）が無いあいだの、保護中のrunの暫定の扱い:
-  reviewの`revise`は送らず、`revise_withheld`を記録してverdictを着地の`approve_landing`のaskに回す（runを誰も扱わないまま残さない）。
-  answerが何でも、着地は操作の結末まで始めない。
-  着地のslotに来たrunはslotを持ったままそこで待ち、承認の列と`integrate --next`は保護中のrunを飛ばして他のrunを着地させる。
-  保留を実装するtaskが、slotを返す保留に置き換える。
 
 ## 入口と診断
 

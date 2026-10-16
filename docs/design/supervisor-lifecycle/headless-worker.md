@@ -282,6 +282,13 @@ inboxは対象外。
   handleを記録したplannerも同じものを出す。
 - **評価**: 切り替えの前後の比較は、workspaceに戻すかの判断でなく、backgroundの経路の退行（残ったprocess・startup・起動の失敗・識別の誤り）の確認として読む（ADR-t1433-3決定5、[zero-based-headless-readiness](../../plans/zero-based-headless-readiness.md)）。
 
+## 再計画の保留
+
+保留の柵（`pause_requested`）を越えたrunには次のturnを送らず、wrapperもturnを始める前ごとに柵を見て終わる（`turn_withheld`）。
+柵の後のreceiptは受理せず、答え待ちのsessionも開き直さない。
+上限を過ぎた書き手は記録したhandleとturnだけを止める（route `replan`）。
+その後は[taskの再計画](../../plans/task-replanning.md#実装の状態)が持つ。
+
 ## 非対話のruntimeのplanner<a id="非対話のruntimeのplanner"></a>
 
 runtimeのplannerは経路の選択なしに非対話で立ち、この文書のturnの駆動をplannerのディレクトリで使う（[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)決定2、[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定3）。

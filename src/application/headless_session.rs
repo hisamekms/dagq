@@ -58,6 +58,31 @@ use crate::domain::{
     worker_model::WorkerSession,
 };
 
+/// What the wrapper of a run makes of the replanning guard of its task as
+/// it read it, before it starts a turn or takes a request (ADR-t1521-2
+/// decision 1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReplanFence {
+    /// No operation guards the task: the turn may start.
+    Clear,
+    /// An operation guards it: no turn starts and the session ends.
+    Fenced(crate::domain::task_replan::ReplanGuard),
+    /// The guard could not be read: no turn starts until it can be.
+    Unknown(String),
+}
+
+/// [`ReplanFence`] of the guard as read (`read`): only a guard read and
+/// found absent lets a turn start.
+fn replan_fence(
+    read: std::result::Result<Option<crate::domain::task_replan::ReplanGuard>, String>,
+) -> ReplanFence {
+    match read {
+        Ok(None) => ReplanFence::Clear,
+        Ok(Some(guard)) => ReplanFence::Fenced(guard),
+        Err(error) => ReplanFence::Unknown(error),
+    }
+}
+
 /// Unix milliseconds on `clock`: when the wrapper read the lines of a
 /// turn's output it reads next ([`TurnReader::stamp`]).
 fn now_millis(clock: &dyn Clock) -> i64 {
@@ -522,6 +547,12 @@ impl<'a> Turns<'a> {
                     }
                 },
             };
+            // Before every turn, the first and one run again as a new
+            // session included: none starts once a replanning guards the
+            // run's task (ADR-t1521-2 decision 1).
+            if self.replan_fenced(&run_dir) {
+                return Ok(0);
+            }
             // The supervisor moved the run to the other provider, or started
             // its worker over for a large context (ADR-t2080-1): this turn
             // is the first of a new session, in the same worktree.
@@ -645,6 +676,9 @@ impl<'a> Turns<'a> {
             if self.files.is_file(&exit_path(run_dir)) {
                 return Ok(None);
             }
+            if self.replan_fenced(run_dir) {
+                return Ok(None);
+            }
             let names: Vec<String> = self
                 .files
                 .read_dir(&turns_dir(run_dir))?
@@ -688,6 +722,84 @@ impl<'a> Turns<'a> {
             self.heartbeat();
             thread::sleep(self.provider.wait_interval());
         }
+    }
+
+    /// Whether a replanning operation guards the run's task (ADR-t1521-2
+    /// decision 1): the wrapper of a run starts no turn (the first, a
+    /// request, one run again as a new session) and takes no next request,
+    /// one the supervisor wrote before the operation's fence included, and
+    /// ends between turns, for the supervisor to save the run's work. The
+    /// requests it leaves are recorded once as `turn_withheld`. A planner's
+    /// wrapper is never fenced; a guard that cannot be read is warned of
+    /// and the wrapper goes on (the supervisor sends nothing meanwhile).
+    fn replan_fenced(&mut self, run_dir: &Path) -> bool {
+        let TurnOwner::Run(run) = &self.owner else {
+            return false;
+        };
+        let task = run.task_id();
+        let mut warned = false;
+        let guard = loop {
+            let read = self
+                .queue
+                .replan_guard(task)
+                .map_err(|error| format!("{error:#}"));
+            match replan_fence(read) {
+                ReplanFence::Clear => return false,
+                ReplanFence::Fenced(guard) => break guard,
+                // A guard that cannot be read starts no turn: the wrapper
+                // waits, heartbeating, until it can tell, or ends at the
+                // exit request.
+                ReplanFence::Unknown(error) => {
+                    if !warned {
+                        tracing::warn!(
+                            "the replanning guard of task {task} could not be read; no turn starts until it can: {error}"
+                        );
+                        let requests = self.pending_requests(run_dir);
+                        if let Err(error) = self.record(
+                            EventKind::TurnWithheld,
+                            json!({"guard_unreadable": error, "requests": requests}),
+                        ) {
+                            tracing::warn!("turn_withheld could not be recorded: {error:#}");
+                        }
+                        warned = true;
+                    }
+                    if self.files.is_file(&exit_path(run_dir)) {
+                        return true;
+                    }
+                    self.heartbeat();
+                    thread::sleep(self.provider.wait_interval());
+                }
+            }
+        };
+        let left = self.pending_requests(run_dir);
+        if let Err(error) = self.record(
+            EventKind::TurnWithheld,
+            json!({"operation_id": guard.operation, "status": guard.status, "requests": left}),
+        ) {
+            tracing::warn!("turn_withheld could not be recorded: {error:#}");
+        }
+        say(
+            self.background,
+            &format!(
+                "task {} is being replanned (operation {}); the session ends between turns",
+                guard.task, guard.operation
+            ),
+        );
+        true
+    }
+
+    /// The numbers of the requests in `run_dir`'s `turns/` not taken yet.
+    fn pending_requests(&self, run_dir: &Path) -> Vec<u64> {
+        self.files
+            .read_dir(&turns_dir(run_dir))
+            .map(|paths| {
+                let names: Vec<String> = paths
+                    .iter()
+                    .filter_map(|path| path.file_name()?.to_str().map(str::to_owned))
+                    .collect();
+                pending(names.iter().map(String::as_str))
+            })
+            .unwrap_or_default()
     }
 
     /// Write a planner's idle marker of the turn that met the provider's
@@ -1462,6 +1574,25 @@ mod tests {
             created_at: String::new(),
             actor: None,
         }
+    }
+
+    /// Only a guard read and found absent lets the wrapper start a turn:
+    /// one that guards the task ends the session, and one that cannot be
+    /// read starts nothing (an earlier request included) until it can.
+    #[test]
+    fn a_turn_starts_only_on_a_guard_read_and_found_absent() {
+        use crate::domain::task_replan::{ReplanGuard, ReplanStatus};
+        assert_eq!(replan_fence(Ok(None)), ReplanFence::Clear);
+        let guard = ReplanGuard {
+            task: crate::domain::TaskId::new(2),
+            operation: crate::domain::ReplanId::new(1),
+            status: ReplanStatus::PauseRequested,
+        };
+        assert_eq!(replan_fence(Ok(Some(guard))), ReplanFence::Fenced(guard));
+        assert_eq!(
+            replan_fence(Err("database is locked".into())),
+            ReplanFence::Unknown("database is locked".into())
+        );
     }
 
     /// A `session_renewed` (ADR-t2080-1) starts the next turn in a new

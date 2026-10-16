@@ -314,6 +314,12 @@ impl Supervisor<'_> {
         {
             return Ok(Step::Disowned);
         }
+        // A run waiting for a person whose task is being replanned is
+        // parked as well: its session lost to the replanning's fence is not
+        // opened again (ADR-t1521-2 decision 1).
+        if let Some(step) = self.park_step(slot)? {
+            return Ok(step);
+        }
         if !slot.waiting_now() {
             return Ok(Step::Continue);
         }

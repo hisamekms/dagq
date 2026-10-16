@@ -495,3 +495,205 @@ fn a_guarding_operation_refuses_the_ordinary_steps_and_the_claim() {
     set("replan_operations", "candidate", &id.as_i64());
     assert_eq!(queue.candidates().unwrap()[0].id(), a);
 }
+
+/// A run whose resumes are used up is not given up (failed for the
+/// recovery job, or retried with its branch) while a replanning guards its
+/// task, though the operation came after the supervisor read it: the
+/// check is the transaction's. With the operation set back to a candidate
+/// (by hand, for the check only), the guard alone held it.
+#[test]
+fn a_run_out_of_resumes_is_not_given_up_while_a_replanning_guards_it() {
+    let (_dir, db) = queue();
+    let (mut queue, _, _, run) = claimed(&db);
+    let conn = Connection::open(&db).unwrap();
+    conn.execute("DELETE FROM run_leases WHERE run_id=?1", [run.as_str()])
+        .unwrap();
+    conn.execute(
+        "UPDATE task_runs SET status='needs_session' WHERE id=?1",
+        [run.as_str()],
+    )
+    .unwrap();
+    for attempt in 1..=dagq::domain::MAX_RESUME_ATTEMPTS {
+        queue
+            .record_runtime_event(
+                &run,
+                dagq::domain::EventKind::ResumeStarted,
+                json!({"attempt": attempt}),
+            )
+            .unwrap();
+    }
+    let recorded = ok(&db, &args(&request(&run, "split it")));
+    let id = ReplanId::new(recorded["operation"]["id"].as_i64().unwrap());
+    park(&mut queue, id, 1, ReplanStatus::PauseRequested);
+    let exhaust = |queue: &mut SqliteQueue| {
+        queue
+            .exhaust_resumes(
+                &run,
+                &dagq::domain::resume::Exhaustion::Recover,
+                "used up",
+                dagq::domain::resume::ResumeConfig::default(),
+            )
+            .unwrap()
+    };
+    assert!(exhaust(&mut queue).is_none());
+    let kept = queue.run(&run).unwrap();
+    assert_eq!(kept.status(), dagq::domain::RunStatus::NeedsSession);
+    assert!(
+        queue
+            .run_events(&run)
+            .unwrap()
+            .iter()
+            .all(|event| event.kind != "recovery_requested")
+    );
+    conn.execute(
+        "UPDATE replan_operations SET status='candidate' WHERE id=?1",
+        [id.as_i64()],
+    )
+    .unwrap();
+    let failed = exhaust(&mut queue).expect("given up once nothing guards it");
+    assert_eq!(failed.status(), dagq::domain::RunStatus::Failed);
+}
+
+/// The restore of a parked run's work is one supervisor's from its start to
+/// its recorded result (ADR-t1521-2): the first to start it holds the run,
+/// and a second is turned away and records nothing, not even a failure that
+/// would block the operation. A holder whose lease went stale loses the run
+/// to a takeover, and its late result records nothing. A lease a holder
+/// could not give back is its own to take up again. The owner's failure
+/// blocks the operation and gives the run back; a result for an operation
+/// that moved meanwhile records nothing and gives it back as well; the
+/// owner's restore is recorded once, after which a start finds the work
+/// restored.
+#[test]
+fn two_supervisors_restore_a_parked_run_one_at_a_time_and_a_loser_writes_nothing() {
+    use dagq::domain::replan_snapshot::RestoreStart;
+    let (_dir, db) = queue();
+    let (mut queue, _, _, run) = claimed(&db);
+    let recorded = ok(&db, &args(&request(&run, "split it")));
+    let id = ReplanId::new(recorded["operation"]["id"].as_i64().unwrap());
+    let mut generation = park(&mut queue, id, 1, ReplanStatus::PauseRequested);
+    generation = park(&mut queue, id, generation, ReplanStatus::Quiescing);
+    generation = park(&mut queue, id, generation, ReplanStatus::Snapshotting);
+    let snapshot = format!("replan-{id}-g{generation}");
+    let moved = |queue: &mut SqliteQueue, from: i64, to: ReplanStatus, snapshot: Option<String>| {
+        queue
+            .move_replan(
+                id,
+                from,
+                &ReplanMove {
+                    to,
+                    reason: format!("the test moves it to {}", to.as_str()),
+                    snapshot_id: snapshot,
+                    diagnosis: None,
+                },
+            )
+            .unwrap()
+            .generation
+    };
+    generation = moved(&mut queue, generation, ReplanStatus::Parked, Some(snapshot));
+    generation = moved(
+        &mut queue,
+        generation,
+        ReplanStatus::ContinuingAfterPark,
+        None,
+    );
+    // Parked as the park leaves it: waiting for a session, nobody leasing.
+    let conn = Connection::open(&db).unwrap();
+    conn.execute("DELETE FROM run_leases WHERE run_id=?1", [run.as_str()])
+        .unwrap();
+    conn.execute(
+        "UPDATE task_runs SET status='needs_session' WHERE id=?1",
+        [run.as_str()],
+    )
+    .unwrap();
+    let (first, second) = (LeaseToken::new("first"), LeaseToken::new("second"));
+    let begin = |queue: &mut SqliteQueue, token: &LeaseToken, generation: i64| {
+        queue.begin_restore(&run, token, id, generation).unwrap()
+    };
+    let finish = |queue: &mut SqliteQueue,
+                  token: &LeaseToken,
+                  generation: i64,
+                  restored: Result<Value, String>| {
+        queue
+            .finish_restore(&run, token, id, generation, restored)
+            .unwrap()
+    };
+    let count = |queue: &SqliteQueue, kind: &str| {
+        queue
+            .run_events(&run)
+            .unwrap()
+            .iter()
+            .filter(|event| event.kind == kind)
+            .count()
+    };
+    let status = |queue: &SqliteQueue| queue.replan_operation(id).unwrap().status;
+    let holder = |queue: &SqliteQueue| {
+        queue
+            .run_lease(&run)
+            .unwrap()
+            .map(|lease| lease.token.as_str().to_owned())
+    };
+    let restored = || Ok(json!({"operation_id": id.as_i64(), "action": "intact"}));
+
+    assert_eq!(begin(&mut queue, &first, generation), RestoreStart::Owned);
+    assert_eq!(
+        begin(&mut queue, &second, generation),
+        RestoreStart::Elsewhere
+    );
+    // The one turned away cannot block the operation with a failure, nor
+    // give the first's lease back.
+    assert!(!finish(
+        &mut queue,
+        &second,
+        generation,
+        Err("changed".into())
+    ));
+    assert_eq!(status(&queue), ReplanStatus::ContinuingAfterPark);
+    assert_eq!(count(&queue, "replan_restore_failed"), 0);
+    assert_eq!(holder(&queue).as_deref(), Some("first"));
+    // A lease the first still holds is its own to take up again.
+    assert_eq!(begin(&mut queue, &first, generation), RestoreStart::Owned);
+
+    // The first stops heartbeating: the second takes the run over, and the
+    // first's late result records nothing and leaves the second's lease.
+    conn.execute(
+        "UPDATE run_leases SET heartbeat_at=0 WHERE run_id=?1",
+        [run.as_str()],
+    )
+    .unwrap();
+    assert_eq!(begin(&mut queue, &second, generation), RestoreStart::Owned);
+    assert!(!finish(&mut queue, &first, generation, restored()));
+    assert_eq!(count(&queue, "replan_restored"), 0);
+    assert_eq!(holder(&queue).as_deref(), Some("second"));
+
+    // The owner's failure blocks the operation and gives the run back.
+    assert!(finish(
+        &mut queue,
+        &second,
+        generation,
+        Err("changed".into())
+    ));
+    assert_eq!(status(&queue), ReplanStatus::Blocked);
+    assert_eq!(count(&queue, "replan_restore_failed"), 1);
+    assert_eq!(holder(&queue), None);
+
+    // A result for an operation that moved meanwhile records nothing and
+    // gives the run back as well.
+    generation = queue.replan_operation(id).unwrap().generation;
+    generation = moved(&mut queue, generation, ReplanStatus::Withdrawn, None);
+    assert_eq!(begin(&mut queue, &first, generation), RestoreStart::Owned);
+    let reopened = moved(&mut queue, generation, ReplanStatus::Blocked, None);
+    assert!(!finish(&mut queue, &first, generation, restored()));
+    assert_eq!(count(&queue, "replan_restored"), 0);
+    assert_eq!(holder(&queue), None);
+    generation = moved(&mut queue, reopened, ReplanStatus::Withdrawn, None);
+
+    // The owner's restore is recorded once; a start then finds it done.
+    assert_eq!(begin(&mut queue, &second, generation), RestoreStart::Owned);
+    assert!(finish(&mut queue, &second, generation, restored()));
+    assert_eq!(count(&queue, "replan_restored"), 1);
+    assert_eq!(holder(&queue), None);
+    assert_eq!(status(&queue), ReplanStatus::Withdrawn);
+    assert_eq!(begin(&mut queue, &first, generation), RestoreStart::Done);
+    assert_eq!(holder(&queue), None);
+}

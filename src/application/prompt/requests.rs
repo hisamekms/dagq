@@ -19,6 +19,17 @@ pub(crate) struct ResumeRequest {
     /// The tests that fail already on the landing branch's CI for the
     /// run's task (ADR-t1920-1 decision 5); `None` when there are none.
     pub known_failures: Option<KnownFailures>,
+    /// For a continuation after a replanning's park, the answers the
+    /// paused session had been sent but had not taken
+    /// ([`crate::domain::run::RunHistory::answers_to_carry`]), each the
+    /// text it was sent as; empty otherwise. They take at most
+    /// [`RESUME_ANSWERS_BYTES`] of the request.
+    pub carried_answers: Vec<String>,
+    /// The file in the run directory the caller writes the whole carried
+    /// answers to when the request cuts them (its `omitted` names
+    /// `answers`), which the request names as where the session reads them
+    /// all; `None` when there is none.
+    pub answers_file: Option<String>,
 }
 
 /// The bytes a resolution request (`resume_request`) takes at most, the
@@ -28,14 +39,22 @@ pub(crate) struct ResumeRequest {
 /// ([`WORKER_PATHS_BYTES`]) and verification commands
 /// ([`WORKER_VERIFY_BYTES`]) as in the worker's prompt, the section on
 /// landed tasks, bounded by its own [`LANDED_SECTION_BYTES`] and never cut
-/// here, and the notes of what was cut (the largest input of the unit
-/// test takes 30,288 bytes), with the language's room. Of the 581 resolution and conflict requests kept on
+/// here, a continuation's carried answers ([`RESUME_ANSWERS_BYTES`]), and
+/// the notes of what was cut (the largest input of the unit test takes
+/// 30,288 bytes without carried answers), with the language's room. Of the 581 resolution and conflict requests kept on
 /// the host on 2026-10-08, most of whose length was the landed tasks'
 /// summaries the section no longer carries, the reason took 272 bytes at
 /// the median, 1,070 at p90, 3,338 at p99 and 4,370 at most. The section
 /// on the tests that fail already on the landing branch's CI adds its own
 /// [`KNOWN_FAILURES_LIMIT`].
 pub const RESUME_REQUEST_LIMIT: usize = 36_000 + KNOWN_FAILURES_LIMIT;
+
+/// The bytes the answers a continuation after a replanning's park carries
+/// take of its resolution request ([`ResumeRequest::carried_answers`]):
+/// what [`RESUME_REQUEST_LIMIT`] leaves past its largest other input.
+/// Answers past it are cut, and the whole of them is in the request's
+/// `answers_file`, which the request names.
+pub const RESUME_ANSWERS_BYTES: usize = 4_000;
 
 /// The bytes of a resolution request's reason (a review's findings sent
 /// back, a triage's instruction, why integrate or the landing recheck
@@ -77,6 +96,11 @@ pub(crate) enum ResumeKind {
     /// (ADR-t1233-2 decision 3): fix the failed tests the reason names,
     /// and the run is validated, reviewed and its e2e run again.
     E2e,
+    /// The trusted runtime parked the run at a turn's end for a replanning
+    /// and saved its work (ADR-t1521-2); the operation ended in a
+    /// continuation or a withdrawal, so the run goes on under the same
+    /// conditions, its work as it was saved.
+    Replan,
 }
 
 /// The section of a resolution request on the tasks landed on `branch`
@@ -170,6 +194,23 @@ pub(crate) fn resume_request(
         &reason_read,
     );
     fit.section("reason", &reason);
+    let answers = if request.kind == ResumeKind::Replan && !request.carried_answers.is_empty() {
+        let answers_read = request.answers_file.as_ref().map_or_else(
+            || NOT_READABLE.to_owned(),
+            |file| format!("every answer is whole in {file}"),
+        );
+        let answers = fit.text(
+            "answers",
+            &request.carried_answers.join("\n"),
+            RESUME_ANSWERS_BYTES,
+            Keep::Start,
+            &answers_read,
+        );
+        fit.section("answers", &answers);
+        answers
+    } else {
+        String::new()
+    };
     let paths = if request.kind == ResumeKind::ScopeViolation {
         let paths = fit.required(
             "paths",
@@ -232,6 +273,11 @@ pub(crate) fn resume_request(
             run.id(),
             task.id()
         ),
+        ResumeKind::Replan => format!(
+            "dagq: run {} (task {}) was paused at the end of a turn while the runtime considered replanning its task, and its work was saved; the task stays as it was, so the run is needs_session and goes on here, and is validated, reviewed and landed as before.",
+            run.id(),
+            task.id()
+        ),
         ResumeKind::SessionGone => format!(
             "dagq: run {} (task {}) passed its review, but its session's workspace was gone before the run could land, and the run cannot land as it stands, so the run is needs_session and is validated and reviewed again after this session.",
             run.id(),
@@ -286,6 +332,19 @@ pub(crate) fn resume_request(
     } else if request.kind == ResumeKind::E2e {
         lines.push(format!(
             "1. Read the logs the reason names and fix the e2e tests that failed (each failed once more on its rerun by name) and commit; if {branch} moved, git rebase {} first. You may run a failed test by name to reproduce it, the way the repository's instructions (AGENTS.md or CLAUDE.md) say, but not the whole e2e: the runtime runs it again after the review.",
+            rebase_target(run, &request.main)
+        ));
+        lines.push(format!("2. {checks}"));
+    } else if request.kind == ResumeKind::Replan {
+        if !answers.is_empty() {
+            lines.push(
+                "The answers to your questions that reached this session as it was paused, which it had not taken yet, are these:"
+                    .to_owned(),
+            );
+            lines.push(answers);
+        }
+        lines.push(format!(
+            "1. Go on with the task where you left off: the commits, the staged and unstaged changes and the untracked files of this worktree are as they were when the run was paused. Commit the work; if {branch} moved, git rebase {} first.",
             rebase_target(run, &request.main)
         ));
         lines.push(format!("2. {checks}"));

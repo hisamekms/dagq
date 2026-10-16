@@ -644,7 +644,8 @@ pub fn for_role(role: Option<SessionRole>) -> bool {
 /// (ADR-t1521-2), oldest first, each with its task's status now, where it
 /// is and why (its last move's reason, else its request's), how many
 /// guard their task, and the ones whose task ended while they stayed
-/// open (`problems`), which only the runtime's outcome closes.
+/// open or that are `blocked` (`problems`), which only the runtime's
+/// outcome closes or moves on.
 pub fn replans(
     open: &[(
         crate::domain::task_replan::ReplanOperation,
@@ -670,7 +671,7 @@ pub fn replans(
             })
         })
         .collect();
-    let problems: Vec<Value> = open
+    let mut problems: Vec<Value> = open
         .iter()
         .filter(|(_, task_status)| *task_status != crate::domain::TaskStatus::InProgress)
         .map(|(op, task_status)| {
@@ -678,6 +679,16 @@ pub fn replans(
                    "problem": "task_not_in_progress"})
         })
         .collect();
+    // A blocked operation waits for whoever fixes the step it failed at.
+    problems.extend(
+        open.iter()
+            .filter(|(op, _)| op.status == crate::domain::task_replan::ReplanStatus::Blocked)
+            .map(|(op, _)| {
+                json!({"id": op.id, "task_id": op.task_id, "run_id": op.run_id,
+                       "problem": "blocked", "return_phase": op.return_phase,
+                       "reason": truncate_reason(op.status_reason.as_deref().unwrap_or(&op.reason))})
+            }),
+    );
     json!({
         "open": listed,
         "guarding": open.iter().filter(|(op, _)| op.status.guards()).count(),

@@ -185,54 +185,31 @@ impl SqliteQueue {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let op = read_operation(&tx, id)?;
-        task_replan::check_move(&op, generation, step)?;
-        let next = task_replan::generation_after(op.status, step.to, op.generation);
-        let return_phase = (step.to == ReplanStatus::Blocked).then_some(op.status);
-        let mut diagnosis = op.diagnosis.clone();
-        // A diagnosis keeps the evidence the request named.
-        if let Some(made) = &step.diagnosis {
-            let mut evidence = diagnosis.evidence.clone();
-            for id in &made.evidence {
-                if !evidence.contains(id) {
-                    evidence.push(*id);
-                }
-            }
-            diagnosis = task_replan::Diagnosis {
-                evidence,
-                ..made.clone()
-            };
-        }
-        tx.execute(
-            "UPDATE replan_operations SET status=?1, status_reason=?2, generation=?3,
-               return_phase=?4, snapshot_id=COALESCE(?5, snapshot_id), diagnosis=?6,
-               updated_at=?7, closed_at=?8
-             WHERE id=?9 AND generation=?10",
-            params![
-                step.to.as_str(),
-                step.reason,
-                next,
-                return_phase.map(ReplanStatus::as_str),
-                step.snapshot_id,
-                serde_json::to_string(&diagnosis)?,
-                now,
-                step.to.is_closed().then_some(now),
-                id,
-                generation,
-            ],
-        )?;
-        event(
-            &tx,
-            op.task_id,
-            Some(&op.run_id),
-            EventKind::ReplanStatusChanged,
-            json!({"operation_id": id, "from": op.status, "to": step.to,
-                   "reason": step.reason, "generation": next,
-                   "snapshot_id": step.snapshot_id}),
-        )?;
-        let moved = read_operation(&tx, id)?;
+        let moved = move_in(&tx, id, generation, step, now)?;
         tx.commit()?;
         Ok(moved)
+    }
+
+    /// The open operations whose run the trusted runtime parks now
+    /// ([`ReplanStatus::parks`]), oldest first.
+    pub fn parking_replans(&self) -> Result<Vec<ReplanOperation>> {
+        Ok(self
+            .replan_operations(false)?
+            .into_iter()
+            .filter(|op| op.status.parks())
+            .collect())
+    }
+
+    /// Every operation on run `run`, oldest first, with its outcome.
+    pub fn replans_of_run(&self, run: &RunId) -> Result<Vec<ReplanOperation>> {
+        let ops: Vec<ReplanOperation> = self
+            .conn
+            .prepare("SELECT * FROM replan_operations WHERE run_id=?1 ORDER BY id")?
+            .query_map([run], operation_row)?
+            .collect::<rusqlite::Result<_>>()?;
+        ops.into_iter()
+            .map(|op| with_outcome(&self.conn, op))
+            .collect()
     }
 
     /// The operation that guards `task` now, if any.
@@ -273,6 +250,82 @@ impl crate::application::commands::replans::ReplanStore for SqliteQueue {
     ) -> Result<ReplanOperation> {
         SqliteQueue::move_replan(self, id, generation, step)
     }
+}
+
+/// Move operation `id`, read under `generation`, as `step` says, on
+/// `conn` inside the caller's transaction ([`SqliteQueue::move_replan`]):
+/// `replan_status_changed` is written with it.
+pub(crate) fn move_in(
+    conn: &Connection,
+    id: ReplanId,
+    generation: i64,
+    step: &ReplanMove,
+    now: i64,
+) -> Result<ReplanOperation> {
+    let op = read_operation(conn, id)?;
+    task_replan::check_move(&op, generation, step)?;
+    // A closed operation reopened (a restore that failed) must stay the
+    // run's one open operation.
+    if op.status.is_closed() && !step.to.is_closed() {
+        let other: Option<ReplanId> = conn
+            .query_row(
+                "SELECT id FROM replan_operations WHERE run_id=?1 AND closed_at IS NULL AND id<>?2
+                 LIMIT 1",
+                params![op.run_id, id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(other) = other {
+            anyhow::bail!(
+                "replan operation {id} cannot be reopened: run {} has operation {other} open",
+                op.run_id
+            );
+        }
+    }
+    let next = task_replan::generation_after(op.status, step.to, op.generation);
+    let return_phase = (step.to == ReplanStatus::Blocked).then_some(op.status);
+    let mut diagnosis = op.diagnosis.clone();
+    // A diagnosis keeps the evidence the request named.
+    if let Some(made) = &step.diagnosis {
+        let mut evidence = diagnosis.evidence.clone();
+        for id in &made.evidence {
+            if !evidence.contains(id) {
+                evidence.push(*id);
+            }
+        }
+        diagnosis = task_replan::Diagnosis {
+            evidence,
+            ..made.clone()
+        };
+    }
+    conn.execute(
+        "UPDATE replan_operations SET status=?1, status_reason=?2, generation=?3,
+           return_phase=?4, snapshot_id=COALESCE(?5, snapshot_id), diagnosis=?6,
+           updated_at=?7, closed_at=?8
+         WHERE id=?9 AND generation=?10",
+        params![
+            step.to.as_str(),
+            step.reason,
+            next,
+            return_phase.map(ReplanStatus::as_str),
+            step.snapshot_id,
+            serde_json::to_string(&diagnosis)?,
+            now,
+            step.to.is_closed().then_some(now),
+            id,
+            generation,
+        ],
+    )?;
+    event(
+        conn,
+        op.task_id,
+        Some(&op.run_id),
+        EventKind::ReplanStatusChanged,
+        json!({"operation_id": id, "from": op.status, "to": step.to,
+               "reason": step.reason, "generation": next,
+               "snapshot_id": step.snapshot_id}),
+    )?;
+    read_operation(conn, id)
 }
 
 /// The operation that guards `task` now, read on `conn` (inside the
@@ -419,7 +472,7 @@ fn record_request(
     Ok(id)
 }
 
-fn read_operation(conn: &Connection, id: ReplanId) -> Result<ReplanOperation> {
+pub(super) fn read_operation(conn: &Connection, id: ReplanId) -> Result<ReplanOperation> {
     let op = conn
         .query_row(
             "SELECT * FROM replan_operations WHERE id=?1",

@@ -38,7 +38,6 @@ use crate::domain::{
     ReasonCode, Receipt, ReceiptResult, RegisteredFollowUp, RunHistory, RunId, RunStatus, Task,
     TaskId, TaskRun,
     disk::{DiskConfig, gib},
-    event_kind,
     execution_class::missing_spike_result,
     heartbeat_stale,
     landing_branch::{
@@ -759,7 +758,7 @@ fn begin(
     // The call is the approval to land (ADR-0016 decision 5): a run it
     // parks as `needs_session` is landed by the supervisor once a resumed
     // session resolved it (ADR-0019 decision 1).
-    if !queue.has_run_event(run.id(), event_kind::INTEGRATION_APPROVED)? {
+    if !RunHistory::from_events(&queue.run_events(run.id())?).approved() {
         queue.record_runtime_event(
             run.id(),
             EventKind::IntegrationApproved,
@@ -3156,6 +3155,7 @@ fn resumes_left<Q: EventStore + ?Sized>(queue: &Q, id: &RunId) -> usize {
 mod tests {
     use super::*;
     use crate::application::memory_files::MemoryFiles;
+    use crate::domain::event_kind;
     use crate::domain::{
         EventFilter, EventId, Provider, RunEvent, RunRecord, TaskRecord, TaskStatus,
     };
