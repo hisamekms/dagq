@@ -2276,7 +2276,13 @@ impl Supervisor<'_> {
     /// [`ClaimStep::Stop`] when no further claim may start in this pass
     /// (no room, the claim spacing, the landing branch, a worker that could
     /// not be provisioned), [`ClaimStep::Next`] when only the candidates of
-    /// this priority ran out.
+    /// this priority ran out. When reading main fails and resolving the
+    /// landing branch there again does not resolve it, the claim is held and
+    /// logged at INFO as the tracing event
+    /// `claim_landing_branch_unresolved`: the mark of a hold by this recheck
+    /// in the middle of the pass, which `check_landing_branch` at the top of
+    /// the pass never logs, whether or not the top's cached stamp skipped
+    /// the resolve there.
     fn claim_tasks(
         &mut self,
         parallel: usize,

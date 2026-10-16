@@ -18,7 +18,9 @@ use serde_json::Value;
 use super::{RunEvent, Summary, median, payload_status};
 use crate::domain::event_kind;
 
-/// The phases, in the order a landing goes through them.
+/// The phases, in the order a landing goes through them, as `stats`'
+/// `land_phases` names them: the runtime's e2e on the host shows there as
+/// `e2e_wait` (waiting for another run's e2e) and `e2e` (its own).
 pub const PHASES: [&str; 11] = [
     // The session's exit and the hand-offs between phases (from
     // `validation_finished`, `review_finished`, a precheck that asks

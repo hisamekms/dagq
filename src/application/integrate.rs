@@ -2454,6 +2454,11 @@ impl Checked {
         json!(self.failed_tests.as_ref().map(|tests| &tests.names))
     }
 
+    /// `failed_tests_omitted` of `verification_command` and of
+    /// `verification_failed`'s `integration_deferred`: how many failed
+    /// tests were left out of `failed_tests` past
+    /// [`MAX_FAILED_TESTS`](verify_failure::MAX_FAILED_TESTS), null when
+    /// none were read.
     fn omitted_json(&self) -> Value {
         json!(self.failed_tests.as_ref().map(|tests| tests.omitted))
     }
@@ -2653,7 +2658,12 @@ fn verification_failed(
 /// The verdict on a verification command that failed on the host: `last`
 /// failed again when it retried `first`, or, with `first` `None`, failed on
 /// a full disk that is `short` of room to retry it (task 639). The run
-/// waits for a person, who lands it again once the host is fixed.
+/// waits for a person, who lands it again once the host is fixed. The
+/// `integration_held` payload names the retry's failure and log
+/// (`failure`, `log_path`), whether it retried (`retried`), the first
+/// failure and its log it retried (`first_failure`, `first_log_path`; null
+/// when it did not retry), and the free and needed room when the disk was
+/// short (`disk`).
 #[allow(clippy::too_many_arguments)]
 fn held(
     run: &TaskRun,

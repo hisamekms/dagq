@@ -416,13 +416,14 @@ pub(super) fn claim_spacing(
 
 /// What holds the claims now, as the supervisors recorded it, for
 /// `candidates`' `held` (ADR-t1992-1): `no_supervisor` while no registered
-/// supervisor is alive with a fresh heartbeat, then the latest record of
-/// each hold that is on (`claim_held` for the load, the disk or a queue
-/// hold, `run_env_program_missing`, `ci_watch_held`,
-/// `landing_branch_unresolved`) of a live
-/// supervisor or of none named, then each live
-/// supervisor's wait for its claim spacing. A hold no supervisor records
-/// is not shown, nor guessed at.
+/// supervisor is alive with a fresh heartbeat, then the queue's latest
+/// record of each hold that is on (`claim_held` for the load, the disk or
+/// a queue hold, `run_env_program_missing`) of a live supervisor or of
+/// none named, then each live supervisor's own holds (`ci_watch_held`,
+/// `landing_branch_unresolved`) by that supervisor's own latest record,
+/// however many the others recorded since, then each live supervisor's
+/// wait for its claim spacing. A hold no supervisor records is not shown,
+/// nor guessed at.
 pub fn claim_holds(
     queue: &(impl crate::application::RunLog + crate::application::SupervisorRegistry + ?Sized),
     control: &dyn ProcessControl,

@@ -99,7 +99,7 @@ targetの中身は、空き容量のための掃除だけがrecheckの走って�
   次のpassの`resume_candidates`（[`needs_session`](needs-session.md)）が、ふつうのresumeとして拾い、効く優先度の順で空いたslotを受ける。
   依頼文は`ResumeKind::Recheck`で、手順は着地の延期と同じrebaseと、commandの失敗ならrebase後にそのcommandを手元で流して直すこと。
 - **このsupervisorがslotに持つrun**: `landing_recheck_failed`をslotが持つ失敗として記録するだけにする。
-  そのrunが着地slotを待って取る直前に`park_held_by_recheck`が、最新の`landing_recheck_failed`がslotが持つ失敗で、確かめたmainとheadが今のmainとrunのcommitに一致するかを見て、一致すればleaseの無いrunと同じ遷移（このsupervisorのtoken）でleaseを手放して`needs_session`にし、同じ内容をparkした失敗としてもう1度記録する（`lease_released`の`reason`は`landing_recheck_failed`）。
+  そのrunが着地slotを待って取る直前に`park_held_by_recheck`が、最新の`landing_recheck_failed`がslotが持つ失敗で、確かめたmainとheadが今のmainとrunのcommitに一致するかを見て、一致すればleaseの無いrunと同じ遷移（このsupervisorのtoken）でleaseを手放して`needs_session`にし、同じ内容をparkした失敗としてもう1度記録する。
   mainがさらに動いていれば着地を試みる。
 - **きれいなrun**（ADR-t1311-1）: merge-treeが衝突せず、`[recheck] command`があればそれも通ったrunのうち、leaseが無いかこのsupervisorがslotに持つものに`landing_recheck_clean`を記録する（payloadは`recheck::clean_payload`）。
   statusは変えない。
@@ -109,9 +109,9 @@ targetの中身は、空き容量のための掃除だけがrecheckの走って�
   recheckの段落は`Landing recheck: `で始まる段落（空行で区切ったもの）で、置くときは前のものを全部除いてからquestionの末尾に置く（ADR-t1311-1以前のバイナリが積み重ねた段落も除く）。
   置き換えた結果が前のquestionと同じなら書き直さず、`ask_updated`も記録しない。
   askは閉じない。
-  - hostの失敗（`why: landing_recheck_failed`、`recheck::skipped_ask_note`）: hostがcommandにコードを判断させなかったので、runはresumeせず着地を待ち続けることを伝える。
-  - 失敗（`why: landing_recheck_failed`、`recheck::ask_note`）: 見つかったことと、答えを待たずにrunをresumeすること（`held`ならsessionが終わったときに着地の代わりにresumeへparkすること）を伝える。
-  - きれい（`why: landing_recheck_clean`、`recheck::clean_ask_note`）: 確かめたmainの短いcommitでrunがまだきれいに着地することと、commandを流したかを伝える。
+  - hostの失敗（`recheck::skipped_ask_note`）: hostがcommandにコードを判断させなかったので、runはresumeせず着地を待ち続けることを伝える。
+  - 失敗（`recheck::ask_note`）: 見つかったことと、答えを待たずにrunをresumeすること（`held`ならsessionが終わったときに着地の代わりにresumeへparkすること）を伝える。
+  - きれい（`recheck::clean_ask_note`）: 確かめたmainの短いcommitでrunがまだきれいに着地することと、commandを流したかを伝える。
 - **resumeの後**: resumeが解決して`validating`を通ったrunに閉じていない`approve_landing`のaskがあれば、reviewをやり直さず、sessionに終了を依頼し（`turns/exit`）、wrapperが終わったことを確かめて残りをhandleで止め（`stop_run_session`。ADR-t1433-3より前にworkspaceで開いたsessionのIDは閉じずに人に任せる）、leaseを手放して`awaiting_integration`で答えを待つ。
   答えは`apply_landing_answers`が適用する。
   `integration_approved`のあるrunはreviewを経ずに着地へ進む。

@@ -259,6 +259,8 @@ pub const MAX_FAILED_TESTS: usize = 20;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FailedTests {
     pub names: Vec<String>,
+    /// How many more failed tests there were past [`MAX_FAILED_TESTS`],
+    /// whose names were left out (`failed_tests_omitted`).
     pub omitted: usize,
 }
 

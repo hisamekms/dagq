@@ -140,7 +140,7 @@ run directoryの検証logの一覧も`RunFiles::read_dir`越しで、application
 - やり直しが通れば次のコマンドへ進み、全部通れば着地する
 - やり直しがコードの分類で落ちたら、そのやり直しの結果で上と同じ`verification_failed`の`needs_session`にする（`last_error`はやり直しのlogを指す）
 - やり直しもhostの分類で落ちたら（と`disk_full`で容量が足りないとき）、runをresumeせずに`awaiting_integration`に戻す（`hold_integration`）。
-  `integration_held`イベント（code `verification_environment`。やり直しと最初の失敗とそのlog、容量不足ならその値を持つ）と`lease_released`を記録してleaseとslotを返す。
+  `integration_held`イベント（code `verification_environment`）と`lease_released`を記録してleaseとslotを返す。
   `last_error`はhostで落ちたコマンドとlogとhostを直す手がかりを示し、`dagq integrate <task>`で着地させるよう書き、sessionをresumeしないことを書く。
   `needs_session`にしないのでresumeの回数（`resume_started`）は使わない
 - holdしたrunはleaseの無い`awaiting_integration`なので、inboxのattentionに1件出る（`domain::run_attention`）。

@@ -705,7 +705,8 @@ enum Command {
     /// `max_investigations` shows `investigation_limit` once the Spike limit lets Spikes go.
     /// Does not claim.
     Candidates {
-        /// Keep the deferred tasks in `candidates`: the claim rule's order alone.
+        /// Keep the deferred tasks in `candidates`: the claim rule's order alone, with no class
+        /// aging applied.
         #[arg(long)]
         ignore_deferrals: bool,
     },

@@ -7,8 +7,8 @@
 //! `--max-load` a few minutes later.
 
 /// The default of `claim_spacing`, in seconds: the load of a claimed run's
-/// build shows in the 1-minute load average about 2 minutes after its claim
-/// (finding 36; the records are in the claim hold's design).
+/// build shows in the 1-minute load average about 2 minutes after its claim,
+/// plus a 1-minute margin (finding 36; the records are in ADR-t1479-1).
 pub const DEFAULT_CLAIM_SPACING_SECS: usize = 180;
 
 /// The spacing in effect: `spacing_secs` while the load hold is on, none

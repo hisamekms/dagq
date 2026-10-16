@@ -448,8 +448,9 @@ pub trait AskStore {
     fn end_stalled_detections(&mut self, run_id: &RunId, answer: &str) -> Result<Vec<Ask>>;
     /// Make `note` the landing recheck's one paragraph of the question of
     /// every ask of the run nobody closed, replacing its earlier ones and
-    /// recording `ask_updated` with `why`; an ask left as it was is not
-    /// written. The asks noted.
+    /// recording `ask_updated` with `why` (`landing_recheck_failed` for a
+    /// failure or a host failure, `landing_recheck_clean` for a clean
+    /// finding); an ask left as it was is not written. The asks noted.
     fn note_on_asks(&mut self, run_id: &RunId, note: &str, why: &str) -> Result<Vec<Ask>>;
     /// Close the run's `approve_landing` asks nobody closed, with `answer`.
     fn close_approve_landing_asks(&mut self, run_id: &RunId, answer: &str) -> Result<Vec<Ask>>;

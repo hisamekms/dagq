@@ -167,7 +167,6 @@ Spikeは実装とworkerの総枠（`parallel`）を共有し、枠を予約し�
   supervisorのlogにwarnで出る。
   hotspotの控えは重なったhotspotと進行中のrunと上限を持つ（欄は`domain::claim_defer::decide`のdoc comment）。
   workerを動かせないtaskの`claim_deferred`は、控えの始まりと理由が変わったときに書き、その理由と経路のworkerを持つ（欄は`domain::claim_defer::worker_deferred`のdoc comment）。
-  `provider_fallback_off`の`message`は、頼んだproviderが今使えず`[provider_fallback] workers`がfalseなのでもう一方のproviderで始めず、そのproviderが使えるようになるまでclaimしないと言う。
   buildを待つtaskの`claim_deferred`は、そのsupervisorのbuildと、それが含まない依存先の着地を持つ（欄は`domain::build_wait::deferred`のdoc comment）。
   Spikeの上限と軽い枠の`claim_deferred`は上の節（[実行区分の上限とaging](#実行区分の上限とaging)）
 - `claim_deferral_ended`（taskのevent）: 控えの終わりで、どう終わったかを持つ（欄は`domain::claim_defer`のdoc comment）。
@@ -186,8 +185,8 @@ Spikeは実装とworkerの総枠（`parallel`）を共有し、枠を予約し�
   CLIは控えを判定し直さず（`decide`・hotspotの計算・providerの経路を走らせない）、記録を閉じたり足したりもしない。
   残りはsupervisorと同じ`claim_order::arrange`に、開いている控え（Spikeの上限のものを含む）を除外の集合として渡してagingを当て（上限は判定しない）、前に出たtaskを示す。
   閾値の選び方は`claim_view::class_aging_secs`が持つ。
-  先頭はgoalで絞ってもqueue全体の候補で決め、`--ignore-deferrals`は規則の順でagingを当てない。
-  `held`はclaimを止める条件を順に混ぜずに出す（`application::health::claim_holds`）: 生きたsupervisorが居なければ`no_supervisor`、生きたsupervisor（か名の無いもの）の最新の記録が保留を示す`claim_held`・`run_env_program_missing`、生きたsupervisorごとに自分の最新の記録が保留を示す`ci_watch_held`・`landing_branch_unresolved`、待っているclaim spacing。
+  先頭はgoalで絞ってもqueue全体の候補で決める。
+  `held`はclaimを止める条件を順に混ぜずに出す（`application::health::claim_holds`）。
   CLIはこれらの条件も判定し直さず、supervisorが記録しない条件は出さない。
   控えが閉じるのはsupervisorが次に判定したときだけで、`fill_slots`はslotが無いpassとclaimを止めているpass（両方のproviderが使えないpassを除く）では判定せず、hotspotの入力もcacheするので、その間は前の判定の控えが開いたまま出る（遅れの上限は無い）。
 - `stats`: windowの中で始まった控えの数と秒、終わり方ごと・hotspotごとの内訳、今の控えを出す（`domain::claim_defer::ClaimDeferrals`）。

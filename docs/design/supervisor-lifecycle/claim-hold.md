@@ -69,7 +69,6 @@ loadの保留が有効なsupervisorは、新しいclaimの間を空ける（[ADR
   このときは1つのpassで空いたslotを埋める。
   e2eはすべての`supervise`に`--max-load 0`を渡すので、間隔は効かない。
 - **設定**: `dagq.toml`の`[supervisor] claim_spacing`（書式・既定・読み直しは[Run environment](run-environment.md)の`[supervisor]`）。
-- **既定の根拠**: claimしたrunのbuildはclaimから約2分でload1に出るので、それに1分の余裕を足した（記録は[ADR-t1479-1](../../adr/2026-10-04-t1479-1-space-new-claims-while-the-load-hold-is-on.md)）。
 - **記録**: 間隔のための待ちは`claim_held` / `claim_resumed`にしない（observerと`stats`の控えの数え方に混ぜない）。
   待ち始めたときにlogにinfo（`claim_spaced`）を出す。
   `run_claimed`に載る間隔と待った時間は`domain::measure::ClaimAttributes`のdoc commentが持つ。

@@ -141,8 +141,9 @@ pub struct DiskNeeds {
 /// taken over the runs apart, not per run: a run whose task goes on
 /// records its build outputs, and its scratchpad only once the task is
 /// over (a landed run's build goes with its whole worktree), so the two
-/// seldom fall on the same run. `None` without either; events of other
-/// kinds or without `bytes` are left out.
+/// seldom fall on the same run. A `build_outputs_removed` counts whatever
+/// its `reason`, of an unfinished run too. `None` without either; events
+/// of other kinds or without `bytes` are left out.
 pub fn run_size(events: &[RunEvent]) -> Option<u64> {
     let mut largest: [Option<u64>; RUN_SIZE_EVENTS.len()] = [None; RUN_SIZE_EVENTS.len()];
     for event in events {

@@ -120,7 +120,10 @@ pub const PROVIDER_UNAVAILABLE: &str = "provider_unavailable";
 pub const MODE_UNAVAILABLE: &str = "mode_unavailable";
 /// Why a candidate's claim is deferred when its provider cannot be used
 /// and `[provider_fallback] workers` is off, so it does not start on the
-/// other one (ADR-t1857-1): it waits for its provider's hold to end.
+/// other one (ADR-t1857-1): it waits for its provider's hold to end. The
+/// `claim_deferred`'s `message` says so: the provider asked for cannot be
+/// used now and `[provider_fallback] workers` is false, so the claim does
+/// not start on the other provider and waits until that one can be used.
 pub const FALLBACK_OFF: &str = "provider_fallback_off";
 
 /// Why `worker` cannot be claimed by a supervisor that runs `supported`:

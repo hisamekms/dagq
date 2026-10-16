@@ -118,10 +118,6 @@ branchの削除・そのbranchへのcommit・remoteのHEADの付け替え・`dag
 main checkoutの無いrepository（印を読めない）と、`Repository`の既定の実装（testのfake）は、毎passで解決する。
 変えないもの: 着地ごとに1度の解決、`fill_slots`のclaimでmainを読む操作が失敗したときの解決し直し（印に依らずその場で解決する）、`up`のpreflight、`doctor`、supervisorの起動時の解決。
 
-`fill_slots`のclaimのloopでmainを読む操作が失敗し、その場の解決し直しでも解決できずclaimを保留してloopを抜けるときは、tracingのINFO eventに`event = "claim_landing_branch_unresolved"`を記録する。
-これはpassの途中の再確認で保留した印で、先頭の`check_landing_branch`では出さない。
-先頭のstampのキャッシュで解決を省いたかどうかには依らない。
-
 ## 既存のqueueの互換
 
 `[repository]`の無い`dagq.toml`（とファイルの無いrepository）では、`origin`のHEADが`main`を指すか、`main`が在れば着地先は`main`、pushは`origin`へ行う。

@@ -28,7 +28,6 @@ supervisorはclaimの前と着地の検証の前に、queueのdirectory（run wo
 `domain::disk::DiskConfig::needs`が、直近のrunのビルドの大きさから決める。
 
 - 直近のrunの大きさ: 直近の`build_outputs_removed`・`scratchpad_removed`・`run_tmp_removed`のそれぞれの`bytes`の最大値の和（`domain::disk::run_size`）。
-  `build_outputs_removed`は終わっていないrunのものも`reason`を問わず数える。
   `$CLAUDE_CODE_TMPDIR`が別のファイルシステムでも区別しない。
   queueのdirのビルドのキャッシュ（`build_cache_removed`、下の「queueのdirのビルドのキャッシュ」）は数えない。
   見積もりは新しいrunと着地の検証がdiskに新しく書く量で、共有のキャッシュはrunごとに増えないため。

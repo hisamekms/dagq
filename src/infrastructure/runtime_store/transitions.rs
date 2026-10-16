@@ -547,7 +547,9 @@ impl SqliteQueue {
     /// `needs_session` with `reason` as `last_error`, recorded as
     /// `landing_recheck_failed` with `payload`, `action: resumed`, the
     /// status and the reason. With `token` the run must be leased to it,
-    /// and the lease goes; without one it must be leased to nobody.
+    /// and the lease goes, recorded first as `lease_released` with reason
+    /// `landing_recheck_failed` (a held run parked as its slot takes it);
+    /// without one it must be leased to nobody.
     /// `None`, and nothing written, when the run is not so (it moved on, or
     /// someone took it meanwhile).
     pub fn park_rechecked(
