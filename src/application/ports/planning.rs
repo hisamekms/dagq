@@ -246,7 +246,8 @@ pub enum PlannerAnswerRoute {
 /// where each came from, the planner of the runtime's opened for each, and
 /// the `planner_question` answers the supervisor types into a planner.
 pub trait DraftPlannerStore {
-    /// Register every still-unrecorded entry of one receipt atomically,
+    /// Register every still-unrecorded entry of one receipt, or of one
+    /// review's judgment, atomically,
     /// including skipped entries and their `follow_up_registered` events.
     /// Snapshot the source task's goal and state in the same transaction;
     /// callers cannot supply registration-time goal facts.
@@ -375,9 +376,13 @@ pub trait DraftPlannerStore {
     fn ask_delivery_failed(&self, ask: AskId, planner: PlannerId) -> Result<bool>;
 }
 
-/// One receipt entry prepared by integrate for atomic registration.
+/// One entry of a run prepared for atomic registration: a receipt's,
+/// which integrate prepares, or a review's `follow_ups`', which the
+/// supervisor prepares once it judged the review (ADR-t2352-1).
 pub struct FollowUpRegistration {
-    pub index: usize,
+    /// What makes it one of its run: an entry whose key is recorded
+    /// already for the run is not registered again.
+    pub key: crate::domain::FollowUpKey,
     pub entry: serde_json::Value,
     pub category: String,
     /// The worker's membership proposal as written, or null (ADR-t1504-2

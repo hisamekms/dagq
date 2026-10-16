@@ -103,6 +103,7 @@ mod related;
 mod request_planner;
 mod request_planner_spike;
 mod review_builtins;
+mod review_follow_ups;
 mod review_programs;
 mod review_subagents;
 mod run_container;

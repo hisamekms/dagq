@@ -1955,10 +1955,12 @@ fn every_worker_text_that_writes_a_receipt_checks_the_documents_once() {
     assert!(!review.contains("the documents you checked against the diff"));
 }
 
-/// Task 1429 (ADR-t1428-1 decision 5): the run's review reads the
+/// ADR-t1428-1 decision 5 as ADR-t2352-1 amends it: the run's review reads the
 /// documents on the changed behavior against the diff and the summary,
-/// once, before the acceptance; the verdict's JSON, the concern's
-/// recommendation and the reason codes stay as they were.
+/// once, before the acceptance, sending back only for a document the diff
+/// changes and a broken promise, and listing a stale document the diff did
+/// not touch in the verdict's follow_ups; the concern's recommendation and
+/// the reason codes stay as they were.
 #[test]
 fn the_review_prompt_checks_the_documents_and_keeps_its_verdict() {
     let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
@@ -1979,31 +1981,48 @@ fn the_review_prompt_checks_the_documents_and_keeps_its_verdict() {
         "A document's diff alone does not show the change is right",
         "check the summary's reason for leaving a document as it is",
         "whether or not the task named it",
-        "a changed flow, boundary, invariant or promise it misses",
-        // Both directions (ADR-t1942-2 decision 4): a missing name alone
-        // is not stale, and what the diff adds that copies the code or
-        // carries history is reported too.
+        // What goes in reasons and what in follow_ups (ADR-t2352-1).
+        "Report as docs_drift in reasons, whether or not the task named it, only a document the diff changes that disagrees with the diff, and a change of the diff that breaks an invariant, promise or boundary a document states.",
+        "A document the diff does not touch that is stale (before the diff, or on a flow, boundary, invariant or promise the diff changes) is no reason to send the run back: list it in follow_ups with its path, section and why, whatever the verdict.",
         "a name missing from a document alone is not stale",
-        "Also report text the diff adds to a document when that text copies the code (lists of fields, flags, defaults, function or test names)",
-        "or carries history (task numbers",
     ] {
-        assert!(REVIEW_DOCS_CHECK.contains(part), "{part}");
+        assert!(
+            REVIEW_DOCS_CHECK
+                .to_lowercase()
+                .contains(&part.to_lowercase()),
+            "{part}"
+        );
     }
-    for word in ["design", "concept", "docs/", "budget", "KiB", "byte"] {
+    // The project's rules judge what makes a document's text a defect
+    // (copies of the code, history), not the runtime (ADR-t2352-1).
+    for word in [
+        "design",
+        "concept",
+        "docs/",
+        "budget",
+        "KiB",
+        "byte",
+        "copies the code",
+        "history",
+        "task numbers",
+        "flags",
+        "defaults",
+    ] {
         assert!(!REVIEW_DOCS_CHECK.contains(word), "{word}");
     }
     assert!(
-        REVIEW_DOCS_CHECK.len() <= 690,
+        REVIEW_DOCS_CHECK.len() <= 830,
         "{}",
         REVIEW_DOCS_CHECK.len()
     );
     assert!(!REVIEW_DOCS_CHECK.contains("cargo") && !REVIEW_DOCS_CHECK.contains('`'));
-    // Unchanged: the verdict's shape, the concern's recommendation and
-    // the reason codes with their definitions.
+    // The verdict's shape with its follow_ups (ADR-t2352-1), the
+    // concern's recommendation and the reason codes with their
+    // definitions.
     assert!(review.contains(
             "Answer with one JSON object and nothing else, matching this schema:\n\
-             {\"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [{\"text\": string, \"codes\": [string]}], \"summary\": string, \"recommendation\": \"land\" | \"send_back\" | null, \"confidence\": \"high\" | \"low\" | null, \"reason_category\": \"scope\" | \"discard\" | null}\n\
-             reasons lists each finding (empty for pass); summary is one or two sentences; recommendation, confidence and reason_category are for a concern only (null for pass and revise).\n"
+             {\"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [{\"text\": string, \"codes\": [string]}], \"summary\": string, \"recommendation\": \"land\" | \"send_back\" | null, \"confidence\": \"high\" | \"low\" | null, \"reason_category\": \"scope\" | \"discard\" | null, \"follow_ups\": [{\"text\": string, \"path\": string, \"section\": string, \"codes\": [string]}]}\n\
+             reasons lists each finding (empty for pass); summary is one or two sentences; recommendation, confidence and reason_category are for a concern only (null for pass and revise); follow_ups lists the stale documents the diff does not touch (empty when none), for any verdict, and never decides it.\n"
         ));
     assert!(review.contains(&format!(
         "{CONCERN_RECOMMENDATION}{}Answer with one JSON object",
@@ -2424,6 +2443,69 @@ fn the_draft_planner_decides_what_it_can_recommend() {
     );
     // The runtime's prompts carry no rules of dagq's own repository.
     assert!(!prompt.contains("ADR"), "{prompt}");
+}
+
+/// A run's review's follow_up is a draft of the run's bundle like its
+/// receipt's (ADR-t2352-1): its planner reads which came from the review,
+/// a stale document the diff did not touch, and which from the receipt.
+#[test]
+fn a_reviews_follow_up_draft_s_planner_reads_it_came_from_the_review() {
+    let review = json!({"source_run_id": RUN, "source_task_id": 3, "from": "review",
+                        "path": "docs/a.md", "section": "s", "category": "docs_drift"});
+    let receipt = json!({"source_run_id": RUN, "source_task_id": 3, "index": 0});
+    let member = |id: i64, material: &Value| {
+        (
+            DraftTarget {
+                task: task(id, "follow", TaskStatus::Draft),
+                origin: DraftOrigin::FollowUp,
+                material: material.clone(),
+                planners: 0,
+                revisit: None,
+            },
+            1,
+        )
+    };
+    let prompt = |members: &[(DraftTarget, usize)]| {
+        let key = BundleKey::of(
+            DraftOrigin::FollowUp,
+            &members[0].0.material,
+            members[0].0.task.id(),
+        );
+        draft_planner_prompt(&DraftPlannerMaterial {
+            db: Path::new("/q/queue.db"),
+            key: &key,
+            members,
+            source: None,
+            receipt: None,
+            goals: &[],
+            answer: None,
+            handover: None,
+            revisits: &[],
+        })
+        .unwrap()
+        .text
+    };
+    let alone = prompt(&[member(9, &review)]);
+    assert!(
+        alone.contains(&format!("A review of run {RUN} of task 3 proposed it as a follow_up: a stale document its diff did not touch, which did not send the run back.\n")),
+        "{alone}"
+    );
+    assert!(
+        alone.contains(&format!(
+            "`--context` beginning with `follow-up draft (proposed by the review of run {RUN} of task 3)`"
+        )),
+        "{alone}"
+    );
+    let both = prompt(&[member(9, &review), member(10, &receipt)]);
+    assert!(
+        both.contains(&format!("The receipt and a review of run {RUN} of task 3 proposed them (task 9 is its review's follow_up on docs/a.md, task 10 is its follow_up 0) as a follow_up: a receipt's is work its worker found outside that task, a review's a stale document its diff did not touch.\n")),
+        "{both}"
+    );
+    let receipts = prompt(&[member(10, &receipt)]);
+    assert!(
+        receipts.contains(&format!("The receipt of run {RUN} of task 3 proposed it as a follow_up: work its worker found outside that task.\n")),
+        "{receipts}"
+    );
 }
 
 /// ADR-t1540-1: the planner opened for a draft whose revisit time came

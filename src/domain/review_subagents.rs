@@ -450,6 +450,11 @@ pub struct AgentResult {
     pub confidence: Option<AskConfidence>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason_category: Option<ConcernReason>,
+    /// The job's `follow_ups`, of the verdict's own form
+    /// ([`super::ReviewVerdict::follow_ups`]): they never change where the
+    /// agent's judgment sends the run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub follow_ups: Vec<super::follow_up::ReviewFollowUp>,
 }
 
 /// An agent's result as the job printed it; a field it does not know
@@ -471,6 +476,8 @@ pub(crate) struct PrintedAgentResult {
     confidence: Option<String>,
     #[serde(default)]
     reason_category: Option<String>,
+    #[serde(default)]
+    follow_ups: serde_json::Value,
 }
 
 impl From<PrintedAgentResult> for AgentResult {
@@ -493,6 +500,7 @@ impl From<PrintedAgentResult> for AgentResult {
             reason_category: concern
                 .then(|| concern::reason(printed.reason_category.as_deref()))
                 .flatten(),
+            follow_ups: super::follow_up::ReviewFollowUp::read_list(&printed.follow_ups),
         }
     }
 }

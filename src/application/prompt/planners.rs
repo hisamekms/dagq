@@ -907,9 +907,35 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
         });
     match origin {
         DraftOrigin::FollowUp => {
+            // A run's review reports a stale document its diff did not
+            // touch as a follow_up of its own (ADR-t2352-1).
+            let of_review = |m: &serde_json::Value| m["from"].as_str() == Some("review");
+            let reviewed = material
+                .members
+                .iter()
+                .filter(|(t, _)| of_review(&t.material))
+                .count();
+            let whence = if reviewed == 0 {
+                "The receipt of"
+            } else if reviewed == material.members.len() {
+                "A review of"
+            } else {
+                "The receipt and a review of"
+            };
+            let why = match (reviewed, material.members.len() - reviewed) {
+                (0, _) => "work its worker found outside that task",
+                (_, 0) => {
+                    "a stale document its diff did not touch, which did not send the run back"
+                }
+                _ => {
+                    "a receipt's is work its worker found outside that task, a review's a stale document its diff did not touch"
+                }
+            };
             out.push_str(&format!(
-                "The receipt of run {run} of task {source} proposed {what} as a follow_up: work its worker found outside that task.\n",
-                run = first.material["source_run_id"].as_str().unwrap_or("(unknown)"),
+                "{whence} run {run} of task {source} proposed {what} as a follow_up: {why}.\n",
+                run = first.material["source_run_id"]
+                    .as_str()
+                    .unwrap_or("(unknown)"),
                 source = first.material["source_task_id"],
                 what = if single {
                     "it".to_owned()
@@ -919,7 +945,19 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
                         material
                             .members
                             .iter()
-                            .map(|(t, _)| format!("task {} is its follow_up {}", t.task.id(), t.material["index"]))
+                            .map(|(t, _)| if of_review(&t.material) {
+                                format!(
+                                    "task {} is its review's follow_up on {}",
+                                    t.task.id(),
+                                    t.material["path"].as_str().unwrap_or("?")
+                                )
+                            } else {
+                                format!(
+                                    "task {} is its follow_up {}",
+                                    t.task.id(),
+                                    t.material["index"]
+                                )
+                            })
                             .collect::<Vec<_>>()
                             .join(", ")
                     )
@@ -1059,9 +1097,15 @@ pub fn draft_planner_prompt(material: &DraftPlannerMaterial<'_>) -> Result<Fitte
         first.material["source_run_id"].as_str().unwrap_or("?"),
         &first.material["source_task_id"],
     );
+    // A review's follow_up was not the receipt's (ADR-t2352-1).
+    let whence = if first.material["from"].as_str() == Some("review") {
+        "review"
+    } else {
+        "receipt"
+    };
     let adopt = match origin {
         DraftOrigin::FollowUp => format!(
-            "complete the draft with `dagq edit {t}` (acceptance, `--verify`, `--paths`, `--evidence`, and `--context` beginning with `follow-up draft (proposed by the receipt of run {run} of task {source})`),"
+            "complete the draft with `dagq edit {t}` (acceptance, `--verify`, `--paths`, `--evidence`, and `--context` beginning with `follow-up draft (proposed by the {whence} of run {run} of task {source})`),"
         ),
         DraftOrigin::GoalGap => format!(
             "complete the draft with `dagq edit {t}` (acceptance, `--verify`, `--paths`, `--evidence`, and `--context` beginning with `goal gap draft (proposed by the judgment of goal {goal_of_first})`),"

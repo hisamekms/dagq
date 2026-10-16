@@ -137,6 +137,149 @@ pub fn follow_up_membership_proposal(entry: &serde_json::Value) -> serde_json::V
         .unwrap_or(serde_json::Value::Null)
 }
 
+/// The category of every draft a run review's `follow_ups` make
+/// (ADR-t2352-1): a stale passage of a document the diff did not touch.
+pub const REVIEW_FOLLOW_UP_CATEGORY: &str = "docs_drift";
+
+/// One entry of a run review's `follow_ups` (ADR-t2352-1), the whole
+/// review's or an agent job's: a document the diff did not touch whose
+/// passage is stale, which the review reports instead of sending the run
+/// back for it. `text` says what is stale and why, like an item of the
+/// verdict's `reasons`; `path` is the document's path in the repository,
+/// `section` its heading (empty for the whole document) and `codes` the
+/// reason codes the job gave, kept for the record only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewFollowUp {
+    pub text: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub section: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub codes: Vec<String>,
+}
+
+/// What makes a review's follow_up one of its run: the document's path and
+/// section, trimmed, the path without a leading `./` and the section
+/// without leading `#`. The same passage reported again (by another job of
+/// the review, by the next review of the run, or by the same verdict judged
+/// again) has the same key and makes no second draft.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ReviewFollowUpKey {
+    pub path: String,
+    #[serde(default)]
+    pub section: String,
+}
+
+impl ReviewFollowUpKey {
+    pub fn new(path: &str, section: &str) -> Self {
+        let path = path.trim();
+        Self {
+            path: path.strip_prefix("./").unwrap_or(path).trim().to_owned(),
+            section: section.trim().trim_start_matches('#').trim().to_owned(),
+        }
+    }
+}
+
+impl ReviewFollowUp {
+    pub fn key(&self) -> ReviewFollowUpKey {
+        ReviewFollowUpKey::new(&self.path, &self.section)
+    }
+
+    /// The entries of a verdict's `follow_ups` as the job printed them
+    /// (`value`): each object with a non-blank text `text` and `path`, its
+    /// `section` when a text and its text `codes`. Anything else (not an
+    /// array, an entry without them) is left out: a follow_up is only a
+    /// note, so its shape never makes the verdict unreadable.
+    pub fn read_list(value: &serde_json::Value) -> Vec<Self> {
+        let text = |entry: &serde_json::Value, key: &str| {
+            entry
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        value
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                let follow_up = Self {
+                    text: text(entry, "text"),
+                    path: text(entry, "path"),
+                    section: text(entry, "section"),
+                    codes: entry
+                        .get("codes")
+                        .and_then(serde_json::Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(|code| code.trim().to_owned())
+                        .filter(|code| !code.is_empty())
+                        .collect(),
+                };
+                (!follow_up.text.is_empty() && !follow_up.key().path.is_empty())
+                    .then_some(follow_up)
+            })
+            .collect()
+    }
+
+    /// The draft's title: the category and where the stale passage is.
+    pub fn draft_title(&self) -> String {
+        let key = self.key();
+        if key.section.is_empty() {
+            format!("{REVIEW_FOLLOW_UP_CATEGORY}: {}", key.path)
+        } else {
+            format!(
+                "{REVIEW_FOLLOW_UP_CATEGORY}: {} ({})",
+                key.path, key.section
+            )
+        }
+    }
+}
+
+/// One follow_up a review's judgment found, with the job that found it:
+/// `agent` names an agent job's, `None` the whole review's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FoundReviewFollowUp {
+    pub agent: Option<String>,
+    pub follow_up: ReviewFollowUp,
+}
+
+/// The follow_ups of a review's judgment to register as drafts: those of
+/// `found` (the whole review's first, then each agent's) whose key is not
+/// among `registered` (the run's drafts from its earlier reviews, or from
+/// this verdict judged before), each key once, the first job's entry.
+pub fn new_review_follow_ups(
+    found: Vec<FoundReviewFollowUp>,
+    registered: &[ReviewFollowUpKey],
+) -> Vec<FoundReviewFollowUp> {
+    let mut seen: std::collections::HashSet<ReviewFollowUpKey> =
+        registered.iter().cloned().collect();
+    found
+        .into_iter()
+        .filter(|found| seen.insert(found.follow_up.key()))
+        .collect()
+}
+
+/// What makes an entry registered as a follow_up draft one of its run, so
+/// that registering the same run again adds nothing: a receipt's entry by
+/// its position in the receipt's `follow_ups`, a review's by its
+/// document's path and section ([`ReviewFollowUpKey`]), whichever review
+/// of the run (`attempt`) and job (`agent`, `None` for the whole review)
+/// found it first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FollowUpKey {
+    Receipt {
+        index: usize,
+    },
+    Review {
+        attempt: usize,
+        agent: Option<String>,
+        key: ReviewFollowUpKey,
+    },
+}
+
 /// Only a complete recorded/restored registration establishes an open source.
 /// Missing or conflicting registration information requires a person.
 pub fn source_goal_was_open(material: &serde_json::Value) -> bool {
@@ -380,6 +523,123 @@ mod tests {
                 .iter()
                 .any(|(code, _)| *code == "other")
         );
+    }
+
+    /// A review's follow_ups are read entry by entry (ADR-t2352-1): an
+    /// entry needs a non-blank text and path, its section and codes are
+    /// kept when they are text, and nothing else (not an array, a bare
+    /// string, an entry without a path) is read or makes an error.
+    #[test]
+    fn a_reviews_follow_ups_are_read_entry_by_entry() {
+        use serde_json::json;
+        let read = |value| ReviewFollowUp::read_list(&value);
+        assert_eq!(
+            read(json!([
+                {"text": " stale ", "path": " docs/a.md ", "section": "流れ", "codes": ["docs_drift", 3, " "]},
+                {"text": "no section", "path": "README.md"},
+                {"text": "no path"},
+                {"text": " ", "path": "docs/b.md"},
+                {"text": "a path not text", "path": 3},
+                {"text": "a section not text", "path": "docs/c.md", "section": ["x"], "codes": "docs_drift"},
+                "a bare string",
+            ])),
+            vec![
+                ReviewFollowUp {
+                    text: "stale".to_owned(),
+                    path: "docs/a.md".to_owned(),
+                    section: "流れ".to_owned(),
+                    codes: vec!["docs_drift".to_owned()],
+                },
+                ReviewFollowUp {
+                    text: "no section".to_owned(),
+                    path: "README.md".to_owned(),
+                    section: String::new(),
+                    codes: Vec::new(),
+                },
+                ReviewFollowUp {
+                    text: "a section not text".to_owned(),
+                    path: "docs/c.md".to_owned(),
+                    section: String::new(),
+                    codes: Vec::new(),
+                },
+            ]
+        );
+        for value in [
+            json!(null),
+            json!({"text": "t", "path": "p"}),
+            json!("t"),
+            json!([]),
+        ] {
+            assert_eq!(read(value), Vec::new());
+        }
+        assert_eq!(read(json!([{"text": "t", "path": "./"}])), Vec::new());
+    }
+
+    /// The same document's passage has one key however the job wrote its
+    /// path and section, and the draft's title names them.
+    #[test]
+    fn a_reviews_follow_up_is_keyed_by_its_document() {
+        assert_eq!(
+            ReviewFollowUpKey::new(" ./docs/a.md ", " ## 流れ "),
+            ReviewFollowUpKey::new("docs/a.md", "流れ")
+        );
+        assert_ne!(
+            ReviewFollowUpKey::new("docs/a.md", "流れ"),
+            ReviewFollowUpKey::new("docs/a.md", "")
+        );
+        let follow_up = |path: &str, section: &str| ReviewFollowUp {
+            text: "t".to_owned(),
+            path: path.to_owned(),
+            section: section.to_owned(),
+            codes: Vec::new(),
+        };
+        assert_eq!(
+            follow_up("./docs/a.md", "#流れ").draft_title(),
+            "docs_drift: docs/a.md (流れ)"
+        );
+        assert_eq!(
+            follow_up("docs/a.md", " ").draft_title(),
+            "docs_drift: docs/a.md"
+        );
+    }
+
+    /// One draft per document's passage for a run: a passage two jobs of
+    /// the review found is the first job's, and one registered already (by
+    /// an earlier review of the run, or by this verdict judged before) is
+    /// left out.
+    #[test]
+    fn a_reviews_follow_ups_already_found_for_the_run_are_left_out() {
+        let found = |agent: Option<&str>, path: &str, section: &str| FoundReviewFollowUp {
+            agent: agent.map(str::to_owned),
+            follow_up: ReviewFollowUp {
+                text: format!("{agent:?}"),
+                path: path.to_owned(),
+                section: section.to_owned(),
+                codes: Vec::new(),
+            },
+        };
+        let all = vec![
+            found(None, "docs/a.md", "流れ"),
+            found(Some("design"), "./docs/a.md", "#流れ"),
+            found(Some("design"), "docs/a.md", "境界"),
+            found(Some("adr"), "docs/b.md", ""),
+        ];
+        assert_eq!(
+            new_review_follow_ups(all.clone(), &[]),
+            vec![all[0].clone(), all[2].clone(), all[3].clone()]
+        );
+        assert_eq!(
+            new_review_follow_ups(
+                all.clone(),
+                &[
+                    ReviewFollowUpKey::new("docs/a.md", "流れ"),
+                    ReviewFollowUpKey::new("docs/b.md", ""),
+                ]
+            ),
+            vec![all[2].clone()]
+        );
+        let every = all.iter().map(|f| f.follow_up.key()).collect::<Vec<_>>();
+        assert_eq!(new_review_follow_ups(all, &every), Vec::new());
     }
 
     #[test]

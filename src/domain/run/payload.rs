@@ -207,11 +207,18 @@ pub(super) struct AskOf {
     pub(super) ask_id: Option<i64>,
 }
 
-/// `follow_up_registered`.
+/// `follow_up_registered`: a receipt's entry names its `index`, a
+/// review's (`from` `review`) its document's `path` and `section`.
 #[derive(Debug, Default, Deserialize)]
-pub(super) struct FollowUpRegistered {
+pub(super) struct FollowUpRegistered<'a> {
     #[serde(default, deserialize_with = "typed")]
     pub(super) index: Option<u64>,
+    #[serde(default, borrow, deserialize_with = "typed")]
+    pub(super) from: Option<&'a str>,
+    #[serde(default, borrow, deserialize_with = "typed")]
+    pub(super) path: Option<&'a str>,
+    #[serde(default, borrow, deserialize_with = "typed")]
+    pub(super) section: Option<&'a str>,
 }
 
 /// `push_failed`.

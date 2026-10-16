@@ -1398,7 +1398,7 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
                     execution_class: Default::default(),
                 });
             FollowUpRegistration {
-                index,
+                key: crate::domain::FollowUpKey::Receipt { index },
                 entry: entry.clone(),
                 category: crate::domain::follow_up_category(entry),
                 membership_proposal: crate::domain::follow_up_membership_proposal(entry),
@@ -1420,6 +1420,127 @@ pub fn register_follow_ups<Q: Queue + ?Sized>(
                 "run {run_id}: follow_ups not registered: {error:#}");
             Vec::new()
         }
+    }
+}
+
+/// Register the `follow_ups` of review `attempt` of `task`'s run `run_id`
+/// (`verdict`, the whole review's and each agent job's) as `docs_drift`
+/// follow_up drafts of the task's goal (ADR-t2352-1), the way
+/// [`register_follow_ups`] registers a receipt's: one follow-up deeper than
+/// the task, origin `follow_up` with the source run and goal, the planner
+/// the runtime opens for the run's drafts. A document's path and section
+/// make one draft for the run ([`crate::domain::new_review_follow_ups`]):
+/// the same passage found by two jobs, by a later review of the run, or by
+/// this verdict judged again after a restart adds nothing. The verdict's
+/// decision and where it sends the run do not read them, and a
+/// registration that fails is only reported. Returns what this call
+/// registered.
+pub fn register_review_follow_ups<Q: EventStore + super::DraftPlannerStore + ?Sized>(
+    queue: &mut Q,
+    task: &Task,
+    run_id: &RunId,
+    attempt: usize,
+    verdict: &crate::domain::ReviewVerdict,
+) -> Vec<RegisteredFollowUp> {
+    let found = verdict.found_follow_ups();
+    if found.is_empty() {
+        return Vec::new();
+    }
+    let registered = match queue.run_events(run_id) {
+        Ok(events) => {
+            crate::domain::RunHistory::from_events(&events).registered_review_follow_ups()
+        }
+        Err(error) => {
+            warn!(op = "follow_up", run_id = %run_id, error = %format_args!("{error:#}"),
+                "run {run_id}: review {attempt}'s follow_ups not registered: {error:#}");
+            return Vec::new();
+        }
+    };
+    let new = crate::domain::new_review_follow_ups(found, &registered);
+    if new.is_empty() {
+        return Vec::new();
+    }
+    let depth = match queue.follow_up_depth(task.id()) {
+        Ok(depth) => depth + 1,
+        Err(error) => {
+            warn!(op = "follow_up", run_id = %run_id, task_id = %task.id(),
+                error = %format_args!("{error:#}"),
+                "run {run_id}: the follow_up_depth of task {} could not be read: {error:#}",
+                task.id());
+            crate::domain::follow_up::FOLLOW_UP_ASK_DEPTH
+        }
+    };
+    let prepared = new
+        .into_iter()
+        .map(|found| review_follow_up_registration(task, run_id, attempt, found))
+        .collect();
+    match queue.register_follow_ups(run_id, prepared, depth) {
+        Ok(added) => {
+            for item in &added {
+                info!(op = "follow_up", run_id = %run_id, follow_up_task_id = %item.task_id,
+                    "run {run_id}: review {attempt}'s follow_up {:?} registered as draft task {}", item.title, item.task_id);
+            }
+            added
+        }
+        Err(error) => {
+            warn!(op = "follow_up", run_id = %run_id, error = %format_args!("{error:#}"),
+                "run {run_id}: review {attempt}'s follow_ups not registered: {error:#}");
+            Vec::new()
+        }
+    }
+}
+
+/// The registration of one follow_up `found` by review `attempt` of
+/// `task`'s run `run_id` (ADR-t2352-1): a `docs_drift` draft of the task's
+/// goal, keyed by its document, whose title names the document and whose
+/// description is the job's text and which job of which review found it.
+pub fn review_follow_up_registration(
+    task: &Task,
+    run_id: &RunId,
+    attempt: usize,
+    found: crate::domain::FoundReviewFollowUp,
+) -> FollowUpRegistration {
+    let who = found.agent.as_deref().map_or_else(
+        || "the whole review".to_owned(),
+        |agent| format!("the agent {agent}"),
+    );
+    let follow_up = &found.follow_up;
+    let draft = NewTask {
+        title: follow_up.draft_title(),
+        description: format!(
+            "{}\n\nFound by {who} of review {attempt} of run {run_id} in a document its diff did not touch, so the review did not send the run back for it.",
+            follow_up.text
+        ),
+        acceptance: String::new(),
+        verification_commands: Vec::new(),
+        required_evidence: Vec::new(),
+        paths: Vec::new(),
+        priority: Default::default(),
+        change: None,
+        dependencies: Vec::new(),
+        goal_dependencies: Vec::new(),
+        goal_id: task.goal_id(),
+        context: format!(
+            "follow_up found by review {attempt} of run {run_id} of task {} ({})",
+            task.id(),
+            task.title()
+        ),
+        provider: None,
+        worker_mode: None,
+        wait_for_build: false,
+        execution_class: Default::default(),
+    };
+    FollowUpRegistration {
+        key: crate::domain::FollowUpKey::Review {
+            attempt,
+            agent: found.agent.clone(),
+            key: follow_up.key(),
+        },
+        entry: json!(follow_up),
+        category: crate::domain::REVIEW_FOLLOW_UP_CATEGORY.to_owned(),
+        membership_proposal: Value::Null,
+        draft: Some(draft),
+        skipped: None,
     }
 }
 
@@ -3237,6 +3358,57 @@ mod tests {
         fn diff_to_file(&self, _: &str, _: &str, _: &Path) -> Result<()> {
             unimplemented!()
         }
+    }
+
+    /// A review's follow_up becomes a `docs_drift` draft of the task's
+    /// goal keyed by its document (ADR-t2352-1): the title names the path
+    /// and section, the description the job's text and which job of which
+    /// review found it, and nothing else of the draft is filled in for the
+    /// planner.
+    #[test]
+    fn a_reviews_follow_up_registers_a_docs_drift_draft_of_the_tasks_goal() {
+        let mut record = task_record(&[], &[]);
+        record.goal_id = Some(crate::domain::GoalId::new(194));
+        let task = Task::restore(record).unwrap();
+        let run = RunId::new(RUN).unwrap();
+        let found = crate::domain::FoundReviewFollowUp {
+            agent: Some("design-consistency".to_owned()),
+            follow_up: crate::domain::ReviewFollowUp {
+                text: "it still says the review sends the run back".to_owned(),
+                path: "./docs/design/a.md".to_owned(),
+                section: "#verdict".to_owned(),
+                codes: vec!["docs_drift".to_owned()],
+            },
+        };
+        let registration = review_follow_up_registration(&task, &run, 2, found);
+        assert_eq!(registration.category, "docs_drift");
+        assert_eq!(registration.membership_proposal, Value::Null);
+        assert_eq!(registration.skipped, None);
+        assert_eq!(
+            registration.key,
+            crate::domain::FollowUpKey::Review {
+                attempt: 2,
+                agent: Some("design-consistency".to_owned()),
+                key: crate::domain::ReviewFollowUpKey::new("docs/design/a.md", "verdict"),
+            }
+        );
+        let draft = registration.draft.unwrap();
+        assert_eq!(draft.title, "docs_drift: docs/design/a.md (verdict)");
+        assert_eq!(draft.goal_id, Some(crate::domain::GoalId::new(194)));
+        assert!(
+            draft
+                .description
+                .starts_with("it still says the review sends the run back\n\nFound by the agent design-consistency of review 2 of run "),
+            "{}",
+            draft.description
+        );
+        assert!(
+            draft
+                .context
+                .contains(&format!("review 2 of run {RUN} of task 7"))
+        );
+        assert!(draft.acceptance.is_empty() && draft.verification_commands.is_empty());
+        assert!(draft.dependencies.is_empty() && draft.paths.is_empty());
     }
 
     fn sha(text: &str) -> CommitSha {

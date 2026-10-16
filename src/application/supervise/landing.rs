@@ -310,6 +310,7 @@ impl Supervisor<'_> {
                         confidence: None,
                         reason_category: None,
                         agents: Vec::new(),
+                        follow_ups: Vec::new(),
                     };
                     let job = ActorContext::review_job(run.id(), state.attempt);
                     return self.send_revise(run, state.session, verdict, &job, None);
@@ -1250,6 +1251,30 @@ impl Supervisor<'_> {
         // Execution is on its `review_job_finished`.
         if let Some(session) = whole_session(watch) {
             session.record(&mut finished);
+        }
+        if !verdict.follow_ups.is_empty() {
+            finished["follow_ups"] = json!(verdict.follow_ups);
+        }
+        // The follow_ups become drafts before the verdict is recorded, so
+        // that a supervisor that stops between them judges the review
+        // again and finds them registered (ADR-t2352-1); they never change
+        // where the verdict sends the run.
+        if !verdict.found_follow_ups().is_empty() {
+            match self.queue.show(run.task_id()) {
+                Ok(detail) => {
+                    crate::application::integrate::register_review_follow_ups(
+                        &mut *self.queue,
+                        &detail.task,
+                        run.id(),
+                        attempt,
+                        &verdict,
+                    );
+                }
+                Err(error) => {
+                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"),
+                        "run {}: review {attempt}'s follow_ups not registered: {error:#}", run.id());
+                }
+            }
         }
         let session = watch.session.clone();
         self.for_job(&job, |sv| {
@@ -2790,6 +2815,9 @@ pub(super) fn combined_verdict(
         confidence: None,
         reason_category,
         agents: verdict.agents.clone(),
+        // Registered as drafts once the review was judged; they are no
+        // reason the run goes back.
+        follow_ups: Vec::new(),
     }
 }
 

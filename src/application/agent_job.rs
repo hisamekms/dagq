@@ -88,10 +88,11 @@ pub struct BuiltAgentJob {
 
 /// The verdict's schema of an agent job: one agent's result of the
 /// review's verdict, as the review reads it
-/// (`review_subagents::AgentResult`).
+/// (`review_subagents::AgentResult`), its `follow_ups` of the whole
+/// review's form (ADR-t2352-1).
 fn schema(agent: &str) -> String {
     format!(
-        "{{\"agent\": \"{agent}\", \"status\": \"completed\" | \"failed\", \"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [{{\"text\": string, \"codes\": [string]}}], \"summary\": string, \"recommendation\": \"land\" | \"send_back\" | null, \"confidence\": \"high\" | \"low\" | null, \"reason_category\": \"scope\" | \"discard\" | null}}"
+        "{{\"agent\": \"{agent}\", \"status\": \"completed\" | \"failed\", \"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [{{\"text\": string, \"codes\": [string]}}], \"summary\": string, \"recommendation\": \"land\" | \"send_back\" | null, \"confidence\": \"high\" | \"low\" | null, \"reason_category\": \"scope\" | \"discard\" | null, \"follow_ups\": [{{\"text\": string, \"path\": string, \"section\": string, \"codes\": [string]}}]}}"
     )
 }
 
@@ -177,7 +178,8 @@ pub fn build(job: &AgentJob<'_>) -> Result<BuiltAgentJob, DefinitionOverLimit> {
         "instructions",
         &format!(
             "Answer with one JSON object and nothing else, matching this schema:\n{schema}\n\
-             reasons lists each finding with the rule codes it breaks (empty for pass); summary is one or two sentences; recommendation, confidence and reason_category are for a concern only (null otherwise). Say status failed only when you could not review the change.\n",
+             reasons lists each finding with the rule codes it breaks (empty for pass); summary is one or two sentences; recommendation, confidence and reason_category are for a concern only (null otherwise). Say status failed only when you could not review the change.\n\
+             A finding on a document goes in reasons only when the change edits that document and disagrees with it, or the change breaks an invariant, promise or boundary a document states. A stale passage of a document the change does not touch never sends it back: list it in follow_ups with its path, section and why (empty when none), whatever the verdict.\n",
             schema = schema(job.agent),
         ),
         AGENT_JOB_INSTRUCTIONS_BYTES / 2,
@@ -296,6 +298,31 @@ mod tests {
         assert!(spoken.text.len() <= AGENT_JOB_PROMPT_LIMIT);
         assert!(spoken.bytes.sections["language"] > 0);
         assert_eq!(sections_sum(&spoken.bytes), spoken.text.len());
+    }
+
+    /// Every agent job is told where a finding on a document goes
+    /// (ADR-t2352-1): in reasons only for a document the change edits and
+    /// a broken promise, and a stale document the change does not touch in
+    /// follow_ups of the verdict's own form; what makes a document's text a
+    /// defect (copies of the code, history) is not the runtime's to say.
+    #[test]
+    fn an_agent_job_puts_a_stale_untouched_document_in_its_follow_ups() {
+        let tools = AgentRole::Review.default_tools();
+        let paths = paths();
+        let text = build(&job("check the ADRs", &tools, &paths))
+            .unwrap()
+            .prompt
+            .text;
+        for part in [
+            "\"follow_ups\": [{\"text\": string, \"path\": string, \"section\": string, \"codes\": [string]}]}",
+            "A finding on a document goes in reasons only when the change edits that document and disagrees with it, or the change breaks an invariant, promise or boundary a document states.",
+            "A stale passage of a document the change does not touch never sends it back: list it in follow_ups with its path, section and why (empty when none), whatever the verdict.",
+        ] {
+            assert!(text.contains(part), "{part}: {text}");
+        }
+        for word in ["copies the code", "history", "task numbers"] {
+            assert!(!text.contains(word), "{word}: {text}");
+        }
     }
 
     /// A definition one byte past its limit makes no prompt: it is never

@@ -21,6 +21,7 @@ related:
   - adr-t1504-1
   - adr-t1504-2
   - adr-t1540-1
+  - adr-t2352-1
 ---
 
 # Draft planners (supervisor)
@@ -35,6 +36,7 @@ run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-sup
 1. **出どころ**: runtimeやjobがdraftを作るときに、出どころと材料を`record_draft_origin`で`draft_origins`に書く。
    `integrate`の`register_follow_ups`はfollow_upのdraftに、workerが付けた種類（[follow_upsの分類コード](receipt-and-session-exit.md#follow_upsの分類コード)、ADR-t947-3）と所属の提案（[follow_upsの所属の提案](receipt-and-session-exit.md#follow_upsの所属の提案)）を材料として書く。
    材料に所属の提案の無いdraftはpromptが`(none)`として、種類の無いdraftはpromptと集計が`unlabeled`として扱う。
+   runのreviewの`follow_ups`は、supervisorがreviewの判定（着地の前）で同じ経路で種類`docs_drift`のdraftにするので、同じrunのreceiptのdraftより先に対象になりうる（[Review](review.md#文書の照合)）。
    `goal_gap`は、[goal review](goal-review.md)のjobの`gaps`のverdict（と人の`approve_goal`の`gaps`のanswer）からruntimeが登録するdraftの出どころとする。
    人が`add`で作ったdraftとobserverのdraft goalのtaskには行が無く、plannerは立たない（再検討の時刻が来たときだけ、出どころ`revisit`として立つ。[再検討の時刻](#再検討の時刻)）。
    出どころ`reopened`は、plan reviewがreadyから戻して自分のproposalに入れたtask（ADR-0044の決定14）が、そのproposalのwithdrawで`draft`に戻ったときにwithdrawが`draft_reopens`に書く。
@@ -46,10 +48,10 @@ run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-sup
 2. **対象**（`planner_drafts`）: 条件はstoreの`targets`のdoc commentが持ち、要点は次のとおり。
    statusが`draft`でproposalに入っておらず、出どころか（有効な）reopenの行があるか再検討の時刻が来ていて、閉じていないruntimeのplannerも、closeされていない`planner_question`のaskも無く、`keep_draft`のanswerで残されておらず、まだ来ない再検討の時刻を持たず、`open`の計画の依頼の参照（`task:N`）に無く、使い切っていないdraft（時刻が来たときの例外は[再検討の時刻](#再検討の時刻)）。
    ただし閉じていないplannerの束と同じ束の鍵を持つdraftは、そのplannerが終わるまで待つ（同じきっかけのdraftが作業中に増えたとき）。
-   integrateは1つのreceiptの未登録follow_upsを1つの`BEGIN IMMEDIATE` transactionで登録するので、passはそのreceiptのdraftを全件見るか1件も見ない。
+   integrateは1つのreceipt、supervisorは1回のreviewの判定の未登録follow_upsを1つの`BEGIN IMMEDIATE` transactionで登録するので、passはその分のdraftを全件見るか1件も見ない。
    束のplannerが`planner_unresponsive`で開いたまま人を待つあいだも、同じ鍵のdraftは待つ。
    - **束**（ADR-t807-1）: 対象を束の鍵（`BundleKey::of`）で分ける。
-     鍵は同じintegrate・同じgoal review・同じwithdrawが作ったことを表す。
+     鍵は同じrun・同じgoal review・同じwithdrawが作ったことを表す。
      作成時刻の近さでは束ねず、材料に鍵の無いdraftは1件で1つの束とする。
      束の順は束の最も古いdraftのID順。
    - Spikeのfollow_upにも立ち、その依頼のplannerは計画しない（[依頼](plan-planners.md#spikeの再計画の依頼)）。
@@ -63,11 +65,9 @@ run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-sup
    draftごとの3択は、採用（出自を補い、依存を足し、lintしてからsubmit）、不採用（cancelとnoteで理由）、自分で決めきれないときの`planner_question`（[推奨が出せればplannerが決める](#推奨が出せればplannerが決める未実装)の3つの条件）で、answerに従う。
    reopenedのdraftは、taskの意図を保ってreasonの指す所を直す。
    他のtaskの重複か、completedのtaskで実装済みのdraftを重複先を記録して閉じるのはこのplanner（[ADR-0063](../../adr/0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md)の決定5）。
-   記録を読むCLIは`prompt::RECORD_READING`（ADR-0044の決定22）が持つ。
    promptは全体と節ごとの上限の中に収める（値と理由は[Prompt](prompt.md#goal-reviewrunのreview復旧jobruntimeのplannerの上限)）。
    draftの節は束の古い順に選び（descriptionは必須で、超えたら切って`over_limit`に書く）、入らないdraftとgoalは件数と読むCLIを書く。
    出どころの節は丸ごとと欄ごとに切り、receiptを読むCLIを書く。
-   promptのbyte数は`planner_prompt_written`に記録する。
 4. **上限まで**（`MAX_DRAFT_PLANNERS`）: plannerがdraftを決めずに終わった（sessionが終わった、idleで終了の依頼を受けて終わった）draftは次のpassで再び対象になり、残りのdraft（とその間に増えた同じきっかけのdraft）で束を作り直して次のplannerが立つ。
    回数はdraftごとに数える（`draft_bundle_members.attempt`）。
    再検討の時刻で立つplannerも、answerを運ぶplannerも1回と数え、作業中の失敗・時間切れも数えるが、人の答えだけを待って終わった（結末`answer_wait`、5）ものは数えない（[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定5）。
@@ -103,8 +103,7 @@ run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-sup
    人のsubmit（人が`DAGQ_ROLE`の無い自分のterminalで打った`submit`）、人の`adopt`を経たsubmit、`ready --bypass-review`は深さを0に戻す。
 7. **終わり**: runtimeのplannerは束のdraftをsubmitしたか、cancelしたか、`keep_draft`で（answerか、まだ来ない再検討の時刻で）残したら（決めずに残したものがあっても）、idleになったところで終了の依頼（`turns/exit`。`planner_exits`に記録）を受け、wrapperがsessionを終える。
    sessionの終わったplanner（exitした、見失った、backgroundのwrapperが居ない）の行は閉じられ、まだ動いているwrapperは止められる。
-   終了の依頼から`SessionWrappers::exit_timeout`を過ぎても終わらなければ、wrapperとその子孫を止めて行を閉じる（[Plan review (supervisor)](plan-review.md#plan-review-supervisor)の`end_runtime_planners`）。
-   runtimeのplannerにcmuxのworkspaceは無いので、閉じるworkspaceも無い。
+   終了の依頼から`SessionWrappers::exit_timeout`を過ぎても終わらなければ、wrapperとその子孫を止めて行を閉じる（[Plan review (supervisor)](plan-review.md)の10）。
    idleは、wrapperがturnの終わりに書くidle markerが最後の入力より新しく、`turns/`に待っている依頼が無いことで判じ、画面は読まない。
    `planner_question`のanswerを送られたplannerも、それをturnで読み終えれば（5）、人の答えだけを待つplannerも（5、`runtime_answer_wait`）終了の依頼を受ける。
    持ち主の居ないreviseが上限で`--planner-timeout`を過ぎて待つときは、人の答えを待っていないidleのplannerが終了の依頼を受けて枠を空ける（`planner_released`。[Plan review (supervisor)](plan-review.md)の9）。
@@ -115,7 +114,7 @@ run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-sup
 8. **記録と読み方**（ADR-t807-1）: plannerの行が閉じるとき（`close_planner`）、束のdraftごとの結末（`DraftOutcome`）を`draft_bundle_members`に書き、draftに`draft_planner_settled`を記録する。
    結末`answer_wait`（人の答えだけを待って終わった）は4で数えない。
    出どころのあるdraftのeventは束の鍵と出どころの欄を載せ、`events`のtaskとrunの絞り込み（runはpayloadの`source_run_id`も見る）で、元のrunから各draftの結末まで引ける。
-   `dagq show ID`（`--full`でなくても）はtaskの`origin`と`revisit`（[再検討の時刻](#再検討の時刻)の「記録」）と、元のtaskなら`follow_up_drafts`（そのrunのreceiptが出したdraftと今の状態）を出す。
+   `dagq show ID`（`--full`でなくても）はtaskの`origin`と`revisit`（[再検討の時刻](#再検討の時刻)の「記録」）と、元のtaskなら`follow_up_drafts`（そのrunのreceipt・reviewのdraftと今の状態）を出す。
    人が`add`したtaskとobserverのdraft goalのtaskの`origin`はnull（再検討の時刻で立ったplannerがあってもnull）で、出どころの行があればどのdraftも出す。
    `dagq planners`はruntimeのplannerの束を、`dagq stats`の`draft_flow`は窓の中の束の数と大きさを出す。
 

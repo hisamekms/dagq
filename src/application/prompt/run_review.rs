@@ -184,16 +184,19 @@ pub(super) const REVIEW_VERDICTS: &str = "Decide one verdict:\n\
 
 /// The whole review's answer: one JSON object of this schema.
 pub(super) const REVIEW_ANSWER: &str = "Answer with one JSON object and nothing else, matching this schema:\n\
-{\"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [{\"text\": string, \"codes\": [string]}], \"summary\": string, \"recommendation\": \"land\" | \"send_back\" | null, \"confidence\": \"high\" | \"low\" | null, \"reason_category\": \"scope\" | \"discard\" | null}\n\
-reasons lists each finding (empty for pass); summary is one or two sentences; recommendation, confidence and reason_category are for a concern only (null for pass and revise).\n";
+{\"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [{\"text\": string, \"codes\": [string]}], \"summary\": string, \"recommendation\": \"land\" | \"send_back\" | null, \"confidence\": \"high\" | \"low\" | null, \"reason_category\": \"scope\" | \"discard\" | null, \"follow_ups\": [{\"text\": string, \"path\": string, \"section\": string, \"codes\": [string]}]}\n\
+reasons lists each finding (empty for pass); summary is one or two sentences; recommendation, confidence and reason_category are for a concern only (null for pass and revise); follow_ups lists the stale documents the diff does not touch (empty when none), for any verdict, and never decides it.\n";
 
 /// How a review checks the documents on the changed behavior
-/// (ADR-t1428-1 decision 5, ADR-t1942-2 decision 4): against the diff and
-/// the summary, never taking a document's diff alone as proof, in both
-/// directions: stale ones as before, and what the diff adds to a document
-/// that copies the code or carries history. A name missing from a document
-/// alone is not drift. The verdict's shape and the codes stay as they are.
-pub const REVIEW_DOCS_CHECK: &str = "Read the documents on the behavior the diff changes (named by the task's description or context or by the summary, or found as you read) against the diff and the summary. A document's diff alone does not show the change is right; check the summary's reason for leaving a document as it is like any other claim. Report as docs_drift a stale document, or a changed flow, boundary, invariant or promise it misses, whether or not the task named it; a name missing from a document alone is not stale. Also report text the diff adds to a document when that text copies the code (lists of fields, flags, defaults, function or test names) or carries history (task numbers, what was before).\n";
+/// (ADR-t1428-1 decision 5 and ADR-t1942-2 decision 4, as ADR-t2352-1
+/// amends them): against the diff and the summary, never taking a
+/// document's diff alone as proof. Only a document the diff changes that
+/// disagrees with it, and a change that breaks what a document states, go
+/// in `reasons`; a stale passage of a document the diff did not touch goes
+/// in `follow_ups`, which never send the run back. What makes a document's
+/// text a defect is the project's rules, not this. A name missing from a
+/// document alone is not drift.
+pub const REVIEW_DOCS_CHECK: &str = "Read the documents on the behavior the diff changes (named by the task's description or context or by the summary, or found as you read) against the diff and the summary. A document's diff alone does not show the change is right; check the summary's reason for leaving a document as it is like any other claim. Report as docs_drift in reasons, whether or not the task named it, only a document the diff changes that disagrees with the diff, and a change of the diff that breaks an invariant, promise or boundary a document states. A document the diff does not touch that is stale (before the diff, or on a flow, boundary, invariant or promise the diff changes) is no reason to send the run back: list it in follow_ups with its path, section and why, whatever the verdict. A name missing from a document alone is not stale.\n";
 
 /// How a review recommends what to do with its `concern`, and which
 /// judgements it leaves to a person (ADR-t451-1 decisions 1 and 3).

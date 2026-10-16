@@ -481,6 +481,24 @@ impl<'a> RunHistory<'a> {
             .collect()
     }
 
+    /// The document of every follow-up a review of the run registered
+    /// already (ADR-t2352-1).
+    pub fn registered_review_follow_ups(&self) -> Vec<crate::domain::ReviewFollowUpKey> {
+        self.events
+            .iter()
+            .filter(|e| e.kind == event_kind::FOLLOW_UP_REGISTERED)
+            .filter_map(|e| {
+                let registered = restore::<FollowUpRegistered>(&e.payload);
+                (registered.from == Some("review")).then(|| {
+                    crate::domain::ReviewFollowUpKey::new(
+                        registered.path.unwrap_or_default(),
+                        registered.section.unwrap_or_default(),
+                    )
+                })
+            })
+            .collect()
+    }
+
     /// Whether the supervisor gave the run up with its live session left
     /// open, the `/exit` not sent (task 237), and no session has exited
     /// since.
@@ -1395,6 +1413,37 @@ mod tests {
     /// of another type or a payload that is not an object reads as the
     /// key's absence; `checks` and `scope_violation` count when present at
     /// all.
+    /// The documents a review's follow_ups registered for the run
+    /// (ADR-t2352-1), apart from a receipt's indexes.
+    #[test]
+    fn registered_review_follow_ups_are_read_by_their_document() {
+        let events = [
+            event(1, "follow_up_registered", json!({"index": 0})),
+            event(
+                2,
+                "follow_up_registered",
+                json!({"from": "review", "review_attempt": 1, "path": "docs/a.md", "section": "流れ"}),
+            ),
+            event(
+                3,
+                "follow_up_registered",
+                json!({"from": "review", "review_attempt": 2, "path": "./docs/b.md"}),
+            ),
+            event(4, "follow_up_registered", json!({"path": "docs/c.md"})),
+        ];
+        assert_eq!(
+            RunHistory::from_events(&events).registered_review_follow_ups(),
+            vec![
+                crate::domain::ReviewFollowUpKey::new("docs/a.md", "流れ"),
+                crate::domain::ReviewFollowUpKey::new("docs/b.md", ""),
+            ]
+        );
+        assert_eq!(
+            RunHistory::from_events(&events).registered_follow_ups(),
+            vec![0]
+        );
+    }
+
     #[test]
     fn recorded_payloads_with_missing_extra_null_or_mistyped_keys_are_read_as_before() {
         fn history(events: &[RunEvent]) -> RunHistory<'_> {

@@ -27,9 +27,9 @@ use crate::application::{
 use crate::domain::{
     Ask, AskId, AskKind, BundleKey, DraftBundleMember, DraftBundleView, DraftOrigin, DraftOutcome,
     DraftRevisit, DraftTarget, Finding, FindingId, FindingQuery, FindingStatus, FindingView,
-    FollowUpDraft, GoalId, MAX_DRAFT_PLANNERS, PlannerId, PlannerOrigin, PlannerSession,
-    ProposalId, RegisteredFollowUp, RequestId, RunHistory, RunId, Task, TaskId, TaskOrigin,
-    TaskStatus,
+    FollowUpDraft, FollowUpKey, GoalId, MAX_DRAFT_PLANNERS, PlannerId, PlannerOrigin,
+    PlannerSession, ProposalId, RegisteredFollowUp, RequestId, ReviewFollowUpKey, RunHistory,
+    RunId, Task, TaskId, TaskOrigin, TaskStatus,
     follow_up::{FollowUpFacts, RevisitChange, adopt_needs_person, revisit_refusal},
     plan_request::Creator,
 };
@@ -177,16 +177,40 @@ impl SqliteQueue {
         let source_goal = read_task(&tx, source)?.goal_id();
         let source_open = goal_open(&tx, source_goal)?;
         let goal_closed = source_goal.is_some() && !source_open;
-        let registered: HashSet<u64> =
-            RunHistory::from_events(&super::runtime_store::run_events_of(&tx, run)?)
-                .registered_follow_ups()
-                .into_iter()
-                .collect();
+        let events = super::runtime_store::run_events_of(&tx, run)?;
+        let history = RunHistory::from_events(&events);
+        let registered: HashSet<u64> = history.registered_follow_ups().into_iter().collect();
+        let mut reviewed: HashSet<ReviewFollowUpKey> =
+            history.registered_review_follow_ups().into_iter().collect();
         let mut added = Vec::new();
         for entry in entries {
-            if registered.contains(&(entry.index as u64)) {
-                continue;
-            }
+            // How the entry is one of its run, in its event and its draft's
+            // origin: a receipt's `index`, or a review's document.
+            let whence = match &entry.key {
+                FollowUpKey::Receipt { index } => {
+                    if registered.contains(&(*index as u64)) {
+                        continue;
+                    }
+                    json!({"index": index})
+                }
+                FollowUpKey::Review {
+                    attempt,
+                    agent,
+                    key,
+                } => {
+                    if !reviewed.insert(key.clone()) {
+                        continue;
+                    }
+                    json!({"from": "review", "review_attempt": attempt, "agent": agent,
+                           "path": key.path, "section": key.section})
+                }
+            };
+            let with_whence = |mut value: Value| {
+                if let (Some(object), Some(whence)) = (value.as_object_mut(), whence.as_object()) {
+                    object.extend(whence.clone());
+                }
+                value
+            };
             let payload = if let Some(mut new) = entry.draft {
                 new.goal_id = source_goal.filter(|_| source_open);
                 new.validate()?;
@@ -203,14 +227,14 @@ impl SqliteQueue {
                     "UPDATE tasks SET follow_up_depth=?2 WHERE id=?1",
                     params![created.id(), depth],
                 )?;
-                let material = json!({
+                let material = with_whence(json!({
                     "source_task_id": source, "source_run_id": run,
                     "source_goal_id": source_goal,
                     "source_goal_state": if source_goal.is_none() { "none" } else if source_open { "open" } else { "closed" },
                     "source_goal_provenance": "recorded",
-                    "index": entry.index, "category": entry.category,
+                    "category": entry.category,
                     "membership_proposal": entry.membership_proposal,
-                });
+                }));
                 ensure!(
                     insert_draft_origin(
                         &tx,
@@ -226,24 +250,24 @@ impl SqliteQueue {
                     task_id: created.id(),
                     title: created.title().to_owned(),
                 });
-                let mut payload = json!({
+                let mut payload = with_whence(json!({
                     "task_id": created.id(), "title": created.title(),
-                    "index": entry.index, "category": entry.category,
+                    "category": entry.category,
                     "membership_proposal": entry.membership_proposal,
                     "source_task_id": source, "source_run_id": run,
                     "source_goal_id": source_goal, "source_goal_state": material["source_goal_state"],
                     "source_goal_provenance": "recorded", "follow_up_depth": depth,
-                });
+                }));
                 if goal_closed {
                     payload["goal_closed"] = json!(true);
                 }
                 payload
             } else {
-                json!({
+                with_whence(json!({
                     "task_id": null, "title": entry.entry["title"],
-                    "index": entry.index, "skipped": entry.skipped,
+                    "skipped": entry.skipped,
                     "category": entry.category, "follow_up": entry.entry,
-                })
+                }))
             };
             event(
                 &tx,
@@ -1114,8 +1138,8 @@ pub(super) fn task_origin(conn: &Connection, task: TaskId) -> Result<Option<Task
     }))
 }
 
-/// The follow_up drafts the receipts of `task`'s runs proposed, by ID, with
-/// their status now (ADR-t807-1).
+/// The follow_up drafts the receipts and the reviews of `task`'s runs
+/// proposed, by ID, with their status now (ADR-t807-1, ADR-t2352-1).
 pub(super) fn follow_up_drafts(conn: &Connection, task: TaskId) -> Result<Vec<FollowUpDraft>> {
     Ok(conn
         .prepare(

@@ -469,6 +469,13 @@ pub struct ReviewVerdict {
     /// review's own, which judges alone.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub agents: Vec<review_subagents::AgentResult>,
+    /// The whole review's `follow_ups` (ADR-t2352-1): stale passages of
+    /// documents the diff did not touch, which the runtime records as
+    /// `docs_drift` follow_up drafts of the run's task. Any verdict may
+    /// carry them, and they never send the run back nor change where it
+    /// goes ([`Self::route`] does not read them).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub follow_ups: Vec<follow_up::ReviewFollowUp>,
 }
 
 /// What the whole review prints ([`ReviewVerdict::parse`]): its own
@@ -486,6 +493,10 @@ struct PrintedReviewVerdict {
     confidence: Option<String>,
     #[serde(default)]
     reason_category: Option<String>,
+    /// Read entry by entry ([`follow_up::ReviewFollowUp::read_list`]), so
+    /// that no shape of it makes the verdict unreadable.
+    #[serde(default)]
+    follow_ups: serde_json::Value,
 }
 
 /// A verdict as `review_finished` recorded it: the whole review's with
@@ -518,6 +529,7 @@ impl From<PrintedReviewVerdict> for ReviewVerdict {
                 .then(|| concern::reason(printed.reason_category.as_deref()))
                 .flatten(),
             agents: Vec::new(),
+            follow_ups: follow_up::ReviewFollowUp::read_list(&printed.follow_ups),
         }
     }
 }
@@ -570,6 +582,25 @@ impl ReviewVerdict {
             self.reason_category,
             revise_left,
         )
+    }
+
+    /// Every follow_up of this verdict, the whole review's first and then
+    /// each agent's in their order, with the job that found it.
+    pub fn found_follow_ups(&self) -> Vec<follow_up::FoundReviewFollowUp> {
+        let whole = self.follow_ups.iter().map(|follow_up| (None, follow_up));
+        let agents = self.agents.iter().flat_map(|agent| {
+            agent
+                .follow_ups
+                .iter()
+                .map(move |follow_up| (Some(agent.agent.clone()), follow_up))
+        });
+        whole
+            .chain(agents)
+            .map(|(agent, follow_up)| follow_up::FoundReviewFollowUp {
+                agent,
+                follow_up: follow_up.clone(),
+            })
+            .collect()
     }
 
     /// The verdict in the review's stdout: the whole text, or else the
@@ -1104,8 +1135,10 @@ pub use finding::{
 };
 pub use follow_up::{
     BundleKey, BundleKeyKind, DraftOrigin, DraftOutcome, DraftRevisit, DraftTarget,
-    FOLLOW_UP_CATEGORIES, MAX_DRAFT_PLANNERS, MEMBERSHIP_PROPOSAL_FIELD, PLANNER_QUESTION_OPTIONS,
-    UNLABELED_CATEGORY, follow_up_category, follow_up_membership_proposal,
+    FOLLOW_UP_CATEGORIES, FollowUpKey, FoundReviewFollowUp, MAX_DRAFT_PLANNERS,
+    MEMBERSHIP_PROPOSAL_FIELD, PLANNER_QUESTION_OPTIONS, REVIEW_FOLLOW_UP_CATEGORY, ReviewFollowUp,
+    ReviewFollowUpKey, UNLABELED_CATEGORY, follow_up_category, follow_up_membership_proposal,
+    new_review_follow_ups,
 };
 pub use goal::{Goal, StrandedDependency};
 pub use goal_tag::{GoalTag, TagSet};

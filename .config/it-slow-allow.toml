@@ -1249,3 +1249,21 @@ task = 2182
 name = "runtime_toolchains::a_claim_records_the_rust_toolchain_where_the_profile_is_declared"
 reason = "B 境界（supervisor の配線）: supervisor の claim が main checkout の dagq.toml の宣言した Rust の profile を verifier から読み、host_versions に rustc を聞かせて run_claimed に rustc_release・rustc_host を書くことを、dagq のソースでない repository の 1 本で確かめる。判定の場合分けは domain::toolchain の unit test"
 task = 2271
+
+# 5.094s (stress 5 on the worker's host)
+[[test]]
+name = "review_follow_ups::a_pass_with_follow_ups_lands_and_records_each_passage_once_as_a_draft"
+reason = "B 境界（SQLite・supervisor の配線）: 全体の review と agent の job の verdict の follow_ups が review_finished の前に queue の draft と出どころになり、pass が差し戻されずに着地し、記録した verdict の判定し直しで draft が増えないことを実際の queue と supervisor で確かめる。parse・行き先・重複の判断は domain::follow_up と domain::review_jobs の unit test"
+task = 2352
+
+# 6.724s (stress 5 on the worker's host)
+[[test]]
+name = "review_follow_ups::a_revise_with_follow_ups_records_them_once_across_the_runs_reviews"
+reason = "B 境界（SQLite・supervisor の配線）: revise の follow_ups が差し戻しの理由にならず、同じ run の次の回の review が同じ文書を返しても queue の draft が増えないことを、実際の revise の往復で確かめる。重複の判断は domain::follow_up の unit test"
+task = 2352
+
+# 5.120s (stress 5 on the worker's host)
+[[test]]
+name = "runtime_review::a_passing_review_exits_the_live_session_and_lands_it"
+reason = "B 境界（プロセス・supervisor の配線）: pass の review が生きている session を終わらせて着地するまでの event の順と、review の prompt に載る verdict の形を実際の supervisor で確かめる"
+task = 2352

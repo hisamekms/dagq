@@ -201,6 +201,117 @@ mod tests {
         .unwrap()
     }
 
+    /// The whole review and an agent job may give follow_ups with any
+    /// verdict (ADR-t2352-1); a verdict without them reads as before, and
+    /// a follow_ups of a broken shape leaves out what does not read
+    /// instead of making the verdict unreadable. They never change where
+    /// the run goes: a pass with follow_ups lands.
+    #[test]
+    fn a_verdicts_follow_ups_are_read_and_never_send_the_run_back() {
+        let stale = json!([{"text": "stale", "path": "docs/a.md", "section": "s", "codes": ["docs_drift"]}]);
+        for decision in ["pass", "revise", "concern"] {
+            let verdict = ReviewVerdict::parse(
+                &json!({"verdict": decision, "reasons": [], "summary": "w", "follow_ups": stale})
+                    .to_string(),
+            )
+            .unwrap();
+            assert_eq!(verdict.follow_ups.len(), 1, "{decision}");
+            assert_eq!(verdict.follow_ups[0].path, "docs/a.md");
+        }
+        assert_eq!(whole("pass", &[]).follow_ups, Vec::new());
+        let broken = ReviewVerdict::parse(
+            &json!({"verdict": "pass", "reasons": [], "summary": "w",
+                    "follow_ups": [{"text": "no path"}, 3, {"text": "t", "path": "docs/b.md"}]})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(broken.follow_ups.len(), 1);
+        assert_eq!(broken.follow_ups[0].path, "docs/b.md");
+        let not_a_list = ReviewVerdict::parse(
+            &json!({"verdict": "pass", "reasons": [], "summary": "w", "follow_ups": "docs/a.md"})
+                .to_string(),
+        )
+        .unwrap();
+        assert_eq!(not_a_list.follow_ups, Vec::new());
+
+        let with_agent = assemble(
+            ReviewVerdict::parse(
+                &json!({"verdict": "pass", "reasons": [], "summary": "w", "follow_ups": stale})
+                    .to_string(),
+            )
+            .unwrap(),
+            vec![
+                agent_result(
+                    "design",
+                    Some(
+                        json!({"agent": "design", "status": "completed", "verdict": "pass",
+                                "reasons": [], "summary": "d",
+                                "follow_ups": [{"text": "old", "path": "docs/c.md", "codes": []}]}),
+                    ),
+                )
+                .unwrap(),
+                agent("adr", "pass", &[]),
+            ],
+        );
+        assert_eq!(with_agent.agents[1].follow_ups, Vec::new());
+        let found = with_agent.found_follow_ups();
+        assert_eq!(
+            found
+                .iter()
+                .map(|f| (f.agent.as_deref(), f.follow_up.path.as_str()))
+                .collect::<Vec<_>>(),
+            [(None, "docs/a.md"), (Some("design"), "docs/c.md")]
+        );
+        for revise_left in [true, false] {
+            let route = with_agent.route(revise_left);
+            assert_eq!(route.destination, Destination::Land);
+            assert_eq!(route.parent, Destination::Land);
+        }
+        // What review_finished records reads back with them.
+        let recorded: ReviewVerdict =
+            serde_json::from_value(serde_json::to_value(&with_agent).unwrap()).unwrap();
+        assert_eq!(recorded, with_agent);
+    }
+
+    /// An agent job's follow_ups are read as the whole review's
+    /// (ADR-t2352-1): a follow_ups that is not an array reads as none, and
+    /// broken entries mixed with good ones leave only the good ones; the
+    /// result stays readable and its judgment is unchanged.
+    #[test]
+    fn an_agents_broken_follow_ups_leave_its_result_readable() {
+        let result = |follow_ups: Value| {
+            agent_result(
+                "design",
+                Some(
+                    json!({"agent": "design", "status": "completed", "verdict": "pass",
+                            "reasons": [], "summary": "d", "follow_ups": follow_ups}),
+                ),
+            )
+            .unwrap()
+        };
+        for not_a_list in [
+            json!("docs/a.md"),
+            json!({"text": "t", "path": "p"}),
+            json!(3),
+            Value::Null,
+        ] {
+            let read = result(not_a_list);
+            assert_eq!(read.follow_ups, Vec::new());
+            assert_eq!(read.verdict, Some(ReviewDecision::Pass));
+        }
+        let mixed = result(json!([
+            {"text": "no path"},
+            "a bare string",
+            {"text": " ", "path": "docs/b.md"},
+            {"text": "stale", "path": "docs/c.md", "section": 7, "codes": ["docs_drift", 1]},
+        ]));
+        assert_eq!(mixed.follow_ups.len(), 1);
+        assert_eq!(mixed.follow_ups[0].path, "docs/c.md");
+        assert_eq!(mixed.follow_ups[0].section, "");
+        assert_eq!(mixed.follow_ups[0].codes, vec!["docs_drift".to_owned()]);
+        assert_eq!(mixed.verdict, Some(ReviewDecision::Pass));
+    }
+
     #[test]
     fn a_job_is_named_by_its_agent_and_writes_its_own_output() {
         let design = ReviewJobId::Agent("design".into());

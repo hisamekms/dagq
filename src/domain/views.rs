@@ -182,8 +182,8 @@ pub struct TaskDetail {
     /// Where the draft came from when the runtime or a job made it
     /// (ADR-t807-1): null for a task a person added.
     pub origin: Option<TaskOrigin>,
-    /// The follow_up drafts the receipts of this task's runs proposed, with
-    /// their status now (ADR-t807-1).
+    /// The follow_up drafts the receipts and the reviews of this task's runs
+    /// proposed, with their status now (ADR-t807-1, ADR-t2352-1).
     pub follow_up_drafts: Vec<FollowUpDraft>,
     /// The draft's revisit time (ADR-t1540-1): when the runtime opens a
     /// planner for it again, or when it did (`opened_at`); null without one.
@@ -243,10 +243,13 @@ pub struct DraftBundleMember {
     pub status: String,
 }
 
-/// A follow_up draft a receipt of the task's runs proposed (ADR-t807-1).
+/// A follow_up draft a receipt or a review of the task's runs proposed
+/// (ADR-t807-1, ADR-t2352-1).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FollowUpDraft {
     pub run_id: Option<String>,
+    /// Its entry's position in the receipt's `follow_ups`; `None` for a
+    /// review's, which its document's path and section make one of its run.
     pub index: Option<i64>,
     pub task_id: TaskId,
     pub title: String,

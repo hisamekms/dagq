@@ -28,6 +28,7 @@ related:
   - adr-t1895-2
   - adr-t1428-1
   - adr-t2259-1
+  - adr-t2352-1
   - design-supervisor-lifecycle-review-builtin
   - design-supervisor-lifecycle-review-programs
 ---
@@ -77,6 +78,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 - やり直しはjobごとに1回まで、プログラムのreviewをやり直したreviewのjobはやり直さない。
 - 全jobが終わるまで判定せず、答えの無いjobが残れば`pass`にしない。
 - AIのjobが他のjobの判定をまとめることはない。
+- verdictの`follow_ups`は判定と行き先を変えず、それだけでrunを差し戻さない。
 - reviseは回（区切りの後）ごとに`MAX_REVISE_ATTEMPTS`回までworkerに返し、concernの`send_back`もこれに数える（[ADR-0050](../../adr/0050-revise-count-scope-per-review-round.md)、上限は[ADR-t2256-1](../../adr/2026-10-11-t2256-1-raise-the-run-review-revise-limit-and-decouple-plan-review.md)）。
   上限に達した後のreviseとconcernの`send_back`は`approve_landing`のaskにし、concernのほかの判断は上限に依らない。
 - 依頼（revise・衝突の解消）はeventを記録してから`turns/`に書くので、二重には書かない。
@@ -117,6 +119,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
    なお答えが無ければ`pass`にせず、全jobの終わりを待ってreviewの失敗にする。
    全てのjobが答えれば、全体のreviewのverdictにagentごとの結果を並べて`review_finished`を記録し、判定ごとに最も重い行き先を機械で取る（`domain::review_jobs::assemble`、下の「判定ごとの行き先」）。
    やり直しの使い方はjobごとにsupervisorの状態（`ReviewJob::again`）が持ち、待ちを挟んでも保つ。
+   どのjobの`follow_ups`も、`review_finished`の前にそのrunのtaskのfollow_upのdraftにする（下の「文書の照合」）。
 4. **reviseの往復**: `revise`と、適用する`send_back`のconcernは、回にreviseが残り、sessionが生きていれば、直す依頼を生きているsessionの次のturnに書く（`revise_requested`）。
    直前のturnの`peak_context`が閾値を超えれば、新しいsessionへの引き継ぎで書く。
    文面と手順は`application::prompt::revise_request`が持つ。
@@ -221,12 +224,16 @@ passしたrunのうちe2eが要るものは、着地スロットを待つ段でs
 
 ## 文書の照合
 
-runのreviewのpromptは、acceptanceの前に`REVIEW_DOCS_CHECK`の1段落を置く（未実装の変更は[built-in](review-builtin.md)）（[ADR-t1428-1](../../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)決定5、[ADR-t1942-2](../../adr/2026-10-07-t1942-2-document-check-and-review-in-both-directions.md)決定4）。
+runのreviewのpromptは、acceptanceの前に`REVIEW_DOCS_CHECK`の1段落を置く（未実装の変更は[built-in](review-builtin.md)）（[ADR-t1428-1](../../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)決定5、[ADR-t1942-2](../../adr/2026-10-07-t1942-2-document-check-and-review-in-both-directions.md)決定4、[ADR-t2352-1](../../adr/2026-10-16-t2352-1-review-sends-back-only-documents-the-diff-touched-and-follows-up-the-rest.md)）。
 
 - 変えた挙動を説明する文書（task・`summary`が名指すもの、読んで見つけたもの）を差分と`summary`に照らして読む。
   文書の差分だけでは正しいとせず、文書を直さなかった理由も確かめる。
-- 両方向: 古い文書と変わった流れ・境界・不変条件・約束の書き漏れを`docs_drift`で指摘し、加えて差分が文書に入れたコードの書き写しと経緯も指摘する。
+- 差し戻すのは、差分が変えた文書と差分の食い違いと、差分が文書の述べる不変条件・約束・境界を破ることだけで、`reasons`に`docs_drift`で書く。
+  何を文書の欠陥とするか（書き写し・経緯など）はpjの規則が決める。
   名前が文書に無いことだけでは古いとしない。
+- 差分が触っていない文書の古い記述は差し戻さず、全体のreviewもagentのjobもどのverdictでも`follow_ups`にpath・節・理由で返す（形は`domain::follow_up::ReviewFollowUp`）。
+  supervisorはそれを`docs_drift`のfollow_upのdraftとして、receiptの`follow_ups`と同じ経路で登録する（`application::integrate::register_review_follow_ups`、[Draft planners](draft-planners.md)）。
+  同じrunでは文書のpathと節ごとに1つで、別のjob・次の回のreview・再起動の後の判定し直しでは増えない。
 - このrepositoryでは、名前の確かめと書き写し・経緯は全体のreviewが`REVIEW_DOCS_CHECK`と`.dagq/review/builtin-acceptance.md`の規則で、形式は`[review.programs]`が見る。
 - `review.md`のTaskの節はcontextを持つので、plannerがcontextに書いた関連文書もreviewが読む（[`review`](commands.md)）。
 
