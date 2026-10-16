@@ -2,10 +2,11 @@
 # SessionStart hook (every source: startup, resume, clear, compact) of the
 # claude-dagq plugin.
 #
-# Only the inbox `dagq up` opens and the planners the supervisor opens
-# (and one a person opened with `dagq plan` before it was retired) are
-# affected: DAGQ_ROLE (inbox or planner, which they
-# put in the workspace's environment with --env) selects `dagq status --role <role>` (supervisors, unfinished runs,
+# Only the inbox a person opens with `dagq inbox` and the planners the
+# supervisor opens (and one a person opened with `dagq plan` before it was
+# retired) are affected: DAGQ_ROLE (inbox or planner, which `dagq inbox` and
+# the supervisor put on the command they start) selects
+# `dagq status --role <role>` (supervisors, unfinished runs,
 # the attention and asks addressed to that role, and the next cursor) on
 # stdout, which Claude Code adds to the context, so the session re-orients
 # itself after a start, a resume, compaction or /clear. The inbox's output
@@ -50,7 +51,7 @@ elif ! command -v dagq >/dev/null 2>&1; then
   exit 0
 fi
 
-# `up` and the supervisor name the session's queue in DAGQ_QUEUE; an explicit DAGQ_DB wins.
+# `dagq inbox` and the supervisor name the session's queue in DAGQ_QUEUE; an explicit DAGQ_DB wins.
 if [ -z "${DAGQ_DB:-}" ] && [ -n "${DAGQ_QUEUE:-}" ]; then
   DAGQ_DB=$DAGQ_QUEUE
   export DAGQ_DB

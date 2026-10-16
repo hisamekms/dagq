@@ -5,8 +5,8 @@
 #
 # Records the session span of the inbox and planner sessions,
 # which the runtime does not start headless: only a session
-# with DAGQ_ROLE inbox or planner and DAGQ_QUEUE (which `up` and the
-# supervisor put in the workspace's environment with --env) passes
+# with DAGQ_ROLE inbox or planner and DAGQ_QUEUE (which `dagq inbox` and the
+# supervisor put on the command they start) passes
 # the hook's stdin (session_id, transcript_path, cwd, source or reason) to
 # `dagq session-event open|close`, which reads the span's kind from
 # DAGQ_SESSION_KIND (else DAGQ_ROLE) and the workspace from
