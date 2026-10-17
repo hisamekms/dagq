@@ -68,6 +68,13 @@
 # one key twice, or two items of one name make the list unreadable (exit 2).
 # An item whose full name has no #[test] in tests/it at HEAD is warned about
 # by name, without changing the exit status.
+#
+# When DAGQ_LOCAL_CHECKS_DIR names a directory (dagq gives it to a worker's
+# turns), each run also leaves there a record of itself with the kind
+# it-test-time, the name dagq.toml's [local_checks.gates.it-test-time] gives
+# (ADR-t2589-1; the format is in scripts/local-check-record.sh). Its output
+# then comes after it ends, stdout before stderr. Without the variable
+# nothing is recorded.
 set -eu
 
 me=check-it-test-time
@@ -332,6 +339,8 @@ self_test() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/$me-self-test.XXXXXX")
   trap 'rm -rf "$tmp"' EXIT
   fail=0
+  # The cases record nothing, even in a turn of dagq, except the record cases.
+  unset DAGQ_LOCAL_CHECKS_DIR
   repo=$tmp/repo
   mkdir -p "$repo"
   g() { git -C "$repo" -c user.name=self-test -c user.email=self-test@example.invalid -c commit.gpgsign=false -c core.hooksPath=/dev/null "$@"; }
@@ -435,7 +444,43 @@ EOF
     else echo "$me --self-test: $1: exit $2, want $3" >&2; fail=1; fi
   done
 
+  # The records: none without DAGQ_LOCAL_CHECKS_DIR; with it one of the
+  # kind it-test-time, its exit status, its log, the same output, and the
+  # tree of the work tree with an uncommitted and an untracked change.
+  records=$tmp/records
+  mkdir -p "$records"
+  echo changed >> "$repo/tests/it/main.rs"
+  echo new > "$repo/untracked"
+  (cd "$repo" && sh "$script" --base HEAD~1 --allow "$tmp/allow.toml" "$tmp/nextest.log") > "$tmp/plain.out" 2> "$tmp/plain.err" || :
+  set +e
+  [ -z "$(ls -A "$records")" ]; record_case no_record_without_the_variable $?
+  (cd "$repo" && DAGQ_LOCAL_CHECKS_DIR=$records sh "$script" --base HEAD~1 --allow "$tmp/allow.toml" "$tmp/nextest.log") > "$tmp/rec.out" 2> "$tmp/rec.err"
+  status=$?
+  [ "$status" -eq 1 ] && cmp -s "$tmp/plain.err" "$tmp/rec.err" && cmp -s "$tmp/plain.out" "$tmp/rec.out"
+  record_case recorded_run_keeps_its_exit_and_output $?
+  set -- "$records"/*.json
+  [ $# -eq 1 ] && grep -q '"exit_status":1,' "$1" && grep -q '"kind":"it-test-time",' "$1"
+  record_case one_record_of_the_kind $?
+  log=$(sed 's/.*"log":"\([^"]*\)".*/\1/' "$1")
+  cat "$tmp/rec.out" "$tmp/rec.err" > "$tmp/rec.log"
+  [ -f "$records/$log" ] && cmp -s "$tmp/rec.log" "$records/$log"; record_case log_beside_the_record $?
+  committed=$(git -C "$repo" rev-parse 'HEAD^{tree}')
+  clone=$tmp/clone
+  git clone -q "$repo" "$clone"
+  cp "$repo/tests/it/main.rs" "$clone/tests/it/main.rs"; cp "$repo/untracked" "$clone/"
+  git -C "$clone" add -A
+  want_tree=$(git -C "$clone" write-tree)
+  [ "$want_tree" != "$committed" ] && grep -q "\"tree_start\":\"$want_tree\",\"tree_end\":\"$want_tree\"" "$1"
+  record_case tree_with_uncommitted_and_untracked $?
+  [ -z "$(git -C "$repo" diff --cached --name-only)" ]; record_case real_index_unchanged $?
+  set -e
+
   if [ "$fail" -eq 0 ]; then echo "$me --self-test: ok"; else exit 1; fi
+}
+
+record_case() { # case, then the condition's result (0 is ok)
+  if [ "$2" -eq 0 ]; then echo "$me --self-test: $1: ok"
+  else echo "$me --self-test: $1: FAILED" >&2; fail=1; fi
 }
 
 base=""
@@ -446,6 +491,27 @@ if [ "${1:-}" = "--self-test" ]; then
   [ $# -eq 1 ] || usage "--self-test takes no other argument"
   self_test
   exit 0
+fi
+
+# With the records' directory, run again as a child and record that run.
+if [ -n "${DAGQ_LOCAL_CHECKS_DIR:-}" ] && [ -z "${CHECK_IT_TEST_TIME_RECORDED:-}" ]; then
+  if [ ! -r "$here/local-check-record.sh" ]; then
+    echo "$me: no record of this run: $here/local-check-record.sh is missing" >&2
+  elif ! record=$(mktemp -d "${TMPDIR:-/tmp}/$me-record.XXXXXX"); then
+    echo "$me: no record of this run: cannot make a temporary directory" >&2
+  else
+    . "$here/local-check-record.sh"
+    trap 'rm -rf "$record"' EXIT
+    local_check_begin sh "$0" "$@" || :
+    set +e
+    CHECK_IT_TEST_TIME_RECORDED=1 sh "$script" "$@" > "$record/out" 2> "$record/err"
+    status=$?
+    cat "$record/out" "$record/err" > "$record/log"
+    local_check_end "$status" it-test-time "$record/log" || :
+    cat "$record/out"
+    cat "$record/err" >&2
+    exit "$status"
+  fi
 fi
 
 while [ $# -gt 0 ]; do

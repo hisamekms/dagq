@@ -43,6 +43,15 @@
 # To read more of a failure, read the log narrowly (rg -n PATTERN LOG,
 # tail -n N LOG) rather than whole. Only sh and a POSIX awk are needed.
 #
+# When DAGQ_LOCAL_CHECKS_DIR names a directory (dagq gives it to a worker's
+# turns), each run also leaves there a record of the command, its exit
+# status, start, time, the tree it ran on and a copy of the log, with the
+# kind stress when the command has --stress-count or --stress-duration and
+# no kind otherwise (ADR-t2589-1; the format and the tree are in
+# scripts/local-check-record.sh, which needs git). dagq.toml's
+# [local_checks.gates.*] name the same kind. Without the variable nothing is
+# recorded.
+#
 # Exit status: the command's, or 2 on a usage error or a log that cannot be
 # written. --self-test exits 0 when every case prints what is expected.
 set -eu
@@ -213,6 +222,8 @@ self_test() {
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/$me-self-test.XXXXXX")
   trap 'rm -rf "$tmp"' EXIT
   fail=0
+  # The fixture cases record nothing, even in a turn of dagq.
+  unset DAGQ_LOCAL_CHECKS_DIR
   esc=$(printf '\033')
   # "case status max_lines max_bytes command": the fixture is <case>.log (\033 in it
   # stands for the escape byte), the expected output <case>.out with LOG for
@@ -257,7 +268,71 @@ test-warnings-fail 101 16 12000 cargo test
 nextest-retry 100 150 12000 cargo nextest run --retries 1
 wrapper-fail 1 150 12000 sh scripts/landing-it.sh
 EOF
+  record_self_test
   if [ "$fail" -eq 0 ]; then echo "$me --self-test: ok"; else exit 1; fi
+}
+
+# record_self_test checks the records in a temporary git repository: none
+# without DAGQ_LOCAL_CHECKS_DIR, one per run with it, the kind stress only
+# for a stress run, and a tree that is the work tree's with its uncommitted
+# and untracked changes, the real index left as it was.
+record_self_test() {
+  repo=$tmp/record-repo
+  records=$tmp/records
+  mkdir -p "$repo" "$records"
+  g() { git -C "$repo" -c user.name=self-test -c user.email=self-test@example.invalid -c commit.gpgsign=false -c core.hooksPath=/dev/null "$@"; }
+  g init -q
+  echo one > "$repo/a"; echo ignored > "$repo/.gitignore"
+  g add -A && g commit -q -m base
+  committed=$(g rev-parse 'HEAD^{tree}')
+  echo two > "$repo/a"; echo new > "$repo/b"; echo skip > "$repo/ignored"
+  index_before=$(cksum < "$repo/.git/index")
+  # What committing the whole work tree would make, in a clone.
+  clone=$tmp/record-clone
+  git clone -q "$repo" "$clone"
+  cp "$repo/a" "$repo/b" "$repo/ignored" "$clone/"
+  git -C "$clone" add -A
+  want_tree=$(git -C "$clone" write-tree)
+
+  set +e
+  record_check() { # case, then the condition's result (0 is ok)
+    if [ "$2" -eq 0 ]; then echo "$me --self-test: $1: ok"
+    else echo "$me --self-test: $1: FAILED" >&2; fail=1; fi
+  }
+  (cd "$repo" && sh "$script" --log "$tmp/r0.log" sh -c 'exit 0') > /dev/null 2>&1
+  [ -z "$(ls -A "$records")" ]; record_check no_record_without_the_variable $?
+
+  (cd "$repo" && DAGQ_LOCAL_CHECKS_DIR=$records sh "$script" --log "$tmp/r1.log" sh -c 'echo plain; exit 3' "it's" > /dev/null 2>&1) || :
+  (cd "$repo" && DAGQ_LOCAL_CHECKS_DIR=$records sh "$script" --log "$tmp/r2.log" sh -c 'echo stressed' --stress-count 5 > /dev/null 2>&1)
+  (cd "$repo" && DAGQ_LOCAL_CHECKS_DIR=$records sh "$script" --log "$tmp/r3.log" sh -c 'echo timed' --stress-duration=60s > /dev/null 2>&1)
+  set -- "$records"/*.json
+  [ $# -eq 3 ]; record_check one_record_per_run $?
+  plain=$(grep -l '"exit_status":3' "$@" || :)
+  [ -n "$plain" ] && grep -q '"kind":null' "$plain" &&
+    grep -qF '"command":"sh -c '"'"'echo plain; exit 3'"'"' '"'"'it'"'"'\\'"'"''"'"'s'"'"'"' "$plain"
+  record_check plain_run_has_no_kind_and_its_command $?
+  [ "$(grep -l '"kind":"stress"' "$@" | wc -l | tr -d ' ')" -eq 2 ]; record_check stress_runs_have_the_stress_kind $?
+  log=$(sed 's/.*"log":"\([^"]*\)".*/\1/' "$plain")
+  [ -f "$records/$log" ] && grep -qx plain "$records/$log"; record_check log_beside_the_record $?
+  grep -q "\"tree_start\":\"$want_tree\",\"tree_end\":\"$want_tree\"" "$plain"; record_check tree_with_uncommitted_and_untracked $?
+  [ "$want_tree" != "$committed" ]; record_check tree_is_not_the_commit_s $?
+  [ "$(cksum < "$repo/.git/index")" = "$index_before" ]; record_check real_index_unchanged $?
+  grep -Eq '"started_at":"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z","duration_ms":[0-9]+,' "$plain"; record_check time_fields $?
+
+  # A run of over a second takes at least 1000 ms; a log over the limit
+  # keeps its end and the run its exit status.
+  slow=$tmp/records-slow
+  mkdir -p "$slow"
+  (cd "$repo" && DAGQ_LOCAL_CHECKS_DIR=$slow LOCAL_CHECK_LOG_BYTES=5 sh "$script" --log "$tmp/r4.log" sh -c 'sleep 1.1; echo head; echo tail; exit 7' > /dev/null 2> "$tmp/r4.err")
+  [ $? -eq 7 ] && [ ! -s "$tmp/r4.err" ]; record_check big_log_keeps_the_exit_status $?
+  set -- "$slow"/*.json
+  [ -f "$1" ] && grep -Eq '"duration_ms":([1-9][0-9]{3,}),' "$1"; record_check duration_of_a_slow_run $?
+  log=$(sed 's/.*"log":"\([^"]*\)".*/\1/' "$1")
+  [ "$(tail -n 1 "$slow/$log")" = tail ] && head -n 1 "$slow/$log" | grep -q 'byte(s) of the output are left out' &&
+    ! grep -q head "$slow/$log"
+  record_check big_log_keeps_its_end $?
+  [ "$(ls "$slow" | wc -l | tr -d ' ')" -eq 2 ]; record_check only_the_record_and_its_log $?
+  set -e
 }
 
 if [ "${1:-}" = "--self-test" ]; then
@@ -270,7 +345,7 @@ log=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --log) [ $# -ge 2 ] || usage "--log needs a file"; log=$2; shift 2 ;;
-    -h|--help) sed -n '2,47p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,56p' "$0"; exit 0 ;;
     --) shift; break ;;
     *) break ;;
   esac
@@ -283,9 +358,28 @@ if [ -z "$log" ]; then
 fi
 : > "$log" 2>/dev/null || { echo "$me: cannot write $log" >&2; exit 2; }
 
+# The kind of the run's record, as dagq.toml's gates name it.
+record_kind=""
+for a in "$@"; do
+  case "$a" in
+    --stress-count|--stress-count=*|--stress-duration|--stress-duration=*) record_kind=stress ;;
+  esac
+done
+if [ -n "${DAGQ_LOCAL_CHECKS_DIR:-}" ]; then
+  if [ -r "$here/local-check-record.sh" ]; then
+    . "$here/local-check-record.sh"
+    local_check_begin "$@" || :
+  else
+    echo "$me: no record of this run: $here/local-check-record.sh is missing" >&2
+  fi
+fi
+
 set +e
 "$@" > "$log" 2>&1
 status=$?
+if [ -n "${DAGQ_LOCAL_CHECKS_DIR:-}" ] && [ -r "$here/local-check-record.sh" ]; then
+  local_check_end "$status" "$record_kind" "$log" || :
+fi
 # The command's status wins even when the shortening fails.
 brief "$(kind_of "$@")" "$log" "$status" || echo "$me: could not shorten the output; full log: $log" >&2
 exit "$status"

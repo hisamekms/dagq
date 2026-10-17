@@ -128,6 +128,26 @@ command = "sh scripts/landing-it.sh"
 profile = "rust"
 paths = ["**/*.rs", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 
+[local_checks]
+# worker の手元の検証（stress と it の test の時間の関門）を要るかを、run の差分が test に触れたかで runtime が決める（ADR-t2589-1 決定 6・8）。
+# tests は test とみなす path の glob。tests/** は test の helper（tests/common）も含み、src/** と crates/** の Rust の file の中の
+# unit test の行は [toolchains.rust] の profile が見分ける（test でない行だけの変更は数えない）。見分けられない file は省かない側に倒れる。
+# 各 gate の paths はそれを要する test の path、kind は記録の種類の名前で、scripts/cargo-brief.sh（stress）と
+# scripts/check-it-test-time.sh（it-test-time）が記録に付ける名前と同じにする。どちらかを変えたら同じ変更でもう一方も直す。
+# 関門の対象と流し方は docs/development/local-checks.md の「stress」と「itのtestの時間の関門」。e2e（tests/e2e.rs・tests/e2e/）と
+# plugin（tests/plugin.rs）は stress の対象外なので gate の paths に入れない。
+# 書式は infrastructure::run_env::LOCAL_GATES_PREFIX の doc comment。
+# [local_checks] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 2624 を含んでから足した。
+tests = ["tests/**", "src/**", "crates/**"]
+
+[local_checks.gates.stress]
+paths = ["tests/it/**", "src/**", "crates/**"]
+kind = "stress"
+
+[local_checks.gates.it-test-time]
+paths = ["tests/it/**"]
+kind = "it-test-time"
+
 [verify_marks.within]
 # tests/common の within helper が待ちの時間切れで打つ行（'test <名前> timed out: <待ったもの> did not happen within <時間>'）を、
 # 着地の検証の timeout（host の分類: integrate がコマンドを 1 回流し直し、worker を resume しない）として読み、{test} を落ちた test の名前にする
