@@ -119,8 +119,10 @@ command = "sh scripts/landing-it.sh"
 # この repository は Rust の project なので、runtime に組み込みの Rust の profile の利用者として宣言する（ADR-t2268-1 決定 3）。
 # 着地の検証と landing recheck の出力の読み方（失敗の分類・落ちた test の名前・flaky のやり直しの env）が、暗黙の Rust の扱いから
 # この宣言に移り、doctor と status の暗黙の扱いの警告が消える。振る舞いは宣言の前と変わらない。
-# 検証の出力は paths に依らず宣言した profile が読む。paths は path に結びつくもの（build の出力と cache の置き場・推奨の案）の範囲で（今は doctor と status に出るだけ）、
-# この repository の Rust の範囲（build.rs を含む Rust の source と、cargo と toolchain の宣言のファイル。** は 0 個の段にも当たる）にする。
+# 検証の出力は paths に依らず宣言した profile が読む。paths は path に結びつくもの（build の出力と cache の置き場・推奨の案）の範囲で、
+# host の landing recheck は merge した木のファイルに paths が当たるときだけこの宣言の build の出力の置き場（CARGO_TARGET_DIR を queue の recheck/target に向ける）を使い、
+# doctor と status は当たる範囲として出し、dagq init と setup-review は推奨の案に写す（自動更新の source build は宣言に依らない）。
+# paths は、この repository の Rust の範囲（build.rs を含む Rust の source と、cargo と toolchain の宣言のファイル。** は 0 個の段にも当たる）にする。
 # 書式は infrastructure::run_env::TOOLCHAINS_PREFIX の doc comment、当て方は docs/design/toolchain-profiles.md。
 # [toolchains.<name>] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリがこの表を読めるようになってから宣言する。
 profile = "rust"
