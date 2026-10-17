@@ -28,6 +28,7 @@ tags:
 - [遅いintegration testの時間が使われている待ちの内訳と、修正の候補の見積もり](slow-test-waits.md)（goal 68、task 975）
 - [判断を unit test に移した着地（task 1412〜1416）の前後の本番の coverage の関門の test の時間と Summary](integration-to-unit-tests.md)（goal 68、task 1417）
 - [runtime の責務の分割の前後の構造の指標・変えた module の CI の test の時間・変更と衝突の集中](architecture-boundaries.md)（goal 100、task 1559）
+- [domain を crate に切り出した試作と現状の、ビルド時間・テストの時間・依存の制御・変更容易さの測定](domain-crate-measurement.md)（goal 121、task 1721）
 - [cmux を inbox だけが使う形の前後の、着地の関門の test 段・e2e の本数と時間・cmux の fake を使う it の数](cmux-inbox-only.md)（goal 92、task 1444）
 - [tests/it の全 1,192 本の分類（境界・判断・代表あり・goal 92 で消える）と、it でないと担保できない test の見積もり](it-reduction.md)（goal 118、task 1706）
 - [docs/design の4指標（総量と伸び・docs/design を変えた着地の割合・docs の衝突と claim の控え・道具の結果に占める docs）と docs だけの衝突の種類（M5）の定義と基準値](docs-slim.md)（goal 159、task 1946・1966）
