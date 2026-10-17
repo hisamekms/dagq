@@ -28,6 +28,7 @@ use super::actor_executor::{
 use super::queue_service::ServiceAccess;
 use super::{AgentProvider, CommandSpec, Spawner, Streams, TurnTarget};
 use crate::domain::actor::ACTOR_ENV;
+use crate::domain::local_checks;
 use crate::domain::podman_machine::QueueKey;
 use crate::domain::queue_service::{CLIENT_ENV, CREDENTIAL_FILE_ENV, Principal};
 use crate::domain::run_container::{
@@ -186,7 +187,7 @@ pub fn verification_line(
     use crate::domain::run_container::{
         MATERIALS_ENV, VerificationContainer, verification_command, verification_run_args,
     };
-    let mut env = env.to_vec();
+    let mut env = verification_env(env);
     env.extend([
         (
             MATERIALS_ENV.to_owned(),
@@ -216,6 +217,16 @@ pub fn verification_line(
     })
     .map_err(|why| anyhow!("the verification's container cannot be made: {why}"))?;
     Ok(containers.command_line(&args))
+}
+
+/// `env` without what names a worker's local checks' directory: a
+/// verification's results are the runtime's own record, and it is never
+/// told where the worker's are (ADR-t2589-1 decision 2).
+fn verification_env(env: &[(String, String)]) -> Vec<(String, String)> {
+    env.iter()
+        .filter(|(key, _)| key != local_checks::DIR_ENV)
+        .cloned()
+        .collect()
 }
 
 /// Starts a worker's turns in their container. Only a Claude worker's
@@ -319,6 +330,7 @@ impl ActorExecutor for PodmanActorExecutor<'_> {
             .map_err(|error| anyhow!("hand the run token to the container: {error:#}"))?;
         let mut env = turn_variables(&prepared.run_env, &agent);
         env.extend(actor.env());
+        env.push(super::actor_executor::local_checks_env(run)?);
         env.push((
             CREDENTIAL_FILE_ENV.to_owned(),
             token
@@ -388,6 +400,7 @@ fn turn_variables(run_env: &[(String, String)], agent: &CommandSpec) -> Vec<(Str
             || CLIENT_ENV.contains(&key)
             || key == "HOME"
             || key == "CLAUDE_CONFIG_DIR"
+            || key == local_checks::DIR_ENV
     };
     let from_agent = agent
         .get_envs()
@@ -405,12 +418,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_verification_is_not_told_the_local_checks_directory() {
+        let env = vec![
+            ("CARGO_TARGET_DIR".to_owned(), "/build".to_owned()),
+            (
+                "DAGQ_LOCAL_CHECKS_DIR".to_owned(),
+                "/q/runs/r1/local-checks".to_owned(),
+            ),
+        ];
+        assert_eq!(verification_env(&env), env[..1]);
+    }
+
+    #[test]
     fn a_turn_s_variables_leave_the_host_s_compiler_wrapper_and_the_actor_s_names_out() {
         let run_env = vec![
             ("RUSTC_WRAPPER".to_owned(), "sccache".to_owned()),
             ("CARGO_TARGET_DIR".to_owned(), "/build".to_owned()),
             ("DAGQ_RUN_ID".to_owned(), "other".to_owned()),
             ("DAGQ_SERVICE_SOCKET".to_owned(), "/x".to_owned()),
+            ("DAGQ_LOCAL_CHECKS_DIR".to_owned(), "/elsewhere".to_owned()),
             ("HOME".to_owned(), "/Users/me".to_owned()),
             (
                 "CLAUDE_CONFIG_DIR".to_owned(),

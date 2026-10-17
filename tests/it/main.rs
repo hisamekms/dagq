@@ -149,6 +149,7 @@ mod runtime_landing_answers;
 mod runtime_landing_release;
 mod runtime_landing_verification;
 mod runtime_light_slots;
+mod runtime_local_checks;
 mod runtime_observer;
 mod runtime_precheck;
 mod runtime_provider_switch;

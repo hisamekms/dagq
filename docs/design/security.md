@@ -41,6 +41,7 @@ dagqのセキュリティの模型の全体を1か所にまとめる。決定の
 AI actorの出力は全てデータで、制御側が決定的に遷移へ写す:
 
 - worker: commitとreceipt。validatingとIntegratorが検査し、receiptの主張を信用せずに検証コマンドを流し直す
+  pjのscriptがrun dirに書く手元の検証の記録もworkerが偽りうるdataで、runtimeは古いtreeと壊れた記録を弾くだけで改ざんを検出せず、記録を着地の安全の根拠にしない（advisory、[ADR-t2589-1](../adr/2026-10-17-t2589-1-local-check-runs-are-recorded-by-project-scripts-and-matched-to-the-receipt-tree.md)決定4）
 - review・recovery・plan review・goal reviewのjob: 型付きのverdict。
   supervisorが写像の表どおりに適用し、読めない出力は何も進めない（[Roles](supervisor-lifecycle/roles.md#headlessのjobのverdictと遷移)）
 - observer: findingと、findingに紐づく`blocked`のaskだけ

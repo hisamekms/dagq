@@ -49,6 +49,7 @@ use crate::domain::{
     actor_model::ActorLaunch,
     authorization::{Capability, grants},
     headless_job::JobAccess,
+    local_checks,
     queue_service::{CLIENT_ENV, CREDENTIAL_FILE_ENV, Principal, SOCKET_ENV, client_role},
     sessions::{self, LAUNCH_ENV},
 };
@@ -399,6 +400,18 @@ pub trait ActorExecutor {
     fn spawn(&self, spec: ActorExecutionSpec<'_>) -> Result<ActorHandle>;
 }
 
+/// What names to a worker's turn of `run` the directory its project's
+/// scripts record the local checks in (ADR-t2589-1 decision 2): the
+/// records' directory under the run directory, the same path in a
+/// container, which mounts the run directory at its own path.
+pub fn local_checks_env(run: &TaskRun) -> Result<(String, String)> {
+    let run_dir = Path::new(run.run_dir().context("missing run directory")?);
+    Ok((
+        local_checks::DIR_ENV.to_owned(),
+        path_text(&local_checks::dir_of(run_dir))?,
+    ))
+}
+
 /// The environment of `actor` on the queue at `queue` (ADR-0026,
 /// ADR-t728-1 decision 4): its role, the queue (not for a worker or a job,
 /// whose `dagq` runs in client mode: [`client_role`]), its id, its run and task,
@@ -745,6 +758,7 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 let mut streams = Streams::Inherit;
                 let mut without: &[&str] = &[];
                 let mut with: &[(String, String)] = &[];
+                let mut checks = None;
                 let mut command = match agent {
                     SessionAgent::Turn {
                         run,
@@ -758,6 +772,7 @@ impl ActorExecutor for HostActorExecutor<'_> {
                         streams = Streams::Files { stdout, stderr };
                         without = without_env;
                         with = with_env;
+                        checks = Some(local_checks_env(run)?);
                         let target = TurnTarget::of_run(run)?;
                         provider.turn_command(&target, prompt, session)?
                     }
@@ -796,6 +811,12 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 for name in without {
                     command.env_remove(name);
                 }
+                // Only a worker's turn names where its local checks are
+                // recorded: never a planner, whatever it inherited.
+                match &checks {
+                    Some((key, value)) => command.env(key, value),
+                    None => command.env_remove(local_checks::DIR_ENV),
+                };
                 let child = self
                     .spawn_agent(provider, &actor, &mut command, streams)
                     .context("launch agent")?;
@@ -1772,7 +1793,9 @@ mod tests {
                 .collect();
             assert!(args.contains(&"opus".to_owned()), "{args:?}");
             // The worker's `dagq` goes to the queue service with the
-            // run's token, never to the queue's path.
+            // run's token, never to the queue's path; the turn is told
+            // where its local checks are recorded (ADR-t2589-1 decision 2).
+            let records = Path::new(run.run_dir().unwrap()).join("local-checks");
             assert_eq!(
                 env_of(command),
                 pairs(&[
@@ -1785,6 +1808,7 @@ mod tests {
                         "DAGQ_SERVICE_CREDENTIAL_FILE",
                         "/q/service/credentials/worker:r1"
                     ),
+                    ("DAGQ_LOCAL_CHECKS_DIR", records.to_str().unwrap()),
                 ])
             );
             assert_eq!(removed_of(command), ["DAGQ_QUEUE"]);

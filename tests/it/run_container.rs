@@ -117,6 +117,7 @@ printf '{"type":"system","subtype":"init","session_id":"%s","model":"stub","perm
   echo "service=$DAGQ_SERVICE_URL"
   echo "credential=$DAGQ_SERVICE_CREDENTIAL_FILE"
   echo "home=$HOME"
+  echo "checks=$DAGQ_LOCAL_CHECKS_DIR"
   echo "target=$CARGO_TARGET_DIR"
   echo "pwd=$(pwd)"
   echo "main=$(git rev-parse refs/remotes/dagq/main)"
@@ -434,6 +435,12 @@ fn a_worker_s_turn_runs_in_its_hardened_container_and_leaves_its_bundle_and_stat
         run_dir.join("container-home").display().to_string()
     );
     assert_eq!(seen["target"], "/build/target");
+    // The records' directory is in the run directory the container mounts
+    // at its own path (ADR-t2589-1 decision 2).
+    assert_eq!(
+        seen["checks"],
+        run_dir.join("local-checks").display().to_string()
+    );
     assert_eq!(
         Path::new(&seen["pwd"]).canonicalize().unwrap(),
         clone.canonicalize().unwrap()

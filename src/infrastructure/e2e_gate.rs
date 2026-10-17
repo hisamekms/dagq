@@ -449,6 +449,8 @@ fn given_env(
 ) -> BTreeMap<OsString, OsString> {
     let mut given = inherited.clone();
     given.extend(env.iter().map(|(key, value)| (key.into(), value.into())));
+    // The e2e's result is the runtime's own record (ADR-t2589-1 decision 2).
+    given.remove(std::ffi::OsStr::new(crate::domain::local_checks::DIR_ENV));
     given.insert("TMPDIR".into(), root.into());
     if let Some(dir) = target_dir {
         given.insert("CARGO_TARGET_DIR".into(), dir.into());
@@ -1105,6 +1107,11 @@ test result: FAILED. 1 passed; 2 failed\n";
         let env = [
             ("GATE_ENV".to_owned(), "run-env-value".to_owned()),
             ("HOME".to_owned(), "/run/home".to_owned()),
+            // Never the e2e's (ADR-t2589-1 decision 2).
+            (
+                crate::domain::local_checks::DIR_ENV.to_owned(),
+                "/q/runs/r/local-checks".to_owned(),
+            ),
         ];
         let given = |rerun: Option<&[String]>| -> BTreeMap<String, String> {
             given_env(

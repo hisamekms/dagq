@@ -940,6 +940,7 @@ fn flaky_retry_vars() -> impl Iterator<Item = &'static str> {
 /// (ADR-t2086-1): its `RUSTC_WRAPPER` is the guard, or none when the server
 /// was not confirmed, never one the process inherited.
 fn verification_command(script: &str, cwd: &Path, env: &[(String, String)]) -> Command {
+    use crate::domain::local_checks::DIR_ENV;
     use crate::domain::sccache::{ERROR_LOG_VAR, REFUSED_ERROR_LOG, WRAPPER_VAR};
     let mut command = Command::new("/bin/sh");
     command.arg("-c").arg(script).current_dir(cwd);
@@ -953,6 +954,9 @@ fn verification_command(script: &str, cwd: &Path, env: &[(String, String)]) -> C
         command.env_remove(WRAPPER_VAR);
     }
     command.envs(env.iter().map(|(key, value)| (key, value)));
+    // Its results are the runtime's own record: it is never told where a
+    // worker's local checks are recorded (ADR-t2589-1 decision 2).
+    command.env_remove(DIR_ENV);
     command
 }
 
@@ -4279,6 +4283,26 @@ mod tests {
         );
         assert_eq!(wrapper(&[]), None);
         assert_eq!(wrapper(&[("SCCACHE_ERROR_LOG", "/tmp/sccache.log")]), None);
+    }
+
+    /// A verification command is never told where a worker's local checks
+    /// are recorded, inherited or given (ADR-t2589-1 decision 2).
+    #[test]
+    fn a_verification_command_is_not_told_the_local_checks_directory() {
+        use crate::domain::local_checks::DIR_ENV;
+        let given = [(DIR_ENV.to_owned(), "/q/runs/r/local-checks".to_owned())];
+        for env in [&[][..], &given[..]] {
+            let command = verification_command("true", Path::new("/"), env);
+            assert_eq!(
+                command
+                    .get_envs()
+                    .filter(|(key, _)| *key == DIR_ENV)
+                    .map(|(_, value)| value)
+                    .collect::<Vec<_>>(),
+                [None],
+                "{env:?}"
+            );
+        }
     }
 
     #[test]

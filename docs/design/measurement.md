@@ -55,6 +55,7 @@ related:
 | run branchのbundle | containerのrunのrun branch 1本 | 材料 | run dir。turnの終わりにcontainerが書き制御側が取り込む |
 | runの状態のファイル | containerのrunのHEADとstatus（workerの申告） | 材料 | run dir。bundleの後にcontainerが書き直し、検証と復旧が読む |
 | mainのbundle | 今のmain 1本 | 材料 | run dir。制御側が書き、次のturnの始めにcontainerが取り込む |
+| 手元の検証の記録 | workerの手元の検証の1回の実行ごとの記録（項目は`domain::local_checks::LocalCheck`）とlog | 材料 | run dirの`local-checks/`（turnのenvが名指す）。pjのscriptが書き、runtimeがreceiptのcommitのtreeと照合してreviewの資料に載せる（`application::review::read_local_checks`） |
 | 着地の検証の対応表のcache | 着地の検証が取った対応表の最新の1つと、取ったCIのrun・そのcommit・runの時刻・取った時刻 | 材料 | hostで`scripts/landing-it.sh`がGitHub Actionsのartifact `it-coverage-map`から取り、新しいrunが無ければ取り直さない。置き場はqueueの外の`${XDG_CACHE_HOME:-$HOME/.cache}/dagq/landing-it/<run id>/`。hostのverificationはそこを読む。containerのverificationでは、integrateが流す準備のコマンド（`landing-it.sh --prepare`）が同じcacheから取ってverificationの材料のdirに写し、integrateがそれをrun dirの材料のdirに写し、containerの中の`landing-it.sh`はその写しだけを読む。cacheも写しも消えてよく、artifactかcacheから取り直せる |
 
 計測の層の論理ストアか、runtime・CI・`scripts/`が続けて書き他の仕組みが読む共有の記録を足すか変えるtaskは、同じ変更でこの表に行（中身・区分・今のアダプタ）を足すか直す（[ADR-t2065-1](../adr/2026-10-08-t2065-1-measurement-ssot-table-holds-stores-and-shared-records-only.md)、[文書の規則](../development/documents.md)の「design」）。

@@ -6,9 +6,11 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::path::Path;
 
+use super::EntryKind;
 use super::{
     Repository, RunFiles, TaskStore, fenced, integrate::integrate_logs, or_none, path_text,
 };
+use crate::domain::local_checks::{self, LocalChecks, Reading};
 use crate::domain::review_builtins::{self, BuiltinAgent, EffectiveBuiltin};
 use crate::domain::review_subagents::{self, AgentRole, AgentTools, ReviewAgents};
 use crate::domain::{CommitSha, Goal, Provider, Receipt, RunStatus, Task, TaskId, TaskRun};
@@ -95,6 +97,7 @@ pub fn review(ports: Review<'_>, task_id: TaskId, range: Option<&ReviewRange>) -
     let log = repository.log_oneline(&base, &head)?;
     let stat = repository.diff_stat(&base, &head)?;
     let numbers = repository.diff_numbers(&base, &head)?;
+    let checks = local_checks_section(files, &*repository, run_dir, &head);
     let text = review_markdown(
         files,
         &task,
@@ -105,6 +108,7 @@ pub fn review(ports: Review<'_>, task_id: TaskId, range: Option<&ReviewRange>) -
         &head,
         &log,
         &stat,
+        checks.as_deref(),
     );
     let path = run_dir.join("review.md");
     let temporary = run_dir.join(format!(".review.md.{pid}.tmp"));
@@ -547,6 +551,95 @@ pub fn check_agents(
     }))
 }
 
+/// The records of the worker's local checks in the records' directory of
+/// `run_dir` ([`local_checks::dir_of`]) read against `tree`, the
+/// receipt's commit's tree (ADR-t2589-1 decisions 3 and 4): each file
+/// named `*.json` is a record, read in the order of the names, without
+/// following a link and up to [`local_checks::RECORD_BYTES`], and those
+/// past [`local_checks::MAX_RECORDS`] are broken unread. A directory that
+/// is not one (a link, a file) or cannot be listed is one broken record.
+/// Nothing is run or interpreted, and no log is read. Never fails: a
+/// record changes no review's way, only what its material shows.
+pub fn read_local_checks(files: &dyn RunFiles, run_dir: &Path, tree: &str) -> LocalChecks {
+    let dir = local_checks::dir_of(run_dir);
+    let mut checks = LocalChecks::default();
+    match files.entry_kind(&dir) {
+        Ok(EntryKind::Dir) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return checks,
+        _ => {
+            checks.add(Reading::Broken);
+            return checks;
+        }
+    }
+    let Ok(entries) = files.read_dir(&dir) else {
+        checks.add(Reading::Broken);
+        return checks;
+    };
+    let (records, over) = local_checks::records_to_read(entries);
+    for _ in 0..over {
+        checks.add(Reading::Broken);
+    }
+    for path in &records {
+        let bytes = match files.entry_kind(path) {
+            Ok(EntryKind::File) => files
+                .read_range(path, 0, local_checks::RECORD_BYTES + 1)
+                .ok()
+                .filter(|bytes| bytes.len() as u64 <= local_checks::RECORD_BYTES),
+            _ => None,
+        };
+        checks.add(local_checks::judge(bytes.as_deref(), tree));
+    }
+    checks
+}
+
+/// The section of review.md on the worker's local checks
+/// ([`read_local_checks`] against the tree of `head`, the receipt's
+/// commit; a run in a container's is the run branch taken in on the
+/// control side): the matched records' items and how many were left out,
+/// never a log's text (ADR-t2589-1 decision 5). `None` without any
+/// record, so the material of a project whose scripts write none is as it
+/// was, and `None` too when the commit's tree cannot be read: the records
+/// never fail the review.
+fn local_checks_section(
+    files: &dyn RunFiles,
+    repository: &dyn Repository,
+    run_dir: &Path,
+    head: &str,
+) -> Option<String> {
+    let dir = local_checks::dir_of(run_dir);
+    if matches!(files.entry_kind(&dir), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return None;
+    }
+    let tree = match repository.tree_of(head) {
+        Ok(tree) => tree,
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "the tree of {head} could not be read for the local check records: {error:#}");
+            return None;
+        }
+    };
+    let checks = read_local_checks(files, run_dir, &tree);
+    if checks.is_empty() {
+        return None;
+    }
+    let matched = serde_json::to_string_pretty(&checks.matched_value()).unwrap_or_default();
+    Some(format!(
+        "\n## Local check records\n\n\
+         What the project's scripts recorded of the worker's local checks in {dir}: \
+         the records whose tree at the start and at the end is the tree {tree} of the receipt's commit {head}, \
+         each with its command, exit status, start, duration in milliseconds, kind and log file in that directory. \
+         The worker can write these records (advisory); they are not checked for tampering, and the landing's verification runs again regardless.\n\n\
+         - matched: {matched_count}\n\
+         - of another tree, or whose tree changed while it ran: {other}\n\
+         - unreadable, malformed or over the limits: {broken}\n\n{body}",
+        dir = dir.display(),
+        matched_count = checks.matched.len(),
+        other = checks.other_tree,
+        broken = checks.broken,
+        body = fenced("json", &matched),
+    ))
+}
+
 /// Write `text` and then the full diff `<base>...<head>` as a fenced block to
 /// `temporary`. Git streams the diff to the file `diff` first, as raw bytes
 /// and never through memory, because the fence must be longer than any
@@ -597,6 +690,7 @@ fn review_markdown(
     head: &str,
     log: &str,
     stat: &str,
+    local_checks: Option<&str>,
 ) -> String {
     let mut out = format!(
         "# Review of task {id}: {title}\n\n\
@@ -665,6 +759,9 @@ fn review_markdown(
         _ => "(none)".to_owned(),
     };
     out.push_str(&format!("\n### Follow-ups\n\n{follow_ups}\n"));
+    if let Some(section) = local_checks {
+        out.push_str(section);
+    }
     out.push_str(&format!(
         "\n## Commits\n\n`git log --oneline {base}..{head}`\n\n{log}\n\
          ## Diffstat\n\n`git diff --stat {base}...{head}`\n\n{stat}\n\
@@ -766,6 +863,7 @@ mod tests {
             SHA,
             "",
             "",
+            None,
         )
     }
 

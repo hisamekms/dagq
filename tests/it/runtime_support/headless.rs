@@ -11,6 +11,14 @@ use dagq::domain::{EventKind, Provider, worker::WorkerMode};
 /// turns with the stub `claude` of [`headless_claude`] (a turn does `say
 /// working` until the test sets its turns).
 pub fn headless_fixture(evidence: &[EvidenceCheck]) -> (Fixture, PathBuf, PathBuf, TestWorkspace) {
+    headless_fixture_verified(evidence, "test -f seed.txt")
+}
+
+/// [`headless_fixture`] whose task's verification is `verify`.
+pub fn headless_fixture_verified(
+    evidence: &[EvidenceCheck],
+    verify: &str,
+) -> (Fixture, PathBuf, PathBuf, TestWorkspace) {
     let (dir, repo, db) = fixture();
     let mut queue = SqliteQueue::open(&db).unwrap();
     queue
@@ -21,7 +29,7 @@ pub fn headless_fixture(evidence: &[EvidenceCheck]) -> (Fixture, PathBuf, PathBu
             title: "test task".into(),
             description: "small change".into(),
             acceptance: "works".into(),
-            verification_commands: vec!["test -f seed.txt".into()],
+            verification_commands: vec![verify.into()],
             required_evidence: evidence.to_vec(),
             paths: Vec::new(),
             priority: Default::default(),

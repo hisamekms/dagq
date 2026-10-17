@@ -917,6 +917,9 @@ impl<'a> Turns<'a> {
             .map_or_else(crate::domain::toolchain::Toolchains::none, |read| read());
         let mut reader = agent.turn_reader(&toolchains)?;
         let cwd = self.cwd()?;
+        if let TurnOwner::Run(run) = self.owner {
+            prepare_local_checks(self.files, run);
+        }
         let (without_env, with_env) = self.sccache_turn(run_dir, turn);
         let session = match resume {
             Some(id) => TurnSession::Resume(id),
@@ -1543,6 +1546,20 @@ impl<'a> Turns<'a> {
             self.heartbeat();
             thread::sleep(self.provider.wait_interval());
         }
+    }
+}
+
+/// Make the directory a worker's turn of `run` is told its local checks
+/// are recorded in (ADR-t2589-1 decision 2), before the turn starts. One
+/// that cannot be made is only logged: the turn starts all the same, and
+/// a project's script that cannot write there records nothing.
+fn prepare_local_checks(files: &dyn RunFiles, run: &TaskRun) {
+    let Some(run_dir) = run.run_dir() else {
+        return;
+    };
+    let dir = crate::domain::local_checks::dir_of(Path::new(run_dir));
+    if let Err(error) = files.create_dir_all(&dir) {
+        tracing::warn!(run_id = %run.id(), %error, "the local checks' directory {} could not be made: {error}", dir.display());
     }
 }
 
