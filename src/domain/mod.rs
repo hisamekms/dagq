@@ -642,6 +642,15 @@ pub const MAX_REVISE_ATTEMPTS: usize = 3;
 /// supervisor acts on once answered (ADR-0027, ADR-0022 decision 3).
 pub const LANDING_OPTIONS: &[&str] = &["land", "send_back", "cancel"];
 
+/// The options of the `approve_landing` ask a failed review opens, which
+/// gave no verdict: [`LANDING_OPTIONS`] and `retry_review`, the review run
+/// again on the same run and receipt (ADR-t2521-1). Its options are how
+/// [`LandingAnswer::accepted`] knows the ask is of a failed review.
+pub const FAILED_REVIEW_LANDING_OPTIONS: &[&str] = &["land", "send_back", "cancel", RETRY_REVIEW];
+
+/// The answer that runs a failed review again (ADR-t2521-1).
+pub const RETRY_REVIEW: &str = "retry_review";
+
 /// A person's answer to an `approve_landing` ask the supervisor applies,
 /// read like [`PlanAnswer`] (task 1424).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -654,20 +663,37 @@ pub enum LandingAnswer {
     SendBack(Option<String>),
     /// Fail the run and cancel its task.
     Cancel,
+    /// Run the review again on the same run and receipt, without resuming
+    /// the session (ADR-t2521-1): only the answer of a failed review's ask.
+    RetryReview,
 }
 
 impl LandingAnswer {
-    /// One of [`LANDING_OPTIONS`], `send_back` optionally followed by `:`
-    /// and the person's reason; anything else is the inbox's to read
-    /// (`land: x`, `cancel: x`, `send_backwards`, `send_back reason`). The
-    /// supervisor that applies the answer, `answer`'s `runtime_delivers` and
-    /// `status`'s `applying the answer` all read it here, so they agree.
+    /// One of [`FAILED_REVIEW_LANDING_OPTIONS`], `send_back` optionally
+    /// followed by `:` and the person's reason; anything else is the
+    /// inbox's to read (`land: x`, `cancel: x`, `send_backwards`,
+    /// `send_back reason`). Whether the ask takes the answer is
+    /// [`Self::accepted`]'s.
     pub fn parse(answer: &str) -> Option<Self> {
         match answer.trim() {
             "land" => Some(Self::Land),
             "cancel" => Some(Self::Cancel),
+            RETRY_REVIEW => Some(Self::RetryReview),
             answer => send_back_reason(answer).map(Self::SendBack),
         }
+    }
+
+    /// The answer the runtime applies to an `approve_landing` ask that
+    /// offered `options`: [`Self::parse`]'s, but `retry_review` only for
+    /// the ask of a failed review, the one that offers it
+    /// ([`FAILED_REVIEW_LANDING_OPTIONS`]); to the ask of a verdict it is
+    /// the inbox's to read (ADR-t2521-1). The supervisor that applies the
+    /// answer, `answer`'s `runtime_delivers` and `status`'s `applying the
+    /// answer` all read it here, so they agree.
+    pub fn accepted(answer: &str, options: &[String]) -> Option<Self> {
+        Self::parse(answer).filter(|action| {
+            *action != Self::RetryReview || options.iter().any(|option| option == RETRY_REVIEW)
+        })
     }
 }
 
@@ -1859,14 +1885,45 @@ mod tests {
             "send_back reason",
             "land: x",
             "cancel: x",
+            "retry_review: x",
+            "retry review",
         ] {
             assert_eq!(LandingAnswer::parse(other), None, "{other}");
         }
+        assert_eq!(
+            LandingAnswer::parse(" retry_review "),
+            Some(LandingAnswer::RetryReview)
+        );
         assert!(
-            LANDING_OPTIONS
+            FAILED_REVIEW_LANDING_OPTIONS
                 .iter()
                 .all(|option| LandingAnswer::parse(option).is_some())
         );
+    }
+
+    #[test]
+    fn only_the_ask_of_a_failed_review_takes_retry_review() {
+        let options = |list: &[&str]| list.iter().map(|o| (*o).to_owned()).collect::<Vec<_>>();
+        let failed = options(FAILED_REVIEW_LANDING_OPTIONS);
+        let verdict = options(LANDING_OPTIONS);
+        assert_eq!(
+            LandingAnswer::accepted("retry_review", &failed),
+            Some(LandingAnswer::RetryReview)
+        );
+        assert_eq!(LandingAnswer::accepted("retry_review", &verdict), None);
+        assert_eq!(LandingAnswer::accepted("retry_review", &[]), None);
+        for (answer, action) in [
+            ("land", LandingAnswer::Land),
+            ("cancel", LandingAnswer::Cancel),
+            ("send_back: x", LandingAnswer::SendBack(Some("x".into()))),
+        ] {
+            assert_eq!(
+                LandingAnswer::accepted(answer, &failed),
+                Some(action.clone())
+            );
+            assert_eq!(LandingAnswer::accepted(answer, &verdict), Some(action));
+        }
+        assert_eq!(LandingAnswer::accepted("ready", &failed), None);
     }
 
     #[test]
@@ -2601,8 +2658,8 @@ pub fn abandon_left_session_open(kind: &str, payload: &serde_json::Value) -> boo
 /// the worker's terminal itself (`runtime_delivers: true`); its answer to a
 /// run no longer running and its `ask_delivery_failed` are the inbox's.
 /// The answer of an `approve_landing` ask the supervisor applies
-/// (`runtime_delivers: true`: one of [`LANDING_OPTIONS`] or `send_back:
-/// <reason>`, [`LandingAnswer`], for a run awaiting integration) is not one either, nor that of the recovery job's `decide`
+/// (`runtime_delivers: true`: one the ask takes, [`LandingAnswer::accepted`],
+/// for a run awaiting integration) is not one either, nor that of the recovery job's `decide`
 /// ask (`runtime_delivers: true`: one of the ask's options, [`TRIAGE_OPTIONS`]
 /// or the job's own, for a `failed` or `interrupted` run).
 /// `integration_retried` is not one: the landing verifies once more by

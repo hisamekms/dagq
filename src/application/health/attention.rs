@@ -236,13 +236,17 @@ pub fn attention(
         // A run a `land` answer approved, or one recovered from a landing
         // it may land again, waits for the supervisor to land it (tasks 949
         // and 1118), not for a person's `integrate`; one recovered from a
-        // landing it may not land again waits for the supervisor's review.
+        // landing it may not land again, or whose failed review a person
+        // answered `retry_review` (ADR-t2521-1), waits for the supervisor's
+        // review.
         if run.status() == RunStatus::AwaitingIntegration && !leased {
             let history = RunHistory::from_events(&events);
             let waits = if history.queued_to_land().is_some() {
                 Some((event_kind::LANDING_QUEUED, AttentionNext::QueuedToLand))
             } else if history.recovered_landing().is_some() {
                 Some((event_kind::RUN_RECOVERED, AttentionNext::Reviewing))
+            } else if history.queued_review_retry().is_some() {
+                Some((event_kind::REVIEW_RETRY_QUEUED, AttentionNext::Reviewing))
             } else {
                 None
             };
@@ -919,9 +923,10 @@ pub fn attention(
             && ask
                 .answer
                 .as_deref()
-                .is_some_and(|answer| LandingAnswer::parse(answer).is_some())
+                .is_some_and(|answer| LandingAnswer::accepted(answer, &ask.options).is_some())
         {
-            // The supervisor lands, sends back or cancels the run itself.
+            // The supervisor lands, sends back, cancels or reviews again
+            // the run itself (ADR-t2521-1).
             (
                 "answered",
                 event_kind::ASK_ANSWERED,

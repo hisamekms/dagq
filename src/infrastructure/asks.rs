@@ -267,8 +267,9 @@ impl SqliteQueue {
             && let Some(run_id) = ask.run_id.as_ref()
         {
             // The supervisor lands, sends back (with the person's reason,
-            // `send_back: <reason>`) or cancels a run awaiting integration
-            // as answered (ADR-0027, task 1424); any other answer, or one
+            // `send_back: <reason>`), cancels or, for a failed review's
+            // ask, reviews again a run awaiting integration as answered
+            // (ADR-0027, task 1424, ADR-t2521-1); any other answer, or one
             // for a run that moved on, is the inbox's to read.
             let status: String =
                 tx.query_row("SELECT status FROM task_runs WHERE id=?1", [run_id], |r| {
@@ -276,7 +277,7 @@ impl SqliteQueue {
                 })?;
             payload["runtime_delivers"] = json!(
                 status == RunStatus::AwaitingIntegration.as_str()
-                    && LandingAnswer::parse(text).is_some()
+                    && LandingAnswer::accepted(text, &ask.options).is_some()
             );
         }
         if ask.kind == AskKind::Decide

@@ -52,7 +52,7 @@ related:
   回答済みかcloseされたaskにはerror。
   復旧jobの`decide`のask（`asked_by: supervisor`、runが`failed` / `interrupted`）に、optionsのどれとも一致しないruntimeの操作の名前だけを答えると、何も書かずにerrorで断り、askは開いたまま残る（名前を含むoptionの原文と、`retry_inherit`なら手での引き継ぎをmessageに示す。[Triage](triage.md)の9）。
   回答した者・選んだ選択肢と、`approve_plan`と`approve_landing`の`<option>: <理由>`の形の答えが名指す選択肢の残し方は、`Ask`の欄のdoc commentと`domain::reasoned_option`が持つ。
-  その2つのkindでsupervisorは`send_back: <理由>`を`send_back`として適用し人の理由を差し戻し先に渡す（`approve_plan`は`PlanAnswer`、`approve_landing`は`LandingAnswer`）ので、`approve_landing`の`ask_answered`の`runtime_delivers`は、runが`awaiting_integration`で答えが`land` / `send_back` / `cancel`か`send_back: <理由>`のときtrueになる（`land: x`・`cancel: x`などはfalseのままinboxが読む。[Review](review.md#review-supervisor)の6）。
+  その2つのkindでsupervisorは`send_back: <理由>`を`send_back`として適用し人の理由を差し戻し先に渡す（`approve_plan`は`PlanAnswer`、`approve_landing`は`LandingAnswer`）ので、`approve_landing`の`ask_answered`の`runtime_delivers`は、runが`awaiting_integration`で答えが`land` / `send_back` / `cancel`か`send_back: <理由>`、またはreviewが失敗してverdictの無いaskへの`retry_review`のときtrueになる（`land: x`・`cancel: x`と、verdictから開いたaskへの`retry_review`などはfalseのままinboxが読む。受け付けの判断は適用と`status`の表示と同じ1つ。[Review](review.md#review-supervisor)の6、[ADR-t2521-1](../../adr/2026-10-17-t2521-1-retry-review-answer-reviews-a-failed-review-again-on-the-same-run.md)）。
   runtimeが自分で閉じる回答（`runtime_closed: true`の`ask_answered`と、supervisorの取り下げ）は`answered_by: runtime`。
   集計は[`stats`](commands.md)の`asks`。
 - `dagq ask close`は回答済みのaskに`closed_at`を書き、`ask_closed`を記録する。

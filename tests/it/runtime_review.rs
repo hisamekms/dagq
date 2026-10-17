@@ -806,7 +806,7 @@ fn a_review_that_exits_non_zero_twice_closes_the_session_and_asks_a_person() {
     assert_eq!(failed[0]["ask_id"], ask.id.as_i64());
     assert_eq!(ask.kind, dagq::domain::AskKind::ApproveLanding);
     assert_eq!(ask.run_id.as_ref(), Some(run.id()));
-    assert_eq!(ask.options, ["land", "send_back", "cancel"]);
+    assert_eq!(ask.options, ["land", "send_back", "cancel", "retry_review"]);
     assert_eq!(ask.asked_by, "supervisor");
     assert_eq!(ask.recommendation, None);
     assert_eq!(ask.confidence, None);

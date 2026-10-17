@@ -54,7 +54,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
        pass    → 5 衝突の事前判定 → 終了の依頼とclose → 着地の前のe2e → 着地
        revise  → 4 reviseの往復（回ごとの上限まで）→ validationからやり直す
        concern → AIが決めるconcern: land（passと同じ道）/ send_back（4と同じ道）/ ask
-       失敗・打ち切り → approve_landingのask → 6 askの回答（land / send_back / cancel）
+       失敗・打ち切り → approve_landingのask → 6 askの回答（land / send_back / cancel / retry_review）
   supervisorが替わったら 7 引き継ぎ、reviseの待ちの間の質問は 8
 ```
 
@@ -145,11 +145,12 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
      askを開けなければ、attentionの`review by hand`から人がreviewして`integrate`を呼ぶ。
 6. **askの回答**: supervisorは毎回、回答済みで閉じていない`approve_landing`のask（runが`awaiting_integration`でleaseが無いもの）の答えを、slotや着地スロットの空きに依らずその場で適用してaskを閉じる（`apply_landing_answers`）。
    - `land`は承認を記録してrunを着地の列に並べ、別の段（`start_approved_landings`）がslotと着地スロットの空きを待って承認の古い順に1本ずつ着地させる。
-     列はeventから読む（`RunHistory::queued_to_land`）ので、supervisorが替わっても次のsupervisorが拾い、二重に着地しない。
+     列と`retry_review`の待ちはeventで読み二重にしない。
    - `send_back`はrunを`needs_session`にし、[`needs_session`](needs-session.md#needs_session)のresumeがreviewの理由を解消依頼に含める。
      人が`send_back: <理由>`で足した理由は、reviewの指摘より先に載る。
    - `cancel`はrunを`failed`にしてtaskを`cancel`する。
-   - 答えの読み方は`domain::LandingAnswer::parse`の1つで、それ以外の答えはinboxが読んで人に返す。
+   - `retry_review`（失敗のaskのみ。ADR-t2521-1）はresumeせず同じreceiptを再reviewする。
+   - 記録・表示・適用は`LandingAnswer::accepted`で受け、他はinboxへ。
    - runが着地せずに終わると（runが`failed`、またはそのtaskが`completed`・`canceled`。`domain::ended_landing_ask_answer`）、その答えはもう当たらないので、runtimeがそのrunの閉じていない`approve_landing`のaskを閉じる。
      runを`failed`にするかtaskを終える経路（triage・resumeの使い切り・`cancel`の答え・別のrunの着地）がその場で閉じ、閉じ損ねたもの（手での操作など）はsupervisorの定期のsweep（`sweep_ended_runs`）が次の周回で閉じる。
      taskが終わっていない間は、`interrupted`のrunと、`needs_session`など待ちに戻りうるrunのaskは閉じない（resumeの後に待ちに戻ったrunに答えを適用する）。

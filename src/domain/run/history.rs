@@ -234,6 +234,32 @@ impl<'a> RunHistory<'a> {
         })
     }
 
+    /// The `review_retry_queued` of a `retry_review` answer that queues the
+    /// run's review again (ADR-t2521-1): the latest one, when nothing after
+    /// it started a review (its program reviews or its agents), a landing
+    /// or a resume, decided the landing, or opened another
+    /// `approve_landing` ask ([`Self::moved_on_after`]). `None` when the
+    /// run is not queued so.
+    pub fn queued_review_retry(&self) -> Option<EventId> {
+        let queued = self
+            .events
+            .iter()
+            .rev()
+            .find(|e| e.kind == event_kind::REVIEW_RETRY_QUEUED)?;
+        (!self.moved_on_after(queued.id)
+            && !self.has_after(queued.id, event_kind::REVIEW_PROGRAMS_STARTED))
+        .then_some(queued.id)
+    }
+
+    /// Whether `review_retry_queued` was recorded for the answer of ask
+    /// `ask_id`.
+    pub fn review_retry_queued_by_ask(&self, ask_id: AskId) -> bool {
+        self.events.iter().any(|e| {
+            e.kind == event_kind::REVIEW_RETRY_QUEUED
+                && e.payload["ask_id"].as_i64() == Some(ask_id.as_i64())
+        })
+    }
+
     /// What the supervisor does with a run whose landing was given up
     /// while it was `integrating` (task 1118): the latest `run_recovered`
     /// with `previous_status: integrating` (the supervisor's, or a
@@ -922,6 +948,49 @@ mod tests {
         assert!(!history.landing_rewrote("aaa", "yyy"));
         assert!(!history.landing_rewrote("ddd", "ddd"));
         assert!(!RunHistory::from_events(&[]).landing_rewrote("aaa", "aaa"));
+    }
+
+    #[test]
+    fn a_review_retry_is_queued_until_a_review_or_another_step_starts() {
+        let retry = |id: i64| {
+            event(
+                id,
+                "review_retry_queued",
+                json!({"ask_id": 7, "answer": "retry_review"}),
+            )
+        };
+        let queued = |events: &[RunEvent]| RunHistory::from_events(events).queued_review_retry();
+        assert_eq!(queued(&[event(1, "review_failed", json!({}))]), None);
+        let events = [event(1, "review_failed", json!({"ask_id": 7})), retry(2)];
+        assert_eq!(queued(&events), Some(EventId::new(2)));
+        let history = RunHistory::from_events(&events);
+        assert!(history.review_retry_queued_by_ask(AskId::new(7)));
+        assert!(!history.review_retry_queued_by_ask(AskId::new(8)));
+        for kind in [
+            "review_programs_started",
+            "review_started",
+            "resume_started",
+            "integration_started",
+            "landing_decided",
+        ] {
+            assert_eq!(
+                queued(&[retry(1), event(2, kind, json!({}))]),
+                None,
+                "{kind}"
+            );
+        }
+        assert_eq!(
+            queued(&[
+                retry(1),
+                event(2, "ask_opened", json!({"kind": "approve_landing"}))
+            ]),
+            None
+        );
+        // An ask about something else keeps it queued.
+        assert_eq!(
+            queued(&[retry(1), event(2, "ask_opened", json!({"kind": "blocked"}))]),
+            Some(EventId::new(1))
+        );
     }
 
     #[test]

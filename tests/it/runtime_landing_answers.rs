@@ -244,3 +244,210 @@ fn approved_runs_wait_for_the_landing_and_land_oldest_approval_first_once() {
         stats["asks"]
     );
 }
+
+/// A review job that prints no verdict, which runs once more and fails.
+const NO_VERDICT: &str = "echo 'no verdict here'";
+
+/// The `approve_landing` ask of task 1's run, its run and the run's
+/// events of `kind`.
+fn landing_ask(queue: &mut SqliteQueue) -> dagq::domain::Ask {
+    let asks = queue.asks(Default::default()).unwrap();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert_eq!(asks[0].kind, dagq::domain::AskKind::ApproveLanding);
+    asks[0].clone()
+}
+
+/// The `next` of the attention of ask `ask` in `status`.
+fn ask_next(db: &Path, ask: dagq::domain::AskId) -> Value {
+    let status = runtime::status(db).unwrap();
+    status["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["ask_id"] == json!(ask))
+        .unwrap_or_else(|| panic!("{status}"))["next"]
+        .clone()
+}
+
+/// The `runtime_delivers` of the answer of ask `ask`.
+fn delivers(queue: &mut SqliteQueue, ask: dagq::domain::AskId) -> Value {
+    let answered = queue
+        .show(TaskId::new(1))
+        .unwrap()
+        .events
+        .into_iter()
+        .find(|e| e.kind == "ask_answered" && e.payload["ask_id"] == json!(ask))
+        .unwrap();
+    answered.payload["runtime_delivers"].clone()
+}
+
+/// A failed review's ask offers `retry_review` (ADR-t2521-1): the runtime
+/// takes the answer (`runtime_delivers`, `applying the answer`), closes
+/// the ask, records `review_retry_queued` once, and reviews the run again
+/// as the next attempt on the receipt it has, without resuming the session
+/// or asking for a receipt; the passing review lands it. Later passes start
+/// no review again.
+#[test]
+fn a_retry_review_answer_reviews_a_failed_review_s_run_again_without_a_resume() {
+    let (_fixture, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    backend.script_for(1, &own_change(1));
+    let reviewer = TestReviewer::new(&[
+        NO_VERDICT.to_owned(),
+        NO_VERDICT.to_owned(),
+        verdict("pass", &[], "fine"),
+    ]);
+    let outcome = supervise_parallel(&db, &repo, &backend, &reviewer, 1);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let ask = landing_ask(&mut queue);
+    assert!(ask.options.iter().any(|o| o == "retry_review"), "{ask:?}");
+    assert!(
+        ask.question.contains(
+            "retry_review: run the review again on the same run and receipt (no change, no resume of the session)"
+        ),
+        "{}",
+        ask.question
+    );
+
+    queue.answer(ask.id, "retry_review").unwrap();
+    assert_eq!(delivers(&mut queue, ask.id), true);
+    assert_eq!(
+        ask_next(&db, ask.id),
+        format!("applying the answer of ask {} (runtime)", ask.id)
+    );
+    let outcome = supervise_parallel(&db, &repo, &backend, &reviewer, 1);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    // Another supervisor's passes start no review again.
+    let outcome = supervise_parallel(&db, &repo, &backend, &reviewer, 1);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.runs.len(), 1);
+    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
+    let queued = payloads(&detail, "review_retry_queued");
+    assert_eq!(
+        queued,
+        [&json!({"ask_id": ask.id, "answer": "retry_review"})]
+    );
+    let attempts: Vec<_> = payloads(&detail, "review_started")
+        .iter()
+        .map(|p| p["attempt"].clone())
+        .collect();
+    assert_eq!(attempts, [json!(1), json!(2)]);
+    assert!(payloads(&detail, "resume_started").is_empty());
+    assert!(payloads(&detail, "landing_decided").is_empty());
+    assert!(payloads(&detail, "review_outcome").is_empty());
+    assert_eq!(payloads(&detail, "receipt_observed").len(), 1);
+    assert_eq!(reviewer.prompts().len(), 3);
+}
+
+/// `retry_review` is no answer of the ask of a verdict (a `concern`): the
+/// runtime does not take it (`runtime_delivers: false`, `read the
+/// answer`), and the ask stays open with no review started again.
+#[test]
+fn a_retry_review_answer_to_a_concern_s_ask_is_left_to_the_inbox() {
+    let (_fixture, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    backend.script_for(1, &own_change(1));
+    let reviewer = TestReviewer::new(&[verdict("concern", &["scope"], "a concern")]);
+    let outcome = supervise_parallel(&db, &repo, &backend, &reviewer, 1);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let ask = landing_ask(&mut queue);
+    assert!(!ask.options.iter().any(|o| o == "retry_review"), "{ask:?}");
+
+    queue.answer(ask.id, "retry_review").unwrap();
+    assert_eq!(delivers(&mut queue, ask.id), false);
+    assert_eq!(
+        ask_next(&db, ask.id),
+        format!("read the answer of ask {} and close it", ask.id)
+    );
+    let outcome = supervise_parallel(&db, &repo, &backend, &reviewer, 1);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
+    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_none());
+    assert!(payloads(&detail, "review_retry_queued").is_empty());
+    assert_eq!(payloads(&detail, "review_started").len(), 1);
+    assert_eq!(reviewer.prompts().len(), 1);
+}
+
+/// A `retry_review` answered while the queue's hold ask holds Claude is
+/// applied, and the review it queues waits held (no `review_started`)
+/// until the hold is released; then it starts once.
+#[test]
+fn a_retried_review_waits_for_the_held_provider() {
+    let (_fixture, repo, db) = fixture();
+    let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+    backend.script_for(1, &own_change(1));
+    let reviewer = TestReviewer::new(&[
+        NO_VERDICT.to_owned(),
+        NO_VERDICT.to_owned(),
+        verdict("pass", &[], "fine"),
+    ]);
+    let outcome = supervise_parallel(&db, &repo, &backend, &reviewer, 1);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let ask = landing_ask(&mut queue);
+    let hold = queue
+        .hold(dagq::domain::NewHold {
+            reason_category: dagq::domain::AskReason::Cost,
+            subject: Some(dagq::domain::queue_hold::USAGE_LIMIT_SUBJECT.to_owned()),
+            run_id: None,
+            job: None,
+            question: "the usage limit".into(),
+            options: dagq::domain::HOLD_OPTIONS
+                .iter()
+                .map(|o| (*o).to_owned())
+                .collect(),
+            asked_by: "supervisor".into(),
+        })
+        .unwrap()
+        .ask;
+    queue.answer(ask.id, "retry_review").unwrap();
+
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let options = SuperviseOptions {
+        stop: stop.clone(),
+        ..supervise_options(1, false)
+    };
+    let passes = options.passes.clone();
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || {
+            runtime::supervise_with_reviewer(
+                &db,
+                &repo,
+                &*backend,
+                &claude_stub(&db),
+                &reviewer,
+                Path::new(env!("CARGO_BIN_EXE_dagq")),
+                &options,
+            )
+            .map(|outcome| (outcome, reviewer.prompts().len()))
+        })
+    };
+    wait_until("the answer to be applied", || {
+        queue.read_ask(ask.id).unwrap().closed_at.is_some()
+    });
+    await_passes(&passes, SOME_PASSES);
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(payloads(&detail, "review_retry_queued").len(), 1);
+    assert_eq!(payloads(&detail, "review_started").len(), 1);
+    assert_eq!(payloads(&detail, "review_failed").len(), 1);
+
+    queue.answer(hold.id, "done").unwrap();
+    wait_until("the run to land", || {
+        queue.show(TaskId::new(1)).unwrap().runs[0].status() == RunStatus::Integrated
+    });
+    stop.store(true, Ordering::SeqCst);
+    let (outcome, prompts) = joined(supervisor, "the supervisor to drain").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(payloads(&detail, "review_started").len(), 2);
+    assert!(payloads(&detail, "resume_started").is_empty());
+    assert_eq!(prompts, 3);
+}

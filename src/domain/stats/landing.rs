@@ -435,14 +435,17 @@ impl LandClock {
                         .map(str::to_owned)
                         .or(opened.flatten());
                     if answered.as_deref() == Some("approve_landing") {
-                        // `land` waits for the slot; `send_back` and
-                        // `cancel` record their own status next. Another
-                        // answer is the inbox's to read: still a person's
-                        // wait.
+                        // `land` waits for the slot; `retry_review` for
+                        // the slot of the review it starts again;
+                        // `send_back` and `cancel` record their own status
+                        // next. Another answer is the inbox's to read:
+                        // still a person's wait.
                         self.asks.clear();
                         self.before_ask = None;
                         Some(if event.payload["runtime_delivers"] == false {
                             ASK
+                        } else if event.payload["option"] == crate::domain::RETRY_REVIEW {
+                            REVIEW
                         } else {
                             LANDING_QUEUE
                         })
@@ -1032,6 +1035,34 @@ mod tests {
                 ("ask", 200),
             ])
         );
+    }
+
+    #[test]
+    fn an_applied_retry_review_waits_as_the_review_not_the_landing_queue() {
+        let (spent, _) = phases(
+            &[
+                ("review_failed", json!({"ask_id": 3}), 0),
+                (
+                    "ask_opened",
+                    json!({"ask_id": 3, "kind": "approve_landing"}),
+                    0,
+                ),
+                (
+                    "ask_answered",
+                    json!({"ask_id": 3, "kind": "approve_landing", "runtime_delivers": true, "option": "retry_review"}),
+                    100,
+                ),
+                ("review_started", json!({}), 130),
+                ("review_finished", json!({}), 150),
+                ("integration_started", json!({}), 160),
+                ("integration_rebased", json!({}), 161),
+                ("run_integrated", json!({}), 170),
+            ],
+            9999,
+        );
+        assert!(!spent.contains_key("landing_queue"), "{spent:?}");
+        assert_eq!(spent["ask"], 100, "{spent:?}");
+        assert_eq!(spent["review"], 50, "{spent:?}");
     }
 
     #[test]

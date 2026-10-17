@@ -323,6 +323,7 @@ event_kinds! {
     ReviewProgramsFinished => "review_programs_finished",
     ReviewProgramsStarted => "review_programs_started",
     ReviewRetried => "review_retried",
+    ReviewRetryQueued => "review_retry_queued",
     ReviewStarted => "review_started",
     ReviseFinished => "revise_finished",
     ReviseReceiptRejected => "revise_receipt_rejected",
@@ -1063,6 +1064,11 @@ pub const REVIEW_PROGRAM_FINISHED: &str = EventKind::ReviewProgramFinished.as_st
 /// sends the worker back with).
 pub const REVIEW_PROGRAMS_FINISHED: &str = EventKind::ReviewProgramsFinished.as_str();
 pub const REVIEW_RETRIED: &str = EventKind::ReviewRetried.as_str();
+/// A person's `retry_review` answer to the `approve_landing` ask of a
+/// failed review was applied (ADR-t2521-1): the `ask_id` and the
+/// `answer`. Recorded once per ask; the run, awaiting integration, waits
+/// for a slot to be reviewed again. Not an attention.
+pub const REVIEW_RETRY_QUEUED: &str = EventKind::ReviewRetryQueued.as_str();
 pub const REVIEW_STARTED: &str = EventKind::ReviewStarted.as_str();
 pub const REVISE_FINISHED: &str = EventKind::ReviseFinished.as_str();
 pub const REVISE_RECEIPT_REJECTED: &str = EventKind::ReviseReceiptRejected.as_str();
@@ -1532,6 +1538,7 @@ mod tests {
             ),
             (EventKind::ReviewProgramsStarted, "review_programs_started"),
             (EventKind::ReviewRetried, "review_retried"),
+            (EventKind::ReviewRetryQueued, "review_retry_queued"),
             (EventKind::ReviewStarted, "review_started"),
             (EventKind::ReviseFinished, "revise_finished"),
             (EventKind::ReviseReceiptRejected, "revise_receipt_rejected"),

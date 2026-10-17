@@ -2120,10 +2120,11 @@ impl Supervisor<'_> {
         if let Err(error) = self.start_approved_landings(parallel) {
             warn!(error = %format_args!("{error:#}"), "an approved run could not start its landing: {error:#}");
         }
-        // A run recovered from a landing it may not land again is reviewed
-        // as one just validated (task 1118).
+        // A run recovered from a landing it may not land again (task 1118),
+        // or queued by a `retry_review` answer (ADR-t2521-1), is reviewed as
+        // one just validated.
         if let Err(error) = self.review_recovered_runs(parallel) {
-            warn!(error = %format_args!("{error:#}"), "a run recovered from its landing could not start its review: {error:#}");
+            warn!(error = %format_args!("{error:#}"), "a run to be reviewed again could not start its review: {error:#}");
         }
         // Before the answers and the recovery jobs: a result a hold kept
         // is applied or discarded once the hold is released (ADR-t1879-1).

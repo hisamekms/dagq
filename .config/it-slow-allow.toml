@@ -1573,3 +1573,27 @@ task = 2273
 name = "runtime_verify_retry::a_failure_of_the_code_is_resumed_as_before"
 reason = "境界（プロセス）: integrate retries a killed command and resumes on the code's failure"
 task = 2273
+
+# 8.375s under load (task 2521)
+[[test]]
+name = "runtime_landing_answers::a_retry_review_answer_reviews_a_failed_review_s_run_again_without_a_resume"
+reason = "境界（supervisorの配線）: a failed review's ask answered retry_review is recorded, shown and applied through SQLite, and the next supervisors review the run again once without a resume; the judgement is in LandingAnswer::accepted and supervise::landing unit tests"
+task = 2521
+
+# 5.576s under load (task 2521)
+[[test]]
+name = "runtime_landing_answers::a_retry_review_answer_to_a_concern_s_ask_is_left_to_the_inbox"
+reason = "境界（supervisorの配線）: a concern's ask answered retry_review is recorded and shown as the inbox's and the supervisor leaves it open; the judgement is in LandingAnswer::accepted unit tests"
+task = 2521
+
+# 9.338s under load (task 2521)
+[[test]]
+name = "runtime_landing_answers::a_retried_review_waits_for_the_held_provider"
+reason = "境界（supervisorの配線）: the review a retry_review queued waits held under the queue's hold ask and starts once it is released"
+task = 2521
+
+# 6.202s under load (task 2521)
+[[test]]
+name = "runtime_review::a_review_that_exits_non_zero_twice_closes_the_session_and_asks_a_person"
+reason = "境界（supervisorの配線）: a failed review closes the session and opens its approve_landing ask with its options through SQLite"
+task = 2521

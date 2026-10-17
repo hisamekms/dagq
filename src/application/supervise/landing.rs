@@ -16,6 +16,7 @@ use crate::application::run_git;
 use crate::domain::ActorContext;
 use crate::domain::AskConfidence;
 use crate::domain::EventKind;
+use crate::domain::FAILED_REVIEW_LANDING_OPTIONS;
 use crate::domain::LandingAnswer;
 use crate::domain::RecoveredLanding;
 use crate::domain::actor_model::{ActorLaunch, ModelRole};
@@ -2128,8 +2129,8 @@ impl Supervisor<'_> {
         self.ask_approve_landing(
             run,
             question,
-            recommendation.map(|r| r.as_str().to_owned()),
-            confidence,
+            LANDING_OPTIONS,
+            (recommendation.map(|r| r.as_str().to_owned()), confidence),
             landing_ask_reason(reason_category),
         )
     }
@@ -2147,17 +2148,24 @@ impl Supervisor<'_> {
         error: &str,
     ) -> Result<AskId> {
         let question = failed_review_question(run, attempt, output, error);
-        self.ask_approve_landing(run, question, None, None, AskReason::Scope)
+        self.ask_approve_landing(
+            run,
+            question,
+            FAILED_REVIEW_LANDING_OPTIONS,
+            (None, None),
+            AskReason::Scope,
+        )
     }
-    /// Open an `approve_landing` ask of `run` carrying the review job's
-    /// `recommendation` and `confidence` when it gave them (ADR-t451-1
-    /// decision 3).
+    /// Open an `approve_landing` ask of `run` offering `options` (a failed
+    /// review's offer `retry_review` too, ADR-t2521-1), carrying the review
+    /// job's `recommendation` and `confidence` when it gave them
+    /// (ADR-t451-1 decision 3).
     fn ask_approve_landing(
         &mut self,
         run: &TaskRun,
         question: String,
-        recommendation: Option<String>,
-        confidence: Option<AskConfidence>,
+        options: &[&str],
+        (recommendation, confidence): (Option<String>, Option<AskConfidence>),
         reason_category: AskReason,
     ) -> Result<AskId> {
         // An earlier ask of the run is about an earlier review (the run was
@@ -2179,7 +2187,7 @@ impl Supervisor<'_> {
                 task_id: None,
                 run_id: Some(run.id().clone()),
                 question,
-                options: LANDING_OPTIONS.iter().map(|o| (*o).to_owned()).collect(),
+                options: options.iter().map(|o| (*o).to_owned()).collect(),
                 asked_by: "supervisor".to_owned(),
                 reason_category,
                 topics: Vec::new(),
@@ -2199,7 +2207,9 @@ impl Supervisor<'_> {
     /// lands it), `send_back` makes it `needs_session` for a resume that
     /// names the review's reasons (after the person's, `send_back:
     /// <reason>`, task 1424), and `cancel` fails the run and cancels its
-    /// task ([`LandingAnswer`]). The ask is closed once applied; any other
+    /// task, and the `retry_review` of a failed review's ask queues the run
+    /// to be reviewed again ([`Self::review_recovered_runs`] reviews it,
+    /// ADR-t2521-1) ([`LandingAnswer`]). The ask is closed once applied; any other
     /// answer is left to the inbox. An error is noted and the ask is tried again on a
     /// later pass.
     pub(super) fn apply_landing_answers(&mut self) -> Result<()> {
@@ -2209,9 +2219,10 @@ impl Supervisor<'_> {
             };
             let answer = ask.answer.as_deref().unwrap_or_default().trim().to_owned();
             let run = self.queue.run(&run_id)?;
-            let Some((action, cause)) = landing_answer_to_apply(&answer, run.status(), || {
-                Ok(self.queue.run_lease(&run_id)?.is_some())
-            })?
+            let Some((action, cause)) =
+                landing_answer_to_apply(&answer, &ask.options, run.status(), || {
+                    Ok(self.queue.run_lease(&run_id)?.is_some())
+                })?
             else {
                 continue;
             };
@@ -2318,11 +2329,13 @@ impl Supervisor<'_> {
         Ok(())
     }
     /// Review the runs recovered from a landing they may not land again
-    /// ([`RunHistory::recovered_landing`]'s `Review`, task 1118) as a run
-    /// just validated: awaiting integration, nobody leasing it, no
-    /// `approve_landing` ask of it open, while slots are free. The run is
-    /// leased to this supervisor and its review started; what follows is
-    /// that of any review (ADR-0027).
+    /// ([`RunHistory::recovered_landing`]'s `Review`, task 1118), and those
+    /// a `retry_review` answer queued ([`RunHistory::queued_review_retry`],
+    /// ADR-t2521-1), as a run just validated: awaiting integration, nobody
+    /// leasing it, no `approve_landing` ask of it open, while slots are
+    /// free. The run is leased to this supervisor and its review started
+    /// on the receipt it has, its session not resumed; what follows is
+    /// that of any review (ADR-0027), a wait for its provider included.
     pub(super) fn review_recovered_runs(&mut self, parallel: usize) -> Result<()> {
         for run in self
             .queue
@@ -2331,14 +2344,24 @@ impl Supervisor<'_> {
             if self.used_slots() >= parallel {
                 break;
             }
-            if self.queue.run_lease(run.id())?.is_some()
-                || !matches!(
-                    RunHistory::from_events(&self.queue.run_events(run.id())?).recovered_landing(),
-                    Some(RecoveredLanding::Review(_))
-                )
-                || self
-                    .queue
-                    .has_unclosed_ask(run.id(), AskKind::ApproveLanding)?
+            if self.queue.run_lease(run.id())?.is_some() {
+                continue;
+            }
+            let events = self.queue.run_events(run.id())?;
+            let history = RunHistory::from_events(&events);
+            let why = if matches!(
+                history.recovered_landing(),
+                Some(RecoveredLanding::Review(_))
+            ) {
+                "its landing was given up before it was approved or passed"
+            } else if history.queued_review_retry().is_some() {
+                "a person answered retry_review to its failed review"
+            } else {
+                continue;
+            };
+            if self
+                .queue
+                .has_unclosed_ask(run.id(), AskKind::ApproveLanding)?
                 // A held task's run waits as it rests (ADR-t1879-1); the
                 // lease's own transaction refuses it besides.
                 || self.queue.turn_fence(run.task_id())?.is_some()
@@ -2360,7 +2383,7 @@ impl Supervisor<'_> {
             let Some(run) = leased else {
                 continue;
             };
-            info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} is reviewed again: its landing was given up before it was approved or passed", run.id(), run.task_id());
+            info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} is reviewed again: {why}", run.id(), run.task_id());
             let session = self.session_of(&run)?;
             match self.start_review(&run, session) {
                 Ok(phase) => self.claim.slots.admit_noting(
@@ -2378,7 +2401,7 @@ impl Supervisor<'_> {
         Ok(())
     }
     /// Apply `answer`, an answer to the `approve_landing` ask `ask_id` of
-    /// `run` read as `action` ([`LandingAnswer::parse`]). The
+    /// `run` taken as `action` ([`LandingAnswer::accepted`]). The
     /// `landing_decided` of a `send_back` records the answer as
     /// `send_back` and the person's reason, when given, as
     /// `person_reason`.
@@ -2441,6 +2464,20 @@ impl Supervisor<'_> {
                 close_ended_landing_asks(&mut *self.queue, Some(run.task_id()));
                 self.request_cleanup(Some(run.task_id()));
             }
+            LandingAnswer::RetryReview => {
+                // Recorded once for the ask, so an answer applied in part
+                // is finished on a later pass and queues one review.
+                let events = self.queue.run_events(run.id())?;
+                if !RunHistory::from_events(&events).review_retry_queued_by_ask(ask_id) {
+                    self.queue.record_runtime_event(
+                        run.id(),
+                        EventKind::ReviewRetryQueued,
+                        payload,
+                    )?;
+                }
+                self.queue.close_ask(ask_id)?;
+                info!(run_id = %run.id(), "run {} is to be reviewed again by ask {ask_id}; it waits for a slot", run.id());
+            }
         }
         Ok(())
     }
@@ -2496,17 +2533,19 @@ impl Supervisor<'_> {
 }
 
 /// The answer of an `approve_landing` ask a pass applies now, with the
-/// phase it moves the run to (queued to land, sent back for a resume, or
-/// ended by the cancel): one [`LandingAnswer::parse`] reads, of a run
-/// awaiting integration that nobody leases (`leased`, read only then).
-/// The slots and the integration slot do not matter (task 949); any other
-/// answer is left to the inbox.
+/// phase it moves the run to (queued to land, sent back for a resume,
+/// ended by the cancel, or queued to be reviewed again): one the ask that
+/// offered `options` takes ([`LandingAnswer::accepted`]: `retry_review`
+/// only that of a failed review), of a run awaiting integration that
+/// nobody leases (`leased`, read only then). The slots and the integration
+/// slot do not matter (task 949); any other answer is left to the inbox.
 pub(super) fn landing_answer_to_apply(
     answer: &str,
+    options: &[String],
     status: RunStatus,
     leased: impl FnOnce() -> Result<bool>,
 ) -> Result<Option<(LandingAnswer, &'static str)>> {
-    let Some(action) = LandingAnswer::parse(answer) else {
+    let Some(action) = LandingAnswer::accepted(answer, options) else {
         return Ok(None);
     };
     if status != RunStatus::AwaitingIntegration || leased()? {
@@ -2516,6 +2555,7 @@ pub(super) fn landing_answer_to_apply(
         LandingAnswer::Land => EventKind::IntegrationApproved.as_str(),
         LandingAnswer::SendBack(_) => "sent_back",
         LandingAnswer::Cancel => "canceled",
+        LandingAnswer::RetryReview => EventKind::ReviewRetryQueued.as_str(),
     };
     Ok(Some((action, cause)))
 }
@@ -2830,7 +2870,7 @@ fn failed_review_question(
         }
     }
     question.push_str(
-        "\nReview the material by hand, then answer. land: land it as it is. send_back: resume the session with this failure as the reason (answer `send_back: <your reason>` to add yours). cancel: fail the run and cancel the task.",
+        "\nReview the material by hand, then answer. land: land it as it is. send_back: resume the session with this failure as the reason (answer `send_back: <your reason>` to add yours). cancel: fail the run and cancel the task. retry_review: run the review again on the same run and receipt (no change, no resume of the session).",
     );
     question
 }
@@ -3064,8 +3104,9 @@ mod tests {
     /// applies.
     #[test]
     fn a_landing_answer_is_applied_to_an_unleased_run_awaiting_integration() {
+        let verdict: Vec<String> = LANDING_OPTIONS.iter().map(|o| (*o).to_owned()).collect();
         let apply = |answer: &str, status: RunStatus, leased: bool| {
-            landing_answer_to_apply(answer, status, || Ok(leased)).unwrap()
+            landing_answer_to_apply(answer, &verdict, status, || Ok(leased)).unwrap()
         };
         let waiting = RunStatus::AwaitingIntegration;
         assert_eq!(
@@ -3094,11 +3135,47 @@ mod tests {
         }
         let unread = || -> Result<bool> { panic!("the lease is read") };
         assert_eq!(
-            landing_answer_to_apply("why?", waiting, unread).unwrap(),
+            landing_answer_to_apply("why?", &verdict, waiting, unread).unwrap(),
             None
         );
         assert_eq!(
-            landing_answer_to_apply("land", RunStatus::Running, unread).unwrap(),
+            landing_answer_to_apply("land", &verdict, RunStatus::Running, unread).unwrap(),
+            None
+        );
+    }
+
+    /// `retry_review` queues the review again only on the ask of a failed
+    /// review, the one that offers it (ADR-t2521-1); to the ask of a
+    /// verdict (a `concern`, a `revise` past its limit, the agents' route)
+    /// it is the inbox's to read, and the lease is not read.
+    #[test]
+    fn retry_review_is_applied_only_to_the_ask_of_a_failed_review() {
+        let options = |list: &[&str]| list.iter().map(|o| (*o).to_owned()).collect::<Vec<_>>();
+        let waiting = RunStatus::AwaitingIntegration;
+        assert_eq!(
+            landing_answer_to_apply(
+                "retry_review",
+                &options(FAILED_REVIEW_LANDING_OPTIONS),
+                waiting,
+                || Ok(false)
+            )
+            .unwrap(),
+            Some((LandingAnswer::RetryReview, "review_retry_queued"))
+        );
+        assert_eq!(
+            landing_answer_to_apply(
+                "retry_review",
+                &options(FAILED_REVIEW_LANDING_OPTIONS),
+                waiting,
+                || Ok(true)
+            )
+            .unwrap(),
+            None
+        );
+        let unread = || -> Result<bool> { panic!("the lease is read") };
+        assert_eq!(
+            landing_answer_to_apply("retry_review", &options(LANDING_OPTIONS), waiting, unread)
+                .unwrap(),
             None
         );
     }
@@ -3134,7 +3211,7 @@ mod tests {
     }
 
     /// The tail every failed review's ask ends with.
-    const FAILED_TAIL: &str = "\nReview the material by hand, then answer. land: land it as it is. send_back: resume the session with this failure as the reason (answer `send_back: <your reason>` to add yours). cancel: fail the run and cancel the task.";
+    const FAILED_TAIL: &str = "\nReview the material by hand, then answer. land: land it as it is. send_back: resume the session with this failure as the reason (answer `send_back: <your reason>` to add yours). cancel: fail the run and cancel the task. retry_review: run the review again on the same run and receipt (no change, no resume of the session).";
 
     /// The ask of a review whose job ran and failed names this review's
     /// output (a non-zero exit, the timeout, an unreadable verdict twice;
