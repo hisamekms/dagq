@@ -456,6 +456,9 @@ pub enum PausePoint {
     /// A resume, once its session's earlier requests were set aside,
     /// before its wrapper starts.
     ResumeLaunch,
+    /// A receipt's validation that ended, before the supervisor acts on
+    /// its result.
+    ValidationEnd,
 }
 
 /// What a supervisor calls at each [`PausePoint`] with the run's ID.
@@ -2050,6 +2053,8 @@ impl Supervisor<'_> {
                     || self.landing.rechecks.running()
                     || self.host.cleanup.for_disk()
                     || self.host.cleanup.deferred()
+                    // A supervisor that stops leaves the park to the next.
+                    || (!stopping && self.hold_parks_going())
                     || rechecked;
                 if !job && !progressed && (options.once || stopping || !self.claim.claiming) {
                     break;
@@ -2092,6 +2097,11 @@ impl Supervisor<'_> {
         // replanned are parked where they wait (ADR-t1521-2).
         if let Err(error) = self.park_idle_runs() {
             warn!(error = %format_args!("{error:#}"), "the runs waiting for a replanning's park could not all be parked: {error:#}");
+        }
+        // Takes no slot: a held task's run that rests waits as it is
+        // (ADR-t1879-1), whoever let it rest.
+        if let Err(error) = self.settle_resting_holds() {
+            warn!(error = %format_args!("{error:#}"), "the holds of resting runs could not all settle: {error:#}");
         }
         // Takes no slot: a dead run goes to the triage below.
         self.recover_dead_runs()?;
@@ -3276,9 +3286,10 @@ impl Supervisor<'_> {
         {
             return Ok(Step::Disowned);
         }
-        // A run whose task is being replanned goes no further than its
-        // park (ADR-t1521-2 decision 1): no next turn, review, revise or
-        // landing starts, and the park gives its slot back.
+        // A run whose task is being replanned or held goes no further than
+        // its park (ADR-t1521-2 decision 1, ADR-t1879-1 decision 7): no
+        // next turn, review, revise or landing starts, and the park gives
+        // its slot back.
         if let Some(step) = self.park_step(slot)? {
             return Ok(step);
         }
@@ -3369,10 +3380,10 @@ impl Supervisor<'_> {
                 if let Some(parked) = self.park_held_by_recheck(&current, &main)? {
                     return Ok(Step::Done(Box::new(parked)));
                 }
-                // A run whose task is being replanned does not land: it
-                // waits in its slot for the operation's outcome
-                // (ADR-t1521-2 decision 1), rather than failing.
-                if self.queue.replan_guard(current.task_id())?.is_some() {
+                // A run whose task is being replanned or held does not
+                // land: it waits in its slot for the park (ADR-t1521-2
+                // decision 1, ADR-t1879-1), rather than failing.
+                if self.queue.turn_fence(current.task_id())?.is_some() {
                     slot.landing_turn = true;
                     return Ok(Step::Continue);
                 }
@@ -3535,6 +3546,7 @@ impl Supervisor<'_> {
                 if !handle.as_ref().is_some_and(|h| h.is_finished()) {
                     return Ok(Step::Continue);
                 }
+                self.pause_at(PausePoint::ValidationEnd, slot.run.id());
                 let mut validation = handle
                     .take()
                     .context("validation already joined")?
@@ -3676,6 +3688,25 @@ impl Supervisor<'_> {
                                     json!({"code": code, "attempt": watch.attempt, "reason": why}),
                                 )?;
                                 info!(run_id = %slot.run.id(), "run {}: {why}; asked the session to fix it ({label})", slot.run.id());
+                            }
+                            // A hold's fence refused the request: the run
+                            // waits for the park, and the resume after the
+                            // release has its receipt judged again.
+                            Err(error)
+                                if error
+                                    .chain()
+                                    .any(|cause| cause.is::<headless::TurnFenced>()) =>
+                            {
+                                info!(run_id = %slot.run.id(), "run {}: {why}; {error:#}", slot.run.id());
+                                slot.transition(
+                                    Phase::ReviewHeld {
+                                        session: Some(session),
+                                        retried: false,
+                                        providers: Vec::new(),
+                                    },
+                                    "fix_withheld",
+                                    &*self.queue,
+                                );
                             }
                             Err(error) => {
                                 let why = format!(
@@ -3836,11 +3867,10 @@ impl Supervisor<'_> {
                 }
             }
             Phase::Satisfied(watch) => {
-                // While a replanning guards the task (ADR-t1521-2), the
+                // While a replanning or a hold fences the task, the
                 // verification's end is acted on neither by an ask nor by a
-                // close: the slot holds it for the park, which withholds it,
-                // or for the operation's end.
-                if self.queue.replan_guard(slot.run.task_id())?.is_some() {
+                // close: the slot holds it for the park, which withholds it.
+                if self.queue.turn_fence(slot.run.task_id())?.is_some() {
                     return Ok(Step::Continue);
                 }
                 // A verification a park joined and set aside, whose park

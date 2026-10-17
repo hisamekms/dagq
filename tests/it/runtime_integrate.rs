@@ -2327,3 +2327,71 @@ fn integrate_records_the_requester_and_the_integrator() {
         );
     }
 }
+
+/// Boundary (ADR-t1879-1): a held task's run awaiting integration is not
+/// the next to land: `integrate --next` passes over it, though it validated
+/// first, and lands the next run; the held run waits as it is, and once
+/// released it is the next again and lands.
+#[test]
+fn integrate_next_passes_over_a_held_tasks_run_and_lands_the_next() {
+    let (_dir, repo, db) = fixture();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue.transition(TaskId::new(1), TaskAction::Draft).unwrap();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let a = add_file_task(
+        &mut queue,
+        &backend,
+        "task a",
+        "a.txt",
+        "a",
+        &["test -f seed.txt"],
+    );
+    let b = add_file_task(
+        &mut queue,
+        &backend,
+        "task b",
+        "b.txt",
+        "b",
+        &["test -f seed.txt"],
+    );
+    let outcome = supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    assert_eq!(outcome["runs"].as_array().unwrap().len(), 2);
+    let first = queue.next_awaiting_integration().unwrap().unwrap();
+    let held_task = first.task_id();
+    let other = if held_task == a { b } else { a };
+    let user = |args: &[&str]| {
+        let output = crate::common::cli::invoke_with(&[], &db, args);
+        assert!(output.status.success(), "{args:?}: {output:?}");
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let held = user(&[
+        "hold",
+        &held_task.to_string(),
+        "--reason",
+        "the remote is down",
+    ]);
+    // Nobody leases a run waiting to land: it waits as it is at once.
+    assert_eq!(held["state"], "held", "{held}");
+    let next = queue.next_awaiting_integration().unwrap().unwrap();
+    assert_eq!(next.task_id(), other, "the held run is passed over");
+    let outcome = integrate_next(&db, &repo);
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    assert_eq!(outcome["run"]["id"], json!(next.id()));
+    assert_eq!(
+        queue.show(other).unwrap().task.status(),
+        TaskStatus::Completed
+    );
+    let waiting = queue.show(held_task).unwrap();
+    assert_eq!(waiting.task.status(), TaskStatus::InProgress);
+    assert_eq!(waiting.runs[0].status(), RunStatus::AwaitingIntegration);
+    assert!(queue.next_awaiting_integration().unwrap().is_none());
+    user(&["release", &held_task.to_string()]);
+    assert_eq!(
+        queue.next_awaiting_integration().unwrap().unwrap().id(),
+        first.id()
+    );
+    let outcome = integrate_next(&db, &repo);
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    assert_eq!(outcome["run"]["id"], json!(first.id()));
+}

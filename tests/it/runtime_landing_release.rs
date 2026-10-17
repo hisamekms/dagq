@@ -608,3 +608,33 @@ fn a_draining_supervisor_releases_a_dead_landing_and_leaves_it_queued() {
         .unwrap_or_else(|| panic!("{status}"));
     assert_eq!(entry["next"], "queued to land (runtime)", "{status}");
 }
+
+/// Boundary (ADR-t1879-1): a hold on a task whose landing is going waits
+/// for the landing to end, and settles in the transaction that ends it: the
+/// recovery of the dead landing leaves the run resting, its hold settled
+/// and its `held` phase recorded at once, with no supervisor's pass. While
+/// held, the run is leased neither for the review its recovery asks for
+/// nor for an e2e, so no slot takes it; once released, it is again.
+#[test]
+fn a_held_task_whose_landing_ends_settles_at_its_end_and_is_not_leased_to_review() {
+    let (_dir, _repo, db, run, _backend) = dead_landing(None);
+    let output =
+        crate::common::cli::invoke_with(&[], &db, &["hold", "1", "--reason", "the remote is down"]);
+    assert!(output.status.success(), "{output:?}");
+    let held: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(held["state"], "settling", "{held}");
+    runtime::recover(&db, run.id()).unwrap();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let hold = queue.task_hold(TaskId::new(1)).unwrap().unwrap();
+    assert!(hold.settled_at.is_some(), "{hold:?}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(phases(&detail).last().unwrap().0, "held");
+    let token = LeaseToken::new("supervisor");
+    assert!(queue.lease_for_review(run.id(), &token).unwrap().is_none());
+    assert!(queue.lease_for_e2e(run.id(), &token).unwrap().is_none());
+    let output = crate::common::cli::invoke_with(&[], &db, &["release", "1"]);
+    assert!(output.status.success(), "{output:?}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_ne!(phases(&detail).last().unwrap().0, "held");
+    assert!(queue.lease_for_review(run.id(), &token).unwrap().is_some());
+}

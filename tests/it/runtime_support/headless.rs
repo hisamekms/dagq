@@ -515,3 +515,33 @@ pub fn request_turn_left_by_a_dead_supervisor(db: &Path, run: &TaskRun, prompt: 
         )
         .unwrap();
 }
+
+/// A pause the first time the supervisor reaches `point`, for a test to
+/// act while it stands still: it writes `paused` and waits for `go` (no
+/// longer than the step's limit).
+pub fn pause_once(point: runtime::PausePoint, paused: PathBuf, go: PathBuf) -> runtime::PausesPort {
+    let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    runtime::PausesPort(Arc::new(move |at, _run| {
+        if at != point || reached.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        fs::write(&paused, "").unwrap();
+        let waited = std::time::Instant::now();
+        while !go.exists() && waited.elapsed() < crate::common::STEP_LIMIT {
+            thread::sleep(Duration::from_millis(20));
+        }
+    }))
+}
+
+/// Wait for the file `path` (no longer than the step's limit).
+pub fn wait_for_file(path: &Path) {
+    let waited = std::time::Instant::now();
+    while !path.exists() {
+        assert!(
+            waited.elapsed() < crate::common::STEP_LIMIT,
+            "{} never came",
+            path.display()
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}

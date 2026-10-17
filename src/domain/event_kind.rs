@@ -183,9 +183,11 @@ event_kinds! {
     HoldAnswerApplied => "hold_answer_applied",
     HoldContinueSent => "hold_continue_sent",
     HoldDeferred => "hold_deferred",
+    HoldParked => "hold_parked",
     HoldResultApplied => "hold_result_applied",
     HoldResultDiscarded => "hold_result_discarded",
     HoldResultKept => "hold_result_kept",
+    HoldResultWithheld => "hold_result_withheld",
     IdleInferred => "idle_inferred",
     InboxNudgeFailed => "inbox_nudge_failed",
     InboxNudged => "inbox_nudged",
@@ -866,6 +868,16 @@ pub const HOLD_RESULT_APPLIED: &str = EventKind::HoldResultApplied.as_str();
 /// A kept result discarded after its hold's release: `kept_id`, `source`,
 /// `reason` ([`super::task_hold::DiscardReason`]).
 pub const HOLD_RESULT_DISCARDED: &str = EventKind::HoldResultDiscarded.as_str();
+/// A run whose task's hold reached it in a slot was parked at its turn's
+/// end by the replanning's park (ADR-t1879-1 decision 7): the run is
+/// `needs_session` with its session and work left in place, its lease and
+/// slot given back. `hold_id`, `carried_answers` (as `replan_parked`'s),
+/// `code: held`, `status` and `reason`.
+pub const HOLD_PARKED: &str = EventKind::HoldParked.as_str();
+/// A result the park of a held run's slot joined and did not act on (an
+/// `already_satisfied` claim's verification, a review left with jobs to
+/// start or past its program): `hold_id`, `what`, and what the result was.
+pub const HOLD_RESULT_WITHHELD: &str = EventKind::HoldResultWithheld.as_str();
 /// A session without a fresh idle marker whose screen was inferred idle
 /// (ADR-t803-1), once per span.
 pub const IDLE_INFERRED: &str = EventKind::IdleInferred.as_str();
@@ -1353,9 +1365,11 @@ mod tests {
             (EventKind::HoldAnswerApplied, "hold_answer_applied"),
             (EventKind::HoldContinueSent, "hold_continue_sent"),
             (EventKind::HoldDeferred, "hold_deferred"),
+            (EventKind::HoldParked, "hold_parked"),
             (EventKind::HoldResultApplied, "hold_result_applied"),
             (EventKind::HoldResultDiscarded, "hold_result_discarded"),
             (EventKind::HoldResultKept, "hold_result_kept"),
+            (EventKind::HoldResultWithheld, "hold_result_withheld"),
             (EventKind::IdleInferred, "idle_inferred"),
             (EventKind::InboxNudgeFailed, "inbox_nudge_failed"),
             (EventKind::InboxNudged, "inbox_nudged"),

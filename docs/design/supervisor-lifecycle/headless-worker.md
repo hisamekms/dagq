@@ -291,6 +291,16 @@ inboxは対象外。
 上限を過ぎた書き手は記録したhandleとturnだけを止める（route `replan`）。
 その後は[taskの再計画](../../plans/task-replanning.md#実装の状態)が持つ。
 
+taskのholdも同じ柵の理由の1つで、別の止め方を持たない（[ADR-t1879-1](../../adr/2026-10-07-t1879-1-hold-a-task-at-the-turn-boundary-and-release-it-explicitly.md)決定7）。
+holdの開いたtaskのrunには次のturnを送らず、wrapperも同じ判定で終わり、supervisorは走っていたturnの終わりを待ってsessionを閉じ、runを`needs_session`（`hold_parked`）にしてslotを返す。
+snapshotは取らずworktreeはそのままで、そのturn（最初のsession・revise・resume）が書いたreceiptは今のとおり検証し、その次の工程（review・revise・着地）を始めずに待ちに入る。
+turnがworktreeに残したprocessが動く間は待ちに入らず（holdは`settling`のまま）、slotで終わりを待つ。
+validationや判定の後のsessionの終了も同じ保留が取り、validationが`needs_session`に戻したrunはその理由のまま待つ。
+slotの外で工程が終わったrunは、その確定のtransactionの中で待ちに入る。
+ただしleaseの返却は書き手の終わりと数えず、登録したprocessに終わりの記録が無いrun（諦めたresumeなど）は、supervisorがholdのparkのために取り、同じ保留で書き手の終わりを確かめてから待ちに入れる。
+再計画のparkが`blocked`で終わったrunは再計画のもので、holdはleaseを取らず、登録したprocessとworktreeに書き手が居ないと確かめてから待ちに入れる。
+解除の後のresumeは同じsessionで止まった所から続ける。
+
 ## 非対話のruntimeのplanner<a id="非対話のruntimeのplanner"></a>
 
 runtimeのplannerは経路の選択なしに非対話で立ち、この文書のturnの駆動をplannerのディレクトリで使う（[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)決定2、[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定3）。

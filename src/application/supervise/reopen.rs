@@ -163,9 +163,9 @@ impl Supervisor<'_> {
         let Phase::Session(watch) = &mut slot.phase else {
             return Ok(Reopen::GiveUp);
         };
-        // A session of a run whose task is being replanned is not opened
-        // again (ADR-t1521-2 decision 1).
-        if self.queue.replan_guard(run.task_id())?.is_some() {
+        // A session of a run whose task is being replanned or held is not
+        // opened again (ADR-t1521-2 decision 1, ADR-t1879-1).
+        if self.queue.turn_fence(run.task_id())?.is_some() {
             return Ok(Reopen::GiveUp);
         }
         let known = self.resume.reopens.contains_key(run.id());

@@ -663,8 +663,9 @@ impl SqliteQueue {
     /// The oldest run awaiting integration by validation time: the FIFO
     /// order of the merge queue. Runs waiting for a session are skipped;
     /// they are resumed explicitly by `integrate ID`. So are the runs of a
-    /// task a replanning operation guards (ADR-t1521-2), which wait for its
-    /// outcome without holding back the others.
+    /// task a replanning operation guards (ADR-t1521-2) or a hold is open on
+    /// (ADR-t1879-1), which wait for the outcome or the release without
+    /// holding back the others.
     pub fn next_awaiting_integration(&self) -> Result<Option<TaskRun>> {
         Ok(self
             .conn
@@ -675,6 +676,8 @@ impl SqliteQueue {
                    AND o.status IN (",
                     crate::infrastructure::sqlite::replan_guarding!(),
                     "))
+                 AND NOT EXISTS (SELECT 1 FROM task_holds h WHERE h.task_id=r.task_id
+                   AND h.released_at IS NULL)
                  ORDER BY (SELECT MIN(e.id) FROM run_events e
                            WHERE e.run_id=r.id AND e.kind=?1) NULLS LAST,
                           r.rowid

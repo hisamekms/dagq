@@ -169,9 +169,9 @@ impl Supervisor<'_> {
             return Ok(());
         };
         self.ensure_sccache(crate::domain::sccache::CheckReason::BeforeResume);
-        // The answers a replanning's park caught untaken go to the session
-        // the continuation opens, once (ADR-t1521-2).
-        let carried_answers = if kind == ResumeKind::Replan {
+        // The answers a park at a turn's end (a replanning's or a hold's)
+        // caught untaken go to the session resumed after it, once.
+        let carried_answers = if kind.parked_at_fence() {
             RunHistory::from_events(&self.queue.run_events(run.id())?).answers_to_carry()
         } else {
             Vec::new()
@@ -1004,6 +1004,7 @@ pub(super) fn resume_reason(
         Some(ParkCause::SessionGone) => ResumeKind::SessionGone,
         Some(ParkCause::E2e) => ResumeKind::E2e,
         Some(ParkCause::Replan) => ResumeKind::Replan,
+        Some(ParkCause::Hold) => ResumeKind::Hold,
         Some(ParkCause::Landing) | None => ResumeKind::Landing,
     };
     (reason, kind)
@@ -1377,6 +1378,13 @@ impl ResumeWatch {
 
     /// `head` is the worktree's HEAD when the worktree is clean, `None`
     /// otherwise: a resolved receipt must name a clean head.
+    /// Whether the session rewrote the receipt since the resume started.
+    pub(super) fn receipt_rewritten(&self, files: &dyn RunFiles) -> bool {
+        files
+            .modified(&self.receipt_path)
+            .is_ok_and(|modified| modified > self.started_at)
+    }
+
     pub(super) fn verdict(
         &self,
         files: &dyn RunFiles,

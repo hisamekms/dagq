@@ -128,6 +128,8 @@ fn a_person_holds_a_task_by_its_id_or_its_runs_and_releases_it() {
     assert!(ok, "{by_run}");
     assert_eq!(by_run["hold"]["task_id"], b.as_i64());
     assert_eq!(by_run["hold"]["run_id"], run.id().as_str());
+    // Its run is on its way, so the hold settles once the run waits.
+    assert_eq!(by_run["state"], "settling");
 
     // Released: the event, no hold shown, claimed again.
     let (ok, released) = user(&db, &["release", &a.to_string()]);
@@ -149,9 +151,33 @@ fn a_person_holds_a_task_by_its_id_or_its_runs_and_releases_it() {
         panic!("A is claimed once released")
     };
     assert_eq!(claimed.task_id(), a);
+    // Not released while its run settles: the hold stays as it was.
+    let (ok, settling) = user(&db, &["release", run.id().as_str()]);
+    assert!(!ok);
+    assert!(
+        settling.as_str().unwrap().contains("hold_not_settled"),
+        "{settling}"
+    );
+    let (_, shown) = user(&db, &["show", &b.to_string()]);
+    assert_eq!(shown["hold"]["reason"], "outage");
+    // A task that ended while its hold settled has nothing left to settle:
+    // the release closes the hold.
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET status='completed' WHERE id=?1",
+            [b.as_i64()],
+        )
+        .unwrap();
     let (ok, released) = user(&db, &["release", run.id().as_str()]);
     assert!(ok, "{released}");
-    assert_eq!(released["continuation"], "continue");
+    assert_eq!(
+        count(
+            &db,
+            "SELECT count(*) FROM task_holds WHERE released_at IS NULL"
+        ),
+        0
+    );
 }
 
 #[test]
@@ -229,6 +255,9 @@ fn only_a_person_and_the_inbox_hold_or_release() {
     let (ok, held) = dagq(&db, &inbox, &["hold", "1", "--reason", "outage"]);
     assert!(ok, "{held}");
     assert_eq!(held["hold"]["by_role"], "inbox");
-    let (ok, released) = dagq(&db, &inbox, &["release", run_id.as_str()]);
+    let b = ready(&mut queue, "B");
+    let (ok, held) = dagq(&db, &inbox, &["hold", &b.to_string(), "--reason", "outage"]);
+    assert!(ok, "{held}");
+    let (ok, released) = dagq(&db, &inbox, &["release", &b.to_string()]);
     assert!(ok, "{released}");
 }

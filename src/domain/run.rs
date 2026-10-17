@@ -28,9 +28,9 @@ pub use payload::{
 };
 pub use recorded::{
     NewRunEvent, Recorded, end_session, finish_validation, record_e2e_park,
-    record_exhausted_resumes, record_gone_session_park, record_landing_decision, record_live_park,
-    record_recheck_park, record_replan_park, record_satisfied_close, record_satisfied_decision,
-    resume_finished, unfinished_change,
+    record_exhausted_resumes, record_gone_session_park, record_hold_park, record_landing_decision,
+    record_live_park, record_recheck_park, record_replan_park, record_satisfied_close,
+    record_satisfied_decision, resume_finished, unfinished_change,
 };
 
 /// A run of a task. `Serialize` is the JSON the CLI prints; there is no
@@ -585,6 +585,30 @@ pub fn park_for_replan(mut run: TaskRun, reason: String) -> Result<TaskRun, Doma
             RunStatus::Interrupted,
         ],
         "park for a replanning",
+    )?;
+    run.status = RunStatus::NeedsSession;
+    run.last_error = Some(reason);
+    Ok(run)
+}
+
+/// Park a run whose task's hold reached it in a slot, once its writer
+/// stopped at the turn's end (ADR-t1879-1 decision 7): it waits for a
+/// session with `reason` as `last_error`, its session and worktree left as
+/// they are, and the hold's guard keeps the resume from starting until a
+/// person releases the hold. No earlier approval or review lets the resumed
+/// work land ([`RunHistory::approved`]).
+pub fn park_for_hold(mut run: TaskRun, reason: String) -> Result<TaskRun, DomainError> {
+    require_status(
+        &run,
+        &[
+            RunStatus::Claimed,
+            RunStatus::Starting,
+            RunStatus::Running,
+            RunStatus::Validating,
+            RunStatus::AwaitingIntegration,
+            RunStatus::NeedsSession,
+        ],
+        "park for a hold",
     )?;
     run.status = RunStatus::NeedsSession;
     run.last_error = Some(reason);

@@ -104,6 +104,7 @@ verifyが通れば人のaskに上げ、人の答えで閉じる。
   containerで流すときは、verificationのcloneの親のdirに残るそのrunのverificationのcontainer・buildの出力のvolume・dirを先に消し（同じ`auto_repaired`）、消せなければ同じく検証しない。
 - **再計画**: taskを再計画の操作が保護する間は、検証の結果でaskを開かずtaskも閉じず、答えも適用せず、closeのtransactionも拒む。
   休むrunもそのまま保留され、開いた`approve_close`は閉じる（[taskの再計画](../../plans/task-replanning.md#実装の状態)）。
+  holdの開いたtaskも同じく検証の結果でaskを開かずtaskも閉じず、答えは解除まで残し、休むrunはそのまま待つ。
 - **集計**: 閉じたrunは着地（`run_integrated`）に数えず、`stats`の`already_satisfied`で別に数える（[stats](commands.md)）。
 
 ## 着地の検証

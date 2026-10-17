@@ -35,7 +35,9 @@ workerのrunは全て非対話（turnごとに別のprocess）で、この文書
 
 - holdの表と`task_held` / `task_released`、`hold` / `release`のCLIと権限、`show` / `list`の表示、readyのtaskのclaim・`needs_session`のresume・止まったrunの復旧jobの開始の止め方（「開始の直前の再検査」）、列の外の結果と回答の適用の止め方と解除の後の適用か破棄（「列の外の結果と回答の適用」。生きているsessionへのverdictは解除の後に捨てる）、再計画の保留と共有する判定は済んだ。
   今の姿は[claimを控える](../design/supervisor-lifecycle/claim-hold.md#taskのhold)・[triage](../design/supervisor-lifecycle/triage.md#taskのhold)・[needs_session](../design/supervisor-lifecycle/needs-session.md#taskのhold)が持つ。
-  走っている工程の後の待ちを実装するまで、holdは確定と同時に`held`で、`settling`は起きない。
+- 走っている非対話のrunの待ち（「状態ごとの効果」の走っている工程・人の答えの待ち・着地の順番待ちと着地の途中・止まったrun・`needs_session`の行）、再計画の保留と共有する柵（「再計画の保留との共通の柵」）、`settling`と`held`の順序（「安全な待ちと解除の順序」）、工程`held`の`run_phase_changed`（「計測とtimeline」の待ちに入った時刻と解除まで）は済んだ。
+  slotで走っていたrunは再計画の保留の経路で`needs_session`（`hold_parked`）になり、解除は今のresumeの経路で同じsessionから続く。
+  今の姿は[非対話のworker](../design/supervisor-lifecycle/headless-worker.md#再計画の保留)・[needs_session](../design/supervisor-lifecycle/needs-session.md#taskのhold)・[人の答えを待つrun](../design/supervisor-lifecycle/waiting.md#taskのhold)・[review](../design/supervisor-lifecycle/review.md#再計画の操作が保護するrun)が持つ。
 
 ## 目的と境界
 

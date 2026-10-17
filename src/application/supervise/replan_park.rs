@@ -12,6 +12,19 @@
 //! from the step the queue records. A continuation or a withdrawal finds
 //! the run's work as it was saved before the run resumes
 //! ([`Supervisor::restore_parked`]).
+//!
+//! The same park takes the run of a held task (ADR-t1879-1 decision 7),
+//! the hold as its other reason ([`ParkFor`]): the same fence, the same
+//! wait for the turn that runs and stop of its writer, the same withheld
+//! review and verification, and a settle that gives the slot back. A hold
+//! changes no plan, so its park saves no snapshot and moves no operation:
+//! the run waits for a session with its worktree as it is (`hold_parked`),
+//! and the settle, which finds the hold still open and settling, records
+//! that the hold settled. A process a turn left in the worktree keeps the
+//! hold settling until it ends. A run at rest is not parked for a hold: the
+//! store settles it in the transaction that let it rest (a lease given
+//! back, a recovery, a status written with nobody leasing it), and
+//! [`Supervisor::settle_resting_holds`] settles what that left.
 
 use super::*;
 use crate::domain::background_wrapper::{BackgroundHandle, is_background};
@@ -21,7 +34,123 @@ use crate::domain::replan_snapshot::{
     UntrackedFile, WorktreeState,
 };
 use crate::domain::run::run_workspaces;
+use crate::domain::task_hold::TaskHold;
 use crate::domain::task_replan::{ReplanMove, ReplanOperation, ReplanStatus};
+
+/// Whether the last of `events`' `resume_started`, `resume_finished` and
+/// `resume_skipped` is a `resume_started`: a resume that never ended.
+fn mid_resume(events: &[RunEvent]) -> bool {
+    events
+        .iter()
+        .rev()
+        .find(|event| {
+            [
+                EventKind::ResumeStarted.as_str(),
+                EventKind::ResumeFinished.as_str(),
+                EventKind::ResumeSkipped.as_str(),
+            ]
+            .contains(&event.kind.as_str())
+        })
+        .is_some_and(|event| event.kind == EventKind::ResumeStarted.as_str())
+}
+
+/// What parks a run at its turn's end: a replanning past its pause's
+/// fence, which also saves the run's work, or its task's hold while it
+/// settles, which leaves the work in place.
+#[derive(Debug, Clone)]
+enum ParkFor {
+    Replan(Box<ReplanOperation>),
+    Hold(TaskHold),
+}
+
+impl ParkFor {
+    /// Since when the run's writer is waited for (unix seconds).
+    const fn since(&self) -> i64 {
+        match self {
+            Self::Replan(op) => op.updated_at,
+            Self::Hold(hold) => hold.created_at,
+        }
+    }
+
+    /// What parks it, for the logs.
+    fn describe(&self) -> String {
+        match self {
+            Self::Replan(op) => format!("replan operation {}", op.id),
+            Self::Hold(hold) => format!("the hold {} of task {}", hold.id, hold.task_id),
+        }
+    }
+
+    /// How long the processes a run's turns left in its worktree are given
+    /// to end at one look: a replanning's park, which blocks on them, waits
+    /// [`LEFT_WRITER_GRACE`]; a hold's looks once and waits for them on the
+    /// next looks, its run keeping its slot meanwhile, so that it settles
+    /// only once no writer is left.
+    const fn writer_grace(&self) -> Duration {
+        match self {
+            Self::Replan(_) => LEFT_WRITER_GRACE,
+            Self::Hold(_) => Duration::ZERO,
+        }
+    }
+
+    /// `workspace_closed`'s `by` for a session the park closes.
+    const fn by(&self) -> &'static str {
+        match self {
+            Self::Replan(_) => "replan",
+            Self::Hold(_) => "hold",
+        }
+    }
+
+    /// The event a result the park joins and does not act on is recorded
+    /// as, with the park's own part of its payload.
+    fn withheld(&self) -> (EventKind, Value) {
+        match self {
+            Self::Replan(op) => (
+                EventKind::ReplanResultWithheld,
+                json!({"operation_id": op.id, "generation": op.generation}),
+            ),
+            Self::Hold(hold) => (EventKind::HoldResultWithheld, json!({"hold_id": hold.id})),
+        }
+    }
+}
+
+/// What a hold's park ends a run in once its writer ended
+/// ([`Supervisor::park_held`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AtEnd {
+    /// A run whose step a hold reached in a slot (or whose supervisor died
+    /// in it) waits for a session (`hold_parked`); one that stopped rests
+    /// as it is.
+    Park,
+    /// The exit after a validation or a verdict: a run its validation sent
+    /// back to a session, or one that stopped, rests as it is with its own
+    /// reason; any other is parked.
+    Rested,
+    /// A run that rests already, nobody holding it: it rests as it is.
+    Resting,
+}
+
+impl AtEnd {
+    /// Whether a run in `status` rests as it is rather than being parked.
+    const fn rests(self, status: RunStatus) -> bool {
+        match status {
+            RunStatus::Failed | RunStatus::Interrupted => true,
+            RunStatus::NeedsSession => !matches!(self, Self::Park),
+            RunStatus::AwaitingIntegration | RunStatus::Validating => {
+                matches!(self, Self::Resting)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// `payload` with the park's own part (`base`) in front.
+fn withheld_payload(base: &Value, payload: Value) -> Value {
+    let mut merged = base.clone();
+    if let (Some(merged), Value::Object(payload)) = (merged.as_object_mut(), payload) {
+        merged.extend(payload);
+    }
+    merged
+}
 
 /// The seconds past a turn's limit the supervisor still waits for the
 /// run's writer to end by itself before it stops it: the wrapper stops a
@@ -150,16 +279,42 @@ impl Supervisor<'_> {
             .find(|op| op.status.parks()))
     }
 
-    /// Park the run of `slot` when an operation parks it, before its phase
-    /// goes on: `None` leaves the step to the phase. A job that runs off
+    /// What parks `run` in its slot now: an operation that parks it, else
+    /// the open hold of its task while it settles. A replanning that
+    /// guards the task past its park (parked, planning) parks nothing
+    /// more, and a hold under it waits for the run to rest.
+    fn park_for(&self, run: &TaskRun) -> Result<Option<ParkFor>> {
+        if let Some(op) = self.parking_of(run.id())? {
+            return Ok(Some(ParkFor::Replan(Box::new(op))));
+        }
+        if self.queue.replan_guard(run.task_id())?.is_some() {
+            return Ok(None);
+        }
+        Ok(self
+            .queue
+            .open_hold(run.task_id())?
+            .filter(|hold| hold.settled_at.is_none())
+            .map(ParkFor::Hold))
+    }
+
+    /// Park the run of `slot` when an operation or its task's hold parks it
+    /// ([`ParkFor`]), before its phase goes on: `None` leaves the step to
+    /// the phase. A job that runs off
     /// the loop (an e2e, a recovery round, a landing) ends first, its
     /// bounded end acted on as before up to the next look, which parks the
     /// run. A review's jobs and program that run end first, and none starts
     /// past the fence: a review with jobs left to start, or whose program
-    /// just ended, is withheld (`replan_result_withheld`). A receipt's
-    /// validation or an `already_satisfied` claim's verification that ends
-    /// meanwhile is not acted on either: no ask opens and no task closes on
-    /// it.
+    /// just ended, is withheld (`replan_result_withheld`, or
+    /// `hold_result_withheld` for a hold). A receipt's validation or an
+    /// `already_satisfied` claim's verification that ends meanwhile is not
+    /// acted on either: no ask opens and no task closes on it. For a hold,
+    /// a receipt the turn wrote and its validation go on as before (the
+    /// late receipt is validated): what they start next is fenced, and the
+    /// park takes the run there. The exit after a validation or a verdict
+    /// is the park's too, so no lease is given back while a writer is left
+    /// in the worktree; a run its validation sent back to a session rests
+    /// with that reason. A resume's rewritten receipt is judged once no
+    /// writer is left.
     pub(super) fn park_step(&mut self, slot: &mut Slot) -> Result<Option<Step>> {
         // A failure of the park (a busy queue, a move another process made
         // first) is the park's, not the phase's: it is tried again on the
@@ -167,19 +322,38 @@ impl Supervisor<'_> {
         match self.try_park_step(slot) {
             Ok(step) => Ok(step),
             Err(error) => {
-                warn!(run_id = %slot.run.id(), error = %format_args!("{error:#}"), "run {}: its park for a replanning failed and is tried again: {error:#}", slot.run.id());
+                warn!(run_id = %slot.run.id(), error = %format_args!("{error:#}"), "run {}: its park at its turn's end failed and is tried again: {error:#}", slot.run.id());
                 Ok(Some(Step::Continue))
             }
         }
     }
 
     fn try_park_step(&mut self, slot: &mut Slot) -> Result<Option<Step>> {
-        let Some(op) = self.parking_of(slot.run.id())? else {
+        let Some(park) = self.park_for(&slot.run)? else {
             return Ok(None);
         };
+        let held = matches!(park, ParkFor::Hold(_));
+        let (withheld_kind, withheld_base) = park.withheld();
         let mut withheld = None;
         match &mut slot.phase {
             Phase::E2e(_) | Phase::Recovery(_) | Phase::Landing(_) => return Ok(None),
+            Phase::Validating(..) if held => return Ok(None),
+            Phase::Session(watch) if held && self.files.is_file(&watch.receipt_path) => {
+                return Ok(None);
+            }
+            // A receipt a revise's or a resume's turn rewrote is judged by
+            // its phase, as a first session's is.
+            Phase::Revise(watch) if held && watch.receipt_rewritten(self, &slot.run) => {
+                return Ok(None);
+            }
+            // Its verdict may let the run rest and give the lease back, so
+            // it is judged only once no writer is left in the worktree.
+            Phase::Resume(watch) if held && watch.receipt_rewritten(&*self.files) => {
+                return Ok(match self.left_writers(&slot.run, park.writer_grace()) {
+                    Quiet::Stopped => None,
+                    _ => Some(Step::Continue),
+                });
+            }
             // The review's jobs that run end first and are reaped; none
             // that waits (for the limit, a provider, or as a run once more)
             // starts. A review whose jobs all ended is judged as before,
@@ -205,9 +379,11 @@ impl Supervisor<'_> {
                     .count();
                 self.queue.record_runtime_event(
                     slot.run.id(),
-                    EventKind::ReplanResultWithheld,
-                    json!({"operation_id": op.id, "generation": op.generation,
-                           "what": "review", "attempt": watch.attempt, "waiting": waiting}),
+                    withheld_kind,
+                    withheld_payload(
+                        &withheld_base,
+                        json!({"what": "review", "attempt": watch.attempt, "waiting": waiting}),
+                    ),
                 )?;
                 let held = Phase::ReviewHeld {
                     session: watch.session.take(),
@@ -231,10 +407,12 @@ impl Supervisor<'_> {
                 self.record_review_program_end(&run, &mut programs, &end, ran)?;
                 self.queue.record_runtime_event(
                     slot.run.id(),
-                    EventKind::ReplanResultWithheld,
-                    json!({"operation_id": op.id, "generation": op.generation,
-                           "what": "review_programs", "attempt": programs.attempt,
-                           "round": programs.round, "ran": programs.outcomes.len()}),
+                    withheld_kind,
+                    withheld_payload(
+                        &withheld_base,
+                        json!({"what": "review_programs", "attempt": programs.attempt,
+                               "round": programs.round, "ran": programs.outcomes.len()}),
+                    ),
                 )?;
                 let held = Phase::ReviewHeld {
                     session: programs.session.take(),
@@ -258,10 +436,12 @@ impl Supervisor<'_> {
                     );
                     self.queue.record_runtime_event(
                         slot.run.id(),
-                        EventKind::ReplanResultWithheld,
-                        json!({"operation_id": op.id, "generation": op.generation,
-                               "what": "satisfied_verification", "ask_id": watch.ask,
-                               "result": checked}),
+                        withheld_kind,
+                        withheld_payload(
+                            &withheld_base,
+                            json!({"what": "satisfied_verification", "ask_id": watch.ask,
+                                   "result": checked}),
+                        ),
                     )?;
                 }
             }
@@ -281,9 +461,11 @@ impl Supervisor<'_> {
                     );
                     self.queue.record_runtime_event(
                         slot.run.id(),
-                        EventKind::ReplanResultWithheld,
-                        json!({"operation_id": op.id, "generation": op.generation,
-                               "what": "validation", "result": checked}),
+                        withheld_kind,
+                        withheld_payload(
+                            &withheld_base,
+                            json!({"what": "validation", "result": checked}),
+                        ),
                     )?;
                 }
             }
@@ -291,14 +473,216 @@ impl Supervisor<'_> {
         }
         // The review left as it stands waits for the park in place of its
         // jobs; were the park not to happen after all, it starts again.
-        if let Some(held) = withheld {
-            slot.transition(held, EventKind::ReplanResultWithheld.as_str(), &*self.queue);
+        if let Some(withheld) = withheld {
+            slot.transition(withheld, withheld_kind.as_str(), &*self.queue);
         }
+        // An exit after a validation or a verdict whose run rests already
+        // (its validation sent it back) keeps that rest and its reason.
+        let rested = matches!(slot.phase, Phase::Exiting(_));
         let run = self.queue.run(slot.run.id())?;
-        match self.park(&op, &run, &self.registration.token.clone())? {
+        let token = self.registration.token.clone();
+        let parked = match &park {
+            ParkFor::Replan(op) => self.park(op, &run, &token)?,
+            ParkFor::Hold(hold) => {
+                let at_end = if rested { AtEnd::Rested } else { AtEnd::Park };
+                self.park_held(hold, &run, &token, at_end)?
+            }
+        };
+        match parked {
             Some(parked) => Ok(Some(Step::Done(Box::new(parked)))),
             None => Ok(Some(Step::Continue)),
         }
+    }
+
+    /// Take the run of a held task through the park: the wait for its
+    /// writer at its turn's end and the settle that records the hold's wait
+    /// ([`RunTransitions::park_for_hold`]), as far as each can go now. The
+    /// run once parked; `None` while it waits, once the park is no longer
+    /// this supervisor's, or once the hold was released or settled
+    /// meanwhile (the run then goes on by its own paths). A writer that
+    /// cannot be stopped is warned of and waited for again on the next
+    /// look: the hold saves nothing, so no step fails. A run that rests as
+    /// it is ([`AtEnd::rests`]) keeps its own reason: its lease is given
+    /// back with the hold settled in the same transaction, the writer found
+    /// ended ([`RunTransitions::release_for_hold`]).
+    fn park_held(
+        &mut self,
+        hold: &TaskHold,
+        run: &TaskRun,
+        token: &LeaseToken,
+        at_end: AtEnd,
+    ) -> Result<Option<TaskRun>> {
+        let park = ParkFor::Hold(hold.clone());
+        self.pause_at(PausePoint::ParkLook, run.id());
+        let quiet = match self.still_settling(run, token, &park) {
+            Ok(()) => self.quiesce(&park, run, token),
+            Err(error) => Err(error),
+        };
+        match quiet {
+            Err(error) if error.chain().any(|cause| cause.is::<ParkLost>()) => {
+                info!(run_id = %run.id(), "run {}: its park stopped: {error:#}", run.id());
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+            Ok(Quiet::Waiting) => return Ok(None),
+            Ok(Quiet::Stuck(why)) => {
+                warn!(run_id = %run.id(), "run {}: its park for the hold {} of task {} waits: {why}", run.id(), hold.id, hold.task_id);
+                return Ok(None);
+            }
+            Ok(Quiet::Stopped) => {}
+        }
+        let run = &self.queue.run(run.id())?;
+        if at_end.rests(run.status()) {
+            self.queue.release_for_hold(hold.id, run.id(), token)?;
+            info!(run_id = %run.id(), "run {}: the hold {} of task {} settled as it rests ({})", run.id(), hold.id, hold.task_id, run.status().as_str());
+            return Ok(Some(self.queue.run(run.id())?));
+        }
+        let carried = owed_and_untaken(&*self.files, run, &self.queue.run_events(run.id())?)?;
+        let mut payload = json!({"hold_id": hold.id});
+        if !carried.is_empty() {
+            payload["carried_answers"] = json!(carried);
+        }
+        let reason = format!(
+            "task {} was held ({}); the run waits for the release with its session and work in place",
+            hold.task_id, hold.reason
+        );
+        let parked = self
+            .queue
+            .park_for_hold(hold.id, run.id(), token, &reason, payload)?;
+        match &parked {
+            Some(_) => {
+                info!(run_id = %run.id(), "run {} parked for the hold {} of task {}; its slot is free", run.id(), hold.id, hold.task_id);
+            }
+            None => {
+                info!(run_id = %run.id(), "run {}: the hold {} of task {} was released or settled before its park", run.id(), hold.id, hold.task_id);
+            }
+        }
+        Ok(parked)
+    }
+
+    /// Settle the holds whose task's latest run rests with nobody holding
+    /// it (waiting for a resume, its landing turn, a person's answer, or
+    /// stopped; one a replanning parked included): the hold's wait is the
+    /// run's rest, recorded once ([`RunTransitions::settle_hold_at_rest`]).
+    /// The store settles a hold in the transaction that lets its run rest
+    /// when no writer of it may run; this pass takes what that did not
+    /// reach, each through the same park as a run in a slot
+    /// ([`Self::park_held`]): the wait for its writer (its session's
+    /// wrapper and turn, and what a turn left in the worktree), then the
+    /// settle. A run in one of this supervisor's slots is its park's.
+    ///
+    /// The runs it takes ([`RunTransitions::lease_for_hold_park`]): one that
+    /// rests with nobody holding it while its writer may still run (a
+    /// resume given up whose wrapper still runs its turn, a replanning's
+    /// park that could not stop the writer), which rests as it is; and one
+    /// resting under the lease of a supervisor that died (its resume's or
+    /// its recovery round's, whose wrapper or job ended unwatched), which
+    /// nothing else takes while its task is held: no adopter takes a resume
+    /// whose session ended, nor a triage or a resume a hold refuses. A run
+    /// waiting to land or validating under a stale lease is an adopter's,
+    /// and goes through the park in its slot.
+    pub(super) fn settle_resting_holds(&mut self) -> Result<()> {
+        for hold in self.queue.settling_holds()? {
+            let Some(run) = self.queue.latest_run_of(hold.task_id)? else {
+                continue;
+            };
+            if self.in_slot(run.id()) {
+                continue;
+            }
+            if let Err(error) = self.park_left_held(&hold, &run) {
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: its park for the hold {} failed and is tried again: {error:#}", run.id(), hold.id);
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether a writer of `run` may be left: a session process it
+    /// registered lives, or a process runs in its worktree
+    /// ([`Self::left_writers`], looked at once). A list that cannot be read
+    /// is a writer left.
+    fn writer_left(&self, run: &TaskRun) -> bool {
+        let registered = self.queue.processes(run.id()).map_or(true, |processes| {
+            processes
+                .iter()
+                .any(|p| p.exited_at.is_none() && self.processes.alive(p.pid))
+        });
+        registered || !matches!(self.left_writers(run, Duration::ZERO), Quiet::Stopped)
+    }
+
+    /// Whether this supervisor holds a run out of its slots for its hold's
+    /// park that waits for the run's writer ([`Self::park_left_held`]): it
+    /// is waited for like a job, so the park ends before the loop does. A
+    /// queue that cannot be read waits for nothing.
+    pub(super) fn hold_parks_going(&self) -> bool {
+        let token = &self.registration.token;
+        self.queue.settling_holds().is_ok_and(|holds| {
+            holds.iter().any(|hold| {
+                self.queue
+                    .latest_run_of(hold.task_id)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|run| {
+                        !self.in_slot(run.id())
+                            && self
+                                .queue
+                                .run_lease(run.id())
+                                .ok()
+                                .flatten()
+                                .is_some_and(|lease| lease.token == *token)
+                    })
+            })
+        })
+    }
+
+    /// Take over for its hold's park a run resting `needs_session`,
+    /// `failed` or `interrupted` under a lease nobody renews (or one this
+    /// supervisor took for the park on an earlier look), and park it as far
+    /// as it can go now. A park that waits for the run's writer keeps the
+    /// lease, which this supervisor's heartbeat renews, so that no release
+    /// settles the hold before the writer ended; the next look goes on.
+    fn park_left_held(&mut self, hold: &TaskHold, run: &TaskRun) -> Result<()> {
+        let stopped_or_waiting = matches!(
+            run.status(),
+            RunStatus::NeedsSession | RunStatus::Failed | RunStatus::Interrupted
+        );
+        let resting = stopped_or_waiting
+            || matches!(
+                run.status(),
+                RunStatus::AwaitingIntegration | RunStatus::Validating
+            );
+        if !resting {
+            return Ok(());
+        }
+        let token = self.registration.token.clone();
+        let lease = self.queue.run_lease(run.id())?;
+        // A run a replanning guards (its park could not stop the writer and
+        // ended blocked) is the replanning's: the hold takes no lease of it
+        // and settles once no writer of it is left.
+        if self.queue.replan_guard(run.task_id())?.is_some() {
+            if lease.is_none() && !self.writer_left(run) {
+                self.queue
+                    .settle_hold_at_rest(hold.id, run.id(), run.status())?;
+            }
+            return Ok(());
+        }
+        if let Some(lease) = lease
+            && lease.token != token
+            && !(stopped_or_waiting && self.lease_stale(&lease, self.generators.clock.now()))
+        {
+            return Ok(());
+        }
+        let Some(run) = self.queue.lease_for_hold_park(run.id(), &token, hold.id)? else {
+            return Ok(());
+        };
+        // A resume a supervisor died in the middle of is parked as a slot's
+        // run is; a run that rested by its own step keeps that rest.
+        let at_end = if mid_resume(&self.queue.run_events(run.id())?) {
+            AtEnd::Park
+        } else {
+            AtEnd::Resting
+        };
+        self.park_held(hold, &run, &token, at_end)?;
+        Ok(())
     }
 
     /// Park the runs no supervisor holds whose operation parks them: one
@@ -399,8 +783,9 @@ impl Supervisor<'_> {
         // longer this supervisor's (another took the run over while this
         // one stood still) looks at no session and stops none.
         self.pause_at(PausePoint::ParkLook, run.id());
+        let park = ParkFor::Replan(Box::new(op.clone()));
         let quiet = match self.still_parking(run, token, &op) {
-            Ok(()) => self.quiesce(&op, run, token),
+            Ok(()) => self.quiesce(&park, run, token),
             Err(error) => Err(error),
         };
         let quiet = match quiet {
@@ -532,15 +917,10 @@ impl Supervisor<'_> {
     /// while the park is still `token`'s and `op` is where it was
     /// ([`Self::still_parking`]): no session another supervisor opened
     /// since is touched.
-    fn quiesce(
-        &mut self,
-        op: &ReplanOperation,
-        run: &TaskRun,
-        token: &LeaseToken,
-    ) -> Result<Quiet> {
+    fn quiesce(&mut self, park: &ParkFor, run: &TaskRun, token: &LeaseToken) -> Result<Quiet> {
         let now = self.generators.clock.now();
         let limit = self.stall.turn_limits().limit_secs;
-        let overdue = quiesce_overdue(op.updated_at, now, limit);
+        let overdue = quiesce_overdue(park.since(), now, limit);
         let events = self.queue.run_events(run.id())?;
         let processes = self.queue.processes(run.id())?;
         let mut running = Vec::new();
@@ -562,19 +942,19 @@ impl Supervisor<'_> {
             if wrapper_runs || turn.is_some() {
                 running.push((handle, turn, session.resume_attempt));
             } else {
-                self.still_parking(run, token, op)?;
-                self.close_parked_session(run, &handle, session.resume_attempt)?;
+                self.still_settling(run, token, park)?;
+                self.close_parked_session(run, &handle, session.resume_attempt, park.by())?;
             }
         }
         if running.is_empty() {
-            return Ok(self.left_writers(run));
+            return Ok(self.left_writers(run, park.writer_grace()));
         }
         if !overdue {
             return Ok(Quiet::Waiting);
         }
         for (handle, turn, resume) in running {
-            self.still_parking(run, token, op)?;
-            warn!(run_id = %run.id(), "run {}: its session {handle} still runs past the turn's limit; stopping it for replan operation {}", run.id(), op.id);
+            self.still_settling(run, token, park)?;
+            warn!(run_id = %run.id(), "run {}: its session {handle} still runs past the turn's limit; stopping it for {}", run.id(), park.describe());
             let stopped =
                 stop_session(self.sessions, &handle, StopRoute::Replan).and_then(|()| match turn {
                     Some(turn) => stop_left_turn(&*self.processes, &turn),
@@ -591,10 +971,10 @@ impl Supervisor<'_> {
                     turn.pid
                 )));
             }
-            self.still_parking(run, token, op)?;
-            self.close_parked_session(run, &handle, resume)?;
+            self.still_settling(run, token, park)?;
+            self.close_parked_session(run, &handle, resume, park.by())?;
         }
-        Ok(self.left_writers(run))
+        Ok(self.left_writers(run, park.writer_grace()))
     }
 
     /// Once `run`'s sessions and turns are gone, whether a process of the
@@ -606,7 +986,7 @@ impl Supervisor<'_> {
     /// is [`Quiet::Stuck`]: the work is not saved while something may
     /// still write it, and the operation is blocked for a person or the
     /// recovery job to stop it.
-    fn left_writers(&self, run: &TaskRun) -> Quiet {
+    fn left_writers(&self, run: &TaskRun, grace: Duration) -> Quiet {
         let Some(worktree) = run.worktree_path() else {
             return Quiet::Stopped;
         };
@@ -627,7 +1007,7 @@ impl Supervisor<'_> {
                 .clock
                 .monotonic()
                 .saturating_duration_since(since);
-            if let Some(quiet) = left_writers_verdict(left, waited, LEFT_WRITER_GRACE) {
+            if let Some(quiet) = left_writers_verdict(left, waited, grace) {
                 return quiet;
             }
             thread::sleep(Duration::from_millis(100));
@@ -642,12 +1022,13 @@ impl Supervisor<'_> {
         run: &TaskRun,
         handle: &str,
         resume: Option<u64>,
+        by: &str,
     ) -> Result<()> {
         stop_session(self.sessions, handle, StopRoute::Replan)?;
         self.queue.record_workspace_closed(
             run.id(),
             handle,
-            json!({"resume_attempt": resume, "by": "replan"}),
+            json!({"resume_attempt": resume, "by": by}),
         )
     }
 
@@ -971,6 +1352,41 @@ impl Supervisor<'_> {
     /// `token` and `op` is still where this park took it (its status and
     /// generation): checked before the park pins the head, puts its
     /// snapshot in place and settles a failure.
+    /// [`Self::still_parking`] for `park`: for a hold, this supervisor
+    /// still holds `run` with `token` and the hold is still open and
+    /// settling.
+    fn still_settling(&self, run: &TaskRun, token: &LeaseToken, park: &ParkFor) -> Result<()> {
+        let hold = match park {
+            ParkFor::Replan(op) => return self.still_parking(run, token, op),
+            ParkFor::Hold(hold) => hold,
+        };
+        let held = self.queue.holds_lease(run.id(), token).map_err(|error| {
+            ParkLost(format!(
+                "the hold of run {} for its park could not be read: {error:#}",
+                run.id()
+            ))
+        })?;
+        if !held {
+            return Err(ParkLost(format!(
+                "this supervisor no longer holds run {} for its park",
+                run.id()
+            ))
+            .into());
+        }
+        let open = self.queue.open_hold(hold.task_id).map_err(|error| {
+            ParkLost(format!("the hold {} could not be read: {error:#}", hold.id))
+        })?;
+        if open.is_none_or(|open| open.id != hold.id || open.settled_at.is_some()) {
+            return Err(ParkLost(format!(
+                "the hold {} was released or settled while run {} was parked",
+                hold.id,
+                run.id()
+            ))
+            .into());
+        }
+        Ok(())
+    }
+
     fn still_parking(&self, run: &TaskRun, token: &LeaseToken, op: &ReplanOperation) -> Result<()> {
         let held = self.queue.holds_lease(run.id(), token).map_err(|error| {
             ParkLost(format!(
@@ -1233,6 +1649,19 @@ mod tests {
         assert!(!quiesce_overdue(100, 100 + 60 + STOP_GRACE_SECS, 60));
         assert!(quiesce_overdue(100, 101 + 60 + STOP_GRACE_SECS, 60));
         assert!(quiesce_overdue(100, 101 + STOP_GRACE_SECS, -5));
+    }
+
+    #[test]
+    fn a_holds_park_looks_at_the_processes_left_once_and_waits_for_them_again() {
+        let left = || Ok(vec!["9 (sleep)".to_owned()]);
+        assert!(matches!(
+            left_writers_verdict(left(), Duration::ZERO, Duration::ZERO),
+            Some(Quiet::Stuck(_))
+        ));
+        assert_eq!(
+            left_writers_verdict(Ok(Vec::new()), Duration::ZERO, Duration::ZERO),
+            Some(Quiet::Stopped)
+        );
     }
 
     #[test]

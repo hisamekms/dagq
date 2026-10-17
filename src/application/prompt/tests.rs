@@ -473,6 +473,7 @@ fn a_container_runs_resume_names_the_clones_main_ref() {
         ResumeKind::SessionGone,
         ResumeKind::ScopeViolation,
         ResumeKind::Replan,
+        ResumeKind::Hold,
     ] {
         let request = ResumeRequest {
             main: CommitSha::try_from(SHA).unwrap(),
@@ -1631,6 +1632,7 @@ fn session_texts(task: &Task, run: &TaskRun) -> Vec<String> {
         ResumeKind::SessionGone,
         ResumeKind::E2e,
         ResumeKind::Replan,
+        ResumeKind::Hold,
     ] {
         let request = ResumeRequest {
             main: CommitSha::try_from(SHA).unwrap(),
@@ -1719,7 +1721,7 @@ fn headless_sessions_are_told_to_finish_in_a_turn_and_never_about_exit() {
                 "{provider:?}: {text}"
             );
         }
-        for request in &texts[1..14] {
+        for request in &texts[1..15] {
             assert!(request.starts_with(HEADLESS_NEXT_TURN), "{request}");
             assert!(request.contains(HEADLESS_STOP), "{request}");
             assert!(request.contains("pkill"), "{request}");
@@ -1730,13 +1732,13 @@ fn headless_sessions_are_told_to_finish_in_a_turn_and_never_about_exit() {
             );
             assert!(request.contains("and end the turn"), "{request}");
         }
-        assert!(texts[17].ends_with(HEADLESS_GO_ON));
-        assert!(texts[14].starts_with(HEADLESS_NEXT_TURN));
-        assert!(texts[14].contains("dagq: the previous turn of run"));
-        assert!(texts[15].starts_with("answer to ask 3: blue\n\n"));
-        assert!(texts[15].ends_with(HEADLESS_GO_ON));
-        assert!(texts[16].starts_with("dagq: the supervisor's recovery job for run"));
+        assert!(texts[18].ends_with(HEADLESS_GO_ON));
+        assert!(texts[15].starts_with(HEADLESS_NEXT_TURN));
+        assert!(texts[15].contains("dagq: the previous turn of run"));
+        assert!(texts[16].starts_with("answer to ask 3: blue\n\n"));
         assert!(texts[16].ends_with(HEADLESS_GO_ON));
+        assert!(texts[17].starts_with("dagq: the supervisor's recovery job for run"));
+        assert!(texts[17].ends_with(HEADLESS_GO_ON));
     }
     // Codex reviews its own diff and does not owe subagent_review.
     let codex = session_texts(&task, &run_on(Provider::Codex, WorkerMode::Headless));
@@ -5051,7 +5053,7 @@ fn task_with_lists(paths: Vec<String>, verification_commands: Vec<String>) -> Ta
     .unwrap()
 }
 
-const RESUME_KINDS: [ResumeKind; 10] = [
+const RESUME_KINDS: [ResumeKind; 11] = [
     ResumeKind::Landing,
     ResumeKind::EvidenceMissing,
     ResumeKind::SentBack,
@@ -5062,12 +5064,42 @@ const RESUME_KINDS: [ResumeKind; 10] = [
     ResumeKind::SessionGone,
     ResumeKind::E2e,
     ResumeKind::Replan,
+    ResumeKind::Hold,
 ];
 
 /// The bytes a next-turn message held to `limit` may take before the
 /// language's instruction is added.
 fn room(limit: usize) -> usize {
     limit - prompt_fit::LANGUAGE_ROOM
+}
+
+/// A run resumed after its task's hold tells its session that a person
+/// held the task and released it, that its worktree is as it was, and
+/// carries the answers its session had not taken when it was parked.
+#[test]
+fn a_resume_after_a_hold_goes_on_where_the_run_stopped_with_its_answers() {
+    let task = task_with_lists(vec!["src/".into()], vec!["cargo test".into()]);
+    let run = run_on(Provider::Claude, WorkerMode::Headless);
+    let request = ResumeRequest {
+        main: CommitSha::try_from("2".repeat(40).as_str()).unwrap(),
+        branch: "main".into(),
+        reason: "task 1 was held: the login expired".into(),
+        kind: ResumeKind::Hold,
+        reason_file: None,
+        known_failures: None,
+        carried_answers: vec!["answer to ask 4: use the staging host".into()],
+        answers_file: None,
+    };
+    let text = resume_request(&task, &run, &request, &[]).unwrap().text;
+    for part in [
+        "while a person held its task",
+        "the hold is released",
+        "answer to ask 4: use the staging host",
+        "where you left off",
+        "the login expired",
+    ] {
+        assert!(text.contains(part), "{part} in {text}");
+    }
 }
 
 /// The answers a continuation after a replanning's park carries take at

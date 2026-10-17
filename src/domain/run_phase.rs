@@ -141,6 +141,12 @@ pub enum Phase {
     LandingAnswer,
     /// It waits for a resume (`needs_session`).
     NeedsSession,
+    /// Its task's hold reached it and nothing of it goes (ADR-t1879-1): the
+    /// step that went when the task was held ended and the next did not
+    /// start, until a person releases the hold. The time between the hold
+    /// (`task_held`) and this phase stays in the phases the run went on
+    /// in, and the release closes it with the phase the run waits in then.
+    Held,
     /// Landed (`run_integrated`), main is pushed. `in_slot` is whether the
     /// supervisor's slot still holds the run (a person's `integrate` holds
     /// none).
@@ -179,6 +185,7 @@ impl Phase {
             Self::Landing => "landing",
             Self::LandingAnswer => "landing_answer",
             Self::NeedsSession => "needs_session",
+            Self::Held => "held",
             Self::Push { .. } => "push",
             Self::PushPending => "push_pending",
             Self::Ended => "ended",
@@ -196,9 +203,11 @@ impl Phase {
             }
             Self::Validating | Self::Exiting => (B::Runtime, H::WorkerSlot),
             Self::ReviewHeld => (B::External, H::WorkerSlot),
-            Self::Waiting | Self::LandingAnswer | Self::ClaimAnswer | Self::PushPending => {
-                (B::Human, H::None)
-            }
+            Self::Waiting
+            | Self::LandingAnswer
+            | Self::ClaimAnswer
+            | Self::PushPending
+            | Self::Held => (B::Human, H::None),
             Self::Verifying => (B::Compute, H::WorkerSlot),
             Self::Returning | Self::LandingQueue | Self::NeedsSession | Self::ClaimHeld => {
                 (B::Queue, H::None)
@@ -239,8 +248,13 @@ impl Phase {
     /// [`Self::at_rest`], except that a `validating` run whose
     /// `already_satisfied` claim rests ([`super::satisfied::rests`]) waits
     /// for the answer to its ask ([`super::satisfied::answer_awaited`]), or
-    /// else for a slot or the container its verification is set to.
+    /// else for a slot or the container its verification is set to; and
+    /// that a run whose hold's wait was recorded ([`Self::Held`]) and not
+    /// released since is still in it.
     pub fn resting(status: RunStatus, events: &[RunEvent]) -> Option<Self> {
+        if status.is_unfinished() && held_unreleased(events) {
+            return Some(Self::Held);
+        }
         if status == RunStatus::Validating && super::satisfied::rests(events) {
             return Some(if super::satisfied::answer_awaited(events) {
                 Self::ClaimAnswer
@@ -274,14 +288,19 @@ impl Phase {
     /// The phase a landing that gave its slot back before main moved
     /// leaves the run in, by the status it left the run in and the run's
     /// `events` (whether it is approved and queued to land): as
-    /// [`Self::at_rest`], `None` for a run another process takes up.
+    /// [`Self::at_rest`], `None` for a run another process takes up; a run
+    /// whose hold settled as it came to rest is [`Self::Held`].
     pub fn after_landing(status: RunStatus, events: &[RunEvent]) -> Option<Self> {
+        if status.is_unfinished() && held_unreleased(events) {
+            return Some(Self::Held);
+        }
         let queued = RunHistory::from_events(events).queued_approval().is_some();
         Self::at_rest(status, queued)
     }
 
     /// The phase a recovery (`run_recovered`, already among the run's
-    /// `events`) leaves the run in, by the status it left the run in. A run
+    /// `events`) leaves the run in, by the status it left the run in; a run
+    /// whose hold settled as it came to rest is [`Self::Held`]. A run
     /// awaiting integration whose landing was given up and not moved on
     /// from ([`RunHistory::recovered_landing`]) is in the phase that
     /// recovery set, however often it is recovered again: one it lands
@@ -289,6 +308,9 @@ impl Phase {
     /// slot to come back to. Any other run is [`Self::at_rest`] by its
     /// status and whether an `approve_landing` answer queued it to land.
     pub fn after_recovery(status: RunStatus, events: &[RunEvent]) -> Option<Self> {
+        if status.is_unfinished() && held_unreleased(events) {
+            return Some(Self::Held);
+        }
         let history = RunHistory::from_events(events);
         match history.recovered_landing() {
             Some(RecoveredLanding::Land(_)) if status == RunStatus::AwaitingIntegration => {
@@ -300,6 +322,17 @@ impl Phase {
             _ => Self::at_rest(status, history.queued_approval().is_some()),
         }
     }
+}
+
+/// Whether the last `run_phase_changed` among `events` entered
+/// [`Phase::Held`] and no `task_released` came after it.
+fn held_unreleased(events: &[RunEvent]) -> bool {
+    events
+        .iter()
+        .rev()
+        .take_while(|event| event.kind != event_kind::TASK_RELEASED)
+        .find(|event| event.kind == event_kind::RUN_PHASE_CHANGED)
+        .is_some_and(|event| event.payload["phase"] == Phase::Held.name())
 }
 
 /// The change that moves the run whose `events` these are to `phase`,
@@ -418,7 +451,7 @@ pub fn last_recorded(events: &[RunEvent]) -> Option<Recorded> {
 mod tests {
     use super::*;
 
-    const ALL: [Phase; 25] = [
+    const ALL: [Phase; 26] = [
         Phase::Provisioning,
         Phase::Worker,
         Phase::Validating,
@@ -440,6 +473,7 @@ mod tests {
         Phase::Landing,
         Phase::LandingAnswer,
         Phase::NeedsSession,
+        Phase::Held,
         Phase::Push { in_slot: true },
         Phase::Push { in_slot: false },
         Phase::PushPending,
@@ -469,6 +503,7 @@ mod tests {
             (Phase::ClaimAnswer, tags(B::Human, H::None)),
             (Phase::ClaimHeld, tags(B::Queue, H::None)),
             (Phase::PushPending, tags(B::Human, H::None)),
+            (Phase::Held, tags(B::Human, H::None)),
             (
                 Phase::Push { in_slot: true },
                 tags(B::External, H::WorkerSlot),
@@ -575,6 +610,50 @@ mod tests {
         assert_eq!(after(RunStatus::NeedsSession), Some(Phase::NeedsSession));
         assert_eq!(after(RunStatus::Failed), Some(Phase::Ended));
         assert_eq!(after(RunStatus::Integrated), None);
+    }
+
+    /// A run whose hold's wait was recorded rests in it until the release,
+    /// whatever its status says; the release lets its status say again.
+    #[test]
+    fn a_held_run_rests_in_its_wait_until_the_release() {
+        let held = event(
+            1,
+            event_kind::RUN_PHASE_CHANGED,
+            PhaseChange::new(Phase::Held, Attempt::FIRST, "hold_parked").payload(),
+        );
+        let lease = event(2, event_kind::LEASE_RELEASED, json!({}));
+        let released = event(3, event_kind::TASK_RELEASED, json!({"hold_id": 1}));
+        let resting = |events: &[RunEvent]| Phase::resting(RunStatus::NeedsSession, events);
+        assert_eq!(resting(&[held.clone(), lease.clone()]), Some(Phase::Held));
+        assert_eq!(
+            Phase::resting(RunStatus::AwaitingIntegration, std::slice::from_ref(&held)),
+            Some(Phase::Held)
+        );
+        assert_eq!(
+            resting(&[held.clone(), lease, released]),
+            Some(Phase::NeedsSession)
+        );
+        // A landing given back or a recovery that let the run rest under
+        // its hold leaves it in the wait, not in the rest it would record.
+        let recovered = event(4, event_kind::RUN_RECOVERED, json!({}));
+        assert_eq!(
+            Phase::after_landing(RunStatus::AwaitingIntegration, std::slice::from_ref(&held)),
+            Some(Phase::Held)
+        );
+        assert_eq!(
+            Phase::after_recovery(RunStatus::NeedsSession, &[held.clone(), recovered.clone()]),
+            Some(Phase::Held)
+        );
+        // An ended run is not held: its life ended.
+        assert_eq!(
+            Phase::resting(RunStatus::Failed, std::slice::from_ref(&held)),
+            Some(Phase::Ended)
+        );
+        assert_eq!(
+            Phase::after_recovery(RunStatus::Interrupted, &[held, recovered]),
+            Some(Phase::Ended)
+        );
+        assert_eq!(Phase::Held.tags(), tags(Blocker::Human, Holds::None));
     }
 
     /// An `already_satisfied` claim at rest (ADR-t1818-1): accepted with no

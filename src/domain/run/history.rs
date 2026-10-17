@@ -25,8 +25,9 @@ pub struct RunHistory<'a> {
 /// The events that park a run for a session with a reason of their own
 /// (the landing or validation, or a person's `send_back`), the triage's
 /// resume, an adopter's park of a run whose workspace was gone, and the
-/// runtime's e2e that failed after the review (ADR-t1233-2).
-const PARKING: [&str; 11] = [
+/// runtime's e2e that failed after the review (ADR-t1233-2), and the parks
+/// at a turn's end for a replanning or a hold.
+const PARKING: [&str; 12] = [
     event_kind::INTEGRATION_DEFERRED,
     event_kind::INTEGRATION_ERROR,
     event_kind::EVIDENCE_MISSING,
@@ -38,16 +39,22 @@ const PARKING: [&str; 11] = [
     event_kind::SESSION_GONE_PARKED,
     event_kind::RUN_E2E_FAILED,
     event_kind::REPLAN_PARKED,
+    event_kind::HOLD_PARKED,
 ];
 
+/// The parks at a turn's end (ADR-t1521-2 decision 1, ADR-t1879-1 decision
+/// 7): what came before one (an approval, a review, the answers owed) was
+/// of the work before the fence.
+const FENCE_PARKS: [&str; 2] = [event_kind::REPLAN_PARKED, event_kind::HOLD_PARKED];
+
 /// The first five of [`PARKING`], the landing recheck's failures, the
-/// runtime's failed e2e and the park for a replanning: what parks a run
-/// that a resumed session may have resolved already. The park for a
-/// replanning is one so that a resume that ended unresolved before it
+/// runtime's failed e2e and the parks at a turn's end: what parks a run
+/// that a resumed session may have resolved already. A park at a turn's
+/// end is one so that a resume that ended unresolved before it
 /// does not let the receipt written after its fence move the run on. A recheck failure the host kept from judging the code
 /// ([`recheck::RecordedFailure::skipped`]) parks nothing, and
 /// [`RunHistory::unresolved_since_park`] passes it over.
-const RESOLVABLE_PARKING: [&str; 8] = [
+const RESOLVABLE_PARKING: [&str; 9] = [
     event_kind::INTEGRATION_DEFERRED,
     event_kind::INTEGRATION_ERROR,
     event_kind::EVIDENCE_MISSING,
@@ -56,6 +63,7 @@ const RESOLVABLE_PARKING: [&str; 8] = [
     event_kind::LANDING_RECHECK_FAILED,
     event_kind::RUN_E2E_FAILED,
     event_kind::REPLAN_PARKED,
+    event_kind::HOLD_PARKED,
 ];
 
 const RESUMES: [&str; 3] = [
@@ -91,6 +99,10 @@ pub enum ParkCause {
     /// saved its work (ADR-t1521-2 decision 1); it resumes once the
     /// operation ends in a continuation or a withdrawal.
     Replan,
+    /// The supervisor parked it at a turn's end for its task's hold
+    /// (ADR-t1879-1 decision 7), its work left in place; it resumes once
+    /// the hold is released.
+    Hold,
 }
 
 /// Why a run waits for a session, from its latest parking event.
@@ -170,22 +182,23 @@ impl<'a> RunHistory<'a> {
 
     /// Whether `integrate` was called on the run (`integration_approved`):
     /// the approval to land it (ADR-0016 decision 5). An approval from
-    /// before the run's latest park for a replanning (`replan_parked`) does
-    /// not count: it approved the work before the park, not what the
-    /// continuation adds (ADR-t1521-2).
+    /// before the run's latest park at a turn's end (`replan_parked` or
+    /// `hold_parked`) does not count: it approved the work before the park,
+    /// not what the session resumed after it adds (ADR-t1521-2,
+    /// ADR-t1879-1).
     pub fn approved(&self) -> bool {
-        self.since_replan_park()
+        self.since_fence_park()
             .iter()
             .any(|e| e.kind == event_kind::INTEGRATION_APPROVED)
     }
 
-    /// The events after the run's latest park for a replanning, or all of
-    /// them when it was never parked so.
-    fn since_replan_park(&self) -> &'a [RunEvent] {
+    /// The events after the run's latest park at a turn's end
+    /// ([`FENCE_PARKS`]), or all of them when it was never parked so.
+    fn since_fence_park(&self) -> &'a [RunEvent] {
         let start = self
             .events
             .iter()
-            .rposition(|e| e.kind == event_kind::REPLAN_PARKED)
+            .rposition(|e| FENCE_PARKS.contains(&e.kind.as_str()))
             .map_or(0, |at| at + 1);
         &self.events[start..]
     }
@@ -289,9 +302,9 @@ impl<'a> RunHistory<'a> {
 
     /// Whether the latest review lets the run land without a person
     /// ([`crate::domain::concern::lets_land`]); a review from before the
-    /// run's latest park for a replanning does not.
+    /// run's latest park at a turn's end does not.
     pub fn review_lets_land(&self) -> bool {
-        self.since_replan_park()
+        self.since_fence_park()
             .iter()
             .rev()
             .find(|e| e.kind == event_kind::REVIEW_FINISHED)
@@ -427,6 +440,8 @@ impl<'a> RunHistory<'a> {
             ParkCause::E2e
         } else if event.kind == event_kind::REPLAN_PARKED {
             ParkCause::Replan
+        } else if event.kind == event_kind::HOLD_PARKED {
+            ParkCause::Hold
         } else {
             ParkCause::Landing
         };
@@ -491,9 +506,9 @@ impl<'a> RunHistory<'a> {
     }
 
     /// The answers to the run's questions its session had been sent but
-    /// had not run when a replanning parked it (`replan_parked`'s
-    /// `carried_answers`, each `{ask_id, seq, prompt}`), oldest first: the
-    /// continuation's resume gives them to its session, and they stay owed
+    /// had not run when a replanning or a hold parked it (`replan_parked`'s
+    /// or `hold_parked`'s `carried_answers`, each `{ask_id, seq, prompt}`),
+    /// oldest first: the resume after it gives them to its session, and they stay owed
     /// until a turn after that park runs its request
     /// ([`Self::requests_run`]); a park that comes before one keeps them.
     /// Empty when the run was never parked so, or owes nothing.
@@ -501,7 +516,7 @@ impl<'a> RunHistory<'a> {
         let Some(parked) = self
             .events
             .iter()
-            .rposition(|e| e.kind == event_kind::REPLAN_PARKED)
+            .rposition(|e| FENCE_PARKS.contains(&e.kind.as_str()))
         else {
             return Vec::new();
         };

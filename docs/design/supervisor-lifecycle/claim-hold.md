@@ -144,4 +144,6 @@ holdの開いたtaskは、fill passの1つの列（resume・復旧job・claim）
 readyのtaskはready queryがholdを除くので、`candidates`にも出ない。
 列を作った後にかかったholdも、claim・resume・triageの開始がそれぞれのトランザクションの中でholdを読み直すので、その開始は起きない。
 queue全体の控えではないので`claim_held` / `claim_resumed`を書かず、`stats`の控えにも数えない。
-走っているrunのturnにholdが効くこと、`status`とattentionへの表示、解除の続け方の選択は予定で、[taskのhold](../../plans/task-hold.md)が持つ。
+走っているrunは、走っている工程の終わりで再計画と同じ保留を通って待ちに入り（[needs_session](needs-session.md#taskのhold)）、holdはそこまで`settling`、待ちに入ると`held`になる。
+`settling`の間の解除は理由`hold_not_settled`で拒み、holdの印を変えない。
+`status`とattentionへの表示、解除の続け方の選択は予定で、[taskのhold](../../plans/task-hold.md)が持つ。

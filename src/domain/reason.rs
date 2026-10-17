@@ -81,6 +81,7 @@ reason_codes! {
     ResumeExhausted => "resume_exhausted": "the run still needed a session after its last resume",
     SessionGone => "session_gone": "an adopter found the workspace of a run whose /exit never reached its session gone, and the run could not land without that session (its head is not the reviewed commit, a worker_question is open, a rebase is in progress), so it waits for a resume instead of landing",
     ReplanParked => "replan_parked": "the trusted runtime parked the run at a turn's end for a replanning of its task and saved its work; it resumes once the replanning ends in a continuation or a withdrawal",
+    Held => "held": "a person or the inbox held the run's task, and the supervisor parked the run at a turn's end with its session and work left in place; it resumes once the hold is released",
     Orphaned => "orphaned": "the run's registered processes were found dead and it was recovered",
     PushFailed => "push_failed": "the push of the landed main failed",
     GitFailed => "git_failed": "a Git command of the runtime failed (removing a landed worktree)",
@@ -214,6 +215,7 @@ pub(crate) fn explains_last_error(event: &RunEvent) -> bool {
         | "landing_decided"
         | "session_gone_parked"
         | "replan_parked"
+        | "hold_parked"
         | "run_e2e_failed" => true,
         // Recovery only interrupts; one mid-integration goes back to
         // `awaiting_integration` with the `last_error` it had.

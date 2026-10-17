@@ -15,10 +15,16 @@
 //! applied if neither the task nor the run moved meanwhile, and discarded
 //! as stale otherwise ([`disposition`]).
 //!
-//! A turn of a run that is already going is not stopped by a hold: the
-//! wait of a running run at a turn's end is planned
-//! (docs/plans/task-hold.md), so a run's wait is [`RunHoldWait::None`]
-//! for every hold today.
+//! A step of a run that is already going is not stopped by a hold
+//! (ADR-0049 decision 4): the hold is `settling` while it goes
+//! ([`run_wait`]), and the replanning's park takes the run at the step's
+//! end the same way, the hold as its other reason (ADR-t1879-1 decision
+//! 7): no next turn, review, revise or landing starts, the wrapper ends
+//! between turns, and the run waits for a session with its session and
+//! worktree left in place, out of the slots. The hold is `held` once the
+//! run waits so; a run already at rest is `held` at once. The wait is not
+//! a stall, an idle session or a run for a recovery job: nothing of the
+//! run runs, and nothing watches it until the release lets it resume.
 
 use serde::{Deserialize, Serialize};
 
@@ -129,16 +135,49 @@ pub struct HoldGuard {
     pub hold: HoldId,
 }
 
-/// Whether an open hold refuses `step`: the claim, the resume and the
-/// start of a recovery job. A hold changes no plan, so `ready`, `edit`,
-/// `cancel` and the dependencies stay as they are; the revise and the
-/// landing of a running run wait for the hold at the turn's end, which is
-/// planned.
+/// Whether an open hold refuses `step`: the claim, the resume, the start
+/// of a recovery job, the revise a review asks for and the start of a
+/// landing. A hold changes no plan, so `ready`, `edit`, `cancel` and the
+/// dependencies stay as they are, and a landing already begun goes on.
 pub const fn holds_step(step: GuardedStep) -> bool {
     matches!(
         step,
-        GuardedStep::Claim | GuardedStep::Resume | GuardedStep::Recover
+        GuardedStep::Claim
+            | GuardedStep::Resume
+            | GuardedStep::Recover
+            | GuardedStep::Revise
+            | GuardedStep::Integrate
     )
+}
+
+/// Where the latest run of a held task stands, in `status` and `leased`
+/// (a process holds its lease): a run whose step goes (its turn, its
+/// validation, review, e2e or landing, or a recovery job's round, each
+/// under a lease, or a run on its way to a session) is
+/// [`RunHoldWait::Settling`] until that step ends; a run at rest with no
+/// one holding it (waiting for a resume, its landing turn, a person's
+/// answer, or stopped) waits as it is ([`RunHoldWait::Settled`]); an ended
+/// run, or none, is [`RunHoldWait::None`].
+pub const fn run_wait(status: Option<RunStatus>, leased: bool) -> RunHoldWait {
+    match status {
+        Some(RunStatus::Claimed | RunStatus::Starting | RunStatus::Running)
+        | Some(RunStatus::Integrating) => RunHoldWait::Settling,
+        Some(
+            RunStatus::Validating
+            | RunStatus::AwaitingIntegration
+            | RunStatus::NeedsSession
+            | RunStatus::Failed
+            | RunStatus::Interrupted,
+        ) if leased => RunHoldWait::Settling,
+        Some(
+            RunStatus::Validating
+            | RunStatus::AwaitingIntegration
+            | RunStatus::NeedsSession
+            | RunStatus::Failed
+            | RunStatus::Interrupted,
+        ) => RunHoldWait::Settled,
+        Some(RunStatus::Integrated | RunStatus::Succeeded) | None => RunHoldWait::None,
+    }
 }
 
 /// Whether a task in `status` takes a hold for `reason`: a reason that is
@@ -177,6 +216,52 @@ pub const fn held_state(wait: RunHoldWait) -> HoldState {
         RunHoldWait::Settling => HoldState::Settling,
         RunHoldWait::None | RunHoldWait::Settled => HoldState::Held,
     }
+}
+
+/// What may still write a resting run, as the queue's records tell, and
+/// whether a park looked: a replanning's park that could not stop or save
+/// the run's work ended `blocked` (`park_blocked`); a session process the
+/// run registered has no exit recorded, whatever its heartbeat says
+/// (`registered_process`: a lease given back, as by a resume given up, is
+/// no writer's end); the supervisor's park found the writer ended
+/// (`checked`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RestWriter {
+    pub park_blocked: bool,
+    pub registered_process: bool,
+    pub checked: bool,
+}
+
+impl RestWriter {
+    /// Whether a writer may still run: the records leave one, and no park
+    /// looked.
+    pub const fn may_run(self) -> bool {
+        !self.checked && (self.park_blocked || self.registered_process)
+    }
+}
+
+/// The wait of a task's latest run in `status`, `leased` or not, for a
+/// hold being recorded: [`run_wait`], a run whose writer may still run
+/// ([`RestWriter::may_run`]) settling like a leased one, once a park found
+/// its writer ended.
+pub const fn rest_wait(status: Option<RunStatus>, leased: bool, writer: RestWriter) -> RunHoldWait {
+    run_wait(status, leased || writer.may_run())
+}
+
+/// Whether a task's hold settles now at its run's rest: the run is the
+/// task's latest (`latest`), nobody leases it, it rests in `status`
+/// ([`run_wait`]) and no writer of it may run ([`RestWriter::may_run`]).
+pub const fn settles_at_rest(
+    status: RunStatus,
+    leased: bool,
+    latest: bool,
+    writer: RestWriter,
+) -> bool {
+    latest
+        && matches!(
+            rest_wait(Some(status), leased, writer),
+            RunHoldWait::Settled
+        )
 }
 
 /// Whether the open hold `open` of `task` may be released while its run
@@ -394,7 +479,86 @@ mod tests {
     }
 
     #[test]
-    fn a_hold_refuses_the_claim_the_resume_and_the_recovery_only() {
+    fn a_run_settles_for_its_hold_once_nothing_of_it_goes() {
+        use RunStatus as S;
+        for status in [S::Claimed, S::Starting, S::Running, S::Integrating] {
+            for leased in [false, true] {
+                assert_eq!(
+                    run_wait(Some(status), leased),
+                    RunHoldWait::Settling,
+                    "{status:?}"
+                );
+            }
+        }
+        for status in [
+            S::Validating,
+            S::AwaitingIntegration,
+            S::NeedsSession,
+            S::Failed,
+            S::Interrupted,
+        ] {
+            assert_eq!(run_wait(Some(status), true), RunHoldWait::Settling);
+            assert_eq!(run_wait(Some(status), false), RunHoldWait::Settled);
+        }
+        for status in [Some(S::Integrated), Some(S::Succeeded), None] {
+            assert_eq!(run_wait(status, true), RunHoldWait::None);
+        }
+    }
+
+    #[test]
+    fn a_rest_settles_its_hold_only_with_no_writer_left_or_one_a_park_found_ended() {
+        let none = RestWriter::default();
+        let blocked = RestWriter {
+            park_blocked: true,
+            ..none
+        };
+        let registered = RestWriter {
+            registered_process: true,
+            ..none
+        };
+        let both = RestWriter {
+            park_blocked: true,
+            registered_process: true,
+            ..none
+        };
+        let rest = RunStatus::NeedsSession;
+        // Nothing may write it: it settles as it rests.
+        assert!(settles_at_rest(rest, false, true, none));
+        // A blocked park or a process with no exit recorded keeps it
+        // settling, until a park found the writer ended.
+        for writer in [blocked, registered, both] {
+            assert!(writer.may_run(), "{writer:?}");
+            assert!(!settles_at_rest(rest, false, true, writer), "{writer:?}");
+            assert_eq!(rest_wait(Some(rest), false, writer), RunHoldWait::Settling);
+            let checked = RestWriter {
+                checked: true,
+                ..writer
+            };
+            assert!(!checked.may_run());
+            assert!(settles_at_rest(rest, false, true, checked), "{checked:?}");
+            assert_eq!(rest_wait(Some(rest), false, checked), RunHoldWait::Settled);
+        }
+        // A lease, a run that is not the task's latest, or a status whose
+        // step goes settle nothing, a park's look or not.
+        let checked = RestWriter {
+            checked: true,
+            ..none
+        };
+        assert!(!settles_at_rest(rest, true, true, checked));
+        assert!(!settles_at_rest(rest, false, false, checked));
+        assert!(!settles_at_rest(RunStatus::Running, false, true, checked));
+        assert!(!settles_at_rest(
+            RunStatus::Integrated,
+            false,
+            true,
+            checked
+        ));
+        // An ended run, or none, has nothing to wait for.
+        assert_eq!(rest_wait(None, false, registered), RunHoldWait::None);
+    }
+
+    #[test]
+    fn a_hold_refuses_what_moves_its_task_on_but_not_its_plan() {
         let refused: Vec<GuardedStep> = [
             GuardedStep::Claim,
             GuardedStep::Resume,
@@ -414,7 +578,9 @@ mod tests {
             [
                 GuardedStep::Claim,
                 GuardedStep::Resume,
-                GuardedStep::Recover
+                GuardedStep::Recover,
+                GuardedStep::Revise,
+                GuardedStep::Integrate
             ]
         );
     }

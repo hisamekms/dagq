@@ -18,9 +18,10 @@ use crate::domain::turn::{
     TurnRequest, exit_path, next_seq, request_path, turns_dir,
 };
 
-/// A turn [`request_turn`] refused because a replanning guards the run's
-/// task (ADR-t1521-2): nothing was written, and nothing failed; what it
-/// carried waits for the session the operation's end resumes.
+/// A turn [`request_turn`] refused because a replanning or a hold fences
+/// the run's task (ADR-t1521-2, ADR-t1879-1): nothing was written, and
+/// nothing failed; what it carried waits for the session resumed once the
+/// fence is gone.
 #[derive(Debug)]
 pub(super) struct TurnFenced(String);
 
@@ -56,16 +57,11 @@ pub(super) fn request_turn(
         Input::Text(text) => (text, None),
         Input::Prompt { text, bytes } => (text, Some(bytes)),
     };
-    // No next turn of a run whose task is being replanned (ADR-t1521-2
-    // decision 1): the request is refused, whatever sends it.
-    if let Some(guard) = sv.queue.replan_guard(run.task_id())? {
-        return Err(TurnFenced(format!(
-            "{what} withheld: task {} is being replanned (replan operation {}, {})",
-            guard.task,
-            guard.operation,
-            guard.status.as_str()
-        ))
-        .into());
+    // No next turn of a run whose task is being replanned or held
+    // (ADR-t1521-2 decision 1, ADR-t1879-1 decision 7): the request is
+    // refused, whatever sends it.
+    if let Some(fence) = sv.queue.turn_fence(run.task_id())? {
+        return Err(TurnFenced(format!("{what} withheld: {}", fence.describe())).into());
     }
     let seq = write_request(&*sv.files, run_dir, text, what)?;
     // Written: a record that fails is only noted, as for a typed text.

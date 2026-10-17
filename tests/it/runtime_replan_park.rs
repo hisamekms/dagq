@@ -1518,35 +1518,6 @@ fn supervise_paused(
     })
 }
 
-/// A pause the first time the supervisor reaches `point`: it writes
-/// `paused` and waits for `go` (no longer than the step's limit).
-fn pause_once(point: runtime::PausePoint, paused: PathBuf, go: PathBuf) -> runtime::PausesPort {
-    let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    runtime::PausesPort(Arc::new(move |at, _run| {
-        if at != point || reached.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            return;
-        }
-        fs::write(&paused, "").unwrap();
-        let waited = std::time::Instant::now();
-        while !go.exists() && waited.elapsed() < common::STEP_LIMIT {
-            thread::sleep(Duration::from_millis(20));
-        }
-    }))
-}
-
-/// Wait for the file `path` (no longer than the step's limit).
-fn wait_for_file(path: &Path) {
-    let waited = std::time::Instant::now();
-    while !path.exists() {
-        assert!(
-            waited.elapsed() < common::STEP_LIMIT,
-            "{} never came",
-            path.display()
-        );
-        thread::sleep(Duration::from_millis(20));
-    }
-}
-
 /// Acceptance: a supervisor that stood still in a park (paused before it
 /// looks at the run's writer, its operation past its limit) and comes back
 /// after another supervisor took the run over, parked it and resumed it

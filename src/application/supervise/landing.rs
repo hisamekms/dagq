@@ -180,7 +180,7 @@ impl Supervisor<'_> {
         session: Option<SessionRef>,
         retried: bool,
     ) -> Result<Phase> {
-        if let Some(held) = self.review_held_for_replanning(run, &session, retried)? {
+        if let Some(held) = self.review_held_at_fence(run, &session, retried)? {
             return Ok(held);
         }
         let events = self.queue.run_events(run.id())?;
@@ -505,26 +505,27 @@ impl Supervisor<'_> {
         session: Option<SessionRef>,
         retried: bool,
     ) -> Result<Phase> {
-        if let Some(held) = self.review_held_for_replanning(run, &session, retried)? {
+        if let Some(held) = self.review_held_at_fence(run, &session, retried)? {
             return Ok(held);
         }
         self.begin_review(run, session, retried)
     }
-    /// Past a replanning's fence (ADR-t1521-2) no review of `run` starts,
-    /// whoever starts it (the step after validation, an adopter, the
-    /// process an exec hands the run to): no program or agent's job, and no
-    /// run once more. The review waits held (`ReviewHeld`), which the park
-    /// takes as it stands; `None` while no replanning guards the task.
-    fn review_held_for_replanning(
+    /// Past a replanning's fence (ADR-t1521-2) or while a hold fences the
+    /// task (ADR-t1879-1) no review of `run` starts, whoever starts it (the
+    /// step after validation, an adopter, the process an exec hands the run
+    /// to): no program or agent's job, and no run once more. The review
+    /// waits held (`ReviewHeld`), which the park takes as it stands; `None`
+    /// while nothing fences the task.
+    fn review_held_at_fence(
         &mut self,
         run: &TaskRun,
         session: &Option<SessionRef>,
         retried: bool,
     ) -> Result<Option<Phase>> {
-        if self.queue.replan_guard(run.task_id())?.is_none() {
+        let Some(fence) = self.queue.turn_fence(run.task_id())? else {
             return Ok(None);
-        }
-        info!(run_id = %run.id(), "run {}: its task is being replanned; its review does not start", run.id());
+        };
+        info!(run_id = %run.id(), "run {}: {}; its review does not start", run.id(), fence.describe());
         Ok(Some(Phase::ReviewHeld {
             session: session.clone(),
             retried,
@@ -1709,18 +1710,40 @@ impl Supervisor<'_> {
         // decision 1): the verdict stays in the history and goes to the
         // landing's ask, as one whose session could not revise it, so the
         // run is not left without anyone to act on it; its landing waits
-        // for the operation's outcome whatever the answer.
-        let guard = self.queue.replan_guard(run.task_id())?;
-        if let Err(withheld) = crate::domain::task_replan::check_step(
-            &crate::domain::task_replan::TaskGuards::replan(guard),
-            crate::domain::task_replan::GuardedStep::Revise,
-        ) {
-            self.queue.record_runtime_event(
-                run.id(),
-                EventKind::ReviseWithheld,
-                json!({"guard": guard, "reasons": verdict.reasons}),
-            )?;
-            return Ok(ask(withheld.to_string(), verdict, session));
+        // for the operation's outcome whatever the answer. A held one gets
+        // none either (ADR-t1879-1): it waits held for the park, which
+        // leaves its session for the resume after the release, whose
+        // review asks again.
+        match self.queue.turn_fence(run.task_id())? {
+            Some(crate::domain::task_replan::Fence::Replan(guard)) => {
+                let withheld = crate::domain::task_replan::check_step(
+                    &crate::domain::task_replan::TaskGuards::replan(Some(guard)),
+                    crate::domain::task_replan::GuardedStep::Revise,
+                )
+                .err()
+                .map(|refused| refused.to_string())
+                .unwrap_or_default();
+                self.queue.record_runtime_event(
+                    run.id(),
+                    EventKind::ReviseWithheld,
+                    json!({"guard": guard, "reasons": verdict.reasons}),
+                )?;
+                return Ok(ask(withheld, verdict, session));
+            }
+            Some(crate::domain::task_replan::Fence::Hold(hold)) => {
+                self.queue.record_runtime_event(
+                    run.id(),
+                    EventKind::ReviseWithheld,
+                    json!({"hold": hold, "reasons": verdict.reasons}),
+                )?;
+                info!(run_id = %run.id(), "run {}: task {} is held; its revise is not sent", run.id(), hold.task);
+                return Ok(Phase::ReviewHeld {
+                    session,
+                    retried: false,
+                    providers: Vec::new(),
+                });
+            }
+            None => {}
         }
         let events = self.queue.run_events(run.id())?;
         let history = RunHistory::from_events(&events);
@@ -2235,9 +2258,10 @@ impl Supervisor<'_> {
             if self.queue.run_lease(run.id())?.is_some() {
                 continue;
             }
-            // A run whose task is being replanned waits, queued, for the
-            // operation's outcome, and holds back no other landing.
-            if self.queue.replan_guard(run.task_id())?.is_some() {
+            // A run whose task is being replanned or held waits, queued,
+            // for the operation's outcome or the release, and holds back no
+            // other landing.
+            if self.queue.turn_fence(run.task_id())?.is_some() {
                 continue;
             }
             if let Some(approval) =
@@ -2315,6 +2339,9 @@ impl Supervisor<'_> {
                 || self
                     .queue
                     .has_unclosed_ask(run.id(), AskKind::ApproveLanding)?
+                // A held task's run waits as it rests (ADR-t1879-1); the
+                // lease's own transaction refuses it besides.
+                || self.queue.turn_fence(run.task_id())?.is_some()
             {
                 continue;
             }

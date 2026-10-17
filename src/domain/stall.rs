@@ -13,6 +13,12 @@
 //! turn and of an idle process watch anything; the keys of the screen, of
 //! a sent text's confirmation and of background work are still read and
 //! checked, and serve only `stats` and the records.
+//!
+//! Every threshold watches a session in a slot. A run whose task is held
+//! (ADR-t1879-1) waits out of the slots with no process once the turn that
+//! ran ends, so none of them reaches its wait: the turn that ran when the
+//! task was held is watched and limited as before, and nothing is from its
+//! end to the release.
 use std::{collections::HashMap, time::Duration};
 
 use serde::{Deserialize, Serialize};

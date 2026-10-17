@@ -1460,6 +1460,84 @@ name = "runtime_recheck::each_declaration_that_applies_builds_in_a_directory_of_
 reason = "B 境界（Git・dagq.toml・プロセス・supervisor の配線）: main checkout の dagq.toml の 3 つの [toolchains] の宣言を実際に読み、merge した木の git ls-tree と paths の照合で当たる 2 つの宣言の dir だけが recheck/ の下にでき、実際の scratch worktree の command がそれぞれの dir を指す env で 1 回ずつ流れ、落ちた回が finding になることを実際の supervisor で確かめる。dir の名前・実行の分け方・当て方の判断は domain::toolchain と supervise::recheck の unit test"
 task = 2270
 
+# 10.3s to 22.7s (stress 60s under the host's load of other runs, task 1881)
+[[test]]
+name = "runtime_task_hold_park::a_hold_during_a_turn_lets_it_end_and_the_run_waits_with_its_session_until_the_release"
+reason = "B 境界（supervisor の配線・wrapper・SQLite・CLI）: turn の途中の hold で、settling の release を CLI が拒み、turn が終わってから wrapper が柵で終わり、run が needs_session（hold_parked）で session と未 commit の差分を残して slot を返し、開き直した supervisor でも待ちが続き、release の後に同じ session の resume で着地することを、実際の wrapper と三度の supervisor の起動で確かめる。柵と待ちの判断は domain::task_replan・domain::task_hold・domain::run_phase の unit test"
+task = 1881
+
+# 9.0s to 17.6s (stress 60s under the host's load of other runs, task 1881)
+[[test]]
+name = "runtime_task_hold_park::a_review_running_at_the_hold_ends_and_the_run_waits_without_landing"
+reason = "B 境界（review の job・supervisor の配線・CLI・Git）: review の job の途中の hold で、release が拒まれ、job が最後まで走って verdict を記録し、着地を始めずに run が session・branch・未 commit の差分を残して待ちへ入り、release の後に同じ session の一度の resume と新しい review を経て一度だけ着地することを、実際の review の job と wrapper で確かめる。柵の判断は domain::task_replan の unit test"
+task = 1881
+
+# 8.0s to 17.0s (stress 60s under the host's load of other runs, task 1881)
+[[test]]
+name = "runtime_task_hold_park::a_replanning_and_a_hold_each_keep_the_run_waiting_until_both_end"
+reason = "B 境界（再計画の park・snapshot・SQLite・supervisor の起動）: 再計画の保留と hold が重なった run が再計画の park で snapshot を取り、hold が休んだ run で settle し、継続だけでは resume せず release の後に restore と resume で着地することを、実際の Git と三度の supervisor の起動で確かめる。重なりの判断は domain::task_replan の unit test"
+task = 1881
+
+# 5.1s to 9.0s (stress 60s under the host's load of other runs, task 1881)
+[[test]]
+name = "runtime_task_hold_park::a_helper_left_running_in_the_worktree_keeps_the_hold_settling"
+reason = "B 境界（process の一覧・wrapper・CLI）: turn が worktree に残した process が動く間は hold が settling のまま release を拒み、run が slot に留まり、process が終わってから待ちへ入ることを、実際の detach した process と wrapper で確かめる。残った process の判定は replan_park の left_writers_verdict の unit test"
+task = 1881
+
+# 6.5s to 12.8s (stress 60s under the host's load of other runs, task 1881)
+[[test]]
+name = "runtime_task_hold_park::a_receipt_a_resumed_turn_rewrote_at_the_hold_is_validated_and_starts_no_review"
+reason = "B 境界（resume の wrapper・validation・supervisor の二度の起動）: 一度 hold で待った run を release で resume し、その resume の turn の途中の hold で、turn が書き直した receipt が resume の判定と validation を通り、review を始めずに再び待ちへ入ることを、実際の wrapper と Git で確かめる。柵の判断は domain::task_replan の unit test"
+task = 1881
+
+# 5.7s to 11.0s (stress 60s under the host's load of other runs, task 1881)
+[[test]]
+name = "runtime_task_hold_park::a_receipt_a_revise_rewrote_at_the_hold_is_validated_and_starts_no_review"
+reason = "B 境界（review の job・revise の turn・validation）: review の revise を送った後の turn の途中の hold で、turn が書き直した receipt が revise の判定と validation を通り、次の review を始めずに待ちへ入ることを、実際の review の job と wrapper で確かめる。柵の判断は domain::task_replan の unit test"
+task = 1881
+
+# 2.6s to 6.7s (stress 5 under the host's load of other runs, task 1881)
+[[test]]
+name = "runtime_landing_release::a_held_task_whose_landing_ends_settles_at_its_end_and_is_not_leased_to_review"
+reason = "B 境界（SQLite の transaction・CLI）: 着地の途中の hold が、死んだ着地の recover の transaction の中で待ちに入り held の工程を記録し、hold の間は review と e2e の lease を拒むことを、実際の supervisor の着地と recover で確かめる。待ちの判断は domain::task_hold と domain::run_phase の unit test"
+task = 1881
+
+# 12.7s to 14.2s (stress 60s under the host's load of other runs, task 1881)
+[[test]]
+name = "runtime_task_hold_park::a_validation_ending_at_the_hold_is_acted_on_and_starts_no_review"
+reason = "B 境界（validation の thread・supervisor の配線・CLI・Git）: validation の終わりで止めた supervisor の間の hold で、release が拒まれ、validation の結果が今のとおり記録されて review を始めずに run が session・branch・未 commit の差分を残して待ちへ入り、release の後に同じ session の一度の resume を経て一度だけ着地することを、実際の wrapper と Git で確かめる。柵と待ちの判断は domain::task_replan・domain::task_hold の unit test"
+task = 1881
+
+# 7.7s to 11.4s (stress 60s under the host's load of other runs, task 1881)
+[[test]]
+name = "runtime_task_hold_park::a_hold_whose_resuming_supervisor_died_is_settled_by_another_supervisor"
+reason = "B 境界（二つの supervisor・lease・wrapper・SQLite）: resume の turn の途中の hold で resume した supervisor が park の手前で止まり lease が stale になった後、wrapper が turn を終えて柵で自ら終わった run を、別の supervisor が hold の park のために lease を引き継いで待ちに入れ、止まっていた supervisor が戻っても何も止めず記録しないことを、実際の wrapper と三つの supervisor の起動で確かめる。引き継ぎの可否は runtime_task_hold の store の test"
+task = 1881
+
+# 4.4s to 7.2s (stress 5 under the host's load of other runs, task 1881)
+[[test]]
+name = "runtime_task_hold_park::a_helper_left_by_a_turn_its_validation_sent_back_keeps_the_hold_settling"
+reason = "B 境界（validation・process の一覧・wrapper・CLI）: validation が evidence_missing で needs_session に戻した run の終了の経路を共通の park が取り、turn が worktree に残した detach した process が動く間は lease を持って hold を settling のまま release を拒み、process が終わってから validation の理由のまま待ちへ入ることを、実際の process と wrapper で確かめる。残った process の判定は replan_park の left_writers_verdict の unit test"
+task = 1881
+
+# 8.3s to 11.3s (stress 5 under the host's load of other runs, task 1881)
+[[test]]
+name = "runtime_integrate::integrate_next_passes_over_a_held_tasks_run_and_lands_the_next"
+reason = "B 境界（SQLite の候補の query・Git の着地・CLI）: 先に validation を終えた run の task を hold すると integrate --next がそれを飛ばして次の run を実際の rebase と main の移動で着地させ、held の run は awaiting_integration のまま待ち、release の後にそれが次になって着地することを、実際の supervisor と integrate で確かめる。hold の判定は domain::task_hold の unit test"
+task = 1881
+
+# 5.5s to 10.6s (stress 5 under the host's load of other runs, task 1881)
+[[test]]
+name = "runtime_task_hold_park::a_hold_under_a_replanning_park_a_helper_blocked_settles_only_once_it_ended"
+reason = "B 境界（再計画の park・process の一覧・SQLite・三度の supervisor の起動）: worktree に残った detach した process で再計画の park が blocked になり lease を返した run の hold が、helper が動く間は supervisor の pass を経ても settling のまま release を拒み、helper が終わった後の pass で待ちに入ることを、実際の process と wrapper で確かめる。blocked の park と終わりの記録の無い process を待ちと数えない判断は domain::task_hold::settles_at_rest の unit test"
+task = 1881
+
+# 9.3s to 10.3s (stress 5 under the host's load of other runs, task 1881)
+[[test]]
+name = "runtime_task_hold_park::a_hold_whose_resume_was_given_up_with_its_wrapper_running_settles_once_it_ended"
+reason = "B 境界（resume の wrapper・lease・SQLite・supervisor の配線）: resume の turn の途中の hold と重なって resume が諦められ（lease を返し wrapper は動いたまま）、lease の返却で hold が settle せず release が拒まれ、supervisor が hold の park のために run を取り wrapper が turn を終えて柵で終わるのを待ってから待ちに入れ、release の後に同じ session で一度だけ着地することを、実際の wrapper と supervisor で確かめる。書き手が残りうる run を待ちと数えない判断は domain::task_hold::settles_at_rest の unit test"
+task = 1881
+
 # 6.838s under load (task 2273)
 [[test]]
 name = "runtime_codex_work::a_codex_commands_failed_tests_are_read_with_the_repositorys_resolution"

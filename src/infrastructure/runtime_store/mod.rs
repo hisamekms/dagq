@@ -111,6 +111,11 @@ fn save_run(
             change.payload,
         )?;
     }
+    // A run that comes to rest with nobody holding it settles its task's
+    // hold in the same transaction.
+    if saved && from != run.status() {
+        crate::infrastructure::task_holds::settle_at_rest_in(conn, run.id(), false)?;
+    }
     Ok(saved)
 }
 
@@ -346,6 +351,10 @@ fn assert_wrapper(conn: &Connection, id: &RunId, pid: u32) -> Result<()> {
     Ok(())
 }
 
+/// Record `kind` for run `id`. A lease given back or a recovery ends the
+/// step a supervisor held the run for: a hold of its task that waited for
+/// that step settles in the same transaction once the run rests
+/// ([`crate::infrastructure::task_holds::settle_at_rest_in`]).
 fn run_event(
     conn: &Connection,
     id: &RunId,
@@ -356,7 +365,11 @@ fn run_event(
         conn.query_row("SELECT task_id FROM task_runs WHERE id=?1", [id], |r| {
             r.get(0)
         })?;
-    event(conn, task_id, Some(id), kind, payload)
+    event(conn, task_id, Some(id), kind, payload)?;
+    if matches!(kind, EventKind::LeaseReleased | EventKind::RunRecovered) {
+        crate::infrastructure::task_holds::settle_at_rest_in(conn, id, false)?;
+    }
+    Ok(())
 }
 
 /// Record, inside the caller's transaction, that the run moved to `phase`

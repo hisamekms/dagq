@@ -725,10 +725,10 @@ impl SessionWatch {
         if answers.is_empty() {
             return Ok(None);
         }
-        // Not while a replanning guards the task (ADR-t1521-2): its fence
+        // Not while a replanning or a hold fences the task: the fence
         // refuses the turn, which would be no failure of the delivery; the
-        // answer stays open for the session the continuation resumes.
-        if sv.queue.replan_guard(run.task_id())?.is_some() {
+        // answer stays open for the session resumed after it.
+        if sv.queue.turn_fence(run.task_id())?.is_some() {
             return Ok(None);
         }
         let events = sv.queue.run_events(run.id())?;
@@ -777,9 +777,9 @@ impl SessionWatch {
                         }
                     }
                 }
-                // A replanning's fence that came after the check above: the
-                // delivery waits for the session the operation's end
-                // resumes, and is no failure that would keep it from it.
+                // A fence that came after the check above: the delivery
+                // waits for the session resumed after it, and is no failure
+                // that would keep it from it.
                 Err(error)
                     if error
                         .chain()

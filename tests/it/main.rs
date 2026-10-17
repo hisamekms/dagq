@@ -181,6 +181,7 @@ mod runtime_stale_receipt;
 mod runtime_stall_end;
 mod runtime_sweep;
 mod runtime_task_hold;
+mod runtime_task_hold_park;
 mod runtime_throughput_review;
 mod runtime_toolchains;
 mod runtime_triage;

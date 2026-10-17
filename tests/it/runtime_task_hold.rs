@@ -249,7 +249,9 @@ fn a_verdict_reaching_a_task_held_meanwhile_is_kept_and_applied_after_the_releas
     let (_dir, repo, db) = fixture();
     let (mut queue, run) = interrupted(&repo, &db);
     assert!(begin_round(&mut queue, &run).is_some());
-    hold(&db, "1");
+    let held = hold(&db, "1");
+    // The round runs: the hold settles at its end, not before.
+    assert_eq!(held["state"], "settling");
     let after = finish_round(&mut queue, &run, &TriageAction::Retry);
     assert_eq!(after.status(), RunStatus::Interrupted);
     assert_eq!(
@@ -276,6 +278,15 @@ fn a_verdict_reaching_a_task_held_meanwhile_is_kept_and_applied_after_the_releas
     ));
     assert!(begin_round(&mut queue, &run).is_none());
 
+    // The round's end gave the lease back, and the hold settled with it.
+    assert!(
+        queue
+            .task_hold(TaskId::new(1))
+            .unwrap()
+            .unwrap()
+            .settled_at
+            .is_some()
+    );
     release(&db, "1");
     assert_eq!(queue.released_kept_results().unwrap(), vec![kept.id]);
     assert!(matches!(
@@ -473,4 +484,176 @@ fn the_supervisor_keeps_a_verdict_whose_task_was_held_while_the_job_ran() {
         "recovery_verdict"
     );
     assert!(common::cli::invoke(&db, &["show", "1"]).status.success());
+}
+
+/// The takeover of a resting run for its hold's park: refused while the
+/// recovery round's lease is fresh, taken once it is stale (as a killed
+/// supervisor's), and the lease given back settles the hold in the same
+/// transaction; a settled hold is taken over no more.
+#[test]
+fn a_held_runs_stale_lease_is_taken_over_for_the_park_only_while_the_hold_settles() {
+    let (_dir, repo, db) = fixture();
+    let (mut queue, run) = interrupted(&repo, &db);
+    assert!(begin_round(&mut queue, &run).is_some());
+    let held = hold(&db, "1");
+    assert_eq!(held["state"], "settling");
+    let hold_id = dagq::domain::HoldId::new(held["hold"]["id"].as_i64().unwrap());
+    let other = LeaseToken::new("other");
+    assert!(
+        queue
+            .lease_for_hold_park(run.id(), &other, hold_id)
+            .unwrap()
+            .is_none(),
+        "a fresh lease is the round's"
+    );
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE run_leases SET heartbeat_at=0, pid=?2 WHERE run_id=?1",
+            rusqlite::params![run.id(), dead_pid()],
+        )
+        .unwrap();
+    let taken = queue
+        .lease_for_hold_park(run.id(), &other, hold_id)
+        .unwrap()
+        .expect("a stale lease is taken over");
+    assert_eq!(taken.status(), RunStatus::Interrupted);
+    let acquired = last(&queue, &run, "lease_acquired").payload;
+    assert_eq!(acquired["reason"], "hold_park");
+    assert_eq!(acquired["previous_token"], JOB);
+    assert!(
+        queue
+            .task_hold(TaskId::new(1))
+            .unwrap()
+            .unwrap()
+            .settled_at
+            .is_none()
+    );
+    queue.release_lease(run.id(), &other).unwrap();
+    assert!(
+        queue
+            .task_hold(TaskId::new(1))
+            .unwrap()
+            .unwrap()
+            .settled_at
+            .is_some()
+    );
+    assert!(
+        queue
+            .lease_for_hold_park(run.id(), &other, hold_id)
+            .unwrap()
+            .is_none(),
+        "a settled hold parks nothing more"
+    );
+}
+
+/// A lease given back is no writer's end (a resume given up keeps a
+/// session whose wrapper may still run its turn), and neither is a
+/// heartbeat gone old while the process lives: a run resting with nobody
+/// holding it while a session process it registered has no exit recorded
+/// is no safe wait. A hold on it is `settling`, a release refused, and a
+/// lease given back without a look at the writer settles nothing, whether
+/// the wrapper's heartbeat is old or fresh; once the wrapper's exit is
+/// recorded, the next lease given back settles it. A park that found the
+/// writer ended settles it as it gives the lease back. The decision is
+/// `domain::task_hold::settles_at_rest`'s (its unit test goes over the
+/// cases); this checks that the store's transactions read the records
+/// into it.
+#[test]
+fn a_rest_whose_registered_wrapper_still_runs_is_no_safe_wait_for_a_hold() {
+    let (_dir, repo, db) = fixture();
+    let (mut queue, run) = interrupted(&repo, &db);
+    let connection = Connection::open(&db).unwrap();
+    connection
+        .execute(
+            "UPDATE task_runs SET status='needs_session' WHERE id=?1",
+            [run.id()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO run_processes(run_id, role, pid, heartbeat_at)
+             VALUES (?1, 'wrapper', ?2, 0)",
+            rusqlite::params![run.id(), std::process::id()],
+        )
+        .unwrap();
+    let held = hold(&db, "1");
+    assert_eq!(held["state"], "settling", "{held}");
+    let output = invoke_with(&[], &db, &["release", "1"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("hold_not_settled"));
+    let hold_id = dagq::domain::HoldId::new(held["hold"]["id"].as_i64().unwrap());
+    let token = LeaseToken::new("park");
+    let settled = || {
+        SqliteQueue::open(&db)
+            .unwrap()
+            .task_hold(TaskId::new(1))
+            .unwrap()
+            .unwrap()
+            .settled_at
+            .is_some()
+    };
+    // A lease given back as a step's end: the wrapper's heartbeat is old
+    // but its process (this test's) lives, and so may its turn.
+    assert!(
+        queue
+            .lease_for_hold_park(run.id(), &token, hold_id)
+            .unwrap()
+            .is_some()
+    );
+    queue.release_lease(run.id(), &token).unwrap();
+    assert!(!settled());
+    // Its heartbeat fresh again: still a writer.
+    connection
+        .execute(
+            "UPDATE run_processes SET heartbeat_at=unixepoch() WHERE run_id=?1",
+            [run.id()],
+        )
+        .unwrap();
+    assert!(
+        queue
+            .lease_for_hold_park(run.id(), &token, hold_id)
+            .unwrap()
+            .is_some()
+    );
+    queue.release_lease(run.id(), &token).unwrap();
+    assert!(!settled());
+    // The wrapper's exit is recorded: the next lease given back settles it.
+    connection
+        .execute(
+            "UPDATE run_processes SET exited_at=unixepoch(), exit_code=0 WHERE run_id=?1",
+            [run.id()],
+        )
+        .unwrap();
+    assert!(
+        queue
+            .lease_for_hold_park(run.id(), &token, hold_id)
+            .unwrap()
+            .is_some()
+    );
+    queue.release_lease(run.id(), &token).unwrap();
+    assert!(settled());
+    release(&db, "1");
+
+    // A park that found the writer ended (a wrapper that died without
+    // recording its exit, heartbeating still by its row) settles the hold
+    // as it gives the lease back.
+    connection
+        .execute(
+            "UPDATE run_processes SET exited_at=NULL, heartbeat_at=unixepoch() WHERE run_id=?1",
+            [run.id()],
+        )
+        .unwrap();
+    let held = hold(&db, "1");
+    assert_eq!(held["state"], "settling");
+    let hold_id = dagq::domain::HoldId::new(held["hold"]["id"].as_i64().unwrap());
+    assert!(
+        queue
+            .lease_for_hold_park(run.id(), &token, hold_id)
+            .unwrap()
+            .is_some()
+    );
+    assert!(queue.release_for_hold(hold_id, run.id(), &token).unwrap());
+    assert!(settled());
+    assert!(queue.run_lease(run.id()).unwrap().is_none());
 }

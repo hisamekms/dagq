@@ -967,6 +967,61 @@ pub trait RunTransitions {
         &self,
         task: crate::domain::TaskId,
     ) -> Result<Option<crate::domain::task_replan::ReplanGuard>>;
+    /// What fences `task`'s run at its turn's boundary now
+    /// ([`crate::domain::task_replan::TaskGuards::fence`]): a replanning
+    /// past its pause's fence or an open hold. No next turn, review, revise
+    /// or landing of the run starts while one does.
+    fn turn_fence(
+        &self,
+        task: crate::domain::TaskId,
+    ) -> Result<Option<crate::domain::task_replan::Fence>>;
+    /// The open holds of tasks that have not ended whose run has not
+    /// settled for them yet (`settling`), oldest first.
+    fn settling_holds(&self) -> Result<Vec<crate::domain::task_hold::TaskHold>>;
+    /// The open hold of `task`, if any.
+    fn open_hold(
+        &self,
+        task: crate::domain::TaskId,
+    ) -> Result<Option<crate::domain::task_hold::TaskHold>>;
+    /// The latest run of `task`, if it has one.
+    fn latest_run_of(&self, task: crate::domain::TaskId) -> Result<Option<TaskRun>>;
+    /// Park run `id`, leased to `token`, for the open hold `hold` of its
+    /// task once its writer stopped (ADR-t1879-1 decision 7): in one
+    /// transaction that finds the hold still open and settling, the run
+    /// becomes `needs_session` (`hold_parked` with `reason` and `payload`),
+    /// gives its lease back, the run's open `approve_landing` and
+    /// `approve_close` asks close, the hold records when it settled and
+    /// the run enters its `held` phase. `None`, with nothing written, once
+    /// the hold was released or settled meanwhile.
+    fn park_for_hold(
+        &mut self,
+        hold: crate::domain::HoldId,
+        id: &RunId,
+        token: &LeaseToken,
+        reason: &str,
+        payload: serde_json::Value,
+    ) -> Result<Option<TaskRun>>;
+    /// Settle the open hold `hold` while its task's latest run `id` rests
+    /// in `status` with nobody holding it, the caller having found no
+    /// writer of it left (no session process it registered runs, nothing
+    /// runs in its worktree): in one transaction that finds the hold still
+    /// open and settling and the run still so. Whether it settled now.
+    fn settle_hold_at_rest(
+        &mut self,
+        hold: crate::domain::HoldId,
+        id: &RunId,
+        status: RunStatus,
+    ) -> Result<bool>;
+    /// Give back `token`'s lease of run `id`, which its park for the open
+    /// hold `hold` took, once the park found the run's writer ended: in one
+    /// transaction the lease goes and the hold settles as the run rests.
+    /// Whether the hold is settled now.
+    fn release_for_hold(
+        &mut self,
+        hold: crate::domain::HoldId,
+        id: &RunId,
+        token: &LeaseToken,
+    ) -> Result<bool>;
     /// The open operations whose run the trusted runtime parks now
     /// ([`crate::domain::task_replan::ReplanStatus::parks`]), oldest first.
     fn parking_replans(&self) -> Result<Vec<crate::domain::task_replan::ReplanOperation>>;
@@ -1004,6 +1059,17 @@ pub trait RunTransitions {
         token: &LeaseToken,
         op: crate::domain::ReplanId,
         generation: i64,
+    ) -> Result<Option<TaskRun>>;
+    /// Lease run `id`, resting under a lease nobody renews (its supervisor
+    /// died with the step it held the run for), to `token` for the park of
+    /// the open hold `hold` of its task while it settles: `None` once the
+    /// hold was released or settled, the run moved or is not its task's
+    /// latest, or another process holds it.
+    fn lease_for_hold_park(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        hold: crate::domain::HoldId,
     ) -> Result<Option<TaskRun>>;
     /// Start the restore of the work operation `op` (read under
     /// `generation`) saved for parked run `id`: the run leased to `token`

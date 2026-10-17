@@ -566,6 +566,138 @@ impl SqliteQueue {
         Ok((parked, run.relocated(&self.runs_dir)))
     }
 
+    /// Park run `id`, leased to `token`, for the open hold `hold` of its
+    /// task (ADR-t1879-1 decision 7), as [`RunTransitions::park_for_hold`]
+    /// says: refused (`None`, nothing written) unless the hold is still
+    /// open and settling, so a release that came first wins and the run
+    /// goes on by its own paths.
+    pub fn park_for_hold(
+        &mut self,
+        hold: crate::domain::HoldId,
+        id: &RunId,
+        token: &LeaseToken,
+        reason: &str,
+        payload: serde_json::Value,
+    ) -> Result<Option<TaskRun>> {
+        let now = self.generators.clock.now();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !crate::infrastructure::task_holds::settle_open(&tx, hold, now)? {
+            return Ok(None);
+        }
+        renew_lease(&tx, id, token, now)?;
+        let run = apply_recorded(
+            &tx,
+            refusals(&self.runs_dir, &self.generators),
+            id,
+            Some(token),
+            || "run cannot be parked for its task's hold".to_owned(),
+            |run| run::record_hold_park(run, reason, payload),
+        )?;
+        ensure!(
+            tx.execute(
+                "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
+                params![id, token]
+            )? == 1,
+            "run lease was lost"
+        );
+        run_event(
+            &tx,
+            id,
+            EventKind::LeaseReleased,
+            json!({"reason": EventKind::HoldParked.as_str(), "hold_id": hold}),
+        )?;
+        // The landing or close question was asked of the work before the
+        // park: the resumed session's validation and review ask afresh.
+        for kind in [
+            crate::domain::AskKind::ApproveLanding,
+            crate::domain::AskKind::ApproveClose,
+        ] {
+            crate::infrastructure::asks::close_asks_in(
+                &tx,
+                id,
+                None,
+                kind,
+                &format!(
+                    "the run was parked for the hold {hold} of its task; this question no longer applies to it"
+                ),
+                now,
+            )?;
+        }
+        crate::infrastructure::task_holds::enter_held_phase(
+            &tx,
+            id,
+            EventKind::HoldParked.as_str(),
+        )?;
+        tx.commit()?;
+        Ok(Some(run.relocated(&self.runs_dir)))
+    }
+
+    /// Settle the open hold `hold` of a run at rest whose writer the caller
+    /// found ended, as [`RunTransitions::settle_hold_at_rest`] says:
+    /// refused (`false`, nothing written) once the hold was released or
+    /// settled, or the run moved, became leased or is no longer its task's
+    /// latest.
+    pub fn settle_hold_at_rest(
+        &mut self,
+        hold: crate::domain::HoldId,
+        id: &RunId,
+        status: RunStatus,
+    ) -> Result<bool> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(stored) = stored_run(&tx, id)? else {
+            return Ok(false);
+        };
+        let open = crate::infrastructure::task_holds::open_hold_of(&tx, stored.task_id())?;
+        if stored.status() != status || open.is_none_or(|open| open.id != hold) {
+            return Ok(false);
+        }
+        let settled = crate::infrastructure::task_holds::settle_at_rest_in(&tx, id, true)?;
+        tx.commit()?;
+        Ok(settled)
+    }
+
+    /// Give back `token`'s lease of run `id`, which its park for the open
+    /// hold `hold` took, once the park found its writer ended
+    /// ([`RunTransitions::release_for_hold`]): in one transaction, the lease
+    /// goes (`lease_released`, `reason: hold_settled`) and the hold settles
+    /// as the run rests, its writer checked.
+    pub fn release_for_hold(
+        &mut self,
+        hold: crate::domain::HoldId,
+        id: &RunId,
+        token: &LeaseToken,
+    ) -> Result<bool> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure!(
+            tx.execute(
+                "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
+                params![id, token]
+            )? == 1,
+            "run lease was lost"
+        );
+        run_event(
+            &tx,
+            id,
+            EventKind::LeaseReleased,
+            json!({"reason": "hold_settled", "hold_id": hold}),
+        )?;
+        let task: crate::domain::TaskId =
+            tx.query_row("SELECT task_id FROM task_runs WHERE id=?1", [id], |r| {
+                r.get(0)
+            })?;
+        let open = crate::infrastructure::task_holds::open_hold_of(&tx, task)?;
+        let settled = open.is_some_and(|open| open.id == hold && open.settled_at.is_some())
+            || crate::infrastructure::task_holds::settle_at_rest_in(&tx, id, true)?;
+        tx.commit()?;
+        Ok(settled)
+    }
+
     /// Park a run awaiting integration leased to `token` whose session's
     /// workspace an adopter found gone while it could not land without that
     /// session (task 960): it becomes `needs_session` with `reason` as
@@ -762,8 +894,9 @@ impl SqliteQueue {
             bail!("run {id} is already integrating (see doctor if it is stuck)");
         }
         let stored = stored_run(&tx, id)?.with_context(|| format!("run {id} does not exist"))?;
-        // No landing of a task being replanned begins, whatever passed
-        // before (ADR-t1521-2 decision 1).
+        // No landing of a task being replanned or held begins, whatever
+        // passed before (ADR-t1521-2 decision 1, ADR-t1879-1); one begun
+        // goes on.
         crate::infrastructure::replans::check_task_step(
             &tx,
             stored.task_id(),
@@ -1123,6 +1256,53 @@ impl SqliteQueue {
 /// The [`RunTransitions`] port over the inherent methods above, which callers
 /// that hold a `SqliteQueue` keep using directly.
 impl RunTransitions for SqliteQueue {
+    fn turn_fence(
+        &self,
+        task: crate::domain::TaskId,
+    ) -> Result<Option<crate::domain::task_replan::Fence>> {
+        SqliteQueue::turn_fence(self, task)
+    }
+    fn settling_holds(&self) -> Result<Vec<crate::domain::task_hold::TaskHold>> {
+        SqliteQueue::settling_holds(self)
+    }
+    fn open_hold(
+        &self,
+        task: crate::domain::TaskId,
+    ) -> Result<Option<crate::domain::task_hold::TaskHold>> {
+        SqliteQueue::task_hold(self, task)
+    }
+    fn latest_run_of(&self, task: crate::domain::TaskId) -> Result<Option<TaskRun>> {
+        match crate::infrastructure::task_holds::latest_run(&self.conn, task)? {
+            Some((id, _)) => Ok(Some(SqliteQueue::run(self, &id)?)),
+            None => Ok(None),
+        }
+    }
+    fn park_for_hold(
+        &mut self,
+        hold: crate::domain::HoldId,
+        id: &RunId,
+        token: &LeaseToken,
+        reason: &str,
+        payload: serde_json::Value,
+    ) -> Result<Option<TaskRun>> {
+        SqliteQueue::park_for_hold(self, hold, id, token, reason, payload)
+    }
+    fn release_for_hold(
+        &mut self,
+        hold: crate::domain::HoldId,
+        id: &RunId,
+        token: &LeaseToken,
+    ) -> Result<bool> {
+        SqliteQueue::release_for_hold(self, hold, id, token)
+    }
+    fn settle_hold_at_rest(
+        &mut self,
+        hold: crate::domain::HoldId,
+        id: &RunId,
+        status: RunStatus,
+    ) -> Result<bool> {
+        SqliteQueue::settle_hold_at_rest(self, hold, id, status)
+    }
     fn replan_guard(
         &self,
         task: crate::domain::TaskId,
@@ -1173,6 +1353,14 @@ impl RunTransitions for SqliteQueue {
         generation: i64,
     ) -> Result<Option<TaskRun>> {
         SqliteQueue::lease_for_park(self, id, token, op, generation)
+    }
+    fn lease_for_hold_park(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        hold: crate::domain::HoldId,
+    ) -> Result<Option<TaskRun>> {
+        SqliteQueue::lease_for_hold_park(self, id, token, hold)
     }
     fn finish_restore(
         &mut self,

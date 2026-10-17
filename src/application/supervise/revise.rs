@@ -268,11 +268,58 @@ impl ReviseWatch {
         self.live.asks_from.max(self.questions_from)
     }
 
+    /// Whether the session rewrote `run`'s receipt since the request.
+    pub(super) fn receipt_rewritten(&self, sv: &Supervisor<'_>, run: &TaskRun) -> bool {
+        run.receipt_path()
+            .is_some_and(|receipt| self.rewritten(sv, Path::new(receipt)))
+    }
+
     /// Whether the session rewrote `receipt` since the request.
     fn rewritten(&self, sv: &Supervisor<'_>, receipt: &Path) -> bool {
         sv.files
             .modified(receipt)
             .is_ok_and(|modified| rewritten_after(modified, self.sent_at))
+    }
+
+    /// What the rewritten `receipt` of `run` says about the revise: the
+    /// head it names, or why it does not do.
+    fn judge_rewritten(
+        &self,
+        sv: &Supervisor<'_>,
+        run: &TaskRun,
+        receipt: &Path,
+    ) -> Result<ReviseOutcome> {
+        let crate::application::run_git::SessionHead { head, clean } =
+            crate::application::run_git::session_head(&*sv.repository, run)?;
+        let parsed = sv
+            .files
+            .read_to_string(receipt)
+            .map_err(anyhow::Error::from)
+            .and_then(|text| Ok(Receipt::parse(&text)?));
+        Ok(match parsed {
+            // A session that gives the change up is validation's to fail.
+            Ok(receipt) if receipt.result() == ReceiptResult::Failed => {
+                ReviseOutcome::Rewritten(head)
+            }
+            Ok(receipt) if receipt.names_commit(head.as_str()) && clean => {
+                ReviseOutcome::Rewritten(head)
+            }
+            Ok(receipt) if !receipt.names_commit(head.as_str()) => ReviseOutcome::Mismatch(
+                ReasonCode::CommitMismatch,
+                format!(
+                    "the rewritten receipt names commit {} but the worktree HEAD is {head}",
+                    receipt.commit()
+                ),
+            ),
+            Ok(_) => ReviseOutcome::Mismatch(
+                ReasonCode::WorktreeDirty,
+                format!("the worktree has uncommitted changes on top of HEAD {head}"),
+            ),
+            Err(error) => ReviseOutcome::Mismatch(
+                ReasonCode::ReceiptInvalid,
+                format!("the rewritten receipt is invalid: {error:#}"),
+            ),
+        })
     }
 
     fn observe(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<Option<ReviseOutcome>> {
@@ -281,6 +328,13 @@ impl ReviseWatch {
             .iter()
             .find(|p| p.role == "wrapper" && p.exited_at.is_none())
         else {
+            // A session that ended once it rewrote the receipt (a wrapper
+            // that ended between turns at a hold's fence, ADR-t1879-1) is
+            // judged by that receipt.
+            let receipt = Path::new(run.receipt_path().context("missing receipt path")?);
+            if self.rewritten(sv, receipt) {
+                return self.judge_rewritten(sv, run, receipt).map(Some);
+            }
             return Ok(Some(ReviseOutcome::Ended(
                 "ended before it rewrote the receipt".to_owned(),
             )));
@@ -387,37 +441,7 @@ impl ReviseWatch {
             _ => false,
         };
         if idle_after_receipt {
-            let crate::application::run_git::SessionHead { head, clean } =
-                crate::application::run_git::session_head(&*sv.repository, run)?;
-            let parsed = sv
-                .files
-                .read_to_string(receipt)
-                .map_err(anyhow::Error::from)
-                .and_then(|text| Ok(Receipt::parse(&text)?));
-            return Ok(Some(match parsed {
-                // A session that gives the change up is validation's to fail.
-                Ok(receipt) if receipt.result() == ReceiptResult::Failed => {
-                    ReviseOutcome::Rewritten(head)
-                }
-                Ok(receipt) if receipt.names_commit(head.as_str()) && clean => {
-                    ReviseOutcome::Rewritten(head)
-                }
-                Ok(receipt) if !receipt.names_commit(head.as_str()) => ReviseOutcome::Mismatch(
-                    ReasonCode::CommitMismatch,
-                    format!(
-                        "the rewritten receipt names commit {} but the worktree HEAD is {head}",
-                        receipt.commit()
-                    ),
-                ),
-                Ok(_) => ReviseOutcome::Mismatch(
-                    ReasonCode::WorktreeDirty,
-                    format!("the worktree has uncommitted changes on top of HEAD {head}"),
-                ),
-                Err(error) => ReviseOutcome::Mismatch(
-                    ReasonCode::ReceiptInvalid,
-                    format!("the rewritten receipt is invalid: {error:#}"),
-                ),
-            }));
+            return self.judge_rewritten(sv, run, receipt).map(Some);
         }
         if !rewritten && idle.is_some_and(|idle| idle.idle_since(input_at)) {
             return Ok(Some(ReviseOutcome::Ended(

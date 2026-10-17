@@ -101,6 +101,19 @@ pub(crate) enum ResumeKind {
     /// continuation or a withdrawal, so the run goes on under the same
     /// conditions, its work as it was saved.
     Replan,
+    /// The supervisor parked the run at a turn's end for its task's hold
+    /// (ADR-t1879-1), its session and worktree left as they were; a person
+    /// released the hold, so the run goes on where it stopped.
+    Hold,
+}
+
+impl ResumeKind {
+    /// Whether the run was parked at a turn's end (a replanning or a hold),
+    /// so the answers its session had been sent and had not taken are
+    /// carried to the resumed one.
+    pub(crate) const fn parked_at_fence(self) -> bool {
+        matches!(self, Self::Replan | Self::Hold)
+    }
 }
 
 /// The section of a resolution request on the tasks landed on `branch`
@@ -194,7 +207,7 @@ pub(crate) fn resume_request(
         &reason_read,
     );
     fit.section("reason", &reason);
-    let answers = if request.kind == ResumeKind::Replan && !request.carried_answers.is_empty() {
+    let answers = if request.kind.parked_at_fence() && !request.carried_answers.is_empty() {
         let answers_read = request.answers_file.as_ref().map_or_else(
             || NOT_READABLE.to_owned(),
             |file| format!("every answer is whole in {file}"),
@@ -278,6 +291,11 @@ pub(crate) fn resume_request(
             run.id(),
             task.id()
         ),
+        ResumeKind::Hold => format!(
+            "dagq: run {} (task {}) was paused at the end of a turn while a person held its task, and nothing of it ran meanwhile; the hold is released and the task stays as it was, so the run is needs_session and goes on here, and is validated, reviewed and landed as before.",
+            run.id(),
+            task.id()
+        ),
         ResumeKind::SessionGone => format!(
             "dagq: run {} (task {}) passed its review, but its session's workspace was gone before the run could land, and the run cannot land as it stands, so the run is needs_session and is validated and reviewed again after this session.",
             run.id(),
@@ -335,7 +353,7 @@ pub(crate) fn resume_request(
             rebase_target(run, &request.main)
         ));
         lines.push(format!("2. {checks}"));
-    } else if request.kind == ResumeKind::Replan {
+    } else if request.kind.parked_at_fence() {
         if !answers.is_empty() {
             lines.push(
                 "The answers to your questions that reached this session as it was paused, which it had not taken yet, are these:"

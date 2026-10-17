@@ -160,13 +160,15 @@ impl SqliteQueue {
     /// recovered from a landing it may not land again (task 1118).
     /// `token` becomes its supervisor and `lease_acquired` (`reason:
     /// review`) is recorded. `Ok(None)` means another process took it or it
-    /// changed meanwhile.
+    /// changed meanwhile, or a replanning or a hold guards its task: the
+    /// review leads to its landing, and a hold that came after the caller
+    /// looked would leave a run in a slot that no park takes.
     pub fn lease_for_review(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>> {
         self.lease_awaiting(id, token, "review")
     }
 
     /// [`Self::lease_for_review`] for the e2e of a run queued to land
-    /// (ADR-t1233-2), recorded with `reason: e2e`.
+    /// (ADR-t1233-2), recorded with `reason: e2e`, refused the same way.
     pub fn lease_for_e2e(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>> {
         self.lease_awaiting(id, token, "e2e")
     }
@@ -174,7 +176,8 @@ impl SqliteQueue {
     /// Lease a `validating` run nobody holds to `token` to verify its
     /// `already_satisfied` claim again (ADR-t1818-1 decision 3), recorded
     /// with `reason: already_satisfied`; refused while a replanning guards
-    /// its task (ADR-t1521-2), whose park takes the run as it rests.
+    /// its task (ADR-t1521-2), whose park takes the run as it rests, or a
+    /// hold does (ADR-t1879-1), under which it rests as it is.
     pub fn lease_satisfied(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>> {
         self.lease_unheld(
             id,
@@ -235,6 +238,63 @@ impl SqliteQueue {
                 token,
                 now,
                 json!({"reason": "replan_park", "operation_id": op, "generation": generation}),
+            )?
+        {
+            return Ok(None);
+        }
+        let run = stored_run(&tx, id)?.unwrap_or(run);
+        tx.commit()?;
+        Ok(Some(run.relocated(&self.runs_dir)))
+    }
+
+    /// [`Self::lease_for_park`] for the open hold `hold` of `id`'s task while
+    /// it settles (ADR-t1879-1): a run resting (as there) under a lease
+    /// that is stale, or one `token` holds already, its task's latest run,
+    /// is leased to `token` (`lease_acquired` with `reason: hold_park`) in
+    /// one transaction that finds the hold still open and settling, so the
+    /// park that takes over from a supervisor that died is one
+    /// supervisor's. A fresh lease of another process, a hold released or
+    /// settled, or a run that moved is refused (`None`).
+    pub fn lease_for_hold_park(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        hold: crate::domain::HoldId,
+    ) -> Result<Option<TaskRun>> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = self.generators.clock.now();
+        let Some(run) = stored_run(&tx, id)?.filter(|run| {
+            matches!(
+                run.status(),
+                RunStatus::NeedsSession
+                    | RunStatus::AwaitingIntegration
+                    | RunStatus::Validating
+                    | RunStatus::Failed
+                    | RunStatus::Interrupted
+            )
+        }) else {
+            return Ok(None);
+        };
+        let open = crate::infrastructure::task_holds::open_hold_of(&tx, run.task_id())?;
+        let latest = crate::infrastructure::task_holds::latest_run(&tx, run.task_id())?;
+        if open.is_none_or(|open| open.id != hold || open.settled_at.is_some())
+            || latest.is_none_or(|(latest, _)| latest != *id)
+        {
+            return Ok(None);
+        }
+        let own = tx.execute(
+            "UPDATE run_leases SET heartbeat_at=?3 WHERE run_id=?1 AND token=?2",
+            params![id, token, now],
+        )? == 1;
+        if !own
+            && !lease_in(
+                &tx,
+                id,
+                token,
+                now,
+                json!({"reason": "hold_park", "hold_id": hold}),
             )?
         {
             return Ok(None);
@@ -399,7 +459,13 @@ impl SqliteQueue {
         token: &LeaseToken,
         reason: &str,
     ) -> Result<Option<TaskRun>> {
-        self.lease_unheld(id, token, reason, RunStatus::AwaitingIntegration, None)
+        self.lease_unheld(
+            id,
+            token,
+            reason,
+            RunStatus::AwaitingIntegration,
+            Some(GuardedStep::Integrate),
+        )
     }
 
     /// Lease a run in `status` nobody holds (or whose lease is stale) to

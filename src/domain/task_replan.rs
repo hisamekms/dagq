@@ -211,6 +211,44 @@ impl TaskGuards {
     pub const fn replan(replan: Option<ReplanGuard>) -> Self {
         Self { replan, hold: None }
     }
+
+    /// What fences the task's run at its turn's boundary now: the
+    /// replanning operation past its pause's fence, else the open hold.
+    /// One fence for both (ADR-t1879-1 decision 7): while either holds, no
+    /// next turn is sent or taken, no review, revise or landing starts, and
+    /// the park takes the run once the step that goes ends. The replanning
+    /// is named first, since its park also saves the work; a hold under it
+    /// still fences once the replanning ends.
+    pub fn fence(&self) -> Option<Fence> {
+        match (self.replan.filter(|guard| guard.status.guards()), self.hold) {
+            (Some(replan), _) => Some(Fence::Replan(replan)),
+            (None, Some(hold)) => Some(Fence::Hold(hold)),
+            (None, None) => None,
+        }
+    }
+}
+
+/// Why a task's run is fenced at its turn's boundary ([`TaskGuards::fence`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "by", rename_all = "snake_case")]
+pub enum Fence {
+    Replan(ReplanGuard),
+    Hold(HoldGuard),
+}
+
+impl Fence {
+    /// What fences it, for the records and the logs.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Replan(guard) => format!(
+                "task {} is being replanned (replan operation {}, {})",
+                guard.task,
+                guard.operation,
+                guard.status.as_str()
+            ),
+            Self::Hold(guard) => format!("task {} is held (hold {})", guard.task, guard.hold),
+        }
+    }
 }
 
 /// Refuse `step` of a task `guards` guard: the one judgment every entry
@@ -646,6 +684,8 @@ mod tests {
             GuardedStep::Claim,
             GuardedStep::Resume,
             GuardedStep::Recover,
+            GuardedStep::Revise,
+            GuardedStep::Integrate,
         ] {
             // Both: the replanning names itself first.
             assert!(matches!(
@@ -671,11 +711,20 @@ mod tests {
             GuardedStep::Edit,
             GuardedStep::Cancel,
             GuardedStep::Dependency,
-            GuardedStep::Revise,
-            GuardedStep::Integrate,
         ] {
             assert!(check_step(&held(None), step).is_ok(), "{step:?}");
         }
+        // One fence at the turn's boundary: the replanning while it guards,
+        // the hold under it once it ends, and none once both are gone.
+        assert_eq!(held(Some(parked)).fence(), Some(Fence::Replan(parked)));
+        assert_eq!(held(Some(ended)).fence(), Some(Fence::Hold(hold)));
+        assert_eq!(held(None).fence(), Some(Fence::Hold(hold)));
+        assert_eq!(
+            TaskGuards::replan(Some(parked)).fence(),
+            Some(Fence::Replan(parked))
+        );
+        assert_eq!(TaskGuards::replan(Some(ended)).fence(), None);
+        assert!(Fence::Hold(hold).describe().contains("held (hold 2)"));
     }
 
     #[test]

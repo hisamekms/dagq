@@ -172,5 +172,9 @@ worktreeは残る。
 
 holdの開いたtaskの`needs_session`のrunはresumeせず、使い切ったresumeの後始末（`exhaust_resumes`）もしない。
 再開の候補の列から外して`hold_deferred`に残し、resumeの開始・skip・使い切りの確定の中でもholdを確かめ直す。
+slotで工程が走っていたrunは、その工程の終わりで再計画と同じ保留を通って`needs_session`（`hold_parked`）になり、sessionとworktreeを残す（[非対話のworker](headless-worker.md#再計画の保留)）。
+保留の時にturnが始まっていなかった回答は解除の後のresumeの依頼に載せ、保留より前の承認とreviewのpassは、そのresumeの後の着地に使わない。
 解除は印を外すだけで、次のpassが今のresumeの経路で続ける。
+再計画の保留とholdが重なれば、両方が終わるまでresumeしない。
+resumeかtriageの途中でsupervisorが死に、staleなleaseのまま休んだrunは、holdがadoptもresumeも止めるので、別のsupervisorがholdのparkのためにそのleaseを引き継ぎ（`lease_acquired`の`hold_park`）、slotのrunと同じ保留で書き手の終わりを待ってから待ちに入れる。
 解除のときにproviderを変えて成果を引き継ぐ新しいrunにすることは予定で、[taskのhold](../../plans/task-hold.md)の「解除の分岐」が持つ。

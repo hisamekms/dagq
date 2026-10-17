@@ -53,7 +53,7 @@ impl Supervisor<'_> {
             }
             if self.in_slot(run.id())
                 || self.queue.run_lease(run.id())?.is_some()
-                || self.queue.replan_guard(run.task_id())?.is_some()
+                || self.queue.turn_fence(run.task_id())?.is_some()
                 || !satisfied::awaits_verification(&self.queue.run_events(run.id())?)
                 || self
                     .queue
@@ -386,11 +386,12 @@ impl Supervisor<'_> {
                 continue;
             };
             let run = self.queue.run(&run_id)?;
-            // A task being replanned takes no answer: the park closes the
-            // ask, and the close's transaction refuses it besides.
+            // A task being replanned or held takes no answer: the
+            // replanning's park closes the ask, and the close's transaction
+            // refuses it besides; a held one keeps it for the release.
             if run.status() != RunStatus::Validating
                 || self.queue.run_lease(&run_id)?.is_some()
-                || self.queue.replan_guard(run.task_id())?.is_some()
+                || self.queue.turn_fence(run.task_id())?.is_some()
             {
                 continue;
             }

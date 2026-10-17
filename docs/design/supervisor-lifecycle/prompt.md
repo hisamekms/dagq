@@ -102,6 +102,8 @@ runtimeのplanner ──> 節ごとの上限（prompt_fit::Fit）→ 記録 → 
   e2eのファイルや再現のコマンドはpromptに書かない（どのrepositoryにも渡る文なので）。
   このrepositoryのそれは[手元の検証](../../development/local-checks.md)の「e2eを流さない」が持つ。
   関門の印は着地の前のe2eがlanding branchのtreeから読み、promptには載せない。
+- holdの待ちから続けるresumeの依頼は、人がtaskをholdして解除したこと、worktreeがturnの終わりのままであることを言い、止まった所から続けてcommitし、前と同じに検証・review・着地を通ると頼む。
+  保留の時にsessionが取っていなかった答えはその依頼に載せる（再計画の継続と同じ）。
 - Predecessor tasksにはtask依存に続けてgoal依存（[ADR-0038](../../adr/0038-task-depends-on-a-goal-until-it-is-achieved.md)）のgoalと、その完了したtaskを並べる。
   goalのtaskは多くなりうるので、summaryを短く切る（`GOAL_TASK_SUMMARY_CHARS`）。
 - 上限（[ADR-t2072-1](../../adr/2026-10-08-t2072-1-worker-prompts-and-next-turns-carry-decision-material-within-limits.md)）: 上限は`WORKER_*`の定数で、値の理由と節ごとの取る順はそのdoc commentが持つ。
