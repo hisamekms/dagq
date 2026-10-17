@@ -126,13 +126,13 @@ printf '{{"type":"item.completed","item":{{"id":"t1","type":"mcp_tool_call","ser
     assert_eq!(commands[0]["session"], "worker");
 }
 
-/// In a repository whose `dagq.toml` declares no toolchain profile, the
-/// tests a Codex command's output names as failed are read as the
-/// resolution of no declaration reads them, and its worker span's work
-/// keeps them.
+/// In a repository whose `dagq.toml` declares the Rust profile, the
+/// tests a Codex command's output names as failed are read as that
+/// resolution reads them, and its worker span's work keeps them.
 #[test]
 fn a_codex_commands_failed_tests_are_read_with_the_repositorys_resolution() {
     let (dir, repo, db, backend, codex) = codex_fixture();
+    declare_rust(&repo);
     set_turns(
         dir.path(),
         &format!(

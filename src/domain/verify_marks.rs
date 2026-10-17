@@ -184,19 +184,15 @@ impl ProjectMark {
 }
 
 /// The timeout line of this repository's own test helper (`tests/common`'s
-/// `within`), the mark a repository that declares neither a profile nor a
-/// mark is read with, as the Rust profile is (ADR-t2268-1 decision 9). It
-/// is part of that implied reading, a step of the move to declarations
-/// that goes with the rest of it once this repository declares the mark
-/// and its profile in its `dagq.toml` (task 2273); neither the runtime's
-/// common marks nor the Rust profile hold it.
-/// [`crate::domain::toolchain::Toolchains`] holds when it applies.
-pub(crate) fn implied_within() -> ProjectMark {
+/// `within`) as its `dagq.toml` declares it, for the tests that read this
+/// repository's output.
+#[cfg(test)]
+pub(crate) fn within() -> ProjectMark {
     ProjectMark {
         name: "within".to_owned(),
         class: MarkClass::Host(ToolHostClass::Timeout),
         line: LinePattern::parse("test {test} timed out: *did not happen within*")
-            .expect("the implied pattern is well formed"),
+            .expect("the pattern is well formed"),
     }
 }
 
@@ -224,7 +220,7 @@ mod tests {
 
     #[test]
     fn a_pattern_reads_the_whole_line_and_the_shortest_test() {
-        let within = implied_within();
+        let within = within();
         let line = "test runtime_x::waits timed out: the run to land did not happen within 20s";
         assert!(within.is_on(line));
         assert_eq!(within.test_on(line).as_deref(), Some("runtime_x::waits"));

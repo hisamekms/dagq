@@ -309,9 +309,8 @@ pub struct KindUsage {
 /// Code's `<...>/claude/versions/<version>`); then the kind the declared
 /// profiles give a process of their tools
 /// ([`Toolchains::process_kind`]: the build tool in `cargo`, the compiler
-/// in `rustc`, the Rust profile's own tools while the repository declares
-/// none, ADR-t2268-1 decision 9); else `other`, where the tools of no
-/// declared profile count.
+/// in `rustc`; none while the repository declares no profile); else
+/// `other`, where the tools of no declared profile count.
 pub fn process_kind(command: &str, toolchains: &Toolchains) -> usize {
     let command = command.trim().trim_start_matches('(').trim_end_matches(')');
     let name = command.rsplit('/').next().unwrap_or(command);
@@ -933,9 +932,9 @@ Swapouts:                               1047356.
  5.5  2048 /usr/libexec/logd
 garbage line
 ";
-        // Undeclared: the Rust profile implied (ADR-t2268-1 decision 9).
-        let undeclared = Toolchains::undeclared();
-        let usage = processes(ps, &undeclared).unwrap();
+        // The Rust profile declared, as in this repository.
+        let rust = Toolchains::this_repository();
+        let usage = processes(ps, &rust).unwrap();
         assert_eq!(usage[0].cpu, 21.5);
         assert_eq!(usage[0].rss_mb, 5.0);
         assert_eq!(usage[1].cpu, 150.0);
@@ -944,16 +943,10 @@ garbage line
         assert_eq!(usage[2].rss_mb, 400.0);
         assert_eq!(usage[3].cpu, 4.0);
         assert_eq!(usage[4].cpu, 5.5);
-        assert_eq!(processes("nothing here\n", &undeclared), None);
-        assert_eq!(PROCESS_KINDS[process_kind("claude", &undeclared)], "claude");
-        assert_eq!(
-            PROCESS_KINDS[process_kind("dagq.previous", &undeclared)],
-            "dagq"
-        );
-        assert_eq!(
-            PROCESS_KINDS[process_kind("clippy-driver", &undeclared)],
-            "rustc"
-        );
+        assert_eq!(processes("nothing here\n", &rust), None);
+        assert_eq!(PROCESS_KINDS[process_kind("claude", &rust)], "claude");
+        assert_eq!(PROCESS_KINDS[process_kind("dagq.previous", &rust)], "dagq");
+        assert_eq!(PROCESS_KINDS[process_kind("clippy-driver", &rust)], "rustc");
         // Without the Rust profile its tools are `other`; `claude` and
         // `dagq` are the runtime's own kinds whatever is declared.
         for toolchains in [
@@ -982,7 +975,7 @@ garbage line
     fn a_sample_is_written_and_read_back_by_its_header() {
         let usage = processes(
             " 10.0 2048 cargo\n 5.0 1024 zsh\n",
-            &Toolchains::undeclared(),
+            &Toolchains::this_repository(),
         )
         .unwrap();
         let memory = Memory {

@@ -4,13 +4,15 @@ use dagq::domain::LeaseToken;
 
 use runtime_support::*;
 
-/// A run awaiting integration, its repository, and the queue.
+/// A run awaiting integration, its repository that declares the Rust
+/// profile, which reads nextest's output (ADR-t2268-1), and the queue.
 fn awaiting() -> (Fixture, PathBuf, PathBuf) {
     let (dir, db, detail) = run_agent(
         "echo a > a.txt && git add a.txt && git commit -q -m a; receipt \"$(git rev-parse HEAD)\"",
     );
     assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
     let repo = Path::new(&db).parent().unwrap().join("repo's directory");
+    declare_rust(&repo);
     (dir, db, repo)
 }
 
@@ -300,6 +302,7 @@ fn a_failure_that_is_not_flaky_is_resumed_at_once() {
 #[test]
 fn the_supervisor_lands_a_run_with_only_flaky_failures_once_more() {
     let (dir, repo, db) = fixture();
+    declare_rust(&repo);
     let flaky = nextest_command(dir.path(), "flaky", &nextest_log(false), true);
     set_commands(&db, json!([flaky]));
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);

@@ -216,9 +216,9 @@ fn doctor_roles(queue: &SqliteQueue) -> Value {
 
 /// `doctor`'s and `status`'s `toolchains` (ADR-t2268-1): the profiles the
 /// `dagq.toml` of the bound main checkout declares, resolved against
-/// `profiles`, with the paths each applies to, or the Rust profile implied
-/// with a warning while it declares none, or `error` with the mistake;
-/// none for a queue bound to no checkout.
+/// `profiles`, with the paths each applies to (none while it declares
+/// none), or `error` with the mistake; none for a queue bound to no
+/// checkout.
 fn bound_toolchains(
     queue: &SqliteQueue,
     profiles: &crate::domain::toolchain::ProfileRegistry,
@@ -303,7 +303,7 @@ fn records_rust_toolchain(
 ) -> bool {
     checkout.is_some_and(|checkout| {
         crate::infrastructure::run_env::toolchains_in_use(checkout, profiles)
-            .records_rust_toolchain(|| is_dagq_source(checkout))
+            .records_rust_toolchain()
     })
 }
 
@@ -1465,9 +1465,9 @@ mod tests {
 
     /// `stats`' `rustc` and the KPIs' `toolchain` axis are shown with the
     /// Rust profile declared, dagq's source or not, and not with only
-    /// another profile declared, even in dagq's source; undeclared, while
-    /// the Rust profile is implied, in dagq's source only (ADR-t2268-1
-    /// decision 9); and not for a queue bound to no checkout.
+    /// another profile declared or none, even in dagq's source
+    /// (ADR-t2268-1 decisions 2 and 3); and not for a queue bound to no
+    /// checkout.
     #[test]
     fn the_rust_toolchain_is_shown_as_the_declared_profiles_say() {
         let shown = |package: &str, toml: Option<&str>| {
@@ -1488,8 +1488,12 @@ mod tests {
         assert!(shown("dagq", Some(rust)));
         assert!(!shown("dagq", Some(fake)));
         assert!(!shown("other", Some(fake)));
-        assert!(shown("dagq", None));
+        assert!(!shown("dagq", None));
         assert!(!shown("other", None));
+        assert!(!shown(
+            "dagq",
+            Some("[verify_marks.within]\nclass = \"timeout\"\nline = \"x {test} y\"\n")
+        ));
         assert!(!records_rust_toolchain(None, &REGISTRY));
     }
 }

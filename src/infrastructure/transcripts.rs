@@ -268,7 +268,7 @@ mod tests {
         };
         assert_eq!(
             transcripts
-                .read(&source, &Toolchains::undeclared())
+                .read(&source, &Toolchains::this_repository())
                 .unwrap_err()
                 .code,
             TRANSCRIPT_MISSING
@@ -279,7 +279,7 @@ mod tests {
         fs::write(project.join(format!("{SESSION}.jsonl")), record(SESSION)).unwrap();
         assert_eq!(
             transcripts
-                .read(&source, &Toolchains::undeclared())
+                .read(&source, &Toolchains::this_repository())
                 .unwrap()
                 .records
                 .len(),
@@ -292,7 +292,7 @@ mod tests {
         };
         assert_eq!(
             transcripts
-                .read(&elsewhere, &Toolchains::undeclared())
+                .read(&elsewhere, &Toolchains::this_repository())
                 .unwrap()
                 .records
                 .len(),
@@ -307,7 +307,7 @@ mod tests {
         };
         assert_eq!(
             transcripts
-                .read(&given, &Toolchains::undeclared())
+                .read(&given, &Toolchains::this_repository())
                 .unwrap_err()
                 .code,
             SESSION_MISMATCH
@@ -315,7 +315,7 @@ mod tests {
         fs::write(&path, "{\"unknown\":1}\n").unwrap();
         assert_eq!(
             transcripts
-                .read(&given, &Toolchains::undeclared())
+                .read(&given, &Toolchains::this_repository())
                 .unwrap_err()
                 .code,
             TRANSCRIPT_UNSUPPORTED
@@ -323,7 +323,7 @@ mod tests {
         fs::write(&path, [0xff, 0xfe]).unwrap();
         assert_eq!(
             transcripts
-                .read(&given, &Toolchains::undeclared())
+                .read(&given, &Toolchains::this_repository())
                 .unwrap_err()
                 .code,
             TRANSCRIPT_UNPARSABLE
@@ -331,7 +331,7 @@ mod tests {
         fs::write(&path, format!("{}\nnot json\n", record(SESSION))).unwrap();
         assert_eq!(
             transcripts
-                .read(&given, &Toolchains::undeclared())
+                .read(&given, &Toolchains::this_repository())
                 .unwrap()
                 .skipped,
             1
@@ -340,7 +340,7 @@ mod tests {
         let unknown = TranscriptSource::default();
         assert_eq!(
             transcripts
-                .read(&unknown, &Toolchains::undeclared())
+                .read(&unknown, &Toolchains::this_repository())
                 .unwrap_err()
                 .code,
             SESSION_UNKNOWN
@@ -348,7 +348,7 @@ mod tests {
         let nowhere = ClaudeTranscripts::new(None);
         assert_eq!(
             nowhere
-                .read(&source, &Toolchains::undeclared())
+                .read(&source, &Toolchains::this_repository())
                 .unwrap_err()
                 .code,
             TRANSCRIPT_MISSING
@@ -389,7 +389,7 @@ mod tests {
         };
         let records = |session: &str| {
             transcripts
-                .read(&source(session), &Toolchains::undeclared())
+                .read(&source(session), &Toolchains::this_repository())
                 .map(|transcript| transcript.records.len())
                 .map_err(|unreadable| unreadable.code)
         };
@@ -495,7 +495,7 @@ mod tests {
         };
         assert_eq!(
             transcripts
-                .read(&source, &Toolchains::undeclared())
+                .read(&source, &Toolchains::this_repository())
                 .unwrap()
                 .records
                 .len(),

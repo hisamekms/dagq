@@ -82,6 +82,26 @@ pub fn git(repo: &Path, args: &[&str]) {
     );
 }
 
+/// What this repository's `dagq.toml` declares of its toolchains
+/// (ADR-t2268-1): the Rust profile over the whole repository and
+/// `tests/common`'s `within` line as a mark.
+pub const RUST_DECLARED: &str = "[toolchains.rust]\nprofile = \"rust\"\n\n[verify_marks.within]\nclass = \"timeout\"\nline = \"test {test} timed out: *did not happen within*\"\n";
+
+/// Add [`RUST_DECLARED`] to main's `dagq.toml` in `repo` and commit it:
+/// a repository whose verification's output the Rust profile reads, as a
+/// repository that declares none no longer has one.
+pub fn declare_rust(repo: &Path) {
+    let path = repo.join("dagq.toml");
+    let mut toml = fs::read_to_string(&path).unwrap_or_default();
+    if !toml.is_empty() && !toml.ends_with('\n') {
+        toml.push('\n');
+    }
+    toml.push_str(RUST_DECLARED);
+    fs::write(&path, toml).unwrap();
+    git(repo, &["add", "dagq.toml"]);
+    git(repo, &["commit", "-q", "-m", "declare the Rust profile"]);
+}
+
 /// The first lines of every stub agent: a stub whose test process is gone
 /// (killed, or ended while the session still ran) kills its own process
 /// group, the one [`StubSpawner`] made, with every child in it.

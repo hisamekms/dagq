@@ -217,16 +217,16 @@ fn a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer() {
 /// A conflict Git does not see: the waiting run adds `a.txt`, which needs
 /// `b.txt`, and the landing run deletes `b.txt`. `git merge-tree` merges
 /// them cleanly, but the `[recheck] command` fails on main's tree with the
-/// run merged in, in the queue's scratch worktree with its one target
-/// directory; the run is parked and resumed with the command's failure,
-/// and that resume counts.
+/// run merged in, in the queue's scratch worktree with the target
+/// directory of the Rust profile the repository declares; the run is
+/// parked and resumed with the command's failure, and that resume counts.
 #[test]
 fn a_waiting_run_whose_check_fails_on_the_new_main_is_resumed() {
     let (dir, repo, db) = fixture();
     fs::write(repo.join("b.txt"), "b\n").unwrap();
     fs::write(
         repo.join("dagq.toml"),
-        "[recheck]\ncommand = 'echo \"target=$CARGO_TARGET_DIR\"; if [ -f a.txt ]; then test -f b.txt || { echo error[E0063]: missing_b; exit 1; }; fi'\n",
+        format!("{RUST_DECLARED}[recheck]\ncommand = 'echo \"target=$CARGO_TARGET_DIR\"; if [ -f a.txt ]; then test -f b.txt || {{ echo error[E0063]: missing_b; exit 1; }}; fi'\n"),
     )
     .unwrap();
     git(&repo, &["add", "."]);
@@ -271,7 +271,7 @@ fn a_waiting_run_whose_check_fails_on_the_new_main_is_resumed() {
         tail.contains(&format!("target={}", recheck_dir.join("target").display())),
         "{tail}"
     );
-    // Undeclared, the Rust profile is implied (ADR-t2268-1 decision 9).
+    // The Rust profile declared under its name builds in its own directory.
     assert!(recheck_dir.join("target").is_dir());
     let log = Path::new(found["log_path"].as_str().unwrap());
     assert!(log.starts_with(waiting.run_dir().unwrap()), "{log:?}");

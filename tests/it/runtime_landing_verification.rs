@@ -256,6 +256,8 @@ fn a_flaky_only_failure_of_the_replacing_command_is_verified_once_more() {
             shell_path(&output)
         ),
     );
+    // The Rust profile reads nextest's output (ADR-t2268-1).
+    declare_rust(&repo);
     set_commands(&db, json!(["true", "cargo coverage-gate"]));
     let outcome = integrate(&db, 1, &repo).unwrap();
     assert_eq!(outcome["outcome"], "integrated", "{outcome}");

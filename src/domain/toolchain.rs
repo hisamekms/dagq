@@ -25,11 +25,7 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use super::{
-    scope::glob_matches,
-    verify_failure::FailureClass,
-    verify_marks::{self, ProjectMark},
-};
+use super::{scope::glob_matches, verify_failure::FailureClass, verify_marks::ProjectMark};
 
 pub mod rust;
 
@@ -184,10 +180,9 @@ impl BuildOutput {
     /// The build output of the declaration named `declaration` of the
     /// profile named `profile`, one directory per declaration
     /// (ADR-t2268-1 decision 6): `dir` itself for the declaration named
-    /// after its profile (and the profile implied while none is declared,
-    /// [`Toolchains::undeclared`]), so a repository that declares its
-    /// profile under the profile's name keeps the directory it built in
-    /// before (decision 9); `<dir>-<declaration>` for any other. The names
+    /// after its profile, so a repository that declares its profile under
+    /// the profile's name builds in the profile's own directory;
+    /// `<dir>-<declaration>` for any other. The names
     /// of the declarations are distinct and kebab-case, so are these.
     pub fn declared(&self, declaration: &str, profile: &str) -> BuildDir {
         let dir = if declaration == profile {
@@ -304,21 +299,13 @@ struct Declared {
 }
 
 /// The profiles that read a repository's output: those its `dagq.toml`
-/// declares, in the order declared, or, while it declares none, the Rust
-/// profile implied (ADR-t2268-1 decision 9); and the project's own marks
-/// ([`verify_marks`]).
+/// declares, in the order declared, and none while it declares none
+/// (ADR-t2268-1 decision 3), when only the runtime's own marks read it;
+/// and the project's own marks ([`verify_marks`]).
 #[derive(Clone)]
 pub struct Toolchains {
     declared: Vec<Declared>,
-    implicit: bool,
     marks: Vec<ProjectMark>,
-    /// Whether `marks` is the one implied ([`verify_marks::implied_within`]):
-    /// while the repository declares neither a profile nor a mark, the
-    /// timeout line of this repository's own test helper is read as the
-    /// Rust profile is, so this repository's classes do not change before
-    /// its `dagq.toml` declares the mark. A declared profile or mark ends
-    /// it.
-    implicit_marks: bool,
 }
 
 impl std::fmt::Debug for Toolchains {
@@ -331,55 +318,52 @@ impl std::fmt::Debug for Toolchains {
                     .map(|profile| profile.name())
                     .collect::<Vec<_>>(),
             )
-            .field("implicit", &self.implicit)
             .field("marks", &self.marks.len())
             .finish()
     }
 }
 
 impl Toolchains {
-    /// No profile and no mark: an output read with it names no test and
-    /// is classed by none. What reads with the repository's declaration
-    /// and cannot know it (its `dagq.toml` cannot be read or has a
-    /// mistake) reads with this rather than guess a profile
+    /// No profile and no mark, as a repository that declares neither:
+    /// an output read with it names no test and is classed by the
+    /// runtime's own marks alone. What reads with the repository's
+    /// declaration and cannot know it (its `dagq.toml` cannot be read or
+    /// has a mistake) reads with this too rather than guess a profile
     /// (ADR-t2257-1 decision 1).
     pub fn none() -> Self {
         Self {
             declared: Vec::new(),
-            implicit: false,
             marks: Vec::new(),
-            implicit_marks: false,
         }
     }
 
-    /// A repository that declares none: the Rust profile and this
-    /// repository's timeout line, implied while the runtime moves to
-    /// declarations (ADR-t2268-1 decision 9).
-    pub fn undeclared() -> Self {
+    /// The Rust profile declared under its name over the whole repository,
+    /// with `tests/common`'s `within` line as a mark: what this
+    /// repository's `dagq.toml` declares, for the tests that read its
+    /// output.
+    #[cfg(test)]
+    pub(crate) fn this_repository() -> Self {
         Self {
             declared: vec![Declared {
                 name: rust::RUST.name().to_owned(),
                 profile: &rust::RUST,
                 paths: Vec::new(),
             }],
-            implicit: true,
-            marks: vec![verify_marks::implied_within()],
-            implicit_marks: true,
+            marks: vec![super::verify_marks::within()],
         }
     }
 
     /// The profiles the runtime's measures read a worker's commands' output
     /// with (the tests they name as failed), from `resolved`, the
-    /// repository's declaration as its landing resolves it: `None`, a
-    /// queue bound to no repository, is one that declares none; `Err`, a
-    /// main checkout that is not found or a `dagq.toml` that cannot be read
-    /// or has a mistake, reads with [`Self::none`], so the measures do not
-    /// stop and read with no profile the repository may not use.
+    /// repository's declaration as its landing resolves it; `None`, a
+    /// queue bound to no repository, and `Err`, a main checkout that is not
+    /// found or a `dagq.toml` that cannot be read or has a mistake, read
+    /// with [`Self::none`], so the measures do not stop and read with no
+    /// profile the repository may not use.
     pub fn for_measures<E>(resolved: Option<Result<Self, E>>) -> Self {
         match resolved {
-            None => Self::resolve(&BUILTIN, &[]).unwrap_or_else(|_| Self::none()),
             Some(Ok(toolchains)) => toolchains,
-            Some(Err(_)) => Self::none(),
+            None | Some(Err(_)) => Self::none(),
         }
     }
 
@@ -388,7 +372,6 @@ impl Toolchains {
     pub fn with_marks(mut self, marks: Vec<ProjectMark>) -> Self {
         if !marks.is_empty() {
             self.marks = marks;
-            self.implicit_marks = false;
         }
         self
     }
@@ -399,15 +382,12 @@ impl Toolchains {
     }
 
     /// `declarations` resolved against `registry`; none is
-    /// [`Self::undeclared`]. A profile the registry does not have is a
-    /// mistake of the file.
+    /// [`Self::none`], so no profile works. A profile the registry does
+    /// not have is a mistake of the file.
     pub fn resolve(
         registry: &ProfileRegistry,
         declarations: &[ToolchainDeclaration],
     ) -> Result<Self, String> {
-        if declarations.is_empty() {
-            return Ok(Self::undeclared());
-        }
         let declared = declarations
             .iter()
             .map(|declaration| {
@@ -429,9 +409,7 @@ impl Toolchains {
             .collect::<Result<_, String>>()?;
         Ok(Self {
             declared,
-            implicit: false,
             marks: Vec::new(),
-            implicit_marks: false,
         })
     }
 
@@ -476,14 +454,10 @@ impl Toolchains {
     /// Whether the host's Rust toolchain (`rustc -vV`'s release and host)
     /// is recorded at a claim and the KPIs' `toolchain` axis has strata:
     /// when the Rust profile is declared (whatever its paths, since the
-    /// toolchain is asked once for the main checkout). While the
-    /// repository declares none, the Rust profile implied keeps them as
-    /// before the declarations: only in dagq's source, `dagq_source`
-    /// (ADR-t2268-1 decision 9, ADR-t614-1).
-    pub fn records_rust_toolchain(&self, dagq_source: impl FnOnce() -> bool) -> bool {
-        if self.implicit {
-            return dagq_source();
-        }
+    /// toolchain is asked once for the main checkout), and never while the
+    /// repository declares none, dagq's source or not (ADR-t2268-1
+    /// decisions 2 and 3).
+    pub fn records_rust_toolchain(&self) -> bool {
         self.profiles()
             .any(|profile| profile.name() == rust::RUST.name())
     }
@@ -491,7 +465,7 @@ impl Toolchains {
     /// The runs of a command the runtime runs over a tree of the
     /// repository, each the build outputs it builds into: those of the
     /// declarations whose paths match a file of the tree (a declaration
-    /// without paths, and the profile implied, always does), each in a
+    /// without paths always does), each in a
     /// directory of its own ([`BuildOutput::declared`], ADR-t2268-1
     /// decision 6), in the order declared. One run gives a variable one
     /// value, so the command runs as many times as the most declarations
@@ -540,53 +514,36 @@ impl Toolchains {
     }
 
     /// What `doctor` and `status` show: each declaration with its profile
-    /// and the paths it applies to (`**` for the whole repository), the
-    /// profile implied while none is declared, and a warning then; and
-    /// `marks`, the project's own marks the output is read with, each with
-    /// its `name`, the `class` it gives and the shape of its `line`, and
-    /// `implicit: true` on the one implied while the repository declares
-    /// neither a profile nor a mark.
+    /// and the paths it applies to (`**` for the whole repository), none
+    /// while the repository declares none; and `marks`, the project's own
+    /// marks the output is read with, each with its `name`, the `class` it
+    /// gives and the shape of its `line`.
     pub fn view(&self) -> Value {
-        let declared: Vec<Value> = if self.implicit {
-            Vec::new()
-        } else {
-            self.declared
-                .iter()
-                .map(|declared| {
-                    json!({
-                        "name": declared.name,
-                        "profile": declared.profile.name(),
-                        "paths": if declared.paths.is_empty() {
-                            vec!["**".to_owned()]
-                        } else {
-                            declared.paths.clone()
-                        },
-                    })
+        let declared: Vec<Value> = self
+            .declared
+            .iter()
+            .map(|declared| {
+                json!({
+                    "name": declared.name,
+                    "profile": declared.profile.name(),
+                    "paths": if declared.paths.is_empty() {
+                        vec!["**".to_owned()]
+                    } else {
+                        declared.paths.clone()
+                    },
                 })
-                .collect()
-        };
+            })
+            .collect();
         json!({
             "declared": declared,
-            "implicit": self.implicit.then(|| rust::RUST.name()),
-            "warning": self.implicit.then_some(UNDECLARED_WARNING),
-            "marks": self.marks.iter().map(|mark| {
-                let mut shown = json!({
-                    "name": mark.name,
-                    "class": mark.class.as_str(),
-                    "line": mark.line.as_str(),
-                });
-                if self.implicit_marks {
-                    shown["implicit"] = json!(true);
-                }
-                shown
-            }).collect::<Vec<_>>(),
+            "marks": self.marks.iter().map(|mark| json!({
+                "name": mark.name,
+                "class": mark.class.as_str(),
+                "line": mark.line.as_str(),
+            })).collect::<Vec<_>>(),
         })
     }
 }
-
-/// `doctor`'s and `status`'s warning while a repository declares no
-/// profile (ADR-t2268-1 decision 9).
-pub const UNDECLARED_WARNING: &str = "dagq.toml declares no [toolchains.<name>]: the Rust profile reads the verification's output until the repository declares the profiles it uses";
 
 /// [`Toolchains::view`] of a declaration that could be read, else the
 /// mistake as `error` alone: a profile no registry has, or a `dagq.toml`
@@ -618,38 +575,30 @@ mod tests {
         assert!(BUILTIN.get("typescript").is_none());
     }
 
+    /// No declaration is no profile and no mark, in dagq's source too
+    /// (ADR-t2268-1 decision 3): nothing of a language reads the output,
+    /// and `doctor` and `status` show it with no warning.
     #[test]
-    fn no_declaration_implies_rust_and_warns() {
+    fn no_declaration_has_no_profile() {
         let toolchains = Toolchains::resolve(&BUILTIN, &[]).unwrap();
-        assert_eq!(
-            toolchains.profiles().map(|p| p.name()).collect::<Vec<_>>(),
-            ["rust"]
-        );
-        assert_eq!(
-            toolchains.view(),
-            json!({
-                "declared": [],
-                "implicit": "rust",
-                "warning": UNDECLARED_WARNING,
-                "marks": [{
-                    "name": "within",
-                    "class": "timeout",
-                    "line": "test {test} timed out: *did not happen within*",
-                    "implicit": true,
-                }],
-            })
-        );
-        // A declared mark ends the implied one and is shown as declared.
-        let marked = toolchains.with_marks(vec![verify_marks::ProjectMark {
+        assert_eq!(toolchains.profiles().count(), 0);
+        assert!(toolchains.marks().is_empty());
+        assert_eq!(toolchains.view(), json!({"declared": [], "marks": []}));
+        assert!(toolchains.flaky_retry_env("rust").is_empty());
+        assert!(toolchains.junit_test_name().is_none());
+        assert_eq!(toolchains.process_kind("cargo", "cargo"), None);
+        assert!(!toolchains.records_rust_toolchain());
+        // A declared mark is read without a profile.
+        let marked = toolchains.with_marks(vec![crate::domain::verify_marks::ProjectMark {
             name: "hung".to_owned(),
-            class: verify_marks::MarkClass::parse("killed").unwrap(),
-            line: verify_marks::LinePattern::parse("HUNG {test} now").unwrap(),
+            class: crate::domain::verify_marks::MarkClass::parse("killed").unwrap(),
+            line: crate::domain::verify_marks::LinePattern::parse("HUNG {test} now").unwrap(),
         }]);
         assert_eq!(
             marked.view()["marks"],
             json!([{"name": "hung", "class": "killed", "line": "HUNG {test} now"}])
         );
-        assert_eq!(marked.view()["implicit"], "rust");
+        assert_eq!(marked.profiles().count(), 0);
     }
 
     #[test]
@@ -670,8 +619,6 @@ mod tests {
                     {"name": "core", "profile": "rust", "paths": ["src/**", "Cargo.toml"]},
                     {"name": "tools", "profile": "rust", "paths": ["**"]},
                 ],
-                "implicit": null,
-                "warning": null,
                 "marks": [],
             })
         );
@@ -689,10 +636,10 @@ mod tests {
         assert_eq!(view(Err(error.clone())), json!({"error": error}));
     }
 
-    /// The measures read with what the declaration resolved to: a queue
-    /// bound to no repository as one that declares none, and a declaration
-    /// that cannot be read or resolved (an unreadable file, a mistake of
-    /// the file, a main checkout not found) with no profile.
+    /// The measures read with what the declaration resolved to, and with
+    /// no profile a queue bound to no repository and a declaration that
+    /// cannot be read or resolved (an unreadable file, a mistake of the
+    /// file, a main checkout not found).
     #[test]
     fn the_measures_read_with_the_resolution_or_with_none() {
         let names = |toolchains: Toolchains| {
@@ -701,11 +648,7 @@ mod tests {
                 .map(|profile| profile.name())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(names(Toolchains::for_measures::<String>(None)), ["rust"]);
-        assert_eq!(
-            Toolchains::for_measures::<String>(None).view()["implicit"],
-            "rust"
-        );
+        assert!(names(Toolchains::for_measures::<String>(None)).is_empty());
         let declared = Toolchains::resolve(&BUILTIN, &[declaration("core", "rust", &[])]).unwrap();
         assert_eq!(
             names(Toolchains::for_measures::<String>(Some(Ok(declared)))),
@@ -727,7 +670,7 @@ mod tests {
 
     #[test]
     fn the_flaky_retry_env_is_only_the_named_profiles_in_use() {
-        let toolchains = Toolchains::undeclared();
+        let toolchains = Toolchains::this_repository();
         assert_eq!(
             toolchains.flaky_retry_env("rust"),
             rust::RUST
@@ -747,18 +690,25 @@ mod tests {
     }
 
     /// The runs of a command over a tree (ADR-t2268-1 decision 6): one
-    /// with the implied Rust profile's own directory while none is
-    /// declared, without listing the tree; else one directory per
-    /// declaration whose paths match a file of the tree, as many runs as
-    /// the most matching declarations of one variable, and one run with
-    /// none when none matches.
+    /// with no output while none is declared, without listing the tree;
+    /// the profile's own directory for a declaration named after it and
+    /// without paths, without listing the tree either; else one directory
+    /// per declaration whose paths match a file of the tree, as many runs
+    /// as the most matching declarations of one variable, and one run
+    /// with none when none matches.
     #[test]
     fn the_build_runs_give_each_matching_declaration_its_directory() {
         let rust = rust::BUILD_OUTPUT.env;
         let fake = fake::BUILD_OUTPUT.env;
         let unlisted = || -> Result<Vec<String>, ()> { panic!("the tree is not listed") };
         assert_eq!(
-            Toolchains::undeclared().build_runs(unlisted),
+            Toolchains::resolve(&BUILTIN, &[])
+                .unwrap()
+                .build_runs(unlisted),
+            Ok(vec![vec![]])
+        );
+        assert_eq!(
+            Toolchains::this_repository().build_runs(unlisted),
             Ok(vec![vec![build_dir("target", rust)]])
         );
         let tree = || -> Result<Vec<String>, ()> {
@@ -767,7 +717,7 @@ mod tests {
         let declared = |declarations: &[ToolchainDeclaration]| {
             Toolchains::resolve(&fake::REGISTRY, declarations).unwrap()
         };
-        // Named after its profile: the profile's directory, as undeclared.
+        // Named after its profile: the profile's directory.
         assert_eq!(
             declared(&[declaration("rust", "rust", &["src/**"])]).build_runs(tree),
             Ok(vec![vec![build_dir("target", rust)]])
@@ -846,15 +796,16 @@ mod tests {
 
     #[test]
     fn the_rust_toolchain_is_recorded_by_the_declared_profiles() {
-        // Undeclared: the implied Rust profile keeps the judgement of
-        // dagq's source (ADR-t2268-1 decision 9).
-        let undeclared = Toolchains::undeclared();
-        assert!(undeclared.records_rust_toolchain(|| true));
-        assert!(!undeclared.records_rust_toolchain(|| false));
-        // Declared: the Rust profile, whatever the source and its paths.
+        // Undeclared: none (ADR-t2268-1 decision 3).
+        assert!(
+            !Toolchains::resolve(&BUILTIN, &[])
+                .unwrap()
+                .records_rust_toolchain()
+        );
+        // Declared: the Rust profile, whatever its paths.
         let rust =
             Toolchains::resolve(&BUILTIN, &[declaration("core", "rust", &["src/**"])]).unwrap();
-        assert!(rust.records_rust_toolchain(|| false));
+        assert!(rust.records_rust_toolchain());
         let both = Toolchains::resolve(
             &fake::REGISTRY,
             &[
@@ -863,10 +814,10 @@ mod tests {
             ],
         )
         .unwrap();
-        assert!(both.records_rust_toolchain(|| false));
-        // No Rust profile resolved: none, even in dagq's source.
-        assert!(!fake::only_fake().records_rust_toolchain(|| true));
-        assert!(!Toolchains::none().records_rust_toolchain(|| true));
+        assert!(both.records_rust_toolchain());
+        // No Rust profile resolved: none.
+        assert!(!fake::only_fake().records_rust_toolchain());
+        assert!(!Toolchains::none().records_rust_toolchain());
     }
 
     #[test]

@@ -48,8 +48,9 @@ case "$1 $2" in
 esac
 "#;
 
-/// Write `[ci_watch]` to the repository's `dagq.toml` and name a GitHub
-/// remote; the fake `gh` goes in `bin/` of the fixture, logged in.
+/// Write `[ci_watch]` to the repository's `dagq.toml`, beside the Rust
+/// profile whose nextest names the JUnit's tests (ADR-t2268-1), and name a
+/// GitHub remote; the fake `gh` goes in `bin/` of the fixture, logged in.
 fn watched(fixture: &Fixture, repo: &Path) -> PathBuf {
     watched_with(fixture, repo, "")
 }
@@ -60,7 +61,7 @@ fn watched_with(fixture: &Fixture, repo: &Path, more: &str) -> PathBuf {
         repo.join("dagq.toml"),
         // Overlapping globs and one that matches nothing: each into its
         // own directory, the others read all the same.
-        format!("[ci_watch]\nworkflow = \"ci.yml\"\njunit_artifacts = [\"junit-*\", \"junit-mac*\", \"absent-*\"]\n{more}"),
+        format!("{RUST_DECLARED}[ci_watch]\nworkflow = \"ci.yml\"\njunit_artifacts = [\"junit-*\", \"junit-mac*\", \"absent-*\"]\n{more}"),
     )
     .unwrap();
     git(repo, &["add", "dagq.toml"]);
@@ -1126,7 +1127,7 @@ fn a_setting_that_no_longer_names_the_missing_job_ends_its_attention() {
             "required_jobs = [\"rust\", \"linux\"]",
             "required_jobs = []",
         ),
-        String::new(),
+        RUST_DECLARED.to_owned(),
     ] {
         assert_ne!(fixed, setting);
         fs::write(repo.join("dagq.toml"), fixed).unwrap();

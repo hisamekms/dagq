@@ -409,8 +409,8 @@ mod tests {
     }
 
     /// The repositories the runtime's own marks must hold for: one that
-    /// declares nothing (the Rust profile implied), one that declares
-    /// Rust, and one that declares only a profile of another tool.
+    /// declares nothing (no profile, ADR-t2268-1 decision 4), one that
+    /// declares Rust, and one that declares only a profile of another tool.
     fn every_declaration() -> [(&'static str, Toolchains); 3] {
         let rust = Toolchains::resolve(
             &BUILTIN,
@@ -423,7 +423,7 @@ mod tests {
         )
         .unwrap();
         [
-            ("undeclared", Toolchains::undeclared()),
+            ("undeclared", Toolchains::resolve(&BUILTIN, &[]).unwrap()),
             ("rust", rust),
             ("fake", fake::only_fake()),
         ]
@@ -476,33 +476,35 @@ mod tests {
 
     #[test]
     fn an_output_no_declared_profile_reads_is_unknown_and_names_no_test() {
-        let only_fake = fake::only_fake();
+        let [(_, undeclared), _, (_, only_fake)] = every_declaration();
         // cargo's and nextest's marks mean nothing to a repository that
-        // declares only another tool's profile.
-        for log in [
-            "error[E0063]: missing field\nerror: could not compile `dagq`\n",
-            "        FAIL [   4.935s] (1/2) dagq::it a::b\nerror: test run failed\n",
-            "  TRY 1 FAIL [ 0.1s] dagq::it a::b\n  TRY 2 PASS [ 0.1s] dagq::it a::b\n",
-            "Diff in /w/src/a.rs:12:\n",
-            "Caused by:\n  process didn't exit successfully: `rustc` (signal: 9, SIGKILL: kill)\n",
-            "     TIMEOUT [ 600.003s] dagq::it a::b\n",
-        ] {
-            let failure = classify(
-                &only_fake,
-                "cargo test --fail-under-lines 80",
-                Some(101),
-                None,
-                log,
-            );
-            assert_eq!(failure.class, FailureClass::Unknown, "{log}");
-            assert_eq!(failure.profile, None, "{log}");
-            assert!(failed_tests(&only_fake, log).is_empty(), "{log}");
-            assert!(flaky_tests(&only_fake, log).is_empty(), "{log}");
+        // declares only another tool's profile, or none.
+        for toolchains in [&undeclared, &only_fake] {
+            for log in [
+                "error[E0063]: missing field\nerror: could not compile `dagq`\n",
+                "        FAIL [   4.935s] (1/2) dagq::it a::b\nerror: test run failed\n",
+                "  TRY 1 FAIL [ 0.1s] dagq::it a::b\n  TRY 2 PASS [ 0.1s] dagq::it a::b\n",
+                "Diff in /w/src/a.rs:12:\n",
+                "Caused by:\n  process didn't exit successfully: `rustc` (signal: 9, SIGKILL: kill)\n",
+                "     TIMEOUT [ 600.003s] dagq::it a::b\n",
+            ] {
+                let failure = classify(
+                    toolchains,
+                    "cargo test --fail-under-lines 80",
+                    Some(101),
+                    None,
+                    log,
+                );
+                assert_eq!(failure.class, FailureClass::Unknown, "{log}");
+                assert_eq!(failure.profile, None, "{log}");
+                assert!(failed_tests(toolchains, log).is_empty(), "{log}");
+                assert!(flaky_tests(toolchains, log).is_empty(), "{log}");
+            }
         }
         // The same output under the Rust profile is read.
         assert_eq!(
             classify(
-                &Toolchains::undeclared(),
+                &Toolchains::this_repository(),
                 "cargo build",
                 Some(101),
                 None,
@@ -610,10 +612,9 @@ mod tests {
     }
 
     #[test]
-    fn the_projects_timeout_line_is_read_where_it_is_declared_or_implied() {
+    fn the_projects_timeout_line_is_read_where_it_is_declared() {
         let [(_, undeclared), (_, rust), (_, fake)] = every_declaration();
         for (declared, toolchains) in [
-            ("implied", undeclared.clone()),
             (
                 "undeclared with the mark",
                 undeclared.with_marks(within_declared()),
@@ -637,8 +638,12 @@ mod tests {
                 "{declared}"
             );
         }
-        // A declared profile without the mark does not read the line.
-        for (declared, toolchains) in [("rust", rust), ("fake", fake)] {
+        // Without the mark nothing reads the line.
+        for (declared, toolchains) in [
+            ("undeclared", Toolchains::resolve(&BUILTIN, &[]).unwrap()),
+            ("rust", rust),
+            ("fake", fake),
+        ] {
             assert_eq!(
                 classify(&toolchains, "check", Some(101), None, WITHIN).class,
                 FailureClass::Unknown,
@@ -646,15 +651,15 @@ mod tests {
             );
             assert!(failed_tests(&toolchains, WITHIN).is_empty(), "{declared}");
         }
-        // Another mark declared ends the implied one.
-        let other = Toolchains::undeclared().with_marks(marks(&[("hung", "killed", "HUNG*")]));
+        // Another mark declared in its place does not read it.
+        let other = Toolchains::this_repository().with_marks(marks(&[("hung", "killed", "HUNG*")]));
         assert_eq!(
             classify(&other, "check", Some(101), None, WITHIN).class,
             FailureClass::Unknown
         );
         // The quoted text of an assertion is not a mark.
         let quoted = "stderr: \"test a::b timed out: x did not happen within 1s\"\n";
-        assert!(failed_tests(&Toolchains::undeclared(), quoted).is_empty());
+        assert!(failed_tests(&Toolchains::this_repository(), quoted).is_empty());
     }
 
     #[test]
@@ -710,7 +715,7 @@ mod tests {
 
     #[test]
     fn the_first_timeout_line_is_the_evidence() {
-        let toolchains = Toolchains::undeclared();
+        let toolchains = Toolchains::this_repository();
         let log = "        FAIL [ 1.0s] dagq::it it::a\n\
     test it::a timed out: x did not happen within 30s\n\
      TIMEOUT [ 60.0s] dagq::it it::b\n";

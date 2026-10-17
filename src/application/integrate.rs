@@ -1891,7 +1891,7 @@ fn land(
     // `[landing_verification]`: a declaration that cannot be resolved stops
     // before the commands, as an unreadable dagq.toml does.
     let toolchains = if commands.is_empty() {
-        Toolchains::undeclared()
+        Toolchains::none()
     } else {
         verifier.toolchains()?
     };
@@ -4958,7 +4958,7 @@ mod tests {
 
     fn checked(code: Option<i32>, signal: Option<i32>, output: &str) -> Checked {
         judge_command(
-            &Toolchains::undeclared(),
+            &Toolchains::this_repository(),
             "cargo test",
             code,
             signal,
@@ -5001,7 +5001,7 @@ mod tests {
         );
         // Killed at its limit: a timeout, whatever the log says.
         let timed_out = judge_command(
-            &Toolchains::undeclared(),
+            &Toolchains::this_repository(),
             "cargo test",
             None,
             Some(9),
@@ -5064,7 +5064,7 @@ mod tests {
     fn a_command_failing_on_the_host_again_holds_the_run_for_a_person() {
         let first = checked(None, Some(15), "");
         let last = judge_command(
-            &Toolchains::undeclared(),
+            &Toolchains::this_repository(),
             "cargo test",
             None,
             Some(15),

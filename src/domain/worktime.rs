@@ -1279,7 +1279,7 @@ mod tests {
         Transcript::parse(
             &lines.join("\n"),
             SESSION,
-            &crate::domain::toolchain::Toolchains::undeclared(),
+            &crate::domain::toolchain::Toolchains::this_repository(),
         )
         .unwrap()
         .records

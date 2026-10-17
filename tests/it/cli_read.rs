@@ -247,8 +247,10 @@ fn bind(db: &Path, dir: &Path, package: &str) {
 
 /// Task 514: the work breakdown a run's session closed with is in
 /// `timeline`'s heavy commands and in `stats --full`. Its cargo-only
-/// counts, the claim's `rustc` and the `toolchain` axis of `kpi` are shown
-/// for dagq's source only (ADR-t614-1).
+/// counts are shown for dagq's source only (ADR-t614-1); the claim's
+/// `rustc` and the `toolchain` axis of `kpi` only where the Rust profile
+/// is declared, so not in dagq's source that declares none (ADR-t2268-1
+/// decisions 2 and 3).
 #[test]
 fn timeline_and_stats_show_the_work_breakdown() {
     use serde_json::json;
@@ -300,11 +302,17 @@ fn timeline_and_stats_show_the_work_breakdown() {
     assert_eq!(overall["categories"]["llvm_cov"]["share"], json!(0.501));
     assert_eq!(overall["verification_repeats"], 1);
     assert_eq!(stats["goals"][0]["work_breakdown"]["runs"], 1);
-    assert_eq!(stats["runs"][0]["rustc_release"], "1.93.0");
-    assert_eq!(
-        stats["versions"]["rustc"][0]["version"],
-        "1.93.0 aarch64-apple-darwin"
-    );
+    let rustc_left_out = |stats: &Value| {
+        for key in ["rustc_release", "rustc_host"] {
+            assert!(stats["runs"][0].get(key).is_none(), "{key}: {stats}");
+        }
+        assert!(
+            stats["versions"].get("rustc").is_none(),
+            "{}",
+            stats["versions"]
+        );
+    };
+    rustc_left_out(&stats);
     let kpi = |db: &Path| {
         ok(
             db,
@@ -320,6 +328,34 @@ fn timeline_and_stats_show_the_work_breakdown() {
         )
     };
     let landings = |kpi: &Value| kpi["periods"][0]["kpis"]["landings"].clone();
+    let no_toolchain = |landings: &Value| {
+        assert!(
+            landings
+                .as_object()
+                .unwrap()
+                .keys()
+                .all(|stratum| !stratum.starts_with("toolchain=")),
+            "{landings}"
+        );
+    };
+    no_toolchain(&landings(&kpi(&db)));
+
+    // dagq's source that declares the Rust profile shows them.
+    std::fs::write(
+        dir.path().join("repo-dagq").join("dagq.toml"),
+        "[toolchains.rust]\nprofile = \"rust\"\n",
+    )
+    .unwrap();
+    let stats = ok(&db, &["stats", "--full"]);
+    assert_eq!(stats["runs"][0]["rustc_release"], "1.93.0");
+    assert_eq!(
+        stats["versions"]["rustc"][0]["version"],
+        "1.93.0 aarch64-apple-darwin"
+    );
+    assert_eq!(
+        stats["runs"][0]["work_breakdown"]["verification_repeats"],
+        1
+    );
     assert_eq!(
         landings(&kpi(&db))["toolchain=1.93.0 aarch64-apple-darwin"]["value"],
         1.0
@@ -330,7 +366,6 @@ fn timeline_and_stats_show_the_work_breakdown() {
     let stats = ok(&db, &["stats", "--full"]);
     let breakdown = &stats["runs"][0]["work_breakdown"];
     assert_eq!(breakdown["secs"]["model"], 600);
-    let run_stats = &stats["runs"][0];
     let groups = [
         breakdown,
         &stats["overall"]["work_breakdown"],
@@ -348,31 +383,17 @@ fn timeline_and_stats_show_the_work_breakdown() {
         }
     }
     assert_eq!(stats["overall"]["work_breakdown"]["runs"], 1);
-    for key in ["rustc_release", "rustc_host"] {
-        assert!(run_stats.get(key).is_none(), "{key}: {run_stats}");
-    }
-    assert!(
-        stats["versions"].get("rustc").is_none(),
-        "{}",
-        stats["versions"]
-    );
+    rustc_left_out(&stats);
     assert_eq!(stats["versions"]["dagq"][0]["runs"], 1);
     let landings = landings(&kpi(&db));
-    assert!(
-        landings
-            .as_object()
-            .unwrap()
-            .keys()
-            .all(|stratum| !stratum.starts_with("toolchain=")),
-        "{landings}"
-    );
+    no_toolchain(&landings);
     assert_eq!(landings["all"]["value"], 1.0);
 }
 
 /// The `toolchain` axis outside dagq's source follows the profiles its
 /// `dagq.toml` declares (ADR-t2268-1): none with only another profile
 /// declared (the made-up one of `tests/common`), a stratum with the
-/// Rust profile declared. Undeclared, it keeps the source judgement
+/// Rust profile declared. Undeclared, none even in dagq's source
 /// (`timeline_and_stats_show_the_work_breakdown`).
 #[test]
 fn the_toolchain_axis_follows_the_declared_rust_profile() {
@@ -429,8 +450,8 @@ fn the_toolchain_axis_follows_the_declared_rust_profile() {
 /// `stats`' `rustc` follows the same judgement as the `toolchain` axis
 /// (ADR-t2268-1): outside dagq's source it is shown with the Rust profile
 /// declared, while the cargo-only counts stay left out; in dagq's source
-/// it is left out with only another profile declared. Undeclared, it
-/// keeps the source judgement (`timeline_and_stats_show_the_work_breakdown`).
+/// it is left out with only another profile declared. Undeclared, it is
+/// left out in dagq's source too (`timeline_and_stats_show_the_work_breakdown`).
 #[test]
 fn the_stats_rustc_follows_the_declared_rust_profile() {
     use dagq::domain::stats::StatsQuery;

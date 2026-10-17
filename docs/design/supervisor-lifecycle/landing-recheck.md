@@ -75,9 +75,8 @@ recheckのthreadが対象を1件ずつ確かめる（`recheck_runs`）。
 2. 衝突が無く、main checkoutの`dagq.toml`の`[recheck] command`（[Run environment](run-environment.md)）があれば、mergeした木を`commit-tree`でmainの上の1 commitにし（refは作らない）、queue dirの`recheck/worktree`に`Repository::checkout_scratch`で出す。
    そこで`/bin/sh`でcommandを実行する。
    envはそのrunの`[run.env]`に、mergeした木に当たる宣言のbuildの出力（`recheck/`の下の宣言ごとのdirとそれを指すenv）を上書きしたもの（`recheck_env`、[Toolchain profiles](../toolchain-profiles.md)の「buildの出力の置き場」）。
-   runtimeはその宣言のdirだけを作り、`[toolchains]`を宣言して当たる宣言が無ければenvを足さずdirを作らない。
+   runtimeはその宣言のdirだけを作り、`[toolchains]`を宣言しないか当たる宣言が無ければenvを足さずdirを作らない。
    同じenvの宣言が複数当たれば、commandを宣言ごとのdirで順に流し直し（毎回mergeした木を出し直す）、落ちた回で止めてその回の失敗をfindingにする。
-   宣言の無いrepositoryは移行の間の暗黙のRustのprofileで、宣言の前と同じdirとenvになる（ADR-t2268-1決定9）。
    出力はrun dirのlogに書く（`recheck_runs`）。
    非0の終了は`verification_failed`である。
    失敗はintegrateの検証と同じ分類（[integrate](integrate.md)）で、hostの失敗とコードの失敗に分ける。

@@ -293,7 +293,7 @@ mod tests {
 
     #[test]
     fn a_sample_of_this_host_has_the_load_and_the_processes() {
-        let sample = sample(1_790_000_000, &Toolchains::undeclared());
+        let sample = sample(1_790_000_000, &Toolchains::this_repository());
         assert_eq!(sample.unix, 1_790_000_000);
         assert!(sample.values.contains_key("load1"), "{sample:?}");
         assert!(sample.values.contains_key("cpu_total"), "{sample:?}");

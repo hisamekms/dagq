@@ -309,9 +309,10 @@ const CONTAINER_VERIFICATION_PREPARE: &str = "prepare";
 ///   repository. An empty array, a blank or absolute glob, or a `.` /
 ///   `..` / empty segment is a mistake of the file.
 ///
-/// Without any table no profile is declared: until the repository
-/// declares one, the Rust profile reads the verification's output
-/// ([`crate::domain::toolchain::Toolchains::undeclared`]) and `doctor` warns.
+/// Without any table no profile is declared, and none reads the
+/// verification's output: only the runtime's own marks and the project's
+/// do ([`crate::domain::toolchain::Toolchains::none`], ADR-t2268-1
+/// decision 3).
 /// Every declared profile reads a verification command's output whatever
 /// its paths (the commands run over the whole repository); what the paths
 /// choose is on [`crate::domain::toolchain`]. Profiles are never inferred
@@ -361,9 +362,7 @@ const TOOLCHAIN_PATHS: &str = "paths";
 /// marks: those of the host's classes after the runtime's full disk and
 /// signal and the flaky tests, by their first line against a profile's
 /// test out of time, and before the exit 124; those of the code's before
-/// the profiles' code failures. While the file declares neither a mark
-/// nor a `[toolchains.<name>]`, `within`'s line above is read as if it were
-/// declared (ADR-t2268-1 decision 9); one of either ends that. A binary
+/// the profiles' code failures. A binary
 /// older than the table refuses it, so a repository declares one only
 /// once the binary that runs its queue reads it.
 pub const VERIFY_MARKS_PREFIX: &str = "verify_marks.";
@@ -2432,8 +2431,8 @@ pub fn load_landing_verification(root: &Path) -> Result<Option<LandingVerificati
 /// The toolchain profiles the `dagq.toml` in `root` declares
 /// ([`TOOLCHAINS_PREFIX`]), resolved against `registry`, with the
 /// project's own marks it declares ([`VERIFY_MARKS_PREFIX`]): no file or no
-/// declaration is the Rust profile implied (ADR-t2268-1 decision 9), and
-/// a profile `registry` does not have is a mistake of the file.
+/// declaration is no profile (ADR-t2268-1 decision 3), and a profile
+/// `registry` does not have is a mistake of the file.
 pub fn load_toolchains(root: &Path, registry: &ProfileRegistry) -> Result<Toolchains> {
     let path = root.join(CONFIG_FILE_NAME);
     let (declarations, marks) = match read_config(&path)? {
@@ -3144,8 +3143,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let registry = &crate::domain::toolchain::BUILTIN;
         assert_eq!(
-            load_toolchains(dir.path(), registry).unwrap().view()["implicit"],
-            "rust"
+            load_toolchains(dir.path(), registry).unwrap().view(),
+            serde_json::json!({"declared": [], "marks": []})
         );
         fs::write(
             dir.path().join(CONFIG_FILE_NAME),
@@ -3264,10 +3263,10 @@ mod tests {
                 .class
                 .as_str()
         };
-        // Neither declared: the implied mark reads the line.
+        // Neither declared: nothing reads the line.
         assert_eq!(
             class(&load_toolchains(dir.path(), registry).unwrap()),
-            "timeout"
+            "unknown"
         );
         // A profile declared without the mark: the line is not read.
         fs::write(

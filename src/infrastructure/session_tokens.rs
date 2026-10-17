@@ -450,7 +450,7 @@ mod tests {
         let records = Transcript::parse(
             &text,
             "s",
-            &crate::domain::toolchain::Toolchains::undeclared(),
+            &crate::domain::toolchain::Toolchains::this_repository(),
         )
         .unwrap()
         .records;

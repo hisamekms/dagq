@@ -1450,7 +1450,7 @@ mod tests {
         assert!(codex.turn_session_from_output());
         assert!(
             codex
-                .turn_reader(&crate::domain::toolchain::Toolchains::undeclared())
+                .turn_reader(&crate::domain::toolchain::Toolchains::this_repository())
                 .is_ok()
         );
         assert!(Codex::new("/nonexistent/codex".into()).preflight().is_err());

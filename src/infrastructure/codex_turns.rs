@@ -1048,7 +1048,7 @@ mod tests {
             let mut reader = CodexTurnReader::reading_since(
                 Some(sessions.clone()),
                 None,
-                Toolchains::undeclared(),
+                Toolchains::this_repository(),
             );
             let signals =
                 reader.line(&json!({"type": "thread.started", "thread_id": "th-1"}).to_string());
@@ -1068,8 +1068,11 @@ mod tests {
                 .unwrap_err()
                 .contains("no rollout of thread th-3")
         );
-        let mut reader =
-            CodexTurnReader::reading_since(Some(sessions.clone()), None, Toolchains::undeclared());
+        let mut reader = CodexTurnReader::reading_since(
+            Some(sessions.clone()),
+            None,
+            Toolchains::this_repository(),
+        );
         let result = reader.finish(None, "");
         assert_eq!(result.model, None);
         assert_eq!(
@@ -1093,7 +1096,8 @@ mod tests {
                 .contains("no model for this turn")
         );
         // A reader made now takes none of these old ones.
-        let mut reader = CodexTurnReader::reading(Some(sessions.clone()), Toolchains::undeclared());
+        let mut reader =
+            CodexTurnReader::reading(Some(sessions.clone()), Toolchains::this_repository());
         reader.line(&json!({"type": "thread.started", "thread_id": "th-1"}).to_string());
         assert!(
             reader
@@ -1102,7 +1106,7 @@ mod tests {
                 .unwrap()
                 .contains("for this turn")
         );
-        let mut reader = CodexTurnReader::reading(None, Toolchains::undeclared());
+        let mut reader = CodexTurnReader::reading(None, Toolchains::this_repository());
         reader.line(&json!({"type": "thread.started", "thread_id": "th-1"}).to_string());
         assert!(
             reader
@@ -1189,7 +1193,7 @@ mod tests {
         let mut reader = CodexTurnReader::reading_since(
             Some(sessions.clone()),
             at("2020-01-01T02:00:00.000Z"),
-            Toolchains::undeclared(),
+            Toolchains::this_repository(),
         );
         reader.line(&line(
             json!({"type": "thread.started", "thread_id": "root"}),
@@ -1242,7 +1246,7 @@ mod tests {
             let mut reader = CodexTurnReader::reading_since(
                 Some(sessions.clone()),
                 since,
-                Toolchains::undeclared(),
+                Toolchains::this_repository(),
             );
             reader.line(&line(json!({"type": "thread.started", "thread_id": "th"})));
             reader.finish(Some(&exit(0)), "").rollout.unwrap()
@@ -1323,7 +1327,7 @@ mod tests {
             let mut reader = CodexTurnReader::reading_since(
                 sessions,
                 at("2020-01-01T05:00:00.000Z"),
-                Toolchains::undeclared(),
+                Toolchains::this_repository(),
             );
             reader.line(&line(
                 json!({"type": "thread.started", "thread_id": thread}),
@@ -1411,7 +1415,7 @@ mod tests {
             let mut reader = CodexTurnReader::reading_since(
                 Some(sessions.clone()),
                 at(since),
-                Toolchains::undeclared(),
+                Toolchains::this_repository(),
             );
             reader.line(&json!({"type": "thread.started", "thread_id": "root"}).to_string());
             reader.finish(Some(&exit(0)), "")
@@ -1489,7 +1493,7 @@ mod tests {
         let mut reader = CodexTurnReader::reading_since(
             Some(sessions.clone()),
             at("2020-01-01T05:00:00.000Z"),
-            Toolchains::undeclared(),
+            Toolchains::this_repository(),
         );
         reader.line(&json!({"type": "thread.started", "thread_id": "quiet"}).to_string());
         assert_eq!(
@@ -1504,7 +1508,7 @@ mod tests {
     /// tests a command's output names as failed are kept with it.
     #[test]
     fn a_turns_commands_carry_when_their_lines_were_read() {
-        let mut reader = CodexTurnReader::reading_since(None, None, Toolchains::undeclared());
+        let mut reader = CodexTurnReader::reading_since(None, None, Toolchains::this_repository());
         let at = |reader: &mut CodexTurnReader, millis: i64, line: Value| {
             reader.stamp(millis);
             reader.line(&line.to_string());
@@ -1611,7 +1615,7 @@ mod tests {
             ["made::up"]
         );
         assert_eq!(names(rust), ["a::b"]);
-        assert_eq!(names(Toolchains::undeclared()), ["a::b"]);
+        assert_eq!(names(Toolchains::this_repository()), ["a::b"]);
         assert!(names(Toolchains::none()).is_empty());
     }
 }

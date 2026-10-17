@@ -369,10 +369,10 @@ fn nextest_line(line: &str) -> Option<(NextestStatus, &str)> {
 
 #[cfg(test)]
 mod tests {
-    //! The Rust profile with the runtime's own marks, as a repository that
-    //! declares none reads a verification's output (ADR-t2268-1 decision 9).
-    //! `tests/common`'s `within` line in these logs is read by the mark
-    //! implied with it ([`crate::domain::verify_marks`]), not the profile.
+    //! The Rust profile with the runtime's own marks, as this repository
+    //! declares it ([`Toolchains::this_repository`]). `tests/common`'s
+    //! `within` line in these logs is read by the mark it declares beside
+    //! ([`crate::domain::verify_marks`]), not the profile.
     use crate::domain::toolchain::Toolchains;
     use crate::domain::verify_failure::{
         EVIDENCE_CHARS, FailedTests, FailureClass, MAX_FAILED_TESTS, VerifyFailure,
@@ -380,7 +380,7 @@ mod tests {
     use serde_json::json;
 
     fn rust() -> Toolchains {
-        Toolchains::undeclared()
+        Toolchains::this_repository()
     }
 
     fn classify(command: &str, exit: Option<i32>, signal: Option<i32>, log: &str) -> VerifyFailure {

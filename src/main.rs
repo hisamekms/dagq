@@ -1609,9 +1609,9 @@ enum Command {
     /// value; with no kind chosen, which to choose: a long-lived token for one's own
     /// subscription used alone, an API key for an organization, a team, a shared host or work).
     /// `toolchains` shows the toolchain profiles dagq.toml declares and the paths each applies
-    /// to, and `marks` the project's own marks on the verification's output
-    /// ([verify_marks.<name>]: its name, the class a line of its shape gives, and the shape,
-    /// with `implicit` on the one read while dagq.toml declares neither a profile nor a mark).
+    /// to (none while it declares none: then no language's knowledge reads the output), and
+    /// `marks` the project's own marks on the verification's output ([verify_marks.<name>]: its
+    /// name, the class a line of its shape gives, and the shape).
     /// `agents` shows the review's agents read from the landing branch; its `builtins` start with
     /// builtin:acceptance, the whole review, and `without_rules` names the enabled built-ins
     /// that judge without the project's rules, the landing branch having no

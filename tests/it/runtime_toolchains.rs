@@ -3,7 +3,8 @@
 //! (ADR-t2268-1). A second profile, made up in `tests/common` and
 //! registered beside the built-in one, classifies, names its tests and gives its retry env
 //! with no other code; the runtime's own host marks hold whatever is
-//! declared, and an output no declared profile reads is `unknown`. The
+//! declared, and an output no declared profile reads is `unknown`, as is
+//! one of a repository that declares none, dagq's source too. The
 //! host's Rust toolchain is recorded at a claim where the Rust profile is
 //! declared (the KPIs' `toolchain` axis is `cli_read`'s).
 use crate::runtime_support;
@@ -65,15 +66,23 @@ fn integrate_with(one_shot: &runtime::OneShot, db: &Path, repo: &Path) -> Value 
         .unwrap()
 }
 
-/// On one repository, first without a declaration, then declaring only
-/// `within`'s mark, then the made-up profile and the mark: a command that
-/// exits 124, 128 + a signal, or fails on a full disk is retried once and
-/// held for a person when it fails so again (ADR-t639-1 decisions 1 to 4);
-/// so is one that prints `within`'s line, implied or declared, which names
-/// its test.
+/// Commit a `Cargo.toml` that makes `repo` dagq's source.
+fn make_dagq_source(repo: &Path) {
+    fs::write(repo.join("Cargo.toml"), "[package]\nname = \"dagq\"\n").unwrap();
+    git(repo, &["add", "Cargo.toml"]);
+    git(repo, &["commit", "-q", "-m", "dagq"]);
+}
+
+/// On one repository that is dagq's source, first without a declaration,
+/// then declaring only `within`'s mark, then the made-up profile and the
+/// mark: a command that exits 124, 128 + a signal, or fails on a full disk
+/// is retried once and held for a person when it fails so again
+/// (ADR-t639-1 decisions 1 to 4, ADR-t2268-1 decision 4); so is one that
+/// prints `within`'s line once the mark is declared, which names its test.
 #[test]
 fn the_host_failures_are_retried_and_held_whatever_is_declared() {
     let (_dir, db, repo) = awaiting();
+    make_dagq_source(&repo);
     let one_shot = with_made_up();
     let host = [
         ("echo boom; exit 124", "timeout"),
@@ -89,7 +98,8 @@ fn the_host_failures_are_retried_and_held_whatever_is_declared() {
         if let Some(toml) = declared {
             declare(&repo, toml);
         }
-        for &(command, class) in commands.iter().chain([&(WITHIN, "timeout")]) {
+        let within = declared.map(|_| &(WITHIN, "timeout"));
+        for &(command, class) in commands.iter().chain(within) {
             set_commands(&db, json!([command]));
             let outcome = integrate_with(&one_shot, &db, &repo);
             assert_eq!(
@@ -141,6 +151,38 @@ fn an_output_only_another_profile_could_read_is_unknown() {
     assert_eq!(deferred[0]["failed_tests"], Value::Null);
 }
 
+/// A repository that declares no profile, dagq's source too (ADR-t2268-1
+/// decision 3): `doctor` shows none and no warning, and cargo's and
+/// nextest's marks, a test passed on its retry and `within`'s line mean
+/// nothing (`unknown`, no tests named, no flaky retry).
+#[test]
+fn a_repository_that_declares_none_reads_no_profile_even_as_dagqs_source() {
+    let (_dir, db, repo) = awaiting();
+    make_dagq_source(&repo);
+    let one_shot = with_made_up();
+    assert_eq!(
+        one_shot.doctor(&db, false, None).unwrap()["toolchains"],
+        json!({"declared": [], "marks": []})
+    );
+    set_commands(
+        &db,
+        json!([
+            "echo 'error[E0425]: cannot find value `x`'; echo '        FAIL [   0.1s] dagq::it a::b'; echo '  FLAKY 2/2 [   0.1s] dagq::it a::b'; echo 'test a::b timed out: x did not happen within 1s'; exit 101"
+        ]),
+    );
+    let outcome = integrate_with(&one_shot, &db, &repo);
+    assert_eq!(outcome["outcome"], "needs_session", "{outcome}");
+    let detail = show(&db);
+    let deferred = payloads(&detail, "integration_deferred");
+    assert_eq!(
+        deferred[0]["failure"]["class"], "unknown",
+        "{}",
+        deferred[0]
+    );
+    assert_eq!(deferred[0]["failed_tests"], Value::Null);
+    assert!(payloads(&detail, "integration_retried").is_empty());
+}
+
 /// A repository that declares only the made-up profile: its marks read the
 /// output, and its flaky retry runs with its env and without nextest's.
 #[test]
@@ -171,7 +213,8 @@ fn the_declared_profile_gives_its_retry_env() {
 /// `doctor` and `status` show the declared profiles and their paths and the
 /// project's marks, and
 /// `doctor` a profile the binary does not build in as an error (the
-/// undeclared view is the unit tests' of `domain::toolchain`).
+/// undeclared view is
+/// [`a_repository_that_declares_none_reads_no_profile_even_as_dagqs_source`]'s).
 #[test]
 fn doctor_and_status_show_the_declared_profiles() {
     let (_dir, db, repo) = awaiting();
@@ -184,8 +227,6 @@ fn doctor_and_status_show_the_declared_profiles() {
             {"name": "tool", "profile": "made-up", "paths": ["tool/**"]},
             {"name": "core", "profile": "rust", "paths": ["**"]},
         ],
-        "implicit": null,
-        "warning": null,
         "marks": [{
             "name": "within",
             "class": "timeout",

@@ -164,6 +164,8 @@ fn a_command_that_fails_on_the_host_again_waits_for_a_person_without_a_resume() 
 #[test]
 fn a_failure_of_the_code_is_resumed_as_before() {
     let (dir, db, repo) = awaiting();
+    // The Rust profile reads cargo's marks (ADR-t2268-1).
+    declare_rust(&repo);
     set_commands(
         &db,
         json!([

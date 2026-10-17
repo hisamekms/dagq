@@ -486,7 +486,7 @@ mod tests {
             log_path: "/r/recheck.log".into(),
             output_tail: "error[E0063]".into(),
             failure: crate::domain::verify_failure::classify(
-                &crate::domain::toolchain::Toolchains::undeclared(),
+                &crate::domain::toolchain::Toolchains::this_repository(),
                 "cargo check",
                 Some(101),
                 None,

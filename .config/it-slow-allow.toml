@@ -1459,3 +1459,39 @@ task = 2270
 name = "runtime_recheck::each_declaration_that_applies_builds_in_a_directory_of_its_own"
 reason = "B 境界（Git・dagq.toml・プロセス・supervisor の配線）: main checkout の dagq.toml の 3 つの [toolchains] の宣言を実際に読み、merge した木の git ls-tree と paths の照合で当たる 2 つの宣言の dir だけが recheck/ の下にでき、実際の scratch worktree の command がそれぞれの dir を指す env で 1 回ずつ流れ、落ちた回が finding になることを実際の supervisor で確かめる。dir の名前・実行の分け方・当て方の判断は domain::toolchain と supervise::recheck の unit test"
 task = 2270
+
+# 6.838s under load (task 2273)
+[[test]]
+name = "runtime_codex_work::a_codex_commands_failed_tests_are_read_with_the_repositorys_resolution"
+reason = "境界（supervisorの配線）: the supervisor reads a Codex turn's commands with the main checkout's dagq.toml resolution"
+task = 2273
+
+# 10.474s under load (task 2273)
+[[test]]
+name = "runtime_integrate::integrate_renumbers_a_migration_whose_number_main_took"
+reason = "境界（Git）: integrate renumbers a migration in the rebased tree and commits it before the verification"
+task = 2273
+
+# 6.452s under load (task 2273)
+[[test]]
+name = "runtime_landing_verification::a_flaky_only_failure_of_the_replacing_command_is_verified_once_more"
+reason = "境界（プロセス）: integrate runs the replacing command of dagq.toml again with the profile's retry env"
+task = 2273
+
+# 7.159s under load (task 2273)
+[[test]]
+name = "runtime_toolchains::a_repository_that_declares_none_reads_no_profile_even_as_dagqs_source"
+reason = "境界（Git・プロセス）: integrate reads the main checkout's Cargo.toml and dagq.toml and runs the command"
+task = 2273
+
+# 6.504s under load (task 2273)
+[[test]]
+name = "runtime_verify_flaky::the_supervisor_lands_a_run_with_only_flaky_failures_once_more"
+reason = "境界（supervisorの配線）: the supervisor's landing does the flaky retry after a passed review"
+task = 2273
+
+# 5.827s under load (task 2273)
+[[test]]
+name = "runtime_verify_retry::a_failure_of_the_code_is_resumed_as_before"
+reason = "境界（プロセス）: integrate retries a killed command and resumes on the code's failure"
+task = 2273

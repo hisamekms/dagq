@@ -512,7 +512,7 @@ mod tests {
     }
 
     fn parse(lines: &[String]) -> Result<Transcript, Unreadable> {
-        Transcript::parse(&lines.join("\n"), SESSION, &Toolchains::undeclared())
+        Transcript::parse(&lines.join("\n"), SESSION, &Toolchains::this_repository())
     }
 
     /// Several turns, one with tools and a subagent in it: each runs from
@@ -606,27 +606,30 @@ mod tests {
 
     #[test]
     fn unreadable_transcripts_say_why() {
-        let unparsable =
-            Transcript::parse("not json\n{also not", SESSION, &Toolchains::undeclared())
-                .unwrap_err();
+        let unparsable = Transcript::parse(
+            "not json\n{also not",
+            SESSION,
+            &Toolchains::this_repository(),
+        )
+        .unwrap_err();
         assert_eq!(unparsable.code, TRANSCRIPT_UNPARSABLE);
         let unsupported = Transcript::parse(
             r#"{"kind":"user","time":"2026-01-01T00:00:00Z"}"#,
             SESSION,
-            &Toolchains::undeclared(),
+            &Toolchains::this_repository(),
         )
         .unwrap_err();
         assert_eq!(unsupported.code, TRANSCRIPT_UNSUPPORTED);
         let other = Transcript::parse(
             &input(0, "hi"),
             "22222222-2222-4222-8222-222222222222",
-            &Toolchains::undeclared(),
+            &Toolchains::this_repository(),
         )
         .unwrap_err();
         assert_eq!(other.code, SESSION_MISMATCH);
         assert_eq!(other.version.as_deref(), Some("2.1.283"));
         assert_eq!(
-            Transcript::parse("", SESSION, &Toolchains::undeclared())
+            Transcript::parse("", SESSION, &Toolchains::this_repository())
                 .unwrap_err()
                 .code,
             TRANSCRIPT_UNPARSABLE
@@ -792,7 +795,7 @@ mod tests {
             ["made::up"]
         );
         assert_eq!(names(&rust), ["a::b"]);
-        assert_eq!(names(&Toolchains::undeclared()), ["a::b"]);
+        assert_eq!(names(&Toolchains::this_repository()), ["a::b"]);
         assert!(names(&Toolchains::none()).is_empty());
     }
 }

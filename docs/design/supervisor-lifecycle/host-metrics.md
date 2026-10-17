@@ -61,7 +61,7 @@ eventにはしない（連続の値でrun_eventsを膨らませない）。
 プロセスの種類はコマンド（`ps -o comm`のpathか名前）で分ける（`domain::host_metrics::process_kind`）。
 次に、main checkoutの`dagq.toml`が宣言したprofileを宣言の順に当て、最初に当たったprofileが道具のprocessをbuildの道具（`cargo`の列）かcompiler（`rustc`の列）に分ける（`ToolchainProfile::process_kind`、各profileの印はその実装のdoc comment。[Toolchain profiles](../toolchain-profiles.md)）。
 列の名前は、ストアの列とファイルのheaderの名前を変えずに読み続けるために固定のままで、`ToolProcess`のdoc commentが理由を持つ。
-宣言の無いrepositoryには移行の間Rustのprofileが暗黙に当たり（ADR-t2268-1決定9）、その印（`domain::toolchain::rust`）で分ける。
+宣言の無いrepositoryではどのprofileも当たらず、道具のprocessは`other`に数える（ADR-t2268-1決定3）。
 `dagq.toml`は取るたびに読み、読めないか知らないprofileを名指すときはどのprofileにも当てない（`run_env::toolchains_in_use`）。
 macOSの`%cpu`は減衰する平均なので瞬間の値ではない。
 

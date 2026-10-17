@@ -2013,10 +2013,10 @@ pub trait Verifier {
         Ok(None)
     }
     /// The toolchain profiles `dagq.toml` declares (`[toolchains.<name>]`,
-    /// ADR-t2268-1), which read the verification commands' output; the
-    /// Rust profile implied while it declares none, which is the default.
+    /// ADR-t2268-1), which read the verification commands' output; none
+    /// while it declares none, which is the default.
     fn toolchains(&self) -> Result<crate::domain::toolchain::Toolchains> {
-        Ok(crate::domain::toolchain::Toolchains::undeclared())
+        Ok(crate::domain::toolchain::Toolchains::none())
     }
     /// `[ci_watch]` of `dagq.toml` (ADR-t1920-1), whose branch the known
     /// failures handed to the landing's command are read for; none by

@@ -39,9 +39,9 @@ dagqの開発でだけ要る機能は、queueのrepositoryが「dagqのソース
 言語・道具の知識は`dagq.toml`で宣言したtoolchainのprofile、projectの値は`dagq.toml`、hostの値は`host.toml`、言語に依らない知識（hostの分類の汎用の印、待ち・dagq・gitのコマンドの分類）はruntimeの共通の既定に置く。
 **実装状況**: profileのportと`[toolchains.<名前>]`の宣言はある（[Toolchain profiles](../toolchain-profiles.md)）。
 検証の失敗の分類・落ちたtestとflakyのtestの抜き出し・flakyのやり直しのenv、landing recheckと自動更新のbuildの出力の置き場と掃除、CIの見張りのJUnitのtestの名前、hostの負荷のprocessの種類、hostの`rustc`とtoolchainの記録とKPIの`toolchain`の軸と`stats`の`rustc`の欄は、profileを通して働く。
-宣言の無いrepositoryではRustのprofileが暗黙に当たり、`doctor`と`status`が警告する（ADR-t2268-1決定9）。
-計測のコマンドの分類と回数はまだprofileに移っておらず、表の4行目のうちそれらはこの判定で分け、下の「言語・道具の知識の今の場所」はcargoの前提でどのrepositoryでも働く。
-移行の間も、宣言の無いrepositoryは今のRustの振る舞いのままで、旧い分け方を外すのはこのrepositoryの`dagq.toml`に宣言と規則が入った後である（ADR-t2268-1決定9）。
+宣言の無いrepositoryでは、dagqのソースでもどのprofileも働かない（ADR-t2268-1決定3）。
+計測のコマンドの分類と回数はまだprofileに移っておらず、表の4行目のうちそれらはこの判定で分ける。
+着地の前のe2eを流すかもこの判定で分け、`dagq.toml`の宣言に移すことはADR-t2257-1決定4が決めている。
 
 | 機能 | 決定 | dagqのソース | ソースでないrepository |
 | --- | --- | --- | --- |
@@ -60,19 +60,16 @@ dagqの開発でだけ要る機能は、queueのrepositoryが「dagqのソース
   判定は区間を閉じるたびに`infrastructure::sessions::dagq_source`が、queueの束縛からmain checkoutを求めて行い、束縛の無いqueueはソースでない。
 - `stats`のcargo専用の欄: ソースでなければ`runs`と全ての群で欄ごと出さず、欄は`domain::stats::without_cargo_measures`のdoc commentが持つ。
 - claimのRustのtoolchainの属性（`run_claimed`）と[`kpi`](commands.md)の`toolchain=`の層と`stats`の`rustc`の欄: この判定ではなく、宣言したprofileにRustのprofileがあるかで分ける（`Toolchains::records_rust_toolchain`）。
-  当たらなければsupervisorはRustのprofileの`rustc -vV`を実行せず欄ごと書かず、`kpi`は`--by toolchain`でも層を出さず、`stats`は`rustc`の欄を`runs`と`versions`で出さない（`domain::stats::without_rustc`）。
-  宣言の無いrepositoryには移行の間Rustのprofileが暗黙に当たり、そのあいだはこの判定のまま分ける（ADR-t2268-1決定9）。
+  当たらなければ（宣言の無いdagqのソースも）supervisorはRustのprofileの`rustc -vV`を実行せず欄ごと書かず、`kpi`は`--by toolchain`でも層を出さず、`stats`は`rustc`の欄を`runs`と`versions`で出さない（`domain::stats::without_rustc`）。
 - 出力の判定は`stats`・`kpi`・日次のレポート・observerの入力を出すたびに`compose`がmain checkoutの`Cargo.toml`と`dagq.toml`で行う。
 
 ### 言語・道具の知識の今の場所
 
-この判定で分けず、cargoの前提でどのrepositoryでも働くもの。
-決まった形では、道具の知識はRustのprofileの実装に移り、宣言したrepositoryでだけ働く（ADR-t2268-1決定1・2）。
+この判定で分けず、道具の知識はRustのprofileの実装が持ち、宣言したrepositoryでだけ働くもの（ADR-t2268-1決定1・2）。
 言語に依らない部分はruntimeの共通の既定に、このrepositoryに固有の部分は`dagq.toml`に置く（ADR-t2268-1決定2・4）。
 
 - 検証の失敗の分類と落ちたtest・flakyのtestの抜き出し、flakyのやり直しのenvと受け継いだ値を落とす扱いは、profileに移った（汎用の印は共通の分類、cargo・nextest・rustfmtの印とenvはRustのprofile。[Toolchain profiles](../toolchain-profiles.md)）。
   `tests/common`の`within`の時間切れの行はprojectに固有の印で、共通の分類にもRustのprofileにも置かず、`dagq.toml`の`[verify_marks.<name>]`で宣言する（`domain::verify_marks`）。
-  このrepositoryの`dagq.toml`が宣言するまでは、profileも印も宣言しないrepositoryの暗黙の扱いとして当たり、Rustのprofileの暗黙の扱いと一緒に外れる。
 - landing recheckと自動更新のbuildの出力の置き場と掃除はprofileに移った（`ToolchainProfile::build_output`）。
   自動更新のsource buildは宣言に依らずRustのprofileのものを使う。
   workerとintegrateのbuildの出力の置き場は`[run.env]`のprojectの値を`infrastructure::run_env`が読むだけで、runtimeに雛形は無い（決まった形ではprofileの推奨の案として出す。ADR-t2268-1決定1・7）。

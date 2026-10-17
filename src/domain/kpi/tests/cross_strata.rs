@@ -162,7 +162,7 @@ fn cross_names_preserve_unknown_values_and_escape_separators() {
     let result = queue.kpi(MONDAY + 2 * DAY, &config, &query);
     let key = "cross:build=b%7Cmodel%3Dx%253D|change=unknown|model=unknown";
     assert_eq!(measure(&result.periods[0], "landings", key).n, 1);
-    // Toolchain is unavailable outside this source repository, unlike a missing value.
+    // Toolchain is unavailable without the Rust profile declared, unlike a missing value.
     queue.no_rust_toolchain = true;
     query.by.push(Axis::Toolchain);
     let result = queue.kpi(MONDAY + 2 * DAY, &config, &query);

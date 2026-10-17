@@ -1730,9 +1730,8 @@ mod tests {
   </testsuite>
   <testsuite name="dagq"><testcase name="a &amp; b" classname=""></testcase></testsuite>
 </testsuites>"#;
-        // Named as the Rust profile's nextest prints them, implied while
-        // the repository declares none (ADR-t2268-1 decision 9).
-        let rust = crate::domain::toolchain::Toolchains::undeclared()
+        // Named as the Rust profile's nextest prints them.
+        let rust = crate::domain::toolchain::Toolchains::this_repository()
             .junit_test_name()
             .unwrap();
         assert_eq!(

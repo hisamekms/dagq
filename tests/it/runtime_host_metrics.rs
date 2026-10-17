@@ -85,6 +85,8 @@ fn rows(host: &Path) -> Vec<String> {
 #[test]
 fn supervisor_records_the_host_load_while_it_runs_and_prunes_old_files() {
     let (dir, repo, db) = fixture();
+    // The Rust profile splits out cargo's load (ADR-t2268-1).
+    declare_rust(&repo);
     SqliteQueue::open(&db)
         .unwrap()
         .transition(TaskId::new(1), TaskAction::Cancel)
@@ -148,8 +150,7 @@ fn supervisor_records_the_host_load_while_it_runs_and_prunes_old_files() {
     let stats = runtime::stats(&db, &Default::default()).unwrap();
     assert!(stats["host"]["samples"].as_u64().unwrap() >= 3, "{stats}");
     assert_eq!(stats["host"]["metrics"]["mem_used_mb"]["max"], 8192.0);
-    // The cargo is the Rust profile's, implied while the repository
-    // declares none (ADR-t2268-1 decision 9).
+    // The cargo is the declared Rust profile's.
     assert_eq!(stats["host"]["metrics"]["cpu_cargo"]["max"], 10.0);
     assert_eq!(stats["host"]["metrics"]["cpu_other"]["max"], 4.0);
     // The free space of the runs' filesystem, its least and median too

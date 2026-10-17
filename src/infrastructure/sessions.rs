@@ -5447,7 +5447,7 @@ pub(super) mod tests {
             .map(|line| line.to_string())
             .join("\n"),
             RUN,
-            &crate::domain::toolchain::Toolchains::undeclared(),
+            &crate::domain::toolchain::Toolchains::this_repository(),
         )
         .unwrap();
         let want = |start: i64, end: i64, cut: i64, verification: &[&str]| Want {

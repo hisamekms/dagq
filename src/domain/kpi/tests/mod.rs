@@ -38,7 +38,7 @@ struct Queue {
     draft_origins: HashMap<TaskId, DraftOrigin>,
     /// The landed runs' areas; `None` without `[areas]`.
     areas: Option<crate::domain::areas::RunAreas>,
-    /// The repository is not dagq's source (ADR-t614-1).
+    /// The repository does not declare the Rust profile (ADR-t2268-1).
     no_rust_toolchain: bool,
 }
 

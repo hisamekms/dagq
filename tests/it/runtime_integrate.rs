@@ -2106,25 +2106,18 @@ fn integrate_renumbers_a_migration_whose_number_main_took() {
     assert!(renumbered_at < verified_at, "{kinds:?}");
     let landed = queue.show(second).unwrap().runs[0].clone();
     assert_landed(&repo, &landed, "add asks", &main);
-    // dagq's source records the host's toolchain at the claim (ADR-t614-1).
+    // dagq's source that declares no profile records no host toolchain at
+    // the claim (ADR-t2268-1 decision 3); where the Rust profile is
+    // declared, `runtime_toolchains` records it.
     let claimed = &detail
         .events
         .iter()
         .find(|e| e.kind == "run_claimed")
         .unwrap()
         .payload;
-    assert!(
-        claimed["rustc_release"]
-            .as_str()
-            .is_some_and(|release| release.split('.').count() == 3),
-        "{claimed}"
-    );
-    assert!(
-        claimed["rustc_host"]
-            .as_str()
-            .is_some_and(|host| host.contains('-')),
-        "{claimed}"
-    );
+    for key in ["rustc_release", "rustc_host"] {
+        assert!(claimed.get(key).is_none(), "{key}: {claimed}");
+    }
 }
 
 /// Git refuses the commit that would renumber the run's migration (here a

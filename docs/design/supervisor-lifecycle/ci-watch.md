@@ -70,7 +70,6 @@ GitHubのURLでない・remoteが無いときは設定の誤りとして`ci_watc
   赤だった先頭をre-runして緑になれば一覧の全ての項目を外して`ci_turned_green`を書き、赤のままなら他の赤の実行と同じに、一覧に無い落ちたtestを足し、JUnitで通ったtestを外す（下の「一覧」）。
   先頭より前に作られた実行のre-runは上の遅れて終わった実行と同じに記録だけする。
 - **testの名前**: JUnitの`testcase`の`classname`と`name`から、JUnitを読む最初の宣言したprofileが道具の表示と同じ名前を作る（`Toolchains::junit_test_name`、[Toolchain profiles](../toolchain-profiles.md)）。
-  宣言の無いrepositoryでは移行の間、暗黙のRustのprofileがnextestの表示と同じ名前にする（ADR-t2268-1決定9）。
   同じ名前が複数のファイルにあれば（macOSとLinuxのjob）、`domain::ci_watch::merge_outcomes`がまとめる。
 - **testの名前が取れない失敗**: 赤の実行で、JUnitが無いか読めないか読むprofileが無いか、JUnitが落ちたtestを1つも名指さないときは、落ちたjobの落ちたstepごとに`job:<job名>/step:<step名>`（落ちたstepの無い落ちたjobは`job:<job名>`）を一覧の項目にする。
   JUnitのファイルとjobを結びつけられないので、jobごとではなく実行ごとに決める。
