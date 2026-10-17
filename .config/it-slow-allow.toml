@@ -941,14 +941,14 @@ task = 2251
 # 6.0s
 [[test]]
 name = "runtime_review::a_review_past_the_revise_limit_that_does_not_pass_asks_a_person_and_land_lands_it"
-reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 生きている session に回の上限まで revise を返した後の review の send_back が、終了の依頼と close の後に approve_landing の ask になり、その land の答えで着地することを実際の supervisor と worker の session で確かめる。上限の判断は domain::run::history と supervise::landing の unit test"
-task = 2256
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 生きている session に run を通した上限まで revise を返した後の、コードの指摘を持つ review の send_back が、終了の依頼と close の後に approve_landing の ask になり、その land の答えで着地することを実際の supervisor と worker の session で確かめる。上限と収束の判断は domain::run::history・domain::review_reason と supervise::landing の unit test"
+task = 2599
 
 # 5.3s
 [[test]]
 name = "runtime_job_verdicts::a_revise_past_its_limit_is_asked_at_the_review_jobs_request"
-reason = "B 境界（SQLite・supervisor の配線）: 生きている session との revise の往復を回の上限まで実際に経た後の revise の approve_landing の ask を、supervisor がその review の job の依頼（requested_by）として記録することを確かめる。上限の判断は domain::run::history の unit test"
-task = 2256
+reason = "B 境界（SQLite・supervisor の配線）: 生きている session との revise の往復を run を通した上限まで実際に経た後の revise の approve_landing の ask を、supervisor がその review の job の依頼（requested_by）として記録することを確かめる。上限の判断は domain::run::history の unit test"
+task = 2599
 
 # 6.284s
 [[test]]
@@ -1607,3 +1607,33 @@ task = 1808
 name = "cli_version::a_supervisor_handed_over_by_an_exec_keeps_its_owner"
 reason = "B 境界（守る境界）: プロセス。installの引き継ぎのexecがownerのenvを保ち、exec後のsupervisorもownerで止まること"
 task = 1808
+
+# 7.7〜8.6s (stress 60s under the host's load of other runs, task 2599)
+[[test]]
+name = "runtime_review::a_revise_verdict_is_fixed_by_the_live_session_and_reviewed_again"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: revise の依頼を生きている session の次の turn に書き、書き直した receipt を validation と 2 回目の review に通して着地するまでの event の順と依頼の文面を実際の supervisor と worker の session で確かめる。依頼の文面は prompt の unit test"
+task = 2599
+
+# 7.3〜8.8s (stress 60s under the host's load of other runs, task 2599)
+[[test]]
+name = "runtime_review_concern::a_high_send_back_revises_the_live_session"
+reason = "B 境界（SQLite・プロセス・supervisor の配線）: concern の確かな send_back を revise と同じ依頼として生きている session に返し、concern_decided の記録とその後の review までを実際の supervisor と worker の session で確かめる。適用の判断は domain::concern の unit test"
+task = 2599
+
+# 11.2〜12.5s (stress 60s under the host's load of other runs, task 2599)
+[[test]]
+name = "runtime_review_revise_limit::revises_are_counted_across_resumes_and_each_review_past_them_is_judged_by_its_codes"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 人の send_back の resume を 2 回挟んで、resume した session に run の 2 回目の revise が届き、上限の後の review がコードの指摘で approve_landing の ask に、その send_back の後の review が収束で着地と follow_up の draft になることを実際の supervisor・worker の session・queue で確かめる。数え方と収束の判断は domain::run::history・domain::review_reason の unit test"
+task = 2599
+
+# 9.7〜10.5s (stress 60s under the host's load of other runs, task 2599)
+[[test]]
+name = "runtime_review_revise_limit::a_review_past_the_limit_with_no_code_finding_lands_and_follows_up_its_reasons"
+reason = "B 境界（SQLite・Git・supervisor の配線）: 上限の後にコードの指摘の無い review が ask を開かずに pass と同じ道で着地し、残った理由が category つきの follow_up の draft として queue に入り、Integrator がその記録で着地させることを実際の supervisor で確かめる。収束と category の判断は domain::review_reason の unit test"
+task = 2599
+
+# 20.3〜22.7s (stress 60s under the host's load of other runs, task 2599)
+[[test]]
+name = "runtime_review_revise_limit::a_resume_after_a_rebase_conflict_or_a_failed_landing_verification_keeps_the_runs_count"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 実際の rebase の衝突と rebase 後の検証の失敗で integrate が止めた 2 本の run を supervisor が resume し、resume した session への revise が run を通した回数で数えられ、上限の後の review が approve_landing の ask になることを実際の supervisor・worker の session・queue で確かめる。数え方の判断は domain::run::history の unit test"
+task = 2599

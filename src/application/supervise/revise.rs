@@ -118,6 +118,15 @@ impl Fix {
     }
 }
 
+/// The reasons review `attempt` sends the run back with
+/// ([`ReviewVerdict::sent_back_findings`]): what decides, once the run's
+/// revises are used up, whether it lands or a person is asked
+/// (ADR-t2599-1).
+pub(super) struct SentBack {
+    pub(super) attempt: usize,
+    pub(super) findings: Vec<crate::domain::review_reason::Finding>,
+}
+
 /// A review's `concern` whose `send_back` the runtime applied as a revise
 /// (`concern_decided` with `applied: true`, ADR-t451-1 decision 3).
 pub(super) struct SentBackConcern {

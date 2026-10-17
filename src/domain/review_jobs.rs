@@ -201,6 +201,142 @@ mod tests {
         .unwrap()
     }
 
+    /// The reasons a route sends back with, as the judgment past the
+    /// revise limit reads them (ADR-t2599-1): the whole review's when its
+    /// own judgment goes where the route does, then each deciding agent's
+    /// under its name with the codes it gave, a security agent's marked,
+    /// and an agent's summary unlabeled when it gave no reason.
+    #[test]
+    fn a_routes_findings_carry_each_agents_codes_and_mark_the_security_ones() {
+        let coded = |name: &str, decision: &str, reasons: Value| {
+            agent_result(
+                name,
+                Some(
+                    json!({"agent": name, "status": "completed", "verdict": decision,
+                            "reasons": reasons, "summary": format!("{name} looked")}),
+                ),
+            )
+            .unwrap()
+        };
+        let verdict = assemble(
+            whole("revise", &["whole finding"]),
+            vec![
+                coded(
+                    "design",
+                    "revise",
+                    json!([{"text": "stale", "codes": ["docs_drift"]}]),
+                ),
+                coded(
+                    "security",
+                    "revise",
+                    json!([{"text": "leak", "codes": ["local_slip"]}]),
+                ),
+                coded("builtin:security", "revise", json!([])),
+                coded("tests", "pass", json!([])),
+            ],
+        );
+        // Recorded and read back, the codes stay.
+        let recorded: crate::domain::review_subagents::AgentResult =
+            serde_json::from_value(json!(verdict.agents[0])).unwrap();
+        assert_eq!(recorded.reason_codes, [vec!["docs_drift".to_owned()]]);
+        let route = verdict.route(true);
+        let findings = verdict.sent_back_findings(Some(&route));
+        let got: Vec<(&str, Vec<&str>, bool)> = findings
+            .iter()
+            .map(|f| {
+                (
+                    f.text.as_str(),
+                    f.codes.iter().map(String::as_str).collect(),
+                    f.security,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("whole finding", vec!["unlabeled"], false),
+                ("design: stale", vec!["docs_drift"], false),
+                ("security: leak", vec!["local_slip"], true),
+                (
+                    "builtin:security: builtin:security looked",
+                    vec!["unlabeled"],
+                    true
+                ),
+            ]
+        );
+        assert!(!crate::domain::review_reason::converged(&findings[1..3]));
+        assert!(crate::domain::review_reason::converged(&findings[1..2]));
+        // Without a route, only the verdict's own reasons.
+        assert_eq!(verdict.sent_back_findings(None).len(), 1);
+        // A whole review that passes while an agent sends back gives only
+        // the agent's.
+        let lighter = assemble(
+            whole("pass", &[]),
+            vec![coded(
+                "design",
+                "revise",
+                json!([{"text": "stale", "codes": ["docs_drift"]}]),
+            )],
+        );
+        let route = lighter.route(true);
+        assert_eq!(
+            lighter
+                .sent_back_findings(Some(&route))
+                .iter()
+                .map(|f| f.text.as_str())
+                .collect::<Vec<_>>(),
+            ["design: stale"]
+        );
+    }
+
+    /// A whole review that sends the run back with no reason keeps a
+    /// finding of its own, unlabeled, beside an agent's: past the revise
+    /// limit an agent's `local_slip` alone does not converge the review
+    /// when the whole review also sends the run back (ADR-t2599-1 decision
+    /// 3, a send-back with no reason). With no route the whole review's
+    /// empty send-back is unlabeled too.
+    #[test]
+    fn a_whole_review_sending_back_with_no_reason_keeps_an_unlabeled_finding() {
+        let verdict = assemble(
+            whole("revise", &[]),
+            vec![
+                agent_result(
+                    "design",
+                    Some(
+                        json!({"agent": "design", "status": "completed", "verdict": "revise",
+                            "reasons": [{"text": "a typo", "codes": ["local_slip"]}],
+                            "summary": "design looked"}),
+                    ),
+                )
+                .unwrap(),
+            ],
+        );
+        let route = verdict.route(true);
+        assert_eq!(route.parent, route.destination);
+        let findings = verdict.sent_back_findings(Some(&route));
+        let got: Vec<(&str, Vec<&str>)> = findings
+            .iter()
+            .map(|f| {
+                (
+                    f.text.as_str(),
+                    f.codes.iter().map(String::as_str).collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("whole", vec!["unlabeled"]),
+                ("design: a typo", vec!["local_slip"])
+            ]
+        );
+        assert!(!crate::domain::review_reason::converged(&findings));
+        let alone = whole("revise", &[]).sent_back_findings(None);
+        assert_eq!(alone.len(), 1);
+        assert_eq!(alone[0].codes, ["unlabeled"]);
+        assert!(!crate::domain::review_reason::converged(&alone));
+    }
+
     /// The whole review and an agent job may give follow_ups with any
     /// verdict (ADR-t2352-1); a verdict without them reads as before, and
     /// a follow_ups of a broken shape leaves out what does not read

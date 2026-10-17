@@ -184,15 +184,16 @@ fn a_concern_is_asked_at_the_review_jobs_request() {
 }
 
 /// A `revise` past the revises left cannot be sent back: the review's job
-/// after the round's three revises asks for the person.
+/// after the run's two revises, whose reason has no code (a code finding),
+/// asks for the person.
 #[test]
 fn a_revise_past_its_limit_is_asked_at_the_review_jobs_request() {
     let (_dir, repo, db) = fixture();
-    let backend = TestWorkspace::new(&db, false, &crate::runtime_review::revising_agent(3));
+    let backend = TestWorkspace::new(&db, false, &crate::runtime_review::revising_agent(2));
     let reviewer = TestReviewer::new(&[verdict("revise", &["still short"], "not yet")]);
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_asked_at_the_jobs_request(&db, 4, &format!("supervisor:{}", std::process::id()));
+    assert_asked_at_the_jobs_request(&db, 3, &format!("supervisor:{}", std::process::id()));
 }
 
 /// A supervisor that takes over a run whose review returned a `concern`

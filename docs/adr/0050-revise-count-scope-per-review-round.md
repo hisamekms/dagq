@@ -2,10 +2,12 @@
 id: adr-0050
 type: adr
 title: reviseの回数をresume・send_back・衝突の解消で区切ったreviewの回ごとに数え、run全体の往復はresumeの上限で抑える（ADR-0027決定2をamends）
-status: accepted
+status: superseded
 created: 2026-09-27
 updated: 2026-09-27
 accepted_on: 2026-09-27
+superseded_by: adr-t2599-1
+superseded_on: 2026-10-17
 amends:
   - adr-0027 decision 2
 amended_by:
@@ -25,6 +27,8 @@ related:
 ---
 
 # ADR-0050: reviseの回数をresume・send_back・衝突の解消で区切ったreviewの回ごとに数え、run全体の往復はresumeの上限で抑える（ADR-0027決定2をamends）
+
+> **置き換え済み（2026-10-17）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t2599-1](2026-10-17-t2599-1-run-review-revises-counted-across-the-run-and-judged-by-code-findings-past-the-limit.md)を読む。
 
 ## Context
 

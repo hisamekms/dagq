@@ -326,6 +326,7 @@ event_kinds! {
     ReviewRetryQueued => "review_retry_queued",
     ReviewStarted => "review_started",
     ReviseFinished => "revise_finished",
+    ReviseLimitJudged => "revise_limit_judged",
     ReviseReceiptRejected => "revise_receipt_rejected",
     ReviseRequested => "revise_requested",
     ReviseUnsent => "revise_unsent",
@@ -1071,6 +1072,7 @@ pub const REVIEW_RETRIED: &str = EventKind::ReviewRetried.as_str();
 pub const REVIEW_RETRY_QUEUED: &str = EventKind::ReviewRetryQueued.as_str();
 pub const REVIEW_STARTED: &str = EventKind::ReviewStarted.as_str();
 pub const REVISE_FINISHED: &str = EventKind::ReviseFinished.as_str();
+pub const REVISE_LIMIT_JUDGED: &str = EventKind::ReviseLimitJudged.as_str();
 pub const REVISE_RECEIPT_REJECTED: &str = EventKind::ReviseReceiptRejected.as_str();
 pub const REVISE_REQUESTED: &str = EventKind::ReviseRequested.as_str();
 pub const REVISE_UNSENT: &str = EventKind::ReviseUnsent.as_str();
@@ -1541,6 +1543,7 @@ mod tests {
             (EventKind::ReviewRetryQueued, "review_retry_queued"),
             (EventKind::ReviewStarted, "review_started"),
             (EventKind::ReviseFinished, "revise_finished"),
+            (EventKind::ReviseLimitJudged, "revise_limit_judged"),
             (EventKind::ReviseReceiptRejected, "revise_receipt_rejected"),
             (EventKind::ReviseRequested, "revise_requested"),
             (EventKind::ReviseUnsent, "revise_unsent"),

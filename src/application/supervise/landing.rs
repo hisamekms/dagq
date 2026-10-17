@@ -317,7 +317,11 @@ impl Supervisor<'_> {
                         follow_ups: Vec::new(),
                     };
                     let job = ActorContext::review_job(run.id(), state.attempt);
-                    return self.send_revise(run, state.session, verdict, &job, None);
+                    let sent_back = SentBack {
+                        attempt: state.attempt,
+                        findings: verdict.sent_back_findings(None),
+                    };
+                    return self.send_revise(run, state.session, verdict, &job, None, sent_back);
                 }
                 ProgramsStep::Failed(index, _) => {
                     let name = name(index);
@@ -1294,11 +1298,11 @@ impl Supervisor<'_> {
         });
         // Each agent's result, and where they and the whole review send the
         // run (ADR-t1453-1 decisions 5 and 7); a review with no agent
-        // records as before.
+        // records as before. A send-back goes back whatever the revises
+        // left: past the limit it is judged by its reasons (ADR-t2599-1).
         if !verdict.agents.is_empty() {
-            let revise_left = self.revise_left(run.id())?;
             finished["agents"] = json!(verdict.agents);
-            finished["route"] = verdict.route(revise_left).event_value();
+            finished["route"] = verdict.route(true).event_value();
         }
         // The whole review's session, which its span names; each job's
         // Execution is on its `review_job_finished`.
@@ -1546,10 +1550,12 @@ impl Supervisor<'_> {
         Ok(started.map(|child| (child, stdout, stderr)))
     }
     /// Move on from a verdict: `pass` exits the session and lands; `revise`
-    /// goes to the live session while revises are left (ADR-0027 decision
-    /// 2); a `concern` lands or goes back on the job's recommendation when
-    /// it may be applied (ADR-t451-1 decision 3, [`Self::act_on_concern`]);
-    /// anything else exits the session and asks a person. The ask
+    /// goes to the live session while the run's revises are left (ADR-0027
+    /// decision 2), and past them is judged by its reasons
+    /// ([`Self::send_revise`], ADR-t2599-1); a `concern` lands or goes back
+    /// on the job's recommendation when it may be applied (ADR-t451-1
+    /// decision 3, [`Self::act_on_concern`]); anything else exits the
+    /// session and asks a person. The ask
     /// records `job`, the review job that returned `verdict` as review
     /// `attempt`, as its `requested_by` (task 798).
     pub(super) fn act_on_verdict(
@@ -1564,7 +1570,7 @@ impl Supervisor<'_> {
         // its judgments sends it (ADR-t1453-1 decision 7). When no agent's
         // judgment goes there, the verdict's own decides, as before.
         if !verdict.agents.is_empty() {
-            let route = verdict.route(self.revise_left(run.id())?);
+            let route = verdict.route(true);
             if !route.deciding().is_empty() {
                 if route.parent_lighter() {
                     warn!(run_id = %run.id(), "run {} review {attempt}: the verdict {} is lighter than its subagents' ({}); the run goes to {}", run.id(), verdict.verdict.as_str(), route.deciding().iter().map(|a| a.agent.as_str()).collect::<Vec<_>>().join(", "), route.destination.as_str());
@@ -1575,19 +1581,25 @@ impl Supervisor<'_> {
         match verdict.verdict {
             ReviewDecision::Pass => self.precheck(run, session, verdict, Some(job.clone())),
             ReviewDecision::Concern => self.act_on_concern(run, session, verdict, job, attempt),
-            ReviewDecision::Revise => self.send_revise(run, session, verdict, job, None),
+            ReviewDecision::Revise => {
+                let sent_back = SentBack {
+                    attempt,
+                    findings: verdict.sent_back_findings(None),
+                };
+                self.send_revise(run, session, verdict, job, None, sent_back)
+            }
         }
     }
-    /// Whether the round of `run` has a revise left.
-    pub(super) fn revise_left(&self, run: &RunId) -> Result<bool> {
+    /// Whether the run has used up its revises ([`MAX_REVISE_ATTEMPTS`]).
+    fn revises_used_up(&self, run: &RunId) -> Result<bool> {
         let events = self.queue.run_events(run)?;
-        Ok(decide_revise(&RunHistory::from_events(&events)) != ReviseDecision::Ask)
+        Ok(decide_revise(&RunHistory::from_events(&events)) == ReviseDecision::Ask)
     }
     /// Go where `route` sends a verdict one of whose agents' judgments
     /// decides it (ADR-t1453-1 decision 7): back to the session with the
     /// reasons of every judgment that sends it back (one revise of the
-    /// round, a person past the limit), or to a person with every judgment
-    /// that asks for one.
+    /// run, judged by those reasons past the limit), or to a person with
+    /// every judgment that asks for one.
     fn act_on_agents(
         &mut self,
         run: &TaskRun,
@@ -1605,13 +1617,17 @@ impl Supervisor<'_> {
                 let concern = parent_concern
                     .then(|| SentBackConcern::of(&verdict, attempt))
                     .flatten();
-                let phase = self.send_revise(run, session, combined, job, concern)?;
+                let used_up = self.revises_used_up(run.id())?;
+                let sent_back = SentBack {
+                    attempt,
+                    findings: verdict.sent_back_findings(Some(route)),
+                };
+                let phase = self.send_revise(run, session, combined, job, concern, sent_back)?;
                 if parent_concern {
                     // As `act_on_concern` records a send_back it could not
                     // apply.
-                    let unsent =
-                        (!matches!(phase, Phase::Revise(_))).then_some(EscalatedBecause::Unsent);
-                    self.record_concern_decided(run, attempt, &verdict, unsent)?;
+                    let escalated = not_applied(used_up, &phase);
+                    self.record_concern_decided(run, attempt, &verdict, escalated)?;
                 }
                 Ok(phase)
             }
@@ -1619,8 +1635,8 @@ impl Supervisor<'_> {
                 if parent_concern {
                     let escalated = match verdict.concern_decision(true) {
                         ConcernDecision::Ask(why) => why,
-                        // Past the revise limit only.
-                        _ => EscalatedBecause::ReviseLimit,
+                        // The route asks only for a concern that does.
+                        _ => EscalatedBecause::NoRecommendation,
                     };
                     self.record_concern_decided(run, attempt, &verdict, Some(escalated))?;
                 }
@@ -1633,9 +1649,10 @@ impl Supervisor<'_> {
     /// no reason a person is needed, `land` goes the way of a `pass` (the
     /// conflict precheck, the session's `/exit` right before the landing,
     /// the e2e when the run needs it) and `send_back` that of a `revise`
-    /// (counted toward the revise limit); anything else exits the session
-    /// and asks a person with the job's recommendation. `concern_decided`
-    /// records which.
+    /// (counted toward the revise limit, and judged by its reasons past it,
+    /// ADR-t2599-1); anything else exits the session and asks a person
+    /// with the job's recommendation. `concern_decided` records which: a
+    /// `send_back` past the limit as `revise_limit`, not applied.
     fn act_on_concern(
         &mut self,
         run: &TaskRun,
@@ -1646,9 +1663,8 @@ impl Supervisor<'_> {
     ) -> Result<Phase> {
         let events = self.queue.run_events(run.id())?;
         let history = RunHistory::from_events(&events);
-        let revise_left = decide_revise(&history) != ReviseDecision::Ask;
-        let decision = verdict.concern_decision(revise_left);
-        let escalated = match decision {
+        let used_up = decide_revise(&history) == ReviseDecision::Ask;
+        let escalated = match verdict.concern_decision(true) {
             ConcernDecision::Land => {
                 self.record_concern_decided(run, attempt, &verdict, None)?;
                 info!(run_id = %run.id(), "run {} review {attempt}: the concern lands on the review's recommendation", run.id());
@@ -1656,10 +1672,14 @@ impl Supervisor<'_> {
             }
             ConcernDecision::SendBack => {
                 let concern = SentBackConcern::of(&verdict, attempt);
-                let phase = self.send_revise(run, session, verdict.clone(), job, concern)?;
-                let unsent =
-                    (!matches!(phase, Phase::Revise(_))).then_some(EscalatedBecause::Unsent);
-                self.record_concern_decided(run, attempt, &verdict, unsent)?;
+                let sent_back = SentBack {
+                    attempt,
+                    findings: verdict.sent_back_findings(None),
+                };
+                let phase =
+                    self.send_revise(run, session, verdict.clone(), job, concern, sent_back)?;
+                let escalated = not_applied(used_up, &phase);
+                self.record_concern_decided(run, attempt, &verdict, escalated)?;
                 return Ok(phase);
             }
             ConcernDecision::Ask(why) => why,
@@ -1690,11 +1710,13 @@ impl Supervisor<'_> {
         Ok(())
     }
     /// Send `verdict`'s reasons to the live session as the next revise (a
-    /// `revise`, or a `concern` the job recommends sending back), the
-    /// round's limit already checked; a person is asked when the session
+    /// `revise`, or a `concern` the job recommends sending back) while the
+    /// run has a revise left, and judge them once it has none
+    /// ([`Self::past_revise_limit`]); a person is asked when the session
     /// ended or the request could not be sent. `concern` is the concern
     /// whose `send_back` this applies, which the ask names when the session
-    /// does not fix it (task 1392).
+    /// does not fix it (task 1392); `sent_back` the reasons the judgment
+    /// reads.
     fn send_revise(
         &mut self,
         run: &TaskRun,
@@ -1702,6 +1724,7 @@ impl Supervisor<'_> {
         verdict: ReviewVerdict,
         job: &ActorContext,
         concern: Option<SentBackConcern>,
+        sent_back: SentBack,
     ) -> Result<Phase> {
         let carries = verdict.verdict == ReviewDecision::Concern;
         let ask = |why: String, verdict: ReviewVerdict, session| {
@@ -1748,9 +1771,9 @@ impl Supervisor<'_> {
         }
         let events = self.queue.run_events(run.id())?;
         let history = RunHistory::from_events(&events);
-        let ReviseDecision::Request { attempt, round } = decide_revise(&history) else {
-            let why = revise_limit_why(history.round_revise_attempts());
-            return Ok(ask(why, verdict, session));
+        let ReviseDecision::Request { attempt, number } = decide_revise(&history) else {
+            let revises = history.revise_attempts();
+            return self.past_revise_limit(run, session, verdict, job, sent_back, revises);
         };
         let Some(live) = session
             .clone()
@@ -1774,7 +1797,7 @@ impl Supervisor<'_> {
         let request = revise_request(
             &task,
             run,
-            round,
+            number,
             &verdict.reasons,
             Some(&findings_file.to_string_lossy()),
         )?;
@@ -1852,7 +1875,7 @@ impl Supervisor<'_> {
                 return Ok(ask(why, verdict, session));
             }
         };
-        info!(run_id = %run.id(), "revise {round} of {MAX_REVISE_ATTEMPTS} (revise-{attempt}) sent to run {} in workspace {}", run.id(), live.workspace);
+        info!(run_id = %run.id(), "revise {number} of {MAX_REVISE_ATTEMPTS} of the run (revise-{attempt}) sent to run {} in workspace {}", run.id(), live.workspace);
         Ok(Phase::Revise(ReviseWatch::new(
             run,
             live,
@@ -1865,6 +1888,66 @@ impl Supervisor<'_> {
             Some(sent_at),
             self.generators.clock.monotonic(),
         )?))
+    }
+    /// A review that sends the run back once the run's `revises` are used
+    /// up (ADR-t2599-1): with no code finding among the reasons of
+    /// `sent_back` ([`review_reason::converged`]) the run lands the way of
+    /// a `pass` (the conflict precheck, the e2e when it needs it, the
+    /// landing's verification) and the reasons become follow_up drafts of
+    /// the task; otherwise the session exits and a person decides in
+    /// `approve_landing`, told the code findings left. `revise_limit_judged`
+    /// records the judgment after the drafts are registered (best effort,
+    /// as a review's follow_ups are), and an adopter goes on from a
+    /// converged one as from a pass.
+    fn past_revise_limit(
+        &mut self,
+        run: &TaskRun,
+        session: Option<SessionRef>,
+        verdict: ReviewVerdict,
+        job: &ActorContext,
+        sent_back: SentBack,
+        revises: usize,
+    ) -> Result<Phase> {
+        let SentBack { attempt, findings } = sent_back;
+        let converged = review_reason::converged(&findings);
+        if converged {
+            match self.queue.show(run.task_id()) {
+                Ok(detail) => {
+                    crate::application::integrate::register_converged_follow_ups(
+                        &mut *self.queue,
+                        &detail.task,
+                        run.id(),
+                        attempt,
+                        &findings,
+                    );
+                }
+                Err(error) => {
+                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"),
+                        "run {}: review {attempt}'s reasons left not registered: {error:#}", run.id());
+                }
+            }
+        }
+        let code_findings: Vec<&review_reason::Finding> =
+            findings.iter().filter(|f| f.is_code_finding()).collect();
+        self.queue.record_runtime_event(
+            run.id(),
+            EventKind::ReviseLimitJudged,
+            json!({
+                "attempt": attempt,
+                "revises": revises,
+                "converged": converged,
+                "code_findings": code_findings.iter().map(|f| json!({
+                    "text": f.text, "codes": f.codes, "security": f.security,
+                })).collect::<Vec<_>>(),
+            }),
+        )?;
+        if converged {
+            info!(run_id = %run.id(), "run {} review {attempt}: past the run's {revises} revises with no code finding; it lands and its reasons become follow_up drafts", run.id());
+            return self.precheck(run, session, verdict, Some(job.clone()));
+        }
+        let why = revise_limit_why(&verdict, revises, &code_findings);
+        let carries = verdict.verdict == ReviewDecision::Concern;
+        Ok(landing_ask(Some(why), verdict, session, job, carries))
     }
 
     /// Before a passed run's session is asked to exit, judge with `git
@@ -2632,10 +2715,47 @@ fn canceled_reason(ask_id: AskId) -> String {
     format!("canceled by ask {ask_id}")
 }
 
-/// Why a verdict that would send the run back asks a person instead: the
-/// round's `revises` were already sent (`MAX_REVISE_ATTEMPTS`).
-fn revise_limit_why(revises: usize) -> String {
-    format!("the review still asks for changes after {revises} revises")
+/// Why a verdict that sends the run back past the run's `revises`
+/// ([`MAX_REVISE_ATTEMPTS`]) asks a person: the code findings left among
+/// its reasons (ADR-t2599-1), each by its codes, a security agent's
+/// marked.
+fn revise_limit_why(
+    verdict: &ReviewVerdict,
+    revises: usize,
+    code_findings: &[&review_reason::Finding],
+) -> String {
+    let asks = if verdict.verdict == ReviewDecision::Concern {
+        "the review recommends send_back"
+    } else {
+        "the review still asks for changes"
+    };
+    let left = code_findings
+        .iter()
+        .map(|finding| {
+            let codes = finding.codes.join(", ");
+            if finding.security {
+                format!("{codes} from a security agent")
+            } else {
+                codes
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    if code_findings.is_empty() {
+        return format!("{asks} after the run's {revises} revises, with no reason to judge");
+    }
+    format!("{asks} after the run's {revises} revises, and code findings are left ({left})")
+}
+
+/// What `concern_decided` records of a `send_back` the runtime took up:
+/// not applied past the run's revises (`revise_limit`, `used_up`), nor when
+/// it did not reach the session as a revise (`unsent`).
+fn not_applied(used_up: bool, phase: &Phase) -> Option<EscalatedBecause> {
+    if used_up {
+        Some(EscalatedBecause::ReviseLimit)
+    } else {
+        (!matches!(phase, Phase::Revise(_))).then_some(EscalatedBecause::Unsent)
+    }
 }
 
 /// Whether a review waits as a whole: its whole review's route (`whole`)
@@ -2887,32 +3007,22 @@ pub(super) fn combined_verdict(
     route: &VerdictRoute,
     parent_decides: bool,
 ) -> ReviewVerdict {
-    let mut reasons = Vec::new();
-    let mut reason_codes = Vec::new();
-    if parent_decides {
-        reasons.extend(verdict.reasons.iter().cloned());
-        reason_codes.extend(verdict.recorded_codes());
-    }
+    let (reasons, reason_codes) = verdict
+        .sent_back_findings(Some(route))
+        .into_iter()
+        .map(|finding| (finding.text, finding.codes))
+        .unzip();
     let deciding = route.deciding();
-    let results = verdict
-        .agents
-        .iter()
-        .filter(|r| deciding.iter().any(|a| a.agent == r.agent));
     let mut categories = Vec::new();
     if parent_decides {
         categories.extend(verdict.reason_category);
     }
-    for result in results {
+    for result in verdict
+        .agents
+        .iter()
+        .filter(|r| deciding.iter().any(|a| a.agent == r.agent))
+    {
         categories.extend(result.reason_category);
-        let texts = if result.reasons.is_empty() {
-            vec![result.summary.clone()]
-        } else {
-            result.reasons.clone()
-        };
-        for text in texts {
-            reasons.push(format!("{}: {text}", result.agent));
-            reason_codes.push(vec![review_reason::UNLABELED.to_owned()]);
-        }
     }
     let asks = route.destination == Destination::Ask;
     let reason_category = asks.then(|| {
@@ -3024,8 +3134,8 @@ pub(super) fn concern_escalation(
             "the review recommends {recommends}, but the judgement is whether to throw the work away (discard)"
         )),
         EscalatedBecause::ReviseLimit => Some(format!(
-            "the review recommends send_back after {} revises",
-            history.round_revise_attempts()
+            "the review recommends send_back after the run's {} revises",
+            history.revise_attempts()
         )),
         EscalatedBecause::Unsent => Some(format!(
             "the review recommends {recommends}, but it could not be applied"
@@ -3441,12 +3551,29 @@ mod tests {
     /// The tail every landing ask of a review that did not pass ends with.
     const LANDING_TAIL: &str = "\nland: land it as it is. send_back: resume the session with these reasons (answer `send_back: <your reason>` to add yours). cancel: fail the run and cancel the task.";
 
-    /// A `revise` past the round's limit asks a person why, with the
-    /// findings and the material (ADR-0027 decision 2).
+    /// A `revise` past the run's limit whose reasons have code findings
+    /// asks a person why, naming the code findings left by their codes (a
+    /// security agent's marked), with the findings and the material
+    /// (ADR-t2599-1).
     #[test]
-    fn a_revise_past_its_limit_asks_with_the_count_of_revises() {
-        let why = revise_limit_why(MAX_REVISE_ATTEMPTS);
-        assert_eq!(why, "the review still asks for changes after 3 revises");
+    fn a_revise_past_its_limit_asks_with_the_count_of_revises_and_the_code_findings() {
+        let revise = verdict(json!({"verdict": "revise", "reasons": [
+            {"text": "still short", "codes": ["code_defect", "local_slip"]},
+            {"text": "a typo", "codes": ["local_slip"]},
+        ], "summary": "not yet"}));
+        let mut findings = revise.sent_back_findings(None);
+        findings.push(review_reason::Finding {
+            text: "builtin:security: leaks a token".into(),
+            codes: vec!["local_slip".into()],
+            security: true,
+        });
+        let left: Vec<&review_reason::Finding> =
+            findings.iter().filter(|f| f.is_code_finding()).collect();
+        let why = revise_limit_why(&revise, MAX_REVISE_ATTEMPTS, &left);
+        assert_eq!(
+            why,
+            "the review still asks for changes after the run's 2 revises, and code findings are left (code_defect, local_slip; local_slip from a security agent)"
+        );
         assert_eq!(
             landing_question(
                 &run(),
@@ -3457,9 +3584,20 @@ mod tests {
                 (None, None),
             ),
             format!(
-                "The supervisor's review of run r1 (task 1) returned revise (the review still asks for changes after 3 revises): not yet\
+                "The supervisor's review of run r1 (task 1) returned revise ({why}): not yet\
                  \n- still short\nReview material: {DIR}/review.md{LANDING_TAIL}"
             )
+        );
+        let concern = concern(Some("send_back"), Some("high"));
+        let unlabeled = concern.sent_back_findings(None);
+        let left: Vec<&review_reason::Finding> = unlabeled.iter().collect();
+        assert_eq!(
+            revise_limit_why(&concern, MAX_REVISE_ATTEMPTS, &left),
+            "the review recommends send_back after the run's 2 revises, and code findings are left (unlabeled)"
+        );
+        assert_eq!(
+            revise_limit_why(&concern, MAX_REVISE_ATTEMPTS, &[]),
+            "the review recommends send_back after the run's 2 revises, with no reason to judge"
         );
     }
 
@@ -3528,25 +3666,24 @@ mod tests {
         assert_eq!(landing_ask_reason(None), AskReason::Scope);
     }
 
-    /// A send_back the runtime would apply past the round's three revises
-    /// asks with the count of the round's revises; before the third one the
-    /// review's revise still goes to the live session.
+    /// A send_back an adopter finds past the run's revises asks with their
+    /// count; before the limit the review's revise still goes to the live
+    /// session.
     #[test]
     fn a_send_back_past_the_revise_limit_asks_with_the_count_of_revises() {
-        let mut kinds = vec![event_kind::REVIEW_STARTED];
-        for _ in 0..2 {
-            kinds.extend([
-                event_kind::REVISE_REQUESTED,
-                event_kind::REVISE_FINISHED,
-                event_kind::REVIEW_STARTED,
-            ]);
-        }
-        let two = events(&kinds);
+        let mut kinds = vec![
+            event_kind::REVIEW_STARTED,
+            event_kind::REVISE_REQUESTED,
+            event_kind::REVISE_FINISHED,
+            event_kind::RESUME_STARTED,
+            event_kind::REVIEW_STARTED,
+        ];
+        let one = events(&kinds);
         assert_eq!(
-            decide_revise(&RunHistory::from_events(&two)),
+            decide_revise(&RunHistory::from_events(&one)),
             ReviseDecision::Request {
-                attempt: 3,
-                round: 3
+                attempt: 2,
+                number: 2
             }
         );
         kinds.extend([
@@ -3561,7 +3698,7 @@ mod tests {
         let why = concern_escalation(&verdict, EscalatedBecause::ReviseLimit, &history);
         assert_eq!(
             why.as_deref(),
-            Some("the review recommends send_back after 3 revises")
+            Some("the review recommends send_back after the run's 2 revises")
         );
         let question = landing_question(
             &run(),
@@ -3573,7 +3710,7 @@ mod tests {
         );
         assert!(
             question.starts_with(
-                "The supervisor's review of run r1 (task 1) returned concern (the review recommends send_back after 3 revises): judged"
+                "The supervisor's review of run r1 (task 1) returned concern (the review recommends send_back after the run's 2 revises): judged"
             ),
             "{question}"
         );

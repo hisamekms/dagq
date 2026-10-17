@@ -224,7 +224,7 @@ fn a_revise_verdict_is_fixed_by_the_live_session_and_reviewed_again() {
     let text = &texts[0];
     for expected in [
         format!(
-            "dagq: the supervisor's review of run {} (task 1) asks for changes (revise 1 of 3).",
+            "dagq: the supervisor's review of run {} (task 1) asks for changes (revise 1 of 2 of the run).",
             run.id()
         ),
         "Findings:\n- add a line to change.txt".to_owned(),
@@ -246,24 +246,24 @@ fn a_revise_verdict_is_fixed_by_the_live_session_and_reviewed_again() {
     );
 }
 
-/// Revise is sent at most `MAX_REVISE_ATTEMPTS` (three) times a round; past
-/// them, a `revise` and a `concern`'s `send_back` become an
-/// `approve_landing` ask after `/exit` and the close. Here the fourth review
-/// is a `concern` whose job recommends `send_back` with high confidence:
-/// past the round's three revises it is not applied but asked, with the
-/// job's recommendation (ADR-t451-1 decision 3). `land` then lands the run
-/// as an approved one. A fourth `revise` asks the same way
+/// Revise is sent at most `MAX_REVISE_ATTEMPTS` (two) times a run; past
+/// them, a `revise` and a `concern`'s `send_back` whose reasons carry a
+/// code finding (here unlabeled) become an `approve_landing` ask after
+/// `/exit` and the close (ADR-t2599-1). Here the third review is a
+/// `concern` whose job recommends `send_back` with high confidence: past
+/// the run's two revises it is not applied but asked, with the job's
+/// recommendation (ADR-t451-1 decision 3). `land` then lands the run as an
+/// approved one. A third `revise` asks the same way
 /// (`runtime_job_verdicts::a_revise_past_its_limit_is_asked_at_the_review_jobs_request`,
-/// its text `landing::tests::a_revise_past_its_limit_asks_with_the_count_of_revises`).
+/// its text `landing::tests::a_revise_past_its_limit_asks_with_the_count_of_revises_and_the_code_findings`).
 #[test]
 fn a_review_past_the_revise_limit_that_does_not_pass_asks_a_person_and_land_lands_it() {
     let (_dir, repo, db) = fixture();
     let base = git_out(&repo, &["rev-parse", "main"]);
-    let backend = TestWorkspace::new(&db, false, &revising_agent(3));
+    let backend = TestWorkspace::new(&db, false, &revising_agent(2));
     let send_back = json!({"verdict": "concern", "reasons": ["still short"], "summary": "not yet",
                            "recommendation": "send_back", "confidence": "high", "reason_category": null});
     let reviewer = TestReviewer::new(&[
-        verdict("revise", &["still short"], "not yet"),
         verdict("revise", &["still short"], "not yet"),
         verdict("revise", &["still short"], "not yet"),
         format!("printf '%s\\n' '{send_back}'"),
@@ -274,11 +274,11 @@ fn a_review_past_the_revise_limit_that_does_not_pass_asks_a_person_and_land_land
     let mut queue = SqliteQueue::open(&db).unwrap();
     let detail = queue.show(TaskId::new(1)).unwrap();
     let run = detail.runs[0].clone();
-    assert_eq!(payloads(&detail, "revise_requested").len(), 3);
+    assert_eq!(payloads(&detail, "revise_requested").len(), 2);
     crate::worker_escalation::assert_revises_raised(&detail, &backend);
-    assert_eq!(payloads(&detail, "revise_finished").len(), 3);
-    assert_eq!(payloads(&detail, "review_finished").len(), 4);
-    assert_eq!(session_texts(&run).len(), 3);
+    assert_eq!(payloads(&detail, "revise_finished").len(), 2);
+    assert_eq!(payloads(&detail, "review_finished").len(), 3);
+    assert_eq!(session_texts(&run).len(), 2);
     assert_eq!(backend.closed(), vec![background_session(&run)]);
     assert!(queue.run_leases().unwrap().is_empty());
     let kinds = event_kinds(&detail);
@@ -293,7 +293,7 @@ fn a_review_past_the_revise_limit_that_does_not_pass_asks_a_person_and_land_land
     assert_eq!(
         payloads(&detail, "concern_decided"),
         [
-            &json!({"attempt": 4, "recommendation": "send_back", "confidence": "high",
+            &json!({"attempt": 3, "recommendation": "send_back", "confidence": "high",
                  "reason_category": null, "applied": false, "escalated_because": "revise_limit"})
         ]
     );
@@ -301,7 +301,7 @@ fn a_review_past_the_revise_limit_that_does_not_pass_asks_a_person_and_land_land
     assert_eq!(ask.confidence, Some(dagq::domain::AskConfidence::High));
     assert!(
         ask.question.contains(
-            "returned concern (the review recommends send_back after 3 revises): not yet"
+            "returned concern (the review recommends send_back after the run's 2 revises, and code findings are left (unlabeled)): not yet"
         ),
         "{}",
         ask.question
@@ -349,8 +349,8 @@ fn a_review_past_the_revise_limit_that_does_not_pass_asks_a_person_and_land_land
     let approved = payloads(&detail, "integration_approved");
     assert_eq!(approved.len(), 1);
     assert_eq!(approved[0]["ask_id"], ask.id.as_i64());
-    // No fifth review.
-    assert_eq!(reviewer.prompts().len(), 4);
+    // No fourth review.
+    assert_eq!(reviewer.prompts().len(), 3);
 }
 
 /// A `concern` exits and closes the session and asks a person; `send_back`

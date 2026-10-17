@@ -95,6 +95,7 @@ impl History {
             "review_finished" => {
                 self.passed = super::concern::lets_land(&event.payload);
             }
+            _ if super::review_reason::judged_converged(event) => self.passed = true,
             kind if PARKING.contains(&kind) || recheck::parks(event) => {
                 self.conflict = matches!(
                     kind,

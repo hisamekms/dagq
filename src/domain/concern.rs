@@ -34,7 +34,8 @@ string_enum!(EscalatedBecause {
     LowConfidence => "low_confidence",
     Scope => "scope",
     Discard => "discard",
-    // A `send_back` past the revises of the round (`MAX_REVISE_ATTEMPTS`).
+    // A `send_back` past the run's revises (`MAX_REVISE_ATTEMPTS`), which
+    // the judgment of its reasons lands or asks a person of (ADR-t2599-1).
     ReviseLimit => "revise_limit",
     // A `send_back` the live session could not be sent: it had ended, the
     // request could not be typed, or its model switch was left unsettled.
@@ -54,9 +55,10 @@ pub enum ConcernDecision {
 
 /// Decide a `concern` from the job's `recommendation`, `confidence` and
 /// `reason_category`. Only a `high` confidence with no reason a person is
-/// needed is applied; a `send_back` also needs a revise left in the round
-/// (`revise_left`). A `land` needs none, since it asks the session for no
-/// further revise.
+/// needed is applied; a `send_back` also needs a revise left in the run
+/// (`revise_left`), and past them the supervisor judges its reasons
+/// instead (ADR-t2599-1). A `land` needs none, since it asks the session
+/// for no further revise.
 pub fn decide(
     recommendation: Option<LandingRecommendation>,
     confidence: Option<AskConfidence>,

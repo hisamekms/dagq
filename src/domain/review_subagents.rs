@@ -443,6 +443,11 @@ pub struct AgentResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verdict: Option<ReviewDecision>,
     pub reasons: Vec<String>,
+    /// The codes the job gave each of `reasons` (ADR-t947-1), empty when it
+    /// gave none: what the judgment past the revise limit reads of an
+    /// agent's reasons (ADR-t2599-1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reason_codes: Vec<Vec<String>>,
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommendation: Option<LandingRecommendation>,
@@ -468,6 +473,9 @@ pub(crate) struct PrintedAgentResult {
     verdict: Option<ReviewDecision>,
     #[serde(default)]
     reasons: Vec<review_reason::PrintedReason>,
+    /// The codes of a result recorded with its reasons as texts.
+    #[serde(default)]
+    reason_codes: Vec<Vec<String>>,
     #[serde(default)]
     summary: String,
     #[serde(default)]
@@ -482,7 +490,14 @@ pub(crate) struct PrintedAgentResult {
 
 impl From<PrintedAgentResult> for AgentResult {
     fn from(printed: PrintedAgentResult) -> Self {
-        let (reasons, _) = review_reason::split(printed.reasons);
+        let (reasons, codes) = review_reason::split(printed.reasons);
+        let reason_codes = if !printed.reason_codes.is_empty() {
+            printed.reason_codes
+        } else if codes.iter().any(|codes| !codes.is_empty()) {
+            codes
+        } else {
+            Vec::new()
+        };
         // Only a concern's are read, as the verdict's.
         let concern = printed.verdict == Some(ReviewDecision::Concern);
         Self {
@@ -490,6 +505,7 @@ impl From<PrintedAgentResult> for AgentResult {
             status: printed.status,
             verdict: printed.verdict,
             reasons,
+            reason_codes,
             summary: printed.summary,
             recommendation: concern
                 .then(|| concern::known(printed.recommendation.as_deref()))
@@ -503,6 +519,15 @@ impl From<PrintedAgentResult> for AgentResult {
             follow_ups: super::follow_up::ReviewFollowUp::read_list(&printed.follow_ups),
         }
     }
+}
+
+/// Whether `agent` is a review agent of the security role, whose findings
+/// never count as converged past the revise limit (ADR-t2599-1): the
+/// built-in `builtin:security` and the project's `security`
+/// (`[review.subagents.security]`).
+pub fn is_security_agent(agent: &str) -> bool {
+    let security = super::review_builtins::BuiltinAgent::Security;
+    agent == security.short() || agent == security.name()
 }
 
 /// Where a judgment of a review sends the run (ADR-t1453-1 decision 7),
@@ -601,7 +626,7 @@ impl VerdictRoute {
 
 /// [`VerdictRoute`] of a verdict whose decision and concern fields are
 /// `parent` and whose agents gave `results` (all completed, see
-/// [`super::review_jobs::agent_result`]); `revise_left` says whether the round has a revise left.
+/// [`super::review_jobs::agent_result`]); `revise_left` says whether the run has a revise left.
 pub fn route(
     parent: (
         ReviewDecision,

@@ -1496,7 +1496,66 @@ pub fn register_review_follow_ups<Q: EventStore + super::DraftPlannerStore + ?Si
     attempt: usize,
     verdict: &crate::domain::ReviewVerdict,
 ) -> Vec<RegisteredFollowUp> {
-    let found = verdict.found_follow_ups();
+    register_found_follow_ups(
+        queue,
+        task,
+        run_id,
+        attempt,
+        verdict.found_follow_ups(),
+        review_follow_up_registration,
+    )
+}
+
+/// The reasons review `attempt` of `task`'s run `run_id` sent the run back
+/// with past its revise limit, left when the run landed with no code
+/// finding among them (ADR-t2599-1): registered as follow_up drafts the way
+/// [`register_review_follow_ups`] registers a review's follow_ups, each
+/// keyed by its text, of the category its codes map to
+/// ([`crate::domain::review_reason::follow_up_category`]).
+pub fn register_converged_follow_ups<Q: EventStore + super::DraftPlannerStore + ?Sized>(
+    queue: &mut Q,
+    task: &Task,
+    run_id: &RunId,
+    attempt: usize,
+    findings: &[crate::domain::review_reason::Finding],
+) -> Vec<RegisteredFollowUp> {
+    let found = findings
+        .iter()
+        .map(|finding| crate::domain::FoundReviewFollowUp {
+            agent: None,
+            follow_up: crate::domain::ReviewFollowUp {
+                text: finding.text.clone(),
+                path: String::new(),
+                section: finding.text.clone(),
+                codes: finding.codes.clone(),
+            },
+        })
+        .collect();
+    register_found_follow_ups(
+        queue,
+        task,
+        run_id,
+        attempt,
+        found,
+        converged_follow_up_registration,
+    )
+}
+
+/// Register as drafts those of `found` the run has none of yet, each as
+/// `registration` makes it.
+fn register_found_follow_ups<Q: EventStore + super::DraftPlannerStore + ?Sized>(
+    queue: &mut Q,
+    task: &Task,
+    run_id: &RunId,
+    attempt: usize,
+    found: Vec<crate::domain::FoundReviewFollowUp>,
+    registration: fn(
+        &Task,
+        &RunId,
+        usize,
+        crate::domain::FoundReviewFollowUp,
+    ) -> FollowUpRegistration,
+) -> Vec<RegisteredFollowUp> {
     if found.is_empty() {
         return Vec::new();
     }
@@ -1526,7 +1585,7 @@ pub fn register_review_follow_ups<Q: EventStore + super::DraftPlannerStore + ?Si
     };
     let prepared = new
         .into_iter()
-        .map(|found| review_follow_up_registration(task, run_id, attempt, found))
+        .map(|found| registration(task, run_id, attempt, found))
         .collect();
     match queue.register_follow_ups(run_id, prepared, depth) {
         Ok(added) => {
@@ -1592,6 +1651,65 @@ pub fn review_follow_up_registration(
         },
         entry: json!(follow_up),
         category: crate::domain::REVIEW_FOLLOW_UP_CATEGORY.to_owned(),
+        membership_proposal: Value::Null,
+        draft: Some(draft),
+        skipped: None,
+    }
+}
+
+/// The registration of one reason `found` that review `attempt` of
+/// `task`'s run `run_id` left when the run landed past its revise limit
+/// (ADR-t2599-1): a draft of the task's goal, of the category of the
+/// reason's codes, keyed by its text, whose description is the text and
+/// which review left it.
+fn converged_follow_up_registration(
+    task: &Task,
+    run_id: &RunId,
+    attempt: usize,
+    found: crate::domain::FoundReviewFollowUp,
+) -> FollowUpRegistration {
+    let follow_up = &found.follow_up;
+    let category = crate::domain::review_reason::follow_up_category(&follow_up.codes);
+    let head: String = follow_up.text.chars().take(80).collect();
+    let title = if head.len() < follow_up.text.len() {
+        format!("{category}: {head}…")
+    } else {
+        format!("{category}: {head}")
+    };
+    let draft = NewTask {
+        title,
+        description: format!(
+            "{}\n\nLeft by review {attempt} of run {run_id} (codes: {}), which sent the run back after its revises were used up with no code finding, so the run landed without it.",
+            follow_up.text,
+            follow_up.codes.join(", ")
+        ),
+        acceptance: String::new(),
+        verification_commands: Vec::new(),
+        required_evidence: Vec::new(),
+        paths: Vec::new(),
+        priority: Default::default(),
+        change: None,
+        dependencies: Vec::new(),
+        goal_dependencies: Vec::new(),
+        goal_id: task.goal_id(),
+        context: format!(
+            "follow_up left by review {attempt} of run {run_id} of task {} ({})",
+            task.id(),
+            task.title()
+        ),
+        provider: None,
+        worker_mode: None,
+        wait_for_build: false,
+        execution_class: Default::default(),
+    };
+    FollowUpRegistration {
+        key: crate::domain::FollowUpKey::Review {
+            attempt,
+            agent: None,
+            key: follow_up.key(),
+        },
+        entry: json!(follow_up),
+        category: category.to_owned(),
         membership_proposal: Value::Null,
         draft: Some(draft),
         skipped: None,

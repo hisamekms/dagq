@@ -578,7 +578,7 @@ pub(crate) fn closed_question_notice(
 pub(crate) fn revise_request(
     task: &Task,
     run: &TaskRun,
-    round: usize,
+    number: usize,
     reasons: &[String],
     findings_file: Option<&str>,
 ) -> Result<FittedPrompt> {
@@ -606,7 +606,7 @@ pub(crate) fn revise_request(
     let checks = local_checks(&verify);
     let route = Route::of(run);
     let mut lines = route.opening(format!(
-        "dagq: the supervisor's review of run {} (task {}) asks for changes (revise {round} of {MAX_REVISE_ATTEMPTS}).",
+        "dagq: the supervisor's review of run {} (task {}) asks for changes (revise {number} of {MAX_REVISE_ATTEMPTS} of the run).",
         run.id(),
         task.id()
     ));

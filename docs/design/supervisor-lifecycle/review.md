@@ -17,6 +17,7 @@ related:
   - adr-0027
   - adr-0050
   - adr-t2256-1
+  - adr-t2599-1
   - adr-t803-1
   - adr-t947-1
   - adr-t1233-2
@@ -52,8 +53,9 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
   → 2 headless実行: 全体のreviewとagentごとの読み取りだけのjobを上限の中で並列に
   → 3 判定: 全jobがそろってから。答えの無いjobはそのjobだけ1回やり直す
        pass    → 5 衝突の事前判定 → 終了の依頼とclose → 着地の前のe2e → 着地
-       revise  → 4 reviseの往復（回ごとの上限まで）→ validationからやり直す
+       revise  → 4 reviseの往復（runを通した上限まで）→ validationからやり直す
        concern → AIが決めるconcern: land（passと同じ道）/ send_back（4と同じ道）/ ask
+       上限の後の差し戻し → 4a コードで着地かask
        失敗・打ち切り → approve_landingのask → 6 askの回答（land / send_back / cancel / retry_review）
   supervisorが替わったら 7 引き継ぎ、reviseの待ちの間の質問は 8
 ```
@@ -75,13 +77,12 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 
 ### 不変条件
 
-- passでないreviewのrunは、人の`land`の答えか、jobの確かな`land`の推奨なしには着地しない（`domain::concern::lets_land`）。
+- passでないreviewのrunは、人の`land`の答えか、jobの確かな`land`の推奨か、4aの収束なしには着地しない。
 - やり直しはjobごとに1回まで、プログラムのreviewをやり直したreviewのjobはやり直さない。
 - 全jobが終わるまで判定せず、答えの無いjobが残れば`pass`にしない。
 - AIのjobが他のjobの判定をまとめることはない。
 - verdictの`follow_ups`は判定と行き先を変えず、それだけでrunを差し戻さない。
-- reviseは回（区切りの後）ごとに`MAX_REVISE_ATTEMPTS`回までworkerに返し、concernの`send_back`もこれに数える（[ADR-0050](../../adr/0050-revise-count-scope-per-review-round.md)、上限は[ADR-t2256-1](../../adr/2026-10-11-t2256-1-raise-the-run-review-revise-limit-and-decouple-plan-review.md)）。
-  上限に達した後のreviseとconcernの`send_back`は`approve_landing`のaskにし、concernのほかの判断は上限に依らない。
+- reviseはrunを通して`MAX_REVISE_ATTEMPTS`回まで返し、resumeで数え直さず、上限の後は4aで決める（[ADR-t2599-1](../../adr/2026-10-17-t2599-1-run-review-revises-counted-across-the-run-and-judged-by-code-findings-past-the-limit.md)）。
 - 依頼（revise・衝突の解消）はeventを記録してから`turns/`に書くので、二重には書かない。
 - 1つのrunに開いた`approve_landing`のaskは1つ。
 - e2eはhostで同時に1本だけ流れる。
@@ -121,7 +122,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
    全てのjobが答えれば、全体のreviewのverdictにagentごとの結果を並べて`review_finished`を記録し、判定ごとに最も重い行き先を機械で取る（`domain::review_jobs::assemble`、下の「判定ごとの行き先」）。
    やり直しの使い方はjobごとにsupervisorの状態（`ReviewJob::again`）が持ち、待ちを挟んでも保つ。
    どのjobの`follow_ups`も、`review_finished`の前にそのrunのtaskのfollow_upのdraftにする（下の「文書の照合」）。
-4. **reviseの往復**: `revise`と、適用する`send_back`のconcernは、回にreviseが残り、sessionが生きていれば、直す依頼を生きているsessionの次のturnに書く（`revise_requested`）。
+4. **reviseの往復**: `revise`と、適用する`send_back`のconcernは、runにreviseが残り、sessionが生きていれば、直す依頼を生きているsessionの次のturnに書く（`revise_requested`）。
    直前のturnの`peak_context`が閾値を超えれば、新しいsessionへの引き継ぎで書く。
    文面と手順は`application::prompt::revise_request`が持つ。
    書き込みに失敗したら`revise_unsent`で取り消し、回数から引く。
@@ -129,6 +130,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
    receiptがHEADと一致しなければvalidationに渡さず（渡すと`failed`になって作業を失う）、HEADで書き直す依頼を送って待ち直す。
    書き直さないidle・sessionの終わり・`resume_timeout`・依頼の書き込みの失敗は、`approve_landing`のaskで人に聞く。
    `resume_timeout`は依頼か待ちを始め直した入力（答え・控えの解除など）から単調時計で数え、HEADで書き直す依頼では数え直さない。
+4a. **上限の後の判定**: 理由にコードの指摘が無ければ（`review_reason::converged`）理由をfollow_upのdraftにしてpassの道で着地し、あれば残った指摘を`approve_landing`のaskで示す。
 5. **終了の依頼とclose**: pass・適用する`land`のconcernは着地の直前に、askにするconcernとreviewの失敗はaskを作る前に、workerのsessionの終了を依頼する（run dirの`turns/exit`、[非対話のworker](headless-worker.md#wrapperがturnを止めるとき)）。
    wrapperの`session_exited`の後にbackgroundのwrapperの残りを止める（runはworkspaceを開かない。[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
    - **passの衝突の事前判定**（ADR-0027決定4）: 終了を依頼する前に、passしたheadとlanding branchを`GitRepository::merge_conflicts`で（refを動かさずに）比べる。
@@ -137,7 +139,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
      数えるresumeを使い切っていれば送らずにaskにする。
      sessionが居ない・送れない・merge-treeが失敗したときは送らずに着地へ進み、着地のrebaseの衝突は`needs_session`のresumeに回る。
    - **pass**: 衝突しなければ`landing_queued`を記録し、e2eが要るrunは[着地の前のe2e](landing-e2e.md)を通してから、着地スロットを待って`integrate`と同じ着地を走らせる。
-   - **concern**（とreviseの打ち切り）: 下の[AIが決めるconcern](#aiが決めるconcern未実装)で決め、askにするものは`approve_landing`のaskを作ってleaseを外す。
+   - **concern**（と4aのask）: 下の[AIが決めるconcern](#aiが決めるconcern未実装)で決め、askにするものは`approve_landing`のaskを作ってleaseを外す。
      askを作る前に、そのrunの閉じていない前の`approve_landing`のaskを閉じる。
      残すと同じrun・kindの開いたaskに畳まれて新しい理由が人に届かず、回答済みの古い答えが新しいreviewに適用されうるため。
    - **reviewの失敗**: concernと同じ経路で`approve_landing`のaskを開いてから`review_failed`を記録し、leaseを外す。
@@ -210,7 +212,7 @@ agentはpjの`.dagq/agents/`のものとバイナリのbuilt-in（`domain::revie
 - **結果のそろいの検査**: agentのjobの答えは、そのagentのちょうど1件の完了した判定でなければ読めない答えで（`domain::review_jobs::agent_result`）、全体のreviewのverdictはagentの結果を持てない（`agents`を持つverdictは`ReviewVerdict::parse`が読めない答えにする）。
 - **判定ごとの行き先**: 全体のreviewとagentごとの判定を着地・差し戻し・人の判断に直し、最も重いものを取る（`domain::review_subagents`）。
   差し戻しは判定ごとの理由をagentの名前を付けて並べた1回のreviseにし、人の判断なら問いに全体のreviewが軽かったことを載せる（`act_on_agents`）。
-  `review_finished`が記録した行き先があれば、着地はそれが`land`のときだけ（`concern::lets_land`）で、引き継いだsupervisorも全体のreviewのverdictだけでは進めずaskにする。
+  `review_finished`が記録した行き先があれば、着地はそれが`land`か4aの収束のときだけで、引き継いだsupervisorも4aの収束の他はaskにする。
 - **誤り**: landing branchの`dagq.toml`が読めない、選ばれたagentの定義が無い、道具の宣言が誤り、範囲かreceiptが読めないときは、必須の検査が分からないので空にせず、起動せずにreviewの失敗にする。
   `dagq.toml`は全体を解釈するので、`[review.subagents.*]`の外の誤りもreviewを失敗させる。
 - **設定の無いrepository**: 既定で有効なbuilt-inは選ばれ、どのagentも選ばれなければ全体のreviewのjob 1本で、agentに関わる欄・指示を持たない。
@@ -244,10 +246,10 @@ runのreviewのpromptは、acceptanceの前に`REVIEW_DOCS_CHECK`の1段落を�
 
 [ADR-t947-1](../../adr/2026-09-28-t947-1-review-verdicts-carry-reason-codes.md)。
 コードの一覧と定義は`domain::review_reason::REVIEW_CODES`が重い順に持ち、promptがそのまま載せる。
-コードを変えるのにADRは要らない（決定6）。
+コードはADRなしに変えてよいが、`CONVERGED_CODES`はADRで変える。
 
 - **verdictの形**: `reasons`の各項目は文とコード（先頭が主）で、文だけの項目も読む。
-  コードは集計のlabelなので、コードの形のせいでverdictを読めなくはせず、判定と適用にも使わない（決定3）。
+  コードの形でverdictを読めなくはせず、コードを読むのは4aだけである。
   主のコードは最初の項目の主のコードで、promptはverdictを決めた項目を先頭に置かせる。
 - **主の選び方**: 1つの項目が2つ以上に当たるときは、直すのに誰の判断が要るかの重い方を主にする（一覧の順）。
   `adr_conflict`・`acceptance_conflict`・`acceptance_infeasible`は、workerが条件を満たすと別の決まりや事実に反すると書いているときで、単に届いていなければ`acceptance_unmet`。
@@ -262,7 +264,7 @@ runのreviewのpromptは、acceptanceの前に`REVIEW_DOCS_CHECK`の1段落を�
 - **verdictの欄**: concernのverdictは推奨・確信度・人が要る理由を持ち、passとreviseでは捨てる（`ReviewVerdict`）。
   知らない理由は`scope`として読み、人が決める側に倒す（`domain::concern`）。
 - **決め方**（`domain::concern::decide`）: 推奨が無い・人が要る理由がある・確信度が`high`でないものはaskにする。
-  残りの`land`は適用し、`send_back`は回にreviseが残っていれば適用し、残っていなければaskにする。
+  残りの`land`は適用し、`send_back`はrunにreviseが残っていれば適用し、残っていなければ4aの判定に回す。
 - **適用**（`Supervisor::act_on_concern`）: `land`はpassと同じ衝突の事前判定・e2e・着地へ進み、`send_back`はreviseと同じ依頼として生きているsessionに返す。
   着地を許す判定（`integrate`の拒否・resumeの数え方・着地の回復）は、適用される`land`のconcernを「passした」と読む（`concern::lets_land`）。
 - **ask**: askにするconcernは推奨と確信度（[ask](ask.md#aiの推奨と確信度未実装)）を載せ、問いにaskにした理由を足す。

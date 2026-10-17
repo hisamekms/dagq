@@ -562,8 +562,9 @@ impl From<RecordedReviewVerdict> for ReviewVerdict {
 
 impl ReviewVerdict {
     /// Where this verdict sends the run with its agents' results
-    /// (ADR-t1453-1 decision 7), `revise_left` saying whether the round
-    /// has a revise left.
+    /// (ADR-t1453-1 decision 7), `revise_left` saying whether the run has
+    /// a revise left (the supervisor takes it with one, and judges a
+    /// send-back past the limit by its reasons, ADR-t2599-1).
     pub fn route(&self, revise_left: bool) -> review_subagents::VerdictRoute {
         review_subagents::route(
             (
@@ -591,7 +592,7 @@ impl ReviewVerdict {
     }
 
     /// What the runtime does with this `concern` (ADR-t451-1 decision 3),
-    /// `revise_left` saying whether the round has a revise left.
+    /// `revise_left` saying whether the run has a revise left.
     pub fn concern_decision(&self, revise_left: bool) -> concern::ConcernDecision {
         concern::decide(
             self.recommendation,
@@ -599,6 +600,62 @@ impl ReviewVerdict {
             self.reason_category,
             revise_left,
         )
+    }
+
+    /// The reasons this verdict sends the run back with, as the judgment
+    /// past the revise limit reads them (ADR-t2599-1): the verdict's own
+    /// when there is no `route` or its own judgment goes where the route
+    /// does, then those of each agent whose judgment decides the route
+    /// ([`review_subagents::VerdictRoute::deciding`]), under the agent's
+    /// name, marked when the agent is of the security role. A judgment
+    /// that sends the run back with no reason gives its summary,
+    /// unlabeled: a send-back with nothing to judge it by is a code
+    /// finding.
+    pub fn sent_back_findings(
+        &self,
+        route: Option<&review_subagents::VerdictRoute>,
+    ) -> Vec<review_reason::Finding> {
+        let mut findings = Vec::new();
+        if route.is_none_or(|route| route.parent == route.destination) {
+            let texts = if self.reasons.is_empty() {
+                vec![self.summary.clone()]
+            } else {
+                self.reasons.clone()
+            };
+            let codes = review_reason::recorded(&self.reason_codes, texts.len());
+            findings.extend(texts.into_iter().zip(codes).map(|(text, codes)| {
+                review_reason::Finding {
+                    text,
+                    codes,
+                    security: false,
+                }
+            }));
+        }
+        let Some(route) = route else {
+            return findings;
+        };
+        let deciding = route.deciding();
+        for result in self
+            .agents
+            .iter()
+            .filter(|result| deciding.iter().any(|a| a.agent == result.agent))
+        {
+            let texts = if result.reasons.is_empty() {
+                vec![result.summary.clone()]
+            } else {
+                result.reasons.clone()
+            };
+            let codes = review_reason::recorded(&result.reason_codes, texts.len());
+            let security = review_subagents::is_security_agent(&result.agent);
+            findings.extend(texts.into_iter().zip(codes).map(|(text, codes)| {
+                review_reason::Finding {
+                    text: format!("{}: {text}", result.agent),
+                    codes,
+                    security,
+                }
+            }));
+        }
+        findings
     }
 
     /// Every follow_up of this verdict, the whole review's first and then
@@ -630,13 +687,19 @@ impl ReviewVerdict {
     }
 }
 
-/// How many times the supervisor sends a `revise` verdict, or a `concern`'s
-/// `send_back` it applies, back to the live session of one run in a review
-/// round (ADR-0027 decision 2, counted per round by ADR-0050, the value
-/// from ADR-t2256-1). Past it, a `revise` and such a `send_back` are asked
-/// of a person (`approve_landing`, `revise_limit`); a `concern`'s other
-/// decisions do not depend on it (ADR-t451-1 decision 3).
-pub const MAX_REVISE_ATTEMPTS: usize = 3;
+/// How many automatic revises the supervisor sends back to the live
+/// session of one run, counted across the whole run (ADR-t2599-1, amending
+/// ADR-0027 decision 2): a `revise` verdict, a `concern`'s `send_back` it
+/// applies and a program review's rejection each count one. A resume (a failed landing
+/// verification, a rebase conflict, a person's `send_back`) and a conflict
+/// resolution do not start the count again. Past it, a review that sends
+/// the run back is judged by its reasons' codes
+/// ([`review_reason::converged`]): with no code finding the run lands and
+/// the reasons left become follow_up drafts, otherwise a person decides
+/// in `approve_landing`. A `concern`'s other decisions do not depend on it
+/// (ADR-t451-1 decision 3), and the plan review's limit
+/// ([`MAX_PLAN_REVISES`]) is not tied to it.
+pub const MAX_REVISE_ATTEMPTS: usize = 2;
 
 /// The options of the `approve_landing` ask a `concern` opens, which the
 /// supervisor acts on once answered (ADR-0027, ADR-0022 decision 3).

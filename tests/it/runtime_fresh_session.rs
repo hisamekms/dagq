@@ -110,7 +110,7 @@ fn a_revise_past_the_threshold_goes_on_in_a_new_session_that_the_wait_follows() 
         "Why the review sent the run back:\n- add a line to change.txt".to_owned(),
         "The earlier session would have been sent this next; it is yours now:".to_owned(),
         format!(
-            "dagq: the supervisor's review of run {} (task 1) asks for changes (revise 1 of 3).",
+            "dagq: the supervisor's review of run {} (task 1) asks for changes (revise 1 of 2 of the run).",
             run.id()
         ),
     ] {
@@ -123,7 +123,7 @@ fn a_revise_past_the_threshold_goes_on_in_a_new_session_that_the_wait_follows() 
     assert!(
         texts[1].starts_with("dagq: this is the next turn of your session")
             && texts[1].contains(&format!(
-                "dagq: the supervisor's review of run {} (task 1) asks for changes (revise 2 of 3).",
+                "dagq: the supervisor's review of run {} (task 1) asks for changes (revise 2 of 2 of the run).",
                 run.id()
             ))
             && !texts[1].contains(HANDOFF_OPENING),

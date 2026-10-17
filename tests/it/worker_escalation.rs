@@ -258,9 +258,6 @@ pub(crate) fn assert_revises_raised(detail: &dagq::domain::TaskDetail, backend: 
         .iter()
         .map(|p| &p["effort"])
         .collect();
-    assert_eq!(efforts, [&json!("high"), &json!("xhigh"), &json!("xhigh")]);
-    assert_eq!(
-        revise_efforts(backend),
-        ["/effort high", "/effort xhigh", "/effort xhigh"]
-    );
+    assert_eq!(efforts, [&json!("high"), &json!("xhigh")]);
+    assert_eq!(revise_efforts(backend), ["/effort high", "/effort xhigh"]);
 }

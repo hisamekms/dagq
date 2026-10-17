@@ -1020,7 +1020,21 @@ fn review_resumption(
         }
         event_kind::REVIEW_FINISHED => {
             let finished: ReviewFinished = restore(&anchor.payload);
+            // A send-back past the run's revises judged with no code
+            // finding (ADR-t2599-1) goes on as a pass: prechecked (again)
+            // before its exit request, landed after it.
+            let converged = history
+                .events()
+                .iter()
+                .any(|e| e.id > anchor.id && crate::domain::review_reason::judged_converged(e));
             match verdict_of(anchor) {
+                Ok(verdict) if converged && !exited => {
+                    return ReviewResumption::Precheck {
+                        verdict,
+                        job: review_job(run, anchor),
+                    };
+                }
+                Ok(_) if converged => Some(AfterExit::Land),
                 // A review whose subagents sent the run further than
                 // its verdict, or carried reasons of their own
                 // (ADR-t1453-1 decision 7), asks a person: an adopter
@@ -1469,6 +1483,44 @@ mod tests {
     /// its reasons none when they are not texts), and is reviewed again
     /// without one; a precheck that sent nothing lands or asks after its
     /// exit request.
+    /// A send-back past the run's revises judged with no code finding
+    /// (ADR-t2599-1) is adopted as a pass: prechecked before its exit
+    /// request and landed after it, whatever the verdict was; one judged
+    /// with a code finding left asks as before.
+    #[test]
+    fn an_adopted_review_judged_converged_goes_on_as_a_pass() {
+        let revise = event(
+            1,
+            event_kind::REVIEW_FINISHED,
+            json!({"verdict": "revise", "reasons": ["a typo"], "reason_codes": [["local_slip"]],
+                   "summary": "s", "attempt": 3}),
+        );
+        let judged = |converged: bool| {
+            event(
+                2,
+                event_kind::REVISE_LIMIT_JUDGED,
+                json!({"attempt": 3, "revises": 2, "converged": converged, "code_findings": []}),
+            )
+        };
+        assert!(matches!(
+            resumption(&[revise.clone(), judged(true)], true, false),
+            ReviewResumption::Precheck { job: Some(_), .. }
+        ));
+        let exited = [
+            revise.clone(),
+            judged(true),
+            event(3, event_kind::EXIT_REQUESTED, json!({})),
+        ];
+        assert!(matches!(
+            resumption(&exited, false, false),
+            ReviewResumption::Exit(AfterExit::Land)
+        ));
+        assert!(matches!(
+            resumption(&[revise, judged(false)], true, false),
+            ReviewResumption::Exit(AfterExit::Ask { .. })
+        ));
+    }
+
     #[test]
     fn an_adopted_request_waits_for_its_live_session() {
         let revise = [event(

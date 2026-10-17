@@ -2,10 +2,12 @@
 id: adr-t2256-1
 type: adr
 title: runのreviewのreviseを生きているsessionに返す回ごとの上限を1つ上げ、plan reviewの差し戻しの上限はその値と数え方のままrunのreviewの上限と連動させない（ADR-0027決定2・ADR-0050決定1・3・4・ADR-0047決定11をamends）
-status: accepted
+status: superseded
 created: 2026-10-11
 updated: 2026-10-11
 accepted_on: 2026-10-11
+superseded_by: adr-t2599-1
+superseded_on: 2026-10-17
 amends:
   - adr-0027 decision 2
   - adr-0050 decision 1
@@ -29,6 +31,8 @@ related:
 ---
 
 # ADR-t2256-1: runのreviewのreviseの回ごとの上限を1つ上げ、plan reviewの上限と連動させない（ADR-0027決定2・ADR-0050決定1・3・4・ADR-0047決定11をamends）
+
+> **置き換え済み（2026-10-17）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t2599-1](2026-10-17-t2599-1-run-review-revises-counted-across-the-run-and-judged-by-code-findings-past-the-limit.md)を読む。
 
 ## Context
 
