@@ -1,0 +1,10 @@
+runtime: 許さない型
+config: 許さない型
+接頭辞のない件名
+feat: 
+feat:
+feat:接頭辞の後に空白がない
+feat(): 空のscope
+style: 既定のcommittedは許すがここでは許さない型
+fixup! 接頭辞のないfixup
+Merge branch 'main' into work

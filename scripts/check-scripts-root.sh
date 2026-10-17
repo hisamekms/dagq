@@ -41,7 +41,7 @@ set -u
 me=check-scripts-root
 
 # The check scripts that take their root from the cwd's git work tree.
-scripts="check-migration-numbers check-test-file-lines check-adr-numbers check-e2e-quarantine check-agents-md-size check-layer-deps check-context-boundaries check-frontmatter-dates check-design-docs check-design-sentences check-doc-links check-doc-frontmatter check-plugin-version"
+scripts="check-migration-numbers check-test-file-lines check-adr-numbers check-e2e-quarantine check-agents-md-size check-layer-deps check-context-boundaries check-frontmatter-dates check-design-docs check-design-sentences check-doc-links check-doc-frontmatter check-plugin-version check-commit-messages"
 
 # "<script> <case>": each case puts one violation of the script into the
 # clone (the cwd) with violate_<case>.
@@ -69,7 +69,8 @@ check-doc-links doc_broken_link
 check-doc-links doc_link_to_removed_design
 check-doc-frontmatter doc_frontmatter_missing_key
 check-doc-frontmatter doc_frontmatter_updated_line
-check-plugin-version plugin_version_mismatch"
+check-plugin-version plugin_version_mismatch
+check-commit-messages commit_message_prefix"
 
 violate_migration_gap() {
   echo 'SELECT 1;' >migrations/9999_scripts_root_gap.sql
@@ -182,6 +183,17 @@ violate_plugin_version_mismatch() {
   sed 's/^\( *"version" *: *"\)[^"]*"/\1999.0.0-scripts-root"/' "$f" >"$f.zz" && mv "$f.zz" "$f"
 }
 
+# The script checks the commits since the merge base with main, so the
+# violation is a commit on a branch of its own, with main pinned at the cloned
+# head: the clone may be on main itself (CI on main) or have no main at all (a
+# detached pull request). reset_clone takes the branch and the pin out again.
+violate_commit_message_prefix() {
+  git checkout --quiet -b zz-scripts-root-commits &&
+    git update-ref refs/heads/main "$head" &&
+    git -c user.name="$me" -c user.email="$me@localhost" -c commit.gpgsign=false \
+      commit --quiet --no-verify --allow-empty -m 'runtime: a prefix not allowed'
+}
+
 unset LAYER_DEPS_ROOT LAYER_DEPS_ALLOW_FILE CONTEXT_BOUNDARIES_ROOT CONTEXT_BOUNDARIES_LIST_FILE CONTEXT_BOUNDARIES_ALLOW_FILE E2E_QUARANTINE_FILE GITHUB_REF_TYPE GITHUB_REF_NAME
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_ALTERNATE_OBJECT_DIRECTORIES
 
@@ -203,14 +215,23 @@ bin=$tmp/bin
 outside=$tmp/outside
 
 git clone --shared --quiet "$repo" "$clone" || prep_fail "cannot clone $repo"
+head=$(git -C "$clone" rev-parse HEAD) || prep_fail "no HEAD in the clone"
+branch=$(git -C "$clone" symbolic-ref --quiet --short HEAD) || branch=""
+main=$(git -C "$clone" rev-parse --quiet --verify refs/heads/main) || main=""
 mkdir -p "$bin" "$outside" || prep_fail "cannot make $bin"
 for s in $scripts; do
   cp "$repo/scripts/$s.sh" "$bin/$s.sh" || prep_fail "cannot copy scripts/$s.sh"
 done
 
-# Put the clone back to HEAD with no untracked file.
+# Put the clone back to the branch, HEAD and main it was cloned at with no
+# untracked file.
 reset_clone() {
-  git -C "$clone" reset --quiet --hard HEAD && git -C "$clone" clean --quiet -fdx ||
+  git -C "$clone" checkout --quiet --force "${branch:-$head}" &&
+    git -C "$clone" reset --quiet --hard "$head" &&
+    { git -C "$clone" branch --quiet -D zz-scripts-root-commits >/dev/null 2>&1 || true; } &&
+    if [ -n "$main" ]; then git -C "$clone" update-ref refs/heads/main "$main"; else
+      git -C "$clone" update-ref -d refs/heads/main 2>/dev/null || true
+    fi && git -C "$clone" clean --quiet -fdx ||
     prep_fail "cannot reset the clone"
 }
 
@@ -247,7 +268,8 @@ while read -r s c; do
       ;;
   esac
   (cd "$clone" && "violate_$c") </dev/null || prep_fail "cannot put $c into the clone"
-  # Nothing is committed: the scripts read the working tree.
+  # Nothing is committed but by violate_commit_message_prefix: the other
+  # scripts read the working tree.
   expect 1 "$s with $c in the clone" "$clone" "$bin/$s.sh"
   expect 0 "$s in $repo while the clone has $c" "$repo" "$repo/scripts/$s.sh"
   reset_clone

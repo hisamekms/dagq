@@ -1,0 +1,14 @@
+# prek (pre-commit compatible) hooks of this repository. Nothing is fetched
+# from the network: each hook is local and runs a tool on PATH. The entry point
+# is .githooks/commit-msg (core.hooksPath=.githooks); `prek install` is not
+# used.
+repos:
+  - repo: local
+    hooks:
+      # The prefix of the commit message (.config/committed.toml). prek passes
+      # the message file as the last argument, after --commit-file.
+      - id: committed
+        name: committed
+        entry: committed --config .config/committed.toml --commit-file
+        language: system
+        stages: [commit-msg]

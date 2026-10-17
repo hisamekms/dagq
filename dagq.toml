@@ -359,6 +359,14 @@ paths = ["AGENTS.md"]
 script = "scripts/check-doc-frontmatter.sh"
 paths = ["docs/**"]
 
+# run branchのcommit（HEADとmainのmerge base..HEAD）の件名の接頭辞を、.config/committed.tomlのallowed_typesで見る。
+# commit-msgのhookを通らないcommit（--no-verify・hookの無いhostやclone）をLLMのreviewの前に返すための関門で、hostにcommittedが無くても流れる。
+# CIは流さない（mainのsquash commitはhookに掛からず、taskのtitleで揃える）。差分に依らず当たるようpathsは全て。
+# 秒は2026-10-17に他のrunと並んだhostで3回測った最大で約0.4秒。
+[review.programs.check-commit-messages]
+script = "scripts/check-commit-messages.sh"
+paths = ["**"]
+
 # docs/designの文書の差分が足した・変えた行の1文1行（docs/development/documents.mdのdesignの「形と予算」）。
 # LLMのreviewが見ていた1文1行の差し戻しをagentを起動する前に安く返し、直すcommitが新しい違反を足す連鎖を止めるため。
 # 既存の行は検査しないので既存の文書の違反では落ちない。基点は既定（HEADとmainのmerge base）。最大約0.4秒。

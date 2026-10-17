@@ -1,0 +1,33 @@
+# commit lint (committed, crate-ci/committed) of this repository: the commit-msg
+# hook runs it through prek (.pre-commit-config.yaml) or directly
+# (.githooks/commit-msg), and scripts/check-commit-messages.sh reads
+# allowed_types from here, so this file is the one place of the prefixes.
+#
+# Only the prefix is checked: a type of allowed_types, an optional (scope) and
+# !, then ": " and a subject that is not empty. The subject is Japanese and
+# long (the title of main's squash commit is the task's title), so the checks
+# outside the prefix are off.
+
+# committed compares the types without regard to case (Feat: passes), and so
+# does scripts/check-commit-messages.sh.
+style = "conventional"
+allowed_types = ["feat", "fix", "docs", "test", "refactor", "perf", "chore"]
+
+subject_length = 0
+line_length = 0
+hard_line_length = 0
+subject_capitalized = false
+subject_not_punctuated = false
+imperative_subject = false
+
+# fixup!, squash! and amend! are allowed: the run branch is squashed when it
+# lands, so they never reach main. committed strips them and checks the prefix
+# of what follows; scripts/check-commit-messages.sh does the same.
+no_fixup = false
+
+# Merge commits are allowed (committed's default). committed checks them only
+# for a range of commits, not for the --commit-file of the hook, where a merge's
+# "Merge ..." message would fail the conventional style: .githooks/commit-msg
+# lets a merge (MERGE_HEAD exists) through, and scripts/check-commit-messages.sh
+# skips merge commits.
+merge_commit = true

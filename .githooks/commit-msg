@@ -1,0 +1,33 @@
+#!/bin/sh
+# Check the prefix of the commit message ($1, the message file) with the commit
+# lint of .config/committed.toml. Enable once per clone with
+# `git config core.hooksPath .githooks`; the relative path resolves from the
+# top of each worktree, so every worktree runs its own checkout of this hook.
+#
+# - prek on PATH and .pre-commit-config.yaml at the root: run its commit-msg
+#   stage on the message file with `prek run --hook-stage commit-msg
+#   --commit-msg-filename FILE` (--hook-stage is the alias of --stage in
+#   https://prek.j178.dev/reference/cli/; --commit-msg-filename is the hidden
+#   option prek requires with the commit-msg stage, as pre-commit's does).
+# - otherwise committed on PATH: run it directly on the message file.
+# - neither: say so on one line of stderr and let the commit through; the gate
+#   is the program review scripts/check-commit-messages.sh.
+# The exit code of prek or committed is the hook's.
+#
+# A merge (MERGE_HEAD exists) is let through: its "Merge ..." message is git's.
+root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+msg=${1:?usage: .githooks/commit-msg MESSAGE_FILE}
+case $msg in
+  /*) ;;
+  *) msg=$(pwd)/$msg ;;
+esac
+git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1 && exit 0
+cd "$root" || exit 0
+if command -v prek >/dev/null 2>&1 && [ -f .pre-commit-config.yaml ]; then
+  exec prek run --hook-stage commit-msg --commit-msg-filename "$msg"
+fi
+if command -v committed >/dev/null 2>&1; then
+  exec committed --config .config/committed.toml --commit-file "$msg"
+fi
+echo "commit-msg: neither prek nor committed is on PATH; the prefix is not checked here (scripts/check-commit-messages.sh checks it in the review)" >&2
+exit 0

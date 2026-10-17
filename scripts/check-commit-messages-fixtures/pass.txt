@@ -1,0 +1,13 @@
+feat: 足す
+fix: 直す
+docs: 文書を直す
+test: testを足す
+refactor: 分ける
+perf: 速くする
+chore: 設定を足す
+Feat: committedと同じく型の大文字と小文字を区別しない
+feat(review): scopeのある件名
+fix!: 互換を壊す
+refactor(domain)!: scopeと!のある件名
+fixup! feat: fixupの後の接頭辞
+squash! fixup! docs: 重ねたfixup
