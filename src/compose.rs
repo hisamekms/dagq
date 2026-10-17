@@ -315,6 +315,16 @@ pub fn task_changes(queue: &SqliteQueue) -> Result<Option<crate::domain::ChangeS
     }
 }
 
+/// The `[tasks] title_prefixes` of the `dagq.toml` of the main checkout
+/// `queue` is bound to, which `submit` and `lint` hold the tasks' titles
+/// to; none for a queue bound to no checkout or without them.
+pub fn task_title_prefixes(queue: &SqliteQueue) -> Result<Option<crate::domain::TitlePrefixes>> {
+    match bound_checkout(queue)? {
+        Some(checkout) => crate::infrastructure::run_env::load_title_prefixes(&checkout),
+        None => Ok(None),
+    }
+}
+
 /// What the threshold of the aging `candidates` and `graph` show is
 /// chosen from ([`crate::application::claim_view::class_aging_secs`]):
 /// the read of `[supervisor]` of the `dagq.toml` of the main checkout

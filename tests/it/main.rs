@@ -40,6 +40,7 @@ mod cli_stats;
 mod cli_status_runs;
 mod cli_task_hold;
 mod cli_tasks;
+mod cli_title_prefixes;
 mod cli_version;
 mod container_image;
 mod draft_bundles;

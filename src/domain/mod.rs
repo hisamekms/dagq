@@ -1125,6 +1125,7 @@ pub mod task_hold;
 pub mod task_replan;
 pub mod throughput_review;
 pub mod timeline;
+pub mod title_prefix;
 pub mod tokens;
 pub mod toolchain;
 pub mod transcript;
@@ -1180,6 +1181,7 @@ pub use run::{
     run_attention_of,
 };
 pub use task::{Task, TaskAction};
+pub use title_prefix::TitlePrefixes;
 pub use views::{
     ClaimOutcome, DraftBundleMember, DraftBundleView, EventActor, EventFilter, FollowUpDraft,
     GoalDetail, GoalPredecessor, GoalSummary, GoalTask, IntegrationOutcome, Landing, Predecessor,

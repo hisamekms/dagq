@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Serialize;
 
 use super::{
-    ChangeSet, GoalId, GoalTag, GoalVerdict, TagSet, Task, TaskId, TaskStatus,
+    ChangeSet, GoalId, GoalTag, GoalVerdict, TagSet, Task, TaskId, TaskStatus, TitlePrefixes,
     follow_up::MembershipGap, scope::validate_path_globs,
 };
 
@@ -45,6 +45,9 @@ pub enum LintCode {
     /// The task's change is not one of the repository's set, which changed
     /// since it was declared.
     ChangeOutsideSet,
+    /// The repository names the prefixes of a task's title (`[tasks]
+    /// title_prefixes`) and the task's title starts with none of them.
+    TitlePrefixOutsideSet,
     /// The repository names a set of goal tags (`[goals] tags`, ADR-t1639-1
     /// decision 6) and the task's goal is a draft without a tag: submitting
     /// it for plan review is refused.
@@ -93,6 +96,8 @@ pub struct LintInput {
     pub goals: BTreeMap<GoalId, Option<GoalVerdict>>,
     /// The repository's set of changes (ADR-t980-1); none checks no change.
     pub changes: Option<ChangeSet>,
+    /// The repository's prefixes of a task's title; none checks no title.
+    pub title_prefixes: Option<TitlePrefixes>,
     /// The repository's set of goal tags (ADR-t1639-1 decision 6); none
     /// checks no goal's tags.
     pub goal_tags: Option<TagSet>,
@@ -140,6 +145,15 @@ pub fn lint(input: &LintInput) -> Vec<LintViolation> {
         content_rules(task, &mut found);
         if let Some(changes) = &input.changes {
             change_rule(task, changes, &mut found);
+        }
+        if let Some(prefixes) = &input.title_prefixes
+            && let Err(error) = prefixes.check(task.id(), task.title())
+        {
+            found.push(violation(
+                LintCode::TitlePrefixOutsideSet,
+                task,
+                error.to_string(),
+            ));
         }
         if let (Some(set), Some(goal_id)) = (&input.goal_tags, task.goal_id())
             && let Some(tags) = input.draft_goal_tags.get(&goal_id)
@@ -384,6 +398,7 @@ mod tests {
             nodes,
             goals: BTreeMap::new(),
             changes: None,
+            title_prefixes: None,
             goal_tags: None,
             draft_goal_tags: BTreeMap::new(),
             membership_gaps: BTreeMap::new(),
@@ -582,6 +597,41 @@ mod tests {
         );
         let found = lint(&input);
         assert!(found[1].reason.contains("declares no change"), "{found:?}");
+    }
+
+    /// With the repository's prefixes of a task's title, each target whose
+    /// title starts with none is reported, the prefixes named; without
+    /// them, no title is checked.
+    #[test]
+    fn title_prefixes_require_each_title_to_start_with_one() {
+        let titles = [
+            "feat: x",
+            "feat(cli): x",
+            "feat!: x",
+            "runtime: x",
+            "feat:x",
+            "feat: ",
+            "no prefix",
+        ];
+        let tasks = titles
+            .iter()
+            .zip(1..)
+            .map(|(title, id)| task(id, title))
+            .collect();
+        let mut input = input(tasks, vec![]);
+        assert_eq!(codes(&input), []);
+        input.title_prefixes = Some(TitlePrefixes::new(vec!["feat".into(), "fix".into()]).unwrap());
+        assert_eq!(
+            codes(&input),
+            [4, 5, 6, 7].map(|id| (id, LintCode::TitlePrefixOutsideSet))
+        );
+        let found = lint(&input);
+        assert!(found[0].reason.contains("feat, fix"), "{found:?}");
+        assert!(found[0].reason.contains("runtime: x"), "{found:?}");
+        assert_eq!(
+            serde_json::to_value(&found[0]).unwrap()["code"],
+            "title_prefix_outside_set"
+        );
     }
 
     /// With the repository's set of goal tags (ADR-t1639-1 decision 6), a

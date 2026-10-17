@@ -98,16 +98,16 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   `<name>`はkebab-caseで、表の重複・知らないkey（`command`も）・keyの欠けは行番号付きのエラーにする。
   `[review.programs."builtin:<名前>"]`はbuilt-inの`enabled`と`paths`（既定を置き換える）だけを持ち（`BuiltinProgramSetting`）、`script`・`args`・知らない名前・pjのprogramの`builtin:`の名前は誤り。
   読むのは作業ファイルでなく、reviewの試行ごとのlanding branchのcommitの`dagq.toml`と`script`（`Verifier::review_programs_in`）。
-- `[tasks]`は`changes`だけを持ち、taskが宣言する変更の種類（change）の値の集合を1行の配列で書く（[ADR-t980-1](../../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)。`domain::ChangeSet`）。
-  値は`TaskChange`の形（[domain-model](../domain-model.md)）で、空の配列・同じ値の重複・形の合わない値は誤り。
-  書いてあれば`add`と`edit`は集合の外の`--change`を拒み、`lint`はchangeの無いtaskと集合の外のchangeを指摘し、`submit`は動かすtaskのどれかがchangeを持たないか集合の外なら何も動かさずに拒む。
-  読むのはqueueが束縛されたmain checkoutの`dagq.toml`で、`add` / `edit` / `submit` / `lint`のたびに読み（`compose::task_changes`）、`dagq.toml`のどこかが解析できなければこの4つのコマンドもそのerrorで止まる。
-  書いてなければ形だけを検査し、changeは省略できる。
-  runtimeが自分で登録するdraft（follow_upなど）は検査しないので、planは`lint`と`submit`で揃える。
+- `[tasks]`は`changes`と`title_prefixes`を持つ（値と形は`domain::ChangeSet`・`domain::TitlePrefixes`）。
+  `changes`はtaskが宣言するchangeの値の集合で（[ADR-t980-1](../../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)）、書いてあれば`add`と`edit`は集合の外の`--change`を拒み、`lint`は指摘し`submit`はchangeの無いtaskと集合の外のchangeを拒む（`submit`は何も動かさない）。
+  `title_prefixes`はtitle（mainのsquash commitの件名）の接頭辞の一覧で、書いてあれば`lint`は指摘し`submit`はそれで始まらないtitleを拒むが、`add`と`edit`は拒まない。
+  読むのはqueueが束縛されたmain checkoutの`dagq.toml`で、上のコマンドのたびに読み、`dagq.toml`のどこかが解析できなければそれらもそのerrorで止まる。
+  書いてなければchangeは形だけを検査して省略でき、titleは見ない。
+  runtimeが自分で登録するdraft（follow_upなど）は検査しないので、planは`lint`と`submit`で揃える（titleは`edit`で直す）。
 - `[goals]`は`tags`と`max_spike_cycles`を持ち、goalのラベル（tag）の値の集合を1行の配列で書く（[ADR-t1639-1](../../adr/2026-10-04-t1639-1-goal-priority-is-the-source-tasks-inherit-and-goals-carry-tags.md)の決定6。`domain::TagSet`）。
   値は`GoalTag`の形（[domain-model](../domain-model.md)）で、形の合わない値と重複は誤り。
   書いてあれば`goal add`と`goal edit`は集合の外の`--tag`を拒み、`lint`は所属のgoalがラベルを持たないか集合の外のラベルを持つdraftのtaskを指摘し、`submit`は与えたgoalと動かすtaskの所属のgoalのうち閉じていないdraftのgoalがラベルを持たないか集合の外なら何も動かさずに拒む。
-  読み方は`[tasks] changes`と同じで、`goal add` / `goal edit` / `submit` / `lint`のたびに読む（`compose::goal_tags`）。
+  読み方は`[tasks] changes`と同じで、`goal add` / `goal edit` / `submit` / `lint`のたびに読む。
   書いてなければ形だけを検査し、goalはラベルを持たなくてよい。
   `max_spike_cycles`はgoalのSpikeの周期の上限で、`submit`だけが読む（`investigation::check_spike_cycles`）。
   値は`dagq.toml`、各ラベルの意味と付け方は[taskの登録](../../development/task-registration.md#goal-の優先度とラベル)が持つ。

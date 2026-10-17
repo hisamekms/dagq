@@ -22,7 +22,8 @@
 //! of a supervisor started without the flags (task 698, task 941,
 //! ADR-t1479-1). `[areas]` maps the
 //! areas `stats` and `kpi` split the landed runs by to globs (ADR-t980-1),
-//! and `[tasks] changes` names the set of changes a task declares one of.
+//! and `[tasks] changes` names the set of changes a task declares one of,
+//! `[tasks] title_prefixes` the prefixes a task's title starts with.
 //! `[goals] tags` names the set of tags a goal's tags are taken from
 //! (ADR-t1639-1 decision 6).
 //! `[e2e] paths` names, as globs, the paths whose change requires `e2e` of
@@ -68,7 +69,7 @@ use std::{
 use crate::{
     application::{Exit, Verifier},
     domain::{
-        ChangeSet, GoalTag, TagSet, TaskChange,
+        ChangeSet, GoalTag, TagSet, TaskChange, TitlePrefixes,
         actor_model::{ModelRole, RoleModel, RoleModels, check_effort},
         agent_eval::round::{EvalConfig, ProviderCost},
         areas::AreaMap,
@@ -140,10 +141,12 @@ const LANGUAGE_TABLE: &str = "language";
 const SUPERVISOR_TABLE: &str = "supervisor";
 /// `[areas]`: each area's name and its globs (ADR-t980-1).
 const AREAS_TABLE: &str = "areas";
-/// `[tasks]`: `changes`, the repository's set of changes (ADR-t980-1).
+/// `[tasks]`: `changes`, the repository's set of changes (ADR-t980-1),
+/// and `title_prefixes`, the prefixes a task's title starts with.
 const TASKS_TABLE: &str = "tasks";
-/// The one key of `[tasks]`.
+/// The keys of `[tasks]`.
 const TASKS_CHANGES: &str = "changes";
+const TASKS_TITLE_PREFIXES: &str = "title_prefixes";
 /// `[goals]`: `tags`, the repository's set of goal tags (ADR-t1639-1
 /// decision 6).
 const GOALS_TABLE: &str = "goals";
@@ -473,6 +476,10 @@ pub struct Config {
     pub areas: Option<AreaMap>,
     /// `[tasks] changes` (ADR-t980-1); `None` without it.
     pub changes: Option<ChangeSet>,
+    /// `[tasks] title_prefixes`, the prefixes a task's title starts with,
+    /// `<prefix>[(<scope>)][!]: <subject>`, which `lint` reports and
+    /// `submit` refuses a task's title outside of; `None` without it.
+    pub title_prefixes: Option<TitlePrefixes>,
     /// `[goals] tags` (ADR-t1639-1 decision 6); `None` without it.
     pub goal_tags: Option<TagSet>,
     /// `[goals] max_spike_cycles`, at least 1: the investigations a goal
@@ -1116,10 +1123,23 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {name}"))?;
                 areas.get_or_insert_with(Vec::new).push((name, globs));
             }
+            Some(TASKS_TABLE) if key == TASKS_TITLE_PREFIXES => {
+                ensure!(
+                    config.title_prefixes.is_none(),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let prefixes = parse_string_array(rest.trim()).with_context(with)?;
+                config.title_prefixes = Some(
+                    TitlePrefixes::new(prefixes)
+                        .map_err(anyhow::Error::msg)
+                        .with_context(with)?,
+                );
+            }
             Some(TASKS_TABLE) => {
                 ensure!(
                     key == TASKS_CHANGES,
-                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{TASKS_TABLE}]; the key is {TASKS_CHANGES}"
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{TASKS_TABLE}]; the keys are {TASKS_CHANGES} and {TASKS_TITLE_PREFIXES}"
                 );
                 ensure!(
                     config.changes.is_none(),
@@ -2486,6 +2506,20 @@ pub fn load_change_set(root: &Path) -> Result<Option<ChangeSet>> {
             parse_config(&text)
                 .with_context(|| format!("parse {}", path.display()))?
                 .changes
+        }
+        None => None,
+    })
+}
+
+/// `[tasks] title_prefixes` of the `dagq.toml` in `root`, `None` when
+/// there is no file or no such key.
+pub fn load_title_prefixes(root: &Path) -> Result<Option<TitlePrefixes>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    Ok(match read_config(&path)? {
+        Some(text) => {
+            parse_config(&text)
+                .with_context(|| format!("parse {}", path.display()))?
+                .title_prefixes
         }
         None => None,
     })
@@ -4062,6 +4096,53 @@ mod tests {
         );
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[tasks]\nchanges = 1\n").unwrap();
         assert!(load_change_set(dir.path()).is_err());
+    }
+
+    /// `[tasks] title_prefixes` names the prefixes of a task's title; an
+    /// empty list, an empty prefix or one with a ':' is refused.
+    #[test]
+    fn parses_the_title_prefixes_of_the_tasks_table() {
+        let config =
+            parse_config("[tasks]\nchanges = [\"fix\"]\ntitle_prefixes = [\"feat\", 'fix'] # c\n")
+                .unwrap();
+        assert_eq!(config.title_prefixes.unwrap().values(), ["feat", "fix"]);
+        assert_eq!(parse_config("[tasks]\n").unwrap().title_prefixes, None);
+        let error = |text: &str| format!("{:#}", parse_config(text).unwrap_err());
+        for (text, expected) in [
+            ("[tasks]\ntitle_prefixes = []\n", "names no prefix"),
+            (
+                "[tasks]\ntitle_prefixes = [\"feat\", \"\"]\n",
+                "names an empty prefix",
+            ),
+            ("[tasks]\ntitle_prefixes = [\"feat:\"]\n", "':'"),
+            ("[tasks]\ntitle_prefixes = \"feat\"\n", "expected an array"),
+            (
+                "[tasks]\ntitle_prefixes = [\"a\"]\ntitle_prefixes = [\"b\"]\n",
+                "defined twice",
+            ),
+            ("[tasks]\nprefixes = [\"a\"]\n", "unknown key prefixes"),
+        ] {
+            let got = error(text);
+            assert!(got.contains(expected), "{text}: {got}");
+            assert!(got.contains("dagq.toml:"), "{text}: {got}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(load_title_prefixes(dir.path()).unwrap(), None);
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[tasks]\ntitle_prefixes = [\"chore\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            load_title_prefixes(dir.path()).unwrap().unwrap().values(),
+            ["chore"]
+        );
+        fs::write(
+            dir.path().join(CONFIG_FILE_NAME),
+            "[tasks]\ntitle_prefixes = []\n",
+        )
+        .unwrap();
+        assert!(load_title_prefixes(dir.path()).is_err());
     }
 
     #[test]

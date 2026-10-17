@@ -8,7 +8,7 @@
 
 use super::{
     OneShot, bound_checkout, bound_main_checkout, goal_tags, open_queue_watch, provider_checks,
-    queue_service_view, task_changes, worker_adapters,
+    queue_service_view, task_changes, task_title_prefixes, worker_adapters,
 };
 use crate::domain::{EventFilter, EventId, EventKind};
 use anyhow::{Context, Result, ensure};
@@ -503,6 +503,9 @@ struct HostReads<'a> {
 impl crate::application::queue_reads::PlanningSources<SqliteQueue> for HostReads<'_> {
     fn changes(&self, queue: &SqliteQueue) -> Result<Option<crate::domain::ChangeSet>> {
         task_changes(queue)
+    }
+    fn title_prefixes(&self, queue: &SqliteQueue) -> Result<Option<crate::domain::TitlePrefixes>> {
+        task_title_prefixes(queue)
     }
     fn goal_tags(&self, queue: &SqliteQueue) -> Result<Option<crate::domain::TagSet>> {
         goal_tags(queue)

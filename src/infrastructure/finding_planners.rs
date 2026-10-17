@@ -66,6 +66,7 @@ impl SqliteQueue {
             &tx,
             submission,
             self.changes.as_ref(),
+            self.title_prefixes.as_ref(),
             self.goal_tags.as_ref(),
             self.max_spike_cycles,
             &self.generators.clock.timestamp(),

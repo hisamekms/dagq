@@ -24,7 +24,7 @@ use crate::application::{
 use crate::domain::claim_order;
 use crate::domain::search::{self, SearchQuery};
 use crate::domain::{
-    ChangeSet, GoalDetail, GoalId, Proposal, ProposalId, TagSet, TaskId, TaskStatus,
+    ChangeSet, GoalDetail, GoalId, Proposal, ProposalId, TagSet, TaskId, TaskStatus, TitlePrefixes,
 };
 
 /// What the planning reads take beyond the queue's records that the
@@ -35,6 +35,9 @@ pub trait PlanningSources<Q: ?Sized> {
     /// The repository's set of changes (ADR-t980-1), none without a
     /// checkout.
     fn changes(&self, queue: &Q) -> Result<Option<ChangeSet>>;
+    /// The repository's prefixes of a task's title, none without a
+    /// checkout.
+    fn title_prefixes(&self, queue: &Q) -> Result<Option<TitlePrefixes>>;
     /// The repository's set of goal tags (ADR-t1639-1 decision 6), none
     /// without a checkout.
     fn goal_tags(&self, queue: &Q) -> Result<Option<TagSet>>;
@@ -246,6 +249,7 @@ pub fn lint<Q: TaskStore + ?Sized>(
     // (ADR-t980-1).
     let mut input = queue.lint_input(&targets)?;
     input.changes = sources.changes(queue)?;
+    input.title_prefixes = sources.title_prefixes(queue)?;
     input.goal_tags = sources.goal_tags(queue)?;
     Ok(json!({"tasks": targets, "violations": crate::domain::lint::lint(&input)}))
 }

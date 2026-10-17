@@ -220,6 +220,13 @@ pub enum DomainError {
         task_id: TaskId,
         changes: Vec<String>,
     },
+    /// The repository names the prefixes of a task's title (`[tasks]
+    /// title_prefixes` of dagq.toml) and the task's title starts with none.
+    TitlePrefixOutsideSet {
+        task_id: TaskId,
+        title: String,
+        prefixes: Vec<String>,
+    },
     /// A goal's tag is not a lowercase slug (ADR-t1639-1 decision 6).
     InvalidGoalTag {
         tag: String,
@@ -732,6 +739,15 @@ impl fmt::Display for DomainError {
                 f,
                 "task {task_id} declares no change; [tasks] changes of dagq.toml requires one of {} (edit {task_id} --change CHANGE)",
                 changes.join(", ")
+            ),
+            Self::TitlePrefixOutsideSet {
+                task_id,
+                title,
+                prefixes,
+            } => write!(
+                f,
+                "task {task_id}'s title {title:?} does not start with one of [tasks] title_prefixes of dagq.toml: {}, then an optional (scope) and '!', ': ' and a subject (edit {task_id} --title TITLE)",
+                prefixes.join(", ")
             ),
             Self::InvalidGoalTag { tag } => write!(
                 f,

@@ -3810,10 +3810,15 @@ fn execute(cli: Cli) -> Result<Value> {
         queue = queue.with_goal_tags(tags);
     }
     // A goal's limit of Spike cycles holds a planner of the runtime's
-    // submit (ADR-t1487-1 decision 8).
+    // submit (ADR-t1487-1 decision 8), and the repository's prefixes of a
+    // task's title the tasks it submits (`add` and `edit` take any title,
+    // so the drafts the runtime makes keep theirs until a planner edits
+    // them).
     if matches!(cli.command, Command::Submit { .. }) {
         let max = dagq::compose::max_spike_cycles(&queue)?;
         queue = queue.with_max_spike_cycles(max);
+        let prefixes = dagq::compose::task_title_prefixes(&queue)?;
+        queue = queue.with_title_prefixes(prefixes);
     }
     // The planning commands run as the caller through the application,
     // which authorizes each before it changes the queue (task 732).

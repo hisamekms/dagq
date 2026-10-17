@@ -48,7 +48,7 @@ use crate::{
         LintNode, NewGoal, NewNote, NewTask, NotePage, NoteQuery, NoteTarget, OBSERVATION_KIND,
         PlannerOrigin, Predecessor, Priority, Proposal, ProposalId, RequestId, RunEvent, RunId,
         RunRecord, Submission, TagSet, Task, TaskAction, TaskChange, TaskDetail, TaskEdit, TaskId,
-        TaskRecord, TaskRun, TaskStatus, TaskStatusCounts,
+        TaskRecord, TaskRun, TaskStatus, TaskStatusCounts, TitlePrefixes,
         actor::{ActorContext, ActorRole},
         authorization::{PriorityHolder, check_priority_change},
         goal,
@@ -166,6 +166,10 @@ pub struct SqliteQueue {
     /// ADR-t980-1) that `add`, `edit`, `submit` and `lint` hold the tasks
     /// to; none accepts any change and a task without one.
     pub(super) changes: Option<ChangeSet>,
+    /// The repository's prefixes of a task's title (`[tasks]
+    /// title_prefixes` of dagq.toml) that `submit` and `lint` hold the
+    /// titles to; none checks no title.
+    pub(super) title_prefixes: Option<TitlePrefixes>,
     /// The repository's set of goal tags (`[goals] tags` of dagq.toml,
     /// ADR-t1639-1 decision 6) that `goal add`, `goal edit`, `submit` and
     /// `lint` hold the goals to; none accepts any tag and a goal without one.
@@ -288,6 +292,7 @@ impl SqliteQueue {
             generators: queue.generators.clone(),
             actors,
             changes: queue.changes.clone(),
+            title_prefixes: queue.title_prefixes.clone(),
             goal_tags: queue.goal_tags.clone(),
             max_spike_cycles: queue.max_spike_cycles,
         };
@@ -409,6 +414,13 @@ impl SqliteQueue {
         self
     }
 
+    /// The queue holding the tasks' titles to the repository's prefixes;
+    /// `None` holds them to none.
+    pub fn with_title_prefixes(mut self, prefixes: Option<TitlePrefixes>) -> Self {
+        self.title_prefixes = prefixes;
+        self
+    }
+
     /// The queue holding the goals to the repository's set of tags
     /// (ADR-t1639-1 decision 6); `None` holds them to none.
     /// With `[goals] max_spike_cycles` (ADR-t1487-1 decision 8).
@@ -476,6 +488,7 @@ impl SqliteQueue {
             generators: clock::system(),
             actors,
             changes: None,
+            title_prefixes: None,
             goal_tags: None,
             max_spike_cycles: None,
         })
@@ -1595,6 +1608,7 @@ impl TaskStore for SqliteQueue {
         let tx = self.conn.unchecked_transaction()?;
         let mut input = read_lint_input(&tx, tasks)?;
         input.changes = self.changes.clone();
+        input.title_prefixes = self.title_prefixes.clone();
         input.goal_tags = self.goal_tags.clone();
         Ok(input)
     }
@@ -2367,6 +2381,7 @@ fn read_lint_input(conn: &Connection, targets: &[TaskId]) -> Result<LintInput> {
         nodes,
         goals,
         changes: None,
+        title_prefixes: None,
         goal_tags: None,
         draft_goal_tags,
         membership_gaps,

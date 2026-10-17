@@ -14,7 +14,7 @@ use super::sqlite::{enum_col, event, goal_event, read_goal, transition_task};
 use crate::domain::{
     Ask, ChangeSet, DomainError, GoalStatus, PlannerOrigin, PlannerOwner, Proposal, ProposalId,
     ProposalRecord, ProposalStatus, Submission, TagSet, TaskAction, TaskId, TaskStatus,
-    follow_up::reopened_material, goal, investigation, proposal,
+    TitlePrefixes, follow_up::reopened_material, goal, investigation, proposal,
 };
 
 /// Submit `submission` inside the caller's write transaction: its tasks
@@ -23,6 +23,8 @@ use crate::domain::{
 /// the proposal, recording `task_status_changed` and `task_submitted`
 /// (`goal_submitted` for a goal). With the repository's set of changes,
 /// every task that moves must declare one of them (ADR-t980-1); with its
+/// prefixes of a task's title, every task that moves must have a title
+/// that starts with one of them; with its
 /// set of goal tags, every draft goal submitted, or of a task that moves,
 /// must have one and only tags of the set (ADR-t1639-1 decision 6). With
 /// `[goals] max_spike_cycles`, a planner of the runtime's submits no Spike
@@ -32,6 +34,7 @@ pub(super) fn submit(
     conn: &Connection,
     submission: Submission,
     changes: Option<&ChangeSet>,
+    title_prefixes: Option<&TitlePrefixes>,
     goal_tags: Option<&TagSet>,
     max_spike_cycles: Option<usize>,
     now: &str,
@@ -119,6 +122,12 @@ pub(super) fn submit(
         for &task_id in &tasks {
             let task = super::sqlite::read_task(conn, task_id)?;
             changes.check_declared(task_id, task.change())?;
+        }
+    }
+    if let Some(prefixes) = title_prefixes {
+        for &task_id in &tasks {
+            let task = super::sqlite::read_task(conn, task_id)?;
+            prefixes.check(task_id, task.title())?;
         }
     }
     if let Some(goal_tags) = goal_tags {
