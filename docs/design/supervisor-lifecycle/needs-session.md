@@ -68,11 +68,11 @@ killだけの試行はkillの後の`resume`の直後の1回だけで、そのres
 
 supervisorは`needs_session`のrunを自分でresumeする（ADR-0019の決定1。`resume_candidates`）。
 ループの各回で、adoptの後、`needs_session`のrunを古い順に見て再開の候補を集める。
-候補は復旧job・claimと1つの列で、taskの効く優先度の降順（同じ優先度では再開が先、再開の中は古い順）に空きslotを受ける（[supervise](supervise.md#supervise)の5の「slotを渡す順」、[ADR-t1850-1](../../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)）。
+候補は復旧job・claimと1つの列で、taskの効く優先度の降順（同じ優先度では再開が先、再開の中は古い順）に空きslotを受ける（[supervise](supervise.md#slotを渡す順とclaim)、[ADR-t1850-1](../../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)）。
 人とinboxは`set-priority`で再開待ちのtaskの優先度を変えて、次の再開の順を変えられる（走っている再開は止めない）。
 試行を使い切ったrun（上の「試行の数え方」）、staleでないleaseを持つrun、前のsessionのwrapperのプロセスがまだ生きている（未終了でPIDが生きている。heartbeatが止まっていても）runは飛ばす。
 このsupervisorが見ていないsessionと同じworktreeで2つ目のsessionを始めないため。
-このsupervisorがまだslotで進めているrun（leaseが他のtokenに移ってstaleになり、sessionが終わっていても）も飛ばす: そのslotは次のtickでleaseを失ったとして外れ（[supervise](supervise.md#supervise)の7）、その後のpassでだけ他のrunと同じく次の試行を始める（同じrunを2つのslotで進めない）。
+このsupervisorがまだslotで進めているrun（leaseが他のtokenに移ってstaleになり、sessionが終わっていても）も飛ばす: そのslotは次のtickでleaseを失ったとして外れ（[supervise](supervise.md#provisionと監視)）、その後のpassでだけ他のrunと同じく次の試行を始める（同じrunを2つのslotで進めない）。
 resumeの前に、このrunに記録されたresumeのsession（backgroundのwrapperのhandle）のうち止めた記録の無いもの（手放したsession、errorで残したもの）がまだ動いていれば止め、`workspace_closed`を記録する。
 動いているかはhandleのprocessで見て、cmuxには聞かない（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
 ADR-t1433-3より前にworkspaceで開いたresumeのsessionのIDは動いていないとみなし、閉じずに人に任せる（人が自分のterminalで閉じる）。

@@ -202,7 +202,7 @@ follow-upの所属の判断・訂正とdraft / readyの所属の変更は同じ`
 
 - `BEGIN IMMEDIATE`で状態の変更・依存グラフの検証・claimを直列化する。
   ロックの待ちは`QUEUE_BUSY_TIMEOUT`までで、超えればerrorを返す。
-  supervisorのheartbeatは`QueueBusy`を次の間隔で書き直す（[supervise](supervisor-lifecycle/supervise.md#supervise)）。
+  supervisorのheartbeatは`QueueBusy`を次の間隔で書き直す（[supervise](supervisor-lifecycle/supervise.md#起動とheartbeat)）。
 - claimは候補の選択・taskの更新・runの作成・event・lease行を1つのトランザクションにまとめ、同時のclaimは別々のtaskを取る。
   holdの行と`task_held` / `task_released`も1つのトランザクションで書き、claim・resume・復旧jobの開始と結果の適用はそれぞれのトランザクションでholdを読むので、先に確定した側だけが効く。
 - 外部キーと依存の複合主キーはDBに置き、自己依存はdomainが拒み、循環はトランザクションの中の再帰CTEで見つける。

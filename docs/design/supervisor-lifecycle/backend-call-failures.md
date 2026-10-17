@@ -48,6 +48,6 @@ related:
   runのwrapperの起動の失敗（provisioningの失敗で、以後のclaimも止める。resumeの起動の失敗は`resume_finished`のerrorの終わり）はrunをabandonするが、`backend_call_failed`はabandonの`runtime_error`より前に入る。
 
 supervisorの再起動ではrunごとのleaseとheartbeatを確認し、孤児プロセスを勝手に再実行しない。
-wrapperが生きている（heartbeatが`HEARTBEAT_TIMEOUT_SECS`以内か`exited_at`記録済み）`running` / `validating`のrunだけは、staleなleaseごと次のsupervisorが引き継いで同じrunを続ける（[ADR-0012](../../adr/0012-adopt-stale-lease-of-live-wrapper.md)、[`supervise`](supervise.md#supervise)の5）。
+wrapperが生きている（heartbeatが`HEARTBEAT_TIMEOUT_SECS`以内か`exited_at`記録済み）`running` / `validating`のrunだけは、staleなleaseごと次のsupervisorが引き継いで同じrunを続ける（[ADR-0012](../../adr/0012-adopt-stale-lease-of-live-wrapper.md)、[`supervise`](supervise.md#adopt)）。
 `awaiting_integration`のrunはwrapperを問わず引き継ぐ。
 それ以外（wrapperが死んだ・黙った、`claimed` / `starting`、`integrating`、leaseなし）は、processが止まっていてleaseが無いかleaseのpidが死んでいればsupervisorが自分で`recover`してtriageにかけ、そうでなければユーザーが`recover`で明示的に復旧する。

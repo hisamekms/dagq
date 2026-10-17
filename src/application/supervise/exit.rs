@@ -17,6 +17,10 @@ impl ExitWatch {
             then,
         }
     }
+    /// Whether the session ended. A wrapper that already recorded its exit
+    /// (it ended by itself, or before an adoption) or is dead is not asked
+    /// to exit; otherwise `exit_requested` is recorded before the request
+    /// is written, and both happen once.
     pub(super) fn poll(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<bool> {
         let Some(session) = &self.session else {
             return Ok(true);

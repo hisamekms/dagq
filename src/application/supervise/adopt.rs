@@ -208,6 +208,16 @@ impl Supervisor<'_> {
             heartbeat_age_secs: now - wrapper.heartbeat_at,
         })
     }
+    /// The slot of an adopted `running` or `validating` run, rebuilt from
+    /// the queue and the run files. A `validating` run is validated again
+    /// from the start. A `running` run's receipt counts as seen only when
+    /// both its file and `receipt_observed` are there, and an `/exit`
+    /// already requested is not written again. Its waits count from their
+    /// records, not from the adoption: the exit timeout from the last
+    /// `exit_requested` and the wait after the receipt from the last
+    /// `receipt_observed` ([`Self::instant_of`]). It waits for no wrapper
+    /// registration: the wrapper of a `running` run registered before the
+    /// adoption, since `claimed` and `starting` runs are never adopted.
     pub(super) fn resume(&self, run: &TaskRun) -> Result<Phase> {
         Ok(match run.status() {
             RunStatus::Validating => {

@@ -326,10 +326,13 @@ impl SqliteQueue {
     /// not released when a run comes to rest `awaiting_integration`: it is
     /// kept through the review and the landing (ADR-0054 decision 6), and a
     /// landed run loses it with `finish_integration`. The supervisor calls
-    /// this when a run ends short of the landing (`needs_session` or
-    /// `failed`), when a recovery round of a finished run ends, when it opens
+    /// this when a run ends short of the landing (`needs_session` once its
+    /// session's exit was asked and its wrapper stopped; `failed` after
+    /// its exit request, at once when its session exited non-zero), when a recovery round of a finished run ends, when it opens
     /// the run's `approve_landing` ask (a `concern` verdict or a failed
-    /// review) or leaves the run waiting for its answer or for a person, when a resumed run's landing cannot start, and when it
+    /// review) or leaves the run waiting for its answer or for a person (a
+    /// run that waits for its `approve_landing` answer and is validated
+    /// again gives it back too), when a resumed run's landing cannot start, and when it
     /// drains or hands off a run it cannot keep. The run's `supervisor_token`
     /// stays as a record.
     pub fn release_lease(&mut self, id: &RunId, token: &LeaseToken) -> Result<()> {

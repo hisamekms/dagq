@@ -34,7 +34,7 @@ worker は receipt を一時ファイルから rename して公開し、wrapper 
    run の画面は読み取らない。
 4. **idle より先に見た wrapper の終了**: turn が失敗して wrapper が終わったのを idle marker より先に見たときは、その時点で receipt の有無を読む。
    receipt があれば終了コードによらず validation に進み、receipt が無く非 0 なら `failed` にする。
-   1 と同じ結果になり、見た順で変わらない（[ADR-t1594-1](../../adr/2026-10-05-t1594-1-a-receipt-left-by-a-failed-headless-turn-goes-to-validation.md)、手順は [supervise](supervise.md) の手順 8）。
+   1 と同じ結果になり、見た順で変わらない（[ADR-t1594-1](../../adr/2026-10-05-t1594-1-a-receipt-left-by-a-failed-headless-turn-goes-to-validation.md)、判定は`domain::run::session_end_status`）。
 
 ### `/exit`の再試行<a id="exitの再試行"></a>
 

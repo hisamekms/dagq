@@ -17,7 +17,7 @@ related:
 sessionの終了はsupervisorが行う。
 runのsession wrapperはworkspaceなしのbackgroundのprocessだけで動き（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）、終わらせるのは終了の依頼と、残っていればhandleの`stop_background`でwrapperを止めること（[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)の決定3）だけで、runのためにcmuxを呼ばない。
 leaseはrun単位で（[ADR-0054](../../adr/0054-run-lease-ownership-parallel-supervisors-and-recover.md)の決定4）、1 runの復旧が他のrunに影響しない。
-receipt検証を通った`awaiting_integration`のrunは、reviewのverdict（pass・concern・reviewの失敗）の後にsessionの終了を待ってwrapperだけを止め（reviseの間は生きているsessionに差し戻すので止めない。[`supervise`](supervise.md#supervise)の10、ADR-0054の決定1）、worktreeとbranchは`integrate`が着地するまで残す（着地後に`integrate`が削除する）。
+receipt検証を通った`awaiting_integration`のrunは、reviewのverdict（pass・concern・reviewの失敗）の後にsessionの終了を待ってwrapperだけを止め（reviseの間は生きているsessionに差し戻すので止めない。[`supervise`](supervise.md#検証とreviewと着地)、ADR-0054の決定1）、worktreeとbranchは`integrate`が着地するまで残す（着地後に`integrate`が削除する）。
 止めたことは`workspace_closed`に、止められなかったことは`cleanup_failed`に記録する。
 どう終わったか（SIGTERM・SIGKILL・既に居なかった）と止めた経路は、止めるたびに`wrapper_stopped`に記録する（[非対話のworker](headless-worker.md)の「停止の記録」）。
 `failed`（非0終了、検証拒否）、provisioningや検証処理のエラー、wrapper heartbeat切れの場合はworktreeを調査のため残す（worktreeのビルド成果物だけは消す。[Run worktrees](run-worktrees.md#run-worktrees)）。

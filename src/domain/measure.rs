@@ -64,7 +64,8 @@ impl HostVersions {
 /// transition (`from`, `to`, the provider asked for and the one the run
 /// starts on, the worker mode and the task's execution class) and adds
 /// `provider_version`, the version among the host's of the provider the
-/// run starts on (ADR-t813-2 decision 7).
+/// run starts on (ADR-t813-2 decision 7). A claim made by hand, with no
+/// supervisor, records the transition alone on its `run_claimed`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ClaimAttributes {
     pub dagq_version: String,

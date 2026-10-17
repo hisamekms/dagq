@@ -894,6 +894,21 @@ pub struct RunError {
 /// has drained the active runs (an error). Every task unblocked by `integrate`
 /// is picked up on a later pass with the then-current `main` as its base.
 /// Accepted runs are reviewed headless by the reviewer (ADR-0027).
+///
+/// The start, in this order: an owner already gone starts nothing; the
+/// queue must be outside the worktree or under its Git common directory (a
+/// queue in the user's directory always is); every worker's agent is
+/// preflighted (Claude's not under `--no-claude`), and a live supervisor of
+/// the other `--no-claude` policy is refused; the queue is bound to the
+/// repository, and one bound to another is refused, though nothing else is
+/// exclusive: several supervisors may share a queue. Then the supervisor
+/// registers with a new token, the slot limits and their sources in the
+/// same write, and accepts handoffs; a process exec'd by a handoff takes
+/// its registration back under the same token and pid instead and writes
+/// the limits again. Only after the registration it records
+/// `stall_config_loaded` and then the mark `supervisor_started`, and starts
+/// the heartbeat. Its runs' worktrees are made from the checkout it was
+/// given, recorded as each run's `repo_path`.
 pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
     ensure!(
         settings.limits.parallel.value >= 1,
@@ -3190,7 +3205,10 @@ impl Supervisor<'_> {
     /// lease another token holds now, stale or not, is adopted, resumed or
     /// triaged by none of the claims of a pass: its slot is dropped on its
     /// next step ([`Self::disown`]), and only a later pass may take the run
-    /// like any other, never into a second slot (task 1361).
+    /// like any other, never into a second slot (task 1361). A pass adopts
+    /// before it steps the slots, so a lease that moved after the last
+    /// step of the pass before would otherwise be adopted back while its
+    /// slot still drives the run.
     fn in_slot(&self, id: &RunId) -> bool {
         self.claim.slots.holds(id)
     }

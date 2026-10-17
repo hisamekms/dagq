@@ -24,9 +24,9 @@ related:
    alertは、最後の`triage_started` / `resume_started`より後に記録された`recovery_requested`があればその`alert`（resumeを使い切ったrunの`resume_exhausted`。[`needs_session`](needs-session.md#needs_session)の6）、無ければrunのstatusで`failed` / `interrupted`。
    resumeの後にもう一度`failed`になったrunはもう一度ラウンドを持つ。
    新鮮なleaseのあるrun（verdictの後の終了を待っているsessionなど）は待つ。
-   このsupervisorがまだslotで進めているrun（ラウンドの途中でleaseが他のtokenに移ってstaleになったものも）も取らない: そのslotは次のtickでleaseを失ったとして外れてjobを止め（[supervise](supervise.md#supervise)の7）、その後のpassでだけ他のrunと同じく次のラウンドを始める（同じrunを2つのslotで進めない）。
+   このsupervisorがまだslotで進めているrun（ラウンドの途中でleaseが他のtokenに移ってstaleになったものも）も取らない: そのslotは次のtickでleaseを失ったとして外れてjobを止め（[supervise](supervise.md#provisionと監視)）、その後のpassでだけ他のrunと同じく次のラウンドを始める（同じrunを2つのslotで進めない）。
    active runが上限未満のときだけ始め、jobの間はrun slotを1つ使う。
-3. **開始**: 2の候補は、`needs_session`の再開・readyのclaimと1つの列で、taskの効く優先度の降順（同じ優先度では再開 → 復旧job → claim）に空きslotを受け、順が来たものから始める（[supervise](supervise.md#supervise)の5の「slotを渡す順」、[ADR-t1850-1](../../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)）。
+3. **開始**: 2の候補は、`needs_session`の再開・readyのclaimと1つの列で、taskの効く優先度の降順（同じ優先度では再開 → 復旧job → claim）に空きslotを受け、順が来たものから始める（[supervise](supervise.md#slotを渡す順とclaim)、[ADR-t1850-1](../../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)）。
    同じrunでそのalertの`recovery_requested`が上限に達していなければ、`begin_triage`が`BEGIN IMMEDIATE`の中で上の条件（runがtaskの最新runであることを含む）を再検査し（staleなleaseは置き換える。slotにあるrunは2で飛ばしてあるので、置き換えるのはslotの外のrunのleaseだけ）、runにleaseを取って`lease_acquired`、`recovery_requested`と`triage_started`を記録する。
    同じrunを2つのsupervisorが取ろうとしても1つしか通らない。
    runのdirectory（無ければ`runs/<run-id>/`）に`recovery-<alert>-<attempt>.prompt.txt`を書いて、run eventの`recovery_prompt_written`を記録する。

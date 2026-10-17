@@ -372,7 +372,10 @@ pub(super) struct ClaimState {
     /// does not burn through every candidate.
     pub(super) claiming: bool,
     pub(super) provisioning_error: Option<String>,
-    /// The load samples of each held run's current interval.
+    /// The load samples of each held run's current interval. An adopted
+    /// or handed-over run's window starts empty at its adoption: the
+    /// samples its previous supervisor took are not restored, so its
+    /// interval's load covers only the time since.
     pub(super) loads: HashMap<RunId, LoadWindow>,
     /// The claims deferred on conflict hotspots (ADR-0069).
     pub(super) defer: claim_defer::DeferWatch,

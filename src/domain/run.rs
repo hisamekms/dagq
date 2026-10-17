@@ -405,7 +405,8 @@ pub const fn session_end_status(exit_code: Option<i32>, receipt: bool) -> RunSta
 /// The session ended (`exit_code`) or went idle after its receipt with the
 /// session still open (`None`, ADR-0027), `receipt` telling whether the
 /// run's receipt was written: the status of [`session_end_status`], and a
-/// failed run gets the code as `last_error`.
+/// failed run gets the code as `last_error`, in the same write, so `show`
+/// alone tells why. The task stays `in_progress` either way.
 pub fn finish_session(
     mut run: TaskRun,
     exit_code: Option<i32>,

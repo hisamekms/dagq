@@ -43,7 +43,3 @@ size = 46299
 path = "docs/design/supervisor-lifecycle/run-environment.md"
 size = 36394
 
-[[doc]]
-path = "docs/design/supervisor-lifecycle/supervise.md"
-size = 32835
-line = 1261
