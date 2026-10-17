@@ -2,7 +2,9 @@
 //! decisions 2 to 5). Each turn of a headless worker is told the records'
 //! directory under its run directory, the verification `integrate` runs is
 //! not, and the review's material lists the records whose tree is the
-//! receipt's commit's with how many were left out, never a log's text.
+//! receipt's commit's with how many were left out, never a log's text,
+//! and which of the local gates the landing branch declares the diff
+//! requires (decision 6).
 use crate::runtime_support;
 
 use runtime_support::headless::*;
@@ -181,5 +183,108 @@ fn the_records_are_read_without_links_and_within_their_limits() {
     assert_eq!(
         (read.matched.len(), read.other_tree, read.broken),
         (0, 0, 1)
+    );
+}
+
+/// The local gates the landing branch's `dagq.toml` declares (decision 6):
+/// the review's section says which the diff from the merge base with the
+/// landing branch to the receipt's commit requires, by the changed lines
+/// that are in a test as the declared Rust profile tells them apart, and
+/// by any change of a test's path while no profile is declared. The
+/// section joins the records' in the material before its commits, as the
+/// first test shows of the records.
+#[test]
+fn the_review_says_which_declared_gates_the_diff_requires() {
+    use dagq::application::review::local_gates_section;
+    use dagq::infrastructure::{adapters::GitRepository, run_env::gate_config};
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    crate::common::template::repository(&repo, "fixture\n");
+    fs::create_dir(repo.join("src")).unwrap();
+    let write = |path: &str, text: &str| fs::write(repo.join(path), text).unwrap();
+    write(
+        "src/a.rs",
+        "fn a() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {}\n}\n",
+    );
+    write("src/b.rs", "fn b() {}\n\n#[test]\nfn t() {}\n");
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "base"]);
+    let base = git_out(&repo, &["rev-parse", "HEAD"]);
+    // The run: a line of `src/a.rs`'s test module and only the production
+    // code of `src/b.rs`; no file under `tests/`.
+    git(&repo, &["checkout", "-q", "-b", "run"]);
+    write(
+        "src/a.rs",
+        "fn a() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() { assert!(true); }\n}\n",
+    );
+    write("src/b.rs", "fn b() { let _ = 2; }\n\n#[test]\nfn t() {}\n");
+    git(&repo, &["commit", "-q", "-am", "work"]);
+    let head = git_out(&repo, &["rev-parse", "HEAD"]);
+    // The landing branch declares the gates after the run began.
+    git(&repo, &["checkout", "-q", "main"]);
+    const GATES: &str = "[local_checks]\ntests = [\"src/**\", \"tests/**\"]\n\n\
+         [local_checks.gates.stress]\npaths = [\"src/**\", \"tests/**\"]\nkind = \"stress\"\n\n\
+         [local_checks.gates.slow]\npaths = [\"tests/**\"]\nkind = \"time-gate\"\n";
+    write(
+        "dagq.toml",
+        &format!("[toolchains.rust]\nprofile = \"rust\"\n\n{GATES}"),
+    );
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "declare the gates"]);
+    let repository = GitRepository::inspect(&repo).unwrap();
+
+    let section = local_gates_section(&repository, &gate_config, &base, &head)
+        .unwrap_or_else(|| panic!("no section"));
+    assert!(
+        section.starts_with("\n## Local gates\n\nWhether the diff "),
+        "{section}"
+    );
+    // Its prose is one paragraph, not a block indented as code.
+    let prose = section.split("```").next().unwrap();
+    assert!(!prose.contains("  "), "{section}");
+    // The diff starts at the merge base with the landing branch.
+    assert!(
+        section.contains(&format!("the diff {base}..{head}")),
+        "{section}"
+    );
+    let gates: Value = serde_json::from_str(
+        section
+            .split("```json\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\n```").next())
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        gates,
+        json!([
+            {
+                "gate": "stress", "kind": "stress", "required": true,
+                "reason": "a test in its paths changed", "changed_tests": ["src/a.rs"],
+            },
+            {
+                "gate": "slow", "kind": "time-gate", "required": false,
+                "reason": "no test in its paths changed", "changed_tests": [],
+            },
+        ])
+    );
+
+    // Without a declared profile, no line is told apart: the change of
+    // `src/b.rs`'s production code counts as a test's too.
+    write("dagq.toml", GATES);
+    git(&repo, &["commit", "-q", "-am", "no profile"]);
+    let section = local_gates_section(&repository, &gate_config, &base, &head).unwrap();
+    assert!(
+        section.contains("\"changed_tests\": [\n      \"src/a.rs\",\n      \"src/b.rs\"\n    ]"),
+        "{section}"
+    );
+
+    // A landing branch that declares the tests and no gate judges none.
+    write("dagq.toml", "[local_checks]\ntests = [\"**\"]\n");
+    git(&repo, &["commit", "-q", "-am", "no gate"]);
+    assert_eq!(
+        local_gates_section(&repository, &gate_config, &base, &head),
+        None
     );
 }

@@ -34,7 +34,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 
 - 書式はTOMLの部分集合で、表は`run_env::parse_config`が受け付けるものだけを持ち、`[run.env]`の各行は`KEY = 'literal'`か`KEY = "basic"`（escapeと拒むkeyは`run_env::parse_config`のdoc comment）。
   `#`以降はcomment。
-  ほかの表（外したresource brokerの`[broker]`と`[broker.package]`は中を問わず読み飛ばし、残したrepositoryを止めない。[ADR-t2125-1](../../adr/2026-10-08-t2125-1-e2e-gate-checks-only-cmux-after-the-broker-removal.md)）、重複したkey、`DAGQ_`で始まるkey（runtimeが`DAGQ_ROLE` / `DAGQ_QUEUE`に使う）はエラーにする。
+  ほかの表（外したresource brokerの`[broker]`と`[broker.package]`は中を問わず読み飛ばし、残したrepositoryを止めない。ADR-t2125-1）、重複したkey、`DAGQ_`で始まるkey（runtimeが`DAGQ_ROLE` / `DAGQ_QUEUE`に使う）はエラーにする。
   下の各表でも（中を読まない`[language]`を除く）、知らないkey・keyの重複・型や範囲の合わない値は行番号付きのエラーにする。
   旧バイナリは知らない表とkeyを含む`dagq.toml`全体を読めなくなり本番のqueueのrunがすべて止まるので、下の表とkeyは固定バイナリが読めるようになってから足す。
 - 読むのはrepositoryのmain checkout（下の「main checkoutの決め方」）の作業ファイルで、run worktreeのものではない。
@@ -111,10 +111,11 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   書いてなければ形だけを検査し、goalはラベルを持たなくてよい。
   `max_spike_cycles`はgoalのSpikeの周期の上限で、`submit`だけが読む（`investigation::check_spike_cycles`）。
   値は`dagq.toml`、各ラベルの意味と付け方は[taskの登録](../../development/task-registration.md#goal-の優先度とラベル)が持つ。
-- `[e2e]`は`paths`だけを持ち、変えるとrunに`e2e`のevidenceを求めるpathをglobの1行の配列で書く（[ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)の決定2。`Verifier::e2e_paths`）。
+- `[e2e]`は`paths`だけを持ち、変えるとrunに`e2e`のevidenceを求めるpathをglobの1行の配列で書く（ADR-t963-1決定2。`Verifier::e2e_paths`）。
   配列でない値と`--paths`の受け付けないglob（空、`/`始まり、`.`や`..`の段、空の段）は行番号付きのエラーにする。
   読むのはsupervisorがvalidatingとworkerのpromptを作るたびのmain checkoutの作業ファイルで、読めなければ警告を出して空として扱う（本番を守るのは[Auto-update](auto-update.md)の入れ替え前のe2eの関門）。
   使い方と無いときの扱い、この repositoryの範囲は[Validation](validation.md)の8と「この repository で置く範囲」。
+- `[local_checks]`と`[local_checks.gates.<name>]`は手元の関門の宣言で、reviewがmainのcommitから読む（ADR-t2589-1決定6、`run_env::LOCAL_GATES_PREFIX`）。
 - `[areas]`は`stats`と`kpi`がrunを分けるareaの名前→globの1行の配列（[ADR-t980-1](../../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)。`domain::areas::AreaMap`）。
   名前の形、空の配列、`--paths`の受け付けないglob、重複は行番号付きのエラーにする。
   書式は上の型、求め方は`application::areas::AreaReader`のdoc commentが持つ。

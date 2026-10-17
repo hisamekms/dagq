@@ -12,7 +12,8 @@
 //! processes of its tools the host's load is split by
 //! ([`ToolchainProfile::process_kind`]); and where its tools put what they
 //! build ([`BuildOutput`]) when the runtime runs a command in a directory
-//! of its own. The runtime's own marks (a full disk, a signal, the
+//! of its own; and which lines of a file of its language are in a test
+//! ([`ToolchainProfile::test_lines`]). The runtime's own marks (a full disk, a signal, the
 //! conventional exit of a timeout, the limit of the whole command) and the
 //! order the marks are tried in are [`crate::domain::verify_failure`]'s,
 //! and work whatever is declared; so are the kinds of process of no
@@ -171,7 +172,18 @@ pub trait ToolchainProfile: Sync {
     /// setup-review` show ([`recommend`]), never values the runtime uses
     /// unless `dagq.toml` has them.
     fn recommendation(&self) -> Recommendation;
+
+    /// The lines of `text`, the file at `path` (from the repository's
+    /// root), that are in a test (ADR-t2589-1 decision 6): ranges of line
+    /// numbers from 1, ends included, which may overlap. `None` when the
+    /// profile does not tell the lines of the file apart (not its
+    /// language's, or one whose every line its tools build as a test): a
+    /// changed line there counts as a test's.
+    fn test_lines(&self, path: &str, text: &str) -> Option<Vec<TestLines>>;
 }
+
+/// Lines of a file in a test ([`ToolchainProfile::test_lines`]).
+pub type TestLines = std::ops::RangeInclusive<usize>;
 
 /// A profile's build output in a directory of the runtime's: the
 /// directory `dir` names under it, and the variable `env` set to it on the
@@ -472,6 +484,22 @@ impl Toolchains {
     pub fn records_rust_toolchain(&self) -> bool {
         self.profiles()
             .any(|profile| profile.name() == rust::RUST.name())
+    }
+
+    /// The lines of `text`, the file at `path`, that are in a test, as
+    /// the first profile whose declaration's paths match `path` (one
+    /// without paths always does) and tells them
+    /// apart says ([`ToolchainProfile::test_lines`], ADR-t2589-1 decision
+    /// 6); `None` when none does, and a changed line there counts as a
+    /// test's.
+    pub fn test_lines(&self, path: &str, text: &str) -> Option<Vec<TestLines>> {
+        self.declared
+            .iter()
+            .filter(|declared| {
+                declared.paths.is_empty()
+                    || declared.paths.iter().any(|glob| glob_matches(glob, path))
+            })
+            .find_map(|declared| declared.profile.test_lines(path, text))
     }
 
     /// The runs of a command the runtime runs over a tree of the

@@ -11,6 +11,7 @@ use super::{
     Repository, RunFiles, TaskStore, fenced, integrate::integrate_logs, or_none, path_text,
 };
 use crate::domain::local_checks::{self, LocalChecks, Reading};
+use crate::domain::local_gates::{Change, GateConfig};
 use crate::domain::review_builtins::{self, BuiltinAgent, EffectiveBuiltin};
 use crate::domain::review_subagents::{self, AgentRole, AgentTools, ReviewAgents};
 use crate::domain::setup_review::SETUP_COMMAND;
@@ -25,6 +26,9 @@ pub struct Review<'a> {
     pub open_repository: &'a dyn Fn(&Path) -> Result<Box<dyn Repository>>,
     /// Names the temporary files, so two reviews of one run do not collide.
     pub pid: u32,
+    /// Reads the local gates and the toolchain profiles of a `dagq.toml`'s
+    /// text ([`local_gates_section`]).
+    pub gate_config: &'a dyn Fn(&str) -> Result<GateConfig>,
 }
 
 /// Write the review material of the task's run that awaits integration or a
@@ -48,6 +52,7 @@ pub fn review(ports: Review<'_>, task_id: TaskId, range: Option<&ReviewRange>) -
         files,
         open_repository,
         pid,
+        gate_config,
     } = ports;
     let detail = queue.show(task_id)?;
     let run = detail
@@ -98,7 +103,10 @@ pub fn review(ports: Review<'_>, task_id: TaskId, range: Option<&ReviewRange>) -
     let log = repository.log_oneline(&base, &head)?;
     let stat = repository.diff_stat(&base, &head)?;
     let numbers = repository.diff_numbers(&base, &head)?;
-    let checks = local_checks_section(files, &*repository, run_dir, &head);
+    let mut checks = local_checks_section(files, &*repository, run_dir, &head);
+    if let Some(gates) = local_gates_section(&*repository, gate_config, &base, &head) {
+        checks.get_or_insert_with(String::new).push_str(&gates);
+    }
     let text = review_markdown(
         files,
         &task,
@@ -640,6 +648,73 @@ fn local_checks_section(
         other = checks.other_tree,
         broken = checks.broken,
         body = fenced("json", &matched),
+    ))
+}
+
+/// The section of review.md on the local gates the landing branch's
+/// `dagq.toml` declares (ADR-t2589-1 decision 6): whether the diff from
+/// the merge base of `base` and `head` to `head` (`head` the receipt's
+/// commit, `base` where the run's own commits start: the declared paths'
+/// range) requires each, and the changed tests that do; a gate not
+/// required is left out because no test in its paths changed. `None`
+/// when the landing branch declares no gate, and, with a warning, when
+/// its `dagq.toml` or the diff cannot be read: the gates never fail the
+/// review, and without the section the review goes by the worker's
+/// evidence as before.
+pub fn local_gates_section(
+    repository: &dyn Repository,
+    gate_config: &dyn Fn(&str) -> Result<GateConfig>,
+    base: &str,
+    head: &str,
+) -> Option<String> {
+    let judged = (|| -> Result<Option<Value>> {
+        let main = repository.main_head()?;
+        let Some(text) = repository.file_in(main.as_str(), CONFIG_FILE)? else {
+            return Ok(None);
+        };
+        let GateConfig { gates, toolchains } = gate_config(&text).with_context(|| {
+            format!("parse {CONFIG_FILE} in the landing branch's commit {main}")
+        })?;
+        let Some(gates) = gates else {
+            return Ok(None);
+        };
+        let from = repository
+            .merge_base(base, head)?
+            .map_or_else(|| base.to_owned(), CommitSha::into_string);
+        let changed = repository.changed_paths(&from, head)?;
+        let needs = gates.judge(&toolchains, &changed, |path| {
+            let text = match repository.file_in(head, path) {
+                Ok(Some(text)) => text,
+                Ok(None) => return Change::Removed,
+                Err(_) => return Change::Unknown,
+            };
+            match repository.changed_hunks(&from, head, path) {
+                Ok(hunks) => Change::Lines { text, hunks },
+                Err(_) => Change::Unknown,
+            }
+        });
+        Ok(Some(json!({
+            "from": from,
+            "gates": needs.iter().map(|need| need.value()).collect::<Vec<_>>(),
+        })))
+    })();
+    let judged = match judged {
+        Ok(judged) => judged?,
+        Err(error) => {
+            tracing::warn!(error = %format_args!("{error:#}"), "the local gates of {head} could not be judged: {error:#}");
+            return None;
+        }
+    };
+    let gates = serde_json::to_string_pretty(&judged["gates"]).unwrap_or_default();
+    Some(format!(
+        "\n## Local gates\n\n\
+         Whether the diff {from}..{head} (from the merge base with the landing branch to the receipt's commit) requires each local gate the landing branch's {CONFIG_FILE} declares, judged by the runtime: \
+         a gate is required when a changed test is in its paths, a changed test being a path of the declared tests whose changed lines are in a test as the toolchain profile tells, \
+         or any change of such a path where no profile tells its lines apart. \
+         A gate not required is left out because no test in its paths changed, and the worker's evidence need not say so; \
+         `kind` is the kind the project's scripts give the local check records of a run of the gate.\n\n{body}",
+        from = judged["from"].as_str().unwrap_or(base),
+        body = fenced("json", &gates),
     ))
 }
 

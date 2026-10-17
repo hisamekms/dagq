@@ -70,7 +70,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
   review中のrun（supervisorのleaseがある）を人の`integrate`は拒む。
 - 資料`review.md`は[`review`](commands.md)が、promptの組み立てと上限は[Prompt](prompt.md#headlessのjobのprompt)が持つ。
   既に落ちているtestは全体のreviewだけが材料に持つ（[CI watch](ci-watch.md)）。
-  資料はreceiptのcommitのtreeと一致した手元の検証の記録と件数を持ち、logの本文は持たない（`read_local_checks`、ADR-t2589-1決定5）。
+  資料はreceiptのcommitのtreeと一致した手元の検証の記録と件数と、宣言した関門の要否を持ち、logの本文は持たない（ADR-t2589-1決定5・6）。
 - providerの一般の規則は[Agent provider lifecycle](../provider-lifecycle.md)と[Actor model](actor-model.md)が持つ。
 
 ### 不変条件

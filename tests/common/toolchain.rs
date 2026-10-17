@@ -3,18 +3,18 @@
 //! runtime, which the runtime tests and the CLI tests declare in
 //! `[toolchains.<name>]` with `profile = "made-up"`.
 use dagq::domain::toolchain::{
-    BuildOutput, JunitTestName, ProfileRegistry, Recommendation, RecommendedProgram, ToolCodeClass,
-    ToolHostClass, ToolProcess, ToolchainProfile, rust,
+    BuildOutput, JunitTestName, ProfileRegistry, Recommendation, RecommendedProgram, TestLines,
+    ToolCodeClass, ToolHostClass, ToolProcess, ToolchainProfile, rust,
 };
 
 /// A made-up tool: `BROKEN <test>` failed, `WOBBLY <test>` passed on its
 /// retry, `HUNG <test>` ran out of time; its retry runs with
 /// `MADE_FLAKY=accept`; its JUnit names a test `<classname>#<name>`, its
-/// build tool is `madebuild`, and it keeps no build output in a directory
-/// of the runtime's. It recommends itself where a `made.build` is,
-/// `madebuild check` as the verification, and the review programs
-/// `made-lint` under `.dagq/review/programs/` and `made-outside` in
-/// `scripts/`, outside what `setup-review` may write.
+/// build tool is `madebuild`, it keeps no build output in a directory
+/// of the runtime's, and it tells no test's lines apart. It recommends
+/// itself where a `made.build` is, `madebuild check` as the verification,
+/// and the review programs `made-lint` under `.dagq/review/programs/` and
+/// `made-outside` in `scripts/`, outside what `setup-review` may write.
 pub struct Made;
 
 pub static MADE: Made = Made;
@@ -92,5 +92,9 @@ impl ToolchainProfile for Made {
                 },
             ],
         }
+    }
+
+    fn test_lines(&self, _: &str, _: &str) -> Option<Vec<TestLines>> {
+        None
     }
 }

@@ -2267,6 +2267,35 @@ impl GitRepository {
             .collect())
     }
 
+    /// The hunks of the diff of `path` from `from` to `to` (`git diff
+    /// -U0 --no-renames`, the path a name and not a pattern).
+    pub fn changed_hunks(
+        &self,
+        from: &str,
+        to: &str,
+        path: &str,
+    ) -> Result<Vec<crate::domain::local_gates::Hunk>> {
+        let diff = review_output(
+            self.command()
+                .arg("-C")
+                .arg(&self.root)
+                .arg("--literal-pathspecs")
+                .args([
+                    "diff",
+                    "-U0",
+                    "--no-color",
+                    "--no-renames",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    from,
+                    to,
+                    "--",
+                    path,
+                ]),
+        )?;
+        Ok(crate::domain::local_gates::hunks_of(&diff))
+    }
+
     /// The paths `to` adds over `from` (`git diff --diff-filter=A
     /// --no-renames`), never quoted.
     pub fn added_paths(&self, from: &str, to: &str) -> Result<Vec<String>> {
@@ -2873,6 +2902,14 @@ impl Repository for GitRepository {
     }
     fn file_in(&self, commit: &str, path: &str) -> Result<Option<String>> {
         GitRepository::file_in(self, commit, path)
+    }
+    fn changed_hunks(
+        &self,
+        from: &str,
+        to: &str,
+        path: &str,
+    ) -> Result<Vec<crate::domain::local_gates::Hunk>> {
+        GitRepository::changed_hunks(self, from, to, path)
     }
     fn blobs_in(&self, commit: &str, paths: &[&str]) -> Result<Vec<(String, String)>> {
         GitRepository::blobs_in(self, commit, paths)

@@ -1808,6 +1808,18 @@ pub trait Repository {
     fn changed_paths(&self, from: &str, to: &str) -> Result<Vec<String>>;
     /// Paths `to` adds over `from`.
     fn added_paths(&self, from: &str, to: &str) -> Result<Vec<String>>;
+    /// The hunks of the diff of the file `path` between two commits, on
+    /// `to`'s side, with no context and no rename (a local gate's
+    /// changed lines, ADR-t2589-1 decision 6); none for a change of its
+    /// mode alone or of a binary file.
+    fn changed_hunks(
+        &self,
+        _from: &str,
+        _to: &str,
+        _path: &str,
+    ) -> Result<Vec<crate::domain::local_gates::Hunk>> {
+        anyhow::bail!("this repository cannot read a diff's lines")
+    }
     /// Paths of the files directly in `directory` of `commit`'s tree; none
     /// when it has no such directory.
     fn paths_in(&self, commit: &str, directory: &str) -> Result<Vec<String>>;

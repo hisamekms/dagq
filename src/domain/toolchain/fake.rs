@@ -4,15 +4,17 @@
 //! build that failed, and whose retry runs with `FAKE_FLAKY=accept`; whose
 //! JUnit names a test `<classname>/<name>`; whose processes are the
 //! build tool `fakebuild` and the compiler `fakec`; and which builds into
-//! the directory `FAKE_OUT` names, `fake-out`; which recommends itself
-//! where a `fake.build` is, `fakebuild check` as the verification, and two
-//! review programs, `fake-lint` under `.dagq/review/programs/` and
+//! the directory `FAKE_OUT` names, `fake-out`; whose files are `*.fake`,
+//! a line of which that starts with `TEST ` is a test's; which recommends
+//! itself where a `fake.build` is, `fakebuild check` as the verification,
+//! and two review programs, `fake-lint` under `.dagq/review/programs/` and
 //! `fake-outside` outside it, which `setup-review` may not write. It
 //! is registered beside the built-in ones in [`REGISTRY`], and nothing
 //! else of the runtime knows it (ADR-t2268-1 decision 8).
 use super::{
-    BuildOutput, JunitTestName, ProfileRegistry, Recommendation, RecommendedProgram, ToolCodeClass,
-    ToolHostClass, ToolProcess, ToolchainDeclaration, ToolchainProfile, Toolchains, rust,
+    BuildOutput, JunitTestName, ProfileRegistry, Recommendation, RecommendedProgram, TestLines,
+    ToolCodeClass, ToolHostClass, ToolProcess, ToolchainDeclaration, ToolchainProfile, Toolchains,
+    rust,
 };
 
 pub static FAKE: Fake = Fake;
@@ -114,6 +116,16 @@ impl ToolchainProfile for Fake {
                 },
             ],
         }
+    }
+
+    fn test_lines(&self, path: &str, text: &str) -> Option<Vec<TestLines>> {
+        path.ends_with(".fake").then(|| {
+            text.lines()
+                .enumerate()
+                .filter(|(_, line)| line.starts_with("TEST "))
+                .map(|(index, _)| index + 1..=index + 1)
+                .collect()
+        })
     }
 }
 

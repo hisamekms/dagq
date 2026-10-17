@@ -443,6 +443,7 @@ pub fn review_in(
             files: &LocalRunFiles,
             open_repository: &open_repository,
             pid: std::process::id(),
+            gate_config: &crate::infrastructure::run_env::gate_config,
         },
         task_id,
         range,

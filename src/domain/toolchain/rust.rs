@@ -82,11 +82,23 @@
 //! `CARGO_TARGET_DIR` names, `target` under the runtime's directory of
 //! the command (`<queue dir>/recheck/target` for the landing recheck,
 //! `<queue dir>/update/target` for the automatic update's build).
+//!
+//! The lines in a test ([`ToolchainProfile::test_lines`]) are those of the
+//! items a test's attribute is put on ([`test_lines`]'s doc) in a `.rs`
+//! file. A file under a directory named `tests` (cargo builds each as an
+//! integration test) or named `tests.rs` (the usual file of a
+//! `#[cfg(test)] mod tests;` declared in another) is not told apart, nor
+//! is a file of another language. A file of a module declared under a
+//! test's attribute in another file by another name (a test helper or
+//! fake) is read alone: only the items under a test's attribute in it are
+//! a test's, so a change of its helpers alone changes no test function.
 use super::{
-    BuildOutput, JunitTestName, Recommendation, RecommendedProgram, ToolCodeClass, ToolHostClass,
-    ToolProcess, ToolchainProfile,
+    BuildOutput, JunitTestName, Recommendation, RecommendedProgram, TestLines, ToolCodeClass,
+    ToolHostClass, ToolProcess, ToolchainProfile,
 };
 use crate::domain::verify_failure::test_name;
+
+mod test_lines;
 
 /// cargo's target directory: see the module's doc.
 pub const BUILD_OUTPUT: BuildOutput = BuildOutput {
@@ -275,6 +287,15 @@ impl ToolchainProfile for Rust {
     fn recommendation(&self) -> Recommendation {
         RECOMMENDATION
     }
+
+    fn test_lines(&self, path: &str, text: &str) -> Option<Vec<TestLines>> {
+        let mut parts = path.rsplit('/');
+        let file = parts.next()?;
+        if !file.ends_with(".rs") || file == "tests.rs" || parts.any(|dir| dir == "tests") {
+            return None;
+        }
+        Some(test_lines::test_lines(text))
+    }
 }
 
 /// What the Rust profile recommends, after this repository's own settings:
@@ -408,6 +429,30 @@ mod tests {
         EVIDENCE_CHARS, FailedTests, FailureClass, MAX_FAILED_TESTS, VerifyFailure,
     };
     use serde_json::json;
+
+    #[test]
+    fn only_a_rust_file_outside_the_test_files_has_its_lines_told_apart() {
+        use super::{RUST, ToolchainProfile};
+        let text = "fn a() {}\n#[test]\nfn b() {}\n";
+        let lines = RUST.test_lines("src/a.rs", text).unwrap();
+        assert_eq!(
+            lines
+                .iter()
+                .map(|l| (*l.start(), *l.end()))
+                .collect::<Vec<_>>(),
+            [(2, 3)]
+        );
+        assert_eq!(RUST.test_lines("a.rs", "fn a() {}\n"), Some(vec![]));
+        for path in [
+            "tests/it/main.rs",
+            "crates/x/tests/a.rs",
+            "src/main_log/tests.rs",
+            "src/a.toml",
+            "README.md",
+        ] {
+            assert_eq!(RUST.test_lines(path, text), None, "{path}");
+        }
+    }
 
     fn rust() -> Toolchains {
         Toolchains::this_repository()

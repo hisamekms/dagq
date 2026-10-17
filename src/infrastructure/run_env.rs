@@ -54,6 +54,9 @@
 //! and the paths it applies to (ADR-t2268-1, [`TOOLCHAINS_PREFIX`]).
 //! `[verify_marks.<name>]` declares a mark of the project's own on its
 //! verification's output (ADR-t2268-1 decision 2, [`VERIFY_MARKS_PREFIX`]).
+//! `[local_checks]` and `[local_checks.gates.<name>]` declare the tests and
+//! the worker's local gates the review judges by a run's diff
+//! (ADR-t2589-1 decision 6, [`LOCAL_GATES_PREFIX`]).
 //! The file is parsed by
 //! hand: the format is these tables of `KEY = value` lines, a subset of
 //! TOML that needs no parser crate.
@@ -85,6 +88,7 @@ use crate::{
         landing_branch::RepositoryConfig,
         landing_verification::{self, LandingVerification},
         light_slots::LightChanges,
+        local_gates::{GateConfig, LocalGate, LocalGates},
         provider_switch::ProviderFallback,
         queue_broker::RegistryHost,
         recheck::RecheckConfig,
@@ -372,9 +376,51 @@ const VERIFY_MARKS_TABLE: &str = "verify_marks";
 /// The keys of `[verify_marks.<name>]` ([`VERIFY_MARKS_PREFIX`]).
 const VERIFY_MARK_CLASS: &str = "class";
 const VERIFY_MARK_LINE: &str = "line";
+/// `[local_checks]`: `tests`, the globs of the paths that are tests
+/// ([`LOCAL_GATES_PREFIX`]).
+const LOCAL_CHECKS_TABLE: &str = "local_checks";
+/// The one key of `[local_checks]`.
+const LOCAL_CHECKS_TESTS: &str = "tests";
+/// `[local_checks.gates.<name>]`: a check the worker runs before its
+/// receipt when a test of the gate's paths changed (ADR-t2589-1 decision
+/// 6), one table per gate, read in file order. `<name>` is the gate's own
+/// name, kebab-case, bare or quoted, each once. Its keys, both required:
+///
+/// - `paths` (a one-line array of distinct repository-relative globs, not
+///   empty): the tests that require the gate.
+/// - `kind` (a string, not blank): the kind the project's scripts give
+///   the records of a run of it ([`crate::domain::local_checks`]).
+///
+/// A gate needs `[local_checks] tests`, the globs of the paths that are
+/// tests (an array as `paths`), and a changed test requires a gate when it
+/// is in the gate's paths; which changed lines are a test's the declared
+/// toolchain profiles tell ([`crate::domain::local_gates`]). For this
+/// repository, for example:
+///
+/// ```toml
+/// [local_checks]
+/// tests = ["src/**", "tests/it/**"]
+///
+/// [local_checks.gates.stress]
+/// paths = ["src/**", "tests/it/**"]
+/// kind = "stress"
+/// ```
+///
+/// The review reads them from the landing branch's commit and judges each
+/// gate by the run's diff; without a gate it judges none and its material
+/// has no section of them. A binary older than these tables refuses them,
+/// so a repository declares them only once the binary that runs its queue
+/// reads them.
+pub const LOCAL_GATES_PREFIX: &str = "local_checks.gates.";
+/// What [`parse_config`] calls the current table while in a
+/// `[local_checks.gates.*]`.
+const LOCAL_GATES_TABLE: &str = "local_checks.gates";
+/// The keys of `[local_checks.gates.<name>]`.
+const LOCAL_GATE_PATHS: &str = "paths";
+const LOCAL_GATE_KIND: &str = "kind";
 const CONTAINER_IMAGE_CONTAINERFILE: &str = "containerfile";
 const CONTAINER_IMAGE_INPUTS: &str = "inputs";
-const TABLES: [&str; 26] = [
+const TABLES: [&str; 27] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -401,6 +447,7 @@ const TABLES: [&str; 26] = [
     CONTAINER_IMAGE_TABLE,
     CONTAINER_BUILD_OUTPUT_TABLE,
     CONTAINER_VERIFICATION_TABLE,
+    LOCAL_CHECKS_TABLE,
 ];
 /// The keys of `[recheck]`.
 const RECHECK_COMMAND: &str = "command";
@@ -541,6 +588,9 @@ pub struct Config {
     /// `[verify_marks.<name>]` in file order ([`VERIFY_MARKS_PREFIX`]);
     /// empty without any.
     pub verify_marks: Vec<ProjectMark>,
+    /// `[local_checks]` and its `[local_checks.gates.<name>]` in file
+    /// order ([`LOCAL_GATES_PREFIX`]); `None` without a gate.
+    pub local_gates: Option<LocalGates>,
 }
 
 impl Config {
@@ -644,6 +694,11 @@ pub fn parse_config(text: &str) -> Result<Config> {
     // The `[verify_marks.<name>]` being read, finished at the next table
     // or the end of the file.
     let mut mark_open: Option<MarkTable> = None;
+    // `[local_checks] tests` as read, and the gates read, the last one
+    // finished at the next table or the end of the file.
+    let mut local_tests: Option<Vec<String>> = None;
+    let mut gates: Vec<LocalGate> = Vec::new();
+    let mut gate_open: Option<GateTable> = None;
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     for (index, raw) in text.lines().enumerate() {
         let number = index + 1;
@@ -670,6 +725,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
             finish_toolchain(&config.toolchains)?;
             if let Some(open) = mark_open.take() {
                 config.verify_marks.push(open.finish()?);
+            }
+            if let Some(open) = gate_open.take() {
+                gates.push(open.finish()?);
             }
             if kpi
                 .header(name)
@@ -846,6 +904,33 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 table = Some(TOOLCHAINS_TABLE);
                 continue;
             }
+            if name == LOCAL_GATES_TABLE || name.starts_with(LOCAL_GATES_PREFIX) {
+                let gate = name
+                    .strip_prefix(LOCAL_GATES_PREFIX)
+                    .map(|gate| parse_key(gate.trim()))
+                    .transpose()
+                    .with_context(|| format!("{CONFIG_FILE_NAME}:{number}"))?
+                    .unwrap_or_default();
+                ensure!(
+                    !gate.is_empty(),
+                    "{CONFIG_FILE_NAME}:{number}: [{name}] names no gate; write [{LOCAL_GATES_PREFIX}<name>]"
+                );
+                ensure!(
+                    review_subagents::valid_agent_name(&gate),
+                    "{CONFIG_FILE_NAME}:{number}: gate {gate:?} of [{name}] is not kebab-case (lowercase letters and digits joined by -)"
+                );
+                ensure!(
+                    gates.iter().all(|g| g.name != gate),
+                    "{CONFIG_FILE_NAME}:{number}: [{name}] is defined twice"
+                );
+                gate_open = Some(GateTable {
+                    line: number,
+                    name: gate,
+                    ..GateTable::default()
+                });
+                table = Some(LOCAL_GATES_TABLE);
+                continue;
+            }
             if name == VERIFY_MARKS_TABLE || name.starts_with(VERIFY_MARKS_PREFIX) {
                 let mark = name
                     .strip_prefix(VERIFY_MARKS_PREFIX)
@@ -895,7 +980,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}], [{CONTAINER_VERIFICATION_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}], [{CONTAINER_VERIFICATION_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -945,6 +1030,21 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 .as_mut()
                 .expect("a [verify_marks.*] table names its mark")
                 .entry(number, key, rest.trim())?,
+            Some(LOCAL_GATES_TABLE) => gate_open
+                .as_mut()
+                .expect("a [local_checks.gates.*] table names its gate")
+                .entry(number, key, rest.trim())?,
+            Some(LOCAL_CHECKS_TABLE) => {
+                ensure!(
+                    key == LOCAL_CHECKS_TESTS,
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{LOCAL_CHECKS_TABLE}]; the key is {LOCAL_CHECKS_TESTS}"
+                );
+                ensure!(
+                    local_tests.is_none(),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                local_tests = Some(nonempty_globs(number, key, rest)?);
+            }
             Some(TOOLCHAINS_TABLE) => {
                 let toolchain = config
                     .toolchains
@@ -1877,7 +1977,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{CONTAINER_IMAGE_TABLE}] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{CONTAINER_IMAGE_TABLE}] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -1887,6 +1987,20 @@ pub fn parse_config(text: &str) -> Result<Config> {
     finish_toolchain(&config.toolchains)?;
     if let Some(open) = mark_open {
         config.verify_marks.push(open.finish()?);
+    }
+    if let Some(open) = gate_open {
+        gates.push(open.finish()?);
+    }
+    if !gates.is_empty() {
+        config.local_gates = Some(LocalGates {
+            tests: local_tests.with_context(|| {
+                format!(
+                    "{CONFIG_FILE_NAME}: [{LOCAL_GATES_PREFIX}{}] needs [{LOCAL_CHECKS_TABLE}] {LOCAL_CHECKS_TESTS}, the globs of the tests",
+                    gates[0].name
+                )
+            })?,
+            gates,
+        });
     }
     if let Some(line) = subagent_open {
         bail!(
@@ -2026,6 +2140,97 @@ impl MarkTable {
             name: self.name,
         })
     }
+}
+
+/// The globs of `key = rest` of line `number`: a one-line array of
+/// repository-relative globs, not empty, each kept once.
+fn nonempty_globs(number: usize, key: &str, rest: &str) -> Result<Vec<String>> {
+    let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+    let globs = parse_string_array(rest.trim()).with_context(with)?;
+    ensure!(
+        !globs.is_empty(),
+        "{CONFIG_FILE_NAME}:{number}: {key} names no glob"
+    );
+    validate_path_globs(&globs).with_context(with)?;
+    Ok(dedup_globs(&globs))
+}
+
+/// A `[local_checks.gates.<name>]` as read so far, checked whole by
+/// [`Self::finish`].
+#[derive(Default)]
+struct GateTable {
+    line: usize,
+    name: String,
+    paths: Option<Vec<String>>,
+    kind: Option<String>,
+}
+
+impl GateTable {
+    fn entry(&mut self, number: usize, key: &str, rest: &str) -> Result<()> {
+        let defined = match key {
+            LOCAL_GATE_PATHS => self.paths.is_some(),
+            LOCAL_GATE_KIND => self.kind.is_some(),
+            _ => bail!(
+                "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{LOCAL_GATES_PREFIX}{}]; the keys are {LOCAL_GATE_PATHS} and {LOCAL_GATE_KIND}",
+                self.name
+            ),
+        };
+        ensure!(
+            !defined,
+            "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+        );
+        if key == LOCAL_GATE_PATHS {
+            self.paths = Some(nonempty_globs(number, key, rest)?);
+        } else {
+            let kind = parse_string(rest.trim())
+                .with_context(|| format!("{CONFIG_FILE_NAME}:{number}: value of {key}"))?;
+            ensure!(
+                !kind.trim().is_empty(),
+                "{CONFIG_FILE_NAME}:{number}: {key} of [{LOCAL_GATES_PREFIX}{}] is blank",
+                self.name
+            );
+            self.kind = Some(kind);
+        }
+        Ok(())
+    }
+
+    /// The gate, once its table ended: both keys are required.
+    fn finish(self) -> Result<LocalGate> {
+        let missing = |key| {
+            anyhow::anyhow!(
+                "{CONFIG_FILE_NAME}:{}: [{LOCAL_GATES_PREFIX}{}] has no {key}",
+                self.line,
+                self.name
+            )
+        };
+        Ok(LocalGate {
+            paths: self
+                .paths
+                .clone()
+                .ok_or_else(|| missing(LOCAL_GATE_PATHS))?,
+            kind: self.kind.clone().ok_or_else(|| missing(LOCAL_GATE_KIND))?,
+            name: self.name,
+        })
+    }
+}
+
+/// What the review judges the local gates by in the `dagq.toml` text
+/// `text` of the landing branch's commit (ADR-t2589-1 decision 6): its
+/// gates ([`LOCAL_GATES_PREFIX`]) and its toolchain profiles resolved
+/// against the built-in ones (none while it declares none, and then no
+/// profile tells a test's lines apart).
+pub fn gate_config(text: &str) -> Result<GateConfig> {
+    gate_config_in(text, &crate::domain::toolchain::BUILTIN)
+}
+
+/// [`gate_config`] with the profiles of `registry`.
+pub fn gate_config_in(text: &str, registry: &ProfileRegistry) -> Result<GateConfig> {
+    let config = parse_config(text)?;
+    Ok(GateConfig {
+        gates: config.local_gates,
+        toolchains: Toolchains::resolve(registry, &config.toolchains)
+            .map_err(anyhow::Error::msg)?,
+    })
 }
 
 /// A `[review.programs.<name>]` as read so far: its header's line and
@@ -3077,6 +3282,113 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
+    }
+
+    /// `[local_checks]` and `[local_checks.gates.<name>]` declare the
+    /// tests and the gates, a gate needs the tests, and a mistake in one
+    /// is refused with its line.
+    #[test]
+    fn parses_the_local_gates_tables() {
+        use crate::domain::local_gates::{LocalGate, LocalGates};
+        let config = parse_config(
+            "[local_checks]\ntests = ['src/**', \"tests/**\", 'src/**']\n[local_checks.gates.stress]\npaths = ['src/**', 'tests/**']\nkind = 'stress'\n[local_checks.gates.\"it-time\"]\nkind = \"it time\" # its records\npaths = ['tests/**']\n[run.env]\nA = '1'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.local_gates,
+            Some(LocalGates {
+                tests: vec!["src/**".into(), "tests/**".into()],
+                gates: vec![
+                    LocalGate {
+                        name: "stress".into(),
+                        paths: vec!["src/**".into(), "tests/**".into()],
+                        kind: "stress".into(),
+                    },
+                    LocalGate {
+                        name: "it-time".into(),
+                        paths: vec!["tests/**".into()],
+                        kind: "it time".into(),
+                    },
+                ],
+            })
+        );
+        // No gate: nothing is judged, the tests' globs alone too.
+        assert_eq!(parse_config("").unwrap().local_gates, None);
+        assert_eq!(
+            parse_config("[local_checks]\ntests = ['src/**']\n")
+                .unwrap()
+                .local_gates,
+            None
+        );
+        for (text, error) in [
+            (
+                "[local_checks.gates.a]\npaths = ['x/**']\nkind = 'a'\n",
+                "[local_checks.gates.a] needs [local_checks] tests",
+            ),
+            (
+                "[local_checks.gates]\n",
+                "dagq.toml:1: [local_checks.gates] names no gate",
+            ),
+            ("[local_checks.gates.A]\n", "is not kebab-case"),
+            (
+                "[local_checks]\ntests = ['a']\n[local_checks.gates.a]\nkind = 'a'\n",
+                "dagq.toml:3: [local_checks.gates.a] has no paths",
+            ),
+            (
+                "[local_checks]\ntests = ['a']\n[local_checks.gates.a]\npaths = ['a']\n[run.env]\n",
+                "dagq.toml:3: [local_checks.gates.a] has no kind",
+            ),
+            (
+                "[local_checks.gates.a]\nkind = ' '\n",
+                "dagq.toml:2: kind of [local_checks.gates.a] is blank",
+            ),
+            (
+                "[local_checks.gates.a]\npaths = []\n",
+                "dagq.toml:2: paths names no glob",
+            ),
+            (
+                "[local_checks.gates.a]\npaths = ['/a']\n",
+                "dagq.toml:2: value of paths",
+            ),
+            (
+                "[local_checks.gates.a]\nkind = 'a'\nkind = 'b'\n",
+                "dagq.toml:3: kind is defined twice",
+            ),
+            (
+                "[local_checks.gates.a]\nname = 'a'\n",
+                "unknown key name in [local_checks.gates.a]",
+            ),
+            (
+                "[local_checks.gates.a]\nkind = 'a'\npaths = ['a']\n[local_checks.gates.a]\n",
+                "dagq.toml:4: [local_checks.gates.a] is defined twice",
+            ),
+            (
+                "[local_checks]\ntests = ['a']\ntests = ['b']\n",
+                "dagq.toml:3: tests is defined twice",
+            ),
+            (
+                "[local_checks]\npaths = ['a']\n",
+                "unknown key paths in [local_checks]",
+            ),
+            ("[local_checks]\ntests = []\n", "tests names no glob"),
+            (
+                "[local_checks]\n[local_checks]\n",
+                "[local_checks] is defined twice",
+            ),
+        ] {
+            let message = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(message.contains(error), "{text:?}: {message}");
+        }
+        // The review's reading resolves the profiles beside the gates.
+        let read = gate_config("[toolchains.web]\nprofile = 'typescript'\n");
+        assert!(format!("{:#}", read.unwrap_err()).contains("unknown profile"));
+        let read = gate_config_in(
+            "[toolchains.made]\nprofile = 'fake'\n",
+            &crate::domain::toolchain::fake::REGISTRY,
+        )
+        .unwrap();
+        assert_eq!(read.gates, None);
+        assert_eq!(read.toolchains.view()["declared"][0]["profile"], "fake");
     }
 
     /// `[toolchains.<name>]` declares a profile and the paths it applies

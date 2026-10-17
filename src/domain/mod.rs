@@ -1076,6 +1076,7 @@ pub mod light_slots;
 pub mod lint;
 pub mod live_alerts;
 pub mod local_checks;
+pub mod local_gates;
 pub mod marks;
 pub mod measure;
 pub mod plan_quality;
