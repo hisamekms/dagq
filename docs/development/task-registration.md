@@ -1,7 +1,7 @@
 ---
 id: development-task-registration
 type: development
-title: このrepositoryのtaskの登録（verify・paths・evidence・changeの選び方、固定バイナリを待つ宣言、依存の付け方、負荷の下で落ちるtestを直すtask、ADRを書くtask、ADRがリンクする文書を消すtask、runtimeの汎用性、plan reviewが当てはめる規則）
+title: このrepositoryのtaskの登録（verify・paths・evidence・change・titleの選び方、固定バイナリを待つ宣言、依存の付け方、負荷の下で落ちるtestを直すtask、ADRを書くtask、ADRがリンクする文書を消すtask、runtimeの汎用性、plan reviewが当てはめる規則）
 status: current
 created: 2026-10-03
 owners:
@@ -98,6 +98,11 @@ runtimeのtaskは`--paths`を宣言しない（上の「推奨の組み合わせ
 - 混ざるときは主な目的の1つを選ぶ（例: 不具合の修正にtestを足すなら`fix`、新しい機能のdocsを同じtaskで書くなら`feature`）。changeは検証を決めない（検証は上の推奨の組み合わせのとおり、変更の対象で選ぶ）。
 - 作業時間の前後比較で読む層は[運用](operations.md)の「KPIの読み方と印」。
 
+## taskのtitle
+
+- taskのtitleは[文書の規則](documents.md)の「commit」の7つの接頭辞のどれかで始める（`docs: ...`の形）。titleはmainのsquash commitの件名になり、制御側のgitはhookを走らせないので、mainの接頭辞はtitleで揃える（[ADR-t2596-1](../adr/2026-10-17-t2596-1-seven-commit-prefixes-checked-by-hook-review-program-and-task-title.md)決定4）。登録するplannerが付け、plan reviewが見る（下の「plan reviewが当てはめる規則」）。
+- 接頭辞は上の「change」から選ぶ: `feature`→`feat`、`fix`→`fix`、`refactor`→`refactor`（速さの改善が目的なら`perf`）、`test`→`test`、`docs`→`docs`、`measure`→`chore`（結果の文書だけを変えるなら`docs`）、`config`→`chore`。
+
 ## goal の優先度とラベル
 
 この repository のラベルの語彙は `dagq.toml` の `[goals] tags` が正本で、[棚卸しの案](../plans/goal-priority-inventory.md#1-ラベルの語彙の案)（task 1642）の 11 語を採用する。ラベルはテーマを表し、優先度は表さない。goal の主題に合うものを 1 つ以上付け、主なラベルを先頭に置く。複数のテーマに関わるときは該当するものを添える。変更するファイルの種類は `[areas]`、task の変更の種類は `change` が持つので、それだけを理由にラベルを選ばない。
@@ -179,6 +184,7 @@ dagqは外部のprojectで使い、このrepositoryはdogfoodingしているだ�
 - 測定のtask（changeが`measure`のtaskと、受け入れ条件に測定を含むtask）は、周回数（と交互に流すか）、表の列、値の計算式（何を何で割るか、待ちを引くときの区間）、証拠の所在（文書の節・CSV・script・コマンドと時刻の区切り）をacceptanceかdescriptionに書くこと（測定の形に当たらない項目、例えば1回だけ読む測定の周回数は、当たらない理由を書く）。条件の範囲を「同じ形のもの」で広げるtaskは、範囲を決めるgrepか一覧を書くこと。欠けていれば`revise`（workerはこれらを根拠に受け入れ条件の各項目を対応づける。[ADR-t1420-1](../adr/2026-10-03-t1420-1-worker-maps-each-acceptance-criterion-before-the-receipt.md)）。
 - ADRの索引（`docs/adr/INDEX.md`、無ければ`sh scripts/adr-index.sh`で作る。[文書の規則](documents.md)の「ADR」）と、taskが名指すADRと`docs/design/`の文書を読み、`accepted`のADRの決定と矛盾するtaskは`concern`にする（`superseded`なら`superseded_by`を辿る）。
 - ADRがリンクする文書を消すtaskが、上の「ADRがリンクする文書を消すtask」のとおり移行中の行を足す先行のtaskに依存していること（その行が既にmainにあれば要らない）。欠けていれば`revise`にする。
+- taskのtitleが上の「taskのtitle」の接頭辞で始まり、changeに合うこと。外れていれば`revise`にする。
 - ADRを書くtaskが上の「ADRを書くtask」を満たすこと（IDとファイル名の形、`check-adr-numbers.sh`のverify、置き換えか`amends`か）。足りなければ`revise`。
 - runtimeのtaskが上の「runtimeの汎用性」のとおり、言語・道具・外への宛先・hostで流すコマンド・cache・資源の値をruntimeに固定せず設定で受けること。固定していれば`revise`にし、設定に出す形と、このrepositoryの値を`dagq.toml`かdocsのdogfoodingの値として登録する形に直させる（[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)）。
 - 挙動や仕様を変えるtaskは、関連文書（[文書の規則](documents.md)の「workerの文書の照合」が挙げる文書）のpath・節と更新が要る理由をdescriptionかcontextに書くこと。欠けていて関連する文書が明らかなら、見つけたpathを理由に書いて`revise`にする。文書の差分を求めるverifyやevidenceは求めない（[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)）。
