@@ -562,6 +562,9 @@ impl GoalReviewStore for SqliteQueue {
             "verdict": apply.verdict.verdict,
             "decision": apply.decision,
             "overridden": apply.overridden,
+            // The verdict's criteria as the goal review returned them: this
+            // field is where ADR-0047 decision 43 records `criteria` in the
+            // payload of what it calls `goal_reviewed`.
             "criteria": apply.verdict.criteria,
             "summary": apply.verdict.summary,
             "gaps": apply.verdict.gaps,

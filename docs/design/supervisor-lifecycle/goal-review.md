@@ -81,7 +81,6 @@ execの[引き継ぎ](handoff.md)のあいだの回収と止め方は引き継�
    - どのverdictも`goal_review_finished`を記録する。
      Codexのjobは加えてthreadから読んだsessionとmodelを持つ（`AgentProvider::job_session`）。
      verdictはproviderによらず、providerの実装が取り出した最終の返答のtextを同じ`GoalReviewVerdict::parse`と同じ`finish_goal_review`の再検査で適用する。
-     ADR-0047の決定43の「`criteria`を`goal_reviewed`のpayloadに記録」は、このeventの`criteria`で持つ。
 6. **失敗**（非0の終了、時間切れ、JSONが無い・形が合わない、起動できない）: goalを動かさず、行を`failed`にして`goal_review_failed`を記録する。
    2の入力が同じなので、2の入力が変わる（所属taskの状態の変化、follow_upの登録、所属の判断の記録・訂正、acceptanceの変更）か人が`goal review ID`を打つまで起動しない。
    そのあいだ`goal_review_holds`がそのgoalを返し、`status`（inbox）のattentionに`goal review by hand`としてgoalの最初のtaskで出る。
