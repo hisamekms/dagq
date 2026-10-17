@@ -1,4 +1,5 @@
 //! Runtime tests: runs that wait for a person outside the slots (ADR-0062).
+use crate::common;
 use crate::runtime_support;
 use dagq::domain::LeaseToken;
 
@@ -206,6 +207,68 @@ fn a_wait_is_taken_over_after_a_handoff() {
     assert_eq!(events_of(&db, run.id(), "run_waiting_ended").len(), 1);
     assert_eq!(events_of(&db, run.id(), "run_slot_regained").len(), 1);
     assert_eq!(sent(&run), [format!("answer to ask {ask}: blue")]);
+}
+
+/// A supervisor whose owner (a test's process) is gone waits for no
+/// person's answer, even in a drain asked for before: a drain without its
+/// owner gone waits for the run's `worker_question` to be answered, and
+/// once the owner is SIGKILLed the loop ends with the reason `owner_gone`
+/// and no registration left. The run keeps its status, its open ask and
+/// its lease, which goes stale with the supervisor for another one to
+/// adopt (a run without a lease is never adopted).
+#[test]
+fn a_supervisor_whose_owner_is_gone_lets_a_waiting_run_go_and_stops() {
+    let (_dir, repo, db) = fixture();
+    let backend = Arc::new(TestWorkspace::new(&db, false, ASKING_AGENT));
+    let mut owner = common::service::StandInOwner::start();
+    let options = SuperviseOptions {
+        owner: Some(owner.pid()),
+        ..supervise_options(1, false)
+    };
+    let (stop, passes) = (options.stop.clone(), options.passes.clone());
+    let supervisor = supervise_in_thread(&db, &repo, &backend, options);
+    wait_until(&db, Duration::from_secs(60), |queue| {
+        run_of(queue, 1)
+            .is_some_and(|run| !events_of(&db, run.id(), "run_waiting_started").is_empty())
+    });
+    let token = SqliteQueue::open(&db).unwrap().supervisors().unwrap()[0]
+        .token
+        .clone();
+    // A drain waits for the answer while the owner lives.
+    stop.store(true, std::sync::atomic::Ordering::SeqCst);
+    wait_until(&db, Duration::from_secs(60), |_| {
+        !common::service::events(&db, "supervisor_draining").is_empty()
+    });
+    let drained_from = passes.load(std::sync::atomic::Ordering::SeqCst);
+    wait_until(&db, Duration::from_secs(60), |_| {
+        passes.load(std::sync::atomic::Ordering::SeqCst) >= drained_from + 5
+    });
+    assert!(!supervisor.is_finished(), "the drain did not wait");
+
+    owner.kill();
+    let outcome = joined(supervisor, "the supervisor whose owner is gone");
+    let outcome = outcome.unwrap();
+    assert_eq!(outcome["outcome"], "owner_gone", "{outcome}");
+
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = run_of(&mut queue, 1).unwrap();
+    assert_eq!(run.status(), RunStatus::Running);
+    assert!(open_ask_of(&mut queue, &run, AskKind::WorkerQuestion).is_some());
+    let lease = queue
+        .run_lease(run.id())
+        .unwrap()
+        .expect("the lease is kept");
+    assert_eq!(lease.token, token);
+    assert!(queue.supervisors().unwrap().is_empty());
+    let draining = common::service::events(&db, "supervisor_draining");
+    assert_eq!(draining.len(), 1, "{draining:?}");
+    assert_eq!(draining[0]["payload"]["reason"], "stop_requested");
+    assert_eq!(draining[0]["payload"]["runs"], json!([run.id()]));
+    let stopped = common::service::events(&db, "supervisor_stopped");
+    assert_eq!(stopped[0]["payload"]["reason"], "owner_gone", "{stopped:?}");
+    // Nothing was sent to the waiting session: its answer is left to the
+    // supervisor that adopts it.
+    assert!(sent(&run).is_empty());
 }
 
 /// Point the run's wrapper row at `pid` with a heartbeat long expired, as

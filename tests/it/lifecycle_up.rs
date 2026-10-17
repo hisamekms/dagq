@@ -479,6 +479,35 @@ fn up_stores_the_exported_config_home_in_the_plist() {
     assert!(!contents.contains("CMUX_"));
 }
 
+/// An `up` a test ran with its owner
+/// (`dagq::domain::queue_service::OWNER_PID_ENV`) passes it on to the
+/// supervisor launchd starts, whose agent then restarts only a failed exit:
+/// a supervisor that stopped because the test is gone stays stopped.
+#[test]
+fn up_passes_the_test_s_owner_to_the_supervisor_and_keeps_it_stopped_after() {
+    let mut fixture = fixture();
+    fixture.environment.owner = Some(4321);
+    let launchd = FakeLaunchd::new(&fixture.location.db);
+    let processes = FakeProcesses::default();
+    let report = up(&fixture, &launchd, &processes);
+    assert_eq!(report["supervisor"]["outcome"], "started", "{report}");
+    let installs = launchd.installs.lock().unwrap();
+    assert_eq!(installs.len(), 1);
+    let contents = &installs[0].2;
+    assert!(
+        contents.contains(
+            "\t\t<key>DAGQ_SERVICE_OWNER_PID</key>\n\t\t<string>4321</string>\n\t</dict>"
+        ),
+        "{contents}"
+    );
+    assert!(
+        contents.contains(
+            "<key>KeepAlive</key>\n\t<dict>\n\t\t<key>SuccessfulExit</key>\n\t\t<false/>\n\t</dict>"
+        ),
+        "{contents}"
+    );
+}
+
 /// Two registrations whose processes are gone, one whose process lives and
 /// holds a lease: `up` drops the dead ones only and reuses the live one.
 #[test]

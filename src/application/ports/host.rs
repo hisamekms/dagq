@@ -114,7 +114,8 @@ pub const CONFIG_HOME_ENV: &str = "XDG_CONFIG_HOME";
 
 /// The environment variables the LaunchAgent gives the supervisor, which
 /// is all a launchd-started process keeps of the shell that ran `up`: its
-/// PATH and, only when that shell exported it, `XDG_CONFIG_HOME`. The
+/// PATH and, only when that shell exported it, `XDG_CONFIG_HOME`, and a
+/// test's owner when the `up` was given one ([`Self::owner`]). The
 /// supervisor calls no cmux, so no cmux variable is among them
 /// (ADR-t1433-4).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -124,6 +125,12 @@ pub struct SupervisorEnvironment {
     /// the supervisor reads the same `config.toml` and `host.toml` as the
     /// `up` that checked them; unset, both are under `~/.config/dagq/`.
     pub config_home: Option<String>,
+    /// [`crate::domain::queue_service::OWNER_PID_ENV`] of the `up` that
+    /// wrote the agent: a test's pid, which the supervisor stops with and
+    /// launchd then does not restart it after. Nothing in production
+    /// sets it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner: Option<u32>,
 }
 
 /// The session wrappers of the headless runs and the runtime's planners,

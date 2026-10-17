@@ -39,6 +39,7 @@ use super::{
 use crate::domain::EventKind;
 use crate::domain::LeaseToken;
 use crate::domain::language::{Language, with_instruction};
+use crate::domain::queue_service::OWNER_PID_ENV;
 use crate::{
     VERSION,
     domain::{
@@ -133,6 +134,10 @@ pub struct UpEnvironment {
     /// ([`UP_RESTART_ENV`]): it does not check the installed plugin, as a
     /// handoff does not (ADR-t617-2 decision 1).
     pub restart: bool,
+    /// [`crate::domain::queue_service::OWNER_PID_ENV`], if it names a pid:
+    /// the test that ran this `up`, passed on to the supervisor it starts
+    /// ([`SupervisorEnvironment::owner`]).
+    pub owner: Option<u32>,
 }
 
 /// Set by the runtime in the environment of the `up` it runs to start a
@@ -2094,6 +2099,7 @@ pub fn launch_agent_spec(
         environment: SupervisorEnvironment {
             path: environment.path.clone(),
             config_home: environment.config_home.clone(),
+            owner: environment.owner,
         },
         log: path_text(&location.log_dir.join(LAUNCHD_LOG_NAME))?,
     })
@@ -2561,7 +2567,11 @@ pub struct LaunchAgentSpec {
 impl LaunchAgentSpec {
     /// The plist as launchd reads it: `KeepAlive` and `RunAtLoad` so the
     /// supervisor starts now and restarts after any exit, stdout and stderr
-    /// appended to one file, and a long `ExitTimeOut` for the drain.
+    /// appended to one file, and a long `ExitTimeOut` for the drain. With
+    /// an owner (a test's), the owner goes into the environment and
+    /// `KeepAlive` restarts only an exit that failed: a supervisor that
+    /// stopped because its owner is gone exits with success and stays
+    /// stopped.
     pub fn xml(&self) -> String {
         let mut xml = String::from(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -2591,8 +2601,19 @@ impl LaunchAgentSpec {
                 escape(config_home)
             ));
         }
+        if let Some(owner) = self.environment.owner {
+            xml.push_str(&format!(
+                "\t\t<key>{OWNER_PID_ENV}</key>\n\t\t<string>{owner}</string>\n"
+            ));
+        }
         xml.push_str("\t</dict>\n");
-        xml.push_str("\t<key>KeepAlive</key>\n\t<true/>\n");
+        if self.environment.owner.is_some() {
+            xml.push_str(
+                "\t<key>KeepAlive</key>\n\t<dict>\n\t\t<key>SuccessfulExit</key>\n\t\t<false/>\n\t</dict>\n",
+            );
+        } else {
+            xml.push_str("\t<key>KeepAlive</key>\n\t<true/>\n");
+        }
         xml.push_str("\t<key>RunAtLoad</key>\n\t<true/>\n");
         xml.push_str(&format!(
             "\t<key>ExitTimeOut</key>\n\t<integer>{EXIT_TIMEOUT_SECS}</integer>\n"

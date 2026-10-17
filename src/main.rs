@@ -4583,6 +4583,11 @@ fn execute(cli: Cli) -> Result<Value> {
             let mut options = SuperviseOptions {
                 no_claude,
                 stop: install_stop_signal()?,
+                // A test's supervisor stops with the test's process; nothing
+                // in production sets it.
+                owner: dagq::infrastructure::queue_service::owner_from_env(|name| {
+                    env::var(name).ok()
+                }),
                 // A one-shot pass observes only when asked to.
                 observe_interval: Duration::from_secs(observe_interval.unwrap_or(if once {
                     0
@@ -5220,6 +5225,7 @@ fn up_environment() -> Result<dagq::lifecycle::UpEnvironment> {
         ),
         user_config: dagq::infrastructure::language::user_config_file(),
         restart: env::var_os(dagq::lifecycle::UP_RESTART_ENV).is_some(),
+        owner: dagq::infrastructure::queue_service::owner_from_env(|name| env::var(name).ok()),
     })
 }
 

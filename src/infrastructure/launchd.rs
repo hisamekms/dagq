@@ -296,6 +296,7 @@ mod tests {
             environment: SupervisorEnvironment {
                 path: "/usr/bin:/home/u/.local/bin".into(),
                 config_home: None,
+                owner: None,
             },
             log: "/data/q/logs/launchd.log".into(),
         };
@@ -331,6 +332,7 @@ mod tests {
             environment: SupervisorEnvironment {
                 path: "/usr/bin".into(),
                 config_home: Some("/home/u/.cfg&<>".into()),
+                owner: None,
             },
             ..spec
         }
@@ -340,6 +342,63 @@ mod tests {
                 "<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>PATH</key>\n\t\t<string>/usr/bin</string>\n\t\t<key>XDG_CONFIG_HOME</key>\n\t\t<string>/home/u/.cfg&amp;&lt;&gt;</string>\n\t</dict>"
             ),
             "{with_config_home}"
+        );
+    }
+
+    /// An `up` run by a test passes its owner on to the supervisor, and
+    /// launchd restarts only a failed exit of that supervisor: one that
+    /// stopped because its owner is gone exits with success and stays
+    /// stopped. Without an owner the plist is the production one, which
+    /// restarts after any exit.
+    #[test]
+    fn a_plist_with_an_owner_names_it_and_does_not_restart_a_successful_exit() {
+        let spec = |owner| LaunchAgentSpec {
+            label: "com.dagq.abc".into(),
+            plist: "/home/u/Library/LaunchAgents/com.dagq.abc.plist".into(),
+            program_arguments: vec!["/bin/dagq".into(), "supervise".into()],
+            working_directory: "/repo".into(),
+            environment: SupervisorEnvironment {
+                path: "/usr/bin".into(),
+                config_home: None,
+                owner,
+            },
+            log: "/data/q/logs/launchd.log".into(),
+        };
+        let owned = spec(Some(4321)).xml();
+        assert!(
+            owned.contains(
+                "<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>PATH</key>\n\t\t<string>/usr/bin</string>\n\t\t<key>DAGQ_SERVICE_OWNER_PID</key>\n\t\t<string>4321</string>\n\t</dict>"
+            ),
+            "{owned}"
+        );
+        assert!(
+            owned.contains(
+                "<key>KeepAlive</key>\n\t<dict>\n\t\t<key>SuccessfulExit</key>\n\t\t<false/>\n\t</dict>"
+            ),
+            "{owned}"
+        );
+        assert!(
+            !owned.contains("<key>KeepAlive</key>\n\t<true/>"),
+            "{owned}"
+        );
+        assert!(owned.contains("<key>RunAtLoad</key>\n\t<true/>"));
+
+        let production = spec(None).xml();
+        assert!(production.contains("<key>KeepAlive</key>\n\t<true/>"));
+        assert!(!production.contains("DAGQ_SERVICE_OWNER_PID"));
+        assert!(!production.contains("SuccessfulExit"));
+        assert_eq!(
+            production.replace("\t<key>KeepAlive</key>\n\t<true/>\n", ""),
+            owned
+                .replace(
+                    "\t\t<key>DAGQ_SERVICE_OWNER_PID</key>\n\t\t<string>4321</string>\n",
+                    ""
+                )
+                .replace(
+                    "\t<key>KeepAlive</key>\n\t<dict>\n\t\t<key>SuccessfulExit</key>\n\t\t<false/>\n\t</dict>\n",
+                    ""
+                ),
+            "an owner changes nothing else"
         );
     }
 
@@ -407,6 +466,7 @@ mod tests {
             environment: SupervisorEnvironment {
                 path: "/usr/bin".into(),
                 config_home: None,
+                owner: None,
             },
             log: "/data/q/logs/launchd.log".into(),
         };

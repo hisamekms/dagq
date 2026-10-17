@@ -68,6 +68,47 @@ pub fn owned_executable(dir: &Path) -> PathBuf {
     wrapper
 }
 
+/// A process that stands for a test's, given to a supervisor as its owner
+/// ([`dagq::domain::queue_service::OWNER_PID_ENV`]) so that the test can end
+/// it. It ends with this test's process too, so what it owns does not
+/// outlive the test.
+pub struct StandInOwner(crate::common::KillOnDrop);
+
+impl StandInOwner {
+    pub fn start() -> Self {
+        Self(crate::common::KillOnDrop::new(
+            Command::new("sh")
+                .args([
+                    "-c",
+                    "while kill -0 \"$PPID\" 2>/dev/null; do sleep 1; done",
+                ])
+                // Its `sleep`, left for a second after a SIGKILL, holds none
+                // of the test's output.
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+            "the stand-in owner",
+        ))
+    }
+
+    pub fn pid(&mut self) -> u32 {
+        self.0.child().id()
+    }
+
+    /// End it with SIGKILL, as a test's process ends at a timeout, and reap
+    /// it: until then it is a zombie, which its supervisor still finds.
+    pub fn kill(&mut self) {
+        let pid = libc::pid_t::try_from(self.pid()).unwrap();
+        // SAFETY: kill(2) takes no pointer.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let _waiting =
+            crate::common::within(crate::common::STEP_LIMIT, "the killed owner to be reaped");
+        self.0.child().wait().unwrap();
+    }
+}
+
 fn dagq(db: &Path, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_dagq"))
         .without_actor_env()

@@ -181,6 +181,7 @@ pub(crate) use self::deliver::{Input, Submission};
 pub use self::disk::CLEANUP_INTERVAL;
 pub use self::e2e::RunE2ePort;
 pub use self::forecast::{FORECAST_CHECK, ForecastPort};
+pub use self::handoff::OWNER_GONE_GRACE;
 pub use self::handoff::SUPERVISOR_HANDED_OFF;
 pub(crate) use self::headless::{lock_waiting, provider_failure, write_request};
 pub use self::host_metrics::HostMetricsPort;
@@ -364,6 +365,21 @@ pub struct LoopSettings {
     /// `[resume]`: the limit of a run's conflict-only attempts (ADR-0047
     /// decision 24).
     pub resume: ResumeConfig,
+    /// The process this supervisor stops with
+    /// ([`crate::domain::queue_service::OWNER_PID_ENV`]): a test's, so a
+    /// supervisor a test started does not outlive it however it ends (a
+    /// SIGKILL included). Once it is gone, the loop stops as on a stop
+    /// request, but lets its runs go instead of waiting for them
+    /// (`let_go_for_owner`) and exits within `owner_gone_grace`, the waits
+    /// of the loop's end included; `supervisor_draining` and
+    /// `supervisor_stopped` record the reason `owner_gone`. One already
+    /// gone at the start registers nothing. An exec keeps the variable, so
+    /// the next binary stops with the same owner. None in production,
+    /// where it runs until it is stopped.
+    pub owner: Option<u32>,
+    /// How long a supervisor whose owner is gone may still wait before it
+    /// exits ([`OWNER_GONE_GRACE`]; tests shorten it).
+    pub owner_gone_grace: Duration,
     /// Counts the loop's passes, one at the top of each; only read by
     /// tests, which wait for passes after a threshold instead of a fixed
     /// sleep (task 1046).
@@ -624,6 +640,22 @@ pub fn spawn_traced<T: Send + 'static>(
     thread::spawn(move || tracing::dispatcher::with_default(&dispatch, work))
 }
 
+/// Wait for `job` to finish, until `deadline` when one is given: whether
+/// it finished, so that joining it does not wait. The end of the loop of
+/// a supervisor whose owner is gone waits for its jobs so
+/// ([`OWNER_GONE_GRACE`]); every other end waits for them to finish. What
+/// to do next is [`handoff::job_wait`]'s; this reads the clock and sleeps.
+pub(super) fn finished_by<T>(job: &thread::JoinHandle<T>, deadline: Option<Instant>) -> bool {
+    loop {
+        let left = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        match handoff::job_wait(job.is_finished(), left) {
+            handoff::JobWait::Join => return true,
+            handoff::JobWait::Leave => return false,
+            handoff::JobWait::Wait => thread::sleep(Duration::from_millis(20)),
+        }
+    }
+}
+
 /// How often a process heartbeats its registration and leases. The
 /// handoff's watch waits for the new supervisor's next heartbeat, so tests
 /// shorten it (`supervise --heartbeat-interval-ms`, task 1048).
@@ -867,6 +899,18 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         settings.limits.parallel.value >= 1,
         "parallel must be at least 1"
     );
+    // An owner already gone starts nothing, not even a preflight that
+    // could fail and be restarted, and registers nothing; after an
+    // exec the registration exists, and the loop drains it instead.
+    if settings.handoff_token.is_none()
+        && handoff::owner_gone(settings.owner, |pid| ports.processes.alive(pid))
+    {
+        info!(
+            "the supervisor did not start: its owner (pid {}) is gone",
+            settings.owner.unwrap_or_default()
+        );
+        return Ok(json!({"outcome": "owner_gone", "owner": settings.owner}));
+    }
     let layout = &ports.layout;
     ensure!(
         !layout.db.starts_with(&layout.repo_root) || layout.db.starts_with(&layout.common_dir),
@@ -1031,6 +1075,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
             exec: None,
             draining: false,
             stop_recorded: false,
+            owner_gone: None,
         },
         fresh_session: settings.fresh_session,
         review_jobs: settings.review_jobs,
@@ -1661,8 +1706,9 @@ impl Supervisor<'_> {
     /// the status it went to.
     fn run_loop(&mut self, options: &LoopSettings) -> Result<Value> {
         let result = self.drive(options);
-        self.host.host_metrics.finish();
-        self.on_observation(|observation, env| observation.ledger.finish(env));
+        let deadline = self.end_deadline(options.owner_gone_grace);
+        self.host.host_metrics.finish(deadline);
+        self.on_observation(|observation, env| observation.ledger.finish(env, deadline));
         // The jobs the loop stopped last (a handoff stops them all), and
         // those a loop that failed leaves running: dropped only after this
         // last write, their ends would not be written.
@@ -1674,7 +1720,7 @@ impl Supervisor<'_> {
             let held = self.cleanup_held();
             self.on_host(|host, env| {
                 host.poll_cleanup(env, &held, true);
-                host.finish_cleanup(env, &held);
+                host.finish_cleanup(env, &held, deadline);
             });
         }
         if self.registration.exec.is_none() {
@@ -1699,6 +1745,19 @@ impl Supervisor<'_> {
             }
         }
         result
+    }
+    /// When the end of the loop stops waiting for its jobs ([`finished_by`]):
+    /// never, or, for a supervisor whose owner is gone, once what is left
+    /// of `grace` is over ([`handoff::owner_gone_left`]).
+    fn end_deadline(&self, grace: Duration) -> Option<Instant> {
+        self.registration.owner_gone.map(|since| {
+            let gone_for = self
+                .generators
+                .clock
+                .monotonic()
+                .saturating_duration_since(since);
+            Instant::now() + handoff::owner_gone_left(gone_for, grace)
+        })
     }
     /// Abandon every headless job still running once the loop ended: the
     /// plan review and the goal review ([`contexts::PlanningState::abandon_jobs`])
@@ -1725,6 +1784,21 @@ impl Supervisor<'_> {
                 }
                 return Err(error);
             }
+            // An owner gone stops this process like a stop request, with
+            // its own reason, but waits for nobody's answer: its runs are
+            // let go and the loop ends within the grace. Looked for in a
+            // drain too, which would otherwise wait for those answers.
+            if self.registration.owner_gone.is_none()
+                && handoff::owner_gone(options.owner, |pid| self.processes.alive(pid))
+            {
+                info!(
+                    "supervisor {}: its owner (pid {}) is gone; it gives its runs back and stops",
+                    self.registration.token,
+                    options.owner.unwrap_or_default()
+                );
+                self.registration.owner_gone = Some(self.generators.clock.monotonic());
+                options.stop.store(true, Ordering::SeqCst);
+            }
             let stopping = options.stop.load(Ordering::SeqCst);
             if stopping && !self.registration.stop_recorded {
                 let runs = self.held_runs();
@@ -1747,6 +1821,30 @@ impl Supervisor<'_> {
             let ending = cleanup::ends_cleanup(stopping, self.registration.handoff.is_some());
             let held = self.cleanup_held();
             self.on_host(|host, env| host.poll_cleanup(env, &held, ending));
+            // After the cleanup was told to end: the loop's end joins it.
+            if let Some(since) = self.registration.owner_gone {
+                self.let_go_for_owner();
+                let gone_for = self
+                    .generators
+                    .clock
+                    .monotonic()
+                    .saturating_duration_since(since);
+                if handoff::owner_gone_ends(
+                    gone_for,
+                    options.owner_gone_grace,
+                    self.claim.slots.len(),
+                ) {
+                    if !self.claim.slots.is_empty() {
+                        warn!(
+                            "supervisor {}: its owner is gone and {} run(s) still validate or land after {}s; their leases go stale with this process",
+                            self.registration.token,
+                            self.claim.slots.len(),
+                            gone_for.as_secs()
+                        );
+                    }
+                    break;
+                }
+            }
             // Every pass, draining or not, so a hold on landings ends as soon
             // as the program is found (ADR-0049 decision 9).
             self.check_run_env_programs()?;
@@ -2066,14 +2164,17 @@ impl Supervisor<'_> {
             thread::sleep(options.tick);
         }
         let held = self.cleanup_held();
-        self.on_host(|host, env| host.finish_cleanup(env, &held));
+        let deadline = self.end_deadline(options.owner_gone_grace);
+        self.on_host(|host, env| host.finish_cleanup(env, &held, deadline));
         if let Some(message) = &self.claim.provisioning_error {
             bail!(
                 "{message}; claiming stopped and {} active run(s) were drained; inspect doctor before recovery",
                 self.finished.len()
             );
         }
-        let outcome = if options.stop.load(Ordering::SeqCst) {
+        let outcome = if self.registration.owner_gone.is_some() {
+            "owner_gone"
+        } else if options.stop.load(Ordering::SeqCst) {
             "stopped"
         } else {
             "finished"

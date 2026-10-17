@@ -251,6 +251,47 @@ fn a_slow_cleanup_does_not_hold_up_the_loop() {
     assert!(payloads_of(&queue, &first, "cleanup_failed").is_empty());
 }
 
+/// A supervisor whose owner (a test's process) is gone exits within its
+/// grace even while its cleanup of an ended run's worktree does not end:
+/// the end of its loop stops waiting for the job, which is left with its
+/// outcomes unrecorded. A supervisor without an owner waits for the
+/// cleanup at its end (`a_slow_cleanup_does_not_hold_up_the_loop`).
+#[test]
+fn a_supervisor_whose_owner_is_gone_does_not_wait_for_a_cleanup_that_does_not_end() {
+    let (_dir, repo, db) = fixture();
+    let backend = Arc::new(TestWorkspace::new(&db, false, BUILDING_AGENT));
+    let files = GatedFiles::default();
+    let mut owner = common::service::StandInOwner::start();
+    let options = files.options(SuperviseOptions {
+        owner: Some(owner.pid()),
+        owner_gone_grace: Duration::from_millis(500),
+        ..supervise_options(1, false)
+    });
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
+    };
+    // The cleanup of the ended run is held, and stays so.
+    let held = files.held();
+    owner.kill();
+    let killed = Instant::now();
+    let outcome = joined(supervisor, "the supervisor whose owner is gone").unwrap();
+    assert_eq!(outcome["outcome"], "owner_gone", "{outcome}");
+    assert!(
+        killed.elapsed() < Duration::from_secs(30),
+        "{:?}",
+        killed.elapsed()
+    );
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    assert!(queue.supervisors().unwrap().is_empty());
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    assert!(held.join("debug/big").is_file());
+    assert!(payloads_of(&queue, &run, "build_outputs_removed").is_empty());
+    // The job left behind ends once the measure goes on.
+    files.open();
+    backend.join();
+}
+
 /// Task 405: a run leased while the cleanup is on another worktree (a
 /// claim of it) is left alone when the cleanup reaches it.
 #[test]

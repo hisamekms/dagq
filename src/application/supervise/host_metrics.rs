@@ -198,10 +198,16 @@ impl HostMetricsWatch {
         self.job = Some(spawn_traced(move || port.record(now, import)));
     }
 
-    /// Wait for the sample job still running, as the loop ends.
-    pub(super) fn finish(&mut self) {
+    /// Wait for the sample job still running, as the loop ends, until
+    /// `deadline` when one is given ([`super::finished_by`]); one still
+    /// running then is left, unrecorded.
+    pub(super) fn finish(&mut self, deadline: Option<Instant>) {
         if let Some(job) = self.job.take() {
-            self.reap(job);
+            if super::finished_by(&job, deadline) {
+                self.reap(job);
+            } else {
+                warn!("the host's sample still runs as the supervisor ends; it is left unrecorded");
+            }
         }
     }
 

@@ -905,11 +905,22 @@ impl HostOpsState {
     /// Once the loop ended: wait for the job and whatever waits for the
     /// next one, and record what they did. After a stop, only the running
     /// job and the rest of a cleanup for room it took on remain; ordinary
-    /// cleanup stops after its current worktree.
-    pub(super) fn finish_cleanup(&mut self, env: &mut HostEnv<'_>, held: &Held) {
+    /// cleanup stops after its current worktree. With a `deadline` (a
+    /// supervisor whose owner is gone, [`super::OWNER_GONE_GRACE`]), a job
+    /// still running then is left, its outcomes unrecorded: a cleanup for
+    /// room goes to its last candidate and may take long.
+    pub(super) fn finish_cleanup(
+        &mut self,
+        env: &mut HostEnv<'_>,
+        held: &Held,
+        deadline: Option<Instant>,
+    ) {
         while let Some(job) = &self.cleanup.job {
-            while !job.handle.is_finished() {
-                thread::sleep(Duration::from_millis(20));
+            if !super::finished_by(&job.handle, deadline) {
+                warn!(
+                    "the cleanup of ended runs' worktrees still runs as the supervisor ends; it is left, its outcomes unrecorded"
+                );
+                return;
             }
             self.poll_cleanup(env, held, false);
         }

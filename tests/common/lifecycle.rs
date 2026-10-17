@@ -93,6 +93,7 @@ pwd >> \"$0.plugin-args\"; exec cat \"$0.plugins\"; fi\nprintf 'claude-stub 0.0.
             claude_config: Some(claude_config),
             user_config: None,
             restart: false,
+            owner: None,
         },
         options: UpOptions {
             no_claude: false,
@@ -191,6 +192,7 @@ impl FakeLaunchd {
             environment: dagq::application::SupervisorEnvironment {
                 path: "/usr/bin".into(),
                 config_home: None,
+                owner: None,
             },
             log: "/dev/null".into(),
         };

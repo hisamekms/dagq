@@ -48,6 +48,80 @@ pub(super) struct Registration {
     /// Whether this process recorded `supervisor_draining` for its stop
     /// request (task 1277): once, on the first pass that saw it.
     pub(super) stop_recorded: bool,
+    /// When this process found its owner gone ([`owner_gone`]), on the
+    /// monotonic clock: it stops for that rather than on a stop request,
+    /// the reason its `supervisor_draining` and `supervisor_stopped`
+    /// record, and lets its runs go instead of draining them
+    /// ([`owner_gone_ends`]).
+    pub(super) owner_gone: Option<Instant>,
+}
+
+/// How long a supervisor whose owner is gone may still wait, from the
+/// pass that found it gone to its exit: for the work it cannot give back
+/// (a validation, a landing, an e2e, the verification of an
+/// `already_satisfied` claim), then for the jobs the end of its loop
+/// joins (the cleanup, the ledger, the host's sample). What still runs
+/// then is left: the leases go stale with its process, and a job's
+/// outcomes are not recorded. Tests shorten it
+/// ([`super::LoopSettings::owner_gone_grace`]).
+pub const OWNER_GONE_GRACE: Duration = Duration::from_secs(60);
+
+/// Whether the loop of a supervisor whose owner has been gone for
+/// `gone_for` ends now, `slots` holding runs after it let go every one it
+/// could: once none is left, or once `grace` is over. Nothing waits for a
+/// person's answer, a headless job or a session: nobody reads them after
+/// the owner (a test) is gone.
+pub(super) fn owner_gone_ends(gone_for: Duration, grace: Duration, slots: usize) -> bool {
+    slots == 0 || gone_for >= grace
+}
+
+/// How long the end of the loop of a supervisor whose owner has been gone
+/// for `gone_for` may still wait for its jobs: what is left of `grace`.
+pub(super) fn owner_gone_left(gone_for: Duration, grace: Duration) -> Duration {
+    grace.saturating_sub(gone_for)
+}
+
+/// What the end of the loop does next with a job it waits for
+/// ([`job_wait`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum JobWait {
+    /// It finished: join it, which does not wait.
+    Join,
+    /// It runs and its deadline is not over: look again.
+    Wait,
+    /// It runs and its deadline is over: leave it running.
+    Leave,
+}
+
+/// [`JobWait`] of a job that `finished` or not, with `left` the time from
+/// now to its deadline (zero once it is over; none waits until the job
+/// finishes: every end but that of a supervisor whose owner is gone).
+pub(super) fn job_wait(finished: bool, left: Option<Duration>) -> JobWait {
+    if finished {
+        JobWait::Join
+    } else if left.is_some_and(|left| left.is_zero()) {
+        JobWait::Leave
+    } else {
+        JobWait::Wait
+    }
+}
+
+/// Whether the process a supervisor stops with is gone
+/// ([`crate::domain::queue_service::OWNER_PID_ENV`], a test's pid), as
+/// `alive` finds it: never without an owner, which is every production
+/// start (`up`'s own environment has none, and nothing else gives one).
+pub(super) fn owner_gone(owner: Option<u32>, alive: impl Fn(u32) -> bool) -> bool {
+    owner.is_some_and(|pid| !alive(pid))
+}
+
+/// The reason a stop is recorded with: the owner's going, or a stop
+/// request.
+const fn stop_reason(owner_gone: bool) -> &'static str {
+    if owner_gone {
+        "owner_gone"
+    } else {
+        "stop_requested"
+    }
 }
 
 /// What the queue's handoff request, read again, makes of the handoff this
@@ -121,7 +195,8 @@ impl Registration {
 
     /// Record, once, that this process drains for a stop request (SIGINT /
     /// SIGTERM, from `down`, the drain of `up` or `install
-    /// --allow-breaking`, or launchd's bootout) (task 1277), with the runs
+    /// --allow-breaking`, or launchd's bootout) (task 1277), or because its
+    /// owner is gone ([`owner_gone`], with that reason), with the runs
     /// its slots hold: a handoff waiting for it fails at once instead of at
     /// its timeout, and the observer reads the stop behind the claims and
     /// resumes it holds. A failed write is only logged and tried again on
@@ -140,7 +215,7 @@ impl Registration {
             "supervisor": self.token,
             "pid": std::process::id(),
             "build": build,
-            "reason": "stop_requested",
+            "reason": stop_reason(self.owner_gone.is_some()),
             "handoff_binary": handoff,
             "runs": runs,
         });
@@ -176,11 +251,14 @@ impl Registration {
         }
         // The mark of the stop; an exec leaves it to the next process's
         // handoff mark.
-        let stopped = json!({
+        let mut stopped = json!({
             "supervisor": self.token,
             "dagq_version": version,
             "outcome": if ok { "stopped" } else { "failed" },
         });
+        if self.owner_gone.is_some() {
+            stopped["reason"] = json!(stop_reason(true));
+        }
         self.heartbeat.stop();
         if let Err(error) =
             queue.prune_supervisor(&self.token, EventKind::SupervisorStopped, &|_| {
@@ -311,6 +389,58 @@ pub(super) fn take_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A supervisor without an owner (every production start: `up`,
+    /// `install`, the automatic update) never stops for one, whatever
+    /// `alive` says, so its life (the handoff's exec, the drain, `up` and
+    /// `down`) is as before; one with an owner stops once it is gone, and
+    /// records that apart from a stop request.
+    #[test]
+    fn only_a_supervisor_with_an_owner_stops_once_the_owner_is_gone() {
+        assert!(!owner_gone(None, |_| false));
+        assert!(!owner_gone(None, |_| true));
+        assert!(!owner_gone(Some(42), |pid| pid == 42));
+        assert!(owner_gone(Some(42), |pid| pid != 42));
+        assert_eq!(stop_reason(false), "stop_requested");
+        assert_eq!(stop_reason(true), "owner_gone");
+    }
+
+    /// A supervisor whose owner is gone ends as soon as it holds no run
+    /// after giving back what it could, whatever its headless jobs or a
+    /// person's answers; the work it cannot give back is waited for only
+    /// within the grace.
+    #[test]
+    fn a_supervisor_whose_owner_is_gone_waits_only_within_the_grace() {
+        let grace = OWNER_GONE_GRACE;
+        let ms = Duration::from_millis(1);
+        assert!(owner_gone_ends(Duration::ZERO, grace, 0));
+        assert!(!owner_gone_ends(Duration::ZERO, grace, 1));
+        assert!(!owner_gone_ends(grace - ms, grace, 2));
+        assert!(owner_gone_ends(grace, grace, 1));
+        assert!(owner_gone_ends(grace + ms, grace, 1));
+        // The end of the loop waits for what is left of the grace, and
+        // for nothing once it is over.
+        assert_eq!(owner_gone_left(Duration::ZERO, grace), grace);
+        assert_eq!(owner_gone_left(grace - ms, grace), ms);
+        assert_eq!(owner_gone_left(grace, grace), Duration::ZERO);
+        assert_eq!(owner_gone_left(grace + ms, grace), Duration::ZERO);
+    }
+
+    /// The end of the loop joins a job that finished, looks again at one
+    /// that runs until its deadline, and leaves it at the deadline; without
+    /// a deadline it waits for the job to finish however long.
+    #[test]
+    fn a_job_is_waited_for_until_its_deadline_and_then_left() {
+        let ms = Duration::from_millis(1);
+        // 1 ms before the deadline, and at it (or past it: nothing left).
+        assert_eq!(job_wait(false, Some(ms)), JobWait::Wait);
+        assert_eq!(job_wait(false, Some(Duration::ZERO)), JobWait::Leave);
+        assert_eq!(job_wait(true, Some(ms)), JobWait::Join);
+        assert_eq!(job_wait(true, Some(Duration::ZERO)), JobWait::Join);
+        // No deadline.
+        assert_eq!(job_wait(false, None), JobWait::Wait);
+        assert_eq!(job_wait(true, None), JobWait::Join);
+    }
 
     /// A handoff request read again keeps, replaces or withdraws the
     /// handoff this process drains for; a pass drains on a stop, a stopped

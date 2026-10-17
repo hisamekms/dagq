@@ -212,10 +212,16 @@ impl LedgerWatch {
         }));
     }
 
-    /// Wait for the pass still running, as the loop ends.
-    pub(super) fn finish(&mut self, env: &mut ObservationEnv<'_>) {
+    /// Wait for the pass still running, as the loop ends, until
+    /// `deadline` when one is given ([`super::finished_by`]); one still
+    /// running then is left, and the next supervisor's ledger catches up.
+    pub(super) fn finish(&mut self, env: &mut ObservationEnv<'_>, deadline: Option<Instant>) {
         if let Some(job) = self.job.take() {
-            self.reap(env, job);
+            if super::finished_by(&job, deadline) {
+                self.reap(env, job);
+            } else {
+                tracing::warn!("the ledger's pass still runs as the supervisor ends; it is left");
+            }
         }
     }
 

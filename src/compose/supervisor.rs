@@ -97,6 +97,13 @@ pub struct SuperviseOptions {
     /// polling for new work.
     pub once: bool,
     pub stop: Arc<AtomicBool>,
+    /// The process the supervisor stops with (`supervise` reads
+    /// [`crate::domain::queue_service::OWNER_PID_ENV`]): a test's; `None`
+    /// in production.
+    pub owner: Option<u32>,
+    /// How long a supervisor whose owner is gone may still wait before it
+    /// exits ([`supervisor::OWNER_GONE_GRACE`]); tests shorten it.
+    pub owner_gone_grace: Duration,
     /// Start the observer job when this long passed since the last one
     /// started or finished (ADR-0024 decision 4); zero disables the
     /// observer, the daily one included.
@@ -377,6 +384,8 @@ impl SuperviseOptions {
             max_waiting: None,
             once,
             stop: Arc::new(AtomicBool::new(false)),
+            owner: None,
+            owner_gone_grace: supervisor::OWNER_GONE_GRACE,
             observe_interval: Duration::ZERO,
             observe_daily: false,
             throughput_review: false,
@@ -493,6 +502,8 @@ impl SuperviseOptions {
             disk,
             resume,
             passes: self.passes.clone(),
+            owner: self.owner,
+            owner_gone_grace: self.owner_gone_grace,
         }
     }
 }

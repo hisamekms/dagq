@@ -195,6 +195,7 @@ serviceは`dagq --db <db> service serve`で、固定バイナリ（`up`かsuperv
 queueのDBが消えれば（使い捨てのqueueの片付け）自分で終わる。
 起動元のenvがownerのpidを名指していれば、そのprocessが居なくなってからも終わる（`domain::queue_service::OWNER_PID_ENV`）。
 これを付けるのはtestだけで、本番の起動元（`up`・supervisor・`service start`）は付けないので、本番のserviceの寿命（supervisorのexecの引き継ぎやdrainの間も動き続けること）は変わらない。
+実バイナリの`supervise`も同じownerで止まり（[supervise](supervisor-lifecycle/supervise.md)）、`up`は自分のenvのownerをlaunchdのsupervisorに渡す（[`up` / `down`](supervisor-lifecycle/up-down.md)）。
 
 - `up`: preflightの後、supervisorより先に`application::queue_service::ensure`を打つ。
   起動できなければ`up`はsupervisorを起動せずに止まる。

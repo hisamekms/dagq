@@ -1597,3 +1597,13 @@ task = 2521
 name = "runtime_review::a_review_that_exits_non_zero_twice_closes_the_session_and_asks_a_person"
 reason = "境界（supervisorの配線）: a failed review closes the session and opens its approve_landing ask with its options through SQLite"
 task = 2521
+
+[[test]]
+name = "cli_version::a_supervisor_stops_by_itself_once_its_owner_is_gone"
+reason = "B 境界（守る境界）: プロセス。実バイナリのsupervisorがSIGKILLされたownerを見て自分でdrainし登録を消すこと（判断はsupervise::handoffのunit test）"
+task = 1808
+
+[[test]]
+name = "cli_version::a_supervisor_handed_over_by_an_exec_keeps_its_owner"
+reason = "B 境界（守る境界）: プロセス。installの引き継ぎのexecがownerのenvを保ち、exec後のsupervisorもownerで止まること"
+task = 1808

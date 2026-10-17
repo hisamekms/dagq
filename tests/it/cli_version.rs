@@ -993,3 +993,206 @@ exec {quoted_bin} \"$@\"\n"
     };
     assert_eq!(exit.code(), Some(3));
 }
+
+/// A queue and a repository with one commit to supervise, and stubs of
+/// cmux and claude beside them.
+struct Supervised {
+    dir: tempfile::TempDir,
+    db: std::path::PathBuf,
+    repo: std::path::PathBuf,
+    cmux: std::path::PathBuf,
+    claude: std::path::PathBuf,
+}
+
+fn supervised() -> Supervised {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("queue").join("queue.db");
+    ok(&db, &["init"]);
+    let repo = dir.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.invalid",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "seed",
+        ],
+    ] {
+        assert!(
+            Command::new(git_executable().expect("git executable"))
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .bounded_status()
+                .unwrap()
+                .success()
+        );
+    }
+    let stub = |name: &str, text: &str| {
+        let path = dir.path().join(name);
+        crate::common::template::script(&path, format!("#!/bin/sh\nprintf '{text}\\n'\n"));
+        path
+    };
+    let (cmux, claude) = (stub("cmux", "PONG"), stub("claude", "stub 1.0"));
+    Supervised {
+        db,
+        repo,
+        cmux,
+        claude,
+        dir,
+    }
+}
+
+impl Supervised {
+    /// `binary`'s `supervise` of the queue, stopping with `owner`
+    /// (`dagq::domain::queue_service::OWNER_PID_ENV`) in place of this
+    /// test's process.
+    fn supervise(&self, binary: &Path, owner: u32) -> common::KillOnDrop {
+        common::KillOnDrop::new(
+            Command::new(binary)
+                .without_actor_env()
+                .env(
+                    dagq::domain::queue_service::OWNER_PID_ENV,
+                    owner.to_string(),
+                )
+                .arg("--db")
+                .arg(&self.db)
+                .args(["supervise", "--observe-interval", "0", "--repo"])
+                .arg(&self.repo)
+                .arg("--cmux")
+                .arg(&self.cmux)
+                .arg("--claude")
+                .arg(&self.claude)
+                .args(FAST_SUPERVISOR)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+            "the supervisor",
+        )
+    }
+
+    fn registered(&self) -> Vec<dagq::domain::SupervisorRegistration> {
+        SqliteQueue::open(&self.db).unwrap().supervisors().unwrap()
+    }
+
+    fn wait_registered(&self) {
+        let started = std::time::Instant::now();
+        while self.registered().is_empty() {
+            assert!(
+                started.elapsed().as_secs() < 30,
+                "the supervisor never registered"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    /// Kill `owner` with SIGKILL and reap it, then wait for the supervisor
+    /// to stop by itself: it leaves no registration and records the
+    /// owner's going as the reason of its stop.
+    fn kill_owner_and_see_the_supervisor_stop(
+        &self,
+        owner: &mut common::service::StandInOwner,
+        supervisor: &mut common::KillOnDrop,
+    ) {
+        owner.kill();
+        let exit = {
+            let _waiting = common::within(
+                std::time::Duration::from_secs(60),
+                "the supervisor to stop once its owner is gone",
+            );
+            supervisor.child().wait().unwrap()
+        };
+        assert!(exit.success(), "{exit:?}");
+        assert!(self.registered().is_empty());
+        let draining = common::service::events(&self.db, "supervisor_draining");
+        assert_eq!(draining.len(), 1, "{draining:?}");
+        assert_eq!(
+            draining[0]["payload"]["reason"], "owner_gone",
+            "{draining:?}"
+        );
+        let stopped = common::service::events(&self.db, "supervisor_stopped");
+        assert_eq!(stopped.len(), 1, "{stopped:?}");
+        assert_eq!(stopped[0]["payload"]["reason"], "owner_gone", "{stopped:?}");
+        assert_eq!(stopped[0]["payload"]["outcome"], "stopped", "{stopped:?}");
+    }
+}
+
+/// A supervisor given an owner (a test's process) stops by itself once
+/// the owner is gone, however it ended (here a SIGKILL, which skips every
+/// drop of the test): it drains, leaves no registration, and records the
+/// owner's going apart from a stop request. One whose owner is gone
+/// already at its start registers nothing.
+#[test]
+fn a_supervisor_stops_by_itself_once_its_owner_is_gone() {
+    let fixture = supervised();
+    let binary = Path::new(env!("CARGO_BIN_EXE_dagq"));
+
+    let mut gone = common::service::StandInOwner::start();
+    let pid = gone.pid();
+    gone.kill();
+    let mut early = fixture.supervise(binary, pid);
+    let exit = {
+        let _waiting = common::within(common::STEP_LIMIT, "the supervisor of a gone owner");
+        early.child().wait().unwrap()
+    };
+    assert!(exit.success(), "{exit:?}");
+    assert!(fixture.registered().is_empty());
+    assert!(common::service::events(&fixture.db, "supervisor_started").is_empty());
+
+    let mut owner = common::service::StandInOwner::start();
+    let mut supervisor = fixture.supervise(binary, owner.pid());
+    fixture.wait_registered();
+    assert_eq!(fixture.registered()[0].pid, supervisor.child().id());
+    fixture.kill_owner_and_see_the_supervisor_stop(&mut owner, &mut supervisor);
+}
+
+/// A supervisor handed over to another binary by `install` (the exec of
+/// the automatic update's handoff too) keeps its owner, since the exec
+/// keeps its environment, and still stops once the owner is gone.
+#[test]
+fn a_supervisor_handed_over_by_an_exec_keeps_its_owner() {
+    let fixture = supervised();
+    let fixed = fixture.dir.path().join("bin").join("dagq");
+    std::fs::create_dir_all(fixed.parent().unwrap()).unwrap();
+    std::fs::copy(env!("CARGO_BIN_EXE_dagq"), &fixed).unwrap();
+    let mut owner = common::service::StandInOwner::start();
+    let mut supervisor = fixture.supervise(&fixed, owner.pid());
+    fixture.wait_registered();
+    let token = fixture.registered()[0].token.clone();
+    let report = ok(
+        &fixture.db,
+        &[
+            "install",
+            "--from",
+            env!("CARGO_BIN_EXE_dagq"),
+            "--to",
+            fixed.to_str().unwrap(),
+            "--handoff-timeout",
+            "60",
+            "--poll-ms",
+            "50",
+        ],
+    );
+    assert_eq!(report["outcome"], "installed", "{report}");
+    assert_eq!(
+        report["supervisors"][0]["token"],
+        token.as_str(),
+        "{report}"
+    );
+    assert_eq!(report["supervisors"][0]["pid"], supervisor.child().id());
+    let handed = common::service::events(&fixture.db, "supervisor_started");
+    assert!(
+        handed
+            .iter()
+            .any(|event| event["payload"]["handoff"] == true),
+        "{handed:?}"
+    );
+    fixture.kill_owner_and_see_the_supervisor_stop(&mut owner, &mut supervisor);
+}

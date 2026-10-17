@@ -201,6 +201,36 @@ impl Supervisor<'_> {
         kept
     }
 
+    /// A pass of a supervisor whose owner is gone (a test's process,
+    /// [`LoopSettings::owner`]): nobody answers its runs' asks or reads
+    /// their work now, so it waits for nothing that has not started. Every
+    /// slot a handoff could rebuild (a run at work or waiting for a person,
+    /// its review, resume, recovery or `/exit`) and a run waiting for the
+    /// landing slot stop their jobs and leave the slots as for a handoff
+    /// whose next process never comes: the leases stay and go stale with
+    /// this process, so a later supervisor adopts the runs (a run without a
+    /// lease is never adopted), and only a recovery's lease is given back
+    /// for the next triage. A validation, a landing, an e2e and the
+    /// verification of an `already_satisfied` claim in progress keep their
+    /// slots until they end or the loop does
+    /// ([`handoff::owner_gone_ends`]).
+    pub(super) fn let_go_for_owner(&mut self) {
+        for mut slot in self.claim.slots.take_all() {
+            if !slot.phase.rebuildable() && !matches!(slot.phase, Phase::AwaitingSlot) {
+                self.claim.slots.admit(slot);
+                continue;
+            }
+            stop_job(&mut slot);
+            let run = slot.run.id().clone();
+            if matches!(slot.phase, Phase::Recovery(_))
+                && let Err(error) = self.queue.release_lease(&run, &self.registration.token)
+            {
+                warn!(run_id = %run, error = %format_args!("{error:#}"), "run {run}: could not release the lease: {error:#}");
+            }
+            info!(run_id = %run, "run {run}: its supervisor's owner is gone; it is left for another supervisor");
+        }
+    }
+
     /// The first step after the exec: a slot for every run whose lease
     /// carries this process's token, rebuilt the way an adopted run's is
     /// (ADR-0039) or from its `handoff.json`. A `needs_session` run without

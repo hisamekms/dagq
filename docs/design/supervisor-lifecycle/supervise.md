@@ -47,8 +47,8 @@ queueはcwdから解決し（[persistence](../persistence.md)のQueue location�
 1. DBのpathを正規化し、checkoutのroot、Git common directoryを取得する。DBはworktree外か、common directory配下に置く（ユーザーDIRのqueueは常に満たす）。worktreeの作成元は`repo_path`に記録したcheckout。
 2. Claudeのpreflightを行う。
 3. queueをrepositoryに束縛する（`bind_repository`）。別repositoryに束縛済みなら開始しない。queue全体の排他はなく、同じqueueに別のsupervisorがいても構わない。
-4. supervisorプロセスのtoken（UUID）を作り、`supervisors`表に自分を登録し（`register_supervisor`）、引き継ぎを受けられる印を付ける（`accept_handoff`）。
-   引き継ぎのexecで起動されたときは新しく登録せず、そのtokenの登録を同じPIDのまま取り戻し（`resume_registration`）、そのtokenのleaseを持つrunのslotを組み立て直す（[Handoff](handoff.md#handoff)）。
+4. supervisorプロセスのtoken（UUID）を作り、`supervisors`表に自分を登録し、引き継ぎを受けられる印を付ける。
+   引き継ぎのexecで起動されたときは新しく登録せず、そのtokenの登録を同じPIDのまま取り戻し、そのtokenのleaseを持つrunのslotを組み立て直す（[Handoff](handoff.md#handoff)）。
    runを1つも持たない常駐supervisorも、この登録で`status`/`doctor`に並ぶ。
    続けて別スレッドで`HEARTBEAT_INTERVAL`ごとにそのtokenの登録と全leaseのheartbeatを1トランザクションで更新する（`heartbeat(token)`）。
    heartbeatの書き込みが他の接続の書き込みのlockでSQLiteのbusy / locked（busy timeoutの`QUEUE_BUSY_TIMEOUT`を待っても取れない）で失敗したときは止めず、次の間隔で書き直す。
@@ -62,6 +62,7 @@ queueはcwdから解決し（[persistence](../persistence.md)のQueue location�
    登録の後、`stall_config_loaded`に続けて変更の印`supervisor_started`を1件記録する（`domain::marks::SUPERVISOR_STARTED`）。
    停止要求（SIGINT/SIGTERM）に最初に気づいたpassでは、drainに入ったことをqueueのevent `supervisor_draining`で1回だけ記録する（[Handoff](handoff.md#handoff)の停止要求の記録と引き継ぎの待ち）。
    loopが終わって登録を消すとき（execするときを除く）は`supervisor_stopped`を記録する。
+   testが付けるownerが居なくなれば答えを待たずrunを手放して止まり、理由を停止要求と分けて記録する（`LoopSettings::owner`）。
    ループの各passでは、環境の検査に続けてsccacheの監視と再起動を行う。
    監視と待ちの入口は`application::supervise::sccache`、serverをsandboxの外で持つ分担と観測の限界は[Run environment](run-environment.md#sccacheのserver)が持つ。
    続けてmain checkoutの`[run.env]`の正規化したhashがqueueの最新の`run_env_changed`と違えば`run_env_changed`を記録する（`Verifier::run_env_table`、hashの鍵はqueueのsaltの`Verifier::run_env_salt`。
@@ -69,7 +70,7 @@ queueはcwdから解決し（[persistence](../persistence.md)のQueue location�
    続けてmain checkoutの`[conflicts]`を読み直す（`Supervisor::reread_conflicts`、ADR-0080・ADR-t774-1・ADR-t775-1）。
    続けて`[supervisor]`を読み直し（flagで明示した値はそのまま）、値が変われば以後のclaimと待ちとruntimeのplannerを立てる判定に使い、登録に書いて`supervisor_config_changed`を記録する（[Run environment](run-environment.md)の`[supervisor]`）。
    続けて`[provider_fallback]`を読み直し、`workers`が変われば以後のclaimの経路とturnの壁の判定に、`jobs`が変われば以後のheadlessのjobの行き先と失敗の後の扱いに使う（[Run environment](run-environment.md)の`[provider_fallback]`、[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)）。
-   続けて`[fresh_session]`を読み直し、変わった閾値を新しいsessionの判定（`next_session`）に使う（[Run environment](run-environment.md)）。
+   続けて`[fresh_session]`を読み直し、変わった閾値を新しいsessionの判定に使う（[Run environment](run-environment.md)）。
    続けて`[ci_watch]`を読み直し、CIの確かめを受け取り・始め（下の「CIの見張り」）、間隔が過ぎていれば今の判定を記録する（[計測](../measurement.md#今の判定の記録)）。
    続けてmainの履歴の動いた分と到達点を記録する（[mainの履歴の記録](../main-history.md)。毎passではGitを読まない）。
    続けて間隔が過ぎていれば、前の周回の後に届いた入力から台帳をjobのthreadで書く（[計測](../measurement.md#台帳を作る係)）。
@@ -151,15 +152,15 @@ workerのsessionはclaimでもresumeでも非対話で、supervisorは依頼をr
     主なものは、着地が終わって`integrated`になったとき、runを`needs_session`にしたとき（終了の依頼とwrapperの停止の後。resumeはleaseを取り直して行う）、`failed`のrunの終了の依頼の後（sessionが非0で終わったrunはすぐ）、`failed` / `interrupted`のrunのtriage（leaseを取り直して行う）が終わったか失敗したとき、concern・reviewの失敗・上限を超えたreviseや衝突の依頼で`approve_landing`のaskを開いたときと、開いたままの`approve_landing`のaskの答えを待つ`awaiting_integration`のrunが検証をやり直したとき（runは`awaiting_integration`のままleaseの無い状態で答えを待つ。[Landing recheck](landing-recheck.md)）、drainやexecの引き継ぎ（[Handoff](handoff.md#handoff)）で持ち続けられないrunを手放すとき、abandon（`lease_released`は書かず`runtime_error`で記録する）である。
 12. **recoverとtriage**（[Triage (supervisor)](triage.md#triage-supervisor)、ADR-0054の決定11、[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定3）: fill passの中で、adoptの後に、`claimed` / `starting` / `running` / `validating`のrunのうち、leaseが無いか、leaseのpidが死んでいて5のadoptの対象にならないもので、processが1つも生きていないもの（`doctor`の`blockers`が空）を`recover`と同じ手順で`interrupted`にする（slotは使わない）。
     持ち主の居ない`integrating`のrun（leaseの行が無いか、leaseがstaleでpidが死んでいる。判定は`landing_release::nobody_lands`）は、`doctor`の`blockers`が空で、worktreeの中で動くプロセス（死んだ着地が残した検証コマンドなど。`run_processes`で、このsupervisor自身の子は除く）も無いときだけ、`recover`と同じ`recover_run`で`awaiting_integration`（leaseなし）に戻して着地スロットを解放し、`auto_repaired`（`repair: landing_released`、欄は`landing_release::released`）を記録する。
-    worktreeにプロセスが残っているときの猶予、猶予の後にpidで止めること、止められないときのinboxのattention（`landing_release_stuck`）は`domain::landing_release`のmodule docが持つ。
+    worktreeにプロセスが残っているときの猶予、猶予の後にpidで止めること、止められないときのinboxのattentionは`domain::landing_release`のmodule docが持つ。
     持ち主の`integrate`は死んでいるのでそのプロセスの結果を読む者はおらず、着地はやり直され（mainに既にあればIntegratorが`landing_found_on_main`にする）、成果は失われない。
     着地そのものは`start_approved_landings`とIntegratorが行う（ADR-0047の3層、ADR-t728-2）。
-    claimを止めてdrainしているsupervisor（fill passを行わない）も、各回でこの解放（`release_dead_landings`）だけは行い、自分の着地を待つrunとdrainが死んだ着地を待たないようにする（列に並んだrunは次のsupervisorが着地させる）。
+    claimを止めてdrainしているsupervisor（fill passを行わない）も、各回でこの解放だけは行い、自分の着地を待つrunとdrainが死んだ着地を待たないようにする（列に並んだrunは次のsupervisorが着地させる）。
     承認されたかreviewがpass済みのrun（Integratorが着地させる条件と同じ`RunHistory::landable`）は`landing_queued`を記録して人を待たずに着地の列に並び（[Review](review.md#review-supervisor)の6の`start_approved_landings`）、そうでないrunは`review_recovered_runs`がleaseを取ってvalidationの直後と同じreviewにかける（そのrunの`approve_landing`のaskが開いていれば、その答えを待つ）。
     回答済みのtriageの`decide`のaskを適用し、空いたslotで`failed` / `interrupted`のrunのtriage（復旧job）を、`needs_session`のresume（試行を使い切ったrunは`failed`にして`decide`のaskにする）とclaimと1つの列で、taskの効く優先度の順に始める（5の「slotを渡す順」、ADR-t1850-1）。
-    休んでいる`already_satisfied`のrunは回収しない（`satisfied::blocks_recovery`）。
+    休んでいる`already_satisfied`のrunは回収しない。
 13. **observer**: 停止要求が無くclaimを止めていなければ、observationの期日が来ていて走っているobserverが無いときに`dagq observe`を子プロセスで起動する（[Observer](observer.md#observer)）。run slotは使わない。
-14. active runも走っているobserverもなく、`once`か停止要求（下記）か、provisioning失敗でclaimを止めていればループを抜ける（走っているobserverもrunと同じく待つ）。
+14. ownerが消えたか、active runも走っているobserverもなく`once`か停止要求（下記）かprovisioning失敗でclaimを止めていればループを抜ける（走っているobserverもrunと同じく待つ）。
     それ以外はactive runがない間は間を置いて（runかjobがある間はtickごとに）`candidates`を見る。
     ループを抜けたら（claimやGitのエラーで抜ける場合も含む）自分の登録の削除と`supervisor_stopped`の記録を1つのトランザクションで行う。
     heartbeat失敗で終わるときと記録に失敗したときは消さず、staleとして次の`up`・`down`の掃除（同じく1つのトランザクション）に任せる。
