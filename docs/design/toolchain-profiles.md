@@ -25,14 +25,14 @@ related:
 言語・道具ごとの知識は、runtimeに組み込んだtoolchainのprofileの実装だけが持ち、projectは`dagq.toml`で使うprofileを宣言する（[ADR-t2268-1](../adr/2026-10-12-t2268-1-toolchain-knowledge-behind-declared-profiles.md)）。
 runtimeのほかのコードは、宣言したprofileをportを通して呼ぶだけで、道具の出力の印やenvの名前を持たない。
 
-**実装状況**: portと登録とRustのprofile、`[toolchains.<name>]`の宣言、検証の出力の読み方（失敗の分類・落ちたtestとflakyのtestの抜き出し・flakyのやり直しのenv）、CIの見張りのJUnitのtestの名前、hostの負荷のprocessの種類、hostのRustのtoolchainの記録とKPIの`toolchain`の軸、landing recheckと自動更新のbuildの出力の置き場と掃除はある。
-計測のコマンドの分類・推奨の設定はまだportに無く、今の場所は[Source repository](supervisor-lifecycle/source-repository.md)の「言語・道具の知識の今の場所」にある。
+**実装状況**: portと登録とRustのprofile、`[toolchains.<name>]`の宣言、検証の出力の読み方（失敗の分類・落ちたtestとflakyのtestの抜き出し・flakyのやり直しのenv）、CIの見張りのJUnitのtestの名前、hostの負荷のprocessの種類、hostのRustのtoolchainの記録とKPIの`toolchain`の軸、landing recheckと自動更新のbuildの出力の置き場と掃除、推奨の設定（宣言・検証のコマンドの組み合わせ・reviewのプログラム）はある。
+計測のコマンドの分類と、containerの材料・registryのhost・workerのcacheのdirの推奨はまだportに無く、今の場所は[Source repository](supervisor-lifecycle/source-repository.md)の「言語・道具の知識の今の場所」にある。
 
 ## portの責務
 
 - portは`domain::toolchain::ToolchainProfile`の1つのtraitで、1つの実装が1つの言語の道具の知識を持つ。
   各methodの意味と、runtimeが呼ぶ順はそのdoc commentが持つ。
-- 今のmethodは、検証のコマンドの出力を読むもの（道具の印から失敗を既存の分類に当てること、落ちたtestと流し直しで通ったtestの名前を読むこと、flakyのやり直しで足すenvを返すこと）と、CIと計測を読むもの（CIの見張りがJUnitのtestを道具の表示と同じ名前にする作り方、hostの負荷で道具のprocessをbuildの道具かcompilerに分けること）と、buildの出力の置き場を返すもの（下の「buildの出力の置き場」）である。
+- 今のmethodは、検証のコマンドの出力を読むもの（道具の印から失敗を既存の分類に当てること、落ちたtestと流し直しで通ったtestの名前を読むこと、flakyのやり直しで足すenvを返すこと）と、CIと計測を読むもの（CIの見張りがJUnitのtestを道具の表示と同じ名前にする作り方、hostの負荷で道具のprocessをbuildの道具かcompilerに分けること）と、buildの出力の置き場を返すもの（下の「buildの出力の置き場」）と、推奨の設定を返すもの（下の「推奨の設定」）である。
   processの種類の列は名前を固定し（`cpu_cargo`・`cpu_rustc`ほか）、profileは閉じた型（`ToolProcess`）でどちらの列かを返す。
   claude・dagq・そのほかは言語に依らないruntimeの共通の分類である（[hostの負荷](supervisor-lifecycle/host-metrics.md)）。
 - hostのRustのtoolchainの記録（claimの`rustc_release`・`rustc_host`）とKPIの`toolchain`の軸と`stats`の`rustc`の欄は、宣言したprofileにRustのprofileがあるときだけ働く（`Toolchains::records_rust_toolchain`）。
@@ -89,6 +89,22 @@ runtimeのほかのコードは、宣言したprofileをportを通して呼ぶ�
 - 自動更新のsource buildはdagq自身の事情なので、宣言に依らずRustのprofileの出力を使う（[Auto-update](supervisor-lifecycle/auto-update.md)）。
 - workerと`integrate`のbuildの出力の置き場は`[run.env]`のprojectの値で、profileは関わらない。
 
+## 推奨の設定
+
+- profileは推奨の設定を`ToolchainProfile::recommendation`で返す（`domain::toolchain::recommend`、ADR-t2268-1決定7）。
+  種類は、宣言を推測する印のfileの名前、taskの`--verify`に渡す検証のコマンドの組み合わせ、reviewのプログラム（`[review.programs.<name>]`のtableとscriptの中身）である。
+  値はその実装の定義のそばに置く。
+- 推奨はruntimeの既定にしない。
+  `dagq.toml`に書かれるまで、どのprofileも働かず、reviewのプログラムも無い（ADR-t2257-1決定1・3）。
+- 案にするprofileは、`dagq.toml`の宣言があればそれ、無ければrepositoryのfileの推測である（`recommend::propose`）。
+  推測は印のfileがrootにあれば全体、下にだけあればそのdirごとの`<dir>/**`をpathsにし、宣言の案に使うだけで有効にしない。
+  宣言が読めない・組み込みに無いprofileを名指す・fileの一覧が取れないときは、案を出さずにその誤りを出す。
+- `dagq init`はmain checkoutの作業ファイルの`dagq.toml`と作業ツリーのfileから案を作り、出力の`recommended.toolchains`に宣言の案・`--verify`・reviewのプログラム・それらを並べた`dagq.toml`の案の文を出すだけで、`dagq.toml`を書かない。
+- `dagq setup-review`はHEADのcommitの`dagq.toml`とfileから案を作る。
+  jobに渡すのは、そのコマンドが書いてよい範囲（`.dagq/review/programs/`の下のscript）に入るreviewのプログラムだけで、範囲の外のscriptの推奨は渡さず案内にだけ出す（`RecommendedProgram::within_setup`）。
+  宣言の案と`--verify`は、宣言がreviewの外のtableで、`--verify`が`dagq.toml`のkeyでなくtaskの登録の値なので、出力の案内にだけ出す。
+  生成の後の変更の範囲の検査は推奨に依らず同じで、推奨が書く範囲を広げない（[setup-review](supervisor-lifecycle/setup-review.md#境界と不変条件)）。
+
 ## 新しいprofileの足し方
 
 - `ToolchainProfile`を実装する型を1つ書き、`domain::toolchain::BUILTIN`の登録に1行足す。
@@ -98,4 +114,4 @@ runtimeのほかのコードは、宣言したprofileをportを通して呼ぶ�
 
 ## テスト
 
-- 偽の2つ目のprofileを実装と登録だけで足し、分類・落ちたtestの抜き出し・やり直しのenv・JUnitのtestの名前・processの種類・buildの出力の置き場と掃除に効くことをtestで確かめ続ける（ADR-t2268-1決定8）。
+- 偽の2つ目のprofileを実装と登録だけで足し、分類・落ちたtestの抜き出し・やり直しのenv・JUnitのtestの名前・processの種類・buildの出力の置き場と掃除・`init`と`setup-review`の推奨の案に効くことをtestで確かめ続ける（ADR-t2268-1決定8）。

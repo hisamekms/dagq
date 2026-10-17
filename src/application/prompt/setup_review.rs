@@ -7,6 +7,7 @@ use crate::domain::{
     review_builtins::{self, BuiltinAgent},
     review_programs::BuiltinProgram,
     setup_review::{CONFIG_FILE, PROGRAMS_DIR, ROOT_FROM_CWD},
+    toolchain::RecommendedProgram,
 };
 
 /// What the job may do: read and edit the files of its temporary place,
@@ -98,6 +99,32 @@ fn builtins() -> String {
     lines.join("\n")
 }
 
+/// The review programs the project's toolchain profiles recommend, each
+/// its table and its script, for the job to write where they fit; none
+/// says nothing.
+fn recommended(programs: &[RecommendedProgram]) -> String {
+    if programs.is_empty() {
+        return String::new();
+    }
+    let mut parts = vec![
+        "The toolchain profiles of the project's languages recommend these programs. Write each \
+         that fits the project, its script at the path given and its table in `dagq.toml`, \
+         adapted to where the project's files are (its `paths`, and where its script runs the \
+         tool, such as the directory of each package when there is none at the root); leave out \
+         one that does not fit or that the project already checks, and say why:"
+            .to_owned(),
+    ];
+    for program in programs {
+        parts.push(format!(
+            "{}`{}`:\n{}",
+            super::fenced("toml", &program.table()),
+            program.script,
+            super::fenced("sh", program.body)
+        ));
+    }
+    format!("{}\n\n", parts.join("\n\n"))
+}
+
 /// The current settings as the prompt carries them, within
 /// [`SETUP_CURRENT_LIMIT`].
 fn current(current: &CurrentSetup) -> String {
@@ -139,8 +166,10 @@ fn current(current: &CurrentSetup) -> String {
 }
 
 /// The prompt of the job: what to read, what to write and where, the
-/// built-ins, and the settings the checkout has now ([`CurrentSetup`]).
-pub fn setup_review_prompt(setup: &CurrentSetup) -> String {
+/// built-ins, the review programs the project's toolchain profiles
+/// recommend (`programs`, only those it may write), and the settings the
+/// checkout has now ([`CurrentSetup`]).
+pub fn setup_review_prompt(setup: &CurrentSetup, programs: &[RecommendedProgram]) -> String {
     let rules_dir = review_builtins::RULES_DIR;
     format!(
         "You set up dagq's review of this repository, once. Your working directory is a \
@@ -175,11 +204,12 @@ pub fn setup_review_prompt(setup: &CurrentSetup) -> String {
          paths, it is not added to them):\n\
          {builtins}\n\
          \n\
-         {current}\n\
+         {recommended}{current}\n\
          \n\
          When you are done, reply with a short summary: each built-in on or off and why, each \
          rules file and program you wrote and what it holds.\n",
         builtins = builtins(),
+        recommended = recommended(programs),
         current = current(setup),
     )
 }
@@ -190,7 +220,7 @@ mod tests {
 
     #[test]
     fn a_repository_without_settings_is_asked_for_new_ones() {
-        let prompt = setup_review_prompt(&CurrentSetup::default());
+        let prompt = setup_review_prompt(&CurrentSetup::default(), &[]);
         assert!(prompt.contains("has no `dagq.toml`"), "{prompt}");
         for name in [
             "builtin:acceptance",
@@ -213,7 +243,7 @@ mod tests {
                 "Tests live in t/.".to_owned(),
             )],
         };
-        let prompt = setup_review_prompt(&setup);
+        let prompt = setup_review_prompt(&setup, &[]);
         assert!(prompt.contains("already has settings"), "{prompt}");
         assert!(prompt.contains("[review.subagents.\"builtin:tests\"]\nenabled = true"));
         assert!(prompt.contains("`.dagq/review/builtin-tests.md`:\n"));
@@ -226,8 +256,25 @@ mod tests {
                 "x".repeat(SETUP_CURRENT_LIMIT + 1),
             )],
         };
-        let prompt = setup_review_prompt(&long);
+        let prompt = setup_review_prompt(&long, &[]);
         assert!(prompt.contains("`.dagq/review/builtin-security.md`: too long"));
         assert!(!prompt.contains(&"x".repeat(SETUP_CURRENT_LIMIT)));
+    }
+
+    #[test]
+    fn the_recommended_programs_are_in_the_prompt() {
+        let program = RecommendedProgram {
+            name: "lint",
+            script: ".dagq/review/programs/lint.sh",
+            paths: &["src/**"],
+            body: "#!/bin/sh\nroot=$(git rev-parse --show-toplevel) || exit 2\n",
+        };
+        let prompt = setup_review_prompt(&CurrentSetup::default(), &[program]);
+        assert!(prompt.contains("recommend these programs"), "{prompt}");
+        assert!(prompt.contains(&program.table()));
+        assert!(prompt.contains("`.dagq/review/programs/lint.sh`:\n"));
+        assert!(prompt.contains(program.body));
+        let none = setup_review_prompt(&CurrentSetup::default(), &[]);
+        assert!(!none.contains("recommend these programs"));
     }
 }

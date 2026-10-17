@@ -3590,7 +3590,10 @@ fn execute(cli: Cli) -> Result<Value> {
             "schema_version": queue.schema_version()?,
             "source": location.source,
             "git_common_dir": common_dir,
-            "recommended": dagq::application::setup_review::recommended(),
+            "recommended": dagq::compose::init_recommended(
+                &cwd,
+                &dagq::domain::toolchain::BUILTIN,
+            ),
         }));
     }
     if let Command::SetupReview {
@@ -3619,6 +3622,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 timeout: Duration::from_secs(*timeout),
                 approval: if *yes { Approval::Given } else { Approval::Ask },
                 dagq: env::current_exe()?,
+                profiles: &dagq::domain::toolchain::BUILTIN,
             },
         );
     }

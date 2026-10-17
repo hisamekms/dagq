@@ -667,9 +667,11 @@ pub(super) fn run_e2e_port(
 
 /// What `setup-review` is run with: the providers' executables (a bare
 /// name is resolved as the throughput review resolves it), Codex's home
-/// (tests), the job's time limit, how the person approves, and the `dagq`
-/// binary.
+/// (tests), the job's time limit, how the person approves, the `dagq`
+/// binary, and the toolchain profiles whose recommendations it proposes
+/// (the built-in ones, and a made-up one beside them in tests).
 pub struct SetupReviewOptions {
+    pub profiles: &'static crate::domain::toolchain::ProfileRegistry,
     pub claude: PathBuf,
     pub codex: PathBuf,
     pub codex_home: Option<PathBuf>,
@@ -718,5 +720,16 @@ pub fn setup_review(db: &Path, cwd: &Path, options: &SetupReviewOptions) -> Resu
             options.timeout,
         ),
         options.approval,
+        options.profiles,
+    )
+}
+
+/// The review's settings `dagq init` recommends in `cwd`
+/// ([`crate::application::setup_review::init_recommended`]) with the
+/// toolchain profiles of `profiles`.
+pub fn init_recommended(cwd: &Path, profiles: &crate::domain::toolchain::ProfileRegistry) -> Value {
+    crate::application::setup_review::init_recommended(
+        &crate::infrastructure::setup_review::LocalInitRepository { cwd },
+        profiles,
     )
 }

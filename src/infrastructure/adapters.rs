@@ -1127,6 +1127,29 @@ pub fn git_common_dir(path: &Path) -> Result<PathBuf> {
         .context("resolve Git common directory")
 }
 
+/// The files of `checkout`'s working tree, tracked or not ignored, as
+/// repository-relative paths: what `dagq init` guesses the toolchain
+/// profiles from.
+pub fn checkout_files(checkout: &Path) -> Result<Vec<String>> {
+    let listed = output(
+        Command::new(git_executable()?)
+            .arg("-C")
+            .arg(checkout)
+            .args([
+                "ls-files",
+                "-z",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+            ]),
+    )?;
+    Ok(listed
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
 /// The main checkout of the repository at `path` (any worktree of it, or
 /// its Git common directory): the main worktree, which `git worktree list`
 /// lists first and whose `dagq.toml` dagq reads. The only place dagq

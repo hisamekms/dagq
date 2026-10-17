@@ -2448,6 +2448,21 @@ pub fn load_toolchains(root: &Path, registry: &ProfileRegistry) -> Result<Toolch
         .with_marks(marks))
 }
 
+/// The `[toolchains.<name>]` the `dagq.toml` in `root` declares, as
+/// written: none without the file. What `dagq init` proposes from
+/// ([`crate::domain::toolchain::recommend::propose`]).
+pub fn load_toolchain_declarations(root: &Path) -> Result<Vec<ToolchainDeclaration>> {
+    let path = root.join(CONFIG_FILE_NAME);
+    Ok(match read_config(&path)? {
+        Some(text) => {
+            parse_config(&text)
+                .with_context(|| format!("parse {}", path.display()))?
+                .toolchains
+        }
+        None => Vec::new(),
+    })
+}
+
 /// The profiles the runtime reads a worker's commands' output with for its
 /// measures (the tests its Claude transcript and its Codex turns name as
 /// failed): the `dagq.toml` of `checkout`, the main checkout of the

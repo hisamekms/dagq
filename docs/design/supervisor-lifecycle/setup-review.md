@@ -18,7 +18,7 @@ related:
 [ADR-t2259-1](../../adr/2026-10-12-t2259-1-builtin-review-agents-and-programs-configured-by-builtin-names.md)決定7の実装。
 人かinboxが打つ`dagq setup-review`は、coding agentにpjを一度だけ読ませてreviewの設定を作らせ、差分を見せ、人が承認したときだけmain checkoutの作業ツリーに書く。
 以降のrunのreviewは、人がcommitしたその設定だけをlanding branchから読む（[Review](review.md#reviewのsubagent)）。
-`dagq init`は推奨の設定（built-inの既定のon/off）とこのコマンドを案内するだけで、agentを起動せず`dagq.toml`も書かない。
+`dagq init`は推奨の設定（built-inの既定のon/offと、toolchainのprofileの推奨）とこのコマンドを案内するだけで、agentを起動せず`dagq.toml`も書かない。
 `dagq doctor`は、pjの規則のfileが無い有効なbuilt-inを出すときにこのコマンドを案内する。
 
 ## 流れ
@@ -29,6 +29,8 @@ related:
 2. 生成のjobを一時のworktreeで起動する。
    promptはbuilt-inとその既定、書いてよいもの、HEADがcommitしている今の設定（`dagq.toml`と`.dagq/review/`の下）を持つ。
    今の設定があれば、それを入力に更新の案を作る。
+   HEADの`dagq.toml`が宣言したtoolchainのprofile（無ければHEADのfileから推測したもの）が推奨するreviewのプログラムのうち、書いてよい範囲に入るものも入力に足す。
+   profileのほかの推奨（宣言の案と`--verify`）はjobに渡さず、出力の`toolchains`に案内として出す（[Toolchain profiles](../toolchain-profiles.md#推奨の設定)）。
 3. jobが終わったら、jobが変えたfileを、場所を作ったときと後の木のbytesの違いとして1度だけ読み（repositoryが無視するfileも含む）、そのbytesを適用の前に下の「境界と不変条件」で検査する。
 4. 同じbytesの差分を見せ、人の承認（端末での確認か、事前の承認の`--yes`）があったときだけ、main checkoutを検査し直してから同じbytesを作業ツリーに書く。
 5. 成否に依らず一時の場所を消す。
@@ -83,5 +85,5 @@ related:
 | 流れと検査の順 | `application::setup_review::setup_review`、hostは`SetupReviewHost`（実装は`infrastructure::setup_review::LocalSetupReview`） |
 | 検査の判断 | `domain::setup_review` |
 | prompt | `application::prompt::setup_review_prompt` |
-| `init`の案内 | `application::setup_review::recommended` |
+| `init`の案内 | `application::setup_review::init_recommended`（repositoryは`InitRepository`、推奨の案は`domain::toolchain::recommend`） |
 | `doctor`の案内 | `application::review::check_agents` |

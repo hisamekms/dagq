@@ -21,6 +21,7 @@ pub mod install;
 pub mod lifecycle;
 pub mod queue;
 pub mod service;
+pub mod setup_review;
 pub mod template;
 pub mod toolchain;
 

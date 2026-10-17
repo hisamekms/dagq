@@ -189,6 +189,7 @@ mod runtime_verify_retry;
 mod runtime_waiting;
 mod runtime_waiting_stages;
 mod setup_review;
+mod setup_review_profiles;
 mod shell_leftovers;
 mod source_repository;
 mod supervisor_without_cmux;

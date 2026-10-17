@@ -27,7 +27,7 @@ use crate::{
         actor_executor::WorkspaceAccess,
         observer::HeadlessAgent,
         prompt::{CurrentSetup, SETUP_REVIEW_ACCESS},
-        setup_review::{Generated, SetupPlace, SetupReviewHost},
+        setup_review::{Generated, InitRepository, SetupPlace, SetupReviewHost},
     },
     domain::{
         ActorContext,
@@ -814,6 +814,29 @@ impl LocalSetupReview<'_> {
     }
 }
 
+/// The repository `dagq init` runs in, at `cwd`: its main checkout, the
+/// `dagq.toml` of its working tree and its files as Git lists them.
+pub struct LocalInitRepository<'a> {
+    pub cwd: &'a Path,
+}
+
+impl InitRepository for LocalInitRepository<'_> {
+    fn checkout(&self) -> Result<PathBuf> {
+        main_checkout_of(self.cwd)
+    }
+
+    fn declarations(
+        &self,
+        checkout: &Path,
+    ) -> Result<Vec<crate::domain::toolchain::ToolchainDeclaration>> {
+        crate::infrastructure::run_env::load_toolchain_declarations(checkout)
+    }
+
+    fn files(&self, checkout: &Path) -> Result<Vec<String>> {
+        crate::infrastructure::adapters::checkout_files(checkout)
+    }
+}
+
 impl SetupReviewHost for LocalSetupReview<'_> {
     fn checkout(&self) -> Result<PathBuf> {
         main_checkout_of(self.cwd).context("setup-review runs in a repository's checkout")
@@ -935,6 +958,30 @@ impl SetupReviewHost for LocalSetupReview<'_> {
 
     fn check_config(&self, text: &str) -> Result<()> {
         crate::infrastructure::run_env::parse_config(text).map(|_| ())
+    }
+
+    fn toolchains(
+        &self,
+        text: &str,
+    ) -> Result<Vec<crate::domain::toolchain::ToolchainDeclaration>> {
+        crate::infrastructure::run_env::parse_config(text).map(|config| config.toolchains)
+    }
+
+    /// `ls-tree` of the commit's objects: no file of the place is read.
+    fn files(&self, checkout: &Path, commit: &str) -> Result<Vec<String>> {
+        let listed = output(git(checkout)?.args([
+            "ls-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            "--full-tree",
+            commit,
+        ]))?;
+        Ok(listed
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned)
+            .collect())
     }
 
     /// Each of `paths` itself, never a directory above it ([`dirty`]):

@@ -4,12 +4,15 @@
 //! build that failed, and whose retry runs with `FAKE_FLAKY=accept`; whose
 //! JUnit names a test `<classname>/<name>`; whose processes are the
 //! build tool `fakebuild` and the compiler `fakec`; and which builds into
-//! the directory `FAKE_OUT` names, `fake-out`. It
+//! the directory `FAKE_OUT` names, `fake-out`; which recommends itself
+//! where a `fake.build` is, `fakebuild check` as the verification, and two
+//! review programs, `fake-lint` under `.dagq/review/programs/` and
+//! `fake-outside` outside it, which `setup-review` may not write. It
 //! is registered beside the built-in ones in [`REGISTRY`], and nothing
 //! else of the runtime knows it (ADR-t2268-1 decision 8).
 use super::{
-    BuildOutput, JunitTestName, ProfileRegistry, ToolCodeClass, ToolHostClass, ToolProcess,
-    ToolchainDeclaration, ToolchainProfile, Toolchains, rust,
+    BuildOutput, JunitTestName, ProfileRegistry, Recommendation, RecommendedProgram, ToolCodeClass,
+    ToolHostClass, ToolProcess, ToolchainDeclaration, ToolchainProfile, Toolchains, rust,
 };
 
 pub static FAKE: Fake = Fake;
@@ -90,6 +93,27 @@ impl ToolchainProfile for Fake {
 
     fn build_output(&self) -> Option<BuildOutput> {
         Some(BUILD_OUTPUT)
+    }
+
+    fn recommendation(&self) -> Recommendation {
+        Recommendation {
+            markers: &["fake.build"],
+            verify: &["fakebuild check"],
+            programs: &[
+                RecommendedProgram {
+                    name: "fake-lint",
+                    script: ".dagq/review/programs/fake-lint.sh",
+                    paths: &["**/*.fake"],
+                    body: "#!/bin/sh\nroot=$(git rev-parse --show-toplevel) || exit 2\nexit 0\n",
+                },
+                RecommendedProgram {
+                    name: "fake-outside",
+                    script: "scripts/fake-outside.sh",
+                    paths: &["**"],
+                    body: "#!/bin/sh\nexit 0\n",
+                },
+            ],
+        }
     }
 }
 

@@ -83,7 +83,8 @@
 //! the command (`<queue dir>/recheck/target` for the landing recheck,
 //! `<queue dir>/update/target` for the automatic update's build).
 use super::{
-    BuildOutput, JunitTestName, ToolCodeClass, ToolHostClass, ToolProcess, ToolchainProfile,
+    BuildOutput, JunitTestName, Recommendation, RecommendedProgram, ToolCodeClass, ToolHostClass,
+    ToolProcess, ToolchainProfile,
 };
 use crate::domain::verify_failure::test_name;
 
@@ -270,7 +271,36 @@ impl ToolchainProfile for Rust {
     fn build_output(&self) -> Option<BuildOutput> {
         Some(BUILD_OUTPUT)
     }
+
+    fn recommendation(&self) -> Recommendation {
+        RECOMMENDATION
+    }
 }
+
+/// What the Rust profile recommends, after this repository's own settings:
+/// a declaration wherever a `Cargo.toml` is; the formatting, the lints
+/// denied as errors and the tests by nextest (whose output the profile
+/// reads, flaky retries included) as a task's verification; and the
+/// formatting as a review program, which builds nothing, so it returns a
+/// run before the review's agents start.
+pub const RECOMMENDATION: Recommendation = Recommendation {
+    markers: &["Cargo.toml"],
+    verify: &[
+        "cargo fmt --all --check",
+        "cargo clippy --locked --all-targets -- -D warnings",
+        "cargo nextest run --locked --workspace",
+    ],
+    programs: &[RecommendedProgram {
+        name: "rustfmt",
+        script: ".dagq/review/programs/rustfmt.sh",
+        paths: &["**/*.rs", "rustfmt.toml", ".rustfmt.toml"],
+        body: "#!/bin/sh\n\
+               # The formatting of the Rust sources, as rustfmt checks it: no build, no test.\n\
+               root=$(git rev-parse --show-toplevel) || exit 2\n\
+               cd \"$root\" || exit 2\n\
+               exec cargo fmt --all --check\n",
+    }],
+};
 
 /// The program and arguments that print the host's Rust toolchain.
 pub const RUSTC_VERSION: (&str, &[&str]) = ("rustc", &["-vV"]);

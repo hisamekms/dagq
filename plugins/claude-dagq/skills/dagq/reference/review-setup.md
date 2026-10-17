@@ -6,9 +6,20 @@ Read this after `init`, when `doctor`'s `agents` names built-ins `without_rules`
 
 A run's review takes the built-in agents' definitions and the built-in programs (`builtin:<name>`) from the dagq binary, never from the repository. The rest it reads from the landing branch's commit, never from a worktree: `dagq.toml`'s settings (which built-ins are on, their paths and provider, and the project's own agents and programs), and each built-in agent's project rules in `.dagq/review/builtin-<name>.md` (the whole review's in `.dagq/review/builtin-acceptance.md`). The rules files are read whether or not `dagq.toml` exists: without it, the built-ins that are on by default run, each with the rules file the commit has, or with none. `init` prints them under `recommended` (`enabled_by_default`), with the command below; it writes no `dagq.toml` and starts no agent.
 
+## The toolchain profiles' proposals
+
+`init` also prints `recommended.toolchains`: what the toolchain profiles built into dagq recommend for the repository. The profiles are those `dagq.toml` declares under `[toolchains.<name>]`, or, when it declares none, those the repository's files suggest (`from` says which; a `Cargo.toml` suggests the Rust profile). Each entry is a proposal for a person to write and commit, and nothing of it works until then:
+
+- `toolchains`: the `[toolchains.<name>]` declaration to add to `dagq.toml` (only when guessed).
+- `verify`: the verification commands to give a task as its `--verify` values when it is registered; they are not a key of `dagq.toml`.
+- `programs`: review programs, each a `[review.programs.<name>]` table (`table`) and its script (`script`, `body`). `setup_review: true` marks those `setup-review` gives its agent; one outside `.dagq/review/programs/` is shown only.
+- `config`: the tables above together, as text to paste into `dagq.toml`.
+
+`error` instead means `dagq.toml` cannot be read or names a profile dagq does not have, or the repository's files could not be listed; fix that first. The proposals assume the tool runs at the repository's root: where the guess gives `paths` below it, adapt the commands and scripts to the directories they apply to. `setup-review` prints the same proposals under `toolchains`.
+
 ## Generating the settings: `setup-review`
 
-`dagq setup-review` has a coding agent read the project once (its instructions, documents, tests, languages and tools) in a temporary checkout of the main checkout's HEAD (written from the commit's objects, so no hook or filter of the repository runs), and write there `dagq.toml`'s built-in and program tables, `.dagq/review/builtin-<name>.md` and `.dagq/review/programs/<name>.sh` (fast checks that run no build or test). The settings the HEAD commits are its input: run it again to update them. Its job runs on `[roles.setup_review]`'s provider (Claude by default) and may only read the queue.
+`dagq setup-review` has a coding agent read the project once (its instructions, documents, tests, languages and tools) in a temporary checkout of the main checkout's HEAD (written from the commit's objects, so no hook or filter of the repository runs), and write there `dagq.toml`'s built-in and program tables, `.dagq/review/builtin-<name>.md` and `.dagq/review/programs/<name>.sh` (fast checks that run no build or test). The settings the HEAD commits are its input: run it again to update them. The review programs the toolchain profiles recommend (above) within `.dagq/review/programs/` are part of its input too; the agent writes those that fit the project, adapted to where its files are. The declaration and the `--verify` commands are never written by it. Its job runs on `[roles.setup_review]`'s provider (Claude by default) and may only read the queue.
 
 Before anyone sees the diff, it refuses (an error, nothing written):
 

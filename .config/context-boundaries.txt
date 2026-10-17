@@ -299,6 +299,7 @@ outer-port | src/application/run_container.rs | RunContainers | execution | inte
 outer-port | src/application/run_container.rs | VerificationContainers | execution | internal | - | the containers the commands of integrate's verification run in, on a clone of the commit that lands; integrate removes what each verification left
 outer-port | src/application/queue_service.rs | ServiceAccess | host | public | execution | not classified by architecture.md; the supervisor issues a token at the claim and the resume
 outer-port | src/application/setup_review.rs | SetupReviewHost | execution | internal | - | the main checkout, the temporary place and the job of setup-review
+outer-port | src/application/setup_review.rs | InitRepository | execution | internal | - | the main checkout, its dagq.toml and its files init proposes the toolchain profiles from
 outer-port | src/application/ci_watch.rs | CiSource | observation | internal | - |
 outer-port | src/application/throughput_review.rs | ThroughputReviewSources | observation | internal | - |
 outer-port | src/application/throughput_review.rs | ThroughputReviewHost | observation | internal | - |

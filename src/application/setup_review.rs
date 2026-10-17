@@ -28,12 +28,15 @@ use crate::domain::{
         CONFIG_FILE, Change, ChangeStatus, SETUP_COMMAND, check_config, check_paths,
         is_program_script, takes_root_from_cwd, visible,
     },
+    toolchain::{ProfileRegistry, ToolchainDeclaration, recommend::Proposed},
 };
 
 /// The review's settings `init` recommends: each built-in with whether it
 /// is on by default (what a repository without `dagq.toml` runs), and the
-/// command that writes the project's rules for them and their settings.
-pub fn recommended() -> Value {
+/// command that writes the project's rules for them and their settings;
+/// and `toolchains`, what the profiles the repository declares, or its
+/// files suggest, recommend ([`Proposed::view`]), shown and never written.
+pub fn recommended(toolchains: &Proposed) -> Value {
     let mut builtins = vec![json!({
         "name": review_builtins::ACCEPTANCE,
         "enabled_by_default": true,
@@ -47,6 +50,7 @@ pub fn recommended() -> Value {
     json!({
         "builtins": builtins,
         "setup": SETUP_COMMAND,
+        "toolchains": toolchains_view(toolchains),
         "note": format!(
             "The review runs the built-ins that are on by default without any {CONFIG_FILE}. \
              Run `{SETUP_COMMAND}` to have a coding agent read the project once and write the \
@@ -55,6 +59,56 @@ pub fn recommended() -> Value {
             review_builtins::RULES_DIR
         ),
     })
+}
+
+/// What `init`'s recommendation reads the repository it runs in through.
+pub trait InitRepository {
+    /// The repository's main checkout.
+    fn checkout(&self) -> Result<PathBuf>;
+    /// The toolchain profiles the `dagq.toml` of `checkout`'s working tree
+    /// declares, as written (none without the file).
+    fn declarations(&self, checkout: &Path) -> Result<Vec<ToolchainDeclaration>>;
+    /// The files of `checkout`'s working tree, tracked or not ignored.
+    fn files(&self, checkout: &Path) -> Result<Vec<String>>;
+}
+
+/// The settings `init` recommends ([`recommended`]), with the toolchain
+/// profiles of `profiles` the main checkout's `dagq.toml` declares, or its
+/// files suggest. Where no main checkout is found (outside a repository,
+/// or a bare one), there is no file to read a declaration or a guess from,
+/// so no profile is proposed and `init` goes on.
+pub fn init_recommended(repository: &dyn InitRepository, profiles: &ProfileRegistry) -> Value {
+    let error = |error: anyhow::Error| format!("{error:#}");
+    let toolchains =
+        match repository.checkout() {
+            Ok(checkout) => crate::domain::toolchain::recommend::propose(
+                profiles,
+                repository.declarations(&checkout).map_err(error),
+                || repository.files(&checkout).map_err(error),
+            ),
+            Err(_) => {
+                crate::domain::toolchain::recommend::propose(profiles, Ok(Vec::new()), || {
+                    Ok(Vec::new())
+                })
+            }
+        };
+    recommended(&toolchains)
+}
+
+/// [`Proposed::view`] with what to do with it: nothing of it works until
+/// a person writes it.
+fn toolchains_view(toolchains: &Proposed) -> Value {
+    let mut view = toolchains.view();
+    if view.get("error").is_none() {
+        view["note"] = json!(format!(
+            "Proposals only: nothing here works until you write it. `toolchains` is the \
+             declaration of the profiles to add to {CONFIG_FILE}; `verify` is the commands to \
+             give a task as its --verify when you register it; `programs` are review programs, \
+             each a table of {CONFIG_FILE} and its script, which `{SETUP_COMMAND}` gives its \
+             agent when `setup_review` is true; `config` is the tables together."
+        ));
+    }
+    view
 }
 
 /// The temporary place of one generation: `tree`, a worktree of the main
@@ -130,6 +184,11 @@ pub trait SetupReviewHost {
     fn changes(&self, place: &SetupPlace) -> Result<(Vec<Generated>, String)>;
     /// Refuse a `dagq.toml` the runtime cannot read.
     fn check_config(&self, text: &str) -> Result<()>;
+    /// The toolchain profiles the `dagq.toml` `text` declares, as the
+    /// runtime reads them.
+    fn toolchains(&self, text: &str) -> Result<Vec<ToolchainDeclaration>>;
+    /// The paths of the files `commit` of `checkout` has.
+    fn files(&self, checkout: &Path, commit: &str) -> Result<Vec<String>>;
     /// Those of `paths` the working tree of `checkout` has changes of that
     /// are not committed (untracked and ignored files included).
     fn uncommitted(&self, checkout: &Path, paths: &[String]) -> Result<Vec<String>>;
@@ -148,13 +207,21 @@ pub trait SetupReviewHost {
     fn remove(&self, checkout: &Path, place: &SetupPlace) -> Result<()>;
 }
 
-/// Run one generation and, approved, apply it (see the module).
-pub fn setup_review(host: &dyn SetupReviewHost, approval: Approval) -> Result<Value> {
+/// Run one generation and, approved, apply it (see the module). The
+/// toolchain profiles of `profiles` the commit declares, or its files
+/// suggest, add their review programs to the job's input; what else they
+/// recommend is only shown.
+pub fn setup_review(
+    host: &dyn SetupReviewHost,
+    approval: Approval,
+    profiles: &ProfileRegistry,
+) -> Result<Value> {
     let checkout = host.checkout()?;
     let place = host.prepare(&checkout)?;
-    let result = host
-        .current(&checkout, &place.commit)
-        .and_then(|current| generate(host, &checkout, &place, &current, approval));
+    let result = host.current(&checkout, &place.commit).and_then(|current| {
+        let toolchains = proposed(host, profiles, &checkout, &place.commit, &current);
+        generate(host, &checkout, &place, &current, &toolchains, approval)
+    });
     let removed = host.remove(&checkout, &place);
     match (result, removed) {
         (Ok(mut value), Err(error)) => {
@@ -169,15 +236,37 @@ pub fn setup_review(host: &dyn SetupReviewHost, approval: Approval) -> Result<Va
     }
 }
 
+/// The profiles `commit`'s `dagq.toml` declares, else those its files
+/// suggest, and what they recommend.
+fn proposed(
+    host: &dyn SetupReviewHost,
+    profiles: &ProfileRegistry,
+    checkout: &Path,
+    commit: &str,
+    current: &CurrentSetup,
+) -> Proposed {
+    let declared = current
+        .config
+        .as_deref()
+        .map_or_else(|| Ok(Vec::new()), |text| host.toolchains(text))
+        .map_err(|error| format!("{error:#}"));
+    crate::domain::toolchain::recommend::propose(profiles, declared, || {
+        host.files(checkout, commit)
+            .map_err(|error| format!("{error:#}"))
+    })
+}
+
 fn generate(
     host: &dyn SetupReviewHost,
     checkout: &Path,
     place: &SetupPlace,
     current: &CurrentSetup,
+    toolchains: &Proposed,
     approval: Approval,
 ) -> Result<Value> {
     let actor = ActorContext::setup_review_job(&place.id);
-    match host.run(place, &setup_review_prompt(current), &actor)? {
+    let prompt = setup_review_prompt(current, &toolchains.setup_programs());
+    match host.run(place, &prompt, &actor)? {
         Some(0) => {}
         exit => bail!(
             "the job that generates the review's settings did not succeed (exit {}); nothing \
@@ -198,6 +287,7 @@ fn generate(
         "diff": diff,
         "approved": null,
         "applied": [],
+        "toolchains": toolchains_view(toolchains),
     });
     if changes.is_empty() {
         value["note"] = json!("the generation changed nothing");
@@ -301,6 +391,7 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::*;
+    use crate::domain::toolchain::{BUILTIN, fake::REGISTRY, recommend::propose};
 
     /// A host whose job "writes" `written` (a path to its text, `None` to
     /// delete it) in its place.
@@ -328,6 +419,10 @@ mod tests {
         asked: RefCell<bool>,
         applied: RefCell<Vec<String>>,
         removed: RefCell<bool>,
+        /// The commit's files.
+        files: Vec<String>,
+        /// The profiles its `dagq.toml` declares.
+        declared: Vec<ToolchainDeclaration>,
     }
 
     fn fake() -> Fake {
@@ -387,6 +482,13 @@ mod tests {
                 bail!("dagq.toml:2: unknown key");
             }
             Ok(())
+        }
+        fn toolchains(&self, _: &str) -> Result<Vec<ToolchainDeclaration>> {
+            Ok(self.declared.clone())
+        }
+        fn files(&self, _: &Path, commit: &str) -> Result<Vec<String>> {
+            assert_eq!(commit, "c0");
+            Ok(self.files.clone())
         }
         fn uncommitted(&self, _: &Path, paths: &[String]) -> Result<Vec<String>> {
             Ok(self
@@ -454,12 +556,33 @@ mod tests {
     }
 
     fn error_of(host: &Fake, approval: Approval) -> String {
-        format!("{:#}", setup_review(host, approval).unwrap_err())
+        format!("{:#}", setup_review(host, approval, &BUILTIN).unwrap_err())
     }
 
     #[test]
     fn init_recommends_the_defaults_and_the_command() {
-        let value = recommended();
+        let toolchains = propose(&REGISTRY, Ok(Vec::new()), || Ok(vec!["fake.build".into()]));
+        let value = recommended(&toolchains);
+        // What the guessed profile recommends is shown, with what to do with it.
+        assert_eq!(value["toolchains"]["from"], "guessed", "{value}");
+        assert_eq!(
+            value["toolchains"]["toolchains"],
+            "[toolchains.fake]\nprofile = \"fake\"\n"
+        );
+        assert_eq!(
+            value["toolchains"]["verify"][0]["commands"],
+            json!(["fakebuild check"])
+        );
+        assert!(
+            value["toolchains"]["note"]
+                .as_str()
+                .unwrap()
+                .contains("Proposals only")
+        );
+        let broken = recommended(&propose(&REGISTRY, Err("dagq.toml:1: bad".into()), || {
+            Ok(Vec::new())
+        }));
+        assert_eq!(broken["toolchains"], json!({"error": "dagq.toml:1: bad"}));
         assert_eq!(value["setup"], "dagq setup-review");
         assert_eq!(
             value["builtins"],
@@ -476,7 +599,7 @@ mod tests {
     fn an_approved_generation_is_applied_and_a_declined_one_is_not() {
         let mut host = generated();
         host.approves = true;
-        let value = setup_review(&host, Approval::Ask).unwrap();
+        let value = setup_review(&host, Approval::Ask, &BUILTIN).unwrap();
         assert!(*host.asked.borrow());
         assert_eq!(value["approved"], json!(true));
         assert_eq!(
@@ -499,7 +622,7 @@ mod tests {
         assert!(*host.removed.borrow());
 
         let declined = generated();
-        let value = setup_review(&declined, Approval::Ask).unwrap();
+        let value = setup_review(&declined, Approval::Ask, &BUILTIN).unwrap();
         assert_eq!(value["approved"], json!(false));
         assert_eq!(value["applied"], json!([]));
         assert!(declined.applied.borrow().is_empty());
@@ -507,7 +630,7 @@ mod tests {
 
         // The flag approves without asking.
         let flagged = generated();
-        let value = setup_review(&flagged, Approval::Given).unwrap();
+        let value = setup_review(&flagged, Approval::Given, &BUILTIN).unwrap();
         assert!(!*flagged.asked.borrow());
         assert_eq!(flagged.applied.borrow().len(), 3, "{value}");
     }
@@ -589,7 +712,7 @@ mod tests {
     fn the_diff_is_shown_with_its_control_characters_escaped() {
         let mut host = generated();
         host.diff = Some("+Tests\x1b[1A\x1b[2K\rok\n");
-        let value = setup_review(&host, Approval::Ask).unwrap();
+        let value = setup_review(&host, Approval::Ask, &BUILTIN).unwrap();
         let escaped = "+Tests\\x1b[1A\\x1b[2K\\rok\n";
         assert_eq!(host.shown.borrow().as_deref(), Some(escaped));
         assert_eq!(value["diff"], escaped);
@@ -645,8 +768,159 @@ mod tests {
         assert!(*host.removed.borrow());
 
         let unchanged = fake();
-        let value = setup_review(&unchanged, Approval::Ask).unwrap();
+        let value = setup_review(&unchanged, Approval::Ask, &BUILTIN).unwrap();
         assert_eq!(value["note"], "the generation changed nothing");
         assert!(!*unchanged.asked.borrow());
+    }
+
+    /// The ToolchainDeclaration of the fake profile over `tool/**`.
+    fn fake_declared() -> Vec<ToolchainDeclaration> {
+        vec![ToolchainDeclaration {
+            name: "tool".into(),
+            profile: "fake".into(),
+            paths: vec!["tool/**".into()],
+            line: 1,
+        }]
+    }
+
+    #[test]
+    fn the_profiles_review_programs_go_into_the_prompt_and_the_rest_is_only_shown() {
+        // Guessed from the commit's files, as nothing is declared.
+        let mut host = generated();
+        host.files = vec!["tool/fake.build".into()];
+        let value = setup_review(&host, Approval::Ask, &REGISTRY).unwrap();
+        let prompt = host.prompts.borrow()[0].clone();
+        assert!(prompt.contains("[review.programs.fake-lint]"), "{prompt}");
+        assert!(prompt.contains(".dagq/review/programs/fake-lint.sh"));
+        // Outside what the job may write: never given to it.
+        assert!(!prompt.contains("fake-outside"), "{prompt}");
+        // Neither the declaration nor the verification goes to the job.
+        assert!(!prompt.contains("fakebuild check"));
+        assert!(!prompt.contains("[toolchains."));
+        let toolchains = &value["toolchains"];
+        assert_eq!(toolchains["from"], "guessed", "{value}");
+        assert_eq!(
+            toolchains["toolchains"],
+            "[toolchains.fake]\nprofile = \"fake\"\npaths = [\"tool/**\"]\n"
+        );
+        assert_eq!(
+            toolchains["verify"][0]["commands"],
+            json!(["fakebuild check"])
+        );
+        assert_eq!(toolchains["programs"][1]["name"], "fake-outside");
+        assert_eq!(toolchains["programs"][1]["setup_review"], false);
+        assert_eq!(value["approved"], false);
+        assert!(host.applied.borrow().is_empty());
+
+        // Declared: the declaration's profile, and nothing guessed.
+        let mut declared = generated();
+        declared.current.config = Some("[toolchains.tool]\nprofile = \"fake\"\n".into());
+        declared.declared = fake_declared();
+        writes(
+            &mut declared,
+            &[(
+                "dagq.toml",
+                Some(
+                    "[toolchains.tool]\nprofile = \"fake\"\n\n[review.subagents.\"builtin:tests\"]\nenabled = true\n",
+                ),
+            )],
+        );
+        let value = setup_review(&declared, Approval::Given, &REGISTRY).unwrap();
+        assert_eq!(value["toolchains"]["from"], "declared");
+        assert_eq!(value["toolchains"]["toolchains"], Value::Null);
+        assert!(declared.prompts.borrow()[0].contains("[review.programs.fake-lint]"));
+        assert_eq!(value["applied"].as_array().unwrap().len(), 3);
+
+        // The built-in profiles alone do not know the fake one: no program.
+        let mut builtin = generated();
+        builtin.files = vec!["tool/fake.build".into()];
+        let value = setup_review(&builtin, Approval::Ask, &BUILTIN).unwrap();
+        assert_eq!(value["toolchains"]["from"], Value::Null);
+        assert!(!builtin.prompts.borrow()[0].contains("fake-lint"));
+    }
+
+    #[test]
+    fn a_recommended_program_written_outside_the_settings_is_refused() {
+        let mut host = generated();
+        host.declared = fake_declared();
+        host.current.config = Some("[toolchains.tool]\nprofile = \"fake\"\n".into());
+        writes(
+            &mut host,
+            &[("scripts/fake-outside.sh", Some("#!/bin/sh\nexit 0\n"))],
+        );
+        let error = format!(
+            "{:#}",
+            setup_review(&host, Approval::Given, &REGISTRY).unwrap_err()
+        );
+        assert!(error.contains("scripts/fake-outside.sh"), "{error}");
+        assert!(host.applied.borrow().is_empty());
+        assert!(*host.removed.borrow());
+    }
+
+    /// A repository for `init`: its checkout, declarations and files, or
+    /// the failure of each.
+    struct Repository {
+        checkout: Option<PathBuf>,
+        declarations: Result<Vec<ToolchainDeclaration>, &'static str>,
+        files: Result<Vec<String>, &'static str>,
+    }
+
+    impl InitRepository for Repository {
+        fn checkout(&self) -> Result<PathBuf> {
+            self.checkout
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("not a checkout"))
+        }
+        fn declarations(&self, checkout: &Path) -> Result<Vec<ToolchainDeclaration>> {
+            assert_eq!(checkout, Path::new("/repo"));
+            self.declarations.clone().map_err(anyhow::Error::msg)
+        }
+        fn files(&self, checkout: &Path) -> Result<Vec<String>> {
+            assert_eq!(checkout, Path::new("/repo"));
+            self.files.clone().map_err(anyhow::Error::msg)
+        }
+    }
+
+    #[test]
+    fn init_proposes_from_the_checkout_and_nothing_without_one() {
+        let repository = |checkout: bool, declarations, files| Repository {
+            checkout: checkout.then(|| PathBuf::from("/repo")),
+            declarations,
+            files,
+        };
+        // Guessed from the files while nothing is declared.
+        let guessed = init_recommended(
+            &repository(true, Ok(Vec::new()), Ok(vec!["fake.build".into()])),
+            &REGISTRY,
+        );
+        assert_eq!(guessed["toolchains"]["from"], "guessed", "{guessed}");
+        assert_eq!(guessed["setup"], "dagq setup-review");
+        // Declared: the declaration, and the files are not needed.
+        let declared = init_recommended(
+            &repository(true, Ok(fake_declared()), Err("not read")),
+            &REGISTRY,
+        );
+        assert_eq!(declared["toolchains"]["from"], "declared", "{declared}");
+        // A dagq.toml that cannot be read, or files that cannot be listed,
+        // is shown as the error.
+        let broken = init_recommended(
+            &repository(true, Err("dagq.toml:1: bad"), Ok(Vec::new())),
+            &REGISTRY,
+        );
+        assert_eq!(broken["toolchains"], json!({"error": "dagq.toml:1: bad"}));
+        let unlisted = init_recommended(
+            &repository(true, Ok(Vec::new()), Err("git failed")),
+            &REGISTRY,
+        );
+        assert_eq!(unlisted["toolchains"], json!({"error": "git failed"}));
+        // No checkout: no profile, no error, and init still recommends.
+        let outside = init_recommended(
+            &repository(false, Err("not read"), Err("not read")),
+            &REGISTRY,
+        );
+        assert_eq!(outside["toolchains"]["from"], Value::Null, "{outside}");
+        assert!(outside["toolchains"].get("error").is_none());
+        assert_eq!(outside["toolchains"]["programs"], json!([]));
+        assert_eq!(outside["builtins"][0]["name"], "builtin:acceptance");
     }
 }

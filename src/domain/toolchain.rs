@@ -19,6 +19,9 @@
 //! language's tools (`claude`, `dagq`, `other`,
 //! [`crate::domain::host_metrics::process_kind`]).
 //!
+//! It also recommends settings a person writes into `dagq.toml`
+//! ([`recommend`]), which work only as written there.
+//!
 //! A new language is one implementation of [`ToolchainProfile`] and one
 //! line in [`BUILTIN`].
 use std::path::Path;
@@ -27,7 +30,10 @@ use serde_json::{Value, json};
 
 use super::{scope::glob_matches, verify_failure::FailureClass, verify_marks::ProjectMark};
 
+pub mod recommend;
 pub mod rust;
+
+pub use recommend::{Recommendation, RecommendedProgram};
 
 #[cfg(test)]
 pub(crate) mod fake;
@@ -159,6 +165,12 @@ pub trait ToolchainProfile: Sync {
     /// the landing recheck's, and the automatic update's build of dagq's
     /// own source. `None` for tools that keep no build output there.
     fn build_output(&self) -> Option<BuildOutput>;
+
+    /// The settings the profile recommends a repository that uses it
+    /// (ADR-t2268-1 decision 7): proposals `dagq init` and `dagq
+    /// setup-review` show ([`recommend`]), never values the runtime uses
+    /// unless `dagq.toml` has them.
+    fn recommendation(&self) -> Recommendation;
 }
 
 /// A profile's build output in a directory of the runtime's: the
