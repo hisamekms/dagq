@@ -19,6 +19,7 @@ related:
   - adr-t1480-1
   - adr-t2182-1
   - adr-t2588-1
+  - adr-t2589-1
   - development-documents
 ---
 
@@ -66,13 +67,25 @@ workerは手元のcargo（`cargo test`・`cargo nextest run`・`cargo clippy`・
 - 表示が上限で省かれたときも、省いた行数とログのpathが出るので、同じくログを狭く読む。
 - 人の手元の検証（上の節）はこの形にしない。
 
+### 実行の記録とreceiptのevidence
+
+workerのturnには、runtimeが手元の検証の記録のdirをenvで渡す。
+`scripts/cargo-brief.sh`は流したコマンドを、`scripts/check-it-test-time.sh`は自分の実行を、そのdirに1回ごとに記録する（コマンド・exit status・その時点の作業treeのtree hash・ログなど。stressと時間の関門には種類の名前を付ける。形はscriptの冒頭）。
+runtimeはreceiptのcommitのtreeと一致する記録だけをreviewの資料に載せ、`dagq.toml`の`[local_checks]`の宣言と差分から、下の「stress」と「itのtestの時間の関門」が要るか（変えたtestが無ければ要らない）を決めて資料に載せる（[ADR-t2589-1](../adr/2026-10-17-t2589-1-local-check-runs-are-recorded-by-project-scripts-and-matched-to-the-receipt-tree.md)、仕組みは[review](../design/supervisor-lifecycle/review.md)）。
+
+- 記録と判定で示せること（流したコマンド・exit status・stressの周回と結果・時間の関門の結果・変えたtestが無いので関門を省いたこと）は、receiptの`tests`のevidenceに書かない。
+- evidenceには記録で示せないことだけを書く: testの範囲を選んだ理由と着地の検証・CIに任せた範囲、流したtestの件数（記録の項目に無く、ログの本文はreviewに渡らない）、流せなかった理由、許可の一覧に足した項目の名前と理由。
+- 検証はcommitの後に流すか、木を止めて流してそのtreeのままcommitする。commitの後に1行でも直せば、記録はそのcommitの根拠にならないので流し直す。1回の実行の間に木を変えた記録も根拠にならない。
+- 記録はworkerが書けるadvisoryなもので、着地の安全は今どおり`integrate`の検証が持つ。workerが手元でstressと時間の関門を流す規則（[ADR-t920-1](../adr/2026-09-28-t920-1-light-worker-stress-and-heavy-repetition-in-scheduled-ci.md)、[ADR-t1707-1](../adr/2026-10-05-t1707-1-time-gate-for-added-or-changed-integration-tests.md)）は変わらない。
+
 ## testの範囲
 
 - 変えた・関係するmoduleを1つずつ`<module>::`で名指しして流す。例: `sh scripts/cargo-brief.sh cargo test --locked --test it <変えた・関係するtestファイルの名前>::`（`tests/it/runtime_claim.rs`なら`sh scripts/cargo-brief.sh cargo test --locked --test it runtime_claim::`。e2eとplugin以外のintegration testは1つのtest binary `it`のmoduleで、ファイル名がmodule名になる。[ADR-0078](../adr/0078-one-integration-test-binary.md)）、`sh scripts/cargo-brief.sh cargo test --locked --lib <module>`。
 - 選び方の目安: 変えた`src/`のmoduleのunit test（`--lib <moduleのパス>`）と、その機能の`tests/it`のmodule（例: `tests/it/runtime_claim.rs`を変えたら`runtime_claim::`、`tests/it/lifecycle_replace.rs`なら`lifecycle_replace::`）。
 - filterはtestの名前（`<module>::<test>`）の部分一致なので、`runtime_`・`lifecycle_`のような接頭辞だけのfilterは多くのmoduleを選ぶ。`--test it`をfilterなしで流さない、接頭辞だけのfilterや多数のmoduleの列挙で`it`の大半を流さない、`--test it --test plugin`を合わせて全体を流さない。
 - `tests/common`や`tests/it/runtime_support`のhelperを変えたら、それを使っているmoduleを流す。使うmoduleが多いときは代表のmodule（数個）に絞り、残りは着地の検証（絞ったITは`tests/common`に触れれば全部のITを流す）とCIに任せたことをreceiptの`tests`のevidenceに書く。
-- これは流す範囲の選び方の手がかりで、全体の`cargo test --locked`と`cargo llvm-cov`をworkerが流さない規則は変わらない。receiptの`tests`のevidenceには流したtestの範囲（コマンドと件数）を書く。
+- これは流す範囲の選び方の手がかりで、全体の`cargo test --locked`と`cargo llvm-cov`をworkerが流さない規則は変わらない。
+- receiptの`tests`のevidenceには、範囲を選んだ理由（着地の検証とCIに任せた範囲を含む）と流したtestの件数を書く。流したコマンドとexit statusと結果は記録が示すので書かない（上の「実行の記録とreceiptのevidence」）。
 
 ## 全体を比べるtest
 
@@ -102,8 +115,8 @@ workerは手元のcargo（`cargo test`・`cargo nextest run`・`cargo clippy`・
 - 1周が15秒を超えるtestを含むときは`--stress-count 5`の代わりに`--stress-duration 60s`にして上限を付ける。
 - 他のrunがhostを使っている負荷の下で流すことに意味があるので、負荷が下がるのを待ってから流さない。
 - 1回でも落ちたら、流し直して通ったことで済ませず、原因（固定の時間の待ち、他のtestとの状態の共有、順序への依存など）を直してからもう一度同じstressを通し、receiptを書く。
-- receiptの`tests`のevidenceに、繰り返したtestの名前・周回数か時間・結果（例: `stress 5 周 × 3 本、15/15 passed`）を書く。
-- 変えたtestが無いrun（docsだけ、testに触らない`src/`の変更など）はstressをせず、しないことと理由（変えたtestが無い）をevidenceに書く。
+- 流したこと・周回・結果は記録が示すので、receiptの`tests`のevidenceに書かない（上の「実行の記録とreceiptのevidence」）。
+- 変えたtestが無いrun（docsだけ、testに触らない`src/`の変更など）はstressをしない。要らないことはruntimeが差分から判定してreviewに渡すので、evidenceにも書かない。runtimeが要るとしたのに流さなかったときは、その理由をevidenceに書く。
 - cargo-nextestはhostに入っている前提（[ADR-t1925-1](../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)決定8。入れ方は[運用](operations.md)の「hostのツール」）で、無ければworkerは入れず、stressをしなかったことと理由（cargo-nextestが無い）をreceiptに書く。
 - これは足した・変えたtestだけをworkerの手元で流すもので、全体の`cargo test --locked`と`cargo llvm-cov`をworkerが流さない規則はそのまま。
 
@@ -130,8 +143,8 @@ workerは手元のcargo（`cargo test`・`cargo nextest run`・`cargo clippy`・
   ```
 
 - exit 1なら、名指されたtestを直すか、testing.mdの条件に当たる理由で許可の一覧に項目を足し、もう一度当てる。どちらもできなければ`failed`のreceiptに理由を書く。
-- receiptの`tests`のevidenceに、コマンドとexit statusと最後の1行（対象・超過・秒の無いものの本数）を書く。足した項目があれば名前と理由も書く。
-- `tests/it`のtestを変えていないrun、stressをしなかったrun（cargo-nextestが無いなど）はscriptを当てず、当てなかったことと理由をevidenceに書く。
+- 当てたこととexit statusは記録が示すので、receiptの`tests`のevidenceに書かない。許可の一覧に項目を足したら、その名前と理由をevidenceに書く。
+- `tests/it`のtestを変えていないrunはscriptを当てず、evidenceにも書かない（要らないことはruntimeが判定する）。stressをしなかったrun（cargo-nextestが無いなど）もscriptを当てず、その理由をevidenceに書く。
 
 ## hostに触らない
 
