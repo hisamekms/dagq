@@ -11,6 +11,8 @@ amends:
   - adr-t1662-3 decision 16
   - adr-t1662-3 decision 18
   - adr-t1662-3 decision 19
+amended_by:
+  - adr-t2589-1
 owners:
   - hisamekms
 tags:
