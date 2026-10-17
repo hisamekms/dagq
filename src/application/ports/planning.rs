@@ -332,7 +332,7 @@ pub trait DraftPlannerStore {
     /// The findings waiting for a planner of the runtime's (ADR-0044
     /// decision 19): `open`, marked for a proposal, no planner open for
     /// it, no `planner_question` about it nobody closed and its planners
-    /// since the mark not used up; the oldest mark first.
+    /// since the mark not used up; the oldest mark first, then by ID.
     fn planner_findings(&self) -> Result<Vec<Finding>>;
     /// Record a planner of the runtime's for `finding`
     /// (`finding_planner_opened`) after re-checking it in the same write

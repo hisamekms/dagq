@@ -60,7 +60,12 @@ impl PlanningState {
     /// the live planner opened for it, as its next turn, once it stopped
     /// after asking,
     /// handed to a new planner when that one is gone (within the limit), or
-    /// closed when the finding moved on.
+    /// closed when the finding moved on. The live planner gets the answer of
+    /// its own question once it went idle after asking, and that of a
+    /// question someone else opened whenever it is idle; the delivery is
+    /// first claimed with `claim_planner_answer`, then the answer is written
+    /// as the planner's next turn's request (nothing is typed into it), and
+    /// once it is written the ask is closed with `ask_delivered`.
     pub(super) fn deliver_finding_answer(
         &mut self,
         env: &mut PlanningEnv<'_>,
@@ -163,7 +168,9 @@ impl PlanningState {
 
     /// Open a planner for each finding waiting for one, the oldest mark
     /// first, while the runtime's planners are below the limit and the
-    /// improvements running below theirs (ADR-0051 decision 25).
+    /// improvements running below theirs (ADR-0051 decision 25). It runs in
+    /// `tend_planners` after the revises, the answers, the planning
+    /// requests' planners and the draft planners, and not in a drain.
     pub(super) fn open_finding_planners(
         &mut self,
         env: &mut PlanningEnv<'_>,

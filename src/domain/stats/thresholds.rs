@@ -584,7 +584,9 @@ pub fn run_ended_resolutions(
 
 /// Whether a `stalled` ask's answer leaves the session alone: `wait`, or
 /// `propose` (ADR-0044 decision 19), which hands the cause to a planner
-/// of the runtime's instead of a person stepping in.
+/// of the runtime's instead of a person stepping in. Either way the
+/// session stays as it is and the watch counts its idle again from the
+/// answer.
 pub fn answer_waits(answer: &str) -> bool {
     answer.trim() == "wait"
         || matches!(

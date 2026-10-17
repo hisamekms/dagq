@@ -816,7 +816,10 @@ impl PlanningState {
     /// Take back a revise whose planner is gone, tell the inbox of a revise
     /// no planner answered within the timeout, deliver every revise not
     /// delivered yet, and end the runtime's planners that are done
-    /// (ADR-0041 decisions 12, 13).
+    /// (ADR-0041 decisions 12, 13). The findings' planners come last: after
+    /// the revises, the answers of `planner_question`s, the planners of the
+    /// planning requests and the draft planners. A draining supervisor
+    /// does not call it, so it opens no planner while it drains.
     fn tend_planners(&mut self, env: &mut PlanningEnv<'_>, options: &LoopSettings) -> Result<()> {
         self.close_person_planners(env);
         if env.jobs.no_claude {

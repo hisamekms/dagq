@@ -25,12 +25,12 @@ related:
 proposalを求める印の付いたfindingごとに、supervisorがruntimeのplannerを1つ立て、plannerがproposalを作ってplan reviewに出すか、findingを`dismissed`にするか、人に聞く。
 人の承認は一律には求めず、人に聞くのはplannerが`planner_question`にしたときとplan reviewが`concern`にしたときだけ。
 use caseは`src/application/supervise/finding_planner.rs`、storeは`src/infrastructure/finding_planners.rs`（port `DraftPlannerStore`に足したメソッド）、規則は`src/domain/finding.rs`、promptは`application::prompt::finding_planner_prompt`。
-run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-supervisor)の`tend_planners`の中で、reviseの配送、`planner_question`のanswerの配送、計画の依頼のplanner、[Draft planners](draft-planners.md#draft-planners-supervisor)の後に進める（drain中は立てない）。
+run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-supervisor)の`tend_planners`の中で進める。
 
 1. **印**: (a) observerが`finding record --propose`で付ける（[Observer](observer.md)）。
    (b) 人がaskに`propose`と答えると、`answer`の同じトランザクションでruntimeが付ける（下の5）。
    印は`open`のfindingにだけ付き、`proposed`のfindingには付かない。
-2. **対象**（`planner_findings`、印の古い順、次にID）: statusが`open`で印があり、閉じていないruntimeのplannerが無く、closeされていない`planner_question`が無く、今の印の後に立てたplannerを使い切っていないfinding。
+2. **対象**（`planner_findings`）: statusが`open`で印があり、閉じていないruntimeのplannerが無く、closeされていない`planner_question`が無く、今の印の後に立てたplannerを使い切っていないfinding。
 3. **立てる**（`open_finding_planners`）: runtimeが立てたplannerで生きているものが上限`runtime_planners`（[Run environment](run-environment.md)の`[supervisor]`。revise・draft・計画の依頼（[inboxからの計画の依頼](plan-planners.md#inboxからの計画の依頼)）のplannerと共有、run slotとは別、人が開いたplannerは数えない）未満のあいだ、`open_finding_planner`で立てる。
    storeは`BEGIN IMMEDIATE`で対象の条件を再検査してから`planners`の行と`finding_planner_opened`を書くので、2つのsupervisorや同じsupervisorの2つのpassが同じfindingに立てない。
    同じトランザクションで改善の数を数え、上限に達していれば何も書かずに`FindingPlannerStart::AtLimit`を返し、そのpassでは後のfindingにも立てない（下の11）。
@@ -47,19 +47,15 @@ run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-sup
    findingの無い`stalled`のaskでは、先にaskのrun（無ければtask、queue）を対象に、askの`ask_opened`を根拠にしたfindingを記録し（同じ種類・対象・subjectの閉じていないfindingがあればその更新）、askに結ぶ。
    `dismiss`はaskのfindingを`dismissed`にする。
    適用したanswerはattentionにならない。
-   `blocked`のaskはその場で閉じ、`stalled`のaskはrunのstallの見張りが閉じる（`propose`は`wait`と同じく、sessionをそのままにしてidleの数え直しを始める）。
+   `blocked`のaskはその場で閉じ、`stalled`のaskはrunのstallの見張りが閉じる。
    それ以外の答えと`planner_question`の答えはここで適用せず、ふだんの行き先に送る。
 6. **submitでの紐づけ**（`submit_linking`、`submit`と同じトランザクション）: `submit --finding`で名指したfindingと、submitしたruntimeのplannerが立てられたfindingを、proposalに紐づける。
-   submitしたplannerは、そのturnの環境の`DAGQ_PLANNER_ID`で引いたplannerの行のbackgroundのhandleで決まり、それがproposalの持ち主になる（`CMUX_WORKSPACE_ID`は、cmuxのworkspaceで動く人のplannerのときだけ使う）。
    `open`のfindingは`proposed`になりproposalを持ち、同じproposalで既に`proposed`（resubmit）は変えない。
    名指したfindingが紐づけられない（他のproposalで`proposed`、`resolved` / `dismissed`）ならsubmit全体が失敗する。
    plannerの自分のfindingは`open`のときだけ紐づける。
    紐づいたproposalはplan review（ADR-0047の決定10〜15）を通る。
    改善のproposalのtaskは個別の優先度を持たずgoalから継ぐ（ADR-t1971-1決定4）。
    plannerの初期promptは`--priority`を付けず、受け入れ条件に要るときだけ`normal`以下の既存のgoalに入れ、ほかは新しいgoal（改善は`normal`以下）かgoalの無いtaskにするよう書き、上限はtaskの値でなくgoalと所属で守る（plan reviewが見て外れれば`revise`）。
-   findingのplannerが作ったtaskは記録の由来が`ai`なので、passの適用がsubmittedのtaskのAIが置いた個別の優先度を外す（[Plan review](plan-review.md)の6の`pass`）。
-   人が作ったtask（`submit --finding`で出したものを含む）と人の出どころの優先度（taskが継ぐgoalのものを含む）には、passも`lower_priority`も触らない。
-   人のconcernへの`ready`の答えと`ready --bypass-review`では外さない。
    follow_upの自動採用の上限（決定16）はfindingのproposalには掛からない（draftの出どころが無いので`check_adoptions`の対象外）。
 7. **終わったproposal**（`settle_findings`、各passで立てる前）: `proposed`のfindingの紐づいたproposalが`canceled`になったか、そのtaskがすべて`completed` / `canceled`になったら、1つ以上`completed`なら`resolved`、1つも無ければ`open`に戻す。
    `open`に戻すときはproposalと印を外すので、もう一度proposalにするには新しい印が要る。
@@ -70,12 +66,10 @@ run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-sup
 9. **planner_question**: `planner_question`はfindingを持てる（taskもrunも無くてよい）。
    answerの行き先（`planner_answer_route`）はfindingで決める。
    runtimeのplannerが一度も立っていないfindingなら人（runtimeのplanner以外の質問）。
-   閉じていないそのfindingのruntimeのplannerがあれば、plannerが自分で作ったaskはplannerがaskの後にidleになってから、他の人が作ったaskはplannerがidleなら、draftと同じく`claim_planner_answer`で配送を取ってから、answerをplannerの次のturnの依頼として書き、`ask_delivered`で閉じる（plannerには何も打ち込まない）。
+   閉じていないそのfindingのruntimeのplannerがあれば、answerはそのplannerに届く。
    無ければ、findingがまだ対象（`open`、印あり、使い切っていない）なら上限の中で新しいplannerがanswerを持って立ち、そうでなければsupervisorが`planner_answer_closed`で閉じる。
    送れなかったときは`ask_delivery_failed`を残し、plannerは人の答え待ちと同じく終わり、answerは新しいplannerが運ぶ（[Draft planners](draft-planners.md)の5）。
    配送のeventはfindingの対象に付き、queueが対象のfindingではqueueのeventになる（`EventKind::is_queue`）。
-   人の答えだけを待って終了の依頼を受けたplanner（10）は行き先にならず、その行が閉じるまでanswerは待つ。
-   前のplannerが人の答えだけを待って終わったなら、answerを運ぶplannerの初期promptにそのnoteと作った・編集したdraftも載り、そのplannerは決めずに終わったときだけ8の回数に数える。
 10. **終わり**: runtimeのplannerは、自分のfindingの`planner_question`のanswerを届ける前と、送ったanswerをまだturnで読み終えていないあいだ（`headless_answer_taken`。[Draft planners](draft-planners.md)の5と同じ）は終了の依頼を受けない。
     それ以外でidleになれば終了の依頼を受けてwrapperがsessionを終え、行は閉じられ、まだ動いているbackgroundのwrapperは止められる（`end_runtime_planners`）。
     runtimeのplannerにcmuxのworkspaceは無く、画面も読まない。
@@ -90,8 +84,7 @@ run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-sup
     上限は`dagq.toml`の`[kpi]`の`max_improvement_proposals`で、supervisorは毎回読み直す。
     合計が上限以上のあいだ、`open_finding_planner`は（人のanswerを運ぶとき以外は）plannerを立てず、findingは`open`のまま待つ。
     eventは書かない。
-    人のanswerを運ぶplannerは、質問したplannerが数えられていたことと人の判断であることから上限を超えて立つ。
-    人が`submit --finding`したproposal（持ち主が`person`。runtimeのproposalを人が出し直すと持ち主が替わり、数えなくなる）とfollow_upのdraftの採否は数えず止めない。
+    人が`submit --finding`したproposal（持ち主が`person`）とfollow_upのdraftの採否は数えず止めない。
     `dagq findings`は改善の数と上限と待つfindingを返し、observerの入力にも同じものが載る。
 12. **test**: `tests/it/finding_planner.rs`がplan reviewのbackendとstubのplan reviewで上の流れを確かめる。
     runtimeのplannerのwrapperはbackgroundに停めてtestが演じ、cmuxのdouble・画面・打ち込みは使わない。

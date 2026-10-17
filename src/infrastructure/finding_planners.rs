@@ -87,7 +87,7 @@ impl SqliteQueue {
     }
 
     /// The findings waiting for a planner of the runtime's, the oldest
-    /// mark first.
+    /// mark first, then by ID.
     pub fn planner_findings(&self) -> Result<Vec<Finding>> {
         let ids: Vec<FindingId> = self
             .conn
@@ -110,7 +110,12 @@ impl SqliteQueue {
     /// records `finding_planner_exhausted` (the inbox's attention) instead.
     /// Without `answer`, no planner is opened while the improvements
     /// running reach `limit` (ADR-0051 decision 25), counted in the same
-    /// transaction.
+    /// transaction. A planner carrying a person's answer is opened past
+    /// that limit and past [`MAX_FINDING_PLANNERS`]: the planner that asked
+    /// was counted already, and the answer is a person's decision. While a
+    /// planner of the finding asked to exit because only a person's answer
+    /// was left still has its row open, no planner carries the answer: the
+    /// answer waits until that row closes.
     pub fn open_finding_planner(
         &mut self,
         finding: FindingId,
@@ -141,9 +146,8 @@ impl SqliteQueue {
         if !eligible {
             return Ok(FindingPlannerStart::Skipped);
         }
-        // A person's answer is carried past the limit, as past
-        // MAX_FINDING_PLANNERS: it is a person's decision, and its planner
-        // stays counted until it submits or ends.
+        // A planner carrying a person's answer stays counted until it
+        // submits or ends.
         if answer.is_none() {
             let improvements = improvement_limit(&tx, limit)?;
             if improvements.reached() {
@@ -197,7 +201,8 @@ impl SqliteQueue {
     }
 
     /// The improvement proposals running against `limit` (ADR-0051
-    /// decision 25).
+    /// decision 25). A proposal of the runtime's that a person submits again
+    /// becomes the person's, and is no longer counted.
     pub fn improvements(&self, limit: usize) -> Result<ImprovementLimit> {
         improvement_limit(&self.conn, limit)
     }
@@ -364,7 +369,8 @@ fn is_target(conn: &Connection, finding: FindingId) -> Result<bool> {
 
 /// The planners of the runtime's opened for the finding since its mark,
 /// but for those asked to exit because only a person's answer was left
-/// (ADR-t1704-1 decision 5).
+/// (ADR-t1704-1 decision 5). A planner that carries a person's answer is
+/// so counted only when it ends without deciding the finding.
 fn planners_since_mark(conn: &Connection, finding: &Finding) -> Result<usize> {
     let count: i64 = conn.query_row(
         "SELECT count(*) FROM planners WHERE finding_id=?1 AND created_at>=?2
@@ -429,7 +435,8 @@ fn proposal_state(
 /// planner while the finding still waits for one (`open`, marked, its
 /// planners not used up); else closed by the supervisor (the finding
 /// moved on). A finding no planner of the runtime's was ever opened for
-/// leaves the answer to a person.
+/// leaves the answer to a person. A planner asked to exit because only a
+/// person's answer was left is no target of the answer.
 pub(super) fn route_of(conn: &Connection, finding: FindingId) -> Result<PlannerAnswerRoute> {
     let planner: Option<PlannerId> = conn
         .query_row(

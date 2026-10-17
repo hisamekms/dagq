@@ -558,7 +558,10 @@ pub fn priority_refusal(task: &PassPriority) -> Option<String> {
 /// decision 4, ADR-t1975-1 decision 7), each with the priority it then
 /// takes from its goal (`normal` without one): the AI's tasks with an own
 /// priority the AI set. A person's task, and a priority a person set, are
-/// kept.
+/// kept. A finding's planner's tasks are the AI's (their record's origin
+/// is `ai`), so a pass takes such a priority off them. Only a pass does:
+/// a `ready` answer to a person's concern and `ready --bypass-review` leave
+/// it.
 pub fn priorities_to_inherit(tasks: &[PassPriority]) -> Vec<(TaskId, Priority)> {
     tasks
         .iter()
