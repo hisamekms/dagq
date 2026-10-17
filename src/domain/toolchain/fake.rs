@@ -2,12 +2,13 @@
 //! `BROKEN <test>` for a failed test, `WOBBLY <test>` for one that passed
 //! on its retry, `HUNG <test>` for one out of time and `NO BUILD` for a
 //! build that failed, and whose retry runs with `FAKE_FLAKY=accept`; whose
-//! JUnit names a test `<classname>/<name>`; and whose processes are the
-//! build tool `fakebuild` and the compiler `fakec`. It
+//! JUnit names a test `<classname>/<name>`; whose processes are the
+//! build tool `fakebuild` and the compiler `fakec`; and which builds into
+//! the directory `FAKE_OUT` names, `fake-out`. It
 //! is registered beside the built-in ones in [`REGISTRY`], and nothing
 //! else of the runtime knows it (ADR-t2268-1 decision 8).
 use super::{
-    JunitTestName, ProfileRegistry, ToolCodeClass, ToolHostClass, ToolProcess,
+    BuildOutput, JunitTestName, ProfileRegistry, ToolCodeClass, ToolHostClass, ToolProcess,
     ToolchainDeclaration, ToolchainProfile, Toolchains, rust,
 };
 
@@ -86,7 +87,17 @@ impl ToolchainProfile for Fake {
             _ => None,
         }
     }
+
+    fn build_output(&self) -> Option<BuildOutput> {
+        Some(BUILD_OUTPUT)
+    }
 }
+
+/// The fake profile's build output.
+pub const BUILD_OUTPUT: BuildOutput = BuildOutput {
+    dir: "fake-out",
+    env: "FAKE_OUT",
+};
 
 /// A repository that declares only the fake profile, over the whole of it.
 pub fn only_fake() -> Toolchains {

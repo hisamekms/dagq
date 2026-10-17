@@ -1447,3 +1447,15 @@ task = 2424
 name = "verification_container::an_already_satisfied_claim_is_verified_in_the_container_and_closes"
 reason = "B 境界（supervisor の配線・Git・プロセス）: already_satisfied の run の snapshot の検証が supervisor の 2 回の pass（検証と close の答えの後の流し直し）を通して fake の podman と実の dagq relay verify で main の head の clone で流れ、引数・token・RUSTC_WRAPPER の外しと event・前の検証の残りの片付け・close を確かめる。container で流すかの判断と部品の呼び順は integrate の unit test"
 task = 2480
+
+# 10.5〜14.3s (stress 5 under the host's load of other runs, task 2270)
+[[test]]
+name = "runtime_recheck::a_recheck_with_no_declared_profile_that_applies_adds_no_build_output"
+reason = "B 境界（Git・dagq.toml・プロセス・supervisor の配線）: main checkout の dagq.toml の [toolchains] を実際に読み、merge した木の git ls-tree と paths の照合で当たる profile が無いとき、実際の scratch worktree で command が build の出力の env を受けず recheck/ の下に dir ができないことを実際の supervisor で確かめる。当て方と env の判断は domain::toolchain と supervise::recheck の unit test"
+task = 2270
+
+# 13.6〜19.9s (stress 60s under the host's load of other runs, task 2270)
+[[test]]
+name = "runtime_recheck::each_declaration_that_applies_builds_in_a_directory_of_its_own"
+reason = "B 境界（Git・dagq.toml・プロセス・supervisor の配線）: main checkout の dagq.toml の 3 つの [toolchains] の宣言を実際に読み、merge した木の git ls-tree と paths の照合で当たる 2 つの宣言の dir だけが recheck/ の下にでき、実際の scratch worktree の command がそれぞれの dir を指す env で 1 回ずつ流れ、落ちた回が finding になることを実際の supervisor で確かめる。dir の名前・実行の分け方・当て方の判断は domain::toolchain と supervise::recheck の unit test"
+task = 2270

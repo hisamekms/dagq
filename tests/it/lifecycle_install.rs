@@ -322,7 +322,14 @@ impl dagq::application::install::Binaries for UpdateBinaries {
         self.note(format!("checkout {} {commit}", checkout.display()));
         Ok(())
     }
-    fn build_into(&self, _: &Path, target: &Path, _: Option<&str>, _: &Path) -> Result<PathBuf> {
+    fn build_into(
+        &self,
+        _: &Path,
+        target: &Path,
+        _: &str,
+        _: Option<&str>,
+        _: &Path,
+    ) -> Result<PathBuf> {
         self.note(format!("build {}", target.display()));
         if self.build_fails {
             bail!("cargo build failed");

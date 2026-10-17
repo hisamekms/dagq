@@ -352,8 +352,10 @@ fn short_while_scratchpad(_: &Path) -> Option<u64> {
 /// as in `a_persons_integrate_counts_the_scratchpads_in_a_runs_size`.
 ///
 /// The build caches of the queue's directory go only in the cleanup for
-/// room, and only the one whose lock is free: the recheck's target is
-/// cleared and counted, and recorded in `build_cache_removed`, while the
+/// room, and only the one whose lock is free: the recheck's build output
+/// of each declaration (here the Rust profile's and a declaration
+/// `core`'s, whatever is declared now) is cleared and counted, and
+/// recorded in `build_cache_removed`, while the
 /// update's target, whose lock the update holds ([`update::hold_target`]),
 /// stays. What else their directories hold stays. Which caches there are,
 /// and that a cache in use, missing or a link is left, are the unit tests
@@ -366,6 +368,7 @@ fn a_cleanup_for_room_removes_the_scratchpads_and_claims_without_holding() {
     let caches = [
         queue_dir.join("update/target/release/big"),
         queue_dir.join("recheck/target/debug/big"),
+        queue_dir.join("recheck/target-core/debug/big"),
     ];
     let kept = [
         queue_dir.join("update/release/bin/dagq"),
@@ -422,16 +425,23 @@ fn a_cleanup_for_room_removes_the_scratchpads_and_claims_without_holding() {
     assert!(!scratchpad.exists());
     assert!(caches[0].is_file(), "the update's target is in use");
     assert!(!caches[1].exists());
+    assert!(!caches[2].exists());
     assert!(queue_dir.join("recheck/target").is_dir());
+    assert!(queue_dir.join("recheck/target-core").is_dir());
     assert!(kept.iter().all(|file| file.is_file()));
     let cleared = queue_events(&db, "build_cache_removed");
-    assert_eq!(cleared.len(), 1, "{cleared:?}");
-    let recheck_target = queue_dir.join("recheck/target").canonicalize().unwrap();
-    assert_eq!(cleared[0]["cache"], "recheck");
-    assert_eq!(cleared[0]["paths"], json!([recheck_target]));
-    assert_eq!(cleared[0]["reason"], "disk_space");
-    let cache_bytes = cleared[0]["bytes"].as_u64().unwrap();
-    assert!(cache_bytes >= SCRATCH as u64, "{cache_bytes}");
+    assert_eq!(cleared.len(), 2, "{cleared:?}");
+    let recheck_targets = ["recheck/target", "recheck/target-core"]
+        .map(|target| queue_dir.join(target).canonicalize().unwrap());
+    let mut cache_bytes = 0;
+    for (cleared, target) in cleared.iter().zip(&recheck_targets) {
+        assert_eq!(cleared["cache"], "recheck");
+        assert_eq!(cleared["paths"], json!([target]));
+        assert_eq!(cleared["reason"], "disk_space");
+        let bytes = cleared["bytes"].as_u64().unwrap();
+        assert!(bytes >= SCRATCH as u64, "{bytes}");
+        cache_bytes += bytes;
+    }
     let removed = queue_events(&db, "scratchpad_removed");
     assert_eq!(removed.len(), 1, "{removed:?}");
     let scratched = removed[0]["bytes"].as_u64().unwrap();
@@ -452,7 +462,7 @@ fn a_cleanup_for_room_removes_the_scratchpads_and_claims_without_holding() {
         worktree[0]["bytes"].as_u64().unwrap() + scratched + tmp_bytes + cache_bytes
     );
     assert_eq!(repaired[0]["detail"]["runs"], json!([first.id().as_str()]));
-    assert_eq!(repaired[0]["detail"]["caches"], json!([recheck_target]));
+    assert_eq!(repaired[0]["detail"]["caches"], json!(recheck_targets));
     assert_eq!(repaired[0]["layer"], "runtime");
     assert_eq!(repaired[0]["conditions"]["free_bytes"], 1);
     let needed = repaired[0]["conditions"]["needed_bytes"].as_u64().unwrap();

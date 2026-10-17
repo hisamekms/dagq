@@ -28,6 +28,7 @@ use super::{
     install::{self, Binaries, E2eGate, E2eSettings, InstallOptions, Source, previous_path},
     lifecycle,
 };
+use crate::domain::toolchain::rust;
 use crate::domain::{
     APPROVE_UPDATE_OPTIONS, AskKind, EventId, HEARTBEAT_TIMEOUT_SECS, RunEvent, SupervisorMode,
     SupervisorRegistration, UPDATE_FAILED_OPTIONS,
@@ -92,8 +93,12 @@ pub fn build_commit(version: &str) -> Option<&str> {
 pub struct UpdatePaths {
     /// `<queue dir>/update/checkout`: a detached worktree of the repository.
     pub checkout: PathBuf,
-    /// `<queue dir>/update/target`: the checkout's `CARGO_TARGET_DIR`.
+    /// The build output of the Rust profile under `<queue dir>/update`
+    /// ([`rust::BUILD_OUTPUT`]): where the build of dagq's own source
+    /// builds, its e2e and the release update's `cargo install` included.
     pub target: PathBuf,
+    /// The variable the build points at `target`: the Rust profile's.
+    pub target_env: &'static str,
     /// `<queue dir>/update/staged/dagq`: a build with a breaking
     /// migration, kept for the `install` a person runs.
     pub staged: PathBuf,
@@ -113,7 +118,8 @@ impl UpdatePaths {
         let root = queue_dir.join("update");
         Self {
             checkout: root.join("checkout"),
-            target: root.join("target"),
+            target: rust::BUILD_OUTPUT.dir_under(&root),
+            target_env: rust::BUILD_OUTPUT.env,
             staged: root.join("staged").join("dagq"),
             release: root.join("release"),
             e2e: root.join("e2e"),
@@ -495,11 +501,12 @@ pub struct JobOptions {
     /// Where the build's output is appended.
     pub log: PathBuf,
     /// A shell command in place of `cargo build --release --locked -p dagq`
-    /// (tests), run in the checkout with
-    /// `CARGO_TARGET_DIR` set.
+    /// (tests), run in the checkout with the variable of
+    /// [`UpdatePaths::target_env`] set to [`UpdatePaths::target`].
     pub build_command: Option<String>,
     /// The e2e the build passes before it is put in place (ADR-t963-1
-    /// decision 1), run in the checkout with `CARGO_TARGET_DIR` set.
+    /// decision 1), run in the checkout building into
+    /// [`UpdatePaths::target`].
     pub e2e: E2eSettings,
     /// The `up` arguments the question of a breaking build hands a person,
     /// beside `--db`: `--cmux`, `--claude`, `--plugin-dir`.
@@ -568,6 +575,7 @@ pub fn run(
             ports.binaries.build_into(
                 &paths.checkout,
                 &paths.target,
+                paths.target_env,
                 options.build_command.as_deref(),
                 &options.log,
             )

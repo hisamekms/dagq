@@ -77,8 +77,21 @@
 //! The host's toolchain a claim records is `release` and `host` of
 //! [`RUSTC_VERSION`] ([`rustc_version`]), run in the main checkout so
 //! that its toolchain file applies.
-use super::{JunitTestName, ToolCodeClass, ToolHostClass, ToolProcess, ToolchainProfile};
+//!
+//! The build output ([`BUILD_OUTPUT`]): cargo builds into the directory
+//! `CARGO_TARGET_DIR` names, `target` under the runtime's directory of
+//! the command (`<queue dir>/recheck/target` for the landing recheck,
+//! `<queue dir>/update/target` for the automatic update's build).
+use super::{
+    BuildOutput, JunitTestName, ToolCodeClass, ToolHostClass, ToolProcess, ToolchainProfile,
+};
 use crate::domain::verify_failure::test_name;
+
+/// cargo's target directory: see the module's doc.
+pub const BUILD_OUTPUT: BuildOutput = BuildOutput {
+    dir: "target",
+    env: "CARGO_TARGET_DIR",
+};
 
 /// The Rust profile, `profile = "rust"`.
 pub static RUST: Rust = Rust;
@@ -252,6 +265,10 @@ impl ToolchainProfile for Rust {
         } else {
             None
         }
+    }
+
+    fn build_output(&self) -> Option<BuildOutput> {
+        Some(BUILD_OUTPUT)
     }
 }
 

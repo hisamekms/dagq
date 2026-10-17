@@ -82,13 +82,13 @@ supervisorはpassの初め（`[run.env]`のprogramの検査の次、drainやhand
 
 ### queueのdirのビルドのキャッシュ
 
-空き容量のための掃除（乗った通常のjobの残りのjobを含む）は、runの後片付けの後に、queueのdirのビルドのキャッシュ2つの中身を消す。
-1つは`update/target`で、自動更新のビルドとe2eの関門、release更新のjobと`install --release`の`cargo install`が`CARGO_TARGET_DIR`に使う。
-もう1つはlanding recheckの`recheck/target`。
+空き容量のための掃除（乗った通常のjobの残りのjobを含む）は、runの後片付けの後に、queueのdirのビルドのキャッシュ（`update/`と`recheck/`の下）の中身を消す。
+1つは`update/target`で、自動更新のビルドとe2eの関門、release更新のjobと`install --release`の`cargo install`がRustのprofileのbuildの出力に使う。
+もう1つはlanding recheckの`recheck/`の下の、組み込みのprofileの宣言ごとのbuildの出力のdirで、宣言を変えても前の宣言のdirが残らないよう、今の宣言に依らずそれに当たるdirを全て見る（`recheck::build_dirs`）。
 どちらも消して作り直せるキャッシュで、sccacheがcompileを共有するので作り直しは速い。
 空きが足りる通常の掃除では消さず、作り直しの時間を払わない。
 
-- 使っている間は消さない: 掃除のjobは`recheck/target`をrecheckのlock（`recheck/lock`）、`update/target`を更新のlock（`update/lock`、`update::hold_target`）を待たずに取れたときだけ消し、消し終わるまで持つ。
+- 使っている間は消さない: 掃除のjobはrecheckのdirをrecheckのlock（`recheck/lock`）、`update/target`を更新のlock（`update/lock`、`update::hold_target`）を待たずに取れたときだけ消し、消し終わるまで持つ。
   取れなければ飛ばし、何も記録せず、次の空き容量のための掃除でまた試す。
 - 消している間は使う側が待つ: recheckは同じlockを待たずに取るので始めず、次の回にやり直す（[Landing recheck](landing-recheck.md)）。
   自動更新のjob、release更新のjob、`install --release`は`update/lock`を待って取るので、消し終わってから始める（[Auto-update](auto-update.md)・[Release update](release-update.md)・[install](install.md)）。

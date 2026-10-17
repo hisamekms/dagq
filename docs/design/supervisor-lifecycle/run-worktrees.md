@@ -92,7 +92,7 @@ worktreeのpathはrun_dirの下の`<runs>/<run-id>/worktree`で、`--repo`のche
   loopは周回の最初にjobが終わっていればjoinし、jobが返した結果からeventを記録する（`cleanup_failed`はプロセスごとにworktreeあたり1回）。
 - 空き容量のための掃除（[空き容量を確かめる](disk-space.md)）も同じjobに乗り、そのjobは最後に`git worktree prune`を行い、loopはこのjobだけはrunと同じく待つ（`supervise --once`がそのjobの後の周回でclaimできるように）。
   別のjobに乗ったときの残りのjob（`Request::counted`）、そのあいだのclaimと着地の控え、次の頼みまでの間隔は[空き容量を確かめる](disk-space.md)の「判定と掃除」が持ち、`supervise --once`のloopは残りのjobも待つ。
-- 空き容量のためのjobと残りのjobは、runの後片付けの後に、queueのdirのビルドのキャッシュ（`update/target`・`recheck/target`）の中身も、それぞれのlockを待たずに取れたときだけ消して`build_cache_removed`（queueのevent）を記録する（[空き容量を確かめる](disk-space.md)の「queueのdirのビルドのキャッシュ」）。
+- 空き容量のためのjobと残りのjobは、runの後片付けの後に、queueのdirのビルドのキャッシュ（`update/`と`recheck/`の下の宣言ごとのbuildの出力）の中身も、それぞれのlockを待たずに取れたときだけ消して`build_cache_removed`（queueのevent）を記録する（[空き容量を確かめる](disk-space.md)の「queueのdirのビルドのキャッシュ」）。
 - stopかhandoffでは、空き容量のためのjobは選んだ最後のworktreeまで処理し、通常のjobは今のworktreeを終えたところで止まる。
   溜めた頼みは捨て、新しいjobは始めない（残りは次のsupervisorの最初の掃除が拾う）。
   ただし、空き容量のための掃除を別のjobに乗せた残り（`Request::counted`）だけは捨てず、走っているjobの後に1回だけjobとして始め、停止の印（`cleanup.stop`）で止めずに選んだ最後のworktreeまで処理する。

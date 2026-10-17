@@ -379,7 +379,8 @@ item | src/domain/run.rs | TaskRun | execution | all | the view of a run, as a v
 item | src/application/supervise/jobs.rs | JobDesk | execution | planning | jobs and providers
 item | src/application/supervise/claim_defer.rs | DeferWatch | execution | planning | the file of the forecast
 item | src/application/supervise/background.rs | stop_swept_wrapper | execution | host | the stop of a wrapper, for the sweep
-item | src/application/supervise/recheck.rs | clear_target | execution | host | under recheck's lock, for the cleaning of free disk
+item | src/application/supervise/recheck.rs | build_dirs | execution | host | the declarations' build outputs, for the cleaning of free disk
+item | src/application/supervise/recheck.rs | clear_targets | execution | host | under recheck's lock, for the cleaning of free disk
 item | src/application/ci_watch.rs | known_failures | observation | execution | to the landing's verification
 item | src/application/ci_watch.rs | run_known_failures | observation | execution | to the worker's prompts and the run's whole review
 item | src/application/supervise/ci_watch.rs | CiWatchState | observation | execution | read held and unreadable only; supervise::ci_watch changes it

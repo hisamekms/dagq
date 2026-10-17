@@ -38,9 +38,9 @@ dagqの開発でだけ要る機能は、queueのrepositoryが「dagqのソース
 この判定に置くのはdagq自身の配布の事情（表の上の3行と、そのinstallと自動更新の前のe2eの関門）だけで、言語・道具の知識は置かない（[ADR-t2268-1](../../adr/2026-10-12-t2268-1-toolchain-knowledge-behind-declared-profiles.md)決定2）。
 言語・道具の知識は`dagq.toml`で宣言したtoolchainのprofile、projectの値は`dagq.toml`、hostの値は`host.toml`、言語に依らない知識（hostの分類の汎用の印、待ち・dagq・gitのコマンドの分類）はruntimeの共通の既定に置く。
 **実装状況**: profileのportと`[toolchains.<名前>]`の宣言はある（[Toolchain profiles](../toolchain-profiles.md)）。
-検証の失敗の分類・落ちたtestとflakyのtestの抜き出し・flakyのやり直しのenv、CIの見張りのJUnitのtestの名前、hostの負荷のprocessの種類、hostの`rustc`とtoolchainの記録とKPIの`toolchain`の軸は、宣言したprofileを通して働く。
+検証の失敗の分類・落ちたtestとflakyのtestの抜き出し・flakyのやり直しのenv、landing recheckと自動更新のbuildの出力の置き場と掃除、CIの見張りのJUnitのtestの名前、hostの負荷のprocessの種類、hostの`rustc`とtoolchainの記録とKPIの`toolchain`の軸は、profileを通して働く。
 宣言の無いrepositoryではRustのprofileが暗黙に当たり、`doctor`と`status`が警告する（ADR-t2268-1決定9）。
-buildの出力の置き場と掃除・計測のコマンドの分類と回数はまだprofileに移っておらず、表の4行目のうちそれらはこの判定で分け、下の「言語・道具の知識の今の場所」はcargoの前提でどのrepositoryでも働く。
+計測のコマンドの分類と回数はまだprofileに移っておらず、表の4行目のうちそれらはこの判定で分け、下の「言語・道具の知識の今の場所」はcargoの前提でどのrepositoryでも働く。
 移行の間も、宣言の無いrepositoryは今のRustの振る舞いのままで、旧い分け方を外すのはこのrepositoryの`dagq.toml`に宣言と規則が入った後である（ADR-t2268-1決定9）。
 
 | 機能 | 決定 | dagqのソース | ソースでないrepository |
@@ -73,7 +73,8 @@ buildの出力の置き場と掃除・計測のコマンドの分類と回数は
 - 検証の失敗の分類と落ちたtest・flakyのtestの抜き出し、flakyのやり直しのenvと受け継いだ値を落とす扱いは、profileに移った（汎用の印は共通の分類、cargo・nextest・rustfmtの印とenvはRustのprofile。[Toolchain profiles](../toolchain-profiles.md)）。
   `tests/common`の`within`の時間切れの行はprojectに固有の印で、共通の分類にもRustのprofileにも置かず、`dagq.toml`の`[verify_marks.<name>]`で宣言する（`domain::verify_marks`）。
   このrepositoryの`dagq.toml`が宣言するまでは、profileも印も宣言しないrepositoryの暗黙の扱いとして当たり、Rustのprofileの暗黙の扱いと一緒に外れる。
-- buildの出力の置き場と掃除: landing recheck（`application::supervise::recheck`）と自動更新。
+- landing recheckと自動更新のbuildの出力の置き場と掃除はprofileに移った（`ToolchainProfile::build_output`）。
+  自動更新のsource buildは宣言に依らずRustのprofileのものを使う。
   workerとintegrateのbuildの出力の置き場は`[run.env]`のprojectの値を`infrastructure::run_env`が読むだけで、runtimeに雛形は無い（決まった形ではprofileの推奨の案として出す。ADR-t2268-1決定1・7）。
 - CIの見張りのJUnitのtestの名前とprocessのcargo・rustcの種類はprofileに移った（`ToolchainProfile`）。
   jobとstepの名前は道具に依らずGitHubのものを読み、claude・dagq・そのほかのprocessの種類はruntimeの共通の既定（`domain::host_metrics::process_kind`）に残す。

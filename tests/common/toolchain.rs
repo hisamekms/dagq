@@ -3,14 +3,15 @@
 //! runtime, which the runtime tests and the CLI tests declare in
 //! `[toolchains.<name>]` with `profile = "made-up"`.
 use dagq::domain::toolchain::{
-    JunitTestName, ProfileRegistry, ToolCodeClass, ToolHostClass, ToolProcess, ToolchainProfile,
-    rust,
+    BuildOutput, JunitTestName, ProfileRegistry, ToolCodeClass, ToolHostClass, ToolProcess,
+    ToolchainProfile, rust,
 };
 
 /// A made-up tool: `BROKEN <test>` failed, `WOBBLY <test>` passed on its
 /// retry, `HUNG <test>` ran out of time; its retry runs with
-/// `MADE_FLAKY=accept`; its JUnit names a test `<classname>#<name>`, and
-/// its build tool is `madebuild`.
+/// `MADE_FLAKY=accept`; its JUnit names a test `<classname>#<name>`, its
+/// build tool is `madebuild`, and it keeps no build output in a directory
+/// of the runtime's.
 pub struct Made;
 
 pub static MADE: Made = Made;
@@ -65,5 +66,8 @@ impl ToolchainProfile for Made {
     }
     fn process_kind(&self, _: &str, name: &str) -> Option<ToolProcess> {
         (name == "madebuild").then_some(ToolProcess::Build)
+    }
+    fn build_output(&self) -> Option<BuildOutput> {
+        None
     }
 }

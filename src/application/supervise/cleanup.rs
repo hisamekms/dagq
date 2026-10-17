@@ -45,9 +45,10 @@
 //! delivered and no turn starts in a worktree being cleaned.
 //!
 //! A cleanup for disk space, and the rest of one, also clears the build
-//! caches of the queue's directory ([`BUILD_CACHES`]): the target
-//! directories of the automatic update and of the landing recheck, which
-//! are built again (sccache shares the compiles). Each only while its lock
+//! caches of the queue's directory ([`build_caches`]): the target
+//! directory of the automatic update and the build output of each
+//! declaration in the landing recheck's directory, which are built again (sccache
+//! shares the compiles). Each only while its lock
 //! is free ([`clear_build_cache`]): the job holds it while it clears, so
 //! what builds there waits, and leaves a cache in use for the next cleanup.
 
@@ -58,6 +59,7 @@ use crate::domain::EventKind;
 use crate::domain::disk::{ProcessExecutable, worktree_executables};
 use crate::domain::event_kind;
 use crate::domain::recovery::{ProcessInfo, run_processes};
+use crate::domain::toolchain::BUILTIN;
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -108,7 +110,7 @@ struct Request {
     /// that wait for an answer with no turn running
     /// ([`WorktreeCleanup::Waiting`]), go too (for disk space).
     idle: bool,
-    /// The [`BUILD_CACHES`] are cleared too (for disk space).
+    /// The [`build_caches`] are cleared too (for disk space).
     caches: bool,
     /// What is removed counts for room as `auto_repaired`: the rest of a
     /// cleanup for room that another job took on. While the disk is short,
@@ -576,51 +578,64 @@ fn worktree_busy(
 /// A build cache of the queue's directory: a target directory something
 /// builds into under its owner's lock, which the cleanup for room clears
 /// through its owner ([`Self::clear_under_lock`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum BuildCache {
     /// The automatic update's target (host operation's own).
     Update,
-    /// The landing recheck's target, which the recheck publishes.
-    Recheck,
+    /// The declarations' build outputs in the landing recheck's
+    /// directory, by their names there, which the recheck publishes
+    /// ([`super::recheck::build_dirs`]) and clears under one lock.
+    Recheck(Vec<String>),
 }
 
-/// The build caches a cleanup for room clears. Their owners clear the
-/// target alone: the rest of their directories (the update's release,
-/// staged build and checkout, the recheck's scratch worktree) stays.
-const BUILD_CACHES: [BuildCache; 2] = [BuildCache::Update, BuildCache::Recheck];
+/// The build caches a cleanup for room clears: the update's target, and
+/// `recheck`, the build outputs in the recheck's directory (one per
+/// declaration of a built-in profile, whatever is declared now). Their
+/// owners clear the target alone: the rest of their directories (the
+/// update's release, staged build and checkout, the recheck's scratch
+/// worktree) stays.
+fn build_caches(recheck: Vec<String>) -> [BuildCache; 2] {
+    [BuildCache::Update, BuildCache::Recheck(recheck)]
+}
 
 impl BuildCache {
     /// `build_cache_removed`'s `cache`.
-    const fn name(self) -> &'static str {
+    const fn name(&self) -> &'static str {
         match self {
             Self::Update => "update",
-            Self::Recheck => "recheck",
+            Self::Recheck(_) => "recheck",
         }
     }
-    /// Run `clear` on the target of the queue at `queue_dir` under its
-    /// owner's lock, taken without waiting ([`update::clear_target`],
-    /// [`super::recheck::clear_target`]): `None` with no target, or while
+    /// Run `clear` on each target of the queue at `queue_dir` under its
+    /// owner's lock, taken once without waiting ([`update::clear_target`],
+    /// [`super::recheck::clear_targets`]): `None` with no target, or while
     /// it is in use.
     fn clear_under_lock<R>(
-        self,
+        &self,
         files: &dyn RunFiles,
         queue_dir: &Path,
-        clear: impl FnOnce(&Path) -> R,
-    ) -> Result<Option<R>> {
+        mut clear: impl FnMut(&Path) -> R,
+    ) -> Result<Option<Vec<R>>> {
         match self {
-            Self::Update => update::clear_target(files, &UpdatePaths::under(queue_dir), clear),
-            Self::Recheck => super::recheck::clear_target(files, queue_dir, clear),
+            Self::Update => Ok(update::clear_target(
+                files,
+                &UpdatePaths::under(queue_dir),
+                |target| clear(target),
+            )?
+            .map(|cleared| vec![cleared])),
+            Self::Recheck(names) => super::recheck::clear_targets(files, queue_dir, names, clear),
         }
     }
 }
 
-/// Clear what `cache`'s target directory holds, keeping the directory:
-/// nothing when there is none (nothing built there, or a link, which is
-/// not followed), and nothing while it is in use (the next cleanup tries
-/// again). Its owner's lock is held until the target is cleared, so
-/// nothing starts to build there meanwhile. The target is measured before
-/// it goes. A lock that cannot be taken fails at the cache's directory.
-fn clear_build_cache(files: &dyn RunFiles, queue_dir: &Path, cache: BuildCache) -> Option<Outcome> {
+/// Clear what each of `cache`'s target directories holds, keeping the
+/// directory: nothing for one there is not (nothing built there, or a
+/// link, which is not followed), and nothing while they are in use (the
+/// next cleanup tries again). Its owner's lock is held until the targets
+/// are cleared, so nothing starts to build there meanwhile. A target is
+/// measured before it goes. A lock that cannot be taken fails at the
+/// cache's directory.
+fn clear_build_cache(files: &dyn RunFiles, queue_dir: &Path, cache: &BuildCache) -> Vec<Outcome> {
     let cleared = cache.clear_under_lock(files, queue_dir, |target| {
         let removed = remove_tree(files, target);
         // Only its contents go: what builds there next finds it.
@@ -635,17 +650,23 @@ fn clear_build_cache(files: &dyn RunFiles, queue_dir: &Path, cache: BuildCache) 
         (target.to_string_lossy().into_owned(), removed)
     });
     match cleared {
-        Ok(None) | Ok(Some((_, Ok(None)))) => None,
-        Ok(Some((path, Ok(Some(bytes))))) => Some(Outcome::BuildCache {
-            name: cache.name(),
-            path,
-            bytes,
-        }),
-        Ok(Some((path, Err(error)))) => Some(Outcome::CacheFailed { path, error }),
-        Err(error) => Some(Outcome::CacheFailed {
+        Ok(None) => Vec::new(),
+        Ok(Some(cleared)) => cleared
+            .into_iter()
+            .filter_map(|(path, removed)| match removed {
+                Ok(None) => None,
+                Ok(Some(bytes)) => Some(Outcome::BuildCache {
+                    name: cache.name(),
+                    path,
+                    bytes,
+                }),
+                Err(error) => Some(Outcome::CacheFailed { path, error }),
+            })
+            .collect(),
+        Err(error) => vec![Outcome::CacheFailed {
             path: queue_dir.join(cache.name()).to_string_lossy().into_owned(),
             error,
-        }),
+        }],
     }
 }
 
@@ -764,7 +785,7 @@ struct JobPorts {
     prune: bool,
     /// Where Claude Code keeps the sessions' scratchpads (task 1100).
     scratchpad_roots: Vec<PathBuf>,
-    /// The queue's directory, whose [`BUILD_CACHES`] the job clears (for
+    /// The queue's directory, whose [`build_caches`] the job clears (for
     /// disk space).
     caches: Option<PathBuf>,
 }
@@ -1138,10 +1159,11 @@ fn run_job(ports: &JobPorts, candidates: Vec<EndedRunWorktree>) -> Vec<Outcome> 
     }
     let mut outcomes = outcomes;
     if let Some(queue_dir) = &ports.caches {
+        let recheck = super::recheck::build_dirs(&*ports.files, queue_dir, &BUILTIN);
         outcomes.extend(
-            BUILD_CACHES
+            build_caches(recheck)
                 .iter()
-                .filter_map(|cache| clear_build_cache(&*ports.files, queue_dir, *cache)),
+                .flat_map(|cache| clear_build_cache(&*ports.files, queue_dir, cache)),
         );
     }
     outcomes
@@ -1795,6 +1817,7 @@ fn may_remove_broken(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::toolchain::fake;
 
     const DISK: DiskRequest = DiskRequest {
         free: Some(1),
@@ -1834,6 +1857,8 @@ mod tests {
         size: Option<u64>,
         fails: bool,
         lock_fails: bool,
+        /// What `read_dir` lists; `None` is no directory.
+        entries: Option<Vec<PathBuf>>,
         done: Mutex<Vec<String>>,
     }
 
@@ -1891,8 +1916,11 @@ mod tests {
         fn exists(&self, _: &Path) -> bool {
             unimplemented!()
         }
-        fn read_dir(&self, _: &Path) -> std::io::Result<Vec<PathBuf>> {
-            unimplemented!()
+        fn read_dir(&self, dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+            self.did("list", dir);
+            self.entries
+                .clone()
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
         }
         fn rename(&self, _: &Path, _: &Path) -> std::io::Result<()> {
             unimplemented!()
@@ -1943,10 +1971,10 @@ mod tests {
                 "/q/update/target",
             ),
             (
-                BuildCache::Recheck,
+                BuildCache::Recheck(vec!["target-tools".to_owned()]),
                 "recheck",
                 "/q/recheck/lock",
-                "/q/recheck/target",
+                "/q/recheck/target-tools",
             ),
         ] {
             let free = CacheFiles {
@@ -1955,8 +1983,8 @@ mod tests {
                 ..CacheFiles::default()
             };
             assert!(matches!(
-                clear_build_cache(&free, q, cache),
-                Some(Outcome::BuildCache { name: n, ref path, bytes: 7 }) if n == name && path == target
+                clear_build_cache(&free, q, &cache).as_slice(),
+                [Outcome::BuildCache { name: n, path, bytes: 7 }] if *n == name && path == target
             ));
             assert_eq!(
                 free.done(),
@@ -1973,16 +2001,16 @@ mod tests {
                 size: Some(7),
                 ..CacheFiles::default()
             };
-            assert!(clear_build_cache(&busy, q, cache).is_none());
+            assert!(clear_build_cache(&busy, q, &cache).is_empty());
             assert_eq!(busy.done(), [format!("lock {lock}")]);
             let missing = CacheFiles::default();
-            assert!(clear_build_cache(&missing, q, cache).is_none());
+            assert!(clear_build_cache(&missing, q, &cache).is_empty());
             assert!(missing.done().is_empty());
             let link = CacheFiles {
                 dir: true,
                 ..CacheFiles::default()
             };
-            assert!(clear_build_cache(&link, q, cache).is_none());
+            assert!(clear_build_cache(&link, q, &cache).is_empty());
             assert_eq!(
                 link.done(),
                 [format!("lock {lock}"), format!("measure {target}")]
@@ -1994,8 +2022,8 @@ mod tests {
                 ..CacheFiles::default()
             };
             assert!(matches!(
-                clear_build_cache(&failing, q, cache),
-                Some(Outcome::CacheFailed { ref path, .. }) if path == target
+                clear_build_cache(&failing, q, &cache).as_slice(),
+                [Outcome::CacheFailed { path, .. }] if path == target
             ));
             let unlockable = CacheFiles {
                 dir: true,
@@ -2003,10 +2031,100 @@ mod tests {
                 ..CacheFiles::default()
             };
             assert!(matches!(
-                clear_build_cache(&unlockable, q, cache),
-                Some(Outcome::CacheFailed { ref path, .. }) if path == &format!("/q/{name}")
+                clear_build_cache(&unlockable, q, &cache).as_slice(),
+                [Outcome::CacheFailed { path, .. }] if path == &format!("/q/{name}")
             ));
         }
+    }
+
+    /// The recheck's build outputs of several declarations are cleared
+    /// under one take of the recheck lock, each its own outcome, so a
+    /// recheck that starts meanwhile finds them all cleared or none; while
+    /// a recheck holds the lock none is.
+    #[test]
+    fn the_recheck_build_outputs_are_cleared_together_under_one_lock() {
+        let q = Path::new("/q");
+        let cache = BuildCache::Recheck(vec!["target".to_owned(), "target-core".to_owned()]);
+        let free = CacheFiles {
+            dir: true,
+            size: Some(7),
+            ..CacheFiles::default()
+        };
+        let cleared: Vec<String> = clear_build_cache(&free, q, &cache)
+            .into_iter()
+            .map(|outcome| match outcome {
+                Outcome::BuildCache {
+                    name: "recheck",
+                    path,
+                    bytes: 7,
+                } => path,
+                _ => panic!("not a cleared recheck cache"),
+            })
+            .collect();
+        assert_eq!(cleared, ["/q/recheck/target", "/q/recheck/target-core"]);
+        let done = free.done();
+        assert_eq!(done.iter().filter(|d| d.starts_with("lock ")).count(), 1);
+        assert_eq!(done[0], "lock /q/recheck/lock");
+        assert!(done.contains(&"remove /q/recheck/target-core".to_owned()));
+        let busy = CacheFiles {
+            dir: true,
+            busy: true,
+            size: Some(7),
+            ..CacheFiles::default()
+        };
+        assert!(clear_build_cache(&busy, q, &cache).is_empty());
+        assert_eq!(busy.done(), ["lock /q/recheck/lock"]);
+    }
+
+    /// The caches cleared are the update's target and, in the recheck's
+    /// directory, the build output of each declaration of a registered
+    /// profile, whatever is declared now (a removed declaration's
+    /// directory included), and nothing else there: a second profile's
+    /// are cleared with nothing but its registration (ADR-t2268-1 decision
+    /// 8). No recheck directory yet leaves the recheck nothing to clear.
+    #[test]
+    fn the_recheck_caches_are_each_declarations_build_output() {
+        let q = Path::new("/q");
+        let listed = CacheFiles {
+            entries: Some(
+                [
+                    "worktree",
+                    "lock",
+                    "dagq-rustc-wrapper",
+                    "target-tools",
+                    "target",
+                    "fake-out-web",
+                ]
+                .iter()
+                .map(|name| Path::new("/q/recheck").join(name))
+                .collect(),
+            ),
+            ..CacheFiles::default()
+        };
+        let recheck = |names: &[&str]| {
+            [
+                BuildCache::Update,
+                BuildCache::Recheck(names.iter().map(|name| (*name).to_owned()).collect()),
+            ]
+        };
+        assert_eq!(
+            build_caches(super::super::recheck::build_dirs(&listed, q, &BUILTIN)),
+            recheck(&["target", "target-tools"])
+        );
+        assert_eq!(listed.done(), ["list /q/recheck"]);
+        assert_eq!(
+            build_caches(super::super::recheck::build_dirs(
+                &listed,
+                q,
+                &fake::REGISTRY
+            )),
+            recheck(&["fake-out-web", "target", "target-tools"])
+        );
+        let none = CacheFiles::default();
+        assert_eq!(
+            build_caches(super::super::recheck::build_dirs(&none, q, &BUILTIN)),
+            recheck(&[])
+        );
     }
 
     /// `build_cache_removed` names the cache, its target and its bytes,

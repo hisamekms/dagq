@@ -47,15 +47,15 @@ supervisorが着地させたrunが`run_integrated`で終わるたびと、main�
   止まったまま`integrating`に残ったrunがあると、それが片付くまでrecheckは始まらない。
   途中の失敗とlockの空き待ちは、何も覚えずに次の回にやり直す。
 - queueのsupervisorの間の排他（ADR-t1310-1）: recheckはqueue dirの`recheck/lock`の排他の`flock`（`RunFiles::try_lock`。待たずに取る）を取ってからだけ始まり、lockは結果を記録した後（`landing_recheck_finished`の後）に手放す。
-  supervisorの着地の予定もmainの動きも同じlockを取るので、supervisorが複数でもscratch worktreeとtargetを使うrecheckはqueueで同時に1つ。
+  supervisorの着地の予定もmainの動きも同じlockを取るので、supervisorが複数でもscratch worktreeとbuildの出力のdirを使うrecheckはqueueで同時に1つ。
   取れなければ始めず、予定は残して次の回にやり直す。
   予定がlockの空きを待つ間は、slotが空でもloopは終わらない（走っているrecheckと同じ扱い。待つのはほかのsupervisorのrecheckが終わるまで）。
   lockを取った後に、最近の`landing_recheck_finished`（`CHECKED_LOOKBACK`）から同じmainを誰が確かめたかを読む: このsupervisorなら何もしない。
   ほかのsupervisorなら、このsupervisorがslotに持つrun（ほかのsupervisorからは見えない）だけを確かめる。
   だれも確かめていなければ対象の全部を確かめる。
   mainの動きを見るsupervisorを1つに選ぶことはしない（drainやhandoffのsupervisorはrecheckを始めないので、生きているほかのsupervisorがmainの動きを確かめる）。
-  空き容量のための掃除も同じlockを待たずに取れたときだけ`recheck/target`の中身を消し、消し終わるまで持つ（[空き容量を確かめる](disk-space.md)の「queueのdirのビルドのキャッシュ」）。
-  recheckが走る間は掃除がtargetに触れず、掃除が消す間はrecheckがlockを取れないので始めず、次の回にやり直す。
+  空き容量のための掃除も同じlockを待たずに取れたときだけ`recheck/`の下の宣言ごとのbuildの出力のdirの中身を消し、消し終わるまで持つ（[空き容量を確かめる](disk-space.md)の「queueのdirのビルドのキャッシュ」）。
+  recheckが走る間は掃除がそのdirに触れず、掃除が消す間はrecheckがlockを取れないので始めず、次の回にやり直す。
   - 着地の名指し: 始めるときのmainが最新の`run_integrated`の`result_commit`なら、そのrunを着地として名指し、`landing_recheck_finished`もそのrunに記録する（予定を作ったのがこのsupervisorの別の着地でも）。
     そうでなければ着地のrunの無い動きとして扱う（下の項）。
   - 着地のrunの無いmainの動き（dagqを通さないpushなど）では、着地のrunを名指さず、`landing_recheck_finished`は確かめた最初のrunに記録する（queue自体のeventは使わない）。
@@ -74,7 +74,10 @@ recheckのthreadが対象を1件ずつ確かめる（`recheck_runs`）。
    衝突すれば`rebase_conflict`で、衝突したpathを持つ。
 2. 衝突が無く、main checkoutの`dagq.toml`の`[recheck] command`（[Run environment](run-environment.md)）があれば、mergeした木を`commit-tree`でmainの上の1 commitにし（refは作らない）、queue dirの`recheck/worktree`に`Repository::checkout_scratch`で出す。
    そこで`/bin/sh`でcommandを実行する。
-   envはそのrunの`[run.env]`に、`CARGO_TARGET_DIR=<queue dir>/recheck/target`を上書きしたもの。
+   envはそのrunの`[run.env]`に、mergeした木に当たる宣言のbuildの出力（`recheck/`の下の宣言ごとのdirとそれを指すenv）を上書きしたもの（`recheck_env`、[Toolchain profiles](../toolchain-profiles.md)の「buildの出力の置き場」）。
+   runtimeはその宣言のdirだけを作り、`[toolchains]`を宣言して当たる宣言が無ければenvを足さずdirを作らない。
+   同じenvの宣言が複数当たれば、commandを宣言ごとのdirで順に流し直し（毎回mergeした木を出し直す）、落ちた回で止めてその回の失敗をfindingにする。
+   宣言の無いrepositoryは移行の間の暗黙のRustのprofileで、宣言の前と同じdirとenvになる（ADR-t2268-1決定9）。
    出力はrun dirのlogに書く（`recheck_runs`）。
    非0の終了は`verification_failed`である。
    失敗はintegrateの検証と同じ分類（[integrate](integrate.md)）で、hostの失敗とコードの失敗に分ける。
@@ -85,9 +88,9 @@ recheckのthreadが対象を1件ずつ確かめる（`recheck_runs`）。
    そのcontainerを使えないとき（verificationのruntimeがhost、containerが使えない、用意できない、podmanがcontainerを起動しない）はhostにもどこにも流さない（下の「見つかったとき」）。
 3. `[recheck]`が無いか、`[run.env]`のprogramが見つからない間（ADR-0049の決定9）は1だけを見る。Gitやcommandが実行できなかったrunは`errors`に数え、runには何も記録しない。
 
-target（`recheck/target`）は1つで、recheckは直列なので、同時にそれを使うのは1本だけ。
-worktreeとtargetはqueue dirの`recheck/`に残り、次のrecheckが使い回す。
-targetの中身は、空き容量のための掃除だけがrecheckの走っていない間に消し、次のrecheckが作り直す。
+buildの出力のdirは宣言ごとに1つで、recheckは直列なので、同時にそれを使うのは1本だけ。
+worktreeとbuildの出力のdirはqueue dirの`recheck/`に残り、次のrecheckが使い回す。
+buildの出力のdirの中身は、空き容量のための掃除だけがrecheckの走っていない間に消し、次のrecheckが作り直す。
 
 ## 見つかったとき
 

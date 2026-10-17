@@ -49,7 +49,7 @@ related:
   setsidで新しいsessionとprocess groupに入れる（supervisorのexecにも、登録済みのin-cmuxのsupervisorのworkspaceが閉じられることにも巻き込まれないため）。
   結果・stderr・ビルドの出力・tracingのlogは`<queue dir>/logs/`の下に置き、古いものは消える（[Logs](commands.md#log)）。
   起動したら、supervisorが`update_started`を書く。
-  1. **ビルド**: `<queue dir>/update/checkout`をheadに合わせ、`CARGO_TARGET_DIR=<queue dir>/update/target`でreleaseのビルドを走らせる。
+  1. **ビルド**: `<queue dir>/update/checkout`をheadに合わせ、Rustのprofileのbuildの出力（`<queue dir>/update/`の下のdirとそれを指すenv。`UpdatePaths::under`）でreleaseのビルドを走らせる。
      人のmainのcheckoutと`target/`は使わない。
      成功すれば`update_built`。
      - **`update/target`の排他**: jobはcheckoutの前にqueueの`update/lock`を待って取り（`update::hold_target`）、jobが終わるまで持つ（e2eの関門は同じtargetを使い、入れ替えるbinaryもそこにある）。
@@ -180,3 +180,4 @@ jobの確認から見張りまでは同じ`put_in_place`（`src/application/upda
 判定と対象の一覧は[Source repository](source-repository.md)にある。
 登録の`auto_update`が真のsupervisorは、見る回ごとに判定し、ソースでなければ`update_failed`のaskの答えの適用もjobの起動もせずに戻り、ソースでなくなった最初の回だけ警告をlogに出す。
 続けてそのときのmainのheadを読み、何もビルドしないことをheadごとに1回出す。
+source buildのbuildの出力のdirとenvは`[toolchains]`の宣言に依らずRustのprofileから取り、source buildを動かすかはこの判定のまま決める（[ADR-t2268-1](../../adr/2026-10-12-t2268-1-toolchain-knowledge-behind-declared-profiles.md)決定2）。

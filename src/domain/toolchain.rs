@@ -10,18 +10,23 @@
 //! a retry of flaky tests runs with), the names of the tests of its JUnit
 //! the CI watch lists ([`ToolchainProfile::junit_test_name`]) and the
 //! processes of its tools the host's load is split by
-//! ([`ToolchainProfile::process_kind`]). The runtime's own marks (a full
-//! disk, a signal, the conventional exit of a timeout, the limit of the
-//! whole command) and the order the marks are tried in are
-//! [`crate::domain::verify_failure`]'s, and work whatever is declared; so
-//! are the kinds of process of no language's tools (`claude`, `dagq`,
-//! `other`, [`crate::domain::host_metrics::process_kind`]).
+//! ([`ToolchainProfile::process_kind`]); and where its tools put what they
+//! build ([`BuildOutput`]) when the runtime runs a command in a directory
+//! of its own. The runtime's own marks (a full disk, a signal, the
+//! conventional exit of a timeout, the limit of the whole command) and the
+//! order the marks are tried in are [`crate::domain::verify_failure`]'s,
+//! and work whatever is declared; so are the kinds of process of no
+//! language's tools (`claude`, `dagq`, `other`,
+//! [`crate::domain::host_metrics::process_kind`]).
 //!
 //! A new language is one implementation of [`ToolchainProfile`] and one
 //! line in [`BUILTIN`].
+use std::path::Path;
+
 use serde_json::{Value, json};
 
 use super::{
+    scope::glob_matches,
     verify_failure::FailureClass,
     verify_marks::{self, ProjectMark},
 };
@@ -152,6 +157,73 @@ pub trait ToolchainProfile: Sync {
     /// path or a name as `ps` gives it, `name` its last part), counted in
     /// the host's load; `None` for a process not the tool's.
     fn process_kind(&self, command: &str, name: &str) -> Option<ToolProcess>;
+
+    /// Where the profile's tools put what they build when the runtime
+    /// runs a command in a directory of its own (ADR-t2268-1 decision 1):
+    /// the landing recheck's, and the automatic update's build of dagq's
+    /// own source. `None` for tools that keep no build output there.
+    fn build_output(&self) -> Option<BuildOutput>;
+}
+
+/// A profile's build output in a directory of the runtime's: the
+/// directory `dir` names under it, and the variable `env` set to it on the
+/// command, over the `[run.env]` value of it. Profiles name different
+/// directories.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuildOutput {
+    pub dir: &'static str,
+    pub env: &'static str,
+}
+
+impl BuildOutput {
+    /// The directory under `root`.
+    pub fn dir_under(&self, root: &Path) -> std::path::PathBuf {
+        root.join(self.dir)
+    }
+
+    /// The build output of the declaration named `declaration` of the
+    /// profile named `profile`, one directory per declaration
+    /// (ADR-t2268-1 decision 6): `dir` itself for the declaration named
+    /// after its profile (and the profile implied while none is declared,
+    /// [`Toolchains::undeclared`]), so a repository that declares its
+    /// profile under the profile's name keeps the directory it built in
+    /// before (decision 9); `<dir>-<declaration>` for any other. The names
+    /// of the declarations are distinct and kebab-case, so are these.
+    pub fn declared(&self, declaration: &str, profile: &str) -> BuildDir {
+        let dir = if declaration == profile {
+            self.dir.to_owned()
+        } else {
+            format!("{}-{declaration}", self.dir)
+        };
+        BuildDir { dir, env: self.env }
+    }
+
+    /// Whether `name`, an entry of a directory the runtime builds in, is
+    /// a directory [`Self::declared`] gives, for whichever declaration.
+    pub fn holds(&self, name: &str) -> bool {
+        name == self.dir
+            || name
+                .strip_prefix(self.dir)
+                .and_then(|rest| rest.strip_prefix('-'))
+                .is_some_and(|declaration| !declaration.is_empty())
+    }
+}
+
+/// A declaration's build output ([`BuildOutput::declared`]): the
+/// directory `dir` under the runtime's directory of the command, the only
+/// one the runtime makes there for the declaration, and the variable
+/// `env` set to it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildDir {
+    pub dir: String,
+    pub env: &'static str,
+}
+
+impl BuildDir {
+    /// The directory under `root`.
+    pub fn dir_under(&self, root: &Path) -> std::path::PathBuf {
+        root.join(&self.dir)
+    }
 }
 
 /// The profiles a declaration may name, looked up by name.
@@ -183,6 +255,17 @@ impl ProfileRegistry {
     /// Every profile, in the order registered.
     pub fn profiles(&self) -> impl Iterator<Item = &'static dyn ToolchainProfile> + '_ {
         self.profiles.iter().copied()
+    }
+
+    /// Whether `name`, an entry of a directory the runtime builds in, is
+    /// the build output of a declaration of any of the profiles
+    /// ([`BuildOutput::holds`]): what the cleanup for room clears, whatever
+    /// a repository declares now, so the directory of a declaration since
+    /// removed does not stay.
+    pub fn holds_build_dir(&self, name: &str) -> bool {
+        self.profiles()
+            .filter_map(|profile| profile.build_output())
+            .any(|output| output.holds(name))
     }
 
     /// The names of the profiles, joined for a message.
@@ -405,6 +488,57 @@ impl Toolchains {
             .any(|profile| profile.name() == rust::RUST.name())
     }
 
+    /// The runs of a command the runtime runs over a tree of the
+    /// repository, each the build outputs it builds into: those of the
+    /// declarations whose paths match a file of the tree (a declaration
+    /// without paths, and the profile implied, always does), each in a
+    /// directory of its own ([`BuildOutput::declared`], ADR-t2268-1
+    /// decision 6), in the order declared. One run gives a variable one
+    /// value, so the command runs as many times as the most declarations
+    /// that match and set one variable: once when they set different
+    /// variables. Each declaration that matches is in one run; a variable
+    /// that fewer of them set keeps its last one in the later runs, so no
+    /// run builds where `[run.env]` says while a declaration matches. With
+    /// no declaration that matches, one run with no output. `tree` lists
+    /// the tree's files, and is called only when a declaration has paths.
+    pub fn build_runs<E>(
+        &self,
+        tree: impl FnOnce() -> Result<Vec<String>, E>,
+    ) -> Result<Vec<Vec<BuildDir>>, E> {
+        let files = if self.declared.iter().any(|d| !d.paths.is_empty()) {
+            tree()?
+        } else {
+            Vec::new()
+        };
+        let matching = self.declared.iter().filter(|declared| {
+            declared.paths.is_empty()
+                || files
+                    .iter()
+                    .any(|file| declared.paths.iter().any(|glob| glob_matches(glob, file)))
+        });
+        // The outputs of each variable, in the order declared.
+        let mut by_env: Vec<Vec<BuildDir>> = Vec::new();
+        for declared in matching {
+            let Some(output) = declared.profile.build_output() else {
+                continue;
+            };
+            let output = output.declared(&declared.name, declared.profile.name());
+            match by_env.iter_mut().find(|same| same[0].env == output.env) {
+                Some(same) => same.push(output),
+                None => by_env.push(vec![output]),
+            }
+        }
+        let runs = by_env.iter().map(Vec::len).max().unwrap_or(1);
+        Ok((0..runs)
+            .map(|run| {
+                by_env
+                    .iter()
+                    .map(|same| same[run.min(same.len() - 1)].clone())
+                    .collect()
+            })
+            .collect())
+    }
+
     /// What `doctor` and `status` show: each declaration with its profile
     /// and the paths it applies to (`**` for the whole repository), the
     /// profile implied while none is declared, and a warning then; and
@@ -603,6 +737,111 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(toolchains.flaky_retry_env("other").is_empty());
+    }
+
+    fn build_dir(dir: &str, env: &'static str) -> BuildDir {
+        BuildDir {
+            dir: dir.to_owned(),
+            env,
+        }
+    }
+
+    /// The runs of a command over a tree (ADR-t2268-1 decision 6): one
+    /// with the implied Rust profile's own directory while none is
+    /// declared, without listing the tree; else one directory per
+    /// declaration whose paths match a file of the tree, as many runs as
+    /// the most matching declarations of one variable, and one run with
+    /// none when none matches.
+    #[test]
+    fn the_build_runs_give_each_matching_declaration_its_directory() {
+        let rust = rust::BUILD_OUTPUT.env;
+        let fake = fake::BUILD_OUTPUT.env;
+        let unlisted = || -> Result<Vec<String>, ()> { panic!("the tree is not listed") };
+        assert_eq!(
+            Toolchains::undeclared().build_runs(unlisted),
+            Ok(vec![vec![build_dir("target", rust)]])
+        );
+        let tree = || -> Result<Vec<String>, ()> {
+            Ok(vec!["src/lib.rs".to_owned(), "web/app.ts".to_owned()])
+        };
+        let declared = |declarations: &[ToolchainDeclaration]| {
+            Toolchains::resolve(&fake::REGISTRY, declarations).unwrap()
+        };
+        // Named after its profile: the profile's directory, as undeclared.
+        assert_eq!(
+            declared(&[declaration("rust", "rust", &["src/**"])]).build_runs(tree),
+            Ok(vec![vec![build_dir("target", rust)]])
+        );
+        // Two declarations of the Rust profile match: a run for each, the
+        // fake profile's one declaration in both.
+        assert_eq!(
+            declared(&[
+                declaration("core", "rust", &["src/**"]),
+                declaration("tools", "rust", &[]),
+                declaration("web", "fake", &["web/**"]),
+            ])
+            .build_runs(tree),
+            Ok(vec![
+                vec![
+                    build_dir("target-core", rust),
+                    build_dir("fake-out-web", fake)
+                ],
+                vec![
+                    build_dir("target-tools", rust),
+                    build_dir("fake-out-web", fake)
+                ],
+            ])
+        );
+        assert_eq!(
+            declared(&[
+                declaration("core", "rust", &["crates/**"]),
+                declaration("tools", "rust", &[]),
+                declaration("web", "fake", &["web/**"]),
+            ])
+            .build_runs(tree),
+            Ok(vec![vec![
+                build_dir("target-tools", rust),
+                build_dir("fake-out-web", fake)
+            ]])
+        );
+        assert_eq!(
+            declared(&[declaration("core", "rust", &["**/*.rs"])])
+                .build_runs(|| Ok::<_, ()>(vec!["README.md".to_owned()])),
+            Ok(vec![vec![]])
+        );
+        assert_eq!(
+            fake::only_fake().build_runs(unlisted),
+            Ok(vec![vec![build_dir("fake-out-made-up", fake)]])
+        );
+        assert_eq!(
+            declared(&[declaration("core", "rust", &["src/**"])]).build_runs(|| Err("no tree")),
+            Err("no tree")
+        );
+    }
+
+    /// The cleanup clears the directory of any declaration of a registered
+    /// profile, whatever is declared now, and nothing else the runtime
+    /// keeps beside them.
+    #[test]
+    fn the_registry_knows_each_declarations_build_directory() {
+        for name in ["target", "target-core", "target-tools"] {
+            assert!(BUILTIN.holds_build_dir(name), "{name}");
+        }
+        for name in [
+            "worktree",
+            "lock",
+            "dagq-rustc-wrapper",
+            "target-",
+            "targets",
+            "fake-out",
+            "fake-out-web",
+        ] {
+            assert!(!BUILTIN.holds_build_dir(name), "{name}");
+        }
+        assert!(fake::REGISTRY.holds_build_dir("target-core"));
+        assert!(fake::REGISTRY.holds_build_dir("fake-out"));
+        assert!(fake::REGISTRY.holds_build_dir("fake-out-web"));
+        assert!(!fake::REGISTRY.holds_build_dir("worktree"));
     }
 
     #[test]

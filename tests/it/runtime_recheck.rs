@@ -271,6 +271,8 @@ fn a_waiting_run_whose_check_fails_on_the_new_main_is_resumed() {
         tail.contains(&format!("target={}", recheck_dir.join("target").display())),
         "{tail}"
     );
+    // Undeclared, the Rust profile is implied (ADR-t2268-1 decision 9).
+    assert!(recheck_dir.join("target").is_dir());
     let log = Path::new(found["log_path"].as_str().unwrap());
     assert!(log.starts_with(waiting.run_dir().unwrap()), "{log:?}");
     assert_eq!(
@@ -298,6 +300,108 @@ fn a_waiting_run_whose_check_fails_on_the_new_main_is_resumed() {
         status["landing_recheck"]["command"],
         "echo \"target=$CARGO_TARGET_DIR\"; if [ -f a.txt ]; then test -f b.txt || { echo error[E0063]: missing_b; exit 1; }; fi"
     );
+}
+
+/// A repository that declares `[toolchains.<name>]` of which none applies
+/// to the tree (ADR-t2268-1): the recheck runs its command with no build
+/// output's variable added and makes no build output directory.
+#[test]
+fn a_recheck_with_no_declared_profile_that_applies_adds_no_build_output() {
+    let (dir, repo, db) = fixture();
+    fs::write(
+        repo.join("dagq.toml"),
+        "[recheck]\ncommand = 'echo \"target=${CARGO_TARGET_DIR-unset}\"; exit 1'\n\n[toolchains.core]\nprofile = \"rust\"\npaths = [\"**/*.rs\"]\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "the recheck and a profile"]);
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    backend.script_for(
+        2,
+        "printf 'other\\n' > other.md && git add other.md && git commit -q -m other; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+    );
+    backend.resume_script_for(1, "await_message; idle; await_exit");
+    let (_waiting, _ask, reviewer) = waiting_then_landing(&backend, &repo, &db);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    let found = payloads(&detail, "landing_recheck_failed");
+    assert_eq!(found.len(), 1, "{:?}", event_kinds(&detail));
+    // The variable is the one the process inherited, if any.
+    let tail = found[0]["output_tail"].as_str().unwrap();
+    let recheck_dir = fs::canonicalize(dir.path()).unwrap().join("recheck");
+    assert!(tail.contains("target="), "{tail}");
+    assert!(
+        !tail.contains(&format!("target={}", recheck_dir.join("target").display())),
+        "{tail}"
+    );
+    assert!(recheck_dir.join("worktree").is_dir());
+    assert!(!recheck_dir.join("target").exists());
+}
+
+/// Declarations of the Rust profile (ADR-t2268-1 decision 6): each one
+/// whose paths match the merged tree builds in a directory of its own,
+/// named after the declaration, in a run of the command of its own (one
+/// variable has one value in a run), and the one that does not match
+/// makes none; none is the profile's own `target`. The command passes in
+/// the first run and fails in the second, whose failure is the finding.
+#[test]
+fn each_declaration_that_applies_builds_in_a_directory_of_its_own() {
+    let (dir, repo, db) = fixture();
+    fs::write(
+        repo.join("dagq.toml"),
+        r#"[recheck]
+command = 'touch "$CARGO_TARGET_DIR/built"; echo "target=$CARGO_TARGET_DIR"; [ "${CARGO_TARGET_DIR##*/}" != target-tools ]'
+
+[toolchains.core]
+profile = "rust"
+paths = ["**/*.rs"]
+
+[toolchains.docs]
+profile = "rust"
+paths = ["**/*.md"]
+
+[toolchains.tools]
+profile = "rust"
+"#,
+    )
+    .unwrap();
+    git(&repo, &["add", "."]);
+    git(
+        &repo,
+        &["commit", "-q", "-m", "the recheck and three declarations"],
+    );
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    backend.script_for(
+        2,
+        "printf 'other\\n' > other.md && git add other.md && git commit -q -m other; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+    );
+    backend.resume_script_for(1, "await_message; idle; await_exit");
+    let (_waiting, _ask, reviewer) = waiting_then_landing(&backend, &repo, &db);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    let found = payloads(&detail, "landing_recheck_failed");
+    assert_eq!(found.len(), 1, "{:?}", event_kinds(&detail));
+    let tail = found[0]["output_tail"].as_str().unwrap();
+    let recheck_dir = fs::canonicalize(dir.path()).unwrap().join("recheck");
+    assert!(
+        tail.contains(&format!(
+            "target={}",
+            recheck_dir.join("target-tools").display()
+        )),
+        "{tail}"
+    );
+    assert!(recheck_dir.join("target-docs/built").is_file());
+    assert!(recheck_dir.join("target-tools/built").is_file());
+    assert!(!recheck_dir.join("target-core").exists());
+    assert!(!recheck_dir.join("target").exists());
 }
 
 /// Commit `[recheck]` with a command that always fails and `paths`.

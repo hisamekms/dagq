@@ -5,7 +5,8 @@
 //! against the new main off the loop,
 //! one recheck at a time: `git merge-tree` for a conflict, then the
 //! `[recheck] command` of `dagq.toml` on main's tree with the run merged
-//! in, in one scratch worktree with one target directory of the queue's,
+//! in, in one scratch worktree of the queue's with the build output of
+//! each declared profile that applies there ([`recheck_env`]),
 //! when that tree differs from main in a path `[recheck] paths` names (or
 //! there are none, ADR-t2032-1).
 //! A run found no longer landing is parked for a resume at once, whatever
@@ -26,36 +27,63 @@ use crate::domain::recheck::{
     RecheckFailure, SKIPPED,
 };
 use crate::domain::sccache::{CheckReason, GuardLook};
+use crate::domain::toolchain::{BuildDir, ProfileRegistry};
 use crate::domain::verify_failure::{self, CommandTimedOut};
 
-/// Where the recheck keeps its scratch worktree and its target directory,
-/// under the queue's directory.
+/// Where the recheck keeps its scratch worktree and the build outputs of
+/// the declarations it runs with, under the queue's directory.
 const RECHECK_DIR: &str = "recheck";
 
 /// The lock file in [`RECHECK_DIR`] the queue's supervisors share: one
-/// recheck at a time uses the scratch worktree and the target, and the
-/// cleanup for room clears the target only under it ([`clear_target`]).
+/// recheck at a time uses the scratch worktree and the build outputs, and
+/// the cleanup for room clears them only under it ([`clear_targets`]).
 const RECHECK_LOCK: &str = "lock";
 
-/// The recheck's one target directory in [`RECHECK_DIR`], its
-/// `CARGO_TARGET_DIR`.
-const RECHECK_TARGET: &str = "target";
-
-/// Run `clear` on the recheck's target directory of the queue at
-/// `queue_dir` only while no recheck uses it: the recheck lock is taken
-/// without waiting and held until `clear` returns, so no recheck starts
-/// meanwhile (it tries again on a later pass, as when another
-/// supervisor's recheck holds the lock). `None` with no target directory,
-/// or while a recheck holds the lock. Published to host operation's
-/// cleanup for room, which clears the target through it.
-pub(super) fn clear_target<R>(
+/// The build outputs in the recheck's directory of the queue at
+/// `queue_dir`: its entries that are the directory of a declaration of a
+/// profile of `profiles` ([`ProfileRegistry::holds_build_dir`]), whatever
+/// the repository declares now, by name. None when the directory cannot
+/// be read (there is none before the first recheck). Published to host
+/// operation's cleanup for room, which clears them through
+/// [`clear_targets`].
+pub(super) fn build_dirs(
     files: &dyn RunFiles,
     queue_dir: &Path,
-    clear: impl FnOnce(&Path) -> R,
-) -> Result<Option<R>> {
+    profiles: &ProfileRegistry,
+) -> Vec<String> {
+    let mut dirs: Vec<String> = files
+        .read_dir(&queue_dir.join(RECHECK_DIR))
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|entry| entry.file_name()?.to_str().map(str::to_owned))
+        .filter(|name| profiles.holds_build_dir(name))
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+/// Run `clear` on each of the build outputs `names` ([`build_dirs`]) in
+/// the recheck's directory of the queue at `queue_dir` that is a
+/// directory, only while no recheck uses them: the recheck lock is taken
+/// once, without waiting, and held until the last `clear` returns, so no
+/// recheck starts meanwhile (it tries again on a later pass, as when
+/// another supervisor's recheck holds the lock) and they are cleared
+/// together or left together. `None` with no such directory, or while a
+/// recheck holds the lock. Published to host operation's cleanup for
+/// room, which clears the declarations' build outputs through it.
+pub(super) fn clear_targets<R>(
+    files: &dyn RunFiles,
+    queue_dir: &Path,
+    names: &[String],
+    clear: impl FnMut(&Path) -> R,
+) -> Result<Option<Vec<R>>> {
     let dir = queue_dir.join(RECHECK_DIR);
-    let target = dir.join(RECHECK_TARGET);
-    if !files.is_dir(&target) {
+    let targets: Vec<PathBuf> = names
+        .iter()
+        .map(|name| dir.join(name))
+        .filter(|target| files.is_dir(target))
+        .collect();
+    if targets.is_empty() {
         return Ok(None);
     }
     let lock = dir.join(RECHECK_LOCK);
@@ -64,12 +92,14 @@ pub(super) fn clear_target<R>(
         .with_context(|| format!("lock {}", lock.display()))?
     else {
         info!(
-            "the recheck target {} is in use: left for the next cleanup",
-            target.display()
+            "the recheck build outputs in {} are in use: left for the next cleanup",
+            dir.display()
         );
         return Ok(None);
     };
-    Ok(Some(clear(&target)))
+    Ok(Some(
+        targets.iter().map(PathBuf::as_path).map(clear).collect(),
+    ))
 }
 
 /// How many of the latest `landing_recheck_finished` tell who checked a
@@ -461,7 +491,7 @@ impl Supervisor<'_> {
     /// made the recheck due. Finding nothing to check holds only for the
     /// runs that waited then: a run that starts waiting later is looked at
     /// against the same main. The supervisors of the queue share one lock
-    /// on the recheck (its scratch worktree and target): a recheck starts
+    /// on the recheck (its scratch worktree and build outputs): a recheck starts
     /// only under it, and who checked the same main already is read under
     /// it, so it is not checked twice. Another supervisor's recheck of main
     /// settles only the runs it could see: the runs this one holds to land
@@ -541,8 +571,8 @@ impl Supervisor<'_> {
         Ok(Start::Started)
     }
 
-    /// The queue's recheck directory: its scratch worktree, its target
-    /// directory and its lock.
+    /// The queue's recheck directory: its scratch worktree, the profiles'
+    /// build outputs and its lock.
     fn recheck_dir(&self) -> Result<PathBuf> {
         Ok(self
             .layout
@@ -615,7 +645,7 @@ impl Supervisor<'_> {
         let command = config.command.clone();
         let dir = self.recheck_dir()?;
         // The command may not start the sccache server (ADR-t2086-1): its
-        // guard lives beside the recheck's target directory.
+        // guard lives in the recheck's directory.
         let look = match &command {
             Some(_) => {
                 self.files.create_dir_all(&dir)?;
@@ -977,10 +1007,11 @@ struct Recheck<'a> {
 /// (or there are none, ADR-t2032-1), is committed on top of main and the
 /// command run on it, its output in `recheck-<main>.log` of the run
 /// directory. A run on the host has it checked out in the scratch worktree
-/// under `dir` and run there in `/bin/sh` with the run's `[run.env]`
-/// (refused the sccache server's start and guarded as `look` says,
-/// ADR-t2086-1) and `CARGO_TARGET_DIR` set to the one target directory
-/// under `dir`. A run in a container has it run in a verification's
+/// under `dir` and run there in `/bin/sh` with the environment of
+/// [`recheck_env`], once for each of the build runs of the declarations
+/// that apply (checked out again before each, and no further once one
+/// fails; [`crate::domain::toolchain::Toolchains::build_runs`]). A run in
+/// a container has it run in a verification's
 /// container, as `in_container` says ([`run_in_container`]).
 fn recheck_runs(recheck: &Recheck<'_>, targets: Vec<Target>) -> Vec<Checked> {
     targets
@@ -1059,8 +1090,9 @@ fn recheck_run(
             target.run_id
         )],
     )?;
-    // The profiles the repository declares read the output (ADR-t2268-1),
-    // resolved before the command so a mistake in them does not cost it.
+    // The profiles the repository declares read the output and, on the
+    // host, place the build output (ADR-t2268-1), resolved before the
+    // command so a mistake in them does not cost it.
     let toolchains = verifier.toolchains()?;
     let log = target
         .run_dir
@@ -1069,9 +1101,23 @@ fn recheck_run(
         None => {
             let scratch = dir.join("worktree");
             files.create_dir_all(dir)?;
-            repository.checkout_scratch(&scratch, merged.as_str())?;
-            let env = recheck_env(verifier.run_env(&target.run_dir)?, dir, look)?;
-            verifier.run_to_log(command, &scratch, &env, &log)
+            let runs = toolchains.build_runs(|| repository.tree_paths(merged.as_str()))?;
+            let mut status = None;
+            // Each run on the merged tree as committed, until one fails.
+            for outputs in &runs {
+                repository.checkout_scratch(&scratch, merged.as_str())?;
+                for output in outputs {
+                    files.create_dir_all(&output.dir_under(dir))?;
+                }
+                let env = recheck_env(verifier.run_env(&target.run_dir)?, dir, outputs, look)?;
+                let ran = verifier.run_to_log(command, &scratch, &env, &log);
+                let passed = matches!(&ran, Ok(exit) if exit.success);
+                status = Some(ran);
+                if !passed {
+                    break;
+                }
+            }
+            status.context("no run of the recheck's command")?
         }
         Some((run, containers, tokens)) => {
             let ran = run_in_container(
@@ -1214,19 +1260,25 @@ impl Drop for Finished<'_> {
     }
 }
 
-/// The command's environment: the run's `[run.env]` with the recheck's one
-/// target directory under `dir` as `CARGO_TARGET_DIR`, refused the sccache
-/// server's start and guarded as `look` says (ADR-t2086-1).
+/// The command's environment on the host in one of its runs: the run's
+/// `[run.env]` with each of `outputs` (the build outputs of that run of
+/// the declarations that apply to the merged tree,
+/// [`crate::domain::toolchain::Toolchains::build_runs`])
+/// pointed at its directory under `dir` over the `[run.env]` value of its
+/// variable, refused the sccache server's start and guarded as `look` says
+/// (ADR-t2086-1). With no output (a repository that declares profiles of
+/// which none applies) nothing is added: the command builds where
+/// `[run.env]` says.
 fn recheck_env(
     mut env: Vec<(String, String)>,
     dir: &Path,
+    outputs: &[BuildDir],
     look: &GuardLook,
 ) -> Result<Vec<(String, String)>> {
-    env.retain(|(key, _)| key != "CARGO_TARGET_DIR");
-    env.push((
-        "CARGO_TARGET_DIR".to_owned(),
-        path_text(&dir.join(RECHECK_TARGET))?,
-    ));
+    for output in outputs {
+        env.retain(|(key, _)| key != output.env);
+        env.push((output.env.to_owned(), path_text(&output.dir_under(dir))?));
+    }
     look.apply(&mut env);
     Ok(env)
 }
@@ -1235,27 +1287,26 @@ fn recheck_env(
 mod tests {
     use super::*;
     use crate::domain::sccache::REFUSED_ERROR_LOG;
+    use crate::domain::toolchain::{fake, rust};
+
+    fn pairs(items: &[(&str, &str)]) -> Vec<(String, String)> {
+        items
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
+    }
 
     #[test]
     fn the_recheck_command_is_refused_the_servers_start_and_guarded_as_looked() {
         let dir = Path::new("/q/recheck");
-        let run_env = || {
-            vec![
-                ("RUSTC_WRAPPER".to_owned(), "sccache".to_owned()),
-                ("CARGO_TARGET_DIR".to_owned(), "/elsewhere".to_owned()),
-            ]
-        };
-        let pairs = |items: &[(&str, &str)]| -> Vec<(String, String)> {
-            items
-                .iter()
-                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-                .collect()
-        };
+        let rust = rust::BUILD_OUTPUT.declared("rust", "rust");
+        let rust = [rust];
+        let run_env = || pairs(&[("RUSTC_WRAPPER", "sccache"), (rust[0].env, "/elsewhere")]);
         let guard = GuardLook::Guard("/q/recheck/dagq-rustc-wrapper".into());
         assert_eq!(
-            recheck_env(run_env(), dir, &guard).unwrap(),
+            recheck_env(run_env(), dir, &rust, &guard).unwrap(),
             pairs(&[
-                ("CARGO_TARGET_DIR", "/q/recheck/target"),
+                (rust[0].env, "/q/recheck/target"),
                 ("SCCACHE_ERROR_LOG", REFUSED_ERROR_LOG),
                 ("RUSTC_WRAPPER", "/q/recheck/dagq-rustc-wrapper"),
                 ("DAGQ_SCCACHE_PROGRAM", "sccache"),
@@ -1266,17 +1317,45 @@ mod tests {
             why: "no sccache server listens on port 4226".into(),
         };
         assert_eq!(
-            recheck_env(run_env(), dir, &unconfirmed).unwrap(),
+            recheck_env(run_env(), dir, &rust, &unconfirmed).unwrap(),
             pairs(&[
-                ("CARGO_TARGET_DIR", "/q/recheck/target"),
+                (rust[0].env, "/q/recheck/target"),
                 ("SCCACHE_ERROR_LOG", REFUSED_ERROR_LOG),
             ])
         );
         assert_eq!(
-            recheck_env(run_env(), dir, &GuardLook::NotConfigured).unwrap(),
+            recheck_env(run_env(), dir, &rust, &GuardLook::NotConfigured).unwrap(),
             pairs(&[
                 ("RUSTC_WRAPPER", "sccache"),
-                ("CARGO_TARGET_DIR", "/q/recheck/target"),
+                (rust[0].env, "/q/recheck/target"),
+            ])
+        );
+    }
+
+    /// The build outputs are those of the declarations (ADR-t2268-1): none
+    /// adds nothing and leaves `[run.env]`'s value; a declaration of a
+    /// second profile adds its own variable and directory and leaves the
+    /// Rust one alone; each declaration has its own directory.
+    #[test]
+    fn the_recheck_env_points_each_declarations_variable_at_its_directory() {
+        let dir = Path::new("/q/recheck");
+        let rust = rust::BUILD_OUTPUT;
+        let web = fake::BUILD_OUTPUT.declared("web", "fake");
+        let run_env = || pairs(&[(rust.env, "/elsewhere")]);
+        let look = GuardLook::NotConfigured;
+        assert_eq!(recheck_env(run_env(), dir, &[], &look).unwrap(), run_env());
+        assert_eq!(
+            recheck_env(run_env(), dir, std::slice::from_ref(&web), &look).unwrap(),
+            pairs(&[
+                (rust.env, "/elsewhere"),
+                ("FAKE_OUT", "/q/recheck/fake-out-web")
+            ])
+        );
+        assert_eq!(
+            recheck_env(run_env(), dir, &[rust.declared("core", "rust"), web], &look).unwrap(),
+            pairs(&[
+                (rust.env, "/q/recheck/target-core"),
+                ("FAKE_OUT", "/q/recheck/fake-out-web"),
             ])
         );
     }

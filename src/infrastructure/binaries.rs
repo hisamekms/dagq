@@ -240,6 +240,7 @@ impl Binaries for LocalBinaries {
         &self,
         checkout: &Path,
         target_dir: &Path,
+        target_env: &str,
         command: Option<&str>,
         log: &Path,
     ) -> Result<PathBuf> {
@@ -263,7 +264,7 @@ impl Binaries for LocalBinaries {
         };
         let status = build
             .current_dir(checkout)
-            .env("CARGO_TARGET_DIR", target_dir)
+            .env(target_env, target_dir)
             .stdin(Stdio::null())
             .stdout(file.try_clone()?)
             .stderr(file)

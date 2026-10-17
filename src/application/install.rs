@@ -78,18 +78,20 @@ pub trait Binaries {
         let _ = (repository, checkout, commit);
         bail!("these binaries cannot check a commit out")
     }
-    /// Build `checkout` for release into `target_dir`, running `command`
-    /// (a shell command) in place of `cargo build --release --locked -p
+    /// Build `checkout` for release into `target_dir`, which the variable
+    /// `target_env` points at (the Rust profile's), running `command` (a
+    /// shell command) in place of `cargo build --release --locked -p
     /// dagq` when given, with what it prints appended to `log`; the binary
     /// built.
     fn build_into(
         &self,
         checkout: &Path,
         target_dir: &Path,
+        target_env: &str,
         command: Option<&str>,
         log: &Path,
     ) -> Result<PathBuf> {
-        let _ = (checkout, target_dir, command, log);
+        let _ = (checkout, target_dir, target_env, command, log);
         bail!("these binaries cannot build a checkout")
     }
     /// Run the e2e of `checkout` (ADR-t963-1 decision 1) with
