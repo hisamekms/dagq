@@ -2040,7 +2040,7 @@ fn the_review_prompt_checks_the_documents_and_keeps_its_verdict() {
         ));
     assert!(review.contains(&format!(
         "{CONCERN_RECOMMENDATION}{}Answer with one JSON object",
-        reason_codes_section(review_reason::REVIEW_CODES)
+        reason_codes_section(review_reason::REVIEW_CODES, &run_review_codes_use())
     )));
     assert!(
         CONCERN_RECOMMENDATION
@@ -2050,7 +2050,10 @@ fn the_review_prompt_checks_the_documents_and_keeps_its_verdict() {
             "Leave scope and discard to the person rather than deciding them; when in doubt, say low.\n\n"
         ));
     assert!(!CONCERN_RECOMMENDATION.contains("document"));
-    assert!(!reason_codes_section(review_reason::REVIEW_CODES).contains(REVIEW_DOCS_CHECK));
+    assert!(
+        !reason_codes_section(review_reason::REVIEW_CODES, &run_review_codes_use())
+            .contains(REVIEW_DOCS_CHECK)
+    );
 }
 
 /// The whole review is builtin:acceptance (ADR-t2259-1 decisions 3 and
@@ -6020,4 +6023,60 @@ fn the_others_tests_left_out_whole_still_get_their_instruction() {
         assert!(text.contains(instruction.trim_end()), "{text}");
         assert_eq!(fitted.bytes.omitted["known_failures"], 2);
     }
+}
+
+/// ADR-t2599-1 decision 7: the run's review is told the judgment past the
+/// run's revise limit reads its codes and lands the run with no code
+/// finding left, while the plan review, whose codes still decide nothing,
+/// keeps being told they are for statistics only.
+#[test]
+fn only_the_run_review_is_told_its_codes_land_the_run_past_the_limit() {
+    const STATISTICS: &str = "The codes are recorded for statistics only and change nothing of how the verdict is applied.";
+    let task = verified_task(7, "work", TaskStatus::InProgress, vec!["make gate".into()]);
+    let review = review_prompt(
+        &task,
+        &run_on(Provider::Claude, WorkerMode::Headless),
+        "r",
+        None,
+        None,
+    )
+    .text;
+    assert!(!review.contains(STATISTICS), "{review}");
+    assert!(!review.contains("statistics only"));
+    for part in [
+        "The verdict (pass, revise, concern) and how a concern is applied do not read the codes.",
+        "once the run's automatic revises are used up",
+        "lets the runtime land the run",
+        "every finding of a security review agent count as code findings",
+        "never only codes from it",
+    ] {
+        assert!(review.contains(part), "{part}");
+    }
+    // The codes that let the run land are the judgment's own list, and
+    // the codes of a code finding are named nowhere in the sentence.
+    let usage = run_review_codes_use();
+    let (_, listed) = usage.split_once("being one of ").unwrap();
+    let (listed, _) = listed.split_once(", lets").unwrap();
+    let listed: Vec<&str> = listed.split(", ").collect();
+    let converged: Vec<&str> = review_reason::CONVERGED_CODES
+        .iter()
+        .map(|(code, _)| *code)
+        .collect();
+    assert_eq!(listed, converged);
+    for (code, _) in review_reason::REVIEW_CODES {
+        let finding = review_reason::Finding {
+            text: String::new(),
+            codes: vec![(*code).to_owned()],
+            security: false,
+        };
+        assert_eq!(listed.contains(code), !finding.is_code_finding(), "{code}");
+    }
+    assert!(review.contains(&usage));
+    let plan = plan_case(0, 0).prompt().text;
+    assert!(
+        plan.contains(&format!("{STATISTICS} The codes:\n")),
+        "{plan}"
+    );
+    assert!(!plan.contains(&usage));
+    assert!(plan.contains(PLAN_REVIEW_CODES_USE));
 }

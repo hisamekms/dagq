@@ -1021,7 +1021,7 @@ pub(super) fn plan_review_text(
         revises = proposal.revise_count(),
         max = MAX_PLAN_REVISES,
         most = DUPLICATE_CANDIDATES,
-        codes = reason_codes_section(review_reason::PLAN_REVIEW_CODES),
+        codes = reason_codes_section(review_reason::PLAN_REVIEW_CODES, PLAN_REVIEW_CODES_USE),
     )
 }
 

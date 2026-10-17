@@ -134,7 +134,7 @@ pub fn review_prompt(
         docs = REVIEW_DOCS_CHECK,
         verdicts = REVIEW_VERDICTS,
         concern = CONCERN_RECOMMENDATION,
-        codes = reason_codes_section(review_reason::REVIEW_CODES),
+        codes = reason_codes_section(review_reason::REVIEW_CODES, &run_review_codes_use()),
         answer = REVIEW_ANSWER,
     );
     fit.finish(text)
@@ -156,7 +156,7 @@ pub fn acceptance_digest() -> String {
         REVIEW_ACCEPTANCE_HEADER,
         REVIEW_VERDICTS,
         CONCERN_RECOMMENDATION,
-        &reason_codes_section(review_reason::REVIEW_CODES),
+        &reason_codes_section(review_reason::REVIEW_CODES, &run_review_codes_use()),
         REVIEW_ANSWER,
     ] {
         hasher.update((part.len() as u64).to_le_bytes());
@@ -206,13 +206,38 @@ pub(super) const CONCERN_RECOMMENDATION: &str = "For a concern, also recommend w
 - reason_category: scope when landing would accept a departure from the acceptance criteria, a recorded decision of the repository or the goal's decisions (or meeting them would need a change of scope); discard when the judgement is whether to cancel the task or throw the work away; null otherwise.\n\
 The runtime applies a high recommendation whose reason_category is null without asking: send_back goes to the worker's session like a revise, and land lands the run after its usual checks. Anything else (low, scope, discard) goes to a person with your recommendation. Leave scope and discard to the person rather than deciding them; when in doubt, say low.\n\n";
 
+/// What a run's review is told its codes change: only the judgment past
+/// the run's revise limit reads them, landing the run when it has reasons
+/// and none is a code finding (ADR-t2599-1 decisions 3 and 7). The codes
+/// that are no code finding are those of
+/// [`review_reason::CONVERGED_CODES`], the judgment's own list.
+pub(super) fn run_review_codes_use() -> String {
+    let converged = review_reason::CONVERGED_CODES
+        .iter()
+        .map(|(code, _)| *code)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "The verdict (pass, revise, concern) and how a concern is applied do not read the codes. \
+         But once the run's automatic revises are used up, a review that sends the run back with reasons, every code of each being one of {converged}, lets the runtime land the run and file the reasons as follow-ups. \
+         Any other code, a reason without one, and every finding of a security review agent count as code findings, which go to a person. \
+         So give a code finding a code outside that list, and never only codes from it."
+    )
+}
+
+/// What a plan review is told its codes change: nothing (ADR-t947-1
+/// decision 3, kept by ADR-t2599-1 decision 7).
+pub(super) const PLAN_REVIEW_CODES_USE: &str =
+    "The codes are recorded for statistics only and change nothing of how the verdict is applied.";
+
 /// How a review job labels each finding (ADR-t947-1): the codes, their
-/// definitions heaviest first, and how the primary one is chosen.
-pub(super) fn reason_codes_section(codes: &[(&str, &str)]) -> String {
+/// definitions heaviest first, how the primary one is chosen, and `usage`,
+/// what the codes change for this review.
+pub(super) fn reason_codes_section(codes: &[(&str, &str)], usage: &str) -> String {
     format!(
         "Give each finding one or more reason codes, the main one first: when a finding fits two, the one whose fix needs the heavier judgment (the list is heaviest first); other when none fits, explained in the text. \
          Put first the finding that decides the verdict; a note that would not stop it is never first. \
-         The codes are recorded for statistics only and change nothing of how the verdict is applied. The codes:\n{}\n\n",
+         {usage} The codes:\n{}\n\n",
         review_reason::prompt_lines(codes)
     )
 }
