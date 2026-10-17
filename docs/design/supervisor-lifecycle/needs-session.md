@@ -37,7 +37,7 @@ parkのイベントは`run_e2e_failed`で、resumeの依頼文は`ResumeKind::E2
 resumeが解消すれば、`integrate`が呼ばれていないrunはvalidatingとreviewをやり直し、着地の前に新しいcommitのe2eをもう一度流す。
 
 着地待ちのrun（`awaiting_integration`）は、着地の後のlanding recheck（[Landing recheck](landing-recheck.md)、[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)）が衝突かコードの分類の失敗を見つけたときも`needs_session`になる（commandがhostの分類で落ちたときはならない）。
-parkのイベントは`landing_recheck_failed`で、resumeの依頼文は`ResumeKind::Recheck`、試行の数え方ではcode `rebase_conflict`ならreviewのverdictを問わず衝突だけのresumeになる（下の「試行の数え方」。使い切ったときの引き継ぐretryはreviewがpassしたかapproveされたrunだけ）。
+parkのイベントは`landing_recheck_failed`で、resumeの依頼文は`ResumeKind::Recheck`、試行の数え方ではcode `rebase_conflict`ならreviewのverdictを問わず衝突だけのresumeになる（下の「試行の数え方」。使い切ったときの引き継ぐretryはreviewがpass済みかapproveされたrunだけ）。
 resumeが解決したrunに閉じていない`approve_landing`のaskがあれば、`validating`の後にreviewをやり直さず、sessionを閉じて答えを待つ。
 
 resumeで開くworkerのsessionは、直前のsessionのmodel / effortを引き継ぐ。
@@ -46,10 +46,10 @@ runを`needs_session`にした最新のeventのcodeが`verification_failed`（in
 
 `integrate`は呼ばれた時点で、runに`integration_approved`イベントを1回だけ記録する。
 supervisorが承認済みのrunを着地させるときは、この`push`に従ってmainを`origin`へpushする（`integrate`と同じ`push_main`）。
-`integrate`を呼ぶことが着地の承認で（ADR-0016の決定5）、runtimeが自分で着地させるのは承認済みのrun、reviewがpassしたrun、`approve_landing`に`land`と答えたrunだけ（[ADR-0027](../../adr/0027-keep-worker-session-through-review-revise-verdict-and-merge-tree-precheck.md)）。
+`integrate`を呼ぶことが着地の承認で（ADR-0016の決定5）、runtimeが自分で着地させるのは承認済みのrun、reviewがpassしたrun（上限の後の差し戻しが収束した`revise_limit_judged`も含む。[Review](review.md#reviewの流れ)の4a）、`approve_landing`に`land`と答えたrunだけ（[ADR-0027](../../adr/0027-keep-worker-session-through-review-revise-verdict-and-merge-tree-precheck.md)）。
 
 **試行の数え方**（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定24）: 判定はdomainの`domain::resume`がrunのイベントだけから行う。
-`resume_started`ごとに、それより前のイベントで (a) reviewがpass済み（`integration_approved`がある（`integrate`か`approve_landing`の`land`）か、最新の`review_finished`の`verdict`が`pass`）で、(b) runを`needs_session`にした最新のイベントが`code: rebase_conflict`の`integration_deferred`なら、その試行は**衝突だけの試行**で、上限に数えない。
+`resume_started`ごとに、それより前のイベントで (a) reviewがpass済み（`integration_approved`がある（`integrate`か`approve_landing`の`land`）か、最新の`review_finished`の`verdict`が`pass`か、その後に収束した（`converged: true`の）`revise_limit_judged`がある）で、(b) runを`needs_session`にした最新のイベントが`code: rebase_conflict`の`integration_deferred`なら、その試行は**衝突だけの試行**で、上限に数えない。
 それ以外（検証の失敗、`evidence_missing`、`scope_violation`、人の`send_back`、triageのresume、reviewがpassしていない衝突）は数える。
 着地前の衝突の確認（[Review](review.md#review-supervisor)の5のprecheck、ADR-0027の決定4）が生きているsessionに送った解消依頼（後で取り消したものを除く）も、reviewがpassした後の衝突だけなので衝突だけの試行で、上限に数えない。
 衝突だけの試行（衝突だけのresumeとprecheckの依頼の和）は別に`dagq.toml`の`[resume] conflict_only_limit`（書式は[Run environment](run-environment.md)）で止める（同じ衝突が解けないまま回り続けないための柵）。

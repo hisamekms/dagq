@@ -171,7 +171,8 @@ Claudeのworker（対話・非対話）は`advisory`のままで、permissionの
 
 - review-jobの`pass`は「着地してよい」というデータで、着地の実行ではない。supervisorはそれを`IntegrationRequest`に写してIntegratorに渡すだけ
 - 依頼を出せるのは`landing.request`を持つuser・inbox・supervisorだけ。worker・job・observer・plannerは出せない
-- Integratorは依頼を受けても、依頼者の権限、runの状態とlease、承認（`integration_approved`か最新のreviewの`pass`）を確かめ、receiptを信用しない再検証・rebase・scopeの判定を通らなければ着地しない
+- Integratorは依頼を受けても、依頼者の権限、runの状態とlease、承認（`integration_approved`か、最新のreviewの`pass`か、上限の後の差し戻しをruntimeが収束と判定した`revise_limit_judged`）を確かめ、receiptを信用しない再検証・rebase・scopeの判定を通らなければ着地しない
+- 収束はコードの指摘が1件も無い差し戻しだけで、securityのreviewのagentの指摘はいつもコードの指摘に数えるので、それが残る差し戻しは収束せず人の`approve_landing`に上がる（ADR-t2599-1決定3・ADR-t1906-1、[Review](supervisor-lifecycle/review.md#reviewの流れ)の4a）
 - `push_main`はIntegratorだけが作れる`PushGrant`を要る
 - 記録は、着地のeventのactorがintegratorで、`requested_by`が依頼者
 

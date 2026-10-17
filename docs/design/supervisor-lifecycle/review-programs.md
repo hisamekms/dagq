@@ -51,7 +51,7 @@ related:
    providerを使わないので、queueの控え（[認証と利用上限のaskの待ち](queue-hold.md)）の間も流れ、`Phase::ReviewHeld`で待つのは全部が通った後のagentのreviewだけである。
 3. **全部が通る**: 全部がexit 0なら`review_programs_finished`の後、agentのreview（`review_started`）に進む。
 4. **1本が落ちる**: 非0で終わったら、後のprogramもagentのjobも起動せず、`review_programs_finished`の後に、落ちたprogramの名前と出力の末尾を理由にreviseと同じ依頼をworkerに送る（`send_revise`。ADR-t1895-2決定3）。
-   回のreviseに1回と数え、上限を超えればreviseと同じく人の`approve_landing`のaskになる。
+   runを通した自動の手直しの上限に1回と数え、上限の後は[Review](review.md#reviewの流れ)の4aの判定に通る（理由に分類コードが無いので収束せず、`approve_landing`のaskになる）。
    直したreceiptは[Validation](validation.md)からやり直し、プログラムのreviewも最初から流れる。
 5. **起動の失敗と時間切れ**: 一覧かscriptが読めない、起動できない（未実装のbackendも）、時間の上限を超えたときは、workerの変更のせいとせずreviewの失敗にする（決定4）。
    最初のprogramから1回だけ流し直し、なお失敗すればagentのjobを起動せずに`review_failed`と`approve_landing`のaskにする。
