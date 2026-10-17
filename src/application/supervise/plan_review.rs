@@ -185,6 +185,11 @@ impl PlanningState {
     /// One pass of plan review: apply the answers, reap the job and apply
     /// its verdict, start the next one (unless the loop is draining), then
     /// deliver the revises and tend the planners.
+    /// A draining loop (`stop`, a provisioning failure) starts no job and
+    /// delivers no revise, but still reaps the running job and applies the
+    /// answers. `true` when it applied something, so a `--once` loop, which
+    /// waits for the running job, takes one more pass to claim the tasks it
+    /// readied; the loop's end does not end the planners it opened.
     pub(super) fn plan_review_pass(
         &mut self,
         env: &mut PlanningEnv<'_>,
@@ -373,6 +378,9 @@ impl PlanningState {
     /// Start the provider's process of the plan review: Claude's `claude
     /// -p`, or Codex's `codex exec --json` in its read-only sandbox, which
     /// reads the files and the queue as [`PLAN_REVIEW_ACCESS`] allows.
+    /// The prompt goes on stdin, not argv; the job runs with the
+    /// plan-review-job role, as a client of the queue service on Codex too,
+    /// and its timeout is its provider's review timeout.
     fn start_plan_review_job(
         &mut self,
         env: &mut PlanningEnv<'_>,
@@ -432,7 +440,9 @@ impl PlanningState {
     }
 
     /// The plan review prompt of `proposal` from the queue as it is now,
-    /// within its limits (task 1561).
+    /// within its limits (task 1561). The goals are each task's goal now,
+    /// the proposal's goals, and a follow_up's source goal, which its
+    /// registration or a membership judgement names.
     fn plan_review_material(
         &mut self,
         env: &mut PlanningEnv<'_>,
@@ -523,7 +533,8 @@ impl PlanningState {
     /// (ADR-0069 decisions 1, 2, ADR-t1981-1): its declared concrete paths
     /// or the files its most related landed tasks changed, and for an
     /// in-progress task also what its run changed. The proposal's tasks are
-    /// read afresh, as the planner may have changed their paths.
+    /// read afresh, as the planner may have changed their paths. Whether a
+    /// task touches a hotspot is judged on its globs as they are.
     fn plan_expected_files(
         &mut self,
         env: &mut PlanningEnv<'_>,
@@ -622,7 +633,10 @@ impl PlanningState {
 
     /// The files the landings conflicted in, as `stats` counts them over
     /// its default window (goal 31), most conflicts first, at most
-    /// [`HOTSPOT_FILES`] of those main still has.
+    /// [`HOTSPOT_FILES`] of those main still has. They are counted by the
+    /// `[conflicts]` settings over main's history, a renamed file under its
+    /// current name; the prompt lists with each the tasks of the proposal
+    /// and the ready and in-progress tasks expected to touch it.
     fn conflict_hotspots(&self, env: &PlanningEnv<'_>) -> Result<Vec<ConflictHotspot>> {
         Ok(conflict_hotspot_files(
             &*env.queue,
@@ -820,6 +834,28 @@ impl PlanningState {
     /// the revises, the answers of `planner_question`s, the planners of the
     /// planning requests and the draft planners. A draining supervisor
     /// does not call it, so it opens no planner while it drains.
+    ///
+    /// A revise goes, in proposal ID order, to its owner planner when that
+    /// one is alive, once it is idle; else, when fewer than
+    /// `runtime_planners` of the runtime's planners are alive (apart from
+    /// the run slots; a person's planner is not counted), to a new headless
+    /// planner opened with the findings in its first prompt, its effort
+    /// raised one step; else it waits at the limit. No planner is opened
+    /// past the limit: an idle planner that waits on nothing does no work,
+    /// and kept, it would fill the limit for good, so the limit is freed by
+    /// [`Self::release_runtime_planner`] instead. A revise with no owner
+    /// waits while a `planner_question` about its tasks is not answered
+    /// (nothing is told), and the answers go with it to the new planner,
+    /// by the route the ask's answer takes. A revise not submitted again
+    /// within the planner timeout, delivered or not, tells the inbox once
+    /// (`planner_unresponsive`, the attention `check the planner`; no
+    /// workspace is closed); an undelivered one also names the runtime's
+    /// planners that fill the limit and why each is not ended
+    /// ([`Self::planner_holds`]). The runtime's headless planner itself is
+    /// not timed by the planner timeout: its wrapper stopping a turn at its
+    /// `[stall]` limit tells the inbox once per planner. A
+    /// delivery claimed and not recorded (its supervisor died in between)
+    /// is delivered again after the time a supervisor is judged dead in.
     fn tend_planners(&mut self, env: &mut PlanningEnv<'_>, options: &LoopSettings) -> Result<()> {
         self.close_person_planners(env);
         if env.jobs.no_claude {
@@ -1065,6 +1101,13 @@ impl PlanningState {
     /// the timeout (no input, no idle marker). One at a time: none while a
     /// planner of the runtime's is already asked to exit, which frees its
     /// place anyway.
+    /// It runs at the end of the pass. One waiting for Claude is not
+    /// chosen: ending it would count as a wait that ended undecided. The
+    /// exit is a request in its `turns/` (`/exit` is not typed), recorded
+    /// as `planner_released`; the planner closes as
+    /// [`Self::end_runtime_planners`] closes one, and the revise gets a new
+    /// planner on a later pass (one that went to the planner released is
+    /// taken back by `plan_revise_lost` and waits at the limit again).
     fn release_runtime_planner(
         &mut self,
         env: &mut PlanningEnv<'_>,

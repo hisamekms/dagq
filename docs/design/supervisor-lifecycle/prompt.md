@@ -238,7 +238,7 @@ workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2
 ### plan reviewの上限
 
 - 入口: `plan_review_prompt`。
-  仕組み（必須の節と省いてよい節、必須の節の替え方、選ぶ順、省いたことの書き方）は[Plan review](plan-review.md)の4の「上限と選ぶ順」が持つ。
+  仕組み（必須の節と省いてよい節、必須の節の替え方、選ぶ順、省いたことの書き方）は`plan_review_prompt`のdoc commentとコメントが持つ（入口は[Plan review](plan-review.md#入口)）。
 - 値の理由と本番の大きさは各定数のdoc commentが持つ。
 - 落とし穴: 上限はagentの文脈のためのもので、stdinで渡すので`ARG_MAX`の制約ではない。
 

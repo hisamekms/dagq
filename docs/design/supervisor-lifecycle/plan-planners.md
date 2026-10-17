@@ -58,7 +58,7 @@ use caseは`src/application/planner.rs`。
   reasonsとtaskの行は上限の中に収め（[Prompt](prompt.md#goal-reviewrunのreview復旧jobruntimeのplannerの上限)）、省いたreasonは最新のplan reviewの記録先のtaskのeventから、省いたtaskはproposalから読むと書く（reopenでは元のreviewのanchorを使い、該当eventが無ければ全文を読む既知の方法は無いと書く）。
   promptのbyte数は`planner_prompt_written`（[Prompt](prompt.md)）に記録する。
   runtimeのplannerとして出し直すので、そのplannerがproposalの持ち主になる。
-  supervisorはplan reviewのrevise（持ち主のplannerが生きていないとき）とreopenでこれを呼ぶ（[Plan review (supervisor)](plan-review.md#plan-review-supervisor)の9）。
+  supervisorはplan reviewのrevise（持ち主のplannerが生きていないとき）とreopenでこれを呼ぶ（[Plan review](plan-review.md#reviseの配送)）。
 - **session wrapper（`planner-session`、hidden）**: runの`session`と同じく、自分をplannerの行に登録する（1つのplannerに1回だけ。閉じたplannerは拒む）。
   runtimeのplannerのwrapperは下の「非対話のplannerのwrapper」で動く。
   対話のagentを起動して終わりまでheartbeatするのは人のplannerのwrapperだけで（[Agent provider lifecycle](../provider-lifecycle.md)）、terminalには何も出さず、workspaceを閉じない（ADR-t1300-1の予告と猶予はADR-t1433-2決定5で対象が無く、workspaceは人が自分のterminalで閉じる）。
@@ -75,7 +75,7 @@ use caseは`src/application/planner.rs`。
   どのplannerの画面も読まず、画面からのidleの推定は無い。
   `idle_since`はidleのときのmarkerの時刻で、送った文面より後にidleになったかの比較に使える。
   runtimeのplannerに届けた`planner_question`の答えを読み終えたかは、その答えの依頼を取ったturnで判じ（下の「状態」）、askが閉じた時刻とは比べない（askが閉じるのは配送の後なので、その前にidleになったplannerを待ち続けて枠をふさぐ）。
-  上限で持ち主の居ないreviseが期限を過ぎて待つときは、何も待たないidleのruntimeのplannerに終了の依頼を置いて枠を空ける（[Plan review (supervisor)](plan-review.md)の9）。
+  上限で持ち主の居ないreviseが期限を過ぎて待つときは、何も待たないidleのruntimeのplannerに終了の依頼を置いて枠を空ける（[Plan review](plan-review.md#reviseの配送)）。
   人が開いたplannerには終わりを頼まない（行は下の「人のplannerの終わり」で閉じる）。
 - **runtimeのplannerの時間切れ**: runtimeのplannerはturnの`[stall]`の上限で時間を切られ、wrapperが上限で止めたturnをsupervisorがplannerごとに1回`planner_unresponsive`で知らせる（下の[runtimeのplannerの経路](#runtimeのplannerの経路)の「状態」）。
   planner timeoutは、plannerに渡したreviseとplannerを待つreviseの時間切れ（proposalの`planner_unresponsive`）と、枠をふさぐidleのplannerの解放に使う。
@@ -90,7 +90,7 @@ use caseは`src/application/planner.rs`。
   下の行の片付けは人のplannerの行を閉じず、ここに任せる（どの行も`person_retired`の1つのcodeで閉じるため）。
 - **plannerの終わりの記録**（`planner_closed`、ADR-t1300-1）: runtimeがplannerの行を閉じるとき、originに依らず、行を閉じるのと同じトランザクションでqueueのevent（task・goal・runに付かない）`planner_closed`を1回記録する（行がすでに閉じていれば何も記録しない）。
   payloadは`planner_closed_payload`が作り、画面の中身は載せない。
-  `code`は上の人のplannerの終わり、runtimeのplannerの終わり方（[Plan review (supervisor)](plan-review.md)の10。古いバイナリがworkspaceに開いた対話の行も、cmuxを呼ばずにsessionが居ないとして閉じ、workspaceは人が閉じるよう理由に書く）、人の答えだけを待って終了の依頼を受けた行（下の[runtimeのplannerの経路](#runtimeのplannerの経路)）、下の行の片付けを分ける。
+  `code`は上の人のplannerの終わり、runtimeのplannerの終わり方（[Plan review](plan-review.md#runtimeのplannerの終わり)。古いバイナリがworkspaceに開いた対話の行も、cmuxを呼ばずにsessionが居ないとして閉じ、workspaceは人が閉じるよう理由に書く）、人の答えだけを待って終了の依頼を受けた行（下の[runtimeのplannerの経路](#runtimeのplannerの経路)）、下の行の片付けを分ける。
   wrapperを起動できずに`error`付きで閉じる行は、このeventを記録しない。
 - **行の片付け**（`close_abandoned_planners`）: 閉じていないruntimeのplannerの行のうち、sessionが記録されていて、それが居らず、wrapperが終わっている行を（`error`なしで）閉じ、`planner_closed`（`abandoned`、workspaceは閉じない）を記録する（人のplannerの行は上の「人のplannerの終わり」に任せる）。
   閉じた行は`planners`に出なくなる。

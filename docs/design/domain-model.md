@@ -140,7 +140,7 @@ CLIの各コマンドが許すstatus・記録するevent・flagごとの振る�
 
 - 基の値は1か所の`domain::base_priority`が決める（[ADR-t1639-1](../adr/2026-10-04-t1639-1-goal-priority-is-the-source-tasks-inherit-and-goals-carry-tags.md)決定2）。
 - 個別の指定の無いtaskは状態によらずgoalの今の値に追随し、claimの時に凍らせない（[ADR-t1811-1](../adr/2026-10-05-t1811-1-tasks-without-own-priority-follow-the-goal-in-every-status.md)）。
-- plan reviewはAI由来のtaskの個別の優先度を外す（人が置いた値と人間由来は残す。[Plan review](supervisor-lifecycle/plan-review.md)の6）。
+- plan reviewはAI由来のtaskの個別の優先度を外す（人が置いた値と人間由来は残す。[Plan review](supervisor-lifecycle/plan-review.md#verdictと適用)）。
 - 誰が置いたか（`PriorityBy`）は効く段（`PrioritySource`）と別の軸で、goal・taskの由来（`RecordedOrigin`）は作成時に1回だけ書く（`domain::plan_request`、ADR-t1975-1決定2・5）。
   goalを移るときの扱いは`task::set_goal`。
 - 効く優先度（`application::effective_priority`）は自分を推移的に待つ`ready`のtaskの値も継ぐが、永久にclaimされないtaskからは継がない（[ADR-t791-1](../adr/2026-09-28-t791-1-effective-priority-ignores-tasks-waiting-on-abandoned-goals.md)）。

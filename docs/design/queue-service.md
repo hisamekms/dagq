@@ -136,7 +136,7 @@ jobのpromptに現れる`` `dagq …` ``が全てユースケースに行くこ�
 
 | 呼び出し元 | どこが言うか | 注 |
 | --- | --- | --- |
-| plan review job（`ReadFilesAndQueueCli`） | `prompt::plan_review_prompt`（[Plan review](supervisor-lifecycle/plan-review.md)の4）、AGENTS.mdのplan reviewの節 | 読み取りだけ |
+| plan review job（`ReadFilesAndQueueCli`） | `prompt::plan_review_prompt`（[Plan review](supervisor-lifecycle/plan-review.md#入口)）、AGENTS.mdのplan reviewの節 | 読み取りだけ |
 | goal review job（`ReadFilesAndQueueCli`） | `prompt::goal_review_prompt`（[Prompt](supervisor-lifecycle/prompt.md#goal-reviewrunのreview復旧jobruntimeのplannerの上限)） | 読み取りだけ |
 | observer（`QueueCli`） | `observer::observer_prompt` | 読み取りと、findingの書き込みとそのask |
 | スループットの見直しのjob（`QueueCli`） | `throughput_review::review_prompt`と、それが載せるdagq skillの`reference/kpi.md`の手順 | 読み取りだけ |

@@ -527,9 +527,14 @@ pub struct PlanDecided {
 pub trait PlanReviewStore {
     /// Close unfinished reviews stopped for an exec handoff, owned only by
     /// `token`, including their session spans. Call before starting jobs.
+    /// Other tokens' rows are left alone; a proposal still a candidate is
+    /// reviewed again on a later pass, and an `interrupted` row is not
+    /// counted as an attempt.
     fn interrupt_plan_reviews_for_handoff(&mut self, token: &LeaseToken) -> Result<()>;
     /// Submitted proposals plan review may take now: not held, with a
     /// submitted task, and whether one of those has the interrupt priority.
+    /// The order ([`crate::domain::next_to_review`]) only says which goes
+    /// first: no submitted proposal skips plan review.
     fn plan_review_candidates(&self) -> Result<Vec<PlanReviewCandidate>>;
     /// Record the start of a plan review of `proposal` by `token`, in the
     /// directory named by its row's ID under `plan_reviews_dir`
@@ -538,6 +543,8 @@ pub trait PlanReviewStore {
     /// as `interrupted` first. `None`: another supervisor's job runs, or the
     /// proposal is no longer a candidate. `launch` is what the job is
     /// started with (ADR-0079 decision 7), recorded as the event's `launch`.
+    /// Its attempt counts the proposal's earlier rows that were not
+    /// `interrupted`.
     fn begin_plan_review(
         &mut self,
         proposal: ProposalId,
@@ -549,6 +556,48 @@ pub trait PlanReviewStore {
     /// Apply what the runtime made of the verdict and finish the job
     /// (`plan_review_finished`); an action the job may not take is an
     /// error, and nothing is applied.
+    ///
+    /// Nothing happens unless the row is still `token`'s unfinished one. A
+    /// proposal no longer submitted, or held, interrupts the row and
+    /// records `plan_review_discarded` only. So does a `task_edited` on a
+    /// task of the proposal after the job started (ADR-0041 decision 9,
+    /// compared by event ID), whatever the verdict, which is kept on the
+    /// row: it judged the old content, and the proposal, still submitted
+    /// and not held, is reviewed afresh on the next pass. An edit before
+    /// the job started, or of another proposal's task, does not stop it.
+    ///
+    /// On a `pass` the origin of each task and where its priority comes
+    /// from decide (ADR-t1975-1 decision 7), not the verdict's text. The
+    /// actions are checked before any is applied (a submitted task of the
+    /// proposal, a dependency on another task that exists, a priority only
+    /// lowered, a duplicate that passes the same check as
+    /// `cancel --duplicate-of` and is not canceled by the same verdict);
+    /// one that fails fails the whole verdict. A `lower_priority` on a
+    /// person's task, or on a priority a person set, is skipped with why
+    /// instead. Then the dependencies are added, a lowered priority of the
+    /// AI's is taken off for its goal's (the way `set-priority --inherit`
+    /// does), the duplicates are canceled as `cancel --duplicate-of`
+    /// records, and, actions or none, every submitted AI's task drops an
+    /// own priority the AI set; the proposal is accepted, its submitted tasks become
+    /// ready and its draft goals open. A `revise` sends the proposal back
+    /// with the findings waiting for their delivery. A `concern` holds it
+    /// and opens the `approve_plan` ask, on its first task with no run, in
+    /// the same transaction.
+    ///
+    /// A `reopen`, whatever the decision, takes a `ready` task outside
+    /// every submitted or revising proposal back to submitted (it is not
+    /// claimed) into a `revising` proposal of its own, owned by the
+    /// runtime, with its reason as the finding (`task_reopened`). A
+    /// `reopen` of a task of the proposal itself fails the whole verdict;
+    /// any other task (not ready, or in another active proposal) is left
+    /// as it is, and why is kept in `plan_review_finished`.
+    /// The weight predictions of the tasks still submitted are checked
+    /// before anything is applied: missing, unreadable, or not one for
+    /// each task, none is recorded and why is kept in
+    /// `plan_review_finished`, and the verdict is applied all the same.
+    /// Neither an edited proposal's verdict nor a failed job records any.
+    /// A `concern` verdict, applied as its recommendation or not, records
+    /// `plan_concern_decided` after `plan_review_finished`.
     fn finish_plan_review(
         &mut self,
         job: &PlanReviewJob,
@@ -558,6 +607,21 @@ pub trait PlanReviewStore {
     /// Record the job's failure (`plan_review_failed`, the inbox's) and
     /// hold the proposal as `failed`, unless the job moved on or its
     /// provider could not be used ([`PlanReviewFailure::unusable`]).
+    ///
+    /// Nothing happens unless the row is still `token`'s unfinished one. A
+    /// proposal that moved on, or a task of it edited after the job
+    /// started, ends the row as [`Self::finish_plan_review`] does
+    /// (`plan_review_discarded` instead of `plan_review_failed`, for a
+    /// proposal that moved on only when the job's agent ran; nothing held):
+    /// the edited content was not reviewed, so it does not go to a person.
+    /// Any other failure (the job could not start, exited non-zero, timed
+    /// out, printed no verdict, or its verdict could not be applied)
+    /// fails the row and holds the proposal: it stays `submitted`, the
+    /// supervisor does not take it again by itself, and `status` shows it
+    /// as an attention (plan review by hand) until the hold goes. A
+    /// person's instruction readies its tasks with the bypass, or submits
+    /// it again as it is (`submit --proposal`, `proposal_resubmitted`),
+    /// which reviews it afresh.
     fn fail_plan_review(
         &mut self,
         job: &PlanReviewJob,
@@ -604,17 +668,30 @@ pub trait PlanReviewStore {
     /// End the submitted proposals none of whose tasks waits for plan
     /// review any more (a person readied them with the bypass or canceled
     /// them): `accepted` when a task is left, `canceled` otherwise
-    /// (`proposal_settled`).
+    /// (`proposal_settled`). One a job still reviews is left. Its hold is
+    /// cleared, so its goals and tasks may join another proposal and its
+    /// attention goes.
     fn settle_proposals(&mut self) -> Result<Vec<(ProposalId, crate::domain::ProposalStatus)>>;
     /// Answered `approve_plan` asks nobody closed, oldest first.
     fn plan_answers(&self) -> Result<Vec<Ask>>;
     /// Apply a person's answer to an `approve_plan` ask and close it.
     /// `None` when the answer is not one the runtime applies (left to the
     /// inbox), or the proposal no longer waits for it (the ask is closed).
+    /// It applies only while the ask's proposal is still submitted and held
+    /// for the concern: `ready` accepts it and readies its tasks,
+    /// `send_back` sends it back with the person's reason and the latest
+    /// verdict's reasons as the findings, `cancel` cancels it and its
+    /// submitted tasks; `plan_review_outcome` (when that latest review was
+    /// the concern) and then `plan_decided` are recorded. A proposal that
+    /// moved on only closes the ask (`ask_closed`). Any other answer is not
+    /// applied, and is an attention as an answer the runtime does not
+    /// carry; `status` shows one it applies as being applied.
     fn decide_plan(&mut self, ask: AskId) -> Result<Option<PlanDecided>>;
     /// Whether the supervisor applies the answer the `approve_plan` ask has.
     fn applies_plan_answer(&self, ask: &Ask) -> Result<bool>;
-    /// The proposals held for a person outside an ask.
+    /// The proposals held for a person outside an ask: a failed job's, a
+    /// concern's whose `approve_plan` ask was closed by an answer the
+    /// runtime does not apply, and a revise no planner answered in time.
     fn plan_review_holds(&self) -> Result<Vec<PlanReviewHold>>;
     /// The tasks of closed goals left unfinished that other tasks wait on
     /// (task 421), held for a person outside an ask.

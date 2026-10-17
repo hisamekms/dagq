@@ -82,7 +82,7 @@ effort = "high"         # 省けば既定
 
 ## 差し戻しで開き直すplannerの段上げ
 
-plan reviewの`revise`（と`reopen`）の指摘を配るとき、持ち主のplannerが居ないのでruntimeが新しくplannerを立てる（`open_runtime_planner`、[Plan review](plan-review.md)の9）と、そのplannerのeffortを`[roles.runtime_planner]`の値（無ければ既定）から1段上げる（`domain::actor_model::raise`）。
+plan reviewの`revise`（と`reopen`）の指摘を配るとき、持ち主のplannerが居ないのでruntimeが新しくplannerを立てる（`open_runtime_planner`、[Plan review](plan-review.md#reviseの配送)）と、そのplannerのeffortを`[roles.runtime_planner]`の値（無ければ既定）から1段上げる（`domain::actor_model::raise`）。
 modelは表の値（無ければ既定を明示）のまま変えない。
 
 生きているplannerへの配送（指摘を次のturnの依頼として`turns/`に置く）は上げず、理由と記録は`infrastructure::plan_reviews`の`revise_sent`のdoc commentが持つ。

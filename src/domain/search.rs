@@ -168,7 +168,8 @@ const MAX_QUERY_WORDS: usize = 20;
 /// Japanese (kanji, kana), which are not separated by spaces, except those
 /// of hiragana alone (particles and endings such as `にする`), each once
 /// (ASCII case ignored), each quoted and joined with `OR`, at most
-/// [`MAX_QUERY_WORDS`] in order; `None` when it has none.
+/// [`MAX_QUERY_WORDS`] in order; `None` when it has none. It does not
+/// change how `dagq search` reads the query a person types.
 pub fn any_word_query(text: &str) -> Option<String> {
     let mut words: Vec<String> = Vec::new();
     let mut take = |word: &str| {

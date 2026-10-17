@@ -31,7 +31,7 @@ runtimeやjobが作ったdraftを、同じきっかけで作られ同時に待�
 対象はfollow_upのdraftに限らず、runtimeやjobが作ったdraft全般（follow_up、goalの判断jobのgap）とする。
 再検討の時刻（[ADR-t1540-1](../../adr/2026-10-05-t1540-1-a-kept-draft-returns-to-runtime-planners-at-its-revisit-time.md)）は下の[再検討の時刻](#再検討の時刻)。
 use caseは`src/application/supervise/draft_planner.rs`、storeは`src/infrastructure/draft_planners.rs`（port `DraftPlannerStore`）、規則と型は`src/domain/follow_up.rs`、promptは`application::prompt::draft_planner_prompt`。
-run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-supervisor)の`tend_planners`の中で、reviseの配送の後に進める（drain中は立てない）。
+run slotは使わず、[Plan review](plan-review.md#reviseの配送)の`tend_planners`の中で、reviseの配送の後に進める（drain中は立てない）。
 
 1. **出どころ**: runtimeやjobがdraftを作るときに、出どころと材料を`record_draft_origin`で`draft_origins`に書く。
    `integrate`の`register_follow_ups`はfollow_upのdraftに、workerが付けた種類（[follow_upsの分類コード](receipt-and-session-exit.md#follow_upsの分類コード)、ADR-t947-3）と所属の提案（[follow_upsの所属の提案](receipt-and-session-exit.md#follow_upsの所属の提案)）を材料として書く。
@@ -103,10 +103,10 @@ run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-sup
    人のsubmit（人が`DAGQ_ROLE`の無い自分のterminalで打った`submit`）、人の`adopt`を経たsubmit、`ready --bypass-review`は深さを0に戻す。
 7. **終わり**: runtimeのplannerは束のdraftをsubmitしたか、cancelしたか、`keep_draft`で（answerか、まだ来ない再検討の時刻で）残したら（決めずに残したものがあっても）、idleになったところで終了の依頼（`turns/exit`。`planner_exits`に記録）を受け、wrapperがsessionを終える。
    sessionの終わったplanner（exitした、見失った、backgroundのwrapperが居ない）の行は閉じられ、まだ動いているwrapperは止められる。
-   終了の依頼から`SessionWrappers::exit_timeout`を過ぎても終わらなければ、wrapperとその子孫を止めて行を閉じる（[Plan review (supervisor)](plan-review.md)の10）。
+   終了の依頼から`SessionWrappers::exit_timeout`を過ぎても終わらなければ、wrapperとその子孫を止めて行を閉じる（[Plan review](plan-review.md#runtimeのplannerの終わり)）。
    idleは、wrapperがturnの終わりに書くidle markerが最後の入力より新しく、`turns/`に待っている依頼が無いことで判じ、画面は読まない。
    `planner_question`のanswerを送られたplannerも、それをturnで読み終えれば（5）、人の答えだけを待つplannerも（5、`runtime_answer_wait`）終了の依頼を受ける。
-   持ち主の居ないreviseが上限で`--planner-timeout`を過ぎて待つときは、人の答えを待っていないidleのplannerが終了の依頼を受けて枠を空ける（`planner_released`。[Plan review (supervisor)](plan-review.md)の9）。
+   持ち主の居ないreviseが上限で`--planner-timeout`を過ぎて待つときは、人の答えを待っていないidleのplannerが終了の依頼を受けて枠を空ける（`planner_released`。[Plan review](plan-review.md#reviseの配送)）。
    runtimeのplannerの時間は`--planner-timeout`でなくturnの`[stall]`の上限で見る: wrapperがturnを`[stall]`の上限で止めたときに、plannerごとに1回`planner_unresponsive`がinboxに届き、止めたturnでsessionが終わるので、plannerは閉じられ、決めずに終わったplannerに数える（`tell_of_stopped_planner_turns`）。
    最後のturnがClaudeのログイン切れ・利用上限・起動の失敗で終わったplannerは、Claudeを待って終了の依頼を受けず、決めずに終わったplannerにも数えない（`provider_wall`）。
    どちらも[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)の「状態」と「使えないとき」。

@@ -40,10 +40,6 @@ path = "docs/design/supervisor-lifecycle/plan-planners.md"
 size = 46299
 
 [[doc]]
-path = "docs/design/supervisor-lifecycle/plan-review.md"
-size = 41468
-
-[[doc]]
 path = "docs/design/supervisor-lifecycle/run-environment.md"
 size = 36394
 

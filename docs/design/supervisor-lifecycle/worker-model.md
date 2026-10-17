@@ -17,7 +17,7 @@ related:
 # Worker model
 
 workerのsessionのmodelとeffortの選び方と記録（[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定3・4・5）。
-予測の記録は[plan review](plan-review.md)の6、読み方と段上げの件数は[stats](commands.md)と[kpi](commands.md)。
+予測の記録は[plan review](plan-review.md#verdictと適用)、読み方と段上げの件数は[stats](commands.md)と[kpi](commands.md)。
 worker以外のアクター（決定7の(b)(c)）は[Actor model](actor-model.md)。
 
 ## 既定を明示して渡す

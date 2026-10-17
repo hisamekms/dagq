@@ -106,7 +106,11 @@ pub const PLAN_REVIEW_PROMPT_LIMIT: usize = 400_000;
 /// the read-only dagq commands (ADR-t1566-1 decisions 2, 3). Half the whole
 /// limit: an ordinary proposal's required sections take about half of this
 /// limit, so nothing is replaced, and past it the optional sections still
-/// keep the other half of the whole. Nothing is moved to a file of the job's directory.
+/// keep the other half of the whole. Nothing is moved to a file of the job's directory:
+/// the job may not be able to read outside the repository (Claude's `Read`),
+/// while the read-only dagq commands its role may run reach it all. The
+/// note of what was replaced heads the proposal's tasks and is kept in
+/// [`PromptBytes`].
 pub const PLAN_REVIEW_REQUIRED_LIMIT: usize = 200_000;
 
 /// Ready and in-progress tasks the plan review prompt gives in full at
@@ -330,6 +334,36 @@ pub(super) fn follow_up_membership(detail: &TaskDetail) -> Option<Value> {
 /// limit and the whole to [`PLAN_REVIEW_PROMPT_LIMIT`]; what is left out is
 /// counted and named with the read-only dagq command that reads it (task
 /// 1561, ADR-t1566-1).
+///
+/// It first tells the job to read the repository's instructions
+/// (AGENTS.md / CLAUDE.md), the documents and rules they name, and those
+/// the tasks name; without AGENTS.md the job judges a task's verify, paths
+/// and evidence from CLAUDE.md, then the README, CI and build settings,
+/// and is to raise a `concern` when none decides. It speaks of
+/// contradicting "the decisions the repository recorded", never of an ADR,
+/// and carries no ADR number of dagq's. The checks it asks for: duplicates
+/// and changes already made (only an obvious duplicate is canceled, a
+/// doubtful one or one that looks done is a `concern`); contradictions with
+/// recorded decisions and the goals' constraints; acceptance at odds with
+/// the description or a sibling's acceptance; a dependency only for a
+/// prerequisite of content, never for touching the same files (the claim's
+/// deferral handles that), and none from a higher goal's task on a lower
+/// one's for that alone; a task that partly overlaps a ready or in-progress
+/// one is a `revise` saying which side to trim; a clash with a proposal
+/// submitted earlier (one submitted later passes); a ready task to
+/// `reopen`, or a task fixing an in-progress one after it lands; a
+/// follow_up's membership, checked from its planner's mapping against the
+/// source goal's acceptance, not passed on its form alone; and `lint`.
+/// Where a person answered the same kind of finding, the ask goes in
+/// `precedents` and the answer in the reason. The origin of each task and
+/// goal decides: a person's task or goal and a priority a person set keep
+/// their priority and membership (a doubt is a `concern` with `scope`),
+/// while for the AI's tasks a new goal's priority and the membership in an
+/// existing goal (needed for its acceptance or not) are checked and a
+/// wrong one is a `revise`. Whatever the verdict, it asks for a weight
+/// estimate of each submitted task, with no other model called for it;
+/// the guide it gives for the estimate is the one of the spike's
+/// `scripts/spikes/predictor-replay/predict.py`.
 pub fn plan_review_prompt(material: &PlanReviewMaterial<'_>) -> Result<PlanReviewPrompt> {
     let proposal = material.proposal;
     let to_lines = |values: Vec<Value>| values.iter().map(Value::to_string).collect::<Vec<_>>();
