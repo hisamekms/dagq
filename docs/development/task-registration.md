@@ -101,6 +101,7 @@ runtimeのtaskは`--paths`を宣言しない（上の「推奨の組み合わせ
 ## taskのtitle
 
 - taskのtitleは[文書の規則](documents.md)の「commit」の7つの接頭辞のどれかで始める（`docs: ...`の形）。titleはmainのsquash commitの件名になり、制御側のgitはhookを走らせないので、mainの接頭辞はtitleで揃える（[ADR-t2596-1](../adr/2026-10-17-t2596-1-seven-commit-prefixes-checked-by-hook-review-program-and-task-title.md)決定4）。登録するplannerが付け、plan reviewが見る（下の「plan reviewが当てはめる規則」）。
+- `dagq lint`と`submit`は`dagq.toml`の`[tasks] title_prefixes`でtitleの接頭辞を検査する（lintは報告し、submitは拒む）。
 - 接頭辞は上の「change」から選ぶ: `feature`→`feat`、`fix`→`fix`、`refactor`→`refactor`（速さの改善が目的なら`perf`）、`test`→`test`、`docs`→`docs`、`measure`→`chore`（結果の文書だけを変えるなら`docs`）、`config`→`chore`。
 
 ## goal の優先度とラベル

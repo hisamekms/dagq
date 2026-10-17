@@ -144,6 +144,12 @@ line = "test {test} timed out: *did not happen within*"
 # [tasks] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 982 を含んでから足した。
 changes = ["feature", "fix", "refactor", "test", "measure", "docs", "config"]
 
+# task の title が始まる接頭辞の集合（ADR-t2596-1 決定 4）。title は main の squash commit の件名になり
+# （docs/development/documents.md の「commit」）、制御側の git は hook を走らせないので、main の接頭辞はここで揃える。
+# 書いてあるので lint はこの接頭辞で始まらない title を報告し、submit は拒む（add と edit は拒まない）。
+# 一覧の正本は .config/committed.toml の allowed_types で、両者を同じ並びに揃える。
+title_prefixes = ["feat", "fix", "docs", "test", "refactor", "perf", "chore"]
+
 # goal のラベル（tag）の語彙（ADR-t1639-1 決定 6、task 1643。task 1642 の
 # docs/plans/goal-priority-inventory.md「1. ラベルの語彙の案」を採用）。
 # 書式は docs/design/supervisor-lifecycle/run-environment.md、各ラベルの意味と付け方は
