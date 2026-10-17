@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use super::{
     Cursor, LiveSnapshot, SlotSnapshot, StatsQuery, stats, timestamp_millis, with_changes,
+    without_cargo_measures, without_rustc,
 };
 use crate::domain::{EventId, GoalId, RunEvent, RunId, TaskChange, TaskId};
 
@@ -84,6 +85,84 @@ fn timestamps_parse_the_queue_format() {
     ] {
         assert_eq!(timestamp_millis(bad), None, "{bad}");
     }
+}
+
+/// The runs' `rustc` and the cargo-only counts are left out by two
+/// judgements of their own: [`without_rustc`] (the Rust profile) leaves
+/// the counts, and [`without_cargo_measures`] (dagq's source) leaves the
+/// `rustc`, the runs per `rustc` with their counts left out too.
+#[test]
+fn the_rustc_and_the_cargo_only_counts_are_left_out_apart() {
+    let mut events = Events::default();
+    events.push(
+        1,
+        Some("a"),
+        "run_claimed",
+        0,
+        json!({"from": "ready", "to": "in_progress",
+               "rustc_release": "1.93.0", "rustc_host": "aarch64-apple-darwin"}),
+    );
+    events.push(1, Some("a"), "session_opened", 1, json!({"kind": "worker"}));
+    let opened = events.last_id();
+    events.push(
+        1,
+        Some("a"),
+        "session_closed",
+        30,
+        json!({"opened_event_id": opened, "reason": "exited", "work": {
+            "total_secs": 1740, "secs": {"model": 1740},
+            "verification_repeats": 2, "full_tests": 1, "llvm_cov_runs": 1,
+        }}),
+    );
+    events.run(1, "a", "run_integrated", 40);
+    let all = stats(
+        &events.0,
+        &goals([(1, None)]),
+        at(60),
+        SlotSnapshot::default(),
+        &StatsQuery {
+            full: true,
+            ..StatsQuery::default()
+        },
+        &LiveSnapshot::default(),
+    );
+    let repeats = |report: &Value| {
+        [
+            report["runs"][0]["work_breakdown"]["verification_repeats"].clone(),
+            report["overall"]["work_breakdown"]["verification_repeats"].clone(),
+        ]
+    };
+
+    let shown = value(&all);
+    assert_eq!(repeats(&shown), [json!(2), json!(2)]);
+    assert_eq!(
+        shown["versions"]["rustc"][0]["work_breakdown"]["verification_repeats"],
+        2
+    );
+
+    let mut no_rustc = all.clone();
+    without_rustc(&mut no_rustc);
+    let no_rustc = value(&no_rustc);
+    for key in ["rustc_release", "rustc_host"] {
+        assert!(no_rustc["runs"][0].get(key).is_none(), "{key}");
+    }
+    assert!(no_rustc["versions"].get("rustc").is_none());
+    assert_eq!(repeats(&no_rustc), [json!(2), json!(2)]);
+
+    let mut no_cargo = all;
+    without_cargo_measures(&mut no_cargo);
+    let no_cargo = value(&no_cargo);
+    assert_eq!(no_cargo["runs"][0]["rustc_release"], "1.93.0");
+    assert_eq!(no_cargo["runs"][0]["rustc_host"], "aarch64-apple-darwin");
+    let rustc = &no_cargo["versions"]["rustc"][0];
+    assert_eq!(rustc["version"], "1.93.0 aarch64-apple-darwin");
+    assert_eq!(rustc["work_breakdown"]["runs"], 1);
+    assert!(
+        rustc["work_breakdown"]
+            .get("verification_repeats")
+            .is_none()
+    );
+    assert_eq!(repeats(&no_cargo), [Value::Null, Value::Null]);
 }
 
 /// What each run was claimed with and the load over its intervals

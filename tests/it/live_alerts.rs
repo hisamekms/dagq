@@ -269,6 +269,7 @@ fn the_folded_streams_give_what_stats_lists_on_the_queue() {
             areas: &areas,
             utc_offset_secs: 0,
             dagq_source: false,
+            rust_toolchain: false,
         },
     )
     .unwrap();

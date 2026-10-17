@@ -18,10 +18,10 @@
 //! which reads the queue, the run directories, the wrappers' processes,
 //! main's history and `<queue dir>/host/` and passes them on without a
 //! judgement of its own → [`stats`] here, which holds every rule of the
-//! counting and does no I/O → [`with_changes`], [`with_areas`] and
-//! [`without_cargo_measures`] → JSON. The KPI windows, the forecast and
-//! plan review's conflict hotspots call [`stats`] directly, so they read
-//! the same rules. Where each field comes from in the ledger is
+//! counting and does no I/O → [`with_changes`], [`with_areas`],
+//! [`without_cargo_measures`] and [`without_rustc`] → JSON. The KPI
+//! windows, the forecast and plan review's conflict hotspots call
+//! [`stats`] directly, so they read the same rules. Where each field comes from in the ledger is
 //! [`crate::domain::ledger::window`]'s.
 //!
 //! One read has four ranges: the page of runs (`--since` <
@@ -1942,17 +1942,16 @@ pub fn with_areas(stats: &mut Stats, areas: Option<&crate::domain::areas::RunAre
 
 /// Leave the cargo-only measures out of `stats` (ADR-t614-1), for a
 /// repository that is not dagq's source: each run's and each group's
-/// counts of what `integrate` repeats, the runs' `rustc` and the runs per
-/// `rustc`. Called last, after [`with_changes`] and [`with_areas`].
+/// counts of what `integrate` repeats. The runs' `rustc` is not one of
+/// them ([`without_rustc`]). Called last, after [`with_changes`] and
+/// [`with_areas`].
 pub fn without_cargo_measures(stats: &mut Stats) {
     for run in &mut stats.runs {
-        run.measures.hide_cargo();
         if let Some(work) = &mut run.work_breakdown {
             work.hide_cargo();
         }
     }
     let versions = &mut stats.versions;
-    versions.rustc.hide();
     let groups = stats
         .goals
         .iter_mut()
@@ -1968,6 +1967,7 @@ pub fn without_cargo_measures(stats: &mut Stats) {
                 .chain(&mut versions.provider)
                 .chain(&mut versions.route)
                 .chain(&mut versions.codex)
+                .chain(versions.rustc.shown_mut().into_iter().flatten())
                 .map(|group| &mut group.intervals),
         )
         .chain(
@@ -1980,6 +1980,18 @@ pub fn without_cargo_measures(stats: &mut Stats) {
     for intervals in groups {
         intervals.work_breakdown.hide_cargo();
     }
+}
+
+/// Leave the runs' `rustc` and the runs per `rustc` out of `stats`, for a
+/// repository whose profiles do not record the Rust toolchain at a claim
+/// ([`crate::domain::toolchain::Toolchains::records_rust_toolchain`], the
+/// same judgement as the claim's record and the KPIs' `toolchain` axis).
+/// Called last, after [`with_changes`] and [`with_areas`].
+pub fn without_rustc(stats: &mut Stats) {
+    for run in &mut stats.runs {
+        run.measures.hide_rustc();
+    }
+    stats.versions.rustc.hide();
 }
 
 /// `runs` grouped by [`RunStats::e2e`]: the known ones by name, then

@@ -29,7 +29,7 @@ use crate::domain::{
         StallConfigReport, Stats, StatsQuery,
         conflicts::{MainHistory, earliest_conflict},
         outlier_thresholds, stats as aggregate, timestamp_millis, with_areas, with_changes,
-        without_cargo_measures,
+        without_cargo_measures, without_rustc,
     },
 };
 
@@ -60,6 +60,11 @@ pub struct StatsSources<'a> {
     /// Whether the queue's repository is dagq's source (ADR-t614-1): only
     /// then are the cargo-only measures shown.
     pub dagq_source: bool,
+    /// Whether the repository's profiles record the host's Rust toolchain
+    /// at a claim
+    /// ([`crate::domain::toolchain::Toolchains::records_rust_toolchain`]):
+    /// only then are the runs' `rustc` and the runs per `rustc` shown.
+    pub rust_toolchain: bool,
 }
 
 /// Main's history since the earliest event of `events` (a second before
@@ -214,6 +219,9 @@ fn finish(
     with_areas(stats, areas.as_ref());
     if !sources.dagq_source {
         without_cargo_measures(stats);
+    }
+    if !sources.rust_toolchain {
+        without_rustc(stats);
     }
     if let Some(read) = sources.host_metrics {
         let (from, until) = stats.window_ms;

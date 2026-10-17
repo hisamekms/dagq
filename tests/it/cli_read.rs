@@ -426,6 +426,94 @@ fn the_toolchain_axis_follows_the_declared_rust_profile() {
     );
 }
 
+/// `stats`' `rustc` follows the same judgement as the `toolchain` axis
+/// (ADR-t2268-1): outside dagq's source it is shown with the Rust profile
+/// declared, while the cargo-only counts stay left out; in dagq's source
+/// it is left out with only another profile declared. Undeclared, it
+/// keeps the source judgement (`timeline_and_stats_show_the_work_breakdown`).
+#[test]
+fn the_stats_rustc_follows_the_declared_rust_profile() {
+    use dagq::domain::stats::StatsQuery;
+    use serde_json::json;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("queue.db");
+    run_with_events(
+        &db,
+        &[
+            ("agent_started", json!({"session_id": "s"}), "00:00:05"),
+            ("session_exited", json!({"exit_code": 0}), "00:30:00"),
+            ("run_integrated", json!({}), "00:40:00"),
+        ],
+    );
+    let work = json!({
+        "total_secs": 1795, "secs": {"model": 600, "llvm_cov": 900, "idle": 295},
+        "commands": {"llvm_cov": {"runs": 1, "failed": 0}},
+        "verification_repeats": 1, "full_tests": 0, "llvm_cov_runs": 1, "heavy": [],
+    });
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "UPDATE run_events SET payload=json_set(payload,'$.work',json(?1)) WHERE kind='session_closed'",
+        [work.to_string()],
+    )
+    .unwrap();
+    conn.execute(
+        "UPDATE run_events SET payload=json_set(payload,'$.rustc_release','1.93.0',
+           '$.rustc_host','aarch64-apple-darwin') WHERE kind='run_claimed'",
+        [],
+    )
+    .unwrap();
+    let one_shot = dagq::runtime::OneShot {
+        profiles: &crate::common::toolchain::PROFILES,
+        ..dagq::runtime::OneShot::system()
+    };
+    let stats = |package: &str, toml: &str| -> Value {
+        bind(&db, dir.path(), package);
+        std::fs::write(
+            dir.path().join(format!("repo-{package}")).join("dagq.toml"),
+            toml,
+        )
+        .unwrap();
+        one_shot
+            .stats_of(
+                &SqliteQueue::open(&db).unwrap(),
+                &db,
+                &StatsQuery {
+                    full: true,
+                    ..StatsQuery::default()
+                },
+            )
+            .unwrap()
+    };
+
+    let declared = stats(
+        "other",
+        "[toolchains.core]\nprofile = \"rust\"\npaths = [\"src/**\"]\n",
+    );
+    assert_eq!(declared["runs"][0]["rustc_release"], "1.93.0");
+    assert_eq!(declared["runs"][0]["rustc_host"], "aarch64-apple-darwin");
+    let rustc = &declared["versions"]["rustc"][0];
+    assert_eq!(rustc["version"], "1.93.0 aarch64-apple-darwin");
+    assert_eq!(rustc["runs"], 1);
+    for group in [
+        &declared["runs"][0]["work_breakdown"],
+        &declared["overall"]["work_breakdown"],
+        &rustc["work_breakdown"],
+    ] {
+        assert!(group.is_object(), "{group}");
+        assert!(group.get("verification_repeats").is_none(), "{group}");
+    }
+
+    let other_only = stats("dagq", "[toolchains.tool]\nprofile = \"made-up\"\n");
+    for key in ["rustc_release", "rustc_host"] {
+        assert!(other_only["runs"][0].get(key).is_none(), "{key}");
+    }
+    assert!(other_only["versions"].get("rustc").is_none());
+    assert_eq!(
+        other_only["runs"][0]["work_breakdown"]["verification_repeats"],
+        1
+    );
+}
+
 #[test]
 fn timeline_names_the_long_gap_before_the_receipt() {
     use serde_json::json;

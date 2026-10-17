@@ -35,7 +35,7 @@ runtimeのほかのコードは、宣言したprofileをportを通して呼ぶ�
 - 今のmethodは、検証のコマンドの出力を読むもの（道具の印から失敗を既存の分類に当てること、落ちたtestと流し直しで通ったtestの名前を読むこと、flakyのやり直しで足すenvを返すこと）と、CIと計測を読むもの（CIの見張りがJUnitのtestを道具の表示と同じ名前にする作り方、hostの負荷で道具のprocessをbuildの道具かcompilerに分けること）と、buildの出力の置き場を返すもの（下の「buildの出力の置き場」）である。
   processの種類の列は名前を固定し（`cpu_cargo`・`cpu_rustc`ほか）、profileは閉じた型（`ToolProcess`）でどちらの列かを返す。
   claude・dagq・そのほかは言語に依らないruntimeの共通の分類である（[hostの負荷](supervisor-lifecycle/host-metrics.md)）。
-- hostのRustのtoolchainの記録（claimの`rustc_release`・`rustc_host`）とKPIの`toolchain`の軸は、宣言したprofileにRustのprofileがあるときだけ働く（`Toolchains::records_rust_toolchain`）。
+- hostのRustのtoolchainの記録（claimの`rustc_release`・`rustc_host`）とKPIの`toolchain`の軸と`stats`の`rustc`の欄は、宣言したprofileにRustのprofileがあるときだけ働く（`Toolchains::records_rust_toolchain`）。
   記録の欄の名前がRustのものなので、ほかのprofileはtoolchainの版を返さない。
 - profileが返せる分類は型で閉じている: hostの分類は`killed`と`timeout`だけ（`ToolHostClass`）、コードの分類はbuild・lint・test・format・coverageだけ（`ToolCodeClass`）。
   profileは既存の分類に印を足すだけで、hostの分類の集合（`FailureClass::is_environmental`）を広げられない（[ADR-t639-1](../adr/2026-09-27-t639-1-retry-verification-failures-of-the-host-once.md)決定5）。

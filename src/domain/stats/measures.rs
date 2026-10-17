@@ -95,8 +95,8 @@ pub struct RunMeasures {
     /// The host's `rustc` at the claim, recorded where the repository's
     /// profiles record the Rust toolchain
     /// ([`crate::domain::toolchain::Toolchains::records_rust_toolchain`]);
-    /// shown with the cargo-only measures, outside dagq's source left out
-    /// (ADR-t614-1).
+    /// shown by the same judgement, elsewhere left out
+    /// ([`super::without_rustc`]).
     #[serde(skip_serializing_if = "CargoOnly::is_hidden")]
     pub rustc_release: CargoOnly<Option<String>>,
     #[serde(skip_serializing_if = "CargoOnly::is_hidden")]
@@ -132,8 +132,8 @@ impl RunMeasures {
         (text(&self.rustc_release), text(&self.rustc_host))
     }
 
-    /// Leave its cargo-only measures out (ADR-t614-1).
-    pub fn hide_cargo(&mut self) {
+    /// Leave its `rustc` out ([`super::without_rustc`]).
+    pub fn hide_rustc(&mut self) {
         self.rustc_release.hide();
         self.rustc_host.hide();
     }
@@ -346,7 +346,7 @@ pub struct VersionStats {
 pub struct Versions {
     pub dagq: Vec<VersionStats>,
     pub claude: Vec<VersionStats>,
-    /// Cargo-only (ADR-t614-1).
+    /// Shown where the runs' `rustc` is ([`super::without_rustc`]).
     #[serde(skip_serializing_if = "CargoOnly::is_hidden")]
     pub rustc: CargoOnly<Vec<VersionStats>>,
     /// By the provider that did the run's work in the end

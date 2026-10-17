@@ -1,8 +1,10 @@
 //! The cargo-only measures of `stats` (ADR-t614-1): what only dagq's own
-//! checks (`cargo test`, llvm-cov, the e2e test) and the host's `rustc`
-//! give. They are shown for dagq's source repository and left out of the
-//! output for any other ([`super::without_cargo_measures`]), where a 0 or
-//! an `unknown` would read as a fact about that project. The decision is
+//! checks (`cargo test`, llvm-cov, the e2e test) give. They are shown for
+//! dagq's source repository and left out of the output for any other
+//! ([`super::without_cargo_measures`]), where a 0 or an `unknown` would
+//! read as a fact about that project. The host's `rustc` is left out the
+//! same way, by whether the repository's profiles record the Rust
+//! toolchain ([`super::without_rustc`]). The decision is
 //! made each time `stats` is shown; the callers of
 //! [`super::stats`] itself (the KPI windows, plan review's conflict
 //! hotspots, the forecast) see every measure. The work breakdown's
@@ -32,6 +34,14 @@ impl<T> CargoOnly<T> {
 
     /// The value, `None` when hidden.
     pub fn shown(&self) -> Option<&T> {
+        match self {
+            Self::Shown(value) => Some(value),
+            Self::Hidden => None,
+        }
+    }
+
+    /// The value to change, `None` when hidden.
+    pub fn shown_mut(&mut self) -> Option<&mut T> {
         match self {
             Self::Shown(value) => Some(value),
             Self::Hidden => None,

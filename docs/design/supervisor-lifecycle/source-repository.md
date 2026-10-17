@@ -38,7 +38,7 @@ dagqの開発でだけ要る機能は、queueのrepositoryが「dagqのソース
 この判定に置くのはdagq自身の配布の事情（表の上の3行と、そのinstallと自動更新の前のe2eの関門）だけで、言語・道具の知識は置かない（[ADR-t2268-1](../../adr/2026-10-12-t2268-1-toolchain-knowledge-behind-declared-profiles.md)決定2）。
 言語・道具の知識は`dagq.toml`で宣言したtoolchainのprofile、projectの値は`dagq.toml`、hostの値は`host.toml`、言語に依らない知識（hostの分類の汎用の印、待ち・dagq・gitのコマンドの分類）はruntimeの共通の既定に置く。
 **実装状況**: profileのportと`[toolchains.<名前>]`の宣言はある（[Toolchain profiles](../toolchain-profiles.md)）。
-検証の失敗の分類・落ちたtestとflakyのtestの抜き出し・flakyのやり直しのenv、landing recheckと自動更新のbuildの出力の置き場と掃除、CIの見張りのJUnitのtestの名前、hostの負荷のprocessの種類、hostの`rustc`とtoolchainの記録とKPIの`toolchain`の軸は、profileを通して働く。
+検証の失敗の分類・落ちたtestとflakyのtestの抜き出し・flakyのやり直しのenv、landing recheckと自動更新のbuildの出力の置き場と掃除、CIの見張りのJUnitのtestの名前、hostの負荷のprocessの種類、hostの`rustc`とtoolchainの記録とKPIの`toolchain`の軸と`stats`の`rustc`の欄は、profileを通して働く。
 宣言の無いrepositoryではRustのprofileが暗黙に当たり、`doctor`と`status`が警告する（ADR-t2268-1決定9）。
 計測のコマンドの分類と回数はまだprofileに移っておらず、表の4行目のうちそれらはこの判定で分け、下の「言語・道具の知識の今の場所」はcargoの前提でどのrepositoryでも働く。
 移行の間も、宣言の無いrepositoryは今のRustの振る舞いのままで、旧い分け方を外すのはこのrepositoryの`dagq.toml`に宣言と規則が入った後である（ADR-t2268-1決定9）。
@@ -54,13 +54,13 @@ dagqの開発でだけ要る機能は、queueのrepositoryが「dagqのソース
 
 ソースでないrepositoryのqueueで記録も出力もしないもの。
 決まった形では、コマンドの分類と回数は`dagq.toml`の規則・宣言したprofileの既定の規則・runtimeの共通の既定の規則の重ね合わせ（[計測](../measurement.md#コマンドの形と分類)）、hostの`rustc`とtoolchainの記録と分け方は宣言したRustのprofileが持ち、この判定を使わない（ADR-t2268-1決定2・5）。
-今は、hostの`rustc`とtoolchainの記録とKPIの`toolchain`の軸を除き、次のとおりこの判定で分ける。
+今は、hostの`rustc`とtoolchainの記録と、KPIの`toolchain`の軸と`stats`の`rustc`の欄を除き、次のとおりこの判定で分ける。
 
 - worktime（`src/domain/worktime.rs`）: commandの分類と数のうちcargoの規則が付けるものは、ソースでなければ区間を閉じるときに付けず`work`に書かない（落ちたtestの名前も、testを流す分類のコマンドが無いので読まない）。
   判定は区間を閉じるたびに`infrastructure::sessions::dagq_source`が、queueの束縛からmain checkoutを求めて行い、束縛の無いqueueはソースでない。
 - `stats`のcargo専用の欄: ソースでなければ`runs`と全ての群で欄ごと出さず、欄は`domain::stats::without_cargo_measures`のdoc commentが持つ。
-- claimのRustのtoolchainの属性（`run_claimed`）と[`kpi`](commands.md)の`toolchain=`の層: この判定ではなく、宣言したprofileにRustのprofileがあるかで分ける（`Toolchains::records_rust_toolchain`）。
-  当たらなければsupervisorはRustのprofileの`rustc -vV`を実行せず欄ごと書かず、`kpi`は`--by toolchain`でも層を出さない。
+- claimのRustのtoolchainの属性（`run_claimed`）と[`kpi`](commands.md)の`toolchain=`の層と`stats`の`rustc`の欄: この判定ではなく、宣言したprofileにRustのprofileがあるかで分ける（`Toolchains::records_rust_toolchain`）。
+  当たらなければsupervisorはRustのprofileの`rustc -vV`を実行せず欄ごと書かず、`kpi`は`--by toolchain`でも層を出さず、`stats`は`rustc`の欄を`runs`と`versions`で出さない（`domain::stats::without_rustc`）。
   宣言の無いrepositoryには移行の間Rustのprofileが暗黙に当たり、そのあいだはこの判定のまま分ける（ADR-t2268-1決定9）。
 - 出力の判定は`stats`・`kpi`・日次のレポート・observerの入力を出すたびに`compose`がmain checkoutの`Cargo.toml`と`dagq.toml`で行う。
 

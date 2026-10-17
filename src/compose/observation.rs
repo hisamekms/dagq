@@ -291,6 +291,22 @@ fn doctor_repository(queue: &SqliteQueue) -> Result<Option<serde_json::Value>> {
     }))
 }
 
+/// Whether the host's Rust toolchain is recorded and shown for the queue
+/// bound to `checkout`, as the profiles of its `dagq.toml` resolved against
+/// `profiles` say
+/// ([`crate::domain::toolchain::Toolchains::records_rust_toolchain`]); a
+/// queue bound to none records it not. `kpi`'s `toolchain` axis and
+/// `stats`' `rustc` read it alike.
+fn records_rust_toolchain(
+    checkout: Option<&Path>,
+    profiles: &crate::domain::toolchain::ProfileRegistry,
+) -> bool {
+    checkout.is_some_and(|checkout| {
+        crate::infrastructure::run_env::toolchains_in_use(checkout, profiles)
+            .records_rust_toolchain(|| is_dagq_source(checkout))
+    })
+}
+
 /// What the KPIs and their reports of the queue at `db` are made with at
 /// `now`: the `[kpi]` of `checkout`'s `dagq.toml` with the host's
 /// `host.toml` (the queue's, over the host-wide one) over it, the host's
@@ -320,10 +336,7 @@ fn report_setup(
         host: crate::application::kpi::Host {
             utc_offset_secs: clock::local_utc_offset(now),
             cores: clock::logical_cores(),
-            rust_toolchain: checkout.is_some_and(|checkout| {
-                crate::infrastructure::run_env::toolchains_in_use(checkout, profiles)
-                    .records_rust_toolchain(|| is_dagq_source(checkout))
-            }),
+            rust_toolchain: records_rust_toolchain(checkout, profiles),
         },
         config: crate::domain::kpi::KpiConfig::merge(repository.as_ref(), host.as_ref()),
         keep: load_host_report(queue_dir, host_wide)?,
@@ -1166,6 +1179,7 @@ impl OneShot {
             areas: &area_reader(checkout.as_deref())?,
             utc_offset_secs: clock::local_utc_offset(now),
             dagq_source: checkout.as_deref().is_some_and(is_dagq_source),
+            rust_toolchain: records_rust_toolchain(checkout.as_deref(), self.profiles),
         };
         read(now, &sources)
     }
@@ -1441,5 +1455,41 @@ pub(super) fn ci_watch_port(
         file,
         source,
         interval: settings.interval,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::records_rust_toolchain;
+    use crate::domain::toolchain::fake::REGISTRY;
+
+    /// `stats`' `rustc` and the KPIs' `toolchain` axis are shown with the
+    /// Rust profile declared, dagq's source or not, and not with only
+    /// another profile declared, even in dagq's source; undeclared, while
+    /// the Rust profile is implied, in dagq's source only (ADR-t2268-1
+    /// decision 9); and not for a queue bound to no checkout.
+    #[test]
+    fn the_rust_toolchain_is_shown_as_the_declared_profiles_say() {
+        let shown = |package: &str, toml: Option<&str>| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("Cargo.toml"),
+                format!("[package]\nname = \"{package}\"\n"),
+            )
+            .unwrap();
+            if let Some(toml) = toml {
+                std::fs::write(dir.path().join("dagq.toml"), toml).unwrap();
+            }
+            records_rust_toolchain(Some(dir.path()), &REGISTRY)
+        };
+        let rust = "[toolchains.core]\nprofile = \"rust\"\npaths = [\"src/**\"]\n";
+        let fake = "[toolchains.tool]\nprofile = \"fake\"\n";
+        assert!(shown("other", Some(rust)));
+        assert!(shown("dagq", Some(rust)));
+        assert!(!shown("dagq", Some(fake)));
+        assert!(!shown("other", Some(fake)));
+        assert!(shown("dagq", None));
+        assert!(!shown("other", None));
+        assert!(!records_rust_toolchain(None, &REGISTRY));
     }
 }
