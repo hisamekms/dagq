@@ -160,7 +160,7 @@ review・recovery・plan review・goal reviewのjobは、jobごとに別のrole�
 | job | verdict | supervisorが行うこと |
 | --- | --- | --- |
 | review-job | `pass` | 衝突の事前検査のあと、sessionの終了を待って着地の段（`AfterExit::Land`）へ進めるだけ。着地の関数は呼ばない。着地は別のthreadの`land_integrating`が、rebase後の検証コマンドを含む自分の検査を通したときだけ行い、落ちればrunは`needs_session`になる |
-| review-job | `revise` / `concern` | 生きているsessionへの差し戻し（`revise`の上限を使い切ったか、sessionが終わっていれば`approve_landing`のask） / `approve_landing`のask |
+| review-job | `revise` / `concern` | 生きているsessionへの差し戻し（sessionが終わっていれば`approve_landing`のask） / `approve_landing`のask。runを通した`revise`の上限の後の差し戻しは収束の判定（`revise_limit_judged`）に通し、コードの指摘が無ければaskを開かずにpassの道で着地して理由をfollow_upのdraftにし、あれば`approve_landing`のask（[Review](review.md)の4a） |
 | recovery-job | `repair`（`confidence: high`） | `RecoveryVerdict::applies()`を通り、さらにalertごとの前提（終わったrunは`plan_ended`、生きているrunは`check_live`）を今も満たすactionだけを適用する。満たさなければaskにする |
 | recovery-job | `repair`（`low`）/ `escalate` | 適用せず、actionを推奨として`decide`などのaskにする |
 | plan-review-job | `pass` / `revise` / `concern` | 1つのtransactionで`ready`・plannerへの差し戻し・`approve_plan`のask。`concern`の`high`で`reason_category`が`null`の`ready` / `send_back`はpass / reviseとして適用する（[Plan review](plan-review.md#aiが決めるconcern未実装)、ADR-t451-1決定4）。`actions`は`pass`（と適用した`ready`）のときだけ許された3種を適用し、`reopen`はverdictに関わらず検査して適用する。`pass`での優先度の扱いは各taskの記録の由来と優先度の出どころで分かれる（[Plan review](plan-review.md#verdictと適用)） |
@@ -175,7 +175,7 @@ review・recovery・plan review・goal reviewのjobは、jobごとに別のrole�
   plan reviewは`plan_review_failed`（`plan review by hand`）でproposalは`submitted`のまま。
   goal reviewは`goal_review_failed`（`goal review by hand`）でgoalは開いたまま。
 - 記録: verdictを適用したeventは上の「eventのactor」のとおりactorがsupervisor、`requested_by`がjobのactor id。
-  reviewの`concern`と差し戻せない`revise`（上限を使い切った・sessionが終わっていた・切り替えられなかった・送れなかった）と、`pass`の後の衝突の事前検査が上限で人に聞く`approve_landing`のaskは、sessionの終了の後に開くが、`AfterExit::Ask`がverdictを返したreview jobのactor（`requested_by`）を持ち、askを開くときだけ`for_job`で包むので、その`ask_opened`もactorがsupervisor、`requested_by`が`review-job:<run>:<attempt>`になる。
+  reviewの`concern`と差し戻せない`revise`（上限の後に収束していない・sessionが終わっていた・切り替えられなかった・送れなかった）と、`pass`の後の衝突の事前検査が上限で人に聞く`approve_landing`のaskは、sessionの終了の後に開くが、`AfterExit::Ask`がverdictを返したreview jobのactor（`requested_by`）を持ち、askを開くときだけ`for_job`で包むので、その`ask_opened`もactorがsupervisor、`requested_by`が`review-job:<run>:<attempt>`になる。
   askの後にleaseを返すなどのeventは`for_job`の外で、`requested_by`を持たない。
   supervisorの引き継ぎ（`adopt.rs`）が履歴から`AfterExit::Ask`を組み立て直すときは、引き継ぐ（か直前の）`review_finished`のpayloadの`attempt`から同じjobを復元し、`attempt`が無ければ別のjobを名指ししないよう`requested_by`を付けない。
   引き継いだpassのrunの衝突の事前検査も同じjobの`for_job`の中で行うので、その`conflict_precheck`も生きている経路と同じく`requested_by`を持つ。

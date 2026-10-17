@@ -156,7 +156,7 @@ workerのsessionはclaimでもresumeでも非対話で、supervisorは依頼をr
     持ち主の`integrate`は死んでいるのでそのプロセスの結果を読む者はおらず、着地はやり直され（mainに既にあればIntegratorが`landing_found_on_main`にする）、成果は失われない。
     着地そのものは`start_approved_landings`とIntegratorが行う（ADR-0047の3層、ADR-t728-2）。
     claimを止めてdrainしているsupervisor（fill passを行わない）も、各回でこの解放だけは行い、自分の着地を待つrunとdrainが死んだ着地を待たないようにする（列に並んだrunは次のsupervisorが着地させる）。
-    承認されたかreviewがpass済みのrun（Integratorが着地させる条件と同じ`RunHistory::landable`）は`landing_queued`を記録して人を待たずに着地の列に並び（[Review](review.md#review-supervisor)の6の`start_approved_landings`）、そうでないrunは`review_recovered_runs`がleaseを取ってvalidationの直後と同じreviewにかける（そのrunの`approve_landing`のaskが開いていれば、その答えを待つ）。
+    承認・reviewのpass・上限の後の収束の判定（`revise_limit_judged`）のどれかがあるrun（`RunHistory::landable`）は`landing_queued`を記録して人を待たずに着地の列に並び（[Review](review.md#review-supervisor)の6）、そうでないrunは`review_recovered_runs`がleaseを取ってvalidationの直後と同じreviewにかける（そのrunの`approve_landing`のaskが開いていれば、その答えを待つ）。
     回答済みのtriageの`decide`のaskを適用し、空いたslotで`failed` / `interrupted`のrunのtriage（復旧job）を、`needs_session`のresume（試行を使い切ったrunは`failed`にして`decide`のaskにする）とclaimと1つの列で、taskの効く優先度の順に始める（5の「slotを渡す順」、ADR-t1850-1）。
     休んでいる`already_satisfied`のrunは回収しない。
 13. **observer**: 停止要求が無くclaimを止めていなければ、observationの期日が来ていて走っているobserverが無いときに`dagq observe`を子プロセスで起動する（[Observer](observer.md#observer)）。run slotは使わない。

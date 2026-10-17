@@ -26,11 +26,11 @@ related:
 # `integrate`
 
 `dagq integrate ID`（taskの`awaiting_integration`または`needs_session`のrun）と`dagq integrate --next`（`awaiting_integration`のrunを検証完了の古い順に1件）は、検証済みのrunをruntimeが`main`へ着地させる操作で、repository内で実行する（[ADR-0008](../../adr/0008-merge-queue-squash-landing.md)）。
-reviewがpassしたrunはsupervisorが同じ`Integrator`に依頼して着地させるので、人が呼ぶのは`review_failed`のrunと、review以前のsupervisorが残した`awaiting_integration`のrunだけ（[Review](review.md#review-supervisor)）。
+reviewがpassしたrunと、上限の後の差し戻しを収束と判定した（`revise_limit_judged`）runはsupervisorが同じ`Integrator`に依頼して着地させるので、人が呼ぶのは`review_failed`のrunと、review以前のsupervisorが残した`awaiting_integration`のrunだけ（[Review](review.md#review-supervisor)）。
 repositoryは`GitRepository::inspect`で開き、common directoryが`queue_repository.git_common_dir`と一致することを要求する。
 
 ユースケースの本体はapplication層の`src/application/integrate.rs`にある（[ADR-0013](../../adr/0013-layered-architecture-and-type-function-style.md)の方針1と8）。
-着地とpushはこのmoduleの`Integrator`だけが行い、supervisorと人の`integrate`は着地の依頼を渡す（[ADR-t728-2](../../adr/2026-09-27-t728-2-landing-only-by-the-trusted-integrator.md)。依頼者の検査・lease・承認かreviewのpassの確認と、eventの依頼者とIntegratorの記録は[Authorization](../authorization.md#着地とpushintegrator)）。
+着地とpushはこのmoduleの`Integrator`だけが行い、supervisorと人の`integrate`は着地の依頼を渡す（[ADR-t728-2](../../adr/2026-09-27-t728-2-landing-only-by-the-trusted-integrator.md)。依頼者の検査・lease・承認かreviewのpassか収束の判定の記録の確認と、eventの依頼者とIntegratorの記録は[Authorization](../authorization.md#着地とpushintegrator)）。
 着地とpushの処理は承認の段（束縛の確認、runの選択、supervisorのleaseの確認、人が打つ`integrate`の空き容量の確認（[空き容量](disk-space.md#人が打つintegrate)）、`integration_approved`、tokenの生成）と着地の段（下の2〜10）に分かれ、どちらもportの束の`Integration`だけを受け取り、queueとGitのinfrastructureの型とrusqliteを参照しない。
 portは`src/application/ports/`にあり、infrastructureの型が実装する。
 2つの段はmoduleの外から呼べず、`Integrator`の承認のmethod（承認の段を呼ぶ）と着地のmethod（検査の後に着地の段を呼ぶ）が入口になる。
