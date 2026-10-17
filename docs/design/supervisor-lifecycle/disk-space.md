@@ -119,7 +119,7 @@ supervisorの着地（`land_integrating`）は上の「判定と掃除」の控�
 
 ## 検証がディスク満杯で落ちたとき
 
-事前の確かめをすり抜けて着地の検証コマンドが`disk_full`で落ちたら（supervisorの着地も人の`integrate`も）、integrateはやり直す前に空きを着地の閾値で確かめる（[`integrate`](integrate.md#integrate)の5の「hostの失敗のやり直し」）。
+事前の確かめをすり抜けて着地の検証コマンドが`disk_full`で落ちたら（supervisorの着地も人の`integrate`も）、integrateはやり直す前に空きを着地の閾値で確かめる（[`integrate`](integrate.md#hostの失敗のやり直し)）。
 閾値と空きの読み方は上と同じで、そのときに読む（`Integration::retry_disk`）。
 
 - 足りれば同じ試行で1回やり直す

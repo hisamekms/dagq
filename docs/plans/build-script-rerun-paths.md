@@ -163,7 +163,7 @@ rustcの`working_dir`（作業ディレクトリ）はincrementalの比べる引
 - **build scriptを直したとき、dagqのcrateがfreshになるのは、worktreeのcommitがseedと同じで、`SOURCES`のファイルが1つも変わっていないときだけである。** そのときは(e)のとおり全部freshになる。
 - **runの変更かrebaseで`SOURCES`が1つでも変われば、3つのcrateはcompileし直しになり、incrementalにも当たらない。** 2章の(e)がこの場合で、(d)と同じだけかかった。
 - workerの最初のbuildが「seedと同じcommitで変更の前」に当たればfreshになる。ただしそのworktreeのincrementalのcacheはseedのcwdのものなので、変更の後の最初のbuildはdagqのcrateを丸ごとcompileする。workerのbuildの合計は、依存crateの段の分しか縮まない。
-- 着地の検証は、rebaseの後にrunの変更の上で流れる（[integrate](../design/supervisor-lifecycle/integrate.md#integrate)の5）。runの変更が`SOURCES`に1つも触れないrun（docsだけなど）でも、seedがbaseと同じcommitでなければrebaseで変わったファイルでbuild scriptが走り直す。着地の検証がfreshになる場合は、ほぼ無い。
+- 着地の検証は、rebaseの後にrunの変更の上で流れる（[integrate](../design/supervisor-lifecycle/integrate.md#検証のコマンド)）。runの変更が`SOURCES`に1つも触れないrun（docsだけなど）でも、seedがbaseと同じcommitでなければrebaseで変わったファイルでbuild scriptが走り直す。着地の検証がfreshになる場合は、ほぼ無い。
 
 ### 4.3 worktree-seed.mdの3.2節（`cov`で(c)が短かった理由）
 

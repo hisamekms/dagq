@@ -734,7 +734,10 @@ pub fn landing_refusal(
 
 /// The first half of `integrate` ([`Integrator::approve`]). The requester
 /// is refused before anything is recorded when the policy does not grant
-/// it [`Capability::IntegrationRequest`] on the run.
+/// it [`Capability::IntegrationRequest`] on the run. `repo`'s Git common
+/// directory (`common_dir`) must be the one the queue is bound to.
+/// `--next` takes only runs awaiting integration, never one that waits
+/// for a session.
 fn begin(
     ctx: &mut Integration<'_>,
     requester: &ActorContext,
@@ -1996,6 +1999,8 @@ fn land(
     }
     // The task's verification commands run here, once per commit, on the
     // rebased tree: validation only checks the receipt (ADR-0023 decision 1).
+    // So they run even when the rebase moved nothing and the head is still
+    // the run's `result_commit`.
     // The repository's landing verification runs in place of those its
     // `dagq.toml` names; the registered commands stay (ADR-t1925-1).
     // Read like `[run.env]`, only for a task that has commands to run.
@@ -2111,6 +2116,11 @@ fn land(
     // The landing's verification, done once more when only flaky tests
     // failed (task 768, ADR-t768-1): a new attempt of every command on the
     // same rebased head, in the slot it holds (main does not move meanwhile).
+    // The receipt check and the rebase are not done again: the rebase moved
+    // the run branch past the receipt's `commit`, so a second check would
+    // find a `commit_mismatch`. The once is per landing: earlier
+    // `integration_retried` events do not count, so a landing after a
+    // resume or a recovery may retry once again.
     let mut flaky_retried = false;
     'verify: loop {
         // Each attempt keeps its own logs, so a second integrate of the run does
@@ -3263,8 +3273,10 @@ const LANDED_LANDING_ASK_CLOSED: &str = "the run was integrated; closed by the r
 /// (task 425), then those of the task's other runs, as the task is
 /// completed, and the `blocked` asks of the run or its task (task 329):
 /// whether it was landed by hand or by the supervisor, nobody needs to
-/// answer them any more. `main` already moved, so a failure is only
-/// reported.
+/// answer them any more. A `blocked` ask left open would keep raising the
+/// `ask_unanswered` alert after the landing. Each close is recorded on the
+/// run, or the task alone, its `ask_opened` was, and leaves the ask's
+/// finding as it is. `main` already moved, so a failure is only reported.
 fn close_landing_asks(queue: &mut dyn AskStore, run: &TaskRun) {
     let closes = [
         (

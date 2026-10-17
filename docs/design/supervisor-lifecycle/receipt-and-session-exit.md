@@ -83,7 +83,7 @@ runのreview（[Review](review.md#差し戻しの分類コード)）と同じ種
 
 - **receiptの形**: `follow_ups`の各要素に`category`（コード1つ）を足す。
   `category`の無い要素と一覧に無い値もreceiptの受理を変えない（validationは拒まない）。
-- **記録**: `integrate`がdraftを登録するとき（[integrate](integrate.md)の10）、`follow_up_registered`のpayloadとdraftの出どころの`material`に`category`を載せる（欠けの判定は`domain::follow_up::follow_up_category`）。
+- **記録**: `integrate`がdraftを登録するとき（[integrate](integrate.md#follow_upsの登録)）、`follow_up_registered`のpayloadとdraftの出どころの`material`に`category`を載せる（欠けの判定は`domain::follow_up::follow_up_category`）。
   draftから出るeventの出どころの欄にも`category`が載る。
   runtimeのplannerとの突き合わせは[Draft planners](draft-planners.md#follow_upの種類と判断の集計)。
 - **workerへの見せ方**: workerのprompt（[prompt](prompt.md)）のreceiptの例は`follow_ups`の要素に`category`を持ち、promptは`FOLLOW_UP_CATEGORIES`（`src/domain/follow_up.rs`。下の表と同じ一覧と短い定義）から一覧と付け方を1行で出す。
@@ -114,7 +114,7 @@ workerはfollow_upごとに、元goalのacceptanceとの関係を提案として
   形はworkerのpromptのreceiptの例が、3つの欄の意味は`FOLLOW_UP_PROPOSAL`が持つ。
   問題と根拠は`description`に書く。
   欄の無い要素も、未知の分類や形の違う値もreceiptの受理を変えない（`category`と同じ。ADR-t947-3決定3）。
-- **記録**: `integrate`の登録（[integrate](integrate.md)の10）が、`follow_up_registered`のpayloadとdraftの出どころの`material`に`membership_proposal`を書いたまま載せる（`domain::follow_up::follow_up_membership_proposal`）。
+- **記録**: `integrate`の登録（[integrate](integrate.md#follow_upsの登録)）が、`follow_up_registered`のpayloadとdraftの出どころの`material`に`membership_proposal`を書いたまま載せる（`domain::follow_up::follow_up_membership_proposal`）。
   登録しなかった項目は`follow_up_registered`に残る。
   runtimeは提案を判断として扱わず、`follow_up_judgements`の行も書かない。
 - **workerへの見せ方**: workerのprompt（[prompt](prompt.md)）のreceiptの例は`follow_ups`の要素に`membership_proposal`を持ち、`FOLLOW_UP_PROPOSAL`（`src/application/prompt/`）が、提案に留めて自分で判断も移動もしないことを言う。

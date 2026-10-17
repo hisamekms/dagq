@@ -20,9 +20,9 @@ supervisorが日次の[レポート](commands.md)を書いた後に、目標割�
 runtimeはntfyやSlackなどのサービスに依存せず、秘密（webhookのURLやtoken）はrepositoryにもeventにも入らない。
 
 ここのpushはホストのコマンドへの通知で、着地したbranchのGitのpushではない。
-着地したbranchのpushは`Integrator`だけが行い、remoteがすでに着地commitを含むときの扱いも含めて[`integrate`](integrate.md)の9が持つ（[Authorization](../authorization.md#着地とpushintegrator)、ADR-t728-2）。
+着地したbranchのpushは`Integrator`だけが行い、remoteがすでに着地commitを含むときの扱いも含めて[`integrate`](integrate.md#着地とpush)と`decide_push`のdoc commentが持つ（[Authorization](../authorization.md#着地とpushintegrator)、ADR-t728-2）。
 その扱いはホストのコマンドへのKPI通知には適用しない。
-着地したrunの工程の`push`・`push_pending`（`run_phase_changed`）もGitのpushのもので、[`integrate`](integrate.md)の9が持つ。
+着地したrunの工程の`push`・`push_pending`（`run_phase_changed`）もGitのpushのもので、[`integrate`](integrate.md#着地とpush)が持つ。
 
 ## 設定（host.tomlの`[push]`）
 

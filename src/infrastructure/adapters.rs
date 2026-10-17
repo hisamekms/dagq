@@ -971,6 +971,8 @@ fn verification_command(script: &str, cwd: &Path, env: &[(String, String)]) -> C
 /// previous attempt's descendants. A stop at the limit is the error
 /// [`CommandTimedOut`](crate::domain::verify_failure::CommandTimedOut),
 /// which integrate records as a `timeout` failure of the command (task 639).
+/// A descendant that moved into a process group of its own after its
+/// parent ended cannot be traced from the group and is not stopped.
 pub fn run_shell_to_log(
     script: &str,
     cwd: &Path,

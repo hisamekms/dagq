@@ -191,7 +191,7 @@ diskの欄:
 
 - 温まった`llvm-cov-target`でも、workspaceの4つのcrateは毎回buildし直しになっている。本番の差（中央値で約22秒）は、この測定の依存crateの段（`cov`の(a)で中央値10.9秒、最大21.5秒）とおおむね合う。
 - task 563・564の35〜55秒は、brokerのcrate（ADR-t827-1）が入る前の値である。いまの着地の検証のbuildは、それより長い。
-- 着地の検証は、runのworktreeでrebaseの後に流れる（[`integrate`](../design/supervisor-lifecycle/integrate.md#integrate)の5）。workerは`cargo llvm-cov`を流さないので、最初の試行の`llvm-cov-target`は今は空である。seedの`llvm-cov-target`をprovisioningでcloneしておけば、この依存crateの段の分（**約10〜25秒**）が縮む見込みである。
+- 着地の検証は、runのworktreeでrebaseの後に流れる（[`integrate`](../design/supervisor-lifecycle/integrate.md#検証のコマンド)）。workerは`cargo llvm-cov`を流さないので、最初の試行の`llvm-cov-target`は今は空である。seedの`llvm-cov-target`をprovisioningでcloneしておけば、この依存crateの段の分（**約10〜25秒**）が縮む見込みである。
 - 本番では、着地はrebaseで変わったソースと、runの変更の上で行われる。(c)のように揃った状態にはならないので、3.2節の56〜84秒の差をそのまま見込みにはしない。
 
 ### 4.2 workerのbuild

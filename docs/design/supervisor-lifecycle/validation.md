@@ -32,7 +32,9 @@ related:
 4. commitがbase commitと異なり（commitなしを拒む）、base commitの子孫である。
    `already_satisfied`では逆にcommitがbase commitであることを求め、5と8だけを見て7を読まずに下の「already_satisfiedの検証」へ進む。
 5. `git status --porcelain --untracked-files=all`が空である。untracked fileもdirtyとみなす。
-6. （欠番）taskの`verification_commands`はここでは実行しない。同じcommitに対する実行は`integrate`のrebase後の1回だけ（[ADR-0040](../../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)の決定1。[`integrate`](integrate.md#integrate)のステップ5）なので、validatingの所要時間はreceiptとGitの照合だけで、`verification_command`イベントも`<run-dir>/verify-N.log`も作らない。検証コマンドで壊れるcommitもここでは`awaiting_integration`になり、`integrate`で`needs_session`になって自動resumeされる。
+6. （欠番）taskの`verification_commands`はここでは実行しない。
+   同じcommitに対する実行は`integrate`のrebase後の1回だけ（[ADR-0040](../../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)の決定1、[`integrate`](integrate.md#検証のコマンド)）なので、validatingの所要時間はreceiptとGitの照合だけで、`verification_command`イベントも`<run-dir>/verify-N.log`も作らない。
+   検証コマンドで壊れるcommitもここでは`awaiting_integration`になり、`integrate`で`needs_session`になって自動resumeされる。
    `already_satisfied`のrunは着地しないので、検証は下の「already_satisfiedの検証」がmainのsnapshotで流す。
 7. **宣言パス**（[ADR-0029](../../adr/0029-task-declares-paths-and-verification-follows-the-kind-of-change.md)）: taskの`paths`が空でなければ、run branchが今のmainから分かれた点（今のmainとreceiptの`commit`のmerge-base。rebaseしていなければbase commit、resumeしたsessionがrebaseしていればそのmain）からreceiptの`commit`までに変わったパスのうち、どのglobにも合わないもの（`domain::scope::out_of_scope`）を探す。
    他のtaskがmainに着地したパスは数えず、renameは両側、削除も含む。
@@ -111,7 +113,7 @@ verifyが通れば人のaskに上げ、人の答えで閉じる。
 
 [ADR-t1925-1](../../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)で、着地の検証を軽くし、最終関門をCIにする。
 置き換えと材料の受け渡しはruntimeにあり、repositoryの`dagq.toml`が設定を持つときだけ働く。
-validatingは今と同じく検証のコマンドを流さず、置き換えも`integrate`のrebase後の1回の検証の中で起きる（[`integrate`](integrate.md)の手順5）。
+validatingは今と同じく検証のコマンドを流さず、置き換えも`integrate`のrebase後の1回の検証の中で起きる（[`integrate`](integrate.md#検証のコマンド)）。
 
 - **置き換えの流れ**: 設定があるときだけ、runtimeはtaskの検証のコマンドのうち設定が名指すもの（coverageの関門）を、設定の着地の検証のコマンドに置き換えて流す。
   当たるコマンドがいくつあっても置き換えたコマンドは1回だけ流し、他のコマンドは登録の順のまま流す。

@@ -21,9 +21,9 @@ related:
 
 # `needs_session`
 
-衝突（4）と再検証の失敗（5。宣言外のパスを含む）は`defer_integration`でrunを`needs_session`にし、理由を`last_error`、詳細を`integration_deferred`イベントに書いて、lease行を消しスロットを空ける。
+rebaseの衝突と再検証の失敗（宣言外のパスを含む、[`integrate`](integrate.md#receiptの検査とrebase)）は`defer_integration`でrunを`needs_session`にし、理由を`last_error`、詳細を`integration_deferred`イベントに書いて、lease行を消しスロットを空ける。
 worktreeは衝突なら検証済みhead、再検証の失敗ならrebase済みのheadに置いたまま残す。
-検証コマンドの失敗のうちhostの分類は`needs_session`にせず、integrateが同じ試行で1回やり直し、なお落ちればrunを`awaiting_integration`に戻して（`integration_held`）inboxに知らせる（[`integrate`](integrate.md#integrate)の5）。
+検証コマンドの失敗のうちhostの分類は`needs_session`にせず、integrateが同じ試行で1回やり直し、なお落ちればrunを`awaiting_integration`に戻して（`integration_held`）inboxに知らせる（[`integrate`](integrate.md#hostの失敗のやり直し)）。
 resumeの回数は使わない。
 runはTaskを占有し続け、`ready`/`cancel`はできない。
 

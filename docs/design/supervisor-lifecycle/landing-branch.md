@@ -64,7 +64,7 @@ pushのremoteと`push`（下の「pushの解決」）は着地の後に`push_con
 
 着地先を読む箇所は、すべて`refs/heads/<branch>`を読む。
 
-- claimのbase commit（[supervise](supervise.md)、ADR-0054決定7）と、着地開始時のmain head・rebase先・`commit-tree`の親（[integrate](integrate.md)の手順4・6、ADR-0008決定3）。
+- claimのbase commit（[supervise](supervise.md)、ADR-0054決定7）と、着地開始時のmain head・rebase先・`commit-tree`の親（[integrate](integrate.md#着地とpush)、ADR-0008決定3）。
 - 着地のbranchの進め方（ADR-0008決定4）: `branch refs/heads/<branch>`をcheckoutしているworktreeがあればそこで`merge --ff-only`、なければ`update-ref refs/heads/<branch> <commit> <old>`。
 - main checkoutの判定のうち「着地先をcheckoutしているworktree」を探すもの（`main_checkout`）。`dagq.toml`を読むmain checkout（main worktree。[Run environment](run-environment.md#main-checkoutの決め方)）とは別。
 - mainの履歴（`main_history`。`stats`の`conflict_hotspots`、claimのhotspot、`plan`）、merge-treeの事前判定、landing recheck、resumeの依頼文に書くrebase先と着地したtaskの一覧。

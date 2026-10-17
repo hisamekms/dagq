@@ -45,7 +45,7 @@ dagqの開発でだけ要る機能は、queueのrepositoryが「dagqのソース
 
 | 機能 | 決定 | dagqのソース | ソースでないrepository |
 | --- | --- | --- | --- |
-| `integrate`のmigrationの番号の振り直し（[integrate](integrate.md)の5） | ADR-0067決定3 | 動く（`migration_renumbered`、振り直せなければ`migration_number_taken`の`needs_session`） | 番号を見ない。振り直さず、`migration_number_taken`にもしない。`migrations/`の変更は他のファイルと同じに扱う |
+| `integrate`のmigrationの番号の振り直し（[integrate](integrate.md#migrationの番号の振り直し)） | ADR-0067決定3 | 動く（`migration_renumbered`、振り直せなければ`migration_number_taken`の`needs_session`） | 番号を見ない。振り直さず、`migration_number_taken`にもしない。`migrations/`の変更は他のファイルと同じに扱う |
 | `--from`なしの`dagq install`（main checkoutからの`cargo build --release --locked`。[install](install.md)の1） | ADR-0073決定14 | 動く | buildせずにerror。`cargo install dagq`で入れ替えるか、`--from`でバイナリかcheckoutを指すよう案内する。`--from`付きと`--rollback`は判定に関係なく動く |
 | `up --auto-update`のsource build（[Auto-update](auto-update.md)） | ADR-0073決定17 | 動く | `up`はerrorで止め、supervisorを起動も引き継ぎもしない。自動更新の設定を持つsupervisorもbuildに進まない。外部のprojectの更新は[Release update](release-update.md)（ADR-t618-1） |
 | `stats`・KPI・worktimeのcargo専用の計測（[stats](commands.md)） | ADR-t614-1決定2(d)（ADR-t1662-3・ADR-t2268-1がamends） | 動く | 記録も出力もしない（下の一覧）。決まった形ではこの判定から外す（下の「cargo専用の計測」） |

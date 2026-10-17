@@ -3048,7 +3048,10 @@ pub const ATTENTION_ROLE: SessionRole = SessionRole::Inbox;
 /// own for it. An `awaiting_integration` run with a
 /// lease is the supervisor's review and landing (ADR-0027, ADR-0054
 /// decision 6); without one it waits for a
-/// person (a failed review, or a run validated before the review existed). The caller passes only the latest run of an `in_progress` task, so a
+/// person (a failed review, a run validated before the review existed, or
+/// a landing `integrate` held: a host failure of its verification, or a
+/// container run with no landing worktree or no guard on its git); the
+/// supervisor does not land it on its own. The caller passes only the latest run of an `in_progress` task, so a
 /// failed run stops counting once the task is retried or canceled.
 pub fn run_attention(
     status: RunStatus,
