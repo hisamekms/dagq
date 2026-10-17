@@ -1,8 +1,11 @@
 # This repository's project image on dagq's container base (ADR-t2257-1
 # decision 2): the Rust toolchain and components of rust-toolchain.toml,
-# cargo-nextest (sh scripts/landing-it.sh runs it), sccache, and python3 3.11
+# cargo-nextest (sh scripts/landing-it.sh runs it), sccache, python3 3.11
 # or later with tomllib (the verify of a config task reads dagq.toml with
-# tomllib; the build fails when it cannot). dagq builds
+# tomllib; the build fails when it cannot), and prek and committed with a
+# system git hook, so that a container worker's commit gets the same check of
+# its message's prefix as a host clone with core.hooksPath=.githooks (the
+# runtime's clone has no such setting, and dagq knows no hook). dagq builds
 # it from the main checkout with this file and the inputs dagq.toml names
 # (rust-toolchain.toml) as its only context, and gives the base as
 # DAGQ_BASE_IMAGE.
@@ -11,6 +14,8 @@ FROM ${DAGQ_BASE_IMAGE}
 
 ARG NEXTEST_VERSION=0.9.146
 ARG SCCACHE_VERSION=0.18.0
+ARG PREK_VERSION=0.5.5
+ARG COMMITTED_VERSION=1.1.11
 
 USER root
 ENV RUSTUP_HOME=/usr/local/rustup \
@@ -29,17 +34,48 @@ RUN set -eu; \
     case "$(uname -m)" in \
         x86_64) nextest=linux; arch=x86_64 ;; \
         aarch64) nextest=linux-arm; arch=aarch64 ;; \
-        *) echo "no cargo-nextest and sccache for $(uname -m)" >&2; exit 1 ;; \
+        *) echo "no cargo-nextest, sccache, prek and committed for $(uname -m)" >&2; exit 1 ;; \
     esac; \
     curl --proto '=https' --tlsv1.2 -LsSf "https://get.nexte.st/${NEXTEST_VERSION}/${nextest}" \
         | tar zxf - -C "$CARGO_HOME/bin"; \
     curl --proto '=https' --tlsv1.2 -LsSf \
         "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-${arch}-unknown-linux-musl.tar.gz" \
         | tar zxf - -C /usr/local/bin --strip-components=1 "sccache-v${SCCACHE_VERSION}-${arch}-unknown-linux-musl/sccache"; \
+    curl --proto '=https' --tlsv1.2 -LsSf \
+        "https://github.com/j178/prek/releases/download/v${PREK_VERSION}/prek-${arch}-unknown-linux-musl.tar.gz" \
+        | tar zxf - --no-same-owner -C /usr/local/bin --strip-components=1 "prek-${arch}-unknown-linux-musl/prek"; \
+    curl --proto '=https' --tlsv1.2 -LsSf \
+        "https://github.com/crate-ci/committed/releases/download/v${COMMITTED_VERSION}/committed-v${COMMITTED_VERSION}-${arch}-unknown-linux-musl.tar.gz" \
+        | tar zxf - --no-same-owner -C /usr/local/bin ./committed; \
     chmod -R a+rX "$RUSTUP_HOME" "$CARGO_HOME"; \
     cargo nextest --version; \
     sccache --version; \
+    prek --version; \
+    committed --version; \
     python3 -c 'import sys, tomllib; assert sys.version_info >= (3, 11), sys.version'
+# The commit-msg hook of every repository in the image (/etc/gitconfig's
+# core.hooksPath, read-only): it hands the message to the clone's own
+# .githooks/commit-msg, which decides what checks it, and lets the commit
+# through in a clone without one. No other hook is put here, so the
+# post-checkout and post-merge hooks of .githooks do not run in the
+# container. The control side's git is not changed by this: its
+# core.hooksPath=/dev/null is given as the command scope, over the system's.
+# prek keeps its data under PREK_HOME, on the private /tmp: the root
+# filesystem is read-only.
+RUN set -eu; \
+    hooks=/usr/local/share/dagq-git-hooks; \
+    mkdir -p "$hooks"; \
+    printf '%s\n' \
+        '#!/bin/sh' \
+        'top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0' \
+        '[ -f "$top/.githooks/commit-msg" ] || exit 0' \
+        'exec sh "$top/.githooks/commit-msg" "$@"' \
+        > "$hooks/commit-msg"; \
+    chmod 0755 "$hooks/commit-msg"; \
+    sh -n "$hooks/commit-msg"; \
+    git config --system core.hooksPath "$hooks"; \
+    test "$(git config --system --get core.hooksPath)" = "$hooks"
+ENV PREK_HOME=/tmp/prek
 # The toolchain stays where it was installed, read-only; cargo writes its
 # registry and git checkouts under the user's own CARGO_HOME (the run may
 # point it at the worker's cache).
