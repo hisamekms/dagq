@@ -23,6 +23,7 @@ related:
   - design-supervisor-lifecycle-prompt
   - design-supervisor-lifecycle-headless-job-processes
   - adr-t1869-1
+  - adr-t2599-1
 ---
 
 # agentのeval
@@ -141,7 +142,10 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 - 対象: runの差分が`.dagq/agents/<name>/AGENT.md`を変えるrun（差分の取り方はreviewのagentの選び方と同じ`<base>...<head>`）。変えたagentごとに1周。
 - reviewのpassの後、着地の前（[着地の前のe2e](supervisor-lifecycle/landing-e2e.md)と同じ位置）に、supervisorがlanding branchのcommitの`.dagq/agents/<name>/evals/dev.json`とpatchで、runのcommitの定義を測る。run branchのケースの追加・変更は使わない。
 - 待つ間と流す間、runは自分のslotとleaseを持ったまま待つ（e2eと同じ）。
-- `passed`が`false`（閾値を下回った、`incomplete`）なら着地させず、理由（成績・失敗したケースのidとagentの理由）をworkerに差し戻す。差し戻しはreviewの`revise`と同じ経路で送り、reviseの上限に1回と数える（上限を超えれば人の判断）。`refused`（`cost_unknown`・上限超え）はworkerが直せないので人の判断（`approve_landing`のask）にする。
+- `passed`が`false`（閾値を下回った、`incomplete`）なら着地させず、理由（成績・失敗したケースのidとagentの理由）をworkerに差し戻す。
+  差し戻しはreviewの`revise`と同じ経路で送り、runを通した自動の手直しの上限に1回と数える。
+  上限の後の差し戻しは[Review](supervisor-lifecycle/review.md#reviewの流れ)の4aの判定に通り、agent evalの差し戻しは理由のコードを持たないので収束していない側に数え、`approve_landing`のaskになる（[ADR-t2599-1](../adr/2026-10-17-t2599-1-run-review-revises-counted-across-the-run-and-judged-by-code-findings-past-the-limit.md)決定1・3・6）。
+  `refused`（`cost_unknown`・上限超え）はworkerが直せないので人の判断（`approve_landing`のask）にする。
 
 ## productionのケースと見張り
 
