@@ -47,7 +47,47 @@ struct Cli {
 #[derive(Subcommand, Clone)]
 enum Command {
     /// Initialize the queue, creating its directory if needed. An existing queue is checked, never migrated.
+    /// Its output recommends the review's settings (`recommended`): the built-ins on and off by
+    /// default, and `dagq setup-review` to write the project's rules for them. It writes no
+    /// dagq.toml and starts no agent.
     Init,
+    // ADR-t2259-1 decision 7.
+    /// Generate the review's settings of this repository with a coding agent, once, and write
+    /// them to the main checkout's working tree only when you approve them. The agent reads the
+    /// project (its instructions, documents, tests, languages and tools) in a temporary checkout
+    /// of the main checkout's HEAD under the queue's directory, under
+    /// DAGQ_ROLE=setup-review-job, which may only read the queue, and writes there dagq.toml's
+    /// built-in tables ([review.subagents."builtin:<name>"]) and program tables
+    /// ([review.programs.<name>]), .dagq/review/builtin-<name>.md (the project's rules for a
+    /// built-in agent) and .dagq/review/programs/*.sh (fast checks that run no build or test). The
+    /// settings the checkout commits now are its input, so running it again updates them. Before
+    /// you see the diff, dagq refuses a generation that changed any other file or any other table
+    /// of dagq.toml, a dagq.toml the runtime cannot read, and a program script that does not take
+    /// its root from the working directory's Git work tree; it applies nothing when the working
+    /// tree has changes not committed to a file the generation changes. It asks on the terminal
+    /// after showing the diff (--yes approves beforehand, a person's alone: the inbox and every
+    /// other actor are refused it); without approval nothing is written.
+    /// It commits and pushes nothing and changes nothing of the queue, and removes the temporary
+    /// checkout whatever happened. The job runs on [roles.setup_review]'s provider, Claude by
+    /// default. Only a person and the inbox run it.
+    SetupReview {
+        /// Approve beforehand: write the changes that pass the checks without asking.
+        #[arg(long)]
+        yes: bool,
+        /// Seconds the agent may run before it is killed.
+        #[arg(long, default_value_t = 1800)]
+        timeout: u64,
+        /// Claude Code executable; a bare name is resolved on PATH.
+        #[arg(long, default_value = "claude")]
+        claude: PathBuf,
+        /// Codex CLI executable, for [roles.setup_review]'s provider = "codex"; a bare name is
+        /// resolved on PATH outside a terminal's shims.
+        #[arg(long, default_value = "codex")]
+        codex: PathBuf,
+        /// Codex's home (tests); Codex's own without.
+        #[arg(long, hide = true)]
+        codex_home: Option<PathBuf>,
+    },
     // ADR-0045.
     /// Apply the migrations this binary knows and the queue lacks; opening a queue never does. A
     /// breaking migration is refused while a supervisor, run or wrapper uses the queue, and the
@@ -1575,7 +1615,8 @@ enum Command {
     /// `agents` shows the review's agents read from the landing branch; its `builtins` start with
     /// builtin:acceptance, the whole review, and `without_rules` names the enabled built-ins
     /// that judge without the project's rules, the landing branch having no
-    /// .dagq/review/builtin-<name>.md for them.
+    /// .dagq/review/builtin-<name>.md for them, with `setup` naming `dagq setup-review`, which
+    /// writes those files.
     /// `schema` is reported even for a queue that needs `migrate` or refuses this binary; the
     /// latter has `error` in place of its supervisors and runs.
     Doctor {
@@ -2506,6 +2547,7 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
         | Command::Supervise { .. }
         | Command::Observe { history: false, .. }
         | Command::ThroughputReview { .. }
+        | Command::SetupReview { .. }
         | Command::Integrate { .. }
         | Command::Review { .. }
         | Command::Recover { .. }
@@ -2727,6 +2769,7 @@ fn operation(command: &Command, env: impl Fn(&str) -> Option<String>) -> Option<
             ..
         }
         | Command::ThroughputReview { .. } => Operation::Observe,
+        Command::SetupReview { yes, .. } => Operation::SetupReview { yes: *yes },
         Command::Integrate { id, next, .. } => {
             Operation::Integrate(id.filter(|_| !next).map(TaskId::new))
         }
@@ -3547,7 +3590,37 @@ fn execute(cli: Cli) -> Result<Value> {
             "schema_version": queue.schema_version()?,
             "source": location.source,
             "git_common_dir": common_dir,
+            "recommended": dagq::application::setup_review::recommended(),
         }));
+    }
+    if let Command::SetupReview {
+        yes,
+        timeout,
+        claude,
+        codex,
+        codex_home,
+    } = &cli.command
+    {
+        if !db.is_file() {
+            bail!(
+                "no queue at {}: run `dagq init` first; setup-review makes its temporary \
+                 checkout under the queue's directory",
+                db.display()
+            );
+        }
+        use dagq::application::setup_review::Approval;
+        return dagq::compose::setup_review(
+            &db,
+            &cwd,
+            &dagq::compose::SetupReviewOptions {
+                claude: claude.clone(),
+                codex: codex.clone(),
+                codex_home: codex_home.clone(),
+                timeout: Duration::from_secs(*timeout),
+                approval: if *yes { Approval::Given } else { Approval::Ask },
+                dagq: env::current_exe()?,
+            },
+        );
     }
     if let Command::Migrate { check } = cli.command {
         if check {
@@ -3858,7 +3931,8 @@ fn execute(cli: Cli) -> Result<Value> {
         | Command::Service { .. }
         | Command::QueueBroker { .. }
         | Command::Relay { .. }
-        | Command::ReviewProgram { .. } => {
+        | Command::ReviewProgram { .. }
+        | Command::SetupReview { .. } => {
             unreachable!()
         }
         // Answered above as reads.
@@ -5478,6 +5552,8 @@ mod tests {
             ("plan", &[]),
             ("supervise", &[]),
             ("throughput-review", &[]),
+            ("setup-review", &[]),
+            ("setup-review", &["--yes"]),
             ("integrate", &["1"]),
             ("recover", &["r1"]),
             ("run close-workspaces", &["--apply"]),
@@ -6005,6 +6081,7 @@ mod tests {
             ActorRole::PlanReviewJob,
             ActorRole::GoalReviewJob,
             ActorRole::ThroughputReviewJob,
+            ActorRole::SetupReviewJob,
         ] {
             let error = refusal(job);
             assert_eq!(error["error"], REVIEWER_DENIED, "{job:?}");

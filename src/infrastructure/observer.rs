@@ -124,6 +124,31 @@ pub fn run_agent(
     prompt: &str,
     agent: &HeadlessAgent<'_>,
 ) -> Result<Option<i32>> {
+    run_agent_in(
+        provider,
+        db,
+        WorkspaceAccess::Scratch(dir.to_path_buf()),
+        dir,
+        prompt,
+        agent,
+        &|| false,
+    )
+}
+
+/// [`run_agent`] with the agent in the directory of `workspace` (the job
+/// of `setup-review` writes its temporary checkout) and its output in
+/// `dir`, stopped with what it started as at its timeout once `stop` says
+/// so (the person interrupted the command): an error either way.
+pub fn run_agent_in(
+    provider: &dyn AgentProvider,
+    db: &Path,
+    workspace: WorkspaceAccess,
+    dir: &Path,
+    prompt: &str,
+    agent: &HeadlessAgent<'_>,
+    stop: &dyn Fn() -> bool,
+) -> Result<Option<i32>> {
+    let cwd = workspace.path().to_path_buf();
     let stdout = dir.join("output.out");
     let stderr = dir.join("output.err");
     let mut path = std::env::var_os("PATH").unwrap_or_default();
@@ -149,10 +174,10 @@ pub fn run_agent(
         .spawn(
             ActorExecutionSpec::new(
                 agent.actor.clone(),
-                WorkspaceAccess::Scratch(dir.to_path_buf()),
+                workspace,
                 ActorProgram::Headless {
                     program: HeadlessProgram::Job {
-                        cwd: dir,
+                        cwd: &cwd,
                         prompt,
                         access: agent.access,
                     },
@@ -176,7 +201,8 @@ pub fn run_agent(
         if let Some(status) = child.try_wait()? {
             return Ok(status.code);
         }
-        if Instant::now() >= deadline {
+        let stopped = stop();
+        if stopped || Instant::now() >= deadline {
             // Listed before the kill: once the agent is gone, its children
             // are no longer its descendants.
             let descendants = SystemProcesses.descendants(child.id());
@@ -184,6 +210,9 @@ pub fn run_agent(
             let _ = child.wait();
             for pid in descendants {
                 let _ = SystemProcesses.kill(pid);
+            }
+            if stopped {
+                anyhow::bail!("{} was interrupted", agent.what);
             }
             anyhow::bail!(
                 "{} did not finish within {}s",

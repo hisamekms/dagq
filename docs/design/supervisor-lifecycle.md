@@ -240,6 +240,7 @@ live worker alert (stalled, idle_process)
 
 - [Review (supervisor)](supervisor-lifecycle/review.md)
 - [プログラムのreview](supervisor-lifecycle/review-programs.md)
+- [reviewの設定の生成（`setup-review`）](supervisor-lifecycle/setup-review.md)
 - [着地の前のe2e](supervisor-lifecycle/landing-e2e.md)
 
 ## Triage (supervisor)

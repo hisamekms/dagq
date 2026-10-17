@@ -85,6 +85,7 @@ jobのroleを知らない古いバイナリは`reviewer`だけを読み取りに
 | | `service.lifecycle` | `up` `down` `inbox` |
 | | `service.install` | `install` `auto-update` |
 | | `queue.admin` | `init` `migrate` `rebind` |
+| | `review.setup` / `review.setup_approve` | `setup-review` / `setup-review --yes`（[setup-review](supervisor-lifecycle/setup-review.md)） |
 | 着地 | `landing.request` | `integrate`（Integratorへの依頼。ADR-t728-2） |
 | | `landing.land` / `landing.push` | Integratorの内側 |
 | 予約 | `reserved.filesystem_read` `reserved.filesystem_write` `reserved.network` `reserved.secret_read` | 後の段（sandbox）。この段では誰にも与えない |
@@ -108,12 +109,13 @@ roleの名前だけでactorを名指さないplannerのidは、どのproposalの
 | role | 許すcapability | resourceの規則 |
 | --- | --- | --- |
 | user | 予約と`review.submit` `triage.submit` `landing.land` `landing.push` `request.decline` `replan.park` `replan.apply`を除く全て | なし |
-| inbox | userと同じ（人の言葉での代行。ADR-t728-3の決定1） | なし。人自身の操作との区別は記録が持つ |
+| inbox | userと同じ（人の言葉での代行。ADR-t728-3の決定1）だが、`review.setup_approve`は持たない | なし。人自身の操作との区別は記録が持つ |
 | planner | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.write`・`goal.close`・`task.write`・`follow_up.judge`・`task.cancel`・`proposal.submit`・`proposal.withdraw`・`note.write`・`mark.write`・`ask.open`・`session.run`・`session.record`・`finding.resolve`・`finding.dismiss`・`planner.open`・`request.decline`・`eval.request`・`eval.request_held_out`・`eval.read`・`eval.cases`・`service.lifecycle`・`service.install`・`queue.admin` | runにはnote（`note --run`）だけを書け、ほかは何もできない（runに紐づくaskも開けない）。開けるaskは`planner_question`だけで、依頼に紐づくもの（`ask --request ID`）はその依頼の閉じていないruntimeのplannerのactor idが自分のときだけ（`request.decline`と同じ規則。plannerが分からなければ拒む）。taskの変更（`task.write`・`task.cancel`）はdraft・submitted・readyのものだけ（状態が不明なら拒む）。`revisit`（draftの再検討の時刻、`task.write`）はdraftだけで（storeがどのroleにも求める）、`draft_planner_exhausted`のあるdraftには付けられない（人・inboxだけが付ける。ADR-t1540-1）。`follow_up.judge`は全状態のfollow_upに記録でき、所属を動かすのはdraft・readyだけ。noteはどの状態のtaskにも書ける。`proposal.withdraw`は自分（actor id）が出したproposalだけ。`planner-session`は自分のplannerだけ。`request.decline`はそのplannerが立てられた依頼（依頼の閉じていないruntimeのplannerのactor idが自分）だけで、plannerが分からなければ拒む |
 | worker | 読み取り・`ask.open`・`note.write`・`replan.propose`・`session.run`・`session.record`・`eval.request`・`eval.read` | evalと`replan.propose`は自分のrunの分だけ。読み取り以外は自分のrun（`DAGQ_RUN_ID`）・そのtask（`DAGQ_TASK_ID`）・自分のrunのaskだけ。開けるaskは`worker_question`だけで、`--run`なら自分のrun、`--task`だけなら自分のtask（`DAGQ_RUN_ID`の無いworkerは何も持たない）。`session`と`session-event`は自分のrunのものだけ（runtimeのwrapperとhookはworkerの環境のまま打つ） |
 | review-job | 読み取り・`review.submit` | `review.submit`は自分のrunだけ |
 | recovery-job | 読み取り・`triage.submit` | `triage.submit`は自分のrunだけ |
 | plan-review-job・goal-review-job・throughput-review-job | 読み取りだけ | throughput-review-jobは[スループットの見直し](supervisor-lifecycle/throughput-review.md)（ADR-t996-1） |
+| setup-review-job | 読み取りだけ | なし（[setup-review](supervisor-lifecycle/setup-review.md)） |
 | observer | 読み取り・`queue.watch`・`ci.read`・`finding.record`・`finding.resolve`・`finding.ask`・`eval.read` | `finding.resolve`と`finding.ask`はfindingだけ |
 | supervisor | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.close`・`task.cancel`・`task.ready`・`note.write`・`ask.open`・`ask.close`・`session.run`・`review.prepare`・`finding.record`・`finding.resolve`・`finding.dismiss`・`observe.run`・`planner.open`・`eval.read`・`scheduler.supervise`・`run.recover`・`service.lifecycle`・`service.install`・`queue.admin`・`landing.request`・`replan.park`・`replan.apply` | なし。`queue.admin`は自動更新が新しいバイナリで`install`と同じ確認（`migrate --check`・`migrate`・使い捨てのqueueの`init`）をするため。`ask.answer`・`task.ready_bypass_review`・`landing.land`・`landing.push`・`workspace.cleanup`（終わったrunに残ったbackgroundのwrapperは自分の掃除で止める）とevalの依頼は持たない |
 | wrapper | 読み取り・`session.run`・`session.record` | なし |
@@ -251,7 +253,7 @@ CLI（`src/main.rs`の`execute()`）はqueueの場所を決めた直後、queue�
 
 結果（上のPolicyの表から決まる）:
 
-- userとinboxは全てを打てる（inboxは人の言葉での代行で、dagq-recoverの手作業の`integrate`・`recover`・`review`を含む。区別は記録のactorが持つ）
+- userとinboxは全てを打てる（inboxは人の言葉での代行で、dagq-recoverの手作業の`integrate`・`recover`・`review`を含み、`setup-review --yes`を除く。区別は記録のactorが持つ）
 - `run screen` / `run send` / `planner screen` / `planner send`と、backgroundのsessionのlogを読む`run log` / `planner log`はuserとinboxだけ（ADR-t1228-1の決定7）。
   plannerは自分のplannerのものも拒み（`screen.read`・`screen.send`を持たない）、supervisorも持たない（自分の送信の経路を使う）
 - `planner request`（`planner.request`）はuserとinboxだけ（ADR-t1533-1）。

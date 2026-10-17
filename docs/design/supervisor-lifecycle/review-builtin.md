@@ -17,6 +17,7 @@ related:
 # built-inのreview（一部実装）
 
 **全体のreviewの`builtin:acceptance`とbuilt-inのagent（security・tests）は実装済みで[Review](review.md)の今の節が、built-inのprogram（secrets）は実装済みで[プログラムのreview](review-programs.md)の今の節が持つ。**
+**pjの規則のfileと設定の生成は実装済みで[setup-review](setup-review.md)が持つ。**
 残りは決定済みの予定で、まだ実装していない。
 決定は[ADR-t2259-1](../../adr/2026-10-12-t2259-1-builtin-review-agents-and-programs-configured-by-builtin-names.md)と、それを直した[ADR-t2389-1](../../adr/2026-10-12-t2389-1-docs-check-only-in-the-overall-review.md)が持つ。
 未実装の部分の今の挙動は[Review](review.md)と[プログラムのreview](review-programs.md)の今の節のとおりである。
@@ -44,8 +45,3 @@ related:
 - **文書の照合**: 今は全体のreviewのpromptの`REVIEW_DOCS_CHECK`が、変えた挙動に対する文書の照合と、差し戻す指摘と`follow_ups`への振り分けを持つ（[Review](review.md#文書の照合)）。
   決定後も変えた挙動に対する文書の古さ・欠けの照合は全体のreview（`builtin:acceptance`）だけが持ち、`builtin:docs`は同梱しない（[ADR-t2389-1](../../adr/2026-10-12-t2389-1-docs-check-only-in-the-overall-review.md)）。
   コードの書き写しと経緯の指摘はruntimeに置かず、pjの規則（このrepositoryでは`.dagq/review/builtin-acceptance.md`）が持つ。
-
-## 生成
-
-- pjの規則のfileと`dagq.toml`の設定は、人が打つ生成のコマンドがcoding agentにpjを一度だけ読ませて一時の場所に作り、差分を人が承認したときだけmain checkoutの作業ツリーに適用する。
-  commitとpushはしない。

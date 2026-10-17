@@ -196,11 +196,12 @@ agentはpjの`.dagq/agents/`のものとバイナリのbuilt-in（`domain::revie
 - **snapshot**: 必須のagentと定義は、試行ごとにlanding branchの今のcommitのtreeから読む（`snapshot_subagents`）。
   workerがrun branchで設定や定義を変えても、選ばれるagentは変わらない。
   built-inの定義だけはバイナリから取り、pjの規則（`.dagq/review/builtin-<名前>.md`）は同じcommitから読む。
+  その規則と設定は[`setup-review`](setup-review.md)で作り、人がcommitする。
 - **選び方**: reviewする範囲の変えたpath（renameは旧と新の両方）を各agentのglobに照らし、当たったagentを設定の順に1回だけ選ぶ（`domain::review_subagents::select`）。
   範囲（基点は[review](commands.md)）は試行ごとに1回決め、`review.md`も同じ範囲で書くので、mainが進んでも選んだ差分と資料は食い違わない。
 - **agentのjob**: snapshotが返した定義の本文をそのままpromptに持ち、定義のpathは書かず、1つのverdictを返させる（`application::agent_job::build`、evalと同じ組み立て）。
   built-inのjobは定義の後にpjの規則を持ち、開始の記録にどのbuildと中身で判断したかを残す。
-  起動は`AgentProvider::agent_job_command`で、道具の変換は宣言から（Claudeはjob自身の引数、Codexは今のreviewのread-onlyのsandboxとjobのpermission profileに足す設定）。
+  起動は`AgentProvider::agent_job_command`で、道具の変換は宣言から。
   agentのjobはqueueを読む道具を持たず、`[run.env]`とsccacheの扱いは全体のreviewのjobと同じである。
   providerの能力でjobを切り替えることはなく、Codexでもagentのjobを動かす。
 - **agentのjobのprovider**<a id="agentのjobのprovider"></a>: `provider`を書いたagentのjobはそのproviderで起動し（`Supervisor::review_job_route`）、上の「reviewのprovider」の`provider`を書いたjobの切り替えと待ちの規則をそのjobだけに当てる。

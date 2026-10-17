@@ -95,6 +95,15 @@ string_enum!(Capability {
     // A production set of an agent's cases (ADR-t1728-1 (g)): asking for
     // one, which the supervisor makes, and deciding a case's label.
     EvalCases => "eval.cases",
+    // Generating the review's settings of the checkout with a coding agent
+    // and writing them to its working tree at a person's approval
+    // (`setup-review`, ADR-t2259-1 decision 7): a person's and the inbox's
+    // only.
+    ReviewSetup => "review.setup",
+    // Approving those changes beforehand (`setup-review --yes`): a
+    // person's alone, never the inbox's, as the changes reach the working
+    // tree only at a person's approval.
+    ReviewSetupApprove => "review.setup_approve",
     // Scheduler transitions and the service.
     Supervise => "scheduler.supervise",
     RunRecover => "run.recover",
@@ -115,7 +124,7 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 60] = [
+    pub const ALL: [Self; 62] = [
         Self::QueueRead,
         Self::QueueWatch,
         Self::ExportFile,
@@ -163,6 +172,8 @@ impl Capability {
         Self::EvalRerun,
         Self::EvalRead,
         Self::EvalCases,
+        Self::ReviewSetup,
+        Self::ReviewSetupApprove,
         Self::Supervise,
         Self::RunRecover,
         Self::WorkspaceCleanup,
@@ -399,11 +410,13 @@ impl Authorizer for StaticPolicy {
 
 use Capability as C;
 
-/// What a person at a plain terminal may do: everything but the jobs'
-/// submissions, the integrator's own landing and push, and the park and
-/// the replacement of a replanning, which only the runtime does. It alone
-/// (with the inbox) holds and releases a task.
-const USER: &[Capability] = &[
+/// What the inbox may do at a person's word: everything but the jobs'
+/// submissions, the integrator's own landing and push, the park and the
+/// replacement of a replanning, which only the runtime does, and the
+/// approval of `setup-review`'s changes beforehand, which is the person's
+/// own ([`USER`]). It alone (with the person) holds and releases a task and
+/// generates the review's settings (`setup-review`).
+const INBOX: &[Capability] = &[
     C::QueueRead,
     C::QueueWatch,
     C::ExportFile,
@@ -445,6 +458,7 @@ const USER: &[Capability] = &[
     C::EvalRerun,
     C::EvalRead,
     C::EvalCases,
+    C::ReviewSetup,
     C::Supervise,
     C::RunRecover,
     C::WorkspaceCleanup,
@@ -453,6 +467,25 @@ const USER: &[Capability] = &[
     C::QueueAdmin,
     C::IntegrationRequest,
 ];
+
+/// The number of [`USER`]'s capabilities: the inbox's and one more.
+const USER_LEN: usize = INBOX.len() + 1;
+
+/// [`INBOX`]'s capabilities and the approval of `setup-review`'s changes
+/// beforehand ([`C::ReviewSetupApprove`]).
+const USER_CAPABILITIES: [Capability; USER_LEN] = {
+    let mut all = [C::ReviewSetupApprove; USER_LEN];
+    let mut at = 0;
+    while at < INBOX.len() {
+        all[at] = INBOX[at];
+        at += 1;
+    }
+    all
+};
+
+/// What a person at a plain terminal may do: the inbox's, and approving
+/// `setup-review`'s changes beforehand (`--yes`), which only a person does.
+const USER: &[Capability] = &USER_CAPABILITIES;
 
 /// The planner's authority as it is (ADR-t728-1 decision 7): goals, tasks
 /// before they start, its proposals, notes, marks, resolving and dismissing
@@ -512,7 +545,9 @@ const REVIEW_JOB: &[Capability] = &[C::QueueRead, C::ReviewSubmit];
 /// A recovery job reads; its verdict comes back as data on its own run.
 const RECOVERY_JOB: &[Capability] = &[C::QueueRead, C::TriageSubmit];
 /// Plan review, goal review and the throughput review read; the supervisor
-/// applies their verdicts and saves the review.
+/// applies their verdicts and saves the review. The job of `setup-review`
+/// reads too: it writes files in its temporary place only, and changes no
+/// state of the queue.
 const READ_ONLY: &[Capability] = &[C::QueueRead];
 
 /// The observer (ADR-0044 decision 4): reads, records and resolves
@@ -570,17 +605,20 @@ const WRAPPER: &[Capability] = &[C::QueueRead, C::SessionRun, C::SessionRecord];
 const INTEGRATOR: &[Capability] = &[C::QueueRead, C::Land, C::Push];
 
 /// The allowlist of `role`. The inbox has the user's (ADR-t728-3 decision
-/// 1: it acts at a person's word); the record tells the two apart.
+/// 1: it acts at a person's word) but the approval of `setup-review`'s
+/// changes beforehand; the record tells the two apart.
 pub const fn grants(role: ActorRole) -> &'static [Capability] {
     match role {
-        ActorRole::User | ActorRole::Inbox => USER,
+        ActorRole::User => USER,
+        ActorRole::Inbox => INBOX,
         ActorRole::Planner => PLANNER,
         ActorRole::Worker => WORKER,
         ActorRole::ReviewJob => REVIEW_JOB,
         ActorRole::RecoveryJob => RECOVERY_JOB,
-        ActorRole::PlanReviewJob | ActorRole::GoalReviewJob | ActorRole::ThroughputReviewJob => {
-            READ_ONLY
-        }
+        ActorRole::PlanReviewJob
+        | ActorRole::GoalReviewJob
+        | ActorRole::ThroughputReviewJob
+        | ActorRole::SetupReviewJob => READ_ONLY,
         ActorRole::Observer => OBSERVER,
         ActorRole::Supervisor => SUPERVISOR,
         ActorRole::Wrapper => WRAPPER,
@@ -783,12 +821,13 @@ mod tests {
         ActorContext::instance(role, 1)
     }
 
-    const JOBS: [ActorRole; 5] = [
+    const JOBS: [ActorRole; 6] = [
         ActorRole::ReviewJob,
         ActorRole::RecoveryJob,
         ActorRole::PlanReviewJob,
         ActorRole::GoalReviewJob,
         ActorRole::ThroughputReviewJob,
+        ActorRole::SetupReviewJob,
     ];
 
     #[test]
@@ -840,6 +879,47 @@ mod tests {
         }
         let worker = ActorContext::worker(&run("r1"), TaskId::new(1));
         assert!(!allowed(&worker, C::TaskHold, &task));
+    }
+
+    /// `setup-review` is a person's and the inbox's alone, and its job
+    /// reads only: every capability that changes the queue is refused it.
+    #[test]
+    fn only_a_person_and_the_inbox_set_up_the_review_and_its_job_only_reads() {
+        for role_ in ActorRole::ALL {
+            assert_eq!(
+                allowed(&role(role_), C::ReviewSetup, &Resource::Queue),
+                matches!(role_, ActorRole::User | ActorRole::Inbox),
+                "{role_:?}"
+            );
+        }
+        let worker = ActorContext::worker(&run("r1"), TaskId::new(1));
+        assert!(!allowed(&worker, C::ReviewSetup, &Resource::Queue));
+        // Approving beforehand is a person's own, not even the inbox's.
+        for role_ in ActorRole::ALL {
+            assert_eq!(
+                allowed(&role(role_), C::ReviewSetupApprove, &Resource::Queue),
+                role_ == ActorRole::User,
+                "{role_:?}"
+            );
+        }
+        let mut inbox = grants(ActorRole::Inbox).to_vec();
+        inbox.push(C::ReviewSetupApprove);
+        assert_eq!(inbox, grants(ActorRole::User));
+        assert_eq!(grants(ActorRole::SetupReviewJob), [C::QueueRead]);
+        let job = ActorContext::setup_review_job("s1");
+        for capability in Capability::ALL
+            .into_iter()
+            .filter(|capability| *capability != C::QueueRead)
+        {
+            for resource in [
+                Resource::Queue,
+                task_in(TaskStatus::Draft),
+                Resource::run(run("r1")),
+                Resource::Goal(GoalId::new(1)),
+            ] {
+                assert!(!allowed(&job, capability, &resource), "{capability:?}");
+            }
+        }
     }
 
     #[test]

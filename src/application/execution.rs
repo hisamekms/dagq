@@ -324,6 +324,7 @@ pub const DAGQ_COMMANDS: &[(&str, &[Capability])] = &[
     ("plan", &[C::PlannerOpen]),
     ("supervise", &[C::Supervise]),
     ("throughput-review", &[C::ObserveRun]),
+    ("setup-review", &[C::ReviewSetup, C::ReviewSetupApprove]),
     ("integrate", &[C::IntegrationRequest]),
     ("recover", &[C::RunRecover]),
     ("run close-workspaces", &[C::WorkspaceCleanup]),

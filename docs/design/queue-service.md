@@ -73,7 +73,7 @@ serviceは呼び出しのprincipal（`Principal`）をtokenから決め、クラ
   - workerのtoken: supervisorがclaimとresumeでrunのsession wrapperをbackgroundで起動するときに発行する。
     wrapperの環境には入れず、session wrapperがagent（非対話のturn。最初のsessionもresumeもturnで動き、対話のsessionは起動しない）を起動するときにそのfileのpathを渡す。
     fileが無いとき（claimの発行を経ずに起動したwrapper）だけwrapperが発行する（wrapperも制御側）
-  - jobのtoken: jobを起動するプロセス（supervisor、`observe`・`throughput-review`のコマンド）が起動のときに発行し、jobのプロセスが終わったとき（それを見たwaitか、handleを捨てたとき）に失効させる（`ServiceAccess::revoke_on_exit`）
+  - jobのtoken: jobを起動するプロセス（supervisor、`observe`・`throughput-review`・`setup-review`のコマンド）が起動のときに発行し、jobのプロセスが終わったとき（それを見たwaitか、handleを捨てたとき）に失効させる（`ServiceAccess::revoke_on_exit`）
 - 失効: `queue_service::revoke`（actor id）が値とprincipalの記録を消す。
   加えてserviceは、principalがrunを名指すtokenを、そのrunが終わったときに断る（runの終わりで失効。`run_holds_token`）。
   workerのtokenのfileはresumeの発行し直しまで残るが、使えない

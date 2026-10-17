@@ -13,6 +13,7 @@ Such a job moves to Claude while Codex cannot be used (missing, does not start, 
 A job that stopped because Codex could not be used starts again on Claude instead of reaching a person; its other failures go to a person as Claude's do.
 A Codex review or plan review does not wait for Claude's `queue_hold` ask.
 Under `--no-claude` no job falls back to Claude: a run review with no provider left goes to a person in an `approve_landing` ask, a plan review to `plan review by hand`, and a recovery job to a person (`triage_failed`, or the alert's `recovery_failed` ask), while a throughput review or an observation records why it did not run.
+`setup-review`'s job runs on Codex too when `[roles.setup_review]` says so, in a sandbox that may write only its temporary checkout; it does not move to Claude, and a failed generation writes nothing.
 Planners and the inbox stay on Claude.
 `dagq doctor`'s `roles` shows each role's provider and where it comes from; a role that cannot run on Codex makes `provider = "codex"` an error in `dagq.toml`.
 

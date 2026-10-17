@@ -46,9 +46,9 @@ mod planning;
 mod supervisor;
 
 pub use execution::{
-    RunE2eOptions, ended_run_material, integrate, recover, review, review_in, session,
-    session_in_background, session_in_background_as, session_in_background_as_with_processes,
-    session_in_background_with_containers,
+    RunE2eOptions, SetupReviewOptions, ended_run_material, integrate, recover, review, review_in,
+    session, session_in_background, session_in_background_as,
+    session_in_background_as_with_processes, session_in_background_with_containers, setup_review,
 };
 pub use host::{
     AutoUpdateJob, COMMAND_TARGET, HostMetricsSettings, QueueBrokerControlPort, QueueBrokerOptions,

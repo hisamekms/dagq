@@ -63,6 +63,7 @@ pub mod screen;
 pub mod screen_idle;
 pub mod session;
 pub mod session_log;
+pub mod setup_review;
 pub mod stats;
 pub mod supervise;
 pub mod throughput_review;

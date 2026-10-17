@@ -13,6 +13,7 @@ use super::{
 use crate::domain::local_checks::{self, LocalChecks, Reading};
 use crate::domain::review_builtins::{self, BuiltinAgent, EffectiveBuiltin};
 use crate::domain::review_subagents::{self, AgentRole, AgentTools, ReviewAgents};
+use crate::domain::setup_review::SETUP_COMMAND;
 use crate::domain::{CommitSha, Goal, Provider, Receipt, RunStatus, Task, TaskId, TaskRun};
 use sha2::{Digest, Sha256};
 
@@ -482,7 +483,8 @@ fn builtin_snapshot(
 /// it over its defaults, each with its rules file
 /// ([`EffectiveBuiltin::doctor_value`]); `without_rules`, the names of
 /// the enabled built-ins whose rules file the landing branch's commit does
-/// not have, which judge without the project's rules; and `errors`, an agent without a definition, named in more than one role's
+/// not have, which judge without the project's rules, with `setup`, the
+/// command that writes those files, when there is any (`null` otherwise); and `errors`, an agent without a definition, named in more than one role's
 /// section, or whose definition declares tools that are a mistake
 /// (ADR-t1728-2). A landing branch without `dagq.toml` has the built-ins
 /// by their defaults. `Err` when the file cannot be read or parsed (an
@@ -546,6 +548,7 @@ pub fn check_agents(
         "commit": commit,
         "agents": agents,
         "builtins": builtins,
+        "setup": (!without_rules.is_empty()).then_some(SETUP_COMMAND),
         "without_rules": without_rules,
         "errors": errors,
     }))
@@ -1172,7 +1175,8 @@ mod tests {
             )
         };
         let nothing = json!({"commit": SHA, "agents": [], "builtins": default_builtins(),
-            "without_rules": ["builtin:acceptance", "builtin:security"], "errors": []});
+            "without_rules": ["builtin:acceptance", "builtin:security"],
+            "setup": "dagq setup-review", "errors": []});
         assert_eq!(check(Vec::new()).unwrap(), nothing);
         assert_eq!(check(vec![(CONFIG_FILE, "[run.env]")]).unwrap(), nothing);
         assert_eq!(nothing["builtins"][1]["enabled"], json!(true));
@@ -1191,7 +1195,8 @@ mod tests {
                 {"agent": "design", "section": "review.subagents", "definition": ".dagq/agents/design/AGENT.md"},
                 {"agent": "unused", "section": "review.subagents", "definition": null},
             ], "builtins": default_builtins(),
-            "without_rules": ["builtin:acceptance", "builtin:security"], "errors": [
+            "without_rules": ["builtin:acceptance", "builtin:security"],
+            "setup": "dagq setup-review", "errors": [
                 "[review.subagents.unused] names an agent without a definition: .dagq/agents/unused/AGENT.md is not committed",
             ]})
         );
@@ -1205,6 +1210,7 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(builtins["without_rules"], json!([]));
+        assert_eq!(builtins["setup"], Value::Null);
         let tests_without = check(vec![(CONFIG_FILE, BUILTINS)]).unwrap();
         assert_eq!(
             tests_without["without_rules"],

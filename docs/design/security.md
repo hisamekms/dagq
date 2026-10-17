@@ -33,7 +33,7 @@ dagqのセキュリティの模型の全体を1か所にまとめる。決定の
 | --- | --- | --- |
 | 人（`Human`） | user | `DAGQ_ROLE`の無い呼び出し。host実行の互換のためにそう扱う（下の「host実行は助言的」） |
 | 信頼する制御側（`TrustedControlPlane`） | supervisor・wrapper・integrator | 決定的なRustのコード。AIを含まない |
-| 信頼しないAI actor（`UntrustedAgent`） | inbox・planner・worker・review-job・recovery-job・plan-review-job・goal-review-job・throughput-review-job・observer | Claude（とCodex）のsession / job。出力はデータ |
+| 信頼しないAI actor（`UntrustedAgent`） | inbox・planner・worker・review-job・recovery-job・plan-review-job・goal-review-job・throughput-review-job・setup-review-job・observer | Claude（とCodex）のsession / job。出力はデータ |
 
 `TrustLevel`はroleだけから決まり（`src/domain/actor.rs`）、promptや名前から推し量らない。
 `DAGQ_ROLE`の未知の値ではコマンドが止まり、queueを開かない（fail closed）。
@@ -55,17 +55,17 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 
 `src/domain/authorization.rs`の`StaticPolicy`（`grants(role)`とresourceの規則）の要約。明示して許したもの以外は全て拒む（default deny）。resourceの持ち主や状態が分からないときも拒む（fail closed）。列はcapabilityの群（名前は[Authorization](authorization.md#capability)）で、○は許す、△はresourceの規則つきで許す、—は拒む。
 
-| role | 読み取り・watch | 計画（goal・task・proposal） | `ready` / `--bypass-review` | note・mark | ask を開く | answer / ask close | finding | 計画の依頼（`request add` / `request decline`）・再計画（`replan request` / `replan propose`） | session | 運用（up・down・install・init・migrate・rebind・plan） | supervise・recover・review・observe | 着地の依頼（`integrate`） | 着地の実行・push |
+| role | 読み取り・watch | 計画（goal・task・proposal） | `ready` / `--bypass-review` | note・mark | ask を開く | answer / ask close | finding | 計画の依頼（`request add` / `request decline`）・再計画（`replan request` / `replan propose`） | session | 運用（up・down・install・init・migrate・rebind・plan・setup-review） | supervise・recover・review・observe | 着地の依頼（`integrate`） | 着地の実行・push |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | user | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / —・○ / — | ○ | ○ | ○ | ○ | — |
-| inbox | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / —・○ / — | ○ | ○ | ○ | ○ | — |
-| planner | ○ | △ draft・submitted・readyのtask（`revisit`はdraftだけで、上限に達したdraftは—）、全状態のfollow_upの所属判断、自分のproposalの取り下げ。`goal ready`・`goal review`は— | — / — | ○（runにはnoteだけ） | △ `planner_question`だけ（依頼に紐づくものは自分が立てられた依頼だけ）、runに紐づくものは— | — / — | resolve・dismiss（recordは—） | — / △ 自分が立てられた依頼だけ・— / — | △ 自分のplannerだけ | ○ | — | — | — |
+| inbox | ○ | ○ | ○ / ○ | ○ | ○ | ○ / ○ | ○ | ○ / —・○ / — | ○ | ○（`--yes`は—） | ○ | ○ | — |
+| planner | ○ | △ draft・submitted・readyのtask（`revisit`はdraftだけで、上限に達したdraftは—）、全状態のfollow_upの所属判断、自分のproposalの取り下げ。`goal ready`・`goal review`は— | — / — | ○（runにはnoteだけ） | △ `planner_question`だけ（依頼に紐づくものは自分が立てられた依頼だけ）、runに紐づくものは— | — / — | resolve・dismiss（recordは—） | — / △ 自分が立てられた依頼だけ・— / — | △ 自分のplannerだけ | ○（setup-reviewは—） | — | — | — |
 | worker | 読み取り（`watch`・`queue.export`・`ci.read`は—） | — | — / — | △ noteだけ、自分のrunとtask | △ 自分のrunかtaskの`worker_question`だけ | — / — | — | — / —・— / △ 自分のrunだけ | △ 自分のrunだけ | — | — | — | — |
 | review-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | — | — | — | — | — |
 | recovery-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | — | — | — | — | — |
-| plan-review-job・goal-review-job・throughput-review-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | — | — | — | — | — |
+| plan-review-job・goal-review-job・throughput-review-job・setup-review-job | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | — | — | — | — | — |
 | observer | ○ | — | — / — | — | △ findingに紐づく`blocked`だけ | — / — | △ recordとresolve（dismissは—） | — / —・— / — | — | — | — | — | — |
-| supervisor | ○ | `goal close`・`cancel`だけ | ○ / — | noteだけ | ○（findingに紐づく`blocked`は—） | — / ○ | record・resolve・dismiss | — / —・— / —（保留と置換は○） | ○（recordは—） | ○ | ○ | ○ | — |
+| supervisor | ○ | `goal close`・`cancel`だけ | ○ / — | noteだけ | ○（findingに紐づく`blocked`は—） | — / ○ | record・resolve・dismiss | — / —・— / —（保留と置換は○） | ○（recordは—） | ○（setup-reviewは—） | ○ | ○ | — |
 | wrapper | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | ○ | — | — | — | — |
 | integrator | 読み取り | — | — / — | — | — | — / — | — | — / —・— / — | — | — | — | — | ○ |
 

@@ -150,6 +150,7 @@ module | src/application/session.rs | execution |
 module | src/application/headless_session.rs | execution |
 module | src/application/integrate.rs | execution |
 module | src/application/review.rs | execution |
+module | src/application/setup_review.rs | execution |
 module | src/application/recording.rs | execution |
 module | src/application/run_container.rs | execution |
 module | src/application/inherit.rs | execution |
@@ -158,6 +159,7 @@ module | src/application/agent_cases.rs | execution |
 module | src/application/prompt/worker.rs | execution | prompt
 module | src/application/prompt/requests.rs | execution | resume_request
 module | src/application/prompt/run_review.rs | execution | recovery_prompt
+module | src/application/prompt/setup_review.rs | execution | setup_review_prompt
 module | src/application/health/runs.rs | execution | recover
 module | src/application/stats.rs | observation |
 module | src/application/kpi.rs | observation |
@@ -296,6 +298,7 @@ outer-port | src/application/broker_relay.rs | RelayRecords | host | internal | 
 outer-port | src/application/run_container.rs | RunContainers | execution | internal | - | the containers a worker's turns run in; the wrapper starts and removes them, and every stop of a run's session or processes removes its container
 outer-port | src/application/run_container.rs | VerificationContainers | execution | internal | - | the containers the commands of integrate's verification run in, on a clone of the commit that lands; integrate removes what each verification left
 outer-port | src/application/queue_service.rs | ServiceAccess | host | public | execution | not classified by architecture.md; the supervisor issues a token at the claim and the resume
+outer-port | src/application/setup_review.rs | SetupReviewHost | execution | internal | - | the main checkout, the temporary place and the job of setup-review
 outer-port | src/application/ci_watch.rs | CiSource | observation | internal | - |
 outer-port | src/application/throughput_review.rs | ThroughputReviewSources | observation | internal | - |
 outer-port | src/application/throughput_review.rs | ThroughputReviewHost | observation | internal | - |

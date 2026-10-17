@@ -43,6 +43,7 @@ mod plan_review;
 mod planners;
 mod requests;
 mod run_review;
+mod setup_review;
 mod worker;
 
 pub use known_failures::*;
@@ -50,6 +51,7 @@ pub use plan_review::*;
 pub use planners::*;
 pub use requests::*;
 pub use run_review::*;
+pub use setup_review::*;
 pub use worker::*;
 
 /// What the plan review prompt takes, in bytes, section by section, and

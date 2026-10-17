@@ -298,6 +298,24 @@ pub fn writable_roots_config(roots: &[PathBuf]) -> Result<String> {
 /// 2.). No writable root, network, approval or bypass flag is given.
 pub const JOB_SANDBOX: &str = "read-only";
 
+/// The sandbox of a headless job that edits the files of its directory
+/// ([`JobAccess::EditFiles`], the job of `setup-review`): it writes its cwd,
+/// a temporary place the runtime checks after it, with no network, and
+/// not `/tmp` or `$TMPDIR` either ([`EDIT_JOB_CONFIG`]).
+pub const EDIT_JOB_SANDBOX: &str = "workspace-write";
+
+/// The `-c` settings of [`EDIT_JOB_SANDBOX`] that leave its cwd the only
+/// place it writes and keep it off the network, whatever the person's
+/// `~/.codex/config.toml` sets for the sandbox: no other writable root,
+/// no `/tmp`, no `$TMPDIR`, and no network access. The runtime checks the
+/// place after the job, and nothing outside it.
+pub const EDIT_JOB_CONFIG: [&str; 4] = [
+    "sandbox_workspace_write.writable_roots=[]",
+    "sandbox_workspace_write.network_access=false",
+    "sandbox_workspace_write.exclude_slash_tmp=true",
+    "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+];
+
 /// The permission profile a headless job runs in when it reaches the
 /// queue service (ADR-t1233-5 decision 4): Codex's `:read-only`, with the
 /// network on only through Codex's network proxy, which lets the job reach
@@ -544,7 +562,8 @@ impl AgentProvider for Codex {
     /// in `cwd` with the prompt as its standard input, never an argument
     /// (`exec` with no prompt reads it there, so a prompt of any size
     /// starts, task 1560) (ADR-t1063-1 decision 2, spike 1.): the job's
-    /// intent is read in [`JOB_SANDBOX`], its environment (role, queue) is
+    /// intent is read in [`JOB_SANDBOX`] (one that edits files in
+    /// [`EDIT_JOB_SANDBOX`]), its environment (role, queue) is
     /// the caller's, and nothing of the person's Codex settings is changed.
     /// `--skip-git-repo-check` because the cwd of the throughput review,
     /// the observer and the recovery job is a job or run directory outside
@@ -557,10 +576,17 @@ impl AgentProvider for Codex {
     /// committed content the person trusts; the other jobs run outside any
     /// Git repository. Only a run's review, in a worktree its worker can
     /// write, is given [`distrust_config`] (by `review_command`,
-    /// ADR-t1570-1 decision 2). Codex names its thread itself, so no
-    /// session id is given.
+    /// ADR-t1570-1 decision 2), and the job that edits files, the job of
+    /// `setup-review` in a worktree of the main checkout: its sandbox
+    /// writes the cwd, so a trust is given for Codex not to persist one,
+    /// and the tree's `.codex/` layer is not loaded. Codex names its
+    /// thread itself, so no session id is given.
     fn headless_command(&self, cwd: &Path, prompt: &str, access: JobAccess) -> Result<CommandSpec> {
-        let _ = access;
+        let sandbox = if access.edits_files() {
+            EDIT_JOB_SANDBOX
+        } else {
+            JOB_SANDBOX
+        };
         let mut command = CommandSpec::new(&self.executable);
         command
             .current_dir(cwd)
@@ -568,10 +594,16 @@ impl AgentProvider for Codex {
             .arg("--json")
             .arg("--skip-git-repo-check")
             .arg("--sandbox")
-            .arg(JOB_SANDBOX)
+            .arg(sandbox)
             .arg("-C")
             .arg(cwd)
             .stdin(prompt);
+        if access.edits_files() {
+            for config in EDIT_JOB_CONFIG {
+                command.arg("-c").arg(config);
+            }
+            command.arg("-c").arg(distrust_config(cwd)?);
+        }
         Ok(command)
     }
     /// A job's model only when it is Codex's (`-m`), and its effort as
@@ -879,6 +911,44 @@ mod tests {
     /// A headless job (ADR-t1063-1): `codex exec --json` in the read-only
     /// sandbox in its directory, no bypass flag, no session id, its model
     /// only when Codex's and its effort as `-c`.
+    /// A job that edits files writes its directory only: no `/tmp` and no
+    /// `$TMPDIR`.
+    #[test]
+    fn an_edit_job_writes_only_its_directory() {
+        let codex = Codex::new("/opt/codex".into());
+        let command = codex
+            .headless_command(Path::new("/q/tree"), "p", JobAccess::EditFiles)
+            .unwrap();
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect();
+        let at = args.iter().position(|arg| *arg == "--sandbox").unwrap();
+        assert_eq!(args[at + 1], EDIT_JOB_SANDBOX);
+        for config in EDIT_JOB_CONFIG {
+            assert!(args.contains(&config), "{args:?}");
+        }
+        // The person's config adds no writable root and no network to it.
+        for config in [
+            "sandbox_workspace_write.writable_roots=[]",
+            "sandbox_workspace_write.network_access=false",
+        ] {
+            let at = args.iter().position(|arg| *arg == config).unwrap();
+            assert_eq!(args[at - 1], "-c", "{args:?}");
+        }
+        // The tree's project layer is not loaded, and no trust is persisted.
+        let distrust = distrust_config(Path::new("/q/tree")).unwrap();
+        assert!(args.contains(&distrust.as_str()), "{args:?}");
+        let read = codex
+            .headless_command(Path::new("/q/tree"), "p", JobAccess::ReadFiles)
+            .unwrap();
+        assert!(
+            !read
+                .get_args()
+                .any(|arg| arg.to_str().unwrap().starts_with("sandbox_workspace_write"))
+        );
+    }
+
     #[test]
     fn a_job_runs_in_the_read_only_sandbox() {
         use crate::domain::actor_model::{ModelRole, RoleModels};

@@ -3439,7 +3439,12 @@ impl AgentProvider for ClaudeCode {
     /// `claude -p` (print mode): no terminal, no trust dialog, no settings
     /// of dagq's ([`AgentSettings::None`]); a tool that needs permission
     /// and is not among the tools of `access` ([`claude_tools`]) is
-    /// refused, and [`PRINT_MODE_DENIED_TOOLS`] are refused outright. The
+    /// refused, and [`PRINT_MODE_DENIED_TOOLS`] are refused outright. A job
+    /// that edits files (the job of `setup-review`, in a checkout of the
+    /// repository's files) also loads no setting sources
+    /// (`--setting-sources ""`), so no hook and no permission of the
+    /// tree's `.claude/` or of the person's settings runs or widens its
+    /// tools, and it is refused [`EDIT_JOB_DENIED_TOOLS`] outright. The
     /// prompt is its standard input, never an argument: `-p` with no
     /// prompt reads it there, and a prompt of any size starts
     /// (task 1560; on the command line one past the system's limit on the
@@ -3449,14 +3454,23 @@ impl AgentProvider for ClaudeCode {
         command
             .current_dir(cwd)
             .args(["-p", "--output-format", "stream-json", "--verbose"]);
-        let tools = claude_tools(access);
+        let mut tools: Vec<String> = claude_tools(access)
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let mut denied: Vec<&str> = PRINT_MODE_DENIED_TOOLS.to_vec();
+        if access.edits_files() {
+            tools.extend(claude_edit_tools(cwd)?);
+            denied.extend(EDIT_JOB_DENIED_TOOLS);
+        }
         if !tools.is_empty() {
             command.arg("--allowedTools").args(tools);
         }
-        command
-            .arg("--disallowedTools")
-            .arg(PRINT_MODE_DENIED_TOOLS.join(","))
-            .stdin(prompt);
+        command.arg("--disallowedTools").arg(denied.join(","));
+        if access.edits_files() {
+            command.arg("--setting-sources").arg("");
+        }
+        command.stdin(prompt);
         Ok(command)
     }
     /// `claude -p --output-format stream-json` prints the job's events,
@@ -3765,7 +3779,8 @@ pub fn agent_settings(role: ActorRole) -> AgentSettings {
 
 /// Claude Code's tools a headless job of `access` is allowed beyond what
 /// needs no permission (ADR-t1063-1 decision 2): reading files is `Read`,
-/// `Grep` and `Glob`, the queue CLI `Bash(dagq:*)`.
+/// `Grep` and `Glob`, the queue CLI `Bash(dagq:*)`. Editing files is
+/// [`claude_edit_tools`], which name the job's directory.
 pub fn claude_tools(access: JobAccess) -> Vec<&'static str> {
     let mut tools = Vec::new();
     if access.reads_files() {
@@ -3775,6 +3790,25 @@ pub fn claude_tools(access: JobAccess) -> Vec<&'static str> {
         tools.push("Bash(dagq:*)");
     }
     tools
+}
+
+/// The tools a job that edits files ([`JobAccess::EditFiles`]) is refused
+/// outright beside [`PRINT_MODE_DENIED_TOOLS`]: a shell and the notebook
+/// editor, which its scoped `Edit` and `Write` ([`claude_edit_tools`]) do
+/// not cover.
+pub const EDIT_JOB_DENIED_TOOLS: [&str; 2] = ["Bash", "NotebookEdit"];
+
+/// Claude Code's tools that edit files, for a job of
+/// [`JobAccess::EditFiles`]: `Edit` and `Write` allowed only under `dir`
+/// (an absolute path rule, `//<dir>/**`), so a write elsewhere is not
+/// allowed and, with no person to ask, is refused.
+pub fn claude_edit_tools(dir: &Path) -> Result<Vec<String>> {
+    let dir = path_text(dir)?;
+    let dir = dir.trim_end_matches('/');
+    Ok(["Edit", "Write"]
+        .iter()
+        .map(|tool| format!("{tool}(/{dir}/**)"))
+        .collect())
 }
 
 /// Claude Code's tools of the runtime's list (ADR-t1728-2), each with the
@@ -5125,6 +5159,45 @@ mod tests {
             assert!(deny.contains(&Value::from(rule)), "{rule}");
         }
         assert!(!deny.contains(&Value::from("Bash(dagq submit:*)")));
+    }
+
+    /// A job that edits files is allowed `Edit` and `Write` under its own
+    /// directory only, beside the reads.
+    #[test]
+    fn claude_edit_job_writes_only_under_its_directory() {
+        let claude = ClaudeCode {
+            executable: "/bin/claude".into(),
+        };
+        let command = claude
+            .headless_command(
+                Path::new("/q/setup-review/s1/tree"),
+                "p",
+                JobAccess::EditFiles,
+            )
+            .unwrap();
+        let args: Vec<_> = command.get_args().collect();
+        let at = args
+            .iter()
+            .position(|arg| *arg == "--allowedTools")
+            .unwrap();
+        assert_eq!(
+            args[at + 1..at + 6],
+            [
+                "Read",
+                "Grep",
+                "Glob",
+                "Edit(//q/setup-review/s1/tree/**)",
+                "Write(//q/setup-review/s1/tree/**)"
+            ]
+        );
+        assert_eq!(args[at + 6], "--disallowedTools");
+        assert_eq!(args[at + 7], "ScheduleWakeup,CronCreate,Bash,NotebookEdit");
+        // No hook or permission of the tree's or the person's settings.
+        assert_eq!(args[at + 8..at + 10], ["--setting-sources", ""]);
+        let read = claude
+            .headless_command(Path::new("/q/job"), "p", JobAccess::ReadFiles)
+            .unwrap();
+        assert!(!read.get_args().any(|arg| arg == "--setting-sources"));
     }
 
     #[test]

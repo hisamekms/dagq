@@ -25,18 +25,20 @@ string_enum!(ModelRole {
     GoalReview => "goal_review",
     Observer => "observer",
     ThroughputReview => "throughput_review",
+    SetupReview => "setup_review",
     RuntimePlanner => "runtime_planner",
     Planner => "planner",
 });
 
 impl ModelRole {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::PlanReview,
         Self::Review,
         Self::Recovery,
         Self::GoalReview,
         Self::Observer,
         Self::ThroughputReview,
+        Self::SetupReview,
         Self::RuntimePlanner,
         Self::Planner,
     ];
@@ -48,15 +50,17 @@ pub const ROLE_PROVIDER: Provider = Provider::Claude;
 
 /// The roles Codex has an implementation for (ADR-t1063-1 decisions 1
 /// and 7): goal, run and plan reviews, the throughput review, the
-/// observer (ADR-t1222-1, task 1223) and the recovery job (task 1225).
-/// Claude runs every role.
-pub const CODEX_ROLES: [ModelRole; 6] = [
+/// observer (ADR-t1222-1, task 1223), the recovery job (task 1225) and
+/// the job of `setup-review` (ADR-t2259-1 decision 7). Claude runs every
+/// role.
+pub const CODEX_ROLES: [ModelRole; 7] = [
     ModelRole::GoalReview,
     ModelRole::Review,
     ModelRole::PlanReview,
     ModelRole::ThroughputReview,
     ModelRole::Observer,
     ModelRole::Recovery,
+    ModelRole::SetupReview,
 ];
 
 /// Whether `provider` can run a session of `role`.
@@ -836,6 +840,7 @@ mod tests {
                         | ModelRole::ThroughputReview
                         | ModelRole::Observer
                         | ModelRole::Recovery
+                        | ModelRole::SetupReview
                 )
             );
         }

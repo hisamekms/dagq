@@ -38,6 +38,7 @@ related:
 AI agent（Claude Code・Codex）の起動・出力の読み取り・失敗の分類・記録を、providerに依らない契約にまとめる。
 applicationはCLIの引数や出力の形式を直接扱わず、providerの違いはadapterだけが持つ。
 providerが使えないとき（実行ファイルが無い・起動できない・認証・利用上限）は、runやjobを失敗にせず、もう一方のproviderへ移るか待つ。
+例外は人かinboxが打つ`setup-review`の生成のjobで、`job_route`を通らず、使えなくても移らず待たずにコマンドの誤りにする（[setup-review](supervisor-lifecycle/setup-review.md#権限)）。
 引数・出力の欄・既定値の意味は定義のそばのdoc comment（`src/application/ports/`とproviderのadapterの`src/infrastructure/`）が持つ。
 
 ## 全体の流れ
@@ -58,6 +59,9 @@ sessionの区間の記録（稼働時間・tokens・model・作業の内訳）
 headless job（runのreview・復旧・plan review・goal review・observerなど）
   ── domain::actor_model::job_route ──► jobのコマンド（AgentProvider::headless_command、promptはstdin）
   ── 最終の返答・失敗の分類・session ──► verdict の適用 / 失敗の分類と控え
+
+setup-review の生成のjob（人かinboxのコマンド）
+  ── [roles.setup_review] の provider（job_route を通らない）──► 起動の失敗・0でない終了はコマンドの誤り
 ```
 
 ## 責務と境界
@@ -106,6 +110,7 @@ worker以外のheadless jobは、providerに権限の意図・promptの渡し方
   reviewの設定は`Stop` hookを持たない。
   reviewの間もworkerのsessionは開いていて、reviewがidle markerを書くとsupervisorのidle判定を誤らせるため。
 - Claudeの他のjobはdagqのsettingsを持たず、道具を`--allowedTools`で絞る。
+  repositoryのfileの木を書く`setup-review`のjobだけは、reviewと同じく`--setting-sources ""`で木と人の設定を読まず、shellも拒む（`EDIT_JOB_DENIED_TOOLS`）。
   予約の道具はreviewと同じく`--disallowedTools`で拒む（`PRINT_MODE_DENIED_TOOLS`、`src/infrastructure/adapters.rs`。拒む理由は定数のdoc comment）。
 - jobの子プロセスは`DAGQ_QUEUE`を持たず、queue serviceのsocketとjobのtokenでクライアントモードの`dagq`を使い、serviceがroleのpolicyで判定する（[Queue service](queue-service.md#クライアントモード)）。
 
@@ -115,10 +120,10 @@ worker以外のheadless jobは、providerに権限の意図・promptの渡し方
 役割ごとの流れは[Plan review](supervisor-lifecycle/plan-review.md#codexで動かす)・[Throughput review](supervisor-lifecycle/throughput-review.md#codexで動かす)・[Observer](supervisor-lifecycle/observer.md#codexで動かす)・[Triage](supervisor-lifecycle/triage.md#codexで動かす)・[生きているsessionの復旧job](supervisor-lifecycle/background-recovery-job.md#codexで動かす)と[ADR-t1207-1](../adr/2026-09-30-t1207-1-codex-run-review.md)が持つ。
 
 - 入口: modelとeffortは`Codex::apply_launch`。
-- どの`JobAccess`も読み取りだけのsandboxに訳す。
+- `setup-review`のjobは作業場所だけに書けるsandbox（人の設定の書き込み先とnetworkを足さない）に、ほかは読み取りだけのsandboxに訳す。
   queue serviceに届く必要があるときは、executorがsandboxをそのsocketだけを許すpermission profileに置き換える（[Queue service](queue-service.md#codexのsandboxからの到達adr-t1233-5決定4)）。
 - jobにはtrustを渡さず、人の`~/.codex/config.toml`のtrustを継ぐ。
-  runのreviewだけはworktreeを`untrusted`にする（`codex::distrust_config`）。
+  runのreviewと`setup-review`のjobだけはworktreeを`untrusted`にする（`codex::distrust_config`）。
   main checkoutのtrustを継ぐと、workerが書けるworktreeの`.codex/config.toml`と`.codex/rules`がreviewに読まれるため（[ADR-t1570-1](../adr/2026-10-04-t1570-1-codex-run-review-distrusts-the-worktree-project.md)）。
 - Codexにはsession idを付けられないので、threadのidと実際のmodelは終わりのeventが持つ。
 

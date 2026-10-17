@@ -183,6 +183,7 @@ string_enum!(JobAccess {
     ReadFiles => "read_files",
     ReadFilesAndQueueCli => "read_files_and_queue_cli",
     QueueCli => "queue_cli",
+    EditFiles => "edit_files",
 });
 
 /// What a headless job may do, as an intent rather than a provider's tool
@@ -194,7 +195,18 @@ impl JobAccess {
     /// Whether the job may read the files of its directory (and, for the
     /// review, the run's).
     pub const fn reads_files(self) -> bool {
-        matches!(self, Self::ReadFiles | Self::ReadFilesAndQueueCli)
+        matches!(
+            self,
+            Self::ReadFiles | Self::ReadFilesAndQueueCli | Self::EditFiles
+        )
+    }
+
+    /// Whether the job may also write the files of its directory: the job
+    /// of `setup-review`, in its temporary place, whose changes the runtime
+    /// checks before it shows them. Claude is given no shell for it; Codex's
+    /// sandbox runs its commands but lets them write only that directory.
+    pub const fn edits_files(self) -> bool {
+        matches!(self, Self::EditFiles)
     }
 
     /// Whether the job may run the `dagq` CLI; what it may change through
@@ -595,11 +607,15 @@ mod tests {
         assert!(JobAccess::ReadFilesAndQueueCli.runs_queue_cli());
         assert!(!JobAccess::QueueCli.reads_files());
         assert!(JobAccess::QueueCli.runs_queue_cli());
+        assert!(JobAccess::EditFiles.reads_files() && JobAccess::EditFiles.edits_files());
+        assert!(!JobAccess::EditFiles.runs_queue_cli());
         for access in [
             JobAccess::ReadFiles,
             JobAccess::ReadFilesAndQueueCli,
             JobAccess::QueueCli,
+            JobAccess::EditFiles,
         ] {
+            assert_eq!(access.edits_files(), access == JobAccess::EditFiles);
             assert_eq!(access.as_str().parse::<JobAccess>().unwrap(), access);
         }
     }

@@ -664,3 +664,59 @@ pub(super) fn run_e2e_port(
             .unwrap_or(Duration::from_secs(crate::domain::run_e2e::RETRY_SECS)),
     })
 }
+
+/// What `setup-review` is run with: the providers' executables (a bare
+/// name is resolved as the throughput review resolves it), Codex's home
+/// (tests), the job's time limit, how the person approves, and the `dagq`
+/// binary.
+pub struct SetupReviewOptions {
+    pub claude: PathBuf,
+    pub codex: PathBuf,
+    pub codex_home: Option<PathBuf>,
+    pub timeout: Duration,
+    pub approval: crate::application::setup_review::Approval,
+    pub dagq: PathBuf,
+}
+
+/// `setup-review` in `cwd` on the queue at `db`
+/// ([`crate::application::setup_review::setup_review`]): its job starts
+/// on the provider of `[roles.setup_review]` of the main checkout's
+/// `dagq.toml`, Claude without.
+pub fn setup_review(db: &Path, cwd: &Path, options: &SetupReviewOptions) -> Result<Value> {
+    use crate::{
+        domain::Provider,
+        infrastructure::setup_review::{Interrupt, LocalSetupReview, setup_launch},
+    };
+    // Held until the place is removed: an interrupt stops the job or the
+    // prompt instead of the process, so the place is removed.
+    let _interrupt = Interrupt::install()?;
+    let checkout = crate::infrastructure::adapters::main_checkout_of(cwd)
+        .context("setup-review runs in a repository's checkout")?;
+    let launch = setup_launch(&checkout);
+    let resolved = |path: &Path, find: fn(&Path) -> Result<PathBuf>| {
+        find(path).unwrap_or_else(|_| path.to_path_buf())
+    };
+    let provider: Box<dyn AgentProvider> = match launch.provider {
+        Provider::Claude => Box::new(ClaudeCode {
+            executable: resolved(
+                &options.claude,
+                crate::infrastructure::adapters::claude_at_entry,
+            ),
+        }),
+        Provider::Codex => Box::new(Codex {
+            executable: resolved(&options.codex, crate::infrastructure::codex::codex_at_entry),
+            home: options.codex_home.clone(),
+        }),
+    };
+    crate::application::setup_review::setup_review(
+        &LocalSetupReview::new(
+            db,
+            cwd,
+            provider.as_ref(),
+            &launch,
+            &options.dagq,
+            options.timeout,
+        ),
+        options.approval,
+    )
+}

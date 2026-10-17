@@ -65,6 +65,7 @@ string_enum!(
     PlanReviewJob => "plan-review-job",
     GoalReviewJob => "goal-review-job",
     ThroughputReviewJob => "throughput-review-job",
+    SetupReviewJob => "setup-review-job",
     Observer => "observer",
     Supervisor => "supervisor",
     Wrapper => "wrapper",
@@ -80,7 +81,7 @@ string_enum!(TrustLevel {
 });
 
 impl ActorRole {
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::User,
         Self::Inbox,
         Self::Planner,
@@ -90,6 +91,7 @@ impl ActorRole {
         Self::PlanReviewJob,
         Self::GoalReviewJob,
         Self::ThroughputReviewJob,
+        Self::SetupReviewJob,
         Self::Observer,
         Self::Supervisor,
         Self::Wrapper,
@@ -110,13 +112,16 @@ impl ActorRole {
             | Self::PlanReviewJob
             | Self::GoalReviewJob
             | Self::ThroughputReviewJob
+            | Self::SetupReviewJob
             | Self::Observer => TrustLevel::UntrustedAgent,
         }
     }
 
-    /// One of the supervisor's headless jobs, whose verdict the supervisor
-    /// applies: the policy allows them reads only (ADR-0027), and the CLI
-    /// refuses the rest with the reviewer's message.
+    /// One of the headless jobs, whose output the runtime reads: the
+    /// supervisor's, whose verdict it applies, and the job `setup-review`
+    /// starts to write the review's settings in a place of its own. The
+    /// policy allows them reads only (ADR-0027), and the CLI refuses the
+    /// rest with the reviewer's message.
     pub const fn is_headless_job(self) -> bool {
         matches!(
             self,
@@ -125,6 +130,7 @@ impl ActorRole {
                 | Self::PlanReviewJob
                 | Self::GoalReviewJob
                 | Self::ThroughputReviewJob
+                | Self::SetupReviewJob
         )
     }
 
@@ -229,6 +235,12 @@ impl ActorContext {
             ActorRole::ThroughputReviewJob,
             format_args!("{mode}:{period}"),
         )
+    }
+
+    /// The job of `setup-review` that writes the review's settings
+    /// (ADR-t2259-1 decision 7), `id` naming its temporary place.
+    pub fn setup_review_job(id: impl std::fmt::Display) -> Self {
+        Self::instance(ActorRole::SetupReviewJob, id)
     }
 
     pub fn with_run(mut self, run: RunId, task: TaskId) -> Self {
@@ -392,7 +404,8 @@ mod tests {
                 "recovery-job",
                 "plan-review-job",
                 "goal-review-job",
-                "throughput-review-job"
+                "throughput-review-job",
+                "setup-review-job"
             ]
         );
     }

@@ -52,7 +52,7 @@ fn denials(db: &Path) -> Vec<Value> {
 }
 
 /// What the untrusted actors may not run, and the capability each needs.
-const OPERATIONS: [(&[&str], &str); 7] = [
+const OPERATIONS: [(&[&str], &str); 8] = [
     (&["integrate", "1"], "landing.request"),
     (&["integrate", "--next"], "landing.request"),
     (&["recover", "r1"], "run.recover"),
@@ -60,6 +60,7 @@ const OPERATIONS: [(&[&str], &str); 7] = [
     (&["up"], "service.lifecycle"),
     (&["down"], "service.lifecycle"),
     (&["migrate"], "queue.admin"),
+    (&["setup-review"], "review.setup"),
 ];
 
 #[test]
@@ -74,6 +75,7 @@ fn workers_jobs_and_the_observer_land_recover_and_run_the_service_not_at_all() {
         "plan-review-job",
         "goal-review-job",
         "throughput-review-job",
+        "setup-review-job",
         "observer",
     ] {
         actors.push(vec![("DAGQ_ROLE", role)]);

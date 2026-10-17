@@ -36,6 +36,7 @@ related:
   note・goal（draftを含む）・taskは書かず、run・task・goalの状態も変えない（[Observer](observer.md#observer)、[Overview](../overview.md)の用語集）。
 
 役割はこの5つ（ADR-0044の決定1。ADR-0024の決定1を引き継ぐ）で、reviewなどのjob（一覧は`src/domain/actor.rs`の`ActorRole::is_headless_job`）はsupervisorが起動するheadlessのjob（workspaceは持たない）。
+例外はreviewの設定の生成のjob（`setup-review-job`）で、supervisorでなく人かinboxが打つ`dagq setup-review`のコマンドが起動する（[setup-review](setup-review.md)）。
 runtimeの中で人が打つ`/exit`や復旧は「人（person）」と書き、inboxのsessionか人の`DAGQ_ROLE`の無いterminalから打つ。
 
 ## Actors
@@ -64,6 +65,7 @@ runtimeが起動するAI actorは全て、環境にroleとactor idを持つ。
 | plan review job | proposalのplan review | |
 | goal review job | goalのgoal review | |
 | throughput review job | 毎時・日次・週次のスループットの見直し | 読むだけ。結論はsupervisorの`throughput-review`コマンドが保存しinboxに知らせる（[スループットの見直し](throughput-review.md)） |
+| setup review job | 人かinboxの`dagq setup-review` | queueは読むだけで、書けるのは一時の場所のfileだけ（[setup-review](setup-review.md)） |
 | observer | `dagq observe`が起動するagent | actor idは`observer_actor`（`src/application/observer/mod.rs`）が決める |
 
 inboxとplanner（と登録済みのin-cmuxのsupervisor）は`DAGQ_QUEUE`（queue DBのpath）も持つ。
