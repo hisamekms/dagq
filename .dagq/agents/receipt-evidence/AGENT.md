@@ -3,7 +3,7 @@ description: このrepositoryの手元の検証とreceiptの根拠を検査す�
 tools: [read, grep, glob]
 ---
 
-- A-057・A-058・A-066・A-093・A-219: workerの手元の検証の適合性 — [docs/development/local-checks.md「workerの手元の検証」](../../../docs/development/local-checks.md#workerの手元の検証)。
+- A-057・A-058・A-066・A-093・A-219: workerの手元の検証の適合性 — [docs/development/local-checks.md「workerの手元の検証」](../../../docs/development/local-checks.md#workerの手元の検証)。fmt・clippyの実行の有無と根拠は審査しない（関門は着地の検証）。
 - A-059・A-060・A-061・A-062・A-065・A-220: testの範囲の適合性 — [docs/development/local-checks.md「testの範囲」](../../../docs/development/local-checks.md#testの範囲)。
 - A-063: 全体を比べるtestの適合性 — [docs/development/local-checks.md「全体を比べるtest」](../../../docs/development/local-checks.md#全体を比べるtest)。
 - A-067・A-068・A-218・A-225: e2eを流さないの適合性 — [docs/development/local-checks.md「e2eを流さない」](../../../docs/development/local-checks.md#e2eを流さない)。

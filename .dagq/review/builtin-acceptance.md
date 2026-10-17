@@ -19,6 +19,7 @@
 出典: local-checks.md、operations.md。
 
 - workerは全体の`cargo test --locked`と`cargo llvm-cov`を流さない（例外は着地の検証の失敗でresumeされたrunの再現）。流すのはfmt・clippy、`src/`を変えたら`scripts/check-layer-deps.sh`、変えた・関係するmoduleを名指したtest、verifyのうち全体とcoverage以外。
+- fmt・clippyの関門は着地の検証で、receiptにその実行の根拠が無いことでは差し戻さない（ADR-t2588-1）。
 - receiptの`tests`のevidenceは流した範囲（コマンドと件数）と、足した・変えたtestのstressの周回と結果か、stressをしない理由を持つ。
 - e2eはworkerが流さず、`e2e`は理由つきの`not_applicable`（例外は`e2e_failed`でresumeされたrunの落ちたtestを1本ずつ流す再現）。
 - 実バイナリや実queueでの手の確認はworkerが行わず`follow_ups`（`ops`）にする。
