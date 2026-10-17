@@ -31,7 +31,11 @@ use super::{
 /// instead.
 pub const MAX_PROVIDER_SWITCHES: usize = 2;
 
-string_enum!(SwitchReason {
+string_enum!(
+    /// Why a provider cannot be used (ADR-t813-2): a closed set apart from
+    /// [`super::ReasonCode`]. None of them is a failure of the run; each says
+    /// that provider cannot be used now.
+    SwitchReason {
     Disabled => "provider_disabled",
     ExecutableMissing => "executable_missing",
     Authentication => "authentication",

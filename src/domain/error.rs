@@ -13,6 +13,8 @@ use super::{
 /// variant carries only what its message needs, and `Display` is the message
 /// the CLI prints and the runtime writes to `last_error`. I/O failures are not
 /// domain errors; the layers that perform I/O convert this at their boundary.
+/// There is no catch-all variant: every variant is a rejection the domain
+/// names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DomainError {
     /// A stored or given string is not a value of the enum `kind`.

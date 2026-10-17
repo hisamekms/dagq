@@ -170,6 +170,7 @@ pub struct Task {
     /// carries it.
     context: String,
     created_at: String,
+    /// Written by the store on every update.
     updated_at: String,
 }
 

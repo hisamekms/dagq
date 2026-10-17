@@ -326,7 +326,8 @@ pub trait DraftPlannerStore {
     /// The `follow_up_depth` of a task (ADR-0037 decision 6). It goes back
     /// to 0 when a person registers, submits (an adopted draft included) or
     /// readies past plan review; a task a planner of the runtime's
-    /// submitted without a person keeps it.
+    /// submitted without a person keeps it. It is a column of the store,
+    /// not a field of the task aggregate.
     fn follow_up_depth(&self, task: TaskId) -> Result<i64>;
     fn set_follow_up_depth(&mut self, task: TaskId, depth: i64) -> Result<()>;
     /// The findings waiting for a planner of the runtime's (ADR-0044

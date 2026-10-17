@@ -2166,7 +2166,8 @@ pub const HEARTBEAT_TIMEOUT_SECS: i64 = 30;
 /// values are short fixed phrases, part of the public contract of `status`,
 /// `events` and `watch`. A `needs_session` run the supervisor stopped
 /// resuming and a dialog a session waits at are asks now (ADR-0024's
-/// Consequences), so neither has a value of its own.
+/// Consequences), so neither has a value of its own. Every attention is
+/// the inbox's; a planner has none (ADR-0044 decision 17).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttentionNext {
     /// Roles disabled by an explicit operator policy need manual handling.

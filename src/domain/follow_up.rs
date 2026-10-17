@@ -16,8 +16,13 @@ use serde::{Deserialize, Serialize};
 
 use super::DomainError;
 
-// Where a draft the runtime or a job registered came from.
-string_enum!(DraftOrigin {
+string_enum!(
+    /// Where a draft the runtime or a job registered came from. `revisit` is
+    /// not recorded as an origin: it is the name the store reads a person's
+    /// draft by once its revisit time came. A `reopened` draft never goes back
+    /// to `ready` by itself, so the plan review that found the disagreement is
+    /// not skipped.
+    DraftOrigin {
     FollowUp => "follow_up",
     GoalGap => "goal_gap",
     Reopened => "reopened",
@@ -52,7 +57,11 @@ pub const PLANNER_QUESTION_OPTIONS: &[&str] = &["adopt", "cancel", "keep_draft"]
 /// Planners the runtime opens for one draft that none of them decided
 /// (its session ended with the draft still waiting); the next time the
 /// draft is recorded as exhausted instead (`draft_planner_exhausted`, the
-/// inbox's attention).
+/// inbox's attention, which waits for a planning request). The count is per
+/// draft; a planner that carries a person's answer, and one opened when a
+/// revisit time a person or the inbox gave comes, open one past it. A
+/// planner that ended only to wait for a person's answer counts to none of
+/// the limits (ADR-t1704-1 decision 5).
 pub const MAX_DRAFT_PLANNERS: usize = 3;
 
 /// A follow-up this many steps from a person's judgement is not submitted

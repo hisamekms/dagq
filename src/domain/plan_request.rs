@@ -4,7 +4,7 @@
 //! planner of the runtime's at a time for each `open` request, at most
 //! [`MAX_REQUEST_PLANNERS`]; the planner submits a proposal (the request is
 //! then `proposed`, linked to it), declines it with a reason (`declined`),
-//! or asks a `planner_question` about it. Its words never change once
+//! or asks a `planner_question` about it. Its words and refs never change once
 //! recorded: a rewording is a new request.
 
 use serde::{Deserialize, Serialize};
@@ -19,10 +19,13 @@ use super::{
 /// finding's, ADR-t1394-1 decision 4).
 pub const MAX_REQUEST_PLANNERS: usize = 3;
 
-// Where a request is (ADR-t1394-1 decision 2): waiting for a planner or
-// with one at work, a proposal submitted from it, declined by its planner,
-// or left undecided by its planners up to the limit.
-string_enum!(RequestStatus {
+string_enum!(
+    /// Where a request is (ADR-t1394-1 decision 2): waiting for a planner or
+    /// with one at work, a proposal submitted from it, declined by its planner,
+    /// or left undecided by its planners up to the limit. Only `open` moves on;
+    /// an ended status never goes back, and `proposed` stays whatever the
+    /// proposal comes to.
+    RequestStatus {
     Open => "open",
     Proposed => "proposed",
     Declined => "declined",
@@ -344,7 +347,8 @@ impl OriginKind {
 /// A goal's or task's origin as the queue records it: the columns
 /// `origin`, `origin_kind` and `origin_request_id` of `goals` and `tasks`,
 /// shown under those names. The kind is none only for `unknown`; the
-/// request only for a `request` kind.
+/// request only for a `request` kind. It is written once, when the goal or
+/// task is created.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct RecordedOrigin {
     pub origin: Origin,

@@ -374,6 +374,8 @@ impl<'de> Deserialize<'de> for RunId {
 
 /// A full Git object ID: 40 (SHA-1) or 64 (SHA-256) hexadecimal digits.
 /// Abbreviated and symbolic names (`HEAD`, `main`) are not commits here.
+/// The Git calls that take a revision keep `&str`, since they take `main`
+/// and other refs too.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct CommitSha(String);

@@ -41,7 +41,7 @@ related:
 # Domain model
 
 queueが扱う業務の型（task・goal・proposal・run・finding・計画の依頼）と、その状態遷移と拒否の規則の概念と地図。
-型・欄・既定値・エラー文の詳細は`src/domain/`の定義のそばのdoc commentが持ち、決定の理由はリンクしたADRが持つ。
+欄・既定値・エラー文・各コマンドが許すstatusは`src/domain/`の定義のそばのdoc commentと`--help`が持ち、決定の理由はリンクしたADRが持つ。
 保存の形は[persistence](persistence.md)、runを動かす流れは[supervisor-lifecycle](supervisor-lifecycle.md)が持つ。
 
 ## 目的
@@ -79,12 +79,9 @@ proposalはplannerがplan reviewに出すtaskとgoalの束で、submitted → ac
 
 ## 責務と境界
 
-- domain（`src/domain/`）は状態と遷移の判断、拒否の分類（`DomainError`）、記録するeventのkindとpayloadを決める。
-  I/Oをせず、`anyhow`・`rusqlite`に依存しない（[ADR-0013](../adr/0013-layered-architecture-and-type-function-style.md)）。
-- applicationとinfrastructureは「読む → domainの関数に渡す → 返った値を保存する」だけで、SQLの中で業務の判断をしない。
-  保存の形とトランザクションは[persistence](persistence.md#集約の読み書き)。
-- 集約（`Task`・`Goal`・`TaskRun`・`Proposal`・`Receipt`）の欄は非公開で、作る・変える入口はそのmoduleの関数だけ。
-  保存済みの行の復元（`restore`）は作成時の規則を当て直さず、どのversionでも守られてきたことだけを確かめる。
+- domain（`src/domain/`）は状態と遷移の判断、拒否の分類（`DomainError`）、記録するeventのkindとpayloadを決め、I/Oをせず`anyhow`・`rusqlite`に依存しない（[ADR-0013](../adr/0013-layered-architecture-and-type-function-style.md)）。
+- applicationとinfrastructureは「読む → domainの関数に渡す → 返った値を保存する」だけで、SQLの中で業務の判断をしない（[persistence](persistence.md#集約の読み書き)）。
+- 集約の欄は非公開で、作る・変える入口はそのmoduleの関数だけで、保存済みの行の復元（`restore`）は作成時の規則を当て直さない。
 - runの状態のうちstatusの外のもの（承認・回数・待ち）は列にせず、`run_events`を`RunHistory`に畳み込んで読む。
 - CLIのJSONの欄名とeventのkind名・理由のコードは公開の契約で、名前を変えない（[ADR-0016](../adr/0016-maintainer-notification-and-compact-output.md)、[ADR-0034](../adr/0034-domain-events-carry-reason-codes-actor-and-configuration-changes.md)）。
 
@@ -96,7 +93,7 @@ proposalはplannerがplan reviewに出すtaskとgoalの束で、submitted → ac
 - goalの`closed_at`と`verdict`は同時にnullか同時に非nullで、verdictを消すのは人の`reopen`だけで、そのときも`goal_closed`のeventは残る。
 - `in_progress`はclaimしたtaskだけが持ち、終端（`completed`・`canceled`）のtaskは変わらない。
 - taskが`completed`になるのは、`integrate`によるrunの着地と、`already_satisfied`の主張を閉じたときだけ。
-  receiptの自己申告だけでは成功せず、着地はbase commitの上のcommit・clean worktree・rebase後に1回だけ流す検証コマンドの成功（[ADR-0040](../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)決定1）、閉じるのはsnapshotの検証と人の答え。
+  receiptの自己申告だけでは成功せず、着地はrebase後に1回だけ流す検証コマンドの成功（[ADR-0040](../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)決定1）、閉じるのはsnapshotの検証と人の答え。
 - mainはtaskごとに1つのsquash commitの直線で、`integrated`のrunはtaskごとに1件、`integrating`のrunはqueueごとに1件。
 - 1 runの失敗・中断・復旧は他のrunの状態・lease・process・資源を変えない。
 - agentの異常終了だけでtaskを自動で再実行しない（次の一手は復旧jobのverdictか人が決める）。
@@ -106,113 +103,37 @@ proposalはplannerがplan reviewに出すtaskとgoalの束で、submitted → ac
 ## Entities
 
 pathは`src/domain/`から。
-`mod.rs`が各moduleを再公開し、各ファイルの冒頭のdoc commentがそのmoduleの決定とADRを持つ。
 
 | 知りたいこと | コードの入口 |
 | --- | --- |
-| task | `task.rs`の`Task` |
-| goal | `goal.rs`の`Goal` |
-| proposal | `proposal.rs`の`Proposal` |
-| run | `run.rs`の`TaskRun`、記録つきは`run/recorded.rs` |
+| task・goal・proposal・run・receipt・finding | `task.rs`の`Task`、`goal.rs`の`Goal`、`proposal.rs`、`run.rs`の`TaskRun`、`receipt.rs`、`finding.rs` |
 | 入力型・復元用・読み取り用の型 | `input.rs`、`views.rs` |
-| receipt | `receipt.rs`の`Receipt` |
-| finding | `finding.rs`の`Finding` |
-| workerのprovider・変更の種類・goalのラベル・path | `worker.rs`、`change.rs`、`goal_tag.rs`、`scope.rs` |
+| provider・変更の種類・goalのラベル・path | `worker.rs`、`change.rs`、`goal_tag.rs`、`scope.rs` |
+| IDとcommitのnewtype、業務上の拒否 | `ids.rs`、`error.rs`の`DomainError` |
 
 - sessionとworkspaceは独立のentityにせず、`TaskRun`のIDと`workspace_id`で表し、noteは`run_events`のkind `observation`で表す。
-- receiptの`follow_ups`は検証に使わず、着地の後に`integrate`が元のtaskと同じgoalのdraftとして登録する（[ADR-0019](../adr/0019-move-routine-maintainer-work-into-the-runtime.md)決定4）。
-  `category`と`membership_proposal`は形が違ってもreceiptを拒まない（[receiptとsessionの終了](supervisor-lifecycle/receipt-and-session-exit.md#follow_upsの分類コード)）。
 
 ## Current operations
 
-CLIの各コマンドが許すstatus・記録するevent・flagごとの振る舞いは`src/main.rs`のclapの定義（`--help`）と、判断の定義のそばのdoc commentが持つ。
-ここには判断の入口と、コードから読めない約束だけを置く。
+| 知りたいこと | コードの入口 |
+| --- | --- |
+| taskの遷移と編集 | `TaskStatus::transition`、`task::edit`、`task::edit_ended_verify`（[ADR-t883-1](../adr/2026-09-30-t883-1-edit-ended-run-verification-before-inherited-retry.md)）、`task::duplicate_refusal` |
+| 優先度 | `domain::base_priority`（[ADR-t1639-1](../adr/2026-10-04-t1639-1-goal-priority-is-the-source-tasks-inherit-and-goals-carry-tags.md)・[ADR-t1811-1](../adr/2026-10-05-t1811-1-tasks-without-own-priority-follow-the-goal-in-every-status.md)）、誰が置いたかは`PriorityBy`、由来は`RecordedOrigin`、`task::set_goal`、`application::effective_priority`（[ADR-t791-1](../adr/2026-09-28-t791-1-effective-priority-ignores-tasks-waiting-on-abandoned-goals.md)） |
+| slotとclaimの順 | `domain::slot_order`、`dependency_graph`の`candidates`、`domain::claim_order` |
+| proposalとplan review | `proposal.rs`、`TaskStore::submit`、`infrastructure::proposals::approve`、`domain::lint::lint`、`domain::plan_review`、follow_upの所属は[所属の判断](follow-up-membership.md) |
+| claimと候補 | `task::claim`、`infrastructure::sqlite`の`READY_QUERY`、buildを待つclaimは`domain::build_wait`、読む口は`application::claim_view`（[ADR-t1992-1](../adr/2026-10-07-t1992-1-candidates-show-the-order-as-claimed-from-the-supervisor-s-deferral-records.md)） |
+| goalのclose・開き直し・依存 | `goal::close`、`goal::check_follow_ups`、`goal::reopen`、`goal::check_accepts_dependents`、acceptanceの版は`GoalDetail` |
+| goal review | [Goal review](supervisor-lifecycle/goal-review.md) |
+| 取り残された依存 | `goal::StrandedDependency`、`infrastructure::stranded` |
+| taskのhold | `domain::task_hold`（予定は[taskのhold](../plans/task-hold.md)） |
+| attentionと表示 | `domain::AttentionNext`、`src/view.rs` |
+| 役割の柵 | `domain::authorization`、[Authorization](authorization.md)の「Policy」 |
 
-### taskの遷移と編集
-
-- 遷移の判断: `TaskStatus::transition`（`TaskAction`ごとに許す元のstatus）。
-- `submitted → ready`の道はplan review（`proposal::accept`）と人のbypassの2つだけ。
-- 中身の編集は`task::edit`が決め、plan reviewを通った中身は直さずに戻してから直す（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)決定9・14）。
-  例外は終わったrunのverifyだけの直し（`task::edit_ended_verify`、[ADR-t883-1](../adr/2026-09-30-t883-1-edit-ended-run-verification-before-inherited-retry.md)）。
-- 重複のcancelの判断は`task::duplicate_refusal`で、重複の記録は連鎖も循環もしない（[ADR-0063](../adr/0063-full-text-search-related-with-mentions-and-search-strength-and-duplicate-of.md)決定5）。
-
-### 優先度
-
-- 基の値は1か所の`domain::base_priority`が決める（[ADR-t1639-1](../adr/2026-10-04-t1639-1-goal-priority-is-the-source-tasks-inherit-and-goals-carry-tags.md)決定2）。
-- 個別の指定の無いtaskは状態によらずgoalの今の値に追随し、claimの時に凍らせない（[ADR-t1811-1](../adr/2026-10-05-t1811-1-tasks-without-own-priority-follow-the-goal-in-every-status.md)）。
-- plan reviewはAI由来のtaskの個別の優先度を外す（人が置いた値と人間由来は残す。[Plan review](supervisor-lifecycle/plan-review.md#verdictと適用)）。
-- 誰が置いたか（`PriorityBy`）は効く段（`PrioritySource`）と別の軸で、goal・taskの由来（`RecordedOrigin`）は作成時に1回だけ書く（`domain::plan_request`、ADR-t1975-1決定2・5）。
-  goalを移るときの扱いは`task::set_goal`。
-- 効く優先度（`application::effective_priority`）は自分を推移的に待つ`ready`のtaskの値も継ぐが、永久にclaimされないtaskからは継がない（[ADR-t791-1](../adr/2026-09-28-t791-1-effective-priority-ignores-tasks-waiting-on-abandoned-goals.md)）。
-- claimの順・`needs_session`の再開・復旧jobは効く優先度で1つの列に並ぶ（`domain::slot_order`、[ADR-t1850-1](../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)）。
-  goal間のrankは作らない。
-
-### proposalとplan review
-
-- 判断は`proposal.rs`、保存は`TaskStore::submit`。
-- taskとgoalは同時に1つのactiveな（`submitted` / `revising`の）proposalにだけ属する。
-- 所属の判断の無いfollow_upのdraftは、plan reviewへの入口と、それを飛ばす入口と、その検査で同じ条件で止まる（[ADR-t1504-2](../adr/2026-10-04-t1504-2-runtime-records-and-enforces-follow-up-membership-judgements.md)決定7、判定は[所属の判断](follow-up-membership.md)の「submit・lint・plan review」）。
-- `lint`はrepositoryに依存しない決まった規則だけを持つ純粋関数`domain::lint::lint`で、repository固有の規則はplan reviewのpromptが文書から読む。
-- plan reviewのapproveは閉じたgoalのtaskをreadyにしない（`infrastructure::proposals::approve`）。
-  閉じたgoalのtaskはclaimされないため。
-
-### claimと実行の順
-
-- `claim`だけが`ready → in_progress`へ動かし、同じトランザクションで`TaskRun::new`がrunを作る。
-- 候補は依存が全て`completed`、goal依存が全て`achieved`で閉じ、draftのgoalに属さず再計画中でもholdでもないreadyのtask（`READY_QUERY`）。
-- 規則の順は`dependency_graph`の`candidates`、agingは`domain::claim_order`が足す。
-- 読む口はsupervisorが記録したclaimの控えを読むだけで、自分では判定しない（`application::claim_view`、[ADR-t1992-1](../adr/2026-10-07-t1992-1-candidates-show-the-order-as-claimed-from-the-supervisor-s-deferral-records.md)）。
-- `wait_for_build`のtaskは、判定したsupervisorが順に名指したときだけclaimされる（[ADR-t1632-1](../adr/2026-10-05-t1632-1-claim-waits-for-a-build-that-contains-the-dependencies-landings.md)）。
-- canceled・失敗・中断・統合待ち・着地中・セッション待ちは、依存の完了の条件を満たさない。
-
-### goal
-
-- close: `goal.rs`が所属taskのstatusをverdictが許すかを決め、`achieved`の前に元goalのfollow_upの所属の判断を求める（ADR-t1504-2決定8）。
-  閉じる経路はどれも同じトランザクションの検査を通る。
-- 開き直し: `achieved`で閉じたgoalだけを人が開き直す（`goal::reopen`、ADR-t1504-2決定9）。
-  開き直しは走っているrunを止めない。
-- `abandoned`で閉じたgoalへの依存は新しく張れない（`goal::check_accepts_dependents`）。
-- acceptanceの版は集約の欄ではなく`GoalDetail`の欄で、文が変わったときだけ増え、所属の判断が判定時の版を持つ。
-- 所属taskが全部終わったopenのgoalは、supervisorのgoal reviewが閉じるか、足りないものをdraftにするか、人に聞く（[Goal review](supervisor-lifecycle/goal-review.md)）。
-
-### 取り残された依存
-
-- 閉じたgoalに残った未完了のtaskを開いたgoalのtaskが待つと、待つ側は永久にclaimされない（`domain::StrandedDependency`）。
-- runtimeは知らせるだけで、待っているtaskを自動で保留にしない。
-  依存を外すか、cancelするか、取り直すかは計画の判断で、決まった規則では選べないため。
-- 同じ待ちの集合は重ねて知らせず、鎖になっているときは根のtaskだけを知らせる。
-
-### taskのhold
-
-判断の入口は`domain::task_hold`、予定の部分は[taskのhold](../plans/task-hold.md)が持つ。
-
-### attentionと読む口
-
-- attentionの判定と次の一手（`AttentionNext`）は`src/domain/mod.rs`が持つ。
-  attentionは全てinboxのもので、plannerのものは無い（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)決定17）。
-- 圧縮した表示（`src/view.rs`）は全文のキー名を変えない（[ADR-0016](../adr/0016-maintainer-notification-and-compact-output.md)）。
-- CIの見張りの状態は`run_events`を畳み込んだビュー（`domain::ci_watch::WatchState::fold`）で、表を持たない（[CI watch](supervisor-lifecycle/ci-watch.md)）。
-
-### 役割の柵
-
-- observerの環境（`DAGQ_ROLE=observer`）は読み取りとfinding・`blocked`のaskだけを許し、一覧に無いコマンドは後から足したものも拒む（ADR-0044決定4）。
-  表は[Authorization](authorization.md)の「Policy」が持つ。
-- この判定は`DAGQ_ROLE`の申告に依る柵で、悪意ある実行は防がない。
-
-## IDとcommitのnewtype
-
-- 入口は`src/domain/ids.rs`で、task IDとgoal IDのように意味の違う値を型で分ける（ADR-0013決定4）。
-- `RunId`と`CommitSha`の読み込みは生成と同じ検証を通し、空のrun IDや不正なcommitの行は変換のエラーになる。
-- 落とし穴: receiptの`run_id`と`commit`は文字列のまま持つ。
-  `Receipt::check`が決まった順で検証し、最初に外れた項目の文を`last_error`に書くため、parseの時点では検証しない。
-- 落とし穴: Gitの操作がrevisionとして取る引数は`main`やrefも受けるので、`CommitSha`でなく`&str`のまま。
+- claimの順・`needs_session`の再開・復旧jobは効く優先度で1つの列に並び、goal間のrankは作らない（[ADR-t1850-1](../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)）。
 
 ## 集約: TaskとGoal
 
-- `updated_at`はDBが更新のたびに書き、`goal::close`だけは`closed_at`と揃えるため時刻を引数に取る。
-- 集約は`Serialize`だけを持ち、`Deserialize`を持たない（作る入口を1つにするため）。
-  入力型（`input.rs`）は`Deserialize`を持つ。
-- follow_upの深さ（`tasks.follow_up_depth`）は集約に持たせず、storeの列として読み書きする（下の「Draft planners」）。
+follow_upの深さは集約でなくstoreの列（`DraftPlannerStore::follow_up_depth`）。
 
 ## cancelの理由の分類コード（未実装）
 
@@ -244,99 +165,40 @@ CLIの各コマンドが許すstatus・記録するevent・flagごとの振る�
 
 ## 集約: TaskRun
 
-- 入口は`src/domain/run.rs`で、どのstatusからどのstatusへ移れるかの判断は全てここにあり、`runtime_store/`と`sqlite.rs`のSQLは判断しない。
-- コマンドは`fn(run, ...) -> Result<TaskRun, DomainError>`の形で、許さない遷移を`RunTransitionNotAllowed`で拒む。
-  各コマンドが許すstatusはその関数のdoc commentが持つ。
-- eventを伴う遷移は記録つきの形（`run::Recorded`、`src/domain/run/recorded.rs`）が記録するkindとpayloadを決めて返し、storeは同じトランザクションで書くだけ（[persistence](persistence.md#集約の読み書き)）。
+| 知りたいこと | コードの入口 |
+| --- | --- |
+| statusの遷移の判断 | `src/domain/run.rs`のコマンド（各関数のdoc commentが許すstatusを持つ） |
+| 遷移が記録するevent | `run::Recorded`（`run/recorded.rs`） |
+| `last_error` | `TaskRun`の欄、コードは`domain::reason::last_error_code` |
+| runのfileのpath | `RunPaths` |
+| 復旧のラウンド | `domain::triage_state`（[triage](supervisor-lifecycle/triage.md)） |
+| receiptの検証 | `domain::validation::judge`、`already_satisfied`は`domain::satisfied`、着地の検証は[Validation](supervisor-lifecycle/validation.md) |
+| 履歴と回数の上限 | `run/history.rs`の`RunHistory`、`domain::resume`（[ADR-t946-1](../adr/2026-09-29-t946-1-kill-only-resumes-have-their-own-limit.md)） |
+| payloadとeventのkind名 | `run/payload.rs`、`domain::event_kind` |
+
 - 落とし穴: storeはrunのコマンドの拒否をCLIと`last_error`の従来の文に置き換えて返し、domainの理由はrun directoryの`refusals.log`に残す。
-- 落とし穴: runのファイルのpathはDBの値を信じず、読むたびにqueueの今の`runs/`から解決し直す（`RunPaths`、[ADR-0017](../adr/0017-resolve-run-paths-from-the-queue-directory.md)）。
-- resume・review・reviseの進みは新しい状態を足さず、eventで表す（[needs_session](supervisor-lifecycle/needs-session.md#needs_session)、[review](supervisor-lifecycle/review.md#review-supervisor)、[ADR-0027](../adr/0027-keep-worker-session-through-review-revise-verdict-and-merge-tree-precheck.md)）。
-- 復旧のラウンドの状態は`domain::triage_state`が最後の`resume_started`以降のeventから導く（[triage](supervisor-lifecycle/triage.md#triage-supervisor)）。
-  providerを使えずに落ちた復旧jobは`Pending`と読む。
-
-### receiptの検証（`domain::validation`）
-
-- 受理か拒否かは純粋な`validation::judge`が決め、次に要る事実を1つずつ求める。
-  applicationの`integrate::check_receipt`は求められた事実だけをrun filesとGitから集めて渡し直す。
-- 判定の順と拒否の理由のコードは`domain::validation`のdoc commentが持つ。
-- 拒否のうち`needs_session`は要求evidenceかSpikeの結果の欠けかscopeの違反（`Validation::resumable()`）。
-- `already_satisfied`の受理は着地せず`validating`に残し、mainのsnapshotで検証する。
-- 着地の検証コマンドはvalidatingでは流さず、`integrate`がrebase後に1回だけ流す（[Validation](supervisor-lifecycle/validation.md)）。
-
-### runの履歴（`RunHistory`）
-
-- 入口は`src/domain/run/history.rs`の`RunHistory::from_events`で、1 runのeventを借りて畳み込む読み取り専用の型。
-- 回数の上限と承認で決まる判断はdomainの関数だけが定数と比べ、supervisor・`integrate`はその結果に従ってI/Oをする。
-- resumeの数え方（数える試行、衝突だけの試行、killだけの試行）と引き継ぐretryの判定は`domain::resume`（[ADR-t946-1](../adr/2026-09-29-t946-1-kill-only-resumes-have-their-own-limit.md)）。
-- 判断に使うpayloadは文字列のkeyでなく型付きの復元（`src/domain/run/payload.rs`、[architecture](architecture.md)の規則C6）で読み、keyの綴りは型の定義の1か所だけにある。
-- 落とし穴: 復元は過去の版が書いたものを読むので拒まず、欄の欠け・`null`・別の型の値は欄が無いと読む。
-- eventのkind名は`domain::event_kind`か機能のmoduleの定数で名指す。
-
-## DomainError
-
-- 入口は`src/domain/error.rs`の`DomainError`で、業務上の拒否だけをvariantにし、汎用の`Other`を持たない。
-- `Display`の文はCLIが`{"error": ...}`に出し、runtimeが`last_error`に書く文そのもので、文はdomainの単体testが固定する。
+- resume・review・reviseの進みは新しい状態を足さず、eventで表す（[needs_session](supervisor-lifecycle/needs-session.md)、[review](supervisor-lifecycle/review.md)、[ADR-0027](../adr/0027-keep-worker-session-through-review-revise-verdict-and-merge-tree-precheck.md)）。
 
 ## Draft planners
 
-runtimeやjobが作ったdraftに、runtimeが同じきっかけの束ごとに1つplannerを立てる（ADR-0044決定16、[ADR-t807-1](../adr/2026-09-28-t807-1-bundle-drafts-of-one-piece-of-work-for-one-runtime-planner.md)）。
-規則と型は`src/domain/follow_up.rs`、storeは`src/infrastructure/draft_planners.rs`、流れは[Draft planners](supervisor-lifecycle/draft-planners.md#draft-planners-supervisor)。
-
-- 出どころ（`DraftOrigin`）と材料はdraftごとに1回記録する。
-  `revisit`は記録する出どころでなく、再検討の時刻が来た人のdraftをstoreがplannerの対象として読むときの名前（[ADR-t1540-1](../adr/2026-10-05-t1540-1-a-kept-draft-returns-to-runtime-planners-at-its-revisit-time.md)）。
-- `reopened`のdraftはreadyに戻さない。
-  食い違いを見つけたplan reviewを飛ばさないため。
-- 束の鍵は`BundleKey::of`が材料から決め、作成時刻では束ねない。
-- 上限（`MAX_DRAFT_PLANNERS`）はdraftごとに数え、達したdraftは計画の依頼を待つ（attentionの`DecideDraft`）。
-  人のanswerを運ぶときと、人・inboxが付けた再検討の時刻が来たときは1回越える。
-- 人の答えだけを待って終わったplanner（`PlannerSession::answer_wait_at`）はどの上限にも数えない（[ADR-t1704-1](../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定5）。
-- 同時に立つplannerの数の上限は束1つを1と数え、他の種類のplannerと共有する。
-- 人を経ずに採用できるfollow_upの上限は`adopt_needs_person`（深さは[ADR-t808-1](../adr/2026-09-28-t808-1-runtime-planners-submit-follow-ups-up-to-depth-two.md)）。
-- 落とし穴: follow_upの深さは人を経ると0に戻り、runtimeのplannerが人を経ずにsubmitしたtaskではそのまま残る（`DraftPlannerStore::follow_up_depth`）。
-- 知らない`AskKind`は`Other`として読み、記録はするがruntimeは適用しない（[ADR-0073](../adr/0073-kind-additions-are-compatible.md)決定21）。
+runtimeやjobが作ったdraftの束ごとにruntimeが立てるplanner（[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)決定16、[ADR-t807-1](../adr/2026-09-28-t807-1-bundle-drafts-of-one-piece-of-work-for-one-runtime-planner.md)）。
+規則は`src/domain/follow_up.rs`、storeは`infrastructure::draft_planners`、流れは[Draft planners](supervisor-lifecycle/draft-planners.md)。
 
 ## Planning requests
 
 人がinboxに頼んだ計画の依頼で、supervisorが依頼ごとにruntimeのplannerを立てる（[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)決定2〜7）。
-規則と型は`src/domain/plan_request.rs`、storeは`src/infrastructure/plan_requests.rs`、流れは[inboxからの計画の依頼](supervisor-lifecycle/plan-planners.md#inboxからの計画の依頼)。
+規則と型は`src/domain/plan_request.rs`、流れは[inboxからの計画の依頼](supervisor-lifecycle/plan-planners.md#inboxからの計画の依頼)。
 
-- 記録できるのは`inbox`と`user`だけで、人の言葉と参照は記録の後に変わらない。
-- `open`から`proposed` / `declined` / `exhausted`へ進み、終わりの状態はどこにも戻らない。
-  `proposed`はproposalのその後の結末で変えない。
-- 依頼を名指せるaskは`planner_question`だけで、その答えは人に回らず、依頼のplannerか新しいplannerに運ぶか閉じる。
-
-## `TaskRun.last_error`
-
-- 意味・上書き・読み方（statusとの組）は`TaskRun`の`last_error`の欄のdoc commentが持つ。
-- 書く文は書くコマンドのdoc commentと、そのrunのeventの自由文が持つ。
-- コードは列を持たず、runのeventから導く（下の「理由の分類コード」）。
+- 依頼を名指せるaskは`planner_question`だけで、その答えは人に回らない（`request_answer_route`）。
 
 ## providerの切り替えの理由（`SwitchReason`）
 
-- 入口は`domain::provider_switch::SwitchReason`の閉じた集合（[ADR-t813-2](../adr/2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md)）。
-- 理由のコード（`ReasonCode`）とは別の集合で、どれも失敗ではなく「そのproviderが使えない」ことを言う。
-- 控えの長さは`SwitchReason::hold_secs`で、利用上限の文が解ける時刻を言えばそれを優先する。
-- 失敗したtestやturnでは切り替えず、使えないと安全に判定できるときだけ切り替える。
-
-## headless jobの種類・権限の意図・失敗（`JobKind`・`JobAccess`・`JobFailure`）
-
-- 入口は`domain::headless_job`の閉じた集合（[ADR-t1063-1](../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)決定2・4、ADR-t1895-1決定1）。
-- `JobFailure`の4つは`SwitchReason`と同値、認証と利用上限は人だけが動かす壁。
-- 値の意味とClaude Codeへの訳は[Agent provider lifecycle](provider-lifecycle.md#headless-jobのinterface)。
+- 入口は`domain::provider_switch`（[ADR-t813-2](../adr/2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md)）、headless jobの種類・権限の意図・失敗は`domain::headless_job`（[ADR-t1063-1](../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)）で、Claude Codeへの訳は[Agent provider lifecycle](provider-lifecycle.md#headless-jobのinterface)。
 
 ## 理由の分類コード（`code`）
 
-- 失敗・保留・中断を記録するeventは、payloadに`code`（`domain::ReasonCode`）を持ち、自由文はそのまま残す（ADR-0034決定1）。
-- コードの一覧と意味は`ReasonCode`の定義が正で、名前を変えるにはADRが要る。
-- コードは「なぜ」、eventのkindは「どの工程で」を言うので、同じコードが別のkindに付く。
-- コードに添える値にpath・workspace ID・pidなどマシンに依る値を入れない（[ADR-0032](../adr/0032-classify-records-into-domain-events-diagnostics-coordination-and-bodies.md)）。
-- どのeventがどのコードを書くかは記録する経路のコードが持ち、cmuxの失敗の`backend_*`は`application::reason_of_error`が決める。
-- 落とし穴: コードが入る前のeventには`code`が無く、読む側はそれを許す。
-- 落とし穴: 別のeventと同じコードを重ねて持つeventがあるので、数えるときは除く（`REPEATED_CODE_KINDS`）。
-- runの`last_error`のコードは`domain::reason::last_error_code`が、`last_error`を書いたか中断したeventのうち最新のものから導く。
+- 一覧と意味は`domain::ReasonCode`、置き方と数え方は`src/domain/reason.rs`（ADR-0034決定1）、cmuxの失敗の`backend_*`は`application::reason_of_error`。
 
 ## CIの見張り（ADR-t1920-1）
 
-- 着地先のbranchで既に落ちているtestの一覧は`domain::ci_watch::WatchState`が持つ（[ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)）。
-- 既に直しているtaskでfindingを閉じる判断は`domain::finding::check_covered_by`。
-- 見張りの流れと設定は[CI watch](supervisor-lifecycle/ci-watch.md)。
+- 決定は[ADR-t1920-1](../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)、既に落ちているtestの一覧は`domain::ci_watch::WatchState`、findingを閉じる判断は`domain::finding::check_covered_by`、流れは[CI watch](supervisor-lifecycle/ci-watch.md)。

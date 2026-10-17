@@ -58,6 +58,8 @@ pub struct Goal {
     /// as achieved clears it ([`reopen`]); the `goal_closed` event stays.
     verdict: Option<GoalVerdict>,
     created_at: String,
+    /// Written by the store on every update; [`close`] takes the time as
+    /// its argument so that it equals `closed_at`.
     updated_at: String,
 }
 
