@@ -647,8 +647,9 @@ pub fn supervise_with_reviewer(
     };
     let transcripts = ClaudeTranscripts::from_env();
     // A Codex that is not found, or does not run, runs no worker: its
-    // tasks are deferred, and the supervisor starts all the same
-    // (ADR-t813-2).
+    // tasks start on headless Claude (or wait for Codex with
+    // `[provider_fallback] workers` off, ADR-t1857-1), and the supervisor
+    // starts all the same (ADR-t813-2).
     let found_codex = crate::infrastructure::codex::codex_at_entry(&options.codex).ok();
     let codex = found_codex.clone().unwrap_or_else(|| options.codex.clone());
     let codex_agent = found_codex

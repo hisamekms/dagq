@@ -8,7 +8,8 @@
 //! a foreground tool > a background command > a subagent > the model >
 //! idle. A shell command is labelled by the heaviest thing it runs
 //! ([`classify`]); a background command and an async subagent end at their
-//! `<task-notification>`.
+//! `<task-notification>`. The tool hooks (`PreToolUse` / `PostToolUse`)
+//! are not used: they cannot see a background command's end.
 
 use std::collections::BTreeMap;
 

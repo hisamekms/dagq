@@ -933,6 +933,9 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         }
     }
     let mut queue = ports.queues.open()?;
+    // A live supervisor of the other `--no-claude` policy is neither
+    // reused nor taken over: this one refuses to start until a person
+    // drains it (ADR-t1204-1).
     for registration in queue.supervisors()? {
         if ports.processes.alive(registration.pid) {
             ensure!(
@@ -3000,6 +3003,7 @@ impl Supervisor<'_> {
                 return;
             }
         };
+        // The observer reads the spans' turns, so they are recorded first.
         self.record_session_turns(true);
         let fallback_jobs = self.provider.fallback.jobs;
         self.on_observation(|observation, env| {

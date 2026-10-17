@@ -4001,7 +4001,10 @@ pub fn claude_global_config(config_dir: Option<&str>, home: Option<&str>) -> Opt
 /// worktree's own root), so a parent's trust is not looked at here either. No flag skips the dialog
 /// (`--dangerously-skip-permissions` does not), print mode (`-p`) never
 /// shows it, and accepting it for the person is not the runtime's to do,
-/// so `up` refuses an untrusted repository instead.
+/// so `up` refuses an untrusted repository instead. `supervise` does not
+/// check it: the sessions it starts all run in print mode, so only an
+/// interactive session (the inbox) needs the check. Accepting the dialog
+/// writes the repository's root as the key, never a worktree's path.
 pub fn claude_trusts_repository(config: &Path, root: &Path) -> Result<bool> {
     let text = match fs::read_to_string(config) {
         Ok(text) => text,

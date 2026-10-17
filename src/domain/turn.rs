@@ -612,7 +612,8 @@ pub struct TurnResult {
     #[serde(skip)]
     pub rollout: Option<RolloutUsage>,
     /// The turn resumed a session the agent does not have (Codex's `no
-    /// rollout found`): it did nothing, and a new session is started.
+    /// rollout found`): it did nothing, and the wrapper forgets that
+    /// session and runs the turn once more, only once, in a new one.
     pub session_missing: bool,
     /// The model the agent says the turn ran on (Claude's `system/init`,
     /// Codex's rollout), and why none was read when it was not.
@@ -855,6 +856,9 @@ pub fn thread_total_own(events: &[RunEvent], session: &str, total: &TokenUsage) 
 /// running, and the `tokens` of the finished turns summed (`messages` is
 /// the number of turns that recorded tokens; `cost_usd` only when each of
 /// them had one). `None` for the tokens when no turn recorded them.
+/// A Claude span is counted from its stream too, though its transcript
+/// could be read, so that how a span is counted does not depend on its
+/// provider.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct HeadlessSpan {
     pub finished: Vec<Turn>,

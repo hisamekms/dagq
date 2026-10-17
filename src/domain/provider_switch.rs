@@ -117,6 +117,11 @@ impl SwitchPhase {
 /// `[provider_fallback]` of `dagq.toml` (ADR-t1857-1): whether a worker
 /// moves off a provider it cannot use (`workers`), and whether a headless
 /// job whose role names its provider does (`jobs`); by default both do.
+/// `jobs` covers each job whose provider is written (in `[roles.<role>]`
+/// or a review agent's table, `claude` and the recovery job included); a
+/// job that writes none is outside it. Off, it changes neither the
+/// failure's class nor the hold: only the move is stopped, and the job or
+/// worker waits for the hold to end; `--no-claude` still moves.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderFallback {
     pub workers: bool,
@@ -362,7 +367,8 @@ pub fn stopped_by_fallback(
 /// (`queue_hold`) and the provider's own [`ProviderHold`] (`own`, see
 /// [`own_hold`]): Claude is disabled under `--no-claude`, else held by the
 /// hold ask before its own hold (an agent that did not start); Codex only
-/// by its own, so Claude's hold ask never holds it.
+/// by its own, so Claude's hold ask never holds it. Under `--no-claude` a
+/// worker never goes back to Claude.
 pub fn held(
     provider: Provider,
     no_claude: bool,
@@ -452,7 +458,9 @@ pub fn wall_move(
 /// of it, `other_headless` false, or it is held), with the wall of the
 /// hold ask open already (`open_hold`, its reason), or of whichever
 /// provider's hold is a login or a usage limit. Two agents that do not
-/// start open none: the run waits on their holds (`holds`).
+/// start open none: the run waits on their holds (`holds`). Nor does a
+/// Codex wall whose run used up its switches while Claude can be used:
+/// no person is needed for either.
 pub fn wall_to_raise(
     no_claude: bool,
     from: Provider,

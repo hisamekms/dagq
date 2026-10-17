@@ -508,7 +508,9 @@ pub(super) fn review_route(
 /// `[provider_fallback] jobs` off the route waits for `provider` instead of
 /// choosing the other, ADR-t1857-1); not when the route still sends it to
 /// `provider` (its hold was not written) or to the person, so that it
-/// fails to the person instead.
+/// fails to the person instead. A run's review has no row of its own, so
+/// one whose start failed and whose route starts it on the other provider
+/// starts again in the same pass.
 pub(super) fn review_moves(route: &ReviewRoute, provider: Provider) -> bool {
     match route {
         ReviewRoute::Start(next, _) => next.provider != provider,

@@ -9,9 +9,11 @@
 //! read from the thread's rollout there.
 //!
 //! Codex also runs the headless jobs whose role `[roles.<role>]` puts on it
-//! (ADR-t1063-1, the goal review for now): one `codex exec --json` in the
-//! read-only sandbox, whose reply, thread and model are read from its JSONL
-//! and its rollout the way a turn's are.
+//! (ADR-t1063-1, the roles of [`crate::domain::actor_model::CODEX_ROLES`]):
+//! one `codex exec --json` in the read-only sandbox, or for a job that
+//! edits files ([`JobAccess::EditFiles`]) the sandbox that writes only its
+//! directory, whose reply, thread and model are read from its JSONL and
+//! its rollout the way a turn's are.
 
 use anyhow::{Context, Result, bail};
 use std::{
@@ -131,7 +133,9 @@ prefix_rule(pattern=["killall"], decision="forbidden", justification="dagq: stop
 /// The sandbox of every turn, before its writable roots: workspace-write
 /// (the worktree, `/tmp` and `$TMPDIR`), no approval (what needs one
 /// fails at once instead of waiting) and the network open for sccache's
-/// server and the registry (ADR-t813-3 decisions 1 and 4).
+/// server and the registry (ADR-t813-3 decisions 1 and 4). The network is
+/// open to reach the sccache server the supervisor started outside the
+/// sandbox; starting one from inside it is refused (ADR-t2086-1).
 pub const SANDBOX_CONFIG: [&str; 3] = [
     r#"sandbox_mode="workspace-write""#,
     r#"approval_policy="never""#,
@@ -142,7 +146,8 @@ pub const SANDBOX_CONFIG: [&str; 3] = [
 /// decision 2): of the Git common directory `G` only the worktree's own
 /// directory, the objects and the refs (and their logs) of the `dagq/`
 /// run branches, so that the run branch takes commits and `main` does
-/// not; the run directory (the receipt); and cargo's registry.
+/// not; the run directory (the receipt); and cargo's registry. Never the
+/// whole common directory, `$HOME` or the queue's directory.
 pub fn writable_roots(worktree: &Path, run_dir: &Path, cargo_home: &Path) -> Result<Vec<PathBuf>> {
     let admin = worktree_admin_dir(worktree)?;
     let common = common_dir(&admin)?;
@@ -290,9 +295,10 @@ pub fn writable_roots_config(roots: &[PathBuf]) -> Result<String> {
     ))
 }
 
-/// The sandbox of a headless job (ADR-t1063-1 decision 2): read-only,
-/// whatever its [`JobAccess`] says. Every intent a job names reads files
-/// and runs `dagq`'s reads at most; the read-only sandbox lets any command
+/// The sandbox of a headless job (ADR-t1063-1 decision 2): read-only for
+/// every [`JobAccess`] but [`JobAccess::EditFiles`], which runs in
+/// [`EDIT_JOB_SANDBOX`]. Every other intent reads files and runs `dagq`'s
+/// reads at most; the read-only sandbox lets any command
 /// read and refuses every write, and `dagq` takes the role and queue from
 /// the job's environment, which the sandbox's shell inherits (spike 1. and
 /// 2.). No writable root, network, approval or bypass flag is given.

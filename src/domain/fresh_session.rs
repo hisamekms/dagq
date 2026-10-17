@@ -8,7 +8,8 @@
 //! (decision 4): no classification of the send-back (a review's reason
 //! code, say) does (ADR-t947-1 decision 3). The new session is a boundary
 //! like a provider's switch (ADR-t813-2 decision 4), recorded as
-//! `session_renewed`.
+//! `session_renewed`. The request for a conflict after a passed review
+//! is not judged: it goes on in the worker's session.
 
 use serde_json::{Value, json};
 

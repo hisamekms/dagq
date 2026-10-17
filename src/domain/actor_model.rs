@@ -360,7 +360,7 @@ pub enum UnnamedWithoutClaude {
 /// the hold ask holds Claude. One that names its provider goes by
 /// [`job_route`]; when that waits under `--no-claude` it is
 /// [`JobStartRoute::Unavailable`] with the reason, as a Codex job never
-/// moves to Claude then.
+/// moves to Claude then: a person is told to handle the role by hand.
 pub fn job_start_route(
     launch: ActorLaunch,
     switchable: bool,
@@ -570,7 +570,9 @@ pub fn check_effort(effort: &str) -> Result<(), DomainError> {
 /// ADR-t1063-1 decision 4), and, with `[provider_fallback] jobs` off
 /// (`fallback` false, ADR-t1857-1), a Claude one of such a role too, so
 /// that the supervisor holds Claude and starts it again there once the
-/// hold ends.
+/// hold ends. The side that observes and analyses (`supervise::observer`)
+/// only reads the end into this value; holding the provider is the side
+/// that runs and lands (`supervise::provider`).
 pub const fn records_unusable(provider: Provider, switchable: bool, fallback: bool) -> bool {
     switchable
         && match provider {

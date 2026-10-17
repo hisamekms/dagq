@@ -95,7 +95,8 @@ pub struct CodexTurnReader {
 const TIMED_ITEMS: [&str; 2] = [SHELL_ITEM, "mcp_tool_call"];
 
 /// What a message of Codex's says went wrong, by its words: `None` for one
-/// that names no kind (a retry, a transport fallback).
+/// that names no kind (a retry, a transport fallback). A bare `429` is not
+/// read, since a request id can contain one.
 pub fn classify(message: &str) -> Option<TurnFailure> {
     let lower = message.to_ascii_lowercase();
     let any = |words: &[&str]| words.iter().any(|word| lower.contains(word));

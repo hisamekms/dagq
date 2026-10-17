@@ -449,7 +449,9 @@ pub trait AgentProvider {
     /// id, under the run's settings. Its stdout is the turn's output for
     /// [`AgentProvider::turn_reader`]. The caller closes stdin, says where
     /// the output goes and starts it in a process group of its own. A
-    /// provider without one refuses.
+    /// provider without one refuses. Unlike a headless job's, whose prompt
+    /// goes on stdin ([`CommandSpec::stdin`]), a turn's prompt is a
+    /// positional argument.
     ///
     /// `target` says where the turn runs: a run's worktree and directory,
     /// or a headless planner's checkout and directory (ADR-t1394-2

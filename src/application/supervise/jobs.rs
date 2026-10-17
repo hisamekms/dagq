@@ -879,7 +879,11 @@ impl<'s> JobDesk<'s> {
     /// with `[provider_fallback] jobs` off, waits for this one to be
     /// usable again (ADR-t1857-1).
     /// `error` is the job's failure, `said` it with the job's output,
-    /// which may say when a usage limit resets.
+    /// which may say when a usage limit resets. A job runs once, so its
+    /// route is chosen before it starts; one found unusable after it
+    /// started is recorded as failed and starts again at a later pass, on
+    /// the other provider or, with the fallback off, once this one can be
+    /// used.
     pub(super) fn job_provider_failed(
         &mut self,
         env: &mut PassEnv<'_>,

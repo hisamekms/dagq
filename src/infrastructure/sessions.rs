@@ -1273,7 +1273,10 @@ const TURN_COMMANDS_BYTES: u64 = 4 * 1024 * 1024;
 /// wrote in the run directory, as a Claude span's is from its transcript;
 /// else the code of why it cannot be made. The files are read here, under
 /// the write lock when there is one: they are small (one line per
-/// command, read to [`TURN_COMMANDS_BYTES`]), unlike a transcript.
+/// command, read to [`TURN_COMMANDS_BYTES`]), unlike a transcript. A Codex
+/// span closed before its wrapper wrote these files gets no breakdown
+/// afterwards: Codex's output has no times, so they cannot be decided
+/// later.
 fn codex_breakdown(
     span: &OpenSpan,
     inputs: &WorkInputs,
@@ -2011,7 +2014,10 @@ pub(super) fn span_task(conn: &Connection, span: &OpenSpan) -> Result<Option<Tas
 /// its end. A span closed already is not closed again. No transcript is
 /// read: a close is marked [`HOOK_INTAKE_PENDING`], and the supervisor's
 /// intake records its turns and measurements later
-/// ([`record_closed_hook_turns`], ADR-t655-1). A runtime planner's span is on the first task of
+/// ([`record_closed_hook_turns`], ADR-t655-1), so the short time Claude
+/// Code gives a `SessionEnd` hook is not spent reading files. A
+/// `/clear`'s `SessionEnd` and the next `SessionStart` both closing the
+/// replaced span count it once. A runtime planner's span is on the first task of
 /// its proposal, with the proposal and its goals; the others are on no
 /// task. Only the spans are written: no run, proposal or planner changes.
 pub(super) fn record_hook(conn: &Connection, hook: &SessionHook) -> Result<Value> {

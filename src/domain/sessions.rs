@@ -519,7 +519,10 @@ pub fn changes(
 /// The span of a headless job, whose session id the runtime gave it
 /// (ADR-0048 decision 4) and recorded in the event that starts it, with
 /// the model and effort it was started with and where they came from
-/// (`launch`, ADR-0079 decision 7) when that event recorded them.
+/// (`launch`, ADR-0079 decision 7) when that event recorded them. A job
+/// started on the provider's defaults records neither, so the model its
+/// span closes with is the one read at the close: a Claude job's from its
+/// transcript, a Codex one's from the event that ends it.
 fn job(kind: &str, payload: &Value, cwd: Option<&str>) -> SpanChange {
     let mut opened = json!({
         "kind": kind,

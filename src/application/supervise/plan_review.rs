@@ -856,6 +856,7 @@ impl PlanningState {
     /// `[stall]` limit tells the inbox once per planner. A
     /// delivery claimed and not recorded (its supervisor died in between)
     /// is delivered again after the time a supervisor is judged dead in.
+    /// Under `--no-claude` no planner is started: a person stands in.
     fn tend_planners(&mut self, env: &mut PlanningEnv<'_>, options: &LoopSettings) -> Result<()> {
         self.close_person_planners(env);
         if env.jobs.no_claude {
