@@ -178,7 +178,7 @@ capabilityを持つroleで、taskやproposalが見つからないときは拒否
 拒んだときは、queueのevent `authorization_denied`（taskにもgoalにも紐づかないqueueのevent。actorの列は拒まれた呼び出し元）を記録し、`AuthorizationError`を返す。
 payloadは`src/application/commands/mod.rs`の`Gate`の記録と`Resource::record`が決める。
 記録に失敗しても拒否は拒否のまま返す。
-CLIのerrorの形はpluginの`dagq`の`reference/authority.md`が持つ。
+CLIのerrorの形は`src/main.rs`の`error_json`が持つ。
 observerのこのeventは、observerの次の起動を決める「自分以外のevent」に数えない。
 
 ### 対話と記録のコマンド（application）
