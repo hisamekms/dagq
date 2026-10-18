@@ -12,7 +12,7 @@ related:
 # Run worktrees
 
 終わったrunのworktreeが占めるディスクを、supervisorが自動で空ける。
-対象は、slotに居ないrunのうち、生きているsupervisorのleaseが無く`integrated`・`succeeded`・`failed`・`interrupted`で終わったもの（staleなleaseは無いものとして扱う。[掃除](cleanup-and-recovery.md#終わったrunの掃除)と同じ）と、leaseが無くtaskが`completed` / `canceled`になったもの（runの状態を問わない）（`ended_run_worktrees`）。
+対象は、slotに居ないrunのうち、生きているsupervisorのleaseが無く`integrated`・`succeeded`・`failed`・`interrupted`で終わったもの（staleなleaseは無いものとして扱う。[掃除](background-recovery-job.md#終わったrunの掃除)と同じ）と、leaseが無くtaskが`completed` / `canceled`になったもの（runの状態を問わない）（`ended_run_worktrees`）。
 worktreeのpathはrun_dirの下の`<runs>/<run-id>/worktree`で、`--repo`のcheckoutとその祖先には触れない。
 消したものはもう無いので、何度見てもよい。
 ただし片付けるものが何も残っていないrunは、同じsupervisorのプロセスの次の掃除からは候補にしない（下の「片付け終わったrun」）。
@@ -109,7 +109,7 @@ worktreeのpathはrun_dirの下の`<runs>/<run-id>/worktree`で、`--repo`のche
 手での`integrate`は着地したrunのworktreeを自分で消し、手での`recover`・人の`ready` / `cancel`・supervisorの外で終わったrunは次の掃除が拾う。
 失敗は`cleanup_failed`にして残りを続け、次の掃除で再び試す（supervisorのプロセスごとにworktreeあたり1回だけ記録する）。
 
-runのsessionの停止（backgroundのwrapperのhandleの`stop_background`。停止ごとに`wrapper_stopped`も記録する。cmuxを呼ばない。[後始末](cleanup-and-recovery.md)）の成否は`task_runs.workspace_closed_at`で表す。
+runのsessionの停止（backgroundのwrapperのhandleの`stop_background`。停止ごとに`wrapper_stopped`も記録する。cmuxを呼ばない。[後始末](background-recovery-job.md#後片付け)）の成否は`task_runs.workspace_closed_at`で表す。
 nullは「止めたことを確かめていない」で、停止の失敗だけでなく、wrapperを止めた後にDBへ書けなかった場合も含む。
 停止の失敗は`cleanup_failed`イベントと`last_error`に残るが、run状態は変えない。
 止めていないsessionをcleaned扱いにせず、再試行は`doctor`/`recover`で扱う。

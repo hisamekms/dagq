@@ -1317,6 +1317,20 @@ fn spawn_job(
 /// instruction only into a session at its prompt, a known dialog only
 /// under its rule, and a close only of a run that lands and whose receipt
 /// still holds. The first that fails refuses the whole verdict.
+///
+/// What each action rests on, never the screen, an input box or an idle
+/// guessed from one:
+/// - `send_instruction`: the turn ended and no next request is waiting;
+///   the instruction becomes the next turn's request.
+/// - `stop_processes`: the listing is read again right before, and only
+///   the named pids of the run's worktree or under its session stop
+///   (never the wrapper or the agent itself), SIGTERM then SIGKILL after
+///   [`STOP_GRACE`].
+/// - `resume`: only a run in its first session is parked in
+///   `needs_session` with the instruction, and only while its resumes
+///   last.
+/// - `wait`: holds the recheck of this alert and reason (at most
+///   `MAX_RECHECK_SECS`); a job of another alert does not clear it.
 fn check_live(
     sv: &mut Supervisor<'_>,
     run: &TaskRun,

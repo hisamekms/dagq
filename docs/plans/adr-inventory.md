@@ -94,7 +94,7 @@ related:
 | 箇条1 `run_leases`でrun単位のlease、supervisorごとのtoken | 有効 | — | migration 0005の記述は記録 | [persistence](../design/persistence.md) |
 | 箇条2 claimとlease作成を同じトランザクションで行う、複数supervisorでも直列 | 有効 | — | | [persistence](../design/persistence.md) |
 | 箇条3 `supervise --parallel N`の常駐ループ、`--once`、signal | 有効（一部上書き） | ADR-0027 決定1 | 「`awaiting_integration`になったrunのleaseを解放する」は、reviewの後までleaseとslotを持つに変わった | [supervise](../design/supervisor-lifecycle/supervise.md)・[review](../design/supervisor-lifecycle/review.md) |
-| 箇条4 1 runのruntime error（exit要求のtimeoutを含む）はそのrunだけをabandonしleaseを削除する | 上書き | ADR-0019 決定2 | `exit_request_timed_out`ではleaseを手放さない。ほかのruntime errorのabandonは有効 | [abandon](../design/supervisor-lifecycle/abandon.md)・[receipt-and-session-exit](../design/supervisor-lifecycle/receipt-and-session-exit.md) |
+| 箇条4 1 runのruntime error（exit要求のtimeoutを含む）はそのrunだけをabandonしleaseを削除する | 上書き | ADR-0019 決定2 | `exit_request_timed_out`ではleaseを手放さない。ほかのruntime errorのabandonは有効 | [abandon](../design/supervisor-lifecycle/background-recovery-job.md#1-runの放棄abandon)・[receipt-and-session-exit](../design/supervisor-lifecycle/receipt-and-session-exit.md) |
 | 箇条5 provisioningの失敗でclaimを止めdrainして非0で終わる | 有効 | — | | [supervise](../design/supervisor-lifecycle/supervise.md) |
 | 箇条6 `doctor` / `recover`はrunごとに判定する | 有効 | — | ADR-0041 決定3でwrapperの死んだrunの`recover`はsupervisorが自動で行うようになったが、判定の単位は変わらない | [doctor](../design/supervisor-lifecycle/commands.md)・[recover](../design/supervisor-lifecycle/commands.md) |
 
@@ -155,7 +155,7 @@ goal 1で実装済みのため、最初の棚卸しで`status: accepted`にし�
 
 ### ADR-0012
 
-置き換え済み（→ [ADR-0039](../adr/0039-adopt-stale-lease-of-live-wrapper-and-renew-own-stale-lease.md)、2026-09-25）。棚卸しの間に着地したtask 259が、段落2の自動`recover`（ADR-0041 決定3）を含む生きている決定を引き継いで丸ごと置き換えた。今の姿は[cleanup-and-recovery](../design/supervisor-lifecycle/cleanup-and-recovery.md)・[recover](../design/supervisor-lifecycle/commands.md)。
+置き換え済み（→ [ADR-0039](../adr/0039-adopt-stale-lease-of-live-wrapper-and-renew-own-stale-lease.md)、2026-09-25）。棚卸しの間に着地したtask 259が、段落2の自動`recover`（ADR-0041 決定3）を含む生きている決定を引き継いで丸ごと置き換えた。今の姿は[runの復旧](../design/supervisor-lifecycle/background-recovery-job.md#後片付け)・[recover](../design/supervisor-lifecycle/commands.md)。
 
 ### ADR-0013 レイヤーと「型＋関数」
 
@@ -274,7 +274,7 @@ ADR-0053へ置き換え済み（下の組Bの記録）。
 | 決定 | 現在 | 上書き | 根拠 | 今の姿（design） |
 | --- | --- | --- | --- | --- |
 | 1 leaseの無い未完了runを`recover run`のattentionにする | 有効 | — | | [status](../design/supervisor-lifecycle/commands.md)・[recover](../design/supervisor-lifecycle/commands.md) |
-| 2 attentionは`lease_released: true`の`runtime_error`だけ | 有効 | — | | [status](../design/supervisor-lifecycle/commands.md)・[abandon](../design/supervisor-lifecycle/abandon.md) |
+| 2 attentionは`lease_released: true`の`runtime_error`だけ | 有効 | — | | [status](../design/supervisor-lifecycle/commands.md)・[abandon](../design/supervisor-lifecycle/background-recovery-job.md#1-runの放棄abandon) |
 | 3 通知は足さない、maintainerは`watch`で受ける | 有効（一部上書き） | ADR-0041 決定17 | attentionはinboxが受ける | [events-watch](../design/supervisor-lifecycle/commands.md) |
 | 4 maintainerが`doctor`を見て`recover`する | 上書き | ADR-0041 決定17 | inboxが人に知らせ、人の指示で`dagq-recover`の手順を行う | [doctor](../design/supervisor-lifecycle/commands.md)・[recover](../design/supervisor-lifecycle/commands.md) |
 

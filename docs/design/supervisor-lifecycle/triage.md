@@ -66,7 +66,7 @@ related:
    人にはinboxのwatchが`ask_opened`として知らせる。
    runはそのまま。
    `triage_finished`と`recovery_finished`を記録する。
-7. **sessionの停止**: `triage_finished`の後、runが開いたsession（[記録](cleanup-and-recovery.md#runのsessionの記録)）のうち止めた記録の無いもので、backgroundのwrapperがまだ動いているもの（handleのprocessで見て、cmuxには聞かない）を止め（どう終わったかは`wrapper_stopped`に記録する。[非対話のworker](headless-worker.md)の「停止の記録」、[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)決定3）、`workspace_closed`を記録する。
+7. **sessionの停止**: `triage_finished`の後、runが開いたsession（[記録](background-recovery-job.md#runのsessionの記録)）のうち止めた記録の無いもので、backgroundのwrapperがまだ動いているもの（handleのprocessで見て、cmuxには聞かない）を止め（どう終わったかは`wrapper_stopped`に記録する。[非対話のworker](headless-worker.md)の「停止の記録」、[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)決定3）、`workspace_closed`を記録する。
    [ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)より前にworkspaceで開いたsessionのIDは開いていないとみなし、cmuxに聞かず閉じもしない（人が自分のterminalで閉じる）。
    止める失敗は`cleanup_failed`に記録して続ける（`last_error`は変えない）。
    1つでも閉じたら、そのrunの閉じていない`stuck_exit`のaskを閉じる。

@@ -1,7 +1,7 @@
 ---
 id: design-supervisor-lifecycle-background-recovery-job
 type: design
-title: "生きているsessionの復旧job"
+title: "runの復旧（復旧job・receiptの無いidle・1 runの放棄・後片付け）"
 status: current
 created: 2026-09-26
 scope: runtime
@@ -11,142 +11,189 @@ related:
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-triage
   - adr-0047
+  - adr-0054
   - adr-t609-1
+  - adr-t1433-3
 ---
 
-# 生きているsessionの復旧job
+# runの復旧（復旧job・receiptの無いidle・1 runの放棄・後片付け）
 
-[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定39・40（`application::supervise::recovery`）。
-復旧jobを、生きているsessionのalertにも広げたもの。
-runtimeの自動修正（決定25・29など）が直さなかったものを、jobが状況を読んで許された操作で直し、直せないか自信が無いときだけ、今までそのalertがなっていたaskでinboxに上げる。
-終わったrun（`failed` / `interrupted` / `resume_exhausted`）は[Triage](triage.md#triage-supervisor)が同じverdictで扱う。
+## 目的
 
-## alert
+runの異常を、runtimeの自動修正、復旧job、人へのaskの3段で扱う（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)）。
+この文書は、生きているrunの復旧job、receiptの無いturnの検知、runtime errorで1 runだけを手放すこと（abandon）、終わったrunのsessionの後片付けの地図である。
+終わったrun（`failed` / `interrupted` / `resume_exhausted`）の復旧jobは[Triage](triage.md#triage-supervisor)が同じverdictで扱う。
 
-| alert | 条件 | 操作 | escalation |
-| --- | --- | --- | --- |
-| `stalled` | receipt も開いた質問もなく turn が終わる（`turn_without_receipt`）、または権限拒否が上限に達する（`permission_denied`） | `send_instruction`・`stop_processes`・`resume`・`wait` | `stalled` の ask（`wait` / `stop` と job の選択肢） |
-| `idle_process` | run の所有するプロセスが、子孫と合わせて CPU 時間をほとんど使わないまま `idle_process_secs` を超えて生きる | `stop_processes`・`send_instruction`・`wait` | receipt 前は `stalled` の ask、後は段に任せる |
-| `failed` | turn が失敗・停止して wrapper が終わった run | `retry`・`retry_inherit`・`resume`・`wait` | triage の ask |
+## 流れ
 
-対話の経路の alert（worker の画面に由来するものと、idle marker の対話の `background_tasks` に由来するもの）は無い（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）。
-過去のそれらの event・ask・復旧 job は履歴として読める。
+```text
+生きているrun
+  ├─ turnがreceiptも開いた質問も無く終わる → 促す → 使い切ればstalledの復旧job
+  ├─ 権限拒否が上限に達する → 促さずにstalledの復旧job
+  ├─ runのプロセスがCPU時間を伸ばさない → idle_processの復旧job
+  │    └─ job: high confidenceのrepairを前提を確かめて適用 / それ以外はそのalertのaskでinboxへ
+  └─ 監視中のruntime error → そのrunだけを手放す（abandon）
+       └─ sessionが残っていなければ次のpassでrecover → interrupted → triage
+終わったrun → wrapperが残っていればtriageの後か次の掃除が止める（worktreeは状態に応じて残す）
+```
+
+## 責務と境界
+
+- 生きているrunの復旧jobの起動・verdictの検査と適用・escalateは`application::supervise::recovery`（module docが範囲を持つ）、turnのstallからjobへの受け渡しとresumeのrepairのparkは`stall_recovery`。
+- receiptの無いturnの検知（促し・stalledのask・`stall_resolved`）は`application::supervise::stall`の`StallWatch`、判断は同じmoduleの副作用のない関数が持つ。
+- 1 runを手放すのは`Supervisor::abandon`と`abandon_with_session`（`mod.rs`）で、記録はqueueの`abandon_run`。
+- 終わったrunのsessionの掃除は`sweep`（`SweepWatch`・`sweep_ended_sessions`）、worktreeとビルド成果物の掃除は`cleanup`（module docが範囲を持つ）と[Run worktrees](run-worktrees.md)。
+- 終わったrunの復旧jobとtriageの後のsessionの停止は[Triage](triage.md)、非対話のworkerのturnの後の扱いは[非対話のworker](headless-worker.md)が持つ。
+- 判断と境界の分け方は[ADR-t1410-1](../../adr/2026-10-03-t1410-1-decisions-in-unit-tests-boundaries-in-integration-tests.md)に従う。
+  見張りの次の一手と引き継いだ見張りの組み立て直しは副作用のない関数が値（時刻、receipt・質問・holdの有無）を受けて決め、queue・file・sessionの読み書きは結果を実行する薄い処理だけが行う。
+
+## 不変条件
+
+- 1 runの異常は他のrunに波及しない（leaseはrun単位。[ADR-0054](../../adr/0054-run-lease-ownership-parallel-supervisors-and-recover.md)の決定4）。
+- 復旧jobは読み取りだけの役割で、操作はruntimeが前提を確かめてから適用する。
+  1つでも前提が崩れれば操作せずescalateする。
+- 生きているrunの復旧jobの失敗は、escalateと同じそのalertのaskになり、`recover by hand`のattentionを作らない（[ADR-t609-1](../../adr/2026-09-27-t609-1-failed-live-recovery-job-opens-the-alert-ask.md)）。
+- 検知ごとの結末（`stall_resolved`）は1回だけ記録され、recover・abandon・triage・sweepが終える検知も同じ共通処理で記録する。
+- 画面・打鍵・Enterの確認・capture した画面を、検知にも復旧jobにも使わない（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）。
+
+## 生きているrunの復旧job
+
+runtimeの自動修正が直さなかったものをjobが状況を読んで許された操作で直し、直せないか自信が無いときだけ、そのalertのaskでinboxに上げる（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定39・40）。
+
+- alertは`stalled`（receiptの無いturn、権限拒否の上限）、`idle_process`（CPU時間が伸びないプロセス）、終わったrunの`failed`で、alertごとに許す操作は`recovery`とtriageのverdictの検査が持つ。
+- 対話の経路のalert（workerの画面に由来するもの、idle markerの対話の`background_tasks`に由来するもの）は無い。
+  過去のそれらのevent・ask・復旧jobは履歴として読める。
+- `answer_known_dialog`・`close_and_proceed`はworkerに適用せず、過去のverdictに書かれていても拒む。
 
 ### CPU時間が伸びないプロセス<a id="cpu時間が伸びないプロセスidle_process"></a>
 
-プロセスの一覧は全 run が共有する。
-各 watch は1間隔待ってから標本を取り始め、新しい標本の run のプロセスを `domain::idle_process::CpuWatch` へ渡す。
-CPU 時間の伸びが経過時間の一定の割合を超えれば進んだとし、子が進んでいる親は idle にしない。
-session の起動の直後に始まった agent の子の補助プロセスは除く。
-
-job に渡した idle の部分木は、進むか `wait` の再確認の時刻になるまで再び渡さない。
-非対話の session と resume に残る監視を使い、対話の終了待ちの `exit_wait` は使わない。
+- プロセスの一覧は全runが共有し、判断は`domain::idle_process::CpuWatch`が持つ。
+- 子が進んでいる親はidleにせず、sessionの起動の直後に始まったagentの子の補助プロセスは除く。
+- jobに渡したidleの部分木は、進むか`wait`の再確認の時刻になるまで再び渡さない。
+- 非対話のsessionとresumeに残る監視を使い、対話の終了待ちは使わない。
+- receipt前は`stalled`のaskに上げてStallWatchが答えを扱い、receipt後とresumeは段に任せる。
 
 ### 起動とprompt
 
-`recovery_requested` に alert と事実と、job の provider・model・effort（job には見せない）を記録し、run dir に prompt と stdout / stderr を書く。
-job は読み取りだけの役割で、記録した provider で起動する（下の「Codexで動かす」）。
-prompt は task・現在の検証・編集の履歴・最後の turn の要約・run のプロセス一覧・worktree の HEAD と receipt の commit・git status と差分を含む。
-alert の事実の直後に、supervisor の固定バイナリの節（今の build とその commit、task の依存先ごとの着地を今の build が含むか、run の claim より後の固定バイナリの入れ替え）を持つ。
-`retry` / `retry_inherit` を許す job（終わった run の job）には、固定バイナリが依存先の着地を含まないことで落ちた run は、今の build がそれを含めば人に聞かずに retry を選んでよく、含まなければ `wait` か escalate にすることを書く（`RECOVERY_BINARY_RULE`）。
-prompt は全体と節ごとの上限を持ち（[Prompt](prompt.md#goal-reviewrunのreview復旧jobruntimeのplannerの上限)）、切ったものは run directory と worktree のファイルを名指し、ファイルに無いもの（alert の事実・プロセスの一覧・過去の verdict）は読めないと書く。
-prompt を書いたら、生きている session の job も終わった run の job も `recovery_prompt_written` を run に記録する。
-capture した画面は使わない。
-`failed` の prompt は triage が組み立てる。
+- 起動の入口は`recovery::start_job`、promptの中身は`prompt::run_review::recovery_prompt`のdoc commentが持つ。
+- jobは画面の代わりに最後のturnの要約を読む。
+- alertの事実の直後に、supervisorの固定バイナリの節（今のbuildが依存先の着地を含むか、claimより後の入れ替え）を置く（`binary_facts_of`）。
+  `retry`を許すjobには、固定バイナリが依存先の着地を含まないことで落ちたrunは今のbuildが含めば人に聞かずにretryしてよく、含まなければ`wait`かescalateにする規則を書く（`RECOVERY_BINARY_RULE`）。
+- promptの上限と切り方は[Prompt](prompt.md#goal-reviewrunのreview復旧jobruntimeのplannerの上限)が持ち、切ったものはファイルを名指し、ファイルに無いもの（alertの事実・プロセスの一覧・過去のverdict）は読めないと書く。
+- `failed`のpromptはtriageが組み立てる。
 
-## 適用
+### 適用
 
-high confidence の repair の全操作について前提を確認してから適用し、操作を `auto_repaired`、結果を `recovery_finished`（Codex の job なら thread と model も）に残す。
-1つでも崩れれば操作せず escalation する。
+- 適用は`recovery::apply_live`で、high confidenceのrepairの全操作の前提を確かめてから適用し、1つでも崩れればverdict全体を拒んでescalateする。
+- 操作ごとの前提は`check_live`のdoc commentが持つ。
+  落とし穴は、どの操作も画面・入力欄・画面から推定したidleを前提にしないことと、止めるのはrunのプロセスだけでwrapperとagent自身は止めないことである。
 
-- `send_instruction`: turn が終わり、次の依頼が無いことを確認して、指示を次の turn の依頼にする。
-  画面・入力欄・Esc で中断された turn・画面から推定した idle には頼らない。
-- `stop_processes`: 適用の直前に一覧を読み直し、run の worktree か session の子孫に属する指定 pid だけを止める。
-  wrapper と agent 自身は対象外。
-  SIGTERM の後に猶予を待ち、生きていればその pid に SIGKILL を送る。
-- `resume`: 最初の session の run を instruction とともに `needs_session` に park して終了を依頼する。
-  resume の上限を確認する。
-- `wait`: alert と reason ごとに再確認を保留する（上限 `MAX_RECHECK_SECS`）。
-  別の alert の job はこの保留を消さない。
+### escalate
 
-`answer_known_dialog`・`close_and_proceed` は worker に適用しない。
-過去の verdict に書かれていても拒む。
+- `escalate`、`confidence: low`の`repair`、前提の崩れた`repair`、試行の使い切りは、inbox宛てのそのalertのaskにする（決定40のkind）。
+- askの選択肢の組み立ては`recovery::ask_options`が持ち、askはそのkindのものにjobの選択肢を足すので、人はjobの見立てと元のaskの答えの両方から選べる。
+- `integrate`の検証が落ちたことのある終了runの`decide`のaskには、verifyを直してから`retry_inherit`するoption（`VERIFY_FIX_OPTION`）を足す（[Triage](triage.md)）。
+  verifyを直すのはuserかinboxで、job自身はeditしない（ADR-t883-1）。
+  直した後のこの回答は、alertごとの上限を使い切った後でも次のroundを持つ。
 
-## escalate
+### jobの失敗
 
-`integrate`の検証が落ちたことのある終了runの`decide`のaskには、runtimeがverifyを直してから`retry_inherit`するoption（`VERIFY_FIX_OPTION`）を足す（[Triage](triage.md)の6）。
-verifyそのものが壊れていたら、userまたはinboxがtaskのverifyを直してから、このoptionで答える。
-jobに戻った次のroundのpromptにはtaskの現在のverifyと`task_edited`が載り、修正済みなら`retry_inherit`を選べる。
-verifyを直した後のこの回答は、alertごとの上限を使い切った後でも次のroundを持つ（Triageの3）。
-job自身はeditしない（ADR-t883-1）。
-
-`escalate`、`confidence: low`の`repair`、前提の崩れた`repair`、試行の使い切りは、inbox宛てのそのalertのaskにする（決定40のkind）。
-optionsはそのkindのものにjobの`options`を足したもの（`recovery::ask_options`。終了runの`decide`では、上のverifyのoptionも）。
-questionは今までのaskの文面に、escalateの理由とjobのverdictと復旧の材料のpathを足したもの。
-escalateしたことを`recovery_finished`に記録する（Codex の job なら thread と model も）。
-
-- `idle_process`: receipt 前は stalled の ask に上げ、StallWatch が答えを扱う。
-  receipt 後と resume は段に任せ、そのことを recovery_finished に記録する。
-
-## jobの失敗
-
-[ADR-t609-1](../../adr/2026-09-27-t609-1-failed-live-recovery-job-opens-the-alert-ask.md)（ADR-0047の決定40をamends）。
-生きているrunのどのalertでも、jobの失敗（起動できない、非0終了、timeout、verdictが無いか形に合わない）は、escalateと同じそのalertのask（上の「escalate」のkindとoptions）にする。
-例外は、`[roles.recovery]`がproviderを書いていて、jobがそのproviderを使えずに失敗した・起動しなかったとき（ログイン・使用量の上限・agentが起動しない。ADR-t1063-1の決定4）である。
-そのときはそのproviderを控え、askを開かずに`recovery_finished`だけを記録し、alertの次のjobを行き先のproviderで始める（[Claudeを使わない運転](../provider-lifecycle.md#claude-を使わない運転)で残るproviderが無ければ、次のjobは起動せずに理由付きのこのaskになる。下の[Codexで動かす](#codexで動かす)）。
-`recover by hand`のattentionは作らない。
-`RecoveryWatch::follow_for`はjobの失敗をescalationとして返し、各watchがescalateと同じ経路でaskを開く。
-askの文面の材料と`recovery_finished`は副作用のない関数が組み立てる。
-
-- askの理由は`recovery_failed`で、jobのverdictが無いのでverdictの部分は無い。
-- `recovery_finished`はjobの失敗として記録し、`recovery_failed`のeventは記録しない。
-- 終わったrunの[Triage](triage.md)の失敗（`triage_failed`、`triage by hand`）は変えない。
-
-ADR-t609-1より前のruntimeが記録してまだ解消していない`recovery_failed`（`domain::recovery::failed_live`）は、adoptしたruntimeも読む。
-`status`はleaseのある生きているrunでもそのrunのattention（`recover by hand`）を出し、そのalertのjobは立てない。
+- 生きているrunのどのalertでも、jobの失敗（起動できない、非0終了、timeout、verdictが無いか形に合わない）は、escalateと同じそのalertのaskにする（[ADR-t609-1](../../adr/2026-09-27-t609-1-failed-live-recovery-job-opens-the-alert-ask.md)）。
+- 例外は、役割がproviderを書いていて、jobがそのproviderを使えずに失敗した・起動しなかったとき（ADR-t1063-1の決定4）で、そのproviderを控え、askを開かずに`recovery_finished`だけを記録する。
+- `RecoveryWatch::follow_for`はjobの失敗をescalationとして返し、各watchがescalateと同じ経路でaskを開く。
+- 終わったrunのtriageの失敗（`triage by hand`）はこれと別で、[Triage](triage.md)が持つ。
+- 過去のruntimeが記録してまだ解消していない`recovery_failed`（`domain::recovery::failed_live`）は、adoptしたruntimeも読み、そのrunのattention（`recover by hand`）を出してjobを立てない。
 
 ## Codexで動かす
 
-`[roles.recovery] provider = "codex"`の生きているrunのjob（終わったrunのjobと同じ役割・同じ行き先で、仕組みは[Triage](triage.md#codexで動かす)）。
-区間は持たない（`recovery_requested`と`recovery_finished`が記録）。
+`[roles.recovery]`がproviderを書いた生きているrunのjobで、終わったrunのjobと同じ役割・同じ行き先である（仕組みは[Triage](triage.md#codexで動かす)）。
 
-- **行き先**（`Supervisor::recovery_route`）: alertのjobを始めるとき決め、`recovery_requested`に書く。
-  providerを書かない役割はClaudeで、queueのholdのあいだは始めない（alertは解けてから追い直す）。
-  providerを書いた役割（`claude`を書いたものも）は使えるproviderで始め、Claudeのholdは`codex`のjobを止めない。
-  `[provider_fallback] jobs = false`なら、使えない理由ではもう一方で始めず、控えが解けるまで待って同じproviderで始める（Claudeを使わない運転による行き先は変わらない。[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)）。
-  Claudeを使わない運転で動かせるproviderが無ければjobを起動せず、jobの失敗と同じそのalertのask（`recovery_failed`）にする。
-- **起動と検査**: Codexでは`codex exec`の読み取りだけのsandbox（queue serviceに届くjobのprofile）で、verdictは最終のmessageから読み、上の「適用」と同じ検査（alertごとに許す操作、`confidence: high`の`repair`だけ、適用の直前の前提の再確認、alertごとの上限）を通る。
-  jobはworktree・run directory・cmuxのworkspaceに書けず、`stop_processes`はruntimeがpidで行う。
-- **失敗**: 非0終了・timeout・読めないverdictは上の「jobの失敗」と同じそのalertのask（`recovery_failed`）にし、Claudeに回さない。
-  providerが使えずに失敗した・起動しなかったjob（ログイン・使用量の上限・agentが起動しない）は、役割がproviderを書いていれば（ADR-t1063-1の決定4）そのproviderを控え（`provider_held`）、askを開かずに`recovery_finished`だけを記録する。
-  alertの次のjobは次の見張りで行き先のprovider（控えの間はもう一方、`jobs = false`なら控えが解けた後の同じprovider）で始まり（`idle_process`は渡したプロセスをもう一度alertにできるよう戻す）、alertごとの上限に数える。
-  queueのhold askに加わるのはClaudeのjobの壁だけ（壁で止まったClaudeのjobはaskにもしない）。
-- **記録**: `recovery_finished`（適用・escalate・失敗のどれでも）にCodexのthreadとmodelを書く。
-  escalateの`recovery_finished`は別の経路で書くので、終わったjobのthreadとmodelは`TriageState::live_job_ends`にrun・alert・attemptごとに置いてそこで載せる。
-  `headless_jobs`の`provider`は`recovery_requested`のprovider。
+- 行き先は`Supervisor::recovery_route`がalertのjobを始めるときに決め、`recovery_requested`に書き、headless jobの記録のproviderもそれである。
+  providerを書かない役割はClaudeで、queueのholdのあいだは始めない。
+  providerを書いた役割は使えるproviderで始め、Claudeのholdは`codex`のjobを止めない。
+  providerの切り替えを切った設定では、控えが解けるまで待って同じproviderで始める（[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)）。
+  [Claudeを使わない運転](../provider-lifecycle.md#claude-を使わない運転)で動かせるproviderが無ければjobを起動せず、jobの失敗と同じaskにする。
+- Codexのjobは読み取りだけのsandboxで動き、上の「適用」と同じ検査を通り、worktree・run directoryに書けず、`stop_processes`はruntimeがpidで行う。
+- 非0終了・timeout・読めないverdictはjobの失敗と同じaskにし、Claudeに回さない。
+- providerを控えた後のalertの次のjobは行き先のproviderで始まり、alertごとの上限に数える（`idle_process`は渡したプロセスをもう一度alertにできるよう戻す）。
+- queueのhold askに加わるのはClaudeのjobの壁だけである。
+
+## receiptの無いturn
+
+workerはすべて非対話のturnで動き（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）、turnの後の扱いは[ADR-t813-1](../../adr/2026-09-28-t813-1-headless-worker-path.md)の決定9に従う。
+turnの後の扱いの詳細は[非対話のworker](headless-worker.md#turnの後の扱い)が持つ。
+
+- 対象は、最初のsessionのturnがreceiptも未回答の`worker_question`も残さずに終わったときである。
+  resumeは解消依頼のturnの後にreceiptを、reviseは差し戻しのturnの後に書き直しを判定する。
+- turnの終わりが決まるので閾値を待たずに促し、促しの上限を使い切ったら`stalled`の復旧jobにする。
+  権限拒否が上限に達したら促さずに復旧jobにする。
+- `stalled`のaskの選択肢は`intervene`の代わりに`stop`を持ち、questionは答える前にturnの記録を読むことを書く。
+  答えごとの扱いは`stall.rs`の`AskStep`が持つ。
+- 答えずに閉じた質問（`closed_undelivered`）は、閉じたことを伝える文を次のturnとして1回だけ届ける。
+  引き継いだsupervisorも同じ文を二度届けない。
+- 時刻の比較で、同じミリ秒の印を新しいものと取らない理由は`file_time`のmodule docが持つ。
+- 画面由来の過去の検知と閾値の記録は読め、statsは過去の検知と結末を引き続き集計する。
+  新しい検知はどのsessionの画面からもidleを判定しない。
+
+## 1 runの放棄（abandon）<a id="1-runの放棄abandon"></a>
+
+- 監視中のruntime error（wrapperのプロセスも死んでいるheartbeat切れ、検証処理そのもののGitやDBの失敗、closeの記録の失敗など）は、そのrunだけを手放す。
+  wrapperのプロセスが生きていればheartbeat切れでも手放さない（[黙ったwrapper](receipt-and-session-exit.md#黙ったwrapper)）。
+- 手放すと`runtime_error`を書いてleaseを消し、status・runのプロセス・worktreeは変えず、supervisorは他のrunを続ける。
+  同じtransactionで、そのrunの開いた`stalled`のaskを閉じ、結末の無い検知に`stall_resolved`を1回ずつ記録する。
+- leaseを消すのは、常駐supervisorが生きている間も`recover`がrunのprocessだけで判定できるようにするためである。
+  taskは未完了のrunで占有されたままなので二重実行にならず、leaseの無い未登録のwrapperは登録できずagentを起動せず、他のsupervisorも引き継がない。
+- `status` / `watch`はこのrunを`recover run`のattentionとして出す（[ADR-0054](../../adr/0054-run-lease-ownership-parallel-supervisors-and-recover.md)の決定8・12）。
+  sessionのprocessが残っていなければ、次のfill passでsupervisor自身がrecoverして`interrupted`にしtriageに回す（ADR-0047の決定3・ADR-0054の決定11）。
+  processが生きている間は人を待ち、人は`dagq-recover` skillに従う（`recover`を人が打つのはsupervisorが居ないときだけで、居ればprocessが止まった時点でsupervisorが行う）。
+- verdictの後の終了の待ちと最初のsessionの終了の依頼には時間切れが無く、abandonせずleaseを持ったままsessionの終了を待つ（resumeのsessionだけはexit timeoutで手放す。[`needs_session`](needs-session.md)）。
+- supervisorがworkerのsessionを開いたまま持っている間（validating・review・revise・verdictの後の終了の待ち）に手放すときは、手放す前にそのsessionに終了を依頼する（`exit_abandoned_session`）。
+  手放したrunはleaseが無く、supervisorもadoptも見ないので、送らなければsessionは誰も見ないまま開いて残る。
+- 依頼を書けなかったなら、そのrunのattentionは`exit the session`（`domain::AttentionNext::ExitSession`）になり、人がそのsessionを終える。
+  sessionの終了が記録されると、runは元のattentionに戻る。
+  置き換えるのは`review and integrate`と`recover run`だけで、`needs_session`・`failed`のrunは`resuming (runtime)`・`triaging (runtime)`のまま出る。
+- validatingとreviewの工程は、errorで手放すときにsessionが分かるよう、次の工程に移るまでsessionを工程に残しておく。
+
+## 後片付け
+
+- sessionの終了はsupervisorが行い、runのためにcmuxを呼ばない（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
+  終わらせるのは終了の依頼と、残っていればwrapperを止めること（[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)の決定3）だけである。
+- `awaiting_integration`のrunは、reviewのverdictの後にsessionの終了を待ってwrapperだけを止め（reviseの間は止めない。[`supervise`](supervise.md#検証とreviewと着地)）、worktreeとbranchは`integrate`が着地するまで残す。
+- `failed`、provisioningや検証処理のエラー、wrapper heartbeat切れのrunは、worktreeを調査のため残し、ビルド成果物だけを消す（[Run worktrees](run-worktrees.md#run-worktrees)）。
+  調べる材料はrun dirのlogとturnで、`dagq run log`で読む。
+- `failed`・`interrupted`のrunにまだ動いているwrapperがあれば、triageの後にsupervisorが止める（[Triage](triage.md#triage-supervisor)）。
+- supervisorの後始末はsupervisorが動いている間だけ働き、runtimeはrunのworkspaceを開かないので、過去に作られて残ったworkspaceは人が閉じる。
+  workspaceで開いた古いrunのsessionは、supervisorは閉じずcmuxにも聞かない。
+
+### runのsessionの記録<a id="runのsessionの記録"></a>
+
+- runが開いたsessionは、最初・resumeごと・開き直しのどれもrun_eventsに残り、止めたかはsessionごとに判じる（`domain::run::run_workspaces`）。
+- reviseは生きているwrapperに送るので、wrapperのsessionを新しく開かない（[Agent provider lifecycle](../provider-lifecycle.md#大きなcontextからの新しいsession)）。
+
+### 終わったrunの掃除<a id="終わったrunの掃除"></a>
+
+- 人が`ready` / cancelした後のrunや着地したrunに残ったwrapperは、fill passの掃除（`sweep_ended_sessions`）が止める。
+  対象は、生きたsupervisorのleaseが無く、slotに居らず、triageの対象でないrunである。
+- staleなleaseは無いものとして扱う。
+  runを終わった状態にしてからleaseを放すまでにsupervisorが死ぬと、leaseが残ってwrapperが永久に拾われなくなるためである。
+- 正は記録ではなくwrapperのprocessで、動いていないsessionには何も書かないので、同じrunを何度掃除しても記録は増えない。
+- 止められなければ失敗を残して次の掃除で止め直し、DBのerrorでもループは止めない。
+- worktreeとbranchは同じ回の[Run worktrees](run-worktrees.md)の掃除が扱い、run dirは消さない。
+
+### 後片付けの境界と約束
+
+- containerで動くrunの後片付けは、worktreeのrunと同じ契機で、clone・制御側のrun branch・着地用のworktree・run dirのbundleと状態のファイル・mainのbundleに及ぶ（[ADR-t2179-1](../../adr/2026-10-12-t2179-1-control-side-runs-no-git-in-a-container-runs-clone-and-lands-in-its-own-worktree.md)決定7）。
+- 約束は2つで、cloneではgitを走らせず、workerが置いたsymlinkの先（hostのファイルとdir）を消さない。
+- gitを使わない削除はguard（決定8）が成り立たなくても行い、制御側のrun branchの削除と着地用のworktreeの登録の解除はguardを通したgitでだけ行う。
+  guardが成り立たなければ飛ばして片付けの失敗として残し、成り立った後の片付けのやり直しが消す。
+- 復旧jobとtriageがrunのheadと状態を読むのもcloneではなくbundleと状態のファイルからで、読めなければその旨を事実として渡す。
+- 片付ける物と手順は`supervise::cleanup`の`clean_clone`と`application::run_git::remove`のdoc commentが持つ。
 
 ## 引き継ぎ
 
-adopt は stalled の reason ごとの wait の再確認の時刻と、turn の依頼の履歴を読み、同じ依頼を二重に届けない。
-過去の対話の監視は復元しない。
-idle_process の CPU 観測はメモリだけなので最初の標本から数え直す。
-前の supervisor が走らせていた job は引き継がず、記録済みの pid と開始時刻でその子を片付けてから新しい job を立てる。
-handoff も job を止めてから引き継ぐ。
-
-receiptの形式は`src/domain/receipt.rs`の`Receipt`で、promptとREADMEに同じ契約を書いている。
-
-## 非対話のrun
-
-workerのrunはすべて非対話で（[ADR-t813-1](../../adr/2026-09-28-t813-1-headless-worker-path.md)）、画面・ダイアログ・`/exit`に由来するalertと`answer_known_dialog`・`close_and_proceed`はどのrunにも出ない。
-その代わりの`stalled`と、turnの失敗・停止で終わったrunの`failed`の扱いは[非対話のworker](headless-worker.md#復旧jobのalertと操作決定9)にある。
-復旧jobは画面の代わりに最後のturnの要約を読む。
-
-## 後片付けの境界と約束
-
-containerで動くrunの後片付けは、worktreeのrunと同じ契機で、clone・制御側のrun branch・着地用のworktree・run dirのrun branchのbundleと状態のファイル・mainのbundleに及ぶ（[ADR-t2179-1](../../adr/2026-10-12-t2179-1-control-side-runs-no-git-in-a-container-runs-clone-and-lands-in-its-own-worktree.md)決定7）。
-約束は2つで、cloneではgitを走らせず、workerが置いたsymlinkの先（hostのファイルとdir）を消さない。
-片付けはgitを使わない削除とmainのrepositoryのgitの手順に分かれる。
-clone・着地用のworktreeのdir・run dirのbundleと状態のファイルの削除はgitを使わずguardを要らないので、guard（決定8）が成り立たなくても行う。
-制御側のrun branchの削除と着地用のworktreeの登録の解除はguardを通したgitでだけ行い、guardが成り立たなければ飛ばして片付けの失敗として残し、guardが成り立った後の片付けのやり直しが消す。
-復旧jobとtriageがrunのheadと状態を読むのもcloneではなくbundleと状態のファイルからで、読めなければその旨を事実として渡す。
-片付ける物の列挙と手順は`supervise::cleanup`の`clean_clone`と`application::run_git::remove`のdoc commentが持つ。
+- adoptはstalledのreasonごとのwaitの再確認の時刻とturnの依頼の履歴を読み、同じ依頼を二重に届けない。
+  検知の結末の判断もrun_eventsの記録から組み立て直す。
+- `idle_process`のCPUの観測はメモリだけなので、最初の標本から数え直す。
+- 前のsupervisorが走らせていたjobは引き継がず、記録済みのpidと開始時刻でその子を片付けてから新しいjobを立てる。
+  handoffもjobを止めてから引き継ぐ。
+- receiptの形式は`src/domain/receipt.rs`の`Receipt`で、promptとREADMEに同じ契約を書いている。

@@ -262,7 +262,7 @@ CLI（`src/main.rs`の`execute()`）はqueueの場所を決めた直後、queue�
 - `run close-workspaces`（`workspace.cleanup`）を通すのはuserとinboxだけ（ADR-t1228-1の決定7）で、plannerとsupervisorを含むほかのroleは`authorization_denied`で拒む。
   通ったuserとinboxにも、runtimeはrunのworkspaceを開かず、runのbackgroundのwrapperは自分で止めることを理由に拒み（引数は受け付けて使わない。ADR-t1433-3の決定3）、何も閉じず記録しない。
   残ったrunのworkspaceは人が自分のterminalで閉じる。
-  supervisorは終わったrunに残ったwrapperを自分の掃除（[終わったrunの掃除](supervisor-lifecycle/cleanup-and-recovery.md#終わったrunの掃除)）で止める
+  supervisorは終わったrunに残ったwrapperを自分の掃除（[終わったrunの掃除](supervisor-lifecycle/background-recovery-job.md#終わったrunの掃除)）で止める
 - `run screen`は`screen.read`を通った後、どのrunにも画面を読まずに理由と`run log`を示して拒む（ADR-t1433-3の決定4）
 - plannerの`service.lifecycle`・`service.install`・`queue.admin`・`planner.open`と、自分のplannerの`planner-session`と`session-event`は、ADR-t728-1の決定7のとおり許す。
   plannerはruntimeだけが立て、人が頼む相手ではないので（[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)）、`up`・`down`・`inbox`・`install`は使わない（打つのはinboxか人の`DAGQ_ROLE`の無いterminal。[Roles](supervisor-lifecycle/roles.md)）。

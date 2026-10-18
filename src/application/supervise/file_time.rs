@@ -13,7 +13,7 @@
 //! wait early (a nudge answered, a recovery job's detection ended, a
 //! receipt counted as rewritten), while the other error only waits for the
 //! next marker. The design is in `docs/design/supervisor-lifecycle/
-//! idle-without-receipt.md`.
+//! background-recovery-job.md`, section "receiptの無いturn".
 
 use super::*;
 

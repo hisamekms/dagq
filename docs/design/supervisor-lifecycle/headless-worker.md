@@ -195,7 +195,7 @@ run dirのI/Oの約束と落とし穴:
 - turnの失敗とwrapperが止めたturn: wrapperはexit code 1で終わり、supervisorは促さずに終わりを待つ。
   runの状態はreceiptの有無で決まり、receiptとwrapperの終わりをどの順で見ても同じになる（[ADR-t1594-1](../../adr/2026-10-05-t1594-1-a-receipt-left-by-a-failed-headless-turn-goes-to-validation.md)、`session_end_status`）。
   receiptを書いた後に失敗したturnのrunはvalidatingへ進み、無ければ`failed`で[triage](triage.md)の復旧jobにかかる。
-- 答えずに閉じた`worker_question`: 促しの代わりに閉じたことを伝える文を1回だけ送る（[receiptの無いidleの検知](idle-without-receipt.md)）。
+- 答えずに閉じた`worker_question`: 促しの代わりに閉じたことを伝える文を1回だけ送る（[runの復旧の「receiptの無いturn」](background-recovery-job.md#receiptの無いturn)）。
 
 ## 待ちの最中に失ったsessionの開き直し
 

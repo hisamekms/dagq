@@ -204,9 +204,9 @@ live worker alert (stalled, idle_process)
 
 - [Prompt](supervisor-lifecycle/prompt.md)
 
-### 1 runの異常（abandon）
+### 1 runの放棄（abandon）
 
-- [1 runの異常（abandon）](supervisor-lifecycle/abandon.md)
+- [runの復旧の「1 runの放棄（abandon）」](supervisor-lifecycle/background-recovery-job.md#1-runの放棄abandon)
 
 ## Observer
 
@@ -225,13 +225,9 @@ live worker alert (stalled, idle_process)
 
 - [Receipt and session exit](supervisor-lifecycle/receipt-and-session-exit.md)
 
-### receiptの無いidleの検知
+### runの復旧
 
-- [receiptの無いidleの検知](supervisor-lifecycle/idle-without-receipt.md)
-
-### 生きているsessionの復旧job
-
-- [生きているsessionの復旧job](supervisor-lifecycle/background-recovery-job.md)（stalled、非対話の idle_process）
+- [runの復旧](supervisor-lifecycle/background-recovery-job.md)（生きているrunの復旧job（stalled、非対話のidle_process）、receiptの無いturn、1 runの放棄、後片付け）
 
 ## Validation
 
@@ -277,9 +273,9 @@ live worker alert (stalled, idle_process)
 
 - [errorと復旧](supervisor-lifecycle/integrate-errors.md)
 
-## Cleanup and recovery
+## 後片付け
 
-- [Cleanup and recovery](supervisor-lifecycle/cleanup-and-recovery.md)
+- [runの復旧の「後片付け」](supervisor-lifecycle/background-recovery-job.md#後片付け)
 
 ### Run worktrees
 

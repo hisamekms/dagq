@@ -109,7 +109,7 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 - sessionの終わりでrunが`validating`か`failed`のどちらになるかは`domain::run::session_end_status`（[ADR-t1594-1](../../adr/2026-10-05-t1594-1-a-receipt-left-by-a-failed-headless-turn-goes-to-validation.md)）。
 - receiptの検証はrunごとのthreadで動き、ループは待たずに他のrunを見続ける（[Validation](validation.md#validation)）。
 - `awaiting_integration`のrunはleaseとslotとworkerのsessionを持ったままheadlessのreviewにかかる（[Review (supervisor)](review.md#review-supervisor)、ADR-0054の決定1・6）。
-- `revise`は生きているsessionへ差し戻し、それ以外の結果ではsessionが終わってからwrapperを止める（[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)の決定3、[Cleanup and recovery](cleanup-and-recovery.md#cleanup-and-recovery)）。
+- `revise`は生きているsessionへ差し戻し、それ以外の結果ではsessionが終わってからwrapperを止める（[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)の決定3、[runの復旧の「後片付け」](background-recovery-job.md#後片付け)）。
 - 着地は着地スロットが空くのをleaseを持ったまま待つ（[integrate](integrate.md)）。
 
 ## leaseの解放

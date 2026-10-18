@@ -74,7 +74,7 @@ runtimeがworkerのsessionに渡すのは終了の依頼・resumeの解消の依
   書けなければ`ask_delivery_failed`だけを記録してaskを閉じず、再送しない（inboxのattentionになる）。
   書いてからcloseまでの間にsupervisorが死んだときだけ、引き継いだsupervisorが同じ答えをもう一度送りうる。
 - runtimeが届けるrunへの答え（`domain::session_takes_answers`）はattentionにせず、届ける者の居ない答えは、答えをworkerに送ってaskを閉じるattentionになる。
-- 配送の前に閉じた`worker_question`の答えは送らず、閉じたことを1回だけ伝える（[receiptの無いidleの検知](idle-without-receipt.md)）。
+- 配送の前に閉じた`worker_question`の答えは送らず、閉じたことを1回だけ伝える（[runの復旧の「receiptの無いturn」](background-recovery-job.md#receiptの無いturn)）。
 
 ## follow_upsの分類コード<a id="follow_upsの分類コード未実装"></a>
 
