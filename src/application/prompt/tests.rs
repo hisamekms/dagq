@@ -2035,8 +2035,8 @@ fn the_review_prompt_checks_the_documents_and_keeps_its_verdict() {
     // definitions.
     assert!(review.contains(
             "Answer with one JSON object and nothing else, matching this schema:\n\
-             {\"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [{\"text\": string, \"codes\": [string]}], \"summary\": string, \"recommendation\": \"land\" | \"send_back\" | null, \"confidence\": \"high\" | \"low\" | null, \"reason_category\": \"scope\" | \"discard\" | null, \"follow_ups\": [{\"text\": string, \"path\": string, \"section\": string, \"codes\": [string]}]}\n\
-             reasons lists each finding (empty for pass); summary is one or two sentences; recommendation, confidence and reason_category are for a concern only (null for pass and revise); follow_ups lists the stale documents the diff does not touch (empty when none), for any verdict, and never decides it.\n"
+             {\"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [{\"text\": string, \"codes\": [string], \"paths\": [string]}], \"summary\": string, \"recommendation\": \"land\" | \"send_back\" | null, \"confidence\": \"high\" | \"low\" | null, \"reason_category\": \"scope\" | \"discard\" | null, \"follow_ups\": [{\"text\": string, \"path\": string, \"section\": string, \"codes\": [string]}]}\n\
+             reasons lists each finding (empty for pass) with the repository-relative paths it is on (empty when it is on no file); summary is one or two sentences; recommendation, confidence and reason_category are for a concern only (null for pass and revise); follow_ups lists the stale documents the diff does not touch (empty when none), for any verdict, and never decides it.\n"
         ));
     assert!(review.contains(&format!(
         "{CONCERN_RECOMMENDATION}{}Answer with one JSON object",
@@ -6049,6 +6049,7 @@ fn only_the_run_review_is_told_its_codes_land_the_run_past_the_limit() {
         "lets the runtime land the run",
         "every finding of a security review agent count as code findings",
         "never only codes from it",
+        "an acceptance_unmet whose paths all lie outside them is no code finding either, so give each finding the paths it is on.",
     ] {
         assert!(review.contains(part), "{part}");
     }
@@ -6067,9 +6068,14 @@ fn only_the_run_review_is_told_its_codes_land_the_run_past_the_limit() {
         let finding = review_reason::Finding {
             text: String::new(),
             codes: vec![(*code).to_owned()],
+            paths: Vec::new(),
             security: false,
         };
-        assert_eq!(listed.contains(code), !finding.is_code_finding(), "{code}");
+        assert_eq!(
+            listed.contains(code),
+            !finding.is_code_finding(None),
+            "{code}"
+        );
     }
     assert!(review.contains(&usage));
     let plan = plan_case(0, 0).prompt().text;

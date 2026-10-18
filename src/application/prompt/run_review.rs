@@ -184,8 +184,8 @@ pub(super) const REVIEW_VERDICTS: &str = "Decide one verdict:\n\
 
 /// The whole review's answer: one JSON object of this schema.
 pub(super) const REVIEW_ANSWER: &str = "Answer with one JSON object and nothing else, matching this schema:\n\
-{\"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [{\"text\": string, \"codes\": [string]}], \"summary\": string, \"recommendation\": \"land\" | \"send_back\" | null, \"confidence\": \"high\" | \"low\" | null, \"reason_category\": \"scope\" | \"discard\" | null, \"follow_ups\": [{\"text\": string, \"path\": string, \"section\": string, \"codes\": [string]}]}\n\
-reasons lists each finding (empty for pass); summary is one or two sentences; recommendation, confidence and reason_category are for a concern only (null for pass and revise); follow_ups lists the stale documents the diff does not touch (empty when none), for any verdict, and never decides it.\n";
+{\"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [{\"text\": string, \"codes\": [string], \"paths\": [string]}], \"summary\": string, \"recommendation\": \"land\" | \"send_back\" | null, \"confidence\": \"high\" | \"low\" | null, \"reason_category\": \"scope\" | \"discard\" | null, \"follow_ups\": [{\"text\": string, \"path\": string, \"section\": string, \"codes\": [string]}]}\n\
+reasons lists each finding (empty for pass) with the repository-relative paths it is on (empty when it is on no file); summary is one or two sentences; recommendation, confidence and reason_category are for a concern only (null for pass and revise); follow_ups lists the stale documents the diff does not touch (empty when none), for any verdict, and never decides it.\n";
 
 /// How a review checks the documents on the changed behavior
 /// (ADR-t1428-1 decision 5 and ADR-t1942-2 decision 4, as ADR-t2352-1
@@ -210,7 +210,9 @@ The runtime applies a high recommendation whose reason_category is null without 
 /// the run's revise limit reads them, landing the run when it has reasons
 /// and none is a code finding (ADR-t2599-1 decisions 3 and 7). The codes
 /// that are no code finding are those of
-/// [`review_reason::CONVERGED_CODES`], the judgment's own list.
+/// [`review_reason::CONVERGED_CODES`], the judgment's own list, and an
+/// `acceptance_unmet` off the repository's code paths
+/// ([`review_reason::CodePaths`]).
 pub(super) fn run_review_codes_use() -> String {
     let converged = review_reason::CONVERGED_CODES
         .iter()
@@ -221,6 +223,7 @@ pub(super) fn run_review_codes_use() -> String {
         "The verdict (pass, revise, concern) and how a concern is applied do not read the codes. \
          But once the run's automatic revises are used up, a review that sends the run back with reasons, every code of each being one of {converged}, lets the runtime land the run and file the reasons as follow-ups. \
          Any other code, a reason without one, and every finding of a security review agent count as code findings, which go to a person. \
+         Where the repository names its code paths, an acceptance_unmet whose paths all lie outside them is no code finding either, so give each finding the paths it is on. \
          So give a code finding a code outside that list, and never only codes from it."
     )
 }

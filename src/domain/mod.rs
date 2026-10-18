@@ -459,8 +459,9 @@ string_enum!(ReviewDecision {
 /// one JSON object, with each agent job's result beside it once the review
 /// assembled them ([`review_jobs::assemble`]), as `review_finished` records
 /// it. Each item of its `reasons` is a text, or a text with its reason
-/// codes (ADR-t947-1): `reasons` keeps the texts and `reason_codes` each
-/// item's codes, empty for an item without them.
+/// codes (ADR-t947-1) and the paths it is on (ADR-t2599-1): `reasons`
+/// keeps the texts, `reason_codes` each item's codes and `reason_paths`
+/// each item's paths, empty for an item without them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "RecordedReviewVerdict")]
 pub struct ReviewVerdict {
@@ -468,6 +469,8 @@ pub struct ReviewVerdict {
     pub reasons: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub reason_codes: Vec<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reason_paths: Vec<Vec<String>>,
     pub summary: String,
     /// What a `concern` recommends (ADR-t451-1 decision 3); `None` for a
     /// `pass` or `revise`, and for a concern without it or with a value
@@ -528,13 +531,14 @@ struct RecordedReviewVerdict {
 
 impl From<PrintedReviewVerdict> for ReviewVerdict {
     fn from(printed: PrintedReviewVerdict) -> Self {
-        let (reasons, reason_codes) = review_reason::split(printed.reasons);
+        let split = review_reason::split_with_paths(printed.reasons);
         // Only a concern's are read: a pass or a revise needs none.
         let concern = printed.verdict == ReviewDecision::Concern;
         Self {
             verdict: printed.verdict,
-            reasons,
-            reason_codes,
+            reason_paths: review_reason::recorded_paths(&split.paths, split.texts.len()),
+            reasons: split.texts,
+            reason_codes: split.codes,
             summary: printed.summary,
             recommendation: concern
                 .then(|| concern::known(printed.recommendation.as_deref()))
@@ -584,6 +588,12 @@ impl ReviewVerdict {
         review_reason::recorded(&self.reason_codes, self.reasons.len())
     }
 
+    /// The paths `review_finished` records for each reason, empty for one
+    /// without them; none when no reason has any.
+    pub fn recorded_paths(&self) -> Vec<Vec<String>> {
+        review_reason::recorded_paths(&self.reason_paths, self.reasons.len())
+    }
+
     /// The verdict's primary code (ADR-t947-1 decision 1): none for a
     /// pass.
     pub fn primary_code(&self) -> Option<String> {
@@ -623,13 +633,15 @@ impl ReviewVerdict {
                 self.reasons.clone()
             };
             let codes = review_reason::recorded(&self.reason_codes, texts.len());
-            findings.extend(texts.into_iter().zip(codes).map(|(text, codes)| {
-                review_reason::Finding {
+            let paths = review_reason::recorded_paths(&self.reason_paths, texts.len());
+            findings.extend(texts.into_iter().zip(codes).enumerate().map(
+                |(index, (text, codes))| review_reason::Finding {
                     text,
                     codes,
+                    paths: paths.get(index).cloned().unwrap_or_default(),
                     security: false,
-                }
-            }));
+                },
+            ));
         }
         let Some(route) = route else {
             return findings;
@@ -646,14 +658,16 @@ impl ReviewVerdict {
                 result.reasons.clone()
             };
             let codes = review_reason::recorded(&result.reason_codes, texts.len());
+            let paths = review_reason::recorded_paths(&result.reason_paths, texts.len());
             let security = review_subagents::is_security_agent(&result.agent);
-            findings.extend(texts.into_iter().zip(codes).map(|(text, codes)| {
-                review_reason::Finding {
+            findings.extend(texts.into_iter().zip(codes).enumerate().map(
+                |(index, (text, codes))| review_reason::Finding {
                     text: format!("{}: {text}", result.agent),
                     codes,
+                    paths: paths.get(index).cloned().unwrap_or_default(),
                     security,
-                }
-            }));
+                },
+            ));
         }
         findings
     }

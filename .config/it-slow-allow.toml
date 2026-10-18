@@ -1637,3 +1637,21 @@ task = 2599
 name = "runtime_review_revise_limit::a_resume_after_a_rebase_conflict_or_a_failed_landing_verification_keeps_the_runs_count"
 reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: 実際の rebase の衝突と rebase 後の検証の失敗で integrate が止めた 2 本の run を supervisor が resume し、resume した session への revise が run を通した回数で数えられ、上限の後の review が approve_landing の ask になることを実際の supervisor・worker の session・queue で確かめる。数え方の判断は domain::run::history の unit test"
 task = 2599
+
+# 12.4〜19.3s (stress 5 under the host's load of other runs, task 2600)
+[[test]]
+name = "runtime_review_revise_limit::an_acceptance_unmet_off_the_code_paths_lands_whatever_the_runs_branch_says"
+reason = "B 境界（SQLite・Git・supervisor の配線）: landing branch の commit の dagq.toml のコードの path が review の試行ごとに review_started に記録され、run branch が書き換えた dagq.toml は効かず、上限の後に path がコードの外の acceptance_unmet と local_slip・docs_drift だけの review が ask を開かずに着地して follow_up の draft になることを実際の supervisor・worker の session・queue で確かめる。path の判定は domain::review_reason の unit test"
+task = 2600
+
+# 10.4〜15.7s (stress 5 under the host's load of other runs, task 2600)
+[[test]]
+name = "runtime_review_revise_limit::an_acceptance_unmet_on_the_code_paths_asks_whatever_the_main_checkouts_files_say"
+reason = "B 境界（SQLite・Git・supervisor の配線）: main checkout の作業ファイルの dagq.toml は読まず、上限の後に path がコードの path に当たる acceptance_unmet が approve_landing の ask になることを実際の supervisor・worker の session・queue で確かめる。path の判定は domain::review_reason の unit test"
+task = 2600
+
+# 4.6〜6.3s (stress 5 under the host's load of other runs, task 2600)
+[[test]]
+name = "runtime_review_revise_limit::code_paths_of_the_landing_branch_that_do_not_parse_fail_the_review"
+reason = "B 境界（SQLite・Git・supervisor の配線）: landing branch の commit の解釈できないコードの path が review の試行を pass にせず review_failed と ask になることを実際の supervisor と queue で確かめる。読み出しの誤りの判断は application::review と infrastructure::run_env の unit test"
+task = 2600

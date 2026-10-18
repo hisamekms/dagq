@@ -95,9 +95,10 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   他のjobに効かず（evalのケースのprogramのjobはreviewの段に数える）、無いkeyは今の上限（[Headless job processes](headless-job-processes.md#記録)）。
   supervisorが起動時に読む。
 - `[review.programs.<name>]`はreviewのprogramのjobで（[プログラムのreview](review-programs.md)）、keyと意味は`ReviewProgram`が持つ。
-  `<name>`はkebab-caseで、表の重複・知らないkey（`command`も）・keyの欠けは行番号付きのエラーにする。
   `[review.programs."builtin:<名前>"]`はbuilt-inの`enabled`と`paths`（既定を置き換える）だけを持ち（`BuiltinProgramSetting`）、`script`・`args`・知らない名前・pjのprogramの`builtin:`の名前は誤り。
   読むのは作業ファイルでなく、reviewの試行ごとのlanding branchのcommitの`dagq.toml`と`script`（`Verifier::review_programs_in`）。
+- `[review.code]`は上限の後の判定（[Review](review.md)の4a）のコードのpathで、key・書式・既定・意味は`review_reason::CodePaths`のdoc commentが持つ。
+  読むのはreviewの試行の始めのlanding branchのcommitの`dagq.toml`（`Verifier::review_code_paths_in`）で、作業ファイルとrunのbranchは読まず、読めなければ試行をreviewの失敗にする。
 - `[tasks]`は`changes`と`title_prefixes`を持つ（値と形は`domain::ChangeSet`・`domain::TitlePrefixes`）。
   `changes`はtaskが宣言するchangeの値の集合で（[ADR-t980-1](../../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)）、書いてあれば`add`と`edit`は集合の外の`--change`を拒み、`lint`は指摘し`submit`はchangeの無いtaskと集合の外のchangeを拒む（`submit`は何も動かさない）。
   `title_prefixes`はtitle（mainのsquash commitの件名）の接頭辞の一覧で、書いてあれば`lint`は指摘し`submit`はそれで始まらないtitleを拒むが、`add`と`edit`は拒まない。
@@ -112,12 +113,10 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   `max_spike_cycles`はgoalのSpikeの周期の上限で、`submit`だけが読む（`investigation::check_spike_cycles`）。
   値は`dagq.toml`、各ラベルの意味と付け方は[taskの登録](../../development/task-registration.md#goal-の優先度とラベル)が持つ。
 - `[e2e]`は`paths`だけを持ち、変えるとrunに`e2e`のevidenceを求めるpathをglobの1行の配列で書く（ADR-t963-1決定2。`Verifier::e2e_paths`）。
-  配列でない値と`--paths`の受け付けないglob（空、`/`始まり、`.`や`..`の段、空の段）は行番号付きのエラーにする。
   読むのはsupervisorがvalidatingとworkerのpromptを作るたびのmain checkoutの作業ファイルで、読めなければ警告を出して空として扱う（本番を守るのは[Auto-update](auto-update.md)の入れ替え前のe2eの関門）。
   使い方と無いときの扱い、この repositoryの範囲は[Validation](validation.md)の8と「この repository で置く範囲」。
 - `[local_checks]`と`[local_checks.gates.<name>]`は手元の関門の宣言で、reviewがmainのcommitから読む（ADR-t2589-1決定6、`run_env::LOCAL_GATES_PREFIX`）。
 - `[areas]`は`stats`と`kpi`がrunを分けるareaの名前→globの1行の配列（[ADR-t980-1](../../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)。`domain::areas::AreaMap`）。
-  名前の形、空の配列、`--paths`の受け付けないglob、重複は行番号付きのエラーにする。
   書式は上の型、求め方は`application::areas::AreaReader`のdoc commentが持つ。
 
 - `[kpi]`と`[kpi.targets."<KPI>"]`はKPIの判定の設定と目標で、KPIの計算（`kpi`・レポート・push・observerの入力）だけが読む（[計測のコマンド](commands.md)、[ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定17・19。解析は`src/infrastructure/kpi_config.rs`の`KpiTables`）。

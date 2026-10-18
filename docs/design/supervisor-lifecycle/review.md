@@ -106,6 +106,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
    落とし穴: HEADと一致しないreceiptを渡すと`failed`になって作業を失うので、HEADで書き直す依頼を送って待ち直す。
    書き直さずに終われば`approve_landing`のaskで人に聞く。
 4a. **上限の後の判定**: 理由にコードの指摘が無ければ理由をfollow_upのdraftにしてpassの道で着地し、あれば`approve_landing`のaskで示す。
+   `acceptance_unmet`は`paths`が全部試行の始めに読んだコードのpath（[`[review.code]`](run-environment.md)）の外のときだけコードの指摘でない（`review_reason::Finding::is_code_finding`）。
 5. **終了の依頼とclose**: 着地かaskの前にworkerのsessionの終了を依頼する（[非対話のworker](headless-worker.md#wrapperがturnを止めるとき)）。
    - **passの衝突の事前判定**（ADR-0027決定4）: 衝突すれば解消を生きているsessionに依頼して4と同じ待ちに入り、[Needs session](needs-session.md)の「試行の数え方」の衝突だけの試行に数える。
    - **pass**: e2eが要るrunは[着地の前のe2e](landing-e2e.md)を通してから着地する。

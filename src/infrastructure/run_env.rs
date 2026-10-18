@@ -97,6 +97,7 @@ use crate::{
         review_programs::{
             self, BuiltinProgram, BuiltinProgramSetting, ReviewProgram, ReviewPrograms,
         },
+        review_reason::CodePaths,
         review_subagents::{self, ReviewAgents, ReviewSubagent},
         run_env::{RunEnvCheck, RunEnvProgram},
         scope::{dedup_globs, validate_path_globs},
@@ -224,6 +225,13 @@ const FRESH_SESSION_TABLE: &str = "fresh_session";
 /// (ADR-t1895-1 decision 1) and how many agent jobs of the reviews run at
 /// once; its keys are on [`ReviewJobs`].
 const REVIEW_JOBS_TABLE: &str = "review.jobs";
+/// `[review.code]`: `paths`, the repository's code paths, which tell an
+/// `acceptance_unmet` of a run's review on code from one elsewhere past
+/// the revise limit (ADR-t2599-1); its format, default and meaning are on
+/// [`CodePaths`].
+const REVIEW_CODE_TABLE: &str = "review.code";
+/// The one key of `[review.code]`.
+const REVIEW_CODE_PATHS: &str = "paths";
 /// `[ci_watch]`: the landing branch's CI the supervisor watches
 /// (ADR-t1920-1). `workflow` (a non-blank string) is required; `branch`
 /// (a branch name without `refs/heads/`), `interval_secs` (at least
@@ -420,7 +428,7 @@ const LOCAL_GATE_PATHS: &str = "paths";
 const LOCAL_GATE_KIND: &str = "kind";
 const CONTAINER_IMAGE_CONTAINERFILE: &str = "containerfile";
 const CONTAINER_IMAGE_INPUTS: &str = "inputs";
-const TABLES: [&str; 27] = [
+const TABLES: [&str; 28] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -440,6 +448,7 @@ const TABLES: [&str; 27] = [
     PROVIDER_FALLBACK_TABLE,
     FRESH_SESSION_TABLE,
     REVIEW_JOBS_TABLE,
+    REVIEW_CODE_TABLE,
     CI_WATCH_TABLE,
     LANDING_VERIFICATION_TABLE,
     EVAL_TABLE,
@@ -561,6 +570,9 @@ pub struct Config {
     /// keeps the provider's review timeout, and no `concurrency` keeps
     /// its default.
     pub review_jobs: ReviewJobs,
+    /// `[review.code] paths` ([`REVIEW_CODE_TABLE`]); `None` without the
+    /// table or with no glob.
+    pub review_code: Option<CodePaths>,
     /// `[ci_watch]` (ADR-t1920-1); `None` without the table, which watches
     /// nothing.
     pub ci_watch: Option<CiWatchConfig>,
@@ -673,6 +685,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut kpi = KpiTables::default();
     let mut areas: Option<Vec<(String, Vec<String>)>> = None;
     let mut e2e_paths_seen: Option<usize> = None;
+    let mut review_code_seen: Option<usize> = None;
     let mut egress_seen = false;
     let mut recheck_paths_seen = false;
     // The line of the `[review.subagents.<agent>]` header whose `paths`
@@ -980,7 +993,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}], [{CONTAINER_VERIFICATION_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}], [{CONTAINER_VERIFICATION_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -1310,6 +1323,21 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     }
                 }
                 config.egress_registries = registries;
+            }
+            Some(REVIEW_CODE_TABLE) => {
+                ensure!(
+                    key == REVIEW_CODE_PATHS,
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{REVIEW_CODE_TABLE}]; the key is {REVIEW_CODE_PATHS}"
+                );
+                ensure!(
+                    review_code_seen.is_none(),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                review_code_seen = Some(number);
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let globs = parse_string_array(rest.trim()).with_context(with)?;
+                validate_path_globs(&globs).with_context(with)?;
+                config.review_code = CodePaths::of(dedup_globs(&globs));
             }
             Some(E2E_TABLE) => {
                 ensure!(
@@ -1977,7 +2005,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{CONTAINER_IMAGE_TABLE}] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{CONTAINER_IMAGE_TABLE}] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -3228,6 +3256,9 @@ impl Verifier for ShellVerifier {
     fn review_subagents_in(&self, text: &str) -> Result<ReviewAgents> {
         Ok(parse_config(text)?.review_agents())
     }
+    fn review_code_paths_in(&self, text: &str) -> Result<Option<CodePaths>> {
+        Ok(parse_config(text)?.review_code)
+    }
     fn review_programs_in(&self, text: &str) -> Result<ReviewPrograms> {
         Ok(parse_config(text)?.review_programs())
     }
@@ -4159,6 +4190,68 @@ mod tests {
             let error = format!("{:#}", parse_config(text).unwrap_err());
             assert!(error.contains(expected), "{text:?}: {error}");
         }
+    }
+
+    /// `[review.code] paths` names the repository's code paths
+    /// (ADR-t2599-1); without the table or with no glob there are none,
+    /// and a mistake in it is refused with its line.
+    #[test]
+    fn parses_the_code_paths_of_the_review_code_table() {
+        let config = parse_config(
+            "[review.jobs]\nconcurrency = 2\n[review.code]\npaths = [\"src/**\", 'tests/**', \"src/**\"] # code\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.review_code,
+            CodePaths::of(vec!["src/**".to_owned(), "tests/**".to_owned()])
+        );
+        assert_eq!(parse_config("").unwrap().review_code, None);
+        assert_eq!(parse_config("[review.code]\n").unwrap().review_code, None);
+        assert_eq!(
+            parse_config("[review.code]\npaths = []\n")
+                .unwrap()
+                .review_code,
+            None
+        );
+        for (text, expected) in [
+            (
+                "[review.code]\nglobs = [\"a\"]\n",
+                "dagq.toml:2: unknown key globs in [review.code]; the key is paths",
+            ),
+            (
+                "[review.code]\npaths = [\"a\"]\npaths = [\"b\"]\n",
+                "dagq.toml:3: paths is defined twice",
+            ),
+            (
+                "[review.code]\npaths = \"src/**\"\n",
+                "dagq.toml:2: value of paths",
+            ),
+            (
+                "[review.code]\npaths = [\"/src/**\"]\n",
+                "dagq.toml:2: value of paths",
+            ),
+            (
+                "[review.code]\n[review.code]\n",
+                "dagq.toml:2: [review.code] is defined twice",
+            ),
+        ] {
+            let error = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(error.contains(expected), "{text:?}: {error}");
+        }
+        let verifier = ShellVerifier {
+            checkout: PathBuf::from("/nonexistent"),
+            db: PathBuf::from("/nonexistent/queue.db"),
+            user_config: None,
+            verification_timeout: Duration::from_secs(1),
+            profiles: &crate::domain::toolchain::BUILTIN,
+        };
+        assert_eq!(
+            verifier
+                .review_code_paths_in("[review.code]\npaths = [\"lib/**\"]\n")
+                .unwrap(),
+            CodePaths::of(vec!["lib/**".to_owned()])
+        );
+        assert!(verifier.review_code_paths_in("[nope]\n").is_err());
     }
 
     /// `[e2e] paths` names the globs whose change requires e2e
@@ -5887,7 +5980,7 @@ LITERAL = 'no \n escapes # here'
         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
         assert!(
             error.contains(
-                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [review.jobs], [ci_watch], [landing_verification], [eval], [eval.providers.<provider>], [egress], [container.image], [container.build_output], [container.verification] and [kpi]"
+                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [review.jobs], [review.code], [ci_watch], [landing_verification], [eval], [eval.providers.<provider>], [egress], [container.image], [container.build_output], [container.verification] and [kpi]"
             ),
             "{error}"
         );

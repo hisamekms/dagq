@@ -264,8 +264,14 @@ mod tests {
                 ),
             ]
         );
-        assert!(!crate::domain::review_reason::converged(&findings[1..3]));
-        assert!(crate::domain::review_reason::converged(&findings[1..2]));
+        assert!(!crate::domain::review_reason::converged(
+            &findings[1..3],
+            None
+        ));
+        assert!(crate::domain::review_reason::converged(
+            &findings[1..2],
+            None
+        ));
         // Without a route, only the verdict's own reasons.
         assert_eq!(verdict.sent_back_findings(None).len(), 1);
         // A whole review that passes while an agent sends back gives only
@@ -330,11 +336,11 @@ mod tests {
                 ("design: a typo", vec!["local_slip"])
             ]
         );
-        assert!(!crate::domain::review_reason::converged(&findings));
+        assert!(!crate::domain::review_reason::converged(&findings, None));
         let alone = whole("revise", &[]).sent_back_findings(None);
         assert_eq!(alone.len(), 1);
         assert_eq!(alone[0].codes, ["unlabeled"]);
-        assert!(!crate::domain::review_reason::converged(&alone));
+        assert!(!crate::domain::review_reason::converged(&alone, None));
     }
 
     /// The whole review and an agent job may give follow_ups with any
@@ -601,6 +607,56 @@ mod tests {
                 .route(true)
                 .destination,
             Destination::Land
+        );
+    }
+
+    /// The paths of each reason (ADR-t2599-1) are kept with the whole
+    /// review's and each agent's reasons, read back from the record, and
+    /// reach the findings the judgment past the revise limit reads.
+    #[test]
+    fn the_paths_of_each_reason_reach_the_record_and_the_findings() {
+        let whole = ReviewVerdict::parse(
+            r#"{"verdict":"revise","reasons":[{"text":"w","codes":["acceptance_unmet"],"paths":["docs/a.md"]},"old"],"summary":"s"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            whole.recorded_paths(),
+            [vec!["docs/a.md".to_owned()], vec![]]
+        );
+        let agent: AgentResult = serde_json::from_value(json!({
+            "agent": "design", "status": "completed", "verdict": "revise",
+            "reasons": [{"text": "d", "codes": ["acceptance_unmet"], "paths": ["src/x.rs"]}],
+            "summary": "looked",
+        }))
+        .unwrap();
+        let verdict = assemble(whole, vec![agent]);
+        // Recorded and read back, the paths stay.
+        let recorded: AgentResult = serde_json::from_value(json!(verdict.agents[0])).unwrap();
+        assert_eq!(recorded.reason_paths, [vec!["src/x.rs".to_owned()]]);
+        assert_eq!(
+            json!(verdict.agents[0])["reason_paths"],
+            json!([["src/x.rs"]])
+        );
+        let route = verdict.route(true);
+        let findings = verdict.sent_back_findings(Some(&route));
+        let paths: Vec<&[String]> = findings.iter().map(|f| f.paths.as_slice()).collect();
+        assert_eq!(
+            paths,
+            [
+                &["docs/a.md".to_owned()][..],
+                &[][..],
+                &["src/x.rs".to_owned()][..]
+            ]
+        );
+        // Without paths nothing is recorded.
+        let bare =
+            ReviewVerdict::parse(r#"{"verdict":"revise","reasons":["a"],"summary":"s"}"#).unwrap();
+        assert!(bare.recorded_paths().is_empty());
+        assert!(
+            serde_json::to_value(&bare)
+                .unwrap()
+                .get("reason_paths")
+                .is_none()
         );
     }
 }

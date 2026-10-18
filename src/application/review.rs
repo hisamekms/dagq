@@ -13,6 +13,7 @@ use super::{
 use crate::domain::local_checks::{self, LocalChecks, Reading};
 use crate::domain::local_gates::{Change, GateConfig};
 use crate::domain::review_builtins::{self, BuiltinAgent, EffectiveBuiltin};
+use crate::domain::review_reason::CodePaths;
 use crate::domain::review_subagents::{self, AgentRole, AgentTools, ReviewAgents};
 use crate::domain::setup_review::SETUP_COMMAND;
 use crate::domain::{CommitSha, Goal, Provider, Receipt, RunStatus, Task, TaskId, TaskRun};
@@ -394,6 +395,28 @@ fn landing_agents(
         .with_context(|| format!("read {CONFIG_FILE} in the landing branch's commit {commit}"))?
     else {
         return Ok(ReviewAgents::default());
+    };
+    parse(&text)
+        .with_context(|| format!("parse {CONFIG_FILE} in the landing branch's commit {commit}"))
+}
+
+/// The code paths (`[review.code]`, [`CodePaths`]) the landing branch's
+/// commit `commit` writes in its `dagq.toml`, read by `parse` from the
+/// committed tree as the review's agents are (ADR-t1453-1 decision 4),
+/// never from a worktree, the main checkout's files or a run's branch;
+/// `None` without the file or the table. `Err` when the file cannot be
+/// read or parsed: the attempt fails rather than judging without them
+/// (decision 6).
+pub fn review_code_paths(
+    repository: &dyn Repository,
+    commit: &str,
+    parse: &dyn Fn(&str) -> Result<Option<CodePaths>>,
+) -> Result<Option<CodePaths>> {
+    let Some(text) = repository
+        .file_in(commit, CONFIG_FILE)
+        .with_context(|| format!("read {CONFIG_FILE} in the landing branch's commit {commit}"))?
+    else {
+        return Ok(None);
     };
     parse(&text)
         .with_context(|| format!("parse {CONFIG_FILE} in the landing branch's commit {commit}"))
@@ -1210,6 +1233,45 @@ mod tests {
         );
         assert!(
             error.contains("has no definition .dagq/agents/design/AGENT.md"),
+            "{error}"
+        );
+    }
+
+    /// The code paths are read from the landing branch's commit only
+    /// (ADR-t2599-1): none without `dagq.toml`, the parser's when it has
+    /// one, and a file that does not parse fails the read.
+    #[test]
+    fn the_code_paths_are_read_from_the_landing_branchs_commit() {
+        let parse = |text: &str| -> Result<Option<CodePaths>> {
+            match text {
+                "[review.code]\npaths = [\"src/**\"]\n" => {
+                    Ok(CodePaths::of(vec!["src/**".to_owned()]))
+                }
+                "" => Ok(None),
+                _ => anyhow::bail!("dagq.toml:1: unknown table"),
+            }
+        };
+        let read = |files: Vec<(&'static str, &'static str)>| {
+            review_code_paths(
+                &Committed {
+                    files,
+                    ..Committed::default()
+                },
+                SHA,
+                &parse,
+            )
+        };
+        assert_eq!(read(Vec::new()).unwrap(), None);
+        assert_eq!(read(vec![(CONFIG_FILE, "")]).unwrap(), None);
+        assert_eq!(
+            read(vec![(CONFIG_FILE, "[review.code]\npaths = [\"src/**\"]\n")]).unwrap(),
+            CodePaths::of(vec!["src/**".to_owned()])
+        );
+        let error = format!("{:#}", read(vec![(CONFIG_FILE, "[nope]\n")]).unwrap_err());
+        assert!(
+            error.contains(&format!(
+                "parse dagq.toml in the landing branch's commit {SHA}"
+            )),
             "{error}"
         );
     }

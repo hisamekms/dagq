@@ -9,7 +9,7 @@ use crate::application::job_start_failure;
 use crate::application::prompt::{AcceptanceRules, PromptBytes, REVIEW_ACCESS};
 use crate::application::review::{
     ReviewRange, SnapshotAgent, SubagentSnapshot, acceptance_record, acceptance_rules,
-    review_range_at, snapshot_subagents,
+    review_code_paths, review_range_at, snapshot_subagents,
 };
 use crate::application::review_programs::{ProgramSnapshot, snapshot_programs};
 use crate::application::run_git;
@@ -312,6 +312,7 @@ impl Supervisor<'_> {
                         verdict: ReviewDecision::Revise,
                         reasons: vec![reason],
                         reason_codes: Vec::new(),
+                        reason_paths: Vec::new(),
                         summary: format!("the review program {name} rejected the change"),
                         recommendation: None,
                         confidence: None,
@@ -630,6 +631,18 @@ impl Supervisor<'_> {
                 return self.unstarted_review_failed(run, session, attempt, error);
             }
         };
+        // The code paths the judgment past the revise limit reads, from the
+        // commit the agents were read from or else the landing branch's
+        // head as the attempt starts (ADR-t2599-1, as ADR-t1453-1
+        // decisions 4 and 6): a
+        // `dagq.toml` that cannot be read leaves the attempt unpassed.
+        let code_paths = match self.review_code_paths(subagents.as_ref()) {
+            Ok(code_paths) => code_paths,
+            Err(read) => {
+                let error = format!("the review's code paths could not be read: {read:#}");
+                return self.unstarted_review_failed(run, session, attempt, error);
+            }
+        };
         let providers = agent_providers(subagents.as_ref());
         let session = match held_review(
             &route,
@@ -668,6 +681,9 @@ impl Supervisor<'_> {
         });
         if let Some(subagents) = &subagents {
             started["subagents"] = subagents.event_value();
+        }
+        if let Some(code_paths) = &code_paths {
+            started["code_paths"] = json!(code_paths.globs);
         }
         // What the whole review's prompt takes (task 1571, ADR-t1566-1
         // decision 6); each agent job's start records its own.
@@ -1303,6 +1319,11 @@ impl Supervisor<'_> {
         // run (ADR-t1453-1 decisions 5 and 7); a review with no agent
         // records as before. A send-back goes back whatever the revises
         // left: past the limit it is judged by its reasons (ADR-t2599-1).
+        // The paths each reason is on, beside its codes (ADR-t2599-1).
+        let reason_paths = verdict.recorded_paths();
+        if !reason_paths.is_empty() {
+            finished["reason_paths"] = json!(reason_paths);
+        }
         if !verdict.agents.is_empty() {
             finished["agents"] = json!(verdict.agents);
             finished["route"] = verdict.route(true).event_value();
@@ -1353,6 +1374,20 @@ impl Supervisor<'_> {
             &|text| self.verifier.review_subagents_in(text),
             &|main| self.receipt_range(run, main),
         )
+    }
+    /// The code paths of the landing branch's commit the agents were read
+    /// from, or of its head without agents ([`review_code_paths`]).
+    fn review_code_paths(
+        &self,
+        subagents: Option<&SubagentSnapshot>,
+    ) -> Result<Option<review_reason::CodePaths>> {
+        let commit = match subagents {
+            Some(snapshot) => snapshot.commit.clone(),
+            None => self.repository.main_head()?.into_string(),
+        };
+        review_code_paths(&*self.repository, &commit, &|text| {
+            self.verifier.review_code_paths_in(text)
+        })
     }
     /// The range `run`'s review reads with the landing branch at `main`:
     /// from its receipt's commit ([`review_range_at`]).
@@ -1916,7 +1951,19 @@ impl Supervisor<'_> {
         revises: usize,
     ) -> Result<Phase> {
         let SentBack { attempt, findings } = sent_back;
-        let converged = review_reason::converged(&findings);
+        // The code paths the attempt read when it started.
+        let code = self
+            .queue
+            .run_events(run.id())?
+            .iter()
+            .rev()
+            .find(|event| {
+                event.kind == EventKind::ReviewStarted.as_str()
+                    && event.payload["attempt"].as_u64() == u64::try_from(attempt).ok()
+            })
+            .and_then(|event| review_reason::CodePaths::recorded(&event.payload));
+        let code = code.as_ref();
+        let converged = review_reason::converged(&findings, code);
         if converged {
             match self.queue.show(run.task_id()) {
                 Ok(detail) => {
@@ -1934,8 +1981,10 @@ impl Supervisor<'_> {
                 }
             }
         }
-        let code_findings: Vec<&review_reason::Finding> =
-            findings.iter().filter(|f| f.is_code_finding()).collect();
+        let code_findings: Vec<&review_reason::Finding> = findings
+            .iter()
+            .filter(|f| f.is_code_finding(code))
+            .collect();
         self.queue.record_runtime_event(
             run.id(),
             EventKind::ReviseLimitJudged,
@@ -1943,8 +1992,9 @@ impl Supervisor<'_> {
                 "attempt": attempt,
                 "revises": revises,
                 "converged": converged,
+                "code_paths": code.map(|code| &code.globs),
                 "code_findings": code_findings.iter().map(|f| json!({
-                    "text": f.text, "codes": f.codes, "security": f.security,
+                    "text": f.text, "codes": f.codes, "paths": f.paths, "security": f.security,
                 })).collect::<Vec<_>>(),
             }),
         )?;
@@ -3017,8 +3067,15 @@ pub(super) fn combined_verdict(
     route: &VerdictRoute,
     parent_decides: bool,
 ) -> ReviewVerdict {
-    let (reasons, reason_codes) = verdict
-        .sent_back_findings(Some(route))
+    let findings = verdict.sent_back_findings(Some(route));
+    let reason_paths = review_reason::recorded_paths(
+        &findings
+            .iter()
+            .map(|finding| finding.paths.clone())
+            .collect::<Vec<_>>(),
+        findings.len(),
+    );
+    let (reasons, reason_codes) = findings
         .into_iter()
         .map(|finding| (finding.text, finding.codes))
         .unzip();
@@ -3050,6 +3107,7 @@ pub(super) fn combined_verdict(
         },
         reasons,
         reason_codes,
+        reason_paths,
         summary: verdict.summary.clone(),
         recommendation: None,
         confidence: None,
@@ -3575,10 +3633,13 @@ mod tests {
         findings.push(review_reason::Finding {
             text: "builtin:security: leaks a token".into(),
             codes: vec!["local_slip".into()],
+            paths: Vec::new(),
             security: true,
         });
-        let left: Vec<&review_reason::Finding> =
-            findings.iter().filter(|f| f.is_code_finding()).collect();
+        let left: Vec<&review_reason::Finding> = findings
+            .iter()
+            .filter(|f| f.is_code_finding(None))
+            .collect();
         let why = revise_limit_why(&revise, MAX_REVISE_ATTEMPTS, &left);
         assert_eq!(
             why,

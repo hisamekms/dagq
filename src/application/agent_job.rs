@@ -92,7 +92,7 @@ pub struct BuiltAgentJob {
 /// review's form (ADR-t2352-1).
 fn schema(agent: &str) -> String {
     format!(
-        "{{\"agent\": \"{agent}\", \"status\": \"completed\" | \"failed\", \"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [{{\"text\": string, \"codes\": [string]}}], \"summary\": string, \"recommendation\": \"land\" | \"send_back\" | null, \"confidence\": \"high\" | \"low\" | null, \"reason_category\": \"scope\" | \"discard\" | null, \"follow_ups\": [{{\"text\": string, \"path\": string, \"section\": string, \"codes\": [string]}}]}}"
+        "{{\"agent\": \"{agent}\", \"status\": \"completed\" | \"failed\", \"verdict\": \"pass\" | \"revise\" | \"concern\", \"reasons\": [{{\"text\": string, \"codes\": [string], \"paths\": [string]}}], \"summary\": string, \"recommendation\": \"land\" | \"send_back\" | null, \"confidence\": \"high\" | \"low\" | null, \"reason_category\": \"scope\" | \"discard\" | null, \"follow_ups\": [{{\"text\": string, \"path\": string, \"section\": string, \"codes\": [string]}}]}}"
     )
 }
 
@@ -178,7 +178,7 @@ pub fn build(job: &AgentJob<'_>) -> Result<BuiltAgentJob, DefinitionOverLimit> {
         "instructions",
         &format!(
             "Answer with one JSON object and nothing else, matching this schema:\n{schema}\n\
-             reasons lists each finding with the rule codes it breaks (empty for pass); summary is one or two sentences; recommendation, confidence and reason_category are for a concern only (null otherwise). Say status failed only when you could not review the change.\n\
+             reasons lists each finding with the rule codes it breaks and the repository-relative paths it is on (none for a finding on no file), empty for pass; summary is one or two sentences; recommendation, confidence and reason_category are for a concern only (null otherwise). Say status failed only when you could not review the change.\n\
              A finding on a document goes in reasons only when the change edits that document and disagrees with it, or the change breaks an invariant, promise or boundary a document states. A stale passage of a document the change does not touch never sends it back: list it in follow_ups with its path, section and why (empty when none), whatever the verdict.\n",
             schema = schema(job.agent),
         ),

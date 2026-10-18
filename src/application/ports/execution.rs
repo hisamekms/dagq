@@ -2136,6 +2136,17 @@ pub trait Verifier {
         let _ = text;
         Ok(crate::domain::review_subagents::ReviewAgents::default())
     }
+    /// The code paths (`[review.code]`,
+    /// [`crate::domain::review_reason::CodePaths`]) of `text`, a whole
+    /// `dagq.toml` as committed; `Err` when it cannot be parsed. None by
+    /// default, which counts every `acceptance_unmet` as a code finding.
+    fn review_code_paths_in(
+        &self,
+        text: &str,
+    ) -> Result<Option<crate::domain::review_reason::CodePaths>> {
+        let _ = text;
+        Ok(None)
+    }
     /// The program reviews (`[review.programs.<name>]`, ADR-t1895-2, and
     /// `[review.programs."builtin:<name>"]`, ADR-t2259-1) of `text`, a
     /// whole `dagq.toml` as committed; `Err` when it cannot be parsed.

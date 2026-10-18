@@ -4,7 +4,9 @@
 //! lists below is kept as it was printed. The codes are labels for `stats`
 //! and `kpi`, and one judgment reads them (ADR-t2599-1, amending decisions
 //! 3 and 6): whether a run's review that sends the run back past its
-//! revise limit has any code finding left ([`converged`]). The verdict's
+//! revise limit has any code finding left ([`converged`]), where an
+//! item's optional `paths` and the repository's [`CodePaths`] tell an
+//! `acceptance_unmet` on code from one elsewhere. The verdict's
 //! decision, how a concern is applied and the plan review read none of
 //! them. The lists and their definitions are the design's, so a code is
 //! added or removed without an ADR; a new code counts as a code finding
@@ -126,7 +128,8 @@ pub const PLAN_REVIEW_CODES: &[(&str, &str)] = &[
 ];
 
 /// One item of a verdict's `reasons` as the job printed it: a text alone
-/// (the form before the codes) or a text with its codes.
+/// (the form before the codes) or a text with its codes and, for a run's
+/// review, the paths it is on.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(untagged)]
 pub(crate) enum PrintedReason {
@@ -138,41 +141,88 @@ pub(crate) enum PrintedReason {
 /// ([`converged`], ADR-t2599-1), yet their shape never fails the verdict:
 /// `codes` may be one string or an array, a value of another shape leaves
 /// the item unlabeled (a code finding there, fail closed), and other
-/// fields are ignored.
+/// fields are ignored. `paths`, the repository-relative paths the item is
+/// on, is read the same way: a value of another shape leaves the item
+/// without paths, which the judgment past the revise limit counts as a
+/// code finding for an `acceptance_unmet` ([`Finding::is_code_finding`]).
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(crate) struct CodedReason {
     text: String,
     #[serde(default)]
     codes: serde_json::Value,
+    #[serde(default)]
+    paths: serde_json::Value,
+}
+
+/// The strings of a loose `codes` or `paths`: one string or an array's
+/// strings, trimmed, blank ones dropped; none for a value of another shape.
+fn strings(value: serde_json::Value) -> Vec<String> {
+    let values = match value {
+        serde_json::Value::String(value) => vec![value],
+        serde_json::Value::Array(values) => values
+            .into_iter()
+            .filter_map(|value| value.as_str().map(str::to_owned))
+            .collect(),
+        _ => Vec::new(),
+    };
+    values
+        .into_iter()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .collect()
 }
 
 /// The texts of `printed` and each item's codes (empty for an item without
 /// them), blank codes dropped.
 pub(crate) fn split(printed: Vec<PrintedReason>) -> (Vec<String>, Vec<Vec<String>>) {
-    printed
-        .into_iter()
-        .map(|reason| match reason {
-            PrintedReason::Text(text) => (text, Vec::new()),
-            PrintedReason::Coded(CodedReason { text, codes }) => {
-                let codes = match codes {
-                    serde_json::Value::String(code) => vec![code],
-                    serde_json::Value::Array(codes) => codes
-                        .into_iter()
-                        .filter_map(|code| code.as_str().map(str::to_owned))
-                        .collect(),
-                    _ => Vec::new(),
-                };
-                (
-                    text,
-                    codes
-                        .into_iter()
-                        .map(|code| code.trim().to_owned())
-                        .filter(|code| !code.is_empty())
-                        .collect(),
-                )
-            }
-        })
-        .unzip()
+    let split = split_with_paths(printed);
+    (split.texts, split.codes)
+}
+
+/// The items of a verdict's `reasons` taken apart, index by index.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SplitReasons {
+    pub(crate) texts: Vec<String>,
+    /// Each item's codes, empty for an item without them.
+    pub(crate) codes: Vec<Vec<String>>,
+    /// Each item's paths (a leading `./` dropped), empty for an item
+    /// without them.
+    pub(crate) paths: Vec<Vec<String>>,
+}
+
+/// [`split`] with each item's `paths` too: what a run's review reads.
+pub(crate) fn split_with_paths(printed: Vec<PrintedReason>) -> SplitReasons {
+    let mut split = SplitReasons::default();
+    for reason in printed {
+        let (text, codes, paths) = match reason {
+            PrintedReason::Text(text) => (text, Vec::new(), Vec::new()),
+            PrintedReason::Coded(CodedReason { text, codes, paths }) => (
+                text,
+                strings(codes),
+                strings(paths)
+                    .into_iter()
+                    .map(|path| path.strip_prefix("./").unwrap_or(&path).to_owned())
+                    .filter(|path| !path.is_empty())
+                    .collect(),
+            ),
+        };
+        split.texts.push(text);
+        split.codes.push(codes);
+        split.paths.push(paths);
+    }
+    split
+}
+
+/// Each of `count` items' paths, empty for one without them; empty
+/// altogether when no item has any, as `review_finished` leaves
+/// `reason_paths` out then.
+pub fn recorded_paths(paths: &[Vec<String>], count: usize) -> Vec<Vec<String>> {
+    if paths.iter().all(Vec::is_empty) {
+        return Vec::new();
+    }
+    (0..count)
+        .map(|index| paths.get(index).cloned().unwrap_or_default())
+        .collect()
 }
 
 /// The codes recorded for each of `count` items: an item's own codes, or
@@ -216,6 +266,50 @@ pub const CANCELED: &str = "canceled";
 /// Every outcome, in the order `stats` lists them.
 pub const OUTCOMES: [&str; 3] = [DEVIATION_ACCEPTED, DEVIATION_REJECTED, CANCELED];
 
+/// The code paths of a repository (ADR-t2599-1): the globs of `[review.code]
+/// paths` in the landing branch's commit's `dagq.toml`, which a run's review
+/// reads at the start of each attempt and records on its `review_started`.
+/// The key is an array of non-blank globs written as `add --paths` takes
+/// them ([`super::scope`]: from the repository root, `*` within one
+/// segment, `**` at any depth), the same glob twice kept once. Without the
+/// key, or with an empty array, the repository has none, and every
+/// `acceptance_unmet` is a code finding. With them, an `acceptance_unmet`
+/// whose paths all lie outside the globs is not one
+/// ([`Finding::is_code_finding`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CodePaths {
+    pub globs: Vec<String>,
+}
+
+impl CodePaths {
+    /// The code paths of `globs`, `None` for none.
+    pub fn of(globs: Vec<String>) -> Option<Self> {
+        (!globs.is_empty()).then_some(Self { globs })
+    }
+
+    /// Whether `path` is code: some glob matches it.
+    pub fn covers(&self, path: &str) -> bool {
+        self.globs
+            .iter()
+            .any(|glob| super::scope::glob_matches(glob, path))
+    }
+
+    /// The code paths `review_started` recorded for its attempt in
+    /// `payload` (`code_paths`), `None` without them: a review started by
+    /// a binary that read none counts every `acceptance_unmet` as a code
+    /// finding.
+    pub fn recorded(payload: &serde_json::Value) -> Option<Self> {
+        let globs: Vec<String> =
+            serde_json::from_value(payload["code_paths"].clone()).unwrap_or_default();
+        Self::of(globs)
+    }
+}
+
+/// The code a reason gives when part of what the task asks is not done:
+/// a code finding unless its paths say it is not on code
+/// ([`Finding::is_code_finding`]).
+pub const ACCEPTANCE_UNMET: &str = "acceptance_unmet";
+
 /// The codes of a run's review that are no code finding (ADR-t2599-1),
 /// each with the follow_up category (ADR-t947-3) of the draft a reason
 /// left with it becomes when the run lands past its revise limit. Every
@@ -234,27 +328,47 @@ pub const CONVERGED_CODES: &[(&str, &str)] = &[
 ];
 
 /// One reason a review sends a run back with: its text, its recorded
-/// codes (at least one, [`UNLABELED`] for none) and whether a review agent
-/// of the security role gave it
-/// ([`super::review_subagents::is_security_agent`]).
+/// codes (at least one, [`UNLABELED`] for none), the paths it is on (none
+/// when the job gave none) and whether a review agent of the security role
+/// gave it ([`super::review_subagents::is_security_agent`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
     pub text: String,
     pub codes: Vec<String>,
+    pub paths: Vec<String>,
     pub security: bool,
 }
 
 impl Finding {
-    /// Whether the reason is a code finding: one from a security agent, or
-    /// with any code (not only its primary one) outside
-    /// [`CONVERGED_CODES`], or with none.
-    pub fn is_code_finding(&self) -> bool {
+    /// Whether the reason is a code finding with the repository's `code`
+    /// paths: one from a security agent, or with any code (not only its
+    /// primary one) outside [`CONVERGED_CODES`], or with none. An
+    /// [`ACCEPTANCE_UNMET`] is not one only when the repository has code
+    /// paths and the reason has paths all of which lie outside them;
+    /// without either, or with one path on code, it is. A path that is not
+    /// a plain repository-relative one (absolute, with a `.` or `..`
+    /// segment, or a `:` such as a line number) cannot be told off code,
+    /// so it counts as on code.
+    pub fn is_code_finding(&self, code: Option<&CodePaths>) -> bool {
+        let plain = |path: &String| {
+            !path.contains(':')
+                && super::scope::validate_path_globs(std::slice::from_ref(path)).is_ok()
+        };
+        let off_code = code.is_some_and(|code| {
+            !self.paths.is_empty()
+                && self
+                    .paths
+                    .iter()
+                    .all(|path| plain(path) && !code.covers(path))
+        });
         self.security
             || self.codes.is_empty()
-            || self
-                .codes
-                .iter()
-                .any(|code| !CONVERGED_CODES.iter().any(|(known, _)| known == code))
+            || self.codes.iter().any(|known| {
+                !(CONVERGED_CODES
+                    .iter()
+                    .any(|(converged, _)| converged == known)
+                    || (off_code && known == ACCEPTANCE_UNMET))
+            })
     }
 
     /// The category of the follow_up draft the reason becomes when the run
@@ -266,20 +380,27 @@ impl Finding {
 }
 
 /// The follow_up category of a reason with `codes` left when the run
-/// landed ([`Finding::follow_up_category`]).
+/// landed ([`Finding::follow_up_category`]): an [`ACCEPTANCE_UNMET`] off
+/// code is `remaining_scope`.
 pub fn follow_up_category(codes: &[String]) -> &'static str {
-    codes
-        .first()
-        .and_then(|code| CONVERGED_CODES.iter().find(|(known, _)| known == code))
-        .map_or("other", |(_, category)| category)
+    codes.first().map_or("other", |first| {
+        if first == ACCEPTANCE_UNMET {
+            return "remaining_scope";
+        }
+        CONVERGED_CODES
+            .iter()
+            .find(|(known, _)| known == first)
+            .map_or("other", |(_, category)| category)
+    })
 }
 
 /// Whether a review that sends the run back past its revise limit has no
-/// code finding left (ADR-t2599-1): it has reasons and none of them is a
-/// code finding ([`Finding::is_code_finding`]). The run then lands with
-/// the reasons as follow_up drafts; otherwise a person decides.
-pub fn converged(findings: &[Finding]) -> bool {
-    !findings.is_empty() && !findings.iter().any(Finding::is_code_finding)
+/// code finding left (ADR-t2599-1) with the repository's `code` paths: it
+/// has reasons and none of them is a code finding
+/// ([`Finding::is_code_finding`]). The run then lands with the reasons as
+/// follow_up drafts; otherwise a person decides.
+pub fn converged(findings: &[Finding], code: Option<&CodePaths>) -> bool {
+    !findings.is_empty() && !findings.iter().any(|f| f.is_code_finding(code))
 }
 
 /// Whether `event` is a `revise_limit_judged` that found the review it
@@ -347,8 +468,115 @@ mod tests {
         Finding {
             text: "t".to_owned(),
             codes: codes.iter().map(|code| (*code).to_owned()).collect(),
+            paths: Vec::new(),
             security,
         }
+    }
+
+    /// The judgment of a repository without code paths.
+    fn converged(findings: &[Finding]) -> bool {
+        super::converged(findings, None)
+    }
+
+    #[test]
+    fn a_run_reviews_items_carry_their_paths_and_the_old_forms_read() {
+        let printed: Vec<PrintedReason> = serde_json::from_str(
+            r#"["old", {"text": "new", "codes": ["acceptance_unmet"], "paths": ["./docs/a.md", " ", "src/b.rs"]}, {"text": "one", "paths": "docs/c.md"}, {"text": "loose", "paths": 7}]"#,
+        )
+        .unwrap();
+        let split = split_with_paths(printed);
+        assert_eq!(split.texts, ["old", "new", "one", "loose"]);
+        assert_eq!(
+            split.paths,
+            [
+                vec![],
+                vec!["docs/a.md".to_owned(), "src/b.rs".to_owned()],
+                vec!["docs/c.md".to_owned()],
+                vec![]
+            ]
+        );
+        assert_eq!(
+            recorded_paths(&split.paths, 4)[1],
+            ["docs/a.md".to_owned(), "src/b.rs".to_owned()]
+        );
+        // None with paths records none.
+        assert!(recorded_paths(&[vec![], vec![]], 2).is_empty());
+        assert_eq!(
+            recorded_paths(&[vec!["a".to_owned()]], 2)[1],
+            Vec::<String>::new()
+        );
+    }
+
+    fn unmet(paths: &[&str]) -> Finding {
+        Finding {
+            paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+            ..finding(&[ACCEPTANCE_UNMET], false)
+        }
+    }
+
+    /// An `acceptance_unmet` is no code finding only with code paths and
+    /// paths all off them (ADR-t2599-1); without the setting or without
+    /// paths it stays one, and the other codes keep their judgment.
+    #[test]
+    fn an_acceptance_unmet_off_the_code_paths_alone_is_no_code_finding() {
+        let code = CodePaths::of(vec!["src/**".to_owned(), "tests/**".to_owned()]).unwrap();
+        let code = Some(&code);
+        let docs = unmet(&["docs/design/review.md", "plugins/a/SKILL.md"]);
+        assert!(!docs.is_code_finding(code));
+        assert!(super::converged(
+            &[
+                docs.clone(),
+                finding(&["local_slip"], false),
+                finding(&["docs_drift"], false)
+            ],
+            code
+        ));
+        assert_eq!(docs.follow_up_category(), "remaining_scope");
+        // One path on code, no paths, or no setting: a code finding.
+        assert!(unmet(&["docs/a.md", "src/b.rs"]).is_code_finding(code));
+        assert!(unmet(&[]).is_code_finding(code));
+        // A path that cannot be told off code counts as on it.
+        for odd in [
+            "/w/src/lib.rs",
+            "docs/../src/lib.rs",
+            "./src/lib.rs",
+            "src/lib.rs:12",
+            "docs//a.md",
+        ] {
+            assert!(unmet(&["docs/a.md", odd]).is_code_finding(code), "{odd}");
+        }
+        assert!(docs.is_code_finding(None));
+        assert!(!super::converged(std::slice::from_ref(&docs), None));
+        assert_eq!(CodePaths::of(Vec::new()), None);
+        // Paths never lift another code nor a security agent's finding.
+        let defect = Finding {
+            paths: vec!["docs/a.md".to_owned()],
+            ..finding(&["code_defect"], false)
+        };
+        assert!(defect.is_code_finding(code));
+        let secure = Finding {
+            security: true,
+            ..docs.clone()
+        };
+        assert!(secure.is_code_finding(code));
+        let mixed = Finding {
+            codes: vec![ACCEPTANCE_UNMET.to_owned(), "test_gap".to_owned()],
+            ..docs
+        };
+        assert!(mixed.is_code_finding(code));
+        // What review_started recorded.
+        assert_eq!(
+            CodePaths::recorded(&serde_json::json!({"code_paths": ["src/**"]})),
+            CodePaths::of(vec!["src/**".to_owned()])
+        );
+        assert_eq!(
+            CodePaths::recorded(&serde_json::json!({"attempt": 1})),
+            None
+        );
+        assert_eq!(
+            CodePaths::recorded(&serde_json::json!({"code_paths": []})),
+            None
+        );
     }
 
     /// Only reasons all of whose codes are among the converged ones, none

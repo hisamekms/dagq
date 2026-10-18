@@ -448,6 +448,11 @@ pub struct AgentResult {
     /// agent's reasons (ADR-t2599-1).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reason_codes: Vec<Vec<String>>,
+    /// The paths the job gave each of `reasons`, empty when it gave none:
+    /// what tells an `acceptance_unmet` on code from one elsewhere past
+    /// the revise limit (ADR-t2599-1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reason_paths: Vec<Vec<String>>,
     pub summary: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recommendation: Option<LandingRecommendation>,
@@ -476,6 +481,9 @@ pub(crate) struct PrintedAgentResult {
     /// The codes of a result recorded with its reasons as texts.
     #[serde(default)]
     reason_codes: Vec<Vec<String>>,
+    /// The paths of a result recorded with its reasons as texts.
+    #[serde(default)]
+    reason_paths: Vec<Vec<String>>,
     #[serde(default)]
     summary: String,
     #[serde(default)]
@@ -490,13 +498,20 @@ pub(crate) struct PrintedAgentResult {
 
 impl From<PrintedAgentResult> for AgentResult {
     fn from(printed: PrintedAgentResult) -> Self {
-        let (reasons, codes) = review_reason::split(printed.reasons);
+        let split = review_reason::split_with_paths(printed.reasons);
+        let reasons = split.texts;
+        let codes = split.codes;
         let reason_codes = if !printed.reason_codes.is_empty() {
             printed.reason_codes
         } else if codes.iter().any(|codes| !codes.is_empty()) {
             codes
         } else {
             Vec::new()
+        };
+        let reason_paths = if printed.reason_paths.is_empty() {
+            review_reason::recorded_paths(&split.paths, reasons.len())
+        } else {
+            printed.reason_paths
         };
         // Only a concern's are read, as the verdict's.
         let concern = printed.verdict == Some(ReviewDecision::Concern);
@@ -506,6 +521,7 @@ impl From<PrintedAgentResult> for AgentResult {
             verdict: printed.verdict,
             reasons,
             reason_codes,
+            reason_paths,
             summary: printed.summary,
             recommendation: concern
                 .then(|| concern::known(printed.recommendation.as_deref()))
