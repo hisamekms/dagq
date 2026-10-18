@@ -21,7 +21,7 @@ use crate::domain::event_kind;
 /// The phases, in the order a landing goes through them, as `stats`'
 /// `land_phases` names them: the runtime's e2e on the host shows there as
 /// `e2e_wait` (waiting for another run's e2e) and `e2e` (its own).
-pub const PHASES: [&str; 11] = [
+pub const PHASES: [&str; 12] = [
     // The session's exit and the hand-offs between phases (from
     // `validation_finished`, `review_finished`, a precheck that asks
     // nothing): what is left until the run waits for the slot.
@@ -56,6 +56,11 @@ pub const PHASES: [&str; 11] = [
     // `integrate` after the rebase: the scope check, `verification_commands`
     // and the commit to main (`integration_rebased`).
     "verify",
+    // Waiting for its task's hold (ADR-t1879-1): from the run's
+    // `run_phase_changed` into `held` to the release (`task_released`, or
+    // the next record of another phase), back in the phase it left. Like
+    // `ask`, a person's wait, which a reader leaves out of the run's time.
+    "held",
 ];
 
 const EXIT: usize = 0;
@@ -73,6 +78,7 @@ const E2E_WAIT: usize = 7;
 const E2E: usize = 8;
 const REBASE: usize = 9;
 const VERIFY: usize = 10;
+const HELD: usize = 11;
 
 /// The seconds a run spent in each phase of its wait to land, and in the
 /// push after it (null when no push was recorded).
@@ -322,6 +328,9 @@ pub struct LandClock {
     spent: [i64; PHASES.len()],
     /// The phase an open ask interrupted, to go back to once it is answered.
     before_ask: Option<usize>,
+    /// The phase the hold's wait interrupted (or the one an event during
+    /// the wait started), to go back to at the release.
+    before_held: Option<usize>,
     /// The run's open asks, by `ask_id`, with their kind.
     asks: HashMap<String, Option<String>>,
     integrated: Option<i64>,
@@ -353,6 +362,7 @@ impl LandClock {
             since: at,
             spent: [0; PHASES.len()],
             before_ask: None,
+            before_held: None,
             asks: HashMap::new(),
             integrated: None,
             push: None,
@@ -421,7 +431,14 @@ impl LandClock {
                     if let Some(key) = ask_key(&event.payload) {
                         self.asks.insert(key, opened.map(str::to_owned));
                     }
-                    if self.phase != ASK {
+                    if self.phase == HELD {
+                        // Asked during the hold's wait: once every ask is
+                        // answered, the run goes back to what the wait
+                        // interrupted, which an ask already open keeps.
+                        if self.before_held != Some(ASK) {
+                            self.before_ask = Some(self.before_held.unwrap_or(EXIT));
+                        }
+                    } else if self.phase != ASK {
                         self.before_ask = Some(self.phase);
                     }
                     Some(ASK)
@@ -458,6 +475,7 @@ impl LandClock {
                 _ => None,
             }
         };
+        let next = self.through_hold(event, next);
         // What queued the run, for the `landing_queue` it enters now.
         let via = match (kind, next) {
             ("landing_queued", _) => Some(
@@ -470,7 +488,7 @@ impl LandClock {
             _ => None,
         };
         if let Some(next) = next {
-            if next != ASK && kind != "ask_answered" {
+            if next != ASK && next != HELD && kind != "ask_answered" && self.phase != HELD {
                 self.asks.clear();
                 self.before_ask = None;
             }
@@ -479,6 +497,32 @@ impl LandClock {
                 self.queue_via = via;
             }
         }
+    }
+
+    /// The phase `event` moves the run to, `next` by the other rules, as
+    /// its hold's wait changes it: the run's record of `held` enters
+    /// [`HELD`]; in it, only the release (`task_released`, a record of
+    /// another phase) leaves it, for the phase the wait interrupted or one
+    /// an event during it started.
+    fn through_hold(&mut self, event: &RunEvent, next: Option<usize>) -> Option<usize> {
+        use crate::domain::run_phase::{Phase, Recorded};
+        let record = Recorded::of_event(event);
+        if record.as_ref().is_some_and(|record| record.is(Phase::Held)) {
+            if self.phase != HELD {
+                self.before_held = Some(self.phase);
+            }
+            return Some(HELD);
+        }
+        if self.phase != HELD {
+            return next;
+        }
+        if event.kind == event_kind::TASK_RELEASED || record.is_some() {
+            return next.or(self.before_held.take()).or(Some(EXIT));
+        }
+        if next.is_some() {
+            self.before_held = next;
+        }
+        None
     }
 
     /// Count a `verification_command` of `integrate` recorded at `at`
@@ -641,6 +685,100 @@ mod tests {
         assert_eq!(phases.secs.iter().sum::<i64>(), 410);
         assert_eq!(phases.push, Some(4));
         assert_eq!(phases.longest(), Some("verify"));
+    }
+
+    /// A hold of a run waiting to land is `held` from its `held` record to
+    /// the release, apart from `ask`; the run goes back to the phase it
+    /// left, and what an event during the wait started waits for it.
+    #[test]
+    fn a_holds_wait_is_its_own_phase_and_the_run_goes_back_after_it() {
+        let held = |at| ("run_phase_changed", json!({"phase": "held"}), at);
+        let (spent, phases) = phases(
+            &[
+                ("review_started", json!({"attempt": 1}), 2),
+                ("task_held", json!({"hold_id": 1}), 10),
+                ("review_finished", json!({"verdict": "pass"}), 62),
+                held(70),
+                ("task_released", json!({"hold_id": 1}), 370),
+                ("run_phase_changed", json!({"phase": "awaiting_slot"}), 370),
+                ("landing_queued", json!({}), 380),
+                held(400),
+                // Recorded during the wait: it takes over at the release.
+                ("needs_session", json!({"status": "needs_session"}), 410),
+                ("task_released", json!({"hold_id": 2}), 500),
+                ("resume_started", json!({}), 520),
+                ("landing_queued", json!({}), 600),
+                ("integration_started", json!({}), 610),
+                ("run_integrated", json!({}), 620),
+            ],
+            9999,
+        );
+        assert_eq!(
+            spent,
+            map(&[
+                ("exit", 2 + 8 + 10),
+                ("review", 60),
+                ("held", 300 + 100),
+                ("landing_queue", 20 + 10),
+                ("resume", 100),
+                ("rebase", 10),
+            ])
+        );
+        assert_eq!(phases.secs.iter().sum::<i64>(), 620);
+    }
+
+    /// Asks opened during the hold's wait leave the run, once every one
+    /// is answered and the hold released in whatever order, in the phase
+    /// the wait interrupted: a second ask does not take the place of it.
+    #[test]
+    fn asks_during_a_holds_wait_go_back_to_what_the_wait_interrupted() {
+        let held = ("run_phase_changed", json!({"phase": "held"}), 20);
+        let ask = |id: i64, at| {
+            (
+                "ask_opened",
+                json!({"ask_id": id, "kind": "worker_question"}),
+                at,
+            )
+        };
+        let answered = |id: i64| ("ask_answered", json!({"ask_id": id}), 0);
+        let released = ("task_released", json!({"hold_id": 1}), 0);
+        let landed = [
+            ("integration_started", json!({}), 200),
+            ("run_integrated", json!({}), 210),
+        ];
+        let (a, b) = (answered(3), answered(4));
+        for order in [
+            [a.clone(), b.clone(), released.clone()],
+            [b.clone(), a.clone(), released.clone()],
+            [a.clone(), released.clone(), b.clone()],
+            [b.clone(), released.clone(), a.clone()],
+            [released.clone(), a.clone(), b.clone()],
+            [released.clone(), b.clone(), a.clone()],
+        ] {
+            let mut events = vec![
+                ("landing_queued", json!({}), 10),
+                held.clone(),
+                ask(3, 30),
+                ask(4, 40),
+            ];
+            let names: Vec<String> = order
+                .iter()
+                .map(|(kind, payload, _)| format!("{kind} {}", payload))
+                .collect();
+            events.extend(
+                order
+                    .into_iter()
+                    .zip([50, 70, 100])
+                    .map(|((kind, payload, _), at)| (kind, payload, at)),
+            );
+            events.extend(landed.clone());
+            let (spent, _) = phases(&events, 9999);
+            let held_secs = spent.get("held").copied().unwrap_or(0);
+            let ask_secs = spent.get("ask").copied().unwrap_or(0);
+            assert_eq!(spent["landing_queue"], 10 + 100, "{names:?} {spent:?}");
+            assert_eq!(held_secs + ask_secs, 80, "{names:?} {spent:?}");
+            assert_eq!(spent.get("exit"), Some(&10), "{names:?} {spent:?}");
+        }
     }
 
     /// The runtime's e2e after the review (ADR-t1233-2) is a phase of its

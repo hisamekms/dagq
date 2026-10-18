@@ -1420,6 +1420,24 @@ impl<'a> Context<'a> {
                 "phase.wait_to_land".to_owned(),
                 secs(|run| run.wait_to_land),
             ),
+            // The waits for a task's hold (ADR-t1879-1), and the phases
+            // without them to read next to those with them.
+            ("phase.held".to_owned(), secs(|run| run.held)),
+            (
+                "phase.work_without_held".to_owned(),
+                secs(|run| run.without_held.map_or(run.work, |w| w.work)),
+            ),
+            (
+                "phase.validate_without_held".to_owned(),
+                secs(|run| run.without_held.map_or(run.validate, |w| w.validate)),
+            ),
+            (
+                "phase.wait_to_land_without_held".to_owned(),
+                secs(|run| {
+                    run.without_held
+                        .map_or(run.wait_to_land, |w| w.wait_to_land)
+                }),
+            ),
         ];
         for (index, phase) in PHASES.iter().enumerate() {
             kpis.push((

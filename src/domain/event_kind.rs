@@ -402,6 +402,7 @@ event_kinds! {
     TaskEdited => "task_edited",
     TaskGoalChanged => "task_goal_changed",
     TaskHeld => "task_held",
+    TaskHoldReminded => "task_hold_reminded",
     TaskPathsChanged => "task_paths_changed",
     TaskPriorityChanged => "task_priority_changed",
     TaskReleased => "task_released",
@@ -1174,6 +1175,13 @@ pub const TASK_REOPENED: &str = EventKind::TaskReopened.as_str();
 /// and `run_status` then, and `state` (`settling` or `held`). Written with
 /// the hold's row in one transaction.
 pub const TASK_HELD: &str = EventKind::TaskHeld.as_str();
+/// A person told of an open hold (ADR-t1879-1): `hold_id`, `task_id`, `reason`,
+/// `until`, `held_at` (unix seconds), `cause` (`until_passed` or
+/// `long_held`, [`super::task_hold::HoldReminder`]) and `at` (unix seconds,
+/// what the next reminder is timed from). Written by a supervisor's pass
+/// at most once per hold per [`super::task_hold::HOLD_REMIND_SECS`]; an
+/// attention for the inbox.
+pub const TASK_HOLD_REMINDED: &str = EventKind::TaskHoldReminded.as_str();
 /// A task's hold released: `hold_id`, `continuation` (`claim` for a task
 /// with no run that waits, `continue` for one whose run goes on its
 /// way), `held_secs` and `settled_secs`. Written with the release of the
@@ -1633,6 +1641,7 @@ mod tests {
             (EventKind::TaskCreated, "task_created"),
             (EventKind::TaskEdited, "task_edited"),
             (EventKind::TaskHeld, "task_held"),
+            (EventKind::TaskHoldReminded, "task_hold_reminded"),
             (EventKind::TaskGoalChanged, "task_goal_changed"),
             (EventKind::TaskPathsChanged, "task_paths_changed"),
             (EventKind::TaskPriorityChanged, "task_priority_changed"),

@@ -1265,6 +1265,9 @@ impl RunTransitions for SqliteQueue {
     fn settling_holds(&self) -> Result<Vec<crate::domain::task_hold::TaskHold>> {
         SqliteQueue::settling_holds(self)
     }
+    fn remind_task_holds(&mut self) -> Result<usize> {
+        Ok(SqliteQueue::remind_task_holds(self)?.len())
+    }
     fn open_hold(
         &self,
         task: crate::domain::TaskId,

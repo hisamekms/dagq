@@ -192,6 +192,68 @@ impl SqliteQueue {
 }
 
 impl SqliteQueue {
+    /// Every open hold of a task that has not ended, oldest first, each
+    /// with its task's latest run and that run's status now.
+    pub fn held_tasks(&self) -> Result<Vec<task_hold::HeldTask>> {
+        self.task_holds()?
+            .into_iter()
+            .map(|hold| {
+                let run = latest_run(&self.conn, hold.task_id)?
+                    .map(|(run, status)| Ok::<_, anyhow::Error>((run, status.parse()?)))
+                    .transpose()?;
+                Ok((hold, run))
+            })
+            .collect()
+    }
+
+    /// Tell a person of each open hold due now ([`TaskHold::reminder_due`]):
+    /// in one transaction, read the open holds of tasks that have not
+    /// ended and when each was last told, and record `task_hold_reminded`
+    /// for each due, so two supervisors at once tell a hold once. The
+    /// holds told, with why.
+    pub fn remind_task_holds(&mut self) -> Result<Vec<(TaskHold, task_hold::HoldReminder)>> {
+        let now = self.generators.clock.now();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let holds: Vec<TaskHold> = tx
+            .prepare(
+                "SELECT h.* FROM task_holds h JOIN tasks t ON t.id = h.task_id
+                 WHERE h.released_at IS NULL AND t.status NOT IN ('completed','canceled')
+                 ORDER BY h.id",
+            )?
+            .query_map([], hold_row)?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut told = Vec::new();
+        for hold in holds {
+            let last: Option<i64> = tx
+                .query_row(
+                    "SELECT json_extract(payload,'$.at') FROM run_events
+                     WHERE task_id=?1 AND kind=?2 AND json_extract(payload,'$.hold_id')=?3
+                     ORDER BY id DESC LIMIT 1",
+                    params![hold.task_id, EventKind::TaskHoldReminded.as_str(), hold.id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .flatten();
+            let Some(cause) = hold.reminder_due(last, now) else {
+                continue;
+            };
+            event(
+                &tx,
+                hold.task_id,
+                None,
+                EventKind::TaskHoldReminded,
+                json!({"hold_id": hold.id, "task_id": hold.task_id, "reason": hold.reason,
+                       "until": hold.until, "held_at": hold.created_at,
+                       "settled_at": hold.settled_at, "cause": cause, "at": now}),
+            )?;
+            told.push((hold, cause));
+        }
+        tx.commit()?;
+        Ok(told)
+    }
+
     /// What fences `task`'s run at its turn's boundary now
     /// ([`crate::domain::task_replan::TaskGuards::fence`]).
     pub fn turn_fence(&self, task: TaskId) -> Result<Option<crate::domain::task_replan::Fence>> {

@@ -81,6 +81,73 @@ mod tests {
         assert_eq!(of(Some(SessionRole::Planner)), (true, false));
     }
 
+    /// `held` lists every open hold with its run; only an overdue one is
+    /// attention, and only where the attention is for the role.
+    #[test]
+    fn held_tasks_list_every_hold_and_the_overdue_ones_join_the_roles_attention() {
+        use crate::domain::HoldId;
+        use crate::domain::task_hold::{HOLD_REMIND_SECS, TaskHold};
+        use std::time::{Duration, UNIX_EPOCH};
+        struct At(i64);
+        impl Clock for At {
+            fn system_time(&self) -> std::time::SystemTime {
+                UNIX_EPOCH + Duration::from_secs(u64::try_from(self.0).unwrap())
+            }
+            fn monotonic(&self) -> std::time::Instant {
+                std::time::Instant::now()
+            }
+        }
+        let hold = |id: i64, task: i64, until: Option<i64>, settled: Option<i64>| TaskHold {
+            id: HoldId::new(id),
+            task_id: TaskId::new(task),
+            run_id: None,
+            reason: format!("reason {id}"),
+            until,
+            by_role: "user".into(),
+            by_id: "user".into(),
+            created_at: 1_000,
+            settled_at: settled,
+        };
+        let run = RunId::new("11111111-1111-4111-8111-111111111111").unwrap();
+        let holds = [
+            (hold(1, 7, Some(2_000), Some(1_000)), None),
+            (
+                hold(2, 8, None, None),
+                Some((run.clone(), RunStatus::Running)),
+            ),
+        ];
+        let status = |now: i64, role| {
+            let mut status = json!({"attention": [{"kind": "other"}]});
+            add_held_tasks(&mut status, &holds, &At(now), role).unwrap();
+            status
+        };
+        let early = status(1_500, Some(SessionRole::Inbox));
+        assert_eq!(early["held"][0]["overdue"], Value::Null);
+        assert_eq!(early["held"][1]["run_id"], json!(run));
+        assert_eq!(early["held"][1]["run_status"], "running");
+        assert_eq!(early["held"][1]["state"], "settling");
+        assert_eq!(early["attention"].as_array().unwrap().len(), 1);
+        let late = status(1_000 + HOLD_REMIND_SECS, Some(SessionRole::Inbox));
+        assert_eq!(late["held"][0]["overdue"], "until_passed");
+        assert_eq!(late["held"][1]["overdue"], "long_held");
+        let attention = late["attention"].as_array().unwrap();
+        assert_eq!(attention.len(), 3);
+        assert_eq!(attention[1]["kind"], "task_hold_reminded");
+        assert_eq!(attention[1]["next"], "release or keep the hold of task 7");
+        assert_eq!(attention[2]["status"], "settling");
+        assert_eq!(attention[2]["last_error"], "reason 2");
+        assert_eq!(
+            status(1_000 + HOLD_REMIND_SECS, None)["attention"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        let planner = status(1_000 + HOLD_REMIND_SECS, Some(SessionRole::Planner));
+        assert_eq!(planner["held"].as_array().unwrap().len(), 2);
+        assert_eq!(planner["attention"].as_array().unwrap().len(), 1);
+    }
+
     #[test]
     fn a_refused_queue_reports_when_and_why() {
         let report = refused(42, &anyhow::anyhow!("floor 9"));

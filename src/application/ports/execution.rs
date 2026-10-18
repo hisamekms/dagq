@@ -980,6 +980,10 @@ pub trait RunTransitions {
     /// The open holds of tasks that have not ended whose run has not
     /// settled for them yet (`settling`), oldest first.
     fn settling_holds(&self) -> Result<Vec<crate::domain::task_hold::TaskHold>>;
+    /// Record `task_hold_reminded` for each open hold due to be told now
+    /// ([`crate::domain::task_hold::TaskHold::reminder_due`]), once per
+    /// hold whoever asks; how many were told.
+    fn remind_task_holds(&mut self) -> Result<usize>;
     /// The open hold of `task`, if any.
     fn open_hold(
         &self,

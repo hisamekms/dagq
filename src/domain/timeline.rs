@@ -8,6 +8,10 @@
 //!
 //! - `no_supervisor`: the gap ends at a `run_adopted` or `run_recovered`
 //!   (no supervisor held the run until another took it over).
+//! - `held`: the run waits for its task's hold (ADR-t1879-1), from its
+//!   `run_phase_changed` into the phase `held` to the next record of
+//!   another phase or the `task_released`. A gap after `task_held` and
+//!   before that record has the reason of what the run still did.
 //! - `waiting_ask`: an ask of the run that holds it (every kind but the
 //!   observer's `blocked` and the planner's `planner_question`) is open.
 //! - `integrating`: `integrate` is rebasing and verifying the run.
@@ -111,6 +115,8 @@ struct State {
     /// runs, `waiting_e2e` while it waits for another run's.
     e2e: Option<&'static str>,
     open_asks: BTreeSet<i64>,
+    /// In its hold's wait: the last phase recorded is `held`, not released.
+    held: bool,
 }
 
 impl State {
@@ -175,6 +181,11 @@ impl State {
                     self.open_asks.remove(&id);
                 }
             }
+            super::event_kind::RUN_PHASE_CHANGED => {
+                self.held = super::run_phase::Recorded::of_event(event)
+                    .is_some_and(|record| record.is(super::run_phase::Phase::Held));
+            }
+            super::event_kind::TASK_RELEASED => self.held = false,
             _ => {}
         }
         if matches!(
@@ -198,6 +209,8 @@ impl State {
     fn reason(&self, end: Option<&RunEvent>, gap: &mut Gap) {
         if end.is_some_and(|e| matches!(e.kind.as_str(), "run_adopted" | "run_recovered")) {
             gap.reason = "no_supervisor";
+        } else if self.held {
+            gap.reason = "held";
         } else if !self.open_asks.is_empty() {
             gap.reason = "waiting_ask";
             gap.ask_ids = self.open_asks.iter().copied().collect();
@@ -523,6 +536,47 @@ mod tests {
             (Some("resume"), None, None)
         );
         assert_eq!(last.secs, 3600);
+    }
+
+    /// A hold's wait is `held` from the run's `held` record to the
+    /// release, before an ask the run waits for; the gap from `task_held`
+    /// to that record keeps the reason of what the run still did.
+    #[test]
+    fn a_holds_wait_is_held_from_its_record_to_its_release() {
+        let run = events(&[
+            ("agent_started", json!({}), "00:00:00"),
+            ("task_held", json!({"hold_id": 1}), "00:10:00"),
+            ("receipt_observed", json!({}), "00:30:00"),
+            (
+                "ask_opened",
+                json!({"ask_id": 3, "kind": "worker_question"}),
+                "00:30:01",
+            ),
+            ("run_phase_changed", json!({"phase": "held"}), "00:31:00"),
+            ("task_released", json!({"hold_id": 1}), "02:00:00"),
+            (
+                "run_phase_changed",
+                json!({"phase": "needs_session"}),
+                "02:00:00",
+            ),
+            ("run_phase_changed", json!({"phase": "held"}), "02:10:00"),
+        ]);
+        let found = gaps(
+            &run,
+            60,
+            Some(timestamp_millis("2026-09-24T03:10:00Z").unwrap()),
+        );
+        assert_eq!(
+            reasons(&found),
+            [
+                (1, "idle"),
+                (2, "idle"),
+                (5, "held"),
+                (7, "waiting_ask"),
+                (8, "held"),
+            ]
+        );
+        assert_eq!(found[2].secs, 5340);
     }
 
     /// The runtime's e2e after the review (ADR-t1233-2) and the wait for

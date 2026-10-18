@@ -33,7 +33,8 @@ use super::{
     error::require,
     event_kind::{
         HOLD_DEFERRED, HOLD_RESULT_APPLIED, HOLD_RESULT_DISCARDED, HOLD_RESULT_KEPT,
-        LEASE_ACQUIRED, LEASE_RELEASED, TASK_HELD, TASK_RELEASED, WORKSPACE_CLOSED,
+        LEASE_ACQUIRED, LEASE_RELEASED, TASK_HELD, TASK_HOLD_REMINDED, TASK_RELEASED,
+        WORKSPACE_CLOSED,
     },
     task_replan::GuardedStep,
 };
@@ -78,6 +79,9 @@ impl TaskHold {
         }
     }
 }
+
+/// An open hold with its task's latest run and that run's status now.
+pub type HeldTask = (TaskHold, Option<(RunId, RunStatus)>);
 
 /// What a hold or a release names: a task, or a run whose task it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,8 +323,9 @@ pub struct ProgressVersion {
 /// The kinds a run's [`ProgressVersion`] does not count: the hold's own
 /// records, and the leases a recovery round takes and gives back and the
 /// session it closes at its end, which move nothing on.
-const NOT_PROGRESS: [&str; 9] = [
+const NOT_PROGRESS: [&str; 10] = [
     TASK_HELD,
+    TASK_HOLD_REMINDED,
     TASK_RELEASED,
     HOLD_DEFERRED,
     HOLD_RESULT_KEPT,
@@ -387,6 +392,112 @@ pub fn disposition(
     } else {
         Disposition::Discard(DiscardReason::Changed)
     }
+}
+
+/// How long a hold with no `until` goes before a person is told of it,
+/// and how long the queue keeps quiet about a hold after telling of it:
+/// one day. Telling releases nothing.
+pub const HOLD_REMIND_SECS: i64 = 24 * 60 * 60;
+
+// Why a hold is told to a person: its `until` passed, or, with none, it
+// has been on for [`HOLD_REMIND_SECS`].
+string_enum!(HoldReminder {
+    UntilPassed => "until_passed",
+    LongHeld => "long_held",
+});
+
+impl TaskHold {
+    /// When the hold is first due to be told: its `until`, or
+    /// [`HOLD_REMIND_SECS`] after it was held.
+    pub const fn first_due(&self) -> i64 {
+        match self.until {
+            Some(until) => until,
+            None => self.created_at.saturating_add(HOLD_REMIND_SECS),
+        }
+    }
+
+    /// Why the hold waits for a person at `now`: its first due time has
+    /// passed ([`Self::first_due`]); `None` before it.
+    pub const fn overdue(&self, now: i64) -> Option<HoldReminder> {
+        if now < self.first_due() {
+            None
+        } else if self.until.is_some() {
+            Some(HoldReminder::UntilPassed)
+        } else {
+            Some(HoldReminder::LongHeld)
+        }
+    }
+
+    /// Whether to tell a person of the hold at `now`, `last` being when it
+    /// was last told: once it is [overdue](Self::overdue), and after that
+    /// once each [`HOLD_REMIND_SECS`], so one hold does not wake the inbox
+    /// again before the next threshold.
+    pub const fn reminder_due(&self, last: Option<i64>, now: i64) -> Option<HoldReminder> {
+        match (self.overdue(now), last) {
+            (Some(_), Some(last)) if now < last.saturating_add(HOLD_REMIND_SECS) => None,
+            (cause, _) => cause,
+        }
+    }
+}
+
+/// The waits of a run for its task's hold in its `events` (ascending id),
+/// in unix milliseconds: from each `run_phase_changed` into
+/// [`Phase::Held`](super::run_phase::Phase::Held) to the next record of
+/// another phase (the release writes it) or a `task_released`, whichever
+/// comes first; `None` as the end of a wait not over. The time from
+/// `task_held` to that record is not among them: the run went on in the
+/// phases it was in.
+pub fn held_spans(events: &[RunEvent]) -> Vec<(i64, Option<i64>)> {
+    use super::run_phase::{Phase, Recorded};
+    let mut spans = Vec::new();
+    let mut open: Option<i64> = None;
+    for event in events {
+        let Some(at) = super::stats::timestamp_millis(&event.created_at) else {
+            continue;
+        };
+        let held = Recorded::of_event(event).map(|record| record.is(Phase::Held));
+        match (open, held) {
+            (None, Some(true)) => open = Some(at),
+            (Some(start), Some(false)) => {
+                spans.push((start, Some(at.max(start))));
+                open = None;
+            }
+            (Some(start), None) if event.kind == TASK_RELEASED => {
+                spans.push((start, Some(at.max(start))));
+                open = None;
+            }
+            _ => {}
+        }
+    }
+    spans.extend(open.map(|start| (start, None)));
+    spans
+}
+
+/// The holds of a task with no run going in its `events` (ascending id),
+/// in unix milliseconds: each `task_held` to the `task_released` of the
+/// same `hold_id`, `None` as the end of one still open. The fold lays
+/// them over the task's time `ready` (its time before a claim).
+pub fn task_hold_spans(events: &[RunEvent]) -> Vec<(i64, Option<i64>)> {
+    let hold_id = |event: &RunEvent| event.payload["hold_id"].as_i64();
+    let mut spans: Vec<(Option<i64>, i64, Option<i64>)> = Vec::new();
+    for event in events {
+        let Some(at) = super::stats::timestamp_millis(&event.created_at) else {
+            continue;
+        };
+        if event.kind == TASK_HELD {
+            spans.push((hold_id(event), at, None));
+        } else if event.kind == TASK_RELEASED
+            && let Some(span) = spans
+                .iter_mut()
+                .find(|(id, _, end)| end.is_none() && (id.is_none() || *id == hold_id(event)))
+        {
+            span.2 = Some(at.max(span.1));
+        }
+    }
+    spans
+        .into_iter()
+        .map(|(_, start, end)| (start, end))
+        .collect()
 }
 
 #[cfg(test)]
@@ -650,5 +761,87 @@ mod tests {
         );
         let superseded = payload(3, HOLD_RESULT_DISCARDED, json!({SUPERSEDED: true}));
         assert_eq!(triage_state(&[asked, superseded]), TriageState::Finished);
+    }
+
+    /// A hold with no `until` is told a day after it was held, one with
+    /// an `until` once that passed; after a reminder it is quiet until a
+    /// day later, however often it is asked.
+    #[test]
+    fn a_hold_is_told_once_past_its_threshold_and_again_a_day_later() {
+        let day = HOLD_REMIND_SECS;
+        let long = hold(true);
+        assert_eq!(long.first_due(), 100 + day);
+        assert_eq!(long.overdue(100 + day - 1), None);
+        assert_eq!(long.reminder_due(None, 100 + day - 1), None);
+        assert_eq!(long.overdue(100 + day), Some(HoldReminder::LongHeld));
+        assert_eq!(
+            long.reminder_due(None, 100 + day),
+            Some(HoldReminder::LongHeld)
+        );
+        let told = 100 + day + 5;
+        assert_eq!(long.reminder_due(Some(told), told), None);
+        assert_eq!(long.reminder_due(Some(told), told + day - 1), None);
+        assert_eq!(
+            long.reminder_due(Some(told), told + day),
+            Some(HoldReminder::LongHeld)
+        );
+        // An `until` takes the place of the day, sooner or later.
+        let soon = TaskHold {
+            until: Some(160),
+            ..hold(false)
+        };
+        assert_eq!(soon.reminder_due(None, 159), None);
+        assert_eq!(
+            soon.reminder_due(None, 160),
+            Some(HoldReminder::UntilPassed)
+        );
+        assert_eq!(soon.reminder_due(Some(170), 170 + day - 1), None);
+        let late = TaskHold {
+            until: Some(100 + 3 * day),
+            ..hold(true)
+        };
+        assert_eq!(late.reminder_due(None, 100 + 2 * day), None);
+        assert_eq!(late.overdue(100 + 3 * day), Some(HoldReminder::UntilPassed));
+    }
+
+    fn at(id: i64, kind: &str, payload: serde_json::Value, secs: i64) -> RunEvent {
+        RunEvent {
+            payload,
+            created_at: crate::domain::marks::utc_text(secs * 1000),
+            ..event(id, kind)
+        }
+    }
+
+    /// A run's wait for its hold runs from its `held` record to the next
+    /// record of another phase or the release, whichever comes first; the
+    /// time from `task_held` to the `held` record is not part of it.
+    #[test]
+    fn a_runs_wait_for_its_hold_runs_from_its_held_record_to_its_release() {
+        let phase =
+            |id, name: &str, secs| at(id, "run_phase_changed", json!({"phase": name}), secs);
+        let events = [
+            phase(1, "worker", 0),
+            at(2, TASK_HELD, json!({"hold_id": 1}), 10),
+            phase(3, "held", 40),
+            at(4, TASK_RELEASED, json!({"hold_id": 1}), 100),
+            phase(5, "needs_session", 100),
+            at(6, TASK_HELD, json!({"hold_id": 2}), 200),
+            phase(7, "held", 200),
+            phase(8, "worker", 260),
+            phase(9, "held", 300),
+        ];
+        assert_eq!(
+            held_spans(&events),
+            [
+                (40_000, Some(100_000)),
+                (200_000, Some(260_000)),
+                (300_000, None)
+            ]
+        );
+        // A task's holds run from `task_held` to its own release.
+        assert_eq!(
+            task_hold_spans(&events),
+            [(10_000, Some(100_000)), (200_000, None)]
+        );
     }
 }

@@ -603,6 +603,13 @@ fn runs_goals_and_alerts_come_from_the_event_sequence() {
         first.as_object_mut().unwrap().remove("context"),
         Some(Value::Null)
     );
+    // Never held: no hold's wait to leave out.
+    for key in ["held", "without_held"] {
+        assert_eq!(
+            first.as_object_mut().unwrap().remove(key),
+            Some(Value::Null)
+        );
+    }
     assert_eq!(
         first,
         json!({
@@ -614,7 +621,7 @@ fn runs_goals_and_alerts_come_from_the_event_sequence() {
             "land_phases": {
                 "exit": 1080, "review": 0, "revise": 0, "conflict": 0, "ask": 0,
                 "resume": 0, "landing_queue": 0, "e2e_wait": 0, "e2e": 0,
-                "rebase": 120, "verify": 0,
+                "rebase": 120, "verify": 0, "held": 0,
                 "push": null,
                 // Task 509: no verification command was recorded.
                 "verify_commands": [],
@@ -700,6 +707,12 @@ fn runs_goals_and_alerts_come_from_the_event_sequence() {
              "validate": {"count": 2, "total": 180, "median": 90},
              "wait_to_land": {"count": 2, "total": 1440, "median": 720},
              "startup": {"count": 1, "total": 180, "median": 180},
+             "held": {"count": 0, "total": 0, "median": null},
+             "without_held": {
+                 "work": {"count": 2, "total": 3000, "median": 1500},
+                 "validate": {"count": 2, "total": 180, "median": 90},
+                 "wait_to_land": {"count": 2, "total": 1440, "median": 720},
+             },
              "sessions": {},
              "work_breakdown": {"runs": 0, "total_secs": 0, "categories": {}, "commands": {},
                                 "verification_repeats": 0, "runs_with_repeats": 0,
@@ -712,6 +725,12 @@ fn runs_goals_and_alerts_come_from_the_event_sequence() {
              "validate": {"count": 1, "total": 60, "median": 60},
              "wait_to_land": {"count": 0, "total": 0, "median": null},
              "startup": {"count": 0, "total": 0, "median": null},
+             "held": {"count": 0, "total": 0, "median": null},
+             "without_held": {
+                 "work": {"count": 1, "total": 300, "median": 300},
+                 "validate": {"count": 1, "total": 60, "median": 60},
+                 "wait_to_land": {"count": 0, "total": 0, "median": null},
+             },
              "sessions": {},
              "work_breakdown": {"runs": 0, "total_secs": 0, "categories": {}, "commands": {},
                                 "verification_repeats": 0, "runs_with_repeats": 0,

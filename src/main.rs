@@ -1316,7 +1316,7 @@ enum Command {
         /// Task whose run awaits integration or comes back from a session.
         id: i64,
     },
-    /// List supervisors, unfinished runs, what waits for a person (attention), the open asks and the event cursor, without changing anything.
+    /// List supervisors, unfinished runs, what waits for a person (attention), the open asks, the held tasks and the event cursor, without changing anything.
     /// The cursor is read before the state, so `watch --after <cursor>` misses no change after it
     /// (it may repeat one).
     Status {
@@ -1444,7 +1444,7 @@ enum Command {
         until: Option<String>,
     },
     /// A run's events oldest first and the gaps between them of at least --gap seconds, each
-    /// with the reason the events show (idle, waiting_ask, background, after_receipt,
+    /// with the reason the events show (idle, held, waiting_ask, background, after_receipt,
     /// waiting_integration, integrating, e2e, waiting_e2e, no_supervisor, unknown). Reads only.
     Timeline {
         run: String,

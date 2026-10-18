@@ -74,6 +74,7 @@ use caseは`src/application/supervise/waiting.rs`、イベントからの状態�
 人の答えを待つrunのtaskがholdされると（[ADR-t1879-1](../../adr/2026-10-07-t1879-1-hold-a-task-at-the-turn-boundary-and-release-it-explicitly.md)）、待ちの見張りの前に再計画と同じ保留がそのrunを取り、wrapperの終了を確かめて`needs_session`（`hold_parked`）にしてslotの印ごと放す（[needs_session](needs-session.md#taskのhold)）。
 答えが来ても次のturnに届けず、届いていない答えは解除の後のresumeの依頼に載せる。
 holdの待ちはprocessを持たないので、`--max-waiting`と`waiting.count`に数えず、この文書の見張り（stall・沈黙・開き直し）の対象にもならない。
+`timeline`と`stats`・`kpi`はholdの待ち（工程`held`）を人の答えの待ちと同じく分け、除いた値と含む値を並べる（[計測](../measurement.md#区間とタグ)）。
 
 ## 差し戻しと解消依頼の段（`Revise` / `Resume`）
 

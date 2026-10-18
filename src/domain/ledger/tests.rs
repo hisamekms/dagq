@@ -609,6 +609,149 @@ fn a_waiting_task_folds_up_to_now_and_a_legacy_run_leaves_the_task_legacy() {
     assert_eq!(row.legacy.unwrap()["runs"], json!([A]));
 }
 
+/// A ready task's hold, from `task_held` to the `task_released` of the
+/// same hold, is its time held before the claim, a person's wait that
+/// holds no slot; the waits of the supervisors are not laid over it, and
+/// a hold still open runs up to now.
+#[test]
+fn a_ready_tasks_hold_is_held_from_its_hold_to_its_release() {
+    let mut log = Log::default();
+    log.add(None, "task_created", json!({}), 0);
+    task_status(&mut log, 100, "submitted", "ready");
+    log.add(
+        None,
+        "task_held",
+        json!({"hold_id": 1, "reason": "login", "state": "held"}),
+        200,
+    )
+    .add(None, "task_released", json!({"hold_id": 1}), 500)
+    .add(
+        None,
+        "task_held",
+        json!({"hold_id": 2, "reason": "again", "state": "held"}),
+        800,
+    );
+    let waits = [wait(IntervalKind::SlotsFull, None, 150, 900)];
+    let TaskFold::Life(life) =
+        fold::fold_task(TaskId::new(TASK), &log.events, &[], &waits, ms(1000))
+    else {
+        panic!("a folded task");
+    };
+    let names: Vec<_> = life
+        .intervals
+        .iter()
+        .map(|i| (i.phase.as_str(), i.millis()))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            (PLAN_REVIEW, 100_000),
+            (READY, 100_000),
+            (fold::HELD, 300_000),
+            (READY, 300_000),
+            (fold::HELD, 200_000),
+        ]
+    );
+    let held = &life.intervals[2];
+    assert_eq!(held.blocker, Some(Phase::Held.tags().blocker));
+    assert_eq!(held.holds, Some(Holds::None));
+    let totals = Totals::of(&life.intervals);
+    assert_eq!(totals.by_blocker["human"].duration_ms, 500_000);
+    assert_eq!(totals.by_holds["none"].duration_ms, 1_000_000);
+    // Slots full is laid over the time ready only.
+    assert_eq!(life.overlay_millis["slots_full"], 50_000 + 300_000);
+}
+
+/// A task row stored by the fold before a ready task's hold was `held`
+/// (an older [`LEDGER_V`], its hold still `ready`) is built and written
+/// again with no new input, and then holds the hold as a person's wait;
+/// the row built again is not written over itself.
+#[test]
+fn a_task_row_of_the_fold_before_holds_is_saved_again_by_the_new_rule() {
+    let mut log = Log::default();
+    log.add(None, "task_created", json!({}), 0);
+    task_status(&mut log, 100, "submitted", "ready");
+    log.add(
+        None,
+        "task_held",
+        json!({"hold_id": 1, "state": "held"}),
+        200,
+    )
+    .add(None, "task_released", json!({"hold_id": 1}), 500);
+    let built = task_row(TaskId::new(TASK), &log.events, &[], &[], ms(600), "built");
+    let held_ms = |row: &LedgerRow| -> i64 {
+        row.intervals
+            .iter()
+            .filter(|interval| interval.phase == fold::HELD)
+            .map(fold::Interval::millis)
+            .sum()
+    };
+    assert_eq!(held_ms(&built), 300_000);
+    // As the fold before it stored the row: the same inputs, the hold
+    // ready, of the version before.
+    let mut stored = built.clone();
+    stored.ledger_v = LEDGER_V - 1;
+    for interval in &mut stored.intervals {
+        if interval.phase == fold::HELD {
+            interval.phase = READY.to_owned();
+            interval.blocker = Some(crate::domain::run_phase::Blocker::Queue);
+        }
+    }
+    assert_eq!(held_ms(&stored), 0);
+    let last = log.events.last().unwrap().id;
+    assert_eq!(stored.inputs_through.events, last);
+    assert!(rebuilds(Some(&stored), last, None));
+    assert!(builder::writes(Some(&stored), &built));
+    let totals = Totals::of(&built.intervals);
+    assert_eq!(totals.by_blocker["human"].duration_ms, 300_000);
+    assert!(!rebuilds(Some(&built), last, None));
+    assert!(!builder::writes(Some(&built), &built));
+}
+
+/// A hold that reaches a working run: from `task_held` to the `held`
+/// record its turn's end wrote the run goes on as the worker, the time
+/// from it to the release's record is the phase `held` with its tags,
+/// and the run works on after the release.
+#[test]
+fn a_runs_hold_is_held_only_from_its_wait_to_its_release() {
+    let mut log = Log::default();
+    log.claim(0)
+        .first(2, Phase::Worker)
+        .at(100, "task_held", json!({"hold_id": 1, "state": "settling"}))
+        .first(300, Phase::Held)
+        .at(900, "task_released", json!({"hold_id": 1}))
+        .first(900, Phase::NeedsSession)
+        .first(950, Phase::Worker);
+    let life = log.fold(1000);
+    assert_covers(&life, 1000);
+    let names: Vec<_> = life
+        .intervals
+        .iter()
+        .map(|i| (i.phase.as_str(), i.millis()))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            (UNATTRIBUTED, 2_000),
+            ("worker", 298_000),
+            ("held", 600_000),
+            ("needs_session", 50_000),
+            ("worker", 50_000),
+        ]
+    );
+    let tags = Phase::Held.tags();
+    assert_eq!(
+        (life.intervals[2].blocker, life.intervals[2].holds),
+        (Some(tags.blocker), Some(tags.holds))
+    );
+    let totals = Totals::of(&life.intervals);
+    assert_eq!(totals.by_blocker["human"].duration_ms, 600_000);
+    assert_eq!(
+        crate::domain::task_hold::held_spans(&log.of(A)),
+        [(ms(300), Some(ms(900)))]
+    );
+}
+
 /// The events of a run from before the switch: no `run_phase_changed`.
 fn legacy_events() -> Log {
     let mut log = Log::default();

@@ -640,6 +640,86 @@ pub fn for_role(role: Option<SessionRole>) -> bool {
     role.is_none_or(|role| role == crate::domain::ATTENTION_ROLE)
 }
 
+/// Add `status`'s `held` to `status` at `clock`'s now ([`held_tasks`]),
+/// the overdue holds joining its `attention` when that is for `role`
+/// ([`for_role`]), as the rest of the attention does.
+pub fn add_held_tasks(
+    status: &mut Value,
+    holds: &[crate::domain::task_hold::HeldTask],
+    clock: &dyn Clock,
+    role: Option<SessionRole>,
+) -> Result<()> {
+    let (held, attention) = held_tasks(holds, clock.now());
+    status["held"] = held;
+    if for_role(role)
+        && let Some(listed) = status["attention"].as_array_mut()
+    {
+        for item in attention {
+            listed.push(serde_json::to_value(item)?);
+        }
+    }
+    Ok(())
+}
+
+/// `status`'s `held`: each open hold of a task that has not ended
+/// (ADR-t1879-1), oldest first, with its reason, `until`, when and by whom
+/// it was held (`held_at`, `by_role`, `by_id`), the run it named, when its
+/// task stopped moving under it (`settled_at`, null while `state` is
+/// `settling`), its task's latest run and that run's status now, and
+/// `overdue`, why it waits for a person ([`TaskHold::overdue`], null
+/// before). With it, the attention of the overdue ones: the hold stands
+/// until a person releases it, and `watch` tells of it once a day
+/// (`task_hold_reminded`).
+///
+/// [`TaskHold::overdue`]: crate::domain::task_hold::TaskHold::overdue
+pub fn held_tasks(
+    holds: &[(
+        crate::domain::task_hold::TaskHold,
+        Option<(RunId, RunStatus)>,
+    )],
+    now: i64,
+) -> (Value, Vec<Attention>) {
+    let mut attention = Vec::new();
+    let listed = holds
+        .iter()
+        .map(|(hold, run)| {
+            let overdue = hold.overdue(now);
+            if overdue.is_some() {
+                attention.push(Attention {
+                    run_id: run.as_ref().map(|(id, _)| id.clone()),
+                    task_id: Some(hold.task_id),
+                    pid: None,
+                    ask_id: None,
+                    reason_category: None,
+                    status: hold.state().as_str().into(),
+                    kind: event_kind::TASK_HOLD_REMINDED.into(),
+                    last_error: Some(truncate_reason(&hold.reason)),
+                    last_error_code: None,
+                    next: AttentionNext::ReleaseOrKeepHold {
+                        task_id: hold.task_id,
+                    },
+                });
+            }
+            json!({
+                "hold_id": hold.id,
+                "task_id": hold.task_id,
+                "reason": truncate_reason(&hold.reason),
+                "until": hold.until,
+                "held_at": hold.created_at,
+                "by_role": hold.by_role,
+                "by_id": hold.by_id,
+                "requested_run_id": hold.run_id,
+                "state": hold.state(),
+                "settled_at": hold.settled_at,
+                "run_id": run.as_ref().map(|(id, _)| id),
+                "run_status": run.as_ref().map(|(_, status)| status),
+                "overdue": overdue,
+            })
+        })
+        .collect::<Vec<_>>();
+    (Value::Array(listed), attention)
+}
+
 /// `status`'s and `doctor`'s `replans`: the open replanning operations
 /// (ADR-t1521-2), oldest first, each with its task's status now, where it
 /// is and why (its last move's reason, else its request's), how many

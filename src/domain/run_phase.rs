@@ -436,6 +436,20 @@ impl Recorded {
             blocked_by: payload["blocked_by"].as_str().map(str::to_owned),
         })
     }
+
+    /// What `event` records, when it is a `run_phase_changed` ([`Self::of`]).
+    pub fn of_event(event: &RunEvent) -> Option<Self> {
+        if event.kind == event_kind::RUN_PHASE_CHANGED {
+            Self::of(&event.payload)
+        } else {
+            None
+        }
+    }
+
+    /// Whether it records `phase`.
+    pub fn is(&self, phase: Phase) -> bool {
+        self.phase == phase.name()
+    }
 }
 
 /// The last `run_phase_changed` among a run's `events`.

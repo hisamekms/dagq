@@ -2391,6 +2391,13 @@ pub enum AttentionNext {
     /// 1129): a person stops the named processes by pid (or makes the host
     /// list processes again). It ends once the supervisor released the run.
     StopLandingProcesses,
+    /// A task's hold passed its `until`, or has been on for a day with
+    /// none (`task_hold_reminded`, ADR-t1879-1): a person releases it, or
+    /// keeps it and is told again a day later. Nothing releases it by
+    /// itself.
+    ReleaseOrKeepHold {
+        task_id: TaskId,
+    },
 }
 
 impl AttentionNext {
@@ -2493,6 +2500,9 @@ impl fmt::Display for AttentionNext {
             Self::CheckE2e => f.write_str("check the e2e host"),
             Self::ExitSession => f.write_str("exit the session"),
             Self::StopLandingProcesses => f.write_str("stop the dead landing's processes"),
+            Self::ReleaseOrKeepHold { task_id } => {
+                write!(f, "release or keep the hold of task {task_id}")
+            }
         }
     }
 }
@@ -2545,6 +2555,7 @@ pub const ATTENTION_KINDS: &[&str] = &[
     queue_service::QUEUE_SERVICE_DOWN,
     queue_broker::QUEUE_BROKER_DOWN,
     broker_relay::QUEUE_RELAY_DOWN,
+    event_kind::TASK_HOLD_REMINDED,
     "ask_opened",
     "ask_answered",
     "ask_delivery_failed",
@@ -2879,6 +2890,14 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         (queue_service::QUEUE_SERVICE_DOWN, _) => Some(AttentionNext::QueueServiceStatus),
         (queue_broker::QUEUE_BROKER_DOWN, _) => Some(AttentionNext::QueueBrokerLog),
         (broker_relay::QUEUE_RELAY_DOWN, _) => Some(AttentionNext::QueueRelayMachine),
+        // A hold past its `until` or a day on, told once per day
+        // (ADR-t1879-1).
+        (event_kind::TASK_HOLD_REMINDED, _) => payload
+            .get("task_id")
+            .and_then(serde_json::Value::as_i64)
+            .map(|task| AttentionNext::ReleaseOrKeepHold {
+                task_id: TaskId::new(task),
+            }),
         (event_kind::RUNTIME_ERROR, _) if abandon_left_session_open(kind, payload) => {
             Some(AttentionNext::ExitSession)
         }
@@ -4145,6 +4164,15 @@ mod attention_tests {
                 Some(StopLandingProcesses),
             ),
             (
+                "task_hold_reminded",
+                json!({"hold_id": 4, "task_id": 7, "reason": "x", "cause": "long_held"}),
+                Some(ReleaseOrKeepHold {
+                    task_id: TaskId::new(7),
+                }),
+            ),
+            // A reminder that names no task tells nothing to act on.
+            ("task_hold_reminded", json!({"hold_id": 4}), None),
+            (
                 "prompt_waiting",
                 json!({"workspace_id": "w", "excerpt": "x", "screen_hash": "h"}),
                 None,
@@ -4448,6 +4476,13 @@ mod attention_tests {
             "stop the dead landing's processes"
         );
         assert_eq!(PushMain.to_string(), "push main");
+        assert_eq!(
+            ReleaseOrKeepHold {
+                task_id: TaskId::new(7)
+            }
+            .to_string(),
+            "release or keep the hold of task 7"
+        );
         assert_eq!(InstallTool.to_string(), "install tool");
         assert_eq!(LogInToGh.to_string(), "log in to gh");
         assert_eq!(FixDagqToml.to_string(), "fix dagq.toml");

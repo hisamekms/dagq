@@ -46,7 +46,7 @@ use super::{EventId, RunEvent, TaskId, event_kind};
 /// The version of the fold: raised when what a row holds or how it is
 /// folded changes, so every row is built again (a legacy row's frozen
 /// values aside, which the store keeps).
-pub const LEDGER_V: u32 = 2;
+pub const LEDGER_V: u32 = 3;
 
 /// The kind of a row. The store keeps every kind in one table by this
 /// column, so a new kind is a new value.

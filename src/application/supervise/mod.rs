@@ -2229,6 +2229,11 @@ impl Supervisor<'_> {
         if let Err(error) = self.settle_resting_holds() {
             warn!(error = %format_args!("{error:#}"), "the holds of resting runs could not all settle: {error:#}");
         }
+        // Takes no slot: a hold past its `until`, or a day on without one,
+        // is told to a person once a day (ADR-t1879-1); nothing releases it.
+        if let Err(error) = self.queue.remind_task_holds() {
+            warn!(error = %format_args!("{error:#}"), "the holds due could not be told: {error:#}");
+        }
         // Takes no slot: a dead run goes to the triage below.
         self.recover_dead_runs()?;
         // Whatever the slots: a `land` answer only queues the run, which

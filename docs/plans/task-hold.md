@@ -39,6 +39,9 @@ workerのrunは全て非対話（turnごとに別のprocess）で、この文書
   slotで走っていたrunは再計画の保留の経路で`needs_session`（`hold_parked`）になり、解除は今のresumeの経路で同じsessionから続く。
   今の姿は[非対話のworker](../design/supervisor-lifecycle/headless-worker.md#再計画の保留)・[needs_session](../design/supervisor-lifecycle/needs-session.md#taskのhold)・[人の答えを待つrun](../design/supervisor-lifecycle/waiting.md#taskのhold)・[review](../design/supervisor-lifecycle/review.md#再計画の操作が保護するrun)が持つ。
 
+- `status`の`held`とattention・知らせ（「statusとattentionと知らせ」の`status`・attention・知らせ。欄は`held`、attentionと知らせのkindは`task_hold_reminded`）と「計測とtimeline」は済んだ。
+  今の姿は[計測](../design/measurement.md#区間とタグ)・[人の答えを待つrun](../design/supervisor-lifecycle/waiting.md#taskのhold)と、`health::held_tasks`・`TaskHold::reminder_due`・`domain::timeline`のdoc commentが持つ。
+
 ## 目的と境界
 
 - 環境・認証・外のサービスの都合でtaskを待たせる間、supervisorがそのtaskを拾わないことを保証する。

@@ -261,3 +261,97 @@ fn only_a_person_and_the_inbox_hold_or_release() {
     let (ok, released) = dagq(&db, &inbox, &["release", &b.to_string()]);
     assert!(ok, "{released}");
 }
+
+/// `status` lists each open hold in `held`, with its reason, `until`,
+/// when it was held and when its task stopped moving under it, and its
+/// task's run now; a hold past its `until` is attention there for the
+/// inbox. The queue tells it once as `task_hold_reminded`, which `events`
+/// reads as attention, and not again the same day; a hold not due is
+/// told nothing, and a released one leaves `held`.
+#[test]
+fn a_held_task_is_in_status_and_one_past_its_until_is_told_once() {
+    let (_dir, db) = queue();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    ready(&mut queue, "A");
+    ready(&mut queue, "B");
+    let ClaimOutcome::Claimed { run } = queue.claim(&base()).unwrap() else {
+        panic!("claim")
+    };
+    assert_eq!(run.task_id(), TaskId::new(1));
+    let (ok, held) = user(
+        &db,
+        &[
+            "hold",
+            run.id().as_str(),
+            "--reason",
+            "the login expired",
+            "--until",
+            "@1000000000",
+        ],
+    );
+    assert!(ok, "{held}");
+    let (ok, held) = user(&db, &["hold", "2", "--reason", "the vendor is down"]);
+    assert!(ok, "{held}");
+
+    let (ok, status) = user(&db, &["status", "--role", "inbox"]);
+    assert!(ok, "{status}");
+    let listed = status["held"].as_array().unwrap();
+    assert_eq!(listed.len(), 2, "{status}");
+    let (running, ready_one) = (&listed[0], &listed[1]);
+    assert_eq!(running["task_id"], 1);
+    assert_eq!(running["reason"], "the login expired");
+    assert_eq!(running["until"], 1_000_000_000_i64);
+    assert_eq!(running["by_role"], "user");
+    assert!(running["held_at"].is_i64(), "{running}");
+    // The run's turn has not ended: it has not stopped moving yet.
+    assert_eq!(running["state"], "settling");
+    assert_eq!(running["settled_at"], Value::Null);
+    assert_eq!(running["run_id"], run.id().as_str());
+    assert_eq!(running["requested_run_id"], run.id().as_str());
+    assert_eq!(running["run_status"], "claimed");
+    assert_eq!(running["overdue"], "until_passed");
+    assert_eq!(ready_one["task_id"], 2);
+    assert_eq!(ready_one["state"], "held");
+    assert_eq!(ready_one["settled_at"], ready_one["held_at"]);
+    assert_eq!(ready_one["run_id"], Value::Null);
+    assert_eq!(ready_one["overdue"], Value::Null);
+    let told: Vec<&Value> = status["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["kind"] == "task_hold_reminded")
+        .collect();
+    assert_eq!(told.len(), 1, "{status}");
+    assert_eq!(told[0]["task_id"], 1);
+    assert_eq!(told[0]["last_error"], "the login expired");
+    assert_eq!(told[0]["next"], "release or keep the hold of task 1");
+    // A planner sees the holds, not the attention.
+    let (ok, planner) = user(&db, &["status", "--role", "planner"]);
+    assert!(ok, "{planner}");
+    assert_eq!(planner["held"].as_array().unwrap().len(), 2);
+    assert!(planner["attention"].as_array().unwrap().is_empty());
+
+    let reminded = queue.remind_task_holds().unwrap();
+    assert_eq!(reminded.len(), 1);
+    assert_eq!(reminded[0].0.task_id, TaskId::new(1));
+    assert!(queue.remind_task_holds().unwrap().is_empty());
+    let (ok, events) = user(&db, &["events", "--after", "0"]);
+    assert!(ok, "{events}");
+    let told: Vec<&Value> = events["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|event| event["kind"] == "task_hold_reminded")
+        .collect();
+    assert_eq!(told.len(), 1, "{events}");
+    assert_eq!(told[0]["task_id"], 1);
+    assert_eq!(told[0]["reason"], "the login expired");
+    assert_eq!(told[0]["next"], "release or keep the hold of task 1");
+
+    let (ok, released) = user(&db, &["release", "2"]);
+    assert!(ok, "{released}");
+    let (_, status) = user(&db, &["status"]);
+    let listed = status["held"].as_array().unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0]["task_id"], 1);
+}

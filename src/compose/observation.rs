@@ -874,7 +874,9 @@ impl OneShot {
     /// command opens it once.
     /// For the inbox and a planner it adds the `language` their prompt
     /// and the `SessionStart` hook carry (ADR-t616-2). `release_update` is
-    /// the release check of the host's `[update]` (ADR-t618-1).
+    /// the release check of the host's `[update]` (ADR-t618-1). `held` is
+    /// the open holds of tasks, and the overdue ones join `attention`
+    /// ([`health::add_held_tasks`]).
     pub fn status_of(
         &self,
         db: &Path,
@@ -930,6 +932,12 @@ impl OneShot {
             status["toolchains"] = toolchains;
         }
         status["replans"] = health::replans(&queue.open_replans()?);
+        health::add_held_tasks(
+            &mut status,
+            &queue.held_tasks()?,
+            &*self.generators.clock,
+            role,
+        )?;
         let sections = health::status_sections(role);
         if sections.language {
             status["language"] = serde_json::to_value(self.language_report(queue)?)?;

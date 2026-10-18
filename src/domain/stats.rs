@@ -277,6 +277,15 @@ pub struct RunStats {
     pub wait_to_land: Option<i64>,
     /// `agent_started` → `first_commit_observed`.
     pub startup: Option<i64>,
+    /// The seconds the run waited for its task's hold (ADR-t1879-1): its
+    /// phase `held`, from the run's record of it to the release, a
+    /// person's wait like an ask's; the time from `task_held` to that
+    /// record stays in what the run did. Null for a run never held.
+    pub held: Option<i64>,
+    /// `work`, `validate` and `wait_to_land` less the hold's waits in each,
+    /// to read next to them; null for a run never held, where they are the
+    /// same.
+    pub without_held: Option<WithoutHeld>,
     pub resumes: i64,
     /// The `verdict` of the last `review_finished`.
     pub review_verdict: Option<String>,
@@ -342,6 +351,24 @@ pub struct RunStats {
     pub session_spans: Vec<sessions::RunSpan>,
 }
 
+/// A run's intervals less the waits for its task's hold in each
+/// ([`RunStats::without_held`]); null where the interval is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct WithoutHeld {
+    pub work: Option<i64>,
+    pub validate: Option<i64>,
+    pub wait_to_land: Option<i64>,
+}
+
+/// [`Intervals`]' `work`, `validate` and `wait_to_land` over the same runs,
+/// each run's less its hold's waits ([`RunStats::without_held`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct WithoutHeldSummary {
+    pub work: Summary,
+    pub validate: Summary,
+    pub wait_to_land: Summary,
+}
+
 /// Count, sum and median of one interval over a set of runs; runs without
 /// the interval are not counted.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -362,6 +389,10 @@ pub struct Intervals {
     pub validate: Summary,
     pub wait_to_land: Summary,
     pub startup: Summary,
+    /// The runs' waits for their tasks' holds, over the runs held.
+    pub held: Summary,
+    /// `work`, `validate` and `wait_to_land` less the holds' waits.
+    pub without_held: WithoutHeldSummary,
     /// The landed runs' `wait_to_land` by phase, with its long tail.
     pub land_phases: LandBreakdown,
     /// The runs' resumes, together and per reason.
@@ -2032,6 +2063,21 @@ fn intervals(runs: &[&RunStats]) -> Intervals {
         validate: summary(runs.iter().map(|r| r.validate)),
         wait_to_land: summary(runs.iter().map(|r| r.wait_to_land)),
         startup: summary(runs.iter().map(|r| r.startup)),
+        held: summary(runs.iter().map(|r| r.held)),
+        without_held: WithoutHeldSummary {
+            work: summary(
+                runs.iter()
+                    .map(|r| r.without_held.map_or(r.work, |w| w.work)),
+            ),
+            validate: summary(
+                runs.iter()
+                    .map(|r| r.without_held.map_or(r.validate, |w| w.validate)),
+            ),
+            wait_to_land: summary(
+                runs.iter()
+                    .map(|r| r.without_held.map_or(r.wait_to_land, |w| w.wait_to_land)),
+            ),
+        },
         land_phases: landing::breakdown(
             runs.iter()
                 .filter_map(|r| Some((r.land_phases.as_ref()?, r.wait_to_land?))),
@@ -2054,6 +2100,12 @@ struct Track {
     validated: Option<i64>,
     agent_started: Option<i64>,
     awaiting_since: Option<i64>,
+    /// The latest `run_integrated`, where `wait_to_land` ends.
+    integrated: Option<i64>,
+    /// The run's waits for its task's hold that ended, and the start of
+    /// one going on ([`super::task_hold::held_spans`]'s rule).
+    held: Vec<(i64, i64)>,
+    held_since: Option<i64>,
     /// The wait to land by phase, from the first `validation_finished`.
     land: Option<LandClock>,
     measure: measures::MeasureTrack,
@@ -2104,6 +2156,8 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
                     validate: None,
                     wait_to_land: None,
                     startup: None,
+                    held: None,
+                    without_held: None,
                     resumes: 0,
                     review_verdict: None,
                     needs_session: 0,
@@ -2132,6 +2186,9 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
                 validated: None,
                 agent_started: None,
                 awaiting_since: None,
+                integrated: None,
+                held: Vec::new(),
+                held_since: None,
                 land: None,
                 measure: measures::MeasureTrack::default(),
             }
@@ -2139,6 +2196,9 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
         track.measure.observe(event);
         if let (Some(clock), Some(at)) = (&mut track.land, at) {
             clock.observe(event, at);
+        }
+        if let Some(at) = at {
+            track.observe_hold(event, at);
         }
         let run = &mut track.stats;
         // The latest validation that recorded it decides: a resumed run's
@@ -2183,6 +2243,9 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
                 run.finished_event_id.get_or_insert(event.id);
             }
             "run_integrated" => {
+                // The same end as `wait_to_land`'s, which the hold's waits
+                // in it are taken from.
+                track.integrated = at;
                 run.wait_to_land = seconds_between(track.validated, at);
                 run.landed_at = Some(event.created_at.clone());
                 run.status = Some("integrated".to_owned());
@@ -2226,9 +2289,64 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
                 .as_ref()
                 .filter(|clock| clock.landed())
                 .map(|clock| clock.phases(0));
+            track.finish_hold();
             track
         })
         .collect()
+}
+
+impl Track {
+    /// Follow the run's waits for its task's hold by
+    /// [`super::task_hold::held_spans`]'s rule.
+    fn observe_hold(&mut self, event: &RunEvent, at: i64) {
+        use super::run_phase::{Phase, Recorded};
+        let held = Recorded::of_event(event).map(|record| record.is(Phase::Held));
+        match (self.held_since, held) {
+            (None, Some(true)) => self.held_since = Some(at),
+            (Some(start), Some(false)) => {
+                self.held.push((start, at.max(start)));
+                self.held_since = None;
+            }
+            (Some(start), None) if event.kind == super::event_kind::TASK_RELEASED => {
+                self.held.push((start, at.max(start)));
+                self.held_since = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// `held` and `without_held` from the waits that ended: a wait going
+    /// on is not over, as an interval with no end is not.
+    fn finish_hold(&mut self) {
+        if self.held.is_empty() {
+            return;
+        }
+        let within = |from: Option<i64>, to: Option<i64>| -> Option<i64> {
+            let (from, to) = (from?, to?);
+            Some(
+                self.held
+                    .iter()
+                    .map(|(start, end)| ((*end).min(to) - (*start).max(from)).max(0))
+                    .sum::<i64>()
+                    / 1000,
+            )
+        };
+        let less =
+            |value: Option<i64>, held: Option<i64>| Some((value? - held.unwrap_or(0)).max(0));
+        let run = &mut self.stats;
+        run.held = Some(
+            self.held
+                .iter()
+                .map(|(start, end)| end - start)
+                .sum::<i64>()
+                / 1000,
+        );
+        run.without_held = Some(WithoutHeld {
+            work: less(run.work, within(self.claimed, self.receipt)),
+            validate: less(run.validate, within(self.receipt, self.validated)),
+            wait_to_land: less(run.wait_to_land, within(self.validated, self.integrated)),
+        });
+    }
 }
 
 struct OpenAsk {
@@ -3202,6 +3320,56 @@ mod tests {
             goal.stall_thresholds["idle_without_receipt_secs"].outcomes,
             BTreeMap::from([("resolved_by_nudge".to_owned(), 1)])
         );
+    }
+
+    /// A run held during its work and again waiting to land: `held` is
+    /// its waits from the run's `held` records to the releases, and
+    /// `without_held` each interval less the waits in it, beside the
+    /// intervals with them; the time from `task_held` to the record stays
+    /// in the work. A run never held has neither.
+    #[test]
+    fn a_held_runs_intervals_are_given_with_and_without_its_holds_wait() {
+        let phase = |id, name: &str, secs| {
+            run_event(id, R1, "run_phase_changed", json!({"phase": name}), secs)
+        };
+        let events = [
+            run_event(1, R1, "run_claimed", json!({}), T),
+            run_event(2, R1, "task_held", json!({"hold_id": 1}), T + 100),
+            phase(3, "held", T + 200),
+            run_event(4, R1, "task_released", json!({"hold_id": 1}), T + 500),
+            phase(5, "needs_session", T + 500),
+            run_event(6, R1, "receipt_observed", json!({}), T + 700),
+            run_event(7, R1, "validation_finished", json!({}), T + 760),
+            run_event(8, R1, "task_held", json!({"hold_id": 2}), T + 800),
+            phase(9, "held", T + 800),
+            run_event(10, R1, "task_released", json!({"hold_id": 2}), T + 1000),
+            run_event(11, R1, "run_integrated", json!({}), T + 1100),
+            run_event(12, R2, "run_claimed", json!({}), T),
+            run_event(13, R2, "receipt_observed", json!({}), T + 50),
+        ];
+        let runs = run_stats(&events);
+        let held = &runs[0];
+        assert_eq!(
+            (held.work, held.validate, held.wait_to_land),
+            (Some(700), Some(60), Some(340))
+        );
+        assert_eq!(held.held, Some(300 + 200));
+        assert_eq!(
+            held.without_held,
+            Some(WithoutHeld {
+                work: Some(400),
+                validate: Some(60),
+                wait_to_land: Some(140),
+            })
+        );
+        assert_eq!(held.land_phases.as_ref().unwrap().secs[11], 200);
+        assert_eq!((runs[1].held, runs[1].without_held), (None, None));
+        let refs: Vec<&RunStats> = runs.iter().collect();
+        let summary = intervals(&refs);
+        assert_eq!(summary.work.total, 750);
+        assert_eq!(summary.without_held.work.total, 450);
+        assert_eq!(summary.without_held.wait_to_land.total, 140);
+        assert_eq!(summary.held.count, 1);
     }
 
     #[test]

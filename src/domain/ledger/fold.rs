@@ -3,8 +3,9 @@
 //! 16, docs/design/measurement.md "畳む関数"). A run's boundaries are its
 //! `run_phase_changed` records only: no other event moves them. A task's
 //! life before and between its runs is read from its status moves, the
-//! `ready_at` its claims recorded and its runs' own folds, with the waits
-//! of the supervisors before a claim laid over its time ready. Time no
+//! `ready_at` its claims recorded and its runs' own folds, its holds
+//! taking its time ready they cover, and the waits of the supervisors
+//! before a claim laid over the rest of that time. Time no
 //! record accounts for is an `unattributed` interval. Reads no state: the
 //! events, the queue's pushes, the waits before a claim and `now_ms` are
 //! all, and the same input gives the same output.
@@ -32,6 +33,10 @@ pub const DEPENDENCY_WAIT: &str = "dependency_wait";
 pub const PLAN_REVIEW: &str = "plan_review";
 /// A task's time as a draft.
 pub const DRAFT: &str = "draft";
+/// A task's time ready under its hold (`task_held` to `task_released`,
+/// ADR-t1879-1): the run's own phase of the hold's wait, laid over the
+/// task's time before a claim with the same tags.
+pub const HELD: &str = Phase::Held.name();
 
 const ENDED: &str = Phase::Ended.name();
 /// The phase a run whose push failed waits in.
@@ -428,6 +433,10 @@ pub fn fold_task(
     let horizon = end.unwrap_or(now_ms).max(start);
     let mut fold = Composer {
         statuses: &statuses,
+        holds: crate::domain::task_hold::task_hold_spans(events)
+            .into_iter()
+            .map(|(start, end)| (start, end.unwrap_or(i64::MAX)))
+            .collect(),
         claims: runs
             .iter()
             .map(|(_, ready_at, life)| (life.start, *ready_at))
@@ -514,6 +523,8 @@ fn statuses(events: &[RunEvent], start: i64) -> Vec<(i64, String)> {
 /// Lays a task's statuses into intervals between its runs.
 struct Composer<'s> {
     statuses: &'s [(i64, String)],
+    /// The task's holds, an open one to the end of time.
+    holds: Vec<(i64, i64)>,
     /// Each run's claim and the `ready_at` it recorded.
     claims: Vec<(i64, Option<i64>)>,
     intervals: Vec<Interval>,
@@ -544,31 +555,59 @@ impl Composer<'_> {
                     .and_then(|(_, ready_at)| *ready_at)
                     .map(|ready_at| ready_at.clamp(from, to));
                 if let Some(ready_at) = ready_at.filter(|ready_at| *ready_at > from) {
-                    self.push(Interval::tagged(
-                        DEPENDENCY_WAIT,
-                        Blocker::Queue,
-                        Holds::None,
-                        from,
-                        ready_at,
-                    ));
+                    self.push_ready(DEPENDENCY_WAIT, from, ready_at);
                     if to > ready_at {
-                        self.push(Interval::tagged(
-                            READY,
-                            Blocker::Queue,
-                            Holds::None,
-                            ready_at,
-                            to,
-                        ));
+                        self.push_ready(READY, ready_at, to);
                     }
                     return;
                 }
-                (READY, Blocker::Queue)
+                return self.push_ready(READY, from, to);
             }
             // In progress with no run on it (between a run's end and a
             // person's next move), or a status the fold does not know.
             _ => return self.push(Interval::unattributed(from, to)),
         };
         self.push(Interval::tagged(phase, blocker, Holds::None, from, to));
+    }
+
+    /// The time `phase` of a task ready from `from` to `to`, its parts
+    /// under a hold [`HELD`] (a person releases it), the rest `phase`.
+    fn push_ready(&mut self, phase: &str, from: i64, to: i64) {
+        let mut cursor = from;
+        let mut holds: Vec<(i64, i64)> = self
+            .holds
+            .iter()
+            .map(|(start, end)| ((*start).max(from), (*end).min(to)))
+            .filter(|(start, end)| end > start)
+            .collect();
+        holds.sort_unstable();
+        for (start, end) in holds {
+            let start = start.max(cursor);
+            if end <= start {
+                continue;
+            }
+            if start > cursor {
+                self.push(Interval::tagged(
+                    phase,
+                    Blocker::Queue,
+                    Holds::None,
+                    cursor,
+                    start,
+                ));
+            }
+            let tags = Phase::Held.tags();
+            self.push(Interval::tagged(HELD, tags.blocker, tags.holds, start, end));
+            cursor = end;
+        }
+        if to > cursor {
+            self.push(Interval::tagged(
+                phase,
+                Blocker::Queue,
+                Holds::None,
+                cursor,
+                to,
+            ));
+        }
     }
 
     fn push(&mut self, interval: Interval) {
