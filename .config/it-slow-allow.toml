@@ -1667,3 +1667,33 @@ task = 2522
 name = "review_subagents::with_the_fallback_off_an_agent_whose_codex_login_ran_out_waits_for_it_and_the_review_lands"
 reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: fallback off で Codex を名指す agent の job が stderr だけの refresh token の期限切れで落ちたとき、Codex を ProviderHold で控えて job だけが待ち、queue の控えの event が解けた後の pass で Codex で起動し直して着地することを確かめる。行き先の判断は supervise::landing の unit test"
 task = 2522
+
+# 7.4s (stress under the host's load of other runs, task 2607)
+[[test]]
+name = "runtime_cleanup::a_slow_cleanup_does_not_hold_up_the_loop"
+reason = "B 境界（Git・プロセス・supervisor の配線）: worktree の掃除の job の thread が止まっている間も supervisor の loop が回り、後で job を回収して build_outputs_removed を記録することを実際の supervisor・worker の session・Git の worktree で確かめる。消す dir の判断は supervise::cleanup の unit test"
+task = 2607
+
+# 5.6s (stress under the host's load of other runs, task 2607)
+[[test]]
+name = "runtime_cleanup::a_run_leased_during_the_cleanup_keeps_its_worktree"
+reason = "B 境界（SQLite・supervisor の配線）: 掃除の job が worktree ごとに queue を読み直し、その間に別の supervisor が lease を取った run の worktree を残すことを実際の queue と supervisor で確かめる"
+task = 2607
+
+# 8.7s (stress under the host's load of other runs, task 2607)
+[[test]]
+name = "runtime_cleanup::a_landing_waits_for_the_cleanup_of_its_build_outputs"
+reason = "B 境界（SQLite・Git・supervisor の配線）: 掃除の job が予約した run の着地を loop が job の回収まで待たせることを実際の supervisor・queue・Git の worktree で確かめる"
+task = 2607
+
+# 14.7s (stress under the host's load of other runs, task 2607)
+[[test]]
+name = "runtime_cleanup::a_drain_on_a_provisioning_failure_takes_cleanup_requests_and_lets_the_job_finish"
+reason = "B 境界（supervisor の配線・復旧）: provisioning の失敗で drain する supervisor が掃除の頼みを受け続け、走っている job を終わらせることを実際の supervisor・worker の session・queue で確かめる"
+task = 2607
+
+# 8.0s (stress under the host's load of other runs, task 2607)
+[[test]]
+name = "runtime_cleanup::the_pass_after_a_long_cleanup_for_room_asks_and_holds"
+reason = "B 境界（SQLite・supervisor の配線）: 間隔より長く走った空き容量のための掃除の後の周回が、読み直した空きで claim の hold と ask を記録することを実際の supervisor と queue で確かめる。間隔の判断は supervise::disk の unit test"
+task = 2607

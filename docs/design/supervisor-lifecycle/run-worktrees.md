@@ -26,7 +26,9 @@ worktreeのpathはrun_dirの下の`<runs>/<run-id>/worktree`で、`--repo`のche
     別の理由の失敗と、dirかbranchを消せなかったときは上と同じく`cleanup_failed`にする（taskが終わっていないrunはworktreeを消さないので、この経路に来ない）。
   - worktreeのディレクトリがもう無いのにbranch `dagq/<run-id>`が残っていれば、`git worktree prune`（Gitはpruneするまで消えたworktreeを覚えていて、そこにcheckoutされたbranchを消させない）の後にbranchを消す。
     branchが無ければ何もしない。
-- **それ以外（taskがまだ`in_progress` / `ready`など）**: 次のrunやresumeが引き継ぐかもしれないのでworktreeとbranchは残し、worktree直下のビルド成果物（`BUILD_OUTPUT_DIRS`）だけを消して`build_outputs_removed`を記録する。
+- **それ以外（taskがまだ`in_progress` / `ready`など）**: 次のrunやresumeが引き継ぐかもしれないのでworktreeとbranchは残し、worktree直下のビルド成果物だけを消して`build_outputs_removed`を記録する。
+  ビルド成果物のdirの名前は、landing recheckと同じ解決の結果に入っている宣言したprofileが返すもので（[Toolchain profiles](../toolchain-profiles.md)の「buildの出力の置き場」）、宣言が無ければ消さない。
+  Gitがファイルを追跡するdirは消さない。
   worktreeが無ければ何もしない。
 
 ## 終わっていないrunのビルド成果物

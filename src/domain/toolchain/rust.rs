@@ -106,6 +106,11 @@ pub const BUILD_OUTPUT: BuildOutput = BuildOutput {
     env: "CARGO_TARGET_DIR",
 };
 
+/// The directories directly under a run's worktree cargo builds into:
+/// `target`, and `llvm-cov-target`, where `cargo llvm-cov` builds when told
+/// to build beside `target` rather than under it.
+pub const WORKTREE_BUILD_DIRS: &[&str] = &["target", "llvm-cov-target"];
+
 /// The Rust profile, `profile = "rust"`.
 pub static RUST: Rust = Rust;
 
@@ -282,6 +287,10 @@ impl ToolchainProfile for Rust {
 
     fn build_output(&self) -> Option<BuildOutput> {
         Some(BUILD_OUTPUT)
+    }
+
+    fn worktree_build_dirs(&self) -> &'static [&'static str] {
+        WORKTREE_BUILD_DIRS
     }
 
     fn recommendation(&self) -> Recommendation {

@@ -25,7 +25,7 @@ related:
 言語・道具ごとの知識は、runtimeに組み込んだtoolchainのprofileの実装だけが持ち、projectは`dagq.toml`で使うprofileを宣言する（[ADR-t2268-1](../adr/2026-10-12-t2268-1-toolchain-knowledge-behind-declared-profiles.md)）。
 runtimeのほかのコードは、宣言したprofileをportを通して呼ぶだけで、道具の出力の印やenvの名前を持たない。
 
-**実装状況**: portと登録とRustのprofile、`[toolchains.<name>]`の宣言、検証の出力の読み方（失敗の分類・落ちたtestとflakyのtestの抜き出し・flakyのやり直しのenv）、CIの見張りのJUnitのtestの名前、hostの負荷のprocessの種類、hostのRustのtoolchainの記録とKPIの`toolchain`の軸、landing recheckと自動更新のbuildの出力の置き場と掃除、fileの中のtestの行の見分け、推奨の設定（宣言・検証のコマンドの組み合わせ・reviewのプログラム）はある。
+**実装状況**: portと登録とRustのprofile、`[toolchains.<name>]`の宣言、検証の出力の読み方（失敗の分類・落ちたtestとflakyのtestの抜き出し・flakyのやり直しのenv）、CIの見張りのJUnitのtestの名前、hostの負荷のprocessの種類、hostのRustのtoolchainの記録とKPIの`toolchain`の軸、landing recheckと自動更新のbuildの出力の置き場と掃除、runのworktreeのビルド成果物の掃除、fileの中のtestの行の見分け、推奨の設定（宣言・検証のコマンドの組み合わせ・reviewのプログラム）はある。
 計測のコマンドの分類と、containerの材料・registryのhost・workerのcacheのdirの推奨はまだportに無く、今の場所は[Source repository](supervisor-lifecycle/source-repository.md)の「言語・道具の知識の今の場所」にある。
 
 ## portの責務
@@ -66,7 +66,7 @@ runtimeのほかのコードは、宣言したprofileをportを通して呼ぶ�
   pathsはpathに結びつくもの（buildの出力の置き場、testの行の見分け、推奨の案）のためにあり、推奨の案は今は`doctor`と`status`に当たる範囲として出るだけである。
 - 宣言したprofileがどれも読まない出力は、共通の印に当たらなければ`unknown`で、落ちたtestの名前は無く、flakyのやり直しのenvも足さない。
 - 宣言が無いrepositoryでは、dagqのソースでもどのprofileも働かない（`Toolchains::none`、ADR-t2268-1決定3）。
-  検証の出力は共通の印と宣言したprojectの印だけが読み、flakyのやり直しのenvもbuildの出力のdirも足さず、CIの見張りはjobとstepで知らせ、hostの`rustc`とtoolchainの記録とKPIの`toolchain`の軸と`stats`の`rustc`の欄は出さない。
+  検証の出力は共通の印と宣言したprojectの印だけが読み、flakyのやり直しのenvもbuildの出力のdirも足さず、runのworktreeのビルド成果物を消さず、CIの見張りはjobとstepで知らせ、hostの`rustc`とtoolchainの記録とKPIの`toolchain`の軸と`stats`の`rustc`の欄は出さない。
   `doctor`と`status`は宣言の無いことを空の`declared`で示し、警告しない。
   `Cargo.toml`などからprofileを推測して有効にすることはしない。
 - 読むのはqueueが束縛されたmain checkoutの作業ファイルの`dagq.toml`で、`integrate`とlanding recheckが検証のたびに読む。
@@ -89,6 +89,8 @@ runtimeのほかのコードは、宣言したprofileをportを通して呼ぶ�
 - 空き容量のための掃除は、今の宣言に依らず、組み込みのprofileのどれかの宣言のdirに当たる`recheck/`の下のdirを全て見る（`recheck::build_dirs`）。
   宣言を変えた後に前の宣言のdirが残らないためである。
 - 自動更新のsource buildはdagq自身の事情なので、宣言に依らずRustのprofileの出力を使う（[Auto-update](supervisor-lifecycle/auto-update.md)）。
+- runのworktreeの掃除（[Run worktrees](supervisor-lifecycle/run-worktrees.md)）が消すworktree直下のdirの名前もprofileだけが返し（`ToolchainProfile::worktree_build_dirs`）、掃除はlanding recheckと同じ解決の結果に入っているprofileの名前を宣言のpathsに依らず全て消す（理由は`Toolchains::worktree_build_dirs`のdoc comment）。
+  当たるprofileが無いときと、`dagq.toml`が読めない・誤りのときは消さない。
 - workerと`integrate`のbuildの出力の置き場は`[run.env]`のprojectの値で、profileは関わらない。
 
 ## 推奨の設定

@@ -59,11 +59,11 @@ use crate::domain::EventKind;
 use crate::domain::disk::{ProcessExecutable, worktree_executables};
 use crate::domain::event_kind;
 use crate::domain::recovery::{ProcessInfo, run_processes};
-use crate::domain::toolchain::BUILTIN;
+use crate::domain::toolchain::{BUILTIN, Toolchains};
 use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use super::{disk::Cleaned, sweep::BUILD_OUTPUT_DIRS};
+use super::disk::Cleaned;
 
 /// A cleanup for disk space (task 377): the free bytes before it and what
 /// was needed, for `auto_repaired`.
@@ -788,6 +788,9 @@ struct JobPorts {
     /// The queue's directory, whose [`build_caches`] the job clears (for
     /// disk space).
     caches: Option<PathBuf>,
+    /// The profiles the repository declares, as the job started: what
+    /// names the build outputs of a worktree ([`remove_build_outputs`]).
+    toolchains: Toolchains,
 }
 
 impl HostOpsState {
@@ -818,7 +821,7 @@ impl HostOpsState {
     ///   its records, and the landed commit's `refs/dagq/runs/<run-id>`,
     ///   stay;
     /// - otherwise (the task may run it again, or retry it on a new run):
-    ///   only the build outputs ([`BUILD_OUTPUT_DIRS`]) go, and the sources,
+    ///   only the build outputs ([`remove_build_outputs`]) go, and the sources,
     ///   commits and run directory stay; recorded as
     ///   `build_outputs_removed` (`paths`, `bytes`, `by: supervisor`,
     ///   `reason: run_ended`). A link in their place is not followed (its
@@ -992,6 +995,13 @@ impl HostOpsState {
                 .parent()
                 .filter(|_| request.caches)
                 .map(Path::to_path_buf),
+            // As the landing recheck resolves them (ADR-t2268-1); a
+            // `dagq.toml` that cannot be read or resolved names no profile,
+            // so nothing a profile the repository may not use names goes.
+            toolchains: env.verifier.toolchains().unwrap_or_else(|error| {
+                warn!(error = %format_args!("{error:#}"), "the toolchains of dagq.toml could not be read; the cleanup removes no build output of a worktree: {error:#}");
+                Toolchains::none()
+            }),
         };
         let handle = spawn_traced(move || run_job(&ports, candidates));
         self.cleanup.job = Some(Job {
@@ -1581,27 +1591,10 @@ fn clean_worktree(
             bytes, false, removal, branch, stopped, unlisted,
         )));
     }
-    let mut paths = Vec::new();
-    let mut bytes = 0;
-    for name in BUILD_OUTPUT_DIRS {
-        let dir = worktree.join(name);
-        let Some(size) = ports
-            .files
-            .tree_size(&dir)
-            .with_context(|| format!("measure {}", dir.display()))?
-        else {
-            continue;
-        };
-        if ports.repository.tracks(worktree, name)? {
-            continue;
-        }
-        ports
-            .files
-            .remove_dir_all(&dir)
-            .with_context(|| format!("remove {}", dir.display()))?;
-        paths.push(dir.to_string_lossy().into_owned());
-        bytes += size;
-    }
+    let (paths, bytes) =
+        remove_build_outputs(&*ports.files, worktree, &ports.toolchains, &|name| {
+            ports.repository.tracks(worktree, name)
+        })?;
     if paths.is_empty() {
         return Ok(None);
     }
@@ -1612,6 +1605,39 @@ fn clean_worktree(
         paths,
         bytes,
     }))
+}
+
+/// Remove the build outputs of `worktree`: the directories directly under
+/// it the declared profiles name ([`Toolchains::worktree_build_dirs`]),
+/// none while none is declared, unless `tracks` says Git tracks a file in
+/// one. A link in their place measures as none and stays. The paths
+/// removed, and the bytes they took.
+fn remove_build_outputs(
+    files: &dyn RunFiles,
+    worktree: &Path,
+    toolchains: &Toolchains,
+    tracks: &dyn Fn(&str) -> Result<bool>,
+) -> Result<(Vec<String>, u64)> {
+    let mut paths = Vec::new();
+    let mut bytes = 0;
+    for name in toolchains.worktree_build_dirs() {
+        let dir = worktree.join(name);
+        let Some(size) = files
+            .tree_size(&dir)
+            .with_context(|| format!("measure {}", dir.display()))?
+        else {
+            continue;
+        };
+        if tracks(name)? {
+            continue;
+        }
+        files
+            .remove_dir_all(&dir)
+            .with_context(|| format!("remove {}", dir.display()))?;
+        paths.push(dir.to_string_lossy().into_owned());
+        bytes += size;
+    }
+    Ok((paths, bytes))
 }
 
 /// Whether the run's task is over and its worktree is the run's own
@@ -2046,6 +2072,61 @@ mod tests {
                 [Outcome::CacheFailed { path, .. }] if path == &format!("/q/{name}")
             ));
         }
+    }
+
+    /// A worktree loses the directories the declared profiles name and
+    /// nothing else: the Rust profile's `target` and `llvm-cov-target`, a
+    /// second profile's with nothing but its implementation (ADR-t2268-1
+    /// decision 8), and none while no profile is declared, whatever the
+    /// repository's declaration resolves to then. A directory Git tracks a
+    /// file in stays.
+    #[test]
+    fn a_worktree_loses_the_build_outputs_the_declared_profiles_name() {
+        let worktree = Path::new("/runs/r/worktree");
+        let removed = |toolchains: &Toolchains, tracked: &[&str]| {
+            let files = CacheFiles {
+                size: Some(3),
+                ..CacheFiles::default()
+            };
+            let tracks = |name: &str| Ok(tracked.contains(&name));
+            let (paths, bytes) =
+                remove_build_outputs(&files, worktree, toolchains, &tracks).unwrap();
+            assert_eq!(bytes, 3 * paths.len() as u64);
+            let removes: Vec<String> = files
+                .done()
+                .into_iter()
+                .filter_map(|done| done.strip_prefix("remove ").map(str::to_owned))
+                .collect();
+            assert_eq!(removes, paths);
+            paths
+        };
+        let under = |names: &[&str]| -> Vec<String> {
+            names
+                .iter()
+                .map(|name| worktree.join(name).to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(
+            removed(&Toolchains::this_repository(), &[]),
+            under(&["target", "llvm-cov-target"])
+        );
+        assert_eq!(
+            removed(&Toolchains::this_repository(), &["target"]),
+            under(&["llvm-cov-target"])
+        );
+        assert_eq!(
+            removed(&fake::only_fake(), &[]),
+            under(&["fake-out", "fake-cache"])
+        );
+        assert!(removed(&Toolchains::none(), &[]).is_empty());
+        // No declaration removes what its resolution names, and nothing
+        // once it names no profile.
+        let undeclared = Toolchains::resolve(&BUILTIN, &[]).unwrap();
+        let named: Vec<&str> = undeclared
+            .profiles()
+            .flat_map(|profile| profile.worktree_build_dirs().iter().copied())
+            .collect();
+        assert_eq!(removed(&undeclared, &[]), under(&named));
     }
 
     /// The recheck's build outputs of several declarations are cleared

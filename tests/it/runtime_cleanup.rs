@@ -193,6 +193,7 @@ impl RunFiles for GatedFiles {
 #[test]
 fn a_slow_cleanup_does_not_hold_up_the_loop() {
     let (_dir, repo, db) = fixture();
+    declare_rust_profile(&repo);
     {
         let mut queue = SqliteQueue::open(&db).unwrap();
         add_ready_task(&mut queue, "second task", &[]);
@@ -259,6 +260,7 @@ fn a_slow_cleanup_does_not_hold_up_the_loop() {
 #[test]
 fn a_supervisor_whose_owner_is_gone_does_not_wait_for_a_cleanup_that_does_not_end() {
     let (_dir, repo, db) = fixture();
+    declare_rust_profile(&repo);
     let backend = Arc::new(TestWorkspace::new(&db, false, BUILDING_AGENT));
     let files = GatedFiles::default();
     let mut owner = common::service::StandInOwner::start();
@@ -297,6 +299,7 @@ fn a_supervisor_whose_owner_is_gone_does_not_wait_for_a_cleanup_that_does_not_en
 #[test]
 fn a_run_leased_during_the_cleanup_keeps_its_worktree() {
     let (_dir, repo, db) = fixture();
+    declare_rust_profile(&repo);
     {
         let mut queue = SqliteQueue::open(&db).unwrap();
         add_ready_task(&mut queue, "second task", &[]);
@@ -863,6 +866,7 @@ fn assert_kept_but_the_build_outputs(repo: &Path, run: &TaskRun) {
 #[test]
 fn a_run_waiting_for_an_answer_is_a_candidate_unless_a_lease_or_a_session_holds_it() {
     let (_dir, repo, db) = fixture();
+    declare_rust_profile(&repo);
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     let (run, ask) = run_awaiting_an_answer(&db, &repo, &backend, true);
     let queue = SqliteQueue::open(&db).unwrap();
@@ -906,6 +910,7 @@ fn a_run_waiting_for_an_answer_is_a_candidate_unless_a_lease_or_a_session_holds_
 #[test]
 fn a_landing_waits_for_the_cleanup_of_its_build_outputs() {
     let (_dir, repo, db) = fixture();
+    declare_rust_profile(&repo);
     let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
     // Nothing uncommitted: the landing would defer a dirty worktree.
     let (run, ask) = run_awaiting_an_answer(&db, &repo, &backend, false);
@@ -999,6 +1004,7 @@ fn moved_on_counts(queue: &SqliteQueue, run: &TaskRun) -> Vec<usize> {
 #[test]
 fn a_skipped_resume_waits_for_the_cleanup_of_its_build_outputs() {
     let (_dir, repo, db) = fixture();
+    declare_rust_profile(&repo);
     let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);
     crate::runtime_resume::unresolved_attempt(&db, &run, &first_landed);
@@ -1142,6 +1148,7 @@ fn draining_finishes_disk_cleanup_before_deciding_a_landing() {
     // `supervise::cleanup` and `domain::landing_hold`.
     for (handoff, disk) in [(false, Some(false)), (true, Some(true))] {
         let (_dir, repo, db) = fixture();
+        declare_rust_profile(&repo);
         let mut queue = SqliteQueue::open(&db).unwrap();
         add_ready_task(&mut queue, "second cleanup", &[]);
         add_ready_task(&mut queue, "third cleanup", &[]);
@@ -1385,6 +1392,7 @@ fn draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing() {
         Drain::HandoffAfterRest,
     ] {
         let (_dir, repo, db) = fixture();
+        declare_rust_profile(&repo);
         let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
         let (idle, ask) = run_awaiting_an_answer(&db, &repo, &backend, true);
         let mut queue = SqliteQueue::open(&db).unwrap();
@@ -1637,6 +1645,7 @@ fn a_withdrawn_handoff_resumes_the_cleanup() {
     ] {
         let case = format!("{withdrawal:?}, enough={enough}");
         let (_dir, repo, db) = fixture();
+        declare_rust_profile(&repo);
         let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
         // A run nobody works on that waits for no answer: only a cleanup
         // for room removes its build outputs.
@@ -1881,6 +1890,7 @@ fn the_rest_of_a_cleanup_for_room_holds_and_asks_nothing_until_it_is_done() {
     // Room for a landing (a gibibyte), short of a claim.
     const LANDING_ROOM: u64 = 4 * GIB;
     let (_dir, repo, db) = fixture();
+    declare_rust_profile(&repo);
     let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
     let (idle, ask) = run_awaiting_an_answer(&db, &repo, &backend, true);
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -2055,6 +2065,7 @@ fn the_rest_of_a_cleanup_for_room_holds_and_asks_nothing_until_it_is_done() {
 #[test]
 fn a_drain_on_a_provisioning_failure_takes_cleanup_requests_and_lets_the_job_finish() {
     let (_dir, repo, db) = fixture();
+    declare_rust_profile(&repo);
     // Two ended runs whose tasks go on (the fixture's task and one more):
     // the ordinary sweep's two candidates.
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -2215,6 +2226,7 @@ fn half_a_gibibyte(_: &Path) -> Option<u64> {
 fn the_pass_after_a_long_cleanup_for_room_asks_and_holds() {
     const INTERVAL: Duration = Duration::from_millis(200);
     let (_dir, repo, db) = fixture();
+    declare_rust_profile(&repo);
     let building = TestWorkspace::new(&db, false, BUILDING_AGENT);
     supervise(&db, &repo, &building).unwrap();
     building.join();
@@ -2397,6 +2409,7 @@ fn short_while_waiting(_: &Path) -> Option<u64> {
 #[test]
 fn a_waiting_runs_build_outputs_go_for_room_and_its_answer_waits_for_the_cleanup() {
     let (_dir, repo, db) = fixture();
+    declare_rust_profile(&repo);
     WAITING_SHORT.store(false, Ordering::SeqCst);
     let backend = Arc::new(TestWorkspace::new(&db, false, BUILDING_ASKING_AGENT));
     let files = GatedFiles::default();

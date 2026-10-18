@@ -251,6 +251,7 @@ fn branch_exists(repo: &Path, branch: &str) -> bool {
 #[test]
 fn ended_runs_lose_their_build_outputs_and_canceled_tasks_their_worktrees() {
     let (_dir, repo, db) = fixture();
+    declare_rust_profile(&repo);
     {
         let mut queue = SqliteQueue::open(&db).unwrap();
         add_ready_task(&mut queue, "second task", &[]);
@@ -408,12 +409,39 @@ fn a_completed_task_loses_the_worktrees_of_all_its_runs() {
     assert!(Path::new(landed.run_dir().unwrap()).is_dir());
 }
 
+/// The build outputs a worktree loses are those the profiles the
+/// repository declares name, read from `dagq.toml` as the cleanup starts:
+/// with none declared an ended run keeps `target/` and `llvm-cov-target/`
+/// and nothing is recorded; once the Rust profile is declared the next
+/// sweep removes them.
+#[test]
+fn a_worktree_keeps_its_build_outputs_until_a_profile_naming_them_is_declared() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
+    supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    assert_eq!(run.status(), RunStatus::Failed);
+    let worktree = Path::new(run.worktree_path().unwrap());
+    assert!(worktree.join("target/debug/big").is_file());
+    assert!(worktree.join("llvm-cov-target/profraw").is_file());
+    assert!(payloads_of(&queue, &run, "build_outputs_removed").is_empty());
+
+    declare_rust_profile(&repo);
+    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
+    assert!(!worktree.join("target").exists());
+    assert!(!worktree.join("llvm-cov-target").exists());
+    assert_eq!(payloads_of(&queue, &run, "build_outputs_removed").len(), 1);
+}
+
 /// Task 376: build outputs that cannot be removed record `cleanup_failed`
 /// once per process and are removed by a later sweep.
 #[test]
 fn build_outputs_that_cannot_be_removed_are_retried_by_the_sweep() {
     use std::os::unix::fs::PermissionsExt;
     let (_dir, repo, db) = fixture();
+    declare_rust_profile(&repo);
     let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
     supervise(&db, &repo, &backend).unwrap();
     backend.join();

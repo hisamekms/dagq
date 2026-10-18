@@ -11,7 +11,8 @@ use dagq::domain::toolchain::{
 /// retry, `HUNG <test>` ran out of time; its retry runs with
 /// `MADE_FLAKY=accept`; its JUnit names a test `<classname>#<name>`, its
 /// build tool is `madebuild`, it keeps no build output in a directory
-/// of the runtime's, and it tells no test's lines apart. It recommends
+/// of the runtime's or in a run's worktree, and it tells no test's lines
+/// apart. It recommends
 /// itself where a `made.build` is, `madebuild check` as the verification,
 /// and the review programs `made-lint` under `.dagq/review/programs/` and
 /// `made-outside` in `scripts/`, outside what `setup-review` may write.
@@ -72,6 +73,9 @@ impl ToolchainProfile for Made {
     }
     fn build_output(&self) -> Option<BuildOutput> {
         None
+    }
+    fn worktree_build_dirs(&self) -> &'static [&'static str] {
+        &[]
     }
     fn recommendation(&self) -> Recommendation {
         Recommendation {

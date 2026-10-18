@@ -75,6 +75,7 @@ dagqの開発でだけ要る機能は、queueのrepositoryが「dagqのソース
   workerとintegrateのbuildの出力の置き場は`[run.env]`のprojectの値を`infrastructure::run_env`が読むだけで、runtimeに雛形は無い（決まった形ではprofileの推奨の案として出す。ADR-t2268-1決定1・7）。
 - CIの見張りのJUnitのtestの名前とprocessのcargo・rustcの種類はprofileに移った（`ToolchainProfile`）。
   jobとstepの名前は道具に依らずGitHubのものを読み、claude・dagq・そのほかのprocessの種類はruntimeの共通の既定（`domain::host_metrics::process_kind`）に残す。
+- e2eの関門（`e2e_gate`）が`CARGO_TARGET_DIR`を自前で入れることと、`--from`なしの`install`（`LocalBinaries::build`）が`CARGO_TARGET_DIR`と`<checkout>/target`を読むことはprofileに移さず、dagq自身のcheckoutからのinstallと自動更新とそのe2eの関門というruntimeの自前の事情として、dagqのソースかの判定の側に残す（ADR-t2268-1決定2）。
 
 ## テスト
 

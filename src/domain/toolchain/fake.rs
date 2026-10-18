@@ -4,7 +4,8 @@
 //! build that failed, and whose retry runs with `FAKE_FLAKY=accept`; whose
 //! JUnit names a test `<classname>/<name>`; whose processes are the
 //! build tool `fakebuild` and the compiler `fakec`; and which builds into
-//! the directory `FAKE_OUT` names, `fake-out`; whose files are `*.fake`,
+//! the directory `FAKE_OUT` names, `fake-out`, and in a run's worktree
+//! into `fake-out` and `fake-cache`; whose files are `*.fake`,
 //! a line of which that starts with `TEST ` is a test's; which recommends
 //! itself where a `fake.build` is, `fakebuild check` as the verification,
 //! and two review programs, `fake-lint` under `.dagq/review/programs/` and
@@ -95,6 +96,10 @@ impl ToolchainProfile for Fake {
 
     fn build_output(&self) -> Option<BuildOutput> {
         Some(BUILD_OUTPUT)
+    }
+
+    fn worktree_build_dirs(&self) -> &'static [&'static str] {
+        &["fake-out", "fake-cache"]
     }
 
     fn recommendation(&self) -> Recommendation {

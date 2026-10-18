@@ -13,12 +13,6 @@ use super::background::{record_close_failure, run_session_open, stop_swept_wrapp
 use super::*;
 use crate::application::EndedRunWorkspace;
 
-/// The build outputs removed from the worktree of an ended run: these
-/// directories directly under the worktree, unless Git tracks a file in
-/// them. `cargo llvm-cov` builds under `target/llvm-cov-target` unless told
-/// otherwise.
-pub(super) const BUILD_OUTPUT_DIRS: &[&str] = &["target", "llvm-cov-target"];
-
 /// The sweep between passes.
 #[derive(Default)]
 pub(super) struct SweepWatch {

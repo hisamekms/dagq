@@ -364,6 +364,7 @@ fn short_while_scratchpad(_: &Path) -> Option<u64> {
 fn a_cleanup_for_room_removes_the_scratchpads_and_claims_without_holding() {
     const SCRATCH: usize = 1 << 20;
     let (dir, repo, db) = fixture();
+    declare_rust_profile(&repo);
     let queue_dir = db.parent().unwrap().to_path_buf();
     let caches = [
         queue_dir.join("update/target/release/big"),

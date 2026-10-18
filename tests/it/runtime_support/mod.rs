@@ -354,6 +354,19 @@ pub fn fixture() -> (Fixture, PathBuf, PathBuf) {
     )
 }
 
+/// Commit main's `dagq.toml` declaring the Rust profile over the whole
+/// repository: the build outputs a run's worktree loses are those the
+/// declared profiles name (`target`, `llvm-cov-target`), and none while
+/// none is declared.
+pub fn declare_rust_profile(repo: &Path) {
+    let path = repo.join("dagq.toml");
+    let mut toml = fs::read_to_string(&path).unwrap_or_default();
+    toml.push_str("\n[toolchains.rust]\nprofile = \"rust\"\n");
+    fs::write(&path, toml).unwrap();
+    git(repo, &["add", "dagq.toml"]);
+    git(repo, &["commit", "-q", "-m", "declare the rust profile"]);
+}
+
 pub fn add_ready_task(queue: &mut SqliteQueue, title: &str, dependencies: &[TaskId]) -> TaskId {
     let task = queue
         .add(NewTask {

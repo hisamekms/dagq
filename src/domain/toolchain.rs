@@ -167,6 +167,12 @@ pub trait ToolchainProfile: Sync {
     /// own source. `None` for tools that keep no build output there.
     fn build_output(&self) -> Option<BuildOutput>;
 
+    /// The directories directly under a run's worktree the profile's tools
+    /// build into when a worker's turn or its checks run them there: what
+    /// the cleanup of a run's worktree removes, unless Git tracks a file
+    /// in one. Empty for tools that build nothing there.
+    fn worktree_build_dirs(&self) -> &'static [&'static str];
+
     /// The settings the profile recommends a repository that uses it
     /// (ADR-t2268-1 decision 7): proposals `dagq init` and `dagq
     /// setup-review` show ([`recommend`]), never values the runtime uses
@@ -502,6 +508,28 @@ impl Toolchains {
             .find_map(|declared| declared.profile.test_lines(path, text))
     }
 
+    /// The directories the cleanup of a run's worktree removes: those of
+    /// every profile declared ([`ToolchainProfile::worktree_build_dirs`]),
+    /// each once, in the order declared, and none while no profile is
+    /// declared. A declaration's paths do not narrow them, unlike
+    /// [`Self::build_runs`]: those say which files of a tree a command
+    /// builds an output of its own for, while a worktree's directories
+    /// are what a worker's turn and its checks built there, run over the
+    /// whole repository; a directory absent costs nothing, and one Git
+    /// tracks a file in stays.
+    pub fn worktree_build_dirs(&self) -> Vec<&'static str> {
+        let mut dirs: Vec<&'static str> = Vec::new();
+        for dir in self
+            .profiles()
+            .flat_map(|profile| profile.worktree_build_dirs().iter().copied())
+        {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+        dirs
+    }
+
     /// The runs of a command the runtime runs over a tree of the
     /// repository, each the build outputs it builds into: those of the
     /// declarations whose paths match a file of the tree (a declaration
@@ -661,6 +689,26 @@ mod tests {
                 ],
                 "marks": [],
             })
+        );
+    }
+
+    /// The worktree's build outputs are every declared profile's, each
+    /// once, whatever the declarations' paths; none with no profile.
+    #[test]
+    fn the_worktree_build_dirs_are_every_declared_profiles() {
+        assert!(Toolchains::none().worktree_build_dirs().is_empty());
+        let both = Toolchains::resolve(
+            &fake::REGISTRY,
+            &[
+                declaration("core", "rust", &["src/**"]),
+                declaration("web", "fake", &["web/**"]),
+                declaration("tools", "rust", &[]),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            both.worktree_build_dirs(),
+            ["target", "llvm-cov-target", "fake-out", "fake-cache"]
         );
     }
 
