@@ -21,6 +21,9 @@ pub const UNLABELED: &str = "unlabeled";
 
 /// The codes of a run's review with their definitions, heaviest first:
 /// the order the job picks the primary code of an item that fits two.
+/// `adr_conflict`, `acceptance_conflict` and `acceptance_infeasible` are
+/// for a worker that wrote that meeting a criterion breaks another rule or
+/// a fact; a criterion simply not reached is `acceptance_unmet`.
 pub const REVIEW_CODES: &[(&str, &str)] = &[
     (
         "adr_conflict",

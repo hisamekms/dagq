@@ -242,7 +242,9 @@ impl ReviseWatch {
     }
 
     /// Another request typed at `sent_at` (a receipt to fix): only what the
-    /// session does after it counts.
+    /// session does after it counts. It does not restart the resume
+    /// timeout (`sent`), which still runs from the request or the last
+    /// input that restarted it.
     pub(super) fn requested(&mut self, sent_at: SystemTime, start: SystemTime) {
         self.sent_at = sent_at;
         self.live.input_at = Some(sent_at);

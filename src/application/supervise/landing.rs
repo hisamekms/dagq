@@ -158,7 +158,10 @@ impl Supervisor<'_> {
     /// then, once they all pass, record `review_started` and start the
     /// headless review: write `review.md`, then run the reviewer's command
     /// with the task's acceptance and the verdict schema. A review that
-    /// cannot even start is a failed one.
+    /// cannot even start is a failed one. Throughout, the supervisor keeps
+    /// the run's lease and slot and the run stays `awaiting_integration`:
+    /// how far its review got is read from its events (`review_started`,
+    /// `review_finished` and those between), not from its status.
     pub(super) fn start_review(
         &mut self,
         run: &TaskRun,
@@ -1688,7 +1691,11 @@ impl Supervisor<'_> {
         let why = concern_escalation(&verdict, escalated, &history);
         Ok(landing_ask(why, verdict, session, job, true))
     }
-    /// Record `concern_decided` for review `attempt`'s concern.
+    /// Record `concern_decided` for review `attempt`'s concern: once per
+    /// concern, whether applied or asked (ADR-t451-1 decision 3); a review
+    /// no job ran records none. An applied `send_back` that later reaches
+    /// a person leaves it as it is and adds `concern_send_back_escalated`
+    /// of the same attempt.
     pub(super) fn record_concern_decided(
         &mut self,
         run: &TaskRun,
@@ -1964,8 +1971,9 @@ impl Supervisor<'_> {
     /// person: a conflicting landing parks it with its resumes used up, and
     /// the resume pass retries it (`exhaust_resumes`). Otherwise, and when
     /// its counted resumes are used up, the session exits and a person is
-    /// asked. Without a live session to ask (or when Git cannot judge), the
-    /// run lands as before, and a conflicting landing parks it for a resume.
+    /// asked. Without a live session to ask (or when the request cannot be
+    /// sent, or Git cannot judge), the run lands as before, and a
+    /// conflicting landing parks it for a resume.
     /// `job` is the review job that passed the run, recorded as the
     /// `requested_by` of the ask (task 798).
     pub(super) fn precheck(
@@ -2242,7 +2250,9 @@ impl Supervisor<'_> {
     /// Open an `approve_landing` ask of `run` offering `options` (a failed
     /// review's offer `retry_review` too, ADR-t2521-1), carrying the review
     /// job's `recommendation` and `confidence` when it gave them
-    /// (ADR-t451-1 decision 3).
+    /// (ADR-t451-1 decision 3). It first closes the run's earlier unclosed
+    /// ones ([`STALE_LANDING_ASK_CLOSED`]), so a run has at most one open
+    /// `approve_landing` ask.
     fn ask_approve_landing(
         &mut self,
         run: &TaskRun,

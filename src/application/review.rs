@@ -304,9 +304,10 @@ impl SubagentSnapshot {
 /// (ADR-t2259-1 decisions 4 to 6). `Ok(None)` when no agent can be
 /// selected, or when `dagq.toml` writes no agent's table and none is
 /// selected: the review goes as before. `Err` when the file cannot be
-/// read or parsed, a selected agent's definition is not in the tree, or
-/// its tools' declaration is a mistake (ADR-t1728-2): the required checks
-/// are not known, so the review must not pass.
+/// read or parsed, a selected agent's definition is not in the tree, its
+/// tools' declaration is a mistake (ADR-t1728-2), or `range` fails (the
+/// receipt or the range cannot be read): the required checks are not
+/// known, so the review must not pass.
 /// `range` gives `<base>` and `<head>` for the landing branch's commit it
 /// is given ([`review_range_at`]), the one the configuration is read
 /// from, and is called only when some agent can be selected (an enabled

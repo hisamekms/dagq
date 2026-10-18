@@ -1603,7 +1603,8 @@ pub trait RunReads {
     /// Returns [`RunNotFound`] only when the lookup succeeded with no row.
     fn run(&self, id: &RunId) -> Result<TaskRun>;
     fn runs_with_status(&self, status: RunStatus) -> Result<Vec<TaskRun>>;
-    /// The run awaiting integration longest, by validation time.
+    /// The run awaiting integration longest, by validation time, skipping
+    /// one whose task is being replanned or held (`integrate --next`).
     fn next_awaiting_integration(&self) -> Result<Option<TaskRun>>;
     /// The sessions of the ended runs the triage does not take, for the
     /// supervisor's sweep.

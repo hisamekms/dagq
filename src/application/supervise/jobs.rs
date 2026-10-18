@@ -1355,6 +1355,9 @@ pub(super) struct ReviewJob {
     /// `review_job_started` carries; `None` for a project's agent.
     pub(super) builtin: Option<serde_json::Value>,
     /// Whether it ran once more already, or starts as its run once more.
+    /// The supervisor's state keeps it across the job's waits (for a held
+    /// provider, for room under the limit of jobs at once), so a wait never
+    /// gives a job a second run once more.
     pub(super) again: bool,
     pub(super) state: ReviewJobState,
     /// The session of its last run that ended, without its tokens (its
