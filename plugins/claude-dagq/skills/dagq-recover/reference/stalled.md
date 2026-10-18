@@ -8,7 +8,7 @@ A run's session is headless: a background process with no screen and no workspac
 
 Before answering, read what the turns did (the question's last turns, `"$DAGQ" run log RUN`, `"$DAGQ" timeline RUN`, `"$DAGQ" events --run RUN --full`) and bring it to the person. Then answer with the person's choice; the supervisor applies it and closes the ask itself:
 
-- **`wait`**: leave the session alone; the idle is counted again from the answer.
+- **`wait`**: leave the session alone; the idle is counted again from the answer, so the same ask may come back.
 - **`propose`** (or `propose: <why>`): a runtime planner proposes a remedy for the cause; the session is left alone as for `wait`.
 - **`stop`**: the supervisor has the session exit; the run ends without a receipt and goes to its recovery job. Nobody ends the wrapper or signals a process by hand.
 - **An instruction** (any other text): sent as the session's next turn.

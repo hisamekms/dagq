@@ -42,7 +42,7 @@ The list is a forecast, not a limit: the worker may change other files, and noth
 ## Change the paths
 
 ```sh
-"$DAGQ" set-paths TASK --paths 'docs/**' --paths '*.md'   # replace every glob of a draft, submitted or ready task
+"$DAGQ" set-paths TASK --paths '<glob>' --paths '<glob>'   # replace every glob of a draft, submitted or ready task
 "$DAGQ" set-paths TASK --none                             # remove the limit
 ```
 

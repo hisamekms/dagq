@@ -8,7 +8,7 @@ A finding is one record per problem (a `kind`, a target and a `subject`); record
 
 - `"$DAGQ" findings` lists the open and proposed findings, biggest impact first; `findings ID` shows one in any status, `--full` with its evidence events (`findings --help`).
 - `"$DAGQ" events --full --run RUN_ID` (or `--task`, `--goal`, `--kind`) reads the events around a finding; `"$DAGQ" timeline RUN_ID` shows where a run's time went (`reference/inspect.md`).
-- `"$DAGQ" observe --history` lists the observations, and `observe --input OBSERVATION` reads one's whole input, including what its prompt left out. The second failed observation in a row (`consecutive_failures`) reaches the inbox as `check the failed observer`.
+- `"$DAGQ" observe --history` lists the observations, and `observe --input OBSERVATION` reads one's whole input, including what its prompt left out. Repeated failed observations reach the inbox as `check the failed observer`.
 
 ## Threshold findings: reading `stall_thresholds` and `running_alerts`
 
@@ -29,7 +29,7 @@ The observer reads the KPIs (`reference/kpi.md`) with the targets of `dagq.toml`
 - A target in `breach` becomes a finding `--kind kpi --queue --subject '<KPI>/<stratum>'` (e.g. `phase.work/area=<area>`) with the breach's event as evidence; the day and the week of one KPI and stratum are one finding. `missed` and `not_judged` make none, and a breach is never a `blocked` ask. The observer resolves it once the target is `ok` again, and marks it `--propose` when the impact and the length call for a remedy.
 - A breach of a `forecast.*` target becomes `--kind forecast --queue --subject '<metric>/<stratum>'` without the `forecast.` prefix (e.g. `p90_hit_rate/all`), never a `kpi` finding, under the same rules. A forecast bias is judged only as such a breach.
 - Read a `kpi` finding with `kpi` and the `marks` around `breach_since`: a change there may be the cause, or the remedy.
-- **Improvement limit.** While the open improvement work for findings reaches `[kpi] max_improvement_proposals` of `dagq.toml`, the supervisor opens no planner for another marked finding; it stays `open` and waits, oldest mark first (`findings` shows it as `improvements`).
+- **Improvement limit.** While the open improvement work for findings reaches `[kpi] max_improvement_proposals` of `dagq.toml`, another marked finding waits `open` for a planner (`findings` shows it as `improvements`).
 - **Priority.** An improvement's tasks take their goal's priority, `normal` or below; a priority a person set stays.
 
 ## Where a finding goes

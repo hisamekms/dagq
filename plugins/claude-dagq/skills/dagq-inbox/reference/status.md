@@ -12,14 +12,13 @@ Read this when what `status`, `watch` or `show` says, or what to do about an att
   - `slots` and `waiting` say how many runs hold a slot, wait to land and wait for a person; count them from these, never from the number of `runs`.
 - `inbox_guardrail` (also in `doctor`): `false` means this inbox was opened without the settings that refuse `cmux`. Tell the person and, after your handoff, have them reopen it (`dagq-recover`'s `reference/up-down.md`, "Open the inbox again"). A `claude` typed again in the workspace has no settings whatever this says.
 - `inbox_watcher` (also in `doctor`): `watching` `0` means no watch runs: start the one of `watch.md`. The Stop hook blocks your turn while it is `0`. When `absent_secs` was long, tell the person: asks opened meanwhile reached nobody.
-- `sccache`: the identity and health of the build cache server the run environment names; `doctor` shows its statistics (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/doctor.md`, "sccache server").
-- `runs` (also in `doctor`): the unfinished runs and the runs a lease holds, each with `progress` (`phase`, `since`, `slot`). Progress is `phase` moving with `slot: used`; when `phase` is `null`, do not guess one. A person is needed only where `slot` is `waiting` (answer its ask) or `attention` names the run. A run's session is read with `run log` (below).
+- `sccache`: when the build cache server the run environment names needs a person, act on its attention below; `doctor` shows it (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/doctor.md`, "sccache server").
+- `runs` (also in `doctor`): the unfinished runs and the runs a lease holds. Progress is the phase moving while the run holds its slot; when there is no phase, do not guess one. A person is needed only where `slot` is `waiting` (answer its ask) or `attention` names the run. A run's session is read with `run log` (below).
 - `waiting`: the runs out of their slots while they wait for a person (below).
 - `asks`: the open asks, cut short; read them whole with `asks --open --role inbox`.
 - `ci`: the CI of the watched branch. A red CI needs nothing from the inbox: a runtime planner registers the fix. The failing tests: `"$DAGQ" ci failures`.
-- `language`: the language to write for people in (the `dagq` skill's section 5).
-- `cursor`: where the next `watch` starts.
-- `attention`: each with `run_id`, `task_id`, `status`, `kind`, `last_error` and a fixed `next`. `--role inbox` keeps all of it. What each `next` asks of you is below.
+- `language`: write for people in it (the `dagq` skill's section 5).
+- `attention`: act on each by its `next` (below); `--role inbox` keeps all of it.
 
 ## Each attention's next
 
@@ -65,7 +64,7 @@ A `(runtime)` next needs nothing: `reviewing`, `resuming`, `triaging`, `queued t
   - `restart supervisor`: `up` on the person's word. `supervisor_duplicate`: `down --wait`, then `up` (`dagq-recover`'s `reference/up-down.md`).
   - A worker provider that cannot be used is no attention: its runs move to the other provider, and the person acts only on a `queue_hold` ask (`reference/asks.md`).
 - Notices (they do not stay in `status`; tell the person):
-  - `report the update`: the supervisor updated dagq by itself, or only the plugin. Tell the person its `version`, its `commit` (or `release`), any `reason` or `message` it has, and that sessions reopened after it load the updated plugin. Nothing to do; a failed update is an ask instead.
+  - `report the update`: the supervisor updated dagq by itself, or only the plugin. Tell the person the version and what the notice says, and that sessions reopened after it load the updated plugin. Nothing to do; a failed update is an ask instead.
   - `report the review`, `check the failed review`: `watch.md`, "The throughput review's notice".
   - `check the failed observer`: `watch.md`, "The observer's failure notice".
 
@@ -75,7 +74,7 @@ A run whose session only waits for a person's answer leaves its slot while it wa
 
 ## asks
 
-`"$DAGQ" asks` lists the asks nobody closed (`--open`, `--role inbox`, `--all`: `asks --help`). Every ask carries its `reason_category`; show it with the question.
+`"$DAGQ" asks` lists the asks nobody closed (`--open`, `--role inbox`, `--all`: `asks --help`). Show each ask's reason category with its question.
 
 - `ask close <id>` marks an answered ask read. An unanswered ask cannot be closed: to withdraw one on the person's word, answer it first (`"$DAGQ" answer <id> --text "withdrawn: <why>"`), then close it.
 - `ask` notifies nobody; your watch tells the person of new asks through the host's push, when it has one.
@@ -98,7 +97,7 @@ Never build the log's path yourself. `--follow` keeps printing: run it in the ba
 
 ## show
 
-`"$DAGQ" show ID` prints a task, its latest run, its recent events and its asks, with long texts cut; `--full` prints them whole (`show --help`). `"$DAGQ" list --status in_progress` finds the tasks worth a `show`. `stats` (`stats --help`, the `dagq` skill's `reference/inspect.md`) reads run events; leave proposals from it to the observer.
+`"$DAGQ" show ID` reads one task, with long texts cut; `--full` prints them whole (`show --help`). `"$DAGQ" list --status in_progress` finds the tasks worth a `show`. `stats` (`stats --help`, the `dagq` skill's `reference/inspect.md`) reads run events; leave proposals from it to the observer.
 
 ## goal list
 

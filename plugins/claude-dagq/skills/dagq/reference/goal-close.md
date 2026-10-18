@@ -4,10 +4,10 @@ A goal is closed once. Closing it after its last task is not a planner's step: t
 
 ## The goal review job
 
-The supervisor starts it for an open goal whose tasks are all `completed` or `canceled` (at least one `completed`, no `draft` or `submitted` left), whose follow-ups are settled ("When a goal may close achieved" below), and whose input changed since its last review. It returns one verdict:
+It comes once every task of an open goal is finished (at least one `completed`, no `draft` or `submitted` left) and its follow-ups are settled ("When a goal may close achieved" below). It returns one verdict:
 
 - **achieved**: the goal closes `achieved` and its `dependents` are released.
-- **gaps**: each gap becomes a `draft` task on the goal, which a runtime planner adopts, drops or asks about like a follow_up draft (`reference/register.md`, "A runtime planner for a draft"). The review starts again once they finish; gaps found again and again turn into an ask.
+- **gaps**: each gap becomes a `draft` task on the goal, which a runtime planner adopts, drops or asks about like a follow_up draft (`reference/register.md`, "A runtime planner for a draft"). Once they finish, the goal is reviewed again; gaps that keep coming back become an ask.
 - **ask**: only when a person is needed (the acceptance changes, abandoning or splitting it, or the job cannot judge): an `approve_goal` ask in the inbox. An answer the supervisor does not apply itself comes back to the inbox to carry out and `ask close`.
 
 A goal that waits only for an unsettled follow-up shows in `status`'s attention as `request a plan for the follow-ups of goal G`. A planner's `judge-follow-up` clears it; the runtime never judges or moves a follow-up itself.

@@ -6,41 +6,42 @@ Each command's flags and the fields it prints are in `"$DAGQ" <command> --help` 
 
 | Command | Answers |
 | --- | --- |
-| `goal list` / `goal show ID` | Every goal, unclosed first, each by priority, with its task counts / one goal, its tasks, latest events and notes, and the unfinished tasks of any goal waiting on it (`dependents`) |
-| `list` / `show ID` | Unfinished tasks, a page at a time / one task with its dependencies, latest run, events, notes and asks |
+| `goal list` / `goal show ID` | Which goals there are and how far each is / one goal, and the unfinished tasks of any goal waiting on it |
+| `list` / `show ID` | Unfinished tasks, a page at a time / one task |
 | `search QUERY` / `related TASK` | Tasks, goals, notes and landed commits matching words / the tasks most related to one by fixed clues (below) |
 | `graph` / `candidates` | Dependencies, what each task still waits for and the critical chain / which ready tasks the supervisor claims next, which it deferred and why, and what holds every claim (below) |
-| `events` / `timeline RUN` | Events oldest first, filtered by kind, task, run or goal / one run's events and the gaps between them with their reason |
+| `events` / `timeline RUN` | What happened, by kind, task, run or goal / where one run's time went between its steps |
 | `notes` / `note` | Notes on a goal, task or run / record one (changes the queue: an `observation` event) |
 | `findings` / `finding dismiss` / `finding resolve` | The observer's findings and how to decide them: `reference/observer.md`. `--covered-by TASK` only for a `ci_failure` finding and an open task that already fixes its tests (`reference/register.md`) |
 | `ci failures [--task ID]` | The tests already failing on the branch the supervisor's CI watch watches; `--task ID` sets apart those the task fixes. Workers and jobs may not run it |
 | `status` / `doctor` | Supervisors, slots, waiting runs and the runs in flight / the same per run with what blocks its recovery (`reference/doctor.md` of the recover skill for acting on it) |
-| `stats` | Where time goes, from run events: per run, goal and overall, with alerts, holds, deferrals, sessions and review reasons |
+| `stats` | Where time goes, per run, goal and overall |
 | `kpi` / `forecast` / `marks` / `mark` / `report` | KPIs, forecasts and change marks: `reference/kpi.md` |
 | `observe --history` / `observe --input` | The observer's past observations and their whole input |
 | `locate` | The queue this directory resolves to, without opening it (`reference/locate.md`) |
 
 ## Read the output
 
-- **Pages.** `list` prints `{"tasks", "next", "total"}`. A null `next` means the last page; otherwise pass it as `--before NEXT` with the same filters. Decide whether more pages exist from `next` alone, never by counting `tasks`. `events` and `notes` page with their `cursor` the same way. In `stats`, `next_cursor` pages only the runs and what derives from them; its period aggregates count the whole window, so never sum them across pages.
-- **Cut texts.** `show`, `goal show` and `doctor` may cut long texts, ending them in `…` and marking the object `truncated: true`. Add `--full` only when you need the whole text, every run, every event payload (a receipt), every ask or a run's `run_dir`. Take the text to edit from `show --full`, never from the cut one.
-- **One task.** Prefer `show ID` to `list --full`. A `claim_deferral` key in the compact `show` means the supervisor is passing over the task at claim now and says why; `show --full` leaves it out (read the `claim_deferred` events instead).
+- **Pages.** Page `list`, `events` and `notes` with the cursor the output gives, with the same filters, until it is null (`<command> --help`); decide whether more pages exist from it alone, never by counting items. `stats`' cursor reads the runs finished later (`stats --help`); its totals already cover the whole window: never sum them across pages.
+- **Cut texts.** `show`, `goal show` and `doctor` may cut long texts, ending them in `…`. Add `--full` only when you need them whole. Take the text to edit from `show --full`, never from the cut one.
+- **One task.** Prefer `show ID` to `list --full`. To see why a ready task is passed over at claim, read `show ID` or `candidates`.
 
 ## Statuses
 
 Task: `draft` → `submitted` (in a proposal, waiting for plan review; never claimed) → `ready` → `in_progress` → `completed`, or `canceled`. Only plan review, a person's explicit `ready --bypass-review` and a retry of an `in_progress` task whose runs failed make a task `ready`. A task stays `in_progress` while any run is unfinished or awaiting integration.
 
-Run: `claimed`, `starting`, `running` and `validating` are unfinished. `awaiting_integration` passed validation and waits for `integrate`, which runs the verification commands after its rebase; `integrating` is being landed now. `needs_session` hit a rebase conflict, a failed verification or a scope violation, and the supervisor resumes its session a limited number of times, then hands it to the recovery job (`last_error` says why). `integrated` landed (`result_commit`) and completed the task. `failed` and `interrupted` keep their worktree for inspection and go to the recovery job. A dependent task waits until every predecessor is `completed`.
+Run: `claimed`, `starting`, `running` and `validating` are unfinished. `awaiting_integration` passed validation and waits for `integrate`, which runs the verification commands after its rebase; `integrating` is being landed now. `needs_session` hit a rebase conflict, a failed verification or a scope violation, and the runtime resumes or recovers it (`last_error` says why). `integrated` landed (`result_commit`) and completed the task. `failed` and `interrupted` keep their worktree for inspection; the runtime's recovery handles them. A dependent task waits until every predecessor is `completed`.
 
-A run whose live session only waits for a person's answer leaves its slot (`status`'s `waiting`) and keeps its lease, session and status; the answer returns it to a slot before new claims. The inbox skill's `reference/status.md` says how to read it.
+A run whose live session only waits for a person's answer frees its slot (`status`'s `waiting`); answering its ask is all it needs. The inbox skill's `reference/status.md` says how to read it.
 
 ## Claude session time
 
-`stats` records each Claude session the runtime uses as a span per kind (`worker`, `resume`, `revise`, `review`, `triage` for the recovery job, `observer`, `plan_review`, `goal_review`, `throughput_review`, and through the plugin's hooks `inbox`, `planner`, `runtime_planner`) with two times: `open` (wall clock from open to close) and `active` (time spent on turns). `open` much longer than `active` means the session sat idle, waiting for a review, a person or its end.
+Read a Claude session's time and tokens with `"$DAGQ" stats` (its fields: `"$DAGQ" stats --help` and its output).
 
-- `sessions.by_kind` covers the window (`--since` / `--until`): the inbox and the planners have no run and appear only there. `active_ratio` is active over open; `open_now` counts spans still open at the window's end, `inferred` spans closed without a seen end, `active_unavailable` spans whose transcript could not be read (yet). `sessions.by_route` splits the same by `interactive` / `headless`.
-- `execution_tokens` counts the tokens of each turn, job and session cut that ended in the window; `recorded_from` says when the records begin and `coverage` (`full` / `partial` / `none`) how much of the window they cover. Tokens are advisory: never for billing or authorization.
-- A context or token value not recorded is counted as missing, never as 0.
+- A session open much longer than it was active sat idle, waiting for a review, a person or its end: look for what it waited on, not for slow work.
+- The inbox and the planners have no run: read them in the window's sessions, not per run.
+- Tokens (`execution_tokens`) are advisory: never for billing or authorization.
+- A context or token value not recorded is missing, never 0.
 
 ## Find duplicates and work already done (`search`, `related`, `--duplicate-of`)
 
@@ -74,7 +75,7 @@ When planning a goal or deciding what to submit next, read `"$DAGQ" graph --goal
 3. When one task blocks many, split it or remove a dependency that is not real (`dependency remove`) so more run in parallel.
 4. `candidates` is the order the supervisor claims in, as of its last judgment of the deferrals; what holds every claim is in `held`. There is no need to register or submit in a particular order: to put a task ahead, give it a priority (below).
 
-The deferrals are judged only in a pass that may claim, so while the slots are full or a hold is on, an earlier deferral stays: read its `since` and `held`. `graph --format d2|svg` draws the near-term diagram; SVG needs `d2` and its TALA plugin on PATH (`doctor` shows where they resolve).
+While the slots are full or a hold is on, a deferral shown may be old: read its `since` and `held`. `graph --format d2|svg` draws the near-term diagram; SVG needs `d2` and its TALA plugin on PATH (`doctor` shows where they resolve).
 
 ## Priority and claim order
 
@@ -97,11 +98,11 @@ A goal and every task have one of five priorities. Pick it by what waiting costs
 ```
 
 - **Where a task's priority comes from.** The goal's priority is the source: a task without its own takes its goal's; `priority_source` says which. Give a task its own only to raise or lower a few tasks of a goal; it does not follow the goal's changes. What a task moved to another goal keeps: `reference/register.md`.
-- **Claim order.** Highest effective priority → most `unblocks` → lowest ID. Goals have no rank: order goals by their priority.
-- **Execution classes.** Within one priority, when both classes (implementation and Spike) have ready tasks, the class whose task has waited past the class aging threshold, and longer than any of the other class's, goes first. Aging never moves a task above a higher priority, never passes the Spike limit or a deferral, and never touches `interrupt` tasks. To hurry a Spike, raise its priority (not to `interrupt`).
-- **Slot order.** A free slot goes to one line of resumes of `needs_session` runs, recovery jobs of `failed` or `interrupted` runs, and claims, sorted by each one's task's effective priority; on the same priority a resume comes first, then a recovery job, then a claim. So a `high` ready task is claimed before a `normal` task's resume. A held kind only leaves the line; it keeps no slot free.
+- **Claim order.** A higher effective priority is claimed first; within one priority, what unblocks more. Goals have no rank: order goals by their priority.
+- **Execution classes.** Within one priority the runtime balances implementation and Spike tasks itself, never above a higher priority. To hurry a Spike, raise its priority (not to `interrupt`).
+- **Slot order.** Resumes, recovery jobs and claims compete for a free slot by their task's effective priority, so a `high` ready task is claimed before a `normal` task's resume. A hold keeps no slot free.
 - **Effective priority.** A task's priority raised to the highest of the `ready` tasks (outside a draft goal) that wait on it, directly or transitively. A `high` ready task pulls its unfinished predecessors ahead: there is no need to raise them one by one. A draft set aside pushes nothing forward.
-- **When it can change.** A task's own while it is `draft`, `submitted` or `ready`; while `in_progress` only by the user and the inbox (a planner changes only tasks that have not started); never on a finished task. A goal's on a draft or open goal. A change takes effect at the next claim, resume or recovery job and never stops a running run.
+- **When it can change.** A task's own while it is `draft`, `submitted` or `ready`; while `in_progress` only by the user and the inbox (a planner changes only tasks that have not started); never on a finished task. A goal's on a draft or open goal. A change never stops a running run.
 - **Putting parked work behind or ahead.** When many runs wait in `needs_session` and other work should go first, `set-priority TASK low` on the parked tasks (or `high` on the one to resume first); `--inherit` gives the task back to its goal. Canceling is the other way out for a parked run nobody needs.
 - **Express urgency with priority only.** Do not move other tasks back to `draft`, and do not add or remove dependencies that are not real, to get one task claimed first.
 - **No aging of priority.** Nothing raises a priority over time: a `low` task, its resume and recovery jobs wait as long as higher ones keep arriving. Check `graph` for ready tasks, and `list --status in_progress` for parked runs, that never reach the front, and raise them by hand.
@@ -113,7 +114,7 @@ Fix a draft or submitted task in place instead of canceling it and registering i
 ```sh
 "$DAGQ" edit TASK --description "..." --acceptance "..."   # also --title, --context
 "$DAGQ" edit TASK --verify 'CHECK' --verify 'TEST'
-"$DAGQ" edit TASK --evidence e2e --paths 'src/**'          # --no-verify / --no-evidence / --no-paths empty a list
+"$DAGQ" edit TASK --evidence e2e --paths '<glob>'          # --no-verify / --no-evidence / --no-paths empty a list
 "$DAGQ" edit TASK --change fix                              # one of the repository's changes (reference/scope.md)
 ```
 

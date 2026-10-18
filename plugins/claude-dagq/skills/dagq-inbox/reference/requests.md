@@ -26,7 +26,7 @@ Tell the person the request's ID. The person may type the same command in a term
 
 ## What the runtime does with it
 
-A runtime planner takes each open request at a supervisor pass (none while no supervisor runs: `up`, `dagq-recover` section 5). It plans it (the request becomes `proposed` and plan review checks the proposal), declines it with a reason, or asks a `planner_question`. After several planners that ended without deciding, the request is `exhausted`. Follow them with `"$DAGQ" requests` (`requests --help`); `dagq planners` lists the open planners.
+A runtime planner takes each open request while a supervisor runs (none without one: `up`, `dagq-recover` section 5). It plans it (`proposed`, and plan review checks the proposal), declines it with a reason, or asks a `planner_question`; a request no planner could decide ends `exhausted`. Follow them with `"$DAGQ" requests` (`requests --help`); `dagq planners` lists the open planners.
 
 ## Tell the person the outcome
 

@@ -7,7 +7,7 @@ Read this when diagnosing a run by hand (the `dagq-recover` skill, sections 1–
 Plain `doctor` is the compact form; diagnosing needs `--full`.
 
 - `supervisors`: a `stale` registration is left by a killed or hung supervisor. The runtime never deletes it: report it to the person rather than removing it; `recover` works regardless of it. Empty `supervisors` means nobody owns any run.
-- `runs`: each run's lease, processes and paths. `blockers` is what still prevents its recovery (`recoverable: true` when empty); only the run's own status, lease and processes count.
+- `runs`: each run's `blockers` say what still prevents its recovery; none means it is recoverable.
 - `inbox_guardrail` `false`: `reference/up-down.md`, "Open the inbox again".
 - `agents` `errors`: a review needing such an agent does not pass; the configuration is fixed on the landing branch.
 - `ci_watch`: what `gh` resolved to on your PATH, which may differ from the supervisor's. While the supervisor cannot read the CI it claims and lands nothing.

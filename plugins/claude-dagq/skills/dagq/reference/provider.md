@@ -4,13 +4,13 @@ Read this to choose a task's worker's agent, to read which one ran, or to tell a
 
 ## Provider and route
 
-A task's worker has a **provider** (`claude` or `codex`) and a **route**; the only route is headless: one non-interactive call per turn, and an answer, a send-back or a resume is the next call on the same session. `add` and `edit` refuse `--interactive`. `add` takes the provider, and `edit ID` changes it on a draft or submitted task (a ready one goes back with `draft ID` first); `show` prints the resolved provider and route.
+A task's worker has a **provider** (`claude` or `codex`) and a **route**; the only route is headless. `add` and `edit` refuse `--interactive`. `add` takes the provider, and `edit ID` changes it on a draft or submitted task (a ready one goes back with `draft ID` first); `show` prints the resolved provider and route.
 
 The task's provider changes only its worker. A headless job runs on Codex only when its role's table in `dagq.toml` says `provider = "codex"` (a run review agent's own `[review.subagents.<agent>]` table can say so for its job alone); planners and the inbox stay on Claude. `"$DAGQ" doctor`'s `roles` shows each role's provider and where it comes from.
 
 ### Which to choose (planner)
 
-- No reason given: give no flag. The worker runs Claude headless.
+- No reason given: give no flag (`"$DAGQ" add --help`).
 - The person wants the task done on Codex: `--provider codex`. Codex does no subagent review, so its run needs no `subagent_review` evidence (the supervisor's review still reviews it before landing). A Codex worker asks as any worker does.
 - The person wants to watch the worker or step in: there is no route for it. Its turns are read with `"$DAGQ" run log RUN --follow`, and it reaches a person only through its asks.
 - Never pick a provider to route around a login or a usage limit: the runtime falls back by itself (below).
@@ -23,7 +23,7 @@ The task's provider changes only its worker. A headless job runs on Codex only w
 
 ## When a provider cannot be used
 
-Only a provider that cannot be used makes a run or job move to the other one: the executable is missing, the agent cannot start, a login is needed, or a usage or rate limit. A model error, a sandbox refusal, a stopped turn, a failed test or a `failed` receipt never switch: they go to the recovery job. A run that moves mid-run starts a new session, which reads the commits so far but not the conversation.
+Only a provider that cannot be used makes a run or job move to the other one: the executable is missing, the agent cannot start, a login is needed, or a usage or rate limit. A model error, a sandbox refusal, a stopped turn, a failed test or a `failed` receipt never switch: they go to the recovery job.
 
 What reaches the person (the inbox shows it):
 
@@ -33,7 +33,7 @@ What reaches the person (the inbox shows it):
 
 ### Turning the fallback off
 
-A person can stop the move to the other provider, for workers and for headless jobs separately, in `dagq.toml`'s `[provider_fallback]` table; it takes effect without a restart. Then a task or job whose provider cannot be used waits for that provider's hold to end instead (a task is deferred at the claim, a run waits on its session), and holds and asks are the same; `--no-claude` still sends Claude work to Codex. Whether to turn it off is the person's call; never edit `dagq.toml` to route around a wall.
+A person can stop the move to the other provider, for workers and for headless jobs separately, in `dagq.toml`'s `[provider_fallback]` table; it takes effect without a restart. Then a task or job whose provider cannot be used waits for that provider's hold to end instead, and holds and asks are the same; `--no-claude` still sends Claude work to Codex. Whether to turn it off is the person's call; never edit `dagq.toml` to route around a wall.
 
 ## A container worker's Claude credential
 

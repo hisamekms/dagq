@@ -11,9 +11,9 @@ The supervisor reviews every run it accepts and lands, sends back or asks `appro
 
 ## Steps
 
-1. `"$DAGQ" review ID` writes `<run_dir>/review.md` (the task, the goal's acceptance and constraints, the receipt, the log and the diff) and prints only its `path` and the diff's size.
+1. `"$DAGQ" review ID` writes the run's review material to a file and prints its `path`.
 2. Start a subagent (the Agent tool) with `path` and this request: read the file; check the diff against the task's acceptance, the goal's constraints and the receipt's claims (tests, subagent review; its `e2e` is `not_applicable`, the runtime runs e2e), and flag changes the task did not ask for; list the titles of the receipt's `follow_ups`; answer `pass` or `concern`, and for `concern` at most a few reasons with file and line, never the diff itself. Add what the repository's instructions ask for.
-3. e2e: `integrate` by hand skips the runtime's e2e step. When the run's validation required e2e, check that `events --run RUN --kind run_e2e_finished` has `outcome: passed` for the reviewed commit and read the run dir's `e2e-*.log`; never run the e2e yourself. Without one, tell the person that `integrate` lands it unchecked by e2e (the auto-update and `install` gates still run the whole suite before a binary is replaced) and land it only on their word.
+3. e2e: `integrate` by hand skips the runtime's e2e step. When the run's validation required e2e, check that `events --run RUN --kind run_e2e_finished` has `outcome: passed` for the reviewed commit and read the run dir's `e2e-*.log`; never run the e2e yourself. Without one, tell the person that `integrate` lands it unchecked by e2e (a binary replaced by `install` or an automatic update still passes the whole suite first) and land it only on their word.
 4. Report the verdict to the person. On `pass` and their word, `"$DAGQ" integrate ID`. On `concern` (the receipt or diff disagrees with the acceptance, the diff has changes the task did not ask for, or the subagent returned findings), do not land: register `"$DAGQ" ask --kind approve_landing --run <run_id> --question "<task, the reasons, head, size, follow_ups>" --option land --option send_back --option cancel`, which the supervisor applies once answered.
 
 ## After integrate

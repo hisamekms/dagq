@@ -4,36 +4,27 @@ Read this after `init`, when `doctor`'s `agents` names built-ins `without_rules`
 
 ## What a run's review reads
 
-A run's review takes the built-in agents' definitions and the built-in programs (`builtin:<name>`) from the dagq binary, never from the repository. The rest it reads from the landing branch's commit, never from a worktree: `dagq.toml`'s settings (which built-ins are on, their paths and provider, and the project's own agents and programs), and each built-in agent's project rules in `.dagq/review/builtin-<name>.md` (the whole review's in `.dagq/review/builtin-acceptance.md`). The rules files are read whether or not `dagq.toml` exists: without it, the built-ins that are on by default run, each with the rules file the commit has, or with none. `init` prints them under `recommended` (`enabled_by_default`), with the command below; it writes no `dagq.toml` and starts no agent.
+A run's review takes the built-in agents and programs (`builtin:<name>`) from the dagq binary. Everything else it reads from the landing branch's commit, never from a worktree: `dagq.toml`'s review settings and each built-in agent's project rules in `.dagq/review/builtin-<name>.md`. So a change to them reaches the review only once it is committed and landed. `init` recommends the settings and points to `setup-review` (`"$DAGQ" init --help`).
 
 ## The toolchain profiles' proposals
 
-`init` also prints `recommended.toolchains`: what the toolchain profiles built into dagq recommend for the repository. The profiles are those `dagq.toml` declares under `[toolchains.<name>]`, or, when it declares none, those the repository's files suggest (`from` says which; a `Cargo.toml` suggests the Rust profile). Each entry is a proposal for a person to write and commit, and nothing of it works until then:
+`init` also prints what the toolchain profiles built into dagq recommend for the repository: those `dagq.toml` declares, or, when it declares none, those the repository's files suggest. Each one is a proposal for a person to write and commit; nothing of it works until then.
 
-- `toolchains`: the `[toolchains.<name>]` declaration to add to `dagq.toml` (only when guessed).
-- `verify`: the verification commands to give a task as its `--verify` values when it is registered; they are not a key of `dagq.toml`.
-- `programs`: review programs, each a `[review.programs.<name>]` table (`table`) and its script (`script`, `body`). `setup_review: true` marks those `setup-review` gives its agent; one outside `.dagq/review/programs/` is shown only.
-- `config`: the tables above together, as text to paste into `dagq.toml`.
-
-`error` instead means `dagq.toml` cannot be read or names a profile dagq does not have, or the repository's files could not be listed; fix that first. The proposals assume the tool runs at the repository's root: where the guess gives `paths` below it, adapt the commands and scripts to the directories they apply to. `setup-review` prints the same proposals under `toolchains`.
+- The person writes and commits the `[toolchains.<name>]` declaration; `setup-review` (below) never writes it or the `--verify` commands, and writes the review programs that fit for the person to commit.
+- The verification commands are for a task's `--verify` when it is registered, not a key of `dagq.toml`.
+- An `error` there means `dagq.toml` cannot be read or names a profile dagq does not have: fix that first.
+- The proposals assume the tool runs at the repository's root: where the profile applies to a directory below it, adapt the commands and scripts to it.
 
 ## Generating the settings: `setup-review`
 
-`dagq setup-review` has a coding agent read the project once (its instructions, documents, tests, languages and tools) in a temporary checkout of the main checkout's HEAD (written from the commit's objects, so no hook or filter of the repository runs), and write there `dagq.toml`'s built-in and program tables, `.dagq/review/builtin-<name>.md` and `.dagq/review/programs/<name>.sh` (fast checks that run no build or test). The settings the HEAD commits are its input: run it again to update them. The review programs the toolchain profiles recommend (above) within `.dagq/review/programs/` are part of its input too; the agent writes those that fit the project, adapted to where its files are. The declaration and the `--verify` commands are never written by it. Its job runs on `[roles.setup_review]`'s provider (Claude by default) and may only read the queue.
+`dagq setup-review` has a coding agent read the project once and write the review's settings, its rules files and fast review programs in a temporary checkout, then shows the diff and writes it to the working tree only at the person's approval. What it may write, what it refuses and the flags are in `"$DAGQ" setup-review --help`.
 
-Before anyone sees the diff, it refuses (an error, nothing written):
-
-- a change to any other file, or to any other table of `dagq.toml`;
-- a `dagq.toml` the runtime cannot read;
-- a program script that does not take its root from the working directory's Git work tree (`git rev-parse --show-toplevel`, word for word, with no other option or argument, and the variable's value or `cd`'s argument that output alone, nothing like `/..` joined to it);
-- a program script that only names that command in a comment, a string (one over lines too) or a here-document: a command must assign its output to a variable or `cd` to it;
-- a file it changes that has changes not committed in the working tree, ignored files included (commit or set them aside, then run it again), or a HEAD that moved while it ran. The working file is compared byte for byte with the commit, and the index's entry with HEAD's, without `git status`: an edit the index's skip-worktree or assume-unchanged flag hides counts, no filter of the repository runs, and a file a filter or a line-ending conversion changes counts as changed;
-- a target that is, or lies under, a symbolic link in the checkout.
-
-Files the repository ignores count as changes too. The changes are read once when the job ends, and those bytes are what is checked, shown in the diff and written: nothing the temporary checkout gets later reaches the working tree, and no filter, attribute or diff setting of the repository runs on them. On Claude the job loads no setting sources (no hook or permission of the repository's or the person's settings); on Codex it does not load the repository's project layer (`.codex/`), and its sandbox writes the temporary checkout only, with no network, whatever the person's Codex settings add. Only the paths written are checked for changes not committed, so other files in an ignored directory do not stop it.
-
-Then it prints the diff, its control characters (escape sequences, carriage returns) written out as escapes, and asks on the terminal whether to write it to the working tree; `--yes` approves beforehand, and only the person may pass it. The written files are 0755 when the job made them executable and 0644 otherwise. After the approval it checks HEAD and the working tree again, so a commit or an edit made while the diff was read is not overwritten. Without approval (and with no terminal and no `--yes`) nothing is written, and the output's `approved` is `false`. Either way the temporary checkout is removed, also when the command is interrupted (Ctrl-C while the job runs or at the prompt). It commits and pushes nothing and changes nothing in the queue: the person reads the written files, commits them, and they reach the review once they land.
+1. Commit or set aside every change in `dagq.toml` and `.dagq/review/` first: it refuses a file it would change that has changes not committed, ignored files included.
+2. Run it. On a refusal (another file or table changed, a `dagq.toml` it cannot read, a program script that does not take its root from the Git work tree, a symbolic link) fix the cause or run it again; nothing was written.
+3. The person reads the diff and approves it at the prompt. Without approval nothing is written.
+4. It commits and pushes nothing and changes nothing in the queue: the person reads the written files and commits them; they reach the review once they land.
+5. Run it again to update the settings: the committed ones are its input.
 
 ## Who runs it
 
-Only the person and the inbox. The inbox runs it without `--yes`, on the person's word, to show the person the diff (the output's `diff`); it is refused `--yes`. Writing the files is the person's: they run it in their own terminal without `DAGQ_ROLE` and answer the prompt, or pass `--yes` there. A planner, a worker and every job are refused (`reference/authority.md`).
+Only the person and the inbox. The inbox runs it without `--yes`, on the person's word, to show the person the diff; it is refused `--yes`. Writing the files is the person's: they run it in their own terminal without `DAGQ_ROLE` and answer the prompt, or pass `--yes` there. A planner, a worker and every job are refused (`reference/authority.md`).

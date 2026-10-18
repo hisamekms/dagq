@@ -11,11 +11,11 @@ Each command below prints JSON; its flags, strata and output are in `"$DAGQ" <co
 ```
 
 - `null` is no record, not zero. A `partial` period (not over yet) and a value with fewer samples than `[kpi] min_samples` are not judged: read no trend from them.
-- `change=` is the change the task declared, never guessed from the diff. `area=` is read from the landed diff through `dagq.toml`'s `[areas]` each time, so editing `[areas]` reclassifies every past run, and a run that touched several areas counts in each.
+- `change=` is the change the task declared, never guessed from the diff. `area=` comes from the landed diff through `dagq.toml`'s `[areas]`, so editing `[areas]` reclassifies past runs, and a run that touched several areas counts in each.
 - Compare work time only within one `area=` or `change=` stratum (which one is the repository's rule): tasks differ by an order of magnitude, so `all` moves with the mix of tasks.
 - A headless job's provider is `job.*`'s own `provider=` stratum, not the worker's `--by provider`.
-- **Tokens**: an execution counts in the period it ended (a session's cut by its time); a period not wholly after the records began is `null`, with the reason in `unavailable`.
-- **Targets** are `[kpi.targets."<KPI>"]` in the main checkout's `dagq.toml` and in `host.toml` (host wins, but `[kpi] max_improvement_proposals` is `dagq.toml`'s only); there is no default target. `breach` is off target for several periods in a row, `missed` not yet that long. Add a `[kpi]` table to `dagq.toml` only once the installed binary knows it: an older one rejects it.
+- **Tokens**: a `null` value means the records do not cover the period (the output says why); never read it as 0.
+- **Targets** are `[kpi.targets."<KPI>"]` in the main checkout's `dagq.toml` and in `host.toml` (host wins, but `[kpi] max_improvement_proposals` is `dagq.toml`'s only); only the targets set there are judged. `breach` is off target for several periods in a row, `missed` not yet that long. Add a `[kpi]` table to `dagq.toml` only once the installed binary knows it: an older one rejects it.
 
 ## Before and after a change: `mark`, `marks`, `kpi --compare`
 
@@ -67,4 +67,4 @@ The push command lives in `host.toml`, never the committed `dagq.toml`: `<queue 
 command = ["/Users/me/.local/bin/dagq-push-ntfy"]   # argv, no shell; required
 ```
 
-The command reads one JSON message (`title`, `text`) on stdin; it also gets the inbox's watch messages, the new-ask one in the inbox session's environment, not the supervisor's. Keep secrets (webhook URLs, topics, tokens) in the script or a file outside the repository. A message that keeps failing reaches the inbox as `fix the push command`, cleared by the next success. A script for ntfy can pipe `jq -r .text` to `curl -fsS -H "Title: <.title>" --data-binary @- https://ntfy.sh/<topic>`.
+The command reads each message as one JSON object with `title` and `text` on stdin. It also runs for the inbox's watch messages, in the inbox session's environment, not the supervisor's. Keep secrets (webhook URLs, topics, tokens) in the script or a file outside the repository. A message that keeps failing reaches the inbox as `fix the push command`, cleared by the next success. A script for ntfy can pipe `jq -r .text` to `curl -fsS -H "Title: <.title>" --data-binary @- https://ntfy.sh/<topic>`.

@@ -24,7 +24,7 @@ Read this when the person wants to update or roll back the `dagq` binary, turn o
 "$DAGQ" up --auto-update   # with the same other flags as always
 ```
 
-It needs no restart: a reused supervisor takes it. An `up` without the flag turns it off again, so every later `up` (the `restart supervisor` one too) must carry it. While it is on, the supervisor builds each runtime landing, runs the e2e suite, installs it and hands itself over; `status`'s `auto_update` shows where it is. A success reaches the inbox as `report the update`; a failure opens `update_failed`.
+It needs no restart: a reused supervisor takes it. An `up` without the flag turns it off again, so every later `up` (the `restart supervisor` one too) must carry it. While it is on, the supervisor updates itself after each landing that changes the binary; `status`'s `auto_update` shows where it is. A success reaches the inbox as `report the update`; a failure opens `update_failed`.
 
 ## Release updates (`approve_release`)
 
