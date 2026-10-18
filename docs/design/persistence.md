@@ -203,6 +203,10 @@ follow-upの所属の判断・訂正とdraft / readyの所属の変更は同じ`
 - `BEGIN IMMEDIATE`で状態の変更・依存グラフの検証・claimを直列化する。
   ロックの待ちは`QUEUE_BUSY_TIMEOUT`までで、超えればerrorを返す。
   supervisorのheartbeatは`QueueBusy`を次の間隔で書き直す（[supervise](supervisor-lifecycle/supervise.md#起動とheartbeat)）。
+- どのwriterがlockを握ったかは、名前付きのwrite transactionの包み`WriteTx`（`infrastructure::sqlite`）が観測する。
+  背景のjobの主な書き込み（ledgerのnode行のretention・hostのCSVの取り込み・forecastのsnapshotなど）はこれを通り、閾値を超えてlockを握ったら名前と保持時間をwarnに出す。
+  保持時間はwrite lockを得てからcommit / rollbackが返るまでで、他のwriterの待ちとlockを得る前の読み取り（遅延のtransactionの最初の書き込みの前）を含めず、書き込みの無いtransactionは持たない。
+  遅延のtransactionがlockを得た時点の近似は`WriteTxTimes`のdoc commentが持つ。
 - claimは候補の選択・taskの更新・runの作成・event・lease行を1つのトランザクションにまとめ、同時のclaimは別々のtaskを取る。
   holdの行と`task_held` / `task_released`も1つのトランザクションで書き、claim・resume・復旧jobの開始と結果の適用はそれぞれのトランザクションでholdを読むので、先に確定した側だけが効く。
 - 外部キーと依存の複合主キーはDBに置き、自己依存はdomainが拒み、循環はトランザクションの中の再帰CTEで見つける。

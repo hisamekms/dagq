@@ -1,15 +1,17 @@
 //! The supervisor's heartbeat over a queue another connection locks: a
 //! busy write is tried again, and only a lost registration or busy writes
-//! that would let the leases go stale stop it (task 1119).
+//! that would let the leases go stale stop it (task 1119). A write
+//! transaction that held the lock past its threshold is named in a WARN.
 use crate::common::{self, queue::fixture};
 use dagq::application::supervise::{Heartbeat, HeartbeatPolicy};
-use dagq::application::{Queue, QueueOpener};
+use dagq::application::{NodeSampleStore, Queue, QueueOpener};
+use dagq::domain::host_metrics::{HOST_NODE, HostSample};
 use dagq::domain::{EventKind, LeaseToken};
-use dagq::infrastructure::sqlite::SqliteQueue;
-use rusqlite::Connection;
+use dagq::infrastructure::sqlite::{SqliteQueue, WriteTx};
+use rusqlite::{Connection, TransactionBehavior};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
@@ -213,4 +215,176 @@ fn a_registration_gone_from_the_queue_stops_the_supervisor() {
     let error = format!("{:#}", heartbeat.check().unwrap_err());
     assert!(error.contains("registration is gone"), "{error}");
     leases.check().unwrap();
+}
+
+/// The WARNs that a write transaction held the lock long, each as its
+/// `transaction` and `held_ms`.
+#[derive(Clone, Default)]
+struct LongHolds(Arc<Mutex<Vec<(String, u64)>>>);
+
+impl LongHolds {
+    fn named(&self, name: &str) -> Vec<u64> {
+        let holds = self.0.lock().unwrap();
+        holds
+            .iter()
+            .filter(|(transaction, _)| transaction == name)
+            .map(|(_, held)| *held)
+            .collect()
+    }
+}
+
+impl<S: tracing::Subscriber> Layer<S> for LongHolds {
+    fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+        #[derive(Default)]
+        struct Fields {
+            message: String,
+            transaction: String,
+            held_ms: Option<u64>,
+        }
+        impl tracing::field::Visit for Fields {
+            fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+                if field.name() == "held_ms" {
+                    self.held_ms = Some(value);
+                }
+            }
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                if field.name() == "transaction" {
+                    self.transaction = value.to_owned();
+                }
+            }
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    self.message = format!("{value:?}");
+                }
+            }
+        }
+        let mut fields = Fields::default();
+        event.record(&mut fields);
+        if fields.message == "queue write lock held long" {
+            let held = fields.held_ms.expect("a long hold's WARN has held_ms");
+            self.0.lock().unwrap().push((fields.transaction, held));
+        }
+    }
+}
+
+const IMPORT: &str = "node_samples_csv_import";
+
+/// The samples of one CSV file, a second apart.
+fn samples(count: i64) -> Vec<HostSample> {
+    (0..count)
+        .map(|n| HostSample::new(1_900_000_000 + n))
+        .collect()
+}
+
+/// A CSV import that held the lock past the threshold (lowered to none, so
+/// any import that wrote does) is named in a WARN with how long it held it.
+#[test]
+fn an_import_that_held_the_lock_past_the_threshold_is_named_in_a_warn() {
+    let _test = common::test();
+    let (_dir, db, _queue) = registered();
+    let holds = LongHolds::default();
+    let _subscriber =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(holds.clone()));
+    let queue = SqliteQueue::open(&db)
+        .unwrap()
+        .with_write_hold_warn(Duration::ZERO);
+    let added = queue
+        .import_node_samples(HOST_NODE, "metrics-x.csv", 1, &samples(500), 1)
+        .unwrap();
+    assert_eq!(added, 500);
+    assert_eq!(holds.named(IMPORT).len(), 1, "{:?}", holds.0);
+    // The same import within the threshold warns of nothing.
+    let quiet = SqliteQueue::open(&db).unwrap();
+    quiet
+        .import_node_samples(HOST_NODE, "metrics-y.csv", 1, &samples(5), 1)
+        .unwrap();
+    assert_eq!(holds.named(IMPORT).len(), 1, "{:?}", holds.0);
+}
+
+/// An import that started while another connection held the lock waits in
+/// its first write past the threshold, but holds the lock only from then:
+/// it is not named as the holder.
+#[test]
+fn an_import_that_waited_for_the_lock_past_the_threshold_is_not_named() {
+    let _test = common::test();
+    let (_dir, db, _queue) = registered();
+    let threshold = Duration::from_secs(1);
+    let held = lock(&db);
+    let holds = LongHolds::default();
+    let (started, starts) = std::sync::mpsc::channel();
+    let import = {
+        let (db, holds) = (db.clone(), holds.clone());
+        thread::spawn(move || {
+            let _subscriber =
+                tracing::subscriber::set_default(tracing_subscriber::registry().with(holds));
+            let queue = SqliteQueue::open(&db)
+                .unwrap()
+                .with_write_hold_warn(threshold);
+            started.send(()).unwrap();
+            let began = Instant::now();
+            queue
+                .import_node_samples(HOST_NODE, "metrics-x.csv", 1, &samples(5), 1)
+                .unwrap();
+            began.elapsed()
+        })
+    };
+    {
+        let _waiting = common::within(common::STEP_LIMIT, "the import thread to start");
+        starts.recv().unwrap();
+    }
+    thread::sleep(threshold + Duration::from_millis(500));
+    drop(held);
+    let took = {
+        let _waiting = common::within(common::STEP_LIMIT, "the import thread to return");
+        import.join().unwrap()
+    };
+    assert!(took > threshold, "the import waited only {took:?}");
+    assert!(holds.named(IMPORT).is_empty(), "{:?}", holds.0);
+}
+
+/// Over a real connection and clock, a [`WriteTx`] past a threshold of
+/// none is named once it ran a write statement, one that changed no row
+/// included: a deferred one from its first write, an immediate one from
+/// its `BEGIN`. One that only read is not, deferred or immediate, committed
+/// or rolled back.
+#[test]
+fn a_write_tx_is_named_once_it_wrote_and_not_when_it_only_read() {
+    let _test = common::test();
+    let holds = LongHolds::default();
+    let _subscriber =
+        tracing::subscriber::set_default(tracing_subscriber::registry().with(holds.clone()));
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE t(x)").unwrap();
+    let read = |tx: &WriteTx<'_>| {
+        let _: i64 = tx
+            .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
+            .unwrap();
+    };
+    let begin = |name, behavior| WriteTx::begin(&conn, name, behavior, Duration::ZERO).unwrap();
+
+    let tx = begin("deferred_read", TransactionBehavior::Deferred);
+    read(&tx);
+    tx.commit().unwrap();
+    let tx = begin("immediate_read", TransactionBehavior::Immediate);
+    read(&tx);
+    drop(tx);
+    let tx = begin("deferred_write", TransactionBehavior::Deferred);
+    read(&tx);
+    assert_eq!(tx.execute("INSERT INTO t VALUES (1),(2)", []).unwrap(), 2);
+    tx.execute("INSERT INTO t VALUES (3)", []).unwrap();
+    tx.commit().unwrap();
+    let tx = begin("immediate_unchanged", TransactionBehavior::Immediate);
+    assert_eq!(tx.execute("DELETE FROM t WHERE x = 9", []).unwrap(), 0);
+    drop(tx);
+
+    for name in ["deferred_read", "immediate_read"] {
+        assert!(holds.named(name).is_empty(), "{name}: {:?}", holds.0);
+    }
+    for name in ["deferred_write", "immediate_unchanged"] {
+        assert_eq!(holds.named(name).len(), 1, "{name}: {:?}", holds.0);
+    }
+    let count: i64 = conn
+        .query_row("SELECT count(*) FROM t", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 3);
 }

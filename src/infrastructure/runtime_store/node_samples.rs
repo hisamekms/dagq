@@ -70,19 +70,21 @@ impl NodeSampleStore for SqliteQueue {
         samples: &[HostSample],
         bytes: u64,
     ) -> Result<usize> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx("node_samples_csv_import", TransactionBehavior::Deferred)?;
         let mut added = 0;
         {
             let mut statement = tx.prepare(&insert())?;
             for sample in samples {
                 // Only the second: every row a file kept is kept.
-                added += statement.execute(rusqlite::params_from_iter(values(
+                let rows = statement.execute(rusqlite::params_from_iter(values(
                     node,
                     day,
                     sample,
                     SampleSource::CsvImport,
                     0,
                 )))?;
+                tx.wrote(rows);
+                added += rows;
             }
         }
         tx.execute(
@@ -119,7 +121,9 @@ impl NodeSampleStore for SqliteQueue {
     }
 
     fn remove_node_samples(&self, before_day: i64) -> Result<usize> {
-        let tx = self.conn.unchecked_transaction()?;
+        // Immediate: its first DELETE is the long one, and a deferred
+        // transaction's hold starts after its first write.
+        let tx = self.write_tx("node_samples_retention", TransactionBehavior::Immediate)?;
         let removed = tx.execute(
             "DELETE FROM node_samples WHERE local_day < ?1",
             [before_day],

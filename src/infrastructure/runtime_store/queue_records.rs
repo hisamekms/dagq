@@ -66,7 +66,7 @@ impl SqliteQueue {
         payload: serde_json::Value,
         previous: Option<EventId>,
     ) -> Result<Option<EventId>> {
-        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let tx = self.write_tx("forecast_snapshot", TransactionBehavior::Immediate)?;
         let latest: Option<EventId> = tx.query_row(
             "SELECT MAX(id) FROM run_events WHERE kind=?1",
             [FORECAST_RECORDED],

@@ -148,7 +148,7 @@ impl LedgerStore for SqliteQueue {
     }
 
     fn remove_node_rows(&self, before_day: i64) -> Result<usize> {
-        let tx = self.conn.unchecked_transaction()?;
+        let tx = self.write_tx("ledger_node_retention", TransactionBehavior::Deferred)?;
         let rows = self.ledger_rows(LedgerKind::Node)?;
         let mut removed = 0;
         for row in rows {

@@ -72,6 +72,165 @@ use crate::{
 };
 
 const APPLICATION_ID: i64 = 0x43545131;
+
+/// How long a [`WriteTx`] may hold the queue's write lock before it warns
+/// with its name, how long it held the lock, how long it ran before it had
+/// the lock, and the rows it wrote. Under
+/// [`crate::application::QUEUE_BUSY_TIMEOUT`], so a writer that holds the
+/// lock long enough to fail another connection's write (the supervisor's
+/// heartbeat) is named in the log.
+pub const WRITE_HOLD_WARN: Duration = Duration::from_secs(2);
+const _: () =
+    assert!(WRITE_HOLD_WARN.as_nanos() < crate::application::QUEUE_BUSY_TIMEOUT.as_nanos());
+
+/// The times of one write transaction, each since just before its `BEGIN`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WriteTxTimes {
+    /// When it had the write lock: when `BEGIN IMMEDIATE` returned, or when
+    /// a deferred transaction's first write statement returned. That
+    /// statement takes the lock and may wait in it for another writer, so
+    /// its end is the first time known to have the lock without that wait;
+    /// the hold drops the statement's own run. `None`: a deferred one that
+    /// wrote nothing.
+    pub locked: Option<Duration>,
+    /// Whether it ran a write statement (one that changed no row counts);
+    /// one that did not has no hold, an immediate one either.
+    pub wrote: bool,
+    /// When its commit or rollback returned.
+    pub ended: Duration,
+    /// The rows its write statements changed.
+    pub rows: usize,
+}
+
+/// A write transaction that held the write lock past the threshold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LongHold {
+    /// From having the lock to the end of its commit or rollback.
+    pub held: Duration,
+    /// Before it had the lock: its wait for another writer, and in a
+    /// deferred one its reads before its first write; not counted as held.
+    pub before_lock: Duration,
+    pub rows: usize,
+}
+
+/// The [`LongHold`] of a transaction of `times` that held the lock longer
+/// than `threshold`; `None` for one within it or one that wrote nothing.
+pub fn long_hold(times: WriteTxTimes, threshold: Duration) -> Option<LongHold> {
+    if !times.wrote {
+        return None;
+    }
+    let locked = times.locked?;
+    let held = times.ended.saturating_sub(locked);
+    (held > threshold).then_some(LongHold {
+        held,
+        before_lock: locked,
+        rows: times.rows,
+    })
+}
+
+/// A named write transaction on the queue that warns, when it ends by its
+/// commit or by a drop (rollback), if it held the write lock past its
+/// threshold ([`long_hold`]): the WARN `queue write lock held long` with
+/// `transaction` (the name), `held_ms`, `before_lock_ms` and `rows`.
+/// Its write statements go through [`WriteTx::execute`], or report what
+/// they changed with [`WriteTx::wrote`], which is how a deferred one knows
+/// when it had the lock; its reads go through the transaction it derefs to.
+pub struct WriteTx<'c> {
+    tx: Option<rusqlite::Transaction<'c>>,
+    name: &'static str,
+    threshold: Duration,
+    began: std::time::Instant,
+    locked: std::cell::Cell<Option<std::time::Instant>>,
+    wrote: std::cell::Cell<bool>,
+    rows: std::cell::Cell<usize>,
+}
+
+impl<'c> WriteTx<'c> {
+    /// Begin `name` on `conn` as `behavior`; an immediate one has the lock
+    /// when its `BEGIN` returns.
+    pub fn begin(
+        conn: &'c Connection,
+        name: &'static str,
+        behavior: TransactionBehavior,
+        threshold: Duration,
+    ) -> rusqlite::Result<Self> {
+        let began = std::time::Instant::now();
+        let tx = rusqlite::Transaction::new_unchecked(conn, behavior)?;
+        let locked = matches!(
+            behavior,
+            TransactionBehavior::Immediate | TransactionBehavior::Exclusive
+        )
+        .then(std::time::Instant::now);
+        Ok(Self {
+            tx: Some(tx),
+            name,
+            threshold,
+            began,
+            locked: std::cell::Cell::new(locked),
+            wrote: std::cell::Cell::new(false),
+            rows: std::cell::Cell::new(0),
+        })
+    }
+
+    /// Run the write statement `sql` and count what it changed.
+    pub fn execute<P: rusqlite::Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize> {
+        let rows = self.transaction().execute(sql, params)?;
+        self.wrote(rows);
+        Ok(rows)
+    }
+
+    /// A write statement run on this transaction returned, changing `rows`.
+    pub fn wrote(&self, rows: usize) {
+        if self.locked.get().is_none() {
+            self.locked.set(Some(std::time::Instant::now()));
+        }
+        self.wrote.set(true);
+        self.rows.set(self.rows.get() + rows);
+    }
+
+    pub fn commit(mut self) -> rusqlite::Result<()> {
+        match self.tx.take() {
+            Some(tx) => tx.commit(),
+            None => Ok(()),
+        }
+    }
+
+    fn transaction(&self) -> &rusqlite::Transaction<'c> {
+        self.tx
+            .as_ref()
+            .expect("a write transaction is open until it ends")
+    }
+}
+
+impl<'c> std::ops::Deref for WriteTx<'c> {
+    type Target = rusqlite::Transaction<'c>;
+    fn deref(&self) -> &Self::Target {
+        self.transaction()
+    }
+}
+
+impl Drop for WriteTx<'_> {
+    fn drop(&mut self) {
+        // A transaction left open rolls back here, before the end is read.
+        drop(self.tx.take());
+        let since = |at: std::time::Instant| at.saturating_duration_since(self.began);
+        let times = WriteTxTimes {
+            locked: self.locked.get().map(since),
+            ended: self.began.elapsed(),
+            wrote: self.wrote.get(),
+            rows: self.rows.get(),
+        };
+        if let Some(hold) = long_hold(times, self.threshold) {
+            tracing::warn!(
+                transaction = self.name,
+                held_ms = u64::try_from(hold.held.as_millis()).unwrap_or(u64::MAX),
+                before_lock_ms = u64::try_from(hold.before_lock.as_millis()).unwrap_or(u64::MAX),
+                rows = hold.rows,
+                "queue write lock held long"
+            );
+        }
+    }
+}
 /// The start of a query of tasks aliased `t`, each with the priority of its
 /// goal as `goal_priority`, which [`task_row`] reads to resolve what a task
 /// without a priority of its own inherits (ADR-t1639-1 decision 2).
@@ -177,6 +336,9 @@ pub struct SqliteQueue {
     /// `[goals] max_spike_cycles` (ADR-t1487-1 decision 8), which `submit`
     /// holds a planner of the runtime's to; none limits nothing.
     pub(super) max_spike_cycles: Option<usize>,
+    /// How long a [`WriteTx`] of this connection may hold the write lock
+    /// before it warns; [`WRITE_HOLD_WARN`] unless a test lowers it.
+    pub(super) write_hold_warn: Duration,
 }
 
 impl SqliteQueue {
@@ -295,6 +457,7 @@ impl SqliteQueue {
             title_prefixes: queue.title_prefixes.clone(),
             goal_tags: queue.goal_tags.clone(),
             max_spike_cycles: queue.max_spike_cycles,
+            write_hold_warn: queue.write_hold_warn,
         };
         copy.apply(state.version, None)?;
         Ok((schema, ReadOnlyQueue::Readable(copy)))
@@ -434,6 +597,28 @@ impl SqliteQueue {
         self
     }
 
+    /// The queue warning of a [`WriteTx`] that held the write lock past
+    /// `threshold` instead of [`WRITE_HOLD_WARN`].
+    pub fn with_write_hold_warn(mut self, threshold: Duration) -> Self {
+        self.write_hold_warn = threshold;
+        self
+    }
+
+    /// A [`WriteTx`] named `name` on this connection, `behavior` as its
+    /// `BEGIN`.
+    pub(crate) fn write_tx(
+        &self,
+        name: &'static str,
+        behavior: TransactionBehavior,
+    ) -> Result<WriteTx<'_>> {
+        Ok(WriteTx::begin(
+            &self.conn,
+            name,
+            behavior,
+            self.write_hold_warn,
+        )?)
+    }
+
     pub fn generators(&self) -> &Generators {
         &self.generators
     }
@@ -491,6 +676,7 @@ impl SqliteQueue {
             title_prefixes: None,
             goal_tags: None,
             max_spike_cycles: None,
+            write_hold_warn: WRITE_HOLD_WARN,
         })
     }
 
@@ -3797,5 +3983,80 @@ mod persons_priority_tests {
             (moved.priority(), moved.own_priority(), moved.priority_by()),
             (Priority::Low, None, PriorityBy::Ai)
         );
+    }
+}
+
+#[cfg(test)]
+mod write_hold_tests {
+    use super::*;
+
+    const THRESHOLD: Duration = Duration::from_secs(2);
+
+    fn ms(millis: u64) -> Duration {
+        Duration::from_millis(millis)
+    }
+
+    fn times(locked: Option<u64>, ended: u64, rows: usize) -> WriteTxTimes {
+        WriteTxTimes {
+            locked: locked.map(ms),
+            ended: ms(ended),
+            wrote: locked.is_some(),
+            rows,
+        }
+    }
+
+    /// A hold past the threshold warns with how long it held, how long it
+    /// ran before the lock and its rows; one within it does not.
+    #[test]
+    fn a_hold_past_the_threshold_is_a_long_hold_and_one_within_it_is_not() {
+        assert_eq!(
+            long_hold(times(Some(100), 2_600, 40), THRESHOLD),
+            Some(LongHold {
+                held: ms(2_500),
+                before_lock: ms(100),
+                rows: 40,
+            })
+        );
+        assert_eq!(long_hold(times(Some(100), 2_100, 40), THRESHOLD), None);
+        assert_eq!(long_hold(times(Some(0), 1_999, 1), THRESHOLD), None);
+    }
+
+    /// The wait for another writer and the reads after `BEGIN` come before
+    /// the lock, so a long one with a short hold is no long hold.
+    #[test]
+    fn the_wait_and_the_reads_before_the_lock_are_not_held() {
+        assert_eq!(long_hold(times(Some(4_900), 5_200, 3), THRESHOLD), None);
+        assert_eq!(long_hold(times(Some(30_000), 30_001, 1), THRESHOLD), None);
+    }
+
+    /// A transaction that wrote nothing has no hold: a deferred one never
+    /// had the lock, and an immediate one that had it from its `BEGIN` but
+    /// read and rolled back is not named as a writer.
+    #[test]
+    fn a_transaction_that_wrote_nothing_is_no_long_hold() {
+        assert_eq!(long_hold(times(None, 60_000, 0), THRESHOLD), None);
+        let immediate = WriteTxTimes {
+            locked: Some(ms(10)),
+            ended: ms(9_000),
+            wrote: false,
+            rows: 0,
+        };
+        assert_eq!(long_hold(immediate, THRESHOLD), None);
+        // A write that changed no row still held the lock.
+        let unchanged = WriteTxTimes {
+            wrote: true,
+            ..immediate
+        };
+        assert_eq!(
+            long_hold(unchanged, THRESHOLD).map(|hold| hold.held),
+            Some(ms(8_990))
+        );
+    }
+
+    /// The threshold names a writer before its hold fails another
+    /// connection's write.
+    #[test]
+    fn the_threshold_is_under_the_busy_timeout() {
+        assert!(WRITE_HOLD_WARN < crate::application::QUEUE_BUSY_TIMEOUT);
     }
 }
