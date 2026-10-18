@@ -63,7 +63,8 @@ runtimeのほかのコードは、宣言したprofileをportを通して呼ぶ�
 - 検証の出力・CIのJUnit・hostのprocessのようにpathに結びつかない出力は、宣言した全てのprofileを宣言の順に当て、各段で最初に当たったものを取る（ADR-t2268-1決定6）。
   宣言したprofileのどれもJUnitを読まなければ、CIの見張りはtestの名前を読まずjobとstepで知らせ、どれも知らない道具のprocessは`other`に数える。
   検証のコマンドは差分のpathに依らずrepository全体を流すので、pathsで絞ると分類を落とすためである。
-  pathsはpathに結びつくもの（buildの出力の置き場、testの行の見分け、推奨の案）のためにあり、推奨の案は今は`doctor`と`status`に当たる範囲として出るだけである。
+  pathsはpathに結びつくもの（buildの出力の置き場、testの行の見分け、推奨の案）のためにある。
+  推奨の案では、`recommend::propose`が宣言のpathsを`dagq init`とbuilt-inのreviewの生成コマンドの宣言の案に写す（[推奨の設定](#推奨の設定)）。
 - 宣言したprofileがどれも読まない出力は、共通の印に当たらなければ`unknown`で、落ちたtestの名前は無く、flakyのやり直しのenvも足さない。
 - 宣言が無いrepositoryでは、dagqのソースでもどのprofileも働かない（`Toolchains::none`、ADR-t2268-1決定3）。
   検証の出力は共通の印と宣言したprojectの印だけが読み、flakyのやり直しのenvもbuildの出力のdirも足さず、runのworktreeのビルド成果物を消さず、CIの見張りはjobとstepで知らせ、hostの`rustc`とtoolchainの記録とKPIの`toolchain`の軸と`stats`の`rustc`の欄は出さない。
@@ -82,10 +83,11 @@ runtimeのほかのコードは、宣言したprofileをportを通して呼ぶ�
   runtimeはprofileが返したdirを宣言ごとに分けて作り、掃除する（ADR-t2268-1決定6）。
   profileと同じ名前の宣言はprofileのdirそのものを使う（決定9）。
   ほかの宣言のdirの名前と決め方は`BuildOutput::declared`のdoc commentが持つ。
-- landing recheckは、pathsがmergeした木のファイルに当たる宣言（pathsの無い宣言は常に当たる）の出力を使う（`Toolchains::build_runs`）。
+- landing recheckは、hostのscratch worktreeで流すとき、pathsがmergeした木のファイルに当たる宣言（pathsの無い宣言は常に当たる）の出力を使う（`Toolchains::build_runs`）。
   1回の実行でenvは1つの値しか持てないので、同じenvの宣言が複数当たればcommandをその数だけ流し、当たる宣言はどれも1回の実行で自分のdirを使う。
   当たる宣言が別々のenvなら、commandは1回である。
   当たる宣言が無ければenvを足さずdirも作らず、commandは`[run.env]`のとおりに1回流れる。
+  containerの中で流すとき（`recheck::run_in_container`）は宣言ごとのbuildの出力を使わず、commandは検証のcontainerで1回流れる。
 - 空き容量のための掃除は、今の宣言に依らず、組み込みのprofileのどれかの宣言のdirに当たる`recheck/`の下のdirを全て見る（`recheck::build_dirs`）。
   宣言を変えた後に前の宣言のdirが残らないためである。
 - 自動更新のsource buildはdagq自身の事情なので、宣言に依らずRustのprofileの出力を使う（[Auto-update](supervisor-lifecycle/auto-update.md)）。
