@@ -67,6 +67,10 @@ impl CiWatchState {
     /// Whether the claims, the resumes and the landings wait for the
     /// means to read the CI: the table is set and this process has no
     /// answer yet or the last one found them missing.
+    /// As for a missing program of `[run.env]`, the runs in flight, their
+    /// reviews and triage, and a landing or resume already started go on;
+    /// a run that passed its review waits awaiting integration without
+    /// taking the landing slot, and the list reads as last recorded.
     pub(super) fn held(&self) -> bool {
         hold_reason(self.config.is_some(), self.available).is_some()
     }

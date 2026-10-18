@@ -33,6 +33,9 @@ pub const CI_WATCH_AVAILABLE: &str = EventKind::CiWatchAvailable.as_str();
 /// The same passing failure (network, a non-zero `gh`) repeated
 /// [`CI_WATCH_FAILURE_LIMIT`] times, or the jobs of one success run could
 /// not be read that many times in a row (ADR-t2034-1 decision 5).
+/// Not an attention: the observer reads it. Nor does it start or end the
+/// hold for the watch, which follows the queue's latest
+/// [`CI_WATCH_UNAVAILABLE`] / [`CI_WATCH_AVAILABLE`].
 pub const CI_CHECK_FAILED: &str = EventKind::CiCheckFailed.as_str();
 /// A success run lacks a job `required_jobs` names: the setting and the
 /// workflow disagree (ADR-t2034-1 decision 5), an attention for the inbox
@@ -49,7 +52,10 @@ pub const CI_WATCH_HELD: &str = EventKind::CiWatchHeld.as_str();
 pub const CI_WATCH_RESUMED: &str = EventKind::CiWatchResumed.as_str();
 /// The supervisor's hold for the watch, which the check's own records do
 /// not show: [`CI_WATCH_UNAVAILABLE`] is the queue's answer, not whether
-/// a supervisor waits for one.
+/// a supervisor waits for one. `candidates`' `held` reads the records of
+/// the living supervisors only, and `status` shows on each registered
+/// supervisor's item (living or not) its own latest; neither is an
+/// attention.
 pub const CI_WATCH_HOLD: super::claim_hold::OwnHold = super::claim_hold::OwnHold {
     held: EventKind::CiWatchHeld,
     resumed: EventKind::CiWatchResumed,
@@ -846,7 +852,12 @@ pub struct FailureFinding {
     /// `ci_failure:<key>` ([`failure_key`]).
     pub subject: String,
     pub summary: String,
-    /// What the fix task carries, one JSON object.
+    /// What the fix task carries, one JSON object, which the planner copies
+    /// into the task's description: the added items (tests, or failed jobs
+    /// and steps), the run's failed jobs and steps, the range from the last
+    /// green to this run (the runs skipped in between, cancelled ones too,
+    /// inside it), the run and its URL, and the commit the supervisor's
+    /// build names with whether it contains the range ([`binary_contains`]).
     pub detail: Value,
     pub propose: String,
 }
@@ -877,7 +888,10 @@ pub struct CiCheckRecord {
     /// The finding of the new failures; its evidence is the events above.
     pub finding: Option<super::NewFinding>,
     /// The findings to resolve, each with its reason: only an `open` one
-    /// with no planner of the runtime's open for it.
+    /// with no planner of the runtime's open for it. An open planner decides
+    /// its finding (a proposal or a dismissal), and a green that came after
+    /// its prompt is read by the next `ci failures`; a `proposed` finding
+    /// ends with its proposal (`settle_findings`).
     pub resolve: Vec<(i64, String)>,
 }
 
@@ -916,7 +930,14 @@ pub struct RunInput<'a> {
 /// one (and not a re-run of it, [`WatchState::is_late`]) is recorded
 /// `late` and changes nothing: no item added or removed, no turn, no
 /// finding, so it neither rolls the list back nor overrides the later
-/// run's decision. A re-run of the latest one is decided like a new run.
+/// run's decision; its failed tests and jobs stay in its `ci_checked`.
+/// A re-run of the latest one is decided like a new run.
+///
+/// A red run takes off only tests its JUnit names passing, so a run whose
+/// JUnit is missing, unread or unnamed, or that did not run the test,
+/// takes off none, and a failed job and step item leaves only on a green
+/// run. Whether the job and step items stand for the tests is decided per
+/// run, not per job, since a JUnit file cannot be tied to its job.
 ///
 /// `ci_checked`'s `known_failures` is the size of the list after this run
 /// is processed; `ci_turned_green`'s `red_secs` is the seconds from the

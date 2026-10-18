@@ -36,7 +36,10 @@ impl SqliteQueue {
     /// the same run and attempt, one records it. The finding's evidence is the run's
     /// `ci_checked` and `ci_turned_red`, which name it back (`finding_id`,
     /// `finding_ids`); a resolved finding the run opens again is marked for
-    /// a proposal anew.
+    /// a proposal anew. The finding is recorded as
+    /// [`SqliteQueue::record_finding`] does (the observer's `finding record`
+    /// match and update), a write of the runtime's that passes no CLI
+    /// authorization, by `supervisor`.
     pub fn record_ci_check(&self, record: CiCheckRecord) -> Result<Option<CiCheckRecorded>> {
         let now = self.generators.clock.now();
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
