@@ -91,8 +91,10 @@ pub trait LedgerStore {
     /// The retention of the node rows, by the same local day as
     /// [`NodeSampleStore::remove_node_samples`]: drop from each the samples
     /// of a day before `before_day` and remove a row left with none
-    /// ([`crate::domain::ledger::node::retained`]), in one transaction.
-    /// Returns how many rows were removed.
+    /// ([`crate::domain::ledger::node::retained`]). Only the rows it
+    /// changes are written, a bounded number a transaction: with none to
+    /// change nothing is written, and one stopped part way is finished by
+    /// the next call. Returns how many rows were removed.
     fn remove_node_rows(&self, before_day: i64) -> Result<usize>;
     /// The window `query` asks of the rows of every kind
     /// ([`crate::domain::ledger::window::select`]): the one entry the
@@ -128,8 +130,12 @@ pub trait NodeSampleStore {
     /// Add the samples of `node` read from the CSV `file` of the local day
     /// `day` (`csv_import`) whose second has no row of `node` yet, however
     /// near another row they are (a supervisor kept them), and mark the
-    /// file imported up to the `bytes` read, in one transaction. Returns
-    /// how many rows were added.
+    /// file imported up to the `bytes` read. The rows are committed a
+    /// bounded number a transaction and the mark with the last of them, so
+    /// an import stopped part way leaves the file's mark as it was (none,
+    /// or that of a shorter read before the file grew) and the next import
+    /// of it adds the rest, none twice. Returns how many rows were
+    /// added.
     fn import_node_samples(
         &self,
         node: &str,

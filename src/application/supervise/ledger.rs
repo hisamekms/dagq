@@ -164,7 +164,9 @@ pub(super) struct LedgerWatch {
     failing: u32,
     recorded: bool,
     /// The local day the node rows' retention last ran on, and the one
-    /// the pass running now runs it on.
+    /// the pass running now runs it on. Kept in the process only: a
+    /// process started again that day runs it once more, which finds no
+    /// row to change and writes nothing ([`crate::application::LedgerStore::remove_node_rows`]).
     retained: Option<i64>,
     retaining: Option<i64>,
 }

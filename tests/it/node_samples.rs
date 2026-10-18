@@ -402,3 +402,131 @@ fn samples_out_of_order_are_kept_alike_in_the_store_and_the_file() {
         stored
     );
 }
+
+/// A file of more rows than one transaction holds: its import commits them
+/// a bounded number at a time and marks the file with the last, so an
+/// import stopped part way (a row it cannot add) keeps the batches before
+/// it and leaves the file's mark as it was (none, or that of a shorter
+/// read before it grew); the next import of the file adds the rest, a row
+/// sampled meanwhile at one of their seconds kept as it is, and every row
+/// is there once with the values the file kept.
+#[test]
+fn a_files_import_commits_by_batches_and_the_next_adds_the_rest() {
+    use dagq::infrastructure::runtime_store::ROWS_PER_TRANSACTION as BATCH;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("q.db");
+    let queue = SqliteQueue::init(&db).unwrap();
+    let day = NOW / DAY;
+    let file: Vec<HostSample> = (0..i64::try_from(BATCH * 2 + 50).unwrap())
+        .map(|n| full(NOW + n * 5))
+        .collect();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TRIGGER stop BEFORE INSERT ON node_samples WHEN new.unix = {}
+         BEGIN SELECT RAISE(ABORT, 'stopped'); END",
+        file[BATCH + 5].unix
+    ))
+    .unwrap();
+    let import = || queue.import_node_samples(HOST_NODE, "metrics-x.csv", day, &file, 900);
+    let error = import().unwrap_err();
+    assert!(format!("{error:#}").contains("stopped"), "{error:#}");
+    assert_eq!(rows(&queue).len(), BATCH);
+    assert!(queue.imported_files(HOST_NODE).unwrap().is_empty());
+    conn.execute_batch("DROP TRIGGER stop").unwrap();
+    let sampled = &file[BATCH + 20];
+    assert!(
+        queue
+            .record_node_sample(HOST_NODE, day, sampled, SampleSource::Sampled, 0)
+            .unwrap()
+    );
+    assert_eq!(import().unwrap(), file.len() - BATCH - 1);
+    let read = rows(&queue);
+    assert_eq!(
+        read.iter()
+            .map(|row| row.sample.clone())
+            .collect::<Vec<_>>(),
+        file
+    );
+    assert_eq!(
+        read.iter()
+            .filter(|row| row.source == SampleSource::Sampled)
+            .map(|row| row.sample.unix)
+            .collect::<Vec<_>>(),
+        [sampled.unix]
+    );
+    assert_eq!(
+        queue.imported_files(HOST_NODE).unwrap(),
+        [("metrics-x.csv".to_owned(), 900)].into()
+    );
+    assert_eq!(import().unwrap(), 0);
+    assert_eq!(rows(&queue).len(), file.len());
+    // The file grown since its import, and the import of it stopped part
+    // way again: the file keeps its mark of before, shorter than the file,
+    // and the next import adds the rest.
+    let grown: Vec<HostSample> = (0..i64::try_from(file.len() + BATCH + 10).unwrap())
+        .map(|n| full(NOW + n * 5))
+        .collect();
+    conn.execute_batch(&format!(
+        "CREATE TRIGGER stop BEFORE INSERT ON node_samples WHEN new.unix = {}
+         BEGIN SELECT RAISE(ABORT, 'stopped'); END",
+        grown[file.len() + 5].unix
+    ))
+    .unwrap();
+    let import = || queue.import_node_samples(HOST_NODE, "metrics-x.csv", day, &grown, 1800);
+    assert!(import().is_err());
+    assert_eq!(
+        queue.imported_files(HOST_NODE).unwrap(),
+        [("metrics-x.csv".to_owned(), 900)].into()
+    );
+    conn.execute_batch("DROP TRIGGER stop").unwrap();
+    assert_eq!(import().unwrap(), BATCH + 10);
+    assert_eq!(
+        rows(&queue)
+            .iter()
+            .map(|row| row.sample.clone())
+            .collect::<Vec<_>>(),
+        grown
+    );
+    assert_eq!(
+        queue.imported_files(HOST_NODE).unwrap(),
+        [("metrics-x.csv".to_owned(), 1800)].into()
+    );
+}
+
+/// While a file of many rows is imported, another connection's heartbeat
+/// gets the write lock between two of its transactions, within its busy
+/// wait: it sees some rows added and some not yet.
+#[test]
+fn a_heartbeat_writes_while_a_file_is_imported() {
+    use crate::common::{self, queue::*};
+    use dagq::infrastructure::runtime_store::ROWS_PER_TRANSACTION as BATCH;
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("q.db");
+    drop(SqliteQueue::init(&db).unwrap());
+    beats(&db);
+    let file: Vec<HostSample> = (0..i64::try_from(BATCH * 8 + 10).unwrap())
+        .map(|n| full(NOW + n * 5))
+        .collect();
+    let total = i64::try_from(file.len()).unwrap();
+    let heart = heart(&db);
+    let job = {
+        let (db, file) = (db.clone(), file.clone());
+        std::thread::spawn(move || {
+            SqliteQueue::open(&db).unwrap().import_node_samples(
+                HOST_NODE,
+                "metrics-x.csv",
+                NOW / DAY,
+                &file,
+                900,
+            )
+        })
+    };
+    let samples = "SELECT count(*) FROM node_samples";
+    until_committed(&db, samples, None);
+    let (written, took, seen) = beat(&heart, &format!("SELECT ({samples})"));
+    let _waiting = common::within(common::STEP_LIMIT, "the import of a file");
+    assert_eq!(job.join().unwrap().unwrap(), file.len());
+    assert!(written, "the heartbeat was not written in {took:?}");
+    assert!(took < dagq::application::QUEUE_BUSY_TIMEOUT, "{took:?}");
+    assert!(0 < seen && seen < total, "{seen} of {total}");
+}

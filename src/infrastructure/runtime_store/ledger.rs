@@ -147,28 +147,56 @@ impl LedgerStore for SqliteQueue {
         rows.map(|row| row?).collect()
     }
 
+    /// Read the node rows with no lock, then write only those the
+    /// retention changes, [`ROWS_PER_TRANSACTION`] a transaction
+    /// ([`in_batches`]): with none to change (the day's retention already
+    /// ran, by another process too) nothing is written and no write lock
+    /// taken. Each batch reads its rows again under its lock, so a row
+    /// another writer changed since the first read is judged as it is now,
+    /// and a retention stopped between batches is finished by the next
+    /// (one whose rows are gone or kept as they are changes nothing).
     fn remove_node_rows(&self, before_day: i64) -> Result<usize> {
-        let tx = self.write_tx("ledger_node_retention", TransactionBehavior::Deferred)?;
-        let rows = self.ledger_rows(LedgerKind::Node)?;
-        let mut removed = 0;
-        for row in rows {
-            match node::retained(&row, before_day) {
-                None => {
-                    removed += tx.execute(
-                        "DELETE FROM ledger_rows WHERE kind=?1 AND key=?2",
-                        params![LedgerKind::Node.as_str(), row.key],
-                    )?;
-                }
-                Some(kept) if kept != row => {
-                    tx.execute(
-                        "UPDATE ledger_rows SET detail=?3 WHERE kind=?1 AND key=?2",
-                        params![LedgerKind::Node.as_str(), row.key, text(&kept.detail)?],
-                    )?;
-                }
-                Some(_) => {}
-            }
+        let changed: Vec<String> = self
+            .ledger_rows(LedgerKind::Node)?
+            .into_iter()
+            .filter(|row| node::retained(row, before_day).as_ref() != Some(row))
+            .map(|row| row.key)
+            .collect();
+        if changed.is_empty() {
+            return Ok(0);
         }
-        tx.commit()?;
+        let mut removed = 0;
+        in_batches(self, "ledger_node_retention", &changed, |tx, keys, _| {
+            for key in keys {
+                let Some(row) = tx
+                    .query_row(
+                        "SELECT * FROM ledger_rows WHERE kind=?1 AND key=?2",
+                        params![LedgerKind::Node.as_str(), key],
+                        ledger_row,
+                    )
+                    .optional()?
+                    .transpose()?
+                else {
+                    continue;
+                };
+                match node::retained(&row, before_day) {
+                    None => {
+                        removed += tx.execute(
+                            "DELETE FROM ledger_rows WHERE kind=?1 AND key=?2",
+                            params![LedgerKind::Node.as_str(), key],
+                        )?;
+                    }
+                    Some(kept) if kept != row => {
+                        tx.execute(
+                            "UPDATE ledger_rows SET detail=?3 WHERE kind=?1 AND key=?2",
+                            params![LedgerKind::Node.as_str(), key, text(&kept.detail)?],
+                        )?;
+                    }
+                    Some(_) => {}
+                }
+            }
+            Ok(())
+        })?;
         Ok(removed)
     }
 }

@@ -70,38 +70,49 @@ impl NodeSampleStore for SqliteQueue {
         samples: &[HostSample],
         bytes: u64,
     ) -> Result<usize> {
-        let tx = self.write_tx("node_samples_csv_import", TransactionBehavior::Deferred)?;
         let mut added = 0;
-        {
-            let mut statement = tx.prepare(&insert())?;
-            for sample in samples {
-                // Only the second: every row a file kept is kept.
-                let rows = statement.execute(rusqlite::params_from_iter(values(
-                    node,
-                    day,
-                    sample,
-                    SampleSource::CsvImport,
-                    0,
-                )))?;
-                tx.wrote(rows);
-                added += rows;
-            }
-        }
-        tx.execute(
-            "INSERT INTO node_sample_imports(node_id,file,day,bytes,rows,imported_at)
-             VALUES (?1,?2,?3,?4,?5,?6)
-             ON CONFLICT(node_id, file) DO UPDATE SET
-                 bytes=excluded.bytes, rows=excluded.rows, imported_at=excluded.imported_at",
-            params![
-                node,
-                file,
-                day,
-                i64::try_from(bytes)?,
-                i64::try_from(samples.len())?,
-                self.generators.clock.now()
-            ],
+        in_batches(
+            self,
+            "node_samples_csv_import",
+            samples,
+            |tx, batch, last| {
+                let mut statement = tx.prepare_cached(&insert())?;
+                for sample in batch {
+                    // Only the second: every row a file kept is kept.
+                    let rows = statement.execute(rusqlite::params_from_iter(values(
+                        node,
+                        day,
+                        sample,
+                        SampleSource::CsvImport,
+                        0,
+                    )))?;
+                    tx.wrote(rows);
+                    added += rows;
+                }
+                // The mark goes with the last batch: a file whose import
+                // stopped before it keeps its mark of before (none, or bytes
+                // shorter than the file), so the next import reads it again
+                // whole, and its rows committed already are kept out by
+                // their second.
+                if last {
+                    tx.execute(
+                    "INSERT INTO node_sample_imports(node_id,file,day,bytes,rows,imported_at)
+                     VALUES (?1,?2,?3,?4,?5,?6)
+                     ON CONFLICT(node_id, file) DO UPDATE SET
+                         bytes=excluded.bytes, rows=excluded.rows, imported_at=excluded.imported_at",
+                    params![
+                        node,
+                        file,
+                        day,
+                        i64::try_from(bytes)?,
+                        i64::try_from(samples.len())?,
+                        self.generators.clock.now()
+                    ],
+                )?;
+                }
+                Ok(())
+            },
         )?;
-        tx.commit()?;
         Ok(added)
     }
 

@@ -203,6 +203,46 @@ fn record_events(conn: &Connection, id: &RunId, events: Vec<run::NewRunEvent>) -
     Ok(())
 }
 
+/// The most rows a background job's bulk write (the node rows' retention,
+/// the import of a CSV file of the host's load) puts in one transaction:
+/// each batch is committed on its own, so the write lock is held a short
+/// while (a few hundred small statements) next to a heartbeat's wait of
+/// [`crate::application::QUEUE_BUSY_TIMEOUT`], and a job stopped between
+/// two leaves what it committed for the next one to go on from.
+pub const ROWS_PER_TRANSACTION: usize = 200;
+
+/// How long such a job waits between two of its transactions, with no
+/// lock held: longer than the longest step of SQLite's busy wait (100 ms),
+/// so a writer waiting on the lock (a heartbeat) gets it before the next
+/// batch takes it again.
+pub const PAUSE_BETWEEN_TRANSACTIONS: std::time::Duration = std::time::Duration::from_millis(120);
+
+/// Run `write` on each batch of at most [`ROWS_PER_TRANSACTION`] of
+/// `items` in its own immediate transaction named `name`
+/// ([`SqliteQueue::write_tx`]), committed before the next starts,
+/// [`PAUSE_BETWEEN_TRANSACTIONS`] apart; `items` empty runs it once on no
+/// items. `write` is told whether its batch is the last. A failure stops
+/// at its batch: the batches before it stay committed.
+fn in_batches<T>(
+    queue: &SqliteQueue,
+    name: &'static str,
+    items: &[T],
+    mut write: impl FnMut(&super::sqlite::WriteTx<'_>, &[T], bool) -> Result<()>,
+) -> Result<()> {
+    let batches = items.len().div_ceil(ROWS_PER_TRANSACTION).max(1);
+    for index in 0..batches {
+        if index > 0 {
+            std::thread::sleep(PAUSE_BETWEEN_TRANSACTIONS);
+        }
+        let start = (index * ROWS_PER_TRANSACTION).min(items.len());
+        let end = (start + ROWS_PER_TRANSACTION).min(items.len());
+        let tx = queue.write_tx(name, TransactionBehavior::Immediate)?;
+        write(&tx, &items[start..end], index + 1 == batches)?;
+        tx.commit()?;
+    }
+    Ok(())
+}
+
 /// The answer the runtime writes into a `stalled` ask it closes as the run
 /// is recovered.
 pub const STALL_RECOVERED_CLOSED: &str = "the run was recovered; closed by the runtime";

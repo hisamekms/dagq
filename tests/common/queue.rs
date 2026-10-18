@@ -182,3 +182,58 @@ pub fn runtime_draft(
     queue.record_draft_origin(id, origin, &material).unwrap();
     id
 }
+
+/// A connection to the queue at `db` for [`beat`], opened before the job
+/// it writes beside starts, so the beat itself is only its statement.
+pub fn heart(db: &Path) -> Connection {
+    let conn = Connection::open(db).unwrap();
+    conn.busy_timeout(dagq::application::QUEUE_BUSY_TIMEOUT)
+        .unwrap();
+    conn
+}
+
+/// A heartbeat's write on `conn` ([`heart`]) while another connection's
+/// job writes the queue: waiting [`dagq::application::QUEUE_BUSY_TIMEOUT`]
+/// for the lock, it adds a row to `beats` (created first by [`beats`])
+/// holding what `seen` (a count) reads under its lock. Returns whether it
+/// was written, how long it took and what it saw.
+pub fn beat(conn: &Connection, seen: &str) -> (bool, std::time::Duration, i64) {
+    let started = std::time::Instant::now();
+    let written = conn
+        .execute(&format!("INSERT INTO beats(seen) {seen}"), [])
+        .is_ok();
+    let took = started.elapsed();
+    let seen = conn
+        .query_row("SELECT coalesce(max(seen), -1) FROM beats", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    (written, took, seen)
+}
+
+/// The table [`beat`] writes, in the queue at `db`.
+pub fn beats(db: &Path) {
+    Connection::open(db)
+        .unwrap()
+        .execute_batch("CREATE TABLE beats(seen INTEGER)")
+        .unwrap();
+}
+
+/// Wait until `count` (a count) reads more than none, or `less` than
+/// `from` when given, in the queue at `db`: a job's first transaction
+/// committed.
+pub fn until_committed(db: &Path, count: &str, from: Option<i64>) {
+    let conn = Connection::open(db).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let now: i64 = conn.query_row(count, [], |r| r.get(0)).unwrap();
+        if from.map_or(now > 0, |from| now < from) {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "nothing was committed"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}

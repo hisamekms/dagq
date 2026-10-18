@@ -17,8 +17,10 @@ use dagq::domain::ledger::{
 use dagq::domain::marks::utc_text;
 use dagq::domain::stats::Cursor;
 use dagq::domain::{EventId, RunEvent, RunId, TaskId};
+use dagq::infrastructure::sqlite::SqliteQueue;
 use rusqlite::Connection;
 use serde_json::{Value, json};
+use std::time::Duration;
 
 use common::queue::*;
 
@@ -306,5 +308,101 @@ fn a_node_row_is_written_once_and_kept_as_the_node_samples() {
     assert_eq!(node::samples(&kept[0])[0].local_day, 2);
     assert_eq!(queue.remove_node_rows(2).unwrap(), 0);
     assert_eq!(queue.remove_node_rows(4).unwrap(), 1);
+    assert_eq!(count(&db, node_rows), 0);
+}
+
+/// `hours` node rows written from one sample an hour on day 1, the first
+/// `kept` of them with a second sample on day 3: the rows the retention by
+/// day 2 removes and those it keeps changed. Returns them by key.
+fn node_rows_over(queue: &SqliteQueue, hours: usize, kept: usize) -> Vec<LedgerRow> {
+    let hour = node::bucket_of(T0);
+    for n in 0..i64::try_from(hours).unwrap() {
+        let start = hour - T0 + n * BUCKET_SECS;
+        record(queue, 1, start + 30);
+        if n < i64::try_from(kept).unwrap() {
+            record(queue, 3, start + 60);
+        }
+    }
+    let rows = node::node_rows(&queue.node_samples(HOST_NODE, 0, i64::MAX).unwrap(), BUILT);
+    assert_eq!(rows.len(), hours);
+    for row in &rows {
+        assert!(queue.write_ledger_row(row).unwrap());
+    }
+    queue.ledger_rows(LedgerKind::Node).unwrap()
+}
+
+/// More node rows than one transaction holds: the retention commits them
+/// a bounded number at a time, so one stopped part way (a row it cannot
+/// remove) has removed and changed the batches before it, and the next
+/// finishes the rest; what is kept is what the retention keeps of each
+/// row, whatever the stop. After it, a retention of the same day (a
+/// supervisor started again that day) changes nothing and takes no write
+/// lock: it runs while another connection holds that lock.
+#[test]
+fn the_node_rows_retention_commits_by_batches_resumes_and_then_writes_nothing() {
+    use dagq::infrastructure::runtime_store::ROWS_PER_TRANSACTION as BATCH;
+    let (dir, queue) = fixture();
+    let db = dir.path().join("queue.db");
+    let (hours, kept) = (BATCH * 2 + 50, 10);
+    let rows = node_rows_over(&queue, hours, kept);
+    let expected: Vec<LedgerRow> = rows
+        .iter()
+        .filter_map(|row| node::retained(row, 2))
+        .collect();
+    assert_eq!(expected.len(), kept);
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TRIGGER stop BEFORE DELETE ON ledger_rows WHEN old.key = '{}'
+         BEGIN SELECT RAISE(ABORT, 'stopped'); END",
+        rows[BATCH + 5].key
+    ))
+    .unwrap();
+    let error = queue.remove_node_rows(2).unwrap_err();
+    assert!(format!("{error:#}").contains("stopped"), "{error:#}");
+    let node_rows = "SELECT count(*) FROM ledger_rows WHERE kind='node'";
+    // The first batch: `kept` rows changed and the rest removed.
+    assert_eq!(
+        count(&db, node_rows),
+        i64::try_from(hours - (BATCH - kept)).unwrap()
+    );
+    let read = queue.ledger_rows(LedgerKind::Node).unwrap();
+    assert_eq!(read[..kept], expected[..]);
+    assert_eq!(read[kept..], rows[BATCH..]);
+    conn.execute_batch("DROP TRIGGER stop").unwrap();
+    assert_eq!(queue.remove_node_rows(2).unwrap(), hours - BATCH);
+    assert_eq!(queue.ledger_rows(LedgerKind::Node).unwrap(), expected);
+
+    queue.set_busy_timeout(Duration::ZERO).unwrap();
+    conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+    assert_eq!(queue.remove_node_rows(2).unwrap(), 0);
+    conn.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(queue.ledger_rows(LedgerKind::Node).unwrap(), expected);
+}
+
+/// While the retention removes many node rows, another connection's
+/// heartbeat gets the write lock between two of its transactions, within
+/// its busy wait: it sees some rows removed and some not yet.
+#[test]
+fn a_heartbeat_writes_while_the_node_rows_retention_runs() {
+    use dagq::infrastructure::runtime_store::ROWS_PER_TRANSACTION as BATCH;
+    let (dir, queue) = fixture();
+    let db = dir.path().join("queue.db");
+    let hours = BATCH * 4 + 10;
+    node_rows_over(&queue, hours, 0);
+    beats(&db);
+    let node_rows = "SELECT count(*) FROM ledger_rows WHERE kind='node'";
+    let total = i64::try_from(hours).unwrap();
+    let heart = heart(&db);
+    let job = {
+        let db = db.clone();
+        std::thread::spawn(move || SqliteQueue::open(&db).unwrap().remove_node_rows(2))
+    };
+    until_committed(&db, node_rows, Some(total));
+    let (written, took, seen) = beat(&heart, &format!("SELECT ({node_rows})"));
+    let _waiting = common::within(common::STEP_LIMIT, "the node rows' retention");
+    assert_eq!(job.join().unwrap().unwrap(), hours);
+    assert!(written, "the heartbeat was not written in {took:?}");
+    assert!(took < dagq::application::QUEUE_BUSY_TIMEOUT, "{took:?}");
+    assert!(0 < seen && seen < total, "{seen} of {total}");
     assert_eq!(count(&db, node_rows), 0);
 }

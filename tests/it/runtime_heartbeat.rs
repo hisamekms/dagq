@@ -277,7 +277,8 @@ fn samples(count: i64) -> Vec<HostSample> {
 }
 
 /// A CSV import that held the lock past the threshold (lowered to none, so
-/// any import that wrote does) is named in a WARN with how long it held it.
+/// any import that wrote does) is named in a WARN with how long it held it,
+/// once for each of its transactions.
 #[test]
 fn an_import_that_held_the_lock_past_the_threshold_is_named_in_a_warn() {
     let _test = common::test();
@@ -292,13 +293,14 @@ fn an_import_that_held_the_lock_past_the_threshold_is_named_in_a_warn() {
         .import_node_samples(HOST_NODE, "metrics-x.csv", 1, &samples(500), 1)
         .unwrap();
     assert_eq!(added, 500);
-    assert_eq!(holds.named(IMPORT).len(), 1, "{:?}", holds.0);
+    let batches = 500_usize.div_ceil(dagq::infrastructure::runtime_store::ROWS_PER_TRANSACTION);
+    assert_eq!(holds.named(IMPORT).len(), batches, "{:?}", holds.0);
     // The same import within the threshold warns of nothing.
     let quiet = SqliteQueue::open(&db).unwrap();
     quiet
         .import_node_samples(HOST_NODE, "metrics-y.csv", 1, &samples(5), 1)
         .unwrap();
-    assert_eq!(holds.named(IMPORT).len(), 1, "{:?}", holds.0);
+    assert_eq!(holds.named(IMPORT).len(), batches, "{:?}", holds.0);
 }
 
 /// An import that started while another connection held the lock waits in

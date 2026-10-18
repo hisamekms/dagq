@@ -209,6 +209,7 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 - **旧方式**: 切り替え前のrun（`run_phase_changed`が無い）とそのtaskは区間に畳まず、`legacy`に今の`RunMeasures`から値を一度だけ書く。
   storeは値と版を上書きせず、後の入力では記録だけを追う。
 - **保持**: nodeの行はhostの負荷と同じ日数で消す。
+  消す・変える行を上限の行数ごとにcommitし、無ければlockを取らず、止まれば次の周回が続ける。
 - **失敗**: 読めない・書けない周回は印を残して次に任せ、続く失敗の初めにwarnを1度出し、決まった回数続けば`ledger_build_failed`を1度記録する。
   runとtaskの結果は変えない。
 
