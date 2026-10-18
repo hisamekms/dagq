@@ -109,10 +109,11 @@ plugins/claude-dagq/
   skills/dagq-inbox/              inbox のループ: ask と attention を人に知らせ、人の指示があるときだけ dagq-recover の手順を実行する。自分では判断しない。人が頼んだ計画は request add で runtime の planner に移譲する
   skills/dagq-planner/SKILL.md    runtime だけが立てる planner: 依頼の計画、goal / task の登録と submit（ready にはしない）、draft の採否
   skills/dagq-recover/            人が手で行うこと（inbox か人の DAGQ_ROLE の無い terminal から、人の指示で）
-  skills/*/reference/             本文から「必要な時に読む」と指す出力のフィールドや状態の一覧
+  skills/*/reference/             本文から「必要な時に読む」と指す役割の手順・判断の規則と --help への案内
 ```
 
-各`SKILL.md`は手順だけを書いて小さく収め（大きさの上限は`tests/plugin.rs`が確かめる）、出力フィールドや状態の一覧は各skillの`reference/`に置いて本文から「必要な時に読む」と指す。
+各`SKILL.md`は手順だけを書いて小さく収め（大きさの上限は`tests/plugin.rs`が確かめる）、場面ごとの役割の手順と判断の規則は各skillの`reference/`に置いて本文から「必要な時に読む」と指す。
+`reference/`はコマンドのflagと出力の欄を列挙せず、`dagq <command> --help`と出力そのものに任せる。
 skillは呼ぶたびに読み込まれcompaction後にも読み直されるので、読み込み単位を小さくする。
 descriptionはtriggerが重ならないように書き分ける: `dagq`は登録と参照、`dagq-planner`はruntimeが立てるplanner session（`DAGQ_ROLE=planner`）の依頼の計画・登録・draftの判断・goal close、`dagq-inbox`はinbox session（`DAGQ_ROLE=inbox`）のaskとattentionの中継と人が頼んだ計画の依頼（`request add`）、`dagq-recover`は人が手で行うこと（`dagq-inbox`と`dagq-planner`は[ADR-0022](../adr/0022-ask-answer-inbox-planner-and-landing-on-doubt.md)）。
 
@@ -187,7 +188,7 @@ skillはすべて`${CLAUDE_PLUGIN_ROOT}/bin/dagq`を呼ぶ。launcherはバイ�
   Releaseのasset名やdagqのrepositoryの開発に固有の手順は出さない（[ADR-t617-1](../adr/2026-09-27-t617-1-plugin-marketplace-pinned-to-release-tag.md)）。
 - queue: バイナリがcwdのrepositoryから解決し、launcherは`DAGQ_DB`があるときだけそれを渡す（形はlauncherの冒頭のコメント）。
   dirの作成と束縛は`init`が行う。
-- `--resolve`: `dagq locate`のJSONに、バイナリと両方のversion（バイナリのものは[build識別子](supervisor-lifecycle/build-identifier.md#build-identifier)）を加えた1つのobjectを返す（欄はpluginの`dagq`の`reference/locate.md`）。
+- `--resolve`: `dagq locate`のJSONに、バイナリと両方のversion（バイナリのものは[build識別子](supervisor-lifecycle/build-identifier.md#build-identifier)）を加えた1つのobjectを返す（errorとwarningのときの手順はpluginの`dagq`の`reference/locate.md`）。
   skillはこれをユーザーへの報告に使う。
 - version不一致: pluginとバイナリのversionのmajor.minorが違うとき、stdoutの解決結果はそのまま出したうえでstderrに警告を1行出し、exitは0のまま（解決自体は正しく、CLIの差だけが不明）。
   skillは止まらずユーザーに報告し、古い方の更新（pluginは`claude plugin update claude-dagq@dagq`、バイナリは`cargo install --locked dagq`）を案内する。
