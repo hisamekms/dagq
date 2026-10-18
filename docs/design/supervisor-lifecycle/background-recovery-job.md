@@ -176,8 +176,10 @@ turnの後の扱いの詳細は[非対話のworker](headless-worker.md#turnの�
 
 ### runのsessionの記録<a id="runのsessionの記録"></a>
 
-- runが開いたsessionは、最初・resumeごと・開き直しのどれもrun_eventsに残り、止めたかはsessionごとに判じる（`domain::run::run_workspaces`）。
-- reviseは生きているwrapperに送るので、wrapperのsessionを新しく開かない（[Agent provider lifecycle](../provider-lifecycle.md#大きなcontextからの新しいsession)）。
+- runが開いたwrapperは、最初・resumeごと・開き直しのどれもrun_eventsに残り、止めたかはwrapperごとに判じる（`domain::run::run_workspaces`）。
+  `session_renewed`はwrapperを増やさないので、止めるのは区切りの前と同じwrapperである。
+- reviseは生きているwrapperに送るので、wrapper（process）は開き直さない。
+- ただし直前のturnの`peak_context`が`[fresh_session]`の閾値を超えれば、同じwrapperが`session_renewed`の後に新しい名前のモデルのsessionを始める（[Agent provider lifecycle](../provider-lifecycle.md#大きなcontextからの新しいsession)）。
 
 ### 終わったrunの掃除<a id="終わったrunの掃除"></a>
 
