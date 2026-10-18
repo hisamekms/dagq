@@ -117,6 +117,15 @@ required_jobs = ["fmt / test / clippy / coverage", "linux build / test"]
 replaces = ["cargo llvm-cov nextest", "cargo llvm-cov --locked --fail-under-lines 80"]
 command = "sh scripts/landing-it.sh"
 
+[fresh_session]
+# worker の差し戻し・needs_session の resume・triage の resume で、直前の turn の peak_context（token 数）がこの値を超えていたら、
+# 同じ worktree・branch のまま引き継ぎの prompt を渡して新しい session で続ける（ADR-t2080-1、goal 174 の段 2-b）。
+# 振る舞いは docs/design/provider-lifecycle.md の「大きなcontextからの新しいsession」、書式は run-environment.md の [fresh_session] の項。
+# 150000 は ADR の試算の閾値で、10/01〜10/07 着地の Claude の worker の run 380 件のうち約 133 run が切り替わり、worker の入力 token が
+# 13〜20% 減る。2026-10-10 以降も resume の 1 回以上の run の peak の中央値が 400k を超えて積み増しが続くので、そのまま採った。
+# [fresh_session] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 2129・2167 を含んでから足した。
+peak_context_above = 150000
+
 [toolchains.rust]
 # この repository は Rust の project なので、runtime に組み込みの Rust の profile の利用者として宣言する（ADR-t2268-1 決定 3）。
 # 宣言したので、組み込みの Rust の profile が着地の検証と landing recheck の出力（失敗の分類・落ちた test の名前・flaky のやり直しの env）を読む。
