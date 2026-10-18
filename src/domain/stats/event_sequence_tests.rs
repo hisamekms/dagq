@@ -87,6 +87,39 @@ fn timestamps_parse_the_queue_format() {
     }
 }
 
+/// The fraction's first three digits, padded with zeros, as the
+/// milliseconds: what padding it into a `String` read before.
+#[test]
+fn a_timestamps_fraction_reads_its_first_three_digits() {
+    let whole = timestamp_millis("2026-09-23T12:00:00Z").unwrap();
+    for (fraction, millis) in [
+        ("", 0),
+        (".", 0),
+        (".5", 500),
+        (".05", 50),
+        (".123", 123),
+        (".1234", 123),
+        (".12345", 123),
+        (".123456", 123),
+        (".1234567", 123),
+        (".12345678", 123),
+        (".123456789", 123),
+        (".999999999", 999),
+    ] {
+        for (sep, zone) in [("T", "Z"), ("T", ""), (" ", "Z"), (" ", "")] {
+            let text = format!("2026-09-23{sep}12:00:00{fraction}{zone}");
+            assert_eq!(timestamp_millis(&text), Some(whole + millis), "{text}");
+        }
+    }
+    for bad in [
+        "2026-09-23T12:00:00.1x3Z",
+        "2026-09-23T12:00:00.12\u{e9}Z",
+        "2026-09-23T12:00:00.\u{e9}Z",
+    ] {
+        assert_eq!(timestamp_millis(bad), None, "{bad}");
+    }
+}
+
 /// The runs' `rustc` and the cargo-only counts are left out by two
 /// judgements of their own: [`without_rustc`] (the Rust profile) leaves
 /// the counts, and [`without_cargo_measures`] (dagq's source) leaves the

@@ -2429,7 +2429,11 @@ pub fn timestamp_millis(text: &str) -> Option<i64> {
     let seconds = time.next()?;
     let (second, fraction) = seconds.split_once('.').unwrap_or((seconds, ""));
     let second = second.parse::<i64>().ok()?;
-    let millis = format!("{fraction:0<3}").get(..3)?.parse::<i64>().ok()?;
+    // The fraction's first three bytes, padded with zeros, on the stack.
+    let mut padded = [b'0'; 3];
+    let len = fraction.len().min(3);
+    padded[..len].copy_from_slice(&fraction.as_bytes()[..len]);
+    let millis = std::str::from_utf8(&padded).ok()?.parse::<i64>().ok()?;
     if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }

@@ -34,7 +34,7 @@ use crate::domain::{
         slots_full_of,
     },
     stats::{landing_utilization, timestamp_millis},
-    supervisor_life::{supervisor_life_end, supervisor_of},
+    supervisor_life::{Lives, supervisor_of},
 };
 
 const LIVE_ALERT_BASELINE: &str = EventKind::LiveAlertBaseline.as_str();
@@ -160,9 +160,11 @@ pub fn queue_rows(
             .into_iter()
             .map(|(interval, end)| (interval, "landing_hold", end)),
     );
+    let mut interval_rows: HashMap<EventId, usize> = HashMap::new();
     for (interval, kind, _) in &intervals {
         if let Some(start) = by_id.get(&interval.id) {
             taken.insert(start.id);
+            interval_rows.entry(start.id).or_insert(rows.len());
             rows.push(interval_row(start, kind, interval));
         }
     }
@@ -170,10 +172,10 @@ pub fn queue_rows(
     // next one replaced).
     for (interval, _, end) in &intervals {
         if let Some(end) = end.filter(|end| by_id.contains_key(end) && !taken.contains(end))
-            && let Some(row) = rows.iter_mut().find(|row| row.start == interval.id)
+            && let Some(&at) = interval_rows.get(&interval.id)
         {
             taken.insert(end);
-            row.records.push(end);
+            rows[at].records.push(end);
         }
     }
     streams(owned, all, now_ms, &mut rows, &mut taken);
@@ -254,8 +256,12 @@ fn streams(
         rows[at].records.push(event.id);
         taken.insert(event.id);
     }
+    if open.is_empty() {
+        return;
+    }
+    let lives = Lives::new(all);
     for (supervisor, at) in open {
-        if let Some(end) = supervisor_life_end(all, &supervisor, now_ms) {
+        if let Some(end) = lives.end(&supervisor, now_ms) {
             let started = rows[at].started_at.unwrap_or(end.at_ms());
             rows[at].ended_at = Some(end.at_ms().max(started));
             rows[at].outcome = Some(claim_hold::ENDED_SUPERVISOR_GONE.into());
@@ -334,13 +340,21 @@ fn finding_rows(owned: &[RunEvent], rows: &mut Vec<Building>, taken: &mut HashSe
 }
 
 /// The integration slot's use: one row per `integrate` attempt, keyed by
-/// its `integration_started`, whose records are its run's.
+/// its `integration_started`, whose records are its run's. Each time is
+/// read once, and an attempt's last input found by a binary search.
 fn landing_slots(all: &[RunEvent], now_ms: i64, built_at: &str) -> Vec<LedgerRow> {
     let (attempts, _) = landing_utilization::spans(all, now_ms);
-    let starts = all.iter().filter(|event| {
-        event.kind == event_kind::INTEGRATION_STARTED
-            && event.run_id.is_some()
-            && timestamp_millis(&event.created_at).is_some()
+    if attempts.is_empty() {
+        return Vec::new();
+    }
+    let times: Vec<Option<i64>> = all
+        .iter()
+        .map(|event| timestamp_millis(&event.created_at))
+        .collect();
+    let through = LastAt::new(all, &times);
+    let starts = all.iter().zip(&times).filter_map(|(event, at)| {
+        (event.kind == event_kind::INTEGRATION_STARTED && event.run_id.is_some() && at.is_some())
+            .then_some(event)
     });
     starts
         .zip(attempts)
@@ -355,14 +369,9 @@ fn landing_slots(all: &[RunEvent], now_ms: i64, built_at: &str) -> Vec<LedgerRow
             row.inputs_through.events = if attempt.open {
                 all.last().map_or(start.id, |last| last.id)
             } else {
-                all.iter()
-                    .filter(|event| {
-                        event.id >= start.id
-                            && timestamp_millis(&event.created_at)
-                                .is_some_and(|at| at <= attempt.end)
-                    })
-                    .map(|event| event.id)
-                    .max()
+                through
+                    .last_at(attempt.end)
+                    .filter(|last| *last >= start.id)
                     .unwrap_or(start.id)
             };
             row.started_at = Some(attempt.start);
@@ -381,6 +390,36 @@ fn landing_slots(all: &[RunEvent], now_ms: i64, built_at: &str) -> Vec<LedgerRow
             row
         })
         .collect()
+}
+
+/// The events whose time reads, by time, each with the greatest id of
+/// those at or before it.
+struct LastAt {
+    by_time: Vec<(i64, EventId)>,
+}
+
+impl LastAt {
+    fn new(events: &[RunEvent], times: &[Option<i64>]) -> Self {
+        let mut by_time: Vec<(i64, EventId)> = events
+            .iter()
+            .zip(times)
+            .filter_map(|(event, at)| Some(((*at)?, event.id)))
+            .collect();
+        by_time.sort_unstable();
+        let mut greatest: Option<EventId> = None;
+        for (_, id) in &mut by_time {
+            let max = greatest.map_or(*id, |greatest| greatest.max(*id));
+            *id = max;
+            greatest = Some(max);
+        }
+        Self { by_time }
+    }
+
+    /// The greatest id of the events at or before `at`.
+    fn last_at(&self, at: i64) -> Option<EventId> {
+        let count = self.by_time.partition_point(|(time, _)| *time <= at);
+        count.checked_sub(1).map(|index| self.by_time[index].1)
+    }
 }
 
 fn finish(row: Building, by_id: &HashMap<EventId, &RunEvent>, built_at: &str) -> LedgerRow {
@@ -408,3 +447,6 @@ fn finish(row: Building, by_id: &HashMap<EventId, &RunEvent>, built_at: &str) ->
     ledger.own(records);
     ledger
 }
+
+#[cfg(test)]
+mod tests;

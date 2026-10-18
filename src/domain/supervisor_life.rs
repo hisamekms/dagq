@@ -6,6 +6,8 @@
 //! [`SUPERVISOR_ALIVE_INTERVAL_SECS`]). The registrations and their
 //! heartbeats are state, which the measurement does not read.
 
+use std::collections::HashMap;
+
 use serde_json::Value;
 
 use super::{HEARTBEAT_TIMEOUT_SECS, RunEvent, event_kind, stats::timestamp_millis};
@@ -50,13 +52,61 @@ impl LifeEnd {
 /// it. A token of a build that recorded no `supervisor_alive` is read the
 /// same way.
 pub fn supervisor_life_end(events: &[RunEvent], token: &str, now_ms: i64) -> Option<LifeEnd> {
-    let mut last: Option<i64> = None;
-    for event in events {
-        if event.payload.get("supervisor").and_then(Value::as_str) != Some(token) {
-            continue;
+    let mut life = Life::default();
+    for event in events
+        .iter()
+        .filter(|event| supervisor_of(event) == Some(token))
+    {
+        life.read(event);
+        if life.stopped.is_some() {
+            break;
+        }
+    }
+    life.end(now_ms)
+}
+
+/// The end of the life of every supervisor of `events` (ascending id),
+/// read in one pass: what [`supervisor_life_end`] gives each, without
+/// reading all the events again per supervisor.
+#[derive(Debug, Default)]
+pub struct Lives<'e> {
+    by_token: HashMap<&'e str, Life>,
+}
+
+impl<'e> Lives<'e> {
+    pub fn new(events: &'e [RunEvent]) -> Self {
+        let mut by_token: HashMap<&'e str, Life> = HashMap::new();
+        for event in events {
+            if let Some(token) = supervisor_of(event) {
+                by_token.entry(token).or_default().read(event);
+            }
+        }
+        Self { by_token }
+    }
+
+    /// [`supervisor_life_end`] of `token` at `now_ms`.
+    pub fn end(&self, token: &str, now_ms: i64) -> Option<LifeEnd> {
+        self.by_token.get(token).and_then(|life| life.end(now_ms))
+    }
+}
+
+/// A supervisor's events read in order: the end its first
+/// `supervisor_stopped` gives, or else the latest time of them.
+#[derive(Debug, Clone, Copy, Default)]
+struct Life {
+    stopped: Option<i64>,
+    last: Option<i64>,
+}
+
+impl Life {
+    /// Read one event naming the supervisor; nothing after its stop, and
+    /// nothing whose time does not parse.
+    fn read(&mut self, event: &RunEvent) {
+        if self.stopped.is_some() {
+            return;
         }
         let Some(at) = timestamp_millis(&event.created_at) else {
-            continue;
+            return;
         };
         if event.kind == event_kind::SUPERVISOR_STOPPED {
             let heartbeat = event
@@ -64,15 +114,20 @@ pub fn supervisor_life_end(events: &[RunEvent], token: &str, now_ms: i64) -> Opt
                 .get("last_heartbeat_at")
                 .and_then(Value::as_i64)
                 .and_then(|secs| secs.checked_mul(1000));
-            return Some(LifeEnd::Stopped {
-                at_ms: heartbeat.map_or(at, |heartbeat| heartbeat.min(at)),
-            });
+            self.stopped = Some(heartbeat.map_or(at, |heartbeat| heartbeat.min(at)));
+        } else {
+            self.last = Some(self.last.map_or(at, |last| last.max(at)));
         }
-        last = Some(last.map_or(at, |last: i64| last.max(at)));
     }
-    let last = last?;
-    let silent_after = (SUPERVISOR_ALIVE_INTERVAL_SECS + HEARTBEAT_TIMEOUT_SECS) * 1000;
-    (now_ms > last + silent_after).then_some(LifeEnd::Silent { at_ms: last })
+
+    fn end(self, now_ms: i64) -> Option<LifeEnd> {
+        if let Some(at_ms) = self.stopped {
+            return Some(LifeEnd::Stopped { at_ms });
+        }
+        let last = self.last?;
+        let silent_after = (SUPERVISOR_ALIVE_INTERVAL_SECS + HEARTBEAT_TIMEOUT_SECS) * 1000;
+        (now_ms > last + silent_after).then_some(LifeEnd::Silent { at_ms: last })
+    }
 }
 
 /// The kinds of event of a supervisor's own life and settings.
@@ -117,6 +172,91 @@ mod tests {
     fn an_alive_is_due_once_the_interval_passed() {
         assert!(!alive_due(SUPERVISOR_ALIVE_INTERVAL_SECS - 1));
         assert!(alive_due(SUPERVISOR_ALIVE_INTERVAL_SECS));
+    }
+
+    /// The end as one supervisor's scan of every event read it: its first
+    /// stop whose time parses, else its latest time once silent.
+    fn life_end_by_scan(events: &[RunEvent], token: &str, now_ms: i64) -> Option<LifeEnd> {
+        let mut last: Option<i64> = None;
+        for event in events {
+            if event.payload.get("supervisor").and_then(Value::as_str) != Some(token) {
+                continue;
+            }
+            let Some(at) = timestamp_millis(&event.created_at) else {
+                continue;
+            };
+            if event.kind == event_kind::SUPERVISOR_STOPPED {
+                let heartbeat = event
+                    .payload
+                    .get("last_heartbeat_at")
+                    .and_then(Value::as_i64)
+                    .and_then(|secs| secs.checked_mul(1000));
+                return Some(LifeEnd::Stopped {
+                    at_ms: heartbeat.map_or(at, |heartbeat| heartbeat.min(at)),
+                });
+            }
+            last = Some(last.map_or(at, |last: i64| last.max(at)));
+        }
+        let last = last?;
+        let silent_after = (SUPERVISOR_ALIVE_INTERVAL_SECS + HEARTBEAT_TIMEOUT_SECS) * 1000;
+        (now_ms > last + silent_after).then_some(LifeEnd::Silent { at_ms: last })
+    }
+
+    /// Every supervisor's end read in one pass ([`Lives`]) and by
+    /// [`supervisor_life_end`] is the one its own scan gave: a stop with
+    /// and without a heartbeat, a stop whose time does not parse, events
+    /// after the stop, clocks out of order, silence and a life going on.
+    #[test]
+    fn the_lives_read_in_one_pass_end_as_each_supervisors_scan_does() {
+        let mut events = vec![
+            event(1, "supervisor_started", json!({"supervisor": "a"}), 0),
+            event(2, "supervisor_alive", json!({"supervisor": "b"}), 4),
+            event(3, "slots_full_started", json!({"supervisor": "a"}), 2),
+            event(4, "supervisor_stopped", json!({"supervisor": "b"}), 6),
+            event(
+                5,
+                "supervisor_stopped",
+                json!({"supervisor": "a", "last_heartbeat_at": 3 * 60}),
+                8,
+            ),
+            event(6, "supervisor_alive", json!({"supervisor": "a"}), 9),
+            event(
+                7,
+                "supervisor_stopped",
+                json!({"supervisor": "a", "last_heartbeat_at": 60}),
+                10,
+            ),
+            event(8, "supervisor_alive", json!({"supervisor": "b"}), 11),
+            event(9, "supervisor_stopped", json!({"supervisor": "c"}), 12),
+            event(10, "supervisor_alive", json!({"supervisor": "c"}), 13),
+            event(11, "supervisor_alive", json!({"supervisor": "d"}), 20),
+            event(12, "supervisor_alive", json!({"supervisor": "d"}), 15),
+            event(13, "supervisor_alive", json!({"other": "e"}), 16),
+        ];
+        events[8].created_at = "garbled".into();
+        let lives = Lives::new(&events);
+        for token in ["a", "b", "c", "d", "e", "none"] {
+            for now in [0, 10, 20, 25, 26, 40, 1000].map(|minute| minute * MIN) {
+                let scan = life_end_by_scan(&events, token, now);
+                assert_eq!(lives.end(token, now), scan, "{token} {now}");
+                assert_eq!(
+                    supervisor_life_end(&events, token, now),
+                    scan,
+                    "{token} {now}"
+                );
+            }
+        }
+        assert_eq!(lives.end("a", 0), Some(LifeEnd::Stopped { at_ms: 3 * MIN }));
+        assert_eq!(lives.end("b", 0), Some(LifeEnd::Stopped { at_ms: 6 * MIN }));
+        assert_eq!(
+            lives.end("c", 1000 * MIN),
+            Some(LifeEnd::Silent { at_ms: 13 * MIN })
+        );
+        assert_eq!(lives.end("d", 20 * MIN), None);
+        assert_eq!(
+            lives.end("d", 1000 * MIN),
+            Some(LifeEnd::Silent { at_ms: 20 * MIN })
+        );
     }
 
     /// (iii) A supervisor that records nothing but its evidence of life

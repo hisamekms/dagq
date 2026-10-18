@@ -268,8 +268,12 @@ fn slots_full_intervals(events: &[RunEvent], now_ms: i64) -> Vec<PreClaimInterva
             _ => {}
         }
     }
+    if open.is_empty() {
+        return rows;
+    }
+    let lives = supervisor_life::Lives::new(events);
     for ((supervisor, _), mut row) in open {
-        if let Some(life) = supervisor_life::supervisor_life_end(events, &supervisor, now_ms) {
+        if let Some(life) = lives.end(&supervisor, now_ms) {
             let started = timestamp_millis(&row.started_at).unwrap_or(life.at_ms());
             row.ended_at = Some(utc_text(life.at_ms().max(started)));
             row.end = Some(claim_hold::ENDED_SUPERVISOR_GONE.to_owned());
