@@ -211,7 +211,7 @@ follow-upの所属の判断・訂正とdraft / readyの所属の変更は同じ`
   holdの行と`task_held` / `task_released`も1つのトランザクションで書き、claim・resume・復旧jobの開始と結果の適用はそれぞれのトランザクションでholdを読むので、先に確定した側だけが効く。
 - 外部キーと依存の複合主キーはDBに置き、自己依存はdomainが拒み、循環はトランザクションの中の再帰CTEで見つける。
 - taskの詳細と一覧は1つのread transactionで読むので、task・run・eventのスナップショットが揃う。
-- contextをまたぐトランザクションは`.config/context-boundaries.txt`のものだけ（[architecture](architecture.md)のX1）。
+- contextをまたぐトランザクションは`src/context_boundaries/ownership.rs`の所有の表のものだけ（[architecture](architecture.md)のX1）。
 
 ### CHECK制約を使わない
 

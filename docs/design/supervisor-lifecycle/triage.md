@@ -93,7 +93,7 @@ related:
 
 userとinbox（人の言葉で）は、`in_progress`のtaskの最新runが`failed`か`interrupted`のとき、`dagq ready ID --inherit --reason ...`でそのrunのbranchを次のrunに引き継いでtaskを`ready`に戻せる（[ADR-t1962-1](../../adr/2026-10-07-t1962-1-retry-carrying-the-branch-over-by-hand.md)）。
 decideのaskの答えに無い引き継ぎを、人の判断として直接打つための操作で、decideの答えの集合（ADR-0047決定3）は変えない。
-認可は計画管理の`ready`が行い、引き継ぎの確定は実行と着地が公開するportが行う（境界をまたぐtransactionのT10、`.config/context-boundaries.txt`）。
+認可は計画管理の`ready`が行い、引き継ぎの確定は実行と着地が公開するportが行う（境界をまたぐtransactionのT10、`src/context_boundaries/ownership.rs`）。
 
 - 引き継ぐcommitは自動の`retry_inherit`と同じ選び方で決める。
   CLIは確定の前にこれを読み、`refs/dagq/runs/<run-id>`は確定が通った後にだけ書くので、断ったときはtask・ask・refのどれも変えない。

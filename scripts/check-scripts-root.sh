@@ -59,7 +59,6 @@ check-layer-deps compose_super_glob
 check-layer-deps planning_reaches_loop_state
 check-layer-deps host_ops_reaches_loop_state
 check-context-boundaries context_unlisted_trait
-check-context-boundaries context_unlisted_store
 check-context-boundaries context_internal_port
 check-context-boundaries context_stale_allow_item
 check-frontmatter-dates frontmatter_date_comment
@@ -128,10 +127,6 @@ violate_host_ops_reaches_loop_state() {
 
 violate_context_unlisted_trait() {
   echo 'pub trait ZzScriptsRoot { fn zz(&self); }' >src/application/zz_scripts_root.rs
-}
-
-violate_context_unlisted_store() {
-  echo 'fn zz_scripts_root(c: &Conn) { c.execute("UPDATE tasks SET id = 1"); }' >src/infrastructure/zz_scripts_root.rs
 }
 
 violate_context_internal_port() {

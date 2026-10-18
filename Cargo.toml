@@ -31,6 +31,9 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["r
 uuid = { version = "1.20", features = ["v4"] }
 
 [dev-dependencies]
+# Reads the sources as syntax for the boundary tests (src/context_boundaries.rs).
+proc-macro2 = { version = "1.0", default-features = false }
+syn = { version = "2.0", default-features = false, features = ["full", "parsing", "visit"] }
 tempfile = "3.25"
 
 # One test binary for the integration tests (tests/it), so tests/common is

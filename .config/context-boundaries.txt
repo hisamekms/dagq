@@ -1,8 +1,9 @@
 # The ownership of the runtime's contexts that the module paths do not tell,
-# read by scripts/check-context-boundaries.sh. The rules it checks with this
-# list (C1, C5, C7 and X1) and their meaning: docs/design/architecture.md,
-# section "検査できる規則"; what counts: the script's header. This header
-# holds the format.
+# read by scripts/check-context-boundaries.sh for the rule C5 (its meaning:
+# docs/design/architecture.md, section "コンテキストの規則"; what counts:
+# the script's header). The tables, the store modules of src/infrastructure/
+# and the transactions are in src/context_boundaries/ownership.rs. This
+# header holds the format.
 #
 # One item per line, `kind | field | ...`, fields trimmed; lines that start
 # with `#` and blank lines are not read. A context is one of planning (計画管理),
@@ -12,15 +13,6 @@
 # every kind is a note (a reason where the kind says so) and may be empty
 # unless it is a reason.
 #
-#   table | <table> | <context> | <note>
-#       The owner of a table some migration creates (CREATE TABLE). Every
-#       table the migrations leave after the last one (not dropped nor
-#       renamed away) must have one.
-#   store | <path> | <context> | <note>
-#       The context of a store module of src/infrastructure/: a file, or a
-#       directory ending in `/` for every file under it (the longest path
-#       wins). Every file of src/infrastructure/ whose strings write SQL
-#       (INSERT, REPLACE, UPDATE, DELETE) must be in one.
 #   module | <path> | <context> | <note>
 #       The context of a module of src/application/ that its path does not
 #       tell (a file, or a directory ending in `/`). Not for the paths the
@@ -44,91 +36,12 @@
 #       A value or a function (not a trait) one context lends to others; the
 #       name must be defined (struct, enum, union, fn, type, const, static,
 #       mod, trait) in <path>; whom it is lent to is not checked.
-#   transaction | <ID> | <writer> | <path> | <function> | <reason>
-#       A function of a transaction that changes the state of several
-#       contexts (T1, T2, ...; one item per function). SQL inside it may
-#       write another context's table; every fn of that name in the file.
 #
 # The script derives, and this list does not write: the owner of a trait of
 # src/application/ports/<context>.rs, and the context of
 # src/application/ports/<context>.rs, src/application/queue_reads/<context>.rs
-# and src/compose/<context>.rs.
-
-# Tables.
-table | tasks | planning |
-table | goals | planning |
-table | task_dependencies | planning |
-table | task_goal_dependencies | planning |
-table | proposals | planning |
-table | plan_reviews | planning |
-table | goal_reviews | planning |
-table | planners | planning |
-table | plan_requests | planning |
-table | plan_request_proposals | planning |
-table | spike_cycles | planning | the investigations; the claim (T1) opens one
-table | replan_operations | planning | the replanning of a run; its guard is read by every step of the task
-table | replan_mappings | planning |
-table | replan_replacements | planning |
-table | task_holds | planning | the hold of a task; the claim, the resume and the recovery round read it
-table | draft_origins | planning |
-table | draft_reopens | planning |
-table | draft_revisits | planning |
-table | draft_bundles | planning |
-table | draft_bundle_members | planning |
-table | follow_up_judgements | planning |
-table | search_index | planning | the search index; migration triggers write it
-table | landed_commits | planning | the search index; migration triggers write it
-table | task_runs | execution |
-table | run_leases | execution |
-table | run_processes | execution |
-table | session_workspaces | execution |
-table | findings | observation |
-table | ledger_rows | observation | the runtime's control does not read it
-table | node_samples | observation | the NodeSampleStore; host writes it through the port, the runtime's control does not read it
-table | node_sample_imports | observation | the imported CSV files, written with node_samples in one transaction
-table | supervisors | host |
-table | queue_repository | host |
-table | schema_floor | host |
-table | binary_updates | host |
-table | headless_jobs | host |
-table | asks | shared | an ask is opened and applied by the context of its kind
-table | run_events | shared | each context writes its own kinds (src/domain/event_kind.rs)
-
-# Store modules of src/infrastructure/.
-store | src/infrastructure/sqlite.rs | planning | TaskStore
-store | src/infrastructure/proposals.rs | planning |
-store | src/infrastructure/plan_reviews.rs | planning |
-store | src/infrastructure/goal_reviews.rs | planning |
-store | src/infrastructure/plan_requests.rs | planning |
-store | src/infrastructure/investigations.rs | planning |
-store | src/infrastructure/replans.rs | planning |
-store | src/infrastructure/task_holds.rs | planning |
-store | src/infrastructure/planners.rs | planning |
-store | src/infrastructure/draft_planners.rs | planning |
-store | src/infrastructure/finding_planners.rs | planning |
-store | src/infrastructure/follow_up_membership.rs | planning |
-store | src/infrastructure/search.rs | planning |
-store | src/infrastructure/runtime_store/planning_records.rs | planning |
-store | src/infrastructure/runtime_store/mod.rs | execution |
-store | src/infrastructure/runtime_store/transitions.rs | execution |
-store | src/infrastructure/runtime_store/recovery.rs | execution |
-store | src/infrastructure/runtime_store/session_registry.rs | execution | mixed: SessionRegistry also writes planning's planners
-store | src/infrastructure/runtime_store/run_log.rs | execution | also host's InboxWatchLog
-store | src/infrastructure/runtime_store/coordination.rs | execution | mixed: RunCoordination, and host's SupervisorRegistry
-store | src/infrastructure/runtime_store/eval_rounds.rs | execution |
-store | src/infrastructure/sessions.rs | execution | the spans of the sessions
-store | src/infrastructure/session_tokens.rs | execution |
-store | src/infrastructure/findings.rs | observation |
-store | src/infrastructure/ci_watch_store.rs | observation |
-store | src/infrastructure/kpi_push.rs | observation |
-store | src/infrastructure/runtime_store/queue_records.rs | observation |
-store | src/infrastructure/runtime_store/ledger.rs | observation |
-store | src/infrastructure/runtime_store/node_samples.rs | observation | NodeSampleStore
-store | src/infrastructure/headless_jobs.rs | host |
-store | src/infrastructure/schema.rs | host |
-store | src/infrastructure/asks.rs | shared | AskStore
-store | src/infrastructure/runtime_store/ask_store.rs | shared | AskStore
-store | src/infrastructure/event_actor.rs | shared | EventStore
+# and src/compose/<context>.rs. The script reads the context of a store
+# module of src/infrastructure/ from the Rust table's store rows.
 
 # Modules of src/application/ whose context the path does not tell.
 module | src/application/commands/planning.rs | planning |
@@ -400,22 +313,3 @@ item | src/application/supervise/contexts.rs | HostOpsState | host | execution |
 item | src/application/supervise/cleanup.rs | CleanupWatch | host | execution | cleaning and defer
 item | src/application/supervise/sccache.rs | ensure_sccache | host | execution |
 item | src/application/supervise/sccache.rs | sccache_look | host | execution |
-
-# Transactions across contexts (ADR-t1545-1 decision 3).
-transaction | T1 | execution | src/infrastructure/sqlite.rs | claim_task | claim: no run without its owner, no in_progress without its run (ADR-0054); runtime_store::transitions calls it
-transaction | T1 | execution | src/infrastructure/runtime_store/transitions.rs | claim_for_supervisor_holding | claim, the supervisor's side
-transaction | T2 | execution | src/infrastructure/runtime_store/transitions.rs | finish_integration | the landing on main and the task's completion agree
-transaction | T3 | planning | src/infrastructure/plan_reviews.rs | decide_plan | a proposal and its tasks in one step
-transaction | T4 | execution | src/infrastructure/runtime_store/recovery.rs | decide_triage | a run's failure and its task's next state in one step (ADR-0047 decision 40)
-transaction | T4 | execution | src/infrastructure/sqlite.rs | transition_task | planning's function T4 changes the task through
-transaction | T5 | planning | src/infrastructure/goal_reviews.rs | decide_goal | a goal's verdict and its gap tasks in one step
-transaction | T6 | planning | src/infrastructure/finding_planners.rs | submit_linking | no double proposal of a finding
-transaction | T6 | planning | src/infrastructure/finding_planners.rs | settle_findings | the verdict goes back to the finding
-transaction | T7 | planning | src/infrastructure/draft_planners.rs | register_follow_ups | a landed run's follow_ups become drafts once with their origin; execution calls it, apart from T2
-transaction | T8 | planning | src/infrastructure/follow_up_membership.rs | judge_follow_up | the judgement, the membership and the question agree (ADR-t1504-2 decisions 1, 6, 9)
-transaction | T9 | planning | src/infrastructure/follow_up_membership.rs | decide_correction | the answer, the goal, the membership and the open questions agree (ADR-t1504-2 decision 9)
-transaction | T10 | execution | src/infrastructure/runtime_store/recovery.rs | inherit_by_hand | a person's carry-over, once and not racing the recovery job (ADR-t1962-1)
-transaction | T11 | execution | src/infrastructure/runtime_store/coordination.rs | heartbeat | the registration and the leases agree
-transaction | T2 | execution | src/infrastructure/sqlite.rs | complete_task | planning's function T2 and T12 complete the task through
-transaction | T12 | execution | src/infrastructure/runtime_store/transitions.rs | close_satisfied | a verified already_satisfied claim's run closes without a commit and its task completes in one step (ADR-t1818-1)
-transaction | T12 | execution | src/infrastructure/runtime_store/transitions.rs | decide_satisfied | a person's retry or cancel fails the run and moves its task in one step (ADR-t1818-1)

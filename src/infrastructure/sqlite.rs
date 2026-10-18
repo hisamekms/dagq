@@ -2906,7 +2906,7 @@ pub(super) fn transition_task(
 /// run, with a completed Spike's replanning request (`now_secs`). The
 /// planning side's write of the task, which the run's end calls rather
 /// than writing `tasks` itself: its landing (T2 of
-/// `.config/context-boundaries.txt`) or the close of a verified
+/// `src/context_boundaries/ownership.rs`) or the close of a verified
 /// `already_satisfied` claim without one (T12, ADR-t1818-1 decision 5).
 pub(super) fn complete_task(
     conn: &Connection,

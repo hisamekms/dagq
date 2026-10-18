@@ -1431,7 +1431,7 @@ pub enum KeptOutcome {
 /// backend's slots. The supervisors' registrations are host運用's
 /// [`SupervisorRegistry`](super::host::SupervisorRegistry), except that
 /// [`heartbeat`](Self::heartbeat) refreshes the registration with the
-/// leases in one write (transaction T11 of .config/context-boundaries.txt).
+/// leases in one write (transaction T11 of src/context_boundaries/ownership.rs).
 /// Its reads (`holds_lease`, `run_leases`, `run_lease`, `processes`,
 /// `backend_slots`) are published to every context (the `method` items of
 /// the same list); the rest is 実行と着地's
