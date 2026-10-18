@@ -1364,6 +1364,12 @@ name = "runtime_fresh_session::a_new_session_recorded_without_its_request_is_the
 reason = "B 境界（復旧と adopt・supervisor の配線）: supervisor が session_renewed を記録して依頼を送れずに止まった後、次の supervisor の resume が閾値に依らずその session に引き継ぎを送り、二度は記録しないことを確かめる。未依頼の区切りの判断は domain::fresh_session の unit test"
 task = 2129
 
+# 5.5〜7.7s (stress 5 under the host's load of other runs, task 2167)
+[[test]]
+name = "runtime_fresh_session::a_new_session_whose_handoff_could_not_be_written_starts_with_the_next_handoff"
+reason = "B 境界（復旧・supervisor の配線・プロセス）: revise の引き継ぎの turns/ への書き込みが失敗した後、supervisor が revise を取り下げて session を終わらせ、人の send_back の resume が記録済みの新しい session を実の wrapper で引き継ぎから一度だけ始めることを 2 回の supervise で確かめる。未依頼の区切りの判断は domain::fresh_session の unit test"
+task = 2167
+
 # 7.8〜9.9s (stress 60s under the host's load of other runs, task 2129)
 [[test]]
 name = "runtime_fresh_session::a_triage_resume_past_the_threshold_goes_on_in_a_new_session"

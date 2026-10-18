@@ -10,6 +10,12 @@
 use crate::runtime_support;
 use dagq::domain::EventKind;
 use dagq::domain::turn::session_name;
+use dagq::{
+    application::{EntryKind, RunFiles},
+    runtime::RunFilesPort,
+};
+use std::io;
+use std::time::SystemTime;
 
 use runtime_support::*;
 
@@ -416,4 +422,202 @@ fn a_triage_resume_after_an_unmeasured_turn_stays_in_the_session() {
     );
     let text = session_texts(&run).pop().unwrap();
     assert!(!text.contains(HANDOFF_OPENING), "{text}");
+}
+
+/// Run files whose first write of a request carrying a handoff into a
+/// session's `turns/` fails, as a full disk would: the supervisor recorded
+/// the new session and could not write its first request.
+#[derive(Default)]
+struct HandoffUnwritten {
+    failed: Mutex<bool>,
+}
+
+impl RunFiles for HandoffUnwritten {
+    fn create_dir_all(&self, dir: &Path) -> io::Result<()> {
+        LocalRunFiles.create_dir_all(dir)
+    }
+    fn create_new_dir(&self, dir: &Path) -> io::Result<()> {
+        LocalRunFiles.create_new_dir(dir)
+    }
+    fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
+        let request = path.parent().is_some_and(|dir| dir.ends_with("turns"))
+            && String::from_utf8_lossy(contents).contains(HANDOFF_OPENING);
+        let mut failed = self.failed.lock().unwrap();
+        if request && !*failed {
+            *failed = true;
+            return Err(io::Error::other("no space left on device"));
+        }
+        LocalRunFiles.write(path, contents)
+    }
+    fn copy(&self, from: &Path, to: &Path) -> io::Result<()> {
+        LocalRunFiles.copy(from, to)
+    }
+    fn read(&self, path: &Path) -> io::Result<Vec<u8>> {
+        LocalRunFiles.read(path)
+    }
+    fn read_from(&self, path: &Path, offset: u64) -> io::Result<Vec<u8>> {
+        LocalRunFiles.read_from(path, offset)
+    }
+    fn read_range(&self, path: &Path, offset: u64, len: u64) -> io::Result<Vec<u8>> {
+        LocalRunFiles.read_range(path, offset, len)
+    }
+    fn read_tail(&self, path: &Path, bytes: u64) -> io::Result<Vec<u8>> {
+        LocalRunFiles.read_tail(path, bytes)
+    }
+    fn size(&self, path: &Path) -> io::Result<u64> {
+        LocalRunFiles.size(path)
+    }
+    fn read_to_string(&self, path: &Path) -> io::Result<String> {
+        LocalRunFiles.read_to_string(path)
+    }
+    fn try_lock(&self, path: &Path) -> io::Result<Option<Box<dyn std::any::Any + Send>>> {
+        LocalRunFiles.try_lock(path)
+    }
+    fn try_lock_shared(&self, path: &Path) -> io::Result<Option<Box<dyn std::any::Any + Send>>> {
+        LocalRunFiles.try_lock_shared(path)
+    }
+    fn lock(&self, path: &Path) -> io::Result<Box<dyn std::any::Any + Send>> {
+        LocalRunFiles.lock(path)
+    }
+    fn modified(&self, path: &Path) -> io::Result<SystemTime> {
+        LocalRunFiles.modified(path)
+    }
+    fn read_stamped(&self, path: &Path) -> Result<Option<(SystemTime, Vec<u8>)>> {
+        LocalRunFiles.read_stamped(path)
+    }
+    fn is_file(&self, path: &Path) -> bool {
+        LocalRunFiles.is_file(path)
+    }
+    fn is_dir(&self, path: &Path) -> bool {
+        LocalRunFiles.is_dir(path)
+    }
+    fn executable(&self, path: &Path) -> io::Result<bool> {
+        LocalRunFiles.executable(path)
+    }
+    fn set_executable(&self, path: &Path, executable: bool) -> io::Result<()> {
+        LocalRunFiles.set_executable(path, executable)
+    }
+    fn entry_kind(&self, path: &Path) -> io::Result<EntryKind> {
+        LocalRunFiles.entry_kind(path)
+    }
+    fn exists(&self, path: &Path) -> bool {
+        LocalRunFiles.exists(path)
+    }
+    fn read_dir(&self, dir: &Path) -> io::Result<Vec<PathBuf>> {
+        LocalRunFiles.read_dir(dir)
+    }
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        LocalRunFiles.rename(from, to)
+    }
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        LocalRunFiles.remove_file(path)
+    }
+    fn tree_size(&self, dir: &Path) -> io::Result<Option<u64>> {
+        LocalRunFiles.tree_size(dir)
+    }
+    fn remove_dir_all(&self, dir: &Path) -> io::Result<()> {
+        LocalRunFiles.remove_dir_all(dir)
+    }
+    fn append_line(&self, path: &Path, line: &str) -> io::Result<()> {
+        LocalRunFiles.append_line(path, line)
+    }
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        LocalRunFiles.canonicalize(path)
+    }
+    fn write_fenced(&self, path: &Path, text: &str, info: &str, body: &Path) -> Result<()> {
+        LocalRunFiles.write_fenced(path, text, info, body)
+    }
+    fn now(&self) -> SystemTime {
+        LocalRunFiles.now()
+    }
+}
+
+/// A revise past the threshold whose handoff cannot be written into
+/// `turns/` leaves `session_renewed` with no request after it: the revise
+/// is withdrawn (`revise_unsent`), the earlier session exits without a
+/// turn, and a person is asked. The person's `send_back` resumes the run in
+/// the session recorded, though that session has finished no turn, so
+/// judging the peak alone would keep it: no second `session_renewed`, and
+/// the resumed wrapper's first turn starts that session with the task's
+/// prompt and the handoff, sent once. No turn of either session ran a
+/// request without the handoff in between.
+#[test]
+fn a_new_session_whose_handoff_could_not_be_written_starts_with_the_next_handoff() {
+    let (_dir, repo, db) = fixture();
+    set_fresh_session_threshold(&repo, 100);
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let backend = TestWorkspace::new(
+        &db,
+        false,
+        &format!(
+            "if [ \"$TURN\" -eq 1 ]; then {}fi; {IDLE_AGENT}",
+            context(500)
+        ),
+    );
+    let reviewer = TestReviewer::new(&[
+        verdict("revise", &["add a line to change.txt"], "one gap"),
+        verdict("pass", &[], "fixed"),
+    ]);
+    let options = SuperviseOptions {
+        files: Some(RunFilesPort(Arc::new(HandoffUnwritten::default()))),
+        ..supervise_options(4, true)
+    };
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let run = detail.runs[0].clone();
+    let name = session_name(run.id().as_str(), 1);
+    let recorded = json!({"after_turn": 1, "peak_context": 500, "threshold": 100,
+                          "provider": "claude", "session": name, "count": 1});
+    assert_eq!(payloads(&detail, "session_renewed"), [&recorded]);
+    let unsent = payloads(&detail, "revise_unsent");
+    assert_eq!(unsent.len(), 1, "{unsent:?}");
+    assert!(
+        unsent[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("no space left on device"),
+        "{unsent:?}"
+    );
+    assert!(payloads(&detail, "turn_requested").is_empty());
+    assert_eq!(stub_calls(&run).len(), 1);
+    assert_exit_sent(&backend, &run, 1);
+    let asks = queue.asks(Default::default()).unwrap();
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    let ask = asks[0].clone();
+    assert_eq!(ask.kind, AskKind::ApproveLanding);
+
+    queue.answer(ask.id, "send_back").unwrap();
+    backend.resume_script_for(
+        1,
+        "await_message; printf 'fixed\\n' >> change.txt; unlocked git commit -q -am fixed; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+    );
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let landed = detail.runs[0].clone();
+    assert_landed_run(&landed, &repo, &base);
+    assert_eq!(payloads(&detail, "session_renewed"), [&recorded]);
+    let requested = payloads(&detail, "turn_requested");
+    assert_eq!(requested.len(), 1, "{requested:?}");
+    assert_eq!(requested[0]["what"], "resolution request");
+    let calls = stub_calls(&landed);
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert!(
+        calls[0].starts_with(&format!("start {} ", run.id())),
+        "{calls:?}"
+    );
+    assert!(calls[1].starts_with(&format!("start {name} ")), "{calls:?}");
+    let texts = session_texts(&landed);
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    assert_eq!(texts[0], new_session_turn(&landed, "resume-1.txt"));
+    assert!(
+        texts[0].contains(
+            "dagq: this run's worker goes on in a new session: its previous turn's context took 500 tokens, above the 100 tokens"
+        ),
+        "{}",
+        texts[0]
+    );
+    assert!(texts[0].contains("The earlier session would have been sent this next"));
 }
