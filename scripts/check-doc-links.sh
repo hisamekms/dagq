@@ -106,6 +106,17 @@ docs/design/supervisor-lifecycle/rebind.md | docs/design/supervisor-lifecycle/co
 docs/design/supervisor-lifecycle/dependency-diagram.md | docs/design/supervisor-lifecycle/commands.md | final
 docs/design/supervisor-lifecycle/conflict-thresholds.md | the doc comments by the definitions | final
 docs/design/supervisor-lifecycle/stall-thresholds.md | the doc comments by the definitions | final
+docs/design/supervisor-lifecycle/claim-defer.md | docs/design/supervisor-lifecycle/claim-hold.md |
+docs/design/supervisor-lifecycle/disk-space.md | docs/design/supervisor-lifecycle/claim-hold.md |
+docs/design/supervisor-lifecycle/landing-recheck.md | docs/design/supervisor-lifecycle/integrate.md |
+docs/design/supervisor-lifecycle/landing-branch.md | docs/design/supervisor-lifecycle/integrate.md |
+docs/design/supervisor-lifecycle/landing-e2e.md | docs/design/supervisor-lifecycle/integrate.md |
+docs/design/supervisor-lifecycle/integrate-errors.md | docs/design/supervisor-lifecycle/integrate.md |
+docs/design/supervisor-lifecycle/abandon.md | docs/design/supervisor-lifecycle/background-recovery-job.md |
+docs/design/supervisor-lifecycle/idle-without-receipt.md | docs/design/supervisor-lifecycle/background-recovery-job.md |
+docs/design/supervisor-lifecycle/cleanup-and-recovery.md | docs/design/supervisor-lifecycle/background-recovery-job.md |
+docs/design/supervisor-lifecycle/session-wrapper.md | docs/design/supervisor-lifecycle/headless-worker.md |
+docs/design/supervisor-lifecycle/receipt-and-session-exit.md | docs/design/supervisor-lifecycle/headless-worker.md |
 EOF
 )
 
