@@ -5,6 +5,13 @@
 //! ended undecided, and once the hold is gone the call it failed at is made
 //! again as its next turn; a turn its wrapper stopped at the `[stall]`
 //! limits tells the inbox.
+//!
+//! While Claude is held, the supervisor's planner pass does not run at
+//! all, and a planner that waits at the wall gets no revise or answer
+//! either: written behind the failed call, such a request would hide it
+//! from the retry, so it is written once the retry's turn ended. The
+//! provider is not switched for a planner, and under `--no-claude` no
+//! planner is opened.
 
 use super::headless::{last_turn, provider_failure};
 use super::provider::{PROVIDER_RETRY, retry_text};
@@ -139,7 +146,11 @@ impl PlanningState {
     /// not get to it, and the planner ended then would lose it unread.
     /// `None` for an interactive planner, and when no request of the answer
     /// is recorded (its record failed), which leave it to the idle marker's
-    /// time.
+    /// time. It is not judged by the idle marker's second against the
+    /// delivery's, which would keep waiting after a turn that ended within
+    /// the same second, nor by when the ask closed: the ask closes after
+    /// the delivery, and a planner idle before that would be waited on for
+    /// good, filling the limit.
     pub(super) fn headless_answer_taken(
         &self,
         env: &PlanningEnv<'_>,

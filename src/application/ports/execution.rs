@@ -1481,7 +1481,9 @@ pub trait SessionRegistry {
     /// but the retired in-cmux supervisor's), without a call to cmux.
     fn forget_retired_session_workspaces(&self) -> Result<usize>;
     /// Record a new planner session (ADR-0041 decisions 1, 6) before its
-    /// workspace opens.
+    /// workspace opens. Planners have rows of their own: `session_workspaces`
+    /// is keyed by role and holds one session per role, while several
+    /// planners may be open at once.
     fn open_planner(
         &self,
         origin: PlannerOrigin,

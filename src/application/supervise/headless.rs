@@ -113,7 +113,9 @@ pub(crate) fn lock_waiting(
 /// Write `text` as the next request (`what`) of the headless session whose
 /// directory is `dir` (its `turns/` made); the request's sequence number.
 /// Requests are taken in the order of their numbers, so one written while
-/// a turn runs is taken after it.
+/// a turn runs is taken after it. The number is chosen under the
+/// directory's lock, so the supervisor and `planner request` writing at
+/// once never share one.
 pub(crate) fn write_request(
     files: &dyn RunFiles,
     dir: &Path,

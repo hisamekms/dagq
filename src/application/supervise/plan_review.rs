@@ -1265,8 +1265,9 @@ impl PlanningState {
     }
 
     /// Stamp a request the supervisor is about to write for the planner of
-    /// `view`, so an idle marker from before it no longer counts. A stamp
-    /// that cannot be written is logged.
+    /// `view`, so an idle marker from before it no longer counts. Every
+    /// request but the exit request is stamped, a `provider retry` too. A
+    /// stamp that cannot be written is logged.
     pub(super) fn stamp_planner_input(&self, env: &PlanningEnv<'_>, view: &PlannerView) {
         if let Err(error) =
             screen_idle::record_supervisor_input(&**env.files, &planner_idle_marker(&view.dir))
@@ -1359,8 +1360,11 @@ impl PlanningState {
     /// Close the row of every person's planner still open, without cmux
     /// (ADR-t1433-2 decision 5, [`planner::close_person_planners`]), so a
     /// revise or an answer for what it owned goes to a new planner of the
-    /// runtime's. A queue that cannot close one is logged; the next pass
-    /// tries again.
+    /// runtime's. It runs first in the planner pass, under `--no-claude`
+    /// too, and not on the passes that skip the planners (a stopping or
+    /// draining supervisor, claims stopped, the queue service down, Claude's
+    /// hold). A queue that cannot
+    /// close one is logged; the next pass tries again.
     fn close_person_planners(&mut self, env: &mut PlanningEnv<'_>) {
         match planner::close_person_planners(&*env.queue) {
             Ok(closed) => {

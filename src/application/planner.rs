@@ -387,7 +387,12 @@ pub struct PlannerWrapper<'a> {
 /// register it, heartbeat until it exits, and record its exit code, which
 /// it returns. A headless planner's wrapper runs its turns instead
 /// ([`Turns`], ADR-t1394-2 decision 2) until the exit request or a turn
-/// that ends the session, and records the exit the same way.
+/// that ends the session, and records the exit the same way. Only a
+/// person's planner opened before `dagq plan` was abolished runs its agent
+/// in a terminal: the wrapper prints nothing there and closes no
+/// workspace, which a person closes. A wrapper the row refuses (closed, or
+/// registered by another wrapper) logs why and ends with the error,
+/// closing no workspace either.
 pub fn run_planner_session(
     ctx: PlannerWrapper<'_>,
     id: PlannerId,
@@ -546,7 +551,8 @@ pub fn run_planner_session(
 /// Remove the runner the wrapper of planner `id` runs from, once its exit
 /// is recorded: nothing runs it again (a planner is never reopened), and
 /// the process keeps its image. A failure is logged; the supervisor's
-/// sweep ([`remove_unused_planner_runners`]) retries it.
+/// sweep ([`remove_unused_planner_runners`]) retries it. It is removed
+/// also when the agent could not start.
 fn drop_own_runner(files: &dyn RunFiles, id: PlannerId, dir: &Path) {
     if let Err(error) = remove_runner(files, &dir.join(PLANNER_RUNNER_FILE)) {
         warn!(planner_id = %id, error = %format_args!("{error:#}"), "planner {id}: its runner could not be removed: {error:#}");
@@ -881,8 +887,10 @@ pub fn close_person_planners(queue: &dyn Queue) -> Result<Vec<PlannerId>> {
 /// wrapper lives while its handle's pid shows the start the handle
 /// recorded (ADR-t1404-1 decision 2), so a pid another process took frees
 /// the runner; a row without a handle is told by its wrapper's pid. A live
-/// wrapper's runner is kept. Every removal is tried; the
-/// first failure is returned after them. Returns the IDs whose runner went.
+/// wrapper's runner is kept, and a closed row alone frees nothing; the
+/// row and the other files of the directory stay. Every removal is tried;
+/// the first failure is returned after them. Returns the IDs whose runner
+/// went.
 pub fn remove_unused_planner_runners(
     queue: &dyn Queue,
     processes: &dyn ProcessControl,

@@ -7,11 +7,14 @@
 //! ([`crate::application::planner_handoff`]), and submits a proposal of it
 //! (the request becomes `proposed`, linked to it), declines it with a
 //! reason, or asks the inbox a `planner_question`, whose answer the
-//! supervisor types into its workspace (or hands to a new planner when
-//! that one is gone). A planner that ends with the request undecided is
-//! followed by another, at most
-//! [`crate::domain::plan_request::MAX_REQUEST_PLANNERS`]; then the request
-//! is `exhausted` and the inbox decides.
+//! supervisor writes as the planner's next turn request (or hands to a new
+//! planner when that one is gone); nothing is typed into a terminal. A
+//! planner that ends with the request undecided is followed by another, at
+//! most [`crate::domain::plan_request::MAX_REQUEST_PLANNERS`]; then the
+//! request is `exhausted` and the inbox decides. No run slot is used: the
+//! requests come in the supervisor's planner pass after the revises and
+//! the answers are delivered and before the draft and finding planners,
+//! since a person waits for them.
 
 use super::*;
 use crate::domain::EventKind;

@@ -57,7 +57,9 @@ pub fn refused_by_row(planner: &PlannerSession) -> Option<String> {
 /// Why the headless planner `id`, judged `state`, takes no follow-up
 /// request now: it is closed, lost or exited, its exit is requested, or
 /// it is idle at `wall`, the provider failure its last turn stopped at.
-/// One opening, at work or idle takes it.
+/// One opening, at work or idle takes it. One idle at the wall is refused
+/// because a request would wait until after its `provider retry` anyway,
+/// and no requests pile up while Claude is held.
 pub fn refused_by_state(
     id: PlannerId,
     state: PlannerState,
@@ -117,7 +119,8 @@ fn request_names(probes: &PlannerProbes<'_>, dir: &Path) -> Result<Vec<String>> 
 /// Returns what was handed: the file, the sentence, the request's number
 /// and the planner's state when it was handed. Recorded as
 /// `turn_requested` (as the supervisor's requests) and
-/// `planner_request_handed`, both with the caller as the actor.
+/// `planner_request_handed`, both with the caller as the actor; the
+/// latter names the file, not the words, and neither is an attention.
 pub fn request_planner(
     queue: &mut dyn Queue,
     probes: &PlannerProbes<'_>,

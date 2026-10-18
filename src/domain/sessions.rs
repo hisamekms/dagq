@@ -33,6 +33,11 @@ pub const GOAL_REVIEW: &str = "goal_review";
 /// that `cwd` and the session id. A Codex review starts without a session
 /// id, so its finish closes the span of its directory.
 pub const THROUGHPUT_REVIEW: &str = "throughput_review";
+/// A planner of the runtime's (ADR-t1394-2 decision 4): its span opens at
+/// its first turn with the route (`headless`) and closes with
+/// `planner_closed`, and takes its running time and tokens from its turns
+/// as a headless worker's. The route is kept so that the spans compare
+/// with those of the interactive planners before.
 pub const RUNTIME_PLANNER: &str = "runtime_planner";
 pub const INBOX: &str = "inbox";
 pub const PLANNER: &str = "planner";
