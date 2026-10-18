@@ -81,14 +81,14 @@ docs/design/supervisor-lifecycle/report.md | docs/design/supervisor-lifecycle/co
 docs/design/supervisor-lifecycle/timeline.md | docs/design/supervisor-lifecycle/commands.md and the doc comments of domain::timeline | final
 docs/design/supervisor-lifecycle/prompt-waiting.md | docs/adr/2026-10-03-t1433-2-abolish-the-interactive-route.md | final
 docs/design/supervisor-lifecycle/session-send.md | docs/design/authorization.md | final
-docs/design/supervisor-lifecycle/implementation-status.md | docs/design/supervisor-lifecycle/receipt-and-session-exit.md | final
+docs/design/supervisor-lifecycle/implementation-status.md | docs/design/supervisor-lifecycle/headless-worker.md | final
 docs/design/supervisor-lifecycle/notification-route.md | docs/design/supervisor-lifecycle/ask-push.md | final
 docs/design/supervisor-lifecycle/cmux-notify.md | docs/design/supervisor-lifecycle/ask-push.md | final
 docs/design/supervisor-lifecycle/naming.md | docs/design/supervisor-lifecycle/headless-worker.md | final
-docs/design/supervisor-lifecycle/run-workspaces.md | docs/design/supervisor-lifecycle/cleanup-and-recovery.md | final
+docs/design/supervisor-lifecycle/run-workspaces.md | docs/design/supervisor-lifecycle/background-recovery-job.md | final
 docs/design/supervisor-lifecycle/session-prompts.md | docs/design/supervisor-lifecycle/roles.md | final
-docs/design/supervisor-lifecycle/worker-question-answer.md | docs/design/supervisor-lifecycle/receipt-and-session-exit.md | final
-docs/design/supervisor-lifecycle/silent-wrapper.md | docs/design/supervisor-lifecycle/receipt-and-session-exit.md | final
+docs/design/supervisor-lifecycle/worker-question-answer.md | docs/design/supervisor-lifecycle/headless-worker.md | final
+docs/design/supervisor-lifecycle/silent-wrapper.md | docs/design/supervisor-lifecycle/headless-worker.md | final
 docs/design/supervisor-lifecycle/first-commit.md | the doc comment of watch_first_commit in src/application/supervise/session.rs | final
 docs/design/supervisor-lifecycle/worktree-read-only-git.md | the doc comments of GitRepository in src/infrastructure/adapters.rs | final
 docs/design/slow-tests.md | docs/development/testing.md and the headers of scripts/slow-tests.sh and scripts/check-it-test-time.sh | final
@@ -106,17 +106,17 @@ docs/design/supervisor-lifecycle/rebind.md | docs/design/supervisor-lifecycle/co
 docs/design/supervisor-lifecycle/dependency-diagram.md | docs/design/supervisor-lifecycle/commands.md | final
 docs/design/supervisor-lifecycle/conflict-thresholds.md | the doc comments by the definitions | final
 docs/design/supervisor-lifecycle/stall-thresholds.md | the doc comments by the definitions | final
-docs/design/supervisor-lifecycle/claim-defer.md | docs/design/supervisor-lifecycle/claim-hold.md |
-docs/design/supervisor-lifecycle/disk-space.md | docs/design/supervisor-lifecycle/claim-hold.md |
-docs/design/supervisor-lifecycle/landing-recheck.md | docs/design/supervisor-lifecycle/integrate.md |
-docs/design/supervisor-lifecycle/landing-branch.md | docs/design/supervisor-lifecycle/integrate.md |
-docs/design/supervisor-lifecycle/landing-e2e.md | docs/design/supervisor-lifecycle/integrate.md |
-docs/design/supervisor-lifecycle/integrate-errors.md | docs/design/supervisor-lifecycle/integrate.md |
-docs/design/supervisor-lifecycle/abandon.md | docs/design/supervisor-lifecycle/background-recovery-job.md |
-docs/design/supervisor-lifecycle/idle-without-receipt.md | docs/design/supervisor-lifecycle/background-recovery-job.md |
-docs/design/supervisor-lifecycle/cleanup-and-recovery.md | docs/design/supervisor-lifecycle/background-recovery-job.md |
-docs/design/supervisor-lifecycle/session-wrapper.md | docs/design/supervisor-lifecycle/headless-worker.md |
-docs/design/supervisor-lifecycle/receipt-and-session-exit.md | docs/design/supervisor-lifecycle/headless-worker.md |
+docs/design/supervisor-lifecycle/claim-defer.md | docs/design/supervisor-lifecycle/claim-hold.md | final
+docs/design/supervisor-lifecycle/disk-space.md | docs/design/supervisor-lifecycle/claim-hold.md | final
+docs/design/supervisor-lifecycle/landing-recheck.md | docs/design/supervisor-lifecycle/integrate.md | final
+docs/design/supervisor-lifecycle/landing-branch.md | docs/design/supervisor-lifecycle/integrate.md | final
+docs/design/supervisor-lifecycle/landing-e2e.md | docs/design/supervisor-lifecycle/integrate.md | final
+docs/design/supervisor-lifecycle/integrate-errors.md | docs/design/supervisor-lifecycle/integrate.md | final
+docs/design/supervisor-lifecycle/abandon.md | docs/design/supervisor-lifecycle/background-recovery-job.md | final
+docs/design/supervisor-lifecycle/idle-without-receipt.md | docs/design/supervisor-lifecycle/background-recovery-job.md | final
+docs/design/supervisor-lifecycle/cleanup-and-recovery.md | docs/design/supervisor-lifecycle/background-recovery-job.md | final
+docs/design/supervisor-lifecycle/session-wrapper.md | docs/design/supervisor-lifecycle/headless-worker.md | final
+docs/design/supervisor-lifecycle/receipt-and-session-exit.md | docs/design/supervisor-lifecycle/headless-worker.md | final
 EOF
 )
 
