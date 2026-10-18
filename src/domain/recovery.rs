@@ -376,7 +376,7 @@ pub struct RecoveryVerdict {
     #[serde(default)]
     pub question: String,
     #[serde(default)]
-    pub options: Vec<String>,
+    pub options: Vec<JobOption>,
     #[serde(default)]
     pub reason_category: Option<AskReason>,
 }
@@ -401,6 +401,317 @@ impl RecoveryVerdict {
         self.verdict == RecoveryDecision::Repair && self.confidence == RecoveryConfidence::High
     }
 }
+
+/// One option a recovery job adds to the ask of its escalation, with the
+/// kind it declares (ADR-t1818-2 decision 1): the runtime answer of the
+/// ask it stands for, or one that goes back to the job ([`RECOVER_KIND`],
+/// [`HAND_OFF_KIND`]).
+/// A bare string declares no kind, as every job's option did before.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "RawJobOption", into = "RawJobOption")]
+pub struct JobOption {
+    pub text: String,
+    pub kind: Option<String>,
+}
+
+/// An object with no `kind` (or a null one) declares none, and one whose
+/// `kind` is not a string declares that value as an unknown kind: either is
+/// left out of the ask, and the rest of the verdict still stands.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum RawJobOption {
+    Bare(String),
+    Declared {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<serde_json::Value>,
+        text: String,
+    },
+}
+
+impl From<RawJobOption> for JobOption {
+    fn from(raw: RawJobOption) -> Self {
+        match raw {
+            RawJobOption::Bare(text) => Self { text, kind: None },
+            RawJobOption::Declared { kind, text } => Self {
+                text,
+                kind: match kind {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(serde_json::Value::String(kind)) => Some(kind),
+                    Some(other) => Some(other.to_string()),
+                },
+            },
+        }
+    }
+}
+
+impl From<JobOption> for RawJobOption {
+    fn from(option: JobOption) -> Self {
+        match option.kind {
+            None => Self::Bare(option.text),
+            Some(kind) => Self::Declared {
+                kind: Some(serde_json::Value::String(kind)),
+                text: option.text,
+            },
+        }
+    }
+}
+
+/// The kind a job declares for an option that goes back to it: choosing it
+/// moves nothing, and the alert's next recovery job runs with the answer
+/// (ADR-t1818-2 decision 2), on a run that ended and on a live one alike.
+pub const RECOVER_KIND: &str = super::RECOVER_AGAIN;
+
+/// The kind a job declares for an option that asks the next round to hand
+/// the run to the check that the base already meets the acceptance
+/// (ADR-t1818-2 decisions 1 and 3; ADR-t1818-1). Only a run that ended
+/// offers it, and it is kept whatever its words say: it reads as the
+/// task's end on purpose, and its label says what choosing it does.
+pub const HAND_OFF_KIND: &str = "hand_off";
+
+/// What the ask shows after each option of [`RECOVER_KIND`], so that each
+/// one says where it goes.
+pub const RECOVER_LABEL: &str = " [goes back to the recovery job, which runs again with this answer; the runtime moves nothing]";
+
+/// What the ask shows after each option of [`HAND_OFF_KIND`].
+pub const HAND_OFF_LABEL: &str = " [goes back to the recovery job, which runs again and may hand the run to the check that the base already meets the acceptance; the task closes only if that check and its review pass; the runtime moves nothing now]";
+
+/// The text a person chose, without the label the ask showed after it.
+pub fn without_label(answer: &str) -> &str {
+    [RECOVER_LABEL, HAND_OFF_LABEL]
+        .iter()
+        .find_map(|label| answer.strip_suffix(label))
+        .unwrap_or(answer)
+}
+
+/// Whether `option` is one a job added that goes back to it: it carries
+/// one of the labels.
+pub fn passes_back(option: &str) -> bool {
+    without_label(option) != option
+}
+
+/// The option of `options` that `answer` chose: the one it is, or else the
+/// one whose text it is without its label (a person may answer a job's
+/// option without the label).
+pub fn chosen_option<'a>(options: &'a [String], answer: &str) -> Option<&'a String> {
+    let answer = answer.trim();
+    options.iter().find(|option| *option == answer).or_else(|| {
+        options
+            .iter()
+            .find(|option| passes_back(option) && without_label(option) == answer)
+    })
+}
+
+/// The words for which a job's option of [`RECOVER_KIND`] is left out of
+/// the ask (ADR-t1818-2 decision 1's fence): it reads as a runtime
+/// operation, or as ending the task, which choosing it would not do. The
+/// ask's own runtime answers are fenced too.
+pub const CONFUSABLE_WORDS: [&str; 19] = [
+    "retry",
+    "retried",
+    "retrying",
+    "retry_inherit",
+    "resume",
+    "resumed",
+    "cancel",
+    "canceled",
+    "cancelled",
+    "canceling",
+    "cancelling",
+    "cancellation",
+    "done",
+    "complete",
+    "completed",
+    "completion",
+    "close",
+    "closed",
+    "obsolete",
+];
+
+/// A job's option the runtime offers as its own answer instead
+/// (ADR-t1818-2 decision 1): the job's text becomes the recommendation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MergedOption {
+    pub text: String,
+    pub into: String,
+}
+
+/// A job's option left out of the ask, and why.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DroppedOption {
+    pub text: String,
+    pub kind: Option<String>,
+    pub why: String,
+}
+
+/// What became of a job's options on its escalation's ask.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SortedOptions {
+    /// The options that go back to the job, each with its label, in the
+    /// job's order.
+    pub kept: Vec<String>,
+    pub merged: Vec<MergedOption>,
+    pub dropped: Vec<DroppedOption>,
+}
+
+/// Sort a job's `options` for an ask whose runtime answers are `kinds`, of
+/// which it offers `offered` now (with any other of the runtime's own
+/// options); `hand_off` says whether the ask may offer [`HAND_OFF_KIND`]
+/// (ADR-t1818-2 decision 1). In order: an option whose text is one the
+/// ask offers is that one; one of a runtime answer's kind is that answer
+/// when offered and left out when not; one of [`HAND_OFF_KIND`] is kept
+/// with [`HAND_OFF_LABEL`] whatever its words; one of [`RECOVER_KIND`] is
+/// kept with [`RECOVER_LABEL`] unless a word of [`CONFUSABLE_WORDS`] or of
+/// `kinds` is in it; any other (no kind, an unknown one) is left out.
+pub fn sort_job_options(
+    offered: &[String],
+    kinds: &[&str],
+    hand_off: bool,
+    options: &[JobOption],
+) -> SortedOptions {
+    let mut sorted = SortedOptions::default();
+    let keep = |sorted: &mut SortedOptions, labeled: String| {
+        if !sorted.kept.contains(&labeled) {
+            sorted.kept.push(labeled);
+        }
+    };
+    for option in options {
+        let text = option.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let kind = option.kind.as_deref().map(str::trim);
+        let drop = |why: String| DroppedOption {
+            text: text.to_owned(),
+            kind: kind.map(str::to_owned),
+            why,
+        };
+        if let Some(into) = offered.iter().find(|offered| *offered == text) {
+            sorted.merged.push(MergedOption {
+                text: text.to_owned(),
+                into: into.clone(),
+            });
+            continue;
+        }
+        match kind {
+            None => sorted.dropped.push(drop("it declares no kind".to_owned())),
+            Some(kind) if kinds.contains(&kind) => {
+                if offered.iter().any(|offered| offered == kind) {
+                    sorted.merged.push(MergedOption {
+                        text: text.to_owned(),
+                        into: kind.to_owned(),
+                    });
+                } else {
+                    sorted.dropped.push(drop(format!(
+                        "`{kind}` is not one of this ask's answers now"
+                    )));
+                }
+            }
+            Some(HAND_OFF_KIND) if hand_off => keep(&mut sorted, format!("{text}{HAND_OFF_LABEL}")),
+            Some(RECOVER_KIND) => match confusable(text, kinds) {
+                Some(word) => sorted.dropped.push(drop(format!(
+                    "it reads as `{word}`, a runtime operation or the task's end, which choosing it would not do"
+                ))),
+                None => keep(&mut sorted, format!("{text}{RECOVER_LABEL}")),
+            },
+            Some(kind) => {
+                let mut known = kinds.to_vec();
+                known.push(RECOVER_KIND);
+                if hand_off {
+                    known.push(HAND_OFF_KIND);
+                }
+                sorted.dropped.push(drop(format!(
+                    "its kind `{kind}` is none of this ask's ({})",
+                    known.join(", ")
+                )));
+            }
+        }
+    }
+    sorted
+}
+
+/// The first word of `text` (lowercased, split at anything but letters,
+/// digits and `_`) that is in [`CONFUSABLE_WORDS`] or `kinds`.
+fn confusable(text: &str, kinds: &[&str]) -> Option<String> {
+    text.to_lowercase()
+        .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+        .find(|word| CONFUSABLE_WORDS.contains(word) || kinds.contains(word))
+        .map(str::to_owned)
+}
+
+impl SortedOptions {
+    /// The lines the ask's question carries for them: the job's text of
+    /// each option the runtime offers instead, each one left out with why,
+    /// and where the kept ones go. Empty when there is nothing to say.
+    pub fn question(&self) -> String {
+        let mut lines = Vec::new();
+        for merged in &self.merged {
+            if merged.text != merged.into {
+                lines.push(format!(
+                    "The recovery job recommends `{}`: {}",
+                    merged.into, merged.text
+                ));
+            }
+        }
+        for dropped in &self.dropped {
+            lines.push(format!(
+                "Left out of the options (the recovery job's, not one the runtime can apply): \"{}\": {}.",
+                dropped.text, dropped.why
+            ));
+        }
+        if self
+            .kept
+            .iter()
+            .any(|option| option.ends_with(RECOVER_LABEL))
+        {
+            lines.push("Each option marked [goes back to the recovery job, which runs again with this answer ...] is the recovery job's own: the runtime moves nothing for it, and the recovery job runs again with your choice.".to_owned());
+        }
+        if self
+            .kept
+            .iter()
+            .any(|option| option.ends_with(HAND_OFF_LABEL))
+        {
+            lines.push("The option marked [... may hand the run to the check that the base already meets the acceptance ...] is the recovery job's own too: the runtime moves nothing for it now; the recovery job runs again and may hand the run to that check, which closes the task only if the verification and its review pass.".to_owned());
+        }
+        lines.join("\n")
+    }
+
+    /// Record the merged and the left-out options in `payload`, when any.
+    pub fn record(&self, payload: &mut serde_json::Value) {
+        if !self.merged.is_empty() {
+            payload["options_merged"] = serde_json::json!(self.merged);
+        }
+        if !self.dropped.is_empty() {
+            payload["options_dropped"] = serde_json::json!(self.dropped);
+        }
+    }
+}
+
+/// The ask whose answer a live session's next recovery job of the alert
+/// judged by `threshold` gets (ADR-t1818-2 decision 2): the latest
+/// `stall_resolved` of `outcome: answered_recover` and that threshold since
+/// the alert's latest `recovery_requested`. `None` when no person chose a
+/// job's option since. The runtime writes it into the next job's
+/// `recovery_requested` (and so its alert facts) as `person_answer`:
+/// `{ask_id, answer}`, the answer without its label, as a run that ended
+/// carries a person's choice into its next round.
+pub fn live_pass_back(events: &[RunEvent], alert: RecoveryAlert, threshold: &str) -> Option<AskId> {
+    events
+        .iter()
+        .rev()
+        .take_while(|e| !(e.kind == "recovery_requested" && e.payload["alert"] == alert.as_str()))
+        .find(|e| {
+            e.kind == "stall_resolved"
+                && e.payload["outcome"] == ANSWERED_RECOVER
+                && e.payload["threshold"] == threshold
+        })
+        .and_then(|e| e.payload["ask_id"].as_i64())
+        .map(AskId::new)
+}
+
+/// `stall_resolved`'s `outcome` when a person chose a job's own option of a
+/// live session's `stalled` ask: the ask is closed and the alert's next
+/// recovery job reads the answer ([`live_pass_back`]).
+pub const ANSWERED_RECOVER: &str = "answered_recover";
 
 /// A process as the runtime lists it for the recovery job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -508,6 +819,260 @@ mod tests {
             }
         }
         all
+    }
+
+    /// A job's option is a bare string (no kind) or `{kind, text}`, and
+    /// is written back the way it was read (a verdict kept for a hold is
+    /// read again).
+    #[test]
+    fn a_jobs_option_reads_and_writes_with_or_without_its_kind() {
+        let verdict = RecoveryVerdict::parse(
+            r#"{"verdict":"escalate","confidence":"high","diagnosis":"x","options":["bare",{"kind":"recover","text":"declared"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            verdict.options,
+            [
+                JobOption {
+                    text: "bare".into(),
+                    kind: None
+                },
+                JobOption {
+                    text: "declared".into(),
+                    kind: Some("recover".into())
+                },
+            ]
+        );
+        let written = serde_json::to_value(&verdict.options).unwrap();
+        assert_eq!(
+            written,
+            serde_json::json!(["bare", {"kind": "recover", "text": "declared"}])
+        );
+        assert_eq!(
+            serde_json::from_value::<Vec<JobOption>>(written).unwrap(),
+            verdict.options
+        );
+        // An object without a kind, or with a null or non-string one, is
+        // read (and left out of the ask later), not a broken verdict.
+        let loose = RecoveryVerdict::parse(
+            r#"{"verdict":"escalate","confidence":"high","diagnosis":"x","options":[{"text":"a"},{"kind":null,"text":"b"},{"kind":3,"text":"c"}]}"#,
+        )
+        .unwrap();
+        let kinds: Vec<Option<&str>> = loose.options.iter().map(|o| o.kind.as_deref()).collect();
+        assert_eq!(kinds, [None, None, Some("3")]);
+    }
+
+    /// A job's option is chosen by its whole text, or by its text without
+    /// the label; a runtime option only by itself.
+    #[test]
+    fn an_answer_chooses_an_option_with_or_without_its_label() {
+        let labeled = format!("ask for a split{RECOVER_LABEL}");
+        let hand_off = format!("the base already meets it{HAND_OFF_LABEL}");
+        let options = vec!["retry".to_owned(), labeled.clone(), hand_off.clone()];
+        assert_eq!(chosen_option(&options, " retry "), Some(&options[0]));
+        assert_eq!(chosen_option(&options, &labeled), Some(&labeled));
+        assert_eq!(chosen_option(&options, "ask for a split"), Some(&labeled));
+        assert_eq!(
+            chosen_option(&options, "the base already meets it"),
+            Some(&hand_off)
+        );
+        assert_eq!(chosen_option(&options, "ask for"), None);
+        assert_eq!(chosen_option(&options, ""), None);
+        assert!(passes_back(&labeled) && passes_back(&hand_off));
+        assert!(!passes_back("retry"));
+        assert_eq!(without_label(&hand_off), "the base already meets it");
+        assert_eq!(without_label("free words"), "free words");
+    }
+
+    fn declared(kind: &str, text: &str) -> JobOption {
+        JobOption {
+            text: text.into(),
+            kind: Some(kind.into()),
+        }
+    }
+
+    /// ADR-t1818-2 decision 1, in its order: an option whose text the ask
+    /// offers is that one whatever its kind; a runtime answer's kind is
+    /// that answer when offered and left out when not; `recover` is kept
+    /// with its label unless a fenced word (or one of the ask's answers) is
+    /// in it; anything else is left out. Kept ones are once. The labels say
+    /// each option goes back to the recovery job and the runtime moves
+    /// nothing.
+    #[test]
+    fn a_jobs_options_are_merged_kept_or_left_out() {
+        let offered: Vec<String> = ["retry", "cancel"].map(String::from).to_vec();
+        let options = [
+            JobOption {
+                text: " cancel ".into(),
+                kind: None,
+            },
+            declared("cancel", "Cancel: the task is obsolete"),
+            declared("resume", "resume it"),
+            declared("recover", "Mark task 1217 done (or cancel it as obsolete)"),
+            declared("recover", "Ask for a split"),
+            declared("recover", "Ask for a split"),
+            declared("recover", "wait_a_bit"),
+            declared("instruction", "go on"),
+            declared("recover", "   "),
+            JobOption {
+                text: "no kind".into(),
+                kind: None,
+            },
+        ];
+        let sorted = sort_job_options(&offered, TRIAGE_OPTIONS, true, &options);
+        assert_eq!(
+            sorted.kept,
+            [
+                format!("Ask for a split{RECOVER_LABEL}"),
+                format!("wait_a_bit{RECOVER_LABEL}"),
+            ]
+        );
+        assert_eq!(
+            sorted.merged,
+            [
+                MergedOption {
+                    text: "cancel".into(),
+                    into: "cancel".into()
+                },
+                MergedOption {
+                    text: "Cancel: the task is obsolete".into(),
+                    into: "cancel".into()
+                },
+            ]
+        );
+        let dropped: Vec<(&str, &str)> = sorted
+            .dropped
+            .iter()
+            .map(|d| (d.text.as_str(), d.why.as_str()))
+            .collect();
+        assert_eq!(
+            dropped,
+            [
+                ("resume it", "`resume` is not one of this ask's answers now"),
+                (
+                    "Mark task 1217 done (or cancel it as obsolete)",
+                    "it reads as `done`, a runtime operation or the task's end, which choosing it would not do"
+                ),
+                (
+                    "go on",
+                    "its kind `instruction` is none of this ask's (retry, resume, cancel, recover, hand_off)"
+                ),
+                ("no kind", "it declares no kind"),
+            ]
+        );
+        // A live ask fences its own answers too: `wait` is a word of it.
+        let live = sort_job_options(
+            &["wait".to_owned(), "stop".to_owned()],
+            &["wait", "stop"],
+            false,
+            &[
+                declared("recover", "wait for the build"),
+                declared("recover", "look at the test's log"),
+            ],
+        );
+        assert_eq!(
+            live.kept,
+            [format!("look at the test's log{RECOVER_LABEL}")]
+        );
+        assert_eq!(
+            live.dropped[0].why,
+            "it reads as `wait`, a runtime operation or the task's end, which choosing it would not do"
+        );
+        assert!(RECOVER_LABEL.contains("goes back to the recovery job"));
+        assert!(RECOVER_LABEL.contains("the runtime moves nothing"));
+        assert!(
+            sorted
+                .question()
+                .contains("the runtime moves nothing for it, and the recovery job runs again"),
+            "{}",
+            sorted.question()
+        );
+    }
+
+    /// ADR-t1818-2 decision 1's exception: an option that asks the next
+    /// round to hand the run to the already-satisfied check is kept with
+    /// its own label though its words read as the task's end, on an ask
+    /// that may offer it (a run that ended); a live ask leaves it out.
+    #[test]
+    fn a_hand_off_option_is_kept_with_its_own_label_where_it_may_be_offered() {
+        let offered: Vec<String> = TRIAGE_OPTIONS.iter().map(|o| (*o).to_owned()).collect();
+        let text =
+            "The base already meets the acceptance: hand it to the check that closes it as done";
+        let sorted = sort_job_options(
+            &offered,
+            TRIAGE_OPTIONS,
+            true,
+            &[declared(HAND_OFF_KIND, text), declared(HAND_OFF_KIND, text)],
+        );
+        assert_eq!(sorted.kept, [format!("{text}{HAND_OFF_LABEL}")]);
+        assert!(sorted.dropped.is_empty(), "{sorted:?}");
+        for part in [
+            "goes back to the recovery job",
+            "may hand the run to the check that the base already meets the acceptance",
+            "the task closes only if that check and its review pass",
+            "the runtime moves nothing now",
+        ] {
+            assert!(HAND_OFF_LABEL.contains(part), "{part}");
+        }
+        let question = sorted.question();
+        assert!(
+            question.contains("closes the task only if the verification and its review pass"),
+            "{question}"
+        );
+        assert!(
+            !question.contains("Each option marked [goes back"),
+            "{question}"
+        );
+        let live = sort_job_options(
+            &["wait".to_owned(), "stop".to_owned()],
+            &["wait", "stop"],
+            false,
+            &[declared(HAND_OFF_KIND, text)],
+        );
+        assert!(live.kept.is_empty());
+        assert_eq!(
+            live.dropped[0].why,
+            "its kind `hand_off` is none of this ask's (wait, stop, recover)"
+        );
+    }
+
+    /// ADR-t1818-2 decision 2 on a live session: the next job of the alert
+    /// gets the ask whose job option a person chose since its last
+    /// request, of its own threshold only.
+    #[test]
+    fn a_live_alerts_next_job_reads_the_ask_whose_job_option_was_chosen() {
+        let requested = |id| {
+            numbered(
+                id,
+                "recovery_requested",
+                serde_json::json!({"alert": "stalled"}),
+            )
+        };
+        let resolved = |id, outcome, threshold, ask| {
+            numbered(
+                id,
+                "stall_resolved",
+                serde_json::json!({"outcome": outcome, "threshold": threshold, "ask_id": ask}),
+            )
+        };
+        let turn = "idle_without_receipt_secs";
+        let events = vec![
+            requested(1),
+            resolved(2, ANSWERED_RECOVER, turn, 7),
+            requested(3),
+        ];
+        assert_eq!(live_pass_back(&events, RecoveryAlert::Stalled, turn), None);
+        let mut events = events;
+        events.push(resolved(4, "answered_wait", turn, 8));
+        events.push(resolved(5, ANSWERED_RECOVER, turn, 9));
+        assert_eq!(
+            live_pass_back(&events, RecoveryAlert::Stalled, turn),
+            Some(AskId::new(9))
+        );
+        assert_eq!(
+            live_pass_back(&events, RecoveryAlert::IdleProcess, "idle_process_secs"),
+            None
+        );
     }
 
     #[test]

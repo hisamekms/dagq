@@ -1728,3 +1728,15 @@ task = 2719
 name = "runtime_heavy_turns::the_update_jobs_build_waits_for_a_landing_recheck_command"
 reason = "B 境界（守る境界）: the update job's process and the landing checks take turns through the queue's lock files across processes in the supervisor's and integrate's wiring (Git, SQLite, stub commands); who waits is in domain::heavy_turn's unit tests"
 task = 2719
+
+# 6.4s under stress, one case (task 1819): two recovery jobs in a row
+[[test]]
+name = "runtime_headless_stall::an_unsure_recovery_job_of_a_headless_stall_asks_a_person_whose_choice_of_its_option_goes_back_to_it"
+reason = "境界（supervisorの配線・プロセス）: a headless session's turns and two recovery jobs run as processes under the supervisor; the stalled ask a job's escalation opens, the person's choice of the job's option that closes it without a turn, and the next job's recovery_requested that carries the answer, then stop ending the run"
+task = 1819
+
+# 5.5s alone (6.4s under stress), task 1819 changed its job's options
+[[test]]
+name = "runtime_repair::a_recovery_repair_of_low_confidence_becomes_an_ask"
+reason = "境界（supervisorの配線・プロセス）: an idle orphan process under the supervisor's CPU watch starts the recovery job, whose escalation opens the stalled ask and records recovery_finished"
+task = 1819

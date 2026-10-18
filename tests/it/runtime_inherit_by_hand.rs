@@ -328,6 +328,9 @@ fn ready_inherit_is_refused_with_its_reason_and_changes_nothing() {
 /// work over.
 const INHERIT_OPTION: &str = "retry_inherit once process inspection is allowed";
 
+/// The recovery job's other option, which the ask offers as the job's own.
+const LOOK_AGAIN: &str = "look again once process inspection is allowed";
+
 /// `dagq answer ID --text TEXT` by the inbox.
 fn answer(db: &Path, ask: AskId, text: &str) -> std::process::Output {
     common::cli::invoke_with(&INBOX, db, &["answer", &ask.to_string(), "--text", text])
@@ -352,7 +355,9 @@ fn answers_of(db: &Path, ask: AskId) -> Vec<Value> {
 /// operation's name and none of its options is refused before anything is
 /// written: the ask stays open, and the message names the option with the
 /// name and the retry by hand. An option as it is and a person's own words
-/// are taken as before.
+/// are taken as before. The job's option that names `retry_inherit` is
+/// not offered (ADR-t1818-2: it reads as a runtime operation), so no
+/// option names the operation.
 #[test]
 fn a_bare_operation_name_to_a_decide_ask_is_refused_and_the_ask_stays_open() {
     let (_dir, repo, db) = fixture();
@@ -363,7 +368,10 @@ fn a_bare_operation_name_to_a_decide_ask_is_refused_and_the_ask_stays_open() {
             "confidence": "high",
             "diagnosis": "a person decides",
             "question": "Carry the work over?",
-            "options": [INHERIT_OPTION],
+            "options": [
+                {"kind": "recover", "text": INHERIT_OPTION},
+                {"kind": "recover", "text": LOOK_AGAIN},
+            ],
         }))]);
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
@@ -372,13 +380,21 @@ fn a_bare_operation_name_to_a_decide_ask_is_refused_and_the_ask_stays_open() {
     assert_eq!(run.status(), RunStatus::Failed);
     let ask = decide_ask(&queue, &run);
     assert_eq!(ask.asked_by, TRIAGE_ASKER);
-    assert!(ask.options.iter().any(|option| option == INHERIT_OPTION));
+    assert!(
+        !ask.options
+            .iter()
+            .any(|option| option.contains(INHERIT_OPTION)),
+        "{:?}",
+        ask.options
+    );
+    let look_again = format!("{LOOK_AGAIN}{}", dagq::domain::recovery::RECOVER_LABEL);
+    assert!(ask.options.contains(&look_again), "{:?}", ask.options);
 
     for text in ["retry_inherit", " RETRY_INHERIT ", "\"retry_inherit\""] {
         let printed: Value = serde_json::from_str(&refusal(&answer(&db, ask.id, text))).unwrap();
         let error = printed["error"].as_str().unwrap();
         assert!(error.contains("the ask stays open"), "{error}");
-        assert!(error.contains(&format!("\"{INHERIT_OPTION}\"")), "{error}");
+        assert!(error.contains("No option names it"), "{error}");
         assert!(error.contains("dagq ready 1 --inherit --reason"), "{error}");
         let now = queue.read_ask(ask.id).unwrap();
         assert!(now.is_open(), "{now:?}");
@@ -387,7 +403,7 @@ fn a_bare_operation_name_to_a_decide_ask_is_refused_and_the_ask_stays_open() {
     }
 
     // The option as it is goes to the runtime (here, to the recovery job).
-    let output = answer(&db, ask.id, INHERIT_OPTION);
+    let output = answer(&db, ask.id, &look_again);
     assert!(
         output.status.success(),
         "{}",

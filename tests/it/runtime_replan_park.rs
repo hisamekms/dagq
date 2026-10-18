@@ -934,7 +934,7 @@ fn a_run_out_of_resumes_is_handed_on_only_after_its_park_ends_and_its_work_is_re
             "verdict": "escalate",
             "confidence": "high",
             "diagnosis": "the parts need a person",
-            "options": ["split the task"],
+            "options": [{"kind": "recover", "text": "split the task"}],
         }))]);
     let options = supervise_options(4, true);
     let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);

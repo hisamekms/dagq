@@ -6107,3 +6107,67 @@ fn only_the_run_review_is_told_its_codes_land_the_run_past_the_limit() {
     assert!(!plan.contains(&usage));
     assert!(plan.contains(PLAN_REVIEW_CODES_USE));
 }
+
+/// ADR-t1818-2: the recovery job is told to declare each option's kind,
+/// that its own options move nothing and come back to it, and that one
+/// which reads as a runtime operation or the task's end is left out: the
+/// ended run's prompt with its kinds and the hand-off, the live session's
+/// with its own; the verify fix is the runtime's.
+#[test]
+fn a_recovery_prompt_tells_the_job_how_to_declare_its_options() {
+    let task = task(7, "work", TaskStatus::InProgress);
+    let facts = json!({});
+    let binary = no_binary();
+    let prompt = |run: &TaskRun, alert, ended: Option<String>| {
+        recovery_prompt(
+            &task,
+            run,
+            1,
+            &RecoveryMaterial {
+                alert,
+                ended,
+                facts: &facts,
+                workspace: "ws",
+                screen: "turns",
+                processes: Ok(Vec::new()),
+                git_status: "",
+                head: SHA,
+                receipt_commit: None,
+                history: &[],
+                allowed: &["retry", "resume", "wait"],
+                binary: &binary,
+            },
+        )
+        .unwrap()
+        .text
+    };
+    let ended = prompt(
+        &run(7, RunStatus::Failed, None),
+        RecoveryAlert::Failed,
+        Some("failed".into()),
+    );
+    assert!(ended.contains(RECOVERY_ENDED_OPTIONS_RULE), "{ended}");
+    assert!(!ended.contains(RECOVERY_LIVE_OPTIONS_RULE), "{ended}");
+    assert!(
+        ended.contains(r#""options": [{"kind": string, "text": string}, ...]"#),
+        "{ended}"
+    );
+    for part in [
+        "\"recover\" is an answer that comes back to you: choosing it moves nothing",
+        "the runtime cannot mark a task done or cancel it from your option",
+        "the runtime itself offers the person `edit the task's --verify, then retry_inherit`",
+        "\"hand_off\" is a recover option that asks your next round to hand the run to the check that the base already meets the acceptance",
+    ] {
+        assert!(RECOVERY_ENDED_OPTIONS_RULE.contains(part), "{part}");
+    }
+    let live = prompt(
+        &run_on(Provider::Claude, WorkerMode::Headless),
+        RecoveryAlert::IdleProcess,
+        None,
+    );
+    assert!(live.contains(RECOVERY_LIVE_OPTIONS_RULE), "{live}");
+    assert!(!live.contains(RECOVERY_ENDED_OPTIONS_RULE), "{live}");
+    assert!(RECOVERY_LIVE_OPTIONS_RULE.contains(
+        "choosing it moves nothing and sends nothing to the session, and your next job for the alert runs with the person's choice"
+    ));
+}

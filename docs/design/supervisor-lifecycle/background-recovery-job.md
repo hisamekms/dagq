@@ -14,6 +14,7 @@ related:
   - adr-0054
   - adr-t609-1
   - adr-t1433-3
+  - adr-t1818-2
 ---
 
 # runの復旧（復旧job・receiptの無いidle・1 runの放棄・後片付け）
@@ -79,6 +80,7 @@ runtimeの自動修正が直さなかったものをjobが状況を読んで許�
 - jobは画面の代わりに最後のturnの要約を読む。
 - alertの事実の直後に、supervisorの固定バイナリの節（今のbuildが依存先の着地を含むか、claimより後の入れ替え）を置く（`binary_facts_of`）。
   `retry`を許すjobには、固定バイナリが依存先の着地を含まないことで落ちたrunは今のbuildが含めば人に聞かずにretryしてよく、含まなければ`wait`かescalateにする規則を書く（`RECOVERY_BINARY_RULE`）。
+- verdictのschemaの後に、jobの足すoptionの種類の宣言と寄せる・外す規則を書く（生きているsessionは`RECOVERY_LIVE_OPTIONS_RULE`、終わったrunは`RECOVERY_ENDED_OPTIONS_RULE`。下の「escalate」）。
 - promptの上限と切り方は[Prompt](prompt.md#goal-reviewrunのreview復旧jobruntimeのplannerの上限)が持ち、切ったものはファイルを名指し、ファイルに無いもの（alertの事実・プロセスの一覧・過去のverdict）は読めないと書く。
 - `failed`のpromptはtriageが組み立てる。
 
@@ -91,7 +93,14 @@ runtimeの自動修正が直さなかったものをjobが状況を読んで許�
 ### escalate
 
 - `escalate`、`confidence: low`の`repair`、前提の崩れた`repair`、試行の使い切りは、inbox宛てのそのalertのaskにする（決定40のkind）。
-- askの選択肢の組み立ては`recovery::ask_options`が持ち、askはそのkindのものにjobの選択肢を足すので、人はjobの見立てと元のaskの答えの両方から選べる。
+- askの選択肢の組み立ては`recovery::ask_options`が持ち、askはそのkindのものに、jobの選択肢のうち残るものを足すので、人はjobの見立てと元のaskの答えの両方から選べる。
+- jobの選択肢は終わったrunと同じ規則で寄せるか外す（[ADR-t1818-2](../../adr/2026-10-05-t1818-2-recovery-job-options-map-to-runtime-options-or-pass-back.md)の決定1、[Triage](triage.md)の6、`domain::recovery::sort_job_options`）。
+  `stalled`のaskでは`wait` / `stop`がruntimeの答えで、引き渡しを頼むoptionは出さない。
+  残るjobの選択肢は、印でoptionごとに復旧jobにもう一度渡りruntimeは何も動かさないことを示し、寄せたものと外したものは理由とともにjobの終わりの記録とquestionに残す。
+- 印の付いたoptionの答え（印の無い文だけでもよい）は、runのslotの中で`StallWatch`がaskを閉じて記録し、sessionには何も送らない。
+  そのalertの次の復旧jobは、alertがまた起きたとき（turnのstallは次の見張り、`idle_process`は渡したプロセスを戻した次の標本）に始まり、その答えを読む（`domain::recovery::live_pass_back`）。
+  jobの回数はalertの上限に数え、使い切ればaskがまた開く。
+  それ以外の自由な文は今までどおりsessionの次のturnとして送る。
 - `integrate`の検証が落ちたことのある終了runの`decide`のaskには、verifyを直してから`retry_inherit`するoption（`VERIFY_FIX_OPTION`）を足す（[Triage](triage.md)）。
   verifyを直すのはuserかinboxで、job自身はeditしない（ADR-t883-1）。
   直した後のこの回答は、alertごとの上限を使い切った後でも次のroundを持つ。

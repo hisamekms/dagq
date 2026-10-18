@@ -13,8 +13,8 @@ use crate::domain::idle_process::{
 };
 use crate::domain::provider_switch::SwitchReason;
 use crate::domain::recovery::{
-    MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, ProcessInfo, RecoveryAction, attempts, failed_live,
-    run_processes,
+    JobOption, MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, ProcessInfo, RecoveryAction, SortedOptions,
+    attempts, failed_live, live_pass_back, run_processes, sort_job_options, without_label,
 };
 
 /// The actions a recovery job may choose for an `idle_process` alert;
@@ -105,8 +105,9 @@ pub(super) struct Note {
     /// The lines for the ask's question: why a person, the diagnosis, the
     /// recommended actions, the job's question and its material.
     pub(super) text: String,
-    /// The job's options, to add to the kind's own.
-    pub(super) options: Vec<String>,
+    /// The job's options as it declared them, which
+    /// [`crate::domain::recovery::sort_job_options`] sorts for the ask.
+    pub(super) options: Vec<JobOption>,
     pub(super) category: AskReason,
 }
 
@@ -200,11 +201,21 @@ impl Escalation {
                 job_file(alert, attempt, "prompt.txt")
             ));
         }
-        let mut options = Vec::new();
+        let mut options: Vec<JobOption> = Vec::new();
         for option in verdict.map(|v| v.options.as_slice()).unwrap_or_default() {
-            let option = option.trim();
-            if !option.is_empty() && !options.iter().any(|o| o == option) {
-                options.push(option.to_owned());
+            let text = option.text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            // Once by text; a later one's declared kind fills an earlier
+            // one's missing kind.
+            match options.iter_mut().find(|o| o.text == text) {
+                Some(earlier) if earlier.kind.is_none() => earlier.kind.clone_from(&option.kind),
+                Some(_) => {}
+                None => options.push(JobOption {
+                    text: text.to_owned(),
+                    kind: option.kind.clone(),
+                }),
             }
         }
         Note {
@@ -309,17 +320,27 @@ impl Supervisor<'_> {
     }
 }
 
-/// The options of the ask an escalation opens: the ask kind's own
-/// `base`, then the job's options (`note`, none for an ask without a job)
-/// that are not among them, in order.
-pub(super) fn ask_options(base: &[&str], note: Option<&Note>) -> Vec<String> {
+/// The options of the ask an escalation opens (ADR-t1818-2): the ask
+/// kind's own `base`, whose runtime answers are `kinds`, then those of the
+/// job's options (`note`, none for an ask without a job) that go back to
+/// the job, labeled, in order (`hand_off`: whether the ask may offer the
+/// hand-off to the already-satisfied check); with what became of the
+/// others.
+pub(super) fn ask_options(
+    base: &[&str],
+    kinds: &[&str],
+    hand_off: bool,
+    note: Option<&Note>,
+) -> (Vec<String>, SortedOptions) {
     let mut options: Vec<String> = base.iter().map(|o| (*o).to_owned()).collect();
-    for option in note.map(|note| note.options.as_slice()).unwrap_or_default() {
-        if !options.contains(option) {
-            options.push(option.clone());
-        }
-    }
-    options
+    let sorted = sort_job_options(
+        &options,
+        kinds,
+        hand_off,
+        note.map(|note| note.options.as_slice()).unwrap_or_default(),
+    );
+    options.extend(sorted.kept.iter().cloned());
+    (options, sorted)
 }
 
 /// The `recovery_finished` of the job `attempt` of `alert` (raised for
@@ -603,6 +624,23 @@ impl RecoveryWatch {
         // The facts may name the evidence themselves.
         if let (Value::Object(payload), Value::Object(facts)) = (&mut payload, facts) {
             payload.extend(facts);
+        }
+        // A person chose one of the last job's own options of the alert's
+        // `stalled` ask: this job reads the answer, without its label
+        // (ADR-t1818-2 decision 2).
+        let threshold = match alert {
+            RecoveryAlert::Stalled => Some(super::stall::IDLE_THRESHOLD),
+            RecoveryAlert::IdleProcess => Some(IDLE_PROCESS_THRESHOLD),
+            _ => None,
+        };
+        if let Some(ask_id) =
+            threshold.and_then(|threshold| live_pass_back(&events, alert, threshold))
+        {
+            let ask = sv.queue.read_ask(ask_id)?;
+            payload["person_answer"] = json!({
+                "ask_id": ask_id,
+                "answer": ask.answer.as_deref().map(without_label),
+            });
         }
         // What the job is started with (ADR-0079 decision 7): recorded,
         // not shown to the job among the facts. A job no provider can run
@@ -935,6 +973,13 @@ impl RecoveryWatch {
             self.cpu = std::mem::take(&mut self.cpu).released();
         }
         step
+    }
+
+    /// Let the processes handed to the last `idle_process` job raise the
+    /// alert again, for the next job that reads a person's choice of one
+    /// of its options (ADR-t1818-2 decision 2).
+    pub(super) fn release_idle(&mut self) {
+        self.cpu = std::mem::take(&mut self.cpu).released();
     }
 
     /// The idle processes last handed to a job, for its ask.
@@ -1651,24 +1696,27 @@ impl SessionWatch {
             .collect::<Vec<_>>()
             .join("; ");
         let idle_secs = idle.iter().map(|p| p.idle_secs).max().unwrap_or(0);
+        let (options, sorted) = super::stall::stalled_options(Some(&note));
         let question = {
             // No screen and no keys: its turns, and no `intervene` (task
             // 1179).
+            let mut text = note.text.trim_end().to_owned();
+            let sorted = sorted.question();
+            if !sorted.is_empty() {
+                text.push('\n');
+                text.push_str(&sorted);
+            }
             let situation = format!(
                 "The headless session of run {run_id} (task {task_id}) has processes that have used almost no CPU time for over {threshold}s (alert: idle_process): {listed}. And {why}.\n{text}",
                 run_id = run.id(),
                 task_id = run.task_id(),
                 threshold = sv.stall.idle_process_secs,
                 why = note.why,
-                text = note.text.trim_end(),
             );
             super::stall::headless_ask_text(run.id(), &situation, "", &turns_excerpt(sv, run))
         };
-        let mut options = ask_options(&STALLED_OPTIONS, Some(&note));
         // A headless session takes no keys: no `intervene` (task 1179).
-        {
-            options = super::stall::headless_options(options);
-        }
+        let options = super::stall::headless_options(options);
         let outcome = ask::ask(
             &mut *sv.queue,
             NewAsk {
@@ -1690,7 +1738,9 @@ impl SessionWatch {
         let now = sv.files.now();
         self.stall
             .escalated(id, now, idle_secs, IDLE_PROCESS_THRESHOLD);
-        escalation.record(sv, run, alert, attempt, &note, Some(id), json!({}))?;
+        let mut extra = json!({});
+        sorted.record(&mut extra);
+        escalation.record(sv, run, alert, attempt, &note, Some(id), extra)?;
         warn!(ask_id = %id, run_id = %run.id(), "run {}: {}; stalled ask {id} (notified: {})", run.id(), note.why, outcome["notified"]);
         Ok(())
     }
@@ -1783,6 +1833,7 @@ pub(super) fn test_run(status: RunStatus, last_error: Option<&str>) -> TaskRun {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::recovery::RECOVER_LABEL;
 
     fn verdict(json: Value) -> RecoveryVerdict {
         RecoveryVerdict::parse(&json.to_string()).unwrap()
@@ -1886,7 +1937,7 @@ mod tests {
             verdict(json!({
                 "verdict": "repair", "confidence": "high", "diagnosis": "flaky",
                 "actions": [{"action": "retry"}],
-                "options": ["retry anyway", " ", "retry anyway "],
+                "options": ["retry anyway", " ", {"kind": "recover", "text": "retry anyway "}],
                 "reason_category": "discard",
             })),
             "its branch holds commits of its own".to_owned(),
@@ -1897,7 +1948,15 @@ mod tests {
             "the runtime did not apply the recovery job's repair: its branch holds commits of its own"
         );
         assert_eq!(note.category, AskReason::Discard);
-        assert_eq!(note.options, ["retry anyway"]);
+        // Trimmed and once by text: the later one's kind fills the first
+        // one's missing kind.
+        assert_eq!(
+            note.options,
+            [JobOption {
+                text: "retry anyway".to_owned(),
+                kind: Some("recover".to_owned())
+            }]
+        );
         for part in [
             "Why a person: discard",
             "Diagnosis: flaky",
@@ -1925,6 +1984,11 @@ mod tests {
         assert!(used_up.requester(&run, alert, 3).is_none());
     }
 
+    /// A live alert's ask offers `wait` and `stop`, then the job's own
+    /// options marked as going back to the recovery job (ADR-t1818-2): a
+    /// job's `wait` is the runtime's, an undeclared, unknown or confusable
+    /// one (and a hand-off, which a live ask does not offer) is left out
+    /// and the question says so.
     #[test]
     fn each_live_alerts_ask_offers_its_own_options_then_the_jobs() {
         let run = test_run(RunStatus::Running, None);
@@ -1933,16 +1997,37 @@ mod tests {
             RecoveryAlert::IdleProcess,
             1,
         );
-        assert_eq!(
-            ask_options(&STALLED_OPTIONS, Some(&failed)),
-            ["wait", "stop"]
-        );
-        let jobs = Escalation::Verdict(verdict(json!({"verdict":"escalate", "confidence":"high", "diagnosis":"x", "options":["wait", "kill it", "kill it"]}))).note(&run, RecoveryAlert::IdleProcess, 1);
-        assert_eq!(
-            ask_options(&STALLED_OPTIONS, Some(&jobs)),
-            ["wait", "stop", "kill it"]
-        );
-        assert_eq!(ask_options(&[], Some(&jobs)), ["wait", "kill it"]);
+        let (options, sorted) = super::super::stall::stalled_options(Some(&failed));
+        assert_eq!(options, ["wait", "stop"]);
+        assert_eq!(sorted.question(), "");
+        let jobs = Escalation::Verdict(verdict(
+            json!({"verdict":"escalate", "confidence":"high", "diagnosis":"x", "options":[
+                {"kind": "wait", "text": "wait for the build"},
+                {"kind": "recover", "text": "kill it"},
+                {"kind": "recover", "text": "kill it"},
+                {"kind": "recover", "text": "stop the cargo test"},
+                {"kind": "instruction", "text": "go on"},
+                {"kind": "hand_off", "text": "the base meets it"},
+                "ping it",
+            ]}),
+        ))
+        .note(&run, RecoveryAlert::IdleProcess, 1);
+        let (options, sorted) = super::super::stall::stalled_options(Some(&jobs));
+        let kill = format!("kill it{RECOVER_LABEL}");
+        assert_eq!(options, ["wait".to_owned(), "stop".to_owned(), kill]);
+        let question = sorted.question();
+        for part in [
+            "The recovery job recommends `wait`: wait for the build",
+            "\"stop the cargo test\": it reads as `stop`",
+            "\"ping it\": it declares no kind",
+            "\"go on\": its kind `instruction` is none of this ask's (wait, stop, recover)",
+            "\"the base meets it\": its kind `hand_off` is none of this ask's",
+            "the runtime moves nothing for it, and the recovery job runs again with your choice",
+        ] {
+            assert!(question.contains(part), "{part}: {question}");
+        }
+        let (bare, _) = ask_options(&[], &STALLED_OPTIONS, false, Some(&jobs));
+        assert_eq!(bare, [format!("kill it{RECOVER_LABEL}")]);
     }
 
     /// The end of a recovery job records the thread and model its provider

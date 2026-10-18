@@ -818,6 +818,18 @@ pub(super) fn binary_sections(
     ))
 }
 
+/// How the recovery job of a run that ended declares its options
+/// (ADR-t1818-2 decisions 1 and 2): the kinds, what the runtime does with
+/// each, that an option which reads as a runtime operation or the task's
+/// end is left out, and the hand-off a later round may choose; the verify
+/// fix is the runtime's own option (ADR-t883-1).
+pub(super) const RECOVERY_ENDED_OPTIONS_RULE: &str = "Each option declares its kind. \"retry\", \"resume\" or \"cancel\" stands for that answer of the person's ask: the runtime offers its own option instead and shows your text as your recommendation for it. \"recover\" is an answer that comes back to you: choosing it moves nothing, and you run again with the person's choice; the ask says so on each such option. \"hand_off\" is a recover option that asks your next round to hand the run to the check that the base already meets the acceptance (a run whose receipt has no commit past the base): it is shown with its own mark whatever its words, and the task closes only if that check and its review pass. An option with no kind or another kind is left out, and so is a recover option whose text reads as a runtime operation or as the task's end (retry, retry_inherit, resume, cancel, done, complete, close, obsolete): the runtime cannot mark a task done or cancel it from your option, so do not offer that. When a broken verification command caused the run to fail, the runtime itself offers the person `edit the task's --verify, then retry_inherit` (user or inbox can edit only verification commands after the run ends; you cannot edit): do not add it, recommend it in your question. Once the task_edited event and current commands show the correction, retry_inherit carries the committed work forward and integration uses the corrected commands. ";
+
+/// How the recovery job of a live session declares its options
+/// (ADR-t1818-2 decisions 1 and 2): `wait` and `stop` are the runtime's,
+/// and the job's own come back to it.
+pub(super) const RECOVERY_LIVE_OPTIONS_RULE: &str = "Each option declares its kind. \"wait\" or \"stop\" stands for that answer of the person's ask: the runtime offers its own option instead and shows your text as your recommendation for it. \"recover\" is an answer that comes back to you: choosing it moves nothing and sends nothing to the session, and your next job for the alert runs with the person's choice (person_answer in the alert facts); the ask says so on each such option. An option with no kind or another kind is left out, and so is a recover option whose text reads as a runtime operation or as the task's end (wait, stop, retry, resume, cancel, done, complete, close, obsolete), so do not offer that. To have the session told something, choose send_instruction yourself. ";
+
 /// What the recovery job of an alert is asked (ADR-0047 decisions 39 and
 /// 40): the alert, the task, the screen, the run's processes, the
 /// worktree's state and the run's earlier repairs, for a run that ended
@@ -999,8 +1011,10 @@ pub fn recovery_prompt(
          Allowed actions:\n{actions}\n\
          Not allowed, ever: cancelling the task, retrying a run that has commits, editing the task, landing without review, writing to main, pushing, deleting branches or worktrees, touching anything outside this run's worktree and workspace, writing the queue database, typing into the session (a headless session takes no keys; an instruction goes as its next turn). If the repair needs any of these, escalate.\n\n\
          Answer with one JSON object and nothing else, matching this schema:\n\
-         {{\"verdict\": \"repair\" | \"escalate\", \"confidence\": \"high\" | \"low\", \"diagnosis\": string, \"actions\": [action, ...], \"question\": string, \"options\": [string, ...], \"reason_category\": \"recovery_failed\" | \"discard\" | \"scope\"}}\n\
-         diagnosis says what you found in one or two sentences. repair needs at least one action and is applied only with confidence high; with confidence low, or with escalate, a person is asked, with your actions as the recommendation, question as the question and options added to theirs. If a broken verification command caused an ended run to fail, offer `edit the task's --verify, then retry_inherit` to the person: user or inbox can edit only verification commands after the run ends; you cannot edit. Once the task_edited event and current commands show the correction, retry_inherit carries the committed work forward and integration uses the corrected commands. reason_category says why a person is needed: recovery_failed when you cannot repair it or are not sure, discard when the work would be thrown away, scope when it needs a permission you do not have.\n",
+         {{\"verdict\": \"repair\" | \"escalate\", \"confidence\": \"high\" | \"low\", \"diagnosis\": string, \"actions\": [action, ...], \"question\": string, \"options\": [{{\"kind\": string, \"text\": string}}, ...], \"reason_category\": \"recovery_failed\" | \"discard\" | \"scope\"}}\n\
+         diagnosis says what you found in one or two sentences. repair needs at least one action and is applied only with confidence high; with confidence low, or with escalate, a person is asked, with your actions as the recommendation, question as the question and options added to theirs as the rule below says.\n\
+         {options_rule}\
+         reason_category says why a person is needed: recovery_failed when you cannot repair it or are not sure, discard when the work would be thrown away, scope when it needs a permission you do not have.\n",
         run_id = run.id(),
         task_id = task.id(),
         state = match &material.ended {
@@ -1032,6 +1046,11 @@ pub fn recovery_prompt(
         verification = fenced("sh", &verification),
         head = material.head,
         receipt = material.receipt_commit.unwrap_or("(no receipt)"),
+        options_rule = if material.ended.is_some() {
+            RECOVERY_ENDED_OPTIONS_RULE
+        } else {
+            RECOVERY_LIVE_OPTIONS_RULE
+        },
     );
     for counted in [&title, &description, &acceptance, &verification] {
         fit.section("task", counted);

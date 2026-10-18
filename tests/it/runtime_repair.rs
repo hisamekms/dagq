@@ -185,7 +185,11 @@ fn a_recovery_repair_of_a_process_outside_the_run_becomes_an_ask() {
 }
 
 /// A repair the job is not sure of is not applied: it becomes an ask with
-/// the job's actions as the recommendation and its options added.
+/// the job's actions as the recommendation and its options sorted
+/// (ADR-t1818-2): one of the runtime's kind is the runtime's option with
+/// its text in the question, its own is marked as going back to the
+/// recovery job, and one that reads as the task's end is left out, in the
+/// question and in `recovery_finished`.
 #[test]
 fn a_recovery_repair_of_low_confidence_becomes_an_ask() {
     let (_dir, repo, db) = fixture();
@@ -197,21 +201,36 @@ fn a_recovery_repair_of_low_confidence_becomes_an_ask() {
             "confidence": "low",
             "diagnosis": "maybe a slow test",
             "actions": [{"action": "stop_processes", "pids": ["PID"]}],
-            "options": ["stop it"],
+            "options": [
+                {"kind": "stop", "text": "end it: the test hangs"},
+                {"kind": "recover", "text": "look at the hung test's log first"},
+                {"kind": "recover", "text": "mark the task done"},
+            ],
         })),
     );
     let (ask, detail) = escalated_orphan(&db, &backend, supervisor);
-    assert_eq!(ask.options, ["wait", "stop", "stop it", "propose"]);
+    let own = format!(
+        "look at the hung test's log first{}",
+        dagq::domain::recovery::RECOVER_LABEL
+    );
+    assert_eq!(ask.options, ["wait", "stop", own.as_str(), "propose"]);
     for part in [
         "confidence low",
         "Recommended: [{\"action\":\"stop_processes\"",
         "Why a person: recovery_failed",
+        "The recovery job recommends `stop`: end it: the test hangs",
+        "\"mark the task done\": it reads as `done`",
     ] {
         assert!(ask.question.contains(part), "{part}: {}", ask.question);
     }
     let finished = payloads(&detail, "recovery_finished");
     assert_eq!(finished[0]["escalated"], true);
     assert_eq!(finished[0]["confidence"], "low");
+    assert_eq!(
+        finished[0]["options_dropped"][0]["text"],
+        "mark the task done"
+    );
+    assert_eq!(finished[0]["options_merged"][0]["into"], "stop");
 }
 
 /// Task 782: the escalation of a live run that its recovery job's verdict

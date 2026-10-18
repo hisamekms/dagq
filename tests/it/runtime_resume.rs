@@ -1160,7 +1160,7 @@ fn resuming_stops_after_three_attempts() {
             "verdict": "escalate",
             "confidence": "high",
             "diagnosis": "the conflict needs a decision on the design",
-            "options": ["split the task"],
+            "options": [{"kind": "recover", "text": "split the task"}],
         }))]);
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
@@ -1217,7 +1217,7 @@ fn resuming_stops_after_three_attempts() {
         [
             "retry",
             "cancel",
-            "split the task",
+            &format!("split the task{}", dagq::domain::recovery::RECOVER_LABEL),
             "edit the task's --verify, then retry_inherit"
         ]
     );

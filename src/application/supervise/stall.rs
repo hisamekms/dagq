@@ -21,7 +21,8 @@ use super::*;
 use crate::domain::EventKind;
 use crate::domain::RunEvent;
 use crate::domain::recovery::{
-    IDLE_WITHOUT_RECEIPT, PERMISSION_DENIED, SEND_UNCONFIRMED, TURN_WITHOUT_RECEIPT,
+    ANSWERED_RECOVER, IDLE_WITHOUT_RECEIPT, PERMISSION_DENIED, SEND_UNCONFIRMED, SortedOptions,
+    TURN_WITHOUT_RECEIPT, chosen_option, passes_back,
 };
 use crate::domain::run::{
     AttemptOf, AutoRepaired, NewStallNudged, NewStallResolved, RecoveryRecord, StallNudged,
@@ -155,6 +156,9 @@ enum TurnStep {
 enum AskSeen<'a> {
     /// Still open, with its answer if it has one.
     Open(Option<&'a str>),
+    /// Still open, answered with one of the recovery job's own options,
+    /// which goes back to the job (ADR-t1818-2 decision 2).
+    Recover,
     /// Someone closed it, with the answer it had.
     Closed(Option<&'a str>),
 }
@@ -182,6 +186,12 @@ enum AskStep {
     /// recorded. The run then ends without a receipt, so it fails and its
     /// recovery job (alert `failed`) takes it.
     Stop,
+    /// Answered with one of the recovery job's own options (with or
+    /// without its label): the ask is closed and `stall_resolved`
+    /// (`answered_recover`) recorded, nothing is sent to the session, and
+    /// the alert's next recovery job reads the answer (ADR-t1818-2
+    /// decision 2). Only from the run's slot, where the job can start.
+    Recover,
     /// Answered anything but `wait` (or `propose`), `intervene` and `stop`:
     /// the session's next turn. The request names the ask and is written
     /// before the ask is closed, so a supervisor that takes the run over
@@ -246,15 +256,10 @@ pub(super) const STALLED_OPTIONS: [&str; 2] = ["wait", "stop"];
 pub(super) const STOP_OPTION: &str = "stop";
 
 /// The options of a `stalled` ask: [`STALLED_OPTIONS`], then those of the
-/// recovery job's `note`, each once (ADR-0047 decision 40).
-pub(super) fn stalled_options(note: Option<&Note>) -> Vec<String> {
-    let mut options: Vec<String> = STALLED_OPTIONS.iter().map(|o| (*o).to_owned()).collect();
-    for option in note.map(|note| note.options.as_slice()).unwrap_or_default() {
-        if !options.contains(option) {
-            options.push(option.clone());
-        }
-    }
-    options
+/// recovery job's `note` that go back to it, each once (ADR-0047 decision
+/// 40, ADR-t1818-2); with what became of the job's others.
+pub(super) fn stalled_options(note: Option<&Note>) -> (Vec<String>, SortedOptions) {
+    super::recovery::ask_options(&STALLED_OPTIONS, &STALLED_OPTIONS, false, note)
 }
 
 /// The answer of a `stalled` ask for a person to step in (ADR-0043), which
@@ -786,7 +791,18 @@ impl StallWatch {
             // closes the ask and opens it again, recording its outcome only
             // if the previous supervisor did not (task 1179).
             let reopens = ask.answer.as_deref().is_some_and(answered_intervene);
-            let applied = !reopens && ask.answered_at.is_some() && resolved("ask", Some(ask.id));
+            // A job's own option the previous supervisor recorded
+            // (`answered_recover`) but did not close goes back to the job:
+            // no person stepped in and nothing waits for a turn of the
+            // session, so it holds nothing; this watch closes the ask and
+            // the alert's next job reads the answer (ADR-t1818-2).
+            let recovers = events.iter().filter_map(resolved_of).any(|r| {
+                r.detection == Some("ask")
+                    && r.ask_id == Some(ask.id.as_i64())
+                    && r.outcome == Some(ANSWERED_RECOVER)
+            });
+            let applied =
+                !reopens && !recovers && ask.answered_at.is_some() && resolved("ask", Some(ask.id));
             watch.asked = Some(Asked {
                 id: ask.id,
                 at: at_unix(ask.created_at + 1),
@@ -1203,7 +1219,7 @@ impl StallWatch {
             self.recovery_resolved(sv, run, outcome)?;
         }
         if self.asked.is_some() || self.reopen.is_some() {
-            self.watch_ask(sv, run, marker, now, recovery.is_some())?;
+            self.watch_ask(sv, run, marker, now, recovery.map(|r| r.recovery))?;
             return Ok(None);
         }
         let Some(idle) = idle else {
@@ -1346,6 +1362,8 @@ impl StallWatch {
                 };
             }
             AskSeen::Open(answer) => answer.map(str::trim),
+            AskSeen::Recover if !send => return AskStep::Nothing,
+            AskSeen::Recover => return AskStep::Recover,
         };
         match answer {
             None if moved(asked.at) => AskStep::Moved,
@@ -1526,7 +1544,9 @@ impl StallWatch {
             LiveStep::Escalate(attempt, escalation) => {
                 let alert = RecoveryAlert::Stalled;
                 let note = escalation.note(run, alert, attempt);
-                let extra = json!({"reason": why});
+                let mut extra = json!({"reason": why});
+                // What became of the job's options (ADR-t1818-2).
+                stalled_options(Some(&note)).1.record(&mut extra);
                 sv.for_escalation(run, alert, attempt, &escalation, |sv| {
                     // A `stalled` ask another alert opened meanwhile
                     // already has a person looking.
@@ -1700,12 +1720,18 @@ impl StallWatch {
         now: SystemTime,
         note: Option<&Note>,
     ) -> Result<AskId> {
+        let (mut options, sorted) = stalled_options(note);
         let recovered = note.map_or_else(String::new, |note| {
-            format!(" And {}.\n{}\n", note.why, note.text)
+            let sorted = sorted.question();
+            let sorted = if sorted.is_empty() {
+                sorted
+            } else {
+                format!("\n{sorted}")
+            };
+            format!(" And {}.\n{}{sorted}\n", note.why, note.text)
         });
         let nudged = nudged_text(nudge, now);
         let question = { headless_question(sv, run, idle_secs, &nudged, &recovered) };
-        let mut options = stalled_options(note);
         {
             options = headless_options(options);
         }
@@ -1776,7 +1802,7 @@ impl StallWatch {
         }
         let previous = stalled_ask(&*sv.queue, run.id(), Some(reopen.previous))?;
         let (options, category) = previous.as_ref().map_or_else(
-            || (stalled_options(None), AskReason::RecoveryFailed),
+            || (stalled_options(None).0, AskReason::RecoveryFailed),
             |ask| (ask.options.clone(), ask.reason_category),
         );
         let reopened = format!(
@@ -1831,8 +1857,9 @@ impl StallWatch {
         run: &TaskRun,
         marker: Option<SystemTime>,
         now: SystemTime,
-        send: bool,
+        recovery: Option<&mut RecoveryWatch>,
     ) -> Result<()> {
+        let send = recovery.is_some();
         // Kept until the ask opens: a failure tries again on the next look.
         if let Some(reopen) = self.reopen {
             self.reopen_ask(sv, run, reopen, now)?;
@@ -1852,6 +1879,15 @@ impl StallWatch {
             None => stalled_ask(&*sv.queue, run.id(), Some(asked.id))?,
         };
         let seen = match &open {
+            Some(ask)
+                if ask
+                    .answer
+                    .as_deref()
+                    .and_then(|answer| chosen_option(&ask.options, answer))
+                    .is_some_and(|option| passes_back(option)) =>
+            {
+                AskSeen::Recover
+            }
             Some(ask) => AskSeen::Open(ask.answer.as_deref()),
             None => AskSeen::Closed(closed.as_ref().and_then(|ask| ask.answer.as_deref())),
         };
@@ -1972,6 +2008,33 @@ impl StallWatch {
                 self.held = Some(now);
                 warn!(ask_id = %id, run_id = %run.id(), "stalled ask {id} of {} answered stop; the headless session is asked to exit, and the run goes to its recovery job without a receipt", run.id());
             }
+            // The job's own option goes back to the job: recorded before
+            // the ask is closed, so that an adopter of a supervisor that
+            // stopped in between closes it without recording it again.
+            // The alert's next job, which reads the answer, starts as the
+            // alert comes again: a turn stall at the next look, an idle
+            // process at the next sample (its processes are let go for it).
+            AskStep::Recover => {
+                if !ask_resolved(&*sv.queue, run, id)? {
+                    Self::resolved(
+                        sv,
+                        run,
+                        "ask",
+                        Some((id, asked.threshold)),
+                        asked.detected_after_secs,
+                        asked.at,
+                        ANSWERED_RECOVER,
+                    )?;
+                }
+                sv.queue.close_ask(id)?;
+                self.asked = None;
+                if asked.threshold == IDLE_PROCESS_THRESHOLD
+                    && let Some(recovery) = recovery
+                {
+                    recovery.release_idle();
+                }
+                info!(ask_id = %id, run_id = %run.id(), "stalled ask {id} of {} answered with the recovery job's own option; the alert's next recovery job reads it", run.id());
+            }
             // A headless session takes no keys: a person's answer other
             // than `intervene` is its next turn's prompt (ADR-t813-1
             // decision 6).
@@ -2034,6 +2097,7 @@ impl StallWatch {
 fn seen_answer(seen: AskSeen<'_>) -> Option<&str> {
     match seen {
         AskSeen::Open(answer) | AskSeen::Closed(answer) => answer,
+        AskSeen::Recover => None,
     }
 }
 
@@ -2325,6 +2389,34 @@ mod tests {
         let watch = StallWatch::adopted(&applied, Some(&open), Some(&open));
         assert!(watch.asked.unwrap().applied);
         assert_eq!(watch.held, Some(at_unix(1002)));
+    }
+
+    /// ADR-t1818-2: the previous supervisor recorded `answered_recover` for
+    /// an ask answered with a job's own option and stopped before it closed
+    /// it. The adopter neither marks it applied nor holds the session, so
+    /// it closes the ask and the idle marker the session left still lets
+    /// the alert's next recovery job start; an ordinary answer applied
+    /// still holds.
+    #[test]
+    fn an_adopter_passes_a_job_options_answer_back_without_holding_the_session() {
+        let answer = format!("look again{}", crate::domain::recovery::RECOVER_LABEL);
+        let open = stalled(4, Some(&answer), None);
+        let events = [ask_end(1, 4, ANSWERED_RECOVER, json!({}))];
+        let watch = StallWatch::adopted(&events, Some(&open), Some(&open));
+        let asked = watch.asked.unwrap();
+        assert!(!asked.applied);
+        assert!(watch.held.is_none());
+        assert_eq!(
+            watch.ask_step(asked, AskSeen::Recover, None, true),
+            AskStep::Recover
+        );
+        // The marker of the session's last turn, from before the answer.
+        assert!(watch.ended_after_inputs(at_unix(1000)));
+        // An answer the previous supervisor applied otherwise holds.
+        let applied = [ask_end(1, 4, "answered_instruction", json!({}))];
+        let watch = StallWatch::adopted(&applied, Some(&open), Some(&open));
+        assert!(watch.asked.unwrap().applied);
+        assert!(!watch.ended_after_inputs(at_unix(1000)));
     }
 
     /// Task 1558: the setting an escalated ask was judged by comes from the
@@ -2714,6 +2806,10 @@ mod tests {
             step(AskSeen::Open(Some("go on")), None, false),
             AskStep::Nothing
         );
+        // One of the recovery job's own options goes back to the job, from
+        // the run's slot only (ADR-t1818-2 decision 2).
+        assert_eq!(step(AskSeen::Recover, None, true), AskStep::Recover);
+        assert_eq!(step(AskSeen::Recover, None, false), AskStep::Nothing);
         // An answer applied (a person stepped in): closed once the session
         // took a turn after the step in.
         let applied = Asked {

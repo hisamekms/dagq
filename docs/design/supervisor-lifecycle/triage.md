@@ -10,6 +10,7 @@ related:
   - design-supervisor-lifecycle-background-recovery-job
   - adr-0039
   - adr-0047
+  - adr-t1818-2
 ---
 
 # Triage (supervisor)
@@ -41,6 +42,8 @@ related:
    その節に続けて、固定バイナリが依存先の着地を含まないことで落ちたrunの`retry` / `retry_inherit`の選び方を書く（`RECOVERY_BINARY_RULE`）。
    promptは全体（言語の指示を含む）と節ごとの上限の中に収め、終わったrunの資料は先頭を残して切る。
    値・理由・切り方と、切ったものに付ける読む方法は[Prompt](prompt.md#goal-reviewrunのreview復旧jobruntimeのplannerの上限)、生きているsessionの復旧jobと共通の節は[復旧job](background-recovery-job.md)のpromptが持つ。
+   verdictのschemaの後に、jobの足すoptionの種類の宣言と、6で寄せる・外す規則を書く（`RECOVERY_ENDED_OPTIONS_RULE`）。
+   verifyを直すoptionはruntimeが足すので、jobには足さずquestionで勧めさせる。
 5. **verdictの適用**（`act_on_recovery`）: stdoutからverdictを読む（`RecoveryVerdict::parse`）。
    `confidence: high`の`repair`で、`actions`がちょうど1つ、かつその前提が今成り立つときだけ適用する。
    前提:
@@ -60,8 +63,13 @@ related:
    適用したら`finish_triage`が遷移と`triage_finished`、`auto_repaired`（`wait`には書かない）、`recovery_finished`を1トランザクションで記録する。
    適用する前にleaseをまだ持っているかを確かめ、失っていれば（止まっていた間に別のsupervisorが引き継いだ）何も書かずにそのrunを手放す。
 6. **escalate**: `escalate`、`confidence: low`の`repair`、前提の崩れた`repair`（操作が1つでない、許されない操作を含む）、alertの回数の使い切りは、`kind: decide`のaskをrunに作る（`asked_by: supervisor`）。
-   optionsは`retry` / `resume` / `cancel`（resumeを使い切ったrunは`retry` / `cancel`）にjobの`options`を足し、runの`integrate`の検証が落ちたことがあるrun（`integration_deferred`の`code: verification_failed`）では最後に`edit the task's --verify, then retry_inherit`をruntimeが足したもの（使い切りのaskにも足す）。
-   questionは各optionの意味を持ち、jobの足したoptionは復旧jobにもう一度渡ること、verifyのoptionを足したaskでは、userかinboxが先にtaskのverifyを直してから答えれば、使い切った後でも復旧jobがもう1回、直したコマンドで走ることを書く。
+   optionsは`retry` / `resume` / `cancel`（resumeを使い切ったrunは`retry` / `cancel`）に、jobの`options`のうち復旧jobに渡し直すものを足し、runの`integrate`の検証が落ちたことがあるrun（`integration_deferred`の`code: verification_failed`）では最後に`edit the task's --verify, then retry_inherit`をruntimeが足したもの（使い切りのaskにも足す）。
+   jobのoptionは種類を宣言し、`domain::recovery::sort_job_options`が[ADR-t1818-2](../../adr/2026-10-05-t1818-2-recovery-job-options-map-to-runtime-options-or-pass-back.md)の決定1で分ける（規則の順・種類・語の一覧・印はその関数と定数のdoc comment）。
+   runtimeの答えを指すものはそのoptionに寄せてjobの文を推奨としてquestionに載せ、今のaskで適用できないもの・種類の無いもの・runtimeの操作や完了・cancelと紛らわしいものは外す。
+   残るjobのoptionは、文の後の印で、optionごとに復旧jobにもう一度渡りruntimeは何も動かさないことを示す。
+   baseがすでに受け入れ条件を満たすことの確かめへの引き渡しを次のラウンドに頼むoptionは、文が完了と紛らわしくても外さず、その旨の印で残し、答えは同じく復旧jobに渡る（引き渡しそのものをjobが選ぶ操作、決定3は許された操作にまだ無い）。
+   寄せたものと外したものは理由とともにラウンドの記録とquestionに残す。
+   questionは各optionの意味を持ち、印の付いたoptionは復旧jobにもう一度渡ること、verifyのoptionを足したaskでは、userかinboxが先にtaskのverifyを直してから答えれば、使い切った後でも復旧jobがもう1回、直したコマンドで走ることを書く。
    askを作った後で`finish_triage`が失敗したら、このpassが開いたaskは取り下げて閉じ、8の失敗にする。
    人にはinboxのwatchが`ask_opened`として知らせる。
    runはそのまま。
@@ -79,8 +87,9 @@ related:
 9. **askの回答**: fill passごとに、`asked_by: supervisor`の`decide`のaskで回答済み・未closeのもののうち、回答がaskのoptionsにある`retry` / `resume` / `cancel`のどれかで、runが`failed` / `interrupted`でleaseが無いものを`decide_triage`で1トランザクションで適用する（runがtaskの最新runで、askが回答済みかつ未closeであることを中で再検査するので、2つのsupervisorが同じ回答を二重に適用しない。staleなleaseの行は同じトランザクションで消すので、止まっていたラウンドのsupervisorが起きてもleaseを更新して書けない。[ADR-0039](../../adr/0039-adopt-stale-lease-of-live-wrapper-and-renew-own-stale-lease.md)の決定7）。
    `retry`はtaskを`ready`（人の判断なので、commitのあるrunでもよい）、`resume`はrunを`needs_session`（`last_error`は直近の`triage_finished`の`reason`に人がresumeを選んだことを添えたもの）、`cancel`はtaskを`canceled`にし、askを閉じ、`triage_decided`を記録する。
    taskが既に`in_progress`でないか、より新しいrunがあれば（人が`ready`を打ったなど）適用するものが無いのでaskを閉じるだけにする。
+   jobの足したoptionは、6の印を外した文だけの回答でもそのoptionとして扱う（`domain::recovery::chosen_option`）。
    回答がjobの足したoptionかruntimeの足した`edit the task's --verify, then retry_inherit`（askのoptionsにあり`retry` / `resume` / `cancel`でないもの）なら、何も動かさずにaskを閉じ、`triage_decided`を記録する。
-   `triage_state`はこれを`Pending`と読むので、次のfill passで同じalertのラウンドがもう一度始まり（alertの回数に数える）、promptのalertの事実でjobが人の選んだものを読む。
+   `triage_state`はこれを`Pending`と読むので、次のfill passで同じalertのラウンドがもう一度始まり（alertの回数に数える）、promptのalertの事実でjobが人の選んだもの（6の印は外す）を読む。
    verifyのoptionの回答は、verifyを直す`task_edited`が先にあれば3の例外で使い切りの後でもラウンドを持ち、jobはpromptでtaskの今のverifyとその`task_edited`を読んで`retry_inherit`を選べる。
    次のrunの`integrate`はtaskの今のverifyを流す。
    optionsに無い自由な回答は人が読む。

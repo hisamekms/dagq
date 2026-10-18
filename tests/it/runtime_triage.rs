@@ -231,9 +231,11 @@ fn a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited() 
     let escalate = || {
         recovery(json!({
             "verdict": "escalate", "confidence": "high", "diagnosis": "the verify is wrong",
-            "options": ["try again"], "reason_category": "recovery_failed"
+            "options": [{"kind": "recover", "text": "try again"}], "reason_category": "recovery_failed"
         }))
     };
+    // The job's own option as the ask shows it (ADR-t1818-2).
+    let try_again = format!("try again{}", dagq::domain::recovery::RECOVER_LABEL);
     let option = "edit the task's --verify, then retry_inherit";
     let mut queue = SqliteQueue::open(&db).unwrap();
     let decide = |queue: &mut SqliteQueue| {
@@ -266,7 +268,10 @@ fn a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited() 
             "{}",
             ask.question
         );
-        queue.answer(ask.id, "try again").unwrap();
+        // The second round answers without the label, as a person may:
+        // it chooses the same option.
+        let answer = if round == 2 { "try again" } else { &try_again };
+        queue.answer(ask.id, answer).unwrap();
         let triages = if round < 3 { vec![escalate()] } else { vec![] };
         let reviewer = TestReviewer::new(&[]).with_triages(&triages);
         let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
@@ -281,7 +286,7 @@ fn a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited() 
         let detail = queue.show(TaskId::new(1)).unwrap();
         let decided = run_payloads(&detail, &first, "triage_decided");
         assert_eq!(decided.len(), round);
-        assert_eq!(decided[round - 1]["answer"], "try again");
+        assert_eq!(decided[round - 1]["answer"], json!(try_again));
         assert_eq!(decided[round - 1]["action"], "recover");
         assert_eq!(decided[round - 1]["status"], "failed");
         assert_eq!(decided[round - 1]["ask_id"], json!(ask.id));
@@ -294,6 +299,7 @@ fn a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited() 
             let finished = run_payloads(&detail, &first, "triage_finished");
             assert_eq!(finished.last().unwrap()["recovery_attempt"], round + 1);
             assert_eq!(finished.last().unwrap()["action"], "ask");
+            // The job reads the answer without the label.
             assert_eq!(requested[round]["person_answer"]["answer"], "try again");
             assert_eq!(requested[round]["person_answer"]["ask_id"], json!(ask.id));
             let (prompt, _) = &reviewer.triage_prompts()[0];
@@ -365,9 +371,13 @@ fn a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited() 
 /// A `retry` of a run whose branch holds commits would throw them away, so
 /// the runtime does not apply it (ADR-0047 decision 40): the whole verdict
 /// becomes the `decide` ask, with the job's diagnosis, its actions as the
-/// recommendation, its options added and its reason category. How the
-/// ask's options and question are composed is
-/// `supervise::triage::tests` and `supervise::recovery::tests` (task 1415).
+/// recommendation, its options sorted (ADR-t1818-2: one of `retry`'s kind
+/// is the runtime's `retry` with its text in the question, its own is
+/// marked as going back to it, and one that reads as the task's end, as
+/// task 1217's did in ask 436, is left out, in the question and in
+/// `triage_finished`) and its reason category. How the ask's options and
+/// question are composed is `supervise::triage::tests`,
+/// `supervise::recovery::tests` and `domain::recovery::tests` (task 1415).
 #[test]
 fn a_retry_of_a_run_with_commits_is_refused_and_asked_with_the_jobs_options() {
     let (_dir, repo, db) = fixture();
@@ -378,7 +388,11 @@ fn a_retry_of_a_run_with_commits_is_refused_and_asked_with_the_jobs_options() {
             "confidence": "high",
             "diagnosis": "flaky",
             "actions": [{"action": "retry"}],
-            "options": ["retry anyway"],
+            "options": [
+                {"kind": "retry", "text": "retry anyway"},
+                {"kind": "recover", "text": "Mark task 1 done (or cancel it as obsolete)"},
+                {"kind": "recover", "text": "ask the planner to split it"},
+            ],
             "reason_category": "discard",
         }))]);
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
@@ -394,6 +408,14 @@ fn a_retry_of_a_run_with_commits_is_refused_and_asked_with_the_jobs_options() {
     assert_eq!(finished.len(), 1);
     assert_eq!(finished[0]["action"], "ask");
     assert_eq!(finished[0]["status"], "failed");
+    assert_eq!(
+        finished[0]["options_merged"],
+        json!([{"text": "retry anyway", "into": "retry"}])
+    );
+    assert_eq!(
+        finished[0]["options_dropped"][0]["text"],
+        "Mark task 1 done (or cancel it as obsolete)"
+    );
     let recovered = payloads(&detail, "recovery_finished");
     assert_eq!(recovered[0]["escalated"], true);
     assert_eq!(recovered[0]["reason_category"], "discard");
@@ -404,7 +426,11 @@ fn a_retry_of_a_run_with_commits_is_refused_and_asked_with_the_jobs_options() {
     assert_eq!(ask.kind, AskKind::Decide);
     assert_eq!(ask.run_id.as_ref(), Some(run.id()));
     assert_eq!(ask.asked_by, "supervisor");
-    assert_eq!(ask.options, ["retry", "resume", "cancel", "retry anyway"]);
+    let split = format!(
+        "ask the planner to split it{}",
+        dagq::domain::recovery::RECOVER_LABEL
+    );
+    assert_eq!(ask.options, ["retry", "resume", "cancel", &split]);
     assert!(!ask.question.contains("dagq edit"), "{}", ask.question);
     assert_eq!(ask.reason_category, dagq::domain::AskReason::Discard);
     for part in [
@@ -415,6 +441,9 @@ fn a_retry_of_a_run_with_commits_is_refused_and_asked_with_the_jobs_options() {
         "Recommended: [{\"action\":\"retry\"}]",
         "Last error: session exited with code 1",
         "recovery-failed-1.prompt.txt",
+        "The recovery job recommends `retry`: retry anyway",
+        "\"Mark task 1 done (or cancel it as obsolete)\": it reads as `done`",
+        "the runtime moves nothing for it, and the recovery job runs again with your choice",
     ] {
         assert!(ask.question.contains(part), "{part}: {}", ask.question);
     }
@@ -427,13 +456,6 @@ fn a_retry_of_a_run_with_commits_is_refused_and_asked_with_the_jobs_options() {
         ask_attention(&status, ask.id)[0]["next"],
         format!("answer ask {}", ask.id)
     );
-    assert!(
-        ask.question
-            .contains("Any other option goes back to the recovery job"),
-        "{}",
-        ask.question
-    );
-
     // The answer of a job's own option goes back to the job: its wiring is
     // in `a_corrected_verify_gets_a_round_past_the_used_up_limit_and_lands_inherited`
     // (task 1415).

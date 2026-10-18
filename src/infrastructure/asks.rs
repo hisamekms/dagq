@@ -295,7 +295,7 @@ impl SqliteQueue {
                 })?;
             payload["runtime_delivers"] = json!(
                 (status == RunStatus::Failed.as_str() || status == RunStatus::Interrupted.as_str())
-                    && ask.options.iter().any(|option| option == text.trim())
+                    && crate::domain::recovery::chosen_option(&ask.options, text).is_some()
             );
         }
         if ask.kind == AskKind::PlannerQuestion {

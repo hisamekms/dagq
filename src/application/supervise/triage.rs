@@ -12,8 +12,8 @@ use crate::domain::actor_model::{ActorLaunch, JobStartRoute, ModelRole};
 use crate::domain::landing_release::{self, ProcessesStep};
 use crate::domain::recovery::{
     ENDED_ACTIONS, MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, ProcessInfo, RecoveryAction,
-    VERIFY_FIX_OPTION, attempts, current_alert, pending_request, run_processes,
-    verification_failed, verify_fix_round,
+    SortedOptions, VERIFY_FIX_OPTION, attempts, current_alert, pending_request, run_processes,
+    sort_job_options, verification_failed, verify_fix_round,
 };
 
 impl Supervisor<'_> {
@@ -311,12 +311,18 @@ impl Supervisor<'_> {
             let Some(run_id) = ask.run_id.clone() else {
                 continue;
             };
-            let answer = ask.answer.as_deref().unwrap_or_default().trim().to_owned();
+            // Only an option the ask offered (a job's own one also without
+            // its label, ADR-t1818-2): a run whose resumes are used up is
+            // not offered `resume`.
+            let Some(answer) = crate::domain::recovery::chosen_option(
+                &ask.options,
+                ask.answer.as_deref().unwrap_or_default(),
+            )
+            .cloned() else {
+                continue;
+            };
             let run = self.queue.run(&run_id)?;
-            // Only an option the ask offered: a run whose resumes are used
-            // up is not offered `resume`.
-            if !ask.options.contains(&answer)
-                || !matches!(run.status(), RunStatus::Failed | RunStatus::Interrupted)
+            if !matches!(run.status(), RunStatus::Failed | RunStatus::Interrupted)
                 || self.queue.run_lease(&run_id)?.is_some()
             {
                 continue;
@@ -459,9 +465,13 @@ impl Supervisor<'_> {
                             && e.payload["action"] == crate::domain::RECOVER_AGAIN
                     })
                 {
+                    // Without the label the ask showed after it.
+                    let answer = decided.payload["answer"]
+                        .as_str()
+                        .map(crate::domain::recovery::without_label);
                     request["person_answer"] = json!({
                         "ask_id": decided.payload["ask_id"],
-                        "answer": decided.payload["answer"],
+                        "answer": answer,
                     });
                 }
                 Some(request)
@@ -944,8 +954,8 @@ impl Supervisor<'_> {
         // Only a run whose `integrate` verification failed is offered the
         // verify fix (ADR-t883-1).
         let verify_failed = verification_failed(&self.queue.run_events(run.id())?);
-        let options = ended_options(&note, exhausted, verify_failed);
-        let question = ended_question(run, alert, &note, exhausted, verify_failed);
+        let (options, sorted) = ended_options(&note, exhausted, verify_failed);
+        let question = ended_question(run, alert, &note, &sorted, exhausted, verify_failed);
         let outcome = ask::ask(
             &mut *self.queue,
             NewAsk {
@@ -981,6 +991,9 @@ impl Supervisor<'_> {
             "duration_secs": duration_secs,
         });
         end.record(&mut payload);
+        // What became of the job's options it did not get as its own
+        // (ADR-t1818-2 decision 1).
+        sorted.record(&mut payload);
         let mut finished = escalation.finished(
             alert,
             attempt,
@@ -1151,19 +1164,32 @@ fn recovery_round(pending: bool, done: usize, granted: bool) -> (bool, usize) {
 
 /// The options of the `decide` ask of a run that ended: `retry` /
 /// `resume` / `cancel` (without `resume` once its resumes are
-/// `exhausted`), the job's, and the verify fix for a run whose `integrate`
-/// verification failed.
-fn ended_options(note: &Note, exhausted: bool, verify_failed: bool) -> Vec<String> {
+/// `exhausted`), the job's that go back to it, and the verify fix for a
+/// run whose `integrate` verification failed; with what became of the
+/// job's others (ADR-t1818-2): one that stands for an option the ask
+/// offers is that one, and one that reads as a runtime operation or the
+/// task's end is left out.
+fn ended_options(
+    note: &Note,
+    exhausted: bool,
+    verify_failed: bool,
+) -> (Vec<String>, SortedOptions) {
     let base = if exhausted {
         EXHAUSTED_OPTIONS
     } else {
         TRIAGE_OPTIONS
     };
-    let mut options = super::recovery::ask_options(base, Some(note));
-    if verify_failed && !options.iter().any(|option| option == VERIFY_FIX_OPTION) {
+    let mut offered: Vec<String> = base.iter().map(|o| (*o).to_owned()).collect();
+    if verify_failed {
+        offered.push(VERIFY_FIX_OPTION.to_owned());
+    }
+    let sorted = sort_job_options(&offered, TRIAGE_OPTIONS, true, &note.options);
+    let mut options: Vec<String> = base.iter().map(|o| (*o).to_owned()).collect();
+    options.extend(sorted.kept.iter().cloned());
+    if verify_failed {
         options.push(VERIFY_FIX_OPTION.to_owned());
     }
-    options
+    (options, sorted)
 }
 
 /// The question of the `decide` ask of a run that ended: where the run
@@ -1173,6 +1199,7 @@ fn ended_question(
     run: &TaskRun,
     alert: RecoveryAlert,
     note: &Note,
+    sorted: &SortedOptions,
     exhausted: bool,
     verify_failed: bool,
 ) -> String {
@@ -1189,10 +1216,11 @@ fn ended_question(
     } else {
         " resume: resume the run's own session with the job's diagnosis."
     };
-    let others = if note.options.is_empty() {
-        ""
+    let others = sorted.question();
+    let others = if others.is_empty() {
+        others
     } else {
-        " Any other option goes back to the recovery job, which runs again with your choice."
+        format!("\n{others}")
     };
     format!(
         "The supervisor's recovery job for run {run_id} (task {task_id}, {status}; alert: {alert}) did not move it on: {why}.\n{text}\nLast error: {last_error}\nretry: make the task ready for a new run from scratch (this run's work is not carried over).{resume} cancel: cancel the task.{verify_fix}{others}",
@@ -1243,64 +1271,181 @@ mod tests {
         .note(&run, RecoveryAlert::Failed, 1)
     }
 
+    fn recover(text: &str) -> String {
+        format!("{text}{}", crate::domain::recovery::RECOVER_LABEL)
+    }
+
     /// The `decide` ask of a run that ended offers `retry`, `resume` and
     /// `cancel` (no `resume` once its resumes are used up), then the job's
-    /// options, then the verify fix for a run whose `integrate`
-    /// verification failed, even once its jobs are used up (moved from
-    /// `runtime_triage`, task 1415).
+    /// options that go back to it, each marked so, then the verify fix for
+    /// a run whose `integrate` verification failed, even once its jobs are
+    /// used up (moved from `runtime_triage`, task 1415; ADR-t1818-2).
     #[test]
     fn a_decide_ask_offers_the_triage_options_the_jobs_and_the_verify_fix() {
         let jobs = note_of(Some(json!({
             "verdict": "escalate", "confidence": "high", "diagnosis": "x",
-            "options": ["retry anyway", "cancel"],
+            "options": [{"kind": "recover", "text": "split the task first"}, "cancel"],
+        })));
+        let split = recover("split the task first");
+        assert_eq!(
+            ended_options(&jobs, false, false).0,
+            ["retry", "resume", "cancel", &split]
+        );
+        assert_eq!(
+            ended_options(&jobs, true, false).0,
+            ["retry", "cancel", &split]
+        );
+        assert_eq!(
+            ended_options(&jobs, false, true).0,
+            ["retry", "resume", "cancel", &split, VERIFY_FIX_OPTION]
+        );
+        let used_up = note_of(None);
+        assert_eq!(
+            ended_options(&used_up, false, true).0,
+            ["retry", "resume", "cancel", VERIFY_FIX_OPTION]
+        );
+        // The job's own verify fix is the runtime's, offered once; without
+        // a failed verification it reads as `retry_inherit` and is left out.
+        let fix = note_of(Some(json!({
+            "verdict": "escalate", "confidence": "high", "diagnosis": "x",
+            "options": [{"kind": "recover", "text": VERIFY_FIX_OPTION}],
         })));
         assert_eq!(
-            ended_options(&jobs, false, false),
-            ["retry", "resume", "cancel", "retry anyway"]
+            ended_options(&fix, false, true).0,
+            ["retry", "resume", "cancel", VERIFY_FIX_OPTION]
         );
+        let (options, sorted) = ended_options(&fix, false, false);
+        assert_eq!(options, ["retry", "resume", "cancel"]);
+        assert_eq!(sorted.dropped.len(), 1, "{sorted:?}");
+        // A run that ended offers the hand-off to the already-satisfied
+        // check with its own label, though it reads as the task's end
+        // (ADR-t1818-2 decision 1).
+        let hand_off = note_of(Some(json!({
+            "verdict": "escalate", "confidence": "high", "diagnosis": "x",
+            "options": [{"kind": "hand_off", "text": "the base already meets it: done"}],
+        })));
+        let (options, sorted) = ended_options(&hand_off, false, false);
+        let label = crate::domain::recovery::HAND_OFF_LABEL;
         assert_eq!(
-            ended_options(&jobs, true, false),
-            ["retry", "cancel", "retry anyway"]
-        );
-        assert_eq!(
-            ended_options(&jobs, false, true),
+            options,
             [
                 "retry",
                 "resume",
                 "cancel",
-                "retry anyway",
-                VERIFY_FIX_OPTION
+                &format!("the base already meets it: done{label}")
             ]
         );
-        let used_up = note_of(None);
-        assert_eq!(
-            ended_options(&used_up, false, true),
-            ["retry", "resume", "cancel", VERIFY_FIX_OPTION]
-        );
-        // The job's own verify fix is not offered twice.
-        let fix = note_of(Some(json!({
+        assert!(sorted.dropped.is_empty(), "{sorted:?}");
+    }
+
+    /// ADR-t1818-2 decision 1: a job's option that stands for a runtime
+    /// answer is that answer (its text the recommendation), one for an
+    /// answer the ask does not offer now, with no kind or an unknown kind
+    /// is left out, and so is one that goes back to the job but reads as a
+    /// runtime operation or the task's end, as task 1217's "Mark task 1217
+    /// done (or cancel it as obsolete)" did (ask 436). What was left out
+    /// stays in the question and in `triage_finished`.
+    #[test]
+    fn a_jobs_option_like_a_runtime_operation_or_the_tasks_end_is_merged_or_left_out() {
+        let jobs = note_of(Some(json!({
             "verdict": "escalate", "confidence": "high", "diagnosis": "x",
-            "options": [VERIFY_FIX_OPTION],
+            "options": [
+                {"kind": "recover", "text": "Mark task 1217 done (or cancel it as obsolete)"},
+                {"kind": "recover", "text": "Retry once the dependency landed"},
+                {"kind": "recover", "text": "Close the task as complete"},
+                {"kind": "retry", "text": "Retry from scratch: the failure was the network"},
+                {"kind": "resume", "text": "Resume with the fix named"},
+                {"kind": "done", "text": "Mark it finished"},
+                "Something without a kind",
+                {"kind": "recover", "text": "Ask the planner to split the task"},
+            ],
         })));
+        let (options, sorted) = ended_options(&jobs, true, false);
         assert_eq!(
-            ended_options(&fix, false, true),
-            ["retry", "resume", "cancel", VERIFY_FIX_OPTION]
+            options,
+            [
+                "retry",
+                "cancel",
+                &recover("Ask the planner to split the task")
+            ]
         );
+        assert_eq!(
+            sorted
+                .merged
+                .iter()
+                .map(|m| (m.into.as_str(), m.text.as_str()))
+                .collect::<Vec<_>>(),
+            [("retry", "Retry from scratch: the failure was the network")]
+        );
+        let dropped: Vec<(&str, &str)> = sorted
+            .dropped
+            .iter()
+            .map(|d| (d.text.as_str(), d.why.as_str()))
+            .collect();
+        assert_eq!(
+            dropped,
+            [
+                (
+                    "Mark task 1217 done (or cancel it as obsolete)",
+                    "it reads as `done`, a runtime operation or the task's end, which choosing it would not do"
+                ),
+                (
+                    "Retry once the dependency landed",
+                    "it reads as `retry`, a runtime operation or the task's end, which choosing it would not do"
+                ),
+                (
+                    "Close the task as complete",
+                    "it reads as `close`, a runtime operation or the task's end, which choosing it would not do"
+                ),
+                (
+                    "Resume with the fix named",
+                    "`resume` is not one of this ask's answers now"
+                ),
+                (
+                    "Mark it finished",
+                    "its kind `done` is none of this ask's (retry, resume, cancel, recover, hand_off)"
+                ),
+                ("Something without a kind", "it declares no kind"),
+            ]
+        );
+        let run = test_run(RunStatus::Failed, None);
+        let question = ended_question(&run, RecoveryAlert::Failed, &jobs, &sorted, true, false);
+        for part in [
+            "The recovery job recommends `retry`: Retry from scratch: the failure was the network",
+            "Left out of the options (the recovery job's, not one the runtime can apply): \"Mark task 1217 done (or cancel it as obsolete)\": it reads as `done`",
+            "\"Something without a kind\": it declares no kind.",
+            "is the recovery job's own: the runtime moves nothing for it, and the recovery job runs again",
+        ] {
+            assert!(question.contains(part), "{part}: {question}");
+        }
+        let mut finished = json!({});
+        sorted.record(&mut finished);
+        assert_eq!(finished["options_dropped"].as_array().unwrap().len(), 6);
+        assert_eq!(finished["options_dropped"][0]["kind"], "recover");
+        assert_eq!(finished["options_merged"][0]["into"], "retry");
+        // Nothing to say records nothing.
+        let mut quiet = json!({});
+        ended_options(&note_of(None), false, false)
+            .1
+            .record(&mut quiet);
+        assert_eq!(quiet, json!({}));
     }
 
     /// The `decide` ask's question names the run and its alert, why a
     /// person is asked with the job's note, the last error, what each
     /// option does, the verify fix's `dagq edit` only after a failed
-    /// verification, and the hand-back only when the job gave options
-    /// (moved from `runtime_triage`, task 1415).
+    /// verification, and where the job's own options go only when it gave
+    /// some (moved from `runtime_triage`, task 1415).
     #[test]
     fn a_decide_ask_tells_what_each_option_does() {
         let run = test_run(RunStatus::Failed, Some("session exited with code 7"));
         let jobs = note_of(Some(json!({
             "verdict": "escalate", "confidence": "high", "diagnosis": "flaky",
-            "options": ["retry anyway"], "reason_category": "discard",
+            "options": [{"kind": "recover", "text": "look at the network first"}],
+            "reason_category": "discard",
         })));
-        let question = ended_question(&run, RecoveryAlert::Failed, &jobs, false, false);
+        let sorted = ended_options(&jobs, false, false).1;
+        let question = ended_question(&run, RecoveryAlert::Failed, &jobs, &sorted, false, false);
         for part in [
             "recovery job for run r1 (task 1, failed; alert: failed) did not move it on: the recovery job could not repair it.",
             "Why a person: discard",
@@ -1310,14 +1455,15 @@ mod tests {
             "retry: make the task ready for a new run from scratch",
             " resume: resume the run's own session",
             " cancel: cancel the task.",
-            "Any other option goes back to the recovery job",
+            "the recovery job runs again with your choice",
         ] {
             assert!(question.contains(part), "{part}: {question}");
         }
         assert!(!question.contains("dagq edit"), "{question}");
 
         let used_up = note_of(None);
-        let question = ended_question(&run, RecoveryAlert::Failed, &used_up, true, true);
+        let none = ended_options(&used_up, true, true).1;
+        let question = ended_question(&run, RecoveryAlert::Failed, &used_up, &none, true, true);
         for part in [
             "the recovery job ran 3 times for this alert already (at most 3)",
             "dagq edit 1 --verify",
@@ -1325,11 +1471,18 @@ mod tests {
         ] {
             assert!(question.contains(part), "{part}: {question}");
         }
-        for absent in [" resume: ", "Any other option"] {
+        for absent in [" resume: ", "runs again with your choice"] {
             assert!(!question.contains(absent), "{absent}: {question}");
         }
         let quiet = test_run(RunStatus::Interrupted, None);
-        let question = ended_question(&quiet, RecoveryAlert::Interrupted, &used_up, false, false);
+        let question = ended_question(
+            &quiet,
+            RecoveryAlert::Interrupted,
+            &used_up,
+            &none,
+            false,
+            false,
+        );
         assert!(question.contains("Last error: (none)"), "{question}");
     }
 }
