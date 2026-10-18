@@ -55,11 +55,11 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 
 - ユースケースの本体は`src/application/integrate.rs`で、module docが範囲を持つ（ADR-0013の方針1と8）。
 - 着地とpushは`Integrator`だけが行い、依頼者は`IntegrationRequest`を渡す（[ADR-t728-2](../../adr/2026-09-27-t728-2-landing-only-by-the-trusted-integrator.md)、[Authorization](../authorization.md#着地とpushintegrator)）。
-- 承認の段は`Integrator::approve`（本体は`begin`）、着地の段は`Integrator::land`（本体は`land_integrating`と`land`）が入口で、どちらもportの束`Integration`だけを受ける。
+- 承認の段は`Integrator::approve`（本体は`begin`）、着地の段は`Integrator::land`（本体は`land_integrating`と`land`）で、どちらもportの束`Integration`だけを受ける。
 - 人の`integrate`の入口は`compose::OneShot::integrate`、supervisorの着地は`src/application/supervise/landing.rs`である。
 - validationの`check_receipt`も同じfileにあり、着地のreceiptの検査と判定を共有する（[Validation](validation.md#validation)）。
 - 結果の意味は`IntegrationOutcome`のdoc commentが持つ。
-- e2eは`application::supervise::e2e`、recheckの対象・起動・排他・確かめ方は`application::supervise::recheck`、その記録とaskの段落は`domain::recheck`、landing branchは`domain::landing_branch`が持つ。
+- e2eは`application::supervise::e2e`、recheckは`application::supervise::recheck`と`domain::recheck`、landing branchは`domain::landing_branch`が持つ。
 
 ## 不変条件
 
@@ -71,10 +71,7 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 ## 承認とslot
 
 - 束縛・対象・lease・空き容量（[空き容量](claim-hold.md#人が打つintegrate)）の確かめと承認の記録は`begin`が持ち、supervisorがreviewかresumeで持つrunは人の`integrate`では承認しない。
-- 検証のコマンドは、queueのどのprocessの自動更新のjobの関門（buildとe2e）とも重ならない（[ADR-t2719-1](../../adr/2026-10-18-t2719-1-auto-update-gate-and-landing-checks-take-turns.md)、lockは`application::heavy_turn`、判断は`domain::heavy_turn`）。
-  supervisorは関門が走っている間と番を待っている間は着地を始めず、runは着地待ちのまま次のpassで見直す（`take_check_turn`、待つことはrunごとに1回logに出る）。
-  `land_integrating`はコマンドの前に番を共有で取れるまで待ち（人の`integrate`も、supervisorが見た後に始まった関門と重なった着地も）、判定まで持つ。
-  コマンドの無いtaskとrunのe2e（別のlockで1本ずつ）は待たない。
+- 検証のコマンドは自動更新のjobの関門（buildとe2e）と同時に流れず、関門が走るか番を待つ間、supervisorは着地を次のpassに回し、`land_integrating`は番を取れるまで待つ（[ADR-t2719-1](../../adr/2026-10-18-t2719-1-auto-update-gate-and-landing-checks-take-turns.md)、[Auto-update](auto-update.md)の「着地の検証との順番」）。
 
 ## receiptの検査とrebase
 
@@ -91,7 +88,7 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 ## 検証のコマンド
 
 - 1つの試行の流れは`land`の検証のloopと`VerifyStep::run`が持つ。
-- コマンドの起動・時間切れ・process groupの止め方は`infrastructure::adapters::run_shell_to_log`、環境は`verification_command`が持つ（[Run environment](run-environment.md#run-environment)）。
+- コマンドの起動と止め方は`infrastructure::adapters::run_shell_to_log`、環境は`verification_command`が持つ（[Run environment](run-environment.md#run-environment)）。
 - 失敗の分類は`domain::verify_failure::classify`、印の出どころは[Toolchain profiles](../toolchain-profiles.md)、Rustの印とnextestのstatusの集合は`domain::toolchain::rust`が持つ。
 - `dagq.toml`の着地の検証は、名指すtaskのコマンドを置き換える（[ADR-t1925-1](../../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)、[Validation](validation.md#着地の検証)）。
   下の2つのやり直しは置き換えたコマンドにも効く。
@@ -109,12 +106,11 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 - 落ちたtestが全て道具の流し直しで通った失敗（`flaky`）は、resumeせず同じslotと同じheadで検証を最初からもう1回流す（[ADR-t768-1](../../adr/2026-09-27-t768-1-rerun-failed-tests-once-and-land-again-on-flaky-only.md)）。
 - やり直しは着地の試行ごとに1回までで、宣言したprofileのやり直しのenvを渡す（ADR-t1039-1）。
 - 流し直しと流しきりは`.config/nextest.toml`の設定で、nextestでない`cargo test`の検証は`flaky`にならない。
-- やり直しはattentionにせず、inboxとobserverは記録と[`stats`](commands.md)で読む。
+- やり直しはattentionにせず、記録と[`stats`](commands.md)で読む。
 
 ## 着地とpush
 
-- squash commitと`main`の進め方は`land`の終わりと`Repository::advance_main`が持ち、runの元の履歴は`refs/dagq/runs/<run-id>`に残る。
-- 着地の後に、そのrunとtaskの答えの要らなくなったaskを閉じ、worktreeとbranchを消す（`close_landing_asks`・`remove_landed_worktree`）。
+- squash commitは`land`の終わりが作って`Repository::advance_main`が`main`を進め、runの元の履歴は`refs/dagq/runs/<run-id>`に残る。
 - pushの先・結果・記録は`decide_push`が決め、pushが失敗してもrunは着地したままで`integrate`は成功で終わる。
   失敗したpushはattentionになり、人が原因を直してpushする（pluginの`dagq-recover`の`reference/review-by-hand.md`の「A failed push」）。
 - containerで動くrunは制御側の着地用のworktreeで着地し、作れないかgitのhookとdriverを止められなければ控える（[Container runtime](../container-runtime.md#git)）。
@@ -122,9 +118,8 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 ## landing branch
 
 - 着地先のbranch・pushのremote・pushするかは`dagq.toml`の`[repository]`が持つ（[ADR-t615-1](../../adr/2026-09-27-t615-1-landing-branch-and-push-remote-per-repository.md)）。
-- 解決は使うたびにその時のrepositoryと`dagq.toml`で行い、DBに保存しない。
-  ただし1回の着地は開始時に1度だけ解決し、着地したcommitが`[repository]`を書き換えても、そのrebase先・`main`の進め方・pushは同じbranchへ行く（`LandingBranch`）。
-- runtimeがsessionやaskに書く文面は、「main」の代わりに解決したbranchの名前を書く。
+- 解決は保存せず使うたびに行うが、1回の着地は開始時に1度だけ解決し、着地したcommitが`[repository]`を書き換えても、そのrebase先・`main`の進め方・pushは同じbranchへ行く（`LandingBranch`）。
+- sessionやaskの文面は「main」の代わりに解決したbranchの名前を書く。
 - `up`のpreflight・`supervise`の起動・`integrate`は解決できなければ止まり、`doctor`は同じerrorを報告し、既定のbranchを仮定しない。
   走っているsupervisorは解決できない間、claimと着地を始めずに控え、その変わり目だけを記録する（`check_landing_branch`）。
 - supervisorは解決の入力のファイルの印が変わらない間は前の解決を使い、印が見落とす変化は上限の時間で拾う（`LANDING_BRANCH_RECHECK`・`GitRepository::landing_branch_stamp`）。
@@ -147,13 +142,11 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 - hostの分類で落ちたcommandと、containerのrunでcommandを流すcontainerが無かったときは何も判定せず、runは着地を待ち続ける（ADR-t639-1、ADR-t2424-1）。
 - recheckを始められないか記録できないerrorはwarnだけで、runに何も記録せず着地を止めない（着地が改めて確かめる）。
 - mainの動きを見るsupervisorは選ばず、drainやhandoffの間は生きているほかのsupervisorが確かめる。
-- queueのどのprocessの自動更新のjobの関門（buildとe2e）が走っている間も、関門が番を待っている間も、recheckは始めずに次のpassで見直す（[ADR-t2719-1](../../adr/2026-10-18-t2719-1-auto-update-gate-and-landing-checks-take-turns.md)、[Auto-update](auto-update.md)の「着地の検証との順番」）。
-  始めたrecheckは番を共有で持ち、結果を記録するまで持つので、関門は走っているrecheckの終わりを待つ。
+- recheckも同じ番を取り、関門の間は始めずに次のpassで見直す。
 
 ## errorと復旧
 
-- `main`が動く前のGit・ファイル・DBのerrorは`abort_integration`でslotを返し、runを着地開始時のstatusに戻して`integrate`は非0で終わる。
-  `main`が動いた後の後始末・push・follow_upsの失敗は着地を変えず、完了の記録が失敗したときはerrorが着地のcommitを名指す。
+- `main`が動く前のerrorはslotを返してrunを戻し`integrate`は非0で終わり（`abort_integration`）、動いた後の後始末・push・follow_upsの失敗は着地を変えず、完了の記録が失敗したときはerrorが着地のcommitを名指す。
 - `integrate`のprocessが途中で死んだrunは`integrating`のまま残り、`doctor`が報告し、`recover`が着地待ちに戻す。
   `integrating`のrunが残る間は、着地もlanding recheckも始まらない。
 
