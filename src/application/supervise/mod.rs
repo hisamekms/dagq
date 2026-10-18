@@ -1371,6 +1371,13 @@ enum Phase {
     /// usage-limit ask that holds the queue's jobs (task 437) or for a held
     /// provider, and so each agent's that names its own provider. Its
     /// session stays open, and the review starts once one of them can.
+    /// It comes only after the program reviews all passed: they use no
+    /// provider and run through the hold, and do not run again when the
+    /// agents' review starts (a handoff or an adoption that rebuilds an
+    /// awaiting run with no review runs them again). It writes no
+    /// `review_started` while it waits, and its wait adds it to no hold
+    /// ask's `affected`: `cancel_affected` gives it up only when the ask
+    /// listed the run already (`queue_hold::hold_outcome`).
     /// `retried` is
     /// whether the review that waits is the one retry of the review
     /// ([`ReviewWatch::retried`]): it stays one across the wait.

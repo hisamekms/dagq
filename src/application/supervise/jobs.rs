@@ -800,7 +800,11 @@ impl<'s> JobDesk<'s> {
         record_job(&ports, what, child, (stdout, stderr), subject, timeout)
     }
 
-    /// Why `job` failed ([`job_failure_of`]).
+    /// Why `job` failed ([`job_failure_of`]). Only a job that failed is
+    /// read (a non-zero exit, a timeout, a verdict that cannot be read;
+    /// not one whose verdict was read and could not be applied), and the
+    /// output of a job that succeeded never is: a job that quotes a wall's
+    /// words in its work is no wall.
     pub(super) fn job_failure(&self, files: &dyn RunFiles, job: &HeadlessJob) -> JobFailure {
         match job.failure_reader() {
             None => JobFailure::Other,

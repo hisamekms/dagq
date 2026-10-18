@@ -22,6 +22,20 @@
 //! apply it. The disk's
 //! `cost` ask (task 377) is applied by [`super::disk`].
 //!
+//! The ask is Claude's hold only (ADR-t813-2 decision 6): it opens when
+//! Claude stops, even while Codex can be used, as the roles that run on
+//! Claude wait for a person, and a stop on Codex alone opens none. A run
+//! whose turn moved from Claude to Codex is not put in the ask's
+//! `affected`: its wall event names where it moved. A run that can move
+//! to neither provider waits instead of failing, and joins the ask when
+//! Claude's login or limit stopped it or neither provider can be used.
+//! One that ran out of switches on Codex while Claude can be used opens
+//! no ask: the same thread gets the call again once Codex's hold ends.
+//! The text to go on after `done` goes to the run's provider of now.
+//! Landing (`integrate`) uses no Claude, so the hold does not stop it.
+//! A failed observer's end records the wall and the ask, and the observer
+//! runs again at its next interval once the hold ends.
+//!
 //! [`HoldReason::Authentication`]: crate::domain::claim_hold::HoldReason::Authentication
 //! [`HoldReason::UsageLimit`]: crate::domain::claim_hold::HoldReason::UsageLimit
 
@@ -51,7 +65,8 @@ const CONTINUED: &str = "continued";
 const RELEASED: &str = "released";
 const MOVED_ON: &str = "moved_on";
 /// Another live supervisor leased it and did not apply the answer within
-/// [`APPLY_WAIT_SECS`].
+/// [`APPLY_WAIT_SECS`]: an older binary that cannot read the answer, or a
+/// supervisor whose passes stopped.
 const ELSEWHERE: &str = "elsewhere";
 /// No live supervisor watched it: no lease, or a stale one.
 const UNWATCHED: &str = "unwatched";
@@ -60,7 +75,10 @@ impl Supervisor<'_> {
     /// Apply the answered authentication and usage-limit asks (unless
     /// `apply` is false: the pass of a handoff, before this supervisor
     /// rebuilt the slots of its runs), then read the one that holds the
-    /// queue's work now (see the module).
+    /// queue's work now (see the module): the first open one, as every
+    /// supervisor reads it again each pass, a drain's too, right after the
+    /// disk check. Under `--no-claude` nothing holds: no role waits for
+    /// Claude's login or limit before going to a person.
     pub(super) fn check_queue_hold(&mut self, apply: bool) -> Result<()> {
         let unclosed: Vec<Ask> = self
             .queue
@@ -172,7 +190,13 @@ impl Supervisor<'_> {
     /// is waited for until then, as a supervisor may adopt it and apply
     /// the answer. The supervisor that closes the ask starts the failed
     /// jobs again (`done`) and records `queue_hold_applied`; one that
-    /// finds it closed by another does neither.
+    /// finds it closed by another does neither. A pass that cannot read a
+    /// run's events or lease leaves the ask for the next pass.
+    /// `cancel_affected` starts no job again: once the ask closes, each
+    /// failed job is its own attention for a person again. A run left
+    /// `elsewhere` or `unwatched` got no answer: after `cancel_affected`
+    /// the inbox gives it up with `recover`, reading `queue_hold_applied`,
+    /// and after `done` its stall nudge asks it to go on.
     fn close_hold(&mut self, ask: &Ask, answer: &str) -> Result<()> {
         let now = self.generators.clock.now();
         let due = ask
@@ -266,6 +290,13 @@ impl Supervisor<'_> {
     /// failed review of a run already opened its `approve_landing` ask, and
     /// a live session's recovery job its alert's ask (ADR-t609-1): those
     /// stay a person's. What could not be started again is logged.
+    /// The window reaches back before the ask, as the ask opens only once
+    /// a session or a job showed the wall, after the failure was recorded.
+    /// A recovery job started again keeps counting its attempts, and one
+    /// past their limit becomes an ask. A review job that stopped at the
+    /// wall is none of these: it waits in its review and starts itself on
+    /// the first pass nothing holds, as a review waiting in
+    /// [`Phase::ReviewHeld`] does.
     fn restart_failed_jobs(&mut self, ask: &Ask) -> Vec<Value> {
         let since_ms = (ask.created_at - FAILED_BEFORE_ASK_SECS) * 1000;
         let failures = |sv: &Self, kind: &str| -> Vec<RunEvent> {
@@ -435,6 +466,12 @@ impl SessionWatch {
     /// when it was typed:
     /// the send is checked as every typed text is (ADR-0047 decision 31),
     /// and `hold_continue_sent` records it.
+    /// A worker's session gets it while its wrapper lives and before its
+    /// exit is asked, and a revise or a resume where it types an answer.
+    /// It is written as the session's next turn request ([`submit`]); the
+    /// stall's clock starts again at the send, and the caller counts its
+    /// stage's timeout again from it. A send that fails is only logged: the stall nudge asks
+    /// the session to go on instead.
     pub(super) fn continue_after_hold(
         &mut self,
         sv: &mut Supervisor<'_>,

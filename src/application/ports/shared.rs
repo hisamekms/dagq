@@ -400,7 +400,9 @@ pub trait AskStore {
     /// The open `queue_hold` ask that holds the run, if any.
     fn hold_of(&self, run_id: &RunId) -> Result<Option<Ask>>;
     /// Whether a `queue_hold` ask that holds the run is still unclosed:
-    /// open, or answered and not yet applied by a supervisor.
+    /// open, or answered and not yet applied by a supervisor. The run's
+    /// stall nudge and stalled ask wait while it is, after the answer too,
+    /// so that no nudge comes before the text `done` sends.
     fn hold_unclosed(&self, run_id: &RunId) -> Result<bool>;
     /// Close the `queue_hold` asks of `reason` and `subject` nobody
     /// closed, answering the open ones `answer` (task 377).
