@@ -6,6 +6,8 @@ status: accepted
 created: 2026-10-04
 updated: 2026-10-04
 accepted_on: 2026-10-04
+amended_by:
+  - adr-t2414-1
 amends:
   - adr-t1394-1 decision 2
   - adr-t1394-1 decision 3
@@ -30,6 +32,8 @@ related:
 ---
 
 # ADR-t1487-1: Spikeを変更の種類と独立したtaskの実行区分にし、結果を根拠付きの判定としてreceiptに持たせ、着地でruntimeが再計画の依頼を冪等に残し、調査中の計画の数と1つのgoalのSpikeの周期の数に上限を置く（ADR-t1394-1決定2・3・4・5・6をamends）
+
+> **一部変更（2026-10-19）**: 決定8の周期の数え方は[ADR-t2414-1](2026-10-19-t2414-1-spike-cycles-count-each-replanning-round-even-inside-one-investigation.md)がamendsした（周期はSpikeの再計画の回で数え、依頼のplannerの追加のSpikeのsubmitで次の回に入る。調査中の計画の枠の保持と解放は決定7のまま）。
 
 ## Context
 

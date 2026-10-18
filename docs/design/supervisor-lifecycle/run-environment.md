@@ -110,7 +110,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
   書いてあれば`goal add`と`goal edit`は集合の外の`--tag`を拒み、`lint`は所属のgoalがラベルを持たないか集合の外のラベルを持つdraftのtaskを指摘し、`submit`は与えたgoalと動かすtaskの所属のgoalのうち閉じていないdraftのgoalがラベルを持たないか集合の外なら何も動かさずに拒む。
   読み方は`[tasks] changes`と同じで、`goal add` / `goal edit` / `submit` / `lint`のたびに読む。
   書いてなければ形だけを検査し、goalはラベルを持たなくてよい。
-  `max_spike_cycles`はgoalのSpikeの周期の上限で、`submit`だけが読む（`investigation::check_spike_cycles`）。
+  `max_spike_cycles`はgoalのSpikeの周期（Spikeとその結果の再計画の回）の上限で、`submit`だけが読む（`investigation::spike_submit`）。
   値は`dagq.toml`、各ラベルの意味と付け方は[taskの登録](../../development/task-registration.md#goal-の優先度とラベル)が持つ。
 - `[e2e]`は`paths`だけを持ち、変えるとrunに`e2e`のevidenceを求めるpathをglobの1行の配列で書く（ADR-t963-1決定2。`Verifier::e2e_paths`）。
   読むのはsupervisorがvalidatingとworkerのpromptを作るたびのmain checkoutの作業ファイルで、読めなければ警告を出して空として扱う（本番を守るのは[Auto-update](auto-update.md)の入れ替え前のe2eの関門）。

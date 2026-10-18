@@ -537,9 +537,11 @@ pub struct Config {
     pub title_prefixes: Option<TitlePrefixes>,
     /// `[goals] tags` (ADR-t1639-1 decision 6); `None` without it.
     pub goal_tags: Option<TagSet>,
-    /// `[goals] max_spike_cycles`, at least 1: the investigations a goal
-    /// may have before a planner of the runtime's may submit no further
-    /// Spike of it (ADR-t1487-1 decision 8); `None` without it.
+    /// `[goals] max_spike_cycles`, at least 1: the cycles (rounds of
+    /// Spikes and the replanning of their results) a goal may have before a
+    /// planner of the runtime's may submit no further Spike of it
+    /// (ADR-t1487-1 decision 8 as ADR-t2414-1 amends it); `None` without
+    /// it.
     pub max_spike_cycles: Option<usize>,
     /// `[e2e] paths` (ADR-t963-1 decision 2); empty without it.
     pub e2e_paths: Vec<String>,

@@ -69,7 +69,10 @@ impl SqliteQueue {
             self.title_prefixes.as_ref(),
             self.goal_tags.as_ref(),
             self.max_spike_cycles,
-            &self.generators.clock.timestamp(),
+            super::proposals::SubmitTime {
+                timestamp: &self.generators.clock.timestamp(),
+                secs: now,
+            },
         )?;
         link_findings(&tx, proposal.id(), workspace.as_deref(), findings, by, now)?;
         // The request of a request's planner that submits (ADR-t1394-1

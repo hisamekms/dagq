@@ -303,8 +303,8 @@ pub enum DomainError {
         status: RequestStatus,
     },
     /// A planner of the runtime's submits a Spike of a goal that had as
-    /// many investigations as `[goals] max_spike_cycles` (ADR-t1487-1
-    /// decision 8): a person decides another.
+    /// many cycles as `[goals] max_spike_cycles` (ADR-t1487-1 decision 8
+    /// as ADR-t2414-1 amends it): a person decides another.
     SpikeCycleLimit {
         task_id: TaskId,
         goal_id: GoalId,
@@ -865,7 +865,7 @@ impl fmt::Display for DomainError {
                 max,
             } => write!(
                 f,
-                "task {task_id} is a Spike of goal {goal_id}, which had {cycles} investigations, the limit of [goals] max_spike_cycles ({max}): another Spike changes the scope, which a person decides; leave it a draft and ask a planner_question with what it would settle, and a person submits it if they agree"
+                "task {task_id} is a Spike of goal {goal_id}, which had {cycles} Spike cycles (rounds of Spikes and their replanning), the limit of [goals] max_spike_cycles ({max}): another Spike changes the scope, which a person decides; leave it a draft and ask a planner_question with what it would settle, and a person submits it if they agree"
             ),
             Self::RequestNotOpen { request_id, status } => write!(
                 f,

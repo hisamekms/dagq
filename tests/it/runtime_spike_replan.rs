@@ -541,13 +541,108 @@ fn abandoning_the_goal_or_canceling_its_spikes_ends_an_investigation() {
     );
 }
 
+/// A draft task of `class` in `goal`; its ID.
+fn draft(queue: &mut SqliteQueue, goal: GoalId, class: ExecutionClass) -> TaskId {
+    queue
+        .add(NewTask {
+            title: format!("next {class:?}"),
+            description: "measure again".into(),
+            acceptance: "a verdict".into(),
+            verification_commands: vec!["true".into()],
+            required_evidence: Vec::new(),
+            paths: Vec::new(),
+            priority: None,
+            change: None,
+            dependencies: Vec::new(),
+            goal_dependencies: Vec::new(),
+            goal_id: Some(goal),
+            context: String::new(),
+            provider: None,
+            worker_mode: None,
+            wait_for_build: false,
+            execution_class: class,
+        })
+        .unwrap()
+        .id()
+}
+
+/// Submit `tasks` as a planner of `origin`, into `proposal` when it is
+/// sent back: the proposal, or the refusal's message.
+fn submit_into(
+    queue: &mut SqliteQueue,
+    tasks: Vec<TaskId>,
+    proposal: Option<dagq::domain::ProposalId>,
+    origin: dagq::domain::PlannerOrigin,
+) -> Result<dagq::domain::ProposalId, String> {
+    queue
+        .submit_linking(
+            dagq::domain::Submission {
+                tasks,
+                goals: Vec::new(),
+                proposal,
+                owner: dagq::domain::PlannerOwner {
+                    origin,
+                    workspace_id: None,
+                },
+            },
+            &[],
+        )
+        .map(|proposal| proposal.id())
+        .map_err(|error| error.to_string())
+}
+
+/// Submit `task` as a planner of `origin`: the refusal's message.
+fn submit_as(
+    queue: &mut SqliteQueue,
+    task: TaskId,
+    origin: dagq::domain::PlannerOrigin,
+) -> Result<(), String> {
+    submit_into(queue, vec![task], None, origin).map(|_| ())
+}
+
+/// Plan review sends `proposal` back: its `task` a draft again.
+fn send_back(db: &Path, proposal: dagq::domain::ProposalId, task: TaskId) {
+    let connection = Connection::open(db).unwrap();
+    connection
+        .execute(
+            "UPDATE proposals SET status='revising' WHERE id=?1",
+            [proposal.as_i64()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE tasks SET status='draft' WHERE id=?1",
+            [task.as_i64()],
+        )
+        .unwrap();
+}
+
+/// The Spike `spike` lands, as far as the investigation sees it: completed,
+/// its request recorded by the next pass.
+fn land(db: &Path, spike: TaskId) {
+    Connection::open(db)
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET status='completed' WHERE id=?1",
+            [spike.as_i64()],
+        )
+        .unwrap();
+}
+
+/// A submitted Spike made ready, claimed, and landed.
+fn run_spike(db: &Path, queue: &mut SqliteQueue, spike: TaskId) {
+    queue.transition(spike, TaskAction::BypassReview).unwrap();
+    claim(db, spike);
+    land(db, spike);
+}
+
 /// `[goals] max_spike_cycles = 1`: a goal's investigation opened once, a
 /// planner of the runtime's submit of a further Spike of it is refused and
 /// says a person decides; a person's submit of it goes, and an
 /// implementation of the goal goes either way.
 #[test]
 fn a_goal_at_its_spike_cycles_takes_a_further_spike_only_from_a_person() {
-    use dagq::domain::{PlannerOrigin, PlannerOwner, Submission};
+    use dagq::domain::PlannerOrigin;
     let (_dir, _repo, db) = fixture();
     let a = open_goal(&db, "goal A");
     let first = add_task(&db, "first spike", ExecutionClass::Spike, Some(a));
@@ -555,50 +650,96 @@ fn a_goal_at_its_spike_cycles_takes_a_further_spike_only_from_a_person() {
     let mut queue = SqliteQueue::open(&db)
         .unwrap()
         .with_max_spike_cycles(Some(1));
-    let draft = |queue: &mut SqliteQueue, class| {
-        queue
-            .add(NewTask {
-                title: format!("next {class:?}"),
-                description: "measure again".into(),
-                acceptance: "a verdict".into(),
-                verification_commands: vec!["true".into()],
-                required_evidence: Vec::new(),
-                paths: Vec::new(),
-                priority: None,
-                change: None,
-                dependencies: Vec::new(),
-                goal_dependencies: Vec::new(),
-                goal_id: Some(a),
-                context: String::new(),
-                provider: None,
-                worker_mode: None,
-                wait_for_build: false,
-                execution_class: class,
-            })
-            .unwrap()
-            .id()
-    };
-    let submit = |queue: &mut SqliteQueue, task, origin| {
-        queue.submit_linking(
-            Submission {
-                tasks: vec![task],
-                goals: Vec::new(),
-                proposal: None,
-                owner: PlannerOwner {
-                    origin,
-                    workspace_id: None,
-                },
-            },
-            &[],
-        )
-    };
-    let further = draft(&mut queue, ExecutionClass::Spike);
-    let refused = submit(&mut queue, further, PlannerOrigin::Runtime)
-        .unwrap_err()
-        .to_string();
+    let further = draft(&mut queue, a, ExecutionClass::Spike);
+    let refused = submit_as(&mut queue, further, PlannerOrigin::Runtime).unwrap_err();
     assert!(refused.contains("max_spike_cycles (1)"), "{refused}");
     assert!(refused.contains("planner_question"), "{refused}");
-    let implementation = draft(&mut queue, ExecutionClass::Implementation);
-    submit(&mut queue, implementation, PlannerOrigin::Runtime).unwrap();
-    submit(&mut queue, further, PlannerOrigin::Person).unwrap();
+    let implementation = draft(&mut queue, a, ExecutionClass::Implementation);
+    submit_as(&mut queue, implementation, PlannerOrigin::Runtime).unwrap();
+    submit_as(&mut queue, further, PlannerOrigin::Person).unwrap();
+}
+
+/// `[goals] max_spike_cycles = 2` (ADR-t2414-1): the goal's first Spike
+/// lands and the replanning submits a further one, which goes and starts
+/// the second cycle; plan review sends it back and its resubmission goes
+/// as the same cycle. It lands, and the replanning's second further Spike
+/// is refused with the way to a person, though the investigation never
+/// closed. A person's submit of it goes.
+#[test]
+fn further_spikes_chained_inside_one_investigation_count_a_cycle_each() {
+    use dagq::domain::{PlannerOrigin, investigation::InvestigationKey};
+    let (_dir, _repo, db) = fixture();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    let a = open_goal(&db, "goal A");
+    let first = add_task(&db, "first spike", ExecutionClass::Spike, Some(a));
+    claim(&db, first);
+    land(&db, first);
+    let mut queue = SqliteQueue::open(&db)
+        .unwrap()
+        .with_max_spike_cycles(Some(2));
+    let second = draft(&mut queue, a, ExecutionClass::Spike);
+    let proposal = submit_into(&mut queue, vec![second], None, PlannerOrigin::Runtime).unwrap();
+    send_back(&db, proposal, second);
+    submit_into(
+        &mut queue,
+        Vec::new(),
+        Some(proposal),
+        PlannerOrigin::Runtime,
+    )
+    .unwrap();
+    run_spike(&db, &mut queue, second);
+    assert_eq!(open_keys(&db), [InvestigationKey::Goal(a)]);
+    let third = draft(&mut queue, a, ExecutionClass::Spike);
+    let refused = submit_as(&mut queue, third, PlannerOrigin::Runtime).unwrap_err();
+    assert!(refused.contains("max_spike_cycles (2)"), "{refused}");
+    assert!(refused.contains("planner_question"), "{refused}");
+    assert_eq!(open_keys(&db), [InvestigationKey::Goal(a)]);
+    submit_as(&mut queue, third, PlannerOrigin::Person).unwrap();
+}
+
+/// `[goals] max_spike_cycles = 2`: two Spikes of the goal claimed side by
+/// side are one cycle, and so is a third submitted while they run, so once
+/// all landed the replanning's further Spike goes; without the setting, a
+/// chain of further Spikes is never refused.
+#[test]
+fn spikes_run_side_by_side_are_one_cycle_and_no_limit_refuses_nothing() {
+    use dagq::domain::PlannerOrigin;
+    let (_dir, _repo, db) = fixture();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    let a = open_goal(&db, "goal A");
+    let (one, two) = (
+        add_task(&db, "spike one", ExecutionClass::Spike, Some(a)),
+        add_task(&db, "spike two", ExecutionClass::Spike, Some(a)),
+    );
+    claim(&db, one);
+    claim(&db, two);
+    let mut queue = SqliteQueue::open(&db)
+        .unwrap()
+        .with_max_spike_cycles(Some(2));
+    let beside = draft(&mut queue, a, ExecutionClass::Spike);
+    submit_as(&mut queue, beside, PlannerOrigin::Runtime).unwrap();
+    queue.transition(beside, TaskAction::BypassReview).unwrap();
+    claim(&db, beside);
+    for spike in [one, two, beside] {
+        land(&db, spike);
+    }
+    let further = draft(&mut queue, a, ExecutionClass::Spike);
+    submit_as(&mut queue, further, PlannerOrigin::Runtime).unwrap();
+
+    let b = open_goal(&db, "goal B");
+    let mut unlimited = SqliteQueue::open(&db).unwrap();
+    let mut spike = add_task(&db, "b first", ExecutionClass::Spike, Some(b));
+    claim(&db, spike);
+    land(&db, spike);
+    for _ in 0..3 {
+        spike = draft(&mut unlimited, b, ExecutionClass::Spike);
+        submit_as(&mut unlimited, spike, PlannerOrigin::Runtime).unwrap();
+        run_spike(&db, &mut unlimited, spike);
+    }
 }

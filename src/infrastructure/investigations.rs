@@ -1,7 +1,11 @@
-//! Investigations (ADR-t1487-1 decisions 5, 7 and 8; the rules are
-//! [`crate::domain::investigation`]): the cycles of `spike_cycles`, opened
-//! by a Spike's claim and closed once they ended, and what the limit of
-//! the open ones counts. [`refresh`] runs inside a write transaction (the
+//! Investigations (ADR-t1487-1 decisions 5, 7 and 8, ADR-t2414-1; the
+//! rules are [`crate::domain::investigation`]): the rows of `spike_cycles`
+//! and what the limit of the open investigations counts. A row is a goal's
+//! cycle: one a Spike's claim opens for an investigation and closes once
+//! it ended, or one a further Spike's submit inside the open investigation
+//! records closed at once ([`start_cycle`]), which never counts as an
+//! open investigation and keeps an older binary's count of the goal's
+//! cycles. [`refresh`] runs inside a write transaction (the
 //! claim's, the supervisor's pass): it records first the request of each
 //! completed Spike that has none, so a cycle never ends before its last
 //! Spike's request is there.
@@ -163,7 +167,7 @@ pub(super) fn open_cycle(
     Ok(opened == 1)
 }
 
-/// How many investigations `goal` has had, the open one included.
+/// How many cycles `goal` has had, the open one included.
 pub(super) fn goal_cycles(conn: &Connection, goal: GoalId) -> Result<usize> {
     let count: i64 = conn.query_row(
         "SELECT count(*) FROM spike_cycles WHERE goal_id=?1",
@@ -171,6 +175,46 @@ pub(super) fn goal_cycles(conn: &Connection, goal: GoalId) -> Result<usize> {
         |r| r.get(0),
     )?;
     Ok(usize::try_from(count)?)
+}
+
+/// Whether `goal`'s results are being replanned: its investigation is
+/// open and a request of its Spikes is `open` (read after [`settle`]).
+pub(super) fn replanning(conn: &Connection, goal: GoalId) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM spike_cycles WHERE goal_id=?1 AND closed_at IS NULL)
+            AND EXISTS(SELECT 1 FROM plan_requests r JOIN tasks t ON t.id=r.spike_task_id
+                WHERE t.goal_id=?1 AND r.status='open')",
+        [goal],
+        |r| r.get(0),
+    )?)
+}
+
+/// Whether one of `spikes` started a cycle of `goal`.
+pub(super) fn counted(conn: &Connection, goal: GoalId, spikes: &[TaskId]) -> Result<bool> {
+    for &spike in spikes {
+        let found: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM spike_cycles WHERE goal_id=?1 AND task_id=?2
+                 AND opened_at=closed_at)",
+            params![goal, spike],
+            |r| r.get(0),
+        )?;
+        if found {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Record the cycle the submit of the further Spike `task` of `goal`
+/// starts inside its open investigation, closed at `now` (`opened_at` is
+/// `closed_at`): the open row keeps the investigation, this one only
+/// counts.
+pub(super) fn start_cycle(conn: &Connection, goal: GoalId, task: TaskId, now: i64) -> Result<()> {
+    conn.execute(
+        "INSERT INTO spike_cycles(goal_id, task_id, opened_at, closed_at) VALUES (?1, ?2, ?3, ?3)",
+        params![goal, task, now],
+    )?;
+    Ok(())
 }
 
 /// Since when the unfinished Spike `task` only waits for a person: its run

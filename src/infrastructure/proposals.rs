@@ -9,13 +9,22 @@ use crate::domain::event_kind;
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
+use std::collections::BTreeMap;
 
 use super::sqlite::{enum_col, event, goal_event, read_goal, transition_task};
 use crate::domain::{
-    Ask, ChangeSet, DomainError, GoalStatus, PlannerOrigin, PlannerOwner, Proposal, ProposalId,
-    ProposalRecord, ProposalStatus, Submission, TagSet, TaskAction, TaskId, TaskStatus,
+    Ask, ChangeSet, DomainError, GoalId, GoalStatus, PlannerOrigin, PlannerOwner, Proposal,
+    ProposalId, ProposalRecord, ProposalStatus, Submission, TagSet, TaskAction, TaskId, TaskStatus,
     TitlePrefixes, follow_up::reopened_material, goal, investigation, proposal,
 };
+
+/// When a submit happens: the timestamp of its records and the unix
+/// seconds of the investigations' (`spike_cycles`).
+#[derive(Debug, Clone, Copy)]
+pub(super) struct SubmitTime<'a> {
+    pub(super) timestamp: &'a str,
+    pub(super) secs: i64,
+}
 
 /// Submit `submission` inside the caller's write transaction: its tasks
 /// and the draft tasks of its goals (and, for a resubmission, the drafts
@@ -28,8 +37,10 @@ use crate::domain::{
 /// set of goal tags, every draft goal submitted, or of a task that moves,
 /// must have one and only tags of the set (ADR-t1639-1 decision 6). With
 /// `[goals] max_spike_cycles`, a planner of the runtime's submits no Spike
-/// of a goal that had as many investigations (ADR-t1487-1 decision 8): a
-/// person decides another, by their answer and their own submit.
+/// of a goal that had as many cycles (ADR-t1487-1 decision 8 as
+/// ADR-t2414-1 amends it): a person decides another, by their answer and
+/// their own submit. A planner of the runtime's further Spikes of a goal
+/// whose results are replanned start its next cycle, at `now`.
 pub(super) fn submit(
     conn: &Connection,
     submission: Submission,
@@ -37,8 +48,12 @@ pub(super) fn submit(
     title_prefixes: Option<&TitlePrefixes>,
     goal_tags: Option<&TagSet>,
     max_spike_cycles: Option<usize>,
-    now: &str,
+    now: SubmitTime<'_>,
 ) -> Result<Proposal> {
+    let SubmitTime {
+        timestamp: now,
+        secs: now_secs,
+    } = now;
     submission.validate()?;
     let target = submission.proposal;
     let existing = target.map(|id| read(conn, id)).transpose()?;
@@ -144,16 +159,30 @@ pub(super) fn submit(
             }
         }
     }
-    if submission.owner.origin == PlannerOrigin::Runtime && max_spike_cycles.is_some() {
+    if submission.owner.origin == PlannerOrigin::Runtime {
+        let mut spikes: BTreeMap<GoalId, Vec<TaskId>> = BTreeMap::new();
         for &task_id in &tasks {
             let task = super::sqlite::read_task(conn, task_id)?;
             if let (true, Some(goal_id)) = (task.execution_class().is_spike(), task.goal_id()) {
-                investigation::check_spike_cycles(
-                    task_id,
-                    goal_id,
-                    super::investigations::goal_cycles(conn, goal_id)?,
-                    max_spike_cycles,
-                )?;
+                spikes.entry(goal_id).or_default().push(task_id);
+            }
+        }
+        if !spikes.is_empty() {
+            super::investigations::settle(conn, now_secs)?;
+        }
+        // A resubmission is counted by the Spikes the proposal ever held,
+        // those its revision dropped or replaced included.
+        let members = existing.as_ref().map_or(&[][..], |p| p.task_ids());
+        for (goal_id, spikes) in spikes {
+            let submit = investigation::SpikeSubmit {
+                by_runtime: true,
+                counted: existing.is_some()
+                    && super::investigations::counted(conn, goal_id, members)?,
+                replanning: super::investigations::replanning(conn, goal_id)?,
+                cycles: super::investigations::goal_cycles(conn, goal_id)?,
+            };
+            if investigation::spike_submit(spikes[0], goal_id, submit, max_spike_cycles)? {
+                super::investigations::start_cycle(conn, goal_id, spikes[0], now_secs)?;
             }
         }
     }

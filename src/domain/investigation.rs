@@ -2,8 +2,8 @@
 //! investigation when one of its Spikes is claimed, and stays one while a
 //! Spike of it is unfinished (a draft is not) or a replanning request of
 //! one of its Spikes is `open`; a Spike without a goal is one of its own
-//! from its claim to its request's end. Each stretch is a cycle, recorded
-//! in `spike_cycles`: opened by the claim, closed by the supervisor once it
+//! from its claim to its request's end. Each stretch is recorded in
+//! `spike_cycles`: opened by the claim, closed by the supervisor once it
 //! ended, or once its goal was abandoned.
 //!
 //! `[supervisor] max_investigations` limits how many investigations hold
@@ -24,9 +24,15 @@
 //! does this limit hold those that would open a new investigation. Both
 //! leave the slot to the implementations.
 //!
-//! `[goals] max_spike_cycles` limits a goal's cycles (decision 8): a
+//! `[goals] max_spike_cycles` limits a goal's cycles (decision 8 as
+//! ADR-t2414-1 amends it): a cycle is a round of Spikes and the replanning
+//! of their results. The claim that opens an investigation starts the
+//! first; a planner of the runtime's submit of a further Spike of the goal
+//! while its results are replanned (a request of its Spikes `open`) starts
+//! the next, the investigation kept open as decision 7 says. Spikes run
+//! side by side are one round. A
 //! planner of the runtime's cannot submit a Spike of a goal that reached
-//! it ([`check_spike_cycles`]), which a person decides instead.
+//! the limit ([`spike_submit`]), which a person decides instead.
 
 use std::collections::{BTreeMap, HashSet};
 
@@ -161,25 +167,50 @@ pub fn investigation_message(counted: usize, max: usize) -> String {
     )
 }
 
-/// Refuse a planner of the runtime's submit of the Spike `task` of `goal`
-/// when the goal has had `cycles` investigations, as many as `max`
-/// (`[goals] max_spike_cycles`, decision 8): another Spike changes the
-/// scope, which a person decides (a `planner_question`, or their own
-/// submit). `None` limits nothing.
-pub fn check_spike_cycles(
+/// What a submit of Spikes of a goal finds: whether a planner of the
+/// runtime's submits them, whether they already count in a cycle (the
+/// resubmission of a proposal plan review sent back, one of whose Spikes
+/// started a cycle), whether the goal's results are being replanned (its
+/// investigation is open and a replanning request of its Spikes is
+/// `open`), and how many cycles the goal has had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpikeSubmit {
+    pub by_runtime: bool,
+    pub counted: bool,
+    pub replanning: bool,
+    pub cycles: usize,
+}
+
+/// Judge the submit `submit` of the Spikes of `goal` (the first `task`)
+/// against `max` (`[goals] max_spike_cycles`; `None` limits nothing),
+/// decision 8 as ADR-t2414-1 amends it: whether it starts the goal's next
+/// cycle. A planner of the runtime's further Spikes while the goal's
+/// results are replanned start one, all of a submit together; a Spike
+/// submitted while the round still runs (no request open yet) joins it,
+/// and the first of an investigation not open yet starts none (its claim
+/// does). When the goal has had `max` cycles, a planner of the runtime's
+/// Spikes are refused instead, since another Spike changes the scope,
+/// which a person decides (a `planner_question`, or their own submit,
+/// which neither is refused nor starts one). Spikes already counted start
+/// none and are not refused. A cycle counts once submitted, whatever plan
+/// review and the Spikes' runs do later.
+pub fn spike_submit(
     task: TaskId,
     goal: GoalId,
-    cycles: usize,
+    submit: SpikeSubmit,
     max: Option<usize>,
-) -> Result<(), DomainError> {
+) -> Result<bool, DomainError> {
+    if !submit.by_runtime || submit.counted {
+        return Ok(false);
+    }
     match max {
-        Some(max) if cycles >= max => Err(DomainError::SpikeCycleLimit {
+        Some(max) if submit.cycles >= max => Err(DomainError::SpikeCycleLimit {
             task_id: task,
             goal_id: goal,
-            cycles,
+            cycles: submit.cycles,
             max,
         }),
-        _ => Ok(()),
+        _ => Ok(submit.replanning),
     }
 }
 
@@ -335,12 +366,20 @@ mod tests {
         assert!(awaited_spikes(&[TaskId::new(9)], &predecessors, &spikes).is_empty());
     }
 
+    fn submit(by_runtime: bool, counted: bool, replanning: bool, cycles: usize) -> SpikeSubmit {
+        SpikeSubmit {
+            by_runtime,
+            counted,
+            replanning,
+            cycles,
+        }
+    }
+
     #[test]
     fn a_goal_at_its_cycle_limit_refuses_another_spike() {
         let (task, goal) = (TaskId::new(4), GoalId::new(2));
-        assert!(check_spike_cycles(task, goal, 1, Some(2)).is_ok());
-        assert!(check_spike_cycles(task, goal, 9, None).is_ok());
-        let refused = check_spike_cycles(task, goal, 2, Some(2)).unwrap_err();
+        assert!(spike_submit(task, goal, submit(true, false, true, 9), None).is_ok());
+        let refused = spike_submit(task, goal, submit(true, false, true, 2), Some(2)).unwrap_err();
         assert!(matches!(
             refused,
             DomainError::SpikeCycleLimit {
@@ -352,6 +391,44 @@ mod tests {
         assert!(
             refused.to_string().contains("planner_question"),
             "{refused}"
+        );
+        // A Spike joining the running round, or the first of the goal's next
+        // investigation, is refused at the limit as well.
+        assert!(spike_submit(task, goal, submit(true, false, false, 1), Some(1)).is_err());
+        // A person's submit goes, and starts no cycle.
+        assert_eq!(
+            spike_submit(task, goal, submit(false, false, true, 5), Some(2)),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn a_further_spike_inside_an_open_investigation_starts_the_next_cycle() {
+        let (task, goal) = (TaskId::new(4), GoalId::new(2));
+        // The first round's replanning submits a further Spike: below the
+        // limit it goes and starts the second.
+        assert_eq!(
+            spike_submit(task, goal, submit(true, false, true, 1), Some(2)),
+            Ok(true)
+        );
+        assert_eq!(
+            spike_submit(task, goal, submit(true, false, true, 1), None),
+            Ok(true)
+        );
+        // The second round's replanning submits another: the investigation
+        // is still open, but the goal has had two cycles.
+        assert!(spike_submit(task, goal, submit(true, false, true, 2), Some(2)).is_err());
+        // A Spike submitted while the round runs, and the first of an
+        // investigation not open yet, start none.
+        assert_eq!(
+            spike_submit(task, goal, submit(true, false, false, 0), Some(2)),
+            Ok(false)
+        );
+        // Spikes already counted, submitted again after a send back, start
+        // none and are not refused.
+        assert_eq!(
+            spike_submit(task, goal, submit(true, true, true, 2), Some(2)),
+            Ok(false)
         );
     }
 }

@@ -132,7 +132,8 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
   記録と欠けの補いは`infrastructure::plan_requests`、promptは`request_planner_prompt`のSpikeの分岐が持つ。
 - 同じgoalのSpikeの依頼は1件ずつ進め、goalを並行して再計画しない（`TARGETS`）。
 - 頼んだ人が居ないので、attentionにするのは`request_planner_exhausted`だけである（`domain::event_attention`）。
-- 周期の上限（`[goals] max_spike_cycles`）に達したgoalのSpikeはruntimeのplannerのsubmitが拒み、plannerは人に上げる（`infrastructure::proposals`、[claimを控える](claim-hold.md#調査中の計画の上限)）。
+- goalのSpikeの周期は再計画の回で数え、調査中の計画が開いたままでも、そのSpikeの依頼が`open`のあいだにruntimeのplannerが追加のSpikeをsubmitすると次の回に入る（[ADR-t2414-1](../../adr/2026-10-19-t2414-1-spike-cycles-count-each-replanning-round-even-inside-one-investigation.md)、`domain::investigation::spike_submit`）。
+  周期の上限（`[goals] max_spike_cycles`）に達したgoalのSpikeはruntimeのplannerのsubmitが拒み、plannerは人に上げる（`infrastructure::proposals`、[claimを控える](claim-hold.md#調査中の計画の上限)）。
   runtimeは未解決を理由にSpikeを延長も連鎖もしない。
 
 ## 予定: inboxからの依頼と非対話のplanner<a id="予定-inboxからの依頼と非対話のplanner"></a>

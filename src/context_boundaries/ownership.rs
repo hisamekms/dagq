@@ -125,7 +125,7 @@ pub(super) const TABLES: &[Table] = &[
     table("planners", Planning),
     table("plan_requests", Planning),
     table("plan_request_proposals", Planning),
-    table("spike_cycles", Planning), // the investigations; the claim (T1) opens one
+    table("spike_cycles", Planning), // the investigations and the goals' Spike cycles; the claim (T1) opens one
     table("replan_operations", Planning), // the replanning of a run; its guard is read by every step of the task
     table("replan_mappings", Planning),
     table("replan_replacements", Planning),
