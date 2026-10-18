@@ -82,6 +82,30 @@ pub(super) struct UpdateWatch {
     /// nothing, so each head is logged once (tests wait for the line
     /// instead of a fixed sleep, task 1048).
     passed: Option<String>,
+    /// The landing checks logged as waiting for the update's gate
+    /// (ADR-t2719-1), so each is logged once a wait; cleared once the gate
+    /// holds none.
+    held_checks: Vec<String>,
+}
+
+impl UpdateWatch {
+    /// Log once per `check` (a landing check that waits) that it waits for
+    /// `what`; `None` once nothing holds the check, so the next wait is
+    /// logged again.
+    pub(super) fn tell_held_check(
+        &mut self,
+        check: &str,
+        what: Option<crate::domain::heavy_turn::HeavyJob>,
+    ) {
+        match what {
+            Some(what) if !self.held_checks.iter().any(|held| held == check) => {
+                info!("{check} waits for {} to end", what.describe());
+                self.held_checks.push(check.to_owned());
+            }
+            Some(_) => {}
+            None => self.held_checks.clear(),
+        }
+    }
 }
 
 impl HostOpsState {

@@ -1161,6 +1161,7 @@ pub mod goal;
 pub mod goal_review;
 pub mod goal_tag;
 pub mod headless_job;
+pub mod heavy_turn;
 pub mod host_metrics;
 pub mod idle_process;
 pub mod ids;

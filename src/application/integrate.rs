@@ -537,6 +537,10 @@ pub struct Integration<'a> {
     /// in a container of its own on a clone of the commit that lands, never
     /// on the host.
     pub verification_containers: &'a dyn super::run_container::VerificationContainers,
+    /// The queue's turns of the host's heavy jobs (ADR-t2719-1): the
+    /// verification waits for the automatic update's build and e2e gate and
+    /// holds a landing check's turn while it runs; `None` takes none.
+    pub heavy_turn: Option<super::heavy_turn::HeavyTurn>,
 }
 
 /// The free disk space integrate checks before it retries a verification
@@ -971,6 +975,25 @@ fn land_integrating(
         if let Err(error) = &guarded {
             return Ok((onto, unguarded(run, error)));
         }
+        // The verification takes turns with the automatic update's build
+        // and e2e (ADR-t2719-1): it waits while the update's job, of any
+        // process of the queue, holds or waits for its turn, and holds its
+        // own until the verdict. A task with no command waits for nothing.
+        let _turn = match &ctx.heavy_turn {
+            Some(turns) if !task.verification_commands().is_empty() => {
+                Some(
+                    turns.check(ctx.files, super::heavy_turn::CHECK_POLL, |what| {
+                        info!(
+                            op = "integrate",
+                            "run {}'s landing waits for {} to end before its verification",
+                            run.id(),
+                            what.describe()
+                        );
+                    })?,
+                )
+            }
+            _ => None,
+        };
         let verdict = land(
             queue,
             repository,

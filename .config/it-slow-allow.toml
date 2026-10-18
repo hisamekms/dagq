@@ -1697,3 +1697,28 @@ task = 2607
 name = "runtime_cleanup::the_pass_after_a_long_cleanup_for_room_asks_and_holds"
 reason = "B 境界（SQLite・supervisor の配線）: 間隔より長く走った空き容量のための掃除の後の周回が、読み直した空きで claim の hold と ask を記録することを実際の supervisor と queue で確かめる。間隔の判断は supervise::disk の unit test"
 task = 2607
+
+[[test]]
+name = "runtime_heavy_turns::a_landing_waits_for_the_update_jobs_e2e_and_verifies_once_it_ended"
+reason = "B 境界（守る境界）: the update job's process and the landing checks take turns through the queue's lock files across processes in the supervisor's and integrate's wiring (Git, SQLite, stub commands); who waits is in domain::heavy_turn's unit tests"
+task = 2719
+
+[[test]]
+name = "runtime_heavy_turns::a_direct_integrate_waits_for_the_update_jobs_e2e"
+reason = "B 境界（守る境界）: the update job's process and the landing checks take turns through the queue's lock files across processes in the supervisor's and integrate's wiring (Git, SQLite, stub commands); who waits is in domain::heavy_turn's unit tests"
+task = 2719
+
+[[test]]
+name = "runtime_heavy_turns::a_landing_recheck_waits_for_the_update_jobs_e2e_and_runs_its_command_once_it_ended"
+reason = "B 境界（守る境界）: the update job's process and the landing checks take turns through the queue's lock files across processes in the supervisor's and integrate's wiring (Git, SQLite, stub commands); who waits is in domain::heavy_turn's unit tests"
+task = 2719
+
+[[test]]
+name = "runtime_heavy_turns::the_update_jobs_build_waits_for_a_landing_verification"
+reason = "B 境界（守る境界）: the update job's process and the landing checks take turns through the queue's lock files across processes in the supervisor's and integrate's wiring (Git, SQLite, stub commands); who waits is in domain::heavy_turn's unit tests"
+task = 2719
+
+[[test]]
+name = "runtime_heavy_turns::the_update_jobs_build_waits_for_a_landing_recheck_command"
+reason = "B 境界（守る境界）: the update job's process and the landing checks take turns through the queue's lock files across processes in the supervisor's and integrate's wiring (Git, SQLite, stub commands); who waits is in domain::heavy_turn's unit tests"
+task = 2719

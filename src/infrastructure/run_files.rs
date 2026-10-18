@@ -417,23 +417,10 @@ impl RunFiles for LocalRunFiles {
         SystemTime::now()
     }
     fn try_lock(&self, path: &Path) -> io::Result<Option<Box<dyn std::any::Any + Send>>> {
-        use std::os::fd::AsRawFd;
-        let file = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(path)?;
-        // SAFETY: flock on a descriptor this function owns; the lock goes
-        // with the file when the guard drops or the process ends.
-        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
-            return Ok(Some(Box::new(file)));
-        }
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
-            Ok(None)
-        } else {
-            Err(error)
-        }
+        try_flock(path, libc::LOCK_EX)
+    }
+    fn try_lock_shared(&self, path: &Path) -> io::Result<Option<Box<dyn std::any::Any + Send>>> {
+        try_flock(path, libc::LOCK_SH)
     }
     fn lock(&self, path: &Path) -> io::Result<Box<dyn std::any::Any + Send>> {
         use std::os::fd::AsRawFd;
@@ -449,6 +436,31 @@ impl RunFiles for LocalRunFiles {
             return Ok(Box::new(file));
         }
         Err(io::Error::last_os_error())
+    }
+}
+
+/// Take the flock `operation` (`LOCK_EX` or `LOCK_SH`) on `path` (created
+/// if missing) without waiting; `None` while another holder keeps it.
+fn try_flock(
+    path: &Path,
+    operation: libc::c_int,
+) -> io::Result<Option<Box<dyn std::any::Any + Send>>> {
+    use std::os::fd::AsRawFd;
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)?;
+    // SAFETY: flock on a descriptor this function owns; the lock goes with
+    // the file when the guard drops or the process ends.
+    if unsafe { libc::flock(file.as_raw_fd(), operation | libc::LOCK_NB) } == 0 {
+        return Ok(Some(Box::new(file)));
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::EWOULDBLOCK) {
+        Ok(None)
+    } else {
+        Err(error)
     }
 }
 
@@ -496,6 +508,23 @@ mod tests {
         drop(guard);
         assert!(files.try_lock(&path).unwrap().is_some());
         assert!(files.try_lock(&dir.path().join("none/lock")).is_err());
+    }
+
+    /// Shared holders go together and keep an exclusive one out, and an
+    /// exclusive holder keeps a shared one out.
+    #[test]
+    fn shared_locks_go_together_and_exclude_an_exclusive_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = LocalRunFiles;
+        let path = dir.path().join("lock");
+        let first = files.try_lock_shared(&path).unwrap().expect("a free lock");
+        let second = files.try_lock_shared(&path).unwrap().expect("shared");
+        assert!(files.try_lock(&path).unwrap().is_none());
+        drop((first, second));
+        let exclusive = files.try_lock(&path).unwrap().expect("a free lock");
+        assert!(files.try_lock_shared(&path).unwrap().is_none());
+        drop(exclusive);
+        assert!(files.try_lock_shared(&path).unwrap().is_some());
     }
 
     /// A waiting lock is taken only once the holder's guard drops, and

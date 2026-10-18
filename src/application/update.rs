@@ -568,6 +568,20 @@ pub fn run(
         Ok(guard) => guard,
         Err(error) => return failed(queue, &job, "build", &error, json!({})),
     };
+    // The build and the e2e gate take turns with the landing checks
+    // (ADR-t2719-1): held from the build to the gate's verdict, not
+    // through the swap, the handoff and the watch.
+    let turns = super::heavy_turn::HeavyTurn::under(db.parent().unwrap_or(Path::new(".")));
+    let gate = match turns.gate(ports.files, |what| {
+        tracing::info!(
+            "automatic update: the job for main's {} waits for {} to end before it builds; no landing check starts meanwhile",
+            options.commit,
+            what.describe()
+        );
+    }) {
+        Ok(gate) => gate,
+        Err(error) => return failed(queue, &job, "build", &error, json!({})),
+    };
     let built = ports
         .binaries
         .checkout(&options.repository, &paths.checkout, &options.commit)
@@ -588,6 +602,7 @@ pub fn run(
     if let Some(failure) = e2e_gate(ports, queue, &job, options)? {
         return Ok(failure);
     }
+    drop(gate);
     put_in_place(ports, queue, db, &job, &binary, PluginStep::Untouched)
 }
 

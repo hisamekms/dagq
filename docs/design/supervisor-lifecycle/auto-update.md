@@ -19,6 +19,7 @@ related:
   - adr-t1233-2
   - adr-t1582-1
   - adr-t1632-1
+  - adr-t2719-1
   - design-persistence
 ---
 
@@ -56,6 +57,12 @@ related:
        release更新のjobと`install --release`も同じlockを取るので、queueの中で`update/target`を使うのは1つだけ。
        持つ間は空き容量の掃除が`update/target`を消さず、掃除が消す間はjobが待つ（[claimを控える](claim-hold.md)の「queueのdirのビルドのキャッシュ」）。
        lockを取れなければ（errorのとき）buildの段の`update_failed`。
+     - **着地の検証との順番**（[ADR-t2719-1](../../adr/2026-10-18-t2719-1-auto-update-gate-and-landing-checks-take-turns.md)、`application::heavy_turn`）: 続けて、queueのdirの`heavy/`の待ちのlockを排他で持ち、番のlockを排他で取れるまで待ってから、待ちのlockを手放してbuildに進む。
+       番はe2eの関門の判定まで持ち、入れ替え・引き継ぎ・見張りの間は持たない。
+       着地の検証（supervisorの着地・人の`integrate`の検証のコマンドとlanding recheck）は番を共有で持ち、待ちのlockが持たれている間は始めないので、jobは待ち始めに走っていた検証の終わりまでしか待たない。
+       検証は待ちのlockを共有で確かめてから番を取るまでその確かめを手放さないので、確かめと番の間にjobが待ち始めて追い越されることは無い（`HeavyTurn::try_check`）。
+       待つときは何を待つかをjobのlogに1回書き、`update_started`のまま待つ。
+       判断は`domain::heavy_turn`で、取れなければbuildの段の`update_failed`。
      - **e2eの関門**（ADR-t963-1決定1、`e2e_gate::run`）: 続けて同じcheckoutで、ビルドと同じ`CARGO_TARGET_DIR`のまま全部のe2eを流す。
        envはjobのprocessのenvを引き継がず、許す名前（資格情報を除く）だけにmain checkoutの`dagq.toml`の`[run.env]`（[Run environment](run-environment.md)）と1回ごとの`TMPDIR`を重ね、logの冒頭に渡した名前だけを書く。
        許す名前・資格情報を除く規則・足りないときの見え方と戻し方は、runのe2eと同じで`infrastructure::e2e_gate`のmodule docと`PASSED_ENV`が持つ。

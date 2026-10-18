@@ -110,6 +110,9 @@ impl Supervisor<'_> {
         let (disk_config, free_space) = (self.host.disk_config, self.host.free_space);
         let runs_dir = self.layout.runs_dir.clone();
         let db = self.layout.db.clone();
+        let heavy_turn = crate::application::heavy_turn::HeavyTurn::under(
+            db.parent().context("queue database has no directory")?,
+        );
         // The supervisor asks; the Integrator checks and lands (ADR-t728-2).
         let request = IntegrationRequest {
             requester: self.layout.supervisor_actor(),
@@ -148,6 +151,7 @@ impl Supervisor<'_> {
                     }),
                     verification_tokens: &*verification_tokens,
                     verification_containers: &*verification_containers,
+                    heavy_turn: Some(heavy_turn),
                 },
                 &request,
             )
@@ -2428,6 +2432,12 @@ impl Supervisor<'_> {
             return Ok(());
         };
         let e2e = self.e2e_due(&run)?.is_some();
+        // Its verification takes turns with the automatic update's build
+        // and e2e (ADR-t2719-1); its e2e has a lock of its own. Only looked
+        // at here: the landing takes the turn itself before its commands.
+        if !e2e && self.landing_waits_its_turn(&run)? {
+            return Ok(());
+        }
         let main = if e2e {
             None
         } else {
@@ -2471,6 +2481,47 @@ impl Supervisor<'_> {
         );
         Ok(())
     }
+    /// Whether the landing of `run` waits for its turn
+    /// ([`Self::take_check_turn`]), only looked at: the landing takes the
+    /// turn itself before its commands, and a task with none waits for
+    /// nothing.
+    pub(super) fn landing_waits_its_turn(&mut self, run: &TaskRun) -> Result<bool> {
+        if self
+            .queue
+            .show(run.task_id())?
+            .task
+            .verification_commands()
+            .is_empty()
+        {
+            return Ok(false);
+        }
+        Ok(self
+            .take_check_turn(&format!("run {}'s landing", run.id()))?
+            .is_none())
+    }
+
+    /// The turn of the landing check `check` (a landing's verification or
+    /// the landing recheck) among the host's heavy jobs (ADR-t2719-1), held
+    /// shared until it drops; `None` while the automatic update's job, of
+    /// any process of the queue, builds and runs its e2e gate or waits for
+    /// its turn. A wait is logged once per check.
+    pub(super) fn take_check_turn(
+        &mut self,
+        check: &str,
+    ) -> Result<Option<crate::application::heavy_turn::Turn>> {
+        let queue_dir = self
+            .layout
+            .db
+            .parent()
+            .context("queue database has no directory")?;
+        let taken =
+            crate::application::heavy_turn::HeavyTurn::under(queue_dir).try_check(&*self.files)?;
+        self.host
+            .update
+            .tell_held_check(check, taken.as_ref().err().copied());
+        Ok(taken.ok())
+    }
+
     /// Review the runs recovered from a landing they may not land again
     /// ([`RunHistory::recovered_landing`]'s `Review`, task 1118), and those
     /// a `retry_review` answer queued ([`RunHistory::queued_review_retry`],

@@ -593,6 +593,11 @@ impl OneShot {
                 &db,
                 Some(main_checkout.clone()),
             ),
+            // A person's landing waits for the automatic update's build and
+            // e2e as the supervisor's does (ADR-t2719-1).
+            heavy_turn: db
+                .parent()
+                .map(crate::application::heavy_turn::HeavyTurn::under),
         };
         let integrator = Integrator::of_process(std::process::id());
         let Some(request) = integrator.approve(&mut integration, &requester, target, repo)? else {

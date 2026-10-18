@@ -71,6 +71,15 @@ pub trait RunFiles: Send + Sync {
         let _ = path;
         Ok(Some(Box::new(())))
     }
+    /// Take a shared lock on `path` (created if missing) without waiting,
+    /// held across processes until the returned guard drops: any number of
+    /// shared holders at once, none while an exclusive one ([`Self::lock`],
+    /// [`Self::try_lock`]) holds it; `None` then. A store with nothing to
+    /// share between processes always grants it.
+    fn try_lock_shared(&self, path: &Path) -> io::Result<Option<Box<dyn std::any::Any + Send>>> {
+        let _ = path;
+        Ok(Some(Box::new(())))
+    }
     /// Take an exclusive lock on `path` (created if missing) as
     /// [`Self::try_lock`] does, but wait while another holder has it. A
     /// store with nothing to share between processes grants it at once.

@@ -377,7 +377,8 @@ pub(super) struct RecheckWatch {
     command: Option<String>,
     started: Instant,
     handle: Option<thread::JoinHandle<Vec<Checked>>>,
-    /// The queue's recheck lock, held until the recheck is recorded.
+    /// The queue's recheck lock and the recheck's heavy turn
+    /// (ADR-t2719-1), held until the recheck is recorded.
     _lock: Box<dyn std::any::Any + Send>,
 }
 
@@ -528,6 +529,14 @@ impl Supervisor<'_> {
             }
             Look::Check(targets) => targets,
         };
+        // It takes turns with the automatic update's build and e2e
+        // (ADR-t2719-1), holding its turn until it is recorded: the due
+        // recheck waits, as for a landing.
+        let Some(turn) =
+            self.take_check_turn(&format!("the landing recheck against main {main}"))?
+        else {
+            return Ok(Start::Later { locked_out: false });
+        };
         let dir = self.recheck_dir()?;
         self.files.create_dir_all(&dir)?;
         let Some(lock) = self.files.try_lock(&dir.join(RECHECK_LOCK))? else {
@@ -567,7 +576,7 @@ impl Supervisor<'_> {
             return Ok(Start::Nothing);
         }
         let landed = self.landing_at(&main)?;
-        self.start(landed, main, targets, lock)?;
+        self.start(landed, main, targets, Box::new((lock, turn)))?;
         Ok(Start::Started)
     }
 

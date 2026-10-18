@@ -3526,6 +3526,13 @@ impl Supervisor<'_> {
                     slot.landing_turn = true;
                     return Ok(Step::Continue);
                 }
+                // Its verification takes turns with the automatic update's
+                // build and e2e (ADR-t2719-1): only looked at here, the
+                // landing takes the turn itself before its commands.
+                if self.landing_waits_its_turn(&current)? {
+                    slot.landing_turn = true;
+                    return Ok(Step::Continue);
+                }
                 let run = match self.queue.begin_integration(
                     slot.run.id(),
                     &self.registration.token,

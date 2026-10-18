@@ -28,6 +28,7 @@ related:
   - adr-t2257-1
   - adr-t2268-1
   - adr-t2424-1
+  - adr-t2719-1
   - design-toolchain-profiles
 ---
 
@@ -70,6 +71,10 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 ## 承認とslot
 
 - 束縛・対象・lease・空き容量（[空き容量](claim-hold.md#人が打つintegrate)）の確かめと承認の記録は`begin`が持ち、supervisorがreviewかresumeで持つrunは人の`integrate`では承認しない。
+- 検証のコマンドは、queueのどのprocessの自動更新のjobの関門（buildとe2e）とも重ならない（[ADR-t2719-1](../../adr/2026-10-18-t2719-1-auto-update-gate-and-landing-checks-take-turns.md)、lockは`application::heavy_turn`、判断は`domain::heavy_turn`）。
+  supervisorは関門が走っている間と番を待っている間は着地を始めず、runは着地待ちのまま次のpassで見直す（`take_check_turn`、待つことはrunごとに1回logに出る）。
+  `land_integrating`はコマンドの前に番を共有で取れるまで待ち（人の`integrate`も、supervisorが見た後に始まった関門と重なった着地も）、判定まで持つ。
+  コマンドの無いtaskとrunのe2e（別のlockで1本ずつ）は待たない。
 
 ## receiptの検査とrebase
 
@@ -142,6 +147,8 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 - hostの分類で落ちたcommandと、containerのrunでcommandを流すcontainerが無かったときは何も判定せず、runは着地を待ち続ける（ADR-t639-1、ADR-t2424-1）。
 - recheckを始められないか記録できないerrorはwarnだけで、runに何も記録せず着地を止めない（着地が改めて確かめる）。
 - mainの動きを見るsupervisorは選ばず、drainやhandoffの間は生きているほかのsupervisorが確かめる。
+- queueのどのprocessの自動更新のjobの関門（buildとe2e）が走っている間も、関門が番を待っている間も、recheckは始めずに次のpassで見直す（[ADR-t2719-1](../../adr/2026-10-18-t2719-1-auto-update-gate-and-landing-checks-take-turns.md)、[Auto-update](auto-update.md)の「着地の検証との順番」）。
+  始めたrecheckは番を共有で持ち、結果を記録するまで持つので、関門は走っているrecheckの終わりを待つ。
 
 ## errorと復旧
 
