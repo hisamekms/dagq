@@ -68,7 +68,9 @@ impl Cost {
 }
 
 /// The health per route of the events with `after < id <= upto` whose task
-/// `counts` accepts, with the waits of `waits` (by route) put in.
+/// `counts` accepts, with the waits of `waits` (by route) put in. A
+/// `turn_finished` with no run (a runtime planner's turn) is not a
+/// worker's and is not counted.
 pub fn route_health(
     events: &[RunEvent],
     after: EventId,

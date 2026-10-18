@@ -70,9 +70,14 @@ pub const MAX_DRAFT_PLANNERS: usize = 3;
 pub const FOLLOW_UP_ASK_DEPTH: i64 = 3;
 
 /// The categories a worker gives each entry of its receipt's `follow_ups`
-/// (`category`, ADR-t947-3), with what each means; the design's list
-/// (receipt-and-session-exit) is the one of record. The runtime records a
-/// value it does not know as it is, and never rejects a receipt for one.
+/// (`category`, ADR-t947-3), with what each means; this list is the one of
+/// record, and the worker's prompt shows it from here. A worker unsure of
+/// one picks it by what finishing the follow-up changes, and neither a
+/// duplicate nor its acceptance is a category (ADR-t947-3 decision 2). The
+/// runtime records a value it does not know as it is, and never rejects a
+/// receipt for one. A `defect` is described by how to reproduce it, or by
+/// where the code is wrong and how; a `test_gap` takes in a test built
+/// weakly (a wait with no bound, a dependence on the wall clock).
 /// The field is not named `kind`, so that it is not mixed up with the
 /// `kind` of the events and asks it is recorded with.
 pub const FOLLOW_UP_CATEGORIES: &[(&str, &str)] = &[

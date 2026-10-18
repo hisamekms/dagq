@@ -7,6 +7,15 @@
 //! runs its turns instead of one agent (ADR-t813-1, `headless_session`).
 //! A wrapper the supervisor started in the background (ADR-t1404-1) has no
 //! workspace: it waits for the supervisor's record of its start instead.
+//!
+//! The runtime starts every wrapper, a worker's and a planner's, in the
+//! background only (ADR-t1433-3). The entry that is not in the background
+//! (it checks for a terminal, refuses a pipe and waits for the workspace's
+//! record) is still accepted for the argv of an older supervisor, and is
+//! taken only when `dagq session` is typed without the background flag.
+//! On either entry, a wrapper refused its registration logs that and ends
+//! with an error, without closing a workspace it may run in or calling
+//! cmux ([`wrapper_refused`]).
 
 use crate::domain::LeaseToken;
 use anyhow::{Result, ensure};

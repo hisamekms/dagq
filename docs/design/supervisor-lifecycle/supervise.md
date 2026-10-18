@@ -101,7 +101,7 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 - provisioningの失敗は環境要因とみなし、以後のclaimを止め、active runをdrainしてから非0で終わる。
 - 各tickの先頭で、そのrunのleaseがまだ自分のものかを確かめ、他に移っていればDBに何も書かずslotを外す（`Supervisor::disown`）。
 - leaseを失うとはlease行が無いか他のtokenに移ることで、heartbeatが古いことではないので、sleepの後も誰にも引き継がれていなければそのまま続ける（[ADR-0039](../../adr/0039-adopt-stale-lease-of-live-wrapper-and-renew-own-stale-lease.md)の決定7）。
-- sessionの見張り（wrapperの登録とheartbeat・receipt・idle marker・終了）はrunごとの`SessionWatch`、終了の依頼は`exit.rs`（[Receipt and session exit](receipt-and-session-exit.md)）。
+- sessionの見張り（wrapperの登録とheartbeat・receipt・idle marker・終了）はrunごとの`SessionWatch`、終了の依頼は`exit.rs`（[receiptとsessionの終わり](headless-worker.md#receiptとsessionの終わり)）。
 - runごとのload averageの区間は`domain::measure::LoadWindow`（引き継いだrunの区間は`ClaimState::loads`）、hostの負荷は[hostの負荷の連続の記録](host-metrics.md)。
 
 ## 検証とreviewと着地

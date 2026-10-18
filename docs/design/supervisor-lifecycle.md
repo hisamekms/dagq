@@ -208,14 +208,9 @@ live worker alert (stalled, idle_process)
 
 - [スループットの見直し（`throughput-review`）](supervisor-lifecycle/throughput-review.md)（supervisorがtimerで毎時・日次・週次に読むだけのheadlessのjobを始め、結果を`<queue dir>/reports/reviews/`に残し、日次・週次と規則に当たった毎時をinboxに知らせるだけのattention（`report the review`）で届ける。週次の次の一手はproposalを求めるfindingになる。[ADR-t996-1](../adr/2026-09-29-t996-1-supervisor-runs-throughput-review-jobs-and-reports-to-inbox.md)）
 
-## `session` wrapper
+## workerのsession
 
-- [`session` wrapper](supervisor-lifecycle/session-wrapper.md)
-- [非対話のworker](supervisor-lifecycle/headless-worker.md)（1 turnを1回の非対話の呼び出しにする経路、`turns/`の依頼、turnの記録と停止、促しと復旧job）
-
-## Receipt and session exit
-
-- [Receipt and session exit](supervisor-lifecycle/receipt-and-session-exit.md)
+- [workerのsession](supervisor-lifecycle/headless-worker.md)（session wrapper、1 turnを1回の非対話の呼び出しにする経路、`turns/`の依頼、turnの記録と停止、促し、receiptとsessionの終わり、黙ったwrapper、答えの配送、receiptの欄の約束）
 
 ### runの復旧
 

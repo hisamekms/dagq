@@ -58,6 +58,13 @@ pub(super) enum WrapperPulse {
 /// `noted` when a fresh heartbeat lets it wait again. If the process is
 /// gone, read its row again so a concurrently recorded exit is `Exited`;
 /// otherwise recover the lost session through the caller's error path.
+///
+/// The wrapper writes its heartbeat, and the queue the events'
+/// `created_at`, on the wall clock, while this compares them with the
+/// injected `Clock`: a `supervise` test with a wrapper must not fix the
+/// clock, or a live wrapper reads as silent or dead; fix it only on paths
+/// without one. A time compared with a receipt's or an idle marker's mtime
+/// is read from the wall clock as well, so that it agrees with the files'.
 pub(super) fn wrapper_pulse(
     sv: &mut Supervisor<'_>,
     run: &TaskRun,

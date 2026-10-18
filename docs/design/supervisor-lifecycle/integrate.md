@@ -152,5 +152,5 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 
 ## follow_upsの登録
 
-- 着地したreceiptの`follow_ups`は`register_follow_ups`が1つのtransactionでdraft taskにし、規則はdoc commentが持つ（ADR-t947-3、[follow_upsの分類コード](receipt-and-session-exit.md#follow_upsの分類コード)）。
+- 着地したreceiptの`follow_ups`は`register_follow_ups`が1つのtransactionでdraft taskにし、規則はdoc commentが持つ（ADR-t947-3、[follow_upsの分類コード](headless-worker.md#follow_upsの分類コード)）。
 - draftはclaimされず、runのfollow_upの束ごとに立つplannerが扱う（[Draft planners](draft-planners.md#draft-planners-supervisor)、[所属の判断](../follow-up-membership.md)）。

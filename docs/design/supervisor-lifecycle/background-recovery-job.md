@@ -138,7 +138,7 @@ turnの後の扱いの詳細は[非対話のworker](headless-worker.md#turnの�
 ## 1 runの放棄（abandon）<a id="1-runの放棄abandon"></a>
 
 - 監視中のruntime error（wrapperのプロセスも死んでいるheartbeat切れ、検証処理そのもののGitやDBの失敗、closeの記録の失敗など）は、そのrunだけを手放す。
-  wrapperのプロセスが生きていればheartbeat切れでも手放さない（[黙ったwrapper](receipt-and-session-exit.md#黙ったwrapper)）。
+  wrapperのプロセスが生きていればheartbeat切れでも手放さない（[黙ったwrapper](headless-worker.md#黙ったwrapper)）。
 - 手放すと`runtime_error`を書いてleaseを消し、status・runのプロセス・worktreeは変えず、supervisorは他のrunを続ける。
   同じtransactionで、そのrunの開いた`stalled`のaskを閉じ、結末の無い検知に`stall_resolved`を1回ずつ記録する。
 - leaseを消すのは、常駐supervisorが生きている間も`recover`がrunのprocessだけで判定できるようにするためである。

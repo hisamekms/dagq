@@ -58,7 +58,7 @@ related:
 | --- | --- | --- | --- | --- |
 | 箇条1 キューごとに一つのsupervisorを起動する | 上書き | ADR-0007 箇条2 | 同じqueueに複数のsupervisorが居てもよく、claimが直列化される | [supervise](../design/supervisor-lifecycle/supervise.md) |
 | 箇条1 supervisorがworkspace作成・監視・完了検証・workspace削除を行う | 有効 | — | 閉じる時点はADR-0027 決定1でreviewの後になったが、所有者は変わらない | [supervise](../design/supervisor-lifecycle/supervise.md) |
-| 箇条2 agentはworkspaceを削除せず、結果をreceiptで通知する | 有効 | — | AGENTS.mdのworker | [receipt-and-session-exit](../design/supervisor-lifecycle/receipt-and-session-exit.md) |
+| 箇条2 agentはworkspaceを削除せず、結果をreceiptで通知する | 有効 | — | AGENTS.mdのworker | [headless-worker](../design/supervisor-lifecycle/headless-worker.md#receiptとsessionの終わり) |
 
 ### ADR-0004 ClaudeとCodexをagent providerとして抽象化する
 
@@ -94,7 +94,7 @@ related:
 | 箇条1 `run_leases`でrun単位のlease、supervisorごとのtoken | 有効 | — | migration 0005の記述は記録 | [persistence](../design/persistence.md) |
 | 箇条2 claimとlease作成を同じトランザクションで行う、複数supervisorでも直列 | 有効 | — | | [persistence](../design/persistence.md) |
 | 箇条3 `supervise --parallel N`の常駐ループ、`--once`、signal | 有効（一部上書き） | ADR-0027 決定1 | 「`awaiting_integration`になったrunのleaseを解放する」は、reviewの後までleaseとslotを持つに変わった | [supervise](../design/supervisor-lifecycle/supervise.md)・[review](../design/supervisor-lifecycle/review.md) |
-| 箇条4 1 runのruntime error（exit要求のtimeoutを含む）はそのrunだけをabandonしleaseを削除する | 上書き | ADR-0019 決定2 | `exit_request_timed_out`ではleaseを手放さない。ほかのruntime errorのabandonは有効 | [abandon](../design/supervisor-lifecycle/background-recovery-job.md#1-runの放棄abandon)・[receipt-and-session-exit](../design/supervisor-lifecycle/receipt-and-session-exit.md) |
+| 箇条4 1 runのruntime error（exit要求のtimeoutを含む）はそのrunだけをabandonしleaseを削除する | 上書き | ADR-0019 決定2 | `exit_request_timed_out`ではleaseを手放さない。ほかのruntime errorのabandonは有効 | [abandon](../design/supervisor-lifecycle/background-recovery-job.md#1-runの放棄abandon)・[headless-worker](../design/supervisor-lifecycle/headless-worker.md#receiptとsessionの終わり) |
 | 箇条5 provisioningの失敗でclaimを止めdrainして非0で終わる | 有効 | — | | [supervise](../design/supervisor-lifecycle/supervise.md) |
 | 箇条6 `doctor` / `recover`はrunごとに判定する | 有効 | — | ADR-0041 決定3でwrapperの死んだrunの`recover`はsupervisorが自動で行うようになったが、判定の単位は変わらない | [doctor](../design/supervisor-lifecycle/commands.md)・[recover](../design/supervisor-lifecycle/commands.md) |
 
@@ -226,7 +226,7 @@ ADR-0053へ置き換え済み（下の組Bの記録）。
 | --- | --- | --- | --- | --- |
 | 原則 判断を含まない手順はruntime、ADR-0016の決定3・5を維持する | 上書き | ADR-0040 決定2 | ADR-0016 決定5（自動では着地しない）は維持されていない。「判断を含まない手順はruntime」は有効 | [review](../design/supervisor-lifecycle/review.md)・[integrate](../design/supervisor-lifecycle/integrate.md) |
 | 1 `needs_session`のsupervisorによるresume、`integration_approved`、3回まで | 有効（一部上書き） | ADR-0040 決定2、ADR-0027 決定3、ADR-0041 決定1・3 | 「未承認のrunは`awaiting_integration`に戻しwatchで承認を待つ」はreview jobに変わった。3回で解消しないrunは`resume session`のattentionではなく`failed`にして`decide`のask（task 100、overview） | [needs-session](../design/supervisor-lifecycle/needs-session.md) |
-| 2 `exit_request_timed_out`でleaseを手放さない | 有効（一部上書き） | ADRなし（task 104） | 「attention（`send /exit`）」は`stuck_exit`のaskになった（[supervisor-lifecycle](../design/supervisor-lifecycle.md)）。下の「ADRの外で変わった実装」 | [receipt-and-session-exit](../design/supervisor-lifecycle/receipt-and-session-exit.md)・[background-recovery-job](../design/supervisor-lifecycle/background-recovery-job.md) |
+| 2 `exit_request_timed_out`でleaseを手放さない | 有効（一部上書き） | ADRなし（task 104） | 「attention（`send /exit`）」は`stuck_exit`のaskになった（[supervisor-lifecycle](../design/supervisor-lifecycle.md)）。下の「ADRの外で変わった実装」 | [headless-worker](../design/supervisor-lifecycle/headless-worker.md#receiptとsessionの終わり)・[background-recovery-job](../design/supervisor-lifecycle/background-recovery-job.md) |
 | 3 `integrate`が着地後にpushする、`push_failed`はattention | 有効 | — | 再試行は人（inboxが知らせる） | [integrate](../design/supervisor-lifecycle/integrate.md) |
 | 4 `integrate`が`follow_ups`をdraftに登録する、`ready`にするかcancelするかは人の判断 | 有効（一部上書き） | ADR-0041 決定16・8 | 登録の形はADR-0041 決定16がそのまま引き継ぐ。採否はruntimeが立てるplannerが決め、`ready`にするのはplan reviewだけ | [integrate](../design/supervisor-lifecycle/integrate.md)・[draft-planners](../design/supervisor-lifecycle/draft-planners.md) |
 | 5 taskの要求evidence、`evidence_missing`で`needs_session` | 有効 | — | | [validation](../design/supervisor-lifecycle/validation.md) |
@@ -365,7 +365,7 @@ ADR-0053へ置き換え済み（下の組Bの記録）。
 | 棚卸しで見つけた差分 | 今の参照先と扱い |
 | --- | --- |
 | supervisorなどのlog（ADR-0010決定6、task 194） | `infrastructure::telemetry`のdoc commentがJSON Linesのファイル名・書式を持つ（[commands](../design/supervisor-lifecycle/commands.md#log)）。細部の差分が残ればこのdesignを直す候補にする。ADR-0033がproposedであることだけを理由にacceptや新ADRを求めない。ログの収集・外部送信など人の判断が要る方針を変えるなら、その範囲だけをplannerが人と決め、小さなamendsの候補にする。 |
-| exit要求のtimeout（旧ADR-0019決定2、task 104） | 後継ADR-0047決定25・40、[Receipt and session exit](../design/supervisor-lifecycle/receipt-and-session-exit.md)・[Background recovery job](../design/supervisor-lifecycle/background-recovery-job.md)を読む。復旧jobの後にaskへ渡す方針は記録済み。生きているrunの復旧job自体が失敗した場合も[ADR-t609-1](../adr/2026-09-27-t609-1-failed-live-recovery-job-opens-the-alert-ask.md)が決定40をamendsしている。残る実装・記述の差分はdesignに実装状況を書く候補で、新しい決定の候補ではない。 |
+| exit要求のtimeout（旧ADR-0019決定2、task 104） | 後継ADR-0047決定25・40、[workerのsession](../design/supervisor-lifecycle/headless-worker.md#receiptとsessionの終わり)・[Background recovery job](../design/supervisor-lifecycle/background-recovery-job.md)を読む。復旧jobの後にaskへ渡す方針は記録済み。生きているrunの復旧job自体が失敗した場合も[ADR-t609-1](../adr/2026-09-27-t609-1-failed-live-recovery-job-opens-the-alert-ask.md)が決定40をamendsしている。残る実装・記述の差分はdesignに実装状況を書く候補で、新しい決定の候補ではない。 |
 | resumeの上限とprompt待ち（旧ADR-0019決定1・6、task 100） | 後継ADR-0047決定24・29・40、[Needs session](../design/supervisor-lifecycle/needs-session.md)・Prompt waiting・[Triage](../design/supervisor-lifecycle/triage.md)を読む。復旧job・人へのaskの境界は後継ADRが持つ。回数・askの形などの細部の差分はdesignを直す候補とし、旧記述を統合ADRへ書き直さない。 |
 
 別の判断候補は、ADR-0009箇条5のgoal所属の編集範囲。「readyのtaskは編集しない」がgoal所属に及ぶかという当時の疑問は、[Domain model](../design/domain-model.md)と後継ADR-0047決定9で現在の扱いを確かめる。既存の決定で解けるならdesignの記述を合わせるだけにし、未決の境界を変える必要が残る場合だけ、人と決めて対象決定を小さなADRでamendsする候補にする。

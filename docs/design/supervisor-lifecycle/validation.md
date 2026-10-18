@@ -22,10 +22,12 @@ related:
 
 # Validation
 
-`validating`のrunに対して、supervisorがセッションと同じleaseの下で、runごとのthreadで次を順に確認する。sessionは開いたまま（[Receipt and session exit](receipt-and-session-exit.md#receipt-and-session-exit)の1）のことも、終了済みのこともある。最初に外れた項目が`failed`の理由（`last_error`）になり、以降は確認しない。
+`validating`のrunに対して、supervisorがセッションと同じleaseの下で、runごとのthreadで次を順に確認する。
+sessionは開いたまま（[turnの後の扱い](headless-worker.md#turnの後の扱い)）のことも、終了済みのこともある。
+最初に外れた項目が`failed`の理由（`last_error`）になり、以降は確認しない。
 
 1. receiptが存在し、`Receipt`として解釈できる。
-2. `run_id`が一致し、`result`が`succeeded`か`already_satisfied`である（`already_satisfied`は`base_checks`も要る。[Receipt and session exit](receipt-and-session-exit.md#baseがすでに満たすときalready_satisfied)）。
+2. `run_id`が一致し、`result`が`succeeded`か`already_satisfied`である（`already_satisfied`は`base_checks`も要る。[already_satisfied](headless-worker.md#baseがすでに満たすときalready_satisfied)）。
    `tests`/`e2e`/`subagent_review`は`failed`でなく、`passed`には証跡、`not_applicable`には理由が空でなく書かれている。
    `commit`は完全なSHAである。
 3. worktreeのHEADがrun branch `dagq/<run-id>`を指し、そのcommitがreceiptの`commit`と一致する。
@@ -52,7 +54,7 @@ related:
    runのsessionには終了を依頼し、終わったらbackgroundのwrapperの残りを止める（resumeは自分のwrapperをbackgroundで起動する。runはworkspaceを開かない。[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
    supervisorはこのrunを[`needs_session`](needs-session.md#needs_session)の手順で自動resumeし、不足しているcheckの実行とreceiptの書き直しを依頼する。
    要求の無いtaskでは8は何もしない。
-9. **Spikeの結果**（[ADR-t1487-1](../../adr/2026-10-04-t1487-1-spike-is-an-execution-class-with-a-judged-result-and-a-durable-replanning-request.md)決定3）: 実行区分が`spike`のtaskのrunだけ、receiptの`spike_result`がそろっていること（[Receipt and session exit](receipt-and-session-exit.md#spikeの結果)）。
+9. **Spikeの結果**（[ADR-t1487-1](../../adr/2026-10-04-t1487-1-spike-is-an-execution-class-with-a-judged-result-and-a-durable-replanning-request.md)決定3）: 実行区分が`spike`のtaskのrunだけ、receiptの`spike_result`がそろっていること（[Spikeの結果](headless-worker.md#spikeの結果)）。
    否定的な結果と未解決は欠けではなく、中身が判定を支えるかは見ない。
    欠けは8と同じく`needs_session`にして自動resumeし、欠けた欄の書き足しを依頼する（codeは`spike_result_missing`）。
    `integrate`も着地の前に読み直したreceiptを同じく検査する。

@@ -25,6 +25,19 @@
 //! store settles it in the transaction that let it rest (a lease given
 //! back, a recovery, a status written with nobody leasing it), and
 //! [`Supervisor::settle_resting_holds`] settles what that left.
+//!
+//! Past the fence no receipt is accepted, and a session waiting for an
+//! answer is not reopened. A held run's turn that wrote a receipt (the
+//! first session's, a revise's or a resume's) has it validated as usual,
+//! but the next step (review, revise, landing) does not start; a run the
+//! validation sent back to `needs_session` waits with that reason. The
+//! return of a lease is not counted as its writer's end: a run whose
+//! registered process has no recorded end (a resume given up) is taken by
+//! the supervisor for the hold's park, which waits for the writer to end
+//! before the run waits. A run whose replanning park ended `blocked` is
+//! the replanning's: the hold takes no lease, and lets it wait once no
+//! writer is in its registered processes or its worktree. A resume after
+//! the release goes on in the same session from where it stopped.
 
 use super::*;
 use crate::domain::background_wrapper::{BackgroundHandle, is_background};

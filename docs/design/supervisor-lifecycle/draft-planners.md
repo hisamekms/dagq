@@ -34,7 +34,7 @@ use caseは`src/application/supervise/draft_planner.rs`、storeは`src/infrastru
 run slotは使わず、[Plan review](plan-review.md#reviseの配送)の`tend_planners`の中で、reviseの配送の後に進める（drain中は立てない）。
 
 1. **出どころ**: runtimeやjobがdraftを作るときに、出どころと材料を`record_draft_origin`で`draft_origins`に書く。
-   `integrate`の`register_follow_ups`はfollow_upのdraftに、workerが付けた種類（[follow_upsの分類コード](receipt-and-session-exit.md#follow_upsの分類コード)、ADR-t947-3）と所属の提案（[follow_upsの所属の提案](receipt-and-session-exit.md#follow_upsの所属の提案)）を材料として書く。
+   `integrate`の`register_follow_ups`はfollow_upのdraftに、workerが付けた種類（[follow_upsの分類コード](headless-worker.md#follow_upsの分類コード)、ADR-t947-3）と所属の提案（[follow_upsの所属の提案](headless-worker.md#follow_upsの所属の提案)）を材料として書く。
    材料に所属の提案の無いdraftはpromptが`(none)`として、種類の無いdraftはpromptと集計が`unlabeled`として扱う。
    runのreviewの`follow_ups`は、supervisorがreviewの判定（着地の前）で同じ経路で種類`docs_drift`のdraftにするので、同じrunのreceiptのdraftより先に対象になりうる（[Review](review.md#文書の照合)）。
    `goal_gap`は、[goal review](goal-review.md)のjobの`gaps`のverdict（と人の`approve_goal`の`gaps`のanswer）からruntimeが登録するdraftの出どころとする。
@@ -157,7 +157,7 @@ draftに再検討の時刻を1つ持たせ、時刻が来たらruntimeのplanner
 [ADR-t947-3](../../adr/2026-09-28-t947-3-follow-ups-carry-category-codes.md)の決定。
 新しいeventは足さず、既存のeventから引く。
 
-- **plannerへの材料**: 2の対象のdraftをplannerに渡すとき、出どころの材料の種類（[Receipt and session exit](receipt-and-session-exit.md#follow_upsの分類コード)）とその定義を、promptのdraftごとの節に載せる（一覧に無い値と`unlabeled`はその旨を添える。`follow_up_category_line`）。
+- **plannerへの材料**: 2の対象のdraftをplannerに渡すとき、出どころの材料の種類（[follow_upsの分類コード](headless-worker.md#follow_upsの分類コード)）とその定義を、promptのdraftごとの節に載せる（一覧に無い値と`unlabeled`はその旨を添える。`follow_up_category_line`）。
 - **判断との突き合わせ**: 8の束のdraftごとの結末と、plannerがそのdraftについて開いた`planner_question`とその答えを、draftの種類で並べる。
   不採用（`canceled`）の理由は[cancelの理由の分類コード](../domain-model.md#cancelの理由の分類コード未実装)（ADR-t947-4）で読む。
 - **集計**: [Stats](commands.md)の`follow_up_categories`。

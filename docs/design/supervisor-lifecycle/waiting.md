@@ -51,7 +51,7 @@ use caseは`src/application/supervise/waiting.rs`、イベントからの状態�
      `worker_question`のaskは閉じない。
      wrapperが黙っていれば（pidは生きている）`wrapper_heartbeat_expired`を記録し、slotで終了を依頼するか段を終えるため`wrapper_silent`で終える。
      `Revise`の沈黙はその後の`ExitWatch`に引き継ぎ、`wrapper_heartbeat_expired`を2度記録しない。
-     slotに戻ったときheartbeatが戻っていれば（終了を依頼する前）、段は黙った印を消して続き、その後のaskで再び待ちに入れ、次の沈黙は`wrapper_heartbeat_expired`を改めて記録する（[黙ったwrapper](receipt-and-session-exit.md#黙ったwrapper)）。
+     slotに戻ったときheartbeatが戻っていれば（終了を依頼する前）、段は黙った印を消して続き、その後のaskで再び待ちに入れ、次の沈黙は`wrapper_heartbeat_expired`を改めて記録する（[黙ったwrapper](headless-worker.md#黙ったwrapper)）。
   3. runがqueue_holdに入っていれば`queue_hold`で終える。
   4. 待ちのあいだに開いた表のaskを`run_waiting_ask_added`で足す。
   5. `Session`のrunで、待ちのあいだに`SessionWatch`がまだ見ていないreceiptが現れたら`session_moved`で終える（どのkindの待ちでも。askの後始末は戻ったslotの`SessionWatch`が行う）。

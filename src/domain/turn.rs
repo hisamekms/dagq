@@ -671,7 +671,9 @@ pub fn commands_path(run_dir: &Path, turn: u64) -> PathBuf {
 
 /// The idle marker the wrapper writes when turn `turn` ended: a `Stop`
 /// shaped object (no background task: a headless turn's background shells
-/// end with it) with the turn's outcome in `dagq_turn`.
+/// end with it) with the turn's outcome in `dagq_turn`. It is `Stop`
+/// shaped so that the watches of the first session, a revise, a resume
+/// and a wait read the idle marker, the receipt and the asks as they are.
 pub fn idle_marker(
     session_id: &str,
     turn: u64,

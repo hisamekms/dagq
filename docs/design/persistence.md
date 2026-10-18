@@ -183,7 +183,7 @@ runの所有・supervisorの登録・runのファイルの約束（[ADR-0007](..
   失敗すれば列はnullのまま`cleanup_failed`を書く。
 - receiptの内容は読んだ時点でevent（`validation_finished`・`integration_receipt`）に写すので、worktreeとrun dirが消えた後も`show`で辿れる。
   `needs_session`をsessionが解消した後のreceiptは、そのrunの最後の`integration_receipt`が持つ。
-- backendの呼び出しの失敗とsessionの終了の依頼は、runのstatusを変えずeventだけで表す（[backendの呼び出しの失敗](supervisor-lifecycle/backend-call-failures.md)、[receiptとsessionの終了](supervisor-lifecycle/receipt-and-session-exit.md)）。
+- backendの呼び出しの失敗とsessionの終了の依頼は、runのstatusを変えずeventだけで表す（[backendの呼び出しの失敗](supervisor-lifecycle/backend-call-failures.md)、[receiptとsessionの終わり](supervisor-lifecycle/headless-worker.md#receiptとsessionの終わり)）。
 - 時刻: 1つの操作は`Clock`を1回読んで使い回し、leaseの鮮度の判定の基準もその時刻にする。
 
 ### queue service

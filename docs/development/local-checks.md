@@ -155,7 +155,7 @@ runtimeはreceiptのcommitのtreeと一致する記録だけをreviewの資料�
 receiptの前に受け入れ条件の各項目を根拠へ対応づける（[ADR-t1420-1](../adr/2026-10-03-t1420-1-worker-maps-each-acceptance-criterion-before-the-receipt.md)。仕組みは[prompt](../design/supervisor-lifecycle/prompt.md)の「受け入れ条件の対応づけ」）。満たせない項目をfollow_upに回して`succeeded`にせず、下の「askにしないもの」とworkerのpromptのaskの規則どおり`worker_question`か`failed`のreceiptにする。このrepositoryでの根拠の書き方:
 
 - testは`<module>::<test>`の名前と流したコマンド（流す範囲は上の「testの範囲」の規則のまま）、文書はpathと節、測定は文書の節・CSVとscriptのpath・コマンドと`--since` / `--until`の区切り。
-- baseがすでに全ての条件を満たし差分が要らないときは、commitせずにreceiptの`result`を`already_satisfied`にし、`base_checks`にbaseで行った確かめのコマンドと結果を書く（[ADR-t1818-1](../adr/2026-10-05-t1818-1-worker-claims-already-satisfied-and-runtime-closes-on-a-verified-snapshot.md)、形は[Receipt and session exit](../design/supervisor-lifecycle/receipt-and-session-exit.md#baseがすでに満たすときalready_satisfied)）。
+- baseがすでに全ての条件を満たし差分が要らないときは、commitせずにreceiptの`result`を`already_satisfied`にし、`base_checks`にbaseで行った確かめのコマンドと結果を書く（[ADR-t1818-1](../adr/2026-10-05-t1818-1-worker-claims-already-satisfied-and-runtime-closes-on-a-verified-snapshot.md)、形は[workerのsession](../design/supervisor-lifecycle/headless-worker.md#baseがすでに満たすときalready_satisfied)）。
   確かめは上の「workerの手元の検証」で許されたものだけで、coverageの関門と全体の`cargo test`は流さない（taskのverifyの全体はruntimeがmainのsnapshotで流す）。
 - 測定のtaskでは条件が求める周回数と実際に流した回数を比べ、足りなければ理由とともに`worker_question`か`failed`にし、少ない周回の結果で`succeeded`にしない。
 - 条件が「ほかに同じ形のもの」のように範囲を広く書くときは、grepなどで洗い出した一覧と各々の扱い（直した・残す理由）を`summary`に書く。条件が「各testの前後の秒」のように値を項目ごとに求めるときは、合計だけでなく求めた単位で書く。
@@ -164,4 +164,4 @@ receiptの前に受け入れ条件の各項目を根拠へ対応づける（[ADR
 
 ## askにしないもの
 
-workerが`dagq ask`にしてよいのは、人が要る理由（[ADR-0047](../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)決定41の`reason_category`。workerでは主に受け入れ条件や範囲が変わる`scope`と、成果を捨てるかどうかの`discard`）に当たるときだけ。当たらないもの（実装の選び方、ADRやmigrationの番号の衝突など）は自分で決めてreceiptの`summary`に書き、taskの範囲の外に出るなら`failed`のreceiptに理由（必要なパスや作業）を書く。ADRの番号の衝突の直し方は[文書の規則](documents.md)の「ADRのID」、migrationは[migrationの規則](migrations.md)の「番号」、cargo-nextestが無いときは上の「hostに触らない」。askの打ち方・`--topic`の分類コード・follow_upsの`category`はworkerのpromptと[ask](../design/supervisor-lifecycle/ask.md#worker_questionの分類コード)・[Receipt and session exit](../design/supervisor-lifecycle/receipt-and-session-exit.md#follow_upsの分類コード)が持つ。
+workerが`dagq ask`にしてよいのは、人が要る理由（[ADR-0047](../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)決定41の`reason_category`。workerでは主に受け入れ条件や範囲が変わる`scope`と、成果を捨てるかどうかの`discard`）に当たるときだけ。当たらないもの（実装の選び方、ADRやmigrationの番号の衝突など）は自分で決めてreceiptの`summary`に書き、taskの範囲の外に出るなら`failed`のreceiptに理由（必要なパスや作業）を書く。ADRの番号の衝突の直し方は[文書の規則](documents.md)の「ADRのID」、migrationは[migrationの規則](migrations.md)の「番号」、cargo-nextestが無いときは上の「hostに触らない」。askの打ち方・`--topic`の分類コード・follow_upsの`category`はworkerのpromptと[ask](../design/supervisor-lifecycle/ask.md#worker_questionの分類コード)・[workerのsession](../design/supervisor-lifecycle/headless-worker.md#follow_upsの分類コード)が持つ。

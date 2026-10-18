@@ -121,7 +121,7 @@ runtimeのplanner ──> 節ごとの上限（prompt_fit::Fit）→ 記録 → 
 
 - workerのpromptはreceiptの書き方の直前に`ACCEPTANCE_MAP`を置く（[ADR-t1420-1](../../adr/2026-10-03-t1420-1-worker-maps-each-acceptance-criterion-before-the-receipt.md)）。
   各項目を満たすものへ対応づけ、満たせない項目を`follow_ups`に回して`succeeded`にしない。
-- baseが満たすときは`ALREADY_SATISFIED`が書き方を言い、verify全体を求めない（[receipt](receipt-and-session-exit.md#baseがすでに満たすときalready_satisfied)）。
+- baseが満たすときは`ALREADY_SATISFIED`が書き方を言い、verify全体を求めない（[receipt](headless-worker.md#baseがすでに満たすときalready_satisfied)）。
 - resumeとreviseの依頼はreceiptを書き直す手順に`ACCEPTANCE_REMAP`と`FOLLOW_UP_PROPOSAL_AGAIN`を足す。
 - どのproviderのworkerも同じ文で、対応づけにも文書の照合にも検査のコマンドやtestの実行は求めない。
 - Codexのworkerの自分のdiffの見直しはこの対応づけの手順に寄せ、受け入れ条件との照合を2度言わない（下の[subagent review](#subagent-review)）。
