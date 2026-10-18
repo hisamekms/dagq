@@ -350,8 +350,10 @@ pub fn next_to_review(candidates: &[PlanReviewCandidate]) -> Option<ProposalId> 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanVerdictDecision {
     pub decision: PlanReviewDecision,
-    /// Why a `revise` became a `concern`: the proposal was sent back
-    /// [`MAX_PLAN_REVISES`] times already.
+    /// Why the decision is not the verdict's own: a `revise` became a
+    /// `concern` as the proposal was sent back [`MAX_PLAN_REVISES`] times
+    /// already, or a `pass` reopening past [`REOPEN_LIMIT`] became a
+    /// `revise` (a `concern` past those revises).
     pub overridden: Option<String>,
     pub concern: Option<PlanConcernDecision>,
 }
@@ -359,8 +361,9 @@ pub struct PlanVerdictDecision {
 /// What the runtime makes of `verdict` on `proposal`, sent back
 /// `revise_count` times when its job started: a `revise` past
 /// [`MAX_PLAN_REVISES`] is a `concern`, a sure `concern` is applied as its
-/// recommendation ([`PlanReviewVerdict::decide_concern`]), and the rest is
-/// the verdict's own.
+/// recommendation ([`PlanReviewVerdict::decide_concern`]), a `pass`
+/// reopening past [`REOPEN_LIMIT`] is a `revise` (past the revises, a
+/// `concern`), and the rest is the verdict's own.
 pub fn decide_verdict(
     proposal: ProposalId,
     verdict: &PlanReviewVerdict,
@@ -380,6 +383,39 @@ pub fn decide_verdict(
         },
         decision => (decision, None),
     };
+    // A pass reopening past the limit sends the proposal back, within the
+    // revises as any other (ADR-t2751-1); `decide_reopen` keeps it.
+    let count = verdict.reopen.len();
+    let (decision, overridden) = match decision {
+        PlanReviewDecision::Pass if count > REOPEN_LIMIT => {
+            let over = reopen_over_limit(count);
+            if revise_count >= MAX_PLAN_REVISES {
+                (
+                    PlanReviewDecision::Concern,
+                    Some(format!(
+                        "{over}, and proposal {proposal} was sent back {revise_count} times already (at most {MAX_PLAN_REVISES})"
+                    )),
+                )
+            } else {
+                (PlanReviewDecision::Revise, Some(over))
+            }
+        }
+        decision => (decision, overridden),
+    };
+    // A sure concern applied as a pass says what it became instead: a
+    // send-back, or left to a person past the revises.
+    let concern = concern.map(|mut decided| {
+        if decided.applied == Some(PlanReviewDecision::Pass) && decision != PlanReviewDecision::Pass
+        {
+            if decision == PlanReviewDecision::Revise {
+                decided.applied = Some(PlanReviewDecision::Revise);
+            } else {
+                decided.applied = None;
+                decided.escalated_because = Some(PlanConcernEscalation::ReviseLimit);
+            }
+        }
+        decided
+    });
     PlanVerdictDecision {
         decision,
         overridden,
@@ -605,6 +641,78 @@ pub fn reopen_reason(reviewed: ProposalId, task_id: TaskId, reason: &str) -> Str
     format!(
         "plan review of proposal {reviewed} found that ready task {task_id} has to change: {reason}"
     )
+}
+
+/// How many ready tasks one plan review may reopen (ADR-t2751-1). An
+/// ordinary reopen names one or two tasks, and a few are still worth a
+/// planner each; more say that the reviewed proposal breaks the registered
+/// tasks wholesale, which that proposal absorbs (keeping them working on
+/// its side, or splitting its change) instead of each task's own planner,
+/// who would otherwise hold the planners and the claim for long.
+pub const REOPEN_LIMIT: usize = 5;
+
+/// What the runtime makes of a verdict's `reopen` (ADR-t2751-1): within
+/// [`REOPEN_LIMIT`] each entry is applied; past it none is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReopenDecision {
+    /// Each entry is reopened, or skipped by [`reopen_refusal`].
+    Apply,
+    /// No entry is reopened, and the reviewed proposal is sent back.
+    OverLimit(ReopenOverLimit),
+}
+
+/// A reopen past [`REOPEN_LIMIT`]: what the verdict's decision becomes and
+/// what is recorded and told.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReopenOverLimit {
+    /// A `pass` becomes a `revise`; a `revise` and a `concern` stay.
+    pub decision: PlanReviewDecision,
+    /// Why the decision is not the one given, kept when it was already
+    /// overridden.
+    pub overridden: Option<String>,
+    /// The reason added to a `revise`'s reasons, or to the text of a
+    /// `concern`'s ask.
+    pub reason: String,
+    /// Why each entry, in order, is not reopened (`reopen_skipped`).
+    pub skipped: Vec<String>,
+}
+
+/// Why `count` reopens are past [`REOPEN_LIMIT`].
+fn reopen_over_limit(count: usize) -> String {
+    format!("it reopens {count} ready tasks, more than the limit of {REOPEN_LIMIT}")
+}
+
+/// Whether the `reopen` entries of a verdict on proposal `reviewed` are
+/// applied, given the `decision` the runtime made of it and why it is not
+/// the verdict's own (`overridden`).
+pub fn decide_reopen(
+    reviewed: ProposalId,
+    decision: PlanReviewDecision,
+    overridden: Option<&str>,
+    reopen: &[Reopen],
+) -> ReopenDecision {
+    let count = reopen.len();
+    if count <= REOPEN_LIMIT {
+        return ReopenDecision::Apply;
+    }
+    let over = reopen_over_limit(count);
+    let reason = format!(
+        "plan review of proposal {reviewed} would reopen {count} ready tasks, more than the limit of {REOPEN_LIMIT}: keep the registered tasks working on this proposal's side (compatibility), or split the change so that only a few tasks are reopened"
+    );
+    let skipped = reopen
+        .iter()
+        .map(|entry| format!("task {} is not reopened: {over}", entry.task_id))
+        .collect();
+    let (decision, overridden) = match decision {
+        PlanReviewDecision::Pass => (PlanReviewDecision::Revise, Some(over)),
+        decision => (decision, overridden.map(str::to_owned)),
+    };
+    ReopenDecision::OverLimit(ReopenOverLimit {
+        decision,
+        overridden,
+        reason,
+        skipped,
+    })
 }
 
 /// The tasks of the proposal edited while its job ran (ADR-0041 decision
@@ -1127,6 +1235,111 @@ mod tests {
         assert_eq!(
             reopen_reason(ProposalId::new(1), task, "it must use the new API"),
             "plan review of proposal 1 found that ready task 4 has to change: it must use the new API"
+        );
+    }
+
+    /// Up to [`REOPEN_LIMIT`] entries are applied whatever the decision;
+    /// one more and none is: each is skipped naming the count and the
+    /// limit, a pass becomes a revise recorded as overridden, a revise
+    /// keeps its decision, and a concern stays a concern with an override
+    /// it already had (ADR-t2751-1).
+    #[test]
+    fn a_reopen_past_the_limit_applies_none_and_sends_the_reviewed_proposal_back() {
+        use PlanReviewDecision as D;
+        let reviewed = ProposalId::new(3);
+        let entries = |count: i64| -> Vec<Reopen> {
+            (1..=count)
+                .map(|id| Reopen {
+                    task_id: TaskId::new(id),
+                    reason: "it must use the new API".into(),
+                })
+                .collect()
+        };
+        let limit = i64::try_from(REOPEN_LIMIT).unwrap();
+        for decision in [D::Pass, D::Revise, D::Concern] {
+            for count in [0, 1, limit] {
+                assert_eq!(
+                    decide_reopen(reviewed, decision, None, &entries(count)),
+                    ReopenDecision::Apply
+                );
+            }
+        }
+        let over = entries(limit + 1);
+        let reason = "plan review of proposal 3 would reopen 6 ready tasks, more than the limit of 5: keep the registered tasks working on this proposal's side (compatibility), or split the change so that only a few tasks are reopened";
+        let skipped: Vec<String> = (1..=6)
+            .map(|id| {
+                format!(
+                    "task {id} is not reopened: it reopens 6 ready tasks, more than the limit of 5"
+                )
+            })
+            .collect();
+        assert_eq!(
+            decide_reopen(reviewed, D::Pass, None, &over),
+            ReopenDecision::OverLimit(ReopenOverLimit {
+                decision: D::Revise,
+                overridden: Some("it reopens 6 ready tasks, more than the limit of 5".into()),
+                reason: reason.into(),
+                skipped: skipped.clone(),
+            })
+        );
+        // The runtime's decision on such a pass: a revise, a concern past
+        // the revises; a revise or a concern of the verdict stays.
+        let mut verdict =
+            PlanReviewVerdict::parse(r#"{"verdict": "pass", "reasons": [], "summary": "ok"}"#)
+                .unwrap();
+        verdict.reopen = over.clone();
+        let decided = decide_verdict(reviewed, &verdict, MAX_PLAN_REVISES - 1);
+        assert_eq!(decided.decision, D::Revise);
+        assert_eq!(
+            decided.overridden.as_deref(),
+            Some("it reopens 6 ready tasks, more than the limit of 5")
+        );
+        let decided = decide_verdict(reviewed, &verdict, MAX_PLAN_REVISES);
+        assert_eq!(decided.decision, D::Concern);
+        assert_eq!(
+            decided.overridden.as_deref(),
+            Some(
+                "it reopens 6 ready tasks, more than the limit of 5, and proposal 3 was sent back 2 times already (at most 2)"
+            )
+        );
+        // A sure concern recommending ready is sent back as well, and its
+        // record says so: applied as a revise, or left to a person.
+        let mut sure = PlanReviewVerdict::parse(
+            r#"{"verdict": "concern", "reasons": ["x"], "summary": "ok",
+                "recommendation": "ready", "confidence": "high"}"#,
+        )
+        .unwrap();
+        sure.reopen = over.clone();
+        let decided = decide_verdict(reviewed, &sure, 0);
+        assert_eq!(decided.decision, D::Revise);
+        assert_eq!(decided.concern.unwrap().applied, Some(D::Revise));
+        let decided = decide_verdict(reviewed, &sure, MAX_PLAN_REVISES);
+        assert_eq!(decided.decision, D::Concern);
+        let concern = decided.concern.unwrap();
+        assert_eq!(concern.applied, None);
+        assert_eq!(
+            concern.escalated_because,
+            Some(PlanConcernEscalation::ReviseLimit)
+        );
+        verdict.reopen.pop();
+        assert_eq!(decide_verdict(reviewed, &verdict, 0).decision, D::Pass);
+        assert_eq!(
+            decide_reopen(reviewed, D::Revise, None, &over),
+            ReopenDecision::OverLimit(ReopenOverLimit {
+                decision: D::Revise,
+                overridden: None,
+                reason: reason.into(),
+                skipped: skipped.clone(),
+            })
+        );
+        assert_eq!(
+            decide_reopen(reviewed, D::Concern, Some("sent back twice"), &over),
+            ReopenDecision::OverLimit(ReopenOverLimit {
+                decision: D::Concern,
+                overridden: Some("sent back twice".into()),
+                reason: reason.into(),
+                skipped,
+            })
         );
     }
 

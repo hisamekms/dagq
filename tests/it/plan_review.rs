@@ -1435,6 +1435,73 @@ fn a_ready_task_the_review_reopens_leaves_the_claim_for_a_planner() {
     assert!(exit_requested(&fx.db, planners[0].id));
 }
 
+/// A pass that reopens more ready tasks than the limit reopens none of
+/// them: each is skipped with the count and the limit, and the reviewed
+/// proposal goes to a planner of the runtime's as a revise saying so
+/// (ADR-t2751-1). The decision is `domain::plan_review::decide_reopen`'s.
+#[test]
+fn a_reopen_past_the_limit_reopens_nothing_and_sends_the_reviewed_proposal_back() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let blocker = TaskId::new(1);
+    let ready: Vec<TaskId> = (0..=dagq::domain::plan_review::REOPEN_LIMIT)
+        .map(|n| {
+            let task = add(
+                &mut queue,
+                &format!("ready {n}"),
+                &[blocker],
+                Priority::Normal,
+            );
+            queue.transition(task, TaskAction::BypassReview).unwrap();
+            task
+        })
+        .collect();
+    let breaking = add(&mut queue, "breaking one", &[blocker], Priority::Normal);
+    let reviewed = submit(&mut queue, &[breaking], None);
+    let reopen: Vec<Value> = ready
+        .iter()
+        .map(|task| json!({"task_id": task, "reason": "it must use the new API"}))
+        .collect();
+    let reviewer = StubReviewer::new(&[json!({
+        "verdict": "pass", "reasons": [], "summary": "ok", "reopen": reopen
+    })]);
+    let backend = PlanWorkspace::default();
+    supervise(&fx, &backend, &reviewer);
+    for &task in &ready {
+        assert_eq!(status(&mut queue, task), TaskStatus::Ready);
+        assert!(events(&mut queue, task, "task_reopened").is_empty());
+    }
+    assert_eq!(
+        queue.show_proposal(reviewed).unwrap().status(),
+        ProposalStatus::Revising
+    );
+    let finished = events(&mut queue, breaking, "plan_review_finished");
+    assert_eq!(finished[0]["decision"], "revise");
+    assert_eq!(finished[0]["reopened"], json!([]));
+    let skipped = finished[0]["reopen_skipped"].as_array().unwrap();
+    assert_eq!(skipped.len(), ready.len());
+    assert!(
+        skipped[0]
+            .as_str()
+            .unwrap()
+            .contains("it reopens 6 ready tasks, more than the limit of 5"),
+        "{finished:?}"
+    );
+    let planners = queue.planners(false).unwrap();
+    assert_eq!(planners.len(), 1);
+    assert_eq!(planners[0].proposal_id, Some(reviewed));
+    let prompt = fs::read_to_string(
+        planners_dir(&fx.db)
+            .join(planners[0].id.to_string())
+            .join("prompt.txt"),
+    )
+    .unwrap();
+    assert!(
+        prompt.contains("would reopen 6 ready tasks, more than the limit of 5"),
+        "{prompt}"
+    );
+}
+
 /// A reopened task whose proposal is withdrawn goes back to `draft` with
 /// origin `reopened`, and a planner of the runtime's takes it up with the
 /// reopen's reason; the proposal's other member only goes back to `draft`

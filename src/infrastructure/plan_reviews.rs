@@ -33,7 +33,9 @@ use crate::{
         TaskAction, TaskId, TaskStatus,
         headless_job::JobSession,
         plan_quality::{self, ProposalFeatures},
-        plan_review::{self, PassPriority, PlanReviewEnd, PlanReviewOutcome, ReviewHold},
+        plan_review::{
+            self, PassPriority, PlanReviewEnd, PlanReviewOutcome, ReopenDecision, ReviewHold,
+        },
         prediction, proposal, review_reason,
         sessions::SESSION_CLOSED,
     },
@@ -618,12 +620,27 @@ impl PlanReviewStore for SqliteQueue {
         }
         let predictions =
             prediction::parse_predictions(apply.verdict.predictions.as_ref(), &submitted);
+        // A reopen past its limit reopens nothing and sends the reviewed
+        // proposal back instead (ADR-t2751-1).
+        let over_limit = match plan_review::decide_reopen(
+            job.proposal_id,
+            apply.decision,
+            apply.overridden.as_deref(),
+            &apply.verdict.reopen,
+        ) {
+            ReopenDecision::Apply => None,
+            ReopenDecision::OverLimit(over) => Some(over),
+        };
+        let (decision, overridden) = match &over_limit {
+            Some(over) => (over.decision, over.overridden.clone()),
+            None => (apply.decision, apply.overridden.clone()),
+        };
         // A pass leaves a priority it may not change (ADR-t1971-1
         // decision 3, by the records of ADR-t1975-1 decision 7) unapplied
         // with why, and the rest of the verdict goes on.
         let mut actions = Vec::new();
         let mut actions_skipped = Vec::new();
-        if apply.decision == PlanReviewDecision::Pass {
+        if decision == PlanReviewDecision::Pass {
             for action in &apply.verdict.actions {
                 let refusal = match action {
                     PlanReviewAction::LowerPriority { task_id, .. }
@@ -644,12 +661,12 @@ impl PlanReviewStore for SqliteQueue {
                 }
             }
         }
-        plan_review::check_verdict(&members, apply.decision, &apply.verdict)
+        plan_review::check_verdict(&members, decision, &apply.verdict)
             .map_err(anyhow::Error::msg)?;
         let mut applied = PlanReviewApplied::default();
         let mut skipped = Vec::new();
         let mut priorities_inherited = Vec::new();
-        match apply.decision {
+        match decision {
             PlanReviewDecision::Pass => {
                 for action in actions {
                     apply_action(&tx, action, &stamp)?;
@@ -669,19 +686,34 @@ impl PlanReviewStore for SqliteQueue {
             }
             PlanReviewDecision::Revise => {
                 proposals::send_back(&tx, job.proposal_id, &stamp)?;
-                await_delivery(&tx, job.proposal_id, &apply.revise_reasons, now)?;
+                let mut reasons = apply.revise_reasons.clone();
+                reasons.extend(over_limit.as_ref().map(|over| over.reason.clone()));
+                await_delivery(&tx, job.proposal_id, &reasons, now)?;
             }
             PlanReviewDecision::Concern => {
                 set_hold(&tx, job.proposal_id, Some(ReviewHold::Concern))?;
-                let ask = apply
+                let mut ask = apply
                     .ask
-                    .as_ref()
+                    .clone()
                     .context("a concern opens an approve_plan ask")?;
+                if let Some(over) = &over_limit {
+                    ask.question.push('\n');
+                    ask.question.push_str(&over.reason);
+                    ask.question.push('.');
+                }
                 ask.validate()?;
-                applied.ask = Some(insert_ask(&tx, ask)?);
+                applied.ask = Some(insert_ask(&tx, &ask)?);
             }
         }
-        for reopen_task in &apply.verdict.reopen {
+        let reopens = if over_limit.is_some() {
+            &[][..]
+        } else {
+            &apply.verdict.reopen[..]
+        };
+        if let Some(over) = &over_limit {
+            skipped.extend(over.skipped.iter().cloned());
+        }
+        for reopen_task in reopens {
             match reopen(
                 &tx,
                 reopen_task.task_id,
@@ -694,24 +726,17 @@ impl PlanReviewStore for SqliteQueue {
                 Err(why) => skipped.push(why),
             }
         }
-        finish_row(
-            &tx,
-            job.id,
-            now,
-            apply.decision.into(),
-            Some(&verdict_json),
-            None,
-        )?;
+        finish_row(&tx, job.id, now, decision.into(), Some(&verdict_json), None)?;
         let mut finished = json!({
                 "proposal_id": job.proposal_id,
                 "plan_review_id": job.id,
                 "attempt": job.attempt,
                 "verdict": apply.verdict.verdict,
-                "decision": apply.decision,
-                "overridden": apply.overridden,
+                "decision": decision,
+                "overridden": overridden,
                 "reasons": apply.verdict.reasons,
                 "reason_codes": apply.verdict.recorded_codes(),
-                "primary_code": (apply.decision != PlanReviewDecision::Pass)
+                "primary_code": (decision != PlanReviewDecision::Pass)
                     .then(|| review_reason::primary(&apply.verdict.recorded_codes())),
                 "summary": apply.verdict.summary,
                 "actions": apply.verdict.actions,

@@ -21,6 +21,7 @@ related:
   - adr-t1981-1
   - adr-t1971-1
   - adr-t1975-1
+  - adr-t2751-1
 ---
 
 # Plan review (supervisor)
@@ -37,7 +38,7 @@ submit -> 候補の順序 -> job（読むだけ） -> verdict -+- pass -----> ta
   ^                                                +- revise ---> plannerへ配送 -> 出し直し --+
   |                                                +- concern --> AIが決める / approve_planのask -> 人のanswer
   +-------------------------------------------------------------------------------------------+
-失敗 -> 保留（plan review by hand）    reopen -> proposalの外のreadyのtaskをruntimeのproposalへ
+失敗 -> 保留（plan review by hand）    reopen -> proposalの外のreadyのtaskをruntimeのproposalへ（上限を超えれば1件も動かさず、検査中のproposalは最終の判定でreviseかconcernのaskへ）
 ```
 
 ## 責務と境界
@@ -84,6 +85,9 @@ submit -> 候補の順序 -> job（読むだけ） -> verdict -+- pass -----> ta
 - runtimeがverdictから決めること: `domain::plan_review::decide_verdict`。
   reviseの上限はrunのreviewとは別に数える（[ADR-t2256-1](../../adr/2026-10-11-t2256-1-raise-the-run-review-revise-limit-and-decouple-plan-review.md)）。
 - 適用（検査中の編集、passでの由来と優先度、reopen、重さの予測）: `PlanReviewStore::finish_plan_review`。
+- reopenの上限と超えたときの扱い: `domain::plan_review::REOPEN_LIMIT`と`decide_reopen`（[ADR-t2751-1](../../adr/2026-10-18-t2751-1-plan-review-reopens-at-most-a-few-ready-tasks-and-sends-back-a-change-that-breaks-many.md)）。
+  上限を超えたreopenは1件も適用せず、多くの登録済みのtaskを壊す変更は検査中のproposalの側で互換を守るか分けるよう求める。
+  passはrevise（reviseの上限を過ぎていればconcern）になり、reviseとconcernは判定を保って理由を足す（reviseは差し戻しの理由に、concernはaskの文に）。
 - 由来と優先度の出どころによる扱い: `domain::plan_review::priority_refusal`と`priorities_to_inherit`（ADR-t1971-1、[ADR-t1975-1](../../adr/2026-10-08-t1975-1-runtime-records-origin-and-person-set-priority-and-ai-actors-cannot-change-it.md)決定7）。
 - 約束: jobが自分でしてよい修正は`PlanReviewAction`と`reopen`だけで、それ以外はreviseでplannerが直す。
 - 重さの予測は記録だけでverdictを変えない（[ADR-0079](../../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)の決定2）。

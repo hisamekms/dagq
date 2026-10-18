@@ -795,6 +795,27 @@ fn plan_prompt(queued: i64, left_out: usize) -> (String, usize) {
     (case.prompt().text, old_size)
 }
 
+/// The reopen line gives the limit and asks for a send-back keeping the
+/// registered tasks working when many would break (ADR-t2751-1).
+#[test]
+fn plan_review_reopens_a_few_tasks_and_sends_back_a_change_that_breaks_many() {
+    let prompt = plan_case(1, 0).prompt().text;
+    let line = prompt
+        .lines()
+        .find(|line| line.contains("name it in reopen"))
+        .unwrap();
+    for part in [
+        &format!(
+            "Reopen only the few tasks that have to change, at most {}",
+            crate::domain::plan_review::REOPEN_LIMIT
+        ),
+        "when many registered tasks would break, reopen none and send this proposal back (revise) asking it to keep them working on its own side (compatibility)",
+        "past the limit the runtime reopens none of them and sends this proposal back itself",
+    ] {
+        assert!(line.contains(part), "{part} in {line}");
+    }
+}
+
 /// A follow_up of the proposal carries its membership judgements with
 /// the version check, another task none, and the prompt asks plan
 /// review to start from the planner's mapping and read the evidence
