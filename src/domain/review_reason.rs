@@ -134,10 +134,11 @@ pub(crate) enum PrintedReason {
     Coded(CodedReason),
 }
 
-/// The codes are labels for `stats` only (ADR-t947-1 decision 3), so their
-/// shape never fails the verdict: `codes` may be one string or an array, a
-/// value of another shape leaves the item unlabeled, and other fields are
-/// ignored.
+/// The codes feed `stats`, `kpi` and the judgment past the revise limit
+/// ([`converged`], ADR-t2599-1), yet their shape never fails the verdict:
+/// `codes` may be one string or an array, a value of another shape leaves
+/// the item unlabeled (a code finding there, fail closed), and other
+/// fields are ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(crate) struct CodedReason {
     text: String,
