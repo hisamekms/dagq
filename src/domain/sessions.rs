@@ -553,7 +553,10 @@ pub const HOOK_KINDS: [&str; 3] = [RUNTIME_PLANNER, INBOX, PLANNER];
 pub const TOKEN_CUT_KINDS: [&str; 2] = [INBOX, PLANNER];
 
 /// How long after a span opened, or after its last cut, the supervisor
-/// cuts its tokens again while it is open: an hour.
+/// cuts its tokens again while it is open: an hour. It is judged only as
+/// often as the transcripts' turns are recorded
+/// (`supervise::SESSION_TURNS_INTERVAL`), so cuts may be up to that much
+/// further apart.
 pub const TOKEN_CUT_INTERVAL_MS: i64 = 60 * 60 * 1000;
 
 /// How long after a span closed the supervisor still makes its cut at the

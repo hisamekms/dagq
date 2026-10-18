@@ -343,7 +343,8 @@ fn read_rollout(path: &Path, session: &str) -> Result<RolloutFile, &'static str>
 /// the files of the [`ROLLOUT_DAYS`] latest day directories written at
 /// `since` or later (every one when `since` is `None`). A child thread
 /// writes a rollout of its own while the root's turn runs, a child of an
-/// earlier turn appending to the one it started.
+/// earlier turn appending to the one it started. A child's file whose
+/// modification time was rewritten to before `since` is missed.
 fn child_rollouts(sessions: &Path, thread: &str, root: &Path, since: Option<i64>) -> Vec<PathBuf> {
     let written_since = |path: &Path| {
         since.is_none_or(|since| {
@@ -396,7 +397,9 @@ fn child_rollouts(sessions: &Path, thread: &str, root: &Path, since: Option<i64>
 /// (`task_started`), and the `token_usage_record`s of the thread's session
 /// made in them, its child threads' included. Else why they cannot be
 /// counted: [`ROLLOUT_MISSING`], [`ROLLOUT_UNREADABLE`],
-/// [`TOKEN_USAGE_RECORD_MISSING`] or [`ROLLOUT_TURN_MISSING`].
+/// [`TOKEN_USAGE_RECORD_MISSING`] or [`ROLLOUT_TURN_MISSING`]. `codex exec`'s
+/// output names no turn, so the Execution's root turns are told by when
+/// they started.
 pub fn rollout_usage(
     sessions: &Path,
     thread: &str,

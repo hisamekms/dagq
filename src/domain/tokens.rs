@@ -100,7 +100,7 @@ pub enum TokenSource {
     ResultUsage,
     /// Codex's `turn.completed`, the thread's running total, which leaves
     /// the child threads out: the fallback for a rollout that could not be
-    /// counted.
+    /// counted. It can be below the sum of the rollout's records.
     ThreadUsage,
     /// The assistant records of a Claude Code transcript, each message once
     /// by its `message.id` ([`span_usage`]): the cuts of an interactive
@@ -191,6 +191,8 @@ pub const CONTEXT_NOT_READ: &str = "context_not_read";
 /// how many times the context was compacted. Only the top-level agent's
 /// calls are counted: a Claude subagent's and a Codex child thread's are
 /// not. `None` with a `reason` is not measured, told from a measured 0.
+/// The cuts of an interactive session (the inbox, a person's planner) are
+/// no Execution and measure none.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecutionContext {
     /// The largest input of one call (`peak_context`): Claude's
@@ -490,6 +492,9 @@ pub struct RolloutUsage {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TurnContext {
     /// The largest `last_token_usage.input_tokens` of its `token_count`s.
+    /// A turn's first `token_count` may carry the previous Execution's last
+    /// call's `last_token_usage`, so with a compaction between them the peak
+    /// may read too large.
     pub peak: Option<i64>,
     /// The last `model_context_window` it names.
     pub window: Option<i64>,

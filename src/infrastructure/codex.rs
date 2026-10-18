@@ -60,7 +60,10 @@ impl Codex {
     }
 
     /// The `sessions` directory of Codex's home; `None` when neither
-    /// `CODEX_HOME` nor `HOME` is set.
+    /// `CODEX_HOME` nor `HOME` is set. It is the one place both a turn's
+    /// and a job's rollouts are read from: a Codex worker does not run in a
+    /// container (docs/design/container-runtime.md), so its rollouts are on
+    /// the host.
     pub fn sessions_dir(&self) -> Option<PathBuf> {
         let home = self.home.clone().or_else(|| {
             std::env::var_os("CODEX_HOME")

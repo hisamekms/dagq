@@ -26,7 +26,10 @@ pub enum ReviewJobId {
 
 impl ReviewJobId {
     /// The agent the job is of; `None` for the whole review. Its
-    /// `headless_jobs` row's `label` and its events' `agent` are this.
+    /// `headless_jobs` row's `label` and its events' `agent` are this. An
+    /// attempt of a review has the whole review's job and one per agent,
+    /// each recording its own Execution, so an end is matched to a job by
+    /// this as well as by its run and attempt.
     pub fn agent(&self) -> Option<&str> {
         match self {
             Self::Whole => None,
@@ -91,7 +94,11 @@ impl JobMiss {
 /// one retry per review across its stages), and while a provider can run
 /// it (`manual`: `--no-claude` left none, so a person reviews it). Every
 /// kind of miss counts alike: a job that could not start, timed out, exited
-/// non-zero or gave no readable answer.
+/// non-zero or gave no readable answer. A `review_job_finished` that says
+/// it runs again (or that it was `held` for its provider) is not the end of
+/// its `headless_jobs` row: the job starts again in a row of its own, so a
+/// supervisor that takes over does not count that end as the row's
+/// Execution ([`crate::domain::headless_job::JobOn`]).
 pub const fn runs_again(retry: bool, job_again: bool, review_retried: bool, manual: bool) -> bool {
     retry && !job_again && !review_retried && !manual
 }

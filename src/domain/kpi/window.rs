@@ -1183,8 +1183,13 @@ impl<'a> Context<'a> {
     /// and provider and per its models in the strata of a model. Unless the
     /// records cover the whole window (`Coverage::Full`; an actor's stratum
     /// by its own records) both are null, not 0 nor a part to be judged
-    /// against: what ended before the records began is not in them.
-    /// Returns the coverage.
+    /// against: what ended before the records began is not in them. The
+    /// strata other than `actor=` are judged by the records of every actor,
+    /// so an actor whose records began later lacks its earlier part there
+    /// (its `actor=` stratum tells). Only an Execution of a run (a worker's
+    /// turn, a review, a recovery job) is in `change=` and `area=` (a run
+    /// with no areas, one not landed, under `area=unknown`), and those
+    /// strata's landings are their own; the others' are `all`'s. Returns the coverage.
     fn token_kpis(
         &self,
         stats: &stats::Stats,

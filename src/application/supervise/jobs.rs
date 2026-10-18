@@ -212,6 +212,11 @@ pub struct JobSubject {
     /// Whether it is a job of a run's review stage, whose timeout
     /// `[review.jobs]` sets by its kind.
     pub(super) review_stage: bool,
+    /// Its `headless_jobs.label`: of a run's review, the agent its job is
+    /// of ([`crate::domain::review_jobs::ReviewJobId::agent`]; none for the
+    /// whole review's), so that the row tells its run and which job of the
+    /// attempt it is. Other jobs name what they are about here (a review's
+    /// program, a recovery job's alert, an agent eval's case).
     pub(super) label: Option<String>,
     pub(super) run_id: Option<RunId>,
     pub(super) proposal_id: Option<crate::domain::ProposalId>,

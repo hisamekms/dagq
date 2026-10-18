@@ -8,6 +8,10 @@
 //! count: an event that ends an Execution but predates that form (a
 //! `turn_finished` counted from `result.usage`, a job's end without
 //! tokens) and the tokens a span recorded at its close are not mixed in.
+//! The inbox's and a person's planner's spans count by their cuts only: a
+//! span without a cut, and what a span used after its last cut (its cut at
+//! the close missed or not measured), are not filled in from its tokens at
+//! the close and are in no window.
 //! When the records start is `recorded_from`, and `coverage` says whether
 //! the window is wholly, partly or not at all after it. The records are
 //! advisory: the files they are counted from are the executing side's to
@@ -113,7 +117,9 @@ pub struct Execution {
     /// `None` when its tokens could not be counted.
     pub tokens: Option<Counts>,
     /// Its tokens per model; together they are `tokens`. What no model
-    /// was named for is [`UNKNOWN`]'s.
+    /// was named for is [`UNKNOWN`]'s; an Execution recorded without them
+    /// has all of `tokens` under its event's model ([`UNKNOWN`] without
+    /// one).
     pub by_model: Vec<(String, Counts)>,
     /// How large its context grew; `None` when its record has none
     /// ([`super::context`]).

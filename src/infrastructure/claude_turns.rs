@@ -391,7 +391,11 @@ impl TurnReader for ClaudeTurnReader {
 /// `modelUsage` (an older Claude Code), the `usage` of the call alone,
 /// without its subagents ([`MODEL_USAGE_MISSING`]); nothing without
 /// either. The subagents it started are `subagent_stats.spawned`, the
-/// call's own.
+/// call's own. A job runs a new session each time, so the totals are the
+/// job's own; a resumed turn's own are what it added to them
+/// ([`crate::domain::turn::turn_own_models`]). The `usage` of the stream's
+/// `assistant` events is a partial count taken when the call started, so
+/// it gives no tokens (only the largest input, [`ContextCounter`]).
 pub fn result_tokens(result: Option<&Value>) -> ExecutionTokens {
     let Some(result) = result else {
         return ExecutionTokens::unmeasured(NO_RESULT);
