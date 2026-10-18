@@ -146,7 +146,7 @@ fn lint_reports_violations_by_code_and_passes_a_sound_plan() {
     let sound = ["--acceptance", "works", "--verify", "cargo test"];
     ok(&db, &[&["add", "done"][..], &sound].concat());
     ok(&db, &["ready", "1", "--bypass-review"]);
-    ok(&db, &["cancel", "1"]);
+    ok(&db, &["cancel", "1", "--reason", "stale"]);
     ok(&db, &[&["add", "sound"][..], &sound].concat());
     ok(&db, &["add", "loose", "--depends-on", "1"]);
     ok(

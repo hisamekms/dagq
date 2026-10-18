@@ -71,6 +71,22 @@ pub enum DomainError {
         authorized: TaskStatus,
         status: TaskStatus,
     },
+    /// A cancel with neither a reason nor a task that holds its content
+    /// (ADR-t947-4 decision 1).
+    CancelReasonMissing,
+    /// A cancel whose `reason` says another task holds its content, without
+    /// naming that task (ADR-t947-4 decision 2).
+    CancelReasonNeedsTarget {
+        reason: String,
+    },
+    /// A cancel of reason `other` without a note saying why.
+    CancelReasonNeedsNote,
+    /// A `reason` an actor's `cancel` does not give: the one the runtime
+    /// records on its own path (ADR-t947-4 decision 3), or the one the
+    /// statistics count a cancel without a reason as.
+    CancelReasonReserved {
+        reason: String,
+    },
     /// A dependency of a task on itself.
     SelfDependency,
     /// The predecessor already depends on the task, directly or not, where
@@ -545,6 +561,20 @@ impl fmt::Display for DomainError {
                 "task {task_id} is {} now, not {} as when this command was authorized; nothing was changed, run it again",
                 status.as_str(),
                 authorized.as_str()
+            ),
+            Self::CancelReasonMissing => f.write_str(
+                "cancel needs --reason CODE, or --duplicate-of X for a task X that holds its content",
+            ),
+            Self::CancelReasonNeedsTarget { reason } => write!(
+                f,
+                "cancel reason {reason} needs --duplicate-of X: the task that holds its content"
+            ),
+            Self::CancelReasonNeedsNote => {
+                f.write_str("cancel reason other needs --note saying why")
+            }
+            Self::CancelReasonReserved { reason } => write!(
+                f,
+                "cancel reason {reason} is kept for the runtime (answered_cancel for the cancel answer of an ask it applies, unrecorded for a cancel recorded without a reason); choose another code"
             ),
             Self::SelfDependency => f.write_str("a task cannot depend on itself"),
             Self::DependencyCycle {

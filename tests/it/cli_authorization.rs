@@ -294,9 +294,9 @@ fn the_planner_keeps_its_authority_on_tasks_that_have_not_started() {
         (&high["priority"], &high["priority_by"]),
         (&json!("high"), &json!("human"))
     );
-    allowed_as(&me, &db, &["cancel", "2"]);
+    allowed_as(&me, &db, &["cancel", "2", "--reason", "stale"]);
     assert_eq!(ok(&db, &["show", "2"])["task"]["status"], "canceled");
-    allowed_as(&me, &db, &["cancel", "1"]);
+    allowed_as(&me, &db, &["cancel", "1", "--reason", "stale"]);
     allowed_as(&me, &db, &["goal", "close", "1", "--verdict", "abandoned"]);
     assert_eq!(ok(&db, &["goal", "show", "1"])["closed"], true);
 }

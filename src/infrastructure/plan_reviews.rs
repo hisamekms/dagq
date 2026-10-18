@@ -18,7 +18,7 @@ use super::{
     asks::{insert_ask, read_ask, record_ask_closed},
     proposals, sessions,
     sqlite::{
-        SqliteQueue, cancel_as_duplicate, change_priority, check_duplicate, enum_col, event,
+        SqliteQueue, cancel_task, change_priority, check_duplicate, enum_col, event,
         insert_dependency, read_task, transition_task,
     },
 };
@@ -31,6 +31,7 @@ use crate::{
         Ask, AskId, AskKind, HEARTBEAT_TIMEOUT_SECS, PlanAnswer, PlanReviewAction,
         PlanReviewCandidate, PlanReviewDecision, PlannerId, Priority, ProposalId, ProposalStatus,
         TaskAction, TaskId, TaskStatus,
+        cancel_reason::NewCancel,
         headless_job::JobSession,
         plan_quality::{self, ProposalFeatures},
         plan_review::{
@@ -238,7 +239,12 @@ fn check_action(conn: &Connection, members: &[TaskId], action: &PlanReviewAction
     Ok(())
 }
 
-fn apply_action(conn: &Connection, action: &PlanReviewAction, now: &str) -> Result<()> {
+fn apply_action(
+    conn: &Connection,
+    action: &PlanReviewAction,
+    proposal: ProposalId,
+    now: &str,
+) -> Result<()> {
     match action {
         PlanReviewAction::AddDependency {
             task_id,
@@ -251,7 +257,12 @@ fn apply_action(conn: &Connection, action: &PlanReviewAction, now: &str) -> Resu
             task_id,
             duplicate_of,
         } => {
-            cancel_as_duplicate(conn, *task_id, *duplicate_of, Some("plan_review"), now)?;
+            cancel_task(
+                conn,
+                *task_id,
+                &NewCancel::plan_review(*duplicate_of, proposal),
+                now,
+            )?;
             Ok(())
         }
     }
@@ -669,7 +680,7 @@ impl PlanReviewStore for SqliteQueue {
         match decision {
             PlanReviewDecision::Pass => {
                 for action in actions {
-                    apply_action(&tx, action, &stamp)?;
+                    apply_action(&tx, action, job.proposal_id, &stamp)?;
                 }
                 // Every submitted AI's task takes its goal's priority
                 // instead of one the AI set, actions or none (ADR-t1971-1
@@ -1129,7 +1140,12 @@ impl PlanReviewStore for SqliteQueue {
                 proposals::save(&tx, &canceled)?;
                 for &task_id in canceled.task_ids() {
                     if read_task(&tx, task_id)?.status() == TaskStatus::Submitted {
-                        transition_task(&tx, task_id, TaskAction::Cancel, &stamp)?;
+                        cancel_task(
+                            &tx,
+                            task_id,
+                            &NewCancel::answered(AskKind::ApprovePlan, ask_id),
+                            &stamp,
+                        )?;
                     }
                 }
                 proposals::read(&tx, proposal_id)?

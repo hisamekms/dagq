@@ -57,6 +57,7 @@ use super::{
 pub mod ask_seen;
 pub mod asks;
 pub mod auto_repairs;
+pub mod cancel_reasons;
 pub mod cargo;
 pub mod claim_waits;
 pub mod conflicts;
@@ -610,6 +611,9 @@ pub struct Stats {
     pub reason_codes: ReasonCodes,
     /// The tasks canceled as duplicates in the same window as `backend_failures`.
     pub duplicate_cancels: DuplicateCancels,
+    /// The tasks canceled in the same window as `backend_failures`, by the
+    /// reason their cancel recorded (ADR-t947-4 decision 4).
+    pub cancel_reasons: BTreeMap<String, cancel_reasons::CancelReason>,
     /// The review and plan review verdicts recorded in the same window as
     /// `backend_failures`, per reason code (ADR-t947-1 decision 5).
     pub review_reasons: review_reasons::ReviewReasons,
@@ -1145,6 +1149,7 @@ pub fn stats(
     let backend_failures = backend_failures(events, window_start, window_last, counts);
     let reason_codes = reason_codes(events, window_start, window_last, counts);
     let duplicate_cancels = duplicate_cancels(events, window_start, window_last, counts);
+    let cancel_reasons = cancel_reasons::cancel_reasons(events, window_start, window_last, counts);
     let review_reasons = review_reasons::review_reasons(events, window_start, window_last, counts);
     let landing_rechecks = landing_rechecks(events, window_start, window_last, counts);
     let landing_waits = landing_waits::landing_waits(events, window_start, window_last, counts);
@@ -1371,6 +1376,7 @@ pub fn stats(
         backend_failures,
         reason_codes,
         duplicate_cancels,
+        cancel_reasons,
         review_reasons,
         running_alerts,
         workspace_check,
@@ -1739,7 +1745,8 @@ fn reason_codes(
 }
 
 /// The `task_status_changed` events with `after < id <= upto` that
-/// canceled a task as a duplicate, whose task `counts` accepts.
+/// canceled a task as a duplicate, whose task `counts` accepts: those whose
+/// reason pairs it with the task it names (ADR-t947-4 decision 2).
 fn duplicate_cancels(
     events: &[RunEvent],
     after: EventId,
@@ -1748,19 +1755,19 @@ fn duplicate_cancels(
 ) -> DuplicateCancels {
     let mut cancels = DuplicateCancels::default();
     for event in events.iter().filter(|event| {
-        event.kind == "task_status_changed"
+        event.kind == super::event_kind::TASK_STATUS_CHANGED
             && event.id > after
             && event.id <= upto
             && counts(event.task_id)
     }) {
-        if let (Some(task_id), Some(duplicate_of)) = (
-            event.task_id,
-            event.payload.get("duplicate_of").and_then(Value::as_i64),
-        ) {
+        let cancel = super::cancel_reason::Recorded::of(&event.payload);
+        if let (Some(task_id), Some(duplicate_of)) = (event.task_id, cancel.duplicate_of)
+            && cancel.pairs_as_duplicate()
+        {
             cancels.count += 1;
             cancels.tasks.push(DuplicateCancel {
                 task_id,
-                duplicate_of: TaskId::new(duplicate_of),
+                duplicate_of,
             });
         }
     }

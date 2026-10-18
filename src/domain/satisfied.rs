@@ -7,7 +7,10 @@
 
 use serde_json::{Value, json};
 
-use super::{AskId, CommitSha, EventId, ReasonCode, RunEvent, RunStatus, TaskAction, event_kind};
+use super::{
+    AskId, AskKind, CommitSha, EventId, ReasonCode, RunEvent, RunStatus, cancel_reason::NewCancel,
+    event_kind,
+};
 
 /// The answer that closes the task as `completed` without a commit.
 pub const CLOSE: &str = "close";
@@ -60,13 +63,13 @@ impl SatisfiedAnswer {
         match self {
             Self::Close => None,
             Self::Retry => Some(Decision {
-                action: TaskAction::Ready,
+                task: TaskMove::Ready,
                 code: ReasonCode::Other,
                 reason: format!("put back to ready by ask {ask}"),
                 cause: "retried",
             }),
             Self::Cancel => Some(Decision {
-                action: TaskAction::Cancel,
+                task: TaskMove::Cancel(NewCancel::answered(AskKind::ApproveClose, ask)),
                 code: ReasonCode::Cancelled,
                 reason: format!("canceled by ask {ask}"),
                 cause: "canceled",
@@ -77,14 +80,23 @@ impl SatisfiedAnswer {
 
 /// A `retry` or `cancel` answer applied: the run fails with `reason` (its
 /// `last_error`) and `code`, recorded as `run_satisfied_decided`, its task
-/// takes `action` in the same transaction, and the run's phase rests with
-/// `cause`.
+/// moves as `task` says in the same transaction, and the run's phase rests
+/// with `cause`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decision {
-    pub action: TaskAction,
+    pub task: TaskMove,
     pub code: ReasonCode,
     pub reason: String,
     pub cause: &'static str,
+}
+
+/// How a decided answer moves the run's task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskMove {
+    /// Back to `ready`.
+    Ready,
+    /// Canceled, recording the answer as its reason (ADR-t947-4 decision 3).
+    Cancel(NewCancel),
 }
 
 /// The options of the `approve_close` ask after `verification`: a claim
@@ -455,7 +467,7 @@ mod tests {
         assert_eq!(
             SatisfiedAnswer::Retry.decision(ask),
             Some(Decision {
-                action: TaskAction::Ready,
+                task: TaskMove::Ready,
                 code: ReasonCode::Other,
                 reason: "put back to ready by ask 8".into(),
                 cause: "retried",
@@ -464,7 +476,7 @@ mod tests {
         assert_eq!(
             SatisfiedAnswer::Cancel.decision(ask),
             Some(Decision {
-                action: TaskAction::Cancel,
+                task: TaskMove::Cancel(NewCancel::answered(AskKind::ApproveClose, ask)),
                 code: ReasonCode::Cancelled,
                 reason: "canceled by ask 8".into(),
                 cause: "canceled",

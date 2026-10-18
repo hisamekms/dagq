@@ -2,7 +2,7 @@
 //! task with its landed commits' messages, follow-up origins and duplicate
 //! mark, asks the search index how strongly the task's title matches each
 //! other task, and leaves the scoring to [`crate::domain::related`].
-use crate::domain::event_kind;
+use crate::domain::{cancel_reason, event_kind};
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, ensure};
@@ -116,24 +116,27 @@ impl SqliteQueue {
             }
         }
         // A cancel records what the task duplicates (decision 5); the last
-        // cancel of a task still canceled is the one that holds.
-        let duplicates: Vec<(i64, Option<i64>)> = self
+        // cancel of a task still canceled is the one that holds, and only
+        // its reasons of a duplicate pair it (ADR-t947-4 decision 2).
+        let duplicates: Vec<(i64, Option<i64>, Option<String>)> = self
             .conn
             .prepare(&format!(
                 "SELECT e.task_id,
                         CASE WHEN json_type(e.payload, '$.duplicate_of') = 'integer'
-                             THEN json_extract(e.payload, '$.duplicate_of') END
+                             THEN json_extract(e.payload, '$.duplicate_of') END,
+                        json_extract(e.payload, '$.reason')
                  FROM run_events e JOIN tasks t ON t.id = e.task_id
                  WHERE e.kind = '{}' AND t.status = 'canceled'
                    AND json_extract(e.payload, '$.to') = 'canceled'
                  ORDER BY e.id",
                 event_kind::TASK_STATUS_CHANGED
             ))?
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .collect::<rusqlite::Result<_>>()?;
-        for (task_id, duplicate_of) in duplicates {
+        for (task_id, duplicate_of, reason) in duplicates {
             if let Some(&i) = position.get(&task_id) {
-                docs[i].duplicate_of = duplicate_of;
+                docs[i].duplicate_of =
+                    duplicate_of.filter(|_| cancel_reason::pairs_as_duplicate(reason.as_deref()));
             }
         }
         Ok(docs)

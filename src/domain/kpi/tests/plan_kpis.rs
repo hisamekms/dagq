@@ -385,6 +385,81 @@ fn the_follow_up_rates_are_split_by_category() {
     );
 }
 
+/// The cancels by reason (ADR-t947-4 decision 4): how many, those the
+/// plan had taken on, how long after their registration, and those that
+/// used a run with the runs' seconds, per `reason=` stratum next to `all`,
+/// with `stats`' `cancel_reasons` in the details; a cancel recorded before
+/// reasons is `unrecorded`.
+#[test]
+fn the_cancels_are_split_by_reason_with_their_plan_and_run_waste() {
+    let mut queue = Queue::default();
+    let day = MONDAY + DAY;
+    let run = "0000000a-0000-4000-8000-000000000001";
+    for task in [10, 11, 12] {
+        queue.push(Some(task), None, "task_created", json!({}), day);
+    }
+    let changed = |to: &str| json!({"from": "draft", "to": to});
+    queue.push(
+        Some(10),
+        None,
+        "task_status_changed",
+        changed("submitted"),
+        day + 10,
+    );
+    queue.push(
+        Some(10),
+        None,
+        "task_status_changed",
+        changed("ready"),
+        day + 20,
+    );
+    queue.push(Some(10), Some(run), "run_claimed", json!({}), day + 100);
+    queue.push(
+        Some(10),
+        Some(run),
+        "recovery_finished",
+        json!({"status": "failed"}),
+        day + 400,
+    );
+    let mut cancel = |task: i64, payload: Value, at: i64| {
+        let mut payload = payload;
+        payload["to"] = json!("canceled");
+        queue.push(Some(task), None, "task_status_changed", payload, at);
+    };
+    cancel(10, json!({"reason": "stale"}), day + 1_000);
+    cancel(11, json!({"reason": "stale"}), day + 2_000);
+    cancel(12, json!({}), day + 3_000);
+    let query = KpiQuery {
+        last: 3,
+        ..KpiQuery::default()
+    };
+    let result = queue.kpi(MONDAY + 2 * DAY + HOUR, &KpiConfig::default(), &query);
+    let second = &result.periods[1];
+    let value = |kpi: &str, stratum: &str| measure(second, kpi, stratum).value;
+    assert_eq!(value("plan.cancels", "reason=stale"), Some(2.0));
+    assert_eq!(value("plan.cancels", "reason=unrecorded"), Some(1.0));
+    assert_eq!(value("plan.cancels", ALL), Some(3.0));
+    assert_eq!(value("plan.cancel_waste", "reason=stale"), Some(1.0));
+    assert_eq!(value("plan.cancel_run_waste", ALL), Some(1.0));
+    let run_secs = measure(second, "plan.cancel_run_secs", "reason=stale");
+    assert_eq!((run_secs.n, run_secs.value), (1, Some(300.0)));
+    let registered = measure(second, "plan.cancel_registered_secs", ALL);
+    assert_eq!(
+        (registered.n, registered.min, registered.max),
+        (3, Some(1_000.0), Some(3_000.0))
+    );
+    assert_eq!(
+        second.window.details["cancel_reasons"]["stale"]["run_waste_secs"],
+        300
+    );
+    // The day before saw no cancel.
+    assert_eq!(
+        measure(&result.periods[0], "plan.cancels", ALL).value,
+        Some(0.0)
+    );
+    assert_eq!(direction("plan.cancel_run_secs"), Some(Direction::Lower));
+}
+
 /// The forecast's errors (ADR-0070 decision 4): every snapshot of a target
 /// that finished in the period is a sample in the period it finished,
 /// split by target, change, band, method and whether a change mark came

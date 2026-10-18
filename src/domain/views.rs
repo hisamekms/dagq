@@ -172,10 +172,19 @@ pub struct TaskDetail {
     pub dependencies: Vec<TaskId>,
     /// Goals the task depends on (ADR-0038), ascending.
     pub goal_dependencies: Vec<GoalId>,
-    /// The task this one was canceled as a duplicate of (ADR-0046 decision 5).
+    /// The task that holds this canceled one's content: the one it
+    /// duplicates (ADR-0046 decision 5) or that took it (ADR-t947-4
+    /// decision 2).
     pub duplicate_of: Option<TaskId>,
-    /// The canceled tasks recorded as duplicates of this one, ascending.
+    /// The reason its cancel recorded (ADR-t947-4), read off
+    /// `duplicate_of` for one recorded before reasons; null for a task not
+    /// canceled or one whose cancel recorded neither.
+    pub cancel_reason: Option<String>,
+    /// The canceled tasks whose `duplicate_of` is this one, ascending.
     pub duplicates: Vec<TaskId>,
+    /// The reason of each of `duplicates`: only `duplicate` and
+    /// `already_done` make it a duplicate (ADR-t947-4 decision 2).
+    pub duplicate_reasons: std::collections::BTreeMap<TaskId, String>,
     pub runs: Vec<TaskRun>,
     pub events: Vec<RunEvent>,
     pub processes: Vec<RunProcess>,

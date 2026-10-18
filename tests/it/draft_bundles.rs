@@ -13,7 +13,10 @@ use crate::plan_review::{
 };
 use dagq::{
     application::TaskStore,
-    domain::{DraftOrigin, PlannerId, PlannerOrigin, PlannerSession, Priority, TaskId},
+    domain::{
+        DraftOrigin, PlannerId, PlannerOrigin, PlannerSession, Priority, TaskId,
+        cancel_reason::NewCancel,
+    },
     infrastructure::sqlite::SqliteQueue,
 };
 use serde_json::{Value, json};
@@ -85,6 +88,50 @@ fn ids(value: &Value) -> Vec<i64> {
         .iter()
         .map(|v| v.as_i64().unwrap())
         .collect()
+}
+
+/// A draft canceled with its content moved into another task (`absorbed`)
+/// settles as canceled, naming no task, while one canceled as a duplicate
+/// settles as a duplicate of its task (ADR-t947-4 decision 2).
+#[test]
+fn a_draft_whose_content_another_task_took_settles_as_canceled() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let goal = open_goal(&mut queue);
+    let source = add(&mut queue, "source", &[], Priority::Normal);
+    let drafts: Vec<TaskId> = (0..2)
+        .map(|i| follow_up(&mut queue, &format!("b{i}"), goal, source, "run-b", i))
+        .collect();
+    let reviewer = StubReviewer::new(&[]);
+    let backend = PlanWorkspace::default();
+    pass(&fx, &backend, &reviewer);
+    let planner = planner_of(&queue, drafts[0]).unwrap();
+    queue
+        .cancel(
+            drafts[0],
+            NewCancel::by_hand(Some("absorbed".into()), Some(source), None),
+        )
+        .unwrap();
+    queue
+        .cancel(drafts[1], NewCancel::by_hand(None, Some(source), None))
+        .unwrap();
+    end(&fx, &backend, &reviewer, planner.id);
+    let settled: Vec<(Value, Value)> = drafts
+        .iter()
+        .map(|&draft| {
+            let settled = events(&mut queue, draft, "draft_planner_settled")
+                .pop()
+                .unwrap();
+            (settled["outcome"].clone(), settled["duplicate_of"].clone())
+        })
+        .collect();
+    assert_eq!(
+        settled,
+        [
+            (json!("canceled"), Value::Null),
+            (json!("duplicate"), json!(source))
+        ]
+    );
 }
 
 /// One run's three follow_ups get one planner whose prompt shows the three
@@ -231,7 +278,9 @@ fn what_a_bundle_leaves_undecided_makes_the_next_and_the_outcomes_are_read() {
         String::from_utf8_lossy(&refused.stderr).contains("planner_question"),
         "{refused:?}"
     );
-    queue.cancel_duplicate(a[0], a[1]).unwrap();
+    queue
+        .cancel(a[0], NewCancel::by_hand(None, Some(a[1]), None))
+        .unwrap();
     // It waits on the fixture's blocker once ready, so no run starts.
     queue.add_dependency(a[1], TaskId::new(1)).unwrap();
     let submitted = submit_from(

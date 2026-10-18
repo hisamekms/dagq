@@ -9,6 +9,7 @@
 //! each draft when the planner ended). Opening a planner is one write
 //! transaction that re-checks the drafts first, so two supervisors never
 //! open one for the same draft.
+use crate::domain::cancel_reason;
 use crate::domain::event_kind::{self, EventKind};
 use std::collections::{HashMap, HashSet};
 
@@ -1039,9 +1040,16 @@ pub(crate) fn settle_bundle(conn: &Connection, planner: PlannerId, now: i64) -> 
                 };
                 (outcome, None, None)
             }
-            TaskStatus::Canceled => match super::sqlite::duplicate_target(conn, task_id)? {
-                Some(target) => (DraftOutcome::Duplicate, None, Some(target)),
-                None => (DraftOutcome::Canceled, None, None),
+            // Only a duplicate's reasons make it one; a draft whose content
+            // another task took is canceled (ADR-t947-4 decision 2).
+            TaskStatus::Canceled => match super::sqlite::cancel_of(conn, task_id)? {
+                Some(super::sqlite::RecordedCancel {
+                    duplicate_of: Some(target),
+                    reason,
+                }) if cancel_reason::pairs_as_duplicate(reason.as_deref()) => {
+                    (DraftOutcome::Duplicate, None, Some(target))
+                }
+                _ => (DraftOutcome::Canceled, None, None),
             },
             _ => (DraftOutcome::Submitted, proposal, None),
         };

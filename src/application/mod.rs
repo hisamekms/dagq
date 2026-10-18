@@ -163,9 +163,14 @@ pub struct TaskListItem {
     pub goal_dependencies: Vec<GoalId>,
     /// The most recently created run, if any.
     pub latest_run: Option<LatestRun>,
-    /// For a task canceled as a duplicate, the task it duplicates (ADR-0046 decision 5).
+    /// For a canceled task, the task that holds its content: the one it
+    /// duplicates (ADR-0046 decision 5) or took it (ADR-t947-4 decision 2).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duplicate_of: Option<TaskId>,
+    /// For a canceled task, the reason its cancel recorded (ADR-t947-4),
+    /// read off `duplicate_of` for one recorded before reasons.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancel_reason: Option<String>,
     /// The open replanning operation on its run (ADR-t1521-2), if any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replan: Option<ListedReplan>,
@@ -280,10 +285,17 @@ impl TaskListItem {
             goal_dependencies,
             latest_run,
             duplicate_of,
+            cancel_reason: None,
             replan: None,
             hold: None,
             details,
         }
+    }
+
+    /// The item marked with the reason of its cancel.
+    pub fn with_cancel_reason(mut self, reason: Option<String>) -> Self {
+        self.cancel_reason = reason;
+        self
     }
 
     /// The item marked with the open replanning operation on its run.

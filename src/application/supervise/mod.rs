@@ -84,7 +84,7 @@ use crate::domain::{
     MAX_RESUME_ATTEMPTS, MAX_REVISE_ATTEMPTS, NewAsk, NewHold, Provider, Reason, ReasonCode,
     Receipt, ReceiptResult, ResumedSession, ReviewDecision, ReviewVerdict, ReviseDecision,
     RunEvent, RunHistory, RunId, RunLease, RunPaths, RunPlan, RunProcess, RunStatus, SessionRole,
-    TRIAGE_OPTIONS, TRIAGE_RETRY_FAILURES, TaskAction, TaskId, TaskRun, TaskStatus, TriageState,
+    TRIAGE_OPTIONS, TRIAGE_RETRY_FAILURES, TaskId, TaskRun, TaskStatus, TriageState,
     after_validation,
     claim_hold::{self, ClaimHold, HoldInputs},
     claim_spacing, decide_conflict, decide_revise, event_kind, headless_job, heartbeat_stale,

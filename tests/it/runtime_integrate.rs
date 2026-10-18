@@ -1796,7 +1796,7 @@ fn integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once() {
     assert_eq!(events_of(&db, run.id(), "follow_up_registered").len(), 4);
     // `stats` puts the drafts next to the landing that registered them,
     // and counts one canceled (task 470).
-    crate::common::cli::ok(&db, &["cancel", "3"]);
+    crate::common::cli::ok(&db, &["cancel", "3", "--reason", "not_worth"]);
     let flow = &crate::common::cli::ok(&db, &["stats", "--full"])["draft_flow"];
     assert_eq!(flow["landings"], 1, "{flow}");
     assert_eq!(flow["registered"], 2, "{flow}");

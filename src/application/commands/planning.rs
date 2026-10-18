@@ -16,7 +16,7 @@ use crate::domain::{
     ActorContext, AuthorizationError, Authorizer, Capability, DomainError, DraftRevisit, FindingId,
     Goal, GoalEdit, GoalId, GoalVerdict, NewGoal, NewTask, Priority, Proposal, ProposalId,
     Resource, Submission, Task, TaskAction, TaskDetail, TaskEdit, TaskId, TaskStatus,
-    authorization::DenyReason, follow_up::RevisitChange,
+    authorization::DenyReason, cancel_reason::NewCancel, follow_up::RevisitChange,
 };
 
 /// What the planning commands read and change of the queue.
@@ -75,12 +75,7 @@ pub trait PlanningStore {
         action: TaskAction,
         authorized: TaskStatus,
     ) -> Result<Task>;
-    fn cancel_duplicate(
-        &mut self,
-        task: TaskId,
-        duplicate_of: TaskId,
-        authorized: TaskStatus,
-    ) -> Result<Task>;
+    fn cancel(&mut self, task: TaskId, cancel: NewCancel, authorized: TaskStatus) -> Result<Task>;
     fn add_dependency(
         &mut self,
         task: TaskId,
@@ -218,13 +213,11 @@ impl<'a, S: PlanningStore + ?Sized> Planning<'a, S> {
         self.store.transition(task, action, status)
     }
 
-    /// `cancel`, as a duplicate of another task when it names one.
-    pub fn cancel(&mut self, task: TaskId, duplicate_of: Option<TaskId>) -> Result<Task> {
+    /// `cancel` with its reason and the task that holds its content, when
+    /// it names one (ADR-t947-4): the store refuses one without either.
+    pub fn cancel(&mut self, task: TaskId, cancel: NewCancel) -> Result<Task> {
         let status = self.authorize_task(Capability::TaskCancel, task)?;
-        match duplicate_of {
-            Some(other) => self.store.cancel_duplicate(task, other, status),
-            None => self.store.transition(task, TaskAction::Cancel, status),
-        }
+        self.store.cancel(task, cancel, status)
     }
 
     /// `dependency add`: the task as it is afterwards.
@@ -458,6 +451,16 @@ mod tests {
         persons_priority: bool,
     }
 
+    /// An actor's cancel of a task whose premise is gone.
+    fn stale() -> NewCancel {
+        NewCancel::by_hand(Some("stale".into()), None, None)
+    }
+
+    /// An actor's cancel of a task `of` holds the content of.
+    fn duplicate_of(of: i64) -> NewCancel {
+        NewCancel::by_hand(None, Some(TaskId::new(of)), None)
+    }
+
     impl Store {
         /// A request's planner giving another priority than the request's.
         fn request_refusal(&self, what: &str) -> anyhow::Error {
@@ -567,14 +570,12 @@ mod tests {
             self.authorized_as = Some(authorized);
             Err(reached(&format!("{action:?}")))
         }
-        fn cancel_duplicate(
-            &mut self,
-            _: TaskId,
-            _: TaskId,
-            authorized: TaskStatus,
-        ) -> Result<Task> {
+        fn cancel(&mut self, _: TaskId, cancel: NewCancel, authorized: TaskStatus) -> Result<Task> {
             self.authorized_as = Some(authorized);
-            Err(reached("cancel-duplicate"))
+            Err(reached(match cancel.duplicate_of {
+                Some(_) => "cancel-duplicate",
+                None => "Cancel",
+            }))
         }
         fn add_dependency(
             &mut self,
@@ -707,9 +708,9 @@ mod tests {
             ("ready --inherit", |p| {
                 p.ready_inheriting(TASK, "why", &NoBranches).map(drop)
             }),
-            ("cancel", |p| p.cancel(TASK, None).map(drop)),
+            ("cancel", |p| p.cancel(TASK, stale()).map(drop)),
             ("cancel --duplicate-of", |p| {
-                p.cancel(TASK, Some(TaskId::new(2))).map(drop)
+                p.cancel(TASK, duplicate_of(2)).map(drop)
             }),
             ("dependency add", |p| {
                 p.add_dependency(TASK, Dependency::Task(TaskId::new(2)))
@@ -1149,9 +1150,9 @@ mod tests {
             ("store: Draft", |p| p.draft(TASK).map(drop)),
             ("store: Ready", |p| p.ready(TASK, false).map(drop)),
             ("store: BypassReview", |p| p.ready(TASK, true).map(drop)),
-            ("store: Cancel", |p| p.cancel(TASK, None).map(drop)),
+            ("store: Cancel", |p| p.cancel(TASK, stale()).map(drop)),
             ("store: cancel-duplicate", |p| {
-                p.cancel(TASK, Some(TaskId::new(2))).map(drop)
+                p.cancel(TASK, duplicate_of(2)).map(drop)
             }),
             ("store: dependency add", |p| {
                 p.add_dependency(TASK, Dependency::Goal(GOAL)).map(drop)
@@ -1181,7 +1182,7 @@ mod tests {
         let mut store = Store::default();
         let me = planner(1);
         let error = Planning::new(&mut store, &me, &StaticPolicy)
-            .cancel(TASK, None)
+            .cancel(TASK, stale())
             .unwrap_err();
         assert_eq!(error.to_string(), "task does not exist");
         assert!(store.denials.into_inner().is_empty());
@@ -1192,7 +1193,7 @@ mod tests {
         let mut store = Store::default();
         let observer = ActorContext::instance(ActorRole::Observer, 1);
         let error = Planning::new(&mut store, &observer, &StaticPolicy)
-            .cancel(TASK, None)
+            .cancel(TASK, stale())
             .unwrap_err();
         let denied = error.downcast::<AuthorizationError>().unwrap();
         assert_eq!(denied.reason, DenyReason::NotGranted);

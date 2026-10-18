@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::{EventId, RunEvent, Summary, TaskId, summary, timestamp_millis};
-use crate::domain::UNLABELED_CATEGORY;
+use crate::domain::{UNLABELED_CATEGORY, cancel_reason};
 
 /// The follow_up drafts of one category in a window.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -24,10 +24,10 @@ pub struct CategoryFlow {
     /// `canceled`, as `draft_flow` counts `adopted`.
     pub adopted: i64,
     /// Left `draft` for the first time in the window by a cancel that
-    /// named no task it duplicates.
+    /// does not pair it as a duplicate of the task it names, if any.
     pub canceled: i64,
-    /// Left `draft` for the first time in the window by a cancel with
-    /// `duplicate_of`.
+    /// Left `draft` for the first time in the window by a cancel that
+    /// pairs it as a duplicate of `duplicate_of` (ADR-t947-4 decision 2).
     pub duplicate: i64,
     /// `adopted` ÷ (`adopted` + `canceled` + `duplicate`), to two decimals;
     /// null when none left.
@@ -128,7 +128,7 @@ pub fn follow_up_categories(
                     && let Some(at) = at
                 {
                     let canceled = (to == Some("canceled"))
-                        .then(|| event.payload.get("duplicate_of").is_some_and(Value::is_i64));
+                        .then(|| cancel_reason::Recorded::of(&event.payload).pairs_as_duplicate());
                     draft.left = Some((event.id, at, canceled));
                 }
                 if event.id <= upto {
@@ -243,6 +243,33 @@ mod tests {
             payload.as_object_mut().unwrap().extend(extra.clone());
         }
         event(id, task_id, "task_status_changed", payload, secs)
+    }
+
+    /// A follow_up canceled with a task named that does not pair it as a
+    /// duplicate (`absorbed`) is canceled, not a duplicate (ADR-t947-4
+    /// decision 2).
+    #[test]
+    fn a_follow_up_whose_content_another_task_took_is_canceled() {
+        let events = [
+            event(1, 2, "task_created", json!({}), 10),
+            event(
+                2,
+                1,
+                "follow_up_registered",
+                json!({"task_id": 2, "category": "defect"}),
+                11,
+            ),
+            changed(
+                3,
+                2,
+                "canceled",
+                json!({"reason": "absorbed", "duplicate_of": 3}),
+                12,
+            ),
+        ];
+        let flow =
+            follow_up_categories(&events, EventId::new(0), EventId::new(3), 15_000, |_| true);
+        assert_eq!((flow["defect"].canceled, flow["defect"].duplicate), (1, 0));
     }
 
     /// Five follow_ups of three categories (one registered before

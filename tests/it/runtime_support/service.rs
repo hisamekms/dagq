@@ -91,7 +91,10 @@ impl Drop for Running {
 pub fn idle_queue() -> (crate::runtime_support::Fixture, PathBuf, PathBuf) {
     let (fixture, repo, db) = crate::runtime_support::fixture();
     for task in ok(&db, &["list"])["tasks"].as_array().unwrap() {
-        ok(&db, &["cancel", &task["id"].to_string()]);
+        ok(
+            &db,
+            &["cancel", &task["id"].to_string(), "--reason", "stale"],
+        );
     }
     (fixture, repo, db)
 }

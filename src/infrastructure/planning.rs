@@ -12,6 +12,7 @@ use crate::application::{EventStore, GoalReviewStore, TaskStore};
 use crate::domain::{
     FindingId, Goal, GoalEdit, GoalId, GoalVerdict, NewGoal, NewTask, Priority, Proposal,
     ProposalId, Submission, Task, TaskAction, TaskDetail, TaskEdit, TaskId, TaskStatus,
+    cancel_reason::NewCancel,
 };
 
 impl PlanningStore for SqliteQueue {
@@ -90,13 +91,8 @@ impl PlanningStore for SqliteQueue {
         self.transition_authorized(task, action, Some(authorized))
     }
 
-    fn cancel_duplicate(
-        &mut self,
-        task: TaskId,
-        duplicate_of: TaskId,
-        authorized: TaskStatus,
-    ) -> Result<Task> {
-        self.cancel_duplicate_authorized(task, duplicate_of, Some(authorized))
+    fn cancel(&mut self, task: TaskId, cancel: NewCancel, authorized: TaskStatus) -> Result<Task> {
+        self.cancel_authorized(task, &cancel, Some(authorized))
     }
 
     fn add_dependency(

@@ -15,11 +15,13 @@ use crate::application::review_programs::{ProgramSnapshot, snapshot_programs};
 use crate::application::run_git;
 use crate::domain::ActorContext;
 use crate::domain::AskConfidence;
+use crate::domain::AskKind;
 use crate::domain::EventKind;
 use crate::domain::FAILED_REVIEW_LANDING_OPTIONS;
 use crate::domain::LandingAnswer;
 use crate::domain::RecoveredLanding;
 use crate::domain::actor_model::{ActorLaunch, ModelRole};
+use crate::domain::cancel_reason::NewCancel;
 use crate::domain::concern::{
     self, ConcernDecision, ConcernReason, EscalatedBecause, LandingRecommendation,
 };
@@ -2652,7 +2654,10 @@ impl Supervisor<'_> {
                     &reason,
                     Reason::new(ReasonCode::Cancelled).on(payload),
                 )?;
-                self.queue.transition(run.task_id(), TaskAction::Cancel)?;
+                self.queue.cancel(
+                    run.task_id(),
+                    NewCancel::answered(AskKind::ApproveLanding, ask_id),
+                )?;
                 self.queue.close_ask(ask_id)?;
                 info!(run_id = %run.id(), task_id = %run.task_id(), "run {} failed and task {} was canceled by ask {ask_id}", run.id(), run.task_id());
                 close_ended_landing_asks(&mut *self.queue, Some(run.task_id()));

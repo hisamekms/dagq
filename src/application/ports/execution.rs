@@ -1201,13 +1201,13 @@ pub trait RunTransitions {
     /// Apply a `retry` or `cancel` answer to the `approve_close` ask of a
     /// validating run nobody leases: it becomes `failed` with `reason`,
     /// recorded as `run_satisfied_decided` with `payload`, and its task
-    /// takes `action` in the same transaction.
+    /// moves as `task` says in the same transaction.
     fn decide_satisfied(
         &mut self,
         id: &RunId,
         reason: &str,
         payload: serde_json::Value,
-        action: crate::domain::TaskAction,
+        task: &crate::domain::satisfied::TaskMove,
     ) -> Result<TaskRun>;
     /// Park a running run leased to `token` whose live session a recovery
     /// job's `resume` sends back to a session of its own (task 442): it

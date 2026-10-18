@@ -1136,6 +1136,7 @@ pub mod authorization;
 pub mod background_wrapper;
 pub mod broker_relay;
 pub mod build_wait;
+pub mod cancel_reason;
 pub mod change;
 pub mod ci_watch;
 pub mod claim_defer;

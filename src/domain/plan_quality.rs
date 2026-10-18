@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde_json::{Value, json};
 
 use super::{
-    EventId, RunEvent, TaskId,
+    EventId, RunEvent, TaskId, cancel_reason,
     sessions::{PLAN_REVIEW, SESSION_CLOSED, SESSION_OPENED},
 };
 
@@ -254,7 +254,9 @@ pub fn plan_quality(
                     fate.adopted = true;
                 }
                 if to == Some("canceled") {
-                    if fate.ready && event.payload.get("duplicate_of").is_some_and(Value::is_i64) {
+                    if fate.ready
+                        && cancel_reason::Recorded::of(&event.payload).pairs_as_duplicate()
+                    {
                         fate.duplicate_after_ready = true;
                     }
                     if fate.adopted {

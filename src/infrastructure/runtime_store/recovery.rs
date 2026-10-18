@@ -3,12 +3,13 @@
 
 use super::*;
 use crate::application::KeptOutcome;
+use crate::domain::cancel_reason::NewCancel;
 use crate::domain::replan_snapshot::RestoreStart;
 use crate::domain::task_hold::{
     self, DiscardReason, Disposition, HoldGuard, KeptSource, ProgressVersion,
 };
 use crate::domain::task_replan::GuardedStep;
-use crate::domain::{EventKind, run_phase};
+use crate::domain::{AskKind, EventKind, run_phase};
 
 impl SqliteQueue {
     /// The runs whose lease carries `token`, oldest first: what a supervisor
@@ -1885,10 +1886,10 @@ fn decide_triage_in(
             )?;
         }
         "cancel" => {
-            crate::infrastructure::sqlite::transition_task(
+            crate::infrastructure::sqlite::cancel_task(
                 conn,
                 run.task_id(),
-                TaskAction::Cancel,
+                &NewCancel::answered(AskKind::Decide, ask_id),
                 &timestamp,
             )?;
         }

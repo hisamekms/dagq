@@ -51,6 +51,7 @@ use crate::{
         TaskRecord, TaskRun, TaskStatus, TaskStatusCounts, TitlePrefixes,
         actor::{ActorContext, ActorRole},
         authorization::{PriorityHolder, check_priority_change},
+        cancel_reason::{self, CancelRecord, NewCancel},
         goal,
         plan_request::{
             CreatingPlanner, Creator, PriorityBy, RecordedOrigin, creation_origin,
@@ -994,23 +995,17 @@ impl SqliteQueue {
         Ok(result)
     }
 
-    pub(super) fn cancel_duplicate_authorized(
+    pub(super) fn cancel_authorized(
         &mut self,
         task_id: TaskId,
-        duplicate_of: TaskId,
+        cancel: &NewCancel,
         authorized: Option<TaskStatus>,
     ) -> Result<Task> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         check_authorized(&tx, task_id, authorized)?;
-        let result = cancel_as_duplicate(
-            &tx,
-            task_id,
-            duplicate_of,
-            None,
-            &self.generators.clock.timestamp(),
-        )?;
+        let result = cancel_task(&tx, task_id, cancel, &self.generators.clock.timestamp())?;
         tx.commit()?;
         Ok(result)
     }
@@ -1306,11 +1301,13 @@ impl TaskStore for SqliteQueue {
                         })
                     })
                     .optional()?;
-                let duplicate_of = if task.status() == TaskStatus::Canceled {
-                    duplicate_target(&tx, task.id())?
+                let cancel = if task.status() == TaskStatus::Canceled {
+                    cancel_of(&tx, task.id())?
                 } else {
                     None
                 };
+                let (duplicate_of, cancel_reason) =
+                    cancel.map_or((None, None), |cancel| (cancel.duplicate_of, cancel.reason));
                 let replan = super::replans::open_operation_of(&tx, task.id())?
                     .as_ref()
                     .map(ListedReplan::of);
@@ -1325,6 +1322,7 @@ impl TaskStore for SqliteQueue {
                     duplicate_of,
                     query.full,
                 )
+                .with_cancel_reason(cancel_reason)
                 .with_replan(replan)
                 .with_hold(hold))
             })
@@ -1356,8 +1354,10 @@ impl TaskStore for SqliteQueue {
             .query_map([task_id], event_row)?
             .collect::<rusqlite::Result<_>>()?;
         let processes = super::runtime_store::processes_for_task(&tx, task_id)?;
-        let duplicate_of = duplicate_target(&tx, task_id)?;
-        let duplicates = duplicates_of(&tx, task_id)?;
+        let (duplicate_of, cancel_reason) = cancel_of(&tx, task_id)?
+            .map_or((None, None), |cancel| (cancel.duplicate_of, cancel.reason));
+        let duplicate_reasons = duplicates_of(&tx, task_id)?;
+        let duplicates = duplicate_reasons.keys().copied().collect();
         let membership_judgements = super::follow_up_membership::judgements(&tx, task_id)?;
         let origin = super::draft_planners::task_origin(&tx, task_id)?;
         let follow_up_drafts = super::draft_planners::follow_up_drafts(&tx, task_id)?;
@@ -1378,7 +1378,9 @@ impl TaskStore for SqliteQueue {
             dependencies,
             goal_dependencies,
             duplicate_of,
+            cancel_reason,
             duplicates,
+            duplicate_reasons,
             runs,
             events,
             processes,
@@ -1395,8 +1397,8 @@ impl TaskStore for SqliteQueue {
         self.transition_authorized(task_id, action, None)
     }
 
-    fn cancel_duplicate(&mut self, task_id: TaskId, duplicate_of: TaskId) -> Result<Task> {
-        self.cancel_duplicate_authorized(task_id, duplicate_of, None)
+    fn cancel(&mut self, task_id: TaskId, cancel: NewCancel) -> Result<Task> {
+        self.cancel_authorized(task_id, &cancel, None)
     }
 
     fn add_dependency(&mut self, task_id: TaskId, predecessor_id: TaskId) -> Result<()> {
@@ -2935,27 +2937,27 @@ pub(super) fn complete_task(
     read_task(conn, task_id)
 }
 
-/// Cancel `task_id` as a duplicate of `duplicate_of` inside the caller's
-/// transaction (ADR-0046 decision 5), recording `duplicate_of` in the
-/// payload of its `task_status_changed`: what `cancel --duplicate-of` does,
-/// and what plan review shares to close a duplicate (`by` names who closed
-/// it when it was not a person's CLI, as `plan_review`). The target is
-/// checked by [`check_duplicate`].
-pub(super) fn cancel_as_duplicate(
+/// Cancel `task_id` inside the caller's transaction with the reason the
+/// domain decides of `cancel` (ADR-t947-4), recorded in the payload of its
+/// `task_status_changed`: what `cancel` does, plan review's
+/// `cancel_duplicate` and the `cancel` answers of the asks the runtime
+/// applies. A task named as the one that holds the content is checked by
+/// [`check_duplicate`] and gives the reason of a `--duplicate-of` alone.
+pub(super) fn cancel_task(
     conn: &Connection,
     task_id: TaskId,
-    duplicate_of: TaskId,
-    by: Option<&str>,
+    cancel: &NewCancel,
     now: &str,
 ) -> Result<Task> {
-    check_duplicate(conn, task_id, duplicate_of)?;
-    apply_transition(
-        conn,
-        task_id,
-        TaskAction::Cancel,
-        now,
-        Some(Duplicate { duplicate_of, by }),
-    )
+    let target = match cancel.duplicate_of {
+        Some(target) => {
+            check_duplicate(conn, task_id, target)?;
+            Some(read_task(conn, target)?.status())
+        }
+        None => None,
+    };
+    let record = cancel.record(target)?;
+    apply_transition(conn, task_id, TaskAction::Cancel, now, Some(&record))
 }
 
 /// Check that `task_id` may be canceled as a duplicate of `duplicate_of`:
@@ -2994,38 +2996,69 @@ pub(super) fn check_duplicate(
     }
 }
 
-/// What a cancel records as a duplicate in its `task_status_changed`.
-struct Duplicate<'a> {
-    duplicate_of: TaskId,
-    by: Option<&'a str>,
-}
-
-/// The task `task_id` was canceled as a duplicate of (ADR-0046 decision 5):
-/// the `duplicate_of` of its latest `task_status_changed`, while that event
+/// The task `task_id`'s latest cancel names as the one that holds its
+/// content (ADR-0046 decision 5, ADR-t947-4 decision 2): the
+/// `duplicate_of` of its latest `task_status_changed`, while that event
 /// canceled it.
 pub(super) fn duplicate_target(conn: &Connection, task_id: TaskId) -> Result<Option<TaskId>> {
-    Ok(conn
+    Ok(cancel_of(conn, task_id)?.and_then(|cancel| cancel.duplicate_of))
+}
+
+/// What the latest cancel of `task_id` recorded, while that event canceled
+/// it: the task it names and its reason, read as
+/// [`cancel_reason::Recorded::reason`] reads one recorded before reasons,
+/// with whether the task it names was completed before it.
+pub(super) fn cancel_of(conn: &Connection, task_id: TaskId) -> Result<Option<RecordedCancel>> {
+    let latest: Option<(i64, String)> = conn
         .query_row(
             &format!(
-                "SELECT json_extract(payload,'$.to'), json_extract(payload,'$.duplicate_of')
-             FROM run_events WHERE task_id=?1 AND kind='{}'
-             ORDER BY id DESC LIMIT 1",
+                "SELECT id, payload FROM run_events WHERE task_id=?1 AND kind='{}'
+                 ORDER BY id DESC LIMIT 1",
                 event_kind::TASK_STATUS_CHANGED
             ),
             [task_id],
-            |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, Option<i64>>(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .optional()?
-        .and_then(|(to, target)| {
-            (to.as_deref() == Some(TaskStatus::Canceled.as_str()))
-                .then_some(target)
-                .flatten()
-        })
-        .map(TaskId::new))
+        .optional()?;
+    let Some((event_id, payload)) = latest else {
+        return Ok(None);
+    };
+    let cancel = cancel_reason::Recorded::of(&serde_json::from_str(&payload)?);
+    if !cancel.canceled() {
+        return Ok(None);
+    }
+    let target_completed = match cancel.duplicate_of {
+        Some(target) => completed_before(conn, target, event_id)?,
+        None => false,
+    };
+    Ok(Some(RecordedCancel {
+        duplicate_of: cancel.duplicate_of,
+        reason: cancel.reason(target_completed),
+    }))
 }
 
-/// The canceled tasks recorded as duplicates of `task_id`, ascending.
-fn duplicates_of(conn: &Connection, task_id: TaskId) -> Result<Vec<TaskId>> {
+/// What a task's latest cancel recorded (see [`cancel_of`]).
+pub(super) struct RecordedCancel {
+    pub(super) duplicate_of: Option<TaskId>,
+    pub(super) reason: Option<String>,
+}
+
+/// Whether `task_id` was completed by an event before `event_id`.
+fn completed_before(conn: &Connection, task_id: TaskId, event_id: i64) -> Result<bool> {
+    Ok(conn.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM run_events WHERE task_id=?1 AND kind='{}'
+             AND json_extract(payload,'$.to')='completed' AND id<?2)",
+            event_kind::TASK_STATUS_CHANGED
+        ),
+        params![task_id, event_id],
+        |r| r.get(0),
+    )?)
+}
+
+/// The canceled tasks whose latest cancel names `task_id`, ascending, each
+/// with its reason (one recorded before reasons is read by its target).
+fn duplicates_of(conn: &Connection, task_id: TaskId) -> Result<BTreeMap<TaskId, String>> {
     let candidates: Vec<TaskId> = conn
         .prepare(&format!(
             "SELECT DISTINCT e.task_id FROM run_events e JOIN tasks t ON t.id=e.task_id
@@ -3035,10 +3068,15 @@ fn duplicates_of(conn: &Connection, task_id: TaskId) -> Result<Vec<TaskId>> {
         ))?
         .query_map([task_id], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
-    let mut duplicates = Vec::with_capacity(candidates.len());
+    let mut duplicates = BTreeMap::new();
     for candidate in candidates {
-        if duplicate_target(conn, candidate)? == Some(task_id) {
-            duplicates.push(candidate);
+        if let Some(RecordedCancel {
+            duplicate_of: Some(target),
+            reason: Some(reason),
+        }) = cancel_of(conn, candidate)?
+            && target == task_id
+        {
+            duplicates.insert(candidate, reason);
         }
     }
     Ok(duplicates)
@@ -3049,7 +3087,7 @@ fn apply_transition(
     task_id: TaskId,
     action: TaskAction,
     now: &str,
-    duplicate: Option<Duplicate>,
+    cancel: Option<&CancelRecord>,
 ) -> Result<Task> {
     // No status of a task a replanning operation guards changes but by
     // the operation's own outcome (ADR-t1521-2 decision 5).
@@ -3084,19 +3122,10 @@ fn apply_transition(
         // again from 1 (ADR-0037 decision 6, kept by ADR-0041 decision 16).
         conn.execute("UPDATE tasks SET follow_up_depth=0 WHERE id=?1", [task_id])?;
     }
-    let mut payload = match duplicate {
-        Some(Duplicate {
-            duplicate_of,
-            by: Some(by),
-        }) => {
-            json!({"from": from, "to": task.status(), "duplicate_of": duplicate_of, "by": by})
-        }
-        Some(Duplicate {
-            duplicate_of,
-            by: None,
-        }) => json!({"from": from, "to": task.status(), "duplicate_of": duplicate_of}),
-        None => json!({"from": from, "to": task.status()}),
-    };
+    let mut payload = json!({"from": from, "to": task.status()});
+    if let (Some(cancel), Some(object)) = (cancel, payload.as_object_mut()) {
+        object.extend(cancel.fields());
+    }
     // A draft the runtime or a job made carries where it came from into
     // its cancel, so the cancel is found from its source (ADR-t807-1).
     if from == TaskStatus::Draft

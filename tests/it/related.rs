@@ -8,6 +8,7 @@ use dagq::{
     application::TaskStore,
     domain::{
         GoalId, NewGoal, NewTask, TaskId,
+        cancel_reason::NewCancel,
         related::{ClueKind, RelatedPage},
     },
     infrastructure::sqlite::SqliteQueue,
@@ -537,7 +538,10 @@ fn related_explains_each_candidate_and_filters_by_status() {
 
     // A canceled duplicate names its original; a status filter keeps it.
     queue
-        .cancel_duplicate(TaskId::new(ids[&230]), TaskId::new(ids[&203]))
+        .cancel(
+            TaskId::new(ids[&230]),
+            NewCancel::by_hand(None, Some(TaskId::new(ids[&203])), None),
+        )
         .unwrap();
     let raw = Connection::open(&db).unwrap();
     let canceled = queue

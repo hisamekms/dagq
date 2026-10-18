@@ -8,7 +8,7 @@ Attention `triage by hand` (`triage_failed`): an ended run's recovery job failed
 
 - `"$DAGQ" ready ID`: run the task again from the current main (no plan review).
 - `ready ID --inherit`: the same, carrying the run's committed work over (below).
-- `cancel ID`: drop it. To change the work, cancel it and record a planning request that names it (`"$DAGQ" request add --text '<their words>' --ref task:N`, `skills/dagq-inbox/reference/requests.md`).
+- `cancel ID --reason CODE`: drop it, with the code that fits the person's reason (`skills/dagq/reference/register.md`, "Cancel reasons"). To change the work, cancel it and record a planning request that names it (`"$DAGQ" request add --text '<their words>' --ref task:N`, `skills/dagq-inbox/reference/requests.md`).
 
 ## Carry a run's work over by hand
 

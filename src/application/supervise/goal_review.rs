@@ -262,6 +262,7 @@ impl PlanningState {
                 "description": shown.task.description(),
                 "acceptance": shown.task.acceptance(),
                 "duplicate_of": shown.duplicate_of,
+                "cancel_reason": shown.cancel_reason,
             });
             if let Some(run) = shown
                 .runs

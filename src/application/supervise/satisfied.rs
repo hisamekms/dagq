@@ -417,7 +417,7 @@ impl Supervisor<'_> {
                 run.id(),
                 &decision.reason,
                 Reason::new(decision.code).on(payload),
-                decision.action,
+                &decision.task,
             )?;
             self.queue.close_ask(ask_id)?;
             info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {}: {}", run.id(), run.task_id(), decision.reason);

@@ -2,6 +2,7 @@
 //! validation, landing decisions, integration and clean-up ([`RunTransitions`]).
 
 use super::*;
+use crate::domain::satisfied::TaskMove;
 use crate::domain::{EventKind, run_phase};
 
 impl SqliteQueue {
@@ -411,15 +412,16 @@ impl SqliteQueue {
     /// Apply a `retry` or `cancel` answer to the `approve_close` ask of a
     /// validating run nobody leases (ADR-t1818-1): it becomes `failed` with
     /// `reason` as `last_error`, recorded as `run_satisfied_decided` with
-    /// `payload`, and its task takes `action` (back to `ready`, or
-    /// canceled) in the same transaction, so that no failed run is left
-    /// for a recovery job on a task a person already decided.
+    /// `payload`, and its task moves as `task` says (back to `ready`, or
+    /// canceled with the answer as its reason) in the same transaction, so
+    /// that no failed run is left for a recovery job on a task a person
+    /// already decided.
     pub fn decide_satisfied(
         &mut self,
         id: &RunId,
         reason: &str,
         payload: serde_json::Value,
-        action: TaskAction,
+        task: &TaskMove,
     ) -> Result<TaskRun> {
         let tx = self
             .conn
@@ -433,12 +435,18 @@ impl SqliteQueue {
             || format!("run {id} is not validating"),
             |run| run::record_satisfied_decision(run, reason, payload),
         )?;
-        crate::infrastructure::sqlite::transition_task(
-            &tx,
-            run.task_id(),
-            action,
-            &self.generators.clock.timestamp(),
-        )?;
+        let now = self.generators.clock.timestamp();
+        match task {
+            TaskMove::Ready => crate::infrastructure::sqlite::transition_task(
+                &tx,
+                run.task_id(),
+                TaskAction::Ready,
+                &now,
+            )?,
+            TaskMove::Cancel(cancel) => {
+                crate::infrastructure::sqlite::cancel_task(&tx, run.task_id(), cancel, &now)?
+            }
+        };
         tx.commit()?;
         Ok(run.relocated(&self.runs_dir))
     }
@@ -1558,9 +1566,9 @@ impl RunTransitions for SqliteQueue {
         id: &RunId,
         reason: &str,
         payload: serde_json::Value,
-        action: TaskAction,
+        task: &TaskMove,
     ) -> Result<TaskRun> {
-        SqliteQueue::decide_satisfied(self, id, reason, payload, action)
+        SqliteQueue::decide_satisfied(self, id, reason, payload, task)
     }
     fn park_live(
         &mut self,

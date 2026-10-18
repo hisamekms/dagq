@@ -392,7 +392,7 @@ fn a_guarding_operation_refuses_the_ordinary_steps_and_the_claim() {
     );
     // The command line refuses it too, a person's included.
     for words in [
-        vec!["cancel", &*a.to_string()],
+        vec!["cancel", &*a.to_string(), "--reason", "stale"],
         vec!["edit", &*a.to_string(), "--title", "renamed"],
     ] {
         let (done, error) = as_role(&db, "user", None, &words);

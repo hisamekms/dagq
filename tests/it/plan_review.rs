@@ -556,6 +556,10 @@ fn a_passing_plan_review_readies_the_proposal_with_its_actions() {
     assert_eq!(canceled["to"], "canceled");
     assert_eq!(canceled["duplicate_of"], json!(blocker));
     assert_eq!(canceled["by"], "plan_review");
+    // Its reason comes from the open task it names, with the proposal
+    // (ADR-t947-4 decision 3).
+    assert_eq!(canceled["reason"], "duplicate");
+    assert_eq!(canceled["proposal_id"], json!(proposal));
     assert!(events(&mut queue, copy, "task_canceled_as_duplicate").is_empty());
     // The events of the proposal are on its first task.
     let started = events(&mut queue, two, "plan_review_started");
@@ -1055,6 +1059,18 @@ fn a_concern_asks_the_inbox_and_the_supervisor_applies_the_answers() {
     assert_eq!(
         queue.show_proposal(proposals[1]).unwrap().status(),
         ProposalStatus::Canceled
+    );
+    // The answer it applied is the cancel's reason (ADR-t947-4 decision 3).
+    let canceled = events(&mut queue, dropped, "task_status_changed")
+        .pop()
+        .unwrap();
+    assert_eq!(
+        (&canceled["reason"], &canceled["by"], &canceled["ask_id"]),
+        (
+            &json!("answered_cancel"),
+            &json!("approve_plan"),
+            &json!(ask_of(dropped).id)
+        )
     );
     assert_eq!(status(&mut queue, returned), TaskStatus::Draft);
     let reasons = proposal_column(&fx.db, proposals[2], "revise_reasons");

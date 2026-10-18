@@ -1740,3 +1740,13 @@ task = 1819
 name = "runtime_repair::a_recovery_repair_of_low_confidence_becomes_an_ask"
 reason = "境界（supervisorの配線・プロセス）: an idle orphan process under the supervisor's CPU watch starts the recovery job, whose escalation opens the stalled ask and records recovery_finished"
 task = 1819
+
+[[test]]
+name = "plan_review::a_concern_asks_the_inbox_and_the_supervisor_applies_the_answers"
+reason = "B 境界（守る境界）: one supervisor pass applies the inbox's answers to plan review's approve_plan asks (ready, send_back, cancel with its reason, a withdrawn or stale proposal) to the queue in the supervisor's wiring (SQLite, the plan review job); which answer does what is in domain::plan_review's and domain::cancel_reason's unit tests"
+task = 955
+
+[[test]]
+name = "runtime_integrate::integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once"
+reason = "B 境界（Git・SQLite・supervisor と integrate の配線）: 実際の supervisor の run と integrate の着地が receipt の follow_ups を goal の draft として 1 度だけ登録し、着地しない receipt では登録しないことを確かめる代表の 1 本。本文の変更は cancel に --reason を足した CLI の引数だけ。follow_up の登録の判断は domain の unit test"
+task = 955

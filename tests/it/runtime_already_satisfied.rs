@@ -308,6 +308,15 @@ fn after_a_restart_a_close_verifies_main_again_and_a_failure_does_not_close() {
             (json!("cancel"), json!("cancelled"))
         ]
     );
+    let canceled = payloads(&detail, "task_status_changed").pop().unwrap();
+    assert_eq!(
+        (&canceled["reason"], &canceled["by"], &canceled["ask_id"]),
+        (
+            &json!("answered_cancel"),
+            &json!("approve_close"),
+            &json!(again.id)
+        )
+    );
     assert!(queue.read_ask(again.id).unwrap().closed_at.is_some());
 }
 

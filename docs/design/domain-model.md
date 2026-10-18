@@ -134,17 +134,19 @@ pathは`src/domain/`から。
 
 follow_upの深さは集約でなくstoreの列（`DraftPlannerStore::follow_up_depth`）。
 
-## cancelの理由の分類コード（未実装）
+## cancelの理由の分類コード<a id="cancelの理由の分類コード未実装"></a>
 
-[ADR-t947-4](../adr/2026-09-28-t947-4-cancel-carries-a-reason-code.md)の決定で、まだ実装していない。
-実装までは`cancel`は理由を持たず、`--duplicate-of`だけが構造の理由である。
-一覧と定義はこの節が持つ（ADR-t947-4決定5、分析は[cancel-reasons](../plans/cancel-reasons.md#ラベルの定義案)）。
+[ADR-t947-4](../adr/2026-09-28-t947-4-cancel-carries-a-reason-code.md)の決定。
+cancelは理由を`task_status_changed`に記録し、誰がcancelしたかはそのeventのactorが持つ。
+一覧と定義はこの節が持ち（ADR-t947-4決定5、分析は[cancel-reasons](../plans/cancel-reasons.md#ラベルの定義案)）、判断の入口は`domain::cancel_reason`。
 
 - `dagq cancel TASK --reason <code> [--duplicate-of X] [--note <text>]`で、`--reason`か`--duplicate-of`のどちらかを必須にし、表で「X必須」のコードは`--duplicate-of`を、`other`は`--note`を必須にする。
 - `--duplicate-of`だけのcancelは、runtimeがXの状態から`duplicate`（開いている）か`already_done`（`completed`）を補う。
-- 一覧に無い値は拒まずに記録し、重複の組として読む（`related`・`search`・`show`・`stats`）のは`duplicate`と`already_done`だけ。
-- runtimeが適用するcancelは経路から理由を付け、askの`cancel`の答えは`answered_cancel`とaskのIDを記録する。
-- 理由の無い過去のcancelは書き換えず、集計は`duplicate_of`があれば上の規則で補い、無ければ`unrecorded`と数える。
+- 一覧に無い値は拒まずに記録し（集計が理由の無いcancelを数える`unrecorded`だけは記録しない）、重複の組として読む（`related`・`search`・`stats`・`kpi`、runtimeのplannerの束の結末）のは`duplicate`と`already_done`だけ。
+- `show`と`list`は理由とともにXを出し、`show X`はXを指すcanceledのtaskにそれぞれの理由を添える。
+- runtimeが適用するcancelは経路から理由を付ける: plan reviewの`cancel_duplicate`はXの状態から補ってproposalのIDを、askの`cancel`の答え（`approve_plan`・`approve_landing`・`decide`・`approve_close`）は`answered_cancel`とaskのIDを記録する。
+- goalの`abandoned`のcloseは所属のtaskをcancelしないので、理由は生じない。
+- 理由の無い過去のcancelは書き換えず、`duplicate_of`があればcancelの時点のXの状態で上の規則で補い、無ければ集計は`unrecorded`と数える。
 
 | コード | 定義（Xは`--duplicate-of`の相手） |
 | --- | --- |

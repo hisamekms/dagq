@@ -824,7 +824,7 @@ fn search_prints_hits_with_excerpts_and_checks_its_filters() {
         ],
     );
     ok(&db, &["add", "unrelated"]);
-    ok(&db, &["cancel", "2"]);
+    ok(&db, &["cancel", "2", "--reason", "stale"]);
     ok(&db, &["note", "--task", "1", "--text", "全文検索のメモ"]);
     let found = ok(&db, &["search", "全文検索"]);
     assert_eq!(found["total"], 2, "{found}");

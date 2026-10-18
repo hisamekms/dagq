@@ -255,7 +255,7 @@ fn a_headless_planner_opened_for_a_revise_runs_its_prompt_as_a_turn_and_ends_on_
 fn a_headless_draft_planner_ends_while_its_question_waits_and_a_new_one_goes_on_from_the_answer() {
     let fx = headless_fixture(
         r#"case "$PROMPT" in
-*"answer to ask "[0-9]*": cancel"*) "$DAGQ" --db "$DB" cancel 2 >> "$RUN_DIR/cancel.log" 2>&1 ;;
+*"answer to ask "[0-9]*": cancel"*) "$DAGQ" --db "$DB" cancel 2 --reason not_worth >> "$RUN_DIR/cancel.log" 2>&1 ;;
 *) "$DAGQ" --db "$DB" note --task 2 --text "half-decided: cancel unless the goal needs it" >> "$RUN_DIR/ask.log" 2>&1
    "$DAGQ" --db "$DB" ask --kind planner_question --because scope --task 2 --question "in the goal?" --cmux true >> "$RUN_DIR/ask.log" 2>&1 ;;
 esac

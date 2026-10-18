@@ -625,6 +625,12 @@ fn an_escalation_waits_for_a_person_and_the_supervisor_applies_the_answer() {
     assert_eq!(decided.len(), 1);
     assert_eq!(decided[0]["answer"], "cancel");
     assert_eq!(decided[0]["ask_id"], ask.id.as_i64());
+    // The answer it applied is the cancel's reason (ADR-t947-4 decision 3).
+    let canceled = payloads(&detail, "task_status_changed").pop().unwrap();
+    assert_eq!(
+        (&canceled["reason"], &canceled["by"], &canceled["ask_id"]),
+        (&json!("answered_cancel"), &json!("decide"), &json!(ask.id))
+    );
     assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
     assert!(ask_attention(&runtime::status(&db).unwrap(), ask.id).is_empty());
 }

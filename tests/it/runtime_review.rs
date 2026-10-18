@@ -847,6 +847,16 @@ fn a_review_that_exits_non_zero_twice_closes_the_session_and_asks_a_person() {
         Some(format!("canceled by ask {}", ask.id).as_str())
     );
     assert_eq!(detail.task.status(), TaskStatus::Canceled);
+    // The answer it applied is the cancel's reason (ADR-t947-4 decision 3).
+    let canceled = detail
+        .events
+        .iter()
+        .rfind(|event| event.kind == "task_status_changed")
+        .unwrap();
+    assert_eq!(
+        canceled.payload,
+        json!({"from": "in_progress", "to": "canceled", "reason": "answered_cancel", "by": "approve_landing", "ask_id": ask.id})
+    );
     // No review after the answer.
     assert_eq!(reviewer.prompts().len(), 2);
 }

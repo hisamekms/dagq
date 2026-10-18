@@ -47,7 +47,7 @@ fn cli_persists_across_processes_and_reports_dependency_errors_as_json() {
     assert_eq!(detail["task"]["title"], first["title"]);
     assert_eq!(detail["dependencies"], serde_json::json!([]));
     assert_eq!(ok(&db, &["list"])["tasks"].as_array().unwrap().len(), 2);
-    ok(&db, &["cancel", &a]);
+    ok(&db, &["cancel", &a, "--reason", "stale"]);
     assert_eq!(
         ok(&db, &["candidates"])["candidates"],
         serde_json::json!([])
@@ -218,7 +218,7 @@ fn list_options_filter_page_and_expand_tasks() {
         .unwrap();
     let c = ok(&db, &["add", "third"])["id"].as_i64().unwrap();
     ok(&db, &["ready", &a.to_string(), "--bypass-review"]);
-    ok(&db, &["cancel", &c.to_string()]);
+    ok(&db, &["cancel", &c.to_string(), "--reason", "stale"]);
 
     let ids = |value: &Value| -> Vec<i64> {
         value["tasks"]
@@ -278,7 +278,7 @@ fn cancel_duplicate_of_is_recorded_shown_listed_and_counted() {
         refused(&db, &["cancel", "2", "--duplicate-of", "99"]).contains("task 99 does not exist")
     );
     assert!(refused(&db, &["cancel", "2", "--duplicate-of", "2"]).contains("itself"));
-    ok(&db, &["cancel", "5"]);
+    ok(&db, &["cancel", "5", "--reason", "stale"]);
     assert!(refused(&db, &["cancel", "2", "--duplicate-of", "5"]).contains("task 5 is canceled"));
     let canceled = ok(&db, &["cancel", "2", "--duplicate-of", "1"]);
     assert_eq!(canceled["status"], "canceled");
@@ -332,6 +332,178 @@ fn cancel_duplicate_of_is_recorded_shown_listed_and_counted() {
     let later = ok(&db, &["stats", "--since", &cursor]);
     assert_eq!(later["duplicate_cancels"]["count"], 1);
     assert_eq!(later["duplicate_cancels"]["tasks"][0]["task_id"], 4);
+}
+
+/// `cancel` records its reason (ADR-t947-4): it needs a reason or the task
+/// that holds the content, what a reason needs, and no reason only the
+/// runtime gives; `show`, `list` and `stats` read it, and only `duplicate`
+/// and `already_done` pair a task as a duplicate. A cancel recorded before
+/// reasons is read by the task it names, as it was then.
+#[test]
+fn cancel_records_its_reason_and_reads_one_recorded_before_reasons() {
+    let (_dir, db) = queue();
+    for title in [
+        "parse the queue config file",
+        "parse the queue config file again",
+        "old drop",
+        "parse the queue config file elsewhere",
+        "costly",
+        "odd",
+        "landed",
+        "old done",
+        "done again",
+    ] {
+        ok(&db, &["add", title]);
+    }
+    // Two cancels and a landing an older binary recorded: no reason, one
+    // naming an open task, one a task completed before it.
+    let raw = rusqlite::Connection::open(&db).unwrap();
+    for (task, status, payload) in [
+        (
+            2,
+            "canceled",
+            json!({"from": "draft", "to": "canceled", "duplicate_of": 1}),
+        ),
+        (3, "canceled", json!({"from": "draft", "to": "canceled"})),
+        (
+            7,
+            "completed",
+            json!({"from": "in_progress", "to": "completed"}),
+        ),
+        (
+            8,
+            "canceled",
+            json!({"from": "draft", "to": "canceled", "duplicate_of": 7}),
+        ),
+    ] {
+        raw.execute(
+            "UPDATE tasks SET status=?2 WHERE id=?1",
+            rusqlite::params![task, status],
+        )
+        .unwrap();
+        raw.execute(
+            "INSERT INTO run_events(task_id, kind, payload) VALUES (?1, 'task_status_changed', ?2)",
+            rusqlite::params![task, payload.to_string()],
+        )
+        .unwrap();
+    }
+
+    // A refusal (each one's words: domain::cancel_reason's unit test)
+    // reaches the CLI and changes nothing.
+    let before = ok(&db, &["events", "--after", "0", "--all"])["cursor"].clone();
+    assert!(refused(&db, &["cancel", "4"]).contains("cancel needs --reason CODE"));
+    assert_eq!(
+        ok(&db, &["events", "--after", "0", "--all"])["cursor"],
+        before
+    );
+    assert_eq!(ok(&db, &["show", "4"])["task"]["status"], "draft");
+    ok(
+        &db,
+        &[
+            "cancel",
+            "4",
+            "--reason",
+            "absorbed",
+            "--duplicate-of",
+            "1",
+            "--note",
+            "moved into 1",
+        ],
+    );
+    ok(&db, &["cancel", "5", "--reason", "not_worth"]);
+    // `--duplicate-of` alone names a completed task: done there already.
+    ok(&db, &["cancel", "9", "--duplicate-of", "7"]);
+    // A code the list does not have is recorded as it is.
+    ok(&db, &["cancel", "6", "--reason", "someday_code"]);
+    let payload: String = raw
+        .query_row(
+            "SELECT payload FROM run_events WHERE task_id=4 AND kind='task_status_changed'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&payload).unwrap(),
+        json!({"from": "draft", "to": "canceled", "reason": "absorbed", "duplicate_of": 1, "note": "moved into 1"})
+    );
+
+    let shown = |id: &str| ok(&db, &["show", id]);
+    assert_eq!(
+        (&shown("4")["cancel_reason"], &shown("4")["duplicate_of"]),
+        (&json!("absorbed"), &json!(1))
+    );
+    assert_eq!(shown("2")["cancel_reason"], "duplicate");
+    assert_eq!(shown("8")["cancel_reason"], "already_done");
+    assert_eq!(shown("9")["cancel_reason"], "already_done");
+    assert_eq!(shown("3")["cancel_reason"], Value::Null);
+    assert_eq!(shown("1")["cancel_reason"], Value::Null);
+    assert_eq!(shown("1")["duplicates"], json!([2, 4]));
+    assert_eq!(
+        shown("1")["duplicate_reasons"],
+        json!({"2": "duplicate", "4": "absorbed"})
+    );
+    let listed = ok(&db, &["list", "--all"]);
+    let row = |id: i64| {
+        listed["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|task| task["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        (&row(4)["cancel_reason"], &row(4)["duplicate_of"]),
+        (&json!("absorbed"), &json!(1))
+    );
+    assert_eq!(row(5)["cancel_reason"], "not_worth");
+    assert!(row(3).get("cancel_reason").is_none());
+    assert!(row(1).get("cancel_reason").is_none());
+    // `related` pairs the duplicate, not the task whose content 1 took.
+    let related = ok(&db, &["related", "1", "--status", "canceled"]);
+    let pairs: Vec<(Value, Value)> = related["related"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|candidate| [json!(2), json!(4)].contains(&candidate["id"]))
+        .map(|candidate| (candidate["id"].clone(), candidate["duplicate_of"].clone()))
+        .collect();
+    assert!(pairs.contains(&(json!(2), json!(1))), "{related}");
+    assert!(
+        pairs.iter().all(|(id, of)| id != &json!(4) || of.is_null()),
+        "{related}"
+    );
+
+    let stats = ok(&db, &["stats", "--full"]);
+    assert_eq!(
+        stats["duplicate_cancels"]["tasks"],
+        json!([
+            {"task_id": 2, "duplicate_of": 1},
+            {"task_id": 8, "duplicate_of": 7},
+            {"task_id": 9, "duplicate_of": 7}
+        ])
+    );
+    let reasons = &stats["cancel_reasons"];
+    let counted = |reason: &str| reasons[reason]["count"].as_i64();
+    assert_eq!(
+        [
+            "absorbed",
+            "not_worth",
+            "someday_code",
+            "duplicate",
+            "already_done",
+            "unrecorded"
+        ]
+        .map(counted),
+        [Some(1), Some(1), Some(1), Some(1), Some(2), Some(1)],
+        "{reasons}"
+    );
+    assert_eq!(
+        reasons["already_done"]["by_actor"],
+        json!({"unrecorded": 1, "user": 1})
+    );
+    assert_eq!(reasons["absorbed"]["by_actor"], json!({"user": 1}));
+    assert_eq!(reasons["duplicate"]["by_actor"], json!({"unrecorded": 1}));
 }
 
 /// `add --paths` stores the globs (ADR-0029), `show` and `list --full`
@@ -611,7 +783,7 @@ fn priority_is_named_changed_while_editable_and_orders_candidates() {
     ] {
         assert!(!invoke(&db, args).status.success(), "{args:?}");
     }
-    ok(&db, &["cancel", "1"]);
+    ok(&db, &["cancel", "1", "--reason", "stale"]);
     assert_eq!(
         refused(&db, &["set-priority", "1", "high"]),
         "task 1 is canceled; the priority can only be changed for draft, submitted, ready or in_progress tasks"

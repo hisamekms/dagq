@@ -10,13 +10,18 @@ use dagq::{
     },
     domain::{
         ClaimOutcome, EvidenceCheck, GoalId, Priority, PrioritySource, TaskAction, TaskEdit,
-        TaskId, TaskStatus,
+        TaskId, TaskStatus, cancel_reason::NewCancel,
     },
     infrastructure::sqlite::SqliteQueue,
 };
 use rusqlite::Connection;
 
 use common::queue::*;
+
+/// An actor's cancel naming `other` as the task that holds the content.
+fn duplicate_of(other: TaskId) -> NewCancel {
+    NewCancel::by_hand(None, Some(other), None)
+}
 
 /// `add --paths` stores the globs once each; `set_paths` replaces them on a
 /// draft or ready task only, records `task_paths_changed` when they change,
@@ -759,7 +764,7 @@ fn changes_authorized_on_another_status_change_nothing() {
         planning::PlanningStore::transition(&mut queue, task, TaskAction::Cancel, ready),
         planning::PlanningStore::transition(&mut queue, task, TaskAction::Draft, ready),
         planning::PlanningStore::transition(&mut queue, task, TaskAction::BypassReview, ready),
-        planning::PlanningStore::cancel_duplicate(&mut queue, task, other, ready),
+        planning::PlanningStore::cancel(&mut queue, task, duplicate_of(other), ready),
         planning::PlanningStore::set_goal(&mut queue, task, Some(goal), ready),
         planning::PlanningStore::set_paths(&mut queue, task, vec!["docs/**".into()], ready),
         planning::PlanningStore::set_priority(&mut queue, task, Some(Priority::High), ready),
@@ -822,7 +827,8 @@ fn changes_authorized_on_another_status_change_nothing() {
     assert_eq!(drafted.status(), TaskStatus::Draft);
     let task = claimed_and_failed(&dir, &mut queue, "a duplicate");
     let duplicate =
-        planning::PlanningStore::cancel_duplicate(&mut queue, task, other, in_progress).unwrap();
+        planning::PlanningStore::cancel(&mut queue, task, duplicate_of(other), in_progress)
+            .unwrap();
     assert_eq!(duplicate.status(), TaskStatus::Canceled);
 
     // And on a `ready` task authorized as `ready`, the rest go on too.

@@ -116,8 +116,8 @@ fn goals_group_tasks_and_report_counts_by_status() {
             .status
             .success()
     );
-    ok(&db, &["cancel", "1"]);
-    ok(&db, &["cancel", "2"]);
+    ok(&db, &["cancel", "1", "--reason", "stale"]);
+    ok(&db, &["cancel", "2", "--reason", "stale"]);
     let closed = ok(&db, &["goal", "close", "1", "--verdict", "achieved"]);
     assert_eq!(closed["verdict"], "achieved");
     assert!(closed["closed_at"].is_string());
@@ -157,7 +157,7 @@ fn graph_reports_unfinished_dependencies_releases_and_the_critical_chain() {
     for id in ["1", "2", "3"] {
         ok(&db, &["ready", id, "--bypass-review"]);
     }
-    ok(&db, &["cancel", "5"]);
+    ok(&db, &["cancel", "5", "--reason", "stale"]);
 
     let graph = ok(&db, &["graph"]);
     let tasks = graph["tasks"].as_array().unwrap();
@@ -248,7 +248,7 @@ fn a_task_waits_for_its_goal_dependency_until_the_goal_is_achieved() {
 
     // The goal's only task is done, yet the goal is open: still waiting.
     // Canceling stands in for completion; both are terminal for the goal.
-    ok(&db, &["cancel", "1"]);
+    ok(&db, &["cancel", "1", "--reason", "stale"]);
     assert!(candidates(&db).is_empty());
     assert_eq!(
         ok(&db, &["graph"])["tasks"][0]["ready_after"],
@@ -444,7 +444,7 @@ fn a_canceled_member_does_not_make_its_goal_wait() {
         refused(&db, &["dependency", "add", "1", "--goal", "1"]),
         cycle
     );
-    ok(&db, &["cancel", "2"]);
+    ok(&db, &["cancel", "2", "--reason", "stale"]);
     let added = ok(&db, &["dependency", "add", "1", "--goal", "1"]);
     assert_eq!(added["goal_dependencies"], serde_json::json!([1]));
 }

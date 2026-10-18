@@ -21,7 +21,7 @@ use std::{fs, path::Path, time::Duration};
 
 /// The turn of the stub planner: keep its prompt, then cancel draft 2.
 const CANCEL_DRAFT_2: &str = r#"printf '%s' "$PROMPT" > "$RUN_DIR/prompt-turn-$TURN.txt"
-"$DAGQ" --db "$DB" cancel 2 >> "$RUN_DIR/cancel.log" 2>&1
+"$DAGQ" --db "$DB" cancel 2 --reason not_worth >> "$RUN_DIR/cancel.log" 2>&1
 say "turn $TURN""#;
 
 /// A time long gone, and one far ahead.

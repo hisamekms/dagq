@@ -80,7 +80,7 @@ fn a_request_written_during_a_turn_at_the_usage_limit_waits_for_the_retry_of_tha
   await_file "$RUN_DIR/answered" ;;
 2) await_file "$RUN_DIR/turns/request-000002.json"
   fail "Claude AI usage limit reached|1790535600" ;;
-*) case "$PROMPT" in *"a request for you"*) "$DAGQ" --db "$DB" cancel 2 >> "$RUN_DIR/cancel.log" 2>&1 ;; esac ;;
+*) case "$PROMPT" in *"a request for you"*) "$DAGQ" --db "$DB" cancel 2 --reason not_worth >> "$RUN_DIR/cancel.log" 2>&1 ;; esac ;;
 esac
 say "turn $TURN""#,
     );

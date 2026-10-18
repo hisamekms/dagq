@@ -12,7 +12,7 @@ use dagq::{
     application::{GoalReviewStore, TaskStore},
     domain::{
         AskKind, AskReason, DraftOrigin, GoalId, GoalVerdict, NewGoal, Priority, TaskAction,
-        TaskId, TaskStatus,
+        TaskId, TaskStatus, cancel_reason::NewCancel,
     },
     infrastructure::sqlite::SqliteQueue,
 };
@@ -53,7 +53,12 @@ pub(crate) fn goal_done(fx: &Fixture) -> (GoalId, TaskId) {
         queue.set_goal(task, Some(goal)).unwrap();
     }
     set_status(fx, done, TaskStatus::Completed);
-    queue.transition(dropped, TaskAction::Cancel).unwrap();
+    queue
+        .cancel(
+            dropped,
+            NewCancel::by_hand(Some("not_worth".into()), None, None),
+        )
+        .unwrap();
     (goal, done)
 }
 
@@ -131,6 +136,8 @@ fn an_achieved_goal_is_closed_with_its_evidence() {
     assert!(prompts[0].contains("the median landing is under 5 minutes"));
     assert!(prompts[0].contains("cache the build"));
     assert!(prompts[0].contains(&format!("\"id\":{done}")));
+    // A canceled task comes with the reason of its cancel (ADR-t947-4).
+    assert!(prompts[0].contains("\"cancel_reason\":\"not_worth\""));
     // The job ran as the goal review job of the goal (ADR-t728-1).
     assert_eq!(
         job_actors(&fx.db),

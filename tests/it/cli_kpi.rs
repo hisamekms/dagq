@@ -619,6 +619,50 @@ fn the_worker_question_topics_reach_stats_and_kpi() {
     );
 }
 
+/// The reasons of the cancels reach `stats` and `kpi` (ADR-t947-4
+/// decision 4): per reason how many, who canceled them and the time from
+/// the registration, as `plan.cancels` and `plan.cancel_registered_secs`
+/// by `reason=`, with `stats`' `cancel_reasons` in the details.
+#[test]
+fn the_cancel_reasons_reach_stats_and_kpi() {
+    let (dir, db) = queue();
+    let config = dir.path().join("config");
+    for title in ["first", "second", "third"] {
+        ok(&db, &["add", title]);
+    }
+    ok(&db, &["cancel", "1", "--reason", "not_worth"]);
+    ok(&db, &["cancel", "3", "--duplicate-of", "2"]);
+    ok(&db, &["cancel", "2", "--reason", "not_worth"]);
+
+    let reasons = &ok(&db, &["stats", "--full"])["cancel_reasons"];
+    let dropped = &reasons["not_worth"];
+    assert_eq!(dropped["count"], 2, "{reasons}");
+    assert_eq!(dropped["by_actor"], json!({"user": 2}), "{reasons}");
+    assert_eq!(dropped["registered_secs"]["count"], 2, "{reasons}");
+    assert_eq!(
+        (&dropped["plan_waste"], &dropped["run_waste"]),
+        (&json!(0), &json!(0)),
+        "{reasons}"
+    );
+    assert_eq!(reasons["duplicate"]["count"], 1, "{reasons}");
+
+    let report = kpi_ok(&db, &config, &["--last", "1"]);
+    let today = &report["periods"][0];
+    let kpis = &today["kpis"];
+    assert_eq!(
+        kpis["plan.cancels"]["reason=not_worth"]["value"], 2.0,
+        "{kpis}"
+    );
+    assert_eq!(
+        kpis["plan.cancels"]["reason=duplicate"]["value"], 1.0,
+        "{kpis}"
+    );
+    assert_eq!(kpis["plan.cancels"]["all"]["value"], 3.0, "{kpis}");
+    assert_eq!(kpis["plan.cancel_registered_secs"]["all"]["n"], 3, "{kpis}");
+    assert_eq!(kpis["plan.cancel_run_waste"]["all"]["value"], 0.0, "{kpis}");
+    assert_eq!(today["details"]["cancel_reasons"]["not_worth"]["count"], 2);
+}
+
 /// A target's `kind` is refused with a pointer to `change` and `area`
 /// (ADR-t980-1), in the host's `host.toml` as in the repository's
 /// `dagq.toml`.

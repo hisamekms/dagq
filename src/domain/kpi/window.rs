@@ -22,6 +22,7 @@ use crate::domain::{
         self, Cursor, LiveSnapshot, RunStats, SlotSnapshot, StatsQuery,
         ask_seen::seen_waits,
         asks::human_waits,
+        cancel_reasons,
         executions::{Coverage, ExecutionTotals},
         landing::PHASES,
         landing_utilization::landing_utilization,
@@ -1099,6 +1100,24 @@ impl<'a> Context<'a> {
         );
         put("plan.follow_up_draft_secs", ALL, Measure::secs(all_secs));
         details.insert("follow_up_categories", json(categories));
+        // The cancels of the window by reason (ADR-t947-4 decision 4), as
+        // `stats`' `cancel_reasons` counts them: how many, those the plan
+        // had taken on (its waste), how long after their registration,
+        // and those that used a run with the runs' seconds.
+        let cancels = &stats.cancel_reasons;
+        let mut every = cancel_reasons::CancelReason::default();
+        for (reason, flow) in cancels {
+            cancel_kpis(&format!("reason={reason}"), flow, &mut put);
+            every.count += flow.count;
+            every.plan_waste += flow.plan_waste;
+            every.run_waste += flow.run_waste;
+            every.run_waste_secs += flow.run_waste_secs;
+            every
+                .registered_secs_values
+                .extend(flow.registered_secs_values.iter().copied());
+        }
+        cancel_kpis(ALL, &every, &mut put);
+        details.insert("cancel_reasons", json(cancels));
         // A person's answers to the workers' questions per primary topic
         // (ADR-t947-2 decision 4), and by when the asks were opened.
         let questions = &stats.worker_question_topics;
@@ -1707,4 +1726,34 @@ struct Findings {
 
 fn json(value: &impl Serialize) -> Value {
     serde_json::to_value(value).unwrap_or(Value::Null)
+}
+
+/// The cancels of one reason, or of all (`stratum`), as KPIs (ADR-t947-4
+/// decision 4): `plan.cancels`, `plan.cancel_waste` (those the plan had
+/// taken on: submitted, ready or a runtime planner),
+/// `plan.cancel_registered_secs` (from the registration to the cancel),
+/// `plan.cancel_run_waste` (those that used a run) and
+/// `plan.cancel_run_secs` (the seconds of their runs).
+fn cancel_kpis(
+    stratum: &str,
+    flow: &cancel_reasons::CancelReason,
+    put: &mut impl FnMut(&str, &str, Measure),
+) {
+    let count = |n: i64| Measure::count(usize::try_from(n).unwrap_or(0));
+    put("plan.cancels", stratum, count(flow.count));
+    put("plan.cancel_waste", stratum, count(flow.plan_waste));
+    put(
+        "plan.cancel_registered_secs",
+        stratum,
+        Measure::secs(flow.registered_secs_values.iter().copied()),
+    );
+    put("plan.cancel_run_waste", stratum, count(flow.run_waste));
+    put(
+        "plan.cancel_run_secs",
+        stratum,
+        Measure::total(
+            Some(float(flow.run_waste_secs)),
+            usize::try_from(flow.run_waste).unwrap_or(0),
+        ),
+    );
 }

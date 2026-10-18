@@ -25,7 +25,7 @@ use dagq::{
         EventId, FindingId, FindingTarget, GoalEdit, GoalId, GoalVerdict, LeaseToken, NewAsk,
         NewFinding, NewGoal, NewNote, NewTask, NoteTarget, PlannerId, PlannerOrigin, PlannerOwner,
         ProposalId, RequestId, Resource, RunId, SessionRole, StaticPolicy, Submission, TaskEdit,
-        TaskId, TaskStatus, worker::WorkerMode,
+        TaskId, TaskStatus, cancel_reason::NewCancel, worker::WorkerMode,
     },
     infrastructure::{adapters::path_text, location::QueueLocation},
 };
@@ -341,15 +341,27 @@ enum Command {
         #[command(subcommand)]
         command: ProposalCommand,
     },
-    /// Cancel a draft, submitted or ready task. Does not satisfy its dependents.
+    // ADR-t947-4.
+    /// Cancel a draft, submitted or ready task, recording why. Does not satisfy its dependents.
     Cancel {
         id: i64,
+        /// Why it is dropped, chosen by where its content is now: duplicate, already_done,
+        /// absorbed or re_registered (each with --duplicate-of), superseded, not_worth,
+        /// decision_moot, not_repo_work, stale, or other (with --note). Needed unless
+        /// --duplicate-of alone says it; a code not listed is recorded as it is, but answered_cancel
+        /// and unrecorded are the runtime's.
+        #[arg(long)]
+        reason: Option<String>,
         // ADR-0046.
-        /// Record the task as a duplicate of this one: another task that exists and is not
-        /// canceled; a completed one means it is already implemented there. `show`, `list` and
-        /// `stats` report it.
+        /// The task that holds its content: another task that exists and is not canceled.
+        /// Alone, it records `duplicate`, or `already_done` when that task is completed; only
+        /// those two make the pair a duplicate for `related`, `search` and `stats`. `show` and
+        /// `list` report it with the reason.
         #[arg(long = "duplicate-of")]
         duplicate_of: Option<i64>,
+        /// A few words on why, recorded with the reason; needed with --reason other.
+        #[arg(long)]
+        note: Option<String>,
     },
     /// Manage prerequisites; TASK depends on PREDECESSOR, or with --goal on a goal
     /// that must be closed as achieved first.
@@ -4079,9 +4091,15 @@ fn execute(cli: Cli) -> Result<Value> {
             }
         },
         Command::Draft { id } => serde_json::to_value(planning!().draft(TaskId::new(id))?)?,
-        Command::Cancel { id, duplicate_of } => serde_json::to_value(
-            planning!().cancel(TaskId::new(id), duplicate_of.map(TaskId::new))?,
-        )?,
+        Command::Cancel {
+            id,
+            reason,
+            duplicate_of,
+            note,
+        } => serde_json::to_value(planning!().cancel(
+            TaskId::new(id),
+            NewCancel::by_hand(reason, duplicate_of.map(TaskId::new), note),
+        )?)?,
         Command::Dependency { command } => {
             use dagq::application::commands::planning::Dependency;
             // clap requires a predecessor or --goal; --goal wins.
