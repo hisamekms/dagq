@@ -2,7 +2,7 @@
 id: plan-domain-crate-measurement
 type: plan
 title: domain を crate に切り出した試作（条件 B）と現状（条件 A）の、ビルド時間・テストの時間・依存の制御・変更容易さの測定
-status: active
+status: completed
 created: 2026-10-14
 owners:
   - hisamekms
@@ -22,7 +22,7 @@ related:
 
 goal 121 の判断の材料（task 1721）。
 `src/domain` を workspace の新しい crate `crates/dagq-domain` に切り出した試作（条件 B）を作り、同じ commit の現状（条件 A）と並べて、(1) 変更 1 回あたりのビルド時間、(2) `cargo clean` の後の build、(3) domain の単体テスト、(4) 依存の制御、(5) 変更容易さを測った・数えた。
-結論（採るか）はこの文書に書かず、次の task が書く。
+採るかの結論は末尾の「[結論](#結論)」にある（task 1722）。
 
 試作の src・Cargo.toml・crates の変更は着地させず、差分を [domain-crate/prototype.patch](domain-crate/prototype.patch) に残した（`git apply` で測った commit に当たる）。
 測定の手順は [domain-crate/measure.sh](domain-crate/measure.sh)、各試行の値は [build-times.csv](domain-crate/build-times.csv)・[clean-builds.csv](domain-crate/clean-builds.csv)・[domain-tests.csv](domain-crate/domain-tests.csv) にある。
@@ -395,3 +395,55 @@ B でこうした変更に増える手順:
 - **テスト**: domain の単体テスト（`#[test]` 1,306）を domain の変更の後に回すと、build の段が B で約半分（中央値 32.5→17.8 秒、比 0.55）、run の段は同じ（比 0.96）、合計で比 0.65。
   B の 1 本の増加は `sql_ids` の test が dagq-domain に移ったため。tests/it は変わらない。
 - 測れなかった項目は無い（試作は compile しきれ、(1)〜(5) を全て測った）。
+
+## 結論
+
+**今は domain を crate に切り出さない。** ADR は書かず、ADR-0013 と ADR-t1545-1 の「crate は 1 つのまま」は変えない。
+試作の B は compile し、(1)〜(5) は全て測れているので、未確認の観点は無い。
+得はあるが、domain を触る変更で消え、残る得が host の負荷の揺れより小さく、依存の制御は今の script が既に違反 0 で守っているものを compile に移すだけで、一度きりの切り出しの手間と、domain を触る変更の 9 割が crate をまたぐことに見合わないと判断した（本番のコードで今 `pub` にする項目は 0 で、commit や着地の数は増えない）。
+
+### 観点ごとの得と手間
+
+| 観点 | 得（測った値） | 手間・得の消える所（測った値） |
+| --- | --- | --- |
+| ビルド時間 | application を変えた後の再 compile は 5 周とも B が速い（中央値の比 k1 0.53・k2 0.70、差 −30.8 秒・−22.9 秒）。`src/lib.rs` の変更も比 0.72・0.65 | domain を変えた後は B が速くならない（比 k1 1.16・k2 1.01、Compiling 2）。下の重みでは、変更 1 回あたりの短縮の見込みは k1 で約 9 秒（A の約 15%）、k2（llvm-cov の build）で約 10 秒（約 14%）で、同じセルの中の揺れ（最大が最小の 2〜7 倍）より小さい。`src/lib.rs` の変更は 5 周中 k1 で 2 周 B が遅い。clean の後は両方を作り直すと比 0.87 で揺れの範囲 |
+| ビルド時間（worktree seed） | dagq-domain は build script を持たないので、mtime をそろえた seed なら fresh に残せる見込みで、dagq だけの作り直しは中央値 208 秒（A は 384 秒、差 B − B-dagq-only 126 秒） | seed は本番に入っておらず（[worktree-seed](worktree-seed.md) の見積もりのまま）、この得は今は出ない |
+| 依存の制御 | L1 の全部と L2 の `anyhow`・`Uuid::new_v4` は crate の境界で compile が強制する | 今の allow list は L1・L2 とも 0 行で、`scripts/check-layer-deps.sh` が既に違反 0 で守っている（切り出しで新たに防げる違反は今は無い）。L2 の `rusqlite` は orphan rule に当たる `sql_ids` の impl 26 個を domain の外へ戻すまで強制されず、std の `std::fs`・`std::process`・`std::net`・`SystemTime::now`・`Instant::now` は切り出しても script か clippy の設定が残る |
+| 変更容易さ | 再公開は `pub use dagq_domain as domain;` の 1 行で、domain の外の path の書き換えは 0、本番のコードの `pub(crate)`→`pub` も今は 0 | `src/domain` を触った 457 commit のうち 419（91.7%）が domain の外の `src` も触り、B ではどれも crate をまたぐ変更になる（dagq から使う項目の `pub`、test の部品の feature `testkit`、新しい外部 crate の Cargo.toml）。一度きりの手間は path の書き換え 471 か所・145 file、`include_str!` 5、`build_id` の 2 関数の写し、orphan rule の 26、test の部品の公開 16 と `cfg` 9 行。衝突の集中（ports.rs・main.rs・supervise）は減らない |
+| テスト | domain の単体テスト（`#[test]` 1,306）を domain の変更の後に回すと、build の段が比 0.55（中央値 32.5→17.8 秒、差 −14.7 秒）、合計で比 0.65（−14.3 秒） | run の段は同じ（比 0.96）。得は domain の test だけを回すときのもので、dagq の lib test と tests/it を build する検証では、domain を変えた後に dagq も作り直す（(1) の (a)）ので残らない。tests/it は変わらない |
+
+ビルド時間の重み: 同じ期間（2026-09-01〜測った commit）に `src` を触った 811 commit のうち、`src/domain` を触ったのが 457（56.4%）、`src/domain` を触らず `src` の他を触ったのが 354（43.6%）。
+domain を触る変更を (a)、触らない変更を (b) の中央値で代表させて、短縮の見込み = 0.564 ×（(a) の差）+ 0.436 ×（(b) の差）とした（k1: 0.564 × 8.40 + 0.436 × (−30.83) = −8.7 秒、A の重み付きの中央値 57.2 秒に対し約 15%。k2: 0.564 × 0.37 + 0.436 × (−22.92) = −9.8 秒、71.2 秒に対し約 14%）。
+数えたコマンドは (5) と同じ形で、domain を触らない commit も数えた:
+
+```sh
+git log 1a7f887b --since=2026-09-01T00:00:00Z --format='@%H' --name-only -- src \
+  | awk '/^@/{if(c!=""){t++; if(d) n++; else if(o) x++} c=$0; d=0; o=0; next}
+         /^src\/domain\//{d=1; next} /^src\//{o=1}
+         END{if(c!=""){t++; if(d) n++; else if(o) x++} print "T=" t, "N=" n, "X=" x}'
+```
+
+結果は `T=811 N=457 X=354`（2026-10-18 に数えた）。
+このコマンドは測った commit `1a7f887b` に固定してあり、この値を再現するためのものである（いつ流しても同じ値になる）。
+
+### 見直す条件
+
+次のどれかが起きたら、[domain-crate/measure.sh](domain-crate/measure.sh) と [prototype.patch](domain-crate/prototype.patch)（当たらなければ同じ形で作り直す）で (1)〜(3) を測り直し、もう一度決める。
+
+- mtime をそろえた worktree seed（または dagq の crate だけを作り直す seed）が本番に入ったとき。dagq-domain が fresh に残るなら、run ごとの最初の build で B − B-dagq-only（今は中央値 126 秒）が得になり、上の重みの判断が変わる。
+- `src` を触る commit のうち `src/domain` を触らない割合 X ÷ T が 70% 以上になったとき（今は 43.6%）。70% では今の中央値で k1 の短縮の見込みが約 19 秒になり、揺れより大きくなりうる。
+  見直すときは、上のコマンドの `1a7f887b` を見直す時点の `main` の最新の commit に、`--since` をその commit の時刻の 30 日前に替えて数える（直近の変更の傾向を見るため。今の 43.6% は 2026-09-01〜`1a7f887b` の値で、中身のある期間は 22 日）:
+
+  ```sh
+  head=$(git rev-parse main)
+  since=$(date -u -r $(( $(git log -1 --format=%ct "$head") - 30*86400 )) +%Y-%m-%dT%H:%M:%SZ)
+  git log "$head" --since="$since" --format='@%H' --name-only -- src \
+    | awk '/^@/{if(c!=""){t++; if(d) n++; else if(o) x++} c=$0; d=0; o=0; next}
+           /^src\/domain\//{d=1; next} /^src\//{o=1}
+           END{if(c!=""){t++; if(d) n++; else if(o) x++} print "T=" t, "N=" n, "X=" x}'
+  ```
+
+  `date -u -r` は macOS の形で、GNU の `date` では `-d @<秒>` にする。数えた commit・期間・T・N・X を、この文書か測り直しの文書に残す。
+- `.config/layer-deps-allow.txt` に L1 か L2 の行が戻る、または script をすり抜けた domain の禁止依存が着地したとき。compile で強制する得が、今の「違反 0 の検査を移すだけ」から変わる。
+
+context ごとの crate はこの結論の範囲外で、決めていない。
