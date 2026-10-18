@@ -1,6 +1,6 @@
 # The watch
 
-Read this when starting or restarting the inbox's background watch (step 2).
+Read this when starting or restarting the inbox's background watch (step 2). Its flags and output: `"$DAGQ" watch --help`.
 
 ## One command in the background
 
@@ -10,29 +10,28 @@ Pass the cursor from `status --role inbox` (or from the last `watch` that return
 "$DAGQ" watch --role inbox --until-attention --after <cursor>
 ```
 
-- `--until-attention` gives `watch` no timeout: it reads the queue every `--interval` (2 seconds) for as long as it takes and returns only when an attention event for the inbox arrives or the supervisors' health changes. Its completion notice reaches you only when there is something to handle.
-- Do not wrap it in a shell loop, and do not add `--timeout` (the two are refused together). The command does the waiting itself, so there is no empty return to skip and no cursor to carry.
-- It prints one JSON object (`events`, `supervisors_changed`, `supervisors`, `cursor`, and `ask_push` when it tried to tell the person of new asks through the host's `[push]`) and exits 0. Handle it (steps 3 and 4), then start the command again from its `cursor`.
-- Two notices do not wake it on their own: `report the update` (`update_installed`) and an hourly `report the review` (`throughput_review_reported` with `mode` `hourly`). They are kept, not lost: when something else wakes the watch (an ask, any other attention, a daily or weekly review, a failed review, a failed observer, the supervisors' health), its `events` hold them too, oldest first, with the rest. Handle each as step 4 and `status.md` say; the time they waited is no failure. When telling `report the update`, add that sessions reopened after it load the updated plugin.
-- A non-zero exit is a failure, never "nothing new": the queue could not be opened or read (its error JSON goes to stderr), or the arguments were refused (a `dagq` too old for `--until-attention` refuses it). `watch` does not retry; report the error to the person.
+- It has no timeout and returns only when there is something to handle. Do not wrap it in a shell loop and do not add `--timeout`.
+- When it returns, handle its `events` (steps 3 and 4), then start the command again from its `cursor`.
+- `report the update` and an hourly `report the review` do not wake it alone; they come with the next return. The time they waited is no failure. When telling `report the update`, add that sessions reopened after it load the updated plugin.
+- A non-zero exit is a failure, never "nothing new": report the error to the person.
 
 ## One watch, never a status poll
 
-Keep exactly one watch running: start a new one only after the previous one has ended, and never beside it. Never poll `status` in a loop instead; `watch` is the only wait. After compaction or `/clear`, check the session's background tasks first: if a watch is still running, let its notice arrive instead of starting a second one.
+Keep exactly one watch running: start a new one only after the previous one has ended. Never poll `status` in a loop instead. After compaction or `/clear`, check the session's background tasks first: if a watch is still running, let its notice arrive.
 
 ## The throughput review's notice
 
-`report the review` (`throughput_review_reported`, a queue event with no task) is the supervisor's throughput review of the last whole hour, of yesterday or of the ISO week before. It asks nothing: there is no ask to answer or close, and it does not stay in `status`.
+`report the review` is the supervisor's review of the last hour, of yesterday or of the week before. It asks nothing and does not stay in `status`.
 
-- Show the person its `mode`, `period` and `conclusion` lines as they are, with `path` (the whole review, `review.md` under `<queue dir>/reports/reviews/`). An hourly one also has `reasons`: `deviation` (the hour's landings far off the 6 hours before), `sustained_drop` (the 3-hour average well below the 24-hour one for 3 hours) or `no_landing`.
-- A weekly one with `finding_id` proposed one change: it is a finding marked for a proposal, which a runtime planner takes up. Tell the person its ID; nothing is yours to do.
-- Only an hour the runtime's rules flag reaches you, and only along with the next event that wakes the watch (above). Every hour is reviewed, but a quiet hour's review is only saved under `reports/reviews/` and never reaches you. Say nothing about the quiet hours, and run no hourly, daily or weekly review of your own.
-- `check the failed review` (`throughput_review_finished` with `outcome` `failed` or `error`) is a review of any mode that reached no conclusion. Show the person its `mode`, `period`, `outcome`, `reason` (the error) or `exit_code`, and `dir` (its `output.out` and `output.err` say why; older jobs have `output.log`). It asks nothing and holds no claim nor landing; the period is not reviewed again, and you run none of your own in its place unless the person says so. A Codex review that stopped because Codex could not be used (its finish has `provider_unusable`) is no notice: the supervisor holds Codex and reviews that period again on the other provider, and only under `--no-claude` does that second try end as a `check the failed review` saying why.
+- Show the person its `mode`, `period` and `conclusion` lines as they are, with `path` (the whole review), and an hourly one's `reasons`.
+- A weekly one with `finding_id` proposed a change that a runtime planner takes up: tell the person its ID; nothing is yours to do.
+- A quiet hour never reaches you. Say nothing about quiet hours, and run no review of your own.
+- `check the failed review`: a review that reached no conclusion. Show its `mode`, `period`, `outcome`, `reason` or `exit_code`, and `dir` (its output files say why). Run none in its place unless the person says so.
 
 ## The observer's failure notice
 
-`check the failed observer` (`observe_finished`, a queue event with no run or task) says the observer could not start, ran out of time (`outcome` `error`) or exited non-zero (`failed`) for the second time in a row. It reaches you once per run of failures: the first failure and the third and later ones are no notice, nor is the success that ends the run. It wakes `watch --role inbox` and `events` returns it; it does not stay in `status`.
+`check the failed observer` says the observer failed twice in a row; it comes once per run of failures and does not stay in `status`.
 
-- Show the person its `mode`, `outcome`, `consecutive_failures`, `reason` (the error) or `exit_code`, and `dir` (its `output.out` and `output.err` say why, `prompt.md` what it was given; `null` when no provider could start it).
-- It asks nothing and holds no claim nor landing; the supervisor starts the next observation on its timer. Run no `observe` of your own unless the person says so.
-- `"$DAGQ" observe --history` shows the observations since, each with its `consecutive_failures` (`reference/observer.md` of the `dagq` skill).
+- Show the person its `mode`, `outcome`, `consecutive_failures`, `reason` or `exit_code`, and `dir`.
+- It asks nothing; the supervisor starts the next observation by itself. Run no `observe` of your own unless the person says so.
+- `"$DAGQ" observe --history` shows the observations since (`reference/observer.md` of the `dagq` skill).
