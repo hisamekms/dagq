@@ -68,18 +68,18 @@ runの一生を、重ならず隙間なく全体を覆う区間の列で表す�
 - **境目の記録**（実装済み）: supervisorが工程を移るたびに`run_phase_changed`を書き、次の記録が前の工程を閉じる。
   payloadの欄と`attempt`の数え方は`PhaseChange::payload`と`Attempt`のdoc commentが持つ。
   後の工程は、次のrevise・resumeまで前のattemptのまま。
-- **書く所**: supervisorの中の移りは、実行と着地の工程ごとの状態のmoduleの移す操作だけを通る。
+- **書く所**: supervisorの中の移りは工程ごとの状態のmoduleの移す操作を通り、外では下の`Integrator`とstoreが書く。
   slotのrunはslotの工程・slotの外の待ち・着地の順番待ちから、slotを離れたrunはstatus（`validating`に休む主張はそのevent）から工程を読む。
   前と同じ工程とattemptは書かず、プロセスが初めて見るrunは記録を読み直してattemptを引き継ぐ。
   記録の失敗はwarnだけで、runの工程の判断は待たない。
-  人の`integrate`の着地は`Integrator`が書く: integration slotを取った所で`landing`を、mainが動く前にslotを返した所（検査の拒否・エラー・`needs_session`・hold・`failed`）でrunが戻ったstatusの工程を書く。
+  人の`integrate`の着地は`Integrator`が書く: integration slotを取った所で`landing`を、mainが動く前にslotを返した所でrunが戻ったstatusの工程を書く。
   supervisorの着地はslotが書く。
   storeは`run_integrated`と同じtransactionで`push`を、`recover`と放置のrunの回収は`run_recovered`と同じtransactionでstatusの工程（`interrupted`は`ended`、やめた着地は`landing_queue`、reviewし直すなら`returning`）を書く。
-  ただし回収かleaseの返却と同じtransactionでtaskのholdがsettleし、runがunfinishedのまま休むときは、statusの工程でなく`held`を書く。
-  `Integrator`がslotを返した所と回収も、runが`held`に入って解除の前でunfinishedのまま休むならstatusの工程を書かない（終端のstatusならその工程を書く）。
+  storeはholdが効いたunfinishedのrunに`held`を書く: すぐ効いた`task_held`、leaseの返却・回収・保存の中のsettle、`hold_parked`、休むrunのholdをsettleするsupervisorのpass。
+  `held`に入り解除の前のrunがunfinishedのまま休むなら、回収・leaseの返却・`Integrator`のslotの返却はstatusの工程を書かず（終端のstatusなら書く）、解除の`task_released`が休む工程で閉じる。
 - **タグ**: `blocker`は何がrunを次へ移すか、`holds`はその間に握るslotで、値と意味は`Blocker`と`Holds`のdoc commentが持つ。
   `holds`はslotの数え方（着地の順番だけを待つrunと人の答えを待つrunはslotの外）に従う。
-- **taskのhold**: `task_held`から待ちに入るまでは走っている工程のまま数え、待ちに入った記録（工程`held`）から解除の後の記録までだけを`held`にする。
+- **taskのhold**: `task_held`から待ちに入るまでは走る工程のまま、待ちに入った記録から解除の後の記録までを`held`にする。
 - **`already_satisfied`の主張**: mainのsnapshotの検証は`validating`と別の工程でworker slotを持ち、検証を待つ間（slotやcontainerの空き）と答えを待つ間はslotの外の工程にする（[ADR-t1818-1](../adr/2026-10-05-t1818-1-worker-claims-already-satisfied-and-runtime-closes-on-a-verified-snapshot.md)）。
 - **`Phase::tags()`**: 記録の工程の定義（`domain::run_phase`）の隣で網羅的な`match`がタグを返す。
   supervisorの工程も網羅的な`match`で記録の工程に対応し、どちらも工程を足して書き忘れるとコンパイルが止まる。
