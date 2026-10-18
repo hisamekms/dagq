@@ -1,7 +1,7 @@
 ---
 id: development-operations
 type: development
-title: このrepositoryの本番queueの運用（固定バイナリ・使い捨てのqueue・hostのツール・dagq.toml・upのコマンド・KPIの印・secret・人への報告）
+title: このrepositoryの本番queueの運用（固定バイナリ・使い捨てのqueue・hostのツール・hostのswapとメモリ・dagq.toml・upのコマンド・KPIの印・secret・人への報告）
 status: current
 created: 2026-10-03
 owners:
@@ -17,7 +17,7 @@ related:
 
 # このrepositoryの本番queueの運用
 
-このrepository（dagq自身）の本番queueを動かし、固定バイナリ・`dagq.toml`・hostのツールに触るときの今の規則。読むのは、人・inboxが`up` / `down` / `install`、hostのツール、pushに、人・inbox・plannerが`dagq.toml`、KPIの印に触る前と、workerが実バイナリや実queueでの確認が要ると思ったとき（[workerがhostと実queueでできないこと](#workerがhostと実queueでできないこと)だけ）。
+このrepository（dagq自身）の本番queueを動かし、固定バイナリ・`dagq.toml`・hostのツールに触るときの今の規則。読むのは、人・inboxが`up` / `down` / `install`、hostのツール、pushに触る前とhostのswapが満ちたのを見たとき、人・inbox・plannerが`dagq.toml`、KPIの印に触る前と、workerが実バイナリや実queueでの確認が要ると思ったとき（[workerがhostと実queueでできないこと](#workerがhostと実queueでできないこと)だけ）。
 
 本番queueと開発環境の境界の短い規則はAGENTS.mdの「本番 queue と開発環境の境界」だけが持ち、この文書は繰り返さない。この文書が持つのは、その規則が当たるsession・理由・実装への参照と、AGENTS.mdに無いこのrepositoryの運用の規則。dagqの汎用の操作（どのrepositoryにも当たる手順と、その理由）はpluginのskillとreference、実装の姿は`docs/design/`、経緯は[運用の規則の経緯](../plans/operation-rules-history.md)とADR、今の設定値は`dagq.toml`（値の理由はそのコメント）が持ち、ここではそれを指すだけにする。
 
@@ -50,6 +50,26 @@ hostのツールは人が入れ、miseのshimへのlinkを`~/.local/bin`に置�
 - 当面の依存図の`d2`とTALA（`d2plugin-tala`）: `mise use -g d2 github:terrastruct/TALA`で入れ、`ln -s ~/.local/share/mise/shims/d2 ~/.local/bin/d2`と`ln -s ~/.local/share/mise/shims/d2plugin-tala ~/.local/bin/d2plugin-tala`。supervisorのPATHは`up`の時点で固定されるので、入れた後はsupervisorを起動し直す。無いときの振る舞いは`infrastructure::d2`のdoc commentと`doctor`の`d2`欄。
 - prekとcommitted（commitの接頭辞のhook。[ADR-t2596-1](../adr/2026-10-17-t2596-1-seven-commit-prefixes-checked-by-hook-review-program-and-task-title.md)）: `mise use -g github:j178/prek github:crate-ci/committed`で入れ、`ln -s ~/.local/share/mise/shims/prek ~/.local/bin/prek`と`ln -s ~/.local/share/mise/shims/committed ~/.local/bin/committed`。hookはrepositoryの`.githooks/commit-msg`が持ち、cloneごとに1回の`git config core.hooksPath .githooks`（[文書の規則](documents.md)の「ADR」の手順）が相対のpathを各worktreeのtopから解決するので、hostのworkerのrunのworktreeにも届く。人の作業はこの2つを入れることとその設定だけで、`prek install`は打たない（`.git/hooks`に作ったhookは`core.hooksPath`を置いたcloneでは使われない）。無いhostではhookは通すだけで、runのプログラムのreview（`scripts/check-commit-messages.sh`）が関門として残る。
   - workerのsandboxでprekがcacheを書けずにcommitが止まったとき: hookのエラーがprekのcacheのdirectory（既定は`~/.cache/prek`、`PREK_HOME`で変わる）への書き込みの拒否かを見る。同じworktreeで`committed --config .config/committed.toml --commit-file <メッセージのファイル>`を直接流して通れば、接頭辞の違反でなくcacheの書き込みで止まっている。そのときは既定のdirectoryへの書き込みをsandboxに許さず、`PREK_HOME`を[Security](../design/security.md#codexのworkerのsandbox)の「Codexのworkerのsandbox」が書いてよいとする場所（run dirなど）の中に向ける。
+
+## hostのswapとメモリ
+
+hostのswapがほぼ満ちたのを見たら、人かinboxがhostで原因の候補のprocessを確かめる。hostの操作は人とinboxのもので、workerはしない（[workerがhostと実queueでできないこと](#workerがhostと実queueでできないこと)）。
+
+- 確かめ方:
+  - `sysctl vm.swapusage`でディスク上のswapの使用量（`used`と`total`）を見る。
+  - `top -l 1 -o mem -stats pid,command,mem,cmprs`で`MEM`と`CMPRS`の大きいprocessを見て、大きいものを`footprint -p <PID>`で見る。
+  - `top`の`CMPRS`と`footprint`の`Swapped`は、圧縮されたメモリとswapに出たメモリを合わせた量で、ディスク上のswapの使用量（`vm.swapusage`）と同じではない。processの値だけでswapの持ち主を断定せず、原因の候補として扱う。
+  - 推移は、supervisorが記録するqueue dirの`host/metrics-YYYYMMDD.csv`の`swap_used_mb`と`rss_*`の列で読む（記録の仕組みは[host metrics](../design/supervisor-lifecycle/host-metrics.md)）。外部のsampler（`~/.local/share/dagq-hostmetrics/metrics.csv`）はこの記録に置き換わって2026-10-03から止まっているので読まない。
+- 2026-10-18の測定（plannerが15:00 JST頃にhostで取った値）:
+  - `vm.swapusage`: `used` 35284 MB / `total` 36864 MB。
+  - fseventsd（14日起動したまま）: `MEM` 36G・`CMPRS` 34G。
+  - `dagq supervise`: `footprint` 4118 MB（peak 5723 MB、起動から約10時間）・`CMPRS` 2361M。
+  - cmux: 1692 MB・`CMPRS` 1537M。claudeは各170〜320 MB。
+  - `host/metrics`の`swap_used_mb`は10/15の約13.7 GBから10/18の約36.7 GBまで増え続けた。
+  - dagqはFSEventsを使わない（`Cargo.toml`にnotifyなどのファイル監視のcrateが無い）。この値から言えるのはfseventsdが原因の候補（`CMPRS`が最も大きい）ということだけで、ディスク上のswapのうちどれだけを持つかは分けて測っていない。
+- 対処:
+  - OSのprocess（fseventsdなど）が候補のときは、人がhostでそのprocessを再起動する。fseventsdはlaunchdが起こし直すので`sudo killall fseventsd`で、それで直らなければOSを再起動する。再起動の前と後の`host/metrics`の`swap_used_mb`（と`vm.swapusage`）を比べ、下がればそれが原因と確かめ、下がらなければ次の候補を見る。
+  - `dagq supervise`が大きいときは、数時間の`footprint`の推移を取り、増え続けるならinboxがrequestで修正を頼む。
 
 ## `[run.env]`とtestの並列度の置き場
 
