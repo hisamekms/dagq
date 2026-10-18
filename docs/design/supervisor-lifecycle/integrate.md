@@ -69,7 +69,7 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 
 ## 承認とslot
 
-- 束縛・対象・lease・空き容量（[空き容量](disk-space.md#人が打つintegrate)）の確かめと承認の記録は`begin`が持ち、supervisorがreviewかresumeで持つrunは人の`integrate`では承認しない。
+- 束縛・対象・lease・空き容量（[空き容量](claim-hold.md#人が打つintegrate)）の確かめと承認の記録は`begin`が持ち、supervisorがreviewかresumeで持つrunは人の`integrate`では承認しない。
 
 ## receiptの検査とrebase
 

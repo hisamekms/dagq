@@ -38,7 +38,7 @@ worktreeのpathはrun_dirの下の`<runs>/<run-id>/worktree`で、`--repo`のche
 - 対象: run（`awaiting_integration`か`needs_session`）のtaskが`completed` / `canceled`でなく、slotに無く、leaseが1つも無く（staleなleaseも有るものとして扱い、触らない）、生きているsessionが無いもの（`ended_run_worktrees`が返す）。
   例えば、着地の列に並んだrun、`approve_landing`を待つrun、resumeを待つ`needs_session`のrun、`integration_held`で人を待つrunである。
 - **人の答えを待つrun**（`AwaitingAnswer`）: runに開いていて答えの無いaskがあり、答えまで何時間も待つので、空きの多少によらず、jobの通常の周回で消す。
-- **それ以外**（`Idle`）: すぐ使われうるので通常は残し、空き容量のための掃除（[空き容量を確かめる](disk-space.md)の「判定と掃除」）のjobのときだけ消して、そのjobの`auto_repaired`に数える。
+- **それ以外**（`Idle`）: すぐ使われうるので通常は残し、空き容量のための掃除（[claimを控える](claim-hold.md)の「判定と掃除」）のjobのときだけ消して、そのjobの`auto_repaired`に数える。
 - 消さないもの: leaseかslotを持つrun（作業中・validating・review・resume・integrate・着地の前のe2e）。
   ただしADR-0071の待ちのrun（leaseとsessionを持ったまま答えを待つ）のうちturnの終わったものは、空き容量のための掃除だけが、leaseを持つsupervisorから受け取ってビルド成果物を消す（[人の答えを待つrun](waiting.md)の「空き容量のための掃除」）。
   worktree・branch・commit・receipt・run_dir・未commitの変更（ソース）は残し、`runner`も消さない（下の`runner`の項は終わったrunだけ）。
@@ -69,7 +69,7 @@ worktreeのpathはrun_dirの下の`<runs>/<run-id>/worktree`で、`--repo`のche
   - queue serviceのクライアントモードとの関係: worker・jobの`dagq`のクライアントモードはDBのpathを渡さないだけでworkerはhostのままなので、置き場所と片付けはこのまま変わらない。
     実行側のコンテナの隔離ではworkerの`/tmp`はコンテナと一緒に消えるが、ビルドの出力とrun_dirはコンテナにmountされるhostのdirに残るので、`TMPDIR`をそのmountの中の同じdirに向ければ、run_dirの側から片付けるこの形をそのまま引き継げる（コンテナの中の`/tmp`を片付ける仕組みは要らない）。
 
-空き容量がclaimか着地の検証に足りないときも、supervisorは同じ掃除と`git worktree prune`を走らせる（閾値と`auto_repaired`は[空き容量を確かめる](disk-space.md)）。
+空き容量がclaimか着地の検証に足りないときも、supervisorは同じ掃除と`git worktree prune`を走らせる（閾値と`auto_repaired`は[claimを控える](claim-hold.md#空き容量)）。
 
 ## loopの外で掃除する
 
@@ -92,9 +92,9 @@ worktreeのpathはrun_dirの下の`<runs>/<run-id>/worktree`で、`--repo`のche
   - 残る隙: 別のsupervisorがこのプロセスの2回の掃除の間にleaseを取ってworktreeを作り直し、同じ状態で返したrunは、このプロセスが入れ替わるまで候補に戻らない。このrepositoryの運用ではqueueごとに常駐するsupervisorは1つで（入れ替えのhandoffの間だけ重なる）、新しいプロセスは覚えていないので、この隙は受け入れる
 - eventはloopが記録する。
   loopは周回の最初にjobが終わっていればjoinし、jobが返した結果からeventを記録する（`cleanup_failed`はプロセスごとにworktreeあたり1回）。
-- 空き容量のための掃除（[空き容量を確かめる](disk-space.md)）も同じjobに乗り、そのjobは最後に`git worktree prune`を行い、loopはこのjobだけはrunと同じく待つ（`supervise --once`がそのjobの後の周回でclaimできるように）。
-  別のjobに乗ったときの残りのjob（`Request::counted`）、そのあいだのclaimと着地の控え、次の頼みまでの間隔は[空き容量を確かめる](disk-space.md)の「判定と掃除」が持ち、`supervise --once`のloopは残りのjobも待つ。
-- 空き容量のためのjobと残りのjobは、runの後片付けの後に、queueのdirのビルドのキャッシュ（`update/`と`recheck/`の下の宣言ごとのbuildの出力）の中身も、それぞれのlockを待たずに取れたときだけ消して`build_cache_removed`（queueのevent）を記録する（[空き容量を確かめる](disk-space.md)の「queueのdirのビルドのキャッシュ」）。
+- 空き容量のための掃除（[claimを控える](claim-hold.md#空き容量)）も同じjobに乗り、そのjobは最後に`git worktree prune`を行い、loopはこのjobだけはrunと同じく待つ（`supervise --once`がそのjobの後の周回でclaimできるように）。
+  別のjobに乗ったときの残りのjob（`Request::counted`）、そのあいだのclaimと着地の控え、次の頼みまでの間隔は[claimを控える](claim-hold.md)の「判定と掃除」が持ち、`supervise --once`のloopは残りのjobも待つ。
+- 空き容量のためのjobと残りのjobは、runの後片付けの後に、queueのdirのビルドのキャッシュ（`update/`と`recheck/`の下の宣言ごとのbuildの出力）の中身も、それぞれのlockを待たずに取れたときだけ消して`build_cache_removed`（queueのevent）を記録する（[claimを控える](claim-hold.md)の「queueのdirのビルドのキャッシュ」）。
 - stopかhandoffでは、空き容量のためのjobは選んだ最後のworktreeまで処理し、通常のjobは今のworktreeを終えたところで止まる。
   溜めた頼みは捨て、新しいjobは始めない（残りは次のsupervisorの最初の掃除が拾う）。
   ただし、空き容量のための掃除を別のjobに乗せた残り（`Request::counted`）だけは捨てず、走っているjobの後に1回だけjobとして始め、停止の印（`cleanup.stop`）で止めずに選んだ最後のworktreeまで処理する。
@@ -102,7 +102,7 @@ worktreeのpathはrun_dirの下の`<runs>/<run-id>/worktree`で、`--repo`のche
   handoffのexecはjobの終わりを、残りのjobがあればその終わりも待つ。
   loopが終わるときは、走っているjobと溜めた頼みのjobを待ってeventを記録する（errorで終わったときも同じ規則でjobを待って記録する）。
   handoffの要求がdrain中に取り消されたときに掃除を通常に戻すことは[Handoff](handoff.md)が持つ。
-- provisioningの失敗でclaimを止めたsupervisor（`claiming`が`false`）もdrainするが、stopやhandoffと違って掃除はdrainの扱いにせず、頼みを受け、通常のjobも止めず、溜めた頼みのjobも始める（空き容量の待ちは[空き容量を確かめる](disk-space.md)の着地）。
+- provisioningの失敗でclaimを止めたsupervisor（`claiming`が`false`）もdrainするが、stopやhandoffと違って掃除はdrainの扱いにせず、頼みを受け、通常のjobも止めず、溜めた頼みのjobも始める（空き容量の待ちは[claimを控える](claim-hold.md#空き容量)の着地）。
   loopは`for_disk`のjobを待ってから終わる。
 
 消す契機は、supervisorのslotが終わったとき（`integrated`・`failed`・`interrupted`）、triageが終わったとき、triageの`decide` askとlandingの`approve_landing` askのanswer（`cancel`を含む）を適用したとき（そのtaskのrunだけ）と、上の掃除と同じ回（`sweep_ended_runs`。終わったrunに残ったbackgroundのwrapperを止めるのと同じ回で、全runを見直す）。

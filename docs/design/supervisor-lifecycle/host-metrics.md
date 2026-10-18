@@ -13,7 +13,7 @@ related:
   - adr-t1662-2
   - design-measurement
   - design-persistence
-  - design-supervisor-lifecycle-disk-space
+  - design-supervisor-lifecycle-claim-hold
   - design-supervisor-lifecycle-throughput-review
 ---
 
@@ -71,7 +71,9 @@ macOSの`%cpu`は減衰する平均なので瞬間の値ではない。
 
 `queue_hold`（`cost`）でclaimと着地が止まるときの空きの推移を読めるように、上の行ごとに空きを記録する。
 
-- **対象**: queueの`runs/`（runのworktreeとそのビルド成果物を置く場所。[空き容量を確かめる](disk-space.md)の判定と同じ）のファイルシステム。`runs/`が無ければqueueのディレクトリ（DBのあるディレクトリ）。queueのディレクトリとworktreeは同じ`runs/`の上にあるので1つで足りる
+- **対象**: queueの`runs/`（runのworktreeとそのビルド成果物を置く場所。[claimを控える](claim-hold.md#空き容量)の判定と同じ）のファイルシステム。
+  `runs/`が無ければqueueのディレクトリ（DBのあるディレクトリ）。
+  queueのディレクトリとworktreeは同じ`runs/`の上にあるので1つで足りる
 - **取り方**: `statvfs(3)`の`f_bavail × f_frsize`を空き、`f_blocks × f_frsize`を全体とする（`infrastructure::adapters::disk_space`）。
   読めなければ3列とも空のセル
 - **間隔と形**: 他の列と同じ行で、同じ間隔ごとに取る。

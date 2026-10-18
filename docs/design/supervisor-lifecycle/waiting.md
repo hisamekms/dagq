@@ -112,7 +112,7 @@ ADR-0062の決定2の`cause`に、この実装は`wrapper_silent`（`Session`で
 ## 空き容量のための掃除
 
 待ちのrunはsupervisorのleaseとslotを持ち、wrapperのheartbeatも続くので、終わったrunと誰も作業していないrunの掃除（[Run worktrees](run-worktrees.md#終わっていないrunのビルド成果物)）の候補にならない。
-空き容量のための掃除（[空き容量を確かめる](disk-space.md)の「判定と掃除」）だけが、待ちのrunのビルド成果物も消す。
+空き容量のための掃除（[claimを控える](claim-hold.md)の「判定と掃除」）だけが、待ちのrunのビルド成果物も消す。
 空きが足りる通常の掃除では消さない（答えはすぐ来ることもあり、作り直しの時間を払わない）。
 
 - 渡し方: queueの一覧はleaseを持つrunを返さないので、leaseを持つsupervisorが、自分のslotの待ちの最中（戻り待ちでない）の非対話のrunを`Supervisor::waiting_worktrees`で掃除に渡す。

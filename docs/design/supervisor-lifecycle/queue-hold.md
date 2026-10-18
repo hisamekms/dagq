@@ -12,7 +12,6 @@ related:
   - design-supervisor-lifecycle
   - design-supervisor-lifecycle-ask
   - design-supervisor-lifecycle-claim-hold
-  - design-supervisor-lifecycle-disk-space
   - design-supervisor-lifecycle-waiting
   - design-supervisor-lifecycle-commands
 ---
@@ -23,7 +22,7 @@ related:
 
 Claude Codeのログインが切れるか利用上限に達すると、新しいrunもheadlessのjobも同じ壁で止まる。
 runtimeはそれをqueueで1件の`queue_hold`のask（`authentication`、または`cost`で`subject: usage_limit`）にまとめ、openな間はClaudeで動く新しいclaimとheadless jobを控え、人のanswerを自分で適用する（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定42の「待ち」と「answer」）。
-ディスクの`cost`のaskは[空き容量を確かめる](disk-space.md)が扱い、ここの控えとanswerの適用には入らない。
+ディスクの`cost`のaskは[claimを控える](claim-hold.md#空き容量)が扱い、ここのanswerの適用には入らない。
 
 ## 流れ
 
@@ -63,16 +62,7 @@ runtimeはそれをqueueで1件の`queue_hold`のask（`authentication`、また
 
 ## 控え
 
-- 毎passの読み直しは`Supervisor::check_queue_hold`で、控えは`Supervisor.queue_hold`に持つ。
-- どのaskが控えるかは`domain::queue_hold::reason_of`と`hold_of`。
-- claimの判定は`ClaimHold::judge`で、控えはディスクとloadより先に判定する（[claimを控える](claim-hold.md)）。
-  控えがclaimを止めるのは、どのworkerにも経路が無いときだけである（`Supervisor::routes`）。
-- jobの行き先は`Supervisor::start_route`（復旧job・observer・スループットの見直し）、runのreviewは`review_route`が控えを読み、plan reviewとgoal reviewは`JobDesk::held`を読む。
-  `provider`を書いた役割のjobは控えの間も使えるproviderで起動する（[ADR-t1063-1](../../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)の決定5）。
-  切り替えを止める設定の扱いは[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)と[Provider lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)。
-- reviewの待ちは`Phase::ReviewHeld`で、プログラムのreviewは控えの間も流れる（[プログラムのreview](review-programs.md)）。
-  始まった後のjobが止まったときは、そのjobだけが他のjobの答えを保ってreviewの中で待つ（[Review](review.md#reviewのprovider)）。
-- `--no-claude`のsupervisorは控えを持たず、reviewは`provider`を書いて使えるCodexで動くjobなら起動し、`provider`が無いかCodexを使えなければ人の`approve_landing`に回る（`review_route`、[ADR-t1207-1](../../adr/2026-09-30-t1207-1-codex-run-review.md)の決定4）。
+- askがopenな間のclaimとheadless jobとrunのreviewの控えは[claimを控える](claim-hold.md#providerごとの控え)が持つ。
 - askに居るrunの待ちは`queue_hold`で戻る（[人の答えを待つrun](waiting.md)）。
 
 ## answerの適用
@@ -91,5 +81,4 @@ runtimeはそれをqueueで1件の`queue_hold`のask（`authentication`、また
 - 閉じる判定は`Supervisor::close_hold`で、結果の分類は`queue_hold_applied`（`domain::queue_hold::QUEUE_HOLD_APPLIED`）のdoc commentが持つ。
 - 別の生きているsupervisorがleaseを持つrunは、そのsupervisorの次のpassが適用するのを、答えから待つ時間（`APPLY_WAIT_SECS`）まで待つ。
 - 閉じたsupervisorだけが`done`で失敗したjobを起動し直し（`Supervisor::restart_failed_jobs`）、Codexの控えも解く（ADR-t813-2の決定6）。
-- 落とし穴: 回答済みのaskは控えないので、claimとheadless jobはaskが閉じるのを待たず答えた時点で再開する。
 - `elsewhere`・`unwatched`のrunには答えが適用されていないので、後の手当ては`close_hold`のdoc commentのとおりinboxかstallの促しが行う。

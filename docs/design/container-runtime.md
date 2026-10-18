@@ -51,7 +51,7 @@ containerを選んだ適用先が使えないとき、hostで動かさずに控�
   その奥で`application::podman_machine::MachineGate`がdagq専用のmachineを見て、使えなければ理由つきで使えないと答える（下の「dagq専用のmachine」）。
   machineの奥では`application::container_image::ImageGate`がimageを見る（下の「image」）。
   その奥の`infrastructure::container_runtime::ContainerExecutors`は、workerにもverificationにも使えると答える。
-- worker: 各候補のclaimを控え、理由を`claim_deferred`に残す（[claimを控える](supervisor-lifecycle/claim-defer.md#workerを動かせないtask)）。
+- worker: 各候補のclaimを控え、理由を`claim_deferred`に残す（[claimを控える](supervisor-lifecycle/claim-hold.md#workerを動かせないtask)）。
   resumeの候補からも外す（`Supervisor::container_deferral`）。
   resumeを使い切ったrunを人に渡すことは止めない。
   切り替えの前からhostで動いていたrunの次のturn（答えの配達・reviseなど）は、wrapperがturnを起動するところ（`headless_session`の`Turns`）で`dagq.toml`を読み直して拒み、wrapperはerrorで終わる。

@@ -88,9 +88,9 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 - 列を組むのは`Supervisor::fill_slots`で、種ごとの保留はその種を列から外すだけで、上位の候補のためにslotを空けて待たない。
 - 効く優先度は`application::effective_priority`、基の優先度とgoal間のrankが無いことは[ADR-t1639-1](../../adr/2026-10-04-t1639-1-goal-priority-is-the-source-tasks-inherit-and-goals-carry-tags.md)の決定2・4・8。
 - 人とinboxは`set-priority`で`in_progress`のtaskの順も変えられる（[Authorization](../authorization.md)）。
-- claimの規則の順は`domain::ClaimRank`（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定4）、区分の上限とagingは[claim-defer](claim-defer.md#実行区分の上限とaging)。
+- claimの規則の順は`domain::ClaimRank`（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定4）、区分の上限とagingは[claimを控える](claim-hold.md#実行区分の上限とaging)。
 - claimの順は控えの記録から`candidates`・`graph`で再現できるので、順の入れ替えは記録しない。
-- 候補を控える理由（衝突の多いファイル・動かせないworker・依存先を含むbuildの待ち）は[claim-defer](claim-defer.md)、claimの間隔と着地待ちが空けた軽い枠は[claim-hold](claim-hold.md)。
+- 候補を控える理由（衝突の多いファイル・動かせないworker・依存先を含むbuildの待ち）とclaimの間隔と着地待ちが空けた軽い枠は[claimを控える](claim-hold.md)。
 - claimはbase commitに着地のbranchをclaimごとに読み直すので、`integrate`で依存が解けたtaskは先行taskを含むmainから始まる。
 - claimの時点の属性は`domain::measure::ClaimAttributes`、claimできる候補の標本は`domain::kpi::CandidatesSample`のdoc comment。
 

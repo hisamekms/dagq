@@ -100,7 +100,7 @@ dagq events --full --kind cleanup_failed --kind auto_repaired --since 2026-09-29
 
 最大は event 45596（2026-09-29T19:14:35.807Z）、task 1048 / run `ba661aa3-ce08-4818-be17-1da6e030bd05`。最初のまとまった掃除 569 件の合計は 1,538,609,152 bytes。event 時刻は job の結果を loop が記録した時刻で、各ファイルの削除時刻ではない。
 
-空き容量のための掃除の `auto_repaired.bytes` に scratchpad が含まれるかは、該当 event が **0 件のため本番では未測定**。設計では worktree・build・scratchpad の合計だが、通常の掃除の 632 件をその実証の代わりにはしない。[disk-space](../design/supervisor-lifecycle/disk-space.md) / [run-worktrees](../design/supervisor-lifecycle/run-worktrees.md) を参照。
+空き容量のための掃除の `auto_repaired.bytes` に scratchpad が含まれるかは、該当 event が **0 件のため本番では未測定**。設計では worktree・build・scratchpad の合計だが、通常の掃除の 632 件をその実証の代わりにはしない。[claimを控える](../design/supervisor-lifecycle/claim-hold.md#空き容量) / [run-worktrees](../design/supervisor-lifecycle/run-worktrees.md) を参照。
 
 ## 3. 消す条件と残存 run
 

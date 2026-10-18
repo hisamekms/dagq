@@ -12,8 +12,6 @@ related:
   - design-supervisor-lifecycle-goal-review
   - design-supervisor-lifecycle-commands
   - design-supervisor-lifecycle-claim-hold
-  - design-supervisor-lifecycle-claim-defer
-  - design-supervisor-lifecycle-disk-space
   - design-supervisor-lifecycle-queue-hold
   - adr-0044
   - adr-0047
@@ -146,17 +144,11 @@ live worker alert (stalled, idle_process)
 
 - [Headless job processes](supervisor-lifecycle/headless-job-processes.md)
 
-### claimを控える（load average）
+### claimを控える
 
-- [claimを控える（load average）](supervisor-lifecycle/claim-hold.md)
-
-### claimを控える（衝突の多いファイル）
-
-- [claimを控える（衝突の多いファイル）](supervisor-lifecycle/claim-defer.md)（[ADR-0080](../adr/0080-supervisor-rereads-conflicts-config.md)）
-
-### 空き容量を確かめる（claimと着地の検証の前）
-
-- [空き容量を確かめる](supervisor-lifecycle/disk-space.md)（[ADR-0047](../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定44）
+- [claimを控える](supervisor-lifecycle/claim-hold.md)（load average・providerごとの控え・空き容量・claimの間隔・軽い枠・衝突の多いファイル・buildを待つtask・実行区分の上限）
+- [空き容量を確かめる（claimと着地の検証の前）](supervisor-lifecycle/claim-hold.md#空き容量)（[ADR-0047](../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定44）
+- [衝突の多いファイル](supervisor-lifecycle/claim-hold.md#衝突の多いファイル)（[ADR-0080](../adr/0080-supervisor-rereads-conflicts-config.md)）
 
 ### 認証と利用上限のaskの待ちとanswer
 

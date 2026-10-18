@@ -54,7 +54,7 @@ related:
      成功すれば`update_built`。
      - **`update/target`の排他**: jobはcheckoutの前にqueueの`update/lock`を待って取り（`update::hold_target`）、jobが終わるまで持つ（e2eの関門は同じtargetを使い、入れ替えるbinaryもそこにある）。
        release更新のjobと`install --release`も同じlockを取るので、queueの中で`update/target`を使うのは1つだけ。
-       持つ間は空き容量の掃除が`update/target`を消さず、掃除が消す間はjobが待つ（[空き容量を確かめる](disk-space.md)の「queueのdirのビルドのキャッシュ」）。
+       持つ間は空き容量の掃除が`update/target`を消さず、掃除が消す間はjobが待つ（[claimを控える](claim-hold.md)の「queueのdirのビルドのキャッシュ」）。
        lockを取れなければ（errorのとき）buildの段の`update_failed`。
      - **e2eの関門**（ADR-t963-1決定1、`e2e_gate::run`）: 続けて同じcheckoutで、ビルドと同じ`CARGO_TARGET_DIR`のまま全部のe2eを流す。
        envはjobのprocessのenvを引き継がず、許す名前（資格情報を除く）だけにmain checkoutの`dagq.toml`の`[run.env]`（[Run environment](run-environment.md)）と1回ごとの`TMPDIR`を重ね、logの冒頭に渡した名前だけを書く。
@@ -163,7 +163,7 @@ related:
     `install`なら人がinboxから問いに書かれた`dagq install`のコマンドを打つ（[`install`](install.md#install)の6）。
     drainが起動し直すsupervisorへの値の引き継ぎは`install_breaking`のdoc commentが持つ。
     どちらもinboxが閉じる。
-- **待ちの見直し**: 引き継いだsupervisorは、execした新しいprocessの最初のpassで、`wait_for_build`のtaskの待ち（[claimを控える](claim-defer.md#依存先の着地を含むbuildを待つtask)、ADR-t1632-1）を自分の新しいbuild識別子で判定し直し、依存先の着地を含めばclaimする（含むかの答えはprocessの中だけでcacheするので、引き継ぎの後は空から読む）。
+- **待ちの見直し**: 引き継いだsupervisorは、execした新しいprocessの最初のpassで、`wait_for_build`のtaskの待ち（[claimを控える](claim-hold.md#依存先の着地を含むbuildを待つtask)、ADR-t1632-1）を自分の新しいbuild識別子で判定し直し、依存先の着地を含めばclaimする（含むかの答えはprocessの中だけでcacheするので、引き継ぎの後は空から読む）。
   `update_installed`そのものは待ちを変えない: 待ちを決めるのは固定バイナリのfileではなくsupervisorの走っているbuildで、引き継いだsupervisorのbuildはそのfileと同じになる。
 - **queue serviceとqueueのbroker**: 3の引き継ぎはどちらも止めず、引き継いだsupervisorの最初の見張りが前のbuildのものを1回だけ入れ替える（[Queue service](../queue-service.md#起動と停止adr-t1233-4決定12)・[Queue broker](../queue-broker.md#起動と停止)）。
 - **status**: `status`は打った`dagq`のbuild識別子と、自動更新（liveな登録のどれかが有効か、最新の段）と、登録ごとの設定と今のbuild識別子を出す。

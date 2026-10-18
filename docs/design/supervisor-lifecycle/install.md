@@ -101,5 +101,5 @@ supervisorが居ないときや、askを待たずに上げたいときに打つ�
 - `install::release_binary`: `<to>`がすでにその版ならそのfileを元にし（cargoを打たない）、そうでなければqueueのdirの下に`cargo install`したものを元にする（`infrastructure::binaries::CargoInstaller`）。
   cargoが見つからない・失敗したら何も置き換えずにerror。
   cargoの間は、自動更新とrelease更新のjobと同じqueueの`update/lock`を待って取り、cargoが終われば手放す（`update::hold_target`）。
-  持つ間は空き容量の掃除が`update/target`を消さず、掃除が消す間は待ってから始める（[空き容量を確かめる](disk-space.md)の「queueのdirのビルドのキャッシュ」）。
+  持つ間は空き容量の掃除が`update/target`を消さず、掃除が消す間は待ってから始める（[claimを控える](claim-hold.md)の「queueのdirのビルドのキャッシュ」）。
 - その後は上の2〜6と同じ（`Source::Binary`）。

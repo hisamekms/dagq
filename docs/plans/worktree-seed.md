@@ -213,7 +213,7 @@ diskの欄:
   - cloneの前後の`df`の差は、並行する本番のrunの書き込みで−0.8〜+0.8 GiBに揺れた。cloneそのものの使用量は、この測り方では分けられなかった。
 - `du`での数え方:
   - build後の`du -sk target`は、(a)が2.3〜2.5 GiB、(b)・(c)が7.3〜7.5 GiBだった。`du`はcloneで共有しているblockもfileごとに数える。
-  - [Run worktrees](../design/supervisor-lifecycle/run-worktrees.md)の`build_outputs_removed`の`bytes`（blocks × 512）と、それを使う[空き容量](../design/supervisor-lifecycle/disk-space.md)の閾値は、同じ数え方をする。そのままでは、1 runあたり約5 GiBを多く見込む。cloneしたtargetを消しても、空くのは共有していないblockだけである。
+  - [Run worktrees](../design/supervisor-lifecycle/run-worktrees.md)の`build_outputs_removed`の`bytes`（blocks × 512）と、それを使う[空き容量](../design/supervisor-lifecycle/claim-hold.md#空き容量)の閾値は、同じ数え方をする。そのままでは、1 runあたり約5 GiBを多く見込む。cloneしたtargetを消しても、空くのは共有していないblockだけである。
 
 ### 4.4 まとめ
 

@@ -74,7 +74,7 @@ submit -> 候補の順序 -> job（読むだけ） -> verdict -+- pass -----> ta
 - 開始の記録、死んだsupervisorの行の引き継ぎ、attemptの数え方: `PlanReviewStore::begin_plan_review`。
 - 起動のmodel / effortは[Actor model](actor-model.md)の役割の表から決める。
 - jobの起動: `PlanningState::start_plan_review_job`（promptの渡し方は[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）。
-- 予想するファイルは[claimを控える](claim-defer.md#判定の入力)と同じ規則で求める（[ADR-t1981-1](../../adr/2026-10-07-t1981-1-expected-files-leave-out-path-globs.md)）。
+- 予想するファイルは[claimを控える](claim-hold.md#判定の入力)と同じ規則で求める（[ADR-t1981-1](../../adr/2026-10-07-t1981-1-expected-files-leave-out-path-globs.md)）。
 - 依存は中身の前提のときだけで、同じファイルを触ることはclaimの控えに任せる（[ADR-t1985-1](../../adr/2026-10-07-t1985-1-dependencies-only-for-content-prerequisites-and-conflicts-left-to-claim-deferral.md)）。
 - 落とし穴: run_eventsはtaskかgoalを要るので、proposalのeventはproposalの最初のtaskに付く。
 

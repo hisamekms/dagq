@@ -65,7 +65,7 @@ parallel = 3
 # 軽い枠で claim されるのは --paths を宣言した task だけ（規則は docs/development/task-registration.md の「change」）。
 # light_changes を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 1591 を含んでから足した。
 light_changes = ["docs", "config"]
-# slot を持てる Spike の数（goal 96、ADR-t1487-2。振る舞いは docs/design/supervisor-lifecycle/claim-defer.md の
+# slot を持てる Spike の数（goal 96、ADR-t1487-2。振る舞いは docs/design/supervisor-lifecycle/claim-hold.md の
 # 「実行区分の上限とaging」）。parallel 3 の中で人と合意した初期案 total 3 / Spike 1 の値。Spike は build・測定・試作で
 # host の load が重くなりやすく、実装の枠を埋めないよう 1 に絞る。枠は予約しないので、Spike が無ければ実装が 3 枠を使う。
 # class_aging は既定のままなので書かない。

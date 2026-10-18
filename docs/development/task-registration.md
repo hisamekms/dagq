@@ -58,7 +58,7 @@ llvm-covとcargo testの重ね方:
 
 ## 固定バイナリがtask Xを含んでから行うtask
 
-固定バイナリがtask Xの着地を含むことを要するtask（新しいflagの登録案内や、新しいkeyを使うconfigなど）は、`dagq add ... --wait-for-build --depends-on X`で登録する。必要な依存先が複数なら`--depends-on`を繰り返す。宣言は`wait_for_build`で、supervisorは自分のbuild識別子のcommitが直接の依存先の着地commitを全て含むまでclaimしない（[claimを控える](../design/supervisor-lifecycle/claim-defer.md#依存先の着地を含むbuildを待つtask)、[Domain model](../design/domain-model.md)）。draft / submittedのtaskは`edit TASK --wait-for-build`で宣言し、`--no-wait-for-build`で外せる。
+固定バイナリがtask Xの着地を含むことを要するtask（新しいflagの登録案内や、新しいkeyを使うconfigなど）は、`dagq add ... --wait-for-build --depends-on X`で登録する。必要な依存先が複数なら`--depends-on`を繰り返す。宣言は`wait_for_build`で、supervisorは自分のbuild識別子のcommitが直接の依存先の着地commitを全て含むまでclaimしない（[claimを控える](../design/supervisor-lifecycle/claim-hold.md#依存先の着地を含むbuildを待つtask)、[Domain model](../design/domain-model.md)）。draft / submittedのtaskは`edit TASK --wait-for-build`で宣言し、`--no-wait-for-build`で外せる。
 
 verifyの1本目に、`~/.local/bin/dagq --version`のbuild識別子と依存先の着地を`git merge-base --is-ancestor`で比べる手書きのscriptを置かない。verifyはclaimの後にしか効かないため、早すぎるclaimを止めるのはこの宣言と`--depends-on`にする。自動更新はruntimeを変える着地でだけbuildするので、runtimeを変えない依存先だけを待つtaskには宣言しない（[ADR-t1632-1](../adr/2026-10-05-t1632-1-claim-waits-for-a-build-that-contains-the-dependencies-landings.md)）。
 
@@ -142,7 +142,7 @@ goal の優先度を正本にし、task は個別の指定が無ければ所属�
 
 ## 依存の付け方
 
-- taskの依存（`--depends-on`）は中身の前提（先に着地しないと作業が成り立たない）に限る。同じファイルの衝突を避けるためだけの依存は付けず、askにもしない。同じファイルの衝突は、衝突の多いファイルならruntimeのclaimの控え（[claimを控える](../design/supervisor-lifecycle/claim-defer.md)。上限の時間まで、`interrupt`のtaskは控えない）が扱い、残りはrebaseか着地の衝突として解く（[ADR-t1985-1](../adr/2026-10-07-t1985-1-dependencies-only-for-content-prerequisites-and-conflicts-left-to-claim-deferral.md)決定1）。
+- taskの依存（`--depends-on`）は中身の前提（先に着地しないと作業が成り立たない）に限る。同じファイルの衝突を避けるためだけの依存は付けず、askにもしない。同じファイルの衝突は、衝突の多いファイルならruntimeのclaimの控え（[claimを控える](../design/supervisor-lifecycle/claim-hold.md#衝突の多いファイル)。上限の時間まで、`interrupt`のtaskは控えない）が扱い、残りはrebaseか着地の衝突として解く（[ADR-t1985-1](../adr/2026-10-07-t1985-1-dependencies-only-for-content-prerequisites-and-conflicts-left-to-claim-deferral.md)決定1）。
 - 依存を付けるときは、noteかtaskのcontextに種類（中身の前提か衝突回避か）と理由を書く（決定2）。
 - 人に聞く（`planner_question`、`--because scope`）のは、(a) 中身の前提の依存で、(b) その依存で低い優先度のgoalのtaskが効く優先度を継いで上がり、(c) 順番の変更・taskのgoalへの取り込み・分割などplannerの手で解けない、の全部を満たすときだけにする。問いは「低いgoalのtaskを（優先度ごと）前に出すか、高いgoalが待つか」にする。どれかを満たさなければ自分で決めて進め、理由をnoteかcontextに残す（決定3）。
 

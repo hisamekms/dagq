@@ -108,7 +108,7 @@ source buildの自動更新の見直しはこれらの段を数えない。
    そうでなければqueueの`update/`の下に`cargo install --locked`したものを元にする（`ReleaseInstaller` port）。
    cargoが見つからない・失敗した・binaryを残さなかったら`update_failed`で、何も置き換えない。
    問いには`retry`、`skip`と、手で入れ替える方法を書く。
-   cargoの間はqueueの更新のlockを持つ（`update::hold_target`、[空き容量](disk-space.md)）。
+   cargoの間はqueueの更新のlockを持つ（`update::hold_target`、[空き容量](claim-hold.md#空き容量)）。
 2. **非互換のmigration**: [Auto-update](auto-update.md)の2と同じく、stageして`approve_update`のaskを開いて終わる（`auto`でも同じ）。
    書くコマンドに`up`の`--auto-update`は付かない（リリースのsupervisorは`auto_update`を持たず、ソースでないrepositoryでは`up --auto-update`がerrorになる。ADR-t614-1）。
    起動し直したsupervisorはhost.tomlの設定をそのまま読むので、この仕組みは打ち直しなしで続く。
