@@ -109,7 +109,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
    `acceptance_unmet`は`paths`が全部試行の始めに読んだコードのpath（[`[review.code]`](run-environment.md)）の外のときだけコードの指摘でない（`review_reason::Finding::is_code_finding`）。
 5. **終了の依頼とclose**: 着地かaskの前にworkerのsessionの終了を依頼する（[非対話のworker](headless-worker.md#wrapperがturnを止めるとき)）。
    - **passの衝突の事前判定**（ADR-0027決定4）: 衝突すれば解消を生きているsessionに依頼して4と同じ待ちに入り、[Needs session](needs-session.md)の「試行の数え方」の衝突だけの試行に数える。
-   - **pass**: e2eが要るrunは[着地の前のe2e](landing-e2e.md)を通してから着地する。
+   - **pass**: e2eが要るrunは[着地の前のe2e](integrate.md#着地の前のe2e)を通してから着地する。
    - **ask**: askを作る前にそのrunの閉じていない前の`approve_landing`を閉じる。
      落とし穴: 残すと開いたaskに畳まれて新しい理由が人に届かず、古い答えが新しいreviewに適用されうる。
 6. **askの回答**: 答えはslotの空きに依らずその場で適用してaskを閉じ、`land`は承認の古い順に1本ずつ着地する。
@@ -143,7 +143,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 
 ## 着地の前のe2e
 
-e2eが要るpassしたrunは、着地スロットを待つ段でhostでe2eを流してから着地する（[着地の前のe2e](landing-e2e.md)）。
+e2eが要るpassしたrunは、着地スロットを待つ段でhostでe2eを流してから着地する（[着地の前のe2e](integrate.md#着地の前のe2e)）。
 
 ## 文書の照合
 

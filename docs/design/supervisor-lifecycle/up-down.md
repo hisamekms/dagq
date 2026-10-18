@@ -8,7 +8,7 @@ scope: runtime
 related:
   - adr-t1582-1
   - design-supervisor-lifecycle
-  - design-supervisor-lifecycle-landing-branch
+  - design-supervisor-lifecycle-integrate
   - design-supervisor-lifecycle-auto-update
   - design-supervisor-lifecycle-source-repository
   - adr-t614-1
@@ -46,7 +46,7 @@ in-cmux modeの起動の指定は何にも触る前に拒み、廃止と次の�
    - main checkoutの`dagq.toml`の`[run.env]`が名指すプログラムが`up`のPATHで解決できること（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定9、[Run environment](run-environment.md#runenvが名指すプログラムの検査)）。
    - trustを確かめるrepository rootと、`[run.env]`・言語・着地先のbranchを読む`dagq.toml`は、repositoryのmain checkout（main worktree。[Run environment](run-environment.md#main-checkoutの決め方)）のもの。
      main checkoutが無いrepository（bare、またはlinked worktreeから打った`--separate-git-dir`）では、理由と案内をつけて止まる。
-   - 着地先のbranchの解決（`dagq.toml`の`[repository]`か推定）もpreflightで行い、解決できないときと、pushを無効にしていない（`push = false`でない）のに明示した`remote`が無いときは止まる（[Landing branch](landing-branch.md#upのpreflightとdoctor)）。
+   - 着地先のbranchの解決（`dagq.toml`の`[repository]`か推定）もpreflightで行い、解決できないときと、pushを無効にしていない（`push = false`でない）のに明示した`remote`が無いときは止まる（[landing branch](integrate.md#landing-branch)）。
    - 自動更新を頼んだ`up`は、着地先のbranchの解決の後で、queueのrepository（main checkout）がdagqのソースかを確かめ、ソースでなければsupervisorを起動も引き継ぎもせずに止まる（自動更新はrepositoryのソースからdagqをbuildするため。[ADR-t614-1](../../adr/2026-09-27-t614-1-dagq-source-only-features-by-one-check.md)、[Auto-update](auto-update.md#dagqのソースのrepositoryだけ)、[Source repository](source-repository.md)）。
 2. **stale登録の削除**: `supervisors`表のうちPIDが死んでいる行を消し、結果に出す。
    PIDが生きていてもheartbeatの古い行は、そのPIDを登録したプロセスでないと分かれば同じく消す（判定は`pid_taken_over`のdoc comment）。

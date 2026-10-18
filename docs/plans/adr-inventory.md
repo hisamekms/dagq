@@ -109,7 +109,7 @@ related:
 | 箇条5 commit messageのtrailer `Taskq-Task` / `Taskq-Run` | 上書き | ADR-0015（trailer行） | `Dagq-Task` / `Dagq-Run`。title・summaryの段落は有効 | [integrate](../design/supervisor-lifecycle/integrate.md) |
 | 箇条6 衝突と再検証の失敗は`needs_session`。SVが`claude --resume`で開き直し、`integrate ID`で再開する | 上書き | ADR-0019 決定1 | `needs_session`にすることは有効。resumeはsupervisorが自動で行う | [needs-session](../design/supervisor-lifecycle/needs-session.md) |
 | 箇条7 `failed` receiptはrunの終了、再試行や取り消しは手動 | 有効（一部上書き） | ADR-0041 決定3（ADR-0024 決定3） | runを`failed`にすることは有効。再試行・resume・人への相談はtriage jobのverdictで決まる | [triage](../design/supervisor-lifecycle/triage.md) |
-| 箇条8 mainを進める前のエラーは`integration_error`で元に戻す | 有効 | — | | [integrate-errors](../design/supervisor-lifecycle/integrate-errors.md) |
+| 箇条8 mainを進める前のエラーは`integration_error`で元に戻す | 有効 | — | | [integrate](../design/supervisor-lifecycle/integrate.md#errorと復旧) |
 
 ### ADR-0009 goalとして表現し、workerのpromptに流す
 

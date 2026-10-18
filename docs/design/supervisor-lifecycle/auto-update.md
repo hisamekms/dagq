@@ -58,9 +58,9 @@ related:
        lockを取れなければ（errorのとき）buildの段の`update_failed`。
      - **e2eの関門**（ADR-t963-1決定1、`e2e_gate::run`）: 続けて同じcheckoutで、ビルドと同じ`CARGO_TARGET_DIR`のまま全部のe2eを流す。
        envはjobのprocessのenvを引き継がず、許す名前（資格情報を除く）だけにmain checkoutの`dagq.toml`の`[run.env]`（[Run environment](run-environment.md)）と1回ごとの`TMPDIR`を重ね、logの冒頭に渡した名前だけを書く。
-       許す名前・資格情報を除く規則・足りないときの見え方と戻し方は、runのe2eと同じで[着地の前のe2e](landing-e2e.md)の「環境」が持つ。
+       許す名前・資格情報を除く規則・足りないときの見え方と戻し方は、runのe2eと同じで`infrastructure::e2e_gate`のmodule docと`PASSED_ENV`が持つ。
        流す前に、hostで1本ずつ流すためのlock（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)決定4、`install::e2e_lock_path`）を取り、流し直しが終わるまで持つ。
-       runtimeがreviewのpassの後に流すrunのe2e（[着地の前のe2e](landing-e2e.md)）と`install`の関門も同じlockを取るので、先に取ったものが流し、後のものは空くまで待つ。
+       runtimeがreviewのpassの後に流すrunのe2e（[着地の前のe2e](integrate.md#着地の前のe2e)）と`install`の関門も同じlockを取るので、先に取ったものが流し、後のものは空くまで待つ。
        出力はbuild logに並ぶe2eのlogで、上限（`install::E2E_TIMEOUT`）を超えたらprocess groupを止めて落ちた扱いにする（`stop_group`）。
        落ちたtestはlogの`test <name> ... FAILED`の行から読む。
        hostの道具の有無で外すe2eは無く、全部のe2eで判定する（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定7）。
@@ -90,7 +90,7 @@ related:
        効かない印は、期限を過ぎた印、印が上限を超えるファイルの全部の印、印の付いたtestが今回を含めて決まった回数続けて流し直しでも落ちた印で、読めないファイルでは印を1つも効かせない（`e2e_quarantine`のdoc comment）。
        続けての失敗は、queueの関門のeventを新しい方から見て数え、runtimeがrunに流すe2eの結果も関門として合わせて数える（ADR-t1233-2決定5、数え方は`e2e_quarantine::failures_in_a_row`のdoc comment）。
        印の有無に依らず数えるので、関門を落とした後もそのtestが流し直しで通るまで落ち続ける。
-       判定は`application::e2e_verdict::judge`で、自動更新のjobと`install`と、runtimeがrunに流すe2eが共有する（runのe2eが印を読むcommitと外す印は[着地の前のe2e](landing-e2e.md)）。
+       判定は`application::e2e_verdict::judge`で、自動更新のjobと`install`と、runtimeがrunに流すe2eが共有する（runのe2eが印を読むcommitと外す印は[着地の前のe2e](integrate.md#着地の前のe2e)）。
        落ちたときの`error`と`update_failed`のaskの問いには、落ちたtest、流し直しでも落ちたtest、flaky・quarantinedのtest、印が効かなかったtestとその理由とファイルの理由、1回目と流し直しのlogのpathが載る。
      - 通れば`update_e2e_passed`を書いて2へ進む。
        関門の判定の欄（ADR-t1165-1決定4）は`update_e2e_passed`とe2eの段の`update_failed`の両方に載り、欄の意味は`e2e_verdict::E2eVerdict`の`fields`のdoc commentが持つ。

@@ -536,7 +536,7 @@ lifecycle_install::a_handoff_looks_again_…は`common::lifecycle`のfixtureと`
 
 ### G2の結果（task 1078）
 
-`check_landing_branch`は、解決の入力のファイルの印が変わったpassか、前の解決から5秒が経ったpassだけで`git`を起動する形になった（[Landing branch](../design/supervisor-lifecycle/landing-branch.md#supervisorが確かめる頻度と条件)）。
+`check_landing_branch`は、解決の入力のファイルの印が変わったpassか、前の解決から5秒が経ったpassだけで`git`を起動する形になった（[landing branch](../design/supervisor-lifecycle/integrate.md#landing-branch)）。
 
 - 2026-09-30 06:46〜06:48 JSTに、このrunのworktreeで測った。対象は30本のうちの6本（`runtime_waiting_stages::a_question_while_resuming_…`・`runtime_resume::a_request_lost_twice_…`・`runtime_review::a_run_the_supervisor_lands_closes_its_landing_ask`・`runtime_stall::a_session_idle_after_its_nudge_…`・`worker_escalation::missing_evidence_and_a_scope_violation_…`・`runtime_precheck::precheck_conflicts_up_to_…`）で、`cargo nextest run --locked --test it`（instrumentなし、6並列）である。
 - commitしない計測用の変更で、`check_landing_branch`の呼び出し（pass）を数え、envで前の形（毎passで解決する）に切り替えた。`git`の起動は、この章の手順と同じくPATHの先頭のwrapper（子のstubの`git`も含む）で数えた。前と後を交互に3回ずつ流した。

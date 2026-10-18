@@ -33,7 +33,7 @@ NEXTEST_TEST_THREADS = "6"
 # （task 292 のようなもの）を着地の前に見つけて、run を resume へ回す。
 # queue dir の recheck/worktree で、CARGO_TARGET_DIR を recheck/target にして 1 本ずつ直列に走る
 # （target は 1 つで同時に使うのは 1 本だけ）。env は [run.env] が渡る。
-# 書式と流れは docs/design/supervisor-lifecycle/landing-recheck.md と run-environment.md。
+# 書式と流れは docs/design/supervisor-lifecycle/integrate.md の「landing recheck」と run-environment.md。
 # [recheck] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 462 を含んでから足した。
 # paths は command を流す差分の glob（ADR-t2032-1）。Rust に関わる差分の無い run は、merge した木の Rust の部分が
 # 着地のときに検証済みの main と同じで compile が壊れる経路がほぼ無いので、cargo check を流さず merge-tree だけを見る。
@@ -315,7 +315,7 @@ max = 0.6
 [e2e]
 # 差分がこの glob に触れる run にだけ、review が pass した後、着地の前に runtime が host で全部の e2e を流す
 # （ADR-t963-1 の決定 2・3、ADR-t1233-2。worker は e2e を流さず、validating は要否を validation_finished の e2e_requirement に記録するだけ。
-# 要否の判定は docs/design/supervisor-lifecycle/validation.md の「runtimeが流すe2e」、流し方は landing-e2e.md）。
+# 要否の判定は docs/design/supervisor-lifecycle/validation.md の「runtimeが流すe2e」、流し方は integrate.md の「着地の前のe2e」）。
 # 置くのは実プロセス・実 launchd・実 Git の境目だけ: 外の道具の adapter、process と session、launchd、lifecycle（up / down・引き継ぎ）、
 # integrate、install、update（自動更新と e2e の関門）、actor（worker・planner・inbox・job の session）の起動と、e2e そのもの（tests/e2e.rs と tests/e2e/ の下）。
 # supervise の判断の部分（src/application/supervise/ の handoff.rs・handoff_slots.rs と update.rs 以外）は含めない。runtime の commit の多くが

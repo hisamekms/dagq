@@ -13,7 +13,7 @@ tags:
 related:
   - adr-t1310-1
   - adr-0068
-  - design-supervisor-lifecycle-landing-recheck
+  - design-supervisor-lifecycle-integrate
   - plan-landing-lane-cpu-share
 ---
 

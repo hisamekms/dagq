@@ -53,6 +53,13 @@ const STOP_GRACE: Duration = Duration::from_secs(10);
 /// key could not read the file, so one is added only after the fixed
 /// binary reads it. A value that is not a credential can be put in the
 /// repository's `[run.env]` meanwhile, which is given as written.
+///
+/// A fixed binary whose list lacks a name a tool needs keeps a run's e2e
+/// from starting (the inbox's `check the e2e host` stays) or fails it for
+/// a missing tool, and can fail the automatic update's gate too: the
+/// log's `== the env passed` line (the names given) and the e2e's output
+/// show which name was missing, and the way back is
+/// `dagq install --rollback` and a task that adds the name.
 pub const PASSED_ENV: &[&str] = &[
     "PATH",
     "HOME",

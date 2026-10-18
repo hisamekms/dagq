@@ -114,7 +114,7 @@ supervisor を起動する terminal の env だけには頼らない。
   検証は `integrate` の 1 回だけなので、review で止まった run は検証まで進まない。
   stub で着地まで流すシナリオ（2〜4）は task の description に `E2E-REVIEW-PASS` を入れて review を pass させるか、`review by hand` になった run に人が `integrate ID` を打つ。
 - e2e: worker（stub も実 Claude も実 Codex も）は e2e を流さず、receipt の `e2e` は理由つきの `not_applicable` になる。
-  e2e が要る run には、review の pass の後、着地の前に supervisor が host で e2e を流す（[着地の前のe2e](../design/supervisor-lifecycle/landing-e2e.md)）。
+  e2e が要る run には、review の pass の後、着地の前に supervisor が host で e2e を流す（[着地の前のe2e](../design/supervisor-lifecycle/integrate.md#着地の前のe2e)）。
   使い捨て repository は dagq のソースでないので runtime の知る e2e が無く、要る run は e2e が無いことを記録して着地へ進む。
   `dagq.toml` を置かない使い捨て repository では `[e2e] paths` が無く、`--evidence e2e` を付けない task は e2e が要らない。
   この工程そのもの（host での実行・1 本ずつの lock・落ちたときの `needs_session` と resume・流せないときの流し直し）は `tests/it/runtime_e2e.rs` が stub のコマンドで確かめる。

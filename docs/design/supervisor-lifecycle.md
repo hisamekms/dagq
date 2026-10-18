@@ -179,7 +179,7 @@ live worker alert (stalled, idle_process)
 
 - [Source repository](supervisor-lifecycle/source-repository.md)（dagqのソースのrepositoryでだけ動く機能と判定）
 - [Language](supervisor-lifecycle/language.md)（runtimeの固定の文字列は英語、AIが人に向けて書く文の言語の`[language]`の設定とpromptへの渡し方）
-- [Landing branch](supervisor-lifecycle/landing-branch.md)（着地先のbranchとpushのremoteの`dagq.toml`の`[repository]`と、指定が無いときの推定）
+- [Landing branch](supervisor-lifecycle/integrate.md#landing-branch)（着地先のbranchとpushのremoteの`dagq.toml`の`[repository]`と、指定が無いときの推定）
 
 ### 人へのaskの通知（`[push]`）
 
@@ -198,7 +198,7 @@ live worker alert (stalled, idle_process)
 
 ### Landing recheck
 
-- [Landing recheck](supervisor-lifecycle/landing-recheck.md)
+- [Landing recheck](supervisor-lifecycle/integrate.md#landing-recheck)
 
 ### Prompt
 
@@ -238,7 +238,7 @@ live worker alert (stalled, idle_process)
 - [Review (supervisor)](supervisor-lifecycle/review.md)
 - [プログラムのreview](supervisor-lifecycle/review-programs.md)
 - [reviewの設定の生成（`setup-review`）](supervisor-lifecycle/setup-review.md)
-- [着地の前のe2e](supervisor-lifecycle/landing-e2e.md)
+- [着地の前のe2e](supervisor-lifecycle/integrate.md#着地の前のe2e)
 
 ## Triage (supervisor)
 
@@ -263,7 +263,7 @@ live worker alert (stalled, idle_process)
 
 ## `integrate`
 
-- [`integrate`](supervisor-lifecycle/integrate.md)
+- [`integrate`](supervisor-lifecycle/integrate.md)（rebase・検証・landing branch・landing recheck・着地の前のe2e・失敗の種類）
 
 ### `needs_session`
 
@@ -271,7 +271,7 @@ live worker alert (stalled, idle_process)
 
 ### errorと復旧
 
-- [errorと復旧](supervisor-lifecycle/integrate-errors.md)
+- [errorと復旧](supervisor-lifecycle/integrate.md#errorと復旧)
 
 ## 後片付け
 

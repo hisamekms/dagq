@@ -4,6 +4,14 @@
 //! from the repository and the file as they are then; never stored. The
 //! same table names the remote the landing is pushed to (`remote`, default
 //! [`DEFAULT_REMOTE`]) and whether it is pushed at all (`push`).
+//!
+//! The guess reads only local refs: nothing is fetched or asked of the
+//! network, and the main checkout's own `HEAD` is not looked at. A binary
+//! that does not know `[repository]` refuses it as an unknown table of
+//! `dagq.toml`, so the table is added only once the binary in place knows
+//! it. A change of the table takes effect from the next claim and the next
+//! landing; a run claimed before lands on the new branch through its
+//! landing's rebase.
 use serde::{Deserialize, Serialize};
 
 use super::DomainError;
@@ -124,6 +132,13 @@ pub struct RepositorySettings {
 }
 
 /// The landing branch and where its name came from.
+///
+/// One landing resolves it once, at its start, and uses that for the
+/// rebase its resumed session is told of, the move of the branch and the
+/// push: the `merge --ff-only` of a landed commit that rewrites
+/// `[repository] branch` rewrites the main checkout's `dagq.toml`, but its
+/// own push still goes to the branch it started with, and the new one
+/// counts from the next landing.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct LandingBranch {
     /// The branch's short name (`main`, not `refs/heads/main`).
@@ -148,10 +163,11 @@ impl LandingBranch {
     }
 }
 
-/// Resolve the landing branch. `configured` is `[repository] branch`,
-/// `remote` the push remote's name and `remote_head` the branch its HEAD
-/// names (`None` without
-/// the remote or its HEAD), and `exists(name)` whether `refs/heads/<name>`
+/// Resolve the landing branch. A `configured` branch that is not local
+/// does not resolve, and is never guessed past. `configured` is
+/// `[repository] branch`, `remote` the push remote's name and
+/// `remote_head` the branch its HEAD names (`None` without the remote or
+/// its HEAD), and `exists(name)` whether `refs/heads/<name>`
 /// is a local branch, as observed: the caller handles a failure to look
 /// (task 1617). The error says what could not be resolved and how to set
 /// it.

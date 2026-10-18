@@ -28,7 +28,7 @@ use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/
 1. **元**: 与えたbinaryかcheckout、省略時はcwdのrepositoryのmain checkout（[Run environment](run-environment.md#main-checkoutの決め方)）をビルドしたもの、戻すときは`<to>.previous`、リリースならcrates.ioのリリース（下の「リリースから」）。
    - **e2eの関門**（[ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)決定1）: 元がdagqのソース（[Source repository](source-repository.md)）のcheckoutなら、ビルドの後・2の確認の前に、[自動更新](auto-update.md#auto-update)と同じ関門（`Binaries::e2e`、`src/infrastructure/e2e_gate.rs`）で全部のe2eを流す。
      e2eは人のshellのenvを引き継がないので、`install`がビルドしたbinaryのpathからそのビルドのtargetを取って関門に渡し、二度目のビルドをしない。
-     envの絞り方は[着地の前のe2e](landing-e2e.md)の「環境」が持ち、hostで1本ずつ流すlockは自動更新の関門とruntimeがrunに流すe2eと共通（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)決定4）。
+     envの絞り方は`infrastructure::e2e_gate`のmodule docと`PASSED_ENV`が持ち、hostで1本ずつ流すlockは自動更新の関門とruntimeがrunに流すe2eと共通（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)決定4）。
      hostの道具の有無で外すe2eは無い（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定7）。
      後始末、落ちたe2eの1回の流し直し、`.config/e2e-quarantine.toml`の印（[ADR-t1165-1](../../adr/2026-09-30-t1165-1-e2e-gate-reruns-failed-e2e-once-and-records-quarantined-failures.md)）は自動更新と同じで、判定は`e2e_verdict::judge`。
      落ちれば何も置き換えず、落ちたtestかその理由とlogのpathを載せたerrorで止まり、関門を飛ばす手を案内する。

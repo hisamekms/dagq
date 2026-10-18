@@ -62,7 +62,7 @@ supervisor
   cloneのrunのturnはcontainerで起動し、runと合わない設定か読めない設定では起動しない（[Container runtime](../container-runtime.md#workerの実行)）。
   wrapperが死んで残したturnと、turnの外に切り離されたprocessは、supervisorの停止と復旧jobが止める。
 - wrapperは誰のturnかを`TurnOwner`（runかplanner）で持ち、違いはそこに閉じる。
-- e2eはworkerのturnで流さず、要るrunにはreviewのpassの後にruntimeがhostで流す（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)、[着地の前のe2e](landing-e2e.md)）。
+- e2eはworkerのturnで流さず、要るrunにはreviewのpassの後にruntimeがhostで流す（[ADR-t1233-2](../../adr/2026-10-02-t1233-2-e2e-runs-on-the-host-after-review-passes.md)、[着地の前のe2e](integrate.md#着地の前のe2e)）。
   落ちれば同じsessionの次のturnとしてresumeを依頼する。
 - 人への質問は`dagq ask`だけで、turnの設定はagentの質問の道具を拒む。
 - Claudeのturn（workerとruntimeのplanner）の設定は、後のpromptを予約する道具も拒む。

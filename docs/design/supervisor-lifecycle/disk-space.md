@@ -90,7 +90,7 @@ supervisorはpassの初め（`[run.env]`のprogramの検査の次、drainやhand
 
 - 使っている間は消さない: 掃除のjobはrecheckのdirをrecheckのlock（`recheck/lock`）、`update/target`を更新のlock（`update/lock`、`update::hold_target`）を待たずに取れたときだけ消し、消し終わるまで持つ。
   取れなければ飛ばし、何も記録せず、次の空き容量のための掃除でまた試す。
-- 消している間は使う側が待つ: recheckは同じlockを待たずに取るので始めず、次の回にやり直す（[Landing recheck](landing-recheck.md)）。
+- 消している間は使う側が待つ: recheckは同じlockを待たずに取るので始めず、次の回にやり直す（[landing recheck](integrate.md#landing-recheck)）。
   自動更新のjob、release更新のjob、`install --release`は`update/lock`を待って取るので、消し終わってから始める（[Auto-update](auto-update.md)・[Release update](release-update.md)・[install](install.md)）。
   どのsupervisorの掃除でも、CLIの`install`でも同じlockのfileなので、queueの中で安全。
 - 消すのはtarget dirの中身だけで、dir自体は空で作り直す。

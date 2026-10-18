@@ -244,7 +244,10 @@ pub(super) const RUN_RUNNER_FILE: &str = "runner";
 /// The longest a pass keeps the landing branch's last resolution while the
 /// stamp of its inputs stays the same (task 1078): a bound for a change the
 /// stamp misses, such as an edit in place that keeps the size, the inode
-/// and a coarse modification time.
+/// and a coarse modification time, and for what it does not read (where a
+/// branch ref that is itself symbolic points, `config.worktree` and an
+/// included config). While the branch does not resolve, every pass resolves
+/// it again, so a hold ends at the first pass it resolves at.
 pub const LANDING_BRANCH_RECHECK: Duration = Duration::from_secs(5);
 
 /// How far back the daily observation reads.
@@ -3700,7 +3703,10 @@ impl Supervisor<'_> {
                 let events = self.queue.run_events(run.id())?;
                 let history = RunHistory::from_events(&events);
                 // A landing recheck resumed the run without waiting for the
-                // answer to its approve_landing ask (ADR-0068 decision 4).
+                // answer to its approve_landing ask (ADR-0068 decision 4): it
+                // is not reviewed again, and waits for the answer unleased once
+                // its session was asked to exit, seen to end and stopped if it
+                // did not (ADR-t1433-3 decision 3).
                 let awaits_landing_answer = run.status() == RunStatus::AwaitingIntegration
                     && !history.approved()
                     && crate::domain::resume::parked_by_recheck(history.events())

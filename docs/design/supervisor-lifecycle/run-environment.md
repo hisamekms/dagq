@@ -12,7 +12,7 @@ related:
   - adr-t1857-1
   - adr-t963-1
   - design-supervisor-lifecycle
-  - design-supervisor-lifecycle-landing-branch
+  - design-supervisor-lifecycle-integrate
   - design-supervisor-lifecycle-language
   - adr-0040
   - adr-0076
@@ -54,7 +54,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - `dagq.toml`はrepositoryにcommitされ、値はworkerのwrapperとturnのprocessのenvに渡るので、secretは入れない。
 - この repositoryの`[run.env]`の値と理由、置かないものとsccacheの入れ方の規則は`dagq.toml`の`[run.env]`のコメント、`.config/nextest.toml`に並列度を書かない理由はその冒頭のコメント、その補足とほかのhostのツールの入れ方は[運用の開発文書](../../development/operations.md)の「`[run.env]`とtestの並列度の置き場」と「hostのツール」が持つ。
 - cargo-nextestは`[run.env]`が名指すプログラムではないので下の検査の対象ではなく、無いhostでは着地の検証の失敗になる（[ADR-t1925-1](../../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)の決定8がADR-0076から引き継ぐ）。
-- `[recheck]`は着地のたびにsupervisorが着地待ちのrunをmainに載せた木で実行する軽い検査で、keyの意味は`domain::recheck::RecheckConfig`、流れとcommandに渡るenvは[Landing recheck](landing-recheck.md)が持つ（[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)の決定2、[ADR-t2032-1](../../adr/2026-10-07-t2032-1-run-the-recheck-command-only-on-runs-touching-recheck-paths.md)）。
+- `[recheck]`は着地のたびにsupervisorが着地待ちのrunをmainに載せた木で実行する軽い検査で、keyの意味は`domain::recheck::RecheckConfig`、流れとcommandに渡るenvは`application::supervise::recheck`が持つ（[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)の決定2、[ADR-t2032-1](../../adr/2026-10-07-t2032-1-run-the-recheck-command-only-on-runs-touching-recheck-paths.md)）。
 
 - `[review.subagents.<agent>]`はreviewのsubagentを必須にするglobで、`paths`（`--paths`・`[e2e] paths`と同じglobの規則の、1つ以上の文字列の配列）と任意の`provider`（[Review](review.md#agentのjobのprovider)）を持つ（[ADR-t1453-1](../../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md)の決定1）。
   - `<agent>`はkebab-caseで、定義のファイル`.dagq/agents/<agent>/AGENT.md`のdirectoryの名前になる（[ADR-t1728-1](../../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)）。
@@ -142,7 +142,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - `[language]`はAIが人に向けて書く文の言語（`tag`、BCP 47の言語タグ）を持ち、利用者ごとの`config.toml`の同じ表より優先する（[Language](language.md)、[ADR-t616-2](../../adr/2026-09-27-t616-2-language-of-text-ai-writes-for-people-is-configurable.md)）。
   表は`run_env::parse_config`が中を見ずに受け付け、誤りでclaimや着地を止めないよう[Language](language.md)の読み手が検査する。
 
-- `[repository]`は着地先のbranch・pushのremote・pushするかを持ち、欄と既定は[Landing branch](landing-branch.md)の「`[repository]`の欄」と`domain::landing_branch::RepositoryConfig`が持つ（[ADR-t615-1](../../adr/2026-09-27-t615-1-landing-branch-and-push-remote-per-repository.md)）。
+- `[repository]`は着地先のbranch・pushのremote・pushするかを持ち、欄と既定は`domain::landing_branch::RepositoryConfig`が持つ（[ADR-t615-1](../../adr/2026-09-27-t615-1-landing-branch-and-push-remote-per-repository.md)）。
 
 - `[ci_watch]`はsupervisorが着地先のbranchのCIの結果を`gh`で読む見張りの設定で（[ADR-t1920-1](../../adr/2026-10-06-t1920-1-supervisor-watches-main-ci-keeps-known-failures-and-files-fixes-through-findings.md)。振る舞いは[CI watch](ci-watch.md)）、表があるときだけ有効になる（表が無ければ無効で、何も読まず何も記録しない）。
   keyの型・既定・意味は`domain::ci_watch::CiWatchConfig`のdoc commentが持ち、読み直しと`up`のpreflightは[CI watch](ci-watch.md)の「いつ確かめるか」と「読む手段が無いとき」が持つ。
