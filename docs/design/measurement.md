@@ -75,6 +75,8 @@ runの一生を、重ならず隙間なく全体を覆う区間の列で表す�
   人の`integrate`の着地は`Integrator`が書く: integration slotを取った所で`landing`を、mainが動く前にslotを返した所（検査の拒否・エラー・`needs_session`・hold・`failed`）でrunが戻ったstatusの工程を書く。
   supervisorの着地はslotが書く。
   storeは`run_integrated`と同じtransactionで`push`を、`recover`と放置のrunの回収は`run_recovered`と同じtransactionでstatusの工程（`interrupted`は`ended`、やめた着地は`landing_queue`、reviewし直すなら`returning`）を書く。
+  ただし回収かleaseの返却と同じtransactionでtaskのholdがsettleし、runがunfinishedのまま休むときは、statusの工程でなく`held`を書く。
+  `Integrator`がslotを返した所と回収も、runが`held`に入って解除の前でunfinishedのまま休むならstatusの工程を書かない（終端のstatusならその工程を書く）。
 - **タグ**: `blocker`は何がrunを次へ移すか、`holds`はその間に握るslotで、値と意味は`Blocker`と`Holds`のdoc commentが持つ。
   `holds`はslotの数え方（着地の順番だけを待つrunと人の答えを待つrunはslotの外）に従う。
 - **taskのhold**: `task_held`から待ちに入るまでは走っている工程のまま数え、待ちに入った記録（工程`held`）から解除の後の記録までだけを`held`にする。
