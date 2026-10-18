@@ -199,7 +199,8 @@ pub fn check_decline(request: &PlanRequest, reason: &str) -> Result<(), DomainEr
 }
 
 /// Where the answer of a `planner_question` about a request goes
-/// (ADR-t1394-1 decision 7).
+/// (ADR-t1394-1 decision 7). A `planner_question` is the only ask that
+/// names a request, and no route takes its answer to a person.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestAnswerRoute {
     /// To the planner of the runtime's open for the request.
