@@ -358,6 +358,14 @@ paths = ["plugins/**"]
 [review.subagents.security]
 paths = ["**"]
 
+# run の review の自動の手直しの上限の後に、acceptance_unmet をコードの指摘に数えるコードの path（方針は ADR-t2599-1、
+# 書式・既定・意味は domain::review_reason::CodePaths の doc comment）。paths が全部ここの外の acceptance_unmet は着地を止めず
+# follow_up の draft になる（docs・plugin・.dagq・scripts・.config は入れない）。値は [areas] の runtime・migrations・tests に合わせた。
+# Cargo.toml・Cargo.lock・rust-toolchain.toml は依存と toolchain を変えて build されるコードを変えるので、src と同じくコードに数える。
+# [review.code] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 2600 を含んでから足した。
+[review.code]
+paths = ["src/**", "tests/**", "migrations/**", "build.rs", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
+
 # プログラムのreview（docs/design/supervisor-lifecycle/review-programs.md、ADR-t1895-2）。差分がpathsに当たるrunのreviewで、
 # agentのjobより前に設定の順に流し、1本でも非0なら後のprogramとagentを起動せずにworkerへ返す。
 # 挙げるのはCIがmainで流す形式の検査で、scripts/check-scripts-root.shの一覧に入り（landing branchのscriptを一時の場所に写し、
