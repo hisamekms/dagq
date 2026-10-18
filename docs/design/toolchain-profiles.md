@@ -65,7 +65,7 @@ runtimeのほかのコードは、宣言したprofileをportを通して呼ぶ�
   検証のコマンドは差分のpathに依らずrepository全体を流すので、pathsで絞ると分類を落とすためである。
   pathsはpathに結びつくもの（buildの出力の置き場、testの行の見分け、推奨の案）のためにある。
   推奨の案では、`recommend::propose`が宣言のpathsを`dagq init`とbuilt-inのreviewの生成コマンドの宣言の案に写す（[推奨の設定](#推奨の設定)）。
-- 宣言したprofileがどれも読まない出力は、共通の印に当たらなければ`unknown`で、落ちたtestの名前は無く、flakyのやり直しのenvも足さない。
+- 宣言したprofileがどれも読まない出力は、共通の印にも宣言したprojectの印（`[verify_marks.<name>]`）にも当たらなければ`unknown`で、落ちたtestの名前は無く、flakyのやり直しのenvも足さない。
 - 宣言が無いrepositoryでは、dagqのソースでもどのprofileも働かない（`Toolchains::none`、ADR-t2268-1決定3）。
   検証の出力は共通の印と宣言したprojectの印だけが読み、flakyのやり直しのenvもbuildの出力のdirも足さず、runのworktreeのビルド成果物を消さず、CIの見張りはjobとstepで知らせ、hostの`rustc`とtoolchainの記録とKPIの`toolchain`の軸と`stats`の`rustc`の欄は出さない。
   `doctor`と`status`は宣言の無いことを空の`declared`で示し、警告しない。
