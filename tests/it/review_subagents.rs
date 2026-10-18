@@ -1487,15 +1487,39 @@ fn an_agent_that_names_codex_moves_alone_to_claude_and_keeps_where_its_provider_
 /// run lands.
 #[test]
 fn with_the_fallback_off_an_agent_that_names_codex_waits_alone_and_the_review_lands() {
+    codex_agent_waits_alone_and_the_review_lands(
+        "{\"type\":\"error\",\"message\":\"unexpected status 429 Too Many Requests: You have hit your usage limit. Try again later.\"}\n",
+        "",
+        "usage_limit",
+    );
+}
+
+/// As above, the job of the agent that names Codex stopping where Codex's
+/// login's refresh token ran out, said only on its stderr: Codex is held
+/// at its login, not asked of per run, and once the hold ends (the login
+/// fixed) the job starts on Codex again in a later pass.
+#[test]
+fn with_the_fallback_off_an_agent_whose_codex_login_ran_out_waits_for_it_and_the_review_lands() {
+    codex_agent_waits_alone_and_the_review_lands(
+        "{\"type\":\"turn.failed\",\"error\":{\"message\":\"stream disconnected before completion\"}}\n",
+        "ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.\n",
+        "authentication",
+    );
+}
+
+/// With `[provider_fallback] jobs = false`, the job of `design`, on Codex,
+/// prints `stdout` and `stderr` once and fails: Codex is held for
+/// `reason`, the job waits for it while the others answer, and the run
+/// lands once the hold ends.
+fn codex_agent_waits_alone_and_the_review_lands(stdout: &str, stderr: &str, reason: &str) {
     use crate::runtime_support::codex::{FINISH, TASK, codex_fixture};
     let (dir, repo, db, backend, codex) = codex_fixture();
     design_on_codex(&repo, "[provider_fallback]\njobs = false\n");
     set_turns(dir.path(), FINISH);
-    fs::write(
-        dir.path().join("codex-agent-design-failure.jsonl"),
-        "{\"type\":\"error\",\"message\":\"unexpected status 429 Too Many Requests: You have hit your usage limit. Try again later.\"}\n",
-    )
-    .unwrap();
+    fs::write(dir.path().join("codex-agent-design-failure.jsonl"), stdout).unwrap();
+    if !stderr.is_empty() {
+        fs::write(dir.path().join("codex-agent-design-failure.err"), stderr).unwrap();
+    }
     let options = SuperviseOptions {
         codex,
         codex_home: Some(dir.path().join(CODEX_HOME)),
@@ -1538,11 +1562,12 @@ fn with_the_fallback_off_an_agent_that_names_codex_waits_alone_and_the_review_la
         .find(|event| event.kind == "provider_held")
         .unwrap();
     assert_eq!(held.payload["provider"], "codex");
+    assert_eq!(held.payload["reason"], reason);
     SqliteQueue::open(&db)
         .unwrap()
         .record_queue_event(
             dagq::domain::EventKind::ProviderReleased,
-            json!({"provider": "codex", "reason": "usage_limit",
+            json!({"provider": "codex", "reason": reason,
                    "since": held.payload["since"], "why": "retry_due"}),
         )
         .unwrap();

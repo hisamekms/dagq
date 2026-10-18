@@ -1655,3 +1655,15 @@ task = 2600
 name = "runtime_review_revise_limit::code_paths_of_the_landing_branch_that_do_not_parse_fail_the_review"
 reason = "B 境界（SQLite・Git・supervisor の配線）: landing branch の commit の解釈できないコードの path が review の試行を pass にせず review_failed と ask になることを実際の supervisor と queue で確かめる。読み出しの誤りの判断は application::review と infrastructure::run_env の unit test"
 task = 2600
+
+# 8.0〜11.1s (stress 5 under the host's load of other runs, task 2522)
+[[test]]
+name = "runtime_codex::a_codex_review_whose_login_ran_out_holds_codex_and_moves_to_claude"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: refresh token の切れた stub の codex の stdout と stderr で review の job が落ちたとき、supervisor が review_failed も ask も作らず Codex を ProviderHold で控え、その job だけが Claude に移って着地することを実際の queue と supervisor で確かめる。分類の判断は infrastructure::codex と codex_turns の unit test"
+task = 2522
+
+# 8.8〜12.1s (stress 5 under the host's load of other runs, task 2522)
+[[test]]
+name = "review_subagents::with_the_fallback_off_an_agent_whose_codex_login_ran_out_waits_for_it_and_the_review_lands"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: fallback off で Codex を名指す agent の job が stderr だけの refresh token の期限切れで落ちたとき、Codex を ProviderHold で控えて job だけが待ち、queue の控えの event が解けた後の pass で Codex で起動し直して着地することを確かめる。行き先の判断は supervise::landing の unit test"
+task = 2522

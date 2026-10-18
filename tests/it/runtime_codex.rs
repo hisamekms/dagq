@@ -631,6 +631,82 @@ fn a_codex_review_at_its_usage_limit_holds_codex_and_moves_to_claude() {
     );
 }
 
+/// What a Codex review job whose login's refresh token ran out prints:
+/// its stdout fails on the workspace's discovery's 401, and its stderr,
+/// from Codex's login manager, names the refresh token.
+const LOGIN_RAN_OUT_REVIEW: &str = "{\"type\":\"error\",\"message\":\"Reconnecting... 2/5 (workspace routing discovery unauthorized (401))\"}\n\
+{\"type\":\"error\",\"message\":\"workspace routing discovery unauthorized (401)\"}\n\
+{\"type\":\"turn.failed\",\"error\":{\"message\":\"workspace routing discovery unauthorized (401)\"}}\n";
+const LOGIN_RAN_OUT_STDERR: &str = "ERROR codex_login::auth::manager: Failed to refresh token status=401 Unauthorized detail=TokenErrorDetail { error_code: Some(\"refresh_token_expired\"), .. }\n\
+ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.\n";
+
+/// A Codex review whose login ran out, while Claude may run: Codex is
+/// held at its login without an ask, the job is not run again on Codex
+/// nor failed, and starts again on Claude; the run lands with no
+/// `review_failed`.
+#[test]
+fn a_codex_review_whose_login_ran_out_holds_codex_and_moves_to_claude() {
+    let (dir, repo, db, backend, codex) = codex_fixture();
+    select_codex_review(&repo);
+    set_turns(dir.path(), FINISH);
+    fs::write(
+        dir.path().join("codex-review-failure.jsonl"),
+        LOGIN_RAN_OUT_REVIEW,
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("codex-review-failure.err"),
+        LOGIN_RAN_OUT_STDERR,
+    )
+    .unwrap();
+    let mut options = supervise_options(1, true);
+    options.codex = codex;
+    options.codex_home = Some(dir.path().join(CODEX_HOME));
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "from Claude")]);
+    let result = {
+        let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
+        runtime::supervise_with_reviewer(
+            &db,
+            &repo,
+            &backend,
+            &claude_stub(&db),
+            &reviewer,
+            Path::new(env!("CARGO_BIN_EXE_dagq")),
+            &options,
+        )
+        .unwrap()
+    };
+    backend.join();
+    assert_integrated(&result, &db);
+    assert_eq!(reviewer.prompts().len(), 1, "Claude reviewed the run");
+    let detail = detail(&db);
+    let started = payloads(&detail, "review_job_started");
+    assert_eq!(started.len(), 2, "{started:?}");
+    assert_eq!(started[0]["launch"]["provider"], "codex");
+    assert_eq!(started[1]["launch"]["provider"], "claude");
+    assert_eq!(started[1]["launch"]["switched_from"], "codex");
+    assert_eq!(started[1]["launch"]["switch_reason"], "authentication");
+    let ends = payloads(&detail, "review_job_finished");
+    assert_eq!(ends.len(), 2, "{ends:?}");
+    assert_eq!(ends[0]["outcome"], "held");
+    assert_eq!(ends[0]["switch_reason"], "authentication");
+    assert!(ends[0]["runs_again"].is_null(), "{}", ends[0]);
+    assert!(payloads(&detail, "review_failed").is_empty());
+    assert!(payloads(&detail, "review_retried").is_empty());
+    let held = queue_events(&db, "provider_held");
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0]["provider"], "codex");
+    assert_eq!(held[0]["reason"], "authentication");
+    assert!(
+        SqliteQueue::open(&db)
+            .unwrap()
+            .asks(AskQuery::default())
+            .unwrap()
+            .is_empty(),
+        "Codex's hold opened no ask"
+    );
+}
+
 /// Under `--no-claude`, a Codex review that printed no readable verdict
 /// but shows its usage limit: Codex is held, no provider is left to review
 /// it again, so it fails as it is (`job_failed`), its output named, rather

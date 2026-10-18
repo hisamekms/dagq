@@ -1126,6 +1126,48 @@ mod tests {
         );
     }
 
+    /// What a Codex job prints when its login's refresh token ran out: its
+    /// stdout retries the workspace's discovery and fails on its 401, and
+    /// only its stderr, from the login manager, names the refresh token.
+    const LOGIN_RAN_OUT_STDOUT: &str = r#"{"type":"thread.started","thread_id":"t-login"}
+{"type":"turn.started"}
+{"type":"error","message":"Reconnecting... 2/5 (workspace routing discovery unauthorized (401))"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Falling back from WebSockets to HTTPS transport. workspace routing discovery unauthorized (401)"}}
+{"type":"error","message":"Reconnecting... 5/5 (workspace routing discovery unauthorized (401))"}
+{"type":"error","message":"workspace routing discovery unauthorized (401)"}
+{"type":"turn.failed","error":{"message":"workspace routing discovery unauthorized (401)"}}
+"#;
+    const LOGIN_RAN_OUT_STDERR: &str = r#"Reading prompt from stdin...
+2026-10-16T10:36:59.490436Z ERROR codex_login::auth::manager: Failed to refresh token status=401 Unauthorized detail=TokenErrorDetail { error_code: Some("refresh_token_expired"), error_message: Some("Your session has expired. Please log in again."), .. }
+2026-10-16T10:36:59.490538Z ERROR codex_login::auth::manager: Failed to refresh token: Your access token could not be refreshed because your refresh token has expired. Please log out and sign in again.
+"#;
+
+    /// A job whose login ran out is read as such from its stdout's 401,
+    /// from its stderr's refresh token, or from both; a turn that rode out
+    /// a retry and completed is no failure.
+    #[test]
+    fn a_job_whose_refresh_token_ran_out_failed_at_its_login() {
+        let codex = Codex::new("codex".into());
+        let line = |value: serde_json::Value| format!("{value}\n");
+        assert_eq!(
+            codex.job_failure(LOGIN_RAN_OUT_STDOUT, LOGIN_RAN_OUT_STDERR),
+            JobFailure::Authentication
+        );
+        assert_eq!(
+            codex.job_failure(LOGIN_RAN_OUT_STDOUT, ""),
+            JobFailure::Authentication
+        );
+        let unnamed = line(serde_json::json!({"type": "thread.started", "thread_id": "t-3"}))
+            + &line(
+                serde_json::json!({"type": "turn.failed", "error": {"message": "stream disconnected before completion"}}),
+            );
+        assert_eq!(codex.job_failure(&unnamed, ""), JobFailure::Other);
+        assert_eq!(
+            codex.job_failure(&unnamed, LOGIN_RAN_OUT_STDERR),
+            JobFailure::Authentication
+        );
+    }
+
     /// A job's tokens are its rollout's records, a child thread's
     /// included, never 0 for a job that made responses; without a rollout
     /// to count they are its `turn.completed`'s with why, and without that

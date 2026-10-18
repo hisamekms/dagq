@@ -216,7 +216,7 @@ ask() {{ "$DAGQ" ask --run "${{DAGQ_RUN_ID:-$SESSION}}" --kind worker_question -
 /// its arguments to `codex-agent-args.log`; with
 /// `codex-agent-<agent>-failure.jsonl` it prints that once and fails. A
 /// review's job with `codex-review-failure.jsonl` prints that
-/// and fails, and with `codex-review-hang` it runs a command in a process
+/// and fails; either prints its `.err` beside it on stderr as it fails, and with `codex-review-hang` it runs a command in a process
 /// group of its own until it is stopped (or the test process or the
 /// stub's directory is gone). A job sources `codex-review-hook.sh` when
 /// there is one. Each turn and job logs its `RUSTC_WRAPPER` and
@@ -256,7 +256,8 @@ if [ -n "$AGENT" ]; then
   printf '{{"type":"thread.started","thread_id":"codex-agent-%s"}}\n{{"type":"turn.started"}}\n' "$AGENT"
   if [ -f {dir}/codex-agent-$AGENT-failure.jsonl ]; then
     cat {dir}/codex-agent-$AGENT-failure.jsonl
-    rm -f {dir}/codex-agent-$AGENT-failure.jsonl
+    [ -f {dir}/codex-agent-$AGENT-failure.err ] && cat {dir}/codex-agent-$AGENT-failure.err >&2
+    rm -f {dir}/codex-agent-$AGENT-failure.jsonl {dir}/codex-agent-$AGENT-failure.err
     exit 1
   fi
   if [ -f {dir}/codex-agent-$AGENT-$AGENT_CALL.jsonl ]; then
@@ -290,6 +291,7 @@ if [ -n "$REVIEW" ]; then
   fi
   if [ -f {dir}/codex-review-failure.jsonl ]; then
     cat {dir}/codex-review-failure.jsonl
+    [ -f {dir}/codex-review-failure.err ] && cat {dir}/codex-review-failure.err >&2
     exit 1
   fi
   # A job that runs a command in a process group of its own until it is

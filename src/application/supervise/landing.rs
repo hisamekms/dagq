@@ -3909,6 +3909,11 @@ mod tests {
             super::jobs::job_failure_route(Provider::Codex, JobFailure::UsageLimit, true),
             (None, Some((SwitchReason::UsageLimit, true)))
         );
+        // So does Codex's login that ran out: no wall, no hold ask.
+        assert_eq!(
+            super::jobs::job_failure_route(Provider::Codex, JobFailure::Authentication, true),
+            (None, Some((SwitchReason::Authentication, true)))
+        );
         // Claude's raises the hold ask and writes no ProviderHold.
         let (wall, unusable) =
             super::jobs::job_failure_route(Provider::Claude, JobFailure::UsageLimit, true);

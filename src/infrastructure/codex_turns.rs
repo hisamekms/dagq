@@ -102,6 +102,7 @@ pub fn classify(message: &str) -> Option<TurnFailure> {
     let any = |words: &[&str]| words.iter().any(|word| lower.contains(word));
     if any(&[
         "401 unauthorized",
+        "unauthorized (401)",
         "auth error",
         "invalid_api_key",
         "incorrect api key",
@@ -110,6 +111,7 @@ pub fn classify(message: &str) -> Option<TurnFailure> {
         "codex login",
         "token expired",
         "refresh token",
+        "refresh_token_expired",
     ]) {
         return Some(TurnFailure::Authentication);
     }
@@ -149,6 +151,15 @@ pub fn classify(message: &str) -> Option<TurnFailure> {
         return Some(TurnFailure::Sandbox);
     }
     None
+}
+
+/// Whether a line of Codex's stderr is its login manager saying the
+/// login's refresh token ran out, which only logging in again fixes: not a
+/// refresh that failed on the network, nor another component's token.
+fn refresh_token_ran_out(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("codex_login")
+        && (lower.contains("refresh_token_expired") || lower.contains("refresh token has expired"))
 }
 
 /// Whether a finished command was refused by the sandbox: it failed with
@@ -696,8 +707,15 @@ impl TurnReader for CodexTurnReader {
         } else {
             self.last_text.clone()
         };
+        // A login that ran out may be said only on stderr, by Codex's
+        // login manager: read for a turn that did not complete or failed,
+        // whatever its stdout said, never for one that completed (a job
+        // read with no exit is an error even then).
+        let login_on_stderr = (self.completed.is_none() || self.failed.is_some())
+            && self.authentication.is_none()
+            && stderr.lines().any(refresh_token_ran_out);
         let failure = is_error.then(|| {
-            if self.authentication.is_some() {
+            if self.authentication.is_some() || login_on_stderr {
                 TurnFailure::Authentication
             } else if self.usage_limit.is_some() {
                 TurnFailure::UsageLimit
@@ -889,6 +907,10 @@ mod tests {
                 "exec_command failed: sandbox denied the write",
                 Some(TurnFailure::Sandbox),
             ),
+            (
+                "workspace routing discovery unauthorized (401)",
+                Some(TurnFailure::Authentication),
+            ),
             ("stream disconnected before completion", None),
             ("unexpected status 500: request id: req_429ab", None),
         ] {
@@ -929,6 +951,48 @@ mod tests {
         assert_eq!(
             reader.finish(Some(&exit(1)), "").failure,
             Some(TurnFailure::UsageLimit)
+        );
+    }
+
+    /// A turn's login that ran out may be said only by Codex's login
+    /// manager on stderr: a turn that failed with it is unusable at its
+    /// login, whatever its stdout's failure said, while a turn that rode
+    /// out its retries and completed is no failure, its stderr unread.
+    #[test]
+    fn a_refresh_token_that_ran_out_on_stderr_fails_the_turn_at_its_login() {
+        let stderr = "ERROR codex_login::auth::manager: Failed to refresh token status=401 Unauthorized detail=TokenErrorDetail { error_code: Some(\"refresh_token_expired\"), .. }\n\
+            ERROR codex_login::auth::manager: Failed to refresh token: your refresh token has expired. Please log out and sign in again.\n";
+        let (mut reader, _) = read(&[
+            json!({"type": "thread.started", "thread_id": "th-7"}),
+            json!({"type": "turn.failed", "error": {"message": "stream disconnected before completion"}}),
+        ]);
+        let result = reader.finish(Some(&exit(1)), stderr);
+        assert_eq!(result.failure, Some(TurnFailure::Authentication));
+        assert!(result.message.unwrap().contains("stream disconnected"));
+        let (mut reader, signals) = read(&[
+            json!({"type": "thread.started", "thread_id": "th-8"}),
+            json!({"type": "error", "message": "Reconnecting... 2/5 (stream disconnected before completion)"}),
+            json!({"type": "error", "message": "Reconnecting... 3/5 (unexpected status 429 Too Many Requests: rate limit)"}),
+            json!({"type": "item.completed", "item": {"id": "i1", "type": "agent_message", "text": "done"}}),
+            json!({"type": "turn.completed", "usage": {}}),
+        ]);
+        assert!(
+            signals
+                .iter()
+                .all(|signal| !matches!(signal, TurnSignal::Unusable(..)))
+        );
+        let result = reader.finish(Some(&exit(0)), stderr);
+        assert!(!result.is_error);
+        assert_eq!(result.failure, None);
+        // A refresh that failed otherwise is not read as the login.
+        let (mut reader, _) = read(&[
+            json!({"type": "turn.failed", "error": {"message": "stream disconnected before completion"}}),
+        ]);
+        let other =
+            "ERROR codex_login::auth::manager: Failed to refresh token: error sending request\n";
+        assert_eq!(
+            reader.finish(Some(&exit(1)), other).failure,
+            Some(TurnFailure::Other)
         );
     }
 
