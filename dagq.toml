@@ -31,8 +31,10 @@ NEXTEST_TEST_THREADS = "6"
 # 着地のたびに supervisor が着地待ちの run を着地後の main に載せた木で確かめる軽い検査（ADR-0068 の決定 2）。
 # merge-tree は git の衝突しか見つけないので、main の変更と合わせると compile しなくなる意味の衝突
 # （task 292 のようなもの）を着地の前に見つけて、run を resume へ回す。
-# queue dir の recheck/worktree で、CARGO_TARGET_DIR を recheck/target にして 1 本ずつ直列に走る
+# host の run の recheck は queue dir の recheck/worktree で、CARGO_TARGET_DIR を recheck/target にして 1 本ずつ直列に走る
 # （target は 1 つで同時に使うのは 1 本だけ）。env は [run.env] が渡る。
+# container の run の command は integrate の verification の container で流れ、流せないときは host で流さず
+# 何も判定しない（ADR-t2424-1）。
 # 書式と流れは docs/design/supervisor-lifecycle/integrate.md の「landing recheck」と run-environment.md。
 # [recheck] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 462 を含んでから足した。
 # paths は command を流す差分の glob（ADR-t2032-1）。Rust に関わる差分の無い run は、merge した木の Rust の部分が
