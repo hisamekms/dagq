@@ -3,8 +3,11 @@
 //! [`LedgerPort::interval`], draining and handing off too, a job thread
 //! reads the inputs that came in after the builder's cursors, folds what
 //! they mark and writes the rows [`crate::domain::ledger::builder`] says,
-//! at most [`WRITES_PER_PASS`] a pass. Nothing of the runtime's control
-//! waits for it or reads it, and a landing does not build a row.
+//! at most [`WRITES_PER_PASS`] a pass. It reads the events of each run and
+//! task it folds, and the builder keeps what the folds of the queue as a
+//! whole read ([`crate::domain::ledger::builder::Kept`]): no pass reads
+//! the whole EventStore. Nothing of the runtime's control waits for it or
+//! reads it, and a landing does not build a row.
 //!
 //! A pass that cannot read or write is logged (once until a pass succeeds
 //! again) and keeps its marks for the next one; after
@@ -18,7 +21,7 @@ use crate::application::LedgerQueue;
 use crate::domain::EventFilter;
 use crate::domain::host_metrics::{local_day, oldest_kept_day};
 use crate::domain::ledger::builder::{
-    Builder, CHECKS_PER_PASS, Inputs, Target, WRITES_PER_PASS, build, hour, writes,
+    Builder, CHECKS_PER_PASS, EVENTS_PER_READ, Inputs, Target, WRITES_PER_PASS, build, hour, writes,
 };
 
 /// How many passes in a row fail before one `ledger_build_failed` is
@@ -87,10 +90,16 @@ fn pass(
     built: &mut Built,
 ) -> Result<()> {
     let latest = store.latest_event_id()?;
-    if latest > builder.events {
-        // At most one event per id between the two.
-        let limit = usize::try_from(latest.as_i64() - builder.events.as_i64())?;
-        let new = store.events_between(builder.events, latest, &EventFilter::default(), limit)?;
+    while latest > builder.events {
+        let new = store.events_between(
+            builder.events,
+            latest,
+            &EventFilter::default(),
+            EVENTS_PER_READ,
+        )?;
+        if new.is_empty() {
+            break;
+        }
         builder.mark_events(&new);
     }
     let samples = store.node_samples_after(builder.samples)?;
@@ -99,12 +108,7 @@ fn pass(
     if !builder.marked() {
         return Ok(());
     }
-    let inputs = Inputs::new(
-        &store.all_events()?,
-        now_ms,
-        built_at,
-        builder.rows_marked(),
-    );
+    let mut inputs = Inputs::of(builder.kept(), now_ms, built_at, builder.rows_marked());
     builder.mark_rows(&inputs.rows);
     let mut targets = builder.take(CHECKS_PER_PASS).into_iter();
     while let Some(target) = targets.next() {
@@ -112,7 +116,7 @@ fn pass(
             builder.keep(target);
             continue;
         }
-        if let Err(error) = write(store, builder, &target, &inputs, built) {
+        if let Err(error) = write(store, builder, &target, &mut inputs, built) {
             builder.keep(target);
             for target in targets {
                 builder.keep(target);
@@ -123,22 +127,38 @@ fn pass(
     Ok(())
 }
 
-/// Fold `target` and write it when [`writes`] says so.
+/// Fold `target`, a run's or a task's on its events up to the builder's
+/// cursor, and write it when [`writes`] says so.
 fn write(
     store: &dyn LedgerQueue,
     builder: &mut Builder,
     target: &Target,
-    inputs: &Inputs,
+    inputs: &mut Inputs,
     built: &mut Built,
 ) -> Result<()> {
-    let samples = match target {
+    let mut samples = Vec::new();
+    let events = match target {
+        Target::Run(run) => store.run_events(&RunId::new(run)?)?,
+        Target::Task(task) => store.task_events(*task)?,
         Target::Node(node, start) => {
             let (from, until) = hour(*start);
-            store.node_samples(node, from, until)?
+            samples = store.node_samples(node, from, until)?;
+            Vec::new()
         }
-        _ => Vec::new(),
+        Target::Row(..) => Vec::new(),
     };
-    let Some(row) = build(target, inputs, &samples) else {
+    // The kept pushes and waits reach the cursor; a later event marks it again.
+    let through = builder.events;
+    inputs.read(
+        target,
+        events
+            .into_iter()
+            .filter(|event| event.id <= through)
+            .collect(),
+    );
+    let row = build(target, inputs, &samples);
+    inputs.forget(target);
+    let Some(row) = row else {
         return Ok(());
     };
     let (kind, key) = target.row_key();

@@ -195,7 +195,8 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 - **周回**: supervisorの周回が間隔ごとに、drainとhandoffの間も、jobのthreadで動く（D7）。
   着地の処理の中では作らず、runtimeの制御（claim・slot・resume・着地）は台帳を読まない。
 - **置き場**: 係の状態（入力ごとのカーソル・印・猶予を待つ行）は観測と分析の状態、組み立ては`compose::observation`にあり、`Supervisor`の本体に状態を足さない。
-- **印**: EventStoreのevent idとNodeSampleStoreの受けた順のidのカーソルから、前の周回の後に届いた入力を読み、そのrun・task・sessionとqueueの行・nodeの時間に印を付ける（全行を走査しない）。
+- **印**: EventStoreとNodeSampleStoreのカーソルの後に届いた入力だけを読み、そのrun・task・sessionとqueueの行・nodeの時間に印を付ける（全行を走査しない）。
+  畳むrun・taskのeventはその都度読み、queue全体の畳みが読む分は係の状態が持つ。
   `push_finished`は`push_pending`で書いたrunにも付ける。
   processの始めはカーソルが0なので、切り替え前を含む全てに追いつく（backfill）。
 - **書く行**: 終わったrun・task（`push_pending`と旧方式を含み、途中のものは書かない）と、session・queue・nodeの行。
@@ -210,7 +211,7 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
   storeは値と版を上書きせず、後の入力では記録だけを追う。
 - **保持**: nodeの行はhostの負荷と同じ日数で消す。
   消す・変える行を上限の行数ごとにcommitし、無ければlockを取らず、止まれば次の周回が続ける。
-- **失敗**: 読めない・書けない周回は印を残して次に任せ、続く失敗の初めにwarnを1度出し、決まった回数続けば`ledger_build_failed`を1度記録する。
+- **失敗**: 読めない・書けない周回は印を残して次に任せ、続けば`ledger_build_failed`を1度記録する。
   runとtaskの結果は変えない。
 
 ## 共通の読み取り関数

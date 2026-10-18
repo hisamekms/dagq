@@ -503,6 +503,17 @@ pub trait EventStore {
     /// Per task, its newest event of one of `kinds` (ADR-0069).
     fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>>;
     fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>>;
+    /// Every event of one task (its runs' too), oldest first, for the
+    /// ledger's fold of its row.
+    fn task_events(&self, task: TaskId) -> Result<Vec<RunEvent>> {
+        let upto = self.latest_event_id()?;
+        let filter = EventFilter {
+            task: Some(task),
+            ..EventFilter::default()
+        };
+        let limit = usize::try_from(upto.as_i64()).unwrap_or_default();
+        self.events_between(EventId::new(0), upto, &filter, limit)
+    }
     fn has_run_event(&self, id: &RunId, kind: &str) -> Result<bool>;
     fn record_runtime_event(
         &self,

@@ -6,19 +6,22 @@ use crate::domain::host_metrics::{HOST_NODE, HostSample, NodeSample, SampleSourc
 use crate::domain::ledger::settle::SETTLE_GRACE_MS;
 use crate::domain::ledger::testkit::{Log, T0, ms, run_id};
 use crate::domain::ledger::{LEDGER_V, LedgerKind, LedgerRow, node};
-use crate::domain::{RunEvent, RunId};
+use crate::domain::{RunEvent, RunId, TaskId};
 
 const BUILT: &str = "2030-01-01T00:00:00.000Z";
 
 /// The stores in memory: the events, the node samples and the rows, the
 /// rows written as `ledger_rows` writes them (a legacy row keeps its
-/// values, its records and their range follow), and how many writes.
+/// values, its records and their range follow), how many writes, and how
+/// many events were read and how often all of them.
 #[derive(Default)]
 struct Memory {
     events: RefCell<Vec<RunEvent>>,
     samples: RefCell<Vec<NodeSample>>,
     rows: RefCell<BTreeMap<(LedgerKind, String), LedgerRow>>,
     writes: Cell<usize>,
+    read: Cell<usize>,
+    read_all: Cell<usize>,
     /// Refuses every write of a row.
     refuses: Cell<bool>,
 }
@@ -32,6 +35,19 @@ impl Memory {
 
     fn row(&self, kind: LedgerKind, key: &str) -> LedgerRow {
         self.rows.borrow()[&(kind, key.to_owned())].clone()
+    }
+
+    /// The events `keep` keeps, counted as read.
+    fn read(&self, keep: impl Fn(&RunEvent) -> bool) -> Vec<RunEvent> {
+        let read: Vec<RunEvent> = self
+            .events
+            .borrow()
+            .iter()
+            .filter(|event| keep(event))
+            .cloned()
+            .collect();
+        self.read.set(self.read.get() + read.len());
+        read
     }
 
     fn count(&self, kind: LedgerKind) -> usize {
@@ -49,13 +65,17 @@ impl EventStore for Memory {
         unreachable!()
     }
     fn all_events(&self) -> Result<Vec<RunEvent>> {
-        Ok(self.events.borrow().clone())
+        self.read_all.set(self.read_all.get() + 1);
+        Ok(self.read(|_| true))
     }
     fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
         unreachable!()
     }
     fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>> {
-        unreachable!()
+        Ok(self.read(|event| event.run_id.as_ref() == Some(id)))
+    }
+    fn task_events(&self, task: TaskId) -> Result<Vec<RunEvent>> {
+        Ok(self.read(|event| event.task_id == Some(task)))
     }
     fn has_run_event(&self, id: &RunId, kind: &str) -> Result<bool> {
         unreachable!()
@@ -112,14 +132,16 @@ impl EventStore for Memory {
         limit: usize,
     ) -> Result<Vec<RunEvent>> {
         assert_eq!(filter, &EventFilter::default());
-        Ok(self
+        let read: Vec<RunEvent> = self
             .events
             .borrow()
             .iter()
             .filter(|event| event.id > after && event.id <= upto)
             .take(limit)
             .cloned()
-            .collect())
+            .collect();
+        self.read.set(self.read.get() + read.len());
+        Ok(read)
     }
 }
 
@@ -512,4 +534,214 @@ fn session_and_queue_rows_left_marked_are_written_by_a_later_pass() {
         "{settled:?}"
     );
     assert!(settled.iter().any(|row| row.is_final));
+}
+
+/// A queue with every kind of row: landed runs, one pending on its push
+/// that a later push closes, a legacy one, a landing its run left for a
+/// session (a status on an event that ends no landing by its kind), a
+/// session, the waits before a claim, a deferral a claim ends, a hold, the
+/// supervisors' lives and a node's hour; the run events carry payloads the
+/// folds of the queue as a whole do not read.
+fn every_kind_of_row() -> (Log, Vec<NodeSample>) {
+    let (a, b, c, d, e) = (run_id(1), run_id(2), run_id(3), run_id(4), run_id(5));
+    let mut log = Log::default();
+    log.add(
+        None,
+        None,
+        "supervisor_started",
+        json!({"supervisor": "s1"}),
+        0,
+    )
+    .add(
+        None,
+        None,
+        "slots_full_started",
+        json!({"supervisor": "s1", "class": "heavy"}),
+        1,
+    )
+    .add(
+        Some(5),
+        None,
+        "claim_deferred",
+        json!({"supervisor": "s1", "reason": "paths"}),
+        2,
+    )
+    .landed(1, &a, 0)
+    .add(
+        Some(1),
+        Some(&a),
+        "review_finished",
+        json!({"verdict": "pass", "body": "x".repeat(512)}),
+        300,
+    )
+    .add(
+        None,
+        None,
+        "slots_full_ended",
+        json!({"supervisor": "s1", "class": "heavy"}),
+        400,
+    )
+    .add(
+        None,
+        None,
+        "session_opened",
+        json!({"kind": "runtime_planner", "planner_id": 5, "supervisor": "s1"}),
+        500,
+    )
+    .add(None, None, "claim_held", json!({"supervisor": "s1"}), 510)
+    .add(
+        None,
+        None,
+        "claim_resumed",
+        json!({"supervisor": "s1"}),
+        520,
+    )
+    .worked(3, &c, 600)
+    .integrated(3, &c, 1300)
+    .push_failed(3, &c, 1510)
+    .legacy(4, &d, 0)
+    .add(
+        Some(5),
+        Some(&e),
+        "run_claimed",
+        json!({"supervisor": "s1", "provider": "claude"}),
+        1600,
+    )
+    .add(
+        Some(5),
+        Some(&e),
+        "integration_started",
+        json!({"supervisor": "s1"}),
+        1700,
+    )
+    .add(
+        Some(5),
+        Some(&e),
+        "validation_finished",
+        json!({"status": "needs_session", "error": "conflict"}),
+        1750,
+    )
+    .add(
+        None,
+        None,
+        "session_closed",
+        json!({"kind": "runtime_planner", "planner_id": 5, "opened_event_id": 1}),
+        1800,
+    )
+    .landed(2, &b, 2000)
+    .add(
+        None,
+        None,
+        "supervisor_alive",
+        json!({"supervisor": "s2"}),
+        3000,
+    )
+    .add(
+        None,
+        None,
+        "supervisor_stopped",
+        json!({"supervisor": "s1", "last_heartbeat_at": T0 + 3100}),
+        3200,
+    );
+    let start = node::bucket_of(T0);
+    (log, vec![sample(1, start + 10), sample(2, start + 40)])
+}
+
+/// The target a stored row is of.
+fn target_of(kind: LedgerKind, key: &str) -> Target {
+    match kind {
+        LedgerKind::Run => Target::Run(key.to_owned()),
+        LedgerKind::Task => Target::Task(TaskId::new(key.parse().unwrap())),
+        LedgerKind::Session | LedgerKind::Queue => Target::Row(kind, key.to_owned()),
+        LedgerKind::Node => {
+            let start = node::bucket_of(T0);
+            assert_eq!(key, node::key(HOST_NODE, start));
+            Target::Node(HOST_NODE.to_owned(), start)
+        }
+    }
+}
+
+/// The passes, reading the new events a page at a time and each run's and
+/// task's events for its fold, write the same queue, run, task, session
+/// and node rows as folding every target on the whole EventStore at once.
+#[test]
+fn the_passes_write_the_rows_a_fold_of_the_whole_event_store_does() {
+    let (log, samples) = every_kind_of_row();
+    let memory = Memory::of(&log);
+    memory.samples.replace(samples.clone());
+    let mut builder = Builder::default();
+    while pass(&memory, &mut builder, LATER).backlog > 0 {}
+    assert_eq!(memory.read_all.get(), 0);
+
+    let whole = Inputs::new(&log.events, ms(LATER), BUILT, true);
+    let rows = memory.rows.borrow().clone();
+    for kind in [
+        LedgerKind::Run,
+        LedgerKind::Task,
+        LedgerKind::Session,
+        LedgerKind::Queue,
+        LedgerKind::Node,
+    ] {
+        assert!(rows.keys().any(|(k, _)| *k == kind), "no {kind:?} row");
+    }
+    for ((kind, key), row) in &rows {
+        let built = build(&target_of(*kind, key), &whole, &samples);
+        assert_eq!(built.as_ref(), Some(row), "{kind:?} {key}");
+    }
+    for (kind, key) in whole.rows.keys() {
+        assert!(rows.contains_key(&(*kind, key.clone())), "{kind:?} {key}");
+    }
+}
+
+/// A pass reads the events after its cursor and those of the runs and
+/// tasks it folds, never all of them: after one more landing and a
+/// supervisor's event, a pass reads as many events however many the queue
+/// held before.
+#[test]
+fn a_pass_reads_what_came_in_and_what_it_folds_whatever_the_queue_holds() {
+    let read_after_one_more = |runs: i64| {
+        let mut log = Log::default();
+        for n in 0..runs {
+            log.landed(
+                n + 1,
+                &format!("{n:08x}-2222-4222-8222-222222222222"),
+                n * 10,
+            );
+        }
+        let pages = log.events.len().div_ceil(EVENTS_PER_READ);
+        let memory = Memory::of(&log);
+        let mut builder = Builder::default();
+        while pass(&memory, &mut builder, LATER).backlog > 0 {}
+        assert_eq!(builder.events, log.last(), "{pages} pages");
+        let caught_up = memory.read.get();
+        assert!(caught_up >= log.events.len(), "{caught_up}");
+
+        let before = log.events.len();
+        log.landed(9001, &run_id(1), 20_000).add(
+            None,
+            None,
+            "supervisor_alive",
+            json!({"supervisor": "s"}),
+            21_000,
+        );
+        let new = log.events.len() - before;
+        memory.events.replace(log.events.clone());
+        memory.read.set(0);
+        pass(&memory, &mut builder, LATER);
+        assert!(
+            memory
+                .rows
+                .borrow()
+                .contains_key(&(LedgerKind::Run, run_id(1)))
+        );
+        assert!(memory.count(LedgerKind::Queue) > 0);
+        assert_eq!(memory.read_all.get(), 0);
+        (memory.read.get(), new, pages)
+    };
+    let (few, new, _) = read_after_one_more(3);
+    let (many, _, pages) = read_after_one_more(300);
+    assert!(pages > 1, "the catch-up reads more than one page");
+    assert_eq!(few, many);
+    // The new events, and the run's and the task's of them for their folds.
+    assert!(few <= new * 3, "{few} of {new}");
 }

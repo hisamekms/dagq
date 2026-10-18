@@ -3,10 +3,11 @@
 //! and its subject, read back as written and once per object, and a legacy
 //! row whose values stay frozen while its records and their Executions
 //! follow the events; a node row folded from the NodeSampleStore, its
-//! marks and its retention.
+//! marks and its retention; the events of one task the ledger's fold of
+//! its row reads.
 use crate::common;
 
-use dagq::application::{LedgerStore, NodeSampleStore};
+use dagq::application::{EventStore, LedgerStore, NodeSampleStore};
 use dagq::domain::host_metrics::{HOST_NODE, HostSample, SampleSource, summarize};
 use dagq::domain::ledger::{
     self, LEDGER_V, LedgerKind, LedgerRow,
@@ -405,4 +406,28 @@ fn a_heartbeat_writes_while_the_node_rows_retention_runs() {
     assert!(took < dagq::application::QUEUE_BUSY_TIMEOUT, "{took:?}");
     assert!(0 < seen && seen < total, "{seen} of {total}");
     assert_eq!(count(&db, node_rows), 0);
+}
+
+/// A task's events are its own and its runs', oldest first, and no other
+/// task's.
+#[test]
+fn a_tasks_events_are_its_own_and_its_runs_oldest_first() {
+    let (dir, queue) = fixture();
+    let db = Connection::open(dir.path().join("queue.db")).unwrap();
+    db.execute_batch("PRAGMA foreign_keys=OFF").unwrap();
+    for (task, run, kind) in [
+        (7, Some(RUN), "run_claimed"),
+        (8, None, "task_created"),
+        (7, None, "task_status_changed"),
+    ] {
+        db.execute(
+            "INSERT INTO run_events(task_id,run_id,kind,payload) VALUES(?1,?2,?3,'{}')",
+            rusqlite::params![task, run, kind],
+        )
+        .unwrap();
+    }
+    let events = EventStore::task_events(&queue, TaskId::new(7)).unwrap();
+    let kinds: Vec<&str> = events.iter().map(|event| event.kind.as_str()).collect();
+    assert_eq!(kinds, ["run_claimed", "task_status_changed"]);
+    assert!(events.windows(2).all(|pair| pair[0].id < pair[1].id));
 }

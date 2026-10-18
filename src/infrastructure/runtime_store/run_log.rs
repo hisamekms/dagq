@@ -615,6 +615,16 @@ impl SqliteQueue {
         run_events_of(&self.conn, id)
     }
 
+    /// Every event of one task (its runs' too), oldest first, by
+    /// `events_by_task`.
+    pub fn task_events(&self, task: TaskId) -> Result<Vec<RunEvent>> {
+        Ok(self
+            .conn
+            .prepare("SELECT * FROM run_events WHERE task_id=?1 ORDER BY id")?
+            .query_map([task], event_row)?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     /// The latest run of every `in_progress` task, oldest first: the runs
     /// `status` judges for attention. An older run of a retried task is
     /// history, and a completed or canceled task needs nobody.
@@ -938,6 +948,9 @@ impl EventStore for SqliteQueue {
     }
     fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>> {
         SqliteQueue::run_events(self, id)
+    }
+    fn task_events(&self, task: TaskId) -> Result<Vec<RunEvent>> {
+        SqliteQueue::task_events(self, task)
     }
     fn has_run_event(&self, id: &RunId, kind: &str) -> Result<bool> {
         SqliteQueue::has_run_event(self, id, kind)
