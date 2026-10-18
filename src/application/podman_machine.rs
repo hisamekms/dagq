@@ -19,8 +19,8 @@ use anyhow::Result;
 
 use crate::domain::container_runtime::{Availability, RuntimeTarget};
 use crate::domain::podman_machine::{
-    MACHINE_NAME, MachineEntry, MachineMounts, MachineResources, Prepare, mounts_mismatch, prepare,
-    stops,
+    LeaseOwner, MACHINE_NAME, MachineEntry, MachineMounts, MachineResources, Prepare,
+    mounts_mismatch, prepare, stops,
 };
 
 /// The podman commands on the dagq machine, each naming it: never the
@@ -42,10 +42,14 @@ pub trait PodmanMachine {
 pub trait MachineUsers {
     /// Wait for the host-wide lock; it is held until the value drops.
     fn lock(&self) -> Result<Box<dyn Any>>;
-    /// `user` uses the machine until it leaves (or its process ends).
-    fn join(&self, user: &str) -> Result<()>;
+    /// `user` uses the machine until it leaves or `owner` is over
+    /// ([`LeaseOwner`]).
+    fn join(&self, user: &str, owner: &LeaseOwner) -> Result<()>;
     fn leave(&self, user: &str) -> Result<()>;
-    /// The users left whose process still runs.
+    /// The users left whose owner still lives ([`lease_held`]); the others
+    /// are forgotten.
+    ///
+    /// [`lease_held`]: crate::domain::podman_machine::lease_held
     fn count(&self) -> Result<usize>;
 }
 
@@ -101,13 +105,13 @@ pub struct Machine<'a> {
     pub volumes: Vec<PathBuf>,
 }
 
-/// Make the dagq machine run for `user` and count it among the users:
-/// create it if there is none, start it if it is stopped, under the
+/// Make the dagq machine run for `user` and count it among the users while
+/// `owner` lives: create it if there is none, start it if it is stopped, under the
 /// host-wide lock so concurrent runs, verifications and tests do it once.
 /// `Err` says why it cannot be used (the person's machine runs, its
 /// volumes do not match, a command failed); then `user` is not counted.
 /// What was done is returned.
-pub fn ensure(machine: &Machine<'_>, user: &str) -> Result<Prepare, String> {
+pub fn ensure(machine: &Machine<'_>, user: &str, owner: &LeaseOwner) -> Result<Prepare, String> {
     let _held = machine
         .users
         .lock()
@@ -134,7 +138,7 @@ pub fn ensure(machine: &Machine<'_>, user: &str) -> Result<Prepare, String> {
     }
     machine
         .users
-        .join(user)
+        .join(user, owner)
         .map_err(|error| format!("count a user of the podman machine {MACHINE_NAME}: {error:#}"))?;
     Ok(step)
 }
@@ -311,7 +315,7 @@ mod tests {
             self.calls.lock().unwrap().push("lock".into());
             Ok(Box::new(()))
         }
-        fn join(&self, user: &str) -> Result<()> {
+        fn join(&self, user: &str, _: &LeaseOwner) -> Result<()> {
             self.users.lock().unwrap().push(user.into());
             Ok(())
         }
@@ -323,6 +327,8 @@ mod tests {
             Ok(self.users.lock().unwrap().len())
         }
     }
+
+    const OWNER: LeaseOwner = LeaseOwner::Process { pid: 1 };
 
     fn machine(host: &Host) -> Machine<'_> {
         let required = MachineMounts::of_queue(Path::new("/q/a"));
@@ -338,15 +344,15 @@ mod tests {
     #[test]
     fn a_missing_machine_is_created_and_started_and_a_stopped_one_started() {
         let host = Host::default();
-        assert_eq!(ensure(&machine(&host), "r1"), Ok(Prepare::Init));
+        assert_eq!(ensure(&machine(&host), "r1", &OWNER), Ok(Prepare::Init));
         assert_eq!(host.calls(), ["lock", "init", "start"]);
         // Running now: nothing more but the lock.
-        assert_eq!(ensure(&machine(&host), "r2"), Ok(Prepare::Ready));
+        assert_eq!(ensure(&machine(&host), "r2", &OWNER), Ok(Prepare::Ready));
         assert_eq!(host.calls()[3..], ["lock"]);
         assert_eq!(*host.users.lock().unwrap(), ["r1", "r2"]);
 
         host.set_running(false);
-        assert_eq!(ensure(&machine(&host), "r3"), Ok(Prepare::Start));
+        assert_eq!(ensure(&machine(&host), "r3", &OWNER), Ok(Prepare::Start));
         assert_eq!(host.calls()[4..], ["lock", "start"]);
     }
 
@@ -366,8 +372,8 @@ mod tests {
     #[test]
     fn the_machine_stops_when_its_last_user_leaves_under_the_lock() {
         let host = Host::default();
-        ensure(&machine(&host), "r1").unwrap();
-        ensure(&machine(&host), "r2").unwrap();
+        ensure(&machine(&host), "r1", &OWNER).unwrap();
+        ensure(&machine(&host), "r2", &OWNER).unwrap();
         assert!(!release(&machine(&host), "r1").unwrap());
         assert!(release(&machine(&host), "r2").unwrap());
         assert_eq!(host.calls()[4..], ["lock", "lock", "stop"]);
@@ -378,7 +384,7 @@ mod tests {
     #[test]
     fn while_the_person_s_machine_runs_nothing_is_created_started_or_counted() {
         let host = Host::with(&[("podman-machine-default", true)]);
-        let why = ensure(&machine(&host), "r1").unwrap_err();
+        let why = ensure(&machine(&host), "r1", &OWNER).unwrap_err();
         assert!(why.contains("podman-machine-default runs"), "{why}");
         assert_eq!(host.calls(), ["lock"]);
         assert!(host.users.lock().unwrap().is_empty());
@@ -388,7 +394,7 @@ mod tests {
     fn volumes_that_do_not_match_are_not_started_and_say_how_to_recreate() {
         let host = Host::with(&[(MACHINE_NAME, false)]);
         *host.mounts.lock().unwrap() = vec![PathBuf::from("/Users/me")];
-        let why = ensure(&machine(&host), "r1").unwrap_err();
+        let why = ensure(&machine(&host), "r1", &OWNER).unwrap_err();
         assert!(why.contains("podman machine rm dagq"), "{why}");
         assert_eq!(host.calls(), ["lock"]);
         assert!(host.users.lock().unwrap().is_empty());
@@ -402,7 +408,7 @@ mod tests {
             ..Host::with(&[(MACHINE_NAME, false)])
         };
         *host.mounts.lock().unwrap() = machine(&host).volumes.clone();
-        let why = ensure(&machine(&host), "r1").unwrap_err();
+        let why = ensure(&machine(&host), "r1", &OWNER).unwrap_err();
         assert!(why.contains("start the podman machine dagq: boom"), "{why}");
         assert!(host.users.lock().unwrap().is_empty());
     }

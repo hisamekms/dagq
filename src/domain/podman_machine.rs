@@ -141,6 +141,67 @@ pub fn stops(running: bool, users_left: usize) -> bool {
     running && users_left == 0
 }
 
+/// What a user of the dagq machine lives as long as: the user is counted
+/// while its owner lives, and is not counted (and forgotten) once it is
+/// over, even when it never left.
+///
+/// A run's worker turns and its verifications are owned by the run in its
+/// queue, not by the process that called `ensure`: that process is the
+/// run's session wrapper, a long-running supervisor or a person's
+/// `integrate`, and a supervisor that outlives a run which ended without
+/// leaving would keep the machine running for as long as it runs. A run
+/// uses the machine while a turn or a verification of it may still start
+/// or run ([`lease_held`]); that is shorter than its relay is kept
+/// ([`relay_fate`]), which stays for a run that failed or was interrupted
+/// while its task waits for the triage or a person's answer. A test or a
+/// smoke that is no run is owned by its own process.
+///
+/// [`relay_fate`]: super::broker_relay::relay_fate
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LeaseOwner {
+    /// The process `pid`: the user ends with it.
+    Process { pid: u32 },
+    /// The run `run` of the queue whose database is `db`.
+    Run { db: PathBuf, run: String },
+}
+
+/// What was seen of a user's [`LeaseOwner`] when the users are counted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerSeen {
+    /// The owner process, and whether it still runs.
+    Process { alive: bool },
+    /// The owner run as its queue knows it.
+    Run(super::broker_relay::RelayRun),
+    /// The user's record names no owner this binary reads.
+    Unreadable,
+}
+
+/// Whether a user whose owner was seen as `seen` still uses the machine.
+/// A run does while it is unfinished ([`RunStatus::is_unfinished`]: from
+/// its claim to its landing, its turns, its review, its resumes and its
+/// verifications among them) and is the latest run of a task in progress;
+/// once it failed, was interrupted or landed, or its task ended or moved
+/// to another run, it does not, though its task may still wait for the
+/// triage or an answer. A run's queue that could not be read keeps its
+/// user (a running container is not stopped on a failed read); an
+/// unreadable record does not.
+///
+/// [`RunStatus::is_unfinished`]: super::RunStatus::is_unfinished
+pub fn lease_held(seen: OwnerSeen) -> bool {
+    use super::broker_relay::RelayRun;
+    match seen {
+        OwnerSeen::Process { alive } => alive,
+        OwnerSeen::Run(RelayRun::Unknown) => true,
+        OwnerSeen::Run(RelayRun::Missing) => false,
+        OwnerSeen::Run(RelayRun::Found {
+            status,
+            task_in_progress,
+        }) => task_in_progress && status.is_unfinished(),
+        OwnerSeen::Unreadable => false,
+    }
+}
+
 /// Why the volumes the dagq machine was created with (`mounted`, their
 /// host paths) do not serve a queue whose directories are `required`:
 /// one of them not mounted, or a mount that is not a run, clone or
@@ -383,5 +444,37 @@ mod tests {
                 disk_gib: 60
             }
         );
+    }
+
+    #[test]
+    fn a_run_s_user_lasts_as_long_as_the_run_not_as_the_process_that_joined() {
+        use super::super::RunStatus;
+        use super::super::broker_relay::RelayRun;
+        let run = |status, task_in_progress| {
+            lease_held(OwnerSeen::Run(RelayRun::Found {
+                status,
+                task_in_progress,
+            }))
+        };
+        // Still at work, at its review, waiting for a resume or at its
+        // landing's verification: counted.
+        assert!(run(RunStatus::Running, true));
+        assert!(run(RunStatus::Validating, true));
+        assert!(run(RunStatus::NeedsSession, true));
+        assert!(run(RunStatus::AwaitingIntegration, true));
+        assert!(run(RunStatus::Integrating, true));
+        // Over, whoever still runs: not counted, even while its task waits
+        // in progress for the triage or an answer.
+        assert!(!run(RunStatus::Failed, true));
+        assert!(!run(RunStatus::Interrupted, true));
+        assert!(!run(RunStatus::Integrated, true));
+        assert!(!run(RunStatus::Running, false));
+        assert!(!lease_held(OwnerSeen::Run(RelayRun::Missing)));
+        // A queue that could not be read keeps it.
+        assert!(lease_held(OwnerSeen::Run(RelayRun::Unknown)));
+        // A test's or a smoke's process.
+        assert!(lease_held(OwnerSeen::Process { alive: true }));
+        assert!(!lease_held(OwnerSeen::Process { alive: false }));
+        assert!(!lease_held(OwnerSeen::Unreadable));
     }
 }

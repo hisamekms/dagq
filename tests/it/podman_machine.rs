@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 
 use dagq::application::podman_machine::{MachineVolumes, ensure, release};
-use dagq::domain::podman_machine::Prepare;
+use dagq::domain::podman_machine::{LeaseOwner, Prepare};
 use dagq::infrastructure::podman_machine::{PodmanCli, QueueMachine, QueueVolumes, host_volumes};
 
 use crate::common::{self, shell_path};
@@ -76,6 +76,13 @@ esac
     fs::write(&program, script).unwrap();
     fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).unwrap();
     program
+}
+
+/// This test's process: a user that lives as long as the test.
+fn me() -> LeaseOwner {
+    LeaseOwner::Process {
+        pid: std::process::id(),
+    }
 }
 
 fn calls(state: &Path) -> Vec<String> {
@@ -145,7 +152,7 @@ fn concurrent_users_create_and_start_the_machine_once_and_the_last_one_stops_it(
             .enumerate()
             .map(|(n, user)| {
                 let machine = host.machine(if n % 2 == 0 { QUEUE_A } else { QUEUE_B });
-                scope.spawn(move || ensure(&machine.machine(), user))
+                scope.spawn(move || ensure(&machine.machine(), user, &me()))
             })
             .collect();
         handles.into_iter().map(|h| h.join().unwrap()).collect()
@@ -199,7 +206,7 @@ fn every_command_names_the_dagq_machine_and_the_default_connection_is_kept() {
     let _waiting = common::test();
     let host = Host::new();
     let machine = host.machine(QUEUE_A);
-    ensure(&machine.machine(), "r1").unwrap();
+    ensure(&machine.machine(), "r1", &me()).unwrap();
     let volumes = host.volumes(QUEUE_A);
     volumes.create_build_output("r1").unwrap();
     volumes.remove_build_output("r1").unwrap();
@@ -232,7 +239,7 @@ fn init_mounts_only_the_run_clone_and_verification_dirs_and_a_mismatch_is_unusab
     // of their own.
     let _waiting = common::test();
     let host = Host::new();
-    ensure(&host.machine(QUEUE_A).machine(), "r1").unwrap();
+    ensure(&host.machine(QUEUE_A).machine(), "r1", &me()).unwrap();
     let all = calls(&host.state);
     let init = all.iter().find(|c| c.starts_with("machine init")).unwrap();
     let mounted: Vec<&str> = init
@@ -278,7 +285,7 @@ fn init_mounts_only_the_run_clone_and_verification_dirs_and_a_mismatch_is_unusab
         r#"{"Mounts":[{"Source":"/Users/someone"}]}"#,
     )
     .unwrap();
-    let why = ensure(&host.machine(QUEUE_A).machine(), "r2").unwrap_err();
+    let why = ensure(&host.machine(QUEUE_A).machine(), "r2", &me()).unwrap_err();
     assert!(why.contains("/Users/someone"), "{why}");
     assert!(why.contains("podman machine rm dagq"), "{why}");
     assert_eq!(count_in(&host.state, "machine start"), 1);
@@ -329,6 +336,89 @@ fn volumes_are_named_per_queue_and_run_and_one_queue_never_removes_another_s() {
     assert!(a.create_build_output("../r").is_err());
 }
 
+/// A run of a new ready task of the queue at `db` claimed outside the
+/// supervisor and left `running`, its task `in_progress`.
+fn running_run(db: &Path, repo: &Path) -> String {
+    use crate::runtime_support::{SqliteQueue, add_ready_task, git_out};
+    use dagq::domain::{ClaimOutcome, CommitSha, LeaseToken};
+    let mut queue = SqliteQueue::open(db).unwrap();
+    add_ready_task(&mut queue, "a run in the machine", &[]);
+    let base = CommitSha::try_from(git_out(repo, &["rev-parse", "main"]).as_str()).unwrap();
+    let ClaimOutcome::Claimed { run } = queue
+        .claim_for_supervisor(&base, &LeaseToken::new("lease"))
+        .unwrap()
+    else {
+        panic!("nothing was claimed")
+    };
+    set_run(db, run.id().as_str(), "running", "in_progress");
+    run.id().to_string()
+}
+
+fn set_run(db: &Path, run: &str, status: &str, task: &str) {
+    let raw = rusqlite::Connection::open(db).unwrap();
+    raw.execute(
+        "UPDATE task_runs SET status=?2 WHERE id=?1",
+        rusqlite::params![run, status],
+    )
+    .unwrap();
+    raw.execute(
+        "UPDATE tasks SET status=?2 WHERE id=(SELECT task_id FROM task_runs WHERE id=?1)",
+        rusqlite::params![run, task],
+    )
+    .unwrap();
+}
+
+/// A run's user is the run in its queue, not the process that made the
+/// machine run for it: while this test's process (a supervisor's
+/// stand-in) runs on, a run still at work or at its landing's
+/// verification keeps the machine running, and one that failed or was
+/// interrupted without leaving is not counted, though its task stays in
+/// progress for the triage or an answer, so the next release stops the
+/// machine.
+#[test]
+fn a_run_that_ended_without_leaving_does_not_keep_the_machine_running() {
+    // The fake podman's children and the host-wide lock have no limit
+    // of their own.
+    let _waiting = common::test();
+    let host = Host::new();
+    let (_fixture, repo, db) = crate::runtime_support::fixture();
+    let runs: Vec<String> = (0..3).map(|_| running_run(&db, &repo)).collect();
+    let (first, second, third) = (&runs[0], &runs[1], &runs[2]);
+    let machine = host.machine(QUEUE_A);
+    for run in &runs {
+        let owner = LeaseOwner::Run {
+            db: db.clone(),
+            run: run.clone(),
+        };
+        ensure(&machine.machine(), run, &owner).unwrap();
+    }
+    let running = || fs::read_to_string(host.state.join("machine")).unwrap() == "running\n";
+    // A test comes and goes: whether the users left keep the machine.
+    let smoke = || {
+        ensure(&machine.machine(), "smoke", &me()).unwrap();
+        release(&machine.machine(), "smoke").unwrap()
+    };
+
+    // The first leaves; the others, still at work, keep it running.
+    assert!(!release(&machine.machine(), first).unwrap());
+    assert!(running());
+    // The second fails and its task waits in progress for the triage;
+    // the third is at its landing's verification.
+    set_run(&db, second, "failed", "in_progress");
+    set_run(&db, third, "integrating", "in_progress");
+    assert!(!smoke());
+    assert!(running());
+    assert!(!host.root.join("machine/users").join(second).exists());
+
+    // The third is interrupted and never leaves, its task in progress,
+    // while this process runs on.
+    set_run(&db, third, "interrupted", "in_progress");
+    assert!(smoke());
+    assert!(!running());
+    assert_eq!(count_in(&host.state, "machine stop"), 1);
+    assert!(!host.root.join("machine/users").join(third).exists());
+}
+
 /// The real dagq machine with the real `podman` on `PATH`: it is created
 /// if missing (mounting this host's queues' directories), started, given a
 /// build output volume and stopped when this test leaves it. Run by hand,
@@ -359,7 +449,7 @@ fn the_real_dagq_machine_starts_holds_a_volume_and_stops() {
         dagq::infrastructure::kpi_config::host_wide_file().as_deref(),
     );
     let user = format!("it-{}", std::process::id());
-    ensure(&machine.machine(), &user).unwrap();
+    ensure(&machine.machine(), &user, &me()).unwrap();
     let volumes = QueueVolumes::of_queue(PodmanCli::default(), &queue).unwrap();
     volumes.create_build_output(&user).unwrap();
     assert!(volumes.build_output_exists(&user).unwrap());

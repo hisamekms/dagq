@@ -16,7 +16,7 @@
 //!
 //! Everything host-wide lives in `<data home>/dagq/machine/`: `lock`
 //! (held with `flock` while the machine is started or stopped) and
-//! `users/<user>` (the pid of the process that joined).
+//! `users/<user>` (the user's [`LeaseOwner`] as JSON).
 
 use std::any::Any;
 use std::ffi::OsString;
@@ -34,8 +34,10 @@ use serde::Deserialize;
 use super::location::DB_FILE_NAME;
 use super::run_env::{parse_positive, strip_comment};
 use crate::application::podman_machine::{Machine, MachineUsers, MachineVolumes, PodmanMachine};
+use crate::domain::broker_relay::RelayRun;
 use crate::domain::podman_machine::{
-    MACHINE_NAME, MachineEntry, MachineMounts, MachineResources, QueueKey,
+    LeaseOwner, MACHINE_NAME, MachineEntry, MachineMounts, MachineResources, OwnerSeen, QueueKey,
+    lease_held,
 };
 
 /// The directory beside the queues in the data home that holds the
@@ -505,10 +507,10 @@ impl MachineUsers for HostMachineUsers {
         Ok(Box::new(file))
     }
 
-    fn join(&self, user: &str) -> Result<()> {
+    fn join(&self, user: &str, owner: &LeaseOwner) -> Result<()> {
         let file = self.user_file(user)?;
         fs::create_dir_all(self.users())?;
-        fs::write(&file, std::process::id().to_string())
+        fs::write(&file, serde_json::to_vec(owner)?)
             .with_context(|| format!("write {}", file.display()))
     }
 
@@ -529,20 +531,102 @@ impl MachineUsers for HostMachineUsers {
             Err(error) => return Err(error).context("read the machine's users"),
         };
         let mut count = 0;
+        let mut queues = Queues::new();
         for entry in entries.flatten() {
-            let alive = fs::read_to_string(entry.path())
-                .ok()
-                .and_then(|pid| pid.trim().parse().ok())
-                .is_some_and(super::adapters::process_alive);
-            if alive {
+            let seen = match fs::read_to_string(entry.path()) {
+                Ok(text) => owner_seen(&text, &mut queues),
+                // Left between the listing and the read.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => OwnerSeen::Unreadable,
+            };
+            if lease_held(seen) {
                 count += 1;
             } else {
-                // Its process ended without leaving.
+                // Its owner is over, though it never left.
                 let _ = fs::remove_file(entry.path());
             }
         }
         Ok(count)
     }
+}
+
+/// The queues the users of one count name, each opened once: `None` when
+/// it could not be read (why is logged), and absent while not opened.
+type Queues = std::collections::HashMap<PathBuf, Option<super::sqlite::SqliteQueue>>;
+
+/// What is seen now of the owner a user's record `text` names: a bare pid
+/// is a process (the record of a binary from before the owners).
+fn owner_seen(text: &str, queues: &mut Queues) -> OwnerSeen {
+    let owner = serde_json::from_str(text).ok().or_else(|| {
+        text.trim()
+            .parse()
+            .ok()
+            .map(|pid| LeaseOwner::Process { pid })
+    });
+    match owner {
+        Some(LeaseOwner::Process { pid }) => OwnerSeen::Process {
+            alive: super::adapters::process_alive(pid),
+        },
+        Some(LeaseOwner::Run { db, run }) => OwnerSeen::Run(run_in_queue(&db, &run, queues)),
+        None => OwnerSeen::Unreadable,
+    }
+}
+
+/// The run `run` as the queue at `db` knows it, read without changing it:
+/// a queue whose database is gone has no such run, and one that cannot
+/// be looked at (a directory it cannot enter) is unknown, not gone.
+fn run_in_queue(db: &Path, run: &str, queues: &mut Queues) -> RelayRun {
+    match db.try_exists() {
+        Ok(true) => {}
+        Ok(false) => return RelayRun::Missing,
+        Err(error) => {
+            tracing::warn!(db = %db.display(), error = %format_args!("{error:#}"), "the queue of a user of the podman machine could not be looked at: {error:#}");
+            return RelayRun::Unknown;
+        }
+    }
+    let opened = queues.entry(db.to_path_buf()).or_insert_with(|| {
+        super::sqlite::SqliteQueue::open_read_only(db)
+            .inspect_err(|error| {
+                tracing::warn!(db = %db.display(), error = %format_args!("{error:#}"), "the queue of a user of the podman machine could not be read: {error:#}");
+            })
+            .ok()
+    });
+    let Some(queue) = opened else {
+        return RelayRun::Unknown;
+    };
+    let read = (|| {
+        if let Some(found) = queue
+            .latest_runs_in_progress()?
+            .into_iter()
+            .find(|found| found.id().as_str() == run)
+        {
+            return Ok(RelayRun::Found {
+                status: found.status(),
+                task_in_progress: true,
+            });
+        }
+        let Ok(id) = crate::domain::RunId::new(run) else {
+            return Ok(RelayRun::Missing);
+        };
+        match queue.run(&id) {
+            Ok(found) => Ok(RelayRun::Found {
+                status: found.status(),
+                task_in_progress: false,
+            }),
+            Err(error)
+                if error
+                    .downcast_ref::<crate::application::RunNotFound>()
+                    .is_some() =>
+            {
+                Ok(RelayRun::Missing)
+            }
+            Err(error) => Err(error),
+        }
+    })();
+    read.unwrap_or_else(|error: anyhow::Error| {
+        tracing::warn!(run, error = %format_args!("{error:#}"), "the run of a user of the podman machine could not be read: {error:#}");
+        RelayRun::Unknown
+    })
 }
 
 /// The named volumes of one queue inside the dagq machine.
@@ -896,23 +980,71 @@ mod tests {
     }
 
     #[test]
-    fn users_whose_process_ended_are_not_counted() {
+    fn users_whose_owner_is_over_are_not_counted() {
         let dir = tempfile::tempdir().unwrap();
         let users = HostMachineUsers {
             dir: dir.path().to_path_buf(),
         };
+        let me = LeaseOwner::Process {
+            pid: std::process::id(),
+        };
         assert_eq!(users.count().unwrap(), 0);
-        users.join("r1").unwrap();
-        users.join("r2").unwrap();
+        users.join("r1", &me).unwrap();
+        users.join("r2", &me).unwrap();
         assert_eq!(users.count().unwrap(), 2);
-        // A pid no process has.
-        fs::write(dir.path().join("users/gone"), i32::MAX.to_string()).unwrap();
-        assert_eq!(users.count().unwrap(), 2);
-        assert!(!dir.path().join("users/gone").exists());
+        // A process that ended, a run of a queue that is gone, a record
+        // nobody reads, and a bare pid of a binary from before the owners.
+        users
+            .join(
+                "gone",
+                &LeaseOwner::Process {
+                    pid: i32::MAX as u32,
+                },
+            )
+            .unwrap();
+        let no_queue = LeaseOwner::Run {
+            db: dir.path().join("none/queue.db"),
+            run: "r9".into(),
+        };
+        users.join("r9", &no_queue).unwrap();
+        fs::write(dir.path().join("users/junk"), "{").unwrap();
+        fs::write(dir.path().join("users/old"), std::process::id().to_string()).unwrap();
+        assert_eq!(users.count().unwrap(), 3);
+        for left in ["gone", "r9", "junk"] {
+            assert!(!dir.path().join("users").join(left).exists(), "{left}");
+        }
         users.leave("r1").unwrap();
         users.leave("r1").unwrap();
+        users.leave("old").unwrap();
         assert_eq!(users.count().unwrap(), 1);
-        assert!(users.join("../x").is_err());
+        assert!(users.join("../x", &me).is_err());
+    }
+
+    #[test]
+    fn a_run_whose_queue_cannot_be_looked_at_stays_counted() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let users = HostMachineUsers {
+            dir: dir.path().join("machine"),
+        };
+        let shut = dir.path().join("shut");
+        fs::create_dir(&shut).unwrap();
+        fs::write(shut.join("queue.db"), "").unwrap();
+        let owner = LeaseOwner::Run {
+            db: shut.join("queue.db"),
+            run: "r1".into(),
+        };
+        users.join("r1", &owner).unwrap();
+        // The queue's directory cannot be entered: whether the queue is
+        // there is not known, so the run is not taken to be over.
+        fs::set_permissions(&shut, fs::Permissions::from_mode(0o000)).unwrap();
+        let counted = users.count();
+        fs::set_permissions(&shut, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(counted.unwrap(), 1);
+        assert!(dir.path().join("machine/users/r1").exists());
+        // Gone once it is looked at and is not there.
+        fs::remove_dir_all(&shut).unwrap();
+        assert_eq!(users.count().unwrap(), 0);
     }
 }
 
@@ -945,7 +1077,12 @@ impl crate::application::podman_machine::RunMachine for QueueRunMachine {
             &queue_dir,
             self.host_wide.as_deref(),
         );
-        crate::application::podman_machine::ensure(&machine.machine(), run)
+        // Absolute: another process, whatever its cwd, reads the queue.
+        let owner = LeaseOwner::Run {
+            db: fs::canonicalize(&self.db).unwrap_or_else(|_| self.db.clone()),
+            run: run.to_owned(),
+        };
+        crate::application::podman_machine::ensure(&machine.machine(), run, &owner)
             .map_err(anyhow::Error::msg)
             .context("make the dagq machine run")?;
         let now = std::time::SystemTime::now()

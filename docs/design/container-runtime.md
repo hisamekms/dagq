@@ -88,7 +88,7 @@ containerはdagq専用の名前のPodman machineだけで動かす（[ADR-t2113-
 - 起動と停止: `ensure`は無ければinitし、止まっていればstartし、使う者として数える入口で、workerのturnとverificationのcontainerの起動の前（runを使う者にする）とpodmanを要るtestとスモークの前に呼ぶ。
   使い終えたら`release`を呼び、使う者が居なければ止める。
   どちらもhost全体のlock（data homeの`dagq/machine/`）の中で判定と操作を行うので、並行するrun・verification・testが同時に呼んでも作るのと起動するのは1回になる。
-  使う者は記録したprocessが終わっていれば数えない。
+  使う者は持ち主（`LeaseOwner`）が終われば数えず、呼んだprocessには依らない（turnとverificationの持ち主はrun）。
 - 人のmachine: Podmanは同時に1つのmachineしか動かさないので、人のmachineが動いている間はdagqのmachineを起動せず、containerを使えないと答える（fail closed）。
   人のmachineは止めない。
 - 資源: CPU・メモリ・diskはhost全体の`host.toml`の`[machine]`が与え、既定値と根拠は`MachineResources`のdoc commentが持つ。
@@ -201,7 +201,7 @@ cloneで働くrunの各turn（最初のturn・revise・答え・resume）は、h
 session wrapperはhostの制御側に残り、turnの出力・receipt・askをrun dirから今と同じく読み、`run log`で追える。
 executorは`application::run_container::PodmanActorExecutor`、設定の読み取り・tokenの受け渡し・podmanは`RunContainers`のport、machine・image・relay・buildの出力の準備はhost運用が実行と着地に貸す`application::podman_machine::RunMachine`のport、`podman run`の引数・token・env・transcriptの置き場の判断は`domain::run_container`、containerの中の処理は`infrastructure::container_turn`（`dagq relay turn`）が持つ。
 
-- 準備: 各turnの前に、machineを動かしてrunを使う者にし（`release`は呼ばず、使う者はwrapperのprocessが終われば数えない）、imageをbuildし、runのrelayを開き、`dagq.toml`が名指せばbuildの出力のvolumeを作り、`[run.env]`と`host.toml`のcontainerの上限を読む。
+- 準備: 各turnの前に、machineを動かしてrunを使う者にし（`release`は呼ばない）、imageをbuildし、runのrelayを開き、`dagq.toml`が名指せばbuildの出力のvolumeを作り、`[run.env]`と`host.toml`のcontainerの上限を読む。
   どれかが失敗すればturnを起動せず、hostにも戻さない。
 - token: supervisorが発行したworkerのtokenを、run dirのファイル（mode 0600、renameで置くのでworkerが置いたsymlinkを辿らない）にして、その場所をenvで渡す。
   podmanの引数とcontainerの設定にtokenの値は無く、ファイルはcontainerを消すときに消す。
