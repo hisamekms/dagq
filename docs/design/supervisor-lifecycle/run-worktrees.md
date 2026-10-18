@@ -65,7 +65,8 @@ worktreeのpathはrun_dirの下の`<runs>/<run-id>/worktree`で、`--repo`のche
   - 消す条件はscratchpadと同じで、消すのは`<runs>/<run-id>/tmp`だけ（`run_tmp_dir`）。
   - 何か消せば`run_tmp_removed`（`scratchpad_removed`と同じ形）をrunに記録し、消せなければ`cleanup_failed`にして、次の掃除で再び試す。
   - runtimeが決めたdirの外にworkerが作ったものは対象外で、人かinboxが消す。
-  - Codexのheadlessのjob（review・goal review・plan reviewなどを`[roles.<role>]`の`provider = "codex"`で動かすもの）は対象外にする: jobはread-onlyのsandbox（`JOB_SANDBOX`か、queue serviceに届くときはそれを広げたjobの権限）で動き、どこにも書けないので、一時ファイルのdirを渡しても使えず、残るものも無い
+  - Codexのheadlessのjob（review・goal review・plan reviewなどを`[roles.<role>]`の`provider = "codex"`で動かすもの）は対象外にする: jobはread-onlyのsandbox（`JOB_SANDBOX`か、queue serviceに届くときはそれを広げたjobの権限）で動き、どこにも書けないので、一時ファイルのdirを渡しても使えず、残るものも無い。
+    例外の`setup-review`の生成のjobは、runに属さず、`/tmp`と`$TMPDIR`を書けず自分の一時のworktreeだけに書けるsandboxで動き、その一時の場所はコマンドが成否に依らず消すので、これも対象外にする（[Setup review](setup-review.md)）。
   - queue serviceのクライアントモードとの関係: worker・jobの`dagq`のクライアントモードはDBのpathを渡さないだけでworkerはhostのままなので、置き場所と片付けはこのまま変わらない。
     実行側のコンテナの隔離ではworkerの`/tmp`はコンテナと一緒に消えるが、ビルドの出力とrun_dirはコンテナにmountされるhostのdirに残るので、`TMPDIR`をそのmountの中の同じdirに向ければ、run_dirの側から片付けるこの形をそのまま引き継げる（コンテナの中の`/tmp`を片付ける仕組みは要らない）。
 
