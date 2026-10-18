@@ -12,6 +12,8 @@ amends:
   - adr-t2287-1 decision 2
   - adr-t2287-1 decision 3
   - adr-t2259-1 decision 12
+amended_by:
+  - adr-t2397-1
 owners:
   - hisamekms
 tags:

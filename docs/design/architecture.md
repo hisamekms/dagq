@@ -18,6 +18,7 @@ related:
   - design-persistence
   - design-supervisor-lifecycle-supervise
   - adr-t2391-1
+  - adr-t2397-1
 ---
 
 # レイヤーとコンテキストの境界
@@ -181,7 +182,8 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 
 ### 検査の範囲
 
-- 各規則の検査は、scriptから、コンパイラ（crateの依存・可視性・型）・clippy・Rustのtest・全体のreviewへ移している途中で、規則ごとの移し先と退役の順は[ADR-t2391-1](../adr/2026-10-12-t2391-1-boundary-rules-to-compiler-clippy-and-rust-tests.md)が持つ。
+- 各規則の検査は、scriptから、コンパイラ（可視性・型）・clippy・Rustのtest・全体のreviewへ移している途中で、規則ごとの移し先と退役の順は[ADR-t2391-1](../adr/2026-10-12-t2391-1-boundary-rules-to-compiler-clippy-and-rust-tests.md)が持つ。
+  crateは1つのままで、crateの分割に委ねた規則（L1・L3・L6・L8・L9のcontextのmoduleどうし・C5・C8）はmoduleの参照を構文で読むRustのtestへ移す（[ADR-t2397-1](../adr/2026-10-18-t2397-1-crate-delegated-boundary-rules-kept-in-one-crate-by-a-rust-module-reference-test.md)）。
   下の記述と各規則の「検査」の行は今動いている検査で、移し先の着地ごとに直す。
 - `scripts/check-layer-deps.sh`は、L1・L2・L3・L4・L6・L9とL7の時計、分けた状態のsubmoduleのC3、`src/application/ports/`のcontextのmoduleのC8を当てる。
   数えるのは参照のpathで、コメントと文字列は数えない（細目はscriptの先頭のコメント）。
