@@ -96,6 +96,7 @@ runtimeが起動するsessionとjobは、kindごとの区間として記録す�
 
 - 入口: `infrastructure::transcripts::ClaudeTranscripts`、前もった読み取りは`infrastructure::sessions::read_before`。
 - 約束: transcriptはロックの外で前もって読み解析し、トランザクションの中では解析し直さない（理由は`read_before`のdoc comment）。
+- 約束: 区間はその区間のsessionのtranscriptを読み、新しいsessionに切り替えた（`session_renewed`）後に開いた区間は新しいsessionのものを読む（`domain::sessions::SpanContext`の`session`）。
 - hookの`SessionEnd`はtranscriptを読まずに閉じ、後でsupervisorが取り込む（[ADR-t655-1](../adr/2026-10-04-t655-1-hook-close-defers-transcript-intake-to-the-supervisor.md)）。
 - 落とし穴: `worktime.jsonl`の明細はcommitを確かめてから書く（`sessions::watch_commits`）。
 

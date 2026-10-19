@@ -114,6 +114,17 @@ pub fn renewals(events: &[RunEvent]) -> usize {
         .count()
 }
 
+/// The session a run's worker goes on in, given its last session boundary
+/// (an event of `kind` with `payload`, as
+/// [`provider_switch::session_starts`] counts them): the `session` a
+/// `session_renewed` names. `None` for a provider switch, and for a
+/// renewal recorded before it named its session.
+pub fn renewed_session(kind: &str, payload: &Value) -> Option<String> {
+    (kind == event_kind::SESSION_RENEWED)
+        .then(|| payload["session"].as_str().map(str::to_owned))
+        .flatten()
+}
+
 /// The payload of the `session_renewed` that starts the next session of
 /// run `run_id`'s worker on `provider`, its events so far being `events`,
 /// because the previous turn's `peak_context` was above `threshold`: the
@@ -306,5 +317,32 @@ mod tests {
             renewed_payload("run-1", Provider::Claude, &[], (1, 0))["after_turn"],
             json!(null)
         );
+    }
+
+    /// A run's spans take the session its last `session_renewed` names;
+    /// a provider switch after it, a renewal that names none (an older
+    /// event) or one naming it otherwise than as text give none.
+    #[test]
+    fn the_renewed_session_is_the_one_the_last_renewal_names() {
+        let renewal = json!({"peak_context": 500_000, "threshold": 400_000, "session": "new"});
+        assert_eq!(
+            renewed_session(event_kind::SESSION_RENEWED, &renewal).as_deref(),
+            Some("new")
+        );
+        assert_eq!(
+            renewed_session(event_kind::PROVIDER_SWITCHED, &renewal),
+            None
+        );
+        for payload in [
+            json!({"peak_context": 500_000, "threshold": 400_000}),
+            json!({"session": 1}),
+            Value::Null,
+        ] {
+            assert_eq!(
+                renewed_session(event_kind::SESSION_RENEWED, &payload),
+                None,
+                "{payload}"
+            );
+        }
     }
 }

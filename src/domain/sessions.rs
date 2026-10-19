@@ -211,6 +211,13 @@ pub struct SpanContext {
     /// The proposal a planner of the runtime's was opened for, which its
     /// headless span names as the hook's span does.
     pub proposal_id: Option<i64>,
+    /// The session the run's worker goes on in when its last session
+    /// boundary is a `session_renewed` (its `session`, ADR-t2080-1): the
+    /// run's own sessions' spans open with it as their `session_id`, so
+    /// that their close reads the new session's transcript. `None` when
+    /// the run's session was never renewed, or a provider switch came
+    /// after the renewal.
+    pub session: Option<String>,
 }
 
 /// The `route` of a headless run's session span.
@@ -293,7 +300,7 @@ pub fn changes(
             };
             changes.push(SpanChange::Open(json!({
                 "kind": span,
-                "session_id": text("session_id"),
+                "session_id": context.session.as_deref().or(text("session_id")),
                 "cwd": context.worktree,
                 "transcript_path": null,
                 "attempt": attempt,
@@ -303,7 +310,8 @@ pub fn changes(
             })));
             changes
         }
-        // The same session goes on as a revise.
+        // The same session goes on as a revise (the new one when it was
+        // renewed before the revise).
         "revise_requested" => {
             let mut changes = close(&RUN_SESSION, NEXT_SPAN);
             let session_id = open
@@ -312,6 +320,7 @@ pub fn changes(
                 .find(|span| RUN_SESSION.contains(&span.kind()))
                 .and_then(OpenSpan::session_id)
                 .map(str::to_owned);
+            let session_id = context.session.clone().or(session_id);
             changes.push(SpanChange::Open(json!({
                 "kind": REVISE,
                 "session_id": session_id,
@@ -339,7 +348,10 @@ pub fn changes(
             };
             changes.push(SpanChange::Open(json!({
                 "kind": span,
-                "session_id": reopened.and_then(OpenSpan::session_id),
+                "session_id": context
+                    .session
+                    .as_deref()
+                    .or(reopened.and_then(OpenSpan::session_id)),
                 "cwd": context.worktree,
                 "transcript_path": null,
                 "attempt": attempt,
@@ -968,6 +980,36 @@ mod tests {
         assert_eq!(payload["kind"], REVISE);
         assert_eq!(payload["attempt"], 1);
         assert_eq!(payload["workspace_id"], json!(null));
+    }
+
+    /// After a `session_renewed` the run's own spans open with the new
+    /// session ([`SpanContext::session`]): a resume's whatever its start
+    /// says, a revise's and a withdrawn revise's whatever the span before
+    /// it named. Without one they keep what they had.
+    #[test]
+    fn the_runs_spans_open_with_the_renewed_session() {
+        let renewed = SpanContext {
+            resumes: 1,
+            revises: 1,
+            session: Some("new".into()),
+            ..SpanContext::default()
+        };
+        let before = span(5, json!({"kind": REVISE, "session_id": "run-1"}));
+        for (kind, payload) in [
+            ("agent_started", json!({"session_id": "run-1"})),
+            ("revise_requested", json!({})),
+            ("revise_unsent", json!({})),
+        ] {
+            let open = [before.clone()];
+            let changed = changes(kind, &payload, &open, &renewed);
+            assert_eq!(opened(&changed[1])["session_id"], "new", "{kind}");
+            let kept = SpanContext {
+                session: None,
+                ..renewed.clone()
+            };
+            let changed = changes(kind, &payload, &open, &kept);
+            assert_eq!(opened(&changed[1])["session_id"], "run-1", "{kind}");
+        }
     }
 
     /// A resume's session is `resume`; one still open when the next starts

@@ -1443,3 +1443,106 @@ fn a_session_closes_with_its_work_when_dagq_toml_cannot_be_read() {
     assert_eq!(work["secs"]["test"], 40, "{payload}");
     assert_eq!(work.get("failed_tests"), None, "{payload}");
 }
+
+/// A revise sent after `session_renewed` opens its span with the new
+/// session the renewal names, and its close counts the commands of that
+/// session's transcript in its `session_closed` work and the run
+/// directory's `worktime.jsonl`, not the run's first session's.
+#[test]
+fn a_span_after_a_renewal_closes_with_the_new_sessions_work() {
+    use serde_json::json;
+    const FIRST: &str = "5f1c2a90-0000-4000-8000-000000000001";
+    const RENEWED: &str = "5f1c2a90-0000-4000-8000-000000000002";
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("queue.db");
+    let run = run_with_events(
+        &db,
+        &[
+            ("agent_started", json!({"session_id": FIRST}), "00:00:05"),
+            (
+                "session_renewed",
+                json!({"peak_context": 500_000, "threshold": 400_000, "session": RENEWED}),
+                "00:02:00",
+            ),
+            ("revise_requested", json!({"attempt": 1}), "00:02:00"),
+        ],
+    );
+    let run_dir = dir.path().join("run");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.execute(
+        "UPDATE task_runs SET run_dir=?1",
+        [run_dir.to_str().unwrap()],
+    )
+    .unwrap();
+    // Each session builds once: the first for 20 s, the new one for 40 s.
+    let project = dir.path().join("claude/projects/elsewhere");
+    std::fs::create_dir_all(&project).unwrap();
+    for (session, minute, built) in [(FIRST, "00", "30"), (RENEWED, "02", "50")] {
+        let line = |kind: &str, at: &str, content: Value| {
+            json!({"type": kind, "timestamp": format!("2026-09-24T00:{minute}:{at}.000Z"),
+                   "sessionId": session, "version": "2.1.283", "message": {"content": content}})
+            .to_string()
+        };
+        let lines = [
+            line("user", "05", json!("go")),
+            line(
+                "assistant",
+                "10",
+                json!([{"type": "tool_use", "id": "a", "name": "Bash",
+                        "input": {"command": "cargo build"}}]),
+            ),
+            line(
+                "user",
+                built,
+                json!([{"type": "tool_result", "tool_use_id": "a", "content": "ok"}]),
+            ),
+            line("assistant", "55", json!([{"type": "text"}])),
+        ];
+        std::fs::write(project.join(format!("{session}.jsonl")), lines.join("\n")).unwrap();
+    }
+    conn.execute("DELETE FROM run_leases", []).unwrap();
+    let config = dir.path().join("claude");
+    let output = invoke_with(
+        &[
+            ("DAGQ_ROLE", "inbox"),
+            ("CLAUDE_CONFIG_DIR", config.to_str().unwrap()),
+        ],
+        &db,
+        &["recover", &run],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let opened: String = conn
+        .query_row(
+            "SELECT payload FROM run_events WHERE kind='session_opened'
+             AND json_extract(payload,'$.kind')='revise'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let opened: Value = serde_json::from_str(&opened).unwrap();
+    assert_eq!(opened["session_id"], RENEWED, "{opened}");
+    let closed: String = conn
+        .query_row(
+            "SELECT payload FROM run_events WHERE kind='session_closed'
+             AND json_extract(payload,'$.kind')='revise'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let closed: Value = serde_json::from_str(&closed).unwrap();
+    assert_eq!(closed["work"]["secs"]["build"], 40, "{closed}");
+    let worktime = std::fs::read_to_string(run_dir.join("worktime.jsonl")).unwrap();
+    let lines: Vec<Value> = worktime
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|line: &Value| line["kind"] == "revise")
+        .collect();
+    assert_eq!(lines.len(), 1, "{worktime}");
+    assert_eq!(lines[0]["command"], "cargo build");
+    assert_eq!(lines[0]["secs"], 40, "{worktime}");
+}

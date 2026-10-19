@@ -30,7 +30,7 @@ use super::{
 use crate::{
     application::{TranscriptSource, Transcripts},
     domain::{
-        EventId, GoalId, RunEvent, RunId, TaskId,
+        EventId, GoalId, RunEvent, RunId, TaskId, fresh_session,
         sessions::{
             GOAL_REVIEW, HEADLESS_ROUTE, HOOK_KINDS, INFERRED, JOB_FINISHED, OpenSpan, PLAN_REVIEW,
             REVIEW, RUN_SESSION, RUNTIME_PLANNER, SESSION_CLOSED, SESSION_OPENED, SESSION_TURNS,
@@ -2218,7 +2218,31 @@ fn run_context(conn: &Connection, run_id: &RunId) -> Result<SpanContext> {
         provider,
         at_ms: None,
         proposal_id: None,
+        session: renewed_session(conn, run_id)?,
     })
+}
+
+/// The run's last session boundary (a `session_renewed` or a
+/// `provider_switched`, as [`crate::domain::provider_switch`] counts
+/// them): its kind and payload.
+const LAST_SESSION_BOUNDARY_SQL: &str = "SELECT kind, payload FROM run_events
+       WHERE run_id=?1 AND kind IN (?2, ?3) ORDER BY id DESC LIMIT 1";
+
+/// [`SpanContext::session`] of run `run_id`
+/// ([`fresh_session::renewed_session`] of its last session boundary).
+fn renewed_session(conn: &Connection, run_id: &RunId) -> Result<Option<String>> {
+    let last: Option<(String, Value)> = conn
+        .query_row(
+            LAST_SESSION_BOUNDARY_SQL,
+            params![
+                run_id,
+                event_kind::SESSION_RENEWED,
+                event_kind::PROVIDER_SWITCHED
+            ],
+            |r| Ok((r.get("kind")?, json_col(r, "payload")?)),
+        )
+        .optional()?;
+    Ok(last.and_then(|(kind, payload)| fresh_session::renewed_session(&kind, &payload)))
 }
 
 fn proposal_goals(conn: &Connection, proposal: Option<i64>) -> Result<Vec<i64>> {
