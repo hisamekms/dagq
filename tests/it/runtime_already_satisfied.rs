@@ -1,8 +1,9 @@
 //! Runtime tests: a worker's `already_satisfied` receipt (ADR-t1818-1) is
 //! no `commit_mismatch`: the runtime lands nothing, runs the task's
 //! verification commands on a snapshot of main recorded with its head,
-//! asks a person on that snapshot, and closes the task without a commit on
-//! the answer, verifying again on main's new head when main moved since.
+//! has the review judge the claim on that same head, asks a person with
+//! the judgment, and closes the task without a commit on the answer,
+//! verifying again on main's new head when main moved since.
 use crate::common;
 use crate::runtime_support;
 
@@ -73,6 +74,16 @@ fn claimed_with(
     dependent: bool,
     before: impl FnOnce(&Path),
 ) -> (Fixture, PathBuf, PathBuf, TestWorkspace, TestReviewer) {
+    claimed_judged(dependent, before, &[verdict("pass", &[], "fine")])
+}
+
+/// [`claimed_with`], the review's jobs (the claim's judgment first) run
+/// by `scripts` in order, the last one repeated.
+fn claimed_judged(
+    dependent: bool,
+    before: impl FnOnce(&Path),
+    scripts: &[String],
+) -> (Fixture, PathBuf, PathBuf, TestWorkspace, TestReviewer) {
     let (fixture, repo, db) = fixture();
     before(&repo);
     // A ready task's verification is not editable through the CLI.
@@ -89,7 +100,7 @@ fn claimed_with(
     }
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.script_for(1, SATISFIED_AGENT);
-    let reviewer = TestReviewer::new(&[verdict("pass", &[], "fine")]);
+    let reviewer = TestReviewer::new(scripts);
     supervise_reviewed(&db, &repo, &backend, &reviewer, 2);
     (fixture, repo, db, backend, reviewer)
 }
@@ -286,6 +297,8 @@ fn after_a_restart_a_close_verifies_main_again_and_a_failure_does_not_close() {
         "{}",
         failed.question
     );
+    // Only the first verification, which passed, was judged by the review.
+    assert_eq!(payloads(&detail, "run_satisfied_review_started").len(), 1);
     assert!(queue.show(TaskId::new(2)).unwrap().runs.is_empty());
 
     queue.answer(failed.id, "retry").unwrap();
@@ -302,6 +315,14 @@ fn after_a_restart_a_close_verifies_main_again_and_a_failure_does_not_close() {
     let again = close_ask(&mut queue);
     assert_eq!(again.options, ["retry", "cancel"]);
     assert_ne!(again.run_id.as_ref(), Some(run.id()));
+    // A claim whose first verification failed is not judged.
+    let judged: Vec<_> = detail
+        .events
+        .iter()
+        .filter(|e| e.kind == "run_satisfied_review_started")
+        .map(|e| e.run_id.clone())
+        .collect();
+    assert_eq!(judged, [Some(run.id().clone())]);
 
     queue.answer(again.id, "cancel").unwrap();
     supervise_reviewed(&db, &repo, &backend, &reviewer, 2);
@@ -798,4 +819,289 @@ fn a_claim_waiting_for_its_close_answer_is_parked_and_the_answer_does_not_close_
         .unwrap_err()
         .to_string();
     assert!(refused.contains("being replanned"), "{refused}");
+}
+
+/// The actor's `requested_by` of every event of `kind` of `run`.
+fn requested_by(detail: &dagq::domain::TaskDetail, run: &RunId, kind: &str) -> Vec<Option<String>> {
+    detail
+        .events
+        .iter()
+        .filter(|e| e.kind == kind && e.run_id.as_ref() == Some(run))
+        .map(|e| e.actor.as_ref().and_then(|a| a.requested_by.clone()))
+        .collect()
+}
+
+/// A script of the claim's judgment: what `printed`, after it wrote the
+/// head and the directory it runs in to `seen`.
+fn judging(seen: &Path, printed: &Value) -> String {
+    format!(
+        "{{ git rev-parse HEAD; pwd -P; }} > {}; printf '%s\\n' '{printed}'",
+        shell_path(seen)
+    )
+}
+
+/// Acceptance (ADR-t1818-1 decision 4): once the claim's verification
+/// passed on main's head, one review job judges it in a checkout of that
+/// head of the queue's `satisfied/` (not the run's worktree or directory),
+/// its prompt carrying the task's acceptance and verification, the
+/// receipt's grounds and the head with what passed there; no review
+/// subagent and no review program run. Even a `high` pass goes to the
+/// person: the `approve_close` ask names the head and the review's
+/// verdict, confidence, recommendation and reasons, and the judgment's
+/// event and the ask's are recorded at the job's request; the tree goes.
+#[test]
+fn a_passed_claim_is_judged_on_its_head_and_asks_the_person_with_the_judgment() {
+    let seen_dir = tempfile::tempdir().unwrap();
+    let seen = seen_dir.path().join("seen");
+    let printed = json!({"verdict": "pass", "reasons": ["seed.txt is there"],
+        "summary": "main meets it", "confidence": "high", "recommendation": "close"});
+    let (_fixture, repo, db, _backend, reviewer) =
+        claimed_judged(false, |_| {}, &[judging(&seen, &printed)]);
+    let head = main_head(&repo);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let run = detail.runs[0].clone();
+    assert_eq!(run.status(), RunStatus::Validating);
+    assert_eq!(detail.task.status(), TaskStatus::InProgress);
+    assert!(queue.run_lease(run.id()).unwrap().is_none());
+
+    // The judgment ran on the snapshot's head, in the queue's scratch.
+    let seen = fs::read_to_string(&seen).unwrap();
+    let mut seen = seen.lines();
+    assert_eq!(seen.next(), Some(head.as_str()));
+    let tree = PathBuf::from(seen.next().unwrap());
+    let scratch = satisfied_scratch(&db, run.id());
+    let scratch = fs::canonicalize(scratch.parent().unwrap())
+        .unwrap()
+        .join(scratch.file_name().unwrap());
+    assert_eq!(tree, scratch);
+    assert!(!tree.starts_with(fs::canonicalize(run.run_dir().unwrap()).unwrap()));
+    let prompts = reviewer.prompts();
+    assert_eq!(prompts.len(), 1, "{prompts:?}");
+    let task = &detail.task;
+    for said in [
+        &format!("main at {head} (the snapshot)"),
+        &format!(
+            "{} is a checkout of main at {head}",
+            satisfied_scratch(&db, run.id()).display()
+        ),
+        task.acceptance(),
+        "test ! -f broken.txt",
+        "the base meets it",
+        "- test -f seed.txt: passed",
+        "2 verification commands",
+    ] {
+        assert!(prompts[0].contains(said), "{said}: {}", prompts[0]);
+    }
+    // No subagent and no program: there is no diff for them.
+    assert!(reviewer.launches().is_empty());
+    let kinds = event_kinds(&detail);
+    for none in [
+        "review_started",
+        "review_job_started",
+        "review_program_finished",
+    ] {
+        assert!(!kinds.contains(&none), "{none}: {kinds:?}");
+    }
+    assert_eq!(
+        payloads(&detail, "run_satisfied_review_started")[0]["head"],
+        json!(head)
+    );
+    let finished = payloads(&detail, "run_satisfied_review_job_finished");
+    assert_eq!(finished.len(), 1);
+    assert_eq!(finished[0]["outcome"], "answered");
+    let judged = payloads(&detail, "run_satisfied_judged");
+    assert_eq!(
+        (
+            &judged[0]["verdict"],
+            &judged[0]["confidence"],
+            &judged[0]["head"]
+        ),
+        (&json!("pass"), &json!("high"), &json!(head))
+    );
+
+    let ask = close_ask(&mut queue);
+    assert_eq!(ask.options, ["close", "retry", "cancel"]);
+    assert_eq!(ask.reason_category, dagq::domain::AskReason::Scope);
+    assert_eq!(ask.recommendation.as_deref(), Some("close"));
+    assert_eq!(ask.confidence, Some(dagq::domain::AskConfidence::High));
+    for said in [
+        head.as_str(),
+        "pass with high confidence, recommending close",
+        "main meets it",
+        "1. seed.txt is there",
+    ] {
+        assert!(ask.question.contains(said), "{said}: {}", ask.question);
+    }
+    // At the judgment job's request: its verdict and the ask it opened,
+    // and nothing before it or after the ask.
+    let job = Some(format!("review-job:{}:satisfied-1", run.id()));
+    assert_eq!(
+        requested_by(&detail, run.id(), "run_satisfied_judged"),
+        std::slice::from_ref(&job)
+    );
+    let opened: Vec<_> = detail
+        .events
+        .iter()
+        .filter(|e| e.kind == "ask_opened" && e.payload["kind"] == "approve_close")
+        .map(|e| e.actor.as_ref().and_then(|a| a.requested_by.clone()))
+        .collect();
+    assert_eq!(opened, [job]);
+    for kind in [
+        "run_satisfied_review_started",
+        "run_satisfied_review_job_finished",
+        "lease_released",
+    ] {
+        assert!(
+            requested_by(&detail, run.id(), kind)
+                .iter()
+                .all(Option::is_none),
+            "{kind}"
+        );
+    }
+    assert_eq!(satisfied_worktrees(&repo, &db), Vec::<String>::new());
+}
+
+/// A judgment the job does not print in the claim's form runs once more,
+/// as a run review's job does; a second one that gives none fails the job
+/// to the person: the `approve_close` ask (still offering close, the
+/// verification passed) says no judgment came, as a failed job's
+/// (`recovery_failed`), recorded at nobody's request.
+#[test]
+fn an_unreadable_judgment_runs_once_more_and_then_asks_as_a_failed_job() {
+    let (_fixture, repo, db, _backend, reviewer) = claimed_judged(
+        false,
+        |_| {},
+        &[
+            "printf 'no judgment here'".to_owned(),
+            verdict("maybe", &[], "still none"),
+        ],
+    );
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let run = detail.runs[0].clone();
+    assert_eq!(reviewer.prompts().len(), 2);
+    let finished: Vec<_> = payloads(&detail, "run_satisfied_review_job_finished")
+        .into_iter()
+        .map(|p| {
+            (
+                p["outcome"].clone(),
+                p["again"].clone(),
+                p["runs_again"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        finished,
+        [
+            (json!("unreadable"), json!(false), json!(true)),
+            (json!("unreadable"), json!(true), json!(false)),
+        ]
+    );
+    let judged = payloads(&detail, "run_satisfied_judged");
+    assert_eq!(judged.len(), 1);
+    assert!(
+        judged[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("satisfied-review-1-again.out"),
+        "{}",
+        judged[0]
+    );
+    let ask = close_ask(&mut queue);
+    assert_eq!(ask.reason_category, dagq::domain::AskReason::RecoveryFailed);
+    assert_eq!(ask.options, ["close", "retry", "cancel"]);
+    assert!(
+        ask.question.contains("gave no judgment"),
+        "{}",
+        ask.question
+    );
+    assert_eq!(
+        requested_by(&detail, run.id(), "run_satisfied_judged"),
+        [None]
+    );
+    assert!(
+        detail
+            .events
+            .iter()
+            .filter(|e| e.kind == "ask_opened")
+            .all(|e| e.actor.as_ref().is_none_or(|a| a.requested_by.is_none()))
+    );
+    assert!(queue.run_lease(run.id()).unwrap().is_none());
+    assert_eq!(satisfied_worktrees(&repo, &db), Vec::<String>::new());
+}
+
+/// Acceptance (ADR-t1521-2, the park): an operation opened while the
+/// claim's judgment job runs lets the job end (it is not abandoned), but
+/// what it judged opens no `approve_close` ask (`replan_result_withheld`):
+/// the run is parked out of its slot, and its task stays in progress.
+#[test]
+fn a_claim_whose_judgment_runs_at_the_fence_is_parked_without_its_ask() {
+    let (fixture, repo, db) = fixture();
+    let gate = fixture.path().join("judgment-gate");
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET verification_commands=?1 WHERE id=1",
+            [VERIFY],
+        )
+        .unwrap();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    add_ready_task(&mut queue, "after it", &[TaskId::new(1)]);
+    let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+    backend.script_for(1, SATISFIED_AGENT);
+    let printed = json!({"verdict": "pass", "reasons": [], "summary": "met", "confidence": "high"});
+    let reviewer = Arc::new(TestReviewer::new(&[format!(
+        "{}; printf '%s\\n' '{printed}'",
+        common::await_path(&gate)
+    )]));
+    // The service the supervisor starts takes the test as its owner.
+    let dagq = common::service::owned_executable(db.parent().unwrap());
+    let supervisor = {
+        let (db, repo, reviewer) = (db.clone(), repo.clone(), reviewer.clone());
+        let backend = backend.clone();
+        thread::spawn(move || {
+            runtime::supervise_with_reviewer(
+                &db,
+                &repo,
+                &*backend,
+                &claude_stub(&db),
+                &*reviewer,
+                &dagq,
+                &supervise_options(2, true),
+            )
+        })
+    };
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        !payloads(
+            &queue.show(TaskId::new(1)).unwrap(),
+            "run_satisfied_review_job_started",
+        )
+        .is_empty()
+    });
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let op = pause_replan(&db, run.id());
+    fs::write(&gate, "").unwrap();
+    finished(&db, &backend, supervisor);
+    assert_parked_unclosed(&db, &op);
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    // The job ended and was reaped, not stopped.
+    let ended = payloads(&detail, "run_satisfied_review_job_finished");
+    assert_eq!(ended.len(), 1, "{:?}", event_kinds(&detail));
+    assert_eq!(ended[0]["outcome"], "answered");
+    assert!(payloads(&detail, "headless_job_stopped").is_empty());
+    let withheld = payloads(&detail, "replan_result_withheld");
+    assert_eq!(withheld.len(), 1, "{withheld:?}");
+    assert_eq!(withheld[0]["what"], "satisfied_judgment");
+    assert_eq!(withheld[0]["operation_id"], json!(op.id));
+    assert_eq!(withheld[0]["result"]["verdict"], "pass");
+    assert!(payloads(&detail, "run_satisfied_judged").is_empty());
+    assert!(
+        queue
+            .asks(Default::default())
+            .unwrap()
+            .iter()
+            .all(|ask| ask.kind != dagq::domain::AskKind::ApproveClose)
+    );
+    assert_eq!(satisfied_worktrees(&repo, &db), Vec::<String>::new());
 }

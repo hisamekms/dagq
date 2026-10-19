@@ -140,16 +140,29 @@ pub fn latest_verified(events: &[RunEvent]) -> Option<Verified> {
 
 /// Whether `event` is a step of a claim's course and, if so, whether the
 /// claim [`rests`] after it: its acceptance (`validation_finished` with
-/// `already_satisfied`) and a verification's end start a rest, and the
-/// snapshot a verification starts on ends it. The KPI's slot occupancy
-/// leaves the rests out by these steps, as the supervisor's count does.
+/// `already_satisfied`), a verification's end and the end of the review's
+/// judgment start a rest, and the snapshot a verification starts on and
+/// the start of a judgment end it. The KPI's slot occupancy leaves the
+/// rests out by these steps, as the supervisor's count does.
 pub fn rests_after(event: &RunEvent) -> Option<bool> {
     match event.kind.as_str() {
-        event_kind::RUN_SATISFIED_VERIFIED => Some(true),
-        event_kind::RUN_SATISFIED_SNAPSHOT => Some(false),
+        event_kind::RUN_SATISFIED_VERIFIED | event_kind::RUN_SATISFIED_JUDGED => Some(true),
+        event_kind::RUN_SATISFIED_SNAPSHOT | event_kind::RUN_SATISFIED_REVIEW_STARTED => {
+            Some(false)
+        }
         event_kind::VALIDATION_FINISHED if event.payload["already_satisfied"] == true => Some(true),
         _ => None,
     }
+}
+
+/// How many judgments of the claim the review began among a run's
+/// `events` (`run_satisfied_review_started`): the next one's attempt is one
+/// more.
+pub fn judgments(events: &[RunEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| e.kind == event_kind::RUN_SATISFIED_REVIEW_STARTED)
+        .count()
 }
 
 /// The latest step of a claim's course among a run's `events` ([`rests_after`]).
@@ -160,8 +173,8 @@ fn last_step(events: &[RunEvent]) -> Option<&RunEvent> {
 /// Whether a `validating` run with these `events` rests between the steps
 /// of its claim, no verification running: accepted and waiting for its
 /// verification to start (while the container its verification is set to
-/// cannot be used), or verified and waiting for the answer to its
-/// `approve_close` ask. Nobody leases it and no process of it lives, yet it
+/// cannot be used), or verified (and judged by the review) and waiting for
+/// the answer to its `approve_close` ask. Nobody leases it and no process of it lives, yet it
 /// is no orphan: the supervisor or the answer moves it, so neither the
 /// supervisor's recovery nor a person's `recover` takes it.
 pub fn rests(events: &[RunEvent]) -> bool {
@@ -525,6 +538,42 @@ mod tests {
             ..event(1, event_kind::VALIDATION_FINISHED)
         };
         assert!(blocks_recovery(RunStatus::Validating, false, &[accepted]));
+    }
+
+    /// The review's judgment after a passed verification ends the rest the
+    /// verification began, and its end begins one again; the judgments are
+    /// counted by their starts.
+    #[test]
+    fn a_claim_under_judgment_does_not_rest_and_rests_once_judged() {
+        let event = |id: i64, kind: &str| RunEvent {
+            id: EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.into(),
+            payload: json!({"head": S1, "passed": true, "attempt": 1}),
+            created_at: String::new(),
+            actor: None,
+        };
+        let judging = [
+            event(1, event_kind::RUN_SATISFIED_SNAPSHOT),
+            event(2, event_kind::RUN_SATISFIED_VERIFIED),
+            event(3, event_kind::RUN_SATISFIED_REVIEW_STARTED),
+            event(4, event_kind::RUN_SATISFIED_REVIEW_JOB_STARTED),
+            event(5, event_kind::RUN_SATISFIED_REVIEW_JOB_FINISHED),
+        ];
+        assert!(!rests(&judging));
+        assert!(!blocks_recovery(RunStatus::Validating, false, &judging));
+        assert_eq!(judgments(&judging), 1);
+        let judged = [
+            judging.to_vec(),
+            vec![event(6, event_kind::RUN_SATISFIED_JUDGED)],
+        ]
+        .concat();
+        assert!(rests(&judged));
+        assert!(blocks_recovery(RunStatus::Validating, false, &judged));
+        assert_eq!(judgments(&judged), 1);
+        assert_eq!(judgments(&judging[..2]), 0);
     }
 
     #[test]

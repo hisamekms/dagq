@@ -233,6 +233,7 @@ workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2
 | goal review | `read_files_and_queue_cli` | `goal_review_prompt` | `GOAL_REVIEW_*` |
 | スループットの見直し | `queue_cli` | `src/application/throughput_review.rs`（[スループットの見直し](throughput-review.md)） | そのmoduleの`PROMPT_*` |
 | runの全体のreview | `read_files` | `prompt::run_review`の`review_prompt` | `RUN_REVIEW_*` |
+| `already_satisfied`の主張の判定（[Review](review.md#already_satisfiedの主張の判定)） | `read_files` | `claim_review_prompt` | `CLAIM_REVIEW_*` |
 | agentのjob（[下](#agentのjobの上限)） | `read_files`を定義の道具に狭める | `agent_job::build` | `AGENT_JOB_*` |
 | 復旧job | `read_files` | `recovery_prompt` | `RECOVERY_*` |
 | runtimeのplanner | plannerのrole | `src/application/prompt/planners.rs` | そのmoduleの定数 |

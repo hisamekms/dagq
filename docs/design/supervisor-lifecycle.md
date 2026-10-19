@@ -62,8 +62,9 @@ ready task (dependencies completed)
   → completion receipt, session idle │ (the session stays open)
   → validate receipt, commit, clean state (own thread)
       already_satisfied (no commit) → stays validating, no landing: the task's
-        verification on a snapshot of main → approve_close ask → close (verified
-        again if main moved) → task completed without a commit; retry / cancel
+        verification on a snapshot of main → passed: one review job judges the
+        claim on that head (no subagent, no program) → approve_close ask → close
+        (verified again if main moved) → task completed without a commit; retry / cancel
   → awaiting_integration: program reviews, the binary's built-ins then the
     landing branch's [review.programs], one at a time
       first non-zero exit → revise (no agent starts); start failure / timeout → review failed

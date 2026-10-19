@@ -6,11 +6,20 @@
 //! or ask a person.
 
 use serde::Deserialize;
+use serde_json::{Value, json};
 
 use super::{
     AskConfidence, CommitSha, ReviewDecision, concern, parse_json_object, review_reason,
-    satisfied::SatisfiedAnswer,
+    satisfied::{self, SatisfiedAnswer, SnapshotVerification},
 };
+
+/// How many reasons of a judgment its `approve_close` ask names, the first
+/// ones, each within [`ASK_REASON_BYTES`], and its summary within
+/// [`ASK_SUMMARY_BYTES`]: the ask is read whole by a person, so a job that
+/// printed much is cut, and its `run_satisfied_judged` keeps it all.
+pub const ASK_REASONS: usize = 10;
+pub const ASK_REASON_BYTES: usize = 600;
+pub const ASK_SUMMARY_BYTES: usize = 1_000;
 
 /// How many times one run's judgment is made again on a newer head after
 /// a `high` pass found main moved past its snapshot (ADR-t1818-1 decision
@@ -135,6 +144,102 @@ pub fn decide(
     }
 }
 
+/// The payload of `run_satisfied_judged` for the judgment `attempt` on the
+/// snapshot `head`: what the job printed, or why it gave none (`error`).
+pub fn judged_payload(
+    attempt: usize,
+    head: &CommitSha,
+    judged: Result<&ClaimJudgment, &str>,
+) -> Value {
+    match judged {
+        Ok(judgment) => json!({
+            "attempt": attempt,
+            "head": head,
+            "verdict": judgment.verdict.as_str(),
+            "confidence": judgment.confidence.map(|c| c.as_str().to_owned()),
+            "recommendation": judgment.recommendation.map(SatisfiedAnswer::as_str),
+            "reasons": judgment.reasons,
+            "summary": judgment.summary,
+        }),
+        Err(error) => json!({"attempt": attempt, "head": head, "error": error}),
+    }
+}
+
+/// The question of the `approve_close` ask a judgment opens: the claim and
+/// its verification as [`satisfied::question`] gives them, then what the
+/// review judged on the same head, its verdict, confidence, recommendation,
+/// summary and reasons (cut to [`ASK_REASONS`], [`ASK_REASON_BYTES`] and
+/// [`ASK_SUMMARY_BYTES`]). Whatever it judged, the person decides: the
+/// runtime closes nothing on the review.
+pub fn judged_question(
+    task: &str,
+    summary: &str,
+    verification: &SnapshotVerification,
+    judgment: &ClaimJudgment,
+) -> String {
+    let mut reasons = String::new();
+    for (index, reason) in judgment.reasons.iter().take(ASK_REASONS).enumerate() {
+        reasons.push_str(&format!(
+            "\n{}. {}",
+            index + 1,
+            clip(reason, ASK_REASON_BYTES)
+        ));
+    }
+    if judgment.reasons.len() > ASK_REASONS {
+        reasons.push_str(&format!(
+            "\n({} more reasons are in the run's run_satisfied_judged event.)",
+            judgment.reasons.len() - ASK_REASONS
+        ));
+    }
+    format!(
+        "{}\nThe review judged the claim on the same head {}: {} with {} confidence, recommending {}. Its summary: {}{}{}\nThe runtime does not close the task on the review: you decide.",
+        satisfied::question(task, summary, verification, None),
+        verification.head,
+        judgment.verdict.as_str(),
+        judgment.confidence.map_or("no known", |c| c.as_str()),
+        judgment
+            .recommendation
+            .map_or("nothing", SatisfiedAnswer::as_str),
+        clip(judgment.summary.trim(), ASK_SUMMARY_BYTES),
+        if reasons.is_empty() {
+            ""
+        } else {
+            "\nIts reasons:"
+        },
+        reasons,
+    )
+}
+
+/// The question of the `approve_close` ask of a claim whose judgment's
+/// job gave no judgment (`error`, cut to [`ASK_SUMMARY_BYTES`]), its one
+/// run once more included: the verification passed, so `close` is still
+/// offered.
+pub fn unjudged_question(
+    task: &str,
+    summary: &str,
+    verification: &SnapshotVerification,
+    error: &str,
+) -> String {
+    format!(
+        "{}\nThe review of the claim on the same head {} gave no judgment, its one run once more included: {}",
+        satisfied::question(task, summary, verification, None),
+        verification.head,
+        clip(error.trim(), ASK_SUMMARY_BYTES),
+    )
+}
+
+/// `text` within `max` bytes, cut at a character's boundary with `…`.
+fn clip(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_owned();
+    }
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
+
 fn ask(judgment: &ClaimJudgment, because: AskBecause) -> JudgmentAsk {
     JudgmentAsk {
         because,
@@ -216,6 +321,78 @@ mod tests {
         .unwrap();
         assert_eq!(read.reasons, ["t"]);
         assert_eq!(read.recommendation, None);
+    }
+
+    fn verification() -> SnapshotVerification {
+        SnapshotVerification {
+            head: sha('a'),
+            commands: 2,
+            failure: None,
+        }
+    }
+
+    /// The ask of a judgment names the head, the verdict, the confidence,
+    /// the recommendation, the summary and the reasons, cut to their
+    /// limits, and says the person decides; the payload keeps them whole.
+    #[test]
+    fn a_judged_ask_says_what_the_review_found_on_the_head_and_its_event_keeps_it_all() {
+        let mut read = judgment("pass", Some("high"));
+        read.reasons = (0..=ASK_REASONS).map(|i| format!("reason {i}")).collect();
+        read.reasons[0] = "é".repeat(ASK_REASON_BYTES);
+        let question = judged_question("7", "the base meets it", &verification(), &read);
+        for said in [
+            sha('a').as_str(),
+            "pass with high confidence, recommending retry",
+            "Its summary: s",
+            "\n2. reason 1",
+            "(1 more reasons",
+            "you decide",
+            "the base meets it",
+        ] {
+            assert!(question.contains(said), "{said}: {question}");
+        }
+        assert!(
+            !question.contains(&format!("reason {ASK_REASONS}")),
+            "{question}"
+        );
+        let first = question
+            .split("\n1. ")
+            .nth(1)
+            .unwrap()
+            .split('\n')
+            .next()
+            .unwrap();
+        assert!(
+            first.len() <= ASK_REASON_BYTES + '…'.len_utf8(),
+            "{}",
+            first.len()
+        );
+        let none = judgment("revise", None);
+        let question = judged_question("7", "", &verification(), &none);
+        assert!(
+            question.contains("revise with no known confidence"),
+            "{question}"
+        );
+        let payload = judged_payload(2, &sha('a'), Ok(&read));
+        assert_eq!(payload["attempt"], 2);
+        assert_eq!(payload["head"], json!(sha('a')));
+        assert_eq!(payload["verdict"], "pass");
+        assert_eq!(payload["confidence"], "high");
+        assert_eq!(payload["recommendation"], "retry");
+        assert_eq!(
+            payload["reasons"].as_array().unwrap().len(),
+            ASK_REASONS + 1
+        );
+        assert_eq!(payload["summary"], "s");
+        assert_eq!(
+            judged_payload(1, &sha('a'), Err("no JSON")),
+            json!({"attempt": 1, "head": sha('a'), "error": "no JSON"})
+        );
+        let question = unjudged_question("7", "", &verification(), "no JSON");
+        assert!(
+            question.contains("gave no judgment") && question.contains("no JSON"),
+            "{question}"
+        );
     }
 
     #[test]

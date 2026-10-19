@@ -43,6 +43,7 @@ mod plan_review;
 mod planners;
 mod requests;
 mod run_review;
+mod satisfied_review;
 mod setup_review;
 mod worker;
 
@@ -51,6 +52,7 @@ pub use plan_review::*;
 pub use planners::*;
 pub use requests::*;
 pub use run_review::*;
+pub use satisfied_review::*;
 pub use setup_review::*;
 pub use worker::*;
 

@@ -106,7 +106,7 @@ When the person asks which goals go first, what moves now or what a theme holds,
 ## Run states
 
 - `claimed` / `starting` / `running`: in progress; read the session with `run log`.
-- `validating`: the supervisor checks the receipt. A run whose base already met the acceptance waits here for its `approve_close` ask.
+- `validating`: the supervisor checks the receipt. A run whose base already met the acceptance stays here while the runtime verifies it on main and a review judges it, then waits for its `approve_close` ask.
 - `awaiting_integration`: accepted; under review or waiting to land. It needs you only through an ask or an attention.
 - `integrating`: landing. A stale lease (`doctor`) is the `dagq-recover` skill's.
 - `needs_session`: the landing failed (a conflict or a verification) or a review was sent back; the supervisor resumes its session.

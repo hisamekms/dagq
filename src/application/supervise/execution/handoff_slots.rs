@@ -137,6 +137,13 @@ impl Supervisor<'_> {
                     info!(run_id = %run.id(), "run {}: review {} stopped for the handoff; it is reviewed again", run.id(), watch.attempt);
                     None
                 }
+                // A validating run is validated again by the next process,
+                // which verifies and judges its claim again.
+                Phase::SatisfiedReview(watch) => {
+                    watch.abandon();
+                    info!(run_id = %run.id(), "run {}: the judgment {} of its already_satisfied claim stopped for the handoff; it is verified and judged again", run.id(), watch.attempt);
+                    None
+                }
                 Phase::ReviewPrograms(watch) => {
                     watch.job.abandon();
                     info!(run_id = %run.id(), "run {}: the program reviews before review {} stopped for the handoff; it is reviewed again", run.id(), watch.programs.attempt);

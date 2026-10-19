@@ -166,6 +166,7 @@ review・recovery・plan review・goal reviewのjobは、jobごとに別のrole�
 | --- | --- | --- |
 | review-job | `pass` | 衝突の事前検査のあと、sessionの終了を待って着地の段（`AfterExit::Land`）へ進めるだけ。着地の関数は呼ばない。着地は別のthreadの`land_integrating`が、rebase後の検証コマンドを含む自分の検査を通したときだけ行い、落ちればrunは`needs_session`になる |
 | review-job | `revise` / `concern` | 生きているsessionへの差し戻し（sessionが終わっていれば`approve_landing`のask） / `approve_landing`のask。runを通した`revise`の上限の後の差し戻しは収束の判定（`revise_limit_judged`）に通し、コードの指摘が無ければaskを開かずにpassの道で着地して理由をfollow_upのdraftにし、あれば`approve_landing`のask（[Review](review.md)の4a） |
+| review-job（`already_satisfied`の主張の判定） | `pass` / `revise` / `concern` | どれも`approve_close`のaskにverdict・確信度・推奨・理由を載せて人に上げるだけで、taskを閉じない（[Review](review.md#already_satisfiedの主張の判定)） |
 | recovery-job | `repair`（`confidence: high`） | `RecoveryVerdict::applies()`を通り、さらにalertごとの前提（終わったrunは`plan_ended`、生きているrunは`check_live`）を今も満たすactionだけを適用する。満たさなければaskにする |
 | recovery-job | `repair`（`low`）/ `escalate` | 適用せず、actionを推奨として`decide`などのaskにする |
 | plan-review-job | `pass` / `revise` / `concern` | 1つのtransactionで`ready`・plannerへの差し戻し・`approve_plan`のask。`concern`の`high`で`reason_category`が`null`の`ready` / `send_back`はpass / reviseとして適用する（[Plan review](plan-review.md#aiが決めるconcern未実装)、ADR-t451-1決定4）。`actions`は`pass`（と適用した`ready`）のときだけ許された3種を適用し、`reopen`はverdictに関わらず検査して適用し、上限を超えれば1件も適用せず、最終の判定でproposalを差し戻すかconcernのaskにする（passはrevise、reviseの上限を過ぎていればconcern）。`pass`での優先度の扱いは各taskの記録の由来と優先度の出どころで分かれる（[Plan review](plan-review.md#verdictと適用)） |
@@ -175,6 +176,7 @@ review・recovery・plan review・goal reviewのjobは、jobごとに別のrole�
 - 例外は`PlanReviewVerdict`の`predictions`で、`serde_json::Value`のまま持つ。型にするとtaskの重さの見積もりの形が崩れただけでverdict全体が読めず、plan reviewが失敗するが、見積もりは記録するだけで遷移を変えない（ADR-0079決定2）ため。supervisorは`parse_predictions`で型付きの`TaskWeightPrediction`にしてから記録し、読めなければ記録しないだけで、生の値から遷移を決めない。
 - 壊れた出力はfail closed: 読めないverdictで何かが着地・retry・`ready`・goalのcloseになることはない。
   reviewは答えの無いjobをそのjobだけ1回同じ入力でやり直し（`review_job_finished`）、それも答えが無ければ`review_failed`と`approve_landing`のask。
+  `already_satisfied`の主張の判定も1回だけやり直し、それも答えが無ければ`recovery_failed`の`approve_close`のask。
   recoveryは`triage_failed`（`triage by hand`）。
   生きているrunのjobの失敗はそのalertのask（`reason_category: recovery_failed`。ADR-t609-1）。
   plan reviewは`plan_review_failed`（`plan review by hand`）でproposalは`submitted`のまま。

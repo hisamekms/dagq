@@ -71,7 +71,7 @@ fn mid_resume(events: &[RunEvent]) -> bool {
 /// fence, which also saves the run's work, or its task's hold while it
 /// settles, which leaves the work in place.
 #[derive(Debug, Clone)]
-enum ParkFor {
+pub(super) enum ParkFor {
     Replan(Box<ReplanOperation>),
     Hold(TaskHold),
 }
@@ -115,7 +115,7 @@ impl ParkFor {
 
     /// The event a result the park joins and does not act on is recorded
     /// as, with the park's own part of its payload.
-    fn withheld(&self) -> (EventKind, Value) {
+    pub(super) fn withheld(&self) -> (EventKind, Value) {
         match self {
             Self::Replan(op) => (
                 EventKind::ReplanResultWithheld,
@@ -157,7 +157,7 @@ impl AtEnd {
 }
 
 /// `payload` with the park's own part (`base`) in front.
-fn withheld_payload(base: &Value, payload: Value) -> Value {
+pub(super) fn withheld_payload(base: &Value, payload: Value) -> Value {
     let mut merged = base.clone();
     if let (Some(merged), Value::Object(payload)) = (merged.as_object_mut(), payload) {
         merged.extend(payload);
@@ -543,6 +543,22 @@ impl Supervisor<'_> {
                                    "result": checked}),
                         ),
                     )?;
+                }
+            }
+            // The claim's judgment job that runs ends first and is reaped;
+            // what it found (a judgment, or none) opens no ask and runs it
+            // not once more: it is withheld once, and its tree goes. Were
+            // the park not to happen after all, the judgment is made again.
+            Phase::SatisfiedReview(watch) if watch.withheld => {}
+            Phase::SatisfiedReview(watch) => {
+                let run = slot.run.clone();
+                match self.park_review_jobs(&run, watch, (withheld_kind, &withheld_base))? {
+                    JobsPark::Wait => return Ok(Some(Step::Continue)),
+                    JobsPark::Judge => return Ok(None),
+                    JobsPark::Withheld(_) => {
+                        watch.set_aside();
+                        self.remove_claim_tree(&run);
+                    }
                 }
             }
             Phase::Validating(handle, _) => {

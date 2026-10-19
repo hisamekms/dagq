@@ -12,6 +12,11 @@ use super::{
 
 /// `headless_jobs.kind` of a headless review of a run (ADR-0027).
 pub const REVIEW: &str = "review";
+/// `headless_jobs.label` of the job of the review's judgment of an
+/// `already_satisfied` claim (ADR-t1818-1 decision 4), a [`REVIEW`] row:
+/// what tells it from the run review's jobs of the same run, its
+/// `attempt` the claim's judgment.
+pub const SATISFIED_REVIEW_LABEL: &str = "already_satisfied";
 /// `headless_jobs.kind` of a recovery job, of a run that ended (the
 /// triage) or of a live session (ADR-0047 decisions 39 and 40).
 pub const RECOVERY: &str = "recovery";
@@ -373,6 +378,7 @@ impl JobOn<'_> {
                 k::REVIEW_FINISHED,
                 k::REVIEW_FAILED,
                 k::REVIEW_RETRIED,
+                k::RUN_SATISFIED_REVIEW_JOB_FINISHED,
             ],
             RECOVERY => &[k::RECOVERY_FINISHED],
             PLAN_REVIEW => &[
@@ -401,16 +407,20 @@ impl JobOn<'_> {
     pub fn execution_recorded(&self, events: &[super::RunEvent]) -> bool {
         events.iter().any(|event| {
             let end: super::run::JobEnd<'_> = super::run::restore_payload(&event.payload);
+            // An end after which the job starts again (once more, or after
+            // a provider it could not use) is an earlier run's, whose row is
+            // another: it is not this row's end, though written in the
+            // second this one started.
+            let restarted = end.runs_again == Some(true) || end.outcome == Some("held");
             let ends = if event.kind == super::event_kind::HEADLESS_JOB_STOPPED {
                 end.kind == Some(self.kind) && end.label == self.label
             } else if event.kind == super::event_kind::REVIEW_JOB_FINISHED {
-                // One job of a review among its others of the attempt. An
-                // end after which the job starts again (once more, or
-                // after a provider it could not use) is an earlier run's,
-                // whose row is another: it is not this row's end, though
-                // written in the second this one started.
-                let restarted = end.runs_again == Some(true) || end.outcome == Some("held");
+                // One job of a review among its others of the attempt.
                 self.kind == REVIEW && end.agent == self.label && !restarted
+            } else if event.kind == super::event_kind::RUN_SATISFIED_REVIEW_JOB_FINISHED {
+                // The one job of a claim's judgment, which no other end of
+                // a review names.
+                self.kind == REVIEW && self.label == Some(SATISFIED_REVIEW_LABEL) && !restarted
             } else {
                 // An attempt's end names no job of its: the whole review's,
                 // the one job a review ran before its agents ran as jobs.
@@ -860,6 +870,59 @@ mod tests {
         assert!(design.execution_recorded(&[stopped(Some("design"))]));
         assert!(!design.execution_recorded(&[stopped(None)]));
         assert!(!review.execution_recorded(&[stopped(Some("design"))]));
+        // The job of a claim's judgment is a review row labelled apart: its
+        // own end of its attempt counts, not an end of its run once more or
+        // of a wait for its provider, and no end of the run's review (nor
+        // its end for the review's whole job) stands for another's.
+        let claim = JobOn {
+            label: Some(SATISFIED_REVIEW_LABEL),
+            ..review
+        };
+        let judged = |payload: serde_json::Value| {
+            ending(
+                1,
+                Some("r1"),
+                "run_satisfied_review_job_finished",
+                payload,
+                after,
+            )
+        };
+        for counted in [
+            json!({"attempt": 2, "outcome": "answered", "tokens_source": null}),
+            json!({"attempt": 2, "outcome": "unreadable", "runs_again": false, "tokens_source": null}),
+        ] {
+            assert!(
+                claim.execution_recorded(&[judged(counted.clone())]),
+                "{counted}"
+            );
+            assert!(
+                !review.execution_recorded(&[judged(counted.clone())]),
+                "{counted}"
+            );
+            assert!(!design.execution_recorded(&[judged(counted)]));
+        }
+        for left in [
+            json!({"attempt": 2, "outcome": "unreadable", "runs_again": true, "tokens_source": null}),
+            json!({"attempt": 2, "outcome": "held", "tokens_source": null}),
+            json!({"attempt": 1, "outcome": "answered", "tokens_source": null}),
+            json!({"attempt": 2, "outcome": "start_failed", "runs_again": false}),
+        ] {
+            assert!(!claim.execution_recorded(&[judged(left.clone())]), "{left}");
+        }
+        assert!(!claim.execution_recorded(&[job_end(None)]));
+        assert!(!claim.execution_recorded(&[ending(
+            1,
+            Some("r1"),
+            "review_failed",
+            counted.clone(),
+            after
+        )]));
+        assert!(claim.execution_recorded(&[stopped(Some(SATISFIED_REVIEW_LABEL))]));
+        assert!(
+            claim
+                .ending_kinds()
+                .contains(&"run_satisfied_review_job_finished")
+        );
         let plan_review = JobOn {
             kind: PLAN_REVIEW,
             label: None,

@@ -80,7 +80,7 @@ reviewの段の順は、先頭の[プログラムのreview](review-programs.md)�
 ## already_satisfiedの検証
 
 [ADR-t1818-1](../../adr/2026-10-05-t1818-1-worker-claims-already-satisfied-and-runtime-closes-on-a-verified-snapshot.md)の、workerが「baseがすでに受け入れ条件を満たす」と書いたrunの経路。
-verifyが通れば人のaskに上げ、人の答えで閉じる。
+verifyが通ればreview jobが同じheadで主張を判定し、その後に人のaskに上げ、人の答えで閉じる。
 
 - **validating**: 受理してもrunは`awaiting_integration`にせず`validating`のまま残し、`result_commit`を持たない（`AfterValidation::Satisfied`）。
   sessionに終了を依頼してworkspaceを閉じる。
@@ -93,7 +93,9 @@ verifyが通れば人のaskに上げ、人の答えで閉じる。
   結果は同じheadとともに`run_satisfied_verified`に残す（欄の意味は`event_kind`のdoc comment）。
   流す間はslotとleaseを持ち、handoffはこれを待つ。
   verificationのruntimeがcontainerで使えない間は、hostで流さずに検証を始めず、runは受理のまま休み、使えるようになった後のpassが始める（[container runtime](../container-runtime.md#fail-closedの境界)、`satisfied::awaits_verification`）。
-- **ask**: verifyの後に`approve_close`のask（理由は`scope`）を開き、questionにsnapshotのheadを載せ、leaseを外してrunを`validating`のまま休ませる。
+- **判定**: 最初のverifyが通ったら、同じslotとleaseのままreview jobがsnapshotのheadの木で主張を判定する（[Review](review.md#already_satisfiedの主張の判定)）。
+  落ちたverifyと、`close`の答えのために流し直したverifyは判定しない。
+- **ask**: 判定の後（verifyが落ちたときはverifyの後）に`approve_close`のask（理由は`scope`、判定のjobが答えなければ`recovery_failed`）を開き、questionにsnapshotのheadと判定を載せ、leaseを外してrunを`validating`のまま休ませる。
   verifyが落ちていればoptionsから`close`を外し、questionに落ちたことを書く。
   休む間は開いたask（検証の前ならcontainerの知らせ）がattentionで、supervisorの死んだrunの回収も、人の`recover`と`doctor`も、このrunを取らない（`satisfied::blocks_recovery`）。
 - **答えの適用**（`apply_satisfied_answers`、passごと）: `retry`はrunを`failed`にしてtaskを`ready`に、`cancel`はrunを`failed`にしてtaskを`canceled`にする。
@@ -101,16 +103,18 @@ verifyが通れば人のaskに上げ、人の答えで閉じる。
   同じheadで通っていれば、runを`succeeded`（commitなし）、taskを`completed`にし、依存するtaskがclaimの候補になる（`run_satisfied_closed`）。
   進んでいれば古い結果では閉じず、空いたslotでrunをleaseし直して新しいheadをsnapshotにverifyを1回流し直す。
   通ればその間にmainがさらに進んでも閉じ、落ちれば閉じずに答えたaskを閉じて、落ちたことを書いたaskを開き直す。
-  人の答えは受け入れ条件の意味の判断なので、通った流し直しの後に聞き直さない。
+  人の答えは受け入れ条件の意味の判断なので、通った流し直しの後に聞き直さず、reviewも判定し直さない。
 - **再起動**: snapshotと結果はeventから読むので、askの後にsupervisorが替わっても、答えの前にmainが進んでも同じ比較になる。
   流し直しの途中で死んだrunは、adopterの再validationが開いたaskを見て休ませ、次のpassの答えの適用がもう一度流し直す。
+  最初の検証か判定の途中で死んだrun（askはまだ無い）は、adopterの再validationからverifyと判定をやり直す。
   検証のコマンドは自分のprocess groupで動き、supervisorが死んでも残りうる。
   そこでscratch worktreeを使い直す前に、そこで動く前の検証のprocessを止め（`auto_repaired`の`satisfied_verification_stopped`）、止まらないか一覧が読めなければ検証せず、askに落ちたことを書く。
   containerで流すときは、verificationのcloneの親のdirに残るそのrunのverificationのcontainer・buildの出力のvolume・dirを先に消し（同じ`auto_repaired`）、消せなければ同じく検証しない。
   検証の途中で死んだsupervisorが残したscratch worktreeは、次の検証の作り直しか、runが終わった後の掃除がGitの登録ごと消す。
-- **再計画**: taskを再計画の操作が保護する間は、検証の結果でaskを開かずtaskも閉じず、答えも適用せず、closeのtransactionも拒む。
+- **再計画**: taskを再計画の操作が保護する間は、検証と判定の結果でaskを開かずtaskも閉じず、答えも適用せず、closeのtransactionも拒む。
+  走っている判定のjobは終わりを待ってから結果を保留する（[Review](review.md#再計画の操作が保護するrun)）。
   休むrunもそのまま保留され、開いた`approve_close`は閉じる（[taskの再計画](../../plans/task-replanning.md#実装の状態)）。
-  holdの開いたtaskも同じく検証の結果でaskを開かずtaskも閉じず、答えは解除まで残し、休むrunはそのまま待つ。
+  holdの開いたtaskも同じく検証と判定の結果でaskを開かずtaskも閉じず、答えは解除まで残し、休むrunはそのまま待つ。
 - **集計**: 閉じたrunは着地（`run_integrated`）に数えず、`stats`の`already_satisfied`で別に数える（[stats](commands.md)）。
 
 ## 着地の検証

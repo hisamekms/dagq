@@ -48,7 +48,7 @@ pub(super) const REVIEW_PROVIDER_DISABLED: &str =
     "provider_disabled: Claude is disabled by --no-claude";
 
 /// A review job that started: its process and its stdout and stderr.
-type StartedReview = (Box<dyn Spawned>, PathBuf, PathBuf);
+pub(super) type StartedReview = (Box<dyn Spawned>, PathBuf, PathBuf);
 
 /// Where the next review of a run goes (ADR-t1063-1 decisions 4 and 5,
 /// ADR-t1207-1).
@@ -816,6 +816,7 @@ impl Supervisor<'_> {
             .iter()
             .map(|slot| match &slot.phase {
                 Phase::Review(watch) => watch.running(),
+                Phase::SatisfiedReview(watch) => watch.running(),
                 _ => 0,
             })
             .sum()

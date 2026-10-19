@@ -54,6 +54,7 @@ mod replan_park;
 mod resume;
 mod revise;
 mod satisfied;
+mod satisfied_review;
 mod session;
 mod slot_limits;
 mod stages;
@@ -1348,6 +1349,11 @@ enum Phase {
     /// main, off the loop (ADR-t1818-1); the run stays `validating` and
     /// keeps its lease and slot until it ends.
     Satisfied(satisfied::SatisfiedWatch),
+    /// The review's judgment of that claim on the snapshot whose
+    /// verification passed, one headless job (ADR-t1818-1 decision 4); the
+    /// run stays `validating` and keeps its lease and slot until the job
+    /// ended and its ask opened.
+    SatisfiedReview(satisfied_review::ClaimReviewWatch),
 }
 
 impl Phase {
@@ -1359,7 +1365,9 @@ impl Phase {
         match self {
             Phase::Session(_) => Recorded::Worker,
             Phase::Validating(..) => Recorded::Validating,
-            Phase::Satisfied(_) => Recorded::Verifying,
+            // The judgment is the claim's step after its verification,
+            // not a run review's.
+            Phase::Satisfied(_) | Phase::SatisfiedReview(_) => Recorded::Verifying,
             Phase::ReviewPrograms(_) | Phase::Review(_) => Recorded::Review,
             Phase::ReviewHeld { .. } => Recorded::ReviewHeld,
             Phase::Revise(_) => Recorded::Revise,
@@ -4013,8 +4021,34 @@ impl Supervisor<'_> {
                     .join()
                     .map_err(|_| anyhow!("the verification thread panicked"))?;
                 let run = self.queue.run(slot.run.id())?;
-                let run = self.satisfied_verified(&run, watch, outcome)?;
-                Ok(Step::Done(Box::new(run)))
+                match self.satisfied_verified(&run, watch, outcome)? {
+                    satisfied::AfterVerified::Rested(run) => Ok(Step::Done(run)),
+                    satisfied::AfterVerified::Judged(phase) => {
+                        slot.run = run;
+                        slot.transition(
+                            *phase,
+                            EventKind::RunSatisfiedReviewStarted.as_str(),
+                            &*self.queue,
+                        );
+                        Ok(Step::Continue)
+                    }
+                }
+            }
+            Phase::SatisfiedReview(watch) => {
+                // Fenced, the slot holds the judgment for the park, which
+                // lets its job end and withholds what it found; a job that
+                // ended is reaped meanwhile, so it holds no review job's
+                // room, and nothing is acted on.
+                if self.queue.turn_fence(slot.run.task_id())?.is_some() {
+                    let run = slot.run.clone();
+                    self.reap_claim_review(&run, watch)?;
+                    return Ok(Step::Continue);
+                }
+                let run = slot.run.clone();
+                Ok(match self.tend_claim_review(&run, watch)? {
+                    Some(run) => Step::Done(Box::new(run)),
+                    None => Step::Continue,
+                })
             }
         }
     }
@@ -4028,6 +4062,7 @@ fn stop_job(slot: &mut Slot) {
         Phase::Review(watch) => watch.abandon(),
         Phase::ReviewPrograms(watch) => watch.job.abandon(),
         Phase::Recovery(watch) => watch.job.abandon(),
+        Phase::SatisfiedReview(watch) => watch.abandon(),
         _ => stop_recovery(slot),
     }
 }

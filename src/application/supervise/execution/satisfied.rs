@@ -19,6 +19,16 @@ pub(super) struct SatisfiedWatch {
     pub(super) ask: Option<AskId>,
 }
 
+/// Where a claim goes once its verification ended
+/// ([`Supervisor::satisfied_verified`]).
+pub(super) enum AfterVerified {
+    /// It rests on its `approve_close` ask, or it closed.
+    Rested(Box<TaskRun>),
+    /// Its first verification on a snapshot passed: the review judges it
+    /// there in this phase ([`Supervisor::begin_claim_review`]).
+    Judged(Box<Phase>),
+}
+
 impl Supervisor<'_> {
     /// Once the session of a run whose claim validation found sound
     /// exited: the verification starts on main's head, unless an
@@ -275,17 +285,21 @@ impl Supervisor<'_> {
     /// verification that could not run, a failure like any other): it is
     /// recorded with its snapshot. One run again for an answer to close
     /// closes the task when it passed (ADR-t1818-1 decision 3: even if
-    /// main moved meanwhile); otherwise the `approve_close` ask opens on
-    /// the snapshot (closing the answered one, whose close could not be
-    /// applied), and the run rests unleased. Not called while a replanning
-    /// guards the task (ADR-t1521-2): the run's slot holds the result for
-    /// the park, which withholds it, or for the operation's end.
+    /// main moved meanwhile, and the review does not judge it again). A
+    /// first verification that passed goes to the review's judgment on the
+    /// same head (decision 4), which asks the person after it (or, when the
+    /// judgment cannot begin, the person is asked without it). Otherwise
+    /// the `approve_close` ask opens on the snapshot (closing the answered
+    /// one, whose close could not be applied), and the run rests unleased.
+    /// Not called while a replanning guards the task (ADR-t1521-2): the
+    /// run's slot holds the result for the park, which withholds it, or
+    /// for the operation's end.
     pub(super) fn satisfied_verified(
         &mut self,
         run: &TaskRun,
         watch: &SatisfiedWatch,
         outcome: Result<SnapshotVerification>,
-    ) -> Result<TaskRun> {
+    ) -> Result<AfterVerified> {
         let verification = outcome.unwrap_or_else(|error| SnapshotVerification {
             head: watch.head.clone(),
             commands: 0,
@@ -304,51 +318,86 @@ impl Supervisor<'_> {
         if let (true, Some(ask)) = (verification.passed(), watch.ask) {
             let verified = satisfied::latest_verified(&self.queue.run_events(run.id())?)
                 .context("the verification just recorded is not read back")?;
-            return self.close_satisfied(
-                run,
-                Some(&self.registration.token().clone()),
-                &verified,
-                ask,
-            );
+            return self
+                .close_satisfied(
+                    run,
+                    Some(&self.registration.token().clone()),
+                    &verified,
+                    ask,
+                )
+                .map(|run| AfterVerified::Rested(Box::new(run)));
+        }
+        // A judgment that cannot begin leaves the claim to the person as
+        // before rather than resting it with no ask.
+        if verification.passed() && watch.ask.is_none() {
+            match self.begin_claim_review(run, verification.clone()) {
+                Ok(phase) => return Ok(AfterVerified::Judged(Box::new(phase))),
+                Err(error) => {
+                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: the review's judgment of its already_satisfied claim could not begin: {error:#}; a person is asked without it", run.id());
+                }
+            }
         }
         if let Some(answered) = watch.ask {
             self.queue.close_ask(answered)?;
         }
         let task = self.queue.show(run.task_id())?.task;
-        let summary = self
-            .files
+        let summary = self.receipt_summary(run);
+        let outcome = self.open_close_ask(
+            run,
+            (
+                satisfied::question(&task.id().to_string(), &summary, &verification, watch.ask),
+                satisfied::options(&verification),
+            ),
+            (AskReason::Scope, None, None),
+        )?;
+        info!(run_id = %run.id(), "run {}: its already_satisfied claim {} on main {}; it waits for a person in ask {}", run.id(), if verification.passed() { "passed" } else { "failed" }, verification.head, outcome["id"]);
+        self.queue
+            .release_lease(run.id(), self.registration.token())?;
+        self.queue
+            .run(run.id())
+            .map(|run| AfterVerified::Rested(Box::new(run)))
+    }
+
+    /// The summary of `run`'s receipt, or nothing when it cannot be read.
+    pub(super) fn receipt_summary(&self, run: &TaskRun) -> String {
+        self.files
             .read_to_string(Path::new(run.receipt_path().unwrap_or_default()))
             .ok()
             .and_then(|text| Receipt::parse(&text).ok())
             .map(|receipt| receipt.summary().to_owned())
-            .unwrap_or_default();
-        let options = satisfied::options(&verification);
-        let outcome = ask::ask(
+            .unwrap_or_default()
+    }
+
+    /// Open the `approve_close` ask of `run` with `question` and
+    /// `options`, why a person is needed, and what the review that asks
+    /// recommends with its confidence.
+    pub(super) fn open_close_ask(
+        &mut self,
+        run: &TaskRun,
+        (question, options): (String, &[&str]),
+        (reason, recommendation, confidence): (
+            AskReason,
+            Option<String>,
+            Option<crate::domain::AskConfidence>,
+        ),
+    ) -> Result<Value> {
+        ask::ask(
             &mut *self.queue,
             NewAsk {
                 kind: AskKind::ApproveClose,
                 task_id: None,
                 run_id: Some(run.id().clone()),
-                question: satisfied::question(
-                    &task.id().to_string(),
-                    &summary,
-                    &verification,
-                    watch.ask,
-                ),
+                question,
                 options: options.iter().map(|o| (*o).to_owned()).collect(),
                 asked_by: "supervisor".to_owned(),
-                reason_category: AskReason::Scope,
+                reason_category: reason,
                 topics: Vec::new(),
-                recommendation: None,
-                confidence: None,
+                recommendation,
+                confidence,
                 finding_id: None,
                 request_id: None,
             },
-        )?;
-        info!(run_id = %run.id(), "run {}: its already_satisfied claim {} on main {}; it waits for a person in ask {}", run.id(), if verification.passed() { "passed" } else { "failed" }, verification.head, outcome["id"]);
-        self.queue
-            .release_lease(run.id(), self.registration.token())?;
-        self.queue.run(run.id())
+        )
     }
 
     /// Close the task of `run` on `verified` for the answer `ask`, giving

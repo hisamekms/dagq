@@ -3347,6 +3347,104 @@ fn a_run_review_prompt_of_a_huge_acceptance_stays_within_its_limits() {
     within(&small, RUN_REVIEW_PROMPT_LIMIT);
 }
 
+/// The judgment of an `already_satisfied` claim names the snapshot's head,
+/// the tree checked out at it, the task's acceptance and verification
+/// commands and the worker's grounds, and asks for the claim's own
+/// verdict; huge material stays within [`CLAIM_REVIEW_PROMPT_LIMIT`], the
+/// receipt's parts cut naming the receipt, and a small claim is not cut.
+#[test]
+fn a_claims_review_prompt_names_its_snapshot_and_stays_within_its_limits() {
+    use crate::domain::satisfied::SnapshotVerification;
+    let verification = SnapshotVerification {
+        head: CommitSha::try_from(SHA).unwrap(),
+        commands: 2,
+        failure: None,
+    };
+    let receipt = |summary: &str, check: &str| {
+        Receipt::parse(
+            &json!({"run_id": RUN, "result": "already_satisfied", "commit": SHA,
+                "tests": {"status": "passed", "evidence_or_reason": "e"},
+                "e2e": {"status": "not_applicable", "evidence_or_reason": "r"},
+                "subagent_review": {"status": "not_applicable", "evidence_or_reason": "r"},
+                "summary": summary,
+                "base_checks": [{"command": check, "result": "passed"}]})
+            .to_string(),
+        )
+        .unwrap()
+    };
+    let run = run_on(Provider::Claude, WorkerMode::Headless);
+    let tree = Path::new("/q/satisfied/run");
+    let small = receipt("the base meets it", "test -f seed.txt");
+    let fitted = claim_review_prompt(
+        &task_with_evidence(7, Vec::new()),
+        &run,
+        (Some(&small), "/runs/run/receipt.json"),
+        &verification,
+        tree,
+    );
+    within(&fitted, CLAIM_REVIEW_PROMPT_LIMIT);
+    assert!(
+        fitted.bytes.omitted.is_empty() && fitted.bytes.over_limit.is_none(),
+        "{:?}",
+        fitted.bytes
+    );
+    for said in [
+        &format!("main at {SHA} (the snapshot)"),
+        "/q/satisfied/run is a checkout of main",
+        "verification commands, which passed",
+        "the base meets it",
+        "- test -f seed.txt: passed",
+        "\"verdict\": \"pass\" | \"revise\" | \"concern\"",
+        "\"recommendation\": \"close\" | \"retry\" | \"cancel\"",
+        "whatever the verdict",
+    ] {
+        assert!(fitted.text.contains(said), "{said}: {}", fitted.text);
+    }
+    let huge = receipt(&big("summary", 50_000), &big("cargo test", 50_000));
+    let fitted = claim_review_prompt(
+        &big_task(7, 100_000),
+        &run,
+        (Some(&huge), "/runs/run/receipt.json"),
+        &verification,
+        tree,
+    );
+    within(&fitted, CLAIM_REVIEW_PROMPT_LIMIT);
+    for section in ["title", "acceptance", "verify", "summary", "base_checks"] {
+        assert_eq!(
+            fitted.bytes.omitted.get(section),
+            Some(&1),
+            "{section}: {:?}",
+            fitted.bytes
+        );
+    }
+    assert!(
+        fitted
+            .text
+            .contains("read it whole in the receipt at /runs/run/receipt.json, its base_checks")
+    );
+    assert!(
+        fitted.text.ends_with(CLAIM_REVIEW_ANSWER_END),
+        "{}",
+        fitted.text
+    );
+    // A receipt that cannot be read leaves its grounds as none.
+    let unread = claim_review_prompt(
+        &task_with_evidence(7, Vec::new()),
+        &run,
+        (None, "/runs/run/receipt.json"),
+        &verification,
+        tree,
+    );
+    assert!(
+        unread.text.contains("The worker's summary:\n(none)"),
+        "{}",
+        unread.text
+    );
+}
+
+/// The last words of a claim's judgment prompt, its schema's explanation.
+const CLAIM_REVIEW_ANSWER_END: &str = "summary is one or two sentences.\n";
+
 /// The recovery job of a headless run whose last turns, alert facts,
 /// history, processes, worktree and ended material are huge stays
 /// within [`RECOVERY_PROMPT_LIMIT`] (the largest in production had

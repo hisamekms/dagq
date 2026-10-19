@@ -143,8 +143,10 @@ fn actor_of(
         }
         // Each agent job of a review records its own (ADR-t1895-1); a
         // review's end recorded its one job's before its agents ran as
-        // jobs.
+        // jobs. The review's judgment of an `already_satisfied` claim is a
+        // review job too.
         event_kind::REVIEW_JOB_FINISHED
+        | event_kind::RUN_SATISFIED_REVIEW_JOB_FINISHED
         | event_kind::REVIEW_FINISHED
         | event_kind::REVIEW_FAILED
         | event_kind::REVIEW_RETRIED => job(REVIEW),

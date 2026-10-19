@@ -349,6 +349,10 @@ event_kinds! {
     RunRecovered => "run_recovered",
     RunSatisfiedClosed => "run_satisfied_closed",
     RunSatisfiedDecided => "run_satisfied_decided",
+    RunSatisfiedJudged => "run_satisfied_judged",
+    RunSatisfiedReviewJobFinished => "run_satisfied_review_job_finished",
+    RunSatisfiedReviewJobStarted => "run_satisfied_review_job_started",
+    RunSatisfiedReviewStarted => "run_satisfied_review_started",
     RunSatisfiedSnapshot => "run_satisfied_snapshot",
     RunSatisfiedVerified => "run_satisfied_verified",
     RunSlotRegained => "run_slot_regained",
@@ -1115,6 +1119,30 @@ pub const RUN_RECOVERED: &str = EventKind::RunRecovered.as_str();
 /// ([`super::satisfied::closed_payload`]). It carries no `status`, so
 /// `stats` counts the run apart from the landed and the failed.
 pub const RUN_SATISFIED_CLOSED: &str = EventKind::RunSatisfiedClosed.as_str();
+/// How the review's judgment of an `already_satisfied` claim ended
+/// (ADR-t1818-1 decision 4), the snapshot's `head` and its `attempt` with
+/// it: the `verdict`, `confidence`, `recommendation`, `reasons` and
+/// `summary` the job printed, recorded at the job's request
+/// (`requested_by`), or the `error` of a job that gave none, recorded at
+/// nobody's ([`super::satisfied::judged_payload`]). The claim rests after
+/// it, its `approve_close` ask open.
+pub const RUN_SATISFIED_JUDGED: &str = EventKind::RunSatisfiedJudged.as_str();
+/// One job of a claim's judgment ended: its `attempt`, whether it ran
+/// `again` (its one run once more), `provider`, `duration_secs`, `output`
+/// (its stem in the run directory) and the Execution of its agent, with
+/// `outcome` `answered`, `held` (a provider that could not be used, with
+/// `switch_reason` when another one was held) or how it missed
+/// (`unreadable`, `exited`, `timed_out`, `start_failed`, with `error` and
+/// `runs_again`).
+pub const RUN_SATISFIED_REVIEW_JOB_FINISHED: &str =
+    EventKind::RunSatisfiedReviewJobFinished.as_str();
+/// One job of a claim's judgment started: its `attempt`, `again`,
+/// `launch`, `session_id` and `output`.
+pub const RUN_SATISFIED_REVIEW_JOB_STARTED: &str = EventKind::RunSatisfiedReviewJobStarted.as_str();
+/// The review's judgment of an `already_satisfied` claim begins on the
+/// verified snapshot `head`, the run's judgment `attempt` (from 1), with
+/// its prompt's `prompt_bytes`: the claim no longer rests.
+pub const RUN_SATISFIED_REVIEW_STARTED: &str = EventKind::RunSatisfiedReviewStarted.as_str();
 /// The main head (`head`) an `already_satisfied` claim's verification runs
 /// on, taken before it runs; `ask_id` names the answer to close it runs
 /// again for ([`super::satisfied::snapshot_payload`]).
@@ -1583,6 +1611,19 @@ mod tests {
             (EventKind::RunRecovered, "run_recovered"),
             (EventKind::RunSatisfiedClosed, "run_satisfied_closed"),
             (EventKind::RunSatisfiedDecided, "run_satisfied_decided"),
+            (EventKind::RunSatisfiedJudged, "run_satisfied_judged"),
+            (
+                EventKind::RunSatisfiedReviewJobFinished,
+                "run_satisfied_review_job_finished",
+            ),
+            (
+                EventKind::RunSatisfiedReviewJobStarted,
+                "run_satisfied_review_job_started",
+            ),
+            (
+                EventKind::RunSatisfiedReviewStarted,
+                "run_satisfied_review_started",
+            ),
             (EventKind::RunSatisfiedSnapshot, "run_satisfied_snapshot"),
             (EventKind::RunSatisfiedVerified, "run_satisfied_verified"),
             (EventKind::RunSlotRegained, "run_slot_regained"),
