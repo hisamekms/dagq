@@ -112,6 +112,10 @@ pass: [ci_watch]を読み直す → 終わった確かめの答え（読めな�
 ### workerとreviewの材料
 
 - 読み手はclaimのprompt、resumeと衝突の依頼、runの全体のreviewのpromptで、agentのjobには載せない（差し戻しを決めるのは全体のreviewのため）。
+- 新しいsessionに切り替えたresumeの依頼は一覧を持たず（reviseの依頼はもともと持たない）、resume・reviseの引き継ぎのpromptが一覧を持つ（[ADR-t2852-1](../../adr/2026-10-19-t2852-1-handoff-carries-local-check-records-resume-timeout-and-findings-once.md)決定5）。
+  runのcommitと未commitの変更が触るpathとtaskが宣言したpathの名前にtestのmoduleのpathが当たるものとtask自身が直すものだけを載せ、外したものがあればその件数と全部を持つファイルを書く。
+  test binaryやpackageの名前とtest自身の名前では当てず、名前の取り方と照らし方は`application::prompt::known_failures`のdoc commentが持つ。
+  taskのpromptの節はclaimの時の写しのまま残る。
 - 読み方は`application::ci_watch::run_known_failures`と`Supervisor::known_failures`（`supervise/execution/session.rs`）、節の文面と選ぶ順と上限は`application::prompt::known_failures`が持つ。
 - workerには自分の変更が原因でなければ直さずreceiptに書くよう、reviewにはそれを差し戻しの理由にしないよう言う。
 

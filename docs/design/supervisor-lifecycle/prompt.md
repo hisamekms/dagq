@@ -116,6 +116,7 @@ runtimeのplanner ──> 節ごとの上限（prompt_fit::Fit）→ 記録 → 
 - 新しいsession（ADR-t2080-1）の最初のturnは`prompt.txt`と引き継ぎのprompt（`handoff_text`）で、wrapperがつなぐ（`domain::turn::new_session_prompt`）。
 - 落とし穴: `tests/e2e.rs`のstubはpromptの1行目とreceiptのpathの行だけを読むので、節を足してもstubは変わらない。
 - 既に落ちているtestの節: 一覧があるときだけclaimのpromptとresumeの依頼に載せ、文面・選ぶ順・上限・読む経路は[CI watch](ci-watch.md#workerとreviewの材料)が持つ。
+  新しいsessionに送るresumeの依頼は節を持たず、引き継ぎのpromptがrunの触るファイルに絞った一覧を持つ（同じ節）。
 - 言語の設定が解決できるときは、promptと依頼の末尾に言語の指示を足す（[Language](language.md#promptへの渡し方)）。
 
 ## 受け入れ条件の対応づけ
