@@ -51,10 +51,6 @@ check-adr-numbers adr_id_mismatch
 check-e2e-quarantine e2e_quarantine_malformed
 check-agents-md-size agents_md_too_big
 check-layer-deps layer_stale_allow_item
-check-layer-deps context_reaches_loop_state
-check-layer-deps stage_reaches_other_context
-check-layer-deps planning_reaches_loop_state
-check-layer-deps host_ops_reaches_loop_state
 check-context-boundaries context_unlisted_trait
 check-context-boundaries context_internal_port
 check-context-boundaries context_stale_allow_item
@@ -91,23 +87,7 @@ violate_agents_md_too_big() {
 
 violate_layer_stale_allow_item() {
   mkdir -p .config
-  echo 'C3 | src/application/supervise/zz_scripts_root.rs | Supervisor | 1899 | fixture' >>.config/layer-deps-allow.txt
-}
-
-violate_context_reaches_loop_state() {
-  echo "impl Supervisor<'_> { fn zz_scripts_root(&self) -> usize { self.slots.len() } }" >>src/application/supervise/report.rs
-}
-
-violate_stage_reaches_other_context() {
-  echo "fn zz_scripts_root(host: &super::contexts::HostOpsState) {}" >>src/application/supervise/stages.rs
-}
-
-violate_planning_reaches_loop_state() {
-  echo "impl Supervisor<'_> { fn zz_scripts_root(&self) -> usize { self.slots.len() } }" >>src/application/supervise/plan_review.rs
-}
-
-violate_host_ops_reaches_loop_state() {
-  echo "fn zz_scripts_root(claim: &super::stages::ClaimState) -> usize { claim.slots.len() }" >>src/application/supervise/sweep.rs
+  echo 'L2 | src/domain/zz_scripts_root.rs | std::process | 1899 | fixture' >>.config/layer-deps-allow.txt
 }
 
 violate_context_unlisted_trait() {
@@ -115,7 +95,7 @@ violate_context_unlisted_trait() {
 }
 
 violate_context_internal_port() {
-  echo 'fn zz_scripts_root(_: &dyn crate::application::RunRecovery) {}' >>src/application/supervise/report.rs
+  echo 'fn zz_scripts_root(_: &dyn crate::application::RunRecovery) {}' >>src/application/supervise/observation/report.rs
 }
 
 violate_context_stale_allow_item() {

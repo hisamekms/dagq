@@ -16,7 +16,9 @@ related:
 
 # Handoff
 
-[ADR-0045](../../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定10・11。supervisorは、sessionの終わりを待たずに、自分のpidのまま別のbinaryをexecして続ける。use caseは`src/application/supervise/handoff.rs`（登録と要求）と`handoff_slots.rs`（slotの止めと取り戻し）、execは`src/main.rs`の`run`。
+[ADR-0045](../../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定10・11。
+supervisorは、sessionの終わりを待たずに、自分のpidのまま別のbinaryをexecして続ける。
+use caseは`src/application/supervise/host_ops/handoff.rs`（登録と要求）と`execution/handoff_slots.rs`（slotの止めと取り戻し）、execは`src/main.rs`の`run`。
 
 - **要求**: 引き継ぎを受けられる印（`supervisors`の`handoff_accepted`。`supervise`が登録の直後に付ける）のある登録にだけ、`up`か`install`が`request_handoff(token, binary)`で要求を書く。
   受けられない登録（引き継ぎを知らない前のbinary）には書かず（`false`）、`up`はdrainに、`install`は`not_handed_off`に回す。

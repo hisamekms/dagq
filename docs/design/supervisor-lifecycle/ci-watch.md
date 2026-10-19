@@ -37,7 +37,7 @@ pass: [ci_watch]を読み直す → 終わった確かめの答え（読めな�
 
 ## 責務と境界
 
-- 何を読むか（GitHubの答えの意味・一覧・finding・保留の理由）は`domain::ci_watch`、1回の確かめは`application::ci_watch::check`、passごとの読み直しと保留は`application::supervise::ci_watch`が持つ。
+- 何を読むか（GitHubの答えの意味・一覧・finding・保留の理由）は`domain::ci_watch`、1回の確かめは`application::ci_watch::check`、passごとの読み直しと保留は`application::supervise::observation::ci_watch`が持つ。
 - GitHubとGitはport `application::ci_watch::CiSource`越しに読み、実装は`infrastructure::ci_watch::GhSource`である。
 - queueへの記録は`infrastructure::ci_watch_store`が持つ。
 - 確かめるのは`SuperviseOptions::ci_watch`（`CiWatchPort`）を持つsupervisorだけである。
@@ -54,7 +54,7 @@ pass: [ci_watch]を読み直す → 終わった確かめの答え（読めな�
 
 ## いつ確かめるか
 
-- passごとの読み直し・期限・jobのthreadは`application::supervise::ci_watch`のmodule docと`ObservationState::ci_watch_pass`、期限は`domain::ci_watch::check_due`が持つ。
+- passごとの読み直し・期限・jobのthreadは`application::supervise::observation::ci_watch`のmodule docと`ObservationState::ci_watch_pass`、期限は`domain::ci_watch::check_due`が持つ。
 - handoffのexecは走っている確かめの終わりを待つ（`ObservationState::handoff_waits`）。
 - 同じ実行の記録の取り合いは`SqliteQueue::record_ci_check`と`CiCheckRecord::previous`。
 
@@ -112,7 +112,7 @@ pass: [ci_watch]を読み直す → 終わった確かめの答え（読めな�
 ### workerとreviewの材料
 
 - 読み手はclaimのprompt、resumeと衝突の依頼、runの全体のreviewのpromptで、agentのjobには載せない（差し戻しを決めるのは全体のreviewのため）。
-- 読み方は`application::ci_watch::run_known_failures`と`Supervisor::known_failures`（`supervise/session.rs`）、節の文面と選ぶ順と上限は`application::prompt::known_failures`が持つ。
+- 読み方は`application::ci_watch::run_known_failures`と`Supervisor::known_failures`（`supervise/execution/session.rs`）、節の文面と選ぶ順と上限は`application::prompt::known_failures`が持つ。
 - workerには自分の変更が原因でなければ直さずreceiptに書くよう、reviewにはそれを差し戻しの理由にしないよう言う。
 
 ## 修正taskのrun

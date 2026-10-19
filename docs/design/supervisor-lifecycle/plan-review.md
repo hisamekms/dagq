@@ -61,7 +61,7 @@ submit -> 候補の順序 -> job（読むだけ） -> verdict -+- pass -----> ta
 
 ## 入口
 
-- passの全体とplannerの世話: `src/application/supervise/plan_review.rs`の`PlanningState::plan_review_pass`。
+- passの全体とplannerの世話: `src/application/supervise/planning/plan_review.rs`の`PlanningState::plan_review_pass`。
 - verdictの型・runtimeの決め方・順序・人の答え: `src/domain/plan_review.rs`。
 - 記録と適用: port `PlanReviewStore`（`src/application/ports/planning.rs`）の各操作のdoc commentと、storeの`src/infrastructure/plan_reviews.rs`。
   行と欄の意味は`migrations/0027_plan_review.sql`のコメントが持つ。

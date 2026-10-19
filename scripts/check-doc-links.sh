@@ -89,7 +89,7 @@ docs/design/supervisor-lifecycle/run-workspaces.md | docs/design/supervisor-life
 docs/design/supervisor-lifecycle/session-prompts.md | docs/design/supervisor-lifecycle/roles.md | final
 docs/design/supervisor-lifecycle/worker-question-answer.md | docs/design/supervisor-lifecycle/headless-worker.md | final
 docs/design/supervisor-lifecycle/silent-wrapper.md | docs/design/supervisor-lifecycle/headless-worker.md | final
-docs/design/supervisor-lifecycle/first-commit.md | the doc comment of watch_first_commit in src/application/supervise/session.rs | final
+docs/design/supervisor-lifecycle/first-commit.md | the doc comment of watch_first_commit in src/application/supervise/execution/session.rs | final
 docs/design/supervisor-lifecycle/worktree-read-only-git.md | the doc comments of GitRepository in src/infrastructure/adapters.rs | final
 docs/design/slow-tests.md | docs/development/testing.md and the headers of scripts/slow-tests.sh and scripts/check-it-test-time.sh | final
 docs/design/stress-ci.md | docs/development/testing.md and the headers of .github/workflows/stress.yml and scripts/stress-recent-tests.sh | final

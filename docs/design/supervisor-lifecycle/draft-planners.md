@@ -30,7 +30,7 @@ related:
 runtimeやjobが作ったdraftを、同じきっかけで作られ同時に待っているものの束にし、束ごとにsupervisorがruntimeのplannerを1つ立て、plannerがdraftごとに採用・不採用・askのどれかを選ぶ。
 対象はfollow_upのdraftに限らず、runtimeやjobが作ったdraft全般（follow_up、goalの判断jobのgap）とする。
 再検討の時刻（[ADR-t1540-1](../../adr/2026-10-05-t1540-1-a-kept-draft-returns-to-runtime-planners-at-its-revisit-time.md)）は下の[再検討の時刻](#再検討の時刻)。
-use caseは`src/application/supervise/draft_planner.rs`、storeは`src/infrastructure/draft_planners.rs`（port `DraftPlannerStore`）、規則と型は`src/domain/follow_up.rs`、promptは`application::prompt::draft_planner_prompt`。
+use caseは`src/application/supervise/planning/draft_planner.rs`、storeは`src/infrastructure/draft_planners.rs`（port `DraftPlannerStore`）、規則と型は`src/domain/follow_up.rs`、promptは`prompt::draft_planner_prompt`。
 run slotは使わず、[Plan review](plan-review.md#reviseの配送)の`tend_planners`の中で、reviseの配送の後に進める（drain中は立てない）。
 
 1. **出どころ**: runtimeやjobがdraftを作るときに、出どころと材料を`record_draft_origin`で`draft_origins`に書く。

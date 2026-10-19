@@ -235,7 +235,7 @@ queueのDBが消えれば（使い捨てのqueueの片付け）自分で終わ�
   起動できなければ`up`はsupervisorを起動せずに止まる。
   結果は`up`の出力の`queue_service`で、起動か入れ替えはevent `queue_service_started`に残す
 - supervisor: `up`が起動したsupervisor（`--once`でないもの）は一定の間隔でserviceを見て、居ない・答えないものは起動し直し、別のbuildのもの（`install`や自動更新の引き継ぎの前のバイナリが残したもの）は入れ替える（`queue_service_started`）。
-  起動し直しは窓の中で回数に上限がある（`application::supervise::queue_service`の定数）。
+  起動し直しは窓の中で回数に上限がある（`application::supervise::host_ops::queue_service`の定数）。
   別のbuildの入れ替えは数えない。
   制限: 起動の成功は自分のbuildの答えだけなので（`SystemQueueService::start`）、`install`が新しいバイナリを置いた後でexecの前のsupervisorの起動は失敗して`queue_service_down`を書き、次の見張りでまた入れ替える。
   drainと引き継ぎの間は見ない（execはserviceを次のプロセスに残し、次のプロセスがbuildの違いで入れ替える）

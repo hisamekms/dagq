@@ -40,9 +40,9 @@ runの異常を、runtimeの自動修正、復旧job、人へのaskの3段で扱
 
 ## 責務と境界
 
-- 生きているrunの復旧jobの起動・verdictの検査と適用・escalateは`application::supervise::recovery`（module docが範囲を持つ）、turnのstallからjobへの受け渡しとresumeのrepairのparkは`stall_recovery`。
-- receiptの無いturnの検知（促し・stalledのask・`stall_resolved`）は`application::supervise::stall`の`StallWatch`、判断は同じmoduleの副作用のない関数が持つ。
-- 1 runを手放すのは`Supervisor::abandon`と`abandon_with_session`（`mod.rs`）で、記録はqueueの`abandon_run`。
+- 生きているrunの復旧jobの起動・verdictの検査と適用・escalateは`application::supervise::execution::recovery`（module docが範囲を持つ）、turnのstallからjobへの受け渡しとresumeのrepairのparkは`stall_recovery`。
+- receiptの無いturnの検知（促し・stalledのask・`stall_resolved`）は`application::supervise::execution::stall`の`StallWatch`、判断は同じmoduleの副作用のない関数が持つ。
+- 1 runを手放すのは`Supervisor::abandon`と`abandon_with_session`（`execution.rs`）で、記録はqueueの`abandon_run`。
 - 終わったrunのsessionの掃除は`sweep`（`SweepWatch`・`sweep_ended_sessions`）、worktreeとビルド成果物の掃除は`cleanup`（module docが範囲を持つ）と[Run worktrees](run-worktrees.md)。
 - 終わったrunの復旧jobとtriageの後のsessionの停止は[Triage](triage.md)、非対話のworkerのturnの後の扱いは[非対話のworker](headless-worker.md)が持つ。
 - 判断と境界の分け方は[ADR-t1410-1](../../adr/2026-10-03-t1410-1-decisions-in-unit-tests-boundaries-in-integration-tests.md)に従う。
@@ -198,7 +198,7 @@ turnの後の扱いの詳細は[非対話のworker](headless-worker.md#turnの�
 - gitを使わない削除はguard（決定8）が成り立たなくても行い、制御側のrun branchの削除と着地用のworktreeの登録の解除はguardを通したgitでだけ行う。
   guardが成り立たなければ飛ばして片付けの失敗として残し、成り立った後の片付けのやり直しが消す。
 - 復旧jobとtriageがrunのheadと状態を読むのもcloneではなくbundleと状態のファイルからで、読めなければその旨を事実として渡す。
-- 片付ける物と手順は`supervise::cleanup`の`clean_clone`と`application::run_git::remove`のdoc commentが持つ。
+- 片付ける物と手順は`supervise::host_ops::cleanup`の`clean_clone`と`application::run_git::remove`のdoc commentが持つ。
 
 ## 引き継ぎ
 

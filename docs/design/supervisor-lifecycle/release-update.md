@@ -52,7 +52,7 @@ dagqのソースのrepositoryの`-dev`のビルドは[Auto-update](auto-update.m
 
 ## ask
 
-supervisor側は`src/application/supervise/release.rs`の`release_update_pass`で、決め方は`application::release_update::next_action`。
+supervisor側は`src/application/supervise/host_ops/release.rs`の`release_update_pass`で、決め方は`application::release_update::next_action`。
 supervisorは前に見てから一定の間隔が経ったpassで、自分のbuild識別子がリリースで、hostの設定の`release`が`off`でないときだけ、次を順に行う（停止要求の後とclaimを止めた後は見ない）。
 `-dev`のビルドのsupervisorは`approve_release`の答えもリリースのjobの`update_failed`の答えも適用しない。
 

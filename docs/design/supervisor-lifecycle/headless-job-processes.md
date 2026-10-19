@@ -23,7 +23,7 @@ related:
 
 supervisorが起動するheadlessのjob（runのreview、終わったrunと生きているsessionの復旧job、plan review、goal review）のClaudeかCodex（[Actor model](actor-model.md#provider)）のプロセスをqueueに記録し、そのsupervisorが死んだ後に引き継ぐsupervisorが、同じjobを立て直す前に前のjobを止める。
 同じ入力のjobが二重に走ること、その費用、古いjobが出力ファイルを書くことを防ぐ。
-use caseは`src/application/supervise/jobs.rs`、表は`src/infrastructure/headless_jobs.rs`、判定は`src/domain/headless_job.rs`。
+use caseは`src/application/supervise/execution/jobs.rs`、表は`src/infrastructure/headless_jobs.rs`、判定は`src/domain/headless_job.rs`。
 observerの子プロセスはここに記録せず、時間切れとsupervisorのループのerrorでの終了のときに子孫ごとkillする（[Observer](observer.md)）。
 
 ## 記録

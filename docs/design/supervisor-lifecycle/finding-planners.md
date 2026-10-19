@@ -24,7 +24,7 @@ related:
 [ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定18〜20。
 proposalを求める印の付いたfindingごとに、supervisorがruntimeのplannerを1つ立て、plannerがproposalを作ってplan reviewに出すか、findingを`dismissed`にするか、人に聞く。
 人の承認は一律には求めず、人に聞くのはplannerが`planner_question`にしたときとplan reviewが`concern`にしたときだけ。
-use caseは`src/application/supervise/finding_planner.rs`、storeは`src/infrastructure/finding_planners.rs`（port `DraftPlannerStore`に足したメソッド）、規則は`src/domain/finding.rs`、promptは`application::prompt::finding_planner_prompt`。
+use caseは`src/application/supervise/planning/finding_planner.rs`、storeは`src/infrastructure/finding_planners.rs`（port `DraftPlannerStore`に足したメソッド）、規則は`src/domain/finding.rs`、promptは`application::prompt::finding_planner_prompt`。
 run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-supervisor)の`tend_planners`の中で進める。
 
 1. **印**: (a) observerが`finding record --propose`で付ける（[Observer](observer.md)）。

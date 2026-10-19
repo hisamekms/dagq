@@ -39,7 +39,7 @@ runtimeはそれをqueueで1件の`queue_hold`のask（`authentication`、また
 ## 責務と境界
 
 - 判断（どのaskが控えるか、壁の種類、jobの項目、answerを適用するか）は`src/domain/queue_hold.rs`が持つ。
-- 控えの読み直し・answerの適用・askを閉じること・jobの起動し直しは`src/application/supervise/queue_hold.rs`が持ち、module docが範囲を持つ。
+- 控えの読み直し・answerの適用・askを閉じること・jobの起動し直しは`src/application/supervise/execution/queue_hold.rs`が持ち、module docが範囲を持つ。
 - askを開く・加わるのは`application::ask::hold`で、壁の文言は`infrastructure::claude`の1か所で読む。
 - 控えの単位はproviderごとで、このaskはClaudeの控えである（[ADR-t813-2](../../adr/2026-09-28-t813-2-provider-per-task-and-mutual-fallback.md)の決定6）。
   Codexの控えはaskを開かない`ProviderHold`で、[Provider lifecycle](../provider-lifecycle.md#使えないproviderからの切り替え)が持つ。

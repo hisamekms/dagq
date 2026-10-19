@@ -151,7 +151,7 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 ## productionのケースと見張り
 
 本番のreviewからケースの集合を作り、queue側に置いてhold-outとして流す。
-入口は依頼と読み取りが`application::agent_cases`の`AgentCaseSets`、作るのが`application::supervise::agent_cases`、eventから集合を畳むのが`domain::agent_eval::production`（eventの種類と欄はそのdoc comment）。
+入口は依頼と読み取りが`application::agent_cases`の`AgentCaseSets`、作るのが`application::supervise::execution::agent_cases`、eventから集合を畳むのが`domain::agent_eval::production`（eventの種類と欄はそのdoc comment）。
 
 - 1集合ずつ、runのslotの外で、古い依頼から作る。
   集合を作るsupervisorは1つで、取るのも居なくなった持ち主から引き取るのも1つの書き込みのtransaction（`EvalRounds::take_case_set`、`agent_cases_taken`）。
@@ -160,7 +160,7 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 - 準備: landing branchのcommitの定義とケースの一覧から、規則コード・`k`・規則の文書のpathと、規則コードごとの規則の場所の対応を決め（`production::frame`）、期間の`review_started`（`subagents`がそのagentを選んだもの）と同じrunとattemptの`review_finished`（そのagentの判定）から、`<base>...<head>`の差分を内容のhashで集合のpatchに書く。
   baseかheadのcommitがrepositoryのどのrefからも辿れないreviewは、objectが残っていても（branchを消した後、GCの前）理由つきで飛ばす（`Repository::reachable_commit`）。
   差分が読めないreviewも理由つきで飛ばし、1つのreviewが集合と後の依頼を止めない。
-  reviewが多すぎる依頼は作らず理由を記録し、人・inbox・plannerが期間を狭めて依頼し直す（上限は`application::supervise::agent_cases`のmodule doc）。
+  reviewが多すぎる依頼は作らず理由を記録し、人・inbox・plannerが期間を狭めて依頼し直す（上限は`application::supervise::execution::agent_cases`のmodule doc）。
 - ラベル: ケースごとに、`[roles.review]`と別のprovider（reviewがClaudeならCodex）のagentのjobを1本起動する。
   起動経路はevalのagentのjobと同じ（下の「evalが本番と共有する起動経路」）で、ケースのtreeからは全てのagentの定義とevalのケースを消す。
   jobの「定義」は規則の文書のpathと、規則コードごとの規則の場所だけ（`production::label_definition`）で、定義の検査項目の文は渡さない。
@@ -201,7 +201,7 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
   eval専用の起動の組み立ては作らない。
 - 本番のrunのreviewのagentのjobも同じ組み立て・起動のコマンド・1つのverdictの読み取りを使う。
   同じ定義・provider・道具の宣言ならargvは一致し、違うのはstdinのpromptの材料の行だけである。
-- 実行の入口は`application::supervise::agent_eval`。
+- 実行の入口は`application::supervise::execution::agent_eval`。
 - ケースのtreeは`base_commit`にpatchを当ててcommitした使い捨てのworktreeで、queueのdata dirの`agent-evals/`の下に周ごとに置く。
   jobのcwdはそのtreeで、材料のファイル（commitの一覧と全文の差分`<base_commit>...<patchを当てたcommit>`）はケースのdirの材料だけのdirに書く。
   Claudeのjobが読めるのはtreeとそのdirだけで（`--add-dir`）、同じケースのほかの実行の出力は読めない。

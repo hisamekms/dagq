@@ -60,7 +60,7 @@ runtimeの制御はこの畳みを使わず、読み手を移すのは段3（[�
   これを`SqliteQueue::record_attributes_baseline`が照合で直す: `domain::ledger::attributes::KINDS`のeventを畳んだ値と状態の表の値（読み手と同じ読み方）を比べ、食い違うtaskとgoalだけに状態の値を`attributes_baseline`として書く。
 - 比べるのは書き込みのlockの外で読んでから、食い違いがあればwriteのtransactionの中でもう一度比べて書く。
   書いた後は畳みと状態が一致するので冪等で、今のbinaryだけが書いたqueueには書かない。
-- 照合するのはsupervisorの観測と分析の周回で、プロセスの最初の周回と、その後`RECONCILE_INTERVAL_SECS`ごと（`supervise::live_alerts::AttributesBaseline`）。
+- 照合するのはsupervisorの観測と分析の周回で、プロセスの最初の周回と、その後`RECONCILE_INTERVAL_SECS`ごと（`supervise::observation::live_alerts::AttributesBaseline`）。
   書けなければwarnにして次の間隔でやり直す。
 - 1回の照合はtaskとgoalの基準を書いた後に、組を閉じるqueueの印（対象の無い`attributes_baseline`）を1つ書く。
   畳む関数は組の印が窓にあるときだけ組の基準を取り、組の一部だけを窓に入れない。

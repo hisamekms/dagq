@@ -41,13 +41,14 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 
 ## 責務と境界
 
-- ユースケースの本体はapplication層の`src/application/supervise/`で、submoduleの分担は`mod.rs`のmodule docが持つ（[ADR-0013](../../adr/0013-layered-architecture-and-type-function-style.md)の方針1と8）。
+- ユースケースの本体はapplication層の`src/application/supervise/`で、contextごとのmoduleは`supervise.rs`、ループとsubmoduleの分担は`execution.rs`のmodule docが持つ（[ADR-0013](../../adr/0013-layered-architecture-and-type-function-style.md)の方針1と8）。
 - `supervise(&Ports, &LoopSettings)`が起動とループを行い、外のものには`Ports`のport越しにだけ触れ、pathと子プロセスの環境は`Layout`として値で受ける。
 - `runtime::supervise`はadapterを組み立てて呼ぶ入口だけ。
 - promptと依頼文は`src/application/prompt/`、askの登録は`application::ask`（通知はせずinboxのwatchが知らせる）。
 - watcherの居ないinboxへの知らせは`inbox_nudge.rs`（[inboxへの知らせ](ask-push.md#supervisorによるinboxへの知らせ)）。
-- 計画管理・観測と分析・host運用の状態は`contexts.rs`（登録は`handoff.rs`）にあり、そのpassだけが変える。
-- 実行と着地の状態は`stages.rs`に工程ごとにあり、工程のsubmoduleとループが変える（欄の所有するcontextは`Supervisor`のdoc comment、[Architecture](../architecture.md)のC3）。
+- 計画管理・観測と分析・host運用の状態は各contextのmodule（`planning.rs`・`observation.rs`・`host_ops.rs`）にあり、欄はそのmoduleの中からだけ見え、そのpassだけが変える。
+  登録（`host_ops/handoff.rs`）も同じで、ループはhandoffと停止の段をそのmethodで進める。
+- 実行と着地の状態は`execution/stages.rs`に工程ごとにあり、工程のsubmoduleとループが変える（欄の所有するcontextは`Supervisor`のdoc comment、[Architecture](../architecture.md)のC3）。
 
 ## 不変条件
 
@@ -69,7 +70,7 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 ## passの始め
 
 - 各passの検査と設定の読み直しの順と理由は`Supervisor::drive`のコメントが持ち、設定の変更は再起動なしに効く。
-- sccacheの監視の入口は`application::supervise::sccache`、serverをsandboxの外で持つ分担は[Run environment](run-environment.md#sccacheのserver)。
+- sccacheの監視の入口は`application::supervise::host_ops::sccache`、serverをsandboxの外で持つ分担は[Run environment](run-environment.md#sccacheのserver)。
 - 待ちの終わったrunは新しい仕事より先に（drain中も）slotへ戻す（`return_waiting_runs`、[人の答えを待つrun](waiting.md)）。
 - workerのsessionはclaimでも再開でも非対話で、supervisorはworkerの画面を読まず打ち込まない（[非対話のworker](headless-worker.md)）。
 

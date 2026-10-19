@@ -84,13 +84,13 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 
 | 知りたいこと | コードの入口 |
 | --- | --- |
-| reviewの始まりと行き先 | `src/application/supervise/landing.rs`の`Supervisor::begin_review`・`review_route`、`supervise/provider.rs` |
-| jobの起動・やり直し・判定 | `landing.rs`の`Supervisor::tend_review`、`supervise/jobs.rs`、`src/domain/review_jobs.rs` |
+| reviewの始まりと行き先 | `src/application/supervise/execution/landing.rs`の`Supervisor::begin_review`・`review_route`、`supervise/execution/provider.rs` |
+| jobの起動・やり直し・判定 | `landing.rs`の`Supervisor::tend_review`、`supervise/execution/jobs.rs`、`src/domain/review_jobs.rs` |
 | verdictごとの進め方 | `landing.rs`の`act_on_verdict`・`act_on_concern`、`src/domain/concern.rs` |
-| reviseと衝突の待ち | `supervise/revise.rs`の`ReviseWatch`、回数は`src/domain/run/history.rs` |
+| reviseと衝突の待ち | `supervise/execution/revise.rs`の`ReviseWatch`、回数は`src/domain/run/history.rs` |
 | 理由のコードと上限の後の判定 | `src/domain/review_reason.rs` |
 | askとその答え | `landing.rs`の`ask_approve_landing`・`apply_landing_answers`、`src/domain/mod.rs`の`LandingAnswer` |
-| 引き継ぎ | `supervise/adopt.rs` |
+| 引き継ぎ | `supervise/execution/adopt.rs` |
 | reviewのprompt | `src/application/prompt/`の`review_prompt` |
 | reviewのsubagent | `src/application/review.rs`、`src/domain/review_subagents.rs` |
 
@@ -120,7 +120,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 
 ## reviewのprovider
 
-- 行き先はreviewの開始とjobの起動のたびにjobごとに決める（入口は`landing.rs`の`Supervisor::review_route`と`supervise/provider.rs`の`review_route`）。
+- 行き先はreviewの開始とjobの起動のたびにjobごとに決める（入口は`landing.rs`の`Supervisor::review_route`と`supervise/execution/provider.rs`の`review_route`）。
 - Codexのreviewはworktreeのprojectを信頼しない（[ADR-t1570-1](../../adr/2026-10-04-t1570-1-codex-run-review-distrusts-the-worktree-project.md)）。
 - 控えるのは実際に失敗したproviderだけで、起動できないjobは他のjobの答えを保ったまま待つ（[Queue hold](queue-hold.md)）。
 - 落とし穴: 引数・envの大きさによる起動の失敗はproviderの問題でないので、控えも切り替えもしない。

@@ -55,7 +55,7 @@ sessionの区間 ── 稼働時間・tokens・model・作業の内訳
 - コマンドは値の`CommandSpec`で返し、起動は`Spawner` portが行うので、supervisorとsession wrapperはプロセスを直接扱わない。
 - AI actorの起動は全て`ActorExecutor`を通る（[Roles](supervisor-lifecycle/roles.md#actorの起動actorexecutor)）。
 - Claude Codeのsettingsはadapter（`src/infrastructure/adapters.rs`）が持ち、headless jobは権限の意図（`JobAccess`）だけを渡す（[ADR-t1063-1](../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)）。
-- 切り替えの判断は`domain::provider_switch`と`domain::actor_model`の純粋な関数が持ち、`supervise::provider`は記録と依頼だけを行う。
+- 切り替えの判断は`domain::provider_switch`と`domain::actor_model`の純粋な関数が持ち、`supervise::execution::provider`は記録と依頼だけを行う。
 
 ## 不変条件
 
@@ -158,7 +158,7 @@ workerのproviderはtaskが選び、経路は非対話だけ（[ADR-t813-2](../a
 
 [ADR-t2080-1](../adr/2026-10-08-t2080-1-fresh-session-on-send-back-and-resume-when-peak-context-exceeds-threshold.md)。
 
-- 入口: 判定は`domain::fresh_session::next_session`、記録と依頼は`supervise::session`。
+- 入口: 判定は`domain::fresh_session::next_session`、記録と依頼は`supervise::execution::session`。
 - 約束: 新しいsessionは`provider_switched`と同じ区切りで、providerを変えない。
 - 落とし穴: Claude Codeは使われた`--session-id`を拒むので、新しいsessionは新しい名前になる（`domain::turn::session_name`）。
 

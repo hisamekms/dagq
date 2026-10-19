@@ -53,12 +53,8 @@ module | src/application/planner_handoff.rs | planning |
 module | src/application/planner_request.rs | planning |
 module | src/application/prompt/planners.rs | planning | inbox_prompt
 module | src/application/prompt/plan_review.rs | planning | plan_review_prompt
-module | src/application/supervise/plan_review.rs | planning |
-module | src/application/supervise/goal_review.rs | planning |
-module | src/application/supervise/request_planner.rs | planning |
-module | src/application/supervise/draft_planner.rs | planning |
-module | src/application/supervise/finding_planner.rs | planning |
-module | src/application/supervise/planner_turns.rs | planning |
+module | src/application/supervise/planning.rs | planning |
+module | src/application/supervise/planning/ | planning |
 module | src/application/session.rs | execution |
 module | src/application/headless_session.rs | execution |
 module | src/application/integrate.rs | execution |
@@ -87,15 +83,8 @@ module | src/application/main_log.rs | observation |
 module | src/application/main_log/ | observation |
 module | src/application/health/report.rs | observation | status
 module | src/application/health/attention.rs | observation | attention
-module | src/application/supervise/ci_watch.rs | observation |
-module | src/application/supervise/main_log.rs | observation |
-module | src/application/supervise/forecast.rs | observation |
-module | src/application/supervise/live_alerts.rs | observation |
-module | src/application/supervise/ledger.rs | observation |
-module | src/application/supervise/observer.rs | observation |
-module | src/application/supervise/push.rs | observation |
-module | src/application/supervise/report.rs | observation |
-module | src/application/supervise/throughput_review.rs | observation |
+module | src/application/supervise/observation.rs | observation |
+module | src/application/supervise/observation/ | observation |
 module | src/application/lifecycle.rs | host | up, down
 module | src/application/install.rs | host |
 module | src/application/update.rs | host |
@@ -110,18 +99,8 @@ module | src/application/actor_executor.rs | host |
 module | src/application/execution.rs | host |
 module | src/application/release_update.rs | host |
 module | src/application/health/host.rs | host | supervisors, roles
-module | src/application/supervise/cleanup.rs | host |
-module | src/application/supervise/disk.rs | host |
-module | src/application/supervise/host_metrics.rs | host |
-module | src/application/supervise/queue_service.rs | host |
-module | src/application/supervise/queue_broker.rs | host |
-module | src/application/supervise/broker_relay.rs | host |
-module | src/application/supervise/release.rs | host |
-module | src/application/supervise/sccache.rs | host |
-module | src/application/supervise/update.rs | host |
-module | src/application/supervise/sweep.rs | host |
-module | src/application/supervise/handoff.rs | host |
-module | src/application/supervise/inbox_nudge.rs | host |
+module | src/application/supervise/host_ops.rs | host |
+module | src/application/supervise/host_ops/ | host |
 
 # Ports of src/application/ports/<context>.rs.
 port | TaskReads | public | all | the reads of the tasks, goals, proposals and notes
@@ -267,26 +246,26 @@ method | SupervisorRegistry | assert_repository | execution |
 method | SupervisorRegistry | set_supervisor_mode | execution |
 
 # Values and functions lent to other contexts.
-item | src/application/supervise/contexts.rs | PlanningState | planning | execution | the stop and the end of a carried-over review
+item | src/application/supervise/planning.rs | PlanningState | planning | execution | the stop and the end of a carried-over review
 item | src/domain/stats/conflicts.rs | ConflictHotspot | planning | execution | the conflict hotspots
 item | src/domain/run.rs | TaskRun | execution | all | the view of a run, as a value
-item | src/application/supervise/jobs.rs | JobDesk | execution | planning | jobs and providers
-item | src/application/supervise/claim_defer.rs | DeferWatch | execution | planning | the file of the forecast
-item | src/application/supervise/background.rs | stop_swept_wrapper | execution | host | the stop of a wrapper, for the sweep
-item | src/application/supervise/recheck.rs | build_dirs | execution | host | the declarations' build outputs, for the cleaning of free disk
-item | src/application/supervise/recheck.rs | clear_targets | execution | host | under recheck's lock, for the cleaning of free disk
+item | src/application/supervise/execution/jobs.rs | JobDesk | execution | planning | jobs and providers
+item | src/application/supervise/execution/claim_defer.rs | DeferWatch | execution | planning | the file of the forecast
+item | src/application/supervise/execution/background.rs | stop_swept_wrapper | execution | host | the stop of a wrapper, for the sweep
+item | src/application/supervise/execution/recheck.rs | build_dirs | execution | host | the declarations' build outputs, for the cleaning of free disk
+item | src/application/supervise/execution/recheck.rs | clear_targets | execution | host | under recheck's lock, for the cleaning of free disk
 item | src/application/ci_watch.rs | known_failures | observation | execution | to the landing's verification
 item | src/application/ci_watch.rs | run_known_failures | observation | execution | to the worker's prompts and the run's whole review
-item | src/application/supervise/ci_watch.rs | CiWatchState | observation | execution | read held and unreadable only; supervise::ci_watch changes it
+item | src/application/supervise/observation/ci_watch.rs | CiWatchState | observation | execution | read held and unreadable only; supervise::ci_watch changes it
 item | src/domain/throughput_review.rs | UnusableFinish | observation | execution | supervise::provider holds it back once
-item | src/application/supervise/observer.rs | UnusableTimerJob | observation | execution | supervise::provider holds it back once
-item | src/application/supervise/report.rs | ReportPort | observation | host | where the KPI push goes, for inbox_nudge
+item | src/application/supervise/observation/observer.rs | UnusableTimerJob | observation | execution | supervise::provider holds it back once
+item | src/application/supervise/observation/report.rs | ReportPort | observation | host | where the KPI push goes, for inbox_nudge
 item | src/application/queue_broker.rs | BrokerGate | host | execution | whether the broker runs, through ContainerRuntime
 item | src/application/podman_machine.rs | MachineGate | host | execution | whether the dagq machine can be used, through ContainerRuntime
 item | src/application/queue_broker.rs | VerificationToken | host | execution | the token of one verification, revoked at its end
 item | src/application/container_image.rs | ImageGate | host | execution | whether the container image can be had, through ContainerRuntime
 item | src/application/broker_relay.rs | RelayGate | host | execution | whether the runs' relays are kept, through ContainerRuntime
-item | src/application/supervise/contexts.rs | HostOpsState | host | execution | free disk and sccache, read
-item | src/application/supervise/cleanup.rs | CleanupWatch | host | execution | cleaning and defer
-item | src/application/supervise/sccache.rs | ensure_sccache | host | execution |
-item | src/application/supervise/sccache.rs | sccache_look | host | execution |
+item | src/application/supervise/host_ops.rs | HostOpsState | host | execution | free disk and sccache, read
+item | src/application/supervise/host_ops/cleanup.rs | CleanupWatch | host | execution | cleaning and defer
+item | src/application/supervise/host_ops/sccache.rs | ensure_sccache | host | execution |
+item | src/application/supervise/host_ops/sccache.rs | sccache_look | host | execution |

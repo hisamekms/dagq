@@ -1,25 +1,11 @@
 #!/bin/sh
-# Check the forbidden dependencies between the layers of the runtime, and
-# between the split contexts of the supervisor, of the ports and of the
-# composition root. The rules (their IDs L2's part clippy cannot hold, C3
-# and C8; clippy.toml holds L2's rest, L4 and L7's clock), what counts in
-# short and the allow list's place are in
+# Check the forbidden dependencies between the layers of the runtime and
+# between the port modules of the contexts. The rules (their IDs L2's part
+# clippy cannot hold and C8; clippy.toml holds L2's rest, L4 and L7's
+# clock), what counts in short and the allow list's place are in
 # docs/design/architecture.md, sections "レイヤーの規則", "コンテキストの規則"
 # and "検査の範囲"; the allow list's format is in its own header
 # (.config/layer-deps-allow.txt); the details of what counts are here.
-#
-# C3 counts in the files of $c3_files under src/application/supervise/ (the
-# submodules that own 計画管理's, 観測と分析's and host運用's state): a
-# reference to the loop's struct `Supervisor` or its `Slot` and `Phase`, or
-# to the module `stages`, its states or the e2e's `E2eWaits`, through which
-# the state of 実行と着地 is reached, is forbidden there, inside tests too.
-# 実行と着地 lends its jobs and providers to 計画管理 through `JobDesk`,
-# whose operations change them. It also counts in the
-# files of $c3_stage_files (実行と着地's state by stage): a reference to
-# `Supervisor` or to the module `contexts` or its states (the other
-# contexts' state and the pass's view of the loop) is forbidden there.
-# Each name counts bare, through `super::` and through
-# `crate::application::supervise::`.
 #
 # C8 counts in the context modules of src/application/ports/ (every file
 # but mod.rs), outside their inline modules (where `super` is the file's own
@@ -36,10 +22,11 @@
 # package, so clippy cannot forbid them in the domain only.
 #
 # L1, L3, L6, L8 and L9 are checked by the Rust test of the module
-# references (src/context_boundaries/modules.rs), not here.
+# references (src/context_boundaries/modules.rs), and C3 by the visibility
+# of the supervisor's context modules, not here.
 #
 # What counts is the path of a reference (`std::process::id`,
-# `super::contexts::HostOpsState`), with a grouped `use crate::{a, b}` expanded
+# `super::shared::Clock`), with a grouped `use crate::{a, b}` expanded
 # into one path each. Comments (`//`, `//!`, `///` and `/* */`, nested ones
 # too), doc links and string and character literals do not count.
 # A cfg is taken for test when its predicate requires test: `test` itself,
@@ -53,7 +40,7 @@
 # at the module's place, inline modules' names included); a test module
 # inside an inline module is handled and the range ends where it ends. An
 # inner `#![cfg(test)]` at the top of a file makes the whole file test.
-# Inside a test range C3 and C8 count and L2 does not.
+# Inside a test range C8 counts and L2 does not.
 #
 # Every occurrence the rules forbid must have its (rule, path, reference) in
 # the allow list (.config/layer-deps-allow.txt, or LAYER_DEPS_ALLOW_FILE),
@@ -72,9 +59,8 @@
 # itself on small fixtures in a temporary directory under ${TMPDIR:-target/}
 # (no violation, one not in the list, a stale item, an item without a task,
 # references only in comments and strings, nested block comments, the cfg
-# forms above, a test range inside an inline module, the C3 references
-# of a split context and of a stage and the C8 references) and removes
-# them.
+# forms above, a test range inside an inline module and the C8
+# references) and removes them.
 #
 # Exit 0 when every occurrence is allowed and no item is stale, 1 when an
 # occurrence is not allowed, an item is stale or the allow list is malformed
@@ -82,13 +68,9 @@
 set -eu
 
 me=check-layer-deps
-# The submodules of src/application/supervise/ that rule C3 is checked on.
-c3_files="contexts ci_watch main_log forecast live_alerts observer push report throughput_review cleanup disk host_metrics queue_service release sccache update sweep handoff inbox_nudge plan_review goal_review request_planner draft_planner finding_planner planner_turns"
 # Rule C8: each port module of src/application/ports/ and the modules it may
 # name, "module:allowed,allowed"; a port module not listed may name none.
 c8_ok="planning:shared execution:shared host:shared,execution observation:shared,planning,execution,host shared:planning,execution,observation,host"
-# The submodules that hold 実行と着地's state by stage, checked by C3 too.
-c3_stage_files="stages"
 script=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 repo=$(git rev-parse --show-toplevel 2>/dev/null) || repo=$(cd "$(dirname "$0")/.." && pwd)
 
@@ -98,27 +80,14 @@ scan() {
   files=$(find src -type f -name '*.rs' 2>/dev/null | LC_ALL=C sort)
   [ -n "$files" ] || return 0
   # shellcheck disable=SC2086
-  LC_ALL=C awk -v c3_files="$c3_files" -v c3_stage_files="$c3_stage_files" -v c8_ok="$c8_ok" '
+  LC_ALL=C awk -v c8_ok="$c8_ok" '
 BEGIN {
   # The patterns per layer, "rule:pattern"; a pattern starting with ^
   # matches at the start of a path, otherwise anywhere in it. The rules in
-  # prod do not count inside #[cfg(test)]; C3 counts there too.
+  # prod do not count inside #[cfg(test)].
   prod["domain"] = "L2:^std::process L2:^std::net L2:^anyhow"
-  n = split(c3_files, o, " ")
-  for (i = 1; i <= n; i++) c3["src/application/supervise/" o[i] ".rs"] = 1
   n = split(c8_ok, o, " ")
   for (i = 1; i <= n; i++) { split(o[i], kv, ":"); c8[kv[1]] = "," kv[2] "," }
-  n = split(c3_stage_files, o, " ")
-  for (i = 1; i <= n; i++) c3s["src/application/supervise/" o[i] ".rs"] = 1
-  c3_names = c3_patterns("Supervisor Slot Phase stages ClaimState SlotTable LandingState ResumeState TriageState ProviderState E2eWaits")
-  c3s_names = c3_patterns("Supervisor contexts ObservationState HostOpsState PassEnv")
-}
-# c3_patterns prints the C3 patterns of each of the names: bare, through
-# super:: and through crate::application::supervise::.
-function c3_patterns(names,   m, i, nm, out) {
-  m = split(names, nm, " "); out = ""
-  for (i = 1; i <= m; i++) out = out " C3:^" nm[i] " C3:^super::" nm[i] " C3:^crate::application::supervise::" nm[i]
-  return substr(out, 2)
 }
 function load(lst, test,   m, i, it) {
   m = split(lst, it, " ")
@@ -141,8 +110,6 @@ function reset_file() {
   if (FILENAME ~ /^src\/application\/ports\/[a-z_]+\.rs$/ && FILENAME != "src/application/ports/mod.rs") {
     port = FILENAME; sub(/^.*\//, "", port); sub(/\.rs$/, "", port)
   }
-  if (FILENAME in c3) load(c3_names, 1)
-  if (FILENAME in c3s) load(c3s_names, 1)
 }
 function check(p, ln, t, dot,   i, hit, seg) {
   if (p == "") return
@@ -368,8 +335,8 @@ check_tree() {
         if (m < 5) { print me ": " show ":" i ": want rule | path | reference | task | reason" > "/dev/stderr"; bad = 1; continue }
         rule = trim(f[1]); path = trim(f[2]); r = trim(f[3]); task = trim(f[4])
         reason = f[5]; for (j = 6; j <= m; j++) reason = reason "|" f[j]; reason = trim(reason)
-        if (rule !~ /^(L2|C[38])$/ || path !~ /^src\// || r == "" || task !~ /^[1-9][0-9]*( *, *[1-9][0-9]*)*$/ || reason == "") {
-          print me ": " show ":" i ": want a rule (L2, C3, C8), a path under src/, a reference, task IDs (1234 or 1234, 1235) and a reason" > "/dev/stderr"; bad = 1; continue
+        if (rule !~ /^(L2|C8)$/ || path !~ /^src\// || r == "" || task !~ /^[1-9][0-9]*( *, *[1-9][0-9]*)*$/ || reason == "") {
+          print me ": " show ":" i ": want a rule (L2, C8), a path under src/, a reference, task IDs (1234 or 1234, 1235) and a reason" > "/dev/stderr"; bad = 1; continue
         }
         k = rule "\t" path "\t" r
         if (k in item) { print me ": " show ":" i ": " rule " " path " " r " is listed twice" > "/dev/stderr"; bad = 1; continue }
@@ -571,21 +538,6 @@ fn production() {}
 EOF
   expect 1 "attribute_ref" "$tmp/attribute_ref" "L2 forbids std::process"
 
-  base context
-  mkdir -p "$tmp/context/src/application/supervise"
-  cat >"$tmp/context/src/application/supervise/report.rs" <<'EOF'
-//! A pass of a split context; Supervisor is named in a comment only.
-pub(super) fn pass(state: &mut ReportWatch, env: &mut PassEnv<'_>) {}
-EOF
-  cat >"$tmp/context/src/application/supervise/landing.rs" <<'EOF'
-impl Supervisor<'_> { fn landing(&mut self) { self.slots.clear(); } }
-EOF
-  expect 0 "C3: a split context's file names no state of the loop" "$tmp/context"
-  cat >>"$tmp/context/src/application/supervise/report.rs" <<'EOF'
-impl Supervisor<'_> { fn slots(&self) -> usize { self.slots.len() } }
-EOF
-  expect 1 "C3: a split context's file reaches the loop's state" "$tmp/context" "src/application/supervise/report.rs:3: C3 forbids Supervisor"
-
   base ports
   mkdir -p "$tmp/ports/src/application/ports"
   cat >"$tmp/ports/src/application/ports/mod.rs" <<'EOF'
@@ -617,40 +569,18 @@ EOF
   expect 1 "C8: a port module globs the re-exports" "$tmp/ports" "src/application/ports/observation.rs:3: C8 forbids super::*"
   expect 1 "C8: a port module names ports through super::super" "$tmp/ports" "src/application/ports/observation.rs:3: C8 forbids super::super::ports"
 
-  base stage
-  mkdir -p "$tmp/stage/src/application/supervise"
-  cat >"$tmp/stage/src/application/supervise/stages.rs" <<'EOF2'
-//! A stage's state; Supervisor and contexts are named in a comment only.
-pub(super) struct SlotTable { slots: Vec<Slot> }
-impl SlotTable { fn admit(&mut self, slot: Slot) { self.slots.push(slot); } }
-EOF2
-  cat >"$tmp/stage/src/application/supervise/report.rs" <<'EOF2'
-pub(super) fn pass(state: &mut ReportWatch) {}
-EOF2
-  expect 0 "C3: a stage's file names only its own state and the slots" "$tmp/stage"
-  cat >>"$tmp/stage/src/application/supervise/stages.rs" <<'EOF2'
-fn cleaning(host: &super::contexts::HostOpsState) {}
-EOF2
-  expect 1 "C3: a stage's file reaches another context's state" "$tmp/stage" "src/application/supervise/stages.rs:4: C3 forbids super::contexts"
-  cat >>"$tmp/stage/src/application/supervise/report.rs" <<'EOF2'
-fn slots(claim: &ClaimState) -> usize { claim.slots.len() }
-EOF2
-  expect 1 "C3: a split context's file reaches a stage's state" "$tmp/stage" "src/application/supervise/report.rs:2: C3 forbids ClaimState"
-
   base allowed
-  mkdir -p "$tmp/allowed/src/application/supervise"
-  echo "impl Supervisor<'_> { fn n(&self) -> usize { self.slots.len() } }" >"$tmp/allowed/src/application/supervise/report.rs"
-  echo 'C3 | src/application/supervise/report.rs | Supervisor | 1 | fixture' >"$tmp/allowed/allow.txt"
+  echo 'fn io() { std::process::exit(1); }' >>"$tmp/allowed/src/domain/run.rs"
+  echo 'L2 | src/domain/run.rs | std::process | 1 | fixture' >"$tmp/allowed/allow.txt"
   expect 0 "violation in the allow list" "$tmp/allowed"
 
   base stale
-  echo 'C3 | src/application/supervise/report.rs | Supervisor | 1 | fixture' >"$tmp/stale/allow.txt"
-  expect 1 "stale item in the allow list" "$tmp/stale" "stale item C3 src/application/supervise/report.rs Supervisor"
+  echo 'L2 | src/domain/run.rs | std::process | 1 | fixture' >"$tmp/stale/allow.txt"
+  expect 1 "stale item in the allow list" "$tmp/stale" "stale item L2 src/domain/run.rs std::process"
 
   base notask
-  mkdir -p "$tmp/notask/src/application/supervise"
-  echo "impl Supervisor<'_> { fn n(&self) -> usize { self.slots.len() } }" >"$tmp/notask/src/application/supervise/report.rs"
-  echo 'C3 | src/application/supervise/report.rs | Supervisor | | fixture' >"$tmp/notask/allow.txt"
+  echo 'fn io() { std::process::exit(1); }' >>"$tmp/notask/src/domain/run.rs"
+  echo 'L2 | src/domain/run.rs | std::process | | fixture' >"$tmp/notask/allow.txt"
   expect 1 "allow item without a task ID" "$tmp/notask" "allow.txt:1: want a rule"
 
   base moved_rule

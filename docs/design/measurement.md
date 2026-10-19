@@ -137,7 +137,7 @@ supervisorの生存と停止の証拠はEventStoreに残し、一生の終わり
 
 ### 今の判定の記録
 
-statsのslotの今の判定は状態表・run dirのmarker・processを入力に今を判定するので、supervisorの周回がその入力を観測してEventStoreに記録し、統計はeventだけから同じ値を作れる（`domain::live_alerts`、`application::supervise::live_alerts`）。
+statsのslotの今の判定は状態表・run dirのmarker・processを入力に今を判定するので、supervisorの周回がその入力を観測してEventStoreに記録し、統計はeventだけから同じ値を作れる（`domain::live_alerts`、`supervise::observation::live_alerts`）。
 
 - **観測**: どのsupervisorも`OBSERVE_INTERVAL_SECS`ごとに、自分のslotやleaseに限らずqueue全体をstatsと同じ読み方で読み、statsと同じ判定の関数（`live_alerts::judge`）で判定する。
   警告の鍵（`AlertKey`）はleaseの持ち主を含めないので、leaseが移っても何も書かない。
@@ -187,7 +187,7 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 
 ## 台帳を作る係
 
-何を書くかは`domain::ledger::builder`が決め（数値は定数）、`application::supervise::ledger`が書く。
+何を書くかは`domain::ledger::builder`が決め（数値は定数）、`supervise::observation::ledger`が書く。
 
 - **周回**: supervisorの周回が間隔ごとに、drainとhandoffの間も、jobのthreadで動く（D7）。
   着地の処理の中では作らず、runtimeの制御（claim・slot・resume・着地）は台帳を読まない。

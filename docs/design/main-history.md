@@ -16,7 +16,7 @@ related:
 # mainの履歴の記録
 
 `conflict_hotspots`の着地件数と改名・削除、areaの変えたfile（[stats](supervisor-lifecycle/commands.md)）を統計がGitを読まずに作れるよう、supervisorの周回がmainのfirst-parentの履歴を`main_*`のeventとしてEventStore（[計測](measurement.md)の「SSOTとビュー」）に記録する。
-何を書くかは`application::main_log::records`が決め、周回からは観測と分析の`supervise::main_log`が呼ぶ。
+何を書くかは`application::main_log::records`が決め、周回からは観測と分析の`supervise::observation::main_log`が呼ぶ。
 runtimeの制御はこの記録を読まない。
 
 - **3つの時刻**: commitの時刻（committerの時刻）、観測したhead（最後に正常に読んだhead）、到達時刻（Gitを正常に読み、観測したheadまでが記録済みと確かめた時刻）。

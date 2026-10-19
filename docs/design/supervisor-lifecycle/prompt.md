@@ -187,7 +187,7 @@ claimのたびに、supervisorはworkerが読む指示の内容のhashを3つ求
 
 - 入口: `recovery_prompt`。
 - どのworkerの記録でも非対話の操作だけを案内し、画面のダイアログに答える操作と閉じて進める操作は許す操作から除く（`HEADLESS_NEVER`）。
-  返されてもsupervisorの`check_live`（`src/application/supervise/recovery.rs`）が拒む。
+  返されてもsupervisorの`check_live`（`src/application/supervise/execution/recovery.rs`）が拒む。
 - `send_instruction`は次のturnの依頼で、画面の代わりにturnの抜粋を読む。
 - verdictのschemaの後に、jobの足すoptionの種類の宣言と、runtimeの操作や完了・cancelと紛らわしいoptionを足さない規則を書く（[ADR-t1818-2](../../adr/2026-10-05-t1818-2-recovery-job-options-map-to-runtime-options-or-pass-back.md)。終わったrunは`RECOVERY_ENDED_OPTIONS_RULE`、生きているsessionは`RECOVERY_LIVE_OPTIONS_RULE`）。
   固定の文で末尾にあるので、全体の上限を超えて中ほどを切っても残り、`RECOVERY_PROMPT_LIMIT`の中に収まる。

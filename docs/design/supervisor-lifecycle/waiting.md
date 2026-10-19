@@ -26,7 +26,7 @@ related:
 
 [ADR-0062](../../adr/0062-runs-waiting-for-a-person-leave-the-slot.md)の実装（決定は[ADR-0071](../../adr/0071-runs-waiting-in-revise-and-resume-leave-the-slot.md)が置き換えて引き継いだ）。
 生きているsessionを持つrunが人の答えか人の操作だけを待っているあいだ、そのrunを並列の上限のslotから外し（**待ち**）、空いたslotで他のtaskをclaimする。
-use caseは`src/application/supervise/waiting.rs`、イベントからの状態の導出と`stats`の集計は`src/domain/waiting.rs`。
+use caseは`src/application/supervise/execution/waiting.rs`、イベントからの状態の導出と`stats`の集計は`src/domain/waiting.rs`。
 
 着地の順番を待つだけのrun（reviewとe2eを終え、他のrunの着地が終わるのだけを待つ`awaiting_integration`のrun）も、並列の上限の件数まではslotの外に数えるもう1つの待ちで、それが空けた枠は`[supervisor] light_changes`の軽いtaskだけが使う（[ADR-t1591-1](../../adr/2026-10-04-t1591-1-landing-queue-leaves-room-for-light-changes.md)。判定は[claimを控える](claim-hold.md#着地待ちが空けた軽い枠)）。
 人の待ちとは別のもので、印は`Slot::landing_turn`、`used_slots()`には含め（resume・戻り・重いtaskのclaimの判定は変わらない）、待ちの上限にも待ちの数にも数えない（sessionを閉じてから着地を待つので、上限の根拠のsessionのメモリを使わない）。

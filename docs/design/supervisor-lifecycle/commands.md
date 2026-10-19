@@ -29,7 +29,7 @@ related:
 | `stats` | `domain::stats`のmodule doc、`application::stats::stats`、`compose::OneShot::stats_of` |
 | `kpi` | `domain::kpi`のmodule doc、`application::kpi::kpi`、`compose::OneShot::kpi_of` |
 | `mark` / `marks` | `domain::marks`のmodule doc、`application::marks` |
-| `report` | `domain::kpi::report`、`application::report`、supervisorの日次は`application::supervise::report` |
+| `report` | `domain::kpi::report`、`application::report`、supervisorの日次は`application::supervise::observation::report` |
 | `timeline` | `domain::timeline`、`compose::observation::timeline` |
 | `status` | `application::health`の`status`とattentionの導出`attention`、`compose::OneShot::status_of` |
 | `doctor` | `application::health`の`doctor`、`compose::OneShot::doctor` |

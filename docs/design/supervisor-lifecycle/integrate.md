@@ -56,10 +56,10 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 - ユースケースの本体は`src/application/integrate.rs`で、module docが範囲を持つ（ADR-0013の方針1と8）。
 - 着地とpushは`Integrator`だけが行い、依頼者は`IntegrationRequest`を渡す（[ADR-t728-2](../../adr/2026-09-27-t728-2-landing-only-by-the-trusted-integrator.md)、[Authorization](../authorization.md#着地とpushintegrator)）。
 - 承認の段は`Integrator::approve`（本体は`begin`）、着地の段は`Integrator::land`（本体は`land_integrating`と`land`）で、どちらもportの束`Integration`だけを受ける。
-- 人の`integrate`の入口は`compose::OneShot::integrate`、supervisorの着地は`src/application/supervise/landing.rs`である。
+- 人の`integrate`の入口は`compose::OneShot::integrate`、supervisorの着地は`src/application/supervise/execution/landing.rs`である。
 - validationの`check_receipt`も同じfileにあり、着地のreceiptの検査と判定を共有する（[Validation](validation.md#validation)）。
 - 結果の意味は`IntegrationOutcome`のdoc commentが持つ。
-- e2eは`application::supervise::e2e`、recheckは`application::supervise::recheck`と`domain::recheck`、landing branchは`domain::landing_branch`が持つ。
+- e2eは`application::supervise::execution::e2e`、recheckは`application::supervise::execution::recheck`と`domain::recheck`、landing branchは`domain::landing_branch`が持つ。
 
 ## 不変条件
 

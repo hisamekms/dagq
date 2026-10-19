@@ -68,9 +68,9 @@ stats / kpi
 | turnの分（累計との差、前のturnが数えたroot turn） | `domain::turn` |
 | jobの終わりへの記録 | `domain::headless_job::JobSession` |
 | 同じjobの終わりを重ねて数えない判定 | `domain::headless_job::JobOn` |
-| runのreviewのjobと行の対応 | `domain::review_jobs::ReviewJobId::agent`・`supervise::jobs::JobSubject::label`・`domain::review_jobs::runs_again` |
-| 死んだsupervisorのjobの記録 | `supervise::jobs::close_taken_over` |
-| 前のreviewを引き継いだ側の記録 | `supervise::adopt::adopted_review_failed` |
+| runのreviewのjobと行の対応 | `domain::review_jobs::ReviewJobId::agent`・`supervise::execution::jobs::JobSubject::label`・`domain::review_jobs::runs_again` |
+| 死んだsupervisorのjobの記録 | `supervise::execution::jobs::close_taken_over` |
+| 前のreviewを引き継いだ側の記録 | `supervise::execution::adopt::adopted_review_failed` |
 
 - 引き継ぎで閉じたjobの記録の置き場は[Headless job processes](supervisor-lifecycle/headless-job-processes.md#引き継ぎ)と同じ。
 

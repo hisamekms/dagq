@@ -54,9 +54,9 @@ fill pass（adopt・answerの適用・resume・triage・sweepの後）
 ## 責務と境界
 
 - queue全体の控えの判定は`domain::claim_hold::ClaimHold::judge`で、supervisorの側は`Supervisor::hold_claims`である。
-- 候補ごとの控えの判定は`domain::claim_defer`（hotspot・worker）と`domain::build_wait`、supervisorの側は`application/supervise/claim_defer.rs`である。
+- 候補ごとの控えの判定は`domain::claim_defer`（hotspot・worker）と`domain::build_wait`、supervisorの側は`application/supervise/execution/claim_defer.rs`である。
 - claimの間隔は`domain::claim_spacing`、軽い枠は`domain::light_slots`、実行区分の上限とagingは`domain::claim_order`、調査中の計画は`domain::investigation`が持つ。
-- 空き容量の閾値は`domain::disk`、確かめと掃除と着地の控えは`application/supervise/disk.rs`が持つ。
+- 空き容量の閾値は`domain::disk`、確かめと掃除と着地の控えは`application/supervise/host_ops/disk.rs`が持つ。
 - 認証と利用上限のaskの検知・answerの適用・askを閉じることは[認証と利用上限のaskの待ちとanswer](queue-hold.md)が持ち、ここはその控えだけを持つ。
 - taskを1つずつ待たせるholdは別の層で、下の「taskのhold」。
 
@@ -279,7 +279,7 @@ Spikeは実装とworkerの総枠を共有し、枠を予約しない（[ADR-t148
 
 ## taskのhold
 
-- taskを1つずつ待たせるhold（[ADR-t1879-1](../../adr/2026-10-07-t1879-1-hold-a-task-at-the-turn-boundary-and-release-it-explicitly.md)）は、fill passの列（resume・復旧job・claim）に入る前に外れ、外したことを工程ごとに1回残す（`supervise::task_hold`）。
+- taskを1つずつ待たせるhold（[ADR-t1879-1](../../adr/2026-10-07-t1879-1-hold-a-task-at-the-turn-boundary-and-release-it-explicitly.md)）は、fill passの列（resume・復旧job・claim）に入る前に外れ、外したことを工程ごとに1回残す（`supervise::execution::task_hold`）。
 - 列を作った後にかかったholdも、claim・resume・triageの開始がトランザクションの中で読み直すので、その開始は起きない。
 - queue全体の控えではないので`claim_held`を書かず、`stats`の控えにも数えない。
 - 走っているrunは工程の終わりで再計画と同じ保留を通って待ちに入り（[needs_session](needs-session.md#taskのhold)）、それまでの解除は拒んでholdの印を変えない。

@@ -25,12 +25,12 @@ related:
 
 | 知りたいこと | コードの入口 |
 | --- | --- |
-| 段の流れと記録 | `src/application/supervise/landing.rs`の`start_review_programs` |
+| 段の流れと記録 | `src/application/supervise/execution/landing.rs`の`start_review_programs` |
 | 次の一手の判断と差し戻しの理由 | `src/domain/review_programs.rs`の`step` |
 | 一覧とscriptの読み込み | `src/application/review_programs.rs`の`snapshot_programs` |
-| jobの起動と終わり | `src/application/supervise/jobs.rs`の`start_review_program` |
+| jobの起動と終わり | `src/application/supervise/execution/jobs.rs`の`start_review_program` |
 | eventの欄 | `src/domain/event_kind.rs`の`REVIEW_PROGRAMS_STARTED`ほかのdoc comment |
-| 送れなかった差し戻しの引き継ぎ | `src/application/supervise/adopt.rs`の`programs_rejected_after` |
+| 送れなかった差し戻しの引き継ぎ | `src/application/supervise/execution/adopt.rs`の`programs_rejected_after` |
 
 ## 範囲
 

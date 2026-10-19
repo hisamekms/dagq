@@ -25,7 +25,10 @@ related:
 
 # Auto-update
 
-[ADR-0045](../../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定13・17。`up --auto-update`のsupervisorは、runtimeを変えるcommitがmainに着地するたびに、queueのdirの下でそのcommitをビルドし、同じcheckoutで全部のe2eを流して通ったときだけ（[ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)決定1）、[`install`](install.md#install)と同じ手順で固定バイナリを置き換えて自分を[引き継ぎ](handoff.md#handoff)で入れ替える。走っているsessionは止まらない。supervisor側は`src/application/supervise/update.rs`、ビルドから見張りまでのjobは`src/application/update.rs`（`run`）、CLIは隠しコマンド`dagq auto-update`、配線は`src/compose/host.rs`の`OneShot::auto_update`。
+[ADR-0045](../../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定13・17。
+`up --auto-update`のsupervisorは、runtimeを変えるcommitがmainに着地するたびに、queueのdirの下でそのcommitをビルドし、同じcheckoutで全部のe2eを流して通ったときだけ（[ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)決定1）、[`install`](install.md#install)と同じ手順で固定バイナリを置き換えて自分を[引き継ぎ](handoff.md#handoff)で入れ替える。
+走っているsessionは止まらない。
+supervisor側は`src/application/supervise/host_ops/update.rs`、ビルドから見張りまでのjobは`src/application/update.rs`（`run`）、CLIは隠しコマンド`dagq auto-update`、配線は`src/compose/host.rs`の`OneShot::auto_update`。
 
 - **有効にする**: `up --auto-update`は、起動するsupervisorの登録の`auto_update`を1にし（launchdの再起動でも同じ引数なので残る）、reuseや引き継ぎで残すliveな登録には`set_auto_update`で1を書く。
   `--auto-update`の無い`up`は同じ登録の`auto_update`を0にする。

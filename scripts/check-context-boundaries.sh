@@ -62,8 +62,9 @@
 #     calls a method of the port that is not public to it (a call cannot be
 #     tied to the trait by grep), and other contexts' use of ports through a
 #     field or a variable without naming the trait;
-#   - the files with no context (src/application/supervise/mod.rs, its
-#     stages and the modules not in a `module` item, src/compose/supervisor.rs,
+#   - the files with no context (src/application/supervise.rs,
+#     contexts.rs, execution.rs and execution/ (the loop and its stages),
+#     the modules not in a `module` item, src/compose/supervisor.rs,
 #     src/compose.rs, src/main.rs, src/domain/ and the rest);
 #   - an item of another module named as a port and brought in by `use`
 #     (the reference is taken for the port: the use path is not resolved);

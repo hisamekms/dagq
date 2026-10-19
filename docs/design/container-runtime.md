@@ -37,7 +37,7 @@ containerを選ばない限りhostのrunの振る舞いは変わらない。
 - 読むのは`infrastructure::run_env::parse_config`。
   適用先でない役割にcontainerを書いた`dagq.toml`は、読み込みが理由つきで拒む（`refuse_container`）。
   inboxは`dagq.toml`の役割の表に無く、表を書けば知らない役割として拒む。
-- supervisorは各passで読み直し（`supervise::container`）、`status`・`doctor`・`integrate`はそのたびにmain checkoutのファイルを読む。
+- supervisorは各passで読み直し（`supervise::execution::container`）、`status`・`doctor`・`integrate`はそのたびにmain checkoutのファイルを読む。
   `status`・`doctor`とwrapperは、queueが束縛されたcheckoutから`BoundRuntimes`で読み、束縛の無いqueueはhost、束縛が解決できなければ読むたびにerrorになる。
 
 ## fail closedの境界
@@ -145,7 +145,7 @@ containerのimageは、runtimeが持つbaseと、`dagq.toml`が名指すproject�
 ## brokerへの経路
 
 runのcontainerは`--network none`で、外への経路はhostのqueueのbrokerへの1本だけにする（[ADR-t2114-3](../adr/2026-10-08-t2114-3-worker-containers-reach-the-broker-through-a-unix-socket-relay.md)決定1〜4）。
-判断は`domain::broker_relay`、use caseと門は`application::broker_relay`、relay・転送のprocessとpodmanのコマンドは`infrastructure::broker_relay`、見張りは`supervise::broker_relay`が持つ。
+`broker_relay`のmoduleは、判断が`domain`、use caseと門が`application`、relay・転送のprocessとpodmanのコマンドが`infrastructure`、見張りが`supervise::host_ops`の下にある。
 
 - runのsocket: runのturnかverificationのcontainerを起動する前に、開いていなければ`application::broker_relay::open`が、machineの中にrunごとのnamed volumeを作ってそのrunのrelayを起動し、runの終わりに`close`がrelayとvolumeを消す。
   relayはrunのcontainerの非rootのuidで動き、そのcontainerと同じuidの対応（`keep-id`）でvolumeの中にsocketをmode 0600で作る。

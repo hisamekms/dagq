@@ -41,7 +41,7 @@ supervisorはinboxの画面を読まず、どのterminalにも打ち込まない
 ## supervisorによるinboxへの知らせ<a id="supervisorによるinboxへの知らせ"></a>
 
 [ADR-t1433-5](../../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)決定1の(3)。
-入口は`application::supervise::inbox_nudge`（閾値とeventのpayloadはそのdoc comment）で、supervisorは毎pass、drainの間も行う（drainはaskの答えを待つため）。
+入口は`application::supervise::host_ops::inbox_nudge`（閾値とeventのpayloadはそのdoc comment）で、supervisorは毎pass、drainの間も行う（drainはaskの答えを待つため）。
 
 - inboxのwatcherが`absent`（`application::inbox_watcher::judge_with`）で、inbox宛てのopenなaskが閾値より長く待つときだけ知らせる。
   待ちは、askを開いた時刻とwatcherを最後に見た時刻の遅い方から数え、watcherが見ていたあいだは数えない。

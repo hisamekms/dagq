@@ -54,7 +54,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - `dagq.toml`はrepositoryにcommitされ、値はworkerのwrapperとturnのprocessのenvに渡るので、secretは入れない。
 - この repositoryの`[run.env]`の値と理由、置かないものとsccacheの入れ方の規則は`dagq.toml`の`[run.env]`のコメント、`.config/nextest.toml`に並列度を書かない理由はその冒頭のコメント、その補足とほかのhostのツールの入れ方は[運用の開発文書](../../development/operations.md)の「`[run.env]`とtestの並列度の置き場」と「hostのツール」が持つ。
 - cargo-nextestは`[run.env]`が名指すプログラムではないので下の検査の対象ではなく、無いhostでは着地の検証の失敗になる（[ADR-t1925-1](../../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)の決定8がADR-0076から引き継ぐ）。
-- `[recheck]`は着地のたびにsupervisorが着地待ちのrunをmainに載せた木で実行する軽い検査で、keyの意味は`domain::recheck::RecheckConfig`、流れとcommandに渡るenvは`application::supervise::recheck`が持つ（[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)の決定2、[ADR-t2032-1](../../adr/2026-10-07-t2032-1-run-the-recheck-command-only-on-runs-touching-recheck-paths.md)）。
+- `[recheck]`は着地のたびにsupervisorが着地待ちのrunをmainに載せた木で実行する軽い検査で、keyの意味は`domain::recheck::RecheckConfig`、流れとcommandに渡るenvは`supervise::execution::recheck`が持つ（[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)の決定2、[ADR-t2032-1](../../adr/2026-10-07-t2032-1-run-the-recheck-command-only-on-runs-touching-recheck-paths.md)）。
 
 - `[review.subagents.<agent>]`はreviewのsubagentを必須にするglobで、`paths`（`--paths`・`[e2e] paths`と同じglobの規則の、1つ以上の文字列の配列）と任意の`provider`（[Review](review.md#agentのjobのprovider)）を持つ（[ADR-t1453-1](../../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md)の決定1）。
   - `<agent>`はkebab-caseで、定義のファイル`.dagq/agents/<agent>/AGENT.md`のdirectoryの名前になる（[ADR-t1728-1](../../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)）。
@@ -189,7 +189,7 @@ processや統計を読めないことだけでも壊れたものとは決めな�
 再起動に失敗した知らせを受けた人はdoctorでidentityとportを確かめ、hostでserverを止め、起動をsupervisorに任せる。
 supervisorが置換の起動を記録すると知らせが消え、人が別のserverを起動して検知されただけでは消えない。
 
-- 監視と再試行の入口は`application::supervise::sccache`。
+- 監視と再試行の入口は`supervise::host_ops::sccache`。
   drain中も監視し、待ちの経過は注入した時計で測る。
 - 判断はdomain、出どころと再起動の記録と確認はapplication、hostへの問い合わせと起動とguardのlinkはinfrastructureの、それぞれ`sccache`のmoduleが持つ。
   再起動の失敗の通知は、稼働中とserver不在の両経路から同じ照合を通る。

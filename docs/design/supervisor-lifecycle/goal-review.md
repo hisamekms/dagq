@@ -22,7 +22,7 @@ related:
 # Goal review (supervisor)
 
 所属taskがすべて終わったopenのgoalを、supervisorが起動するheadlessのgoal review jobがacceptanceと照合し、そのverdictと人のanswerをruntimeが適用する（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定43）。
-use caseは`src/application/supervise/goal_review.rs`、storeは`src/infrastructure/goal_reviews.rs`（port `GoalReviewStore`）、verdict・answer・起動の条件の型は`src/domain/goal_review.rs`、promptは`prompt::goal_review_prompt`。
+use caseは`src/application/supervise/planning/goal_review.rs`、storeは`src/infrastructure/goal_reviews.rs`（port `GoalReviewStore`）、verdict・answer・起動の条件の型は`src/domain/goal_review.rs`、promptは`prompt::goal_review_prompt`。
 plan reviewと同じくrun slotは使わず、loopの各passで進める（`goal_review_pass`）。
 `--once`のloopは走っているgoal reviewを待つ。
 drain中（`stop`、provisioningの失敗）は新しいgoal reviewを始めない（走っているjobとanswerの適用は続ける）。
@@ -125,5 +125,5 @@ execの[引き継ぎ](handoff.md)のあいだの回収と止め方は引き継�
    適用の時にgoalがもうachievedで閉じていなければ、askを閉じて`ask_closed`だけを記録する。
    走っている依存taskの停止と過去のeventの書き換えはどの答えでもしない。
 
-判断は`src/domain/goal_review.rs`のunit test、providerの行き先とjobの失敗の控えは`src/application/supervise/goal_review.rs`のunit test、境界は`tests/it/goal_review.rs`・`tests/it/goal_review_codex.rs`、follow_upの所属の判断と9の訂正は`tests/it/follow_up_membership.rs`が確かめる。
+判断は`src/domain/goal_review.rs`のunit test、providerの行き先とjobの失敗の控えは`src/application/supervise/planning/goal_review.rs`のunit test、境界は`tests/it/goal_review.rs`・`tests/it/goal_review_codex.rs`、follow_upの所属の判断と9の訂正は`tests/it/follow_up_membership.rs`が確かめる。
 runtimeの他のtestが使う`TestReviewer`（`tests/it/runtime_support`）はgoal reviewを起動させず失敗にするので、goalのtaskを着地させるtestではgoalは開いたまま残る。

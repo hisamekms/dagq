@@ -44,7 +44,7 @@
 
 出典: `docs/design/architecture.md`の「検査できる規則」「検査の範囲」、ADR-t2391-1。
 
-- `src/`の差分が足したものに、各規則の「検査」が全体のreviewを名指す部分を当てる: L5、L7の判断とeventのpayloadの組み立て、L8、C2の型で守られない部分、C3の残り、C4のuse caseの切り方、C5のscriptが見ない部分、C6、C8の例外の中身と`crate::application::X`を通す名指し、X2、X3。
+- `src/`の差分が足したものに、各規則の「検査」が全体のreviewを名指す部分を当てる: L5、L7の判断とeventのpayloadの組み立て、L8、L9の共有の配線の置き場、C2の型で守られない部分、C3の残り、C4のuse caseの切り方、C5のscriptが見ない部分、C6、C8の例外の中身と`crate::application::X`を通す名指し、X2、X3。
 - 規則の本文はarchitecture.mdの各IDが持ち、指摘には規則のIDを添える。scriptが見る部分と所有の一覧への記録の漏れは指摘しない。
 
 ## 文書の置き場と役割

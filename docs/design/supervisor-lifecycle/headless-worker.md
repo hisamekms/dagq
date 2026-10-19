@@ -88,8 +88,8 @@ supervisor
 | --- | --- |
 | wrapperの起動の待ち・登録・終わりの記録 | `src/application/session.rs`の`run_session` |
 | wrapperのturnの駆動・止める判断・記録 | `src/application/headless_session.rs`の`Turns` |
-| supervisorから見たsession・依頼の書き込み | `src/application/supervise/headless.rs` |
-| 終了の依頼と黙ったwrapper | `src/application/supervise/exit.rs`の`ExitWatch`・`wrapper_pulse` |
+| supervisorから見たsession・依頼の書き込み | `src/application/supervise/execution/headless.rs` |
+| 終了の依頼と黙ったwrapper | `src/application/supervise/execution/exit.rs`の`ExitWatch`・`wrapper_pulse` |
 | `turns/`のfileの名前・依頼・idle marker・turnのcostとトークン数 | `src/domain/turn.rs`の`TurnRequest` |
 | Claudeの呼び出しと出力の読み | `src/infrastructure/claude_turns.rs` |
 | Claudeのsessionの有無とtranscriptの置き場 | `src/infrastructure/transcripts.rs`の`ClaudeTranscripts` |
@@ -99,7 +99,7 @@ supervisor
 | idle markerの読み | `Supervisor::session_idle` |
 | backgroundの起動・停止・生死 | `src/infrastructure/background.rs`の`BackgroundWrappers`、`src/domain/background_wrapper.rs` |
 | 停止の記録・残ったturnの停止 | `application::recording`の`RecordingSessions` |
-| runtimeのplannerのturn | `src/application/supervise/planner_turns.rs` |
+| runtimeのplannerのturn | `src/application/supervise/planning/planner_turns.rs` |
 
 ## 経路の全体
 
@@ -242,7 +242,7 @@ workerはbaseが受け入れ条件をすでに満たし差分が要らないと�
 
 ## 待ちの最中に失ったsessionの開き直し
 
-非対話のrunは待ちのあいだagentのprocessを持たず、session・worktree・開いたaskはwrapperが死んでも残るので、[待ち](waiting.md)の最中にwrapperを失ったrunはruntimeが開き直して待ちを続ける（ADR-0047の第1層、`src/application/supervise/reopen.rs`のmodule docと定数）。
+非対話のrunは待ちのあいだagentのprocessを持たず、session・worktree・開いたaskはwrapperが死んでも残るので、[待ち](waiting.md)の最中にwrapperを失ったrunはruntimeが開き直して待ちを続ける（ADR-0047の第1層、`src/application/supervise/execution/reopen.rs`のmodule docと定数）。
 
 - 対象は最初のsessionの待ちで、receiptが無く、閉じていない`worker_question`か`stalled`のaskがあるrunだけで、上限を超えたら終了したsessionと同じ判定（ADR-t1594-1）で進める。
 - 最後のturnのprocessが生きていれば2つ目のsessionを開かず、失ったwrapperが動いていれば先に止め、止められなければ新しいwrapperを起動しない（同じ依頼を2つのwrapperが取らない）。

@@ -113,7 +113,7 @@ queue serviceと同じ手順に乗せる（[Queue service](queue-service.md#起�
 
 ## 見張りと知らせ
 
-- supervisor（`--once`でないもの）はserviceと同じ間隔と上限で見て、居ない・答えないbrokerを起動し直す（`supervise::queue_broker`）。
+- supervisor（`--once`でないもの）はserviceと同じ間隔と上限で見て、居ない・答えないbrokerを起動し直す（`supervise::host_ops::queue_broker`）。
   見る時期・窓の数え方・次の一手の判断は`domain::queue_broker::watch_step`ほかで、supervisorは注入した時計の単調時刻を値で渡す。
   drainと引き継ぎの間は見ない。
 - 起動し直せない・上限に達したときは、inbox宛てのattention `queue_broker_down`をDBに直接書き、brokerがまた動けば消える。

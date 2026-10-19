@@ -5,7 +5,7 @@
 # holds the format.
 #
 # One item per line, `rule | path | reference | task | reason`; lines that
-# start with `#` and blank lines are not read. rule is one of L2, C3 and C8
+# start with `#` and blank lines are not read. rule is L2 or C8
 # (what clippy.toml holds of L2, L4, L5 and L7 is not here; L1, L3, L6, L8
 # and L9 are allowed in the table of the Rust test,
 # src/context_boundaries/ownership.rs); path is a file from `src/`;

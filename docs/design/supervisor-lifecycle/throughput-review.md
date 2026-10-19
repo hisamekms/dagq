@@ -30,7 +30,7 @@ supervisorがtimerで毎時・日次・週次のスループットの見直し�
 
 - supervisorが見直しを始めるかは`SuperviseOptions::throughput_review`が決め、既定は`--help`が持つ。
   `up`が起動するsupervisorは既定で有効で、時間帯は既定でhostのもの（`clock::local_utc_offset`）。
-- 各passで走るものを回収し、無ければ期限の来たものを1つ子processで始める（`supervise::throughput_review`）。
+- 各passで走るものを回収し、無ければ期限の来たものを1つ子processで始める（`supervise::observation::throughput_review`）。
   observerと同じくrunの枠を使わず、1度に1つで、始めない間は`Supervisor::start_throughput_review`のdoc commentが持つ。
   どのproviderで始めるか（始めないか）は下の「Codexで動かす」の行き先（`Supervisor::job_start_route`）が決め、`[roles.throughput_review]`にproviderの無い見直しは、queueのhold（loginとusageの壁）のあいだと`--no-claude`では始めない。
 - 期限: 時（期間が最も早く過ぎる）→日→週の順に、最後の確定した期間に終わりの記録も走っている始まりも無いものが期限で、期間・ラベル・数え方は`domain::throughput_review`のdoc commentが持つ。

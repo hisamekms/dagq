@@ -70,7 +70,7 @@ messageごとの欄と文面は`domain::kpi::push`のそれぞれを作る関数
 - **日次・週次のまとめ**（`daily` / `weekly`、`summary_message`）: そのjobで書いたレポートのうち最新の日と最新の週の分だけ1通ずつ（起動時に遡って書いた古い日の分は送らない）。
   即時通知を上限で送らなかった目標割れもまとめに載る。
 - 1つのjobの中では即時通知、日次、週次の順に送る。
-- **inboxの見張りの通知**（`inbox_watch`、`inbox_watch_message`）: inboxのwatchが居ないままaskがinboxを待つと、`supervise::inbox_nudge`が同じ`ReportPort::push_config`で`[push]`を読み、その不在ごとに1通を返し、ループがこの文書の待ちに入れる。
+- **inboxの見張りの通知**（`inbox_watch`、`inbox_watch_message`）: inboxのwatchが居ないままaskがinboxを待つと、`supervise::host_ops::inbox_nudge`が同じ`ReportPort::push_config`で`[push]`を読み、その不在ごとに1通を返し、ループがこの文書の待ちに入れる。
   送り方・再試行・記録は下の「実行・再試行・失敗」と同じで、まとめと即時通知の切り替えはこのmessageを止めない。
   いつ送るかと`inbox_nudged`の記録は[inboxへの知らせ](ask-push.md#supervisorによるinboxへの知らせ)が持つ。
 - **新しいaskの通知**（`ask_opened`）: inboxのwatchが`ask_opened`を返すとき、そのwatchのprocessが同じ`[push]`で1通を送る。
@@ -81,7 +81,7 @@ messageごとの欄と文面は`domain::kpi::push`のそれぞれを作る関数
 
 ## 実行・再試行・失敗
 
-- supervisorはレポートのjobが作ったメッセージをプロセスのメモリの列に積み、周回ごとに期日の来た1通をjob threadで送る（`application::supervise::push`）。
+- supervisorはレポートのjobが作ったメッセージをプロセスのメモリの列に積み、周回ごとに期日の来た1通をjob threadで送る（`application::supervise::observation::push`）。
   コマンドは`infrastructure::push::run_push`がshellを通さずに、自分のprocess groupで起動し、stdinにメッセージを書き、stdoutは捨て、stderrの末尾を読む（stderrをpipeで受けない理由は`run_push`のdoc comment）。
   期限を過ぎたらprocess groupごとSIGKILLで止める。
 - 終了コード0なら`kpi_push_sent`、0でない・signalで終わった・timeout・起動できなかったら`kpi_push_failed`を記録する（欄は`domain::kpi::push`のdoc comment）。

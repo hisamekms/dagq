@@ -1175,7 +1175,7 @@ fn main_vanishing_after_the_landing_branch_check_holds_the_claim() {
     assert!(
         records.iter().any(|record| {
             record["fields"]["event"] == "claim_landing_branch_unresolved"
-                && record["target"] == "dagq::application::supervise"
+                && record["target"] == "dagq::application::supervise::execution"
         }),
         "the claim did not recheck the landing branch during the pass: {log}"
     );
@@ -1247,7 +1247,10 @@ fn supervise_records_its_progress_as_json_lines() {
     assert_eq!(running["fields"]["run_id"], run.id().as_str());
     assert_eq!(running["fields"]["task_id"], "1");
     assert_eq!(running["level"], "INFO");
-    assert_eq!(running["target"], "dagq::application::supervise::session");
+    assert_eq!(
+        running["target"],
+        "dagq::application::supervise::execution::session"
+    );
     assert!(text.contains(&format!("receipt received for {}", run.id())));
     assert!(text.contains(&format!("run {} is awaiting_integration", run.id())));
     assert!(messages.iter().any(|m| m.starts_with(&format!(

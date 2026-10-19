@@ -22,8 +22,8 @@ C5 | src/application/lifecycle.rs | SessionRegistry | none | unregistered: host'
 C5 | src/application/health/report.rs | DraftPlannerStore | 2233 | observation's status passes its queue to attention, which reads planning's DraftPlannerStore
 C5 | src/application/health/report.rs | GoalReviewStore | none | unregistered: observation's status takes planning's internal GoalReviewStore
 C5 | src/application/health/report.rs | PlanReviewStore | none | unregistered: observation's status takes planning's internal PlanReviewStore
-C5 | src/application/supervise/cleanup.rs | Repository | none | unregistered: host's cleanup job takes execution's internal Repository (its reads RepositoryReads are public to observation only)
-C5 | src/application/supervise/plan_review.rs | Repository | none | unregistered: planning's conflict hotspots take execution's internal Repository (its reads RepositoryReads are public to observation only)
+C5 | src/application/supervise/host_ops/cleanup.rs | Repository | none | unregistered: host's cleanup job takes execution's internal Repository (its reads RepositoryReads are public to observation only)
+C5 | src/application/supervise/planning/plan_review.rs | Repository | none | unregistered: planning's conflict hotspots take execution's internal Repository (its reads RepositoryReads are public to observation only)
 C5 | src/compose/observation.rs | Verifier | none | unregistered: observation's composition reads execution's Verifier, public to host only
 C5 | src/infrastructure/runtime_store/mod.rs | InboxWatchLog | none | unregistered: execution's store names host's internal InboxWatchLog
 C5 | src/infrastructure/runtime_store/run_log.rs | InboxWatchLog | none | unregistered: execution's store implements host's internal InboxWatchLog

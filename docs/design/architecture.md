@@ -69,7 +69,7 @@ context: 計画管理 ──T1 claim──▶ 実行と着地 ──T2 着地 / 
 ## 2つの軸
 
 - レイヤーの入口は`src/lib.rs`のdoc comment（各レイヤーとレイヤーの外のmoduleの役割）。
-- eventの種類の所有するcontextは`src/domain/event_kind.rs`のmoduleのdoc comment、`Supervisor`の欄の所有するcontextは`src/application/supervise/mod.rs`の`Supervisor`のdoc commentが持つ。
+- eventの種類の所有するcontextは`src/domain/event_kind.rs`のmoduleのdoc comment、`Supervisor`の欄の所有するcontextは`src/application/supervise/execution.rs`の`Supervisor`のdoc commentが持つ。
 
 ## 共有の部品
 
@@ -130,7 +130,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
   検査: clippy（`disallowed_methods`・`disallowed_types`・`disallowed_macros`）。
 - **L5** `src/application`の状態の判断（遷移・回数と上限・送るか・待つか）は、時刻を`Clock`か値の引数で受け、判断の中で時計を読まない（[ADR-t1410-1](../adr/2026-10-03-t1410-1-decisions-in-unit-tests-boundaries-in-integration-tests.md)）。
   待ちの判断は、今の時刻と観測を引数に取り次の操作を値で返す副作用のない関数にし、境界の時刻（ちょうど閾値・その1 ms前）をunit testで確かめる。
-  時計を読んで結果をportで実行するのは呼ぶ側の薄い処理にする（例: `supervise::session`・`reopen`の待ちの判断）。
+  時計を読んで結果をportで実行するのは呼ぶ側の薄い処理にする（例: `supervise::execution::session`・`reopen`の待ちの判断）。
   検査: 時計の読み取りはclippy（`disallowed_methods`の`Instant::now`・`Instant::elapsed`）で、時刻は`Clock::monotonic`、経った時間は同じ時計の`Clock::since`で読む。
   呼ぶ側の薄い処理が直接読む所だけ、そのitemに理由付きの`#[expect(clippy::disallowed_methods, reason = "...")]`を置く。
   判断の中で読むかは全体のreview。
@@ -144,7 +144,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
   検査: 参照されないことはRustのtest（`src/context_boundaries/modules.rs`）、新しいmoduleを外に足さないことは全体のreview。
 - **L9** `src/compose/`の`supervisor`（ループ）以外のmodule（contextごと）は互いと`supervisor`を参照せず、`use super::*`も書かない。
   共有の配線は`src/compose.rs`に置き、外からは`crate::compose`の再公開だけを参照する。
-  検査: contextのmoduleどうしと`supervisor`への参照と`use super::*`はRustのtest（`src/context_boundaries/modules.rs`）、`src/compose/`の外からの参照は可視性（その下のmoduleがprivateであることも同じtestが確かめる）。
+  検査: contextのmoduleどうしと`supervisor`への参照と`use super::*`はRustのtest（`src/context_boundaries/modules.rs`）、`src/compose/`の外からの参照はコンパイラ（可視性。その下のmoduleがprivateであることは同じtestが確かめる）、共有の配線の置き場は全体のreview。
 
 ### コンテキストの規則
 
@@ -157,7 +157,8 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
   `application::health`のattentionが読む計画管理の`DraftPlannerStore`・`PlanReviewStore`・`GoalReviewStore`と、それを渡すstatusのこれらのportは、計画管理が読み取りのportを公開するまで型で守られず、全体のreviewが見る。
 - **C3** `application::supervise`のsubmoduleは、自分のcontextの`Supervisor`の欄か分けた状態だけを変える。
   他のcontextの欄は読むか、そのcontextの関数を呼ぶ。
-  検査: 分けた状態のsubmoduleはscript、残りは全体のreview。
+  `application::supervise`はcontextごとのmodule（ループと実行と着地の`execution`、`planning`・`observation`・`host_ops`）に分かれ、各contextの分けた状態（host運用の登録`Registration`を含む）と`Supervisor`の欄はそのmoduleの中からだけ見え、ループは他のcontextの状態をそのmethodで読み変える。
+  検査: 他のcontextの欄を変えることはコンパイラ（可視性）、他のcontextの関数を呼ぶべきところかとsubmoduleを置くcontextは全体のreview。
 - **C4** 新しく足す・変えるuse caseは`Box<dyn Queue>`・`&mut dyn Queue`・全体の`QueueOpener`を取らず、要るportだけを取る（ADR-0013決定1の「portは原則applicationに定義する」のまま、幅を狭める）。
   検査: 観測と分析のuse caseは型（C2の読み取りのtraitだけを取る）、ほかのuse caseの切り方は全体のreview。
 - **C5** 他のcontextの公開していないport（所有の一覧で内部としたもの、一部公開のportは公開していないmethod）を使わない。
@@ -197,7 +198,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 - L1・L3・L6・L8・L9は、`cargo test`が流すRustのtest（`src/context_boundaries/modules.rs`）が当てる。
   testは`src/lib.rs`から辿るmoduleのRustを構文で読み、`use`とpathをcrateの根からのmoduleのpathに解き、再公開を定義のmoduleまで辿る（`#[cfg(test)]`の中も数える）。
   共有の部品を参照してよいレイヤー、`src/compose/`のループのmodule、今の違反は所有の表に置く。
-- `scripts/check-layer-deps.sh`は、L2のうちclippyの一覧に置けない部分、分けた状態のsubmoduleのC3、`src/application/ports/`のcontextのmoduleのC8を当てる。
+- `scripts/check-layer-deps.sh`は、L2のうちclippyの一覧に置けない部分と、`src/application/ports/`のcontextのmoduleのC8を当てる。
   数えるのは参照のpathで、コメントと文字列は数えない（細目はscriptの先頭のコメント）。
   許可の一覧は`.config/layer-deps-allow.txt`。
 - 所有の一覧は2か所に分かれ、pathから導けない所有だけを持つ。
@@ -215,7 +216,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
   許可の一覧は`.config/context-boundaries-allow.txt`。
 - 所有の表の書式と落ちる条件はtestのdoc comment、`.config/`の一覧の書式と落ちる条件は各一覧の先頭のコメント、scriptの数え方の細目はscriptの先頭のコメントが持つ。
 - 今ある違反は、理由と行き先のtask（行き先が未登録なら、所有の表では`Fix::Unregistered`、`.config/context-boundaries-allow.txt`では`none`と理由）を持つ許可の一覧にだけ置く（ADR-t1545-1決定4、ADR-t2287-1、ADR-t2391-1決定3）。
-  C1とL1・L3・L6・L8・L9の許可は所有の表に、C5とL2・C3・C8の許可は`.config/`の許可の一覧に置く。
+  C1とL1・L3・L6・L8・L9の許可は所有の表に、C5とL2・C8の許可は`.config/`の許可の一覧に置く。
   許可の一覧に無い違反と、違反が消えた古い項目で落ちるので、違反を直す変更は同じ変更で許可の一覧の項目を消す。
   reviewだけで見る規則の今の違反は文書に記録せず、行き先はqueueのtaskが持つ。
 - 2つのscriptは、CIと`src/`を変えるtaskのverifyが流す。
