@@ -356,111 +356,27 @@ fn an_adopted_headless_revise_keeps_waiting_outside_the_slot() {
     assert_eq!(stub_calls(&run).len(), 3, "{:?}", stub_calls(&run));
 }
 
-/// A resumed session that asks a `worker_question` waits for the answer
-/// outside the one slot with its clock stopped (decisions 1, 15 and 16):
-/// the question held past the resume timeout does not get it `/exit`, and
-/// another task is claimed meanwhile. Its answer is the runtime's to type
-/// (decision 17) once the run is back in a slot; the idle after that
-/// answer, with the conflict resolved, ends the resume with its
-/// `exit_requested` recorded, and the run lands.
-#[test]
-fn a_question_while_resuming_waits_outside_the_slot_and_gets_its_answer() {
-    let (_dir, repo, db) = fixture();
-    let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    let (run, first_landed) = parked_conflict(&repo, &db, &backend);
-    add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "third", &[]);
-    backend.resume_timeout = STAGE_TIMEOUT;
-    backend.resume_script_for(2, &resume_asking(false));
-    backend.script_for(3, BESIDE_AGENT);
-    let backend = Arc::new(backend);
-    let options = supervise_options(1, true);
-    let passes = options.passes.clone();
-    let supervisor = supervise_in_thread(&db, &repo, &backend, None, options);
-    wait_until(&db, Duration::from_secs(60), |queue| {
-        run_of(queue, 3).is_some_and(|three| queue.run_lease(three.id()).unwrap().is_none())
-    });
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let ask = open_ask_of(&mut queue, &run, AskKind::WorkerQuestion).unwrap();
-    let started = events_of(&db, run.id(), "run_waiting_started");
-    assert_eq!(started.len(), 1, "{started:?}");
-    assert_eq!(started[0]["phase"], "resume");
-    assert_eq!(started[0]["status"], "needs_session");
-    assert_eq!(started[0]["ask_id"], json!(ask));
-    // The third task got the slot the waiting resume left.
-    let mut id_of = |task: i64, kind: &str| {
-        queue
-            .show(TaskId::new(task))
-            .unwrap()
-            .events
-            .iter()
-            .find(|e| e.kind == kind)
-            .map(|e| e.id)
-            .unwrap()
-    };
-    assert!(id_of(2, "run_waiting_started") < id_of(3, "run_claimed"));
-    hold_past_the_stage_timeout(&db, &run, "run_waiting_started", &passes);
-    let kinds = kinds_of(&db, 2);
-    assert!(!kinds.iter().any(|k| k == "resume_finished"), "{kinds:?}");
-    let resumed = at(&kinds, "resume_started");
-    assert!(
-        !kinds[resumed..].iter().any(|k| k == "exit_requested"),
-        "{kinds:?}"
-    );
-    let status = runtime::status(&db).unwrap();
-    let waiting = &status["waiting"][0];
-    assert_eq!(waiting["run_id"], json!(run.id()), "{status}");
-    assert_eq!(waiting["phase"], "resume");
-    assert_eq!(waiting["status"], "needs_session");
-
-    queue.answer(ask, "theirs").unwrap();
-    let detail = queue.show(TaskId::new(2)).unwrap();
-    assert_eq!(
-        payloads(&detail, "ask_answered")[0]["runtime_delivers"],
-        true
-    );
-    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
-    backend.join();
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let detail = queue.show(TaskId::new(2)).unwrap();
-    assert_landed(&repo, &detail.runs[0], "second", &first_landed);
-    let ended = payloads(&detail, "run_waiting_ended");
-    assert_eq!(ended[0]["cause"], "answered");
-    // The wait, with the resume's clock stopped, outlasted its timeout.
-    assert!(
-        ended[0]["waited_secs"].as_u64().unwrap() >= STAGE_TIMEOUT.as_secs(),
-        "{ended:?}"
-    );
-    let texts = session_texts(&detail.runs[0]);
-    assert!(
-        texts
-            .iter()
-            .any(|text| text.starts_with(&format!("answer to ask {ask}: theirs"))),
-        "{texts:?}"
-    );
-    let kinds = kinds_of(&db, 2);
-    let resumed = at(&kinds, "resume_started");
-    let exit = resumed
-        + kinds[resumed..]
-            .iter()
-            .position(|k| k == "exit_requested")
-            .unwrap();
-    assert!(at(&kinds, "run_slot_regained") < at(&kinds, "ask_delivered"));
-    assert!(at(&kinds, "ask_delivered") < exit, "{kinds:?}");
-    let requested = payloads(&detail, "exit_requested");
-    assert_eq!(requested.last().unwrap()["resume_attempt"], 1);
-    assert_eq!(
-        payloads(&detail, "resume_finished")[0]["outcome"],
-        "resolved"
-    );
+/// Move `ahead`, the supervisor's monotonic clock, past the stage timeout
+/// and wait for passes of the supervisor that would have ended the stage,
+/// had its clock run on.
+fn run_the_stage_clock_out(ahead: &MonotonicAhead, passes: &AtomicU64) {
+    ahead.by(STAGE_TIMEOUT + HELD_MARGIN);
+    await_passes(passes, SOME_PASSES);
 }
 
-/// With the waits at their limit, a resumed session's question keeps the
-/// run in its slot (`run_waiting_deferred`, decision 7), where its clock
-/// still stops while the question is open (decisions 15 and 16): no
-/// `/exit` past the resume timeout, and the answer typed from the slot
-/// lets it resolve and land.
+/// A resumed session's question waits where the waits leave room for it,
+/// with the resume's clock stopped throughout (decisions 1, 7 and 15 to
+/// 17): while another run's question takes the one wait, it stays in its
+/// slot (`run_waiting_deferred`), and once that wait ended it leaves its
+/// slot to wait. Moving the supervisor's clock past the resume timeout in
+/// either place gets it no `/exit`. Its answer is the runtime's to type
+/// once the run is back in a slot; the idle after that answer, with the
+/// conflict resolved, ends the resume with its `exit_requested`, and the
+/// run lands. When the return restarts the resume's clocks, and from
+/// which time, is the unit tests' (`waiting::tests`); where the waits'
+/// limit keeps a question in its slot is `domain::waiting`'s.
 #[test]
-fn a_resume_question_past_the_limit_waits_in_its_slot_with_its_clock_stopped() {
+fn a_resume_question_waits_in_its_slot_then_outside_it_with_its_clock_stopped() {
     let (_dir, repo, db) = fixture();
     let mut backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);
@@ -469,9 +385,10 @@ fn a_resume_question_past_the_limit_waits_in_its_slot_with_its_clock_stopped() {
     backend.resume_script_for(2, &resume_asking(true));
     backend.script_for(3, ASKING_AGENT);
     let backend = Arc::new(backend);
+    let (options, ahead) = supervise_options_ahead(2, true);
     let options = SuperviseOptions {
         max_waiting: Some(1),
-        ..supervise_options(2, true)
+        ..options
     };
     let passes = options.passes.clone();
     let supervisor = supervise_in_thread(&db, &repo, &backend, None, options);
@@ -488,12 +405,15 @@ fn a_resume_question_past_the_limit_waits_in_its_slot_with_its_clock_stopped() {
     wait_until(&db, Duration::from_secs(30), |_| {
         !events_of(&db, run.id(), "run_waiting_deferred").is_empty()
     });
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let ask = open_ask_of(&mut queue, &run, AskKind::WorkerQuestion).unwrap();
     let deferrals = events_of(&db, run.id(), "run_waiting_deferred");
-    assert_eq!(deferrals.len(), 1);
-    assert_eq!(deferrals[0]["ask_kind"], "worker_question");
-    assert_eq!(deferrals[0]["waiting"], 1);
-    assert_eq!(deferrals[0]["limit"], 1);
-    hold_past_the_stage_timeout(&db, &run, "run_waiting_deferred", &passes);
+    assert_eq!(
+        deferrals,
+        vec![json!({"ask_id": ask, "ask_kind": "worker_question", "waiting": 1, "limit": 1})]
+    );
+    // In its slot past the resume timeout: no `/exit`, and no wait yet.
+    run_the_stage_clock_out(&ahead, &passes);
     let kinds = kinds_of(&db, 2);
     let resumed = at(&kinds, "resume_started");
     assert!(
@@ -502,21 +422,76 @@ fn a_resume_question_past_the_limit_waits_in_its_slot_with_its_clock_stopped() {
     );
     assert!(events_of(&db, run.id(), "run_waiting_started").is_empty());
 
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let ask = open_ask_of(&mut queue, &run, AskKind::WorkerQuestion).unwrap();
-    queue.answer(ask, "theirs").unwrap();
-    wait_until(&db, Duration::from_secs(60), |queue| {
-        queue.run(run.id()).unwrap().status() == RunStatus::Integrated
-    });
+    // The other wait ends: the resume's question takes the wait.
     let three = run_of(&mut queue, 3).unwrap();
     let other = open_ask_of(&mut queue, &three, AskKind::WorkerQuestion).unwrap();
     queue.answer(other, "blue").unwrap();
+    wait_until(&db, Duration::from_secs(60), |_| {
+        !events_of(&db, run.id(), "run_waiting_started").is_empty()
+    });
+    let started = events_of(&db, run.id(), "run_waiting_started");
+    assert_eq!(started.len(), 1, "{started:?}");
+    assert_eq!(started[0]["phase"], "resume");
+    assert_eq!(started[0]["status"], "needs_session");
+    assert_eq!(started[0]["ask_id"], json!(ask));
+    let status = runtime::status(&db).unwrap();
+    let waiting = &status["waiting"][0];
+    assert_eq!(waiting["run_id"], json!(run.id()), "{status}");
+    assert_eq!(waiting["phase"], "resume");
+    assert_eq!(waiting["status"], "needs_session");
+    // Outside the slots past the resume timeout: no `/exit` either.
+    run_the_stage_clock_out(&ahead, &passes);
+    let kinds = kinds_of(&db, 2);
+    assert!(!kinds.iter().any(|k| k == "resume_finished"), "{kinds:?}");
+    assert!(
+        !kinds[resumed..].iter().any(|k| k == "exit_requested"),
+        "{kinds:?}"
+    );
+
+    queue.answer(ask, "theirs").unwrap();
+    let detail = queue.show(TaskId::new(2)).unwrap();
+    assert_eq!(
+        payloads(&detail, "ask_answered")[0]["runtime_delivers"],
+        true
+    );
     let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
     backend.join();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let detail = queue.show(TaskId::new(2)).unwrap();
     assert_landed(&repo, &detail.runs[0], "second", &first_landed);
+    let texts = session_texts(&detail.runs[0]);
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.starts_with(&format!("answer to ask {ask}: theirs"))),
+        "{texts:?}"
+    );
     assert_eq!(payloads(&detail, "ask_delivered").len(), 1);
+    // The wait records the time it took on the queue's clock, which the
+    // moved monotonic clock does not stretch.
+    let event = |kind: &str| detail.events.iter().find(|e| e.kind == kind).unwrap();
+    let (began, ended) = (event("run_waiting_started"), event("run_waiting_ended"));
+    assert_eq!(ended.payload["cause"], "answered");
+    let millis = |e: &dagq::domain::RunEvent| timestamp_millis(&e.created_at).unwrap();
+    let span = (millis(ended) - millis(began)) / 1000;
+    let waited = ended.payload["waited_secs"].as_i64().unwrap();
+    assert!((span - 1..=span + 1).contains(&waited), "{waited} {span}");
+    let kinds = kinds_of(&db, 2);
+    let exit = resumed
+        + kinds[resumed..]
+            .iter()
+            .position(|k| k == "exit_requested")
+            .unwrap();
+    assert!(at(&kinds, "run_waiting_deferred") < at(&kinds, "run_waiting_started"));
+    assert!(at(&kinds, "run_waiting_ended") < at(&kinds, "run_slot_regained"));
+    assert!(at(&kinds, "run_slot_regained") < at(&kinds, "ask_delivered"));
+    assert!(at(&kinds, "ask_delivered") < exit, "{kinds:?}");
+    let requested = payloads(&detail, "exit_requested");
+    assert_eq!(requested.last().unwrap()["resume_attempt"], 1);
+    assert_eq!(
+        payloads(&detail, "resume_finished")[0]["outcome"],
+        "resolved"
+    );
     let stats = runtime::stats(&db, &Default::default()).unwrap();
     assert_eq!(stats["waiting"]["deferred"], 1, "{stats}");
 }

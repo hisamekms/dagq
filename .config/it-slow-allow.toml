@@ -546,23 +546,17 @@ name = "runtime_triage::a_triage_whose_lease_moved_is_triaged_again_only_after_i
 reason = "B 境界（守る境界）: lease race between supervisors"
 task = 1707
 
-# 13.259s, class R
-[[test]]
-name = "runtime_waiting_stages::a_question_while_resuming_waits_outside_the_slot_and_gets_its_answer"
-reason = "B 境界（supervisor の配線）: resumeの質問でslotの外に待ち、resumeの時計が止まったまま上限を越えて保ち、slotに戻って答えを打ちexitまで進む。時計の止め方と戻し方はresume.rsの判断で、goal 100の1557が移す。上限とslotの数え方はdomain::waitingのunit test"
-task = 1719
-
 # 11.141s, class B
 [[test]]
 name = "runtime_waiting_stages::a_question_while_revising_waits_outside_the_slot_with_its_clock_stopped"
 reason = "B 境界（守る境界）: representative slot/wait wiring with concurrent task"
 task = 1707
 
-# 15.070s, class D
+# 8.5s to 9.4s (median 8.553s) in task 2448's three runs of runtime_waiting_stages:: at 6 threads, class B, added by task 2448
 [[test]]
-name = "runtime_waiting_stages::a_resume_question_past_the_limit_waits_in_its_slot_with_its_clock_stopped"
-reason = "B 境界（supervisor の配線）: 待ちの上限でslotに残ったresumeの質問のあいだresumeの時計が止まり、slotから答えを打って着地する。slotの中で時計を止める判断はresume.rsで、goal 100の1557が移す。上限で控える判断はdomain::waiting::wait_moveのunit test"
-task = 1719
+name = "runtime_waiting_stages::a_resume_question_waits_in_its_slot_then_outside_it_with_its_clock_stopped"
+reason = "B 境界（supervisor の配線）: 上限でslotに残ったresumeの質問と、上限が空いてslotの外に出た質問のあいだ、進めた時計でresumeの時計が止まり、slotに戻って答えを打ちexitと着地まで進む。質問が開いているあいだ時計を止めるのはresume.rsの観察（変えない対象）。戻りの時刻から数え直す判断はwaiting::testsのunit test、上限で控える判断はdomain::waiting::wait_moveのunit test"
+task = 2448
 
 # 5.179s, class B
 [[test]]

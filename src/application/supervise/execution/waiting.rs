@@ -702,3 +702,216 @@ impl Supervisor<'_> {
         ))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::resume::{ResumeWatch, resume_deadline};
+    use super::super::revise::{Fix, ReviseWatch, revise_deadline};
+    use super::super::stages::SlotTable;
+    use super::super::stale::StaleNudge;
+    use super::*;
+    use crate::application::memory_files::MemoryFiles;
+    use crate::domain::waiting::WaitCause;
+
+    const MS: Duration = Duration::from_millis(1);
+
+    /// The resume timeout of these tests.
+    const TIMEOUT: Duration = Duration::from_secs(1800);
+
+    /// How long the stage ran before its question: the time left of its
+    /// timeout when the wait began is `TIMEOUT - BEFORE`.
+    const BEFORE: Duration = Duration::from_secs(600);
+
+    /// How long the wait lasted: past the timeout the stage had left.
+    const WAITED: Duration = Duration::from_secs(3600);
+
+    fn run() -> TaskRun {
+        TaskRun::restore(crate::domain::RunRecord {
+            id: RunId::new("r").unwrap(),
+            task_id: TaskId::new(1),
+            status: RunStatus::NeedsSession,
+            requested_provider: Provider::Claude,
+            actual_provider: Provider::Claude,
+            worker_mode: Worker::default_mode(Provider::Claude),
+            base_commit: CommitSha::parse("a".repeat(40), "commit").unwrap(),
+            branch: None,
+            worktree_path: None,
+            workspace_id: Some("ws".to_owned()),
+            receipt_path: Some("/runs/r/receipt.json".to_owned()),
+            log_path: None,
+            result_commit: None,
+            repo_path: None,
+            run_dir: Some("/runs/r".to_owned()),
+            last_error: None,
+            workspace_closed_at: None,
+            created_at: String::new(),
+        })
+        .unwrap()
+    }
+
+    /// A resume whose request was sent at `sent` (on the monotonic clock)
+    /// and typed at `typed` (on the files' clock), with a request to
+    /// rewrite a stale receipt typed then too, settled or not.
+    fn resume(sent: Instant, typed: SystemTime, settled: bool) -> ResumeWatch {
+        let run = run();
+        ResumeWatch {
+            workspace: "ws".to_owned(),
+            attempt: 1,
+            run_dir: PathBuf::from("/runs/r"),
+            receipt_path: PathBuf::from("/runs/r/receipt.json"),
+            idle_marker: run.idle_marker_path().unwrap(),
+            started_at: typed,
+            startup: sent,
+            message: String::new(),
+            message_bytes: crate::application::prompt::PromptBytes::default(),
+            message_sent: Some((sent, typed)),
+            start: Some(typed),
+            exit_requested: None,
+            required_evidence: Vec::new(),
+            spike: false,
+            approved: false,
+            silent: false,
+            exit_for_silence: false,
+            stale: Some(StaleNudge {
+                at: typed,
+                typed_at: typed,
+                settled,
+            }),
+            delivered_closed: None,
+            recovery: RecoveryWatch::default(),
+            live: Box::new(SessionWatch::fixing(&run, "ws", typed, sent).unwrap()),
+        }
+    }
+
+    /// A slot whose resume asked at `asked` and waits outside the slots.
+    fn waiting_resume(watch: ResumeWatch, asked: i64) -> SlotTable {
+        let mut table = SlotTable::default();
+        table.admit(Slot::new(run(), Phase::Resume(watch)));
+        table.leave_for(
+            0,
+            Waiting {
+                asks: vec![(AskId::new(1), AskKind::WorkerQuestion)],
+                started_at: asked,
+                since: asked_since(asked),
+                ended: Some((asked + 3600, WaitCause::Answered)),
+            },
+        );
+        table
+    }
+
+    fn resume_of(table: &SlotTable) -> &ResumeWatch {
+        match &table[0].phase {
+            Phase::Resume(watch) => watch,
+            _ => panic!("not a resume"),
+        }
+    }
+
+    /// A resume back in its slot from a wait counts its timeout from the
+    /// return (ADR-0071 decision 15): the wait, longer than the timeout
+    /// it had left, does not end it, and the time left before the wait is
+    /// not carried over. The stage is not watched while it waits, so its
+    /// clock is the one it had before the wait until the return restarts
+    /// it. The timeout of a stale-receipt request not settled yet, and the
+    /// idle that answers it, count from the return as well, on the files'
+    /// clock; the time it was typed stays for whether the receipt was
+    /// rewritten. `origin` is only a value: what is compared is the time
+    /// passed since it.
+    #[test]
+    fn a_resume_back_from_a_wait_counts_its_timeouts_from_the_return() {
+        let files = MemoryFiles::default();
+        let origin = Instant::now();
+        let typed = UNIX_EPOCH + Duration::from_secs(1_000);
+        let mut table = waiting_resume(resume(origin, typed, false), 1_000);
+        let back = origin + BEFORE + WAITED;
+        // Had the clock run through the wait, the timeout would have ended
+        // the resume before it came back.
+        assert!(resume_deadline(origin + TIMEOUT, origin, TIMEOUT, false).is_some());
+        assert_eq!(resume_of(&table).message_sent.unwrap().0, origin);
+
+        let regained = table.regain(0, &files, back);
+        assert!(regained.is_some());
+        let watch = resume_of(&table);
+        let (sent, sent_at) = watch.message_sent.unwrap();
+        assert_eq!(sent, back);
+        // The request's own time, which an idle marker is judged by, is kept.
+        assert_eq!(sent_at, typed);
+        for at in [back, back + (TIMEOUT - BEFORE), back + TIMEOUT - MS] {
+            assert_eq!(resume_deadline(at, sent, TIMEOUT, false), None, "{at:?}");
+        }
+        assert_eq!(
+            resume_deadline(back + TIMEOUT, sent, TIMEOUT, false),
+            Some("did not finish within the resume timeout")
+        );
+        let stale = watch.stale.unwrap();
+        assert_eq!(stale.at, files.now());
+        assert_eq!(stale.typed_at, typed);
+        // Regained once: a second regain finds no wait and moves nothing.
+        assert!(table.regain(0, &files, back + TIMEOUT).is_none());
+        assert_eq!(resume_of(&table).message_sent.unwrap().0, back);
+    }
+
+    /// A stale-receipt request that was settled before the wait keeps its
+    /// time; a resume back before its request was sent has no request
+    /// clock to restart.
+    #[test]
+    fn a_resume_back_from_a_wait_moves_only_its_open_clocks() {
+        let files = MemoryFiles::default();
+        let origin = Instant::now();
+        let typed = UNIX_EPOCH + Duration::from_secs(1_000);
+        let mut table = waiting_resume(resume(origin, typed, true), 1_000);
+        table.regain(0, &files, origin + WAITED);
+        assert_eq!(resume_of(&table).stale.unwrap().at, typed);
+
+        let mut unsent = resume(origin, typed, false);
+        unsent.message_sent = None;
+        let mut table = waiting_resume(unsent, 1_000);
+        table.regain(0, &files, origin + WAITED);
+        let watch = resume_of(&table);
+        assert!(watch.message_sent.is_none());
+        assert_eq!(watch.stale.unwrap().at, files.now());
+    }
+
+    /// A revise back from a wait counts its resume timeout from the
+    /// return too, without the time left before the wait; a phase without
+    /// a stage clock is left as it was.
+    #[test]
+    fn a_revise_back_from_a_wait_counts_its_timeout_from_the_return() {
+        let files = MemoryFiles::default();
+        let origin = Instant::now();
+        let typed = UNIX_EPOCH + Duration::from_secs(1_000);
+        let run = run();
+        let mut phase = Phase::Revise(ReviseWatch {
+            session: SessionRef {
+                workspace: "ws".to_owned(),
+                resume: None,
+            },
+            attempt: 1,
+            fix: Fix::Revise {
+                reasons: vec!["say which line".to_owned()],
+                concern: None,
+            },
+            sent_at: typed,
+            sent: origin,
+            start: Some(typed),
+            live: Box::new(SessionWatch::fixing(&run, "ws", typed, origin).unwrap()),
+            questions_from: 1_000,
+            delivered_closed: None,
+        });
+        let back = origin + BEFORE + WAITED;
+        assert!(revise_deadline(back, origin, TIMEOUT).is_some());
+        phase.restart_stage_clocks(&files, back);
+        let Phase::Revise(watch) = &phase else {
+            panic!("not a revise");
+        };
+        assert_eq!(watch.sent, back);
+        assert_eq!(watch.sent_at, typed);
+        for at in [back, back + (TIMEOUT - BEFORE), back + TIMEOUT - MS] {
+            assert!(revise_deadline(at, watch.sent, TIMEOUT).is_none(), "{at:?}");
+        }
+        assert!(revise_deadline(back + TIMEOUT, watch.sent, TIMEOUT).is_some());
+
+        let mut awaiting = Phase::AwaitingSlot;
+        awaiting.restart_stage_clocks(&files, back);
+        assert!(matches!(awaiting, Phase::AwaitingSlot));
+    }
+}
