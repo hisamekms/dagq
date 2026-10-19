@@ -121,10 +121,12 @@ command = "sh scripts/landing-it.sh"
 # worker の差し戻し・needs_session の resume・triage の resume で、直前の turn の peak_context（token 数）がこの値を超えていたら、
 # 同じ worktree・branch のまま引き継ぎの prompt を渡して新しい session で続ける（ADR-t2080-1、goal 174 の段 2-b）。
 # 振る舞いは docs/design/provider-lifecycle.md の「大きなcontextからの新しいsession」、書式は run-environment.md の [fresh_session] の項。
-# 150000 は ADR の試算の閾値で、10/01〜10/07 着地の Claude の worker の run 380 件のうち約 133 run が切り替わり、worker の入力 token が
-# 13〜20% 減る。2026-10-10 以降も resume の 1 回以上の run の peak の中央値が 400k を超えて積み増しが続くので、そのまま採った。
+# 2026-10-19 08:36 JST（task 2076）に ADR の試算の 150000 で入れたが、10/19 の revise・resume で切り替えた session は 27 件中 9 件（33%）が
+# resume_timeout の 3600 秒で時間切れになった（切り替えない session は 32 件中 1 件、3%）。読み直しと検査のやり直しが原因で、切り替え後も
+# 1 turn で peak が 13〜42 万 token に戻り、1 run で最大 3 回切り替わった。止めずに 400000 に上げ、極端な積み増し（観測の最大は 962k）の
+# session だけを切り替える。切り替えた session への引き継ぎの改善と計測の抜けは別の request で扱う。
 # [fresh_session] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 2129・2167 を含んでから足した。
-peak_context_above = 150000
+peak_context_above = 400000
 
 [toolchains.rust]
 # この repository は Rust の project なので、runtime に組み込みの Rust の profile の利用者として宣言する（ADR-t2268-1 決定 3）。
