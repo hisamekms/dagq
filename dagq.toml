@@ -249,27 +249,6 @@ provider = "codex"
 # --skip-git-repo-check を付ける）を両方含むことを verify の関門で確かめてから足す。
 provider = "codex"
 
-[roles.runtime_planner]
-# runtime の planner（revise・draft・finding・計画の依頼）の経路の欄（goal 87、ADR-t1394-2 の決定 1、task 1396・1402 で足した）。
-# task 1441（ADR-t1433-2 の決定 3）から runtime の planner は非対話だけで動き、route は値に関わらず受け付けて無視する
-# （無視することを supervisor が warning で 1 回言う。対話に戻す経路は無い。書式と振る舞いは docs/design/supervisor-lifecycle/actor-model.md の
-# 「runtimeのplannerの経路」と plan-planners.md の同じ節）。欄を残すのは、route を知っていて task 1441 を含まない固定バイナリが、
-# 欄が無ければ runtime の planner を既定の interactive（cmux の workspace）で開くため。欄を消すのは、固定バイナリが task 1441 を
-# 含んだことを確かめてからの別の task（それより前に消すと本番の planner が黙って対話に戻る）。評価（退行の確認）は docs/plans/headless-planner-evaluation.md。
-# provider・model・effort は書かず、Claude の既定のまま（Codex の planner は別の goal）。
-route = "headless"
-
-[headless]
-# 非対話の session wrapper を cmux の workspace でなく、supervisor から切り離した background の process として動かす
-# （人の 2026-10-02 の提起、goal 89、ADR-t1404-1 の決定 7、task 1405・1408）。task 1440（ADR-t1433-3 の決定 1・2）から、
-# worker の wrapper はこの欄を受け付けて無視し、値に関わらず background で動く（"workspace" なら警告を出す。戻す経路は無い）。
-# runtime の planner も task 1441（ADR-t1433-2 の決定 3）から、この欄を読まずに常に background で動く。書式と振る舞いは
-# docs/design/supervisor-lifecycle/headless-worker.md の「workspaceなしのbackgroundのwrapper」と run-environment.md の [headless] の項。
-# 出力は `dagq run log` / `planner log` で読む。評価（退行の確認）は docs/plans/headless-background-evaluation.md。
-# 欄を消すのは、古い固定バイナリが欄の無い dagq.toml を読めることを確かめてからの別の task（ADR-t1433-3 の決定 2）。
-# [headless] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 1405・1406 を含んでから足した。
-wrapper = "background"
-
 [areas]
 # stats と kpi が着地 commit の差分から run の変更の対象（area）を求める対応表（ADR-t980-1、task 983。
 # 書式と求め方は domain::areas::AreaMap と application::areas::AreaReader の doc comment）。glob は --paths と同じ規則で重なってよく、
