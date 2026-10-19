@@ -159,6 +159,7 @@ port | ObservationQueue | internal | - |
 port | LedgerStore | internal | - | the ledger is read through ledger::read
 port | NodeSampleStore | partial | - | the measurement reads it; host records the host's load
 port | LedgerQueue | internal | - | what builds the ledger reads and writes
+port | SessionStepStore | internal | - | the measurement's store of the sessions' steps
 port | MarkLog | internal | - |
 port | SupervisorReads | public | all |
 port | SupervisorRegistry | partial | - |

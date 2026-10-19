@@ -193,6 +193,8 @@ pub(super) const TABLES: &[Table] = &[
     table("ledger_rows", Observation), // the runtime's control does not read it
     table("node_samples", Observation), // the NodeSampleStore; host writes it through the port, the runtime's control does not read it
     table("node_sample_imports", Observation), // the imported CSV files, written with node_samples in one transaction
+    table("session_steps", Observation), // the SessionStepStore; the runtime's control does not read it
+    table("session_step_removed", Observation), // the SessionStepStore's seqs its retention removed
     table("supervisors", Host),
     table("queue_repository", Host),
     table("schema_floor", Host),
@@ -233,6 +235,7 @@ pub(super) const STORES: &[Store] = &[
     store("src/infrastructure/runtime_store/queue_records.rs", Observation),
     store("src/infrastructure/runtime_store/ledger.rs", Observation),
     store("src/infrastructure/runtime_store/node_samples.rs", Observation), // NodeSampleStore
+    store("src/infrastructure/runtime_store/session_steps.rs", Observation), // SessionStepStore
     store("src/infrastructure/headless_jobs.rs", Host),
     store("src/infrastructure/schema.rs", Host),
     store("src/infrastructure/asks.rs", Shared), // AskStore

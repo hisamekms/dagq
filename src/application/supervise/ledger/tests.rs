@@ -1,16 +1,19 @@
 use std::cell::{Cell, RefCell};
 
 use super::*;
-use crate::application::{LedgerStore, NodeSampleStore};
+use crate::application::{LedgerStore, NodeSampleStore, SessionStepStore};
 use crate::domain::host_metrics::{HOST_NODE, HostSample, NodeSample, SampleSource};
 use crate::domain::ledger::settle::SETTLE_GRACE_MS;
 use crate::domain::ledger::testkit::{Log, T0, ms, run_id};
 use crate::domain::ledger::{LEDGER_V, LedgerKind, LedgerRow, node};
+use crate::domain::session_step::{
+    RETENTION_MS, SeqRange, SessionStep, Step, StepKind, StepTarget, StepsRecorded,
+};
 use crate::domain::{RunEvent, RunId, TaskId};
 
 const BUILT: &str = "2030-01-01T00:00:00.000Z";
 
-/// The stores in memory: the events, the node samples and the rows, the
+/// The stores in memory: the events, the node samples, the steps and the rows, the
 /// rows written as `ledger_rows` writes them (a legacy row keeps its
 /// values, its records and their range follow), how many writes, and how
 /// many events were read and how often all of them.
@@ -18,6 +21,7 @@ const BUILT: &str = "2030-01-01T00:00:00.000Z";
 struct Memory {
     events: RefCell<Vec<RunEvent>>,
     samples: RefCell<Vec<NodeSample>>,
+    steps: RefCell<Vec<SessionStep>>,
     rows: RefCell<BTreeMap<(LedgerKind, String), LedgerRow>>,
     writes: Cell<usize>,
     read: Cell<usize>,
@@ -244,9 +248,109 @@ impl NodeSampleStore for Memory {
     }
 }
 
+#[allow(unused_variables)]
+impl SessionStepStore for Memory {
+    fn record_steps(
+        &self,
+        target: &StepTarget,
+        session_id: &str,
+        steps: &[Step],
+        received_at: i64,
+    ) -> Result<StepsRecorded> {
+        let mut held = self.steps.borrow_mut();
+        for step in steps {
+            let id = held.last().map_or(1, |last| last.id + 1);
+            held.push(SessionStep {
+                id,
+                target: target.clone(),
+                session_id: session_id.to_owned(),
+                received_at,
+                step: step.clone(),
+            });
+        }
+        Ok(StepsRecorded {
+            added: steps.len(),
+            duplicates: 0,
+        })
+    }
+    fn session_gaps(&self, session_id: &str) -> Result<Vec<SeqRange>> {
+        unreachable!()
+    }
+    fn steps_after(&self, after: i64, limit: usize) -> Result<Vec<SessionStep>> {
+        unreachable!()
+    }
+    fn target_steps(&self, target: &StepTarget) -> Result<Vec<SessionStep>> {
+        unreachable!()
+    }
+    fn remove_steps(&self, before: i64) -> Result<usize> {
+        let mut held = self.steps.borrow_mut();
+        let count = held.len();
+        held.retain(|step| step.received_at >= before);
+        Ok(count - held.len())
+    }
+}
+
 /// One pass at `secs` after [`T0`].
 fn pass(memory: &Memory, builder: &mut Builder, secs: i64) -> Built {
-    build_pass(memory, builder, ms(secs), BUILT, None)
+    build_pass(memory, builder, ms(secs), BUILT, Retain::default())
+}
+
+/// The retention runs once a local day: the steps past
+/// [`RETENTION_MS`] whether or not the host's load is kept, and the node
+/// rows only when it is.
+#[test]
+fn the_retention_is_due_once_a_day_for_the_steps_and_the_kept_node_rows() {
+    let now = 200 * 86_400;
+    let today = 200;
+    let steps = Some(now * 1000 - RETENTION_MS);
+    assert_eq!(
+        Retain::due(now, today, None, None),
+        Retain {
+            node_rows: None,
+            steps
+        }
+    );
+    let both = Retain::due(now, today, Some(today - 1), Some(30));
+    assert_eq!(both.steps, steps);
+    assert!(both.node_rows.is_some());
+    assert!(both.any());
+    let done = Retain::due(now, today, Some(today), Some(30));
+    assert_eq!(done, Retain::default());
+    assert!(!done.any());
+}
+
+/// A pass with the steps' retention removes the steps that came in
+/// before it, whatever their session, keeps the others, and reports how
+/// many it removed.
+#[test]
+fn a_pass_removes_the_steps_past_their_retention() {
+    let memory = Memory::default();
+    let run = StepTarget::run(&RunId::new("r-steps").unwrap());
+    let step = Step::new(1, StepKind::ModelTurn, 0, 10);
+    memory
+        .record_steps(&run, "old", std::slice::from_ref(&step), 1_000)
+        .unwrap();
+    memory
+        .record_steps(&run, "both", std::slice::from_ref(&step), 1_000)
+        .unwrap();
+    let later = Step::new(2, StepKind::Wait, 20, 10);
+    memory.record_steps(&run, "both", &[later], 5_000).unwrap();
+    memory.record_steps(&run, "new", &[step], 5_000).unwrap();
+    let mut builder = Builder::default();
+    let retain = Retain {
+        node_rows: None,
+        steps: Some(2_000),
+    };
+    let built = build_pass(&memory, &mut builder, ms(0), BUILT, retain);
+    assert_eq!(built.failure, None);
+    assert_eq!(built.steps_removed, 2);
+    let kept: Vec<(String, i64)> = memory
+        .steps
+        .borrow()
+        .iter()
+        .map(|step| (step.session_id.clone(), step.step.seq))
+        .collect();
+    assert_eq!(kept, vec![("both".to_owned(), 2), ("new".to_owned(), 1)]);
 }
 
 /// A long time after every run here, past every grace.

@@ -189,7 +189,7 @@ pub use self::jobs::{
     HeadlessJob, JobEnds, JobFailed, JobPorts, JobSubject, PROGRAM_OUTPUT_TAIL, ProgramEnd,
     record_job, start_program_job, start_review_program,
 };
-pub use self::ledger::{Built, FAILING_PASSES, LedgerPort, build_pass};
+pub use self::ledger::{Built, FAILING_PASSES, LedgerPort, Retain, build_pass};
 pub use self::queue_broker::QueueBrokerPort;
 pub use self::queue_service::{
     QUEUE_SERVICE_INTERVAL, QUEUE_SERVICE_RESTART_WINDOW, QUEUE_SERVICE_RESTARTS,

@@ -1221,6 +1221,7 @@ pub mod satisfied;
 pub mod sccache;
 pub mod scope;
 pub mod search;
+pub mod session_step;
 pub mod sessions;
 pub mod setup_review;
 pub mod slot_limits;

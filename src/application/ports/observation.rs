@@ -11,6 +11,7 @@ use crate::domain::ledger::{
     LedgerKind, LedgerRow,
     window::{LedgerWindow, WindowQuery},
 };
+use crate::domain::session_step::{SeqRange, SessionStep, Step, StepTarget, StepsRecorded};
 use crate::domain::{AskId, EventId, EventKind, FindingView, RunEvent, TaskId};
 use anyhow::Result;
 
@@ -158,12 +159,52 @@ pub trait NodeSampleStore {
     fn node_samples_after(&self, after: i64) -> Result<Vec<NodeSample>>;
 }
 
-/// What builds the ledger reads and writes (docs/design/measurement.md
-/// "台帳を作る係"): the EventStore and the NodeSampleStore, its inputs, and
-/// the LedgerStore. Every store of the three is one.
-pub trait LedgerQueue: EventStore + LedgerStore + NodeSampleStore {}
+/// The SessionStepStore (ADR-t1662-2 decisions 1 and 4, ADR-t1662-3
+/// decision 12): the steps of the sessions, one row per
+/// `(session_id, seq)`, each with the one target its session is of. A
+/// run's steps are for its ledger row; a target of no run's are kept here
+/// only, read by their target. A step is kept
+/// [`crate::domain::session_step::RETENTION_DAYS`] after it came in.
+pub trait SessionStepStore {
+    /// Record `steps` of `session_id` of `target` as received at
+    /// `received_at` (unix ms), in one transaction: a step whose
+    /// `(session_id, seq)` is held already, or was removed by the
+    /// retention from a session that keeps a step, adds nothing, whatever
+    /// it says now; steps that do not hold together
+    /// ([`crate::domain::session_step::check`]) and a session whose steps
+    /// came in under another target refuse the whole call, recording none
+    /// ([`crate::domain::session_step::StepError`]).
+    fn record_steps(
+        &self,
+        target: &StepTarget,
+        session_id: &str,
+        steps: &[Step],
+        received_at: i64,
+    ) -> Result<StepsRecorded>;
+    /// The gaps of the seqs of `session_id`
+    /// ([`crate::domain::session_step::gaps`]): a seq the retention
+    /// removed is no gap, a seq that never came in is one.
+    fn session_gaps(&self, session_id: &str) -> Result<Vec<SeqRange>>;
+    /// At most `limit` steps that came in after the step `after` (their
+    /// id), in the order they came in: the cursor of what builds the
+    /// ledger.
+    fn steps_after(&self, after: i64, limit: usize) -> Result<Vec<SessionStep>>;
+    /// The steps of `target`, in the order they came in.
+    fn target_steps(&self, target: &StepTarget) -> Result<Vec<SessionStep>>;
+    /// Remove every step that came in before `before` (unix ms); a session
+    /// keeping other steps keeps the seqs removed, so they open no gap and
+    /// are not added again. With none to remove nothing is written.
+    /// Returns how many steps were removed.
+    fn remove_steps(&self, before: i64) -> Result<usize>;
+}
 
-impl<T: EventStore + LedgerStore + NodeSampleStore + ?Sized> LedgerQueue for T {}
+/// What builds the ledger reads and writes (docs/design/measurement.md
+/// "台帳を作る係"): the EventStore, the NodeSampleStore and the
+/// SessionStepStore, its inputs, and the LedgerStore. Every store of the
+/// four is one.
+pub trait LedgerQueue: EventStore + LedgerStore + NodeSampleStore + SessionStepStore {}
+
+impl<T: EventStore + LedgerStore + NodeSampleStore + SessionStepStore + ?Sized> LedgerQueue for T {}
 
 /// What reports read and record of the queue as a whole: the findings,
 /// the written reports, KPI breaches, forecasts and the CI watch.

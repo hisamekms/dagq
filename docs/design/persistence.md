@@ -39,6 +39,7 @@ related:
   - adr-0037
   - adr-0063
   - design-domain-model
+  - design-measurement
 ---
 
 # SQLite persistence
@@ -191,6 +192,19 @@ runの所有・supervisorの登録・runのファイルの約束（[ADR-0007](..
 queue service（[Queue service](queue-service.md)）もDBを開くプロセスの1つで、要求ごとに接続を開き、要求のprincipalのactorで書く。
 DBを直接開く他のプロセスとは、SQLiteのトランザクションとleaseの規則で並ぶ。
 serviceのファイル（socket・lock・`state.json`・token）はqueueのディレクトリの`service/`に置き、DBには置かない。
+
+## session steps
+
+`session_steps`はSessionStepStore（[計測](measurement.md#ssotとビュー)）の表で、sessionのstepを1行ずつ持つ。
+入口は`runtime_store/session_steps.rs`、型は`domain::session_step`。
+
+- `(session_id, seq)`をUNIQUEにし、同じstepを2度受けても1行で、先に受けた中身を保つ。
+- 1つのsessionのstepは1つの対象のもので、別の対象の名で届いた同じsessionのstepは呼び出しごと拒む。
+- seqの抜けは埋めず、読むときに1から最大のseqまでのうち、持つstepにも保持で消したseqにも無い区間として数える。
+- `id`はAUTOINCREMENTで、保持で消えた行の番号を使い直さないので、受けた順のidのカーソルは保持の後も成り立つ。
+- 保持は台帳を作る係の周回が行い、受けてから90日を過ぎたstepを1行ずつ消す。
+- stepの残るsessionは消したseqを連続する区間ごとに`session_step_removed`に持ち、それを抜けと数えず、届き直しても足さない（stepの残らないsessionの行は消す）。
+- stepはseqの順に届くとは限らないので、消したseqより小さい届いていないseqは抜けのまま残り、届けば足す。
 
 ## follow-upの所属の判断
 

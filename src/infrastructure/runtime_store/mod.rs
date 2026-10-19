@@ -69,6 +69,7 @@ mod queue_records;
 mod recovery;
 mod run_log;
 mod session_registry;
+mod session_steps;
 mod transitions;
 
 /// The run as stored (its paths not relocated), for a command to start from.

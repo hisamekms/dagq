@@ -42,7 +42,7 @@ related:
 | --- | --- | --- | --- |
 | StateStore | 今の状態（task・goal・run・ask・proposal・planner・lease・supervisorなど） | SSOT | queue.dbの状態の表 |
 | EventStore | 起きたことのappend-onlyの記録（runの遷移・`run_phase_changed`・claimの前の区間・今の判定の記録・queueの出来事・mainの履歴・[task/goal/findingの属性](attribute-records.md)・Executionのtoken） | SSOT | queue.dbの`run_events`（runの無いqueueのeventを含む）。EventStoreとStateStoreは同じtransactionで確定する |
-| SessionStepStore | sessionのstep（turn・tool・コマンドのshape）。`(session_id, seq)`で重複を除き、抜けを残す | SSOT | 未実装（queue.dbの新しい表の予定） |
+| SessionStepStore | sessionのstep（turn・tool・コマンドのshape）と対象。`(session_id, seq)`で重複を除き、抜けを残す | SSOT | queue.dbの`session_steps` |
 | NodeSampleStore | nodeの資源の連続の値（load average・CPU・メモリ・swap・pageout・ファイルシステムの空き） | SSOT | queue.dbの`node_samples`（hostのCSVは写しで、保持の期間の分を一度取り込む。[hostの負荷](supervisor-lifecycle/host-metrics.md)） |
 | LedgerStore | 台帳（run・task・session・queue・nodeの行）。旧方式の行のlegacyのJSONは凍結して捨てない | ビュー | queue.dbの`ledger_rows` |
 | ReportStore | 統計の出力（日次・週次のレポート） | ビュー | queueのdirの`reports/`のファイルと`report_written`のevent |
