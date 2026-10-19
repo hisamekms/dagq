@@ -184,14 +184,93 @@ impl Assigned {
     }
 }
 
-/// One `integrate` attempt's row as it is kept: its `integration_started`,
-/// its run and, once it ended, the greatest id of the events read whose
-/// time is at or before its end.
+/// One `integrate` attempt's row as it is kept: its `integration_started`
+/// and its run. Once it ended it reads up to the greatest id of the events
+/// read whose time is at or before its end ([`Throughs`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Slot {
     start: EventId,
     run: String,
-    through: EventId,
+}
+
+/// The greatest id each ended attempt reads up to, kept as runs of
+/// attempts: an event reaches every attempt ended at or after its time,
+/// which are the last of those ended ([`Attempts::ended_since`]), so it
+/// sets one run from the first of them on (ids ascend) and drops the runs
+/// that started at or after it. Each run is set once and dropped at most
+/// once, so an event costs a binary search and its share of the runs, not
+/// the attempts it reaches; and the attempts it reaches go into `touched`
+/// only where no event since `touched` was last emptied put them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Throughs {
+    /// `(first attempt, greatest id)`, the firsts ascending: an attempt
+    /// reads up to the id of the last run starting at or before it.
+    runs: Vec<(usize, EventId)>,
+    /// The attempts put into `touched` since it was last emptied, as far
+    /// as this knows: from the first to those ended at the last event.
+    touched: Option<std::ops::Range<usize>>,
+}
+
+impl Throughs {
+    /// Let `id` reach the ended attempts of `reached` (the last of those
+    /// ended) and put their slots' keys into `touched`.
+    fn reach(
+        &mut self,
+        reached: std::ops::Range<usize>,
+        id: EventId,
+        slots: &[Slot],
+        touched: &mut BTreeSet<(LedgerKind, String)>,
+    ) {
+        let (from, ended) = (reached.start, reached.end);
+        if from >= ended {
+            return;
+        }
+        while self.runs.last().is_some_and(|run| run.0 >= from) {
+            self.runs.pop();
+            scanned(1);
+        }
+        self.runs.push((from, id));
+        let key = |index: usize| (LedgerKind::Queue, slots[index].start.to_string());
+        // An emptied `touched` holds none of the first: put them all again.
+        let held = self
+            .touched
+            .clone()
+            .filter(|held| !held.is_empty() && touched.contains(&key(held.start)));
+        let (put, kept) = match held {
+            Some(held) => (
+                (from..held.start).chain(held.end.max(from)..ended),
+                from.min(held.start)..ended,
+            ),
+            None => ((from..ended).chain(0..0), from..ended),
+        };
+        for index in put {
+            touched.insert(key(index));
+            scanned(1);
+        }
+        self.touched = Some(kept);
+    }
+
+    /// The greatest id the ended attempt of `index` reads up to; none
+    /// before an event reached it.
+    fn of(&self, index: usize) -> Option<EventId> {
+        let at = self.runs.partition_point(|run| run.0 <= index);
+        at.checked_sub(1).map(|at| self.runs[at].1)
+    }
+}
+
+/// Count `n` attempts or runs of them looked at, for the tests that bound
+/// the work of the landing slot's rows.
+#[cfg(test)]
+fn scanned(n: usize) {
+    SCANNED.with(|count| count.set(count.get() + n));
+}
+
+#[cfg(not(test))]
+const fn scanned(_: usize) {}
+
+#[cfg(test)]
+thread_local! {
+    static SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Which queue row each event of the queue read so far is a record of,
@@ -218,6 +297,7 @@ pub struct QueueBook {
     lives_of: HashMap<String, BTreeSet<EventId>>,
     attempts: Attempts,
     slots: Vec<Slot>,
+    throughs: Throughs,
     slot_of: HashMap<EventId, usize>,
     /// The last event read.
     last: EventId,
@@ -273,16 +353,16 @@ impl QueueBook {
                 self.slots.push(Slot {
                     start: event.id,
                     run: run.as_str().to_owned(),
-                    through: event.id,
                 });
             }
         }
         // The attempts ended at or after its time read up to it.
-        for index in self.attempts.ended_since(at) {
-            let slot = &mut self.slots[index];
-            slot.through = slot.through.max(event.id);
-            touched.insert((LedgerKind::Queue, slot.start.to_string()));
-        }
+        self.throughs.reach(
+            self.attempts.ended_since(at),
+            event.id,
+            &self.slots,
+            touched,
+        );
         if let Some(open) = self.attempts.open() {
             touched.insert((LedgerKind::Queue, self.slots[open].start.to_string()));
         }
@@ -573,7 +653,9 @@ impl QueueBook {
         row.inputs_through.events = if attempt.open {
             self.last
         } else {
-            slot.through.max(slot.start)
+            self.throughs
+                .of(index)
+                .map_or(slot.start, |through| through.max(slot.start))
         };
         row.started_at = Some(attempt.start);
         row.ended_at = (!attempt.open).then_some(attempt.end);

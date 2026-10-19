@@ -495,3 +495,240 @@ fn the_rows_a_supervisors_end_ends_are_the_rows_a_scan_per_supervisor_gives() {
     let rows = queue_rows(&log.events, &log.events, now, "b");
     assert_eq!(rows, expected);
 }
+
+/// The landing slots as each event scanned the attempts ended at or after
+/// its time, latest first while they were, and set them to read up to it:
+/// each slot's greatest id read (the open one's none), the keys each part
+/// of `events` cut at `splits` put into `touched`, and how many attempts
+/// the scan looked at.
+fn slots_by_scan(
+    events: &[RunEvent],
+    splits: &[usize],
+) -> (Vec<Option<EventId>>, Vec<BTreeSet<String>>, usize) {
+    let mut attempts = landing_utilization::Attempts::default();
+    let mut slots: Vec<(EventId, EventId)> = Vec::new();
+    let (mut parts, mut looked) = (vec![BTreeSet::new()], 0);
+    for (index, event) in events.iter().enumerate() {
+        if splits.contains(&index) {
+            parts.push(BTreeSet::new());
+        }
+        let touched = parts.last_mut().unwrap();
+        let Some(at) = timestamp_millis(&event.created_at) else {
+            continue;
+        };
+        if let Some(run) = &event.run_id
+            && attempts.add(event, run, at).started.is_some()
+        {
+            slots.push((event.id, event.id));
+        }
+        for index in (0..slots.len()).rev() {
+            if attempts.open() == Some(index) {
+                continue;
+            }
+            looked += 1;
+            if attempts.get(index, 0).unwrap().end < at {
+                break;
+            }
+            slots[index].1 = slots[index].1.max(event.id);
+            touched.insert(slots[index].0.to_string());
+        }
+        if let Some(open) = attempts.open() {
+            touched.insert(slots[open].0.to_string());
+        }
+    }
+    let throughs = slots
+        .iter()
+        .enumerate()
+        .map(|(index, slot)| (attempts.open() != Some(index)).then_some(slot.1))
+        .collect();
+    (throughs, parts, looked)
+}
+
+/// Attempts that end at one time, events that go back in time, and an
+/// attempt still open, among the queue's own events.
+fn tangled_log() -> Log {
+    let mut log = Log::default();
+    let runs: Vec<String> = (1..=7).map(run_id).collect();
+    for (task, run) in runs.iter().take(4).enumerate() {
+        let task = Some(i64::try_from(task).unwrap() + 1);
+        log.add(task, Some(run), "integration_started", json!({}), 10)
+            .add(task, Some(run), "run_integrated", json!({}), 10);
+    }
+    let mark = |log: &mut Log, secs: i64| {
+        log.add(None, None, "mark_added", json!({"mark": "m"}), secs);
+    };
+    mark(&mut log, 10);
+    mark(&mut log, 10);
+    log.add(Some(5), Some(&runs[4]), "integration_started", json!({}), 8)
+        .add(Some(5), Some(&runs[4]), "integration_held", json!({}), 7);
+    mark(&mut log, 3);
+    log.add(
+        Some(6),
+        Some(&runs[5]),
+        "integration_started",
+        json!({}),
+        12,
+    )
+    .add(Some(6), Some(&runs[5]), "run_integrated", json!({}), 11);
+    mark(&mut log, 10);
+    mark(&mut log, 20);
+    log.add(
+        Some(7),
+        Some(&runs[6]),
+        "integration_started",
+        json!({}),
+        25,
+    );
+    mark(&mut log, 9);
+    log
+}
+
+/// The queue rows and the slots' keys a book read a part at a time put
+/// into `touched` (emptied between the parts cut at `splits`).
+fn book_by_parts(log: &Log, splits: &[usize], now: i64) -> (Vec<LedgerRow>, Vec<BTreeSet<String>>) {
+    let (mut lives, mut pre_claim, mut book) = (
+        Lives::default(),
+        PreClaimBook::default(),
+        QueueBook::default(),
+    );
+    let mut parts = vec![BTreeSet::new()];
+    for (index, event) in log.events.iter().enumerate() {
+        if splits.contains(&index) {
+            parts.push(BTreeSet::new());
+        }
+        lives.add(event);
+        let moved = pre_claim.add(event);
+        book.add(
+            event,
+            owner(event) == Owner::Queue,
+            moved,
+            parts.last_mut().unwrap(),
+        );
+    }
+    let slots: BTreeSet<String> = book
+        .slots
+        .iter()
+        .map(|slot| slot.start.to_string())
+        .collect();
+    let parts = parts
+        .into_iter()
+        .map(|touched| {
+            touched
+                .into_iter()
+                .filter(|(_, key)| slots.contains(key))
+                .map(|(_, key)| key)
+                .collect()
+        })
+        .collect();
+    let owned = owned_of(&log.events);
+    let at = At {
+        owned: &owned,
+        pre_claim: &pre_claim,
+        lives: &lives,
+        now_ms: now,
+        built_at: "b",
+    };
+    let mut rows: Vec<LedgerRow> = book.keys().filter_map(|key| book.row(&key, &at)).collect();
+    rows.sort_by_key(|row| row.inputs_from);
+    (rows, parts)
+}
+
+/// With attempts that end at one time and events that go back in time,
+/// the book read whole or a part at a time folds the queue rows the scan
+/// of every ended attempt per event gives, and each part puts into
+/// `touched` the slots that scan put.
+#[test]
+fn the_slots_reached_by_runs_are_those_the_scan_per_event_reached() {
+    let log = tangled_log();
+    let now = ms(100);
+    let whole = queue_rows(&owned_of(&log.events), &log.events, now, "b");
+    let slot_rows: Vec<&LedgerRow> = whole
+        .iter()
+        .filter(|row| {
+            row.subject
+                .as_ref()
+                .is_some_and(|s| s.kind == "landing_slot")
+        })
+        .collect();
+    let rescan = landing_slots_by_rescan(&log.events, now, "b");
+    assert_eq!(slot_rows, rescan.iter().collect::<Vec<_>>());
+    let len = log.events.len();
+    let mut cuts: Vec<Vec<usize>> = (0..=len).map(|split| vec![split]).collect();
+    cuts.push((1..len).collect());
+    cuts.push((1..len).step_by(3).collect());
+    for splits in cuts {
+        let (rows, parts) = book_by_parts(&log, &splits, now);
+        assert_eq!(rows, whole, "{splits:?}");
+        let (throughs, scanned_parts, _) = slots_by_scan(&log.events, &splits);
+        assert_eq!(parts, scanned_parts, "{splits:?}");
+        let reached: Vec<Option<EventId>> = slot_rows
+            .iter()
+            .map(|row| row.ended_at.map(|_| row.inputs_through.events))
+            .collect();
+        assert_eq!(reached, throughs, "{splits:?}");
+    }
+    // Reached back: the attempts at 10 read the mark at 9.
+    assert_eq!(slot_rows[0].inputs_through.events, log.last());
+}
+
+/// `attempts` attempts that end at one time, then `events` events at it
+/// and before it: every event reaches every attempt.
+fn bunched_log(attempts: u8, events: usize) -> Log {
+    let mut log = Log::default();
+    for n in 1..=attempts {
+        let run = run_id(n);
+        log.add(
+            Some(i64::from(n)),
+            Some(&run),
+            "integration_started",
+            json!({}),
+            10,
+        )
+        .add(
+            Some(i64::from(n)),
+            Some(&run),
+            "run_integrated",
+            json!({}),
+            10,
+        );
+    }
+    for secs in (0..events).map(|n| 10 - i64::try_from(n % 10).unwrap()) {
+        log.add(None, None, "mark_added", json!({"mark": "m"}), secs);
+    }
+    log
+}
+
+fn scanned_count() -> usize {
+    SCANNED.with(std::cell::Cell::get)
+}
+
+/// The attempts and runs of them the book looks at stay within a bound
+/// linear in the events, read whole or in two parts, where the scan per
+/// event looked at every attempt for every event.
+#[test]
+fn the_slots_cost_a_bound_linear_in_the_events() {
+    for (attempts, events) in [(20, 20), (60, 60), (120, 240)] {
+        let log = bunched_log(attempts, events);
+        let len = log.events.len();
+        let (_, _, looked) = slots_by_scan(&log.events, &[]);
+        assert!(looked >= usize::from(attempts) * events, "{looked}");
+
+        let before = scanned_count();
+        queue_rows(&[], &log.events, ms(100), "b");
+        let whole = scanned_count() - before;
+        assert!(
+            whole <= 2 * len,
+            "{attempts}×{events}: {whole} > {}",
+            2 * len
+        );
+
+        let before = scanned_count();
+        book_by_parts(&log, &[len / 2], ms(100));
+        let parts = scanned_count() - before;
+        assert!(
+            parts <= 3 * len,
+            "{attempts}×{events}: {parts} > {}",
+            3 * len
+        );
+    }
+}

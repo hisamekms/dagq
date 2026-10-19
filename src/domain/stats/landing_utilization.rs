@@ -170,16 +170,13 @@ impl Attempts {
         (0..self.attempts.len()).filter_map(move |index| self.get(index, now_ms))
     }
 
-    /// The indexes of the attempts ended at or after `at`, latest first:
-    /// the attempts end in the order they started, so they are the last.
-    pub fn ended_since(&self, at: i64) -> impl Iterator<Item = usize> + '_ {
-        self.attempts
-            .iter()
-            .enumerate()
-            .rev()
-            .filter(|(_, attempt)| !attempt.open)
-            .take_while(move |(_, attempt)| attempt.end >= at)
-            .map(|(index, _)| index)
+    /// The indexes of the attempts ended at or after `at`: the attempts
+    /// end in the order they started and only the last can be open, so
+    /// they are the last of those ended, found by a binary search.
+    pub fn ended_since(&self, at: i64) -> std::ops::Range<usize> {
+        let ended = self.attempts.len() - usize::from(self.open.is_some());
+        let from = self.attempts[..ended].partition_point(|attempt| attempt.end < at);
+        from..ended
     }
 }
 
