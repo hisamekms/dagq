@@ -85,6 +85,20 @@ pub(crate) fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
         .collect()
 }
 
+fn queue_event_actors(db: &Path, kind: &str) -> Vec<(String, String, Option<String>)> {
+    Connection::open(db)
+        .unwrap()
+        .prepare(
+            "SELECT actor_role, actor_id, requested_by
+             FROM run_events WHERE kind=?1 ORDER BY id",
+        )
+        .unwrap()
+        .query_map([kind], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
 /// Without `[roles.observer]` the agent is given no model or effort; with
 /// it in the bound checkout's `dagq.toml`, it is given its model and
 /// effort. `observe_started` and the span record which (ADR-0079 decision
@@ -683,6 +697,33 @@ fn supervisor_starts_the_observer_on_its_interval_without_a_run_slot() {
         );
         // Claude's session and model are not read from its output.
         assert!(f.get("model").is_none(), "{f}");
+    }
+    let supervisor_actor = (
+        "supervisor".to_owned(),
+        format!("supervisor:{}", std::process::id()),
+        None,
+    );
+    assert_eq!(
+        queue_event_actors(&db, "observe_started"),
+        [supervisor_actor.clone(), supervisor_actor.clone()]
+    );
+    assert_eq!(
+        queue_event_actors(&db, "observe_finished"),
+        [supervisor_actor.clone(), supervisor_actor]
+    );
+    let finding_actors = queue_event_actors(&db, "finding_recorded");
+    assert_eq!(finding_actors.len(), 2, "{finding_actors:?}");
+    let observer_ids: Vec<_> = queue_events(&db, "session_opened")
+        .into_iter()
+        .filter(|payload| payload["kind"] == "observer")
+        .map(|payload| format!("observer:{}", payload["session_id"].as_str().unwrap()))
+        .collect();
+    assert_eq!(observer_ids.len(), 2, "{observer_ids:?}");
+    for ((role, id, requested_by), expected_id) in finding_actors.iter().zip(observer_ids) {
+        assert_eq!(
+            (role.as_str(), id.as_str(), requested_by),
+            ("observer", expected_id.as_str(), &None)
+        );
     }
     let mut findings = SqliteQueue::open(&db)
         .unwrap()

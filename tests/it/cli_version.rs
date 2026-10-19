@@ -765,6 +765,7 @@ exec {quoted_bin} \"$@\"\n"
             .unwrap(),
         "the supervisor",
     );
+    let supervisor_actor_id = format!("supervisor:{}", supervisor.child().id());
     // Waits for the look at main's `sha` that builds nothing, for `why`;
     // a later look at the same head starts no job either.
     let looked = |sha: &str, why: &str| {
@@ -904,6 +905,23 @@ exec {quoted_bin} \"$@\"\n"
         .into_iter()
         .find(|u| u.kind == "update_failed")
         .unwrap();
+    let assert_supervisor_actor = |kind: &str, commit: &str| {
+        let event = updates()
+            .into_iter()
+            .find(|event| event.kind == kind && event.payload["commit"] == commit)
+            .unwrap_or_else(|| panic!("no {kind} event for {commit}"));
+        let actor = event
+            .actor
+            .unwrap_or_else(|| panic!("{} has no actor", event.kind));
+        assert_eq!(
+            (actor.role.as_str(), actor.id.as_str(), actor.requested_by),
+            ("supervisor", supervisor_actor_id.as_str(), None),
+            "{} actor",
+            event.kind
+        );
+    };
+    assert_supervisor_actor("update_installed", &source);
+    assert_supervisor_actor("update_failed", &broken_commit);
     assert_eq!(failed.payload["stage"], "install", "{failed:?}");
     // Every supervisor failed the handoff: each is brought back (task 716).
     assert_eq!(failed.payload["kept"], false, "{failed:?}");
