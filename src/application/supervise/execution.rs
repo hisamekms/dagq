@@ -1588,11 +1588,59 @@ impl Supervisor<'_> {
         close_ended_landing_asks(&mut *self.queue, None);
         self.request_cleanup(None);
         self.on_planning(|planning, env| planning.sweep_planners(env));
+        self.sweep_worker_tokens();
         let held = self.held_runs();
         // The sweep closes 実行と着地's asks and stalled detections of the
         // runs it stops, so it takes the loop's whole queue.
         let (mut env, _, host) = self.split();
         host.sweep_ended_sessions(&mut env, &held)
+    }
+
+    /// Revoke the queue service's token of `run`'s worker, whose run has
+    /// ended (ADR-t1233-4 decision 4): its value leaves the disk with the
+    /// run. A failure is the sweep's to take up again.
+    fn revoke_worker_token(&self, run: &TaskRun) {
+        let actor = ActorContext::worker(run.id(), run.task_id());
+        if let Err(error) = self
+            .service_access
+            .revoke(&self.layout.db, actor.actor_id())
+        {
+            warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: its worker's queue service token could not be revoked: {error:#}", run.id());
+        }
+    }
+
+    /// Revoke the workers' tokens whose runs ended or are not in the queue
+    /// (`worker_token_ended`), those the end of their run did not revoke:
+    /// a run that ended while no supervisor looked, by a cancel, or by
+    /// another process. A run whose status does not read keeps its token.
+    fn sweep_worker_tokens(&self) {
+        let queue = &self.queue;
+        let mut ended = |principal: &crate::domain::queue_service::Principal| {
+            let Some(run) = &principal.run_id else {
+                return false;
+            };
+            let status = match queue.run(run) {
+                Ok(run) => Some(run.status()),
+                Err(error)
+                    if error
+                        .downcast_ref::<crate::application::RunNotFound>()
+                        .is_some() =>
+                {
+                    None
+                }
+                Err(_) => return false,
+            };
+            crate::domain::queue_service::worker_token_ended(principal, status)
+        };
+        match self.service_access.sweep(&self.layout.db, &mut ended) {
+            Ok(revoked) if !revoked.is_empty() => {
+                info!("revoked the queue service tokens of ended runs' workers: {revoked:?}");
+            }
+            Ok(_) => {}
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the queue service tokens of ended runs could not all be revoked: {error:#}");
+            }
+        }
     }
 
     /// Ask host運用 for the worktrees of ended runs to be cleaned, every
@@ -2833,6 +2881,9 @@ impl Supervisor<'_> {
                         warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: its workspaces could not all be closed: {error:#}", run.id());
                     }
                     close_ended_landing_asks(&mut *self.queue, Some(run.task_id()));
+                    if !crate::domain::queue_service::run_holds_token(run.status()) {
+                        self.revoke_worker_token(&run);
+                    }
                     self.request_cleanup(Some(run.task_id()));
                     self.finished.push(*run);
                 }

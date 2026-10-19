@@ -79,7 +79,9 @@ serviceは呼び出しのprincipal（`Principal`）をtokenから決め、クラ
   - jobのtoken: jobを起動するプロセス（supervisor、`observe`・`throughput-review`・`setup-review`のコマンド）が起動のときに発行し、jobのプロセスが終わったとき（それを見たwaitか、handleを捨てたとき）に失効させる（`ServiceAccess::revoke_on_exit`）
 - 失効: `queue_service::revoke`（actor id）が値とprincipalの記録を消す。
   加えてserviceは、principalがrunを名指すtokenを、そのrunが終わったときに断る（runの終わりで失効。`run_holds_token`）。
-  workerのtokenのfileはresumeの発行し直しまで残るが、使えない
+  workerのtokenは、supervisorがrunの終わり（slotのrunが着地・failed・interruptedで休むとき）に`ServiceAccess::revoke`で消す。
+  そこで消さなかったもの（cancel、retryで次のrunに移ったrun、supervisorが居ない間に終わったrun、queueに無いrun）は、supervisorが起動の最初のpassと終わったrunのsweepのたびに`ServiceAccess::sweep`で消す（`worker_token_ended`）。
+  resumeを待つrun（`needs_session`）はtokenを保つので消さず、resumeは今までどおり発行し直す
 - executorのtelemetryのprincipal（ADR-t1662-3決定9〜11・13）: role `executor-telemetry`で、対象を1つだけ持つ（runの対象は`run_id`、runを持たない対象は種類とid。`domain::session_step::StepTarget`）。
   actor idは対象から作り（`domain::telemetry::actor_id`）、runの対象のtokenはworkerのものと同じくrunの終わりで断る。
   ADR-t1233-4決定4のAI actorごとのtokenを、制御側が発行するこのprincipalに広げたもので、決定6のwrapper・hook・plannerのDBの直接の読み書きは変えず、段(5)のwrapper自身のprincipalも先取りしない。
@@ -278,7 +280,6 @@ workerとjobのClaudeの`permissions.deny`には`dagq service`の制御のコマ
 
 ## まだ無いもの
 
-- runの終わりでのworkerのtokenのfileの片付け（serviceはrunの終わったtokenを断るので使えないが、fileは次のresumeの発行し直しか手の片付けまで残る）
 - 実Codexでの読み取りだけのjobのsocketへの到達の確認（`codex sandbox`とstubのCodexまで。上の「Codexのsandboxからの到達」）
 - `dagq ci failures`（`ci.read`。[CI watch](supervisor-lifecycle/ci-watch.md)）の読み取りのユースケース。
   clientのmodeでは`no_use_case`で断る

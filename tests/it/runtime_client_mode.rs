@@ -122,28 +122,11 @@ await_message; resolve; receipt "$(git rev-parse HEAD)"; idle; await_exit"#,
         );
         assert_eq!(note.payload["by"], "worker");
     }
-    // The runs ended (both tasks landed), and so did their workers' tokens.
-    let credentials =
-        dagq::infrastructure::queue_service::service_dir(db.parent().unwrap()).join("credentials");
-    let tokens: Vec<PathBuf> = fs::read_dir(&credentials)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .collect();
-    assert_eq!(tokens.len(), 2, "{tokens:?}");
-    for token in tokens {
-        let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
-            .without_actor_env()
-            .env(
-                "DAGQ_SERVICE_SOCKET",
-                dagq::infrastructure::queue_service::socket_path(db.parent().unwrap()),
-            )
-            .env("DAGQ_SERVICE_CREDENTIAL_FILE", &token)
-            .args(["show", "2"])
-            .bounded_output()
-            .unwrap();
-        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
-        assert_eq!(error["queue_service"]["code"], "unauthenticated", "{error}");
-    }
+    // The runs ended (both tasks landed), and their workers' tokens left
+    // the disk: the one the resume issued again with the run's landing, the
+    // first task's (landed by `integrate`, not by the supervisor) with the
+    // supervisor's sweep.
+    assert_no_tokens(db.parent().unwrap());
 }
 
 /// The review and the recovery job of a run are given no queue path, and
@@ -174,11 +157,113 @@ fn the_review_and_the_recovery_job_are_given_the_service_not_the_queue() {
     for name in ["review", "recovery"] {
         names_no_queue(&db, &dir, name);
     }
-    // Each job's token was revoked when it ended; only the runs' remain.
-    let credentials = dagq::infrastructure::queue_service::service_dir(&dir).join("credentials");
-    assert_eq!(
-        fs::read_dir(&credentials).unwrap().count(),
-        2,
-        "the two runs' workers' tokens only"
+    // Each job's token was revoked when it ended, and each run's worker's
+    // with its run: the first failed, its retry landed.
+    assert_no_tokens(&dir);
+}
+
+/// The files of the tokens the control side issued on the queue in
+/// `queue_dir`: their values and their records.
+fn token_files(queue_dir: &Path) -> Vec<PathBuf> {
+    let service = dagq::infrastructure::queue_service::service_dir(queue_dir);
+    ["credentials", "tokens"]
+        .iter()
+        .filter_map(|dir| fs::read_dir(service.join(dir)).ok())
+        .flatten()
+        .map(|entry| entry.unwrap().path())
+        .collect()
+}
+
+/// No token's value or record is left on the queue in `queue_dir`.
+fn assert_no_tokens(queue_dir: &Path) {
+    let left = token_files(queue_dir);
+    assert!(left.is_empty(), "{left:?}");
+}
+
+/// Whether the worker of `run` holds a token: its value's file.
+fn worker_holds_token(db: &Path, run: &TaskRun) -> bool {
+    use dagq::application::queue_service::ServiceAccess;
+    let actor = dagq::domain::ActorContext::worker(run.id(), run.task_id());
+    dagq::infrastructure::queue_service::SystemServiceAccess
+        .credential(db, actor.actor_id())
+        .is_some()
+}
+
+/// The supervisor's sweep revokes the tokens the ends of their runs left
+/// (a run `integrate` landed, a canceled task's run, a run the queue does
+/// not have) and keeps the token of a run that waits for its resume
+/// (`needs_session`).
+#[test]
+fn the_sweep_revokes_the_tokens_of_ended_runs_and_keeps_a_waiting_runs() {
+    let (_dir, repo, db) = fixture();
+    let queue_dir = db.parent().unwrap().to_owned();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let (parked, _) = parked_conflict(&repo, &db, &backend);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let landed = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    assert_eq!(landed.status(), RunStatus::Integrated);
+    // `integrate` landed the first task with no supervisor to revoke its
+    // worker's token; one is left of a run no longer in the queue.
+    assert!(worker_holds_token(&db, &landed));
+    assert!(worker_holds_token(&db, &parked));
+    let gone = dagq::domain::queue_service::Principal::worker(
+        &RunId::new("gone").unwrap(),
+        TaskId::new(9),
     );
+    dagq::infrastructure::queue_service::issue(&queue_dir, &gone, 0).unwrap();
+    let sweeping = SuperviseOptions {
+        sweep_interval: Duration::ZERO,
+        ..supervise_options(1, true)
+    };
+    // A person holds the parked run's task, which keeps it waiting; the
+    // supervisor's sweep takes the ended runs' tokens and keeps its.
+    let held =
+        crate::common::cli::invoke_with(&[], &db, &["hold", "2", "--reason", "a look first"]);
+    assert!(
+        held.status.success(),
+        "{}",
+        String::from_utf8_lossy(&held.stderr)
+    );
+    let outcome = supervise_with(&db, &repo, &backend, &sweeping).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(
+        queue.run(parked.id()).unwrap().status(),
+        RunStatus::NeedsSession
+    );
+    assert!(worker_holds_token(&db, &parked));
+    assert!(!worker_holds_token(&db, &landed));
+    assert_eq!(
+        token_files(&queue_dir).len(),
+        2,
+        "the parked run's value and record"
+    );
+    // The run ends while no supervisor looks (as `recover` ends one whose
+    // process is gone) and the person cancels its task; the supervisor
+    // that comes next sweeps the run's token.
+    let released = crate::common::cli::invoke_with(&[], &db, &["release", "2"]);
+    assert!(
+        released.status.success(),
+        "{}",
+        String::from_utf8_lossy(&released.stderr)
+    );
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET status='interrupted' WHERE id=?1",
+            [parked.id().as_str()],
+        )
+        .unwrap();
+    queue
+        .transition(TaskId::new(2), TaskAction::Cancel)
+        .unwrap();
+    let ended = queue.run(parked.id()).unwrap().status();
+    assert!(
+        !dagq::domain::queue_service::run_holds_token(ended),
+        "{ended:?}"
+    );
+    let outcome = supervise_with(&db, &repo, &backend, &sweeping).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_no_tokens(&queue_dir);
 }

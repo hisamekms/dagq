@@ -977,6 +977,12 @@ mod tests {
                 .any(|issued| issued == actor_id)
                 .then(|| format!("/q/service/credentials/{actor_id}").into())
         }
+        fn revoke(&self, _: &Path, _: &str) -> Result<bool> {
+            Ok(false)
+        }
+        fn sweep(&self, _: &Path, _: &mut dyn FnMut(&Principal) -> bool) -> Result<Vec<String>> {
+            Ok(Vec::new())
+        }
         fn revoke_on_exit(
             &self,
             _: &Path,

@@ -300,6 +300,18 @@ name = "runtime_client_mode::the_worker_and_its_resume_reach_the_queue_only_thro
 reason = "B 境界（守る境界）: process env/argv + service socket"
 task = 1707
 
+# 5.397s
+[[test]]
+name = "runtime_client_mode::the_review_and_the_recovery_job_are_given_the_service_not_the_queue"
+reason = "B 境界（守る境界）: process env/argv of the jobs + the service's token files that the runs' ends and the jobs' ends remove; its time is a failed run, its recovery job, the retry and its review"
+task = 1324
+
+# 6.382s
+[[test]]
+name = "runtime_client_mode::the_sweep_revokes_the_tokens_of_ended_runs_and_keeps_a_waiting_runs"
+reason = "B 境界（守る境界）: the service's token files on disk against the runs' statuses in SQLite, swept by the supervisor; its time is two landings, a parked conflict and two supervisor starts"
+task = 1324
+
 # 5.342s, class R
 [[test]]
 name = "runtime_e2e::a_failed_e2e_parks_the_run_for_a_resume_and_its_fix_lands"

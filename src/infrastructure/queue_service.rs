@@ -2,7 +2,7 @@
 //! `dagq service serve` runs ([`serve`]), its unix socket under the
 //! queue's directory, the client a caller speaks to it with ([`call`]),
 //! the tokens the control side issues for its principals ([`issue`],
-//! [`revoke`]) and the control `up`, `down` and the supervisor start,
+//! [`revoke`], [`sweep`]) and the control `up`, `down` and the supervisor start,
 //! look at and stop it with ([`SystemQueueService`]).
 //!
 //! Everything lives in `<queue dir>/service/` (mode 0700): the socket
@@ -257,6 +257,68 @@ pub fn revoke(queue_dir: &Path, actor_id: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Revoke every token whose principal `ended` says has ended (a worker's
+/// whose run ended, found by the supervisor's sweep): its record, and its
+/// value when the actor's file still holds that token (a token issued again
+/// since the look, as another supervisor's resume does, is left); the
+/// actor ids of those revoked. A record that does not read is left for a
+/// person to look at, and one that cannot be removed for the next sweep.
+pub fn sweep(queue_dir: &Path, ended: &mut dyn FnMut(&Principal) -> bool) -> Result<Vec<String>> {
+    let dir = service_dir(queue_dir).join(TOKENS_DIR);
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).with_context(|| format!("read {}", dir.display())),
+    };
+    let mut revoked = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        let Ok(record) = serde_json::from_slice::<TokenRecord>(&bytes) else {
+            continue;
+        };
+        if !ended(&record.principal) {
+            continue;
+        }
+        let actor_id = record.principal.actor_id;
+        if let Err(error) = sweep_one(queue_dir, &path, &actor_id) {
+            warn!(error = %format_args!("{error:#}"), "the token of {actor_id} could not be revoked: {error:#}");
+            continue;
+        }
+        if !revoked.contains(&actor_id) {
+            revoked.push(actor_id);
+        }
+    }
+    Ok(revoked)
+}
+
+/// Remove the token's record at `record`, and the value `actor_id`'s file
+/// holds when it is that token's.
+fn sweep_one(queue_dir: &Path, record: &Path, actor_id: &str) -> Result<()> {
+    let file = credential_path(queue_dir, actor_id);
+    match fs::read_to_string(&file) {
+        Ok(token) if record_path(queue_dir, token.trim()) == record => {
+            match fs::remove_file(&file) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(error).with_context(|| format!("remove {}", file.display()));
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("read {}", file.display())),
+    }
+    match fs::remove_file(record) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("remove a token's record"),
+    }
+}
+
 /// The principal `token` was issued for, `None` for one never issued or
 /// revoked.
 pub fn lookup(queue_dir: &Path, token: &str) -> Result<Option<Principal>> {
@@ -300,6 +362,14 @@ impl ServiceAccess for SystemServiceAccess {
     fn credential(&self, db: &Path, actor_id: &str) -> Option<PathBuf> {
         let file = credential_path(&queue_dir_of(db), actor_id);
         file.is_file().then_some(file)
+    }
+
+    fn revoke(&self, db: &Path, actor_id: &str) -> Result<bool> {
+        revoke(&queue_dir_of(db), actor_id)
+    }
+
+    fn sweep(&self, db: &Path, ended: &mut dyn FnMut(&Principal) -> bool) -> Result<Vec<String>> {
+        sweep(&queue_dir_of(db), ended)
     }
 
     fn revoke_on_exit(
@@ -1675,6 +1745,60 @@ mod tests {
         // The control side issues no token for itself or a person.
         let user = Principal::of(&ActorContext::user());
         assert!(issue(dir.path(), &user, 1).is_err());
+    }
+
+    #[test]
+    fn a_sweep_revokes_the_tokens_it_is_told_ended_and_keeps_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        // No token issued yet: nothing to sweep.
+        assert!(sweep(dir.path(), &mut |_| true).unwrap().is_empty());
+        let ended = Principal::worker(&RunId::new("r1").unwrap(), TaskId::new(3));
+        let live = Principal::worker(&RunId::new("r2").unwrap(), TaskId::new(4));
+        let ended_file = issue(dir.path(), &ended, 1).unwrap().file;
+        let ended_token = read_token(&ended_file).unwrap();
+        let live_token = read_token(&issue(dir.path(), &live, 1).unwrap().file).unwrap();
+        // A record its actor's value no longer names, as a crash between
+        // the two removals of a revoke leaves.
+        let orphan = "b".repeat(64);
+        let record = TokenRecord {
+            principal: ended.clone(),
+            issued_at: 0,
+        };
+        write_private(
+            &record_path(dir.path(), &orphan),
+            &serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        // The record of an actor's old token, swept after a token was
+        // issued to it again (the look saw the old one ended): the sweep of
+        // the old record leaves the new value.
+        let run = RunId::new("r3").unwrap();
+        let again = Principal::worker(&run, TaskId::new(5));
+        let again_file = issue(dir.path(), &again, 1).unwrap().file;
+        let old = Principal::worker(&run, TaskId::new(6));
+        let stale = "c".repeat(64);
+        write_private(
+            &record_path(dir.path(), &stale),
+            &serde_json::to_vec(&TokenRecord {
+                principal: old.clone(),
+                issued_at: 0,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let swept = sweep(dir.path(), &mut |principal| principal == &old).unwrap();
+        assert_eq!(swept, [again.actor_id.as_str()]);
+        assert!(again_file.exists());
+        assert_eq!(lookup(dir.path(), &stale).unwrap(), None);
+        assert!(revoke(dir.path(), &again.actor_id).unwrap());
+        let revoked = sweep(dir.path(), &mut |principal| principal == &ended).unwrap();
+        assert_eq!(revoked, [ended.actor_id.as_str()]);
+        assert!(!ended_file.exists());
+        assert_eq!(lookup(dir.path(), &ended_token).unwrap(), None);
+        assert_eq!(lookup(dir.path(), &orphan).unwrap(), None);
+        assert_eq!(lookup(dir.path(), &live_token).unwrap(), Some(live));
+        let records = fs::read_dir(service_dir(dir.path()).join(TOKENS_DIR)).unwrap();
+        assert_eq!(records.count(), 1);
     }
 
     #[test]

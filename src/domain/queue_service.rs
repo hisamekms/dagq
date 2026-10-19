@@ -454,6 +454,17 @@ pub const fn run_holds_token(status: RunStatus) -> bool {
     )
 }
 
+/// Whether the token of `principal` is a worker's whose run ended:
+/// `status` is its run's, `None` for a run not in the queue. The supervisor
+/// revokes such a token's value and record; the service refuses it already
+/// ([`run_holds_token`]). Every other principal's token is left as it is:
+/// a job's ends with its process.
+pub fn worker_token_ended(principal: &Principal, status: Option<RunStatus>) -> bool {
+    principal.role == ActorRole::Worker
+        && principal.run_id.is_some()
+        && !status.is_some_and(run_holds_token)
+}
+
 /// The supervisor could not keep the service running: the inbox's
 /// attention (`reason`, `message`), next `dagq service status`, until the
 /// service runs again (ADR-t1233-4 decision 3).
@@ -722,6 +733,19 @@ mod tests {
         ] {
             assert!(!run_holds_token(status), "{status:?}");
         }
+        // A worker's token goes with its run's end or absence, never while
+        // the run waits for its resume; no other principal's goes so.
+        let run = RunId::new("r1").unwrap();
+        let worker = Principal::worker(&run, TaskId::new(4));
+        assert!(!worker_token_ended(&worker, Some(RunStatus::NeedsSession)));
+        assert!(!worker_token_ended(&worker, Some(RunStatus::Running)));
+        assert!(worker_token_ended(&worker, Some(RunStatus::Integrated)));
+        assert!(worker_token_ended(&worker, Some(RunStatus::Failed)));
+        assert!(worker_token_ended(&worker, None));
+        let job = Principal::of(&ActorContext::review_job(&run, 1));
+        assert!(!worker_token_ended(&job, None));
+        let telemetry = Principal::telemetry(&StepTarget::run(&run), Some(TaskId::new(4)));
+        assert!(!worker_token_ended(&telemetry, Some(RunStatus::Failed)));
         assert!(attention_stands(Some(QUEUE_SERVICE_DOWN)));
         assert!(!attention_stands(Some(QUEUE_SERVICE_RUNNING)));
         assert!(!attention_stands(None));

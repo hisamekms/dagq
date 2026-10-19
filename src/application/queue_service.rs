@@ -768,7 +768,8 @@ pub trait QueueServiceControl: Send + Sync {
 /// at `db`, and the file of a token for the actor's principal. Only the
 /// control side holds it: the supervisor issues a worker's token at the
 /// claim and the resume and a job's at its start, and no command of an AI
-/// actor's issues one.
+/// actor's issues one. The supervisor revokes a worker's token when its run
+/// ends, and sweeps those whose runs ended while it did not look.
 pub trait ServiceAccess: Send + Sync {
     /// The socket of the service of the queue at `db`.
     fn socket(&self, db: &std::path::Path) -> std::path::PathBuf;
@@ -777,6 +778,16 @@ pub trait ServiceAccess: Send + Sync {
     fn issue(&self, db: &std::path::Path, principal: &Principal) -> Result<std::path::PathBuf>;
     /// The file of the token `actor_id` holds, `None` when it holds none.
     fn credential(&self, db: &std::path::Path, actor_id: &str) -> Option<std::path::PathBuf>;
+    /// Revoke the token `actor_id` holds (a worker's whose run ended):
+    /// whether there was one.
+    fn revoke(&self, db: &std::path::Path, actor_id: &str) -> Result<bool>;
+    /// Revoke every token of the queue at `db` whose principal `ended`
+    /// says has ended: the actor ids of those revoked.
+    fn sweep(
+        &self,
+        db: &std::path::Path,
+        ended: &mut dyn FnMut(&Principal) -> bool,
+    ) -> Result<Vec<String>>;
     /// `child`, which revokes the token of `actor_id` once it has ended (a
     /// job's, whose token ends with it).
     fn revoke_on_exit(
