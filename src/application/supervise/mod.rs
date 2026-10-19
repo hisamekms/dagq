@@ -445,6 +445,11 @@ pub struct Layout {
     /// program reviews of its review write the scripts they run, outside
     /// what its worker can write (ADR-t1895-2 decision 2).
     pub review_programs_dir: PathBuf,
+    /// `satisfied/` of the queue: one scratch worktree per run, where the
+    /// snapshot its `already_satisfied` claim is verified on is checked
+    /// out, outside what its worker can write
+    /// ([`crate::application::integrate::satisfied_scratch`]).
+    pub satisfied_dir: PathBuf,
     /// `replans/` of the queue: the snapshot of each run parked for a
     /// replanning, outside what its worker can write (ADR-t1521-2).
     pub replans_dir: PathBuf,
@@ -486,6 +491,7 @@ impl Layout {
             agent_evals_dir: root.join("agent-evals"),
             agent_cases_dir: root.join("agent-cases"),
             review_programs_dir: root.join("review-programs"),
+            satisfied_dir: root.join("satisfied"),
             replans_dir: root.join("replans"),
         }
     }

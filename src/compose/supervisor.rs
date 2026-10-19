@@ -49,7 +49,7 @@ use crate::{
         codex::Codex,
         location::{
             QueueLocation, agent_cases_dir, agent_evals_dir, goal_reviews_dir, plan_reviews_dir,
-            planners_dir, replans_dir, review_programs_dir, runs_dir,
+            planners_dir, replans_dir, review_programs_dir, runs_dir, satisfied_dir,
         },
         process::LocalSpawner,
         run_env::{
@@ -710,6 +710,7 @@ pub fn supervise_with_reviewer(
         agent_evals_dir: agent_evals_dir(&db),
         agent_cases_dir: agent_cases_dir(&db),
         review_programs_dir: review_programs_dir(&db),
+        satisfied_dir: satisfied_dir(&db),
         replans_dir: replans_dir(&db),
         db: db.clone(),
     };

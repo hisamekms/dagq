@@ -1949,6 +1949,21 @@ pub trait Repository: RepositoryReads {
         let _ = (path, commit);
         anyhow::bail!("this repository keeps no scratch worktree")
     }
+    /// Make the scratch worktree at `path` again from nothing, `commit`
+    /// checked out detached: whatever is at `path` is removed first without
+    /// being trusted as a worktree (a `.git` in it is not used, a link is
+    /// removed and never followed), and Git's record of it is pruned.
+    fn fresh_scratch(&self, path: &Path, commit: &str) -> Result<()> {
+        let _ = (path, commit);
+        anyhow::bail!("this repository makes no scratch worktree")
+    }
+    /// Remove the scratch worktree at `path` as [`Self::fresh_scratch`]
+    /// clears it, without trusting what is there, and prune Git's record
+    /// of it.
+    fn remove_scratch(&self, path: &Path) -> Result<()> {
+        let _ = path;
+        anyhow::bail!("this repository removes no scratch worktree")
+    }
     /// The tasks landed between two commits, oldest first, from their
     /// `Dagq-Task` trailers.
     fn landed_task_ids(&self, base: &str, head: &str) -> Result<Vec<TaskId>>;

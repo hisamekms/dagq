@@ -64,6 +64,15 @@ fn claimed() -> (Fixture, PathBuf, PathBuf, TestWorkspace, TestReviewer) {
 fn claimed_after(
     before: impl FnOnce(&Path),
 ) -> (Fixture, PathBuf, PathBuf, TestWorkspace, TestReviewer) {
+    claimed_with(true, before)
+}
+
+/// [`claimed_after`], with task 2 depending on task 1 only when
+/// `dependent`.
+fn claimed_with(
+    dependent: bool,
+    before: impl FnOnce(&Path),
+) -> (Fixture, PathBuf, PathBuf, TestWorkspace, TestReviewer) {
     let (fixture, repo, db) = fixture();
     before(&repo);
     // A ready task's verification is not editable through the CLI.
@@ -75,7 +84,9 @@ fn claimed_after(
         )
         .unwrap();
     let mut queue = SqliteQueue::open(&db).unwrap();
-    add_ready_task(&mut queue, "after it", &[TaskId::new(1)]);
+    if dependent {
+        add_ready_task(&mut queue, "after it", &[TaskId::new(1)]);
+    }
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.script_for(1, SATISFIED_AGENT);
     let reviewer = TestReviewer::new(&[verdict("pass", &[], "fine")]);
@@ -369,6 +380,9 @@ fn a_verification_set_to_a_held_container_runs_nothing_on_the_host() {
         .filter(|entry| entry.file_name().to_string_lossy().starts_with("satisfied"))
         .collect();
     assert!(logs.is_empty(), "{logs:?}");
+    // Nor was a scratch worktree made on the host.
+    let scratch = satisfied_scratch(&db, run.id());
+    assert!(fs::symlink_metadata(&scratch).is_err(), "{scratch:?}");
     let refused = runtime::recover(&db, run.id()).unwrap_err().to_string();
     assert!(refused.contains("already_satisfied"), "{refused}");
     let status = runtime::status(&db).unwrap();
@@ -421,7 +435,7 @@ fn a_verification_a_dead_supervisor_left_running_is_stopped_before_the_next() {
     let mut queue = SqliteQueue::open(&db).unwrap();
     let ask = close_ask(&mut queue);
     let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
-    let scratch = Path::new(run.run_dir().unwrap()).join("satisfied");
+    let scratch = satisfied_scratch(&db, run.id());
     fs::create_dir_all(&scratch).unwrap();
     // A stand-in the test orphans in `dir`: it ends on its own once its
     // directory or the test's process is gone, or after two minutes,
@@ -473,6 +487,189 @@ fn a_verification_a_dead_supervisor_left_running_is_stopped_before_the_next() {
         "{pids:?}"
     );
     assert_eq!(detail.task.status(), TaskStatus::Completed);
+    assert_eq!(satisfied_worktrees(&repo, &db), Vec::<String>::new());
+}
+
+/// Where the verification of `run`'s claim checks its snapshot out: the
+/// run's directory of the queue's `satisfied/`.
+fn satisfied_scratch(db: &Path, run: &RunId) -> PathBuf {
+    dagq::application::integrate::satisfied_scratch(
+        &dagq::infrastructure::location::satisfied_dir(db),
+        run,
+    )
+}
+
+/// The worktrees Git records of the repository under the queue's
+/// `satisfied/`.
+fn satisfied_worktrees(repo: &Path, db: &Path) -> Vec<String> {
+    let dir = dagq::infrastructure::location::satisfied_dir(db);
+    let dir = fs::canonicalize(dir.parent().unwrap())
+        .unwrap()
+        .join(dir.file_name().unwrap());
+    git_out(repo, &["worktree", "list", "--porcelain"])
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .filter(|path| {
+            fs::canonicalize(path)
+                .unwrap_or_else(|_| PathBuf::from(path))
+                .starts_with(&dir)
+                || Path::new(path).starts_with(&dir)
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Another worktree of the repository, a person's or another run's, with
+/// work of its own not committed: a tracked file changed and a file Git
+/// does not track. What the verification must leave as it is.
+struct Bystander {
+    dir: PathBuf,
+    git_dir: String,
+    head: String,
+    branch: String,
+    status: String,
+}
+
+impl Bystander {
+    fn new(repo: &Path, dir: PathBuf) -> Self {
+        git(
+            repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "bystander",
+                dir.to_str().unwrap(),
+                "main",
+            ],
+        );
+        fs::write(dir.join("seed.txt"), "changed, not committed").unwrap();
+        fs::write(dir.join("untracked.txt"), "not tracked").unwrap();
+        let read = |args: &[&str]| git_out(&dir, args).trim().to_owned();
+        Self {
+            git_dir: read(&["rev-parse", "--absolute-git-dir"]),
+            head: read(&["rev-parse", "HEAD"]),
+            branch: read(&["symbolic-ref", "HEAD"]),
+            status: read(&["status", "--porcelain", "--untracked-files=all"]),
+            dir,
+        }
+    }
+
+    /// Its HEAD, its branch and its work are as they were.
+    fn assert_untouched(&self) {
+        let read = |args: &[&str]| git_out(&self.dir, args).trim().to_owned();
+        assert_eq!(read(&["rev-parse", "HEAD"]), self.head);
+        assert_eq!(read(&["symbolic-ref", "HEAD"]), self.branch);
+        assert_eq!(
+            read(&["status", "--porcelain", "--untracked-files=all"]),
+            self.status
+        );
+        assert_eq!(
+            fs::read_to_string(self.dir.join("seed.txt")).unwrap(),
+            "changed, not committed"
+        );
+        assert_eq!(
+            fs::read_to_string(self.dir.join("untracked.txt")).unwrap(),
+            "not tracked"
+        );
+    }
+}
+
+/// Plant with `plant` what points at a [`Bystander`] where the run's
+/// scratch worktree is (the queue's `satisfied/`) and where it once was
+/// (the run directory's `satisfied`, which its worker can write), then
+/// move main and answer close: the verification on the new head makes its
+/// scratch worktree again from nothing and the task closes, the bystander's
+/// HEAD and work unchanged, what was planted in the run directory left
+/// alone, and no scratch worktree left behind or recorded by Git. With
+/// `cleaned`, once the run ended, the cleanup removes a scratch worktree a
+/// dead verification left, with Git's record of it. No task depends on
+/// the claim's.
+fn a_planted_scratch_is_not_trusted(cleaned: bool, plant: impl FnOnce(&Path, &Path, &Bystander)) {
+    let (fixture, repo, db, backend, reviewer) = claimed_with(false, |_| {});
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let ask = close_ask(&mut queue);
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let bystander = Bystander::new(&repo, fixture.dir.path().join("bystander"));
+    let scratch = satisfied_scratch(&db, run.id());
+    let old = Path::new(run.run_dir().unwrap()).join("satisfied");
+    plant(&scratch, &old, &bystander);
+    let planted = fs::symlink_metadata(&old).unwrap().file_type();
+    git(
+        &repo,
+        &["commit", "-q", "--allow-empty", "-m", "main moves"],
+    );
+    queue.answer(ask.id, "close").unwrap();
+    supervise_reviewed(&db, &repo, &backend, &reviewer, 2);
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.task.status(), TaskStatus::Completed);
+    let verified = payloads(&detail, "run_satisfied_verified");
+    assert_eq!(verified.len(), 2, "{:?}", event_kinds(&detail));
+    assert_eq!(verified[1]["passed"], true, "{verified:?}");
+    bystander.assert_untouched();
+    assert_eq!(
+        fs::symlink_metadata(&old).unwrap().file_type(),
+        planted,
+        "the run directory's satisfied is left alone"
+    );
+    assert!(fs::symlink_metadata(&scratch).is_err(), "{scratch:?}");
+    assert_eq!(satisfied_worktrees(&repo, &db), Vec::<String>::new());
+    if !cleaned {
+        return;
+    }
+
+    // A scratch worktree a dead verification left, recorded by Git.
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            scratch.to_str().unwrap(),
+            "main",
+        ],
+    );
+    assert_eq!(satisfied_worktrees(&repo, &db).len(), 1);
+    let sweeping = SuperviseOptions {
+        sweep_interval: Duration::ZERO,
+        ..supervise_options(2, true)
+    };
+    supervise_with(&db, &repo, &backend, &sweeping).unwrap();
+    assert!(fs::symlink_metadata(&scratch).is_err(), "{scratch:?}");
+    assert_eq!(satisfied_worktrees(&repo, &db), Vec::<String>::new());
+    bystander.assert_untouched();
+}
+
+/// A link to another worktree where the scratch worktree is, and a `.git`
+/// file naming that worktree's Git directory where it once was in the run
+/// directory: neither is followed nor used, and the cleanup of the ended
+/// run removes a scratch worktree left there.
+#[test]
+fn a_link_where_the_scratch_is_is_removed_not_followed() {
+    a_planted_scratch_is_not_trusted(true, |scratch, old, bystander| {
+        fs::create_dir_all(scratch.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&bystander.dir, scratch).unwrap();
+        fs::create_dir_all(old).unwrap();
+        fs::write(old.join(".git"), format!("gitdir: {}\n", bystander.git_dir)).unwrap();
+    });
+}
+
+/// A `.git` file naming another worktree's Git directory where the scratch
+/// worktree is, and a link to that worktree where it once was in the run
+/// directory: the `.git` is not trusted as the scratch worktree's.
+#[test]
+fn a_git_file_where_the_scratch_is_is_not_trusted() {
+    a_planted_scratch_is_not_trusted(false, |scratch, old, bystander| {
+        fs::create_dir_all(scratch).unwrap();
+        fs::write(
+            scratch.join(".git"),
+            format!("gitdir: {}\n", bystander.git_dir),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&bystander.dir, old).unwrap();
+    });
 }
 
 /// Open a replanning operation on `run` and move it past the pause's fence,

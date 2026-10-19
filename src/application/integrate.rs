@@ -303,9 +303,9 @@ fn unguarded_rejection(facts: ReceiptFacts<'_>, run: &TaskRun, error: &anyhow::E
 /// coverage gate included, ADR-t1818-1 decision 2), on `head`, the snapshot
 /// of main an `already_satisfied` claim is verified on, with the run's
 /// `[run.env]`; nothing is rebased, committed or pushed, and the run's own
-/// worktree keeps the base its receipt names. On the host they run in a
-/// scratch worktree of the run's directory with `head` checked out
-/// detached. Set to the container (ADR-t2113-3 decision 1), they run as
+/// worktree keeps the base its receipt names. On the host they run in the
+/// run's scratch worktree of `scratches`, the queue's `satisfied/`, made
+/// again with `head` checked out detached ([`fresh_satisfied_scratch`]). Set to the container (ADR-t2113-3 decision 1), they run as
 /// the landing's verification does: each in a container of its own on a
 /// clone of `head` made by `containers`, with a token of the snapshot's
 /// own and without the sccache wrapper, never on the host instead. The
@@ -317,7 +317,7 @@ pub fn verify_snapshot(
     files: &dyn RunFiles,
     task: &Task,
     run: &TaskRun,
-    head: &CommitSha,
+    (head, scratches): (&CommitSha, &Path),
     containers: SnapshotContainers<'_>,
 ) -> Result<SnapshotVerification> {
     let commands = task.verification_commands();
@@ -362,21 +362,19 @@ pub fn verify_snapshot(
         bail!("{message}");
     }
     let env = verifier.run_env(run_dir)?;
-    let scratch = satisfied_scratch(run_dir);
     // The scratch worktree goes whatever the commands did.
-    let ran = repository
-        .checkout_scratch(&scratch, head.as_str())
-        .and_then(|()| {
-            snapshot_commands(
-                files,
-                run_dir,
-                head,
-                commands,
-                &mut verification.commands,
-                |command, log| verifier.run_to_log(command, &scratch, &env, log),
-            )
-        });
-    if let Err(error) = repository.remove_case_tree(&scratch) {
+    let ran = fresh_satisfied_scratch(repository, scratches, run.id(), head).and_then(|scratch| {
+        snapshot_commands(
+            files,
+            run_dir,
+            head,
+            commands,
+            &mut verification.commands,
+            |command, log| verifier.run_to_log(command, &scratch, &env, log),
+        )
+    });
+    let scratch = satisfied_scratch(scratches, run.id());
+    if let Err(error) = repository.remove_scratch(&scratch) {
         warn!(run_id = %run.id(), "run {}: the scratch worktree {} could not be removed: {error:#}", run.id(), scratch.display());
     }
     verification.failure = ran?;
@@ -425,11 +423,33 @@ fn snapshot_commands(
     Ok(None)
 }
 
-/// The scratch worktree of `run_dir` [`verify_snapshot`] checks a snapshot
-/// out in; what an earlier verification left working in it is stopped
-/// before it is used again.
-pub fn satisfied_scratch(run_dir: &Path) -> PathBuf {
-    run_dir.join("satisfied")
+/// Where `run`'s snapshot of main is checked out when its
+/// `already_satisfied` claim is verified on the host: its directory of
+/// `dir`, the queue's `satisfied/`, outside what the run's worker can
+/// write (its run directory and worktree), so no `.git` or link the worker
+/// left points the host's Git at a directory of the worker's choosing.
+/// What an earlier verification left working in it is stopped before it
+/// is made again.
+pub fn satisfied_scratch(dir: &Path, run: &RunId) -> PathBuf {
+    dir.join(run.as_str())
+}
+
+/// Make `run`'s [`satisfied_scratch`] of `dir` again from nothing with
+/// `head` checked out detached, and give its path: what was there is not
+/// trusted as a worktree but removed (a link without being followed), so
+/// every use starts from `head` alone. What checks a snapshot of a claim
+/// out on the host checks it out with this.
+pub fn fresh_satisfied_scratch(
+    repository: &dyn Repository,
+    dir: &Path,
+    run: &RunId,
+    head: &CommitSha,
+) -> Result<PathBuf> {
+    let scratch = satisfied_scratch(dir, run);
+    repository
+        .fresh_scratch(&scratch, head.as_str())
+        .with_context(|| format!("make the scratch worktree {}", scratch.display()))?;
+    Ok(scratch)
 }
 
 /// What the receipt `integrate` reads before landing lacks: the code, the
@@ -3446,14 +3466,16 @@ mod tests {
         fn is_dagq_source(&self) -> bool {
             self.dagq_source
         }
-        fn checkout_scratch(&self, _: &Path, commit: &str) -> Result<()> {
+        fn fresh_scratch(&self, path: &Path, commit: &str) -> Result<()> {
             self.calls
                 .borrow_mut()
-                .push(format!("checkout_scratch {commit}"));
+                .push(format!("fresh_scratch {} {commit}", path.display()));
             Ok(())
         }
-        fn remove_case_tree(&self, _: &Path) -> Result<()> {
-            self.calls.borrow_mut().push("remove_case_tree".to_owned());
+        fn remove_scratch(&self, path: &Path) -> Result<()> {
+            self.calls
+                .borrow_mut()
+                .push(format!("remove_scratch {}", path.display()));
             Ok(())
         }
         fn current_branch(&self, _: &Path) -> Result<Option<String>> {
@@ -3697,6 +3719,8 @@ mod tests {
 
     /// Where the run's files are in [`MemoryFiles`].
     const DIR: &str = "/runs/run";
+    /// The queue's `satisfied/` of a unit test.
+    const SCRATCHES: &str = "/q/satisfied";
 
     /// A container run whose commits the repository's git cannot be kept
     /// from running the hooks and drivers of, or whose landing worktree
@@ -3861,7 +3885,7 @@ mod tests {
                 &files,
                 &task,
                 &run,
-                &sha(HEAD),
+                (&sha(HEAD), Path::new(SCRATCHES)),
                 NoContainers::parts(&NoContainers::default()),
             )
             .unwrap();
@@ -3876,11 +3900,15 @@ mod tests {
         assert_eq!(ran, ["first"]);
         let failure = failed.failure.unwrap();
         assert_eq!((failure.command.as_str(), failure.exit_code), ("first", 1));
+        // Made again in the queue's `satisfied/`, outside the run's
+        // directory, for every verification.
+        let scratch = format!("{SCRATCHES}/{RUN}");
+        assert!(!scratch.starts_with(DIR), "{scratch}");
         assert_eq!(
             calls,
             [
-                format!("checkout_scratch {HEAD}"),
-                "remove_case_tree".to_owned()
+                format!("fresh_scratch {scratch} {HEAD}"),
+                format!("remove_scratch {scratch}")
             ]
         );
         let (second, ran, _) = verify(vec![true, false, true]);
@@ -3990,7 +4018,7 @@ mod tests {
                 &files,
                 &task,
                 &run(dir),
-                &sha(HEAD),
+                (&sha(HEAD), Path::new(SCRATCHES)),
                 containers.parts(),
             )
             .unwrap();

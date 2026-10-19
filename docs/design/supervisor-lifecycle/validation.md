@@ -86,7 +86,8 @@ verifyが通れば人のaskに上げ、人の答えで閉じる。
   sessionに終了を依頼してworkspaceを閉じる。
 - **snapshot**: 検証の時点のmainのheadを1つ決めて`run_satisfied_snapshot`に残し、そのheadでtaskの`verification_commands`を登録のまま全部流す（`integrate::verify_snapshot`）。
   coverageの関門も流し、[着地の検証](#着地の検証)の置き換えはしない。
-  hostでは流す場所はrun directoryのscratch worktreeで、runのworktreeはreceiptの名指すbaseのままにする。
+  hostでは流す場所はqueueの`satisfied/`のrunごとのscratch worktreeで、runのworktreeはreceiptの名指すbaseのままにする。
+  その置き場はrun directoryの外のworkerが書けない場所で、検証のたびにそこにあるものを（`.git`もlinkも）worktreeとして信用せずに消し（linkは辿らずlinkだけを消す）、snapshotのheadで作り直す（`integrate::fresh_satisfied_scratch`）。
   verificationのruntimeがcontainerなら、着地の検証と同じ部品で、snapshotのheadのcloneを置いたverificationごとのcontainerで流す（[container runtime](../container-runtime.md#verificationの実行)、tokenはsnapshotの検証のもの）。
   rebase・commit・push・e2eは無い。
   結果は同じheadとともに`run_satisfied_verified`に残す（欄の意味は`event_kind`のdoc comment）。
@@ -106,6 +107,7 @@ verifyが通れば人のaskに上げ、人の答えで閉じる。
   検証のコマンドは自分のprocess groupで動き、supervisorが死んでも残りうる。
   そこでscratch worktreeを使い直す前に、そこで動く前の検証のprocessを止め（`auto_repaired`の`satisfied_verification_stopped`）、止まらないか一覧が読めなければ検証せず、askに落ちたことを書く。
   containerで流すときは、verificationのcloneの親のdirに残るそのrunのverificationのcontainer・buildの出力のvolume・dirを先に消し（同じ`auto_repaired`）、消せなければ同じく検証しない。
+  検証の途中で死んだsupervisorが残したscratch worktreeは、次の検証の作り直しか、runが終わった後の掃除がGitの登録ごと消す。
 - **再計画**: taskを再計画の操作が保護する間は、検証の結果でaskを開かずtaskも閉じず、答えも適用せず、closeのtransactionも拒む。
   休むrunもそのまま保留され、開いた`approve_close`は閉じる（[taskの再計画](../../plans/task-replanning.md#実装の状態)）。
   holdの開いたtaskも同じく検証の結果でaskを開かずtaskも閉じず、答えは解除まで残し、休むrunはそのまま待つ。

@@ -117,6 +117,7 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 - 計画系は`Planning`、対話と記録は`Dialogue`、runtimeの操作系は`Operation`（queueを開く・作る・移す前）。
   Codexのworkerの`dagq ask`は、クライアントモードでqueue serviceのユースケースとして送られ、serviceがworkerのprincipalで判定する（ADR-t1233-5決定5。[Queue service](queue-service.md#クライアントモード)）。
   supervisorはsandboxの外で動くので、workerが書くrun dirのfileを、supervisorと非対話のwrapperの`LocalRunFiles`とprocessの出力のopenが`O_NOFOLLOW`で開いた記述子に対する操作で扱い、workerの代わりにrunのdirの外を読み書きしない（上限は`src/infrastructure/run_files.rs`、[provider-lifecycle](provider-lifecycle.md#codexの非対話のworker)の「run dirのfile」）。
+  hostのGitが作業するscratch worktree（`already_satisfied`のsnapshotの検証のもの）はrun dirに置かず、queueの`satisfied/`のrunごとのdirに置き、使うたびにそこにある`.git`もlinkも信用せずに消して（linkは辿らない）作り直す（[Validation](supervisor-lifecycle/validation.md#already_satisfiedの検証)）。
   拒否は`authorization_denied`のeventとして、拒まれた呼び出し元をactorに記録し、拒否のerrorを返す
 - 着地とpushは`Integrator`がもう一度判定する（下の「reviewのpassとIntegrator」）
 - queue serviceは、[ユースケース](queue-service.md#ユースケース)を、tokenから決めたprincipalのactorで同じ`Dialogue`・`Gate`と`StaticPolicy`に通す（service側の判定。`DAGQ_ROLE`は使わない）。

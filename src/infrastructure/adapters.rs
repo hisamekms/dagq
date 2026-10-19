@@ -691,6 +691,19 @@ pub fn claude_version(claude: &Path) -> Option<String> {
         .flatten()
 }
 
+/// Remove whatever is at `path` without following it: a directory with
+/// all under it (a link inside is removed, not followed), a link or a file
+/// alone. Nothing at `path` is no error.
+fn remove_untrusted(path: &Path) -> Result<()> {
+    let removed = match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => Err(error),
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path),
+        Ok(_) => fs::remove_file(path),
+    };
+    removed.with_context(|| format!("remove {}", path.display()))
+}
+
 pub fn output(command: &mut Command) -> Result<String> {
     let (status, stdout, stderr) = capture(command, OUTPUT_TIMEOUT)?;
     ensure!(
@@ -1722,6 +1735,39 @@ impl GitRepository {
                 .args(["checkout", "--detach", "--force", "--quiet", commit]),
         )?;
         output(self.command().arg("-C").arg(path).args(["clean", "-ffdxq"]))?;
+        Ok(())
+    }
+
+    /// Make the scratch worktree at `path` again at `commit`, detached:
+    /// what is there goes first ([`remove_untrusted`]), so no `.git` and no
+    /// link left at `path` points a checkout or a clean at another
+    /// directory, and Git's record of what went is pruned.
+    pub fn fresh_scratch(&self, path: &Path, commit: &str) -> Result<()> {
+        self.remove_scratch(path)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        }
+        output(
+            self.command()
+                .arg("-C")
+                .arg(&self.root)
+                .args(["worktree", "add", "--detach", "--force"])
+                .arg(path)
+                .arg(commit),
+        )?;
+        Ok(())
+    }
+
+    /// Remove what is at `path` ([`remove_untrusted`]) and prune Git's
+    /// record of the worktree that was there.
+    pub fn remove_scratch(&self, path: &Path) -> Result<()> {
+        remove_untrusted(path)?;
+        output(
+            self.command()
+                .arg("-C")
+                .arg(&self.root)
+                .args(["worktree", "prune"]),
+        )?;
         Ok(())
     }
 
@@ -2994,6 +3040,12 @@ impl Repository for GitRepository {
     }
     fn checkout_scratch(&self, path: &Path, commit: &str) -> Result<()> {
         GitRepository::checkout_scratch(self, path, commit)
+    }
+    fn fresh_scratch(&self, path: &Path, commit: &str) -> Result<()> {
+        GitRepository::fresh_scratch(self, path, commit)
+    }
+    fn remove_scratch(&self, path: &Path) -> Result<()> {
+        GitRepository::remove_scratch(self, path)
     }
     fn tree_of(&self, commit: &str) -> Result<String> {
         GitRepository::tree_of(self, commit)

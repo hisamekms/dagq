@@ -1277,6 +1277,18 @@ name = "runtime_already_satisfied::a_claim_without_its_base_checks_is_an_invalid
 reason = "B 境界（守る境界）: supervisor wiring: a real worker turn's receipt without base_checks is refused by the supervisor's validation on SQLite (run failed, receipt_invalid, nothing verified); the refusal itself is receipt::tests and validation::tests"
 task = 1820
 
+# 6.314s (stress max; 4.8s alone), class B
+[[test]]
+name = "runtime_already_satisfied::a_link_where_the_scratch_is_is_removed_not_followed"
+reason = "B 境界（守る境界）: real Git and filesystem: a link to another worktree where the scratch is and a .git file in the run directory's old place are neither followed nor used by the host's git (the other worktree's HEAD and uncommitted files stay), the scratch is made again and removed with Git's record, and the cleanup of the ended run removes one a dead verification left; the place is location::tests and integrate::tests"
+task = 2831
+
+# 5.805s (stress max; 4.3s alone), class B
+[[test]]
+name = "runtime_already_satisfied::a_git_file_where_the_scratch_is_is_not_trusted"
+reason = "B 境界（守る境界）: real Git and filesystem: a .git file naming another worktree's Git directory where the scratch is, and a link in the run directory's old place, are not trusted by the host's git (the other worktree's HEAD and uncommitted files stay) and the claim closes on a scratch made again; the place is location::tests and integrate::tests"
+task = 2831
+
 [[test]]
 name = "review_programs::builtin_secrets_sends_an_added_key_back_without_any_configuration"
 reason = "supervisorの配線: 設定の無いrepositoryでbuilt-inのprogramのjobがagentより前にプロセスとして流れ、差し戻しとeventの記録まで通る境界"

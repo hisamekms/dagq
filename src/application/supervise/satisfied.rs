@@ -209,7 +209,8 @@ impl Supervisor<'_> {
             });
         // One verification of the run at a time in its scratch worktree,
         // so the files verified are the snapshot's.
-        let scratch = integration::satisfied_scratch(run_dir);
+        let scratches = self.layout.satisfied_dir.clone();
+        let scratch = integration::satisfied_scratch(&scratches, run.id());
         let stale = self.stop_stale_verification(run, &scratch).and_then(|()| {
             if in_container {
                 self.stop_stale_container(run)
@@ -256,7 +257,7 @@ impl Supervisor<'_> {
                 &*files,
                 &task,
                 &target,
-                &snapshot,
+                (&snapshot, &scratches),
                 integration::SnapshotContainers {
                     containers: &*containers,
                     tokens: &*tokens,

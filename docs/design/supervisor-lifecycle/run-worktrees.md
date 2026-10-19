@@ -49,6 +49,9 @@ worktreeのpathはrun_dirの下の`<runs>/<run-id>/worktree`で、`--repo`のche
 - **runの`runner`**: 上のどちらでも、同じjobがrun_dirの`runner`（claimとresumeのたびに写すバイナリの写し）を消し、消してよい理由と失敗のやり直しは`remove_run_runner`が持つ。
   worktreeの有無を問わず、run_dirの他のfile（`receipt.json`・検証のlogなど）は残す。
 
+- **runの`already_satisfied`のscratch worktree**: 終わったrunについて、同じjobが、検証の途中で死んだsupervisorが残したqueueの`satisfied/`のそのrunのscratch worktreeを、そこにあるものを信用せずにGitの登録ごと消す（`satisfied_scratch_of`、[Validation](validation.md#already_satisfiedの検証)）。
+  eventは記録せず、消せなければ`cleanup_failed`にして、次の掃除で再び試す。
+
 - **runのClaude Codeのscratchpad**: taskが`completed` / `canceled`のrunについて、同じjobが、そのrunのsession（worker）がClaude Codeのscratchpadを置くディレクトリを消す。
   workerは使い捨てのrepositoryや計測用の`target/`をそこに置くので、1 runで数GBになりうる。
   - 名前: runのsessionのcwdはrunのworktreeなので、runtimeはDBのworktreeのpathから、Claude Codeが付けるディレクトリの名前を求める（`scratchpad_dir_name`）。

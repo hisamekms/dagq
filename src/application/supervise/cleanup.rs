@@ -30,7 +30,10 @@
 //! its worktree: the Claude Code scratchpad of its session (task 1100,
 //! [`scratchpad_dir_name`]), and the temporary files directory the runtime
 //! gave its Codex turns as their `TMPDIR` (task 1290, [`RUN_TMP_DIR`] in
-//! its run directory). The rest of the run directory stays.
+//! its run directory). The rest of the run directory stays. Of every
+//! ended run it removes the scratch worktree an `already_satisfied`
+//! verification left in the queue's `satisfied/` (its supervisor died
+//! while it ran, [`satisfied_scratch_of`]).
 //!
 //! Beside the ended runs, it removes the build outputs of the runs left in
 //! the middle with no lease and no live session (task 1289,
@@ -425,7 +428,7 @@ fn task_over_record(task_status: TaskStatus, paths: &[String], bytes: u64) -> Va
 }
 
 /// The message and the payload of `cleanup_failed` for `what` (`worktree`,
-/// `scratchpad` or `run tmp`) at `path`.
+/// `scratchpad`, `run tmp` or `satisfied scratch`) at `path`.
 fn failed_record(what: &str, path: &str, error: &anyhow::Error) -> (String, Value) {
     let message = format!("{what} {path} could not be cleaned: {error:#}");
     let payload = reason_of_error(error, ReasonCode::Other)
@@ -726,7 +729,7 @@ enum Outcome {
     },
     Failed {
         run_id: RunId,
-        /// `worktree`, `scratchpad` or `run tmp`.
+        /// `worktree`, `scratchpad`, `run tmp` or `satisfied scratch`.
         what: &'static str,
         path: String,
         error: anyhow::Error,
@@ -785,6 +788,9 @@ struct JobPorts {
     prune: bool,
     /// Where Claude Code keeps the sessions' scratchpads (task 1100).
     scratchpad_roots: Vec<PathBuf>,
+    /// The queue's `satisfied/`, of the runs' `already_satisfied`
+    /// verifications' scratch worktrees.
+    satisfied_dir: PathBuf,
     /// The queue's directory, whose [`build_caches`] the job clears (for
     /// disk space).
     caches: Option<PathBuf>,
@@ -989,6 +995,7 @@ impl HostOpsState {
             },
             prune: request.prune,
             scratchpad_roots: (self.scratchpad_roots)(),
+            satisfied_dir: env.layout.satisfied_dir.clone(),
             caches: env
                 .layout
                 .db
@@ -1353,6 +1360,7 @@ fn clean_candidate(
     }
     remove_scratchpads(ports, candidate, outcomes);
     remove_run_tmp(ports, candidate, outcomes);
+    remove_satisfied_scratch(ports, candidate, outcomes);
     let mine = &outcomes[first..];
     let branch = if mine.iter().any(|o| matches!(o, Outcome::Worktree { .. })) {
         Some(false)
@@ -1478,6 +1486,42 @@ fn remove_scratchpads(ports: &JobPorts, candidate: &EndedRunWorktree, outcomes: 
             paths,
             bytes,
         });
+    }
+}
+
+/// The scratch worktree of an ended run's `already_satisfied`
+/// verification ([`crate::application::integrate::satisfied_scratch`]),
+/// which one whose supervisor died while it ran leaves behind: none for a
+/// run in the middle, whose claim may be verified again.
+fn satisfied_scratch_of(candidate: &EndedRunWorktree, satisfied_dir: &Path) -> Option<PathBuf> {
+    (candidate.cleanup == WorktreeCleanup::Ended)
+        .then(|| crate::application::integrate::satisfied_scratch(satisfied_dir, &candidate.run_id))
+}
+
+/// Remove the [`satisfied_scratch_of`] an ended run, with Git's record of
+/// it, without trusting what is there. The removal records no event (a log
+/// line only).
+fn remove_satisfied_scratch(
+    ports: &JobPorts,
+    candidate: &EndedRunWorktree,
+    outcomes: &mut Vec<Outcome>,
+) {
+    let Some(scratch) = satisfied_scratch_of(candidate, &ports.satisfied_dir) else {
+        return;
+    };
+    if !ports.files.exists(&scratch) {
+        return;
+    }
+    match ports.repository.remove_scratch(&scratch) {
+        Ok(()) => {
+            info!(run_id = %candidate.run_id, "run {} is {}; removed the scratch worktree {} its verification left", candidate.run_id, candidate.status.as_str(), scratch.display());
+        }
+        Err(error) => outcomes.push(Outcome::Failed {
+            run_id: candidate.run_id.clone(),
+            what: "satisfied scratch",
+            path: scratch.to_string_lossy().into_owned(),
+            error,
+        }),
     }
 }
 
@@ -2759,6 +2803,30 @@ mod tests {
         assert!(runner_goes(WorktreeCleanup::Ended));
         assert!(!runner_goes(WorktreeCleanup::AwaitingAnswer(AskId::new(7))));
         assert!(!runner_goes(WorktreeCleanup::Idle));
+    }
+
+    /// An ended run's `already_satisfied` scratch worktree goes from the
+    /// queue's `satisfied/`, whatever its task; a run in the middle keeps
+    /// it, as its claim may be verified again.
+    #[test]
+    fn an_ended_runs_satisfied_scratch_goes_from_the_queues_directory() {
+        let dir = Path::new("/q/satisfied");
+        for status in [TaskStatus::InProgress, TaskStatus::Completed] {
+            assert_eq!(
+                satisfied_scratch_of(&candidate("r", status), dir),
+                Some(PathBuf::from("/q/satisfied/r"))
+            );
+        }
+        for cleanup in [
+            WorktreeCleanup::AwaitingAnswer(AskId::new(7)),
+            WorktreeCleanup::Idle,
+        ] {
+            let middle = EndedRunWorktree {
+                cleanup,
+                ..candidate("r", TaskStatus::InProgress)
+            };
+            assert_eq!(satisfied_scratch_of(&middle, dir), None, "{cleanup:?}");
+        }
     }
 
     /// Task 1100 and task 1290: the scratchpads and the temporary files

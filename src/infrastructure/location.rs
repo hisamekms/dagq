@@ -31,6 +31,10 @@ pub const AGENT_EVALS_DIR_NAME: &str = "agent-evals";
 /// The directory beside the database where the program reviews of the
 /// runs' reviews keep the scripts they run ([`review_programs_dir`]).
 pub const REVIEW_PROGRAMS_DIR_NAME: &str = "review-programs";
+/// The directory beside the database where the snapshots of main the
+/// runs' `already_satisfied` claims are verified on are checked out
+/// ([`satisfied_dir`]).
+pub const SATISFIED_DIR_NAME: &str = "satisfied";
 /// The directory beside the database where the snapshots of the runs
 /// parked for a replanning are kept ([`replans_dir`]).
 pub const REPLANS_DIR_NAME: &str = "replans";
@@ -244,6 +248,16 @@ pub fn review_programs_dir(db: &Path) -> PathBuf {
         .join(REVIEW_PROGRAMS_DIR_NAME)
 }
 
+/// `satisfied/` next to the database: one scratch worktree per run, where
+/// the snapshot of main its `already_satisfied` claim is verified on is
+/// checked out, outside what the run's worker can write
+/// ([`crate::application::integrate::satisfied_scratch`]).
+pub fn satisfied_dir(db: &Path) -> PathBuf {
+    QueueLocation::explicit(db)
+        .queue_dir
+        .join(SATISFIED_DIR_NAME)
+}
+
 /// `replans/` next to the database: the snapshot of each run parked for a
 /// replanning (ADR-t1521-2 decision 2), outside what the run's worker can
 /// write.
@@ -320,6 +334,25 @@ mod tests {
         let scratch =
             crate::application::review_programs::program_scratch(&review_programs_dir(db), &run);
         assert_eq!(scratch, Path::new("/q/review-programs/r1"));
+        let run_dir = runs_dir(db).join(run.as_str());
+        for writable in [run_dir.clone(), run_dir.join("worktree")] {
+            assert!(
+                !scratch.starts_with(&writable),
+                "{scratch:?} under {writable:?}"
+            );
+        }
+    }
+
+    /// A run's `already_satisfied` snapshot is checked out in its scratch
+    /// worktree of the queue's `satisfied/`, beside `runs/`: outside its
+    /// run directory and the worktree under it, which its worker can
+    /// write, and not the run directory's `satisfied` it once was.
+    #[test]
+    fn a_runs_satisfied_scratch_is_outside_its_run_directory_and_worktree() {
+        let db = Path::new("/q/queue.db");
+        let run = crate::domain::RunId::new("r1").unwrap();
+        let scratch = crate::application::integrate::satisfied_scratch(&satisfied_dir(db), &run);
+        assert_eq!(scratch, Path::new("/q/satisfied/r1"));
         let run_dir = runs_dir(db).join(run.as_str());
         for writable in [run_dir.clone(), run_dir.join("worktree")] {
             assert!(
