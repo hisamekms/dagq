@@ -309,6 +309,26 @@ fn data_home_from(xdg: Option<OsString>, home: Option<OsString>) -> Result<PathB
 mod tests {
     use super::*;
 
+    /// A run's program reviews write their scripts in its directory of
+    /// the queue's `review-programs/`, beside `runs/`: outside its run
+    /// directory and the worktree under it, which its worker can write
+    /// (ADR-t1895-2 decision 2).
+    #[test]
+    fn a_runs_program_scratch_is_outside_its_run_directory_and_worktree() {
+        let db = Path::new("/q/queue.db");
+        let run = crate::domain::RunId::new("r1").unwrap();
+        let scratch =
+            crate::application::review_programs::program_scratch(&review_programs_dir(db), &run);
+        assert_eq!(scratch, Path::new("/q/review-programs/r1"));
+        let run_dir = runs_dir(db).join(run.as_str());
+        for writable in [run_dir.clone(), run_dir.join("worktree")] {
+            assert!(
+                !scratch.starts_with(&writable),
+                "{scratch:?} under {writable:?}"
+            );
+        }
+    }
+
     #[test]
     fn hash_is_stable_and_short() {
         let hash = repository_hash(Path::new("/tmp/repo/.git"));

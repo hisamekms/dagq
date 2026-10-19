@@ -19,7 +19,8 @@ use super::execution::{ExecutionConfig, ExecutorBackend};
 use super::review::{CONFIG_FILE, ReviewRange};
 use super::{Repository, ReviewProgramBackend};
 use crate::domain::review_programs::{self, ReviewProgram, ReviewPrograms, SelectedProgram};
-use crate::domain::{ActorRole, CommitSha};
+use crate::domain::{ActorRole, CommitSha, RunId};
+use std::path::{Path, PathBuf};
 
 /// The backends a program job can run on, and which the review's actor
 /// (`ExecutionConfig::backend_of(ActorRole::ReviewJob)`) runs on: a
@@ -200,12 +201,20 @@ pub fn snapshot_programs(
     }))
 }
 
+/// Where `run`'s program reviews write the scripts they run: its directory
+/// of `dir`, the queue's `review-programs/`, outside what the run's worker
+/// can write (its run directory and worktree): a script written there
+/// could be replaced between its write and its exec, and the worker's text
+/// would run instead of the landing branch's (ADR-t1895-2 decision 2).
+pub fn program_scratch(dir: &Path, run: &RunId) -> PathBuf {
+    dir.join(run.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::application::DiffNumbers;
     use crate::domain::{TaskId, TaskRun};
-    use std::path::{Path, PathBuf};
 
     const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
     const CONFIG: &str = "the committed dagq.toml";

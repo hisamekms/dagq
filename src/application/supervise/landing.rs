@@ -11,7 +11,7 @@ use crate::application::review::{
     ReviewRange, SnapshotAgent, SubagentSnapshot, acceptance_record, acceptance_rules,
     review_code_paths, review_range_at, snapshot_subagents,
 };
-use crate::application::review_programs::{ProgramSnapshot, snapshot_programs};
+use crate::application::review_programs::{self, ProgramSnapshot, snapshot_programs};
 use crate::application::run_git;
 use crate::domain::ActorContext;
 use crate::domain::AskConfidence;
@@ -470,7 +470,7 @@ impl Supervisor<'_> {
     /// Start the program at `index` of `state`'s programs as a program job
     /// against the run's worktree, its output in the run's directory and
     /// its script in the run's directory of `review-programs/`, which the
-    /// worker cannot write.
+    /// worker cannot write ([`review_programs::program_scratch`]).
     fn start_run_program(
         &self,
         run: &TaskRun,
@@ -488,7 +488,7 @@ impl Supervisor<'_> {
             worktree.display()
         );
         let env = run_git::tree_env(&*self.repository, run, &worktree)?;
-        let scratch = self.layout.review_programs_dir.join(run.id().as_str());
+        let scratch = review_programs::program_scratch(&self.layout.review_programs_dir, run.id());
         let subject = JobSubject::review_program(run.id(), state.round, &program.program.name);
         let timeout = self.job_timeout(&subject);
         start_review_program(

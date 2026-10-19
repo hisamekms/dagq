@@ -140,6 +140,8 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 ## プログラムのreview<a id="プログラムのreview"></a>
 
 段の先頭で、pathが差分に当たるprogramをagentのjobの前に流す（[ADR-t1895-2](../../adr/2026-10-06-t1895-2-program-reviews-are-fast-format-checks-read-from-the-landing-branch.md)、[プログラムのreview](review-programs.md)）。
+landing branchのcommitから読んだscriptは、queueの`review-programs/<run id>/`（runtimeだけが持つdir）に書き出して流す。
+run dirとrunのworktreeとその下はworkerが書けるので置かない（書き出してからexecまでにworkerが置き換えたscriptが流れうる。`review_programs::program_scratch`）。
 
 ## 着地の前のe2e
 

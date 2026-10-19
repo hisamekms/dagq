@@ -40,6 +40,14 @@ fn marking(mark: &Path) -> String {
     )
 }
 
+/// A script that appends to `mark` the path it ran from each time it runs.
+fn marking_its_path(mark: &Path) -> String {
+    format!(
+        "#!/bin/sh\necho \"$0\" >> {}\n",
+        crate::common::shell_path(mark)
+    )
+}
+
 /// How many times the script marking `mark` ran.
 fn runs_of(mark: &Path) -> usize {
     fs::read_to_string(mark).map_or(0, |text| text.lines().count())
@@ -78,7 +86,7 @@ fn a_rejecting_program_sends_the_worker_back_before_any_agent_and_a_passing_set_
          [review.programs.later]\nscript = \"scripts/later.sh\"\npaths = [\"change.txt\"]\n\
          [review.programs.never]\nscript = \"scripts/never.sh\"\npaths = [\"nothing/**\"]\n",
         &[
-            ("scripts/first.sh", marking(&mark("first"))),
+            ("scripts/first.sh", marking_its_path(&mark("first"))),
             (
                 "scripts/fix.sh",
                 "#!/bin/sh\ngrep -q 'fix 1' change.txt && exit 0\necho 'change.txt lacks fix 1'\nexit 1\n"
@@ -120,6 +128,29 @@ fn a_rejecting_program_sends_the_worker_back_before_any_agent_and_a_passing_set_
         ),
         (2, 1, 0)
     );
+    // Each script ran from the run's directory of the queue's
+    // `review-programs/`, outside its run directory and worktree, which
+    // the worker can write (ADR-t1895-2 decision 2).
+    // Each is compared with its parent's links resolved, as the script's
+    // path is: the worktree is gone once the run landed.
+    let canonical = |path: &Path| {
+        let parent = path.parent().unwrap().canonicalize().unwrap();
+        parent.join(path.file_name().unwrap())
+    };
+    let run_dir = canonical(Path::new(run.run_dir().unwrap()));
+    let worktree = canonical(Path::new(run.worktree_path().unwrap()));
+    let scratch = canonical(
+        &dagq::infrastructure::location::review_programs_dir(&db).join(run.id().as_str()),
+    );
+    let ran = fs::read_to_string(mark("first")).unwrap();
+    assert_eq!(ran.lines().count(), 2, "{ran}");
+    for path in ran.lines().map(Path::new) {
+        assert!(path.starts_with(&scratch), "{path:?} under {scratch:?}");
+        assert!(
+            !path.starts_with(&run_dir) && !path.starts_with(&worktree),
+            "{path:?}"
+        );
+    }
     // The selected programs, in order, without `never`.
     let started = payloads(&detail, "review_programs_started");
     assert_eq!(started.len(), 2);
@@ -137,7 +168,6 @@ fn a_rejecting_program_sends_the_worker_back_before_any_agent_and_a_passing_set_
         (&started[0]["round"], &started[1]["round"]),
         (&json!(1), &json!(2))
     );
-    let run_dir = Path::new(run.run_dir().unwrap());
     let rejected = fs::read_to_string(run_dir.join("review-program-1-fix.out")).unwrap();
     assert_eq!(rejected, "change.txt lacks fix 1\n");
     assert!(run_dir.join("review-program-2-fix.out").is_file());
