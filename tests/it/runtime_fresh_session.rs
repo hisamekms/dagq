@@ -113,7 +113,9 @@ fn a_revise_past_the_threshold_goes_on_in_a_new_session_that_the_wait_follows() 
             "Commits since the base {}, newest first:\n",
             run.base_commit()
         ),
-        "Why the review sent the run back:\n- add a line to change.txt".to_owned(),
+        "seconds of this request (the resume timeout)".to_owned(),
+        "as the project's scripts recorded them in the directory `$DAGQ_LOCAL_CHECKS_DIR` names"
+            .to_owned(),
         "The earlier session would have been sent this next; it is yours now:".to_owned(),
         format!(
             "dagq: the supervisor's review of run {} (task 1) asks for changes (revise 1 of 2 of the run).",
@@ -126,6 +128,13 @@ fn a_revise_past_the_threshold_goes_on_in_a_new_session_that_the_wait_follows() 
             texts[0]
         );
     }
+    // The review's findings once, in the revise request.
+    assert_eq!(
+        texts[0].matches("add a line to change.txt").count(),
+        1,
+        "{}",
+        texts[0]
+    );
     assert!(
         texts[1].starts_with("dagq: this is the next turn of your session")
             && texts[1].contains(&format!(

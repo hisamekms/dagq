@@ -7,6 +7,7 @@ use crate::application::prompt::{HandoffMaterial, PromptBytes, handoff_text};
 use crate::domain::EventKind;
 use crate::domain::e2e_quarantine;
 use crate::domain::fresh_session::{self, NextSession};
+use crate::domain::local_checks::LocalChecks;
 
 /// The file in a run's directory that holds the whole list of the tests
 /// that fail already on the landing branch's CI its worker's prompt was
@@ -862,16 +863,15 @@ impl Supervisor<'_> {
     /// request ([`Self::next_session`]): `request` (built without the
     /// language's instruction) with it, for the same session; for a new
     /// one, the handoff prompt ([`Self::handoff_prompt`]) that carries
-    /// `request` and `review`, with why the session is new. `request_file`
-    /// is where the handoff says the whole request is, written only when
-    /// the handoff cut it. The caller records the new session
-    /// ([`Self::renew_session`]) before it writes the request.
+    /// `request`, with why the session is new. `request_file` is where the
+    /// handoff says the whole request is, written only when the handoff cut
+    /// it. The caller records the new session ([`Self::renew_session`])
+    /// before it writes the request.
     pub(super) fn session_request(
         &mut self,
         run: &TaskRun,
         request: FittedPrompt,
         request_file: &Path,
-        review: Option<(&str, Option<&Path>)>,
     ) -> Result<(FittedPrompt, Option<(u64, u64)>)> {
         let NextSession::Fresh {
             peak_context,
@@ -884,8 +884,7 @@ impl Supervisor<'_> {
             ));
         };
         let fresh = (peak_context, threshold);
-        let handoff =
-            self.handoff_prompt(run, fresh, review, (&request.text, Some(request_file)))?;
+        let handoff = self.handoff_prompt(run, fresh, (&request.text, request_file))?;
         if handoff.bytes.omitted.contains_key("request") {
             self.files.write(request_file, request.text.as_bytes())?;
         }
@@ -893,18 +892,23 @@ impl Supervisor<'_> {
     }
 
     /// The handoff prompt of a new session of `run`'s worker
-    /// ([`handoff_text`]): its own commits (`review::run_commits`) and its
-    /// worktree's changes as git shows them, the summary of the receipt it wrote last, `review` and
-    /// the `request` it would have been sent (with the file that holds it
-    /// whole). What git cannot show is said, not an error: the session
-    /// reads it in its worktree. The language's instruction is added here
-    /// once, so `request` is passed without it.
+    /// ([`handoff_text`], ADR-t2852-1): its own commits
+    /// (`review::run_commits`) and its worktree's changes as git shows
+    /// them, the records of its local checks on the tree of its head (the
+    /// others counted, as a review counts them),
+    /// the tests that fail already on the landing branch's CI with the
+    /// names of the paths its commits and its worktree change and its task
+    /// declares (the whole list written beside `request_file`), the resume
+    /// timeout, the summary of the receipt it wrote last and the `request`
+    /// it would have been sent (with the file that holds it whole). What
+    /// git cannot show is said, not an error: the session reads it in its
+    /// worktree. The language's instruction is added here once, so
+    /// `request` is passed without it.
     pub(super) fn handoff_prompt(
-        &self,
+        &mut self,
         run: &TaskRun,
         (peak_context, threshold): (u64, u64),
-        review: Option<(&str, Option<&Path>)>,
-        (request, request_file): (&str, Option<&Path>),
+        (request, request_file): (&str, &Path),
     ) -> Result<FittedPrompt> {
         run.worktree_path().context("missing worktree")?;
         let unread = |what: &str, error: anyhow::Error| {
@@ -913,8 +917,55 @@ impl Supervisor<'_> {
         };
         let commits = crate::application::review::run_commits(&*self.repository, run)
             .unwrap_or_else(|error| unread("log", error));
-        let changes = crate::application::run_git::status(&*self.repository, run)
-            .unwrap_or_else(|error| unread("status", error));
+        let status = crate::application::run_git::status(&*self.repository, run);
+        let mut touched: Vec<String> = status
+            .as_deref()
+            .map(|status| status.lines().filter_map(porcelain_path).collect())
+            .unwrap_or_default();
+        let changes = status.unwrap_or_else(|error| unread("status", error));
+        let head_tree = crate::application::run_git::head(&*self.repository, run)
+            .and_then(|head| self.repository.tree_of(head.as_str()));
+        let head_tree = head_tree
+            .map_err(|error| warn!(run_id = %run.id(), "the tree of {}'s head could not be read for its handoff: {error:#}", run.id()))
+            .ok();
+        match crate::application::review::run_changed_paths(&*self.repository, run) {
+            Ok(paths) => touched.extend(paths),
+            Err(error) => {
+                warn!(run_id = %run.id(), "the paths {} changes could not be read for its handoff: {error:#}", run.id());
+            }
+        }
+        // The declared paths only add names: without them the run's own
+        // changes still name its tests.
+        match self.queue.show(run.task_id()) {
+            Ok(detail) => touched.extend(detail.task.paths().iter().cloned()),
+            Err(error) => {
+                warn!(run_id = %run.id(), "task {}'s paths could not be read for its handoff: {error:#}", run.task_id());
+            }
+        }
+        let touched = crate::application::prompt::touched_names(&touched);
+        let stem = request_file
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("handoff");
+        let run_dir = run.run_dir().map(Path::new);
+        let known = run_dir.and_then(|dir| {
+            self.known_failures(
+                run.task_id(),
+                &dir.join(format!("{stem}-handoff-known-failures.json")),
+            )
+        });
+        // Judged against the head's tree as a review judges them against
+        // its commit's: without the tree no record is on it.
+        let (checks, older_checks) = run_dir.map_or_else(
+            || (LocalChecks::default(), 0),
+            |dir| {
+                crate::application::review::newest_local_checks(
+                    &*self.files,
+                    dir,
+                    head_tree.as_deref().unwrap_or_default(),
+                )
+            },
+        );
         let receipt = run
             .receipt_path()
             .and_then(|path| self.files.read_to_string(Path::new(path)).ok())
@@ -924,12 +975,17 @@ impl Supervisor<'_> {
             &HandoffMaterial {
                 peak_context,
                 threshold,
+                resume_timeout: self.sessions.resume_timeout().as_secs(),
                 commits: &commits,
                 changes: &changes,
-                review,
+                head_tree: head_tree.as_deref(),
+                checks: &checks,
+                older_checks,
+                known_failures: known.as_ref(),
+                touched: &touched,
                 receipt_summary: receipt.as_ref().map(Receipt::summary),
                 request,
-                request_file,
+                request_file: Some(request_file),
             },
         );
         Ok(prompt.with_language(self.verifier.language().as_ref()))
@@ -961,9 +1017,34 @@ impl Supervisor<'_> {
     }
 }
 
+/// The path a line of `git status --porcelain` names: the new one of a
+/// rename.
+fn porcelain_path(line: &str) -> Option<String> {
+    let path = line.get(3..)?;
+    let path = path.rsplit(" -> ").next().unwrap_or(path);
+    let path = path.trim().trim_matches('"');
+    (!path.is_empty()).then(|| path.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A porcelain line names its path, a rename its new one.
+    #[test]
+    fn a_porcelain_line_names_its_path() {
+        assert_eq!(
+            porcelain_path(" M src/lib.rs").as_deref(),
+            Some("src/lib.rs")
+        );
+        assert_eq!(porcelain_path("?? notes.txt").as_deref(), Some("notes.txt"));
+        assert_eq!(
+            porcelain_path("R  tests/old.rs -> tests/new.rs").as_deref(),
+            Some("tests/new.rs")
+        );
+        assert_eq!(porcelain_path(""), None);
+        assert_eq!(porcelain_path("?? "), None);
+    }
 
     /// An origin for the monotonic times the decisions are given: only the
     /// offsets from it matter, never what the clock read.

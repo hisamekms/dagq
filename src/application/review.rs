@@ -4,13 +4,13 @@
 
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::EntryKind;
 use super::{
     Repository, RunFiles, TaskStore, fenced, integrate::integrate_logs, or_none, path_text,
 };
-use crate::domain::local_checks::{self, LocalChecks, Reading};
+use crate::domain::local_checks::{self, LocalChecks};
 use crate::domain::local_gates::{Change, GateConfig};
 use crate::domain::review_builtins::{self, BuiltinAgent, EffectiveBuiltin};
 use crate::domain::review_reason::CodePaths;
@@ -196,6 +196,14 @@ pub fn run_commits(repository: &dyn Repository, run: &TaskRun) -> Result<String>
     let head = super::run_git::head(repository, run)?;
     let base = range_base(repository, run, &repository.main_head()?, head.as_str())?;
     repository.log_oneline(&base, head.as_str())
+}
+
+/// The paths `run`'s own commits change, counted as [`run_commits`]
+/// counts the commits.
+pub fn run_changed_paths(repository: &dyn Repository, run: &TaskRun) -> Result<Vec<String>> {
+    let head = super::run_git::head(repository, run)?;
+    let base = range_base(repository, run, &repository.main_head()?, head.as_str())?;
+    repository.changed_paths(&base, head.as_str())
 }
 
 /// The range `<base>...<head>` of one review attempt.
@@ -596,35 +604,74 @@ pub fn check_agents(
 /// Nothing is run or interpreted, and no log is read. Never fails: a
 /// record changes no review's way, only what its material shows.
 pub fn read_local_checks(files: &dyn RunFiles, run_dir: &Path, tree: &str) -> LocalChecks {
-    let dir = local_checks::dir_of(run_dir);
+    let (mut checks, over) = judged(files, run_dir, tree, local_checks::records_to_read);
+    for _ in 0..over {
+        checks.add(local_checks::Reading::Broken);
+    }
+    checks
+}
+
+/// The records of the worker's local checks in `run_dir` as the handoff
+/// of a new session shows them (ADR-t2852-1): read and judged against
+/// `tree`, the tree of the run's head, as [`read_local_checks`] reads
+/// them for a review, so only those on that tree are shown and the rest
+/// counted; but the newest [`local_checks::MAX_RECORDS`] by name
+/// ([`local_checks::newest_records_to_read`]), with how many older ones
+/// were left out unread.
+pub fn newest_local_checks(
+    files: &dyn RunFiles,
+    run_dir: &Path,
+    tree: &str,
+) -> (LocalChecks, usize) {
+    judged(files, run_dir, tree, local_checks::newest_records_to_read)
+}
+
+/// The records `pick` takes from the records' directory of `run_dir`,
+/// judged against `tree`, and how many `pick` left out.
+fn judged(
+    files: &dyn RunFiles,
+    run_dir: &Path,
+    tree: &str,
+    pick: fn(Vec<PathBuf>) -> (Vec<PathBuf>, usize),
+) -> (LocalChecks, usize) {
+    let (bytes, over) = record_bytes(files, run_dir, pick);
     let mut checks = LocalChecks::default();
+    for bytes in bytes {
+        checks.add(local_checks::judge(bytes.as_deref(), tree));
+    }
+    (checks, over)
+}
+
+/// The bytes of each record in the records' directory of `run_dir` that
+/// `pick` takes, in the order of their names, `None` for a broken one,
+/// and how many `pick` left out. None at all without the directory; one
+/// broken when it is not a directory or cannot be listed.
+fn record_bytes(
+    files: &dyn RunFiles,
+    run_dir: &Path,
+    pick: fn(Vec<PathBuf>) -> (Vec<PathBuf>, usize),
+) -> (Vec<Option<Vec<u8>>>, usize) {
+    let dir = local_checks::dir_of(run_dir);
     match files.entry_kind(&dir) {
         Ok(EntryKind::Dir) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return checks,
-        _ => {
-            checks.add(Reading::Broken);
-            return checks;
-        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), 0),
+        _ => return (vec![None], 0),
     }
     let Ok(entries) = files.read_dir(&dir) else {
-        checks.add(Reading::Broken);
-        return checks;
+        return (vec![None], 0);
     };
-    let (records, over) = local_checks::records_to_read(entries);
-    for _ in 0..over {
-        checks.add(Reading::Broken);
-    }
+    let (records, over) = pick(entries);
+    let mut bytes = Vec::with_capacity(records.len());
     for path in &records {
-        let bytes = match files.entry_kind(path) {
+        bytes.push(match files.entry_kind(path) {
             Ok(EntryKind::File) => files
                 .read_range(path, 0, local_checks::RECORD_BYTES + 1)
                 .ok()
                 .filter(|bytes| bytes.len() as u64 <= local_checks::RECORD_BYTES),
             _ => None,
-        };
-        checks.add(local_checks::judge(bytes.as_deref(), tree));
+        });
     }
-    checks
+    (bytes, over)
 }
 
 /// The section of review.md on the worker's local checks

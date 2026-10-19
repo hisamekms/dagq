@@ -5,6 +5,7 @@ use super::*;
 use crate::application::run_git::rebase_target;
 
 /// What the resolution request tells a resumed session.
+#[derive(Clone)]
 pub(crate) struct ResumeRequest {
     /// The landing branch's head the session rebases onto.
     pub main: CommitSha,

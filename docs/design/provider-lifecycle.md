@@ -156,10 +156,13 @@ workerのproviderはtaskが選び、経路は非対話だけ（[ADR-t813-2](../a
 
 ## 大きなcontextからの新しいsession
 
-[ADR-t2080-1](../adr/2026-10-08-t2080-1-fresh-session-on-send-back-and-resume-when-peak-context-exceeds-threshold.md)。
+[ADR-t2080-1](../adr/2026-10-08-t2080-1-fresh-session-on-send-back-and-resume-when-peak-context-exceeds-threshold.md)、引き継ぎの中身は[ADR-t2852-1](../adr/2026-10-19-t2852-1-handoff-carries-local-check-records-resume-timeout-and-findings-once.md)。
 
-- 入口: 判定は`domain::fresh_session::next_session`、記録と依頼は`supervise::execution::session`。
+- 入口: 判定は`domain::fresh_session::next_session`、記録と依頼は`supervise::execution::session`、引き継ぎのpromptは`prompt::handoff_text`。
 - 約束: 新しいsessionは`provider_switched`と同じ区切りで、providerを変えない。
+- 最初のturnはclaimの時のtaskのpromptと引き継ぎで、引き継ぎがtaskのpromptの読む指示を上書きし、文書は要るときだけ開かせる。
+- 引き継ぎはreviewの材料と同じ除外で今のHEADのtreeの手元の検証の記録だけを載せ、別のtreeの記録は数だけを書く（receiptの根拠は[ADR-t2589-1](../adr/2026-10-17-t2589-1-local-check-runs-are-recorded-by-project-scripts-and-matched-to-the-receipt-tree.md)の照合のまま）。
+- 引き継ぎはresumeの時間の上限の秒を書き、reviewの指摘は送るはずだった依頼の中の1回だけ、known failuresはrunが触るファイルに当たるもの（test binaryとpackageの名前では当てない）だけを載せる。
 - 落とし穴: Claude Codeは使われた`--session-id`を拒むので、新しいsessionは新しい名前になる（`domain::turn::session_name`）。
 
 ## Trust prompt

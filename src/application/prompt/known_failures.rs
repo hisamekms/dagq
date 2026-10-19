@@ -218,3 +218,75 @@ pub(super) fn known_failures_section(
     fit.section("known_failures", &text);
     text
 }
+
+/// File stems that name no test of their own (a module's or a package's
+/// index): a path ending in one is named by its directory.
+const INDEX_STEMS: [&str; 7] = ["mod", "lib", "main", "index", "tests", "test", "__init__"];
+
+/// The names a path of `paths` (a changed file, or a declared path or
+/// glob) gives a test's name: its file's stem, or its directory's for an
+/// index file ([`INDEX_STEMS`]); a glob's last plain part. The runtime
+/// knows no project's layout, so a test is matched by these alone.
+pub(crate) fn touched_names(paths: &[String]) -> BTreeSet<String> {
+    paths
+        .iter()
+        .filter_map(|path| {
+            let parts: Vec<&str> = path
+                .split('/')
+                .filter(|part| !part.is_empty() && !part.contains(['*', '?', '[']))
+                .collect();
+            let (last, parent) = parts.split_last()?;
+            let stem = last.split('.').next().unwrap_or(last);
+            let name = if INDEX_STEMS.contains(&stem) {
+                parent.last()?
+            } else {
+                stem
+            };
+            (!name.is_empty()).then(|| name.to_owned())
+        })
+        .collect()
+}
+
+/// Whether the test `name` is one of `touched` ([`touched_names`]): a
+/// word of its module path is one of them (ADR-t2852-1 decision 5). What comes before a space is
+/// the test binary's or the package's name (nextest's `<binary-id>
+/// <test>`), which every test of that binary shares, and the path's last
+/// part is the test's own name: neither is matched, so touching a file
+/// named like the package (`dagq.toml`) or like the binary (the `it`
+/// binary's `tests/it/main.rs`) keeps no test by itself, nor does a file
+/// named like a test (`docs/check_status.md` for `check_status`). A test
+/// with no module path is matched by nothing.
+fn touches(name: &str, touched: &BTreeSet<String>) -> bool {
+    let path = name.split_once(' ').map_or(name, |(_, path)| path).trim();
+    let Some((module, _test)) = path.rsplit_once("::") else {
+        return false;
+    };
+    module
+        .split("::")
+        .flat_map(|part| part.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-')))
+        .any(|word| touched.contains(word))
+}
+
+/// `known` with only the others' tests that `touched` names
+/// ([`touched_names`]; the task's own are all kept), and how many others
+/// were left out.
+pub(crate) fn touched_known_failures(
+    known: &KnownFailures,
+    touched: &BTreeSet<String>,
+) -> (KnownFailures, usize) {
+    let others: Vec<KnownFailure> = known
+        .others
+        .iter()
+        .filter(|item| touches(&item.name, touched))
+        .cloned()
+        .collect();
+    let left_out = known.others.len() - others.len();
+    (
+        KnownFailures {
+            others,
+            fixing: known.fixing.clone(),
+            file: known.file.clone(),
+        },
+        left_out,
+    )
+}

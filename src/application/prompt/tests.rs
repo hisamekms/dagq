@@ -1,11 +1,13 @@
 use super::*;
 use crate::application::memory_files::MemoryFiles;
+use crate::domain::local_checks::LocalChecks;
 use crate::domain::worker::WorkerMode;
 use crate::domain::{
     EvidenceCheck, GoalRecord, GoalStatus, GoalVerdict, Provider, RunId, RunRecord, TaskRecord,
     TaskStatus,
 };
 use serde_json::json;
+use std::collections::BTreeSet;
 use std::time::UNIX_EPOCH;
 
 const SHA: &str = "1111111111111111111111111111111111111111";
@@ -5571,54 +5573,101 @@ fn prompt_bytes_are_read_back_as_written() {
     assert_eq!(read, bytes);
 }
 
-/// ADR-t2080-1 decision 2: the handoff prompt of a new session carries
-/// why it is new, the commits, the uncommitted changes, the review's
-/// reasons, the receipt's summary and the request it would have been
-/// sent, whole when they fit, and nothing else (no transcript); with
-/// the task's prompt before it, it is the new session's first turn.
-#[test]
-fn a_handoff_carries_the_work_the_review_the_receipt_and_the_request() {
-    let run = run_on(Provider::Codex, WorkerMode::Headless);
-    let findings = Path::new("/runs/run/turns/revise-findings.txt");
-    let material = HandoffMaterial {
+/// The tree of the head the handoff tests' worktree is at, and another.
+const HEAD_TREE: &str = "2222222222222222222222222222222222222222";
+const OTHER_TREE: &str = "3333333333333333333333333333333333333333";
+
+/// No name a path gives a test.
+static NO_NAMES: BTreeSet<String> = BTreeSet::new();
+
+/// A record of a local check whose tree was `start` and `end`, which
+/// exited with `exit` after 22 minutes; `None` for a broken one.
+type CheckRecord<'a> = Option<(&'a str, &'a str, i64, &'a str)>;
+
+/// `records` judged against HEAD's tree as a review judges them.
+fn judged_checks(records: &[CheckRecord<'_>]) -> LocalChecks {
+    let mut checks = LocalChecks::default();
+    for record in records {
+        let bytes = record.map(|(start, end, exit, command)| {
+            json!({
+                "command": command, "exit_status": exit, "started_at": "2026-10-19T01:02:03Z",
+                "duration_ms": 1_320_000, "kind": null, "tree_start": start, "tree_end": end,
+                "log": "1.log",
+            })
+            .to_string()
+        });
+        checks.add(crate::domain::local_checks::judge(
+            bytes.as_deref().map(str::as_bytes),
+            HEAD_TREE,
+        ));
+    }
+    checks
+}
+
+/// No record at all.
+static NO_CHECKS: LocalChecks = LocalChecks {
+    matched: Vec::new(),
+    other_tree: 0,
+    broken: 0,
+};
+
+/// The material of a handoff with no work, record or list yet.
+fn bare_handoff(request: &str) -> HandoffMaterial<'_> {
+    HandoffMaterial {
         peak_context: 200_001,
         threshold: 200_000,
+        resume_timeout: 3600,
+        commits: "",
+        changes: "",
+        head_tree: Some(HEAD_TREE),
+        checks: &NO_CHECKS,
+        older_checks: 0,
+        known_failures: None,
+        touched: &NO_NAMES,
+        receipt_summary: None,
+        request,
+        request_file: None,
+    }
+}
+
+/// ADR-t2080-1 decision 2 as ADR-t2852-1 amends it: the handoff prompt
+/// of a new session carries why it is new, not to read the documents
+/// again first, the resume timeout, the commits, the uncommitted
+/// changes, the local checks' records, the receipt's summary and the
+/// request it would have been sent, whole when they fit, and nothing
+/// else (no transcript); with the task's prompt before it, it is the new
+/// session's first turn.
+#[test]
+fn a_handoff_carries_the_work_the_checks_the_receipt_and_the_request() {
+    let run = run_on(Provider::Codex, WorkerMode::Headless);
+    let material = HandoffMaterial {
         commits: "abc1234 runtime: the fix\nabc1233 runtime: the start\n",
         changes: " M src/lib.rs\n?? notes.txt\n",
-        review: Some(("- the test misses the boundary", Some(findings))),
         receipt_summary: Some("did the fix"),
-        request: "dagq: the review asks you to revise.",
-        request_file: None,
+        ..bare_handoff("dagq: the review asks you to revise.")
     };
     let fitted = handoff_text(&run, &material);
     assert_eq!(
         fitted.text,
         format!(
-            "dagq: this run's worker goes on in a new session: its previous turn's context took 200001 tokens, above the 200000 tokens this repository sets, so nothing of the earlier conversation carries over. The task's prompt is above; the run, its worktree, its branch and its provider are the same. The work so far is in this worktree and its branch: go on from it rather than starting over.\n\nCommits since the base {SHA}, newest first:\nabc1234 runtime: the fix\nabc1233 runtime: the start\n\nUncommitted changes in the worktree (`git status --porcelain`):\n M src/lib.rs\n?? notes.txt\n\nWhy the review sent the run back:\n- the test misses the boundary\n\nThe summary of the receipt you wrote last:\ndid the fix\n\nThe earlier session would have been sent this next; it is yours now:\n\ndagq: the review asks you to revise."
+            "dagq: this run's worker goes on in a new session: its previous turn's context took 200001 tokens, above the 200000 tokens this repository sets, so nothing of the earlier conversation carries over. The task's prompt is above; the run, its worktree, its branch and its provider are the same. The work so far is in this worktree and its branch: go on from it rather than starting over.\n\nDo not start by reading again the instructions and documents the task's prompt names: what the task asks is above and below. Open a document only when the work needs it.\n\nThe supervisor stops this session unless you rewrite the receipt within 3600 seconds of this request (the resume timeout). Once your fixes are made and the checks the final tree needs have run, rewrite the receipt before any other work, such as a subagent review again.\n\nCommits since the base {SHA}, newest first:\nabc1234 runtime: the fix\nabc1233 runtime: the start\n\nUncommitted changes in the worktree (`git status --porcelain`):\n M src/lib.rs\n?? notes.txt\n\nYour local checks on the tree {HEAD_TREE} of HEAD, as the project's scripts recorded them in the directory `$DAGQ_LOCAL_CHECKS_DIR` names, newest first:\n(none)\n\nThe summary of the receipt you wrote last:\ndid the fix\n\nThe earlier session would have been sent this next; it is yours now:\n\ndagq: the review asks you to revise."
         )
     );
     assert!(fitted.bytes.omitted.is_empty(), "{:?}", fitted.bytes);
     assert_eq!(fitted.bytes.over_limit, None);
     assert_eq!(fitted.bytes.limit, HANDOFF_LIMIT);
     assert_eq!(fitted.bytes.total, fitted.text.len());
-    for section in ["commits", "changes", "review", "receipt", "request"] {
+    for section in ["commits", "changes", "checks", "receipt", "request"] {
         assert!(fitted.bytes.sections[section] > 0, "{section}");
     }
-    // A clean worktree with no commit, no review and no receipt says
-    // so, and still carries the request.
-    let bare = handoff_text(
-        &run,
-        &HandoffMaterial {
-            commits: "",
-            changes: "",
-            review: None,
-            receipt_summary: None,
-            ..material
-        },
-    );
+    // A clean worktree with no commit and no receipt says so, and still
+    // carries the request.
+    let bare = handoff_text(&run, &bare_handoff("dagq: the review asks you to revise."));
     assert!(bare.text.contains("newest first:\n(none)\n\nUncommitted"));
-    assert!(bare.text.contains("--porcelain`):\n(none)\n\nThe earlier"));
-    assert!(!bare.text.contains("Why the review"));
+    assert!(
+        bare.text
+            .contains("--porcelain`):\n(none)\n\nYour local checks")
+    );
     assert!(!bare.text.contains("The summary of the receipt"));
     assert!(bare.text.ends_with("dagq: the review asks you to revise."));
     // The first turn of the new session: the task's prompt, then this.
@@ -5626,23 +5675,357 @@ fn a_handoff_carries_the_work_the_review_the_receipt_and_the_request() {
     assert!(first.starts_with("the task's prompt\n\ndagq: this run's worker goes on"));
 }
 
+/// ADR-t2852-1: only the local checks' records on HEAD's tree are shown,
+/// each with its command, its result and how long it took, the newest
+/// first; those of another tree, whose tree changed while it ran or that
+/// are broken are left out as a review's material leaves them out
+/// (ADR-t2589-1 decision 4) and only counted, said to be no ground but a
+/// clue in the records' directory; after a change the final tree's
+/// checks run again (ADR-t2589-1 unchanged), never only those the diff
+/// touches.
+#[test]
+fn a_handoff_shows_only_the_local_checks_on_heads_tree() {
+    let run = run_on(Provider::Claude, WorkerMode::Headless);
+    let checks = judged_checks(&[
+        Some((HEAD_TREE, HEAD_TREE, 1, "sh scripts/first.sh")),
+        Some((OTHER_TREE, OTHER_TREE, 101, "sh scripts/stress.sh old")),
+        Some((OTHER_TREE, HEAD_TREE, 0, "sh scripts/changed.sh")),
+        None,
+        Some((HEAD_TREE, HEAD_TREE, 0, "sh scripts/lint.sh")),
+    ]);
+    let material = HandoffMaterial {
+        checks: &checks,
+        older_checks: 3,
+        ..bare_handoff("the request")
+    };
+    let text = handoff_text(&run, &material).text;
+    let lint = text
+        .find("- exit 0, took 22m 0s, started 2026-10-19T01:02:03Z: sh scripts/lint.sh\n")
+        .unwrap_or_else(|| panic!("{text}"));
+    let first = text
+        .find("- exit 1, took 22m 0s, started 2026-10-19T01:02:03Z: sh scripts/first.sh\n")
+        .unwrap_or_else(|| panic!("{text}"));
+    assert!(lint < first, "newest first");
+    assert!(text.contains(&format!(
+        "Your local checks on the tree {HEAD_TREE} of HEAD"
+    )));
+    // The others' commands never reach the prompt; they are counted.
+    for excluded in ["scripts/stress.sh", "scripts/changed.sh", "exit 101"] {
+        assert!(!text.contains(excluded), "{excluded}");
+    }
+    for said in [
+        "(2 records of another tree, or whose tree changed while it ran, are not shown: they are no ground for the receipt. the directory `$DAGQ_LOCAL_CHECKS_DIR` names holds them, a clue to go on from: what passed, what failed and how long it took.)",
+        "(1 records could not be read or are over their limits.)",
+        "(3 older records were not read: past the most records a run's handoff reads.)",
+        "A record shown here ran on HEAD's tree: while nothing changes, it is a ground for the receipt as it is, so do not run it again.",
+        "Once you change anything, run again on the final tree the checks it needs",
+    ] {
+        assert!(text.contains(said), "{said}\n{text}");
+    }
+    for unsaid in ["only the checks", "only those", "the diff touches"] {
+        assert!(!text.contains(unsaid), "{unsaid}");
+    }
+    // HEAD's tree unread: the supervisor judges against no tree, so no
+    // record is on it and none is shown.
+    let unread_checks = {
+        let mut checks = LocalChecks::default();
+        for _ in 0..3 {
+            checks.add(crate::domain::local_checks::judge(
+                Some(
+                    json!({"command": "sh scripts/lint.sh", "exit_status": 0, "started_at": "t",
+                           "duration_ms": 1, "tree_start": HEAD_TREE, "tree_end": HEAD_TREE, "log": "1.log"})
+                    .to_string()
+                    .as_bytes(),
+                ),
+                "",
+            ));
+        }
+        checks
+    };
+    let unread = handoff_text(
+        &run,
+        &HandoffMaterial {
+            head_tree: None,
+            checks: &unread_checks,
+            ..material
+        },
+    )
+    .text;
+    assert!(unread.contains("HEAD's tree could not be read, so none is shown"));
+    assert!(!unread.contains("scripts/lint.sh"));
+    assert!(unread.contains("(3 records of another tree"));
+    // No record: said, and no rule of records follows.
+    let none = handoff_text(&run, &bare_handoff("the request")).text;
+    assert!(none.contains(" of HEAD, as the project's scripts recorded them in the directory `$DAGQ_LOCAL_CHECKS_DIR` names, newest first:\n(none)\n\nThe earlier session"));
+    assert!(!none.contains("is a ground for the receipt"));
+}
+
+/// ADR-t2852-1: the new session is told not to read the documents again
+/// first but to open them when the work needs them, and the resume
+/// timeout's seconds, before which it rewrites the receipt ahead of any
+/// other work once the final tree's checks have run.
+#[test]
+fn a_handoff_says_to_read_only_what_is_needed_and_the_resume_timeout() {
+    let run = run_on(Provider::Claude, WorkerMode::Headless);
+    let text = handoff_text(
+        &run,
+        &HandoffMaterial {
+            resume_timeout: 1234,
+            ..bare_handoff("the request")
+        },
+    )
+    .text;
+    let reading = text
+        .find(
+            "Do not start by reading again the instructions and documents the task's prompt names",
+        )
+        .unwrap();
+    assert!(text.contains("Open a document only when the work needs it."));
+    assert!(!text.contains(WORKER_READING.trim_end()));
+    assert!(reading < text.find("Commits since the base").unwrap());
+    assert!(text.contains(
+        "unless you rewrite the receipt within 1234 seconds of this request (the resume timeout)"
+    ));
+    assert!(text.contains("Once your fixes are made and the checks the final tree needs have run, rewrite the receipt before any other work, such as a subagent review again."));
+}
+
+/// ADR-t2852-1: a revise's handoff carries the review's findings once,
+/// in the request it would have sent.
+#[test]
+fn a_revises_handoff_carries_the_findings_once() {
+    let run = run_on(Provider::Claude, WorkerMode::Headless);
+    let task = task_with_lists(vec!["src/".into()], vec!["cargo test".into()]);
+    let finding = "the boundary test misses the empty list";
+    let request = revise_request(&task, &run, 1, &[format!("- {finding}")], None).unwrap();
+    let text = handoff_text(&run, &bare_handoff(&request.text)).text;
+    assert_eq!(text.matches(finding).count(), 1, "{text}");
+}
+
+/// ADR-t2852-1: the handoff lists of the tests that fail already on the
+/// landing branch's CI the task's own and those in the files the run
+/// touches, and counts the rest with the file that lists them all.
+#[test]
+fn a_handoff_narrows_the_known_failures_to_the_files_the_run_touches() {
+    let run = run_on(Provider::Claude, WorkerMode::Headless);
+    let list = known(
+        &[
+            (
+                "dagq::it runtime_fresh_session::a_new_session_starts",
+                3,
+                None,
+            ),
+            ("dagq::it planner_headless::a_planner_ends", 2, Some(5)),
+            ("dagq application::prompt::tests::a_prompt_fits", 1, None),
+            ("dagq::it runtime_codex::a_codex_review", 1, None),
+        ],
+        &["dagq::it runtime_own::the_fixed_test"],
+    );
+    let touched = touched_names(&[
+        "tests/it/runtime_fresh_session.rs".into(),
+        "src/application/prompt/tests.rs".into(),
+    ]);
+    let text = handoff_text(
+        &run,
+        &HandoffMaterial {
+            known_failures: Some(&list),
+            touched: &touched,
+            ..bare_handoff("the request")
+        },
+    )
+    .text;
+    for kept in [
+        "runtime_fresh_session::a_new_session_starts",
+        "application::prompt::tests::a_prompt_fits",
+        "runtime_own::the_fixed_test",
+    ] {
+        assert!(text.contains(kept), "{kept}");
+    }
+    for left in ["planner_headless", "runtime_codex"] {
+        assert!(!text.contains(left), "{left}");
+    }
+    assert!(text.contains(&format!(
+        "(2 more failing tests are in none of those files and are left out here; {KNOWN_FILE} lists them all. Do not fix them.)"
+    )));
+    // None of the others touched: said, with the count.
+    let none = handoff_text(
+        &run,
+        &HandoffMaterial {
+            known_failures: Some(&known(&[("dagq::it runtime_codex::a", 1, None)], &[])),
+            touched: &touched,
+            ..bare_handoff("the request")
+        },
+    )
+    .text;
+    assert!(none.contains("the task declares: none\n(1 more failing tests"));
+}
+
+/// ADR-t2852-1: an ordinary change that adds an integration test file,
+/// registers it in the binary's `main.rs` and touches the package's
+/// `dagq.toml` keeps only the tests of the files it changes. The binary's
+/// and the package's names, which every test shares, match no test by
+/// themselves, nor does a test's own name; the rest is counted with the
+/// file that lists them all.
+#[test]
+fn an_ordinary_change_keeps_only_the_failures_of_its_test_files() {
+    let run = run_on(Provider::Claude, WorkerMode::Headless);
+    let list = known(
+        &[
+            (
+                "dagq::it runtime_fresh_session::a_new_session_starts",
+                5,
+                None,
+            ),
+            ("dagq::it planner_headless::a_planner_ends", 4, None),
+            ("dagq::it runtime_codex::it_holds_codex", 3, None),
+            (
+                "dagq application::prompt::worker::tests::a_prompt_fits",
+                2,
+                None,
+            ),
+            ("dagq domain::turn::tests::a_turn_ends", 1, None),
+            ("dagq::it main::dagq", 1, None),
+        ],
+        &[],
+    );
+    let touched = touched_names(&[
+        "tests/it/main.rs".into(),
+        "tests/it/runtime_fresh_session.rs".into(),
+        "dagq.toml".into(),
+        "Cargo.lock".into(),
+        "src/application/prompt/worker.rs".into(),
+    ]);
+    let text = handoff_text(
+        &run,
+        &HandoffMaterial {
+            known_failures: Some(&list),
+            touched: &touched,
+            ..bare_handoff("the request")
+        },
+    )
+    .text;
+    for kept in [
+        "runtime_fresh_session::a_new_session_starts",
+        "application::prompt::worker::tests::a_prompt_fits",
+    ] {
+        assert!(text.contains(kept), "{kept}\n{text}");
+    }
+    for left in [
+        "planner_headless",
+        "runtime_codex",
+        "domain::turn",
+        "main::dagq",
+    ] {
+        assert!(!text.contains(left), "{left}\n{text}");
+    }
+    assert!(text.contains(&format!(
+        "(4 more failing tests are in none of those files and are left out here; {KNOWN_FILE} lists them all. Do not fix them.)"
+    )));
+}
+
+/// ADR-t2852-1 decision 5: a test's own name is never matched, also when
+/// its name has no module path: a file named like the test, or like the
+/// binary's last part, keeps none of them, while a test of a touched
+/// module is kept.
+#[test]
+fn a_tests_own_name_keeps_no_failure_even_without_a_module_path() {
+    let run = run_on(Provider::Claude, WorkerMode::Headless);
+    let list = known(
+        &[
+            ("pkg::integration check_status", 3, None),
+            ("check_status", 2, None),
+            ("pkg::integration status::check_status", 1, None),
+        ],
+        &[],
+    );
+    let touched = touched_names(&["docs/check_status.md".into(), "src/integration.rs".into()]);
+    let text = handoff_text(
+        &run,
+        &HandoffMaterial {
+            known_failures: Some(&list),
+            touched: &touched,
+            ..bare_handoff("the request")
+        },
+    )
+    .text;
+    assert!(!text.contains("check_status (CI run"), "{text}");
+    assert!(text.contains(&format!(
+        "the task declares: none\n(3 more failing tests are in none of those files and are left out here; {KNOWN_FILE} lists them all. Do not fix them.)"
+    )), "{text}");
+    // A test of a touched module is kept.
+    let touched = touched_names(&["src/status.rs".into()]);
+    let text = handoff_text(
+        &run,
+        &HandoffMaterial {
+            known_failures: Some(&list),
+            touched: &touched,
+            ..bare_handoff("the request")
+        },
+    )
+    .text;
+    assert!(
+        text.contains("- pkg::integration status::check_status (CI run"),
+        "{text}"
+    );
+    assert!(
+        text.contains("(2 more failing tests are in none of those files"),
+        "{text}"
+    );
+}
+
+/// The names paths give a test: a file's stem, an index file's
+/// directory, a glob's last plain part.
+#[test]
+fn the_paths_a_run_touches_name_tests_by_their_files() {
+    let names = touched_names(&[
+        "tests/it/runtime_claim.rs".into(),
+        "src/application/prompt/mod.rs".into(),
+        "src/domain/**".into(),
+        "docs/**/*.md".into(),
+        "**".into(),
+        "src/lib.rs".into(),
+    ]);
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    assert_eq!(names, ["docs", "domain", "prompt", "runtime_claim", "src"]);
+}
+
 /// ADR-t2080-1 decision 2 within ADR-t2072-1's limits: with the largest
-/// material each section is cut to its bytes keeping its start, says
-/// how many bytes it left out and where to read them, and the whole
-/// stays within `HANDOFF_LIMIT` without its middle cut; the request's
-/// cut is said in `over_limit`.
+/// material each section is cut to its bytes keeping its start (the
+/// local checks' newest records), says how many bytes or records it left
+/// out and where to read them, and the whole stays within
+/// `HANDOFF_LIMIT` without its middle cut; the request's cut is said in
+/// `over_limit`.
 #[test]
 fn a_handoff_with_the_largest_material_stays_within_its_limits() {
     let run = run_on(Provider::Claude, WorkerMode::Headless);
     let huge = "引".repeat(300_000);
-    let findings = Path::new("/runs/run/turns/revise-findings.txt");
     let request_file = Path::new("/runs/run/turns/request-9.json");
+    let commands: Vec<String> = (0..crate::domain::local_checks::MAX_RECORDS)
+        .map(|n| format!("{n} {}", "c".repeat(4000)))
+        .collect();
+    let records: Vec<CheckRecord<'_>> = commands
+        .iter()
+        .enumerate()
+        .map(|(n, command)| Some((HEAD_TREE, HEAD_TREE, n as i64, command.as_str())))
+        .collect();
+    let checks = judged_checks(&records);
+    let names: Vec<String> = (0..1000)
+        .map(|n| format!("t{n}::{}", "n".repeat(1000)))
+        .collect();
+    let others: Vec<(&str, i64, Option<i64>)> =
+        names.iter().map(|name| (name.as_str(), 1, None)).collect();
+    let list = known(&others, &[]);
+    let touched: BTreeSet<String> = (0..1000).map(|n| format!("t{n}")).collect();
     let material = HandoffMaterial {
         peak_context: u64::MAX,
         threshold: u64::MAX - 1,
+        resume_timeout: u64::MAX,
         commits: &huge,
         changes: &huge,
-        review: Some((&huge, Some(findings))),
+        head_tree: Some(HEAD_TREE),
+        checks: &checks,
+        older_checks: 7,
+        known_failures: Some(&list),
+        touched: &touched,
         receipt_summary: Some(&huge),
         request: &huge,
         request_file: Some(request_file),
@@ -5680,11 +6063,6 @@ fn a_handoff_with_the_largest_material_stays_within_its_limits() {
             "`git status` and `git diff` in your worktree show them all".to_owned(),
         ),
         (
-            "review",
-            HANDOFF_REVIEW_BYTES,
-            format!("the whole of it is in {}", findings.display()),
-        ),
-        (
             "receipt",
             HANDOFF_RECEIPT_BYTES,
             "the receipt at /runs/run/receipt.json holds the whole summary".to_owned(),
@@ -5704,6 +6082,23 @@ fn a_handoff_with_the_largest_material_stays_within_its_limits() {
             "{section}"
         );
     }
+    // The newest records kept, each command cut, the older counted.
+    assert!(fitted.bytes.omitted["checks"] > 100, "{:?}", fitted.bytes);
+    let last = crate::domain::local_checks::MAX_RECORDS - 1;
+    assert!(fitted.text.contains(&format!("exit {last}, took")));
+    assert!(!fitted.text.contains("exit 0, took"));
+    assert!(fitted.text.contains("older records on HEAD's tree left out by this section's limit; the directory `$DAGQ_LOCAL_CHECKS_DIR` names holds them all."));
+    assert!(fitted.text.contains("(7 older records were not read"));
+    assert!(
+        fitted
+            .text
+            .contains("the directory `$DAGQ_LOCAL_CHECKS_DIR` names holds the record whole]")
+    );
+    assert!(
+        fitted
+            .text
+            .contains(&format!("{KNOWN_FILE} lists them all"))
+    );
     assert!(
         fitted
             .text
@@ -5727,19 +6122,7 @@ fn a_handoff_with_the_largest_material_stays_within_its_limits() {
 #[test]
 fn a_kept_handoff_is_held_to_the_handoffs_limit() {
     let run = run_on(Provider::Claude, WorkerMode::Headless);
-    let handoff = handoff_text(
-        &run,
-        &HandoffMaterial {
-            peak_context: 200_000,
-            threshold: 150_000,
-            commits: "",
-            changes: "",
-            review: None,
-            receipt_summary: None,
-            request: "the resolution request",
-            request_file: None,
-        },
-    );
+    let handoff = handoff_text(&run, &bare_handoff("the resolution request"));
     for limit in [REVISE_REQUEST_LIMIT, RESUME_REQUEST_LIMIT] {
         assert_eq!(kept_request_limit(&handoff.text, limit), HANDOFF_LIMIT);
         assert_eq!(

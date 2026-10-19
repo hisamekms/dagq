@@ -51,6 +51,27 @@ pub fn dir_of(run_dir: &Path) -> PathBuf {
 /// record too), in the order of their names, up to [`MAX_RECORDS`]; and
 /// how many more there are, each a broken record left unread.
 pub fn records_to_read(entries: Vec<PathBuf>) -> (Vec<PathBuf>, usize) {
+    let mut records = record_paths(entries);
+    let over = records.len().saturating_sub(MAX_RECORDS);
+    records.truncate(MAX_RECORDS);
+    (records, over)
+}
+
+/// Which entries of the records' directory the handoff of a new session
+/// reads (ADR-t2852-1): the records [`records_to_read`] reads, but the
+/// last [`MAX_RECORDS`] by name, so the newest are kept (a project's
+/// script names a record by its start, as `scripts/local-check-record.sh`
+/// does); and how many older ones are left out unread, which are not
+/// broken.
+pub fn newest_records_to_read(entries: Vec<PathBuf>) -> (Vec<PathBuf>, usize) {
+    let mut records = record_paths(entries);
+    let over = records.len().saturating_sub(MAX_RECORDS);
+    records.drain(..over);
+    (records, over)
+}
+
+/// The files of `entries` named `*.json`, in the order of their names.
+fn record_paths(entries: Vec<PathBuf>) -> Vec<PathBuf> {
     let suffix = RECORD_SUFFIX.as_bytes();
     let mut records: Vec<_> = entries
         .into_iter()
@@ -62,9 +83,7 @@ pub fn records_to_read(entries: Vec<PathBuf>) -> (Vec<PathBuf>, usize) {
         })
         .collect();
     records.sort();
-    let over = records.len().saturating_sub(MAX_RECORDS);
-    records.truncate(MAX_RECORDS);
-    (records, over)
+    records
 }
 
 /// One run of a check as its record says, its tree the same at its start
@@ -274,6 +293,35 @@ mod tests {
         assert_eq!(read(&record(OTHER, OTHER)), Reading::OtherTree);
         assert_eq!(read(&record(TREE, OTHER)), Reading::OtherTree);
         assert_eq!(read(&record(OTHER, TREE)), Reading::OtherTree);
+    }
+
+    /// Past the limit of records, the review reads the first by name and
+    /// counts the rest, and the handoff the last and counts the older.
+    #[test]
+    fn past_the_limit_the_review_reads_the_first_records_and_the_handoff_the_newest() {
+        let mut entries: Vec<PathBuf> = (0..=MAX_RECORDS)
+            .rev()
+            .map(|n| PathBuf::from(format!("/d/{n:04}.json")))
+            .collect();
+        entries.push(PathBuf::from("/d/0001.log"));
+        let (first, over) = records_to_read(entries.clone());
+        assert_eq!((first.len(), over), (MAX_RECORDS, 1));
+        assert_eq!(first[0], PathBuf::from("/d/0000.json"));
+        let (newest, older) = newest_records_to_read(entries);
+        assert_eq!((newest.len(), older), (MAX_RECORDS, 1));
+        assert_eq!(newest[0], PathBuf::from("/d/0001.json"));
+        assert_eq!(
+            newest.last().unwrap(),
+            &PathBuf::from(format!("/d/{MAX_RECORDS:04}.json"))
+        );
+        let few = vec![PathBuf::from("/d/b.json"), PathBuf::from("/d/a.json")];
+        assert_eq!(
+            newest_records_to_read(few),
+            (
+                vec![PathBuf::from("/d/a.json"), PathBuf::from("/d/b.json")],
+                0
+            )
+        );
     }
 
     #[test]

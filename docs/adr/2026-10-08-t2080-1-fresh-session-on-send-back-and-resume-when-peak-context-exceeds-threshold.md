@@ -10,6 +10,8 @@ amends:
   - adr-0027 decision 2
   - adr-0027 decision 3
   - adr-t813-2 decision 4
+amended_by:
+  - adr-t2852-1
 owners:
   - hisamekms
 tags:

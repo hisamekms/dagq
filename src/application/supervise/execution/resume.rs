@@ -503,6 +503,23 @@ impl Supervisor<'_> {
         // A clone reaches main only through its bundle (ADR-t2179-1
         // decision 6).
         run_git::hand_main(&*self.repository, run, &request.main)?;
+        // A new session's handoff lists the known failures narrowed to
+        // the files the run touches, so its request does not list them
+        // all again (ADR-t2852-1).
+        let narrowed;
+        let request = if matches!(
+            self.next_session(run)?,
+            crate::domain::fresh_session::NextSession::Fresh { .. }
+        ) && request.known_failures.is_some()
+        {
+            narrowed = ResumeRequest {
+                known_failures: None,
+                ..request.clone()
+            };
+            &narrowed
+        } else {
+            request
+        };
         let built = resume_request(&task, run, request, &landed)?;
         self.write_reason_file(request, &built)?;
         self.write_answers_file(request, &built)?;
@@ -513,7 +530,6 @@ impl Supervisor<'_> {
             run,
             built,
             &run_dir.join(format!("resume-{attempt}-request.txt")),
-            None,
         )?;
         // What an adopter or the next process sends when it was not sent.
         self.files.write(

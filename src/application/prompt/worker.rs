@@ -3,6 +3,7 @@
 //! (execution and landing).
 
 use super::*;
+use crate::domain::local_checks::LocalChecks;
 
 /// What the prompt says about one direct predecessor: the task, the squash
 /// commit `integrate` put on `main` for it, and the summary its agent wrote.
@@ -481,13 +482,16 @@ pub const UNDELIVERED_REQUEST_BYTES: usize = RESUME_REQUEST_LIMIT;
 pub const PROVIDER_MESSAGE_BYTES: usize = 2_000;
 
 /// What the handoff prompt of a new session of a run's worker carries
-/// (ADR-t2080-1 decision 2): why the session is new, the work so far as
-/// git shows it, why the review sent the run back, the summary of the
-/// receipt the worker wrote last, and the request the earlier session
-/// would have been sent next (a revise's, a resume's or a triage's
-/// instruction). No transcript of the conversation: the worktree and its
-/// commits hold the work. The task's prompt is the new session's first
-/// part, which the session wrapper puts before it
+/// (ADR-t2080-1 decision 2 as ADR-t2852-1 amends it): why the session is
+/// new, the work so far as git shows it, the records of its local checks
+/// on the head's tree with how many others there are, the tests that fail already
+/// on the landing branch's CI in the files the run touches, how long the
+/// request may take, the summary of the receipt the worker wrote last,
+/// and the request the earlier session would have been sent next (a
+/// revise's, a resume's or a triage's instruction), which carries a
+/// review's findings once. No transcript of the conversation: the
+/// worktree and its commits hold the work. The task's prompt is the new
+/// session's first part, which the session wrapper puts before it
 /// ([`crate::domain::turn::new_session_prompt`]).
 #[derive(Debug, Clone, Copy)]
 pub struct HandoffMaterial<'a> {
@@ -495,14 +499,28 @@ pub struct HandoffMaterial<'a> {
     /// peak_context_above` it was above, in tokens.
     pub peak_context: u64,
     pub threshold: u64,
+    /// The resume timeout in seconds: how long after the request the
+    /// supervisor waits for the receipt to be rewritten.
+    pub resume_timeout: u64,
     /// `git log --oneline <base>..<branch>`: the commits so far, newest
     /// first.
     pub commits: &'a str,
     /// `git status --porcelain` of the worktree: the uncommitted changes.
     pub changes: &'a str,
-    /// Why the review sent the run back, and the file in the run directory
-    /// that holds it whole; `None` when no review did.
-    pub review: Option<(&'a str, Option<&'a Path>)>,
+    /// The tree of the branch's head; `None` when it could not be read.
+    pub head_tree: Option<&'a str>,
+    /// The newest records of the run's local checks judged against
+    /// `head_tree` as a review judges them against its commit's
+    /// (ADR-t2589-1 decision 4): those on it in the order of their files'
+    /// names, and how many were of another tree or broken; and how many
+    /// older ones were left out unread.
+    pub checks: &'a LocalChecks,
+    pub older_checks: usize,
+    /// The tests that fail already on the landing branch's CI for the
+    /// run's task, and the names the paths the run changes or declares
+    /// give a test ([`touched_names`]).
+    pub known_failures: Option<&'a KnownFailures>,
+    pub touched: &'a BTreeSet<String>,
     /// The summary of the receipt the worker wrote last; `None` without
     /// one.
     pub receipt_summary: Option<&'a str>,
@@ -514,13 +532,14 @@ pub struct HandoffMaterial<'a> {
 
 /// The bytes the handoff prompt of a new session (`handoff_text`) takes
 /// at most, the language's instruction included (ADR-t2080-1 decision 2,
-/// held as ADR-t2072-1 holds the next turns): its fixed text (under 1,500
-/// bytes with commit IDs of 64), the commits ([`HANDOFF_COMMITS_BYTES`]),
-/// the changes ([`HANDOFF_CHANGES_BYTES`]), the review's reasons
-/// ([`HANDOFF_REVIEW_BYTES`]), the receipt's summary
+/// held as ADR-t2072-1 holds the next turns): its fixed text (under 3,500
+/// bytes with commit IDs of 64 and a run directory's longest path), the commits ([`HANDOFF_COMMITS_BYTES`]),
+/// the changes ([`HANDOFF_CHANGES_BYTES`]), the local checks' records
+/// ([`HANDOFF_CHECKS_BYTES`]), the tests that fail already on the landing
+/// branch's CI ([`KNOWN_FAILURES_LIMIT`]), the receipt's summary
 /// ([`HANDOFF_RECEIPT_BYTES`]), the request ([`HANDOFF_REQUEST_BYTES`]) and
 /// the notes of what was cut, with the language's room: the sections'
-/// limits take 78,000 bytes together, and the request's grows with the
+/// limits take 77,500 bytes together, and the request's grows with the
 /// known failures' section of a resolution request
 /// ([`KNOWN_FAILURES_LIMIT`]). The new session's first turn is the task's
 /// prompt ([`WORKER_PROMPT_LIMIT`]) and this.
@@ -534,10 +553,14 @@ pub const HANDOFF_COMMITS_BYTES: usize = 8_000;
 /// status --porcelain`. The rest is in the worktree's `git status`.
 pub const HANDOFF_CHANGES_BYTES: usize = 8_000;
 
-/// The bytes of the review's reasons: as many as a revise request carries
-/// ([`REVISE_FINDINGS_BYTES`]), since the revise request it would have
-/// sent carries them too and is cut there the same.
-pub const HANDOFF_REVIEW_BYTES: usize = REVISE_FINDINGS_BYTES;
+/// The bytes of the local checks' lines, the newest kept: a line takes
+/// about 150 bytes and its command at most [`HANDOFF_CHECK_COMMAND_BYTES`],
+/// so about 50 records of usual commands fit. The rest is in the records'
+/// directory.
+pub const HANDOFF_CHECKS_BYTES: usize = 12_000;
+
+/// The bytes of one record's command: cut past these, keeping its start.
+pub const HANDOFF_CHECK_COMMAND_BYTES: usize = 600;
 
 /// The bytes of the receipt's summary: a predecessor's summary took
 /// 2,121 bytes at the median and 6,580 at p90 on 2026-10-08, so it is cut
@@ -552,6 +575,10 @@ pub const HANDOFF_REQUEST_BYTES: usize = RESUME_REQUEST_LIMIT;
 /// How every handoff prompt ([`handoff_text`]) starts.
 const HANDOFF_OPENING: &str = "dagq: this run's worker goes on in a new session";
 
+/// How the handoff names the records' directory: by the variable each
+/// turn is given, whose path a container sees too.
+const CHECKS_DIR: &str = "the directory `$DAGQ_LOCAL_CHECKS_DIR` names";
+
 /// The whole limit a request kept in a run file is held to again when a
 /// supervisor that did not write it sends it (an adopted revise, an
 /// adopted or handed-off resume): [`HANDOFF_LIMIT`] for a handoff prompt
@@ -564,26 +591,156 @@ pub(crate) fn kept_request_limit(text: &str, limit: usize) -> usize {
     }
 }
 
+/// `ms` as minutes and seconds.
+fn duration_text(ms: u64) -> String {
+    let seconds = ms / 1000;
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else {
+        format!("{}m {}s", seconds / 60, seconds % 60)
+    }
+}
+
+/// The section on the local checks' records (ADR-t2852-1): only those
+/// on the head's tree `head`, the newest first within
+/// [`HANDOFF_CHECKS_BYTES`], with their commands as they are (the runtime
+/// names no check); the others are counted, never shown, as a review's
+/// material leaves them out (ADR-t2589-1 decision 4), and what each is to
+/// the receipt is said (ADR-t2589-1 decisions 3 and 9, unchanged): one on
+/// the final tree is a ground, one of another tree is not.
+fn checks_section(
+    fit: &mut Fit,
+    head: Option<&str>,
+    (checks, older): (&LocalChecks, usize),
+) -> String {
+    let read = format!("{CHECKS_DIR} holds the record whole");
+    let lines: Vec<(String, bool)> = checks
+        .matched
+        .iter()
+        .rev()
+        .map(|check| {
+            let (command, cut) = prompt_fit::cut_part(
+                &check.command,
+                HANDOFF_CHECK_COMMAND_BYTES,
+                Keep::Start,
+                &read,
+            );
+            let kind = check
+                .kind
+                .as_deref()
+                .map_or_else(String::new, |kind| format!(", kind {kind}"));
+            (
+                format!(
+                    "- exit {}, took {}, started {}{kind}: {command}\n",
+                    check.exit_status,
+                    duration_text(check.duration_ms),
+                    check.started_at,
+                ),
+                cut,
+            )
+        })
+        .collect();
+    let mut text = match head {
+        Some(head) => format!(
+            "\n\nYour local checks on the tree {head} of HEAD, as the project's scripts recorded them in {CHECKS_DIR}, newest first:\n"
+        ),
+        None => format!(
+            "\n\nYour local checks on HEAD's tree, as the project's scripts recorded them in {CHECKS_DIR}: HEAD's tree could not be read, so none is shown (`git rev-parse HEAD^{{tree}}` in your worktree prints it).\n"
+        ),
+    };
+    if head.is_some() && lines.is_empty() {
+        text.push_str("(none)\n");
+    }
+    let (kept, left_out) = picked_lines(
+        fit,
+        "checks",
+        &lines,
+        0..lines.len(),
+        (usize::MAX, HANDOFF_CHECKS_BYTES),
+    );
+    for ((line, _), kept) in lines.iter().zip(&kept) {
+        if *kept {
+            text.push_str(line);
+        }
+    }
+    if !left_out.is_empty() {
+        text.push_str(&format!(
+            "({} older records on HEAD's tree left out by this section's limit; {CHECKS_DIR} holds them all.)\n",
+            left_out.len()
+        ));
+    }
+    if checks.other_tree > 0 {
+        text.push_str(&format!(
+            "({} records of another tree, or whose tree changed while it ran, are not shown: they are no ground for the receipt. {CHECKS_DIR} holds them, a clue to go on from: what passed, what failed and how long it took.)\n",
+            checks.other_tree
+        ));
+    }
+    if checks.broken > 0 {
+        text.push_str(&format!(
+            "({} records could not be read or are over their limits.)\n",
+            checks.broken
+        ));
+    }
+    if older > 0 {
+        text.push_str(&format!(
+            "({older} older records were not read: past the most records a run's handoff reads.)\n"
+        ));
+    }
+    if !checks.is_empty() || older > 0 {
+        text.push_str("A record shown here ran on HEAD's tree: while nothing changes, it is a ground for the receipt as it is, so do not run it again. Once you change anything, run again on the final tree the checks it needs; which of the project's gates it needs is judged from the run's diff as before. Uncommitted changes make the work tree another tree than HEAD's.\n");
+    }
+    fit.section("checks", &text);
+    text
+}
+
+/// The section on the tests that fail already on the landing branch's CI
+/// in the files the run touches (ADR-t2852-1), the task's own all kept,
+/// with how many others were left out and the file that lists them all;
+/// empty without a list.
+fn touched_failures_section(
+    fit: &mut Fit,
+    known: Option<&KnownFailures>,
+    touched: &BTreeSet<String>,
+) -> String {
+    let Some(known) = known else {
+        return String::new();
+    };
+    let (narrowed, left_out) = touched_known_failures(known, touched);
+    let mut text = "\n\nOf the tests that fail already on the landing branch's CI, those in the files your commits change, the worktree changes or the task declares".to_owned();
+    if narrowed.others.is_empty() && narrowed.fixing.is_empty() {
+        text.push_str(": none\n");
+    } else {
+        text.push_str(":\n");
+        text.push_str(&known_failures_section(
+            fit,
+            Some(&narrowed),
+            Reader::Worker,
+        ));
+    }
+    if left_out > 0 {
+        text.push_str(&format!(
+            "({left_out} more failing tests are in none of those files and are left out here; {} lists them all. Do not fix them.)\n",
+            known.file
+        ));
+    }
+    text
+}
+
 /// The handoff prompt of a new session of `run`'s worker for a large
 /// context ([`HandoffMaterial`]), held to [`HANDOFF_LIMIT`]. Each part is
 /// one section cut to its bytes keeping its start, with the bytes left out
 /// and how to read the rest: the commits and the changes with git in the
-/// worktree, the review's reasons and the request in their files when the
-/// caller names them, the receipt's summary in the receipt. The request is
-/// required material (a cut is said in `over_limit`); the fixed text is
-/// never cut.
+/// worktree, the local checks' records in their directory, the known
+/// failures and the request in their files, the receipt's summary in the
+/// receipt. The request is required material (a cut is said in
+/// `over_limit`); the fixed text is never cut. A review's findings are in
+/// the request alone (ADR-t2852-1).
 pub fn handoff_text(run: &TaskRun, material: &HandoffMaterial<'_>) -> FittedPrompt {
     let mut fit = Fit::new(HANDOFF_LIMIT);
     let base = run.base_commit();
-    let in_file = |path: Option<&Path>| {
-        path.map_or_else(
-            || NOT_READABLE.to_owned(),
-            |path| format!("the whole of it is in {}", path.display()),
-        )
-    };
     let mut text = format!(
-        "{HANDOFF_OPENING}: its previous turn's context took {} tokens, above the {} tokens this repository sets, so nothing of the earlier conversation carries over. The task's prompt is above; the run, its worktree, its branch and its provider are the same. The work so far is in this worktree and its branch: go on from it rather than starting over.",
-        material.peak_context, material.threshold,
+        "{HANDOFF_OPENING}: its previous turn's context took {} tokens, above the {} tokens this repository sets, so nothing of the earlier conversation carries over. The task's prompt is above; the run, its worktree, its branch and its provider are the same. The work so far is in this worktree and its branch: go on from it rather than starting over.\n\nDo not start by reading again the instructions and documents the task's prompt names: what the task asks is above and below. Open a document only when the work needs it.\n\nThe supervisor stops this session unless you rewrite the receipt within {} seconds of this request (the resume timeout). Once your fixes are made and the checks the final tree needs have run, rewrite the receipt before any other work, such as a subagent review again.",
+        material.peak_context, material.threshold, material.resume_timeout,
     );
     let commits = fit.text(
         "commits",
@@ -609,20 +766,18 @@ pub fn handoff_text(run: &TaskRun, material: &HandoffMaterial<'_>) -> FittedProm
         "\n\nUncommitted changes in the worktree (`git status --porcelain`):\n{}",
         or_none(&changes)
     ));
-    if let Some((review, file)) = material.review {
-        let review = fit.text(
-            "review",
-            review.trim(),
-            HANDOFF_REVIEW_BYTES,
-            Keep::Start,
-            &in_file(file),
-        );
-        fit.section("review", &review);
-        text.push_str(&format!(
-            "\n\nWhy the review sent the run back:\n{}",
-            or_none(&review)
-        ));
-    }
+    text.push_str(
+        checks_section(
+            &mut fit,
+            material.head_tree,
+            (material.checks, material.older_checks),
+        )
+        .trim_end_matches('\n'),
+    );
+    text.push_str(
+        touched_failures_section(&mut fit, material.known_failures, material.touched)
+            .trim_end_matches('\n'),
+    );
     if let Some(summary) = material.receipt_summary {
         let read = run.receipt_path().map_or_else(
             || NOT_READABLE.to_owned(),
@@ -641,12 +796,11 @@ pub fn handoff_text(run: &TaskRun, material: &HandoffMaterial<'_>) -> FittedProm
             or_none(&summary)
         ));
     }
-    let request = fit.required(
-        "request",
-        material.request,
-        HANDOFF_REQUEST_BYTES,
-        &in_file(material.request_file),
+    let read = material.request_file.map_or_else(
+        || NOT_READABLE.to_owned(),
+        |path| format!("the whole of it is in {}", path.display()),
     );
+    let request = fit.required("request", material.request, HANDOFF_REQUEST_BYTES, &read);
     fit.section("request", &request);
     text.push_str(&format!(
         "\n\nThe earlier session would have been sent this next; it is yours now:\n\n{request}"

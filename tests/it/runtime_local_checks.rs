@@ -186,6 +186,76 @@ fn the_records_are_read_without_links_and_within_their_limits() {
     );
 }
 
+/// The handoff of a new session (ADR-t2852-1) reads the run's records as
+/// a review does (ADR-t2589-1 decision 4): only those on the head's tree
+/// are kept, the rest of another tree, whose tree changed or that are
+/// broken counted, a directory that is a link read as one broken record
+/// with its target unread. Past the limit of records it reads the newest,
+/// so a check on the final tree recorded last is kept and the older ones
+/// counted, while the review's reading stays as it was.
+#[test]
+fn a_handoff_keeps_the_newest_records_on_the_heads_tree_as_a_review_does() {
+    use dagq::application::review::{newest_local_checks, read_local_checks};
+    use dagq::domain::local_checks::MAX_RECORDS;
+    use dagq::infrastructure::run_files::LocalRunFiles;
+    const TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+    const OLD: &str = "1111111111111111111111111111111111111111";
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = dir.path().join("runs").join("r1");
+    let records = run_dir.join("local-checks");
+    fs::create_dir_all(&records).unwrap();
+    let record = |start: &str, end: &str, command: &str| {
+        json!({
+            "command": command, "exit_status": 0, "started_at": "t", "duration_ms": 1,
+            "tree_start": start, "tree_end": end, "log": "a.log",
+        })
+        .to_string()
+    };
+    // The same exclusions as a review's material.
+    fs::write(records.join("a.json"), record(TREE, TREE, "on the head")).unwrap();
+    fs::write(records.join("b.json"), record(OLD, OLD, "of another tree")).unwrap();
+    fs::write(records.join("c.json"), record(OLD, TREE, "changed")).unwrap();
+    fs::write(records.join("d.json"), "not a record").unwrap();
+    let (read, older) = newest_local_checks(&LocalRunFiles, &run_dir, TREE);
+    assert_eq!(read, read_local_checks(&LocalRunFiles, &run_dir, TREE));
+    assert_eq!(older, 0);
+    let commands: Vec<&str> = read.matched.iter().map(|c| c.command.as_str()).collect();
+    assert_eq!(commands, ["on the head"]);
+    assert_eq!((read.other_tree, read.broken), (2, 1));
+
+    // Past the limit, the newest: the last by name, on the final tree.
+    for index in 0..MAX_RECORDS {
+        fs::write(
+            records.join(format!("e{index:04}.json")),
+            record(OLD, OLD, "old"),
+        )
+        .unwrap();
+    }
+    fs::write(
+        records.join("f.json"),
+        record(TREE, TREE, "on the final tree"),
+    )
+    .unwrap();
+    let (read, older) = newest_local_checks(&LocalRunFiles, &run_dir, TREE);
+    assert_eq!(older, 5);
+    let commands: Vec<&str> = read.matched.iter().map(|c| c.command.as_str()).collect();
+    assert_eq!(commands, ["on the final tree"]);
+    assert_eq!((read.other_tree, read.broken), (MAX_RECORDS - 1, 0));
+    let review = read_local_checks(&LocalRunFiles, &run_dir, TREE);
+    let commands: Vec<&str> = review.matched.iter().map(|c| c.command.as_str()).collect();
+    assert_eq!(commands, ["on the head"]);
+
+    // A directory that is a link is not followed.
+    let elsewhere = dir.path().join("elsewhere");
+    fs::rename(&records, &elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &records).unwrap();
+    let (read, older) = newest_local_checks(&LocalRunFiles, &run_dir, TREE);
+    assert_eq!(
+        (read.matched.len(), read.other_tree, read.broken, older),
+        (0, 0, 1, 0)
+    );
+}
+
 /// The local gates the landing branch's `dagq.toml` declares (decision 6):
 /// the review's section says which the diff from the merge base with the
 /// landing branch to the receipt's commit requires, by the changed lines
