@@ -195,13 +195,13 @@ taskのevent（runを持てば`run_id`も付ける）。
 
 ## statusとattentionと知らせ
 
-- `status`は、開いたholdを`task_holds`の配列に出す（taskとrunのID・理由・かけたactor・かけた時刻・待ちに入った時刻・`until`・状態）。
-  runの`progress.phase`は待ちの間`held`、`slot`はslotの外。
-- attentionは、`until`を過ぎたhold、`until`の無いholdはかけてから24時間（定数。後で`dagq.toml`の設定にできる）を過ぎたものを、`kind: task_held`・`next: release or keep the hold of task N`で出す。
-  inboxが同じholdを繰り返し起こさないよう、知らせは24時間ごとに1回にする。
+- `status`は、開いたholdを欄`held`に出し、期限（`until`）を過ぎたholdと、`until`が無くかけてから長いholdを、attentionに`kind: task_hold_reminded`で出す。
+  出す項目は`health::held_tasks`、長いとみなす時間は`HOLD_REMIND_SECS`と`TaskHold::overdue`、`next`の文言は`AttentionNext::ReleaseOrKeepHold`のdoc commentが持つ。
+- holdは期限を過ぎても人が解除するまで外れず、supervisorは同じholdの`task_hold_reminded`を1日に1回だけ記録し（`TaskHold::reminder_due`のdoc comment）、`watch`がそれを知らせる。
+- `status`・`watch`・`hold`・`release`の操作の詳細（flagと出力の読み方）は、各コマンドの`--help`が持つ。
 - `list`・`show`は、holdの開いたtaskに理由と状態を付ける。
-- `candidates`は、holdの開いたreadyのtaskを候補から除き、除いたことを理由（task hold）つきで示す。
-  queue全体の控えを出す今の`held`とは混ぜない。
+- `candidates`は、holdの開いたreadyのtaskを候補から除く。
+  queue全体の控えを出す`candidates`の`held`とは混ぜない。
 
 ## 権限
 
