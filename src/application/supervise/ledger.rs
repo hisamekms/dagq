@@ -239,7 +239,7 @@ impl LedgerWatch {
     /// running then is left, and the next supervisor's ledger catches up.
     pub(super) fn finish(&mut self, env: &mut ObservationEnv<'_>, deadline: Option<Instant>) {
         if let Some(job) = self.job.take() {
-            if super::finished_by(&job, deadline) {
+            if super::finished_by(&job, deadline, &*env.generators.clock) {
                 self.reap(env, job);
             } else {
                 tracing::warn!("the ledger's pass still runs as the supervisor ends; it is left");

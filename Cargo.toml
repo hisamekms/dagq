@@ -30,6 +30,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["registry", "std"] }
 uuid = { version = "1.20", features = ["v4"] }
 
+# The boundary lints of clippy.toml are off for the package and turned on
+# in src/lib.rs on the modules the rules hold for (ADR-t2391-1 decision 2).
+[lints.clippy]
+disallowed_methods = "allow"
+disallowed_types = "allow"
+disallowed_macros = "allow"
+
 [dev-dependencies]
 # Reads the sources as syntax for the boundary tests (src/context_boundaries.rs).
 proc-macro2 = { version = "1.0", default-features = false }

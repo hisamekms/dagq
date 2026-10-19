@@ -1223,7 +1223,7 @@ impl Supervisor<'_> {
                 Err(error) => Err(JobFailed::Exited(format!("{error:#}"))),
             };
             let run = round.running.remove(index);
-            let duration_secs = run.job.started.elapsed().as_secs();
+            let duration_secs = run.job.elapsed().as_secs();
             let stdout = self
                 .files
                 .read_to_string(&run.job.stdout)

@@ -75,7 +75,7 @@ pub use crate::domain::ClaimRank;
 pub use ports::*;
 pub use recording::reason_of_error;
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::domain::{
     EvidenceCheck, ExecutionClass, GoalId, GoalStatus, GoalVerdict, Priority, PrioritySource,
@@ -1034,6 +1034,19 @@ mod tests {
     }
 }
 
+/// Whether a wait bounded by `limit` is over after `waited` (rule L5 of
+/// docs/design/architecture.md): it ends at `limit` exactly. The caller
+/// reads `waited` with [`Clock::since`] and acts on the answer.
+pub fn waited_out(waited: Duration, limit: Duration) -> bool {
+    waited >= limit
+}
+
+/// What is left of a wait bounded by `limit` after `waited`; zero once it
+/// is over ([`waited_out`]).
+pub fn time_left(waited: Duration, limit: Duration) -> Duration {
+    limit.saturating_sub(waited)
+}
+
 /// Seconds since the Unix epoch; zero before it.
 pub fn unix_seconds(time: SystemTime) -> i64 {
     time.duration_since(UNIX_EPOCH)
@@ -1087,6 +1100,20 @@ mod clock_tests {
         fn monotonic(&self) -> std::time::Instant {
             std::time::Instant::now()
         }
+    }
+
+    /// A wait is over at its limit exactly, not 1 ms before, and nothing
+    /// of it is left then.
+    #[test]
+    fn a_wait_is_over_at_its_limit() {
+        let limit = Duration::from_secs(10);
+        let ms = Duration::from_millis(1);
+        assert!(!waited_out(limit - ms, limit));
+        assert!(waited_out(limit, limit));
+        assert!(waited_out(limit + ms, limit));
+        assert_eq!(time_left(limit - ms, limit), ms);
+        assert_eq!(time_left(limit, limit), Duration::ZERO);
+        assert_eq!(time_left(limit + ms, limit), Duration::ZERO);
     }
 
     #[test]

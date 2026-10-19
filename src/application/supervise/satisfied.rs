@@ -121,15 +121,23 @@ impl Supervisor<'_> {
         for pid in &pids {
             let _ = self.processes.terminate(*pid);
         }
-        let started = Instant::now();
-        while started.elapsed() < super::recovery::STOP_GRACE && !alive(self).is_empty() {
+        let started = self.generators.clock.monotonic();
+        while !crate::application::waited_out(
+            self.generators.clock.since(started),
+            super::recovery::STOP_GRACE,
+        ) && !alive(self).is_empty()
+        {
             thread::sleep(Duration::from_millis(50));
         }
         for pid in alive(self) {
             let _ = self.processes.kill(pid);
         }
-        let started = Instant::now();
-        while started.elapsed() < super::recovery::STOP_GRACE && !alive(self).is_empty() {
+        let started = self.generators.clock.monotonic();
+        while !crate::application::waited_out(
+            self.generators.clock.since(started),
+            super::recovery::STOP_GRACE,
+        ) && !alive(self).is_empty()
+        {
             thread::sleep(Duration::from_millis(50));
         }
         let left = alive(self);

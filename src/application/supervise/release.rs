@@ -92,14 +92,11 @@ impl HostOpsState {
             return;
         }
         let first_pass = self.release.last.is_none();
-        if self
-            .release
-            .last
-            .is_some_and(|last| last.elapsed() < RELEASE_LOOK)
-        {
+        let since_last = self.release.last.map(|at| env.generators.clock.since(at));
+        if !look_due(since_last) {
             return;
         }
-        self.release.last = Some(Instant::now());
+        self.release.last = Some(env.generators.clock.monotonic());
         let config = (port.config)();
         if config.release == ReleaseMode::Off {
             return;
@@ -146,14 +143,14 @@ impl HostOpsState {
         let Some(port) = self.release_port.clone() else {
             return Ok(());
         };
-        if self
+        let since_last = self
             .release
             .last_update
-            .is_some_and(|last| last.elapsed() < options.update.interval)
-        {
+            .map(|at| env.generators.clock.since(at));
+        if !update_due(since_last, options.update.interval) {
             return Ok(());
         }
-        self.release.last_update = Some(Instant::now());
+        self.release.last_update = Some(env.generators.clock.monotonic());
         // A development build never acts on a release (ADR-t618-1
         // decision 1): its answers are left for a supervisor that does.
         if !is_release_build(&port.current) {
@@ -636,6 +633,18 @@ fn release_job_command(
     command
 }
 
+/// Whether the release is looked for now: on the first pass and
+/// [`RELEASE_LOOK`] after the last look, given as the time since.
+fn look_due(since_last: Option<Duration>) -> bool {
+    since_last.is_none_or(|since| since >= RELEASE_LOOK)
+}
+
+/// Whether the release update looks again: on the first pass and
+/// `interval` after the last look, given as the time since.
+fn update_due(since_last: Option<Duration>, interval: Duration) -> bool {
+    since_last.is_none_or(|since| since >= interval)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -686,6 +695,21 @@ mod tests {
             ]
         );
         assert!(!args.contains(&"--cmux"), "{args:?}");
+    }
+
+    /// The release is looked for on the first pass and at [`RELEASE_LOOK`]
+    /// after the last look, and the release update at its interval, not
+    /// 1 ms before.
+    #[test]
+    fn the_release_and_its_update_look_again_at_their_intervals() {
+        let interval = Duration::from_secs(300);
+        let ms = Duration::from_millis(1);
+        assert!(look_due(None));
+        assert!(!look_due(Some(RELEASE_LOOK - ms)));
+        assert!(look_due(Some(RELEASE_LOOK)));
+        assert!(update_due(None, interval));
+        assert!(!update_due(Some(interval - ms), interval));
+        assert!(update_due(Some(interval), interval));
     }
 
     fn step(kind: &str, payload: Value) -> RunEvent {

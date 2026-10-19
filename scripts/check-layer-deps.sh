@@ -1,8 +1,9 @@
 #!/bin/sh
 # Check the forbidden dependencies between the layers of the runtime, and
 # between the split contexts of the supervisor, of the ports and of the
-# composition root. The rules (their IDs L1, L2, L3, L4, L6, L7, L9, C3 and
-# C8), what counts in short and the allow list's place are in
+# composition root. The rules (their IDs L1, L2's part clippy cannot hold, L3,
+# L6, L9, C3 and C8; clippy.toml holds L2's rest, L4 and L7's clock), what
+# counts in short and the allow list's place are in
 # docs/design/architecture.md, sections "レイヤーの規則", "コンテキストの規則"
 # and "検査の範囲"; the allow list's format is in its own header
 # (.config/layer-deps-allow.txt); the details of what counts are here.
@@ -29,9 +30,12 @@
 # its module (`super::shared::Clock`), never through the re-exports of
 # mod.rs, and only from the modules the rule lets the file use.
 #
-# L7 counts in src/compose.rs and every file under src/compose/ outside
-# tests: a read of the wall or the monotonic clock (SystemTime::now,
-# Instant::now). The modules of src/compose/ are found from the tree: each
+# L2 counts in src/domain outside tests: a path into anyhow, std::process or
+# std::net. These are the domain's alone (application uses anyhow and
+# std::process::id), and clippy.toml has one list per lint for the whole
+# package, so clippy cannot forbid them in the domain only.
+#
+# The modules of src/compose/ are found from the tree: each
 # `name.rs` and `name/` right under it is the module `name`, so a new module
 # is checked without a list. Each of them but those of $compose_loop is a
 # context module. L9 counts, inside tests too, in the files of a context
@@ -47,7 +51,7 @@
 # in.
 #
 # What counts is the path of a reference (`crate::application::timestamp`,
-# `std::time::SystemTime::now`), with a grouped `use crate::{a, b}` expanded
+# `std::process::id`), with a grouped `use crate::{a, b}` expanded
 # into one path each. Comments (`//`, `//!`, `///` and `/* */`, nested ones
 # too), doc links and string and character literals do not count.
 # A cfg is taken for test when its predicate requires test: `test` itself,
@@ -61,7 +65,7 @@
 # at the module's place, inline modules' names included); a test module
 # inside an inline module is handled and the range ends where it ends. An
 # inner `#![cfg(test)]` at the top of a file makes the whole file test.
-# Inside a test range L1, L3 and L6 count and L2 and L4 do not.
+# Inside a test range L1, L3 and L6 count and L2 does not.
 #
 # Every occurrence the rules forbid must have its (rule, path, reference) in
 # the allow list (.config/layer-deps-allow.txt, or LAYER_DEPS_ALLOW_FILE),
@@ -81,7 +85,7 @@
 # (no violation, one not in the list, a stale item, an item without a task,
 # references only in comments and strings, nested block comments, the cfg
 # forms above, a test range inside an inline module, the C3 references
-# of a split context and of a stage, the C8 references and the L7 and L9
+# of a split context and of a stage, the C8 references and the L9
 # references of the composition root, a new module of it and a glob of it)
 # and removes them.
 #
@@ -128,8 +132,7 @@ BEGIN {
     ref["application"] = ref["application"] " L3:^" o[i]
     ref["infrastructure"] = ref["infrastructure"] " L6:^" o[i]
   }
-  prod["domain"] = "L2:^rusqlite L2:^std::fs L2:^std::process L2:^std::net L2:SystemTime::now L2:Instant::now L2:Uuid::new_v4 L2:^anyhow"
-  prod["application"] = "L4:^rusqlite L4:^std::fs L4:process::Command L4:SystemTime::now L4:Uuid::new_v4"
+  prod["domain"] = "L2:^std::process L2:^std::net L2:^anyhow"
   n = split(c3_files, o, " ")
   for (i = 1; i <= n; i++) c3["src/application/supervise/" o[i] ".rs"] = 1
   n = split(c8_ok, o, " ")
@@ -138,8 +141,6 @@ BEGIN {
   for (i = 1; i <= n; i++) c3s["src/application/supervise/" o[i] ".rs"] = 1
   c3_names = c3_patterns("Supervisor Slot Phase stages ClaimState SlotTable LandingState ResumeState TriageState ProviderState E2eWaits")
   c3s_names = c3_patterns("Supervisor contexts ObservationState HostOpsState PassEnv")
-  prod["compose"] = "L7:SystemTime::now L7:Instant::now"
-  prod["compose.rs"] = prod["compose"]
   n_cm = split(compose_modules, cm, " ")
   n = split(compose_loop, o, " ")
   for (i = 1; i <= n; i++) compose_loop_module[o[i]] = 1
@@ -390,7 +391,7 @@ check_tree() {
     BEGIN { n = split(ENVIRON["LAYER_DEPS_TESTS"], t, "\n") }
     $1 == "testmod" || $1 == "" { next }
     {
-      if ($1 == "L2" || $1 == "L4" || $1 == "L7") {
+      if ($1 == "L2") {
         for (i = 1; i <= n; i++) {
           if (t[i] == "") continue
           if ($2 == t[i] || (substr(t[i], length(t[i])) == "/" && index($2, t[i]) == 1)) next
@@ -410,8 +411,8 @@ check_tree() {
         if (m < 5) { print me ": " show ":" i ": want rule | path | reference | task | reason" > "/dev/stderr"; bad = 1; continue }
         rule = trim(f[1]); path = trim(f[2]); r = trim(f[3]); task = trim(f[4])
         reason = f[5]; for (j = 6; j <= m; j++) reason = reason "|" f[j]; reason = trim(reason)
-        if (rule !~ /^(L[123467]|L9|C[38])$/ || path !~ /^src\// || r == "" || task !~ /^[1-9][0-9]*( *, *[1-9][0-9]*)*$/ || reason == "") {
-          print me ": " show ":" i ": want a rule (L1, L2, L3, L4, L6, L7, L9, C3, C8), a path under src/, a reference, task IDs (1234 or 1234, 1235) and a reason" > "/dev/stderr"; bad = 1; continue
+        if (rule !~ /^(L[1236]|L9|C[38])$/ || path !~ /^src\// || r == "" || task !~ /^[1-9][0-9]*( *, *[1-9][0-9]*)*$/ || reason == "") {
+          print me ": " show ":" i ": want a rule (L1, L2, L3, L6, L9, C3, C8), a path under src/, a reference, task IDs (1234 or 1234, 1235) and a reason" > "/dev/stderr"; bad = 1; continue
         }
         k = rule "\t" path "\t" r
         if (k in item) { print me ": " show ":" i ": " rule " " path " " r " is listed twice" > "/dev/stderr"; bad = 1; continue }
@@ -465,11 +466,11 @@ pub fn f() -> &'static str { "crate::application::x and std::fs in a string" }
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
-fn helper() { let _ = std::time::SystemTime::now(); }
+fn helper() { let _ = std::process::id(); }
 pub fn g(c: char) -> bool { c == '{' }
 EOF
     cat >"$d/src/domain/run/tests.rs" <<'EOF'
-fn t() { let _ = std::fs::read("x"); }
+fn t() { let _ = std::process::exit(1); }
 EOF
     cat >"$d/src/application/use_case.rs" <<'EOF'
 use crate::{
@@ -480,12 +481,12 @@ pub fn now(clock: &dyn Clock) -> u64 { clock.now() }
 #[cfg(test)]
 mod tests {
     #[test]
-    fn t() { let _ = std::fs::read("fixture"); }
+    fn t() { let _ = std::process::exit(1); }
 }
 EOF
     cat >"$d/src/infrastructure/store.rs" <<'EOF'
 use crate::application::ports::Clock;
-pub fn open() { let _ = std::fs::read("x"); let _ = std::time::SystemTime::now(); }
+pub fn open() { let _ = std::process::exit(1); let _ = std::time::SystemTime::now(); }
 EOF
     : >"$d/allow.txt"
   }
@@ -507,91 +508,91 @@ EOF
 
   base prodio
   cat >>"$tmp/prodio/src/domain/run.rs" <<'EOF'
-pub fn h() -> u64 { std::time::SystemTime::now().elapsed().unwrap().as_secs() }
+pub fn h() -> u64 { u64::from(std::process::id()) }
 EOF
-  expect 1 "L2 counts SystemTime::now outside #[cfg(test)]" "$tmp/prodio" "src/domain/run.rs:12: L2 forbids SystemTime::now"
+  expect 1 "L2 counts std::process outside #[cfg(test)]" "$tmp/prodio" "src/domain/run.rs:12: L2 forbids std::process"
 
   base cfgend
   cat >>"$tmp/cfgend/src/domain/run.rs" <<'EOF'
 pub enum E { A, #[cfg(test)] Fake, }
-pub fn k(c: char) -> bool { let _ = std::time::SystemTime::now(); c == 'é' }
+pub fn k(c: char) -> bool { let _ = std::process::id(); c == 'é' }
 EOF
-  expect 1 "the #[cfg(test)] region ends with its enclosing item" "$tmp/cfgend" "src/domain/run.rs:13: L2 forbids SystemTime::now"
+  expect 1 "the #[cfg(test)] region ends with its enclosing item" "$tmp/cfgend" "src/domain/run.rs:13: L2 forbids std::process"
 
   base nested_comments
   cat >>"$tmp/nested_comments/src/domain/run.rs" <<'EOF'
-/* outer /* inner */ std::fs::read("hidden");
+/* outer /* inner */ std::process::exit(1);
    /* another /* deeper */ crate::application::timestamp(); */ still outer */
 EOF
   expect 0 "nested_comments" "$tmp/nested_comments"
 
   base nested_comments_end
   cat >>"$tmp/nested_comments_end/src/domain/run.rs" <<'EOF'
-/* outer /* inner */ hidden */ std::fs::read("production");
+/* outer /* inner */ hidden */ std::process::exit(1);
 EOF
-  expect 1 "nested_comments_end" "$tmp/nested_comments_end" "L2 forbids std::fs"
+  expect 1 "nested_comments_end" "$tmp/nested_comments_end" "L2 forbids std::process"
 
   base multiline_cfg
   cat >>"$tmp/multiline_cfg/src/domain/run.rs" <<'EOF'
 #[cfg(
     /* a nested /* comment */ here */ test
 )]
-fn multiline() { std::fs::read("test"); }
+fn multiline() { std::process::exit(1); }
 EOF
   expect 0 "multiline_cfg" "$tmp/multiline_cfg"
 
   base required_cfg
   cat >>"$tmp/required_cfg/src/domain/run.rs" <<'EOF'
 #[cfg(any())]
-fn unreachable() { std::fs::read("unreachable"); }
+fn unreachable() { std::process::exit(1); }
 #[cfg(any(test))]
-fn single_any() { std::fs::read("test"); }
+fn single_any() { std::process::exit(1); }
 #[cfg(all(test, unix))]
-fn all_test() { std::fs::read("test"); }
+fn all_test() { std::process::exit(1); }
 #[cfg(all(unix, any(test)))]
-fn nested() { std::fs::read("test"); }
+fn nested() { std::process::exit(1); }
 #[cfg(any(all(test, unix), all(test, feature = "x"),))]
-fn every_branch() { std::fs::read("test"); }
+fn every_branch() { std::process::exit(1); }
 #[cfg(any(test))]
-use std::fs;
+use std::process;
 EOF
   cat >>"$tmp/required_cfg/src/application/use_case.rs" <<'EOF'
 #[cfg(all(test, unix))]
-fn test_io() { std::fs::read("test"); }
+fn test_io() { std::process::exit(1); }
 EOF
-  expect 0 "required_cfg (L2 and L4)" "$tmp/required_cfg"
+  expect 0 "required_cfg" "$tmp/required_cfg"
 
   for predicate in 'any(test, unix)' 'any(test, feature = "x")' 'not(test)' 'all(unix, any(test, unix))' 'all(test, not(unix))' 'all()' 'feature = "test"'; do
     base production_cfg
-    printf '#[cfg(%s)]\nfn production() { std::fs::read("production"); }\n' "$predicate" >>"$tmp/production_cfg/src/domain/run.rs"
-    expect 1 "production_cfg: $predicate" "$tmp/production_cfg" "L2 forbids std::fs"
+    printf '#[cfg(%s)]\nfn production() { std::process::exit(1); }\n' "$predicate" >>"$tmp/production_cfg/src/domain/run.rs"
+    expect 1 "production_cfg: $predicate" "$tmp/production_cfg" "L2 forbids std::process"
   done
 
   base inline_test_mod
   cat >>"$tmp/inline_test_mod/src/domain/run.rs" <<'EOF'
 mod outer { #[cfg(test)] mod tests {
-    fn io() { std::fs::read("test"); }
-    #[cfg(test)] mod nested { fn io() { std::fs::read("test"); } }
-    fn still_test() { std::fs::read("test"); }
+    fn io() { std::process::exit(1); }
+    #[cfg(test)] mod nested { fn io() { std::process::exit(1); } }
+    fn still_test() { std::process::exit(1); }
 } }
 EOF
   expect 0 "inline_test_mod" "$tmp/inline_test_mod"
 
   base inline_test_mod_end
   cat >>"$tmp/inline_test_mod_end/src/domain/run.rs" <<'EOF'
-mod outer { #[cfg(test)] mod tests { fn io() { std::fs::read("test"); } }
-    fn production() { std::fs::read("production"); }
+mod outer { #[cfg(test)] mod tests { fn io() { std::process::exit(1); } }
+    fn production() { std::process::exit(1); }
 }
 EOF
-  expect 1 "inline_test_mod_end" "$tmp/inline_test_mod_end" "src/domain/run.rs:13: L2 forbids std::fs"
+  expect 1 "inline_test_mod_end" "$tmp/inline_test_mod_end" "src/domain/run.rs:13: L2 forbids std::process"
 
   base inline_test_file
   cat >>"$tmp/inline_test_file/src/domain/run.rs" <<'EOF'
 mod outer { mod inner { #[cfg(test)] mod helpers; } }
 EOF
   mkdir -p "$tmp/inline_test_file/src/domain/run/outer/inner/helpers"
-  echo 'fn io() { std::fs::read("test"); }' >"$tmp/inline_test_file/src/domain/run/outer/inner/helpers.rs"
-  echo 'fn io() { std::fs::read("test"); }' >"$tmp/inline_test_file/src/domain/run/outer/inner/helpers/child.rs"
+  echo 'fn io() { std::process::exit(1); }' >"$tmp/inline_test_file/src/domain/run/outer/inner/helpers.rs"
+  echo 'fn io() { std::process::exit(1); }' >"$tmp/inline_test_file/src/domain/run/outer/inner/helpers/child.rs"
   expect 0 "inline_test_file" "$tmp/inline_test_file"
 
   base inline_test_file_neighbor
@@ -599,24 +600,24 @@ EOF
 mod outer { #[cfg(test)] mod helpers; }
 mod helpers;
 EOF
-  echo 'fn io() { std::fs::read("production"); }' >"$tmp/inline_test_file_neighbor/src/domain/run/helpers.rs"
-  expect 1 "inline_test_file_neighbor" "$tmp/inline_test_file_neighbor" "src/domain/run/helpers.rs:1: L2 forbids std::fs"
+  echo 'fn io() { std::process::exit(1); }' >"$tmp/inline_test_file_neighbor/src/domain/run/helpers.rs"
+  expect 1 "inline_test_file_neighbor" "$tmp/inline_test_file_neighbor" "src/domain/run/helpers.rs:1: L2 forbids std::process"
 
   base multiline_cfg_end
   cat >>"$tmp/multiline_cfg_end/src/domain/run.rs" <<'EOF'
 #[cfg(
     test
 )]
-fn test_io() { std::fs::read("test"); } fn production() { std::fs::read("production"); }
+fn test_io() { std::process::exit(1); } fn production() { std::process::exit(1); }
 EOF
-  expect 1 "multiline_cfg_end" "$tmp/multiline_cfg_end" "src/domain/run.rs:15: L2 forbids std::fs"
+  expect 1 "multiline_cfg_end" "$tmp/multiline_cfg_end" "src/domain/run.rs:15: L2 forbids std::process"
 
   base required_cfg_end
   cat >>"$tmp/required_cfg_end/src/domain/run.rs" <<'EOF'
-#[cfg(all(test, unix))] use std::fs;
-fn production() { std::fs::read("production"); }
+#[cfg(all(test, unix))] use std::process;
+fn production() { std::process::exit(1); }
 EOF
-  expect 1 "required_cfg_end" "$tmp/required_cfg_end" "src/domain/run.rs:13: L2 forbids std::fs"
+  expect 1 "required_cfg_end" "$tmp/required_cfg_end" "src/domain/run.rs:13: L2 forbids std::process"
 
   base required_cfg_ref
   cat >>"$tmp/required_cfg_ref/src/application/use_case.rs" <<'EOF'
@@ -733,15 +734,6 @@ EOF
   echo 'pub fn up() {}' >"$tmp/compose_outside/src/compose/host.rs"
   echo 'fn main() { dagq::compose::host::up(); }' >"$tmp/compose_outside/src/main.rs"
   expect 1 "L9: outside the composition root a submodule is named" "$tmp/compose_outside" "src/main.rs:1: L9 forbids compose::host"
-
-  base compose_clock
-  mkdir -p "$tmp/compose_clock/src/compose"
-  cat >"$tmp/compose_clock/src/compose/host.rs" <<'EOF'
-#[cfg(test)]
-fn fixture() { let _ = std::time::Instant::now(); }
-pub fn up() { let _ = std::time::SystemTime::now(); }
-EOF
-  expect 1 "L7: the composition reads the clock outside tests" "$tmp/compose_clock" "src/compose/host.rs:3: L7 forbids SystemTime::now"
 
   base compose_new_module
   mkdir -p "$tmp/compose_new_module/src/compose/foo"

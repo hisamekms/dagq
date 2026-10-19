@@ -86,27 +86,24 @@ impl ObservationState {
                 }
                 Ok(Err(error)) => {
                     warn!(error = %format_args!("{error:#}"), "the forecast snapshot could not be recorded: {error:#}");
-                    self.forecast.failed = Some(Instant::now());
+                    self.forecast.failed = Some(env.generators.clock.monotonic());
                 }
                 Err(_) => {
                     warn!("the forecast snapshot job panicked");
-                    self.forecast.failed = Some(Instant::now());
+                    self.forecast.failed = Some(env.generators.clock.monotonic());
                 }
             }
         }
-        if !start
-            || self
-                .forecast
-                .failed
-                .is_some_and(|failed| failed.elapsed() < RETRY)
-            || self
-                .forecast
-                .looked
-                .is_some_and(|looked| looked.elapsed() < port.check)
-        {
+        let clock = &env.generators.clock;
+        if !look_due(
+            start,
+            self.forecast.failed.map(|at| clock.since(at)),
+            self.forecast.looked.map(|at| clock.since(at)),
+            port.check,
+        ) {
             return;
         }
-        self.forecast.looked = Some(Instant::now());
+        self.forecast.looked = Some(env.generators.clock.monotonic());
         let now = env.generators.clock.now();
         let pending = match forecast::pending(
             &*env.queue,
@@ -118,7 +115,7 @@ impl ObservationState {
             Ok(None) => return,
             Err(error) => {
                 warn!(error = %format_args!("{error:#}"), "the forecast triggers could not be read: {error:#}");
-                self.forecast.failed = Some(Instant::now());
+                self.forecast.failed = Some(env.generators.clock.monotonic());
                 return;
             }
         };
@@ -145,4 +142,37 @@ fn snapshot(
     let queue = queues.open()?;
     let outcome = forecast::record_snapshot(&*queue, processes, token, now, min_samples, pending)?;
     Ok((pending.through, outcome))
+}
+
+/// Whether the triggers are looked for now, with `start`: [`RETRY`] after a
+/// failure and `check` after the last look, each given as the time since.
+fn look_due(
+    start: bool,
+    since_failed: Option<Duration>,
+    since_looked: Option<Duration>,
+    check: Duration,
+) -> bool {
+    start
+        && since_failed.is_none_or(|since| since >= RETRY)
+        && since_looked.is_none_or(|since| since >= check)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The triggers are looked for at the retry after a failure and at the
+    /// check after a look, not 1 ms before; never without `start`.
+    #[test]
+    fn the_triggers_are_looked_for_once_the_retry_and_the_check_passed() {
+        let check = FORECAST_CHECK;
+        let ms = Duration::from_millis(1);
+        assert!(look_due(true, None, None, check));
+        assert!(!look_due(false, None, None, check));
+        assert!(!look_due(true, Some(RETRY - ms), None, check));
+        assert!(look_due(true, Some(RETRY), None, check));
+        assert!(!look_due(true, None, Some(check - ms), check));
+        assert!(look_due(true, None, Some(check), check));
+        assert!(!look_due(true, Some(RETRY), Some(check - ms), check));
+    }
 }

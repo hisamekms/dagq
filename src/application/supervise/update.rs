@@ -120,14 +120,14 @@ impl HostOpsState {
             info!("automatic update job exited: {exit}");
             self.update.job = None;
         }
-        if self
+        let since_last = self
             .update
             .last_check
-            .is_some_and(|last| last.elapsed() < options.update.interval)
-        {
+            .map(|at| env.generators.clock.since(at));
+        if !check_due(since_last, options.update.interval) {
             return Ok(());
         }
-        self.update.last_check = Some(Instant::now());
+        self.update.last_check = Some(env.generators.clock.monotonic());
         let enabled = env
             .queue
             .supervisors()?
@@ -402,6 +402,12 @@ fn update_job_command(
     command
 }
 
+/// Whether the automatic update looks again: on the first pass and
+/// `interval` after the last look, given as the time since.
+fn check_due(since_last: Option<Duration>, interval: Duration) -> bool {
+    since_last.is_none_or(|since| since >= interval)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,5 +462,16 @@ mod tests {
             ]
         );
         assert!(!args.contains(&"--cmux"), "{args:?}");
+    }
+
+    /// The automatic update looks on the first pass and at its interval
+    /// after the last look, not 1 ms before.
+    #[test]
+    fn the_automatic_update_looks_again_at_its_interval() {
+        let interval = Duration::from_secs(300);
+        let ms = Duration::from_millis(1);
+        assert!(check_due(None, interval));
+        assert!(!check_due(Some(interval - ms), interval));
+        assert!(check_due(Some(interval), interval));
     }
 }

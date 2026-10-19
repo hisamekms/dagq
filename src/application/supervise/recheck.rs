@@ -703,7 +703,7 @@ impl Supervisor<'_> {
             record_on,
             main,
             command,
-            started: Instant::now(),
+            started: self.generators.clock.monotonic(),
             handle: Some(handle),
             _lock: lock,
         });
@@ -782,7 +782,7 @@ impl Supervisor<'_> {
             &watch.main,
             watch.landed.as_ref(),
             watch.command.as_deref(),
-            watch.started.elapsed().as_secs(),
+            self.generators.clock.since(watch.started).as_secs(),
             &self.registration.token,
         );
         info!(

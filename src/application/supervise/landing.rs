@@ -898,7 +898,7 @@ impl Supervisor<'_> {
                     AfterExit::ReviewFailed {
                         attempt,
                         error,
-                        duration_secs: watch.started.elapsed().as_secs(),
+                        duration_secs: self.generators.clock.since(watch.started).as_secs(),
                         output: whole_ran.then_some(attempt),
                         session,
                     },
@@ -923,7 +923,7 @@ impl Supervisor<'_> {
         let agent = self
             .job_agent(ended.provider)
             .with_context(|| format!("no {} runs on this supervisor", ended.provider.as_str()))?;
-        let duration_secs = ended.started.elapsed().as_secs();
+        let duration_secs = ended.elapsed().as_secs();
         let stdout = self.files.read_to_string(&ended.stdout).unwrap_or_default();
         // A provider that names its session itself (Codex) says its thread
         // and model in its output (ADR-t1063-1 decision 6); Claude's gives
@@ -1315,7 +1315,7 @@ impl Supervisor<'_> {
             "reason_codes": verdict.recorded_codes(),
             "primary_code": verdict.primary_code(),
             "summary": verdict.summary,
-            "duration_secs": watch.started.elapsed().as_secs(),
+            "duration_secs": self.generators.clock.since(watch.started).as_secs(),
             "attempt": attempt,
             "recommendation": verdict.recommendation,
             "confidence": verdict.confidence,

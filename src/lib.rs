@@ -25,9 +25,30 @@
 //! contexts use only the rule of the identifier and the commit it names,
 //! which do no I/O; its `emit` and `compute` call Git and belong to the
 //! build script.
+//!
+//! The lists of clippy.toml (the clocks, random IDs and I/O of L2, L4, L5
+//! and L7) are turned on here, in a build without test, on the modules
+//! those rules hold for; the lints are off elsewhere (Cargo.toml).
+#[cfg_attr(
+    not(test),
+    warn(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        clippy::disallowed_macros
+    )
+)]
 pub mod application;
 pub mod build_id;
+#[cfg_attr(not(test), warn(clippy::disallowed_methods))]
 pub mod compose;
+#[cfg_attr(
+    not(test),
+    warn(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        clippy::disallowed_macros
+    )
+)]
 pub mod domain;
 pub mod infrastructure;
 pub mod lifecycle;

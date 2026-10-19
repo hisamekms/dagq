@@ -314,6 +314,13 @@ pub trait Clock: Send + Sync {
     /// and handed to the decision as a value (task 1557).
     fn monotonic(&self) -> Instant;
 
+    /// How long since `at`, an instant [`Self::monotonic`] gave: measured
+    /// on the same clock, not with `Instant::elapsed`, and zero for an
+    /// `at` after now.
+    fn since(&self, at: Instant) -> Duration {
+        self.monotonic().saturating_duration_since(at)
+    }
+
     /// Unix seconds, the form of `heartbeat_at`, `closed_at` and the other
     /// INTEGER times.
     fn now(&self) -> i64 {

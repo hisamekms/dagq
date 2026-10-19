@@ -86,25 +86,21 @@ impl ObservationState {
                     self.report.checked = Some(day);
                     self.report.failed = None;
                     if let Some((config, messages)) = done.push {
-                        self.queue_pushes(config, messages);
+                        self.queue_pushes(config, messages, env.generators.clock.monotonic());
                     }
                 }
                 Ok(Err(error)) => {
                     warn!(error = %format_args!("{error:#}"), "the KPI reports could not be written: {error:#}");
-                    self.report.failed = Some(Instant::now());
+                    self.report.failed = Some(env.generators.clock.monotonic());
                 }
                 Err(_) => {
                     warn!("the KPI report job panicked");
-                    self.report.failed = Some(Instant::now());
+                    self.report.failed = Some(env.generators.clock.monotonic());
                 }
             }
         }
-        if !start
-            || self
-                .report
-                .failed
-                .is_some_and(|failed| failed.elapsed() < RETRY)
-        {
+        let since_failed = self.report.failed.map(|at| env.generators.clock.since(at));
+        if !start_due(start, since_failed) {
             return;
         }
         let now = env.generators.clock.now();
@@ -146,5 +142,27 @@ impl ObservationState {
             })
         });
         self.report.job = Some((day, job));
+    }
+}
+
+/// Whether a report job may start now, with `start`: [`RETRY`] after a
+/// failure, given as the time since.
+fn start_due(start: bool, since_failed: Option<Duration>) -> bool {
+    start && since_failed.is_none_or(|since| since >= RETRY)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A report job starts again at the retry after a failure, not 1 ms
+    /// before; never without `start`.
+    #[test]
+    fn a_report_starts_again_once_the_retry_passed() {
+        let ms = Duration::from_millis(1);
+        assert!(start_due(true, None));
+        assert!(!start_due(false, None));
+        assert!(!start_due(true, Some(RETRY - ms)));
+        assert!(start_due(true, Some(RETRY)));
     }
 }

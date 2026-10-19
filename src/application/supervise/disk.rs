@@ -143,14 +143,14 @@ impl HostOpsState {
     /// `scratchpad_removed` and `run_tmp_removed`.
     pub(super) fn disk_needs(&mut self, env: &mut HostEnv<'_>) -> Result<DiskNeeds> {
         if let Some((at, needs)) = self.disk.needs
-            && at.elapsed() < NEEDS_INTERVAL
+            && needs_fresh(env.generators.clock.since(at))
         {
             return Ok(needs);
         }
         let builds =
             crate::application::recent_run_sizes(&*env.queue, self.disk_config.sample_runs)?;
         let needs = self.disk_config.needs(&builds);
-        self.disk.needs = Some((Instant::now(), needs));
+        self.disk.needs = Some((env.generators.clock.monotonic(), needs));
         Ok(needs)
     }
     /// Ask for what the ended runs left to be cleaned for room, when
@@ -165,7 +165,7 @@ impl HostOpsState {
         interval: Duration,
     ) {
         if !asks_for_cleanup(
-            self.disk.cleaned.map(|at| at.elapsed()),
+            self.disk.cleaned.map(|at| env.generators.clock.since(at)),
             self.cleanup.for_disk(),
             interval,
         ) {
@@ -174,7 +174,7 @@ impl HostOpsState {
         // A request a drain does not take is not a cleanup: the next one
         // after the drain ends is not kept waiting for it (task 1427).
         if self.request_cleanup(env, held, None, Some(DiskRequest { free, needed })) {
-            self.disk.cleaned = Some(Instant::now());
+            self.disk.cleaned = Some(env.generators.clock.monotonic());
         }
     }
     /// Once a cleanup for room is done: record `auto_repaired` when it
@@ -486,10 +486,26 @@ impl Cleaned {
     }
 }
 
+/// Whether the needs read `since` ago are used still: until
+/// [`NEEDS_INTERVAL`], at which they are read again.
+fn needs_fresh(since: Duration) -> bool {
+    since < NEEDS_INTERVAL
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::claim_hold::HoldReason;
+
+    /// The needs are kept until 1 ms before [`NEEDS_INTERVAL`] and read
+    /// again at it.
+    #[test]
+    fn the_disk_needs_are_read_again_at_their_interval() {
+        let ms = Duration::from_millis(1);
+        assert!(needs_fresh(Duration::ZERO));
+        assert!(needs_fresh(NEEDS_INTERVAL - ms));
+        assert!(!needs_fresh(NEEDS_INTERVAL));
+    }
     use crate::domain::landing_hold::{self, LandingHold, LandingHoldInputs};
 
     const GIB: u64 = 1 << 30;

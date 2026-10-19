@@ -1,0 +1,102 @@
+# What the boundary rules of docs/design/architecture.md forbid the inner
+# layers to call or name (ADR-t2391-1 decision 2): each item's reason names
+# its rule. The lints are allowed for the package in Cargo.toml's [lints]
+# and turned on in src/lib.rs only on the modules the rules hold for, in a
+# build without test: all three on domain and application, and
+# disallowed_methods on the composition root. Each lint has one list for the
+# package, so a list holds only what every module it is on forbids; what
+# only the domain forbids (anyhow, the rest of std::process, std::net) is
+# scripts/check-layer-deps.sh's L2. A place the rule lets read the clock
+# gets an #[expect(clippy::disallowed_methods, reason = "...")] on the item.
+
+disallowed-methods = [
+    # The clocks and random IDs: the shared Clock and IdGenerator ports.
+    { path = "std::time::SystemTime::now", reason = "L2, L4, L7: read the wall clock through the Clock port" },
+    { path = "std::time::Instant::now", reason = "L2, L5, L7: read the monotonic clock through Clock::monotonic or take the time as a value" },
+    { path = "std::time::Instant::elapsed", reason = "L2, L5, L7: measure from Clock::monotonic, the clock the instant was read on" },
+    { path = "std::time::SystemTime::elapsed", reason = "L2, L4, L7: measure from the Clock port's wall clock" },
+    { path = "uuid::Uuid::new_v4", reason = "L2, L4: make IDs through the IdGenerator port" },
+    { path = "getrandom::fill", reason = "L2, L4: make IDs through the IdGenerator port" },
+    { path = "getrandom::u32", reason = "L2, L4: make IDs through the IdGenerator port" },
+    { path = "getrandom::u64", reason = "L2, L4: make IDs through the IdGenerator port" },
+    # Files: the ports the infrastructure implements.
+    { path = "std::fs::canonicalize", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::copy", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::create_dir", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::create_dir_all", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::exists", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::hard_link", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::metadata", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::read", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::read_dir", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::read_link", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::read_to_string", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::remove_dir", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::remove_dir_all", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::remove_file", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::rename", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::set_permissions", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::symlink_metadata", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::write", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::File::open", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::File::create", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::File::create_new", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::File::options", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::OpenOptions::new", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::DirBuilder::new", reason = "L2, L4: reach files through a port" },
+    # Outside commands.
+    { path = "std::process::Command::new", reason = "L2, L4: run commands through a port" },
+    # The database.
+    { path = "rusqlite::Connection::open", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::Connection::open_with_flags", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::Connection::open_in_memory", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::Connection::execute", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::Connection::execute_batch", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::Connection::prepare", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::Connection::prepare_cached", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::Connection::query_row", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::Connection::transaction", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::Connection::unchecked_transaction", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::params_from_iter", reason = "L2, L4: reach the database through a port" },
+]
+
+# The types of the database, files and outside commands.
+disallowed-types = [
+    { path = "rusqlite::Connection", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::Transaction", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::Savepoint", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::Statement", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::CachedStatement", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::Row", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::Rows", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::MappedRows", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::Error", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::ToSql", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::Params", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::OptionalExtension", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::types::Value", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::types::ValueRef", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::types::FromSql", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::backup::Backup", reason = "L2, L4: reach the database through a port" },
+    { path = "std::fs::File", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::OpenOptions", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::DirEntry", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::ReadDir", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::Metadata", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::DirBuilder", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::Permissions", reason = "L2, L4: reach files through a port" },
+    { path = "std::fs::FileType", reason = "L2, L4: reach files through a port" },
+    { path = "std::process::Command", reason = "L2, L4: run commands through a port" },
+    { path = "std::process::Child", reason = "L2, L4: run commands through a port" },
+    { path = "std::process::Stdio", reason = "L2, L4: run commands through a port" },
+    { path = "std::process::Output", reason = "L2, L4: run commands through a port" },
+    { path = "std::process::ChildStdin", reason = "L2, L4: run commands through a port" },
+    { path = "std::process::ChildStdout", reason = "L2, L4: run commands through a port" },
+    { path = "std::process::ChildStderr", reason = "L2, L4: run commands through a port" },
+]
+
+# The database's macros.
+disallowed-macros = [
+    { path = "rusqlite::params", reason = "L2, L4: reach the database through a port" },
+    { path = "rusqlite::named_params", reason = "L2, L4: reach the database through a port" },
+]

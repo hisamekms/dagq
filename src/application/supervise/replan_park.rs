@@ -411,10 +411,7 @@ impl Supervisor<'_> {
                 let Some(end) = watch.job.poll_program(&*self.files)? else {
                     return Ok(Some(Step::Continue));
                 };
-                let ran = (
-                    watch.job.started.elapsed().as_secs(),
-                    watch.job.timeout.as_secs(),
-                );
+                let ran = (watch.job.elapsed().as_secs(), watch.job.timeout.as_secs());
                 let mut programs = watch.programs.take();
                 let run = self.queue.run(slot.run.id())?;
                 self.record_review_program_end(&run, &mut programs, &end, ran)?;

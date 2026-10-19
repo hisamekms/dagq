@@ -664,7 +664,7 @@ impl PlanningState {
             return Ok(false);
         };
         let watch = self.plan_review.take().expect("polled above");
-        let duration_secs = watch.headless.started.elapsed().as_secs();
+        let duration_secs = watch.headless.elapsed().as_secs();
         let stdout = env
             .files
             .read_to_string(&watch.headless.stdout)
@@ -1165,7 +1165,8 @@ impl PlanningState {
                 Input::Exit,
                 "exit",
             )?;
-            self.planner_exits.push((id, Instant::now()));
+            self.planner_exits
+                .push((id, env.generators.clock.monotonic()));
             env.queue.record_queue_event(
                 EventKind::PlannerReleased,
                 json!({
@@ -1401,7 +1402,7 @@ impl PlanningState {
         {
             let id = view.planner.id;
             let workspace = view.planner.workspace_id.clone();
-            let asked = exit_asked(&self.planner_exits, id, Instant::now());
+            let asked = exit_asked(&self.planner_exits, id, env.generators.clock.monotonic());
             let overdue = exit_overdue(asked, env.sessions.exit_timeout());
             if self.planner_gone(env, view) || overdue {
                 if overdue {
@@ -1518,7 +1519,8 @@ impl PlanningState {
                     Input::Exit,
                     "exit",
                 )?;
-                self.planner_exits.push((id, Instant::now()));
+                self.planner_exits
+                    .push((id, env.generators.clock.monotonic()));
                 info!("planner {id} of the runtime is done; asked it to exit");
             } else if answer_wait_only(&busy) && view.planner.route == PlannerRoute::Headless {
                 self.end_for_answer_wait(env, view, workspace, &revising)?;
@@ -1583,7 +1585,8 @@ impl PlanningState {
             Input::Exit,
             "exit",
         )?;
-        self.planner_exits.push((id, Instant::now()));
+        self.planner_exits
+            .push((id, env.generators.clock.monotonic()));
         info!("{reason}");
         Ok(())
     }
@@ -1694,7 +1697,8 @@ impl PlanningState {
         ) {
             warn!(error = %format_args!("{error:#}"), "the exit request of planner {} of the runtime could not be written: {error:#}; its wrapper is stopped past the exit timeout", view.planner.id);
         }
-        self.planner_exits.push((view.planner.id, Instant::now()));
+        self.planner_exits
+            .push((view.planner.id, env.generators.clock.monotonic()));
     }
 }
 

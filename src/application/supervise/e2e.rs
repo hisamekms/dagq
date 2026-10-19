@@ -58,8 +58,9 @@ pub(super) struct E2eWaits {
     port: Option<RunE2ePort>,
     /// The runs whose `run_e2e_waiting` was recorded for the wait now.
     waiting: HashSet<RunId>,
-    /// When the e2e of a run that could not run is tried again.
-    retry: HashMap<RunId, Instant>,
+    /// When the e2e of a run could not run, and how long after that it is
+    /// tried again.
+    retry: HashMap<RunId, (Instant, Duration)>,
 }
 
 impl E2eWaits {
@@ -70,6 +71,12 @@ impl E2eWaits {
             retry: HashMap::new(),
         }
     }
+}
+
+/// Whether an e2e that could not run `since_unavailable` ago still waits to
+/// be tried again `retry` after that: it is tried from `retry` on.
+fn retry_waits(since_unavailable: Duration, retry: Duration) -> bool {
+    since_unavailable < retry
 }
 
 /// The e2e of a run in progress on a thread.
@@ -98,7 +105,7 @@ impl Supervisor<'_> {
         self.e2e
             .retry
             .get(run.id())
-            .is_some_and(|at| Instant::now() < *at)
+            .is_some_and(|(at, retry)| retry_waits(self.generators.clock.since(*at), *retry))
     }
 
     /// The e2e `run` needs before it lands (ADR-t1233-2), at its head;
@@ -197,7 +204,7 @@ impl Supervisor<'_> {
             commit,
             settings,
             requirement: due.requirement,
-            started: Instant::now(),
+            started: self.generators.clock.monotonic(),
         })))
     }
 
@@ -232,7 +239,7 @@ impl Supervisor<'_> {
         warn!(run_id = %run.id(), "run {}: its e2e could not run ({in_a_row} in a row); trying again in {}s: {error}", run.id(), retry.as_secs());
         self.e2e
             .retry
-            .insert(run.id().clone(), Instant::now() + retry);
+            .insert(run.id().clone(), (self.generators.clock.monotonic(), retry));
         slot.run = run;
         slot.transition(
             Phase::AwaitingSlot,
@@ -255,7 +262,7 @@ impl Supervisor<'_> {
             "commit": watch.commit,
             "requirement": watch.requirement,
             "log": watch.settings.log,
-            "secs": watch.started.elapsed().as_secs(),
+            "secs": self.generators.clock.since(watch.started).as_secs(),
         });
         let outcome = match outcome {
             Ok(outcome) => outcome,
@@ -409,6 +416,17 @@ fn ran_payload(base: Value, outcome: &E2eOutcome) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An e2e that could not run waits until 1 ms before its retry and is
+    /// tried at it.
+    #[test]
+    fn an_unavailable_e2e_waits_until_its_retry() {
+        let retry = Duration::from_secs(run_e2e::RETRY_SECS);
+        let ms = Duration::from_millis(1);
+        assert!(retry_waits(Duration::ZERO, retry));
+        assert!(retry_waits(retry - ms, retry));
+        assert!(!retry_waits(retry, retry));
+    }
 
     /// The run's `run_e2e_finished` says how its e2e went; it names no
     /// test left out, as the gate runs them all (ADR-t2159-1 decision 7).

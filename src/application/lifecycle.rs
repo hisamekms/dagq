@@ -55,7 +55,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 /// Set in the environment of every session of a queue: the role the
@@ -845,9 +845,7 @@ fn drain_supervisors(
     // its row while its heartbeat thread runs on, and a run claimed
     // between that check and the signal is a session again), so the wait
     // is bounded there instead of unbounded.
-    let deadline = options
-        .no_wait
-        .then(|| Instant::now() + options.startup_timeout);
+    let started = options.no_wait.then(|| up.clock.monotonic());
     loop {
         let remaining: Vec<String> = queue
             .supervisors()?
@@ -861,9 +859,9 @@ fn drain_supervisors(
         if remaining.is_empty() {
             break;
         }
-        if let Some(deadline) = deadline {
+        if let Some(started) = started {
             ensure!(
-                Instant::now() < deadline,
+                !super::waited_out(up.clock.since(started), options.startup_timeout),
                 "--no-wait: the supervisor did not stop within {}s of the signal; still \
 registered: {}. It has been asked to drain and its LaunchAgent is unloaded, so run `up` again \
 once `status` shows it gone",
@@ -1483,14 +1481,14 @@ run `up`",
             false,
         ));
     }
-    let deadline = Instant::now() + timeout;
+    let started = clock.monotonic();
     loop {
         let stops = Stops::around(queue, || {
             let now = clock.now();
             Ok((now, queue.supervisors()?))
         })?;
         let (now, registrations) = (stops.now, &stops.registrations);
-        let expired = Instant::now() >= deadline;
+        let expired = super::waited_out(clock.since(started), timeout);
         for (handed, timed_out) in handed
             .iter_mut()
             .filter(|(h, _)| h.now.is_none() && h.error.is_none())
@@ -1616,14 +1614,14 @@ fn look_again(
     grace: Duration,
     poll: Duration,
 ) -> Result<()> {
-    let deadline = Instant::now() + grace;
+    let started = clock.monotonic();
     while !pending.is_empty() {
         let stops = Stops::around(queue, || {
             let now = clock.now();
             Ok((now, queue.supervisors()?))
         })?;
         let (now, registrations) = (stops.now, &stops.registrations);
-        let expired = Instant::now() >= deadline;
+        let expired = super::waited_out(clock.since(started), grace);
         pending.retain(|&index| {
             let one = &mut handed[index];
             let registration = &one.registration;
@@ -2056,7 +2054,7 @@ fn wait_for_registration(
         options,
         ..
     } = *up;
-    let deadline = Instant::now() + options.startup_timeout;
+    let started = up.clock.monotonic();
     loop {
         let registrations = queue.supervisors()?;
         if let Some(registration) = started_registration(
@@ -2067,7 +2065,10 @@ fn wait_for_registration(
         ) {
             return Ok(registration.clone());
         }
-        ensure!(Instant::now() < deadline, "no live supervisor registration");
+        ensure!(
+            !super::waited_out(up.clock.since(started), options.startup_timeout),
+            "no live supervisor registration"
+        );
         thread::sleep(options.poll);
     }
 }

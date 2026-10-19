@@ -2662,6 +2662,10 @@ impl VerifyStep<'_> {
     /// its limit for the whole command is a `timeout` failure, not an
     /// error. A command run in place of the task's names them in the event
     /// (`replaces`) and atop its log.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "L5: times the verification command it runs for the event; no decision reads it"
+    )]
     fn run(
         &self,
         queue: &mut dyn Queue,

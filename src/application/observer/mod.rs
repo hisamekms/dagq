@@ -20,7 +20,7 @@ use crate::domain::EventKind;
 use crate::domain::actor_model::records_unusable;
 use std::{
     path::{Path, PathBuf},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use anyhow::Result;
@@ -294,7 +294,7 @@ pub fn observe<Q: AskStore + ObserverLog + QueueRecords + RunLog + TaskReads>(
         "observer ({}) started",
         options.mode.as_str()
     );
-    let clock = Instant::now();
+    let clock = generators.clock.monotonic();
     let started_ms = generators
         .clock
         .system_time()
@@ -384,7 +384,7 @@ pub fn observe<Q: AskStore + ObserverLog + QueueRecords + RunLog + TaskReads>(
         "closed_finding_ids": written.closed,
         "ask_ids": written.asks,
         "without_ask_finding_ids": written.without_ask,
-        "duration_secs": clock.elapsed().as_secs(),
+        "duration_secs": generators.clock.since(clock).as_secs(),
         "dir": dir,
         "wall": wall.map(Wall::as_str),
         "hold_ask_id": hold,

@@ -199,11 +199,15 @@ impl HostMetricsWatch {
     }
 
     /// Wait for the sample job still running, as the loop ends, until
-    /// `deadline` when one is given ([`super::finished_by`]); one still
-    /// running then is left, unrecorded.
-    pub(super) fn finish(&mut self, deadline: Option<Instant>) {
+    /// `deadline` on `clock` when one is given ([`super::finished_by`]);
+    /// one still running then is left, unrecorded.
+    pub(super) fn finish(
+        &mut self,
+        deadline: Option<Instant>,
+        clock: &dyn crate::application::Clock,
+    ) {
         if let Some(job) = self.job.take() {
-            if super::finished_by(&job, deadline) {
+            if super::finished_by(&job, deadline, clock) {
                 self.reap(job);
             } else {
                 warn!("the host's sample still runs as the supervisor ends; it is left unrecorded");

@@ -672,14 +672,19 @@ pub fn spawn_traced<T: Send + 'static>(
     thread::spawn(move || tracing::dispatcher::with_default(&dispatch, work))
 }
 
-/// Wait for `job` to finish, until `deadline` when one is given: whether
+/// Wait for `job` to finish, until `deadline` on `clock`'s monotonic clock
+/// when one is given: whether
 /// it finished, so that joining it does not wait. The end of the loop of
 /// a supervisor whose owner is gone waits for its jobs so
 /// ([`OWNER_GONE_GRACE`]); every other end waits for them to finish. What
 /// to do next is [`handoff::job_wait`]'s; this reads the clock and sleeps.
-pub(super) fn finished_by<T>(job: &thread::JoinHandle<T>, deadline: Option<Instant>) -> bool {
+pub(super) fn finished_by<T>(
+    job: &thread::JoinHandle<T>,
+    deadline: Option<Instant>,
+    clock: &dyn crate::application::Clock,
+) -> bool {
     loop {
-        let left = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        let left = deadline.map(|deadline| deadline.saturating_duration_since(clock.monotonic()));
         match handoff::job_wait(job.is_finished(), left) {
             handoff::JobWait::Join => return true,
             handoff::JobWait::Leave => return false,
@@ -806,6 +811,10 @@ impl Heartbeat {
 
 /// The heartbeat's loop: a write every interval until `stop` says so, or an
 /// error once the process can no longer keep what it holds.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "L5: the heartbeat thread's thin loop; alive_due decides on the seconds it hands over"
+)]
 fn beat(
     queues: &dyn QueueOpener,
     token: &LeaseToken,
@@ -1691,7 +1700,11 @@ impl Supervisor<'_> {
     /// and the background wrappers of ended runs still running are stopped
     /// ([`sweep::SweepWatch::sweep_ended_sessions`]).
     fn sweep_ended_runs(&mut self, interval: Duration) -> Result<()> {
-        if !self.host.sweep.start(Instant::now(), interval) {
+        if !self
+            .host
+            .sweep
+            .start(self.generators.clock.monotonic(), interval)
+        {
             return Ok(());
         }
         close_ended_landing_asks(&mut *self.queue, None);
@@ -1764,7 +1777,9 @@ impl Supervisor<'_> {
     fn run_loop(&mut self, options: &LoopSettings) -> Result<Value> {
         let result = self.drive(options);
         let deadline = self.end_deadline(options.owner_gone_grace);
-        self.host.host_metrics.finish(deadline);
+        self.host
+            .host_metrics
+            .finish(deadline, &*self.generators.clock);
         self.on_observation(|observation, env| observation.ledger.finish(env, deadline));
         // The jobs the loop stopped last (a handoff stops them all), and
         // those a loop that failed leaves running: dropped only after this
@@ -1807,13 +1822,9 @@ impl Supervisor<'_> {
     /// never, or, for a supervisor whose owner is gone, once what is left
     /// of `grace` is over ([`handoff::owner_gone_left`]).
     fn end_deadline(&self, grace: Duration) -> Option<Instant> {
+        let now = self.generators.clock.monotonic();
         self.registration.owner_gone.map(|since| {
-            let gone_for = self
-                .generators
-                .clock
-                .monotonic()
-                .saturating_duration_since(since);
-            Instant::now() + handoff::owner_gone_left(gone_for, grace)
+            now + handoff::owner_gone_left(now.saturating_duration_since(since), grace)
         })
     }
     /// Abandon every headless job still running once the loop ended: the
@@ -1869,7 +1880,7 @@ impl Supervisor<'_> {
                 host.host_metrics_port.as_ref(),
                 handing_off,
                 || generators.clock.now(),
-                Instant::now(),
+                self.generators.clock.monotonic(),
             );
             // Before any job starts: none runs twice (task 443).
             self.tend_headless_jobs();
@@ -2147,7 +2158,8 @@ impl Supervisor<'_> {
             if let Some((config, message)) =
                 self.on_host(|_, env| inbox_nudge::inbox_nudge_pass(env, reports.as_ref()))
             {
-                self.observation.queue_pushes(config, vec![message]);
+                let now = self.generators.clock.monotonic();
+                self.observation.queue_pushes(config, vec![message], now);
             }
             // Reaped on every pass, started only by a supervisor at work.
             // Its route decides on `--no-claude` and the hold: a login or
@@ -2744,9 +2756,12 @@ impl Supervisor<'_> {
         // for a moment (a Git that did not start), is tried again at the
         // next pass, so the claims resume there once it resolves.
         if let (Some(stamp), Some((last, at))) = (&stamp, &self.landing.stamp)
-            && !self.landing.unresolved
-            && stamp == last
-            && at.elapsed() < recheck
+            && keeps_landing_resolution(
+                self.landing.unresolved,
+                stamp == last,
+                self.generators.clock.since(*at),
+                recheck,
+            )
         {
             // A resolution kept after a record of its end that failed.
             if self.landing.recorded != Some(None) {
@@ -2754,7 +2769,7 @@ impl Supervisor<'_> {
             }
             return;
         }
-        self.landing.stamp = stamp.map(|stamp| (stamp, Instant::now()));
+        self.landing.stamp = stamp.map(|stamp| (stamp, self.generators.clock.monotonic()));
         self.resolve_landing_branch();
     }
     /// Resolve the landing branch now and hold claims and landings while it
@@ -3130,14 +3145,11 @@ impl Supervisor<'_> {
     /// since the last time (at once with `now`). A failure is logged only: it changes no run (ADR-0048
     /// decision 10), and the next time reads the transcripts again.
     fn record_session_turns(&mut self, now: bool) {
-        if !now
-            && self
-                .last_turns
-                .is_some_and(|last| last.elapsed() < SESSION_TURNS_INTERVAL)
-        {
+        let since_last = self.last_turns.map(|at| self.generators.clock.since(at));
+        if !session_turns_due(now, since_last) {
             return;
         }
-        self.last_turns = Some(Instant::now());
+        self.last_turns = Some(self.generators.clock.monotonic());
         self.close_ended_sessions();
         match self.queue.record_session_turns() {
             Ok(0) => {}
@@ -3614,7 +3626,7 @@ impl Supervisor<'_> {
                     return Ok(Step::Continue);
                 };
                 let (round, alert, attempt) = (watch.round, watch.alert, watch.attempt);
-                let duration_secs = watch.job.started.elapsed().as_secs();
+                let duration_secs = watch.job.elapsed().as_secs();
                 let run = self.queue.run(slot.run.id())?;
                 // A job that failed: stopped at a wall only a person moves
                 // (Claude's), it joins the hold ask, whose `done` starts it
@@ -3785,10 +3797,7 @@ impl Supervisor<'_> {
                 let Some(end) = watch.job.poll_program(&*self.files)? else {
                     return Ok(Step::Continue);
                 };
-                let ran = (
-                    watch.job.started.elapsed().as_secs(),
-                    watch.job.timeout.as_secs(),
-                );
+                let ran = (watch.job.elapsed().as_secs(), watch.job.timeout.as_secs());
                 let programs = watch.programs.take();
                 let run = self.queue.run(slot.run.id())?;
                 let next = self.review_program_ended(&run, programs, &end, ran)?;
@@ -4290,6 +4299,25 @@ fn requested_by_job<S: ?Sized, T>(
     result
 }
 
+/// Whether the last resolution of the landing branch is kept: it
+/// resolved, its inputs (the stamp) did not change, and `recheck` has not
+/// passed `since` it.
+fn keeps_landing_resolution(
+    unresolved: bool,
+    same_stamp: bool,
+    since: Duration,
+    recheck: Duration,
+) -> bool {
+    !unresolved && same_stamp && since < recheck
+}
+
+/// Whether the session turns are recorded now: at once with `now`, else on
+/// the first pass and [`SESSION_TURNS_INTERVAL`] after the last time, given
+/// as the time since.
+fn session_turns_due(now: bool, since_last: Option<Duration>) -> bool {
+    now || since_last.is_none_or(|since| since >= SESSION_TURNS_INTERVAL)
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -4298,6 +4326,41 @@ mod tests {
 
     use super::*;
     use crate::domain::{EventFilter, actor::ActorContext};
+
+    /// A resolution of the landing branch is kept until 1 ms before its
+    /// recheck and resolved again at it, or at once when it did not resolve
+    /// or its inputs changed.
+    #[test]
+    fn the_landing_branch_is_resolved_again_at_its_recheck() {
+        let recheck = Duration::from_secs(300);
+        let ms = Duration::from_millis(1);
+        assert!(keeps_landing_resolution(false, true, recheck - ms, recheck));
+        assert!(!keeps_landing_resolution(false, true, recheck, recheck));
+        assert!(!keeps_landing_resolution(
+            true,
+            true,
+            Duration::ZERO,
+            recheck
+        ));
+        assert!(!keeps_landing_resolution(
+            false,
+            false,
+            Duration::ZERO,
+            recheck
+        ));
+    }
+
+    /// The session turns are recorded on the first pass, at once with
+    /// `now`, and at [`SESSION_TURNS_INTERVAL`] after the last time, not
+    /// 1 ms before.
+    #[test]
+    fn the_session_turns_are_recorded_at_their_interval() {
+        let ms = Duration::from_millis(1);
+        assert!(session_turns_due(false, None));
+        assert!(!session_turns_due(false, Some(SESSION_TURNS_INTERVAL - ms)));
+        assert!(session_turns_due(false, Some(SESSION_TURNS_INTERVAL)));
+        assert!(session_turns_due(true, Some(Duration::ZERO)));
+    }
 
     /// An event store that keeps the requester [`EventStore::request_as`] sets, the
     /// calls in their order, and the kind of each queue event with the

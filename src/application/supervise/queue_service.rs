@@ -88,14 +88,14 @@ impl HostOpsState {
         if !working {
             return self.queue_service.up;
         }
-        if self
+        let since_last = self
             .queue_service
             .last
-            .is_some_and(|last| last.elapsed() < port.interval)
-        {
+            .map(|at| env.generators.clock.since(at));
+        if !look_due(since_last, port.interval) {
             return self.queue_service.up;
         }
-        self.queue_service.last = Some(Instant::now());
+        self.queue_service.last = Some(env.generators.clock.monotonic());
         let found = port.control.probe();
         let accepted = found.state == ServiceState::Running
             && found.build.is_some()
@@ -120,7 +120,11 @@ impl HostOpsState {
             self.queue_service.up = false;
         }
         let window = QUEUE_SERVICE_RESTART_WINDOW;
-        let limited = restart_limited(&mut self.queue_service.starts, Instant::now(), window);
+        let limited = restart_limited(
+            &mut self.queue_service.starts,
+            env.generators.clock.monotonic(),
+            window,
+        );
         if !replacing && limited {
             warn!(
                 "the queue service was started {} times in {}s and is still not running: left to a person",
@@ -140,7 +144,9 @@ impl HostOpsState {
             return false;
         }
         if !replacing {
-            self.queue_service.starts.push(Instant::now());
+            self.queue_service
+                .starts
+                .push(env.generators.clock.monotonic());
         }
         let replaced = (found.state != ServiceState::Stopped).then(|| found.clone());
         match port.control.start(port.start_timeout) {
@@ -299,9 +305,26 @@ fn restart_limited(starts: &mut Vec<Instant>, at: Instant, window: Duration) -> 
     starts.len() >= QUEUE_SERVICE_RESTARTS
 }
 
+/// Whether the queue service is looked at now: on the first pass and
+/// `interval` after the last look, given as the time since.
+fn look_due(since_last: Option<Duration>, interval: Duration) -> bool {
+    since_last.is_none_or(|since| since >= interval)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The queue service is looked at on the first pass and at its
+    /// interval after the last look, not 1 ms before.
+    #[test]
+    fn the_queue_service_is_looked_at_again_at_its_interval() {
+        let interval = Duration::from_secs(5);
+        let ms = Duration::from_millis(1);
+        assert!(look_due(None, interval));
+        assert!(!look_due(Some(interval - ms), interval));
+        assert!(look_due(Some(interval), interval));
+    }
 
     /// The starts are counted in the window up to 1 ms before its end: at
     /// its end the oldest leaves it and the service is started again.

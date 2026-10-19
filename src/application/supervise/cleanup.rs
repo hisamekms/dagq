@@ -884,7 +884,7 @@ impl HostOpsState {
             self.cleaned_for_disk(env, disk, &cleaned);
             // The next cleanup for room waits its interval from here, so
             // the pass after it judges the reading after it (task 1627).
-            self.disk.cleaned = Some(Instant::now());
+            self.disk.cleaned = Some(env.generators.clock.monotonic());
         }
         self.start_cleanup(env, held);
     }
@@ -919,7 +919,7 @@ impl HostOpsState {
         deadline: Option<Instant>,
     ) {
         while let Some(job) = &self.cleanup.job {
-            if !super::finished_by(&job.handle, deadline) {
+            if !super::finished_by(&job.handle, deadline, &*env.generators.clock) {
                 warn!(
                     "the cleanup of ended runs' worktrees still runs as the supervisor ends; it is left, its outcomes unrecorded"
                 );

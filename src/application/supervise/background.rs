@@ -186,6 +186,10 @@ pub(crate) fn left_planner_turn(
 /// started (listed first, since they are init's once it dies, and each
 /// killed only while its pid shows the start it was listed with), then its
 /// process group. Waits up to [`TURN_STOP_WAIT`] for it to be gone.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "L5: the thin wait for the killed processes to be gone, bounded by TURN_STOP_WAIT"
+)]
 pub(crate) fn stop_left_turn(
     processes: &dyn ProcessControl,
     turn: &BackgroundHandle,
@@ -211,7 +215,7 @@ pub(crate) fn stop_left_turn(
     let waited = Instant::now();
     while alive(turn) {
         ensure!(
-            waited.elapsed() < TURN_STOP_WAIT,
+            !crate::application::waited_out(waited.elapsed(), TURN_STOP_WAIT),
             "the turn {} the background wrapper left is still running after SIGKILL",
             turn.pid
         );

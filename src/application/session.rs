@@ -60,6 +60,10 @@ impl WrapperStart {
     /// Wait, checking every 100 ms up to [`WORKSPACE_REGISTRATION`], until
     /// `ready` (which reads the queue) says what the wrapper waits for is
     /// recorded: a workspace, or its own start in the background.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "L5: the wrapper's thin wait bounds its polling of the queue; `ready` decides"
+    )]
     pub fn wait(self, mut ready: impl FnMut() -> Result<bool>) -> Result<()> {
         let started = Instant::now();
         loop {
@@ -67,7 +71,7 @@ impl WrapperStart {
                 return Ok(());
             }
             ensure!(
-                started.elapsed() < WORKSPACE_REGISTRATION,
+                !super::waited_out(started.elapsed(), WORKSPACE_REGISTRATION),
                 match self {
                     Self::Workspace => "workspace registration timed out",
                     Self::Background =>

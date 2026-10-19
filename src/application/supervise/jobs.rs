@@ -291,7 +291,7 @@ pub struct JobPorts<'a> {
     pub store: &'a dyn HeadlessJobStore,
     pub processes: Arc<dyn ProcessControl + Send + Sync>,
     pub supervisor_token: &'a LeaseToken,
-    pub clock: &'a dyn Clock,
+    pub clock: &'a Arc<dyn Clock>,
     pub ends: &'a JobEnds,
 }
 
@@ -332,14 +332,15 @@ pub fn record_job(
         what,
         kind: subject.job,
         child,
-        started: Instant::now(),
+        started: ports.clock.monotonic(),
+        clock: Arc::clone(ports.clock),
         timeout,
         stdout,
         stderr,
         processes: ports.processes.clone(),
         record,
         provider: subject.provider,
-        started_at: started_at_ms(ports.clock),
+        started_at: started_at_ms(&**ports.clock),
         // Only an agent's job is an Execution whose end is recorded when it
         // is abandoned (ADR-t1486-1); a program job's ends with its row.
         unended: (subject.job == JobKind::Agent).then(|| (ports.ends.clone(), subject)),
@@ -479,7 +480,10 @@ pub struct HeadlessJob {
     /// What runs it.
     pub(super) kind: JobKind,
     pub(super) child: Box<dyn Spawned>,
+    /// When it started, on [`Self::clock`]'s monotonic clock.
     pub(super) started: Instant,
+    /// The clock it started on, which its time is measured on.
+    pub(super) clock: Arc<dyn Clock>,
     pub(super) timeout: Duration,
     pub(super) stdout: PathBuf,
     pub(super) stderr: PathBuf,
@@ -498,7 +502,18 @@ pub struct HeadlessJob {
     pub(super) unended: Option<(JobEnds, JobSubject)>,
 }
 
+/// Whether a job that has not ended after running `ran` is waited for
+/// still: until its `timeout`, at which it is stopped.
+fn runs_on(ran: Duration, timeout: Duration) -> bool {
+    ran < timeout
+}
+
 impl HeadlessJob {
+    /// How long it has run.
+    pub(super) fn elapsed(&self) -> Duration {
+        self.clock.since(self.started)
+    }
+
     /// `Some` once the job ended: its reply, as `provider` (the one that
     /// started it) reads it out of its stdout (ADR-t1063-1 decision 2), or
     /// why it failed (a non-zero exit, or the timeout, after which the
@@ -534,7 +549,7 @@ impl HeadlessJob {
     ) -> Result<Option<std::result::Result<String, JobFailed>>> {
         let status = match self.child.try_wait()? {
             Some(status) => status,
-            None if self.started.elapsed() < self.timeout => return Ok(None),
+            None if runs_on(self.elapsed(), self.timeout) => return Ok(None),
             None => {
                 self.stop();
                 return Ok(Some(Err(JobFailed::TimedOut(format!(
@@ -567,7 +582,7 @@ impl HeadlessJob {
                 self.ended(headless_job::ENDED);
                 Some(status)
             }
-            None if self.started.elapsed() < self.timeout => return Ok(None),
+            None if runs_on(self.elapsed(), self.timeout) => return Ok(None),
             None => {
                 self.stop();
                 None
@@ -799,7 +814,7 @@ impl<'s> JobDesk<'s> {
             store: &*env.queue,
             processes: env.processes.clone(),
             supervisor_token: env.token,
-            clock: &*env.generators.clock,
+            clock: &env.generators.clock,
             ends: self.job_ends,
         };
         record_job(&ports, what, child, (stdout, stderr), subject, timeout)
@@ -1031,7 +1046,7 @@ impl Supervisor<'_> {
             store: &*self.queue,
             processes: self.processes.clone(),
             supervisor_token: &self.registration.token,
-            clock: &*self.generators.clock,
+            clock: &self.generators.clock,
             ends: &self.job_ends,
         }
     }
@@ -1308,13 +1323,15 @@ impl Supervisor<'_> {
                 let _ = self.processes.terminate(*pid);
             }
         }
-        let deadline = Instant::now() + TAKEOVER_GRACE;
+        let started = self.generators.clock.monotonic();
         let running = |pid: u32| {
             // A job this process started before its exec is its child.
             self.processes.reap(pid);
             self.processes.alive(pid)
         };
-        while all.iter().any(|(pid, _)| running(*pid)) && Instant::now() < deadline {
+        while all.iter().any(|(pid, _)| running(*pid))
+            && !crate::application::waited_out(self.generators.clock.since(started), TAKEOVER_GRACE)
+        {
             thread::sleep(Duration::from_millis(50));
         }
         let mut killed = Vec::new();
@@ -1565,6 +1582,15 @@ mod tests {
     use super::*;
     use crate::application::{CommandSpec, Exit, memory_files::MemoryFiles};
 
+    /// A job is waited for until 1 ms before its timeout and stopped at it.
+    #[test]
+    fn a_job_runs_on_until_its_timeout() {
+        let timeout = Duration::from_secs(60);
+        let ms = Duration::from_millis(1);
+        assert!(runs_on(timeout - ms, timeout));
+        assert!(!runs_on(timeout, timeout));
+    }
+
     /// A process that has exited already, as `success` says.
     struct Ended {
         success: bool,
@@ -1661,6 +1687,7 @@ mod tests {
             kind: JobKind::Agent,
             child: Box::new(Ended { success }),
             started: Instant::now(),
+            clock: Arc::new(At(std::time::UNIX_EPOCH)),
             timeout: Duration::from_secs(60),
             stdout: out,
             stderr: err,
@@ -1704,7 +1731,7 @@ mod tests {
         let rows = Rows::default();
         let ends = JobEnds::default();
         let token = LeaseToken::new("me");
-        let clock = At(std::time::UNIX_EPOCH);
+        let clock: Arc<dyn Clock> = Arc::new(At(std::time::UNIX_EPOCH));
         let ports = JobPorts {
             store: &rows,
             processes: Arc::new(NoProcesses),

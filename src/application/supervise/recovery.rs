@@ -919,7 +919,10 @@ impl RecoveryWatch {
         }
         let threshold = sv.stall.idle_process_secs;
         let interval = sample_interval(sv.stall.idle_process());
-        if self.idle_watched.get_or_insert_with(Instant::now).elapsed() < interval {
+        let watched = *self
+            .idle_watched
+            .get_or_insert_with(|| sv.generators.clock.monotonic());
+        if fresh(sv.generators.clock.since(watched), interval) {
             return Ok(LiveStep::Pending);
         }
         let Some((at, all)) = process_sample(sv, interval, self.cpu_sampled) else {
@@ -996,6 +999,13 @@ fn sample_interval(threshold: Duration) -> Duration {
     Duration::from_secs((threshold.as_secs() / 10).clamp(1, 60)).min(threshold)
 }
 
+/// Whether what was watched or listed `since` ago is still fresh: less
+/// than `interval` (the idle watch's first look and the listing of the
+/// processes wait so long).
+fn fresh(since: Duration, interval: Duration) -> bool {
+    since < interval
+}
+
 /// The user's processes as the supervisor listed them at most `interval`
 /// ago (one listing serves every run), with the time of the listing;
 /// `None` when that listing is the one taken `last`, or when they could
@@ -1005,11 +1015,12 @@ fn process_sample(
     interval: Duration,
     last: Option<SystemTime>,
 ) -> Option<(SystemTime, Vec<ProcessInfo>)> {
+    let clock = &sv.generators.clock;
     if sv
         .triage
         .process_sample
         .as_ref()
-        .is_none_or(|(at, _)| at.elapsed() >= interval)
+        .is_none_or(|(at, _)| !fresh(clock.since(*at), interval))
     {
         let sample = match sv.processes.list() {
             Ok(all) => Some((sv.files.now(), all)),
@@ -1018,7 +1029,7 @@ fn process_sample(
                 None
             }
         };
-        sv.triage.process_sample = Some((Instant::now(), sample));
+        sv.triage.process_sample = Some((sv.generators.clock.monotonic(), sample));
     }
     sv.triage
         .process_sample
@@ -1476,7 +1487,7 @@ fn apply_live_verdict(
     verdict: RecoveryVerdict,
     end: &JobEnd,
 ) -> Result<std::result::Result<Applied, Escalation>> {
-    let duration_secs = job.job.started.elapsed().as_secs();
+    let duration_secs = job.job.elapsed().as_secs();
     if !verdict.applies() {
         return Ok(Err(Escalation::Verdict(verdict)));
     }
@@ -1764,8 +1775,10 @@ fn stop_processes(sv: &Supervisor<'_>, run: &TaskRun, pids: &[u32]) -> Result<Ve
             return Err(error.context(format!("stop pid {}", process.pid)));
         }
     }
-    let started = Instant::now();
-    while started.elapsed() < STOP_GRACE && targets.iter().any(|p| sv.processes.alive(p.pid)) {
+    let started = sv.generators.clock.monotonic();
+    while !crate::application::waited_out(sv.generators.clock.since(started), STOP_GRACE)
+        && targets.iter().any(|p| sv.processes.alive(p.pid))
+    {
         thread::sleep(Duration::from_millis(50));
     }
     let mut stopped = Vec::new();
@@ -1834,6 +1847,17 @@ pub(super) fn test_run(status: RunStatus, last_error: Option<&str>) -> TaskRun {
 mod tests {
     use super::*;
     use crate::domain::recovery::RECOVER_LABEL;
+
+    /// A watch or a listing is fresh until 1 ms before its interval passed
+    /// and taken again at it.
+    #[test]
+    fn a_watch_is_fresh_until_its_interval_passed() {
+        let interval = Duration::from_secs(6);
+        let ms = Duration::from_millis(1);
+        assert!(fresh(Duration::ZERO, interval));
+        assert!(fresh(interval - ms, interval));
+        assert!(!fresh(interval, interval));
+    }
 
     fn verdict(json: Value) -> RecoveryVerdict {
         RecoveryVerdict::parse(&json.to_string()).unwrap()

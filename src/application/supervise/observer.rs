@@ -210,7 +210,7 @@ impl ObservationState {
             options.observe_daily,
             &self.observers_launched,
             env.generators.clock.now(),
-            Instant::now(),
+            env.generators.clock.monotonic(),
             |mode| env.queue.last_observe(mode.as_str()),
         )
     }
@@ -234,7 +234,8 @@ impl ObservationState {
         self.observer_again = None;
         self.observers_launched
             .retain(|(launched, _)| *launched != mode);
-        self.observers_launched.push((mode, Instant::now()));
+        self.observers_launched
+            .push((mode, env.generators.clock.monotonic()));
         let layout = env.layout;
         let mut command = CommandSpec::new(&layout.runner);
         command

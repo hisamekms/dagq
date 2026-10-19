@@ -24,10 +24,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow, bail, ensure};
 use serde_json::{Value, json};
-use std::{
-    thread,
-    time::{Duration, Instant},
-};
+use std::{thread, time::Duration};
 
 /// At most this many attention events come back from one `watch` without
 /// a role or for the planner; the cursor then points at the last one
@@ -327,7 +324,7 @@ pub fn watch(
         full: false,
         filter: EventFilter::default(),
     };
-    let deadline = options.timeout.map(|timeout| Instant::now() + timeout);
+    let started = clock.monotonic();
     loop {
         let upto = queue.latest_event_id()?;
         let Read {
@@ -342,7 +339,9 @@ pub fn watch(
             let _ = record.heartbeat(now);
         }
         let changed = for_role(options.role) && pulses(&registrations, now, control) != baseline;
-        let remaining = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        let remaining = options
+            .timeout
+            .map(|timeout| super::time_left(clock.since(started), timeout));
         if woken || changed || remaining.is_some_and(|r| r.is_zero()) {
             // A timeout with nothing that woke it keeps the notices for the
             // next watch.

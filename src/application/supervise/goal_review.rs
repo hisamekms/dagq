@@ -339,7 +339,7 @@ impl PlanningState {
             return Ok(false);
         };
         let watch = self.goal_review.take().expect("polled above");
-        let duration_secs = watch.headless.started.elapsed().as_secs();
+        let duration_secs = watch.headless.elapsed().as_secs();
         let stdout = env
             .files
             .read_to_string(&watch.headless.stdout)

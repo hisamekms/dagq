@@ -120,22 +120,24 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
   例外は共有の部品の`crate::build_id`（I/Oを持たない規則と`named_commit`）だけ。
   検査: script。
 - **L2** `src/domain`の本番のコード（`test=false`のビルドに残りうるコード）はDB・ファイル・process・network・時計・乱数のID・`anyhow`を参照しない（ADR-0013のAlternativesの機械化）。
-  検査: script（禁止するpathの一覧はscriptが持つ）。
+  検査: 時計・乱数のID・DB・ファイル・外のcommandはclippy（`clippy.toml`の`disallowed_methods`・`disallowed_types`・`disallowed_macros`）、`anyhow`・`std::process`の残り・`std::net`はscript（下の「[検査の範囲](#検査の範囲)」）。
 - **L3** `src/application`のコードはinfrastructure・起動部分とレイヤーの外のmoduleを参照しない。
   `#[cfg(test)]`の中も同じ（testはapplicationのtest doubleを使う）。
   例外は共有の部品の`crate::migration_numbers`と`crate::build_id`だけ。
   検査: script。
 - **L4** `src/application`の本番のコードはDB・ファイル・外のcommand・壁時計・乱数のIDを直接使わず、portを通す。
   `#[cfg(test)]`の中でfixtureを作るファイル操作はよい。
-  検査: script。
+  検査: clippy（`disallowed_methods`・`disallowed_types`・`disallowed_macros`）。
 - **L5** `src/application`の状態の判断（遷移・回数と上限・送るか・待つか）は、時刻を`Clock`か値の引数で受け、判断の中で時計を読まない（[ADR-t1410-1](../adr/2026-10-03-t1410-1-decisions-in-unit-tests-boundaries-in-integration-tests.md)）。
   待ちの判断は、今の時刻と観測を引数に取り次の操作を値で返す副作用のない関数にし、境界の時刻（ちょうど閾値・その1 ms前）をunit testで確かめる。
   時計を読んで結果をportで実行するのは呼ぶ側の薄い処理にする（例: `supervise::session`・`reopen`の待ちの判断）。
-  検査: 全体のreview（残る`Instant::now`が多いので、減るまでscriptに入れない）。
+  検査: 時計の読み取りはclippy（`disallowed_methods`の`Instant::now`・`Instant::elapsed`）で、時刻は`Clock::monotonic`、経った時間は同じ時計の`Clock::since`で読む。
+  呼ぶ側の薄い処理が直接読む所だけ、そのitemに理由付きの`#[expect(clippy::disallowed_methods, reason = "...")]`を置く。
+  判断の中で読むかは全体のreview。
 - **L6** `src/infrastructure`のコードは`crate::compose`とレイヤーの外のmoduleを参照しない。
   検査: script。
 - **L7** 起動部分（`src/compose.rs`とその下のmodule）はadapterを作ってuse caseに注入する配線だけを持ち、判断・時刻の読み取り・eventのpayloadの組み立てを持たない。
-  検査: 時刻の読み取りはscript、残りは全体のreview。
+  検査: 時刻の読み取りはclippy（`disallowed_methods`、`#[expect]`を置かない）、残りは全体のreview。
 - **L8** レイヤーの外のmodule（`view`）は起動部分と同じ外側に置き、domain・applicationを使ってよいが、domain・application・infrastructureから参照されない（L1・L3・L6）。
   `build.rs`と共有する`build_id`・`migration_numbers`はレイヤーの外のmoduleに数えず、共有の部品としてL1・L3が名指す例外の範囲で参照してよい。
   新しいmoduleをレイヤーの外に足さない。
@@ -187,7 +189,12 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 - 各規則の検査は、scriptから、コンパイラ（可視性・型）・clippy・Rustのtest・全体のreviewへ移している途中で、規則ごとの移し先と退役の順は[ADR-t2391-1](../adr/2026-10-12-t2391-1-boundary-rules-to-compiler-clippy-and-rust-tests.md)が持つ。
   crateは1つのままで、crateの分割に委ねた規則（L1・L3・L6・L8・L9のcontextのmoduleどうし・C5・C8）はmoduleの参照を構文で読むRustのtestへ移す（[ADR-t2397-1](../adr/2026-10-18-t2397-1-crate-delegated-boundary-rules-kept-in-one-crate-by-a-rust-module-reference-test.md)）。
   下の記述と各規則の「検査」の行は今動いている検査で、移し先の着地ごとに直す。
-- `scripts/check-layer-deps.sh`は、L1・L2・L3・L4・L6・L9とL7の時計、分けた状態のsubmoduleのC3、`src/application/ports/`のcontextのmoduleのC8を当てる。
+- clippyの一覧は`clippy.toml`で、lintはpackageでは切り（`Cargo.toml`の`[lints]`）、`src/lib.rs`がdomain・application・起動部分のmoduleの宣言でtestでないビルドにだけ有効にする（ADR-t2391-1決定2）。
+  3つのlintはdomainとapplicationに、`disallowed_methods`は起動部分にも有効にするので、起動部分にはL7の時計に加えて同じ一覧のDB・ファイル・外のcommandの関数も当たる。
+  lintの一覧はpackageに1つなので、有効にした全てのmoduleが禁じるものだけを置き、domainだけが禁じるもの（applicationが使う`anyhow`と`std::process::id`を含む`std::process`の残り、`std::net`）はscriptのL2が見る。
+  infrastructure・レイヤーの外のmodule・`src/main.rs`・`tests/`・`#[cfg(test)]`の中にはlintが当たらないので、例外を置かない。
+  許す場所はapplicationの個々のitemの理由付きの`#[expect]`だけで、moduleの宣言・crateの全体・domain・起動部分には置かない。
+- `scripts/check-layer-deps.sh`は、L1・L2のうちclippyの一覧に置けない部分・L3・L6・L9、分けた状態のsubmoduleのC3、`src/application/ports/`のcontextのmoduleのC8を当てる。
   数えるのは参照のpathで、コメントと文字列は数えない（細目はscriptの先頭のコメント）。
   許可の一覧は`.config/layer-deps-allow.txt`。
 - 所有の一覧は2か所に分かれ、pathから導けない所有だけを持つ。

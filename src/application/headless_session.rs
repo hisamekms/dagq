@@ -32,7 +32,7 @@ use std::{
     io::{IsTerminal, Write},
     path::{Path, PathBuf},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use super::{
@@ -1483,15 +1483,15 @@ impl<'a> Turns<'a> {
         stdout: &Path,
         limits: TurnLimits,
     ) -> Result<(Option<super::Exit>, Option<Stop>, Tail)> {
-        let started = Instant::now();
-        let mut last_output = Instant::now();
+        let started = self.clock.monotonic();
+        let mut last_output = self.clock.monotonic();
         let mut tail = Tail::default();
         let mut stop: Option<Stop> = None;
         loop {
             reader.stamp(now_millis(self.clock));
             let lines = tail.read(self.files, stdout, false);
             if !lines.is_empty() {
-                last_output = Instant::now();
+                last_output = self.clock.monotonic();
             }
             for line in lines {
                 for signal in reader.line(&line) {
@@ -1536,8 +1536,8 @@ impl<'a> Turns<'a> {
                     None,
                     self.files.is_file(&exit_path(run_dir)),
                     reader.heartbeats(),
-                    last_output.elapsed(),
-                    started.elapsed(),
+                    self.clock.since(last_output),
+                    self.clock.since(started),
                     limits,
                 )
             };

@@ -474,11 +474,12 @@ fn a_program_job_is_recorded_and_its_timeout_stops_what_it_started() {
     let queue = SqliteQueue::init(&db).unwrap();
     let ends = JobEnds::default();
     let token = LeaseToken::new("program-supervisor");
+    let clock: Arc<dyn dagq::application::Clock> = Arc::new(SystemClock);
     let ports = JobPorts {
         store: &queue,
         processes: Arc::new(SystemProcesses),
         supervisor_token: &token,
-        clock: &SystemClock,
+        clock: &clock,
         ends: &ends,
     };
     let run = RunId::new("run-1").unwrap();
@@ -604,11 +605,12 @@ fn a_review_program_runs_narrowed_in_the_worktree_and_is_stopped_past_its_limit(
     let queue = SqliteQueue::init(&db).unwrap();
     let ends = JobEnds::default();
     let token = LeaseToken::new("program-supervisor");
+    let clock: Arc<dyn dagq::application::Clock> = Arc::new(SystemClock);
     let ports = JobPorts {
         store: &queue,
         processes: Arc::new(SystemProcesses),
         supervisor_token: &token,
-        clock: &SystemClock,
+        clock: &clock,
         ends: &ends,
     };
     let worktree = dir.path().join("worktree");
@@ -846,11 +848,12 @@ fn a_review_program_runs_the_landing_branchs_script_not_the_worktrees() {
     let queue = SqliteQueue::init(&db).unwrap();
     let ends = JobEnds::default();
     let token = LeaseToken::new("program-supervisor");
+    let clock: Arc<dyn dagq::application::Clock> = Arc::new(SystemClock);
     let ports = JobPorts {
         store: &queue,
         processes: Arc::new(SystemProcesses),
         supervisor_token: &token,
-        clock: &SystemClock,
+        clock: &clock,
         ends: &ends,
     };
     let host = HostPrograms::inheriting(

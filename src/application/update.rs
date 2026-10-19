@@ -45,7 +45,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 /// How many of the latest `update_*` a look reads: enough to find the
@@ -1579,7 +1579,7 @@ fn watch(
     handoff_from: i64,
     job: &Job,
 ) -> Result<Vec<Watched>> {
-    let deadline = Instant::now() + job.watch_timeout;
+    let started = ports.clock.monotonic();
     let mut watched: Vec<Watched> = handed
         .iter()
         .map(|(token, pid)| Watched {
@@ -1594,7 +1594,7 @@ fn watch(
         .collect();
     loop {
         let registrations = queue.supervisors()?;
-        let expired = Instant::now() >= deadline;
+        let expired = super::waited_out(ports.clock.since(started), job.watch_timeout);
         for watched in watched.iter_mut().filter(|w| !w.done && w.error.is_none()) {
             if let Err(error) = observe(
                 ports,
@@ -1723,8 +1723,10 @@ fn bring_back(
     }
     if alive {
         let _ = ports.processes.terminate(current.pid);
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while ports.processes.alive(current.pid) && Instant::now() < deadline {
+        let started = ports.clock.monotonic();
+        while ports.processes.alive(current.pid)
+            && !super::waited_out(ports.clock.since(started), Duration::from_secs(10))
+        {
             thread::sleep(Duration::from_millis(100));
         }
         if ports.processes.alive(current.pid) {

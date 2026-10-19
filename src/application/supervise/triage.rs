@@ -237,8 +237,12 @@ impl Supervisor<'_> {
                 })
                 .collect()
         };
-        let started = Instant::now();
-        while started.elapsed() < super::recovery::STOP_GRACE && !alive(self).is_empty() {
+        let started = self.generators.clock.monotonic();
+        while !crate::application::waited_out(
+            self.generators.clock.since(started),
+            super::recovery::STOP_GRACE,
+        ) && !alive(self).is_empty()
+        {
             thread::sleep(Duration::from_millis(50));
         }
         let killed = alive(self);
@@ -247,8 +251,12 @@ impl Supervisor<'_> {
                 warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: SIGKILL to pid {pid} failed: {error:#}", run.id());
             }
         }
-        let started = Instant::now();
-        while started.elapsed() < super::recovery::STOP_GRACE && !alive(self).is_empty() {
+        let started = self.generators.clock.monotonic();
+        while !crate::application::waited_out(
+            self.generators.clock.since(started),
+            super::recovery::STOP_GRACE,
+        ) && !alive(self).is_empty()
+        {
             thread::sleep(Duration::from_millis(50));
         }
         let left = alive(self);
