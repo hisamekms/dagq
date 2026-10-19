@@ -30,7 +30,7 @@ pub mod push;
 pub mod report;
 mod window;
 
-pub use candidates::CandidatesSample;
+pub use candidates::{CandidatesSample, ClaimPassEnd};
 pub use compare::{Comparison, Confounder, Side, Split, WindowSpan};
 pub use config::{KpiConfig, KpiSettings, Stat, Target, TargetReport};
 pub use window::{CANDIDATES_SAMPLED, WindowKpis};

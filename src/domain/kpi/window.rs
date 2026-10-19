@@ -36,7 +36,14 @@ use crate::domain::{
 const NONE: &str = "none";
 
 /// A sample of what the supervisor could claim (ADR-0051 decision 3):
-/// `candidates`, `free_slots` and `ready`, recorded when they change.
+/// `candidates`, `free_slots`, `ready` and `claims_held`, recorded when they
+/// change. A sample holds from its time until the next sample or now, and
+/// no longer than the life of the supervisor that wrote it (its payload's
+/// `supervisor`): its own stop, the next supervisor's start, or the last
+/// heartbeat of a stale one. Time with no live supervisor counts neither
+/// in the mean nor in `starved_secs`; a live supervisor's last sample holds
+/// until now. A sample with `claims_held` (a hold, a drain or a handoff)
+/// counts in the mean but never as starved.
 pub const CANDIDATES_SAMPLED: &str =
     crate::domain::event_kind::EventKind::CandidatesSampled.as_str();
 
@@ -90,6 +97,14 @@ struct Occupancy {
     spans: Vec<(i64, i64)>,
 }
 
+/// One supervisor process's recorded lifetime, in unix milliseconds.
+struct SupervisorLife {
+    token: Option<String>,
+    start: i64,
+    end: i64,
+    parallel: i64,
+}
+
 /// What every window reads, derived once.
 pub(super) struct Context<'a> {
     pub events: &'a [RunEvent],
@@ -118,7 +133,7 @@ pub(super) struct Context<'a> {
     /// When each finished run (of the goal) finished, ascending.
     pub finishes: Vec<i64>,
     /// The supervisors' lives: start, end and `parallel`.
-    supervisors: Vec<(i64, i64, i64)>,
+    supervisors: Vec<SupervisorLife>,
     occupancy: Vec<Occupancy>,
     pub marks: Vec<Mark>,
     pub min_samples: usize,
@@ -159,7 +174,7 @@ fn supervisor_lives(
     events: &[RunEvent],
     heartbeats: &HashMap<String, i64>,
     now: i64,
-) -> Vec<(i64, i64, i64)> {
+) -> Vec<SupervisorLife> {
     let now_ms = now * 1000;
     let supervisor = |event: &RunEvent| {
         event
@@ -221,7 +236,12 @@ fn supervisor_lives(
                             .unwrap_or(start)
                     }
                 });
-            (start, end.min(now_ms).max(start), *parallel)
+            SupervisorLife {
+                token: token.clone(),
+                start,
+                end: end.min(now_ms).max(start),
+                parallel: *parallel,
+            }
         })
         .collect()
 }
@@ -1589,13 +1609,13 @@ impl<'a> Context<'a> {
         let capacity: i64 = self
             .supervisors
             .iter()
-            .map(|&(from, to, parallel)| parallel * overlap((from, to), start, end))
+            .map(|life| life.parallel * overlap((life.start, life.end), start, end))
             .sum();
         // The times any supervisor was alive in the window, merged.
         let mut alive: Vec<(i64, i64)> = self
             .supervisors
             .iter()
-            .map(|&(from, to, _)| (from.max(start), to.min(end)))
+            .map(|life| (life.start.max(start), life.end.min(end)))
             .filter(|(from, to)| from < to)
             .collect();
         alive.sort_unstable();
@@ -1632,7 +1652,9 @@ impl<'a> Context<'a> {
 
     /// The time-weighted mean and the maximum of `candidates` in the
     /// window, the seconds free slots had no candidate while ready tasks
-    /// waited, and the samples that cover it; `None` without a sample.
+    /// waited and claims were not held, and the samples that cover it, each
+    /// sample over the span [`CANDIDATES_SAMPLED`] gives it; `None` without
+    /// a sample.
     fn candidates(&self, start: i64, end: i64) -> Option<(f64, f64, i64, usize)> {
         let samples: Vec<(i64, &Value)> = self
             .events
@@ -1649,7 +1671,17 @@ impl<'a> Context<'a> {
             let until = samples
                 .get(index + 1)
                 .map_or(self.now * 1000, |next| next.0);
-            let time = overlap((*at, until), start, end);
+            // A sample belongs to the process that wrote it. It cannot
+            // bridge a stop/restart gap, or survive into another process
+            // (including an exec using the same token).
+            let Some(life) = self.supervisors.iter().find(|life| {
+                life.token.as_deref() == payload.get("supervisor").and_then(Value::as_str)
+                    && life.start <= *at
+                    && *at < life.end
+            }) else {
+                continue;
+            };
+            let time = overlap((*at, until.min(life.end)), start, end);
             if time == 0 {
                 continue;
             }
@@ -1659,7 +1691,11 @@ impl<'a> Context<'a> {
             covered += time;
             used += 1;
             max = Some(max.map_or(candidates, |max| max.max(candidates)));
-            if number("free_slots") > 0 && number("candidates") == 0 && number("ready") > 0 {
+            if payload.get("claims_held").and_then(Value::as_bool) != Some(true)
+                && number("free_slots") > 0
+                && number("candidates") == 0
+                && number("ready") > 0
+            {
                 starved += time;
             }
         }

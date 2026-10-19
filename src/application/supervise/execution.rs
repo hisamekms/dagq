@@ -1897,6 +1897,7 @@ impl Supervisor<'_> {
                     self.host.end_cleanup_for_handoff();
                 }
                 if let Some(binary) = self.registration.handoff().map(str::to_owned) {
+                    self.sample_candidates(self.claim.parallel, true);
                     // A landing recheck in progress is waited for: its
                     // command would go on in the scratch worktree the next
                     // process uses (ADR-0068). None starts meanwhile (this
@@ -1985,9 +1986,10 @@ impl Supervisor<'_> {
             // And the runs' relays to it (ADR-t2114-3 decision 4).
             self.on_host(|host, env| host.broker_relay_pass(env, working));
             if self.claim.claiming && !stopping {
-                self.fill_slots(self.claim.parallel, options.sweep_interval)?;
-                self.sample_candidates(self.claim.parallel);
+                let held = self.fill_slots(self.claim.parallel, options.sweep_interval)?;
+                self.sample_candidates(self.claim.parallel, held);
             } else {
+                self.sample_candidates(self.claim.parallel, true);
                 // A draining supervisor still frees the integration slot a
                 // dead landing holds: its own runs waiting to land, and so
                 // the drain, would wait for it forever (task 1118).
@@ -2117,9 +2119,11 @@ impl Supervisor<'_> {
     }
     /// Adopt the runs other supervisors left behind, then claim and
     /// provision candidates until every slot is taken or nothing is
-    /// claimable. `main` is reread per claim so a task released by
+    /// claimable. Returns whether claims were held, for the KPI sample
+    /// ([`ClaimPassEnd::claims_held`]).
+    /// `main` is reread per claim so a task released by
     /// `integrate` starts from the main that contains its predecessor.
-    fn fill_slots(&mut self, parallel: usize, sweep_interval: Duration) -> Result<()> {
+    fn fill_slots(&mut self, parallel: usize, sweep_interval: Duration) -> Result<bool> {
         // A run that waits for a person is adopted without a free slot
         // (ADR-0062 decision 11): the check is per run.
         self.adopt_stale_runs(parallel)?;
@@ -2283,6 +2287,7 @@ impl Supervisor<'_> {
                 }
             }
         }
+        let may_claim = claims.is_some();
         // The claims of one priority run together: the claim loop takes
         // every candidate of that priority or higher, in its own order.
         let mut claimed_down_to: Option<Priority> = None;
@@ -2316,7 +2321,13 @@ impl Supervisor<'_> {
         // The slots as the pass leaves them.
         self.claim
             .note_slots_full(&*self.queue, self.registration.token(), parallel);
-        Ok(())
+        Ok(ClaimPassEnd {
+            may_claim,
+            claiming: self.claim.claiming,
+            landing_resolved: !self.landing.unresolved,
+            route_left: !self.routes().is_empty(),
+        }
+        .claims_held())
     }
     /// The room for the next claim (ADR-t1591-1).
     fn claim_room(&self, parallel: usize) -> ClaimRoom {
@@ -2537,12 +2548,14 @@ impl Supervisor<'_> {
     /// Record `candidates_sampled` (ADR-0051 decision 3) when this pass's
     /// claimable ready tasks (by the rule's order, the deferred ones
     /// included: [`CandidatesSample::candidates`]), free slots or ready
-    /// tasks differ from the sample this process recorded last, and on its
-    /// first claim pass ([`ObservationState::record_candidates`]).
-    fn sample_candidates(&mut self, parallel: usize) {
+    /// tasks or whether claims are held differ from the sample this process
+    /// recorded last, a draining or handing-off pass included, and on its
+    /// first pass ([`ObservationState::record_candidates`]).
+    fn sample_candidates(&mut self, parallel: usize, claims_held: bool) {
         let sample = self.queue.graph_input().map(|input| {
             let graph = dependency_graph(input, None);
             CandidatesSample {
+                claims_held,
                 candidates: graph.candidates.len(),
                 free_slots: parallel.saturating_sub(self.used_slots()),
                 ready: graph

@@ -51,6 +51,7 @@ fn the_supervisor_samples_the_candidates_when_they_change() {
     assert_eq!(first.len(), 1, "{first:?}");
     assert_eq!(counts(&first[0]), (1, 2, 1));
     assert!(first[0]["supervisor"].is_string());
+    assert_eq!(first[0]["claims_held"], true);
 
     let stop = Arc::new(AtomicBool::new(false));
     let options = SuperviseOptions {
@@ -87,6 +88,27 @@ fn the_supervisor_samples_the_candidates_when_they_change() {
     assert_eq!(all.len(), 3, "{all:?}");
     assert_eq!(counts(&all[2]), (1, 2, 2));
 
+    // KPI's now has second precision, while events have milliseconds.
+    // Wait for that cursor to cover the stopped process, even when both
+    // supervisors fit in the current second; do not rely on pass sleeps.
+    let stopped_ms = SqliteQueue::open(&db)
+        .unwrap()
+        .all_events()
+        .unwrap()
+        .iter()
+        .filter(|event| event.kind == "supervisor_stopped")
+        .filter_map(|event| dagq::domain::stats::timestamp_millis(&event.created_at))
+        .max()
+        .unwrap();
+    wait_until(&db, Duration::from_secs(30), |_| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            * 1000
+            > stopped_ms
+    });
+
     // `kpi` over the samples the supervisor wrote.
     let config = dir.path().join("config");
     fs::create_dir_all(&config).unwrap();
@@ -111,4 +133,37 @@ fn the_supervisor_samples_the_candidates_when_they_change() {
     assert_eq!(candidates["max"], 1.0, "{today}");
     assert_eq!(today["details"]["candidates"]["starved_secs"], 0, "{today}");
     assert!(today["unavailable"].get("candidates").is_none(), "{today}");
+}
+
+/// Entering drain closes a starved sample even when the counts do not
+/// change: a ready task waiting on a draft still has no candidate.
+#[test]
+fn a_draining_supervisor_records_that_claims_are_held() {
+    let (_dir, repo, db) = fixture();
+    {
+        let mut queue = SqliteQueue::open(&db).unwrap();
+        queue.transition(TaskId::new(1), TaskAction::Draft).unwrap();
+        add_ready_task(&mut queue, "waiting", &[TaskId::new(1)]);
+    }
+    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
+    let stop = Arc::new(AtomicBool::new(false));
+    let options = SuperviseOptions {
+        stop: stop.clone(),
+        ..supervise_options(2, false)
+    };
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
+    };
+    wait_until(&db, Duration::from_secs(30), |_| !samples(&db).is_empty());
+    stop.store(true, Ordering::SeqCst);
+    let outcome = joined(supervisor, "the supervisor to drain").unwrap();
+    backend.join();
+    assert_eq!(outcome["runs"], json!([]));
+    let recorded = samples(&db);
+    assert_eq!(recorded.len(), 2, "{recorded:?}");
+    assert_eq!(recorded[0]["claims_held"], false);
+    assert_eq!(recorded[1]["claims_held"], true);
+    assert_eq!(counts(&recorded[0]), (0, 2, 1));
+    assert_eq!(counts(&recorded[1]), (0, 2, 1));
 }

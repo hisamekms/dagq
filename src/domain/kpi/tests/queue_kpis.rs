@@ -12,7 +12,7 @@ fn derives_the_queue_kpis_of_a_window() {
     start(&mut queue, 2, MONDAY);
     queue.queue_event(
         window::CANDIDATES_SAMPLED,
-        json!({"candidates": 2, "free_slots": 1, "ready": 2}),
+        json!({"supervisor": "s", "candidates": 2, "free_slots": 1, "ready": 2}),
         MONDAY,
     );
     // Two hours of one run in four hours of two slots.
@@ -24,7 +24,7 @@ fn derives_the_queue_kpis_of_a_window() {
     ));
     queue.queue_event(
         window::CANDIDATES_SAMPLED,
-        json!({"candidates": 0, "free_slots": 1, "ready": 1}),
+        json!({"supervisor": "s", "candidates": 0, "free_slots": 1, "ready": 1}),
         MONDAY + 2 * HOUR,
     );
     queue.queue_event(
@@ -76,13 +76,13 @@ fn derives_the_queue_kpis_of_a_window() {
     assert!(!day.partial);
     assert_eq!(measure(day, "slot_usage", ALL).value, Some(0.25));
     assert_eq!(measure(day, "slot_usage", ALL).n, 1);
-    // 2 candidates for two hours, then none until now (22 hours).
+    // 2 candidates for two hours, then none until the stop (two hours).
     let candidates = measure(day, "candidates", ALL);
-    assert_eq!(candidates.value, Some(round3(4.0 / 24.0)));
+    assert_eq!(candidates.value, Some(1.0));
     assert_eq!(candidates.max, Some(2.0));
     assert_eq!(
         day.window.details["candidates"]["starved_secs"],
-        json!(22 * HOUR)
+        json!(2 * HOUR)
     );
     assert_eq!(measure(day, "asks_per_landing", ALL).value, Some(2.0));
     assert_eq!(
@@ -471,4 +471,134 @@ fn landing_utilization_counts_every_attempt_within_the_day() {
     let details = &partial.window.details["landing_utilization"];
     assert_eq!(details["window_secs"], json!(4 * HOUR));
     assert_eq!(details["busy_secs"], json!(60 + 600 + HOUR));
+}
+
+/// The same process lifetime bounds both the weighted denominator and
+/// starvation, including windows entirely within downtime.
+#[test]
+fn candidates_end_with_their_supervisor_and_exclude_downtime() {
+    for ending in [
+        "stopped",
+        "restart",
+        "next_start",
+        "stale",
+        "pruned",
+        "gone",
+        "live",
+        "held",
+        "resumed",
+    ] {
+        let mut queue = Queue::default();
+        start(&mut queue, 2, MONDAY);
+        queue.queue_event(
+            window::CANDIDATES_SAMPLED,
+            json!({"supervisor": "s", "candidates": 2, "free_slots": 1, "ready": 2}),
+            MONDAY,
+        );
+        queue.queue_event(
+            window::CANDIDATES_SAMPLED,
+            json!({"supervisor": "s", "candidates": 0, "free_slots": 1, "ready": 1}),
+            MONDAY + 2 * HOUR,
+        );
+        match ending {
+            "stopped" | "restart" => queue.queue_event(
+                marks::SUPERVISOR_STOPPED,
+                json!({"supervisor": "s"}),
+                MONDAY + 4 * HOUR,
+            ),
+            "stale" => {
+                queue.heartbeats.insert("s".into(), MONDAY + 4 * HOUR);
+            }
+            "pruned" => queue.queue_event(
+                marks::SUPERVISOR_STOPPED,
+                json!({"supervisor": "s", "last_heartbeat_at": MONDAY + 4 * HOUR}),
+                MONDAY + 10 * HOUR,
+            ),
+            "gone" => {
+                queue.queue_event("claim_held", json!({"supervisor": "s"}), MONDAY + 4 * HOUR)
+            }
+            "live" | "held" | "resumed" => {
+                queue.heartbeats.insert("s".into(), MONDAY + DAY - 1);
+            }
+            "next_start" => queue.queue_event(
+                marks::SUPERVISOR_STARTED,
+                json!({"supervisor": "t", "parallel": 2}),
+                MONDAY + 4 * HOUR,
+            ),
+            _ => unreachable!(),
+        }
+        if matches!(ending, "held" | "resumed") {
+            queue.queue_event(window::CANDIDATES_SAMPLED,
+                json!({"supervisor": "s", "candidates": 0, "free_slots": 1, "ready": 1, "claims_held": true}), MONDAY + 4 * HOUR);
+        }
+        if ending == "resumed" {
+            queue.queue_event(window::CANDIDATES_SAMPLED,
+                json!({"supervisor": "s", "candidates": 0, "free_slots": 1, "ready": 1, "claims_held": false}), MONDAY + 6 * HOUR);
+        }
+        if matches!(ending, "restart" | "next_start") {
+            if ending == "restart" {
+                queue.queue_event(
+                    marks::SUPERVISOR_STARTED,
+                    json!({"supervisor": "t", "parallel": 2}),
+                    MONDAY + 8 * HOUR,
+                );
+            }
+            // A different supervisor's stop cannot close t; nor may a
+            // late sample from s borrow t's lifetime.
+            queue.queue_event(
+                marks::SUPERVISOR_STOPPED,
+                json!({"supervisor": "other"}),
+                MONDAY + 9 * HOUR,
+            );
+            queue.queue_event(
+                window::CANDIDATES_SAMPLED,
+                json!({"supervisor": "s", "candidates": 100, "free_slots": 1, "ready": 100}),
+                MONDAY + 10 * HOUR,
+            );
+            queue.queue_event(
+                window::CANDIDATES_SAMPLED,
+                json!({"supervisor": "t", "candidates": 4, "free_slots": 1, "ready": 4}),
+                MONDAY + 12 * HOUR,
+            );
+            queue.heartbeats.insert("t".into(), MONDAY + DAY - 1);
+        }
+        let query = KpiQuery {
+            at: Some(Cursor::Time(MONDAY * 1000)),
+            ..KpiQuery::default()
+        };
+        let result = queue.kpi(MONDAY + DAY, &KpiConfig::default(), &query);
+        let day = result.periods.last().unwrap();
+        let (mean, max, starved) = match ending {
+            "live" => (4.0 / 24.0, 2.0, 22 * HOUR),
+            "held" => (4.0 / 24.0, 2.0, 2 * HOUR),
+            "resumed" => (4.0 / 24.0, 2.0, 20 * HOUR),
+            "restart" | "next_start" => (52.0 / 16.0, 4.0, 2 * HOUR),
+            _ => (1.0, 2.0, 2 * HOUR),
+        };
+        assert_eq!(
+            measure(day, "candidates", ALL).value,
+            Some(round3(mean)),
+            "{ending}"
+        );
+        assert_eq!(measure(day, "candidates", ALL).max, Some(max), "{ending}");
+        assert_eq!(
+            day.window.details["candidates"]["starved_secs"], starved,
+            "{ending}"
+        );
+        if !matches!(ending, "live" | "held" | "resumed") {
+            let gap = queue.kpi(
+                MONDAY + DAY,
+                &KpiConfig::default(),
+                &KpiQuery {
+                    since: Some(Cursor::Time((MONDAY + 5 * HOUR) * 1000)),
+                    until: Some(Cursor::Time((MONDAY + 7 * HOUR) * 1000)),
+                    ..KpiQuery::default()
+                },
+            );
+            assert_eq!(
+                gap.periods[0].window.unavailable["candidates"], "no_samples",
+                "{ending}"
+            );
+        }
+    }
 }

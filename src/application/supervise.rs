@@ -73,7 +73,7 @@ use crate::domain::{
     claim_hold::{self, ClaimHold, HoldInputs},
     claim_spacing, decide_conflict, decide_revise, event_kind, headless_job, heartbeat_stale,
     instructions::{self, InstructionVersions},
-    kpi::CandidatesSample,
+    kpi::{CandidatesSample, ClaimPassEnd},
     marks::{RUN_ENV_CHANGED, run_env_digest},
     measure::{ClaimAttributes, ClaimSpacing, HostVersions, LoadSummary, LoadWindow},
     queue_hold::{HoldJob, Wall},
