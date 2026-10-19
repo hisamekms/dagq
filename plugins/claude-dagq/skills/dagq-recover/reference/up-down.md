@@ -7,16 +7,15 @@ Read this when `up` or `down` returns something the `dagq-recover` skill (sectio
 `up` needs an initialized queue (`init` from the `dagq` skill first), keeps one supervisor resident under launchd and ends with a `doctor` summary to report. It opens neither the inbox (`inbox.outcome` `not_opened`: the person opens it with `dagq inbox` in their own terminal, below) nor a planner; `dagq plan` is refused (a plan is the inbox's request: `skills/dagq-inbox/reference/requests.md`).
 
 - Sessions load the plugin installed in Claude Code. Pass `--plugin-dir PATH` only when the repository's instructions name a plugin checkout; never `$CLAUDE_PLUGIN_ROOT` (a per-version cache an update leaves stale and deletes).
-- Pass `--claude` and `--codex` as real paths (`~/.local/bin/claude`, `~/.local/bin/codex`) from a cmux terminal: there a bare `claude` is cmux's per-surface shim, which would be fixed on the supervisor. An update of Claude Code or Codex needs no new `up`. A missing `codex` does not stop `up`: Codex tasks start on Claude. `status`'s `supervisors[].providers` shows what was resolved.
+- Pass `--claude` and `--codex` as real paths (`~/.local/bin/claude`, `~/.local/bin/codex`): a bare name a terminal's shim resolves would be fixed on the supervisor. An update of Claude Code or Codex needs no new `up`. A missing `codex` does not stop `up`: Codex tasks start on Claude. `status`'s `supervisors[].providers` shows what was resolved.
 - `supervisor.outcome` `reused` touches nothing but `auto_update`, which follows this `up`'s `--auto-update`. To change `--claude`, `--codex` or `--max-waiting` of a supervisor of the same build, `down --wait`, then `up` again.
 - `down` closes neither the inbox nor a planner. A workspace an earlier binary opened for a role (`retired_sessions`) is forgotten, not closed: the person closes it in their own terminal without `DAGQ_ROLE`.
 - `warnings`, `stray_agents`, `pruned_supervisors`: report them; nothing else failed.
 - A preflight that fails (Claude Code, the plugin, `gh` for the CI watch) stops `up` with why and what to do: have the person install or log in (`gh auth login`) in their own terminal, or ask through a planning request for a task that changes the repository's configuration. `doctor`'s `ci_watch` shows what resolved.
-- `up --in-cmux` is refused: the mode is retired.
 
 ### Explicitly run without Claude
 
-On the person's word, drain first, then `up --no-claude`; existing Claude workers must finish before switching, and an old Claude run needing a resume waits for recovery by hand. `up` opens no inbox then: keep one opened by hand. Workers and roles configured for Codex run on Codex and never fall back to Claude. Roles on Claude are off (`provider_disabled` / `handle disabled roles manually` in `status`): handle their reviews, plan reviews and recovery with this skill's manual procedures. The flag implies no approval or bypass. Do not run `observe` in their place. A live supervisor with another policy is drained before changing it.
+On the person's word, drain first, then `up --no-claude`; existing Claude workers must finish before switching, and an old Claude run needing a resume waits for recovery by hand. `dagq inbox` starts Claude Code, so keep an inbox the person opened by hand (`up`'s `inbox.next`). Workers and roles configured for Codex run on Codex and never fall back to Claude. Roles on Claude are off (`provider_disabled` / `handle disabled roles manually` in `status`): handle their reviews, plan reviews and recovery with this skill's manual procedures. The flag implies no approval or bypass. Do not run `observe` in their place. A live supervisor with another policy is drained before changing it.
 
 ### A supervisor of another build
 
@@ -30,9 +29,9 @@ A supervisor alive but no longer heartbeating is not replaced (`status` shows it
 
 A run whose session waits on an ask leaves its slot, up to `--max-waiting`, and keeps its lease and session. So a drain (`down`, `down --wait`, `install --allow-breaking`) waits until each such ask is answered: show the person the open asks (`status`'s `waiting`) before a drain. A handoff does not wait for them.
 
-### A registered in-cmux supervisor
+### A supervisor of the retired mode
 
-One started in the retired mode (`mode` `in_cmux` in `status`) keeps working and takes handoffs, but nothing restarts it. Move it to launchd once: `down --wait`, then `up` without `--in-cmux`, keeping your usual flags (for example `--auto-update`). `down` never closes its workspace (`supervisor_workspaces` `left_open`, with `--wait` too): the person closes it in their own terminal without `DAGQ_ROLE`.
+One an earlier binary started outside launchd (`mode` `in_cmux` in `status`) keeps working and takes handoffs, but nothing restarts it. Move it to launchd once: `down --wait`, then `up`, keeping your usual flags (for example `--auto-update`). `down` never closes the terminal it ran in (`supervisor_workspaces` `left_open`, with `--wait` too): the person closes it.
 
 ### Two supervisors of one queue
 
@@ -40,16 +39,16 @@ One started in the retired mode (`mode` `in_cmux` in `status`) keeps working and
 
 ### Open the inbox again (the guardrail)
 
-`inbox_guardrail` `false` (`status`, `doctor`) means the inbox was not opened with its settings (they refuse `cmux`); a `claude` typed again in the inbox's terminal has none either and is not seen. On the person's word:
+`inbox_guardrail` `false` (`status`, `doctor`) means the inbox was opened without its settings; a `claude` typed again in the inbox's terminal has none either and is not seen. Reopen it the same way after a plugin update, or once to move an inbox an earlier binary opened in a cmux workspace. On the person's word:
 
 1. The inbox writes its handoff first (open items, the watch's cursor, what the person said to keep), where the repository's instructions keep it.
 2. The person ends that inbox (it cannot end itself).
-3. The person runs `dagq inbox` in a terminal without `DAGQ_ROLE` (it is refused inside an inbox): the new inbox has the settings, reads the handoff and starts its watch. Its flags: `dagq inbox --help`.
+3. The person closes that inbox's terminal or workspace if they no longer need it, and runs `dagq inbox` in a terminal without `DAGQ_ROLE` (it is refused inside an inbox): the new inbox has the settings, reads the handoff and starts its watch. Its flags: `dagq inbox --help`.
 
 ## down
 
 - Plain `down` ends the day's work: the supervisor stops claiming, drains its runs and exits.
-- `--wait` blocks until it is gone. Use it when the next step needs that (changing flags, moving an in-cmux supervisor, shutting down).
+- `--wait` blocks until it is gone. Use it when the next step needs that (changing flags, moving a supervisor of the retired mode, shutting down).
 - `--force` loses the active runs (handled afterwards with this skill): only on the person's explicit word.
 
 ## Logs

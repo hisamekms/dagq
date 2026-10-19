@@ -7,5 +7,5 @@
     "name": "hisamekms"
   },
   "repository": "https://github.com/hisamekms/dagq",
-  "keywords": ["cmux", "dagq", "worktree", "task-queue"]
+  "keywords": ["dagq", "worktree", "task-queue"]
 }

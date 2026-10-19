@@ -1,13 +1,13 @@
 # dagq
 
-dagq is a dependency DAG queue: a Rust task orchestrator for running dependency-aware development tasks as background worker sessions in isolated Git worktrees, with a resident inbox session in cmux. The name is the shape of the work — tasks form a dependency DAG, and the queue runs the ones whose predecessors have landed. (It is unrelated to DAQ, data acquisition.)
+dagq is a dependency DAG queue: a Rust task orchestrator for running dependency-aware development tasks as background worker sessions in isolated Git worktrees, with a resident inbox session you open in your own terminal. The name is the shape of the work — tasks form a dependency DAG, and the queue runs the ones whose predecessors have landed. (It is unrelated to DAQ, data acquisition.)
 
 You describe a problem to a planner session, which writes it down as a goal and tasks. A headless plan review checks the plan and makes the tasks ready. A resident supervisor runs each ready task as a Claude Code (or Codex) worker in its own Git worktree, has a headless review check the result, and lands it on your default branch as one squash commit. Everything that needs a person reaches one resident inbox session.
 
 ## Requirements
 
 - **macOS on Apple Silicon (`aarch64-apple-darwin`).** No other platform is built, released, or tested.
-- **cmux.** The inbox gets a cmux workspace. Workers and planners run in the background without one, and their output is read with `dagq run log` and `dagq planner log`.
+- **A terminal for the inbox.** You open the inbox with `dagq inbox` in any terminal or IDE. Workers and planners run in the background, and their output is read with `dagq run log` and `dagq planner log`.
 - **Claude Code**, signed in, on PATH. The inbox, the planners and the headless jobs (plan review, run review, recovery, goal review, observer) are Claude Code sessions, and workers are too unless a task asks for Codex. The Codex CLI is optional (`up --codex`, `add --provider codex`).
 - **Git.** The repository needs at least one commit on the branch dagq lands on ([Landing branch, remote and push](#landing-branch-remote-and-push)).
 - **Rust and a C compiler** for `cargo install` (the crate's `rust-version`, now 1.98; the C compiler builds the bundled SQLite). The release update also runs `cargo install` ([Update](#update)).
@@ -39,7 +39,7 @@ The plugin holds the skills the inbox and planner sessions follow, the launcher 
 **4. Decide what workers may do, in Claude Code's settings.** dagq has no permission policy of its own for workers. It adds only a few deny rules to each run: no signalling processes by name (`pkill`, `killall`), no `dagq` commands outside the worker's role, and no setting or unsetting the variables that name the worker's role and queue (`DAGQ_ROLE` and the like). Everything else comes from Claude Code:
 
 - A Claude worker runs headless by default, one `claude -p` call per turn, in Claude Code's auto mode (`--permission-mode auto`). Auto mode and your `permissions` rules (`allow` / `deny` in `~/.claude/settings.json` or the repository's `.claude/settings.json`) decide what a worker may do without a person. If the session does not start in auto mode (for example, a model that does not support it), dagq stops the turn as a launch failure instead of running it in another mode.
-- `add` and `edit` refuse `--interactive`: the interactive worker was retired, every worker runs headless, and no run gets a cmux workspace. A task added with it before keeps that mark, but its runs are headless too. Read a run's session with `dagq run log RUN --follow`; a worker reaches you only through its asks, which you `dagq answer`.
+- `add` and `edit` refuse `--interactive`: the interactive worker was retired, every worker runs headless in the background. A task added with it before keeps that mark, but its runs are headless too. Read a run's session with `dagq run log RUN --follow`; a worker reaches you only through its asks, which you `dagq answer`.
 
 Codex workers run in Codex's own sandbox ([provider lifecycle](docs/design/provider-lifecycle.md)). Set these up before the first run.
 
@@ -49,12 +49,15 @@ From anywhere inside the repository:
 
 ```sh
 dagq init   # create the queue for this repository
-dagq up     # start the supervisor and open the inbox
+dagq up     # start the supervisor
+dagq inbox  # open the inbox in this terminal
 ```
 
 Each Git repository has one queue, at `~/.local/share/dagq/<hash>/queue.db` (`$XDG_DATA_HOME/dagq/<hash>/`). `<hash>` comes from the repository's Git common directory, so every worktree of the repository shares the queue. `dagq locate` shows where a directory's queue is without creating anything. `--db PATH` before the subcommand uses another queue file.
 
-`up` is idempotent. It checks cmux, Claude Code, the plugin, folder trust, the landing branch, `dagq.toml`, and the programs `[run.env]` names. Then it starts one supervisor, resident as a launchd LaunchAgent that launchd restarts if it stops, and opens the inbox session in the cmux workspace `[<repo>]inbox`. Run it again and it reuses what is already running. It hands a supervisor of another build over to its own binary without stopping the runs in flight. `dagq down` stops the supervisor after it drains (`--wait` waits for that); it leaves the inbox and planner sessions open.
+`up` is idempotent. It checks Claude Code, the plugin, folder trust, the landing branch, `dagq.toml`, and the programs `[run.env]` names. Then it starts one supervisor, resident as a launchd LaunchAgent that launchd restarts if it stops, and prints how to open the inbox: `up` opens no session. Run it again and it reuses what is already running. It hands a supervisor of another build over to its own binary without stopping the runs in flight. `dagq down` stops the supervisor after it drains (`--wait` waits for that); it leaves the inbox and planner sessions open.
+
+`dagq inbox` opens the inbox session in the foreground of the terminal you type it in. Type it in a terminal without `DAGQ_ROLE`; it is refused inside an inbox. To open it again, end that session and type `dagq inbox` again.
 
 When you have something to plan, ask the inbox in your own words. It records them as a planning request, and the supervisor opens a planner for it in the background, which submits a proposal or declines the request with a reason. From a terminal without `DAGQ_ROLE` you can record one yourself:
 

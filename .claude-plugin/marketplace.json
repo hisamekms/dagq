@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "dagq",
-  "description": "The Claude Code plugin for dagq: register, run, inspect, integrate, and recover tasks that execute in cmux workspaces and isolated Git worktrees.",
+  "description": "The Claude Code plugin for dagq: register, run, inspect, integrate, and recover tasks that run as background sessions in isolated Git worktrees.",
   "owner": {
     "name": "hisamekms"
   },

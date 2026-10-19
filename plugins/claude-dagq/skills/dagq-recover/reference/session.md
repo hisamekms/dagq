@@ -1,6 +1,6 @@
 # A run's session: its turns, undelivered answers and past asks
 
-Read this to carry out, on the person's word, an answer that has to reach a run's session (the `dagq-recover` skill, section 7). Every run's session is headless in the background: the runtime hands it everything (answers, send-backs, resumes, the exit request) as the next turn in the run directory's `turns/`. Nothing reaches a session by hand (the inbox's settings refuse `cmux`): never edit its worktree, merge or push for it, touch its `turns/` or signal its processes. Provider routes: `skills/dagq/reference/provider.md`.
+Read this to carry out, on the person's word, an answer that has to reach a run's session (the `dagq-recover` skill, section 7). Every run's session is headless in the background: the runtime hands it everything (answers, send-backs, resumes, the exit request) as the next turn in the run directory's `turns/`. Nothing reaches a session by hand: never edit its worktree, merge or push for it, touch its `turns/` or signal its processes. Provider routes: `skills/dagq/reference/provider.md`.
 
 ## The commands
 

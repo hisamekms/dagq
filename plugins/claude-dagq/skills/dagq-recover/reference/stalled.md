@@ -4,7 +4,7 @@ Read this to carry out, on the person's word, the answer to a `stalled` ask (the
 
 ## A headless run's `stalled` ask
 
-A run's session is headless: a background process with no screen and no workspace. Nothing is typed into that session by hand, by any command or by `cmux`: the supervisor hands it an instruction as its next turn, has it exit for `stop`, and sends it nothing for the other answers. `run screen` is refused and names the run's `turns/`; `run send` refuses every run.
+A run's session is headless: a background process with no screen and no workspace. Nothing is typed into that session, by hand or by any command: the supervisor hands it an instruction as its next turn, has it exit for `stop`, and sends it nothing for the other answers. `run screen` is refused and names the run's `turns/`; `run send` refuses every run.
 
 Before answering, read what the turns did (the question's last turns, `"$DAGQ" run log RUN`, `"$DAGQ" timeline RUN`, `"$DAGQ" events --run RUN --full`) and bring it to the person. Then answer with the person's choice; the supervisor applies it and closes the ask itself:
 

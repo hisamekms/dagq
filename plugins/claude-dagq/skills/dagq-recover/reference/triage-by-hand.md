@@ -4,7 +4,7 @@ Read this when the attention `triage by hand` or `recover by hand` reaches the p
 
 ## `triage by hand`
 
-Attention `triage by hand` (`triage_failed`): an ended run's recovery job failed; the run stays as it is and is not tried again. One held only because its provider could not be used is not this attention: it stays `triaging (runtime)`. Read `last_error`, the job's files in the run directory and the run's turns (`"$DAGQ" run log RUN`), and bring the choice to the person (a workspace an older run opened is closed by the person in their own terminal, never `cmux` from the inbox):
+Attention `triage by hand` (`triage_failed`): an ended run's recovery job failed; the run stays as it is and is not tried again. One held only because its provider could not be used is not this attention: it stays `triaging (runtime)`. Read `last_error`, the job's files in the run directory and the run's turns (`"$DAGQ" run log RUN`), and bring the choice to the person (a workspace an older run opened is closed by the person, never from the inbox):
 
 - `"$DAGQ" ready ID`: run the task again from the current main (no plan review).
 - `ready ID --inherit`: the same, carrying the run's committed work over (below).

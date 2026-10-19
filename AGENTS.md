@@ -2,7 +2,7 @@
 
 ## 概要
 
-dagq は cmux と Git worktree で依存関係付きの開発タスクを実行する Rust runtime。この repository 自身の開発タスクも dagq で流す。文書の分類は [docs/README.md](docs/README.md)。
+dagq は Git worktree で依存関係付きの開発タスクを background の session として実行する Rust runtime。この repository 自身の開発タスクも dagq で流す。文書の分類は [docs/README.md](docs/README.md)。
 
 この文書は、この repository の開発に要る短い案内だけを持つ。CLI の使い方は plugin の skill、規則の本文は `docs/development/`、実装は `docs/design/`、経緯は ADR、測定は `docs/plans/`、今の設定値は `dagq.toml` が持つ（ADR-t1453-2）。タスクの一覧・状態・依存・run 履歴・完了はキューだけが持つ（文書に写さない）。
 
@@ -19,7 +19,7 @@ dagq は cmux と Git worktree で依存関係付きの開発タスクを実行�
 - session 開始時に `which dagq` が `~/.local/bin/dagq` に解決することを確かめ、コマンドは repository の中（どの worktree でもよい）で打つ
 - planner・inbox・人は `dagq list` と担当の `dagq show ID`、[docs/plans/current.md](docs/plans/current.md) の現在のステップと完了条件を読む（worker は読まない）
 - 人・inbox は `install`・`up` / `down`、host のツール（sccache・`d2`・TALA）、push と secret に、人・inbox・planner は `dagq.toml` と KPI の印に触る前に operations.md の該当の節（`up` は「`up`のコマンド」）を読む（planner は `up` / `down` / `install` を打たない）
-- inbox と planner は cmux を直接打たない（settings の `permissions.deny` の `Bash(cmux:*)`、ADR-t1228-2）
+- inbox は `up` が開かず、人が `DAGQ_ROLE` の無い terminal で `dagq inbox` を打って開く
 - AGENTS.md には規則の本文を足さず案内だけを置く（大きさの上限と検査は [documents.md](docs/development/documents.md) の「AGENTS.md」）
 
 ## 役割と変更の範囲ごとの読む案内
