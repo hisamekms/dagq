@@ -175,7 +175,7 @@ impl Spawner for StubSpawner {
                 .get_envs()
                 .any(|(key, value)| key == "DAGQ_SERVICE_SOCKET" && value.is_some())
         {
-            common::service::serve_with(&self.db, &fake_cmux_dir(&self.db).join("cmux"));
+            common::service::serve(&self.db);
         }
         let mut stubs = stubs();
         let Some(groups) = stubs.entry(self.db.clone()).or_insert(Some(Vec::new())) else {
@@ -184,19 +184,6 @@ impl Spawner for StubSpawner {
         let mut command = process::command(spec);
         // The spec's own actor (a worker's, a job's), not the tests' one.
         command.without_actor_env();
-        // A stub's `dagq` that names no `--cmux` finds the fake first: before
-        // the spec's PATH (the last it sets, as `process::command` applies
-        // them), the tests' own when it sets none, or alone when it removes it.
-        let path = match spec.get_envs().filter(|(key, _)| *key == "PATH").last() {
-            Some((_, value)) => value.map(ToOwned::to_owned).unwrap_or_default(),
-            None => std::env::var_os("PATH").unwrap_or_default(),
-        };
-        command.env(
-            "PATH",
-            std::env::join_paths(
-                std::iter::once(fake_cmux_dir(&self.db)).chain(std::env::split_paths(&path)),
-            )?,
-        );
         // A headless job's prompt, or nothing (task 1560).
         command.stdin(process::stdin(spec)?);
         match streams {
@@ -220,29 +207,6 @@ impl Spawner for StubSpawner {
         groups.push(child.id());
         Ok(Box::new(Stub(child)))
     }
-}
-
-/// The directory of a fake `cmux` next to the queue at `db`, which appends
-/// the arguments of each call to `calls` there and exits at once: what the
-/// stub agents' `dagq` (a notifying `ask`, a `stats`) resolves as `cmux`
-/// when it names none, so no test reaches the host's cmux or its inbox
-/// (task 1128).
-pub fn fake_cmux_dir(db: &Path) -> PathBuf {
-    let dir = db.parent().unwrap().join("fake-cmux");
-    let stub = dir.join("cmux");
-    if !stub.exists() {
-        fs::create_dir_all(&dir).unwrap();
-        // Written aside and renamed, so a stub started at the same time
-        // never runs half a script.
-        let aside = dir.join(format!("cmux.{:?}", thread::current().id()));
-        crate::common::template::script(
-            &aside,
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${0%/*}/calls\"\n",
-        );
-
-        fs::rename(&aside, &stub).unwrap();
-    }
-    dir
 }
 
 /// The host's processes as a supervisor in production sees them: a test's
@@ -1096,12 +1060,6 @@ pub fn supervise_options(parallel: usize, once: bool) -> SuperviseOptions {
         // No Codex worker unless a test gives its stub: the host's `codex`
         // is not these tests'.
         codex: PathBuf::from("/nonexistent/codex"),
-        // An update's or a release's job that starts a supervisor again
-        // does not reach the host's cmux (task 1128).
-        update: dagq::application::supervise::UpdateSettings {
-            cmux: Some(PathBuf::from("/usr/bin/true")),
-            ..base.update.clone()
-        },
         // A stop of a run in a clone does not reach the host's podman.
         run_containers: Some(runtime::RunContainersPort(Arc::new(NoContainers))),
         ..base
@@ -1732,7 +1690,7 @@ pub fn stats_full(db: &Path) -> Value {
         .without_actor_env()
         .arg("--db")
         .arg(db)
-        .args(["stats", "--full", "--cmux", "/usr/bin/true"])
+        .args(["stats", "--full"])
         .bounded_output()
         .unwrap();
     assert!(

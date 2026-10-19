@@ -196,8 +196,8 @@ pub fn install_with(
     )
 }
 
-/// `install` of `source` into `/opt/bin/dagq`, restarting with `--cmux
-/// /opt/cmux`, without `--allow-breaking`.
+/// `install` of `source` into `/opt/bin/dagq`, restarting with `--claude
+/// /opt/claude`, without `--allow-breaking`.
 pub fn install_options(
     source: dagq::application::install::Source,
 ) -> dagq::application::install::InstallOptions {
@@ -205,7 +205,7 @@ pub fn install_options(
         source,
         target: "/opt/bin/dagq".into(),
         allow_breaking: false,
-        restart: vec!["--cmux".into(), "/opt/cmux".into()],
+        restart: vec!["--claude".into(), "/opt/claude".into()],
         handoff_timeout: Duration::from_secs(5),
         poll: Duration::from_millis(20),
         e2e: E2eGate::Run(e2e_settings(Path::new("/queue"))),

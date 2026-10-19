@@ -134,10 +134,11 @@ impl Provider {
 }
 
 // How `up` started a supervisor. `Launchd` is the resident LaunchAgent, the
-// one mode `up` starts; `InCmux` is the retired mode (ADR-t1433-4) that ran
-// `supervise` inside the cmux workspace `[<repo>]supervisor`, still read on
-// the registrations an earlier binary wrote. A registration without a mode
-// was started by hand.
+// one mode `up` starts; `InCmux` is the retired mode (ADR-t1433-4) in which
+// an earlier binary ran `supervise` inside the cmux workspace
+// `[<repo>]supervisor`, read only on the registrations such a binary wrote
+// (ADR-t2159-1 decision 6). A registration without a mode was started by
+// hand.
 string_enum!(SupervisorMode {
     Launchd => "launchd",
     InCmux => "in_cmux",

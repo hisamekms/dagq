@@ -1,8 +1,7 @@
-//! Worker screen/send/close-workspaces commands are refused without
-//! touching cmux. A planner has no screen to read and takes no keys or
-//! answers either (ADR-t1433-2): `planner screen` says so and where its
-//! turns are, and `planner send` is refused, without cmux; who may run
-//! them stays the actors' authorization.
+//! Worker screen/send/close-workspaces commands are refused. A planner has
+//! no screen to read and takes no keys or answers either (ADR-t1433-2):
+//! `planner screen` says so and where its turns are, and `planner send` is
+//! refused; who may run them stays the actors' authorization.
 
 use crate::common;
 
@@ -18,39 +17,7 @@ use dagq::{
     infrastructure::sqlite::SqliteQueue,
 };
 use serde_json::Value;
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
-
-/// Claude Code at rest: the input box empty, nothing at work.
-const READY: &str = "\
-⏺ Done.
-
-──────────────────────────────────────────────────────────────────────
-❯
-──────────────────────────────────────────────────────────────────────
-  ? for shortcuts
-";
-
-/// A stub `cmux` beside `db`: `read-screen` prints the `screen` file, and
-/// every call is appended to `calls`. Returns its path.
-fn stub_cmux(db: &Path, screen: &str) -> PathBuf {
-    let dir = db.parent().unwrap().join("screen-cmux");
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("screen"), screen).unwrap();
-    let stub = dir.join("cmux");
-    common::template::script(
-        &stub,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${0%/*}/calls\"\n\
-         if [ \"$1\" = read-screen ]; then cat \"${0%/*}/screen\"; fi\n",
-    );
-    stub
-}
-
-fn calls(cmux: &Path) -> String {
-    fs::read_to_string(cmux.parent().unwrap().join("calls")).unwrap_or_default()
-}
+use std::path::Path;
 
 /// A headless run of a new ready task claimed and planned, its session's
 /// workspace `workspace`, or with `recorded_interactive` a run stored as
@@ -151,25 +118,21 @@ fn answered_ask(db: &Path, run: &str, answer: &str) -> String {
 /// log CLI that replaced it (ADR-t1433-3 decision 4), by run or task id,
 /// for a run recorded as interactive too; `run send` refuses typing; and
 /// `run close-workspaces` is refused with its reason (decision 3). None of
-/// them reads, types or needs cmux.
+/// them reads or types anything.
 #[test]
-fn runs_refuse_their_screen_and_typing_without_cmux() {
+fn runs_refuse_their_screen_and_typing() {
     let (_dir, db) = queue();
     // Include the old stored mode: historical interactive records no
     // longer grant access to a terminal, either by run or task id.
     let interactive = run_in(&db, "historical", true, "WS-I");
     let headless = run_in(&db, "headless", false, "WS-H");
-    let cmux = stub_cmux(&db, READY);
-    let cmux = cmux.to_str().unwrap();
     for (run, task) in [(&interactive, "1"), (&headless, "2")] {
         let ask = answered_ask(&db, run, "continue");
-        // Asking can notify the inbox; compare only screen/send calls.
-        let before = calls(Path::new(cmux));
         for target in [run.as_str(), task] {
             let refused = failed_with(
                 &[("DAGQ_ROLE", "inbox")],
                 &db,
-                &["run", "screen", target, "--lines", "1000", "--cmux", cmux],
+                &["run", "screen", target, "--lines", "1000"],
             );
             let error = refused["error"].as_str().unwrap();
             assert!(
@@ -185,7 +148,6 @@ fn runs_refuse_their_screen_and_typing_without_cmux() {
             ] {
                 let mut argv = vec!["run", "send", target];
                 argv.extend(input);
-                argv.extend(["--cmux", cmux]);
                 let failed = failed_with(&[], &db, &argv);
                 let error = failed["error"].as_str().unwrap();
                 assert!(
@@ -196,28 +158,9 @@ fn runs_refuse_their_screen_and_typing_without_cmux() {
                 );
             }
         }
-        assert_eq!(
-            calls(Path::new(cmux)),
-            before,
-            "worker commands must not read or type"
-        );
     }
-    // None needs cmux: a host without it gets the same replies.
-    let missing = "/nonexistent/cmux";
-    let refused = failed_with(
-        &[("DAGQ_ROLE", "inbox")],
-        &db,
-        &["run", "screen", &headless, "--cmux", missing],
-    );
-    assert!(
-        refused["error"]
-            .as_str()
-            .unwrap()
-            .contains(dagq::application::screen::RUN_SCREEN_REFUSED),
-        "{refused}"
-    );
     for args in [
-        vec!["run", "close-workspaces", "--apply", "--cmux", missing],
+        vec!["run", "close-workspaces", "--apply"],
         vec!["run", "close-workspaces", headless.as_str()],
         vec!["run", "close-workspaces", "--task", "2"],
     ] {
@@ -228,20 +171,6 @@ fn runs_refuse_their_screen_and_typing_without_cmux() {
             "{args:?}: {refused}"
         );
     }
-    let failed = failed_with(
-        &[],
-        &db,
-        &[
-            "run", "send", &headless, "--key", "enter", "--cmux", missing,
-        ],
-    );
-    assert!(
-        failed["error"]
-            .as_str()
-            .unwrap()
-            .contains("no interactive input"),
-        "{failed}"
-    );
     assert!(events(&db, "screen_read").is_empty());
     assert!(events(&db, "screen_input_sent").is_empty());
     assert!(
@@ -254,7 +183,8 @@ fn runs_refuse_their_screen_and_typing_without_cmux() {
 /// abolished) has its screen read no more and takes no keys or answers
 /// (ADR-t1433-2): `planner screen` says so, with where a planner's turns
 /// are, and `planner send` is refused with what to do instead; neither
-/// calls cmux or records anything. An unknown planner is the queue's error.
+/// reads, types or records anything. An unknown planner is the queue's
+/// error.
 #[test]
 fn a_planner_in_a_workspace_has_no_screen_read_and_takes_no_keys_or_answers() {
     let (_dir, db) = queue();
@@ -263,13 +193,11 @@ fn a_planner_in_a_workspace_has_no_screen_read_and_takes_no_keys_or_answers() {
     queue.planner_workspace_created(planner.id, "PW-1").unwrap();
     drop(queue);
     let run = run_in(&db, "asked", false, "WS-1");
-    let cmux = stub_cmux(&db, READY);
-    let cmux = cmux.to_str().unwrap();
     let id = planner.id.to_string();
 
     for args in [
-        vec!["planner", "screen", &id, "--cmux", cmux],
-        vec!["planner", "screen", &id, "--lines", "1000", "--cmux", cmux],
+        vec!["planner", "screen", &id],
+        vec!["planner", "screen", &id, "--lines", "1000"],
     ] {
         let read = ok_as("inbox", &db, &args);
         assert_eq!(read["planner_id"], planner.id.as_i64());
@@ -292,9 +220,9 @@ fn a_planner_in_a_workspace_has_no_screen_read_and_takes_no_keys_or_answers() {
     }
     let ask = answered_ask(&db, &run, "yes");
     for args in [
-        vec!["planner", "send", &id, "--key", "escape", "--cmux", cmux],
-        vec!["planner", "send", &id, "--key", "exit", "--cmux", cmux],
-        vec!["planner", "send", &id, "--answer", &ask, "--cmux", cmux],
+        vec!["planner", "send", &id, "--key", "escape"],
+        vec!["planner", "send", &id, "--key", "exit"],
+        vec!["planner", "send", &id, "--answer", &ask],
     ] {
         let failed = failed_with(&[], &db, &args);
         let error = failed["error"].as_str().unwrap();
@@ -302,11 +230,10 @@ fn a_planner_in_a_workspace_has_no_screen_read_and_takes_no_keys_or_answers() {
         assert!(error.contains("`answer`"), "{failed}");
     }
     assert!(
-        failed_with(&[], &db, &["planner", "screen", "99", "--cmux", cmux])["error"]
+        failed_with(&[], &db, &["planner", "screen", "99"])["error"]
             .as_str()
             .is_some()
     );
-    assert_eq!(calls(Path::new(cmux)), "", "nothing read or typed");
     assert!(events(&db, "screen_read").is_empty());
     assert!(events(&db, "screen_input_sent").is_empty());
     assert!(events(&db, "ask_delivered").is_empty());
@@ -316,8 +243,6 @@ fn a_planner_in_a_workspace_has_no_screen_read_and_takes_no_keys_or_answers() {
 fn a_planner_a_worker_and_the_jobs_are_refused_and_recorded() {
     let (_dir, db) = queue();
     let run = run_in(&db, "guarded", false, "WS-1");
-    let cmux = stub_cmux(&db, READY);
-    let cmux = cmux.to_str().unwrap();
     let planner = [
         ("DAGQ_ROLE", "planner"),
         ("DAGQ_ACTOR_ID", "planner:1"),
@@ -350,8 +275,7 @@ fn a_planner_a_worker_and_the_jobs_are_refused_and_recorded() {
                 "screen.send",
             ),
         ] {
-            let mut argv = args.clone();
-            argv.extend(["--cmux", cmux]);
+            let argv = args.clone();
             let error = failed_with(env, &db, &argv);
             assert_eq!(
                 error["denied"]["capability"], capability,
@@ -361,7 +285,6 @@ fn a_planner_a_worker_and_the_jobs_are_refused_and_recorded() {
             refused += 1;
         }
     }
-    assert_eq!(calls(Path::new(cmux)), "", "nothing was read or typed");
     let denied = events(&db, "authorization_denied");
     assert_eq!(denied.len(), refused);
     assert_eq!(denied[0]["actor"]["role"], "planner");

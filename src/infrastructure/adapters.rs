@@ -3312,36 +3312,6 @@ impl SessionWrappers for BackgroundSessions {
     }
 }
 
-/// One `workspace list`-shaped listing of the workspaces of every window in
-/// a `cmux --json --id-format uuids list-windows` reply, `list` giving each
-/// window's listing by its UUID. A window that cannot be listed fails the
-/// whole listing: a workspace missed there would look closed.
-pub fn merged_workspace_listing(
-    windows: &Value,
-    mut list: impl FnMut(&str) -> Result<Value>,
-) -> Result<Value> {
-    let mut workspaces = Vec::new();
-    for window in windows
-        .as_array()
-        .context("cmux list-windows is not a list")?
-    {
-        let id = window
-            .get("id")
-            .and_then(Value::as_str)
-            .context("cmux listed a window without an ID")?;
-        let listing = list(id).with_context(|| format!("list the workspaces of window {id}"))?;
-        workspaces.extend(
-            listing
-                .get("workspaces")
-                .and_then(Value::as_array)
-                .with_context(|| format!("cmux workspace list of window {id} has no workspaces"))?
-                .iter()
-                .cloned(),
-        );
-    }
-    Ok(serde_json::json!({ "workspaces": workspaces }))
-}
-
 /// The entries of `claude plugin list --json` (an array of `{"id":
 /// "<plugin>@<marketplace>", "enabled": bool, "version": ..., ...}`) that
 /// are of the plugin `name`, each with its id.
@@ -3770,12 +3740,12 @@ impl AgentProvider for ClaudeCode {
 /// (ADR-t1228-2 decision 3).
 pub const INBOX_SETTINGS: &str = "claude-inbox-settings.json";
 
-/// Settings of the inbox (ADR-t1228-2 decision 3): `permissions.deny`
+/// Settings of the inbox (ADR-t2159-1 decision 5): `permissions.deny`
 /// only, `deny` being the inbox's ([`permission_deny`]: the `dagq`
-/// commands its role may not run, the variables naming the actor and
-/// `Bash(cmux:*)`). No hook and no idle marker (the inbox is not judged
-/// idle), no suggestion setting (a person types in it), no `autoMode`.
-/// A guardrail, not enforcement (decision 5).
+/// commands its role may not run and the variables naming the actor). No
+/// hook and no idle marker (the inbox is not judged idle), no suggestion
+/// setting (a person types in it), no `autoMode`. A guardrail, not
+/// enforcement.
 pub fn inbox_settings(deny: &[String]) -> Result<String> {
     Ok(serde_json::to_string_pretty(&serde_json::json!({
         "permissions": {
@@ -5920,12 +5890,12 @@ mod tests {
         assert_eq!(claude.job_reply(stdout), stdout);
     }
 
-    /// The planners' settings (a planner session's and a headless
-    /// planner's turns) and the inbox's refuse raw cmux beside their role's
-    /// denials and the identity variables; a worker's, its turns' and the
-    /// review's do not (ADR-t1228-2 decisions 2, 3 and 7).
+    /// No settings refuse cmux (ADR-t2159-1 decision 5): the planners'
+    /// (a planner session's and a headless planner's turns) and the
+    /// inbox's keep their role's denials and the identity variables, as a
+    /// worker's turns and the review's do.
     #[test]
-    fn raw_cmux_is_denied_to_the_planners_and_the_inbox_only() {
+    fn no_settings_deny_cmux_and_each_keeps_its_roles_denials() {
         let claude = ClaudeCode {
             executable: "/bin/claude".into(),
         };
@@ -5934,7 +5904,7 @@ mod tests {
             let settings: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
             serde_json::from_value(settings["permissions"]["deny"].clone()).unwrap()
         };
-        let cmux = crate::application::execution::RAW_CMUX_DENIED.to_owned();
+        let no_cmux = |deny: &[String]| !deny.iter().any(|rule| rule.contains("cmux"));
         let identity = "Bash(export DAGQ_ROLE*)".to_owned();
         let turn = |role: ActorRole, sub: &str| {
             let target_dir = dir.path().join(sub);
@@ -5956,11 +5926,11 @@ mod tests {
             deny_of(&target_dir.join(HEADLESS_SETTINGS))
         };
         let planner_turn = turn(ActorRole::Planner, "planner");
-        assert!(planner_turn.contains(&cmux), "{planner_turn:?}");
+        assert!(no_cmux(&planner_turn), "{planner_turn:?}");
         assert!(planner_turn.contains(&identity));
         assert!(planner_turn.contains(&"Bash(dagq integrate:*)".to_owned()));
         let worker_turn = turn(ActorRole::Worker, "worker");
-        assert!(!worker_turn.contains(&cmux), "{worker_turn:?}");
+        assert!(no_cmux(&worker_turn), "{worker_turn:?}");
         assert!(worker_turn.contains(&identity));
         assert!(worker_turn.contains(&"AskUserQuestion".to_owned()));
 
@@ -5974,7 +5944,9 @@ mod tests {
         };
         claude.planner_command(&planner).unwrap();
         let session = deny_of(&planner_dir.join("claude-settings.json"));
-        assert!(session.contains(&cmux) && session.contains(&identity));
+        assert!(no_cmux(&session), "{session:?}");
+        assert!(session.contains(&identity));
+        assert!(session.contains(&"Bash(dagq integrate:*)".to_owned()));
 
         let run = run_in(dir.path());
         fs::create_dir_all(run.run_dir().unwrap()).unwrap();
@@ -5988,7 +5960,7 @@ mod tests {
             .unwrap();
         let review =
             deny_of(&Path::new(run.run_dir().unwrap()).join("claude-review-settings.json"));
-        assert!(!review.contains(&cmux) && review.contains(&identity));
+        assert!(no_cmux(&review) && review.contains(&identity));
 
         let queue_dir = dir.path().join("queue");
         fs::create_dir_all(&queue_dir).unwrap();
@@ -6005,7 +5977,13 @@ mod tests {
             settings,
             serde_json::json!({"permissions": {"deny": permission_deny(ActorRole::Inbox)}})
         );
-        assert!(deny_of(&path).contains(&cmux));
+        let inbox = deny_of(&path);
+        assert!(no_cmux(&inbox), "{inbox:?}");
+        assert!(inbox.contains(&identity));
+        assert!(
+            inbox.contains(&"Bash(dagq replan propose:*)".to_owned()),
+            "{inbox:?}"
+        );
     }
 
     /// A worker's turn, new or resumed, takes its model and effort
@@ -6093,34 +6071,6 @@ mod tests {
             workspace_closed_at: None,
             created_at: "2026-09-22 00:00:00".into(),
         }
-    }
-
-    /// The windows' listings are concatenated; a window that cannot be
-    /// listed, or a reply of the wrong shape, fails the whole listing.
-    #[test]
-    fn merged_workspace_listing_joins_every_window() {
-        let windows = serde_json::json!([{"id": "A"}, {"id": "B"}]);
-        let merged = merged_workspace_listing(&windows, |window| {
-            Ok(serde_json::json!({"window_id": window, "workspaces": [{"id": format!("{window}-1")}]}))
-        })
-        .unwrap();
-        assert_eq!(
-            merged,
-            serde_json::json!({"workspaces": [{"id": "A-1"}, {"id": "B-1"}]})
-        );
-        assert_eq!(
-            merged_workspace_listing(&serde_json::json!([]), |_| unreachable!()).unwrap(),
-            serde_json::json!({"workspaces": []})
-        );
-        let error = merged_workspace_listing(&windows, |window| {
-            ensure!(window == "A", "TabManager not available");
-            Ok(serde_json::json!({"workspaces": []}))
-        })
-        .unwrap_err();
-        assert!(format!("{error:#}").contains("window B"), "{error:#}");
-        assert!(merged_workspace_listing(&serde_json::json!({}), |_| unreachable!()).is_err());
-        assert!(merged_workspace_listing(&serde_json::json!([{}]), |_| unreachable!()).is_err());
-        assert!(merged_workspace_listing(&windows, |_| Ok(serde_json::json!({}))).is_err());
     }
 
     #[test]

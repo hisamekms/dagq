@@ -30,8 +30,10 @@
 //! a run (ADR-t963-1 decision 2). `[broker]` and `[broker.package]`, the
 //! settings of the removed resource broker, are accepted and not read
 //! (ADR-t2125-1).
-//! `[headless] wrapper` chooses where a headless session's wrapper runs:
-//! in a cmux workspace or as a background process (ADR-t1404-1).
+//! `[headless] wrapper`, which chose where an earlier binary ran a headless
+//! session's wrapper (in a cmux workspace or as a background process,
+//! ADR-t1404-1), is accepted and read only to warn that it is ignored: every
+//! wrapper runs in the background (ADR-t1433-3 decision 1).
 //! `[provider_fallback] workers` turns off a worker's move off a provider
 //! it cannot use, and `jobs` that of a headless job whose role names its
 //! provider (ADR-t1857-1).

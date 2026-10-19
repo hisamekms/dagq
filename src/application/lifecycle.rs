@@ -73,10 +73,6 @@ pub const WORKER_ROLE: &str = ActorRole::Worker.as_str();
 /// plan` no longer opens one a person talks with (ADR-t1394-1).
 pub const PLANNER_ROLE: &str = ActorRole::Planner.as_str();
 pub use crate::domain::actor::{PLANNER_ID_ENV, PLANNER_ORIGIN_ENV, SESSION_KIND_ENV};
-/// The cmux workspace a session runs in, set by cmux in every terminal:
-/// a person's planner's workspace owns the proposals it submits (a planner
-/// of the runtime's has none: its record's background handle owns them).
-pub const CMUX_WORKSPACE_ENV: &str = "CMUX_WORKSPACE_ID";
 /// `DAGQ_ROLE` of the session where a person answers the queue's asks: a
 /// person opens it in their own terminal with `dagq inbox`.
 pub const INBOX_ROLE: &str = ActorRole::Inbox.as_str();
@@ -353,10 +349,7 @@ pub struct UpOptions {
     pub no_wait: bool,
     /// Passed to the supervisor, whose planners load it with `--plugin-dir`.
     pub plugin_dir: Option<PathBuf>,
-    /// Resolved executables; the agent runs the supervisor with these. The
-    /// cmux is only passed on for the supervisor's older command line, and
-    /// one not found does not stop `up` (the supervisor uses none).
-    pub cmux: PathBuf,
+    /// Resolved executables; the agent runs the supervisor with these.
     pub claude: PathBuf,
     /// The Codex CLI the supervisor's Codex workers start (ADR-t813-2),
     /// resolved when it was found; a missing one does not stop `up`: the
@@ -1835,8 +1828,8 @@ fn start_under_launchd(
 }
 
 /// `<this binary> --db <db> supervise [--parallel N] --log-dir <queue logs>
-/// --cmux <resolved> --claude <resolved> --codex <resolved or given> --mode
-/// launchd [--plugin-dir <dir>]`:
+/// --claude <resolved> --codex <resolved or given> --mode launchd
+/// [--plugin-dir <dir>]`, with no `--cmux` (ADR-t2159-1 decision 6):
 /// what the LaunchAgent keeps going. The executables are absolute so
 /// launchd's PATH does not decide which ones run; the plugin directory is
 /// what the planners the runtime opens load. `--mode` is what its start
@@ -1863,8 +1856,6 @@ fn supervise_arguments(
         "supervise".into(),
         "--log-dir".into(),
         path_text(&location.log_dir)?,
-        "--cmux".into(),
-        path_text(&options.cmux)?,
         "--claude".into(),
         path_text(&options.claude)?,
         "--codex".into(),

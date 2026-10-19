@@ -4,7 +4,7 @@
 //! The words are written under the planner's directory and the sentence
 //! pointing at them becomes its next turn request, after a turn at work;
 //! an interactive planner and one closed, lost, exited or asked to exit
-//! are refused, and nothing reaches cmux. Other roles are refused and
+//! are refused. Other roles are refused and
 //! recorded. A headless planner has no screen and takes no keys. The
 //! words come as `--text`, from a file with `--text-file` (`--file`) or
 //! from stdin with `--text -`, handed as read; two of them or none, and a
@@ -29,25 +29,9 @@ use serde_json::Value;
 use std::{
     fs,
     io::Write,
-    path::{Path, PathBuf},
+    path::Path,
     process::{Command, Output, Stdio},
 };
-
-/// A stub `cmux` beside `db` that only keeps its calls; returns its path.
-fn stub_cmux(db: &Path) -> PathBuf {
-    let dir = db.parent().unwrap().join("request-cmux");
-    fs::create_dir_all(&dir).unwrap();
-    let stub = dir.join("cmux");
-    common::template::script(
-        &stub,
-        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${0%/*}/calls\"\n",
-    );
-    stub
-}
-
-fn calls(cmux: &Path) -> String {
-    fs::read_to_string(cmux.parent().unwrap().join("calls")).unwrap_or_default()
-}
 
 /// The handle of `pid` as the supervisor records a background wrapper.
 fn handle_of(pid: u32) -> String {
@@ -105,10 +89,10 @@ fn refusal(env: &[(&str, &str)], db: &Path, args: &[&str]) -> Value {
     serde_json::from_slice(&output.stderr).unwrap()
 }
 
-/// `planner request ID --text TEXT` with the stub `cmux`.
-fn request(planner: PlannerId, text: &str, cmux: &str) -> Vec<String> {
+/// `planner request ID --text TEXT`.
+fn request(planner: PlannerId, text: &str) -> Vec<String> {
     let id = planner.to_string();
-    ["planner", "request", &id, "--text", text, "--cmux", cmux]
+    ["planner", "request", &id, "--text", text]
         .map(str::to_owned)
         .to_vec()
 }
@@ -120,8 +104,6 @@ fn args(argv: &[String]) -> Vec<&str> {
 #[test]
 fn a_follow_up_reaches_a_live_headless_planner_as_its_next_turn_with_its_actor() {
     let (_dir, db) = queue();
-    let cmux = stub_cmux(&db);
-    let cmux = cmux.to_str().unwrap();
     let id = planner(
         &db,
         PlannerRoute::Headless,
@@ -133,11 +115,7 @@ fn a_follow_up_reaches_a_live_headless_planner_as_its_next_turn_with_its_actor()
     fs::create_dir_all(dir.join("turns")).unwrap();
     fs::write(taken_path(&dir, 1), "{}").unwrap();
 
-    let handed = ok_as(
-        "inbox",
-        &db,
-        &args(&request(id, "also split the docs", cmux)),
-    );
+    let handed = ok_as("inbox", &db, &args(&request(id, "also split the docs")));
     assert_eq!(handed["state"], "working");
     assert_eq!(handed["seq"], 2, "after the turn at work: {handed}");
     let file = dir.join("requests").join("followup-1.md");
@@ -159,7 +137,7 @@ fn a_follow_up_reaches_a_live_headless_planner_as_its_next_turn_with_its_actor()
         r#"{"dagq_turn":{"turn":1,"outcome":"succeeded"}}"#,
     )
     .unwrap();
-    let listed = ok(&db, &["planners", "--cmux", cmux]);
+    let listed = ok(&db, &["planners"]);
     assert_eq!(listed["planners"][0]["state"], "working", "{listed}");
 
     // A person at a plain terminal, from a file; the next one is taken
@@ -174,8 +152,6 @@ fn a_follow_up_reaches_a_live_headless_planner_as_its_next_turn_with_its_actor()
             &id.to_string(),
             "--file",
             words.to_str().unwrap(),
-            "--cmux",
-            cmux,
         ],
     );
     assert_eq!(second["seq"], 3);
@@ -196,14 +172,11 @@ fn a_follow_up_reaches_a_live_headless_planner_as_its_next_turn_with_its_actor()
         requested[0]["payload"]["what"],
         "follow-up request followup-1"
     );
-    assert_eq!(calls(Path::new(cmux)), "", "nothing reached cmux");
 }
 
 #[test]
 fn an_interactive_closed_lost_exited_exiting_or_walled_planner_is_refused_with_the_reason() {
     let (_dir, db) = queue();
-    let cmux = stub_cmux(&db);
-    let cmux = cmux.to_str().unwrap();
     let pid = std::process::id();
     let (_alive, handles) = (0..4)
         .map(|_| live_process())
@@ -242,11 +215,7 @@ fn an_interactive_closed_lost_exited_exiting_or_walled_planner_is_refused_with_t
         (exiting, "is asked to exit"),
         (walled, "waits for Claude"),
     ] {
-        let error = refusal(
-            &[("DAGQ_ROLE", "inbox")],
-            &db,
-            &args(&request(id, "more", cmux)),
-        );
+        let error = refusal(&[("DAGQ_ROLE", "inbox")], &db, &args(&request(id, "more")));
         assert!(
             error["error"].as_str().unwrap().contains(reason),
             "{id}: {error}"
@@ -259,11 +228,6 @@ fn an_interactive_closed_lost_exited_exiting_or_walled_planner_is_refused_with_t
             "{id}: nothing handed"
         );
     }
-    assert_eq!(
-        calls(Path::new(cmux)),
-        "",
-        "nothing typed or probed by cmux"
-    );
     assert!(events(&db, "planner_request_handed").is_empty());
     assert!(events(&db, "turn_requested").is_empty());
 }
@@ -271,8 +235,6 @@ fn an_interactive_closed_lost_exited_exiting_or_walled_planner_is_refused_with_t
 #[test]
 fn only_the_inbox_and_a_person_hand_a_request_and_other_roles_are_recorded() {
     let (_dir, db) = queue();
-    let cmux = stub_cmux(&db);
-    let cmux = cmux.to_str().unwrap();
     let id = planner(
         &db,
         PlannerRoute::Headless,
@@ -299,7 +261,7 @@ fn only_the_inbox_and_a_person_hand_a_request_and_other_roles_are_recorded() {
         vec![("DAGQ_ROLE", "supervisor")],
     ];
     for env in &actors {
-        let error = refusal(env, &db, &args(&request(id, "more", cmux)));
+        let error = refusal(env, &db, &args(&request(id, "more")));
         assert_eq!(error["denied"]["capability"], "planner.request", "{env:?}");
         assert_eq!(error["denied"]["reason"], "not granted");
     }
@@ -312,14 +274,12 @@ fn only_the_inbox_and_a_person_hand_a_request_and_other_roles_are_recorded() {
         !planners_dir(&db).join(&own).join("requests").exists(),
         "nothing handed"
     );
-    ok_as("inbox", &db, &args(&request(id, "more", cmux)));
+    ok_as("inbox", &db, &args(&request(id, "more")));
 }
 
 #[test]
 fn a_headless_planner_has_no_screen_and_takes_no_keys_or_answer() {
     let (_dir, db) = queue();
-    let cmux = stub_cmux(&db);
-    let cmux = cmux.to_str().unwrap();
     let id = planner(
         &db,
         PlannerRoute::Headless,
@@ -328,7 +288,7 @@ fn a_headless_planner_has_no_screen_and_takes_no_keys_or_answer() {
     );
     let own = id.to_string();
 
-    let read = ok_as("inbox", &db, &["planner", "screen", &own, "--cmux", cmux]);
+    let read = ok_as("inbox", &db, &["planner", "screen", &own]);
     assert_eq!(read["screen"], Value::Null);
     assert_eq!(read["route"], "headless");
     assert_eq!(
@@ -344,15 +304,13 @@ fn a_headless_planner_has_no_screen_and_takes_no_keys_or_answer() {
         vec!["planner", "send", &own, "--key", "exit"],
         vec!["planner", "send", &own, "--answer", "1"],
     ] {
-        let mut argv = send.clone();
-        argv.extend(["--cmux", cmux]);
+        let argv = send.clone();
         let error = refusal(&[("DAGQ_ROLE", "inbox")], &db, &argv);
         assert!(
             error["error"].as_str().unwrap().contains("is headless"),
             "{argv:?}: {error}"
         );
     }
-    assert_eq!(calls(Path::new(cmux)), "", "nothing read or typed");
     assert!(events(&db, "screen_read").is_empty());
     assert!(events(&db, "screen_input_sent").is_empty());
 }
@@ -361,15 +319,9 @@ fn a_headless_planner_has_no_screen_and_takes_no_keys_or_answer() {
 /// break, which a shell's quoting breaks.
 const WORDS: &str = "残りの task も分けて。\"戻す\" 計画は後で。\nIt's `dagq.toml`'s [run.env]; keep it.\n\n  - 2 行目の箇条書き\n";
 
-/// `planner request ID ARGS --cmux CMUX` as the inbox with `stdin` on its
-/// standard input.
-fn request_with_stdin(
-    db: &Path,
-    planner: PlannerId,
-    args: &[&str],
-    cmux: &str,
-    stdin: &[u8],
-) -> Output {
+/// `planner request ID ARGS` as the inbox with `stdin` on its standard
+/// input.
+fn request_with_stdin(db: &Path, planner: PlannerId, args: &[&str], stdin: &[u8]) -> Output {
     let _waiting = common::within(common::STEP_LIMIT, "planner request with stdin");
     let mut child = Command::new(env!("CARGO_BIN_EXE_dagq"))
         .without_actor_env()
@@ -378,7 +330,6 @@ fn request_with_stdin(
         .arg(db)
         .args(["planner", "request", &planner.to_string()])
         .args(args)
-        .args(["--cmux", cmux])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -393,8 +344,6 @@ fn request_with_stdin(
 #[test]
 fn words_from_a_file_or_stdin_are_handed_as_text_gives_them() {
     let (dir, db) = queue();
-    let cmux = stub_cmux(&db);
-    let cmux = cmux.to_str().unwrap();
     let id = planner(
         &db,
         PlannerRoute::Headless,
@@ -413,7 +362,7 @@ fn words_from_a_file_or_stdin_are_handed_as_text_gives_them() {
         &["--file", words_path][..],
         &["--text", "-"][..],
     ] {
-        let output = request_with_stdin(&db, id, args, cmux, WORDS.as_bytes());
+        let output = request_with_stdin(&db, id, args, WORDS.as_bytes());
         assert!(
             output.status.success(),
             "{args:?}: {}",
@@ -442,8 +391,6 @@ fn words_from_a_file_or_stdin_are_handed_as_text_gives_them() {
 #[test]
 fn two_inputs_none_or_unreadable_words_are_refused_and_hand_nothing() {
     let (dir, db) = queue();
-    let cmux = stub_cmux(&db);
-    let cmux = cmux.to_str().unwrap();
     let id = planner(
         &db,
         PlannerRoute::Headless,
@@ -480,7 +427,7 @@ fn two_inputs_none_or_unreadable_words_are_refused_and_hand_nothing() {
         vec!["--text".into(), "x".into(), "--text".into(), "-".into()],
     ] {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let output = request_with_stdin(&db, id, &args, cmux, WORDS.as_bytes());
+        let output = request_with_stdin(&db, id, &args, WORDS.as_bytes());
         assert!(!output.status.success(), "{args:?}");
     }
     // Words that cannot be read, are not UTF-8 or hold nothing are
@@ -509,7 +456,7 @@ fn two_inputs_none_or_unreadable_words_are_refused_and_hand_nothing() {
     ];
     for (args, stdin, reason) in cases {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
-        let output = request_with_stdin(&db, id, &args, cmux, stdin);
+        let output = request_with_stdin(&db, id, &args, stdin);
         assert!(!output.status.success(), "{args:?}");
         let error: Value = serde_json::from_slice(&output.stderr).unwrap();
         let message = error["error"].as_str().unwrap();
@@ -524,7 +471,6 @@ fn two_inputs_none_or_unreadable_words_are_refused_and_hand_nothing() {
     );
     assert!(events(&db, "planner_request_handed").is_empty());
     assert!(events(&db, "turn_requested").is_empty());
-    assert_eq!(calls(Path::new(cmux)), "", "nothing reached cmux");
 }
 
 #[test]

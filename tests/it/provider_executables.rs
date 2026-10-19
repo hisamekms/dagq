@@ -289,15 +289,14 @@ fn planner_with_claude_gone(found: bool) {
     }
 }
 
-/// A repository with one commit, a queue, and stubs of `cmux` and of a
-/// Claude Code installed as Claude Code installs itself: `bin/claude`, a
+/// A repository with one commit, a queue, and a stub of a Claude Code
+/// installed as Claude Code installs itself: `bin/claude`, a
 /// link to `share/claude/versions/2.2.0`. The path of a version an update
 /// removed, `share/claude/versions/2.1.0`, is not there.
 struct Entry {
     dir: tempfile::TempDir,
     db: PathBuf,
     repo: PathBuf,
-    cmux: PathBuf,
     bin: PathBuf,
 }
 
@@ -332,8 +331,6 @@ impl Entry {
                     .success()
             );
         }
-        let cmux = dir.path().join("cmux");
-        common::template::script(&cmux, "#!/bin/sh\nprintf 'PONG\\n'\n");
         let version = dir.path().join("share/claude/versions/2.2.0");
         fs::create_dir_all(version.parent().unwrap()).unwrap();
         // Every call says how it was started (`$0`) and its first argument.
@@ -346,13 +343,7 @@ impl Entry {
         );
         let bin = dir.path().join("bin");
         claude_link(&bin, &version);
-        Self {
-            dir,
-            db,
-            repo,
-            cmux,
-            bin,
-        }
+        Self { dir, db, repo, bin }
     }
 
     fn gone(&self) -> PathBuf {
@@ -377,8 +368,6 @@ impl Entry {
             })
             .arg("--repo")
             .arg(&self.repo)
-            .arg("--cmux")
-            .arg(&self.cmux)
             .arg("--claude")
             .arg(claude)
             .args(extra)

@@ -573,7 +573,7 @@ pub fn token_cut_due(since: i64, now: i64) -> bool {
     now - since >= TOKEN_CUT_INTERVAL_MS
 }
 
-/// The workspace variable holding what the runtime started a planner's
+/// The session's variable holding what the runtime started a planner's
 /// agent with (an [`super::actor_model::ActorLaunch`] as JSON), which the
 /// hook copies into the span's `launch`.
 pub const LAUNCH_ENV: &str = "DAGQ_LAUNCH";
@@ -588,8 +588,6 @@ pub struct SessionHook {
     pub session_id: String,
     pub transcript_path: Option<String>,
     pub cwd: Option<String>,
-    /// The cmux workspace the session runs in (`CMUX_WORKSPACE_ID`).
-    pub workspace_id: Option<String>,
     /// The planner session (`DAGQ_PLANNER_ID`) of a planner's.
     pub planner_id: Option<i64>,
     /// What the runtime started the planner's agent with
@@ -637,7 +635,6 @@ impl SessionHook {
             session_id,
             transcript_path: text("transcript_path"),
             cwd: text("cwd"),
-            workspace_id: env("CMUX_WORKSPACE_ID").filter(|id| !id.trim().is_empty()),
             planner_id: env("DAGQ_PLANNER_ID").and_then(|id| id.trim().parse().ok()),
             launch: env(LAUNCH_ENV)
                 .and_then(|launch| serde_json::from_str::<Value>(&launch).ok())
@@ -656,8 +653,8 @@ pub enum HookEvent {
 
 /// The kind of the span of a session with `DAGQ_SESSION_KIND` `session_kind`,
 /// `DAGQ_ROLE` `role` and `DAGQ_PLANNER_ORIGIN` `origin`, when the hook
-/// records one: the workspace's `DAGQ_SESSION_KIND`, else (a workspace
-/// opened before it) the role, a planner the runtime opened being a
+/// records one: the session's `DAGQ_SESSION_KIND`, else (a session an
+/// earlier binary opened before it) the role, a planner the runtime opened being a
 /// `runtime_planner`. Every other session (workers included) has none.
 pub fn hook_kind(
     session_kind: Option<&str>,
@@ -689,14 +686,15 @@ pub fn end_reason(reason: &str) -> &'static str {
 /// The spans a hook's report closes and opens, given the spans of
 /// [`HOOK_KINDS`] open (oldest first). A start of a session whose span is
 /// open goes on with it (`resume`, `compact`, a `clear` that kept the
-/// session id); one of a new session id closes the spans open in the same
-/// workspace as `next_span` (a `/clear` gave the session a new id) and
-/// opens its own. Without a workspace, it closes the spans of its kind
-/// open without one as `inferred` (ADR-t655-1 decision 3): their
-/// `SessionEnd` was missed, and two such sessions of a kind at once cannot
-/// be told apart. An end closes the session's span; one already closed
-/// changes nothing. `context` is added to the opened payload (a runtime
-/// planner's proposal and goals).
+/// session id); one of a new session id (a `/clear` gave the session a new
+/// id, or another session of the kind started) closes the spans of its
+/// kind open as `inferred` (ADR-t655-1 decision 3) and opens its own: their
+/// `SessionEnd` was missed, and two sessions of a kind at once cannot be
+/// told apart. The terminal is not asked which session it runs
+/// (ADR-t2159-1 decision 1), and the `workspace_id` an earlier binary
+/// recorded in a span is not read. An end closes the session's span; one
+/// already closed changes nothing. `context` is added to the opened
+/// payload (a runtime planner's proposal and goals).
 pub fn hook_changes(hook: &SessionHook, open: &[OpenSpan], context: &Value) -> Vec<SpanChange> {
     let own = |span: &&OpenSpan| {
         HOOK_KINDS.contains(&span.kind()) && span.session_id() == Some(hook.session_id.as_str())
@@ -714,25 +712,10 @@ pub fn hook_changes(hook: &SessionHook, open: &[OpenSpan], context: &Value) -> V
         HookEvent::Start { source } => {
             let mut changes: Vec<SpanChange> = open
                 .iter()
-                .filter(|span| {
-                    HOOK_KINDS.contains(&span.kind())
-                        && match hook.workspace_id.as_deref() {
-                            Some(workspace) => {
-                                span.payload["workspace_id"].as_str() == Some(workspace)
-                            }
-                            None => {
-                                span.payload["workspace_id"].as_str().is_none()
-                                    && span.kind() == hook.kind
-                            }
-                        }
-                })
+                .filter(|span| span.kind() == hook.kind)
                 .map(|span| SpanChange::Close {
                     span: span.clone(),
-                    reason: if hook.workspace_id.is_some() {
-                        NEXT_SPAN
-                    } else {
-                        INFERRED
-                    },
+                    reason: INFERRED,
                 })
                 .collect();
             let mut payload = json!({
@@ -740,7 +723,6 @@ pub fn hook_changes(hook: &SessionHook, open: &[OpenSpan], context: &Value) -> V
                 "session_id": hook.session_id,
                 "cwd": hook.cwd,
                 "transcript_path": hook.transcript_path,
-                "workspace_id": hook.workspace_id,
                 "provider": "claude",
                 "source": source,
             });
@@ -775,8 +757,8 @@ pub fn hook_changes(hook: &SessionHook, open: &[OpenSpan], context: &Value) -> V
 ///   abolished) closes once its planner is over, or, naming none, once no
 ///   person's planner row is open.
 /// - An `inbox` span closes once a later inbox span of another session
-///   id is open (one in another workspace, which the hook's `next_span`
-///   did not close); the same session resumed or compacted goes on in its
+///   id is open (one an earlier binary's hook left open in another cmux
+///   workspace); the same session resumed or compacted goes on in its
 ///   span. The latest inbox span is never closed this way.
 ///
 /// No span closes by how long its transcript has been still: a resident
@@ -1275,6 +1257,9 @@ mod tests {
         assert_eq!(end_reason("other"), EXITED);
     }
 
+    /// The hook's report takes its session from the input and its span's
+    /// kind, planner and launch from the environment; a cmux workspace the
+    /// terminal names is not read (ADR-t2159-1 decision 1).
     #[test]
     fn a_hook_input_names_its_session_and_the_environment_its_span() {
         let env = |vars: &'static [(&'static str, &'static str)]| {
@@ -1309,7 +1294,6 @@ mod tests {
                 session_id: "s".into(),
                 transcript_path: Some("/t.jsonl".into()),
                 cwd: Some("/repo".into()),
-                workspace_id: Some("W".into()),
                 planner_id: Some(7),
                 launch: Some(
                     json!({"role": "runtime_planner", "model": "claude-opus-5-5",
@@ -1322,6 +1306,7 @@ mod tests {
             panic!("expected an open, got {opened:?}");
         };
         assert_eq!(payload["launch"]["effort"], "high");
+        assert_eq!(payload.get("workspace_id"), None, "{payload}");
         let unreadable = env(&[("DAGQ_ROLE", "planner"), ("DAGQ_LAUNCH", "not json")]);
         assert_eq!(
             SessionHook::from_hook("open", &input, unreadable)
@@ -1330,7 +1315,7 @@ mod tests {
                 .launch,
             None
         );
-        let inbox = env(&[("DAGQ_ROLE", "inbox"), ("CMUX_WORKSPACE_ID", " ")]);
+        let inbox = env(&[("DAGQ_ROLE", "inbox"), ("CMUX_WORKSPACE_ID", "W")]);
         let hook = SessionHook::from_hook("close", &input, inbox)
             .unwrap()
             .unwrap();
@@ -1340,7 +1325,6 @@ mod tests {
                 reason: "logout".into()
             }
         );
-        assert_eq!(hook.workspace_id, None);
         assert_eq!(hook.planner_id, None);
         let bare = json!({"session_id": "s"});
         let hook = SessionHook::from_hook("open", &bare, inbox)
@@ -1369,42 +1353,47 @@ mod tests {
         assert!(SessionHook::from_hook("stop", &input, inbox).is_err());
     }
 
+    /// A hook's start opens its session's span, goes on in it while the
+    /// session id is the same, and a new session id of the kind closes the
+    /// open spans of its kind as inferred (ADR-t655-1 decision 3), one an
+    /// earlier binary recorded with its cmux workspace too; an end closes
+    /// its session's span once.
     #[test]
     fn a_hook_opens_goes_on_replaces_and_closes_spans() {
-        let hook = |event: HookEvent, session: &str, workspace: Option<&str>| SessionHook {
+        let hook = |event: HookEvent, kind: &'static str, session: &str| SessionHook {
             event,
-            kind: INBOX,
+            kind,
             session_id: session.into(),
             transcript_path: None,
             cwd: None,
-            workspace_id: workspace.map(str::to_owned),
             planner_id: Some(2),
             launch: None,
         };
-        let start = |session, workspace| {
+        let start = |session| {
             hook(
                 HookEvent::Start {
                     source: "startup".into(),
                 },
+                INBOX,
                 session,
-                workspace,
             )
         };
-        let opened_changes =
-            hook_changes(&start("s-1", Some("W")), &[], &json!({"proposal_id": 4}));
+        let opened_changes = hook_changes(&start("s-1"), &[], &json!({"proposal_id": 4}));
         let payload = opened(&opened_changes[0]);
         assert_eq!(payload["kind"], INBOX);
         assert_eq!(payload["session_id"], "s-1");
-        assert_eq!(payload["workspace_id"], "W");
+        assert_eq!(payload.get("workspace_id"), None);
         assert_eq!(payload["source"], "startup");
         assert_eq!(payload["planner_id"], 2);
         assert_eq!(payload["proposal_id"], 4);
         let open = [
             span(1, payload.clone()),
+            // An earlier binary's span, in a cmux workspace.
             span(
                 2,
                 json!({"kind": INBOX, "session_id": "s-9", "workspace_id": "V"}),
             ),
+            span(5, json!({"kind": PLANNER, "session_id": "s-6"})),
             // A run's span is never the hook's.
             span(
                 3,
@@ -1412,40 +1401,38 @@ mod tests {
             ),
         ];
         // The same session: goes on.
-        assert!(hook_changes(&start("s-1", Some("W")), &open, &Value::Null).is_empty());
-        // A new session id in the workspace: replaces its span.
-        let replaced = hook_changes(&start("s-2", Some("W")), &open, &Value::Null);
-        assert_eq!(replaced.len(), 2);
-        assert_eq!(closed(&replaced[0]), (1, NEXT_SPAN));
-        assert_eq!(opened(&replaced[1])["session_id"], "s-2");
-        // No workspace, and no span of its kind open without one: closes
-        // nothing.
-        let alone = hook_changes(&start("s-3", None), &open, &Value::Null);
-        assert_eq!(alone.len(), 1);
-        // No workspace: a span of its kind open without one missed its
-        // `SessionEnd` and closes as inferred (ADR-t655-1 decision 3); its
-        // own session's span, another kind's and one with a workspace
+        assert!(hook_changes(&start("s-1"), &open, &Value::Null).is_empty());
+        assert!(hook_changes(&start("s-9"), &open, &Value::Null).is_empty());
+        // A new session id: the spans of its kind missed their
+        // `SessionEnd` and close as inferred; another kind's and a run's
         // do not.
-        let unscoped = [
-            span(1, payload.clone()),
-            span(4, json!({"kind": INBOX, "session_id": "s-5"})),
-            span(5, json!({"kind": PLANNER, "session_id": "s-6"})),
-            span(6, json!({"kind": INBOX, "session_id": "s-7"})),
-        ];
-        let next = hook_changes(&start("s-7", None), &unscoped, &Value::Null);
-        assert!(next.is_empty(), "its own session goes on: {next:?}");
-        let next = hook_changes(&start("s-8", None), &unscoped, &Value::Null);
+        let next = hook_changes(&start("s-2"), &open, &Value::Null);
         assert_eq!(next.len(), 3);
-        assert_eq!(closed(&next[0]), (4, INFERRED));
-        assert_eq!(closed(&next[1]), (6, INFERRED));
-        assert_eq!(opened(&next[2])["session_id"], "s-8");
+        assert_eq!(closed(&next[0]), (1, INFERRED));
+        assert_eq!(closed(&next[1]), (2, INFERRED));
+        assert_eq!(opened(&next[2])["session_id"], "s-2");
+        let planner = hook(
+            HookEvent::Start {
+                source: "startup".into(),
+            },
+            PLANNER,
+            "s-7",
+        );
+        let next = hook_changes(&planner, &open, &Value::Null);
+        assert_eq!(next.len(), 2);
+        assert_eq!(closed(&next[0]), (5, INFERRED));
+        // Nothing of its kind open: closes nothing.
+        assert_eq!(
+            hook_changes(&start("s-3"), &open[2..], &Value::Null).len(),
+            1
+        );
         let end = |session| {
             hook(
                 HookEvent::End {
                     reason: "clear".into(),
                 },
+                INBOX,
                 session,
-                Some("W"),
             )
         };
         let ended = hook_changes(&end("s-1"), &open, &Value::Null);

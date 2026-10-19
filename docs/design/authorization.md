@@ -272,12 +272,9 @@ CLI（`src/main.rs`の`execute()`）はqueueの場所を決めた直後、queue�
 - 拒否は`authorization_denied`として、拒まれた呼び出し元をactorにしてqueueに記録する（`src/infrastructure/denials.rs`の`QueueDenials`が、判定の後でだけqueueを開く）。
   queueが無い・このバイナリが開けない（`init`の前、`migrate`の前）ときは記録できず、拒否は拒否のまま返す。
   errorの形は計画系と同じ
-- 生の`cmux`はこのpolicyの外にある（dagqのCLIを通らない）。
-  inboxとplannerには、Claudeのsettingsの`permissions.deny`の`Bash(cmux:*)`を置き、上の`run` / `planner`のCLIを使わせる（[ADR-t1228-2](../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）。
-  これは**guardrailであってenforcementではない**: hostの判定は助言的なまま（ADR-t728-1決定6）で、絶対pathやscriptからの`cmux`は通り、`dagq inbox`を通さずに開いたinboxと`claude`を打ち直したsessionには効かない。
-  拒むのはあくまでCLIの判定で、cmuxを拒んだことでCLIの権限は変わらない。
-  workerとjobの`cmux`は拒まない（隔離が扱う）。
-  Codexのinboxは同じ趣旨をCodexの手段で持たせ、無ければguardrailが無いと[Security](security.md#判定の場所)に書く（決定6）。
+- dagqはcmuxのsessionを持たないので、どのroleのsettingsもcmuxを拒まない（[ADR-t2159-1](../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定5）。
+  sessionへの操作は上の`run` / `planner`のCLIで行う。
+  Codexのinboxは同じ趣旨（dagqのCLIを通す）をCodexの手段で持たせ、無ければguardrailが無いと[Security](security.md#判定の場所)に書く（決定5）。
   settingsの場所・中身と`status` / `doctor`の`inbox_guardrail`は[`up` / `down`](supervisor-lifecycle/up-down.md)と[Security](security.md)が持つ
 
 #### 制御側の起動としての`supervise`と`auto-update`
@@ -346,8 +343,6 @@ observerとjobの拒否のerrorの文は計画系と同じ。
   clapの全subcommandが`DAGQ_COMMANDS`か、`src/main.rs`のtestの`LEFT_OUT_COMMANDS`のどちらかにあることもunit testが確かめ、どちらにも無いsubcommandを足すと落ちる。
   roleによって拒まれうるsubcommandを足したら、読み取りの形を持つものを除いて表に入れる。
 - actorを名指す変数（`IDENTITY_ENV`）の書き換えも全roleで拒む。
-- inboxとplannerには最後に`Bash(cmux:*)`（`RAW_CMUX_DENIED`）も足す（[ADR-t1228-2](../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）。
-  workerとjobには足さない（決定7）。
 - workerとplannerのsession・turnの設定とreview jobの設定では、`SIGNAL_BY_NAME_DENIED`の後に置く（turnの設定ではその間に`AskUserQuestion`と予約の道具を挟む。[非対話のworker](supervisor-lifecycle/headless-worker.md)。review jobの設定はroleの規則だけ）。
   inboxの設定（[`up` / `down`](supervisor-lifecycle/up-down.md)）は`permissions.deny`だけで、roleの規則だけを持ち、`SIGNAL_BY_NAME_DENIED`は入れない。
 

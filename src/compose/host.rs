@@ -62,7 +62,6 @@ pub struct AutoUpdateJob {
     /// How long that e2e may run.
     pub e2e_timeout: Duration,
     /// What a supervisor started again by `up` uses (see [`restarter`]).
-    pub cmux: PathBuf,
     pub claude: PathBuf,
     /// The Codex CLI of the supervisor that started the job (ADR-t813-2).
     pub codex: PathBuf,
@@ -85,18 +84,15 @@ fn e2e_log(build_log: &Path) -> PathBuf {
     build_log.with_file_name(format!("{stem}.e2e.log"))
 }
 
-/// The arguments of the `up` that starts a supervisor registered in the
-/// retired in-cmux mode again after an update's job, beside `--db` and its
-/// own flags.
+/// The arguments of the `up` that starts a supervisor an earlier binary
+/// registered in the retired in-cmux mode again after an update's job,
+/// beside `--db` and its own flags: no `--cmux` (ADR-t2159-1 decision 6).
 fn restart_arguments(
-    cmux: &Path,
     claude: &Path,
     codex: &Path,
     plugin_dir: Option<&Path>,
 ) -> Result<Vec<String>> {
     let mut arguments = vec![
-        "--cmux".to_owned(),
-        path_text(cmux)?,
         "--claude".to_owned(),
         path_text(claude)?,
         "--codex".to_owned(),
@@ -138,7 +134,6 @@ pub struct ReleaseUpdateJob {
     /// The cargo that installs the release.
     pub cargo: PathBuf,
     /// What a supervisor started again by `up` uses (see [`restarter`]).
-    pub cmux: PathBuf,
     pub claude: PathBuf,
     /// The Codex CLI of the supervisor that started the job (ADR-t813-2).
     pub codex: PathBuf,
@@ -418,16 +413,16 @@ fn up_run_env_programs(
 }
 
 /// The arguments `install` gives the `up` that starts a drained supervisor
-/// again (`--cmux`, and `--claude`, `--codex`, `--plugin-dir` when given):
-/// a provider's path as given, a link kept and a gone one found again by
-/// its name (ADR-t2079-1); a Codex not found is passed as given.
+/// again (`--claude`, `--codex`, `--plugin-dir` when given, and no `--cmux`,
+/// ADR-t2159-1 decision 6): a provider's path as given, a link kept and a
+/// gone one found again by its name (ADR-t2079-1); a Codex not found is
+/// passed as given.
 pub fn install_restart_arguments(
-    cmux: &Path,
     claude: Option<&Path>,
     codex: Option<&Path>,
     plugin_dir: Option<&Path>,
 ) -> Result<Vec<String>> {
-    let mut restart = vec!["--cmux".to_owned(), path_text(cmux)?];
+    let mut restart = Vec::new();
     if let Some(claude) = claude {
         restart.extend([
             "--claude".to_owned(),
@@ -703,12 +698,8 @@ impl OneShot {
             .canonicalize()
             .context("queue must already be initialized")?;
         let queues = |db: &Path| self.host_queues(db);
-        let restart_arguments = restart_arguments(
-            &job.cmux,
-            &job.claude,
-            &job.codex,
-            job.plugin_dir.as_deref(),
-        )?;
+        let restart_arguments =
+            restart_arguments(&job.claude, &job.codex, job.plugin_dir.as_deref())?;
         let restart = restarter(&db, &job.target, &restart_arguments);
         let paths = update::UpdatePaths::under(&location.queue_dir);
         let e2e = installation::E2eSettings {
@@ -770,12 +761,8 @@ impl OneShot {
             .canonicalize()
             .context("queue must already be initialized")?;
         let queues = |db: &Path| self.host_queues(db);
-        let restart_arguments = restart_arguments(
-            &job.cmux,
-            &job.claude,
-            &job.codex,
-            job.plugin_dir.as_deref(),
-        )?;
+        let restart_arguments =
+            restart_arguments(&job.claude, &job.codex, job.plugin_dir.as_deref())?;
         let restart = restarter(&db, &job.target, &restart_arguments);
         // Where the supervisor started it: its sessions' repository.
         let plugin = job.plugin_dir.is_none().then(|| ClaudePlugin {
@@ -1147,4 +1134,41 @@ pub(super) fn sccache_port(
             dagq: Some(runner.to_path_buf()),
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `up` an update's job or `install` starts a supervisor again with
+    /// is given its providers and plugin directory, and no `--cmux`
+    /// (ADR-t2159-1 decision 6).
+    #[test]
+    fn a_restarts_up_is_given_the_providers_and_no_cmux() {
+        assert_eq!(
+            restart_arguments(
+                Path::new("/opt/bin/claude"),
+                Path::new("/opt/bin/codex"),
+                Some(Path::new("/plugin")),
+            )
+            .unwrap(),
+            [
+                "--claude",
+                "/opt/bin/claude",
+                "--codex",
+                "/opt/bin/codex",
+                "--plugin-dir",
+                "/plugin",
+            ]
+        );
+        assert_eq!(
+            install_restart_arguments(None, None, Some(Path::new("/plugin"))).unwrap(),
+            ["--plugin-dir", "/plugin"]
+        );
+        assert!(
+            install_restart_arguments(None, None, None)
+                .unwrap()
+                .is_empty()
+        );
+    }
 }

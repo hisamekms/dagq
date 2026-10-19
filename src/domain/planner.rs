@@ -1,9 +1,10 @@
-//! A planner session (ADR-0041 decisions 1, 6, 12, 13): an on-demand cmux
-//! workspace where a planner writes goals and tasks and submits them as a
-//! proposal. The runtime opens one for a proposal it sends back, a draft, a
-//! finding or a planning request; the row of a person's planner (`dagq
-//! plan`, abolished by ADR-t1394-1) opened before is closed without cmux
-//! (ADR-t1433-2 decision 5). Each is recorded apart
+//! A planner session (ADR-0041 decisions 1, 6, 12, 13): an on-demand
+//! headless session, started as a background wrapper (ADR-t1433-2), where a
+//! planner writes goals and tasks and submits them as a proposal. The
+//! runtime opens one for a proposal it sends back, a draft, a finding or a
+//! planning request; the row of a person's planner (`dagq plan`, abolished
+//! by ADR-t1394-1) or of one an earlier binary opened in a cmux workspace
+//! is closed without cmux (ADR-t1433-2 decision 5). Each is recorded apart
 //! (`planners`), with the pids and heartbeat of its session wrapper, so its
 //! liveness and idleness are judged the way a worker's are.
 
@@ -35,7 +36,9 @@ pub struct PlannerSession {
     /// The planning request the runtime opened it for (ADR-t1394-1
     /// decision 4).
     pub request_id: Option<RequestId>,
-    /// The cmux workspace's UUID, once cmux created it (ADR-0026).
+    /// The handle of its background wrapper (ADR-t1404-1 decision 10),
+    /// or the cmux workspace's UUID an earlier binary recorded
+    /// (ADR-0026).
     pub workspace_id: Option<String>,
     pub wrapper_pid: Option<u32>,
     pub agent_pid: Option<u32>,

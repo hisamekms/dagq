@@ -341,7 +341,8 @@ pub fn start_provisioning(mut run: TaskRun, plan: &RunPlan) -> Result<TaskRun, D
     Ok(run)
 }
 
-/// A starting run gets its cmux workspace once.
+/// A starting run gets its session's handle (its background wrapper's)
+/// once.
 pub fn attach_workspace(mut run: TaskRun, workspace_id: String) -> Result<TaskRun, DomainError> {
     require_status(&run, &[RunStatus::Starting], "attach a workspace to")?;
     require(run.workspace_id.is_none(), || {

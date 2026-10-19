@@ -69,9 +69,6 @@ pub fn fixture() -> Fixture {
 pwd >> \"$0.plugin-args\"; exec cat \"$0.plugins\"; fi\nprintf 'claude-stub 0.0.0\\n'\n",
     );
 
-    // Only passed on to the supervisor's command line: no cmux is there.
-    let cmux = dir.path().join("cmux-absent");
-
     // Claude Code has accepted the folder trust dialog at the repository root.
     let claude_config = dir.path().join("claude.json");
     let root = repo.canonicalize().unwrap();
@@ -104,7 +101,6 @@ pwd >> \"$0.plugin-args\"; exec cat \"$0.plugins\"; fi\nprintf 'claude-stub 0.0.
             in_cmux: false,
             no_wait: false,
             plugin_dir: Some(dir.path().to_path_buf()),
-            cmux,
             claude,
             codex: "/opt/bin/codex".into(),
             startup_timeout: Duration::from_secs(5),

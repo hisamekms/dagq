@@ -218,8 +218,6 @@ fn up_starts_the_agent_once_and_reuses_it_after_and_opens_no_inbox() {
         "supervise",
         "--log-dir",
         fixture.location.log_dir.to_str().unwrap(),
-        "--cmux",
-        fixture.options.cmux.to_str().unwrap(),
         "--claude",
         fixture.options.claude.to_str().unwrap(),
         // Fixed like `--claude` (ADR-t813-2).
@@ -250,8 +248,10 @@ fn up_starts_the_agent_once_and_reuses_it_after_and_opens_no_inbox() {
     assert!(contents.contains(
         "<key>EnvironmentVariables</key>\n\t<dict>\n\t\t<key>PATH</key>\n\t\t<string>/usr/bin:/bin:/home/u/.local/bin</string>\n\t</dict>"
     ));
-    // The supervisor calls no cmux, so the agent carries no cmux variable.
+    // The supervisor calls no cmux, so the agent carries no cmux variable
+    // and no `--cmux` (ADR-t2159-1 decision 6).
     assert!(!contents.contains("CMUX_"));
+    assert!(!contents.contains("--cmux"), "{contents}");
     assert!(contents.contains("<key>KeepAlive</key>\n\t<true/>"));
     assert!(contents.contains("<key>RunAtLoad</key>\n\t<true/>"));
     let launchd_log = fixture.location.log_dir.join("launchd.log");
@@ -981,11 +981,10 @@ fn up_and_down_record_what_they_did_through_tracing() {
 }
 
 /// `up` requires Claude Code and an initialized queue, and no cmux: the
-/// fixture's PATH and `--cmux` name none, and the supervisor starts.
+/// fixture's PATH names none, and the supervisor starts.
 #[test]
 fn up_requires_claude_and_an_initialized_queue_but_no_cmux() {
     let fixture = fixture();
-    assert!(!fixture.options.cmux.exists());
     let launchd = FakeLaunchd::new(&fixture.location.db);
     let processes = FakeProcesses::default();
     let mut options = fixture.options.clone();

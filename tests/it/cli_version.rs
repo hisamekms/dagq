@@ -423,7 +423,7 @@ fn install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back() {
 
         path
     };
-    let (cmux, claude) = (stub("cmux", "PONG"), stub("claude", "stub 1.0"));
+    let claude = stub("claude", "stub 1.0");
     // The fixed binary the supervisor runs, and the one `install` replaces.
     let fixed = dir.path().join("bin").join("dagq");
     std::fs::create_dir_all(fixed.parent().unwrap()).unwrap();
@@ -451,8 +451,6 @@ fn install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back() {
             .arg(&db)
             .args(["supervise", "--observe-interval", "0", "--repo"])
             .arg(&repo)
-            .arg("--cmux")
-            .arg(&cmux)
             .arg("--claude")
             .arg(&claude)
             // Looks for the handoff every 100ms instead of 2s (task 1048).
@@ -561,10 +559,7 @@ fn install_of_a_build_that_dies_puts_the_binary_back_and_asks_the_inbox() {
         crate::common::template::script(&path, text);
         path
     };
-    let (cmux, claude) = (
-        stub("cmux", "#!/bin/sh\nprintf 'PONG\\n'\n"),
-        stub("claude", "#!/bin/sh\nprintf 'stub 1.0\\n'\n"),
-    );
+    let claude = stub("claude", "#!/bin/sh\nprintf 'stub 1.0\\n'\n");
     let bin = env!("CARGO_BIN_EXE_dagq");
     let quoted_bin = crate::common::shell_path(bin);
     // Like the real binary for every check `install` makes, but a
@@ -588,8 +583,6 @@ exec {quoted_bin} \"$@\"\n"
             .arg(&db)
             .args(["supervise", "--observe-interval", "0", "--repo"])
             .arg(&repo)
-            .arg("--cmux")
-            .arg(&cmux)
             .arg("--claude")
             .arg(&claude)
             .args(FAST_SUPERVISOR)
@@ -722,7 +715,6 @@ fn auto_update_installs_each_runtime_landing_and_puts_a_broken_build_back() {
 
         path
     };
-    let cmux = stub("cmux", "#!/bin/sh\nprintf 'PONG\\n'\n");
     let claude = stub("claude", "#!/bin/sh\nprintf 'stub 1.0\\n'\n");
     let bin = env!("CARGO_BIN_EXE_dagq");
     let quoted_bin = crate::common::shell_path(bin);
@@ -755,8 +747,6 @@ exec {quoted_bin} \"$@\"\n"
             .arg(&db)
             .args(["supervise", "--observe-interval", "0", "--repo"])
             .arg(&repo)
-            .arg("--cmux")
-            .arg(&cmux)
             .arg("--claude")
             .arg(&claude)
             .args(["--auto-update", "--update-interval", "1"])
@@ -853,9 +843,10 @@ exec {quoted_bin} \"$@\"\n"
 
     // Once the repository is not dagq's source (ADR-t614-1), runtime
     // landings build nothing; they do again once it is.
-    // Committed before the working file changes, so no look sees the new
-    // manifest with the old head; the working file leaves dagq first, so no
-    // look sees dagq's manifest with the new head either.
+    // A look reads the working file before main's head. Committed before the
+    // working file changes, so no look sees the new manifest with the old
+    // head; the working file leaves dagq first and is committed once a look
+    // read it, so no look that read dagq's manifest sees the new head either.
     let manifest = |name: &str| {
         if name != "dagq" {
             std::fs::write(
@@ -863,6 +854,13 @@ exec {quoted_bin} \"$@\"\n"
                 format!("[package]\nname = \"{name}\"\n"),
             )
             .unwrap();
+            wait(
+                "the look at the working file outside dagq's source",
+                &mut || {
+                    std::fs::read_to_string(&log)
+                        .is_ok_and(|text| text.contains("the repository is not dagq's source (its"))
+                },
+            );
         }
         let staged = dir.path().join("Cargo.toml.staged");
         std::fs::write(&staged, format!("[package]\nname = \"{name}\"\n")).unwrap();
@@ -994,13 +992,12 @@ exec {quoted_bin} \"$@\"\n"
     assert_eq!(exit.code(), Some(3));
 }
 
-/// A queue and a repository with one commit to supervise, and stubs of
-/// cmux and claude beside them.
+/// A queue and a repository with one commit to supervise, and a stub of
+/// claude beside them.
 struct Supervised {
     dir: tempfile::TempDir,
     db: std::path::PathBuf,
     repo: std::path::PathBuf,
-    cmux: std::path::PathBuf,
     claude: std::path::PathBuf,
 }
 
@@ -1039,11 +1036,10 @@ fn supervised() -> Supervised {
         crate::common::template::script(&path, format!("#!/bin/sh\nprintf '{text}\\n'\n"));
         path
     };
-    let (cmux, claude) = (stub("cmux", "PONG"), stub("claude", "stub 1.0"));
+    let claude = stub("claude", "stub 1.0");
     Supervised {
         db,
         repo,
-        cmux,
         claude,
         dir,
     }
@@ -1065,8 +1061,6 @@ impl Supervised {
                 .arg(&self.db)
                 .args(["supervise", "--observe-interval", "0", "--repo"])
                 .arg(&self.repo)
-                .arg("--cmux")
-                .arg(&self.cmux)
                 .arg("--claude")
                 .arg(&self.claude)
                 .args(FAST_SUPERVISOR)

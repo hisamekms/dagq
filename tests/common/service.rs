@@ -121,14 +121,13 @@ fn dagq(db: &Path, args: &[&str]) -> std::process::Output {
 }
 
 /// Start the service of the queue at `db` unless this test process did
-/// already, with `cmux` as the cmux it notifies the inbox through (a
-/// stub's: the host's is never reached).
-pub fn serve_with(db: &Path, cmux: &Path) {
+/// already.
+pub fn serve(db: &Path) {
     let mut served = served();
     if served.contains(db) {
         return;
     }
-    let output = dagq(db, &["service", "start", "--cmux", cmux.to_str().unwrap()]);
+    let output = dagq(db, &["service", "start"]);
     assert!(
         output.status.success(),
         "the queue service of {} did not start: {}",
@@ -136,20 +135,6 @@ pub fn serve_with(db: &Path, cmux: &Path) {
         String::from_utf8_lossy(&output.stderr)
     );
     served.insert(db.to_owned());
-}
-
-/// [`serve_with`] a stub cmux beside the queue that only records its calls
-/// (`calls` beside it), shared like the tests' other stubs.
-pub fn serve(db: &Path) {
-    let stub = db.parent().unwrap().join("service-cmux").join("cmux");
-    if !stub.exists() {
-        std::fs::create_dir_all(stub.parent().unwrap()).unwrap();
-        crate::common::template::script(
-            &stub,
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${0%/*}/calls\"\n",
-        );
-    }
-    serve_with(db, &stub);
 }
 
 /// The file a test's stub writes beside the queue at `db` once it started
@@ -185,11 +170,10 @@ impl Drop for Served {
     }
 }
 
-/// A queue with one task claimed as run `run`, and a stub cmux beside it.
+/// A queue with one task claimed as run `run`.
 pub struct Queue {
     _dir: tempfile::TempDir,
     pub db: PathBuf,
-    pub cmux: PathBuf,
     pub run: TaskRun,
 }
 
@@ -215,24 +199,15 @@ pub fn queue() -> Queue {
     let ClaimOutcome::Claimed { run } = queue.claim(&common::queue::base()).unwrap() else {
         panic!("nothing claimed");
     };
-    let cmux = dir.path().join("cmux-stub");
-    common::template::script(
-        &cmux,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"${0%/*}/notifications\"\n",
-    );
     Queue {
         db: dir.path().join("queue.db"),
         _dir: dir,
-        cmux,
         run: *run,
     }
 }
 
 pub fn start(queue: &Queue) -> Value {
-    ok(
-        &queue.db,
-        &["service", "start", "--cmux", queue.cmux.to_str().unwrap()],
-    )
+    ok(&queue.db, &["service", "start"])
 }
 
 pub fn token(queue: &Queue, principal: &Principal) -> String {

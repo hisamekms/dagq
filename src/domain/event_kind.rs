@@ -569,8 +569,8 @@ impl EventKind {
                 // (ADR-t906-1 decision 1 (3)).
                 | InboxNudged
                 | InboxNudgeFailed
-                // The inbox `up` opened, with whether its settings deny raw
-                // cmux (ADR-t1228-2 decision 4).
+                // The inbox `dagq inbox` opened, with whether it had its
+                // guardrail settings (ADR-t2159-1 decisions 2 and 5).
                 | InboxOpened
                 // The inbox's watcher gone and back, for the KPI of how long
                 // an ask waits to be seen (task 1021).
@@ -889,8 +889,9 @@ pub const IDLE_INFERRED: &str = EventKind::IdleInferred.as_str();
 /// was also sent through `[push]` (`action`). Older records hold the typed
 /// lines and the `cmux notify` of ADR-t906-1.
 pub const INBOX_NUDGED: &str = EventKind::InboxNudged.as_str();
-/// `up` opened the inbox's workspace, with whether it started the inbox
-/// with the settings that deny raw cmux (ADR-t1228-2 decision 4).
+/// `dagq inbox` opened the inbox in the person's terminal, with whether it
+/// started the inbox with its guardrail settings (ADR-t2159-1 decisions 2
+/// and 5); an earlier binary's `up` recorded the workspace it opened.
 pub const INBOX_OPENED: &str = EventKind::InboxOpened.as_str();
 /// A nudge of the inbox an older supervisor could not type or notify
 /// (ADR-t906-1); read only.

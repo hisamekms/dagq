@@ -13,7 +13,6 @@ fn event(db: &std::path::Path, action: &str, input: &Value) -> Value {
     command
         .without_actor_env()
         .env("DAGQ_ROLE", "inbox")
-        .env_remove("CMUX_WORKSPACE_ID")
         .args(["--db", db.to_str().unwrap(), "session-event", action])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

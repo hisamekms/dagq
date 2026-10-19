@@ -89,8 +89,8 @@ runtimeが起動するAI actorは全て`ActorExecutor::spawn(ActorExecutionSpec)
   sandboxのbackendは同じspecを強制する側になる。
 - Claudeのsettingsは、Claude Code adapter（`src/infrastructure/adapters.rs`）の`agent_settings(role)`の1か所でroleから決まる（Claude Codeの実装のものなのでadapterが持つ。ADR-t1063-1の決定3。headless jobは権限の意図`JobAccess`だけを渡す。[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）。
   workerとruntimeのplannerは非対話のturnで動き、turnのsettingsは`turn_command`が書く（hookなし、`permissions.deny`、サジェストの設定なし）。
-  inboxも`agent_settings`では`None`だが、`dagq inbox`が開くときに`AgentProvider::inbox_command`が`permissions.deny`だけの設定（hookもサジェストの設定も無い）を書いて渡す（[ADR-t1228-2](../../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)、[`up` / `down`](up-down.md)）。
-  設定を書くroleの`permissions.deny`には、roleのpolicyが拒むコマンドの規則（`permission_deny(role)`。inboxとplannerは`Bash(cmux:*)`も。[Authorization](../authorization.md#claudeのpermissionsdenyguardrail)）が入る。
+  inboxも`agent_settings`では`None`だが、`dagq inbox`が開くときに`AgentProvider::inbox_command`が`permissions.deny`だけの設定（hookもサジェストの設定も無い）を書いて渡す（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定5、[`up` / `down`](up-down.md)）。
+  設定を書くroleの`permissions.deny`には、roleのpolicyが拒むコマンドの規則（`permission_deny(role)`。[Authorization](../authorization.md#claudeのpermissionsdenyguardrail)）が入る。
   Claude Code adapterはこれをファイルに書くだけ（[Agent provider lifecycle](../provider-lifecycle.md)）。
 - executorの外でClaudeを起動するのはtestのstubだけ。executorの外で起動するもの（登録済みのin-cmuxのsupervisorのworkspace、session wrapper自身、supervisorが起動する`observe`と`auto-update`のコマンド）はAI actorではなく、信頼する制御側。
 

@@ -320,7 +320,6 @@ mod tests {
             session_id: session.into(),
             transcript_path: Some(dir.join(format!("{session}.jsonl")).display().to_string()),
             cwd: Some("/repo".into()),
-            workspace_id: Some(format!("W-{session}")),
             planner_id: None,
             launch: None,
         }
@@ -552,6 +551,8 @@ mod tests {
     /// `session_closed` does, and is never before a cut made while the span
     /// was open. An `inferred` close the hook made (at the next start of
     /// its kind) is counted to its close, as its final `session_turns` is.
+    /// Each span closes before the next opens, as a start closes the open
+    /// spans of its kind.
     #[test]
     fn an_inferred_close_is_cut_through_its_last_record_and_never_back() {
         let dir = tempfile::tempdir().unwrap();
@@ -579,13 +580,13 @@ mod tests {
                 "2026-10-01T02:30:00.000Z",
                 (2, 2),
             );
-        }
-        // "b" is cut at 03:00, after its last record.
-        let b = open_hook_spans(conn).unwrap().remove(1);
-        let start = b.opened_ms.unwrap();
-        let at = rfc3339_millis("2026-10-01T03:00:00.000Z").unwrap();
-        assert!(write(conn, &prepare(conn, b, start, at, false).unwrap()).unwrap());
-        for session in ["a", "b", "c"] {
+            if session == "b" {
+                // "b" is cut at 03:00, after its last record.
+                let b = open_hook_spans(conn).unwrap().remove(0);
+                let start = b.opened_ms.unwrap();
+                let at = rfc3339_millis("2026-10-01T03:00:00.000Z").unwrap();
+                assert!(write(conn, &prepare(conn, b, start, at, false).unwrap()).unwrap());
+            }
             record_hook(conn, &hook(dir.path(), false, INBOX, session)).unwrap();
             closes.push(
                 conn.query_row("SELECT max(id) FROM run_events", [], |r| r.get::<_, i64>(0))

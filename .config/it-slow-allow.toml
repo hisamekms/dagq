@@ -1750,3 +1750,28 @@ task = 955
 name = "runtime_integrate::integrate_registers_the_landed_follow_ups_as_draft_tasks_of_the_goal_once"
 reason = "B 境界（Git・SQLite・supervisor と integrate の配線）: 実際の supervisor の run と integrate の着地が receipt の follow_ups を goal の draft として 1 度だけ登録し、着地しない receipt では登録しないことを確かめる代表の 1 本。本文の変更は cancel に --reason を足した CLI の引数だけ。follow_up の登録の判断は domain の unit test"
 task = 955
+
+[[test]]
+name = "cli_version::install_of_a_build_that_dies_puts_the_binary_back_and_asks_the_inbox"
+reason = "B 境界（守る境界）: install hands a running supervisor over to a built binary whose supervisor dies, across processes, and puts the old binary back by a file rename"
+task = 2163
+
+[[test]]
+name = "queue_service::the_service_answers_its_principals_and_refuses_the_rest_on_its_side"
+reason = "B 境界（守る境界）: the queue service process answers on its unix socket for the principals its token files name, with the SQLite queue behind it"
+task = 2163
+
+[[test]]
+name = "runtime_codex_ask::a_codex_workers_ask_goes_to_the_queue_service"
+reason = "B 境界（守る境界）: a Codex worker's turn the supervisor starts reaches the queue service process in client mode, across processes and the SQLite queue"
+task = 2163
+
+[[test]]
+name = "runtime_handoff::auto_update_builds_runtime_landings_and_retries_on_the_answer"
+reason = "B 境界（守る境界）: the supervisor starts the automatic update's job process for a landing that changes the runtime, across Git and processes"
+task = 2163
+
+[[test]]
+name = "runtime_background::without_the_old_keys_a_worker_runs_in_the_background_with_no_warning"
+reason = "B 境界（守る境界）: the supervisor's wiring starts a worker's session wrapper in the background from a dagq.toml without [headless], through review and landing on Git and SQLite"
+task = 2163

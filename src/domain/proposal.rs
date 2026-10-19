@@ -8,12 +8,11 @@ use serde::{Deserialize, Serialize};
 use super::{DomainError, GoalId, PlannerOrigin, ProposalId, ProposalStatus, TaskId, require};
 
 /// The planner that owns a proposal: whether a person or the runtime
-/// opened it, and the handle of the planner that submitted. A person's
-/// planner run in a cmux workspace gives its workspace
-/// (`CMUX_WORKSPACE_ID`, which only such a planner has). A planner of the
-/// runtime's has no workspace: `submit` takes the background handle of the
-/// planner row that the turn's `DAGQ_PLANNER_ID` names. The handle is
-/// absent when neither gives one.
+/// opened it, and the handle of the planner that submitted: `submit` takes
+/// the background handle of the planner row that the turn's
+/// `DAGQ_PLANNER_ID` names, and none without one. The terminal's variables
+/// name no owner (ADR-t2159-1 decision 1); a proposal an earlier binary
+/// recorded may keep the cmux workspace of a person's planner.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannerOwner {
     pub origin: PlannerOrigin,

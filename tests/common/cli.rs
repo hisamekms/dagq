@@ -117,19 +117,19 @@ pub fn refused(db: &Path, args: &[&str]) -> String {
     error["error"].as_str().unwrap().to_owned()
 }
 
-/// `submit` as a planner session would run it: in a cmux workspace, with
-/// the planner's origin when the runtime opened it.
+/// `submit` as a planner session would run it: as the planner `planner`
+/// (`DAGQ_PLANNER_ID`) when given, with the planner's origin when the
+/// runtime opened it.
 pub fn submit_from(
     db: &Path,
-    workspace: Option<&str>,
+    planner: Option<&str>,
     origin: Option<&str>,
     args: &[&str],
 ) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
     command.without_actor_env();
-    command.env_remove("CMUX_WORKSPACE_ID");
-    if let Some(workspace) = workspace {
-        command.env("CMUX_WORKSPACE_ID", workspace);
+    if let Some(planner) = planner {
+        command.env("DAGQ_PLANNER_ID", planner);
     }
     if let Some(origin) = origin {
         command.env("DAGQ_PLANNER_ORIGIN", origin);

@@ -2008,10 +2008,10 @@ pub(super) fn span_task(conn: &Connection, span: &OpenSpan) -> Result<Option<Tas
 
 /// Record what the plugin's hook reported of an inbox or planner session
 /// (ADR-0048 decision 6): open its span, go on with the one open for its
-/// session id, close the one of the session a `/clear` replaced in its
-/// workspace (`next_span`) or, without a workspace, the ones of its kind
-/// open without one (`inferred`, ADR-t655-1 decision 3), or close it at
-/// its end. A span closed already is not closed again. No transcript is
+/// session id, close the ones of its kind open for another session id (a
+/// `/clear` replaced the session, or another session of the kind started:
+/// `inferred`, ADR-t655-1 decision 3), or close it at its end. A span
+/// closed already is not closed again. No transcript is
 /// read: a close is marked [`HOOK_INTAKE_PENDING`], and the supervisor's
 /// intake records its turns and measurements later
 /// ([`record_closed_hook_turns`], ADR-t655-1), so the short time Claude
@@ -3105,7 +3105,7 @@ pub(super) mod tests {
         // headless planner and does not see its span.
         let planner5 = |event| SessionHook {
             planner_id: Some(5),
-            ..hook(dir.path(), event, RUNTIME_PLANNER, "s-5", "s-5")
+            ..hook(dir.path(), event, RUNTIME_PLANNER, "s-5")
         };
         let skipped = record_hook(conn, &planner5(Some("startup"))).unwrap();
         assert_eq!(skipped["skipped"], "headless_planner");
@@ -4540,13 +4540,12 @@ pub(super) mod tests {
     }
 
     /// A `SessionStart` / `SessionEnd` the hook reported for `session` of
-    /// `kind` in `workspace`, with its transcript under `dir`.
+    /// `kind`, with its transcript under `dir`.
     fn hook(
         dir: &std::path::Path,
         start: Option<&str>,
         kind: &'static str,
         session: &str,
-        workspace: &str,
     ) -> SessionHook {
         use crate::domain::sessions::HookEvent;
         SessionHook {
@@ -4562,7 +4561,6 @@ pub(super) mod tests {
             session_id: session.into(),
             transcript_path: Some(dir.join(format!("{session}.jsonl")).display().to_string()),
             cwd: Some("/repo".into()),
-            workspace_id: Some(workspace.into()),
             planner_id: None,
             launch: None,
         }
@@ -4595,7 +4593,7 @@ pub(super) mod tests {
 
     /// The inbox's span opens at its start, records its finished turns
     /// while open, goes on through a compaction, and is replaced at a
-    /// /clear (a new session id in its workspace) with its active time; its
+    /// /clear (a new session id of its kind) with its active time; its
     /// late `SessionEnd` and a second one change nothing (ADR-0048
     /// decision 6). `stats` counts the spans with their open and active
     /// time in its window.
@@ -4609,8 +4607,7 @@ pub(super) mod tests {
         ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let conn = &queue.conn;
-        let started =
-            record_hook(conn, &hook(dir.path(), Some("startup"), INBOX, "s-1", "W")).unwrap();
+        let started = record_hook(conn, &hook(dir.path(), Some("startup"), INBOX, "s-1")).unwrap();
         assert_eq!(started["closed"], json!([]));
         let opened = started["opened"].as_i64().unwrap();
         let start = retime(conn, 0, 100);
@@ -4620,25 +4617,24 @@ pub(super) mod tests {
         assert_eq!(of_kind(&queue, SESSION_TURNS)[0].payload["kind"], "inbox");
         // A compaction keeps the session id: the span goes on.
         let compacted =
-            record_hook(conn, &hook(dir.path(), Some("compact"), INBOX, "s-1", "W")).unwrap();
+            record_hook(conn, &hook(dir.path(), Some("compact"), INBOX, "s-1")).unwrap();
         assert_eq!(compacted["opened"], Value::Null);
         assert_eq!(compacted["closed"], json!([]));
         // A /clear whose SessionStart comes first: the new session id
-        // closes the span of its workspace as the next span.
+        // closes the span of its kind as inferred.
         READS.set(0);
-        let cleared =
-            record_hook(conn, &hook(dir.path(), Some("clear"), INBOX, "s-2", "W")).unwrap();
+        let cleared = record_hook(conn, &hook(dir.path(), Some("clear"), INBOX, "s-2")).unwrap();
         assert_eq!(READS.get(), 0);
         assert_eq!(cleared["closed"], json!([opened]));
         let closed = &of_kind(&queue, SESSION_CLOSED)[0];
-        assert_eq!(closed.payload["reason"], crate::domain::sessions::NEXT_SPAN);
+        assert_eq!(closed.payload["reason"], INFERRED);
         assert_eq!(closed.payload["active_unavailable"], "hook_intake_pending");
         assert_eq!(closed.task_id, None);
         assert_eq!(record_open_turns(conn).unwrap(), 1);
         assert_eq!(record_open_turns(conn).unwrap(), 0);
         // Its SessionEnd, late, and a second one: closed once.
         for _ in 0..2 {
-            let ended = record_hook(conn, &hook(dir.path(), None, INBOX, "s-1", "W")).unwrap();
+            let ended = record_hook(conn, &hook(dir.path(), None, INBOX, "s-1")).unwrap();
             assert_eq!(ended["closed"], json!([]));
         }
         assert_eq!(of_kind(&queue, SESSION_CLOSED).len(), 1);
@@ -4680,7 +4676,7 @@ pub(super) mod tests {
         ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let conn = &queue.conn;
-        let start_hook = hook(dir.path(), Some("startup"), INBOX, "s", "W");
+        let start_hook = hook(dir.path(), Some("startup"), INBOX, "s");
         record_hook(conn, &start_hook).unwrap();
         let start = retime(conn, 0, 100);
         hook_transcript(dir.path(), "s", start, &[(5, 25), (40, 50)], 60);
@@ -4699,7 +4695,7 @@ pub(super) mod tests {
         text.push_str(&format!("\n{}\n{}", assistant(80_000), assistant(150_000)));
         std::fs::write(&path, text).unwrap();
         READS.set(0);
-        record_hook(conn, &hook(dir.path(), None, INBOX, "s", "W")).unwrap();
+        record_hook(conn, &hook(dir.path(), None, INBOX, "s")).unwrap();
         assert_eq!(READS.get(), 0);
         let closed = of_kind(&queue, SESSION_CLOSED)[0].clone();
         let end = start + 100_000;
@@ -4733,7 +4729,7 @@ pub(super) mod tests {
         assert!(!spans[0].active_unavailable);
         assert_eq!(spans[0].end, Some(end));
         // Finalized even if intake is called again or SessionEnd is duplicated.
-        record_hook(conn, &hook(dir.path(), None, INBOX, "s", "W")).unwrap();
+        record_hook(conn, &hook(dir.path(), None, INBOX, "s")).unwrap();
         assert_eq!(of_kind(&queue, SESSION_CLOSED).len(), 1);
         assert_eq!(
             of_kind(&queue, SESSION_TURNS)
@@ -4751,13 +4747,9 @@ pub(super) mod tests {
         ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let conn = &queue.conn;
-        record_hook(
-            conn,
-            &hook(dir.path(), Some("startup"), INBOX, "missing", "W"),
-        )
-        .unwrap();
+        record_hook(conn, &hook(dir.path(), Some("startup"), INBOX, "missing")).unwrap();
         READS.set(0);
-        record_hook(conn, &hook(dir.path(), None, INBOX, "missing", "W")).unwrap();
+        record_hook(conn, &hook(dir.path(), None, INBOX, "missing")).unwrap();
         assert_eq!(READS.get(), 0);
         assert!(open_hook_spans(conn).unwrap().is_empty());
         assert_eq!(record_open_turns(conn).unwrap(), 1);
@@ -4774,33 +4766,25 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn next_start_without_workspace_infers_only_the_same_kind() {
+    fn next_start_infers_only_the_same_kind() {
         use crate::domain::sessions::{INBOX, PLANNER, RUNTIME_PLANNER};
         let dir = tempfile::tempdir().unwrap();
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let conn = &queue.conn;
-        let no_workspace = |kind, session| SessionHook {
-            workspace_id: None,
-            ..hook(dir.path(), Some("startup"), kind, session, "unused")
-        };
+        let start = |kind, session| hook(dir.path(), Some("startup"), kind, session);
         for (kind, session) in [(INBOX, "i"), (PLANNER, "p"), (RUNTIME_PLANNER, "r")] {
-            record_hook(conn, &no_workspace(kind, session)).unwrap();
+            record_hook(conn, &start(kind, session)).unwrap();
         }
-        record_hook(
-            conn,
-            &hook(dir.path(), Some("startup"), INBOX, "with-w", "W"),
-        )
-        .unwrap();
         READS.set(0);
-        record_hook(conn, &no_workspace(INBOX, "i")).unwrap();
+        record_hook(conn, &start(INBOX, "i")).unwrap();
         assert!(of_kind(&queue, SESSION_CLOSED).is_empty());
-        record_hook(conn, &no_workspace(INBOX, "i-next")).unwrap();
+        record_hook(conn, &start(INBOX, "i-next")).unwrap();
         assert_eq!(READS.get(), 0);
         let closed = of_kind(&queue, SESSION_CLOSED);
         assert_eq!(closed.len(), 1);
         assert_eq!(closed[0].payload["session_id"], "i");
         assert_eq!(closed[0].payload["reason"], INFERRED);
-        assert_eq!(open_hook_spans(conn).unwrap().len(), 4);
+        assert_eq!(open_hook_spans(conn).unwrap().len(), 3);
     }
 
     /// A runtime planner's span is on the first task of its proposal, with
@@ -4844,9 +4828,14 @@ pub(super) mod tests {
         .unwrap();
         let planner = |kind, session: &str, planner| SessionHook {
             planner_id: planner,
-            ..hook(dir.path(), Some("startup"), kind, session, session)
+            ..hook(dir.path(), Some("startup"), kind, session)
         };
         record_hook(conn, &planner(RUNTIME_PLANNER, "p-3", Some(3))).unwrap();
+        // Its end closes it on the same task.
+        record_hook(conn, &hook(dir.path(), None, RUNTIME_PLANNER, "p-3")).unwrap();
+        let closed = &of_kind(&queue, SESSION_CLOSED)[0];
+        assert_eq!(closed.task_id, Some(first));
+        assert_eq!(closed.payload["reason"], crate::domain::sessions::EXITED);
         record_hook(conn, &planner(RUNTIME_PLANNER, "p-4", Some(4))).unwrap();
         record_hook(conn, &planner(PLANNER, "p-5", Some(3))).unwrap();
         let opened = of_kind(&queue, SESSION_OPENED);
@@ -4858,11 +4847,6 @@ pub(super) mod tests {
             assert_eq!(other.task_id, None);
             assert_eq!(other.payload.get("proposal_id"), None);
         }
-        // Its end closes it on the same task.
-        record_hook(conn, &hook(dir.path(), None, RUNTIME_PLANNER, "p-3", "p-3")).unwrap();
-        let closed = &of_kind(&queue, SESSION_CLOSED)[0];
-        assert_eq!(closed.task_id, Some(first));
-        assert_eq!(closed.payload["reason"], crate::domain::sessions::EXITED);
     }
 
     /// The hook's spans the supervisor found over close as inferred, at
@@ -4876,16 +4860,8 @@ pub(super) mod tests {
         ClaudeTranscripts::use_config_dir_in_test(&dir.path().join("config"));
         let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
         let conn = &queue.conn;
-        record_hook(
-            conn,
-            &hook(dir.path(), Some("startup"), INBOX, "s-1", "W-1"),
-        )
-        .unwrap();
-        record_hook(
-            conn,
-            &hook(dir.path(), Some("startup"), PLANNER, "s-2", "W-2"),
-        )
-        .unwrap();
+        record_hook(conn, &hook(dir.path(), Some("startup"), INBOX, "s-1")).unwrap();
+        record_hook(conn, &hook(dir.path(), Some("startup"), PLANNER, "s-2")).unwrap();
         let start = retime(conn, 0, 100);
         hook_transcript(dir.path(), "s-2", start, &[(5, 25)], 30);
         let spans = hook_spans(conn).unwrap();

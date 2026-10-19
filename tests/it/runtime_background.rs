@@ -104,6 +104,36 @@ fn a_background_headless_run_lands_without_a_workspace() {
     assert!(backend.closed().contains(&handle.to_owned()));
 }
 
+/// A `dagq.toml` without `[headless]` and `[roles.runtime_planner] route`
+/// (the keys a later `dagq.toml` drops) starts a worker's session wrapper
+/// in the background as with them, non-interactive, and the supervisor
+/// warns of nothing (ADR-t1433-3 decision 2).
+#[test]
+fn without_the_old_keys_a_worker_runs_in_the_background_with_no_warning() {
+    let (dir, repo, db, backend) = headless_fixture(&[]);
+    assert!(!repo.join("dagq.toml").exists());
+    set_turns(dir.path(), FINISH);
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
+    let options = supervise_options(4, true);
+    let (telemetry, captured) = Telemetry::capture();
+    let outcome =
+        telemetry.in_scope(|| supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options));
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
+    let log = captured.text();
+    assert!(!log.contains("of dagq.toml is ignored"), "{log}");
+    let detail = detail(&db);
+    let handle = detail.runs[0].workspace_id().unwrap();
+    assert!(is_background(handle), "{handle}");
+    let launched = backend.launched.lock().unwrap().clone();
+    assert_eq!(launched.len(), 1, "{launched:?}");
+    assert!(
+        launched[0].command.contains("'--background'"),
+        "{}",
+        launched[0].command
+    );
+}
+
 /// Acceptance: a worker question is answered as the next turn of the same
 /// background session, and the run lands.
 #[test]

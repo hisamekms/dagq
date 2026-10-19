@@ -395,37 +395,14 @@ impl HostOpsState {
             logs.join(format!("{name}.build.log")),
             logs.join(format!("{name}.json")),
         );
-        let mut command = CommandSpec::new(&layout.runner);
-        command
-            .arg("--db")
-            .arg(&layout.db)
-            .arg("release-update")
-            .args(["--release", version, "--token", env.token.as_str()])
-            .envs(layout.supervisor_actor().env())
-            // It opens the queue it names, not a client-mode `dagq`.
-            .env_remove(crate::domain::queue_service::SOCKET_ENV)
-            .arg("--to")
-            .arg(&layout.runner)
-            .arg("--log")
-            .arg(&build_log)
-            .arg("--claude")
-            .arg(&layout.claude)
-            .arg("--codex")
-            .arg(&layout.codex)
-            .current_dir(&layout.repo_root)
-            .new_session();
-        if let Some(cmux) = &options.update.cmux {
-            command.arg("--cmux").arg(cmux);
-        }
-        if let Some(dir) = &layout.plugin_dir {
-            command.arg("--plugin-dir").arg(dir);
-        }
-        if let Some(cargo) = &options.update.cargo {
-            command.arg("--cargo").arg(cargo);
-        }
-        if plugin_only {
-            command.arg("--plugin-only");
-        }
+        let command = release_job_command(
+            layout,
+            env.token,
+            version,
+            &build_log,
+            &options.update,
+            plugin_only,
+        );
         let job = env.spawner.spawn(
             &command,
             Streams::Files {
@@ -614,11 +591,102 @@ fn interrupted_failure(
     })
 }
 
+/// The command of the job that installs release `version` (only the
+/// plugin, with `plugin_only`), started by the supervisor `token` with the
+/// paths and providers of `layout`, cargo's output appended to
+/// `build_log`: a supervisor the job starts again gets this one's
+/// providers and plugin directory, and no `--cmux` (ADR-t2159-1 decision
+/// 6).
+fn release_job_command(
+    layout: &Layout,
+    token: &LeaseToken,
+    version: &str,
+    build_log: &Path,
+    update: &UpdateSettings,
+    plugin_only: bool,
+) -> CommandSpec {
+    let mut command = CommandSpec::new(&layout.runner);
+    command
+        .arg("--db")
+        .arg(&layout.db)
+        .arg("release-update")
+        .args(["--release", version, "--token", token.as_str()])
+        .envs(layout.supervisor_actor().env())
+        // It opens the queue it names, not a client-mode `dagq`.
+        .env_remove(crate::domain::queue_service::SOCKET_ENV)
+        .arg("--to")
+        .arg(&layout.runner)
+        .arg("--log")
+        .arg(build_log)
+        .arg("--claude")
+        .arg(&layout.claude)
+        .arg("--codex")
+        .arg(&layout.codex)
+        .current_dir(&layout.repo_root)
+        .new_session();
+    if let Some(dir) = &layout.plugin_dir {
+        command.arg("--plugin-dir").arg(dir);
+    }
+    if let Some(cargo) = &update.cargo {
+        command.arg("--cargo").arg(cargo);
+    }
+    if plugin_only {
+        command.arg("--plugin-only");
+    }
+    command
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::application::update::{UPDATE_FAILED, UPDATE_STARTED};
     use crate::domain::{AskId, EventId};
+
+    /// The release's job is the runtime binary's `release-update` of the
+    /// release for this supervisor, given this supervisor's providers and
+    /// plugin directory for a supervisor it starts again, and no `--cmux`
+    /// (ADR-t2159-1 decision 6).
+    #[test]
+    fn the_release_job_is_given_the_supervisors_providers_and_no_cmux() {
+        let layout = Layout::for_test(Path::new("/q"));
+        let command = release_job_command(
+            &layout,
+            &LeaseToken::new("token-1"),
+            "0.4.0",
+            Path::new("/q/logs/release.build.log"),
+            &UpdateSettings::default(),
+            true,
+        );
+        assert_eq!(command.get_program(), "/opt/bin/dagq");
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "--db",
+                "/q/queue.db",
+                "release-update",
+                "--release",
+                "0.4.0",
+                "--token",
+                "token-1",
+                "--to",
+                "/opt/bin/dagq",
+                "--log",
+                "/q/logs/release.build.log",
+                "--claude",
+                "/opt/bin/claude",
+                "--codex",
+                "/opt/bin/codex",
+                "--plugin-dir",
+                "/plugin",
+                "--plugin-only",
+            ]
+        );
+        assert!(!args.contains(&"--cmux"), "{args:?}");
+    }
 
     fn step(kind: &str, payload: Value) -> RunEvent {
         RunEvent {

@@ -99,6 +99,7 @@ in-cmux modeの起動の指定は何にも触る前に拒み、廃止と次の�
    - **二重のsupervisorの警告**: 同じqueueに引き継ぎの組でないliveな登録が2つ以上あるか、queueのLaunchAgent（自分のlabelと、同じDBの別のlabel）が2つ以上loadされていれば、`doctor`と`status`が同じ判定（`health::duplicate_supervisors`）でwarningを出し、`status`はinboxのattentionにも載せる。
      引き継ぎの元の登録とexecが同じpidで作り直した後継の登録は1つのsupervisorと数えて知らせない（意味と直し方は判定のdoc comment）。
    - plist: `~/Library/LaunchAgents/com.dagq.<queue hash>.plist`で、queue hashの決め方は`QueueLocation::hash`のdoc comment、中身は`src/application/lifecycle.rs`の`LaunchAgentSpec::xml`と`supervise_arguments`と`SupervisorEnvironment`のdoc commentにある。
+     `up`が書くplistに`--cmux`は無く、前のbinaryが書いたplistと引き継ぎのexecのargvにある`--cmux`は新しいbinaryが受け付けて無視する（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定6、`src/main.rs`の`RetiredCmux`）。
      `up`のenvがtestのownerを名指していれば、それもsupervisorに渡し、`KeepAlive`は失敗で終わったときだけ立て直す形にして、ownerが居なくなって止まったsupervisorを立て直し続けない（[Queue service](../queue-service.md)の起動と停止）。
    - 起動: agentをbootoutしてからbootstrapし直し、既にbootstrap済みでも定義を差し替える。
      bootoutは即返り、旧プロセスが終わるまでのbootstrapは失敗するので、serviceが消えるまで待ち、消えなければSIGKILLを送る（hangしたsupervisorがlabelを`ExitTimeOut`の間占有しないため）。

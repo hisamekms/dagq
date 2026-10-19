@@ -466,7 +466,7 @@ fn run_update_job_at(
             log: dir.join("build.log"),
             build_command: None,
             e2e: e2e_settings(&dir.join("queue-dir")),
-            restart: vec!["--cmux".into(), "/opt/cmux".into()],
+            restart: vec!["--claude".into(), "/opt/claude".into()],
             handoff_timeout,
             watch_timeout: Duration::from_secs(5),
             poll: Duration::from_millis(20),
@@ -682,7 +682,7 @@ fn the_update_job_installs_watches_restores_and_asks() {
         report["command"]
             .as_str()
             .unwrap()
-            .contains("--allow-breaking --cmux /opt/cmux")
+            .contains("--allow-breaking --claude /opt/claude")
     );
     assert!(binaries.calls().iter().all(|c| !c.starts_with("replace")));
     let asks = queue.asks(dagq::application::AskQuery::default()).unwrap();
@@ -2097,7 +2097,7 @@ fn run_release_job_with(
             target: dir.join("bin").join("dagq"),
             paths: update::UpdatePaths::under(&dir.join("queue-dir")),
             log: dir.join("cargo.log"),
-            restart: vec!["--cmux".into(), "/opt/cmux".into()],
+            restart: vec!["--claude".into(), "/opt/claude".into()],
             handoff_timeout: Duration::from_secs(5),
             watch_timeout: Duration::from_secs(5),
             poll: Duration::from_millis(20),

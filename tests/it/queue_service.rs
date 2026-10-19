@@ -82,10 +82,7 @@ fn the_service_answers_its_principals_and_refuses_the_rest_on_its_side() {
         ok(&queue.db, &["show", &task.to_string(), "--full"])
     );
 
-    // The worker asks on its own run, recorded as itself. The service,
-    // started with `--cmux` as a registered argv has it, accepts and
-    // ignores it: it runs no cmux, and the inbox's watch tells of the ask
-    // (ADR-t1433-1).
+    // The worker asks on its own run, recorded as itself.
     let asked = call(
         &queue,
         Some(&worker_token),
@@ -99,10 +96,6 @@ fn the_service_answers_its_principals_and_refuses_the_rest_on_its_side() {
     assert_eq!(asks[0]["run_id"], json!(queue.run.id()));
     let opened = events(&queue.db, "ask_opened");
     assert_eq!(opened[0]["actor"]["role"], "worker", "{opened:?}");
-    assert!(
-        !queue.cmux.with_file_name("notifications").exists(),
-        "the service ran cmux"
-    );
 
     // Not on another run: refused by the service and recorded as the
     // worker, whatever it names.

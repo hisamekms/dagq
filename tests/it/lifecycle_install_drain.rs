@@ -19,7 +19,7 @@ use dagq::{
     infrastructure::sqlite::SqliteQueue,
 };
 use serde_json::{Value, json};
-use std::{fs, path::Path, sync::Mutex, thread, time::Duration};
+use std::{fs, sync::Mutex, thread, time::Duration};
 
 /// A build with a breaking migration is refused without `--allow-breaking`
 /// and replaces nothing; with it, the supervisor is drained, the queue
@@ -73,7 +73,15 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
     let db = fixture.location.db.to_str().unwrap();
     assert_eq!(
         binaries.up.lock().unwrap()[0],
-        ["--db", db, "up", "--parallel", "4", "--cmux", "/opt/cmux"]
+        [
+            "--db",
+            db,
+            "up",
+            "--parallel",
+            "4",
+            "--claude",
+            "/opt/claude"
+        ]
     );
 
     // A drained supervisor with the automatic update, a wait limit and a
@@ -112,8 +120,8 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
                 "2",
                 "--runtime-planners",
                 "3",
-                "--cmux",
-                "/opt/cmux"
+                "--claude",
+                "/opt/claude"
             ],
             vec![
                 "--db",
@@ -256,7 +264,6 @@ fn install_starts_a_drained_supervisor_again_with_the_provider_links() {
     let mut options = install_options(Source::Binary("/built/dagq".into()));
     options.allow_breaking = true;
     options.restart = dagq::compose::install_restart_arguments(
-        Path::new("/opt/cmux"),
         Some(&bin.join("claude")),
         Some(&bin.join("codex")),
         None,
@@ -284,6 +291,8 @@ fn install_starts_a_drained_supervisor_again_with_the_provider_links() {
             .all(|arg| !arg.contains("versions/") && !arg.contains("releases/")),
         "{up:?}"
     );
+    // No `--cmux` (ADR-t2159-1 decision 6).
+    assert!(!up.iter().any(|arg| arg == "--cmux"), "{up:?}");
 }
 
 /// `install --allow-breaking`'s drain is `down --wait`: it unloads the

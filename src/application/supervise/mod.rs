@@ -409,10 +409,6 @@ pub struct Layout {
     pub common_dir: PathBuf,
     /// The `claude` the run sessions start.
     pub claude: PathBuf,
-    /// The cmux of `supervise --cmux`: the supervisor calls none
-    /// (ADR-t1433-1); only the e2e it runs before a landing pings it, as
-    /// the e2e gate's precondition (ADR-t1233-2 decision 3).
-    pub cmux: PathBuf,
     /// The `codex` a Codex worker starts (`supervise --codex`), resolved
     /// when it was found.
     pub codex: PathBuf,
@@ -459,6 +455,39 @@ impl Layout {
     /// and the commands it starts for itself record.
     pub fn supervisor_actor(&self) -> ActorContext {
         ActorContext::instance(crate::domain::ActorRole::Supervisor, self.pid)
+    }
+}
+
+#[cfg(test)]
+impl Layout {
+    /// The layout of the queue `<root>/queue.db` in a unit test: the runtime
+    /// binary `/opt/bin/dagq` with Claude Code and Codex beside it, the
+    /// repository `/repo` and the plugin directory `/plugin`.
+    pub(super) fn for_test(root: &Path) -> Self {
+        Self {
+            db: root.join("queue.db"),
+            runs_dir: root.join("runs"),
+            queue_hash: "queue-hash".into(),
+            repo_root: "/repo".into(),
+            main_checkout: "/repo".into(),
+            common_dir: "/repo/.git".into(),
+            claude: "/opt/bin/claude".into(),
+            codex: "/opt/bin/codex".into(),
+            codex_home: None,
+            providers: Vec::new(),
+            runner: "/opt/bin/dagq".into(),
+            pid: 42,
+            version: "0.0.0-test".into(),
+            observer_env_remove: Vec::new(),
+            planners_dir: root.join("planners"),
+            plugin_dir: Some("/plugin".into()),
+            plan_reviews_dir: root.join("plan-reviews"),
+            goal_reviews_dir: root.join("goal-reviews"),
+            agent_evals_dir: root.join("agent-evals"),
+            agent_cases_dir: root.join("agent-cases"),
+            review_programs_dir: root.join("review-programs"),
+            replans_dir: root.join("replans"),
+        }
     }
 }
 

@@ -937,7 +937,8 @@ fn session_event_hook_records_the_spans_of_the_inbox_and_planners_only() {
         dir.path(),
     ));
     // A planner of an old workspace (no DAGQ_SESSION_KIND) whose SessionEnd
-    // was lost: its /clear closes it as the next span.
+    // was lost: its /clear closes it as inferred. The cmux workspace the
+    // terminal names is not read (ADR-t2159-1 decision 1).
     let planner = [
         ("DAGQ_BIN", binary),
         ("DAGQ_ROLE", "planner"),
@@ -988,12 +989,12 @@ fn session_event_hook_records_the_spans_of_the_inbox_and_planners_only() {
             row("session_opened", "inbox s-2", "clear"),
             row("session_closed", "inbox s-2", "exited"),
             row("session_opened", "planner p-1", "startup"),
-            row("session_closed", "planner p-1", "next_span"),
+            row("session_closed", "planner p-1", "inferred"),
             row("session_opened", "planner p-2", "clear"),
         ]
     );
     let events = span_events(binary, &db, &data_home, &repo);
-    assert_eq!(events[0]["payload"]["workspace_id"], "W-INBOX");
+    assert_eq!(events[0]["payload"].get("workspace_id"), None);
     assert_eq!(events[0]["task_id"], Value::Null);
     // Hook closes first; the supervisor has not attempted intake yet.
     assert_eq!(events[1]["payload"]["active"], "unavailable");

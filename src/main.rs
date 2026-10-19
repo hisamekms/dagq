@@ -44,6 +44,17 @@ struct Cli {
     command: Command,
 }
 
+// ADR-t2159-1 decision 6. What it is is on its field: a doc comment here would be the help of
+// a command that has none of its own.
+#[derive(clap::Args, Clone)]
+struct RetiredCmux {
+    /// `--cmux <PATH>`, which the command lines of an earlier binary still carry (the launchd
+    /// plist of a registered supervisor, the argv it execs at a handoff, the jobs and wrappers
+    /// it started): accepted, left out of the help and ignored, as dagq calls no cmux.
+    #[arg(long = "cmux", hide = true, value_name = "PATH")]
+    _ignored: Option<PathBuf>,
+}
+
 #[derive(Subcommand, Clone)]
 enum Command {
     /// Initialize the queue, creating its directory if needed. An existing queue is checked, never migrated.
@@ -130,10 +141,8 @@ enum Command {
         /// Seconds the supervisor may take to come back under the new binary.
         #[arg(long, default_value_t = 1800)]
         handoff_timeout: u64,
-        /// cmux executable, passed on to the e2e gate and to the `up` that starts a supervisor
-        /// registered in the retired in-cmux mode again (under launchd); no workspace is closed.
-        #[arg(long, default_value = "cmux")]
-        cmux: PathBuf,
+        #[command(flatten)]
+        cmux: RetiredCmux,
         /// Claude Code executable the restarted supervisor uses after a drain, or after a failed
         /// watch of the handed-over supervisors.
         #[arg(long)]
@@ -818,12 +827,8 @@ enum Command {
         /// waiting for new work.
         #[arg(long)]
         once: bool,
-        // ADR-t1433-1.
-        /// cmux executable, accepted from registered command lines: the supervisor calls no
-        /// cmux; it goes on only to the update's job, for a supervisor registered in the retired
-        /// in-cmux mode.
-        #[arg(long, default_value = "cmux")]
-        cmux: PathBuf,
+        #[command(flatten)]
+        cmux: RetiredCmux,
         /// Claude Code executable; a bare name is resolved on PATH.
         #[arg(long, default_value = "claude")]
         claude: PathBuf,
@@ -969,8 +974,8 @@ enum Command {
         /// Seconds the e2e may run before it counts as failed.
         #[arg(long, default_value_t = 1800)]
         e2e_timeout: u64,
-        #[arg(long, default_value = "cmux")]
-        cmux: PathBuf,
+        #[command(flatten)]
+        cmux: RetiredCmux,
         #[arg(long, default_value = "claude")]
         claude: PathBuf,
         #[arg(long, default_value = "codex")]
@@ -1009,8 +1014,8 @@ enum Command {
         log: PathBuf,
         #[arg(long, default_value = "cargo")]
         cargo: PathBuf,
-        #[arg(long, default_value = "cmux")]
-        cmux: PathBuf,
+        #[command(flatten)]
+        cmux: RetiredCmux,
         #[arg(long, default_value = "claude")]
         claude: PathBuf,
         #[arg(long, default_value = "codex")]
@@ -1079,9 +1084,8 @@ enum Command {
         /// resolved on PATH outside a terminal's shims.
         #[arg(long, default_value = "codex")]
         codex: PathBuf,
-        /// Accepted from registered command lines and ignored: the observer calls no cmux.
-        #[arg(long, default_value = "cmux")]
-        cmux: PathBuf,
+        #[command(flatten)]
+        cmux: RetiredCmux,
         /// What the agent starts with, as the supervisor routed it (an actor launch as JSON);
         /// `[roles.observer]` of dagq.toml without.
         #[arg(long, hide = true)]
@@ -1214,9 +1218,8 @@ enum Command {
         /// Checkout of the repository; defaults to the working directory.
         #[arg(long)]
         repo: Option<PathBuf>,
-        /// cmux executable, accepted for older command lines: `up` calls no cmux.
-        #[arg(long, default_value = "cmux")]
-        cmux: PathBuf,
+        #[command(flatten)]
+        cmux: RetiredCmux,
         /// Claude Code executable; a bare name is resolved on PATH.
         #[arg(long, default_value = "claude")]
         claude: PathBuf,
@@ -1271,11 +1274,8 @@ enum Command {
         /// Include closed planners.
         #[arg(long)]
         all: bool,
-        // ADR-t1433-2.
-        /// cmux executable, accepted for older command lines: no planner's workspace is looked up
-        /// in cmux.
-        #[arg(long, default_value = "cmux")]
-        cmux: PathBuf,
+        #[command(flatten)]
+        cmux: RetiredCmux,
     },
     // ADR-t1228-1.
     /// A run's session, named by its run id or its task id (the task's latest
@@ -1295,7 +1295,7 @@ enum Command {
         #[command(subcommand)]
         command: PlannerCommand,
     },
-    /// Stop the queue's supervisor: unload its launchd agent so it drains and is not restarted, or signal one registered in the retired in-cmux mode. Closes no cmux workspace (a person closes the one such a supervisor ran in) and leaves the inbox alone.
+    /// Stop the queue's supervisor: unload its launchd agent so it drains and is not restarted, or signal one an earlier binary registered in the retired in-cmux mode, whose terminal is left to a person. Leaves the inbox alone.
     Down {
         /// Wait until the supervisor's registration is gone or its process exited.
         #[arg(long)]
@@ -1303,9 +1303,8 @@ enum Command {
         /// Kill the supervisor after the unload and drop its registration.
         #[arg(long, conflicts_with = "wait")]
         force: bool,
-        /// cmux executable, accepted for older command lines: `down` calls no cmux.
-        #[arg(long, default_value = "cmux")]
-        cmux: PathBuf,
+        #[command(flatten)]
+        cmux: RetiredCmux,
     },
     /// Land a validated run on main: rebase, re-validate, squash into one commit, complete the task, then push main to origin.
     Integrate {
@@ -1399,9 +1398,8 @@ enum Command {
         /// for.
         #[arg(long, conflicts_with_all = ["task_id", "run", "finding"])]
         request: Option<i64>,
-        /// Accepted and ignored: the inbox's watch notifies the person of a new ask.
-        #[arg(long, default_value = "cmux")]
-        cmux: PathBuf,
+        #[command(flatten)]
+        cmux: RetiredCmux,
     },
     /// Write the answer of an open ask; the inbox then sees ask_answered unless the runtime applies it.
     Answer {
@@ -1487,10 +1485,8 @@ enum Command {
         /// which come back with the next events that wake it; planner never.
         #[arg(long, value_parser = ROLES)]
         role: Option<String>,
-        /// Accepted and ignored: the inbox's watch tells of a new ask through the host's `[push]`
-        /// (ADR-t2159-1 decision 4), and an older inbox's command line may still pass it.
-        #[arg(long, hide = true)]
-        cmux: Option<PathBuf>,
+        #[command(flatten)]
+        cmux: RetiredCmux,
     },
     /// Per-run times in seconds (work, validate, wait_to_land, startup) and counts, per-goal and
     /// overall count/total/median, and alerts over thresholds, derived from run events. The latest
@@ -1521,10 +1517,8 @@ enum Command {
         /// final, push_pending, dirty, and up_to_date per row.
         #[arg(long)]
         ledger: bool,
-        /// Accepted and ignored: `workspace_mismatch` is judged by the runs' background wrappers,
-        /// without cmux.
-        #[arg(long, default_value = "cmux")]
-        cmux: PathBuf,
+        #[command(flatten)]
+        cmux: RetiredCmux,
     },
     // ADR-0051, ADR-t980-1.
     /// KPIs of the flow, rework, people's load, infrastructure, improvements and sessions per day
@@ -1709,10 +1703,8 @@ enum Command {
         /// Reopen the session of a `needs_session` run the supervisor resumes.
         #[arg(long)]
         resume: bool,
-        /// Accepted from an older supervisor's argv and ignored: a wrapper
-        /// calls no cmux.
-        #[arg(long, default_value = "cmux")]
-        cmux: PathBuf,
+        #[command(flatten)]
+        cmux: RetiredCmux,
         // ADR-t1404-1.
         /// Started by the supervisor in the background, without a workspace or
         /// a terminal.
@@ -1749,10 +1741,8 @@ enum Command {
         #[arg(long, requires = "model")]
         effort: Option<String>,
 
-        /// Accepted from an older supervisor's argv and ignored: a wrapper
-        /// calls no cmux.
-        #[arg(long, default_value = "cmux")]
-        cmux: PathBuf,
+        #[command(flatten)]
+        cmux: RetiredCmux,
         // ADR-t1394-2.
         /// The planner's agent runs one call per turn: the wrapper needs no
         /// terminal for it.
@@ -2029,18 +2019,16 @@ enum ServiceCommand {
     /// Start the queue service of this binary unless one of its build answers, replacing one
     /// of another build; `up` does this before the supervisor.
     Start {
-        /// Accepted from registered command lines and ignored: the service calls no cmux.
-        #[arg(long, default_value = "cmux")]
-        cmux: PathBuf,
+        #[command(flatten)]
+        cmux: RetiredCmux,
     },
     /// Stop the queue service; `down` does this after the supervisor.
     Stop,
     /// Run the queue service in the foreground until SIGINT or SIGTERM (what `start`, `up`
     /// and the supervisor run in the background). A second one for the same queue is refused.
     Serve {
-        /// Accepted from registered command lines and ignored: the service calls no cmux.
-        #[arg(long, default_value = "cmux")]
-        cmux: PathBuf,
+        #[command(flatten)]
+        cmux: RetiredCmux,
     },
 }
 
@@ -2117,22 +2105,20 @@ enum RunCommand {
     // ADR-t1433-3.
     /// Refused for every run, with the reason: a run's session runs in the
     /// background without a screen. Read its turns with `run log RUN
-    /// [--follow]`. Nothing is read or recorded, and cmux is not needed.
+    /// [--follow]`. Nothing is read or recorded.
     Screen {
         /// Run ID, or a task ID for the task's latest run.
         run: String,
         /// Accepted and ignored: there is no screen to read.
         #[arg(long, default_value_t = dagq::application::screen::DEFAULT_LINES)]
         lines: usize,
-        /// Accepted and ignored: cmux is not used.
-        #[arg(long, default_value = "cmux")]
-        cmux: PathBuf,
+        #[command(flatten)]
+        cmux: RetiredCmux,
     },
     // task 1437.
     /// Refused for every run: no worker run takes keys or text, as every
     /// worker runs headless. Answer the run's asks with `answer`; the
-    /// supervisor delivers the answer as the session's next turn. cmux is
-    /// not needed.
+    /// supervisor delivers the answer as the session's next turn.
     Send {
         /// Run ID, or a task ID for the task's latest run.
         run: String,
@@ -2142,9 +2128,8 @@ enum RunCommand {
         /// Accepted and ignored.
         #[arg(long)]
         answer: Option<i64>,
-        /// Accepted and ignored: cmux is not used.
-        #[arg(long, default_value = "cmux")]
-        cmux: PathBuf,
+        #[command(flatten)]
+        cmux: RetiredCmux,
     },
     // ADR-t1404-1, ADR-t1433-3.
     /// Print the output of the run's session wrapper started in the background:
@@ -2166,8 +2151,7 @@ enum RunCommand {
     // ADR-t1433-3.
     /// Refused: the runtime opens no workspace for a run any more and stops a
     /// run's background wrapper itself. Close a workspace a run opened before
-    /// in your own terminal. The arguments are accepted and ignored, and cmux
-    /// is not needed.
+    /// in your own terminal. The arguments are accepted and ignored.
     CloseWorkspaces {
         /// Accepted and ignored.
         #[arg(conflicts_with = "task")]
@@ -2178,9 +2162,8 @@ enum RunCommand {
         /// Accepted and ignored.
         #[arg(long)]
         apply: bool,
-        /// Accepted and ignored: cmux is not used.
-        #[arg(long, default_value = "cmux")]
-        cmux: PathBuf,
+        #[command(flatten)]
+        cmux: RetiredCmux,
     },
 }
 
@@ -2190,16 +2173,14 @@ enum PlannerCommand {
     /// Print that the planner's session has no screen and where its turns are
     /// (`turns/` of its directory): a planner of the runtime's runs headless,
     /// and the terminal of a person's planner is not read any more. Read its
-    /// turns with `planner log`. Nothing is read or recorded, and cmux is not
-    /// needed.
+    /// turns with `planner log`. Nothing is read or recorded.
     Screen {
         planner: i64,
         /// Accepted and ignored: there is no screen to read.
         #[arg(long, default_value_t = dagq::application::screen::DEFAULT_LINES)]
         lines: usize,
-        /// Accepted and ignored: cmux is not used.
-        #[arg(long, default_value = "cmux")]
-        cmux: PathBuf,
+        #[command(flatten)]
+        cmux: RetiredCmux,
     },
     // ADR-t1404-1 decision 8.
     /// Print the output of the planner's session wrapper started in the
@@ -2222,7 +2203,7 @@ enum PlannerCommand {
     /// planner's session. Answer its `planner_question` with `answer`, and the
     /// supervisor delivers the answer (to a headless planner as its next turn);
     /// hand a headless planner a follow-up with `planner request`. Nothing is
-    /// recorded, and cmux is not needed.
+    /// recorded.
     Send {
         planner: i64,
         /// Accepted and ignored.
@@ -2231,9 +2212,8 @@ enum PlannerCommand {
         /// Accepted and ignored.
         #[arg(long)]
         answer: Option<i64>,
-        /// Accepted and ignored: cmux is not used.
-        #[arg(long, default_value = "cmux")]
-        cmux: PathBuf,
+        #[command(flatten)]
+        cmux: RetiredCmux,
     },
     /// Hand a follow-up request to an open headless planner of the
     /// runtime's (only the inbox, at a person's word, and a person at a
@@ -2252,9 +2232,8 @@ enum PlannerCommand {
         /// its path.
         #[arg(long, group = "words", alias = "file")]
         text_file: Option<PathBuf>,
-        /// Accepted and ignored: the planner is judged by its background wrapper, without cmux.
-        #[arg(long, default_value = "cmux")]
-        cmux: PathBuf,
+        #[command(flatten)]
+        cmux: RetiredCmux,
     },
 }
 
@@ -3249,8 +3228,8 @@ fn queue_read(command: &Command) -> Option<QueueRead> {
 /// The use case and params of the queue service a client-mode `dagq`
 /// sends `command` as (goal 82's stage (3), ADR-t1233-1 decision 7): the
 /// same options the service reads back as the command line's. `None` for
-/// a command the service has no use case for. A `--cmux` is not sent:
-/// neither the client nor the service calls cmux (ADR-t1433-1).
+/// a command the service has no use case for. A `--cmux` ([`RetiredCmux`])
+/// is not sent.
 fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
     if let Some(read) = queue_read(command) {
         return Ok(Some(read.request()));
@@ -3667,7 +3646,7 @@ fn execute(cli: Cli) -> Result<Value> {
         rollback,
         allow_breaking,
         handoff_timeout,
-        cmux,
+        cmux: _,
         claude,
         codex,
         plugin_dir,
@@ -3696,9 +3675,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 Source::default_checkout(checkout, dagq_source)?
             }
         };
-        let cmux = executable(&cmux).unwrap_or(cmux);
         let restart = dagq::compose::install_restart_arguments(
-            &cmux,
             claude.as_deref(),
             codex.as_deref(),
             plugin_dir.as_deref(),
@@ -3807,8 +3784,6 @@ fn execute(cli: Cli) -> Result<Value> {
     if let Command::Service { command } = cli.command {
         return match command {
             ServiceCommand::Status => Ok(dagq::compose::queue_service_status(&db)),
-            // `--cmux` is accepted and ignored: the service calls no cmux
-            // (ADR-t1433-1).
             ServiceCommand::Start { cmux: _ } => {
                 dagq::compose::queue_service_start(&db, &env::current_exe()?)
             }
@@ -4046,28 +4021,21 @@ fn execute(cli: Cli) -> Result<Value> {
             proposal,
             findings,
         } => {
-            use dagq::application::lifecycle::{
-                CMUX_WORKSPACE_ENV, PLANNER_ID_ENV, PLANNER_ORIGIN_ENV,
-            };
+            use dagq::application::lifecycle::{PLANNER_ID_ENV, PLANNER_ORIGIN_ENV};
             let origin = match env::var(PLANNER_ORIGIN_ENV) {
                 Ok(origin) if !origin.is_empty() => origin.parse()?,
                 _ => PlannerOrigin::Person,
             };
-            // A planner of the runtime's whose wrapper runs in the
-            // background has no workspace of cmux's: its handle, which its
-            // record keeps in place of one (ADR-t1404-1 decision 10),
-            // makes it the proposal's owner.
-            let workspace_id = env::var(CMUX_WORKSPACE_ENV)
+            // The proposal's owner is the planner the turn's actor names:
+            // the background handle its record keeps (ADR-t1404-1 decision
+            // 10). The terminal's variables name none (ADR-t2159-1
+            // decision 1).
+            let workspace_id = env::var(PLANNER_ID_ENV)
                 .ok()
-                .filter(|id| !id.trim().is_empty())
-                .or_else(|| {
-                    let planner = env::var(PLANNER_ID_ENV).ok()?.trim().parse().ok()?;
-                    queue
-                        .planner(PlannerId::new(planner))
-                        .ok()?
-                        .workspace_id
-                        .filter(|id| dagq::domain::background_wrapper::is_background(id))
-                });
+                .and_then(|planner| planner.trim().parse().ok())
+                .and_then(|planner| queue.planner(PlannerId::new(planner)).ok())
+                .and_then(|planner| planner.workspace_id)
+                .filter(|id| dagq::domain::background_wrapper::is_background(id));
             serde_json::to_value(planning!().submit(
                 Submission {
                     tasks: tasks.into_iter().map(TaskId::new).collect(),
@@ -4516,8 +4484,7 @@ fn execute(cli: Cli) -> Result<Value> {
             request,
             cmux: _,
         } => {
-            // `--cmux` is accepted and ignored: the inbox's watch notifies
-            // the person of the new ask (ADR-t1433-1 decision 2).
+            // The inbox's watch tells of the new ask (ADR-t2159-1 decision 4).
             dialogue!().ask(NewAsk {
                 recommendation: recommend,
                 confidence: confidence.as_deref().map(str::parse).transpose()?,
@@ -4565,7 +4532,7 @@ fn execute(cli: Cli) -> Result<Value> {
             max_waiting,
             max_load,
             once,
-            cmux,
+            cmux: _,
             claude,
             codex,
             log_dir: _,
@@ -4593,11 +4560,6 @@ fn execute(cli: Cli) -> Result<Value> {
             tick_ms,
         } => {
             use dagq::compose::SuperviseOptions;
-            use dagq::infrastructure::adapters::executable;
-            // The supervisor calls no cmux (ADR-t1433-1): `--cmux` is
-            // accepted, need not resolve, and goes on only to the update's
-            // job, for a supervisor registered in the retired in-cmux mode.
-            let cmux = executable(&cmux).unwrap_or(cmux);
             let mut options = SuperviseOptions {
                 no_claude,
                 stop: install_stop_signal()?,
@@ -4629,7 +4591,6 @@ fn execute(cli: Cli) -> Result<Value> {
                     e2e_command: update_e2e_command,
                     e2e_timeout: update_e2e_timeout.map(Duration::from_secs),
                     poll: update_poll_ms.map(Duration::from_millis),
-                    cmux: Some(cmux.clone()),
                     cargo: update_cargo,
                 },
                 parallel: parallel.map(usize::from),
@@ -4717,16 +4678,13 @@ fn execute(cli: Cli) -> Result<Value> {
             handoff_timeout,
             plugin_dir,
             repo,
-            cmux,
+            cmux: _,
             claude,
             codex,
             auto_update,
         } => {
             use dagq::application::lifecycle::UpOptions;
-            use dagq::infrastructure::{
-                adapters::{SystemProcesses, executable},
-                launchd::Launchctl,
-            };
+            use dagq::infrastructure::{adapters::SystemProcesses, launchd::Launchctl};
             let environment = up_environment()?;
             let options = UpOptions {
                 no_claude,
@@ -4737,9 +4695,6 @@ fn execute(cli: Cli) -> Result<Value> {
                 in_cmux,
                 no_wait,
                 plugin_dir,
-                // Only passed on to the supervisor's command line: a host
-                // without cmux goes up all the same (ADR-t2159-1).
-                cmux: executable(&cmux).unwrap_or(cmux),
                 claude: if no_claude {
                     claude
                 } else {
@@ -4771,7 +4726,7 @@ fn execute(cli: Cli) -> Result<Value> {
             build_command,
             e2e_command,
             e2e_timeout,
-            cmux,
+            cmux: _,
             claude,
             codex,
             plugin_dir,
@@ -4779,7 +4734,6 @@ fn execute(cli: Cli) -> Result<Value> {
             watch_timeout,
             poll_ms,
         } => {
-            use dagq::infrastructure::adapters::executable;
             drop(queue);
             one_shot.auto_update(
                 &location,
@@ -4792,7 +4746,6 @@ fn execute(cli: Cli) -> Result<Value> {
                     build_command,
                     e2e_command,
                     e2e_timeout: Duration::from_secs(e2e_timeout),
-                    cmux: executable(&cmux).unwrap_or(cmux),
                     claude: dagq::infrastructure::adapters::claude_at_entry(&claude)
                         .unwrap_or(claude),
                     codex: dagq::infrastructure::codex::codex_at_entry(&codex).unwrap_or(codex),
@@ -4809,7 +4762,7 @@ fn execute(cli: Cli) -> Result<Value> {
             to,
             log,
             cargo,
-            cmux,
+            cmux: _,
             claude,
             codex,
             plugin_dir,
@@ -4827,7 +4780,6 @@ fn execute(cli: Cli) -> Result<Value> {
                     target: to,
                     log,
                     cargo: executable(&cargo).unwrap_or(cargo),
-                    cmux: executable(&cmux).unwrap_or(cmux),
                     claude: dagq::infrastructure::adapters::claude_at_entry(&claude)
                         .unwrap_or(claude),
                     codex: dagq::infrastructure::codex::codex_at_entry(&codex).unwrap_or(codex),
@@ -4839,8 +4791,6 @@ fn execute(cli: Cli) -> Result<Value> {
             )?
         }
         Command::Plan { .. } => bail!(dagq::application::planner::PLAN_REFUSED),
-        // `--cmux` is accepted and ignored: a planner is judged by its
-        // background wrapper, without cmux (ADR-t1433-1).
         Command::Planners { all, cmux: _ } => one_shot.planners_of(
             &queue,
             &db,
@@ -4850,8 +4800,8 @@ fn execute(cli: Cli) -> Result<Value> {
         Command::Run { command } => {
             use dagq::application::screen::{self, RunTarget};
             match command {
-                // Neither builds a cmux nor an agent adapter: they read only
-                // the queue (task 1437).
+                // Neither builds an agent adapter: they read only the queue
+                // (task 1437).
                 RunCommand::Screen { run, .. } => {
                     screen::run_screen(&mut queue, &RunTarget::parse(&run)?)?
                 }
@@ -4873,8 +4823,7 @@ fn execute(cli: Cli) -> Result<Value> {
         Command::Planner { command } => {
             use dagq::application::screen;
             match command {
-                // Neither reads a screen nor types: no cmux is built
-                // (ADR-t1433-2).
+                // Neither reads a screen nor types (ADR-t1433-2).
                 PlannerCommand::Screen { planner, .. } => screen::planner_screen(
                     &queue,
                     &dagq::infrastructure::location::planners_dir(&db),
@@ -4913,8 +4862,6 @@ fn execute(cli: Cli) -> Result<Value> {
                 }
             }
         }
-        // `--cmux` is accepted and ignored: `down` closes no cmux workspace
-        // (ADR-t2159-1 decision 3).
         Command::Down {
             wait,
             force,
@@ -4984,8 +4931,6 @@ fn execute(cli: Cli) -> Result<Value> {
             timeout,
             claude,
             codex,
-            // Accepted from registered command lines and ignored: the
-            // observer calls no cmux (ADR-t1433-1).
             cmux: _,
             launch,
             codex_home,
@@ -5712,6 +5657,127 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// ADR-t2159-1 decision 6: the command lines an earlier binary
+    /// registered or started (the launchd plist's `supervise`, the update
+    /// jobs', the wrappers', the service's, and `up`, `down`, `install` and
+    /// the other commands that took a `--cmux`) still parse with their
+    /// `--cmux <path>`, and no command's help shows it.
+    #[test]
+    fn a_registered_argv_with_a_cmux_parses_and_no_help_shows_it() {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(registered_argv_with_a_cmux_parses_and_no_help_shows_it)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn registered_argv_with_a_cmux_parses_and_no_help_shows_it() {
+        use clap::CommandFactory;
+        let cmux = ["--cmux", "/opt/homebrew/bin/cmux"];
+        let plist = [
+            "/opt/bin/dagq",
+            "--db",
+            "/q/queue.db",
+            "supervise",
+            "--log-dir",
+            "/q/logs",
+            "--cmux",
+            "/opt/homebrew/bin/cmux",
+            "--claude",
+            "/opt/bin/claude",
+            "--codex",
+            "/opt/bin/codex",
+            "--mode",
+            "launchd",
+            "--auto-update",
+        ];
+        assert!(matches!(
+            Cli::try_parse_from(plist).unwrap().command,
+            Command::Supervise {
+                auto_update: true,
+                ..
+            }
+        ));
+        let argvs: [&[&str]; 20] = [
+            &["up", "--parallel", "3"],
+            &["down", "--wait"],
+            &["install", "--allow-breaking"],
+            &[
+                "auto-update",
+                "--commit",
+                "c",
+                "--token",
+                "t",
+                "--to",
+                "/b",
+                "--repo",
+                "/r",
+                "--log",
+                "/l",
+            ],
+            &[
+                "release-update",
+                "--release",
+                "0.4.0",
+                "--token",
+                "t",
+                "--to",
+                "/b",
+                "--log",
+                "/l",
+            ],
+            &["observe", "--daily"],
+            &["planners"],
+            &[
+                "ask",
+                "--kind",
+                "worker_question",
+                "--question",
+                "q",
+                "--because",
+                "scope",
+            ],
+            &["watch", "--role", "inbox"],
+            &["stats", "--full"],
+            &["session", "--run", "r", "--lease", "l", "--claude", "/c"],
+            &["planner-session", "--planner", "1", "--claude", "/c"],
+            &["service", "start"],
+            &["service", "serve"],
+            &["run", "screen", "1"],
+            &["run", "send", "1", "--key", "enter"],
+            &["run", "close-workspaces"],
+            &["planner", "screen", "1"],
+            &["planner", "send", "1", "--key", "enter"],
+            &["planner", "request", "1", "--text", "more"],
+        ];
+        for argv in argvs {
+            let argv: Vec<&str> = std::iter::once("dagq")
+                .chain(argv.iter().copied())
+                .chain(cmux)
+                .collect();
+            Cli::try_parse_from(&argv).unwrap_or_else(|error| panic!("{argv:?}: {error}"));
+        }
+        // Every command that takes it hides it.
+        fn with_cmux(command: &clap::Command, path: &str, found: &mut Vec<String>) {
+            if let Some(arg) = command
+                .get_arguments()
+                .find(|arg| arg.get_long() == Some("cmux"))
+            {
+                assert!(arg.is_hide_set(), "{path} shows --cmux");
+                let help = command.clone().render_long_help().to_string();
+                assert!(!help.contains("--cmux"), "{path}: {help}");
+                found.push(path.to_owned());
+            }
+            for sub in command.get_subcommands() {
+                with_cmux(sub, &format!("{path} {}", sub.get_name()), found);
+            }
+        }
+        let mut found = Vec::new();
+        with_cmux(&Cli::command(), "dagq", &mut found);
+        assert_eq!(found.len(), 21, "{found:?}");
     }
 
     /// The wrapper argv an older supervisor or planner opener gives, without

@@ -571,14 +571,16 @@ fn an_ended_run_with_a_stale_lease_is_swept_but_not_one_with_a_live_lease() {
     assert!(candidate(&queue));
 }
 
-/// ADR-t2022-1: the supervisor closes, as inferred and without listing
-/// cmux, the hook's spans whose session is over though no `SessionEnd`
-/// came: a runtime planner's whose row is closed, a person's planner's
-/// (its row closed as `person_retired`), and an inbox's that a later inbox
-/// session in another workspace followed. The later inbox session, resumed
-/// in a third workspace, goes on in its span.
+/// ADR-t2022-1: the hook's spans whose session is over though no
+/// `SessionEnd` came close as inferred, without listing cmux: the
+/// supervisor closes a runtime planner's whose row is closed and a
+/// person's planner's (its row closed as `person_retired`), and the start
+/// of a later inbox session closes the inbox's before it (the
+/// supervisor's close of an inbox span an earlier binary left open beside a
+/// later one is the unit test of `domain::sessions::inferred_hook_closes`).
+/// The later inbox session, resumed, goes on in its span.
 #[test]
-fn the_supervisor_closes_the_spans_of_ended_inbox_and_planner_sessions_without_listing_cmux() {
+fn the_spans_of_ended_inbox_and_planner_sessions_close_as_inferred_without_listing_cmux() {
     use dagq::{
         application::SessionRegistry,
         domain::{
@@ -597,7 +599,7 @@ fn the_supervisor_closes_the_spans_of_ended_inbox_and_planner_sessions_without_l
         .unwrap();
     let person = queue.open_planner(PlannerOrigin::Person, None).unwrap().id;
     queue.planner_workspace_created(person, "W-PERSON").unwrap();
-    let hook = |kind, session: &str, source: &str, workspace: &str, planner: Option<i64>| {
+    let hook = |kind, session: &str, source: &str, planner: Option<i64>| {
         queue
             .record_session_hook(&SessionHook {
                 event: HookEvent::Start {
@@ -607,29 +609,21 @@ fn the_supervisor_closes_the_spans_of_ended_inbox_and_planner_sessions_without_l
                 session_id: session.into(),
                 transcript_path: None,
                 cwd: None,
-                workspace_id: Some(workspace.into()),
                 planner_id: planner,
                 launch: None,
             })
             .unwrap();
     };
-    hook(INBOX, "s-old", "startup", "W-OLD", None);
+    hook(INBOX, "s-old", "startup", None);
     hook(
         RUNTIME_PLANNER,
         "s-runtime",
         "startup",
-        "W-RUNTIME",
         Some(runtime.as_i64()),
     );
-    hook(
-        PLANNER,
-        "s-person",
-        "startup",
-        "W-PERSON",
-        Some(person.as_i64()),
-    );
-    hook(INBOX, "s-new", "startup", "W-NEW", None);
-    hook(INBOX, "s-new", "resume", "W-OTHER", None);
+    hook(PLANNER, "s-person", "startup", Some(person.as_i64()));
+    hook(INBOX, "s-new", "startup", None);
+    hook(INBOX, "s-new", "resume", None);
     assert!(
         queue
             .end_planner(runtime, &serde_json::json!({"code": "runtime_exited"}))

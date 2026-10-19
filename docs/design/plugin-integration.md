@@ -171,11 +171,11 @@ runtimeのplanner（全て非対話）の区間はturnから記録する（[ADR-
   `DAGQ_DB`が無ければ`DAGQ_QUEUE`を`DAGQ_DB`にする。
   それ以外のsession（workerを含む。workerの区間はruntimeが書く）では何もしない。
 - 区間のkindは`domain::sessions`の`hook_kind`が決める（読む環境変数は`SessionHook`のdoc comment）。
-- `/clear`とcompactionで二重に数えない: 同じsession_idの`SessionStart`（`resume`・`compact`）は開いている区間を続け、別のsession_idの`SessionStart`は同じworkspaceの開いている区間を閉じてから開き、閉じた区間への2回目の`SessionEnd`は何も書かない。
+- `/clear`とcompactionで二重に数えない: 同じsession_idの`SessionStart`（`resume`・`compact`）は開いている区間を続け、別のsession_idの`SessionStart`は同kindの開いている区間を推定の終了で閉じてから開き（時間の閾値は使わない。次の開始1回が契機）、閉じた区間への2回目の`SessionEnd`は何も書かない。
 - closeはtranscriptを読まない: `SessionEnd` と次の `SessionStart` によるcloseは先に `session_closed` をcommitし、残りの稼働時間・tokens・modelの取り込みはsupervisorに任せる。
   読めなくても区間は閉じたまま。
-  `CMUX_WORKSPACE_ID` が無い場合は、workspace IDの無い同kindの次の別sessionの開始で前を推定の終了で閉じる（時間の閾値は使わない。次の開始1回が契機）。
-  同じIDのresume・compactや別kind、workspace IDのある区間には影響しない。
+  sessionが動くterminalは問わず、前のbinaryが区間に記録したworkspace IDは読まない。
+  同じIDのresume・compactや別kindの区間には影響しない。
   詳細と同時sessionの制約は[provider-lifecycle](provider-lifecycle.md#claude-sessionの区間)。
 - 失敗してもsessionを止めない: 何も出力せず（`SessionStart`のstdoutはcontextに入るので）、`dagq`が無い・実行できない、queueが開けない、入力にsession_idが無い、記録に失敗した、のどれでもexit 0する。記録のCLIは区間のeventだけを書き、run・proposal・plannerの状態を変えない。
 

@@ -1,20 +1,24 @@
-//! A headless session wrapper started as a background process instead of
-//! in a cmux workspace (ADR-t1404-1): the `[headless] wrapper` setting of
-//! `dagq.toml` that chooses it, and the handle the run records in place of
-//! a workspace ID. The handle names the wrapper by its pid and the start
-//! the system recorded for it, so a pid another process took later is
-//! never taken for the wrapper (decision 2).
+//! A headless session wrapper started as a background process (ADR-t1404-1),
+//! the only way a wrapper starts (ADR-t1433-3): the `[headless] wrapper`
+//! setting an older `dagq.toml` still writes, read only to warn that it is
+//! ignored, and the handle the run records where an earlier binary
+//! recorded a cmux workspace's ID. The handle names the wrapper by its pid
+//! and the start the system recorded for it, so a pid another process took
+//! later is never taken for the wrapper (decision 2).
 
 use std::fmt;
 
-/// Where a headless session's wrapper runs (`[headless] wrapper`).
+/// What `[headless] wrapper` of `dagq.toml` says. A worker's and a runtime
+/// planner's wrapper run in the background whatever it says (ADR-t1433-3
+/// decision 1, ADR-t1433-2 decision 3), so the default, a `dagq.toml`
+/// without the key, is [`Self::Background`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HeadlessWrapper {
-    /// In a cmux workspace of its own (ADR-t813-1 decision 3), the default
-    /// until the evaluation (ADR-t1404-1 decision 7).
-    #[default]
+    /// In a cmux workspace of its own, as an earlier binary started one
+    /// (ADR-t813-1 decision 3): read only to warn that it is ignored.
     Workspace,
     /// As a process detached from the supervisor, without a workspace.
+    #[default]
     Background,
 }
 
@@ -523,9 +527,11 @@ mod tests {
         assert!(!is_background("workspace:1"));
     }
 
+    /// The setting reads its two values, and without it a wrapper runs as
+    /// every wrapper does: in the background.
     #[test]
     fn the_setting_reads_its_two_values() {
-        assert_eq!(HeadlessWrapper::default(), HeadlessWrapper::Workspace);
+        assert_eq!(HeadlessWrapper::default(), HeadlessWrapper::Background);
         for wrapper in HeadlessWrapper::ALL {
             assert_eq!(HeadlessWrapper::parse(wrapper.as_str()), Some(wrapper));
         }

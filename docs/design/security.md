@@ -128,14 +128,13 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
   通った読み取りはqueueに書かない
 - runtimeがClaudeの設定を書くactor（worker・planner・review job・inbox）の`permissions.deny`には、roleが持たないcommandの`Bash(dagq <command>:*)`と、`DAGQ_ROLE`などactorを名指す変数の書き換えを入れる（`permission_deny(role)`）。
   これは誤りを早く止めるguardrailで、pathやscriptからの呼び出しは通るので、拒むのはCLIの判定
-- inboxとplannerの`permissions.deny`には`Bash(cmux:*)`も入れる（`execution::RAW_CMUX_DENIED`、[ADR-t1228-2](../adr/2026-10-02-t1228-2-deny-raw-cmux-to-inbox-and-planner-as-a-guardrail.md)）。
-  sessionへの操作（画面を読む・決めたキーと答えを送る・plannerへの続きの依頼。runのturnはlogを読む）は判定と記録を通る`run` / `planner`のCLIで行い、記録の残らない生のcmuxにふだん流れないようにする。
+- inboxとplannerの`permissions.deny`にcmuxを拒む規則は無い（dagqがcmuxのsessionを持たないため。[ADR-t2159-1](../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定5）。
+  sessionへの操作（画面を読む・決めたキーと答えを送る・plannerへの続きの依頼。runのturnはlogを読む）は判定と記録を通る`run` / `planner`のCLIで行う。
   plannerはruntimeが書くsettingsに、inboxは`dagq inbox`が開くときにqueueのディレクトリに書くsettings（[`dagq inbox`](supervisor-lifecycle/up-down.md#dagq-inbox)）に持つ。
-  これは**guardrailであってenforcementではない**: denyはClaude Codeのtoolの呼び出しの綴りで照合する助言的な抑止で、絶対pathの`cmux`・scriptの中の呼び出し・別のshellからの実行を止めず、`dagq inbox`を通さずに開いたinboxと、`claude`を打ち直したsessionには効かない（inboxがguardrailつきで開かれたかは`status` / `doctor`の`inbox_guardrail`が見せる）。
+  これは**guardrailであってenforcementではない**: denyはClaude Codeのtoolの呼び出しの綴りで照合する助言的な抑止で、`dagq inbox`を通さずに開いたinboxと、`claude`を打ち直したsessionには効かない（inboxがguardrailつきで開かれたかは`status` / `doctor`の`inbox_guardrail`が見せる）。
   hostの判定は助言的なまま（ADR-t728-1決定6）。
-  workerとjobの`cmux`は拒まず、隔離に任せる（決定7）。
-  人自身のterminal（`DAGQ_ROLE`なし）はsettingsを持たず、ADR-t1228-1が人に残したcmuxの操作をそこで打つ
-- Codexのinboxは、同じ趣旨（`cmux`で始まるコマンドを拒み、dagqのCLIを使わせる）をCodexの手段で持たせる（ADR-t1228-2決定6）。
+  人自身のterminal（`DAGQ_ROLE`なし）はsettingsを持たない
+- Codexのinboxは、同じ趣旨（dagqのCLIを通す）をCodexの手段で持たせる（ADR-t2159-1決定5）。
   今のproviderの口（`AgentProvider::inbox_command`）でinboxを持つのはClaudeだけで、Codexはinboxを持たない（settingsを持たないproviderのinboxが入れば`inbox_guardrail`が見せる）。
   Codexのinboxを作るtaskが手段を持たせるか、手段が無ければこのguardrailが無いことをここに書き、skillの手順をCLIだけにすることで足りるとする
 
@@ -147,7 +146,9 @@ containerに置いたworkerのturnを除き、actorは全て同じユーザー�
 
 同じhostの敵対的なプロセスは次で迂回できる:
 
-- envの偽装: `DAGQ_ROLE`を外せばuser、`DAGQ_ROLE=inbox`にすればinboxとして判定される。`DAGQ_RUN_ID`も書き換えられる。`permissions.deny`はClaude Codeのコマンドの先頭の形しか見ないので、pathや`sh -c`やscriptからは通る（inboxとplannerの`Bash(cmux:*)`も同じ）
+- envの偽装: `DAGQ_ROLE`を外せばuser、`DAGQ_ROLE=inbox`にすればinboxとして判定される。
+  `DAGQ_RUN_ID`も書き換えられる。
+  `permissions.deny`はClaude Codeのコマンドの先頭の形しか見ないので、pathや`sh -c`やscriptからは通る
 - DBの直接操作: queueのSQLiteファイルはこのユーザーが読み書きでき、CLIを通らずに状態とeventを書き換えられる
 - Gitとファイル: worktree・main checkout・`runs/`・固定バイナリを直接書き換えられ、pushの資格情報もこのユーザーのもの
 - プロセス: 他のactorのプロセスにsignalを送れる（`pkill`・`killall`を拒むのもguardrail）

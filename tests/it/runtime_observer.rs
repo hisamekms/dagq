@@ -151,11 +151,11 @@ q() { dagq "$@" > /dev/null; }
 q finding record --kind stall --task 1 --summary 'task 1 waits for a slot' --evidence 1
 q finding record --kind stall --task 1 --summary 'task 1 waits for a slot' --evidence 1 --evidence 2
 q finding record --kind capacity --queue --subject idle_slots --summary 'slots idle'
-q ask --kind blocked --because recovery_failed --finding 2 --question 'slots idle while task 1 is ready' --option 'restart the supervisor' --recommend 'restart the supervisor' --confidence high --cmux /usr/bin/true
-q ask --kind blocked --because recovery_failed --finding 2 --question 'the same alert again' --recommend propose --cmux /usr/bin/true
-if q ask --kind blocked --because scope --finding 1 --question 'wait for a slot?' --option wait --cmux /usr/bin/true 2> blocked.err; then exit 8; fi
+q ask --kind blocked --because recovery_failed --finding 2 --question 'slots idle while task 1 is ready' --option 'restart the supervisor' --recommend 'restart the supervisor' --confidence high
+q ask --kind blocked --because recovery_failed --finding 2 --question 'the same alert again' --recommend propose
+if q ask --kind blocked --because scope --finding 1 --question 'wait for a slot?' --option wait 2> blocked.err; then exit 8; fi
 if q ready 1 2> ready.err; then exit 3; fi
-if q ask --kind decide --because recovery_failed --task 1 --question 'decide?' --cmux /usr/bin/true 2> ask.err; then exit 4; fi
+if q ask --kind decide --because recovery_failed --task 1 --question 'decide?' 2> ask.err; then exit 4; fi
 if q goal ready 1 2> goal.err; then exit 5; fi
 if q note --task 1 --text 'seen' 2> note.err; then exit 6; fi
 if q goal add --draft 'claim faster' 2> draft.err; then exit 7; fi
@@ -606,10 +606,6 @@ fn supervisor_starts_the_observer_on_its_interval_without_a_run_slot() {
     let options = SuperviseOptions {
         observe_interval: Duration::from_secs(3600),
         observe_daily: true,
-        update: dagq::application::supervise::UpdateSettings {
-            cmux: Some(PathBuf::from("/usr/bin/true")),
-            ..Default::default()
-        },
         ..SuperviseOptions::new(1, true)
     };
     let runner = db.parent().unwrap().join("observer-runner");
@@ -1217,10 +1213,6 @@ printf 'test provider\n'
     let options = SuperviseOptions {
         observe_interval: Duration::from_secs(3600),
         observe_daily: false,
-        update: dagq::application::supervise::UpdateSettings {
-            cmux: Some(PathBuf::from("/usr/bin/true")),
-            ..Default::default()
-        },
         ..SuperviseOptions::new(1, false)
     };
     let supervisor = {
@@ -1293,41 +1285,6 @@ fn a_handoff_leaves_no_observer_process() {
         gone(child),
         "the agent's child {child} outlived the handoff"
     );
-}
-
-/// The observer calls no cmux (ADR-t1433-1): `observe --cmux`, as a
-/// supervisor of an older binary passes it, is accepted and ignored, and
-/// the cmux it names is never run.
-#[test]
-fn observe_accepts_its_cmux_and_never_runs_it() {
-    let (_dir, _repo, db) = fixture();
-    let cmux = db.parent().unwrap().join("selected-cmux");
-    let calls = db.parent().unwrap().join("cmux-calls");
-    crate::common::template::script(
-        &cmux,
-        r#"#!/bin/sh
-printf '%s\n' "$*" >> "${0%/*}/cmux-calls"
-"#,
-    );
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_dagq"))
-        .without_actor_env()
-        .args([
-            "--db",
-            db.to_str().unwrap(),
-            "observe",
-            "--dry-run",
-            "--daily",
-            "--cmux",
-            cmux.to_str().unwrap(),
-        ])
-        .bounded_output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(!calls.exists(), "the observer ran cmux");
 }
 
 #[test]
@@ -1415,8 +1372,6 @@ fn the_observer_reads_what_its_prompt_left_out_and_the_prompt_bytes_are_recorded
                 &question,
                 "--option",
                 "a",
-                "--cmux",
-                "/usr/bin/true",
             ],
         );
     }

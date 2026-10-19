@@ -41,9 +41,6 @@ pub struct UpdateSettings {
     /// heartbeat; `None` is the job's default (tests shorten it, task
     /// 1048).
     pub poll: Option<Duration>,
-    /// The cmux the job's `up` is given when it starts a supervisor
-    /// registered in the retired in-cmux mode again.
-    pub cmux: Option<PathBuf>,
     /// The cargo the release update's job installs a release with
     /// (ADR-t618-1 decision 5); `None` is `cargo`. Tests give a stub.
     pub cargo: Option<PathBuf>,
@@ -58,7 +55,6 @@ impl Default for UpdateSettings {
             e2e_command: None,
             e2e_timeout: None,
             poll: None,
-            cmux: None,
             cargo: None,
         }
     }
@@ -320,47 +316,7 @@ to wait for the next landing that changes the runtime.",
             logs.join(format!("{name}.build.log")),
             logs.join(format!("{name}.json")),
         );
-        let mut command = CommandSpec::new(&layout.runner);
-        command
-            .arg("--db")
-            .arg(&layout.db)
-            .arg("auto-update")
-            .args(["--commit", head, "--token", env.token.as_str()])
-            .envs(layout.supervisor_actor().env())
-            // It opens the queue it names, not a client-mode `dagq`.
-            .env_remove(crate::domain::queue_service::SOCKET_ENV)
-            .arg("--to")
-            .arg(&layout.runner)
-            .arg("--repo")
-            .arg(&layout.repo_root)
-            .arg("--log")
-            .arg(&build_log)
-            .arg("--claude")
-            .arg(&layout.claude)
-            .arg("--codex")
-            .arg(&layout.codex)
-            .current_dir(&layout.repo_root)
-            .new_session();
-        if let Some(cmux) = &options.update.cmux {
-            command.arg("--cmux").arg(cmux);
-        }
-        if let Some(dir) = &layout.plugin_dir {
-            command.arg("--plugin-dir").arg(dir);
-        }
-        if let Some(build) = &options.update.build_command {
-            command.arg("--build-command").arg(build);
-        }
-        if let Some(e2e) = &options.update.e2e_command {
-            command.arg("--e2e-command").arg(e2e);
-        }
-        if let Some(timeout) = options.update.e2e_timeout {
-            command
-                .arg("--e2e-timeout")
-                .arg(timeout.as_secs().to_string());
-        }
-        if let Some(poll) = options.update.poll {
-            command.arg("--poll-ms").arg(poll.as_millis().to_string());
-        }
+        let command = update_job_command(layout, env.token, head, &build_log, &options.update);
         let job = env.spawner.spawn(
             &command,
             Streams::Files {
@@ -390,5 +346,115 @@ to wait for the next landing that changes the runtime.",
         );
         self.update.job = Some(job);
         Ok(())
+    }
+}
+
+/// The command of the automatic update's job for main's `head`, started by
+/// the supervisor `token` with the paths and providers of `layout`, the
+/// build's output appended to `build_log`: a supervisor the job starts
+/// again gets this one's providers and plugin directory, and no `--cmux`
+/// (ADR-t2159-1 decision 6).
+fn update_job_command(
+    layout: &Layout,
+    token: &LeaseToken,
+    head: &str,
+    build_log: &Path,
+    update: &UpdateSettings,
+) -> CommandSpec {
+    let mut command = CommandSpec::new(&layout.runner);
+    command
+        .arg("--db")
+        .arg(&layout.db)
+        .arg("auto-update")
+        .args(["--commit", head, "--token", token.as_str()])
+        .envs(layout.supervisor_actor().env())
+        // It opens the queue it names, not a client-mode `dagq`.
+        .env_remove(crate::domain::queue_service::SOCKET_ENV)
+        .arg("--to")
+        .arg(&layout.runner)
+        .arg("--repo")
+        .arg(&layout.repo_root)
+        .arg("--log")
+        .arg(build_log)
+        .arg("--claude")
+        .arg(&layout.claude)
+        .arg("--codex")
+        .arg(&layout.codex)
+        .current_dir(&layout.repo_root)
+        .new_session();
+    if let Some(dir) = &layout.plugin_dir {
+        command.arg("--plugin-dir").arg(dir);
+    }
+    if let Some(build) = &update.build_command {
+        command.arg("--build-command").arg(build);
+    }
+    if let Some(e2e) = &update.e2e_command {
+        command.arg("--e2e-command").arg(e2e);
+    }
+    if let Some(timeout) = update.e2e_timeout {
+        command
+            .arg("--e2e-timeout")
+            .arg(timeout.as_secs().to_string());
+    }
+    if let Some(poll) = update.poll {
+        command.arg("--poll-ms").arg(poll.as_millis().to_string());
+    }
+    command
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The automatic update's job is the runtime binary's `auto-update` of
+    /// main's head for this supervisor, given this supervisor's providers
+    /// and plugin directory for a supervisor it starts again, and no
+    /// `--cmux` (ADR-t2159-1 decision 6).
+    #[test]
+    fn the_update_job_is_given_the_supervisors_providers_and_no_cmux() {
+        let layout = Layout::for_test(Path::new("/q"));
+        let update = UpdateSettings {
+            poll: Some(Duration::from_millis(20)),
+            ..UpdateSettings::default()
+        };
+        let command = update_job_command(
+            &layout,
+            &LeaseToken::new("token-1"),
+            "abc123",
+            Path::new("/q/logs/update.build.log"),
+            &update,
+        );
+        assert_eq!(command.get_program(), "/opt/bin/dagq");
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "--db",
+                "/q/queue.db",
+                "auto-update",
+                "--commit",
+                "abc123",
+                "--token",
+                "token-1",
+                "--to",
+                "/opt/bin/dagq",
+                "--repo",
+                "/repo",
+                "--log",
+                "/q/logs/update.build.log",
+                "--claude",
+                "/opt/bin/claude",
+                "--codex",
+                "/opt/bin/codex",
+                "--plugin-dir",
+                "/plugin",
+                "--poll-ms",
+                "20",
+            ]
+        );
+        assert!(!args.contains(&"--cmux"), "{args:?}");
     }
 }

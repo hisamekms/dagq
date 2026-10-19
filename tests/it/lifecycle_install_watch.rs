@@ -189,7 +189,7 @@ fn run(
             source: Source::Binary(binaries.built.clone()),
             target: target.to_owned(),
             allow_breaking: false,
-            restart: vec!["--cmux".into(), "/opt/cmux".into()],
+            restart: vec!["--claude".into(), "/opt/claude".into()],
             handoff_timeout: Duration::from_secs(5),
             poll: Duration::from_millis(20),
             e2e: E2eGate::NotApplicable,
@@ -548,7 +548,6 @@ fn a_persons_install_failure_leaves_the_automatic_update_alone() {
             e2e_command: None,
             e2e_timeout: None,
             poll: None,
-            cmux: Some(PathBuf::from("/usr/bin/true")),
             cargo: None,
         },
         ..runtime_support::supervise_options(1, true)

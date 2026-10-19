@@ -509,7 +509,7 @@ pub struct JobOptions {
     /// [`UpdatePaths::target`].
     pub e2e: E2eSettings,
     /// The `up` arguments the question of a breaking build hands a person,
-    /// beside `--db`: `--cmux`, `--claude`, `--plugin-dir`.
+    /// beside `--db`: `--claude`, `--codex`, `--plugin-dir`.
     pub restart: Vec<String>,
     /// How long the supervisor may take to exec the new binary (it
     /// finishes a validation or landing in progress first).
@@ -704,7 +704,7 @@ pub struct ReleaseJobOptions {
     /// Where cargo's output is appended.
     pub log: PathBuf,
     /// The arguments the question of a breaking release hands a person,
-    /// beside `--db`: `--cmux`, `--claude`, `--plugin-dir`.
+    /// beside `--db`: `--claude`, `--codex`, `--plugin-dir`.
     pub restart: Vec<String>,
     pub handoff_timeout: Duration,
     pub watch_timeout: Duration,
@@ -2391,12 +2391,12 @@ mod tests {
     /// agent, and one started by hand is not started again.
     #[test]
     fn a_gone_in_cmux_supervisor_is_started_again_under_launchd() {
-        let job = ["--cmux".to_owned(), "/opt/cmux".to_owned()];
+        let job = ["--claude".to_owned(), "/opt/claude".to_owned()];
         let up = |auto_update: &[&str]| {
             [
                 &["--db", "/q/queue.db", "up"][..],
                 auto_update,
-                &["--parallel", "3", "--cmux", "/opt/cmux"],
+                &["--parallel", "3", "--claude", "/opt/claude"],
             ]
             .concat()
             .into_iter()

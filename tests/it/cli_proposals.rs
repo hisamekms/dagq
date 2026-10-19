@@ -5,8 +5,9 @@ use common::cli::*;
 use serde_json::Value;
 
 /// ADR-0041 decisions 7 and 8: `submit` bundles drafts into a proposal
-/// owned by the planner's workspace; a submitted task is never claimed,
-/// and only plan review or `ready --bypass-review` makes it ready.
+/// owned by its planner; a submitted task is never claimed, and only plan
+/// review or `ready --bypass-review` makes it ready. A cmux workspace the
+/// terminal names owns nothing (ADR-t2159-1 decision 1).
 #[test]
 fn submit_bundles_drafts_into_a_proposal_that_plan_review_or_a_bypass_readies() {
     let (_dir, db) = queue();
@@ -15,7 +16,11 @@ fn submit_bundles_drafts_into_a_proposal_that_plan_review_or_a_bypass_readies() 
     ok(&db, &["add", "alone"]);
     ok(&db, &["add", "left out"]);
 
-    let submitted = submit_from(&db, Some("W-1"), None, &["2", "--goal", "1"]);
+    let submitted = invoke_with(
+        &[("CMUX_WORKSPACE_ID", "W-1")],
+        &db,
+        &["submit", "2", "--goal", "1"],
+    );
     assert!(
         submitted.status.success(),
         "{}",
@@ -28,7 +33,7 @@ fn submit_bundles_drafts_into_a_proposal_that_plan_review_or_a_bypass_readies() 
     assert_eq!(proposal["goal_ids"], serde_json::json!([1]));
     assert_eq!(
         proposal["owner"],
-        serde_json::json!({"origin": "person", "workspace_id": "W-1"})
+        serde_json::json!({"origin": "person", "workspace_id": null})
     );
     assert_eq!(ok(&db, &["show", "1"])["task"]["status"], "submitted");
     let listed = ok(&db, &["list", "--status", "submitted"]);
@@ -104,7 +109,7 @@ fn proposal_withdraw_releases_the_members_for_another_proposal() {
     ok(&db, &["goal", "add", "planned", "--draft"]);
     ok(&db, &["add", "in goal", "--goal", "1"]);
     ok(&db, &["add", "alone"]);
-    let submitted = submit_from(&db, Some("W-1"), None, &["2", "--goal", "1"]);
+    let submitted = submit_from(&db, None, None, &["2", "--goal", "1"]);
     assert!(submitted.status.success());
 
     for role in ["observer", "reviewer"] {

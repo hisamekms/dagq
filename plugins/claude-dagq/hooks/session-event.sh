@@ -9,8 +9,8 @@
 # supervisor put on the command they start) passes
 # the hook's stdin (session_id, transcript_path, cwd, source or reason) to
 # `dagq session-event open|close`, which reads the span's kind from
-# DAGQ_SESSION_KIND (else DAGQ_ROLE) and the workspace from
-# CMUX_WORKSPACE_ID. Every other session, workers included, is left alone.
+# DAGQ_SESSION_KIND (else DAGQ_ROLE); it reads nothing of the terminal the
+# session runs in. Every other session, workers included, is left alone.
 # The hook prints nothing (a SessionStart's stdout would reach the context)
 # and always exits 0: a missing dagq, a queue that cannot be opened or a
 # failed record never stops the session, and the status the

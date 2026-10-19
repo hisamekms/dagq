@@ -44,7 +44,7 @@ pub fn is_headless_stub(program: &std::ffi::OsStr) -> bool {
 /// The `$DAGQ` of the headless stubs in `dir` (`dagq-client` there), on
 /// `db` made by the process `test_pid`: the tests' `dagq`, but a
 /// client-mode call (a worker's or a job's turn) first starts the queue's
-/// service with the fake cmux, as [`common::service::serve`] does, unless
+/// service, as [`common::service::serve`] does, unless
 /// a stub's call already did; turns that call it at once take turns
 /// under a lock (a directory beside the marker, given up after 30
 /// seconds), since a second `service start` that finds the first's
@@ -69,7 +69,7 @@ if [ -n "${{{socket}:-}}" ] && [ ! -e "$STARTED" ]; then
     n=$((n + 1)); [ "$n" -lt 600 ] || exit 1; sleep 0.05
   done
   if [ ! -e "$STARTED" ]; then
-    ( cd / && env{unset} {owner}="$STUB_TEST_PID" "$TESTS_DAGQ" --db "$STUB_DB" service start --cmux "$CMUX" >/dev/null ) || {{ rmdir "$STARTED.lock"; exit 1; }}
+    ( cd / && env{unset} {owner}="$STUB_TEST_PID" "$TESTS_DAGQ" --db "$STUB_DB" service start >/dev/null ) || {{ rmdir "$STARTED.lock"; exit 1; }}
     : > "$STARTED"
   fi
   rmdir "$STARTED.lock"
@@ -81,7 +81,6 @@ exec "$TESTS_DAGQ" "$@"
     );
     let [(_, stub_db), (_, pid)] = stub_env(db, test_pid);
     let started = common::service::started_by_a_stub(db);
-    let cmux = fake_cmux_dir(db).join("cmux");
     crate::common::template::script_env(
         &dir.join("dagq-client"),
         script,
@@ -90,7 +89,6 @@ exec "$TESTS_DAGQ" "$@"
             ("STUB_TEST_PID", &pid),
             ("TESTS_DAGQ", env!("CARGO_BIN_EXE_dagq")),
             ("STARTED", started.to_str().unwrap()),
-            ("CMUX", cmux.to_str().unwrap()),
         ],
     );
 }
@@ -119,10 +117,7 @@ fn stub_script(path: &Path, script: String, db: &Path, test_pid: u32) {
 /// `$COST`, 0.01 unless the turn sets it, as its `total_cost_usd`, and
 /// `$EXTRA`, fields the turn may add, such as a `modelUsage`),
 /// `denied` (three refusals), `fail TEXT` (an error result, exit 1),
-/// `commit MESSAGE`, `receipt COMMIT [RESULT] [EVIDENCE]`, `ask QUESTION`
-/// (its notification goes to `true`, not the host's cmux: a real `cmux
-/// notify` that is slow under load would be a quiet process of the turn
-/// for the `idle_process` watch).
+/// `commit MESSAGE`, `receipt COMMIT [RESULT] [EVIDENCE]`, `ask QUESTION`.
 pub fn headless_claude(dir: &Path, db: &Path) -> PathBuf {
     headless_claude_of(dir, db, std::process::id())
 }
@@ -175,7 +170,7 @@ receipt() {{
   printf '{{"run_id":"%s","result":"%s","commit":"%s","tests":{{"status":"passed","evidence_or_reason":"ran"}},"e2e":{{"status":"%s","evidence_or_reason":"stub e2e"}},"subagent_review":{{"status":"passed","evidence_or_reason":"reviewed"}},"summary":"turn %s"}}' "${{DAGQ_RUN_ID:-$SESSION}}" "${{2:-succeeded}}" "$1" "${{3:-not_applicable}}" "$TURN" > "$RECEIPT.tmp"
   mv "$RECEIPT.tmp" "$RECEIPT"
 }}
-ask() {{ "$DAGQ" ask --run "${{DAGQ_RUN_ID:-$SESSION}}" --kind worker_question --because scope --topic acceptance_conflict --question "$1" --cmux true >/dev/null; }}
+ask() {{ "$DAGQ" ask --run "${{DAGQ_RUN_ID:-$SESSION}}" --kind worker_question --because scope --topic acceptance_conflict --question "$1" >/dev/null; }}
 . {turns}
 [ -n "$RESULTED" ] || result
 "#,
@@ -353,7 +348,7 @@ receipt() {{
   printf '{{"run_id":"%s","result":"%s","commit":"%s","tests":{{"status":"passed","evidence_or_reason":"ran"}},"e2e":{{"status":"%s","evidence_or_reason":"stub e2e"}},"subagent_review":{{"status":"passed","evidence_or_reason":"reviewed"}},"summary":"turn %s"}}' "$DAGQ_RUN_ID" "${{2:-succeeded}}" "$1" "${{3:-not_applicable}}" "$TURN" > "$RECEIPT.tmp"
   mv "$RECEIPT.tmp" "$RECEIPT"
 }}
-ask() {{ "$DAGQ" ask --run "$DAGQ_RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question "$1" --cmux true >/dev/null; }}
+ask() {{ "$DAGQ" ask --run "$DAGQ_RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question "$1" >/dev/null; }}
 echo "Reading additional input from stdin..." >&2
 printf '{{"type":"thread.started","thread_id":"%s"}}
 {{"type":"turn.started"}}

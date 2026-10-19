@@ -354,6 +354,36 @@ say "turn $TURN""#,
     assert!(queue_events(&fx.db, "turn_requested").is_empty());
 }
 
+/// Without `[roles.runtime_planner] route` and `[headless]` in `dagq.toml`
+/// (the keys a later `dagq.toml` drops), the planner the supervisor opens
+/// for a revise runs headless in the background as with them, and the
+/// supervisor warns of nothing (ADR-t1433-2 decision 3).
+#[test]
+fn without_the_old_keys_the_runtimes_planner_runs_headless_with_no_warning() {
+    let fx = fixture();
+    assert!(!fx.repo.join("dagq.toml").exists());
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let task = add(&mut queue, "change", &[TaskId::new(1)], Priority::Normal);
+    submit(&mut queue, &[task], None);
+    let reviewer = StubReviewer::new(&[revise(&["split it"])]);
+    // Parked: the test plays the planner.
+    let backend = PlanWorkspace::default();
+    let settings = options(1, Duration::from_secs(3600));
+    let (telemetry, captured) = dagq::infrastructure::telemetry::Telemetry::capture();
+    telemetry.in_scope(|| supervise_with(&fx, &backend, &reviewer, &settings));
+    let log = captured.text();
+    assert!(!log.contains("of dagq.toml is ignored"), "{log}");
+    let planners = queue.planners(false).unwrap();
+    assert_eq!(planners.len(), 1, "{planners:?}");
+    assert_eq!(planners[0].route, PlannerRoute::Headless);
+    let handle = planners[0].workspace_id.clone().unwrap();
+    assert!(is_background(&handle), "{handle}");
+    let launched = backend.background.launched();
+    assert_eq!(launched.len(), 1, "{launched:?}");
+    assert!(launched[0].1.contains("'--headless'"), "{launched:?}");
+    assert!(launched[0].1.contains("'--background'"), "{launched:?}");
+}
+
 /// Acceptance (ADR-t1433-2 decision 3): with the old `route =
 /// "interactive"` of `[roles.runtime_planner]`, the planner the supervisor
 /// opens for a revise runs headless: its wrapper starts in the background
