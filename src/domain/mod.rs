@@ -1218,6 +1218,7 @@ pub mod run_env;
 pub mod run_phase;
 pub mod run_progress;
 pub mod satisfied;
+pub mod satisfied_judgment;
 pub mod sccache;
 pub mod scope;
 pub mod search;

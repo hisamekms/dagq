@@ -164,6 +164,9 @@ promptは`REVIEW_DOCS_CHECK`で文書の照合を求める（[ADR-t1942-2](../..
 [ADR-t451-1](../../adr/2026-10-02-t451-1-ai-decides-recommendable-asks-and-escalates-only-the-undecidable.md)決定3。
 
 - **verdictの欄**: 推奨・確信度・人が要る理由はconcernのverdictだけが持つ（`ReviewVerdict`）。
+  例外は`already_satisfied`の主張の判定だけで、専用の入口がpass・revise・concernのどれでも確信度を読み、`high`のpassだけを閉じる側に置く（[ADR-t1818-1](../../adr/2026-10-05-t1818-1-worker-claims-already-satisfied-and-runtime-closes-on-a-verified-snapshot.md)決定3・4、`domain::satisfied_judgment`）。
+  通常のrunのreviewの読み取りとconcernの判定はこの入口で変わらない。
+  mainがsnapshotから進んだ`high`のpassの判定のやり直しには上限があり、超えたら人のaskにする（値は`satisfied_judgment::MAX_JUDGMENT_RETRIES`）。
 - 推奨が無い・人が要る理由がある・確信度が`high`でないconcernはaskにし、知らない理由は人が決める側に倒す（`domain::concern::decide`）。
 - 着地を許す判定は、適用される`land`のconcernを「passした」と読む（`concern::lets_land`）。
 - セキュリティのagentは[ADR-t1906-1](../../adr/2026-10-14-t1906-1-security-review-agent-findings-follow-the-concern-rules.md)。
