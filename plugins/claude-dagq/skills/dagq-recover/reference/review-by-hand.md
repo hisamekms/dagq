@@ -21,7 +21,7 @@ The supervisor reviews every run it accepts and lands, sends back or asks `appro
 - `integrated`: report the landed commit, what it unblocked and the draft tasks from `follow_ups` (also any entry it skipped). A draft is never claimed; the runtime opens a planner for each.
 - `needs_session`: nothing landed; the supervisor resumes the session and lands the run itself. Do not `integrate` it again.
 - `failed`: the receipt reported `failed`; the recovery job takes the run.
-- An error leaves the landing branch untouched and puts the run back with `last_error`. A checkout of the landing branch whose uncommitted changes overlap the landing is a common cause: fix it and run `integrate` again.
+- An error leaves the landing branch untouched and puts the run back with `last_error`. A checkout of the landing branch whose uncommitted changes overlap the landing is a common cause: fix it and run `integrate` again. So is a container verification whose container podman itself did not start (exit 125): that command is not judged and the run does not go to `needs_session`; fix podman (its machine, for one) and run `integrate` again.
 
 The task's verification commands run in `integrate`, after its rebase (an `already_satisfied` run's run on a snapshot of main instead: the `dagq-inbox` skill's `reference/asks.md`, `approve_close`); before it there is no verification log, and the receipt's `tests` is the worker's own claim. Judge by the highest attempt's `integrate-<attempt>-verify-N.log`, not by whichever file is there.
 
