@@ -13,7 +13,7 @@ Take a refusal as the answer: never retry it under another `DAGQ_ROLE`, without 
 A worker, a job and the observer get the queue service's address and a token, never the queue's path: their `dagq` sends each command to the service, which checks it for the token's principal whatever `DAGQ_ROLE` says. A refusal names a code:
 
 - `no_use_case`: the service does not serve the command; `control_side_command`: `doctor`, `service status` or `planners`, which a person or the inbox runs on the host; `queue_named`: it names a queue (`--db`). Never add `--db` to reach the queue; hand the step on.
-- `authorization_denied`: refused for your principal, as in "The check".
+- `authorization_denied`: refused for your principal, as in "The check". The error also carries `denied` (role, capability, reason) and the message the command line prints for the same refusal; the client's own codes carry no `denied`.
 - `unreachable`, `unauthenticated`, `no_credential`, `client_misconfigured`: no service, token or usable address. Do not work around it (the client never opens the queue instead): try again later, or write it in the receipt.
 - `bad_request`, `failed`, `api_version_mismatch`: read the message.
 

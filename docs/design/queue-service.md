@@ -96,6 +96,7 @@ serviceは呼び出しのprincipal（`Principal`）をtokenから決め、クラ
 `src/application/queue_service.rs`の`QueueService::handle`が、versionの検査、tokenの検査、ユースケースの順に行う。
 認可はCLIと同じapplicationの境界（`Dialogue`・`Gate`と`StaticPolicy`）を、principalのactorでservice側で通す。
 拒否はCLIと同じ`authorization_denied`（拒まれたprincipalがactor）に記録し、`authorization_denied`のcodeで返す。
+そのerrorはeventと同じrole・capability・reasonを`denied`に持ち（`ServiceDenial`）、知らない欄を読み飛ばす古いクライアントはcodeとmessageだけを読むので、API versionを上げない。
 codeの意味は`ServiceErrorCode`のdoc comment。
 
 paramsはそのコマンドのoption、答えはそのコマンドの出力（paramsの形は`src/application/queue_service.rs`の各params型）。
@@ -204,7 +205,9 @@ ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、ADR-t2114-3決定3。
 - tokenはcredentialのfileから読み、要求ごとに送る。
   答えの`result`をCLIと同じに出す（`graph --format d2`の本文もそのまま）。
   答えを待つ時間と読む長さの上限はどちらの宛ても同じ
-- 断り: serviceとbrokerの断りもクライアントの断りも同じ形のerrorで終了コード1になり、codeの意味は`ClientFailure`のdoc comment。
+- 断り: serviceとbrokerの断りもクライアントの断りも同じ形のerror（`queue_service`の`code`）で終了コード1になり、codeの意味は`ClientFailure`のdoc comment。
+  serviceの`authorization_denied`は、codeに加えてローカルのCLIの断りと同じ`denied`（role・capability・reason）とerrorの文（observerとjobには各々の決まった文）を出す。
+  クライアントで断るもの（`no_use_case`・`queue_named`など）は`denied`を持たない
   どの断りでもDBを開くことに戻らない（fail closed）
 - `doctor`・`service status`・`planners`は制御側（人かinboxがhostで打つ）のコマンドとして`control_side_command`で断り、errorの文がコマンド名とそれを言う。
   DBもserviceも触らない。

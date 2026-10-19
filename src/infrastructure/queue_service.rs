@@ -50,8 +50,8 @@ use crate::application::{
 };
 use crate::domain::queue_service::{
     API_VERSION, LOCK_FILE, LOG_FILE, MAX_ANSWER_BYTES, MAX_REQUEST_BYTES, OWNER_PID_ENV,
-    Principal, SERVICE_DIR, SOCKET_FILE, STATE_FILE, ServiceErrorCode, ServiceRequest,
-    ServiceResponse, ServiceState, UseCase,
+    Principal, SERVICE_DIR, SOCKET_FILE, STATE_FILE, ServiceDenial, ServiceErrorCode,
+    ServiceRequest, ServiceResponse, ServiceState, UseCase,
 };
 use crate::domain::session_step::StepTarget;
 use crate::domain::telemetry::{ReportRecorded, TelemetryReport};
@@ -557,6 +557,9 @@ pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(300);
 pub struct ClientFailure {
     pub code: String,
     pub message: String,
+    /// What the service's policy refused, with its `authorization_denied`:
+    /// the command line prints it as a local refusal's `denied`.
+    pub denied: Option<ServiceDenial>,
 }
 
 impl std::fmt::Display for ClientFailure {
@@ -572,6 +575,7 @@ impl ClientFailure {
         Self {
             code: code.to_owned(),
             message: message.into(),
+            denied: None,
         }
     }
 }
@@ -705,7 +709,14 @@ impl Client {
             }
         };
         if let Some(error) = response.error {
-            return Err(ClientFailure::new(error.code.as_str(), error.message).into());
+            return Err(ClientFailure {
+                denied: error
+                    .denied
+                    .filter(|_| error.code == ServiceErrorCode::AuthorizationDenied)
+                    .map(|denied| *denied),
+                ..ClientFailure::new(error.code.as_str(), error.message)
+            }
+            .into());
         }
         if !crate::domain::queue_service::understands(&response) {
             return Err(ClientFailure::new(

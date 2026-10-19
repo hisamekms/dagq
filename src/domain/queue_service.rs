@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::session_step::StepTarget;
-use super::{ActorContext, ActorRole, DomainError, RunId, RunStatus, TaskId};
+use super::{ActorContext, ActorRole, AuthorizationError, DomainError, RunId, RunStatus, TaskId};
 
 /// The API version this binary speaks. A change a caller of the version
 /// before cannot read raises it.
@@ -286,6 +286,32 @@ pub struct ServiceRequest {
 pub struct ServiceError {
     pub code: ServiceErrorCode,
     pub message: String,
+    /// What the policy refused, with `authorization_denied` only: the
+    /// values its event records. A client that does not know the field
+    /// ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub denied: Option<Box<ServiceDenial>>,
+}
+
+/// A refusal of the policy as the service answers it: the role, the
+/// capability and the reason as the `authorization_denied` event and the
+/// command line's `denied` spell them. Kept as text, so that a client
+/// reads a role or a capability it does not know.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceDenial {
+    pub role: String,
+    pub capability: String,
+    pub reason: String,
+}
+
+impl From<&AuthorizationError> for ServiceDenial {
+    fn from(error: &AuthorizationError) -> Self {
+        Self {
+            role: error.role.as_str().to_owned(),
+            capability: error.capability.as_str().to_owned(),
+            reason: error.reason.as_str().to_owned(),
+        }
+    }
 }
 
 /// The answer to one request: `result` when `ok`, else `error`. It
@@ -322,8 +348,20 @@ impl ServiceResponse {
             error: Some(ServiceError {
                 code,
                 message: message.into(),
+                denied: None,
             }),
         }
+    }
+
+    /// `authorization_denied` for `refused`, with its message and what it
+    /// refused.
+    pub fn denied(refused: &AuthorizationError) -> Self {
+        let mut response =
+            Self::failure(ServiceErrorCode::AuthorizationDenied, refused.to_string());
+        if let Some(error) = &mut response.error {
+            error.denied = Some(Box::new(refused.into()));
+        }
+        response
     }
 }
 
@@ -542,6 +580,46 @@ mod tests {
                 .unwrap(),
             success
         );
+    }
+
+    #[test]
+    fn a_refusal_of_the_policy_names_what_it_refused_and_reads_without_it() {
+        use crate::domain::Capability;
+        use crate::domain::authorization::DenyReason;
+        let refused = AuthorizationError {
+            role: ActorRole::Worker,
+            capability: Capability::NoteWrite,
+            reason: DenyReason::Resource,
+        };
+        let response = ServiceResponse::denied(&refused);
+        let written = serde_json::to_value(&response).unwrap();
+        assert_eq!(
+            written["error"],
+            json!({"code": "authorization_denied",
+                   "message": "worker may not note.write (not on this resource)",
+                   "denied": {"role": "worker", "capability": "note.write",
+                              "reason": "not on this resource"}})
+        );
+        assert_eq!(
+            serde_json::from_value::<ServiceResponse>(written.clone()).unwrap(),
+            response
+        );
+        // A client that knows no `denied` reads the refusal by its code.
+        #[derive(Deserialize)]
+        struct Older {
+            code: ServiceErrorCode,
+            message: String,
+        }
+        let older: Older = serde_json::from_value(written["error"].clone()).unwrap();
+        assert_eq!(older.code, ServiceErrorCode::AuthorizationDenied);
+        assert_eq!(older.message, refused.to_string());
+        // A role or a capability this binary does not know still reads.
+        let newer: ServiceError = serde_json::from_value(json!({
+            "code": "authorization_denied", "message": "m",
+            "denied": {"role": "future-job", "capability": "future.write", "reason": "r"},
+        }))
+        .unwrap();
+        assert_eq!(newer.denied.unwrap().role, "future-job");
     }
 
     #[test]

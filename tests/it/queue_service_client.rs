@@ -15,7 +15,10 @@ use std::{
     process::{Command, Output},
 };
 
-use crate::common::{Bounded, WithoutActor, cli::ok};
+use crate::common::{
+    Bounded, WithoutActor,
+    cli::{invoke_with, ok},
+};
 use dagq::{
     domain::{
         ActorContext,
@@ -66,6 +69,14 @@ fn refused(output: &Output) -> String {
         .as_str()
         .unwrap_or_else(|| panic!("no code in {error}"))
         .to_owned()
+}
+
+/// The refusal a refused command printed, without the service's code:
+/// its message and what it refused (`denied`).
+fn denial(output: &Output) -> Value {
+    assert!(!output.status.success(), "it succeeded");
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    json!({"error": error["error"], "denied": error["denied"]})
 }
 
 fn issued(queue: &Queue, principal: &Principal) -> PathBuf {
@@ -244,6 +255,106 @@ fn a_worker_s_dagq_runs_its_commands_through_the_service_as_the_worker() {
             .unwrap()
             .is_empty()
     );
+}
+
+/// Each refusal of a worker's dagq by the service prints, beside the
+/// service's code, what the command line prints when it refuses the
+/// worker the same (whatever role the environment claims): the message,
+/// and the role, the capability and the reason its event records.
+#[test]
+fn a_worker_s_refusal_by_the_service_prints_as_the_command_line_s() {
+    let (queue, socket) = served();
+    let task = queue.run.task_id().to_string();
+    let run = queue.run.id().to_string();
+    let worker = issued(
+        &queue,
+        &Principal::worker(queue.run.id(), queue.run.task_id()),
+    );
+    let other = ok(&queue.db, &["add", "another"])["id"].to_string();
+    let local_worker = [
+        ("DAGQ_ROLE", "worker"),
+        ("DAGQ_ACTOR_ID", &*format!("worker:{run}")),
+        ("DAGQ_RUN_ID", &*run),
+        ("DAGQ_TASK_ID", &*task),
+    ];
+    let note = ["note", "--task", other.as_str(), "--text", "x"];
+    let ask = [
+        "ask",
+        "--task",
+        other.as_str(),
+        "--kind",
+        "worker_question",
+        "--because",
+        "scope",
+        "--topic",
+        "design_choice",
+        "--question",
+        "q?",
+    ];
+    let finding = [
+        "finding",
+        "record",
+        "--kind",
+        "stall",
+        "--queue",
+        "--summary",
+        "s",
+    ];
+    for (role, args, capability, reason) in [
+        ("worker", &note[..], "note.write", "not on this resource"),
+        ("worker", &ask[..], "ask.open", "not on this resource"),
+        ("observer", &finding[..], "finding.record", "not granted"),
+    ] {
+        let served = client(&queue, &socket, Some(&worker), role, args);
+        assert_eq!(refused(&served), "authorization_denied", "{args:?}");
+        let printed = denial(&served);
+        assert_eq!(
+            printed["denied"],
+            json!({"role": "worker", "capability": capability, "reason": reason}),
+            "{args:?}"
+        );
+        let recorded = events(&queue.db, "authorization_denied");
+        let last = &recorded.last().unwrap()["payload"];
+        assert_eq!(
+            json!({"role": last["role"], "capability": last["capability"], "reason": last["reason"]}),
+            printed["denied"],
+            "{args:?}"
+        );
+        let local = invoke_with(&local_worker, &queue.db, args);
+        assert_eq!(printed, denial(&local), "{args:?}");
+    }
+}
+
+/// A job refused on the service's side prints the refusal the command line
+/// prints for the job: the jobs' message and what was refused.
+#[test]
+fn a_job_s_refusal_by_the_service_prints_as_the_command_line_s() {
+    let (queue, socket) = served();
+    let task = queue.run.task_id().to_string();
+    let job = issued(&queue, &Principal::of(&ActorContext::plan_review_job(1, 1)));
+    let args = ["note", "--task", task.as_str(), "--text", "x"];
+    let served = client(&queue, &socket, Some(&job), "plan-review-job", &args);
+    assert_eq!(refused(&served), "authorization_denied");
+    let printed = denial(&served);
+    assert_eq!(
+        printed["denied"],
+        json!({"role": "plan-review-job", "capability": "note.write", "reason": "not granted"}),
+        "{printed}"
+    );
+    let recorded = events(&queue.db, "authorization_denied");
+    assert_eq!(recorded.len(), 1, "{recorded:?}");
+    for field in ["role", "capability", "reason"] {
+        assert_eq!(recorded[0]["payload"][field], printed["denied"][field]);
+    }
+    let local = invoke_with(
+        &[
+            ("DAGQ_ROLE", "plan-review-job"),
+            ("DAGQ_ACTOR_ID", "plan-review-job:1:1"),
+        ],
+        &queue.db,
+        &args,
+    );
+    assert_eq!(printed, denial(&local));
 }
 
 /// What the service has no use case for, a command that names a queue, a

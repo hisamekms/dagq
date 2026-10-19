@@ -135,10 +135,7 @@ impl QueueService<'_> {
         match result {
             Ok(value) => ServiceResponse::success(value),
             Err(error) => match error.downcast_ref::<AuthorizationError>() {
-                Some(refused) => ServiceResponse::failure(
-                    ServiceErrorCode::AuthorizationDenied,
-                    refused.to_string(),
-                ),
+                Some(refused) => ServiceResponse::denied(refused),
                 None if error.downcast_ref::<BadParams>().is_some()
                     || error.downcast_ref::<BadRead>().is_some() =>
                 {
@@ -1305,6 +1302,13 @@ mod tests {
             let denial = backend.log.lock().unwrap().pop().unwrap();
             assert_eq!(denial["event"], "authorization_denied", "{params}");
             assert_eq!(denial["resource"]["kind"], "agent_eval");
+            // The refusal answers what its event records.
+            let denied = response.error.unwrap().denied.unwrap();
+            assert_eq!(
+                json!([denied.role, denied.capability, denied.reason]),
+                json!([denial["role"], denial["capability"], denial["reason"]]),
+                "{params}"
+            );
         }
         // A production set is never a worker's to ask for or decide
         // (ADR-t1728-1 (g)).

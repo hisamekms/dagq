@@ -2973,33 +2973,51 @@ impl dagq::application::commands::DenialLog for CommandDenials<'_> {
 
 /// The error JSON of a failed command. A refusal carries what was refused
 /// (`denied`: the role, the capability and why), and keeps the message the
-/// observer and the headless jobs always got.
+/// observer and the headless jobs always got; a client-mode dagq's refusal
+/// by the service's policy is printed the same, with the service's code.
 fn error_json(error: &anyhow::Error) -> Value {
     // A client-mode dagq's failure carries the service's code or its own
     // (goal 82's stage (3)).
     if let Some(failure) =
         error.downcast_ref::<dagq::infrastructure::queue_service::ClientFailure>()
     {
-        return json!({"error": failure.message, "queue_service": {"code": failure.code}});
+        let mut printed =
+            json!({"error": failure.message, "queue_service": {"code": failure.code}});
+        if let Some(denied) = &failure.denied {
+            if let Some(message) = denied.role.parse().ok().and_then(role_denied_message) {
+                printed["error"] = json!(message);
+            }
+            printed["denied"] = json!({
+                "role": denied.role,
+                "capability": denied.capability,
+                "reason": denied.reason,
+            });
+        }
+        return printed;
     }
     let Some(denied) = error.downcast_ref::<AuthorizationError>() else {
         return json!({"error": format!("{error:#}")});
     };
-    let message = if denied.role == ActorRole::Observer {
-        OBSERVER_DENIED.to_owned()
-    } else if denied.role.is_headless_job() {
-        REVIEWER_DENIED.to_owned()
-    } else {
-        denied.to_string()
-    };
     json!({
-        "error": message,
+        "error": role_denied_message(denied.role).map_or_else(|| denied.to_string(), str::to_owned),
         "denied": {
             "role": denied.role,
             "capability": denied.capability,
             "reason": denied.reason.as_str(),
         },
     })
+}
+
+/// The message every refusal of `role` prints in place of the refusal's
+/// own: the observer's and the headless jobs'.
+fn role_denied_message(role: ActorRole) -> Option<&'static str> {
+    if role == ActorRole::Observer {
+        Some(OBSERVER_DENIED)
+    } else if role.is_headless_job() {
+        Some(REVIEWER_DENIED)
+    } else {
+        None
+    }
 }
 
 /// Who the events this command writes record (ADR-t728-1 decision 4): the
@@ -6217,6 +6235,53 @@ mod tests {
         assert_eq!(
             refusal(ActorRole::Worker)["error"],
             "worker may not mark.write (not granted)"
+        );
+    }
+
+    /// A client-mode dagq prints the service's refusal of the policy as the
+    /// command line prints its own, with the service's code; a failure with
+    /// nothing refused prints only the code and the message.
+    #[test]
+    fn a_refusal_by_the_service_prints_as_a_local_one_with_its_code() {
+        use dagq::domain::queue_service::ServiceDenial;
+        use dagq::infrastructure::queue_service::ClientFailure;
+        for role in [
+            ActorRole::Worker,
+            ActorRole::Observer,
+            ActorRole::PlanReviewJob,
+        ] {
+            let refused = AuthorizationError {
+                role,
+                capability: Capability::MarkWrite,
+                reason: dagq::domain::authorization::DenyReason::NotGranted,
+            };
+            let local = error_json(&anyhow::Error::new(refused.clone()));
+            let served = error_json(&anyhow::Error::new(ClientFailure {
+                denied: Some(ServiceDenial::from(&refused)),
+                ..ClientFailure::new("authorization_denied", refused.to_string())
+            }));
+            assert_eq!(served["queue_service"]["code"], "authorization_denied");
+            assert_eq!(served["error"], local["error"], "{role:?}");
+            assert_eq!(served["denied"], local["denied"], "{role:?}");
+        }
+        // A role this binary does not know keeps the service's message.
+        let served = error_json(&anyhow::Error::new(ClientFailure {
+            denied: Some(ServiceDenial {
+                role: "future-job".to_owned(),
+                capability: "note.write".to_owned(),
+                reason: "not granted".to_owned(),
+            }),
+            ..ClientFailure::new("authorization_denied", "future-job may not note.write")
+        }));
+        assert_eq!(served["error"], "future-job may not note.write");
+        assert_eq!(served["denied"]["role"], "future-job");
+        let served = error_json(&anyhow::Error::new(ClientFailure::new(
+            "no_use_case",
+            "not served",
+        )));
+        assert_eq!(
+            served,
+            json!({"error": "not served", "queue_service": {"code": "no_use_case"}})
         );
     }
 }
