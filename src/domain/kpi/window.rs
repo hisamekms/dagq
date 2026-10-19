@@ -996,8 +996,9 @@ impl<'a> Context<'a> {
         details.insert("tokens", json(&stats.execution_tokens));
 
         // The quality of the plans (ADR-0079 decision 7): split by the
-        // judging plan review session's model and effort and by the
-        // proposal's features, whatever `--by` says, and by no run's axis.
+        // judging plan review session's and submitting planner span's model
+        // and effort and by the proposal's features, whatever `--by` says,
+        // and by no run's axis.
         for (stratum, quality) in plan_quality(events, after, upto, |t| self.counts(t)) {
             put(
                 "plan.revise_rate",

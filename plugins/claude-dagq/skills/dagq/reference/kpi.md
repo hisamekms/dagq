@@ -14,6 +14,7 @@ Each command below prints JSON; its flags, strata and output are in `"$DAGQ" <co
 - `change=` is the change the task declared, never guessed from the diff. `area=` comes from the landed diff through `dagq.toml`'s `[areas]`, so editing `[areas]` reclassifies past runs, and a run that touched several areas counts in each.
 - Compare work time only within one `area=` or `change=` stratum (which one is the repository's rule): tasks differ by an order of magnitude, so `all` moves with the mix of tasks.
 - A headless job's provider is `job.*`'s own `provider=` stratum, not the worker's `--by provider`.
+- In `plan.*`, `model=` / `effort=` are the plan review job's session and `planner_model=` / `planner_effort=` the span of the planner whose submission was the last before that review (before the proposal became ready, when no review judged it), so a proposal several planners worked on counts under the last one; `unknown` when that span or its record is missing.
 - **Tokens**: a `null` value means the records do not cover the period (the output says why); never read it as 0.
 - **Targets** are `[kpi.targets."<KPI>"]` in the main checkout's `dagq.toml` and in `host.toml` (host wins, but `[kpi] max_improvement_proposals` is `dagq.toml`'s only); only the targets set there are judged. `breach` is off target for several periods in a row, `missed` not yet that long. Add a `[kpi]` table to `dagq.toml` only once the installed binary knows it: an older one rejects it.
 

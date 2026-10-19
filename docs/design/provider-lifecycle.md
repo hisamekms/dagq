@@ -120,6 +120,8 @@ runtimeが起動するsessionとjobは、kindごとの区間として記録す�
 ### modelとeffort
 
 - 入口: `domain::tokens::span_models`、読み口は[stats](supervisor-lifecycle/commands.md)（[ADR-0079](../adr/0079-record-task-weight-predictions-and-trial-model-effort-selection.md)決定7）。
+- 約束: plannerの区間は、`submit`が提出したplannerとその開いている区間を記録してproposalに結ぶ。
+  `kpi`の計画の品質は、plan reviewの開始の前の最後の提出の区間のmodel / effortをplannerの層にする（`domain::plan_quality::PlannerSubmission`）。
 
 ## workerのproviderと経路
 

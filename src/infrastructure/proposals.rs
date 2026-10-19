@@ -6,6 +6,7 @@
 //! them as drafts.
 use crate::domain::EventKind;
 use crate::domain::event_kind;
+use crate::domain::sessions::{PLANNER, RUNTIME_PLANNER, SESSION_CLOSED, SESSION_OPENED};
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::json;
@@ -30,7 +31,8 @@ pub(super) struct SubmitTime<'a> {
 /// and the draft tasks of its goals (and, for a resubmission, the drafts
 /// the proposal already holds) move from `draft` to `submitted` and join
 /// the proposal, recording `task_status_changed` and `task_submitted`
-/// (`goal_submitted` for a goal). With the repository's set of changes,
+/// (`goal_submitted` for a goal), and `proposal_submitted`
+/// ([`record_submitter`]). With the repository's set of changes,
 /// every task that moves must declare one of them (ADR-t980-1); with its
 /// prefixes of a task's title, every task that moves must have a title
 /// that starts with one of them; with its
@@ -83,6 +85,7 @@ pub(super) fn submit(
                     EventKind::ProposalResubmitted,
                     json!({"proposal_id": retried.id()}),
                 )?;
+                record_submitter(conn, retried.id(), task_id, &submission.owner)?;
             }
             return read(conn, retried.id());
         }
@@ -189,6 +192,7 @@ pub(super) fn submit(
     // Whoever submits, a follow_up draft goes only with a current decided
     // membership judgement (ADR-t1504-2 decision 7).
     super::follow_up_membership::check_judged(conn, &tasks, false)?;
+    let submitter = submission.owner.clone();
     let adoptions = super::draft_planners::check_adoptions(conn, &tasks, submission.owner.origin)?;
     let submitted = match existing {
         Some(existing) => {
@@ -246,7 +250,64 @@ pub(super) fn submit(
             )?;
         }
     }
+    record_submitter(conn, id, tasks[0], &submitter)?;
     read(conn, id)
+}
+
+/// Records `proposal_submitted` on the proposal's first `task`: the
+/// planner whose actor submits, or else the open planner of the owner's
+/// workspace, and that planner's last open span. It is kept apart from the
+/// proposal's owner, which the next submit replaces, and is recorded on
+/// every submit, a held proposal's retry with no task moving included.
+fn record_submitter(
+    conn: &Connection,
+    proposal: ProposalId,
+    task: TaskId,
+    owner: &PlannerOwner,
+) -> Result<()> {
+    let actor: String = conn.query_row("SELECT dagq_actor_id()", [], |r| r.get(0))?;
+    let planner = if let Some(id) = actor.strip_prefix("planner:") {
+        id.parse::<i64>().ok()
+    } else {
+        conn.query_row(
+            "SELECT id FROM planners WHERE workspace_id=?1 AND closed_at IS NULL
+             ORDER BY id DESC LIMIT 1",
+            [&owner.workspace_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .optional()?
+    };
+    // `+o.id` lets the `NOT EXISTS` find the close by
+    // `events_by_opened_event` (migration 0058).
+    let span: Option<i64> = match planner {
+        Some(planner) => conn
+            .query_row(
+                "SELECT o.id FROM run_events o WHERE o.kind=?2
+                   AND json_extract(o.payload,'$.kind') IN (?3, ?4)
+                   AND json_extract(o.payload,'$.planner_id')=?1
+                   AND NOT EXISTS (SELECT 1 FROM run_events c WHERE c.kind=?5
+                                   AND json_extract(c.payload,'$.opened_event_id')=+o.id)
+                 ORDER BY o.id DESC LIMIT 1",
+                params![
+                    planner,
+                    SESSION_OPENED,
+                    PLANNER,
+                    RUNTIME_PLANNER,
+                    SESSION_CLOSED
+                ],
+                |r| r.get(0),
+            )
+            .optional()?,
+        None => None,
+    };
+    event(
+        conn,
+        task,
+        None,
+        EventKind::ProposalSubmitted,
+        json!({"proposal_id": proposal, "planner_id": planner, "opened_event_id": span}),
+    )?;
+    Ok(())
 }
 
 /// The plan-review path to `ready` (ADR-0041 decisions 8, 11): the

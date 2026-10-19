@@ -588,3 +588,77 @@ fn submit_needs_a_draft_task_and_an_open_goal() {
     // A failed submit leaves nothing behind.
     assert!(queue.proposals(true).unwrap().is_empty());
 }
+
+#[test]
+fn submission_records_the_planner_and_open_span_even_without_draft_transitions() {
+    use dagq::domain::EventId;
+    use dagq::domain::plan_quality::planner_submission;
+    let (dir, mut queue) = fixture();
+    let task = queue.add(new_task("planner attribution")).unwrap().id();
+    let planner = queue.open_planner(PlannerOrigin::Person, None).unwrap();
+    queue.planner_workspace_created(planner.id, "W1").unwrap();
+    let conn = rusqlite::Connection::open(dir.path().join("queue.db")).unwrap();
+    conn.execute(
+        "INSERT INTO run_events(kind,payload) VALUES ('session_opened',?1)",
+        [serde_json::json!({"kind":"planner","planner_id":planner.id}).to_string()],
+    )
+    .unwrap();
+    let opened = conn.last_insert_rowid();
+    let proposal = queue.submit(submission(&[task], &[], None)).unwrap();
+    conn.execute("INSERT INTO run_events(kind,payload) VALUES ('session_closed',?1)",
+        [serde_json::json!({"kind":"planner","opened_event_id":opened,"model":"opus","effort":"high"}).to_string()]).unwrap();
+    // A person retries unchanged content from a workspace without a planner.
+    conn.execute(
+        "UPDATE proposals SET review_hold='concern' WHERE id=?1",
+        [proposal.id()],
+    )
+    .unwrap();
+    let mut retry = submission(&[], &[], Some(proposal.id().as_i64()));
+    retry.owner.workspace_id = None;
+    queue.submit(retry).unwrap();
+    let events = queue.all_events().unwrap();
+    let links: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == "proposal_submitted")
+        .collect();
+    assert_eq!(links.len(), 2);
+    assert_eq!(links[0].payload["planner_id"], planner.id.as_i64());
+    assert_eq!(links[0].payload["opened_event_id"], opened);
+    assert!(links[1].payload["planner_id"].is_null());
+    assert!(links[1].payload["opened_event_id"].is_null());
+    let first = planner_submission(
+        &events,
+        proposal.id().as_i64(),
+        EventId::new(links[0].id.as_i64() + 1),
+    );
+    assert_eq!(first.planner_id, Some(planner.id.as_i64()));
+    assert_eq!(first.opened_event_id, Some(EventId::new(opened)));
+    assert_eq!(first.model.as_deref(), Some("opus"));
+    assert_eq!(first.effort.as_deref(), Some("high"));
+    assert_eq!(
+        planner_submission(&events, proposal.id().as_i64(), EventId::new(i64::MAX)),
+        first
+    );
+    // The actor wins over a stale owner workspace, including draft planners
+    // whose planners row has no proposal at session start.
+    let runtime = queue.open_planner(PlannerOrigin::Runtime, None).unwrap();
+    conn.execute(
+        "INSERT INTO run_events(kind,payload) VALUES ('session_opened',?1)",
+        [serde_json::json!({"kind":"runtime_planner","planner_id":runtime.id}).to_string()],
+    )
+    .unwrap();
+    let runtime_span = conn.last_insert_rowid();
+    let mut queue = queue.with_actor(dagq::domain::ActorContext::instance(
+        dagq::domain::ActorRole::Planner,
+        runtime.id,
+    ));
+    let next = queue
+        .add(new_task("draft planner submission"))
+        .unwrap()
+        .id();
+    let submitted = queue.submit(submission(&[next], &[], None)).unwrap();
+    let history = queue.all_events().unwrap();
+    let linked = planner_submission(&history, submitted.id().as_i64(), EventId::new(i64::MAX));
+    assert_eq!(linked.planner_id, Some(runtime.id.as_i64()));
+    assert_eq!(linked.opened_event_id, Some(EventId::new(runtime_span)));
+}

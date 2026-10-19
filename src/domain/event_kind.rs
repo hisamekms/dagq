@@ -269,6 +269,7 @@ event_kinds! {
     ProviderWaiting => "provider_waiting",
     ProposalResubmitted => "proposal_resubmitted",
     ProposalSettled => "proposal_settled",
+    ProposalSubmitted => "proposal_submitted",
     ProposalWithdrawn => "proposal_withdrawn",
     PushFailed => "push_failed",
     PushFinished => "push_finished",
@@ -968,6 +969,13 @@ pub const PROMPT_CLEARED: &str = EventKind::PromptCleared.as_str();
 pub const PROMPT_WAITING: &str = EventKind::PromptWaiting.as_str();
 pub const PROPOSAL_RESUBMITTED: &str = EventKind::ProposalResubmitted.as_str();
 pub const PROPOSAL_SETTLED: &str = EventKind::ProposalSettled.as_str();
+/// A submission of a proposal and who made it, on its first task:
+/// `proposal_id`, `planner_id` (the submitting planner) and
+/// `opened_event_id` (the `session_opened` of that planner's open span),
+/// each null when not found. Every `submit` records one, a held proposal's
+/// retry with no task moving included; the plan quality reads the planner
+/// from it ([`crate::domain::plan_quality::PlannerSubmission`]).
+pub const PROPOSAL_SUBMITTED: &str = EventKind::ProposalSubmitted.as_str();
 pub const PROPOSAL_WITHDRAWN: &str = EventKind::ProposalWithdrawn.as_str();
 pub const PUSH_FAILED: &str = EventKind::PushFailed.as_str();
 pub const PUSH_FINISHED: &str = EventKind::PushFinished.as_str();
@@ -1480,6 +1488,7 @@ mod tests {
             (EventKind::ProviderWaiting, "provider_waiting"),
             (EventKind::ProposalResubmitted, "proposal_resubmitted"),
             (EventKind::ProposalSettled, "proposal_settled"),
+            (EventKind::ProposalSubmitted, "proposal_submitted"),
             (EventKind::ProposalWithdrawn, "proposal_withdrawn"),
             (EventKind::PushFailed, "push_failed"),
             (EventKind::PushFinished, "push_finished"),

@@ -56,6 +56,27 @@ fn plan_quality_is_split_by_the_judging_session_and_the_proposal() {
             tuesday - 60,
         );
     }
+    queue.push(
+        None,
+        None,
+        "session_opened",
+        json!({"kind":"planner", "planner_id":42, "marker":100}),
+        tuesday - 120,
+    );
+    queue.push(
+        Some(10),
+        None,
+        "proposal_submitted",
+        json!({"proposal_id":1, "planner_id":42, "opened_marker":100}),
+        tuesday - 30,
+    );
+    queue.push(
+        None,
+        None,
+        "session_closed",
+        json!({"kind":"planner", "opened_marker":100, "model":"planner-opus", "effort":"xhigh"}),
+        tuesday + 2 * HOUR,
+    );
     review(&mut queue, 1, "medium", "revise", tuesday);
     review(&mut queue, 2, "high", "pass", tuesday + HOUR);
     // Task 10 is a follow-up draft adopted into the proposal; task 11's run
@@ -123,6 +144,14 @@ fn plan_quality_is_split_by_the_judging_session_and_the_proposal() {
         let measure = measure(day, name, stratum);
         (measure.n, measure.value)
     };
+    assert_eq!(
+        value("plan.revise_rate", "planner_model=planner-opus"),
+        (2, Some(0.5))
+    );
+    assert_eq!(
+        value("plan.task_rework_rate", "planner_effort=xhigh"),
+        (2, Some(0.5))
+    );
     assert_eq!(value("plan.revise_rate", "all"), (2, Some(0.5)));
     assert_eq!(value("plan.revise_rate", "effort=medium"), (1, Some(1.0)));
     assert_eq!(value("plan.revise_rate", "effort=high"), (1, Some(0.0)));

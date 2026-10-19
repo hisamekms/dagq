@@ -74,6 +74,7 @@ mod main_checkout;
 mod node_samples;
 mod observer_codex;
 mod plan_review;
+mod plan_review_attribution;
 mod plan_review_codex;
 mod plan_review_concern;
 mod plan_review_expected_files;
