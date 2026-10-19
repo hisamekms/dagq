@@ -20,8 +20,10 @@
 //! to L9, C1 to C8, X1 to X3) are in docs/design/architecture.md
 //! (ADR-t1545-1), and what each context owns and exposes that the module
 //! paths do not tell is in src/context_boundaries/ownership.rs (the tables,
-//! the stores and the transactions) and .config/context-boundaries.txt (the
-//! ports and the modules of the application). Of [`build_id`], the
+//! the stores, the transactions and the shared parts each layer may use)
+//! and .config/context-boundaries.txt (the ports and the modules of the
+//! application). The test-only module `context_boundaries` checks the
+//! rules it can on the sources, outside the layers. Of [`build_id`], the
 //! contexts use only the rule of the identifier and the commit it names,
 //! which do no I/O; its `emit` and `compute` call Git and belong to the
 //! build script.
@@ -55,6 +57,9 @@ pub mod lifecycle;
 pub mod migration_numbers;
 pub mod runtime;
 pub mod view;
+
+#[cfg(test)]
+mod context_boundaries;
 
 /// The build identifier of this binary (ADR-0045 decision 2): `X.Y.Z` for a
 /// release, `X.Y.Z-dev+<commit>[.dirty]` for a development build. `dagq

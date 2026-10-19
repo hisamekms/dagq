@@ -6,6 +6,11 @@
 //! allowed today. The runtime does not read it; [`super::check`] matches it
 //! against the code.
 //!
+//! For the module references of L1, L3, L6, L8 and L9 ([`super::modules`]):
+//! the shared parts outside the layers each layer may reference, the
+//! modules of `src/compose/` that are not a context module, and the
+//! references that break a rule allowed today.
+//!
 //! One row per line, kept by `#[rustfmt::skip]`: until C5 moves to a Rust
 //! test, `scripts/check-context-boundaries.sh` reads the context of a file
 //! of `src/infrastructure/` from the `store(...)` rows of [`STORES`].
@@ -69,6 +74,48 @@ pub(super) enum Fix {
 /// [`super::check`] prints it (the innermost fn, `-` outside any).
 #[derive(Debug)]
 pub(super) struct Allowed {
+    pub(super) path: &'static str,
+    pub(super) reference: &'static str,
+    pub(super) fix: Fix,
+    pub(super) reason: &'static str,
+}
+
+/// A layer of docs/design/architecture.md.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Layer {
+    Domain,
+    Application,
+    Infrastructure,
+    /// The composition root, `src/compose.rs` and `src/compose/`.
+    Compose,
+}
+
+/// A rule of docs/design/architecture.md the module references break.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) enum Rule {
+    L1,
+    L3,
+    L6,
+    L8,
+    L9,
+}
+
+/// A module of the crate's root outside the layers that `layers` may
+/// reference as a shared part (L1, L3, L8); any other module there is an
+/// outer one no layer references.
+#[derive(Debug)]
+pub(super) struct SharedModule {
+    pub(super) module: &'static str,
+    pub(super) layers: &'static [Layer],
+    pub(super) reason: &'static str,
+}
+
+/// A module reference allowed today: `reference` is the module the rule
+/// names as [`super::modules::check`] prints it (`crate::view`,
+/// `crate::compose::host` or `crate::compose::*`).
+#[derive(Debug)]
+pub(super) struct ModuleAllowed {
+    pub(super) rule: Rule,
     pub(super) path: &'static str,
     pub(super) reference: &'static str,
     pub(super) fix: Fix,
@@ -242,3 +289,22 @@ pub(super) const ALLOWED: &[Allowed] = &[
     allowed("src/infrastructure/runtime_store/session_registry.rs", "planners in end_planner", Fix::Unregistered, "SessionRegistry (execution) writes planning's planners; split the port"),
     allowed("src/infrastructure/sqlite.rs", "schema_floor in apply_migrations", Fix::Unregistered, "planning's store writes host's schema_floor when it migrates the queue"),
 ];
+
+pub(super) const SHARED_MODULES: &[SharedModule] = &[
+    SharedModule {
+        module: "build_id",
+        layers: &[Layer::Domain, Layer::Application, Layer::Infrastructure],
+        reason: "shared with build.rs; the contexts use only the rule of the identifier and the commit it names, which do no I/O",
+    },
+    SharedModule {
+        module: "migration_numbers",
+        layers: &[Layer::Application, Layer::Infrastructure],
+        reason: "shared with build.rs; the numbers of the migrations, which do no I/O",
+    },
+];
+
+/// The modules of `src/compose/` that are not a context module (L9): the
+/// supervisor loop's, which may name the contexts.
+pub(super) const COMPOSE_LOOP: &[&str] = &["supervisor"];
+
+pub(super) const MODULES_ALLOWED: &[ModuleAllowed] = &[];

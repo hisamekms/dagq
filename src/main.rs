@@ -5402,8 +5402,6 @@ fn main() -> ExitCode {
 }
 
 #[cfg(test)]
-mod context_boundaries;
-#[cfg(test)]
 mod emitted_text;
 #[cfg(test)]
 mod history_citation;

@@ -50,12 +50,9 @@ check-test-file-lines test_file_too_long
 check-adr-numbers adr_id_mismatch
 check-e2e-quarantine e2e_quarantine_malformed
 check-agents-md-size agents_md_too_big
-check-layer-deps layer_forbidden_reference
 check-layer-deps layer_stale_allow_item
 check-layer-deps context_reaches_loop_state
 check-layer-deps stage_reaches_other_context
-check-layer-deps compose_new_module_crosses_context
-check-layer-deps compose_super_glob
 check-layer-deps planning_reaches_loop_state
 check-layer-deps host_ops_reaches_loop_state
 check-context-boundaries context_unlisted_trait
@@ -92,13 +89,9 @@ violate_agents_md_too_big() {
   awk 'BEGIN { for (i = 1; i <= 200; i++) print "padding line for check-scripts-root, over the size limit" }' >>AGENTS.md
 }
 
-violate_layer_forbidden_reference() {
-  echo 'use crate::infrastructure::scripts_root_fixture;' >src/domain/zz_scripts_root.rs
-}
-
 violate_layer_stale_allow_item() {
   mkdir -p .config
-  echo 'L1 | src/domain/zz_scripts_root.rs | crate::infrastructure | 1899 | fixture' >>.config/layer-deps-allow.txt
+  echo 'C3 | src/application/supervise/zz_scripts_root.rs | Supervisor | 1899 | fixture' >>.config/layer-deps-allow.txt
 }
 
 violate_context_reaches_loop_state() {
@@ -107,14 +100,6 @@ violate_context_reaches_loop_state() {
 
 violate_stage_reaches_other_context() {
   echo "fn zz_scripts_root(host: &super::contexts::HostOpsState) {}" >>src/application/supervise/stages.rs
-}
-
-violate_compose_new_module_crosses_context() {
-  echo 'fn zz_scripts_root() { super::host::scripts_root_fixture(); }' >src/compose/zz_scripts_root.rs
-}
-
-violate_compose_super_glob() {
-  echo 'use super::*;' >>src/compose/observation.rs
 }
 
 violate_planning_reaches_loop_state() {

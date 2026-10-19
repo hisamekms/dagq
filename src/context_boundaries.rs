@@ -24,10 +24,16 @@
 //!   removes its row.
 //! - Test code (see [`source`]) does not count.
 //!
-//! This is test code of the binary (declared by `src/main.rs`), outside the
-//! library's layers, and reads the sources and the migrations as files.
+//! The rules L1, L3, L6, L8 and L9 on the module references are checked by
+//! [`modules`] with the same table.
+//!
+//! This is test code of the library (a `#[cfg(test)]` module of
+//! `src/lib.rs`, run by `cargo test --lib`), outside the library's layers,
+//! and reads the sources and the migrations as files.
 
 mod fixtures;
+mod module_fixtures;
+mod modules;
 mod ownership;
 mod source;
 mod sql;

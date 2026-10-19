@@ -118,13 +118,13 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 - **L1** `src/domain`のコードはapplication・infrastructure・起動部分とレイヤーの外のmoduleを参照しない。
   `#[cfg(test)]`の中も同じ。
   例外は共有の部品の`crate::build_id`（I/Oを持たない規則と`named_commit`）だけ。
-  検査: script。
+  検査: Rustのtest（`src/context_boundaries/modules.rs`）。
 - **L2** `src/domain`の本番のコード（`test=false`のビルドに残りうるコード）はDB・ファイル・process・network・時計・乱数のID・`anyhow`を参照しない（ADR-0013のAlternativesの機械化）。
   検査: 時計・乱数のID・DB・ファイル・外のcommandはclippy（`clippy.toml`の`disallowed_methods`・`disallowed_types`・`disallowed_macros`）、`anyhow`・`std::process`の残り・`std::net`はscript（下の「[検査の範囲](#検査の範囲)」）。
 - **L3** `src/application`のコードはinfrastructure・起動部分とレイヤーの外のmoduleを参照しない。
   `#[cfg(test)]`の中も同じ（testはapplicationのtest doubleを使う）。
   例外は共有の部品の`crate::migration_numbers`と`crate::build_id`だけ。
-  検査: script。
+  検査: Rustのtest（`src/context_boundaries/modules.rs`）。
 - **L4** `src/application`の本番のコードはDB・ファイル・外のcommand・壁時計・乱数のIDを直接使わず、portを通す。
   `#[cfg(test)]`の中でfixtureを作るファイル操作はよい。
   検査: clippy（`disallowed_methods`・`disallowed_types`・`disallowed_macros`）。
@@ -135,16 +135,16 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
   呼ぶ側の薄い処理が直接読む所だけ、そのitemに理由付きの`#[expect(clippy::disallowed_methods, reason = "...")]`を置く。
   判断の中で読むかは全体のreview。
 - **L6** `src/infrastructure`のコードは`crate::compose`とレイヤーの外のmoduleを参照しない。
-  検査: script。
+  検査: Rustのtest（`src/context_boundaries/modules.rs`）。
 - **L7** 起動部分（`src/compose.rs`とその下のmodule）はadapterを作ってuse caseに注入する配線だけを持ち、判断・時刻の読み取り・eventのpayloadの組み立てを持たない。
   検査: 時刻の読み取りはclippy（`disallowed_methods`、`#[expect]`を置かない）、残りは全体のreview。
 - **L8** レイヤーの外のmodule（`view`）は起動部分と同じ外側に置き、domain・applicationを使ってよいが、domain・application・infrastructureから参照されない（L1・L3・L6）。
   `build.rs`と共有する`build_id`・`migration_numbers`はレイヤーの外のmoduleに数えず、共有の部品としてL1・L3が名指す例外の範囲で参照してよい。
   新しいmoduleをレイヤーの外に足さない。
-  検査: script（L1・L3・L6として）と全体のreview。
+  検査: 参照されないことはRustのtest（`src/context_boundaries/modules.rs`）、新しいmoduleを外に足さないことは全体のreview。
 - **L9** `src/compose/`の`supervisor`（ループ）以外のmodule（contextごと）は互いと`supervisor`を参照せず、`use super::*`も書かない。
   共有の配線は`src/compose.rs`に置き、外からは`crate::compose`の再公開だけを参照する。
-  検査: script。
+  検査: contextのmoduleどうしと`supervisor`への参照と`use super::*`はRustのtest（`src/context_boundaries/modules.rs`）、`src/compose/`の外からの参照は可視性（その下のmoduleがprivateであることも同じtestが確かめる）。
 
 ### コンテキストの規則
 
@@ -194,11 +194,14 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
   lintの一覧はpackageに1つなので、有効にした全てのmoduleが禁じるものだけを置き、domainだけが禁じるもの（applicationが使う`anyhow`と`std::process::id`を含む`std::process`の残り、`std::net`）はscriptのL2が見る。
   infrastructure・レイヤーの外のmodule・`src/main.rs`・`tests/`・`#[cfg(test)]`の中にはlintが当たらないので、例外を置かない。
   許す場所はapplicationの個々のitemの理由付きの`#[expect]`だけで、moduleの宣言・crateの全体・domain・起動部分には置かない。
-- `scripts/check-layer-deps.sh`は、L1・L2のうちclippyの一覧に置けない部分・L3・L6・L9、分けた状態のsubmoduleのC3、`src/application/ports/`のcontextのmoduleのC8を当てる。
+- L1・L3・L6・L8・L9は、`cargo test`が流すRustのtest（`src/context_boundaries/modules.rs`）が当てる。
+  testは`src/lib.rs`から辿るmoduleのRustを構文で読み、`use`とpathをcrateの根からのmoduleのpathに解き、再公開を定義のmoduleまで辿る（`#[cfg(test)]`の中も数える）。
+  共有の部品を参照してよいレイヤー、`src/compose/`のループのmodule、今の違反は所有の表に置く。
+- `scripts/check-layer-deps.sh`は、L2のうちclippyの一覧に置けない部分、分けた状態のsubmoduleのC3、`src/application/ports/`のcontextのmoduleのC8を当てる。
   数えるのは参照のpathで、コメントと文字列は数えない（細目はscriptの先頭のコメント）。
   許可の一覧は`.config/layer-deps-allow.txt`。
 - 所有の一覧は2か所に分かれ、pathから導けない所有だけを持つ。
-  Rustのtestの側の所有の表`src/context_boundaries/ownership.rs`は、tableの所有、storeのmoduleのcontext、境界をまたぐtransactionの関数、C1の今の違反を持つ。
+  Rustのtestの側の所有の表`src/context_boundaries/ownership.rs`は、tableの所有、storeのmoduleのcontext、境界をまたぐtransactionの関数、C1とL1・L3・L6・L8・L9の今の違反を持つ。
   `.config/context-boundaries.txt`は、`src/application/`のmoduleのcontext、portとそのmethodの公開先、`ports/`の外のportを持つ。
 - C1・C7のtableとstoreのmoduleとtransaction・X1は、`cargo test`が流すRustのtest（`src/context_boundaries.rs`）が当てる。
   testは`src/infrastructure/`のRustを構文で読み、test codeの外の文字列の中のSQLの書き込み先を所有の表と照合する。
@@ -212,7 +215,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
   許可の一覧は`.config/context-boundaries-allow.txt`。
 - 所有の表の書式と落ちる条件はtestのdoc comment、`.config/`の一覧の書式と落ちる条件は各一覧の先頭のコメント、scriptの数え方の細目はscriptの先頭のコメントが持つ。
 - 今ある違反は、理由と行き先のtask（行き先が未登録なら、所有の表では`Fix::Unregistered`、`.config/context-boundaries-allow.txt`では`none`と理由）を持つ許可の一覧にだけ置く（ADR-t1545-1決定4、ADR-t2287-1、ADR-t2391-1決定3）。
-  C1の許可は所有の表に、C5とL・C8の許可は`.config/`の許可の一覧に置く。
+  C1とL1・L3・L6・L8・L9の許可は所有の表に、C5とL2・C3・C8の許可は`.config/`の許可の一覧に置く。
   許可の一覧に無い違反と、違反が消えた古い項目で落ちるので、違反を直す変更は同じ変更で許可の一覧の項目を消す。
   reviewだけで見る規則の今の違反は文書に記録せず、行き先はqueueのtaskが持つ。
 - 2つのscriptは、CIと`src/`を変えるtaskのverifyが流す。
