@@ -519,6 +519,75 @@ pub(super) fn review_moves(route: &ReviewRoute, provider: Provider) -> bool {
     }
 }
 
+/// How a review job of a run's stage that failed ends, as its provider's
+/// failure reads ([`Supervisor::review_job_failed`]): the caller records
+/// it and keeps the job waiting, or misses it as its stage says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReviewJobFailure {
+    /// Claude stopped at its login or usage limit, and the job joined the
+    /// queue's hold ask: no failure of the run, it waits for the ask with
+    /// its stage's other jobs kept (task 438).
+    Walled(Wall),
+    /// Another provider cannot be used and is held: the job starts again
+    /// where its route sends it, on the other provider or once its hold
+    /// ends (ADR-t1063-1 decisions 4 and 5, ADR-t1857-1).
+    Moved(Provider, SwitchReason),
+    /// Its provider cannot be used and nothing moves it (a hold that could
+    /// not be written, `--no-claude`): the failure is the provider's, so
+    /// the job does not run once more and goes to the person.
+    Unusable,
+    /// Any other failure: the stage's own path for a job that missed.
+    Failed,
+}
+
+/// [`ReviewJobFailure`] of a job whose Claude wall, if any, was raised or
+/// not (`walled`), and whose other provider was found unusable for a
+/// reason and moves on the route read after its hold (`unusable`,
+/// [`review_moves`]).
+pub(super) fn review_job_failure(
+    walled: Option<(Wall, bool)>,
+    unusable: Option<(Provider, SwitchReason, bool)>,
+) -> ReviewJobFailure {
+    match (walled, unusable) {
+        (Some((wall, true)), _) => ReviewJobFailure::Walled(wall),
+        (_, Some((provider, reason, true))) => ReviewJobFailure::Moved(provider, reason),
+        (_, Some((_, _, false))) | (Some((_, false)), None) => ReviewJobFailure::Unusable,
+        (None, None) => ReviewJobFailure::Failed,
+    }
+}
+
+impl Supervisor<'_> {
+    /// Read why `ended`, a review job of a run's stage that failed with
+    /// `error` and wrote `stdout`, failed, and hold what it says
+    /// ([`review_job_failure`]): Claude's login or usage limit raises the
+    /// queue's hold ask with the job as `hold`; another provider that
+    /// cannot be used is held when the job's role names its provider
+    /// (`switchable`), and the job moves when the route of its `named`
+    /// provider ([`Self::review_job_route`]) then sends it elsewhere.
+    pub(super) fn review_job_failed(
+        &mut self,
+        ended: &HeadlessJob,
+        (error, stdout): (&str, &str),
+        hold: &HoldJob,
+        (named, switchable): (Option<Provider>, bool),
+    ) -> ReviewJobFailure {
+        let wall = self.job_wall(ended);
+        let raised = wall.is_some_and(|wall| self.raise_job_wall(wall, hold, error));
+        let unusable = if raised || ended.provider == Provider::Claude {
+            None
+        } else {
+            let said = format!("{error}\n{stdout}");
+            let failure = self.job_failure(ended);
+            self.job_provider_failed(ended.provider, failure, (error, &said), hold, switchable)
+                .map(|(provider, reason)| {
+                    let moves = review_moves(&self.review_job_route(named), provider);
+                    (provider, reason, moves)
+                })
+        };
+        review_job_failure(wall.map(|wall| (wall, raised)), unusable)
+    }
+}
+
 /// How the supervisor holds the provider the finish of a job on its timer
 /// (a throughput review, an observation) says could not be used
 /// (`provider_unusable`), so that the job waits for that provider and
@@ -1226,6 +1295,97 @@ mod tests {
             unusable_hold(Provider::Claude, SwitchReason::Disabled, false),
             None
         );
+    }
+
+    /// A review job of any run's stage that failed ends as its provider's
+    /// failure reads, as [`Supervisor::review_job_failed`] composes it:
+    /// Claude's login or usage limit waits at the hold ask, another
+    /// provider that cannot be used moves (to the other provider, or to
+    /// wait for its hold) or, when nothing moves it, goes to the person,
+    /// and any other failure takes the stage's own path.
+    #[test]
+    fn a_failed_review_job_waits_at_the_wall_moves_goes_to_the_person_or_fails() {
+        use super::super::jobs::job_failure_route;
+        use crate::domain::headless_job::JobFailure;
+        // The job's role names Codex; `held` is the provider held after it.
+        let route = |no_claude: bool, fallback: bool, held: Option<Provider>| {
+            review_route(
+                no_claude,
+                (true, fallback),
+                launch(Provider::Codex),
+                None,
+                move |provider| match (provider, no_claude) {
+                    (Provider::Claude, true) => Some(SwitchReason::Disabled),
+                    _ => (held == Some(provider)).then_some(SwitchReason::UsageLimit),
+                },
+            )
+        };
+        let classify =
+            |provider: Provider, failure: JobFailure, raised: bool, after: ReviewRoute| {
+                let (wall, unusable) = job_failure_route(provider, failure, true);
+                let unusable = (provider != Provider::Claude && !(raised && wall.is_some()))
+                    .then(|| {
+                        unusable
+                            .map(|(reason, _)| (provider, reason, review_moves(&after, provider)))
+                    })
+                    .flatten();
+                review_job_failure(wall.map(|wall| (wall, raised)), unusable)
+            };
+        // Claude's login or usage limit waits at the hold ask.
+        for (failure, wall) in [
+            (JobFailure::Authentication, Wall::Authentication),
+            (JobFailure::UsageLimit, Wall::UsageLimit),
+        ] {
+            assert_eq!(
+                classify(Provider::Claude, failure, true, route(false, true, None)),
+                ReviewJobFailure::Walled(wall)
+            );
+            // Its hold ask could not be written: the person, not once more.
+            assert_eq!(
+                classify(Provider::Claude, failure, false, route(false, true, None)),
+                ReviewJobFailure::Unusable
+            );
+        }
+        // Codex's usage limit: on, it moves to Claude; off, it waits for
+        // Codex. Either way it is no failure of the run.
+        for fallback in [true, false] {
+            assert_eq!(
+                classify(
+                    Provider::Codex,
+                    JobFailure::UsageLimit,
+                    false,
+                    route(false, fallback, Some(Provider::Codex))
+                ),
+                ReviewJobFailure::Moved(Provider::Codex, SwitchReason::UsageLimit)
+            );
+        }
+        // Codex's hold was not written, or `--no-claude` leaves no
+        // provider: it goes to the person.
+        assert_eq!(
+            classify(
+                Provider::Codex,
+                JobFailure::Authentication,
+                false,
+                route(false, true, None)
+            ),
+            ReviewJobFailure::Unusable
+        );
+        assert_eq!(
+            classify(
+                Provider::Codex,
+                JobFailure::UsageLimit,
+                false,
+                route(true, true, Some(Provider::Codex))
+            ),
+            ReviewJobFailure::Unusable
+        );
+        // Any other failure, on either provider, is the stage's own.
+        for provider in [Provider::Claude, Provider::Codex] {
+            assert_eq!(
+                classify(provider, JobFailure::Other, false, route(false, true, None)),
+                ReviewJobFailure::Failed
+            );
+        }
     }
 
     fn describe(route: &ReviewRoute) -> String {

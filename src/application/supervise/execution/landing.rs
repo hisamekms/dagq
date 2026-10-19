@@ -3,6 +3,7 @@
 //! landing itself (ADR-0023, ADR-0027).
 
 use super::jobs::{ReviewAnswer, ReviewJob, ReviewJobInput, ReviewJobState};
+use super::provider::ReviewJobFailure;
 use super::*;
 use crate::application::agent_job::{self, AgentJob};
 use crate::application::job_start_failure;
@@ -964,46 +965,33 @@ impl Supervisor<'_> {
                 failed.into_error(),
             ),
         };
-        // A job stopped at a login that ran out or the usage limit is no
-        // failure of the run: it joins the hold ask and waits with the
-        // review's other jobs kept (task 438).
-        let wall = self.job_wall(&ended);
+        // A job stopped at a login that ran out or the usage limit joins the
+        // hold ask and waits with the review's other jobs kept; one whose
+        // other provider cannot be used starts again where its route sends
+        // it ([`Self::review_job_failed`]).
         let hold = HoldJob::Review(run.id().clone());
-        if let Some(wall) = wall
-            && self.raise_job_wall(wall, &hold, &error)
-        {
-            info!(run_id = %run.id(), "run {} review {attempt}: {} stopped at the {} wall; it waits for the hold ask", run.id(), job.id.describe(), wall.as_str());
-            finished["outcome"] = json!("held");
-            finished["error"] = json!(error);
-            return self.record_review_job_finished(run, finished);
-        }
-        // Another provider that cannot be used (Codex's login, usage limit
-        // or start) is held, and a job whose role names its provider starts
-        // again where the route sends it (ADR-t1063-1 decisions 4 and 5,
-        // ADR-t1857-1).
-        let mut unusable = wall.is_some();
-        if ended.provider != Provider::Claude {
-            let said = format!("{error}\n{stdout}");
-            let failure = self.job_failure(&ended);
-            if let Some((provider, reason)) = self.job_provider_failed(
-                ended.provider,
-                failure,
-                (&error, &said),
-                &hold,
-                switchable,
-            ) {
-                match after_unusable(self.review_job_route(job.provider), provider) {
-                    AfterUnusable::Fail => unusable = true,
-                    AfterUnusable::Start(..) | AfterUnusable::Wait(_) => {
-                        warn!(run_id = %run.id(), error = %error, "run {} review {attempt}: {} cannot be used ({}) for {}; it starts again where its route sends it", run.id(), provider.as_str(), reason.as_str(), job.id.describe());
-                        finished["outcome"] = json!("held");
-                        finished["error"] = json!(error);
-                        finished["switch_reason"] = json!(reason.as_str());
-                        return self.record_review_job_finished(run, finished);
-                    }
-                }
+        let unusable = match self.review_job_failed(
+            &ended,
+            (&error, &stdout),
+            &hold,
+            (job.provider, switchable),
+        ) {
+            ReviewJobFailure::Walled(wall) => {
+                info!(run_id = %run.id(), "run {} review {attempt}: {} stopped at the {} wall; it waits for the hold ask", run.id(), job.id.describe(), wall.as_str());
+                finished["outcome"] = json!("held");
+                finished["error"] = json!(error);
+                return self.record_review_job_finished(run, finished);
             }
-        }
+            ReviewJobFailure::Moved(provider, reason) => {
+                warn!(run_id = %run.id(), error = %error, "run {} review {attempt}: {} cannot be used ({}) for {}; it starts again where its route sends it", run.id(), provider.as_str(), reason.as_str(), job.id.describe());
+                finished["outcome"] = json!("held");
+                finished["error"] = json!(error);
+                finished["switch_reason"] = json!(reason.as_str());
+                return self.record_review_job_finished(run, finished);
+            }
+            ReviewJobFailure::Unusable => true,
+            ReviewJobFailure::Failed => false,
+        };
         finished["outcome"] = json!(miss.as_str());
         finished["error"] = json!(error);
         let again = self.missed_review_job(run, (attempt, retried), job, miss, &error, unusable);
