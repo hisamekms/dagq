@@ -6,7 +6,8 @@
 //! allowed today. The runtime does not read it; [`super::check`] matches it
 //! against the code.
 //!
-//! For the module references of L1, L3, L6, L8 and L9 ([`super::modules`]):
+//! For the module references of L1, L2, L3, L6, L8 and L9
+//! ([`super::modules`]):
 //! the shared parts outside the layers each layer may reference, the
 //! modules of `src/compose/` that are not a context module, and the
 //! references that break a rule allowed today.
@@ -94,6 +95,7 @@ pub(super) enum Layer {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Rule {
     L1,
+    L2,
     L3,
     L6,
     L8,

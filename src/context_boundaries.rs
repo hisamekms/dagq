@@ -24,7 +24,7 @@
 //!   removes its row.
 //! - Test code (see [`source`]) does not count.
 //!
-//! The rules L1, L3, L6, L8 and L9 on the module references are checked by
+//! The rules L1, L2, L3, L6, L8 and L9 on the module references are checked by
 //! [`modules`] with the same table.
 //!
 //! This is test code of the library (a `#[cfg(test)]` module of

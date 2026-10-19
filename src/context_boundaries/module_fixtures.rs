@@ -285,6 +285,166 @@ fn a_new_module_of_compose_is_a_context_without_a_list() {
     );
 }
 
+/// L2: the production code of the domain references no `anyhow`,
+/// `std::process` or `std::net`, however it names them.
+#[test]
+fn the_domains_production_code_references_no_anyhow_process_or_network() {
+    let l2 = |item: &str| {
+        format!(
+            "src/domain/run.rs: L2 forbids {item}; fix it, or add a row to ownership::MODULES_ALLOWED with its fix and reason"
+        )
+    };
+    let cases = [
+        ("fn r() -> anyhow::Result<()> { Ok(()) }\n", "anyhow"),
+        ("fn p() -> u32 { std::process::id() }\n", "std::process"),
+        ("fn n(_: std::net::IpAddr) {}\n", "std::net"),
+        ("use std::process;\n", "std::process"),
+        ("use std::{fmt, net::IpAddr};\n", "std::net"),
+        ("use anyhow::Context as _;\n", "anyhow"),
+        (
+            "fn b() -> Result<(), u8> { anyhow::bail!(\"no\") }\n",
+            "anyhow",
+        ),
+        (
+            "fn m() { let _ = format!(\"{}\", std::process::id()); }\n",
+            "std::process",
+        ),
+        (
+            "fn m() { let _ = format!(\"{}\", ::std::net::Ipv4Addr::LOCALHOST); }\n",
+            "std::net",
+        ),
+        ("extern crate anyhow as failure;\n", "anyhow"),
+        (
+            "fn m() { let _ = format!(\"{}\", 1 as ::std::process::ExitCode); }\n",
+            "std::process",
+        ),
+        (
+            "mod inner { fn f() { let _ = std::net::TcpStream::connect(\"x\"); } }\n",
+            "std::net",
+        ),
+        (
+            "#[cfg(any(test, unix))]\nfn u() -> u32 { std::process::id() }\n",
+            "std::process",
+        ),
+        (
+            "#[cfg(not(test))]\nfn u() -> u32 { std::process::id() }\n",
+            "std::process",
+        ),
+        (
+            "pub enum E { A, #[cfg(test)] Fake }\nfn k() -> u32 { std::process::id() }\n",
+            "std::process",
+        ),
+        (
+            "#[cfg(all(unix, any(test, unix)))]\nfn u() -> u32 { std::process::id() }\n",
+            "std::process",
+        ),
+        (
+            "#[cfg(all())]\nfn u() -> u32 { std::process::id() }\n",
+            "std::process",
+        ),
+        (
+            "#[cfg(feature = \"test\")]\nfn u() -> u32 { std::process::id() }\n",
+            "std::process",
+        ),
+        (
+            "fn f() { #[cfg(unix)] { let _ = std::process::id(); } }\n",
+            "std::process",
+        ),
+    ];
+    for (line, item) in cases {
+        fails_with("src/domain/run.rs", line, &l2(item));
+    }
+    // A renamed `use` is a violation where it is written and where its
+    // name is used.
+    let mut files = clean();
+    files.insert(
+        "src/domain/other.rs".to_owned(),
+        "use std::process as proc;\nfn p() -> u32 { proc::id() }\n".to_owned(),
+    );
+    files
+        .get_mut("src/domain.rs")
+        .unwrap()
+        .push_str("mod other;\n");
+    assert_eq!(
+        errors(&files, &[]),
+        [
+            "src/domain/other.rs: L2 forbids std::process; fix it, or add a row to ownership::MODULES_ALLOWED with its fix and reason"
+        ]
+    );
+    // A rename of `extern crate` at the root names the crate everywhere.
+    let mut files = clean();
+    files
+        .get_mut("src/lib.rs")
+        .unwrap()
+        .push_str("extern crate anyhow as failure;\n");
+    files
+        .get_mut("src/domain/run.rs")
+        .unwrap()
+        .push_str("fn b() -> Result<(), u8> { failure::bail!(\"no\") }\n");
+    assert_eq!(errors(&files, &[]), [l2("anyhow")]);
+}
+
+/// L2 does not count test code, the application, the composition root, a
+/// module of the domain of the same name or another part of `std`.
+#[test]
+fn the_domains_test_code_and_the_outer_layers_may_reference_anyhow_process_and_network() {
+    let mut files = clean();
+    files.get_mut("src/domain/run.rs").unwrap().push_str(
+        "#[cfg(test)]\nfn t() -> u32 { std::process::id() }\n\
+         #[cfg(all(test, unix))]\nuse std::net::IpAddr;\n\
+         #[cfg(test)]\nmod more { use anyhow::Result; fn r() -> Result<()> { anyhow::bail!(\"no\") } }\n\
+         pub struct S { #[cfg(test)] pid: std::process::ExitCode }\n\
+         impl S { #[cfg(test)] fn pid() -> u32 { std::process::id() } }\n\
+         mod process { pub fn id() -> u32 { 1 } }\nfn own() -> u32 { process::id() }\n\
+         fn fmt(_: std::fmt::Error) {}\n\
+         #[cfg(any(test))]\nfn single_any() -> u32 { std::process::id() }\n\
+         #[cfg(all(unix, any(test)))]\nfn nested() -> u32 { std::process::id() }\n\
+         #[cfg(any(all(test, unix), all(test, feature = \"x\"),))]\nfn every_branch() -> u32 { std::process::id() }\n\
+         #[cfg(any())]\nfn never() -> u32 { std::process::id() }\n\
+         #[cfg(any(test))]\nuse std::process as proc;\n\
+         fn blocks() {\n\
+             #[cfg(test)] { let _ = std::process::id(); }\n\
+             #[cfg(test)] println!(\"{}\", std::process::id());\n\
+             let _ = (1, #[cfg(test)] std::net::Ipv4Addr::LOCALHOST);\n\
+         }\n\
+         fn built() -> S { S { #[cfg(test)] pid: std::process::ExitCode::SUCCESS } }\n",
+    );
+    files.get_mut("src/domain/run/tests.rs").unwrap().push_str(
+        "use std::net::IpAddr;\nfn r() -> anyhow::Result<u32> { Ok(std::process::id()) }\n",
+    );
+    files
+        .get_mut("src/domain.rs")
+        .unwrap()
+        .push_str("mod probe;\n");
+    files.insert(
+        "src/domain/probe.rs".to_owned(),
+        "#![cfg(test)]\nfn p() -> u32 { std::process::id() }\n".to_owned(),
+    );
+    files
+        .get_mut("src/application/use_case.rs")
+        .unwrap()
+        .push_str(
+            "use anyhow::Context;\nfn a() -> anyhow::Result<u32> { Ok(std::process::id()) }\n",
+        );
+    files
+        .get_mut("src/compose.rs")
+        .unwrap()
+        .push_str("fn pid() -> u32 { std::process::id() }\nfn ip(_: std::net::IpAddr) {}\n");
+    assert_eq!(errors(&files, &[]), Vec::<String>::new());
+    let allowed = [ModuleAllowed {
+        rule: Rule::L2,
+        path: "src/domain/run.rs",
+        reference: "std::process",
+        fix: Fix::Tasks(&[1]),
+        reason: "fixture",
+    }];
+    files
+        .get_mut("src/domain/run.rs")
+        .unwrap()
+        .push_str("fn p() -> u32 { std::process::id() }\n");
+    assert_eq!(errors(&files, &allowed), Vec::<String>::new());
+}
+
 #[test]
 fn an_allowed_row_lets_its_violation_and_fails_when_stale_or_without_a_task() {
     let row = |fix| ModuleAllowed {

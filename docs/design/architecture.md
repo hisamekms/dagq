@@ -19,6 +19,7 @@ related:
   - design-supervisor-lifecycle-supervise
   - adr-t2391-1
   - adr-t2397-1
+  - adr-t2796-1
 ---
 
 # レイヤーとコンテキストの境界
@@ -120,7 +121,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
   例外は共有の部品の`crate::build_id`（I/Oを持たない規則と`named_commit`）だけ。
   検査: Rustのtest（`src/context_boundaries/modules.rs`）。
 - **L2** `src/domain`の本番のコード（`test=false`のビルドに残りうるコード）はDB・ファイル・process・network・時計・乱数のID・`anyhow`を参照しない（ADR-0013のAlternativesの機械化）。
-  検査: 時計・乱数のID・DB・ファイル・外のcommandはclippy（`clippy.toml`の`disallowed_methods`・`disallowed_types`・`disallowed_macros`）、`anyhow`・`std::process`の残り・`std::net`はscript（下の「[検査の範囲](#検査の範囲)」）。
+  検査: 時計・乱数のID・DB・ファイル・外のcommandはclippy（`clippy.toml`の`disallowed_methods`・`disallowed_types`・`disallowed_macros`）、`anyhow`・`std::process`（`std::process::id`を含む）・`std::net`はRustのtest（`src/context_boundaries/modules.rs`、下の「[検査の範囲](#検査の範囲)」）。
 - **L3** `src/application`のコードはinfrastructure・起動部分とレイヤーの外のmoduleを参照しない。
   `#[cfg(test)]`の中も同じ（testはapplicationのtest doubleを使う）。
   例外は共有の部品の`crate::migration_numbers`と`crate::build_id`だけ。
@@ -188,21 +189,21 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 ### 検査の範囲
 
 - 各規則の検査は、scriptから、コンパイラ（可視性・型）・clippy・Rustのtest・全体のreviewへ移している途中で、規則ごとの移し先と退役の順は[ADR-t2391-1](../adr/2026-10-12-t2391-1-boundary-rules-to-compiler-clippy-and-rust-tests.md)が持つ。
-  crateは1つのままで、crateの分割に委ねた規則（L1・L3・L6・L8・L9のcontextのmoduleどうし・C5・C8）はmoduleの参照を構文で読むRustのtestへ移す（[ADR-t2397-1](../adr/2026-10-18-t2397-1-crate-delegated-boundary-rules-kept-in-one-crate-by-a-rust-module-reference-test.md)）。
+  crateは1つのままで、crateの分割に委ねた規則（L1・L3・L6・L8・L9のcontextのmoduleどうし・C5・C8）と、L2のうちdomainだけが禁じる`anyhow`・`std::process`・`std::net`はmoduleの参照を構文で読むRustのtestへ移す（[ADR-t2397-1](../adr/2026-10-18-t2397-1-crate-delegated-boundary-rules-kept-in-one-crate-by-a-rust-module-reference-test.md)、[ADR-t2796-1](../adr/2026-10-20-t2796-1-domain-only-l2-items-to-the-module-reference-test.md)）。
   下の記述と各規則の「検査」の行は今動いている検査で、移し先の着地ごとに直す。
 - clippyの一覧は`clippy.toml`で、lintはpackageでは切り（`Cargo.toml`の`[lints]`）、`src/lib.rs`がdomain・application・起動部分のmoduleの宣言でtestでないビルドにだけ有効にする（ADR-t2391-1決定2）。
   3つのlintはdomainとapplicationに、`disallowed_methods`は起動部分にも有効にするので、起動部分にはL7の時計に加えて同じ一覧のDB・ファイル・外のcommandの関数も当たる。
-  lintの一覧はpackageに1つなので、有効にした全てのmoduleが禁じるものだけを置き、domainだけが禁じるもの（applicationが使う`anyhow`と`std::process::id`を含む`std::process`の残り、`std::net`）はscriptのL2が見る。
+  lintの一覧はpackageに1つなので、有効にした全てのmoduleが禁じるものだけを置き、domainだけが禁じるもの（applicationが使う`anyhow`と`std::process::id`を含む`std::process`の残り、`std::net`）はmoduleの参照のRustのtestが見る。
   infrastructure・レイヤーの外のmodule・`src/main.rs`・`tests/`・`#[cfg(test)]`の中にはlintが当たらないので、例外を置かない。
   許す場所はapplicationの個々のitemの理由付きの`#[expect]`だけで、moduleの宣言・crateの全体・domain・起動部分には置かない。
-- L1・L3・L6・L8・L9は、`cargo test`が流すRustのtest（`src/context_boundaries/modules.rs`）が当てる。
-  testは`src/lib.rs`から辿るmoduleのRustを構文で読み、`use`とpathをcrateの根からのmoduleのpathに解き、再公開を定義のmoduleまで辿る（`#[cfg(test)]`の中も数える）。
+- L1・L3・L6・L8・L9と、L2の`anyhow`・`std::process`・`std::net`は、`cargo test`が流すRustのtest（`src/context_boundaries/modules.rs`）が当てる。
+  testは`src/lib.rs`から辿るmoduleのRustを構文で読み、`use`とpathをcrateの根からのmoduleのpathか外のcrateのpathに解き、再公開を定義のmoduleまで辿る（L2は`#[cfg(test)]`の中を数えず、ほかは数える）。
   共有の部品を参照してよいレイヤー、`src/compose/`のループのmodule、今の違反は所有の表に置く。
-- `scripts/check-layer-deps.sh`は、L2のうちclippyの一覧に置けない部分と、`src/application/ports/`のcontextのmoduleのC8を当てる。
+- `scripts/check-layer-deps.sh`は、`src/application/ports/`のcontextのmoduleのC8を当てる。
   数えるのは参照のpathで、コメントと文字列は数えない（細目はscriptの先頭のコメント）。
   許可の一覧は`.config/layer-deps-allow.txt`。
 - 所有の一覧は2か所に分かれ、pathから導けない所有だけを持つ。
-  Rustのtestの側の所有の表`src/context_boundaries/ownership.rs`は、tableの所有、storeのmoduleのcontext、境界をまたぐtransactionの関数、C1とL1・L3・L6・L8・L9の今の違反を持つ。
+  Rustのtestの側の所有の表`src/context_boundaries/ownership.rs`は、tableの所有、storeのmoduleのcontext、境界をまたぐtransactionの関数、C1とL1・L2・L3・L6・L8・L9の今の違反を持つ。
   `.config/context-boundaries.txt`は、`src/application/`のmoduleのcontext、portとそのmethodの公開先、`ports/`の外のportを持つ。
 - C1・C7のtableとstoreのmoduleとtransaction・X1は、`cargo test`が流すRustのtest（`src/context_boundaries.rs`）が当てる。
   testは`src/infrastructure/`のRustを構文で読み、test codeの外の文字列の中のSQLの書き込み先を所有の表と照合する。
@@ -216,7 +217,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
   許可の一覧は`.config/context-boundaries-allow.txt`。
 - 所有の表の書式と落ちる条件はtestのdoc comment、`.config/`の一覧の書式と落ちる条件は各一覧の先頭のコメント、scriptの数え方の細目はscriptの先頭のコメントが持つ。
 - 今ある違反は、理由と行き先のtask（行き先が未登録なら、所有の表では`Fix::Unregistered`、`.config/context-boundaries-allow.txt`では`none`と理由）を持つ許可の一覧にだけ置く（ADR-t1545-1決定4、ADR-t2287-1、ADR-t2391-1決定3）。
-  C1とL1・L3・L6・L8・L9の許可は所有の表に、C5とL2・C8の許可は`.config/`の許可の一覧に置く。
+  C1とL1・L2・L3・L6・L8・L9の許可は所有の表に、C5・C8の許可は`.config/`の許可の一覧に置く。
   許可の一覧に無い違反と、違反が消えた古い項目で落ちるので、違反を直す変更は同じ変更で許可の一覧の項目を消す。
   reviewだけで見る規則の今の違反は文書に記録せず、行き先はqueueのtaskが持つ。
 - 2つのscriptは、CIと`src/`を変えるtaskのverifyが流す。

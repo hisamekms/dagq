@@ -6,7 +6,8 @@
 # disallowed_methods on the composition root. Each lint has one list for the
 # package, so a list holds only what every module it is on forbids; what
 # only the domain forbids (anyhow, the rest of std::process, std::net) is
-# scripts/check-layer-deps.sh's L2. A place the rule lets read the clock
+# checked by the Rust test of the module references
+# (src/context_boundaries/modules.rs). A place the rule lets read the clock
 # gets an #[expect(clippy::disallowed_methods, reason = "...")] on the item.
 
 disallowed-methods = [

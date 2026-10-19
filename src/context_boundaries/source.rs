@@ -1,9 +1,8 @@
 //! A Rust source read as syntax for the boundary tests: its string
 //! literals outside test code with the fns they are in, its fns outside
 //! test code, and the files its `#[cfg(test)] mod name;` declares. Test code
-//! is an item (or a field, a variant, an arm, a `let`) under
-//! `#[cfg(test)]` or `#[cfg(all(test, ...))]`, and a file under
-//! `#![cfg(test)]`. Comments and attributes (doc comments too) are not read;
+//! is an item (or a field, a variant, an arm, a `let`) under a `cfg` that
+//! requires `test` ([`is_test`]), and a file under `#![cfg(test)]`. Comments and attributes (doc comments too) are not read;
 //! the tokens of a macro are read for their string literals only.
 
 use proc_macro2::TokenTree;
@@ -39,31 +38,40 @@ pub(super) fn read(text: &str) -> syn::Result<Source> {
     Ok(reader.source)
 }
 
-/// Whether `attrs` hold `#[cfg(test)]` or `#[cfg(all(test, ...))]`.
-fn is_test(attrs: &[Attribute]) -> bool {
+/// Whether `attrs` hold a `cfg` whose predicate requires `test`, so that
+/// what it is on is in no `test=false` build: `test`, an `all(...)` with an
+/// argument that requires it, or an `any(...)` all of whose arguments do
+/// (`cfg(any(test))`, `cfg(all(unix, any(test)))`). `not(...)`, a key and
+/// value and an `any(...)` with an argument that does not require `test`
+/// may hold without it.
+pub(super) fn is_test(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|attr| {
-        if !attr.path().is_ident("cfg") {
-            return false;
-        }
-        let Ok(meta) = attr.parse_args::<Meta>() else {
-            return false;
-        };
-        match meta {
-            Meta::Path(path) => path.is_ident("test"),
-            Meta::List(list) if list.path.is_ident("all") => list
-                .parse_args_with(
-                    syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
-                )
-                .is_ok_and(|all| {
-                    all.iter()
-                        .any(|m| matches!(m, Meta::Path(p) if p.is_ident("test")))
-                }),
-            _ => false,
-        }
+        attr.path().is_ident("cfg") && attr.parse_args::<Meta>().is_ok_and(|m| requires_test(&m))
     })
 }
 
-fn item_attrs(item: &syn::Item) -> &[Attribute] {
+fn requires_test(meta: &Meta) -> bool {
+    match meta {
+        Meta::Path(path) => path.is_ident("test"),
+        Meta::List(list) => {
+            let Ok(args) = list.parse_args_with(
+                syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated,
+            ) else {
+                return false;
+            };
+            if list.path.is_ident("all") {
+                args.iter().any(requires_test)
+            } else if list.path.is_ident("any") {
+                args.iter().all(requires_test)
+            } else {
+                false
+            }
+        }
+        Meta::NameValue(_) => false,
+    }
+}
+
+pub(super) fn item_attrs(item: &syn::Item) -> &[Attribute] {
     use syn::Item;
     match item {
         Item::Const(i) => &i.attrs,
@@ -244,6 +252,10 @@ trait T { fn provided(&self) { "provided"; } fn required(&self); }
 mod tests { fn t() { "test"; } }
 #[cfg(all(test, unix))]
 fn unix_test() { "unix test"; }
+#[cfg(all(unix, any(test)))]
+fn nested_test() { "nested test"; }
+#[cfg(any(test, unix))]
+fn maybe_test() { "maybe test"; }
 #[cfg(test)]
 mod helpers;
 mod inner { #[cfg(test)] mod deeper; }
@@ -269,6 +281,7 @@ fn arms(x: u8) {
             ("bytes", "outer::inner"),
             ("method", "method"),
             ("provided", "provided"),
+            ("maybe test", "maybe_test"),
             ("arm", "arms"),
         ];
         let want: Vec<(String, String)> = want
@@ -279,7 +292,15 @@ fn arms(x: u8) {
         let fns: Vec<&str> = source.fns.iter().map(String::as_str).collect();
         assert_eq!(
             fns,
-            ["arms", "inner", "method", "outer", "provided", "required"]
+            [
+                "arms",
+                "inner",
+                "maybe_test",
+                "method",
+                "outer",
+                "provided",
+                "required"
+            ]
         );
         assert_eq!(source.test_modules, ["helpers", "inner/deeper"]);
     }

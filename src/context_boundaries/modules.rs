@@ -1,26 +1,39 @@
-//! The rules L1, L3, L6, L8 and L9 of docs/design/architecture.md, checked
-//! on the library's module references read as syntax: a layer references
-//! no outer layer and no module outside the layers but the shared parts the
-//! table [`super::ownership::SHARED_MODULES`] lets it, and a context module
-//! of `src/compose/` references no other module of `src/compose/` and globs
-//! no `crate::compose`. The modules of `src/compose/` are declared private,
-//! so the code outside the composition root reaches them only through its
+//! The rules L1, L2's part clippy cannot hold, L3, L6, L8 and L9 of
+//! docs/design/architecture.md, checked on the library's module references
+//! read as syntax: a layer references no outer layer and no module outside
+//! the layers but the shared parts the table
+//! [`super::ownership::SHARED_MODULES`] lets it, the production code of the
+//! domain references none of [`DOMAIN_FORBIDS`], and a context module of
+//! `src/compose/` references no other module of `src/compose/` and globs no
+//! `crate::compose`. The modules of `src/compose/` are declared private, so
+//! the code outside the composition root reaches them only through its
 //! re-exports (L9).
 //!
 //! What counts:
 //!
 //! - The modules are those `src/lib.rs` declares, followed through
 //!   `mod name;` (`name.rs`, else `name/mod.rs`) and inline modules. Test
-//!   code counts too.
+//!   code counts too, but not for L2: test code is an item, a field, a
+//!   variant, an arm, a `let`, an expression (a block too), a statement
+//!   macro or a field of a struct expression or pattern under a `cfg` that
+//!   requires `test` ([`super::source::is_test`]), the files a test module
+//!   declares and a file under `#![cfg(test)]`.
 //! - A reference is the path of a `use` (each leaf of a group, `self` and
 //!   `*` included), a path in an expression, a type, a pattern or an
-//!   attribute, and a path starting with `crate`, `self` or `super` in a
-//!   macro's tokens (a group in them read as a `use` tree). It is resolved
+//!   attribute, and a path in a macro's tokens (a name followed by `::`, a
+//!   leading `::`, or `crate`, `self` or `super`; a group in them read as a
+//!   `use` tree). It is resolved
 //!   to a path from the crate's root: `crate`, `self` and `super` by the
 //!   module it is written in, a bare first segment when it names an item, a
 //!   module or a `use` of that module or a name one of its globs brings in,
-//!   a glob's module's own globs included (otherwise it is another crate, a
-//!   local or a generic and does not count). A name is looked up in the
+//!   a glob's module's own globs included. A bare first segment the
+//!   library does not define there, and a leading `::` but the root's
+//!   names of `extern crate self`, is another crate (a local or a generic
+//!   reads the same, so one named like an item of [`DOMAIN_FORBIDS`] would
+//!   count); `extern crate name as other;` makes `other` that crate where
+//!   it is written, and in every module when it is at the root. The names
+//!   a glob of another crate brings in are not followed (a glob of
+//!   `std::process` counts at the glob). A name is looked up in the
 //!   namespaces of the place it is written in, as Rust does ([`Ns`]): an
 //!   item names it and hides a glob's name or an outer scope's only in its
 //!   own namespace, a `use` in all of them. `extern crate self as name`
@@ -38,8 +51,9 @@
 //!   module it is in nor the one it names.
 //! - Comments, doc comments and string literals do not count.
 //! - A violation is `<rule> <reference>` in its file, the reference cut to
-//!   the module the rule names (`crate::view`, `crate::compose::host`, or
-//!   `crate::compose::*` for a glob of the root). Every violation has a row
+//!   the module the rule names (`crate::view`, `crate::compose::host`,
+//!   `crate::compose::*` for a glob of the root, or an item of
+//!   [`DOMAIN_FORBIDS`] such as `std::process`). Every violation has a row
 //!   of [`super::ownership::MODULES_ALLOWED`], and every row still matches
 //!   one.
 
@@ -49,8 +63,26 @@ use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use syn::visit::{self, Visit};
 
-/// A module path from the crate's root, `[]` for the root.
+/// A module path from the crate's root, `[]` for the root; one of another
+/// crate starts with [`EXTERN`].
 type ModulePath = Vec<String>;
+
+/// The first segment of a path of another crate (`["::", "std", "net"]`),
+/// which no module of the library has.
+const EXTERN: &str = "::";
+
+/// The keywords a path with a leading `::` may follow in a macro's tokens.
+const KEYWORDS: &[&str] = &[
+    "as", "box", "break", "const", "dyn", "else", "for", "if", "impl", "in", "let", "match",
+    "move", "mut", "ref", "return", "static", "where", "while", "yield",
+];
+
+/// What the production code of the domain does not reference (L2): the
+/// paths of other crates the domain alone forbids, which clippy.toml's
+/// lists, one per lint for the whole package, cannot hold, since the
+/// application uses `anyhow` and `std::process::id` and the composition
+/// root `std::process::id`.
+const DOMAIN_FORBIDS: &[&[&str]] = &[&["anyhow"], &["std", "process"], &["std", "net"]];
 
 /// The names a module, or a block, defines and imports.
 #[derive(Debug, Default)]
@@ -100,6 +132,8 @@ struct Reference {
     /// The namespaces its last segment is looked up in.
     ns: Ns,
     glob: bool,
+    /// Whether it is in test code.
+    test: bool,
 }
 
 /// The library read as syntax.
@@ -117,6 +151,9 @@ struct Crate {
     /// The names `extern crate self as` gives the root at the root: every
     /// module may name the root by them, bare or after `::`.
     prelude: BTreeSet<String>,
+    /// The crates `extern crate name as other;` at the root names, by
+    /// `other`: every module may name the crate by it.
+    externs: BTreeMap<String, String>,
     memo: Memo,
 }
 
@@ -143,8 +180,8 @@ pub(super) struct ModuleRecords<'a> {
 fn read(files: &BTreeMap<String, String>) -> Crate {
     let mut krate = Crate::default();
     krate.modules.insert(Vec::new(), Module::default());
-    let mut queue = vec![("src/lib.rs".to_owned(), Vec::new())];
-    while let Some((file, module)) = queue.pop() {
+    let mut queue = vec![("src/lib.rs".to_owned(), Vec::new(), false)];
+    while let Some((file, module, test)) = queue.pop() {
         let Some(text) = files.get(&file) else {
             krate
                 .errors
@@ -169,10 +206,11 @@ fn read(files: &BTreeMap<String, String>) -> Crate {
             declared: Vec::new(),
             blocks: Vec::new(),
             cfg: false,
+            test: test || super::source::is_test(&parsed.attrs),
         };
         reader.visit_file(&parsed);
         let declared = std::mem::take(&mut reader.declared);
-        for (dir, child) in declared {
+        for (dir, child, test) in declared {
             let name = child.last().cloned().unwrap_or_default();
             let flat = format!("{dir}/{name}.rs");
             let nested = format!("{dir}/{name}/mod.rs");
@@ -181,7 +219,7 @@ fn read(files: &BTreeMap<String, String>) -> Crate {
             } else {
                 nested
             };
-            queue.push((path, child));
+            queue.push((path, child, test));
         }
     }
     let scopes = krate.modules.values().chain(&krate.blocks);
@@ -201,12 +239,15 @@ struct Reader<'a> {
     dir: Vec<String>,
     /// The module the code is in, by depth of inline module.
     module: Vec<ModulePath>,
-    /// The modules declared without a body: their directory and path.
-    declared: Vec<(String, ModulePath)>,
+    /// The modules declared without a body: their directory, path and
+    /// whether they are test code.
+    declared: Vec<(String, ModulePath, bool)>,
     /// The blocks around the code in its module, outermost first.
     blocks: Vec<usize>,
     /// Whether the `use` being read is under a `cfg`.
     cfg: bool,
+    /// Whether the code being read is test code.
+    test: bool,
 }
 
 impl Reader<'_> {
@@ -242,7 +283,16 @@ impl Reader<'_> {
             path,
             ns,
             glob,
+            test: self.test,
         });
+    }
+
+    /// Walks code with `attrs`, as test code when they make it so.
+    fn with_attrs(&mut self, attrs: &[syn::Attribute], walk: impl FnOnce(&mut Self)) {
+        let test = self.test;
+        self.test |= super::source::is_test(attrs);
+        walk(self);
+        self.test = test;
     }
 
     /// `path` with its last segment in `ns`, and the paths of its generic
@@ -311,9 +361,9 @@ impl Reader<'_> {
         self.reference(path, ANY, false);
     }
 
-    /// The paths starting with `crate`, `self` or `super` in a macro's
-    /// tokens, which syn does not parse, a group (`crate::{a, b::c}`) read
-    /// as a `use` tree.
+    /// The paths in a macro's tokens, which syn does not parse: a name
+    /// followed by `::`, a leading `::`, or `crate`, `self` or `super`, a
+    /// group (`crate::{a, b::c}`) read as a `use` tree.
     fn tokens(&mut self, tokens: TokenStream) {
         let trees: Vec<TokenTree> = tokens.into_iter().collect();
         let mut i = 0;
@@ -323,16 +373,34 @@ impl Reader<'_> {
                 i += 1;
                 continue;
             }
+            let colons_at = |at: usize| {
+                matches!(trees.get(at), Some(TokenTree::Punct(p)) if p.as_char() == ':')
+                    && matches!(trees.get(at + 1), Some(TokenTree::Punct(p)) if p.as_char() == ':')
+            };
             let starts = matches!(&trees[i], TokenTree::Ident(id)
-                if ["crate", "self", "super"].contains(&id.to_string().as_str()));
-            let after_colons = i >= 2
-                && matches!(&trees[i - 1], TokenTree::Punct(p) if p.as_char() == ':')
-                && matches!(&trees[i - 2], TokenTree::Punct(p) if p.as_char() == ':');
-            if !starts || after_colons {
+                if ["crate", "self", "super"].contains(&id.to_string().as_str()) || colons_at(i + 1) && !KEYWORDS.contains(&id.to_string().as_str()));
+            let after_colons = i >= 2 && colons_at(i - 2);
+            // `::name` after nothing, a punctuation or a keyword
+            // (`<T>::name` and `a::name` go on a path).
+            let leading = after_colons
+                && (i == 2
+                    || match &trees[i - 3] {
+                        TokenTree::Punct(p) => p.as_char() != '>',
+                        TokenTree::Ident(id) => KEYWORDS.contains(&id.to_string().as_str()),
+                        _ => false,
+                    });
+            if !matches!(&trees[i], TokenTree::Ident(_))
+                || after_colons && !leading
+                || !after_colons && !starts
+            {
                 i += 1;
                 continue;
             }
-            let mut path = Vec::new();
+            let mut path = if leading {
+                vec![String::new()]
+            } else {
+                Vec::new()
+            };
             let mut glob = false;
             while let Some(TokenTree::Ident(id)) = trees.get(i) {
                 path.push(id.to_string());
@@ -401,12 +469,7 @@ fn item_name(item: &syn::Item) -> Option<(String, bool, Ns)> {
     let (ident, attrs, ns) = match item {
         Item::Const(i) => (&i.ident, &i.attrs, VALUE),
         Item::Enum(i) => (&i.ident, &i.attrs, TYPE),
-        Item::ExternCrate(i) if i.ident == "self" => return None,
-        Item::ExternCrate(i) => (
-            i.rename.as_ref().map_or(&i.ident, |(_, r)| r),
-            &i.attrs,
-            TYPE,
-        ),
+        Item::ExternCrate(_) => return None,
         Item::Fn(i) => (&i.sig.ident, &i.attrs, VALUE),
         Item::Macro(i) => (i.ident.as_ref()?, &i.attrs, MACRO),
         Item::Mod(i) => (&i.ident, &i.attrs, TYPE),
@@ -428,6 +491,53 @@ fn item_name(item: &syn::Item) -> Option<(String, bool, Ns)> {
     Some((ident.to_string(), under_cfg(attrs), ns))
 }
 
+/// The attributes of an expression.
+fn expr_attrs(e: &syn::Expr) -> &[syn::Attribute] {
+    use syn::Expr;
+    match e {
+        Expr::Array(e) => &e.attrs,
+        Expr::Assign(e) => &e.attrs,
+        Expr::Async(e) => &e.attrs,
+        Expr::Await(e) => &e.attrs,
+        Expr::Binary(e) => &e.attrs,
+        Expr::Block(e) => &e.attrs,
+        Expr::Break(e) => &e.attrs,
+        Expr::Call(e) => &e.attrs,
+        Expr::Cast(e) => &e.attrs,
+        Expr::Closure(e) => &e.attrs,
+        Expr::Const(e) => &e.attrs,
+        Expr::Continue(e) => &e.attrs,
+        Expr::Field(e) => &e.attrs,
+        Expr::ForLoop(e) => &e.attrs,
+        Expr::Group(e) => &e.attrs,
+        Expr::If(e) => &e.attrs,
+        Expr::Index(e) => &e.attrs,
+        Expr::Infer(e) => &e.attrs,
+        Expr::Let(e) => &e.attrs,
+        Expr::Lit(e) => &e.attrs,
+        Expr::Loop(e) => &e.attrs,
+        Expr::Macro(e) => &e.attrs,
+        Expr::Match(e) => &e.attrs,
+        Expr::MethodCall(e) => &e.attrs,
+        Expr::Paren(e) => &e.attrs,
+        Expr::Path(e) => &e.attrs,
+        Expr::Range(e) => &e.attrs,
+        Expr::RawAddr(e) => &e.attrs,
+        Expr::Reference(e) => &e.attrs,
+        Expr::Repeat(e) => &e.attrs,
+        Expr::Return(e) => &e.attrs,
+        Expr::Struct(e) => &e.attrs,
+        Expr::Try(e) => &e.attrs,
+        Expr::TryBlock(e) => &e.attrs,
+        Expr::Tuple(e) => &e.attrs,
+        Expr::Unary(e) => &e.attrs,
+        Expr::Unsafe(e) => &e.attrs,
+        Expr::While(e) => &e.attrs,
+        Expr::Yield(e) => &e.attrs,
+        _ => &[],
+    }
+}
+
 fn under_cfg(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|attr| attr.path().is_ident("cfg"))
 }
@@ -437,22 +547,91 @@ impl<'ast> Visit<'ast> for Reader<'_> {
         if let Some((name, cfg, ns)) = item_name(item) {
             self.item(name, cfg, ns);
         }
-        visit::visit_item(self, item);
+        self.with_attrs(super::source::item_attrs(item), |r| {
+            visit::visit_item(r, item);
+        });
     }
 
     /// `extern crate self as name;` names the crate's root, from every
-    /// module when it is at the root.
+    /// module when it is at the root; `extern crate name as other;` names
+    /// the crate `name`.
     fn visit_item_extern_crate(&mut self, e: &'ast syn::ItemExternCrate) {
+        let rename = e.rename.as_ref().map(|(_, r)| r.to_string());
+        self.cfg = under_cfg(&e.attrs);
         if e.ident == "self" {
-            let name = e.rename.as_ref().map(|(_, r)| r.to_string());
             if self.here().is_empty() && self.blocks.is_empty() {
-                self.krate.prelude.extend(name.clone());
+                self.krate.prelude.extend(rename.clone());
             }
-            self.cfg = under_cfg(&e.attrs);
-            self.alias(name, vec!["crate".to_owned()]);
-            self.cfg = false;
+            self.alias(rename, vec!["crate".to_owned()]);
+        } else {
+            let name = e.ident.to_string();
+            if let Some(rename) = &rename
+                && self.here().is_empty()
+                && self.blocks.is_empty()
+            {
+                self.krate.externs.insert(rename.clone(), name.clone());
+            }
+            self.alias(
+                Some(rename.unwrap_or(name.clone())),
+                vec![String::new(), name],
+            );
         }
+        self.cfg = false;
         visit::visit_item_extern_crate(self, e);
+    }
+
+    fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+        let attrs: &[syn::Attribute] = match item {
+            syn::ImplItem::Const(i) => &i.attrs,
+            syn::ImplItem::Fn(i) => &i.attrs,
+            syn::ImplItem::Type(i) => &i.attrs,
+            syn::ImplItem::Macro(i) => &i.attrs,
+            _ => &[],
+        };
+        self.with_attrs(attrs, |r| visit::visit_impl_item(r, item));
+    }
+
+    fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+        let attrs: &[syn::Attribute] = match item {
+            syn::TraitItem::Const(i) => &i.attrs,
+            syn::TraitItem::Fn(i) => &i.attrs,
+            syn::TraitItem::Type(i) => &i.attrs,
+            syn::TraitItem::Macro(i) => &i.attrs,
+            _ => &[],
+        };
+        self.with_attrs(attrs, |r| visit::visit_trait_item(r, item));
+    }
+
+    fn visit_field(&mut self, f: &'ast syn::Field) {
+        self.with_attrs(&f.attrs, |r| visit::visit_field(r, f));
+    }
+
+    fn visit_variant(&mut self, v: &'ast syn::Variant) {
+        self.with_attrs(&v.attrs, |r| visit::visit_variant(r, v));
+    }
+
+    fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+        self.with_attrs(&arm.attrs, |r| visit::visit_arm(r, arm));
+    }
+
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        self.with_attrs(&local.attrs, |r| visit::visit_local(r, local));
+    }
+
+    fn visit_expr(&mut self, e: &'ast syn::Expr) {
+        self.with_attrs(expr_attrs(e), |r| visit::visit_expr(r, e));
+    }
+
+    fn visit_stmt_macro(&mut self, m: &'ast syn::StmtMacro) {
+        self.with_attrs(&m.attrs, |r| visit::visit_stmt_macro(r, m));
+    }
+
+    fn visit_field_value(&mut self, f: &'ast syn::FieldValue) {
+        self.with_attrs(&f.attrs, |r| visit::visit_field_value(r, f));
+    }
+
+    fn visit_field_pat(&mut self, f: &'ast syn::FieldPat) {
+        self.with_attrs(&f.attrs, |r| visit::visit_field_pat(r, f));
     }
 
     fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
@@ -472,7 +651,7 @@ impl<'ast> Visit<'ast> for Reader<'_> {
         match &m.content {
             None => {
                 let parent = self.dir.last().expect("a dir").clone();
-                self.declared.push((parent, child));
+                self.declared.push((parent, child, self.test));
             }
             Some((_, items)) => {
                 let blocks = std::mem::take(&mut self.blocks);
@@ -650,6 +829,8 @@ impl Crate {
             "" => {
                 if path.get(1).is_some_and(|name| self.prelude.contains(name)) {
                     found.insert(path[2..].to_vec());
+                } else {
+                    found.insert(self.extern_path(&path[1..]));
                 }
             }
             "Self" => {}
@@ -673,7 +854,9 @@ impl Crate {
                 }
                 found.insert([&base[..], rest].concat());
             }
-            name if !self.names.contains(name) => {}
+            name if !self.names.contains(name) => {
+                found.insert(self.extern_path(path));
+            }
             name => {
                 for (k, &block) in blocks.iter().enumerate().rev() {
                     let scope = &self.blocks[block];
@@ -719,6 +902,9 @@ impl Crate {
                 }
                 if want & TYPE != 0 && self.prelude.contains(name) {
                     found.insert(path[1..].to_vec());
+                }
+                if found.is_empty() && want != 0 {
+                    found.insert(self.extern_path(path));
                 }
             }
         }
@@ -839,6 +1025,17 @@ impl Crate {
         value
     }
 
+    /// `path` (as written, from a crate's name) as a path of another crate,
+    /// a root `extern crate` rename replaced by the crate's name.
+    fn extern_path(&self, path: &[String]) -> ModulePath {
+        let mut out = vec![EXTERN.to_owned()];
+        out.extend(path.iter().cloned());
+        if let Some(name) = out.get(1).and_then(|first| self.externs.get(first)) {
+            out[1] = name.clone();
+        }
+        out
+    }
+
     /// [`Crate::resolve`] of the segments of `path` from `start` on.
     fn resolve_from(
         &self,
@@ -893,13 +1090,28 @@ impl Crate {
             if item {
                 resolved.extend(self.resolve_from(path.clone(), i + 1, ns, seen));
             }
-            if resolved.is_empty() {
+            if resolved.iter().all(|p| is_extern(p)) {
                 resolved.insert(path);
             }
             return resolved;
         }
         BTreeSet::from([path])
     }
+}
+
+fn is_extern(path: &[String]) -> bool {
+    path.first().is_some_and(|s| s == EXTERN)
+}
+
+/// The item of [`DOMAIN_FORBIDS`] `to` names, as L2 prints it.
+fn domain_forbids(to: &[String]) -> Option<String> {
+    let crate_path = to.strip_prefix(&[EXTERN.to_owned()][..])?;
+    DOMAIN_FORBIDS
+        .iter()
+        .find(|item| {
+            item.len() <= crate_path.len() && item.iter().zip(crate_path).all(|(a, b)| a == b)
+        })
+        .map(|item| item.join("::"))
 }
 
 fn show(path: &[String]) -> String {
@@ -1043,6 +1255,12 @@ pub(super) fn check(files: &BTreeMap<String, String>, records: &ModuleRecords) -
             {
                 found.insert((reference.file.clone(), Rule::L9, module));
             }
+            if from == Layer::Domain
+                && !reference.test
+                && let Some(item) = domain_forbids(&to)
+            {
+                found.insert((reference.file.clone(), Rule::L2, item));
+            }
         }
     }
     let mut listed = BTreeSet::new();
@@ -1094,7 +1312,7 @@ fn the_layers_and_the_composition_contexts_reference_only_what_they_may() {
     let errors = check(&files, &records);
     assert!(
         errors.is_empty(),
-        "the module references (docs/design/architecture.md, L1, L3, L6, L8 and L9):\n{}",
+        "the module references (docs/design/architecture.md, L1, L2, L3, L6, L8 and L9):\n{}",
         errors.join("\n")
     );
 }

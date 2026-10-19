@@ -87,7 +87,7 @@ violate_agents_md_too_big() {
 
 violate_layer_stale_allow_item() {
   mkdir -p .config
-  echo 'L2 | src/domain/zz_scripts_root.rs | std::process | 1899 | fixture' >>.config/layer-deps-allow.txt
+  echo 'C8 | src/application/ports/zz_scripts_root.rs | super::host | 1899 | fixture' >>.config/layer-deps-allow.txt
 }
 
 violate_context_unlisted_trait() {
