@@ -189,18 +189,17 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 
 ## 台帳を作る係
 
-何を書くかは`domain::ledger::builder`が決め、`application::supervise::ledger`が書く。
-数値はそのmoduleの定数が持つ。
+何を書くかは`domain::ledger::builder`が決め（数値は定数）、`application::supervise::ledger`が書く。
 
 - **周回**: supervisorの周回が間隔ごとに、drainとhandoffの間も、jobのthreadで動く（D7）。
   着地の処理の中では作らず、runtimeの制御（claim・slot・resume・着地）は台帳を読まない。
 - **置き場**: 係の状態（入力ごとのカーソル・印・猶予を待つ行）は観測と分析の状態、組み立ては`compose::observation`にあり、`Supervisor`の本体に状態を足さない。
-- **印**: EventStoreとNodeSampleStoreのカーソルの後に届いた入力だけを読み、そのrun・task・sessionとqueueの行・nodeの時間に印を付ける（全行を走査しない）。
+- **印**: EventStoreとNodeSampleStoreのカーソルの後に届いた入力だけを読み、そのrun・task・それが変えたsessionとqueueの行（記録でない終わりも）・nodeの時間に印を付ける（全行を走査しない）。
   畳むrun・taskのeventはその都度読み、queue全体の畳みは届いたeventを一度だけ読んで持ち越す（`builder::Kept`）。
   周回は新しいeventが変えうる行と印の付いた行だけを畳み、周回で作る領域は前からのeventの数に比例しない。
   `push_finished`は`push_pending`で書いたrunにも付ける。
   processの始めはカーソルが0なので、切り替え前を含む全てに追いつく（backfill）。
-- **書く行**: 終わったrun・task（`push_pending`と旧方式を含み、途中のものは書かない）と、session・queue・nodeの行。
+- **書く行**: 終わったrun・task（`push_pending`（他のpushが閉じたtaskも）と旧方式を含み途中は書かない）と、session・queue・nodeの行。
   書くかは`builder::writes`が決め、同じ入力では書かない（冪等）。
   1周回で書く数と見る数に上限があり、残りは次の周回。
 - **確定**（`final`）: run・taskは終わりから猶予の後で、`push_pending`には付けない。

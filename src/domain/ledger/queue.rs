@@ -5,7 +5,9 @@
 //! - `slots_full`, `claim_hold`, `claim_deferral`: the waits before a claim
 //!   as [`crate::domain::pre_claim::pre_claim_intervals`] reads them; `landing_hold`: a hold on the
 //!   landings by the same rule ([`claim_hold::hold_spans`]). Its start and
-//!   its end are its records.
+//!   its end are its records; an end of no record of its own (the claim
+//!   that ends a deferral, the next hold) is read up to all the same
+//!   (`inputs_through`), as is a stream's next baseline.
 //! - `live_alert_stream`: a supervisor's stream of the record of the
 //!   judgments of now from its baseline (or its first record) to its next
 //!   baseline: the inputs and their versions and its reaches, folded per
@@ -167,6 +169,10 @@ struct Assigned {
     baseline: bool,
     version: Option<u64>,
     records: Vec<EventId>,
+    /// The event that ended it when that is not one of its records (a
+    /// claim that ends a deferral, the next hold or baseline): an input
+    /// of it all the same.
+    ended_by: Option<EventId>,
 }
 
 impl Assigned {
@@ -180,6 +186,7 @@ impl Assigned {
             baseline: false,
             version: None,
             records: vec![start.id],
+            ended_by: None,
         }
     }
 }
@@ -323,6 +330,13 @@ impl QueueBook {
         {
             touched.extend(rows.iter().map(|row| (LedgerKind::Queue, row.to_string())));
         }
+        // An end is an input of its interval whoever's event it is.
+        for start in moved.ended.into_iter().flatten() {
+            if let Some(row) = self.rows.get_mut(&start) {
+                row.ended_by = Some(event.id);
+                touched.insert((LedgerKind::Queue, start.to_string()));
+            }
+        }
         if !owned {
             return;
         }
@@ -454,6 +468,7 @@ impl QueueBook {
                 {
                     row.ended_at = timestamp_millis(&event.created_at);
                     row.outcome = Some("replaced".into());
+                    row.ended_by = Some(event.id);
                     touched.insert((LedgerKind::Queue, at.to_string()));
                     if let Some(rows) = self.lives_of.get_mut(&supervisor) {
                         rows.remove(&at);
@@ -592,6 +607,9 @@ impl QueueBook {
         }
         let life = row.life.as_deref().and_then(|s| at.lives.last_of(s));
         let mut ledger = finish(row, at.owned, at.built_at);
+        if let Some(end) = assigned.ended_by {
+            ledger.inputs_through.events = ledger.inputs_through.events.max(end);
+        }
         ledger.inputs_through.supervisor = life;
         Some(ledger)
     }

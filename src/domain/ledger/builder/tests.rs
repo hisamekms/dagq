@@ -37,7 +37,8 @@ fn an_event_marks_what_it_is_an_input_of() {
         builder.take(10),
         [Target::Run(a.clone()), Target::Task(TaskId::new(1))]
     );
-    assert!(!builder.rows_marked());
+    // The run's landing moves the landing slot's row, a queue row.
+    assert!(builder.rows_marked());
     let row = build(&Target::Run(a.clone()), &inputs(&log, 1000), &[]).unwrap();
     builder.track(&Target::Run(a.clone()), &row);
 

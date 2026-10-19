@@ -7,15 +7,18 @@
 //! - **Marks**: each input after a cursor (an EventStore event id, a
 //!   NodeSampleStore id) marks what it is an input of
 //!   ([`Builder::mark_events`], [`Builder::mark_samples`]): its run, its
-//!   task, the session and queue rows, its node and hour. A `push_finished`
+//!   task, the session and queue rows it changes (any event's: a claim
+//!   ends a deferral, a run's event moves the landing slot), its node and
+//!   hour. A `push_finished`
 //!   marks the runs this builder left pending on their push and their tasks
 //!   (another run's push may close them). No row is scanned to find a dirty
 //!   one. A builder starts with its cursors at 0, so a new process marks
 //!   every run and task, those before the switch too, and catches up.
 //! - **Which are written**: a run whose life ended (its push finished or
 //!   was skipped, it ended without a landing, it was canceled), one pending
-//!   on its push, and a legacy run; a task that ended, or whose run is
-//!   pending on its push, and a legacy task; every session, queue and node
+//!   on its push, and a legacy run; a task that ended, or whose last run is
+//!   pending on its push or was until another run's push closed it, and a
+//!   legacy task; every session, queue and node
 //!   row ([`build`]). A run or task on its way is not written: its next
 //!   event marks it again. A row is written when the store has none, when
 //!   its fold is older than [`LEDGER_V`] (a legacy row aside, whose version
@@ -202,8 +205,9 @@ pub struct Builder {
     pub samples: i64,
     marks: BTreeSet<Target>,
     /// Session and queue rows with an input after this event are to be
-    /// looked at: set by an event of theirs (or naming a supervisor, whose
-    /// life may end their intervals) and taken by [`Self::mark_rows`].
+    /// looked at: set by an event of theirs, one that changed one of them
+    /// or one naming a supervisor (whose life may end their intervals),
+    /// and taken by [`Self::mark_rows`].
     rows_after: Option<EventId>,
     /// Rows ended and not settled, by when their grace is over (unix ms).
     unsettled: BTreeMap<Target, i64>,
@@ -237,18 +241,26 @@ impl Builder {
     /// are inputs of, keep what the folds of the queue as a whole read of
     /// them, and move the cursor past them.
     pub fn mark_events(&mut self, new: &[RunEvent]) {
-        Arc::make_mut(&mut self.kept).add(new, &mut self.touched);
+        let kept = Arc::make_mut(&mut self.kept);
         for event in new {
+            let mut touched = BTreeSet::new();
+            kept.add(std::slice::from_ref(event), &mut touched);
             if let Some(run) = &event.run_id {
                 self.marks.insert(Target::Run(run.to_string()));
             }
             if let Some(task) = event.task_id {
                 self.marks.insert(Target::Task(task));
             }
-            let owned = owner::owner(event);
-            if matches!(owned, Owner::Session | Owner::Queue) || supervisor_of(event).is_some() {
+            // A row it changed reads it (a run's event too, that ends a
+            // deferral or moves the landing slot); a supervisor's life may
+            // end rows.
+            if matches!(owner::owner(event), Owner::Session | Owner::Queue)
+                || !touched.is_empty()
+                || supervisor_of(event).is_some()
+            {
                 self.rows_after.get_or_insert(self.events);
             }
+            self.touched.append(&mut touched);
             if event.kind == event_kind::PUSH_FINISHED {
                 for (run, task) in &self.pending_pushes {
                     self.marks.insert(Target::Run(run.clone()));
@@ -417,6 +429,18 @@ pub fn pending_push(row: &LedgerRow) -> bool {
             .is_some_and(|last| last.phase == fold::PUSH_PENDING)
 }
 
+/// Whether the task row `row`'s last run waits on a push or waited on one
+/// another run's push closed (the task not ended after it): its last
+/// interval of a run is `push_pending`. The row it was written as while
+/// pending is folded again once the push closes it.
+fn run_waited_on_push(row: &LedgerRow) -> bool {
+    row.intervals
+        .iter()
+        .rev()
+        .find(|interval| interval.run_id.is_some())
+        .is_some_and(|last| last.phase == fold::PUSH_PENDING)
+}
+
 /// Whether the run or task row `row` is settled at `now_ms`: a legacy row
 /// is (a run from before the switch ended long ago); a pending push is
 /// not; else once it ended and [`SETTLE_GRACE_MS`] passed.
@@ -580,7 +604,7 @@ pub fn build(target: &Target, inputs: &Inputs, samples: &[NodeSample]) -> Option
                 now,
                 &inputs.built_at,
             );
-            if !(row.is_legacy() || row.ended_at.is_some() || pending_push(&row)) {
+            if !(row.is_legacy() || row.ended_at.is_some() || run_waited_on_push(&row)) {
                 return None;
             }
             row.is_final = run_settles(&row, now);

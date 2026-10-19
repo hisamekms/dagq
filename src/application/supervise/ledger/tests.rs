@@ -274,9 +274,13 @@ fn the_ledger_catches_up_once_and_the_same_inputs_leave_it_as_it_is() {
     let first = pass(&memory, &mut builder, LATER);
     assert_eq!(first.written, WRITES_PER_PASS);
     assert!(first.backlog > 0, "{first:?}");
+    // Each landed run has a landing slot's row too, marked by its run's
+    // events: the run, the task and the slot, three rows a run.
     let second = pass(&memory, &mut builder, LATER);
-    assert_eq!(second.written, runs * 2 - WRITES_PER_PASS);
-    assert_eq!(second.backlog, 0);
+    assert_eq!(second.written, WRITES_PER_PASS);
+    let third = pass(&memory, &mut builder, LATER);
+    assert_eq!(third.written, runs * 3 - 2 * WRITES_PER_PASS);
+    assert_eq!(third.backlog, 0);
     assert_eq!(memory.count(LedgerKind::Run), runs);
     assert_eq!(memory.count(LedgerKind::Task), runs);
     assert!(memory.rows.borrow().values().all(|row| row.is_final));
@@ -289,7 +293,8 @@ fn the_ledger_catches_up_once_and_the_same_inputs_leave_it_as_it_is() {
         .landed(9002, &run_id(2), 20_000);
     memory.events.replace(more.events);
     let caught = pass(&memory, &mut builder, LATER);
-    assert_eq!(caught.written, 4);
+    // Each run's, task's and landing slot's.
+    assert_eq!(caught.written, 6);
     assert_eq!(memory.count(LedgerKind::Run), runs + 2);
 
     let rows = memory.rows.borrow().clone();
@@ -316,7 +321,9 @@ fn a_new_fold_builds_the_rows_again_but_a_legacy_one() {
         row.ledger_v = LEDGER_V - 1;
     }
     let built = pass(&memory, &mut Builder::default(), LATER);
-    assert_eq!(built.written, 2, "run a and its task");
+    // The landing slot's rows of a and of the legacy d too: queue rows,
+    // of the older fold as well.
+    assert_eq!(built.written, 4, "run a, its task and the landing slots");
     assert_eq!(memory.row(LedgerKind::Run, &a).ledger_v, LEDGER_V);
     let kept = memory.row(LedgerKind::Run, &d);
     assert_eq!(kept.ledger_v, LEDGER_V - 1);
@@ -418,10 +425,11 @@ fn a_store_that_cannot_be_written_keeps_the_marks_for_the_next_pass() {
     let mut builder = Builder::default();
     let failed = pass(&memory, &mut builder, LATER);
     assert!(failed.failure.unwrap().contains("readonly"));
-    assert_eq!(failed.backlog, 4);
+    // Each run's, task's and landing slot's, marked by the run's events.
+    assert_eq!(failed.backlog, 6);
     assert!(memory.rows.borrow().is_empty());
     memory.refuses.set(false);
-    assert_eq!(pass(&memory, &mut builder, LATER).written, 4);
+    assert_eq!(pass(&memory, &mut builder, LATER).written, 6);
 }
 
 /// The session and queue rows are written once; a later event of a
@@ -893,6 +901,79 @@ fn passes_on_a_few_events_each_write_the_rows_of_the_fold_of_every_event() {
             .is_some_and(|s| s.kind == "landing_slot");
         if matches!(kind, LedgerKind::Session | LedgerKind::Queue) && !slot {
             assert!(rows.contains_key(&(*kind, key.clone())), "{kind:?} {key}");
+        }
+    }
+}
+
+/// Whatever many events each pass reads (1, 2 or 3 more, or all at once),
+/// after each pass the store holds the queue, run, task, session and node
+/// rows of the ledger's fold of the events read so far
+/// ([`crate::domain::ledger::build`]), settled as the builder says: a
+/// row ended by an event it does not record (a deferral a claim ends), the
+/// landing slot of a run with no supervisor's event, a task left pending
+/// on its push that a later push closes among them. A run or task on its
+/// way is not written; one a later input put on its way again is left as
+/// it was; a legacy row keeps the values first written. The node samples
+/// come in one more a pass, and the node rows are those of the samples so
+/// far ([`node::node_rows`]).
+#[test]
+fn passes_on_any_number_of_events_each_write_the_rows_of_the_fold_so_far() {
+    let (every_kind, samples) = every_kind_of_row();
+    let mut landed = Log::default();
+    landed.landed(1, &run_id(1), 0);
+    for (name, log) in [("every kind", every_kind), ("landed", landed)] {
+        let all = log.events.len();
+        for step in [1, 2, 3, all] {
+            let memory = Memory::default();
+            let mut builder = Builder::default();
+            let mut read = 0;
+            let mut passes = 0;
+            while read < all {
+                read = (read + step).min(all);
+                passes += 1;
+                let events = &log.events[..read];
+                let samples = &samples[..passes.min(samples.len())];
+                memory.events.replace(events.to_vec());
+                memory.samples.replace(samples.to_vec());
+                while pass(&memory, &mut builder, LATER).backlog > 0 {}
+                let at = format!("{name}, {step} a pass, {read} read");
+                let nodes = node::node_rows(samples, BUILT);
+                assert_eq!(memory.count(LedgerKind::Node), nodes.len(), "{at}");
+                for mut expected in nodes {
+                    let stored = memory.row(LedgerKind::Node, &expected.key);
+                    expected.is_final = stored.is_final;
+                    assert_eq!(stored, expected, "{at}: node {}", expected.key);
+                }
+                let whole = crate::domain::ledger::build(events, ms(LATER), BUILT);
+                let rows = memory.rows.borrow();
+                let at_once = Inputs::new(events, ms(LATER), BUILT, true);
+                for expected in whole {
+                    let key = (expected.kind, expected.key.clone());
+                    let target = target_of(expected.kind, &expected.key);
+                    let stored = rows.get(&key);
+                    // Every queue and session row is written, and the
+                    // task another run's push closed the pending push of.
+                    let required = matches!(expected.kind, LedgerKind::Queue | LedgerKind::Session)
+                        || (name == "every kind"
+                            && read == all
+                            && key == (LedgerKind::Task, "3".to_owned()));
+                    if !required && build(&target, &at_once, &[]).is_none() {
+                        // On its way: not written, or left as it was.
+                        continue;
+                    }
+                    let Some(stored) = stored else {
+                        panic!("{at}: no {key:?}");
+                    };
+                    let mut expected = expected;
+                    expected.is_final = stored.is_final;
+                    if expected.is_legacy() {
+                        // The store keeps a legacy row's values as first
+                        // written; its records follow.
+                        expected.legacy.clone_from(&stored.legacy);
+                    }
+                    assert_eq!(stored, &expected, "{at}: {key:?}");
+                }
+            }
         }
     }
 }
