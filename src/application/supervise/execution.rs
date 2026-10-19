@@ -395,6 +395,9 @@ pub enum PausePoint {
     /// A receipt's validation that ended, before the supervisor acts on
     /// its result.
     ValidationEnd,
+    /// A landing recheck that found a run no longer landing, before the
+    /// supervisor records the finding and parks the run.
+    RecheckFailure,
 }
 
 /// What a supervisor calls at each [`PausePoint`] with the run's ID.

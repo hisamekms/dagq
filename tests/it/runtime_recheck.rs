@@ -214,6 +214,194 @@ fn a_waiting_run_that_a_landing_conflicts_with_is_resumed_before_its_answer() {
     assert!(not_waited.get("wait_secs").is_none(), "{not_waited}");
 }
 
+/// The events of `kinds` of `detail`, in order, from the first of them
+/// that is `from`.
+fn kinds_from<'a>(
+    detail: &'a dagq::domain::TaskDetail,
+    from: &str,
+    kinds: &[&str],
+) -> Vec<&'a str> {
+    detail
+        .events
+        .iter()
+        .map(|e| e.kind.as_str())
+        .filter(|k| kinds.contains(k))
+        .skip_while(|k| *k != from)
+        .collect()
+}
+
+/// An answer recorded before the landing recheck parks the waiting run
+/// and not yet applied (`land: <reason>`, taken as `land`; the supervisor
+/// stands still where the recheck found the conflict, before it records it,
+/// and the answer is given then) is kept through the park, the resume and
+/// the validation: the ask stays unclosed, and once the rebased run waits
+/// again the supervisor applies it, recording `integration_approved` and
+/// `landing_queued`, and the run lands without a third review.
+#[test]
+fn an_answer_recorded_before_the_recheck_parks_the_run_applies_after_its_resume() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let (_waiting, ask, reviewer) = waiting_then_landing(&backend, &repo, &db);
+    backend.resume_script_for(1, RESOLVING_RESUME);
+    let answered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let pauses = {
+        let (db, answered) = (db.clone(), answered.clone());
+        runtime::PausesPort(Arc::new(move |at, _run| {
+            if at == runtime::PausePoint::RecheckFailure
+                && !answered.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                SqliteQueue::open(&db)
+                    .unwrap()
+                    .answer(ask.id, "land: fine once rebased")
+                    .unwrap();
+            }
+        }))
+    };
+    let options = SuperviseOptions {
+        pauses: Some(pauses),
+        ..supervise_options(4, true)
+    };
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(answered.load(std::sync::atomic::Ordering::SeqCst));
+    // A later pass applies it if the first supervisor ended before it.
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
+    let answered = payloads(&detail, "ask_answered");
+    assert_eq!(answered.len(), 1);
+    assert_eq!(answered[0]["runtime_delivers"], true, "{}", answered[0]);
+    let approved = payloads(&detail, "integration_approved");
+    assert_eq!(approved.len(), 1);
+    assert_eq!(approved[0]["ask_id"], ask.id.as_i64());
+    assert_eq!(
+        payloads(&detail, "landing_queued"),
+        [&json!({"via": "approve", "ask_id": ask.id})]
+    );
+    assert_eq!(
+        kinds_from(
+            &detail,
+            "ask_answered",
+            &[
+                "ask_answered",
+                "landing_recheck_failed",
+                "resume_started",
+                "validation_finished",
+                "integration_approved",
+                "landing_queued",
+                "run_integrated",
+            ]
+        ),
+        [
+            "ask_answered",
+            "landing_recheck_failed",
+            "resume_started",
+            "validation_finished",
+            "integration_approved",
+            "landing_queued",
+            "run_integrated",
+        ]
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("change.txt")).unwrap(),
+        "resolved by the resumed session\n"
+    );
+    assert_eq!(reviewer.prompts().len(), 2);
+}
+
+/// An answer given while a landing recheck has the waiting run resumed
+/// (`land: <reason>`, taken as `land`) is not delivered then
+/// (`runtime_delivers: false`, the run is not awaiting integration); the
+/// ask stays unclosed, and once the rebased run waits again after its
+/// validation the supervisor applies it: `integration_approved` and
+/// `landing_queued` after the validation, and the run lands without a
+/// third review.
+#[test]
+fn an_answer_given_while_the_recheck_resumes_the_run_applies_once_it_waits_again() {
+    let (dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let (_waiting, ask, reviewer) = waiting_then_landing(&backend, &repo, &db);
+    let marker = dir.path().join("answered");
+    backend.resume_script_for(
+        1,
+        &format!("await_file {}; {RESOLVING_RESUME}", shell_path(&marker)),
+    );
+    let answerer = {
+        let (db, marker) = (db.clone(), marker.clone());
+        thread::spawn(move || {
+            wait_until(&db, Duration::from_secs(20), |queue| {
+                !payloads(&queue.show(TaskId::new(1)).unwrap(), "resume_started").is_empty()
+            });
+            let mut queue = SqliteQueue::open(&db).unwrap();
+            queue.answer(ask.id, "land: the rebase is fine").unwrap();
+            let detail = queue.show(TaskId::new(1)).unwrap();
+            let delivers = detail
+                .events
+                .iter()
+                .find(|e| e.kind == "ask_answered" && e.payload["ask_id"] == json!(ask.id))
+                .unwrap()
+                .payload["runtime_delivers"]
+                .clone();
+            fs::write(&marker, "").unwrap();
+            (detail.runs[0].status(), delivers)
+        })
+    };
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let (answered_in, delivers) = joined(answerer, "the answerer to answer");
+    assert_ne!(answered_in, RunStatus::AwaitingIntegration);
+    assert_eq!(delivers, false);
+    // A later pass applies it if the first supervisor ended before it.
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+    assert_eq!(detail.task.status(), TaskStatus::Completed);
+    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
+    let approved = payloads(&detail, "integration_approved");
+    assert_eq!(approved.len(), 1);
+    assert_eq!(approved[0]["ask_id"], ask.id.as_i64());
+    assert_eq!(
+        payloads(&detail, "landing_queued"),
+        [&json!({"via": "approve", "ask_id": ask.id})]
+    );
+    assert_eq!(
+        kinds_from(
+            &detail,
+            "landing_recheck_failed",
+            &[
+                "landing_recheck_failed",
+                "ask_answered",
+                "resume_started",
+                "validation_finished",
+                "integration_approved",
+                "landing_queued",
+                "run_integrated",
+            ]
+        ),
+        [
+            "landing_recheck_failed",
+            "resume_started",
+            "ask_answered",
+            "validation_finished",
+            "integration_approved",
+            "landing_queued",
+            "run_integrated",
+        ]
+    );
+    assert_eq!(
+        fs::read_to_string(repo.join("change.txt")).unwrap(),
+        "resolved by the resumed session\n"
+    );
+    assert_eq!(reviewer.prompts().len(), 2);
+}
+
 /// A conflict Git does not see: the waiting run adds `a.txt`, which needs
 /// `b.txt`, and the landing run deletes `b.txt`. `git merge-tree` merges
 /// them cleanly, but the `[recheck] command` fails on main's tree with the

@@ -1787,3 +1787,15 @@ task = 2163
 name = "runtime_background::without_the_old_keys_a_worker_runs_in_the_background_with_no_warning"
 reason = "B 境界（守る境界）: the supervisor's wiring starts a worker's session wrapper in the background from a dagq.toml without [headless], through review and landing on Git and SQLite"
 task = 2163
+
+# 9.794s (worker stress, task 2867)
+[[test]]
+name = "runtime_recheck::an_answer_recorded_before_the_recheck_parks_the_run_applies_after_its_resume"
+reason = "B 境界（supervisorの配線）: an approve_landing answer kept in SQLite across the Git recheck's park, the resume and the validation, applied once the run waits again"
+task = 2867
+
+# 9.351s (worker stress, task 2867)
+[[test]]
+name = "runtime_recheck::an_answer_given_while_the_recheck_resumes_the_run_applies_once_it_waits_again"
+reason = "B 境界（supervisorの配線）: an approve_landing answer given during the recheck's resume, not delivered then, applied by the supervisor after the validation"
+task = 2867

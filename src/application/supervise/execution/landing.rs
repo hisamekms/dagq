@@ -2358,9 +2358,12 @@ impl Supervisor<'_> {
     /// <reason>`, task 1424), and `cancel` fails the run and cancels its
     /// task, and the `retry_review` of a failed review's ask queues the run
     /// to be reviewed again ([`Self::review_recovered_runs`] reviews it,
-    /// ADR-t2521-1) ([`LandingAnswer`]). The ask is closed once applied; any other
-    /// answer is left to the inbox. An error is noted and the ask is tried again on a
-    /// later pass.
+    /// ADR-t2521-1) ([`LandingAnswer`], each also as `<option>: <reason>`).
+    /// The ask is closed once applied; any other answer is left to the
+    /// inbox. An answer given while the run was elsewhere (parked by a
+    /// landing recheck, resumed, validated) stays unclosed and applies on
+    /// the pass after the run waits again. An error is noted and the ask is
+    /// tried again on a later pass.
     pub(super) fn apply_landing_answers(&mut self) -> Result<()> {
         for ask in self.queue.landing_answers()? {
             let Some(run_id) = ask.run_id.clone() else {
@@ -3330,7 +3333,7 @@ mod tests {
     }
 
     /// The answers a pass applies at once, whatever the slots (task 949):
-    /// `land`, `send_back` (with the person's reason) and `cancel`, each
+    /// `land`, `send_back` and `cancel` (each with the person's reason), each
     /// with the phase it moves the run to, of a run awaiting integration
     /// that nobody leases. Any other answer is the inbox's; a run in
     /// another status or leased waits, its lease read only when the answer
@@ -3357,7 +3360,17 @@ mod tests {
             apply("cancel", waiting, false),
             Some((LandingAnswer::Cancel, "canceled"))
         );
+        // The reason after the option's `:` chooses the option.
+        assert_eq!(
+            apply("land: review 3, the findings are docs only", waiting, false),
+            Some((LandingAnswer::Land, "integration_approved"))
+        );
+        assert_eq!(
+            apply("cancel: not needed", waiting, false),
+            Some((LandingAnswer::Cancel, "canceled"))
+        );
         assert_eq!(apply("land it", waiting, false), None);
+        assert_eq!(apply("review 3: land", waiting, false), None);
         assert_eq!(apply("land", waiting, true), None);
         for status in [
             RunStatus::Running,

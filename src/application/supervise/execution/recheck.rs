@@ -765,6 +765,7 @@ impl Supervisor<'_> {
                 }
                 Finding::Failed(failure) => failure,
             };
+            self.pause_at(PausePoint::RecheckFailure, &target.run_id);
             let action = match self.record_recheck_failure(watch, &target, &failure) {
                 Ok(Some(action)) => Some(action),
                 Ok(None) => {

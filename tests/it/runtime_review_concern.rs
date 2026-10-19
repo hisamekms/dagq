@@ -324,9 +324,9 @@ fn a_discard_concern_asks_a_person_with_the_recommendation() {
     let kinds = event_kinds(&detail);
     assert!(position(&kinds, "workspace_closed") < position(&kinds, "ask_opened"));
 
-    // An answer not read as an option (`land: x`, task 1424) is the inbox's:
-    // the supervisor leaves the run and the ask as they are.
-    queue.answer(ask.id, "land: x").unwrap();
+    // An answer whose head is no option (`approve: x`) is the inbox's: the
+    // supervisor leaves the run and the ask as they are.
+    queue.answer(ask.id, "approve: x").unwrap();
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     let detail = queue.show(TaskId::new(1)).unwrap();

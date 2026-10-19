@@ -63,9 +63,12 @@ fn wait_until(what: &str, mut check: impl FnMut() -> bool) {
 /// on the next pass: the ask closes, the approval and `landing_queued`
 /// (`via: approve`) are recorded, and the run waits unleased. Once the
 /// slot and the integration slot are free, it lands before the next task
-/// is claimed.
+/// is claimed. The answer gives a reason (`land: <reason>`), which chooses
+/// `land` as the bare option does (`runtime_delivers`) and stays in the
+/// ask's answer.
 #[test]
 fn a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim() {
+    const LAND_WITH_A_REASON: &str = "land: review 3, the findings are docs only";
     let (fixture, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.script_for(1, &own_change(1));
@@ -100,7 +103,8 @@ fn a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim
                     .first()
                     .is_some_and(|run| run.status() == RunStatus::Running)
             });
-            queue.answer(ask.id, "land").unwrap();
+            queue.answer(ask.id, LAND_WITH_A_REASON).unwrap();
+            let delivered = delivers(&mut queue, ask.id);
             wait_until("the answer to be applied", || {
                 queue.read_ask(ask.id).unwrap().closed_at.is_some()
             });
@@ -116,18 +120,22 @@ fn a_land_answer_is_applied_while_the_slot_is_taken_and_lands_before_a_new_claim
                     .collect::<Vec<_>>(),
                 queue.run_lease(first.runs[0].id()).unwrap().is_some(),
                 runtime::status(&db).unwrap(),
+                delivered,
+                queue.read_ask(ask.id).unwrap().answer,
             );
             fs::write(&marker, "").unwrap();
             observed
         })
     };
     let outcome = supervise_parallel(&db, &repo, &backend, &reviewer, 1);
-    let (second, first, queued, leased, status) = answerer.join().unwrap();
+    let (second, first, queued, leased, status, delivered, answer) = answerer.join().unwrap();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
     assert_eq!(second, RunStatus::Running);
     assert_eq!(first, RunStatus::AwaitingIntegration);
     assert_eq!(queued, [json!({"via": "approve", "ask_id": ask.id})]);
     assert!(!leased);
+    assert_eq!(delivered, true);
+    assert_eq!(answer.as_deref(), Some(LAND_WITH_A_REASON));
     let entry = status["attention"]
         .as_array()
         .unwrap()
@@ -372,6 +380,35 @@ fn a_retry_review_answer_to_a_concern_s_ask_is_left_to_the_inbox() {
     assert!(payloads(&detail, "review_retry_queued").is_empty());
     assert_eq!(payloads(&detail, "review_started").len(), 1);
     assert_eq!(reviewer.prompts().len(), 1);
+}
+
+/// `cancel: <reason>` chooses `cancel` as the bare option does: the run
+/// fails, its task is canceled and the ask closes, the answer with its
+/// reason recorded on `landing_decided`.
+#[test]
+fn a_cancel_answer_with_a_reason_is_applied_as_cancel() {
+    let (_fixture, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    backend.script_for(1, &own_change(1));
+    let reviewer = TestReviewer::new(&[verdict("concern", &["scope"], "a concern")]);
+    let outcome = supervise_parallel(&db, &repo, &backend, &reviewer, 1);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let ask = landing_ask(&mut queue);
+
+    queue.answer(ask.id, "cancel: not needed").unwrap();
+    assert_eq!(delivers(&mut queue, ask.id), true);
+    let outcome = supervise_parallel(&db, &repo, &backend, &reviewer, 1);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::Failed);
+    assert_eq!(detail.task.status(), TaskStatus::Canceled);
+    assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
+    let decided = payloads(&detail, "landing_decided");
+    assert_eq!(decided.len(), 1, "{decided:?}");
+    assert_eq!(decided[0]["answer"], "cancel: not needed", "{}", decided[0]);
+    assert!(payloads(&detail, "integration_approved").is_empty());
 }
 
 /// A `retry_review` answered while the queue's hold ask holds Claude is

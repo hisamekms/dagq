@@ -268,9 +268,10 @@ impl SqliteQueue {
         {
             // The supervisor lands, sends back (with the person's reason,
             // `send_back: <reason>`), cancels or, for a failed review's
-            // ask, reviews again a run awaiting integration as answered
-            // (ADR-0027, task 1424, ADR-t2521-1); any other answer, or one
-            // for a run that moved on, is the inbox's to read.
+            // ask, reviews again a run awaiting integration as answered,
+            // each option also as `<option>: <reason>` (ADR-0027, task
+            // 1424, ADR-t2521-1); any other answer is the inbox's to read.
+            // One for a run elsewhere now applies once the run waits again.
             let status: String =
                 tx.query_row("SELECT status FROM task_runs WHERE id=?1", [run_id], |r| {
                     r.get(0)

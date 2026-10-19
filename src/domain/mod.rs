@@ -300,9 +300,9 @@ impl AskKind {
     /// `<option>: <reason>` (`send_back: <reason>`), which `stats` counts
     /// as choosing the option (task 1389): the `approve_plan`, whose
     /// `send_back: <reason>` the supervisor applies with `PlanAnswer`, and
-    /// the `approve_landing`, whose `send_back: <reason>` the supervisor
-    /// applies with `LandingAnswer` and `review_reason::answer_outcome`
-    /// reads.
+    /// the `approve_landing`, whose `<option>: <reason>` the supervisor
+    /// applies as the option with `LandingAnswer` and
+    /// `review_reason::answer_outcome` reads.
     pub fn takes_reasoned_answers(&self) -> bool {
         matches!(self, Self::ApprovePlan | Self::ApproveLanding)
     }
@@ -747,22 +747,31 @@ pub enum LandingAnswer {
 }
 
 impl LandingAnswer {
-    /// One of [`FAILED_REVIEW_LANDING_OPTIONS`], `send_back` optionally
-    /// followed by `:` and the person's reason; anything else is the
-    /// inbox's to read (`land: x`, `cancel: x`, `send_backwards`,
-    /// `send_back reason`). Whether the ask takes the answer is
+    /// One of [`FAILED_REVIEW_LANDING_OPTIONS`], each optionally followed
+    /// by `:` and the person's reason (`land: <reason>`, the form
+    /// [`reasoned_option`] counts as choosing the option): `send_back`
+    /// passes its reason on, the others' stays in the ask's answer. Anything
+    /// else is the inbox's to read (`land it`, `send_backwards`, `send_back
+    /// reason`, a reason alone). Whether the ask takes the answer is
     /// [`Self::accepted`]'s.
     pub fn parse(answer: &str) -> Option<Self> {
-        match answer.trim() {
-            "land" => Some(Self::Land),
-            "cancel" => Some(Self::Cancel),
-            RETRY_REVIEW => Some(Self::RetryReview),
-            answer => send_back_reason(answer).map(Self::SendBack),
+        let answer = answer.trim();
+        if let Some(reason) = send_back_reason(answer) {
+            return Some(Self::SendBack(reason));
         }
+        [
+            ("land", Self::Land),
+            ("cancel", Self::Cancel),
+            (RETRY_REVIEW, Self::RetryReview),
+        ]
+        .into_iter()
+        .find(|(option, _)| option_reason(answer, option).is_some())
+        .map(|(_, action)| action)
     }
 
     /// The answer the runtime applies to an `approve_landing` ask that
-    /// offered `options`: [`Self::parse`]'s, but `retry_review` only for
+    /// offered `options`: [`Self::parse`]'s, but `retry_review` (with or
+    /// without a reason) only for
     /// the ask of a failed review, the one that offers it
     /// ([`FAILED_REVIEW_LANDING_OPTIONS`]); to the ask of a verdict it is
     /// the inbox's to read (ADR-t2521-1). The supervisor that applies the
@@ -802,10 +811,18 @@ pub fn ended_landing_ask_answer(run: RunStatus, task: TaskStatus) -> Option<Stri
 /// `send_back` or an empty reason after `send_back:`, `Some(Some(reason))`
 /// for `send_back: <reason>`, `None` for any other answer.
 pub(crate) fn send_back_reason(answer: &str) -> Option<Option<String>> {
-    if answer == "send_back" {
+    option_reason(answer, "send_back")
+}
+
+/// The reason of an answer (trimmed) that chose `option`: `Some(None)` for
+/// the bare option or an empty reason after `<option>:`,
+/// `Some(Some(reason))` for `<option>: <reason>`, `None` for any other
+/// answer.
+fn option_reason(answer: &str, option: &str) -> Option<Option<String>> {
+    if answer == option {
         return Some(None);
     }
-    let reason = answer.strip_prefix("send_back")?.trim_start();
+    let reason = answer.strip_prefix(option)?.trim_start();
     let reason = reason.strip_prefix(':')?.trim();
     Some((!reason.is_empty()).then(|| reason.to_owned()))
 }
@@ -1944,7 +1961,7 @@ mod tests {
     }
 
     #[test]
-    fn a_landing_answer_is_one_of_the_options_and_send_back_may_carry_a_reason() {
+    fn a_landing_answer_is_one_of_the_options_each_of_which_may_carry_a_reason() {
         assert_eq!(LandingAnswer::parse(" land "), Some(LandingAnswer::Land));
         assert_eq!(LandingAnswer::parse("cancel"), Some(LandingAnswer::Cancel));
         assert_eq!(
@@ -1966,9 +1983,12 @@ mod tests {
             "send back",
             "send_backwards",
             "send_back reason",
-            "land: x",
-            "cancel: x",
-            "retry_review: x",
+            "land it",
+            "landing: x",
+            "canceled",
+            "Land: x",
+            "review 3: land it",
+            ": land",
             "retry review",
         ] {
             assert_eq!(LandingAnswer::parse(other), None, "{other}");
@@ -1977,6 +1997,16 @@ mod tests {
             LandingAnswer::parse(" retry_review "),
             Some(LandingAnswer::RetryReview)
         );
+        // The head before `:` chooses the option, as `reasoned_option`
+        // counts it; the reason stays in the ask's answer.
+        for (answer, action) in [
+            ("land: review 3, fine", LandingAnswer::Land),
+            (" land :", LandingAnswer::Land),
+            ("cancel: not needed: a: b", LandingAnswer::Cancel),
+            ("retry_review: the job hung", LandingAnswer::RetryReview),
+        ] {
+            assert_eq!(LandingAnswer::parse(answer), Some(action), "{answer}");
+        }
         assert!(
             FAILED_REVIEW_LANDING_OPTIONS
                 .iter()
@@ -1995,9 +2025,19 @@ mod tests {
         );
         assert_eq!(LandingAnswer::accepted("retry_review", &verdict), None);
         assert_eq!(LandingAnswer::accepted("retry_review", &[]), None);
+        assert_eq!(
+            LandingAnswer::accepted("retry_review: the job hung", &failed),
+            Some(LandingAnswer::RetryReview)
+        );
+        assert_eq!(
+            LandingAnswer::accepted("retry_review: the job hung", &verdict),
+            None
+        );
         for (answer, action) in [
             ("land", LandingAnswer::Land),
+            ("land: x", LandingAnswer::Land),
             ("cancel", LandingAnswer::Cancel),
+            ("cancel: x", LandingAnswer::Cancel),
             ("send_back: x", LandingAnswer::SendBack(Some("x".into()))),
         ] {
             assert_eq!(
