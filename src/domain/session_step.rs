@@ -30,7 +30,7 @@ pub const fn retained_since(now_ms: i64) -> i64 {
 }
 
 /// What a step was (ADR-t1662-1 decision 7).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StepKind {
     /// A model's turn: from the request to the end of its answer.

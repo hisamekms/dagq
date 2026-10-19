@@ -25,6 +25,7 @@ pub mod queue;
 pub mod read;
 pub mod session;
 pub mod settle;
+pub mod steps;
 #[cfg(test)]
 pub(crate) mod testkit;
 pub mod window;

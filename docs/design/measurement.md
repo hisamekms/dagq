@@ -161,15 +161,11 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 全ての行が持つ項目と意味は`LedgerRow`のdoc commentとmigrationのコメントが持つ。
 
 - **作り直し**: 版が上がった行と、到達点より後に入力が届いた行は畳み直す（`ledger::rebuilds`、確定の印の後と旧方式の行も同じ）。
-- **旧方式**: 切り替え前のrunとそれを持つtaskの行は、今のstatsの値を一度だけ書き、storeは上書きしない。
-  記録とその範囲は追う。
 - **記録**: どのeventも、どれか1つの行の記録になる（`domain::ledger::owner`）。
   行は自分の記録とその入力のevent idの範囲を持ち、行だけから今の統計の関数の入力が戻る。
 - **run**（実装済み）: 区間の列・タグごとの合計・claimの属性の組（キーを知らずにそのまま）・claimの後の事実と、そのrunの上のsessionとjob・Executionの列。
-  旧方式のrunの組は`RunMeasures`から作る。
   予定: `steps`・`change`・`area`・`nature`。
 - **task**（実装済み）: 区間の列と重ねたsupervisor単位の区間。
-  旧方式のrunを持つtaskは旧方式の行。
 - **session**（実装済み）: runを持たない対象のsessionとjobの1回（`domain::ledger::session`）。
 - **queue**（実装済み）: run・task・sessionに属さないqueue全体の区間か出来事の1つ（`domain::ledger::queue`）。
 - **node**（実装済み）: hostの欄の置き場で、NodeSampleStoreだけを読みnodeと時間の区切りごとにsampleのまま持ち、係が同じ保持で消す（`domain::ledger::node`）。
@@ -181,9 +177,10 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 
 - **run**: 境目は`run_phase_changed`だけ。
   最後の記録が`ended`なら閉じ、`push_pending`なら後の`push_finished`で閉じ、ほかは今の時刻まで畳んで終わりを持たない（確定していない）。
-  `run_phase_changed`無しで終わったrunは旧方式。
 - **task**: statusの移りを工程にし、runの間はそのrunの区間を差し込み、readyの間は`ready_at`で依存の待ちを分けてsupervisor単位の区間を重ねる。
 - **claimの後の事実**は`domain::after_claim`が作り、statsの`MeasureTrack`も同じものを使う。
+- **step**: runのstepは`domain::ledger::steps`が親の区間ごとにkindの内訳と被覆率に畳み（内側の層は重なってよい。係の取り込みは予定）、区間の外のstepとseqの抜けを数える。
+  結果は数えたseqを持ち、保持で消えたstepの送り直しは数えず、抜けを埋める遅れたseqは足す。
 
 置き換える今の組み立て（段3で撤去）はADR-t1662-1決定20が挙げる。
 
