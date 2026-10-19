@@ -128,7 +128,6 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
   通った読み取りはqueueに書かない
 - runtimeがClaudeの設定を書くactor（worker・planner・review job・inbox）の`permissions.deny`には、roleが持たないcommandの`Bash(dagq <command>:*)`と、`DAGQ_ROLE`などactorを名指す変数の書き換えを入れる（`permission_deny(role)`）。
   これは誤りを早く止めるguardrailで、pathやscriptからの呼び出しは通るので、拒むのはCLIの判定
-- inboxとplannerの`permissions.deny`にcmuxを拒む規則は無い（dagqがcmuxのsessionを持たないため。[ADR-t2159-1](../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定5）。
   sessionへの操作（画面を読む・決めたキーと答えを送る・plannerへの続きの依頼。runのturnはlogを読む）は判定と記録を通る`run` / `planner`のCLIで行う。
   plannerはruntimeが書くsettingsに、inboxは`dagq inbox`が開くときにqueueのディレクトリに書くsettings（[`dagq inbox`](supervisor-lifecycle/up-down.md#dagq-inbox)）に持つ。
   これは**guardrailであってenforcementではない**: denyはClaude Codeのtoolの呼び出しの綴りで照合する助言的な抑止で、`dagq inbox`を通さずに開いたinboxと、`claude`を打ち直したsessionには効かない（inboxがguardrailつきで開かれたかは`status` / `doctor`の`inbox_guardrail`が見せる）。

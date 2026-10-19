@@ -219,7 +219,7 @@ skillはすべて`${CLAUDE_PLUGIN_ROOT}/bin/dagq`を呼ぶ。launcherはバイ�
   headlessのreviewが失敗したrun（`review by hand`）とreview以前のrun（`review and integrate`）だけは、inboxが人の指示で`dagq-recover`の`reference/review-by-hand.md`に従い、`review ID`の`review.md`をsubagentにレビューさせて結論（`pass` / `concern`と理由）だけ受け取る。
   `pass`なら人の指示で`integrate`を呼び（`watch`の結果やイベントの副作用としては呼ばない）、`concern`なら`approve_landing`のaskを作り、その答えはsupervisorが適用する。
   `needs_session`のrunはsupervisorがresumeし（resumeのwrapperはruntimeが起動して止め、inboxはsessionを作らない）、解消しなければ`failed`にして`decide`のaskにする。
-  runのsession wrapperはworkspaceなしのbackgroundのprocessだけで動き、runはcmuxのworkspaceを開かない（[ADR-t1433-3](../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
+  runのsession wrapperはworkspaceなしのbackgroundのprocessだけで動く（[ADR-t1433-3](../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
   `failed` / `interrupted`のrunにまだ動いているwrapperはtriageの後にsupervisorが止める。
   runのturnは`run log`で読む。
 - `recover`はバイナリが拒否条件を判定する。

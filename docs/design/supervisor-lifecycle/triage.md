@@ -74,8 +74,8 @@ related:
    人にはinboxのwatchが`ask_opened`として知らせる。
    runはそのまま。
    `triage_finished`と`recovery_finished`を記録する。
-7. **sessionの停止**: `triage_finished`の後、runが開いたsession（[記録](background-recovery-job.md#runのsessionの記録)）のうち止めた記録の無いもので、backgroundのwrapperがまだ動いているもの（handleのprocessで見て、cmuxには聞かない）を止め（どう終わったかは`wrapper_stopped`に記録する。[非対話のworker](headless-worker.md)の「停止の記録」、[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)決定3）、`workspace_closed`を記録する。
-   [ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)より前にworkspaceで開いたsessionのIDは開いていないとみなし、cmuxに聞かず閉じもしない（人が自分のterminalで閉じる）。
+7. **sessionの停止**: `triage_finished`の後、runが開いたsession（[記録](background-recovery-job.md#runのsessionの記録)）のうち止めた記録の無いもので、backgroundのwrapperがまだ動いているもの（handleのprocessで見る）を止め（どう終わったかは`wrapper_stopped`に記録する。[非対話のworker](headless-worker.md)の「停止の記録」、[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)決定3）、`workspace_closed`を記録する。
+   [ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)より前にworkspaceで開いたsessionのIDは開いていないとみなし、閉じない（人が自分のterminalで閉じる）。
    止める失敗は`cleanup_failed`に記録して続ける（`last_error`は変えない）。
    1つでも閉じたら、そのrunの閉じていない`stuck_exit`のaskを閉じる。
    最後にleaseを解放する。
@@ -133,7 +133,7 @@ jobは状態を変えず読むだけ（`TRIAGE_ACCESS`）で、verdictはClaude�
 - **起動**（`recovery::start_job`）: `triage_started`の`launch`のproviderのagentでjobを起動する。
   Codexでは`codex exec`の読み取りだけのsandboxでrun directoryを作業場所にし、jobの`dagq`がqueue serviceに届くときはjobのpermission profile（`:read-only`を継ぎ、queue serviceのsocketだけに届く）にする（[Provider lifecycle](../provider-lifecycle.md)）。
   書けるroot・sandboxを外すflag・session idは渡さない。
-  jobはworkerのworktree・run directory・cmuxのworkspaceに書けず、`stop_processes`などの操作はjobではなくruntimeがpidで行う。
+  jobはworkerのworktree・run directoryに書けず、`stop_processes`などの操作はjobではなくruntimeがpidで行う。
 - **読み取り**: verdictはCodexの最終の`agent_message`のtext（`AgentProvider::job_reply`）から読む。
   threadはjobの出力から、modelはそのthreadのrolloutから読み（`AgentProvider::job_session`）、`triage_finished` / `triage_failed`と`recovery_finished`に書き、ラウンドの区間の`session_closed`もそれを取る。
 - **失敗**: 非0終了・timeout・読めないverdictは、Claudeのjobと同じ8の失敗（`triage_failed`のattention）にし、Claudeに回さない。

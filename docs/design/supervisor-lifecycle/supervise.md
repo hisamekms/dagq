@@ -23,9 +23,8 @@ related:
 
 # `supervise`
 
-> supervisorはcmuxを呼ばない（[ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)）。
 > supervisorはlaunchdで常駐し、in-cmux modeでは新しく起動しない（[ADR-t1433-4](../../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）。
-> 登録済みのin-cmuxのsupervisorは、そのworkspaceに居たまま引き継ぎと`down`だけを受ける。
+> 前のbinaryが登録したin-cmuxのsupervisorは、引き継ぎと`down`だけを受ける。
 
 ## 目的
 

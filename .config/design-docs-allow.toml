@@ -19,23 +19,22 @@
 
 [[doc]]
 path = "docs/design/authorization.md"
-size = 41453
+size = 40635
 line = 1659
 
 [[doc]]
 path = "docs/design/overview.md"
-size = 16782
-line = 1105
+line = 1095
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/draft-planners.md"
-size = 34374
+size = 34292
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/observer.md"
-size = 36750
+size = 34897
 
 [[doc]]
 path = "docs/design/supervisor-lifecycle/run-environment.md"
-size = 36394
+size = 36358
 

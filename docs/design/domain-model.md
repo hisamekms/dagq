@@ -191,5 +191,5 @@ runtimeやjobが作ったdraftの束ごとにruntimeが立てるplannerで、規
 
 ## 理由の分類コード（`code`）
 
-- 一覧と意味は`domain::ReasonCode`、置き方と数え方は`src/domain/reason.rs`（ADR-0034決定1）、cmuxの失敗の`backend_*`は`application::reason_of_error`。
+- 一覧と意味は`domain::ReasonCode`、置き方と数え方は`src/domain/reason.rs`（ADR-0034決定1）、backendの呼び出しの失敗の`backend_*`は`application::reason_of_error`。
 

@@ -56,7 +56,7 @@ submit -> 候補の順序 -> job（読むだけ） -> verdict -+- pass -----> ta
 - jobの開始より後に検査中のproposalのtaskが編集されたら、verdictも失敗も適用せず、次のpassで編集後の内容をかけ直す。
 - 失敗で保留したproposalはsubmittedのまま動かさず、supervisorは自分では取り直さない。
 - plannerには何も打ち込まない。
-  runtimeのplannerへの指摘・答え・終了は次のturnの依頼として置き、cmuxのworkspaceの行には何も送らない（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定3・5）。
+  runtimeのplannerへの指摘・答え・終了は次のturnの依頼として置き、古い記録のworkspaceの行には何も送らない（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定3・5）。
 - runtimeがplannerを立てるのは`runtime_planners`の上限の中だけ。
 
 ## 入口

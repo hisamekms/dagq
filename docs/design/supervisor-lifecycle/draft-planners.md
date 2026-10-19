@@ -180,7 +180,7 @@ draftに再検討の時刻を1つ持たせ、時刻が来たらruntimeのplanner
 
 [ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)と[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)。
 人が開くplannerは無い（ADR-t1394-1）: `dagq plan`は何も開かず、inboxへの計画の依頼の案内を付けて拒む。
-人のplannerの行が開いたまま残っていれば、supervisorがcmuxを呼ばずに閉じた行として扱い（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定5。[`plan` / `planners`](plan-planners.md)の「人のplannerの終わり」）、その持ち主のdraftへのanswerは新しいruntimeのplannerが受ける。
+人のplannerの行が開いたまま残っていれば、supervisorが閉じた行として扱い（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定5。[`plan` / `planners`](plan-planners.md)の「人のplannerの終わり」）、その持ち主のdraftへのanswerは新しいruntimeのplannerが受ける。
 非対話の経路（ADR-t1394-2の決定1・2・3・5）では、answerは次のturnの依頼として届く。
 読み終えたかは、そのanswerの依頼を取ったturnが終わり、そのturnがClaudeのログイン切れ・利用上限・起動の失敗で失敗していなければ読み終えたとする（`headless_answer_taken`、判断は`src/domain/turn.rs`の`request_read`）。
 壁で失敗したturnだけでは読み終えたとせず、wrapperが次に取る`provider retry`のturn（そのanswerを載せる）が壁で失敗せずに終わるまで追う（壁で失敗したturnの後にplannerを終わらせると、answerが読まれずに失われるため）。
@@ -194,7 +194,7 @@ draftに再検討の時刻を1つ持たせ、時刻が来たらruntimeのplanner
   人のterminalからのsubmitは人の判断を経たものとして扱う（`by: "person"`、深さを0に戻す）。
 - **非対話の経路**（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定3・[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)決定1）: draftのplannerは経路を選ばず、いつも非対話でbackgroundのwrapperだけで動く（`[roles.runtime_planner]`の`route`は受け付けて無視する）。
   起動はbackgroundのwrapper（3）、answerの配送は次のturnの依頼（5）、終わりは終了の依頼とturnの終わり（7）で（`headless::send_to_planner`）、idleはturnの終わりのidle markerで判断する。
-  runtimeのplannerにはcmuxのworkspace・画面・打ち込み・`/exit`が無い（workspaceで開いた対話の行は閉じた行として読み、cmuxを呼ばない）。
+  runtimeのplannerには画面・打ち込み・`/exit`が無い（古い記録のworkspaceで開いた対話の行は閉じた行として読む）。
   束・上限・結末の記録（8）は同じ（[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)）。
 
 ## 所属の判断

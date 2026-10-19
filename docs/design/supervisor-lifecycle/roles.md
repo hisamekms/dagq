@@ -16,8 +16,13 @@ related:
 
 # Roles
 
-- **supervisor**: runtimeの`supervise`プロセス。taskをclaimし、runごとにworktreeを作ってsession wrapperをbackgroundで起動して監視し、receiptを検証する。`up`がlaunchdのLaunchAgentとして常駐させ、supervisorはcmuxを呼ばない（[ADR-t1433-4](../../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）。廃止したin-cmux modeで起動して登録されたsupervisorは、`[<repo>]supervisor` workspaceの中で引き継ぎと`down`を受けるだけで、新しくは起動しない。
-- **worker**: run session。runごとのsession wrapperがworkspaceなしのsupervisorから切り離したbackgroundのprocessとして動き、turnごとに非対話のagent（ClaudeかCodex）を起動する（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)、[非対話のworker](headless-worker.md)）。`needs_session`のrunのresumeも同じくbackgroundのwrapperで動く。runはcmuxのworkspaceを開かない。
+- **supervisor**: runtimeの`supervise`プロセス。
+  taskをclaimし、runごとにworktreeを作ってsession wrapperをbackgroundで起動して監視し、receiptを検証する。
+  `up`がlaunchdのLaunchAgentとして常駐させる（[ADR-t1433-4](../../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）。
+  前のbinaryがin-cmux modeで起動して登録したsupervisorは、引き継ぎと`down`を受けるだけで、新しくは起動しない。
+- **worker**: run session。
+  runごとのsession wrapperがworkspaceなしのsupervisorから切り離したbackgroundのprocessとして動き、turnごとに非対話のagent（ClaudeかCodex）を起動する（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)、[非対話のworker](headless-worker.md)）。
+  `needs_session`のrunのresumeも同じくbackgroundのwrapperで動く。
 - **planner**: goal / taskを書いてproposalとしてsubmitするsession。
   proposalごとのオンデマンドのbackgroundのwrapperで、workspaceを持たず、常駐しない（[ADR-0044](../../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定1・6）。
   runtimeが立てる（差し戻し先のplannerが閉じていたproposal・draft・finding・inboxからの計画の依頼。複数同時に開ける）。
@@ -59,7 +64,7 @@ runtimeが起動するAI actorは全て、環境にroleとactor idを持つ。
 | worker（resumeも） | runのbackgroundのsession wrapper | `DAGQ_RUN_ID`・`DAGQ_TASK_ID` |
 | planner（runtime・draft・finding） | runtimeのplannerのbackgroundのwrapper（`planner-session`）とそのturn | |
 | inbox | 人のterminalの`dagq inbox` | |
-| supervisor（登録済みのin-cmuxのもの） | in-cmux modeで開いたworkspace（新しくは起動しない） | |
+| supervisor（前のbinaryが登録したin-cmuxのもの） | 前のbinaryのin-cmux mode（新しくは起動しない） | |
 | review job | runのreview | |
 | recovery job | 終わったrunと生きているrunの復旧 | |
 | plan review job | proposalのplan review | |

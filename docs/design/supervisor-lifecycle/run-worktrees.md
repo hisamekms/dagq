@@ -110,7 +110,7 @@ worktreeのpathはrun_dirの下の`<runs>/<run-id>/worktree`で、`--repo`のche
 手での`integrate`は着地したrunのworktreeを自分で消し、手での`recover`・人の`ready` / `cancel`・supervisorの外で終わったrunは次の掃除が拾う。
 失敗は`cleanup_failed`にして残りを続け、次の掃除で再び試す（supervisorのプロセスごとにworktreeあたり1回だけ記録する）。
 
-runのsessionの停止（backgroundのwrapperのhandleの`stop_background`。停止ごとに`wrapper_stopped`も記録する。cmuxを呼ばない。[後始末](background-recovery-job.md#後片付け)）の成否は`task_runs.workspace_closed_at`で表す。
+runのsessionの停止（backgroundのwrapperのhandleの`stop_background`。停止ごとに`wrapper_stopped`も記録する。[後始末](background-recovery-job.md#後片付け)）の成否は`task_runs.workspace_closed_at`で表す。
 nullは「止めたことを確かめていない」で、停止の失敗だけでなく、wrapperを止めた後にDBへ書けなかった場合も含む。
 停止の失敗は`cleanup_failed`イベントと`last_error`に残るが、run状態は変えない。
 止めていないsessionをcleaned扱いにせず、再試行は`doctor`/`recover`で扱う。

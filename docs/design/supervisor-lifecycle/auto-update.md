@@ -47,7 +47,7 @@ related:
   - supervisorの着地でも、人が手で打った`integrate`でも、mainが進めば同じように拾う。
     ビルド中に次の着地があっても積まず、jobが終わった後の最初の見直しで、そのときのheadを1回ビルドする。
 - **job**（隠しコマンド`dagq auto-update`。引数は`--help`が持つ）: supervisorが自分のbinary（`current_exe`）で起動する。
-  setsidで新しいsessionとprocess groupに入れる（supervisorのexecにも、登録済みのin-cmuxのsupervisorのworkspaceが閉じられることにも巻き込まれないため）。
+  setsidで新しいsessionとprocess groupに入れる（supervisorのexecにも終わりにも巻き込まれないため）。
   結果・stderr・ビルドの出力・tracingのlogは`<queue dir>/logs/`の下に置き、古いものは消える（[Logs](commands.md#log)）。
   起動したら、supervisorが`update_started`を書く。
   1. **ビルド**: `<queue dir>/update/checkout`をheadに合わせ、Rustのprofileのbuildの出力（`<queue dir>/update/`の下のdirとそれを指すenv。`UpdatePaths::under`）でreleaseのビルドを走らせる。
@@ -77,7 +77,7 @@ related:
      - **後始末**: 通っても落ちても、そのe2eの`TMPDIR`を使い捨ての場所として片付ける。
        command lineの引数にその`TMPDIR`の中のpathを持つprocess（e2eが起動したsupervisorやstubのagent。時間切れで止めたときに残る）をSIGTERM（待って止まらなければSIGKILL）で止める。
        続けて`TMPDIR`を消す。
-       processは`ps`で列挙して探し、cmuxは呼ばない（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定7）。
+       processは`ps`で列挙して探す。
        - 消せなければ`TMPDIR`を残す。
          次の関門が始まる前に`<queue dir>/update/e2e`の下の残りを同じ手順で片付ける（並んで走る関門のdirは片付けない）。
          e2eが終わった後もそのprocess groupに残ったもの（stubの`sleep`など）はSIGKILLで止める。
@@ -131,7 +131,7 @@ related:
      その登録が前のbuild識別子のままheartbeatしていれば（execが失敗して前のbinaryが続けた）何もしない。
      PIDが生きていてheartbeatしていなければSIGTERM（止まらなければSIGKILL）で止め、止めたか死んでいた登録を起動し直す（`application::update::restart`、source buildのjobもリリースのjobも同じ）。
      launchd modeの登録は`KeepAlive`が戻したbinaryで起動し直すので任せ、登録済みのin-cmuxのsupervisorは記録したworkspaceを閉じず（人が閉じる）、戻したbinaryの`up`でlaunchd modeとして起動する（`--auto-update`はその登録が`auto_update`を持つときだけ付ける）。
-     この`up`が失敗したときは`update_failed`のaskと`supervisor_stopped`で人に知らせ、人かinboxが`down --wait`の後に`--in-cmux`を付けない`up`を打つ。
+     この`up`が失敗したときは`update_failed`のaskと`supervisor_stopped`で人に知らせ、人かinboxが`down --wait`の後に`up`を打つ。
      手で起動した（modeの無い）supervisorは起動し直さない。
   6. 成功すれば`update_installed`を書く。
      失敗すれば、失敗した段と理由、binaryを戻したか残したか、supervisorごとの引き継ぎと戻した結果を載せた`update_failed`を書き、`update_failed`のaskを開く。

@@ -52,7 +52,7 @@ related:
   上限切れのerrorに「検証や着地がまだ進行中」と添えるのは、停止中でないsupervisorだけにする。
 - **exec**: `main`は`supervise`の結果が`handoff`なら、queueの接続がすべて閉じた後で、自分の引数を引き継ぎの引数に組み直し（`handoff_arguments`、ADR-t813-2）、要求されたbinaryを`CommandExt::exec`で同じpidのまま起動する（SQLiteのfdはclose-on-execで開かれる）。
   execが失敗したら（fileが無い、実行できない）logに残し、同じbinaryのまま同じ引数で`supervise`をやり直すので、登録は前のbuild識別子で取り戻され、頼んだ側は「別のbuild識別子で戻った」として失敗を知る。
-  登録済みのin-cmuxのsupervisorは同じcmux workspaceの同じプロセスのままで（cmuxは呼ばない）、launchd modeのsupervisorは同じpidなので`KeepAlive`は何もしない。
+  登録済みのin-cmuxのsupervisorも同じプロセスのままで、launchd modeのsupervisorは同じpidなので`KeepAlive`は何もしない。
 - **取り戻し**: exec 後は同じ token と pid の登録を取り戻し、version と heartbeat を更新する。
   lease と開始時刻を保ち、supervisor_handed_off を記録して slot を復元する。
   handoff.json の resume と終了要求、送った依頼を復元し、依頼を二重に送らない。

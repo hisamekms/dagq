@@ -112,7 +112,7 @@ runtimeのtaskは`--paths`を宣言しない（上の「推奨の組み合わせ
 |---|---|---|
 | `headless` | worker・planner・job を非対話（turn ごとの呼び出し）と background の wrapper で動かすこと | 非対話の経路・wrapper・その評価と測定を作るか変える goal。非対話の run の stall や待ちの改善が主題なら `reliability` を主にして `headless` を添える |
 | `codex` | Codex の provider（worker・job・planner・inbox）を使えるようにし、Claude と比べること | provider を Codex に広げるか切り替える goal。レビュー系かどうかでラベルを分けず、優先度は goal ごとに判断する |
-| `cmux` | cmux への依存（backend の呼び出し・対話の経路・workspace・it と e2e の cmux の fake）を減らすか安定させること | cmux を呼ぶ箇所を消すか、その呼び出しの失敗を扱う goal と、その案内の整理 |
+| `cmux` | dagq から cmux への依存を無くした後の残り（古い記録の読み方・受け付けて無視する引数・案内）を整理すること | cmux への依存を無くした後に残る記録・引数・案内を整理する goal |
 | `throughput` | 着地の速度・着地の検証と test の時間・slot と claim・CPU の取り合い | 着地までの時間か着地の件数を直接動かす goal。数えるだけのものは `observability` |
 | `enterprise` | 他の repository・隔離環境・認可・Linux とコンテナ・配布とリリースで dagq を使えるようにすること | dogfooding の前提を取り除く goal |
 | `planning` | planner・plan review・goal・follow-up の所属・依頼（request）・Spike・再計画の流れ | 計画を立てる・検査する・goal を開閉する仕組みを変える goal |

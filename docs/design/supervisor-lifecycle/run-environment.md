@@ -218,7 +218,7 @@ inboxのwatchのaskの通知は、queueが束縛されたcommon directoryの名�
   runの無い検査（`up`・claim・`doctor`）では`${DAGQ_RUN_DIR}`を含む値は検査しない（runの前にはrun directoryに何も無いため）。
   `dagq.toml`が無ければ何も検査しない。
   結果は`domain::run_env::RunEnvCheck`。
-- **`up`のpreflight**: cmux・Claude・trustの後に、`up`のPATH（supervisorに渡すPATH）で検査する（`lifecycle::Ports::run_env_programs`）。
+- **`up`のpreflight**: Claude・trustの後に、`up`のPATH（supervisorに渡すPATH）で検査する（`lifecycle::Ports::run_env_programs`）。
   見つからなければsupervisorを起動せず、変数名・値・PATHと対処（入れるか、`dagq.toml`から外すtaskを登録する）を挙げたerrorで止まる。
   `dagq.toml`があるrepositoryでは`up`の出力に検査の結果が付く。
 - **supervisorのclaimの前**: 各fill passのclaimの前に自分のPATHで検査し（`Verifier::run_env_programs`）、見つからなければそのpassではclaimしない。

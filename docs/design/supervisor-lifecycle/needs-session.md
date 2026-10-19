@@ -74,7 +74,7 @@ supervisorは`needs_session`のrunを自分でresumeする（ADR-0019の決定1�
 このsupervisorが見ていないsessionと同じworktreeで2つ目のsessionを始めないため。
 このsupervisorがまだslotで進めているrun（leaseが他のtokenに移ってstaleになり、sessionが終わっていても）も飛ばす: そのslotは次のtickでleaseを失ったとして外れ（[supervise](supervise.md#provisionと監視)）、その後のpassでだけ他のrunと同じく次の試行を始める（同じrunを2つのslotで進めない）。
 resumeの前に、このrunに記録されたresumeのsession（backgroundのwrapperのhandle）のうち止めた記録の無いもの（手放したsession、errorで残したもの）がまだ動いていれば止め、`workspace_closed`を記録する。
-動いているかはhandleのprocessで見て、cmuxには聞かない（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
+動いているかはhandleのprocessで見る（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
 ADR-t1433-3より前にworkspaceで開いたresumeのsessionのIDは動いていないとみなし、閉じずに人に任せる（人が自分のterminalで閉じる）。
 resume中に死んだsupervisorが起動したwrapper（handleの記録が無い）は見つけないが、wrapperが生きている間は上の条件で飛ばす。
 `dagq.toml`がworkerをcontainerで動かすときは、containerが使えないか、containerの届かないproviderで動くrunを候補から飛ばし、hostで再開しない（[Container runtime](../container-runtime.md#fail-closedの境界)）。

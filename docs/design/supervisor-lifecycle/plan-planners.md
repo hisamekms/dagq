@@ -47,7 +47,7 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
 ## 不変条件
 
 - runtimeのplannerは非対話でbackgroundのwrapperだけで動き、workspaceを開かない（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定3、[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
-- どのplannerの画面も読まず、どのplannerにも打ち込まず、plannerのためにcmuxを呼ばない。
+- どのplannerの画面も読まず、どのplannerにも打ち込まない。
 - 行を閉じるのはsupervisorだけで、plannerを閉じるCLIは無い（[ADR-t1533-1](../../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)決定2）。
 - 行を閉じるのと同じトランザクションで`planner_closed`を1回だけ記録する（[ADR-t1300-1](../../adr/2026-10-02-t1300-1-runtime-closes-exited-person-planners-after-a-grace.md)）。
 - runtimeが立てたplannerは上限の枠を共有し、run slotを使わない（[Draft planners](draft-planners.md)）。
@@ -65,13 +65,13 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
 ## 状態と生存
 
 - 状態の判定は`planner_view`と`PlannerSession::state`が持つ。
-- cmuxのworkspaceを記録した行はcmuxに問わず`closed`と読む（`retired_workspace`）。
+- 前のbinaryがworkspaceを記録した行は`closed`と読む（`retired_workspace`）。
 - backgroundのwrapperはpidと起動時刻で生存を見て、heartbeatの遅れでは死んだとしない（[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)決定2）。
 - `dagq planners`は何も閉じない（`planner_views`）。
 
 ## 終わりと片付け
 
-- **人のplannerの終わり**: 開いたままの人のplannerの行は、plannerのpassの初めに`close_person_planners`がcmuxを呼ばずに閉じ、workspaceは人が自分のterminalで閉じる（ADR-t1433-2決定5）。
+- **人のplannerの終わり**: 開いたままの人のplannerの行は、plannerのpassの初めに`close_person_planners`が閉じ、workspaceは人が自分のterminalで閉じる（ADR-t1433-2決定5）。
   その行のreviseとanswerは新しいruntimeのplannerに届く。
 - **plannerの終わりの記録**: `planner_closed`の中身は`planner_closed_payload`、codeは`PlannerCloseCode`が持つ。
   wrapperを起動できずにerror付きで閉じる行は記録しない。

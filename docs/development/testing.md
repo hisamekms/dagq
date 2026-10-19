@@ -56,7 +56,7 @@ testは`src/lib.rs`のunit testと`tests/it`・`tests/e2e.rs`・`tests/plugin.rs
 testはmacOS（関門とCIの`checks`）とLinux（CIの`linux`、失敗を通さない）の両方で通す（下の「CI」）。
 
 - まず移植できる形に書く: `ps`・`lsof`・`sed`の出力と引数の違い、`/private/tmp`などのpath、inodeの再利用、時刻の精度（Linuxの`ps`のCPU時間は秒単位、Gitは秒単位で比べることがある）に頼らない。stat dataを変えるならmtimeを秒単位で動かす（`File::set_modified`）。
-- macOSにしか無い機能（launchd・実物のcmuxなど）を使うtestだけを`#[cfg(target_os = "macos")]`で分け、直前のコメントに理由（何がmacOSにしか無いか）を書く。分けたtestの一覧は持たず、`#[cfg(target_os = "macos")]`の付いたtestとその直前のコメントが一覧になる。Linuxで消すのはtestだけで、runtimeの機能は消さない（Linuxで使えない機能は分かるerrorにし、それを`#[cfg(not(target_os = "macos"))]`のtestで確かめる）。
+- macOSにしか無い機能（launchdなど）を使うtestだけを`#[cfg(target_os = "macos")]`で分け、直前のコメントに理由（何がmacOSにしか無いか）を書く。分けたtestの一覧は持たず、`#[cfg(target_os = "macos")]`の付いたtestとその直前のコメントが一覧になる。Linuxで消すのはtestだけで、runtimeの機能は消さない（Linuxで使えない機能は分かるerrorにし、それを`#[cfg(not(target_os = "macos"))]`のtestで確かめる）。
 - hostのworker（macOS）はLinuxのtestを流せないので、Linuxの結果は着地後のmainのCIの`linux`のjobのsummaryで読む。Linuxで新しく落ちたtestは、summaryから読んで移植できる形に直すか、上のとおりmacOSに固有として分ける。
 - `dagq.toml`がverificationをcontainerにしたとき、着地の検証はLinuxのcontainerで流れ、macOSに固有のtestはbuildされず流れない。hostで流し直すことはせず（workerのコードをcontainerの外で走らせるため）、mainのCIの`checks`（macOS）だけが流し、落ちればCIの見張りが修正のtaskにする（[ADR-t2182-1](../adr/2026-10-14-t2182-1-macos-specific-tests-are-left-to-the-ci-macos-job-not-the-container-verification.md)）。
 - containerのworker（resumeを含む）の手元のtestもLinuxで、macOSに固有のtestは流せない。それを変えたworkerは、流せなかったことをreceiptに書き、確かめをmainのCIの`checks`に任せる。
@@ -76,11 +76,11 @@ jobの意味と流すものは`.github/workflows/`の`ci.yml`・`stress.yml`・`
 [ADR-t1410-1](../adr/2026-10-03-t1410-1-decisions-in-unit-tests-boundaries-in-integration-tests.md)。runtimeのtaskのworkerとplannerが守る。
 
 - 状態の判断（状態の遷移・回数と上限・時刻を値で受けた時間の判定・verdictやanswerから操作への対応・askやerrorの文面・次の一手の選び方）は`src/`の副作用のない関数にして`#[cfg(test)]`のunit testで確かめる。unit testは外部プロセス・git・SQLiteのファイル・sleep・実時間の時計を使わない（時刻は値で渡す）。
-- `tests/it`はSQLite・Git・プロセス・supervisorの配線・復旧とadopt・cmuxの境界を代表の1 caseで確かめ、判断のcaseごとにfixtureとsupervisorを起動し直さない。
+- `tests/it`はSQLite・Git・プロセス・supervisorの配線・復旧とadoptの境界を代表の1 caseで確かめ、判断のcaseごとにfixtureとsupervisorを起動し直さない。
 - e2eは実バイナリ・実Git・実launchdのハッピーパスと境界だけにする（流し方は下の「e2e」）。
 - integration testを減らすときは、確かめていた中身をunit testか残すintegration testに対応づけ、行き先の無いまま消さない。
 - 時間の関門（[ADR-t1707-1](../adr/2026-10-05-t1707-1-time-gate-for-added-or-changed-integration-tests.md)）: baseからの差分で足した・本文を変えた`tests/it`のtestの1本の時間が閾値を超えたら、許可の一覧に項目が無いかぎり関門が落ちる。閾値・許可の一覧（`.config/it-slow-allow.toml`）の書式・testの名前の求め方・scriptの引数は`scripts/check-it-test-time.sh`の冒頭のコメントが持つ。
-  - 超えたら、まずtestを直す（判断をunit testへ移す、caseごとにfixtureとsupervisorを起動し直さない）。直さずに許可の一覧に項目を足してよいのは、理由が次のどちらかのときだけ: (a) そのtestが守る境界（SQLite・Git・プロセス・supervisorの配線・復旧とadoptのどれか。cmuxは挙げず、inboxへのcmuxの送り出しはsupervisorの配線として書く）を書ける、(b) 移し替えの予定があり、その行き先のtaskかgoalを書ける。判断のcaseを並べただけのtestは(a)に当たらない。項目には足したtaskのIDを書く。
+  - 超えたら、まずtestを直す（判断をunit testへ移す、caseごとにfixtureとsupervisorを起動し直さない）。直さずに許可の一覧に項目を足してよいのは、理由が次のどちらかのときだけ: (a) そのtestが守る境界（SQLite・Git・プロセス・supervisorの配線・復旧とadoptのどれか）を書ける、(b) 移し替えの予定があり、その行き先のtaskかgoalを書ける。判断のcaseを並べただけのtestは(a)に当たらない。項目には足したtaskのIDを書く。
   - 項目のtestを直すか移すtaskは、同じ変更で自分の項目を外すか理由を直す。testを消すか名前を変えるtaskは、消えた名前の項目を同じ変更で外す（残すと、後で同じ名前のtestを足したときに関門を素通りする。scriptはHEADに無い項目を警告するだけで落とさない）。
   - 閾値は本番の関門の`dagq::it`の1本の平均の数倍に置く。CIのrunnerと本番の関門は並列度が違い同じtestの秒が違うので、CIで落ちたtestが本番の関門のlogの秒では閾値の内なら、その秒を添えて直すか項目を足すかをplannerが決める。
   - 関門の場所: workerの手元（[手元の検証](local-checks.md)の「itのtestの時間の関門」）、runのreviewのtestの規則の検査、CIのpushとpull_request（mainへのpushで落ちればci-failureのissue）。`integrate`の検証には足さない。
@@ -103,7 +103,7 @@ jobの意味と流すものは`.github/workflows/`の`ci.yml`・`stress.yml`・`
 
 ## e2e
 
-- ハッピーパスを`tests/e2e.rs`に置く。実バイナリ・実Gitを使い、Claudeの代わりに受け入れ条件どおりcommitとreceiptを書くstubスクリプトをproviderにする。実cmuxを要るe2eは無く、全部cmuxの無いhostで流れ、関門はhostの道具の有無でe2eを外さない（`up`はinboxを開かない。[ADR-t2159-1](../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定7）。launchdの`up` / `down`のe2eは使い捨てのHOMEとLaunchAgentのlabelで動いて本番のsupervisorのagentに触れず、launchdを使えないhostでは落ちる（黙ってskipもpassもしない。[`up` / `down`](../design/supervisor-lifecycle/up-down.md)）。どれも`#[ignore]`とし、integrateでは流さない（1本ずつの着地の上限が下がるため。[ADR-t963-1](../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)決定4）。着地の rebase の後にも流し直さない。
+- ハッピーパスを`tests/e2e.rs`に置く。実バイナリ・実Gitを使い、Claudeの代わりに受け入れ条件どおりcommitとreceiptを書くstubスクリプトをproviderにする。関門はhostの道具の有無でe2eを外さない（[ADR-t2159-1](../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定7）。launchdの`up` / `down`のe2eは使い捨てのHOMEとLaunchAgentのlabelで動いて本番のsupervisorのagentに触れず、launchdを使えないhostでは落ちる（黙ってskipもpassもしない。[`up` / `down`](../design/supervisor-lifecycle/up-down.md)）。どれも`#[ignore]`とし、integrateでは流さない（1本ずつの着地の上限が下がるため。[ADR-t963-1](../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)決定4）。着地の rebase の後にも流し直さない。
 - e2eのrunはworkerのsession wrapperをbackgroundで起動し（runのworkspaceは無い。[ADR-t1433-3](../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）、harnessはwrapperのhandle（processが動いているか）を見て待つ。ケースはrunのsessionがbackgroundのhandleで、wrapperが終わり、`wrapper_launched`のlogが`session.log`であることを確かめ、落ちたtestが残したwrapperはguardが止める。
 - e2eを流すのはworkerでなくruntimeがhostで、2つの場所: (1) 差分が`dagq.toml`の`[e2e] paths`に触れるrunと`--evidence e2e`のtaskのrunで、reviewのpassの後・着地の前（[着地の前のe2e](../design/supervisor-lifecycle/integrate.md#着地の前のe2e)、要否は[Validation](../design/supervisor-lifecycle/validation.md)の「runtimeが流すe2e」）。(2) 自動更新とsourceのcheckoutからの`install`が固定バイナリを入れ替える前（[Auto-update](../design/supervisor-lifecycle/auto-update.md)・[install](../design/supervisor-lifecycle/install.md)）。workerが流さないことと`e2e_failed`のresumeでの再現は[手元の検証](local-checks.md)の「e2eを流さない」。
 - `[e2e] paths`の外の変更が実プロセス・launchdとの組み合わせを壊しても本番のバイナリは(2)の関門が守るので、落ちたらplannerが直すtaskを作る。runをまたぐsupervisorの振る舞いを変え、`tests/e2e.rs`の複数passの筋書きを変えうるtaskは、関門で止まる前に捕まえるため登録の時に`--evidence e2e`を付ける（目安は[taskの登録](task-registration.md)の「e2e」）。

@@ -151,9 +151,8 @@ validatingは今と同じく検証のコマンドを流さず、置き換えも`
 
 ## runtimeが流すe2e
 
-e2eはcmuxを使わず、全部がcmuxの無いhostで流れる（`up`はinboxを開かない。[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定7、[testの制約](../../development/testing.md#e2e)）。
-関門（自動更新と`install`の関門。[Auto-update](auto-update.md)の「e2eの関門」。[着地の前のe2e](integrate.md#着地の前のe2e)）は全部のe2eを流して判定し、hostの道具の有無で流さないe2eを持たない（ADR-t2159-1決定7）。
-関門の後始末は、`ps`で列挙したprocessのうちe2eの`TMPDIR`の中を指すものを止めてそのdirectoryを消すだけで、cmuxを呼ばない。
+関門（自動更新と`install`の関門。[Auto-update](auto-update.md)の「e2eの関門」。[着地の前のe2e](integrate.md#着地の前のe2e)）は全部のe2eを流して判定し、hostの道具の有無で流さないe2eを持たない（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定7、[testの制約](../../development/testing.md#e2e)）。
+関門の後始末は、`ps`で列挙したprocessのうちe2eの`TMPDIR`の中を指すものを止めてそのdirectoryを消すだけである。
 launchdの`up` / `down`のe2eは追加の環境変数なしに本文まで流れ、使い捨てのHOMEとLaunchAgentのlabelで動き、launchdを使えないhostでは落ちる（黙ってskipもpassもしない。[`up` / `down`](up-down.md)）。
 
 [ADR-t963-1](../../adr/2026-09-29-t963-1-e2e-required-by-diff-and-run-in-full-before-auto-update.md)の決定2・3が決めたe2eの要否を、validatingが決めて記録する。

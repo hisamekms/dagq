@@ -72,7 +72,6 @@ run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-sup
    配送のeventはfindingの対象に付き、queueが対象のfindingではqueueのeventになる（`EventKind::is_queue`）。
 10. **終わり**: runtimeのplannerは、自分のfindingの`planner_question`のanswerを届ける前と、送ったanswerをまだturnで読み終えていないあいだ（`headless_answer_taken`。[Draft planners](draft-planners.md)の5と同じ）は終了の依頼を受けない。
     それ以外でidleになれば終了の依頼を受けてwrapperがsessionを終え、行は閉じられ、まだ動いているbackgroundのwrapperは止められる（`end_runtime_planners`）。
-    runtimeのplannerにcmuxのworkspaceは無く、画面も読まない。
     idleはwrapperがturnの終わりに書くidle markerで判じ、時間は`--planner-timeout`でなくturnの`[stall]`の上限で見る。
     wrapperがturnを`[stall]`の上限で止めたときは、plannerごとに1回`planner_unresponsive`がinboxに届き、止めたturnでsessionが終わるので、決めずに終わったplannerに数える（`tell_of_stopped_planner_turns`）。
     最後のturnがClaudeのログイン切れ・利用上限・起動の失敗で終わったplannerは、Claudeを待って終了の依頼を受けず、決めずに終わったplannerにも数えない（`provider_wall`）。
@@ -87,7 +86,7 @@ run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-sup
     人が`submit --finding`したproposal（持ち主が`person`）とfollow_upのdraftの採否は数えず止めない。
     `dagq findings`は改善の数と上限と待つfindingを返し、observerの入力にも同じものが載る。
 12. **test**: `tests/it/finding_planner.rs`がplan reviewのbackendとstubのplan reviewで上の流れを確かめる。
-    runtimeのplannerのwrapperはbackgroundに停めてtestが演じ、cmuxのdouble・画面・打ち込みは使わない。
+    runtimeのplannerのwrapperはbackgroundに停めてtestが演じる。
     規則は`src/domain/finding.rs`のunit test。
 
 ## 推奨が出せればplannerが決める（ADR-t451-1）<a id="推奨が出せればplannerが決める未実装"></a>
@@ -101,7 +100,7 @@ findingのplannerも、[Draft planners](draft-planners.md#推奨が出せればp
 
 [ADR-t1394-1](../../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)と[ADR-t1394-2](../../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)。
 人が開くplannerは無く、`dagq plan`は何も開かずにinboxへの計画の依頼の案内を付けて拒む（ADR-t1394-1）。
-人が開いたplannerの閉じていない行は、supervisorがcmuxを呼ばずに閉じた行として扱い（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定5。[`plan` / `planners`](plan-planners.md)の「人のplannerの終わり」）、その持ち主のdraftへのanswerは新しいruntimeのplannerが受ける。
+人が開いたplannerの閉じていない行は、supervisorが閉じた行として扱い（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定5。[`plan` / `planners`](plan-planners.md)の「人のplannerの終わり」）、その持ち主のdraftへのanswerは新しいruntimeのplannerが受ける。
 非対話の経路（ADR-t1394-2の決定1・2・3・5）では、answerは次のturnの依頼として届き、読み終えたかとClaudeを待つplannerの扱いは[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)の「状態」と「使えないとき」が持つ。
 残りの予定は[予定: inboxからの依頼と非対話のplanner](plan-planners.md#予定-inboxからの依頼と非対話のplanner)にある。
 
@@ -111,7 +110,7 @@ findingのplannerも、[Draft planners](draft-planners.md#推奨が出せればp
   依頼のplannerがsubmitしたproposalは、依頼とfindingの両方に結ばれる。
 - findingのplannerは経路を選ばず、いつも非対話でbackgroundのwrapperだけで動く（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定3・[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)決定1）。
   `[roles.runtime_planner]`の`route`は受け付けて無視する（[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)）。
-  起動は3、submitの持ち主は6、answerの配送は9、終わりは10で（`headless::send_to_planner`）、runtimeのplannerにはcmuxのworkspace・画面・打ち込み・`/exit`が無い。
+  起動は3、submitの持ち主は6、answerの配送は9、終わりは10で（`headless::send_to_planner`）、runtimeのplannerには画面・打ち込み・`/exit`が無い。
   11の改善の上限は依頼のplannerを、findingを持たないかぎり数えない。
 
 ## CIの見張りの`ci_failure`のfinding

@@ -165,14 +165,14 @@ turnの後の扱いの詳細は[非対話のworker](headless-worker.md#turnの�
 
 ## 後片付け
 
-- sessionの終了はsupervisorが行い、runのためにcmuxを呼ばない（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
+- sessionの終了はsupervisorが行う（[ADR-t1433-3](../../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
   終わらせるのは終了の依頼と、残っていればwrapperを止めること（[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)の決定3）だけである。
 - `awaiting_integration`のrunは、reviewのverdictの後にsessionの終了を待ってwrapperだけを止め（reviseの間は止めない。[`supervise`](supervise.md#検証とreviewと着地)）、worktreeとbranchは`integrate`が着地するまで残す。
 - `failed`、provisioningや検証処理のエラー、wrapper heartbeat切れのrunは、worktreeを調査のため残し、ビルド成果物だけを消す（[Run worktrees](run-worktrees.md#run-worktrees)）。
   調べる材料はrun dirのlogとturnで、`dagq run log`で読む。
 - `failed`・`interrupted`のrunにまだ動いているwrapperがあれば、triageの後にsupervisorが止める（[Triage](triage.md#triage-supervisor)）。
 - supervisorの後始末はsupervisorが動いている間だけ働き、runtimeはrunのworkspaceを開かないので、過去に作られて残ったworkspaceは人が閉じる。
-  workspaceで開いた古いrunのsessionは、supervisorは閉じずcmuxにも聞かない。
+  workspaceで開いた古いrunのsessionは、supervisorは閉じない。
 
 ### runのsessionの記録<a id="runのsessionの記録"></a>
 

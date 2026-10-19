@@ -108,5 +108,6 @@ macOSの`%cpu`は減衰する平均なので瞬間の値ではない。
 1. `dagq status`でsupervisorの`binary_version`がこの変更を含むことを確かめる（`--auto-update`のsupervisorは着地の後に自分で入れ替わる）
 2. `ls "$(dirname "$(dagq locate | jq -r .db)")/host/"`に今日の`metrics-YYYYMMDD.csv`があり、`tail -n 3`で間隔ごとに行が増えていることを確かめる。
 3. `dagq stats`の`host.samples`が0でないことを確かめる
-4. 外部のsamplerを、それを起動した方法（launchdのagent・cmuxのworkspaceのshellなど）で止める。pidで止め、`pkill`のように名前で選ばない
+4. 外部のsamplerを、それを起動した方法（launchdのagent・terminalのshellなど）で止める。
+   pidで止め、`pkill`のように名前で選ばない
 5. 過去の`metrics.csv`は比較のために残してよい（runtimeは読まない。列が違う）

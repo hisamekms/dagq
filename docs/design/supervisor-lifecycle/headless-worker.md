@@ -70,7 +70,6 @@ supervisor
 - workerへの文面は`/exit`・画面への打ち込み・backgroundの処理に頼らず、Codexはsubagent reviewをしない（[Prompt](prompt.md#経路とproviderごとの文面)）。
 - 人への質問は`dagq ask`だけで、turnの設定はagentの質問の道具と、Claudeでは後のpromptを予約する道具も拒む。
   予約したwakeupは`claude -p`をturnの終わりの後も生かし、turnを終わらせないため（一覧と理由は`adapters.rs`の`PRINT_MODE_DENIED_TOOLS`のdoc comment）。
-- runtimeはrunのためにcmuxのworkspaceもgroupも作らない（[ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)）。
 
 ### 不変条件
 
@@ -184,7 +183,7 @@ run dirのI/Oの約束と落とし穴（`agent_dir`のmodule docと`agent_dir::i
 - idle markerは最後の入力より新しいときだけturnの終わりを示し（`screen_idle::last_input`）、画面からの推定（[ADR-t803-1](../../adr/2026-09-27-t803-1-infer-idle-from-the-screen-when-the-idle-marker-is-missing-or-stale.md)、superseded）の記録は読めるまま新しくは書かれない。
 - verdictが終了を求めるときは、終了の依頼を記録してから`turns/exit`に書く（`ExitWatch::poll`）。
   終わった後はwrapperの残りをhandleで止める（`stop_run_session`、[ADR-t1404-1](../../adr/2026-10-03-t1404-1-headless-wrappers-run-as-detached-background-processes.md)決定3）。
-  backgroundより前にworkspaceで開いたsessionのIDは閉じず、cmuxにも聞かずに人に任せる。
+  backgroundより前にworkspaceで開いたsessionのIDは閉じず、人に任せる。
 - workerに`/exit`を打たず、打鍵の再試行・ダイアログの応答・終了待ちの時間切れのaskと復旧jobは無い（`[exit]`の表は読んで検査するだけで、意味は`domain::exit::ExitConfig`）。
   plannerにも何も打たない。
 
@@ -272,10 +271,10 @@ workerのsession wrapperは、supervisorから切り離したprocess（自分の
   sessionが開いているかはprocessで判じ、backgroundより前にworkspaceで開いたsessionのIDは開いていないとみなし、閉じない（人が自分のterminalで閉じる）。
 - **入口**: backgroundの入口は端末を確かめず、自分で新しいsessionとprocess groupを持つ（`compose::wrapper_entry`）。
   同じpidで別の起動時刻の記録は、死んだwrapperのpidを継いだ別のprocessのものなので自分とみなさない。
-- **env**: workerのactorの変数と`[run.env]`（[Run environment](run-environment.md)）はwrapperのprocessのenvで渡し、supervisorのenvの`CMUX_*`と`DAGQ_*`は外してから足す。
+- **env**: workerのactorの変数と`[run.env]`（[Run environment](run-environment.md)）はwrapperのprocessのenvで渡し、supervisorのenvの端末のpaneの変数（`background::TERMINAL_PANE_PREFIXES`）と`DAGQ_*`は外してから足す。
 - **識別と生死**<a id="識別と生死"></a>: 生きているとは、handleのpidが記録した起動時刻のまま居ること（`Supervisor::wrapper_lives`）。
   adopt・引き継ぎ（[Handoff](handoff.md)）・開き直しは記録したhandleで行うので、supervisorが止まってもwrapperとturnは動き続ける。
-  heartbeatの古さは生死に使わず（上の「黙ったwrapper」）、`stats`もcmuxを呼ばずこの生死だけで判じる（[Stats](commands.md)）。
+  heartbeatの古さは生死に使わず（上の「黙ったwrapper」）、`stats`もこの生死だけで判じる（[Stats](commands.md)）。
 - **停止**: runtimeはまず終了の依頼で終わらせ、残っていればhandleの`stop_background`でwrapperにSIGTERMを、猶予の後にgroupと控えた子孫にSIGKILLを送る（ADR-t1404-1決定3）。
   wrapperが先に死んで残したturnは最後のturnの始まりの記録から止め、それが生きている間sessionは開いているとみなされる。
   ADR-t813-1決定5の「最後のturnの終わりにworkspaceをcloseする」は、wrapperの終わりを確かめて残りを止めることと読む。
@@ -283,7 +282,7 @@ workerのsession wrapperは、supervisorから切り離したprocess（自分の
   SIGTERMで終わったかSIGKILLまで要ったかを[評価](../../plans/headless-background-evaluation.md)の「processの残り」が数えるため。
   復旧jobの`stop_processes`はwrapperでなくpidを止めるので、この記録をしない。
 - **出力**（ADR-t1404-1決定6）: wrapperの`[dagq]`の要約は`session.log`に追記され、書けない行は捨ててsessionは止めず、人は`run log`と`planner log`で読む（`application::session_log`のmodule doc）。
-- **画面と片付けのCLIの拒否**（ADR-t1433-3決定3・4）: `run screen`は`run log`と`turns/`の場所を示して拒み、`run close-workspaces`は権限の検査の後に拒み、どちらもcmuxを呼ばない。
+- **画面と片付けのCLIの拒否**（ADR-t1433-3決定3・4）: `run screen`は`run log`と`turns/`の場所を示して拒み、`run close-workspaces`は権限の検査の後に拒む。
 
 ## 再計画の保留
 

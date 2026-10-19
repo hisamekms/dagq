@@ -31,7 +31,6 @@ related:
 `dagq up`はqueueのruntimeをcold startする1コマンドで、application層の`src/application/lifecycle.rs`の`up`が行う（`down`も同じファイル。[ADR-0013](../../adr/0013-layered-architecture-and-type-function-style.md)）。
 外への口は`lifecycle::Ports`にまとめ、`compose::up` / `compose::down`が組み立てる。
 冪等で、続けて2回叩けば2回目は`reused`になる。
-`up` / `down`はcmuxを呼ばない（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定1）。
 外部（launchctl、PIDの生存とsignal）は`LaunchAgent`、`ProcessControl`のtrait越しに呼び、判定はfakeで、実launchdの`up → status → down --wait`はe2eで確かめる（e2eの条件は`tests/e2e.rs`の冒頭のdoc comment）。
 in-cmux modeの起動の指定は何にも触る前に拒み、廃止と次の手順を文面に書く（[ADR-t1433-4](../../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）。
 
@@ -60,8 +59,8 @@ in-cmux modeの起動の指定は何にも触る前に拒み、廃止と次の�
      待つ相手と待たない指定での拒み方は、そのdoc commentと`stray_supervisors`のdoc commentにある。
    - **launchd mode**: LaunchAgentを書いて起動し、登録が現れるまで待つ。
    - **登録済みのin-cmuxのsupervisor**（ADR-t1433-4決定3）: `up`は新しくin-cmux modeで起動せず、登録にも`session_workspaces`にもin-cmuxの記録を書かない。
-     読むのは前のbinaryが残した登録だけで、引き継ぎ（下記）ではそのworkspaceに居続けてcmuxを呼ばず、drainと`down`ではSIGINTを送る。
-     そのworkspaceはdagqが閉じず人が閉じ、`session_workspaces`の`supervisor`行はcmuxを呼ばずに消す（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定3・6）。
+     読むのは前のbinaryが残した登録だけで、引き継ぎ（下記）では同じプロセスのまま続け、drainと`down`ではSIGINTを送る。
+     そのworkspaceはdagqが閉じず人が閉じ、`session_workspaces`の`supervisor`行は消す（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定3・6）。
      launchdに移すのは人かinboxの一度の`down --wait`と、in-cmuxの指定を外した`up`。
      起動するsupervisorのmodeは常に`launchd`で、supervisorの起動の印の`mode`になる（[変更の印](commands.md)）。
    - **待つ相手**: `up`が起動したsupervisorの登録だけを受け取り、既に表にあった登録を取り違えない（`started_registration`のdoc comment）。
@@ -79,7 +78,7 @@ in-cmux modeの起動の指定は何にも触る前に拒み、廃止と次の�
        非互換が1つでもあれば、何も起動もsignalもせず、`down --wait` → `dagq migrate` → `up`、または`dagq install --allow-breaking`を案内するerrorで止まる。
        互換のmigrationの後も、古いbinaryのsupervisorとrunのwrapperはfloor以上なのでそのまま動く（[persistence](../persistence.md#database-setup-and-migrations)）。
      - **引き継ぎ**（[Handoff](handoff.md#handoff)）: liveな登録それぞれに`up`自身の絶対pathへのexecを頼み、各登録が同じpidのまま`up`のbuild識別子で戻るのを待つ（`lifecycle::hand_off`）。
-       何もsignalせず、LaunchAgentもcmuxのworkspaceも触らず、走っているrunのsessionもleaseもそのまま。
+       何もsignalせず、LaunchAgentに触らず、走っているrunのsessionもleaseもそのまま。
        待ちの上限は全員で1つで、supervisorは進行中の検証と着地の区切りまで待ってからexecするので、integrateの検証1回分に及ぶことがある。
        戻ったと見なす条件・失敗の条件・猶予の見直し・要求の取り消しは`hand_off`と`HANDOFF_GRACE`のdoc commentと[Handoff](handoff.md#handoff)にある。
        1つの失敗で待ちを止めず、全員の成功か失敗を待つ（[ADR-t632-1](../../adr/2026-09-27-t632-1-handoff-restores-only-when-every-supervisor-failed.md)）。
@@ -111,12 +110,10 @@ in-cmux modeの起動の指定は何にも触る前に拒み、廃止と次の�
 4. **inbox**: `up`はinboxを開かない（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定3）。
    inboxは人が自分のterminalで`dagq inbox`を打って開く（下の「`dagq inbox`」）。
    `up`はplannerも開かない（plannerはruntimeが立てる。[`plan` / `planners`](plan-planners.md#plan--planners)）。
-   `up`は`session_workspaces`のうちsupervisor以外のroleの行（前のbinaryが記録したもの）を、cmuxを呼ばずに消す。
+   `up`は`session_workspaces`のうちsupervisor以外のroleの行（前のbinaryが記録したもの）を消す。
    workspace自体は閉じず、人が閉じる（決定6）。
    `up`を打った環境の`DAGQ_ROLE`と`DAGQ_QUEUE`は見ない。
 5. **結果**: supervisorの結果に、適用したmigration、inboxを開く案内、消した記録と登録、人が`up`の後に最初に見る未完のrun（`open_work`）を添える。
-
-前提: supervisorはcmuxを呼ばないので（[ADR-t1433-4](../../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）、launchdが起動するsupervisorにcmuxのsocket passwordは要らない。`up` / `down` / `dagq inbox`もcmuxを呼ばず、cmuxの無いPATHで動く（ADR-t2159-1決定1）。
 
 ## `dagq inbox`
 
@@ -152,7 +149,7 @@ PIDが生きていてもheartbeatの古い登録は、`up`と共通の`pid_taken
 同じqueueの別のlabelのagent（`up`の3と同じ探し方）も同じく外し、結果に出す。
 そのsupervisorの登録も他の登録と同じくsignalと待ちの対象になる。
 signalの対象の登録が1件もなければ`not_running`を返す（強制終了での登録行の扱いは`lifecycle::down`のdoc comment）。
-あれば登録ごとにsignalを選ぶ: `mode` が`in_cmux`ならSIGINT（cmuxのterminalでCtrl-Cを押したのと同じ。runtimeはSIGTERMと同じくdrainに入る。このmodeにはsignalを届けてくれるservice managerがない）、そうでなければSIGTERM——ただしbootoutでlaunchdが外したagentそれぞれのプロセスにSIGTERMを届けるので、そのPIDには送らない（runtimeは1回目のsignalでdispositionを既定に戻すので、2回目は即死になる。`lifecycle::signalled_by_bootout`）。
+あれば登録ごとにsignalを選ぶ: `mode` が`in_cmux`ならSIGINT（terminalでCtrl-Cを押したのと同じ。runtimeはSIGTERMと同じくdrainに入る。このmodeにはsignalを届けてくれるservice managerがない）、そうでなければSIGTERM——ただしbootoutでlaunchdが外したagentそれぞれのプロセスにSIGTERMを届けるので、そのPIDには送らない（runtimeは1回目のsignalでdispositionを既定に戻すので、2回目は即死になる。`lifecycle::signalled_by_bootout`）。
 外したagentのどれかがloadされているのにPIDが読めないときは誰にも送らない。
 既定は即返り、待つ指定はその登録が消えるかPIDが死ぬまで待ち、強制終了はSIGKILLを送って登録行を消す（leaseはやがてstaleになり、runは`doctor` / `recover`で扱う）。
 
@@ -160,9 +157,8 @@ queueのbroker（[Queue broker](../queue-broker.md#起動と停止)）はqueue s
 `up`はserviceの後、supervisorより先にbrokerを起動し（生きていればreuse、buildが違えば入れ替え）、起動できなければsupervisorを起動せずに止まる。
 `down`はsupervisorの後、serviceより先にbrokerを止め、drainを待たないときは最後のsupervisorにdrainの終わりで止めさせる。
 
-`down`はcmuxのworkspaceを閉じない（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定3・6）。
-登録済みのin-cmuxのsupervisor（前のbinaryがそのmodeで登録したもの）が動いていたworkspaceは、結果に開いたまま残すと出して人に任せる。
-`session_workspaces`の`supervisor`行はcmuxを呼ばずに消す。
+登録済みのin-cmuxのsupervisor（前のbinaryがそのmodeで登録したもの）が動いていたworkspaceを`down`は閉じず、結果に開いたまま残すと出して人に任せる（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定3・6）。
+`session_workspaces`の`supervisor`行は消す。
 どの経路でも`supervisors`の全登録が対象で、signalの順（in-cmuxにはSIGINT）と登録の後始末は変えない。
 inboxは人のterminalで、`down`は触らない。
 

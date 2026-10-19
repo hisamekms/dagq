@@ -60,22 +60,18 @@ related:
 
 利用方法は[README](../../README.md)を参照。
 
-dagqは、依存関係を持つ開発タスクをSQLiteで管理し、着手可能なタスクをGit worktreeとsupervisorから切り離したbackgroundのsession wrapperで実行するRust runtimeである（cmuxはinboxのworkspaceに使う）。
+dagqは、依存関係を持つ開発タスクをSQLiteで管理し、着手可能なタスクをGit worktreeとsupervisorから切り離したbackgroundのsession wrapperで実行するRust runtimeである。
 
-> **予定**: cmuxはinboxだけが使う形に移る（[ADR-t1433-1](../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)）。
-> cmuxを呼ぶのは`up`がinboxのworkspaceを開く・確かめる・閉じることとinboxのsessionの中の操作だけになり、worker・runtimeのplanner・supervisor・queue service・observer・jobはcmuxを呼ばない。
-> 対話の経路（workerの`--interactive`とruntimeのplannerの対話）は廃止し（[ADR-t1433-2](../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）、非対話のsession wrapperはbackgroundのprocessだけで動き（[ADR-t1433-3](../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）、runtimeはinboxのterminalに打ち込まない（[ADR-t1433-5](../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)）。
-> workerのsession wrapperとruntimeのplannerはbackgroundだけで動き、runもruntimeのplannerもworkspaceを開かない。
-> workerの対話の経路は動かず、`add` / `edit`の`--interactive`は理由付きで拒み、workerへの文面に対話の分岐は無い。
-> supervisorはlaunchdだけで常駐し、`--in-cmux`は拒む（[ADR-t1433-4](../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）。
-> この文書の対話の記述は、後続のtaskが実装するまでの今の姿である。
+inboxは人が自分のterminalで`dagq inbox`を打って開く対話のsessionで、`up`はinboxを開かない（[ADR-t2159-1](../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定2・3）。
+対話の経路（workerの`--interactive`とruntimeのplannerの対話）は廃止し（[ADR-t1433-2](../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）、非対話のsession wrapperはbackgroundのprocessだけで動き（[ADR-t1433-3](../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）、runtimeはinboxのterminalに打ち込まない（[ADR-t1433-5](../adr/2026-10-03-t1433-5-inbox-watch-without-typing-into-the-inbox.md)）。
+`add` / `edit`の`--interactive`は理由付きで拒み、workerへの文面に対話の分岐は無い。
+supervisorはlaunchdだけで常駐し、in-cmux modeの指定は拒む（[ADR-t1433-4](../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）。
 
 ## 用語集
 
 役割は5つで、ADR-0024の決定1で確定し、[ADR-0044](../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定1が引き継いだ: supervisor、worker、planner、inbox、observer。
-このうち`DAGQ_ROLE`で名乗るworkspaceを持つのはinboxだけで、cmux workspaceのtitleは`[<repo>]<role>`（[ADR-0028](../adr/0028-workspace-titles-are-repo-and-role.md)）。
-workerとruntimeのplannerはworkspaceを持たず、session wrapperはbackgroundのprocessで動く（[ADR-t1433-3](../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
-`up`が開くのはinboxだけで、plannerはproposalごとのオンデマンドのbackgroundのwrapperとしてruntimeが立てる（ADR-0044の決定1・6。[supervisor-lifecycle](supervisor-lifecycle/plan-planners.md#plan--planners)）。
+新しく起動するroleはworkspaceを持たず、workerとruntimeのplannerのsession wrapperはbackgroundのprocessで動く（[ADR-t1433-3](../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)）。
+plannerはproposalごとのオンデマンドのbackgroundのwrapperとしてruntimeが立てる（ADR-0044の決定1・6。[supervisor-lifecycle](supervisor-lifecycle/plan-planners.md#plan--planners)）。
 人が開くplannerは[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)で廃止した: 人はinboxに計画を頼み、inboxが人の言葉を計画の依頼として記録し、supervisorが依頼ごとにruntimeのplannerを立てる。
 `dagq plan`は何も開かず、その案内を付けて拒む。
 runtimeのplannerは経路を選ばず非対話（workerと同じturn）だけで、supervisorから切り離したbackgroundのwrapperで動く（[ADR-t1394-2](../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)の非対話の経路。対話の経路は[ADR-t1433-2](../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)で廃止、[ADR-t1433-3](../adr/2026-10-03-t1433-3-headless-wrappers-run-only-in-the-background.md)。[runtimeのplannerの経路](supervisor-lifecycle/plan-planners.md#runtimeのplannerの経路)）。
@@ -87,7 +83,7 @@ observerとreview / triageのjobはworkspaceを持たないheadlessのjobで、`
 | **supervisor** | runtimeの`dagq supervise`プロセス。依存が解けたtaskをclaimし、runごとにworktreeを作ってworkerのsession wrapperをbackgroundで起動し、receiptを検証し、runごとのheadlessのjob（review、triage）を起動してそのverdictで着地・差し戻し・resume・retryを行い、`needs_session`のrunをresumeし（`MAX_RESUME_ATTEMPTS`で解消しなければ人へのaskにする）、後始末をする（[ADR-0003](../adr/0003-supervisor-owns-lifecycle.md)、[ADR-0007](../adr/0007-run-level-leases-parallel-execution.md)、[ADR-0040](../adr/0040-verify-once-review-run-env-graph-stats-and-task-priority-in-claim-order.md)、[ADR-0027](../adr/0027-keep-worker-session-through-review-revise-verdict-and-merge-tree-precheck.md)、ADR-0044）。launchdのLaunchAgentとして常駐する。 | "SV"（supervisorの略） |
 | **worker** | runごとにsupervisorが起動するClaude（将来はCodex）のsession。割り当てられたworktreeの中だけで作業し、commitしてreceiptを書く。判断が要るときは`worker_question`のaskを登録して止まる。 | agent session、run session |
 | **planner** | goal / taskを書いてproposalとしてsubmitし、inboxが記録した計画の依頼を計画するか理由付きで却下し、follow_upのdraft taskの採否とobserverのfindingの扱いを自分で決め、goalをcloseするのは採らないdraft goalの破棄（`--verdict abandoned`）と人の言葉のときだけのsession（[ADR-0022](../adr/0022-ask-answer-inbox-planner-and-landing-on-doubt.md)、ADR-0044の決定1・6）。常駐せず、proposalごとのオンデマンドのbackgroundのwrapperとturnで動き、workspaceを持たない。runtimeが立てる（revise・draft・finding・inboxからの計画の依頼。複数同時に開ける）。画面を見る人は居ない。`up` / `down` / `install`は打たない（CLIは許すが、inboxか人の`DAGQ_ROLE`の無いterminalが打つ）。runtimeのplannerは経路の選択なしに非対話（turnごとの呼び出し）だけで動く（ADR-t1394-2・ADR-t1433-2・ADR-t1433-3）。決めきれない判断は`planner_question`でinboxに上げる（ADR-t1394-1）。 | （新設） |
-| **inbox** | 人に届くものすべての窓口になる常駐session（[ADR-0022](../adr/0022-ask-answer-inbox-planner-and-landing-on-doubt.md)、ADR-0044の決定6）。openなaskを人に見せてanswerを書き戻し、それ以外のattention（回答済みのask、止まったsupervisor、失敗したreview / triage、pushの失敗）を人に知らせ、人の指示があるときだけ`dagq-recover`の手順（`up` / `down`、手でのreviewと`integrate`、`recover`。workerのrunへの`run send`とplannerへの`planner send`はどれにも拒まれ、workerとplannerへの答えは`answer`で記録してsupervisorが届ける）を実行する。自分では判断しない。人が頼んだ計画は人の言葉のまま計画の依頼として記録してruntimeのplannerに移譲し（`dagq request add`、ADR-t1394-1）、結末（`proposed` / `declined` / `exhausted`）と依頼についての`planner_question`を人に伝える（手順は`dagq-inbox` skillの`reference/requests.md`）。`up`が`[<repo>]inbox`のworkspaceに`inbox_prompt`付きで開く。 | （新設） |
+| **inbox** | 人に届くものすべての窓口になる常駐session（[ADR-0022](../adr/0022-ask-answer-inbox-planner-and-landing-on-doubt.md)、ADR-0044の決定6）。openなaskを人に見せてanswerを書き戻し、それ以外のattention（回答済みのask、止まったsupervisor、失敗したreview / triage、pushの失敗）を人に知らせ、人の指示があるときだけ`dagq-recover`の手順（`up` / `down`、手でのreviewと`integrate`、`recover`。workerのrunへの`run send`とplannerへの`planner send`はどれにも拒まれ、workerとplannerへの答えは`answer`で記録してsupervisorが届ける）を実行する。自分では判断しない。人が頼んだ計画は人の言葉のまま計画の依頼として記録してruntimeのplannerに移譲し（`dagq request add`、ADR-t1394-1）、結末（`proposed` / `declined` / `exhausted`）と依頼についての`planner_question`を人に伝える（手順は`dagq-inbox` skillの`reference/requests.md`）。人が自分のterminalで`dagq inbox`を打って開く。 | （新設） |
 | **observer** | supervisorのtimerで定期起動するheadlessのjob（ADR-0044の決定4）。状態は変えない。`stats`、閉じていないfinding、直近のnoteを読み、findingの記録と更新（決定18）とfindingに紐づく`blocked`のask（決定23）だけを書く。noteとdraft goalは書かない。 | （新設） |
 
 **退役した役割。**

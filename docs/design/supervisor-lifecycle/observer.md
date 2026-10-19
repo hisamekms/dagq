@@ -28,7 +28,7 @@ related:
 [ADR-0044](../../adr/0044-findings-proposals-from-findings-and-quiet-observer.md)の決定4・18・23。
 observerはnoteとdraft goalを書かず、findingを記録・更新し、見立てが人を要るfindingにだけ`blocked`のaskを上げる（下の「人が要る見立てだけをblockedにする」）。
 dagqが回っているかを観察して継続的改善の材料を残すjobで、個々の詰まりは解消しない。
-cmux workspaceを持たず、`AgentProvider::headless_command`にsession idを割り当ててMCPを読まない形で起動する。
+workspaceを持たず、`AgentProvider::headless_command`にsession idを割り当ててMCPを読まない形で起動する。
 Claudeでは予約の道具（`PRINT_MODE_DENIED_TOOLS`）を拒み、promptはstdinで渡し、user・project・plugin・claude.aiのどのMCP serverも読み込まない。
 providerは`[roles.observer]`の`provider`で選び、書かなければClaude、`codex`ならCodexで動く（下の「Codexで動かす」）。
 実装は`src/application/observer/`（ユースケース。`compose::observe`がqueueと`ObserverSources`・`ObserverHost`を組み立てて注入する）と`src/infrastructure/observer.rs`（cursorと観察のdir、`[roles.observer]`、headlessのagentのprocess）。
@@ -110,15 +110,14 @@ supervisorはserviceが居ない間observerを起動しない（ADR-t1233-4決�
   supervisorのループがerrorで終わったときは（正常な停止はobserverの終了を待つ）、走っている`dagq observe`の子孫を読んでから`dagq observe`とその子孫（agentとそのBash）をSIGKILLし、logに1行残す。
   この`observe`は`observe_finished`を書かない。
   execの引き継ぎ（`prepare_handoff`）でも同じく子孫ごとkillし、次のプロセスが期日に起動し直す。
-  launchd modeでも登録済みのin-cmuxのsupervisorでも`supervise`の既定値で同じに動く（`up`はこの設定を渡さない）。
+  どのsupervisorでも`supervise`の既定値で同じに動く（`up`はこの設定を渡さない）。
   起動するのはqueue serviceが居るときだけ。
 - **出力の扱い**: findingは人とplannerが`findings`で影響の大きい順に読み、手当てしないと決めたものを`finding dismiss`する。
   proposalを求める印の付いたfindingには、supervisorがruntimeのplannerを立ててproposalを作らせる（[Finding planners (supervisor)](finding-planners.md)）。
   findingに紐づけた`blocked`のaskには、runtimeが`propose`と`dismiss`のoptionを足し、人のその答えをfindingに適用する。
   `blocked`のaskは`status --role inbox`に`ask_opened`として出る。
 
-- **cmux**: observerはcmuxを呼ばない（[ADR-t1433-1](../../adr/2026-10-03-t1433-1-cmux-is-used-only-by-the-inbox.md)）。
-  `stats`の`workspace_mismatch`はrunのbackgroundのwrapperの生死で決まり（[Stats](commands.md)）、agentがloginの切れや利用上限で止まったときのholdのask（`application::ask::hold`）はinboxの`watch`が`ask_opened`で人に知らせる（[人への通知](ask-push.md)）。
+- **生死と通知**: `stats`の`workspace_mismatch`はrunのbackgroundのwrapperの生死で決まり（[Stats](commands.md)）、agentがloginの切れや利用上限で止まったときのholdのask（`application::ask::hold`）はinboxの`watch`が`ask_opened`で人に知らせる（[人への通知](ask-push.md)）。
 
 ## Codexで動かす
 

@@ -64,7 +64,7 @@ hostのswapがほぼ満ちたのを見たら、人かinboxがhostで原因の候
   - `vm.swapusage`: `used` 35284 MB / `total` 36864 MB。
   - fseventsd（14日起動したまま）: `MEM` 36G・`CMPRS` 34G。
   - `dagq supervise`: `footprint` 4118 MB（peak 5723 MB、起動から約10時間）・`CMPRS` 2361M。
-  - cmux: 1692 MB・`CMPRS` 1537M。claudeは各170〜320 MB。
+  - 人のterminalのapp: 1692 MB・`CMPRS` 1537M。claudeは各170〜320 MB。
   - `host/metrics`の`swap_used_mb`は10/15の約13.7 GBから10/18の約36.7 GBまで増え続けた。
   - dagqはFSEventsを使わない（`Cargo.toml`にnotifyなどのファイル監視のcrateが無い）。この値から言えるのはfseventsdが原因の候補（`CMPRS`が最も大きい）ということだけで、ディスク上のswapのうちどれだけを持つかは分けて測っていない。
 - 対処:
@@ -85,13 +85,13 @@ hostのswapがほぼ満ちたのを見たら、人かinboxがhostで原因の候
 
 ## `up`のコマンド
 
-このrepositoryの`up`は次のとおり。supervisorはcmuxを呼ばず、launchdのLaunchAgentとしてだけ常駐する（[ADR-t1433-4](../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）。`--in-cmux`は廃止され、付けた`up`は何にも触らずに拒まれる。`up`を打つsession、止まったsupervisorの起動し直し方、launchd modeが止まるときの振る舞い、出力の読み方はpluginの`dagq-recover`の`reference/up-down.md`が持つ。
+このrepositoryの`up`は次のとおり。supervisorはlaunchdのLaunchAgentとしてだけ常駐し（[ADR-t1433-4](../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）、`up`はinboxを開かない（inboxは人が自分のterminalで`dagq inbox`を打って開く。[ADR-t2159-1](../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定2・3）。`--in-cmux`は廃止され、付けた`up`は何にも触らずに拒まれる。`up`を打つsession、止まったsupervisorの起動し直し方、launchd modeが止まるときの振る舞い、出力の読み方はpluginの`dagq-recover`の`reference/up-down.md`が持つ。
 
 ```sh
 dagq up --claude ~/.local/bin/claude --codex ~/.local/bin/codex --plugin-dir <この repository>/plugins/claude-dagq --auto-update
 ```
 
-- 本番のsupervisorがまだ登録済みのin-cmuxのもの（`status`の`supervisors[].mode`が`in_cmux`）なら、launchdに移すのは人かinboxの一度きりの手での操作: `dagq down --wait`で止めてから、上のコマンド（`--in-cmux`なし。`--auto-update`などいつもの引数は付けたまま）を打つ。`down --wait`はそのsupervisorの`[<repo>]supervisor`のworkspaceも閉じる。移すまでは新しいバイナリへの引き継ぎも`down`もそのまま効く。
+- 本番のsupervisorがまだ登録済みのin-cmuxのもの（`status`の`supervisors[].mode`が`in_cmux`）なら、launchdに移すのは人かinboxの一度きりの手での操作: `dagq down --wait`で止めてから、上のコマンド（`--in-cmux`なし。`--auto-update`などいつもの引数は付けたまま）を打つ。そのsupervisorが動いていたworkspaceはdagqが閉じないので、人が閉じる。移すまでは新しいバイナリへの引き継ぎも`down`もそのまま効く。e2eの関門はcmuxを要らず全部のe2eを流すので、移した後もhostのcmuxの設定でe2eが関門から外れることは無い。
 - `--parallel`を付けない規則とその理由は`dagq.toml`の`[supervisor]`の`parallel`のコメントが持つ。`--runtime-planners`も同じ理由で付けない（`runtime_planners`は`[supervisor]`で決める）。flagが`[supervisor]`より優先して残る仕組みと、付けて起動したsupervisorを`[supervisor]`に従わせる手順は[Run environment](../design/supervisor-lifecycle/run-environment.md)の`[supervisor]`の項（「優先順」と「起動し直すときの引き継ぎ」）。
 - このrepositoryは自動更新を使う（上のコマンドの`--auto-update`）。打ち直す`up`にも付け続けることとその理由はpluginの`dagq-recover`の`reference/update.md`の「Automatic updates (`up --auto-update`)」が持つ。
 - `--claude`と`--codex`の値は上のコマンドのpath。pathで渡す理由、Claude CodeやCodexを更新したときの解決し直し、`codex`が無いときの振る舞いはpluginの`dagq-recover`の`reference/up-down.md`の「up」、`install --allow-breaking`のdrainが起動し直す`up`に渡すものは同じskillの`reference/update.md`の「install」が持つ。
