@@ -187,7 +187,7 @@ jobのpromptに現れる`` `dagq …` ``が全てユースケースに行くこ�
   promptとskillはsvgを名指さない
 - `locate`（DBのpathを返す）・`doctor`（hostとDBのファイルの診断）・`service status`・`planners`: 制御側の状態を見るもので、jobのpromptは名指さない。
   dagq skillは`doctor`を名指すが、AGENTS.mdはworkerの実queueでの`doctor`の確認を人かinboxに任せる。
-  クライアントモードでは`locate`がDBのpathを出さずにsocketを答え、ほかは`no_use_case`で断る（[クライアントモード](#クライアントモード)）
+  クライアントモードでは`locate`がDBのpathを出さずにsocketとserviceへの到達を答え、ほかは`control_side_command`で断る（[クライアントモード](#クライアントモード)）
 
 ## クライアントモード
 
@@ -204,8 +204,12 @@ ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、ADR-t2114-3決定3。
   答えを待つ時間と読む長さの上限はどちらの宛ても同じ
 - 断り: serviceとbrokerの断りもクライアントの断りも同じ形のerrorで終了コード1になり、codeの意味は`ClientFailure`のdoc comment。
   どの断りでもDBを開くことに戻らない（fail closed）
-- `no_use_case`になるのはserviceのユースケースでない全てのコマンド。
-  `locate`はserviceに送らずに、DBのpathを出さずにsocket（brokerの宛てではbroker）を答え、DBの有無を答えない。
+- `doctor`・`service status`・`planners`は制御側（人かinboxがhostで打つ）のコマンドとして`control_side_command`で断り、errorの文がコマンド名とそれを言う。
+  DBもserviceも触らない。
+  `no_use_case`になるのはそのほかのserviceのユースケースでない全てのコマンド。
+- `locate`はDBのpathを出さずにsocket（brokerの宛てではbroker）を答え、DBの有無を答えない。
+  serviceへの到達は`hello`（statusの見る待ちと同じ短い待ち）で確かめて足し、答えれば`reachable: true`とserviceのAPI versionの幅とこのclientの版がその中か、答えなければ（brokerの断りも。brokerの宛てで読めるtokenが無ければbrokerに送らない）`reachable: false`と理由を足す（形は`Client::reach`のdoc comment）。
+  どちらでも`locate`は成功し、DBを開くことに戻らない。
   pluginの`--resolve`が最初に打ち、dagq skillはDBが無いと分かったときだけ`init`を言うので、workerとjobが`init`を試みない
 - workerとjobのpromptとskillのコマンド（`dagq ask`・`dagq show`など）は変えない。
   observerとスループットの見直しのpromptは、`dagq --db <db>`ではなく`dagq`を名指す（promptはagentの引数なので、DBのpathを含めない）

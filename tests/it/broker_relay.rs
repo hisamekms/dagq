@@ -1034,9 +1034,20 @@ fn a_run_s_dagq_reaches_the_service_through_the_forwarder_the_relay_and_the_brok
     let located = answered(&client(&elsewhere, &as_run, &["locate"]));
     assert_eq!(located["broker"], json!(url.trim_start_matches("http://")));
     assert_eq!(located["db"], Value::Null);
+    assert_eq!(located["reachable"], true, "{located}");
+    assert_eq!(located["api_compatible"], true, "{located}");
 
     // Refused by the broker, read as the socket's client reads a refusal.
     let without_token = [(URL_ENV, url.as_str()), ("DAGQ_RUN_ID", run.as_str())];
+    // With no token to send, `locate` does not ask the broker.
+    let located = answered(&client(&elsewhere, &without_token, &["locate"]));
+    assert_eq!(located["reachable"], false, "{located}");
+    assert!(
+        located["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.starts_with("no_credential")),
+        "{located}"
+    );
     assert_eq!(
         refused(&client(&elsewhere, &without_token, &["show", &task])),
         "unauthenticated"

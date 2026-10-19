@@ -3406,11 +3406,23 @@ fn client_mode(client: &dagq::infrastructure::queue_service::Client, cli: &Cli) 
         )
         .into());
     }
-    // `locate` says where the commands go, without the queue's path: the
-    // plugin's `--resolve` runs it first.
+    if let Some(name) = control_side_command(&cli.command) {
+        return Err(ClientFailure::new(
+            "control_side_command",
+            format!(
+                "dagq {name} is a control-side command: a person or the inbox runs it on the \
+                 host, and a client-mode dagq (DAGQ_SERVICE_SOCKET or DAGQ_SERVICE_URL is set) \
+                 neither opens the queue for it nor sends it to the queue service"
+            ),
+        )
+        .into());
+    }
+    // `locate` says where the commands go, without the queue's path, and
+    // whether the service answers there: the plugin's `--resolve` runs it
+    // first.
     if matches!(cli.command, Command::Locate) {
         use dagq::infrastructure::queue_service::ClientRoute;
-        return Ok(match &client.route {
+        let mut located = match &client.route {
             ClientRoute::Socket(socket) => json!({
                 "client_mode": true,
                 "socket": socket,
@@ -3427,7 +3439,11 @@ fn client_mode(client: &dagq::infrastructure::queue_service::Client, cli: &Cli) 
                 "note": "dagq runs in client mode: its commands go to the queue service through \
                          the queue broker, and it opens no queue",
             }),
-        });
+        };
+        if let (Value::Object(located), Value::Object(reach)) = (&mut located, client.reach()) {
+            located.extend(reach);
+        }
+        return Ok(located);
     }
     let Some((use_case, params)) = client_request(&cli.command)? else {
         return Err(ClientFailure::new(
@@ -3439,6 +3455,20 @@ fn client_mode(client: &dagq::infrastructure::queue_service::Client, cli: &Cli) 
         .into());
     };
     client.call(use_case, params)
+}
+
+/// The name of `command` when it is one of the control side's, which a
+/// person or the inbox runs on the host and a client-mode `dagq` refuses
+/// as `control_side_command` rather than as `no_use_case`.
+fn control_side_command(command: &Command) -> Option<&'static str> {
+    match command {
+        Command::Doctor { .. } => Some("doctor"),
+        Command::Service {
+            command: ServiceCommand::Status,
+        } => Some("service status"),
+        Command::Planners { .. } => Some("planners"),
+        _ => None,
+    }
 }
 
 /// Run the relay or the forwarder of a run's path to the queue broker, or

@@ -267,16 +267,29 @@ fn a_client_mode_dagq_opens_no_queue_and_says_why_it_refused() {
         vec!["watch", "--timeout", "1"],
         vec!["report"],
         vec!["graph", "--out", "g.d2", "--format", "d2"],
-        vec!["doctor"],
         vec!["init"],
         vec!["observe"],
         vec!["integrate", task.as_str()],
-        vec!["service", "status"],
     ] {
         let output = client(&queue, &socket, Some(&worker), "worker", &args);
         assert_eq!(refused(&output), "no_use_case", "{args:?}");
     }
-    // `locate` says where the commands go, and names no queue.
+    // The control side's commands are refused as such, by name.
+    for (args, name) in [
+        (vec!["doctor"], "dagq doctor"),
+        (vec!["service", "status"], "dagq service status"),
+        (vec!["planners"], "dagq planners"),
+    ] {
+        let output = client(&queue, &socket, Some(&worker), "worker", &args);
+        assert_eq!(refused(&output), "control_side_command", "{args:?}");
+        let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+        let message = error["error"].as_str().unwrap();
+        assert!(message.contains(name), "{message}");
+        assert!(message.contains("control-side command"), "{message}");
+        assert!(message.contains("a person or the inbox"), "{message}");
+    }
+    // `locate` says where the commands go and that the service answers
+    // there with its API versions, and names no queue.
     let located = answered(&client(
         &queue,
         &socket,
@@ -287,7 +300,10 @@ fn a_client_mode_dagq_opens_no_queue_and_says_why_it_refused() {
     assert_eq!(
         located,
         json!({"client_mode": true, "socket": socket, "db": null, "db_exists": null,
-               "note": located["note"]})
+               "note": located["note"], "reachable": true,
+               "api_version": dagq::domain::queue_service::API_VERSION,
+               "min_api_version": dagq::domain::queue_service::MIN_API_VERSION,
+               "api_compatible": true})
     );
     assert!(!located.to_string().contains(db), "{located}");
     let named = client(
@@ -334,6 +350,36 @@ fn a_client_mode_dagq_opens_no_queue_and_says_why_it_refused() {
     assert_eq!(refused(&unreachable), "unreachable");
     assert!(
         String::from_utf8_lossy(&unreachable.stderr).contains("does not open the queue itself")
+    );
+    // With no service on the socket, `locate` still answers, with why it
+    // does not reach one, and asks for no `init`.
+    let located = answered(&client(
+        &queue,
+        &socket,
+        Some(&worker),
+        "worker",
+        &["locate"],
+    ));
+    assert_eq!(located["reachable"], false, "{located}");
+    assert!(
+        located["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty())
+    );
+    assert_eq!(located["db_exists"], Value::Null);
+    assert_eq!(located["db"], Value::Null);
+    assert!(located.get("api_version").is_none(), "{located}");
+    assert!(!located.to_string().contains(db), "{located}");
+    // The control side's commands touch neither the queue nor the service.
+    assert_eq!(
+        refused(&client(
+            &queue,
+            &socket,
+            Some(&worker),
+            "worker",
+            &["doctor"]
+        )),
+        "control_side_command"
     );
 }
 

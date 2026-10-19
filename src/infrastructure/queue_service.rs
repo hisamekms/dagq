@@ -476,7 +476,10 @@ pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(300);
 /// (`unauthenticated`, `forbidden_destination`, `bad_request`,
 /// `unreachable`), or the client's (`unreachable`: nothing answers on the
 /// socket or at the broker; `no_credential`: the token's file does not
-/// read; `no_use_case`: the command is none of the service's;
+/// read; `control_side_command`: the command is one of the control
+/// side's (`doctor`, `service status`, `planners`), which a person or the
+/// inbox runs on the host; `no_use_case`: any other command that is none
+/// of the service's;
 /// `queue_named`: the command names a queue to open; `client_misconfigured`:
 /// the environment names both a socket and a broker, a broker URL that
 /// does not read, or, with a broker, a run that holds a control character).
@@ -648,6 +651,77 @@ impl Client {
             (true, Some(result)) => Ok(result),
             _ => Err(ClientFailure::new("failed", "the queue service answered nothing").into()),
         }
+    }
+
+    /// Whether the queue service answers `hello` within [`PROBE_TIMEOUT`],
+    /// the short wait of a look at it: what `locate` adds to its answer
+    /// (see [`reach_of`]). It never fails, and opens no queue whatever it
+    /// finds (fail closed).
+    pub fn reach(&self) -> Value {
+        let request = ServiceRequest {
+            api_version: API_VERSION,
+            token: None,
+            use_case: UseCase::Hello,
+            params: Value::Null,
+        };
+        let response = match &self.route {
+            ClientRoute::Socket(socket) => call(socket, &request, PROBE_TIMEOUT),
+            ClientRoute::Broker { address, run } => {
+                // The broker lets through only a request with a token, and
+                // records the refusal of one without: with no token to
+                // read, it is not asked.
+                let token = match &self.credential {
+                    Some(file) => read_token(file),
+                    None => Err(anyhow::anyhow!("no token's file is named")),
+                };
+                let token = match token {
+                    Ok(token) => token,
+                    Err(error) => {
+                        return json!({
+                            "reachable": false,
+                            "reason": format!("no_credential: {error:#}"),
+                        });
+                    }
+                };
+                super::queue_broker::call(
+                    address,
+                    Some(&token),
+                    run.as_deref(),
+                    &request,
+                    PROBE_TIMEOUT,
+                )
+                .and_then(|(status, body)| {
+                    serde_json::from_slice(&body).with_context(|| {
+                        format!("the queue broker's answer (status {status}) does not read")
+                    })
+                })
+            }
+        };
+        reach_of(response)
+    }
+}
+
+/// What a client's `hello` found: `reachable: true` with the service's
+/// `api_version` and `min_api_version` and whether this client's version
+/// is among them (`api_compatible`; a service that does not take it
+/// answers `api_version_mismatch` with its versions), or `reachable:
+/// false` with the `reason` (nothing answers, or the broker refused).
+fn reach_of(response: Result<ServiceResponse>) -> Value {
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => return json!({"reachable": false, "reason": format!("{error:#}")}),
+    };
+    match &response.error {
+        Some(error) if error.code != ServiceErrorCode::ApiVersionMismatch => json!({
+            "reachable": false,
+            "reason": format!("{}: {}", error.code.as_str(), error.message),
+        }),
+        _ => json!({
+            "reachable": true,
+            "api_version": response.api_version,
+            "min_api_version": response.min_api_version,
+            "api_compatible": crate::domain::queue_service::understands(&response),
+        }),
     }
 }
 
@@ -1663,5 +1737,40 @@ mod tests {
         assert!(ServiceRecord::read(dir.path()).is_none());
         // A start of a binary that is not there fails.
         assert!(control.start(Duration::from_secs(1)).is_err());
+    }
+
+    /// `locate`'s reach: a service that answers is reachable with its
+    /// versions, one of other versions too but not compatible, and nothing
+    /// answering or a refusal in front of it is not reachable, with why.
+    #[test]
+    fn a_hello_is_read_as_reachable_or_not_with_its_reason() {
+        let answered = reach_of(Ok(ServiceResponse::success(json!({"build": "x"}))));
+        assert_eq!(
+            answered,
+            json!({"reachable": true, "api_version": API_VERSION,
+                   "min_api_version": crate::domain::queue_service::MIN_API_VERSION,
+                   "api_compatible": true})
+        );
+        let mut newer =
+            ServiceResponse::failure(ServiceErrorCode::ApiVersionMismatch, "not this version");
+        newer.api_version = API_VERSION + 2;
+        newer.min_api_version = API_VERSION + 1;
+        let other = reach_of(Ok(newer));
+        assert_eq!(other["reachable"], true);
+        assert_eq!(other["api_compatible"], false);
+        assert_eq!(other["min_api_version"], API_VERSION + 1);
+        let refused = reach_of(Ok(ServiceResponse::failure(
+            ServiceErrorCode::Unauthenticated,
+            "no token",
+        )));
+        assert_eq!(
+            refused,
+            json!({"reachable": false, "reason": "unauthenticated: no token"})
+        );
+        let silent = reach_of(Err(anyhow::anyhow!("nothing listens")));
+        assert_eq!(
+            silent,
+            json!({"reachable": false, "reason": "nothing listens"})
+        );
     }
 }

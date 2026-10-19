@@ -370,11 +370,28 @@ pub fn exchange(
     body: &[u8],
     timeout: Duration,
 ) -> Result<(u16, Vec<u8>)> {
-    let stream = TcpStream::connect(address)
+    // The connection waits no longer than the exchange: a probe's short
+    // wait holds for a host that drops the packets too.
+    let stream = connect(address, timeout)
         .with_context(|| format!("the queue broker at {address} is unreachable"))?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
     exchange_on(stream, head, body)
+}
+
+/// A connection to `address` (`<host>:<port>`) to each of its addresses in
+/// turn, waiting at most `timeout` on each.
+fn connect(address: &str, timeout: Duration) -> std::io::Result<TcpStream> {
+    let mut last = None;
+    for addr in std::net::ToSocketAddrs::to_socket_addrs(address)? {
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last = Some(error),
+        }
+    }
+    Err(last.unwrap_or_else(|| {
+        std::io::Error::new(ErrorKind::NotFound, "the address resolves to nothing")
+    }))
 }
 
 /// [`exchange`] on a connection already made: the broker's port, or a
