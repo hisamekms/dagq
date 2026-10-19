@@ -85,6 +85,8 @@ run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-sup
     eventは書かない。
     人が`submit --finding`したproposal（持ち主が`person`）とfollow_upのdraftの採否は数えず止めない。
     `dagq findings`は改善の数と上限と待つfindingを返し、observerの入力にも同じものが載る。
+    `dagq kpi`の`improvement_proposals`はこのうちproposalの方だけを、期間の終わりの時点についてeventから同じ規則で数え、plannerは数えない。
+    再submitは紐づけを書き直さずに持ち主を変えうるので、`task_submitted`が持ち主の出自（`owner_origin`）を持つ（数え方とeventの読み方は`domain::kpi`の`improvement_proposals`のdoc comment）。
 12. **test**: `tests/it/finding_planner.rs`がplan reviewのbackendとstubのplan reviewで上の流れを確かめる。
     runtimeのplannerのwrapperはbackgroundに停めてtestが演じる。
     規則は`src/domain/finding.rs`のunit test。

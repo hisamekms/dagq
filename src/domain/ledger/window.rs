@@ -117,7 +117,7 @@
 //! | `slot_usage`, `landing_utilization`, `landing_utilization.peak`, `landing_attempt`, `landing_queue_depth` | run rows' intervals and holds, queue `landing_slot` rows |
 //! | `candidates` | queue `live_alert_stream` rows (the slots' inputs) |
 //! | `findings_open`, `finding_resolve_time` | queue `finding` rows |
-//! | `improvement_proposals` | none recorded (`unavailable`) |
+//! | `improvement_proposals` | queue `finding` rows' records (the links to a proposal and their `by`) and task rows' records (`task_submitted` with its `owner_origin`, `task_reopened`, `task_status_changed`, `proposal_withdrawn`) up to the period's end |
 //! | `drafts_per_landing`, `draft_backlog` | task rows' records, task attributes |
 //! | `session_open.*`, `session_active.*`, `session_active_ratio.*` | session rows and run rows' `sessions` |
 //! | `job.count.*`, `job.failed_rate.*`, `job.secs.*`, `job.verdict.*` | session rows of jobs and run rows' `jobs` |

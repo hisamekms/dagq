@@ -4,8 +4,8 @@
 use super::*;
 
 /// The KPIs no run carries: slot usage while a supervisor lived, the
-/// candidates' samples, asks per landing and a person's wait, attentions,
-/// findings, and the ones not recorded yet.
+/// candidates' samples, asks per landing and a person's wait, attentions
+/// and findings.
 #[test]
 fn derives_the_queue_kpis_of_a_window() {
     let mut queue = Queue::default();
@@ -99,10 +99,9 @@ fn derives_the_queue_kpis_of_a_window() {
     );
     assert_eq!(day.window.details["findings"]["recorded"], json!(2));
     assert!(measure(day, "attentions_per_landing", ALL).value.is_some());
-    assert_eq!(
-        day.window.unavailable["improvement_proposals"],
-        "not_recorded"
-    );
+    // No finding was linked to a proposal: no improvement runs.
+    assert_eq!(measure(day, "improvement_proposals", ALL).value, Some(0.0));
+    assert!(!day.window.unavailable.contains_key("improvement_proposals"));
     assert!(!day.window.unavailable.contains_key("candidates"));
     // A day before the queue: no supervisor, no sample.
     let before = &result.periods[0];
@@ -601,4 +600,168 @@ fn candidates_end_with_their_supervisor_and_exclude_downtime() {
             );
         }
     }
+}
+
+/// Links `finding` to `proposal`, submitted with `tasks` by `by` (a
+/// `planner` of the runtime's or a `person`; `None` records no `by`).
+fn improvement(
+    queue: &mut Queue,
+    finding: i64,
+    proposal: i64,
+    tasks: &[i64],
+    by: Option<&str>,
+    secs: i64,
+) {
+    for &task in tasks {
+        queue.push(
+            Some(task),
+            None,
+            "task_status_changed",
+            json!({"from": "draft", "to": "submitted"}),
+            secs,
+        );
+        queue.push(
+            Some(task),
+            None,
+            "task_submitted",
+            json!({"proposal_id": proposal}),
+            secs,
+        );
+    }
+    let mut link = json!({"finding_id": finding, "from": "open", "to": "proposed",
+                          "proposal_id": proposal});
+    if let Some(by) = by {
+        link["by"] = json!(by);
+    }
+    queue.queue_event("finding_status_changed", link, secs);
+}
+
+fn task_to(queue: &mut Queue, task: i64, to: &str, secs: i64) {
+    queue.push(
+        Some(task),
+        None,
+        "task_status_changed",
+        json!({"to": to}),
+        secs,
+    );
+}
+
+/// `improvement_proposals` (ADR-0051 decision 25) counts, at each period's
+/// end, the proposals of the runtime's planners linked to a finding with a
+/// task still to be done: not one whose tasks all ended (completed or
+/// canceled), one withdrawn, one a person submitted or resubmitted, one
+/// whose last task plan review reopened into another, nor one whose finding
+/// a person marked for a new proposal; a proposal of two findings once.
+#[test]
+fn counts_the_improvement_proposals_running_at_each_periods_end() {
+    let mut queue = Queue::default();
+    let at = MONDAY + HOUR;
+    // Running: one task completed, the other ready.
+    improvement(&mut queue, 1, 10, &[101, 102], Some("planner"), at);
+    task_to(&mut queue, 101, "completed", at + HOUR);
+    task_to(&mut queue, 102, "ready", at + HOUR);
+    // Settled on Tuesday: its only task completes, the finding resolved.
+    improvement(&mut queue, 2, 11, &[111], Some("planner"), at);
+    task_to(&mut queue, 111, "completed", at + DAY);
+    queue.queue_event(
+        "finding_status_changed",
+        json!({"finding_id": 2, "from": "proposed", "to": "resolved", "proposal_id": 11,
+               "by": "runtime"}),
+        at + DAY + 60,
+    );
+    // Withdrawn on Monday, its finding open again.
+    improvement(&mut queue, 3, 12, &[121], Some("planner"), at);
+    queue.push(
+        Some(121),
+        None,
+        "proposal_withdrawn",
+        json!({"proposal_id": 12, "from": "submitted"}),
+        at + 2 * HOUR,
+    );
+    task_to(&mut queue, 121, "draft", at + 2 * HOUR);
+    // A person's proposal, running.
+    improvement(&mut queue, 4, 13, &[131], Some("person"), at);
+    // Every task canceled.
+    improvement(&mut queue, 5, 14, &[141], Some("planner"), at);
+    task_to(&mut queue, 141, "canceled", at + HOUR);
+    // Two findings of one proposal, running.
+    improvement(&mut queue, 6, 15, &[151], Some("planner"), at);
+    improvement(&mut queue, 7, 15, &[], Some("planner"), at);
+    // Unlinked on Monday: a person marked its finding for a new proposal.
+    improvement(&mut queue, 8, 16, &[161], Some("planner"), at);
+    queue.queue_event(
+        "finding_status_changed",
+        json!({"finding_id": 8, "from": "dismissed", "to": "open", "ask_id": 3}),
+        at + 3 * HOUR,
+    );
+    // Sent back and resubmitted by a person on Monday: no longer counted.
+    improvement(&mut queue, 9, 17, &[171], Some("planner"), at);
+    task_to(&mut queue, 171, "draft", at + HOUR);
+    task_to(&mut queue, 171, "submitted", at + 2 * HOUR);
+    queue.push(
+        Some(171),
+        None,
+        "task_submitted",
+        json!({"proposal_id": 17, "owner_origin": "person"}),
+        at + 2 * HOUR,
+    );
+    // Its done task completed, its other task reopened by plan review
+    // into a proposal of its own on Monday: ended.
+    improvement(&mut queue, 10, 18, &[181, 182], Some("planner"), at);
+    task_to(&mut queue, 181, "completed", at + HOUR);
+    task_to(&mut queue, 182, "submitted", at + 2 * HOUR);
+    queue.push(
+        Some(182),
+        None,
+        "task_reopened",
+        json!({"proposal_id": 19, "reviewed_proposal_id": 20}),
+        at + 2 * HOUR,
+    );
+    let query = KpiQuery {
+        at: Some(Cursor::Time((MONDAY + DAY) * 1000)),
+        last: 3,
+        ..KpiQuery::default()
+    };
+    let result = queue.kpi(MONDAY + 2 * DAY, &KpiConfig::default(), &query);
+    let count = |index: usize| measure(&result.periods[index], "improvement_proposals", ALL).value;
+    // Before the queue, Monday (10, 11 and 15) and Tuesday (10 and 15).
+    assert_eq!(
+        (count(0), count(1), count(2)),
+        (Some(0.0), Some(3.0), Some(2.0))
+    );
+    assert!(result.periods.iter().all(|period| {
+        !period
+            .window
+            .unavailable
+            .contains_key("improvement_proposals")
+    }));
+}
+
+/// A running improvement whose link does not record who submitted it
+/// cannot be told from a person's: the KPI has no value then and says
+/// why, while one of the same kind that ended does not stop the count.
+#[test]
+fn an_improvement_of_an_unknown_owner_makes_the_count_unavailable() {
+    let mut queue = Queue::default();
+    let at = MONDAY + HOUR;
+    improvement(&mut queue, 1, 10, &[101], None, at);
+    task_to(&mut queue, 101, "completed", at + DAY);
+    improvement(&mut queue, 2, 11, &[111], Some("planner"), at);
+    let query = KpiQuery {
+        at: Some(Cursor::Time((MONDAY + DAY) * 1000)),
+        last: 2,
+        ..KpiQuery::default()
+    };
+    let result = queue.kpi(MONDAY + 2 * DAY, &KpiConfig::default(), &query);
+    let monday = &result.periods[0];
+    assert_eq!(measure(monday, "improvement_proposals", ALL).value, None);
+    assert_eq!(
+        monday.window.unavailable["improvement_proposals"],
+        "not_recorded"
+    );
+    let tuesday = &result.periods[1];
+    assert_eq!(
+        measure(tuesday, "improvement_proposals", ALL).value,
+        Some(1.0)
+    );
 }

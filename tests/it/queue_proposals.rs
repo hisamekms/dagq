@@ -60,12 +60,8 @@ fn submitted_tasks_wait_for_plan_review_which_readies_or_sends_them_back() {
     }
     assert_eq!(status_of(&mut queue, later), TaskStatus::Draft);
     let events = queue.show(a).unwrap().events;
-    assert!(
-        events
-            .iter()
-            .any(|e| e.kind == "task_submitted"
-                && e.payload == serde_json::json!({"proposal_id": 1}))
-    );
+    assert!(events.iter().any(|e| e.kind == "task_submitted"
+        && e.payload == serde_json::json!({"proposal_id": 1, "owner_origin": "person"})));
     assert!(
         queue
             .show_goal(goal)

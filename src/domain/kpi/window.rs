@@ -15,6 +15,7 @@ use crate::domain::{
     event_attention,
     forecast::score::{self, Scoring, Target},
     host_metrics::{HostSummary, PROCESS_KINDS},
+    improvement_running,
     marks::{self, Mark},
     plan_quality::plan_quality,
     satisfied,
@@ -836,8 +837,13 @@ impl<'a> Context<'a> {
             "findings",
             serde_json::json!({"recorded": findings.recorded, "resolved": findings.resolve_secs.len()}),
         );
-        put("improvement_proposals", ALL, Measure::total(None, 0));
-        unavailable.insert("improvement_proposals", NOT_RECORDED);
+        match self.improvement_proposals(upto) {
+            Some(running) => put("improvement_proposals", ALL, Measure::count(running)),
+            None => {
+                put("improvement_proposals", ALL, Measure::total(None, 0));
+                unavailable.insert("improvement_proposals", NOT_RECORDED);
+            }
+        }
         // The drafts the runtime and the jobs register, as `stats`'
         // `draft_flow` counts them (task 611): no run carries them, so
         // `all` only, like `findings_open`.
@@ -1751,6 +1757,137 @@ impl<'a> Context<'a> {
             .filter(|(status, _)| matches!(status.as_str(), "open" | "proposed"))
             .count();
         result
+    }
+
+    /// `improvement_proposals` (ADR-0051 decision 25): the improvement
+    /// proposals running at the window's end, by the rule of
+    /// `SqliteQueue::improvements`' proposals (its planners are not
+    /// counted) rebuilt from the events up to `upto`, as no table's state
+    /// of then is kept. A proposal counts while a finding is linked to it,
+    /// its owner is a planner of the runtime's, and [`improvement_running`]
+    /// holds for it then. The events carry each of these facts:
+    /// - the link: a `finding_status_changed` to `proposed` with its
+    ///   `proposal_id` links the finding, and one to `open` that names a
+    ///   `proposal_id` (its proposal ended unremedied) or an `ask_id` (a
+    ///   person marked it for a new proposal) unlinks it, as those two
+    ///   alone clear the finding's proposal; a finding resolved, dismissed
+    ///   or reopened by another occurrence keeps it;
+    /// - the owner's origin: the latest of the link's `by` (`planner` for a
+    ///   planner of the runtime's, `person` for a person's `submit
+    ///   --finding`, which is not counted) and the `owner_origin` of the
+    ///   proposal's `task_submitted`. A resubmission changes the owner
+    ///   without linking its findings again, so `task_submitted` records
+    ///   it: the one fact no event carried;
+    /// - the proposal's members and their ends: the tasks its
+    ///   `task_submitted` and `task_reopened` (plan review moving a ready
+    ///   task into a proposal of its own) bring in, less those reopened
+    ///   into another, and each task's latest `task_status_changed`
+    ///   (`completed` or `canceled` ends one; a member with none since is
+    ///   still to be done);
+    /// - its withdrawal: `proposal_withdrawn`, which cancels it. Plan
+    ///   review's cancel cancels its tasks, which ends it the same way.
+    ///
+    /// With `--goal`, a proposal counts when one of its tasks is of the
+    /// goal. `None` (`unavailable`: `not_recorded`) when a proposal that
+    /// would run has no record of its owner's origin.
+    fn improvement_proposals(&self, upto: EventId) -> Option<usize> {
+        use crate::domain::{ProposalStatus, TaskStatus, event_kind as kinds};
+        let mut links: HashMap<i64, i64> = HashMap::new();
+        let mut owners: HashMap<i64, Option<bool>> = HashMap::new();
+        let mut members: HashMap<i64, Vec<TaskId>> = HashMap::new();
+        let mut withdrawn: HashSet<i64> = HashSet::new();
+        let mut statuses: HashMap<TaskId, TaskStatus> = HashMap::new();
+        let field = |event: &RunEvent, key: &str| event.payload.get(key).and_then(Value::as_i64);
+        for event in self.events.iter().filter(|event| event.id <= upto) {
+            match event.kind.as_str() {
+                kinds::FINDING_STATUS_CHANGED => {
+                    let Some(finding) = field(event, "finding_id") else {
+                        continue;
+                    };
+                    let proposal = field(event, "proposal_id");
+                    match (event.payload["to"].as_str(), proposal) {
+                        (Some("proposed"), Some(proposal)) => {
+                            links.insert(finding, proposal);
+                            let by = event.payload.get("by").and_then(Value::as_str);
+                            owners.insert(proposal, by.and_then(runtime_owner));
+                        }
+                        (Some("open"), _)
+                            if proposal.is_some() || field(event, "ask_id").is_some() =>
+                        {
+                            links.remove(&finding);
+                        }
+                        _ => {}
+                    }
+                }
+                kinds::TASK_SUBMITTED | kinds::TASK_REOPENED => {
+                    let (Some(proposal), Some(task)) = (field(event, "proposal_id"), event.task_id)
+                    else {
+                        continue;
+                    };
+                    if event.kind == kinds::TASK_REOPENED {
+                        for tasks in members.values_mut() {
+                            tasks.retain(|&member| member != task);
+                        }
+                    }
+                    let tasks = members.entry(proposal).or_default();
+                    if !tasks.contains(&task) {
+                        tasks.push(task);
+                    }
+                    if let Some(origin) = event.payload.get("owner_origin").and_then(Value::as_str)
+                    {
+                        owners.insert(proposal, runtime_owner(origin));
+                    }
+                }
+                kinds::TASK_STATUS_CHANGED => {
+                    if let (Some(task), Some(Ok(to))) = (
+                        event.task_id,
+                        event.payload["to"].as_str().map(str::parse::<TaskStatus>),
+                    ) {
+                        statuses.insert(task, to);
+                    }
+                }
+                kinds::PROPOSAL_WITHDRAWN => {
+                    withdrawn.extend(field(event, "proposal_id"));
+                }
+                _ => {}
+            }
+        }
+        let proposals: HashSet<i64> = links.into_values().collect();
+        let mut running = 0;
+        for proposal in proposals {
+            let tasks = members.get(&proposal).map_or(&[][..], Vec::as_slice);
+            if self.goal_id.is_some() && !tasks.iter().any(|&task| self.counts(Some(task))) {
+                continue;
+            }
+            let status = if withdrawn.contains(&proposal) {
+                ProposalStatus::Canceled
+            } else {
+                ProposalStatus::Submitted
+            };
+            let ends: Vec<TaskStatus> = tasks
+                .iter()
+                .map(|task| statuses.get(task).copied().unwrap_or(TaskStatus::Submitted))
+                .collect();
+            if !improvement_running(status, &ends) {
+                continue;
+            }
+            match owners.get(&proposal).copied().flatten() {
+                Some(true) => running += 1,
+                Some(false) => {}
+                None => return None,
+            }
+        }
+        Some(running)
+    }
+}
+
+/// Whether an owner's origin as an event names it (`planner` or
+/// `runtime`, `person`) is the runtime's; `None` for any other.
+fn runtime_owner(origin: &str) -> Option<bool> {
+    match origin {
+        "planner" | "runtime" => Some(true),
+        "person" => Some(false),
+        _ => None,
     }
 }
 

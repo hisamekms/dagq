@@ -30,9 +30,10 @@ pub(super) struct SubmitTime<'a> {
 /// Submit `submission` inside the caller's write transaction: its tasks
 /// and the draft tasks of its goals (and, for a resubmission, the drafts
 /// the proposal already holds) move from `draft` to `submitted` and join
-/// the proposal, recording `task_status_changed` and `task_submitted`
-/// (`goal_submitted` for a goal), and `proposal_submitted`
-/// ([`record_submitter`]). With the repository's set of changes,
+/// the proposal, recording `task_status_changed` and `task_submitted` with
+/// the owner's origin, which a resubmission may change (`goal_submitted`
+/// for a goal), and `proposal_submitted` ([`record_submitter`]). With the
+/// repository's set of changes,
 /// every task that moves must declare one of them (ADR-t980-1); with its
 /// prefixes of a task's title, every task that moves must have a title
 /// that starts with one of them; with its
@@ -232,7 +233,7 @@ pub(super) fn submit(
             task_id,
             None,
             EventKind::TaskSubmitted,
-            json!({"proposal_id": id}),
+            json!({"proposal_id": id, "owner_origin": submitted.owner().origin}),
         )?;
     }
     super::draft_planners::record_adoptions(conn, &adoptions)?;

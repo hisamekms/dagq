@@ -108,9 +108,10 @@ fn kpi_reads_the_queue_the_host_settings_and_the_marks() {
     assert_eq!(today["kpis"]["landing_attempt"]["all"]["n"], 0);
     assert_eq!(today["details"]["landing_utilization"]["attempts"], 0);
     assert_eq!(
-        today["unavailable"]["improvement_proposals"],
-        "not_recorded"
+        today["kpis"]["improvement_proposals"]["all"],
+        json!({"n": 0, "value": 0.0})
     );
+    assert!(today["unavailable"].get("improvement_proposals").is_none());
     assert_eq!(today["marks"][0]["label"], "sccache");
     assert_eq!(today["comparison"]["landings"]["all"]["previous"], 0.0);
     assert_eq!(periods[0]["partial"], false);
@@ -234,6 +235,88 @@ fn kpi_counts_the_drafts_registered_per_landing() {
     let target = &report["targets"][0];
     assert_eq!(target["kpi"], "draft_backlog");
     assert_eq!(target["periods"][0]["reason"], "partial");
+}
+
+/// Submits a draft task named `title` linked to `finding`, as a planner
+/// of `origin`'s; returns the task.
+fn submit_improvement(
+    queue: &mut SqliteQueue,
+    db: &Path,
+    finding: dagq::domain::FindingId,
+    origin: dagq::domain::PlannerOrigin,
+    title: &str,
+) -> TaskId {
+    let task = TaskId::new(ok(db, &["add", title])["id"].as_i64().unwrap());
+    queue
+        .submit_linking(
+            dagq::domain::Submission {
+                tasks: vec![task],
+                goals: Vec::new(),
+                proposal: None,
+                owner: dagq::domain::PlannerOwner {
+                    origin,
+                    workspace_id: Some(format!("W-{title}")),
+                },
+            },
+            &[finding],
+        )
+        .unwrap();
+    task
+}
+
+/// `improvement_proposals` (ADR-0051 decision 25) on a real queue: the
+/// proposals the runtime's planners linked to a finding count while a task
+/// is to be done, a person's `submit --finding` does not, and the count of
+/// today is the one `SqliteQueue::improvements` gives now.
+#[test]
+fn kpi_counts_the_improvement_proposals_running() {
+    use dagq::domain::{FindingTarget, NewFinding, PlannerOrigin};
+    let (dir, db) = queue();
+    let config = dir.path().join("config");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let mut finding = |subject: &str| {
+        queue
+            .record_finding(NewFinding {
+                kind: "conflict_hotspot".into(),
+                target: FindingTarget::Queue,
+                subject: subject.into(),
+                summary: format!("{subject} conflicts"),
+                detail: None,
+                impact: None,
+                evidence: Vec::new(),
+                propose: None,
+                by: "observer".into(),
+            })
+            .unwrap()
+            .finding
+            .id
+    };
+    let findings = [
+        finding("src/a.rs"),
+        finding("src/b.rs"),
+        finding("src/c.rs"),
+    ];
+    submit_improvement(&mut queue, &db, findings[0], PlannerOrigin::Runtime, "a");
+    let ended = submit_improvement(&mut queue, &db, findings[1], PlannerOrigin::Runtime, "b");
+    submit_improvement(&mut queue, &db, findings[2], PlannerOrigin::Person, "c");
+    let count = |db: &Path| {
+        kpi_ok(db, &config, &["--last", "1"])["periods"][0]["kpis"]["improvement_proposals"]["all"]
+            ["value"]
+            .clone()
+    };
+    assert_eq!(count(&db), json!(2.0));
+    ok(
+        &db,
+        &["cancel", &ended.to_string(), "--reason", "not_worth"],
+    );
+    assert_eq!(count(&db), json!(1.0));
+    assert_eq!(queue.improvements(9).unwrap().running, 1);
+    let report = kpi_ok(&db, &config, &["--last", "1"]);
+    assert!(
+        report["periods"][0]["unavailable"]
+            .get("improvement_proposals")
+            .is_none()
+    );
 }
 
 /// `dagq report` in UTC with the host-wide `host.toml` under `config`.
