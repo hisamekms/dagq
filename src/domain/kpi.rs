@@ -406,7 +406,11 @@ pub struct KpiInput<'a> {
     pub rust_toolchain: bool,
     pub config: &'a KpiConfig,
     /// The host's load, a reference next to each window's KPIs (task 872):
-    /// never a KPI, judged or pushed; `None` reads none.
+    /// itself never a KPI, judged or pushed, but `cpu_per_landing` and
+    /// `load_per_core` are made from it and judged against their targets
+    /// like any KPI. `kpi`, the reports, the breach check and the
+    /// observer's input all pass the host's records; `None` reads none and
+    /// leaves those KPIs null and `not_judged`.
     pub host: Option<HostReader<'a>>,
 }
 

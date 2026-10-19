@@ -19,8 +19,8 @@ pub struct Host {
 
 /// The KPIs `query` asks for, at the unix second `now`, judged by `config`,
 /// the landed runs' areas read by `areas`, with the host's load of each
-/// window when `host_metrics` reads it (task 872; `kpi` and the reports do,
-/// the breach check and the observer do not). The KPIs come from the
+/// window when `host_metrics` reads it (`kpi`, the reports, the breach
+/// check and the observer's input all pass the host's records). The KPIs come from the
 /// [`EventStore`]; the [`PlanningRecords`] and [`SupervisorReads`] reads
 /// are what they still join from the StateStore (the tasks' goals and
 /// changes, the drafts' origins and the supervisors' heartbeats) until the

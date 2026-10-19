@@ -292,6 +292,71 @@ fn a_failing_command_is_retried_then_told_once_and_cleared_by_a_success() {
     );
 }
 
+/// A target on the host's load is judged from the host's records as
+/// `dagq kpi` judges it: off target day after day, its breach is
+/// recorded and pushed; without records it is not judged and the check
+/// goes on.
+#[test]
+fn a_host_load_target_breaches_from_the_host_records_and_is_not_judged_without_them() {
+    let host_load = |s: &Setup| {
+        fs::write(
+            s.queue_dir.join("host.toml"),
+            format!(
+                "[kpi]\nmin_samples = 1\nbreach_periods = 1\nbreach_weeks = 1\n\n\
+                 [kpi.targets.load_per_core]\nstat = \"median\"\nmax = 0.001\n\n\
+                 [push]\ncommand = [\"{}\"]\ntimeout_secs = 10\nmax_breach_per_day = 1\n",
+                s.script.display()
+            ),
+        )
+        .unwrap();
+    };
+    let breaches = |db: &Path| -> Vec<(String, String)> {
+        events_of(db, "kpi_breach_started")
+            .iter()
+            .map(|b| {
+                (
+                    b["period"].as_str().unwrap().to_owned(),
+                    b["kpi"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    };
+
+    let s = setup("exit 0", true);
+    host_load(&s);
+    record_host_load(&s.queue_dir, 21, 64.0);
+    let backend = TestWorkspace::new(&s.db, false, VALID_AGENT);
+    supervise_with(&s.db, &s.repo, &backend, &s.options).unwrap();
+    assert_eq!(
+        breaches(&s.db),
+        [
+            ("day".to_owned(), "load_per_core".to_owned()),
+            ("week".to_owned(), "load_per_core".to_owned()),
+        ]
+    );
+    let messages = pushed(&s.inbox);
+    assert_eq!(messages[0].0["kind"], "breach", "{messages:?}");
+    assert_eq!(messages[0].0["breaches"][0]["kpi"], "load_per_core");
+
+    let s = setup("exit 0", true);
+    host_load(&s);
+    let backend = TestWorkspace::new(&s.db, false, VALID_AGENT);
+    let outcome = supervise_with(&s.db, &s.repo, &backend, &s.options).unwrap();
+    assert_eq!(outcome["outcome"], "finished", "{outcome}");
+    assert_eq!(breaches(&s.db), []);
+    // The reports judge with the same reader: the target is not judged.
+    let written = events_of(&s.db, "report_written");
+    let latest_day = written.iter().rev().find(|w| w["period"] == "day").unwrap();
+    let report: Value =
+        serde_json::from_slice(&fs::read(latest_day["json"].as_str().unwrap()).unwrap()).unwrap();
+    let target = &report["targets"][0];
+    assert_eq!(
+        (&target["kpi"], &target["state"]),
+        (&json!("load_per_core"), &json!("not_judged")),
+        "{report}"
+    );
+}
+
 /// Of two supervisors that judged the same breach, one records it, and
 /// an ended breach can start again.
 #[test]

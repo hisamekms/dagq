@@ -563,7 +563,10 @@ impl<'a> Context<'a> {
     /// (goal 72): the CPU seconds the records stand for over the landings,
     /// and `load1` over the logical cores. Null without records (or
     /// landings, or cores). `landings` are the `all` stratum's, of the goal
-    /// with `--goal`, while the CPU is always the whole host's.
+    /// with `--goal`, while the CPU is always the whole host's. Their
+    /// targets are judged as any KPI's, so the breach check records and
+    /// pushes their breaches and the observer reads them; null leaves them
+    /// `not_judged`.
     fn host_kpis(
         &self,
         host: &HostSummary,

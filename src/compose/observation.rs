@@ -1219,10 +1219,7 @@ impl OneShot {
             &setup.config,
             &setup.areas,
             query,
-            setup
-                .host_metrics
-                .as_ref()
-                .map(|read| crate::domain::kpi::HostReader(read.0.as_ref())),
+            setup.host_reader(),
         )?)?)
     }
 
@@ -1284,7 +1281,7 @@ impl OneShot {
                     last,
                     ..KpiQuery::default()
                 },
-                None,
+                setup.host_reader(),
             )
         };
         let (day, week) = (of(Period::Day, 7)?, of(Period::Week, 4)?);

@@ -192,7 +192,7 @@ promptと打たせるコマンドと出力の形は変えず、Claudeのplugin�
 [ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定24〜26（決定26はADR-t1971-1がamends）。
 observerはKPIの目標割れの継続を種類`kpi`のfindingにし、そこから作る改善のproposalは同時の数に上限がある。
 
-- **入力の`kpi`**（`OneShot::observer_kpi`、純粋関数と載せるものは`domain::kpi::observe`）: [`kpi`](commands.md)を直近の日と週の期間で`dagq kpi`と同じ設定（main checkoutの`dagq.toml`の`[kpi]`にhost.tomlを重ねたもの）で計算し、目標ごとの判定、目標割れごとのfindingの種類・subject・根拠のevent・印、期間ごとの傾向と見込みの答え合わせを載せる。
+- **入力の`kpi`**（`OneShot::observer_kpi`、純粋関数と載せるものは`domain::kpi::observe`）: [`kpi`](commands.md)を直近の日と週の期間で`dagq kpi`と同じ設定とhostの負荷の記録で計算し（hostの負荷のKPIの目標も判定）、目標ごとの判定、目標割れごとのfindingの種類・subject・根拠のevent・印、期間ごとの傾向と見込みの答え合わせを載せる。
   数字は`kpi`の出力をそのまま引き、observerは作らない。
   読めなければ`{"error": ...}`にして他の入力で観察を続ける。
   目標割れの根拠は同じ期間・KPI・層の閉じていない`kpi_breach_started`のevent ID（`SqliteQueue::kpi_breach_events_open`）。

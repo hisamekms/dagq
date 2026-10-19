@@ -45,6 +45,7 @@ runtimeはntfyやSlackなどのサービスに依存せず、秘密（webhookの
 
 - supervisorのレポートのjob（[レポート](commands.md)のsupervisorの日次）が、`write_due`の後に`application::push::check_breaches`で、今の時点の日と週の`kpi`の目標の判定（[kpi](commands.md)）を読む。
   目標が1つも無く、開いた目標割れも無ければ何もしない。
+  `dagq kpi`とレポートと同じくhostの負荷の記録も読むので、hostの負荷から作るKPI（`cpu_per_landing`・`load_per_core`）の目標も判定し、記録が無ければそのKPIは`not_judged`になるだけで検査は続く。
 - 状態が`breach`の目標（KPIと層）は`kpi_breach_started`を、開いた目標割れのうち今の判定が`ok`か`missed`のもの（判定できる期間が目標を満たした）は解消を、目標の設定から消えたものも解消を`kpi_breach_resolved`で記録する。
   `not_judged`の間は開いたまま。
   どれもtaskの無いqueueのevent。

@@ -66,6 +66,15 @@ pub struct ReportSetup {
     pub host_metrics: Option<HostMetrics>,
 }
 
+impl ReportSetup {
+    /// [`Self::host_metrics`] as the reader [`super::kpi::kpi`] takes.
+    pub fn host_reader(&self) -> Option<HostReader<'_>> {
+        self.host_metrics
+            .as_ref()
+            .map(|read| HostReader(read.0.as_ref()))
+    }
+}
+
 /// Summarizes the host's load between two unix seconds (task 872).
 #[derive(Clone)]
 pub struct HostMetrics(pub Arc<dyn Fn(i64, i64) -> HostSummary + Send + Sync>);
@@ -160,10 +169,7 @@ fn make_with(
             at,
             ..KpiQuery::default()
         },
-        setup
-            .host_metrics
-            .as_ref()
-            .map(|read| HostReader(read.0.as_ref())),
+        setup.host_reader(),
     )?;
     let findings: Vec<_> = queue
         .findings(&FindingQuery::default())?

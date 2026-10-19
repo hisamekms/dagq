@@ -1033,6 +1033,75 @@ impl AgentProvider for BreachRecorder {
     }
 }
 
+/// The observer's `kpi` judges a target on the host's load from the
+/// host's records as `dagq kpi` does: off target, it is in breach in the
+/// input; without records it is not judged and the observer goes on.
+#[test]
+fn observe_judges_a_host_load_target_from_the_host_records() {
+    use dagq::application::observer::ObserveMode;
+    // The observer's `kpi` input of a queue with the target, with the
+    // host's records of 3 weeks or without them.
+    let observed = |recorded: bool| -> Value {
+        let (_dir, repo, db) = fixture();
+        SqliteQueue::open(&db)
+            .unwrap()
+            .bind_repository(repo.join(".git").to_str().unwrap())
+            .unwrap();
+        let queue_dir = db.parent().unwrap();
+        fs::write(
+            queue_dir.join("host.toml"),
+            "[kpi]\nmin_samples = 1\nbreach_periods = 1\nbreach_weeks = 1\n\
+             [kpi.targets.load_per_core]\nstat = \"median\"\nmax = 0.001\n",
+        )
+        .unwrap();
+        if recorded {
+            record_host_load(queue_dir, 21, 64.0);
+        }
+        let done = observe(&db, &BreachRecorder, &observe_options(ObserveMode::Hourly)).unwrap();
+        assert_eq!(done["outcome"], "succeeded", "{done}");
+        let dir = PathBuf::from(done["dir"].as_str().unwrap());
+        serde_json::from_str(&fs::read_to_string(dir.join("seen.json")).unwrap()).unwrap()
+    };
+    let states = |kpi: &Value| -> Vec<(Value, Value)> {
+        kpi["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| (t["period"].clone(), t["state"].clone()))
+            .collect()
+    };
+
+    let kpi = observed(true);
+    assert_eq!(
+        states(&kpi),
+        [
+            (json!("day"), json!("breach")),
+            (json!("week"), json!("breach")),
+        ],
+        "{kpi}"
+    );
+    let breaches = kpi["breaches"].as_array().unwrap();
+    assert_eq!(breaches.len(), 2, "{kpi}");
+    assert!(
+        breaches
+            .iter()
+            .all(|breach| breach["subject"] == "load_per_core/all"),
+        "{kpi}"
+    );
+
+    // No records: not judged, and the observer runs.
+    let kpi = observed(false);
+    assert_eq!(
+        states(&kpi),
+        [
+            (json!("day"), json!("not_judged")),
+            (json!("week"), json!("not_judged")),
+        ],
+        "{kpi}"
+    );
+    assert_eq!(kpi["breaches"], json!([]));
+}
+
 /// ADR-0070 decisions 4 and 5: a forecast that missed its p90 is scored
 /// in the observer's input (`kpi.forecast`), the target on its p90 hit
 /// rate goes into breach, and the breach is recorded as a `forecast`

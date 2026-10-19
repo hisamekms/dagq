@@ -2277,3 +2277,26 @@ impl Clock for ManualClock {
         Instant::now()
     }
 }
+
+/// Records the host's load under the queue at `queue_dir` as the
+/// supervisor would (`host/metrics-*.csv`, in UTC): `load1` of `load`
+/// every 6 hours over the `days` before now.
+pub fn record_host_load(queue_dir: &Path, days: i64, load: f64) {
+    use dagq::domain::host_metrics::{HostSample, file_name, header, local_day};
+    let host = queue_dir.join(dagq::domain::host_metrics::HOST_DIR);
+    fs::create_dir_all(&host).unwrap();
+    let now = SystemClock.now();
+    let mut files: std::collections::BTreeMap<i64, String> = std::collections::BTreeMap::new();
+    for back in (1..=4 * days).rev() {
+        let unix = now - back * 6 * 3600;
+        let mut sample = HostSample::new(unix);
+        sample.set("load1", Some(load));
+        files
+            .entry(local_day(unix, 0))
+            .or_insert_with(|| format!("{}\n", header()))
+            .push_str(&format!("{}\n", sample.row(0)));
+    }
+    for (day, text) in files {
+        fs::write(host.join(file_name(day)), text).unwrap();
+    }
+}
