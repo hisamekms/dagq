@@ -273,6 +273,93 @@ pub(super) enum Quiet {
     Stuck(String),
 }
 
+/// The headless review jobs a phase holds, as the park of a run takes
+/// them ([`Supervisor::park_review_jobs`]): a phase whose review jobs a
+/// park must let end implements it, and its arm in the park's step calls
+/// that.
+pub(super) trait ParkedReviewJobs {
+    /// Reap the jobs that ended, recording their ends; a reap starts no job.
+    fn reap(&mut self, supervisor: &mut Supervisor<'_>, run: &TaskRun) -> Result<()>;
+    /// How many of its jobs run.
+    fn running(&self) -> usize;
+    /// How many of its jobs wait to start.
+    fn waiting(&self) -> usize;
+    /// Whether, once none of its jobs runs or waits, its phase judges it as
+    /// before (its verdict starts nothing past the fence) rather than the
+    /// park withholding its result.
+    fn judged_once_ended(&self) -> bool;
+    /// What the withheld event records of it (`what`, its `attempt`, ...),
+    /// past the park's own part.
+    fn withheld(&self) -> Value;
+}
+
+impl ParkedReviewJobs for ReviewWatch {
+    fn reap(&mut self, supervisor: &mut Supervisor<'_>, run: &TaskRun) -> Result<()> {
+        supervisor.reap_review_jobs(run, self)
+    }
+
+    fn running(&self) -> usize {
+        Self::running(self)
+    }
+
+    fn waiting(&self) -> usize {
+        waiting_review_jobs(&self.jobs)
+    }
+
+    fn judged_once_ended(&self) -> bool {
+        true
+    }
+
+    fn withheld(&self) -> Value {
+        review_withheld(self.attempt)
+    }
+}
+
+/// How many of a run's review `jobs` wait to start.
+fn waiting_review_jobs(jobs: &[ReviewJob]) -> usize {
+    jobs.iter()
+        .filter(|job| matches!(job.state, ReviewJobState::Waiting(_)))
+        .count()
+}
+
+/// What the withheld event records of a run's review of `attempt`.
+fn review_withheld(attempt: usize) -> Value {
+    json!({"what": "review", "attempt": attempt})
+}
+
+/// What the park makes of a phase's review jobs once those that ended were
+/// reaped ([`park_review_jobs`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum JobsPark {
+    /// A job runs: the run keeps its slot until it ends.
+    Wait,
+    /// None runs or waits and the phase judges them as before.
+    Judge,
+    /// None runs and the result is withheld (recorded, not acted on): the
+    /// jobs that wait never start, and the run is parked. What the withheld
+    /// event records of the jobs, past the park's own part.
+    Withheld(Value),
+}
+
+/// The park's step over `jobs`, whose ended ones were reaped: wait while
+/// one runs; else judge as before when none waits and the phase is judged
+/// once ended; else withhold the result, with what to record of it (with
+/// `waiting`, how many were left to start). No job is started.
+pub(super) fn park_review_jobs<J: ParkedReviewJobs + ?Sized>(jobs: &J) -> JobsPark {
+    if jobs.running() > 0 {
+        return JobsPark::Wait;
+    }
+    let waiting = jobs.waiting();
+    if waiting == 0 && jobs.judged_once_ended() {
+        return JobsPark::Judge;
+    }
+    let mut payload = jobs.withheld();
+    if let Some(payload) = payload.as_object_mut() {
+        payload.insert("waiting".to_owned(), json!(waiting));
+    }
+    JobsPark::Withheld(payload)
+}
+
 impl Supervisor<'_> {
     /// Let a test pause this supervisor at `point` for `run`
     /// ([`Ports::pauses`]); nothing outside the tests.
@@ -308,6 +395,28 @@ impl Supervisor<'_> {
             .open_hold(run.task_id())?
             .filter(|hold| hold.settled_at.is_none())
             .map(ParkFor::Hold))
+    }
+
+    /// Take `jobs`, the review jobs of `run`'s phase, through the park:
+    /// reap those that ended, then [`park_review_jobs`], whose withheld
+    /// result is recorded as the park's event `kind` with its own part of
+    /// the payload, `base`, in front: a record that fails fails the step.
+    fn park_review_jobs(
+        &mut self,
+        run: &TaskRun,
+        jobs: &mut dyn ParkedReviewJobs,
+        (kind, base): (EventKind, &Value),
+    ) -> Result<JobsPark> {
+        jobs.reap(self, run)?;
+        let park = park_review_jobs(jobs);
+        if let JobsPark::Withheld(payload) = &park {
+            self.queue.record_runtime_event(
+                run.id(),
+                kind,
+                withheld_payload(base, payload.clone()),
+            )?;
+        }
+        Ok(park)
     }
 
     /// Park the run of `slot` when an operation or its task's hold parks it
@@ -374,36 +483,17 @@ impl Supervisor<'_> {
             // left to start is withheld and parked as it stands.
             Phase::Review(watch) => {
                 let run = slot.run.clone();
-                self.reap_review_jobs(&run, watch)?;
-                if watch.running() > 0 {
-                    return Ok(Some(Step::Continue));
+                match self.park_review_jobs(&run, watch, (withheld_kind, &withheld_base))? {
+                    JobsPark::Wait => return Ok(Some(Step::Continue)),
+                    JobsPark::Judge => return Ok(None),
+                    JobsPark::Withheld(_) => {
+                        withheld = Some(Phase::ReviewHeld {
+                            session: watch.session.take(),
+                            retried: watch.retried,
+                            providers: Vec::new(),
+                        });
+                    }
                 }
-                if watch
-                    .jobs
-                    .iter()
-                    .all(|job| !matches!(job.state, ReviewJobState::Waiting(_)))
-                {
-                    return Ok(None);
-                }
-                let waiting = watch
-                    .jobs
-                    .iter()
-                    .filter(|job| matches!(job.state, ReviewJobState::Waiting(_)))
-                    .count();
-                self.queue.record_runtime_event(
-                    slot.run.id(),
-                    withheld_kind,
-                    withheld_payload(
-                        &withheld_base,
-                        json!({"what": "review", "attempt": watch.attempt, "waiting": waiting}),
-                    ),
-                )?;
-                let held = Phase::ReviewHeld {
-                    session: watch.session.take(),
-                    retried: watch.retried,
-                    providers: Vec::new(),
-                };
-                withheld = Some(held);
             }
             // The program that runs ends first and its end is recorded;
             // neither the next program nor the agents' review starts.
@@ -479,7 +569,16 @@ impl Supervisor<'_> {
                     )?;
                 }
             }
-            _ => {}
+            // A session's, a revise's or a resume's turn that runs is
+            // waited for by the park itself; a review that waits as a whole,
+            // an exit and a wait for a slot or an e2e run nothing to end.
+            Phase::Session(_)
+            | Phase::Revise(_)
+            | Phase::Resume(_)
+            | Phase::ReviewHeld { .. }
+            | Phase::Exiting(_)
+            | Phase::AwaitingSlot
+            | Phase::AwaitingE2e => {}
         }
         // The review left as it stands waits for the park in place of its
         // jobs; were the park not to happen after all, it starts again.
@@ -1652,6 +1751,107 @@ fn saved_log(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::review_jobs::ReviewJobId;
+
+    /// A phase's review jobs by how many run and wait, standing for any
+    /// phase that holds them.
+    struct Jobs {
+        running: usize,
+        waiting: usize,
+        judged_once_ended: bool,
+    }
+
+    impl ParkedReviewJobs for Jobs {
+        fn reap(&mut self, _: &mut Supervisor<'_>, _: &TaskRun) -> Result<()> {
+            unreachable!("park_review_jobs reaps nothing")
+        }
+
+        fn running(&self) -> usize {
+            self.running
+        }
+
+        fn waiting(&self) -> usize {
+            self.waiting
+        }
+
+        fn judged_once_ended(&self) -> bool {
+            self.judged_once_ended
+        }
+
+        fn withheld(&self) -> Value {
+            json!({"what": "claim_review", "attempt": 2})
+        }
+    }
+
+    #[test]
+    fn a_review_job_that_runs_is_waited_for_and_nothing_is_withheld() {
+        for judged_once_ended in [true, false] {
+            let jobs = Jobs {
+                running: 1,
+                waiting: 2,
+                judged_once_ended,
+            };
+            assert_eq!(park_review_jobs(&jobs), JobsPark::Wait);
+        }
+    }
+
+    #[test]
+    fn review_jobs_left_to_start_are_withheld_and_not_started() {
+        let jobs = Jobs {
+            running: 0,
+            waiting: 2,
+            judged_once_ended: true,
+        };
+        assert_eq!(
+            park_review_jobs(&jobs),
+            JobsPark::Withheld(json!({"what": "claim_review", "attempt": 2, "waiting": 2}))
+        );
+    }
+
+    #[test]
+    fn ended_review_jobs_are_judged_as_before_or_withheld_by_their_phase() {
+        let ended = |judged_once_ended| Jobs {
+            running: 0,
+            waiting: 0,
+            judged_once_ended,
+        };
+        assert_eq!(park_review_jobs(&ended(true)), JobsPark::Judge);
+        assert_eq!(
+            park_review_jobs(&ended(false)),
+            JobsPark::Withheld(json!({"what": "claim_review", "attempt": 2, "waiting": 0}))
+        );
+    }
+
+    #[test]
+    fn a_runs_review_counts_its_jobs_left_to_start_and_records_its_attempt() {
+        let job = |state| ReviewJob {
+            id: ReviewJobId::Whole,
+            provider: None,
+            input: ReviewJobInput::Whole {
+                prompt: String::new(),
+                prompt_bytes: crate::application::prompt::PromptBytes::default(),
+                session_id: None,
+            },
+            builtin: None,
+            again: false,
+            state,
+            session: None,
+        };
+        let missed = || ReviewJobState::Missed {
+            why: "no answer".to_owned(),
+            ran: true,
+        };
+        assert_eq!(waiting_review_jobs(&[job(missed())]), 0);
+        assert_eq!(
+            waiting_review_jobs(&[
+                job(missed()),
+                job(ReviewJobState::Waiting(None)),
+                job(ReviewJobState::Waiting(Some("held".to_owned()))),
+            ]),
+            2
+        );
+        assert_eq!(review_withheld(3), json!({"what": "review", "attempt": 3}));
+    }
 
     #[test]
     fn the_wait_for_the_writer_ends_past_the_turns_limit_and_its_grace() {
