@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use dagq::application::{GraphInput, TaskStore, dependency_graph, diagram};
+use dagq::application::{GraphInput, TaskReads, dependency_graph, diagram};
 use dagq::domain::GoalId;
 use dagq::domain::ledger::attributes::{Attributes, Folded, fold};
 use dagq::infrastructure::sqlite::SqliteQueue;

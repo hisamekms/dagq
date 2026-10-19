@@ -8,7 +8,7 @@ use serde_json::Value;
 
 use super::sqlite::{SqliteQueue, read_task};
 use crate::application::commands::planning::{Dependency, PlanningStore};
-use crate::application::{EventStore, GoalReviewStore, TaskStore};
+use crate::application::{EventStore, GoalReviewStore, TaskReads, TaskStore};
 use crate::domain::{
     FindingId, Goal, GoalEdit, GoalId, GoalVerdict, NewGoal, NewTask, Priority, Proposal,
     ProposalId, Submission, Task, TaskAction, TaskDetail, TaskEdit, TaskId, TaskStatus,
@@ -128,7 +128,7 @@ impl PlanningStore for SqliteQueue {
     }
 
     fn show(&mut self, task: TaskId) -> Result<TaskDetail> {
-        TaskStore::show(self, task)
+        TaskReads::show(self, task)
     }
 
     fn submit(&mut self, submission: Submission, findings: &[FindingId]) -> Result<Proposal> {

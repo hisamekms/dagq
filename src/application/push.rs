@@ -13,7 +13,7 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use super::{
-    AskQuery, AskStore, PlanningRecords, QueueRecords, RunLog, SupervisorRegistry,
+    AskQuery, AskStore, PlanningRecords, QueueRecords, RunLog, SupervisorReads,
     report::{self, ReportSetup, Written},
 };
 use crate::domain::kpi::{
@@ -74,7 +74,7 @@ pub struct BreachCheck {
 /// 18). A start is marked `pushed` while `push` sends breaches and the
 /// local day's limit allows.
 pub fn check_breaches(
-    queue: &(impl PlanningRecords + QueueRecords + SupervisorRegistry + RunLog + ?Sized),
+    queue: &(impl PlanningRecords + QueueRecords + SupervisorReads + RunLog + ?Sized),
     setup: &ReportSetup,
     push: Option<&PushConfig>,
     now: i64,

@@ -7,20 +7,26 @@
 //! calls them and applies what they return.
 
 use super::*;
-use crate::application::{HostOpsQueue, ObservationQueue, SupervisorRegistry};
+use crate::application::{HostOpsQueue, ObservationQueue, RepositoryReads, SupervisorReads};
 
 /// What a pass of a context reads and calls of the loop: the parts every
 /// context shares (the queue's connection, the clock, the
 /// places) and the adapters, borrowed apart from the context's own state.
 /// The connection is the loop's whole queue until [`PassEnv::observation`]
-/// or [`PassEnv::host`] keeps the ports `Q` of the context.
-pub(super) struct PassEnv<'s, Q: ?Sized = dyn Queue + Send> {
+/// or [`PassEnv::host`] keeps the ports `Q` of the context, and the
+/// repository `R` the loop's whole [`Repository`] until
+/// [`PassEnv::observation`] keeps its reads.
+pub(super) struct PassEnv<
+    's,
+    Q: ?Sized = dyn Queue + Send,
+    R: ?Sized = Arc<dyn Repository + Send + Sync>,
+> {
     pub(super) queue: &'s mut Q,
     pub(super) generators: &'s Generators,
     pub(super) layout: &'s Layout,
     pub(super) processes: &'s Arc<dyn ProcessControl + Send + Sync>,
     pub(super) files: &'s Arc<dyn RunFiles>,
-    pub(super) repository: &'s Arc<dyn Repository + Send + Sync>,
+    pub(super) repository: &'s R,
     pub(super) verifier: &'s Arc<dyn Verifier + Send + Sync>,
     pub(super) spawner: &'s dyn Spawner,
     pub(super) sessions: &'s dyn SessionWrappers,
@@ -57,8 +63,10 @@ impl PassEnv<'_> {
     }
 }
 
-/// 観測と分析's [`PassEnv`]: the loop's connection as its ports.
-pub(super) type ObservationEnv<'s> = PassEnv<'s, dyn ObservationQueue + Send>;
+/// 観測と分析's [`PassEnv`]: the loop's connection as its ports and the
+/// repository as its reads (rule C2 of docs/design/architecture.md).
+pub(super) type ObservationEnv<'s> =
+    PassEnv<'s, dyn ObservationQueue + Send, dyn RepositoryReads + Send + Sync>;
 
 /// host運用's [`PassEnv`]: the loop's connection as its ports.
 pub(super) type HostEnv<'s> = PassEnv<'s, dyn HostOpsQueue + Send>;
@@ -84,7 +92,7 @@ impl<'s> PassEnv<'s> {
             layout,
             processes,
             files,
-            repository,
+            repository: &**repository,
             verifier,
             spawner,
             sessions,
@@ -121,7 +129,7 @@ impl<'s> PassEnv<'s> {
     }
 }
 
-impl<Q: SupervisorRegistry + RunLog + ?Sized> PassEnv<'_, Q> {
+impl<Q: SupervisorReads + RunLog + ?Sized, R: ?Sized> PassEnv<'_, Q, R> {
     /// Record `kinds`' held or resumed event when `hold` differs from the
     /// hold in place on the queue (task 327); whether it holds.
     pub(super) fn record_hold(

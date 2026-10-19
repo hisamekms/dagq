@@ -29,7 +29,7 @@ use serde_json::{Value, json};
 use crate::{
     application::{
         AgentProvider, AgentSignals, AskQuery, AskStore, Generators, ObserverLog, QueueRecords,
-        RunLog, TaskStore, dependency_graph, lifecycle::OBSERVER_ROLE,
+        RunLog, TaskReads, dependency_graph, lifecycle::OBSERVER_ROLE,
     },
     domain::{
         ActorContext, ActorRole, AskId, CONSECUTIVE_FAILURES, EventId, FindingQuery, NewHold,
@@ -156,7 +156,7 @@ pub struct ObserverEnvironment<'a, Q: ?Sized> {
 /// refused (it is gone, `unreachable`) is no failure of the observation,
 /// and only when the agent exits non-zero on its error does the next one
 /// read the window again.
-pub fn observe<Q: AskStore + ObserverLog + QueueRecords + RunLog + TaskStore>(
+pub fn observe<Q: AskStore + ObserverLog + QueueRecords + RunLog + TaskReads>(
     queue: &mut Q,
     db: &Path,
     provider: &dyn AgentProvider,

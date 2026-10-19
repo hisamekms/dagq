@@ -86,7 +86,7 @@ pub struct GoalDetail {
 }
 
 /// A task's landed commit (its `run_integrated`'s `result_commit`, the
-/// `landed_commits` row): what `TaskStore::build_waits` gives the claim's
+/// `landed_commits` row): what `TaskReads::build_waits` gives the claim's
 /// wait for a build that contains the dependencies' landings (ADR-t1632-1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Landing {

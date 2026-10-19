@@ -43,7 +43,7 @@ use crate::application::queue_reads::QueueRead;
 use crate::application::queue_service::{
     QueueService, QueueServiceControl, ServiceAccess, ServiceBackend, ServiceProbe, ServiceQueue,
 };
-use crate::application::{EventStore, Exit, Generators, RunNotFound, RunReads, Spawned, TaskStore};
+use crate::application::{EventStore, Exit, Generators, RunNotFound, RunReads, Spawned, TaskReads};
 use crate::domain::queue_service::{
     API_VERSION, LOCK_FILE, LOG_FILE, MAX_ANSWER_BYTES, MAX_REQUEST_BYTES, OWNER_PID_ENV,
     Principal, SERVICE_DIR, SOCKET_FILE, STATE_FILE, ServiceErrorCode, ServiceRequest,
@@ -1029,7 +1029,7 @@ impl DialogueStore for ServiceSqlite {
 
 impl ServiceQueue for ServiceSqlite {
     fn show(&mut self, id: TaskId, full: bool, events: usize) -> Result<Value> {
-        let detail = TaskStore::show(&mut self.queue, id)?;
+        let detail = TaskReads::show(&mut self.queue, id)?;
         Ok(if full {
             serde_json::to_value(detail)?
         } else {
@@ -1045,11 +1045,11 @@ impl ServiceQueue for ServiceSqlite {
         }
     }
     fn proposals(&self, all: bool) -> Result<Value> {
-        Ok(json!({"proposals": TaskStore::proposals(&self.queue, all)?}))
+        Ok(json!({"proposals": TaskReads::proposals(&self.queue, all)?}))
     }
 
     fn show_proposal(&self, id: ProposalId) -> Result<Value> {
-        Ok(serde_json::to_value(TaskStore::show_proposal(
+        Ok(serde_json::to_value(TaskReads::show_proposal(
             &self.queue,
             id,
         )?)?)

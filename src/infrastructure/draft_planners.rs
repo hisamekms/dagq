@@ -837,9 +837,6 @@ impl DraftPlannerStore for SqliteQueue {
     fn set_follow_up_depth(&mut self, task: TaskId, depth: i64) -> Result<()> {
         SqliteQueue::set_follow_up_depth(self, task, depth)
     }
-    fn planner_findings(&self) -> Result<Vec<Finding>> {
-        SqliteQueue::planner_findings(self)
-    }
     fn open_finding_planner(
         &mut self,
         finding: FindingId,
@@ -847,9 +844,6 @@ impl DraftPlannerStore for SqliteQueue {
         limit: usize,
     ) -> Result<FindingPlannerStart> {
         SqliteQueue::open_finding_planner(self, finding, answer, limit)
-    }
-    fn improvements(&self, limit: usize) -> Result<crate::domain::ImprovementLimit> {
-        SqliteQueue::improvements(self, limit)
     }
     fn finding_view(&self, finding: FindingId) -> Result<FindingView> {
         SqliteQueue::findings(
@@ -889,6 +883,15 @@ impl DraftPlannerStore for SqliteQueue {
     }
     fn ask_delivery_failed(&self, ask: AskId, planner: PlannerId) -> Result<bool> {
         SqliteQueue::ask_delivery_failed(self, ask, planner)
+    }
+}
+
+impl crate::application::DraftPlannerReads for SqliteQueue {
+    fn planner_findings(&self) -> Result<Vec<Finding>> {
+        SqliteQueue::planner_findings(self)
+    }
+    fn improvements(&self, limit: usize) -> Result<crate::domain::ImprovementLimit> {
+        SqliteQueue::improvements(self, limit)
     }
 }
 
@@ -1685,7 +1688,7 @@ pub(super) fn record_adoptions(conn: &Connection, adoptions: &[Adoption]) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::application::TaskStore;
+    use crate::application::{TaskReads, TaskStore};
     use crate::domain::{NewAsk, NewTask};
 
     fn draft(queue: &mut SqliteQueue, title: &str) -> TaskId {

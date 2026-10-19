@@ -8,7 +8,7 @@ use std::{
 };
 
 use dagq::{
-    application::{Clock, Generators, IdGenerator, TaskStore, timestamp},
+    application::{Clock, Generators, IdGenerator, TaskReads, TaskStore, timestamp},
     domain::{
         ClaimOutcome, CommitSha, EventId, GoalVerdict, RunId, TaskAction, TaskId, TaskStatus,
     },

@@ -7,7 +7,7 @@
 //! [`QueueRecords`]), the shared [`EventStore`], and
 //! only the reads the other contexts open to every context: the execution
 //! context's runs ([`RunLog`] for the events, the timeline and the marks)
-//! and the planning context's [`TaskStore`] (the notes).
+//! and the planning context's [`TaskReads`] (the notes).
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -18,7 +18,7 @@ use super::{
 };
 use crate::application::forecast::ForecastQuery;
 use crate::application::{
-    Clock, EventStore, ObserverLog, QueueRecords, RunLog, TaskStore, observer, watch,
+    Clock, EventStore, ObserverLog, QueueRecords, RunLog, TaskReads, observer, watch,
 };
 use crate::domain::kpi::KpiQuery;
 use crate::domain::stats::StatsQuery;
@@ -124,7 +124,7 @@ pub fn forecast<Q: ?Sized>(
 }
 
 /// `notes`.
-pub fn notes(queue: &(impl TaskStore + ?Sized), read: &NotesRead) -> Result<Value> {
+pub fn notes(queue: &(impl TaskReads + ?Sized), read: &NotesRead) -> Result<Value> {
     Ok(serde_json::to_value(queue.notes(&NoteQuery {
         goal_id: read.goal.map(GoalId::new),
         task_id: read.task.map(TaskId::new),

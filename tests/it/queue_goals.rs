@@ -2,7 +2,7 @@
 use crate::common;
 
 use dagq::{
-    application::{TaskQuery, TaskStore},
+    application::{TaskQuery, TaskReads, TaskStore},
     domain::{
         ClaimOutcome, GoalEdit, GoalId, GoalStatus, GoalVerdict, NewGoal, NewNote, NewTask,
         NotePage, NoteQuery, NoteTarget, RunId, TaskAction, TaskId, TaskStatus,

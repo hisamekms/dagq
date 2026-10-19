@@ -39,8 +39,8 @@ use serde_json::json;
 use crate::{
     application::{
         Generators, GraphGoalDependency, GraphInput, GraphTask, IdGenerator, LatestRun, ListedHold,
-        ListedReplan, StatusFilter, TaskListItem, TaskPage, TaskQuery, TaskStore, dependency_graph,
-        timestamp,
+        ListedReplan, StatusFilter, TaskListItem, TaskPage, TaskQuery, TaskReads, TaskStore,
+        dependency_graph, timestamp,
     },
     domain::{
         ChangeSet, ClaimOutcome, CommitSha, DomainError, EventId, Goal, GoalDetail, GoalEdit,
@@ -1212,6 +1212,416 @@ impl TaskStore for SqliteQueue {
         Ok(result)
     }
 
+    fn transition(&mut self, task_id: TaskId, action: TaskAction) -> Result<Task> {
+        self.transition_authorized(task_id, action, None)
+    }
+
+    fn cancel(&mut self, task_id: TaskId, cancel: NewCancel) -> Result<Task> {
+        self.cancel_authorized(task_id, &cancel, None)
+    }
+
+    fn add_dependency(&mut self, task_id: TaskId, predecessor_id: TaskId) -> Result<()> {
+        self.add_dependency_authorized(task_id, predecessor_id, None)
+    }
+
+    fn remove_dependency(&mut self, task_id: TaskId, predecessor_id: TaskId) -> Result<()> {
+        self.remove_dependency_authorized(task_id, predecessor_id, None)
+    }
+
+    fn add_goal_dependency(&mut self, task_id: TaskId, goal_id: GoalId) -> Result<()> {
+        self.add_goal_dependency_authorized(task_id, goal_id, None)
+    }
+
+    fn remove_goal_dependency(&mut self, task_id: TaskId, goal_id: GoalId) -> Result<()> {
+        self.remove_goal_dependency_authorized(task_id, goal_id, None)
+    }
+
+    fn investigations(&mut self) -> Result<crate::domain::investigation::Investigations> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let investigations = super::investigations::refresh(&tx, self.generators.clock.now())?;
+        tx.commit()?;
+        Ok(investigations)
+    }
+
+    fn ready_at(&self, tasks: &[TaskId]) -> Result<std::collections::HashMap<TaskId, i64>> {
+        let tx = self.conn.unchecked_transaction()?;
+        let mut times = std::collections::HashMap::new();
+        for task in tasks {
+            if let Some(at) = task_ready_at(&tx, *task)?
+                .as_deref()
+                .and_then(crate::domain::stats::timestamp_millis)
+            {
+                times.insert(*task, at);
+            }
+        }
+        Ok(times)
+    }
+
+    fn claim(&mut self, base_commit: &CommitSha) -> Result<ClaimOutcome> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let outcome = claim_task(
+            &tx,
+            &self.runs_dir,
+            self.generators.ids.as_ref(),
+            self.generators.clock.system_time(),
+            base_commit,
+            &[],
+            &crate::domain::claim_order::ClaimHolds::default(),
+            None,
+            &WorkerTrial::default(),
+            // What every binary runs (ADR-t813-2); a supervisor claims
+            // through its table of adapters instead.
+            &WorkerRoute::direct(&[Worker::CLAUDE_INTERACTIVE, Worker::CLAUDE_HEADLESS]),
+        )?;
+        tx.commit()?;
+        Ok(outcome)
+    }
+
+    fn add_goal(&mut self, new: NewGoal) -> Result<Goal> {
+        // Rejected before taking the write lock; `new` checks it again.
+        new.validate()?;
+        if let Some(tags) = &self.goal_tags {
+            tags.check(&new.tags)?;
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // Its origin, and a request's priority attached as a person's
+        // (ADR-t1975-1 decisions 2 and 5).
+        let creator = creator_of_actor(&tx)?;
+        let origin = creation_origin(creator);
+        let (priority, priority_by) =
+            goal_priority_at_creation(creator, request_priority(&tx, origin)?, new.priority)?;
+        let mut new = new;
+        new.priority = Some(priority);
+        let goal = Goal::new(
+            GoalId::new(next_id(&tx, "goals")?),
+            new,
+            self.generators.clock.timestamp(),
+        )?
+        .with_record(priority_by, origin);
+        let id = goal.id();
+        tx.execute(
+            "INSERT INTO goals(id, title, description, acceptance, constraints, doc, status,
+                               created_at, updated_at, priority, tags, priority_by, origin,
+                               origin_kind, origin_request_id)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+            params![
+                id,
+                goal.title(),
+                goal.description(),
+                goal.acceptance(),
+                goal.constraints(),
+                goal.doc(),
+                goal.status().as_str(),
+                goal.created_at(),
+                goal.updated_at(),
+                goal.priority().as_i64(),
+                serde_json::to_string(goal.tags())?,
+                goal.priority_by().as_str(),
+                origin.origin.as_str(),
+                origin.kind.map(|kind| kind.as_str()),
+                origin.request_id
+            ],
+        )?;
+        let result = read_goal(&tx, id)?;
+        goal_event(&tx, id, EventKind::GoalCreated, json!({"goal": result}))?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    /// Edit a goal and record `goal_updated` with the goal before and after,
+    /// and the goal's acceptance version before (`old_acceptance_version`)
+    /// and after (`new_acceptance_version`) the edit, which differ only when
+    /// the acceptance text changed.
+    fn edit_goal(&mut self, goal_id: GoalId, edit: GoalEdit) -> Result<Goal> {
+        ensure!(!edit.is_empty(), "goal edit changes nothing");
+        if let (Some(set), Some(tags)) = (&self.goal_tags, &edit.tags) {
+            set.check(tags)?;
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let old = read_goal(&tx, goal_id)?;
+        // The event keeps the goal before the edit, which consumes it.
+        let old_json = serde_json::to_value(&old)?;
+        let old_version = super::follow_up_membership::acceptance_version(&tx, goal_id)?;
+        // A change of priority records who set it (ADR-t1975-1 decision 3).
+        // Only a person changes a person's (ADR-t1975-1 decision 3).
+        let priority_by = match edit.priority {
+            Some(priority) if priority != old.priority() => {
+                check_priority_change(
+                    actor_role(&tx)?,
+                    PriorityHolder::Goal(goal_id),
+                    old.priority(),
+                    old.priority_by(),
+                )?;
+                PriorityBy::of(creator_of_actor(&tx)?)
+            }
+            _ => old.priority_by(),
+        };
+        let new = goal::edit(old, edit)?;
+        tx.execute(
+            "UPDATE goals SET title=?1, description=?2, acceptance=?3, constraints=?4, doc=?5,
+             updated_at=?6, priority=?8, tags=?9, priority_by=?10 WHERE id=?7",
+            params![
+                new.title(),
+                new.description(),
+                new.acceptance(),
+                new.constraints(),
+                new.doc(),
+                self.generators.clock.timestamp(),
+                goal_id,
+                new.priority().as_i64(),
+                serde_json::to_string(new.tags())?,
+                priority_by.as_str()
+            ],
+        )?;
+        goal_event(
+            &tx,
+            goal_id,
+            EventKind::GoalUpdated,
+            // `new` keeps the setter of the priority before the edit; who
+            // set it is the stored one (for the measurement's fold).
+            json!({"old": old_json, "new": new, "old_acceptance_version": old_version,
+                "new_acceptance_version": super::follow_up_membership::acceptance_version(&tx, goal_id)?,
+                "priority_by": priority_by.as_str()}),
+        )?;
+        let result = read_goal(&tx, goal_id)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    fn close_goal(&mut self, goal_id: GoalId, verdict: GoalVerdict) -> Result<Goal> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        close_goal_in(
+            &tx,
+            goal_id,
+            verdict,
+            &self.generators.clock.timestamp(),
+            json!({}),
+        )?;
+        let result = read_goal(&tx, goal_id)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    fn submit(&mut self, submission: Submission) -> Result<Proposal> {
+        self.submit_linking(submission, &[])
+    }
+
+    fn approve_proposal(&mut self, proposal_id: ProposalId) -> Result<Proposal> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let proposal = proposals::approve(&tx, proposal_id, &self.generators.clock.timestamp())?;
+        tx.commit()?;
+        Ok(proposal)
+    }
+
+    fn send_back_proposal(&mut self, proposal_id: ProposalId) -> Result<Proposal> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let proposal = proposals::send_back(&tx, proposal_id, &self.generators.clock.timestamp())?;
+        tx.commit()?;
+        Ok(proposal)
+    }
+
+    fn withdraw_proposal(&mut self, proposal_id: ProposalId) -> Result<Proposal> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let proposal = proposals::withdraw(
+            &tx,
+            proposal_id,
+            &self.generators.clock.timestamp(),
+            self.generators.clock.now(),
+        )?;
+        tx.commit()?;
+        Ok(proposal)
+    }
+
+    fn ready_goal(&mut self, goal_id: GoalId) -> Result<Goal> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let draft = read_goal(&tx, goal_id)?;
+        let from = draft.status();
+        let opened = goal::ready(draft)?;
+        tx.execute(
+            "UPDATE goals SET status=?1, updated_at=?2 WHERE id=?3",
+            params![
+                opened.status().as_str(),
+                self.generators.clock.timestamp(),
+                goal_id
+            ],
+        )?;
+        goal_event(
+            &tx,
+            goal_id,
+            EventKind::GoalStatusChanged,
+            json!({"from": from, "to": opened.status()}),
+        )?;
+        let result = read_goal(&tx, goal_id)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    fn add_note(&mut self, note: NewNote) -> Result<RunEvent> {
+        note.validate()?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let payload = note.payload();
+        match &note.target {
+            NoteTarget::Task(task_id) => {
+                read_task(&tx, *task_id)?;
+                event(&tx, *task_id, None, EventKind::Observation, payload)?;
+            }
+            NoteTarget::Run(run_id) => {
+                let task_id: TaskId = tx
+                    .query_row("SELECT task_id FROM task_runs WHERE id=?1", [run_id], |r| {
+                        r.get(0)
+                    })
+                    .optional()?
+                    .with_context(|| format!("run {run_id} does not exist"))?;
+                event(&tx, task_id, Some(run_id), EventKind::Observation, payload)?;
+            }
+            NoteTarget::Goal(goal_id) => {
+                read_goal(&tx, *goal_id)?;
+                goal_event(&tx, *goal_id, EventKind::Observation, payload)?;
+            }
+        }
+        let result = tx.query_row(
+            "SELECT * FROM run_events WHERE id=?1",
+            [tx.last_insert_rowid()],
+            event_row,
+        )?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    fn set_goal(&mut self, task_id: TaskId, goal_id: Option<GoalId>) -> Result<Task> {
+        self.set_goal_authorized(task_id, goal_id, None)
+    }
+
+    fn set_paths(&mut self, task_id: TaskId, paths: Vec<String>) -> Result<Task> {
+        self.set_paths_authorized(task_id, paths, None)
+    }
+
+    fn edit_task(
+        &mut self,
+        task_id: TaskId,
+        edit: TaskEdit,
+        authorized: TaskStatus,
+    ) -> Result<Task> {
+        ensure!(!edit.is_empty(), "task edit changes nothing");
+        // Checked before the task is read, so a bad value is reported first.
+        edit.validate()?;
+        if let (Some(changes), Some(change)) = (&self.changes, &edit.change) {
+            changes.check(change)?;
+        }
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        super::replans::check_task_step(&tx, task_id, GuardedStep::Edit)?;
+        let old = read_task(&tx, task_id)?;
+        task::check_status_authorized(&old, authorized)?;
+        // The event keeps the fields before the edit, which consumes the task.
+        let old_json = serde_json::to_value(&old)?;
+        let old_mode = old.stored_worker_mode();
+        let new = if old.status() == TaskStatus::InProgress {
+            let latest: Option<String> = tx
+                .query_row(
+                    "SELECT status FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
+                    [task_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            ensure!(
+                edit.verify_only()
+                    && !has_unfinished_run(&tx, task_id)?
+                    && !tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM run_leases l JOIN task_runs r ON r.id=l.run_id WHERE r.task_id=?1)",
+                        [task_id], |row| row.get::<_, bool>(0),
+                    )?
+                    && matches!(latest.as_deref(), Some("failed" | "interrupted")),
+                "task {task_id} is in_progress; only --verify/--no-verify may be edited by user or inbox after its latest run has ended and no live run remains"
+            );
+            task::edit_ended_verify(old, edit)?
+        } else {
+            task::edit(old, edit)?
+        };
+        let new_json = serde_json::to_value(&new)?;
+        let (mut from, mut to) = (serde_json::Map::new(), serde_json::Map::new());
+        // The JSON leaves out a wait for the build not declared: recorded
+        // as false (ADR-t1632-1).
+        let value = |json: &serde_json::Value, field: &str| match field {
+            "wait_for_build" => json!(json[field].as_bool().unwrap_or(false)),
+            _ => json[field].clone(),
+        };
+        for field in EDITABLE_TASK_FIELDS {
+            if old_json[field] != new_json[field] {
+                from.insert(field.to_owned(), value(&old_json, field));
+                to.insert(field.to_owned(), value(&new_json, field));
+            }
+        }
+        // Naming the mode the default already resolves to (`--headless` on a
+        // Claude task that named none) changes what is stored, not what is
+        // shown: recorded with the stored values, null for the default.
+        if old_mode != new.stored_worker_mode() && !to.contains_key("worker_mode") {
+            from.insert("worker_mode".to_owned(), json!(old_mode));
+            to.insert("worker_mode".to_owned(), json!(new.stored_worker_mode()));
+        }
+        if !to.is_empty() {
+            tx.execute(
+                "UPDATE tasks SET title=?1, description=?2, acceptance=?3,
+                 verification_commands=?4, required_evidence=?5, paths=?6, context=?7,
+                 worker_provider=?10, worker_mode=?11, change=?12, wait_for_build=?13,
+                 execution_class=?14, updated_at=?8 WHERE id=?9",
+                params![
+                    new.title(),
+                    new.description(),
+                    new.acceptance(),
+                    serde_json::to_string(new.verification_commands())?,
+                    serde_json::to_string(new.required_evidence())?,
+                    serde_json::to_string(new.paths())?,
+                    new.context(),
+                    self.generators.clock.timestamp(),
+                    task_id,
+                    new.worker().provider.as_str(),
+                    new.stored_worker_mode().map(WorkerMode::as_str),
+                    new.change().map(TaskChange::as_str),
+                    new.wait_for_build(),
+                    new.execution_class().as_str(),
+                ],
+            )?;
+            event(
+                &tx,
+                task_id,
+                None,
+                EventKind::TaskEdited,
+                json!({"from": from, "to": to}),
+            )?;
+        }
+        let result = read_task(&tx, task_id)?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    fn set_priority(&mut self, task_id: TaskId, priority: Option<Priority>) -> Result<Task> {
+        self.set_priority_authorized(task_id, priority, None)
+    }
+}
+
+impl TaskReads for SqliteQueue {
     fn list(&self, query: &TaskQuery) -> Result<TaskPage> {
         ensure!(query.limit > 0, "limit must be at least 1");
         let mut filters = Vec::new();
@@ -1393,30 +1803,6 @@ impl TaskStore for SqliteQueue {
         })
     }
 
-    fn transition(&mut self, task_id: TaskId, action: TaskAction) -> Result<Task> {
-        self.transition_authorized(task_id, action, None)
-    }
-
-    fn cancel(&mut self, task_id: TaskId, cancel: NewCancel) -> Result<Task> {
-        self.cancel_authorized(task_id, &cancel, None)
-    }
-
-    fn add_dependency(&mut self, task_id: TaskId, predecessor_id: TaskId) -> Result<()> {
-        self.add_dependency_authorized(task_id, predecessor_id, None)
-    }
-
-    fn remove_dependency(&mut self, task_id: TaskId, predecessor_id: TaskId) -> Result<()> {
-        self.remove_dependency_authorized(task_id, predecessor_id, None)
-    }
-
-    fn add_goal_dependency(&mut self, task_id: TaskId, goal_id: GoalId) -> Result<()> {
-        self.add_goal_dependency_authorized(task_id, goal_id, None)
-    }
-
-    fn remove_goal_dependency(&mut self, task_id: TaskId, goal_id: GoalId) -> Result<()> {
-        self.remove_goal_dependency_authorized(task_id, goal_id, None)
-    }
-
     fn candidates(&self) -> Result<Vec<Task>> {
         let tx = self.conn.unchecked_transaction()?;
         let order = claim_order(&tx)?;
@@ -1456,51 +1842,6 @@ impl TaskStore for SqliteQueue {
     fn graph_input(&self) -> Result<GraphInput> {
         let tx = self.conn.unchecked_transaction()?;
         read_graph_input(&tx)
-    }
-
-    fn investigations(&mut self) -> Result<crate::domain::investigation::Investigations> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let investigations = super::investigations::refresh(&tx, self.generators.clock.now())?;
-        tx.commit()?;
-        Ok(investigations)
-    }
-
-    fn ready_at(&self, tasks: &[TaskId]) -> Result<std::collections::HashMap<TaskId, i64>> {
-        let tx = self.conn.unchecked_transaction()?;
-        let mut times = std::collections::HashMap::new();
-        for task in tasks {
-            if let Some(at) = task_ready_at(&tx, *task)?
-                .as_deref()
-                .and_then(crate::domain::stats::timestamp_millis)
-            {
-                times.insert(*task, at);
-            }
-        }
-        Ok(times)
-    }
-
-    fn claim(&mut self, base_commit: &CommitSha) -> Result<ClaimOutcome> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let outcome = claim_task(
-            &tx,
-            &self.runs_dir,
-            self.generators.ids.as_ref(),
-            self.generators.clock.system_time(),
-            base_commit,
-            &[],
-            &crate::domain::claim_order::ClaimHolds::default(),
-            None,
-            &WorkerTrial::default(),
-            // What every binary runs (ADR-t813-2); a supervisor claims
-            // through its table of adapters instead.
-            &WorkerRoute::direct(&[Worker::CLAUDE_INTERACTIVE, Worker::CLAUDE_HEADLESS]),
-        )?;
-        tx.commit()?;
-        Ok(outcome)
     }
 
     fn predecessors(&self, task_id: TaskId) -> Result<Vec<Predecessor>> {
@@ -1551,59 +1892,6 @@ impl TaskStore for SqliteQueue {
             ))?
             .query_map([], task_row)?
             .collect::<rusqlite::Result<_>>()?)
-    }
-
-    fn add_goal(&mut self, new: NewGoal) -> Result<Goal> {
-        // Rejected before taking the write lock; `new` checks it again.
-        new.validate()?;
-        if let Some(tags) = &self.goal_tags {
-            tags.check(&new.tags)?;
-        }
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        // Its origin, and a request's priority attached as a person's
-        // (ADR-t1975-1 decisions 2 and 5).
-        let creator = creator_of_actor(&tx)?;
-        let origin = creation_origin(creator);
-        let (priority, priority_by) =
-            goal_priority_at_creation(creator, request_priority(&tx, origin)?, new.priority)?;
-        let mut new = new;
-        new.priority = Some(priority);
-        let goal = Goal::new(
-            GoalId::new(next_id(&tx, "goals")?),
-            new,
-            self.generators.clock.timestamp(),
-        )?
-        .with_record(priority_by, origin);
-        let id = goal.id();
-        tx.execute(
-            "INSERT INTO goals(id, title, description, acceptance, constraints, doc, status,
-                               created_at, updated_at, priority, tags, priority_by, origin,
-                               origin_kind, origin_request_id)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
-            params![
-                id,
-                goal.title(),
-                goal.description(),
-                goal.acceptance(),
-                goal.constraints(),
-                goal.doc(),
-                goal.status().as_str(),
-                goal.created_at(),
-                goal.updated_at(),
-                goal.priority().as_i64(),
-                serde_json::to_string(goal.tags())?,
-                goal.priority_by().as_str(),
-                origin.origin.as_str(),
-                origin.kind.map(|kind| kind.as_str()),
-                origin.request_id
-            ],
-        )?;
-        let result = read_goal(&tx, id)?;
-        goal_event(&tx, id, EventKind::GoalCreated, json!({"goal": result}))?;
-        tx.commit()?;
-        Ok(result)
     }
 
     fn list_goals(&self) -> Result<Vec<GoalSummary>> {
@@ -1668,120 +1956,6 @@ impl TaskStore for SqliteQueue {
         })
     }
 
-    /// Edit a goal and record `goal_updated` with the goal before and after,
-    /// and the goal's acceptance version before (`old_acceptance_version`)
-    /// and after (`new_acceptance_version`) the edit, which differ only when
-    /// the acceptance text changed.
-    fn edit_goal(&mut self, goal_id: GoalId, edit: GoalEdit) -> Result<Goal> {
-        ensure!(!edit.is_empty(), "goal edit changes nothing");
-        if let (Some(set), Some(tags)) = (&self.goal_tags, &edit.tags) {
-            set.check(tags)?;
-        }
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let old = read_goal(&tx, goal_id)?;
-        // The event keeps the goal before the edit, which consumes it.
-        let old_json = serde_json::to_value(&old)?;
-        let old_version = super::follow_up_membership::acceptance_version(&tx, goal_id)?;
-        // A change of priority records who set it (ADR-t1975-1 decision 3).
-        // Only a person changes a person's (ADR-t1975-1 decision 3).
-        let priority_by = match edit.priority {
-            Some(priority) if priority != old.priority() => {
-                check_priority_change(
-                    actor_role(&tx)?,
-                    PriorityHolder::Goal(goal_id),
-                    old.priority(),
-                    old.priority_by(),
-                )?;
-                PriorityBy::of(creator_of_actor(&tx)?)
-            }
-            _ => old.priority_by(),
-        };
-        let new = goal::edit(old, edit)?;
-        tx.execute(
-            "UPDATE goals SET title=?1, description=?2, acceptance=?3, constraints=?4, doc=?5,
-             updated_at=?6, priority=?8, tags=?9, priority_by=?10 WHERE id=?7",
-            params![
-                new.title(),
-                new.description(),
-                new.acceptance(),
-                new.constraints(),
-                new.doc(),
-                self.generators.clock.timestamp(),
-                goal_id,
-                new.priority().as_i64(),
-                serde_json::to_string(new.tags())?,
-                priority_by.as_str()
-            ],
-        )?;
-        goal_event(
-            &tx,
-            goal_id,
-            EventKind::GoalUpdated,
-            // `new` keeps the setter of the priority before the edit; who
-            // set it is the stored one (for the measurement's fold).
-            json!({"old": old_json, "new": new, "old_acceptance_version": old_version,
-                "new_acceptance_version": super::follow_up_membership::acceptance_version(&tx, goal_id)?,
-                "priority_by": priority_by.as_str()}),
-        )?;
-        let result = read_goal(&tx, goal_id)?;
-        tx.commit()?;
-        Ok(result)
-    }
-
-    fn close_goal(&mut self, goal_id: GoalId, verdict: GoalVerdict) -> Result<Goal> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        close_goal_in(
-            &tx,
-            goal_id,
-            verdict,
-            &self.generators.clock.timestamp(),
-            json!({}),
-        )?;
-        let result = read_goal(&tx, goal_id)?;
-        tx.commit()?;
-        Ok(result)
-    }
-
-    fn submit(&mut self, submission: Submission) -> Result<Proposal> {
-        self.submit_linking(submission, &[])
-    }
-
-    fn approve_proposal(&mut self, proposal_id: ProposalId) -> Result<Proposal> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let proposal = proposals::approve(&tx, proposal_id, &self.generators.clock.timestamp())?;
-        tx.commit()?;
-        Ok(proposal)
-    }
-
-    fn send_back_proposal(&mut self, proposal_id: ProposalId) -> Result<Proposal> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let proposal = proposals::send_back(&tx, proposal_id, &self.generators.clock.timestamp())?;
-        tx.commit()?;
-        Ok(proposal)
-    }
-
-    fn withdraw_proposal(&mut self, proposal_id: ProposalId) -> Result<Proposal> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let proposal = proposals::withdraw(
-            &tx,
-            proposal_id,
-            &self.generators.clock.timestamp(),
-            self.generators.clock.now(),
-        )?;
-        tx.commit()?;
-        Ok(proposal)
-    }
-
     fn show_proposal(&self, proposal_id: ProposalId) -> Result<Proposal> {
         let tx = self.conn.unchecked_transaction()?;
         proposals::read(&tx, proposal_id)
@@ -1799,66 +1973,6 @@ impl TaskStore for SqliteQueue {
         input.title_prefixes = self.title_prefixes.clone();
         input.goal_tags = self.goal_tags.clone();
         Ok(input)
-    }
-
-    fn ready_goal(&mut self, goal_id: GoalId) -> Result<Goal> {
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let draft = read_goal(&tx, goal_id)?;
-        let from = draft.status();
-        let opened = goal::ready(draft)?;
-        tx.execute(
-            "UPDATE goals SET status=?1, updated_at=?2 WHERE id=?3",
-            params![
-                opened.status().as_str(),
-                self.generators.clock.timestamp(),
-                goal_id
-            ],
-        )?;
-        goal_event(
-            &tx,
-            goal_id,
-            EventKind::GoalStatusChanged,
-            json!({"from": from, "to": opened.status()}),
-        )?;
-        let result = read_goal(&tx, goal_id)?;
-        tx.commit()?;
-        Ok(result)
-    }
-
-    fn add_note(&mut self, note: NewNote) -> Result<RunEvent> {
-        note.validate()?;
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let payload = note.payload();
-        match &note.target {
-            NoteTarget::Task(task_id) => {
-                read_task(&tx, *task_id)?;
-                event(&tx, *task_id, None, EventKind::Observation, payload)?;
-            }
-            NoteTarget::Run(run_id) => {
-                let task_id: TaskId = tx
-                    .query_row("SELECT task_id FROM task_runs WHERE id=?1", [run_id], |r| {
-                        r.get(0)
-                    })
-                    .optional()?
-                    .with_context(|| format!("run {run_id} does not exist"))?;
-                event(&tx, task_id, Some(run_id), EventKind::Observation, payload)?;
-            }
-            NoteTarget::Goal(goal_id) => {
-                read_goal(&tx, *goal_id)?;
-                goal_event(&tx, *goal_id, EventKind::Observation, payload)?;
-            }
-        }
-        let result = tx.query_row(
-            "SELECT * FROM run_events WHERE id=?1",
-            [tx.last_insert_rowid()],
-            event_row,
-        )?;
-        tx.commit()?;
-        Ok(result)
     }
 
     fn notes(&self, query: &NoteQuery) -> Result<NotePage> {
@@ -1900,118 +2014,6 @@ impl TaskStore for SqliteQueue {
             .or(query.since)
             .unwrap_or(EventId::new(0));
         Ok(NotePage { notes, cursor })
-    }
-
-    fn set_goal(&mut self, task_id: TaskId, goal_id: Option<GoalId>) -> Result<Task> {
-        self.set_goal_authorized(task_id, goal_id, None)
-    }
-
-    fn set_paths(&mut self, task_id: TaskId, paths: Vec<String>) -> Result<Task> {
-        self.set_paths_authorized(task_id, paths, None)
-    }
-
-    fn edit_task(
-        &mut self,
-        task_id: TaskId,
-        edit: TaskEdit,
-        authorized: TaskStatus,
-    ) -> Result<Task> {
-        ensure!(!edit.is_empty(), "task edit changes nothing");
-        // Checked before the task is read, so a bad value is reported first.
-        edit.validate()?;
-        if let (Some(changes), Some(change)) = (&self.changes, &edit.change) {
-            changes.check(change)?;
-        }
-        let tx = self
-            .conn
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        super::replans::check_task_step(&tx, task_id, GuardedStep::Edit)?;
-        let old = read_task(&tx, task_id)?;
-        task::check_status_authorized(&old, authorized)?;
-        // The event keeps the fields before the edit, which consumes the task.
-        let old_json = serde_json::to_value(&old)?;
-        let old_mode = old.stored_worker_mode();
-        let new = if old.status() == TaskStatus::InProgress {
-            let latest: Option<String> = tx
-                .query_row(
-                    "SELECT status FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
-                    [task_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            ensure!(
-                edit.verify_only()
-                    && !has_unfinished_run(&tx, task_id)?
-                    && !tx.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM run_leases l JOIN task_runs r ON r.id=l.run_id WHERE r.task_id=?1)",
-                        [task_id], |row| row.get::<_, bool>(0),
-                    )?
-                    && matches!(latest.as_deref(), Some("failed" | "interrupted")),
-                "task {task_id} is in_progress; only --verify/--no-verify may be edited by user or inbox after its latest run has ended and no live run remains"
-            );
-            task::edit_ended_verify(old, edit)?
-        } else {
-            task::edit(old, edit)?
-        };
-        let new_json = serde_json::to_value(&new)?;
-        let (mut from, mut to) = (serde_json::Map::new(), serde_json::Map::new());
-        // The JSON leaves out a wait for the build not declared: recorded
-        // as false (ADR-t1632-1).
-        let value = |json: &serde_json::Value, field: &str| match field {
-            "wait_for_build" => json!(json[field].as_bool().unwrap_or(false)),
-            _ => json[field].clone(),
-        };
-        for field in EDITABLE_TASK_FIELDS {
-            if old_json[field] != new_json[field] {
-                from.insert(field.to_owned(), value(&old_json, field));
-                to.insert(field.to_owned(), value(&new_json, field));
-            }
-        }
-        // Naming the mode the default already resolves to (`--headless` on a
-        // Claude task that named none) changes what is stored, not what is
-        // shown: recorded with the stored values, null for the default.
-        if old_mode != new.stored_worker_mode() && !to.contains_key("worker_mode") {
-            from.insert("worker_mode".to_owned(), json!(old_mode));
-            to.insert("worker_mode".to_owned(), json!(new.stored_worker_mode()));
-        }
-        if !to.is_empty() {
-            tx.execute(
-                "UPDATE tasks SET title=?1, description=?2, acceptance=?3,
-                 verification_commands=?4, required_evidence=?5, paths=?6, context=?7,
-                 worker_provider=?10, worker_mode=?11, change=?12, wait_for_build=?13,
-                 execution_class=?14, updated_at=?8 WHERE id=?9",
-                params![
-                    new.title(),
-                    new.description(),
-                    new.acceptance(),
-                    serde_json::to_string(new.verification_commands())?,
-                    serde_json::to_string(new.required_evidence())?,
-                    serde_json::to_string(new.paths())?,
-                    new.context(),
-                    self.generators.clock.timestamp(),
-                    task_id,
-                    new.worker().provider.as_str(),
-                    new.stored_worker_mode().map(WorkerMode::as_str),
-                    new.change().map(TaskChange::as_str),
-                    new.wait_for_build(),
-                    new.execution_class().as_str(),
-                ],
-            )?;
-            event(
-                &tx,
-                task_id,
-                None,
-                EventKind::TaskEdited,
-                json!({"from": from, "to": to}),
-            )?;
-        }
-        let result = read_task(&tx, task_id)?;
-        tx.commit()?;
-        Ok(result)
-    }
-
-    fn set_priority(&mut self, task_id: TaskId, priority: Option<Priority>) -> Result<Task> {
-        self.set_priority_authorized(task_id, priority, None)
     }
 }
 

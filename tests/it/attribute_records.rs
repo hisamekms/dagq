@@ -4,7 +4,7 @@
 //! gives what the store reads now (docs/design/attribute-records.md).
 use crate::common;
 
-use dagq::application::{GraphInput, TaskStore};
+use dagq::application::{GraphInput, TaskReads, TaskStore};
 use dagq::domain::ledger::attributes::{Folded, fold};
 use dagq::domain::{
     ClaimOutcome, DraftOrigin, ExecutionClass, GoalEdit, GoalId, GoalVerdict, NewGoal, Priority,

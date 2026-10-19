@@ -12,7 +12,7 @@ use crate::plan_review::{
     submit, supervise_with,
 };
 use crate::runtime_support::{headless_claude, set_turns};
-use dagq::application::TaskStore;
+use dagq::application::{TaskReads, TaskStore};
 use dagq::{
     domain::{
         DraftOrigin, PlannerRoute, Priority, ProposalStatus, TaskId,

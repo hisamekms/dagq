@@ -2887,20 +2887,11 @@ impl crate::application::inherit::CarriedBranches for RunRepositories {
 /// The Git port over the inherent methods above, which callers that hold a
 /// `GitRepository` keep using directly.
 impl Repository for GitRepository {
-    fn landing_branch(&self) -> Result<LandingBranch> {
-        GitRepository::landing_branch(self)
-    }
-    fn landing_branch_stamp(&self) -> Option<LandingBranchStamp> {
-        GitRepository::landing_branch_stamp(self)
-    }
     fn repository_config(&self) -> Result<RepositoryConfig> {
         GitRepository::repository_config(self)
     }
     fn is_dagq_source(&self) -> bool {
         GitRepository::is_dagq_source(self)
-    }
-    fn main_head(&self) -> Result<CommitSha> {
-        GitRepository::main_head(self)
     }
     fn file_in(&self, commit: &str, path: &str) -> Result<Option<String>> {
         GitRepository::file_in(self, commit, path)
@@ -2916,23 +2907,8 @@ impl Repository for GitRepository {
     fn blobs_in(&self, commit: &str, paths: &[&str]) -> Result<Vec<(String, String)>> {
         GitRepository::blobs_in(self, commit, paths)
     }
-    fn main_history(&self, since: i64) -> Result<MainHistory> {
-        GitRepository::main_history(self, since)
-    }
-    fn main_commits(&self, head: &str, after: Option<&str>, since: i64) -> Result<Vec<MainCommit>> {
-        GitRepository::main_commits(self, head, after, since)
-    }
-    fn tree_paths(&self, commit: &str) -> Result<Vec<String>> {
-        GitRepository::tree_paths(self, commit)
-    }
-    fn has_commit(&self, commit: &str) -> Result<bool> {
-        GitRepository::has_commit(self, commit)
-    }
     fn reachable_commit(&self, commit: &str) -> Result<bool> {
         GitRepository::reachable_commit(self, commit)
-    }
-    fn on_first_parent_line(&self, commit: &str, head: &str) -> Result<bool> {
-        GitRepository::on_first_parent_line(self, commit, head)
     }
     fn current_branch(&self, worktree: &Path) -> Result<Option<String>> {
         GitRepository::current_branch(self, worktree)
@@ -2942,9 +2918,6 @@ impl Repository for GitRepository {
     }
     fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool> {
         GitRepository::is_ancestor(self, ancestor, descendant)
-    }
-    fn merge_base(&self, a: &str, b: &str) -> Result<Option<CommitSha>> {
-        GitRepository::merge_base(self, a, b)
     }
     fn status(&self, worktree: &Path) -> Result<String> {
         GitRepository::status(self, worktree)
@@ -3128,6 +3101,36 @@ impl Repository for GitRepository {
         run: &str,
     ) -> Result<Option<(CommitSha, CommitSha)>> {
         GitRepository::landed_run_commit(self, base, head, run)
+    }
+}
+
+impl crate::application::RepositoryReads for GitRepository {
+    fn landing_branch(&self) -> Result<LandingBranch> {
+        GitRepository::landing_branch(self)
+    }
+    fn landing_branch_stamp(&self) -> Option<LandingBranchStamp> {
+        GitRepository::landing_branch_stamp(self)
+    }
+    fn main_head(&self) -> Result<CommitSha> {
+        GitRepository::main_head(self)
+    }
+    fn main_history(&self, since: i64) -> Result<MainHistory> {
+        GitRepository::main_history(self, since)
+    }
+    fn main_commits(&self, head: &str, after: Option<&str>, since: i64) -> Result<Vec<MainCommit>> {
+        GitRepository::main_commits(self, head, after, since)
+    }
+    fn tree_paths(&self, commit: &str) -> Result<Vec<String>> {
+        GitRepository::tree_paths(self, commit)
+    }
+    fn has_commit(&self, commit: &str) -> Result<bool> {
+        GitRepository::has_commit(self, commit)
+    }
+    fn on_first_parent_line(&self, commit: &str, head: &str) -> Result<bool> {
+        GitRepository::on_first_parent_line(self, commit, head)
+    }
+    fn merge_base(&self, a: &str, b: &str) -> Result<Option<CommitSha>> {
+        GitRepository::merge_base(self, a, b)
     }
 }
 

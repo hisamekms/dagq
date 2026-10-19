@@ -13,7 +13,7 @@ use crate::common::{
 };
 use crate::plan_review::{PlanWorkspace, StubReviewer, open_goal, options, supervise_with};
 use crate::planner_headless::{diagnose_planner, headless_fixture, queue_events, supervise_until};
-use dagq::application::TaskStore;
+use dagq::application::{TaskReads, TaskStore};
 use dagq::domain::{AskKind, AskReason, DraftOrigin, NewAsk, NewTask, PlannerRoute, TaskId};
 use dagq::infrastructure::{location::planners_dir, sqlite::SqliteQueue};
 use serde_json::{Value, json};

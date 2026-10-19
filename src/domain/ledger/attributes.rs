@@ -331,7 +331,7 @@ impl Attributes {
     }
 
     /// Every goal in ID order with its tasks counted by status, as
-    /// `TaskStore::list_goals` gives it.
+    /// `TaskReads::list_goals` gives it.
     pub fn goal_summaries(&self) -> Vec<GoalSummary> {
         self.goals
             .iter()

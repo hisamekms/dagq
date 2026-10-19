@@ -3452,9 +3452,6 @@ mod tests {
             self.calls.borrow_mut().push("remove_case_tree".to_owned());
             Ok(())
         }
-        fn main_head(&self) -> Result<CommitSha> {
-            Ok(sha(BASE))
-        }
         fn current_branch(&self, _: &Path) -> Result<Option<String>> {
             Ok(self.branch.clone())
         }
@@ -3466,9 +3463,6 @@ mod tests {
                 .borrow_mut()
                 .push(format!("is_ancestor {ancestor} {descendant}"));
             Ok(ancestor == BASE)
-        }
-        fn merge_base(&self, _: &str, _: &str) -> Result<Option<CommitSha>> {
-            Ok(Some(sha(BASE)))
         }
         fn status(&self, _: &Path) -> Result<String> {
             Ok(self.status.clone())
@@ -3566,6 +3560,15 @@ mod tests {
         }
         fn diff_to_file(&self, _: &str, _: &str, _: &Path) -> Result<()> {
             unimplemented!()
+        }
+    }
+
+    impl crate::application::RepositoryReads for FakeRepository {
+        fn main_head(&self) -> Result<CommitSha> {
+            Ok(sha(BASE))
+        }
+        fn merge_base(&self, _: &str, _: &str) -> Result<Option<CommitSha>> {
+            Ok(Some(sha(BASE)))
         }
     }
 

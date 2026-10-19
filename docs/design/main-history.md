@@ -22,7 +22,7 @@ runtimeの制御はこの記録を読まない。
 - **3つの時刻**: commitの時刻（committerの時刻）、観測したhead（最後に正常に読んだhead）、到達時刻（Gitを正常に読み、観測したheadまでが記録済みと確かめた時刻）。
   到達時刻はheadが動かなくても進む。
 - **Gitを読む周回**: 周回は毎passでGitを起動しない。
-  着地先のbranchの解決の入力のファイルの印（[着地先のbranch](supervisor-lifecycle/integrate.md#landing-branch)と同じ`Repository::landing_branch_stamp`。mainへのcommitで変わる）をGitなしで読み、印が変わったとき・到達点の間隔が来たとき・最初の周回だけ、queueとGitを読む。
+  着地先のbranchの解決の入力のファイルの印（[着地先のbranch](supervisor-lifecycle/integrate.md#landing-branch)と同じ`RepositoryReads::landing_branch_stamp`。mainへのcommitで変わる）をGitなしで読み、印が変わったとき・到達点の間隔が来たとき・最初の周回だけ、queueとGitを読む。
   印を読めないrepositoryと読み取りの失敗の間は、前に読んでから`MAIN_RETRY_SECS`経つまで読まない。
 - **記録**: Gitを読む周回はheadを読み、前回の到達点から動いていれば間のfirst-parentのcommitを変えたpath（改名と削除を含む）とともに古い順に`main_commits_recorded`へ書き、続けて`main_observed`を書く。
   dagqの着地も人の直接のpushも入る。

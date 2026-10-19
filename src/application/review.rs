@@ -1008,9 +1008,6 @@ mod tests {
         fn is_dagq_source(&self) -> bool {
             false
         }
-        fn main_head(&self) -> Result<CommitSha> {
-            Ok(CommitSha::try_from(SHA).unwrap())
-        }
         fn file_in(&self, commit: &str, path: &str) -> Result<Option<String>> {
             // Only the landing branch's commit is ever read.
             assert_eq!(commit, SHA);
@@ -1019,13 +1016,6 @@ mod tests {
                 .iter()
                 .find(|(name, _)| *name == path)
                 .map(|(_, text)| (*text).to_owned()))
-        }
-        fn merge_base(&self, a: &str, b: &str) -> Result<Option<CommitSha>> {
-            Ok(self
-                .merge_bases
-                .iter()
-                .find(|(x, y, _)| (*x, *y) == (a, b))
-                .map(|(_, _, base)| CommitSha::try_from(*base).unwrap()))
         }
         fn changed_paths(&self, from: &str, to: &str) -> Result<Vec<String>> {
             assert_eq!((from, to), ("base", "head"));
@@ -1128,6 +1118,19 @@ mod tests {
         }
         fn diff_to_file(&self, _: &str, _: &str, _: &Path) -> Result<()> {
             unreachable!()
+        }
+    }
+
+    impl crate::application::RepositoryReads for Committed {
+        fn main_head(&self) -> Result<CommitSha> {
+            Ok(CommitSha::try_from(SHA).unwrap())
+        }
+        fn merge_base(&self, a: &str, b: &str) -> Result<Option<CommitSha>> {
+            Ok(self
+                .merge_bases
+                .iter()
+                .find(|(x, y, _)| (*x, *y) == (a, b))
+                .map(|(_, _, base)| CommitSha::try_from(*base).unwrap()))
         }
     }
 

@@ -15,7 +15,7 @@ use crate::plan_review::{
 };
 
 use dagq::{
-    application::TaskStore,
+    application::TaskReads,
     domain::{AskKind, Priority, ProposalId, ProposalStatus, TaskId, TaskStatus},
     infrastructure::sqlite::SqliteQueue,
 };

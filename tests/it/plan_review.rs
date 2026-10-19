@@ -19,7 +19,9 @@ use anyhow::{Result, bail};
 use dagq::domain::background_wrapper::{StopRoute, WrapperStop};
 use dagq::domain::headless_job::JobAccess;
 use dagq::{
-    application::{AgentProvider, CommandSpec, SessionWrappers, TaskStore, planner_idle_marker},
+    application::{
+        AgentProvider, CommandSpec, SessionWrappers, TaskReads, TaskStore, planner_idle_marker,
+    },
     domain::{
         AskKind, DraftOrigin, NewAsk, NewGoal, NewTask, PlannerOrigin, PlannerOwner, Priority,
         ProposalId, ProposalStatus, Submission, TaskAction, TaskEdit, TaskId, TaskRun, TaskStatus,

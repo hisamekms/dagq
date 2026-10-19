@@ -8,7 +8,7 @@
 use anyhow::Result;
 use serde_json::Value;
 
-use super::Repository;
+use super::RepositoryReads;
 use crate::domain::{
     event_kind::EventKind,
     stats::{
@@ -20,15 +20,15 @@ use crate::domain::{
     },
 };
 
-/// What the record reads of Git: a narrowing of [`Repository`] to its
-/// read-only reads of main, implemented for every `Repository` and by test
+/// What the record reads of Git: a narrowing of [`RepositoryReads`] to
+/// its reads of main, implemented for every `RepositoryReads` and by test
 /// fakes. It is not a port of its own.
 pub trait MainReader {
     /// Main's head now.
     fn head(&self) -> Result<String>;
-    /// See [`Repository::main_commits`].
+    /// See [`RepositoryReads::main_commits`].
     fn commits(&self, head: &str, after: Option<&str>, since: i64) -> Result<Vec<MainCommit>>;
-    /// See [`Repository::tree_paths`].
+    /// See [`RepositoryReads::tree_paths`].
     fn paths(&self, commit: &str) -> Result<Vec<String>>;
     /// Whether `commit` is still on main's first-parent line at `head`.
     fn reaches(&self, commit: &str, head: &str) -> Result<bool>;
@@ -36,7 +36,7 @@ pub trait MainReader {
     fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>>;
 }
 
-impl<T: Repository + ?Sized> MainReader for T {
+impl<T: RepositoryReads + ?Sized> MainReader for T {
     fn head(&self) -> Result<String> {
         Ok(self.main_head()?.as_str().to_owned())
     }
@@ -53,7 +53,7 @@ impl<T: Repository + ?Sized> MainReader for T {
         if !self.has_commit(a)? {
             return Ok(None);
         }
-        Ok(Repository::merge_base(self, a, b)?.map(|sha| sha.as_str().to_owned()))
+        Ok(RepositoryReads::merge_base(self, a, b)?.map(|sha| sha.as_str().to_owned()))
     }
 }
 

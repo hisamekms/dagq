@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use dagq::{
-    application::TaskStore,
+    application::{TaskReads, TaskStore},
     domain::{DraftOrigin, Priority, TaskId},
 };
 use dagq::{

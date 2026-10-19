@@ -431,12 +431,24 @@ pub trait InboxWatchLog {
     ) -> Result<bool>;
 }
 
+/// The reads of the supervisors' registrations, their handoffs and the
+/// repository the queue is bound to that host運用 publishes to every
+/// context (rule C2 of docs/design/architecture.md).
+pub trait SupervisorReads {
+    /// Every registered supervisor, oldest first, alive or not.
+    fn supervisors(&self) -> Result<Vec<SupervisorRegistration>>;
+    /// The binary the supervisor `token` was asked to exec, if any.
+    fn handoff_request(&self, token: &LeaseToken) -> Result<Option<String>>;
+    /// Git common directory the queue is bound to, if any.
+    fn repository_binding(&self) -> Result<Option<String>>;
+}
+
 /// The supervisors' registrations, their handoffs and settings, and the
 /// repository the queue is bound to: the coordination state of host運用
-/// (ADR-0032's second kind). Its reads (`supervisors`, `handoff_request`,
-/// `repository_binding`) are published to every context and the rest to
-/// 実行と着地's loop (the `method` items of .config/context-boundaries.txt).
-pub trait SupervisorRegistry {
+/// (ADR-0032's second kind). Its reads are [`SupervisorReads`]; the rest
+/// is published to 実行と着地's loop (the `method` items of
+/// .config/context-boundaries.txt).
+pub trait SupervisorRegistry: SupervisorReads {
     /// Register a supervisor with its slot limits and their sources in one
     /// write, so `status` and a reader of the registration never see it
     /// without them.
@@ -456,15 +468,11 @@ pub trait SupervisorRegistry {
         kind: EventKind,
         stopped: &dyn Fn(&SupervisorRegistration) -> serde_json::Value,
     ) -> Result<bool>;
-    /// Every registered supervisor, oldest first, alive or not.
-    fn supervisors(&self) -> Result<Vec<SupervisorRegistration>>;
     /// Mark `token`'s registration as one that takes a handoff.
     fn accept_handoff(&self, token: &LeaseToken) -> Result<()>;
     /// Ask the supervisor `token` to exec `binary`; `false` when it is not
     /// registered or does not take a handoff (ADR-0045 decision 10).
     fn request_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool>;
-    /// The binary the supervisor `token` was asked to exec, if any.
-    fn handoff_request(&self, token: &LeaseToken) -> Result<Option<String>>;
     /// Atomically take the matching request immediately before an exec.
     /// A withdrawal or replacement wins if it reached the queue first.
     fn take_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool>;
@@ -502,8 +510,6 @@ pub trait SupervisorRegistry {
     /// Point the queue at `common_dir` whatever it was bound to, and return
     /// the previous binding (`rebind`, ADR-0020).
     fn rebind_repository(&mut self, common_dir: &str) -> Result<Option<String>>;
-    /// Git common directory the queue is bound to, if any.
-    fn repository_binding(&self) -> Result<Option<String>>;
     fn bind_repository(&mut self, common_dir: &str) -> Result<()>;
     fn assert_repository(&self, common_dir: &str) -> Result<()>;
     /// Record how `up` started the supervisor `token`.

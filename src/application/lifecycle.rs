@@ -27,9 +27,9 @@
 //! files through [`Ports`]; the entry points in [`crate::compose`] build
 //! the adapters.
 use super::{
-    AgentProvider, AgentState, CONFIG_HOME_ENV, Clock, CommandSpec, DefinedAgent, LaunchAgent,
-    ProcessControl, QueueOpener, RunCoordination, RunFiles, RunLog, RunRecovery, SessionRegistry,
-    SupervisorEnvironment, SupervisorRegistry,
+    AgentProvider, AgentState, CONFIG_HOME_ENV, Clock, CommandSpec, CoordinationReads,
+    DefinedAgent, LaunchAgent, ProcessControl, QueueOpener, RunFiles, RunLog, RunRecovery,
+    SessionRegistry, SupervisorEnvironment, SupervisorRegistry,
     actor_executor::{
         ActorExecutionSpec, ActorExecutor, ActorProgram, HostActorExecutor, WorkspaceAccess,
     },
@@ -712,11 +712,11 @@ impl PartialHandoff {
 /// supervisors' registrations and handoffs, the runs they lease, the
 /// events, and the workspaces an earlier binary recorded.
 pub trait LifecycleQueue:
-    SupervisorRegistry + RunCoordination + RunRecovery + RunLog + SessionRegistry
+    SupervisorRegistry + CoordinationReads + RunRecovery + RunLog + SessionRegistry
 {
 }
 
-impl<T: SupervisorRegistry + RunCoordination + RunRecovery + RunLog + SessionRegistry + ?Sized>
+impl<T: SupervisorRegistry + CoordinationReads + RunRecovery + RunLog + SessionRegistry + ?Sized>
     LifecycleQueue for T
 {
 }
@@ -2233,7 +2233,7 @@ pub fn inbox(
 /// lease still has a live, heartbeating owner, and the runs that wait for
 /// review (`awaiting_integration`) or a resumed session (`needs_session`).
 fn open_work(
-    queue: &(impl RunCoordination + RunLog + ?Sized),
+    queue: &(impl CoordinationReads + RunLog + ?Sized),
     processes: &dyn ProcessControl,
     clock: &dyn Clock,
 ) -> Result<Value> {

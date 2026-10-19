@@ -10,8 +10,8 @@ use serde::Serialize;
 
 use super::stats::{StatsSources, inputs};
 use super::{
-    EventStore, LedgerStore, NodeSampleStore, PlanningRecords, ProcessControl, RunCoordination,
-    RunReads, SupervisorRegistry, TaskStore,
+    CoordinationReads, EventStore, LedgerStore, NodeSampleStore, PlanningRecords, ProcessControl,
+    RunReads, SupervisorReads, TaskReads,
 };
 use crate::domain::host_metrics::{
     DEFAULT_RETENTION_DAYS, HOST_NODE, HostSample, local_day, oldest_kept_day,
@@ -49,10 +49,10 @@ pub fn ledger_check(
     queue: &(
          impl EventStore
          + PlanningRecords
-         + RunCoordination
-         + SupervisorRegistry
+         + CoordinationReads
+         + SupervisorReads
          + RunReads
-         + TaskStore
+         + TaskReads
          + LedgerStore
          + NodeSampleStore
          + ?Sized

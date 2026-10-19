@@ -17,7 +17,7 @@ use crate::plan_review::{
     PlanWorkspace, StubReviewer, add, open_goal, options, runtime_draft, supervise_with,
 };
 use crate::planner_headless::{diagnose_planner, headless_fixture, queue_events, supervise_until};
-use dagq::application::{PlanRequestStore, TaskStore};
+use dagq::application::{PlanRequestStore, TaskReads};
 use dagq::{
     domain::{
         AskKind, DraftOrigin, PlannerId, PlannerRoute, Priority, RequestId, TaskId, TaskStatus,

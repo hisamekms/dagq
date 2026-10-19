@@ -10,7 +10,7 @@
 use crate::common::cli::{invoke_with, ok, ok_as, queue};
 use crate::common::queue::{base, new_goal, new_task};
 use dagq::{
-    application::{PlanRequestStore, TaskStore, commands::replans::Replans},
+    application::{PlanRequestStore, TaskReads, TaskStore, commands::replans::Replans},
     domain::{
         ActorContext, ActorRole, ClaimOutcome, GoalEdit, LeaseToken, ReplanId, RunId, StaticPolicy,
         TaskAction, TaskId,

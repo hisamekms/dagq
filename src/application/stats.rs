@@ -16,8 +16,8 @@ use std::{
 use anyhow::Result;
 
 use super::{
-    AgentSignals, EventStore, PlanningRecords, ProcessControl, RunCoordination, RunFiles, RunLog,
-    RunReads, StatusFilter, SupervisorRegistry, TaskQuery, TaskStore,
+    AgentSignals, CoordinationReads, EventStore, PlanningRecords, ProcessControl, RunFiles, RunLog,
+    RunReads, StatusFilter, SupervisorReads, TaskQuery, TaskReads,
 };
 use crate::domain::{
     GoalStatus, RunId, RunStatus, SupervisorPulse, TaskRun, TaskStatus,
@@ -46,7 +46,7 @@ pub struct StatsSources<'a> {
     /// The `[conflicts]` of `dagq.toml`; `None` when there is no file.
     pub conflicts_file: &'a dyn Fn() -> Result<Option<ConflictConfig>>,
     /// Main's history since a unix second (see
-    /// [`crate::application::Repository::main_history`]).
+    /// [`crate::application::RepositoryReads::main_history`]).
     pub history: &'a dyn Fn(i64) -> Result<MainHistory>,
     /// The summary of the host's load between two unix seconds (task
     /// 516); `None` reads none.
@@ -114,10 +114,10 @@ pub fn stats(
     queue: &(
          impl EventStore
          + PlanningRecords
-         + RunCoordination
-         + SupervisorRegistry
+         + CoordinationReads
+         + SupervisorReads
          + RunReads
-         + TaskStore
+         + TaskReads
          + ?Sized
      ),
     processes: &dyn ProcessControl,
@@ -158,10 +158,10 @@ pub(crate) fn inputs(
     queue: &(
          impl EventStore
          + PlanningRecords
-         + RunCoordination
-         + SupervisorRegistry
+         + CoordinationReads
+         + SupervisorReads
          + RunReads
-         + TaskStore
+         + TaskReads
          + ?Sized
      ),
     processes: &dyn ProcessControl,
@@ -254,7 +254,7 @@ impl StatsSources<'_> {
 /// the processes and `sources`: what a supervisor's pass records
 /// (docs/design/measurement.md "今の判定の記録").
 pub fn live_inputs(
-    queue: &(impl TaskStore + PlanningRecords + SupervisorRegistry + RunCoordination + RunLog + ?Sized),
+    queue: &(impl TaskReads + PlanningRecords + SupervisorReads + CoordinationReads + RunLog + ?Sized),
     processes: &dyn ProcessControl,
     now: i64,
     events: &[crate::domain::RunEvent],
@@ -275,7 +275,7 @@ pub fn live_inputs(
 /// which are alive) less the runs executing, and the candidates and ready
 /// tasks.
 fn slot_snapshot(
-    queue: &(impl EventStore + TaskStore + SupervisorRegistry + RunCoordination + RunReads + ?Sized),
+    queue: &(impl EventStore + TaskReads + SupervisorReads + CoordinationReads + RunReads + ?Sized),
     processes: &dyn ProcessControl,
     now: i64,
 ) -> Result<SlotSnapshot> {

@@ -10,7 +10,7 @@ pub use crate::application::health::compact_event;
 use crate::{
     application::health::{for_role, pulses, supervisors},
     application::{
-        Clock, EventStore, ProcessControl, RunCoordination, RunLog, SupervisorRegistry,
+        Clock, CoordinationReads, EventStore, ProcessControl, RunLog, SupervisorReads,
         push::{self, PushOutcome, PushRequest, PushTarget},
     },
     domain::{
@@ -304,7 +304,7 @@ pub struct WatchOptions {
 /// nothing of the supervisor's. One that fails stops nothing; the output's
 /// `ask_push` says how it went ([`notify_opened`]).
 pub fn watch(
-    queue: &(impl RunLog + RunCoordination + SupervisorRegistry),
+    queue: &(impl RunLog + CoordinationReads + SupervisorReads),
     clock: &dyn Clock,
     control: &dyn ProcessControl,
     mut record: Option<&mut dyn WatchRecord>,

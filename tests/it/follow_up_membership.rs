@@ -2,7 +2,7 @@
 use crate::common::{self, queue::*};
 use dagq::domain::follow_up::{MembershipClassification as Class, MembershipJudgement};
 use dagq::{
-    application::TaskStore,
+    application::{TaskReads, TaskStore},
     domain::{
         ClaimOutcome, DraftOrigin, GoalEdit, GoalId, PlannerOrigin, PlannerOwner, Submission,
         TaskAction, TaskId,

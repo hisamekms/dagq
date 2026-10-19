@@ -19,7 +19,7 @@ use dagq::application::commands::operations::{HookSession, Operation, WorkspaceS
 use dagq::application::queue_reads::{self as reads, QueueRead};
 use dagq::domain::queue_service::UseCase;
 use dagq::{
-    application::{PlanRequestStore, TaskStore},
+    application::{PlanRequestStore, TaskReads},
     domain::{
         ActorContext, ActorRole, AskId, AskKind, AskReason, AuthorizationError, Capability,
         EventId, FindingId, FindingTarget, GoalEdit, GoalId, GoalVerdict, LeaseToken, NewAsk,

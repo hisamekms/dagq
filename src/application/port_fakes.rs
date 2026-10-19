@@ -8,7 +8,7 @@ use crate::domain::*;
 use anyhow::Result;
 use std::cell::RefCell;
 
-/// The supervisors' registrations ([`SupervisorRegistry::supervisors`]) and
+/// The supervisors' registrations ([`SupervisorReads::supervisors`]) and
 /// the queue's events ([`EventStore::latest_events_of`],
 /// [`EventStore::record_queue_event`]), newest last.
 #[derive(Default)]
@@ -170,17 +170,11 @@ impl SupervisorRegistry for SupervisorsAndEvents {
     ) -> Result<bool> {
         unreachable!("prune_supervisor is not what the test reaches")
     }
-    fn supervisors(&self) -> Result<Vec<SupervisorRegistration>> {
-        Ok(self.registrations.clone())
-    }
     fn accept_handoff(&self, token: &LeaseToken) -> Result<()> {
         unreachable!("accept_handoff is not what the test reaches")
     }
     fn request_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
         unreachable!("request_handoff is not what the test reaches")
-    }
-    fn handoff_request(&self, token: &LeaseToken) -> Result<Option<String>> {
-        unreachable!("handoff_request is not what the test reaches")
     }
     fn take_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
         unreachable!("take_handoff is not what the test reaches")
@@ -219,9 +213,6 @@ impl SupervisorRegistry for SupervisorsAndEvents {
     fn rebind_repository(&mut self, common_dir: &str) -> Result<Option<String>> {
         unreachable!("rebind_repository is not what the test reaches")
     }
-    fn repository_binding(&self) -> Result<Option<String>> {
-        unreachable!("repository_binding is not what the test reaches")
-    }
     fn bind_repository(&mut self, common_dir: &str) -> Result<()> {
         unreachable!("bind_repository is not what the test reaches")
     }
@@ -238,13 +229,26 @@ impl SupervisorRegistry for SupervisorsAndEvents {
     }
 }
 
+#[allow(unused_variables)]
+impl crate::application::SupervisorReads for SupervisorsAndEvents {
+    fn supervisors(&self) -> Result<Vec<SupervisorRegistration>> {
+        Ok(self.registrations.clone())
+    }
+    fn handoff_request(&self, token: &LeaseToken) -> Result<Option<String>> {
+        unreachable!("handoff_request is not what the test reaches")
+    }
+    fn repository_binding(&self) -> Result<Option<String>> {
+        unreachable!("repository_binding is not what the test reaches")
+    }
+}
+
 /// A failed call [`SessionRecords`] recorded: the run it was on and its
 /// payload.
 pub(crate) type RecordedFailure = (Option<RunId>, serde_json::Value);
 
 /// The runs whose sessions the recording of the session wrappers finds
 /// ([`RunReads::run_in_workspace`]), the slots it reports
-/// ([`RunCoordination::backend_slots`], with the tokens it asked for) and
+/// ([`CoordinationReads::backend_slots`], with the tokens it asked for) and
 /// the failed calls it records ([`EventStore::record_backend_failure`]).
 /// Every connection it opens shares what is recorded.
 #[derive(Clone, Default)]
@@ -384,20 +388,8 @@ impl RunCoordination for SessionRecords {
     fn release_lease(&mut self, id: &RunId, token: &LeaseToken) -> Result<()> {
         unreachable!("release_lease is not what the test reaches")
     }
-    fn holds_lease(&self, id: &RunId, token: &LeaseToken) -> Result<bool> {
-        unreachable!("holds_lease is not what the test reaches")
-    }
-    fn run_leases(&self) -> Result<Vec<RunLease>> {
-        unreachable!("run_leases is not what the test reaches")
-    }
-    fn run_lease(&self, id: &RunId) -> Result<Option<RunLease>> {
-        unreachable!("run_lease is not what the test reaches")
-    }
     fn heartbeat(&mut self, token: &LeaseToken) -> Result<HeartbeatWrite> {
         unreachable!("heartbeat is not what the test reaches")
-    }
-    fn processes(&self, id: &RunId) -> Result<Vec<RunProcess>> {
-        unreachable!("processes is not what the test reaches")
     }
     fn register_wrapper(&mut self, id: &RunId, token: &LeaseToken, pid: u32) -> Result<()> {
         unreachable!("register_wrapper is not what the test reaches")
@@ -442,6 +434,22 @@ impl RunCoordination for SessionRecords {
     }
     fn wrapper_exited(&mut self, id: &RunId, pid: u32, exit_code: i32) -> Result<()> {
         unreachable!("wrapper_exited is not what the test reaches")
+    }
+}
+
+#[allow(unused_variables)]
+impl crate::application::CoordinationReads for SessionRecords {
+    fn holds_lease(&self, id: &RunId, token: &LeaseToken) -> Result<bool> {
+        unreachable!("holds_lease is not what the test reaches")
+    }
+    fn run_leases(&self) -> Result<Vec<RunLease>> {
+        unreachable!("run_leases is not what the test reaches")
+    }
+    fn run_lease(&self, id: &RunId) -> Result<Option<RunLease>> {
+        unreachable!("run_lease is not what the test reaches")
+    }
+    fn processes(&self, id: &RunId) -> Result<Vec<RunProcess>> {
+        unreachable!("processes is not what the test reaches")
     }
     fn backend_slots(&self, token: Option<&LeaseToken>) -> Result<(i64, Option<i64>)> {
         self.slots_of.lock().unwrap().push(token.cloned());
@@ -519,9 +527,6 @@ impl SessionRegistry for SessionRecords {
     fn planner_silent(&self, id: PlannerId, payload: serde_json::Value) -> Result<bool> {
         unreachable!("planner_silent is not what the test reaches")
     }
-    fn silent_planners(&self) -> Result<Vec<(PlannerSession, RunEvent)>> {
-        unreachable!("silent_planners is not what the test reaches")
-    }
     fn record_session_turns(&self) -> Result<usize> {
         unreachable!("record_session_turns is not what the test reaches")
     }
@@ -546,6 +551,13 @@ impl SessionRegistry for SessionRecords {
         session: Option<&crate::domain::headless_job::JobSession>,
     ) -> Result<usize> {
         unreachable!("close_review_session is not what the test reaches")
+    }
+}
+
+#[allow(unused_variables)]
+impl crate::application::SessionReads for SessionRecords {
+    fn silent_planners(&self) -> Result<Vec<(PlannerSession, RunEvent)>> {
+        unreachable!("silent_planners is not what the test reaches")
     }
 }
 

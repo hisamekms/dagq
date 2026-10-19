@@ -21,7 +21,7 @@ pub(super) struct MainLogWatch {
     /// whether Git's reading was failing; `None` before the first look.
     last: Option<(Option<String>, i64, bool)>,
     /// The stamp of the landing branch's files taken before the last look
-    /// that went through ([`Repository::landing_branch_stamp`]).
+    /// that went through ([`RepositoryReads::landing_branch_stamp`](crate::application::RepositoryReads::landing_branch_stamp)).
     stamp: Option<LandingBranchStamp>,
     /// When this process last looked (unix seconds).
     looked: i64,
@@ -108,7 +108,7 @@ impl ObservationState {
                     .filter_map(|event| crate::domain::stats::timestamp_millis(&event.created_at))
                     .min())
             };
-            let records = records(&recorded, now, &earliest, &**env.repository);
+            let records = records(&recorded, now, &earliest, env.repository);
             let mut last = (
                 recorded.reach.as_ref().map(|reach| reach.head.clone()),
                 recorded.reach.as_ref().map_or(now, |reach| reach.at),

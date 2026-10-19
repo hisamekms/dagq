@@ -2,9 +2,9 @@
 //! "観測と分析"): the reads of the queue's records, the observer's log
 //! and the marks, over the [`EventStore`] in [`super::shared`].
 
-use super::execution::{RunCoordination, RunLog};
-use super::host::SupervisorRegistry;
-use super::planning::{PlanningRecords, TaskStore};
+use super::execution::{CoordinationReads, RunLog};
+use super::host::SupervisorReads;
+use super::planning::{PlanningRecords, TaskReads};
 use super::shared::{AskStore, EventStore};
 use crate::domain::host_metrics::{HostSample, NodeSample, SampleSource};
 use crate::domain::ledger::{
@@ -227,21 +227,15 @@ pub trait QueueRecords {
 /// and the asks a finding holds by. [`super::shared::Queue`] has it as a
 /// supertrait, so the loop's connection upcasts to it.
 pub trait ObservationQueue:
-    TaskStore
-    + PlanningRecords
-    + SupervisorRegistry
-    + RunCoordination
-    + RunLog
-    + QueueRecords
-    + AskStore
+    TaskReads + PlanningRecords + SupervisorReads + CoordinationReads + RunLog + QueueRecords + AskStore
 {
 }
 
 impl<
-    T: TaskStore
+    T: TaskReads
         + PlanningRecords
-        + SupervisorRegistry
-        + RunCoordination
+        + SupervisorReads
+        + CoordinationReads
         + RunLog
         + QueueRecords
         + AskStore

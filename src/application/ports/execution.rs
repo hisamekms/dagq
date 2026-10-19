@@ -1426,29 +1426,36 @@ pub enum KeptOutcome {
     Discarded(crate::domain::task_hold::DiscardReason),
 }
 
+/// The reads of the run leases, the runs' processes and the backend's
+/// slots that 実行と着地 publishes to every context (rule C2 of
+/// docs/design/architecture.md).
+pub trait CoordinationReads {
+    fn holds_lease(&self, id: &RunId, token: &LeaseToken) -> Result<bool>;
+    fn run_leases(&self) -> Result<Vec<RunLease>>;
+    fn run_lease(&self, id: &RunId) -> Result<Option<RunLease>>;
+    /// The processes registered for the run (its wrapper and agent).
+    fn processes(&self, id: &RunId) -> Result<Vec<RunProcess>>;
+    /// The leases `token` holds (every lease with `None`) and the
+    /// `parallel` it registered (null without a supervisor).
+    fn backend_slots(&self, token: Option<&LeaseToken>) -> Result<(i64, Option<i64>)>;
+}
+
 /// The state runs coordinate through (ADR-0032's second kind): run leases
 /// and heartbeats, the wrapper and agent processes of runs and the
 /// backend's slots. The supervisors' registrations are host運用's
 /// [`SupervisorRegistry`](super::host::SupervisorRegistry), except that
 /// [`heartbeat`](Self::heartbeat) refreshes the registration with the
 /// leases in one write (transaction T11 of src/context_boundaries/ownership.rs).
-/// Its reads (`holds_lease`, `run_leases`, `run_lease`, `processes`,
-/// `backend_slots`) are published to every context (the `method` items of
-/// the same list); the rest is 実行と着地's
-/// own (a handoff gives its slots' leases back in 実行と着地's
+/// Its reads are [`CoordinationReads`]; the rest is 実行と着地's own (a
+/// handoff gives its slots' leases back in 実行と着地's
 /// `supervise::handoff_slots`).
-pub trait RunCoordination {
+pub trait RunCoordination: CoordinationReads {
     /// Refresh every lease `token` holds; how many there were.
     fn heartbeat_leases(&self, token: &LeaseToken) -> Result<usize>;
     fn release_lease(&mut self, id: &RunId, token: &LeaseToken) -> Result<()>;
-    fn holds_lease(&self, id: &RunId, token: &LeaseToken) -> Result<bool>;
-    fn run_leases(&self) -> Result<Vec<RunLease>>;
-    fn run_lease(&self, id: &RunId) -> Result<Option<RunLease>>;
     /// One heartbeat of the process `token`: its registration and every
     /// lease it holds; how many leases there were.
     fn heartbeat(&mut self, token: &LeaseToken) -> Result<HeartbeatWrite>;
-    /// The processes registered for the run (its wrapper and agent).
-    fn processes(&self, id: &RunId) -> Result<Vec<RunProcess>>;
     fn register_wrapper(&mut self, id: &RunId, token: &LeaseToken, pid: u32) -> Result<()>;
     fn register_resume_wrapper(&mut self, id: &RunId, token: &LeaseToken, pid: u32) -> Result<()>;
     /// Forget the processes of a running run whose session was lost, so
@@ -1479,15 +1486,21 @@ pub trait RunCoordination {
     fn register_turn_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32) -> Result<()>;
     fn heartbeat_wrapper(&self, id: &RunId, pid: u32) -> Result<()>;
     fn wrapper_exited(&mut self, id: &RunId, pid: u32, exit_code: i32) -> Result<()>;
-    /// The leases `token` holds (every lease with `None`) and the
-    /// `parallel` it registered (null without a supervisor).
-    fn backend_slots(&self, token: Option<&LeaseToken>) -> Result<(i64, Option<i64>)>;
+}
+
+/// The read of the sessions around runs that 実行と着地 publishes to
+/// 観測と分析 (rule C2 of docs/design/architecture.md): the planners that
+/// went silent, for the inbox's attention.
+pub trait SessionReads {
+    /// The planners not closed that such a `planner_unresponsive` names,
+    /// each with that event: the inbox's attention.
+    fn silent_planners(&self) -> Result<Vec<(PlannerSession, RunEvent)>>;
 }
 
 /// The sessions around runs: the workspaces an earlier binary's `up`
 /// recorded, the planner sessions and the Claude session spans the hooks
 /// and transcripts report.
-pub trait SessionRegistry {
+pub trait SessionRegistry: SessionReads {
     /// Forget the workspace of `role`; `false` when none was recorded.
     fn remove_session_workspace(&self, role: SessionRole) -> Result<bool>;
     /// Forget the workspaces recorded for a role `up` no longer opens (all
@@ -1556,9 +1569,6 @@ pub trait SessionRegistry {
     /// per planner: `payload` names it by `planner_id` with `subject:
     /// "planner"`. `false` when it was recorded before.
     fn planner_silent(&self, id: PlannerId, payload: serde_json::Value) -> Result<bool>;
-    /// The planners not closed that such a `planner_unresponsive` names,
-    /// each with that event: the inbox's attention.
-    fn silent_planners(&self) -> Result<Vec<(PlannerSession, RunEvent)>>;
     /// Record the finished transcript turns of the Claude session spans
     /// still open, and finalize closed hook spans awaiting intake (ADR-0048
     /// decision 8); returns how many spans got turns or final measurements.
@@ -1658,7 +1668,7 @@ pub trait RecordingQueue: RunLog + RunCoordination + SessionRegistry {}
 
 impl<T: RunLog + RunCoordination + SessionRegistry + ?Sized> RecordingQueue for T {}
 
-/// One file's identity and change times as [`Repository::landing_branch_stamp`]
+/// One file's identity and change times as [`RepositoryReads::landing_branch_stamp`]
 /// reads them; `None` in [`LandingBranchStamp`] is a file that is not there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileStamp {
@@ -1676,10 +1686,10 @@ pub struct FileStamp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LandingBranchStamp(pub Vec<(PathBuf, Option<FileStamp>)>);
 
-/// The Git operations `integrate` and the supervisor use on the repository
-/// the queue is bound to and on its run worktrees. Commits are named by
-/// their full SHA; a failed Git command is an error with Git's message.
-pub trait Repository {
+/// The reads of main's history and of the landing branch that 実行と着地
+/// publishes to 観測と分析 (rule C2 of docs/design/architecture.md): the
+/// CI watch and the record of main's history take these alone.
+pub trait RepositoryReads {
     /// The branch runs land on (ADR-t615-1), resolved again on every call;
     /// a repository that does not resolve one lands on `main`.
     fn landing_branch(&self) -> Result<crate::domain::landing_branch::LandingBranch> {
@@ -1692,30 +1702,8 @@ pub trait Repository {
     fn landing_branch_stamp(&self) -> Option<LandingBranchStamp> {
         None
     }
-    /// `[repository]` of the main checkout's `dagq.toml`, read again on
-    /// every call; a repository without one has the default (`origin`,
-    /// pushed). `integrate --no-push` reads it only to record the remote
-    /// it did not push to.
-    fn repository_config(&self) -> Result<crate::domain::landing_branch::RepositoryConfig> {
-        Ok(Default::default())
-    }
-    /// Whether the repository is dagq's source (ADR-t614-1), judged again
-    /// on every call; what only dagq's own development needs runs only
-    /// there.
-    fn is_dagq_source(&self) -> bool;
     /// The landing branch's current commit, read again on every call.
     fn main_head(&self) -> Result<CommitSha>;
-    /// Read a UTF-8 blob in a commit's tree; `None` if the path is absent.
-    fn file_in(&self, _commit: &str, _path: &str) -> Result<Option<String>> {
-        anyhow::bail!("this repository cannot read committed files")
-    }
-
-    /// The blob ID of each file at or under `paths` (files, or directories
-    /// and everything under them) in `commit`'s tree, by its path; a path
-    /// the tree lacks gives none.
-    fn blobs_in(&self, _commit: &str, _paths: &[&str]) -> Result<Vec<(String, String)>> {
-        anyhow::bail!("this repository cannot list committed files")
-    }
 
     /// Main's first-parent history since `since` (unix seconds) and the
     /// paths it has now, for `conflict_hotspots`; a repository that cannot
@@ -1747,22 +1735,50 @@ pub trait Repository {
         let _ = commit;
         anyhow::bail!("this repository keeps no history")
     }
+    /// Whether `commit` is on the first-parent line of `head`.
+    fn on_first_parent_line(&self, commit: &str, head: &str) -> Result<bool> {
+        let _ = (commit, head);
+        anyhow::bail!("this repository keeps no history")
+    }
+    fn merge_base(&self, a: &str, b: &str) -> Result<Option<CommitSha>>;
+}
+
+/// The Git operations `integrate` and the supervisor use on the repository
+/// the queue is bound to and on its run worktrees. Commits are named by
+/// their full SHA; a failed Git command is an error with Git's message.
+pub trait Repository: RepositoryReads {
+    /// `[repository]` of the main checkout's `dagq.toml`, read again on
+    /// every call; a repository without one has the default (`origin`,
+    /// pushed). `integrate --no-push` reads it only to record the remote
+    /// it did not push to.
+    fn repository_config(&self) -> Result<crate::domain::landing_branch::RepositoryConfig> {
+        Ok(Default::default())
+    }
+    /// Whether the repository is dagq's source (ADR-t614-1), judged again
+    /// on every call; what only dagq's own development needs runs only
+    /// there.
+    fn is_dagq_source(&self) -> bool;
+    /// Read a UTF-8 blob in a commit's tree; `None` if the path is absent.
+    fn file_in(&self, _commit: &str, _path: &str) -> Result<Option<String>> {
+        anyhow::bail!("this repository cannot read committed files")
+    }
+
+    /// The blob ID of each file at or under `paths` (files, or directories
+    /// and everything under them) in `commit`'s tree, by its path; a path
+    /// the tree lacks gives none.
+    fn blobs_in(&self, _commit: &str, _paths: &[&str]) -> Result<Vec<(String, String)>> {
+        anyhow::bail!("this repository cannot list committed files")
+    }
     /// Whether the repository has `commit` and some ref reaches it; a
     /// commit only its kept object holds (its branch deleted) is not.
     fn reachable_commit(&self, commit: &str) -> Result<bool> {
         let _ = commit;
         anyhow::bail!("this repository keeps no history")
     }
-    /// Whether `commit` is on the first-parent line of `head`.
-    fn on_first_parent_line(&self, commit: &str, head: &str) -> Result<bool> {
-        let _ = (commit, head);
-        anyhow::bail!("this repository keeps no history")
-    }
     /// Symbolic HEAD of a worktree (`refs/heads/...`), `None` when detached.
     fn current_branch(&self, worktree: &Path) -> Result<Option<String>>;
     fn head(&self, worktree: &Path) -> Result<CommitSha>;
     fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool>;
-    fn merge_base(&self, a: &str, b: &str) -> Result<Option<CommitSha>>;
     /// `git status --porcelain` of the worktree; blank when clean.
     fn status(&self, worktree: &Path) -> Result<String>;
     /// The diff of the worktree against its head, as `git diff --binary`

@@ -150,12 +150,14 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
   他のcontextのtableを書くのは、所有の一覧の`transaction`の項目の関数の中だけ。
   検査: Rustのtest（`src/context_boundaries.rs`）。
 - **C2** 観測と分析のコードは、他のcontextの状態を変えるportのmethod（`TaskStore`・`RunCoordination`・`SupervisorRegistry`・`DraftPlannerStore`の書き込み、`RunTransitions`・`RunRecovery`・`PlanReviewStore`・`GoalReviewStore`）を呼ばない。
-  検査: 全体のreview。
+  観測と分析が読む他のcontextのportは、読み取りのtrait（`…Reads`）と、それをsupertraitに持つ書き込みのtraitに分かれる。
+  検査: 型（観測と分析のuse caseと`ObservationQueue`・`ObservationEnv`は読み取りのtraitだけを取り、書き込みのmethodを呼ぶコードはコンパイルできない）。
+  `application::health`のattentionが読む計画管理の`DraftPlannerStore`・`PlanReviewStore`・`GoalReviewStore`と、それを渡すstatusのこれらのportは、計画管理が読み取りのportを公開するまで型で守られず、全体のreviewが見る。
 - **C3** `application::supervise`のsubmoduleは、自分のcontextの`Supervisor`の欄か分けた状態だけを変える。
   他のcontextの欄は読むか、そのcontextの関数を呼ぶ。
   検査: 分けた状態のsubmoduleはscript、残りは全体のreview。
 - **C4** 新しく足す・変えるuse caseは`Box<dyn Queue>`・`&mut dyn Queue`・全体の`QueueOpener`を取らず、要るportだけを取る（ADR-0013決定1の「portは原則applicationに定義する」のまま、幅を狭める）。
-  検査: 全体のreview（portを分けた後にscript）。
+  検査: 観測と分析のuse caseは型（C2の読み取りのtraitだけを取る）、ほかのuse caseの切り方は全体のreview。
 - **C5** 他のcontextの公開していないport（所有の一覧で内部としたもの、一部公開のportは公開していないmethod）を使わない。
   検査: portの名前の参照はscript（`scripts/check-context-boundaries.sh`）、一部公開のportのmethodの単位の参照とcontextの決まらないmoduleは全体のreview。
 - **C6** 他のcontextのeventを読むときは、kindを`domain::event_kind`か所有するdomainのmoduleの定数で名指し、状態の判断に使うpayloadは文字列のkeyではなく型付きの復元の値で読む。

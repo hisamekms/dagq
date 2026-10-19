@@ -21,11 +21,54 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-pub trait TaskStore {
-    fn add(&mut self, task: NewTask) -> Result<Task>;
+/// The reads of the tasks, goals, proposals and notes that 計画管理
+/// publishes to every context (rule C2 of docs/design/architecture.md):
+/// 観測と分析 takes these alone, so it cannot call a write of
+/// [`TaskStore`].
+pub trait TaskReads {
     /// One page of tasks matching `query`, newest first.
     fn list(&self, query: &TaskQuery) -> Result<TaskPage>;
     fn show(&mut self, task_id: TaskId) -> Result<TaskDetail>;
+    /// Dependency-ready tasks in claim order (ADR-0040 decision 4); each
+    /// task is limited to one unfinished run. No claim deferral is left
+    /// out: the supervisor leaves out its own, and the stats count them all.
+    fn candidates(&self) -> Result<Vec<Task>>;
+    /// The ready tasks that wait for a build containing their
+    /// dependencies' landings (ADR-t1632-1), each with the landed commits
+    /// of its direct predecessors (none for a predecessor that landed
+    /// nothing).
+    fn build_waits(&self)
+    -> Result<std::collections::HashMap<TaskId, Vec<crate::domain::Landing>>>;
+    /// The unfinished tasks with their direct predecessors and the IDs of
+    /// `candidates`, read in one snapshot.
+    fn graph_input(&self) -> Result<GraphInput>;
+    /// Direct predecessors of a task, each with the run that landed it, in ID order.
+    fn predecessors(&self, task_id: TaskId) -> Result<Vec<Predecessor>>;
+    /// Goals a task depends on, in ID order, each with its completed tasks
+    /// and the runs that landed them.
+    fn goal_predecessors(&self, task_id: TaskId) -> Result<Vec<GoalPredecessor>>;
+    /// Tasks that are `in_progress` right now, in ID order.
+    fn tasks_in_progress(&self) -> Result<Vec<Task>>;
+    /// Every goal in ID order with its task counts by status.
+    fn list_goals(&self) -> Result<Vec<GoalSummary>>;
+    fn show_goal(&mut self, goal_id: GoalId) -> Result<GoalDetail>;
+    fn show_proposal(&self, proposal_id: ProposalId) -> Result<Proposal>;
+    /// The submitted and revising proposals, oldest submission first; with
+    /// `all`, every proposal.
+    fn proposals(&self, all: bool) -> Result<Vec<Proposal>>;
+    /// What `lint` checks `tasks` against (ADR-0041 decision 10), read in
+    /// one snapshot: the tasks in the order given, every task's status and
+    /// dependencies, and every goal's verdict. A missing task is an error.
+    fn lint_input(&self, tasks: &[TaskId]) -> Result<LintInput>;
+    /// One page of notes, oldest first.
+    fn notes(&self, query: &NoteQuery) -> Result<NotePage>;
+}
+
+/// 計画管理's writes of the tasks and goals, with the reads of
+/// [`TaskReads`]; its claim is published to 実行と着地 (the `method`
+/// items of .config/context-boundaries.txt).
+pub trait TaskStore: TaskReads {
+    fn add(&mut self, task: NewTask) -> Result<Task>;
     /// Move a task by `action`. A cancel that records its reason is
     /// [`TaskStore::cancel`]; one by this records none.
     fn transition(&mut self, task_id: TaskId, action: TaskAction) -> Result<Task>;
@@ -40,19 +83,6 @@ pub trait TaskStore {
     /// (ADR-0038); never its own goal, never a cycle.
     fn add_goal_dependency(&mut self, task_id: TaskId, goal_id: GoalId) -> Result<()>;
     fn remove_goal_dependency(&mut self, task_id: TaskId, goal_id: GoalId) -> Result<()>;
-    /// Dependency-ready tasks in claim order (ADR-0040 decision 4); each
-    /// task is limited to one unfinished run. No claim deferral is left
-    /// out: the supervisor leaves out its own, and the stats count them all.
-    fn candidates(&self) -> Result<Vec<Task>>;
-    /// The ready tasks that wait for a build containing their
-    /// dependencies' landings (ADR-t1632-1), each with the landed commits
-    /// of its direct predecessors (none for a predecessor that landed
-    /// nothing).
-    fn build_waits(&self)
-    -> Result<std::collections::HashMap<TaskId, Vec<crate::domain::Landing>>>;
-    /// The unfinished tasks with their direct predecessors and the IDs of
-    /// `candidates`, read in one snapshot.
-    fn graph_input(&self) -> Result<GraphInput>;
     /// When each of `tasks` became claimable (`claim_facts::claimable_since`), in
     /// Unix milliseconds; a task with no time read is left out. The aging
     /// of the claim order measures the waits from it (ADR-t1487-2
@@ -66,17 +96,7 @@ pub trait TaskStore {
     fn investigations(&mut self) -> Result<crate::domain::investigation::Investigations>;
     /// Reserve one run atomically, without a lease. Does not start a process or validate Git objects.
     fn claim(&mut self, base_commit: &CommitSha) -> Result<ClaimOutcome>;
-    /// Direct predecessors of a task, each with the run that landed it, in ID order.
-    fn predecessors(&self, task_id: TaskId) -> Result<Vec<Predecessor>>;
-    /// Goals a task depends on, in ID order, each with its completed tasks
-    /// and the runs that landed them.
-    fn goal_predecessors(&self, task_id: TaskId) -> Result<Vec<GoalPredecessor>>;
-    /// Tasks that are `in_progress` right now, in ID order.
-    fn tasks_in_progress(&self) -> Result<Vec<Task>>;
     fn add_goal(&mut self, goal: NewGoal) -> Result<Goal>;
-    /// Every goal in ID order with its task counts by status.
-    fn list_goals(&self) -> Result<Vec<GoalSummary>>;
-    fn show_goal(&mut self, goal_id: GoalId) -> Result<GoalDetail>;
     /// Replace the given fields; running runs keep their prompt snapshot.
     fn edit_goal(&mut self, goal_id: GoalId, edit: GoalEdit) -> Result<Goal>;
     /// Record the verdict once. `achieved` is refused while a task is not
@@ -120,20 +140,10 @@ pub trait TaskStore {
     /// submitted tasks return to draft, and its tasks and goals are free to
     /// join another proposal.
     fn withdraw_proposal(&mut self, proposal_id: ProposalId) -> Result<Proposal>;
-    fn show_proposal(&self, proposal_id: ProposalId) -> Result<Proposal>;
-    /// The submitted and revising proposals, oldest submission first; with
-    /// `all`, every proposal.
-    fn proposals(&self, all: bool) -> Result<Vec<Proposal>>;
-    /// What `lint` checks `tasks` against (ADR-0041 decision 10), read in
-    /// one snapshot: the tasks in the order given, every task's status and
-    /// dependencies, and every goal's verdict. A missing task is an error.
-    fn lint_input(&self, tasks: &[TaskId]) -> Result<LintInput>;
     /// Open a draft goal so its tasks become candidates (ADR-0024 decision 5).
     fn ready_goal(&mut self, goal_id: GoalId) -> Result<Goal>;
     /// Record a note as an `observation` run event on its task, run or goal.
     fn add_note(&mut self, note: NewNote) -> Result<RunEvent>;
-    /// One page of notes, oldest first.
-    fn notes(&self, query: &NoteQuery) -> Result<NotePage>;
 }
 
 /// How [`DraftPlannerStore::open_draft_planner`] ended.
@@ -246,10 +256,22 @@ pub enum PlannerAnswerRoute {
     Person,
 }
 
+/// The reads of the runtime's planners' drafts and findings that 計画管理
+/// publishes to every context (rule C2 of docs/design/architecture.md).
+pub trait DraftPlannerReads {
+    /// The findings waiting for a planner of the runtime's (ADR-0044
+    /// decision 19): `open`, marked for a proposal, no planner open for
+    /// it, no `planner_question` about it nobody closed and its planners
+    /// since the mark not used up; the oldest mark first, then by ID.
+    fn planner_findings(&self) -> Result<Vec<Finding>>;
+    /// The improvement proposals running against `limit`.
+    fn improvements(&self, limit: usize) -> Result<crate::domain::ImprovementLimit>;
+}
+
 /// The drafts the runtime or a job registered (ADR-0041 decision 16):
 /// where each came from, the planner of the runtime's opened for each, and
 /// the `planner_question` answers the supervisor types into a planner.
-pub trait DraftPlannerStore {
+pub trait DraftPlannerStore: DraftPlannerReads {
     /// Register every still-unrecorded entry of one receipt, or of one
     /// review's judgment, atomically,
     /// including skipped entries and their `follow_up_registered` events.
@@ -334,11 +356,6 @@ pub trait DraftPlannerStore {
     /// not a field of the task aggregate.
     fn follow_up_depth(&self, task: TaskId) -> Result<i64>;
     fn set_follow_up_depth(&mut self, task: TaskId, depth: i64) -> Result<()>;
-    /// The findings waiting for a planner of the runtime's (ADR-0044
-    /// decision 19): `open`, marked for a proposal, no planner open for
-    /// it, no `planner_question` about it nobody closed and its planners
-    /// since the mark not used up; the oldest mark first, then by ID.
-    fn planner_findings(&self) -> Result<Vec<Finding>>;
     /// Record a planner of the runtime's for `finding`
     /// (`finding_planner_opened`) after re-checking it in the same write
     /// transaction. With `answer`, the planner carries that answered
@@ -351,8 +368,6 @@ pub trait DraftPlannerStore {
         answer: Option<AskId>,
         limit: usize,
     ) -> Result<FindingPlannerStart>;
-    /// The improvement proposals running against `limit`.
-    fn improvements(&self, limit: usize) -> Result<crate::domain::ImprovementLimit>;
     /// One finding as `findings ID --full` shows it.
     fn finding_view(&self, finding: FindingId) -> Result<FindingView>;
     /// The asks about the finding, oldest first.

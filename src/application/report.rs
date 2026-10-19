@@ -20,7 +20,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use super::{
-    PlanningRecords, QueueRecords, RunFiles, RunLog, SupervisorRegistry, TaskStore, kpi::Host,
+    PlanningRecords, QueueRecords, RunFiles, RunLog, SupervisorReads, TaskReads, kpi::Host,
 };
 use crate::domain::{
     FindingQuery,
@@ -92,7 +92,7 @@ pub struct Written {
 /// The report of the `period` that holds `at` (now without), at the unix
 /// second `now`, with the dependency diagram of the queue now.
 pub fn make(
-    queue: &(impl PlanningRecords + QueueRecords + SupervisorRegistry + RunLog + TaskStore + ?Sized),
+    queue: &(impl PlanningRecords + QueueRecords + SupervisorReads + RunLog + TaskReads + ?Sized),
     setup: &ReportSetup,
     now: i64,
     period: Period,
@@ -105,7 +105,7 @@ pub fn make(
 /// The near-term dependency diagram of the queue now, drawn by `render`:
 /// its tasks and the inline SVG, or why there is none. A queue with no
 /// near-term task is not drawn.
-pub fn diagram(queue: &(impl TaskStore + ?Sized), render: &DiagramRenderer) -> DiagramSection {
+pub fn diagram(queue: &(impl TaskReads + ?Sized), render: &DiagramRenderer) -> DiagramSection {
     let graph = match queue.graph_input() {
         Ok(input) => super::dependency_graph(input, None),
         Err(error) => {
@@ -142,7 +142,7 @@ pub fn diagram(queue: &(impl TaskStore + ?Sized), render: &DiagramRenderer) -> D
 
 /// [`make`] with the diagram drawn already.
 fn make_with(
-    queue: &(impl PlanningRecords + QueueRecords + SupervisorRegistry + RunLog + TaskStore + ?Sized),
+    queue: &(impl PlanningRecords + QueueRecords + SupervisorReads + RunLog + TaskReads + ?Sized),
     setup: &ReportSetup,
     now: i64,
     period: Period,
@@ -221,7 +221,7 @@ pub fn write(
 /// and shared by the others. A report another supervisor recorded
 /// meanwhile is not recorded twice nor returned.
 pub fn write_due(
-    queue: &(impl PlanningRecords + QueueRecords + SupervisorRegistry + RunLog + TaskStore + ?Sized),
+    queue: &(impl PlanningRecords + QueueRecords + SupervisorReads + RunLog + TaskReads + ?Sized),
     files: &dyn RunFiles,
     setup: &ReportSetup,
     now: i64,

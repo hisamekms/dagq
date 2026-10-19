@@ -768,20 +768,8 @@ impl RunCoordination for SqliteQueue {
     fn release_lease(&mut self, id: &RunId, token: &LeaseToken) -> Result<()> {
         SqliteQueue::release_lease(self, id, token)
     }
-    fn holds_lease(&self, id: &RunId, token: &LeaseToken) -> Result<bool> {
-        SqliteQueue::holds_lease(self, id, token)
-    }
-    fn run_leases(&self) -> Result<Vec<RunLease>> {
-        SqliteQueue::run_leases(self)
-    }
-    fn run_lease(&self, id: &RunId) -> Result<Option<RunLease>> {
-        SqliteQueue::run_lease(self, id)
-    }
     fn heartbeat(&mut self, token: &LeaseToken) -> Result<HeartbeatWrite> {
         SqliteQueue::heartbeat(self, token)
-    }
-    fn processes(&self, id: &RunId) -> Result<Vec<RunProcess>> {
-        SqliteQueue::processes(self, id)
     }
     fn register_wrapper(&mut self, id: &RunId, token: &LeaseToken, pid: u32) -> Result<()> {
         SqliteQueue::register_wrapper(self, id, token, pid)
@@ -827,6 +815,21 @@ impl RunCoordination for SqliteQueue {
     fn wrapper_exited(&mut self, id: &RunId, pid: u32, exit_code: i32) -> Result<()> {
         SqliteQueue::wrapper_exited(self, id, pid, exit_code)
     }
+}
+
+impl crate::application::CoordinationReads for SqliteQueue {
+    fn holds_lease(&self, id: &RunId, token: &LeaseToken) -> Result<bool> {
+        SqliteQueue::holds_lease(self, id, token)
+    }
+    fn run_leases(&self) -> Result<Vec<RunLease>> {
+        SqliteQueue::run_leases(self)
+    }
+    fn run_lease(&self, id: &RunId) -> Result<Option<RunLease>> {
+        SqliteQueue::run_lease(self, id)
+    }
+    fn processes(&self, id: &RunId) -> Result<Vec<RunProcess>> {
+        SqliteQueue::processes(self, id)
+    }
     fn backend_slots(&self, token: Option<&LeaseToken>) -> Result<(i64, Option<i64>)> {
         SqliteQueue::backend_slots(self, token)
     }
@@ -851,17 +854,11 @@ impl SupervisorRegistry for SqliteQueue {
     ) -> Result<bool> {
         SqliteQueue::prune_supervisor(self, token, kind, stopped)
     }
-    fn supervisors(&self) -> Result<Vec<SupervisorRegistration>> {
-        SqliteQueue::supervisors(self)
-    }
     fn accept_handoff(&self, token: &LeaseToken) -> Result<()> {
         SqliteQueue::accept_handoff(self, token)
     }
     fn request_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
         SqliteQueue::request_handoff(self, token, binary)
-    }
-    fn handoff_request(&self, token: &LeaseToken) -> Result<Option<String>> {
-        SqliteQueue::handoff_request(self, token)
     }
     fn take_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool> {
         SqliteQueue::take_handoff(self, token, binary)
@@ -896,9 +893,6 @@ impl SupervisorRegistry for SqliteQueue {
     fn rebind_repository(&mut self, common_dir: &str) -> Result<Option<String>> {
         SqliteQueue::rebind_repository(self, common_dir)
     }
-    fn repository_binding(&self) -> Result<Option<String>> {
-        SqliteQueue::repository_binding(self)
-    }
     fn bind_repository(&mut self, common_dir: &str) -> Result<()> {
         SqliteQueue::bind_repository(self, common_dir)
     }
@@ -912,6 +906,18 @@ impl SupervisorRegistry for SqliteQueue {
         workspace_id: Option<&str>,
     ) -> Result<()> {
         SqliteQueue::set_supervisor_mode(self, token, mode, workspace_id)
+    }
+}
+
+impl crate::application::SupervisorReads for SqliteQueue {
+    fn supervisors(&self) -> Result<Vec<SupervisorRegistration>> {
+        SqliteQueue::supervisors(self)
+    }
+    fn handoff_request(&self, token: &LeaseToken) -> Result<Option<String>> {
+        SqliteQueue::handoff_request(self, token)
+    }
+    fn repository_binding(&self) -> Result<Option<String>> {
+        SqliteQueue::repository_binding(self)
     }
 }
 

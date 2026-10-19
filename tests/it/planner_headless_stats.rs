@@ -10,7 +10,7 @@ use crate::plan_review::{
     PlanWorkspace, StubReviewer, add, fixture, git, options, submit, supervise_with,
 };
 use crate::runtime_support::{headless_claude, set_turns};
-use dagq::application::TaskStore;
+use dagq::application::TaskReads;
 use dagq::{
     domain::{Priority, ProposalStatus, TaskId},
     infrastructure::sqlite::SqliteQueue,

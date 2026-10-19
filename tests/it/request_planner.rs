@@ -16,7 +16,7 @@ use crate::runtime_support::planner_turns::{
     block_next_request, exit_requested, idle, turn_requests,
 };
 use dagq::{
-    application::{PlanRequestStore, RequestPlannerStart, TaskStore},
+    application::{PlanRequestStore, RequestPlannerStart, TaskReads, TaskStore},
     domain::{
         AskKind, AskReason, EventId, FindingTarget, NewAsk, NewFinding, NewTask, PlannerId,
         PlannerOrigin, PlannerOwner, Priority, RequestId, Submission, TaskId,

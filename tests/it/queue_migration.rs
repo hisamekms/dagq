@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use dagq::{
     VERSION,
-    application::TaskStore,
+    application::{TaskReads, TaskStore},
     domain::search::{SearchKind, SearchQuery},
     domain::{
         EventId, EvidenceCheck, ExecutionClass, GoalId, GoalStatus, Priority, RunId, RunStatus,

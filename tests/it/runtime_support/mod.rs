@@ -22,7 +22,7 @@ pub use dagq::{
     VERSION,
     application::{
         AgentProvider, Clock, CommandSpec, Exit, Generators, IdGenerator, MainRemote,
-        SessionWrappers, Spawned, Spawner, Streams, SupervisorEnvironment, TaskStore,
+        SessionWrappers, Spawned, Spawner, Streams, SupervisorEnvironment, TaskReads, TaskStore,
         dependency_graph,
     },
     domain::{

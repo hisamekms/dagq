@@ -63,7 +63,7 @@ runtimeのplanner ──> 節ごとの上限（prompt_fit::Fit）→ 記録 → 
 - `src/application/prompt/`: 全てのpromptと依頼の文面と組み立て。
   queueもファイルも直接は読まず、呼び出し側が集めた材料を文にする。
 - `src/application/prompt_fit.rs`: 節ごとの件数とbyteの上限、切り方、省いたことの注記、`PromptBytes`の集計。
-- 材料を集めるのはsupervisorとapplicationの各use case（claim、plan review、復旧job、plannerの起動）で、queueの読み取りは`TaskStore`の読み取り専用の操作を使う。
+- 材料を集めるのはsupervisorとapplicationの各use case（claim、plan review、復旧job、plannerの起動）で、queueの読み取りは`TaskReads`の操作を使う。
 - promptをagentに渡すのはproviderの層（[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)）。
 - このrepositoryに固有の規則（文書の層と予算、検証の選び方）はpromptに書かず、`docs/development/`が持つ（[ADR-t1453-2](../../adr/2026-10-03-t1453-2-ownership-of-agents-md-plugin-development-docs-and-config.md)）。
 

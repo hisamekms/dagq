@@ -11,7 +11,7 @@ use anyhow::Result;
 
 use super::report::local_day;
 use super::{
-    PlanningRecords, ProcessControl, QueueRecords, RunLog, SupervisorRegistry, TaskStore, WaitFor,
+    PlanningRecords, ProcessControl, QueueRecords, RunLog, SupervisorReads, TaskReads, WaitFor,
     dependency_graph,
 };
 use crate::domain::{
@@ -42,7 +42,7 @@ pub struct ForecastQuery {
 /// change drawing from the whole distribution below `min_samples` landed
 /// runs, narrowed to `query` after the whole queue is simulated.
 pub fn forecast(
-    queue: &(impl PlanningRecords + SupervisorRegistry + RunLog + TaskStore + ?Sized),
+    queue: &(impl PlanningRecords + SupervisorReads + RunLog + TaskReads + ?Sized),
     processes: &dyn ProcessControl,
     now: i64,
     min_samples: usize,
@@ -53,7 +53,7 @@ pub fn forecast(
 
 /// [`forecast`], with the latest event ID the history was read through.
 fn forecast_through(
-    queue: &(impl PlanningRecords + SupervisorRegistry + RunLog + TaskStore + ?Sized),
+    queue: &(impl PlanningRecords + SupervisorReads + RunLog + TaskReads + ?Sized),
     processes: &dyn ProcessControl,
     now: i64,
     min_samples: usize,
@@ -244,7 +244,7 @@ pub enum SnapshotOutcome {
 /// as one `forecast_recorded` by `supervisor` when [`decide`] keeps any of
 /// `pending`'s triggers.
 pub fn record_snapshot(
-    queue: &(impl PlanningRecords + QueueRecords + SupervisorRegistry + RunLog + TaskStore + ?Sized),
+    queue: &(impl PlanningRecords + QueueRecords + SupervisorReads + RunLog + TaskReads + ?Sized),
     processes: &dyn ProcessControl,
     supervisor: &LeaseToken,
     now: i64,

@@ -5,7 +5,7 @@ use crate::common;
 use std::sync::{Arc, Barrier};
 
 use dagq::{
-    application::{TaskQuery, TaskStore},
+    application::{TaskQuery, TaskReads, TaskStore},
     domain::{
         ClaimOutcome, CommitSha, GoalId, GoalVerdict, Provider, RunId, RunStatus, TaskAction,
         TaskId, TaskStatus,

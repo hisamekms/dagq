@@ -8,7 +8,7 @@ use runtime_support::*;
 #[test]
 fn receipt_follow_ups_appear_as_one_atomic_planner_bundle() {
     use dagq::{
-        application::{TaskStore, integrate::register_follow_ups},
+        application::{TaskReads, TaskStore, integrate::register_follow_ups},
         domain::{ClaimOutcome, DraftOrigin, NewTask, TaskAction},
     };
     let dir = tempfile::tempdir().unwrap();

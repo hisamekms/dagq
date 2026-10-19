@@ -199,9 +199,6 @@ impl SessionRegistry for SqliteQueue {
     fn planner_silent(&self, id: PlannerId, payload: Value) -> Result<bool> {
         SqliteQueue::planner_silent(self, id, payload)
     }
-    fn silent_planners(&self) -> Result<Vec<(PlannerSession, RunEvent)>> {
-        SqliteQueue::silent_planners(self)
-    }
     fn record_session_turns(&self) -> Result<usize> {
         crate::infrastructure::sessions::record_open_turns(&self.conn)
     }
@@ -235,5 +232,11 @@ impl SessionRegistry for SqliteQueue {
         let closed = crate::infrastructure::sessions::close_review(&tx, id, ending.as_ref())?;
         tx.commit()?;
         Ok(closed)
+    }
+}
+
+impl crate::application::SessionReads for SqliteQueue {
+    fn silent_planners(&self) -> Result<Vec<(PlannerSession, RunEvent)>> {
+        SqliteQueue::silent_planners(self)
     }
 }

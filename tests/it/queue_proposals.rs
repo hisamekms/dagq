@@ -2,7 +2,7 @@
 use crate::common;
 
 use dagq::{
-    application::{StatusFilter, TaskQuery, TaskStore, dependency_graph},
+    application::{StatusFilter, TaskQuery, TaskReads, TaskStore, dependency_graph},
     domain::{
         ClaimOutcome, GoalId, GoalVerdict, NewGoal, NewTask, PlannerOrigin, PlannerOwner,
         ProposalId, ProposalStatus, SessionRole, Submission, TaskAction, TaskEdit, TaskId,

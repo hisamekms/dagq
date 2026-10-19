@@ -2,7 +2,7 @@
 //! [`crate::domain::kpi::kpi`] derives the KPIs from. Reads only.
 use anyhow::{Result, anyhow};
 
-use super::{EventStore, PlanningRecords, SupervisorRegistry, areas::AreaReader};
+use super::{EventStore, PlanningRecords, SupervisorReads, areas::AreaReader};
 use crate::domain::kpi::{HostReader, Kpi, KpiConfig, KpiInput, KpiQuery, kpi as derive};
 
 /// Where the host is: the time zone at `now` (seconds east of UTC) and the
@@ -21,12 +21,12 @@ pub struct Host {
 /// the landed runs' areas read by `areas`, with the host's load of each
 /// window when `host_metrics` reads it (task 872; `kpi` and the reports do,
 /// the breach check and the observer do not). The KPIs come from the
-/// [`EventStore`]; the [`PlanningRecords`] and [`SupervisorRegistry`] reads
+/// [`EventStore`]; the [`PlanningRecords`] and [`SupervisorReads`] reads
 /// are what they still join from the StateStore (the tasks' goals and
 /// changes, the drafts' origins and the supervisors' heartbeats) until the
 /// ledger replaces them (ADR-t1662-2 D1).
 pub fn kpi(
-    queue: &(impl EventStore + PlanningRecords + SupervisorRegistry + ?Sized),
+    queue: &(impl EventStore + PlanningRecords + SupervisorReads + ?Sized),
     now: i64,
     host: Host,
     config: &KpiConfig,
@@ -68,7 +68,7 @@ pub fn kpi(
 /// `max_improvement_proposals` (ADR-0051 decision 25), and when they
 /// reached it, the findings waiting for a planner because of it.
 pub fn improvements(
-    store: &dyn super::DraftPlannerStore,
+    store: &dyn super::DraftPlannerReads,
     limit: usize,
 ) -> Result<serde_json::Value> {
     let improvements = store.improvements(limit)?;

@@ -124,8 +124,10 @@ module | src/application/supervise/handoff.rs | host |
 module | src/application/supervise/inbox_nudge.rs | host |
 
 # Ports of src/application/ports/<context>.rs.
+port | TaskReads | public | all | the reads of the tasks, goals, proposals and notes
 port | TaskStore | partial | - |
 port | PlanningRecords | public | all |
+port | DraftPlannerReads | public | all | the improvements running and the findings waiting for a planner
 port | DraftPlannerStore | partial | - |
 port | PlanReviewStore | internal | - |
 port | GoalReviewStore | internal | - |
@@ -133,9 +135,12 @@ port | PlanRequestStore | internal | - |
 port | RunReads | public | all |
 port | RunLog | public | all | the pair of RunReads and EventStore
 port | Verifier | partial | - |
-port | Repository | partial | - |
-port | RunCoordination | partial | - |
-port | SessionRegistry | partial | - |
+port | RepositoryReads | public | observation | read-only reads of main; the CI watch reads the landing branch, unresolved it leaves the check to the landing's hold
+port | Repository | internal | - |
+port | CoordinationReads | public | all |
+port | RunCoordination | internal | - |
+port | SessionReads | public | observation | attention reads the planners that went silent
+port | SessionRegistry | internal | - |
 port | RunTransitions | internal | - | its claim_for_supervisor_holding is T1
 port | RunRecovery | internal | - |
 port | EvalRounds | internal | - |
@@ -155,6 +160,7 @@ port | LedgerStore | internal | - | the ledger is read through ledger::read
 port | NodeSampleStore | partial | - | the measurement reads it; host records the host's load
 port | LedgerQueue | internal | - | what builds the ledger reads and writes
 port | MarkLog | internal | - |
+port | SupervisorReads | public | all |
 port | SupervisorRegistry | partial | - |
 port | HeadlessJobStore | public | planning,execution,observation | to each context that starts a job
 port | QueueOpener | public | all |
@@ -220,46 +226,15 @@ outer-port | src/application/observer/mod.rs | ObserverSources | observation | i
 outer-port | src/application/observer/mod.rs | ObserverHost | observation | internal | - |
 outer-port | src/application/queue_reads/planning.rs | PlanningSources | - | public | observation | not classified by architecture.md; compose joins it with ObservationSources in QueueReadSources
 outer-port | src/application/queue_reads/observation.rs | ObservationSources | - | internal | - |
-not-port | src/application/main_log.rs | MainReader | a narrowing of Repository to its reads of main, implemented for every Repository
+not-port | src/application/main_log.rs | MainReader | a narrowing of RepositoryReads to its reads of main, implemented for every RepositoryReads
 not-port | src/application/queue_reads/mod.rs | QueueReadSources | a bound that joins PlanningSources and ObservationSources
 
 # The methods of the partial ports.
-method | TaskStore | list | all | the reads
-method | TaskStore | show | all |
-method | TaskStore | candidates | all |
-method | TaskStore | build_waits | all |
-method | TaskStore | graph_input | all |
-method | TaskStore | predecessors | all |
-method | TaskStore | goal_predecessors | all |
-method | TaskStore | tasks_in_progress | all |
-method | TaskStore | list_goals | all |
-method | TaskStore | show_goal | all |
-method | TaskStore | show_proposal | all |
-method | TaskStore | proposals | all |
-method | TaskStore | lint_input | all |
-method | TaskStore | notes | all |
 method | TaskStore | claim | execution | T1
 method | TaskStore | investigations | execution | the claim's investigation limit (ADR-t1487-1)
-method | DraftPlannerStore | improvements | all |
-method | DraftPlannerStore | planner_findings | all |
 method | DraftPlannerStore | register_follow_ups | execution | T7
 method | Verifier | run_env | host | the environment, for host運用's diagnosis
 method | Verifier | run_env_programs | host | the programs, for host運用's diagnosis
-method | Repository | landing_branch | observation | the CI watch; unresolved, it leaves the check to the landing's hold
-method | Repository | main_head | observation | read-only reads of main
-method | Repository | main_history | observation |
-method | Repository | landing_branch_stamp | observation |
-method | Repository | main_commits | observation |
-method | Repository | tree_paths | observation |
-method | Repository | on_first_parent_line | observation |
-method | Repository | has_commit | observation |
-method | Repository | merge_base | observation |
-method | RunCoordination | holds_lease | all | the reads
-method | RunCoordination | run_leases | all |
-method | RunCoordination | run_lease | all |
-method | RunCoordination | processes | all |
-method | RunCoordination | backend_slots | all |
-method | SessionRegistry | silent_planners | observation | attention reads the planners that went silent
 method | QueueRecords | findings | all | the reads; record_* are internal
 method | QueueRecords | reports_written | all |
 method | QueueRecords | kpi_breaches_open | all |
@@ -270,9 +245,6 @@ method | NodeSampleStore | record_node_sample | host | the record of the host's 
 method | NodeSampleStore | import_node_samples | host | the import of the CSV files
 method | NodeSampleStore | imported_files | host | the import reads its marks
 method | NodeSampleStore | remove_node_samples | host | the retention
-method | SupervisorRegistry | supervisors | all | the reads
-method | SupervisorRegistry | handoff_request | all |
-method | SupervisorRegistry | repository_binding | all |
 method | SupervisorRegistry | register_supervisor | execution | the loop
 method | SupervisorRegistry | prune_supervisor | execution |
 method | SupervisorRegistry | accept_handoff | execution |

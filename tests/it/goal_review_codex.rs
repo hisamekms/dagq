@@ -10,7 +10,7 @@ use crate::plan_review::{
     Fixture, PlanWorkspace, StubReviewer, fixture, git, job_actors, options, supervise_with,
 };
 
-use dagq::{application::TaskStore, domain::GoalVerdict, infrastructure::sqlite::SqliteQueue};
+use dagq::{application::TaskReads, domain::GoalVerdict, infrastructure::sqlite::SqliteQueue};
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::{

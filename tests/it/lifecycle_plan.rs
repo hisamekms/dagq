@@ -12,7 +12,7 @@ use common::lifecycle::*;
 use anyhow::{Result, bail};
 use dagq::{
     application::{
-        SessionWrappers, TaskStore,
+        SessionWrappers, TaskReads, TaskStore,
         planner::{self, OpenedPlanner, PlannerLaunch},
     },
     domain::{

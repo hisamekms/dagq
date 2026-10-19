@@ -12,7 +12,7 @@ use crate::plan_review::{
     PlanWorkspace, StubReviewer, add, events, fixture, status, submit, supervise,
 };
 use dagq::{
-    application::TaskStore,
+    application::TaskReads,
     domain::{
         AskConfidence, AskKind, FindingTarget, NewFinding, PlannerOrigin, PlannerOwner, Priority,
         ProposalStatus, Submission, TaskId, TaskStatus,

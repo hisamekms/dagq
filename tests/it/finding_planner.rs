@@ -12,7 +12,7 @@ use crate::plan_review::{
 };
 use crate::runtime_support::planner_turns::{exit_requested, idle, turn_requests};
 use dagq::{
-    application::TaskStore,
+    application::{TaskReads, TaskStore},
     domain::{
         AskKind, AskReason, FindingId, FindingQuery, FindingStatus, FindingTarget, NewAsk,
         NewFinding, NewTask, PlannerOrigin, PlannerOwner, Priority, Submission, TaskAction, TaskId,

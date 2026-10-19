@@ -37,11 +37,11 @@ pub fn status(
          + GoalReviewStore
          + PlanReviewStore
          + QueueRecords
-         + RunCoordination
-         + SupervisorRegistry
+         + CoordinationReads
+         + SupervisorReads
          + RunLog
-         + SessionRegistry
-         + TaskStore
+         + SessionReads
+         + TaskReads
          + ?Sized
      ),
     control: &dyn ProcessControl,
@@ -425,7 +425,7 @@ pub(super) fn claim_spacing(
 /// wait for its claim spacing. A hold no supervisor records is not shown,
 /// nor guessed at.
 pub fn claim_holds(
-    queue: &(impl crate::application::RunLog + crate::application::SupervisorRegistry + ?Sized),
+    queue: &(impl crate::application::RunLog + crate::application::SupervisorReads + ?Sized),
     control: &dyn ProcessControl,
     clock: &dyn Clock,
 ) -> Result<Vec<Value>> {
@@ -547,7 +547,7 @@ pub(super) fn held(
 /// ([`actor_executions`]: the host, advisory, not sandboxed; a Codex
 /// worker confined). Reads only.
 pub fn doctor(
-    queue: &(impl RunCoordination + SupervisorRegistry + RunLog + ?Sized),
+    queue: &(impl CoordinationReads + SupervisorReads + RunLog + ?Sized),
     control: &dyn ProcessControl,
     files: &dyn RunFiles,
     clock: &dyn Clock,

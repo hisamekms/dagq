@@ -179,11 +179,11 @@ pub fn attention(
          + GoalReviewStore
          + PlanReviewStore
          + QueueRecords
-         + RunCoordination
-         + SupervisorRegistry
+         + CoordinationReads
+         + SupervisorReads
          + RunLog
-         + SessionRegistry
-         + TaskStore
+         + SessionReads
+         + TaskReads
          + ?Sized
      ),
     registrations: &[SupervisorRegistration],
@@ -970,7 +970,7 @@ pub fn attention(
 }
 
 /// Whether `task` is a draft, read from the task store every context reads.
-pub(super) fn is_draft(queue: &(impl TaskStore + ?Sized), task: TaskId) -> Result<bool> {
+pub(super) fn is_draft(queue: &(impl TaskReads + ?Sized), task: TaskId) -> Result<bool> {
     let page = queue.list(&crate::application::TaskQuery {
         status: crate::application::StatusFilter::Only(vec![TaskStatus::Draft]),
         goal_id: None,

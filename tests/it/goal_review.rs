@@ -9,7 +9,7 @@ use crate::plan_review::{
 };
 
 use dagq::{
-    application::{GoalReviewStore, TaskStore},
+    application::{GoalReviewStore, TaskReads, TaskStore},
     domain::{
         AskKind, AskReason, DraftOrigin, GoalId, GoalVerdict, NewGoal, Priority, TaskAction,
         TaskId, TaskStatus, cancel_reason::NewCancel,

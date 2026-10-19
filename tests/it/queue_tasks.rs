@@ -4,7 +4,7 @@ use crate::common;
 
 use dagq::{
     application::{
-        StatusFilter, TaskQuery, TaskStore,
+        StatusFilter, TaskQuery, TaskReads, TaskStore,
         commands::planning::{self, Dependency},
         dependency_graph,
     },
