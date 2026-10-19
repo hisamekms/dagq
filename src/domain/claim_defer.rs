@@ -705,14 +705,8 @@ pub fn deferral_spans(events: &[RunEvent]) -> Vec<HoldSpan<'_>> {
     let mut spans = Vec::new();
     let mut open: BTreeMap<TaskId, HoldSpan<'_>> = BTreeMap::new();
     for event in events {
-        let Some(task) = event.task_id else {
+        let Some((task, why)) = deferral_end(event) else {
             continue;
-        };
-        let why = match event.kind.as_str() {
-            CLAIM_DEFERRED => ENDED_SUPERSEDED,
-            CLAIM_DEFERRAL_ENDED => text(event, "why").unwrap_or("unknown"),
-            "run_claimed" => ENDED_CLAIMED,
-            _ => continue,
         };
         let at_ms = timestamp_millis(&event.created_at);
         if let Some(mut held) = open.remove(&task) {
@@ -736,6 +730,20 @@ pub fn deferral_spans(events: &[RunEvent]) -> Vec<HoldSpan<'_>> {
     }
     spans.extend(open.into_values());
     spans
+}
+
+/// The task whose deferral open now `event` ends by [`deferral_spans`]'
+/// rule, and why; none for an event that is not one of theirs. A
+/// `claim_deferred` also starts the task's next one.
+pub fn deferral_end(event: &RunEvent) -> Option<(TaskId, &str)> {
+    let task = event.task_id?;
+    let why = match event.kind.as_str() {
+        CLAIM_DEFERRED => ENDED_SUPERSEDED,
+        CLAIM_DEFERRAL_ENDED => text(event, "why").unwrap_or("unknown"),
+        "run_claimed" => ENDED_CLAIMED,
+        _ => return None,
+    };
+    Some((task, why))
 }
 
 fn text<'e>(event: &'e RunEvent, key: &str) -> Option<&'e str> {

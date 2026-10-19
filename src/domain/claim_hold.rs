@@ -503,19 +503,11 @@ pub fn hold_spans(kinds: HoldKinds, events: &[RunEvent]) -> Vec<HoldSpan<'_>> {
     let mut spans: Vec<HoldSpan<'_>> = Vec::new();
     let mut open: Option<HoldSpan<'_>> = None;
     for event in events {
-        let at_ms = timestamp_millis(&event.created_at);
-        let why = match event.kind.as_str() {
-            kind if kind == kinds.held => ENDED_REPLACED,
-            kind if kind == kinds.resumed => ENDED_RESUMED,
-            "supervisor_stopped"
-                if open.as_ref().is_some_and(|held| {
-                    text(held.start, "supervisor") == text(event, "supervisor")
-                }) =>
-            {
-                ENDED_SUPERVISOR_GONE
-            }
-            _ => continue,
+        let opener = open.as_ref().map(|held| text(held.start, "supervisor"));
+        let Some(why) = hold_end(kinds, opener, event) else {
+            continue;
         };
+        let at_ms = timestamp_millis(&event.created_at);
         if let Some(mut held) = open.take() {
             held.end = Some(SpanEnd {
                 event,
@@ -534,6 +526,25 @@ pub fn hold_spans(kinds: HoldKinds, events: &[RunEvent]) -> Vec<HoldSpan<'_>> {
     }
     spans.extend(open);
     spans
+}
+
+/// Why `event` ends the hold of `kinds` open now, by [`hold_spans`]' rule,
+/// when one is open (`opener`: the supervisor its `held` names): none for
+/// an event that is not one of theirs. A `held` also starts the next one;
+/// a `held` or `resumed` with none open ends nothing.
+pub fn hold_end(
+    kinds: HoldKinds,
+    opener: Option<Option<&str>>,
+    event: &RunEvent,
+) -> Option<&'static str> {
+    match event.kind.as_str() {
+        kind if kind == kinds.held => Some(ENDED_REPLACED),
+        kind if kind == kinds.resumed => Some(ENDED_RESUMED),
+        "supervisor_stopped" if opener.is_some_and(|by| by == text(event, "supervisor")) => {
+            Some(ENDED_SUPERVISOR_GONE)
+        }
+        _ => None,
+    }
 }
 
 fn text<'e>(event: &'e RunEvent, key: &str) -> Option<&'e str> {

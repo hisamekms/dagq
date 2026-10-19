@@ -257,8 +257,10 @@ impl fmt::Display for AskId {
 
 /// The ID of a `run_events` row, which is also the cursor `status` hands out
 /// and `watch` and `stats` read past: events are numbered in the order they
-/// were recorded, and 0 is the cursor before the first one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+/// were recorded, and 0 (the default) is the cursor before the first one.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(transparent)]
 pub struct EventId(i64);
 

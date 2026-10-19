@@ -31,6 +31,7 @@ pub mod window;
 
 pub use baseline::WindowEnd;
 
+use std::borrow::Borrow;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -455,13 +456,13 @@ fn legacy_attributes(run: &RunStats) -> Map<String, Value> {
 
 /// The row of `task` from its `events` (ascending id, its runs' among
 /// them), the queue's `push_finished` (`pushes`), the waits before a claim
-/// and `now_ms`, built at `built_at`. A task with a legacy run is a legacy
+/// (by the id of their start) and `now_ms`, built at `built_at`. A task with a legacy run is a legacy
 /// row naming its runs.
 pub fn task_row(
     task: TaskId,
     events: &[RunEvent],
     pushes: &[RunEvent],
-    pre_claim: &[PreClaimInterval],
+    pre_claim: impl IntoIterator<Item = impl Borrow<PreClaimInterval>>,
     now_ms: i64,
     built_at: &str,
 ) -> LedgerRow {

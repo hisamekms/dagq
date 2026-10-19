@@ -252,3 +252,347 @@ fn a_sample_marks_its_hour_which_settles_after_it() {
     assert!(writes(Some(&row), &again));
     assert_eq!(build(&target, &late, &[]), None);
 }
+
+/// A history of `n` of each kind the folds of the queue as a whole read,
+/// each ended before what comes after it: runs landed (their attempts at
+/// the landing slot and their pushes), slots full, holds and deferrals,
+/// streams of supervisors that stopped, sessions and events of the queue
+/// of their own; but for slots full whose supervisor lives past
+/// [`LAST_PASS`] and falls silent before the next.
+fn history(n: i64) -> Log {
+    let mut log = Log::default();
+    for k in 0..n {
+        let at = k * 10;
+        let supervisor = format!("h{k}");
+        let task = 100 + k;
+        log.landed(task, &format!("{k:08x}-2222-4222-8222-222222222222"), at)
+            .add(
+                None,
+                None,
+                "slots_full_started",
+                json!({"supervisor": supervisor, "class": "heavy"}),
+                at,
+            )
+            .add(
+                None,
+                None,
+                "slots_full_ended",
+                json!({"supervisor": supervisor, "class": "heavy"}),
+                at + 1,
+            )
+            .add(None, None, "claim_held", json!({"supervisor": "h"}), at + 2)
+            .add(
+                None,
+                None,
+                "claim_resumed",
+                json!({"supervisor": "h"}),
+                at + 3,
+            )
+            .add(
+                Some(task),
+                None,
+                "claim_deferred",
+                json!({"supervisor": "h", "reason": "paths"}),
+                at + 4,
+            )
+            .add(
+                Some(task),
+                None,
+                "claim_deferral_ended",
+                json!({"supervisor": "h", "why": "free"}),
+                at + 5,
+            )
+            .add(
+                None,
+                None,
+                "live_alert_baseline",
+                json!({"supervisor": supervisor, "version": 1}),
+                at + 6,
+            )
+            .add(
+                None,
+                None,
+                "supervisor_stopped",
+                json!({"supervisor": supervisor}),
+                at + 7,
+            )
+            .add(
+                None,
+                None,
+                "session_opened",
+                json!({"kind": "runtime_planner", "planner_id": 1000 + k}),
+                at + 8,
+            )
+            .add(
+                None,
+                None,
+                "session_closed",
+                json!({"kind": "runtime_planner", "planner_id": 1000 + k}),
+                at + 9,
+            )
+            .add(None, None, "mark_added", json!({"mark": k}), at + 9)
+            // Slots full no end of its own ends: its supervisor stops, or
+            // falls silent.
+            .add(
+                None,
+                None,
+                "slots_full_started",
+                json!({"supervisor": format!("g{k}"), "class": "light"}),
+                at + 9,
+            )
+            .add(
+                None,
+                None,
+                "supervisor_stopped",
+                json!({"supervisor": format!("g{k}")}),
+                at + 9,
+            )
+            .add(
+                None,
+                None,
+                "slots_full_started",
+                json!({"supervisor": format!("q{k}"), "class": "heavy"}),
+                at + 9,
+            );
+    }
+    for k in 0..n {
+        log.add(
+            None,
+            None,
+            "supervisor_alive",
+            json!({"supervisor": format!("q{k}")}),
+            LAST_PASS - 100,
+        );
+    }
+    log
+}
+
+/// When the pass before the one [`one_pass`] counts ran.
+const LAST_PASS: i64 = 999_100;
+
+/// What [`one_pass`] counts a pass made, in its order.
+type Made = (usize, usize, usize, usize, usize, usize, usize);
+
+/// What one pass makes and drops of a builder caught up on `log` when
+/// the same new inputs come in: the rows it builds, the events it copies
+/// into them, the landing slot's attempts among them, the waits before a
+/// claim its due copies as it closes those whose supervisor's life ended
+/// since the last pass, and the waits it makes for a task's fold (the
+/// rest it reads where they are kept). Also what is kept, and how many
+/// waits the due closed, to tell the histories apart.
+fn one_pass(mut log: Log) -> (Made, usize, usize) {
+    let now = 2_000_000;
+    let mut builder = Builder::default();
+    builder.mark_events(&log.events);
+    builder.due(ms(LAST_PASS));
+    let rows = builder.rows_to_build(builder.kept());
+    let inputs = Inputs::of(builder.kept(), ms(LAST_PASS), BUILT, &rows);
+    builder.mark_rows(&inputs.rows);
+    builder.take(usize::MAX);
+    drop(inputs);
+
+    let before = log.last();
+    let run = run_id(1);
+    log.add(
+        None,
+        None,
+        "supervisor_alive",
+        json!({"supervisor": "s"}),
+        1_000_000,
+    )
+    .add(
+        None,
+        None,
+        "slots_full_started",
+        json!({"supervisor": "s", "class": "light"}),
+        1_000_001,
+    )
+    .add(
+        None,
+        None,
+        "claim_held",
+        json!({"supervisor": "s"}),
+        1_000_002,
+    )
+    .add(
+        None,
+        None,
+        "session_opened",
+        json!({"kind": "runtime_planner", "planner_id": 1}),
+        1_000_003,
+    )
+    .add(None, None, "mark_added", json!({"mark": "new"}), 1_000_004)
+    .worked(1, &run, 1_000_005)
+    .add(
+        Some(1),
+        Some(&run),
+        "integration_started",
+        json!({}),
+        1_001_000,
+    );
+    builder.mark_events(&log.after(before));
+    // The waits as the last pass read them: where each one's text is
+    // kept, and whether it was open. One the due closes is moved, its text
+    // where it was; a copy's is elsewhere, as both are at once.
+    let before: std::collections::HashMap<EventId, (*const u8, bool)> = {
+        let kept = builder.kept();
+        kept.pre_claim
+            .intervals(&kept.lives, ms(LAST_PASS))
+            .filter_map(|wait| match wait {
+                std::borrow::Cow::Borrowed(wait) => {
+                    Some((wait.id, (wait.started_at.as_ptr(), wait.end.is_none())))
+                }
+                std::borrow::Cow::Owned(_) => None,
+            })
+            .collect()
+    };
+    builder.due(ms(now));
+    let (mut copied_by_due, mut closed_by_due) = (0, 0);
+    let kept = builder.kept();
+    for wait in kept.pre_claim.intervals(&kept.lives, ms(now)) {
+        match before.get(&wait.id) {
+            Some(&(text, open)) if text == wait.started_at.as_ptr() => {
+                if open && wait.end.is_some() {
+                    closed_by_due += 1;
+                }
+            }
+            _ => copied_by_due += 1,
+        }
+    }
+    let rows = builder.rows_to_build(builder.kept());
+    let mut inputs = Inputs::of(builder.kept(), ms(now), BUILT, &rows);
+    builder.mark_rows(&inputs.rows);
+    // The pushes and the waits before a claim are read where they are kept.
+    assert!(Arc::ptr_eq(&inputs.kept, builder.kept()));
+    let kept = Arc::clone(builder.kept());
+    let task = Target::Task(TaskId::new(1));
+    let events: Vec<RunEvent> = log
+        .events
+        .iter()
+        .filter(|event| event.task_id == Some(TaskId::new(1)))
+        .cloned()
+        .collect();
+    // A task on its way is not written, but its fold reads the waits:
+    // count those it is given made for it, not read where they are kept.
+    let (mut made_waits, mut read_waits) = (0, 0);
+    let row = super::super::task_row(
+        TaskId::new(1),
+        &events,
+        &kept.pushes,
+        kept.pre_claim
+            .intervals(&kept.lives, ms(now))
+            .inspect(|wait| {
+                read_waits += 1;
+                if matches!(wait, std::borrow::Cow::Owned(_)) {
+                    made_waits += 1;
+                }
+            }),
+        ms(now),
+        BUILT,
+    );
+    assert_eq!(row.task_id, Some(TaskId::new(1)));
+    inputs.read(&task, events);
+    assert_eq!(build(&task, &inputs, &[]), None);
+    let copied = inputs.rows.values().map(|row| row.records.len()).sum();
+    let attempts = inputs
+        .rows
+        .values()
+        .filter(|row| {
+            row.subject
+                .as_ref()
+                .is_some_and(|s| s.kind == "landing_slot")
+        })
+        .count();
+    let marked = builder.take(usize::MAX).len();
+    let kept_size = kept.queue.len() + kept.sessions.len() + kept.pushes.len() + read_waits;
+    (
+        (
+            rows.len(),
+            inputs.rows.len(),
+            copied,
+            attempts,
+            marked,
+            copied_by_due,
+            made_waits,
+        ),
+        kept_size,
+        closed_by_due,
+    )
+}
+
+/// A pass at a time before the last pass's, as a clock set back gives it,
+/// folds a slots full whose supervisor's silence the last pass found as
+/// the fold of every event then: open again in its queue row and in the
+/// waits of a task's, and ended again by the pass after.
+#[test]
+fn a_pass_at_a_clock_set_back_folds_the_waits_as_every_event_then() {
+    use crate::domain::{HEARTBEAT_TIMEOUT_SECS, supervisor_life::SUPERVISOR_ALIVE_INTERVAL_SECS};
+    let run = run_id(1);
+    let mut log = Log::default();
+    log.add(Some(1), None, "task_created", json!({}), 0)
+        .add(
+            None,
+            None,
+            "slots_full_started",
+            json!({"supervisor": "s", "class": "heavy"}),
+            10,
+        )
+        .add(
+            None,
+            None,
+            "supervisor_alive",
+            json!({"supervisor": "s"}),
+            20,
+        )
+        .landed(1, &run, 1000);
+    // The last time s's life goes on.
+    let bound = ms(20) + (SUPERVISOR_ALIVE_INTERVAL_SECS + HEARTBEAT_TIMEOUT_SECS) * 1000;
+    let task = Target::Task(TaskId::new(1));
+    let slots_full = Target::Row(LedgerKind::Queue, "2".to_owned());
+    let whole = |now: i64| {
+        let inputs = Inputs::new(&log.events, now, BUILT, true);
+        (build(&task, &inputs, &[]), build(&slots_full, &inputs, &[]))
+    };
+    assert_ne!(whole(bound), whole(bound + 1));
+    let mut builder = Builder::default();
+    builder.mark_events(&log.events);
+    for now in [bound + 1, bound, bound + 1, bound] {
+        builder.due(now);
+        let rows = BTreeSet::from([(LedgerKind::Queue, "2".to_owned())]);
+        let mut inputs = Inputs::of(builder.kept(), now, BUILT, &rows);
+        inputs.read(
+            &task,
+            log.events
+                .iter()
+                .filter(|event| event.task_id == Some(TaskId::new(1)))
+                .cloned()
+                .collect(),
+        );
+        assert_eq!(
+            (build(&task, &inputs, &[]), build(&slots_full, &inputs, &[])),
+            whole(now),
+            "at {now}"
+        );
+    }
+}
+
+/// A pass folds the same new inputs into as many rows, copies as many
+/// events, makes as many attempts, marks as many targets, and copies no
+/// wait before a claim as its due closes those whose supervisor fell
+/// silent since the last pass and makes none for a task's fold (slots
+/// full its supervisor's stop or silence ended among them), however long
+/// the history before them: nothing it makes grows with the events kept.
+#[test]
+fn a_pass_makes_as_much_of_the_same_new_inputs_whatever_the_history() {
+    let (few, kept_few, closed_few) = one_pass(history(3));
+    let (many, kept_many, closed_many) = one_pass(history(300));
+    assert!(kept_many > kept_few * 50, "{kept_few} {kept_many}");
+    // The history's, and the new inputs' own.
+    assert_eq!((closed_few, closed_many), (3 + 1, 300 + 1));
+    assert_eq!(few, many);
+    let (rows, built, copied, attempts, _, copied_by_due, made_waits) = few;
+    assert_eq!((copied_by_due, made_waits), (0, 0));
+    assert_eq!(rows, built);
+    assert!(built > 0 && copied > 0, "{few:?}");
+    assert_eq!(attempts, 1);
+}

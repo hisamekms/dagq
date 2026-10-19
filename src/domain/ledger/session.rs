@@ -12,7 +12,7 @@
 //! The tokens come from the records of the Executions and the cuts alone
 //! (ADR-t1486-1), never from the steps. Reads nothing but the events.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use serde_json::{Map, Value, json};
 
@@ -21,15 +21,12 @@ use crate::domain::{
     EventId, EventKind, RunEvent,
     headless_job::JobRef,
     sessions::{
-        GOAL_REVIEW, HOOK_KINDS, INFERRED, OBSERVER, PLAN_REVIEW, SESSION_OPENED, SpanRef,
-        THROUGHPUT_REVIEW,
+        GOAL_REVIEW, HOOK_KINDS, INFERRED, OBSERVER, PLAN_REVIEW, SESSION_CLOSED, SESSION_OPENED,
+        SpanRef, THROUGHPUT_REVIEW,
     },
     stats::{
         executions::{Execution, executions},
-        jobs::{
-            DEFAULT_PROVIDER, JobLife, job_lives, job_lives_with, job_of, session_models,
-            starts_job,
-        },
+        jobs::{DEFAULT_PROVIDER, JobLife, job_lives, job_lives_with, job_of, starts_job},
         sessions::{Span, spans},
         timestamp_millis,
     },
@@ -211,51 +208,91 @@ const THROUGHPUT_REVIEW_KINDS: [&str; 3] = [
 
 /// The session rows of `events`: the session's and job's events of no run
 /// ([`super::owner::Owner::Session`]), ascending id, built at
-/// `built_at`. A span is a row from its open; its turns, cuts and close
-/// go to it by `opened_event_id`. A job is a row from its start to its end,
-/// a later event of its kind and key to its last row. A runtime planner's
-/// event goes to its span open last, an event of none of these to the
-/// row of round 0 of what it is of. Rounds count from 1 per kind and id.
+/// `built_at`, as [`SessionBook`] assigns them.
 pub fn session_rows(events: &[RunEvent], built_at: &str) -> Vec<LedgerRow> {
-    let mut rows: Vec<Building> = Vec::new();
-    let mut rounds: HashMap<(String, String, &'static str), i64> = HashMap::new();
-    let mut by_open: HashMap<EventId, usize> = HashMap::new();
-    let mut by_planner: HashMap<i64, usize> = HashMap::new();
-    let mut by_job: HashMap<(&'static str, String), usize> = HashMap::new();
-    let mut outside: HashMap<(String, String), usize> = HashMap::new();
-    let mut next = |kind: &str, id: &str, what: &'static str| -> i64 {
-        let round = rounds
-            .entry((kind.to_owned(), id.to_owned(), what))
-            .or_default();
-        *round += 1;
-        *round
-    };
+    let mut book = SessionBook::default();
     for event in events {
+        book.add(event, &mut BTreeSet::new());
+    }
+    // Read by id: the order they came in is the fold's.
+    let mut by_id = events.to_vec();
+    by_id.sort_by_key(|event| event.id);
+    book.keys()
+        .filter_map(|key| book.row(key, &by_id, built_at))
+        .collect()
+}
+
+/// Which session row each event read so far is a record of, assigned one
+/// event at a time and kept, so that a reader that holds it reads no
+/// event twice and folds only the rows it asks for ([`Self::row`]). A span
+/// is a row from its open; its turns, cuts and close go to it by
+/// `opened_event_id`. A job is a row from its start to its end, a later
+/// event of its kind and key to its last row. A runtime planner's event
+/// goes to its span open last, an event of none of these to the row of
+/// round 0 of what it is of. Rounds count from 1 per kind and id.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SessionBook {
+    /// In the order they were made.
+    rows: Vec<Assigned>,
+    by_key: HashMap<String, usize>,
+    rounds: HashMap<(String, String, &'static str), i64>,
+    by_open: HashMap<EventId, usize>,
+    by_planner: HashMap<i64, usize>,
+    by_job: HashMap<(&'static str, String), usize>,
+    outside: HashMap<(String, String), usize>,
+    /// The sessions' models by their closes
+    /// ([`crate::domain::stats::jobs::session_models`]).
+    models: HashMap<String, (String, EventId)>,
+    /// The job rows by the session whose close gives their model.
+    jobs_by_session: HashMap<String, Vec<usize>>,
+}
+
+/// One session row as it is assigned: what it is of and its records' ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Assigned {
+    key: String,
+    kind: String,
+    id: String,
+    round: i64,
+    what: &'static str,
+    records: Vec<EventId>,
+}
+
+impl SessionBook {
+    /// Assign `event`, after every one assigned before, and add to
+    /// `touched` the key of each row whose fold it changes: the one it is
+    /// a record of, and a job's whose model its close gives.
+    pub fn add(&mut self, event: &RunEvent, touched: &mut BTreeSet<(LedgerKind, String)>) {
         let span = SpanRef::of(event);
         let at = if event.kind == SESSION_OPENED {
             let kind = span.kind.as_deref().unwrap_or_default();
             let id = span_target(event);
-            let mut row = Building::new(kind, &id, next(kind, &id, "session"));
-            row.items = json!({"what": "session"});
-            by_open.insert(event.id, rows.len());
+            let at = self.open_row(kind, &id, "session");
+            self.by_open.insert(event.id, at);
             if let Some(planner) = span.planner_id {
-                by_planner.insert(planner, rows.len());
+                self.by_planner.insert(planner, at);
             }
-            rows.push(row);
-            rows.len() - 1
-        } else if let Some(at) = span.opened_event_id.and_then(|opened| by_open.get(&opened)) {
+            at
+        } else if let Some(at) = span
+            .opened_event_id
+            .and_then(|opened| self.by_open.get(&opened))
+        {
             *at
         } else if starts_job(event)
             && let Some((kind, key)) = job_of(event)
         {
-            let mut row = Building::new(kind, &key, next(kind, &key, "job"));
-            row.items = json!({"what": "job"});
-            by_job.insert((kind, key), rows.len());
-            rows.push(row);
-            rows.len() - 1
-        } else if let Some(at) = job_of(event).and_then(|key| by_job.get(&key)) {
+            let at = self.open_row(kind, &key, "job");
+            self.by_job.insert((kind, key), at);
+            if let Some(session) = span.session_id.clone() {
+                self.jobs_by_session.entry(session).or_default().push(at);
+            }
+            at
+        } else if let Some(at) = job_of(event).and_then(|key| self.by_job.get(&key)) {
             *at
-        } else if let Some(at) = span.planner_id.and_then(|planner| by_planner.get(&planner)) {
+        } else if let Some(at) = span
+            .planner_id
+            .and_then(|planner| self.by_planner.get(&planner))
+        {
             *at
         } else {
             let (kind, id) = match (span.planner_id, job_of(event)) {
@@ -263,22 +300,76 @@ pub fn session_rows(events: &[RunEvent], built_at: &str) -> Vec<LedgerRow> {
                 (None, Some((kind, key))) => (kind.to_owned(), key),
                 (None, None) => outside_of(event),
             };
-            match outside.get(&(kind.clone(), id.clone())) {
+            match self.outside.get(&(kind.clone(), id.clone())) {
                 Some(at) => *at,
                 None => {
-                    outside.insert((kind.clone(), id.clone()), rows.len());
-                    rows.push(Building::new(&kind, &id, 0));
-                    rows.len() - 1
+                    let at = self.push(&kind, &id, 0, "events");
+                    self.outside.insert((kind, id), at);
+                    at
                 }
             }
         };
-        rows[at].records.push(event.clone());
+        self.rows[at].records.push(event.id);
+        touched.insert((LedgerKind::Session, self.rows[at].key.clone()));
+        if event.kind == SESSION_CLOSED
+            && let (Some(session), Some(model)) = (span.session_id, span.model)
+        {
+            for job in self.jobs_by_session.get(&session).into_iter().flatten() {
+                touched.insert((LedgerKind::Session, self.rows[*job].key.clone()));
+            }
+            self.models.insert(session, (model, event.id));
+        }
     }
-    // A job's model is its session's close, which is that span's row.
-    let models = session_models(events);
-    rows.into_iter()
-        .map(|row| finish(row, &models, built_at))
-        .collect()
+
+    /// A new row of a span or a job of `kind` and `id`, its next round.
+    fn open_row(&mut self, kind: &str, id: &str, what: &'static str) -> usize {
+        let round = self
+            .rounds
+            .entry((kind.to_owned(), id.to_owned(), what))
+            .or_default();
+        *round += 1;
+        let round = *round;
+        self.push(kind, id, round, what)
+    }
+
+    fn push(&mut self, kind: &str, id: &str, round: i64, what: &'static str) -> usize {
+        let key = format!("{kind}/{id}/{what}/{round}");
+        self.by_key.insert(key.clone(), self.rows.len());
+        self.rows.push(Assigned {
+            key,
+            kind: kind.to_owned(),
+            id: id.to_owned(),
+            round,
+            what,
+            records: Vec::new(),
+        });
+        self.rows.len() - 1
+    }
+
+    /// The keys of every row, in the order they were made.
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        self.rows.iter().map(|row| row.key.as_str())
+    }
+
+    /// The row of `key` folded from its records among `events` (the
+    /// session events assigned, ascending id), built at `built_at`; none
+    /// for a key of no row.
+    pub fn row(&self, key: &str, events: &[RunEvent], built_at: &str) -> Option<LedgerRow> {
+        let assigned = &self.rows[*self.by_key.get(key)?];
+        let mut row = Building::new(&assigned.kind, &assigned.id, assigned.round);
+        if assigned.what != "events" {
+            row.items = json!({"what": assigned.what});
+        }
+        row.records = assigned
+            .records
+            .iter()
+            .filter_map(|id| {
+                let at = events.binary_search_by_key(id, |event| event.id).ok()?;
+                Some(events[at].clone())
+            })
+            .collect();
+        Some(finish(row, &self.models, built_at))
+    }
 }
 
 /// What an event of a session of no row is of: a plan review's or goal

@@ -37,19 +37,29 @@
 //!   folds of the queue as a whole read of the rest is [`Kept`] between
 //!   passes, so no pass reads the whole EventStore again
 //!   ([`Inputs::of`]).
+//! - **What a pass makes**: each event is read into [`Kept`] once as it
+//!   comes in (the supervisors' lives, the waits before a claim, the
+//!   landing slot's attempts, which session or queue row it is a record
+//!   of), and a pass folds of it only the session and queue rows those
+//!   events may have changed and those marked
+//!   ([`Builder::rows_to_build`]); a task's fold reads the pushes and the
+//!   waits where they are kept. Nothing a pass makes grows with the events
+//!   before its new ones.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use super::{
     LEDGER_V, LedgerKind, LedgerRow, fold,
     node::{self, BUCKET_SECS},
     owner::{self, Owner},
-    queue, session,
+    queue::{self, QueueBook},
+    session::SessionBook,
     settle::{self, SETTLE_GRACE_MS},
 };
 use crate::domain::host_metrics::NodeSample;
-use crate::domain::pre_claim::{PreClaimInterval, pre_claim_intervals};
-use crate::domain::supervisor_life::supervisor_of;
+use crate::domain::pre_claim::PreClaimBook;
+use crate::domain::supervisor_life::{Lives, supervisor_of};
 use crate::domain::{EventId, RunEvent, TaskId, event_kind};
 
 /// How often the supervisor's pass builds the ledger.
@@ -67,13 +77,6 @@ pub const CHECKS_PER_PASS: usize = 2_000;
 /// How many events after the cursor a pass reads at a time: a new process
 /// reads every event once, a page at a time.
 pub const EVENTS_PER_READ: usize = 5_000;
-
-/// The payload keys the folds of the queue as a whole read of an event no
-/// session or queue row owns: its writer (the supervisors' lives, the end
-/// of a deferral by a claim) and its status (whether it ends a landing's
-/// attempt). A fold of the queue as a whole that reads another key of such
-/// an event adds it here.
-const KEPT_KEYS: [&str; 2] = ["supervisor", "status"];
 
 /// What a mark is of.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -101,68 +104,90 @@ impl Target {
 /// What the folds of the queue as a whole (the session and queue rows,
 /// the waits before a claim, the pushes) read of the EventStore up to the
 /// builder's cursor, kept between passes so that a pass reads only what
-/// came in after it: every event, whole when a session or queue row owns
-/// it or it is a `push_finished`, else without its actor and with only the
-/// [`KEPT_KEYS`] of its payload. The events of a run or a task folded are
-/// read whole for its fold ([`Inputs::read`]).
+/// came in after it: the events a session or queue row owns and the
+/// `push_finished`, whole, and what the folds made of every event so far,
+/// each read once as it came in ([`Self::add`]): the supervisors' lives,
+/// the waits before a claim and the holds on the landings, the landing
+/// slot's attempts, and which session or queue row each event is a record
+/// of. A pass folds of them only the rows it looks at
+/// ([`Inputs::of`]); the events of a run or a task folded are read whole
+/// for its fold ([`Inputs::read`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Kept {
+    /// The last event read.
+    last: EventId,
     /// Ascending id.
-    all: Vec<RunEvent>,
     sessions: Vec<RunEvent>,
     queue: Vec<RunEvent>,
     pushes: Vec<RunEvent>,
+    lives: Lives,
+    pre_claim: PreClaimBook,
+    session_rows: SessionBook,
+    queue_rows: QueueBook,
 }
 
 impl Kept {
+    /// The kept of `events` (ascending id).
+    pub fn of(events: &[RunEvent]) -> Self {
+        let mut kept = Self::default();
+        kept.add(events, &mut BTreeSet::new());
+        kept
+    }
+
     /// Keep what the folds of the queue as a whole read of `new`
-    /// (ascending id); one at or before the last kept is kept already.
-    fn add(&mut self, new: &[RunEvent]) {
+    /// (ascending id), and add to `touched` the session and queue rows
+    /// whose fold it changes; one at or before the last kept is kept
+    /// already.
+    fn add(&mut self, new: &[RunEvent], touched: &mut BTreeSet<(LedgerKind, String)>) {
         for event in new {
-            if self.all.last().is_some_and(|last| event.id <= last.id) {
+            if event.id <= self.last {
                 continue;
             }
-            let owned = match owner::owner(event) {
-                Owner::Session => Some(&mut self.sessions),
-                Owner::Queue => Some(&mut self.queue),
-                Owner::Run | Owner::Task => None,
-            };
-            let push = event.kind == event_kind::PUSH_FINISHED;
-            if push {
-                self.pushes.push(event.clone());
-            }
+            self.last = event.id;
+            self.lives.add(event);
+            let moved = self.pre_claim.add(event);
+            let owned = owner::owner(event);
+            self.queue_rows
+                .add(event, owned == Owner::Queue, moved, touched);
             match owned {
-                Some(owned) => {
-                    owned.push(event.clone());
-                    self.all.push(event.clone());
+                Owner::Session => {
+                    self.session_rows.add(event, touched);
+                    self.sessions.push(event.clone());
                 }
-                None if push => self.all.push(event.clone()),
-                None => self.all.push(trimmed(event)),
+                Owner::Queue => self.queue.push(event.clone()),
+                Owner::Run | Owner::Task => {}
+            }
+            if event.kind == event_kind::PUSH_FINISHED {
+                self.pushes.push(event.clone());
             }
         }
     }
-}
 
-/// `event` with only what [`Kept`] keeps of an event no session or queue
-/// row owns.
-fn trimmed(event: &RunEvent) -> RunEvent {
-    let kept: serde_json::Map<String, serde_json::Value> = KEPT_KEYS
-        .iter()
-        .filter_map(|key| Some(((*key).to_owned(), event.payload.get(*key)?.clone())))
-        .collect();
-    RunEvent {
-        id: event.id,
-        task_id: event.task_id,
-        goal_id: event.goal_id,
-        run_id: event.run_id.clone(),
-        kind: event.kind.clone(),
-        payload: if kept.is_empty() {
-            serde_json::Value::Null
-        } else {
-            serde_json::Value::Object(kept)
-        },
-        created_at: event.created_at.clone(),
-        actor: None,
+    /// The session or queue row of `kind` and `key` at `now_ms`, built at
+    /// `built_at`; none for a key of no row.
+    fn row(&self, kind: LedgerKind, key: &str, now_ms: i64, built_at: &str) -> Option<LedgerRow> {
+        match kind {
+            LedgerKind::Session => self.session_rows.row(key, &self.sessions, built_at),
+            LedgerKind::Queue => self.queue_rows.row(
+                key,
+                &queue::At {
+                    owned: &self.queue,
+                    pre_claim: &self.pre_claim,
+                    lives: &self.lives,
+                    now_ms,
+                    built_at,
+                },
+            ),
+            _ => None,
+        }
+    }
+
+    /// The keys of every session and queue row.
+    fn keys(&self) -> impl Iterator<Item = (LedgerKind, String)> + '_ {
+        self.session_rows
+            .keys()
+            .map(|key| (LedgerKind::Session, key.to_owned()))
+            .chain(self.queue_rows.keys().map(|key| (LedgerKind::Queue, key)))
     }
 }
 
@@ -184,7 +209,12 @@ pub struct Builder {
     unsettled: BTreeMap<Target, i64>,
     /// The runs left pending on their push, each with its task.
     pending_pushes: BTreeMap<String, Option<TaskId>>,
-    kept: Kept,
+    /// The session and queue rows an event read since the rows were last
+    /// built may have changed ([`Kept::add`]).
+    touched: BTreeSet<(LedgerKind, String)>,
+    /// Shared with the pass's [`Inputs`], which it drops before the next
+    /// events come in: an [`Inputs`] kept past them would copy it whole.
+    kept: Arc<Kept>,
 }
 
 impl Default for Builder {
@@ -196,7 +226,8 @@ impl Default for Builder {
             rows_after: None,
             unsettled: BTreeMap::new(),
             pending_pushes: BTreeMap::new(),
-            kept: Kept::default(),
+            touched: BTreeSet::new(),
+            kept: Arc::default(),
         }
     }
 }
@@ -206,7 +237,7 @@ impl Builder {
     /// are inputs of, keep what the folds of the queue as a whole read of
     /// them, and move the cursor past them.
     pub fn mark_events(&mut self, new: &[RunEvent]) {
-        self.kept.add(new);
+        Arc::make_mut(&mut self.kept).add(new, &mut self.touched);
         for event in new {
             if let Some(run) = &event.run_id {
                 self.marks.insert(Target::Run(run.to_string()));
@@ -253,9 +284,33 @@ impl Builder {
                 .any(|target| matches!(target, Target::Row(..)))
     }
 
-    /// Mark the session and queue rows of `rows` (all of them, as [`build`]
-    /// folds them) that read an input after the event the marks started at.
+    /// The session and queue rows a pass builds when [`Self::rows_marked`]:
+    /// those an event read since they were last built may have changed,
+    /// the landing slot's open one (its inputs reach every event) and
+    /// those marked; none otherwise. Every row that read an input after
+    /// the event the marks started at is among them.
+    pub fn rows_to_build(&self, kept: &Kept) -> BTreeSet<(LedgerKind, String)> {
+        if !self.rows_marked() {
+            return BTreeSet::new();
+        }
+        let mut rows = self.touched.clone();
+        rows.extend(
+            kept.queue_rows
+                .open_slot()
+                .map(|key| (LedgerKind::Queue, key)),
+        );
+        rows.extend(self.marks.iter().filter_map(|target| match target {
+            Target::Row(kind, key) => Some((*kind, key.clone())),
+            _ => None,
+        }));
+        rows
+    }
+
+    /// Mark the session and queue rows of `rows` (those
+    /// [`Self::rows_to_build`] names, as [`build`] folds them) that read an
+    /// input after the event the marks started at.
     pub fn mark_rows(&mut self, rows: &BTreeMap<(LedgerKind, String), LedgerRow>) {
+        self.touched.clear();
         let Some(after) = self.rows_after.take() else {
             return;
         };
@@ -266,8 +321,13 @@ impl Builder {
         }
     }
 
-    /// Mark again the rows whose grace is over at `now_ms`.
+    /// Mark again the rows whose grace is over at `now_ms`, and close where
+    /// they are kept the slots full whose supervisor's life ended by then,
+    /// so that no read of them this pass makes them again: of the kept
+    /// ends, only those that came by then ([`PreClaimBook::close_lives`]).
     pub fn due(&mut self, now_ms: i64) {
+        let kept = Arc::make_mut(&mut self.kept);
+        kept.pre_claim.close_lives(&kept.lives, now_ms);
         let due: Vec<Target> = self
             .unsettled
             .iter()
@@ -327,7 +387,7 @@ impl Builder {
     }
 
     /// What the folds of the queue as a whole read, up to [`Self::events`].
-    pub const fn kept(&self) -> &Kept {
+    pub const fn kept(&self) -> &Arc<Kept> {
         &self.kept
     }
 }
@@ -385,28 +445,27 @@ pub fn writes(stored: Option<&LedgerRow>, built: &LedgerRow) -> bool {
 }
 
 /// What a pass folds its marks of: the events of each run and task
-/// (ascending id), the queue's pushes and waits before a claim, and the
-/// session and queue rows folded of them.
+/// (ascending id), what the folds of the queue as a whole read ([`Kept`]:
+/// the pushes and the waits before a claim, read where they are kept),
+/// and the session and queue rows folded of them.
 #[derive(Debug, Clone)]
 pub struct Inputs {
     pub now_ms: i64,
     pub built_at: String,
     runs: BTreeMap<String, Vec<RunEvent>>,
     tasks: BTreeMap<TaskId, Vec<RunEvent>>,
-    pushes: Vec<RunEvent>,
-    pre_claim: Vec<PreClaimInterval>,
-    /// The session and queue rows, built only when they are marked.
+    kept: Arc<Kept>,
+    /// The session and queue rows built.
     pub rows: BTreeMap<(LedgerKind, String), LedgerRow>,
 }
 
 impl Inputs {
     /// The inputs of `events` (the whole EventStore) at `now_ms`, built at
     /// `built_at`, every run's and task's events among them; with `rows`,
-    /// the session and queue rows too.
+    /// every session and queue row too.
     pub fn new(events: &[RunEvent], now_ms: i64, built_at: &str, rows: bool) -> Self {
         let mut runs: BTreeMap<String, Vec<RunEvent>> = BTreeMap::new();
         let mut tasks: BTreeMap<TaskId, Vec<RunEvent>> = BTreeMap::new();
-        let (mut sessions, mut queue) = (Vec::new(), Vec::new());
         for event in events {
             if let Some(run) = &event.run_id {
                 runs.entry(run.to_string()).or_default().push(event.clone());
@@ -414,65 +473,42 @@ impl Inputs {
             if let Some(task) = event.task_id {
                 tasks.entry(task).or_default().push(event.clone());
             }
-            if rows {
-                match owner::owner(event) {
-                    Owner::Session => sessions.push(event.clone()),
-                    Owner::Queue => queue.push(event.clone()),
-                    Owner::Run | Owner::Task => {}
-                }
-            }
         }
-        let pushes: Vec<RunEvent> = events
-            .iter()
-            .filter(|event| event.kind == event_kind::PUSH_FINISHED)
-            .cloned()
-            .collect();
-        let mut inputs = Self::folded(events, &sessions, &queue, pushes, now_ms, built_at, rows);
+        let kept = Arc::new(Kept::of(events));
+        let keys: BTreeSet<(LedgerKind, String)> = if rows {
+            kept.keys().collect()
+        } else {
+            BTreeSet::new()
+        };
+        let mut inputs = Self::of(&kept, now_ms, built_at, &keys);
         inputs.runs = runs;
         inputs.tasks = tasks;
         inputs
     }
 
-    /// The inputs of what `kept` holds at `now_ms`, built at `built_at`;
-    /// with `rows`, the session and queue rows too. No run's or task's
-    /// events are among them until [`Self::read`] gives them.
-    pub fn of(kept: &Kept, now_ms: i64, built_at: &str, rows: bool) -> Self {
-        Self::folded(
-            &kept.all,
-            &kept.sessions,
-            &kept.queue,
-            kept.pushes.clone(),
-            now_ms,
-            built_at,
-            rows,
-        )
-    }
-
-    fn folded(
-        all: &[RunEvent],
-        sessions: &[RunEvent],
-        queue: &[RunEvent],
-        pushes: Vec<RunEvent>,
+    /// The inputs of what `kept` holds at `now_ms`, built at `built_at`,
+    /// the session and queue rows of `rows` among them (a key of no row
+    /// builds none). No run's or task's events are among them until
+    /// [`Self::read`] gives them.
+    pub fn of(
+        kept: &Arc<Kept>,
         now_ms: i64,
         built_at: &str,
-        rows: bool,
+        rows: &BTreeSet<(LedgerKind, String)>,
     ) -> Self {
-        let mut built = BTreeMap::new();
-        if rows {
-            for row in session::session_rows(sessions, built_at)
-                .into_iter()
-                .chain(queue::queue_rows(queue, all, now_ms, built_at))
-            {
-                built.insert((row.kind, row.key.clone()), row);
-            }
-        }
+        let built = rows
+            .iter()
+            .filter_map(|(kind, key)| {
+                let row = kept.row(*kind, key, now_ms, built_at)?;
+                Some(((*kind, key.clone()), row))
+            })
+            .collect();
         Self {
             now_ms,
             built_at: built_at.to_owned(),
             runs: BTreeMap::new(),
             tasks: BTreeMap::new(),
-            pushes,
-            pre_claim: pre_claim_intervals(all, now_ms),
+            kept: Arc::clone(kept),
             rows: built,
         }
     }
@@ -516,10 +552,11 @@ impl Inputs {
 /// the NodeSampleStore's of a node target's hour.
 pub fn build(target: &Target, inputs: &Inputs, samples: &[NodeSample]) -> Option<LedgerRow> {
     let now = inputs.now_ms;
+    let kept = &*inputs.kept;
     match target {
         Target::Run(run) => {
             let events = inputs.runs.get(run)?;
-            let mut row = super::run_row(run, events, &inputs.pushes, now, &inputs.built_at);
+            let mut row = super::run_row(run, events, &kept.pushes, now, &inputs.built_at);
             if !(row.is_legacy() || row.ended_at.is_some() || pending_push(&row)) {
                 return None;
             }
@@ -538,8 +575,8 @@ pub fn build(target: &Target, inputs: &Inputs, samples: &[NodeSample]) -> Option
             let mut row = super::task_row(
                 *task,
                 events,
-                &inputs.pushes,
-                &inputs.pre_claim,
+                &kept.pushes,
+                kept.pre_claim.intervals(&kept.lives, now),
                 now,
                 &inputs.built_at,
             );

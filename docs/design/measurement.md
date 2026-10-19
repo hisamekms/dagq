@@ -196,15 +196,15 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
   着地の処理の中では作らず、runtimeの制御（claim・slot・resume・着地）は台帳を読まない。
 - **置き場**: 係の状態（入力ごとのカーソル・印・猶予を待つ行）は観測と分析の状態、組み立ては`compose::observation`にあり、`Supervisor`の本体に状態を足さない。
 - **印**: EventStoreとNodeSampleStoreのカーソルの後に届いた入力だけを読み、そのrun・task・sessionとqueueの行・nodeの時間に印を付ける（全行を走査しない）。
-  畳むrun・taskのeventはその都度読み、queue全体の畳みが読む分は係の状態が持つ。
+  畳むrun・taskのeventはその都度読み、queue全体の畳みは届いたeventを一度だけ読んで持ち越す（`builder::Kept`）。
+  周回は新しいeventが変えうる行と印の付いた行だけを畳み、周回で作る領域は前からのeventの数に比例しない。
   `push_finished`は`push_pending`で書いたrunにも付ける。
   processの始めはカーソルが0なので、切り替え前を含む全てに追いつく（backfill）。
 - **書く行**: 終わったrun・task（`push_pending`と旧方式を含み、途中のものは書かない）と、session・queue・nodeの行。
-  行が無い・`ledger_v`が古い・畳んだ入力が`inputs_through`を越えた（dirty）・確定した、のときだけ書き、同じ入力では書かない（冪等）。
+  書くかは`builder::writes`が決め、同じ入力では書かない（冪等）。
   1周回で書く数と見る数に上限があり、残りは次の周回。
 - **確定**（`final`）: run・taskは終わりから猶予の後で、`push_pending`には付けない。
   session・queue・nodeの行は`domain::ledger::settle`が決める（閉じた時刻か区間の終わりから猶予の後で、閉じていない行は確定しない）。
-  supervisorの一生の終わりで閉じた行は、そのsupervisorの最後のeventを到達点に持ち、後の停止でdirtyになる。
   確定の後もdirtyなら畳み直す。
   telemetryのtokenの失効と資源の最後の記録の条件は、それを記録するtaskが足す（予定）。
 - **旧方式**: 切り替え前のrun（`run_phase_changed`が無い）とそのtaskは区間に畳まず、`legacy`に今の`RunMeasures`から値を一度だけ書く。

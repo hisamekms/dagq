@@ -108,7 +108,8 @@ fn pass(
     if !builder.marked() {
         return Ok(());
     }
-    let mut inputs = Inputs::of(builder.kept(), now_ms, built_at, builder.rows_marked());
+    let rows = builder.rows_to_build(builder.kept());
+    let mut inputs = Inputs::of(builder.kept(), now_ms, built_at, &rows);
     builder.mark_rows(&inputs.rows);
     let mut targets = builder.take(CHECKS_PER_PASS).into_iter();
     while let Some(target) = targets.next() {

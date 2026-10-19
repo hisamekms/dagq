@@ -745,3 +745,154 @@ fn a_pass_reads_what_came_in_and_what_it_folds_whatever_the_queue_holds() {
     // The new events, and the run's and the task's of them for their folds.
     assert!(few <= new * 3, "{few} of {new}");
 }
+
+/// The events of every kind of row of the queue as a whole, a run's and a
+/// task's, each interval ended by an event of its own, so that every row
+/// a later event changes reads it.
+fn in_time_order() -> Log {
+    let (a, b, c) = (run_id(1), run_id(2), run_id(3));
+    let mut log = Log::default();
+    log.add(
+        None,
+        None,
+        "supervisor_started",
+        json!({"supervisor": "s1"}),
+        0,
+    )
+    .add(
+        None,
+        None,
+        "slots_full_started",
+        json!({"supervisor": "s1", "class": "heavy"}),
+        1,
+    )
+    .add(
+        Some(5),
+        None,
+        "claim_deferred",
+        json!({"supervisor": "s1", "reason": "paths"}),
+        2,
+    )
+    .add(
+        None,
+        None,
+        "live_alert_baseline",
+        json!({"supervisor": "s1", "version": 1}),
+        3,
+    )
+    .landed(1, &a, 10)
+    .add(
+        None,
+        None,
+        "slots_full_ended",
+        json!({"supervisor": "s1", "class": "heavy"}),
+        1000,
+    )
+    .add(
+        None,
+        None,
+        "session_opened",
+        json!({"kind": "runtime_planner", "planner_id": 5, "supervisor": "s1"}),
+        1010,
+    )
+    .add(None, None, "claim_held", json!({"supervisor": "s1"}), 1020)
+    .add(
+        None,
+        None,
+        "live_alert_input_changed",
+        json!({"supervisor": "s1", "version": 2}),
+        1030,
+    )
+    .add(
+        None,
+        None,
+        "claim_resumed",
+        json!({"supervisor": "s2"}),
+        1040,
+    )
+    .add(
+        Some(5),
+        None,
+        "claim_deferral_ended",
+        json!({"supervisor": "s1", "why": "free"}),
+        1050,
+    )
+    .add(
+        None,
+        None,
+        "session_closed",
+        json!({"kind": "runtime_planner", "planner_id": 5, "opened_event_id": 7}),
+        1060,
+    )
+    .landed(3, &c, 1100)
+    .add(None, None, "mark_added", json!({"mark": "m"}), 2100)
+    .add(
+        None,
+        None,
+        "supervisor_alive",
+        json!({"supervisor": "s2"}),
+        2200,
+    )
+    .landed(2, &b, 2300)
+    .add(
+        None,
+        None,
+        "supervisor_stopped",
+        json!({"supervisor": "s1"}),
+        3300,
+    );
+    log
+}
+
+/// Passes that each read a few events more, folding only the session and
+/// queue rows those reached, end with the queue, run, task and session
+/// rows of the ledger's fold of every event at once
+/// ([`crate::domain::ledger::build`]), settled as the builder says, for
+/// every row the builder writes.
+#[test]
+fn passes_on_a_few_events_each_write_the_rows_of_the_fold_of_every_event() {
+    let log = in_time_order();
+    let memory = Memory::default();
+    let mut builder = Builder::default();
+    for read in (1..=log.events.len()).step_by(3).chain([log.events.len()]) {
+        memory.events.replace(log.events[..read].to_vec());
+        while pass(&memory, &mut builder, LATER).backlog > 0 {}
+    }
+    let whole: BTreeMap<(LedgerKind, String), LedgerRow> =
+        crate::domain::ledger::build(&log.events, ms(LATER), BUILT)
+            .into_iter()
+            .map(|row| ((row.kind, row.key.clone()), row))
+            .collect();
+    let rows = memory.rows.borrow();
+    for kind in [
+        LedgerKind::Run,
+        LedgerKind::Task,
+        LedgerKind::Session,
+        LedgerKind::Queue,
+    ] {
+        assert!(rows.keys().any(|(k, _)| *k == kind), "no {kind:?} row");
+    }
+    let at_once = Inputs::new(&log.events, ms(LATER), BUILT, true);
+    for ((kind, key), row) in rows.iter() {
+        // A row its later inputs put on its way again is not written.
+        let Some(built) = build(&target_of(*kind, key), &at_once, &[]) else {
+            continue;
+        };
+        assert_eq!(row, &built, "{kind:?} {key}");
+        let mut expected = whole[&(*kind, key.clone())].clone();
+        expected.is_final = row.is_final;
+        assert_eq!(row, &expected, "{kind:?} {key}");
+    }
+    // Every session row and interval or event of the queue is written; a
+    // landing slot's is written by the passes that build the rows while
+    // it reads a new input, as any row they mark.
+    for ((kind, key), row) in &whole {
+        let slot = row
+            .subject
+            .as_ref()
+            .is_some_and(|s| s.kind == "landing_slot");
+        if matches!(kind, LedgerKind::Session | LedgerKind::Queue) && !slot {
+            assert!(rows.contains_key(&(*kind, key.clone())), "{kind:?} {key}");
+        }
+    }
+}

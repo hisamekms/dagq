@@ -1,7 +1,13 @@
 use serde_json::{Value, json};
 
 use super::*;
-use crate::domain::ledger::testkit::{Log, ms, run_id};
+use crate::domain::event_kind;
+use crate::domain::ledger::{
+    owner::{Owner, owner},
+    testkit::{Log, ms, run_id},
+};
+use crate::domain::pre_claim::{SlotClass, pre_claim_intervals};
+use crate::domain::stats::landing_utilization;
 
 /// The landing slots as every attempt read all the events again: the
 /// greatest id from its start whose time is at or before its end.
@@ -111,7 +117,7 @@ fn the_landing_slots_are_the_rows_a_rescan_of_every_attempt_gives() {
     for open in [false, true] {
         let log = log(open);
         let now = ms(100);
-        let slots = landing_slots(&log.events, now, "b");
+        let slots = queue_rows(&[], &log.events, now, "b");
         assert_eq!(
             slots,
             landing_slots_by_rescan(&log.events, now, "b"),
@@ -210,22 +216,85 @@ fn the_queue_rows_are_the_rows_a_rescan_of_every_attempt_gives() {
     }
 }
 
+/// An attempt reads up to the greatest id whose time is at or before its
+/// end, an event that came in later with an earlier time too.
 #[test]
-fn the_last_input_at_a_time_is_the_greatest_id_at_or_before_it() {
+fn an_attempt_reads_a_later_event_of_an_earlier_time() {
     let mut log = log(false);
-    log.events[1].created_at = "?".into();
-    let times: Vec<Option<i64>> = log
-        .events
+    let before = queue_rows(&[], &log.events, ms(100), "b");
+    log.add(None, None, "mark_added", json!({"mark": "late"}), 39);
+    let after = queue_rows(&[], &log.events, ms(100), "b");
+    assert_eq!(after, landing_slots_by_rescan(&log.events, ms(100), "b"));
+    assert_eq!(before[0].inputs_through.events, EventId::new(4));
+    assert_eq!(after[0].inputs_through.events, log.last());
+    assert_eq!(before[1].inputs_through.events, EventId::new(8));
+    assert_eq!(after[1].inputs_through.events, log.last());
+}
+
+/// The queue's events of `log`, as the ledger's owner gives them.
+fn owned_of(events: &[RunEvent]) -> Vec<RunEvent> {
+    events
         .iter()
-        .map(|event| timestamp_millis(&event.created_at))
-        .collect();
-    let last = LastAt::new(&log.events, &times);
-    assert_eq!(last.last_at(ms(-1)), None);
-    assert_eq!(last.last_at(ms(0)), Some(EventId::new(1)));
-    assert_eq!(last.last_at(ms(10)), Some(EventId::new(1)));
-    assert_eq!(last.last_at(ms(48)), Some(EventId::new(8)));
-    assert_eq!(last.last_at(ms(70)), Some(EventId::new(9)));
-    assert_eq!(last.last_at(ms(1000)), Some(EventId::new(11)));
+        .filter(|event| owner(event) == Owner::Queue)
+        .cloned()
+        .collect()
+}
+
+/// A book given the events a part at a time folds every row as the book
+/// of all of them at once does, and each part names every row whose
+/// inputs it reached.
+#[test]
+fn a_book_read_a_part_at_a_time_folds_the_rows_of_all_at_once() {
+    let mut late = log(true);
+    late.add(None, None, "mark_added", json!({"mark": "late"}), 39);
+    for log in [log(false), late, gone_log()] {
+        let now = ms(10_000);
+        let whole = queue_rows(&owned_of(&log.events), &log.events, now, "b");
+        for split in 0..=log.events.len() {
+            let (mut lives, mut pre_claim, mut book) = (
+                Lives::default(),
+                PreClaimBook::default(),
+                QueueBook::default(),
+            );
+            let mut touched = BTreeSet::new();
+            let mut read = |events: &[RunEvent], touched: &mut BTreeSet<_>| {
+                for event in events {
+                    lives.add(event);
+                    let moved = pre_claim.add(event);
+                    book.add(event, owner(event) == Owner::Queue, moved, touched);
+                }
+            };
+            read(&log.events[..split], &mut touched);
+            touched.clear();
+            read(&log.events[split..], &mut touched);
+            let owned = owned_of(&log.events);
+            let at = At {
+                owned: &owned,
+                pre_claim: &pre_claim,
+                lives: &lives,
+                now_ms: now,
+                built_at: "b",
+            };
+            let mut rows: Vec<LedgerRow> =
+                book.keys().filter_map(|key| book.row(&key, &at)).collect();
+            rows.sort_by_key(|row| row.inputs_from);
+            assert_eq!(rows, whole, "{split}");
+            let after = log
+                .events
+                .get(split.wrapping_sub(1))
+                .map_or(EventId::new(0), |e| e.id);
+            for row in &rows {
+                if row.inputs_through.last() > after {
+                    assert!(
+                        touched.contains(&(LedgerKind::Queue, row.key.clone()))
+                            || book.open_slot().as_deref() == Some(row.key.as_str()),
+                        "{split}: {}",
+                        row.key
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Two supervisors whose lives end, each with a stream and a slots-full

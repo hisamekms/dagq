@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use super::{HEARTBEAT_TIMEOUT_SECS, RunEvent, event_kind, stats::timestamp_millis};
+use super::{EventId, HEARTBEAT_TIMEOUT_SECS, RunEvent, event_kind, stats::timestamp_millis};
 
 /// How often a supervisor records `supervisor_alive` at most: its
 /// heartbeat writes the registration every two seconds, and one event
@@ -67,41 +67,72 @@ pub fn supervisor_life_end(events: &[RunEvent], token: &str, now_ms: i64) -> Opt
 
 /// The end of the life of every supervisor of `events` (ascending id),
 /// read in one pass: what [`supervisor_life_end`] gives each, without
-/// reading all the events again per supervisor.
-#[derive(Debug, Default)]
-pub struct Lives<'e> {
-    by_token: HashMap<&'e str, Life>,
+/// reading all the events again per supervisor. It is kept as it is and
+/// given each later event ([`Self::add`]), so a reader that holds it reads
+/// no event twice.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Lives {
+    by_token: HashMap<String, Life>,
 }
 
-impl<'e> Lives<'e> {
-    pub fn new(events: &'e [RunEvent]) -> Self {
-        let mut by_token: HashMap<&'e str, Life> = HashMap::new();
+impl Lives {
+    pub fn new(events: &[RunEvent]) -> Self {
+        let mut lives = Self::default();
         for event in events {
-            if let Some(token) = supervisor_of(event) {
-                by_token.entry(token).or_default().read(event);
+            lives.add(event);
+        }
+        lives
+    }
+
+    /// Read `event`, after every one read before.
+    pub fn add(&mut self, event: &RunEvent) {
+        if let Some(token) = supervisor_of(event) {
+            match self.by_token.get_mut(token) {
+                Some(life) => life.read(event),
+                None => {
+                    let mut life = Life::default();
+                    life.read(event);
+                    self.by_token.insert(token.to_owned(), life);
+                }
             }
         }
-        Self { by_token }
     }
 
     /// [`supervisor_life_end`] of `token` at `now_ms`.
     pub fn end(&self, token: &str, now_ms: i64) -> Option<LifeEnd> {
         self.by_token.get(token).and_then(|life| life.end(now_ms))
     }
+
+    /// The earliest time at which [`Self::end`] of `token` gives an end
+    /// as its events read so far tell: any time once it stopped, else the
+    /// first past the silence after its last event; none while nothing of
+    /// it can end it.
+    pub fn ends_from(&self, token: &str) -> Option<i64> {
+        self.by_token.get(token).and_then(|life| life.ends_from())
+    }
+
+    /// The last event naming `token` as its supervisor, its stop or a
+    /// later one too: what a row its life ended reads up to.
+    pub fn last_of(&self, token: &str) -> Option<EventId> {
+        self.by_token.get(token).map(|life| life.last_id)
+    }
 }
 
 /// A supervisor's events read in order: the end its first
 /// `supervisor_stopped` gives, or else the latest time of them.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct Life {
     stopped: Option<i64>,
     last: Option<i64>,
+    /// The last event naming it, whatever it is.
+    last_id: EventId,
 }
 
 impl Life {
     /// Read one event naming the supervisor; nothing after its stop, and
     /// nothing whose time does not parse.
     fn read(&mut self, event: &RunEvent) {
+        self.last_id = self.last_id.max(event.id);
         if self.stopped.is_some() {
             return;
         }
@@ -125,8 +156,15 @@ impl Life {
             return Some(LifeEnd::Stopped { at_ms });
         }
         let last = self.last?;
+        (now_ms >= self.ends_from()?).then_some(LifeEnd::Silent { at_ms: last })
+    }
+
+    fn ends_from(self) -> Option<i64> {
+        if self.stopped.is_some() {
+            return Some(i64::MIN);
+        }
         let silent_after = (SUPERVISOR_ALIVE_INTERVAL_SECS + HEARTBEAT_TIMEOUT_SECS) * 1000;
-        (now_ms > last + silent_after).then_some(LifeEnd::Silent { at_ms: last })
+        Some(self.last?.saturating_add(silent_after + 1))
     }
 }
 
@@ -244,6 +282,15 @@ mod tests {
                     scan,
                     "{token} {now}"
                 );
+            }
+            // The first time it ends at is the one it ends from.
+            match lives.ends_from(token) {
+                Some(i64::MIN) => assert!(lives.end(token, i64::MIN).is_some(), "{token}"),
+                Some(at) => {
+                    assert!(lives.end(token, at).is_some(), "{token}");
+                    assert_eq!(lives.end(token, at - 1), None, "{token}");
+                }
+                None => assert_eq!(lives.end(token, i64::MAX), None, "{token}"),
             }
         }
         assert_eq!(lives.end("a", 0), Some(LifeEnd::Stopped { at_ms: 3 * MIN }));

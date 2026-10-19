@@ -3,7 +3,7 @@
 //! (`subject.kind`):
 //!
 //! - `slots_full`, `claim_hold`, `claim_deferral`: the waits before a claim
-//!   as [`pre_claim_intervals`] reads them; `landing_hold`: a hold on the
+//!   as [`crate::domain::pre_claim::pre_claim_intervals`] reads them; `landing_hold`: a hold on the
 //!   landings by the same rule ([`claim_hold::hold_spans`]). Its start and
 //!   its end are its records.
 //! - `live_alert_stream`: a supervisor's stream of the record of the
@@ -13,27 +13,24 @@
 //!   interval only, never the alert's value).
 //! - `finding`: one finding from its first record, with its values now.
 //! - `landing_slot`: one `integrate` attempt holding the integration slot
-//!   ([`landing_utilization::spans`]); its records are its run's.
+//!   ([`crate::domain::stats::landing_utilization::spans`]); its records
+//!   are its run's.
 //! - any other kind: one event (main's history, a goal's attributes, an
 //!   update's step, a mark, a backend's failure), its kind the row's.
 //!
 //! An interval with no end yet has no `ended_at` and is not settled
 //! ([`super::settle`]). Reads nothing but the events.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use serde_json::{Value, json};
 
 use super::{LedgerKind, LedgerRow, Subject, findings};
 use crate::domain::{
-    EventId, EventKind, RunEvent, claim_defer, claim_hold,
-    event_kind::{self, SLOTS_FULL_ENDED, SLOTS_FULL_STARTED},
+    EventId, EventKind, RunEvent, claim_hold,
     live_alerts::{self, AlertKey, StreamRecord},
-    pre_claim::{
-        IntervalKind, PreClaimInterval, SlotClass, landing_hold_intervals, pre_claim_intervals,
-        slots_full_of,
-    },
-    stats::{landing_utilization, timestamp_millis},
+    pre_claim::{IntervalKind, Moved, PreClaimBook, PreClaimInterval, Started},
+    stats::{landing_utilization::Attempts, timestamp_millis},
     supervisor_life::{Lives, supervisor_of},
 };
 
@@ -55,22 +52,6 @@ struct Building {
     life: Option<String>,
 }
 
-impl Building {
-    fn new(start: &RunEvent, kind: &str, about: String) -> Self {
-        Self {
-            start: start.id,
-            kind: kind.to_owned(),
-            about,
-            started_at: timestamp_millis(&start.created_at),
-            ended_at: None,
-            outcome: None,
-            detail: json!({}),
-            records: vec![start.id],
-            life: None,
-        }
-    }
-}
-
 const fn interval_kind(kind: IntervalKind) -> &'static str {
     match kind {
         IntervalKind::SlotsFull => "slots_full",
@@ -79,354 +60,556 @@ const fn interval_kind(kind: IntervalKind) -> &'static str {
     }
 }
 
-/// The end event of each slots-full interval, by its start: its
-/// supervisor's next `slots_full_ended` of its class (the rule of
-/// [`pre_claim_intervals`]).
-fn slots_full_ends(events: &[RunEvent]) -> HashMap<EventId, EventId> {
-    let mut open: BTreeMap<(String, SlotClass), EventId> = BTreeMap::new();
-    let mut ends = HashMap::new();
-    for event in events {
-        let Some(key) = slots_full_of(event) else {
-            continue;
-        };
-        match event.kind.as_str() {
-            SLOTS_FULL_STARTED => {
-                open.entry(key).or_insert(event.id);
-            }
-            SLOTS_FULL_ENDED => {
-                if let Some(start) = open.remove(&key) {
-                    ends.insert(start, event.id);
-                }
-            }
-            _ => {}
-        }
-    }
-    ends
-}
-
-/// The end event of each hold and deferral, by its start.
-fn span_ends(events: &[RunEvent]) -> HashMap<EventId, EventId> {
-    claim_hold::hold_spans(claim_hold::CLAIMS, events)
-        .into_iter()
-        .chain(claim_defer::deferral_spans(events))
-        .filter_map(|span| Some((span.start.id, span.end?.event.id)))
-        .collect()
-}
-
 /// The interval row of a wait before a claim or a hold on the landings.
-fn interval_row(start: &RunEvent, kind: &str, interval: &PreClaimInterval) -> Building {
+fn interval_row(
+    start: &Assigned,
+    id: EventId,
+    kind: &str,
+    interval: &PreClaimInterval,
+) -> Building {
     let about = interval
         .supervisor
         .clone()
         .or_else(|| interval.task_id.map(|task| task.to_string()))
         .unwrap_or_default();
-    let mut row = Building::new(start, kind, about);
-    row.ended_at = interval.ended_at.as_deref().and_then(timestamp_millis);
-    row.outcome.clone_from(&interval.end);
-    if interval.end.as_deref() == Some(claim_hold::ENDED_SUPERVISOR_GONE) {
-        row.life.clone_from(&interval.supervisor);
+    Building {
+        start: id,
+        kind: kind.to_owned(),
+        about,
+        started_at: start.started_at,
+        ended_at: interval.ended_at.as_deref().and_then(timestamp_millis),
+        outcome: interval.end.clone(),
+        detail: json!({"interval": interval}),
+        records: start.records.clone(),
+        life: (interval.end.as_deref() == Some(claim_hold::ENDED_SUPERVISOR_GONE))
+            .then(|| interval.supervisor.clone())
+            .flatten(),
     }
-    row.detail = json!({"interval": interval});
-    row
 }
 
 /// The queue rows of `owned` (the events of the queue as a whole,
 /// [`super::owner::Owner::Queue`], ascending id), read against `all` (the
 /// whole EventStore: the supervisors' lives end intervals, and the runs'
-/// events give the landing slot's use) at `now_ms`, built at `built_at`.
-/// Each of `owned` is the records of exactly one row.
+/// events give the landing slot's use) at `now_ms`, built at `built_at`,
+/// as [`QueueBook`] assigns them. Each of `owned` is the records of
+/// exactly one row.
 pub fn queue_rows(
     owned: &[RunEvent],
     all: &[RunEvent],
     now_ms: i64,
     built_at: &str,
 ) -> Vec<LedgerRow> {
-    let by_id: HashMap<EventId, &RunEvent> = owned.iter().map(|event| (event.id, event)).collect();
-    let mut rows: Vec<Building> = Vec::new();
-    let mut taken: HashSet<EventId> = HashSet::new();
-    let mut ends: HashMap<EventId, EventId> = slots_full_ends(all);
-    ends.extend(span_ends(all));
-    let mut intervals: Vec<(PreClaimInterval, &'static str, Option<EventId>)> =
-        pre_claim_intervals(all, now_ms)
-            .into_iter()
-            .map(|interval| {
-                let end = ends.get(&interval.id).copied();
-                let kind = interval_kind(interval.kind);
-                (interval, kind, end)
-            })
-            .collect();
-    intervals.extend(
-        landing_hold_intervals(all)
-            .into_iter()
-            .map(|(interval, end)| (interval, "landing_hold", end)),
+    let owns: HashSet<EventId> = owned.iter().map(|event| event.id).collect();
+    let (mut lives, mut pre_claim, mut book) = (
+        Lives::default(),
+        PreClaimBook::default(),
+        QueueBook::default(),
     );
-    let mut interval_rows: HashMap<EventId, usize> = HashMap::new();
-    for (interval, kind, _) in &intervals {
-        if let Some(start) = by_id.get(&interval.id) {
-            taken.insert(start.id);
-            interval_rows.entry(start.id).or_insert(rows.len());
-            rows.push(interval_row(start, kind, interval));
-        }
-    }
-    // An end is its interval's unless it starts one itself (a hold the
-    // next one replaced).
-    for (interval, _, end) in &intervals {
-        if let Some(end) = end.filter(|end| by_id.contains_key(end) && !taken.contains(end))
-            && let Some(&at) = interval_rows.get(&interval.id)
-        {
-            taken.insert(end);
-            rows[at].records.push(end);
-        }
-    }
-    streams(owned, all, now_ms, &mut rows, &mut taken);
-    alerts(owned, &mut rows, &mut taken);
-    finding_rows(owned, &mut rows, &mut taken);
-    for event in owned.iter().filter(|event| !taken.contains(&event.id)) {
-        let about = supervisor_of(event)
-            .map(str::to_owned)
-            .or_else(|| event.goal_id.map(|goal| goal.to_string()))
-            .unwrap_or_default();
-        let mut row = Building::new(event, &event.kind, about);
-        row.ended_at = row.started_at;
-        rows.push(row);
-    }
-    // The last event naming each supervisor: what a life's end was read
-    // from (`supervisor_life_end` reads only those and the time).
-    let mut lives: HashMap<&str, EventId> = HashMap::new();
+    let mut touched = BTreeSet::new();
     for event in all {
-        if let Some(supervisor) = supervisor_of(event) {
-            lives.insert(supervisor, event.id);
-        }
+        lives.add(event);
+        let moved = pre_claim.add(event);
+        book.add(event, owns.contains(&event.id), moved, &mut touched);
     }
-    let mut ledger: Vec<LedgerRow> = rows
-        .into_iter()
-        .map(|row| {
-            let life = row.life.as_deref().and_then(|s| lives.get(s)).copied();
-            let mut ledger = finish(row, &by_id, built_at);
-            ledger.inputs_through.supervisor = life;
-            ledger
-        })
-        .collect();
-    ledger.extend(landing_slots(all, now_ms, built_at));
-    ledger.sort_by_key(|row| row.inputs_from);
-    ledger
+    // Read by id: the order they came in is the fold's.
+    let mut by_id = owned.to_vec();
+    by_id.sort_by_key(|event| event.id);
+    let at = At {
+        owned: &by_id,
+        pre_claim: &pre_claim,
+        lives: &lives,
+        now_ms,
+        built_at,
+    };
+    let mut rows: Vec<LedgerRow> = book.keys().filter_map(|key| book.row(&key, &at)).collect();
+    rows.sort_by_key(|row| row.inputs_from);
+    rows
 }
 
-/// The streams of the record of the judgments of now: per supervisor,
-/// from a baseline (or its first record) to its next baseline, ended
-/// there (`replaced`) or by the end of its supervisor's life.
-fn streams(
-    owned: &[RunEvent],
-    all: &[RunEvent],
-    now_ms: i64,
-    rows: &mut Vec<Building>,
-    taken: &mut HashSet<EventId>,
-) {
-    let mut open: HashMap<String, usize> = HashMap::new();
-    for event in owned {
+/// What a queue row is folded against: the queue's events (`owned`,
+/// ascending id), the waits before a claim and the supervisors' lives of
+/// every event read, and the time.
+pub struct At<'a> {
+    pub owned: &'a [RunEvent],
+    pub pre_claim: &'a PreClaimBook,
+    pub lives: &'a Lives,
+    pub now_ms: i64,
+    pub built_at: &'a str,
+}
+
+/// What a queue row is, as it is assigned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Of {
+    /// A wait before a claim or a hold on the landings, as
+    /// [`PreClaimBook`] holds it.
+    Interval(Started),
+    /// A supervisor's stream of the record of the judgments of now.
+    Stream,
+    /// One alert.
+    Alert,
+    /// One finding.
+    Finding,
+    /// One event of its own.
+    Event,
+}
+
+/// One queue row as it is assigned: what it is of, its records' ids and
+/// what its records gave so far.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Assigned {
+    of: Of,
+    about: String,
+    started_at: Option<i64>,
+    ended_at: Option<i64>,
+    outcome: Option<String>,
+    /// A stream's: whether it started at a baseline, and the input
+    /// version its records carried last.
+    baseline: bool,
+    version: Option<u64>,
+    records: Vec<EventId>,
+}
+
+impl Assigned {
+    fn new(of: Of, start: &RunEvent, about: String) -> Self {
+        Self {
+            of,
+            about,
+            started_at: timestamp_millis(&start.created_at),
+            ended_at: None,
+            outcome: None,
+            baseline: false,
+            version: None,
+            records: vec![start.id],
+        }
+    }
+}
+
+/// One `integrate` attempt's row as it is kept: its `integration_started`,
+/// its run and, once it ended, the greatest id of the events read whose
+/// time is at or before its end.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Slot {
+    start: EventId,
+    run: String,
+    through: EventId,
+}
+
+/// Which queue row each event of the queue read so far is a record of,
+/// assigned one event at a time and kept, so that a reader that holds it
+/// reads no event twice and folds only the rows it asks for
+/// ([`Self::row`]). An interval's start and the end it records are its
+/// records (an end that starts the next one is not); a stream runs from a
+/// baseline (or its supervisor's first record) to the next baseline; an
+/// alert from its `live_alert_started` to the `live_alert_ended` of its
+/// key; a finding holds every record of it; any other event is a row of
+/// its own. The landing slot's rows are the attempts of every event read
+/// ([`Attempts`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QueueBook {
+    rows: BTreeMap<EventId, Assigned>,
+    /// The open stream of each supervisor, by its start.
+    streams: HashMap<String, EventId>,
+    /// The open alert of each supervisor and key, by its start.
+    alerts: BTreeMap<(String, AlertKey), EventId>,
+    findings: HashMap<i64, EventId>,
+    /// The rows a supervisor's life may end, or whose end its life
+    /// reached: its open stream and slots full, and its holds its stop
+    /// ended.
+    lives_of: HashMap<String, BTreeSet<EventId>>,
+    attempts: Attempts,
+    slots: Vec<Slot>,
+    slot_of: HashMap<EventId, usize>,
+    /// The last event read.
+    last: EventId,
+}
+
+impl QueueBook {
+    /// Read `event`, after every one read before: the queue's own
+    /// (`owned`) are assigned, `moved` is what it did to the waits before
+    /// a claim ([`PreClaimBook::add`]), and every event reads into the
+    /// landing slot's attempts. The key of each row whose fold it changes
+    /// goes into `touched`.
+    pub fn add(
+        &mut self,
+        event: &RunEvent,
+        owned: bool,
+        moved: Moved,
+        touched: &mut BTreeSet<(LedgerKind, String)>,
+    ) {
+        self.last = self.last.max(event.id);
+        self.attempt(event, touched);
+        if let Some(supervisor) = supervisor_of(event)
+            && let Some(rows) = self.lives_of.get(supervisor)
+        {
+            touched.extend(rows.iter().map(|row| (LedgerKind::Queue, row.to_string())));
+        }
+        if !owned {
+            return;
+        }
+        let mut taken = self.interval(event, moved, touched);
+        taken |= self.stream(event, touched);
+        taken |= self.alert(event, touched);
+        taken |= self.finding(event, touched);
+        if !taken {
+            let about = supervisor_of(event)
+                .map(str::to_owned)
+                .or_else(|| event.goal_id.map(|goal| goal.to_string()))
+                .unwrap_or_default();
+            let mut row = Assigned::new(Of::Event, event, about);
+            row.ended_at = row.started_at;
+            self.rows.insert(event.id, row);
+            touched.insert((LedgerKind::Queue, event.id.to_string()));
+        }
+    }
+
+    fn attempt(&mut self, event: &RunEvent, touched: &mut BTreeSet<(LedgerKind, String)>) {
+        let Some(at) = timestamp_millis(&event.created_at) else {
+            return;
+        };
+        if let Some(run) = &event.run_id {
+            let stepped = self.attempts.add(event, run, at);
+            if stepped.started.is_some() {
+                self.slot_of.insert(event.id, self.slots.len());
+                self.slots.push(Slot {
+                    start: event.id,
+                    run: run.as_str().to_owned(),
+                    through: event.id,
+                });
+            }
+        }
+        // The attempts ended at or after its time read up to it.
+        for index in self.attempts.ended_since(at) {
+            let slot = &mut self.slots[index];
+            slot.through = slot.through.max(event.id);
+            touched.insert((LedgerKind::Queue, slot.start.to_string()));
+        }
+        if let Some(open) = self.attempts.open() {
+            touched.insert((LedgerKind::Queue, self.slots[open].start.to_string()));
+        }
+    }
+
+    /// Assign `event` to the interval it starts or the one whose end it
+    /// records; whether it did.
+    fn interval(
+        &mut self,
+        event: &RunEvent,
+        moved: Moved,
+        touched: &mut BTreeSet<(LedgerKind, String)>,
+    ) -> bool {
+        if let Some(started) = moved.started {
+            self.rows.insert(
+                event.id,
+                Assigned::new(Of::Interval(started), event, String::new()),
+            );
+            if started == Started::PreClaim(IntervalKind::SlotsFull)
+                && let Some(supervisor) = supervisor_of(event)
+            {
+                self.lives_of
+                    .entry(supervisor.to_owned())
+                    .or_default()
+                    .insert(event.id);
+            }
+            touched.insert((LedgerKind::Queue, event.id.to_string()));
+        }
+        for start in moved.ended.into_iter().flatten() {
+            // An end the slots full of its supervisor recorded: its life
+            // no longer ends it.
+            if let Some(supervisor) = supervisor_of(event)
+                && event.kind == crate::domain::event_kind::SLOTS_FULL_ENDED
+                && let Some(rows) = self.lives_of.get_mut(supervisor)
+            {
+                rows.remove(&start);
+            }
+            // A hold its supervisor's stop ended reads its later life.
+            if event.kind == crate::domain::event_kind::SUPERVISOR_STOPPED
+                && let Some(supervisor) = supervisor_of(event)
+            {
+                self.lives_of
+                    .entry(supervisor.to_owned())
+                    .or_default()
+                    .insert(start);
+            }
+            touched.insert((LedgerKind::Queue, start.to_string()));
+        }
+        if moved.started.is_some() {
+            return true;
+        }
+        // An end is its interval's unless it starts one itself (a hold the
+        // next one replaced).
+        let Some(start) = moved
+            .ended
+            .into_iter()
+            .flatten()
+            .find(|start| self.rows.contains_key(start))
+        else {
+            return false;
+        };
+        if let Some(row) = self.rows.get_mut(&start) {
+            row.records.push(event.id);
+        }
+        true
+    }
+
+    /// Assign a record of a stream of the judgments of now: per
+    /// supervisor, from a baseline (or its first record) to its next
+    /// baseline, ended there (`replaced`) or by the end of its
+    /// supervisor's life; whether it is one.
+    fn stream(&mut self, event: &RunEvent, touched: &mut BTreeSet<(LedgerKind, String)>) -> bool {
         let kind = event.kind.as_str();
         if !live_alerts::RECORD_KINDS.contains(&kind)
             || [LIVE_ALERT_STARTED, LIVE_ALERT_ENDED].contains(&kind)
         {
-            continue;
+            return false;
         }
         let Some(record) = StreamRecord::of(event) else {
-            continue;
+            return false;
         };
-        let supervisor = record.supervisor.as_str();
-        let current = open.get(supervisor).copied();
+        let supervisor = record.supervisor;
+        let current = self.streams.get(&supervisor).copied();
         let at = match current {
             Some(at) if kind != LIVE_ALERT_BASELINE => at,
             _ => {
-                if let Some(at) = current {
-                    rows[at].ended_at = timestamp_millis(&event.created_at);
-                    rows[at].outcome = Some("replaced".into());
+                if let Some(at) = current
+                    && let Some(row) = self.rows.get_mut(&at)
+                {
+                    row.ended_at = timestamp_millis(&event.created_at);
+                    row.outcome = Some("replaced".into());
+                    touched.insert((LedgerKind::Queue, at.to_string()));
+                    if let Some(rows) = self.lives_of.get_mut(&supervisor) {
+                        rows.remove(&at);
+                    }
                 }
-                let mut row = Building::new(event, "live_alert_stream", supervisor.to_owned());
+                let mut row = Assigned::new(Of::Stream, event, supervisor.clone());
                 row.records.clear();
-                row.detail = json!({"baseline": kind == LIVE_ALERT_BASELINE});
-                open.insert(supervisor.to_owned(), rows.len());
-                rows.push(row);
-                rows.len() - 1
+                row.baseline = kind == LIVE_ALERT_BASELINE;
+                self.rows.insert(event.id, row);
+                self.lives_of
+                    .entry(supervisor.clone())
+                    .or_default()
+                    .insert(event.id);
+                self.streams.insert(supervisor, event.id);
+                event.id
             }
         };
-        if let Some(version) = record.version {
-            rows[at].detail["version"] = json!(version);
+        if let Some(row) = self.rows.get_mut(&at) {
+            if record.version.is_some() {
+                row.version = record.version;
+            }
+            row.records.push(event.id);
         }
-        rows[at].records.push(event.id);
-        taken.insert(event.id);
+        touched.insert((LedgerKind::Queue, at.to_string()));
+        true
     }
-    if open.is_empty() {
-        return;
-    }
-    let lives = Lives::new(all);
-    for (supervisor, at) in open {
-        if let Some(end) = lives.end(&supervisor, now_ms) {
-            let started = rows[at].started_at.unwrap_or(end.at_ms());
-            rows[at].ended_at = Some(end.at_ms().max(started));
-            rows[at].outcome = Some(claim_hold::ENDED_SUPERVISOR_GONE.into());
-            rows[at].life = Some(supervisor);
-        }
-    }
-}
 
-/// One alert from its `live_alert_started` to the `live_alert_ended` of
-/// the same key; an end with no start is an event row.
-fn alerts(owned: &[RunEvent], rows: &mut Vec<Building>, taken: &mut HashSet<EventId>) {
-    let mut open: BTreeMap<(String, AlertKey), usize> = BTreeMap::new();
-    for event in owned {
+    /// Assign an alert's start or end: one alert from its
+    /// `live_alert_started` to the `live_alert_ended` of the same key; an
+    /// end with no start is not one.
+    fn alert(&mut self, event: &RunEvent, touched: &mut BTreeSet<(LedgerKind, String)>) -> bool {
         let Some(StreamRecord {
             supervisor,
             alert: Some(alert),
             ..
         }) = StreamRecord::of(event)
         else {
-            continue;
+            return false;
         };
         let about = alert.run_id.clone().unwrap_or_else(|| alert.kind.clone());
         let key = (supervisor, alert);
         match event.kind.as_str() {
             LIVE_ALERT_STARTED => {
-                let mut row = Building::new(event, "live_alert", about);
-                row.detail = json!({"alert": event.payload});
-                open.insert(key, rows.len());
-                rows.push(row);
-                taken.insert(event.id);
+                self.rows
+                    .insert(event.id, Assigned::new(Of::Alert, event, about));
+                self.alerts.insert(key, event.id);
+                touched.insert((LedgerKind::Queue, event.id.to_string()));
+                true
             }
             LIVE_ALERT_ENDED => {
-                if let Some(at) = open.remove(&key) {
-                    rows[at].ended_at = timestamp_millis(&event.created_at);
-                    rows[at].outcome = Some("ended".into());
-                    rows[at].records.push(event.id);
-                    taken.insert(event.id);
+                let Some(at) = self.alerts.remove(&key) else {
+                    return false;
+                };
+                if let Some(row) = self.rows.get_mut(&at) {
+                    row.ended_at = timestamp_millis(&event.created_at);
+                    row.outcome = Some("ended".into());
+                    row.records.push(event.id);
                 }
+                touched.insert((LedgerKind::Queue, at.to_string()));
+                true
             }
-            _ => {}
+            _ => false,
         }
     }
-}
 
-/// One finding from its first record: every record of its values, the
-/// latest values and status, ended while it is settled.
-fn finding_rows(owned: &[RunEvent], rows: &mut Vec<Building>, taken: &mut HashSet<EventId>) {
-    let mut by_finding: HashMap<i64, usize> = HashMap::new();
-    for event in owned {
-        if !findings::KINDS.contains(&event.kind.as_str()) {
-            continue;
+    /// Assign a record of a finding: one finding from its first record,
+    /// every record of its values; whether it is one.
+    fn finding(&mut self, event: &RunEvent, touched: &mut BTreeSet<(LedgerKind, String)>) -> bool {
+        if !findings::KINDS.contains(&event.kind.as_str())
+            || event.payload.get(findings::VALUES).is_none()
+        {
+            return false;
         }
-        let (Some(finding), Some(values)) = (
-            findings::values_of(event),
-            event.payload.get(findings::VALUES),
-        ) else {
-            continue;
+        let Some(finding) = findings::values_of(event) else {
+            return false;
         };
         let id = finding.id.as_i64();
-        let at = *by_finding.entry(id).or_insert_with(|| {
-            let mut row = Building::new(event, "finding", id.to_string());
+        let at = *self.findings.entry(id).or_insert(event.id);
+        let row = self.rows.entry(at).or_insert_with(|| {
+            let mut row = Assigned::new(Of::Finding, event, id.to_string());
             row.records.clear();
-            rows.push(row);
-            rows.len() - 1
+            row
         });
-        let row = &mut rows[at];
         row.records.push(event.id);
         row.outcome = Some(finding.status.as_str().to_owned());
-        let settled = !finding.status.is_unsettled();
-        row.ended_at = settled
+        row.ended_at = (!finding.status.is_unsettled())
             .then(|| timestamp_millis(&event.created_at))
             .flatten();
-        row.detail = json!({"finding": values});
-        taken.insert(event.id);
+        touched.insert((LedgerKind::Queue, at.to_string()));
+        true
     }
-}
 
-/// The integration slot's use: one row per `integrate` attempt, keyed by
-/// its `integration_started`, whose records are its run's. Each time is
-/// read once, and an attempt's last input found by a binary search.
-fn landing_slots(all: &[RunEvent], now_ms: i64, built_at: &str) -> Vec<LedgerRow> {
-    let (attempts, _) = landing_utilization::spans(all, now_ms);
-    if attempts.is_empty() {
-        return Vec::new();
+    /// The keys of every row: the queue's events', then the landing
+    /// slot's.
+    pub fn keys(&self) -> impl Iterator<Item = String> + '_ {
+        self.rows
+            .keys()
+            .chain(self.slots.iter().map(|slot| &slot.start))
+            .map(EventId::to_string)
     }
-    let times: Vec<Option<i64>> = all
-        .iter()
-        .map(|event| timestamp_millis(&event.created_at))
-        .collect();
-    let through = LastAt::new(all, &times);
-    let starts = all.iter().zip(&times).filter_map(|(event, at)| {
-        (event.kind == event_kind::INTEGRATION_STARTED && event.run_id.is_some() && at.is_some())
-            .then_some(event)
-    });
-    starts
-        .zip(attempts)
-        .map(|(start, attempt)| {
-            let mut row = LedgerRow::new(
-                LedgerKind::Queue,
-                start.id.to_string(),
-                attempt.task_id,
-                built_at,
-            );
-            row.inputs_from = start.id;
-            row.inputs_through.events = if attempt.open {
-                all.last().map_or(start.id, |last| last.id)
-            } else {
-                through
-                    .last_at(attempt.end)
-                    .filter(|last| *last >= start.id)
-                    .unwrap_or(start.id)
-            };
-            row.started_at = Some(attempt.start);
-            row.ended_at = (!attempt.open).then_some(attempt.end);
-            row.outcome =
-                (!attempt.open).then(|| if attempt.landed { "landed" } else { "left" }.to_owned());
-            row.subject = Some(Subject {
-                kind: "landing_slot".into(),
-                id: start
-                    .run_id
-                    .as_ref()
-                    .map(|run| run.as_str().to_owned())
-                    .unwrap_or_default(),
-                ..Subject::default()
-            });
-            row
-        })
-        .collect()
-}
 
-/// The events whose time reads, by time, each with the greatest id of
-/// those at or before it.
-struct LastAt {
-    by_time: Vec<(i64, EventId)>,
-}
-
-impl LastAt {
-    fn new(events: &[RunEvent], times: &[Option<i64>]) -> Self {
-        let mut by_time: Vec<(i64, EventId)> = events
-            .iter()
-            .zip(times)
-            .filter_map(|(event, at)| Some(((*at)?, event.id)))
-            .collect();
-        by_time.sort_unstable();
-        let mut greatest: Option<EventId> = None;
-        for (_, id) in &mut by_time {
-            let max = greatest.map_or(*id, |greatest| greatest.max(*id));
-            *id = max;
-            greatest = Some(max);
+    /// The row of `key` folded against `at`; none for a key of no row.
+    pub fn row(&self, key: &str, at: &At<'_>) -> Option<LedgerRow> {
+        let id = EventId::new(key.parse().ok()?);
+        if let Some(&slot) = self.slot_of.get(&id) {
+            return self.landing_slot(slot, at);
         }
-        Self { by_time }
+        let assigned = self.rows.get(&id)?;
+        let mut row = match assigned.of {
+            Of::Interval(Started::PreClaim(kind)) => {
+                let (interval, _) = at.pre_claim.interval(id, at.lives, at.now_ms)?;
+                interval_row(assigned, id, interval_kind(kind), &interval)
+            }
+            Of::Interval(Started::LandingHold) => {
+                let (interval, _) = at.pre_claim.landing_hold(id)?;
+                interval_row(assigned, id, "landing_hold", interval)
+            }
+            of => {
+                let mut row = Building {
+                    start: id,
+                    kind: String::new(),
+                    about: assigned.about.clone(),
+                    started_at: assigned.started_at,
+                    ended_at: assigned.ended_at,
+                    outcome: assigned.outcome.clone(),
+                    detail: json!({}),
+                    records: assigned.records.clone(),
+                    life: None,
+                };
+                self.fill(&mut row, of, at);
+                row
+            }
+        };
+        if row.kind.is_empty() {
+            row.kind = event(at.owned, id)?.kind.clone();
+        }
+        let life = row.life.as_deref().and_then(|s| at.lives.last_of(s));
+        let mut ledger = finish(row, at.owned, at.built_at);
+        ledger.inputs_through.supervisor = life;
+        Some(ledger)
     }
 
-    /// The greatest id of the events at or before `at`.
-    fn last_at(&self, at: i64) -> Option<EventId> {
-        let count = self.by_time.partition_point(|(time, _)| *time <= at);
-        count.checked_sub(1).map(|index| self.by_time[index].1)
+    /// What a stream, an alert or a finding is besides its records: its
+    /// kind and detail, and a stream's end by its supervisor's life.
+    fn fill(&self, row: &mut Building, of: Of, at: &At<'_>) {
+        let Some(assigned) = self.rows.get(&row.start) else {
+            return;
+        };
+        match of {
+            Of::Stream => {
+                row.kind = "live_alert_stream".into();
+                row.detail = json!({"baseline": assigned.baseline});
+                if let Some(version) = assigned.version {
+                    row.detail["version"] = json!(version);
+                }
+                if self.streams.get(&row.about) == Some(&row.start)
+                    && let Some(end) = at.lives.end(&row.about, at.now_ms)
+                {
+                    let started = row.started_at.unwrap_or(end.at_ms());
+                    row.ended_at = Some(end.at_ms().max(started));
+                    row.outcome = Some(claim_hold::ENDED_SUPERVISOR_GONE.into());
+                    row.life = Some(row.about.clone());
+                }
+            }
+            Of::Alert => {
+                row.kind = "live_alert".into();
+                if let Some(start) = event(at.owned, row.start) {
+                    row.detail = json!({"alert": start.payload});
+                }
+            }
+            Of::Finding => {
+                row.kind = "finding".into();
+                if let Some(values) = row
+                    .records
+                    .last()
+                    .and_then(|last| event(at.owned, *last))
+                    .and_then(|last| last.payload.get(findings::VALUES))
+                {
+                    row.detail = json!({"finding": values});
+                }
+            }
+            Of::Interval(_) | Of::Event => {}
+        }
+    }
+
+    /// The row of the attempt of `index`: its records are its run's.
+    fn landing_slot(&self, index: usize, at: &At<'_>) -> Option<LedgerRow> {
+        let slot = self.slots.get(index)?;
+        let attempt = self.attempts.get(index, at.now_ms)?;
+        let mut row = LedgerRow::new(
+            LedgerKind::Queue,
+            slot.start.to_string(),
+            attempt.task_id,
+            at.built_at,
+        );
+        row.inputs_from = slot.start;
+        row.inputs_through.events = if attempt.open {
+            self.last
+        } else {
+            slot.through.max(slot.start)
+        };
+        row.started_at = Some(attempt.start);
+        row.ended_at = (!attempt.open).then_some(attempt.end);
+        row.outcome =
+            (!attempt.open).then(|| if attempt.landed { "landed" } else { "left" }.to_owned());
+        row.subject = Some(Subject {
+            kind: "landing_slot".into(),
+            id: slot.run.clone(),
+            ..Subject::default()
+        });
+        Some(row)
+    }
+
+    /// The key of the landing slot's row open now: its inputs reach every
+    /// event read.
+    pub fn open_slot(&self) -> Option<String> {
+        self.attempts
+            .open()
+            .and_then(|index| self.slots.get(index))
+            .map(|slot| slot.start.to_string())
     }
 }
 
-fn finish(row: Building, by_id: &HashMap<EventId, &RunEvent>, built_at: &str) -> LedgerRow {
+/// The event of `id` among `events` (ascending id).
+fn event(events: &[RunEvent], id: EventId) -> Option<&RunEvent> {
+    events
+        .binary_search_by_key(&id, |event| event.id)
+        .ok()
+        .map(|at| &events[at])
+}
+
+fn finish(row: Building, owned: &[RunEvent], built_at: &str) -> LedgerRow {
     let mut records: Vec<RunEvent> = row
         .records
         .iter()
-        .filter_map(|id| by_id.get(id).map(|event| (*event).clone()))
+        .filter_map(|id| event(owned, *id).cloned())
         .collect();
     records.sort_by_key(|event| event.id);
     let mut ledger = LedgerRow::new(

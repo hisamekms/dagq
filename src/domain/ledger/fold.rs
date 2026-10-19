@@ -10,6 +10,7 @@
 //! events, the queue's pushes, the waits before a claim and `now_ms` are
 //! all, and the same input gives the same output.
 
+use std::borrow::Borrow;
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
@@ -381,7 +382,7 @@ pub fn fold_task(
     task: TaskId,
     events: &[RunEvent],
     pushes: &[RunEvent],
-    pre_claim: &[PreClaimInterval],
+    pre_claim: impl IntoIterator<Item = impl Borrow<PreClaimInterval>>,
     now_ms: i64,
 ) -> TaskFold {
     let mut runs: Vec<(String, Option<i64>, Option<RunLife>)> = Vec::new();
@@ -620,11 +621,12 @@ impl Composer<'_> {
 fn overlays(
     task: TaskId,
     intervals: &[Interval],
-    pre_claim: &[PreClaimInterval],
+    pre_claim: impl IntoIterator<Item = impl Borrow<PreClaimInterval>>,
     now_ms: i64,
 ) -> Vec<Overlay> {
     let mut out = Vec::new();
     for wait in pre_claim {
+        let wait = wait.borrow();
         let kind = match wait.kind {
             IntervalKind::SlotsFull => "slots_full",
             IntervalKind::ClaimHold => "claim_hold",

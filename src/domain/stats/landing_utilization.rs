@@ -73,8 +73,7 @@ pub struct Wait {
 /// Every `integrate` attempt and every wait for the slot of `events`, the
 /// open ones ending at `now_ms`.
 pub fn spans(events: &[RunEvent], now_ms: i64) -> (Vec<Attempt>, Vec<Wait>) {
-    let mut attempts: Vec<Attempt> = Vec::new();
-    let mut open: Option<(RunId, usize)> = None;
+    let mut attempts = Attempts::default();
     let mut waits: Vec<Wait> = Vec::new();
     let mut waiting: HashMap<RunId, usize> = HashMap::new();
     for event in events {
@@ -95,30 +94,93 @@ pub fn spans(events: &[RunEvent], now_ms: i64) -> (Vec<Attempt>, Vec<Wait>) {
                 end: now_ms,
             });
         }
+        attempts.add(event, run_id, at);
+    }
+    (attempts.at(now_ms).collect(), waits)
+}
+
+/// The `integrate` attempts of the events read so far, read one event at
+/// a time and kept ([`spans`]' attempts): a reader that holds it reads no
+/// event twice. The open one ends only as it is read ([`Self::at`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Attempts {
+    /// In the order they started; an open one's `end` is its start.
+    attempts: Vec<Attempt>,
+    open: Option<(RunId, usize)>,
+}
+
+/// What one event did to the attempts ([`Attempts::add`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Stepped {
+    /// The attempt it ended, by its index.
+    pub ended: Option<usize>,
+    /// The attempt it started, by its index.
+    pub started: Option<usize>,
+}
+
+impl Attempts {
+    /// Read `event` of `run_id` at `at` (unix ms), after every one read
+    /// before; an event of no run or of no readable time is not read.
+    pub fn add(&mut self, event: &RunEvent, run_id: &RunId, at: i64) -> Stepped {
+        let mut stepped = Stepped::default();
+        let kind = event.kind.as_str();
         let ends_own = ENDS.contains(&kind) || leaves(&event.payload);
         if (kind == "integration_started"
-            || (ends_own && open.as_ref().is_some_and(|o| o.0 == *run_id)))
-            && let Some((_, index)) = open.take()
+            || (ends_own && self.open.as_ref().is_some_and(|o| o.0 == *run_id)))
+            && let Some((_, index)) = self.open.take()
         {
-            let attempt = &mut attempts[index];
+            let attempt = &mut self.attempts[index];
             attempt.end = at.max(attempt.start);
             attempt.landed = kind == "run_integrated";
             attempt.open = false;
+            stepped.ended = Some(index);
         }
         if kind == "integration_started" {
             // After the one before, even if the clocks disagree.
-            let start = attempts.last().map_or(at, |last| at.max(last.end));
-            open = Some((run_id.clone(), attempts.len()));
-            attempts.push(Attempt {
+            let start = self.attempts.last().map_or(at, |last| at.max(last.end));
+            self.open = Some((run_id.clone(), self.attempts.len()));
+            stepped.started = Some(self.attempts.len());
+            self.attempts.push(Attempt {
                 task_id: event.task_id,
                 start,
-                end: now_ms.max(start),
+                end: start,
                 landed: false,
                 open: true,
             });
         }
+        stepped
     }
-    (attempts, waits)
+
+    /// The index of the attempt open now.
+    pub fn open(&self) -> Option<usize> {
+        self.open.as_ref().map(|(_, index)| *index)
+    }
+
+    /// The attempt of `index` at `now_ms`: an open one ends then.
+    pub fn get(&self, index: usize, now_ms: i64) -> Option<Attempt> {
+        let mut attempt = self.attempts.get(index)?.clone();
+        if attempt.open {
+            attempt.end = now_ms.max(attempt.start);
+        }
+        Some(attempt)
+    }
+
+    /// Every attempt at `now_ms`, in the order they started.
+    pub fn at(&self, now_ms: i64) -> impl Iterator<Item = Attempt> + '_ {
+        (0..self.attempts.len()).filter_map(move |index| self.get(index, now_ms))
+    }
+
+    /// The indexes of the attempts ended at or after `at`, latest first:
+    /// the attempts end in the order they started, so they are the last.
+    pub fn ended_since(&self, at: i64) -> impl Iterator<Item = usize> + '_ {
+        self.attempts
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, attempt)| !attempt.open)
+            .take_while(move |(_, attempt)| attempt.end >= at)
+            .map(|(index, _)| index)
+    }
 }
 
 fn overlap((from, to): (i64, i64), start: i64, end: i64) -> i64 {
