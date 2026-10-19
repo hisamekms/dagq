@@ -116,6 +116,10 @@ string_enum!(Capability {
     IntegrationRequest => "landing.request",
     Land => "landing.land",
     Push => "landing.push",
+    // The steps of a session an executor sends of its own target
+    // (`telemetry_report`, ADR-t1662-3 decision 9): the executor's
+    // telemetry principal's one capability, and no other role's.
+    TelemetryReport => "telemetry.report",
     // Reserved for a later stage (sandboxed execution): no role has them.
     FilesystemRead => "reserved.filesystem_read",
     FilesystemWrite => "reserved.filesystem_write",
@@ -124,7 +128,7 @@ string_enum!(Capability {
 });
 
 impl Capability {
-    pub const ALL: [Self; 62] = [
+    pub const ALL: [Self; 63] = [
         Self::QueueRead,
         Self::QueueWatch,
         Self::ExportFile,
@@ -183,6 +187,7 @@ impl Capability {
         Self::IntegrationRequest,
         Self::Land,
         Self::Push,
+        Self::TelemetryReport,
         Self::FilesystemRead,
         Self::FilesystemWrite,
         Self::NetworkAccess,
@@ -257,6 +262,15 @@ pub enum Resource {
     AgentEval {
         run: Option<RunId>,
     },
+    /// The target a telemetry report names its steps of (ADR-t1662-3
+    /// decision 10), and the owner the control side registered the
+    /// report's session to (`None` for a session never registered): only
+    /// the principal issued for the target sends them, and only of a
+    /// session registered to it.
+    Telemetry {
+        target: super::session_step::StepTarget,
+        owner: Option<super::session_step::StepTarget>,
+    },
     /// A resource the caller named but could not read (such as a malformed
     /// run id): no owner can match it.
     Unresolved,
@@ -304,6 +318,10 @@ impl Resource {
                 json!({"kind": "request", "id": id, "planner": planner})
             }
             Self::AgentEval { run } => json!({"kind": "agent_eval", "run": run}),
+            Self::Telemetry { target, owner } => json!({
+                "kind": "telemetry", "target": target.kind.as_str(), "id": target.id,
+                "owner": owner.as_ref().map(|owner| format!("{}:{}", owner.kind.as_str(), owner.id)),
+            }),
             Self::Unresolved => json!({"kind": "unresolved"}),
         }
     }
@@ -604,6 +622,10 @@ const WRAPPER: &[Capability] = &[C::QueueRead, C::SessionRun, C::SessionRecord];
 /// The integrator lands and pushes (ADR-t728-2).
 const INTEGRATOR: &[Capability] = &[C::QueueRead, C::Land, C::Push];
 
+/// An executor's telemetry principal sends the steps of its own target and
+/// nothing else, not even a read (ADR-t1662-3 decision 9).
+const EXECUTOR_TELEMETRY: &[Capability] = &[C::TelemetryReport];
+
 /// The allowlist of `role`. The inbox has the user's (ADR-t728-3 decision
 /// 1: it acts at a person's word) but the approval of `setup-review`'s
 /// changes beforehand; the record tells the two apart.
@@ -623,6 +645,7 @@ pub const fn grants(role: ActorRole) -> &'static [Capability] {
         ActorRole::Supervisor => SUPERVISOR,
         ActorRole::Wrapper => WRAPPER,
         ActorRole::Integrator => INTEGRATOR,
+        ActorRole::ExecutorTelemetry => EXECUTOR_TELEMETRY,
     }
 }
 
@@ -652,8 +675,19 @@ fn resource_permits(actor: &ActorContext, capability: Capability, resource: &Res
             C::FindingAsk | C::FindingResolve => matches!(resource, Resource::Finding(_)),
             _ => true,
         },
+        ActorRole::ExecutorTelemetry => telemetry_owns(actor, resource),
         _ => true,
     }
+}
+
+/// The telemetry principal's own target: the one its actor id names
+/// ([`super::telemetry::actor_id`], which the service takes from the
+/// token's principal, never from the caller), of a session the control
+/// side registered to that target.
+fn telemetry_owns(actor: &ActorContext, resource: &Resource) -> bool {
+    matches!(resource, Resource::Telemetry { target, owner }
+        if actor.actor_id() == super::telemetry::actor_id(target)
+            && owner.as_ref() == Some(target))
 }
 
 /// A worker's run, its task, or an ask on its run.
@@ -949,11 +983,17 @@ mod tests {
         }
     }
 
+    /// Every role but the executor's telemetry principal reads: it sends
+    /// the steps of its target only (ADR-t1662-3 decision 9).
     #[test]
     fn every_role_reads_and_is_refused_what_it_was_not_granted() {
         for role_ in ActorRole::ALL {
             let actor = role(role_);
-            assert!(allowed(&actor, C::QueueRead, &Resource::Queue), "{role_:?}");
+            assert_eq!(
+                allowed(&actor, C::QueueRead, &Resource::Queue),
+                role_ != ActorRole::ExecutorTelemetry,
+                "{role_:?}"
+            );
             for capability in Capability::ALL {
                 if !grants(role_).contains(&capability) {
                     let error = StaticPolicy
@@ -1764,5 +1804,126 @@ mod membership_policy_tests {
             })
         );
         assert_eq!(DenyReason::PersonsPriority.as_str(), "a person's priority");
+    }
+}
+
+#[cfg(test)]
+mod telemetry_policy_tests {
+    use super::*;
+    use crate::domain::queue_service::Principal;
+    use crate::domain::session_step::{StepTarget, TargetKind};
+
+    fn allowed(actor: &ActorContext, capability: Capability, resource: &Resource) -> bool {
+        StaticPolicy.authorize(actor, capability, resource).is_ok()
+    }
+
+    /// `target`'s resource, of a session registered to it.
+    fn owned(target: &StepTarget) -> Resource {
+        Resource::Telemetry {
+            target: target.clone(),
+            owner: Some(target.clone()),
+        }
+    }
+
+    fn target(kind: TargetKind, id: &str) -> StepTarget {
+        StepTarget {
+            kind,
+            id: id.to_owned(),
+        }
+    }
+
+    /// ADR-t1662-3 decisions 9 and 10: the telemetry principal sends the
+    /// steps of its own target and nothing else, and no other role sends
+    /// any, an agent's token of the same target included.
+    #[test]
+    fn only_the_telemetry_principal_reports_and_only_of_its_own_target() {
+        let run = RunId::new("r1").unwrap();
+        let own = StepTarget::run(&run);
+        let others = [
+            StepTarget::run(&RunId::new("r2").unwrap()),
+            target(TargetKind::Planner, "3"),
+            target(TargetKind::PlanReview, "4"),
+            target(TargetKind::GoalReview, "5"),
+            target(TargetKind::ThroughputReview, "6"),
+        ];
+        let telemetry = Principal::telemetry(&own, Some(TaskId::new(1))).actor();
+        assert_eq!(telemetry.role(), ActorRole::ExecutorTelemetry);
+        assert!(allowed(&telemetry, C::TelemetryReport, &owned(&own)));
+        for other in &others {
+            let refused = StaticPolicy
+                .authorize(&telemetry, C::TelemetryReport, &owned(other))
+                .unwrap_err();
+            assert_eq!(refused.reason, DenyReason::Resource, "{other:?}");
+        }
+        let of_planner = Principal::telemetry(&others[1], None).actor();
+        assert!(allowed(&of_planner, C::TelemetryReport, &owned(&others[1])));
+        assert!(!allowed(
+            &of_planner,
+            C::TelemetryReport,
+            &owned(&others[2])
+        ));
+        // Its own target's session registered to no target, or to
+        // another, is refused it.
+        for owner in [None, Some(others[0].clone())] {
+            let refused = StaticPolicy
+                .authorize(
+                    &telemetry,
+                    C::TelemetryReport,
+                    &Resource::Telemetry {
+                        target: own.clone(),
+                        owner,
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(refused.reason, DenyReason::Resource);
+        }
+        // Every other capability is refused it, a read included.
+        for capability in Capability::ALL
+            .into_iter()
+            .filter(|capability| *capability != C::TelemetryReport)
+        {
+            for resource in [
+                Resource::Queue,
+                Resource::run(run.clone()),
+                Resource::task(TaskId::new(1)),
+                owned(&own),
+            ] {
+                assert!(
+                    !allowed(&telemetry, capability, &resource),
+                    "{capability} on {resource:?}"
+                );
+            }
+        }
+        // No other role reports, whatever it acts on: the worker of the
+        // run, its jobs and the planner of the target among them.
+        let agents = [
+            ActorContext::worker(&run, TaskId::new(1)),
+            ActorContext::review_job(&run, 1),
+            ActorContext::recovery_job(&run, "a", 1),
+            ActorContext::plan_review_job(4, 1),
+            ActorContext::goal_review_job(5, 1),
+            ActorContext::throughput_review_job("hourly", "h"),
+            ActorContext::instance(ActorRole::Observer, 1),
+            ActorContext::instance(ActorRole::Planner, 3),
+        ];
+        for actor in agents.iter().cloned().chain(
+            ActorRole::ALL
+                .into_iter()
+                .filter(|role| *role != ActorRole::ExecutorTelemetry)
+                .map(|role| ActorContext::instance(role, 1)),
+        ) {
+            for target in std::iter::once(&own).chain(&others) {
+                let refused = StaticPolicy
+                    .authorize(&actor, C::TelemetryReport, &owned(target))
+                    .unwrap_err();
+                assert_eq!(refused.reason, DenyReason::NotGranted, "{actor:?}");
+            }
+        }
+        assert_eq!(grants(ActorRole::ExecutorTelemetry), &[C::TelemetryReport]);
+        assert_eq!(
+            owned(&others[2]).record(),
+            serde_json::json!({"kind": "telemetry", "target": "plan_review", "id": "4",
+                               "owner": "plan_review:4"})
+        );
     }
 }

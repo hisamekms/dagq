@@ -19,6 +19,8 @@ related:
   - design-authorization
   - design-persistence
   - design-supervisor-lifecycle-commands
+  - adr-t1662-3
+  - design-measurement
 ---
 
 # Queue service
@@ -29,6 +31,7 @@ hostで動き、queue DBを開いてユースケース単位のAPIを、service�
 今の段（段(2)・(3)）: serviceは下の[ユースケース](#ユースケース)（findingの書き込みはCodexのobserverの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）と、読み取りのroleのjobとworkerが打つqueue全体の読み取り（[読み取りのユースケース](#読み取りのユースケース)）を答える。
 **worker（resumeを含む）・headlessのjob・observerのdagqはクライアントモードで動き、そのプロセスにはqueue DBのpathを渡さない**（[クライアントモード](#クライアントモード)）。
 supervisor・session wrapperとhook・inbox・planner・人のCLIはDBを直接開く（段(5)まで。ADR-t1233-4決定6）。
+例外はexecutorのsessionのstepだけで、制御側が対象ごとに発行するtelemetry専用のprincipalで[`telemetry_report`](#telemetry_report)を通る（[ADR-t1662-3](../adr/2026-10-04-t1662-3-executors-send-telemetry-and-commands-are-classified-by-shape.md)決定13）。
 
 名前: この文書の「broker」はqueueのbroker（[Queue broker](queue-broker.md)）のこと。
 brokerはrun tokenを検証した要求をそのtokenのままserviceのsocketへ転送するので、serviceの認証と認可は変わらない。
@@ -67,7 +70,7 @@ serviceは呼び出しのprincipal（`Principal`）をtokenから決め、クラ
 
 - 発行: 制御側だけが`queue_service::issue`で発行する。
   AI actorにtokenを作るコマンドは無い。
-  発行できるprincipalはAI actorだけで、人と制御側（user・supervisor・wrapper・integrator）は段(5)まで今のままDBを直接開く。
+  発行できるprincipalはAI actorと、executorのtelemetry専用のprincipal（下の「executorのtelemetryのprincipal」）だけで、人と制御側（user・supervisor・wrapper・integrator）は段(5)まで今のままDBを直接開く（`Principal::check`）。
   同じactor idに発行し直すと前のtokenは失効する（resumeの発行し直し）。
   発行するのはactorの起動の1か所（applicationのport `ServiceAccess`）:
   - workerのtoken: supervisorがclaimとresumeでrunのsession wrapperをbackgroundで起動するときに発行する。
@@ -77,6 +80,10 @@ serviceは呼び出しのprincipal（`Principal`）をtokenから決め、クラ
 - 失効: `queue_service::revoke`（actor id）が値とprincipalの記録を消す。
   加えてserviceは、principalがrunを名指すtokenを、そのrunが終わったときに断る（runの終わりで失効。`run_holds_token`）。
   workerのtokenのfileはresumeの発行し直しまで残るが、使えない
+- executorのtelemetryのprincipal（ADR-t1662-3決定9〜11・13）: role `executor-telemetry`で、対象を1つだけ持つ（runの対象は`run_id`、runを持たない対象は種類とid。`domain::session_step::StepTarget`）。
+  actor idは対象から作り（`domain::telemetry::actor_id`）、runの対象のtokenはworkerのものと同じくrunの終わりで断る。
+  ADR-t1233-4決定4のAI actorごとのtokenを、制御側が発行するこのprincipalに広げたもので、決定6のwrapper・hook・plannerのDBの直接の読み書きは変えず、段(5)のwrapper自身のprincipalも先取りしない。
+  発行と失効の口は制御側だけが呼ぶapplicationのport `TelemetryTokens`で、AI actorのコマンドからは呼べない
 - 断り: 認証できない要求は`unauthenticated`で断り、queueのevent `queue_service_unauthenticated`（tokenの値は書かない）に残す（理由は`QueueService::authenticate`のdoc comment）。
 - hostの呼び出し元に渡すenvはsocketのpathとtokenのfileのpathで、containerのrunにはsocketの代わりにbrokerのURLを渡す（[クライアントモード](#クライアントモード)、`domain::queue_service::CLIENT_ENV`）。
   envの名前の落とし穴は`CREDENTIAL_FILE_ENV`のdoc comment
@@ -104,6 +111,7 @@ paramsはそのコマンドのoption、答えはそのコマンドの出力（pa
 | `finding_dismiss` | `dagq finding dismiss`（下の「CIの見張り」） | `finding.dismiss`（ADR-t1222-1決定2） |
 | `agent_`の各ユースケース | `dagq agent`の同名のサブコマンド | `eval.*`。[Agent eval](agent-eval.md) |
 | `replan_propose` | `dagq replan propose` | `replan.propose`（run） |
+| `telemetry_report` | なし（executorのTelemetrySink） | `telemetry.report`（tokenの対象）。[telemetry_report](#telemetry_report) |
 | 読み取り | そのコマンド | `queue.read`（queue）。[読み取りのユースケース](#読み取りのユースケース) |
 
 observerのfindingに紐づく`blocked`のaskは`ask`のユースケース（capabilityは`finding.ask`）で送る。
@@ -111,6 +119,32 @@ findingの書き込みとそのaskはCLIと同じ`Dialogue`をprincipalのactor�
 そのため`observe_finished`の件数と、observer自身のeventを数えない判定（[Observer](supervisor-lifecycle/observer.md)の0、`SqliteQueue::events_besides`）は、CLIで書いたときと同じに成り立つ（ADR-t1222-1決定4）。
 
 `ask`は誰にも知らせず、inboxの`watch`が人に知らせる（[人への通知](supervisor-lifecycle/ask-push.md)）。
+
+### telemetry_report
+
+executorがsessionのstepと、supervisorが外から測れない環境で中から測った資源のsampleを送るユースケース（ADR-t1662-3決定2・4・9・10、[計測](measurement.md)の「送る口」）。
+送る側のportは`application::TelemetrySink`で、今のアダプタは`infrastructure::queue_service::ServiceTelemetrySink`（クライアントモードのsocketの宛てで送る）。
+paramsの形は`domain::telemetry::TelemetryReport`（1つのsessionの、1つの対象のstepと資源のsample）。
+
+- paramsの版: paramsは要求の`api_version`とは別に自分の`version`を持つ。
+  serviceは他の欄より先に版を読み、`MIN_TELEMETRY_VERSION`〜`TELEMETRY_VERSION`の外（版の無いものを含む）は何も記録せず`bad_request`で断る。
+  知らない欄は、上の段でもstepとsampleの中でも捨てて受ける。
+  前の版のserviceが一部だけ読んではいけない変更は版を上げ、他の欄と並ぶ欄を足すだけなら上げない
+- 1回の上限: executorは30秒ごとにまとめて送る（`REPORT_INTERVAL_SECS`）。
+  上限はparamsのJSONとしての大きさ（`MAX_REPORT_BYTES`）で、要求の1行の上限から要求の残りの欄の分を引いたものなので、文字のescapeで膨らんでも上限の内の要求は1行に収まる。
+  ほかにstepとsampleの数・idと名前の長さ・コマンドのshapeの大きさにも上限があり（値は`domain::telemetry`の定数）、超えたものは何も記録せず`bad_request`で断る。
+  `ServiceTelemetrySink`は上限を超えたものを送らずに断る。
+  溜まったstep（serviceが答えなかった後など）は何回かに分けて送る
+- 認可: `telemetry.report`を、paramsが名指す対象と、そのsessionを制御側が登録した対象（`Resource::Telemetry`）でprincipalに通す。
+  持つのはexecutor-telemetryだけで、tokenの対象と違う対象（他のrun・他のplanner・他のjob）と、tokenの対象に登録されていないsession（未登録も）は`authorization_denied`（記録は他のユースケースと同じ）。
+  sessionの持ち主は、executorが送る前に制御側が`SessionOwners::register_session`でDBに直接登録し、serviceのユースケースからは登録できないので、別の対象のtokenが他の対象のsessionを先に取れない
+  agentのtoken（worker・各job・observer・planner）では、自分のrunの対象でも、paramsを読む前に`authorization_denied`
+- 書き込み: 受けたstepとsampleを受けた時刻とともに書き（`SessionStepStore::record_steps`、`SessionResourceStore::record_resources`の順）、答えはそれぞれの足した数と既に持っていた数。
+  間で失敗すればstepだけが残り、送り直しは同じstepを足さない。
+  成り立たないもの（seqが1より前・負の長さや値）と、別の対象で受けたことのあるsessionは`bad_request`で、何も記録しない
+- 読み取りのユースケースの除外: `telemetry_report`は読み取りではなく、対応するコマンドも無い（`UseCase::of_command`は行き先にしない）。
+  executor-telemetryのtokenは読み取り（`queue.read`）を含め他の全てのユースケースを、paramsを読む前に`authorization_denied`で拒まれる
+- 終わったrunのtokenは断るので、runの対象の最後のstepはrunが終わる前に送る
 
 ## 読み取りのユースケース
 
@@ -120,7 +154,7 @@ CLIとserviceは同じ`application::queue_reads::answer`で答える。
 serviceは起動部分が注入する読み取り（`ServiceReads`）で呼ぶので、`infrastructure::queue_service`は起動部分を参照しない。
 paramsは`application::queue_reads::QueueRead`が読み、CLIのparserが拒む値は`bad_request`。
 認可はCLIがそのコマンドに求めるのと同じ`queue.read`（queue）を`Gate`でprincipalに通す。
-全role（workerとjobを含む）がqueue全体を読める（ADR-t1233-5決定3）。
+executor-telemetryのほかの全role（workerとjobを含む）がqueue全体を読める（ADR-t1233-5決定3）。
 `stats`・`kpi`・`forecast`・`status`・`candidates`の「今」はserviceが要求を受けた時刻。
 
 ユースケースの一覧は`domain::queue_service::UseCase`、CLIと違うparamsは`application::queue_reads`の各optionの型のdoc commentが持つ。
@@ -244,6 +278,9 @@ workerとjobのClaudeの`permissions.deny`には`dagq service`の制御のコマ
 - 実Codexでの読み取りだけのjobのsocketへの到達の確認（`codex sandbox`とstubのCodexまで。上の「Codexのsandboxからの到達」）
 - `dagq ci failures`（`ci.read`。[CI watch](supervisor-lifecycle/ci-watch.md)）の読み取りのユースケース。
   clientのmodeでは`no_use_case`で断る
+- executor-telemetryのtokenを発行・失効させる処理（runのclaim・resume、jobの起動、plannerを開くとき）、sessionの持ち主の登録、executorからの送信。
+  portと`telemetry_report`の受け口だけがある
+- queueのbrokerはrun tokenのほかを通さないので、containerのrunのexecutorの`telemetry_report`の経路は無い（[Queue broker](queue-broker.md)の`TokenRefusal`）
 - 段(4)〜(6)の残り: brokerの残りの宛て（[Queue broker](queue-broker.md#まだ無いもの)）、supervisor・wrapper・hook・CLIのservice経由化、integrateのverificationの隔離
 
 ## CIの見張り（ADR-t1920-1）

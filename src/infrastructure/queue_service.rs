@@ -42,13 +42,19 @@ use crate::application::commands::dialogue::{DialogueStore, MarkChange};
 use crate::application::queue_reads::QueueRead;
 use crate::application::queue_service::{
     QueueService, QueueServiceControl, ServiceAccess, ServiceBackend, ServiceProbe, ServiceQueue,
+    TelemetryTokens,
 };
-use crate::application::{EventStore, Exit, Generators, RunNotFound, RunReads, Spawned, TaskReads};
+use crate::application::{
+    EventStore, Exit, Generators, RunNotFound, RunReads, SessionOwners, SessionResourceStore,
+    SessionStepStore, Spawned, TaskReads, TelemetrySink,
+};
 use crate::domain::queue_service::{
     API_VERSION, LOCK_FILE, LOG_FILE, MAX_ANSWER_BYTES, MAX_REQUEST_BYTES, OWNER_PID_ENV,
     Principal, SERVICE_DIR, SOCKET_FILE, STATE_FILE, ServiceErrorCode, ServiceRequest,
     ServiceResponse, ServiceState, UseCase,
 };
+use crate::domain::session_step::StepTarget;
+use crate::domain::telemetry::{ReportRecorded, TelemetryReport};
 use crate::domain::{
     ActorContext, ActorRole, Answerer, Ask, AskId, EventKind, Finding, FindingId, FindingOutcome,
     FindingStatus, NewAsk, NewFinding, NewNote, PlannerId, ProposalId, RequestId, RunEvent, RunId,
@@ -308,6 +314,58 @@ impl ServiceAccess for SystemServiceAccess {
             actor_id: actor_id.to_owned(),
             revoked: false,
         })
+    }
+}
+
+impl TelemetryTokens for SystemServiceAccess {
+    fn issue_telemetry(
+        &self,
+        db: &Path,
+        target: &StepTarget,
+        task: Option<TaskId>,
+    ) -> Result<PathBuf> {
+        let principal = Principal::telemetry(target, task);
+        Ok(issue(&queue_dir_of(db), &principal, unix_now())?.file)
+    }
+
+    fn revoke_telemetry(&self, db: &Path, target: &StepTarget) -> Result<bool> {
+        revoke(
+            &queue_dir_of(db),
+            &crate::domain::telemetry::actor_id(target),
+        )
+    }
+}
+
+/// An executor's [`TelemetrySink`] through the queue service's client mode
+/// (ADR-t1233-1 decision 7): `telemetry_report` on `client`'s route, as the
+/// telemetry principal of the token in its credential file. A refusal or a
+/// service that does not answer is an error, and nothing is kept here: the
+/// executor sends its steps again.
+#[derive(Debug, Clone)]
+pub struct ServiceTelemetrySink {
+    pub client: Client,
+}
+
+impl ServiceTelemetrySink {
+    /// The sink of the service on `socket`, with the token in `credential`.
+    pub fn new(socket: PathBuf, credential: PathBuf) -> Self {
+        Self {
+            client: Client {
+                route: ClientRoute::Socket(socket),
+                credential: Some(credential),
+            },
+        }
+    }
+}
+
+impl TelemetrySink for ServiceTelemetrySink {
+    fn report(&self, report: &TelemetryReport) -> Result<ReportRecorded> {
+        // A report past its bounds would not be read: it is not sent.
+        crate::domain::telemetry::check(report).map_err(anyhow::Error::msg)?;
+        let result = self
+            .client
+            .call(UseCase::TelemetryReport, serde_json::to_value(report)?)?;
+        serde_json::from_value(result).context("the queue service's answer to telemetry_report")
     }
 }
 
@@ -1058,6 +1116,33 @@ impl ServiceQueue for ServiceSqlite {
     /// As the command line reads it ([`ServiceReads`]), without cmux.
     fn read(&mut self, read: &QueueRead) -> Result<Value> {
         (self.reads)(&mut self.queue, &self.db, read)
+    }
+
+    fn session_owner(&self, session_id: &str) -> Result<Option<StepTarget>> {
+        Ok(SessionOwners::session_owner(&self.queue, session_id)?.map(|owner| owner.target))
+    }
+
+    fn record_report(&mut self, report: &TelemetryReport) -> Result<ReportRecorded> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| {
+                i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+            });
+        let steps = SessionStepStore::record_steps(
+            &self.queue,
+            &report.target,
+            &report.session_id,
+            &report.steps,
+            now_ms,
+        )?;
+        let resources = SessionResourceStore::record_resources(
+            &self.queue,
+            &report.target,
+            &report.session_id,
+            &report.resources,
+            now_ms,
+        )?;
+        Ok(ReportRecorded { steps, resources })
     }
 }
 

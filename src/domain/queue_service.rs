@@ -16,6 +16,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::session_step::StepTarget;
 use super::{ActorContext, ActorRole, DomainError, RunId, RunStatus, TaskId};
 
 /// The API version this binary speaks. A change a caller of the version
@@ -156,6 +157,13 @@ string_enum!(UseCase {
     // the inbox's or a planner's, so a worker's is refused and recorded.
     AgentCases => "agent_cases",
     AgentDecide => "agent_decide",
+    // The steps of a session an executor sends of the one target its
+    // telemetry principal was issued for (ADR-t1662-3 decisions 2 and 9),
+    // with a version of its params of their own
+    // ([`crate::domain::telemetry`]): the only use case that principal
+    // reaches, and one no agent's token reaches. No command line goes to
+    // it.
+    TelemetryReport => "telemetry_report",
 });
 
 impl UseCase {
@@ -333,8 +341,9 @@ pub const fn understands(response: &ServiceResponse) -> bool {
 
 /// Who a token was issued for (ADR-t1233-4 decision 4): the role, the
 /// actor id the records keep, and the run and task of a worker (or of a
-/// job on a run). The service acts as this principal and never as the
-/// role a caller names.
+/// job on a run). An executor's telemetry principal (ADR-t1662-3
+/// decisions 9 and 10) has its one target too, and a run target's run. The
+/// service acts as this principal and never as the role a caller names.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Principal {
     pub role: ActorRole,
@@ -343,6 +352,10 @@ pub struct Principal {
     pub run_id: Option<RunId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<TaskId>,
+    /// The one target of an executor's telemetry principal; `None` for
+    /// every other principal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<StepTarget>,
 }
 
 impl Principal {
@@ -358,20 +371,56 @@ impl Principal {
             actor_id: actor.actor_id().to_owned(),
             run_id: actor.run_id().cloned(),
             task_id: actor.task_id(),
+            target: None,
+        }
+    }
+
+    /// The telemetry principal of `target` (ADR-t1662-3 decision 10): its
+    /// actor id is the target's ([`super::telemetry::actor_id`]), and a run
+    /// target's names the run and its `task`, so its token ends with the
+    /// run as a worker's does. A target of no run names no task.
+    pub fn telemetry(target: &StepTarget, task: Option<TaskId>) -> Self {
+        let run_id = target.run_id();
+        Self {
+            role: ActorRole::ExecutorTelemetry,
+            actor_id: super::telemetry::actor_id(target),
+            task_id: run_id.as_ref().and(task),
+            run_id,
+            target: Some(target.clone()),
         }
     }
 
     /// The principals the control side issues tokens for: the AI actors
-    /// (ADR-t1233-4 decision 4). A person and the control side open the
-    /// DB themselves until stage (5) (decision 6).
+    /// (ADR-t1233-4 decision 4), and an executor's telemetry principal
+    /// whose actor id and run are its one target's (ADR-t1662-3 decisions
+    /// 9 and 13). No other principal has a target. A person and the rest
+    /// of the control side (the wrapper, the integrator, the supervisor)
+    /// open the DB themselves until stage (5) (decision 6).
     pub fn check(&self) -> Result<(), DomainError> {
-        if self.role.trust() == super::TrustLevel::UntrustedAgent {
-            Ok(())
-        } else {
+        let refuse = |value: String| {
             Err(DomainError::UnknownValue {
                 kind: "Principal role",
-                value: self.role.as_str().to_owned(),
+                value,
             })
+        };
+        match (&self.target, self.role) {
+            (None, role) if role.trust() == super::TrustLevel::UntrustedAgent => Ok(()),
+            (Some(target), ActorRole::ExecutorTelemetry)
+                if self.actor_id == super::telemetry::actor_id(target)
+                    && self.run_id == target.run_id()
+                    && (target.kind != super::session_step::TargetKind::Run
+                        || self.run_id.is_some())
+                    && (self.run_id.is_some() || self.task_id.is_none()) =>
+            {
+                Ok(())
+            }
+            (Some(target), role) => refuse(format!(
+                "{} of {} {}",
+                role.as_str(),
+                target.kind.as_str(),
+                target.id
+            )),
+            (None, role) => refuse(role.as_str().to_owned()),
         }
     }
 
@@ -566,6 +615,93 @@ mod tests {
             serde_json::to_value(&worker).unwrap(),
             json!({"role": "worker", "actor_id": "worker:r1", "run_id": "r1", "task_id": 4})
         );
+    }
+
+    /// ADR-t1662-3 decisions 9, 10 and 13: the executor's telemetry
+    /// principal is the one role of the control side a token is issued
+    /// for, with its actor and run its one target's; the wrapper, the
+    /// integrator, the supervisor and the user are refused as before, and
+    /// so is a target on any other role or one its actor does not match.
+    #[test]
+    fn a_telemetry_principal_is_issued_for_one_target_and_no_other_control_role_is() {
+        use crate::domain::session_step::TargetKind;
+        let run = RunId::new("r1").unwrap();
+        let of_run = Principal::telemetry(&StepTarget::run(&run), Some(TaskId::new(4)));
+        assert!(of_run.check().is_ok());
+        assert_eq!(of_run.role, ActorRole::ExecutorTelemetry);
+        assert_eq!(of_run.actor().run_id(), Some(&run));
+        assert_eq!(of_run.actor().task_id(), Some(TaskId::new(4)));
+        assert_eq!(of_run.actor().actor_id(), "executor-telemetry:run:r1");
+        assert_eq!(
+            serde_json::to_value(&of_run).unwrap(),
+            json!({"role": "executor-telemetry", "actor_id": "executor-telemetry:run:r1",
+                   "run_id": "r1", "task_id": 4, "target": {"kind": "run", "id": "r1"}})
+        );
+        let planner = StepTarget {
+            kind: TargetKind::Planner,
+            id: "3".into(),
+        };
+        let of_planner = Principal::telemetry(&planner, Some(TaskId::new(4)));
+        assert!(of_planner.check().is_ok());
+        assert_eq!(
+            (of_planner.run_id.clone(), of_planner.task_id),
+            (None, None)
+        );
+        assert_eq!(of_planner.actor().run_id(), None);
+        for role in [
+            ActorRole::User,
+            ActorRole::Supervisor,
+            ActorRole::Wrapper,
+            ActorRole::Integrator,
+            ActorRole::ExecutorTelemetry,
+        ] {
+            assert!(
+                Principal::of(&ActorContext::new(role, "x"))
+                    .check()
+                    .is_err(),
+                "{role:?}"
+            );
+        }
+        // A target on an agent or another control role, and a target its
+        // actor or run does not match, are no principal.
+        let mut on_worker = Principal::worker(&run, TaskId::new(4));
+        on_worker.target = Some(StepTarget::run(&run));
+        assert!(on_worker.check().is_err());
+        for role in [
+            ActorRole::Wrapper,
+            ActorRole::Integrator,
+            ActorRole::Supervisor,
+            ActorRole::User,
+        ] {
+            let mut on_role = of_run.clone();
+            on_role.role = role;
+            assert!(on_role.check().is_err(), "{role:?}");
+        }
+        let mut another_actor = of_run.clone();
+        another_actor.actor_id = "executor-telemetry:run:r2".into();
+        assert!(another_actor.check().is_err());
+        let mut another_run = of_run.clone();
+        another_run.run_id = Some(RunId::new("r2").unwrap());
+        assert!(another_run.check().is_err());
+        // A run target whose id is no run's names no run its token ends
+        // with, and the telemetry role without a target is no principal.
+        let bad_run = StepTarget {
+            kind: TargetKind::Run,
+            id: " ".into(),
+        };
+        assert!(Principal::telemetry(&bad_run, None).check().is_err());
+        let mut no_target = of_run.clone();
+        no_target.target = None;
+        assert!(no_target.check().is_err());
+        let mut planner_with_task = of_planner;
+        planner_with_task.task_id = Some(TaskId::new(4));
+        assert!(planner_with_task.check().is_err());
+        // An older record, without a target, reads as before.
+        let read: Principal =
+            serde_json::from_value(json!({"role": "worker", "actor_id": "worker:r1"})).unwrap();
+        assert_eq!(read.target, None);
+        assert_eq!(UseCase::TelemetryReport.as_str(), "telemetry_report");
+        assert_eq!(UseCase::of_command(&["telemetry_report"]), None);
     }
 
     #[test]

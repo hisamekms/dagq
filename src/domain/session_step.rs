@@ -8,6 +8,13 @@
 //! [`RETENTION_DAYS`] after it came in; the seqs removed are kept as
 //! ranges, so they are no gap.
 //!
+//! A session's resource samples ([`ResourceSample`]) are what its executor
+//! measured from inside, where the supervisor cannot measure from outside
+//! (ADR-t1662-3 decisions 1 and 4), in the common units, kept by
+//! `(session_id, seq)` once as the steps are. A session's owner is the
+//! target the control side registered it to before its executor reports
+//! ([`SessionOwner`]).
+//!
 //! Nothing here holds a prompt, an output, a command line or tokens
 //! (tokens are the Executions' record, ADR-t1486-1).
 
@@ -178,9 +185,12 @@ pub enum StepError {
     Seq(i64),
     /// A step's offset, length or output is negative.
     Negative(i64),
-    /// The session's steps came in under another target: one session is
-    /// one target's.
+    /// The session's steps came in under another target, or the session
+    /// is registered to another: one session is one target's.
     SessionOfAnotherTarget,
+    /// A resource sample's seq is before [`FIRST_SEQ`], or one of its
+    /// values is negative or not finite.
+    Resource(i64),
 }
 
 impl std::fmt::Display for StepError {
@@ -189,6 +199,10 @@ impl std::fmt::Display for StepError {
             Self::Seq(seq) => write!(f, "step seq {seq} is before {FIRST_SEQ}"),
             Self::Negative(seq) => write!(f, "step {seq} has a negative offset, length or output"),
             Self::SessionOfAnotherTarget => write!(f, "the session's steps are of another target"),
+            Self::Resource(seq) => write!(
+                f,
+                "resource sample {seq} has a seq before {FIRST_SEQ}, or a negative or non-finite value"
+            ),
         }
     }
 }
@@ -209,6 +223,113 @@ pub fn check(steps: &[Step]) -> Result<(), StepError> {
     Ok(())
 }
 
+/// What an executor measured of its session's resources over one window
+/// from inside (ADR-t1662-3 decision 4), in the common units: its number
+/// in the session's samples from [`FIRST_SEQ`], the window's offset from
+/// the session's start and its length (milliseconds), and each value the
+/// environment let it measure, `None` where it could not.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResourceSample {
+    pub seq: i64,
+    pub offset_ms: i64,
+    pub duration_ms: i64,
+    /// CPU time spent in the window, in seconds.
+    pub cpu_seconds: Option<f64>,
+    /// The CPU limit, in cores.
+    pub cpu_limit: Option<f64>,
+    /// Time the CPU limit throttled, in seconds.
+    pub throttled_seconds: Option<f64>,
+    /// The most memory used, in bytes.
+    pub memory_max_bytes: Option<i64>,
+    /// The memory limit, in bytes.
+    pub memory_limit_bytes: Option<i64>,
+    /// Bytes read and written.
+    pub read_bytes: Option<i64>,
+    pub write_bytes: Option<i64>,
+    /// The CPU pressure (PSI `some avg10`, a percentage).
+    pub cpu_pressure: Option<f64>,
+    /// The load average over a minute, where the environment has one.
+    pub load_average: Option<f64>,
+    /// The node the session ran on.
+    pub node_id: Option<String>,
+}
+
+impl ResourceSample {
+    /// A sample of the window at `offset_ms` lasting `duration_ms`, with no
+    /// value measured.
+    pub fn new(seq: i64, offset_ms: i64, duration_ms: i64) -> Self {
+        Self {
+            seq,
+            offset_ms,
+            duration_ms,
+            cpu_seconds: None,
+            cpu_limit: None,
+            throttled_seconds: None,
+            memory_max_bytes: None,
+            memory_limit_bytes: None,
+            read_bytes: None,
+            write_bytes: None,
+            cpu_pressure: None,
+            load_average: None,
+            node_id: None,
+        }
+    }
+}
+
+/// Refuse `samples` unless each holds together: a seq from [`FIRST_SEQ`],
+/// and no value negative or, for a real, not finite.
+pub fn check_resources(samples: &[ResourceSample]) -> Result<(), StepError> {
+    for sample in samples {
+        let real = |value: Option<f64>| value.is_none_or(|v| v.is_finite() && v >= 0.0);
+        let whole = |value: Option<i64>| value.is_none_or(|v| v >= 0);
+        let holds = sample.seq >= FIRST_SEQ
+            && sample.offset_ms >= 0
+            && sample.duration_ms >= 0
+            && [
+                sample.cpu_seconds,
+                sample.cpu_limit,
+                sample.throttled_seconds,
+                sample.cpu_pressure,
+                sample.load_average,
+            ]
+            .into_iter()
+            .all(real)
+            && [
+                sample.memory_max_bytes,
+                sample.memory_limit_bytes,
+                sample.read_bytes,
+                sample.write_bytes,
+            ]
+            .into_iter()
+            .all(whole);
+        if !holds {
+            return Err(StepError::Resource(sample.seq));
+        }
+    }
+    Ok(())
+}
+
+/// A resource sample as the store holds it, as [`SessionStep`] a step.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionResource {
+    pub id: i64,
+    pub target: StepTarget,
+    pub session_id: String,
+    pub received_at: i64,
+    pub sample: ResourceSample,
+}
+
+/// The target the control side registered a session to before its
+/// executor reports: the queue service records a session's steps and
+/// samples only for its owner's telemetry principal, so no token takes
+/// another target's session first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionOwner {
+    pub session_id: String,
+    pub target: StepTarget,
+    pub registered_at: i64,
+}
+
 /// A step as the SessionStepStore holds it: its id in the order the rows
 /// came in (a cursor reads past it), its target and session, and when it
 /// came in (unix milliseconds).
@@ -223,7 +344,7 @@ pub struct SessionStep {
 
 /// What recording a session's steps did: the steps added, and those whose
 /// `(session_id, seq)` was held already.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StepsRecorded {
     pub added: usize,
     pub duplicates: usize,

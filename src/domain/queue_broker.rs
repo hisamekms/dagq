@@ -925,8 +925,14 @@ mod tests {
             actor_id: "observer:1".into(),
             run_id: None,
             task_id: None,
+            target: None,
         };
-        for principal in [job, observer] {
+        // Nor is an executor's telemetry token of the run.
+        let telemetry = Principal::telemetry(
+            &crate::domain::session_step::StepTarget::run(&RunId::new("r1").unwrap()),
+            Some(TaskId::new(1)),
+        );
+        for principal in [job, observer, telemetry] {
             assert_eq!(
                 judge_run_token(&principal, "r1", Some(RunStatus::Running)),
                 Err(TokenRefusal::NotARunToken)

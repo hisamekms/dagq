@@ -15,6 +15,7 @@ related:
   - adr-t1228-2
   - design-supervisor-lifecycle-roles
   - design-security
+  - adr-t1662-3
 ---
 
 # Authorization
@@ -88,6 +89,7 @@ jobのroleを知らない古いバイナリは`reviewer`だけを読み取りに
 | | `review.setup` / `review.setup_approve` | `setup-review` / `setup-review --yes`（[setup-review](supervisor-lifecycle/setup-review.md)） |
 | 着地 | `landing.request` | `integrate`（Integratorへの依頼。ADR-t728-2） |
 | | `landing.land` / `landing.push` | Integratorの内側 |
+| 計測 | `telemetry.report` | CLIには無い（queue serviceの`telemetry_report`） |
 | 予約 | `reserved.filesystem_read` `reserved.filesystem_write` `reserved.network` `reserved.secret_read` | 後の段（sandbox）。この段では誰にも与えない |
 
 CLIのコマンドからcapabilityとresourceへの写しは`src/main.rs`の`requests`で、matchに既定の枝を置かないので、コマンドを足すと写しを書くまでcompileが通らない。
@@ -108,7 +110,7 @@ roleの名前だけでactorを名指さないplannerのidは、どのproposalの
 
 | role | 許すcapability | resourceの規則 |
 | --- | --- | --- |
-| user | 予約と`review.submit` `triage.submit` `landing.land` `landing.push` `request.decline` `replan.park` `replan.apply`を除く全て | なし |
+| user | 予約と`review.submit` `triage.submit` `landing.land` `landing.push` `request.decline` `replan.park` `replan.apply` `telemetry.report`を除く全て | なし |
 | inbox | userと同じ（人の言葉での代行。ADR-t728-3の決定1）だが、`review.setup_approve`は持たない | なし。人自身の操作との区別は記録が持つ |
 | planner | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.write`・`goal.close`・`task.write`・`follow_up.judge`・`task.cancel`・`proposal.submit`・`proposal.withdraw`・`note.write`・`mark.write`・`ask.open`・`session.run`・`session.record`・`finding.resolve`・`finding.dismiss`・`planner.open`・`request.decline`・`eval.request`・`eval.request_held_out`・`eval.read`・`eval.cases`・`service.lifecycle`・`service.install`・`queue.admin` | runにはnote（`note --run`）だけを書け、ほかは何もできない（runに紐づくaskも開けない）。開けるaskは`planner_question`だけで、依頼に紐づくもの（`ask --request ID`）はその依頼の閉じていないruntimeのplannerのactor idが自分のときだけ（`request.decline`と同じ規則。plannerが分からなければ拒む）。taskの変更（`task.write`・`task.cancel`）はdraft・submitted・readyのものだけ（状態が不明なら拒む）。`revisit`（draftの再検討の時刻、`task.write`）はdraftだけで（storeがどのroleにも求める）、`draft_planner_exhausted`のあるdraftには付けられない（人・inboxだけが付ける。ADR-t1540-1）。`follow_up.judge`は全状態のfollow_upに記録でき、所属を動かすのはdraft・readyだけ。noteはどの状態のtaskにも書ける。`proposal.withdraw`は自分（actor id）が出したproposalだけ。`planner-session`は自分のplannerだけ。`request.decline`はそのplannerが立てられた依頼（依頼の閉じていないruntimeのplannerのactor idが自分）だけで、plannerが分からなければ拒む |
 | worker | 読み取り・`ask.open`・`note.write`・`replan.propose`・`session.run`・`session.record`・`eval.request`・`eval.read` | evalと`replan.propose`は自分のrunの分だけ。読み取り以外は自分のrun（`DAGQ_RUN_ID`）・そのtask（`DAGQ_TASK_ID`）・自分のrunのaskだけ。開けるaskは`worker_question`だけで、`--run`なら自分のrun、`--task`だけなら自分のtask（`DAGQ_RUN_ID`の無いworkerは何も持たない）。`session`と`session-event`は自分のrunのものだけ（runtimeのwrapperとhookはworkerの環境のまま打つ） |
@@ -120,6 +122,7 @@ roleの名前だけでactorを名指さないplannerのidは、どのproposalの
 | supervisor | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.close`・`task.cancel`・`task.ready`・`note.write`・`ask.open`・`ask.close`・`session.run`・`review.prepare`・`finding.record`・`finding.resolve`・`finding.dismiss`・`observe.run`・`planner.open`・`eval.read`・`scheduler.supervise`・`run.recover`・`service.lifecycle`・`service.install`・`queue.admin`・`landing.request`・`replan.park`・`replan.apply` | なし。`queue.admin`は自動更新が新しいバイナリで`install`と同じ確認（`migrate --check`・`migrate`・使い捨てのqueueの`init`）をするため。`ask.answer`・`task.ready_bypass_review`・`landing.land`・`landing.push`・`workspace.cleanup`（終わったrunに残ったbackgroundのwrapperは自分の掃除で止める）とevalの依頼は持たない |
 | wrapper | 読み取り・`session.run`・`session.record` | なし |
 | integrator | 読み取り・`landing.land`・`landing.push` | なし |
+| executor-telemetry | `telemetry.report`だけ | tokenの対象に制御側が登録したsessionだけ |
 
 旧値の`DAGQ_ROLE=reviewer`はreview-jobとして読む（[Roles](supervisor-lifecycle/roles.md#cliでの解釈)）。
 jobの環境には`DAGQ_RUN_ID`が無いので、`review.submit`・`triage.submit`は持ち主が分からず拒まれる。
@@ -170,7 +173,7 @@ taskの状態による制限は無く、submitted以降の訂正も記録でき�
 
 policyは上の表のまま: plannerはdraft・submitted・readyのtaskの変更と`cancel`、goalの追加・編集・close、自分のproposalの取り下げを持ち、`ready`・`goal ready`・`goal review`とin_progress以降のtaskの変更（follow_upの所属判断の記録を除く。`in_progress`のtaskの`set-priority`もuserとinboxだけ）は持たない。
 `ready`はuserとinbox（人の言葉での代行。区別はeventのactorが持つ）。
-worker・headlessのjob（一覧は`src/domain/actor.rs`の`ActorRole::is_headless_job`）・observer・wrapper・integratorは計画系を何もできない。
+worker・headlessのjob（一覧は`src/domain/actor.rs`の`ActorRole::is_headless_job`）・observer・wrapper・integrator・executor-telemetryは計画系を何もできない。
 supervisorはCLIからは`ready`・`cancel`・`goal close`だけ。
 capabilityをどのresourceにも持たないroleは、storeを読む前に拒む（taskやproposalが無くても拒否になる）。
 capabilityを持つroleで、taskやproposalが見つからないときは拒否ではなく、そのerrorになる。
@@ -318,9 +321,8 @@ findingの書き込みもCLIと同じpolicyで判定する（ADR-t1222-1決定2�
 クライアントが名乗るroleは使わない（workerとjobのクライアントモードのdagqは`DAGQ_ROLE`を読まず、そのtokenのprincipalで判定される。[クライアントモード](queue-service.md#クライアントモード)）。
 拒否は同じ`authorization_denied`（拒まれたprincipalがactor）に残る。
 tokenを発行するのは制御側だけで、AI actorにtokenを作るコマンドは無い。
-読み取りは狭めず、全roleがqueue全体を読める（ADR-t1233-5決定3）。
+読み取りは狭めず、executor-telemetryのほかの全roleがqueue全体を読める（ADR-t1233-5決定3）。
 queue全体の読み取りのユースケース（一覧は[Queue service](queue-service.md#読み取りのユースケース)）は、CLIがその読み取りのコマンドに求めるのと同じ`queue.read`（queue）を`Gate`でprincipalに通してから答えるので、workerとjobも読める。
-CLIで`queue.watch`の`watch`と`queue.export`の`report`・`graph --out`はユースケースが無く（`bad_request`）、paramsは書き出すファイルも実行するprogramも受け取らず、hostのd2を起動する`graph --format svg`も受け取らない。
 
 ### ほかのコマンド（CLIの入口）
 

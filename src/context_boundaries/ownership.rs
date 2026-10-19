@@ -195,6 +195,8 @@ pub(super) const TABLES: &[Table] = &[
     table("node_sample_imports", Observation), // the imported CSV files, written with node_samples in one transaction
     table("session_steps", Observation), // the SessionStepStore; the runtime's control does not read it
     table("session_step_removed", Observation), // the SessionStepStore's seqs its retention removed
+    table("session_resources", Observation), // the sessions' resource samples an executor measured
+    table("session_owners", Observation), // the target the control side registered each session to
     table("supervisors", Host),
     table("queue_repository", Host),
     table("schema_floor", Host),

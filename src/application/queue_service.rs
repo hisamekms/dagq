@@ -38,11 +38,13 @@ use crate::domain::queue_service::{
     API_VERSION, MIN_API_VERSION, Principal, ServiceErrorCode, ServiceRequest, ServiceResponse,
     ServiceState, UseCase, answers, run_holds_token,
 };
+use crate::domain::session_step::{StepError, StepTarget};
+use crate::domain::telemetry::{ReportRecorded, TelemetryReport};
 use crate::domain::{
-    ActorContext, Answerer, Ask, AskId, AskKind, AskReason, AuthorizationError, Capability,
-    EventId, Finding, FindingId, FindingOutcome, FindingStatus, FindingTarget, GoalId, NewAsk,
-    NewFinding, NewNote, NoteTarget, PlannerId, ProposalId, RequestId, Resource, RunEvent, RunId,
-    RunStatus, StaticPolicy, TaskId,
+    ActorContext, ActorRole, Answerer, Ask, AskId, AskKind, AskReason, AuthorizationError,
+    Capability, EventId, Finding, FindingId, FindingOutcome, FindingStatus, FindingTarget, GoalId,
+    NewAsk, NewFinding, NewNote, NoteTarget, PlannerId, ProposalId, RequestId, Resource, RunEvent,
+    RunId, RunStatus, StaticPolicy, TaskId,
 };
 
 /// The queue as one use case of the service reads and changes it, written
@@ -65,6 +67,16 @@ pub trait ServiceQueue:
     fn show_proposal(&self, id: ProposalId) -> Result<Value>;
     /// A read of the whole queue as its command prints it.
     fn read(&mut self, read: &QueueRead) -> Result<Value>;
+    /// The target the control side registered `session_id` to
+    /// ([`crate::application::SessionOwners`]); `None` for one never
+    /// registered.
+    fn session_owner(&self, session_id: &str) -> Result<Option<StepTarget>>;
+    /// Record `report`'s steps and resource samples as received now
+    /// ([`crate::application::SessionStepStore::record_steps`], then
+    /// [`crate::application::SessionResourceStore::record_resources`]): a
+    /// failure between leaves the steps, which the executor's resend adds
+    /// no second time.
+    fn record_report(&mut self, report: &TelemetryReport) -> Result<ReportRecorded>;
 }
 
 /// What the service runs its use cases on.
@@ -415,6 +427,24 @@ fn run(
     raw: &Value,
 ) -> Result<Value> {
     let mut store = Store(queue);
+    // The executor's telemetry principal reaches `telemetry_report` alone
+    // and a role without `telemetry.report` never reaches it (ADR-t1662-3
+    // decision 9): each is refused, and recorded, before its params are
+    // read, as the least the other use cases need, a read of the queue, and
+    // as `telemetry.report` on no target it may name.
+    let gate = Gate {
+        actor,
+        authorizer: &StaticPolicy,
+    };
+    if actor.role() == ActorRole::ExecutorTelemetry && use_case != UseCase::TelemetryReport {
+        gate.authorize(&store, Capability::QueueRead, &Resource::Queue)?;
+    }
+    if use_case == UseCase::TelemetryReport
+        && !crate::domain::authorization::grants(actor.role())
+            .contains(&Capability::TelemetryReport)
+    {
+        gate.authorize(&store, Capability::TelemetryReport, &Resource::Unresolved)?;
+    }
     // The reads of the whole queue (ADR-t1233-5 decisions 1 to 3), each
     // authorized as the command line asks for its command.
     if let Some(read) = QueueRead::parse(use_case, raw)? {
@@ -443,6 +473,31 @@ fn run(
         | UseCase::Lint
         | UseCase::ObserveHistory
         | UseCase::ObserveInput => unreachable!("a read is answered above"),
+        UseCase::TelemetryReport => {
+            // A version the service does not read, or a report past its
+            // bounds, is refused before anything is recorded; a field it
+            // does not know is dropped (crate::domain::telemetry::read).
+            let report = crate::domain::telemetry::read(raw)
+                .map_err(|error| BadParams(error.to_string()))?;
+            // Of the target the token was issued for, and of a session the
+            // control side registered to it.
+            let owner = store.0.session_owner(&report.session_id)?;
+            gate.authorize(
+                &store,
+                Capability::TelemetryReport,
+                &Resource::Telemetry {
+                    target: report.target.clone(),
+                    owner,
+                },
+            )?;
+            let recorded = store.0.record_report(&report).map_err(|error| {
+                match error.downcast_ref::<StepError>() {
+                    Some(refused) => BadParams(refused.to_string()).into(),
+                    None => error,
+                }
+            })?;
+            Ok(serde_json::to_value(recorded)?)
+        }
         UseCase::AgentEval => {
             let p: AgentEvalParams = params(use_case, raw)?;
             let name = p.split.as_deref().unwrap_or("dev");
@@ -732,6 +787,25 @@ pub trait ServiceAccess: Send + Sync {
     ) -> Box<dyn super::Spawned>;
 }
 
+/// How the control side issues and revokes the token of an executor's
+/// telemetry principal (ADR-t1662-3 decision 11): only the control side
+/// calls it, and no command of an AI actor's does. The token's file is
+/// the executor's to read; it is handed to no agent.
+pub trait TelemetryTokens: Send + Sync {
+    /// Issue the token of the telemetry principal of `target` of the queue
+    /// at `db` (of `task`, for a run target), revoking the one it held: the
+    /// file holding it.
+    fn issue_telemetry(
+        &self,
+        db: &std::path::Path,
+        target: &StepTarget,
+        task: Option<TaskId>,
+    ) -> Result<std::path::PathBuf>;
+    /// Revoke the token of the telemetry principal of `target`: whether
+    /// there was one.
+    fn revoke_telemetry(&self, db: &std::path::Path, target: &StepTarget) -> Result<bool>;
+}
+
 /// `up`'s step (ADR-t1233-4 decision 1): reuse a service of this build
 /// that answers, else start one (replacing one of another build), and
 /// report what was done. A service that does not start stops `up`.
@@ -825,7 +899,7 @@ mod tests {
     use anyhow::anyhow;
 
     use super::*;
-    use crate::domain::{ActorRole, Answerer};
+    use crate::domain::Answerer;
 
     /// One queue: task 1 with run `r1` in `status`; everything it was
     /// asked to write is kept.
@@ -969,6 +1043,36 @@ mod tests {
         fn read(&mut self, read: &QueueRead) -> Result<Value> {
             Ok(json!({"read": format!("{read:?}")}))
         }
+        /// A session `<kind>:<id>:<name>` is registered to that target,
+        /// any other to none; one named `taken` has steps of another target.
+        fn session_owner(&self, session_id: &str) -> Result<Option<StepTarget>> {
+            let mut parts = session_id.splitn(3, ':');
+            Ok(match (parts.next(), parts.next(), parts.next()) {
+                (Some(kind), Some(id), Some(_)) => Some(StepTarget {
+                    kind: crate::domain::session_step::TargetKind::parse(kind).unwrap(),
+                    id: id.to_owned(),
+                }),
+                _ => None,
+            })
+        }
+        fn record_report(&mut self, report: &TelemetryReport) -> Result<ReportRecorded> {
+            if report.session_id.ends_with(":taken") {
+                return Err(StepError::SessionOfAnotherTarget.into());
+            }
+            self.log.lock().unwrap().push(json!({
+                "steps": report.steps.len(), "resources": report.resources.len(),
+                "session": report.session_id,
+                "target": format!("{}:{}", report.target.kind.as_str(), report.target.id),
+            }));
+            let added = |added| crate::domain::session_step::StepsRecorded {
+                added,
+                duplicates: 0,
+            };
+            Ok(ReportRecorded {
+                steps: added(report.steps.len()),
+                resources: added(report.resources.len()),
+            })
+        }
     }
 
     struct Backend {
@@ -986,6 +1090,27 @@ mod tests {
                     ActorRole::Observer,
                     "s1",
                 ))),
+                "recovery" => Some(Principal::of(&ActorContext::recovery_job(&run, "a", 1))),
+                "plan-review" => Some(Principal::of(&ActorContext::plan_review_job(4, 1))),
+                "goal-review" => Some(Principal::of(&ActorContext::goal_review_job(5, 1))),
+                "throughput-review" => Some(Principal::of(&ActorContext::throughput_review_job(
+                    "hourly", "h",
+                ))),
+                "planner" => Some(Principal::of(&ActorContext::instance(
+                    ActorRole::Planner,
+                    3,
+                ))),
+                "telemetry" => Some(Principal::telemetry(
+                    &StepTarget::run(&run),
+                    Some(TaskId::new(1)),
+                )),
+                "telemetry-planner" => Some(Principal::telemetry(
+                    &StepTarget {
+                        kind: crate::domain::session_step::TargetKind::Planner,
+                        id: "3".into(),
+                    },
+                    None,
+                )),
                 "broken" => return Err(anyhow!("unreadable")),
                 _ => None,
             })
@@ -1473,6 +1598,309 @@ mod tests {
             assert_eq!(code(&response), Some(ServiceErrorCode::BadRequest));
         }
         assert!(backend.log.lock().unwrap().is_empty());
+    }
+
+    /// A report of one step and one resource sample of `session` of the
+    /// target `kind` `id`.
+    fn sent(kind: &str, id: &str, session: &str) -> Value {
+        json!({"version": crate::domain::telemetry::TELEMETRY_VERSION,
+               "target": {"kind": kind, "id": id}, "session_id": session,
+               "steps": [{"seq": 1, "kind": "model_turn", "offset_ms": 0, "duration_ms": 5}],
+               "resources": [{"seq": 1, "offset_ms": 0, "duration_ms": 30000,
+                              "cpu_seconds": 1.5, "memory_max_bytes": 1024}]})
+    }
+
+    /// [`sent`] of a session registered to its own target.
+    fn report(kind: &str, id: &str) -> Value {
+        sent(kind, id, &format!("{kind}:{id}:s1"))
+    }
+
+    /// ADR-t1662-3 decisions 9 and 10: the telemetry principal records the
+    /// steps of its own target and is refused another's; no agent's token
+    /// reports, whatever target it names.
+    #[test]
+    fn only_the_telemetry_principal_reports_and_only_of_its_own_target() {
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        let pop = || backend.log.lock().unwrap().pop().unwrap();
+        for (token, kind, id) in [
+            ("telemetry", "run", "r1"),
+            ("telemetry-planner", "planner", "3"),
+        ] {
+            let response = service.handle(&request(
+                Some(token),
+                UseCase::TelemetryReport,
+                report(kind, id),
+            ));
+            assert_eq!(
+                response.result,
+                Some(json!({"steps": {"added": 1, "duplicates": 0},
+                            "resources": {"added": 1, "duplicates": 0}})),
+                "{response:?}"
+            );
+            assert_eq!(
+                pop(),
+                json!({"steps": 1, "resources": 1, "session": format!("{kind}:{id}:s1"),
+                       "target": format!("{kind}:{id}")})
+            );
+        }
+        // Its own target's, of a session registered to no target or to
+        // another: refused, so no token takes another's session first.
+        for session in ["s1", "planner:9:s1", "run:r2:s1"] {
+            let response = service.handle(&request(
+                Some("telemetry"),
+                UseCase::TelemetryReport,
+                sent("run", "r1", session),
+            ));
+            assert_eq!(
+                code(&response),
+                Some(ServiceErrorCode::AuthorizationDenied),
+                "{session}"
+            );
+            assert_eq!(
+                response.error.unwrap().message,
+                "executor-telemetry may not telemetry.report (not on this resource)"
+            );
+            assert_eq!(pop()["role"], "executor-telemetry");
+            assert!(backend.log.lock().unwrap().is_empty());
+        }
+        // Another run's, planner's or job's target: refused and recorded as
+        // the telemetry principal, nothing written.
+        for (token, kind, id) in [
+            ("telemetry", "run", "r2"),
+            ("telemetry", "planner", "3"),
+            ("telemetry", "plan_review", "4"),
+            ("telemetry", "goal_review", "5"),
+            ("telemetry", "throughput_review", "6"),
+            ("telemetry-planner", "planner", "4"),
+            ("telemetry-planner", "run", "r1"),
+        ] {
+            let response = service.handle(&request(
+                Some(token),
+                UseCase::TelemetryReport,
+                report(kind, id),
+            ));
+            assert_eq!(
+                code(&response),
+                Some(ServiceErrorCode::AuthorizationDenied),
+                "{token} on {kind} {id}"
+            );
+            let denial = pop();
+            assert_eq!(denial["role"], "executor-telemetry");
+            assert_eq!(denial["capability"], "telemetry.report");
+            assert!(backend.log.lock().unwrap().is_empty());
+        }
+        // No agent's token reports, of its own run or target included.
+        for (token, role, kind, id) in [
+            ("worker", "worker", "run", "r1"),
+            ("review", "review-job", "run", "r1"),
+            ("recovery", "recovery-job", "run", "r1"),
+            ("plan-review", "plan-review-job", "plan_review", "4"),
+            ("goal-review", "goal-review-job", "goal_review", "5"),
+            (
+                "throughput-review",
+                "throughput-review-job",
+                "throughput_review",
+                "6",
+            ),
+            ("observer", "observer", "run", "r1"),
+            ("planner", "planner", "planner", "3"),
+        ] {
+            let response = service.handle(&request(
+                Some(token),
+                UseCase::TelemetryReport,
+                report(kind, id),
+            ));
+            assert_eq!(
+                code(&response),
+                Some(ServiceErrorCode::AuthorizationDenied),
+                "{token}"
+            );
+            assert_eq!(
+                response.error.unwrap().message,
+                format!("{role} may not telemetry.report (not granted)")
+            );
+            assert_eq!(pop()["role"], role);
+            assert!(backend.log.lock().unwrap().is_empty());
+        }
+        // A session whose steps came in under another target is refused.
+        let response = service.handle(&request(
+            Some("telemetry"),
+            UseCase::TelemetryReport,
+            sent("run", "r1", "run:r1:taken"),
+        ));
+        assert_eq!(code(&response), Some(ServiceErrorCode::BadRequest));
+        assert!(backend.log.lock().unwrap().is_empty());
+    }
+
+    /// The report's own version, its bounds and the fields it does not
+    /// know (docs/design/queue-service.md).
+    #[test]
+    fn a_report_of_an_unknown_version_or_past_its_bounds_is_refused_and_unknown_fields_dropped() {
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        let send = |params: Value| {
+            service.handle(&request(
+                Some("telemetry"),
+                UseCase::TelemetryReport,
+                params,
+            ))
+        };
+        let mut unknown = report("run", "r1");
+        unknown["version"] = json!(crate::domain::telemetry::TELEMETRY_VERSION + 1);
+        let mut over = report("run", "r1");
+        over["steps"] = Value::Array(
+            (1..=crate::domain::telemetry::MAX_STEPS_PER_REPORT + 1)
+                .map(|seq| json!({"seq": seq, "kind": "wait", "offset_ms": 0, "duration_ms": 1}))
+                .collect(),
+        );
+        let mut negative = report("run", "r1");
+        negative["steps"][0]["seq"] = json!(0);
+        let mut negative_sample = report("run", "r1");
+        negative_sample["resources"][0]["cpu_seconds"] = json!(-1.0);
+        let mut large = report("run", "r1");
+        large["steps"][0]["command_shape"] =
+            json!("x".repeat(crate::domain::queue_service::MAX_REQUEST_BYTES));
+        for (params, says) in [
+            (unknown, "version"),
+            (over, "at most"),
+            (negative, "seq 0"),
+            (negative_sample, "resource sample 1"),
+            (large, "bytes as JSON"),
+            (Value::Null, "version"),
+        ] {
+            let response = send(params);
+            assert_eq!(code(&response), Some(ServiceErrorCode::BadRequest));
+            assert!(response.error.unwrap().message.contains(says), "{says}");
+        }
+        assert!(backend.log.lock().unwrap().is_empty());
+        let mut later = report("run", "r1");
+        later["sent_by"] = json!({"cpu_seconds": 1});
+        later["steps"][0]["later"] = json!(true);
+        later["resources"][0]["later"] = json!(true);
+        assert!(send(later).ok);
+        assert_eq!(backend.log.lock().unwrap().len(), 1);
+        // A token whose run ended is no token.
+        let ended = self::backend(RunStatus::Integrated);
+        let response = QueueService {
+            backend: &ended,
+            build: "b",
+            pid: 1,
+        }
+        .handle(&request(
+            Some("telemetry"),
+            UseCase::TelemetryReport,
+            report("run", "r1"),
+        ));
+        assert_eq!(code(&response), Some(ServiceErrorCode::Unauthenticated));
+    }
+
+    /// ADR-t1662-3 decision 9: the telemetry principal reaches no use case
+    /// but `telemetry_report`, a read included, and changes nothing.
+    #[test]
+    fn the_telemetry_principal_is_refused_every_other_use_case() {
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        for (use_case, params) in [
+            (UseCase::Status, Value::Null),
+            (UseCase::Show, json!({"id": 1})),
+            (UseCase::Events, json!({"run": "r1"})),
+            (UseCase::List, Value::Null),
+            (UseCase::GoalList, Value::Null),
+            (
+                UseCase::Ask,
+                json!({"kind": "worker_question", "because": "scope", "topics": ["design_choice"],
+                       "question": "q", "run_id": "r1"}),
+            ),
+            (UseCase::Note, json!({"run": "r1", "text": "x"})),
+            (UseCase::ProposalList, Value::Null),
+            (
+                UseCase::FindingRecord,
+                json!({"kind": "k", "run": "r1", "summary": "s"}),
+            ),
+            (UseCase::ReplanPropose, json!({"run": "r1", "reason": "r"})),
+            (UseCase::AgentResults, Value::Null),
+        ] {
+            let response = service.handle(&request(Some("telemetry"), use_case, params));
+            assert_eq!(
+                code(&response),
+                Some(ServiceErrorCode::AuthorizationDenied),
+                "{use_case:?}: {response:?}"
+            );
+            let denial = backend.log.lock().unwrap().pop().unwrap();
+            assert_eq!(denial["role"], "executor-telemetry", "{use_case:?}");
+            assert!(backend.log.lock().unwrap().is_empty(), "{use_case:?}");
+        }
+        // Whatever params it sends, no other use case answers it.
+        for name in [
+            "ask",
+            "show",
+            "note",
+            "proposal_list",
+            "proposal_show",
+            "finding_record",
+            "finding_resolve",
+            "finding_dismiss",
+            "list",
+            "candidates",
+            "graph",
+            "status",
+            "asks",
+            "events",
+            "timeline",
+            "stats",
+            "kpi",
+            "forecast",
+            "notes",
+            "marks",
+            "findings",
+            "search",
+            "related",
+            "goal_list",
+            "goal_show",
+            "lint",
+            "observe_history",
+            "observe_input",
+            "agent_eval",
+            "agent_results",
+            "agent_result",
+            "replan_propose",
+            "agent_cases",
+            "agent_decide",
+        ] {
+            let use_case: UseCase = name.parse().unwrap();
+            let response = service.handle(&request(Some("telemetry"), use_case, json!({})));
+            assert_eq!(
+                code(&response),
+                Some(ServiceErrorCode::AuthorizationDenied),
+                "{use_case:?}"
+            );
+            let log: Vec<Value> = backend.log.lock().unwrap().drain(..).collect();
+            assert_eq!(log.len(), 1, "{use_case:?}: {log:?}");
+            assert_eq!(log[0]["role"], "executor-telemetry", "{use_case:?}");
+        }
+        // An agent's token is refused telemetry_report, and recorded,
+        // whatever its params.
+        for params in [json!({}), json!({"version": 99}), Value::Null] {
+            let response =
+                service.handle(&request(Some("worker"), UseCase::TelemetryReport, params));
+            assert_eq!(code(&response), Some(ServiceErrorCode::AuthorizationDenied));
+            let log: Vec<Value> = backend.log.lock().unwrap().drain(..).collect();
+            assert_eq!(log.len(), 1, "{log:?}");
+            assert_eq!(log[0]["capability"], "telemetry.report");
+        }
     }
 
     struct Control {

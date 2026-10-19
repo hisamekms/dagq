@@ -11,7 +11,11 @@ use crate::domain::ledger::{
     LedgerKind, LedgerRow,
     window::{LedgerWindow, WindowQuery},
 };
-use crate::domain::session_step::{SeqRange, SessionStep, Step, StepTarget, StepsRecorded};
+use crate::domain::session_step::{
+    ResourceSample, SeqRange, SessionOwner, SessionResource, SessionStep, Step, StepTarget,
+    StepsRecorded,
+};
+use crate::domain::telemetry::{ReportRecorded, TelemetryReport};
 use crate::domain::{AskId, EventId, EventKind, FindingView, RunEvent, TaskId};
 use anyhow::Result;
 
@@ -193,9 +197,74 @@ pub trait SessionStepStore {
     fn target_steps(&self, target: &StepTarget) -> Result<Vec<SessionStep>>;
     /// Remove every step that came in before `before` (unix ms); a session
     /// keeping other steps keeps the seqs removed, so they open no gap and
-    /// are not added again. With none to remove nothing is written.
-    /// Returns how many steps were removed.
+    /// are not added again. The resource samples that came in before it go
+    /// too, and the owners registered before it whose session keeps no
+    /// step and no sample ([`SessionOwners`]). With none to remove nothing
+    /// is written. Returns how many steps were removed.
     fn remove_steps(&self, before: i64) -> Result<usize>;
+}
+
+/// The resource samples of the sessions (ADR-t1662-3 decisions 1 and 4):
+/// what an executor measured from inside where the supervisor cannot, one
+/// row per `(session_id, seq)`, each with its session's target, kept and
+/// removed with the steps ([`SessionStepStore::remove_steps`]).
+pub trait SessionResourceStore {
+    /// Record `samples` of `session_id` of `target` as received at
+    /// `received_at` (unix ms), in one transaction: a sample whose
+    /// `(session_id, seq)` is held already adds nothing; samples that do
+    /// not hold together ([`crate::domain::session_step::check_resources`])
+    /// and a session whose steps or samples came in under another target
+    /// refuse the whole call, recording none.
+    fn record_resources(
+        &self,
+        target: &StepTarget,
+        session_id: &str,
+        samples: &[ResourceSample],
+        received_at: i64,
+    ) -> Result<StepsRecorded>;
+    /// The samples of `target`, in the order they came in.
+    fn target_resources(&self, target: &StepTarget) -> Result<Vec<SessionResource>>;
+}
+
+/// The owners of the sessions (ADR-t1662-3 decision 10): the control side
+/// registers the target a session is of before its executor reports, and
+/// the queue service records a report only for the telemetry principal of
+/// the session's owner, so no token takes another target's session first.
+/// Only the control side registers; no use case of the service does.
+pub trait SessionOwners {
+    /// Register `session_id` as `target`'s at `registered_at` (unix ms).
+    /// Registering it again to the same target changes nothing; a session
+    /// registered to another target, or whose steps or samples came in
+    /// under another, is refused
+    /// ([`crate::domain::session_step::StepError::SessionOfAnotherTarget`]).
+    fn register_session(
+        &self,
+        target: &StepTarget,
+        session_id: &str,
+        registered_at: i64,
+    ) -> Result<()>;
+    /// The owner `session_id` was registered to; `None` for one never
+    /// registered (or removed by the retention).
+    fn session_owner(&self, session_id: &str) -> Result<Option<SessionOwner>>;
+}
+
+/// Where an executor sends what its sessions did (ADR-t1662-3 decisions 1
+/// and 2, docs/design/measurement.md "送る口"): a report of one session's
+/// steps, and of the resources it measured from inside where the
+/// supervisor cannot, of the one target its telemetry token was issued
+/// for, every
+/// [`crate::domain::telemetry::REPORT_INTERVAL_SECS`]. The adapter now is
+/// the queue service's `telemetry_report` through the client mode, on the
+/// host too; the agent the executor runs sends nothing. A report that does
+/// not arrive changes no run's, job's or session's outcome: the executor
+/// sends its steps and samples again, and the stores keep one of each
+/// `(session_id, seq)`.
+pub trait TelemetrySink {
+    /// Send `report`: what the SessionStepStore added of its steps and
+    /// samples and held already, or why it was refused. A report past its
+    /// bounds ([`crate::domain::telemetry::check`]) is refused before it
+    /// is sent.
+    fn report(&self, report: &TelemetryReport) -> Result<ReportRecorded>;
 }
 
 /// What builds the ledger reads and writes (docs/design/measurement.md

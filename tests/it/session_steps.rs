@@ -2,19 +2,21 @@
 //! decision 4, ADR-t1662-3 decisions 8, 10 and 12): one row per
 //! `(session_id, seq)` with its gaps, the cursor of the order the rows
 //! came in, each step with its target and read by it, no column for what
-//! a session said, and the retention the ledger's pass runs. The
+//! a session said, and the retention the ledger's pass runs; the
+//! sessions' owners the control side registers and their resource samples
+//! (`session_owners`, `session_resources`). The
 //! decisions (the gaps, the check of a step, when the retention is due)
 //! are the unit tests of `domain::session_step` and
 //! `application::supervise::ledger`.
 use dagq::application::{
-    SessionStepStore,
+    SessionOwners, SessionResourceStore, SessionStepStore,
     supervise::{Retain, build_pass},
 };
 use dagq::domain::RunId;
 use dagq::domain::ledger::builder::Builder;
 use dagq::domain::session_step::{
-    RETENTION_MS, SeqRange, SessionStep, Step, StepKind, StepTarget, StepsRecorded, TargetKind,
-    retained_since,
+    RETENTION_MS, ResourceSample, SeqRange, SessionStep, Step, StepKind, StepTarget, StepsRecorded,
+    TargetKind, retained_since,
 };
 use dagq::infrastructure::sqlite::SqliteQueue;
 use serde_json::json;
@@ -390,4 +392,102 @@ fn a_session_at_the_largest_seq_reads_its_gaps() {
             },
         ]
     );
+}
+
+/// A session is registered to one target: again to it changes nothing, to
+/// another is refused, and so are another target's steps and samples of
+/// it. Its samples are one row per seq with their target; the retention
+/// removes the old samples with the steps, and the old owners whose
+/// session keeps nothing.
+#[test]
+fn a_sessions_owner_and_samples_are_one_targets_and_the_retention_removes_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+    let (run, planner) = (run_target(), planner_target());
+    let now_ms = NOW * 1000;
+    let old = now_ms - RETENTION_MS - DAY_MS;
+    queue.register_session(&run, "worker", old).unwrap();
+    queue.register_session(&run, "worker", now_ms).unwrap();
+    let owner = queue.session_owner("worker").unwrap().unwrap();
+    assert_eq!((owner.target, owner.registered_at), (run.clone(), old));
+    assert_eq!(queue.session_owner("nobody's").unwrap(), None);
+    let another = |error: anyhow::Error| error.to_string().contains("another target");
+    assert!(another(
+        queue
+            .register_session(&planner, "worker", now_ms)
+            .unwrap_err()
+    ));
+    assert!(another(
+        queue
+            .record_steps(&planner, "worker", &steps(&[1]), now_ms)
+            .unwrap_err()
+    ));
+    let mut sample = ResourceSample::new(1, 0, 30_000);
+    sample.cpu_seconds = Some(2.5);
+    sample.memory_max_bytes = Some(1 << 30);
+    sample.node_id = Some("host".to_owned());
+    assert!(another(
+        queue
+            .record_resources(&planner, "worker", &[sample.clone()], now_ms)
+            .unwrap_err()
+    ));
+    // Steps that came in first hold the session for their target too.
+    queue
+        .record_steps(&planner, "planner", &steps(&[1]), now_ms)
+        .unwrap();
+    assert!(another(
+        queue.register_session(&run, "planner", now_ms).unwrap_err()
+    ));
+
+    let second = ResourceSample::new(2, 30_000, 30_000);
+    assert_eq!(
+        queue
+            .record_resources(&run, "worker", &[sample.clone(), second.clone()], old)
+            .unwrap(),
+        StepsRecorded {
+            added: 2,
+            duplicates: 0
+        }
+    );
+    assert_eq!(
+        queue
+            .record_resources(&run, "worker", std::slice::from_ref(&second), now_ms)
+            .unwrap(),
+        StepsRecorded {
+            added: 0,
+            duplicates: 1
+        }
+    );
+    let held = queue.target_resources(&run).unwrap();
+    assert_eq!(
+        held.iter()
+            .map(|row| row.sample.clone())
+            .collect::<Vec<_>>(),
+        [sample, second]
+    );
+    assert!(
+        held.iter()
+            .all(|row| row.target == run && row.session_id == "worker")
+    );
+    assert_eq!(queue.target_resources(&planner).unwrap(), vec![]);
+    let mut negative = ResourceSample::new(3, 0, 1);
+    negative.read_bytes = Some(-1);
+    assert!(
+        queue
+            .record_resources(&run, "worker", &[negative], now_ms)
+            .is_err()
+    );
+
+    // The old samples go; the old owner of a session that keeps nothing
+    // goes, one whose session keeps a step stays.
+    queue.register_session(&run, "kept", old).unwrap();
+    queue
+        .record_steps(&run, "kept", &steps(&[1]), now_ms)
+        .unwrap();
+    queue.remove_steps(retained_since(now_ms)).unwrap();
+    assert_eq!(queue.target_resources(&run).unwrap(), vec![]);
+    assert_eq!(queue.session_owner("worker").unwrap(), None);
+    assert!(queue.session_owner("kept").unwrap().is_some());
+    // Nothing more is due.
+    assert_eq!(queue.remove_steps(retained_since(now_ms)).unwrap(), 0);
 }

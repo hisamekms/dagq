@@ -1234,6 +1234,7 @@ pub mod supervisor_life;
 pub mod task;
 pub mod task_hold;
 pub mod task_replan;
+pub mod telemetry;
 pub mod throughput_review;
 pub mod timeline;
 pub mod title_prefix;

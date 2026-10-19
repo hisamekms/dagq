@@ -127,7 +127,7 @@ actorをどこで動かし、specをどこまで守らせるかは`src/applicati
 `execute()`はコマンドの前に環境を`ActorContext::from_env`で読む。
 
 - `DAGQ_ROLE`が無いか空なら`user`（人）。host実行の互換のためで、助言的（advisory）でありsandboxではない（ADR-t728-1の決定6）。
-- `DAGQ_ROLE`がroleの値（`user`を除く）でなければerrorで止まり、queueを開かない（fail closed）。
+- `DAGQ_ROLE`がroleの値（`user`と、queue serviceのprincipalだけのrole `executor-telemetry`を除く）でなければerrorで止まり、queueを開かない（fail closed）。
   `DAGQ_RUN_ID`・`DAGQ_TASK_ID`が読めないときも同じ。
 - 計画系のコマンドは全てのroleについてapplicationの層が判定し、拒んだ試みを`authorization_denied`に記録する（[Authorization](../authorization.md#計画系のコマンドapplication)）。
   対話と記録のコマンドと、runtimeの操作系のコマンド（[Authorization](../authorization.md#runtimeの操作系のコマンドapplication)）も同じ。

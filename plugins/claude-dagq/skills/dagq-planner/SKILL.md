@@ -9,7 +9,7 @@ Prerequisite: `DAGQ="${CLAUDE_PLUGIN_ROOT}/bin/dagq"` resolved as in the `dagq` 
 
 Roles: the supervisor lands runs and runs **plan review**; the inbox relays asks and attention to the person and records their plans as **requests**. Only the runtime opens a planner (a request, a revise, a draft, a finding). After compaction or `/clear`, re-read your work (`status --role planner`, `proposal list`, `goal show ID`). Write in the language the `dagq` skill's section 5 names.
 
-Your initial prompt says what you were opened for; no person watches this session. Each answer, revise or follow-up is your next turn (`dagq: a request for you is in the file ...`: read it and work on it). Work only on what you were opened for, report briefly and stop; the runtime ends it.
+Your prompt says what you were opened for; no person watches. Each answer, revise or follow-up is your next turn (`dagq: a request for you is in the file ...`: read it and work on it). Work only on what you were opened for, report briefly and stop; the runtime ends it.
 
 ## Basic policy
 
@@ -46,7 +46,7 @@ Run `related ID` (and `search`), then do one of what the prompt lists: adopt (`e
 
 ## 4. Goals, forecasts, findings, KPIs
 
-`goal show ID`, `graph --goal ID` and `forecast --goal ID` show progress. A request to defer a goal's improvements its acceptance does not need: section 3's judgement. Decide the observer's findings per `skills/dagq/reference/observer.md` (section 3). Mark a change of a setting, the operation or the host (`mark`) and judge it with `kpi --compare` (`skills/dagq/reference/kpi.md`).
+`goal show ID`, `graph --goal ID` and `forecast --goal ID` show progress. A request to defer a goal's improvements its acceptance does not need: section 3's judgement. Decide the observer's findings per `skills/dagq/reference/observer.md` (section 3). Mark a setting, operation or host change (`mark`) and judge it with `kpi --compare` (`skills/dagq/reference/kpi.md`).
 
 ## 5. A finished goal
 
@@ -54,6 +54,6 @@ Not yours. Once an open goal's tasks ended (no draft left, `follow_ups` too) and
 
 ## Where your authority ends
 
-The CLI checks this (`skills/dagq/reference/authority.md`); a refusal is final. Within the policy and prompt: `goal add`, `add`, `edit`, `lint`, `submit`, `dependency`, `set-goal`, `judge-follow-up`, `set-paths`, `set-priority`, `revisit` (a draft's, not one whose planners are used up), `draft`, `proposal withdraw` of your own, `cancel` of a draft, submitted or ready task, `goal edit`, `goal close`, `finding dismiss`/`resolve`, `request decline` of your own, `note` (on a run too), `mark`, `ci failures`, `agent eval` (no `--rerun`), `agent cases`/`decide`, `ask --kind planner_question` (task, finding, own request; not a run). The CLI refuses `ready` (any form), `goal ready`, `goal review`, `request add`/`setup-review`, `replan`, `run`/`planner` `screen`/`log`/`send`, `planner request`, `run close-workspaces` or changing a person's priority; `set-goal` keeps it on the task unless the new goal has it as a person's. Never: `integrate`, `review`, `answer`, `ask close`, `recover`, `hold`/`release`, `supervise`, `observe`, `finding record`, `up`/`down`/`inbox`/`install` (allowed, not yours), a change to a task once `in_progress` (except a follow_up membership judgement), or anything in a run's worktree or workspace: the inbox's, on the person's word (`skills/dagq-recover/SKILL.md`).
+The CLI checks this (`skills/dagq/reference/authority.md`); a refusal is final. Within the policy and prompt: `goal add`, `add`, `edit`, `lint`, `submit`, `dependency`, `set-goal`, `judge-follow-up`, `set-paths`, `set-priority`, `revisit` (a draft's, not one whose planners are used up), `draft`, `proposal withdraw` of your own, `cancel` of a draft, submitted or ready task, `goal edit`, `goal close`, `finding dismiss`/`resolve`, `request decline` of your own, `note` (on a run too), `mark`, `ci failures`, `agent eval` (no `--rerun`), `agent cases`/`decide`, `ask --kind planner_question` (task, finding, own request; not a run). The CLI refuses `ready` (any form), `goal ready`, `goal review`, `request add`/`setup-review`, `replan`, `run`/`planner` `screen`/`log`/`send`, `planner request`, `run close-workspaces` or changing a person's priority; `set-goal` keeps it on the task unless the new goal has it as a person's. Never: `integrate`, `review`, `answer`, `ask close`, `recover`, `hold`/`release`, `supervise`, `observe`, `finding record`, `up`/`down`/`inbox`/`install` (allowed, not yours), `telemetry_report` (no token command), a change to a task once `in_progress` (except a follow_up membership judgement), or anything in a run's worktree or workspace: the inbox's, on the person's word (`skills/dagq-recover/SKILL.md`).
 
 `submit` refuses a follow_up draft with a source goal and no current judgement.

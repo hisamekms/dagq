@@ -70,6 +70,12 @@ string_enum!(
     Supervisor => "supervisor",
     Wrapper => "wrapper",
     Integrator => "integrator",
+    /// The principal an executor (a session wrapper or runner, the process
+    /// that starts a headless job, a landing's verification) sends its
+    /// telemetry as (ADR-t1662-3 decisions 9 and 10): a token the control
+    /// side issues for one target, good for `telemetry_report` alone. A
+    /// queue service's principal only: no process runs as it.
+    ExecutorTelemetry => "executor-telemetry",
 });
 
 // How far an actor is trusted (ADR-t728-1 decision 1): a person, the
@@ -81,7 +87,7 @@ string_enum!(TrustLevel {
 });
 
 impl ActorRole {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::User,
         Self::Inbox,
         Self::Planner,
@@ -96,6 +102,7 @@ impl ActorRole {
         Self::Supervisor,
         Self::Wrapper,
         Self::Integrator,
+        Self::ExecutorTelemetry,
     ];
 
     /// The trust of the role: fixed by the role, never inferred from a
@@ -103,7 +110,9 @@ impl ActorRole {
     pub const fn trust(self) -> TrustLevel {
         match self {
             Self::User => TrustLevel::Human,
-            Self::Supervisor | Self::Wrapper | Self::Integrator => TrustLevel::TrustedControlPlane,
+            Self::Supervisor | Self::Wrapper | Self::Integrator | Self::ExecutorTelemetry => {
+                TrustLevel::TrustedControlPlane
+            }
             Self::Inbox
             | Self::Planner
             | Self::Worker
@@ -134,10 +143,11 @@ impl ActorRole {
         )
     }
 
-    /// `DAGQ_ROLE` of the role; the user has none.
+    /// `DAGQ_ROLE` of the role; the user has none, and neither has the
+    /// executor's telemetry role, a queue service's principal only.
     pub const fn env_value(self) -> Option<&'static str> {
         match self {
-            Self::User => None,
+            Self::User | Self::ExecutorTelemetry => None,
             other => Some(other.as_str()),
         }
     }
@@ -273,7 +283,9 @@ impl ActorContext {
     /// variable). No `DAGQ_ROLE`, or an empty one, is the user. A value
     /// that is not a role other than the user is an error, and so is an
     /// unreadable run or task id: nothing runs as an actor it cannot name.
-    /// The legacy `reviewer` is read as a review job. Without
+    /// The legacy `reviewer` is read as a review job. The executor's
+    /// telemetry role is a queue service's principal only, so it is
+    /// refused as unknown, as the user is. Without
     /// `DAGQ_ACTOR_ID` (a session opened before it) the id is the value of
     /// `DAGQ_ROLE`.
     pub fn from_env(env: impl Fn(&str) -> Option<String>) -> Result<Self, DomainError> {
@@ -283,7 +295,7 @@ impl ActorContext {
         let role = match value.as_str() {
             LEGACY_REVIEWER_ROLE => ActorRole::ReviewJob,
             other => match other.parse::<ActorRole>() {
-                Ok(ActorRole::User) | Err(_) => {
+                Ok(ActorRole::User | ActorRole::ExecutorTelemetry) | Err(_) => {
                     return Err(DomainError::UnknownValue {
                         kind: ROLE_ENV,
                         value,
@@ -383,9 +395,10 @@ mod tests {
         for role in ActorRole::ALL {
             let expected = match role {
                 ActorRole::User => TrustLevel::Human,
-                ActorRole::Supervisor | ActorRole::Wrapper | ActorRole::Integrator => {
-                    TrustLevel::TrustedControlPlane
-                }
+                ActorRole::Supervisor
+                | ActorRole::Wrapper
+                | ActorRole::Integrator
+                | ActorRole::ExecutorTelemetry => TrustLevel::TrustedControlPlane,
                 _ => TrustLevel::UntrustedAgent,
             };
             assert_eq!(role.trust(), expected, "{role:?}");
@@ -419,7 +432,16 @@ mod tests {
             assert_eq!(actor.written_by(), "human");
             assert_eq!(actor.answerer(), Some(crate::domain::Answerer::PERSON));
         }
-        for value in ["inboxes", "user", "Worker", "reviewers", "person", "human"] {
+        // The executor's telemetry role is a token's principal only.
+        for value in [
+            "inboxes",
+            "user",
+            "Worker",
+            "reviewers",
+            "person",
+            "human",
+            "executor-telemetry",
+        ] {
             let error = parse(&[("DAGQ_ROLE", value)]).unwrap_err();
             assert_eq!(error.to_string(), format!("unknown DAGQ_ROLE: {value}"));
         }

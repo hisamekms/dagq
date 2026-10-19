@@ -26,7 +26,8 @@ related:
 
 # 計測
 
-> **一部だけ実装済み**: 「SSOTとビュー」のport・「区間とタグ」のrunの工程の記録（`run_phase_changed`）・「終端」・「claimの前」・「supervisorの一生」・「今の判定の記録」と「runの比較の軸」の記録、run・task・session・queue・nodeの台帳と「畳む関数」・「台帳を作る係」・「共通の読み取り関数」・「並走の比較と照合」は実装済みで、今の姿を書く。
+> **一部だけ実装済み**: 「SSOTとビュー」のport・「区間とタグ」のrunの工程の記録（`run_phase_changed`）・「終端」・「claimの前」・「supervisorの一生」・「今の判定の記録」と「runの比較の軸」の記録、run・task・session・queue・nodeの台帳と「畳む関数」・「台帳を作る係」・「共通の読み取り関数」・「並走の比較と照合」と「送る口」の受け口は実装済みで、今の姿を書く。
+> 「送る口」のexecutorの送信とtokenとsessionの登録の時機は予定。
 > ほかの節は計測の作り直しの今の予定で、まだ`src/`に無い。
 > 今動いている計測は[計測のコマンド](supervisor-lifecycle/commands.md)と最初のcommitの観測（`first_commit_observed`）が持ち、この文書はそれらを変えない。
 > 後続のtaskが実装したら、この注記と各節を今の姿に直す。
@@ -42,7 +43,7 @@ related:
 | --- | --- | --- | --- |
 | StateStore | 今の状態（task・goal・run・ask・proposal・planner・lease・supervisorなど） | SSOT | queue.dbの状態の表 |
 | EventStore | 起きたことのappend-onlyの記録（runの遷移・`run_phase_changed`・claimの前の区間・今の判定の記録・queueの出来事・mainの履歴・[task/goal/findingの属性](attribute-records.md)・Executionのtoken） | SSOT | queue.dbの`run_events`（runの無いqueueのeventを含む）。EventStoreとStateStoreは同じtransactionで確定する |
-| SessionStepStore | sessionのstep（turn・tool・コマンドのshape）と対象。`(session_id, seq)`で重複を除き、抜けを残す | SSOT | queue.dbの`session_steps` |
+| SessionStepStore | sessionのstep・中から測った資源と、対象と持ち主。`(session_id, seq)`で重複を除き、抜けを残す | SSOT | queue.dbの`session_steps`ほか |
 | NodeSampleStore | nodeの資源の連続の値（load average・CPU・メモリ・swap・pageout・ファイルシステムの空き） | SSOT | queue.dbの`node_samples`（hostのCSVは写しで、保持の期間の分を一度取り込む。[hostの負荷](supervisor-lifecycle/host-metrics.md)） |
 | LedgerStore | 台帳（run・task・session・queue・nodeの行）。旧方式の行のlegacyのJSONは凍結して捨てない | ビュー | queue.dbの`ledger_rows` |
 | ReportStore | 統計の出力（日次・週次のレポート） | ビュー | queueのdirの`reports/`のファイルと`report_written`のevent |
@@ -257,17 +258,18 @@ claimの属性は`run_claimed`の`attributes`（キーと値の開いた組）�
 
 （ADR-t1662-3決定1〜13）
 
-- **送る側**: executor（session wrapper・runner、非対話のjobを起動するプロセス、`integrate`とe2eの検証）がstepをまとめてTelemetrySinkに送る。
+- **送る側**: executor（session wrapper・runner、非対話のjobを起動するプロセス、`integrate`とe2eの検証）がstepと中から測った資源をまとめてTelemetrySinkに送る。
   agentは送らない。
   supervisorは工程・claim・slot・ask・`environment_attached`・nodeの時系列・外から測れる資源を自分で書く。
-- **TelemetrySink**: 今のアダプタはqueue serviceのユースケース`telemetry_report`（APIの版つき。[Queue service](queue-service.md)）。stepは`(session_id, seq)`と対象を持つ。送れなくても結果を変えない。
-- **principal**: role `executor_telemetry`（予定の名前）。
-  呼べるのは`telemetry_report`だけ。
-  対象は1つで、runか、runを持たない対象の種類とid。
-  supervisorがclaim・resume・jobの起動・plannerを開くときに発行し、runの終わり・leaseの喪失・jobの終わり・`planner_closed`で失効させる。
+- **TelemetrySink**: portで、今のアダプタはqueue serviceの`telemetry_report`（[Queue service](queue-service.md#telemetry_report)）。
+  stepと資源は`(session_id, seq)`と対象を持ち、制御側が登録したsessionのものだけを受ける。
+  送れなくても結果を変えない。
+- **principal**: role `executor-telemetry`。
+  supervisorがclaim・resume・jobの起動・plannerを開くときに発行し、runの終わり・leaseの喪失・jobの終わり・`planner_closed`で失効させる（予定）。
   tokenのファイルはagentのworktree・run dir・plannerのdirの外に置き、agentのenvとargvに渡さない。
 - **所属**: runの対象のstepはrunの行に畳み、runを持たない対象のstepはSessionStepStoreに持ってsessionの行で読む。
-- **差し替える口**: 実行環境の口・資源の口・送る口。資源の共通の単位はCPU時間（秒）・メモリの最大（byte）・読み書きの量（byte）・壁時計の時間（ミリ秒）とnodeのid。3つの口のアダプタは同じ適合test一式を通す。
+- **差し替える口**: 実行環境の口・資源の口・送る口（資源の単位は`ResourceSample`のdoc comment）。
+  3つの口のアダプタは同じ適合test一式を通す。
 - **OpenTelemetry**: 区間はspan、stepは子のspan、タグと属性はattributeに写す。記録の経路にはしない。
 
 ## コマンドの形と分類
