@@ -173,6 +173,78 @@ fn no_run_is_claimed_while_the_disk_is_short_and_the_inbox_is_told_once() {
     assert_eq!(disk_asks(&db).len(), 2);
 }
 
+/// Whether the in-flight test's disk is short.
+static IN_FLIGHT_SHORT: AtomicBool = AtomicBool::new(false);
+
+fn short_while_in_flight(_: &Path) -> Option<u64> {
+    Some(if IN_FLIGHT_SHORT.load(Ordering::SeqCst) {
+        GIB / 2
+    } else {
+        4 * GIB
+    })
+}
+
+/// A shortage deep enough to ask at once holds the next claim
+/// (`claim_held`) but opens no disk ask while a run the slots hold goes on
+/// by itself, its end being a likely way back to room. Once that run
+/// left its slot (here its review, with no reviewer, fails and it waits
+/// for a person), nothing goes on and the one disk ask opens. When the ask opens or closes is the
+/// unit tests' of `supervise::disk::disk_ask_condition`.
+#[test]
+fn a_run_in_flight_keeps_a_shortage_from_asking_until_it_waits() {
+    let (_dir, repo, db) = fixture();
+    IN_FLIGHT_SHORT.store(false, Ordering::SeqCst);
+    let gate = db.with_file_name("in-flight gate");
+    let backend = Arc::new(TestWorkspace::new(&db, false, VALID_AGENT));
+    backend.script_for(
+        1,
+        &format!("{}; {VALID_AGENT}", crate::common::await_path(&gate)),
+    );
+    let stop = Arc::new(AtomicBool::new(false));
+    let options = SuperviseOptions {
+        disk: gibibyte_needed(),
+        free_space: short_while_in_flight,
+        stop: stop.clone(),
+        ..supervise_options(2, false)
+    };
+    let passes = options.passes.clone();
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
+    };
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        !queue.show(TaskId::new(1)).unwrap().runs.is_empty()
+    });
+    IN_FLIGHT_SHORT.store(true, Ordering::SeqCst);
+    // A whole pass reads the short disk before the next task is ready.
+    await_passes(&passes, 2);
+    add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "held", &[]);
+    wait_until(&db, Duration::from_secs(30), |_| {
+        !queue_events(&db, "claim_held").is_empty()
+    });
+    await_passes(&passes, 2);
+    assert!(disk_asks(&db).is_empty(), "{:?}", disk_asks(&db));
+    assert!(
+        SqliteQueue::open(&db)
+            .unwrap()
+            .show(TaskId::new(2))
+            .unwrap()
+            .runs
+            .is_empty()
+    );
+
+    // The run ends its work and leaves its slot: the ask opens.
+    fs::write(&gate, "").unwrap();
+    wait_until(&db, Duration::from_secs(30), |_| !disk_asks(&db).is_empty());
+    stop.store(true, Ordering::SeqCst);
+    let outcome = joined(supervisor, "the supervisor to drain").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let asks = disk_asks(&db);
+    assert_eq!(asks.len(), 1, "{asks:?}");
+    assert!(asks[0].is_open());
+}
+
 /// A worker script that commits, leaves build outputs in its worktree and
 /// fails: its receipt names the base commit, which validation refuses
 /// (a headless turn that writes its receipt and then exits non-zero may be

@@ -2475,7 +2475,15 @@ fn parse_positive_number(text: &str) -> Result<f64> {
 }
 
 /// `[disk]` of the `dagq.toml` in `root` (ADR-0047 decision 44), `None`
-/// when there is no file; no table or no key is the default.
+/// when there is no file; no table or no key is the default
+/// ([`DiskConfig`] names each key, its type and default). The factors and
+/// shares (`claim_factor`, `integrate_factor`, `ask_margin`,
+/// `close_margin`) take a positive number, the others (`sample_runs`,
+/// `min_free_bytes`, `ask_after_secs`) a positive whole number; a key it
+/// does not know, a value of the wrong type or a key set twice is an
+/// error, and the supervisor that cannot read the table warns and runs on
+/// the defaults. An older binary refuses the keys it does not know, so a
+/// new key goes into `dagq.toml` only once the installed binary reads it.
 pub fn load_disk_config(root: &Path) -> Result<Option<DiskConfig>> {
     let path = root.join(CONFIG_FILE_NAME);
     let Some(text) = read_config(&path)? else {
@@ -5053,8 +5061,35 @@ LITERAL = 'no \n escapes # here'
                 claim_factor: 2.5,
                 integrate_factor: 1.0,
                 min_free_bytes: Some(1000),
+                ..DiskConfig::default()
             }
         );
+        // The disk ask's hysteresis: a whole number of seconds and two
+        // shares.
+        let config = parse_config(
+            "[disk]\nask_after_secs = 1_800\nask_margin = 0.2 # below\nclose_margin = 1\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.disk,
+            DiskConfig {
+                ask_after_secs: 1800,
+                ask_margin: 0.2,
+                close_margin: 1.0,
+                ..DiskConfig::default()
+            }
+        );
+        for (text, error) in [
+            ("[disk]\nask_after_secs = 1.5", "whole number"),
+            ("[disk]\nask_after_secs = 0", "positive number, not 0"),
+            ("[disk]\nask_after_secs = x", "whole number"),
+            ("[disk]\nask_margin = 0", "positive number, not 0"),
+            ("[disk]\nclose_margin = -0.1", "positive number"),
+            ("[disk]\nclose_margin = x", "expected a number, not x"),
+        ] {
+            let message = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(message.contains(error), "{text}: {message}");
+        }
         assert_eq!(parse_config("").unwrap().disk, DiskConfig::default());
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load_disk_config(dir.path()).unwrap(), None);

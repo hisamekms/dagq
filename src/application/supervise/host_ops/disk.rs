@@ -11,7 +11,9 @@
 //! the end of the last ([`asks_for_cleanup`], task 1627): the pass after
 //! it judges the reading after it. Still short, it opens
 //! the queue's one `cost` ask about the disk (`subject: disk`) once, and
-//! the runs whose landing waits for the disk join it. The claims are held through
+//! the runs whose landing waits for the disk join it; but only once the
+//! shortage lasted or is deep, with no run in flight, and the runtime
+//! closes it only once there is room with a margin ([`disk_ask_condition`]). The claims are held through
 //! the claim pass's hold (`claim_held`, reason `disk_space`), the
 //! landings through `landing_held` / `landing_resumed`; a run waiting to
 //! land stays awaiting integration and starts no verification.
@@ -20,7 +22,7 @@ use super::{cleanup::DiskRequest, *};
 use crate::domain::EventKind;
 use crate::domain::{
     Ask,
-    disk::{DISK_CLEANUP, DISK_OPTIONS, DISK_SUBJECT, DiskNeeds, gib},
+    disk::{DISK_CLEANUP, DISK_OPTIONS, DISK_SUBJECT, DiskConfig, DiskNeeds, gib},
 };
 
 /// How long the needs read from the recent runs' sizes are kept.
@@ -55,21 +57,27 @@ pub(in crate::application::supervise) struct DiskWatch {
     pub(super) cleaning: bool,
     /// This pass's reading is short of what a claim or a landing needs.
     short: bool,
+    /// When the first reading of this shortage was short; `None` while
+    /// there is room ([`disk_ask_condition`]).
+    short_since: Option<Instant>,
 }
 
 impl HostOpsState {
     /// Check the free disk space for this pass (see the module): clean
     /// and ask when short, close the disk ask when there is room, and
     /// record the landings' hold. `landings` are the runs the slots hold
-    /// waiting for their landing turn, and `held` every run a slot holds,
-    /// which a cleanup leaves alone. The claims' hold is judged when the
-    /// supervisor claims, from the same reading.
+    /// waiting for their landing turn, `held` every run a slot holds,
+    /// which a cleanup leaves alone, and `in_flight` how many of them go
+    /// on by themselves (neither waiting for a person nor for their
+    /// landing turn), whose end may make room. The claims' hold is judged
+    /// when the supervisor claims, from the same reading.
     pub(in crate::application::supervise) fn check_disk(
         &mut self,
         env: &mut HostEnv<'_>,
         interval: Duration,
         landings: &[RunId],
         held: &super::cleanup::Held,
+        in_flight: usize,
     ) -> Result<()> {
         let unclosed: Vec<Ask> = env
             .queue
@@ -89,6 +97,13 @@ impl HostOpsState {
         self.disk.short = reading.short;
         self.disk.cleaning = reading.cleaning;
         self.disk.landing_short = reading.landing_short;
+        if reading.short {
+            self.disk
+                .short_since
+                .get_or_insert_with(|| env.generators.clock.monotonic());
+        } else {
+            self.disk.short_since = None;
+        }
         let Judged::Recorded {
             ask,
             landings: hold,
@@ -102,7 +117,20 @@ impl HostOpsState {
             &[]
         };
         let open = unclosed.iter().any(|ask| ask.is_open());
-        match disk_ask_step(ask, self.disk.asked, open, &self.disk.joined, waiting) {
+        let condition = disk_ask_condition(&ShortageReading {
+            short: ask,
+            free,
+            need: most,
+            short_for: self
+                .disk
+                .short_since
+                .map(|at| env.generators.clock.since(at)),
+            in_flight,
+            asked: self.disk.asked,
+            open,
+            config: &self.disk_config,
+        });
+        match disk_ask_step(condition, self.disk.asked, open, &self.disk.joined, waiting) {
             AskStep::Open(joining) => self.ask_for_disk(env, free, &needs, joining)?,
             AskStep::Nothing => {}
             AskStep::Close => {
@@ -396,14 +424,112 @@ pub(in crate::application::supervise) fn asks_for_cleanup(
     !for_disk && since_cleaned.is_none_or(|since| since >= interval)
 }
 
+/// What a judged pass's reading says of the disk ask
+/// ([`disk_ask_condition`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::application::supervise) enum AskCondition {
+    /// Ask: open the disk ask, or add the waiting landings to it.
+    Ask,
+    /// Short with no ask yet that may not open one, or above the
+    /// threshold short of the margin with one: neither open nor close.
+    Keep,
+    /// Room: close the disk ask, or forget the shortage.
+    Room,
+}
+
+/// A judged pass's reading for [`disk_ask_condition`].
+#[derive(Debug, Clone, Copy)]
+pub(in crate::application::supervise) struct ShortageReading<'a> {
+    /// Short of the larger threshold (what holds the claims or landings).
+    pub(super) short: bool,
+    pub(super) free: Option<u64>,
+    /// The larger of what a claim and a landing need.
+    pub(super) need: Option<u64>,
+    /// How long since the first reading of this shortage was short.
+    pub(super) short_for: Option<Duration>,
+    /// The runs the slots hold that go on by themselves.
+    pub(super) in_flight: usize,
+    /// The disk ask of this shortage was opened (open still, or answered
+    /// `wait`).
+    pub(super) asked: bool,
+    /// A disk ask is open.
+    pub(super) open: bool,
+    pub(super) config: &'a DiskConfig,
+}
+
+/// Whether a judged pass asks, keeps or closes the disk ask: the
+/// hysteresis that keeps a free space moving across the threshold (a
+/// run's build, a cleanup) from opening and closing it pass after pass,
+/// while the holds follow the threshold itself.
+///
+/// - With an open ask, it closes only once the free space is above the
+///   threshold by `close_margin` of it (or no longer read); short, the
+///   waiting landings join it, and between the threshold and that margin
+///   nothing changes, so no second ask opens.
+/// - With the ask of this shortage answered `wait` (closed, still asked),
+///   nothing is asked while short, and the threshold itself ends the
+///   shortage, so a later one may ask again.
+/// - With none, room forgets the shortage; short, a run in flight keeps
+///   it from asking (its end and the cleanup after it may make room, and
+///   the supervisor resumes by itself); with none in flight it asks once
+///   the shortage lasted `ask_after_secs` from its first reading, or at
+///   once when the free space is below the threshold by `ask_margin` of
+///   it.
+pub(in crate::application::supervise) fn disk_ask_condition(
+    reading: &ShortageReading<'_>,
+) -> AskCondition {
+    let config = reading.config;
+    if reading.open {
+        return if clear_above(reading.free, reading.need, config.close_margin) {
+            AskCondition::Room
+        } else if reading.short {
+            AskCondition::Ask
+        } else {
+            AskCondition::Keep
+        };
+    }
+    if !reading.short {
+        return AskCondition::Room;
+    }
+    if reading.asked {
+        return AskCondition::Ask;
+    }
+    if reading.in_flight > 0 {
+        return AskCondition::Keep;
+    }
+    let lasted = reading
+        .short_for
+        .is_some_and(|since| since >= Duration::from_secs(config.ask_after_secs));
+    if lasted || far_below(reading.free, reading.need, config.ask_margin) {
+        AskCondition::Ask
+    } else {
+        AskCondition::Keep
+    }
+}
+
+/// Free bytes below `need` by `margin` of it or more.
+fn far_below(free: Option<u64>, need: Option<u64>, margin: f64) -> bool {
+    matches!((free, need), (Some(free), Some(need)) if free < need && (need - free) as f64 >= need as f64 * margin)
+}
+
+/// Free bytes above `need` by `margin` of it; either unknown is room, as
+/// it is no shortage.
+fn clear_above(free: Option<u64>, need: Option<u64>, margin: f64) -> bool {
+    match (free, need) {
+        (Some(free), Some(need)) => free >= need && (free - need) as f64 >= need as f64 * margin,
+        _ => true,
+    }
+}
+
 /// What a judged pass does with the disk ask ([`disk_ask_step`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::application::supervise) enum AskStep {
     /// Open the disk ask, once per entry: `None` with no run, a run to
     /// add the run whose landing waits to it.
     Open(Vec<Option<RunId>>),
-    /// Short, but the ask of this shortage was answered `wait`: nothing
-    /// until there is room.
+    /// Short, but the ask of this shortage was answered `wait`, or the
+    /// condition keeps ([`AskCondition::Keep`]): nothing until there is
+    /// room.
     Nothing,
     /// There is room again: close the disk ask and forget this shortage.
     Close,
@@ -413,18 +539,24 @@ pub(in crate::application::supervise) enum AskStep {
 }
 
 /// What a judged pass does with the disk ask (ADR-0047 decision 44):
-/// short (`ask`), the ask of this shortage is opened once (with no run
-/// when no landing waits, else with each `waiting` run) and the waiting
-/// runs not `joined` yet are added while it is `open`; once `asked` and no
-/// longer open (answered `wait`), nothing is asked until there is room.
-/// With room, the ask is closed when one is open or was `asked`.
+/// asking ([`AskCondition::Ask`]), the ask of this shortage is opened once
+/// (with no run when no landing waits, else with each `waiting` run) and
+/// the waiting runs not `joined` yet are added while it is `open`; once
+/// `asked` and no longer open (answered `wait`), nothing is asked until
+/// there is room. With room, the ask is closed when one is open or was
+/// `asked`; kept, nothing changes.
 pub(in crate::application::supervise) fn disk_ask_step(
-    ask: bool,
+    condition: AskCondition,
     asked: bool,
     open: bool,
     joined: &[RunId],
     waiting: &[RunId],
 ) -> AskStep {
+    let ask = match condition {
+        AskCondition::Ask => true,
+        AskCondition::Keep => return AskStep::Nothing,
+        AskCondition::Room => false,
+    };
     match (ask, asked) {
         (true, true) if !open => AskStep::Nothing,
         (true, true) => AskStep::Open(
@@ -740,21 +872,27 @@ mod tests {
         let (a, b) = (RunId::new("a").unwrap(), RunId::new("b").unwrap());
         // Short, not asked yet: opened with no run, or with each landing.
         assert_eq!(
-            disk_ask_step(true, false, false, &[], &[]),
+            disk_ask_step(AskCondition::Ask, false, false, &[], &[]),
             AskStep::Open(vec![None])
         );
         assert_eq!(
-            disk_ask_step(true, false, false, &[], &[a.clone(), b.clone()]),
+            disk_ask_step(
+                AskCondition::Ask,
+                false,
+                false,
+                &[],
+                &[a.clone(), b.clone()]
+            ),
             AskStep::Open(vec![Some(a.clone()), Some(b.clone())])
         );
         // Asked and open: told once, only a new landing joins.
         assert_eq!(
-            disk_ask_step(true, true, true, &[], &[]),
+            disk_ask_step(AskCondition::Ask, true, true, &[], &[]),
             AskStep::Open(vec![])
         );
         assert_eq!(
             disk_ask_step(
-                true,
+                AskCondition::Ask,
                 true,
                 true,
                 std::slice::from_ref(&a),
@@ -765,7 +903,7 @@ mod tests {
         // Answered `wait`: asked, closed, still short.
         assert_eq!(
             disk_ask_step(
-                true,
+                AskCondition::Ask,
                 true,
                 false,
                 std::slice::from_ref(&a),
@@ -774,11 +912,241 @@ mod tests {
             AskStep::Nothing
         );
         // Room: closed when asked or open, else only forgotten.
-        assert_eq!(disk_ask_step(false, true, false, &[], &[]), AskStep::Close);
-        assert_eq!(disk_ask_step(false, false, true, &[], &[]), AskStep::Close);
         assert_eq!(
-            disk_ask_step(false, false, false, &[], &[a]),
+            disk_ask_step(AskCondition::Room, true, false, &[], &[]),
+            AskStep::Close
+        );
+        assert_eq!(
+            disk_ask_step(AskCondition::Room, false, true, &[], &[]),
+            AskStep::Close
+        );
+        assert_eq!(
+            disk_ask_step(AskCondition::Room, false, false, &[], &[a]),
             AskStep::Forget
+        );
+    }
+
+    /// A reading of `free` free bytes against a need of 100 GiB with the
+    /// default `[disk]` (30 minutes, 10% below, 5% above), short as the
+    /// holds read it, `short_for` since its first short reading.
+    fn condition(free: u64, short_for: Option<u64>, in_flight: usize, asked: bool) -> AskCondition {
+        reading(free, short_for, in_flight, asked, asked)
+    }
+
+    /// [`condition`] with an ask `asked` and `open` apart (answered
+    /// `wait`: asked, not open).
+    fn reading(
+        free: u64,
+        short_for: Option<u64>,
+        in_flight: usize,
+        asked: bool,
+        open: bool,
+    ) -> AskCondition {
+        let need = 100 * GIB;
+        disk_ask_condition(&ShortageReading {
+            short: free < need,
+            free: Some(free),
+            need: Some(need),
+            short_for: short_for.map(Duration::from_secs),
+            in_flight,
+            asked,
+            open,
+            config: &DiskConfig::default(),
+        })
+    }
+
+    /// A shortage just below the threshold asks only once it lasted the
+    /// default 30 minutes from its first reading, one 10% below or deeper
+    /// at once; a run in flight keeps either from asking (the holds still
+    /// follow the threshold: the reading stays short).
+    #[test]
+    fn a_shortage_asks_once_it_lasted_or_is_deep_and_no_run_is_in_flight() {
+        use AskCondition::{Ask, Keep, Room};
+        let (shallow, deep) = (99 * GIB, 89 * GIB);
+        for (free, short_for, in_flight, expected) in [
+            // Room, nothing asked: the shortage is forgotten.
+            (100 * GIB, None, 0, Room),
+            (100 * GIB, None, 2, Room),
+            // Just below: kept until 30 minutes passed.
+            (shallow, Some(0), 0, Keep),
+            (shallow, Some(29 * 60 + 59), 0, Keep),
+            (shallow, Some(30 * 60), 0, Ask),
+            (shallow, Some(3 * 3600), 0, Ask),
+            // Within 10% below it waits; 10% below or deeper it asks.
+            (90 * GIB + 1, Some(0), 0, Keep),
+            (90 * GIB, Some(0), 0, Ask),
+            (deep, Some(0), 0, Ask),
+            (1, None, 0, Ask),
+            // A run in flight: kept, however long or deep.
+            (shallow, Some(3 * 3600), 1, Keep),
+            (deep, Some(0), 1, Keep),
+            (1, Some(3 * 3600), 3, Keep),
+        ] {
+            assert_eq!(
+                condition(free, short_for, in_flight, false),
+                expected,
+                "{free} {short_for:?} {in_flight}"
+            );
+        }
+    }
+
+    /// An ask opened stays until the free space is 5% above the threshold:
+    /// across it below that nothing changes (no second ask, no close),
+    /// short it is joined whatever runs, and at the margin it is closed.
+    #[test]
+    fn an_ask_closes_only_once_the_free_space_is_above_the_threshold_by_the_margin() {
+        use AskCondition::{Ask, Keep, Room};
+        for (free, in_flight, expected) in [
+            (99 * GIB, 0, Ask),
+            (99 * GIB, 2, Ask),
+            (100 * GIB, 0, Keep),
+            (105 * GIB - 1, 0, Keep),
+            (105 * GIB, 0, Room),
+            (200 * GIB, 1, Room),
+        ] {
+            assert_eq!(
+                condition(free, None, in_flight, true),
+                expected,
+                "{free} {in_flight}"
+            );
+        }
+        // A free space moving across the threshold, pass after pass, while
+        // the ask stays open: it is opened once and never closed.
+        let (a, b) = (RunId::new("a").unwrap(), RunId::new("b").unwrap());
+        let mut asked = false;
+        let mut opened = 0;
+        for free in [99, 101, 99, 103, 98, 104, 99] {
+            let short_for = (free < 100).then_some(31 * 60);
+            let step = disk_ask_step(
+                condition(free * GIB, short_for, 0, asked),
+                asked,
+                asked,
+                &[],
+                &[],
+            );
+            match step {
+                AskStep::Open(joining) if !asked => {
+                    assert_eq!(joining, [None]);
+                    opened += 1;
+                    asked = true;
+                }
+                AskStep::Open(joining) => assert!(joining.is_empty()),
+                AskStep::Nothing => {}
+                other => panic!("{free}: {other:?}"),
+            }
+        }
+        assert_eq!(opened, 1);
+        assert_eq!(
+            disk_ask_step(condition(106 * GIB, None, 0, true), true, true, &[], &[]),
+            AskStep::Close
+        );
+        // Kept with no ask: nothing is opened, closed or forgotten, and no
+        // landing joins.
+        assert_eq!(
+            disk_ask_step(
+                condition(99 * GIB, Some(0), 0, false),
+                false,
+                false,
+                &[],
+                &[a, b]
+            ),
+            AskStep::Nothing
+        );
+        // Unknown free bytes or need are room, as before.
+        let config = DiskConfig::default();
+        let unknown = |free: Option<u64>, need: Option<u64>| {
+            disk_ask_condition(&ShortageReading {
+                short: false,
+                free,
+                need,
+                short_for: None,
+                in_flight: 0,
+                asked: true,
+                open: true,
+                config: &config,
+            })
+        };
+        assert_eq!(unknown(None, Some(GIB)), Room);
+        assert_eq!(unknown(Some(1), None), Room);
+    }
+
+    /// The `[disk]` shares and duration decide: a shorter duration asks
+    /// sooner, a wider ask margin asks later, a wider close margin closes
+    /// later.
+    #[test]
+    fn the_disk_settings_move_when_the_ask_opens_and_closes() {
+        use AskCondition::{Ask, Keep, Room};
+        let config = DiskConfig {
+            ask_after_secs: 60,
+            ask_margin: 0.5,
+            close_margin: 0.2,
+            ..DiskConfig::default()
+        };
+        let judge = |free: u64, short_for: u64, asked: bool| {
+            disk_ask_condition(&ShortageReading {
+                short: free < 100,
+                free: Some(free),
+                need: Some(100),
+                short_for: Some(Duration::from_secs(short_for)),
+                in_flight: 0,
+                asked,
+                open: asked,
+                config: &config,
+            })
+        };
+        assert_eq!(judge(99, 59, false), Keep);
+        assert_eq!(judge(99, 60, false), Ask);
+        assert_eq!(judge(60, 0, false), Keep);
+        assert_eq!(judge(49, 0, false), Ask);
+        assert_eq!(judge(50, 0, false), Ask);
+        assert_eq!(judge(119, 0, true), Keep);
+        assert_eq!(judge(120, 0, true), Room);
+    }
+
+    /// An ask answered `wait` (asked, closed) asks nothing more while
+    /// short, whatever the depth, and the threshold itself ends that
+    /// shortage, as without the margin: a shortage after it asks again
+    /// (no run in flight, deep).
+    #[test]
+    fn a_wait_answer_holds_until_the_threshold_and_a_later_shortage_asks_again() {
+        use AskCondition::{Ask, Room};
+        // Short, answered `wait`: asked, so nothing is asked.
+        for free in [99 * GIB, 89 * GIB, 1] {
+            assert_eq!(reading(free, Some(3600), 0, true, false), Ask);
+            assert_eq!(
+                disk_ask_step(
+                    reading(free, Some(3600), 0, true, false),
+                    true,
+                    false,
+                    &[],
+                    &[]
+                ),
+                AskStep::Nothing
+            );
+        }
+        // Back at the threshold, within the close margin: the shortage
+        // ends (the watch forgets it asked).
+        assert_eq!(reading(100 * GIB, None, 0, true, false), Room);
+        assert_eq!(
+            disk_ask_step(
+                reading(101 * GIB, None, 0, true, false),
+                true,
+                false,
+                &[],
+                &[]
+            ),
+            AskStep::Close
+        );
+        // Short again, deep: a new ask opens.
+        assert_eq!(
+            disk_ask_step(
+                reading(89 * GIB, Some(0), 0, false, false),
+                false,
+                false,
+                &[],
+                &[]
+            ),
+            AskStep::Open(vec![None])
         );
     }
 
@@ -792,7 +1160,7 @@ mod tests {
         assert!(!asks_again_on(""));
         // After `done` the watch is not asked: a short pass opens anew.
         assert_eq!(
-            disk_ask_step(true, false, false, &[], &[]),
+            disk_ask_step(AskCondition::Ask, false, false, &[], &[]),
             AskStep::Open(vec![None])
         );
         // and a cleanup for room is asked for at once.

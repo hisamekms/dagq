@@ -2101,8 +2101,27 @@ impl Supervisor<'_> {
                 .map(|slot| slot.run.id().clone())
                 .collect();
             let held = self.cleanup_held();
+            // The runs that go on by themselves, whose end may make room:
+            // while one does, a shortage holds without asking. A run waiting
+            // for a person, for its landing turn or for a provider's hold
+            // does not.
+            let in_flight = self
+                .claim
+                .slots
+                .iter()
+                .filter(|slot| {
+                    !slot.out_of_slot()
+                        && !matches!(slot.phase, Phase::AwaitingSlot | Phase::ReviewHeld { .. })
+                })
+                .count();
             self.on_host(|host, env| {
-                host.check_disk(env, options.disk_cleanup_interval, &landings, &held)
+                host.check_disk(
+                    env,
+                    options.disk_cleanup_interval,
+                    &landings,
+                    &held,
+                    in_flight,
+                )
             })?;
             // Every pass too: the answer of an authentication or usage-limit
             // ask is applied and the hold read before any work starts (task

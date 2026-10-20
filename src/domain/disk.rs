@@ -47,6 +47,16 @@ pub const DEFAULT_CLAIM_FACTOR: f64 = 2.0;
 /// Default factor of the recent run size a landing's verification needs
 /// free.
 pub const DEFAULT_INTEGRATE_FACTOR: f64 = 1.5;
+/// Default seconds a shortage lasts, from the first reading short of it,
+/// before the disk ask opens: 30 minutes, past the few minutes a run's
+/// build or a cleanup moves the free space across a threshold.
+pub const DEFAULT_ASK_AFTER_SECS: u64 = 30 * 60;
+/// Default share of the threshold the free space is below it by for the
+/// disk ask to open at once.
+pub const DEFAULT_ASK_MARGIN: f64 = 0.10;
+/// Default share of the threshold the free space is above it by for the
+/// runtime to close the disk ask.
+pub const DEFAULT_CLOSE_MARGIN: f64 = 0.05;
 
 /// The `[disk]` table of `dagq.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
@@ -63,6 +73,23 @@ pub struct DiskConfig {
     /// The least free bytes either needs, also before any build was
     /// measured; `None` checks nothing until one was.
     pub min_free_bytes: Option<u64>,
+    /// `ask_after_secs` (a positive whole number of seconds, default
+    /// [`DEFAULT_ASK_AFTER_SECS`]): how long a shortage lasts, from the
+    /// first pass that read it, before the disk ask opens. The claims and
+    /// landings are held from the first reading whatever it says; it
+    /// only keeps a free space that moves across a threshold from asking.
+    pub ask_after_secs: u64,
+    /// `ask_margin` (a positive number, default [`DEFAULT_ASK_MARGIN`]):
+    /// the disk ask opens at once, without waiting `ask_after_secs`, when
+    /// the free space is below the threshold by this share of it or more;
+    /// 1 or more never asks at once.
+    pub ask_margin: f64,
+    /// `close_margin` (a positive number, default
+    /// [`DEFAULT_CLOSE_MARGIN`]): the runtime closes the disk ask it opened
+    /// only once the free space is above the threshold by this share of
+    /// it; until then the ask stays and no second one is opened, while
+    /// the holds end at the threshold itself.
+    pub close_margin: f64,
 }
 
 impl Default for DiskConfig {
@@ -72,20 +99,32 @@ impl Default for DiskConfig {
             claim_factor: DEFAULT_CLAIM_FACTOR,
             integrate_factor: DEFAULT_INTEGRATE_FACTOR,
             min_free_bytes: None,
+            ask_after_secs: DEFAULT_ASK_AFTER_SECS,
+            ask_margin: DEFAULT_ASK_MARGIN,
+            close_margin: DEFAULT_CLOSE_MARGIN,
         }
     }
 }
 
 impl DiskConfig {
     /// The setting names of the `[disk]` table.
-    pub const KEYS: [&str; 4] = [
+    pub const KEYS: [&str; 7] = [
         "sample_runs",
         "claim_factor",
         "integrate_factor",
         "min_free_bytes",
+        "ask_after_secs",
+        "ask_margin",
+        "close_margin",
     ];
-    /// The settings that are factors (positive numbers, not whole ones).
-    pub const FACTORS: [&str; 2] = ["claim_factor", "integrate_factor"];
+    /// The settings that are factors or shares (positive numbers, not
+    /// whole ones).
+    pub const FACTORS: [&str; 4] = [
+        "claim_factor",
+        "integrate_factor",
+        "ask_margin",
+        "close_margin",
+    ];
 
     /// The whole-number setting `key` set to `value`; `None` for a key
     /// that is not one.
@@ -93,6 +132,7 @@ impl DiskConfig {
         match key {
             "sample_runs" => self.sample_runs = value,
             "min_free_bytes" => self.min_free_bytes = Some(u64::try_from(value).ok()?),
+            "ask_after_secs" => self.ask_after_secs = u64::try_from(value).ok()?,
             _ => return None,
         }
         Some(())
@@ -103,6 +143,8 @@ impl DiskConfig {
         match key {
             "claim_factor" => self.claim_factor = value,
             "integrate_factor" => self.integrate_factor = value,
+            "ask_margin" => self.ask_margin = value,
+            "close_margin" => self.close_margin = value,
             _ => return None,
         }
         Some(())
@@ -307,10 +349,15 @@ mod tests {
         let mut config = DiskConfig::default();
         assert_eq!(config.set_whole("sample_runs", 5), Some(()));
         assert_eq!(config.set_whole("min_free_bytes", 9), Some(()));
+        assert_eq!(config.set_whole("ask_after_secs", 60), Some(()));
         assert_eq!(config.set_whole("claim_factor", 9), None);
+        assert_eq!(config.set_whole("ask_margin", 9), None);
         assert_eq!(config.set_factor("claim_factor", 3.0), Some(()));
         assert_eq!(config.set_factor("integrate_factor", 2.5), Some(()));
+        assert_eq!(config.set_factor("ask_margin", 0.2), Some(()));
+        assert_eq!(config.set_factor("close_margin", 0.1), Some(()));
         assert_eq!(config.set_factor("sample_runs", 2.5), None);
+        assert_eq!(config.set_factor("ask_after_secs", 2.5), None);
         assert_eq!(
             config,
             DiskConfig {
@@ -318,8 +365,18 @@ mod tests {
                 claim_factor: 3.0,
                 integrate_factor: 2.5,
                 min_free_bytes: Some(9),
+                ask_after_secs: 60,
+                ask_margin: 0.2,
+                close_margin: 0.1,
             }
         );
+        // Every key is set by one of the two, and the factors by the second.
+        for key in DiskConfig::KEYS {
+            let mut config = DiskConfig::default();
+            let factor = config.set_factor(key, 1.0).is_some();
+            assert_eq!(factor, DiskConfig::FACTORS.contains(&key), "{key}");
+            assert_eq!(config.set_whole(key, 1).is_some(), !factor, "{key}");
+        }
         assert_eq!(gib(1.5 * f64::from(1u32 << 30)), "1.5 GiB");
     }
 
