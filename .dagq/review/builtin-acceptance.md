@@ -18,7 +18,7 @@
 
 出典: local-checks.md、operations.md。
 
-- workerは全体の`cargo test --locked`と`cargo llvm-cov`を流さない（例外は着地の検証の失敗でresumeされたrunの再現）。流すのはfmt・clippy、`src/`を変えたら`scripts/check-layer-deps.sh`、変えた・関係するmoduleを名指したtest、verifyのうち全体とcoverage以外。
+- workerは全体の`cargo test --locked`と`cargo llvm-cov`を流さない（例外は着地の検証の失敗でresumeされたrunの再現）。流すのはfmt・clippy、変えた・関係するmoduleを名指したtest、verifyのうち全体とcoverage以外。
 - fmt・clippyの関門は着地の検証で、receiptにその実行の根拠が無いことでは差し戻さない（ADR-t2588-1）。
 - 手元の検証の実行（流したコマンド・exit status・stressの周回と結果・時間の関門の結果）と、変えたtestが無いので関門を省いたことは、資料の記録の節と関門の節が示していれば、receiptの`tests`のevidenceに無いことでは差し戻さない（ADR-t2589-1）。節が無ければevidenceで見る。
 - receiptの`tests`のevidenceは記録で示せないこと（testの範囲を選んだ理由と着地の検証・CIに任せた範囲、流したtestの件数、流せなかった理由、許可の一覧に足した項目の理由）を持つ。testの範囲の選び方の妥当さと受け入れ条件の対応づけは引き続き見て、要る関門の記録が無いか失敗しているときはevidenceと合わせて判じる。
@@ -45,7 +45,7 @@
 出典: `docs/design/architecture.md`の「検査できる規則」「検査の範囲」、ADR-t2391-1。
 
 - `src/`の差分が足したものに、各規則の「検査」が全体のreviewを名指す部分を当てる: L5、L7の判断とeventのpayloadの組み立て、L8、L9の共有の配線の置き場、C2の型で守られない部分、C3の残り、C4のuse caseの切り方、C5のtestが見ない部分（一部公開のportのmethodの単位の参照とcontextの決まらないmodule）、C6のpayloadの読み方、C8の例外の中身と`crate::application::X`を通す名指し、X2、X3。
-- 規則の本文はarchitecture.mdの各IDが持ち、指摘には規則のIDを添える。scriptが見る部分と所有の一覧への記録の漏れは指摘しない。
+- 規則の本文はarchitecture.mdの各IDが持ち、指摘には規則のIDを添える。コンパイラ・clippy・Rustのtestが見る部分と所有の表への記録の漏れは指摘しない。
 
 ## 文書の置き場と役割
 

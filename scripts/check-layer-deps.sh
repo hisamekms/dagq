@@ -1,21 +1,18 @@
 #!/bin/sh
-# The rules this script checked (L2's part clippy cannot hold and C8, before
-# them L1, L3, L6, L8 and L9) are checked by the Rust test of the module
-# references (src/context_boundaries/modules.rs and its ports module), with
-# the table src/context_boundaries/ownership.rs; what they check is in
-# docs/design/architecture.md, section "検査の範囲". `cargo test` runs them.
+# A compatibility wrapper, kept only because the saved verification commands
+# of registered tasks run `sh scripts/check-layer-deps.sh`. New tasks must
+# not name it. It is removed once no unfinished task's verification names it.
 #
-# The script checks nothing and reads no list: it stays only until it is
-# retired with scripts/check-context-boundaries.sh (ADR-t2397-1 decision 4),
-# so that what already runs it (the verify of registered tasks and CI) still
-# passes.
-#
-# Exit 0, with --self-test too.
+# It runs the Rust test of the module references on this tree
+# (src/context_boundaries/modules.rs, whose check includes the ports of
+# modules/ports.rs) and the fixtures of its layer rules (module_fixtures.rs):
+# the tests whose module path starts with context_boundaries::module. It
+# ignores its arguments (--self-test included) and exits with cargo's exit
+# code. It reads no list and holds no rule: the rules and the table are in
+# those tests and src/context_boundaries/ownership.rs
+# (docs/design/architecture.md, section "検査の範囲").
 set -eu
 
-me=check-layer-deps
-if [ "${1:-}" = "--self-test" ]; then
-  echo "$me --self-test: ok (no rule left to test)"
-  exit 0
-fi
-echo "$me: ok (the rules are the Rust test src/context_boundaries/modules.rs)"
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+exec cargo test --locked --lib context_boundaries::module

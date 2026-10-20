@@ -111,7 +111,7 @@ required_jobs = ["fmt / test / clippy / coverage", "linux build / test"]
 # scripts/landing-it.py の冒頭が持ち、値の根拠は docs/plans/landing-it-selection.md の「決めたこと」。登録済みの task の --verify は書き換えない。
 # replaces は旧と今の関門（cargo llvm-cov nextest ... と cargo llvm-cov --locked --fail-under-lines 80）に当たる。
 # command は unit test 全件（workspace の lib・bin）と絞った IT を 1 回の cargo nextest run で流し、既に落ちているテストを外す。
-# fmt・clippy・layer-deps と task に固有の検査は task の --verify にあるものが登録のまま流れるので、ここに重ねない。
+# fmt・clippy と task に固有の検査は task の --verify にあるものが登録のまま流れるので、ここに重ねない。
 # 行カバレッジの関門は CI（ci.yml）だけが見る。外すときはこの節を消せば、次の着地から登録のコマンドに戻る。
 # [landing_verification] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 1926 を含んでから足した。
 replaces = ["cargo llvm-cov nextest", "cargo llvm-cov --locked --fail-under-lines 80"]
@@ -365,7 +365,6 @@ paths = ["src/**", "tests/**", "migrations/**", "build.rs", "Cargo.toml", "Cargo
 # build・testを流すもの（ADR-t1895-2決定1）、10秒を超えるもの、今のmainで落ちるもの（関係ないrunまで差し戻す）は挙げない。
 # 引数はCIと同じにし（CIが--baseを渡すcheck-design-docsとcheck-design-sentencesはscriptの既定の基点を使う）、--self-testは挙げない。
 # 秒は2026-10-12に他のrunと並んだhostで3回測った最大で、順はその小さいものから。
-# 入れなかった候補: check-layer-deps（cargoは実行しないが、3回の最大が約35秒で10秒を超える（同じ測定で挙げたものの最大の約4倍）。src/**の差分はintegrateのverifyとCIが見る）。
 
 # .config/e2e-quarantine.tomlの書式・重複・上限と、印のtestがtests/e2e.rsかtests/e2e/にあること。最大約0.1秒。
 [review.programs.check-e2e-quarantine]
@@ -411,12 +410,6 @@ paths = ["tests/**"]
 [review.programs.check-migration-numbers]
 script = "scripts/check-migration-numbers.sh"
 paths = ["migrations/**", "build.rs"]
-
-# contextの境界の規則と、所有の一覧とコードの食い違い（規則のIDと一覧の置き場はdocs/design/architecture.mdの「検査の範囲」）。
-# 許可の一覧に無い新しい違反をLLMのreviewを起動する前に返し、全体のreviewを意味の判断に絞るため。最大約1.4秒。
-[review.programs.check-context-boundaries]
-script = "scripts/check-context-boundaries.sh"
-paths = ["src/**", ".config/context-boundaries.txt", ".config/context-boundaries-allow.txt"]
 
 # docs/の.mdのfrontmatterの日付の行の形。最大約2.7秒。
 [review.programs.check-frontmatter-dates]

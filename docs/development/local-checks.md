@@ -43,7 +43,6 @@ dagqのworkerは全体の`cargo test --locked`を流さず、`cargo llvm-cov`（
 
 - `sh scripts/cargo-brief.sh cargo fmt --all --check`と`sh scripts/cargo-brief.sh cargo clippy --locked --all-targets -- -D warnings`
   fmt・clippyの関門は着地の検証で、workerが手元で流したかは確かめない。receiptの`tests`のevidenceにその実行を書くことは求めず、reviewも確かめない（[ADR-t2588-1](../adr/2026-10-17-t2588-1-worker-local-fmt-and-clippy-are-not-receipt-evidence-and-not-reviewed.md)）。
-- `src/`を変えたら`sh scripts/check-layer-deps.sh`（レイヤーの禁止依存）と`sh scripts/check-context-boundaries.sh`（contextの境界と所有の一覧の食い違い）。CIも実行する。規則と一覧の置き場は[Architecture](../design/architecture.md)の「検査の範囲」
 - 変更に関係するtestだけの`cargo test`（次の「testの範囲」と「全体を比べるtest」）
 - taskのverifyのうちcoverageの関門（`cargo llvm-cov nextest`と旧い形の`cargo llvm-cov`）と全体の`cargo test --locked`以外（`cargo test --locked --test plugin`など）
 - 足した・変えたtestのstress（下の「stress」）

@@ -1,24 +1,19 @@
 #!/bin/sh
-# The rules this script checked, C5 and the records of the ports and of the
-# modules of src/application/ that C7 holds, are checked by the Rust test of
-# the module references (src/context_boundaries/modules.rs and its ports
-# module), with C1, C7 and X1 in src/context_boundaries.rs; their table is
-# src/context_boundaries/ownership.rs and what they check is in
-# docs/design/architecture.md, section "検査の範囲". `cargo test` runs them.
+# A compatibility wrapper, kept only because the saved verification commands
+# of registered tasks run `sh scripts/check-context-boundaries.sh`. New tasks
+# must not name it. It is removed once no unfinished task's verification
+# names it.
 #
-# The script checks nothing and reads no list (.config/context-boundaries.txt
-# and .config/context-boundaries-allow.txt stay unread, for an older copy of
-# this script the program review may run): it stays only until it is
-# retired with scripts/check-layer-deps.sh (ADR-t2397-1 decision 4), so
-# that what already runs it (the verify of registered tasks, CI and the
-# program review of dagq.toml) still passes.
-#
-# Exit 0, with --self-test too.
+# It runs every test of src/context_boundaries.rs and its modules (the tests
+# whose module path starts with context_boundaries::: the SQL write targets
+# of C1, C7 and X1, the module references of C5 and C8, and their fixtures)
+# and exits with cargo's exit code. It ignores its arguments (--self-test
+# included). It reads no list and holds no rule: the
+# rules and the table are in those tests and
+# src/context_boundaries/ownership.rs (docs/design/architecture.md, section
+# "検査の範囲").
 set -eu
 
-me=check-context-boundaries
-if [ "${1:-}" = "--self-test" ]; then
-  echo "$me --self-test: ok (no rule left to test)"
-  exit 0
-fi
-echo "$me: ok (the rules are the Rust test src/context_boundaries/modules.rs)"
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+exec cargo test --locked --lib context_boundaries::
