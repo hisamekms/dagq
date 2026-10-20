@@ -4,6 +4,7 @@
 //! submodule can change them; the loop calls the state's methods.
 
 use super::*;
+use crate::domain::session_step::{StepTarget, TargetKind};
 
 pub(super) mod draft_planner;
 pub(super) mod finding_planner;
@@ -47,4 +48,24 @@ impl PlanningState {
     pub(super) const fn busy(&self) -> bool {
         self.plan_review.is_some() || self.goal_review.is_some()
     }
+}
+
+/// Issue the telemetry token of the job of `kind` and `id` (a plan review,
+/// a goal review) as its agent is started (ADR-t1662-3 decision 11): one
+/// not issued is logged, and the job goes on without telemetry.
+fn issue_job_telemetry(env: &contexts::PlanningEnv<'_>, kind: TargetKind, id: i64) {
+    env.jobs
+        .target_telemetry(&env.pass)
+        .issue(&*env.pass.queue, &StepTarget::of(kind, id));
+}
+
+/// Revoke the telemetry token of the job of `kind` and `id` at its end
+/// (its exit read, its failure, its stop for a handoff); one not revoked is
+/// left to the sweep, and the service refuses it once the row finished.
+fn end_job_telemetry(env: &contexts::PlanningEnv<'_>, kind: TargetKind, id: i64) {
+    env.jobs.target_telemetry(&env.pass).end(
+        &*env.pass.queue,
+        &StepTarget::of(kind, id),
+        crate::domain::telemetry::TokenRevocation::JobEnded,
+    );
 }

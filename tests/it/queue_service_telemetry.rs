@@ -253,18 +253,20 @@ fn a_telemetry_token_records_its_targets_steps_and_samples_and_reaches_nothing_e
     assert_eq!(held(&queue.db, &target).len(), 4);
 }
 
-/// A target of no run (a planner of the runtime's) has its own token, and
-/// a session is recorded only for the target the control side registered
-/// it to: a token of another target takes neither a registered session nor
-/// one registered to none, which its owner still reports once registered.
+/// A target of no run (an open planner of the runtime's) has its own
+/// token, and a session is recorded only for the target the control side
+/// registered it to: a token of another target takes neither a registered
+/// session nor one registered to none, which its owner still reports once
+/// registered.
 #[test]
 fn a_session_is_recorded_only_for_the_target_the_control_side_registered_it_to() {
     let queue = queue();
     start(&queue);
-    let planner = StepTarget {
-        kind: TargetKind::Planner,
-        id: "7".into(),
-    };
+    let opened = SqliteQueue::open(&queue.db)
+        .unwrap()
+        .open_planner(dagq::domain::PlannerOrigin::Runtime, None)
+        .unwrap();
+    let planner = StepTarget::of(TargetKind::Planner, opened.id.as_i64());
     let run = StepTarget::run(queue.run.id());
     let socket = service::socket_path(queue.dir());
     let planner_sink = ServiceTelemetrySink::new(

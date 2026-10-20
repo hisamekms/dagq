@@ -29,7 +29,23 @@
 //! and every lease ([`Retries::save`], [`Retries::take`]). A token is
 //! telemetry, so nothing here changes a run's outcome: a failure is logged.
 //!
-//! Targets of no run (a planner, a job of no run) are not issued here.
+//! A target of no run (ADR-t1662-3 decisions 10 and 11) is issued its
+//! token by the control side that starts its agent, through
+//! [`TargetTelemetry`]: the supervisor as it opens a planner of the
+//! runtime's and as it starts a plan review, a goal review or an eval job,
+//! and the observation's and the throughput review's own commands once
+//! their start is recorded. A plan or goal review's and a command's are
+//! revoked by the one that issued them at the target's end (the job's, the
+//! command's finish, or a launch that closed its planner), and the
+//! supervisor's sweep revokes the tokens of
+//! the targets the queue says ended or whose runner is gone
+//! ([`sweep_targets`]): a closed planner, a job's finished row or a job
+//! whose supervisor is gone, a command's finish, its process gone or past
+//! the time it ends by. The queue service refuses a token of a target so
+//! ended at once, revoked yet or not. The queue's events record their issue
+//! and revocation, each only once it succeeded. Their file is under the
+//! queue's `service/`, outside the planner's directory and the job's, and
+//! no agent is given it.
 
 use std::path::{Path, PathBuf};
 
@@ -41,11 +57,13 @@ use tracing::warn;
 use super::queue_service::TelemetryTokens;
 use super::{EventStore, RunFiles};
 use crate::domain::session_step::StepTarget;
-use crate::domain::telemetry::{HeldTelemetry, RunTokenState, TokenRevocation, run_token_due};
+use crate::domain::telemetry::{
+    HeldTelemetry, RunTokenState, TokenRevocation, run_token_due, target_token_due,
+};
 use crate::domain::{EventKind, LeaseToken, RunId, TaskId};
 
-/// Where the issue and the revocation are recorded: the run's events.
-/// Every [`EventStore`] is one.
+/// Where the issue and the revocation are recorded: the run's events, and
+/// the queue's for a target of no run. Every [`EventStore`] is one.
 pub trait TokenLog {
     /// Record `kind` with `payload` on `run`.
     fn record_token_event(
@@ -54,6 +72,8 @@ pub trait TokenLog {
         kind: EventKind,
         payload: serde_json::Value,
     ) -> Result<()>;
+    /// Record `kind` with `payload` on the queue (a target of no run's).
+    fn record_queue_token_event(&self, kind: EventKind, payload: serde_json::Value) -> Result<()>;
 }
 
 impl<T: EventStore + ?Sized> TokenLog for T {
@@ -65,6 +85,137 @@ impl<T: EventStore + ?Sized> TokenLog for T {
     ) -> Result<()> {
         self.record_runtime_event(run, kind, payload)
     }
+    fn record_queue_token_event(&self, kind: EventKind, payload: serde_json::Value) -> Result<()> {
+        self.record_queue_event(kind, payload).map(drop)
+    }
+}
+
+/// The issue and the revocation of the token of a target of no run by the
+/// control side that starts its agent: the tokens of the queue at `db`,
+/// issued under `lease` (the supervisor's token; `None` from a command,
+/// whose token the target's end alone ends).
+#[derive(Clone, Copy)]
+pub struct TargetTelemetry<'a> {
+    pub tokens: &'a dyn TelemetryTokens,
+    pub db: &'a Path,
+    pub lease: Option<&'a LeaseToken>,
+}
+
+impl TargetTelemetry<'_> {
+    /// Issue the token of `target`, a target of no run, as its agent is
+    /// started, revoking any it held, and record it on the queue
+    /// (`telemetry_token_issued`) once it was issued. The file its executor
+    /// reads it from; `None` when it could not be issued: the target goes
+    /// on without telemetry, as its outcome does not hang on it.
+    pub fn issue<L: TokenLog + ?Sized>(&self, log: &L, target: &StepTarget) -> Option<PathBuf> {
+        match self
+            .tokens
+            .issue_telemetry(self.db, target, None, self.lease)
+        {
+            Ok(file) => {
+                record_queue(
+                    log,
+                    EventKind::TelemetryTokenIssued,
+                    json!({"target": target}),
+                );
+                Some(file)
+            }
+            Err(error) => {
+                warn!(
+                    "the telemetry token of {} {} could not be issued; its executor sends no telemetry: {error:#}",
+                    target.kind.as_str(),
+                    target.id
+                );
+                None
+            }
+        }
+    }
+
+    /// Revoke the token of `target` at its end ([`revoke_target`]). One
+    /// that cannot be revoked is logged: the service refuses it from the
+    /// end on, and the sweep revokes it ([`sweep_targets`]).
+    pub fn end<L: TokenLog + ?Sized>(&self, log: &L, target: &StepTarget, why: TokenRevocation) {
+        if let Err(error) = revoke_target(self.tokens, log, self.db, target, why) {
+            warn!(
+                "the telemetry token of {} {} could not be revoked at its end; the sweep tries again: {error:#}",
+                target.kind.as_str(),
+                target.id
+            );
+        }
+    }
+}
+
+/// Revoke the token of `target`, a target of no run, for `why`, and record
+/// it on the queue (`telemetry_token_revoked`) once the revocation
+/// succeeded and there was one. Whether there was one; an error records
+/// nothing and may leave the token, still listed for the sweep.
+pub fn revoke_target<L: TokenLog + ?Sized>(
+    tokens: &dyn TelemetryTokens,
+    log: &L,
+    db: &Path,
+    target: &StepTarget,
+    why: TokenRevocation,
+) -> Result<bool> {
+    let revoked = tokens.revoke_telemetry(db, target, None)?;
+    if revoked {
+        record_queue(
+            log,
+            EventKind::TelemetryTokenRevoked,
+            json!({"target": target, "reason": why.as_str()}),
+        );
+    }
+    Ok(revoked)
+}
+
+/// The sweep of the tokens of the targets of no run: each listed whose
+/// target `facts` reads as ended, or whose runner is gone by `alive`, at
+/// `now_ms` ([`target_token_due`]), is revoked ([`revoke_target`]): the
+/// targets revoked. One whose facts cannot be read, and one whose
+/// revocation failed, stay listed for the next sweep. A run's token is
+/// left to [`sweep`].
+pub fn sweep_targets<L: TokenLog + ?Sized>(
+    tokens: &dyn TelemetryTokens,
+    log: &L,
+    db: &Path,
+    now_ms: i64,
+    alive: &dyn Fn(u32) -> bool,
+) -> Vec<StepTarget> {
+    let held = match tokens.held_telemetry(db) {
+        Ok(held) => held,
+        Err(error) => {
+            warn!(
+                "the telemetry tokens could not be listed; the next sweep looks again: {error:#}"
+            );
+            return Vec::new();
+        }
+    };
+    let mut revoked = Vec::new();
+    for HeldTelemetry { target, .. } in held {
+        if target.run_id().is_some() || revoked.contains(&target) {
+            continue;
+        }
+        let (kind, id) = (target.kind.as_str(), &target.id);
+        let facts = match tokens.target_facts(db, &target) {
+            Ok(facts) => facts,
+            Err(error) => {
+                warn!("{kind} {id} could not be read for its telemetry token: {error:#}");
+                continue;
+            }
+        };
+        let Some(why) = target_token_due(target.kind, &facts, now_ms, alive) else {
+            continue;
+        };
+        match revoke_target(tokens, log, db, &target, why) {
+            Ok(true) => revoked.push(target),
+            Ok(false) => {}
+            Err(error) => {
+                warn!(
+                    "the telemetry token of {kind} {id} could not be revoked; the next sweep tries again: {error:#}"
+                );
+            }
+        }
+    }
+    revoked
 }
 
 /// The revocations of one supervisor's that failed and that no sweep would
@@ -368,6 +519,16 @@ pub fn sweep<L: TokenLog + ?Sized>(
     revoked
 }
 
+/// Record `kind` on the queue; a record that cannot be written is logged.
+fn record_queue<L: TokenLog + ?Sized>(log: &L, kind: EventKind, payload: serde_json::Value) {
+    if let Err(error) = log.record_queue_token_event(kind, payload) {
+        warn!(
+            "{} could not be recorded on the queue: {error:#}",
+            kind.as_str()
+        );
+    }
+}
+
 /// Record `kind` on `run`; a record that cannot be written is logged.
 fn record<L: TokenLog + ?Sized>(log: &L, run: &RunId, kind: EventKind, payload: serde_json::Value) {
     if let Err(error) = log.record_token_event(run, kind, payload) {
@@ -386,7 +547,7 @@ mod tests {
     use super::*;
     use crate::domain::RunStatus;
     use crate::domain::session_step::TargetKind;
-    use crate::domain::telemetry::{HeldTelemetry, LeaseView};
+    use crate::domain::telemetry::{Beat, HeldTelemetry, LeaseView, TargetFacts};
 
     /// The tokens held, each target with the lease it was issued under and
     /// how many times it was issued; a failure of a revocation or of an
@@ -397,6 +558,9 @@ mod tests {
         issues: Mutex<u32>,
         failing_revocations: Mutex<u32>,
         failing_issues: Mutex<u32>,
+        /// What the queue holds of each target of no run by its id; one
+        /// not here has ended, and `unreadable` cannot be read.
+        targets: Mutex<BTreeMap<String, TargetFacts>>,
     }
 
     impl Tokens {
@@ -462,6 +626,18 @@ mod tests {
                 })
                 .collect())
         }
+        fn target_facts(&self, _: &Path, target: &StepTarget) -> Result<TargetFacts> {
+            if target.id == "404" {
+                return Err(anyhow!("the queue is locked"));
+            }
+            Ok(self
+                .targets
+                .lock()
+                .unwrap()
+                .get(&target.id)
+                .cloned()
+                .unwrap_or(TargetFacts::Ended))
+        }
     }
 
     /// The events written, as (run, kind, reason); none on a run the
@@ -484,6 +660,23 @@ mod tests {
             }
             self.written.borrow_mut().push((
                 run.to_string(),
+                kind.as_str(),
+                payload["reason"].as_str().map(str::to_owned),
+            ));
+            Ok(())
+        }
+        /// Written as on a run named `queue:<kind>:<id>` of its target.
+        fn record_queue_token_event(
+            &self,
+            kind: EventKind,
+            payload: serde_json::Value,
+        ) -> Result<()> {
+            self.written.borrow_mut().push((
+                format!(
+                    "queue:{}:{}",
+                    payload["target"]["kind"].as_str().unwrap(),
+                    payload["target"]["id"].as_str().unwrap()
+                ),
                 kind.as_str(),
                 payload["reason"].as_str().map(str::to_owned),
             ));
@@ -1041,6 +1234,150 @@ mod tests {
                 written("r1", "telemetry_token_issued", None),
                 written("r1", "telemetry_token_revoked", Some("reissued")),
                 written("r1", "telemetry_token_issued", None),
+            ]
+        );
+    }
+
+    fn target(kind: TargetKind, id: i64) -> StepTarget {
+        StepTarget::of(kind, id)
+    }
+
+    /// ADR-t1662-3 decision 11: the control side issues a target of no
+    /// run its token as it starts its agent and revokes it at its end, each
+    /// recorded on the queue only once it succeeded; a revocation that
+    /// failed records nothing and leaves the token for the sweep.
+    #[test]
+    fn a_target_of_no_run_is_issued_at_its_start_and_revoked_at_its_end() {
+        let (tokens, log) = (Tokens::default(), Log::default());
+        let telemetry = TargetTelemetry {
+            tokens: &tokens,
+            db: Path::new(DB),
+            lease: Some(&lease("a")),
+        };
+        let review = target(TargetKind::PlanReview, 4);
+        assert!(telemetry.issue(&log, &review).is_some());
+        assert_eq!(tokens.held(&review), Some((Some("a".to_owned()), 1)));
+        *tokens.failing_issues.lock().unwrap() = 1;
+        let observer = target(TargetKind::Observer, 8);
+        assert_eq!(
+            TargetTelemetry {
+                lease: None,
+                ..telemetry
+            }
+            .issue(&log, &observer),
+            None
+        );
+        *tokens.failing_revocations.lock().unwrap() = 1;
+        telemetry.end(&log, &review, TokenRevocation::JobEnded);
+        assert!(tokens.held(&review).is_some());
+        telemetry.end(&log, &review, TokenRevocation::JobEnded);
+        assert_eq!(tokens.held(&review), None);
+        // Nothing left to revoke records nothing.
+        telemetry.end(&log, &review, TokenRevocation::JobEnded);
+        assert_eq!(
+            *log.written.borrow(),
+            [
+                written("queue:plan_review:4", "telemetry_token_issued", None),
+                written(
+                    "queue:plan_review:4",
+                    "telemetry_token_revoked",
+                    Some("job_ended")
+                ),
+            ]
+        );
+    }
+
+    /// The sweep revokes the tokens of the targets of no run whose end the
+    /// queue holds, or whose runner is gone, and keeps the rest, a run's
+    /// among them; one that cannot be read, or whose revocation failed,
+    /// stays for the next sweep, and is recorded only once revoked.
+    #[test]
+    fn the_sweep_revokes_the_tokens_of_targets_that_ended_or_whose_runner_is_gone() {
+        let (tokens, log) = (Tokens::default(), Log::default());
+        let telemetry = TargetTelemetry {
+            tokens: &tokens,
+            db: Path::new(DB),
+            lease: None,
+        };
+        let planner = target(TargetKind::Planner, 1);
+        let closed = target(TargetKind::Planner, 2);
+        let review = target(TargetKind::GoalReview, 3);
+        let orphan = target(TargetKind::PlanReview, 5);
+        let command = target(TargetKind::ThroughputReview, 6);
+        let killed = target(TargetKind::Observer, 7);
+        let unreadable = target(TargetKind::EvalJob, 404);
+        for each in [
+            &planner,
+            &closed,
+            &review,
+            &orphan,
+            &command,
+            &killed,
+            &unreadable,
+        ] {
+            telemetry.issue(&log, each).unwrap();
+        }
+        issue(&tokens, &log, "r1", "a").unwrap();
+        log.written.borrow_mut().clear();
+        let beat = |pid| Some(Beat { pid, age_secs: 1 });
+        tokens.targets.lock().unwrap().extend([
+            ("1".to_owned(), TargetFacts::OpenPlanner),
+            (
+                "3".to_owned(),
+                TargetFacts::SupervisedJob {
+                    supervisor: beat(10),
+                },
+            ),
+            (
+                "5".to_owned(),
+                TargetFacts::SupervisedJob {
+                    supervisor: beat(11),
+                },
+            ),
+            (
+                "6".to_owned(),
+                TargetFacts::StartedCommand {
+                    ends_by_ms: 2_000,
+                    pid: Some(10),
+                },
+            ),
+            (
+                "7".to_owned(),
+                TargetFacts::StartedCommand {
+                    ends_by_ms: 2_000,
+                    pid: Some(12),
+                },
+            ),
+        ]);
+        // Supervisor 11 and command 12 died without a word to the queue.
+        let alive = |pid: u32| pid == 10;
+        *tokens.failing_revocations.lock().unwrap() = 1;
+        let swept = |tokens: &Tokens| sweep_targets(tokens, &log, Path::new(DB), 1_000, &alive);
+        assert_eq!(swept(&tokens), [orphan.clone(), killed.clone()]);
+        assert_eq!(swept(&tokens), std::slice::from_ref(&closed));
+        assert!(swept(&tokens).is_empty());
+        for kept in [&planner, &review, &command, &unreadable] {
+            assert!(tokens.held(kept).is_some(), "{kept:?}");
+        }
+        assert!(tokens.held(&StepTarget::run(&run("r1"))).is_some());
+        assert_eq!(
+            *log.written.borrow(),
+            [
+                written(
+                    "queue:plan_review:5",
+                    "telemetry_token_revoked",
+                    Some("job_ended")
+                ),
+                written(
+                    "queue:observer:7",
+                    "telemetry_token_revoked",
+                    Some("job_ended")
+                ),
+                written(
+                    "queue:planner:2",
+                    "telemetry_token_revoked",
+                    Some("planner_closed")
+                ),
             ]
         );
     }

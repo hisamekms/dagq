@@ -114,6 +114,7 @@ impl PlanningState {
         else {
             return Ok(());
         };
+        issue_job_telemetry(env, TargetKind::GoalReview, job.id);
         match self.spawn_goal_review(env, &job, &launch) {
             Ok((prompt_bytes, Ok(headless))) => {
                 info!(
@@ -346,6 +347,7 @@ impl PlanningState {
             return Ok(false);
         };
         let watch = self.goal_review.take().expect("polled above");
+        end_job_telemetry(env, TargetKind::GoalReview, watch.job.id);
         let duration_secs = watch.headless.elapsed().as_secs();
         let stdout = env
             .files
@@ -486,6 +488,7 @@ impl PlanningState {
                 warn!(error = %error, "goal {} goal review {} failed: {error}; it waits for a person", job.goal_id, job.attempt);
             }
         }
+        end_job_telemetry(env, TargetKind::GoalReview, job.id);
         if let Err(recorded) = env
             .pass
             .queue

@@ -161,6 +161,20 @@ fn an_achieved_goal_is_closed_with_its_evidence() {
     );
     // What its prompt took (task 1571, ADR-t1566-1 decision 6).
     assert_prompt_bytes(&finished[0], &prompts[0]);
+    // Its telemetry token (ADR-t1662-3 decision 11): issued as its job
+    // started and revoked at its end, each on the queue by its id.
+    let started = goal_events(&mut queue, goal, "goal_review_started");
+    let id = started[0]["goal_review_id"].as_i64().unwrap().to_string();
+    assert_eq!(
+        crate::common::service::target_token_events(
+            &fx.db,
+            dagq::domain::session_step::TargetKind::GoalReview
+        ),
+        [
+            (id.clone(), "issued", None),
+            (id, "revoked", Some("job_ended".to_owned()))
+        ]
+    );
 
     // A closed goal is no candidate.
     let again = StubReviewer::new(&[json!({"verdict": "achieved"})]);

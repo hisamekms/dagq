@@ -54,7 +54,7 @@ use crate::domain::queue_service::{
     ServiceRequest, ServiceResponse, ServiceState, UseCase,
 };
 use crate::domain::session_step::StepTarget;
-use crate::domain::telemetry::{HeldTelemetry, ReportRecorded, TelemetryReport};
+use crate::domain::telemetry::{HeldTelemetry, ReportRecorded, TargetFacts, TelemetryReport};
 use crate::domain::{
     ActorContext, ActorRole, Answerer, Ask, AskId, EventKind, Finding, FindingId, FindingOutcome,
     FindingStatus, LeaseToken, NewAsk, NewFinding, NewNote, PlannerId, ProposalId, RequestId,
@@ -612,6 +612,10 @@ impl TelemetryTokens for SystemServiceAccess {
         // Only a file whose value is a token that holds.
         let token = read_token(&file).ok()?;
         matches!(lookup(&queue_dir, &token), Ok(Some(_))).then_some(file)
+    }
+
+    fn target_facts(&self, db: &Path, target: &StepTarget) -> Result<TargetFacts> {
+        SqliteQueue::open(db)?.telemetry_target(target)
     }
 
     fn held_telemetry(&self, db: &Path) -> Result<Vec<HeldTelemetry>> {
@@ -1344,6 +1348,16 @@ impl ServiceBackend for SqliteServiceBackend {
         EventStore::record_queue_event(&queue, EventKind::QueueServiceUnauthenticated, payload)
             .map(drop)
     }
+
+    fn now_ms(&self) -> i64 {
+        self.generators
+            .clock
+            .system_time()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|since| i64::try_from(since.as_millis()).ok())
+            .unwrap_or_default()
+    }
 }
 
 /// One request's queue.
@@ -1520,6 +1534,10 @@ impl ServiceQueue for ServiceSqlite {
             now_ms,
         )?;
         Ok(ReportRecorded { steps, resources })
+    }
+
+    fn telemetry_target(&self, target: &StepTarget) -> Result<TargetFacts> {
+        self.queue.telemetry_target(target)
     }
 }
 

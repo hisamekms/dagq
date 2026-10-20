@@ -100,6 +100,9 @@ pub struct PlannerLaunch<'a> {
     /// The limits of a planner's turns, from the supervisor's `[stall]`
     /// settings, as a headless worker's.
     pub turn_limits: TurnLimits,
+    /// The supervisor's issue of a planner's telemetry token as its wrapper
+    /// starts (ADR-t1662-3 decision 11); `None` issues none.
+    pub telemetry: Option<crate::application::telemetry_tokens::TargetTelemetry<'a>>,
 }
 
 /// A planner whose wrapper just started: its record (with the handle of
@@ -210,10 +213,33 @@ fn launch_planner(
     let dir = planner_dir(launch.planners_dir, planner.id);
     let prompt = prompt.clone().with_language(launch.language.as_ref());
     record_prompt_bytes(queue, &planner, kind, &prompt);
+    // Its token's file is under the queue's `service/`, outside the
+    // planner's directory; the wrapper, its executor, finds it by the
+    // planner, and its agent is not given it. Its close ends it: here
+    // when the launch fails, else by the sweep, as the service refuses it
+    // from `planner_closed` on.
+    let target = crate::domain::session_step::StepTarget::of(
+        crate::domain::session_step::TargetKind::Planner,
+        planner.id.as_i64(),
+    );
+    if let Some(telemetry) = &launch.telemetry {
+        telemetry.issue(queue, &target);
+    }
+    let closed = |error: &anyhow::Error| -> Result<()> {
+        queue.close_planner(planner.id, Some(&format!("{error:#}")))?;
+        if let Some(telemetry) = &launch.telemetry {
+            telemetry.end(
+                queue,
+                &target,
+                crate::domain::telemetry::TokenRevocation::PlannerClosed,
+            );
+        }
+        Ok(())
+    };
     let handle = match start_wrapper(launch, &planner, &dir, &prompt.text, actor) {
         Ok(handle) => handle,
         Err(error) => {
-            queue.close_planner(planner.id, Some(&format!("{error:#}")))?;
+            closed(&error)?;
             return Err(error);
         }
     };
@@ -233,7 +259,7 @@ fn launch_planner(
                 "the planner's wrapper {handle} could not be recorded, and stopping it failed: {stop:#}"
             )),
         };
-        queue.close_planner(planner.id, Some(&format!("{error:#}")))?;
+        closed(&error)?;
         return Err(error);
     }
     Ok(OpenedPlanner {

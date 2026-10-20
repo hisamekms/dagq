@@ -236,3 +236,32 @@ pub fn events(db: &Path, kind: &str) -> Vec<Value> {
         .unwrap()
         .clone()
 }
+
+/// The queue's `telemetry_token_*` events of the targets of no run of
+/// `kind` (ADR-t1662-3 decision 11), in order, each as its target's id, its
+/// kind and its reason (`None` for an issue).
+pub fn target_token_events(
+    db: &Path,
+    kind: dagq::domain::session_step::TargetKind,
+) -> Vec<(String, &'static str, Option<String>)> {
+    use dagq::domain::EventKind;
+    dagq::infrastructure::sqlite::SqliteQueue::open(db)
+        .unwrap()
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.run_id.is_none() && event.payload["target"]["kind"] == kind.as_str())
+        .filter_map(|event| {
+            let recorded = match event.kind.known()? {
+                EventKind::TelemetryTokenIssued => "issued",
+                EventKind::TelemetryTokenRevoked => "revoked",
+                _ => return None,
+            };
+            Some((
+                event.payload["target"]["id"].as_str()?.to_owned(),
+                recorded,
+                event.payload["reason"].as_str().map(str::to_owned),
+            ))
+        })
+        .collect()
+}

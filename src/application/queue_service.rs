@@ -39,7 +39,7 @@ use crate::domain::queue_service::{
     ServiceState, UseCase, answers, run_holds_token,
 };
 use crate::domain::session_step::{StepError, StepTarget};
-use crate::domain::telemetry::{ReportRecorded, TelemetryReport};
+use crate::domain::telemetry::{ReportRecorded, TargetFacts, TelemetryReport};
 use crate::domain::{
     ActorContext, ActorRole, Answerer, Ask, AskId, AskKind, AskReason, AuthorizationError,
     Capability, EventId, Finding, FindingId, FindingOutcome, FindingStatus, FindingTarget, GoalId,
@@ -77,6 +77,10 @@ pub trait ServiceQueue:
     /// failure between leaves the steps, which the executor's resend adds
     /// no second time.
     fn record_report(&mut self, report: &TelemetryReport) -> Result<ReportRecorded>;
+    /// What the queue holds of `target`, a target of no run, for whether
+    /// its telemetry token still holds
+    /// ([`crate::domain::telemetry::target_token_due`]).
+    fn telemetry_target(&self, target: &StepTarget) -> Result<TargetFacts>;
 }
 
 /// What the service runs its use cases on.
@@ -89,6 +93,9 @@ pub trait ServiceBackend: Send + Sync {
     /// Record a request that named no principal
     /// (`queue_service_unauthenticated`), written as the service itself.
     fn record_unauthenticated(&self, payload: Value) -> Result<()>;
+    /// The unix milliseconds now, by the service's clock: what a target's
+    /// command is read against, past the time it ends by or not.
+    fn now_ms(&self) -> i64;
 }
 
 /// The service's use cases on a backend.
@@ -147,11 +154,16 @@ impl QueueService<'_> {
     }
 
     /// The principal of the request's token, whose run, when it names
-    /// one, has not ended. A refusal is `unauthenticated`, recorded with
+    /// one, has not ended, and whose target of no run, when it has one,
+    /// has not either. A refusal is `unauthenticated`, recorded with
     /// the use case and the reason, never the token: `missing_token` for
     /// no token or an empty one, `unknown_token` for one the control side
     /// did not issue or has revoked, `run_ended` for one whose run has
-    /// ended or is not in the queue.
+    /// ended or is not in the queue, `target_ended` for a telemetry token
+    /// whose target of no run the queue says ended or whose runner is gone
+    /// ([`crate::domain::telemetry::target_token_due`]), revoked yet or
+    /// not: a token the process that issued it could not revoke before it
+    /// fell is refused all the same.
     fn authenticate(&self, request: &ServiceRequest) -> Result<Principal, ServiceResponse> {
         let refuse = |reason: &str, message: &str| {
             let payload = json!({"use_case": request.use_case, "reason": reason});
@@ -195,6 +207,34 @@ impl QueueService<'_> {
                     return Err(ServiceResponse::failure(
                         ServiceErrorCode::Failed,
                         format!("the token's run could not be read: {error:#}"),
+                    ));
+                }
+            }
+        }
+        if let Some(target) = principal.target.as_ref().filter(|t| t.run_id().is_none()) {
+            let facts = self
+                .backend
+                .open(&principal.actor())
+                .and_then(|queue| queue.telemetry_target(target));
+            match facts {
+                Ok(facts)
+                    if crate::domain::telemetry::target_token_due(
+                        target.kind,
+                        &facts,
+                        self.backend.now_ms(),
+                        &|_| true,
+                    )
+                    .is_none() => {}
+                Ok(_) => {
+                    return Err(refuse(
+                        "target_ended",
+                        "the token's target has ended or is not in the queue",
+                    ));
+                }
+                Err(error) => {
+                    return Err(ServiceResponse::failure(
+                        ServiceErrorCode::Failed,
+                        format!("the token's target could not be read: {error:#}"),
                     ));
                 }
             }
@@ -837,6 +877,10 @@ pub trait TelemetryTokens: Send + Sync {
         &self,
         db: &std::path::Path,
     ) -> Result<Vec<crate::domain::telemetry::HeldTelemetry>>;
+    /// What the queue at `db` holds of `target`, a target of no run, for
+    /// whether its token is due ([`crate::domain::telemetry::target_token_due`]):
+    /// what the sweep reads, as the service does at each request.
+    fn target_facts(&self, db: &std::path::Path, target: &StepTarget) -> Result<TargetFacts>;
 }
 
 /// `up`'s step (ADR-t1233-4 decision 1): reuse a service of this build
@@ -1106,6 +1150,14 @@ mod tests {
                 resources: added(report.resources.len()),
             })
         }
+        /// A target of id 9 ended; every other is still open.
+        fn telemetry_target(&self, target: &StepTarget) -> Result<TargetFacts> {
+            Ok(if target.id == "9" {
+                TargetFacts::Ended
+            } else {
+                TargetFacts::OpenPlanner
+            })
+        }
     }
 
     struct Backend {
@@ -1144,6 +1196,13 @@ mod tests {
                     },
                     None,
                 )),
+                "telemetry-ended" => Some(Principal::telemetry(
+                    &StepTarget {
+                        kind: crate::domain::session_step::TargetKind::PlanReview,
+                        id: "9".into(),
+                    },
+                    None,
+                )),
                 "broken" => return Err(anyhow!("unreadable")),
                 _ => None,
             })
@@ -1158,6 +1217,9 @@ mod tests {
         fn record_unauthenticated(&self, payload: Value) -> Result<()> {
             self.log.lock().unwrap().push(payload);
             Ok(())
+        }
+        fn now_ms(&self) -> i64 {
+            0
         }
     }
 
@@ -1240,6 +1302,31 @@ mod tests {
             ended.log.lock().unwrap().pop().unwrap()["reason"],
             "run_ended"
         );
+        // A telemetry token of a target of no run ends with its target,
+        // revoked yet or not (ADR-t1662-3 decision 11).
+        let report = |target: &str| {
+            json!({"version": crate::domain::telemetry::TELEMETRY_VERSION,
+                "target": {"kind": "plan_review", "id": target},
+                "session_id": format!("plan_review:{target}:s"), "steps": []})
+        };
+        let response = service.handle(&request(
+            Some("telemetry-ended"),
+            UseCase::TelemetryReport,
+            report("9"),
+        ));
+        assert_eq!(code(&response), Some(ServiceErrorCode::Unauthenticated));
+        assert_eq!(
+            ended.log.lock().unwrap().pop().unwrap(),
+            json!({"use_case": "telemetry_report", "reason": "target_ended"})
+        );
+        let response = service.handle(&request(
+            Some("telemetry-planner"),
+            UseCase::TelemetryReport,
+            json!({"version": crate::domain::telemetry::TELEMETRY_VERSION,
+                "target": {"kind": "planner", "id": "3"},
+                "session_id": "planner:3:s", "steps": []}),
+        ));
+        assert_eq!(code(&response), None, "{response:?}");
     }
 
     /// A worker proposes to replan its own run through the service, and

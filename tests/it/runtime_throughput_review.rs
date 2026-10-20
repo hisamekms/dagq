@@ -176,6 +176,23 @@ fn an_hour_no_rule_meets_is_reviewed_and_saved_but_not_told_to_the_inbox() {
     let started = queue_events(&db, "throughput_review_started");
     assert_eq!(started.len(), 1);
     assert_eq!(started[0]["reasons"], json!([]));
+    // Its telemetry token (ADR-t1662-3 decision 11), of the target its
+    // start is: issued once the start was recorded, which names the
+    // command's process and timeout, and revoked once its finish, which
+    // names the start, was.
+    assert_eq!(started[0]["pid"], json!(std::process::id()));
+    assert!(started[0]["timeout_secs"].is_u64(), "{}", started[0]);
+    let id = done["started_event_id"].as_i64().unwrap().to_string();
+    assert_eq!(
+        crate::common::service::target_token_events(
+            &db,
+            dagq::domain::session_step::TargetKind::ThroughputReview
+        ),
+        [
+            (id.clone(), "issued", None),
+            (id, "revoked", Some("job_ended".to_owned()))
+        ]
+    );
     let dir = PathBuf::from(done["dir"].as_str().unwrap());
     assert!(
         dir.ends_with("reports/reviews/hourly-2026-09-29T03"),
@@ -468,6 +485,15 @@ fn a_preparation_failure_is_finished_once_and_told_to_the_inbox() {
     );
     assert!(queue_events(&db, "throughput_review_started").is_empty());
     assert!(queue_events(&db, "throughput_review_reported").is_empty());
+    // Failed before its start: it names no start, and was issued no token.
+    assert_eq!(done.get("started_event_id"), None, "{done}");
+    assert_eq!(
+        crate::common::service::target_token_events(
+            &db,
+            dagq::domain::session_step::TargetKind::ThroughputReview
+        ),
+        []
+    );
     let notices: Vec<_> = attentions(&db)
         .into_iter()
         .filter(|event| event["kind"] == "throughput_review_finished")
@@ -522,6 +548,21 @@ fn a_failed_review_is_recorded_and_told_to_the_inbox_as_a_notice() {
     assert!(
         error["error"].as_str().unwrap().contains("start"),
         "{error}"
+    );
+    // Each one's telemetry token (ADR-t1662-3 decision 11), issued once its
+    // start was recorded, ended with its finish, which names the start.
+    let mut expected = Vec::new();
+    for done in [&failed, &error] {
+        let id = done["started_event_id"].as_i64().unwrap().to_string();
+        expected.push((id.clone(), "issued", None));
+        expected.push((id, "revoked", Some("job_ended".to_owned())));
+    }
+    assert_eq!(
+        crate::common::service::target_token_events(
+            &db,
+            dagq::domain::session_step::TargetKind::ThroughputReview
+        ),
+        expected
     );
     assert_eq!(
         queue_events(&db, "throughput_review_finished"),

@@ -514,6 +514,12 @@ impl HeadlessJob {
         self.provider
     }
 
+    /// The id of the job's `headless_jobs` row; `None` when its start
+    /// could not be recorded.
+    pub(in crate::application::supervise) fn row_id(&self) -> Option<i64> {
+        self.record.as_ref().map(|(_, id)| *id)
+    }
+
     /// Where the job's stdout is written.
     pub(in crate::application::supervise) fn stdout(&self) -> &Path {
         &self.stdout
@@ -748,6 +754,9 @@ pub(in crate::application::supervise) struct JobDesk<'s> {
     pub(super) codex_jobs: Option<&'s dyn AgentProvider>,
     pub(super) signals: &'s dyn AgentSignals,
     pub(super) service_access: &'s dyn crate::application::queue_service::ServiceAccess,
+    /// The telemetry tokens this supervisor issues the targets of no run it
+    /// starts the agent of (ADR-t1662-3 decision 11).
+    pub(super) telemetry_tokens: &'s dyn crate::application::queue_service::TelemetryTokens,
     pub(super) no_claude: bool,
     pub(super) job_ends: &'s JobEnds,
     /// `[review.jobs]` as read at the start.
@@ -757,6 +766,21 @@ pub(in crate::application::supervise) struct JobDesk<'s> {
 }
 
 impl<'s> JobDesk<'s> {
+    /// The issue and the revocation of the telemetry token of a target of
+    /// no run whose agent this supervisor starts (a planner, a plan or goal
+    /// review), under its lease
+    /// ([`crate::application::telemetry_tokens::TargetTelemetry`]).
+    pub(in crate::application::supervise) fn target_telemetry<'e>(
+        &'e self,
+        env: &'e PassEnv<'_>,
+    ) -> crate::application::telemetry_tokens::TargetTelemetry<'e> {
+        crate::application::telemetry_tokens::TargetTelemetry {
+            tokens: self.telemetry_tokens,
+            db: &env.layout.db,
+            lease: Some(env.token),
+        }
+    }
+
     /// The agent that runs the jobs on Claude.
     pub(in crate::application::supervise) fn reviewer(&self) -> &'s dyn AgentProvider {
         self.reviewer
@@ -1056,6 +1080,7 @@ impl Supervisor<'_> {
                 codex_jobs: self.codex_jobs,
                 signals: self.signals,
                 service_access: self.service_access,
+                telemetry_tokens: self.telemetry_tokens,
                 no_claude: self.no_claude,
                 job_ends: &self.job_ends,
                 review_jobs: self.review_jobs,
@@ -1108,14 +1133,36 @@ impl Supervisor<'_> {
         subject: JobSubject,
     ) -> HeadlessJob {
         let timeout = self.job_timeout(&subject);
-        record_job(
+        // An agent job of no run of an eval's (its cases' labeling too) is a
+        // target of no run by its row (ADR-t1662-3 decision 10): issued its
+        // telemetry token once the row is written; the sweep revokes it once
+        // the row ended or this supervisor is gone.
+        let eval = subject.run_id.is_none()
+            && subject.job == JobKind::Agent
+            && subject.kind == headless_job::AGENT_EVAL;
+        let job = record_job(
             &self.job_ports(),
             what,
             child,
             (stdout, stderr),
             subject,
             timeout,
-        )
+        );
+        if eval && let Some(id) = job.row_id() {
+            crate::application::telemetry_tokens::TargetTelemetry {
+                tokens: self.telemetry_tokens,
+                db: &self.layout.db,
+                lease: Some(self.registration.token()),
+            }
+            .issue(
+                &*self.queue,
+                &crate::domain::session_step::StepTarget::of(
+                    crate::domain::session_step::TargetKind::EvalJob,
+                    id,
+                ),
+            );
+        }
+        job
     }
 
     /// How long a job about `subject` may run

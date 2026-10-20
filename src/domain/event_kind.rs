@@ -502,6 +502,11 @@ impl EventKind {
                 | AuthorizationDenied
                 | ObserveStarted
                 | ObserveFinished
+                // The issue and revocation of the telemetry token of a
+                // target of no run (ADR-t1662-3 decision 11), by `target`;
+                // a run's are on the run.
+                | TelemetryTokenIssued
+                | TelemetryTokenRevoked
                 // The throughput review (ADR-t996-1) is about the queue.
                 | ThroughputReviewStarted
                 | ThroughputReviewFinished
@@ -1366,10 +1371,12 @@ pub const TASK_SUBMITTED: &str = EventKind::TaskSubmitted.as_str();
 pub const TASK_WEIGHT_PREDICTED: &str = EventKind::TaskWeightPredicted.as_str();
 /// The supervisor issued a run's executor its telemetry token at the claim,
 /// a resume, an adoption, or the start of an executor on a run that held
-/// none issued under its lease (ADR-t1662-3 decision 11): `target`. Written
-/// only once the token was issued.
+/// none issued under its lease (ADR-t1662-3 decision 11), or the control
+/// side issued a target of no run its token as it started its agent, on the
+/// queue: `target`. Written only once the token was issued.
 pub const TELEMETRY_TOKEN_ISSUED: &str = EventKind::TelemetryTokenIssued.as_str();
-/// A run's telemetry token was revoked: `target`, `reason`
+/// A telemetry token was revoked, on its run or, for a target of no run,
+/// on the queue: `target`, `reason`
 /// ([`super::telemetry::TokenRevocation`]). Written only once the
 /// revocation succeeded, so no token of the run authenticates after it; a
 /// revocation that failed writes nothing and is tried again by the next

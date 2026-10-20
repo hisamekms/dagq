@@ -70,7 +70,10 @@ impl StepKind {
 
 /// The kind of the one target a session's steps are of (ADR-t1662-3
 /// decision 10): a run, which a worker's session and the jobs and
-/// verifications on the run share, or one of the targets of no run.
+/// verifications on the run share, or one of the targets of no run, each a
+/// session the control side starts an agent in with no run: the runtime's
+/// planner, the supervisor's plan review, goal review and eval jobs, and
+/// the observation and the throughput review its child commands run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TargetKind {
@@ -82,17 +85,25 @@ pub enum TargetKind {
     PlanReview,
     /// A goal review job, by its id.
     GoalReview,
-    /// A throughput review, by the id of its start.
+    /// A throughput review, by the id of its start
+    /// (`throughput_review_started`).
     ThroughputReview,
+    /// An observation, by the id of its start (`observe_started`).
+    Observer,
+    /// A job of the eval of an agent, or one that labels a case of a
+    /// production set, by its `headless_jobs` id.
+    EvalJob,
 }
 
 impl TargetKind {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 7] = [
         Self::Run,
         Self::Planner,
         Self::PlanReview,
         Self::GoalReview,
         Self::ThroughputReview,
+        Self::Observer,
+        Self::EvalJob,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -102,6 +113,8 @@ impl TargetKind {
             Self::PlanReview => "plan_review",
             Self::GoalReview => "goal_review",
             Self::ThroughputReview => "throughput_review",
+            Self::Observer => "observer",
+            Self::EvalJob => "eval_job",
         }
     }
 
@@ -124,6 +137,14 @@ impl StepTarget {
         Self {
             kind: TargetKind::Run,
             id: run.to_string(),
+        }
+    }
+
+    /// The target of no run of `kind` by its id `id`.
+    pub fn of(kind: TargetKind, id: i64) -> Self {
+        Self {
+            kind,
+            id: id.to_string(),
         }
     }
 

@@ -161,6 +161,32 @@ fn a_requested_round_runs_one_agent_job_per_run_and_records_its_scores() {
             Some("ended".to_owned())
         )
     );
+    // Each job's telemetry token (ADR-t1662-3 decision 11), of its row: issued
+    // as it started, and revoked by the sweep once its row ended.
+    let ids: Vec<String> = rusqlite::Connection::open(&fx.db)
+        .unwrap()
+        .prepare("SELECT id FROM headless_jobs WHERE kind = 'agent_eval' ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get::<_, i64>(0))
+        .unwrap()
+        .map(|id| id.unwrap().to_string())
+        .collect();
+    let mut recorded = common::service::target_token_events(
+        &fx.db,
+        dagq::domain::session_step::TargetKind::EvalJob,
+    );
+    recorded.sort();
+    let mut expected: Vec<_> = ids
+        .iter()
+        .flat_map(|id| {
+            [
+                (id.clone(), "issued", None),
+                (id.clone(), "revoked", Some("job_ended".to_owned())),
+            ]
+        })
+        .collect();
+    expected.sort();
+    assert_eq!(recorded, expected);
 
     // The definition past the limit started no round.
     let refused = events(&fx.db, EventKind::AgentEvalRefused);

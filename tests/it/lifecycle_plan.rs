@@ -14,15 +14,18 @@ use dagq::{
     application::{
         SessionWrappers, TaskReads, TaskStore,
         planner::{self, OpenedPlanner, PlannerLaunch},
+        queue_service::TelemetryTokens,
     },
     domain::{
         NewTask, PlannerId, PlannerOrigin, SessionRole, TaskRun,
         actor_model::ModelRole,
         background_wrapper::{StopRoute, WrapperStop},
+        session_step::{StepTarget, TargetKind},
     },
     infrastructure::{
         adapters::{GitRepository, SystemProcesses, shell_quote},
         clock::SystemClock,
+        queue_service::SystemServiceAccess,
         run_files::LocalRunFiles,
         sqlite::SqliteQueue,
     },
@@ -198,6 +201,11 @@ fn launch<'a>(
         language,
         roles: Default::default(),
         turn_limits: dagq::domain::stall::StallConfig::default().turn_limits(),
+        telemetry: Some(dagq::application::telemetry_tokens::TargetTelemetry {
+            tokens: &dagq::infrastructure::queue_service::SystemServiceAccess,
+            db,
+            lease: None,
+        }),
     }
 }
 
@@ -354,6 +362,18 @@ fn each_runtime_planner_starts_its_wrapper_in_the_background_without_a_workspace
                 quoted(plugin_dir.as_deref().unwrap()),
             )
         );
+        // Its telemetry token (ADR-t1662-3 decision 11): issued as it
+        // opened, its file outside the planner's directory, and named
+        // nowhere in the wrapper's environment or command line.
+        let credential = SystemServiceAccess
+            .telemetry_credential(db, &StepTarget::of(TargetKind::Planner, id))
+            .unwrap();
+        assert!(!credential.starts_with(&dir), "{credential:?}");
+        let token = std::fs::read_to_string(&credential).unwrap();
+        for text in [credential.to_str().unwrap(), token.trim()] {
+            assert!(!command.contains(text), "{command}");
+            assert!(env.iter().all(|(_, v)| !v.contains(text)), "{env:?}");
+        }
         for (name, value) in [
             ("DAGQ_ROLE", "planner".to_owned()),
             ("DAGQ_QUEUE", db.to_str().unwrap().to_owned()),
@@ -411,6 +431,32 @@ fn each_runtime_planner_starts_its_wrapper_in_the_background_without_a_workspace
     let all = queue.planners(true).unwrap();
     assert_eq!(all.len(), 3);
     assert!(all[2].closed_at.is_some());
+    // Its close revoked the token issued as it opened, each recorded on
+    // the queue once it succeeded.
+    let third = StepTarget::of(TargetKind::Planner, all[2].id.as_i64());
+    assert_eq!(SystemServiceAccess.telemetry_credential(db, &third), None);
+    let token_events: Vec<_> = queue
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.payload["target"] == json!(third))
+        .map(|event| {
+            (
+                event.kind.as_str().to_owned(),
+                event.payload["reason"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        token_events,
+        [
+            ("telemetry_token_issued".to_owned(), Value::Null),
+            (
+                "telemetry_token_revoked".to_owned(),
+                "planner_closed".into()
+            ),
+        ]
+    );
     assert!(
         all[2]
             .error

@@ -653,6 +653,19 @@ fn a_passing_plan_review_readies_the_proposal_with_its_actions() {
     // Reviewed once: a second pass finds nothing to review.
     supervise(&fx, &backend, &reviewer);
     assert_eq!(reviewer.prompts().len(), 1);
+    // Its telemetry token (ADR-t1662-3 decision 11): issued as its job
+    // started and revoked at its end, each on the queue by its id.
+    let id = finished[0]["plan_review_id"].as_i64().unwrap().to_string();
+    assert_eq!(
+        common::service::target_token_events(
+            &fx.db,
+            dagq::domain::session_step::TargetKind::PlanReview
+        ),
+        [
+            (id.clone(), "issued", None),
+            (id, "revoked", Some("job_ended".to_owned()))
+        ]
+    );
 }
 
 /// ADR-t1433-2 decision 5: the proposal of a person's planner opened before

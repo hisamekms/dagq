@@ -113,7 +113,8 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
   agentのtoken（worker・各job・observer・planner）とほかの全roleは`telemetry.report`を持たない。
   runの対象のtokenはsupervisorだけがclaim・resume・runの引き継ぎと、runの上でexecutorを起動するとき自分のleaseのものが無ければ、自分のleaseの下で発行し（前のものは失効させて発行し直す）、runの終わりとleaseの喪失で失効させる。
   leaseの喪失による失効はそのleaseで発行したものだけを消し、失効の失敗（発行し直しの前のものも）は次の見回りでやり直し、失効の記録は失効が成功した後にだけ書き、発行と失効は互いに排他にする（時点と記録は[Queue service](queue-service.md#principalとtoken)）。
-  tokenのファイルはqueueの`service/`の下でagentのworktreeとrun dirの外にあり、executorは対象から場所を引く口を使い、agentのenvとargvには渡さない（hostでは助言的）
+  runを持たない対象のtokenはagentを起動する制御側が発行して対象の終わりで失効させ、起動元が失効の前に落ちても、serviceが要求ごとに対象の終わりをqueueから読んで断る。
+  tokenのファイルはqueueの`service/`の下でagentのworktree・run dir・plannerとjobのdirの外にあり、executorは対象から場所を引く口を使い、agentのenvとargvには渡さない（hostでは助言的）
 - 予約のcapabilityは誰にも与えない。
   sandboxのbackendが強制するときの名前
 

@@ -489,10 +489,17 @@ impl SqliteQueue {
     /// (ADR-0044): every event but `observe_started` / `observe_finished`,
     /// the findings and asks `role` wrote, the commands of `role` the
     /// authorizer refused, the session events of its own spans
-    /// (`span_kind`), and the KPIs' bookkeeping
-    /// ([`crate::domain::kpi::BOOKKEEPING_KINDS`], ADR-0051 decision 24).
+    /// (`span_kind`), the issue and revocation of telemetry tokens (its own
+    /// observation's among them, ADR-t1662-3 decision 11), and the KPIs'
+    /// bookkeeping ([`crate::domain::kpi::BOOKKEEPING_KINDS`], ADR-0051
+    /// decision 24).
     pub fn events_besides(&self, role: &str, span_kind: &str, after: EventId) -> Result<i64> {
-        let mut ignored = vec![event_kind::OBSERVE_STARTED, event_kind::OBSERVE_FINISHED];
+        let mut ignored = vec![
+            event_kind::OBSERVE_STARTED,
+            event_kind::OBSERVE_FINISHED,
+            event_kind::TELEMETRY_TOKEN_ISSUED,
+            event_kind::TELEMETRY_TOKEN_REVOKED,
+        ];
         ignored.extend_from_slice(crate::domain::kpi::BOOKKEEPING_KINDS);
         let ignored = serde_json::to_string(&ignored)?;
         Ok(self.conn.query_row(

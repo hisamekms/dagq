@@ -233,6 +233,10 @@ pub struct ThroughputReviewEnvironment<'a, Q: ?Sized> {
     /// Claude Code's reading of a job's output, for the walls of a Claude
     /// job (task 438); `None` reads none.
     pub signals: Option<&'a dyn AgentSignals>,
+    /// The issue of the review's telemetry token once its start is
+    /// recorded, revoked at its finish (ADR-t1662-3 decision 11); `None`
+    /// issues none.
+    pub telemetry: Option<crate::application::telemetry_tokens::TargetTelemetry<'a>>,
 }
 
 /// Run one review: judge the hour (hourly), gather the inputs, start the
@@ -295,8 +299,21 @@ pub fn review<Q: AskStore + RunLog>(
         failure["error"] = json!(format!("{error:#}"));
         failure
     });
-    // The only finish write (see the doc comment).
-    queue.record_queue_event(EventKind::ThroughputReviewFinished, payload.clone())?;
+    // The only finish write (see the doc comment). The review's telemetry
+    // token ends with it, whichever way it ended once its start was
+    // recorded (the failure's payload names the start too), and so does a
+    // finish that could not be written.
+    let finished = queue.record_queue_event(EventKind::ThroughputReviewFinished, payload.clone());
+    if let (Some(telemetry), Some(started)) =
+        (&environment.telemetry, payload["started_event_id"].as_i64())
+    {
+        telemetry.end(
+            &*queue,
+            &review_target(EventId::new(started)),
+            crate::domain::telemetry::TokenRevocation::JobEnded,
+        );
+    }
+    finished?;
     tracing::info!(
         mode = options.mode.as_str(),
         period = period.label,
@@ -306,6 +323,15 @@ pub fn review<Q: AskStore + RunLog>(
         payload["outcome"]
     );
     Ok(payload)
+}
+
+/// The target of the telemetry token of the review whose start is
+/// `started` (ADR-t1662-3 decision 10).
+fn review_target(started: EventId) -> crate::domain::session_step::StepTarget {
+    crate::domain::session_step::StepTarget::of(
+        crate::domain::session_step::TargetKind::ThroughputReview,
+        started.as_i64(),
+    )
 }
 
 /// Prepare and execute a known period; retain context for preparation errors.
@@ -323,6 +349,7 @@ fn review_period<Q: AskStore + RunLog>(
         host,
         generators,
         signals,
+        telemetry: _,
     } = *environment;
     let landings = landings(queue, period)?;
     let judgment = match options.mode {
@@ -408,9 +435,21 @@ fn review_period<Q: AskStore + RunLog>(
         "dir": dir,
         "session_id": session_id,
         "launch": launch.to_value(),
+        // Its process and its timeout, by which the queue tells the end of
+        // a review that fell before it recorded its finish.
+        "pid": host.pids().0,
+        "timeout_secs": options.timeout.as_secs(),
     });
     merge(&mut started, &prompt_record);
     let started = queue.record_queue_event(EventKind::ThroughputReviewStarted, started)?;
+    // A failure from here on is finished as this start's.
+    failure["started_event_id"] = json!(started);
+    // The review's telemetry token, of the target its start is: its
+    // executor is this command, and the agent is not given it. [`review`]
+    // revokes it at the finish.
+    if let Some(telemetry) = &environment.telemetry {
+        telemetry.issue(&*queue, &review_target(started));
+    }
     tracing::info!(
         mode = options.mode.as_str(),
         period = period.label,
@@ -462,6 +501,8 @@ fn review_period<Q: AskStore + RunLog>(
         "error": error,
         "reasons": reasons,
         "dir": dir,
+        // The start this finish ends, the target of its telemetry token.
+        "started_event_id": started,
         // The span this review's start opened closes by it.
         "session_id": session_id,
         "duration_secs": generators.clock.since(clock).as_secs(),

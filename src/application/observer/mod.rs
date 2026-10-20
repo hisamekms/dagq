@@ -143,6 +143,13 @@ pub struct ObserverEnvironment<'a, Q: ?Sized> {
     pub sources: &'a dyn ObserverSources<Q>,
     pub host: &'a dyn ObserverHost,
     pub generators: &'a Generators,
+    /// This process's id, which the start records for the sweep to tell
+    /// the observation's end by once it is gone.
+    pub pid: u32,
+    /// The issue of the observation's telemetry token once its start is
+    /// recorded, revoked at its finish (ADR-t1662-3 decision 11); `None`
+    /// issues none.
+    pub telemetry: Option<crate::application::telemetry_tokens::TargetTelemetry<'a>>,
 }
 
 /// Run one observation: gather the inputs, start the agent headless with
@@ -168,6 +175,8 @@ pub fn observe<Q: AskStore + ObserverLog + QueueRecords + RunLog + TaskReads>(
         sources,
         host,
         generators,
+        pid,
+        telemetry,
     } = *environment;
     let started = generators.clock.now();
     let since = match (options.since, options.mode) {
@@ -285,9 +294,30 @@ pub fn observe<Q: AskStore + ObserverLog + QueueRecords + RunLog + TaskReads>(
     // The actor is one per observation either way.
     let instance = generators.ids.uuid();
     let session_id = (launch.provider == Provider::Claude).then(|| instance.clone());
-    let mut started_payload = json!({"mode": options.mode.as_str(), "since": since, "dir": dir, "session_id": session_id, "launch": launch.to_value()});
+    // Its process and its timeout, by which the queue tells the end of an
+    // observation that fell before it recorded its finish.
+    let mut started_payload = json!({"mode": options.mode.as_str(), "since": since, "dir": dir, "session_id": session_id, "launch": launch.to_value(), "pid": pid, "timeout_secs": options.timeout.as_secs()});
     merge(&mut started_payload, &prompt_record);
     let event_mark = queue.record_queue_event(EventKind::ObserveStarted, started_payload)?;
+    // The observation's telemetry token, of the target its start is: its
+    // executor is this command, and the agent is not given it.
+    let target = crate::domain::session_step::StepTarget::of(
+        crate::domain::session_step::TargetKind::Observer,
+        event_mark.as_i64(),
+    );
+    if let Some(telemetry) = &telemetry {
+        telemetry.issue(&*queue, &target);
+    }
+    // Its end: the finish recorded, or a failure that records none.
+    let ended = |queue: &Q| {
+        if let Some(telemetry) = &telemetry {
+            telemetry.end(
+                queue,
+                &target,
+                crate::domain::telemetry::TokenRevocation::JobEnded,
+            );
+        }
+    };
     tracing::info!(
         mode = options.mode.as_str(),
         since = since.map(EventId::as_i64),
@@ -352,7 +382,9 @@ pub fn observe<Q: AskStore + ObserverLog + QueueRecords + RunLog + TaskReads>(
             })
             .ok()
     });
-    let written = queue.written_by(OBSERVER_ROLE, event_mark, ask_mark)?;
+    let written = queue
+        .written_by(OBSERVER_ROLE, event_mark, ask_mark)
+        .inspect_err(|_| ended(queue))?;
     let (recorded, updated, closed, asks, without_ask) = (
         written.recorded.len(),
         written.updated.len(),
@@ -360,10 +392,11 @@ pub fn observe<Q: AskStore + ObserverLog + QueueRecords + RunLog + TaskReads>(
         written.asks.len(),
         written.without_ask.len(),
     );
-    let failures = consecutive_failures(queue, outcome)?;
+    let failures = consecutive_failures(queue, outcome).inspect_err(|_| ended(queue))?;
     let saved = outcome == "succeeded" && options.mode == ObserveMode::Hourly;
     if saved {
-        host.write_cursor(db, cursor)?;
+        host.write_cursor(db, cursor)
+            .inspect_err(|_| ended(queue))?;
     }
     let mut payload = json!({
         "mode": options.mode.as_str(),
@@ -399,7 +432,9 @@ pub fn observe<Q: AskStore + ObserverLog + QueueRecords + RunLog + TaskReads>(
     if let Some(unusable) = provider_unusable {
         payload["provider_unusable"] = unusable;
     }
-    queue.record_queue_event(EventKind::ObserveFinished, payload.clone())?;
+    let finished = queue.record_queue_event(EventKind::ObserveFinished, payload.clone());
+    ended(queue);
+    finished?;
     tracing::info!(
         mode = options.mode.as_str(),
         outcome,

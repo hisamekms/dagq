@@ -147,6 +147,36 @@ fn the_observer_takes_its_role_table_and_records_what_it_started_with() {
         .map(|payload| payload["launch"].clone())
         .collect();
     assert_eq!(spans, started);
+    // Each observation's telemetry token (ADR-t1662-3 decision 11), of the
+    // target its start is: issued once the start was recorded, which names
+    // the command's process and timeout, and revoked once its finish was.
+    let mut starts = dagq::application::EventStore::latest_events_of(
+        &SqliteQueue::open(&db).unwrap(),
+        "observe_started",
+        10,
+    )
+    .unwrap();
+    starts.reverse();
+    let mut expected = Vec::new();
+    for start in &starts {
+        assert_eq!(
+            start.payload["pid"],
+            std::process::id(),
+            "{}",
+            start.payload
+        );
+        assert!(start.payload["timeout_secs"].is_u64(), "{}", start.payload);
+        let id = start.id.as_i64().to_string();
+        expected.push((id.clone(), "issued", None));
+        expected.push((id, "revoked", Some("job_ended".to_owned())));
+    }
+    assert_eq!(
+        crate::common::service::target_token_events(
+            &db,
+            dagq::domain::session_step::TargetKind::Observer
+        ),
+        expected
+    );
 }
 
 #[test]

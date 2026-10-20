@@ -302,5 +302,7 @@ runtimeのplannerは経路の選択なしに非対話で立ち、この文書の
   wrapperはそのとき壁のturnのidle markerを書き直す。
 - 生死と掃除はworkerと同じくhandleの識別だけで判じ、heartbeatが古くても`lost`にせず行を閉じない。
 - **起動**: `launch_planner`がbackgroundで立ててhandleをplannerの行に記録し、`dagq submit`はplannerの記録からhandleを読んでproposalの持ち主にするので、wrapperは最初のturnの前にhandleが記録されるのを待つ。
+- **telemetryのtoken**: `launch_planner`がwrapperの起動の前にplannerを対象として発行し、ファイルはplannerのディレクトリの外で、wrapperとturnのenv・argvに載せない。
+  `planner_closed`の後はserviceが断り、見回りが失効させる（[Queue service](../queue-service.md#principalとtoken)）。
 - 殺されたwrapperが残したturnはplannerの最後のturnの始まりの記録から止める（ADR-t1404-1決定3・8）。
 - **CLI**（[ADR-t1533-1](../../adr/2026-10-03-t1533-1-follow-up-requests-go-to-headless-planners-by-planner-id-and-no-planner-close.md)）: `planner screen`は画面を読まずに`turns/`の場所を返し、`planner send`は拒む（[続きの依頼と非対話のplannerのCLI](plan-planners.md#続きの依頼と非対話のplannerのcli)）。

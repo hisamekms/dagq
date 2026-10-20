@@ -1559,6 +1559,7 @@ impl Supervisor<'_> {
                 codex_jobs: self.codex_jobs,
                 signals: self.signals,
                 service_access: self.service_access,
+                telemetry_tokens: self.telemetry_tokens,
                 no_claude: self.no_claude,
                 job_ends: &self.job_ends,
                 review_jobs: self.review_jobs,
@@ -1617,8 +1618,18 @@ impl Supervisor<'_> {
     /// Try again the revocations held, then revoke the telemetry tokens
     /// that are due by the queue: the runs that ended, and those whose
     /// lease was lost, each only under the lease it was issued under
-    /// ([`telemetry_tokens::sweep`]).
+    /// ([`telemetry_tokens::sweep`]), and the targets of no run that ended
+    /// or whose runner is gone, by the queue and this host's processes
+    /// ([`telemetry_tokens::sweep_targets`]).
     fn sweep_telemetry(&mut self) {
+        let processes = &self.processes;
+        telemetry_tokens::sweep_targets(
+            self.telemetry_tokens,
+            &*self.queue,
+            &self.layout.db,
+            self.generators.clock.now().saturating_mul(1000),
+            &|pid| processes.alive(pid),
+        );
         let mut retries = std::mem::take(&mut self.telemetry_retries);
         let now = self.generators.clock.now();
         let states = |run: &RunId, issuer: Option<&crate::domain::LeaseToken>| {

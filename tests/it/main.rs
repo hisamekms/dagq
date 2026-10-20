@@ -201,6 +201,7 @@ mod shell_leftovers;
 mod source_repository;
 mod supervisor_without_cmux;
 mod task_replanning;
+mod telemetry_targets;
 mod telemetry_tokens;
 mod test_actor_env;
 mod throughput_review_codex;

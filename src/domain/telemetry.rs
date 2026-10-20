@@ -238,7 +238,7 @@ pub fn actor_id(target: &StepTarget) -> String {
 }
 
 string_enum!(
-/// Why a run's telemetry token was revoked (ADR-t1662-3 decision 11), as
+/// Why a telemetry token was revoked (ADR-t1662-3 decision 11), as
 /// `telemetry_token_revoked` records it once the revocation succeeded.
 TokenRevocation {
     /// A resume issued the run another one.
@@ -247,7 +247,80 @@ TokenRevocation {
     RunEnded => "run_ended",
     /// The supervisor that held the run's lease lost it.
     LeaseLost => "lease_lost",
+    /// The job or the command of a target of no run ended, or the process
+    /// that ran it is gone ([`target_token_due`]).
+    JobEnded => "job_ended",
+    /// The runtime's planner was closed (`planner_closed`).
+    PlannerClosed => "planner_closed",
 });
+
+/// How long after its timeout a command of a target of no run (an
+/// observation, a throughput review) whose finish the queue does not hold
+/// is taken to have ended: the margin of
+/// [`super::throughput_review::RUNNING_MS`] over the job's timeout.
+pub const COMMAND_MARGIN_MS: i64 = 5 * 60 * 1000;
+
+/// What the queue holds of a target of no run (ADR-t1662-3 decision 11),
+/// for whether its telemetry token still holds ([`target_token_due`]):
+/// the queue service reads it at each request, and the supervisor's sweep
+/// at each pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetFacts {
+    /// The queue has no such target, or records its end: the planner was
+    /// closed, the job's row finished, the command's finish was recorded.
+    Ended,
+    /// A planner of the runtime's still open.
+    OpenPlanner,
+    /// A job the supervisor watches (a plan review, a goal review, an eval
+    /// job) whose row is unfinished: the registration of that supervisor,
+    /// `None` once it is gone.
+    SupervisedJob { supervisor: Option<Beat> },
+    /// A command the supervisor started as a child (an observation, a
+    /// throughput review) whose start has no finish: by when it ends at the
+    /// latest (unix ms: its start, its timeout and [`COMMAND_MARGIN_MS`]),
+    /// and its process, `None` for a start that names none.
+    StartedCommand { ends_by_ms: i64, pid: Option<u32> },
+}
+
+/// A supervisor's registration as the end of its job is read: its process
+/// and how long ago (seconds) it last beat.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Beat {
+    pub pid: u32,
+    pub age_secs: i64,
+}
+
+/// Whether the telemetry token of a target of no run of `kind` is due at
+/// `now_ms` by what the queue holds of it (`facts`), and why: the target
+/// ended (a closed planner is [`TokenRevocation::PlannerClosed`]), or the
+/// process that ran it is gone though the queue does not say it ended: the
+/// supervisor of a job no longer registered or beating, a command past the
+/// time it ends by, or one whose process `alive` says is gone. The service
+/// reads only the queue (`alive` true for every process); the supervisor's
+/// sweep asks the host too. A token due is refused by the service whether
+/// it was revoked yet or not.
+pub fn target_token_due(
+    kind: TargetKind,
+    facts: &TargetFacts,
+    now_ms: i64,
+    alive: &dyn Fn(u32) -> bool,
+) -> Option<TokenRevocation> {
+    let ended = match facts {
+        TargetFacts::Ended => true,
+        TargetFacts::OpenPlanner => false,
+        TargetFacts::SupervisedJob { supervisor } => {
+            supervisor.is_none_or(|beat| super::heartbeat_stale(alive(beat.pid), beat.age_secs))
+        }
+        TargetFacts::StartedCommand { ends_by_ms, pid } => {
+            now_ms > *ends_by_ms || pid.is_some_and(|pid| !alive(pid))
+        }
+    };
+    ended.then_some(if kind == TargetKind::Planner {
+        TokenRevocation::PlannerClosed
+    } else {
+        TokenRevocation::JobEnded
+    })
+}
 
 /// A telemetry token the control side holds: its target, and the lease (the
 /// supervisor's token) it was issued under, `None` for one issued under no
@@ -415,6 +488,8 @@ mod tests {
             TargetKind::PlanReview,
             TargetKind::GoalReview,
             TargetKind::ThroughputReview,
+            TargetKind::Observer,
+            TargetKind::EvalJob,
         ] {
             for id in ["0", "-1", "x"] {
                 assert_eq!(check(&report(kind, id)), Err(TelemetryError::Target));
@@ -636,5 +711,76 @@ mod tests {
         }
         assert_eq!(TokenRevocation::Reissued.as_str(), "reissued");
         assert_eq!(TokenRevocation::LeaseLost.as_str(), "lease_lost");
+    }
+
+    /// ADR-t1662-3 decision 11: a target of no run's token is due once the
+    /// queue says it ended, or once the process that ran it is gone: a
+    /// job's supervisor unregistered, stale or dead, a command past the
+    /// time it ends by or whose process is dead. A closed planner's reason
+    /// is its own.
+    #[test]
+    fn a_target_of_no_runs_token_is_due_once_it_ended_or_its_runner_is_gone() {
+        use super::super::HEARTBEAT_TIMEOUT_SECS;
+        let live = |_: u32| true;
+        let dead = |pid: u32| pid != 7;
+        let due = |kind, facts: &TargetFacts, alive: &dyn Fn(u32) -> bool| {
+            target_token_due(kind, facts, 1_000, alive)
+        };
+        assert_eq!(
+            due(TargetKind::Planner, &TargetFacts::Ended, &live),
+            Some(TokenRevocation::PlannerClosed)
+        );
+        assert_eq!(
+            due(TargetKind::Planner, &TargetFacts::OpenPlanner, &live),
+            None
+        );
+        for kind in [
+            TargetKind::PlanReview,
+            TargetKind::GoalReview,
+            TargetKind::EvalJob,
+            TargetKind::ThroughputReview,
+            TargetKind::Observer,
+        ] {
+            assert_eq!(
+                due(kind, &TargetFacts::Ended, &live),
+                Some(TokenRevocation::JobEnded),
+                "{kind:?}"
+            );
+        }
+        let job = |supervisor| TargetFacts::SupervisedJob { supervisor };
+        let beat = |age_secs| Some(Beat { pid: 7, age_secs });
+        assert_eq!(due(TargetKind::PlanReview, &job(beat(1)), &live), None);
+        for (facts, alive) in [
+            (job(None), &live as &dyn Fn(u32) -> bool),
+            (job(beat(HEARTBEAT_TIMEOUT_SECS + 1)), &live),
+            (job(beat(1)), &dead),
+        ] {
+            assert_eq!(
+                due(TargetKind::GoalReview, &facts, alive),
+                Some(TokenRevocation::JobEnded),
+                "{facts:?}"
+            );
+        }
+        let command = |ends_by_ms, pid| TargetFacts::StartedCommand { ends_by_ms, pid };
+        assert_eq!(
+            due(TargetKind::Observer, &command(1_000, Some(7)), &live),
+            None
+        );
+        assert_eq!(
+            due(TargetKind::Observer, &command(1_000, None), &dead),
+            None
+        );
+        for (facts, alive) in [
+            (command(999, Some(7)), &live as &dyn Fn(u32) -> bool),
+            (command(5_000, Some(7)), &dead),
+        ] {
+            assert_eq!(
+                due(TargetKind::ThroughputReview, &facts, alive),
+                Some(TokenRevocation::JobEnded),
+                "{facts:?}"
+            );
+        }
+        assert_eq!(TokenRevocation::PlannerClosed.as_str(), "planner_closed");
+        assert_eq!(TokenRevocation::JobEnded.as_str(), "job_ended");
     }
 }

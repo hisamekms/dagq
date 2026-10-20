@@ -9,6 +9,7 @@ use crate::domain::session_step::{
     self, ResourceSample, SeqRange, SessionOwner, SessionResource, SessionStep, Step, StepError,
     StepKind, StepTarget, StepsRecorded, TargetKind, gaps, ranges,
 };
+use crate::domain::telemetry::{Beat, TargetFacts};
 
 /// The columns of a stored step, in the order [`step_row`] reads them.
 const COLUMNS: &str = "id,target_kind,target_id,session_id,seq,kind,offset_ms,duration_ms,\
@@ -404,5 +405,121 @@ impl SessionOwners for SqliteQueue {
             )
             .optional()?;
         Ok(owner)
+    }
+}
+
+impl SqliteQueue {
+    /// What the queue holds of `target`, a target of no run, for whether its
+    /// telemetry token still holds ([`crate::domain::telemetry::TargetFacts`]):
+    /// a planner's `closed_at`; a plan review's, a goal review's or an eval
+    /// job's row (`finished_at`, `ended_at`) and the registration of the
+    /// supervisor that runs it, its heartbeat's age by the DB's clock; a
+    /// command's start (`observe_started`, `throughput_review_started`) and
+    /// a finish of its directory after it, the time it ends by from its
+    /// start, its `timeout_secs` and the margin, and its `pid`. A target
+    /// the queue does not have has ended, and so does a run's.
+    pub fn telemetry_target(&self, target: &StepTarget) -> Result<TargetFacts> {
+        let Ok(id) = target.id.parse::<i64>() else {
+            return Ok(TargetFacts::Ended);
+        };
+        let job = |table: &str, ended: &str, only: &str| -> Result<TargetFacts> {
+            let row = self
+                .conn
+                .query_row(
+                    &format!(
+                        "SELECT r.{ended}, s.pid, unixepoch() - s.heartbeat_at FROM {table} r
+                         LEFT JOIN supervisors s ON s.token = r.supervisor_token
+                         WHERE r.id = ?1{only}"
+                    ),
+                    [id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<i64>>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            Ok(match row {
+                Some((None, pid, age)) => TargetFacts::SupervisedJob {
+                    supervisor: pid.zip(age).map(|(pid, age_secs)| Beat {
+                        pid: u32::try_from(pid).unwrap_or_default(),
+                        age_secs,
+                    }),
+                },
+                _ => TargetFacts::Ended,
+            })
+        };
+        let command = |started: EventKind, finished: EventKind| -> Result<TargetFacts> {
+            let row = self
+                .conn
+                .query_row(
+                    "SELECT CAST((julianday(s.created_at) - 2440587.5) * 86400000 AS INTEGER),
+                            json_extract(s.payload, '$.timeout_secs'),
+                            json_extract(s.payload, '$.pid'),
+                            EXISTS (SELECT 1 FROM run_events f
+                                    WHERE f.kind = ?3 AND f.id > s.id
+                                      AND json_extract(f.payload, '$.dir')
+                                          = json_extract(s.payload, '$.dir'))
+                     FROM run_events s WHERE s.id = ?1 AND s.kind = ?2",
+                    params![id, started.as_str(), finished.as_str()],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, bool>(3)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            Ok(match row {
+                Some((started_ms, timeout_secs, pid, false)) => TargetFacts::StartedCommand {
+                    ends_by_ms: started_ms.saturating_add(timeout_secs.map_or(
+                        crate::domain::throughput_review::RUNNING_MS,
+                        |secs| {
+                            secs.saturating_mul(1000)
+                                .saturating_add(crate::domain::telemetry::COMMAND_MARGIN_MS)
+                        },
+                    )),
+                    pid: pid.and_then(|pid| u32::try_from(pid).ok()),
+                },
+                _ => TargetFacts::Ended,
+            })
+        };
+        match target.kind {
+            TargetKind::Run => Ok(TargetFacts::Ended),
+            TargetKind::Planner => {
+                let closed = self
+                    .conn
+                    .query_row(
+                        "SELECT closed_at IS NOT NULL FROM planners WHERE id = ?1",
+                        [id],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .optional()?;
+                Ok(if closed == Some(false) {
+                    TargetFacts::OpenPlanner
+                } else {
+                    TargetFacts::Ended
+                })
+            }
+            TargetKind::PlanReview => job("plan_reviews", "finished_at", ""),
+            TargetKind::GoalReview => job("goal_reviews", "finished_at", ""),
+            TargetKind::EvalJob => job(
+                "headless_jobs",
+                "ended_at",
+                &format!(
+                    " AND r.run_id IS NULL AND r.kind = '{}'",
+                    crate::domain::headless_job::AGENT_EVAL
+                ),
+            ),
+            TargetKind::ThroughputReview => command(
+                EventKind::ThroughputReviewStarted,
+                EventKind::ThroughputReviewFinished,
+            ),
+            TargetKind::Observer => command(EventKind::ObserveStarted, EventKind::ObserveFinished),
+        }
     }
 }

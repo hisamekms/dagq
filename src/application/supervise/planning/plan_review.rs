@@ -104,6 +104,7 @@ impl PlanningState {
         }
         if let Some(mut watch) = self.plan_review.take() {
             watch.headless.abandon();
+            end_job_telemetry(env, TargetKind::PlanReview, watch.job.id);
             info!(
                 "plan review {} stopped for the handoff; it runs again",
                 watch.job.attempt
@@ -111,6 +112,7 @@ impl PlanningState {
         }
         if let Some(mut watch) = self.goal_review.take() {
             watch.headless.abandon();
+            end_job_telemetry(env, TargetKind::GoalReview, watch.job.id);
             info!(
                 "goal review {} of goal {} stopped for the handoff; it runs again",
                 watch.job.attempt, watch.job.goal_id
@@ -309,6 +311,7 @@ impl PlanningState {
             return Ok(());
         }
         let proposal = env.queue.show_proposal(proposal_id)?;
+        issue_job_telemetry(env, TargetKind::PlanReview, job.id);
         match self.spawn_plan_review(env, &job, &proposal, &launch) {
             Ok((prompt_bytes, Ok(headless))) => {
                 info!(task_id = %job.anchor, "proposal {proposal_id} plan review {} started on {} with a prompt of {} bytes", job.attempt, launch.provider.as_str(), prompt_bytes.total);
@@ -673,6 +676,7 @@ impl PlanningState {
             return Ok(false);
         };
         let watch = self.plan_review.take().expect("polled above");
+        end_job_telemetry(env, TargetKind::PlanReview, watch.job.id);
         let duration_secs = watch.headless.elapsed().as_secs();
         let stdout = env
             .files
@@ -809,6 +813,7 @@ impl PlanningState {
                 warn!(task_id = %job.anchor, error = %error, "proposal {} plan review {} failed: {error}; it waits for a person", job.proposal_id, job.attempt);
             }
         }
+        end_job_telemetry(env, TargetKind::PlanReview, job.id);
         if let Err(recorded) = env
             .pass
             .queue
@@ -1360,6 +1365,7 @@ impl PlanningState {
             language: env.verifier.language(),
             roles,
             turn_limits: env.turn_limits,
+            telemetry: Some(env.jobs.target_telemetry(&env.pass)),
         }
     }
 

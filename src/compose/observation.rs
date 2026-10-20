@@ -614,6 +614,12 @@ pub fn observe(
             sources: &sources,
             host: &crate::infrastructure::observer::LocalObserver,
             generators: &generators,
+            pid: std::process::id(),
+            telemetry: Some(crate::application::telemetry_tokens::TargetTelemetry {
+                tokens: &crate::infrastructure::queue_service::SystemServiceAccess,
+                db: &db,
+                lease: None,
+            }),
         },
     )
 }
@@ -668,6 +674,11 @@ pub fn throughput_review(
             // starts nothing (task 438, ADR-t1857-1).
             signals: Some(&crate::infrastructure::adapters::ClaudeCode {
                 executable: PathBuf::from("claude"),
+            }),
+            telemetry: Some(crate::application::telemetry_tokens::TargetTelemetry {
+                tokens: &crate::infrastructure::queue_service::SystemServiceAccess,
+                db: &db,
+                lease: None,
             }),
         },
     )

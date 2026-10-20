@@ -37,7 +37,7 @@ Codexのobserverは、jobのdagqをクライアントモードにしてqueue ser
 serviceはobserverのprincipal（tokenのrole `observer`とjobのactor id）をactorにしてCLIと同じ`Dialogue`で書くので、findingのeventの`by`とaskの`asked_by`は`observer`、eventのactorはjobのactor idになり、拒否の`authorization_denied`もactorのroleが`observer`で残る。
 そのため下の0の「observer自身のeventを数えない」判定（`SqliteQueue::events_besides`）はCLIで書いたときと同じに成り立つ（ADR-t1222-1決定4）。
 providerによらずagentの`dagq`はserviceに送り、queueのDBを開かない。
-tokenはjobの起動ごとに`HostActorExecutor`が発行してfileに書き、そのpathを`DAGQ_SERVICE_CREDENTIAL_FILE`で渡し、jobのprocessが終われば失効させる（4）。
+tokenはjobの起動ごとに`HostActorExecutor`が発行してそのfileのpathをenvで渡し、jobのprocessが終われば失効させる（4）。
 Codexのsandboxに足すのはserviceのsocketへの到達だけ（下の「Codexで動かす」）。
 supervisorはserviceが居ない間observerを起動しない（ADR-t1233-4決定2）ので、agentの書き込みがserviceに届かないのは走っている間にserviceが落ちたときだけで、その件数とidは`observe_finished`に入らない（書かれていないので）。
 
@@ -72,7 +72,8 @@ supervisorはserviceが居ない間observerを起動しない（ADR-t1233-4決�
      入力は下の「promptの入力の上限と選ぶ順」の上限と順で載せる。
      省いたものを読む方法は`queue_cli`の権限で打てる読むコマンド（`observe --input`と既存の読むコマンド）に限り、3の`input.json`をファイルとして読ませない（observerはファイルを読めない）。
   3. promptを組む前に`<queue dir>/observer/<started_at>/`（同じ秒に既にあれば`-1`以降の接尾辞）を作り（promptはその名前を`observe --input`の読む先として名指す）、`prompt.md`と`input.json`（入力の全体）を書き、`observe_started`をtaskの無いrun_eventsに記録する。
-  4. そのdirをcwdに、envでobserverの役割とqueue serviceのsocketとobserverのtokenのfileを渡し（queueのpathは渡さない。tokenはjobの終わりで失効する）、PATHの先頭に`dagq`のdirを置いてagentを起動し（promptは`dagq --db <db>`ではなく`dagq`を名指し、agentの`dagq`はクライアントモードでserviceに送る。[Queue service](../queue-service.md#クライアントモード)）、stdoutを`output.out`、stderrを`output.err`に分けて書く（`Streams::Files`）。
+     記録の後にこのコマンドがその記録を対象にtelemetryのtokenを発行し、5の後に失効させる。
+  4. そのdirをcwdに、envでobserverの役割とqueue serviceのsocketとobserverのtokenのfileを渡し（queueのpathは渡さない）、PATHの先頭に`dagq`のdirを置いてagentを起動し（promptは`dagq --db <db>`ではなく`dagq`を名指す。[Queue service](../queue-service.md#クライアントモード)）、stdoutを`output.out`、stderrを`output.err`に分けて書く（`Streams::Files`）。
      `--timeout`を過ぎたらkillする。
      killの前にagentの子孫（`ProcessControl::descendants`。agentのBashとそれが起動したもの）を読み、agentの後にそれらもSIGKILLするので、agentの子プロセスは残らない。
      Codexのjobも同じ`run_agent`で止め、Codexがコマンドごとに別のprocess groupで走らせたものも、killの前に列挙した子孫としてpidで止まる。
