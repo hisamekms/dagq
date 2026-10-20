@@ -30,13 +30,18 @@
 //! run's review gets (ADR-t1728-1 (i)): those the round's commit
 //! configures whose paths the case's change touches, read with their
 //! scripts at that commit (never from the case's tree, whatever its patch
-//! changes), run one after another in the slot of the case's run, against
-//! the case's tree, on the backend of the review's actor
-//! ([`crate::application::review_programs::ProgramBackends`]). They spend
-//! nothing of the provider's. Once each exits 0 the agent job starts; a
-//! case one of them rejects never reaches the agent and is out of its
-//! scores; one that could not start or ran past its time closes the round
-//! incomplete, and no run starts after it.
+//! changes), run one after another in the slot of the case's run, on the
+//! backend of the review's actor
+//! ([`crate::application::review_programs::ProgramBackends`]): each first
+//! against the tree of the case's base (without what the case's tree
+//! hides), where one that exits non-zero is not run for the case (the
+//! rule it checks is broken before the change, ADR-t2300-1; its end on a
+//! base is kept for the round's other cases of that base), and then those
+//! left against the case's tree. They spend nothing of the provider's.
+//! Once each exits 0 the agent job starts; a case one of them rejects
+//! never reaches the agent and is out of its scores; one that could not
+//! start or ran past its time on either tree closes the round incomplete,
+//! and no run starts after it.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -48,7 +53,7 @@ use crate::application::agent_job::{self, AgentJob};
 use crate::application::review::CONFIG_FILE;
 use crate::application::review_programs::{SnapshotProgram, programs_at, required_programs};
 use crate::domain::actor_model::{ActorLaunch, ModelRole};
-use crate::domain::agent_eval::programs::{self, CaseCheck, ProgramFailure, Step};
+use crate::domain::agent_eval::programs::{self, Against, CaseCheck, ProgramFailure, Step};
 use crate::domain::agent_eval::record::{self, Round};
 use crate::domain::agent_eval::round::{
     ProviderCost, ProviderWait, Refusal, RefusalReason, RoundKey, case_set_digest,
@@ -105,6 +110,9 @@ pub(super) struct EvalRound {
     /// What each case's program reviews said, by case id, once its check
     /// ended.
     checks: BTreeMap<String, CaseCheck>,
+    /// How each program exited on a base's tree, by base commit and
+    /// program: the round's other cases of that base do not run it again.
+    base_ends: BTreeMap<(String, String), bool>,
 }
 
 /// The tree of one case: `base` with the patch committed as `head`.
@@ -130,18 +138,109 @@ struct EvalJob {
 struct CaseChecking {
     /// The programs the case needs, in the configured order.
     selected: Vec<SnapshotProgram>,
-    /// How each that ran ended ([`programs::step`]).
-    ended: Vec<Option<bool>>,
+    /// How each that ran on the base's tree ended ([`programs::step`]).
+    on_base: Vec<Option<bool>>,
+    /// How each that ran on the case's tree ended.
+    on_case: Vec<Option<bool>>,
     /// The end of the latest that ran.
     last: Option<ProgramEnd>,
+    /// The base's tree is there: made before the first program that runs
+    /// against it, removed once none is left to run there.
+    base_made: bool,
 }
 
 impl CaseChecking {
+    fn new(selected: Vec<SnapshotProgram>) -> Self {
+        Self {
+            selected,
+            on_base: Vec::new(),
+            on_case: Vec::new(),
+            last: None,
+            base_made: false,
+        }
+    }
+
     fn names(&self) -> Vec<String> {
         self.selected
             .iter()
             .map(|program| program.program.name.clone())
             .collect()
+    }
+
+    fn step(&self) -> Step {
+        programs::step(&self.names(), &self.on_base, &self.on_case)
+    }
+
+    /// The tree the next program runs against: the base's until each ran
+    /// there.
+    fn against(&self) -> Against {
+        if self.on_base.len() < self.selected.len() {
+            Against::Base
+        } else {
+            Against::Case
+        }
+    }
+
+    /// The tree of the program that could not tell: the base's while one
+    /// ran past its time there or not each ran there yet.
+    fn failing_tree(&self) -> Against {
+        if self.on_base.contains(&None) {
+            Against::Base
+        } else {
+            self.against()
+        }
+    }
+
+    /// The programs that ran against the case's tree, and `next` when
+    /// given (one that did not start there).
+    fn ran(&self, next: Option<&str>) -> Vec<String> {
+        let mut ran: Vec<String> = programs::kept(&self.names(), &self.on_base)
+            .into_iter()
+            .take(self.on_case.len())
+            .collect();
+        ran.extend(next.map(str::to_owned));
+        ran
+    }
+
+    fn base_failing(&self) -> Vec<String> {
+        programs::base_failing(&self.names(), &self.on_base)
+    }
+
+    fn program_named(&self, name: &str) -> bool {
+        self.selected
+            .iter()
+            .any(|program| program.program.name == name)
+    }
+
+    fn program(&self, name: &str) -> &SnapshotProgram {
+        self.selected
+            .iter()
+            .find(|program| program.program.name == name)
+            .expect("a selected program")
+    }
+
+    /// Record how the program that ran last ended, `success` being its
+    /// exit's (`None` past its time).
+    fn ended(&mut self, success: Option<bool>) {
+        match self.against() {
+            Against::Base => self.on_base.push(success),
+            Against::Case => self.on_case.push(success),
+        }
+    }
+}
+
+/// The tree of `against` of `tree`: what a case's program runs in.
+fn tree_of(tree: &CaseTree, against: Against) -> PathBuf {
+    match against {
+        Against::Base => tree.dir.join("base"),
+        Against::Case => tree.tree.clone(),
+    }
+}
+
+const fn against_str(against: Against) -> &'static str {
+    match against {
+        Against::Base => "base",
+        Against::Case => "case",
     }
 }
 
@@ -225,9 +324,11 @@ impl Supervisor<'_> {
     fn remove_case_trees(&self, id: i64, cases: usize) {
         let dir = self.layout.agent_evals_dir.join(id.to_string());
         for index in 0..cases {
-            let tree = dir.join(index.to_string()).join("tree");
-            if let Err(error) = self.repository.remove_case_tree(&tree) {
-                warn!(error = %format_args!("{error:#}"), "agent eval {id}: the case tree {} could not be removed: {error:#}", tree.display());
+            for name in ["tree", "base"] {
+                let tree = dir.join(index.to_string()).join(name);
+                if let Err(error) = self.repository.remove_case_tree(&tree) {
+                    warn!(error = %format_args!("{error:#}"), "agent eval {id}: the case tree {} could not be removed: {error:#}", tree.display());
+                }
             }
         }
     }
@@ -691,6 +792,7 @@ impl Supervisor<'_> {
             commit,
             programs,
             checks: BTreeMap::new(),
+            base_ends: BTreeMap::new(),
         });
         Ok(true)
     }
@@ -793,6 +895,7 @@ impl Supervisor<'_> {
             programs: self.eval_programs(started.cases_commit()),
             commit: started.cases_commit().to_owned(),
             checks: round.checks.clone(),
+            base_ends: BTreeMap::new(),
         });
         Ok(())
     }
@@ -892,45 +995,56 @@ impl Supervisor<'_> {
             Err(error) => Err(error.clone()),
         };
         match selected {
-            Ok(selected) => self.go_on_checking(
-                round,
-                case,
-                run,
-                CaseChecking {
-                    selected,
-                    ended: Vec::new(),
-                    last: None,
-                },
-            ),
+            Ok(selected) => self.go_on_checking(round, case, run, CaseChecking::new(selected)),
             Err(detail) => {
                 let check = CaseCheck::Failed {
                     program: CONFIG_FILE.to_owned(),
                     failure: ProgramFailure::StartFailed,
                 };
-                self.record_check(round, case, &check, &[], None, Some(detail))
+                let checking = CaseChecking::new(Vec::new());
+                self.record_check(round, case, &check, &checking, None, Some(detail))
             }
         }
     }
 
     /// The next step of `case`'s program reviews ([`programs::step`]):
-    /// start its next program, or end its check, starting its run `run`'s
-    /// agent job when every program exited 0.
+    /// start its next program (against the base's tree, unless the
+    /// round's end of it there is known, then against the case's), or end
+    /// its check, starting its run `run`'s agent job when every program it
+    /// ran against the case's tree exited 0. The base's tree is made
+    /// before the first program that runs there and removed once none is
+    /// left to run there.
     fn go_on_checking(
         &mut self,
         round: &mut EvalRound,
         case: &str,
         run: u32,
-        checking: CaseChecking,
+        mut checking: CaseChecking,
     ) -> Result<()> {
-        let names = checking.names();
-        let ran = &names[..checking.ended.len().min(names.len())];
-        let step = programs::step(&names, &checking.ended);
+        let base_commit = round.trees[case].base.clone();
+        let mut step = checking.step();
+        while let Step::Run(name, Against::Base) = &step {
+            match round.base_ends.get(&(base_commit.clone(), name.clone())) {
+                Some(success) => checking.on_base.push(Some(*success)),
+                None => break,
+            }
+            step = checking.step();
+        }
+        if checking.base_made
+            && (checking.against() == Against::Case || matches!(step, Step::Done(_)))
+        {
+            checking.base_made = false;
+            let base = tree_of(&round.trees[case], Against::Base);
+            if let Err(error) = self.repository.remove_case_tree(&base) {
+                warn!(error = %format_args!("{error:#}"), "agent eval {}: the base tree {} could not be removed: {error:#}", round.id, base.display());
+            }
+        }
         // Another case's program failed meanwhile: nothing more starts.
         let halted = programs::any_failed(&round.checks);
         match step {
             Step::Done(CaseCheck::Passed) => {
-                if !names.is_empty() {
-                    self.record_check(round, case, &CaseCheck::Passed, ran, None, None)?;
+                if !checking.selected.is_empty() {
+                    self.record_check(round, case, &CaseCheck::Passed, &checking, None, None)?;
                 }
                 round.checks.insert(case.to_owned(), CaseCheck::Passed);
                 if halted || self.eval_wait(round.provider).is_some() {
@@ -942,15 +1056,19 @@ impl Supervisor<'_> {
                 self.start_eval_run(round, case, run)
             }
             Step::Done(check) => {
-                self.record_check(round, case, &check, ran, checking.last.as_ref(), None)
+                let last = checking.last.clone();
+                self.record_check(round, case, &check, &checking, last.as_ref(), None)
             }
-            Step::Run(_) if halted => {
+            Step::Run(..) if halted => {
                 round.left.push_front((case.to_owned(), run));
                 Ok(())
             }
-            Step::Run(name) => {
-                let program = &checking.selected[checking.ended.len()];
-                match self.start_case_program(round, case, run, program) {
+            Step::Run(name, against) => {
+                let program = checking.program(&name).clone();
+                let started = self
+                    .case_base_tree(round, case, against, &mut checking)
+                    .and_then(|()| self.start_case_program(round, case, run, &program, against));
+                match started {
                     Ok(job) => {
                         round.running.push(EvalJob {
                             case: case.to_owned(),
@@ -961,18 +1079,16 @@ impl Supervisor<'_> {
                         Ok(())
                     }
                     Err(error) => {
-                        warn!(error = %format_args!("{error:#}"), "agent eval {}: the program {name} of case {case} could not start: {error:#}", round.id);
+                        warn!(error = %format_args!("{error:#}"), "agent eval {}: the program {name} of case {case} could not start against its {} tree: {error:#}", round.id, against_str(against));
                         let check = CaseCheck::Failed {
                             program: name,
                             failure: ProgramFailure::StartFailed,
                         };
-                        let mut ran = ran.to_vec();
-                        ran.push(program.program.name.clone());
                         self.record_check(
                             round,
                             case,
                             &check,
-                            &ran,
+                            &checking,
                             None,
                             Some(format!("{error:#}")),
                         )
@@ -982,44 +1098,73 @@ impl Supervisor<'_> {
         }
     }
 
-    /// Start `program` against `case`'s tree as a program job before its
-    /// run `run`, on the backend of the review's actor, its output and
-    /// what it runs in the case's directory.
+    /// Make the tree of `case`'s base before the first program that runs
+    /// against it (`against` the base, the tree not made yet).
+    fn case_base_tree(
+        &self,
+        round: &EvalRound,
+        case: &str,
+        against: Against,
+        checking: &mut CaseChecking,
+    ) -> Result<()> {
+        if against != Against::Base || checking.base_made {
+            return Ok(());
+        }
+        let tree = &round.trees[case];
+        self.repository
+            .add_case_base_tree(&tree_of(tree, Against::Base), &tree.base, &HIDDEN)?;
+        checking.base_made = true;
+        Ok(())
+    }
+
+    /// Start `program` against `case`'s tree or its base's (`against`) as
+    /// a program job before its run `run`, on the backend of the review's
+    /// actor, its output and what it runs in the case's directory.
     fn start_case_program(
         &self,
         round: &EvalRound,
         case: &str,
         run: u32,
         program: &SnapshotProgram,
+        against: Against,
     ) -> Result<HeadlessJob> {
         let tree = &round.trees[case];
         let name = &program.program.name;
-        let subject = JobSubject::eval_program(
-            format!("{}:{}:{case}:{name}", round.agent, round.id),
-            usize::try_from(run).unwrap_or(usize::MAX),
-        );
+        let (label, stem) = match against {
+            Against::Base => (
+                format!("{}:{}:{case}:{name}:base", round.agent, round.id),
+                format!("base-{run}-{name}"),
+            ),
+            Against::Case => (
+                format!("{}:{}:{case}:{name}", round.agent, round.id),
+                format!("program-{run}-{name}"),
+            ),
+        };
+        let subject = JobSubject::eval_program(label, usize::try_from(run).unwrap_or(usize::MAX));
         let timeout = self.job_timeout(&subject);
         start_program_against(
             &self.job_ports(),
             self.spawner,
             self.programs,
             program,
-            (&tree.tree, &[]),
+            (&tree_of(tree, against), &[]),
             (&tree.dir, &tree.dir.join("programs")),
-            (&format!("program-{run}-{name}"), subject),
+            (&stem, subject),
             timeout,
         )
     }
 
     /// Record `check`, the end of `case`'s program reviews, with the
-    /// programs that ran, the end of the one that stopped or failed it and
-    /// why it failed; a case it stops has none of its runs left.
+    /// programs that ran against its tree, those not run for it as they
+    /// failed on its base, the tree of the one that failed it, the end of
+    /// the one that stopped or failed it and why it failed; a case it
+    /// stops has none of its runs left.
     fn record_check(
         &self,
         round: &mut EvalRound,
         case: &str,
         check: &CaseCheck,
-        ran: &[String],
+        checking: &CaseChecking,
         end: Option<&ProgramEnd>,
         detail: Option<String>,
     ) -> Result<()> {
@@ -1031,7 +1176,23 @@ impl Supervisor<'_> {
         let mut payload = check.record();
         payload["eval_id"] = json!(round.id);
         payload["case"] = json!(case);
-        payload["programs"] = json!(ran);
+        let failed_on = match check {
+            CaseCheck::Failed { program, .. } if checking.program_named(program) => {
+                Some(checking.failing_tree())
+            }
+            _ => None,
+        };
+        // One that did not start has no end among those that ran.
+        let unstarted = match check {
+            CaseCheck::Failed {
+                program,
+                failure: ProgramFailure::StartFailed,
+            } if failed_on == Some(Against::Case) => Some(program.as_str()),
+            _ => None,
+        };
+        payload["programs"] = json!(checking.ran(unstarted));
+        payload["base_failing"] = json!(checking.base_failing());
+        payload["against"] = json!(failed_on.map(against_str));
         if let Some(end) = end {
             payload["exit"] = json!(end.exit.as_ref().map(ToString::to_string));
             payload["stdout_tail"] = json!(end.stdout_tail);
@@ -1330,24 +1491,30 @@ impl Supervisor<'_> {
             let mut checking = run.checking.expect("a program job");
             match ended {
                 Ok(end) => {
-                    checking
-                        .ended
-                        .push(end.exit.as_ref().map(|exit| exit.success));
+                    let success = end.exit.as_ref().map(|exit| exit.success);
+                    if let (Against::Base, Step::Run(name, _), Some(success)) =
+                        (checking.against(), checking.step(), success)
+                    {
+                        let base = round.trees[&run.case].base.clone();
+                        round.base_ends.insert((base, name), success);
+                    }
+                    checking.ended(success);
                     checking.last = Some(end);
                     self.go_on_checking(round, &run.case, run.round, checking)?;
                 }
                 Err(error) => {
-                    let name = checking.selected[checking.ended.len()].program.name.clone();
+                    let Step::Run(name, _) = checking.step() else {
+                        unreachable!("a program job runs the case's next program");
+                    };
                     let check = CaseCheck::Failed {
                         program: name,
                         failure: ProgramFailure::StartFailed,
                     };
-                    let ran = checking.names()[..=checking.ended.len()].to_vec();
                     self.record_check(
                         round,
                         &run.case,
                         &check,
-                        &ran,
+                        &checking,
                         None,
                         Some(format!("{error:#}")),
                     )?;

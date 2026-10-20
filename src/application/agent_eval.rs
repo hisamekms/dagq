@@ -316,7 +316,9 @@ fn metrics(metrics: &Metrics) -> Value {
 /// cases' digests. `incomplete` says why it ended before every run. The
 /// cases a program review stopped are out of the agent's scores and
 /// counted in `program_stopped` with each one's id and program
-/// ([`programs::stopped_record`]).
+/// ([`programs::stopped_record`]); those with a program not run for them
+/// as it failed on their base, in `program_base_failing`
+/// ([`programs::base_failing_record`]).
 pub fn finished(round: &Round, all_cases: &[Case], incomplete: Option<Incomplete>) -> Value {
     let cases = &programs::scored_cases(all_cases, &round.checks);
     let started = round.started.as_ref();
@@ -390,6 +392,7 @@ pub fn finished(round: &Round, all_cases: &[Case], incomplete: Option<Incomplete
         })).collect::<Vec<_>>(),
         "failed_cases": failed_cases,
         "program_stopped": programs::stopped_record(all_cases, &round.checks),
+        "program_base_failing": programs::base_failing_record(all_cases, &round.base_failing),
         "runs": runs.len(),
         "cost": {"spent_usd": round.spent_usd(), "by_source": by_source},
         "definition_digest": started.map(|s| &s.definition_digest),

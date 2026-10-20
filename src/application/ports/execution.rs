@@ -1963,6 +1963,13 @@ pub trait Repository: RepositoryReads {
         let _ = (path, base, patch, hidden);
         anyhow::bail!("this repository cannot make an eval case's tree")
     }
+    /// The tree of [`Self::add_case_tree`] with the base's files only, at
+    /// `path`, without `hidden`: what the case's program reviews run
+    /// against before its change.
+    fn add_case_base_tree(&self, path: &Path, base: &str, hidden: &[&str]) -> Result<()> {
+        let _ = (path, base, hidden);
+        anyhow::bail!("this repository cannot make an eval case's base tree")
+    }
     /// Remove the case's tree at `path` ([`Self::add_case_tree`]); one
     /// already gone is not an error.
     fn remove_case_tree(&self, path: &Path) -> Result<()> {

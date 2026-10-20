@@ -2717,25 +2717,45 @@ impl GitRepository {
         patch: &Path,
         hidden: &[&str],
     ) -> Result<CommitSha> {
+        self.with_case_index(path, |index| {
+            self.case_trees(index, path, base, Some(patch), hidden)
+        })
+        .map(|head| head.expect("a change's commit"))
+    }
+
+    /// The tree of [`Self::add_case_tree`] with the base's files only: the
+    /// base's commit on the landing branch's name at `HEAD`, without
+    /// `hidden`, in a repository of its own. A tree left at `path` is
+    /// removed first. No hook runs.
+    pub fn add_case_base_tree(&self, path: &Path, base: &str, hidden: &[&str]) -> Result<()> {
+        self.with_case_index(path, |index| {
+            self.case_trees(index, path, base, None, hidden)
+        })
+        .map(|_| ())
+    }
+
+    /// `make` on a new tree at `path` through its temporary index.
+    fn with_case_index<T>(&self, path: &Path, make: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
         self.remove_case_tree(path)?;
         if let Some(dir) = path.parent() {
             fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
         }
         let index = case_index(path);
-        let made = self.case_trees(&index, path, base, patch, hidden);
+        let made = make(&index);
         let _ = fs::remove_file(&index);
         made
     }
 
-    /// [`Self::add_case_tree`] through the temporary `index`.
+    /// [`Self::add_case_tree`] through the temporary `index`: the base's
+    /// commit, and `patch` on top when given (its commit returned).
     fn case_trees(
         &self,
         index: &Path,
         path: &Path,
         base: &str,
-        patch: &Path,
+        patch: Option<&Path>,
         hidden: &[&str],
-    ) -> Result<CommitSha> {
+    ) -> Result<Option<CommitSha>> {
         let here = || {
             let mut command = self.command();
             command
@@ -2783,6 +2803,9 @@ impl GitRepository {
         )?;
         output(tree().args(["add", "--all", "--force"]))?;
         commit(&mut tree(), "chore: the eval case's base")?;
+        let Some(patch) = patch else {
+            return Ok(None);
+        };
         // The change goes on a detached HEAD: any branch name could be the
         // landing branch's, or above or below it (`case`, `case/topic`).
         output(tree().args(["switch", "--quiet", "--detach"]))?;
@@ -2825,7 +2848,7 @@ impl GitRepository {
         self.case_files(&here, path, hidden)?;
         output(tree().args(["add", "--all", "--force"]))?;
         commit(&mut tree(), "chore: the eval case's change")?;
-        object_id(&head, "the case's commit")
+        object_id(&head, "the case's commit").map(Some)
     }
 
     /// The files of the temporary index of `here` checked out at `path`,
@@ -3219,6 +3242,9 @@ impl Repository for GitRepository {
         hidden: &[&str],
     ) -> Result<CommitSha> {
         GitRepository::add_case_tree(self, path, base, patch, hidden)
+    }
+    fn add_case_base_tree(&self, path: &Path, base: &str, hidden: &[&str]) -> Result<()> {
+        GitRepository::add_case_base_tree(self, path, base, hidden)
     }
     fn remove_case_tree(&self, path: &Path) -> Result<()> {
         GitRepository::remove_case_tree(self, path)

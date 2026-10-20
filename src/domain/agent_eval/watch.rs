@@ -698,6 +698,7 @@ mod tests {
             started_payload: None,
             runs: Vec::new(),
             checks: Default::default(),
+            base_failing: Default::default(),
             finished: None,
             owner: None,
         }

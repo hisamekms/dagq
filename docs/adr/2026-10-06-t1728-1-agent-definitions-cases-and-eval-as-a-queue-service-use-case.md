@@ -10,6 +10,7 @@ amends:
   - adr-t1453-1 decision 2
 amended_by:
   - adr-t2259-1
+  - adr-t2300-1
 owners:
   - hisamekms
 tags:

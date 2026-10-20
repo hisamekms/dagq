@@ -690,24 +690,33 @@ fn a_run_that_changes_a_definition_runs_its_dev_before_it_lands_and_goes_back_un
 
 /// A case's program reviews run before its agent (ADR-t1728-1 (i)), each
 /// read with its script from the landing branch's commit and run against
-/// the case's tree: a case one of them rejects reaches no agent, is out of
-/// the agent's scores and is named with the program in the round's
+/// the tree of the case's base and then the case's tree: a program that
+/// fails on the base (a rule the base breaks already) is not run for the
+/// case and is named in its check (ADR-t2300-1), though the case's change
+/// touches its paths, and the case goes on to its agent; a case one of
+/// the others rejects (a violation its change adds) reaches no agent, is
+/// out of the agent's scores and is named with the program in the round's
 /// `program_stopped`, though its patch rewrites the script to pass; a
 /// program whose paths a case does not touch does not run for it, and a
 /// case each of whose programs passes goes to its agent.
 #[test]
-fn a_case_a_program_rejects_reaches_no_agent_and_is_out_of_the_scores() {
+fn a_program_the_base_fails_is_left_out_and_a_case_a_program_rejects_reaches_no_agent() {
     use std::os::unix::fs::PermissionsExt;
     let fx = fixture();
     let scripts = fx.repo.join("scripts");
     fs::create_dir_all(&scripts).unwrap();
     for (name, text) in [
-        // Passes in a case's tree only: the patch's files are there.
-        ("intree.sh", "#!/bin/sh\ntest -e notes.txt -o -e bad.txt\n"),
+        ("intree.sh", "#!/bin/sh\ntest -e dagq.toml\n"),
         ("never.sh", "#!/bin/sh\nexit 1\n"),
+        // Passes on the base, rejects a tree with bad.txt.
         (
             "nobad.sh",
-            "#!/bin/sh\necho bad.txt is not allowed >&2\nexit 1\n",
+            "#!/bin/sh\ntest ! -e bad.txt && exit 0\necho bad.txt is not allowed >&2\nexit 1\n",
+        ),
+        // Fails on the base already, which has legacy.txt.
+        (
+            "legacy.sh",
+            "#!/bin/sh\ntest ! -e legacy.txt && exit 0\necho legacy.txt breaks the rule >&2\nexit 1\n",
         ),
     ] {
         let path = scripts.join(name);
@@ -720,18 +729,25 @@ fn a_case_a_program_rejects_reaches_no_agent_and_is_out_of_the_scores() {
         "\n[review.programs.intree]\nscript = \"scripts/intree.sh\"\npaths = [\"**\"]\n",
         "\n[review.programs.never]\nscript = \"scripts/never.sh\"\npaths = [\"nothing/**\"]\n",
         "\n[review.programs.nobad]\nscript = \"scripts/nobad.sh\"\npaths = [\"bad.txt\"]\n",
+        "\n[review.programs.legacy]\nscript = \"scripts/legacy.sh\"\npaths = [\"**\"]\n",
     ));
     fs::write(&config, text).unwrap();
+    fs::write(fx.repo.join("legacy.txt"), "old\n").unwrap();
     git(&fx.repo, &["add", "."]);
     git(&fx.repo, &["commit", "-q", "-m", "programs"]);
     let base = git_out(&fx.repo, &["rev-parse", "HEAD"]);
 
-    let notes = "diff --git a/notes.txt b/notes.txt\nnew file mode 100644\n--- /dev/null\n+++ b/notes.txt\n@@ -0,0 +1 @@\n+hello\n";
+    // Adds notes.txt and changes legacy.txt, which the base breaks the
+    // rule of already.
+    let notes = concat!(
+        "diff --git a/notes.txt b/notes.txt\nnew file mode 100644\n--- /dev/null\n+++ b/notes.txt\n@@ -0,0 +1 @@\n+hello\n",
+        "diff --git a/legacy.txt b/legacy.txt\n--- a/legacy.txt\n+++ b/legacy.txt\n@@ -1 +1 @@\n-old\n+older\n",
+    );
     // Adds bad.txt and rewrites the script that rejects it to pass.
     let bad = concat!(
         "diff --git a/bad.txt b/bad.txt\nnew file mode 100644\n--- /dev/null\n+++ b/bad.txt\n@@ -0,0 +1 @@\n+bad\n",
         "diff --git a/scripts/nobad.sh b/scripts/nobad.sh\n--- a/scripts/nobad.sh\n+++ b/scripts/nobad.sh\n",
-        "@@ -1,3 +1,3 @@\n #!/bin/sh\n echo bad.txt is not allowed >&2\n-exit 1\n+exit 0\n",
+        "@@ -1,4 +1,4 @@\n #!/bin/sh\n test ! -e bad.txt && exit 0\n echo bad.txt is not allowed >&2\n-exit 1\n+exit 0\n",
     );
     let patches = fx.repo.join(".dagq/agent-cases/patches");
     fs::create_dir_all(&patches).unwrap();
@@ -783,10 +799,16 @@ fn a_case_a_program_rejects_reaches_no_agent_and_is_out_of_the_scores() {
     assert_eq!(passed["eval_id"], id);
     assert_eq!(passed["outcome"], "passed", "{passed}");
     assert_eq!(passed["programs"], json!(["intree"]), "never does not run");
+    assert_eq!(
+        passed["base_failing"],
+        json!(["legacy"]),
+        "the base breaks legacy's rule: {passed}"
+    );
     let stopped = of("has-bad");
     assert_eq!(stopped["outcome"], "stopped", "{stopped}");
     assert_eq!(stopped["program"], "nobad");
     assert_eq!(stopped["programs"], json!(["intree", "nobad"]));
+    assert_eq!(stopped["base_failing"], json!(["legacy"]));
     assert!(
         stopped["stderr_tail"]
             .as_str()
@@ -806,6 +828,13 @@ fn a_case_a_program_rejects_reaches_no_agent_and_is_out_of_the_scores() {
         scores["program_stopped"],
         json!({"count": 1, "cases": [{"id": "has-bad", "program": "nobad"}]})
     );
+    assert_eq!(
+        scores["program_base_failing"],
+        json!({"count": 2, "cases": [
+            {"id": "needs-d1", "programs": ["legacy"]},
+            {"id": "has-bad", "programs": ["legacy"]},
+        ]})
+    );
     assert_eq!(scores["cost"]["spent_usd"], 0.25, "programs spend nothing");
 
     // Recorded as the eval's program jobs, apart from its agent jobs.
@@ -817,15 +846,30 @@ fn a_case_a_program_rejects_reaches_no_agent_and_is_out_of_the_scores() {
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap();
-    let mut labels: Vec<String> = labels.into_iter().flatten().collect();
-    labels.sort();
+    let (on_base, mut on_case): (Vec<String>, Vec<String>) = labels
+        .into_iter()
+        .flatten()
+        .partition(|label| label.ends_with(":base"));
+    on_case.sort();
     assert_eq!(
-        labels,
+        on_case,
         [
             format!("demo:{id}:has-bad:intree"),
             format!("demo:{id}:has-bad:nobad"),
             format!("demo:{id}:needs-d1:intree"),
         ]
+    );
+    // Each program a case needs ran on the base, the shared base's end
+    // kept for the other case unless both ran at once.
+    let ran_on_base: Vec<&str> = on_base
+        .iter()
+        .map(|label| label.rsplit(':').nth(1).unwrap())
+        .collect();
+    assert!(
+        ["intree", "legacy", "nobad"]
+            .iter()
+            .all(|name| ran_on_base.contains(name)),
+        "{on_base:?}"
     );
     assert_eq!(eval_jobs(&fx.db).len(), 1);
 }
@@ -866,6 +910,7 @@ fn a_program_that_cannot_start_closes_the_round_incomplete() {
     assert_eq!(checked[0]["outcome"], "failed", "{}", checked[0]);
     assert_eq!(checked[0]["program"], "noexec");
     assert_eq!(checked[0]["failure"], "start_failed");
+    assert_eq!(checked[0]["against"], "base", "it fails on the base first");
     let scores = events(&fx.db, EventKind::AgentEvalFinished);
     assert_eq!(scores.len(), 1);
     assert_eq!(scores[0]["outcome"], "incomplete", "{}", scores[0]);

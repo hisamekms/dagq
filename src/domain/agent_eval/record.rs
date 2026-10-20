@@ -26,8 +26,11 @@
 //!   retry of a non-zero exit).
 //! - `agent_eval_case_checked`: a case's program reviews ended its check
 //!   before its agent (`case`, and `outcome`, `program` and `failure` of
-//!   [`super::programs::CaseCheck`], with `programs`, those that ran, and
-//!   the ends of the output of the one that stopped or failed it).
+//!   [`super::programs::CaseCheck`], with `programs`, those that ran
+//!   against the case's tree, `base_failing`, those not run for it as they
+//!   exited non-zero on its base, `against`, the tree of the one that
+//!   failed it, and the ends of the output of the one that stopped or
+//!   failed it).
 //!   Recorded once per case that needs a program.
 //! - `agent_eval_finished`: the round's scores (see
 //!   `application::agent_eval::finish`).
@@ -223,6 +226,9 @@ pub struct Round {
     /// What each case's program reviews said, by case id, for the cases
     /// whose check ended.
     pub checks: BTreeMap<String, CaseCheck>,
+    /// The programs not run for a case as they exited non-zero on its
+    /// base, by case id, for the cases whose check ended naming one.
+    pub base_failing: BTreeMap<String, Vec<String>>,
     pub finished: Option<Value>,
     /// The supervisor that runs it: the `supervisor` of its latest start
     /// or take-up; `None` before it started, or for one recorded without.
@@ -337,6 +343,7 @@ pub fn rounds<'a>(
                         owner: None,
                         runs: Vec::new(),
                         checks: BTreeMap::new(),
+                        base_failing: BTreeMap::new(),
                         finished: None,
                     },
                 );
@@ -390,6 +397,10 @@ pub fn rounds<'a>(
             }
         } else if *kind == EventKind::AgentEvalCaseChecked {
             if let Some(check) = CaseCheck::read(payload) {
+                let failing = super::programs::read_base_failing(payload);
+                if !failing.is_empty() {
+                    round.base_failing.insert(case.clone(), failing);
+                }
                 round.checks.insert(case, check);
             }
         } else if *kind == EventKind::AgentEvalFinished {
