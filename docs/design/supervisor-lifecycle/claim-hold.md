@@ -246,6 +246,7 @@ Spikeがclaimされたgoal（goalの無いSpikeはそれ自体）は、未完了
 ## 依存先の着地を含むbuildを待つtask
 
 - `wait_for_build`を宣言したtaskは、supervisor自身のbuild識別子（[Build identifier](build-identifier.md)）のcommitが直接の依存先の着地commitを全て含むまでclaimしない（[ADR-t1632-1](../../adr/2026-10-05-t1632-1-claim-waits-for-a-build-that-contains-the-dependencies-landings.md)）。
+- 依存先が着地した後に登録するtaskも、そのbuildを待つために着地済みの依存先への依存を宣言してよく、`dagq lint`はそれを着地済みへの依存として指摘しない（取り消された依存先は着地しないので指摘する）。
 - 判定は`domain::build_wait`（`judge`・`claim_step`・`decide`）で、workerの判定の後・hotspotの前に行い、待つtaskはhotspotの判定にかけない。
 - 効く優先度が`interrupt`でも待つ（宣言は落ちる関門を避けるためで、急ぎでも同じに落ちる）。
 - 含むかを読めない（gitのerror）ならclaimしない。

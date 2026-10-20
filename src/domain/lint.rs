@@ -198,6 +198,14 @@ fn violation(code: LintCode, task: &Task, reason: String) -> LintViolation {
     }
 }
 
+/// Report the dependencies the task waits for in vain: a completed, a
+/// canceled, and a draft outside the linted set that nothing submits.
+///
+/// A task that declares `wait_for_build` (ADR-t1632-1) is not reported for a
+/// completed dependency: its claim waits for a build that contains the
+/// landings of its direct dependencies, so a completed one still holds the
+/// claim back until the build includes it. A canceled one never lands, so no
+/// build includes it, and it is reported as for any task.
 fn predecessor_rules(
     task: &Task,
     node: &LintNode,
@@ -210,6 +218,7 @@ fn predecessor_rules(
             continue;
         };
         let rule = match status {
+            TaskStatus::Completed if task.wait_for_build() => None,
             TaskStatus::Completed => Some((LintCode::DependsOnCompleted, "is already completed")),
             TaskStatus::Canceled => Some((
                 LintCode::DependsOnCanceled,
@@ -506,6 +515,35 @@ mod tests {
                     LintCode::DependsOnDraft,
                     "it depends on task 7, which is a draft that nothing submitted"
                 ),
+            ]
+        );
+    }
+
+    /// A task waiting for a build that contains its dependencies' landings
+    /// needs its completed dependencies; canceled and outside drafts are
+    /// reported as for any task.
+    #[test]
+    fn a_task_waiting_for_a_build_may_depend_on_a_completed_task() {
+        let waiting = with(task(1, "a"), |r| r.wait_for_build = true);
+        let mut plan = input(vec![waiting, task(2, "b")], vec![]);
+        for id in [1, 2] {
+            plan.nodes.get_mut(&TaskId::new(id)).unwrap().depends_on =
+                [5, 6, 7].map(TaskId::new).to_vec();
+        }
+        plan.nodes
+            .insert(TaskId::new(5), node(TaskStatus::Completed, &[]));
+        plan.nodes
+            .insert(TaskId::new(6), node(TaskStatus::Canceled, &[]));
+        plan.nodes
+            .insert(TaskId::new(7), node(TaskStatus::Draft, &[]));
+        assert_eq!(
+            codes(&plan),
+            [
+                (1, LintCode::DependsOnCanceled),
+                (1, LintCode::DependsOnDraft),
+                (2, LintCode::DependsOnCompleted),
+                (2, LintCode::DependsOnCanceled),
+                (2, LintCode::DependsOnDraft),
             ]
         );
     }

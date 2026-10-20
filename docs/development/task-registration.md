@@ -58,7 +58,7 @@ llvm-covとcargo testの重ね方:
 
 ## 固定バイナリがtask Xを含んでから行うtask
 
-固定バイナリがtask Xの着地を含むことを要するtask（新しいflagの登録案内や、新しいkeyを使うconfigなど）は、`dagq add ... --wait-for-build --depends-on X`で登録する。必要な依存先が複数なら`--depends-on`を繰り返す。宣言は`wait_for_build`で、supervisorは自分のbuild識別子のcommitが直接の依存先の着地commitを全て含むまでclaimしない（[claimを控える](../design/supervisor-lifecycle/claim-hold.md#依存先の着地を含むbuildを待つtask)、[Domain model](../design/domain-model.md)）。draft / submittedのtaskは`edit TASK --wait-for-build`で宣言し、`--no-wait-for-build`で外せる。
+固定バイナリがtask Xの着地を含むことを要するtask（新しいflagの登録案内や、新しいkeyを使うconfigなど）は、`dagq add ... --wait-for-build --depends-on X`で登録する。必要な依存先が複数なら`--depends-on`を繰り返す。宣言は`wait_for_build`で、supervisorは自分のbuild識別子のcommitが直接の依存先の着地commitを全て含むまでclaimしない（[claimを控える](../design/supervisor-lifecycle/claim-hold.md#依存先の着地を含むbuildを待つtask)、[Domain model](../design/domain-model.md)）。draft / submittedのtaskは`edit TASK --wait-for-build`で宣言し、`--no-wait-for-build`で外せる。依存先が既に着地していても、buildを待つために依存を外さずに宣言する（`dagq lint`は`wait_for_build`のtaskの着地済みの依存先を指摘しない）。
 
 verifyの1本目に、`~/.local/bin/dagq --version`のbuild識別子と依存先の着地を`git merge-base --is-ancestor`で比べる手書きのscriptを置かない。verifyはclaimの後にしか効かないため、早すぎるclaimを止めるのはこの宣言と`--depends-on`にする。自動更新はruntimeを変える着地でだけbuildするので、runtimeを変えない依存先だけを待つtaskには宣言しない（[ADR-t1632-1](../adr/2026-10-05-t1632-1-claim-waits-for-a-build-that-contains-the-dependencies-landings.md)）。
 
