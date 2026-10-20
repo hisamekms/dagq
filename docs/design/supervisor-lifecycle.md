@@ -63,7 +63,9 @@ ready task (dependencies completed)
   → validate receipt, commit, clean state (own thread)
       already_satisfied (no commit) → stays validating, no landing: the task's
         verification on a snapshot of main → passed: one review job judges the
-        claim on that head (no subagent, no program) → approve_close ask → close
+        claim on that head (no subagent, no program) → high pass with main still
+        there: task completed without a commit; main moved: verified and judged
+        again on the new head (up to a limit); otherwise approve_close ask → close
         (verified again if main moved) → task completed without a commit; retry / cancel
   → awaiting_integration: program reviews, the binary's built-ins then the
     landing branch's [review.programs], one at a time

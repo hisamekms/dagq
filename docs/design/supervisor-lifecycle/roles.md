@@ -166,7 +166,8 @@ review・recovery・plan review・goal reviewのjobは、jobごとに別のrole�
 | --- | --- | --- |
 | review-job | `pass` | 衝突の事前検査のあと、sessionの終了を待って着地の段（`AfterExit::Land`）へ進めるだけ。着地の関数は呼ばない。着地は別のthreadの`land_integrating`が、rebase後の検証コマンドを含む自分の検査を通したときだけ行い、落ちればrunは`needs_session`になる |
 | review-job | `revise` / `concern` | 生きているsessionへの差し戻し（sessionが終わっていれば`approve_landing`のask） / `approve_landing`のask。runを通した`revise`の上限の後の差し戻しは収束の判定（`revise_limit_judged`）に通し、コードの指摘が無ければaskを開かずにpassの道で着地して理由をfollow_upのdraftにし、あれば`approve_landing`のask（[Review](review.md)の4a） |
-| review-job（`already_satisfied`の主張の判定） | `pass` / `revise` / `concern` | どれも`approve_close`のaskにverdict・確信度・推奨・理由を載せて人に上げるだけで、taskを閉じない（[Review](review.md#already_satisfiedの主張の判定)） |
+| review-job（`already_satisfied`の主張の判定） | `pass`（`confidence: high`） | 適用の時点のmainのheadがsnapshotのままなら、taskをcommitなしの`completed`で閉じる。進んでいれば閉じずに新しいheadでverifyと判定をやり直し、やり直しの上限を超えたら`approve_close`のask（`satisfied_judgment::decide`、[Review](review.md#already_satisfiedの主張の判定)） |
+| review-job（`already_satisfied`の主張の判定） | `pass`（`high`でない）/ `revise` / `concern` | `approve_close`のaskにverdict・確信度・推奨・理由を載せて人に上げるだけで、taskを閉じない |
 | recovery-job | `repair`（`confidence: high`） | `RecoveryVerdict::applies()`を通り、さらにalertごとの前提（終わったrunは`plan_ended`、生きているrunは`check_live`）を今も満たすactionだけを適用する。満たさなければaskにする |
 | recovery-job | `repair`（`low`）/ `escalate` | 適用せず、actionを推奨として`decide`などのaskにする |
 | plan-review-job | `pass` / `revise` / `concern` | 1つのtransactionで`ready`・plannerへの差し戻し・`approve_plan`のask。`concern`の`high`で`reason_category`が`null`の`ready` / `send_back`はpass / reviseとして適用する（[Plan review](plan-review.md#aiが決めるconcern未実装)、ADR-t451-1決定4）。`actions`は`pass`（と適用した`ready`）のときだけ許された3種を適用し、`reopen`はverdictに関わらず検査して適用し、上限を超えれば1件も適用せず、最終の判定でproposalを差し戻すかconcernのaskにする（passはrevise、reviseの上限を過ぎていればconcern）。`pass`での優先度の扱いは各taskの記録の由来と優先度の出どころで分かれる（[Plan review](plan-review.md#verdictと適用)） |

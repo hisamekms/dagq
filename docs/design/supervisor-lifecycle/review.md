@@ -168,7 +168,7 @@ promptは`REVIEW_DOCS_CHECK`で文書の照合を求める（[ADR-t1942-2](../..
   例外は`already_satisfied`の主張の判定だけで、専用の入口がpass・revise・concernのどれでも確信度を読み、`high`のpassだけを閉じる側に置く（[ADR-t1818-1](../../adr/2026-10-05-t1818-1-worker-claims-already-satisfied-and-runtime-closes-on-a-verified-snapshot.md)決定3・4、`domain::satisfied_judgment`）。
   通常のrunのreviewの読み取りとconcernの判定はこの入口で変わらない。
   mainがsnapshotから進んだ`high`のpassの判定のやり直しには上限があり、超えたら人のaskにする（値は`satisfied_judgment::MAX_JUDGMENT_RETRIES`）。
-  この判断（`satisfied_judgment::decide`）はまだ閉じる経路に当てはめず、今は判定によらず人のaskにする（下の「already_satisfiedの主張の判定」）。
+  この判断（`satisfied_judgment::decide`）の当てはめは下の「already_satisfiedの主張の判定」の「適用」。
 - 推奨が無い・人が要る理由がある・確信度が`high`でないconcernはaskにし、知らない理由は人が決める側に倒す（`domain::concern::decide`）。
 - 着地を許す判定は、適用される`land`のconcernを「passした」と読む（`concern::lets_land`）。
 - セキュリティのagentは[ADR-t1906-1](../../adr/2026-10-14-t1906-1-security-review-agent-findings-follow-the-concern-rules.md)。
@@ -177,7 +177,7 @@ promptは`REVIEW_DOCS_CHECK`で文書の照合を求める（[ADR-t1942-2](../..
 
 [ADR-t1818-1](../../adr/2026-10-05-t1818-1-worker-claims-already-satisfied-and-runtime-closes-on-a-verified-snapshot.md)決定4の、「差分なしで受け入れ条件を満たす」主張をreview jobが判定する段（流れの前後は[Validation](validation.md#already_satisfiedの検証)）。
 
-- **起動**: snapshotの最初のverifyが通ったときだけ、同じslotとleaseのまま1つのreview jobを起動する（`run_satisfied_review_started`）。
+- **起動**: snapshotのverifyが通ったとき（最初のものと、下の「適用」のやり直しのもの）に、同じslotとleaseのまま1つのreview jobを起動する（`run_satisfied_review_started`）。
   verifyが落ちたときと、人の`close`の答えのためにverifyを流し直したときは起動しない。
 - **木**: jobはrunのworktreeでもrun directoryでもなく、queueの`satisfied/`のrunのscratch worktreeを、起動のたびにそこにあるもの（`.git`もlinkも）を信用せずにsnapshotのheadで作り直した木で読むだけで動く（`integrate::fresh_satisfied_scratch`）。
   判定の後と保留の時に木を消し、途中で死んだsupervisorが残した木は次の作り直しかrunの後の掃除が消す。
@@ -187,13 +187,18 @@ promptは`REVIEW_DOCS_CHECK`で文書の照合を求める（[ADR-t1942-2](../..
   答えの無いjob（読めない・未知のverdict・必須の欄の欠落・非0の終了・時間切れ・起動の失敗）は、runのreviewのjobと同じく1回だけやり直す。
 - **providerの失敗**: jobの終わりはrunのreviewのjobと同じ分類に通す（`Supervisor::review_job_failed`）。
   Claudeの認証切れ・利用上限はqueueのholdのaskに加わり、もう一方のproviderが使えなければ控えて切り替えるか待つので、jobの失敗にもやり直しの1回にも数えない（[Agent provider lifecycle](../provider-lifecycle.md)）。
-- **ask**: 判定の結果によらず`approve_close`のask（理由は`scope`）を開き、headとreviewのverdict・確信度・推奨・理由を載せ、leaseを外してrunを休ませる。
-  `high`のpassで人に聞かずに閉じることは未実装で、今は人が判定を見て答える。
+- **適用**: 判定を、適用の時点のmainのheadと判定したsnapshotのhead、そのrunのやり直しの回数と比べる（`satisfied_judgment::decide`）。
+  `high`のpassでmainがsnapshotのままなら、人に聞かずにrunを`succeeded`（commitなし）、taskを`completed`にし、同じtransactionでleaseを返す（`run_satisfied_closed`の`closed_by`は`judgment`）。
+  `high`のpassでmainが進んでいれば古い判定では閉じず、slotとleaseのまま今のmainのheadを新しいsnapshotにverifyを流し直し、通ればそのheadで判定し直す。
+  やり直しには上限があり（値は`satisfied_judgment::MAX_JUDGMENT_RETRIES`）、超えた`high`のpassは閉じずに人のaskにする。
+- **ask**: `high`のpassでないもの（`low`・確信度の欠落か未知の値・revise・concern）と上限を超えたものは`approve_close`のask（理由は`scope`）を開き、headとreviewのverdict・確信度・推奨・理由と閉じなかった訳を載せ、leaseを外してrunを休ませる。
   やり直しても答えが無ければjobの失敗として`approve_close`のask（理由は`recovery_failed`）を開く。
   verifyは通っているので、どちらのaskも`close`を選べる。
-- **記録**: 判定の`run_satisfied_judged`と判定から開くaskの`ask_opened`は`Supervisor::for_job`の中で書き、`requested_by`に判定元のjob（`review-job:<run>:satisfied-<n>`）を持つ（[roles](roles.md#eventのactor)）。
+- **記録**: 判定の`run_satisfied_judged`（適用の`step`つき）と、判定による閉じ・verifyの流し直しの`run_satisfied_snapshot`・判定から開くaskの`ask_opened`は`Supervisor::for_job`の中で書き、`requested_by`に判定元のjob（`review-job:<run>:satisfied-<n>`）を持つ（[roles](roles.md#eventのactor)）。
+  判定で閉じた`run_satisfied_closed`は判定・確信度・head・receiptの根拠を持ち、人の答えで閉じたもの（`closed_by`は`answer`）と分かれる。
   jobの失敗の`run_satisfied_judged`とaskは、jobの依頼ではないので`requested_by`を持たない。
 - **引き継ぎ**: handoffはjobを止め、次のprocessはvalidatingのrunを検証し直してverifyと判定をやり直す。
+  判定を記録した後に閉じる前に止まったsupervisorのrunもleaseを残すので、adopterは記録された判定では閉じず、再validationからその時点のmainでverifyと判定をやり直す。
 
 ## 再計画の操作が保護するrun
 

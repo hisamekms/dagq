@@ -285,10 +285,12 @@ impl Supervisor<'_> {
     /// verification that could not run, a failure like any other): it is
     /// recorded with its snapshot. One run again for an answer to close
     /// closes the task when it passed (ADR-t1818-1 decision 3: even if
-    /// main moved meanwhile, and the review does not judge it again). A
-    /// first verification that passed goes to the review's judgment on the
-    /// same head (decision 4), which asks the person after it (or, when the
-    /// judgment cannot begin, the person is asked without it). Otherwise
+    /// main moved meanwhile, and the review does not judge it again). Any
+    /// other verification that passed (the first, or one run again because
+    /// main moved past a judged snapshot) goes to the review's judgment on
+    /// the same head (decision 4), which closes it or asks the person after
+    /// it (or, when the judgment cannot begin, the person is asked without
+    /// it). Otherwise
     /// the `approve_close` ask opens on the snapshot (closing the answered
     /// one, whose close could not be applied), and the run rests unleased.
     /// Not called while a replanning guards the task (ADR-t1521-2): the
@@ -358,12 +360,17 @@ impl Supervisor<'_> {
             .map(|run| AfterVerified::Rested(Box::new(run)))
     }
 
-    /// The summary of `run`'s receipt, or nothing when it cannot be read.
-    pub(super) fn receipt_summary(&self, run: &TaskRun) -> String {
+    /// `run`'s receipt, or `None` when it cannot be read.
+    pub(super) fn receipt_of(&self, run: &TaskRun) -> Option<Receipt> {
         self.files
             .read_to_string(Path::new(run.receipt_path().unwrap_or_default()))
             .ok()
             .and_then(|text| Receipt::parse(&text).ok())
+    }
+
+    /// The summary of `run`'s receipt, or nothing when it cannot be read.
+    pub(super) fn receipt_summary(&self, run: &TaskRun) -> String {
+        self.receipt_of(run)
             .map(|receipt| receipt.summary().to_owned())
             .unwrap_or_default()
     }

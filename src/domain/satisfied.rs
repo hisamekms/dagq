@@ -300,13 +300,15 @@ pub fn snapshot_payload(head: &CommitSha, ask: Option<AskId>) -> Value {
     payload
 }
 
-/// The payload of `run_satisfied_closed`: the head the task was verified
-/// on, the verification and the answer it was closed on. `rechecked` says
-/// the verification ran again for the answer after main moved.
+/// The payload of `run_satisfied_closed` for a person's answer
+/// (`closed_by` `answer`): the head the task was verified on, the
+/// verification and the answer it was closed on. `rechecked` says the
+/// verification ran again for the answer after main moved.
 pub fn closed_payload(verified: &Verified, ask: AskId) -> Value {
     json!({
         "head": verified.head,
         "verified_event": verified.event,
+        "closed_by": "answer",
         "ask_id": ask,
         "answer": CLOSE,
         "rechecked": verified.ask_id == Some(ask),
@@ -470,6 +472,7 @@ mod tests {
         let closed = closed_payload(&verified(S2, true, Some(5)), AskId::new(5));
         assert_eq!(closed["rechecked"], true);
         assert_eq!(closed["head"], S2);
+        assert_eq!(closed["closed_by"], "answer");
         assert_eq!(snapshot_payload(&sha(S1), None), json!({"head": S1}));
     }
 

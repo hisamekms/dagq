@@ -9,8 +9,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{
-    AskConfidence, CommitSha, ReviewDecision, concern, parse_json_object, review_reason,
-    satisfied::{self, SatisfiedAnswer, SnapshotVerification},
+    AskConfidence, CommitSha, ReviewDecision, RunEvent, concern, event_kind, parse_json_object,
+    receipt::BaseCheck,
+    review_reason,
+    satisfied::{self, SatisfiedAnswer, SnapshotVerification, Verified},
 };
 
 /// How many reasons of a judgment its `approve_close` ask names, the first
@@ -95,6 +97,20 @@ pub enum JudgmentStep {
     Ask(JudgmentAsk),
 }
 
+/// The `step` of a judgment made again on a newer head.
+const REJUDGE: &str = "rejudge";
+
+impl JudgmentStep {
+    /// The `step` of its `run_satisfied_judged`.
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Close => "close",
+            Self::Rejudge { .. } => REJUDGE,
+            Self::Ask(_) => "ask",
+        }
+    }
+}
+
 /// Why a judgment went to a person.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AskBecause {
@@ -104,6 +120,15 @@ pub enum AskBecause {
     /// A `high` pass on a snapshot main moved past, with no new judgment
     /// left ([`MAX_JUDGMENT_RETRIES`]).
     RetryLimit,
+}
+
+impl AskBecause {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotHighPass => "not_high_pass",
+            Self::RetryLimit => "retry_limit",
+        }
+    }
 }
 
 /// The ask a judgment opens, with what the review gave.
@@ -144,38 +169,84 @@ pub fn decide(
     }
 }
 
+/// How many times a run's claim was judged again on a newer head after a
+/// `high` pass found main moved past its snapshot, by its `events` (the
+/// `run_satisfied_judged` whose `step` is `rejudge`): the `retries` of
+/// [`decide`]. A judgment made again because its supervisor stopped (the
+/// next one validates, verifies and judges the claim afresh) is no retry.
+pub fn rejudged(events: &[RunEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| e.kind == event_kind::RUN_SATISFIED_JUDGED && e.payload["step"] == REJUDGE)
+        .count()
+}
+
 /// The payload of `run_satisfied_judged` for the judgment `attempt` on the
-/// snapshot `head`: what the job printed, or why it gave none (`error`).
+/// snapshot `head`: what the job printed with the step the runtime took on
+/// it, or why it gave none (`error`).
 pub fn judged_payload(
     attempt: usize,
     head: &CommitSha,
-    judged: Result<&ClaimJudgment, &str>,
+    judged: Result<(&ClaimJudgment, &JudgmentStep), &str>,
 ) -> Value {
     match judged {
-        Ok(judgment) => json!({
-            "attempt": attempt,
-            "head": head,
-            "verdict": judgment.verdict.as_str(),
-            "confidence": judgment.confidence.map(|c| c.as_str().to_owned()),
-            "recommendation": judgment.recommendation.map(SatisfiedAnswer::as_str),
-            "reasons": judgment.reasons,
-            "summary": judgment.summary,
-        }),
+        Ok((judgment, step)) => {
+            let mut payload = json!({
+                "attempt": attempt,
+                "head": head,
+                "verdict": judgment.verdict.as_str(),
+                "confidence": judgment.confidence.map(|c| c.as_str().to_owned()),
+                "recommendation": judgment.recommendation.map(SatisfiedAnswer::as_str),
+                "reasons": judgment.reasons,
+                "summary": judgment.summary,
+                "step": step.as_str(),
+            });
+            match step {
+                JudgmentStep::Close => {}
+                JudgmentStep::Rejudge { head } => payload["main"] = json!(head),
+                JudgmentStep::Ask(ask) => payload["because"] = json!(ask.because.as_str()),
+            }
+            payload
+        }
         Err(error) => json!({"attempt": attempt, "head": head, "error": error}),
     }
+}
+
+/// The payload of `run_satisfied_closed` for a claim the review's
+/// judgment `attempt` closed (`closed_by` `judgment`), a `high` pass on the
+/// head of `verified` while main was still there: the head, the
+/// verification, the verdict and confidence, and the receipt's grounds
+/// (its summary and `base_checks`). No ask was answered.
+pub fn closed_payload(
+    verified: &Verified,
+    attempt: usize,
+    judgment: &ClaimJudgment,
+    (summary, base_checks): (&str, &[BaseCheck]),
+) -> Value {
+    json!({
+        "head": verified.head,
+        "verified_event": verified.event,
+        "closed_by": "judgment",
+        "attempt": attempt,
+        "verdict": judgment.verdict.as_str(),
+        "confidence": judgment.confidence.map(|c| c.as_str().to_owned()),
+        "receipt_summary": summary,
+        "base_checks": base_checks,
+    })
 }
 
 /// The question of the `approve_close` ask a judgment opens: the claim and
 /// its verification as [`satisfied::question`] gives them, then what the
 /// review judged on the same head, its verdict, confidence, recommendation,
 /// summary and reasons (cut to [`ASK_REASONS`], [`ASK_REASON_BYTES`] and
-/// [`ASK_SUMMARY_BYTES`]). Whatever it judged, the person decides: the
-/// runtime closes nothing on the review.
+/// [`ASK_SUMMARY_BYTES`]), and why the runtime did not close the task on
+/// it (`because`): it is no `high` pass, or main kept moving past the
+/// snapshot while the claim was judged again. The person decides.
 pub fn judged_question(
     task: &str,
     summary: &str,
     verification: &SnapshotVerification,
-    judgment: &ClaimJudgment,
+    (judgment, because): (&ClaimJudgment, AskBecause),
 ) -> String {
     let mut reasons = String::new();
     for (index, reason) in judgment.reasons.iter().take(ASK_REASONS).enumerate() {
@@ -192,7 +263,7 @@ pub fn judged_question(
         ));
     }
     format!(
-        "{}\nThe review judged the claim on the same head {}: {} with {} confidence, recommending {}. Its summary: {}{}{}\nThe runtime does not close the task on the review: you decide.",
+        "{}\nThe review judged the claim on the same head {}: {} with {} confidence, recommending {}. Its summary: {}{}{}\n{} you decide.",
         satisfied::question(task, summary, verification, None),
         verification.head,
         judgment.verdict.as_str(),
@@ -207,6 +278,12 @@ pub fn judged_question(
             "\nIts reasons:"
         },
         reasons,
+        match because {
+            AskBecause::NotHighPass =>
+                "The runtime closes the task by itself only on a pass with high confidence, so it does not close it on this review:",
+            AskBecause::RetryLimit =>
+                "Main moved past the snapshot after a pass with high confidence each time the claim was verified and judged again, up to the limit, so the runtime does not close the task on it:",
+        },
     )
 }
 
@@ -339,7 +416,12 @@ mod tests {
         let mut read = judgment("pass", Some("high"));
         read.reasons = (0..=ASK_REASONS).map(|i| format!("reason {i}")).collect();
         read.reasons[0] = "é".repeat(ASK_REASON_BYTES);
-        let question = judged_question("7", "the base meets it", &verification(), &read);
+        let question = judged_question(
+            "7",
+            "the base meets it",
+            &verification(),
+            (&read, AskBecause::RetryLimit),
+        );
         for said in [
             sha('a').as_str(),
             "pass with high confidence, recommending retry",
@@ -348,6 +430,7 @@ mod tests {
             "(1 more reasons",
             "you decide",
             "the base meets it",
+            "Main moved past the snapshot",
         ] {
             assert!(question.contains(said), "{said}: {question}");
         }
@@ -368,12 +451,16 @@ mod tests {
             first.len()
         );
         let none = judgment("revise", None);
-        let question = judged_question("7", "", &verification(), &none);
+        let question = judged_question("7", "", &verification(), (&none, AskBecause::NotHighPass));
         assert!(
-            question.contains("revise with no known confidence"),
+            question.contains("revise with no known confidence")
+                && question.contains("only on a pass with high confidence"),
             "{question}"
         );
-        let payload = judged_payload(2, &sha('a'), Ok(&read));
+        let step = JudgmentStep::Ask(ask(&read, AskBecause::RetryLimit));
+        let payload = judged_payload(2, &sha('a'), Ok((&read, &step)));
+        assert_eq!(payload["step"], "ask");
+        assert_eq!(payload["because"], "retry_limit");
         assert_eq!(payload["attempt"], 2);
         assert_eq!(payload["head"], json!(sha('a')));
         assert_eq!(payload["verdict"], "pass");
@@ -474,5 +561,83 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A run's retries are its judgments the runtime made again on a newer
+    /// head, read back from their `step`: not a close, an ask, a judgment
+    /// that gave none, or another event.
+    #[test]
+    fn only_a_judgment_made_again_on_a_newer_head_counts_as_a_retry() {
+        let high = judgment("pass", Some("high"));
+        let low = judgment("pass", Some("low"));
+        let event = |id: i64, kind: &str, payload: Value| RunEvent {
+            id: super::super::EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.into(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        };
+        let judged = |id: i64, step: &JudgmentStep| {
+            event(
+                id,
+                event_kind::RUN_SATISFIED_JUDGED,
+                judged_payload(1, &sha('a'), Ok((&high, step))),
+            )
+        };
+        let rejudge = decide(&high, &sha('a'), &sha('b'), 0, MAX_JUDGMENT_RETRIES);
+        let rejudged_payload = judged(1, &rejudge).payload;
+        assert_eq!(rejudged_payload["step"], "rejudge");
+        assert_eq!(rejudged_payload["main"], json!(sha('b')));
+        assert_eq!(judged(1, &JudgmentStep::Close).payload["step"], "close");
+        let events = [
+            judged(1, &rejudge),
+            judged(2, &JudgmentStep::Close),
+            judged(3, &decide(&low, &sha('a'), &sha('a'), 0, 2)),
+            event(
+                4,
+                event_kind::RUN_SATISFIED_JUDGED,
+                judged_payload(4, &sha('a'), Err("no JSON")),
+            ),
+            event(
+                5,
+                event_kind::RUN_SATISFIED_SNAPSHOT,
+                json!({"step": "rejudge"}),
+            ),
+            judged(6, &rejudge),
+        ];
+        assert_eq!(rejudged(&events), 2);
+        assert_eq!(rejudged(&events[1..5]), 0);
+    }
+
+    /// A close by the judgment names the head, the verification, the
+    /// verdict and confidence and the receipt's grounds, and no ask.
+    #[test]
+    fn a_close_by_the_judgment_keeps_the_head_the_verdict_and_the_grounds() {
+        let verified = Verified {
+            head: sha('a'),
+            passed: true,
+            ask_id: None,
+            event: super::super::EventId::new(9),
+        };
+        let checks = [BaseCheck {
+            command: "test -f seed.txt".into(),
+            result: "passed".into(),
+        }];
+        let closed = closed_payload(
+            &verified,
+            3,
+            &judgment("pass", Some("high")),
+            ("the base meets it", &checks),
+        );
+        assert_eq!(
+            closed,
+            json!({"head": sha('a'), "verified_event": 9, "closed_by": "judgment",
+                "attempt": 3, "verdict": "pass", "confidence": "high",
+                "receipt_summary": "the base meets it",
+                "base_checks": [{"command": "test -f seed.txt", "result": "passed"}]})
+        );
     }
 }

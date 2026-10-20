@@ -7,12 +7,20 @@
 //! ([`ClaimJudgment::parse`]), a job that gives none runs once more as a
 //! run review's does, and a provider that cannot be used holds, moves or
 //! waits as it does for a run review's job ([`Supervisor::review_job_failed`]).
-//! Whatever it judged, the claim then goes to a person in the
-//! `approve_close` ask with the review's reasons, recommendation and
-//! confidence: the runtime closes nothing on the review yet. The verdict is
-//! recorded and the ask opened at the job's request (`requested_by`); a job
-//! that gave no judgment asks as a failed job (`recovery_failed`), at
-//! nobody's.
+//! What it judged is decided against main's head at that moment
+//! ([`satisfied_judgment::decide`], ADR-t1818-1 decisions 3 and 5): a
+//! `high` pass on a snapshot main is still at closes the task as
+//! `completed` without a commit, with no ask; one main moved past is
+//! verified and judged again on main's head, up to
+//! [`satisfied_judgment::MAX_JUDGMENT_RETRIES`] times; anything else, or a
+//! `high` pass past that limit, goes to a person in the `approve_close` ask
+//! with the review's reasons, recommendation and confidence. The verdict is
+//! recorded and the close, the verification again or the ask applied at the
+//! job's request (`requested_by`); a job that gave no judgment asks as a
+//! failed job (`recovery_failed`), at nobody's. A supervisor that stops
+//! after the verdict's record leaves its run leased: the one that adopts it
+//! validates, verifies and judges the claim afresh on main as it is then,
+//! never closing on the old judgment.
 
 use super::landing::{AfterUnusable, ReviewRoute, StartedReview, after_unusable};
 use super::provider::ReviewJobFailure;
@@ -24,7 +32,7 @@ use crate::domain::actor_model::ActorLaunch;
 use crate::domain::headless_job::{JobKind, JobStop};
 use crate::domain::review_jobs::{self, JobMiss};
 use crate::domain::satisfied::{self, SnapshotVerification};
-use crate::domain::satisfied_judgment::{self, ClaimJudgment};
+use crate::domain::satisfied_judgment::{self, ClaimJudgment, JudgmentStep};
 
 /// A claim's judgment in the run's slot: its `attempt` (from 1, by the
 /// run's `run_satisfied_review_started`), the verification that passed on
@@ -118,6 +126,16 @@ impl replan_park::ParkedReviewJobs for ClaimReviewWatch {
         }
         withheld
     }
+}
+
+/// Where a claim goes once its judgment ended
+/// ([`Supervisor::tend_claim_review`]).
+pub(super) enum AfterJudged {
+    /// It rests on its `approve_close` ask, or it closed.
+    Rested(Box<TaskRun>),
+    /// Main moved past the judged snapshot: the claim is verified again on
+    /// main's head in this phase, then judged there.
+    Verify(Box<Phase>),
 }
 
 /// The actor of the job of judgment `attempt` of `run`'s claim, which its
@@ -215,22 +233,30 @@ impl Supervisor<'_> {
     }
 
     /// One step of `run`'s claim judgment in `watch`: reap its job, start
-    /// it while it waits and a provider can run it, and once it judged or
-    /// failed, ask the person ([`Self::claim_judged`],
-    /// [`Self::claim_unjudged`]): the run then rests, given back.
+    /// it while it waits and a provider can run it, and once it judged,
+    /// apply the judgment ([`Self::claim_judged`]), or once it failed, ask
+    /// the person ([`Self::claim_unjudged`]).
     pub(super) fn tend_claim_review(
         &mut self,
         run: &TaskRun,
         watch: &mut ClaimReviewWatch,
-    ) -> Result<Option<TaskRun>> {
+    ) -> Result<Option<AfterJudged>> {
         watch.withheld = false;
         self.reap_claim_review(run, watch)?;
         if matches!(watch.state, ClaimJob::Waiting(_)) {
             self.start_claim_review(run, watch)?;
         }
         match std::mem::replace(&mut watch.state, ClaimJob::Waiting(None)) {
-            ClaimJob::Judged(judgment) => self.claim_judged(run, watch, &judgment).map(Some),
-            ClaimJob::Failed(why) => self.claim_unjudged(run, watch, &why).map(Some),
+            ClaimJob::Judged(judgment) => {
+                let after = self.claim_judged(run, watch, &judgment)?;
+                if after.is_none() {
+                    watch.state = ClaimJob::Judged(judgment);
+                }
+                Ok(after)
+            }
+            ClaimJob::Failed(why) => self
+                .claim_unjudged(run, watch, &why)
+                .map(|run| Some(AfterJudged::Rested(Box::new(run)))),
             state => {
                 watch.state = state;
                 Ok(None)
@@ -601,44 +627,126 @@ impl Supervisor<'_> {
         Ok(started.map(|child| (child, stdout, stderr)))
     }
 
-    /// The review judged `run`'s claim as `judgment`: the `approve_close`
-    /// ask opened (reason `scope`) and the judgment recorded as
-    /// `run_satisfied_judged`, with its reasons, recommendation and confidence, both at
-    /// the job's request ([`Self::for_job`]); then the judgment's tree goes
-    /// and the run rests, given back. A `high` pass is asked too.
+    /// The review judged `run`'s claim as `judgment`, decided against
+    /// main's head now and this run's judgments made again so far
+    /// ([`satisfied_judgment::decide`]), recorded as `run_satisfied_judged`
+    /// with the step and applied, both at the job's request
+    /// ([`Self::for_job`]): a close completes the task without a commit and
+    /// gives the lease back in its transaction; a judgment made again
+    /// verifies the claim on main's head, the run kept; an ask opens the
+    /// `approve_close` ask (reason `scope`) with the review's reasons,
+    /// recommendation and confidence, and the run rests, given back. The
+    /// judgment's tree goes in each. `None` when the close was refused: the
+    /// judgment stays for the next step.
     fn claim_judged(
         &mut self,
         run: &TaskRun,
         watch: &ClaimReviewWatch,
         judgment: &ClaimJudgment,
-    ) -> Result<TaskRun> {
+    ) -> Result<Option<AfterJudged>> {
         let job = claim_review_job(run.id(), watch.attempt);
-        let (task, summary) = self.claim_of(run)?;
         let verification = &watch.verification;
-        // The ask first: the claim rests from its judgment's record on, so
-        // it never rests without one.
-        let ask = self.for_job(&job, |sv| {
-            let ask = sv.open_close_ask(
-                run,
-                (
-                    satisfied_judgment::judged_question(&task, &summary, verification, judgment),
-                    &satisfied::CLOSE_OPTIONS,
-                ),
-                (
-                    AskReason::Scope,
-                    judgment.recommendation.map(|r| r.as_str().to_owned()),
-                    judgment.confidence,
-                ),
-            )?;
-            sv.queue.record_runtime_event(
-                run.id(),
-                EventKind::RunSatisfiedJudged,
-                satisfied_judgment::judged_payload(watch.attempt, &verification.head, Ok(judgment)),
-            )?;
-            Ok(ask)
-        })?;
-        info!(run_id = %run.id(), "run {}: the review judged its already_satisfied claim on main {} {}; it waits for a person in ask {}", run.id(), verification.head, judgment.verdict.as_str(), ask["id"]);
-        self.rest_after_judgment(run)
+        let main = self.repository.main_head()?;
+        let events = self.queue.run_events(run.id())?;
+        let step = satisfied_judgment::decide(
+            judgment,
+            &verification.head,
+            &main,
+            satisfied_judgment::rejudged(&events),
+            satisfied_judgment::MAX_JUDGMENT_RETRIES,
+        );
+        let judged = satisfied_judgment::judged_payload(
+            watch.attempt,
+            &verification.head,
+            Ok((judgment, &step)),
+        );
+        match step {
+            JudgmentStep::Close => {
+                let verified = satisfied::latest_verified(&events)
+                    .filter(|v| v.passed && v.head == verification.head)
+                    .context("the judged snapshot's verification is not read back")?;
+                let receipt = self.receipt_of(run);
+                let grounds = receipt
+                    .as_ref()
+                    .map_or(("", &[][..]), |r| (r.summary(), r.base_checks()));
+                let closed = self.for_job(&job, |sv| {
+                    sv.queue.record_runtime_event(
+                        run.id(),
+                        EventKind::RunSatisfiedJudged,
+                        judged,
+                    )?;
+                    Ok(sv.queue.close_satisfied(
+                        run.id(),
+                        Some(&sv.registration.token().clone()),
+                        satisfied_judgment::closed_payload(
+                            &verified,
+                            watch.attempt,
+                            judgment,
+                            grounds,
+                        ),
+                    ))
+                })?;
+                // A close refused (a replanning or a hold came in since the
+                // fence was looked at) keeps the judgment in the slot: the
+                // next step withholds it for the park, or closes then.
+                let (_, closed) = match closed {
+                    Ok(closed) => closed,
+                    Err(error) => {
+                        warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: the close its judgment decided could not be applied: {error:#}; the next step looks at it again", run.id());
+                        return Ok(None);
+                    }
+                };
+                info!(run_id = %run.id(), task_id = %run.task_id(), "task {} is completed without a commit: the review judged its already_satisfied claim a pass with high confidence on main {}, still main's head", run.task_id(), verification.head);
+                self.remove_claim_tree(run);
+                Ok(Some(AfterJudged::Rested(Box::new(closed))))
+            }
+            JudgmentStep::Rejudge { head } => {
+                info!(run_id = %run.id(), "run {}: main moved from {} to {head} while the review judged its already_satisfied claim; it is verified and judged again there", run.id(), verification.head);
+                self.remove_claim_tree(run);
+                let phase = self.for_job(&job, |sv| {
+                    sv.queue.record_runtime_event(
+                        run.id(),
+                        EventKind::RunSatisfiedJudged,
+                        judged,
+                    )?;
+                    sv.verify_satisfied(run, None)
+                })?;
+                Ok(Some(AfterJudged::Verify(Box::new(phase))))
+            }
+            JudgmentStep::Ask(asked) => {
+                let (task, summary) = self.claim_of(run)?;
+                // The ask first: the claim rests from its judgment's record
+                // on, so it never rests without one.
+                let ask = self.for_job(&job, |sv| {
+                    let ask = sv.open_close_ask(
+                        run,
+                        (
+                            satisfied_judgment::judged_question(
+                                &task,
+                                &summary,
+                                verification,
+                                (judgment, asked.because),
+                            ),
+                            &satisfied::CLOSE_OPTIONS,
+                        ),
+                        (
+                            AskReason::Scope,
+                            judgment.recommendation.map(|r| r.as_str().to_owned()),
+                            judgment.confidence,
+                        ),
+                    )?;
+                    sv.queue.record_runtime_event(
+                        run.id(),
+                        EventKind::RunSatisfiedJudged,
+                        judged,
+                    )?;
+                    Ok(ask)
+                })?;
+                info!(run_id = %run.id(), "run {}: the review judged its already_satisfied claim on main {} {} ({}); it waits for a person in ask {}", run.id(), verification.head, judgment.verdict.as_str(), asked.because.as_str(), ask["id"]);
+                self.rest_after_judgment(run)
+                    .map(|run| Some(AfterJudged::Rested(Box::new(run))))
+            }
+        }
     }
 
     /// The job of `run`'s claim judgment gave no judgment (`why`): recorded

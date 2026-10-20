@@ -1113,19 +1113,26 @@ pub const RUN_RECOVERED: &str = EventKind::RunRecovered.as_str();
 /// A task closed `completed` without a commit on a verified
 /// `already_satisfied` claim (ADR-t1818-1 decision 5): no landing. `head`
 /// is the main head it was verified on, `verified_event` that
-/// verification's `run_satisfied_verified`, `ask_id` and `answer` the
-/// person's close, and `rechecked` whether the verification ran again for
-/// that answer because main had moved
-/// ([`super::satisfied::closed_payload`]). It carries no `status`, so
-/// `stats` counts the run apart from the landed and the failed.
+/// verification's `run_satisfied_verified`, and `closed_by` what closed it:
+/// a person's `answer` (`ask_id`, and `rechecked` whether the verification
+/// ran again for it because main had moved,
+/// [`super::satisfied::closed_payload`]) or the review's `judgment`, a
+/// `high` pass on that head while main was still there, with its
+/// `attempt`, `verdict`, `confidence` and the receipt's grounds, recorded
+/// at the judgment job's request
+/// ([`super::satisfied_judgment::closed_payload`]). It carries no
+/// `status`, so `stats` counts the run apart from the landed and the
+/// failed.
 pub const RUN_SATISFIED_CLOSED: &str = EventKind::RunSatisfiedClosed.as_str();
 /// How the review's judgment of an `already_satisfied` claim ended
 /// (ADR-t1818-1 decision 4), the snapshot's `head` and its `attempt` with
 /// it: the `verdict`, `confidence`, `recommendation`, `reasons` and
 /// `summary` the job printed, recorded at the job's request
-/// (`requested_by`), or the `error` of a job that gave none, recorded at
-/// nobody's ([`super::satisfied::judged_payload`]). The claim rests after
-/// it, its `approve_close` ask open.
+/// (`requested_by`) with the `step` the runtime took on it (`close`,
+/// `rejudge` on `main`'s newer head, or `ask` with `because`), or the
+/// `error` of a job that gave none, recorded at nobody's
+/// ([`super::satisfied_judgment::judged_payload`]). Unless it closed or is
+/// judged again, the claim rests after it, its `approve_close` ask open.
 pub const RUN_SATISFIED_JUDGED: &str = EventKind::RunSatisfiedJudged.as_str();
 /// One job of a claim's judgment ended: its `attempt`, whether it ran
 /// `again` (its one run once more), `provider`, `duration_secs`, `output`

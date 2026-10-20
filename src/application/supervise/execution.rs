@@ -4046,7 +4046,15 @@ impl Supervisor<'_> {
                 }
                 let run = slot.run.clone();
                 Ok(match self.tend_claim_review(&run, watch)? {
-                    Some(run) => Step::Done(Box::new(run)),
+                    Some(satisfied_review::AfterJudged::Rested(run)) => Step::Done(run),
+                    Some(satisfied_review::AfterJudged::Verify(phase)) => {
+                        slot.transition(
+                            *phase,
+                            EventKind::RunSatisfiedSnapshot.as_str(),
+                            &*self.queue,
+                        );
+                        Step::Continue
+                    }
                     None => Step::Continue,
                 })
             }

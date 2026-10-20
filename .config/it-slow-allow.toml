@@ -1253,6 +1253,12 @@ name = "runtime_already_satisfied::a_verified_claim_is_closed_without_a_commit_b
 reason = "B 境界（守る境界）: supervisor wiring and Git: snapshot verify in a scratch worktree, the approve_close ask, the close on SQLite and the dependent's claim and landing; the close decision is satisfied::tests"
 task = 1820
 
+# 7.339s (stress max), class B
+[[test]]
+name = "runtime_already_satisfied::a_high_pass_on_the_snapshot_main_is_still_at_closes_the_claim_with_no_ask"
+reason = "B 境界（守る境界）: supervisor wiring, Git and SQLite: the judgment job's high pass closed in the close transaction with its lease and requested_by, then the dependent's claim and landing; the close decision is satisfied_judgment::tests"
+task = 2834
+
 # 11.025s (stress max), class B
 [[test]]
 name = "runtime_already_satisfied::a_close_answered_after_main_moved_verifies_the_new_head_first"
