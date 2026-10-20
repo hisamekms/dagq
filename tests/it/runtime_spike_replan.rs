@@ -543,6 +543,72 @@ fn abandoning_the_goal_or_canceling_its_spikes_ends_an_investigation() {
     );
 }
 
+/// `max_investigations = 1`, goal A's Spike `a1` claimed first: goal A's other
+/// Spikes wait over goal dependencies, `a2` for goal B (whose Spike `b1` is
+/// ready) and `a3` for goal D, whose implementation `d1` waits over a task
+/// dependency for goal E's Spike `e1`. `b1` and `e1` are what the open
+/// investigation waits for: past the limit the supervisor claims them, never
+/// held; goal C's Spike `c1`, which nothing of goal A waits for, stays held
+/// by the investigation limit, the only deferral `candidates` and `graph`
+/// show.
+#[test]
+fn a_spike_awaited_over_a_goal_dependency_is_claimed_past_the_investigation_limit() {
+    let (_dir, repo, db) = fixture();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    fs::write(
+        repo.join("dagq.toml"),
+        "[supervisor]\nmax_investigations = 1\n",
+    )
+    .unwrap();
+    let [a, b, c, d, e] = ["A", "B", "C", "D", "E"].map(|name| open_goal(&db, name));
+    let a1 = add_task(&db, "a1", ExecutionClass::Spike, Some(a));
+    let a2 = add_task(&db, "a2", ExecutionClass::Spike, Some(a));
+    let a3 = add_task(&db, "a3", ExecutionClass::Spike, Some(a));
+    let b1 = add_task(&db, "b1", ExecutionClass::Spike, Some(b));
+    let c1 = add_task(&db, "c1", ExecutionClass::Spike, Some(c));
+    let d1 = add_task(&db, "d1", ExecutionClass::Implementation, Some(d));
+    let e1 = add_task(&db, "e1", ExecutionClass::Spike, Some(e));
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue.add_goal_dependency(a2, b).unwrap();
+    queue.add_goal_dependency(a3, d).unwrap();
+    queue.add_dependency(d1, e1).unwrap();
+    queue.set_priority(a1, Some(Priority::High)).unwrap();
+    let backend = TestWorkspace::new(&db, false, &spike_agent("holds"));
+    let outcome = supervise_with(&db, &repo, &backend, &supervise_options(4, true)).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let claimed = claimed_tasks(&db);
+    assert_eq!(claimed.first(), Some(&a1), "{claimed:?}");
+    let mut past = claimed[1..].to_vec();
+    past.sort();
+    assert_eq!(past, [b1, e1], "{claimed:?}");
+    for awaited in [b1, e1] {
+        assert_eq!(
+            reasons_of(&db, awaited, "claim_deferred"),
+            Vec::<String>::new()
+        );
+    }
+    assert_eq!(
+        reasons_of(&db, c1, "claim_deferred"),
+        ["investigation_limit"]
+    );
+
+    let view = crate::common::cli::ok(&db, &["candidates"]);
+    assert_eq!(ids(&view["candidates"]), Vec::<i64>::new(), "{view}");
+    assert_eq!(view["deferred"].as_array().unwrap().len(), 1, "{view}");
+    assert_eq!(view["deferred"][0]["task_id"], c1.as_i64(), "{view}");
+    assert_eq!(
+        view["deferred"][0]["reason"], "investigation_limit",
+        "{view}"
+    );
+    let graph = crate::common::cli::ok(&db, &["graph"]);
+    assert_eq!(graph["candidates"], view["candidates"], "{graph}");
+    assert_eq!(graph["deferred"], view["deferred"], "{graph}");
+}
+
 /// A draft task of `class` in `goal`; its ID.
 fn draft(queue: &mut SqliteQueue, goal: GoalId, class: ExecutionClass) -> TaskId {
     queue

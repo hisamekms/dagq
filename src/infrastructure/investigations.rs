@@ -9,7 +9,7 @@
 //! claim's, the supervisor's pass): it records first the request of each
 //! completed Spike that has none, so a cycle never ends before its last
 //! Spike's request is there.
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -17,7 +17,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use crate::domain::{
     AskKind, ExecutionClass, GoalId, TaskId,
     claim_defer::waits_for_owner,
-    investigation::{Investigation, InvestigationKey, Investigations, awaited_spikes},
+    investigation::{Investigation, InvestigationKey, Investigations, WaitEdges, awaited_spikes},
 };
 
 /// The statuses of an unfinished Spike that keeps its investigation open:
@@ -117,16 +117,30 @@ pub(super) fn refresh(conn: &Connection, now: i64) -> Result<Investigations> {
         unfinished.extend(spikes.into_iter().map(TaskId::new));
         open.push(Investigation { key, waits });
     }
-    let mut predecessors: BTreeMap<TaskId, Vec<TaskId>> = BTreeMap::new();
-    let edges: Vec<(TaskId, TaskId)> = conn
-        .prepare(
-            "SELECT d.task_id, d.predecessor_id FROM task_dependencies d
-             JOIN tasks t ON t.id=d.task_id WHERE t.status NOT IN ('completed','canceled')",
-        )?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    for (task, predecessor) in edges {
-        predecessors.entry(task).or_default().push(predecessor);
+    let mut edges = WaitEdges::default();
+    let waiting = "JOIN tasks t ON t.id=d.task_id WHERE t.status NOT IN ('completed','canceled')";
+    for (task, predecessor) in pairs(
+        conn,
+        &format!("SELECT d.task_id, d.predecessor_id FROM task_dependencies d {waiting}"),
+    )? {
+        edges.tasks.entry(task).or_default().push(predecessor);
+    }
+    for (task, goal) in pairs(
+        conn,
+        &format!(
+            "SELECT d.task_id, d.goal_id FROM task_goal_dependencies d {waiting}
+             AND NOT EXISTS(SELECT 1 FROM goals g WHERE g.id=d.goal_id
+                 AND g.closed_at IS NOT NULL AND g.verdict='achieved')"
+        ),
+    )? {
+        edges.goals.entry(task).or_default().push(goal);
+    }
+    for (goal, task) in pairs(
+        conn,
+        "SELECT goal_id, id FROM tasks WHERE goal_id IS NOT NULL
+         AND status NOT IN ('completed','canceled')",
+    )? {
+        edges.goal_tasks.entry(goal).or_default().push(task);
     }
     let spikes: HashSet<TaskId> = conn
         .prepare("SELECT id FROM tasks WHERE execution_class='spike' AND status='ready'")?
@@ -134,7 +148,7 @@ pub(super) fn refresh(conn: &Connection, now: i64) -> Result<Investigations> {
         .collect::<rusqlite::Result<_>>()?;
     Ok(Investigations {
         open,
-        awaited: awaited_spikes(&unfinished, &predecessors, &spikes),
+        awaited: awaited_spikes(&unfinished, &edges, &spikes),
     })
 }
 
@@ -277,5 +291,15 @@ fn ids(conn: &Connection, sql: &str, param: i64) -> Result<Vec<i64>> {
     Ok(conn
         .prepare(sql)?
         .query_map([param], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+fn pairs<A: rusqlite::types::FromSql, B: rusqlite::types::FromSql>(
+    conn: &Connection,
+    sql: &str,
+) -> Result<Vec<(A, B)>> {
+    Ok(conn
+        .prepare(sql)?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?)
 }

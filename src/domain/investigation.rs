@@ -10,8 +10,9 @@
 //! their place at once: at the limit, a Spike that would open a new one is
 //! deferred ([`INVESTIGATION_LIMIT`]) until one ends. A Spike of an
 //! investigation already open, and one an unfinished Spike of an open
-//! investigation waits for (transitively), is never held, so the limit
-//! may be passed for a while. An investigation all of whose remaining work
+//! investigation waits for (transitively, over task dependencies and over
+//! goal dependencies, which wait for the goal's unfinished tasks), is never
+//! held, so the limit may be passed for a while. An investigation all of whose remaining work
 //! only waits for a person's answer (a Spike's run on its question, its
 //! proposal on plan review's question, its request's `planner_question`)
 //! stops counting once the wait is `[conflicts] waiting_owner_grace_secs`
@@ -95,7 +96,7 @@ pub struct InvestigationLimit {
 }
 
 /// The open investigations, and the Spikes their unfinished Spikes wait
-/// for over task dependencies, transitively.
+/// for over task and goal dependencies, transitively ([`awaited_spikes`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Investigations {
     pub open: Vec<Investigation>,
@@ -139,19 +140,47 @@ impl Investigations {
     }
 }
 
+/// What a task waits for: its direct predecessors over task dependencies
+/// (`tasks`), the goals it waits to close achieved over goal dependencies
+/// (`goals`), and each such goal's unfinished tasks (`goal_tasks`), which
+/// the goal waits for before it can close.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WaitEdges {
+    pub tasks: BTreeMap<TaskId, Vec<TaskId>>,
+    pub goals: BTreeMap<TaskId, Vec<GoalId>>,
+    pub goal_tasks: BTreeMap<GoalId, Vec<TaskId>>,
+}
+
 /// The Spikes the unfinished Spikes `from` wait for, transitively over
-/// `predecessors` (each task's direct ones), of those in `spikes`.
+/// `edges` (a goal dependency waits for the goal's unfinished tasks), of
+/// those in `spikes`.
 pub fn awaited_spikes(
     from: &[TaskId],
-    predecessors: &BTreeMap<TaskId, Vec<TaskId>>,
+    edges: &WaitEdges,
     spikes: &HashSet<TaskId>,
 ) -> HashSet<TaskId> {
     let mut seen: HashSet<TaskId> = HashSet::new();
+    let mut goals_seen: HashSet<GoalId> = HashSet::new();
     let mut stack: Vec<TaskId> = from.to_vec();
     while let Some(task) = stack.pop() {
-        for predecessor in predecessors.get(&task).into_iter().flatten() {
-            if seen.insert(*predecessor) {
-                stack.push(*predecessor);
+        let via_goals = edges
+            .goals
+            .get(&task)
+            .into_iter()
+            .flatten()
+            .filter(|goal| goals_seen.insert(**goal))
+            .flat_map(|goal| edges.goal_tasks.get(goal).into_iter().flatten());
+        let waited: Vec<TaskId> = edges
+            .tasks
+            .get(&task)
+            .into_iter()
+            .flatten()
+            .chain(via_goals)
+            .copied()
+            .collect();
+        for predecessor in waited {
+            if seen.insert(predecessor) {
+                stack.push(predecessor);
             }
         }
     }
@@ -352,18 +381,51 @@ mod tests {
 
     #[test]
     fn the_awaited_spikes_follow_the_dependencies_transitively() {
-        let predecessors: BTreeMap<TaskId, Vec<TaskId>> = [
-            (TaskId::new(1), vec![TaskId::new(2)]),
-            (TaskId::new(2), vec![TaskId::new(3), TaskId::new(4)]),
-            (TaskId::new(4), vec![TaskId::new(1)]),
-        ]
-        .into();
+        let edges = WaitEdges {
+            tasks: [
+                (TaskId::new(1), vec![TaskId::new(2)]),
+                (TaskId::new(2), vec![TaskId::new(3), TaskId::new(4)]),
+                (TaskId::new(4), vec![TaskId::new(1)]),
+            ]
+            .into(),
+            ..WaitEdges::default()
+        };
         let spikes: HashSet<TaskId> = [TaskId::new(3), TaskId::new(4), TaskId::new(9)].into();
         assert_eq!(
-            awaited_spikes(&[TaskId::new(1)], &predecessors, &spikes),
+            awaited_spikes(&[TaskId::new(1)], &edges, &spikes),
             [TaskId::new(3), TaskId::new(4)].into()
         );
-        assert!(awaited_spikes(&[TaskId::new(9)], &predecessors, &spikes).is_empty());
+        assert!(awaited_spikes(&[TaskId::new(9)], &edges, &spikes).is_empty());
+    }
+
+    /// A goal dependency waits for the goal's unfinished tasks, and the
+    /// closure goes on from them over task and goal dependencies alike; a
+    /// goal no waiting task depends on is not reached, and a cycle through
+    /// goals ends.
+    #[test]
+    fn the_awaited_spikes_follow_goal_dependencies_transitively() {
+        let (b, c, d) = (GoalId::new(2), GoalId::new(3), GoalId::new(4));
+        let edges = WaitEdges {
+            tasks: [(TaskId::new(20), vec![TaskId::new(21)])].into(),
+            goals: [
+                (TaskId::new(1), vec![b]),
+                (TaskId::new(21), vec![d]),
+                (TaskId::new(40), vec![b]),
+            ]
+            .into(),
+            goal_tasks: [
+                (b, vec![TaskId::new(20)]),
+                (c, vec![TaskId::new(30)]),
+                (d, vec![TaskId::new(40)]),
+            ]
+            .into(),
+        };
+        let spikes: HashSet<TaskId> = [20, 21, 30, 40].map(TaskId::new).into();
+        assert_eq!(
+            awaited_spikes(&[TaskId::new(1)], &edges, &spikes),
+            [20, 21, 40].map(TaskId::new).into()
+        );
+        assert!(awaited_spikes(&[TaskId::new(30)], &edges, &spikes).is_empty());
     }
 
     fn submit(by_runtime: bool, counted: bool, replanning: bool, cycles: usize) -> SpikeSubmit {

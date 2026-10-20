@@ -1072,6 +1072,12 @@ name = "runtime_spike_replan::the_investigation_limit_holds_a_new_goal_s_spike_u
 reason = "B 境界（SQLite・supervisor の配線・CLI）: max_spikes と max_investigations を dagq.toml から読んだ supervisor が、Spike の上限と調査中の計画の上限の控えを claim_deferred に記録して枠を実装に渡し、candidates・graph がその記録を出し、着地と依頼の却下で調査が終わった pass に控えた Spike を claim することを、実際の worker の session と integrate で確かめる。上限の判断は domain::investigation と domain::claim_order の unit test"
 task = 1493
 
+# 7.0s to 7.6s (stress 5, task 2416)
+[[test]]
+name = "runtime_spike_replan::a_spike_awaited_over_a_goal_dependency_is_claimed_past_the_investigation_limit"
+reason = "B 境界（SQLite・supervisor の配線・CLI）: task_goal_dependencies と task_dependencies を読んだ claim のトランザクションが、調査中の計画が goal への依存越しに待つ Spike を max_investigations を超えて claim し、待たない goal の Spike だけを claim_deferred に記録して candidates・graph がそれを出すことを、実際の worker の session で確かめる。goal の辺を含む推移的な閉包の判断は domain::investigation の unit test"
+task = 2416
+
 # 6.0〜7.4s (stress 5 under the host's load of other runs, task 2179)
 [[test]]
 name = "runtime_clone::nothing_a_worker_plants_in_its_clone_runs_on_the_control_side"
