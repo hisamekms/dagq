@@ -7,7 +7,9 @@
 //! landing's dev before the oldest request. It reads the agent's
 //! definition and cases from the landing branch's commit (a production set
 //! of the queue's side, `--set`, from that set's view, made again from its
-//! events and Git: [`crate::application::agent_cases::view`]), and for each run
+//! events and Git: [`crate::application::agent_cases::view`]; the dev a
+//! run waits for before it lands reads the definition from the run's head,
+//! [`super::eval_gate`]), and for each run
 //! of a case starts one agent job ([`crate::application::agent_job`]) on
 //! `[roles.review]`'s provider through the headless jobs' one way
 //! ([`super::jobs`]): recorded in `headless_jobs` as `agent_eval`, under
@@ -92,8 +94,9 @@ pub(super) struct EvalRound {
     waiting: Option<ProviderWait>,
     /// `agent-evals/<id>/`.
     dir: PathBuf,
-    /// The landing branch's commit its definition, cases and program
-    /// reviews are read from.
+    /// The landing branch's commit its cases and program reviews are read
+    /// from (and its definition, but for the dev a run waits for before it
+    /// lands).
     commit: String,
     /// The program reviews the commit configures, or why they did not
     /// read, which fails every case that runs.
@@ -265,7 +268,7 @@ impl Supervisor<'_> {
     }
 
     /// The rounds the eval's events say, oldest first.
-    fn eval_rounds(&self) -> Result<Vec<Round>> {
+    pub(super) fn eval_rounds(&self) -> Result<Vec<Round>> {
         let kinds: Vec<&str> = record::KINDS.iter().map(|kind| kind.as_str()).collect();
         let upto = self.queue.latest_event_id()?;
         let every = usize::try_from(i64::MAX).unwrap_or(usize::MAX);
@@ -349,24 +352,25 @@ impl Supervisor<'_> {
         }
     }
 
-    /// Read the agent's definition and its `split` cases (those of
-    /// `selected`, when given) from `commit`'s tree, or, for a production
-    /// set of the queue's side (`set`), its cases and patches from the
-    /// set's view ([`crate::application::agent_cases::view`]); a refusal
-    /// when they are not there or do not read.
+    /// Read the agent's definition from `definition_commit`'s tree and its
+    /// `split` cases (those of `selected`, when given) from `commit`'s,
+    /// or, for a production set of the queue's side (`set`), its cases and
+    /// patches from the set's view
+    /// ([`crate::application::agent_cases::view`]); a refusal when they
+    /// are not there or do not read.
     fn eval_snapshot(
         &self,
         (agent, split, set, set_through): (&str, Split, Option<i64>, Option<i64>),
-        commit: &str,
+        (definition_commit, commit): (&str, &str),
         selected: Option<&[String]>,
     ) -> Result<std::result::Result<Snapshot, Refusal>> {
         let repository = &*self.repository;
         let Some((path, definition)) =
-            find_definition(agent, |path| repository.file_in(commit, path))?
+            find_definition(agent, |path| repository.file_in(definition_commit, path))?
         else {
             return Ok(Err(refusal(
                 RefusalReason::DefinitionMissing,
-                format!("no definition of {agent} in the landing branch's commit {commit}"),
+                format!("no definition of {agent} in the commit {definition_commit}"),
             )));
         };
         let tools = match AgentTools::declared(ToolRole::Review, &definition) {
@@ -535,9 +539,13 @@ impl Supervisor<'_> {
         }
         let config = self.verifier.eval_config()?;
         let commit = self.repository.main_head()?.into_string();
+        // The dev a run waits for before it lands measures the run's
+        // definition on the landing branch's cases (ADR-t1728-1 decision
+        // 10).
+        let definition_commit = request.definition_commit.as_deref().unwrap_or(&commit);
         let snapshot = match self.eval_snapshot(
             (&request.agent, request.split, request.set, None),
-            &commit,
+            (definition_commit, &commit),
             request.cases.as_deref(),
         )? {
             Ok(snapshot) => snapshot,
@@ -597,7 +605,8 @@ impl Supervisor<'_> {
                 "split": request.split.as_str(),
                 "provider": provider,
                 "model": launch.model,
-                "definition_commit": commit,
+                "definition_commit": definition_commit,
+                "cases_commit": (definition_commit != commit).then_some(&commit),
                 "definition_digest": key.definition_digest,
                 "case_set_digest": key.case_set_digest,
                 "cases": snapshot.cases.iter().map(|case| &case.id).collect::<Vec<_>>(),
@@ -706,7 +715,7 @@ impl Supervisor<'_> {
                 request.set,
                 started.set_through,
             ),
-            &started.definition_commit,
+            (&started.definition_commit, started.cases_commit()),
             Some(
                 &started
                     .planned
@@ -755,8 +764,8 @@ impl Supervisor<'_> {
             cost_limited: false,
             waiting: None,
             dir: self.layout.agent_evals_dir.join(round.id.to_string()),
-            programs: self.eval_programs(&started.definition_commit),
-            commit: started.definition_commit.clone(),
+            programs: self.eval_programs(started.cases_commit()),
+            commit: started.cases_commit().to_owned(),
             checks: round.checks.clone(),
         });
         Ok(())

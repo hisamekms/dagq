@@ -21,6 +21,8 @@ related:
   - adr-t803-1
   - adr-t947-1
   - adr-t1233-2
+  - adr-t1728-1
+  - design-agent-eval
   - adr-t1582-1
   - adr-t1165-1
   - adr-t1453-1
@@ -52,7 +54,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
   → 1 開始: review.mdと各jobのpromptを書く
   → 2 headless実行: 全体のreviewとagentごとの読み取りだけのjobを上限の中で並列に
   → 3 判定: 全jobがそろってから。答えの無いjobはそのjobだけ1回やり直す
-       pass    → 5 衝突の事前判定 → 終了の依頼とclose → 着地の前のe2e → 着地
+       pass    → 5a 定義を変えるrunはagentのeval → 5 衝突の事前判定 → 終了の依頼とclose → 着地の前のe2e → 着地
        revise  → 4 reviseの往復（runを通した上限まで）→ validationからやり直す
        concern → AIが決めるconcern: land（passと同じ道）/ send_back（4と同じ道）/ ask
        上限の後の差し戻し → 4a コードで着地かask
@@ -93,6 +95,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 | 引き継ぎ | `supervise/execution/adopt.rs` |
 | reviewのprompt | `src/application/prompt/`の`review_prompt` |
 | reviewのsubagent | `src/application/review.rs`、`src/domain/review_subagents.rs` |
+| 着地の前のagentのeval | `supervise/execution/eval_gate.rs`、判定は`src/domain/agent_eval/before_landing.rs` |
 | `already_satisfied`の主張の判定 | `supervise/execution/satisfied_review.rs`、promptは`claim_review_prompt`、verdictは`src/domain/satisfied_judgment.rs` |
 
 ## reviewの流れ
@@ -108,6 +111,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
    書き直さずに終われば`approve_landing`のaskで人に聞く。
 4a. **上限の後の判定**: 理由にコードの指摘が無ければ理由をfollow_upのdraftにしてpassの道で着地し、あれば`approve_landing`のaskで示す。
    `acceptance_unmet`は`paths`が全部試行の始めに読んだコードのpath（[`[review.code]`](run-environment.md)）の外のときだけコードの指摘でない（`review_reason::Finding::is_code_finding`）。
+5a. **着地の前のagentのeval**: passの後、衝突の事前判定の前に、定義を変えるrunはsessionとslotとleaseを持ったままlanding branchのケースでdevを待つ（下の「着地の前のagentのeval」）。
 5. **終了の依頼とclose**: 着地かaskの前にworkerのsessionの終了を依頼する（[非対話のworker](headless-worker.md#wrapperがturnを止めるとき)）。
    - **passの衝突の事前判定**（ADR-0027決定4）: 衝突すれば解消を生きているsessionに依頼して4と同じ待ちに入り、[Needs session](needs-session.md)の「試行の数え方」の衝突だけの試行に数える。
    - **pass**: e2eが要るrunは[着地の前のe2e](integrate.md#着地の前のe2e)を通してから着地する。
@@ -147,6 +151,19 @@ run dirとrunのworktreeとその下はworkerが書けるので置かない（�
 ## 着地の前のe2e
 
 e2eが要るpassしたrunは、着地スロットを待つ段でhostでe2eを流してから着地する（[着地の前のe2e](integrate.md#着地の前のe2e)）。
+
+## 着地の前のagentのeval
+
+[ADR-t1728-1](../../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)決定10の実装。
+差分（reviewと同じ`<base>...<head>`）が`.dagq/agents/<name>/AGENT.md`を変え、landing branchのcommitにそのagentの`evals/dev.json`があるrunは、passの後・衝突の事前判定の前に、runの定義をlanding branchのケースで測るdevの周を待つ。
+
+- 周はevalの枠で流れ（[agentのeval](../agent-eval.md)の「evalの枠」）、runは待つ間も流す間もsessionを開いたままslotとleaseを持つ。
+  待ちの理由は`run_agent_eval_waiting`に記録し、`status`のrunの`progress`に出る。
+- 全部の周がpassなら5へ進む。
+  閾値を下回った周は、失敗したケースのidとagentの理由を4と同じ経路で送り、runを通したreviseの上限に数える。
+  上限を使い切っていれば`approve_landing`のaskにする（理由のコードを持たないので4aで着地しない）。
+- 周が流せない（拒否・`incomplete`・判定の無い実行・使えないprovider）か、supervisorが止まるときは、`approve_landing`のaskに理由を載せる。
+- 定義を変えないrunは何も記録せず今のまま進み、`dev.json`の無いagentと定義を消したagentは`run_agent_eval_requested`の`skipped`に理由を残して進む。
 
 ## 文書の照合
 

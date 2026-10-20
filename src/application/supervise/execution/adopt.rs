@@ -1052,7 +1052,7 @@ fn review_resumption(
                         job: review_job(run, anchor),
                     };
                 }
-                Ok(_) if converged => Some(AfterExit::Land),
+                Ok(verdict) if converged => Some(land_or_eval_ask(run, history, anchor, verdict)),
                 // A review whose subagents sent the run further than
                 // its verdict, or carried reasons of their own
                 // (ADR-t1453-1 decision 7), asks a person: an adopter
@@ -1076,7 +1076,9 @@ fn review_resumption(
                         job: review_job(run, anchor),
                     };
                 }
-                Ok(verdict) if verdict.verdict == ReviewDecision::Pass => Some(AfterExit::Land),
+                Ok(verdict) if verdict.verdict == ReviewDecision::Pass => {
+                    Some(land_or_eval_ask(run, history, anchor, verdict))
+                }
                 Ok(verdict) => Some(AfterExit::Ask {
                     why: (verdict.verdict == ReviewDecision::Revise).then(|| {
                         "the revise could not go on when the supervisor was replaced".to_owned()
@@ -1124,6 +1126,59 @@ fn review_resumption(
         _ => None,
     };
     then.map_or(ReviewResumption::Review, ReviewResumption::Exit)
+}
+
+/// What a pass whose exit was requested goes on to: the landing, or, when
+/// the agent eval before the landing ended after `anchor` with anything
+/// but a pass (the supervisor was replaced before the ask it led to
+/// opened), a person's `approve_landing` with why (ADR-t1728-1 decision
+/// 10).
+fn land_or_eval_ask(
+    run: &TaskRun,
+    history: &RunHistory<'_>,
+    anchor: &RunEvent,
+    verdict: ReviewVerdict,
+) -> AfterExit {
+    match eval_stops_landing(history.events(), anchor.id) {
+        Some(why) => AfterExit::Ask {
+            why: Some(why),
+            decision: verdict.verdict,
+            recommendation: None,
+            confidence: None,
+            reason_category: None,
+            reasons: verdict.reasons,
+            summary: verdict.summary,
+            requested_by: review_job(run, anchor),
+            sent_back: None,
+        },
+        None => AfterExit::Land,
+    }
+}
+
+/// Why the agent eval before the landing keeps the run from landing, from
+/// the latest `run_agent_eval_finished` after event `anchor`: none when
+/// there is none or it passed.
+fn eval_stops_landing(events: &[RunEvent], anchor: EventId) -> Option<String> {
+    let finished = events
+        .iter()
+        .rev()
+        .take_while(|event| event.id > anchor)
+        .find(|event| event.kind == EventKind::RunAgentEvalFinished)?;
+    let payload = &finished.payload;
+    match payload["outcome"].as_str() {
+        Some("passed") => None,
+        Some("ask") => Some(payload["why"].as_str().unwrap_or_default().to_owned()),
+        _ => Some(format!(
+            "the agent eval before the landing sent the run back and the supervisor was replaced before it was applied: {}",
+            payload["reasons"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("; ")
+        )),
+    }
 }
 
 /// Whether an exit request was recorded after event `anchor`: an adopter
@@ -1422,6 +1477,48 @@ mod tests {
         let history = RunHistory::from_events(events);
         let anchor = crate::domain::review_anchor(events).unwrap();
         review_resumption(&run, &history, anchor, live, landing_ask_open)
+    }
+
+    /// A pass whose agent eval before the landing asked a person or sent
+    /// the run back, then whose exit was requested, is asked with the
+    /// eval's reason by an adopter, not landed; one whose eval passed
+    /// lands.
+    #[test]
+    fn an_adopted_pass_whose_agent_eval_did_not_pass_is_asked_not_landed() {
+        let asked = [
+            event(1, event_kind::REVIEW_STARTED, json!({"attempt": 1})),
+            pass(2),
+            event(
+                3,
+                event_kind::RUN_AGENT_EVAL_FINISHED,
+                json!({"commit": "h", "outcome": "ask", "why": "cost_unknown"}),
+            ),
+            event(4, event_kind::EXIT_REQUESTED, json!({})),
+        ];
+        assert!(matches!(
+            resumption(&asked, false, false),
+            ReviewResumption::Exit(AfterExit::Ask { why: Some(why), .. }) if why == "cost_unknown"
+        ));
+        let mut sent_back = asked.clone();
+        sent_back[2] = event(
+            3,
+            event_kind::RUN_AGENT_EVAL_FINISHED,
+            json!({"commit": "h", "outcome": "send_back", "reasons": ["case x failed"]}),
+        );
+        assert!(matches!(
+            resumption(&sent_back, false, false),
+            ReviewResumption::Exit(AfterExit::Ask { why: Some(why), .. }) if why.ends_with("case x failed")
+        ));
+        let mut passed = asked.clone();
+        passed[2] = event(
+            3,
+            event_kind::RUN_AGENT_EVAL_FINISHED,
+            json!({"commit": "h", "outcome": "passed"}),
+        );
+        assert!(matches!(
+            resumption(&passed, false, false),
+            ReviewResumption::Exit(AfterExit::Land)
+        ));
     }
 
     /// Task 1558, moved from

@@ -33,7 +33,7 @@ reviewのagentが正しく判定しているかを、規則コードごとの陽
 workerもjobもLLMのCLIを直接打たない。
 1周の中のケースごとの1回は、本番のrunのreviewのagentのjobと同じ起動経路で、測るagentの1本のjobだけを起動する。
 
-> **一部は予定**: 「採用の判定」と「productionのケースと見張り」の見張りはまだ実装していない予定で、名前と数値は実装が決める。
+> **一部は予定**: 「productionのケースと見張り」の見張りはまだ実装していない予定で、名前と数値は実装が決める。
 > ほかの節は今の姿で、欄・flag・既定値の意味は定義のそばのdoc commentが持つ。
 
 決めた理由は[ADR-t1728-1](../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)（定義とケースの置き場・eval）と[ADR-t1728-2](../adr/2026-10-06-t1728-2-agents-declare-their-tools-from-a-runtime-list.md)（道具の宣言）、定義を切らない例外は[ADR-t1869-1](../adr/2026-10-09-t1869-1-agent-jobs-carry-the-whole-definition-and-do-not-start-over-the-limit.md)、材料は[review-agent-evalのSpike](../plans/review-agent-eval-spike.md)が持つ。
@@ -139,14 +139,22 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 
 ## 採用の判定（着地の前のdev）
 
+入口は`application::supervise::execution::eval_gate`、対象と行き先の判定は`domain::agent_eval::before_landing`。
+
 - 対象: runの差分が`.dagq/agents/<name>/AGENT.md`を変えるrun（差分の取り方はreviewのagentの選び方と同じ`<base>...<head>`）。変えたagentごとに1周。
-- reviewのpassの後、着地の前（[着地の前のe2e](supervisor-lifecycle/integrate.md#着地の前のe2e)と同じ位置）に、supervisorがlanding branchのcommitの`.dagq/agents/<name>/evals/dev.json`とpatchで、runのcommitの定義を測る。
-  run branchのケースの追加・変更は使わない。
-- 待つ間と流す間、runは自分のslotとleaseを持ったまま待つ（e2eと同じ）。
-- `passed`が`false`（閾値を下回った、`incomplete`）なら着地させず、理由（成績・失敗したケースのidとagentの理由）をworkerに差し戻す。
-  差し戻しはreviewの`revise`と同じ経路で送り、runを通した自動の手直しの上限に1回と数える。
-  上限の後の差し戻しは[Review](supervisor-lifecycle/review.md#reviewの流れ)の4aの判定に通り、agent evalの差し戻しは理由のコードを持たないので収束していない側に数え、`approve_landing`のaskになる（[ADR-t2599-1](../adr/2026-10-17-t2599-1-run-review-revises-counted-across-the-run-and-judged-by-code-findings-past-the-limit.md)決定1・3・6）。
-  `refused`（`cost_unknown`・上限超え）はworkerが直せないので人の判断（`approve_landing`のask）にする。
+  landing branchのcommitに`evals/dev.json`が無いagent（ケースがまだ無い）と、runが定義を消したagentは流さず、理由を`run_agent_eval_requested`の`skipped`に残す。
+  定義を変えないrunは何も記録しない。
+- reviewのpassの後、衝突の事前判定の前に、supervisorが依頼を記録し（`before_landing`、定義のcommitはrunのhead）、周はlanding branchのcommitの`evals/dev.json`とpatchとprogramでrunの定義を測る。
+  run branchのケースの追加・変更は使わない（`agent_eval_started`の`cases_commit`）。
+  依頼はheadごとに1回で、同じheadを引き継いだsupervisorは同じ周を待つ。
+- 待つ間と流す間、runはsessionを開いたまま自分のslotとleaseを持つ（e2eと同じくslotを放さない。差し戻しを生きているsessionに送るため、sessionを閉じる前に待つ）。
+  待ちの理由は`run_agent_eval_waiting`で、`status`の`progress`の`agent_eval_waiting`・`agent_eval`に出る。
+- 行き先は全部の周の終わりで決め、`run_agent_eval_finished`に記録する。
+  全部が`passed`なら衝突の事前判定へ進む。
+  完了した周が閾値を下回れば、成績と失敗したケースのidとagentの理由をreviewの`revise`と同じ経路でsessionに差し戻し、runを通した自動の手直しの上限に1回と数える。
+  上限を使い切った後の差し戻しは理由のコードを持たないので[Review](supervisor-lifecycle/review.md#reviewの流れ)の4aで着地せず、`approve_landing`のaskになる（[ADR-t2599-1](../adr/2026-10-17-t2599-1-run-review-revises-counted-across-the-run-and-judged-by-code-findings-past-the-limit.md)決定1・3・6）。
+- workerが直せないもの（`refused`の`cost_unknown`・上限超えなど、`incomplete`、判定の無い実行、`--no-claude`かagentが無くて使えないprovider）と、止まるsupervisor（引き継ぎでないもの）は、理由を載せた`approve_landing`のaskにする。
+  控え中のproviderは待つ。
 
 ## productionのケースと見張り
 

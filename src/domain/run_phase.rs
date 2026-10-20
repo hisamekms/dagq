@@ -127,6 +127,10 @@ pub enum Phase {
     /// A run to land waits in its slot to be decided: its e2e, the holds
     /// of a landing, the integration slot.
     AwaitingSlot,
+    /// Its review passed and it waits in its slot for the dev of the agent
+    /// definitions it changes (ADR-t1728-1 decision 10), its session open:
+    /// the round waits for its turn or runs.
+    AgentEval,
     /// It waits for another run's e2e or to try its own again.
     AwaitingE2e,
     /// Its e2e runs on the host.
@@ -179,6 +183,7 @@ impl Phase {
             Self::ClaimHeld => "claim_held",
             Self::Returning => "returning",
             Self::AwaitingSlot => "awaiting_slot",
+            Self::AgentEval => "agent_eval",
             Self::AwaitingE2e => "awaiting_e2e",
             Self::E2e => "e2e",
             Self::LandingQueue => "landing_queue",
@@ -198,9 +203,12 @@ impl Phase {
         use Holds as H;
         let (blocker, holds) = match self {
             Self::Provisioning => (B::Infra, H::WorkerSlot),
-            Self::Worker | Self::Review | Self::Revise | Self::Resume | Self::Recovery => {
-                (B::Ai, H::WorkerSlot)
-            }
+            Self::Worker
+            | Self::Review
+            | Self::Revise
+            | Self::Resume
+            | Self::Recovery
+            | Self::AgentEval => (B::Ai, H::WorkerSlot),
             Self::Validating | Self::Exiting => (B::Runtime, H::WorkerSlot),
             Self::ReviewHeld => (B::External, H::WorkerSlot),
             Self::Waiting
@@ -465,7 +473,7 @@ pub fn last_recorded(events: &[RunEvent]) -> Option<Recorded> {
 mod tests {
     use super::*;
 
-    const ALL: [Phase; 26] = [
+    const ALL: [Phase; 27] = [
         Phase::Provisioning,
         Phase::Worker,
         Phase::Validating,
@@ -481,6 +489,7 @@ mod tests {
         Phase::ClaimHeld,
         Phase::Returning,
         Phase::AwaitingSlot,
+        Phase::AgentEval,
         Phase::AwaitingE2e,
         Phase::E2e,
         Phase::LandingQueue,

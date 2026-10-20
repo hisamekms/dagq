@@ -141,6 +141,7 @@ impl<'a> AgentEvals<'a> {
             requested_by_id: actor.actor_id().to_owned(),
             run_id: actor.run_id().map(ToString::to_string),
             before_landing: false,
+            definition_commit: None,
         };
         let id = self
             .store
@@ -443,6 +444,7 @@ mod tests {
                     requested_by_id: "user".into(),
                     run_id: None,
                     before_landing: false,
+                    definition_commit: None,
                 }
                 .record(),
             ),

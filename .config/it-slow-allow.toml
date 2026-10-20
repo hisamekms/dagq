@@ -1991,3 +1991,9 @@ task = 2792
 name = "runtime_adopt::a_supervisor_that_lost_its_lease_stops_touching_the_run"
 reason = "B 境界（守る境界）: across two supervisors on SQLite, the one whose run's lease another took stops touching the run and writes nothing of it but the revocation of the telemetry token issued under its lease (adoption)"
 task = 2792
+
+# 6.7s (stress of 5 under the host's load)
+[[test]]
+name = "agent_eval_rounds::a_run_that_changes_a_definition_runs_its_dev_before_it_lands_and_goes_back_under_the_threshold"
+reason = "B 境界（supervisor の配線）: 実 supervisor で定義を変える run の review の pass から eval の周の依頼・実行・閾値の下での revise の差し戻し・新しい head での周の pass・着地までを、Git・SQLite・実 process で確かめる代表の 1 本（周が 2 回と revise の往復が要る）。対象と行き先の判断は domain::agent_eval::before_landing の unit test"
+task = 1871

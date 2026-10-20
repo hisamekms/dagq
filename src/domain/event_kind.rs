@@ -346,6 +346,9 @@ event_kinds! {
     ReviseUnsent => "revise_unsent",
     ReviseWithheld => "revise_withheld",
     RunAdopted => "run_adopted",
+    RunAgentEvalFinished => "run_agent_eval_finished",
+    RunAgentEvalRequested => "run_agent_eval_requested",
+    RunAgentEvalWaiting => "run_agent_eval_waiting",
     WorkerModeConverted => "worker_mode_converted",
     RunClaimed => "run_claimed",
     RunE2eFailed => "run_e2e_failed",
@@ -1215,6 +1218,18 @@ pub const REVISE_REQUESTED: &str = EventKind::ReviseRequested.as_str();
 pub const REVISE_UNSENT: &str = EventKind::ReviseUnsent.as_str();
 pub const RUNTIME_ERROR: &str = EventKind::RuntimeError.as_str();
 pub const RUN_ADOPTED: &str = EventKind::RunAdopted.as_str();
+/// The dev a run that changes an agent's definition runs before it lands
+/// (ADR-t1728-1 decision 10), at the run's `commit`: the rounds it asked
+/// for (`rounds`, each `agent` and `eval_id`) and the agents left out with
+/// why (`skipped`, [`super::agent_eval::before_landing::SkipReason`]).
+pub const RUN_AGENT_EVAL_REQUESTED: &str = EventKind::RunAgentEvalRequested.as_str();
+/// The run waits in its slot for those rounds (`reason`,
+/// [`super::agent_eval::before_landing::WaitReason`]); recorded when the
+/// reason changes.
+pub const RUN_AGENT_EVAL_WAITING: &str = EventKind::RunAgentEvalWaiting.as_str();
+/// Where the rounds sent the run (`outcome`: `passed`, `send_back` with
+/// `reasons`, or `ask` with `why`).
+pub const RUN_AGENT_EVAL_FINISHED: &str = EventKind::RunAgentEvalFinished.as_str();
 pub const RUN_CLAIMED: &str = EventKind::RunClaimed.as_str();
 /// The runtime's e2e of a run after its review (ADR-t1233-2): it failed
 /// and parked the run for a resume (`needs_session`).
@@ -1740,6 +1755,9 @@ mod tests {
             (EventKind::RunAdopted, "run_adopted"),
             (EventKind::WorkerModeConverted, "worker_mode_converted"),
             (EventKind::RunClaimed, "run_claimed"),
+            (EventKind::RunAgentEvalFinished, "run_agent_eval_finished"),
+            (EventKind::RunAgentEvalRequested, "run_agent_eval_requested"),
+            (EventKind::RunAgentEvalWaiting, "run_agent_eval_waiting"),
             (EventKind::RunE2eFailed, "run_e2e_failed"),
             (EventKind::RunE2eFinished, "run_e2e_finished"),
             (EventKind::RunE2eStarted, "run_e2e_started"),

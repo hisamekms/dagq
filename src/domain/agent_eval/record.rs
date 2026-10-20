@@ -65,6 +65,11 @@ pub struct Request {
     /// The dev a run waits for before it lands (ADR-t1728-1 decision 10),
     /// which goes before every request.
     pub before_landing: bool,
+    /// The commit the definition is read from, for the dev a run waits for
+    /// before it lands: the run's head, whose definition is measured on
+    /// the landing branch's cases. `None` reads the definition from the
+    /// landing branch's commit, as the cases are.
+    pub definition_commit: Option<String>,
 }
 
 impl Request {
@@ -80,6 +85,7 @@ impl Request {
             "requested_by_id": self.requested_by_id,
             "run_id": self.run_id,
             "before_landing": self.before_landing,
+            "definition_commit": self.definition_commit,
         })
     }
 
@@ -103,6 +109,7 @@ impl Request {
             requested_by_id: text("requested_by_id").unwrap_or_default(),
             run_id: text("run_id"),
             before_landing: payload["before_landing"].as_bool().unwrap_or(false),
+            definition_commit: text("definition_commit"),
         })
     }
 }
@@ -111,9 +118,12 @@ impl Request {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Started {
     pub provider: Provider,
-    /// The landing branch's commit the definition and the cases were read
-    /// from.
+    /// The commit the definition was read from: the landing branch's, or
+    /// the run's head for the dev a run waits for before it lands.
     pub definition_commit: String,
+    /// The landing branch's commit the cases (and the program reviews)
+    /// were read from, when it is not `definition_commit`.
+    pub cases_commit: Option<String>,
     pub definition_digest: String,
     pub case_set_digest: String,
     /// Each case's id and runs, in the list's order.
@@ -137,6 +147,7 @@ impl Started {
         Some(Self {
             provider: payload["provider"].as_str()?.parse().ok()?,
             definition_commit: text("definition_commit")?,
+            cases_commit: text("cases_commit"),
             definition_digest: text("definition_digest")?,
             case_set_digest: text("case_set_digest")?,
             planned: payload["planned"]
@@ -155,6 +166,13 @@ impl Started {
             threshold: payload["threshold"].as_f64()?,
             set_through: payload["set_through"].as_i64(),
         })
+    }
+
+    /// The landing branch's commit its cases were read from.
+    pub fn cases_commit(&self) -> &str {
+        self.cases_commit
+            .as_deref()
+            .unwrap_or(&self.definition_commit)
     }
 
     /// Every run the round plans, each case's in order.
@@ -447,6 +465,7 @@ mod tests {
             requested_by_id: "user".into(),
             run_id: None,
             before_landing: false,
+            definition_commit: None,
         }
         .record()
     }
@@ -657,6 +676,23 @@ mod tests {
         assert_eq!(Started::read(&payload).unwrap().set_through, Some(42));
     }
 
+    /// The dev a run waits for before it lands reads its definition from
+    /// the run's head and its cases from the landing branch's commit, which
+    /// a supervisor that takes it up reads them from again: the cases the
+    /// run changed on its branch are never the ones it is scored on. Any
+    /// other round reads both from the one commit.
+    #[test]
+    fn a_round_before_landing_reads_its_cases_from_the_landing_branch_not_the_run() {
+        let mut payload = started(1, "claude", "d");
+        payload["definition_commit"] = json!("run-head");
+        payload["cases_commit"] = json!("main-head");
+        let before_landing = Started::read(&payload).unwrap();
+        assert_eq!(before_landing.definition_commit, "run-head");
+        assert_eq!(before_landing.cases_commit(), "main-head");
+        let other = Started::read(&started(1, "claude", "d")).unwrap();
+        assert_eq!(other.cases_commit(), "c");
+    }
+
     #[test]
     fn a_request_reads_back_as_recorded() {
         let request = Request {
@@ -670,6 +706,7 @@ mod tests {
             requested_by_id: "worker:r1".into(),
             run_id: Some("r1".into()),
             before_landing: false,
+            definition_commit: Some("abc".into()),
         };
         assert_eq!(Request::read(&request.record()), Some(request));
     }

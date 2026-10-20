@@ -422,6 +422,102 @@ fn a_running_round_takes_no_run_slot_and_holds_no_review() {
     assert_eq!(scores[0]["outcome"], "complete", "{scores:?}");
 }
 
+/// A run that changes an agent's definition runs its dev after its review
+/// passed and before it lands (ADR-t1728-1 decision 10): the round
+/// measures the run's definition on the landing branch's cases (the run
+/// removed its own `dev.json`, which is not used), the run waits in its
+/// slot meanwhile, and a round under the threshold sends it back to its
+/// session as a revise of the run with the failed case and the agent's
+/// reasons; its fix is reviewed and measured again at its new head, passes
+/// and lands.
+#[test]
+fn a_run_that_changes_a_definition_runs_its_dev_before_it_lands_and_goes_back_under_the_threshold()
+{
+    use crate::runtime_support::{
+        TestReviewer, TestWorkspace, fixture as run_fixture, payloads, supervise_reviewed, verdict,
+    };
+    let (_fx, repo, db) = run_fixture();
+    commit_agents(&repo);
+    let landing = git_out(&repo, &["rev-parse", "HEAD"]);
+    // Its first turn changes the definition and removes its dev cases; the
+    // revise appends to the definition again.
+    let worker = "if [ \"$TURN\" -eq 1 ]; then \
+           printf 'Also flag D-1 on notes.md.\\n' >> .dagq/agents/demo/AGENT.md; \
+           git rm -q .dagq/agents/demo/evals/dev.json; git add -A .dagq; commit work; \
+         else printf 'And on notes.rst.\\n' >> .dagq/agents/demo/AGENT.md; \
+           git commit -q -am fix; fi; receipt \"$(git rev-parse HEAD)\"";
+    let backend = TestWorkspace::new(&db, false, worker);
+    let says = |reply: String| format!("cat >/dev/null; printf '%s\\n' {}", shell_path(&reply));
+    // The first round misses the violation; the second finds it.
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "fine")]).with_agent_jobs(&[
+        says(clean()),
+        says(clean()),
+        says(violation()),
+        says(clean()),
+    ]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+
+    let detail =
+        dagq::application::TaskReads::show(&mut SqliteQueue::open(&db).unwrap(), TaskId::new(1))
+            .unwrap();
+    let run = &detail.runs[0];
+    assert_eq!(run.status().as_str(), "integrated");
+    let requested = payloads(&detail, "run_agent_eval_requested");
+    assert_eq!(requested.len(), 2, "one per head: {requested:?}");
+    let started = events(&db, EventKind::AgentEvalStarted);
+    assert_eq!(started.len(), 2);
+    for (asked, round) in requested.iter().zip(&started) {
+        assert_eq!(asked["rounds"][0]["agent"], "demo");
+        assert_eq!(asked["rounds"][0]["eval_id"], round["eval_id"]);
+        assert_eq!(asked["skipped"], json!([]));
+        // The run's definition on the landing branch's two cases.
+        assert_eq!(round["definition_commit"], asked["commit"]);
+        assert_eq!(round["cases_commit"], landing);
+        assert_eq!(round["planned_runs"], 2);
+    }
+    assert_ne!(requested[0]["commit"], requested[1]["commit"]);
+    let waited = payloads(&detail, "run_agent_eval_waiting");
+    assert!(
+        waited.iter().any(|w| w["reason"] == "agent_eval_running"),
+        "{waited:?}"
+    );
+    let ended = payloads(&detail, "run_agent_eval_finished");
+    assert_eq!(ended.len(), 2);
+    assert_eq!(ended[0]["outcome"], "send_back", "{:?}", ended[0]);
+    assert_eq!(ended[1]["outcome"], "passed");
+    let reasons: Vec<&str> = ended[0]["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r.as_str().unwrap())
+        .collect();
+    assert!(
+        reasons[0].contains("falls under the threshold"),
+        "{reasons:?}"
+    );
+    assert!(
+        reasons.iter().any(|r| r.contains("case needs-d1 failed")),
+        "{reasons:?}"
+    );
+    // Sent back as a revise of the run, with those reasons.
+    let revises = payloads(&detail, "revise_requested");
+    assert_eq!(revises.len(), 1);
+    assert_eq!(revises[0]["attempt"], 1);
+    assert_eq!(revises[0]["reasons"], ended[0]["reasons"]);
+    let kinds: Vec<&str> = detail.events.iter().map(|e| e.kind.as_str()).collect();
+    let at = |kind: &str| kinds.iter().position(|k| *k == kind).unwrap();
+    assert!(at("review_finished") < at("run_agent_eval_requested"));
+    assert!(at("run_agent_eval_finished") < at("revise_requested"));
+    assert!(
+        kinds
+            .iter()
+            .rposition(|k| *k == "run_agent_eval_finished")
+            .unwrap()
+            < at("exit_requested")
+    );
+}
+
 /// A case's program reviews run before its agent (ADR-t1728-1 (i)), each
 /// read with its script from the landing branch's commit and run against
 /// the case's tree: a case one of them rejects reaches no agent, is out of

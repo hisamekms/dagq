@@ -17,6 +17,7 @@ use crate::domain::EventKind;
 use crate::domain::run::{ConflictPrecheck, restore_payload};
 use serde::Serialize;
 
+use super::agent_eval::before_landing::WaitReason;
 use super::{RunEvent, RunStatus, run_e2e, stats::timestamp_millis, waiting::WaitState};
 
 /// The step a listed run is in.
@@ -43,6 +44,13 @@ pub enum Phase {
     ConflictFix,
     /// The supervisor asked its session to `/exit` and waits for it.
     Exit,
+    /// Its review passed and it waits in its slot for the dev of the
+    /// agent definitions it changes to start (ADR-t1728-1 decision 10):
+    /// another round runs or goes first, or the review's provider is held
+    /// (`run_agent_eval_requested`, `run_agent_eval_waiting`).
+    AgentEvalWaiting,
+    /// That dev runs (`run_agent_eval_waiting` with `agent_eval_running`).
+    AgentEval,
     /// Waits for the landing slot (`landing_queued`, or an e2e that
     /// passed or found nothing to run).
     LandingQueue,
@@ -97,6 +105,15 @@ impl Phase {
             Some(EventKind::ConflictPrecheck) if payload["unsent"] != true => return None,
             Some(EventKind::ExitRequested | EventKind::ExitRetried) => Some(Self::Exit),
             Some(EventKind::LandingQueued) => Some(Self::LandingQueue),
+            Some(EventKind::RunAgentEvalRequested) if !rounds_asked(payload) => return None,
+            Some(EventKind::RunAgentEvalRequested) => Some(Self::AgentEvalWaiting),
+            Some(EventKind::RunAgentEvalWaiting) => {
+                Some(if payload["reason"] == WaitReason::Running.as_str() {
+                    Self::AgentEval
+                } else {
+                    Self::AgentEvalWaiting
+                })
+            }
             Some(EventKind::RunE2eWaiting) => Some(Self::E2eWaiting),
             Some(EventKind::RunE2eStarted) => Some(Self::E2e),
             Some(EventKind::RunE2eFinished) => match payload["outcome"].as_str() {
@@ -114,6 +131,7 @@ impl Phase {
                 | EventKind::ConflictPrecheck
                 | EventKind::SessionExited
                 | EventKind::RunE2eFailed
+                | EventKind::RunAgentEvalFinished
                 | EventKind::RunIntegrated
                 | EventKind::IntegrationDeferred
                 | EventKind::IntegrationError
@@ -150,6 +168,8 @@ impl Phase {
                     | Self::E2eWaiting
                     | Self::E2e
                     | Self::E2eRetryWait
+                    | Self::AgentEvalWaiting
+                    | Self::AgentEval
             ),
             S::Integrating => self == Self::Integrating,
             S::NeedsSession => matches!(self, Self::Resume | Self::Exit),
@@ -157,6 +177,14 @@ impl Phase {
             S::Integrated | S::Succeeded => self == Self::Exit,
         }
     }
+}
+
+/// Whether a `run_agent_eval_requested` asked for any round: one that
+/// only left agents out moves nothing.
+fn rounds_asked(payload: &serde_json::Value) -> bool {
+    payload["rounds"]
+        .as_array()
+        .is_some_and(|rounds| !rounds.is_empty())
 }
 
 /// How a run uses its supervisor's slot, as `status`' `slots` and
@@ -377,6 +405,69 @@ mod tests {
                 Some(P::Integrating),
             ]
         );
+    }
+
+    /// A passed run whose agent eval waits for its turn while another round
+    /// runs shows that wait, then the round that runs, in its slot; an
+    /// eval that only left agents out moves nothing, and its end leaves
+    /// the run to the steps after it.
+    #[test]
+    fn a_runs_agent_eval_before_it_lands_shows_why_it_waits() {
+        use Phase as P;
+        use RunStatus as S;
+        let steps = [
+            (
+                "review_finished",
+                json!({"verdict": "pass"}),
+                S::AwaitingIntegration,
+            ),
+            (
+                event_kind::RUN_AGENT_EVAL_REQUESTED,
+                json!({"rounds": [], "skipped": [{"agent": "a", "reason": "no_dev_cases"}]}),
+                S::AwaitingIntegration,
+            ),
+            (
+                event_kind::RUN_AGENT_EVAL_REQUESTED,
+                json!({"rounds": [{"agent": "a", "eval_id": 7}]}),
+                S::AwaitingIntegration,
+            ),
+            (
+                event_kind::RUN_AGENT_EVAL_WAITING,
+                json!({"reason": "agent_eval_queued"}),
+                S::AwaitingIntegration,
+            ),
+            (
+                event_kind::RUN_AGENT_EVAL_WAITING,
+                json!({"reason": "agent_eval_running"}),
+                S::AwaitingIntegration,
+            ),
+            (
+                event_kind::RUN_AGENT_EVAL_FINISHED,
+                json!({"outcome": "passed"}),
+                S::AwaitingIntegration,
+            ),
+            ("exit_requested", json!({}), S::AwaitingIntegration),
+        ];
+        assert_eq!(
+            phases(&steps),
+            [
+                None,
+                None,
+                Some(P::AgentEvalWaiting),
+                Some(P::AgentEvalWaiting),
+                Some(P::AgentEval),
+                None,
+                Some(P::Exit),
+            ]
+        );
+        // It holds its slot meanwhile.
+        let mut events = Vec::new();
+        for (i, (kind, payload, _)) in steps[..4].iter().enumerate() {
+            events.push(event(i as i64 + 1, kind, payload.clone()));
+        }
+        let progress = Progress::of(S::AwaitingIntegration, Lease::Live, &events, 0);
+        assert_eq!(progress.phase, Some(P::AgentEvalWaiting));
+        assert_eq!(progress.slot, Some(SlotUse::Used));
     }
 
     /// The program reviews before the agents' review are the review: their

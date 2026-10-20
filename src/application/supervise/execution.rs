@@ -38,6 +38,7 @@ pub(super) mod claim_defer;
 mod container;
 mod deliver;
 mod e2e;
+mod eval_gate;
 mod exit;
 mod file_time;
 mod handoff_slots;
@@ -1345,6 +1346,10 @@ enum Phase {
     /// A run to land (a passed review, or an approved resolved resume)
     /// waits for the single integration slot, keeping its lease.
     AwaitingSlot,
+    /// A passed run that changes an agent's definition waits, its session
+    /// open and its lease and slot kept, for the dev of the landing
+    /// branch's cases before its precheck (ADR-t1728-1 decision 10).
+    AgentEval(eval_gate::EvalGateWatch),
     /// A passed run waits for its e2e to start (ADR-t1233-2): another
     /// run's e2e runs, one that could not run waits to be tried again, or a
     /// handoff starts none. Unlike `AwaitingSlot` nothing is about to start,
@@ -1389,6 +1394,7 @@ impl Phase {
             Phase::Exiting(_) => Recorded::Exiting,
             Phase::Resume(_) => Recorded::Resume,
             Phase::AwaitingSlot => Recorded::AwaitingSlot,
+            Phase::AgentEval(_) => Recorded::AgentEval,
             Phase::AwaitingE2e => Recorded::AwaitingE2e,
             Phase::E2e(_) => Recorded::E2e,
             Phase::Landing(_) => Recorded::Landing,
@@ -3737,6 +3743,14 @@ impl Supervisor<'_> {
                     EventKind::IntegrationStarted.as_str(),
                     &*self.queue,
                 );
+                Ok(Step::Continue)
+            }
+            Phase::AgentEval(watch) => {
+                let run = self.queue.run(slot.run.id())?;
+                if let Some(next) = self.look_at_eval(&run, watch)? {
+                    slot.run = run;
+                    slot.transition(next, EventKind::RunAgentEvalFinished.as_str(), &*self.queue);
+                }
                 Ok(Step::Continue)
             }
             // Decided again as a run awaiting the slot.

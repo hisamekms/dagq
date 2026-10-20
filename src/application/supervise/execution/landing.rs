@@ -1394,7 +1394,7 @@ impl Supervisor<'_> {
     }
     /// The range `run`'s review reads with the landing branch at `main`:
     /// from its receipt's commit ([`review_range_at`]).
-    fn receipt_range(&self, run: &TaskRun, main: &CommitSha) -> Result<ReviewRange> {
+    pub(super) fn receipt_range(&self, run: &TaskRun, main: &CommitSha) -> Result<ReviewRange> {
         let receipt_path = Path::new(run.receipt_path().context("missing receipt path")?);
         let receipt = Receipt::parse(
             &self
@@ -1632,7 +1632,7 @@ impl Supervisor<'_> {
         }
     }
     /// Whether the run has used up its revises ([`MAX_REVISE_ATTEMPTS`]).
-    fn revises_used_up(&self, run: &RunId) -> Result<bool> {
+    pub(super) fn revises_used_up(&self, run: &RunId) -> Result<bool> {
         let events = self.queue.run_events(run)?;
         Ok(decide_revise(&RunHistory::from_events(&events)) == ReviseDecision::Ask)
     }
@@ -1762,7 +1762,7 @@ impl Supervisor<'_> {
     /// whose `send_back` this applies, which the ask names when the session
     /// does not fix it (task 1392); `sent_back` the reasons the judgment
     /// reads.
-    fn send_revise(
+    pub(super) fn send_revise(
         &mut self,
         run: &TaskRun,
         session: Option<SessionRef>,
@@ -2037,6 +2037,11 @@ impl Supervisor<'_> {
         verdict: ReviewVerdict,
         job: Option<ActorContext>,
     ) -> Result<Phase> {
+        // A run that changes an agent's definition runs its dev on the
+        // landing branch's cases first (ADR-t1728-1 decision 10).
+        if let Some(phase) = self.eval_before_landing(run, (&session, &verdict, &job))? {
+            return Ok(phase);
+        }
         let land = |session| Phase::Exiting(ExitWatch::new(session, AfterExit::Land));
         let head = run
             .result_commit()
@@ -2785,7 +2790,7 @@ pub(super) fn first_to_land<R>(mut queued: Vec<(EventId, R)>) -> Option<R> {
 /// job that returned it (task 798). `carries` puts the job's
 /// recommendation and confidence on the ask (a `concern`'s, ADR-t451-1
 /// decision 3).
-fn landing_ask(
+pub(super) fn landing_ask(
     why: Option<String>,
     verdict: ReviewVerdict,
     session: Option<SessionRef>,
