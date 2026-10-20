@@ -5704,6 +5704,125 @@ mod tests {
         );
     }
 
+    /// Each agent job [`claude_agent_job_tool_args`] gives its tools, as
+    /// its launch builds it ([`crate::application::agent_job::build`] then
+    /// `agent_job_command`): a run of an eval's round and of a dev eval's
+    /// cases (no project's rules, the case's tree) and an agent's job of a
+    /// run's review (the project's rules, the run's review tree). Each
+    /// refuses [`PRINT_MODE_DENIED_TOOLS`] after the tools its declaration
+    /// leaves out, so a wakeup it schedules cannot keep its one `claude -p`
+    /// alive, a declaration of no tool and of every tool included; the
+    /// declared tools stay [`claude_agent_job_tool_args`]'s.
+    #[test]
+    fn every_kind_of_agent_job_refuses_the_print_modes_scheduling_tools() {
+        use crate::application::agent_job::{AgentJob, build};
+        use crate::domain::review_subagents::{AgentRole, AgentTool, AgentTools};
+        let dir = tempfile::tempdir().unwrap();
+        let claude = ClaudeCode {
+            executable: PathBuf::from("claude"),
+        };
+        let material = dir.path().join("material/review.md");
+        let review_tree = dir.path().join("review-tree");
+        let case_tree = dir.path().join("case-tree");
+        let kinds: [(&str, Option<&str>, &Path, AgentTools); 5] = [
+            (
+                "eval round run",
+                None,
+                &case_tree,
+                AgentRole::Review.default_tools(),
+            ),
+            (
+                "dev eval case",
+                None,
+                &case_tree,
+                AgentTools::new([AgentTool::Read]),
+            ),
+            (
+                "review agent",
+                Some("RULES"),
+                &review_tree,
+                AgentRole::Review.default_tools(),
+            ),
+            (
+                "review agent of no tool",
+                Some("RULES"),
+                &review_tree,
+                AgentTools::new([]),
+            ),
+            (
+                "review agent of every tool",
+                Some("RULES"),
+                &review_tree,
+                AgentTools::new(AgentTool::ALL),
+            ),
+        ];
+        let denied = PRINT_MODE_DENIED_TOOLS.join(",");
+        assert!(PRINT_MODE_DENIED_TOOLS.contains(&"ScheduleWakeup"));
+        assert!(PRINT_MODE_DENIED_TOOLS.contains(&"CronCreate"));
+        for (at, (kind, rules, cwd, tools)) in kinds.into_iter().enumerate() {
+            let job_dir = dir.path().join(format!("job-{at}"));
+            fs::create_dir(&job_dir).unwrap();
+            let built = build(&AgentJob {
+                agent: "rust-reviewer",
+                definition: "Review the Rust of the change.",
+                tools: &tools,
+                rules,
+                base: "base",
+                head: "head",
+                material: &material,
+                cwd,
+                dir: &job_dir,
+                language: None,
+            })
+            .unwrap();
+            let args: Vec<String> = claude
+                .agent_job_command(&built.launch)
+                .unwrap()
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            let after = |flag: &str| {
+                args.iter()
+                    .position(|arg| arg == flag)
+                    .map(|at| args[at + 1].clone())
+            };
+            let converted = claude_agent_job_tool_args(&tools);
+            let of = |flag: &str| {
+                converted
+                    .iter()
+                    .position(|arg| arg == flag)
+                    .map(|at| converted[at + 1].clone())
+            };
+            assert_eq!(
+                after("--allowedTools"),
+                of("--allowedTools"),
+                "{kind}: {args:?}"
+            );
+            let expected = match of("--disallowedTools") {
+                Some(left_out) => format!("{left_out},{denied}"),
+                None => denied.clone(),
+            };
+            assert_eq!(
+                after("--disallowedTools"),
+                Some(expected),
+                "{kind}: {args:?}"
+            );
+            assert_eq!(
+                args.iter()
+                    .filter(|arg| *arg == "--disallowedTools")
+                    .count(),
+                1,
+                "{kind}: {args:?}"
+            );
+            let refused = after("--disallowedTools").unwrap_or_default();
+            let refused: Vec<&str> = refused.split(',').collect();
+            assert!(
+                refused.contains(&"ScheduleWakeup") && refused.contains(&"CronCreate"),
+                "{kind}: {args:?}"
+            );
+        }
+    }
+
     /// The review loads no setting sources, so the worktree's
     /// `.claude/agents` and `.claude/settings.json` are not read
     /// (ADR-t1470-1 decision 1), keeps its settings and refusals, and is
