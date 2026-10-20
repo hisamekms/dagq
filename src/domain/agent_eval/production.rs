@@ -302,14 +302,15 @@ pub fn candidates<'a>(
         };
         let key = (event.run_id.to_owned(), attempt);
         if *event.kind == EventKind::ReviewStarted {
-            let subagents = &event.payload["subagents"];
-            let selected = subagents["agents"]
-                .as_array()
-                .is_some_and(|agents| agents.iter().any(|a| a["agent"] == agent));
-            if !selected || !period.holds(event.created_at) {
+            let review: restored::ReviewStarted = restore_payload(event.payload);
+            if !review.selects(agent) || !period.holds(event.created_at) {
                 continue;
             }
-            let (Some(base), Some(head)) = (subagents["base"].as_str(), subagents["head"].as_str())
+            let Some(restored::Subagents {
+                base: Some(base),
+                head: Some(head),
+                ..
+            }) = review.subagents
             else {
                 continue;
             };
@@ -326,12 +327,8 @@ pub fn candidates<'a>(
             let Some((_, (base, head, at))) = started.iter().find(|(seen, _)| *seen == key) else {
                 continue;
             };
-            let judged = event.payload["agents"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .find(|result| result["agent"] == agent && result["verdict"].is_string());
-            if let Some(result) = judged {
+            let review: restored::ReviewFinished = restore_payload(event.payload);
+            if let Some((verdict, reasons)) = review.judgment_of(agent) {
                 found.insert(
                     key.clone(),
                     Candidate {
@@ -339,14 +336,8 @@ pub fn candidates<'a>(
                         attempt,
                         base: base.clone(),
                         head: head.clone(),
-                        verdict: result["verdict"].as_str().unwrap_or_default().to_owned(),
-                        reasons: result["reasons"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .filter_map(Value::as_str)
-                            .map(str::to_owned)
-                            .collect(),
+                        verdict,
+                        reasons,
                         reviewed_at: at.clone(),
                     },
                 );
@@ -357,6 +348,119 @@ pub fn candidates<'a>(
         .iter()
         .filter_map(|(key, _)| found.remove(key))
         .collect()
+}
+
+/// The starts (Unix milliseconds, oldest first) of `agent`'s production
+/// reviews still in flight: each `review_started` that selected the agent
+/// with no `review_finished` of the same run and attempt yet. Such a review
+/// is no [`candidates`] one until it finishes, so a period that ends while
+/// it runs must end before it starts to count it later.
+pub fn in_flight<'a>(agent: &str, events: impl IntoIterator<Item = ReviewEvent<'a>>) -> Vec<i64> {
+    let mut started: Vec<((String, u64), i64)> = Vec::new();
+    for event in events {
+        let Some(attempt) = restore_payload::<AttemptOf>(event.payload).attempt else {
+            continue;
+        };
+        let key = (event.run_id.to_owned(), attempt);
+        if *event.kind == EventKind::ReviewStarted {
+            let selected = restore_payload::<restored::ReviewStarted>(event.payload).selects(agent);
+            started.retain(|(seen, _)| *seen != key);
+            if let (true, Some(at)) = (selected, event_instant(event.created_at)) {
+                started.push((key, at));
+            }
+        } else if *event.kind == EventKind::ReviewFinished {
+            started.retain(|(seen, _)| *seen != key);
+        }
+    }
+    let mut starts: Vec<i64> = started.into_iter().map(|(_, at)| at).collect();
+    starts.sort_unstable();
+    starts
+}
+
+/// The review events' payloads [`candidates`] and [`in_flight`] decide by,
+/// restored as typed values (`run::payload::restore`): a missing key,
+/// `null` or a value of another type reads as absent, and an item of a list
+/// that is not an object is skipped, so no recorded event is refused.
+mod restored {
+    use serde::Deserialize;
+    use serde_json::Value;
+
+    use crate::domain::run::payload::{object, objects, typed};
+
+    /// `review_started`: what its `subagents` selected and reviewed.
+    #[derive(Debug, Default, Deserialize)]
+    pub(super) struct ReviewStarted {
+        #[serde(default, deserialize_with = "object")]
+        pub(super) subagents: Option<Subagents>,
+    }
+
+    impl ReviewStarted {
+        /// Whether its `subagents` selected `agent`.
+        pub(super) fn selects(&self, agent: &str) -> bool {
+            self.subagents
+                .as_ref()
+                .and_then(|subagents| subagents.agents.as_ref())
+                .is_some_and(|agents| {
+                    agents
+                        .iter()
+                        .flatten()
+                        .any(|selected| selected.agent.as_deref() == Some(agent))
+                })
+        }
+    }
+
+    /// The `subagents` of a `review_started`.
+    #[derive(Debug, Default, Deserialize)]
+    pub(super) struct Subagents {
+        #[serde(default, deserialize_with = "typed")]
+        pub(super) base: Option<String>,
+        #[serde(default, deserialize_with = "typed")]
+        pub(super) head: Option<String>,
+        #[serde(default, deserialize_with = "objects")]
+        pub(super) agents: Option<Vec<Option<Named>>>,
+    }
+
+    /// One agent a review selected, or one agent's result, by its name.
+    #[derive(Debug, Default, Deserialize)]
+    pub(super) struct Named {
+        #[serde(default, deserialize_with = "typed")]
+        pub(super) agent: Option<String>,
+    }
+
+    /// `review_finished`: each agent's result.
+    #[derive(Debug, Default, Deserialize)]
+    pub(super) struct ReviewFinished {
+        #[serde(default, deserialize_with = "objects")]
+        agents: Option<Vec<Option<AgentResult>>>,
+    }
+
+    /// One agent's result of a `review_finished`.
+    #[derive(Debug, Default, Deserialize)]
+    struct AgentResult {
+        #[serde(default, deserialize_with = "typed")]
+        agent: Option<String>,
+        #[serde(default, deserialize_with = "typed")]
+        verdict: Option<String>,
+        #[serde(default, deserialize_with = "typed")]
+        reasons: Option<Vec<Value>>,
+    }
+
+    impl ReviewFinished {
+        /// `agent`'s judgment, its verdict and its reasons (those that are
+        /// text), when its result has a verdict.
+        pub(super) fn judgment_of(self, agent: &str) -> Option<(String, Vec<String>)> {
+            let result = self.agents?.into_iter().flatten().find(|result| {
+                result.agent.as_deref() == Some(agent) && result.verdict.is_some()
+            })?;
+            let reasons = result
+                .reasons
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|reason| reason.as_str().map(str::to_owned))
+                .collect();
+            Some((result.verdict?, reasons))
+        }
+    }
 }
 
 /// Why a review whose `base` or `head` no ref of the repository reaches (a
@@ -1082,6 +1186,71 @@ mod tests {
             }]
         );
         assert_eq!(found[0].id(), "prod-r1-a1");
+    }
+
+    /// The review events are read through their typed restores as they
+    /// were by keys: a list's item that is not an object is skipped, a
+    /// `subagents` that is not an object selects nobody, a result's reason
+    /// that is not text is left out, and a review still in flight is the
+    /// one with no `review_finished` of its run and attempt.
+    #[test]
+    fn the_review_events_are_read_leniently_by_their_restores() {
+        let selected = json!({"attempt": 1, "subagents": {"base": "b1", "head": "h1",
+            "agents": ["demo", 3, {"agent": 7}, {"agent": "demo"}]}});
+        let not_object = json!({"attempt": 1, "subagents": ["demo"]});
+        let no_head =
+            json!({"attempt": 2, "subagents": {"base": "b1", "agents": [{"agent": "demo"}]}});
+        let ended = json!({"attempt": 1, "agents": ["demo", {"agent": "demo", "verdict": "revise",
+            "reasons": ["adds notes.txt", 4, null]}]});
+        let events = [
+            (
+                "r1",
+                "review_started",
+                &selected,
+                "2026-10-05T00:00:00.000Z",
+            ),
+            (
+                "r2",
+                "review_started",
+                &not_object,
+                "2026-10-05T01:00:00.000Z",
+            ),
+            ("r3", "review_started", &no_head, "2026-10-05T02:00:00.000Z"),
+            ("r1", "review_finished", &ended, "2026-10-05T00:10:00.000Z"),
+        ];
+        let kinds: Vec<RecordedKind> = events
+            .iter()
+            .map(|(_, kind, _, _)| (*kind).into())
+            .collect();
+        let read = |upto: usize| {
+            events[..upto]
+                .iter()
+                .zip(&kinds)
+                .map(|((run_id, _, payload, created_at), kind)| ReviewEvent {
+                    run_id,
+                    kind,
+                    payload,
+                    created_at,
+                })
+                .collect::<Vec<_>>()
+        };
+        let found = candidates("demo", Period::default(), read(4));
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].run_id, "r1");
+        assert_eq!(found[0].verdict, "revise");
+        assert_eq!(found[0].reasons, ["adds notes.txt"]);
+        // r2 selected nobody; r3 has no head but runs still.
+        assert_eq!(
+            in_flight("demo", read(3)),
+            [
+                event_instant("2026-10-05T00:00:00.000Z").unwrap(),
+                event_instant("2026-10-05T02:00:00.000Z").unwrap(),
+            ]
+        );
+        assert_eq!(
+            in_flight("demo", read(4)),
+            [event_instant("2026-10-05T02:00:00.000Z").unwrap()]
+        );
     }
 
     /// The period's boundaries are instants, compared with the events'

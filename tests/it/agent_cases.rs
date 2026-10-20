@@ -10,7 +10,7 @@
 //! processes.
 
 use crate::common;
-use crate::plan_review::{Fixture, fixture, git};
+use crate::plan_review::{Fixture, fixture, git, options};
 use crate::runtime_support::agent_eval::{EvalAgent, commit_agents, events, supervise, violation};
 use crate::runtime_support::{git_out, orphan};
 
@@ -509,5 +509,136 @@ fn a_set_round_taken_up_is_scored_on_the_labels_it_started_with() {
     assert_eq!(
         shown["cases"][0]["review"]["expected"]["verdict"], "clean",
         "{shown}"
+    );
+}
+
+/// Record `kind` of the review of run `run` (task `task`, made by
+/// [`reviewed`] or here) with `payload`, at `at`.
+fn review_event(db: &Path, (task, run): (i64, &str), kind: &str, payload: &Value, at: &str) {
+    let conn = Connection::open(db).unwrap();
+    conn.execute(
+        "INSERT INTO run_events(task_id,run_id,kind,payload,created_at) VALUES (?1,?2,?3,?4,?5)",
+        params![task, run, kind, payload.to_string(), at],
+    )
+    .unwrap();
+}
+
+/// The supervisor's watch of the adopted definitions (ADR-t1728-1 (g)):
+/// an agent with case lists whose production reviews came after its last
+/// watch gets one due finding with the set to ask for; an agent with none
+/// finished gets the reason recorded and no finding, its period ending
+/// before its review still in flight, which the next look counts once it
+/// finishes; and the watch asks for no set and no round itself. When it is
+/// due and each step are unit tests of `domain::agent_eval::watch`.
+#[test]
+fn the_watch_records_when_an_agent_is_due_and_asks_for_nothing() {
+    let fx = fixture();
+    commit_agents(&fx.repo);
+    commit_config(&fx.repo, "[eval]\nwatch_new_reviews = 1\n");
+    let (base, head) = reviewed_change(&fx.repo);
+    let at = "2026-10-06T00:00:00.000Z";
+    reviewed(&fx.db, (11, "r1"), (&base, &head), &["demo"], "pass", at);
+    // huge's review started a minute ago and runs still.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    let started_at =
+        dagq::domain::marks::utc_text(i64::try_from(now.as_millis()).unwrap() - 60_000);
+    reviewed(&fx.db, (12, "r2"), (&base, &head), &["other"], "pass", at);
+    let huge = json!({"attempt": 1, "subagents": {"commit": base, "base": base, "head": head,
+        "agents": [{"agent": "huge"}]}});
+    review_event(
+        &fx.db,
+        (12, "r2"),
+        "review_started",
+        &json!({"attempt": 2, "subagents": huge["subagents"]}),
+        &started_at,
+    );
+    let out = tempfile::tempdir().unwrap();
+    let agent = EvalAgent::new(out.path(), &[violation()]);
+    // The supervisor runs in the test's process: its service is the test's.
+    let dagq = common::service::owned_executable(out.path());
+    let mut options = options(0, std::time::Duration::from_secs(3600));
+    options.agent_watch = Some(std::time::Duration::ZERO);
+    let look = || {
+        dagq::runtime::supervise_with_reviewer(
+            &fx.db,
+            &fx.repo,
+            &crate::plan_review::PlanWorkspace::default(),
+            &fx.claude,
+            &agent,
+            &dagq,
+            &options,
+        )
+        .unwrap()
+    };
+    let due_findings = || {
+        let listed = common::cli::ok(
+            &fx.db,
+            &["findings", "--all", "--kind", "agent_eval_watch_due"],
+        );
+        listed["findings"].as_array().unwrap().clone()
+    };
+    let outcome = look();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+
+    let findings = due_findings();
+    assert_eq!(findings.len(), 1, "{findings:?}");
+    let due = &findings[0];
+    assert_eq!(due["subject"], "demo/due since the start", "{due}");
+    assert_eq!(due["target"], "queue");
+    assert_eq!(due["status"], "open");
+    assert_eq!(due["recorded_by"], "supervisor");
+    assert!(due["propose_reason"].is_string(), "{due}");
+    let detail: Value = serde_json::from_str(due["detail"].as_str().unwrap()).unwrap();
+    assert_eq!(detail["step"], "due");
+    assert_eq!(detail["reviews"], 1);
+    assert_eq!(detail["first_review_at"], at);
+    let ask = detail["ask"].as_str().unwrap();
+    assert!(ask.starts_with("agent cases demo --until "), "{detail}");
+    // huge has no review finished: why, no finding, and the period ends
+    // before its review in flight.
+    let skipped = events(&fx.db, EventKind::AgentEvalWatchSkipped);
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert_eq!(skipped[0]["agent"], "huge");
+    assert_eq!(skipped[0]["reason"], "no_new_reviews");
+    assert_eq!(skipped[0]["through"], started_at.as_str());
+    // The watch asks for nothing: the planner its finding opens does.
+    assert_eq!(
+        events(&fx.db, EventKind::AgentCasesRequested),
+        Vec::<Value>::new()
+    );
+    assert_eq!(
+        events(&fx.db, EventKind::AgentEvalRequested),
+        Vec::<Value>::new()
+    );
+
+    // Again, after huge's review finished: it is counted in huge's new
+    // period, from where the skip ended the last; demo's open finding holds
+    // its watch, though another review came.
+    review_event(
+        &fx.db,
+        (12, "r2"),
+        "review_finished",
+        &json!({"attempt": 2, "verdict": "pass", "agents": [
+            {"agent": "huge", "status": "completed", "verdict": "pass", "reasons": [], "summary": "s"}]}),
+        &dagq::domain::marks::utc_text(i64::try_from(now.as_millis()).unwrap()),
+    );
+    reviewed(&fx.db, (13, "r3"), (&base, &head), &["demo"], "pass", at);
+    let outcome = look();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let findings = due_findings();
+    assert_eq!(findings.len(), 2, "{findings:?}");
+    let huge_due = findings
+        .iter()
+        .find(|finding| finding["subject"] == format!("huge/due since {started_at}"))
+        .unwrap_or_else(|| panic!("huge's due finding in {findings:?}"));
+    let detail: Value = serde_json::from_str(huge_due["detail"].as_str().unwrap()).unwrap();
+    assert_eq!(detail["reviews"], 1, "{detail}");
+    assert_eq!(detail["first_review_at"], started_at.as_str());
+    assert_eq!(events(&fx.db, EventKind::AgentEvalWatchSkipped).len(), 1);
+    assert_eq!(
+        events(&fx.db, EventKind::AgentCasesRequested),
+        Vec::<Value>::new()
     );
 }

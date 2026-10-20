@@ -107,6 +107,10 @@ pub struct EvalConfig {
     pub threshold: f64,
     /// `recent_runs`, a whole number above 0 ([`DEFAULT_RECENT_RUNS`]).
     pub recent_runs: usize,
+    /// `watch_new_reviews` and `watch_interval_days`, whole numbers above
+    /// 0: when the watch of an adopted definition is due
+    /// ([`super::watch::WatchConfig`]).
+    pub watch: super::watch::WatchConfig,
     /// `[eval.providers.<provider>]` by provider; a provider without its
     /// table has Claude's [`DEFAULT_CLAUDE_RUN_USD`] for Claude and nothing
     /// for Codex.
@@ -115,12 +119,14 @@ pub struct EvalConfig {
 
 impl EvalConfig {
     /// The keys of `[eval]`.
-    pub const KEYS: [&'static str; 5] = [
+    pub const KEYS: [&'static str; 7] = [
         "max_runs",
         "max_cost_usd",
         "concurrency",
         "threshold",
         "recent_runs",
+        "watch_new_reviews",
+        "watch_interval_days",
     ];
 
     /// `provider`'s table.
@@ -153,6 +159,7 @@ impl Default for EvalConfig {
             concurrency: DEFAULT_CONCURRENCY,
             threshold: super::DEFAULT_THRESHOLD,
             recent_runs: DEFAULT_RECENT_RUNS,
+            watch: super::watch::WatchConfig::default(),
             providers,
         }
     }

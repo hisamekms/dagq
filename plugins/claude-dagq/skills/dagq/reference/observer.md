@@ -32,6 +32,16 @@ The observer reads the KPIs (`reference/kpi.md`) with the targets of `dagq.toml`
 - **Improvement limit.** While the open improvement work for findings reaches `[kpi] max_improvement_proposals` of `dagq.toml`, another marked finding waits `open` for a planner (`findings` shows it as `improvements`). A CI watch's `ci_failure` finding is a repair, not an improvement: it is not counted and does not wait.
 - **Priority.** An improvement's tasks take their goal's priority, `normal` or below; a priority a person set stays.
 
+## Agent watch findings: kinds `agent_eval_watch_due` and `agent_eval_below_threshold`
+
+The supervisor watches each agent with case lists on the landing branch (`.dagq/agents/<agent>/evals/`): once `[eval] watch_new_reviews` production reviews selected it since its last watch, or `watch_interval_days` passed with one, it records a finding on the queue, with `--propose`, for a runtime planner. It asks for no set and no round itself. Each step is one finding of `agent_eval_watch_due`; its detail says the `step` and the command to run (`ask`). The planner opened for it:
+
+1. **`due`**: asks for the production set of the period, `agent cases <agent> --since S --until U` as the detail gives it, then `finding resolve ID --reason 'set N asked for'`.
+2. **`holdout`** (that set is built and no round runs it): first compares the set's digest (`agent set N`) with the `case_set_digest` of the agent's rounds on the same `definition_digest` (`agent results --agent <agent>`, `agent result ID`). If it ran already, the hold-out's once rule refuses it: `finding dismiss ID --reason` with why, and no rerun. Else `agent eval <agent> --set N`, then `finding resolve ID --reason 'eval E asked for'`.
+3. **`refused`** (the round was not started: the once rule, the cost limit or an unknown cost): `finding dismiss ID --reason` with the refusal's reason. A planner never asks to run it again (`--rerun` is a person's); a raised `[eval]` limit is a person's decision.
+
+A hold-out or production round on the landing branch's definition that ends under the threshold is an `agent_eval_below_threshold` finding, whoever asked for it, with its scores, the values under the threshold and each failed case's id and reasons. Its planner submits a task to improve the definition on those cases (`submit ... --finding ID`). A failed case whose label looks wrong is a label to decide, not the definition's: it goes to a person, as a set's disputed cases do.
+
 ## Where a finding goes
 
 1. **A proposal, without a person.** The observer marks a finding that needs a remedy (`finding record --propose '<why>'`: it recurs or costs much). A runtime planner then checks `search` / `related` for work already queued or done and either submits tasks (`submit ... --finding ID`), dismisses it, or asks the person with a `planner_question`. When planners leave it undecided, the inbox gets `request a plan for the finding`: on the person's word it records `request add --ref finding:N`.

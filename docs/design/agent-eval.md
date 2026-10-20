@@ -1,7 +1,7 @@
 ---
 id: design-agent-eval
 type: design
-title: agentのeval（定義とケースの置き場・ケースの欄・採点・漏れの検査・依頼と認可・記録・費用の上限・hold-outの1回の制限・evalの枠・本番と共有する起動経路・道具の宣言・採用の判定・productionのケース・programのreview）
+title: agentのeval（定義とケースの置き場・ケースの欄・採点・漏れの検査・依頼と認可・記録・費用の上限・hold-outの1回の制限・evalの枠・本番と共有する起動経路・道具の宣言・採用の判定・productionのケースと見張り・programのreview）
 status: current
 created: 2026-10-06
 scope: runtime
@@ -33,8 +33,7 @@ reviewのagentが正しく判定しているかを、規則コードごとの陽
 workerもjobもLLMのCLIを直接打たない。
 1周の中のケースごとの1回は、本番のrunのreviewのagentのjobと同じ起動経路で、測るagentの1本のjobだけを起動する。
 
-> **一部は予定**: 「productionのケースと見張り」の見張りはまだ実装していない予定で、名前と数値は実装が決める。
-> ほかの節は今の姿で、欄・flag・既定値の意味は定義のそばのdoc commentが持つ。
+> 欄・flag・既定値の意味は定義のそばのdoc commentが持つ。
 
 決めた理由は[ADR-t1728-1](../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)（定義とケースの置き場・eval）と[ADR-t1728-2](../adr/2026-10-06-t1728-2-agents-declare-their-tools-from-a-runtime-list.md)（道具の宣言）、定義を切らない例外は[ADR-t1869-1](../adr/2026-10-09-t1869-1-agent-jobs-carry-the-whole-definition-and-do-not-start-over-the-limit.md)、材料は[review-agent-evalのSpike](../plans/review-agent-eval-spike.md)が持つ。
 
@@ -93,7 +92,7 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
   どれもqueue serviceのユースケースで（[Queue service](queue-service.md)）、client modeのworkerも使える。
   use caseは`application::agent_eval`の`AgentEvals`、flagの意味はCLIの定義（`AgentCommand`）が持つ。
 - 依頼は記録するだけで、実行はsupervisorが行う。
-  supervisorは依頼を実行するだけで、自分では依頼しない。
+  supervisorは依頼を実行するだけで、自分では依頼しない（見張りは時期をfindingにするだけ。下の「採用した定義の見張り」）。
 - 依頼の認可と実行を分ける: devはworker（自分のrunの分）・人・inbox・planner、hold-outとproductionは人・inbox・planner、同じキーの再実行は人とinboxだけができる。
   読み取りはworkerには自分のrunの分だけを見せる。
   capabilityの表は[Authorization](authorization.md)が持ち、要るcapabilityは`domain::authorization::eval_request_needs`が決める。
@@ -187,7 +186,25 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
   作り直しは、まずbaseかheadがrefから辿れないケースを、patchのファイルが残っていても理由つきで飛ばす（ケースのtreeはbaseから作り、ビューはファイルの有無で変わらない）。
   残りのケースは内容のhashが合うpatchのファイルを使い、無ければ差分から書き直し、読めない・内容が変わった・UTF-8の文でない差分のケースは理由つきで飛ばす。
 - 集合をhold-outとして1回流した後、repositoryの`production.json`に足すのはtaskで行う。
-- 見張り（予定）: supervisorは、採用した定義（landing branchの定義のdigest）ごとに、前回の見張り（`agent_eval_watch_due`）の後に`new_reviews`件の本番のreviewがたまったか`interval_days`が過ぎたら、`agent_eval_watch_due`のfindingを記録するだけで、自分では依頼しない。
+
+### 採用した定義の見張り
+
+landing branchの定義を新しい本番のreviewで測り直す時期をsupervisorが判断し、findingにする。
+判断は`domain::agent_eval::watch`、記録は`application::supervise::observation::agent_watch`（間隔と値は`[eval]`の`watch_new_reviews`・`watch_interval_days`、`EvalConfig`のdoc comment）。
+
+- supervisorは依頼しない: 集合の作成もhold-outも、findingで開かれたruntimeのplannerが依頼者として依頼し（[Finding planners](supervisor-lifecycle/finding-planners.md)）、実行は今までどおりsupervisorが行う。
+  plannerの手順は見張りのfindingのplannerの初期prompt（[Finding planners](supervisor-lifecycle/finding-planners.md)の4）とpluginの`dagq` skillの`reference/observer.md`が持つ。
+- 対象と時期: 働いているsupervisorが一定の間隔で、landing branchのcommitに`evals/`のファイルを持つagentごとに、新しい期間にそのagentを選んで判定の付いた本番のreview（`production::candidates`と同じく開始の時刻で数える）を数える。
+  間隔は最後の見張り（`due`のfinding・productionの周の開始・新しいreviewの無かった周の記録）から数え、期間は前の期間の終わり（`due`の`until`、集合の周はその集合の`--until`、周の無かった記録の`through`）から始まる。
+  期間の終わりは今か、まだ終わっていないそのagentのreviewのうち最も早い開始の前（上限の時間を過ぎたものは数えない）で、見張りの間に走っていたreviewは終わった後に次の期間で数える（`watch::period_end`）。
+  件数が設定に達したか、間隔が過ぎて1件以上あれば`due`のfindingを記録する。
+  間隔が過ぎて1件も無ければfindingを作らず`agent_eval_watch_skipped`に理由と期間の終わりを記録する。
+  同じagentの見張りのfindingが開いている間は何も記録しない。
+- findingの段: どれも種類`agent_eval_watch_due`・対象queue・`--propose`付きで、subjectが段と対象を名指し、同じsubjectは状態に依らず1回だけ記録する（`record_finding_once`。2つのsupervisorでも1つ）。
+  `due`は期間と依頼する`agent cases`を、`holdout`はplannerが依頼した集合が作られて周が無いことと依頼する`agent eval --set`を、`refused`はplannerの集合の周が始まらなかった理由を持つ。
+  `refused`はplannerが理由を書いてdismissする（再実行はplannerの権限に無い）。
+- 成績のfinding: hold-outかproductionの周（着地の前のdevでなく、定義はlanding branchのもの）が全ての実行を終えて閾値を下回れば、依頼者に依らず種類`agent_eval_below_threshold`のfindingを記録し、成績・下回った値・失敗したケースのidとagentの理由を持たせる。
+  runtimeのplannerが定義の改善のtaskにし、ラベルの食い違いは集合の`disputed`と同じく人に回る。
 
 ## 道具の宣言
 

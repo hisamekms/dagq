@@ -6,6 +6,7 @@
 use super::*;
 use crate::application::ObservationQueue;
 
+pub(super) mod agent_watch;
 pub(super) mod ci_watch;
 pub(super) mod forecast;
 pub(super) mod ledger;
@@ -51,6 +52,10 @@ pub(super) struct ObservationState {
     forecast: forecast::ForecastWatch,
     /// The KPI push's messages waiting and the one being sent.
     push: push::PushWatch,
+    /// How often the watch of the adopted agent definitions looks
+    /// (ADR-t1728-1 (g)); `None` watches none.
+    agent_watch_check: Option<Duration>,
+    agent_watch: agent_watch::AgentWatch,
     /// Watches the landing branch's CI (ADR-t1920-1).
     ci_watch_port: Option<CiWatchPort>,
     ci: ci_watch::CiWatchState,
@@ -79,6 +84,8 @@ impl ObservationState {
             forecasts: ports.forecasts.clone(),
             forecast: forecast::ForecastWatch::default(),
             push: push::PushWatch::default(),
+            agent_watch_check: ports.agent_watch,
+            agent_watch: agent_watch::AgentWatch::default(),
             ci_watch_port: ports.ci_watch.clone(),
             ci: ci_watch::CiWatchState::default(),
             live_alerts: live_alerts::LiveAlertWatch::default(),

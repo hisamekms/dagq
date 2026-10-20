@@ -41,6 +41,7 @@ run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-sup
 4. **初期prompt**（`finding_planner_prompt`、載せるものは`FindingPlannerMaterial`）: findingとその根拠、根拠と記録を読むCLI、findingに紐づくaskとそのanswer、対象のgoalとそのtask、手順を載せる。
    手順は、`dagq search` / `related`で既存のtaskと実装済みを確かめてから、(1) 既存のopenなgoalにtaskを足してfindingを名指してsubmit、(2) 範囲に入るgoalが無ければdraftのgoalとtaskを書いてsubmit（新しいgoalでも人の承認は要らない）、(3) 手当てしない（既存のtaskで足りる、もう起きていない、割に合わない）なら`dagq finding dismiss`で理由を書く、(4) 自分で決めきれないもの（[推奨が出せればplannerが決める](#推奨が出せればplannerが決める未実装)の条件）だけ`planner_question`で聞いて止まる、のどれか1つ。
    verify・paths・evidenceは`prompt::repository_rules`の順で決めさせる（[Prompt](prompt.md#repositoryの規則を読む順)）。
+   agentの見張りの段のfinding（`agent_eval_watch_due`）だけは、この排他の手順でなく、detailの段（`due`・`holdout`は`ask`のコマンドで依頼してresolve、拒まれたものと`refused`は理由を書いてdismiss）を行わせ、taskもaskも作らせない（`prompt::planners`の`watch_steps`、[agentのeval](../agent-eval.md#採用した定義の見張り)）。
    人のanswerを運ぶplannerには元の質問とanswerを載せる。
    promptは全体と節ごとの上限の中に収め（値と理由は[Prompt](prompt.md#goal-reviewrunのreview復旧jobruntimeのplannerの上限)）、根拠のeventは新しい順に選び、省いたものはその件数と読むだけの`dagq`のコマンドを書く。
 5. **askの「提案にする」**（`answer`の中、`finding_planners::apply_answer`）: findingに紐づいた`blocked`のaskには、askを作るときにruntimeがoptionsの末尾に`propose`と`dismiss`を足し、`stalled`のaskには`propose`を足す（復旧jobが足すoptionの後）。

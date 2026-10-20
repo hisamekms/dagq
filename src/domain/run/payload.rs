@@ -70,7 +70,7 @@ where
 
 /// A key whose value is a JSON object, read as `T`; absent when it is
 /// missing, of another type (an array too) or does not read as `T`.
-fn object<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+pub(crate) fn object<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: Deserializer<'de>,
     T: serde::de::DeserializeOwned,
@@ -88,7 +88,7 @@ fn as_object<T: serde::de::DeserializeOwned>(value: Value) -> Option<T> {
 
 /// A key whose value is an array, each item read as `T` when it is an
 /// object; absent when the key is missing or not an array.
-fn objects<'de, D, T>(deserializer: D) -> Result<Option<Vec<Option<T>>>, D::Error>
+pub(crate) fn objects<'de, D, T>(deserializer: D) -> Result<Option<Vec<Option<T>>>, D::Error>
 where
     D: Deserializer<'de>,
     T: serde::de::DeserializeOwned,

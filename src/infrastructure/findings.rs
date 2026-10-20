@@ -30,6 +30,38 @@ impl SqliteQueue {
         Ok(outcome)
     }
 
+    /// Record `new` unless a finding of the same kind, target and subject
+    /// is there in any status, in one write: what the supervisor records
+    /// once and never as an occurrence of a settled one (the steps of the
+    /// watch of an adopted definition, ADR-t1728-1 (g)), and of two
+    /// supervisors that record it at once one does. The new finding's id,
+    /// or `None` when one was there.
+    pub fn record_finding_once(&self, new: NewFinding) -> Result<Option<FindingId>> {
+        let now = self.generators.clock.now();
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let (task_id, run_id, goal_id) = resolve_target(&tx, &new.target)?;
+        let there: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM findings WHERE kind=?1 AND target=?2
+               AND ifnull(task_id,0)=ifnull(?3,0) AND ifnull(run_id,'')=ifnull(?4,'')
+               AND ifnull(goal_id,0)=ifnull(?5,0) AND subject=?6)",
+            params![
+                new.kind,
+                new.target.name(),
+                task_id,
+                run_id,
+                goal_id,
+                new.subject
+            ],
+            |r| r.get(0),
+        )?;
+        if there {
+            return Ok(None);
+        }
+        let outcome = record_in(&tx, &new, now)?;
+        tx.commit()?;
+        Ok(Some(outcome.finding.id))
+    }
+
     /// Resolve or dismiss a finding with the reason
     /// ([`finding::check_transition`]), recording `finding_status_changed`.
     pub fn set_finding_status(

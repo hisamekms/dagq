@@ -322,6 +322,14 @@ pub trait QueueRecords {
         &self,
         record: crate::domain::ci_watch::CiCheckRecord,
     ) -> Result<Option<crate::domain::ci_watch::CiCheckRecorded>>;
+    /// Record `finding` unless one of the same kind, target and subject
+    /// is there in any status, in one write transaction: its id, or
+    /// `None` when one was there (the watch of an adopted definition,
+    /// ADR-t1728-1 (g)).
+    fn record_finding_once(
+        &self,
+        finding: crate::domain::NewFinding,
+    ) -> Result<Option<crate::domain::FindingId>>;
     /// The `ci_failure` findings `task` fixes (linked to its proposal, or
     /// dismissed as covered by it).
     fn ci_failure_findings_of(&self, task: TaskId) -> Result<Vec<crate::domain::FindingId>>;

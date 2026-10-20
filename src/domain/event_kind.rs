@@ -110,6 +110,7 @@ event_kinds! {
     AgentEvalStarted => "agent_eval_started",
     AgentEvalTakenUp => "agent_eval_taken_up",
     AgentEvalWaiting => "agent_eval_waiting",
+    AgentEvalWatchSkipped => "agent_eval_watch_skipped",
     AgentStarted => "agent_started",
     ApproveWithheld => "approve_withheld",
     AskAnswered => "ask_answered",
@@ -494,6 +495,9 @@ impl EventKind {
                 | AgentEvalRunFinished
                 | AgentEvalCaseChecked
                 | AgentEvalFinished
+                // The watch of an adopted definition (ADR-t1728-1 (g)): an
+                // interval with no new production review, by `agent`.
+                | AgentEvalWatchSkipped
                 // The production cases of an agent (ADR-t1728-1 (g)): the
                 // requests, labels, sets and decisions, by `set_id`.
                 | AgentCasesRequested
@@ -1479,6 +1483,7 @@ mod tests {
             (EventKind::AgentEvalStarted, "agent_eval_started"),
             (EventKind::AgentEvalTakenUp, "agent_eval_taken_up"),
             (EventKind::AgentEvalWaiting, "agent_eval_waiting"),
+            (EventKind::AgentEvalWatchSkipped, "agent_eval_watch_skipped"),
             (EventKind::AgentStarted, "agent_started"),
             (EventKind::ApproveWithheld, "approve_withheld"),
             (EventKind::AskAnswered, "ask_answered"),

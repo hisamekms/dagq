@@ -114,6 +114,7 @@ pub use self::host_ops::sccache::SccachePort;
 pub use self::host_ops::update::{UPDATE_INTERVAL, UpdateSettings};
 use self::host_ops::{broker_relay, cleanup, disk, handoff, inbox_nudge, queue_broker, sccache};
 use self::observation::ObservationState;
+pub use self::observation::agent_watch::AGENT_WATCH_CHECK;
 pub use self::observation::ci_watch::{CiSourceMaker, CiWatchFile, CiWatchPort};
 pub use self::observation::forecast::{FORECAST_CHECK, ForecastPort};
 pub use self::observation::ledger::{Built, FAILING_PASSES, LedgerPort, Retain, build_pass};

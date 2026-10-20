@@ -220,6 +220,11 @@ pub struct SuperviseOptions {
     /// How often the triggers of a snapshot are looked for; tests shorten
     /// it.
     pub forecast_check: Duration,
+    /// How often the watch of the adopted agent definitions looks
+    /// (ADR-t1728-1 (g)): `None`, the library's default, watches none; the
+    /// CLI's supervisor at work looks every
+    /// [`crate::application::supervise::AGENT_WATCH_CHECK`].
+    pub agent_watch: Option<Duration>,
     /// The host-wide `host.toml` the supervisor reads (`[kpi]`, `[report]`,
     /// `[push]`); `None` is `$XDG_CONFIG_HOME/dagq/host.toml`. Tests set it.
     pub host_config: Option<PathBuf>,
@@ -423,6 +428,7 @@ impl SuperviseOptions {
             report_daily: false,
             forecast_snapshots: false,
             forecast_check: crate::application::supervise::FORECAST_CHECK,
+            agent_watch: None,
             host_config: None,
             diagram_path: None,
             user_config: None,
@@ -925,6 +931,7 @@ pub fn supervise_with_reviewer(
         provider_fallback_file,
         fresh_session_file,
         forecasts,
+        agent_watch: options.agent_watch,
         release: Some(release),
         host_metrics,
         queue_service: options

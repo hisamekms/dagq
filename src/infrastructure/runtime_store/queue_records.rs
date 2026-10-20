@@ -134,6 +134,12 @@ impl QueueRecords for SqliteQueue {
     ) -> Result<Option<crate::domain::ci_watch::CiCheckRecorded>> {
         SqliteQueue::record_ci_check(self, record)
     }
+    fn record_finding_once(
+        &self,
+        finding: crate::domain::NewFinding,
+    ) -> Result<Option<crate::domain::FindingId>> {
+        SqliteQueue::record_finding_once(self, finding)
+    }
     fn ci_failure_findings_of(&self, task: TaskId) -> Result<Vec<crate::domain::FindingId>> {
         SqliteQueue::ci_failure_findings_of(self, task)
     }

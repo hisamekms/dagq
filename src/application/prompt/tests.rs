@@ -2854,6 +2854,112 @@ fn the_finding_planner_decides_what_it_can_recommend() {
     assert!(!prompt.contains("--priority normal"), "{prompt}");
 }
 
+/// A planner opened for a step of an agent's watch (ADR-t1728-1 (g)) is
+/// given that step, the set or the hold-out to ask for and the finding to
+/// resolve, or the refusal to dismiss, in place of the proposal, the
+/// dismissal or the question every other finding's planner chooses
+/// exactly one of; a score under the threshold is an improvement like any
+/// other finding.
+#[test]
+fn a_watch_findings_planner_does_its_step_and_plans_no_task() {
+    use crate::domain::{
+        FindingId,
+        agent_eval::watch::{SCORE_FINDING_KIND, WATCH_FINDING_KIND},
+        finding::{Finding, FindingStatus, Impact},
+    };
+    let finding = |kind: &str| FindingView {
+        finding: Finding {
+            id: FindingId::new(9),
+            kind: kind.into(),
+            target: "queue".into(),
+            task_id: None,
+            run_id: None,
+            goal_id: None,
+            subject: "rules/due since the start".into(),
+            summary: "rules's definition is due to be watched".into(),
+            detail: json!({"step": "due", "agent": "rules",
+                "ask": "agent cases rules --until 2026-10-20T00:00:00.000Z"})
+            .to_string(),
+            impact: Impact::Normal,
+            first_seen_at: 0,
+            last_seen_at: 0,
+            occurrences: 1,
+            evidence: Vec::new(),
+            status: FindingStatus::Open,
+            status_reason: None,
+            proposal_id: None,
+            covered_by_task: None,
+            propose_reason: Some("ask for the production set".into()),
+            propose_requested_at: None,
+            recorded_by: "supervisor".into(),
+            updated_at: 0,
+        },
+        proposal_status: None,
+        open_asks: Vec::new(),
+        evidence_events: None,
+    };
+    let prompt_of = |view: &FindingView, answer: Option<&Ask>| {
+        finding_planner_prompt(&FindingPlannerMaterial {
+            db: Path::new("/q/queue.db"),
+            finding: view,
+            attempt: 1,
+            asks: &[],
+            goal: None,
+            goal_closed: false,
+            siblings: &[],
+            answer,
+            handover: None,
+        })
+        .unwrap()
+        .text
+    };
+    let watch = finding(WATCH_FINDING_KIND);
+    let prompt = prompt_of(&watch, None);
+    for part in [
+        "The finding is a step of the supervisor's watch of an agent's definition: do that step",
+        "## What to do: a step of an agent's watch",
+        "plan no task and submit nothing for it",
+        // The detail's command is shown and is the one to run.
+        "agent cases rules --until 2026-10-20T00:00:00.000Z",
+        "- `due`: ask for the production set of the period: run `dagq <ask>`",
+        "then `dagq finding resolve 9 --reason 'set <its id> asked for'`",
+        "- `holdout`:",
+        "`dagq agent results --agent <agent>`",
+        "the hold-out's once rule refuses it: run `dagq finding dismiss 9 --reason '<why>'`",
+        "then `dagq finding resolve 9 --reason 'eval <its id> asked for'`",
+        "- `refused`:",
+        "run `dagq finding dismiss 9 --reason '<the refusal's reason>'`",
+        "Never ask to run a set again (`--rerun` is a person's)",
+        "a command that is refused is not tried again",
+    ] {
+        assert!(prompt.contains(part), "{part} in {prompt}");
+    }
+    // None of the general steps: no proposal, no exclusive choice.
+    for gone in [
+        "Then do exactly one of these",
+        "marked for a proposal",
+        "dagq submit",
+        "dagq add --goal",
+        "planner_question",
+        "## A CI failure",
+    ] {
+        assert!(!prompt.contains(gone), "{gone} in {prompt}");
+    }
+    // An answer a planner before it carried applies to the step.
+    let answer = asked(31, 40);
+    let carried = prompt_of(&watch, Some(&answer));
+    assert!(
+        carried.contains("Apply this answer to the step above."),
+        "{carried}"
+    );
+    assert!(!carried.contains("as step 4 says"), "{carried}");
+    // A score under the threshold is an improvement: the general steps.
+    let score = prompt_of(&finding(SCORE_FINDING_KIND), None);
+    assert!(score.contains("Then do exactly one of these"), "{score}");
+    assert!(score.contains("dagq submit ID... --finding 9"), "{score}");
+    assert!(!score.contains("a step of an agent's watch"), "{score}");
+}
+
 /// A task in progress with `goal` and `context`.
 fn grouped_task(id: i64, title: &str, goal: Option<i64>, context: &str) -> Task {
     Task::restore(TaskRecord {

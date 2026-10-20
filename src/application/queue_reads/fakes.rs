@@ -94,6 +94,12 @@ impl QueueRecords for Records {
     ) -> Result<Option<crate::domain::ci_watch::CiCheckRecorded>> {
         unimplemented!()
     }
+    fn record_finding_once(
+        &self,
+        _: crate::domain::NewFinding,
+    ) -> Result<Option<crate::domain::FindingId>> {
+        unimplemented!()
+    }
     fn ci_failure_findings_of(&self, _: TaskId) -> Result<Vec<crate::domain::FindingId>> {
         unimplemented!()
     }

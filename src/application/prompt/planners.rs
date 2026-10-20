@@ -1397,9 +1397,18 @@ pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<F
     let finding = &view.finding;
     let id = finding.id;
     let read = format!("read it whole with `dagq findings {id} --full`");
+    // A step of the watch of an adopted agent definition (ADR-t1728-1
+    // (g)): the planner asks for the set or the hold-out the step names,
+    // or dismisses a refused one, and plans no task.
+    let watch = finding.kind == crate::domain::agent_eval::watch::WATCH_FINDING_KIND;
     let mut out = format!(
-        "You are a planner the dagq runtime opened for finding {id} of the queue at {db}; no person watches this session. The finding is marked for a proposal: make the plan that remedies it (planner {attempt} of at most {max} the runtime opens for it).\n",
+        "You are a planner the dagq runtime opened for finding {id} of the queue at {db}; no person watches this session. {task} (planner {attempt} of at most {max} the runtime opens for it).\n",
         db = crate::application::path_text(material.db)?,
+        task = if watch {
+            "The finding is a step of the supervisor's watch of an agent's definition: do that step"
+        } else {
+            "The finding is marked for a proposal: make the plan that remedies it"
+        },
         attempt = material.attempt,
         max = MAX_FINDING_PLANNERS,
     );
@@ -1503,7 +1512,10 @@ pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<F
             "\n## Goal\n\nIts target belongs to no goal. `dagq goal list` shows the open goals.\n",
         ),
     }
-    out.push_str(&format!(
+    if watch {
+        out.push_str(&watch_steps(id));
+    } else {
+        out.push_str(&format!(
         "\n## What to do\n\n\
          Follow the dagq-planner skill of the dagq plugin, its Basic policy above all: {DECIDE_YOURSELF} {rules} Before you plan, look for tasks that already remedy it or code that already does (`dagq search '<words>'`, `dagq related ID` for a task, `dagq show ID`). Then do exactly one of these:\n\
          1. Tasks for an open goal: when the remedy is within an open goal's scope (the one above, or another from `dagq goal list`), add its tasks to that goal as drafts (`dagq add --goal GOAL ...`, with `--context` beginning with `from finding {id} ({kind})` and saying why you chose this remedy), check them with `dagq lint`, and submit them with `dagq submit ID... --finding {id}`.\n\
@@ -1516,6 +1528,7 @@ pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<F
         kind = finding.kind,
         rules = repository_rules(RUNTIME_PLANNER_ASK),
     ));
+    }
     // A failure of the watched branch's CI (ADR-t1920-1): the fix task
     // carries the finding's detail, and a task that already fixes the
     // same tests covers it instead of a new one.
@@ -1533,8 +1546,13 @@ pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<F
     if let Some(answer) = material.answer {
         let (question, text) = planner_answer(&mut fit, answer);
         let carried = format!(
-            "\nThe planner before you asked a person (ask {aid}) and is gone:\n{question}\n\nanswer to ask {aid}: {text}\n\nApply this answer as step 4 says.\n",
+            "\nThe planner before you asked a person (ask {aid}) and is gone:\n{question}\n\nanswer to ask {aid}: {text}\n\nApply this answer {how}.\n",
             aid = answer.id,
+            how = if watch {
+                "to the step above"
+            } else {
+                "as step 4 says"
+            },
         );
         fit.section("answer", &carried);
         out.push_str(&carried);
@@ -1543,6 +1561,24 @@ pub fn finding_planner_prompt(material: &FindingPlannerMaterial<'_>) -> Result<F
         out.push_str(&handover_section(&mut fit, handover));
     }
     Ok(fit.finish(out))
+}
+
+/// What a planner opened for a step of the watch of an adopted agent
+/// definition does (ADR-t1728-1 (g); the plugin's `dagq` skill,
+/// `reference/observer.md`): the step its detail names, in place of the
+/// proposal, the dismissal or the question every other finding's planner
+/// chooses from. It asks for the set or the hold-out as the requester the
+/// supervisor is not, and never for a rerun.
+fn watch_steps(id: crate::domain::FindingId) -> String {
+    format!(
+        "\n## What to do: a step of an agent's watch\n\n\
+         The supervisor recorded this finding to have an agent's definition on the landing branch measured again on new production reviews; it asks for nothing itself. Its detail is one JSON object: `step`, `agent` and, for `due` and `holdout`, `ask`, the dagq command to run. Do the step its `step` names; plan no task and submit nothing for it:\n\
+         - `due`: ask for the production set of the period: run `dagq <ask>` (`agent cases <agent> --since S --until U` as the detail gives it), then `dagq finding resolve {id} --reason 'set <its id> asked for'`.\n\
+         - `holdout`: the set a planner asked for is built and no round runs it. First compare the set's digest (`dagq agent set <set>`) with the `case_set_digest` of the agent's rounds on the same `definition_digest` (`dagq agent results --agent <agent>`, `dagq agent result <id>`). When it ran already, the hold-out's once rule refuses it: run `dagq finding dismiss {id} --reason '<why>'`. Else run `dagq <ask>` (`agent eval <agent> --set <set>`), then `dagq finding resolve {id} --reason 'eval <its id> asked for'`.\n\
+         - `refused`: the round was not started (the once rule, the cost limit or an unknown cost): run `dagq finding dismiss {id} --reason '<the refusal's reason>'`.\n\
+         Never ask to run a set again (`--rerun` is a person's) and never change `[eval]`'s limits; a command that is refused is not tried again: dismiss the finding with what it said. \
+         When you are done, report the outcome in one or two sentences and stop; the runtime ends this session. Do not work on anything but this finding. Never open the queue database directly; use the dagq CLI only.\n"
+    )
 }
 
 /// What a planning request refers to, as its planner's prompt shows it

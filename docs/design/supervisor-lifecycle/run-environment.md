@@ -68,7 +68,6 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - `[resume]`は`needs_session`のrunの衝突だけの試行の上限で、keyと既定、設定にしない上限は`domain::resume::ResumeConfig`が持つ（[Needs session](needs-session.md)の「試行の数え方」、ADR-0047の決定24）。
   supervisorが起動時に読み（`SuperviseOptions::resume`で上書きできる）、読めなければ既定値で動く。
   起動の後の変更はsupervisorを起動し直すまで効かない。
-- `[exit]`はsessionが止めた`/exit`の再試行の設定だった表で、`dagq.toml`を読むときに検査するだけで何も使わない（keyと意味は`domain::exit::ExitConfig`、[receiptとsessionの終わり](headless-worker.md#receiptとsessionの終わり)、ADR-0047の決定25）。
 
 - `[supervisor]`はsupervisorの同時に走らせるrunの数・人の答えを待つrunの上限・runtimeが同時に立てるplannerの上限・claimの間隔・軽い枠のchange・実行区分の上限とaging・調査中の計画の上限を持ち、keyと意味は`domain::slot_limits::SupervisorConfig`が持つ（[人の答えを待つrun](waiting.md)・[Draft planners](draft-planners.md)・[Finding planners](finding-planners.md)・[Plan review (supervisor)](plan-review.md#plan-review-supervisor)・[claimを控える](claim-hold.md)・[実行区分の上限とaging](claim-hold.md#実行区分の上限とaging)、ADR-t1479-1、ADR-t1591-1）。
   projectごとのbuildの重さに合わせた並列数と、答えを待つplannerが枠をふさいでもdraftとreviseが進む数と、buildのloadが出るまでの間をrepositoryに置くため。
@@ -91,6 +90,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - `[fresh_session]`は`peak_context_above`（意味は`domain::fresh_session::FreshSessionConfig`）だけを持つ（[ADR-t2080-1](../../adr/2026-10-08-t2080-1-fresh-session-on-send-back-and-resume-when-peak-context-exceeds-threshold.md)、振る舞いは[Provider lifecycle](../provider-lifecycle.md#大きなcontextからの新しいsession)）。
   keyが無ければ新しいsessionを始めない。
   値とkeyの誤り、読む時と読めないときの扱い（読み手は`load_fresh_session`）は`[provider_fallback]`と同じ。
+- `[eval]`と`[eval.providers.<provider>]`はagentのevalの上限・閾値・費用の見込みと採用した定義の見張りの時期で、keyと既定値は`EvalConfig`・`ProviderCost`のdoc comment、使い方は[agentのeval](../agent-eval.md)が持つ。
 - `[review.jobs]`はrunのreviewの段のjobの種類ごとの時間の上限と、reviewのagentのjobの同時実行の上限で（ADR-t1895-1決定1。keyと既定値は`ReviewJobs`のdoc comment）。
   他のjobに効かず（evalのケースのprogramのjobはreviewの段に数える）、無いkeyは今の上限（[Headless job processes](headless-job-processes.md#記録)）。
   supervisorが起動時に読む。

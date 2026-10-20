@@ -4667,6 +4667,9 @@ fn execute(cli: Cli) -> Result<Value> {
                 // The ledger, built from what is recorded (docs/design/
                 // measurement.md "台帳を作る係"); a one-shot pass does not.
                 ledger: (!once).then(dagq::compose::LedgerOptions::default),
+                // The watch of the adopted agent definitions (ADR-t1728-1
+                // (g)); a one-shot pass does not watch them.
+                agent_watch: (!once).then_some(dagq::application::supervise::AGENT_WATCH_CHECK),
                 // A supervisor at work keeps the queue's service (ADR-t1233-4
                 // decision 2); a one-shot pass does not.
                 queue_service: (!once).then(|| dagq::compose::QueueServiceOptions {

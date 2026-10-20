@@ -1529,6 +1529,18 @@ pub fn parse_config(text: &str) -> Result<Config> {
                         )
                         .with_context(with)?;
                     }
+                    "watch_new_reviews" => {
+                        eval.watch.new_reviews = usize::try_from(
+                            parse_positive(rest.trim(), "number of reviews").with_context(with)?,
+                        )
+                        .with_context(with)?;
+                    }
+                    "watch_interval_days" => {
+                        eval.watch.interval_days = u32::try_from(
+                            parse_positive(rest.trim(), "number of days").with_context(with)?,
+                        )
+                        .with_context(with)?;
+                    }
                     "max_cost_usd" => {
                         eval.max_cost_usd =
                             parse_positive_number(rest.trim()).with_context(with)?;
@@ -5606,6 +5618,7 @@ LITERAL = 'no \n escapes # here'
         assert_eq!(eval("").unwrap(), EvalConfig::default());
         let read = eval(
             "[eval]\nmax_runs = 60\nmax_cost_usd = 12.5\nconcurrency = 2\nthreshold = 0.8\nrecent_runs = 5\n\
+             watch_new_reviews = 4\nwatch_interval_days = 3\n\
              [eval.providers.codex]\ninput_usd_per_mtok = 1.25\noutput_usd_per_mtok = 10\ndefault_run_usd = 0.3\n",
         )
         .unwrap();
@@ -5619,6 +5632,7 @@ LITERAL = 'no \n escapes # here'
             ),
             (60, 12.5, 2, 0.8, 5)
         );
+        assert_eq!((read.watch.new_reviews, read.watch.interval_days), (4, 3));
         let codex = read.provider(crate::domain::Provider::Codex);
         assert!(codex.converts());
         assert_eq!(codex.default_run_usd, Some(0.3));
@@ -5631,6 +5645,8 @@ LITERAL = 'no \n escapes # here'
         for wrong in [
             "[eval]\nthreshold = 1.5\n",
             "[eval]\nmax_runs = 0\n",
+            "[eval]\nwatch_interval_days = 0\n",
+            "[eval]\nwatch_new_reviews = -1\n",
             "[eval]\nlimit = 3\n",
             "[eval]\nmax_runs = 3\nmax_runs = 4\n",
             "[eval.providers.gemini]\ndefault_run_usd = 1\n",

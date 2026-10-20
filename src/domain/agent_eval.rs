@@ -17,6 +17,7 @@ pub mod programs;
 pub mod record;
 pub mod review;
 pub mod round;
+pub mod watch;
 
 /// The directory of an agent's case lists, in its definition's directory
 /// (`.dagq/agents/<name>/evals/`).

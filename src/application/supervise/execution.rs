@@ -509,6 +509,9 @@ pub struct Ports<'a> {
     /// Records the forecast snapshots (ADR-0070 decision 3); `None`
     /// records none.
     pub forecasts: Option<ForecastPort>,
+    /// How often the watch of the adopted agent definitions looks
+    /// (ADR-t1728-1 (g)); `None` watches none.
+    pub agent_watch: Option<Duration>,
     /// Looks for a new release on crates.io (ADR-t618-1); `None` looks
     /// for none.
     pub release: Option<ReleasePort>,
@@ -2348,6 +2351,9 @@ impl Supervisor<'_> {
                 // Looked for by a supervisor at work only: the triggers stay
                 // in the queue for the next look (ADR-0070 decision 3).
                 observation.forecast_pass(env, working);
+                // The watch of the adopted agent definitions, likewise:
+                // what it counts stays in the queue (ADR-t1728-1 (g)).
+                observation.agent_watch_pass(env, working);
             });
             // Looked for by a supervisor at work only (ADR-t618-1).
             self.on_host(|host, env| host.release_pass(env, working));
