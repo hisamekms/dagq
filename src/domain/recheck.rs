@@ -363,18 +363,31 @@ pub fn landing_at(latest_integrated: Option<&RunEvent>, main: &str) -> Option<La
 /// `events`: by its passed review's conflict precheck (ADR-0027 decision
 /// 4), by its landing that parked it, or by a recheck, failed or clean.
 /// What that found is handled, and is not judged again.
-pub fn judged_against(events: &[RunEvent], main: &str, head: &str) -> bool {
+///
+/// A clean recheck with a null `command` judged only the merge. When the
+/// supervisor that asks would run a command (`runs_command`: `[recheck]
+/// command` is set and its program is found), such a clean settles the
+/// head only if it records the command was skipped by `[recheck] paths`
+/// ([`SKIPPED_BY_PATHS`]); one recorded where the command could not run
+/// (its program missing, or a record from before the paths) does not,
+/// and the run goes through the recheck's paths decision again
+/// ([`runs_command`]).
+pub fn judged_against(events: &[RunEvent], main: &str, head: &str, runs_command: bool) -> bool {
     events.iter().any(|event| {
-        matches!(
-            event.kind.known(),
+        let settles = match event.kind.known() {
             Some(
                 EventKind::ConflictPrecheck
-                    | EventKind::IntegrationDeferred
-                    | EventKind::LandingRecheckFailed
-                    | EventKind::LandingRecheckClean
-            )
-        ) && event.payload["main"] == main
-            && event.payload["head"] == head
+                | EventKind::IntegrationDeferred
+                | EventKind::LandingRecheckFailed,
+            ) => true,
+            Some(EventKind::LandingRecheckClean) => {
+                !runs_command
+                    || !event.payload["command"].is_null()
+                    || event.payload["command_skipped"] == SKIPPED_BY_PATHS
+            }
+            _ => false,
+        };
+        settles && event.payload["main"] == main && event.payload["head"] == head
     })
 }
 
@@ -745,20 +758,85 @@ mod tests {
                 ..event(json!({"main": main, "head": head}))
             };
             assert!(
-                judged_against(std::slice::from_ref(&judged), main, head),
+                judged_against(std::slice::from_ref(&judged), main, head, false),
                 "{kind}"
             );
             assert!(
-                !judged_against(std::slice::from_ref(&judged), "m2", head),
+                !judged_against(std::slice::from_ref(&judged), "m2", head, false),
                 "{kind}"
             );
-            assert!(!judged_against(&[judged], main, "h2"), "{kind}");
+            assert!(!judged_against(&[judged], main, "h2", false), "{kind}");
         }
         let other = RunEvent {
             kind: "review_finished".into(),
             ..event(json!({"main": main, "head": head}))
         };
-        assert!(!judged_against(&[other], main, head));
+        assert!(!judged_against(&[other], main, head, false));
+    }
+
+    /// A clean recheck that checked only the merge settles the head for a
+    /// supervisor that would run a command only when the command was
+    /// skipped by `[recheck] paths`; for one that would not, it does. A
+    /// clean that names a command and the other judgements settle it
+    /// either way.
+    #[test]
+    fn a_clean_with_no_command_settles_a_supervisor_with_one_only_when_skipped_by_paths() {
+        let (main, head) = ("m1", "h1");
+        let clean = |payload: Value| RunEvent {
+            kind: LANDING_RECHECK_CLEAN.into(),
+            ..event(payload)
+        };
+        let unmarked = clean(json!({"main": main, "head": head, "command": null}));
+        let unwritten = clean(json!({"main": main, "head": head}));
+        let by_paths = clean(json!({
+            "main": main, "head": head, "command": null, "command_skipped": SKIPPED_BY_PATHS,
+        }));
+        let with_command = clean(json!({"main": main, "head": head, "command": "make check"}));
+        for event in [&unmarked, &unwritten] {
+            assert!(!judged_against(
+                std::slice::from_ref(event),
+                main,
+                head,
+                true
+            ));
+            assert!(judged_against(
+                std::slice::from_ref(event),
+                main,
+                head,
+                false
+            ));
+        }
+        for event in [&by_paths, &with_command] {
+            assert!(judged_against(
+                std::slice::from_ref(event),
+                main,
+                head,
+                true
+            ));
+            assert!(judged_against(
+                std::slice::from_ref(event),
+                main,
+                head,
+                false
+            ));
+        }
+        for kind in [
+            "conflict_precheck",
+            "integration_deferred",
+            LANDING_RECHECK_FAILED,
+        ] {
+            let judged = RunEvent {
+                kind: kind.into(),
+                ..event(json!({"main": main, "head": head, "command": null}))
+            };
+            assert!(judged_against(&[judged], main, head, true), "{kind}");
+        }
+        // Another judgement of the same main and head still settles it.
+        let deferred = RunEvent {
+            kind: "integration_deferred".into(),
+            ..event(json!({"main": main, "head": head}))
+        };
+        assert!(judged_against(&[unmarked, deferred], main, head, true));
     }
 
     /// The recent `landing_recheck_finished` of a main tell whether this

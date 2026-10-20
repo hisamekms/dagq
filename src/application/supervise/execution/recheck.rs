@@ -192,6 +192,23 @@ fn left_to_check(targets: Vec<(Target, bool)>, checked: CheckedBy) -> Vec<Target
         .collect()
 }
 
+/// The `[recheck]` this supervisor's recheck uses (`config`, read only
+/// when [run.env] finds the command's program): a command whose program
+/// [run.env] cannot find (`run_env_missing`) would fail on every run
+/// (ADR-0049 decision 9), so only the merge is checked then. Whether it
+/// has a command decides whether a clean recheck recorded with no command
+/// settles a run ([`recheck::judged_against`]).
+fn recheck_config(
+    run_env_missing: bool,
+    config: impl FnOnce() -> Result<RecheckConfig>,
+) -> Result<RecheckConfig> {
+    if run_env_missing {
+        Ok(RecheckConfig::default())
+    } else {
+        config()
+    }
+}
+
 /// Where `landing_recheck_finished` goes: the run of the dagq landing
 /// that moved main, or, when none did, the first run checked.
 fn record_on(landed: Option<&Landed>, targets: &[Target]) -> RunId {
@@ -552,6 +569,10 @@ impl Supervisor<'_> {
         {
             return Ok(Start::Later { locked_out: false });
         }
+        let config = recheck_config(self.landing.run_env_missing, || {
+            self.verifier.recheck_config()
+        })?;
+        let runs_command = config.command.is_some();
         let mut judged = Vec::with_capacity(targets.len());
         for target in targets {
             let settled = self
@@ -562,6 +583,7 @@ impl Supervisor<'_> {
                     &self.queue.run_events(&target.run_id)?,
                     main.as_str(),
                     target.head.as_str(),
+                    runs_command,
                 );
             judged.push((target, settled));
         }
@@ -576,7 +598,7 @@ impl Supervisor<'_> {
             return Ok(Start::Nothing);
         }
         let landed = self.landing_at(&main)?;
-        self.start(landed, main, targets, Box::new((lock, turn)))?;
+        self.start(landed, main, targets, config, Box::new((lock, turn)))?;
         Ok(Start::Started)
     }
 
@@ -641,16 +663,10 @@ impl Supervisor<'_> {
         landed: Option<Landed>,
         main: CommitSha,
         targets: Vec<Target>,
+        config: RecheckConfig,
         lock: Box<dyn std::any::Any + Send>,
     ) -> Result<()> {
         let record_on = record_on(landed.as_ref(), &targets);
-        // A command whose program [run.env] cannot find would fail on every
-        // run (ADR-0049 decision 9): only the merge is checked then.
-        let config = if self.landing.run_env_missing {
-            RecheckConfig::default()
-        } else {
-            self.verifier.recheck_config()?
-        };
         let command = config.command.clone();
         let dir = self.recheck_dir()?;
         // The command may not start the sccache server (ADR-t2086-1): its
@@ -1604,6 +1620,103 @@ mod tests {
         assert_eq!(runs(&left_to_check(judged(), CheckedBy::No)), ["r1", "r3"]);
         assert_eq!(runs(&left_to_check(judged(), CheckedBy::Other)), ["r3"]);
         assert!(left_to_check(judged(), CheckedBy::This).is_empty());
+    }
+
+    /// A run this supervisor holds in its slot, whose only judgement for
+    /// main and its head is another supervisor's clean with no command,
+    /// after that supervisor checked main: (a) with no paths-skip mark
+    /// and a command with no `[recheck] paths`, (b) with paths the merged
+    /// diff touches, it is checked and the command runs; (c) with paths it
+    /// touches none of, it is checked and recorded clean skipped by the
+    /// paths; (d) with no command here, or its program missing, it is
+    /// settled; (e) a clean skipped by the paths settles it for a
+    /// supervisor with a command.
+    #[test]
+    fn another_supervisors_clean_with_no_command_settles_a_held_run_by_its_paths_mark() {
+        let (main, head) = (sha('a'), sha('b'));
+        let clean = |skipped_by_paths: bool| RunEvent {
+            id: crate::domain::EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: LANDING_RECHECK_CLEAN.into(),
+            payload: recheck::clean_payload(None, &main, &head, None, skipped_by_paths),
+            created_at: String::new(),
+            actor: None,
+        };
+        let config = |command: Option<&str>, paths: &[&str]| RecheckConfig {
+            command: command.map(str::to_owned),
+            paths: paths.iter().map(|p| (*p).to_owned()).collect(),
+        };
+        // What a recheck of the held run does: nothing (settled), the
+        // command, or a clean skipped by the paths (`git merge-tree` is
+        // clean here).
+        let checks = |event: &RunEvent, env_missing: bool, config: RecheckConfig| {
+            let config = recheck_config(env_missing, || Ok(config)).unwrap();
+            let settled = recheck::judged_against(
+                std::slice::from_ref(event),
+                main.as_str(),
+                head.as_str(),
+                config.command.is_some(),
+            );
+            let left = left_to_check(vec![(target("r1", 'b', true), settled)], CheckedBy::Other);
+            if left.is_empty() {
+                return "settled";
+            }
+            match config.command {
+                None => "merge only",
+                Some(_) if recheck::runs_command(&config.paths, &["src/lib.rs".to_owned()]) => {
+                    "command"
+                }
+                Some(_) => "skipped by paths",
+            }
+        };
+        let unmarked = clean(false);
+        assert_eq!(
+            checks(&unmarked, false, config(Some("make"), &[])),
+            "command"
+        );
+        assert_eq!(
+            checks(&unmarked, false, config(Some("make"), &["src/**"])),
+            "command"
+        );
+        assert_eq!(
+            checks(&unmarked, false, config(Some("make"), &["docs/**"])),
+            "skipped by paths"
+        );
+        assert_eq!(checks(&unmarked, false, config(None, &[])), "settled");
+        assert_eq!(
+            checks(&unmarked, true, config(Some("make"), &[])),
+            "settled"
+        );
+        let by_paths = clean(true);
+        assert_eq!(
+            by_paths.payload["command_skipped"],
+            recheck::SKIPPED_BY_PATHS
+        );
+        assert_eq!(
+            checks(&by_paths, false, config(Some("make"), &[])),
+            "settled"
+        );
+        assert_eq!(
+            checks(&by_paths, false, config(Some("make"), &["src/**"])),
+            "settled"
+        );
+    }
+
+    /// The config is not read when [run.env] cannot find the command's
+    /// program: the recheck has no command then.
+    #[test]
+    fn a_missing_program_has_no_command_and_reads_no_config() {
+        let set = RecheckConfig {
+            command: Some("make".to_owned()),
+            paths: vec!["src/**".to_owned()],
+        };
+        assert_eq!(
+            recheck_config(true, || unreachable!("the config is read")).unwrap(),
+            RecheckConfig::default()
+        );
+        assert_eq!(recheck_config(false, || Ok(set.clone())).unwrap(), set);
     }
 
     /// `landing_recheck_finished` goes on the run whose landing moved main,
