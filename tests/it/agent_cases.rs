@@ -11,7 +11,9 @@
 
 use crate::common;
 use crate::plan_review::{Fixture, fixture, git, options};
-use crate::runtime_support::agent_eval::{EvalAgent, commit_agents, events, supervise, violation};
+use crate::runtime_support::agent_eval::{
+    DEFINITION, EvalAgent, commit_agents, events, supervise, violation,
+};
 use crate::runtime_support::{git_out, orphan};
 
 use dagq::domain::EventKind;
@@ -641,4 +643,26 @@ fn the_watch_records_when_an_agent_is_due_and_asks_for_nothing() {
         events(&fx.db, EventKind::AgentCasesRequested),
         Vec::<Value>::new()
     );
+}
+
+/// The watch judges a score against an agent's `AGENT.md` as the reads it
+/// takes ([`dagq::application::RepositoryReads`]) find it at the landing
+/// branch's head: the committed text, not an edit of the checkout, and
+/// none for an agent the head has no definition of.
+#[test]
+fn the_watchs_reads_take_an_agents_definition_from_the_landing_heads_tree() {
+    let fx = fixture();
+    commit_agents(&fx.repo);
+    fs::write(fx.repo.join(".dagq/agents/demo/AGENT.md"), "edited\n").unwrap();
+    let git = dagq::infrastructure::adapters::GitRepository::inspect(&fx.repo).unwrap();
+    let reads: &dyn dagq::application::RepositoryReads = &git;
+    let head = reads.main_head().unwrap();
+    assert_eq!(head.as_str(), git_out(&fx.repo, &["rev-parse", "main"]));
+    let path = dagq::domain::review_subagents::definition_path("demo");
+    assert_eq!(
+        reads.file_in(head.as_str(), &path).unwrap().as_deref(),
+        Some(DEFINITION)
+    );
+    let absent = dagq::domain::review_subagents::definition_path("gone");
+    assert_eq!(reads.file_in(head.as_str(), &absent).unwrap(), None);
 }

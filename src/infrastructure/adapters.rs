@@ -2982,9 +2982,6 @@ impl Repository for GitRepository {
     fn is_dagq_source(&self) -> bool {
         GitRepository::is_dagq_source(self)
     }
-    fn file_in(&self, commit: &str, path: &str) -> Result<Option<String>> {
-        GitRepository::file_in(self, commit, path)
-    }
     fn changed_hunks(
         &self,
         from: &str,
@@ -3203,6 +3200,9 @@ impl Repository for GitRepository {
 }
 
 impl crate::application::RepositoryReads for GitRepository {
+    fn file_in(&self, commit: &str, path: &str) -> Result<Option<String>> {
+        GitRepository::file_in(self, commit, path)
+    }
     fn landing_branch(&self) -> Result<LandingBranch> {
         GitRepository::landing_branch(self)
     }

@@ -19,7 +19,8 @@
 //!   why and dismisses it, never asking to run it again.
 //!
 //! Apart from them, a hold-out or production round on the landing branch's
-//! definition that ends under the threshold is a finding of
+//! definition (its digest that of the `AGENT.md` there now) that ends
+//! under the threshold is a finding of
 //! [`SCORE_FINDING_KIND`] ([`below_finding`]), whoever asked for it.
 //! Everything here is without side effects; the supervisor reads the
 //! events and the landing branch's tree and records what it returns.
@@ -403,6 +404,8 @@ mod restored {
         pub(super) outcome: Option<String>,
         #[serde(default, deserialize_with = "typed")]
         pub(super) below: Option<Vec<Below>>,
+        #[serde(default, deserialize_with = "typed")]
+        pub(super) definition_digest: Option<String>,
     }
 }
 
@@ -534,21 +537,55 @@ pub fn refused_finding(round: &Round, refused: Option<i64>) -> Option<WatchFindi
     })
 }
 
+/// The agent's definition on the landing branch's head, as the score
+/// finding compares a round with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Adopted<'a> {
+    /// The digest ([`super::round::definition_digest`]) of its `AGENT.md`.
+    Digest(&'a str),
+    /// The landing branch has no `AGENT.md` of the agent: no definition is
+    /// adopted.
+    Absent,
+    /// Its `AGENT.md` could not be read, and why.
+    Unread(&'a str),
+}
+
 /// The score finding of `round`: a hold-out or production round, not a
 /// run's dev before its landing, on the landing branch's definition (none
-/// read from another commit), that ran every run and has a value under its threshold,
-/// with its failed cases' ids and reasons. `finished` is its
-/// `agent_eval_finished` event.
-pub fn below_finding(round: &Round, finished: Option<i64>) -> Option<WatchFinding> {
-    let scores = round.finished.as_ref()?;
+/// read from another commit), that ran every run and has a value under its
+/// threshold, with its failed cases' ids and reasons. Only a round whose
+/// `definition_digest` is `adopted`'s now is one: a round of a definition
+/// replaced since, or of none adopted, is none, and one whose definition
+/// on the landing branch could not be read is not judged, with why (the
+/// error). `finished` is its `agent_eval_finished` event.
+pub fn below_finding(
+    round: &Round,
+    finished: Option<i64>,
+    adopted: Adopted<'_>,
+) -> Result<Option<WatchFinding>, String> {
+    let Some(scores) = round.finished.as_ref() else {
+        return Ok(None);
+    };
     let read: restored::Finished = restore_payload(scores);
-    let below = read.below.filter(|below| !below.is_empty())?;
+    let Some(below) = read.below.filter(|below| !below.is_empty()) else {
+        return Ok(None);
+    };
     if !held_out(round.request.split)
         || round.request.before_landing
         || round.request.definition_commit.is_some()
         || read.outcome.as_deref() != Some("complete")
     {
-        return None;
+        return Ok(None);
+    }
+    match adopted {
+        Adopted::Digest(digest) if read.definition_digest.as_deref() == Some(digest) => {}
+        Adopted::Digest(_) | Adopted::Absent => return Ok(None),
+        Adopted::Unread(why) => {
+            return Err(format!(
+                "eval {} of {} is not judged: its definition on the landing branch could not be read: {why}",
+                round.id, round.request.agent
+            ));
+        }
     }
     let agent = &round.request.agent;
     let failed: Vec<Value> = scores["failed_cases"]
@@ -565,7 +602,7 @@ pub fn below_finding(round: &Round, finished: Option<i64>) -> Option<WatchFindin
         (Split::Production, Some(set)) => format!("production set {set}"),
         (split, _) => split.as_str().to_owned(),
     };
-    Some(WatchFinding {
+    Ok(Some(WatchFinding {
         kind: SCORE_FINDING_KIND,
         subject: format!("{agent}/eval {}", round.id),
         summary: format!(
@@ -593,7 +630,7 @@ pub fn below_finding(round: &Round, finished: Option<i64>) -> Option<WatchFindin
             round.id
         ),
         evidence: finished,
-    })
+    }))
 }
 
 #[cfg(test)]
@@ -603,6 +640,9 @@ mod tests {
     use crate::domain::agent_eval::record::Request;
 
     const NOW: i64 = 1_790_000_000_000;
+
+    /// The landing branch's definition the score finding's rounds ran.
+    const ADOPTED: Adopted<'static> = Adopted::Digest("dd");
 
     fn config() -> WatchConfig {
         WatchConfig {
@@ -1006,7 +1046,7 @@ mod tests {
         ] {
             let mut ended = round(40, request(split, set, by));
             ended.finished = Some(finished.clone());
-            let finding = below_finding(&ended, Some(41)).unwrap();
+            let finding = below_finding(&ended, Some(41), ADOPTED).unwrap().unwrap();
             assert_eq!(finding.kind, SCORE_FINDING_KIND);
             assert_eq!(finding.subject, "rules/eval 40");
             assert_eq!(finding.detail["failed_cases"][0]["id"], "h-3");
@@ -1023,21 +1063,78 @@ mod tests {
         }
         let mut dev = round(40, request(Split::Dev, None, "worker"));
         dev.finished = Some(finished.clone());
-        assert!(below_finding(&dev, None).is_none());
+        assert_eq!(below_finding(&dev, None, ADOPTED), Ok(None));
         let mut before_landing = round(40, request(Split::Holdout, None, "supervisor"));
         before_landing.request.before_landing = true;
         before_landing.finished = Some(finished.clone());
-        assert!(below_finding(&before_landing, None).is_none());
+        assert_eq!(below_finding(&before_landing, None, ADOPTED), Ok(None));
         let mut runs_head = round(40, request(Split::Holdout, None, "user"));
         runs_head.request.definition_commit = Some("c0ffee".to_owned());
         runs_head.finished = Some(finished.clone());
-        assert!(below_finding(&runs_head, None).is_none());
+        assert_eq!(below_finding(&runs_head, None, ADOPTED), Ok(None));
         let mut incomplete = round(40, request(Split::Holdout, None, "user"));
         incomplete.finished = Some(json!({"outcome": "incomplete", "below": finished["below"]}));
-        assert!(below_finding(&incomplete, None).is_none());
+        assert_eq!(below_finding(&incomplete, None, ADOPTED), Ok(None));
         let mut passed = round(40, request(Split::Holdout, None, "user"));
         passed.finished = Some(json!({"outcome": "complete", "below": []}));
-        assert!(below_finding(&passed, None).is_none());
-        assert!(below_finding(&round(40, request(Split::Holdout, None, "user")), None).is_none());
+        assert_eq!(below_finding(&passed, None, ADOPTED), Ok(None));
+        assert_eq!(
+            below_finding(
+                &round(40, request(Split::Holdout, None, "user")),
+                None,
+                ADOPTED
+            ),
+            Ok(None)
+        );
+    }
+
+    /// The finished round of [`ADOPTED`]'s definition under the threshold.
+    fn below_round() -> Round {
+        let mut ended = round(40, request(Split::Holdout, None, "user"));
+        ended.finished = Some(json!({
+            "outcome": "complete",
+            "below": [{"metric": "judgment_recall", "value": 0.67}],
+            "failed_cases": [{"id": "h-3", "reasons": [["MIG-2: no down"]]}],
+            "definition_digest": "dd",
+        }));
+        ended
+    }
+
+    /// A round under the threshold is a finding only while its definition
+    /// is the landing branch's now: one of a definition replaced since, or
+    /// of an agent the landing branch has no definition of, is none.
+    #[test]
+    fn a_round_of_a_replaced_definition_is_no_finding() {
+        let ended = below_round();
+        let finding = below_finding(&ended, Some(41), ADOPTED).unwrap().unwrap();
+        assert_eq!(finding.detail["failed_cases"][0]["id"], "h-3");
+        assert_eq!(
+            finding.detail["failed_cases"][0]["reasons"][0][0],
+            "MIG-2: no down"
+        );
+        assert_eq!(
+            below_finding(&ended, Some(41), Adopted::Digest("ee")),
+            Ok(None)
+        );
+        assert_eq!(below_finding(&ended, Some(41), Adopted::Absent), Ok(None));
+        let mut undigested = below_round();
+        undigested.finished.as_mut().unwrap()["definition_digest"] = Value::Null;
+        assert_eq!(below_finding(&undigested, Some(41), ADOPTED), Ok(None));
+    }
+
+    /// A round under the threshold whose agent's definition on the landing
+    /// branch could not be read is no finding, and says why; one that
+    /// would be no finding anyway says nothing.
+    #[test]
+    fn a_round_whose_definition_could_not_be_read_is_not_judged_with_why() {
+        let why = below_finding(&below_round(), Some(41), Adopted::Unread("bad blob")).unwrap_err();
+        assert!(why.contains("eval 40 of rules"), "{why}");
+        assert!(why.contains("bad blob"), "{why}");
+        let mut passed = below_round();
+        passed.finished.as_mut().unwrap()["below"] = json!([]);
+        assert_eq!(
+            below_finding(&passed, None, Adopted::Unread("bad blob")),
+            Ok(None)
+        );
     }
 }

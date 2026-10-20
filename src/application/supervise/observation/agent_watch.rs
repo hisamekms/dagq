@@ -6,20 +6,24 @@
 //! the steps of each agent's watch and the scores under the threshold as
 //! findings on the queue (each once, by its subject, so of two
 //! supervisors one records it), and an interval with no new review as
-//! `agent_eval_watch_skipped`. It asks for no set and no round: a runtime
+//! `agent_eval_watch_skipped`. A score is judged against each agent's
+//! `AGENT.md` on the landing branch's head; one whose definition there
+//! could not be read is logged with why and judged again at the next
+//! check. It asks for no set and no round: a runtime
 //! planner the findings open does. It takes no run slot and uses no LLM; a
 //! failure is logged and looked at again at the next check.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::application::RepositoryReads;
 use crate::domain::agent_eval::production::{self, Period, ReviewEvent};
 use crate::domain::agent_eval::record;
-use crate::domain::agent_eval::round::EvalConfig;
+use crate::domain::agent_eval::round::{EvalConfig, definition_digest};
 use crate::domain::agent_eval::watch::{
-    self, SCORE_FINDING_KIND, WATCH_FINDING_KIND, Watch, WatchFinding, WatchRecord,
+    self, Adopted, SCORE_FINDING_KIND, WATCH_FINDING_KIND, Watch, WatchFinding, WatchRecord,
 };
+use crate::domain::review_subagents::definition_path;
 use crate::domain::{FindingQuery, FindingTarget, FindingView, NewFinding, RunEvent};
 
 /// How often the watch looks when the supervisor's CLI runs it.
@@ -38,6 +42,9 @@ pub(in crate::application::supervise) struct Looked {
     pub(in crate::application::supervise) findings: Vec<String>,
     /// The agents whose interval passed with no new review.
     pub(in crate::application::supervise) skipped: Vec<String>,
+    /// Why rounds under the threshold were not judged: their agent's
+    /// definition on the landing branch could not be read.
+    pub(in crate::application::supervise) unjudged: Vec<String>,
 }
 
 impl ObservationState {
@@ -77,6 +84,9 @@ impl ObservationState {
                     info!(
                         "agents' watch of {agent}: no new production review since its last watch"
                     );
+                }
+                for why in &looked.unjudged {
+                    warn!("agents' watch: {why}");
                 }
             }
             Err(error) => {
@@ -151,6 +161,9 @@ fn look(
     // What became of the sets and rounds a planner asked for, and the
     // scores under the threshold.
     let mut stepped: BTreeSet<String> = BTreeSet::new();
+    let mut definitions: BTreeMap<String, std::result::Result<Option<String>, String>> =
+        BTreeMap::new();
+    let mut unread: BTreeSet<String> = BTreeSet::new();
     for set in &sets {
         let built = watch::set_event(&events, EventKind::AgentCasesBuilt, set.id);
         if let Some(found) = watch::set_finding(set, &rounds, built)
@@ -167,8 +180,26 @@ fn look(
             stepped.insert(round.request.agent.clone());
         }
         let finished = watch::eval_event(&events, EventKind::AgentEvalFinished, round.id);
-        if let Some(found) = watch::below_finding(round, finished) {
-            record(found, &mut looked)?;
+        let agent = &round.request.agent;
+        let adopted = definitions.entry(agent.clone()).or_insert_with(|| {
+            repository
+                .file_in(commit.as_str(), &definition_path(agent))
+                .map(|text| text.as_deref().map(definition_digest))
+                .map_err(|error| format!("{error:#}"))
+        });
+        let adopted = match adopted {
+            Ok(Some(digest)) => Adopted::Digest(digest),
+            Ok(None) => Adopted::Absent,
+            Err(why) => Adopted::Unread(why),
+        };
+        match watch::below_finding(round, finished, adopted) {
+            Ok(Some(found)) => {
+                record(found, &mut looked)?;
+            }
+            Ok(None) => {}
+            // One reason per agent: its other rounds wait on the same read.
+            Err(why) if unread.insert(agent.clone()) => looked.unjudged.push(why),
+            Err(_) => {}
         }
     }
     // Each agent's watch, from where its last period ended.

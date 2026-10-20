@@ -1731,6 +1731,11 @@ pub trait RepositoryReads {
         let _ = (head, after, since);
         anyhow::bail!("this repository keeps no history")
     }
+    /// Read a UTF-8 blob in a commit's tree (never a checkout's file);
+    /// `None` if the path is absent.
+    fn file_in(&self, _commit: &str, _path: &str) -> Result<Option<String>> {
+        anyhow::bail!("this repository cannot read committed files")
+    }
     /// Every file path of `commit`'s tree.
     fn tree_paths(&self, commit: &str) -> Result<Vec<String>> {
         let _ = commit;
@@ -1764,10 +1769,6 @@ pub trait Repository: RepositoryReads {
     /// on every call; what only dagq's own development needs runs only
     /// there.
     fn is_dagq_source(&self) -> bool;
-    /// Read a UTF-8 blob in a commit's tree; `None` if the path is absent.
-    fn file_in(&self, _commit: &str, _path: &str) -> Result<Option<String>> {
-        anyhow::bail!("this repository cannot read committed files")
-    }
 
     /// The blob ID of each file at or under `paths` (files, or directories
     /// and everything under them) in `commit`'s tree, by its path; a path

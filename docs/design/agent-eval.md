@@ -204,6 +204,8 @@ landing branchの定義を新しい本番のreviewで測り直す時期をsuperv
   `due`は期間と依頼する`agent cases`を、`holdout`はplannerが依頼した集合が作られて周が無いことと依頼する`agent eval --set`を、`refused`はplannerの集合の周が始まらなかった理由を持つ。
   `refused`はplannerが理由を書いてdismissする（再実行はplannerの権限に無い）。
 - 成績のfinding: hold-outかproductionの周（着地の前のdevでなく、定義はlanding branchのもの）が全ての実行を終えて閾値を下回れば、依頼者に依らず種類`agent_eval_below_threshold`のfindingを記録し、成績・下回った値・失敗したケースのidとagentの理由を持たせる。
+  findingにするのは周の定義のdigestがlanding branchのheadの`.dagq/agents/<name>/AGENT.md`の今のdigestと等しい周だけで、定義が変わった後の周や定義の無いagentの周は記録しない（採用していない定義の改善をplannerに頼まない）。
+  `AGENT.md`が読めなければfindingを作らず、理由をsupervisorのlogに残して次の見張りで判定し直す。
   runtimeのplannerが定義の改善のtaskにし、ラベルの食い違いは集合の`disputed`と同じく人に回る。
 
 ## 道具の宣言
