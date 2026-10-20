@@ -12,6 +12,15 @@
 //! Exiting that way skips every `Drop`, so what a guard would clean up
 //! outside the process (a supervisor the e2e tests started) is registered with [`on_timeout`] too: the monitor runs
 //! those hooks, each within its own limit, before it exits (task 440).
+//!
+//! A binary may opt into deadlines of its own with [`deadlines`] (the e2e's
+//! do): a deadline of the whole process from that call, every test's
+//! ([`test_within`]) ending before it, every wait and polling loop
+//! ([`deadline`]) of a test ending before the test's, and an overall limit
+//! of the cleanup, past which the hooks not run yet are left and named.
+//! Without it (`tests/it`) a wait has its own limit only and the cleanup
+//! runs every hook within its own. What is decided, the deadlines and the
+//! cut of the cleanup, is [`dagq::domain::e2e_deadline`]'s.
 #![allow(dead_code)]
 
 pub mod actor;
@@ -27,12 +36,14 @@ pub mod toolchain;
 
 pub use actor::WithoutActor;
 
+use dagq::domain::e2e_deadline::{self, HookOutcome};
 use std::{
+    cell::Cell,
     collections::HashMap,
     io::Write,
     process::{self, Command, ExitStatus, Output},
     sync::{
-        LazyLock, Mutex, MutexGuard, PoisonError,
+        LazyLock, Mutex, MutexGuard, OnceLock, PoisonError,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
@@ -55,7 +66,50 @@ struct Open {
     test: String,
     what: String,
     started: Instant,
-    limit: Duration,
+    /// Its own limit, as asked for.
+    own: Duration,
+    /// When it is late, since [`ORIGIN`]: `own` from `started`, or before
+    /// the deadline of what encloses it.
+    deadline: Duration,
+}
+
+impl Open {
+    /// How long it may take: its own limit, or less when cut to end before
+    /// what encloses it.
+    fn limit(&self) -> Duration {
+        self.deadline.saturating_sub(since_origin(self.started))
+    }
+}
+
+/// What the deadlines are measured from.
+static ORIGIN: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+fn since_origin(at: Instant) -> Duration {
+    at.saturating_duration_since(*ORIGIN)
+}
+
+/// The deadlines a binary opted into with [`deadlines`].
+struct Deadlines {
+    /// The process's, since [`ORIGIN`].
+    run_end: Duration,
+    /// The overall limit of the cleanup past a timeout.
+    cleanup: Duration,
+}
+
+static DEADLINES: OnceLock<Deadlines> = OnceLock::new();
+
+thread_local! {
+    /// The deadline of the test the thread runs, since [`ORIGIN`], while
+    /// its [`TestWait`] is held.
+    static TEST_END: Cell<Option<Duration>> = const { Cell::new(None) };
+}
+
+/// The deadline of what encloses a wait the calling thread opens: its
+/// test's, or else the process's, when the binary opted in.
+fn enclosing() -> Option<Duration> {
+    TEST_END
+        .get()
+        .or_else(|| DEADLINES.get().map(|deadlines| deadlines.run_end))
 }
 
 static OPEN: LazyLock<Mutex<HashMap<u64, Open>>> = LazyLock::new(|| {
@@ -114,11 +168,19 @@ pub fn on_timeout(
     Cleanup(id)
 }
 
-/// Run every registered hook, newest first, each within its limit.
+/// Run every registered hook, newest first, each within its limit, and
+/// within the overall limit of the cleanup when the binary opted into one
+/// ([`deadlines`]): past it the hooks not run yet are left, and what ended,
+/// what was left running and what was not run are named.
 fn run_hooks() {
+    let started = Instant::now();
+    let mut cleanup = e2e_deadline::Cleanup::new(DEADLINES.get().map(|d| d.cleanup));
     let mut pending: Vec<_> = hooks().drain().collect();
     pending.sort_by_key(|(id, _)| std::cmp::Reverse(*id));
     for (_, hook) in pending {
+        let Some(wait) = cleanup.wait_for(&hook.what, hook.limit, started.elapsed()) else {
+            continue;
+        };
         report(&format!("cleaning up before the exit: {}\n", hook.what));
         let (done, finished) = mpsc::channel();
         let run = hook.run;
@@ -129,16 +191,17 @@ fn run_hooks() {
                 let _ = done.send(());
             });
         let outcome = match spawned {
-            Err(error) => format!("could not start: {error}"),
-            Ok(_) => match finished.recv_timeout(hook.limit) {
-                Ok(()) => "done".to_owned(),
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    format!("did not finish within {:?}", hook.limit)
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => "panicked".to_owned(),
+            Err(error) => HookOutcome::CouldNotStart(error.to_string()),
+            Ok(_) => match finished.recv_timeout(wait) {
+                Ok(()) => HookOutcome::Done,
+                Err(mpsc::RecvTimeoutError::Timeout) => HookOutcome::DidNotFinish(wait),
+                Err(mpsc::RecvTimeoutError::Disconnected) => HookOutcome::Panicked,
             },
         };
-        report(&format!("  cleanup {} {outcome}\n", hook.what));
+        report(&cleanup.ended(&hook.what, hook.limit, outcome));
+    }
+    if let Some(summary) = cleanup.summary() {
+        report(&summary);
     }
 }
 
@@ -171,28 +234,132 @@ impl Drop for Waiting {
 }
 
 /// Time what the calling thread waits for from now, `what` naming the
-/// condition ("the supervisor thread to return").
+/// condition ("the supervisor thread to return"): within `limit`, cut to
+/// end before its test's or the process's deadline when the binary opted
+/// into [`deadlines`].
 pub fn within(limit: Duration, what: impl Into<String>) -> Waiting {
-    let id = NEXT.fetch_add(1, Ordering::Relaxed);
+    LazyLock::force(&ORIGIN);
+    let started = Instant::now();
+    let deadline = e2e_deadline::nested_deadline(
+        since_origin(started),
+        limit,
+        enclosing(),
+        e2e_deadline::WAIT_MARGIN,
+    );
     let test = thread::current()
         .name()
         .unwrap_or("(on a thread the test started)")
         .to_owned();
+    Waiting(open_wait(test, what.into(), started, limit, deadline))
+}
+
+fn open_wait(
+    test: String,
+    what: String,
+    started: Instant,
+    own: Duration,
+    deadline: Duration,
+) -> u64 {
+    let id = NEXT.fetch_add(1, Ordering::Relaxed);
     open().insert(
         id,
         Open {
             test,
-            what: what.into(),
-            started: Instant::now(),
-            limit,
+            what,
+            started,
+            own,
+            deadline,
         },
     );
-    Waiting(id)
+    id
 }
 
 /// The whole test the calling thread runs, for a fixture to hold.
 pub fn test() -> Waiting {
     within(TEST_LIMIT, "the test to finish")
+}
+
+/// Opt this test binary into the deadlines of the e2e (the first call sets
+/// them; a later one changes nothing): the process's, `run_limit` from now,
+/// past which it reports every open wait, cleans up and exits like a wait
+/// past its limit; and `cleanup`, the overall limit of that cleanup.
+pub fn deadlines(run_limit: Duration, cleanup: Duration) {
+    LazyLock::force(&ORIGIN);
+    let started = Instant::now();
+    let mut first = false;
+    let set = DEADLINES.get_or_init(|| {
+        first = true;
+        Deadlines {
+            run_end: since_origin(started) + run_limit,
+            cleanup,
+        }
+    });
+    if first {
+        // Never closed: it ends with the process.
+        open_wait(
+            "(the e2e test binary)".to_owned(),
+            "the e2e process to end by its deadline".to_owned(),
+            started,
+            run_limit,
+            set.run_end,
+        );
+    }
+}
+
+/// [`test`] within `limit` for a binary that opted into [`deadlines`]:
+/// the test ends before the process's deadline however late it started,
+/// and what it waits for on this thread ([`within`], [`deadline`]) ends
+/// before its own deadline, so a wait that stops is named first.
+pub fn test_within(limit: Duration) -> TestWait {
+    let waiting = within(limit, "the test to finish");
+    let end = open()[&waiting.0].deadline;
+    let enclosing = TEST_END.replace(Some(end));
+    TestWait(waiting, enclosing)
+}
+
+/// The whole test [`test_within`] timed; dropping it closes it.
+#[must_use = "the test is timed only while this is held"]
+pub struct TestWait(Waiting, Option<Duration>);
+impl Drop for TestWait {
+    fn drop(&mut self) {
+        TEST_END.set(self.1);
+    }
+}
+
+/// `thread::spawn` for a thread of the test the calling thread runs: what
+/// it waits for ([`within`], [`deadline`]) ends before that test's
+/// deadline, as on the test's own thread.
+pub fn spawn_in_test<T: Send + 'static>(
+    run: impl FnOnce() -> T + Send + 'static,
+) -> thread::JoinHandle<T> {
+    let end = TEST_END.get();
+    thread::spawn(move || {
+        TEST_END.set(end);
+        run()
+    })
+}
+
+/// The deadline of a polling loop of the calling thread that may go on for
+/// `limit` from now: [`deadline_after`] now.
+pub fn deadline(limit: Duration) -> Instant {
+    deadline_after(Instant::now(), limit)
+}
+
+/// The deadline of a polling loop that may go on for `limit` from `start`:
+/// cut to end before its test's or the process's deadline when the binary
+/// opted into [`deadlines`], with time left for the loop's own failure to
+/// be the one named. On a thread the test started, only one started with
+/// [`spawn_in_test`] (or a deadline taken on the test's thread) ends before
+/// the test's.
+pub fn deadline_after(start: Instant, limit: Duration) -> Instant {
+    LazyLock::force(&ORIGIN);
+    let end = e2e_deadline::nested_deadline(
+        since_origin(start),
+        limit,
+        enclosing(),
+        e2e_deadline::LOOP_MARGIN,
+    );
+    *ORIGIN + end
 }
 
 /// `Command::output` and `Command::status` timed with [`STEP_LIMIT`]: the
@@ -224,7 +391,8 @@ fn exits(command: &Command) -> String {
 fn monitor() {
     loop {
         thread::sleep(Duration::from_millis(250));
-        let late = late_report(&open());
+        let now = since_origin(Instant::now());
+        let late = late_report(&open(), now);
         let Some(late) = late else {
             continue;
         };
@@ -237,19 +405,27 @@ fn monitor() {
     }
 }
 
-/// The report of a wait past its limit, and of every other open wait, if
-/// one is past its limit.
-fn late_report(open: &HashMap<u64, Open>) -> Option<String> {
-    let late = open
-        .values()
-        .find(|wait| wait.started.elapsed() >= wait.limit)?;
+/// The report of a wait past its deadline at `now`, the first to come
+/// when more are, and of every other open wait, if one is past it.
+fn late_report(open: &HashMap<u64, Open>, now: Duration) -> Option<String> {
+    let id = e2e_deadline::first_late(open.iter().map(|(id, wait)| (*id, wait.deadline)), now)?;
+    let late = &open[&id];
     let mut report = format!(
         "\ntest {} timed out: {} did not happen within {:?}\n",
-        late.test, late.what, late.limit
+        late.test,
+        late.what,
+        late.limit()
     );
+    if late.limit() < late.own {
+        report += &format!(
+            "  (its own limit {:?} was cut to end before its test's or the process's deadline)\n",
+            late.own
+        );
+    }
     let mut others: Vec<_> = open
-        .values()
-        .filter(|wait| !std::ptr::eq(*wait, late))
+        .iter()
+        .filter(|(other, _)| **other != id)
+        .map(|(_, wait)| wait)
         .collect();
     others.sort_by_key(|wait| wait.started);
     for wait in others {

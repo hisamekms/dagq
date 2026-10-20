@@ -24,7 +24,7 @@ mod stub;
 
 use cleanup::{claim_fixture_dir, sweep_abandoned_fixtures};
 use common::service::OwnedByTest;
-use common::{Bounded, Cleanup, Waiting, WithoutActor};
+use common::{Bounded, Cleanup, TestWait, WithoutActor};
 use dagq::application::ProcessControl;
 use dagq::domain::background_wrapper::BackgroundHandle;
 use dagq::infrastructure::adapters::SystemProcesses;
@@ -53,13 +53,61 @@ const SUPERVISE_TIMEOUT: Duration = common::STEP_LIMIT;
 /// e2e tests running in parallel, other runs) must not hold back the claims
 /// a test waits for.
 const NO_LOAD_HOLD: [&str; 2] = ["--max-load", "0"];
-/// A whole e2e test, which the fixture holds: well above the longest test's
-/// own deadlines (a few supervise passes of [`SUPERVISE_TIMEOUT`] each), so
-/// those fail first with their own message. The waits inside a test are
-/// timed with [`common::STEP_LIMIT`].
-const TEST_LIMIT: Duration = Duration::from_secs(1800);
+/// The e2e gates stop the whole `cargo test --locked --test e2e --
+/// --ignored` at their timeout (`--e2e-timeout`, 1800 s by default, from
+/// the spawn of cargo, so with the compile and the start of the harness,
+/// `C`), and leave no harness summary to say what stopped. So that an e2e
+/// that stops fails by the name of what it waited for, with its cleanup,
+/// before that kill, the binary keeps deadlines of its own
+/// ([`common::deadlines`], decided in [`dagq::domain::e2e_deadline`]):
+///
+/// - [`RUN_LIMIT`] from the first fixture's start, for the whole process:
+///   past it the monitor names every open wait, cleans up and exits 101.
+///   Every test's deadline, and so every wait's, ends before it, however
+///   late the test started (`RUST_TEST_THREADS` queues them).
+/// - [`TEST_LIMIT`] for one test, ended before the process's deadline.
+/// - every wait (`within`, [`common::STEP_LIMIT`]) and polling loop
+///   ([`common::deadline`]: [`SUPERVISE_TIMEOUT`], [`WAIT_LIMIT`]) of a test
+///   ends before its test's deadline: a wait whose own limit would outlive
+///   it is cut. A test that waits several of these in a row (up to 10 of 300
+///   s, by their own limits) so still fails by the name of the one that
+///   stopped, not as "the test to finish".
+/// - [`CLEANUP_TOTAL`], the overall limit of the cleanup past a timeout:
+///   the hooks run newest first, each within its own limit cut to what is
+///   left, and past it the rest are left (the gate's SIGKILL of the e2e's
+///   process group and its cleanup of the e2e's `TMPDIR` stop what they
+///   would have), named as not run.
+///
+/// Guaranteed by these (the code bounds them):
+/// (a) a wait of a test ends before the test's deadline, at most
+///   [`TEST_LIMIT`] after its start, and that at or before the process's
+///   ([`TEST_LIMIT`] <= [`RUN_LIMIT`]), so the inner wait is named first;
+/// (b) once its first fixture started, the process ends by `RUN_LIMIT + R +
+///   CLEANUP_TOTAL` (`R`: the monitor's 250 ms poll and its report).
+///
+/// Budgeted from measurements (empirical; nothing bounds a later compile
+/// or test): `C_budget` 240 s for `C`, above the most `secs - finished_in`
+/// of the gates' logs so far (197 s, p90 86 s;
+/// docs/plans/broker-e2e-image-cache/), and 5 s for `R`, so that
+/// `C_budget + RUN_LIMIT + R + CLEANUP_TOTAL` = 240 + 1320 + 5 + 120 = 1685
+/// s leaves 115 s to 1800; (c) [`RUN_LIMIT`] well above the longest whole
+/// sound run (`finished_in`) so far, 404 s with no broker e2e (the broker
+/// e2e, since removed, took it to 1280 s), so it does not cut a sound run.
+///
+/// While `C <= C_budget` an e2e that stops ends with exit 101 and the name
+/// of what stopped before the gate's kill. Past it nothing is promised: the
+/// gate stops it at its timeout and records a timeout, as before, unless it
+/// exited 101 first. Either way libtest prints no summary, so the gate's
+/// records do not tell whether `C` went past its budget.
+const RUN_LIMIT: Duration = Duration::from_secs(1320);
+/// A whole e2e test, which the fixture holds ([`RUN_LIMIT`]'s comment): at
+/// most [`RUN_LIMIT`], and well above a whole sound run so far.
+const TEST_LIMIT: Duration = Duration::from_secs(1200);
+/// The overall limit of the timeout cleanup ([`RUN_LIMIT`]'s comment):
+/// each hook takes a `kill` or a wrapper's stop of a few seconds.
+const CLEANUP_TOTAL: Duration = Duration::from_secs(120);
 /// How long the timeout cleanup of a process or a supervisor the test
-/// started may take before the test binary exits without it.
+/// started may take before the test binary goes on without it.
 const CLEANUP_LIMIT: Duration = Duration::from_secs(60);
 /// How long a test polls for a state it waits to reach (a status, a
 /// planner's state, a process's exit, a landing):
@@ -119,7 +167,7 @@ fn dagq(env: &Env, args: &[&str]) -> Value {
 /// judged on the first look. Past the deadline the last status is returned,
 /// for the caller's assertions to show.
 fn status_when(env: &Env, condition: impl Fn(&Value) -> bool) -> Value {
-    let deadline = Instant::now() + WAIT_LIMIT;
+    let deadline = common::deadline(WAIT_LIMIT);
     loop {
         let status = dagq(env, &["status"]);
         if condition(&status) || Instant::now() >= deadline {
@@ -262,7 +310,7 @@ struct Fixture {
     /// Held for the fixture's lifetime, and dropped after `_dir` is gone;
     /// see [`OWNER_FILE`].
     _owner: fs::File,
-    _test: Waiting,
+    _test: TestWait,
 }
 
 /// A fixture whose repository's default branch is `main`.
@@ -274,7 +322,8 @@ fn fixture() -> Fixture {
 /// commit also has `files` (path, content) besides `seed.txt` and
 /// `dagq.toml`.
 fn fixture_on(branch: &str, files: &[(&str, &str)]) -> Fixture {
-    let test = common::within(TEST_LIMIT, "the test to finish");
+    common::deadlines(RUN_LIMIT, CLEANUP_TOTAL);
+    let test = common::test_within(TEST_LIMIT);
     let dir = tempfile::tempdir().unwrap();
     let owner = claim_fixture_dir(dir.path());
     let repo = dir.path().join(E2E_REPO_NAME);
@@ -409,11 +458,13 @@ pub(crate) fn wrapper_running(id: &str) -> bool {
 /// Wait until the background wrapper `id` has ended: the runtime has it end
 /// after its session and stops what is left of it (ADR-t1404-1 decision 3).
 pub(crate) fn wait_until_wrapper_gone(id: &str) {
-    let deadline = Instant::now() + WAIT_LIMIT;
+    let started = Instant::now();
+    let deadline = common::deadline_after(started, WAIT_LIMIT);
     while wrapper_running(id) {
         assert!(
             Instant::now() < deadline,
-            "the background wrapper {id} still runs {WAIT_LIMIT:?} after its session ended"
+            "the background wrapper {id} still runs {:?} after its session ended",
+            deadline - started
         );
         thread::sleep(Duration::from_millis(200));
     }
@@ -508,6 +559,7 @@ fn supervise_once(fixture: &Fixture, extra: &[&str], tasks: &[&str]) -> Pass {
     dagq(&fixture.env, &["service", "start"]);
     let _service = ServiceGuard(&fixture.env);
     let started = Instant::now();
+    let deadline = common::deadline_after(started, SUPERVISE_TIMEOUT);
     let mut child = ChildGuard::new(
         Command::new(BIN)
             // A person's supervisor, not the session's running the tests,
@@ -537,12 +589,15 @@ fn supervise_once(fixture: &Fixture, extra: &[&str], tasks: &[&str]) -> Pass {
             child.reaped();
             break status;
         }
-        if started.elapsed() >= SUPERVISE_TIMEOUT {
+        if Instant::now() >= deadline {
             let _ = child.0.kill();
             let _ = child.0.wait();
             child.reaped();
             let stderr = joined(stderr, "the supervisor's stderr reader");
-            panic!("supervise did not finish within {SUPERVISE_TIMEOUT:?}; its stderr:\n{stderr}");
+            panic!(
+                "supervise did not finish within {:?}; its stderr:\n{stderr}",
+                deadline - started
+            );
         }
         for task in tasks {
             if sessions.iter().any(|(t, _)| t == task) {
@@ -965,11 +1020,11 @@ fn a_worker_question_is_answered_as_the_next_turn_and_the_run_lands() {
             data_home: env.data_home.clone(),
         };
         let task_id = task_id.clone();
-        thread::spawn(move || {
-            let started = Instant::now();
+        let deadline = common::deadline(SUPERVISE_TIMEOUT);
+        common::spawn_in_test(move || {
             loop {
                 assert!(
-                    started.elapsed() < SUPERVISE_TIMEOUT,
+                    Instant::now() < deadline,
                     "the worker asked nothing, or its run never waited"
                 );
                 // Its commands write to files: the main thread spawns the
@@ -1375,10 +1430,11 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
     let victim_stderr = reader(victim.0.stderr.take().unwrap());
     let victim_pid = victim.0.id();
     let started = Instant::now();
+    let deadline = common::deadline_after(started, SUPERVISE_TIMEOUT);
     let mut victim_stderr = Some(victim_stderr);
     let run = loop {
         let exited = victim.0.try_wait().unwrap().is_some();
-        if exited || started.elapsed() >= SUPERVISE_TIMEOUT {
+        if exited || Instant::now() >= deadline {
             let _ = victim.0.kill();
             let _ = victim.0.wait();
             victim.reaped();
@@ -1388,7 +1444,8 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
             );
             let runs = dagq(env, &["show", &task_id, "--full"])["runs"].clone();
             panic!(
-                "the worker did not start within {SUPERVISE_TIMEOUT:?} (the supervisor exited: {exited}); runs: {runs}\nsupervisor stderr:\n{log}"
+                "the worker did not start within {:?} (the supervisor exited: {exited}); runs: {runs}\nsupervisor stderr:\n{log}",
+                deadline - started
             );
         }
         let detail = dagq(env, &["show", &task_id, "--full"]);
@@ -1822,14 +1879,17 @@ fn install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
     let stderr = reader(supervisor.0.stderr.take().unwrap());
     let pid = supervisor.0.id();
     let started = Instant::now();
+    let start_deadline = common::deadline_after(started, SUPERVISE_TIMEOUT);
+    let land_deadline = common::deadline_after(started, SUPERVISE_TIMEOUT * 2);
     let run = loop {
         assert!(
             supervisor.0.try_wait().unwrap().is_none(),
             "the supervisor exited before the worker started"
         );
         assert!(
-            started.elapsed() < SUPERVISE_TIMEOUT,
-            "the worker did not start within {SUPERVISE_TIMEOUT:?}"
+            Instant::now() < start_deadline,
+            "the worker did not start within {:?}",
+            start_deadline - started
         );
         let detail = dagq(env, &["show", &task_id, "--full"]);
         if let Some(run) = detail["runs"].as_array().unwrap().last()
@@ -1880,7 +1940,7 @@ fn install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
     fs::write(run_dir.join("go"), "").unwrap();
     let mut stderr = Some(stderr);
     let landed = loop {
-        if started.elapsed() >= SUPERVISE_TIMEOUT * 2 {
+        if Instant::now() >= land_deadline {
             let _ = supervisor.0.kill();
             let log = joined(stderr.take().unwrap(), "the supervisor's stderr reader");
             panic!("the run did not land; supervisor stderr:\n{log}");
@@ -1926,7 +1986,7 @@ fn install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
 
     // SIGINT drains the continued supervisor like any other.
     unsafe { libc::kill(pid as i32, libc::SIGINT) };
-    let deadline = Instant::now() + WAIT_LIMIT;
+    let deadline = common::deadline(WAIT_LIMIT);
     let exit = loop {
         if let Some(exit) = supervisor.0.try_wait().unwrap() {
             supervisor.reaped();
@@ -2019,14 +2079,17 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
             .any(|u| u.kind == EventKind::UpdateInstalled && u.payload["commit"] == sha)
     };
     let started = Instant::now();
+    let start_deadline = common::deadline_after(started, SUPERVISE_TIMEOUT);
+    let land_deadline = common::deadline_after(started, SUPERVISE_TIMEOUT * 2);
     let run = loop {
         assert!(
             supervisor.0.try_wait().unwrap().is_none(),
             "the supervisor exited before the worker started"
         );
         assert!(
-            started.elapsed() < SUPERVISE_TIMEOUT,
-            "the worker did not start within {SUPERVISE_TIMEOUT:?}"
+            Instant::now() < start_deadline,
+            "the worker did not start within {:?}",
+            start_deadline - started
         );
         let detail = dagq(env, &["show", &task_id, "--full"]);
         if let Some(run) = detail["runs"].as_array().unwrap().last()
@@ -2049,7 +2112,7 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
     let landed = git(repo, &["rev-parse", "main"]).trim().to_owned();
     let mut stderr = Some(stderr);
     while !installed(&landed) {
-        if started.elapsed() >= SUPERVISE_TIMEOUT {
+        if Instant::now() >= start_deadline {
             let _ = supervisor.0.kill();
             let log = joined(stderr.take().unwrap(), "the supervisor's stderr reader");
             panic!(
@@ -2075,7 +2138,7 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
     // The worker finishes; the continued supervisor lands its run.
     fs::write(run_dir.join("go"), "").unwrap();
     let detail = loop {
-        if started.elapsed() >= SUPERVISE_TIMEOUT * 2 {
+        if Instant::now() >= land_deadline {
             let _ = supervisor.0.kill();
             let log = joined(stderr.take().unwrap(), "the supervisor's stderr reader");
             panic!("the run did not land; supervisor stderr:\n{log}");
@@ -2108,7 +2171,7 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
     );
 
     unsafe { libc::kill(pid as i32, libc::SIGINT) };
-    let deadline = Instant::now() + WAIT_LIMIT;
+    let deadline = common::deadline(WAIT_LIMIT);
     let exit = loop {
         if let Some(exit) = supervisor.0.try_wait().unwrap() {
             supervisor.reaped();
