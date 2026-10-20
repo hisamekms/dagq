@@ -6,21 +6,23 @@
 //! allowed today. The runtime does not read it; [`super::check`] matches it
 //! against the code.
 //!
-//! For the module references of L1, L2, L3, L6, L8 and L9
-//! ([`super::modules`]):
-//! the shared parts outside the layers each layer may reference, the
-//! modules of `src/compose/` that are not a context module, and the
+//! For the module references of L1, L2, L3, L6, L8, L9, C5 and C8
+//! ([`super::modules`]): the shared parts outside the layers each layer may
+//! reference, the modules of `src/compose/` that are not a context module,
+//! the context of the modules of `src/application/` their path does not
+//! tell, whom each port is public to, the values lent to other contexts,
+//! the other contexts' port modules each port module may name, and the
 //! references that break a rule allowed today.
 //!
-//! One row per line, kept by `#[rustfmt::skip]`: until C5 moves to a Rust
-//! test, `scripts/check-context-boundaries.sh` reads the context of a file
-//! of `src/infrastructure/` from the `store(...)` rows of [`STORES`].
+//! One row per line, kept by `#[rustfmt::skip]`.
 
 use Context::{Execution, Host, Observation, Planning, Shared};
+use Publicity::{Internal, Partial, Public};
+use To::{All, Only};
 
 /// A context of docs/design/architecture.md; [`Context::Shared`] is the
 /// shared parts every context may write.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Context {
     /// 計画管理.
     Planning,
@@ -100,6 +102,8 @@ pub(super) enum Rule {
     L6,
     L8,
     L9,
+    C5,
+    C8,
 }
 
 /// A module of the crate's root outside the layers that `layers` may
@@ -112,9 +116,11 @@ pub(super) struct SharedModule {
     pub(super) reason: &'static str,
 }
 
-/// A module reference allowed today: `reference` is the module the rule
-/// names as [`super::modules::check`] prints it (`crate::view`,
-/// `crate::compose::host` or `crate::compose::*`).
+/// A module reference allowed today: `reference` is what the rule names as
+/// [`super::modules::check`] prints it: a module for L1, L3, L6, L8 and L9
+/// (`crate::view`, `crate::compose::host` or `crate::compose::*`), the
+/// forbidden item for L2 (`std::process`), the port's name for C5 and the
+/// path as written for C8 (`super::execution`).
 #[derive(Debug)]
 pub(super) struct ModuleAllowed {
     pub(super) rule: Rule,
@@ -122,6 +128,150 @@ pub(super) struct ModuleAllowed {
     pub(super) reference: &'static str,
     pub(super) fix: Fix,
     pub(super) reason: &'static str,
+}
+
+/// Whom a port, a method of a partial port or a lent value is public to.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum To {
+    All,
+    /// These contexts; never empty.
+    Only(&'static [Context]),
+}
+
+/// Whom a port is public to (C5).
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Publicity {
+    Public(To),
+    /// Public to no other context.
+    Internal,
+    /// Its [`Method`] rows' methods are public, each to its `to`; the trait
+    /// counts as public, by its name, to every context one of them names,
+    /// and whether a context calls only those is the review's.
+    Partial,
+}
+
+/// The context of a module of `src/application/` its path does not tell:
+/// a file, or a directory ending in `/` for every file under it (the
+/// longest path of these rows and [`STORES`] wins). The path tells it for
+/// `src/application/ports/<context>.rs`,
+/// `src/application/queue_reads/<context>.rs` and
+/// `src/compose/<context>.rs`, which have no row; a file with neither has
+/// no context.
+#[derive(Debug)]
+pub(super) struct ModuleContext {
+    pub(super) path: &'static str,
+    pub(super) context: Context,
+}
+
+/// A port of `src/application/ports/<context>.rs`, owned by that context:
+/// each pub trait of those files (but `mod.rs`) has one row.
+#[derive(Debug)]
+pub(super) struct Port {
+    pub(super) name: &'static str,
+    pub(super) publicity: Publicity,
+}
+
+/// A port defined in the file `path` of `src/application/` outside
+/// `ports/`; `owner` is `None` where the path tells it
+/// (`queue_reads/<context>.rs`). Each pub trait of `src/application/`
+/// outside `ports/` is an [`OuterPort`] or a [`NotPort`].
+#[derive(Debug)]
+pub(super) struct OuterPort {
+    pub(super) path: &'static str,
+    pub(super) name: &'static str,
+    pub(super) owner: Option<Context>,
+    pub(super) publicity: Publicity,
+}
+
+/// A pub trait of `src/application/` outside `ports/` that is no port.
+#[derive(Debug)]
+pub(super) struct NotPort {
+    pub(super) path: &'static str,
+    pub(super) name: &'static str,
+    pub(super) reason: &'static str,
+}
+
+/// A method of a [`Publicity::Partial`] port public to `to`, declared in
+/// the trait's body; the port's other methods are internal.
+#[derive(Debug)]
+pub(super) struct Method {
+    pub(super) port: &'static str,
+    pub(super) method: &'static str,
+    pub(super) to: To,
+}
+
+/// A value or a function (not a trait) `owner` lends to other contexts,
+/// which `path` defines; whether only they use it is not checked.
+#[derive(Debug)]
+pub(super) struct Lent {
+    pub(super) path: &'static str,
+    pub(super) name: &'static str,
+    pub(super) owner: Context,
+    pub(super) to: To,
+}
+
+/// The other contexts' port modules the port module of `context` may name
+/// besides its own and `shared`'s (C8).
+#[derive(Debug)]
+pub(super) struct PortModules {
+    pub(super) context: Context,
+    pub(super) names: &'static [Context],
+    pub(super) reason: &'static str,
+}
+
+const fn module(path: &'static str, context: Context) -> ModuleContext {
+    ModuleContext { path, context }
+}
+
+const fn port(name: &'static str, publicity: Publicity) -> Port {
+    Port { name, publicity }
+}
+
+const fn outer_port(
+    path: &'static str,
+    name: &'static str,
+    owner: Option<Context>,
+    publicity: Publicity,
+) -> OuterPort {
+    OuterPort {
+        path,
+        name,
+        owner,
+        publicity,
+    }
+}
+
+const fn not_port(path: &'static str, name: &'static str, reason: &'static str) -> NotPort {
+    NotPort { path, name, reason }
+}
+
+const fn method(port: &'static str, method: &'static str, to: To) -> Method {
+    Method { port, method, to }
+}
+
+const fn lent(path: &'static str, name: &'static str, owner: Context, to: To) -> Lent {
+    Lent {
+        path,
+        name,
+        owner,
+        to,
+    }
+}
+
+const fn module_allowed(
+    rule: Rule,
+    path: &'static str,
+    reference: &'static str,
+    fix: Fix,
+    reason: &'static str,
+) -> ModuleAllowed {
+    ModuleAllowed {
+        rule,
+        path,
+        reference,
+        fix,
+        reason,
+    }
 }
 
 const fn table(name: &'static str, owner: Context) -> Table {
@@ -314,4 +464,268 @@ pub(super) const SHARED_MODULES: &[SharedModule] = &[
 /// supervisor loop's, which may name the contexts.
 pub(super) const COMPOSE_LOOP: &[&str] = &["supervisor"];
 
-pub(super) const MODULES_ALLOWED: &[ModuleAllowed] = &[];
+#[rustfmt::skip]
+pub(super) const MODULES_ALLOWED: &[ModuleAllowed] = &[
+    module_allowed(Rule::C5, "src/application/health/attention.rs", "DraftPlannerStore", Fix::Tasks(&[2233]), "observation's attention reads planning's DraftPlannerStore (planner_answer_route, exhausted_drafts, exhausted_findings), whose reads are not public"),
+    module_allowed(Rule::C5, "src/application/health/attention.rs", "GoalReviewStore", Fix::Tasks(&[2233]), "observation's attention reads planning's internal GoalReviewStore"),
+    module_allowed(Rule::C5, "src/application/health/attention.rs", "PlanReviewStore", Fix::Tasks(&[2233]), "observation's attention reads planning's internal PlanReviewStore"),
+    module_allowed(Rule::C5, "src/application/lifecycle.rs", "RunRecovery", Fix::Tasks(&[2233]), "host's lifecycle reads execution's internal RunRecovery"),
+    module_allowed(Rule::C5, "src/application/lifecycle.rs", "SessionRegistry", Fix::Unregistered, "host's LifecycleQueue takes execution's internal SessionRegistry"),
+    module_allowed(Rule::C5, "src/application/health/report.rs", "DraftPlannerStore", Fix::Tasks(&[2233]), "observation's status passes its queue to attention, which reads planning's DraftPlannerStore"),
+    module_allowed(Rule::C5, "src/application/health/report.rs", "GoalReviewStore", Fix::Unregistered, "observation's status takes planning's internal GoalReviewStore"),
+    module_allowed(Rule::C5, "src/application/health/report.rs", "PlanReviewStore", Fix::Unregistered, "observation's status takes planning's internal PlanReviewStore"),
+    module_allowed(Rule::C5, "src/application/supervise/host_ops/cleanup.rs", "Repository", Fix::Unregistered, "host's cleanup job takes execution's internal Repository (its reads RepositoryReads are public to observation only)"),
+    module_allowed(Rule::C5, "src/application/supervise/planning/plan_review.rs", "Repository", Fix::Unregistered, "planning's conflict hotspots take execution's internal Repository (its reads RepositoryReads are public to observation only)"),
+    module_allowed(Rule::C5, "src/compose/observation.rs", "Verifier", Fix::Unregistered, "observation's composition reads execution's Verifier, public to host only"),
+    module_allowed(Rule::C5, "src/infrastructure/runtime_store/mod.rs", "InboxWatchLog", Fix::Unregistered, "execution's store names host's internal InboxWatchLog"),
+    module_allowed(Rule::C5, "src/infrastructure/runtime_store/run_log.rs", "InboxWatchLog", Fix::Unregistered, "execution's store implements host's internal InboxWatchLog"),
+    module_allowed(Rule::C5, "src/infrastructure/runtime_store/run_log.rs", "ObserverLog", Fix::Unregistered, "execution's store implements observation's internal ObserverLog"),
+];
+
+#[rustfmt::skip]
+pub(super) const MODULES: &[ModuleContext] = &[
+    module("src/application/commands/planning.rs", Planning),
+    module("src/application/commands/requests.rs", Planning),
+    module("src/application/commands/replans.rs", Planning),
+    module("src/application/commands/holds.rs", Planning),
+    module("src/application/planner.rs", Planning),
+    module("src/application/planner_handoff.rs", Planning),
+    module("src/application/planner_request.rs", Planning),
+    module("src/application/prompt/planners.rs", Planning), // inbox_prompt
+    module("src/application/prompt/plan_review.rs", Planning), // plan_review_prompt
+    module("src/application/supervise/planning.rs", Planning),
+    module("src/application/supervise/planning/", Planning),
+    module("src/application/session.rs", Execution),
+    module("src/application/headless_session.rs", Execution),
+    module("src/application/integrate.rs", Execution),
+    module("src/application/review.rs", Execution),
+    module("src/application/setup_review.rs", Execution),
+    module("src/application/recording.rs", Execution),
+    module("src/application/run_container.rs", Execution),
+    module("src/application/inherit.rs", Execution),
+    module("src/application/agent_eval.rs", Execution),
+    module("src/application/agent_cases.rs", Execution),
+    module("src/application/prompt/worker.rs", Execution), // prompt
+    module("src/application/prompt/requests.rs", Execution), // resume_request
+    module("src/application/prompt/run_review.rs", Execution), // recovery_prompt
+    module("src/application/prompt/setup_review.rs", Execution), // setup_review_prompt
+    module("src/application/health/runs.rs", Execution), // recover
+    module("src/application/stats.rs", Observation),
+    module("src/application/kpi.rs", Observation),
+    module("src/application/ledger_check.rs", Observation),
+    module("src/application/forecast.rs", Observation),
+    module("src/application/report.rs", Observation),
+    module("src/application/observer/", Observation),
+    module("src/application/watch.rs", Observation),
+    module("src/application/throughput_review.rs", Observation),
+    module("src/application/ci_watch.rs", Observation),
+    module("src/application/main_log.rs", Observation),
+    module("src/application/main_log/", Observation),
+    module("src/application/health/report.rs", Observation), // status
+    module("src/application/health/attention.rs", Observation), // attention
+    module("src/application/supervise/observation.rs", Observation),
+    module("src/application/supervise/observation/", Observation),
+    module("src/application/lifecycle.rs", Host), // up, down
+    module("src/application/install.rs", Host),
+    module("src/application/update.rs", Host),
+    module("src/application/queue_service.rs", Host),
+    module("src/application/podman_machine.rs", Host),
+    module("src/application/container_image.rs", Host),
+    module("src/application/queue_broker.rs", Host),
+    module("src/application/broker_relay.rs", Host),
+    module("src/application/sccache.rs", Host),
+    module("src/application/sccache/", Host),
+    module("src/application/actor_executor.rs", Host),
+    module("src/application/execution.rs", Host),
+    module("src/application/release_update.rs", Host),
+    module("src/application/health/host.rs", Host), // supervisors, roles
+    module("src/application/supervise/host_ops.rs", Host),
+    module("src/application/supervise/host_ops/", Host),
+];
+
+#[rustfmt::skip]
+pub(super) const PORTS: &[Port] = &[
+    port("TaskReads", Public(All)), // the reads of the tasks, goals, proposals and notes
+    port("TaskStore", Partial),
+    port("PlanningRecords", Public(All)),
+    port("DraftPlannerReads", Public(All)), // the improvements running and the findings waiting for a planner
+    port("DraftPlannerStore", Partial),
+    port("PlanReviewStore", Internal),
+    port("GoalReviewStore", Internal),
+    port("PlanRequestStore", Internal),
+    port("RunReads", Public(All)),
+    port("RunLog", Public(All)), // the pair of RunReads and EventStore
+    port("Verifier", Partial),
+    port("RepositoryReads", Public(Only(&[Observation]))), // read-only reads of main; the CI watch reads the landing branch, unresolved it leaves the check to the landing's hold
+    port("Repository", Internal),
+    port("CoordinationReads", Public(All)),
+    port("RunCoordination", Internal),
+    port("SessionReads", Public(Only(&[Observation]))), // attention reads the planners that went silent
+    port("SessionRegistry", Internal),
+    port("RunTransitions", Internal), // its claim_for_supervisor_holding is T1
+    port("RunRecovery", Internal),
+    port("EvalRounds", Internal),
+    port("ReviewProgramBackend", Internal),
+    port("ContainerRuntime", Public(Only(&[Host]))), // whether the container runtime can run a target now; host only wraps it in BrokerGate, which shows whether the broker runs
+    port("RecordingQueue", Internal),
+    port("RunFiles", Public(All)), // not classified by architecture.md; public to the contexts that use it today
+    port("AgentProvider", Public(All)), // not classified by architecture.md; public to the contexts that use it today
+    port("TurnReader", Internal),
+    port("Transcripts", Internal),
+    port("AgentSignals", Public(Only(&[Planning, Observation]))), // not classified by architecture.md; public to the contexts that use it today
+    port("MainRemote", Internal),
+    port("QueueRecords", Partial),
+    port("ObserverLog", Internal),
+    port("ObservationQueue", Internal),
+    port("LedgerStore", Internal), // the ledger is read through ledger::read
+    port("NodeSampleStore", Partial), // the measurement reads it; host records the host's load
+    port("LedgerQueue", Internal), // what builds the ledger reads and writes
+    port("SessionStepStore", Internal), // the measurement's store of the sessions' steps
+    port("TelemetrySink", Public(Only(&[Execution]))), // the executor sends its sessions' steps and resource samples through it
+    port("SessionResourceStore", Internal), // the measurement's store of the resources an executor measured
+    port("SessionOwners", Public(Only(&[Execution]))), // the control side registers the target a session is of before its executor reports
+    port("MarkLog", Internal),
+    port("SupervisorReads", Public(All)),
+    port("SupervisorRegistry", Partial),
+    port("HeadlessJobStore", Public(Only(&[Planning, Execution, Observation]))), // to each context that starts a job
+    port("QueueOpener", Public(All)),
+    port("LaunchAgent", Public(All)),
+    port("SccacheServer", Public(All)),
+    port("ProcessControl", Public(All)),
+    port("InstalledPlugin", Public(All)),
+    port("InboxWatchLog", Internal),
+    port("HostOpsQueue", Internal),
+    port("HostMetricsFiles", Internal), // the CSV copy of the host's load
+    port("SessionWrappers", Public(Only(&[Planning, Execution]))), // not classified by architecture.md; public to the contexts that use it today
+    port("Clock", Public(All)),
+    port("IdGenerator", Public(All)),
+    port("Spawner", Public(All)),
+    port("Spawned", Public(All)),
+    port("AskStore", Public(All)),
+    port("EventStore", Public(All)),
+    port("StateStore", Public(All)),
+    port("Queue", Public(All)),
+];
+
+#[rustfmt::skip]
+pub(super) const OUTER_PORTS: &[OuterPort] = &[
+    outer_port("src/application/inherit.rs", "InheritStore", Some(Execution), Public(Only(&[Planning]))), // ready --inherit (T10)
+    outer_port("src/application/inherit.rs", "CarriedBranches", Some(Execution), Public(Only(&[Planning]))), // ready --inherit (T10)
+    outer_port("src/application/agent_eval.rs", "EvalStore", Some(Execution), Public(Only(&[Host]))), // through AgentEvals to the CLI and the queue service; they write requests only
+    outer_port("src/application/agent_cases.rs", "CaseSetStore", Some(Execution), Public(Only(&[Host]))), // through AgentCaseSets to the CLI and the queue service; they write requests and a person's decisions only
+    outer_port("src/application/commands/requests.rs", "RequestStore", Some(Planning), Internal),
+    outer_port("src/application/commands/replans.rs", "ReplanStore", Some(Planning), Public(Only(&[Host]))), // through Replans to the CLI and the queue service (a worker's proposal)
+    outer_port("src/application/commands/planning.rs", "PlanningStore", Some(Planning), Internal),
+    outer_port("src/application/commands/holds.rs", "HoldStore", Some(Planning), Internal), // through Holds to the CLI
+    outer_port("src/application/commands/dialogue.rs", "DialogueStore", Some(Shared), Public(All)), // asks and notes
+    outer_port("src/application/commands/mod.rs", "DenialLog", Some(Shared), Public(All)), // what a command refused
+    outer_port("src/application/watch.rs", "AskNotifier", Some(Observation), Internal), // implemented by PushNotifier
+    outer_port("src/application/watch.rs", "WatchRecord", Some(Observation), Internal),
+    outer_port("src/application/lifecycle.rs", "LifecycleQueue", Some(Host), Internal),
+    outer_port("src/application/actor_executor.rs", "ActorExecutor", Some(Host), Public(All)), // the start of an actor
+    outer_port("src/application/release_update.rs", "ReleaseIndex", Some(Host), Internal),
+    outer_port("src/application/install.rs", "Binaries", Some(Host), Internal),
+    outer_port("src/application/install.rs", "ReleaseInstaller", Some(Host), Internal),
+    outer_port("src/application/queue_service.rs", "ServiceQueue", Some(Host), Internal),
+    outer_port("src/application/queue_service.rs", "ServiceBackend", Some(Host), Internal),
+    outer_port("src/application/queue_service.rs", "QueueServiceControl", Some(Host), Internal),
+    outer_port("src/application/queue_broker.rs", "QueueBrokerControl", Some(Host), Internal), // how up, down and the supervisor start, look at and stop the broker
+    outer_port("src/application/queue_broker.rs", "BrokerBackend", Some(Host), Internal), // what the broker runs a request on
+    outer_port("src/application/podman_machine.rs", "PodmanMachine", Some(Host), Internal), // the podman commands on the dagq machine
+    outer_port("src/application/podman_machine.rs", "MachineUsers", Some(Host), Internal), // the host-wide lock and users of the dagq machine
+    outer_port("src/application/podman_machine.rs", "MachineVolumes", Some(Host), Public(Only(&[Execution]))), // the named volumes of a queue in the dagq machine; the cleanup at a run's end and the landing removes a run's build output
+    outer_port("src/application/podman_machine.rs", "RunMachine", Some(Host), Public(Only(&[Execution]))), // a run's parts in the dagq machine (the machine with the run as a user, the image, the run's relay, a build output volume), made ready before each turn of a worker and each verification in the container
+    outer_port("src/application/queue_broker.rs", "VerificationTokens", Some(Host), Public(Only(&[Execution]))), // how integrate issues and revokes the token of each verification
+    outer_port("src/application/container_image.rs", "ImageSpecs", Some(Host), Internal), // the images of a queue as its main checkout decides them
+    outer_port("src/application/container_image.rs", "ImageBuilder", Some(Host), Internal), // the podman commands on the images in the dagq machine
+    outer_port("src/application/container_image.rs", "ImageRecords", Some(Host), Internal), // the queue's records of the container image
+    outer_port("src/application/broker_relay.rs", "RelayControl", Some(Host), Public(Only(&[Execution]))), // the relays of the runs' containers in the dagq machine; a run's container opens its relay before it starts and closes it at its end
+    outer_port("src/application/broker_relay.rs", "RelayRecords", Some(Host), Internal), // the supervisor's record of the relays, read by the gate
+    outer_port("src/application/run_container.rs", "RunContainers", Some(Execution), Internal), // the containers a worker's turns run in; the wrapper starts and removes them, and every stop of a run's session or processes removes its container
+    outer_port("src/application/run_container.rs", "VerificationContainers", Some(Execution), Internal), // the containers the commands of integrate's verification run in, on a clone of the commit that lands; integrate removes what each verification left
+    outer_port("src/application/queue_service.rs", "ServiceAccess", Some(Host), Public(Only(&[Execution]))), // not classified by architecture.md; the supervisor issues a token at the claim and the resume
+    outer_port("src/application/queue_service.rs", "TelemetryTokens", Some(Host), Public(Only(&[Execution]))), // not classified by architecture.md; the supervisor issues and revokes an executor's telemetry token per target
+    outer_port("src/application/setup_review.rs", "SetupReviewHost", Some(Execution), Internal), // the main checkout, the temporary place and the job of setup-review
+    outer_port("src/application/setup_review.rs", "InitRepository", Some(Execution), Internal), // the main checkout, its dagq.toml and its files init proposes the toolchain profiles from
+    outer_port("src/application/ci_watch.rs", "CiSource", Some(Observation), Internal),
+    outer_port("src/application/throughput_review.rs", "ThroughputReviewSources", Some(Observation), Internal),
+    outer_port("src/application/throughput_review.rs", "ThroughputReviewHost", Some(Observation), Internal),
+    outer_port("src/application/observer/mod.rs", "ObserverSources", Some(Observation), Internal),
+    outer_port("src/application/observer/mod.rs", "ObserverHost", Some(Observation), Internal),
+    outer_port("src/application/queue_reads/planning.rs", "PlanningSources", None, Public(Only(&[Observation]))), // not classified by architecture.md; compose joins it with ObservationSources in QueueReadSources
+    outer_port("src/application/queue_reads/observation.rs", "ObservationSources", None, Internal),
+];
+
+#[rustfmt::skip]
+pub(super) const NOT_PORTS: &[NotPort] = &[
+    not_port("src/application/main_log.rs", "MainReader", "a narrowing of RepositoryReads to its reads of main, implemented for every RepositoryReads"),
+    not_port("src/application/queue_reads/mod.rs", "QueueReadSources", "a bound that joins PlanningSources and ObservationSources"),
+];
+
+#[rustfmt::skip]
+pub(super) const METHODS: &[Method] = &[
+    method("TaskStore", "claim", Only(&[Execution])), // T1
+    method("TaskStore", "investigations", Only(&[Execution])), // the claim's investigation limit (ADR-t1487-1)
+    method("DraftPlannerStore", "register_follow_ups", Only(&[Execution])), // T7
+    method("Verifier", "run_env", Only(&[Host])), // the environment, for host運用's diagnosis
+    method("Verifier", "run_env_programs", Only(&[Host])), // the programs, for host運用's diagnosis
+    method("QueueRecords", "findings", All), // the reads; record_* are internal
+    method("QueueRecords", "reports_written", All),
+    method("QueueRecords", "kpi_breaches_open", All),
+    method("QueueRecords", "ci_watch_events", All),
+    method("QueueRecords", "ci_failure_findings_of", All),
+    method("QueueRecords", "ci_failure_fix_tasks", All),
+    method("NodeSampleStore", "record_node_sample", Only(&[Host])), // the record of the host's load
+    method("NodeSampleStore", "import_node_samples", Only(&[Host])), // the import of the CSV files
+    method("NodeSampleStore", "imported_files", Only(&[Host])), // the import reads its marks
+    method("NodeSampleStore", "remove_node_samples", Only(&[Host])), // the retention
+    method("SupervisorRegistry", "register_supervisor", Only(&[Execution])), // the loop
+    method("SupervisorRegistry", "prune_supervisor", Only(&[Execution])),
+    method("SupervisorRegistry", "accept_handoff", Only(&[Execution])),
+    method("SupervisorRegistry", "request_handoff", Only(&[Execution])),
+    method("SupervisorRegistry", "take_handoff", Only(&[Execution])),
+    method("SupervisorRegistry", "cancel_handoff", Only(&[Execution])),
+    method("SupervisorRegistry", "resume_registration", Only(&[Execution])),
+    method("SupervisorRegistry", "set_auto_update", Only(&[Execution])),
+    method("SupervisorRegistry", "set_slot_limits", Only(&[Execution])),
+    method("SupervisorRegistry", "set_max_load", Only(&[Execution])),
+    method("SupervisorRegistry", "set_supervisor_providers", Only(&[Execution])),
+    method("SupervisorRegistry", "rebind_repository", Only(&[Execution])),
+    method("SupervisorRegistry", "bind_repository", Only(&[Execution])),
+    method("SupervisorRegistry", "assert_repository", Only(&[Execution])),
+    method("SupervisorRegistry", "set_supervisor_mode", Only(&[Execution])),
+];
+
+#[rustfmt::skip]
+pub(super) const LENT: &[Lent] = &[
+    lent("src/application/supervise/planning.rs", "PlanningState", Planning, Only(&[Execution])), // the stop and the end of a carried-over review
+    lent("src/domain/stats/conflicts.rs", "ConflictHotspot", Planning, Only(&[Execution])), // the conflict hotspots
+    lent("src/domain/run.rs", "TaskRun", Execution, All), // the view of a run, as a value
+    lent("src/application/supervise/execution/jobs.rs", "JobDesk", Execution, Only(&[Planning])), // jobs and providers
+    lent("src/application/supervise/execution/claim_defer.rs", "DeferWatch", Execution, Only(&[Planning])), // the file of the forecast
+    lent("src/application/supervise/execution/background.rs", "stop_swept_wrapper", Execution, Only(&[Host])), // the stop of a wrapper, for the sweep
+    lent("src/application/supervise/execution/recheck.rs", "build_dirs", Execution, Only(&[Host])), // the declarations' build outputs, for the cleaning of free disk
+    lent("src/application/supervise/execution/recheck.rs", "clear_targets", Execution, Only(&[Host])), // under recheck's lock, for the cleaning of free disk
+    lent("src/application/ci_watch.rs", "known_failures", Observation, Only(&[Execution])), // to the landing's verification
+    lent("src/application/ci_watch.rs", "run_known_failures", Observation, Only(&[Execution])), // to the worker's prompts and the run's whole review
+    lent("src/application/supervise/observation/ci_watch.rs", "CiWatchState", Observation, Only(&[Execution])), // read held and unreadable only; supervise::ci_watch changes it
+    lent("src/domain/throughput_review.rs", "UnusableFinish", Observation, Only(&[Execution])), // supervise::provider holds it back once
+    lent("src/application/supervise/observation/observer.rs", "UnusableTimerJob", Observation, Only(&[Execution])), // supervise::provider holds it back once
+    lent("src/application/supervise/observation/report.rs", "ReportPort", Observation, Only(&[Host])), // where the KPI push goes, for inbox_nudge
+    lent("src/application/queue_broker.rs", "BrokerGate", Host, Only(&[Execution])), // whether the broker runs, through ContainerRuntime
+    lent("src/application/podman_machine.rs", "MachineGate", Host, Only(&[Execution])), // whether the dagq machine can be used, through ContainerRuntime
+    lent("src/application/queue_broker.rs", "VerificationToken", Host, Only(&[Execution])), // the token of one verification, revoked at its end
+    lent("src/application/container_image.rs", "ImageGate", Host, Only(&[Execution])), // whether the container image can be had, through ContainerRuntime
+    lent("src/application/broker_relay.rs", "RelayGate", Host, Only(&[Execution])), // whether the runs' relays are kept, through ContainerRuntime
+    lent("src/application/supervise/host_ops.rs", "HostOpsState", Host, Only(&[Execution])), // free disk and sccache, read
+    lent("src/application/supervise/host_ops/cleanup.rs", "CleanupWatch", Host, Only(&[Execution])), // cleaning and defer
+    lent("src/application/supervise/host_ops/sccache.rs", "ensure_sccache", Host, Only(&[Execution])),
+    lent("src/application/supervise/host_ops/sccache.rs", "sccache_look", Host, Only(&[Execution])),
+];
+
+#[rustfmt::skip]
+pub(super) const PORT_MODULES: &[PortModules] = &[
+    PortModules { context: Observation, names: &[Planning, Execution, Host], reason: "観測と分析 reads the other contexts" },
+    PortModules { context: Shared, names: &[Planning, Execution, Observation, Host], reason: "Queue and StateStore join every context's ports" },
+    PortModules { context: Host, names: &[Execution], reason: "host names RunLog, the pair of RunReads and EventStore" },
+];

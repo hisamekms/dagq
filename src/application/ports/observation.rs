@@ -280,7 +280,7 @@ impl<T: EventStore + LedgerStore + NodeSampleStore + SessionStepStore + ?Sized> 
 ///
 /// Owned by the observation and analysis context: its reads are open to
 /// every context and its `record_*` writes are its own
-/// (.config/context-boundaries.txt).
+/// (src/context_boundaries/ownership.rs).
 pub trait QueueRecords {
     /// The findings `query` lists, larger impact first (`findings`), for
     /// the KPI report's open findings.

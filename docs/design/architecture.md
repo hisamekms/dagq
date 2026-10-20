@@ -31,8 +31,8 @@ related:
 runtime（src/）の責務を、レイヤーとコンテキスト（context）の2軸で分ける今の境界と、それを守る規則の正本。
 決めた理由は[ADR-t1545-1](../adr/2026-10-04-t1545-1-split-the-runtime-by-layer-and-context.md)（[ADR-0013](../adr/0013-layered-architecture-and-type-function-style.md)決定1をamends）が持つ。
 moduleの説明は[overview](overview.md)、集約は[Domain model](domain-model.md)、tableは[Persistence](persistence.md)、supervisorのループは[`supervise`](supervisor-lifecycle/supervise.md)が持つ。
-全体のreviewのpjの規則と検査のscriptは、この文書の規則のID（下の「検査できる規則」）を参照し、本文を写さない（ADR-t1545-1決定4）。
-境界の記録（tableとstoreのmoduleのcontext・portの公開・境界をまたぐtransaction・今の違反）はこの文書に置かず、コードと、Rustのtestの所有の表と、検査のscriptが読む`.config/`の一覧が持つ（[ADR-t2287-1](../adr/2026-10-12-t2287-1-context-boundary-records-in-code-and-config-lists.md)、[ADR-t2391-1](../adr/2026-10-12-t2391-1-boundary-rules-to-compiler-clippy-and-rust-tests.md)決定3、下の「[検査の範囲](#検査の範囲)」）。
+全体のreviewのpjの規則と検査のtestは、この文書の規則のID（下の「検査できる規則」）を参照し、本文を写さない（ADR-t1545-1決定4）。
+境界の記録（tableとstoreのmoduleのcontext・portの公開・境界をまたぐtransaction・今の違反）はこの文書に置かず、コードと、Rustのtestの所有の表が持つ（[ADR-t2287-1](../adr/2026-10-12-t2287-1-context-boundary-records-in-code-and-config-lists.md)、[ADR-t2391-1](../adr/2026-10-12-t2391-1-boundary-rules-to-compiler-clippy-and-rust-tests.md)決定3、下の「[検査の範囲](#検査の範囲)」）。
 
 ### 全体の流れ
 
@@ -112,7 +112,7 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 
 規則のIDは変えない。
 規則を変えるときはIDを足すか、古いIDを「廃止」と書いて残す。
-各規則の「検査」は、script（機械）で見るか全体のreviewで見るかを書く。
+各規則の「検査」は、機械（コンパイラ・clippy・Rustのtest）で見るか全体のreviewで見るかを書く。
 
 ### レイヤーの規則
 
@@ -163,16 +163,16 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
 - **C4** 新しく足す・変えるuse caseは`Box<dyn Queue>`・`&mut dyn Queue`・全体の`QueueOpener`を取らず、要るportだけを取る（ADR-0013決定1の「portは原則applicationに定義する」のまま、幅を狭める）。
   検査: 観測と分析のuse caseは型（C2の読み取りのtraitだけを取る）、ほかのuse caseの切り方は全体のreview。
 - **C5** 他のcontextの公開していないport（所有の一覧で内部としたもの、一部公開のportは公開していないmethod）を使わない。
-  検査: portの名前の参照はscript（`scripts/check-context-boundaries.sh`）、一部公開のportのmethodの単位の参照とcontextの決まらないmoduleは全体のreview。
+  検査: portの参照はmoduleの参照のRustのtest（`src/context_boundaries/modules.rs`、traitを定義のpathで識別する）、一部公開のportのmethodの単位の参照とcontextの決まらないmoduleは全体のreview。
 - **C6** 他のcontextのeventを読むときは、kindを`domain::event_kind`か所有するdomainのmoduleの定数で名指し、状態の判断に使うpayloadは文字列のkeyではなく型付きの復元の値で読む。
   古いeventの読み取りは保つ。
   検査: 全体のreview。
 - **C7** 新しいport・table・storeのmoduleとtransactionの関数は、pathから導けないもの（所有するcontextと公開先）を所有の一覧に足してから置く。
   一覧はコードに無い項目を持たない。
-  検査: table・storeのmodule・transactionの関数はRustのtest（`src/context_boundaries.rs`）、portと`src/application/`のmoduleの記録はC5のscriptが一覧を読むときに照合する（C5とともにRustのtestへ移す、ADR-t2397-1決定4）。
+  検査: table・storeのmodule・transactionの関数はRustのtest（`src/context_boundaries.rs`）、portと`src/application/`のmoduleの記録はmoduleの参照のRustのtest（`src/context_boundaries/modules.rs`）。
 - **C8** `src/application/ports/`のmoduleは自分と`shared`のportだけを、moduleのpath（`super::shared::Clock`）で名指す。
   例外は他のcontextを読む観測と分析、`Queue`・`StateStore`の`shared`、`RunLog`を組に名指す`host`。
-  検査: script（例外の中身と`crate::application::X`を通す名指しは全体のreview）。
+  検査: moduleの参照のRustのtest（`src/context_boundaries/modules.rs`、例外の組は所有の表）、例外の中身と`crate::application::X`を通す名指しは全体のreview。
 
 ### transactionの規則
 
@@ -196,31 +196,26 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
   lintの一覧はpackageに1つなので、有効にした全てのmoduleが禁じるものだけを置き、domainだけが禁じるもの（applicationが使う`anyhow`と`std::process::id`を含む`std::process`の残り、`std::net`）はmoduleの参照のRustのtestが見る。
   infrastructure・レイヤーの外のmodule・`src/main.rs`・`tests/`・`#[cfg(test)]`の中にはlintが当たらないので、例外を置かない。
   許す場所はapplicationの個々のitemの理由付きの`#[expect]`だけで、moduleの宣言・crateの全体・domain・起動部分には置かない。
-- L1・L3・L6・L8・L9と、L2の`anyhow`・`std::process`・`std::net`は、`cargo test`が流すRustのtest（`src/context_boundaries/modules.rs`）が当てる。
-  testは`src/lib.rs`から辿るmoduleのRustを構文で読み、`use`とpathをcrateの根からのmoduleのpathか外のcrateのpathに解き、再公開を定義のmoduleまで辿る（L2は`#[cfg(test)]`の中を数えず、ほかは数える）。
-  共有の部品を参照してよいレイヤー、`src/compose/`のループのmodule、今の違反は所有の表に置く。
-- `scripts/check-layer-deps.sh`は、`src/application/ports/`のcontextのmoduleのC8を当てる。
-  数えるのは参照のpathで、コメントと文字列は数えない（細目はscriptの先頭のコメント）。
-  許可の一覧は`.config/layer-deps-allow.txt`。
-- 所有の一覧は2か所に分かれ、pathから導けない所有だけを持つ。
-  Rustのtestの側の所有の表`src/context_boundaries/ownership.rs`は、tableの所有、storeのmoduleのcontext、境界をまたぐtransactionの関数、C1とL1・L2・L3・L6・L8・L9の今の違反を持つ。
-  `.config/context-boundaries.txt`は、`src/application/`のmoduleのcontext、portとそのmethodの公開先、`ports/`の外のportを持つ。
+- L1・L3・L6・L8・L9・C5・C8と、L2の`anyhow`・`std::process`・`std::net`と、C7のうちportと`src/application/`のmoduleの記録は、`cargo test`が流すRustのtest（`src/context_boundaries/modules.rs`）が当てる。
+  testは`src/lib.rs`から辿るmoduleのRustを構文で読み、`use`とpathをcrateの根からのmoduleのpathか外のcrateのpathに解き、再公開を定義のmoduleまで辿る（L2とC5は`#[cfg(test)]`の中を数えず、ほかは数える）。
+  C5はtraitを名前でなく定義のmoduleのpathで識別し、C8は`src/application/ports/<context>.rs`の書いたpathを見る。
+  共有の部品を参照してよいレイヤー、`src/compose/`のループのmodule、portの公開先、C8の例外の組、今の違反は所有の表に置く。
+- `scripts/check-layer-deps.sh`は規則も一覧も持たず、退役（ADR-t2397-1決定4の3）まで、それを流すverifyとCIのために残る。
+- 所有の一覧はRustのtestの側の所有の表`src/context_boundaries/ownership.rs`で、pathから導けない所有だけを持つ。
+  tableの所有、storeのmoduleのcontext、境界をまたぐtransactionの関数、`src/application/`のmoduleのcontext、portとそのmethodの公開先、`ports/`の外のport、C1とL1・L2・L3・L6・L8・L9・C5・C8の今の違反を持つ。
 - C1・C7のtableとstoreのmoduleとtransaction・X1は、`cargo test`が流すRustのtest（`src/context_boundaries.rs`）が当てる。
   testは`src/infrastructure/`のRustを構文で読み、test codeの外の文字列の中のSQLの書き込み先を所有の表と照合する。
   どのmigrationも作らないtableの行、migrationが残すのに行の無いtable、コードに無いstoreのmoduleとtransactionの関数でも落ちる。
   共有の部品のtableは、どのcontextが書いても違反に数えない。
   migrationのtriggerが書く`search_index`・`landed_commits`は数えない。
-- `scripts/check-context-boundaries.sh`は、C5と、C5が読む`.config/context-boundaries.txt`とコードの食い違い（一覧に無いport、コードに無い一覧の項目）を当てる。
-  storeのmoduleのcontextは、所有の表の`store`の行から読む。
-  共有の部品のportは、どのcontextが使っても違反に数えない。
-  `src/application/ports/<context>.rs`のportの所有と、`ports/`・`queue_reads/`・`compose/`の`<context>.rs`のcontextは、scriptがpathから導く。
-  許可の一覧は`.config/context-boundaries-allow.txt`。
-- 所有の表の書式と落ちる条件はtestのdoc comment、`.config/`の一覧の書式と落ちる条件は各一覧の先頭のコメント、scriptの数え方の細目はscriptの先頭のコメントが持つ。
-- 今ある違反は、理由と行き先のtask（行き先が未登録なら、所有の表では`Fix::Unregistered`、`.config/context-boundaries-allow.txt`では`none`と理由）を持つ許可の一覧にだけ置く（ADR-t1545-1決定4、ADR-t2287-1、ADR-t2391-1決定3）。
-  C1とL1・L2・L3・L6・L8・L9の許可は所有の表に、C5・C8の許可は`.config/`の許可の一覧に置く。
+- C5では、共有の部品のportは、どのcontextが使っても違反に数えない。
+  `src/application/ports/<context>.rs`のportの所有と、`ports/`・`queue_reads/`・`compose/`の`<context>.rs`のcontextは、testがpathから導く。
+  `scripts/check-context-boundaries.sh`は規則を持たず一覧を読まず、退役（ADR-t2397-1決定4の3）まで、それを流すverify・CI・runのreviewのプログラムのために残る。
+  `.config/context-boundaries.txt`と`.config/context-boundaries-allow.txt`はどの検査も読まず、landing branchの古いscriptを流すreviewのプログラムのためだけに変えずに残し、scriptとともに消す。
+- 所有の表の書式と落ちる条件はtestのdoc commentが持つ。
+- 今ある違反は、理由と行き先のtask（行き先が未登録なら、所有の表の`Fix::Unregistered`と理由）を持つ許可の一覧にだけ置く（ADR-t1545-1決定4、ADR-t2287-1、ADR-t2391-1決定3）。
+  C1とL1・L2・L3・L6・L8・L9・C5・C8の許可は所有の表に置く。
   許可の一覧に無い違反と、違反が消えた古い項目で落ちるので、違反を直す変更は同じ変更で許可の一覧の項目を消す。
   reviewだけで見る規則の今の違反は文書に記録せず、行き先はqueueのtaskが持つ。
-- 2つのscriptは、CIと`src/`を変えるtaskのverifyが流す。
-  `scripts/check-context-boundaries.sh`は、runのreviewのプログラム（[プログラムのreview](supervisor-lifecycle/review-programs.md)、どのscriptを流すかは`dagq.toml`の`[review.programs]`）としてもLLMのagentより前に流れる。
-- 「検査」が全体のreviewを名指す部分と、scriptとtestが見ない部分（C5の一部公開のportのmethodの単位の参照、contextの決まらないmodule、実行時に組み立てるSQLなど。全体はscriptの先頭のコメントとtestのdoc comment）は、全体のreview（[Review](supervisor-lifecycle/review.md#reviewの流れ)）が、規則のIDを名指すこのrepositoryのpjの規則`.dagq/review/builtin-acceptance.md`に従って、差分が足したものだけを見る。
-  scriptとtestの規則と、所有の一覧への記録の漏れは見ない。
+- 「検査」が全体のreviewを名指す部分と、testが見ない部分（C5の一部公開のportのmethodの単位の参照、contextの決まらないmodule、実行時に組み立てるSQLなど。全体はtestのdoc comment）は、全体のreview（[Review](supervisor-lifecycle/review.md#reviewの流れ)）が、規則のIDを名指すこのrepositoryのpjの規則`.dagq/review/builtin-acceptance.md`に従って、差分が足したものだけを見る。
+  testの規則と、所有の一覧への記録の漏れは見ない。

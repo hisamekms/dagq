@@ -411,7 +411,7 @@ pub trait HeadlessJobStore {
 /// events (on no task, goal or run) whose comparison and write share one
 /// write transaction, so a second supervisor and the process after an exec
 /// make neither twice. Internal to host運用
-/// (.config/context-boundaries.txt).
+/// (src/context_boundaries/ownership.rs).
 pub trait InboxWatchLog {
     /// Record `inbox_nudged` with `payload` unless one with the same
     /// `absent_since` and `attempt` is recorded (ADR-t1433-5 decision 1
@@ -446,8 +446,8 @@ pub trait SupervisorReads {
 /// The supervisors' registrations, their handoffs and settings, and the
 /// repository the queue is bound to: the coordination state of host運用
 /// (ADR-0032's second kind). Its reads are [`SupervisorReads`]; the rest
-/// is published to 実行と着地's loop (the `method` items of
-/// .config/context-boundaries.txt).
+/// is published to 実行と着地's loop (the `METHODS` rows of
+/// src/context_boundaries/ownership.rs).
 pub trait SupervisorRegistry: SupervisorReads {
     /// Register a supervisor with its slot limits and their sources in one
     /// write, so `status` and a reader of the registration never see it

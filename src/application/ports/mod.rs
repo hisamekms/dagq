@@ -6,7 +6,7 @@
 //! Each port is in the module of the context that owns it, with the types
 //! of its arguments and results, and the ports every context uses are in
 //! [`shared`] (docs/design/architecture.md, section "検査の範囲"; whom
-//! each port is public to is in .config/context-boundaries.txt). The
+//! each port is public to is in src/context_boundaries/ownership.rs). The
 //! modules are private: every port keeps its path (`application::X`, and
 //! `ports::X` inside `application`) through the re-exports below.
 

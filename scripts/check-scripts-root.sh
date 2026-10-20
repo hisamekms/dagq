@@ -41,7 +41,7 @@ set -u
 me=check-scripts-root
 
 # The check scripts that take their root from the cwd's git work tree.
-scripts="check-migration-numbers check-test-file-lines check-adr-numbers check-e2e-quarantine check-agents-md-size check-layer-deps check-context-boundaries check-frontmatter-dates check-design-docs check-design-sentences check-doc-links check-doc-frontmatter check-plugin-version check-commit-messages"
+scripts="check-migration-numbers check-test-file-lines check-adr-numbers check-e2e-quarantine check-agents-md-size check-frontmatter-dates check-design-docs check-design-sentences check-doc-links check-doc-frontmatter check-plugin-version check-commit-messages"
 
 # "<script> <case>": each case puts one violation of the script into the
 # clone (the cwd) with violate_<case>.
@@ -50,10 +50,6 @@ check-test-file-lines test_file_too_long
 check-adr-numbers adr_id_mismatch
 check-e2e-quarantine e2e_quarantine_malformed
 check-agents-md-size agents_md_too_big
-check-layer-deps layer_stale_allow_item
-check-context-boundaries context_unlisted_trait
-check-context-boundaries context_internal_port
-check-context-boundaries context_stale_allow_item
 check-frontmatter-dates frontmatter_date_comment
 check-design-docs design_doc_too_big
 check-design-sentences design_doc_two_sentences_on_a_line
@@ -83,24 +79,6 @@ violate_e2e_quarantine_malformed() {
 
 violate_agents_md_too_big() {
   awk 'BEGIN { for (i = 1; i <= 200; i++) print "padding line for check-scripts-root, over the size limit" }' >>AGENTS.md
-}
-
-violate_layer_stale_allow_item() {
-  mkdir -p .config
-  echo 'C8 | src/application/ports/zz_scripts_root.rs | super::host | 1899 | fixture' >>.config/layer-deps-allow.txt
-}
-
-violate_context_unlisted_trait() {
-  echo 'pub trait ZzScriptsRoot { fn zz(&self); }' >src/application/zz_scripts_root.rs
-}
-
-violate_context_internal_port() {
-  echo 'fn zz_scripts_root(_: &dyn crate::application::RunRecovery) {}' >>src/application/supervise/observation/report.rs
-}
-
-violate_context_stale_allow_item() {
-  mkdir -p .config
-  echo 'C5 | src/application/zz_scripts_root.rs | RunRecovery | 2286 | fixture' >>.config/context-boundaries-allow.txt
 }
 
 violate_frontmatter_date_comment() {

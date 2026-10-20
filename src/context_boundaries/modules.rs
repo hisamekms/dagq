@@ -7,13 +7,14 @@
 //! `src/compose/` references no other module of `src/compose/` and globs no
 //! `crate::compose`. The modules of `src/compose/` are declared private, so
 //! the code outside the composition root reaches them only through its
-//! re-exports (L9).
+//! re-exports (L9). C5 and C8 on the same references, and C7 for the
+//! records of the ports, are [`ports`].
 //!
 //! What counts:
 //!
 //! - The modules are those `src/lib.rs` declares, followed through
 //!   `mod name;` (`name.rs`, else `name/mod.rs`) and inline modules. Test
-//!   code counts too, but not for L2: test code is an item, a field, a
+//!   code counts too, but not for L2 and C5: test code is an item, a field, a
 //!   variant, an arm, a `let`, an expression (a block too), a statement
 //!   macro or a field of a struct expression or pattern under a `cfg` that
 //!   requires `test` ([`super::source::is_test`]), the files a test module
@@ -22,7 +23,8 @@
 //!   `*` included), a path in an expression, a type, a pattern or an
 //!   attribute, and a path in a macro's tokens (a name followed by `::`, a
 //!   leading `::`, or `crate`, `self` or `super`; a group in them read as a
-//!   `use` tree). It is resolved
+//!   `use` tree; for C5 only, outside test code, a name alone there too,
+//!   [`Reference::bare`]). It is resolved
 //!   to a path from the crate's root: `crate`, `self` and `super` by the
 //!   module it is written in, a bare first segment when it names an item, a
 //!   module or a `use` of that module or a name one of its globs brings in,
@@ -56,6 +58,8 @@
 //!   [`DOMAIN_FORBIDS`] such as `std::process`). Every violation has a row
 //!   of [`super::ownership::MODULES_ALLOWED`], and every row still matches
 //!   one.
+
+pub(super) mod ports;
 
 use super::ownership::{Fix, Layer, ModuleAllowed, Rule, SharedModule};
 use proc_macro2::{TokenStream, TokenTree};
@@ -134,6 +138,23 @@ struct Reference {
     glob: bool,
     /// Whether it is in test code.
     test: bool,
+    /// A name alone in a macro's tokens (`RunRecovery` in
+    /// `vec![None::<&dyn RunRecovery>]`), outside test code: only C5 reads
+    /// it, since syn does not tell what it is.
+    bare: bool,
+}
+
+/// A trait the library defines, with the methods its body declares outside
+/// test code.
+#[derive(Debug)]
+struct TraitDef {
+    file: String,
+    module: ModulePath,
+    name: String,
+    /// Declared `pub` or `pub(crate)`.
+    public: bool,
+    test: bool,
+    methods: BTreeSet<String>,
 }
 
 /// The library read as syntax.
@@ -144,6 +165,10 @@ struct Crate {
     /// only inside it.
     blocks: Vec<Module>,
     references: Vec<Reference>,
+    traits: Vec<TraitDef>,
+    /// The names each file defines outside test code (an item at any
+    /// depth, or a fn of an `impl`), by file.
+    defined: BTreeSet<(String, String)>,
     errors: Vec<String>,
     /// Every name an item or a `use` defines somewhere in the library: a
     /// bare first segment outside it names nothing of the library.
@@ -173,6 +198,7 @@ struct Memo {
 pub(super) struct ModuleRecords<'a> {
     pub(super) shared: &'a [SharedModule],
     pub(super) allowed: &'a [ModuleAllowed],
+    pub(super) ports: ports::PortRecords<'a>,
 }
 
 /// Reads the library from `src/lib.rs` of `files` (path from the repository
@@ -284,6 +310,26 @@ impl Reader<'_> {
             ns,
             glob,
             test: self.test,
+            bare: false,
+        });
+    }
+
+    /// The name `name` alone in a macro's tokens, as a reference only C5
+    /// reads; none in test code, which C5 does not count.
+    fn bare(&mut self, name: String) {
+        if self.test {
+            return;
+        }
+        let module = self.here().clone();
+        self.krate.references.push(Reference {
+            file: self.file.clone(),
+            module,
+            blocks: self.blocks.clone(),
+            path: vec![name],
+            ns: ANY,
+            glob: false,
+            test: false,
+            bare: true,
         });
     }
 
@@ -363,7 +409,9 @@ impl Reader<'_> {
 
     /// The paths in a macro's tokens, which syn does not parse: a name
     /// followed by `::`, a leading `::`, or `crate`, `self` or `super`, a
-    /// group (`crate::{a, b::c}`) read as a `use` tree.
+    /// group (`crate::{a, b::c}`) read as a `use` tree; and each other name
+    /// alone (not a keyword, a field or method after `.`, a lifetime or a
+    /// macro's `$` variable) as a [`Reference::bare`].
     fn tokens(&mut self, tokens: TokenStream) {
         let trees: Vec<TokenTree> = tokens.into_iter().collect();
         let mut i = 0;
@@ -393,6 +441,17 @@ impl Reader<'_> {
                 || after_colons && !leading
                 || !after_colons && !starts
             {
+                if let TokenTree::Ident(id) = &trees[i]
+                    && !after_colons
+                {
+                    let name = id.to_string();
+                    let marked = i >= 1
+                        && matches!(&trees[i - 1], TokenTree::Punct(p)
+                            if ['.', '\'', '$'].contains(&p.as_char()));
+                    if !marked && !KEYWORDS.contains(&name.as_str()) {
+                        self.bare(name);
+                    }
+                }
                 i += 1;
                 continue;
             }
@@ -544,12 +603,44 @@ fn under_cfg(attrs: &[syn::Attribute]) -> bool {
 
 impl<'ast> Visit<'ast> for Reader<'_> {
     fn visit_item(&mut self, item: &'ast syn::Item) {
+        let test = self.test || super::source::is_test(super::source::item_attrs(item));
         if let Some((name, cfg, ns)) = item_name(item) {
+            if !test {
+                self.krate.defined.insert((self.file.clone(), name.clone()));
+            }
             self.item(name, cfg, ns);
         }
         self.with_attrs(super::source::item_attrs(item), |r| {
             visit::visit_item(r, item);
         });
+    }
+
+    fn visit_item_trait(&mut self, t: &'ast syn::ItemTrait) {
+        let methods = t
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                syn::TraitItem::Fn(f) if !super::source::is_test(&f.attrs) => {
+                    Some(f.sig.ident.to_string())
+                }
+                _ => None,
+            })
+            .collect();
+        let public = match &t.vis {
+            syn::Visibility::Public(_) => true,
+            syn::Visibility::Restricted(r) => r.in_token.is_none() && r.path.is_ident("crate"),
+            syn::Visibility::Inherited => false,
+        };
+        let module = self.here().clone();
+        self.krate.traits.push(TraitDef {
+            file: self.file.clone(),
+            module,
+            name: t.ident.to_string(),
+            public,
+            test: self.test,
+            methods,
+        });
+        visit::visit_item_trait(self, t);
     }
 
     /// `extern crate self as name;` names the crate's root, from every
@@ -588,6 +679,14 @@ impl<'ast> Visit<'ast> for Reader<'_> {
             syn::ImplItem::Macro(i) => &i.attrs,
             _ => &[],
         };
+        if let syn::ImplItem::Fn(f) = item
+            && !self.test
+            && !super::source::is_test(attrs)
+        {
+            self.krate
+                .defined
+                .insert((self.file.clone(), f.sig.ident.to_string()));
+        }
         self.with_attrs(attrs, |r| visit::visit_impl_item(r, item));
     }
 
@@ -1228,11 +1327,17 @@ pub(super) fn check(files: &BTreeMap<String, String>, records: &ModuleRecords) -
             ));
         }
     }
+    let ports = ports::PortCheck::new(&krate, files, &records.ports, &mut errors);
     let mut found = BTreeSet::new();
     for reference in &krate.references {
         let Some(from) = layer(&reference.module) else {
             continue;
         };
+        if !reference.bare
+            && let Some(written) = ports.c8(reference)
+        {
+            found.insert((reference.file.clone(), Rule::C8, written));
+        }
         let mut seen = Vec::new();
         let written = krate.absolute(
             &reference.module,
@@ -1246,20 +1351,25 @@ pub(super) fn check(files: &BTreeMap<String, String>, records: &ModuleRecords) -
             paths.extend(krate.resolve(to.clone(), reference.ns, &mut seen));
             paths.insert(to);
         }
-        for to in paths {
-            if let Some((rule, module)) = layer_rule(from, &to, records.shared, &top) {
+        for to in paths.iter().filter(|_| !reference.bare) {
+            if let Some((rule, module)) = layer_rule(from, to, records.shared, &top) {
                 found.insert((reference.file.clone(), rule, module));
             }
             if let Some(module) =
-                compose_rule(&reference.module, &to, reference.glob, &loops, &children)
+                compose_rule(&reference.module, to, reference.glob, &loops, &children)
             {
                 found.insert((reference.file.clone(), Rule::L9, module));
             }
             if from == Layer::Domain
                 && !reference.test
-                && let Some(item) = domain_forbids(&to)
+                && let Some(item) = domain_forbids(to)
             {
                 found.insert((reference.file.clone(), Rule::L2, item));
+            }
+        }
+        if !reference.test {
+            for port in ports.c5(&reference.file, &paths) {
+                found.insert((reference.file.clone(), Rule::C5, port));
             }
         }
     }
@@ -1302,17 +1412,28 @@ pub(super) fn check(files: &BTreeMap<String, String>, records: &ModuleRecords) -
 }
 
 #[test]
-fn the_layers_and_the_composition_contexts_reference_only_what_they_may() {
+fn the_layers_the_composition_contexts_and_the_ports_reference_only_what_they_may() {
+    use super::ownership as o;
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let files = super::files(root, "src", "rs").into_iter().collect();
     let records = ModuleRecords {
-        shared: super::ownership::SHARED_MODULES,
-        allowed: super::ownership::MODULES_ALLOWED,
+        shared: o::SHARED_MODULES,
+        allowed: o::MODULES_ALLOWED,
+        ports: ports::PortRecords {
+            modules: o::MODULES,
+            stores: o::STORES,
+            ports: o::PORTS,
+            outer_ports: o::OUTER_PORTS,
+            not_ports: o::NOT_PORTS,
+            methods: o::METHODS,
+            lent: o::LENT,
+            port_modules: o::PORT_MODULES,
+        },
     };
     let errors = check(&files, &records);
     assert!(
         errors.is_empty(),
-        "the module references (docs/design/architecture.md, L1, L2, L3, L6, L8 and L9):\n{}",
+        "the module references (docs/design/architecture.md, L1, L2, L3, L6, L8, L9, C5, C7 and C8):\n{}",
         errors.join("\n")
     );
 }

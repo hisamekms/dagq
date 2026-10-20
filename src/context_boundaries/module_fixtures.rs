@@ -1,8 +1,8 @@
 //! The module reference check on small libraries: one with no violation,
 //! and one violation of each rule put into it.
 
-use super::modules::{ModuleRecords, check};
-use super::ownership::{Fix, Layer, ModuleAllowed, Rule, SharedModule};
+use super::modules::{ModuleRecords, check, ports::PortRecords};
+use super::ownership::{Fix, Layer, ModuleAllowed, NotPort, Rule, SharedModule};
 use std::collections::BTreeMap;
 
 const SHARED: &[SharedModule] = &[
@@ -102,6 +102,20 @@ fn errors(files: &BTreeMap<String, String>, allowed: &[ModuleAllowed]) -> Vec<St
         &ModuleRecords {
             shared: SHARED,
             allowed,
+            ports: PortRecords {
+                modules: &[],
+                stores: &[],
+                ports: &[],
+                outer_ports: &[],
+                not_ports: &[NotPort {
+                    path: "src/application/use_case.rs",
+                    name: "Clock",
+                    reason: "fixture",
+                }],
+                methods: &[],
+                lent: &[],
+                port_modules: &[],
+            },
         },
     )
 }

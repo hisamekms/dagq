@@ -1,3 +1,11 @@
+# Nothing in this tree reads this list any more: C5, C8 and the records of
+# the ports are the Rust test src/context_boundaries/modules.rs with the
+# table src/context_boundaries/ownership.rs, which holds the rows below.
+# The list stays, unchanged, only because the program review of a run runs
+# the landing branch's scripts/check-context-boundaries.sh, and an older
+# one reads it; it goes with the script (ADR-t2397-1 decision 4, stage 3).
+# Do not change it to follow the code.
+#
 # The ownership of the runtime's contexts that the module paths do not tell,
 # read by scripts/check-context-boundaries.sh for the rule C5 (its meaning:
 # docs/design/architecture.md, section "コンテキストの規則"; what counts:

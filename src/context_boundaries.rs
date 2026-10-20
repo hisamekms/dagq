@@ -24,8 +24,9 @@
 //!   removes its row.
 //! - Test code (see [`source`]) does not count.
 //!
-//! The rules L1, L2, L3, L6, L8 and L9 on the module references are checked by
-//! [`modules`] with the same table.
+//! The rules L1, L2, L3, L6, L8, L9, C5 and C8 on the module references,
+//! and C7 for the records of the ports and of the modules of
+//! `src/application/`, are checked by [`modules`] with the same table.
 //!
 //! This is test code of the library (a `#[cfg(test)]` module of
 //! `src/lib.rs`, run by `cargo test --lib`), outside the library's layers,
@@ -35,6 +36,7 @@ mod fixtures;
 mod module_fixtures;
 mod modules;
 mod ownership;
+mod port_fixtures;
 mod source;
 mod sql;
 

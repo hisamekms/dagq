@@ -65,8 +65,8 @@ pub trait TaskReads {
 }
 
 /// 計画管理's writes of the tasks and goals, with the reads of
-/// [`TaskReads`]; its claim is published to 実行と着地 (the `method`
-/// items of .config/context-boundaries.txt).
+/// [`TaskReads`]; its claim is published to 実行と着地 (the `METHODS`
+/// rows of src/context_boundaries/ownership.rs).
 pub trait TaskStore: TaskReads {
     fn add(&mut self, task: NewTask) -> Result<Task>;
     /// Move a task by `action`. A cancel that records its reason is
@@ -896,7 +896,7 @@ pub trait GoalReviewStore {
 /// `draft_origins` and the search index with `landed_commits`): the
 /// related tasks and their landed commits, the search, and the lookups
 /// `stats`, `kpi` and `forecast` join runs with. A pure read, open to
-/// every context (.config/context-boundaries.txt).
+/// every context (src/context_boundaries/ownership.rs).
 pub trait PlanningRecords {
     /// The commits that landed the `limit` completed tasks most related to
     /// `task` (`dagq related`, ADR-0046), for the files it is expected to

@@ -20,9 +20,8 @@
 //! to L9, C1 to C8, X1 to X3) are in docs/design/architecture.md
 //! (ADR-t1545-1), and what each context owns and exposes that the module
 //! paths do not tell is in src/context_boundaries/ownership.rs (the tables,
-//! the stores, the transactions and the shared parts each layer may use)
-//! and .config/context-boundaries.txt (the ports and the modules of the
-//! application). The test-only module `context_boundaries` checks the
+//! the stores, the transactions, the shared parts each layer may use, the
+//! ports and the modules of the application). The test-only module `context_boundaries` checks the
 //! rules it can on the sources, outside the layers. Of [`build_id`], the
 //! contexts use only the rule of the identifier and the commit it names,
 //! which do no I/O; its `emit` and `compute` call Git and belong to the
