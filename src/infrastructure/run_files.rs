@@ -120,6 +120,22 @@ impl RunFiles for LocalRunFiles {
         let (dir, name) = Directory::parent(path)?;
         dir.write(name, contents).map(drop)
     }
+    fn create_new_file(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
+        if !in_run_dir(path) {
+            use std::os::unix::fs::OpenOptionsExt;
+            // O_CREAT | O_EXCL: an existing entry, a link included, is
+            // refused, never followed.
+            return fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .custom_flags(libc::O_NOFOLLOW)
+                .mode(0o600)
+                .open(path)?
+                .write_all(contents);
+        }
+        let (dir, name) = Directory::parent(path)?;
+        dir.create_new(name, contents)
+    }
     fn copy(&self, from: &Path, to: &Path) -> io::Result<()> {
         if !in_run_dir(to) {
             return fs::copy(from, to).map(drop);
@@ -550,6 +566,31 @@ mod tests {
         assert!(LocalRunFiles.try_lock(&path).unwrap().is_none());
         drop(guard);
         assert!(LocalRunFiles.try_lock(&path).unwrap().is_some());
+    }
+
+    /// A new file is created only where nothing is: an existing file and
+    /// a link (to a file elsewhere) are refused and left as they were, in
+    /// a run directory and outside one.
+    #[test]
+    fn a_new_file_never_replaces_or_follows_what_is_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = LocalRunFiles;
+        let elsewhere = dir.path().join("elsewhere");
+        fs::write(&elsewhere, "kept").unwrap();
+        for parent in [dir.path().join("recheck"), dir.path().join("runs/a")] {
+            fs::create_dir_all(&parent).unwrap();
+            let new = parent.join("new");
+            files.create_new_file(&new, b"dagq").unwrap();
+            assert_eq!(fs::read(&new).unwrap(), b"dagq");
+            let error = files.create_new_file(&new, b"again").unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+            assert_eq!(fs::read(&new).unwrap(), b"dagq");
+            let link = parent.join("link");
+            std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+            let error = files.create_new_file(&link, b"dagq").unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::AlreadyExists, "{error}");
+            assert_eq!(fs::read(&elsewhere).unwrap(), b"kept");
+        }
     }
 
     #[test]

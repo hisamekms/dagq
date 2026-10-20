@@ -19,12 +19,17 @@
 //! verification's container, as `integrate`'s verification does, never on
 //! the host; with no such container it is not run and judges nothing, as
 //! a command that failed on the host (ADR-t2424-1).
+//! Before any command of a pass runs on the host, the recheck checks that
+//! it can write the build outputs of all of them ([`check_writable`]); when it cannot,
+//! the pass runs no command on the host and records nothing on the runs
+//! that would have run one (ADR-0068 decision 2), and the queue's
+//! `landing_recheck_target_unwritable` tells the inbox ([`TargetCheck`]).
 
 use super::*;
 use crate::domain::EventKind;
 use crate::domain::recheck::{
     self, CheckedBy, HELD, LANDING_RECHECK_CLEAN, LANDING_RECHECK_FAILED, Landed, RecheckConfig,
-    RecheckFailure, SKIPPED,
+    RecheckFailure, SKIPPED, TargetCheck,
 };
 use crate::domain::sccache::{CheckReason, GuardLook};
 use crate::domain::toolchain::{BuildDir, ProfileRegistry};
@@ -236,6 +241,10 @@ struct Tally {
     errors: u64,
     resumed: u64,
     held: u64,
+    /// The runs whose command would have run but did not, since the
+    /// build output could not be written ([`Finding::Unwritable`]): none
+    /// was recorded, apart from `checked`.
+    target_unwritable: u64,
     failed_runs: Vec<Value>,
 }
 
@@ -285,7 +294,10 @@ impl Tally {
 
     /// The payload of `landing_recheck_finished` against `main` after the
     /// dagq landing `landed` (`None` when main moved without one), with
-    /// `command`, how long it took and the supervisor that ran it.
+    /// `command`, how long it took and the supervisor that ran it, and,
+    /// when the pass ran no command for its build output
+    /// ([`Finding::Unwritable`]), `command_skipped_reason`
+    /// [`recheck::TARGET_UNWRITABLE`].
     fn finished(
         &self,
         main: &CommitSha,
@@ -306,6 +318,9 @@ impl Tally {
         if let (Some(payload), Value::Object(counts)) = (payload.as_object_mut(), self.counts()) {
             payload.extend(counts);
         }
+        if self.target_unwritable > 0 {
+            payload["command_skipped_reason"] = json!(recheck::TARGET_UNWRITABLE);
+        }
         payload
     }
 
@@ -321,6 +336,7 @@ impl Tally {
             "errors": self.errors,
             "resumed": self.resumed,
             "held": self.held,
+            "target_unwritable": self.target_unwritable,
         })
     }
 }
@@ -370,6 +386,11 @@ enum InContainer {
 /// container (a run in a container whose command ran).
 type Checked = (Target, Finding, Option<u16>);
 
+/// What a recheck's thread found: each run's [`Checked`], and its write
+/// check of the build outputs, `None` when no command was to run on the
+/// host.
+type Found = (Vec<Checked>, Option<TargetCheck>);
+
 /// What the recheck found for one run.
 #[derive(Debug)]
 pub(super) enum Finding {
@@ -381,6 +402,10 @@ pub(super) enum Finding {
     Failed(RecheckFailure),
     /// Git or the command could not be run: nothing is recorded on the run.
     Error(String),
+    /// The command would have run, but the pass's build output could not
+    /// be written ([`check_writable`]), so no command ran: nothing is
+    /// recorded on the run (ADR-0068 decision 2).
+    Unwritable,
 }
 
 /// A recheck in progress on its thread.
@@ -393,7 +418,7 @@ pub(super) struct RecheckWatch {
     main: CommitSha,
     command: Option<String>,
     started: Instant,
-    handle: Option<thread::JoinHandle<Vec<Checked>>>,
+    handle: Option<thread::JoinHandle<Found>>,
     /// The queue's recheck lock and the recheck's heavy turn
     /// (ADR-t2719-1), held until the recheck is recorded.
     _lock: Box<dyn std::any::Any + Send>,
@@ -699,6 +724,7 @@ impl Supervisor<'_> {
         let verifier = self.verifier.clone();
         let files = self.files.clone();
         let on = main.clone();
+        let probe = write_probe(&self.generators.ids.uuid());
         let handle = spawn_traced(move || {
             recheck_runs(
                 &Recheck {
@@ -710,6 +736,7 @@ impl Supervisor<'_> {
                     dir: &dir,
                     look: &look,
                     in_container: in_container.as_ref(),
+                    probe: &probe,
                 },
                 targets,
             )
@@ -744,7 +771,7 @@ impl Supervisor<'_> {
     /// Record what a recheck found: each finding, failed or clean, on its
     /// run (and its open asks), and `landing_recheck_finished` with the counts on the run
     /// whose landing it followed (or the first run it checked).
-    fn apply_recheck(&mut self, watch: &RecheckWatch, found: Vec<Checked>) -> Result<()> {
+    fn apply_recheck(&mut self, watch: &RecheckWatch, (found, writes): Found) -> Result<()> {
         let mut tally = Tally::default();
         for (target, finding, removed) in found {
             if let Some(port) = removed {
@@ -777,6 +804,10 @@ impl Supervisor<'_> {
                 Finding::Error(error) => {
                     tally.error();
                     warn!(run_id = %target.run_id, error = %error, "run {}: the landing recheck against main {} could not judge it: {error}", target.run_id, watch.main);
+                    continue;
+                }
+                Finding::Unwritable => {
+                    tally.target_unwritable += 1;
                     continue;
                 }
                 Finding::Failed(failure) => failure,
@@ -812,6 +843,37 @@ impl Supervisor<'_> {
             EventKind::LandingRecheckFinished,
             payload,
         )?;
+        if let Some(writes) = &writes {
+            self.record_target_check(writes, &watch.main, tally.target_unwritable)?;
+        }
+        Ok(())
+    }
+
+    /// Record on the queue what the pass's write check of its build output
+    /// found, where it differs from the latest record of [`recheck::TARGET_KINDS`]
+    /// ([`TargetCheck::transition`]): the attention once while it stays
+    /// unwritable, its end once it is written again.
+    fn record_target_check(
+        &mut self,
+        writes: &TargetCheck,
+        main: &CommitSha,
+        unrecorded: u64,
+    ) -> Result<()> {
+        if let TargetCheck::Unwritable { path, error } = writes {
+            warn!(
+                "the landing recheck against main {main} cannot write {path} ({error}): it ran no command, and the {unrecorded} run(s) it would have run one on keep waiting to land with nothing recorded"
+            );
+        }
+        let last = self.queue.latest_queue_event(&recheck::TARGET_KINDS)?;
+        if let Some((kind, mut payload)) =
+            writes.transition(last.as_ref().map(|event| &event.kind), main, unrecorded)
+        {
+            payload["supervisor"] = json!(self.registration.token());
+            self.queue.record_queue_event(kind, payload)?;
+            if kind == EventKind::LandingRecheckTargetWritable {
+                info!("the landing recheck writes its build output again; its commands run");
+            }
+        }
         Ok(())
     }
 
@@ -1025,46 +1087,157 @@ struct Recheck<'a> {
     /// Where the commands of the runs in a container run; `None` when no
     /// command of such a run is to run.
     in_container: Option<&'a InContainer>,
+    /// The name of the file the pass's write check creates and removes in
+    /// each build output ([`write_probe`]).
+    probe: &'a str,
 }
 
-/// Check each target against `main`, one after another (ADR-0068 decision
-/// 2): `git merge-tree` first; a clean merge, when there is a `command`
-/// and the merged tree differs from main in a path of `[recheck] paths`
-/// (or there are none, ADR-t2032-1), is committed on top of main and the
-/// command run on it, its output in `recheck-<main>.log` of the run
-/// directory. A run on the host has it checked out in the scratch worktree
-/// under `dir` and run there in `/bin/sh` with the environment of
-/// [`recheck_env`], once for each of the build runs of the declarations
-/// that apply (checked out again before each, and no further once one
-/// fails; [`crate::domain::toolchain::Toolchains::build_runs`]). A run in
-/// a container has it run in a verification's
-/// container, as `in_container` says ([`run_in_container`]).
-fn recheck_runs(recheck: &Recheck<'_>, targets: Vec<Target>) -> Vec<Checked> {
-    targets
+/// What came of a run's check before its command: found already (a
+/// conflict, no command, a diff off `[recheck] paths`, no container to run
+/// in), or its command is to run.
+enum Prepared {
+    Found(Finding),
+    Command(ToRun),
+}
+
+/// A run whose command is to run.
+struct ToRun {
+    /// Main's tree with the run merged in, committed on top of main.
+    merged: CommitSha,
+    /// The profiles the repository declares, which read the output.
+    toolchains: crate::domain::toolchain::Toolchains,
+    /// The build outputs of each run of the command on the host
+    /// ([`crate::domain::toolchain::Toolchains::build_runs`]); `None` for a
+    /// run in a container, which builds in its container.
+    host: Option<Vec<Vec<BuildDir>>>,
+}
+
+/// The build outputs under `dir` of every run of `prepared` whose command
+/// is to run on the host, each once, in the order the runs come: what a
+/// pass checks ([`pass_writes`]) before any of its commands runs. None
+/// when no command is to run on the host (no command, every run in
+/// conflict or off `[recheck] paths`, only runs in a container) or no
+/// declaration applies.
+fn host_outputs(prepared: &[Result<Prepared>], dir: &Path) -> Vec<PathBuf> {
+    let mut outputs: Vec<PathBuf> = Vec::new();
+    for prepared in prepared {
+        let Ok(Prepared::Command(ToRun {
+            host: Some(runs), ..
+        })) = prepared
+        else {
+            continue;
+        };
+        for output in runs.iter().flatten().map(|output| output.dir_under(dir)) {
+            if !outputs.contains(&output) {
+                outputs.push(output);
+            }
+        }
+    }
+    outputs
+}
+
+/// The write check of a pass over `outputs` ([`host_outputs`]) with
+/// `check`, until one is unwritable: `None` with none to check. Once one
+/// is unwritable, no command of the pass runs on the host; a run in a
+/// container builds in its container, not here, and is neither checked
+/// nor stopped.
+fn pass_writes(outputs: &[PathBuf], check: impl Fn(&Path) -> TargetCheck) -> Option<TargetCheck> {
+    let mut found = None;
+    for output in outputs {
+        let checked = check(output);
+        let writable = checked == TargetCheck::Writable;
+        found = Some(checked);
+        if !writable {
+            break;
+        }
+    }
+    found
+}
+
+/// The name of the file a pass's write check ([`check_writable`]) creates
+/// and removes in a build output, unique to the pass by `id`, so it never
+/// names what a command or an earlier pass left there.
+fn write_probe(id: &str) -> String {
+    format!(".dagq-write-check-{id}")
+}
+
+/// Whether the recheck can write in the build output `dir` (`<queue
+/// dir>/recheck/target` for the Rust profile): it is made if missing, and
+/// the file `probe` ([`write_probe`]) is created in it only where nothing
+/// of that name is ([`RunFiles::create_new_file`]: an existing file or
+/// link is neither written nor followed), then removed; only a file this
+/// check created is removed. A command that cannot write where
+/// it builds fails on every run whatever the run's code, as the cargo of a
+/// supervisor started in another's sandbox did with `Operation not
+/// permitted` on `target/debug/deps`. Unwritable names the path that
+/// failed and the OS's error.
+fn check_writable(files: &dyn RunFiles, dir: &Path, probe: &str) -> TargetCheck {
+    let unwritable = |path: &Path, error: std::io::Error| TargetCheck::Unwritable {
+        path: path.display().to_string(),
+        error: error.to_string(),
+    };
+    if let Err(error) = files.create_dir_all(dir) {
+        return unwritable(dir, error);
+    }
+    let probe = dir.join(probe);
+    if let Err(error) = files.create_new_file(&probe, b"dagq") {
+        return unwritable(&probe, error);
+    }
+    if let Err(error) = files.remove_file(&probe) {
+        return unwritable(&probe, error);
+    }
+    TargetCheck::Writable
+}
+
+/// Check each target against `main` (ADR-0068 decision 2), in two steps.
+/// First each one up to its command ([`prepare_run`]): `git merge-tree`;
+/// a clean merge, when there is a `command` and the merged tree differs
+/// from main in a path of `[recheck] paths` (or there are none,
+/// ADR-t2032-1), is committed on top of main. Then, before any command
+/// runs, the build outputs of every run whose command runs on the host
+/// are checked ([`pass_writes`]): when one cannot be written, no command
+/// runs on the host and those runs are [`Finding::Unwritable`]. Then the
+/// commands, one after another ([`run_command`]), each output in
+/// `recheck-<main>.log` of the run directory.
+fn recheck_runs(recheck: &Recheck<'_>, targets: Vec<Target>) -> Found {
+    let prepared: Vec<Result<Prepared>> = targets
+        .iter()
+        .map(|target| prepare_run(recheck, target))
+        .collect();
+    let writes = pass_writes(&host_outputs(&prepared, recheck.dir), |output| {
+        check_writable(recheck.files, output, recheck.probe)
+    });
+    let unwritable = matches!(writes, Some(TargetCheck::Unwritable { .. }));
+    let checked = targets
         .into_iter()
-        .map(|target| {
+        .zip(prepared)
+        .map(|(target, prepared)| {
             let mut removed = None;
-            let finding = recheck_run(recheck, &target, &mut removed)
-                .unwrap_or_else(|error| Finding::Error(format!("{error:#}")));
+            let finding = match prepared {
+                Ok(Prepared::Found(finding)) => Ok(finding),
+                Ok(Prepared::Command(ToRun { host: Some(_), .. })) if unwritable => {
+                    Ok(Finding::Unwritable)
+                }
+                Ok(Prepared::Command(to_run)) => {
+                    run_command(recheck, &target, to_run, &mut removed)
+                }
+                Err(error) => Err(error),
+            }
+            .unwrap_or_else(|error| Finding::Error(format!("{error:#}")));
             (target, finding, removed)
         })
-        .collect()
+        .collect();
+    (checked, writes)
 }
 
-/// `removed` is set to the port of the sccache whose wrapper a container's
-/// command was run without.
-fn recheck_run(
-    recheck: &Recheck<'_>,
-    target: &Target,
-    removed: &mut Option<u16>,
-) -> Result<Finding> {
+/// A run's check up to its command: what was found without one, or what
+/// the command needs. Nothing runs or is made on the host but the merged
+/// commit.
+fn prepare_run(recheck: &Recheck<'_>, target: &Target) -> Result<Prepared> {
     let Recheck {
         verifier,
-        files,
         main,
         config,
-        dir,
-        look,
         ..
     } = *recheck;
     let guarded;
@@ -1076,12 +1249,16 @@ fn recheck_run(
     };
     let tree = match repository.merged_tree(main.as_str(), target.head.as_str())? {
         Ok(tree) => tree,
-        Err(paths) => return Ok(Finding::Failed(RecheckFailure::Conflict { paths })),
+        Err(paths) => {
+            return Ok(Prepared::Found(Finding::Failed(RecheckFailure::Conflict {
+                paths,
+            })));
+        }
     };
     let Some(command) = config.command.as_deref() else {
-        return Ok(Finding::Clean {
+        return Ok(Prepared::Found(Finding::Clean {
             skipped_by_paths: false,
-        });
+        }));
     };
     if !config.paths.is_empty()
         && !recheck::runs_command(
@@ -1089,25 +1266,24 @@ fn recheck_run(
             &repository.changed_paths(main.as_str(), &tree)?,
         )
     {
-        return Ok(Finding::Clean {
+        return Ok(Prepared::Found(Finding::Clean {
             skipped_by_paths: true,
-        });
+        }));
     }
-    let refused = |why: String| {
-        Ok(Finding::Failed(RecheckFailure::ContainerRefused {
-            command: command.to_owned(),
-            why,
-        }))
-    };
     // Refused before anything is made for it.
-    let in_container = match (&target.container, recheck.in_container) {
-        (None, _) => None,
-        (Some(_), Some(InContainer::Refused(why))) => return refused(why.clone()),
-        (Some(_), None) => return refused("no container was looked at".to_owned()),
-        (Some(run), Some(InContainer::Run { containers, tokens })) => {
-            Some((run, &**containers, &**tokens))
-        }
+    let refusal = match (&target.container, recheck.in_container) {
+        (Some(_), Some(InContainer::Refused(why))) => Some(why.clone()),
+        (Some(_), None) => Some("no container was looked at".to_owned()),
+        _ => None,
     };
+    if let Some(why) = refusal {
+        return Ok(Prepared::Found(Finding::Failed(
+            RecheckFailure::ContainerRefused {
+                command: command.to_owned(),
+                why,
+            },
+        )));
+    }
     let merged = repository.commit_tree(
         &tree,
         main.as_str(),
@@ -1120,18 +1296,68 @@ fn recheck_run(
     // host, place the build output (ADR-t2268-1), resolved before the
     // command so a mistake in them does not cost it.
     let toolchains = verifier.toolchains()?;
+    let host = match target.container {
+        Some(_) => None,
+        None => Some(toolchains.build_runs(|| repository.tree_paths(merged.as_str()))?),
+    };
+    Ok(Prepared::Command(ToRun {
+        merged,
+        toolchains,
+        host,
+    }))
+}
+
+/// Run the command of `target` as `to_run` says ([`prepare_run`]). A run
+/// on the host has the merged commit checked out in the scratch worktree
+/// under `dir` and the command run there in `/bin/sh` with the environment
+/// of [`recheck_env`], once for each of its build runs (checked out again
+/// before each, and no further once one fails). A run in a container has
+/// it run in a verification's container, as `in_container` says
+/// ([`run_in_container`]). `removed` is set to the port of the sccache
+/// whose wrapper a container's command was run without.
+fn run_command(
+    recheck: &Recheck<'_>,
+    target: &Target,
+    to_run: ToRun,
+    removed: &mut Option<u16>,
+) -> Result<Finding> {
+    let Recheck {
+        verifier,
+        files,
+        main,
+        config,
+        dir,
+        look,
+        ..
+    } = *recheck;
+    let command = config
+        .command
+        .as_deref()
+        .context("no command to run in the recheck")?;
+    let ToRun {
+        merged,
+        toolchains,
+        host,
+    } = to_run;
+    let refused = |why: String| {
+        Ok(Finding::Failed(RecheckFailure::ContainerRefused {
+            command: command.to_owned(),
+            why,
+        }))
+    };
     let log = target
         .run_dir
         .join(format!("recheck-{}.log", &main.as_str()[..12]));
-    let status = match in_container {
-        None => {
+    let status = match (host, &target.container, recheck.in_container) {
+        (Some(runs), _, _) => {
             let scratch = dir.join("worktree");
             files.create_dir_all(dir)?;
-            let runs = toolchains.build_runs(|| repository.tree_paths(merged.as_str()))?;
             let mut status = None;
             // Each run on the merged tree as committed, until one fails.
             for outputs in &runs {
-                repository.checkout_scratch(&scratch, merged.as_str())?;
+                recheck
+                    .repository
+                    .checkout_scratch(&scratch, merged.as_str())?;
                 for output in outputs {
                     files.create_dir_all(&output.dir_under(dir))?;
                 }
@@ -1145,11 +1371,11 @@ fn recheck_run(
             }
             status.context("no run of the recheck's command")?
         }
-        Some((run, containers, tokens)) => {
+        (None, Some(run), Some(InContainer::Run { containers, tokens })) => {
             let ran = run_in_container(
                 &InRecheck {
-                    containers,
-                    tokens,
+                    containers: &**containers,
+                    tokens: &**tokens,
                     verifier,
                 },
                 run,
@@ -1174,6 +1400,7 @@ fn recheck_run(
                 status => status,
             }
         }
+        (None, _, _) => return refused("no container was looked at".to_owned()),
     };
     let (code, signal, timed_out) = match status {
         Ok(exit) if exit.success => {
@@ -1320,6 +1547,111 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect()
+    }
+
+    /// The write check makes the build output, creates its file in it and
+    /// removes it, leaving nothing behind. A file already there under the
+    /// probe's name is neither written nor removed: the check found it
+    /// cannot create its own.
+    #[test]
+    fn a_writable_build_output_is_checked_and_left_as_it_was() {
+        use crate::application::memory_files::MemoryFiles;
+        let files = MemoryFiles::default();
+        let target = Path::new("/q/recheck/target");
+        let probe = write_probe("pass-1");
+        assert_eq!(
+            check_writable(&files, target, &probe),
+            TargetCheck::Writable
+        );
+        assert!(!files.exists(&target.join(&probe)));
+        let left = target.join(write_probe("pass-2"));
+        files.put(&left, std::time::SystemTime::UNIX_EPOCH, "left");
+        let found = check_writable(&files, target, &write_probe("pass-2"));
+        assert!(
+            matches!(&found, TargetCheck::Unwritable { path, .. } if Path::new(path) == left),
+            "{found:?}"
+        );
+        assert_eq!(files.bytes(&left).unwrap(), b"left");
+        assert_ne!(write_probe("pass-1"), write_probe("pass-2"));
+    }
+
+    /// The build outputs a pass checks are those of the runs whose command
+    /// runs on the host, each once, in the runs' order: none for a run
+    /// found without a command (a conflict, no command, a diff off
+    /// `[recheck] paths`), a run in a container or one that could not be
+    /// prepared, so a pass whose runs all go without a command checks
+    /// nothing.
+    #[test]
+    fn a_pass_checks_the_build_outputs_of_the_runs_whose_command_runs_on_the_host() {
+        let dir = Path::new("/q/recheck");
+        let core = rust::BUILD_OUTPUT.declared("core", "rust");
+        let rust = rust::BUILD_OUTPUT.declared("rust", "rust");
+        let command = |host: Option<Vec<Vec<BuildDir>>>| {
+            Ok(Prepared::Command(ToRun {
+                merged: CommitSha::parse("a".repeat(40), "commit").unwrap(),
+                toolchains: crate::domain::toolchain::Toolchains::none(),
+                host,
+            }))
+        };
+        let without_command = || {
+            vec![
+                Ok(Prepared::Found(Finding::Clean {
+                    skipped_by_paths: false,
+                })),
+                Ok(Prepared::Found(Finding::Clean {
+                    skipped_by_paths: true,
+                })),
+                Ok(Prepared::Found(Finding::Failed(RecheckFailure::Conflict {
+                    paths: vec!["change.txt".into()],
+                }))),
+                command(None),
+                Err(anyhow::anyhow!("git failed")),
+            ]
+        };
+        assert!(host_outputs(&without_command(), dir).is_empty());
+        let mut prepared = without_command();
+        // A run with no declaration that applies comes first: the outputs
+        // of the runs after it are checked before its command runs.
+        prepared.push(command(Some(vec![vec![]])));
+        prepared.push(command(Some(vec![vec![core.clone()], vec![rust.clone()]])));
+        prepared.push(command(Some(vec![vec![rust]])));
+        assert_eq!(
+            host_outputs(&prepared, dir),
+            [dir.join("target-core"), dir.join("target")]
+        );
+    }
+
+    /// The outputs are checked in order until one is unwritable; with none
+    /// to check, nothing is found.
+    #[test]
+    fn a_pass_stops_checking_at_its_first_unwritable_build_output() {
+        let checked = std::cell::RefCell::new(Vec::new());
+        let target = PathBuf::from("/q/recheck/target");
+        let other = PathBuf::from("/q/recheck/target-other");
+        let last = PathBuf::from("/q/recheck/target-last");
+        let unwritable = TargetCheck::Unwritable {
+            path: other.display().to_string(),
+            error: "Operation not permitted (os error 1)".into(),
+        };
+        let check = |output: &Path| {
+            checked.borrow_mut().push(output.to_owned());
+            if output == other {
+                unwritable.clone()
+            } else {
+                TargetCheck::Writable
+            }
+        };
+        assert_eq!(pass_writes(&[], check), None);
+        assert_eq!(
+            pass_writes(std::slice::from_ref(&target), check),
+            Some(TargetCheck::Writable)
+        );
+        checked.borrow_mut().clear();
+        assert_eq!(
+            pass_writes(&[target.clone(), other.clone(), last], check),
+            Some(unwritable.clone())
+        );
+        assert_eq!(*checked.borrow(), [target, other]);
     }
 
     #[test]
@@ -1808,6 +2140,7 @@ mod tests {
                 "errors": 1,
                 "resumed": 1,
                 "held": 1,
+                "target_unwritable": 0,
             })
         );
         let none = Tally::default().finished(&main, None, None, 0, &LeaseToken::new("me"));
@@ -1815,5 +2148,16 @@ mod tests {
         assert_eq!(none["landed_task_id"], Value::Null);
         assert_eq!(none["checked"], 0);
         assert_eq!(none["failed_runs"], json!([]));
+        assert!(none.get("command_skipped_reason").is_none());
+        // Runs left unrecorded for an unwritable build output are counted
+        // apart from `checked`, with why no command ran.
+        let unwritable = Tally {
+            target_unwritable: 2,
+            ..Tally::default()
+        }
+        .finished(&main, None, Some("exit 1"), 0, &LeaseToken::new("me"));
+        assert_eq!(unwritable["checked"], 0);
+        assert_eq!(unwritable["target_unwritable"], 2);
+        assert_eq!(unwritable["command_skipped_reason"], "target_unwritable");
     }
 }

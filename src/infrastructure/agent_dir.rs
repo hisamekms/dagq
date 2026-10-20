@@ -222,6 +222,28 @@ impl Directory {
         check(unsafe { libc::mkdirat(self.0.fd(), name.as_ptr(), 0o755) })
     }
 
+    /// A new file `name` with `bytes`, created only when no entry of that
+    /// name exists (O_EXCL, a link included and never followed).
+    pub(crate) fn create_new(&self, name: impl AsRef<OsStr>, bytes: &[u8]) -> io::Result<()> {
+        let entry = entry_name(name)?;
+        // SAFETY: descriptor and name are valid; ownership is taken below.
+        let fd = unsafe {
+            libc::openat(
+                self.0.fd(),
+                entry.as_ptr(),
+                libc::O_WRONLY
+                    | libc::O_CREAT
+                    | libc::O_EXCL
+                    | libc::O_NOFOLLOW
+                    | libc::O_NONBLOCK
+                    | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        check(fd)?;
+        File::from(unsafe { OwnedFd::from_raw_fd(fd) }).write_all(bytes)
+    }
+
     pub(crate) fn read_file(&self, name: impl AsRef<OsStr>) -> io::Result<File> {
         let name = entry_name(name)?;
         // Nonblocking open, then fstat: a FIFO cannot hold the caller.

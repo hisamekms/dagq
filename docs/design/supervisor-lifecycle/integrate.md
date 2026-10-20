@@ -19,6 +19,7 @@ related:
   - adr-0017
   - adr-0029
   - adr-0040
+  - adr-0049
   - adr-0068
   - adr-t615-1
   - adr-t1233-2
@@ -71,7 +72,7 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 ## 承認とslot
 
 - 束縛・対象・lease・空き容量（[空き容量](claim-hold.md#人が打つintegrate)）の確かめと承認の記録は`begin`が持ち、supervisorがreviewかresumeで持つrunは人の`integrate`では承認しない。
-- 検証のコマンドは自動更新のjobの関門（buildとe2e）と同時に流れず、関門が走るか番を待つ間、supervisorは着地を次のpassに回し、`land_integrating`は番を取れるまで待つ（[ADR-t2719-1](../../adr/2026-10-18-t2719-1-auto-update-gate-and-landing-checks-take-turns.md)、[Auto-update](auto-update.md)の「着地の検証との順番」）。
+- 検証のコマンドは自動更新のjobの関門（buildとe2e）と同時に流れず、関門が走るか番を待つ間、supervisorは着地を次のpassに回し、`land_integrating`は番を取れるまで待つ（ADR-t2719-1、[Auto-update](auto-update.md)の「着地の検証との順番」）。
 
 ## receiptの検査とrebase
 
@@ -90,20 +91,20 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 - 1つの試行の流れは`land`の検証のloopと`VerifyStep::run`が持つ。
 - コマンドの起動と止め方は`infrastructure::adapters::run_shell_to_log`、環境は`verification_command`が持つ（[Run environment](run-environment.md#run-environment)）。
 - 失敗の分類は`domain::verify_failure::classify`、印の出どころは[Toolchain profiles](../toolchain-profiles.md)、Rustの印とnextestのstatusの集合は`domain::toolchain::rust`が持つ。
-- `dagq.toml`の着地の検証は、名指すtaskのコマンドを置き換える（[ADR-t1925-1](../../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)、[Validation](validation.md#着地の検証)）。
+- `dagq.toml`の着地の検証は、名指すtaskのコマンドを置き換える（ADR-t1925-1、[Validation](validation.md#着地の検証)）。
   下の2つのやり直しは置き換えたコマンドにも効く。
 - verificationがcontainerなら、コマンドはrebase後のcommitのcloneのcontainerで流れ、使えなければコマンドの前に止める（[Container runtime](../container-runtime.md#verificationの実行)）。
 
 ## hostの失敗のやり直し
 
-- hostの分類（`FailureClass::is_environmental`）の失敗は、workerをresumeせず同じ試行の中で1回だけやり直す（[ADR-t639-1](../../adr/2026-09-27-t639-1-retry-verification-failures-of-the-host-once.md)）。
+- hostの分類（`FailureClass::is_environmental`）の失敗は、workerをresumeせず同じ試行の中で1回だけやり直す（ADR-t639-1）。
 - なおhostの分類で落ちるか、やり直す空きが無ければ、leaseの無い着地待ちへ控え（`held`）、inboxのattentionになる。
   人がhostを直して`dagq integrate`を打てば、新しい試行で検証からやり直す（`domain::run_attention`）。
 - 分類の集合は人の判断なしに広げない（ADR-t639-1）。
 
 ## 不安定なtestの着地のやり直し
 
-- 落ちたtestが全て道具の流し直しで通った失敗（`flaky`）は、resumeせず同じslotと同じheadで検証を最初からもう1回流す（[ADR-t768-1](../../adr/2026-09-27-t768-1-rerun-failed-tests-once-and-land-again-on-flaky-only.md)）。
+- 落ちたtestが全て道具の流し直しで通った失敗（`flaky`）は、resumeせず同じslotと同じheadで検証を最初からもう1回流す（ADR-t768-1）。
 - やり直しは着地の試行ごとに1回までで、宣言したprofileのやり直しのenvを渡す（ADR-t1039-1）。
 - 流し直しと流しきりは`.config/nextest.toml`の設定で、nextestでない`cargo test`の検証は`flaky`にならない。
 - やり直しはattentionにせず、記録と[`stats`](commands.md)で読む。
@@ -117,7 +118,7 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 
 ## landing branch
 
-- 着地先のbranch・pushのremote・pushするかは`dagq.toml`の`[repository]`が持つ（[ADR-t615-1](../../adr/2026-09-27-t615-1-landing-branch-and-push-remote-per-repository.md)）。
+- 着地先のbranch・pushのremote・pushするかは`dagq.toml`の`[repository]`が持つ（ADR-t615-1）。
 - 解決は保存せず使うたびに行うが、1回の着地は開始時に1度だけ解決し、着地したcommitが`[repository]`を書き換えても、そのrebase先・`main`の進め方・pushは同じbranchへ行く（`LandingBranch`）。
 - sessionやaskの文面は「main」の代わりに解決したbranchの名前を書く。
 - `up`のpreflight・`supervise`の起動・`integrate`は解決できなければ止まり、`doctor`は同じerrorを報告し、既定のbranchを仮定しない。
@@ -136,10 +137,12 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 
 ## landing recheck
 
-- `main`が最後のrecheckから動けば、直接の`integrate`やdagqを通さないpushの後も、次のpassで着地待ちのrunを先回りして確かめる（[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)、[ADR-t1310-1](../../adr/2026-10-03-t1310-1-recheck-whenever-main-moves-past-the-last-recheck.md)）。
+- `main`が最後のrecheckから動けば、直接の`integrate`やdagqを通さないpushの後も、次のpassで着地待ちのrunを先回りして確かめる（[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)、ADR-t1310-1）。
 - 着地しなくなったleaseの無いrunは、askの答えや`integrate`の順番を待たずにresumeへ回り、slotに持つrunは着地の直前にparkする。
   きれいなrunにも結果を記録し、runの開いているaskは最新の結果を1つの段落で見せる（ADR-t1311-1）。
 - hostの分類で落ちたcommandと、containerのrunでcommandを流すcontainerが無かったときは何も判定せず、runは着地を待ち続ける（ADR-t639-1、ADR-t2424-1）。
+- passのどのcommandよりも前に`check_writable`がhostでcommandを流す全runのbuild outputへの書き込みを確かめ、書けないpassはhostでcommandを流さず、流すはずだったrunを記録もresumeもしない（ADR-0068決定2）。
+- 書けない間はqueueのattentionを1度だけ残し、書けたrecheckが対のeventで閉じる（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)決定9、`TargetCheck`）。
 - recheckを始められないか記録できないerrorはwarnだけで、runに何も記録せず着地を止めない（着地が改めて確かめる）。
 - mainの動きを見るsupervisorは選ばず、drainやhandoffの間は生きているほかのsupervisorが確かめる。
 - recheckも同じ番を取り、関門の間は始めずに次のpassで見直す。

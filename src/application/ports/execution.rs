@@ -32,6 +32,17 @@ pub trait RunFiles: Send + Sync {
     /// Create `dir`, which must not exist yet.
     fn create_new_dir(&self, dir: &Path) -> io::Result<()>;
     fn write(&self, path: &Path, contents: &[u8]) -> io::Result<()>;
+    /// Create the file `path` with `contents` only when nothing is there
+    /// yet: an existing file or link (never followed) is an
+    /// `AlreadyExists` error and is left as it was, so a caller removes
+    /// only what it created. A store with no links refuses a path it holds
+    /// and writes otherwise.
+    fn create_new_file(&self, path: &Path, contents: &[u8]) -> io::Result<()> {
+        if self.exists(path) {
+            return Err(io::Error::from(io::ErrorKind::AlreadyExists));
+        }
+        self.write(path, contents)
+    }
     fn copy(&self, from: &Path, to: &Path) -> io::Result<()>;
     fn read(&self, path: &Path) -> io::Result<Vec<u8>>;
     /// The bytes of `path` from `offset` on (none past its end): what a

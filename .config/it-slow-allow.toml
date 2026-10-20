@@ -2009,3 +2009,21 @@ task = 2112
 name = "runtime_provider_switch::a_codex_turn_at_its_usage_limit_moves_to_claude_without_an_ask"
 reason = "B 境界（守る境界）: the supervisor's wiring of a provider switch with real stub processes, the Codex thread and the Claude session the switch opened registered to the run before its turn"
 task = 2869
+
+# 15.6s in task 2140's stress (four waiting runs and a landing recheck)
+[[test]]
+name = "runtime_recheck::a_recheck_that_cannot_write_its_build_output_runs_no_command_and_records_no_run"
+reason = "B 境界（supervisor の配線・Git・SQLite・実 filesystem の権限）: 書けない recheck の出力先の pass で、実 git merge-tree の衝突の run の resume・paths で外れた run の clean・command より先に確かめて記録しない 2 run（出力先の無い先行 run を含む）と queue の attention が同じ pass で並ぶことを確かめる代表の 1 本。確かめる出力先と順序と counts の判断は recheck.rs と domain::recheck の unit test"
+task = 2140
+
+# 8.9s in task 2140's stress (three supervisor passes over moves of main)
+[[test]]
+name = "runtime_recheck::an_unwritable_build_output_is_told_once_and_its_end_once_it_is_written"
+reason = "B 境界（supervisor の配線・SQLite・実 filesystem の権限）: main が動くたびの recheck で queue の attention が 1 件のまま、書けるようになった recheck が対の event を SQLite に書き command を流すことを確かめる。変わり目の判断は domain::recheck::TargetCheck の unit test"
+task = 2140
+
+# task 2140's stress (one waiting run and a recheck)
+[[test]]
+name = "runtime_recheck::a_recheck_with_no_command_does_not_check_its_build_output"
+reason = "B 境界（supervisor の配線・実 filesystem の権限）: command の無い設定では、書けない recheck/target があっても実 supervisor の pass が確かめを流さず clean を記録し attention を書かないことを確かめる。どの run の出力先を確かめるかの判断は recheck.rs の host_outputs の unit test"
+task = 2140

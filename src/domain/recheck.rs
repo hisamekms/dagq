@@ -418,10 +418,126 @@ pub fn checked_by(finished: &[RunEvent], main: &str, supervisor: &str) -> Checke
     checked
 }
 
+/// Recorded on the queue when a recheck could not write its build output
+/// (`<queue dir>/recheck/<output>`, the Rust profile's `target`) and so ran
+/// no command in that pass, after anything but this kind: an attention of
+/// the inbox's ([`crate::domain::AttentionNext::FixRecheckTarget`]). Its
+/// payload holds the `path` the check could not write, the OS's `error`,
+/// the `main` checked and how many runs it left `unrecorded`. A command
+/// that cannot write where it builds fails on every run whatever its code,
+/// so the runs it would have judged get no record and stay awaiting
+/// integration, as when [run.env] names a missing program (ADR-0068
+/// decision 2, ADR-0049 decision 9).
+pub const LANDING_RECHECK_TARGET_UNWRITABLE: &str =
+    crate::domain::event_kind::EventKind::LandingRecheckTargetUnwritable.as_str();
+
+/// Recorded when a recheck wrote its build output again after a
+/// [`LANDING_RECHECK_TARGET_UNWRITABLE`] (`main`): no attention, and the
+/// attention ends with it.
+pub const LANDING_RECHECK_TARGET_WRITABLE: &str =
+    crate::domain::event_kind::EventKind::LandingRecheckTargetWritable.as_str();
+
+/// The two kinds, for reading the latest of them.
+pub const TARGET_KINDS: [&str; 2] = [
+    LANDING_RECHECK_TARGET_UNWRITABLE,
+    LANDING_RECHECK_TARGET_WRITABLE,
+];
+
+/// `command_skipped_reason` of a `landing_recheck_finished` whose pass ran
+/// no command because its build output could not be written; its count
+/// `target_unwritable` is the runs that went unrecorded for it. Apart from
+/// `command_skipped`, the runs whose diff missed `[recheck] paths`.
+pub const TARGET_UNWRITABLE: &str = "target_unwritable";
+
+/// What the write check of a recheck's build output found, made before the
+/// first run whose command would run in the pass, and only then.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetCheck {
+    Writable,
+    /// `path` could not be made or written for the OS's `error`.
+    Unwritable {
+        path: String,
+        error: String,
+    },
+}
+
+impl TargetCheck {
+    /// The queue event a pass whose check found `self` records against
+    /// `main`, given the latest of [`TARGET_KINDS`] on the queue (`last`)
+    /// and the runs it left unrecorded: unwritable after anything but
+    /// unwritable, writable after unwritable, else none, so main moving
+    /// while it stays unwritable does not wake the inbox again.
+    pub fn transition(
+        &self,
+        last: Option<&super::RecordedKind>,
+        main: &CommitSha,
+        unrecorded: u64,
+    ) -> Option<(EventKind, Value)> {
+        let was_unwritable =
+            last.is_some_and(|kind| *kind == EventKind::LandingRecheckTargetUnwritable);
+        match self {
+            Self::Unwritable { path, error } if !was_unwritable => Some((
+                EventKind::LandingRecheckTargetUnwritable,
+                json!({
+                    "path": path,
+                    "error": error,
+                    "main": main,
+                    "unrecorded": unrecorded,
+                }),
+            )),
+            Self::Writable if was_unwritable => Some((
+                EventKind::LandingRecheckTargetWritable,
+                json!({"main": main}),
+            )),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::EventId;
+
+    #[test]
+    fn records_only_the_changes_between_unwritable_and_writable() {
+        let main = CommitSha::parse("a".repeat(40), "commit").unwrap();
+        let unwritable = TargetCheck::Unwritable {
+            path: "/q/recheck/target".into(),
+            error: "Operation not permitted (os error 1)".into(),
+        };
+        let writable_kind =
+            crate::domain::RecordedKind::from(EventKind::LandingRecheckTargetWritable);
+        let unwritable_kind =
+            crate::domain::RecordedKind::from(EventKind::LandingRecheckTargetUnwritable);
+        for last in [None, Some(&writable_kind)] {
+            let (kind, payload) = unwritable.transition(last, &main, 3).unwrap();
+            assert_eq!(kind, EventKind::LandingRecheckTargetUnwritable);
+            assert_eq!(
+                payload,
+                json!({
+                    "path": "/q/recheck/target",
+                    "error": "Operation not permitted (os error 1)",
+                    "main": "a".repeat(40),
+                    "unrecorded": 3,
+                })
+            );
+        }
+        assert_eq!(
+            unwritable.transition(Some(&unwritable_kind), &main, 3),
+            None
+        );
+        let (kind, payload) = TargetCheck::Writable
+            .transition(Some(&unwritable_kind), &main, 0)
+            .unwrap();
+        assert_eq!(kind, EventKind::LandingRecheckTargetWritable);
+        assert_eq!(payload, json!({"main": "a".repeat(40)}));
+        assert_eq!(TargetCheck::Writable.transition(None, &main, 0), None);
+        assert_eq!(
+            TargetCheck::Writable.transition(Some(&writable_kind), &main, 0),
+            None
+        );
+    }
 
     fn landed() -> Landed {
         Landed {

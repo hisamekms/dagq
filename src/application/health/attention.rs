@@ -418,6 +418,29 @@ pub fn attention(
             next: AttentionNext::InstallTool,
         });
     }
+    // The landing recheck could not write its build output, so it runs no
+    // command and records nothing on the runs it would have judged until a
+    // recheck writes there again (ADR-0068 decision 2).
+    if let Some(event) = queue.latest_queue_event(&crate::domain::recheck::TARGET_KINDS)?
+        && event.kind == EventKind::LandingRecheckTargetUnwritable
+    {
+        attention.push(Attention {
+            run_id: None,
+            task_id: None,
+            pid: None,
+            ask_id: None,
+            reason_category: None,
+            status: "unwritable".into(),
+            kind: event.kind.to_string(),
+            last_error: Some(truncate_reason(&format!(
+                "{}: {}",
+                event.payload["path"].as_str().unwrap_or_default(),
+                event.payload["error"].as_str().unwrap_or_default()
+            ))),
+            last_error_code: None,
+            next: AttentionNext::FixRecheckTarget,
+        });
+    }
     // A target dagq.toml sets to the container cannot be used: its claims,
     // resumes or landings wait, never on the host, until the container can
     // be used or a task sets it back to the host (goal 38).

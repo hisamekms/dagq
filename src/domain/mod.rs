@@ -2391,6 +2391,16 @@ pub enum AttentionNext {
     /// Stop the faulty server on the host; let the supervisor start its
     /// replacement so the recorded start clears restart-failure attention.
     CheckSccache,
+    /// The landing recheck could not write its build output under the
+    /// queue's directory (`landing_recheck_target_unwritable`, with the
+    /// `path` and the OS's `error`): a person gives the supervisor write
+    /// access to that path (its permissions, or a sandbox the supervisor
+    /// started in). Until then no recheck runs its command, and the runs it
+    /// would have judged keep waiting to land with nothing recorded and no
+    /// resume (ADR-0068 decision 2). It ends with the first recheck that
+    /// writes there again (`landing_recheck_target_writable`), and is told
+    /// once however often main moves meanwhile.
+    FixRecheckTarget,
     /// The automatic update put a new binary in place of the supervisor's
     /// (`update_installed`, ADR-0073 decision 17): a notice the inbox
     /// passes on to the person, who acts on nothing.
@@ -2555,6 +2565,7 @@ impl fmt::Display for AttentionNext {
             Self::DecideWaiting => f.write_str("request a plan for the waiting tasks"),
             Self::CheckSccache => f.write_str("stop sccache on the host; the supervisor starts it"),
             Self::InstallTool => f.write_str("install tool"),
+            Self::FixRecheckTarget => f.write_str("fix the recheck target"),
             Self::LogInToGh => f.write_str("log in to gh"),
             Self::FixDagqToml => f.write_str("fix dagq.toml"),
             Self::ReportUpdate => f.write_str("report the update"),
@@ -2611,6 +2622,9 @@ pub const ATTENTION_KINDS: &[&str] = &[
     event_kind::REQUEST_PLANNER_EXHAUSTED,
     event_kind::DEPENDENCY_STRANDED,
     run_env::RUN_ENV_PROGRAM_MISSING,
+    // Not its pair `landing_recheck_target_writable`
+    // ([`AttentionNext::FixRecheckTarget`]).
+    recheck::LANDING_RECHECK_TARGET_UNWRITABLE,
     container_runtime::CONTAINER_RUNTIME_UNAVAILABLE,
     ci_watch::CI_WATCH_UNAVAILABLE,
     ci_watch::CI_JOBS_MISSING,
@@ -2905,6 +2919,11 @@ pub fn event_attention(kind: &RecordedKind, payload: &serde_json::Value) -> Opti
         (Some(EventKind::LandingReleaseStuck), _) => Some(AttentionNext::StopLandingProcesses),
         (Some(EventKind::SccacheServerRestartFailed), _) => Some(AttentionNext::CheckSccache),
         (Some(EventKind::RunEnvProgramMissing), _) => Some(AttentionNext::InstallTool),
+        // The recheck's build output could not be written, so it ran no
+        // command; its pair `landing_recheck_target_writable` is none.
+        (Some(EventKind::LandingRecheckTargetUnwritable), _) => {
+            Some(AttentionNext::FixRecheckTarget)
+        }
         // A target set to the container that cannot be used waits, never on
         // the host (ADR-t2113-1 decision 4): the container is made usable,
         // or a task sets the runtime back to the host.
@@ -4147,6 +4166,16 @@ mod attention_tests {
                 None,
             ),
             (
+                "landing_recheck_target_unwritable",
+                json!({"path": "/q/recheck/target", "error": "Operation not permitted (os error 1)"}),
+                Some(FixRecheckTarget),
+            ),
+            (
+                "landing_recheck_target_writable",
+                json!({"main": "m"}),
+                None,
+            ),
+            (
                 "container_runtime_unavailable",
                 json!({"targets": [{"target": "worker", "reason": "x"}], "message": "m"}),
                 Some(FixDagqToml),
@@ -4560,6 +4589,7 @@ mod attention_tests {
             "release or keep the hold of task 7"
         );
         assert_eq!(InstallTool.to_string(), "install tool");
+        assert_eq!(FixRecheckTarget.to_string(), "fix the recheck target");
         assert_eq!(LogInToGh.to_string(), "log in to gh");
         assert_eq!(FixDagqToml.to_string(), "fix dagq.toml");
         assert_eq!(CheckE2e.to_string(), "check the e2e host");

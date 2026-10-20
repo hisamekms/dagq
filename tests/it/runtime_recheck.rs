@@ -1360,3 +1360,226 @@ fn a_slot_run_with_a_killed_recheck_is_not_parked_before_landing() {
     assert!(events_of(&db, run.id(), "resume_started").is_empty());
     assert_eq!(events_of(&db, run.id(), "landing_recheck_failed").len(), 1);
 }
+
+/// The queue's events of `kind`, oldest first.
+fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
+    Connection::open(db)
+        .unwrap()
+        .prepare("SELECT payload FROM run_events WHERE kind=?1 ORDER BY id")
+        .unwrap()
+        .query_map([kind], |r| r.get::<_, String>(0))
+        .unwrap()
+        .map(|p| serde_json::from_str(&p.unwrap()).unwrap())
+        .collect()
+}
+
+/// Make the recheck's build output `name` (`<queue dir>/recheck/<name>`)
+/// unwritable, or writable again.
+fn output_writable(db: &Path, name: &str, writable: bool) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let target = db.parent().unwrap().join("recheck").join(name);
+    fs::create_dir_all(&target).unwrap();
+    let mode = if writable { 0o755 } else { 0o555 };
+    fs::set_permissions(&target, fs::Permissions::from_mode(mode)).unwrap();
+    target
+}
+
+/// [`output_writable`] for the Rust profile's `target`.
+fn target_writable(db: &Path, writable: bool) -> PathBuf {
+    output_writable(db, "target", writable)
+}
+
+/// The attention items `status` shows for an unwritable recheck target.
+fn target_attention(db: &Path) -> Vec<Value> {
+    runtime::status(db).unwrap()["attention"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["kind"] == "landing_recheck_target_unwritable")
+        .cloned()
+        .collect()
+}
+
+/// The recheck cannot write a build output: the pass runs no command.
+/// The runs whose command would run (no conflict, their diff on
+/// `[recheck] paths`) get no record, are not resumed and keep waiting to
+/// land, while in the same pass the run that conflicts is recorded and
+/// resumed and the run off the paths is recorded clean as skipped by them.
+/// The unwritable output is the declaration's that applies only to the
+/// last run: the first run, to which none applies, runs no command either,
+/// since every output is checked before any command runs.
+/// `landing_recheck_finished` says why no command ran and how many runs
+/// went unrecorded, and the queue holds one attention with the path and
+/// the OS's error.
+#[test]
+fn a_recheck_that_cannot_write_its_build_output_runs_no_command_and_records_no_run() {
+    let (_dir, repo, db) = fixture();
+    fs::write(
+        repo.join("dagq.toml"),
+        "[toolchains.core]\nprofile = \"rust\"\npaths = [\"**/*.rs\"]\n\n[recheck]\ncommand = 'exit 1'\npaths = ['*.txt', '**/*.rs']\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "the recheck"]);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    add_ready_task(&mut queue, "off the paths", &[]);
+    add_ready_task(&mut queue, "conflicting", &[]);
+    add_ready_task(&mut queue, "rust", &[]);
+    drop(queue);
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    backend.script_for(
+        1,
+        "printf 'a\\n' > a.txt && git add a.txt && git commit -q -m a; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+    );
+    backend.script_for(
+        2,
+        "printf 'b\\n' > b.md && git add b.md && git commit -q -m b; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+    );
+    backend.script_for(
+        4,
+        "printf 'fn f() {}\\n' > lib.rs && git add lib.rs && git commit -q -m rust; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+    );
+    backend.resume_script_for(3, RESOLVING_RESUME);
+    let concern = || verdict("concern", &["a person should look"], "unsure");
+    let reviewer = TestReviewer::new(&[concern(), concern(), concern(), concern()]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let target = output_writable(&db, "target-core", false);
+    let main = move_main(&repo, "change.txt", "changed on main by hand\n");
+
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    output_writable(&db, "target-core", true);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    for task in [1, 4] {
+        let unrecorded = queue.show(TaskId::new(task)).unwrap();
+        assert_eq!(unrecorded.runs[0].status(), RunStatus::AwaitingIntegration);
+        for kind in [
+            "landing_recheck_failed",
+            "landing_recheck_clean",
+            "resume_started",
+        ] {
+            assert!(
+                payloads(&unrecorded, kind).is_empty(),
+                "task {task} {kind}: {:?}",
+                event_kinds(&unrecorded)
+            );
+        }
+    }
+    let off_paths = queue.show(TaskId::new(2)).unwrap();
+    let clean = payloads(&off_paths, "landing_recheck_clean");
+    assert_eq!(clean.len(), 1, "{:?}", event_kinds(&off_paths));
+    assert_eq!(clean[0]["command_skipped"], "paths");
+    let conflicting = queue.show(TaskId::new(3)).unwrap();
+    let failed = payloads(&conflicting, "landing_recheck_failed");
+    assert_eq!(failed.len(), 1, "{:?}", event_kinds(&conflicting));
+    assert_eq!(failed[0]["code"], "rebase_conflict");
+    assert_eq!(failed[0]["action"], "resumed");
+    assert_eq!(payloads(&conflicting, "resume_started").len(), 1);
+
+    let finished = queue_events(&db, "landing_recheck_finished");
+    let finished = finished.last().unwrap();
+    assert_eq!(finished["main"], json!(main));
+    assert_eq!(finished["command_skipped_reason"], "target_unwritable");
+    assert_eq!(finished["target_unwritable"], 2, "{finished}");
+    assert_eq!(finished["command_skipped"], 1);
+    assert_eq!(finished["conflicts"], 1);
+    let told = queue_events(&db, "landing_recheck_target_unwritable");
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(told[0]["main"], json!(main));
+    assert_eq!(told[0]["unrecorded"], 2);
+    let path = told[0]["path"].as_str().unwrap();
+    assert!(
+        Path::new(path).starts_with(fs::canonicalize(&target).unwrap()),
+        "{path}"
+    );
+    assert!(
+        told[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("Permission denied"),
+        "{}",
+        told[0]
+    );
+    assert!(queue_events(&db, "landing_recheck_target_writable").is_empty());
+}
+
+/// While the build output stays unwritable, the next recheck (main moved
+/// again) records no second attention; the first recheck that writes it
+/// again records the pair, which ends the attention, and runs the command,
+/// which finds the run still landing.
+#[test]
+fn an_unwritable_build_output_is_told_once_and_its_end_once_it_is_written() {
+    let (_dir, repo, db) = fixture();
+    fs::write(
+        repo.join("dagq.toml"),
+        format!("{RUST_DECLARED}[recheck]\ncommand = 'true'\n"),
+    )
+    .unwrap();
+    git(&repo, &["add", "."]);
+    git(&repo, &["commit", "-q", "-m", "the recheck"]);
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let (waiting, _ask, reviewer) = one_waiting(&backend, &repo, &db);
+    target_writable(&db, false);
+    move_main(&repo, "first.md", "first\n");
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let attention = target_attention(&db);
+    assert_eq!(attention.len(), 1, "{attention:?}");
+    assert_eq!(attention[0]["next"], "fix the recheck target");
+    move_main(&repo, "second.md", "second\n");
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(queue_events(&db, "landing_recheck_finished").len(), 2);
+    assert_eq!(
+        queue_events(&db, "landing_recheck_target_unwritable").len(),
+        1
+    );
+    assert!(events_of(&db, waiting.id(), "landing_recheck_clean").is_empty());
+
+    target_writable(&db, true);
+    let main = move_main(&repo, "third.md", "third\n");
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(
+        queue_events(&db, "landing_recheck_target_unwritable").len(),
+        1
+    );
+    let writable = queue_events(&db, "landing_recheck_target_writable");
+    assert_eq!(writable.len(), 1, "{writable:?}");
+    assert_eq!(writable[0]["main"], json!(main));
+    let clean = events_of(&db, waiting.id(), "landing_recheck_clean");
+    assert_eq!(clean.len(), 1);
+    assert_eq!(clean[0]["command"], "true");
+    assert_eq!(clean[0]["main"], json!(main));
+    assert!(target_attention(&db).is_empty());
+    let run = run_of(&db, 1).unwrap();
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    assert!(events_of(&db, run.id(), "resume_started").is_empty());
+}
+
+/// No write check without a command to run: with no `[recheck] command`,
+/// an unwritable build output changes nothing: the run is recorded clean
+/// as before and no attention is recorded. Which runs a pass checks the
+/// outputs of (none off `[recheck] paths` either) is the unit test's of
+/// `host_outputs`.
+#[test]
+fn a_recheck_with_no_command_does_not_check_its_build_output() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let (waiting, _ask, reviewer) = one_waiting(&backend, &repo, &db);
+    target_writable(&db, false);
+    move_main(&repo, "other.md", "other\n");
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    target_writable(&db, true);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let clean = events_of(&db, waiting.id(), "landing_recheck_clean");
+    assert_eq!(clean.len(), 1);
+    assert_eq!(clean[0]["command"], Value::Null);
+    assert!(clean[0].get("command_skipped").is_none());
+    assert!(queue_events(&db, "landing_recheck_target_unwritable").is_empty());
+    let finished = queue_events(&db, "landing_recheck_finished");
+    let finished = finished.last().unwrap();
+    assert_eq!(finished["target_unwritable"], 0);
+    assert!(finished.get("command_skipped_reason").is_none());
+}

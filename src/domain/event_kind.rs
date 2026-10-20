@@ -235,6 +235,8 @@ event_kinds! {
     LandingRecheckClean => "landing_recheck_clean",
     LandingRecheckFailed => "landing_recheck_failed",
     LandingRecheckFinished => "landing_recheck_finished",
+    LandingRecheckTargetUnwritable => "landing_recheck_target_unwritable",
+    LandingRecheckTargetWritable => "landing_recheck_target_writable",
     LandingResumed => "landing_resumed",
     LeaseAcquired => "lease_acquired",
     LeaseReleased => "lease_released",
@@ -537,6 +539,10 @@ impl EventKind {
                 | PlannerAnswerClaimed
                 | RunEnvProgramMissing
                 | RunEnvProgramFound
+                // Whether the landing recheck can write its build output
+                // (task 2140), as `run_env_program_*`.
+                | LandingRecheckTargetUnwritable
+                | LandingRecheckTargetWritable
                 // Whether the container runtime a target is set to can be
                 // used (goal 38, ADR-t2113-1 decision 4).
                 | ContainerRuntimeUnavailable
@@ -1624,6 +1630,14 @@ mod tests {
             (
                 EventKind::LandingRecheckFinished,
                 "landing_recheck_finished",
+            ),
+            (
+                EventKind::LandingRecheckTargetUnwritable,
+                "landing_recheck_target_unwritable",
+            ),
+            (
+                EventKind::LandingRecheckTargetWritable,
+                "landing_recheck_target_writable",
             ),
             (EventKind::LandingResumed, "landing_resumed"),
             (EventKind::LiveAlertBaseline, "live_alert_baseline"),
