@@ -55,13 +55,8 @@ import csv, json, sys
 json.dump([dict(databaseId=int(x['run_id']), headSha=x['head_sha'], conclusion=x['conclusion'], createdAt=x['created_at'], url=x['url'])
            for x in csv.DictReader(open(sys.argv[1])) if '2026-10-06T00:00:00Z' <= x['created_at'] < '2026-10-14T10:27:41Z'], sys.stdout)
 PY
-STEPS=6 sh "$here/../landing-it-selection/collect.sh" $T1 ci
-# step 3 of landing-it-selection/collect.sh, the logs read 4 at a time
-python3 -c 'import json; [print(r["databaseId"]) for r in json.load(open("ci/ci-runs.json")) if r["conclusion"] == "failure"]' >ci/failed_ids.txt
-xargs -P 4 -I{} sh -c '[ -s ci/logs/{}.txt ] || gh run view -R hisamekms/dagq {} --log-failed >ci/logs/{}.txt 2>/dev/null || true' <ci/failed_ids.txt
-awk '/^  python3 - "\$id" "\$OUT\/log.txt"/{f=1;next} /^PY$/{f=0} f' "$here/../landing-it-selection/collect.sh" >parse_failed.py
-: >ci/ci-failed-tests.tsv
-for id in $(cat ci/failed_ids.txt); do python3 parse_failed.py "$id" "ci/logs/$id.txt" >>ci/ci-failed-tests.tsv; done
+# steps 3 and 6 of landing-it-selection/collect.sh, the runs read 4 at a time
+STEPS="3 6" JOBS=4 sh "$here/../landing-it-selection/collect.sh" $T1 ci
 python3 "$here/replay.py" . "$repo" out >/dev/null
 python3 "$here/stages.py" events_before.json events_after.json "$here/../landing-verify-switch/choice.csv" >out/stages.csv
 python3 "$here/stage_summary.py" out/stages.csv events_before.json events_after.json >out/stage-summary.json

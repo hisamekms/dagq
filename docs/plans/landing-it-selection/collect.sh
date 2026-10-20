@@ -4,14 +4,16 @@
 # repository (the inputs are materials: the map alone is 13 MB, and
 # analyze.py's CSVs are what the document keeps).
 #
-# Usage: sh collect.sh T_END OUT
+# Usage: [SINCE=TIME] sh collect.sh T_END OUT
 #   T_END   the end of the period, a UTC midnight (e.g. 2026-10-06T00:00:00Z)
+#   SINCE   the start of the period (default 2026-09-29T00:00:00Z); the CI
+#           runs are read from its day
 #
 # It reads, once:
-#   1. the run_integrated events from 2026-09-29T00:00:00Z to T_END with
+#   1. the run_integrated events from SINCE to T_END with
 #      dagq events --full, paging with --after <cursor> until events is empty
 #      (one page holds at most --limit 100) -> landings.tsv
-#   2. main's push CI runs created from 2026-09-29 to the day before T_END with
+#   2. main's push CI runs created from SINCE's day to the day before T_END with
 #      gh run list --limit 1000; if it returns 1000 runs it reads the period
 #      again day by day -> ci-runs.json
 #   3. the failed tests of each failed run: the FAIL rows of the nextest
@@ -27,15 +29,18 @@
 #      run did not have, like the linux job before it was added) means the
 #      job gave no test result -> ci-jobs.tsv
 # STEPS (default "1 2 3 4 5 6") runs only the named steps, e.g. STEPS="3 4 5".
+# JOBS (default 8) is how many runs steps 3 and 6 read at a time.
 # It needs dagq (read-only commands), git and an authenticated gh.
 set -eu
 
 T_END=${1:?usage: sh collect.sh T_END OUT}
 OUT=${2:?usage: sh collect.sh T_END OUT}
-SINCE=2026-09-29T00:00:00Z
+SINCE=${SINCE:-2026-09-29T00:00:00Z}
+SINCE_DAY=$(printf %s "$SINCE" | cut -c1-10)
 REPO=${REPO:-hisamekms/dagq}
 mkdir -p "$OUT/maps"
 STEPS=${STEPS:-1 2 3 4 5 6}
+JOBS=${JOBS:-8}
 want() { case " $STEPS " in *" $1 "*) return 0 ;; esac; return 1; }
 
 if want 1; then
@@ -63,13 +68,13 @@ if want 2; then
 # 2. CI runs (created is inclusive on both ends; the last day is T_END - 1 day)
 last_day=$(python3 -c "import datetime,sys; t=datetime.datetime.strptime(sys.argv[1][:10],'%Y-%m-%d'); print((t-datetime.timedelta(days=1)).strftime('%Y-%m-%d'))" "$T_END")
 fields=databaseId,headSha,conclusion,createdAt,url
-gh run list -R "$REPO" --workflow CI --branch main --event push --created "2026-09-29..$last_day" --json "$fields" --limit 1000 > "$OUT/ci-runs.json"
+gh run list -R "$REPO" --workflow CI --branch main --event push --created "$SINCE_DAY..$last_day" --json "$fields" --limit 1000 > "$OUT/ci-runs.json"
 if [ "$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$OUT/ci-runs.json")" -ge 1000 ]; then
   echo "gh run list hit --limit 1000: reading day by day"
-  python3 - "$last_day" <<'PY' > "$OUT/days.txt"
+  python3 - "$SINCE_DAY" "$last_day" <<'PY' > "$OUT/days.txt"
 import datetime, sys
-d = datetime.date(2026, 9, 29)
-end = datetime.date.fromisoformat(sys.argv[1])
+d = datetime.date.fromisoformat(sys.argv[1])
+end = datetime.date.fromisoformat(sys.argv[2])
 while d <= end:
     print(d.isoformat()); d += datetime.timedelta(days=1)
 PY
@@ -86,10 +91,11 @@ fi
 
 if want 3; then
 # 3. failed tests of each failed run
-: > "$OUT/ci-failed-tests.tsv"
-for id in $(python3 -c 'import json,sys; [print(r["databaseId"]) for r in json.load(open(sys.argv[1])) if r["conclusion"]=="failure"]' "$OUT/ci-runs.json"); do
-  gh run view -R "$REPO" "$id" --log-failed 2>/dev/null > "$OUT/log.txt" || true
-  python3 - "$id" "$OUT/log.txt" >> "$OUT/ci-failed-tests.tsv" <<'PY'
+# Each run is read once into OUT/logs/<id>.tsv (a rerun skips those
+# already there), JOBS runs at a time. A run gh fails to read gets no file
+# and stops the step, so a rerun reads it again.
+mkdir -p "$OUT/logs"
+cat > "$OUT/parse-log.py" <<'PY'
 import re, sys
 run_id, path = sys.argv[1], sys.argv[2]
 # gh's log rows are "<job>\t<step>\t<timestamp> <text>"; the nextest rows are
@@ -123,8 +129,15 @@ for job, rows in jobs.items():
         seen.add(key)
         print("\t".join([run_id, "linux" if "linux" in job.lower() else "macos", binary + "::" + name, "flaky" if flaky else "fail"]))
 PY
+python3 -c 'import json,sys; [print(r["databaseId"]) for r in json.load(open(sys.argv[1])) if r["conclusion"]=="failure"]' "$OUT/ci-runs.json" |
+  OUT="$OUT" REPO="$REPO" xargs -P "$JOBS" -I{} sh -c '[ -f "$OUT/logs/$1.tsv" ] && exit 0
+    gh run view -R "$REPO" "$1" --log-failed 2>/dev/null > "$OUT/logs/$1.log" || exit 1
+    python3 "$OUT/parse-log.py" "$1" "$OUT/logs/$1.log" > "$OUT/logs/$1.tmp" && mv "$OUT/logs/$1.tmp" "$OUT/logs/$1.tsv"
+    rm -f "$OUT/logs/$1.log"' _ {}
+: > "$OUT/ci-failed-tests.tsv"
+for id in $(python3 -c 'import json,sys; [print(r["databaseId"]) for r in json.load(open(sys.argv[1])) if r["conclusion"]=="failure"]' "$OUT/ci-runs.json"); do
+  cat "$OUT/logs/$id.tsv" >> "$OUT/ci-failed-tests.tsv"
 done
-rm -f "$OUT/log.txt"
 echo "failed test rows: $(wc -l < "$OUT/ci-failed-tests.tsv")"
 
 fi
@@ -150,11 +163,15 @@ echo "maps: $(ls "$OUT/maps" | wc -l | tr -d ' ')"
 fi
 
 if want 6; then
-# 6. the jobs and their test step
+# 6. the jobs and their test step (cached in OUT/jobs/<id>.tsv like step 3)
+mkdir -p "$OUT/jobs"
+python3 -c 'import json,sys; [print(r["databaseId"]) for r in json.load(open(sys.argv[1])) if r["conclusion"]!="cancelled"]' "$OUT/ci-runs.json" |
+  OUT="$OUT" REPO="$REPO" xargs -P "$JOBS" -I{} sh -c '[ -f "$OUT/jobs/$1.tsv" ] && exit 0
+    gh run view -R "$REPO" "$1" --json jobs --jq ".jobs[] | [.name, ([.steps[] | select(.name == \"cargo llvm-cov nextest\" or .name == \"cargo nextest run\") | .conclusion] | first // \"none\")] | @tsv" > "$OUT/jobs/$1.raw" || exit 1
+    sed "s/^/$1	/" "$OUT/jobs/$1.raw" > "$OUT/jobs/$1.tmp" && mv "$OUT/jobs/$1.tmp" "$OUT/jobs/$1.tsv" && rm -f "$OUT/jobs/$1.raw"' _ {}
 : > "$OUT/ci-jobs.tsv"
 for id in $(python3 -c 'import json,sys; [print(r["databaseId"]) for r in json.load(open(sys.argv[1])) if r["conclusion"]!="cancelled"]' "$OUT/ci-runs.json"); do
-  gh run view -R "$REPO" "$id" --json jobs --jq '.jobs[] | [.name, ([.steps[] | select(.name == "cargo llvm-cov nextest" or .name == "cargo nextest run") | .conclusion] | first // "none")] | @tsv' |
-    sed "s/^/$id\t/" >> "$OUT/ci-jobs.tsv"
+  cat "$OUT/jobs/$id.tsv" >> "$OUT/ci-jobs.tsv"
 done
 echo "ci jobs: $(wc -l < "$OUT/ci-jobs.tsv")"
 fi

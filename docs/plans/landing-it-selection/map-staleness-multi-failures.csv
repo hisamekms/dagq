@@ -1,0 +1,9 @@
+test,red_run,red_at,mass,range_tasks,direct_commits_in_range,selected_by_b,only_b_k1,only_b_k2,only_b_k3
+dagq::it::planner_headless::a_headless_request_planner_ends_while_its_question_waits_and_the_answer_opens_one_that_declines,37753486294,2026-10-08T08:59:01Z,0,2071;1226;2068;2070;2069;1989,,,,,
+dagq::it::planner_headless::a_headless_request_planner_ends_while_its_question_waits_and_the_answer_opens_one_that_declines,37803133384,2026-10-08T15:43:46Z,0,2155;1847,,,,,
+dagq::it::planner_headless::a_headless_draft_planner_ends_while_its_question_waits_and_a_new_one_goes_on_from_the_answer,37855130545,2026-10-08T22:42:18Z,0,1896;1725;2169;2159;2126;1664,,,,,
+dagq::it::planner_headless::a_headless_request_planner_ends_while_its_question_waits_and_the_answer_opens_one_that_declines,38156413395,2026-10-11T16:40:08Z,0,2282;2281,,,,,
+dagq::it::planner_headless::a_headless_draft_planner_ends_while_its_question_waits_and_a_new_one_goes_on_from_the_answer,38201554275,2026-10-12T03:53:36Z,0,2373;2259,,,,,
+dagq::it::planner_headless::a_headless_request_planner_ends_while_its_question_waits_and_the_answer_opens_one_that_declines,38204115177,2026-10-12T04:31:10Z,0,1685;2171;2388,,1685,,,
+dagq::it::planner_headless::a_headless_draft_planner_ends_while_its_question_waits_and_a_new_one_goes_on_from_the_answer,38277036754,2026-10-12T16:23:18Z,0,1820;2161,,2161,,,
+dagq::it::verification_container::a_waiting_run_in_a_container_has_its_recheck_command_run_in_a_verification_s_container,38943374865,2026-10-16T17:55:18Z,0,2424;2536,,,,,

@@ -183,6 +183,56 @@ def src_count(repo, commit, cache):
     return cache[commit]
 
 
+def ci_new_failures(data, repo, by_commit):
+    """CI: each job's runs with test results, in order, and the tests each
+    turned red (a test red in a job whose previous result had it green), each
+    with the landings of its range (by_commit: commit -> landing) and the
+    range's commits that are none of them. Returns (runs, results,
+    no_results, events)."""
+    runs = [r for r in json.load(open(os.path.join(data, "ci-runs.json"))) if r["conclusion"] != "cancelled"]
+    runs.sort(key=lambda r: r["createdAt"])
+    order = {r["databaseId"]: i for i, r in enumerate(runs)}
+    failed = defaultdict(set)  # (run, job) -> tests
+    for line in open(os.path.join(data, "ci-failed-tests.tsv")):
+        rid, job, test, kind = line.rstrip("\n").split("\t")
+        if kind == "fail":
+            failed[(int(rid), job)].add(test)
+    results = defaultdict(list)  # job -> runs with a test result
+    no_results = []
+    for line in open(os.path.join(data, "ci-jobs.tsv")):
+        rid, name, step = line.rstrip("\n").split("\t")
+        rid, job = int(rid), "linux" if "linux" in name.lower() else "macos"
+        if step == "success" or (step == "failure" and failed.get((rid, job))):
+            results[job].append(rid)
+        else:
+            no_results.append((rid, job, step))
+    by_id = {r["databaseId"]: r for r in runs}
+    new_by_run = defaultdict(dict)  # run -> test -> (prev run, still red next run)
+    for job, rids in results.items():
+        rids.sort(key=order.get)
+        for i in range(1, len(rids)):
+            prev, cur = rids[i - 1], rids[i]
+            nxt = rids[i + 1] if i + 1 < len(rids) else None
+            for t in failed.get((cur, job), set()) - failed.get((prev, job), set()):
+                p0 = new_by_run[cur].get(t)
+                # Red in both jobs: the range is the shorter one (the later previous run).
+                if p0 is None or order[prev] > order[p0[0]]:
+                    new_by_run[cur][t] = (prev, nxt is not None and t in failed.get((nxt, job), set()))
+    events = []
+    for cur in sorted(new_by_run, key=order.get):
+        r = by_id[cur]
+        new = new_by_run[cur]
+        for t in sorted(new):
+            prev, persistent = new[t]
+            rng = git(repo, "rev-list", "--first-parent", f"{by_id[prev]['headSha']}..{r['headSha']}").stdout.split()
+            events.append(dict(
+                test=t, prev_run=prev, prev_at=by_id[prev]["createdAt"], red_run=cur, red_at=r["createdAt"],
+                in_range=[by_commit[c] for c in rng if c in by_commit], direct=[c for c in rng if c not in by_commit],
+                new_in_run=len(new), persistent=persistent,
+            ))
+    return runs, results, no_results, events
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("data")
@@ -211,63 +261,27 @@ def main():
         landings.append(row)
     by_commit = {r["commit"]: r for r in landings}
 
-    # CI: each job's runs with test results, in order, and the tests each
-    # turned red (a test red in a job whose previous result had it green).
-    runs = [r for r in json.load(open(os.path.join(a.data, "ci-runs.json"))) if r["conclusion"] != "cancelled"]
-    runs.sort(key=lambda r: r["createdAt"])
-    order = {r["databaseId"]: i for i, r in enumerate(runs)}
-    failed = defaultdict(set)  # (run, job) -> tests
-    for line in open(os.path.join(a.data, "ci-failed-tests.tsv")):
-        rid, job, test, kind = line.rstrip("\n").split("\t")
-        if kind == "fail":
-            failed[(int(rid), job)].add(test)
-    results = defaultdict(list)  # job -> runs with a test result
-    no_results = []
-    for line in open(os.path.join(a.data, "ci-jobs.tsv")):
-        rid, name, step = line.rstrip("\n").split("\t")
-        rid, job = int(rid), "linux" if "linux" in name.lower() else "macos"
-        if step == "success" or (step == "failure" and failed.get((rid, job))):
-            results[job].append(rid)
-        else:
-            no_results.append((rid, job, step))
+    runs, results, no_results, raw = ci_new_failures(a.data, repo, by_commit)
     it_binaries = {t["binary_id"] for t in m.tests.values()}
-    by_id = {r["databaseId"]: r for r in runs}
-    new_by_run = defaultdict(dict)  # run -> test -> (prev run, still red next run)
-    for job, rids in results.items():
-        rids.sort(key=order.get)
-        for i in range(1, len(rids)):
-            prev, cur = rids[i - 1], rids[i]
-            nxt = rids[i + 1] if i + 1 < len(rids) else None
-            for t in failed.get((cur, job), set()) - failed.get((prev, job), set()):
-                p0 = new_by_run[cur].get(t)
-                # Red in both jobs: the range is the shorter one (the later previous run).
-                if p0 is None or order[prev] > order[p0[0]]:
-                    new_by_run[cur][t] = (prev, nxt is not None and t in failed.get((nxt, job), set()))
     events = []
-    for cur in sorted(new_by_run, key=order.get):
-        r = by_id[cur]
-        new = new_by_run[cur]
-        for t in sorted(new):
-            prev, persistent = new[t]
-            rng = git(repo, "rev-list", "--first-parent", f"{by_id[prev]['headSha']}..{r['headSha']}").stdout.split()
-            in_range = [by_commit[c] for c in rng if c in by_commit]
-            direct = [c for c in rng if c not in by_commit]
-            if t not in m.tests:
-                if any(t.startswith(b + "::") for b in it_binaries):
-                    cls = "it not in the table"
-                elif t.startswith("dagq::e2e::"):
-                    cls = "e2e"
-                else:
-                    cls = "unit (always run)"
-                selected = None
+    for e in raw:
+        t, in_range = e["test"], e["in_range"]
+        if t not in m.tests:
+            if any(t.startswith(b + "::") for b in it_binaries):
+                cls = "it not in the table"
+            elif t.startswith("dagq::e2e::"):
+                cls = "e2e"
             else:
-                cls = "it"
-                selected = [x["task"] for x in in_range if t in x["tests"]]
-            events.append(dict(
-                test=t, prev_run=prev, red_run=cur, red_at=r["createdAt"],
-                range_tasks=[x["task"] for x in in_range], direct=direct, new_in_run=len(new), cls=cls,
-                selected=selected, persistent=persistent,
-            ))
+                cls = "unit (always run)"
+            selected = None
+        else:
+            cls = "it"
+            selected = [x["task"] for x in in_range if t in x["tests"]]
+        events.append(dict(
+            test=t, prev_run=e["prev_run"], red_run=e["red_run"], red_at=e["red_at"],
+            range_tasks=[x["task"] for x in in_range], direct=e["direct"], new_in_run=e["new_in_run"], cls=cls,
+            selected=selected, persistent=e["persistent"],
+        ))
     for e in events:
         e["mass"] = e["new_in_run"] >= MASS
         e["multi"] = len(e["range_tasks"]) > 1
