@@ -546,7 +546,9 @@ pub struct LandingRechecks {
     /// Runs found conflicting with main (`rebase_conflict`).
     pub conflicts: i64,
     /// Runs that merged cleanly but failed the recheck's command
-    /// (`verification_failed`): the conflicts Git does not see.
+    /// (`verification_failed`): the conflicts Git does not see, and the
+    /// failures main alone met too (`main_failed`, ADR-t2141-1), which
+    /// resumed nothing.
     pub check_failures: i64,
     /// Runs whose recheck command failed on the host (`action: skipped`,
     /// ADR-t639-1): they say nothing of the code, so they are neither
@@ -1820,7 +1822,7 @@ fn landing_rechecks(
                 let code = recorded.code.unwrap_or_default();
                 if code == "rebase_conflict" {
                     rechecks.conflicts += 1;
-                } else if recorded.skipped() {
+                } else if recorded.environmental() {
                     rechecks.environment += 1;
                 } else {
                     rechecks.check_failures += 1;
@@ -2671,15 +2673,24 @@ mod tests {
                 json!({"code": "verification_failed", "action": "skipped", "class": "disk_full"}),
                 T,
             ),
+            // Main alone failed the command too (ADR-t2141-1): a check
+            // failure of the code, with no resume.
+            run_event(
+                7,
+                R2,
+                "landing_recheck_failed",
+                json!({"code": "verification_failed", "action": "skipped", "class": "build_error", "main_failed": true}),
+                T,
+            ),
         ];
-        let all = landing_rechecks(&events, EventId::new(0), EventId::new(6), |_| true);
+        let all = landing_rechecks(&events, EventId::new(0), EventId::new(7), |_| true);
         assert_eq!(all.rechecks, 2);
         assert_eq!(all.runs_checked, 4);
         assert_eq!(all.conflicts, 1);
-        assert_eq!(all.check_failures, 1);
+        assert_eq!(all.check_failures, 2);
         assert_eq!(all.environment, 1);
         assert_eq!(all.resumed, 2);
-        assert_eq!(all.runs.len(), 3);
+        assert_eq!(all.runs.len(), 4);
         assert_eq!(all.runs[2].action, "skipped");
         assert_eq!(all.runs[0].landed_task_id, Some(9));
         assert_eq!(all.runs[1].action, "held");

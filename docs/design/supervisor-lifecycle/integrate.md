@@ -143,6 +143,10 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 - hostの分類で落ちたcommandと、containerのrunでcommandを流すcontainerが無かったときは何も判定せず、runは着地を待ち続ける（ADR-t639-1、ADR-t2424-1）。
 - passのどのcommandよりも前に`check_writable`がhostでcommandを流す全runのbuild outputへの書き込みを確かめ、書けないpassはhostでcommandを流さず、流すはずだったrunを記録もresumeもしない（ADR-0068決定2）。
 - 書けない間はqueueのattentionを1度だけ残し、書けたrecheckが対のeventで閉じる（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)決定9、`TargetCheck`）。
+- hostで流したrunのcommandがコードの分類で落ちたpassは、全てのrunを確かめた後に1回だけmainの木だけでcommandを流す（`recheck_runs`・`check_main`、[ADR-t2141-1](../../adr/2026-10-20-t2141-1-recheck-checks-main-alone-before-resuming-runs-whose-command-failed.md)）。
+  mainも落ちれば、落ちたrunはresumeせず着地を待ち続け、queueのattentionで1回だけinboxに知らせる（`domain::recheck::kept_by_main`・`MainCheck::transition`）。
+  mainが通るか判定できなければ、同じ出力で落ちた複数のrunも今までどおり各々resumeする。
+  attentionが残る間は、hostでcommandが通ったrunのあるpassでもmainを確かめ、通れば終わりの印を残す。
 - recheckを始められないか記録できないerrorはwarnだけで、runに何も記録せず着地を止めない（着地が改めて確かめる）。
 - mainの動きを見るsupervisorは選ばず、drainやhandoffの間は生きているほかのsupervisorが確かめる。
 - recheckも同じ番を取り、関門の間は始めずに次のpassで見直す。

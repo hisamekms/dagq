@@ -238,6 +238,8 @@ event_kinds! {
     LandingRecheckFinished => "landing_recheck_finished",
     LandingRecheckTargetUnwritable => "landing_recheck_target_unwritable",
     LandingRecheckTargetWritable => "landing_recheck_target_writable",
+    LandingRecheckMainFailed => "landing_recheck_main_failed",
+    LandingRecheckMainPassed => "landing_recheck_main_passed",
     LandingResumed => "landing_resumed",
     LeaseAcquired => "lease_acquired",
     LeaseReleased => "lease_released",
@@ -570,6 +572,10 @@ impl EventKind {
                 | CiWatchResumed
                 | LandingBranchUnresolved
                 | LandingBranchResolved
+                // The landing recheck's command failing and passing on
+                // main alone (ADR-t2141-1), about the queue's main.
+                | LandingRecheckMainFailed
+                | LandingRecheckMainPassed
                 | SessionOpened
                 | SessionClosed
                 // A planner's screen inferred idle without its idle marker
@@ -1643,6 +1649,14 @@ mod tests {
             (
                 EventKind::LandingRecheckTargetWritable,
                 "landing_recheck_target_writable",
+            ),
+            (
+                EventKind::LandingRecheckMainFailed,
+                "landing_recheck_main_failed",
+            ),
+            (
+                EventKind::LandingRecheckMainPassed,
+                "landing_recheck_main_passed",
             ),
             (EventKind::LandingResumed, "landing_resumed"),
             (EventKind::LiveAlertBaseline, "live_alert_baseline"),

@@ -24,12 +24,17 @@
 //! the pass runs no command on the host and records nothing on the runs
 //! that would have run one (ADR-0068 decision 2), and the queue's
 //! `landing_recheck_target_unwritable` tells the inbox ([`TargetCheck`]).
+//! A pass whose command failed a run on the host for the code runs the
+//! command once more on main's tree alone ([`check_main`]); when main
+//! fails it too, the runs that failed so are neither parked nor held, and
+//! the queue tells the inbox once (ADR-t2141-1).
 
 use super::*;
 use crate::domain::EventKind;
 use crate::domain::recheck::{
-    self, CheckedBy, HELD, LANDING_RECHECK_CLEAN, LANDING_RECHECK_FAILED, Landed, RecheckConfig,
-    RecheckFailure, SKIPPED, TargetCheck,
+    self, CheckedBy, HELD, LANDING_RECHECK_CLEAN, LANDING_RECHECK_FAILED,
+    LANDING_RECHECK_MAIN_KINDS, Landed, MainCheck, RecheckConfig, RecheckFailure, SKIPPED,
+    TargetCheck,
 };
 use crate::domain::sccache::{CheckReason, GuardLook};
 use crate::domain::toolchain::{BuildDir, ProfileRegistry};
@@ -245,6 +250,12 @@ struct Tally {
     /// build output could not be written ([`Finding::Unwritable`]): none
     /// was recorded, apart from `checked`.
     target_unwritable: u64,
+    /// What the command found on main alone ([`MainCheck::outcome`]);
+    /// `None` when the pass did not check main ([`recheck_runs`]).
+    main_check: Option<&'static str>,
+    /// Of `check_failed`, the runs not resumed nor held because the
+    /// command failed on main alone too ([`recheck::kept_by_main`]).
+    main_failed: u64,
     failed_runs: Vec<Value>,
 }
 
@@ -268,7 +279,14 @@ impl Tally {
     /// failed on the host, and the `action` its record took
     /// ([`recheck::RESUMED`], [`HELD`] or [`SKIPPED`]); `None` when it was
     /// not recorded (the run moved on, or the record failed).
-    fn failed(&mut self, run_id: &RunId, failure: &RecheckFailure, action: Option<&'static str>) {
+    /// `kept_by_main` when main's failure kept it from a resume.
+    fn failed(
+        &mut self,
+        run_id: &RunId,
+        failure: &RecheckFailure,
+        action: Option<&'static str>,
+        kept_by_main: bool,
+    ) {
         self.checked += 1;
         match failure {
             RecheckFailure::Conflict { .. } => self.conflicts += 1,
@@ -282,6 +300,7 @@ impl Tally {
         };
         match action {
             HELD => self.held += 1,
+            SKIPPED if kept_by_main => self.main_failed += 1,
             SKIPPED => {}
             _ => self.resumed += 1,
         }
@@ -337,6 +356,8 @@ impl Tally {
             "resumed": self.resumed,
             "held": self.held,
             "target_unwritable": self.target_unwritable,
+            "main_check": self.main_check,
+            "main_failed": self.main_failed,
         })
     }
 }
@@ -386,10 +407,11 @@ enum InContainer {
 /// container (a run in a container whose command ran).
 type Checked = (Target, Finding, Option<u16>);
 
-/// What a recheck's thread found: each run's [`Checked`], and its write
-/// check of the build outputs, `None` when no command was to run on the
-/// host.
-type Found = (Vec<Checked>, Option<TargetCheck>);
+/// What a recheck's thread found: each run's [`Checked`], its write check
+/// of the build outputs, `None` when no command was to run on the host,
+/// and the command on main alone, `None` when the pass did not check it
+/// ([`check_main`]).
+type Found = (Vec<Checked>, Option<TargetCheck>, Option<MainCheck>);
 
 /// What the recheck found for one run.
 #[derive(Debug)]
@@ -720,6 +742,11 @@ impl Supervisor<'_> {
         let in_container = (command.is_some()
             && targets.iter().any(|target| target.container.is_some()))
         .then(|| self.recheck_container());
+        let main_failed_open = command.is_some()
+            && self
+                .queue
+                .latest_queue_event(&LANDING_RECHECK_MAIN_KINDS)?
+                .is_some_and(|event| event.kind == EventKind::LandingRecheckMainFailed);
         let repository = self.repository.clone();
         let verifier = self.verifier.clone();
         let files = self.files.clone();
@@ -737,6 +764,7 @@ impl Supervisor<'_> {
                     look: &look,
                     in_container: in_container.as_ref(),
                     probe: &probe,
+                    main_failed_open,
                 },
                 targets,
             )
@@ -771,8 +799,11 @@ impl Supervisor<'_> {
     /// Record what a recheck found: each finding, failed or clean, on its
     /// run (and its open asks), and `landing_recheck_finished` with the counts on the run
     /// whose landing it followed (or the first run it checked).
-    fn apply_recheck(&mut self, watch: &RecheckWatch, (found, writes): Found) -> Result<()> {
-        let mut tally = Tally::default();
+    fn apply_recheck(&mut self, watch: &RecheckWatch, (found, writes, main): Found) -> Result<()> {
+        let mut tally = Tally {
+            main_check: main.as_ref().map(MainCheck::outcome),
+            ..Tally::default()
+        };
         for (target, finding, removed) in found {
             if let Some(port) = removed {
                 self.with_env(|env| {
@@ -813,7 +844,10 @@ impl Supervisor<'_> {
                 Finding::Failed(failure) => failure,
             };
             self.pause_at(PausePoint::RecheckFailure, &target.run_id);
-            let action = match self.record_recheck_failure(watch, &target, &failure) {
+            let main_log = main.as_ref().and_then(MainCheck::failed_log).filter(|_| {
+                recheck::kept_by_main(&failure, target.container.is_none(), main.as_ref())
+            });
+            let action = match self.record_recheck_failure(watch, &target, &failure, main_log) {
                 Ok(Some(action)) => Some(action),
                 Ok(None) => {
                     info!(run_id = %target.run_id, "run {}: the landing recheck found it no longer landing on main {}, but it moved on meanwhile", target.run_id, watch.main);
@@ -824,7 +858,7 @@ impl Supervisor<'_> {
                     None
                 }
             };
-            tally.failed(&target.run_id, &failure, action);
+            tally.failed(&target.run_id, &failure, action, main_log.is_some());
         }
         let payload = tally.finished(
             &watch.main,
@@ -845,6 +879,51 @@ impl Supervisor<'_> {
         )?;
         if let Some(writes) = &writes {
             self.record_target_check(writes, &watch.main, tally.target_unwritable)?;
+        }
+        if let (Some(main), Some(command)) = (&main, watch.command.as_deref())
+            && let Err(error) = self.record_main_check(watch, main, command, tally.main_failed)
+        {
+            warn!(error = %format_args!("{error:#}"), "the landing recheck's command on main {} alone could not be recorded: {error:#}", watch.main);
+        }
+        Ok(())
+    }
+
+    /// Record on the queue what the command found on main alone
+    /// (ADR-t2141-1) when it differs from the latest record of it
+    /// ([`MainCheck::transition`]): a failure is the inbox's attention
+    /// once, until a pass on main alone ends it. `failed_runs` is how many
+    /// runs main's failure kept from a resume.
+    fn record_main_check(
+        &mut self,
+        watch: &RecheckWatch,
+        main: &MainCheck,
+        command: &str,
+        failed_runs: u64,
+    ) -> Result<()> {
+        match main {
+            MainCheck::Failed { log_path, .. } => {
+                warn!(
+                    "the landing recheck's command {command:?} fails on main {} alone too (see {log_path}): {failed_runs} run(s) that failed it keep waiting to land instead of a resume",
+                    watch.main
+                );
+            }
+            MainCheck::Unjudged(why) => {
+                warn!(
+                    "the landing recheck's command {command:?} could not be judged on main {} alone: {why}; the runs that failed it are handled as before",
+                    watch.main
+                );
+            }
+            MainCheck::Passed { .. } => {}
+        }
+        let last = self.queue.latest_queue_event(&LANDING_RECHECK_MAIN_KINDS)?;
+        if let Some((kind, mut payload)) = main.transition(
+            last.as_ref().map(|e| &e.kind),
+            &watch.main,
+            command,
+            failed_runs,
+        ) {
+            payload["supervisor"] = json!(self.registration.token());
+            self.queue.record_queue_event(kind, payload)?;
         }
         Ok(())
     }
@@ -928,14 +1007,18 @@ impl Supervisor<'_> {
     /// (ADR-t639-1), nor does one with no container to run in
     /// (ADR-t2424-1): the finding is recorded as [`SKIPPED`] and the run
     /// keeps waiting to land as it was, held by integrate's control of a
-    /// host failure or not. Every way its open asks get the finding.
-    /// `None` when the run moved on since it was checked (another head,
-    /// another status, or a lease of another process).
+    /// host failure or not. Nor does a failure the command met on main
+    /// alone too (`main_log`, the log of main's check; ADR-t2141-1),
+    /// recorded as [`SKIPPED`] with `main_failed: true` and
+    /// `main_log_path`, using no resume. Every way its open asks get the
+    /// finding. `None` when the run moved on since it was checked (another
+    /// head, another status, or a lease of another process).
     fn record_recheck_failure(
         &mut self,
         watch: &RecheckWatch,
         target: &Target,
         failure: &RecheckFailure,
+        main_log: Option<&str>,
     ) -> Result<Option<&'static str>> {
         let run = self.queue.run(&target.run_id)?;
         if run.status() != RunStatus::AwaitingIntegration
@@ -946,16 +1029,23 @@ impl Supervisor<'_> {
         let reason = failure.reason(watch.landed.as_ref(), &watch.main);
         let mut payload = failure.payload(watch.landed.as_ref(), &watch.main, &target.head);
         let lease = self.queue.run_lease(run.id())?;
-        if failure.is_environmental() {
+        if failure.is_environmental() || main_log.is_some() {
             if lease.is_some_and(|lease| lease.token != *self.registration.token()) {
                 return Ok(None);
             }
             payload["action"] = json!(SKIPPED);
             payload["reason"] = json!(reason);
             payload["status"] = json!(run.status());
+            if let Some(main_log) = main_log {
+                payload["main_failed"] = json!(true);
+                payload["main_log_path"] = json!(main_log);
+            }
             self.queue
                 .record_runtime_event(run.id(), EventKind::LandingRecheckFailed, payload)?;
-            let note = if matches!(failure, RecheckFailure::ContainerRefused { .. }) {
+            let note = if let Some(main_log) = main_log {
+                warn!(run_id = %run.id(), "run {}: {reason}; the command fails on main alone too (see {main_log}), so the run keeps waiting to land", run.id());
+                recheck::main_failed_ask_note(&reason, main_log)
+            } else if matches!(failure, RecheckFailure::ContainerRefused { .. }) {
                 warn!(run_id = %run.id(), "run {}: {reason}; nothing judged the code, so the run keeps waiting to land", run.id());
                 recheck::refused_ask_note(&reason)
             } else {
@@ -1090,6 +1180,11 @@ struct Recheck<'a> {
     /// The name of the file the pass's write check creates and removes in
     /// each build output ([`write_probe`]).
     probe: &'a str,
+    /// The latest record of the command on main alone is a failure (the
+    /// inbox's attention stands): main is checked in a pass that ran the
+    /// command on a run on the host even when none failed it, so a fixed
+    /// main ends the attention.
+    main_failed_open: bool,
 }
 
 /// What came of a run's check before its command: found already (a
@@ -1198,7 +1293,13 @@ fn check_writable(files: &dyn RunFiles, dir: &Path, probe: &str) -> TargetCheck 
 /// are checked ([`pass_writes`]): when one cannot be written, no command
 /// runs on the host and those runs are [`Finding::Unwritable`]. Then the
 /// commands, one after another ([`run_command`]), each output in
-/// `recheck-<main>.log` of the run directory.
+/// `recheck-<main>.log` of the run directory. Once every target is
+/// checked, a pass whose command failed a run on the host for the code
+/// ([`recheck::checks_main`]) runs it on main alone ([`check_main`]) with
+/// the first such run's `[run.env]`, and the findings are recorded as it
+/// says ([`recheck::kept_by_main`]); while main's failure is the inbox's
+/// attention, a pass whose command passed on a run on the host checks
+/// main too, with that run's `[run.env]`.
 fn recheck_runs(recheck: &Recheck<'_>, targets: Vec<Target>) -> Found {
     let prepared: Vec<Result<Prepared>> = targets
         .iter()
@@ -1226,8 +1327,131 @@ fn recheck_runs(recheck: &Recheck<'_>, targets: Vec<Target>) -> Found {
             .unwrap_or_else(|error| Finding::Error(format!("{error:#}")));
             (target, finding, removed)
         })
-        .collect();
-    (checked, writes)
+        .collect::<Vec<Checked>>();
+    let failed = checked
+        .iter()
+        .find_map(|(target, finding, _)| match finding {
+            Finding::Failed(failure)
+                if recheck::checks_main(failure, target.container.is_none()) =>
+            {
+                Some(target)
+            }
+            _ => None,
+        });
+    // With the attention open, a pass whose command passed on a run on the
+    // host checks main too, so a fixed main ends it.
+    let passed = || {
+        checked.iter().find_map(|(target, finding, _)| {
+            (target.container.is_none()
+                && matches!(
+                    finding,
+                    Finding::Clean {
+                        skipped_by_paths: false
+                    }
+                ))
+            .then_some(target)
+        })
+    };
+    let first = failed.or_else(|| {
+        (recheck.main_failed_open && recheck.config.command.is_some())
+            .then(passed)
+            .flatten()
+    });
+    let main = first.map(|first| check_main(recheck, first));
+    (checked, writes, main)
+}
+
+/// Run the command on main's tree alone, no run merged in (ADR-t2141-1),
+/// as on a run on the host ([`run_on_host`]): in the same scratch
+/// worktree and build outputs, with the `[run.env]` of `first` (the first
+/// run that failed it, or that passed it while main's failure is the
+/// inbox's attention), its output in `main-<main's first 12>.log` of the
+/// recheck's directory. Git or the command not run, its time limit or a
+/// failure on the host judge nothing ([`MainCheck::Unjudged`]).
+fn check_main(recheck: &Recheck<'_>, first: &Target) -> MainCheck {
+    let checked = || -> Result<MainCheck> {
+        let command = recheck
+            .config
+            .command
+            .as_deref()
+            .context("no recheck command")?;
+        let main = recheck.main;
+        let toolchains = recheck.verifier.toolchains()?;
+        let runs = toolchains.build_runs(|| recheck.repository.tree_paths(main.as_str()))?;
+        let log = recheck
+            .dir
+            .join(format!("main-{}.log", &main.as_str()[..12]));
+        let log_path = path_text(&log)?;
+        let exit = match run_on_host(recheck, &runs, main, &first.run_dir, command, &log)? {
+            Ok(exit) if exit.success => return Ok(MainCheck::Passed { log_path }),
+            Ok(exit) => exit,
+            Err(error) => return Ok(MainCheck::Unjudged(format!("{error:#}"))),
+        };
+        let output = recheck
+            .files
+            .read(&log)
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default();
+        let failure =
+            verify_failure::classify(&toolchains, command, exit.code, exit.signal, &output);
+        if failure.class.is_environmental() {
+            return Ok(MainCheck::Unjudged(format!(
+                "it failed on the host ({}: {}); see {log_path}",
+                failure.class.as_str(),
+                failure.evidence
+            )));
+        }
+        Ok(MainCheck::Failed {
+            exit_code: exit.code.unwrap_or(128),
+            log_path,
+            failure,
+        })
+    };
+    checked().unwrap_or_else(|error| MainCheck::Unjudged(format!("{error:#}")))
+}
+
+/// Run `command` on the host on `commit` in the scratch worktree under the
+/// recheck's directory, with the environment of [`recheck_env`] from the
+/// `[run.env]` of `run_dir`, once for each of `runs` (the build outputs
+/// of each run, [`crate::domain::toolchain::Toolchains::build_runs`]),
+/// checked out again before each and no further once one fails, its
+/// output in `log`. The outer `Err` when Git or the setup failed; the
+/// inner one is the command's own (its time limit included).
+fn run_on_host(
+    recheck: &Recheck<'_>,
+    runs: &[Vec<BuildDir>],
+    commit: &CommitSha,
+    run_dir: &Path,
+    command: &str,
+    log: &Path,
+) -> Result<Result<crate::application::Exit>> {
+    let Recheck {
+        verifier,
+        files,
+        dir,
+        look,
+        ..
+    } = *recheck;
+    let scratch = dir.join("worktree");
+    files.create_dir_all(dir)?;
+    let mut status = None;
+    // Each run on the tree as committed, until one fails.
+    for outputs in runs {
+        recheck
+            .repository
+            .checkout_scratch(&scratch, commit.as_str())?;
+        for output in outputs {
+            files.create_dir_all(&output.dir_under(dir))?;
+        }
+        let env = recheck_env(verifier.run_env(run_dir)?, dir, outputs, look)?;
+        let ran = verifier.run_to_log(command, &scratch, &env, log);
+        let passed = matches!(&ran, Ok(exit) if exit.success);
+        status = Some(ran);
+        if !passed {
+            break;
+        }
+    }
+    status.context("no run of the recheck's command")
 }
 
 /// A run's check up to its command: what was found without one, or what
@@ -1326,8 +1550,6 @@ fn run_command(
         files,
         main,
         config,
-        dir,
-        look,
         ..
     } = *recheck;
     let command = config
@@ -1349,28 +1571,7 @@ fn run_command(
         .run_dir
         .join(format!("recheck-{}.log", &main.as_str()[..12]));
     let status = match (host, &target.container, recheck.in_container) {
-        (Some(runs), _, _) => {
-            let scratch = dir.join("worktree");
-            files.create_dir_all(dir)?;
-            let mut status = None;
-            // Each run on the merged tree as committed, until one fails.
-            for outputs in &runs {
-                recheck
-                    .repository
-                    .checkout_scratch(&scratch, merged.as_str())?;
-                for output in outputs {
-                    files.create_dir_all(&output.dir_under(dir))?;
-                }
-                let env = recheck_env(verifier.run_env(&target.run_dir)?, dir, outputs, look)?;
-                let ran = verifier.run_to_log(command, &scratch, &env, &log);
-                let passed = matches!(&ran, Ok(exit) if exit.success);
-                status = Some(ran);
-                if !passed {
-                    break;
-                }
-            }
-            status.context("no run of the recheck's command")?
-        }
+        (Some(runs), _, _) => run_on_host(recheck, &runs, &merged, &target.run_dir, command, &log)?,
         (None, Some(run), Some(InContainer::Run { containers, tokens })) => {
             let ran = run_in_container(
                 &InRecheck {
@@ -2070,7 +2271,10 @@ mod tests {
     /// on) is counted but not listed.
     #[test]
     fn the_finished_recheck_counts_its_findings() {
-        let mut tally = Tally::default();
+        let mut tally = Tally {
+            main_check: Some("failed"),
+            ..Tally::default()
+        };
         tally.clean(false);
         tally.clean(true);
         tally.error();
@@ -2088,23 +2292,33 @@ mod tests {
                 profile: None,
             },
         };
-        let (r1, r2, r3, r4) = (
+        let (r1, r2, r3, r4, r5) = (
             RunId::new("r1").unwrap(),
             RunId::new("r2").unwrap(),
             RunId::new("r3").unwrap(),
             RunId::new("r4").unwrap(),
+            RunId::new("r5").unwrap(),
         );
-        tally.failed(&r1, &conflict, Some(recheck::RESUMED));
+        tally.failed(&r1, &conflict, Some(recheck::RESUMED), false);
         tally.failed(
             &r2,
             &check(verify_failure::FailureClass::TestFailure),
             Some(HELD),
+            false,
         );
-        tally.failed(&r3, &conflict, None);
+        tally.failed(&r3, &conflict, None, false);
         tally.failed(
             &r4,
             &check(verify_failure::FailureClass::DiskFull),
             Some(SKIPPED),
+            false,
+        );
+        // Kept from its resume by main's failure (ADR-t2141-1).
+        tally.failed(
+            &r5,
+            &check(verify_failure::FailureClass::BuildError),
+            Some(SKIPPED),
+            true,
         );
         let landed = Landed {
             run_id: RunId::new("landed").unwrap(),
@@ -2129,18 +2343,21 @@ mod tests {
                     {"run_id": "r1", "code": "rebase_conflict", "action": "resumed"},
                     {"run_id": "r2", "code": "verification_failed", "action": "held"},
                     {"run_id": "r4", "code": "verification_failed", "action": "skipped"},
+                    {"run_id": "r5", "code": "verification_failed", "action": "skipped"},
                 ],
                 "supervisor": "me",
-                "checked": 7,
+                "checked": 8,
                 "clean": 2,
                 "command_skipped": 1,
                 "conflicts": 2,
-                "check_failed": 1,
+                "check_failed": 2,
                 "environment": 1,
                 "errors": 1,
                 "resumed": 1,
                 "held": 1,
                 "target_unwritable": 0,
+                "main_check": "failed",
+                "main_failed": 1,
             })
         );
         let none = Tally::default().finished(&main, None, None, 0, &LeaseToken::new("me"));
@@ -2149,6 +2366,8 @@ mod tests {
         assert_eq!(none["checked"], 0);
         assert_eq!(none["failed_runs"], json!([]));
         assert!(none.get("command_skipped_reason").is_none());
+        assert_eq!(none["main_check"], Value::Null);
+        assert_eq!(none["main_failed"], 0);
         // Runs left unrecorded for an unwritable build output are counted
         // apart from `checked`, with why no command ran.
         let unwritable = Tally {

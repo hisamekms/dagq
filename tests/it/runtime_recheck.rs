@@ -468,8 +468,16 @@ fn a_waiting_run_whose_check_fails_on_the_new_main_is_resumed() {
         log.file_name().unwrap().to_str().unwrap(),
         format!("recheck-{}.log", &main[..12])
     );
-    assert!(recheck_dir.join("worktree").join("a.txt").is_file());
+    // Main alone passed the command after it (ADR-t2141-1), in the same
+    // scratch worktree, which it left on main's tree.
+    assert!(
+        recheck_dir
+            .join(format!("main-{}.log", &main[..12]))
+            .is_file()
+    );
+    assert!(!recheck_dir.join("worktree").join("a.txt").exists());
     assert!(!recheck_dir.join("worktree").join("b.txt").exists());
+    assert_eq!(status_main_check(&db), "passed");
     let reason = found["reason"].as_str().unwrap();
     assert!(reason.contains("exits with 1 on main"), "{reason}");
     let started = payloads(&detail, "resume_started");
@@ -489,6 +497,12 @@ fn a_waiting_run_whose_check_fails_on_the_new_main_is_resumed() {
         status["landing_recheck"]["command"],
         "echo \"target=$CARGO_TARGET_DIR\"; if [ -f a.txt ]; then test -f b.txt || { echo error[E0063]: missing_b; exit 1; }; fi"
     );
+}
+
+/// `main_check` of the latest `landing_recheck_finished`, as `status`
+/// shows it.
+fn status_main_check(db: &Path) -> Value {
+    runtime::status(db).unwrap()["landing_recheck"]["main_check"].clone()
 }
 
 /// A repository that declares `[toolchains.<name>]` of which none applies
@@ -1582,4 +1596,220 @@ fn a_recheck_with_no_command_does_not_check_its_build_output() {
     let finished = finished.last().unwrap();
     assert_eq!(finished["target_unwritable"], 0);
     assert!(finished.get("command_skipped_reason").is_none());
+}
+
+/// The queue's records of the recheck's command on main alone
+/// (ADR-t2141-1), oldest first: each one's kind and payload.
+fn main_checks(db: &Path) -> Vec<(String, Value)> {
+    Connection::open(db)
+        .unwrap()
+        .prepare(
+            "SELECT kind, payload FROM run_events WHERE kind LIKE 'landing_recheck_main_%' \
+             AND run_id IS NULL ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            let payload: String = row.get(1)?;
+            Ok((row.get(0)?, serde_json::from_str(&payload).unwrap()))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+/// A recheck command that fails on a tree with `broken.txt` (main broken
+/// for every run) or with a `change.txt` a run wrote (the run's code).
+const MAIN_OR_RUN_FAILS: &str = "[recheck]\ncommand = 'if [ -f broken.txt ] || grep -q \"change by\" change.txt; then echo \"error[E0063]: broken\"; exit 1; fi'\n";
+
+/// A recheck command that fails on a tree with `broken.txt` alone.
+const MAIN_BROKEN_FAILS: &str =
+    "[recheck]\ncommand = 'if [ -f broken.txt ]; then echo \"error[E0063]: broken\"; exit 1; fi'\n";
+
+/// The resumed session of a waiting run whose command failed: rebase onto
+/// the main the request names, then rewrite the receipt.
+const REBASED_RESUME: &str = "await_message; unlocked git rebase -q \"$MAIN\" || exit 1; receipt \"$(git rev-parse HEAD)\"; idle; await_exit";
+
+/// Commit `files` on main by hand, outside dagq; the new main.
+fn move_main_with(repo: &Path, files: &[(&str, Option<&str>)]) -> String {
+    for (file, text) in files {
+        match text {
+            Some(text) => {
+                fs::write(repo.join(file), text).unwrap();
+                git(repo, &["add", file]);
+            }
+            None => git(repo, &["rm", "-q", file]),
+        }
+    }
+    git(repo, &["commit", "-q", "-m", "main moves"]);
+    git_out(repo, &["rev-parse", "main"])
+}
+
+/// The run's command fails for the code, and so does main's tree alone
+/// (ADR-t2141-1): the run is neither parked nor held and uses no resume,
+/// its finding is skipped with main's failure and log, and the queue
+/// tells the inbox once. Main still failing on the next recheck tells it
+/// nothing more; once main is fixed, the pass is recorded though no run
+/// failed, and a main that breaks again is told again. That a run that
+/// fails on a main that passes is resumed is the next test's.
+#[test]
+fn a_recheck_whose_command_fails_on_main_alone_too_resumes_no_run_and_tells_the_inbox_once() {
+    let (dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let (waiting, _ask, reviewer) = one_waiting(&backend, &repo, &db);
+    let main = move_main_with(
+        &repo,
+        &[
+            ("dagq.toml", Some(MAIN_OR_RUN_FAILS)),
+            ("broken.txt", Some("broken\n")),
+        ],
+    );
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let run = run_of(&db, 1).unwrap();
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    assert_eq!(run.result_commit(), waiting.result_commit());
+    assert!(events_of(&db, run.id(), "resume_started").is_empty());
+    let found = events_of(&db, run.id(), "landing_recheck_failed");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0]["action"], "skipped");
+    assert_eq!(found[0]["code"], "verification_failed");
+    assert_eq!(found[0]["main_failed"], true);
+    let main_log = fs::canonicalize(dir.path())
+        .unwrap()
+        .join("recheck")
+        .join(format!("main-{}.log", &main[..12]));
+    assert_eq!(
+        found[0]["main_log_path"],
+        json!(main_log.display().to_string())
+    );
+    assert!(
+        fs::read_to_string(&main_log)
+            .unwrap()
+            .contains("error[E0063]: broken")
+    );
+    let checks = main_checks(&db);
+    assert_eq!(checks.len(), 1, "{checks:?}");
+    let (kind, payload) = &checks[0];
+    assert_eq!(kind, "landing_recheck_main_failed");
+    assert_eq!(payload["main"], json!(main));
+    assert_eq!(payload["log_path"], found[0]["main_log_path"]);
+    assert_eq!(payload["class"], found[0]["class"]);
+    assert_eq!(payload["exit_code"], 1);
+    assert_eq!(payload["failed_runs"], 1);
+    assert_eq!(
+        dagq::domain::event_attention(&EventKind::LandingRecheckMainFailed.into(), payload)
+            .map(|next| next.to_string()),
+        Some("fix main or the recheck environment".to_owned())
+    );
+    let counts = &runtime::status(&db).unwrap()["landing_recheck"];
+    assert_eq!(counts["main_check"], "failed", "{counts}");
+    assert_eq!(counts["main_failed"], 1);
+    assert_eq!(counts["check_failed"], 1);
+    assert_eq!(counts["resumed"], 0);
+    assert_eq!(counts["held"], 0);
+
+    // Main moves and is still broken: the run is skipped again, and the
+    // inbox is not told again.
+    move_main_with(&repo, &[("other.txt", Some("other\n"))]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let run = run_of(&db, 1).unwrap();
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    assert!(events_of(&db, run.id(), "resume_started").is_empty());
+    let found = events_of(&db, run.id(), "landing_recheck_failed");
+    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found[1]["main_failed"], true);
+    assert_eq!(main_checks(&db).len(), 1);
+
+    // Main is fixed and the run passes the command: no run failed it, but
+    // with the attention open main is checked too, and its pass recorded.
+    move_main_with(
+        &repo,
+        &[("dagq.toml", Some(MAIN_BROKEN_FAILS)), ("broken.txt", None)],
+    );
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let run = run_of(&db, 1).unwrap();
+    assert_eq!(events_of(&db, run.id(), "landing_recheck_failed").len(), 2);
+    assert_eq!(events_of(&db, run.id(), "landing_recheck_clean").len(), 1);
+    assert_eq!(status_main_check(&db), "passed");
+    let checks = main_checks(&db);
+    assert_eq!(
+        checks
+            .iter()
+            .map(|(kind, _)| kind.as_str())
+            .collect::<Vec<_>>(),
+        ["landing_recheck_main_failed", "landing_recheck_main_passed"]
+    );
+    assert_eq!(
+        dagq::domain::event_attention(&EventKind::LandingRecheckMainPassed.into(), &checks[1].1),
+        None
+    );
+
+    // Main breaks again: the inbox is told again.
+    move_main_with(&repo, &[("broken.txt", Some("broken\n"))]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let run = run_of(&db, 1).unwrap();
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    assert!(events_of(&db, run.id(), "resume_started").is_empty());
+    let found = events_of(&db, run.id(), "landing_recheck_failed");
+    assert_eq!(found.len(), 3, "{found:?}");
+    assert_eq!(found[2]["main_failed"], true);
+    assert_eq!(main_checks(&db).len(), 3);
+}
+
+/// Two runs fail the command the same way, but main alone passes it
+/// (ADR-t2141-1): their failures are their code's, and each is resumed as
+/// ADR-0068 decision 3 says; main's pass with no failure before it is
+/// not recorded on the queue.
+#[test]
+fn a_recheck_whose_command_passes_on_main_resumes_each_run_that_fails_it_the_same_way() {
+    let (_dir, repo, db) = fixture();
+    add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "second task", &[]);
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let reviewer = TestReviewer::new(&[
+        verdict("concern", &["a person should look"], "unsure"),
+        verdict("concern", &["a person should look"], "unsure"),
+    ]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    for task in [1, 2] {
+        assert_eq!(
+            run_of(&db, task).unwrap().status(),
+            RunStatus::AwaitingIntegration
+        );
+        backend.resume_script_for(task, REBASED_RESUME);
+    }
+    move_main_with(&repo, &[("dagq.toml", Some(MAIN_OR_RUN_FAILS))]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut tails = Vec::new();
+    for task in [1, 2] {
+        let run = run_of(&db, task).unwrap();
+        let found = events_of(&db, run.id(), "landing_recheck_failed");
+        assert_eq!(found.len(), 1, "task {task}: {found:?}");
+        assert_eq!(found[0]["action"], "resumed");
+        assert!(found[0].get("main_failed").is_none());
+        assert_eq!(events_of(&db, run.id(), "resume_started").len(), 1);
+        tails.push(found[0]["output_tail"].clone());
+    }
+    assert_eq!(tails[0], tails[1]);
+    assert!(main_checks(&db).is_empty());
+    let finished: Vec<Value> = [1, 2]
+        .into_iter()
+        .flat_map(|task| {
+            events_of(
+                &db,
+                run_of(&db, task).unwrap().id(),
+                "landing_recheck_finished",
+            )
+        })
+        .collect();
+    assert_eq!(finished.len(), 1, "{finished:?}");
+    let counts = &finished[0];
+    assert_eq!(counts["main_check"], "passed", "{counts}");
+    assert_eq!(counts["main_failed"], 0);
+    assert_eq!(counts["check_failed"], 2);
+    assert_eq!(counts["resumed"], 2);
 }

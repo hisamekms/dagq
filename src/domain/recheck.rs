@@ -11,14 +11,16 @@ use serde_json::{Value, json};
 
 use super::run::payload::{restore, typed};
 use super::verify_failure::VerifyFailure;
-use super::{CommitSha, ReasonCode, RunEvent, RunId, TaskId, scope::glob_matches};
+use super::{CommitSha, ReasonCode, RecordedKind, RunEvent, RunId, TaskId, scope::glob_matches};
 
 /// A run the recheck found no longer landing on main (ADR-0068 decision
 /// 3). Its `action` says what followed: [`RESUMED`] (it was parked for a
 /// resume in the same transaction), [`HELD`] (a session or the landing
 /// holds it; it is parked when it would land) or [`SKIPPED`] (the host
-/// kept the command from judging the code, ADR-t639-1: the run stays
-/// awaiting integration, neither parked nor held).
+/// kept the command from judging the code, ADR-t639-1, or the command
+/// failed on main alone too, ADR-t2141-1, which `main_failed: true` and
+/// `main_log_path` tell: the run stays awaiting integration, neither
+/// parked nor held).
 pub const LANDING_RECHECK_FAILED: &str = super::event_kind::LANDING_RECHECK_FAILED;
 
 /// A run the recheck found still landing on main (ADR-t1311-1): the main
@@ -41,8 +43,9 @@ pub const RESUMED: &str = "resumed";
 pub const HELD: &str = "held";
 
 /// `action` of a failure the recheck's command met on the host
-/// ([`RecheckFailure::is_environmental`]): nothing followed, and the run
-/// keeps waiting to land as it was.
+/// ([`RecheckFailure::is_environmental`]), or that it met on main alone
+/// too ([`kept_by_main`]): nothing followed, and the run keeps waiting to
+/// land as it was.
 pub const SKIPPED: &str = "skipped";
 
 /// `command_skipped` of a clean finding whose run's diff touches none of
@@ -314,6 +317,10 @@ pub struct RecordedFailure<'a> {
     /// `true` on a held run's parking, which repeats its finding.
     #[serde(default, deserialize_with = "typed")]
     pub repeat: Option<bool>,
+    /// `true` on a [`SKIPPED`] failure the command met on main alone too
+    /// ([`kept_by_main`]): a failure of the code, not of the host.
+    #[serde(default, deserialize_with = "typed")]
+    pub main_failed: Option<bool>,
 }
 
 impl<'a> RecordedFailure<'a> {
@@ -325,6 +332,13 @@ impl<'a> RecordedFailure<'a> {
     /// ([`SKIPPED`]): the finding parked and held nothing.
     pub fn skipped(&self) -> bool {
         self.action == Some(FailedAction::Skipped)
+    }
+
+    /// Whether the host or a missing container kept the command from
+    /// judging the code: [`Self::skipped`] but for main's failure
+    /// ([`Self::main_failed`]), which judged it.
+    pub fn environmental(&self) -> bool {
+        self.skipped() && self.main_failed != Some(true)
     }
 }
 
@@ -494,6 +508,140 @@ impl TargetCheck {
     }
 }
 
+/// The landing recheck's command failed on main's tree alone, run once in
+/// a pass whose command failed a run for the code (ADR-t2141-1), recorded
+/// on the queue when the latest of [`LANDING_RECHECK_MAIN_KINDS`] is not
+/// one already: `main`, `command`, `exit_code`, `class`, `evidence`,
+/// `log_path` (`recheck/main-<main's first 12>.log` of the queue's
+/// directory), `failed_runs` (how many runs it kept from a resume) and
+/// `supervisor`. An attention (`fix main or the recheck environment`)
+/// for the inbox: the runs' failures are main's or the recheck
+/// environment's, and resuming the runs would not fix them.
+pub const LANDING_RECHECK_MAIN_FAILED: &str =
+    crate::domain::event_kind::EventKind::LandingRecheckMainFailed.as_str();
+
+/// The command passed on main alone after a
+/// [`LANDING_RECHECK_MAIN_FAILED`] (`main`, `command`, `log_path`,
+/// `supervisor`); the attention ends with it, and it is no attention
+/// itself. Not recorded after another pass: main's check passing is
+/// the usual case.
+pub const LANDING_RECHECK_MAIN_PASSED: &str =
+    crate::domain::event_kind::EventKind::LandingRecheckMainPassed.as_str();
+
+/// The two kinds, for reading the latest of them.
+pub const LANDING_RECHECK_MAIN_KINDS: [&str; 2] =
+    [LANDING_RECHECK_MAIN_FAILED, LANDING_RECHECK_MAIN_PASSED];
+
+/// What the recheck's command found on main's tree alone, with no run
+/// merged in (ADR-t2141-1). It runs once in a pass, only when the command
+/// failed at least one run on the host for the code
+/// ([`checks_main`]), or, while the latest record of it is
+/// [`LANDING_RECHECK_MAIN_FAILED`], passed one, on the host in the
+/// recheck's scratch worktree and build outputs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MainCheck {
+    /// The command passed on main: the runs' failures are theirs.
+    Passed { log_path: String },
+    /// The command failed on main for the code: the runs' failures say
+    /// nothing of the runs.
+    Failed {
+        exit_code: i32,
+        log_path: String,
+        failure: VerifyFailure,
+    },
+    /// Git or the command could not be run, or the command failed on the
+    /// host ([`super::verify_failure::FailureClass::is_environmental`]):
+    /// nothing is told of main, and the runs are handled as without it.
+    Unjudged(String),
+}
+
+impl MainCheck {
+    /// `main_check` of `landing_recheck_finished`.
+    pub const fn outcome(&self) -> &'static str {
+        match self {
+            Self::Passed { .. } => "passed",
+            Self::Failed { .. } => "failed",
+            Self::Unjudged(_) => "unjudged",
+        }
+    }
+
+    /// The log of main's check when main failed it.
+    pub fn failed_log(&self) -> Option<&str> {
+        match self {
+            Self::Failed { log_path, .. } => Some(log_path),
+            _ => None,
+        }
+    }
+
+    /// The event to record on the queue after this check, given the
+    /// latest of [`LANDING_RECHECK_MAIN_KINDS`] (`last`): the failure
+    /// unless the latest is a failure already, the pass only after a
+    /// failure, and nothing for a check that judged nothing. So a main
+    /// that stays broken, or that passes as it usually does, does not
+    /// wake the inbox on each recheck. `failed_runs` is how many runs the
+    /// failure kept from a resume.
+    pub fn transition(
+        &self,
+        last: Option<&RecordedKind>,
+        main: &CommitSha,
+        command: &str,
+        failed_runs: u64,
+    ) -> Option<(EventKind, Value)> {
+        let was_failed = last.is_some_and(|kind| *kind == EventKind::LandingRecheckMainFailed);
+        match self {
+            Self::Failed {
+                exit_code,
+                log_path,
+                failure,
+            } if !was_failed => Some((
+                EventKind::LandingRecheckMainFailed,
+                json!({
+                    "main": main,
+                    "command": command,
+                    "exit_code": exit_code,
+                    "class": failure.class,
+                    "evidence": failure.evidence,
+                    "log_path": log_path,
+                    "failed_runs": failed_runs,
+                }),
+            )),
+            Self::Passed { log_path } if was_failed => Some((
+                EventKind::LandingRecheckMainPassed,
+                json!({"main": main, "command": command, "log_path": log_path}),
+            )),
+            _ => None,
+        }
+    }
+}
+
+/// Whether `failure`, of a run whose command ran on the host
+/// (`on_host`), has the recheck check main alone (ADR-t2141-1): a
+/// command that failed for the code. A conflict, a failure on the host
+/// and a run in a container (whose command does not run where main's
+/// check does) do not.
+pub fn checks_main(failure: &RecheckFailure, on_host: bool) -> bool {
+    on_host && matches!(failure, RecheckFailure::CheckFailed { .. }) && !failure.is_environmental()
+}
+
+/// Whether `failure` of a run is kept from a resume because the command
+/// failed on main alone (`main`, the pass's check of main; ADR-t2141-1):
+/// such a run is recorded [`SKIPPED`] with `main_failed` and keeps
+/// waiting to land, using no resume. With main passing, unjudged or not
+/// checked, the run is handled as ADR-0068 decision 3 says, however many
+/// runs failed the same way.
+pub fn kept_by_main(failure: &RecheckFailure, on_host: bool, main: Option<&MainCheck>) -> bool {
+    checks_main(failure, on_host) && matches!(main, Some(MainCheck::Failed { .. }))
+}
+
+/// The paragraph a failure kept by main's failure ([`kept_by_main`])
+/// puts in the run's open asks: what the run met, that main fails alone,
+/// and that the run keeps waiting to land.
+pub fn main_failed_ask_note(reason: &str, main_log: &str) -> String {
+    format!(
+        "{ASK_NOTE_PREFIX}{reason}. The command fails on main alone too (see {main_log}): the run is not resumed and keeps waiting to land."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,6 +704,142 @@ mod tests {
             payload,
             created_at: String::new(),
             actor: None,
+        }
+    }
+
+    fn check_failed(class: super::super::verify_failure::FailureClass) -> RecheckFailure {
+        RecheckFailure::CheckFailed {
+            command: "cargo check".into(),
+            exit_code: 101,
+            log_path: "/runs/r/recheck-m.log".into(),
+            output_tail: "error: could not compile".into(),
+            failure: VerifyFailure {
+                class,
+                evidence: "error: could not compile".into(),
+                profile: None,
+            },
+        }
+    }
+
+    fn main_failed() -> MainCheck {
+        MainCheck::Failed {
+            exit_code: 101,
+            log_path: "/q/recheck/main-m.log".into(),
+            failure: VerifyFailure {
+                class: super::super::verify_failure::FailureClass::BuildError,
+                evidence: "error: could not compile".into(),
+                profile: None,
+            },
+        }
+    }
+
+    /// Main alone is checked only for a command that failed a run on the
+    /// host for the code; a run whose failure it is is kept from a resume
+    /// only when main failed too (ADR-t2141-1). A pass on main, a check
+    /// that judged nothing, or none, leave the run to its resume.
+    #[test]
+    fn a_runs_code_failure_is_kept_from_its_resume_only_when_main_fails_alone_too() {
+        use super::super::verify_failure::FailureClass::*;
+        let code = check_failed(BuildError);
+        let host = check_failed(DiskFull);
+        let conflict = RecheckFailure::Conflict {
+            paths: vec!["x.rs".into()],
+        };
+        let refused = RecheckFailure::ContainerRefused {
+            command: "c".into(),
+            why: "w".into(),
+        };
+        for class in [
+            BuildError,
+            Lint,
+            TestFailure,
+            Format,
+            CoverageBelow,
+            Unknown,
+        ] {
+            assert!(checks_main(&check_failed(class), true), "{class:?}");
+        }
+        assert!(!checks_main(&code, false));
+        assert!(!checks_main(&host, true));
+        assert!(!checks_main(&conflict, true));
+        assert!(!checks_main(&refused, true));
+
+        let failed = main_failed();
+        let passed = MainCheck::Passed {
+            log_path: "/q/recheck/main-m.log".into(),
+        };
+        let unjudged = MainCheck::Unjudged("git did not start".into());
+        assert!(kept_by_main(&code, true, Some(&failed)));
+        assert!(!kept_by_main(&code, true, Some(&passed)));
+        assert!(!kept_by_main(&code, true, Some(&unjudged)));
+        assert!(!kept_by_main(&code, true, None));
+        assert!(!kept_by_main(&code, false, Some(&failed)));
+        assert!(!kept_by_main(&conflict, true, Some(&failed)));
+        assert!(!kept_by_main(&host, true, Some(&failed)));
+        assert_eq!(failed.failed_log(), Some("/q/recheck/main-m.log"));
+        assert_eq!(passed.failed_log(), None);
+        assert_eq!(
+            [failed.outcome(), passed.outcome(), unjudged.outcome()],
+            ["failed", "passed", "unjudged"]
+        );
+        let note = main_failed_ask_note("it failed", "/q/recheck/main-m.log");
+        assert!(note.starts_with(ASK_NOTE_PREFIX), "{note}");
+        assert!(note.contains("fails on main alone too"), "{note}");
+    }
+
+    /// Main's failure is recorded unless the latest record is a failure;
+    /// its pass only after a failure; an unjudged check never (ADR-t2141-1).
+    #[test]
+    fn main_alone_is_told_once_when_it_fails_and_once_when_it_passes_again() {
+        let main = CommitSha::parse("a".repeat(40), "commit").unwrap();
+        let failed = main_failed();
+        let passed = MainCheck::Passed {
+            log_path: "/q/recheck/main-m.log".into(),
+        };
+        let unjudged = MainCheck::Unjudged("x".into());
+        let was_failed: RecordedKind = EventKind::LandingRecheckMainFailed.into();
+        let was_passed: RecordedKind = EventKind::LandingRecheckMainPassed.into();
+        let (kind, payload) = failed.transition(None, &main, "cargo check", 3).unwrap();
+        assert_eq!(kind, EventKind::LandingRecheckMainFailed);
+        assert_eq!(
+            payload,
+            json!({
+                "main": main,
+                "command": "cargo check",
+                "exit_code": 101,
+                "class": "build_error",
+                "evidence": "error: could not compile",
+                "log_path": "/q/recheck/main-m.log",
+                "failed_runs": 3,
+            })
+        );
+        assert_eq!(
+            failed
+                .transition(Some(&was_passed), &main, "c", 1)
+                .map(|(kind, _)| kind),
+            Some(EventKind::LandingRecheckMainFailed)
+        );
+        assert!(
+            failed
+                .transition(Some(&was_failed), &main, "c", 1)
+                .is_none()
+        );
+        let (kind, payload) = passed
+            .transition(Some(&was_failed), &main, "cargo check", 0)
+            .unwrap();
+        assert_eq!(kind, EventKind::LandingRecheckMainPassed);
+        assert_eq!(
+            payload,
+            json!({"main": main, "command": "cargo check", "log_path": "/q/recheck/main-m.log"})
+        );
+        assert!(passed.transition(None, &main, "c", 0).is_none());
+        assert!(
+            passed
+                .transition(Some(&was_passed), &main, "c", 0)
+                .is_none()
+        );
+        for last in [None, Some(&was_failed), Some(&was_passed)] {
+            assert!(unjudged.transition(last, &main, "c", 0).is_none());
         }
     }
 

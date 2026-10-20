@@ -2469,6 +2469,16 @@ pub enum AttentionNext {
     /// 1129): a person stops the named processes by pid (or makes the host
     /// list processes again). It ends once the supervisor released the run.
     StopLandingProcesses,
+    /// The landing recheck's command failed on main's tree alone, after it
+    /// failed a run for the code (`landing_recheck_main_failed`,
+    /// ADR-t2141-1): main is broken or the recheck's environment is (its
+    /// `recheck/target`, the supervisor's environment), so the runs that
+    /// failed keep waiting to land instead of being resumed. A person
+    /// reads the log the event names, then has a task fix main or fixes
+    /// the environment. `landing_recheck_main_passed` records its end once
+    /// a recheck passes on main alone; `status` shows no standing row for
+    /// it, so `watch` tells it once.
+    FixMainOrRecheck,
     /// A task's hold passed its `until`, or has been on for a day with
     /// none (`task_hold_reminded`, ADR-t1879-1): a person releases it, or
     /// keeps it and is told again a day later. Nothing releases it by
@@ -2579,6 +2589,7 @@ impl fmt::Display for AttentionNext {
             Self::CheckE2e => f.write_str("check the e2e host"),
             Self::ExitSession => f.write_str("exit the session"),
             Self::StopLandingProcesses => f.write_str("stop the dead landing's processes"),
+            Self::FixMainOrRecheck => f.write_str("fix main or the recheck environment"),
             Self::ReleaseOrKeepHold { task_id } => {
                 write!(f, "release or keep the hold of task {task_id}")
             }
@@ -2603,6 +2614,9 @@ pub const ATTENTION_KINDS: &[&str] = &[
     "integration_error",
     event_kind::INTEGRATION_HELD,
     event_kind::LANDING_RELEASE_STUCK,
+    // The recheck's command failed on main alone (ADR-t2141-1): told once
+    // until main passes it again.
+    recheck::LANDING_RECHECK_MAIN_FAILED,
     "push_failed",
     "runtime_error",
     "resume_finished",
@@ -2917,6 +2931,9 @@ pub fn event_attention(kind: &RecordedKind, payload: &serde_json::Value) -> Opti
         // The release of a dead landing could not stop what its worktree
         // still runs (task 1129).
         (Some(EventKind::LandingReleaseStuck), _) => Some(AttentionNext::StopLandingProcesses),
+        // The landing recheck's command fails on main alone (ADR-t2141-1);
+        // its pass again is no attention.
+        (Some(EventKind::LandingRecheckMainFailed), _) => Some(AttentionNext::FixMainOrRecheck),
         (Some(EventKind::SccacheServerRestartFailed), _) => Some(AttentionNext::CheckSccache),
         (Some(EventKind::RunEnvProgramMissing), _) => Some(AttentionNext::InstallTool),
         // The recheck's build output could not be written, so it ran no
@@ -4176,6 +4193,16 @@ mod attention_tests {
                 None,
             ),
             (
+                "landing_recheck_main_failed",
+                json!({"main": "m", "command": "c", "exit_code": 101, "class": "build_error", "log_path": "/q/recheck/main-m.log", "failed_runs": 2}),
+                Some(FixMainOrRecheck),
+            ),
+            (
+                "landing_recheck_main_passed",
+                json!({"main": "m", "command": "c", "log_path": "/q/recheck/main-m.log"}),
+                None,
+            ),
+            (
                 "container_runtime_unavailable",
                 json!({"targets": [{"target": "worker", "reason": "x"}], "message": "m"}),
                 Some(FixDagqToml),
@@ -4579,6 +4606,10 @@ mod attention_tests {
         assert_eq!(
             StopLandingProcesses.to_string(),
             "stop the dead landing's processes"
+        );
+        assert_eq!(
+            FixMainOrRecheck.to_string(),
+            "fix main or the recheck environment"
         );
         assert_eq!(PushMain.to_string(), "push main");
         assert_eq!(
