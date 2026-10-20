@@ -96,6 +96,7 @@ runtimeの自動修正が直さなかったものをjobが状況を読んで許�
 ### escalate
 
 - `escalate`、`confidence: low`の`repair`、前提の崩れた`repair`、試行の使い切りは、inbox宛てのそのalertのaskにする（決定40のkind）。
+  使い切りはjobを起動しないので、行き先（下の「Codexで動かす」）が待つあいだも待たずにaskにする（`domain::recovery::round_start`）。
 - askの選択肢の組み立ては`recovery::ask_options`が持ち、askはそのkindのものに、jobの選択肢のうち残るものを足すので、人はjobの見立てと元のaskの答えの両方から選べる。
 - jobの選択肢は終わったrunと同じ規則で寄せるか外す（[ADR-t1818-2](../../adr/2026-10-05-t1818-2-recovery-job-options-map-to-runtime-options-or-pass-back.md)の決定1、[Triage](triage.md)の6、`domain::recovery::sort_job_options`）。
   `stalled`のaskでは`wait` / `stop`がruntimeの答えで、引き渡しを頼むoptionは出さない。
@@ -121,7 +122,7 @@ runtimeの自動修正が直さなかったものをjobが状況を読んで許�
 `[roles.recovery]`がproviderを書いた生きているrunのjobで、終わったrunのjobと同じ役割・同じ行き先である（仕組みは[Triage](triage.md#codexで動かす)）。
 
 - 行き先は`Supervisor::recovery_route`がalertのjobを始めるときに決め、`recovery_requested`に書き、headless jobの記録のproviderもそれである。
-  providerを書かない役割はClaudeで、queueのholdのあいだは始めない。
+  providerを書かない役割はClaudeで、queueのholdのあいだは始めない（alertが試行を使い切っていれば待たずにaskにする）。
   providerを書いた役割は使えるproviderで始め、Claudeのholdは`codex`のjobを止めない。
   providerの切り替えを切った設定では、控えが解けるまで待って同じproviderで始める（[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)）。
   [Claudeを使わない運転](../provider-lifecycle.md#claude-を使わない運転)で動かせるproviderが無ければjobを起動せず、jobの失敗と同じaskにする。

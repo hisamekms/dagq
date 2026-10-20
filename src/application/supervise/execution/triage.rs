@@ -12,8 +12,9 @@ use crate::domain::actor_model::{ActorLaunch, JobStartRoute, ModelRole};
 use crate::domain::landing_release::{self, ProcessesStep};
 use crate::domain::recovery::{
     ENDED_ACTIONS, HandOffFacts, MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, ProcessInfo,
-    RecoveryAction, SortedOptions, VERIFY_FIX_OPTION, attempts, current_alert, hand_off_refusal,
-    pending_request, run_processes, sort_job_options, verification_failed, verify_fix_round,
+    RecoveryAction, RoundStart, SortedOptions, VERIFY_FIX_OPTION, attempts, current_alert,
+    hand_off_refusal, pending_request, round_start, run_processes, sort_job_options,
+    verification_failed, verify_fix_round,
 };
 
 impl Supervisor<'_> {
@@ -380,15 +381,15 @@ impl Supervisor<'_> {
     /// round took them since their last resume, or their round's `wait` is
     /// over (ADR-0047 decision 39), in the order the queue lists them. A
     /// run someone leases (a session still asked to exit) waits, and none
-    /// is due while no provider can run the job ([`Self::recovery_route`]
-    /// waits): a login or usage limit that holds the queue holds a role
-    /// that names no provider (task 437), while one whose role names its
-    /// provider may start on Codex meanwhile (ADR-t1063-1 decision 5)
-    /// unless `[provider_fallback] jobs` is off (ADR-t1857-1).
+    /// whose job is to start is due while no provider can run it
+    /// ([`Self::recovery_route`] waits): a login or usage limit that holds
+    /// the queue holds a role that names no provider (task 437), while one
+    /// whose role names its provider may start on Codex meanwhile
+    /// (ADR-t1063-1 decision 5) unless `[provider_fallback] jobs` is off
+    /// (ADR-t1857-1). A run whose alert got its jobs starts none and is due
+    /// meanwhile ([`round_start`]).
     pub(super) fn triage_candidates(&mut self) -> Result<Vec<TaskRun>> {
-        if self.recovery_route().is_none() {
-            return Ok(Vec::new());
-        }
+        let waits = self.recovery_route().is_none();
         let now = self.generators.clock.now();
         let mut due_runs = Vec::new();
         for run in self.queue.runs_to_triage()? {
@@ -407,6 +408,9 @@ impl Supervisor<'_> {
             {
                 continue;
             }
+            if waits && !self.ended_round(&run, &events)?.used_up {
+                continue;
+            }
             // No recovery job of a held task (ADR-t1879-1).
             if self.held_out(
                 run.task_id(),
@@ -419,6 +423,25 @@ impl Supervisor<'_> {
         }
         Ok(due_runs)
     }
+    /// The round of `run`, which ended, as its `events` read now.
+    fn ended_round(&mut self, run: &TaskRun, events: &[RunEvent]) -> Result<EndedRound> {
+        let pending = pending_request(events).is_some();
+        let alert = current_alert(events).unwrap_or_else(|| RecoveryAlert::of_ended(run.status()));
+        let done = attempts(events, alert);
+        // A person's verify-fix answer after the task's verification
+        // was edited gets its round past the limit (ADR-t883-1).
+        let granted = !pending
+            && done >= MAX_RECOVERY_ATTEMPTS
+            && verify_fix_round(events, &self.queue.show(run.task_id())?.events);
+        let (used_up, attempt) = recovery_round(pending, done, granted);
+        Ok(EndedRound {
+            pending,
+            alert,
+            done,
+            used_up,
+            attempt,
+        })
+    }
     /// Start the recovery job of `run`, one of [`Self::triage_candidates`],
     /// in a free slot: the fill pass calls it in the order of its line
     /// (ADR-t1850-1). The alert is that of the run's latest
@@ -428,7 +451,8 @@ impl Supervisor<'_> {
     /// `evidence` is the ID of the event that put the run into its status.
     /// An alert that
     /// got its [`MAX_RECOVERY_ATTEMPTS`] jobs is escalated without one (but
-    /// for a person's verify fix after an edit, [`verify_fix_round`]), and a
+    /// for a person's verify fix after an edit, [`verify_fix_round`]) even
+    /// while the route waits, and a
     /// job that cannot even start fails its round right away. The job starts
     /// on the provider [`Self::recovery_route`] says, which is recorded as
     /// the `launch` of `triage_started` the job is started from; under
@@ -436,54 +460,50 @@ impl Supervisor<'_> {
     /// told why.
     pub(super) fn triage_run(&mut self, run: TaskRun) -> Result<()> {
         let events = self.queue.run_events(run.id())?;
-        let pending = pending_request(&events);
-        let alert = current_alert(&events).unwrap_or_else(|| RecoveryAlert::of_ended(run.status()));
-        let done = attempts(&events, alert);
-        // A person's verify-fix answer after the task's verification
-        // was edited gets its round past the limit (ADR-t883-1).
-        let granted = pending.is_none()
-            && done >= MAX_RECOVERY_ATTEMPTS
-            && verify_fix_round(&events, &self.queue.show(run.task_id())?.events);
-        let (used_up, attempt) = recovery_round(pending.is_some(), done, granted);
-        let request = match pending {
-            Some(_) => None,
-            None if used_up => None,
-            None => {
-                let evidence: Vec<EventId> = events
-                    .iter()
-                    .rev()
-                    .find(|e| e.payload["status"] == run.status().as_str())
-                    .map(|e| e.id)
-                    .into_iter()
-                    .collect();
-                let mut request = json!({
-                    "alert": alert,
-                    "attempt": done + 1,
-                    "status": run.status().as_str(),
-                    "evidence": evidence,
-                    "last_error": run.last_error(),
+        let EndedRound {
+            pending,
+            alert,
+            done,
+            used_up,
+            attempt,
+        } = self.ended_round(&run, &events)?;
+        let request = if pending || used_up {
+            None
+        } else {
+            let evidence: Vec<EventId> = events
+                .iter()
+                .rev()
+                .find(|e| e.payload["status"] == run.status().as_str())
+                .map(|e| e.id)
+                .into_iter()
+                .collect();
+            let mut request = json!({
+                "alert": alert,
+                "attempt": done + 1,
+                "status": run.status().as_str(),
+                "evidence": evidence,
+                "last_error": run.last_error(),
+            });
+            // A person chose one of the last job's own options.
+            if let Some(decided) = events
+                .iter()
+                .rev()
+                .take_while(|e| e.kind != EventKind::TriageStarted)
+                .find(|e| {
+                    e.kind == EventKind::TriageDecided
+                        && e.payload["action"] == crate::domain::RECOVER_AGAIN
+                })
+            {
+                // Without the label the ask showed after it.
+                let answer = decided.payload["answer"]
+                    .as_str()
+                    .map(crate::domain::recovery::without_label);
+                request["person_answer"] = json!({
+                    "ask_id": decided.payload["ask_id"],
+                    "answer": answer,
                 });
-                // A person chose one of the last job's own options.
-                if let Some(decided) = events
-                    .iter()
-                    .rev()
-                    .take_while(|e| e.kind != EventKind::TriageStarted)
-                    .find(|e| {
-                        e.kind == EventKind::TriageDecided
-                            && e.payload["action"] == crate::domain::RECOVER_AGAIN
-                    })
-                {
-                    // Without the label the ask showed after it.
-                    let answer = decided.payload["answer"]
-                        .as_str()
-                        .map(crate::domain::recovery::without_label);
-                    request["person_answer"] = json!({
-                        "ask_id": decided.payload["ask_id"],
-                        "answer": answer,
-                    });
-                }
-                Some(request)
             }
+            Some(request)
         };
         // Not while the cleanup job is to clear the run's worktree (task
         // 405).
@@ -494,13 +514,26 @@ impl Supervisor<'_> {
             return Ok(());
         }
         // The route as it reads now: a job reaped earlier in this pass may
-        // have held a provider.
-        let Some(route) = self.recovery_route() else {
-            return Ok(());
+        // have held a provider. A used-up round records the launch the
+        // route gives, or its role's while the route waits.
+        let route = self.recovery_route();
+        let used_up_launch = match &route {
+            Some(JobStartRoute::Start(launch, _) | JobStartRoute::Unavailable(launch, _)) => {
+                launch.clone()
+            }
+            None => self
+                .role_models(ModelRole::Recovery)
+                .launch(ModelRole::Recovery),
         };
-        let (launch, switchable, unavailable) = match route {
-            JobStartRoute::Start(launch, switchable) => (launch, switchable, None),
-            JobStartRoute::Unavailable(launch, why) => (launch, false, Some(why)),
+        let (launch, switchable, unavailable) = match round_start(used_up, route) {
+            RoundStart::UsedUp => (used_up_launch, false, None),
+            RoundStart::Waits => return Ok(()),
+            RoundStart::Starts(JobStartRoute::Start(launch, switchable)) => {
+                (launch, switchable, None)
+            }
+            RoundStart::Starts(JobStartRoute::Unavailable(launch, why)) => {
+                (launch, false, Some(why))
+            }
         };
         let begun =
             self.queue
@@ -1213,6 +1246,17 @@ fn launch_of(events: &[RunEvent]) -> ActorLaunch {
         )
 }
 
+/// A round of a run that ended: whether a request is `pending`, its alert,
+/// the jobs `done` for it, whether they are `used_up` and the number of the
+/// round's job ([`recovery_round`]).
+struct EndedRound {
+    pending: bool,
+    alert: RecoveryAlert,
+    done: usize,
+    used_up: bool,
+    attempt: usize,
+}
+
 /// Whether a round of a run that ended finds its alert's jobs used up, and
 /// the number of its job: a `pending` request is the job `done` counted
 /// already; else the next one, used up past [`MAX_RECOVERY_ATTEMPTS`]
@@ -1322,6 +1366,27 @@ mod tests {
             (false, 3)
         );
         assert_eq!(recovery_round(true, 1, false), (false, 1));
+    }
+
+    /// A used-up alert goes to a person whether or not the route waits; a
+    /// round with jobs left, the verify fix granted past the limit and a
+    /// pending request's alike, waits for the route or starts on it.
+    #[test]
+    fn a_used_up_round_escalates_while_the_route_waits_and_any_other_waits_for_it() {
+        let start = |pending, done, granted, route: Option<&'static str>| {
+            round_start(recovery_round(pending, done, granted).0, route)
+        };
+        let max = MAX_RECOVERY_ATTEMPTS;
+        assert_eq!(start(false, max, false, None), RoundStart::UsedUp);
+        assert_eq!(start(false, max, false, Some("codex")), RoundStart::UsedUp);
+        for (pending, done, granted) in [(false, 0, false), (false, max, true), (true, max, false)]
+        {
+            assert_eq!(start(pending, done, granted, None), RoundStart::Waits);
+            assert_eq!(
+                start(pending, done, granted, Some("codex")),
+                RoundStart::Starts("codex")
+            );
+        }
     }
 
     fn note_of(job: Option<serde_json::Value>) -> Note {

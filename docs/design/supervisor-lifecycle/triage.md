@@ -25,6 +25,7 @@ related:
    alertは、最後の`triage_started` / `resume_started`より後に記録された`recovery_requested`があればその`alert`（resumeを使い切ったrunの`resume_exhausted`。[`needs_session`](needs-session.md#needs_session)の6）、無ければrunのstatusで`failed` / `interrupted`。
    resumeの後にもう一度`failed`になったrunはもう一度ラウンドを持つ。
    新鮮なleaseのあるrun（verdictの後の終了を待っているsessionなど）は待つ。
+   行き先（下の「Codexで動かす」の`recovery_route`）が待つあいだは、jobを始めるrunを候補にせず、3でjobを起動せずにescalateになるrun（alertの上限に達し、3の例外に当たらない）だけを候補にする（jobを起動しないのでproviderを要らない。`domain::recovery::round_start`）。
    このsupervisorがまだslotで進めているrun（ラウンドの途中でleaseが他のtokenに移ってstaleになったものも）も取らない: そのslotは次のtickでleaseを失ったとして外れてjobを止め（[supervise](supervise.md#provisionと監視)）、その後のpassでだけ他のrunと同じく次のラウンドを始める（同じrunを2つのslotで進めない）。
    active runが上限未満のときだけ始め、jobの間はrun slotを1つ使う。
 3. **開始**: 2の候補は、`needs_session`の再開・readyのclaimと1つの列で、taskの効く優先度の降順（同じ優先度では再開 → 復旧job → claim）に空きslotを受け、順が来たものから始める（[supervise](supervise.md#slotを渡す順とclaim)、[ADR-t1850-1](../../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)）。
@@ -33,8 +34,9 @@ related:
    runのdirectory（無ければ`runs/<run-id>/`）に`recovery-<alert>-<attempt>.prompt.txt`を書いて、run eventの`recovery_prompt_written`を記録する。
    `triage_started`の`launch`のproviderのheadlessのコマンドをそのdirectoryで、`DAGQ_ROLE=recovery-job`（CLIはreviewと同じく読み取りだけを許す。[Roles](roles.md#actors)）と、queue serviceのsocketとjobのtokenのfile付き（`DAGQ_QUEUE`は渡さない。[Queue service](../queue-service.md#クライアントモード)）で起動し、stdout / stderrを`recovery-<alert>-<attempt>.out` / `.err`に書く（promptと一緒に、promptの固定バイナリの節の全体（claim以後の入れ替えの全てと、読む上限を超えて読まなかった件数）を`recovery-<alert>-<attempt>.binary.json`に書く）。
    timeoutはreviewと同じ。
-   上限の件数に達していれば、jobを起動せずに`begin_triage`（`recovery_requested`なし）の後すぐ6のescalateにする。
+   上限の件数に達していれば、行き先が待つあいだも、jobを起動せずに`begin_triage`（`recovery_requested`なし）の後すぐ6のescalateにする（`triage_started`の`launch`は行き先のもの、待つあいだは役割のもの）。
    例外は、最後のラウンドの後の人の回答が`edit the task's --verify, then retry_inherit`で、runの最初のeventより後にtaskのverifyを変えた`task_edited`があるときで、上限に達していてもjobをもう1回起動する（ADR-t883-1。直したverifyをjobが読んで`retry_inherit`を選べるように）。
+   jobを起動するので、行き先が待つあいだは他のラウンドと同じく待つ。
    その`recovery_requested`は上限を超えた通し番号になる。
    editの無い回答は他のoptionと同じで、上限に達していればすぐescalateになり、同じ選択肢のaskがまた開く（人が直して答えるまで進まない）。
 4. **prompt**（`prompt::recovery_prompt`。決定39の入力）: 載せる資料はこの関数のdoc commentが持つ。
@@ -134,6 +136,7 @@ jobは状態を変えず読むだけ（`TRIAGE_ACCESS`）で、verdictはClaude�
 設定はjobを始めるたびに読み直すので、設定の変更が着地してmain checkoutに反映されればsupervisorの再起動は要らない。
 
 - **行き先**（`Supervisor::recovery_route`）: ラウンドを始める前に決め、`triage_started`の`launch`に書く。
+  待つのはjobを起動するラウンドだけで、上限に達したalertのescalateは待たない（2・3）。
   providerを書かない役割はClaudeで、queueのholdのあいだは始めず、[Claudeを使わない運転](../provider-lifecycle.md#claude-を使わない運転)ではjobを起動せずに理由付きの8の失敗にする。
   providerを書いた役割（`claude`を書いたものも）は、そのproviderが使えれば（supervisorにagentがあり控えられていない）そこで、使えなければもう一方のproviderで、どちらも使えなければ待つ。
   `[provider_fallback] jobs = false`なら、使えない理由（実行ファイルが無い・起動できない・認証・利用上限）ではもう一方で始めず、控えが解けるまで待って同じproviderで始める（Claudeを使わない運転による行き先は変わらない。[ADR-t1857-1](../../adr/2026-10-06-t1857-1-provider-fallback-can-be-turned-off-for-workers-and-jobs.md)）。

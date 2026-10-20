@@ -15,8 +15,9 @@ use crate::domain::idle_process::{
 };
 use crate::domain::provider_switch::SwitchReason;
 use crate::domain::recovery::{
-    JobOption, MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, ProcessInfo, RecoveryAction, SortedOptions,
-    attempts, failed_live, live_pass_back, run_processes, sort_job_options, without_label,
+    JobOption, MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, ProcessInfo, RecoveryAction, RoundStart,
+    SortedOptions, attempts, failed_live, live_pass_back, round_start, run_processes,
+    sort_job_options, without_label,
 };
 use crate::domain::run::{RecoveryRecord, restore_payload};
 
@@ -603,18 +604,18 @@ impl RecoveryWatch {
         facts: Value,
         marker: Option<(SystemTime, i64)>,
     ) -> Result<Option<(usize, Escalation)>> {
+        let events = sv.queue.run_events(run.id())?;
+        let done = attempts(&events, alert);
         // A login or usage limit that holds the queue starts no recovery
         // job on Claude (task 437): the alert is followed again once it is
         // fixed. One whose role names its provider may start on Codex
-        // meanwhile (ADR-t1063-1 decision 5).
-        let Some(route) = sv.recovery_route() else {
-            return Ok(None);
+        // meanwhile (ADR-t1063-1 decision 5). An alert that got its jobs
+        // starts none, so it goes to a person without waiting.
+        let route = match round_start(done >= MAX_RECOVERY_ATTEMPTS, sv.recovery_route()) {
+            RoundStart::UsedUp => return Ok(Some((done, Escalation::UsedUp(done)))),
+            RoundStart::Waits => return Ok(None),
+            RoundStart::Starts(route) => route,
         };
-        let events = sv.queue.run_events(run.id())?;
-        let done = attempts(&events, alert);
-        if done >= MAX_RECOVERY_ATTEMPTS {
-            return Ok(Some((done, Escalation::UsedUp(done))));
-        }
         let attempt = done + 1;
         let evidence: Vec<EventId> = Vec::new();
         let mut payload = json!({

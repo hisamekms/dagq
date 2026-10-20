@@ -13,6 +13,7 @@ use crate::runtime_support;
 
 use dagq::application::EventStore;
 use dagq::domain::provider_switch::{ProviderHold, SwitchReason};
+use dagq::domain::recovery::MAX_RECOVERY_ATTEMPTS;
 use dagq::domain::{AskReason, EventKind, Provider};
 use runtime_support::*;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1045,6 +1046,97 @@ fn with_the_fallback_off_a_codex_recovery_job_at_its_limit_waits_and_retries_cod
     );
     assert!(reviewer.triage_prompts().is_empty(), "Claude ran no job");
     assert_eq!(recovery_providers(&db), ["codex", "codex"]);
+}
+
+/// With `[provider_fallback] jobs = false`, a run that ended whose alert
+/// used up its jobs on Codex goes to a person while Codex is still held:
+/// the escalation starts no job, so it waits for no provider. Each round
+/// before it waited for Codex's hold to end.
+#[test]
+fn with_the_fallback_off_a_used_up_alert_is_asked_while_codex_is_held() {
+    let (dir, repo, db) = fixture();
+    fs::write(
+        repo.join("dagq.toml"),
+        "[roles.recovery]\nprovider = 'codex'\nmodel = 'gpt-6-astra'\neffort = 'high'\n\n[provider_fallback]\njobs = false\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "dagq.toml"]);
+    git(
+        &repo,
+        &["commit", "-m", "select Codex for recovery, no fallback"],
+    );
+    let backend = TestWorkspace::new(&db, false, &fails_once(db.parent().unwrap()));
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")])
+        .with_triages(&[repair(json!({"action": "retry"}), "Claude must not run")]);
+    fs::write(
+        dir.path().join("codex-review-failure.jsonl"),
+        CODEX_LIMIT_FAILURE,
+    )
+    .unwrap();
+    let (_codex, options) = codex_options(dir.path(), &db, 4);
+    // Each job stops at Codex's usage limit and holds it; the next round
+    // starts once the hold ends.
+    for round in 1..=MAX_RECOVERY_ATTEMPTS {
+        if round > 1 {
+            let held = queue_events(&db, "provider_held");
+            SqliteQueue::open(&db)
+                .unwrap()
+                .record_queue_event(
+                    EventKind::ProviderReleased,
+                    json!({"provider": "codex", "reason": "usage_limit",
+                           "since": held.last().unwrap()["since"], "why": "retry_due"}),
+                )
+                .unwrap();
+        }
+        let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+        assert_eq!(outcome["errors"], json!([]), "{outcome}");
+        assert_eq!(recovery_providers(&db).len(), round);
+    }
+    // Codex is held after the last job, and the next pass escalates.
+    assert_eq!(
+        queue_events(&db, "provider_held").len(),
+        MAX_RECOVERY_ATTEMPTS
+    );
+    assert_eq!(
+        queue_events(&db, "provider_released").len(),
+        MAX_RECOVERY_ATTEMPTS - 1
+    );
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.runs.len(), 1);
+    let run = &detail.runs[0];
+    assert_eq!(run.status(), RunStatus::Failed);
+    // No job started for the escalation, on Codex or on Claude.
+    assert_eq!(recovery_providers(&db), ["codex"; MAX_RECOVERY_ATTEMPTS]);
+    assert!(reviewer.triage_prompts().is_empty(), "Claude ran no job");
+    let started = run_payloads(&detail, run, "triage_started");
+    assert_eq!(started.len(), MAX_RECOVERY_ATTEMPTS + 1, "{started:?}");
+    assert_eq!(started.last().unwrap()["launch"]["provider"], "codex");
+    let finished = run_payloads(&detail, run, "triage_finished");
+    let [used_up] = finished.as_slice() else {
+        panic!("{finished:?}")
+    };
+    assert_eq!(used_up["action"], "ask");
+    assert!(used_up["verdict"].is_null());
+    let recovered = run_payloads(&detail, run, "recovery_finished");
+    assert_eq!(
+        recovered.last().unwrap()["escalated"],
+        true,
+        "{recovered:?}"
+    );
+    let asks = queue.unclosed_run_asks(run.id()).unwrap();
+    let [ask] = asks.as_slice() else {
+        panic!("{asks:?}")
+    };
+    assert_eq!(ask.kind, dagq::domain::AskKind::Decide);
+    assert!(
+        ask.question
+            .contains("the recovery job ran 3 times for this alert already (at most 3)"),
+        "{}",
+        ask.question
+    );
 }
 
 /// The payloads of the queue's events of `kind`, oldest first.

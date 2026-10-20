@@ -39,6 +39,32 @@ string_enum!(RecoveryConfidence {
 /// alert goes to the inbox as `recovery_failed` (ADR-0047 decision 39).
 pub const MAX_RECOVERY_ATTEMPTS: usize = 3;
 
+/// What a recovery round of an alert does once it is known whether the
+/// alert got its jobs (`used_up`) and where its job would start (`route`,
+/// `None` while the job's provider waits).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoundStart<R> {
+    /// To a person at once: no job starts, so no provider is waited for.
+    UsedUp,
+    /// Nothing until the route opens.
+    Waits,
+    /// The job starts on the route.
+    Starts(R),
+}
+
+/// The [`RoundStart`] of a round: an alert that got its
+/// [`MAX_RECOVERY_ATTEMPTS`] jobs is escalated whether or not its route
+/// waits; any other round, a person's verify fix granted past the limit
+/// ([`verify_fix_round`]) among them, starts its job on the route or waits
+/// for it.
+pub fn round_start<R>(used_up: bool, route: Option<R>) -> RoundStart<R> {
+    match route {
+        _ if used_up => RoundStart::UsedUp,
+        None => RoundStart::Waits,
+        Some(route) => RoundStart::Starts(route),
+    }
+}
+
 /// The longest `wait` a recovery job may ask for (ADR-0047 decision 40).
 pub const MAX_RECHECK_SECS: u64 = 3600;
 
@@ -1570,6 +1596,14 @@ mod tests {
             &taken,
             &[edited(13, "verification_commands")]
         ));
+    }
+
+    #[test]
+    fn a_used_up_round_starts_no_job_and_waits_for_no_route() {
+        assert_eq!(round_start(true, None::<u8>), RoundStart::UsedUp);
+        assert_eq!(round_start(true, Some(1)), RoundStart::UsedUp);
+        assert_eq!(round_start(false, None::<u8>), RoundStart::Waits);
+        assert_eq!(round_start(false, Some(1)), RoundStart::Starts(1));
     }
 
     #[test]
