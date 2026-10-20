@@ -498,6 +498,31 @@ pub trait EventStore {
     /// `update_started` behind the steps the job wrote before it
     /// ([`crate::domain::in_job_order`]).
     fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>>;
+    /// The binary's installs past event `after` (a run's claim): the
+    /// queue's `update_installed` that installed more than the plugin, the
+    /// newest `limit` of them oldest first, and how many past `after` there
+    /// are in all, so those beyond `limit` are counted, not dropped. Unlike
+    /// [`Self::update_events`], no count of the other `update_*` steps
+    /// pushes one out.
+    fn installs_after(&self, after: EventId, limit: usize) -> Result<(Vec<RunEvent>, usize)> {
+        let all: Vec<RunEvent> = self
+            .all_events()?
+            .into_iter()
+            .filter(|e| {
+                e.id > after
+                    && e.kind == EventKind::UpdateInstalled
+                    && e.run_id.is_none()
+                    && e.task_id.is_none()
+                    && e.goal_id.is_none()
+                    && !crate::domain::stats::updates::plugin_only(e)
+            })
+            .collect();
+        let total = all.len();
+        Ok((
+            all.into_iter().skip(total.saturating_sub(limit)).collect(),
+            total,
+        ))
+    }
     /// The latest `limit` events of the e2e gates, newest first: the
     /// automatic update's (`update_e2e_passed`, `update_failed`) and the
     /// runtime's e2e of the runs (`run_e2e_finished`, `run_e2e_failed`,

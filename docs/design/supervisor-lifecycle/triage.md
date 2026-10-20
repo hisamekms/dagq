@@ -31,7 +31,7 @@ related:
    同じrunでそのalertの`recovery_requested`が上限に達していなければ、`begin_triage`が`BEGIN IMMEDIATE`の中で上の条件（runがtaskの最新runであることを含む）を再検査し（staleなleaseは置き換える。slotにあるrunは2で飛ばしてあるので、置き換えるのはslotの外のrunのleaseだけ）、runにleaseを取って`lease_acquired`、`recovery_requested`と`triage_started`を記録する。
    同じrunを2つのsupervisorが取ろうとしても1つしか通らない。
    runのdirectory（無ければ`runs/<run-id>/`）に`recovery-<alert>-<attempt>.prompt.txt`を書いて、run eventの`recovery_prompt_written`を記録する。
-   `triage_started`の`launch`のproviderのheadlessのコマンドをそのdirectoryで、`DAGQ_ROLE=recovery-job`（CLIはreviewと同じく読み取りだけを許す。[Roles](roles.md#actors)）と、queue serviceのsocketとjobのtokenのfile付き（`DAGQ_QUEUE`は渡さない。[Queue service](../queue-service.md#クライアントモード)）で起動し、stdout / stderrを`recovery-<alert>-<attempt>.out` / `.err`に書く（promptと一緒に、promptの固定バイナリの節の全体を`recovery-<alert>-<attempt>.binary.json`に書く）。
+   `triage_started`の`launch`のproviderのheadlessのコマンドをそのdirectoryで、`DAGQ_ROLE=recovery-job`（CLIはreviewと同じく読み取りだけを許す。[Roles](roles.md#actors)）と、queue serviceのsocketとjobのtokenのfile付き（`DAGQ_QUEUE`は渡さない。[Queue service](../queue-service.md#クライアントモード)）で起動し、stdout / stderrを`recovery-<alert>-<attempt>.out` / `.err`に書く（promptと一緒に、promptの固定バイナリの節の全体（claim以後の入れ替えの全てと、読む上限を超えて読まなかった件数）を`recovery-<alert>-<attempt>.binary.json`に書く）。
    timeoutはreviewと同じ。
    上限の件数に達していれば、jobを起動せずに`begin_triage`（`recovery_requested`なし）の後すぐ6のescalateにする。
    例外は、最後のラウンドの後の人の回答が`edit the task's --verify, then retry_inherit`で、runの最初のeventより後にtaskのverifyを変えた`task_edited`があるときで、上限に達していてもjobをもう1回起動する（ADR-t883-1。直したverifyをjobが読んで`retry_inherit`を選べるように）。

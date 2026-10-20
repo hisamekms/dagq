@@ -4,6 +4,13 @@
 
 use super::*;
 
+/// The rows of [`SqliteQueue::installs_after`]: the queue's events of kind
+/// `?1` past id `?2` that installed more than the plugin.
+const INSTALLS_AFTER: &str = "FROM run_events
+     WHERE kind = ?1 AND id > ?2
+     AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL
+     AND NOT COALESCE(json_extract(payload, '$.plugin_only'), 0)";
+
 impl SqliteQueue {
     /// The latest `limit` steps of the automatic update, newest first: the
     /// queue's `update_*` events (ADR-0073 decision 17), each job's
@@ -31,6 +38,32 @@ impl SqliteQueue {
                 )?
                 .collect::<rusqlite::Result<_>>()?,
         ))
+    }
+
+    /// The binary's installs past event `after`, the newest `limit` oldest
+    /// first, and their count in all (see
+    /// [`crate::application::EventStore::installs_after`]). A pure read.
+    pub fn installs_after(&self, after: EventId, limit: usize) -> Result<(Vec<RunEvent>, usize)> {
+        let kind = crate::domain::UPDATE_INSTALLED;
+        // One read snapshot keeps the installs and their count consistent.
+        let tx = self.conn.unchecked_transaction()?;
+        let total: i64 = tx.query_row(
+            &format!("SELECT COUNT(*) {INSTALLS_AFTER}"),
+            params![kind, after],
+            |row| row.get(0),
+        )?;
+        let mut installs: Vec<RunEvent> = tx
+            .prepare(&format!(
+                "SELECT * {INSTALLS_AFTER} ORDER BY id DESC LIMIT ?3"
+            ))?
+            .query_map(
+                params![kind, after, i64::try_from(limit).unwrap_or(i64::MAX)],
+                event_row,
+            )?
+            .collect::<rusqlite::Result<_>>()?;
+        tx.finish()?;
+        installs.reverse();
+        Ok((installs, usize::try_from(total).unwrap_or(usize::MAX)))
     }
 
     /// The latest `limit` events of the e2e gates, newest first (see
@@ -942,6 +975,9 @@ impl EventStore for SqliteQueue {
     fn update_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
         SqliteQueue::update_events(self, limit)
     }
+    fn installs_after(&self, after: EventId, limit: usize) -> Result<(Vec<RunEvent>, usize)> {
+        SqliteQueue::installs_after(self, after, limit)
+    }
     fn e2e_gate_events(&self, limit: usize) -> Result<Vec<RunEvent>> {
         SqliteQueue::e2e_gate_events(self, limit)
     }
@@ -1169,5 +1205,71 @@ mod tests {
             !steps.iter().any(|line| line == "SCAN run_events"),
             "{steps:#?}"
         );
+    }
+
+    /// The installs past a run's claim are read past any number of the
+    /// other `update_*` steps: not one before the claim, of the plugin
+    /// only, of another kind or of a task, the newest `limit` oldest first
+    /// and all of them counted (task 1831). The read walks no table.
+    #[test]
+    fn the_installs_past_a_claim_are_read_past_the_other_update_steps_and_counted() {
+        use crate::domain::EventKind;
+        let dir = tempfile::tempdir().unwrap();
+        let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let record = |kind: EventKind, payload: serde_json::Value| {
+            queue.record_queue_event(kind, payload).unwrap()
+        };
+        let before = record(
+            EventKind::UpdateInstalled,
+            serde_json::json!({"version": "old"}),
+        );
+        let claim = record(EventKind::UpdateStarted, serde_json::json!({}));
+        assert!(before < claim);
+        let mut installs = Vec::new();
+        for n in 0..300 {
+            record(EventKind::UpdateStarted, serde_json::json!({}));
+            record(EventKind::UpdateBuilt, serde_json::json!({}));
+            record(
+                EventKind::CiWatchHeld,
+                serde_json::json!({"supervisor": "a"}),
+            );
+            if n < 3 {
+                installs.push(record(
+                    EventKind::UpdateInstalled,
+                    serde_json::json!({"version": format!("v{n}")}),
+                ));
+                record(
+                    EventKind::UpdateInstalled,
+                    serde_json::json!({"plugin_only": true}),
+                );
+            }
+        }
+        // The steps after them push the installs out of the newest update
+        // steps.
+        assert!(
+            queue
+                .update_events(200)
+                .unwrap()
+                .iter()
+                .all(|e| e.kind != EventKind::UpdateInstalled)
+        );
+        let ids = |events: &[RunEvent]| events.iter().map(|e| e.id).collect::<Vec<_>>();
+        let (read, total) = queue.installs_after(claim, 1_000).unwrap();
+        assert_eq!((ids(&read), total), (installs.clone(), 3));
+        let (read, total) = queue.installs_after(claim, 2).unwrap();
+        assert_eq!((ids(&read), total), (installs[1..].to_vec(), 3));
+        let (read, total) = queue.installs_after(EventId::new(0), 1_000).unwrap();
+        assert_eq!(read.first().map(|e| e.id), Some(before));
+        assert_eq!(total, 4);
+        for sql in [
+            format!("SELECT COUNT(*) {INSTALLS_AFTER}"),
+            format!("SELECT * {INSTALLS_AFTER} ORDER BY id DESC LIMIT ?3"),
+        ] {
+            let steps = plan(&queue.conn, &sql);
+            assert!(
+                !steps.iter().any(|line| line == "SCAN run_events"),
+                "{steps:#?}"
+            );
+        }
     }
 }

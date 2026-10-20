@@ -79,6 +79,7 @@ runtimeの自動修正が直さなかったものをjobが状況を読んで許�
 - 起動の入口は`recovery::start_job`、promptの中身は`prompt::run_review::recovery_prompt`のdoc commentが持つ。
 - jobは画面の代わりに最後のturnの要約を読む。
 - alertの事実の直後に、supervisorの固定バイナリの節（今のbuildが依存先の着地を含むか、claimより後の入れ替え）を置く（`binary_facts_of`）。
+  入れ替えはclaimのeventより後の`update_installed`を他の`update_*`の数に押し出されずに読み（`EventStore::installs_after`）、読む上限を超えた古いものは件数で節と`binary.json`に書く。
   `retry`を許すjobには、固定バイナリが依存先の着地を含まないことで落ちたrunは今のbuildが含めば人に聞かずにretryしてよく、含まなければ`wait`かescalateにする規則を書く（`RECOVERY_BINARY_RULE`）。
 - verdictのschemaの後に、jobの足すoptionの種類の宣言と寄せる・外す規則を書く（生きているsessionは`RECOVERY_LIVE_OPTIONS_RULE`、終わったrunは`RECOVERY_ENDED_OPTIONS_RULE`。下の「escalate」）。
 - promptの上限と切り方は[Prompt](prompt.md#goal-reviewrunのreview復旧jobruntimeのplannerの上限)が持ち、切ったものはファイルを名指し、ファイルに無いもの（alertの事実・プロセスの一覧・過去のverdict）は読めないと書く。

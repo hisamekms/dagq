@@ -287,5 +287,6 @@ workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2
 - 不変条件: 節の上限の和は全体の上限（言語の指示の分の空きを除く）に収まるように決める。
   それでも超えたときだけ、先頭と末尾（指示とverdictのschema）を残して中ほどを切る（`Fit::finish`）。
 - 約束: 復旧jobの固定バイナリの節はretryの判断の材料なので、alertの事実の直後に置き、中ほどを切っても残る側に置く（`binary_sections`）。
+  入れ替えの節は節の上限で省いたものを件数と`binary.json`で読むと書き、queueの読む上限で読まなかったclaim以後の`update_installed`も件数で書く（黙って落とさない）。
 - 記録: どのjobも`PromptBytes`を`prompt_bytes`としてeventに記録し、plan reviewと同じ形を持つ。
   数え方は`PromptBytes`のdoc commentが持つ。

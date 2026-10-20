@@ -3,7 +3,9 @@
 //! escalate to an ask. Historical alert kinds remain readable in the domain.
 
 use super::*;
-use crate::application::prompt::{BinaryFacts, FittedPrompt, binary_facts, recovery_binary_file};
+use crate::application::prompt::{
+    BinaryFacts, FittedPrompt, binary_facts, claim_event, recovery_binary_file,
+};
 use crate::domain::ActorContext;
 use crate::domain::EventKind;
 use crate::domain::actor_model::{ActorLaunch, JobStartRoute, ModelRole, UnnamedWithoutClaude};
@@ -1189,9 +1191,11 @@ fn spawn_live(
     )
 }
 
-/// The queue's `update_*` events the recovery job's [`BinaryFacts`] reads
-/// at most, newest first: a few days of landings.
-const BINARY_UPDATE_EVENTS: usize = 200;
+/// The `update_installed` since the claim the recovery job's
+/// [`BinaryFacts`] reads at most, the newest; those past it are counted
+/// ([`BinaryFacts::replacements_unread`]). Installs only, so the other
+/// `update_*` steps do not push one out: about one per landing.
+const BINARY_INSTALLS: usize = 1_000;
 
 /// What the recovery job of `run` reads of the binary the supervisor runs
 /// (task 1633): this process's build identifier, the replacements since
@@ -1202,7 +1206,7 @@ pub(super) fn binary_facts_of(
     run: &TaskRun,
     detail: &crate::domain::TaskDetail,
 ) -> Result<BinaryFacts> {
-    let updates = sv.queue.update_events(BINARY_UPDATE_EVENTS)?;
+    let (updates, unread) = installs_since_claim(&*sv.queue, run, &detail.events, BINARY_INSTALLS)?;
     let mut landings = Vec::new();
     for dependency in &detail.dependencies {
         let events = sv.queue.show(*dependency)?.events;
@@ -1216,10 +1220,29 @@ pub(super) fn binary_facts_of(
         &sv.layout.version,
         run,
         &detail.events,
-        &updates,
+        (&updates, unread),
         &landings,
         &|commit, build| repository.is_ancestor(commit, build),
     ))
+}
+
+/// The binary's installs since `run`'s claim among `events` (the task's),
+/// the newest `limit` oldest first, and how many more past `limit` the
+/// read left out. With no claim among them, every install is read with
+/// no limit, so none before the run's start is counted as left out, and
+/// [`binary_facts`] keeps those after the run's start.
+fn installs_since_claim<Q: EventStore + ?Sized>(
+    queue: &Q,
+    run: &TaskRun,
+    events: &[RunEvent],
+    limit: usize,
+) -> Result<(Vec<RunEvent>, usize)> {
+    let (installs, total) = match claim_event(run, events) {
+        Some(claim) => queue.installs_after(claim, limit)?,
+        None => queue.installs_after(EventId::new(0), usize::MAX)?,
+    };
+    let unread = total.saturating_sub(installs.len());
+    Ok((installs, unread))
 }
 
 /// The worktree's `git status`, HEAD and the receipt's `commit`, for the
@@ -2147,5 +2170,91 @@ mod tests {
             sample_interval(Duration::from_millis(300)),
             Duration::from_millis(300)
         );
+    }
+
+    /// The recovery job's replacements (task 1831) are the installs since
+    /// the claim however many other `update_*` steps came after them: not
+    /// one from before the claim, of the plugin only or of another kind,
+    /// and those past the read's limit are counted, not dropped.
+    #[test]
+    fn binary_facts_read_the_installs_since_the_claim_past_many_update_steps() {
+        use crate::application::port_fakes::SupervisorsAndEvents;
+        let run = test_run(RunStatus::Failed, None);
+        let event = |id: i64, run: Option<&RunId>, kind: &str, payload: Value| RunEvent {
+            id: EventId::new(id),
+            task_id: run.map(|_| TaskId::new(1)),
+            goal_id: None,
+            run_id: run.cloned(),
+            kind: kind.into(),
+            payload,
+            created_at: format!("t{id}"),
+            actor: None,
+        };
+        let claim = event(10, Some(run.id()), "run_claimed", json!({}));
+        let mut queue = vec![event(
+            5,
+            None,
+            "update_installed",
+            json!({"version": "old"}),
+        )];
+        let steps = [
+            "update_started",
+            "update_built",
+            "update_e2e_passed",
+            "update_failed",
+        ];
+        for id in 11..=260 {
+            queue.push(event(id, None, steps[id as usize % steps.len()], json!({})));
+        }
+        queue.push(event(
+            261,
+            None,
+            "update_installed",
+            json!({"version": "a", "commit": "a"}),
+        ));
+        queue.push(event(
+            262,
+            None,
+            "update_installed",
+            json!({"plugin_only": true}),
+        ));
+        queue.push(event(
+            263,
+            None,
+            "update_installed",
+            json!({"version": "b", "commit": "b"}),
+        ));
+        let fake = SupervisorsAndEvents {
+            events: std::cell::RefCell::new(queue),
+            ..SupervisorsAndEvents::default()
+        };
+        let events = vec![claim];
+        let holds = |_: &str, _: &str| -> Result<bool> { Ok(true) };
+        let ids = |facts: &BinaryFacts| -> Vec<Value> {
+            facts
+                .replacements
+                .iter()
+                .map(|r| r["event_id"].clone())
+                .collect()
+        };
+        let (installs, unread) = installs_since_claim(&fake, &run, &events, 200).unwrap();
+        assert_eq!(unread, 0);
+        let facts = binary_facts("0.1.0", &run, &events, (&installs, unread), &[], &holds);
+        assert_eq!(ids(&facts), [json!(261), json!(263)]);
+        assert_eq!(facts.replacements_unread, 0);
+        // Past the read's limit the newest are read and the rest counted,
+        // in the facts the prompt and the run directory's file carry.
+        let (installs, unread) = installs_since_claim(&fake, &run, &events, 1).unwrap();
+        let facts = binary_facts("0.1.0", &run, &events, (&installs, unread), &[], &holds);
+        assert_eq!(ids(&facts), [json!(263)]);
+        assert_eq!(facts.replacements_unread, 1);
+        assert_eq!(
+            serde_json::to_value(&facts).unwrap()["replacements_unread"],
+            1
+        );
+        // With no claim among the task's events, every install is read and
+        // none is counted as left out.
+        let (installs, unread) = installs_since_claim(&fake, &run, &[], 1).unwrap();
+        assert_eq!((installs.len(), unread), (3, 0));
     }
 }

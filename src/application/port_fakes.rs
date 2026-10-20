@@ -10,7 +10,8 @@ use std::cell::RefCell;
 
 /// The supervisors' registrations ([`SupervisorReads::supervisors`]) and
 /// the queue's events ([`EventStore::latest_events_of`],
-/// [`EventStore::record_queue_event`]), newest last.
+/// [`EventStore::record_queue_event`], [`EventStore::all_events`]), newest
+/// last.
 #[derive(Default)]
 pub(crate) struct SupervisorsAndEvents {
     pub(crate) registrations: Vec<SupervisorRegistration>,
@@ -60,7 +61,7 @@ impl EventStore for SupervisorsAndEvents {
         unreachable!("update_events is not what the test reaches")
     }
     fn all_events(&self) -> Result<Vec<RunEvent>> {
-        unreachable!("all_events is not what the test reaches")
+        Ok(self.events.borrow().clone())
     }
     fn latest_task_events(&self, kinds: &[&str]) -> Result<Vec<RunEvent>> {
         unreachable!("latest_task_events is not what the test reaches")

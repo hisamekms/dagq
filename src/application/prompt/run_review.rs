@@ -2,7 +2,7 @@
 //! (execution and landing).
 
 use super::*;
-use crate::domain::EventKind;
+use crate::domain::{EventId, EventKind};
 
 /// The bytes the whole run review prompt takes at most, the language's
 /// instruction included (task 1571, ADR-t1566-1 decision 4): in production
@@ -601,24 +601,39 @@ pub struct BinaryFacts {
     /// run's `supervisor_handed_off`: `event_id`, `kind`, `at`,
     /// `previous_version`, `version` and, for `update_installed`, `commit`.
     pub replacements: Vec<Value>,
+    /// The `update_installed` since the claim the queue's read left out
+    /// past its limit (the oldest), counted so none drops unsaid: neither
+    /// `replacements` nor the run directory's file holds them.
+    pub replacements_unread: usize,
+}
+
+/// The id of `run`'s claim among `events` (the task's): the run's first
+/// event; `None` when none of them is the run's.
+pub fn claim_event(run: &TaskRun, events: &[RunEvent]) -> Option<EventId> {
+    events
+        .iter()
+        .filter(|e| e.run_id.as_ref() == Some(run.id()))
+        .map(|e| e.id)
+        .min()
 }
 
 /// The [`BinaryFacts`] of `run` for a supervisor of build `version`:
 /// `events` are the task's (the run's among them), `updates` the queue's
-/// `update_*` events, `landings` each dependency with the commit it landed,
-/// and `holds(commit, build)` whether `build` contains `commit`.
+/// `update_installed` read since the claim and `unread` how many more the
+/// read left out ([`crate::application::EventStore::installs_after`]),
+/// `landings` each dependency with the commit it landed, and
+/// `holds(commit, build)` whether `build` contains `commit`.
 pub fn binary_facts(
     version: &str,
     run: &TaskRun,
     events: &[RunEvent],
-    updates: &[RunEvent],
+    (updates, unread): (&[RunEvent], usize),
     landings: &[(TaskId, Option<String>)],
     holds: &dyn Fn(&str, &str) -> Result<bool>,
 ) -> BinaryFacts {
     let commit = crate::application::update::build_commit(version).map(str::to_owned);
     let own = |e: &&RunEvent| e.run_id.as_ref() == Some(run.id());
-    // The run's first event is its claim.
-    let claimed = events.iter().filter(own).map(|e| e.id).min();
+    let claimed = claim_event(run, events);
     let after_claim = |e: &RunEvent| match claimed {
         Some(id) => e.id > id,
         None => e.created_at.as_str() >= run.created_at(),
@@ -682,6 +697,7 @@ pub fn binary_facts(
         commit,
         dependencies,
         replacements,
+        replacements_unread: unread,
     }
 }
 
@@ -795,6 +811,13 @@ pub(super) fn binary_sections(
             .collect();
         replacements.push('\n');
         replacements.push_str(&left_out_note("of them (the oldest)", &ids, &read));
+    }
+    if facts.replacements_unread > 0 {
+        replacements.push('\n');
+        replacements.push_str(&format!(
+            "({} older update_installed since the claim were left out by the queue's read limit: neither this section nor the run directory's file holds them, and the newest are above.)\n",
+            facts.replacements_unread
+        ));
     }
     fit.section("replacements", &replacements);
     let rule = if material

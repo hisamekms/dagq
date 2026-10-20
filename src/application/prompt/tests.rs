@@ -3186,6 +3186,7 @@ fn no_binary() -> BinaryFacts {
         commit: None,
         dependencies: Vec::new(),
         replacements: Vec::new(),
+        replacements_unread: 0,
     }
 }
 
@@ -3481,6 +3482,7 @@ fn a_recovery_prompt_of_huge_turns_and_facts_stays_within_its_limits() {
             replacements: (1..=500)
                 .map(|id| json!({"event_id": id, "kind": "update_installed", "at": "t", "previous_version": format!("0.1.0-dev+{SHA}"), "version": format!("0.1.0-dev+{SHA}"), "commit": SHA}))
                 .collect(),
+            replacements_unread: 3,
         };
     for (run, ended) in [
         (run_on(Provider::Claude, WorkerMode::Headless), None),
@@ -3552,6 +3554,10 @@ fn a_recovery_prompt_of_huge_turns_and_facts_stays_within_its_limits() {
             "{} of them (the oldest) left out by this section's limit: 1, 2,",
             500 - RECOVERY_REPLACEMENTS
         )));
+        // Those the queue's read left out past its limit are counted too.
+        assert!(text.contains(
+            "(3 older update_installed since the claim were left out by the queue's read limit:"
+        ));
         assert!(text.contains("\"event_id\":500,"));
         assert!(!text.contains("\"event_id\":490,"));
         assert!(text.contains("of them (those the build does not hold were chosen first) left out by this section's limit: task 2, task 4,"));
@@ -3646,7 +3652,7 @@ fn binary_facts_name_the_build_its_replacements_since_the_claim_and_what_it_hold
         "0.1.0-dev+bbb.dirty",
         &run,
         &events,
-        &updates,
+        (&updates, 0),
         &landings,
         &holds,
     );
@@ -3693,7 +3699,7 @@ fn binary_facts_of_a_build_without_a_commit_cannot_tell_what_it_holds() {
     )];
     let landings = vec![(TaskId::new(1), Some("aaa".to_owned()))];
     let holds = |_: &str, _: &str| -> Result<bool> { panic!("nothing to ask git") };
-    let facts = binary_facts("0.1.0", &run, &events, &updates, &landings, &holds);
+    let facts = binary_facts("0.1.0", &run, &events, (&updates, 0), &landings, &holds);
     assert_eq!(facts.commit, None);
     assert!(facts.replacements.is_empty());
     assert_eq!(facts.dependencies[0].held, None);
@@ -3705,7 +3711,7 @@ fn binary_facts_of_a_build_without_a_commit_cannot_tell_what_it_holds() {
             .contains("names no commit")
     );
     // A run with no event of its own yet counts from its claim time.
-    let facts = binary_facts("0.1.0", &run, &[], &updates, &[], &holds);
+    let facts = binary_facts("0.1.0", &run, &[], (&updates, 0), &[], &holds);
     assert_eq!(facts.replacements.len(), 1);
 }
 
@@ -3727,6 +3733,7 @@ fn a_recovery_prompt_carries_the_binary_and_when_a_replacement_lets_it_retry() {
             why: None,
         }],
         replacements: vec![json!({"event_id": 9, "kind": "update_installed", "version": "v2"})],
+        replacements_unread: 0,
     };
     let prompt = |allowed: &[&str], binary: &BinaryFacts| {
         recovery_prompt(
