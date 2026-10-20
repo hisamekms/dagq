@@ -81,6 +81,8 @@ eventはrunのeventとして`events --run`と`timeline`に出る。
   cwdはrunのworktree（containerのrunでは着地用のworktreeで、gitのhookとdriverを止めるenvを持つ。[Container runtime](../container-runtime.md#git)）である。
 - **env**: 起動元のenvを消し、e2eの関門と共通の部品（`passed_env::PassedEnv`）で絞る。
   資格情報の除外は常に効き、例外を持たず、queue serviceとbrokerに届く`DAGQ_*`は渡らない。
+  built-inのprogramにだけ、起動元の`LLVM_PROFILE_FILE`が絶対pathのときにそれを渡す（`review_programs::PROFILE_ENV`）。
+  coverageを計測したdagqのバイナリはこれが無いか相対pathだとcwdのworktreeにprofileを書き、着地でworktreeが汚れるため。
   `PATH`からは空・相対の項目と、runのworktree・run dir・main checkoutとその下を指す項目を除く（`review_programs::narrowed_path`）。
 - **結果**: `HeadlessJob::poll_program`が終了のstatusとstdout・stderrの末尾を返す。
   上限（programの`timeout_secs`、無ければ`[review.jobs]`）を超えればprocess groupごと止め、statusは無い。

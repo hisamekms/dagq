@@ -7,7 +7,8 @@
 //! worktree and directory nor the main checkout ([`narrowed_path`]), so a
 //! worker's change to the script or a program put there does not run. A
 //! built-in program runs as the supervisor's own binary's hidden
-//! subcommand (`domain::review_programs::BuiltinProgram`), nothing written.
+//! subcommand (`domain::review_programs::BuiltinProgram`), nothing written,
+//! given an absolute [`PROFILE_ENV`] as well.
 
 use anyhow::{Context, Result};
 use std::{
@@ -82,6 +83,14 @@ impl HostPrograms {
 /// `dagq review-program <name> <its arguments>`.
 pub const BUILTIN_SUBCOMMAND: &str = "review-program";
 
+/// Where a coverage-instrumented `dagq` writes its profile. A built-in
+/// program, the supervisor's own binary, is given it back when its value is
+/// an absolute path: without it, or with a relative one, an instrumented
+/// binary writes its profile into its working directory, the run's
+/// worktree, which would then not be clean at the landing. An uninstrumented
+/// binary reads nothing of it, and a script is never given it.
+pub const PROFILE_ENV: &str = "LLVM_PROFILE_FILE";
+
 impl ReviewProgramBackend for HostPrograms {
     fn command(
         &self,
@@ -90,7 +99,8 @@ impl ReviewProgramBackend for HostPrograms {
         run_dir: &Path,
         scratch: &Path,
     ) -> Result<CommandSpec> {
-        let mut command = if program.program.builtin.is_some() {
+        let builtin = program.program.builtin.is_some();
+        let mut command = if builtin {
             let mut command = CommandSpec::new(&self.dagq);
             command.arg(BUILTIN_SUBCOMMAND).arg(&program.program.name);
             command
@@ -104,6 +114,14 @@ impl ReviewProgramBackend for HostPrograms {
             && let Some(narrowed) = narrowed_path(&value, &[worktree, run_dir, &self.repository])
         {
             given.insert("PATH".into(), narrowed);
+        }
+        if builtin
+            && let Some((name, value)) = self
+                .inherited
+                .iter()
+                .find(|(name, value)| name == PROFILE_ENV && Path::new(value).is_absolute())
+        {
+            given.insert(name.clone(), value.clone());
         }
         command.env_clear().envs(given).current_dir(worktree);
         Ok(command)
@@ -224,6 +242,7 @@ mod tests {
             ("SSH_AUTH_SOCK", "/tmp/agent"),
             ("LC_SECRET", "s"),
             ("OTHER", "x"),
+            ("LLVM_PROFILE_FILE", "/target/dagq-%p-%m.profraw"),
         ]
         .map(|(k, v)| (OsString::from(k), OsString::from(v)))
         .to_vec()
@@ -360,14 +379,8 @@ mod tests {
         );
     }
 
-    /// A built-in program runs the supervisor's binary's hidden subcommand
-    /// with its name and arguments, narrowed as a script is, and writes
-    /// nothing to the scratch directory.
-    #[test]
-    fn a_builtin_program_runs_the_supervisors_binary_and_writes_nothing() {
-        let root = tempfile::tempdir().unwrap();
-        let scratch = root.path().join("review-program-1-builtin:secrets");
-        let builtin = SnapshotProgram {
+    fn builtin() -> SnapshotProgram {
+        SnapshotProgram {
             program: ReviewProgram {
                 name: "builtin:secrets".to_owned(),
                 script: "builtin:secrets".to_owned(),
@@ -378,30 +391,64 @@ mod tests {
             },
             matched: vec!["a".to_owned()],
             script: BuiltinProgram::Secrets.source().to_owned(),
-        };
-        let command = HostPrograms::inheriting("/repo", "/bin/dagq", inherited())
+        }
+    }
+
+    fn builtin_command(inherited: Vec<(OsString, OsString)>, scratch: &Path) -> CommandSpec {
+        HostPrograms::inheriting("/repo", "/bin/dagq", inherited)
             .command(
-                &builtin,
+                &builtin(),
                 Path::new("/runs/r/worktree"),
                 Path::new("/runs/r"),
-                &scratch,
+                scratch,
             )
-            .unwrap();
+            .unwrap()
+    }
+
+    /// A built-in program runs the supervisor's binary's hidden subcommand
+    /// with its name and arguments, narrowed as a script is but for an
+    /// absolute [`PROFILE_ENV`], and writes nothing to the scratch
+    /// directory.
+    #[test]
+    fn a_builtin_program_runs_the_supervisors_binary_and_writes_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = root.path().join("review-program-1-builtin:secrets");
+        let command = builtin_command(inherited(), &scratch);
         assert_eq!(command.get_program(), OsStr::new("/bin/dagq"));
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
             ["review-program", "builtin:secrets", "base", "head"]
         );
         assert!(command.get_env_clear());
-        assert!(
-            command
-                .get_envs()
-                .all(|(name, _)| PROGRAM_ENV.passes(&name.to_string_lossy()))
+        let given: Vec<&OsStr> = command.get_envs().map(|(name, _)| name).collect();
+        assert_eq!(
+            given,
+            ["HOME", "LC_ALL", "LLVM_PROFILE_FILE", "PATH", "TMPDIR"]
         );
         assert_eq!(
             command.get_current_dir(),
             Some(Path::new("/runs/r/worktree"))
         );
         assert!(!scratch.exists());
+    }
+
+    /// A coverage-instrumented built-in writes its profile where the
+    /// supervisor's absolute [`PROFILE_ENV`] says, never into the run's
+    /// worktree: a relative value, which would resolve there, is not given,
+    /// nor any value to a script.
+    #[test]
+    fn only_a_builtin_is_given_an_absolute_profile_path() {
+        assert!(!PROGRAM_ENV.passes(PROFILE_ENV));
+        let scratch = tempfile::tempdir().unwrap();
+        let script = command(inherited(), scratch.path(), "#!/bin/sh\n");
+        assert!(script.get_envs().all(|(name, _)| name != PROFILE_ENV));
+        let mut relative = inherited();
+        relative.retain(|(name, _)| name != PROFILE_ENV);
+        relative.push((PROFILE_ENV.into(), "dagq-%p.profraw".into()));
+        let command = builtin_command(relative, &scratch.path().join("b"));
+        assert!(command.get_envs().all(|(name, _)| name != PROFILE_ENV));
+        let command = builtin_command(inherited(), &scratch.path().join("b"));
+        assert!(command.get_envs().any(|(name, value)| name == PROFILE_ENV
+            && value == Some(OsStr::new("/target/dagq-%p-%m.profraw"))));
     }
 }
