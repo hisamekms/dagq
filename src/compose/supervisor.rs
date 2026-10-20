@@ -809,8 +809,7 @@ pub fn supervise_with_reviewer(
             }),
         )
     });
-    let host_programs =
-        crate::infrastructure::review_programs::HostPrograms::new(&main_checkout, runner);
+    let host_programs = review_program_host(&repository, runner, std::env::vars_os())?;
     let ports = Ports {
         queues: Arc::new(opener()),
         observation_queues: Arc::new(SqlitePorts {
@@ -970,4 +969,22 @@ pub fn supervise_with_reviewer(
         ..options.settings(stall, conflicts, disk, resume, limits)
     };
     supervisor::supervise(&ports, &settings)
+}
+
+/// The host's backend of a run review's program jobs, given `inherited` as
+/// the supervisor's environment: the `PATH` it gives a job leaves out the
+/// queue's main checkout, `repository`'s, whichever of its worktrees the
+/// supervisor was started in.
+pub fn review_program_host(
+    repository: &GitRepository,
+    runner: &Path,
+    inherited: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Result<crate::infrastructure::review_programs::HostPrograms> {
+    Ok(
+        crate::infrastructure::review_programs::HostPrograms::inheriting(
+            repository.checkout()?,
+            runner,
+            inherited,
+        ),
+    )
 }

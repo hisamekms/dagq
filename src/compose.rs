@@ -68,7 +68,8 @@ pub use planning::{
 };
 pub use supervisor::{
     ContainerRuntimePort, PausesPort, ProcessesPort, RunContainersPort, RunFilesPort,
-    SuperviseOptions, VerificationContainersPort, supervise, supervise_with_reviewer,
+    SuperviseOptions, VerificationContainersPort, review_program_host, supervise,
+    supervise_with_reviewer,
 };
 
 /// The one-shot entry points (`integrate`, `status`, `doctor`, `recover`,

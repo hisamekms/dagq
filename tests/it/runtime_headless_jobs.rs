@@ -751,7 +751,8 @@ fn a_review_program_runs_narrowed_in_the_worktree_and_is_stopped_past_its_limit(
 /// every `PATH` entry it could reach (the working directory, the
 /// worktree, the run's directory, the main checkout), yet the job runs
 /// the script as main has it, which finds the program in the host's
-/// directory.
+/// directory. The backend is the supervisor's, built in the run's
+/// worktree, so it is the main checkout it leaves out.
 #[test]
 fn a_review_program_runs_the_landing_branchs_script_not_the_worktrees() {
     use dagq::application::review::ReviewRange;
@@ -856,11 +857,14 @@ fn a_review_program_runs_the_landing_branchs_script_not_the_worktrees() {
         clock: &clock,
         ends: &ends,
     };
-    let host = HostPrograms::inheriting(
-        &repo,
-        env!("CARGO_BIN_EXE_dagq"),
+    // As the supervisor builds it, here started in the run's worktree: the
+    // main checkout it leaves out is the queue's, not that worktree.
+    let host = dagq::compose::review_program_host(
+        &GitRepository::inspect(&worktree).unwrap(),
+        Path::new(env!("CARGO_BIN_EXE_dagq")),
         [(OsString::from("PATH"), OsString::from(path.join(":")))],
-    );
+    )
+    .unwrap();
     let backend = ProgramBackends::new(&host, ExecutionConfig::default());
     let mut job = start_review_program(
         &ports,
