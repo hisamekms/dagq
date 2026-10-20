@@ -14,7 +14,9 @@ use dagq::{
     application::{Clock, Generators, TaskStore, inbox_watcher::WatcherRecord},
     domain::{
         AskKind, AskReason, EventKind, NewAsk, SessionRole, TaskAction, TaskId,
-        event_kind::{ASK_OPENED, INBOX_NUDGED, INBOX_WATCHER_ABSENT, INBOX_WATCHER_RETURNED},
+        event_kind::{
+            ASK_ANSWERED, ASK_OPENED, INBOX_NUDGED, INBOX_WATCHER_ABSENT, INBOX_WATCHER_RETURNED,
+        },
     },
     infrastructure::{adapters::BackgroundSessions, sqlite::SqliteQueue},
     runtime::{self, SuperviseOptions},
@@ -305,7 +307,8 @@ fn a_nudge_of_an_absence_is_claimed_once_across_supervisors() {
 
 /// The watcher's state is recorded at each change only, whatever the
 /// passes in between; `kpi` counts an ask opened while it was alive as
-/// seen at once, one opened while it was absent as seen at its return, and
+/// seen at once, one opened while it was absent and answered after the
+/// return as seen at its return, and
 /// neither one opened before the first record nor one not seen yet.
 #[test]
 fn the_watchers_changes_are_recorded_once_and_give_how_long_an_ask_waited_to_be_seen() {
@@ -391,6 +394,58 @@ fn the_watchers_changes_are_recorded_once_and_give_how_long_an_ask_waited_to_be_
         .map(|w| w["max"].as_f64().unwrap())
         .reduce(f64::max);
     assert_eq!((min, max), (Some(0.0), Some(60.0)), "{report}");
+}
+
+/// An ask opened while the watcher was away and answered before it came
+/// back waited to be seen up to its answer, not to the return.
+#[test]
+fn an_ask_answered_before_the_watcher_returns_waits_up_to_its_answer() {
+    let inbox = Inbox::new(false, false);
+    let mut queue = SqliteQueue::open(&inbox.fx.db).unwrap();
+    inbox.supervise(0);
+    let ask = open_ask(&mut queue);
+    // A person answers it from another terminal.
+    queue.answer(ask, "withdrawn").unwrap();
+    inbox.watching(100);
+    inbox.supervise(100);
+    let kinds = [
+        INBOX_WATCHER_ABSENT,
+        ASK_OPENED,
+        ASK_ANSWERED,
+        INBOX_WATCHER_RETURNED,
+    ];
+    let conn = rusqlite::Connection::open(&inbox.fx.db).unwrap();
+    let events: Vec<(i64, String)> = conn
+        .prepare("SELECT id, kind FROM run_events WHERE kind IN (?1, ?2, ?3, ?4) ORDER BY id")
+        .unwrap()
+        .query_map(
+            rusqlite::params![kinds[0], kinds[1], kinds[2], kinds[3]],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    let names: Vec<&str> = events.iter().map(|(_, kind)| kind.as_str()).collect();
+    assert_eq!(names, kinds);
+    // Answered 20 s after its opening, the watch back 300 s after it.
+    for ((id, _), ago) in events.iter().zip([600, 500, 480, 200]) {
+        conn.execute(
+            "UPDATE run_events SET created_at=strftime('%Y-%m-%dT%H:%M:%fZ','now',?1) WHERE id=?2",
+            rusqlite::params![format!("-{ago} seconds"), id],
+        )
+        .unwrap();
+    }
+    let report = crate::common::cli::ok(&inbox.fx.db, &["kpi", "--last", "2"]);
+    let waits: Vec<&Value> = report["periods"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|period| &period["kpis"]["ask_seen_wait"]["all"])
+        .filter(|wait| wait["n"].as_u64().unwrap_or(0) > 0)
+        .collect();
+    assert_eq!(waits.len(), 1, "{report}");
+    assert_eq!(waits[0]["n"], 1, "{report}");
+    assert_eq!(waits[0]["max"].as_f64(), Some(20.0), "{report}");
 }
 
 #[test]

@@ -138,6 +138,8 @@ struct AskTrack {
     answered: Option<(EventId, Option<i64>)>,
     /// The first event that applied the answer: its id and time.
     applied: Option<(EventId, Option<i64>)>,
+    /// The first `ask_closed`: its id and time.
+    closed: Option<(EventId, Option<i64>)>,
     /// The first answer was the runtime's own (`runtime_closed`).
     runtime_closed: bool,
     /// The run the ask is about.
@@ -318,6 +320,12 @@ fn tracks(events: &[RunEvent], upto: EventId) -> HashMap<AskKey, AskTrack> {
             ));
         }
         let at = || (event.id, timestamp_millis(&event.created_at));
+        if event.kind == "ask_closed"
+            && let Some(track) = tracks.get_mut(&ask_key(event))
+            && track.closed.is_none()
+        {
+            track.closed = Some(at());
+        }
         match event.kind.as_str() {
             "ask_opened" => {
                 let key = ask_key(event);
@@ -340,6 +348,7 @@ fn tracks(events: &[RunEvent], upto: EventId) -> HashMap<AskKey, AskTrack> {
                         opened_ms: timestamp_millis(&event.created_at),
                         answered: None,
                         applied: None,
+                        closed: None,
                         runtime_closed: false,
                         run: event.run_id.as_ref().map(|run| run.as_str().to_owned()),
                         slot_wait: 0,
@@ -388,6 +397,26 @@ fn tracks(events: &[RunEvent], upto: EventId) -> HashMap<AskKey, AskTrack> {
         }
     }
     tracks
+}
+
+/// Where each ask opened up to `upto` ended by then, by [`ask_key`]: its
+/// first `ask_answered` (the runtime's own, `runtime_closed`, included), or
+/// an `ask_closed` before any answer. The id and time of the end; an ask
+/// still open at `upto` has none.
+pub(super) fn ask_ends(
+    events: &[RunEvent],
+    upto: EventId,
+) -> HashMap<AskKey, (EventId, Option<i64>)> {
+    tracks(events, upto)
+        .into_iter()
+        .filter_map(|(key, track)| {
+            let end = match (track.answered, track.closed) {
+                (Some(answered), Some(closed)) => Some(answered.min(closed)),
+                (answered, closed) => answered.or(closed),
+            };
+            end.map(|end| (key, end))
+        })
+        .collect()
 }
 
 /// The seconds a person took over the asks whose task `counts` accepts
@@ -481,9 +510,9 @@ fn times(
 
 /// What pairs an `ask_answered` with its `ask_opened`: the payload's
 /// `ask_id` (or `id`), and the task and run, as `stats`' open asks do.
-type AskKey = (Option<String>, Option<TaskId>, Option<String>);
+pub(super) type AskKey = (Option<String>, Option<TaskId>, Option<String>);
 
-fn ask_key(event: &RunEvent) -> AskKey {
+pub(super) fn ask_key(event: &RunEvent) -> AskKey {
     let id = event
         .payload
         .get("ask_id")
