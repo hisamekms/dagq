@@ -24,11 +24,14 @@ Each command's flags and the fields it prints are in `"$DAGQ" <command> --help` 
 
 - **Pages.** Page `list`, `events` and `notes` with the cursor the output gives, with the same filters, until it is null (`<command> --help`); decide whether more pages exist from it alone, never by counting items. `stats`' cursor reads the runs finished later (`stats --help`); its totals already cover the whole window: never sum them across pages.
 - **Cut texts.** `show`, `goal show` and `doctor` may cut long texts, ending them in `…`. Add `--full` only when you need them whole. Take the text to edit from `show --full`, never from the cut one.
+- **Holds.** `show ID`'s `hold` is the task's open hold: its reason (cut), `until`, who held it and when, the run it named and `settled_at` (when the task stopped moving under it; null while what was going still goes). `status`' `held` lists every open hold with its `state`, the task's latest run and `overdue`. Holding and releasing: the `dagq-recover` skill's `reference/hold.md`.
 - **One task.** Prefer `show ID` to `list --full`. To see why a ready task is passed over at claim, read `show ID` or `candidates`.
 
 ## Statuses
 
 Task: `draft` → `submitted` (in a proposal, waiting for plan review; never claimed) → `ready` → `in_progress` → `completed`, or `canceled`. Only plan review, a person's explicit `ready --bypass-review` and a retry of an `in_progress` task whose runs failed make a task `ready`. A task stays `in_progress` while any run is unfinished or awaiting integration.
+
+A hold is a mark beside the status, not a status: a held task keeps its status, and the runtime neither claims it nor resumes or recovers its run, nor starts its landing, until it is released.
 
 Run: `claimed`, `starting`, `running` and `validating` are unfinished. `awaiting_integration` passed validation and waits for `integrate`, which runs the verification commands after its rebase; `integrating` is being landed now. `needs_session` hit a rebase conflict, a failed verification or a scope violation, and the runtime resumes or recovers it (`last_error` says why). `integrated` landed (`result_commit`) and completed the task. `failed` and `interrupted` keep their worktree for inspection; the runtime's recovery handles them. A dependent task waits until every predecessor is `completed`.
 

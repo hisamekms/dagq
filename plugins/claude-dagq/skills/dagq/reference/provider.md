@@ -6,6 +6,8 @@ Read this to choose a task's worker's agent, to read which one ran, or to tell a
 
 A task's worker has a **provider** (`claude` or `codex`) and a **route**; the only route is headless. `add` and `edit` refuse `--interactive`. `add` takes the provider, and `edit ID` changes it on a draft or submitted task (a ready one goes back with `draft ID` first); `show` prints the resolved provider and route.
 
+An `in_progress` task's provider and model change only through a release of its hold: `release TASK --provider P --model M` (on the person's word, the person's or the inbox's). A run that waits (not `failed` or `interrupted`) and has a session goes on in it on the same provider, `--model` from its next turn; another provider ends the run, and the next run carries its work over. A stopped run (`failed`, `interrupted`) released with `--provider` (its own included) or `--model` always ends for a new run that carries its work over. The branches: the `dagq-recover` skill's `reference/hold.md`.
+
 The task's provider changes only its worker. A headless job runs on Codex only when its role's table in `dagq.toml` says `provider = "codex"` (a run review agent's own `[review.subagents.<agent>]` table can say so for its job alone); planners and the inbox stay on Claude. `"$DAGQ" doctor`'s `roles` shows each role's provider and where it comes from.
 
 ### Which to choose (planner)

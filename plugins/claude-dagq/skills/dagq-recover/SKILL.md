@@ -21,6 +21,8 @@ Three layers: the runtime fixes what fixed rules prove safe (`auto_repaired`), t
 
 Recovery is refused while a run process lives or its lease is fresh. A supervisor asks a run's session to exit and stops its background wrapper itself; nothing types into a session (`run send` refuses every run). `exit the session` (the runtime could not ask it to exit) and a hung supervisor are ended by the person in their own terminal; never kill them yourself.
 
+To make a task wait while what blocks its run is removed, then go on: `hold` / `release` (`reference/hold.md`).
+
 ## 3. Recover (only without a supervisor)
 
 Attention `recover run` (`kind` `runtime_error`): an unfinished run without a lease whose session may still live. With a supervisor running it recovers the run once the session is gone; without one:

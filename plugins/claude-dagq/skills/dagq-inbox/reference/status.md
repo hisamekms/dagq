@@ -15,6 +15,7 @@ Read this when what `status`, `watch` or `show` says, or what to do about an att
 - `sccache`: when the build cache server the run environment names needs a person, act on its attention below; `doctor` shows it (`${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/doctor.md`, "sccache server").
 - `runs` (also in `doctor`): the unfinished runs and the runs a lease holds. Progress is the phase moving while the run holds its slot; when there is no phase, do not guess one. A person is needed only where `slot` is `waiting` (answer its ask) or `attention` names the run. A run's session is read with `run log` (below).
 - `waiting`: the runs out of their slots while they wait for a person (below).
+- `held`: the held tasks, each with its reason, `until`, who held it, `state` (`settling` while what was going still goes, `held` once it waits), its latest run and `overdue` (why it now waits for a person). A held task needs nothing until its attention comes; what a hold does and `release`: `dagq-recover`'s `reference/hold.md`.
 - `asks`: the open asks, cut short; read them whole with `asks --open --role inbox`.
 - `ci`: the CI of the watched branch. A red CI needs nothing from the inbox: a runtime planner registers the fix. The failing tests: `"$DAGQ" ci failures`.
 - `language`: write for people in it (the `dagq` skill's section 5).
@@ -63,6 +64,8 @@ A `(runtime)` next needs nothing: `reviewing`, `resuming`, `triaging`, `queued t
   - `look at the dagq podman machine's relays`: show `podman machine list` and the error; the person mends the machine.
   - `restart supervisor`: `up` on the person's word. `supervisor_duplicate`: `down --wait`, then `up` (`dagq-recover`'s `reference/up-down.md`).
   - A worker provider that cannot be used is no attention: its runs move to the other provider, and the person acts only on a `queue_hold` ask (`reference/asks.md`).
+- Holds:
+  - `release or keep the hold of task N` (`task_hold_reminded`): the hold's `until` passed (`overdue` `until_passed`) or it has been on a day with none (`long_held`); `watch` tells it once a day. Tell the person the task, its reason and how long it has waited; on their word `release` it (`dagq-recover`'s `reference/hold.md`), or keep it: nothing to do, it is told again a day later.
 - Notices (they do not stay in `status`; tell the person):
   - `report the update`: the supervisor updated dagq by itself, or only the plugin. Tell the person the version and what the notice says, and that sessions reopened after it load the updated plugin. Nothing to do; a failed update is an ask instead.
   - `report the review`, `check the failed review`: `watch.md`, "The throughput review's notice".
@@ -71,6 +74,8 @@ A `(runtime)` next needs nothing: `reviewing`, `resuming`, `triaging`, `queued t
 ## Runs waiting for a person (outside the slots)
 
 A run whose session only waits for a person's answer leaves its slot while it waits, so another task can run; its ask is the attention, so answering the ask is all it needs from you. A drain (`down --wait`) waits for these runs too, so it ends only once their asks are answered. `status`' `waiting` lists them; their limit is `up --max-waiting` (`"$DAGQ" up --help`).
+
+The run of a held task also waits out of its slot, with its session kept, but it waits for a `release`, not an answer: it is in `held`, not in `waiting`, and counts toward no limit.
 
 ## asks
 
