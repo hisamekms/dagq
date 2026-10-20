@@ -53,6 +53,7 @@ Claude/Codexで同じ状態機械を使う。
   reviewを始める側（validationの後、adopt、exec引き継ぎの後の組み直し）も、保護のあいだはprogramもjobも始めず、reviewを待たせたまま保留に渡す。
   継続のresumeの依頼に載せる回答は依頼の中の上限までで、超えた分も含めた全体を`resume-<回>-answers.txt`に書き、依頼がそのfileを名指す。
   保護のあいだ柵に拒まれた回答の配送は失敗とせず、askを開いたまま残して、継続のresumeのsessionが届ける。
+  保護中のrunのreviseと着地の順も保留の経路で扱い、slotで待たずaskにも回さない（暫定の扱いを置き換えた）。
   `already_satisfied`の主張のrunも同じく保留する。
   走っている検証は終わりを待つが、その結果では`approve_close`を開かずtaskも閉じない（`replan_result_withheld`）。
   答えを待って休むrunも保留し、開いた`approve_close`を同じtransactionで閉じる。

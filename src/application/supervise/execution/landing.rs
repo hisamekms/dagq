@@ -1765,7 +1765,8 @@ impl Supervisor<'_> {
     /// ended or the request could not be sent. `concern` is the concern
     /// whose `send_back` this applies, which the ask names when the session
     /// does not fix it (task 1392); `sent_back` the reasons the judgment
-    /// reads.
+    /// reads. While a replanning or a hold fences the task, nothing is sent
+    /// and nobody is asked: the review waits held for the park.
     pub(super) fn send_revise(
         &mut self,
         run: &TaskRun,
@@ -1779,44 +1780,28 @@ impl Supervisor<'_> {
         let ask = |why: String, verdict: ReviewVerdict, session| {
             landing_ask(Some(why), verdict, session, job, carries)
         };
-        // A run whose task is being replanned gets no revise (ADR-t1521-2
-        // decision 1): the verdict stays in the history and goes to the
-        // landing's ask, as one whose session could not revise it, so the
-        // run is not left without anyone to act on it; its landing waits
-        // for the operation's outcome whatever the answer. A held one gets
-        // none either (ADR-t1879-1): it waits held for the park, which
-        // leaves its session for the resume after the release, whose
-        // review asks again.
-        match self.queue.turn_fence(run.task_id())? {
-            Some(crate::domain::task_replan::Fence::Replan(guard)) => {
-                let withheld = crate::domain::task_replan::check_step(
-                    &crate::domain::task_replan::TaskGuards::replan(Some(guard)),
-                    crate::domain::task_replan::GuardedStep::Revise,
-                )
-                .err()
-                .map(|refused| refused.to_string())
-                .unwrap_or_default();
-                self.queue.record_runtime_event(
-                    run.id(),
-                    EventKind::ReviseWithheld,
-                    json!({"guard": guard, "reasons": verdict.reasons}),
-                )?;
-                return Ok(ask(withheld, verdict, session));
-            }
-            Some(crate::domain::task_replan::Fence::Hold(hold)) => {
-                self.queue.record_runtime_event(
-                    run.id(),
-                    EventKind::ReviseWithheld,
-                    json!({"hold": hold, "reasons": verdict.reasons}),
-                )?;
-                info!(run_id = %run.id(), "run {}: task {} is held; its revise is not sent", run.id(), hold.task);
-                return Ok(Phase::ReviewHeld {
-                    session,
-                    retried: false,
-                    providers: Vec::new(),
-                });
-            }
-            None => {}
+        // A run whose task is being replanned or held gets no revise
+        // (ADR-t1521-2 decision 1, ADR-t1879-1): `revise_withheld` keeps
+        // the verdict in the history, no ask opens on it, and the review
+        // waits held for the park, which gives the slot back and leaves
+        // the session for the resume after the operation's outcome or the
+        // release, whose review asks again.
+        if let Some(fence) = self.queue.turn_fence(run.task_id())? {
+            let (key, by) = match fence {
+                crate::domain::task_replan::Fence::Replan(guard) => ("guard", json!(guard)),
+                crate::domain::task_replan::Fence::Hold(hold) => ("hold", json!(hold)),
+            };
+            self.queue.record_runtime_event(
+                run.id(),
+                EventKind::ReviseWithheld,
+                json!({key: by, "reasons": verdict.reasons}),
+            )?;
+            info!(run_id = %run.id(), "run {}: {}; its revise is not sent", run.id(), fence.describe());
+            return Ok(Phase::ReviewHeld {
+                session,
+                retried: false,
+                providers: Vec::new(),
+            });
         }
         let events = self.queue.run_events(run.id())?;
         let history = RunHistory::from_events(&events);

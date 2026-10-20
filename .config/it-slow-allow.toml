@@ -2129,3 +2129,18 @@ task = 1882
 name = "runtime_task_release::a_fresh_release_after_an_earlier_carry_over_starts_from_main_with_nothing_inherited"
 reason = "B 境界（復旧 job・supervisor の配線・CLI・Git）: 前の run が retry_inherit で引き継がれた task で、何も残さずに失敗した run を release すると retry_fresh になり、次の run の prompt と run_inherited に前の引き継ぎが載らないことを、実際の supervisor・復旧 job・run の prompt で確かめる。探索の境界の判断は domain::resume::inherited_from の unit test"
 task = 1882
+
+[[test]]
+name = "runtime_replanning::a_passed_run_whose_operation_parks_no_more_rests_out_of_its_slot_and_lands_after_the_outcome"
+reason = "境界: supervisorの配線（保留を終えた柵の下で枠を返すSQLiteのtransaction）と、柵の解除の後の別のsupervisorでのresumeから着地までを2回の起動で通す"
+task = 2432
+
+[[test]]
+name = "runtime_replanning::a_withheld_revise_under_an_operation_that_parks_no_more_rests_the_run_out_of_its_slot"
+reason = "境界: supervisorの配線（reviseを送らずreviewを保留してsessionを閉じ、保留を終えた柵の下で枠を返すSQLiteのtransaction）と、柵の解除の後の別のsupervisorでのresumeから着地までを2回の起動で通す"
+task = 2432
+
+[[test]]
+name = "runtime_replanning::a_run_waiting_in_the_landing_slot_rests_out_of_it_once_its_task_is_guarded"
+reason = "境界: supervisorの配線（着地の順を自動更新のgateのlockで待つslotのrunに柵を立て、枠を返すSQLiteのtransaction）を実際のlockとsupervisorで通す。選択の判断はchoose_parkのunit test"
+task = 2432

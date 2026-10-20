@@ -3795,10 +3795,10 @@ impl Supervisor<'_> {
                     return Ok(Step::Done(Box::new(parked)));
                 }
                 // A run whose task is being replanned or held does not
-                // land: it waits in its slot for the park (ADR-t1521-2
-                // decision 1, ADR-t1879-1), rather than failing.
+                // land (ADR-t1521-2 decision 1, ADR-t1879-1): the park
+                // above takes it out of its slot; a fence that came since
+                // that look is the next look's.
                 if self.queue.turn_fence(current.task_id())?.is_some() {
-                    slot.landing_turn = true;
                     return Ok(Step::Continue);
                 }
                 // Its verification takes turns with the automatic update's

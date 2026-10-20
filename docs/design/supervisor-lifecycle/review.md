@@ -224,3 +224,5 @@ e2eが要るpassしたrunは、着地スロットを待つ段でhostでe2eを流
 保護中のrunとholdの開いたtaskのrunは、走っているreviewとe2eの終了を待ち、そのverdictでrevise・ask・着地を始めない。
 `already_satisfied`の主張の判定のjobも同じく終了を待って刈り取り、その判定でaskを開かず、答えの無いjobをやり直さずに、結果を`replan_result_withheld`（holdは`hold_result_withheld`）に残してrunを保留する。
 runは[保留](headless-worker.md#再計画の保留)されてslotを返し、承認の列と`integrate --next`は飛ばす（[taskの再計画](../../plans/task-replanning.md)）。
+reviseのverdictも送らず`revise_withheld`に残し、askを開かずreviewを保留に渡す。
+保留を終えた柵（`blocked`などの保留の後の操作、落ち着いたhold）がslotに見つけたrunも、着地の順やreviewの保留のままslotで待たず、書き手の終わりを待って保留と同じ`needs_session`で休んでslotを返し、操作の結末か解除の後のresumeが新しいvalidationとreviewから続ける。

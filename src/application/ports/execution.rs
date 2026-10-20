@@ -1104,6 +1104,23 @@ pub trait RunTransitions {
         token: Option<&LeaseToken>,
         payload: serde_json::Value,
     ) -> Result<(crate::domain::task_replan::ReplanOperation, TaskRun)>;
+    /// Let run `id`, leased to `token`, rest out of its slot once its
+    /// writer stopped, for the fence of its task that parks it no more (a
+    /// replanning past its park, a hold that settled): in one transaction
+    /// that finds the task still fenced, the run becomes `needs_session`
+    /// with `reason`, recorded as the fence's park (`replan_parked` with
+    /// the operation and its status, or `hold_parked` with the hold, on
+    /// `payload`), gives its lease back and its open `approve_landing` and
+    /// `approve_close` asks close, so its next step is the resume after
+    /// the operation's outcome or the release. `None`, with nothing
+    /// written, once nothing fences the task.
+    fn rest_fenced(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        reason: &str,
+        payload: serde_json::Value,
+    ) -> Result<Option<TaskRun>>;
     /// Lease run `id`, resting unleased, to `token` for the park of
     /// operation `op` (read under `generation`); `None` once `op` no longer
     /// parks it or another process holds it.

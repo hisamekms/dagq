@@ -48,7 +48,7 @@ use crate::domain::replan_snapshot::{
 };
 use crate::domain::run::run_workspaces;
 use crate::domain::task_hold::TaskHold;
-use crate::domain::task_replan::{ReplanMove, ReplanOperation, ReplanStatus};
+use crate::domain::task_replan::{Fence, ReplanMove, ReplanOperation, ReplanStatus};
 
 /// Whether the last of `events`' `resume_started`, `resume_finished` and
 /// `resume_skipped` is a `resume_started`: a resume that never ended.
@@ -67,12 +67,24 @@ fn mid_resume(events: &[RunEvent]) -> bool {
 }
 
 /// What parks a run at its turn's end: a replanning past its pause's
-/// fence, which also saves the run's work, or its task's hold while it
-/// settles, which leaves the work in place.
+/// fence, which also saves the run's work, its task's hold while it
+/// settles, which leaves the work in place, or a fence that parks it no
+/// more ([`Self::Rest`]).
 #[derive(Debug, Clone)]
 pub(super) enum ParkFor {
     Replan(Box<ReplanOperation>),
     Hold(TaskHold),
+    /// A fence whose park is over (a replanning past its park, `blocked`
+    /// included, or a hold that settled) and finds the run in a slot: the
+    /// run does not wait there for the outcome or the release, whatever
+    /// its step (a landing's turn, a review held at the fence). Once its
+    /// writer ended it rests out of the slot as the park leaves a run
+    /// ([`RunTransitions::rest_fenced`]), with its work in place, and the
+    /// resume after the operation's outcome or the release takes it on
+    /// through a new validation and review. A writer left in the worktree
+    /// is waited for on the next looks, saving nothing. Since when (unix
+    /// seconds) the fence stands as it is.
+    Rest(Fence, i64),
 }
 
 impl ParkFor {
@@ -81,6 +93,7 @@ impl ParkFor {
         match self {
             Self::Replan(op) => op.updated_at,
             Self::Hold(hold) => hold.created_at,
+            Self::Rest(_, since) => *since,
         }
     }
 
@@ -89,6 +102,7 @@ impl ParkFor {
         match self {
             Self::Replan(op) => format!("replan operation {}", op.id),
             Self::Hold(hold) => format!("the hold {} of task {}", hold.id, hold.task_id),
+            Self::Rest(fence, _) => fence.describe(),
         }
     }
 
@@ -100,15 +114,15 @@ impl ParkFor {
     const fn writer_grace(&self) -> Duration {
         match self {
             Self::Replan(_) => LEFT_WRITER_GRACE,
-            Self::Hold(_) => Duration::ZERO,
+            Self::Hold(_) | Self::Rest(..) => Duration::ZERO,
         }
     }
 
     /// `workspace_closed`'s `by` for a session the park closes.
     const fn by(&self) -> &'static str {
         match self {
-            Self::Replan(_) => "replan",
-            Self::Hold(_) => "hold",
+            Self::Replan(_) | Self::Rest(Fence::Replan(_), _) => "replan",
+            Self::Hold(_) | Self::Rest(Fence::Hold(_), _) => "hold",
         }
     }
 
@@ -121,8 +135,61 @@ impl ParkFor {
                 json!({"operation_id": op.id, "generation": op.generation}),
             ),
             Self::Hold(hold) => (EventKind::HoldResultWithheld, json!({"hold_id": hold.id})),
+            Self::Rest(Fence::Replan(guard), _) => (
+                EventKind::ReplanResultWithheld,
+                json!({"operation_id": guard.operation}),
+            ),
+            Self::Rest(Fence::Hold(guard), _) => (
+                EventKind::HoldResultWithheld,
+                json!({"hold_id": guard.hold}),
+            ),
         }
     }
+}
+
+/// What the queue says now of a run in a slot, for [`choose_park`].
+pub(super) struct ParkLook {
+    /// The run's replanning operations, oldest first.
+    pub ops: Vec<ReplanOperation>,
+    /// What fences its task at its turn's boundary, if anything.
+    pub fence: Option<Fence>,
+    /// Its task's open hold, read under a hold's fence.
+    pub hold: Option<TaskHold>,
+    /// Now (unix seconds).
+    pub now: i64,
+}
+
+/// What parks a run in its slot, as `look` finds it: the latest of its
+/// operations that parks it ([`ReplanStatus::parks`]); else nothing while
+/// nothing fences its task; else, under a hold's fence, the open hold
+/// while it settles; else a fence whose park is over ([`ParkFor::Rest`]):
+/// a replanning that guards the task past its park (parked, planning,
+/// blocked), which a hold under it leaves to rest the run, or a hold that
+/// settled. The rest stands since its operation last moved or its hold
+/// settled, `now` when neither is found.
+pub(super) fn choose_park(look: ParkLook) -> Option<ParkFor> {
+    let ParkLook {
+        ops,
+        fence,
+        hold,
+        now,
+    } = look;
+    if let Some(op) = ops.iter().rev().find(|op| op.status.parks()) {
+        return Some(ParkFor::Replan(Box::new(op.clone())));
+    }
+    let fence = fence?;
+    let since = match fence {
+        Fence::Replan(guard) => ops
+            .iter()
+            .find(|op| op.id == guard.operation)
+            .map(|op| op.updated_at),
+        Fence::Hold(_) => match hold {
+            Some(hold) if hold.settled_at.is_none() => return Some(ParkFor::Hold(hold)),
+            Some(hold) => hold.settled_at,
+            None => None,
+        },
+    };
+    Some(ParkFor::Rest(fence, since.unwrap_or(now)))
 }
 
 /// What a hold's park ends a run in once its writer ended
@@ -368,32 +435,21 @@ impl Supervisor<'_> {
         }
     }
 
-    /// The open operation that parks `run` now, if any.
-    fn parking_of(&self, run: &RunId) -> Result<Option<ReplanOperation>> {
-        Ok(self
-            .queue
-            .replans_of_run(run)?
-            .into_iter()
-            .rev()
-            .find(|op| op.status.parks()))
-    }
-
-    /// What parks `run` in its slot now: an operation that parks it, else
-    /// the open hold of its task while it settles. A replanning that
-    /// guards the task past its park (parked, planning) parks nothing
-    /// more, and a hold under it waits for the run to rest.
+    /// What parks `run` in its slot now ([`choose_park`] on what the queue
+    /// says): the run's operations, its task's fence and, under a hold's
+    /// fence, its task's open hold.
     fn park_for(&self, run: &TaskRun) -> Result<Option<ParkFor>> {
-        if let Some(op) = self.parking_of(run.id())? {
-            return Ok(Some(ParkFor::Replan(Box::new(op))));
-        }
-        if self.queue.replan_guard(run.task_id())?.is_some() {
-            return Ok(None);
-        }
-        Ok(self
-            .queue
-            .open_hold(run.task_id())?
-            .filter(|hold| hold.settled_at.is_none())
-            .map(ParkFor::Hold))
+        let fence = self.queue.turn_fence(run.task_id())?;
+        let hold = match fence {
+            Some(Fence::Hold(_)) => self.queue.open_hold(run.task_id())?,
+            _ => None,
+        };
+        Ok(choose_park(ParkLook {
+            ops: self.queue.replans_of_run(run.id())?,
+            fence,
+            hold,
+            now: self.generators.clock.now(),
+        }))
     }
 
     /// Take `jobs`, the review jobs of `run`'s phase, through the park:
@@ -453,7 +509,7 @@ impl Supervisor<'_> {
         let Some(park) = self.park_for(&slot.run)? else {
             return Ok(None);
         };
-        let held = matches!(park, ParkFor::Hold(_));
+        let held = matches!(park, ParkFor::Hold(_) | ParkFor::Rest(Fence::Hold(_), _));
         let (withheld_kind, withheld_base) = park.withheld();
         let mut withheld = None;
         match &mut slot.phase {
@@ -612,6 +668,7 @@ impl Supervisor<'_> {
                 let at_end = if rested { AtEnd::Rested } else { AtEnd::Park };
                 self.park_held(hold, &run, &token, at_end)?
             }
+            ParkFor::Rest(..) => self.rest_fenced(&park, &run, &token)?,
         };
         match parked {
             Some(parked) => Ok(Some(Step::Done(Box::new(parked)))),
@@ -683,6 +740,58 @@ impl Supervisor<'_> {
             }
         }
         Ok(parked)
+    }
+
+    /// Let `run`, which this supervisor holds in a slot with `token`, rest
+    /// out of it for `park`, a fence whose park is over ([`ParkFor::Rest`]):
+    /// the same wait for its writer as a park (its session's wrapper and
+    /// turn, closed once they ended, and what a turn left in the worktree),
+    /// then [`RunTransitions::rest_fenced`]. The run once it rests; `None`
+    /// while it waits, or once the fence was lifted or the run lost
+    /// meanwhile (the run then goes on by its own paths).
+    fn rest_fenced(
+        &mut self,
+        park: &ParkFor,
+        run: &TaskRun,
+        token: &LeaseToken,
+    ) -> Result<Option<TaskRun>> {
+        let quiet = match self.still_settling(run, token, park) {
+            Ok(()) => self.quiesce(park, run, token),
+            Err(error) => Err(error),
+        };
+        match quiet {
+            Err(error) if error.chain().any(|cause| cause.is::<ParkLost>()) => {
+                info!(run_id = %run.id(), "run {}: its rest stopped: {error:#}", run.id());
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+            Ok(Quiet::Waiting) => return Ok(None),
+            Ok(Quiet::Stuck(why)) => {
+                warn!(run_id = %run.id(), "run {}: its rest out of its slot for {} waits: {why}", run.id(), park.describe());
+                return Ok(None);
+            }
+            Ok(Quiet::Stopped) => {}
+        }
+        let run = &self.queue.run(run.id())?;
+        let carried = owed_and_untaken(&*self.files, run, &self.queue.run_events(run.id())?)?;
+        let mut payload = json!({});
+        if !carried.is_empty() {
+            payload["carried_answers"] = json!(carried);
+        }
+        let reason = format!(
+            "{}; the run rests out of its slot with its work in place until that ends",
+            park.describe()
+        );
+        let rested = self.queue.rest_fenced(run.id(), token, &reason, payload)?;
+        match &rested {
+            Some(_) => {
+                info!(run_id = %run.id(), "run {}: {}; it rests out of its slot, which is free", run.id(), park.describe());
+            }
+            None => {
+                info!(run_id = %run.id(), "run {}: the fence of its task was lifted before it rested", run.id());
+            }
+        }
+        Ok(rested)
     }
 
     /// Settle the holds whose task's latest run rests with nobody holding
@@ -1479,11 +1588,13 @@ impl Supervisor<'_> {
     /// snapshot in place and settles a failure.
     /// [`Self::still_parking`] for `park`: for a hold, this supervisor
     /// still holds `run` with `token` and the hold is still open and
-    /// settling.
+    /// settling; for a rest, it still holds `run` and the task is still
+    /// fenced.
     fn still_settling(&self, run: &TaskRun, token: &LeaseToken, park: &ParkFor) -> Result<()> {
         let hold = match park {
             ParkFor::Replan(op) => return self.still_parking(run, token, op),
             ParkFor::Hold(hold) => hold,
+            ParkFor::Rest(..) => return self.still_resting(run, token),
         };
         let held = self.queue.holds_lease(run.id(), token).map_err(|error| {
             ParkLost(format!(
@@ -1508,6 +1619,37 @@ impl Supervisor<'_> {
                 run.id()
             ))
             .into());
+        }
+        Ok(())
+    }
+
+    /// Fail with [`ParkLost`] unless this supervisor still holds `run` with
+    /// `token` and its task is still fenced: checked before a rest stops or
+    /// closes a session.
+    fn still_resting(&self, run: &TaskRun, token: &LeaseToken) -> Result<()> {
+        let held = self.queue.holds_lease(run.id(), token).map_err(|error| {
+            ParkLost(format!(
+                "the hold of run {} for its rest could not be read: {error:#}",
+                run.id()
+            ))
+        })?;
+        if !held {
+            return Err(ParkLost(format!(
+                "this supervisor no longer holds run {} for its rest",
+                run.id()
+            ))
+            .into());
+        }
+        let fenced = self.queue.turn_fence(run.task_id()).map_err(|error| {
+            ParkLost(format!(
+                "the fence of run {} could not be read: {error:#}",
+                run.id()
+            ))
+        })?;
+        if fenced.is_none() {
+            return Err(
+                ParkLost(format!("the fence of run {}'s task was lifted", run.id())).into(),
+            );
         }
         Ok(())
     }
@@ -1796,6 +1938,165 @@ mod tests {
 
         fn withheld(&self) -> Value {
             json!({"what": "claim_review", "attempt": 2})
+        }
+    }
+
+    /// Operation `id` of task 7's run in `status`, last moved at
+    /// `updated_at`.
+    fn op(id: i64, status: ReplanStatus, updated_at: i64) -> ReplanOperation {
+        ReplanOperation {
+            id: crate::domain::ReplanId::new(id),
+            task_id: TaskId::new(7),
+            run_id: RunId::new("run-1").unwrap(),
+            goal_id: None,
+            origin: crate::domain::task_replan::ReplanOrigin::Runtime,
+            status,
+            status_reason: None,
+            generation: 1,
+            return_phase: None,
+            reason: "too long".into(),
+            conditions: crate::domain::task_replan::OriginalConditions {
+                title: "t".into(),
+                description: "d".into(),
+                acceptance: Vec::new(),
+                paths: Vec::new(),
+                verify: Vec::new(),
+                evidence: Value::Null,
+                predecessors: Vec::new(),
+                successors: Vec::new(),
+                goal: None,
+            },
+            task_version: String::new(),
+            goal_acceptance_version: None,
+            diagnosis: Default::default(),
+            snapshot_id: None,
+            request_id: None,
+            proposal_id: None,
+            requested_by: "supervisor".into(),
+            requested_by_id: "supervisor".into(),
+            mappings: Vec::new(),
+            replaced_by: Vec::new(),
+            created_at: 0,
+            updated_at,
+            closed_at: None,
+        }
+    }
+
+    /// The fence `op` puts on its task.
+    fn replan_fence(op: &ReplanOperation) -> Fence {
+        Fence::Replan(op.guard().expect("a guarding operation"))
+    }
+
+    /// Hold 4 of task 7, held at 10 and settled at `settled_at`.
+    fn hold(settled_at: Option<i64>) -> TaskHold {
+        TaskHold {
+            id: crate::domain::HoldId::new(4),
+            task_id: TaskId::new(7),
+            run_id: None,
+            reason: "wait".into(),
+            until: None,
+            by_role: "user".into(),
+            by_id: "user".into(),
+            created_at: 10,
+            settled_at,
+        }
+    }
+
+    /// The fence `hold` puts on its task.
+    fn hold_fence(hold: &TaskHold) -> Fence {
+        Fence::Hold(crate::domain::task_hold::HoldGuard {
+            task: hold.task_id,
+            hold: hold.id,
+        })
+    }
+
+    fn look(ops: Vec<ReplanOperation>, fence: Option<Fence>, hold: Option<TaskHold>) -> ParkLook {
+        ParkLook {
+            ops,
+            fence,
+            hold,
+            now: 1000,
+        }
+    }
+
+    #[test]
+    fn nothing_parks_a_run_whose_task_nothing_fences() {
+        assert!(choose_park(look(Vec::new(), None, None)).is_none());
+        let closed = op(1, ReplanStatus::Withdrawn, 50);
+        assert!(choose_park(look(vec![closed], None, None)).is_none());
+    }
+
+    #[test]
+    fn an_operation_that_parks_the_run_takes_it_whatever_came_before() {
+        for status in [
+            ReplanStatus::PauseRequested,
+            ReplanStatus::Quiescing,
+            ReplanStatus::Snapshotting,
+        ] {
+            let parking = op(2, status, 60);
+            let fence = Some(replan_fence(&parking));
+            let ops = vec![op(1, ReplanStatus::Withdrawn, 50), parking];
+            match choose_park(look(ops, fence, Some(hold(None)))) {
+                Some(ParkFor::Replan(chosen)) => assert_eq!(chosen.id.as_i64(), 2, "{status:?}"),
+                other => panic!("{status:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn an_operation_past_its_park_rests_the_run_since_it_last_moved() {
+        for status in [
+            ReplanStatus::Parked,
+            ReplanStatus::Planning,
+            ReplanStatus::Reviewing,
+            ReplanStatus::Blocked,
+        ] {
+            let past = op(3, status, 70);
+            let fence = replan_fence(&past);
+            // A hold under it leaves the run to the replanning's rest.
+            match choose_park(look(vec![past], Some(fence), Some(hold(None)))) {
+                Some(ParkFor::Rest(rest, since)) => {
+                    assert_eq!(rest, fence, "{status:?}");
+                    assert_eq!(since, 70, "{status:?}");
+                }
+                other => panic!("{status:?}: {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_hold_that_settles_parks_the_run_and_one_that_settled_rests_it() {
+        let settling = hold(None);
+        let fence = hold_fence(&settling);
+        match choose_park(look(Vec::new(), Some(fence), Some(settling))) {
+            Some(ParkFor::Hold(chosen)) => assert_eq!(chosen.id.as_i64(), 4),
+            other => panic!("{other:?}"),
+        }
+        let settled = hold(Some(20));
+        match choose_park(look(Vec::new(), Some(fence), Some(settled))) {
+            Some(ParkFor::Rest(rest, since)) => {
+                assert_eq!(rest, fence);
+                assert_eq!(since, 20);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_rest_whose_start_is_not_found_stands_since_now() {
+        let elsewhere = op(5, ReplanStatus::Blocked, 70);
+        let fence = replan_fence(&elsewhere);
+        match choose_park(look(Vec::new(), Some(fence), None)) {
+            Some(ParkFor::Rest(_, since)) => assert_eq!(since, 1000),
+            other => panic!("{other:?}"),
+        }
+        let held = hold_fence(&hold(None));
+        match choose_park(look(Vec::new(), Some(held), None)) {
+            Some(ParkFor::Rest(rest, since)) => {
+                assert_eq!(rest, held);
+                assert_eq!(since, 1000);
+            }
+            other => panic!("{other:?}"),
         }
     }
 

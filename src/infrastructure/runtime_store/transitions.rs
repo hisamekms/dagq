@@ -642,6 +642,96 @@ impl SqliteQueue {
         Ok(Some(run.relocated(&self.runs_dir)))
     }
 
+    /// Let run `id`, leased to `token`, rest out of its slot for the fence
+    /// that parks it no more, as [`RunTransitions::rest_fenced`] says:
+    /// refused (`None`, nothing written) once nothing fences its task.
+    pub fn rest_fenced(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        reason: &str,
+        payload: serde_json::Value,
+    ) -> Result<Option<TaskRun>> {
+        let now = self.generators.clock.now();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        renew_lease(&tx, id, token, now)?;
+        let task: crate::domain::TaskId =
+            tx.query_row("SELECT task_id FROM task_runs WHERE id=?1", [id], |r| {
+                r.get(0)
+            })?;
+        let Some(fence) = (crate::domain::task_replan::TaskGuards {
+            replan: crate::infrastructure::replans::guard_of(&tx, task)?,
+            hold: crate::infrastructure::task_holds::guard_of(&tx, task)?,
+        })
+        .fence() else {
+            return Ok(None);
+        };
+        let mut payload = payload;
+        let (by, kind) = match fence {
+            crate::domain::task_replan::Fence::Replan(guard) => {
+                payload["operation_id"] = json!(guard.operation);
+                payload["fence"] = json!(guard.status);
+                ("replan operation", EventKind::ReplanParked)
+            }
+            crate::domain::task_replan::Fence::Hold(guard) => {
+                payload["hold_id"] = json!(guard.hold);
+                ("hold", EventKind::HoldParked)
+            }
+        };
+        let run = apply_recorded(
+            &tx,
+            refusals(&self.runs_dir, &self.generators),
+            id,
+            Some(token),
+            || "run cannot rest for its task's fence".to_owned(),
+            |run| match fence {
+                crate::domain::task_replan::Fence::Replan(_) => {
+                    run::record_replan_park(run, reason, payload)
+                }
+                crate::domain::task_replan::Fence::Hold(_) => {
+                    run::record_hold_park(run, reason, payload)
+                }
+            },
+        )?;
+        ensure!(
+            tx.execute(
+                "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
+                params![id, token]
+            )? == 1,
+            "run lease was lost"
+        );
+        run_event(
+            &tx,
+            id,
+            EventKind::LeaseReleased,
+            json!({"reason": kind.as_str(), "fence": fence}),
+        )?;
+        // The landing or close question was asked of the work before the
+        // rest: the resumed session's validation and review ask afresh.
+        for ask in [
+            crate::domain::AskKind::ApproveLanding,
+            crate::domain::AskKind::ApproveClose,
+        ] {
+            crate::infrastructure::asks::close_asks_in(
+                &tx,
+                id,
+                None,
+                ask,
+                &format!(
+                    "the run rested out of its slot for the {by} that fences its task; this question no longer applies to it"
+                ),
+                now,
+            )?;
+        }
+        if kind == EventKind::HoldParked {
+            crate::infrastructure::task_holds::enter_held_phase(&tx, id, kind.as_str())?;
+        }
+        tx.commit()?;
+        Ok(Some(run.relocated(&self.runs_dir)))
+    }
+
     /// Settle the open hold `hold` of a run at rest whose writer the caller
     /// found ended, as [`RunTransitions::settle_hold_at_rest`] says:
     /// refused (`false`, nothing written) once the hold was released or
@@ -1311,6 +1401,15 @@ impl RunTransitions for SqliteQueue {
         payload: serde_json::Value,
     ) -> Result<(crate::domain::task_replan::ReplanOperation, TaskRun)> {
         SqliteQueue::settle_replan(self, op, generation, step, token, payload)
+    }
+    fn rest_fenced(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        reason: &str,
+        payload: serde_json::Value,
+    ) -> Result<Option<TaskRun>> {
+        SqliteQueue::rest_fenced(self, id, token, reason, payload)
     }
     fn begin_restore(
         &mut self,
