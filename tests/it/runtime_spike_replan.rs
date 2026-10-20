@@ -811,3 +811,89 @@ fn spikes_run_side_by_side_are_one_cycle_and_no_limit_refuses_nothing() {
         run_spike(&db, &mut unlimited, spike);
     }
 }
+
+/// The goal's cycles: `(all, open)`, the open ones the investigations.
+fn cycles(db: &Path, goal: GoalId) -> (i64, i64) {
+    Connection::open(db)
+        .unwrap()
+        .query_row(
+            "SELECT count(*), count(*) FILTER (WHERE closed_at IS NULL) FROM spike_cycles
+             WHERE goal_id=?1",
+            [goal.as_i64()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+}
+
+/// The goal's Spike lands, and the planner of its request submits a
+/// further Spike (the request proposed, the second cycle started); plan
+/// review sends it back. With no Spike unfinished and no request `open`,
+/// the investigation stays open while the Spike is a draft of a revising
+/// proposal (ADR-t1487-1 decision 7): passes neither close it nor open
+/// another, and the cycles stay two (ADR-t2414-1). The proposal
+/// withdrawn, nothing keeps it, and it ends.
+#[test]
+fn a_further_spike_sent_back_keeps_the_investigation_until_its_proposal_is_withdrawn() {
+    use dagq::application::{PlanRequestStore, RequestPlannerStart};
+    use dagq::domain::{
+        PlannerOrigin, investigation::InvestigationKey, plan_request::RequestStatus,
+    };
+    let (_dir, _repo, db) = fixture();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+    let a = open_goal(&db, "goal A");
+    let first = add_task(&db, "first spike", ExecutionClass::Spike, Some(a));
+    claim(&db, first);
+    land(&db, first);
+    assert_eq!(open_keys(&db), [InvestigationKey::Goal(a)]);
+    let mut queue = SqliteQueue::open(&db)
+        .unwrap()
+        .with_max_spike_cycles(Some(3));
+    let request = queue.plan_requests(true).unwrap()[0].id;
+    let RequestPlannerStart::Opened { planner, .. } =
+        queue.open_request_planner(request, None).unwrap()
+    else {
+        panic!("no planner opened for request {request}");
+    };
+    queue
+        .planner_workspace_created(planner.id, "replanner")
+        .unwrap();
+
+    let further = draft(&mut queue, a, ExecutionClass::Spike);
+    let proposal = queue
+        .submit_linking(
+            dagq::domain::Submission {
+                tasks: vec![further],
+                goals: Vec::new(),
+                proposal: None,
+                owner: dagq::domain::PlannerOwner {
+                    origin: PlannerOrigin::Runtime,
+                    workspace_id: Some("replanner".into()),
+                },
+            },
+            &[],
+        )
+        .unwrap()
+        .id();
+    assert_eq!(
+        queue.plan_request(request).unwrap().status,
+        RequestStatus::Proposed
+    );
+    assert_eq!(cycles(&db, a), (2, 1));
+
+    send_back(&db, proposal, further);
+    for _ in 0..2 {
+        assert_eq!(open_keys(&db), [InvestigationKey::Goal(a)]);
+        assert_eq!(cycles(&db, a), (2, 1));
+    }
+
+    queue.withdraw_proposal(proposal).unwrap();
+    assert_eq!(
+        queue.show(further).unwrap().task.status(),
+        TaskStatus::Draft
+    );
+    assert!(open_keys(&db).is_empty());
+    assert_eq!(cycles(&db, a), (2, 0));
+}
