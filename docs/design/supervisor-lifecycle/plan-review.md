@@ -112,6 +112,7 @@ submit -> 候補の順序 -> job（読むだけ） -> verdict -+- pass -----> ta
 - 上限で待つreviseのための枠の空け方: `PlanningState::release_runtime_planner`。
 - plannerを終わらせない理由: `PlannerBusy`と`PlanningState::busy_reasons`。
 - 届ける依頼の文: `prompt::plan_revise_request`。
+- 持ち主が居ないreviseは、回答済みの`planner_question`とそれを出したplannerごとの引き継ぎ材料を同じ新しいplannerに運び、`plan_revise_sent`と運んだanswerのclose（`ask_delivered`）を1トランザクションで記録する（[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定2〜4、`PlanReviewStore::revise_sent`）。
 - 差し戻しで開き直すplannerのeffortは1段上げ、生きているsessionのmodel / effortは切り替えない（[Actor model](actor-model.md#差し戻しで開き直すplannerの段上げ)）。
 - 落とし穴: sessionが見つからないだけではplannerが終わった証拠にせず、wrapperで判定する（workerと同じ。`PlanningState::planner_gone`）。
 - 落とし穴: plannerはClaudeのsessionなので、Claudeの控えの間はruntimeのplannerへの配送を止める。

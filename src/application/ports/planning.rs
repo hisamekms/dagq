@@ -657,13 +657,17 @@ pub trait PlanReviewStore {
     /// (`plan_revise_sent`); `opened` is what the planner's agent started
     /// with when the runtime opened that planner for it (its effort raised
     /// one step, ADR-0079 decision 7 (c)), `None` when it went to a live
-    /// planner, whose effort is not raised.
+    /// planner, whose effort is not raised. `answers` are the answered
+    /// `planner_question`s that went with it, closed (`ask_delivered`) in
+    /// the same transaction: the record and the closes are kept together
+    /// or not at all (ADR-t1704-1 decision 2).
     fn revise_sent(
         &mut self,
         proposal: ProposalId,
         planner: PlannerId,
         workspace: &str,
         opened: Option<&crate::domain::actor_model::ActorLaunch>,
+        answers: &[AskId],
     ) -> Result<()>;
     /// Take the revise of `proposal` back for another delivery: the
     /// planner it went to is gone before it submitted again

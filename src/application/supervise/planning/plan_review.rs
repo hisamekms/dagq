@@ -998,7 +998,7 @@ impl PlanningState {
                         view.planner.id
                     );
                     env.queue
-                        .revise_sent(proposal.id(), view.planner.id, &workspace, None)?;
+                        .revise_sent(proposal.id(), view.planner.id, &workspace, None, &[])?;
                 }
                 // Not listed, yet its session runs: it is not given up on
                 // that evidence; the timeout tells the inbox.
@@ -1012,13 +1012,16 @@ impl PlanningState {
                     if held || !env.queue.claim_revise(proposal.id())? {
                         continue;
                     }
-                    let handover = match answers.first() {
-                        Some(ask) => env.queue.planner_handover(ask.id)?,
-                        None => None,
-                    };
+                    // What each planner that stopped at one of them left,
+                    // once per planner (ADR-t1704-1 decision 3).
+                    let mut found = Vec::new();
+                    for ask in &answers {
+                        found.extend(env.queue.planner_handover(ask.id)?);
+                    }
+                    let handovers = once_per_planner(found);
                     let carried = Carried {
                         answers: &answers,
-                        handover: handover.as_ref(),
+                        handovers: &handovers,
                     };
                     let opened =
                         match self.open_planner_for(env, proposal, &revise.reasons, carried) {
@@ -1039,14 +1042,18 @@ impl PlanningState {
                         proposal.id(),
                         opened.planner.id
                     );
+                    // The answers it carries are closed with the revise's
+                    // record, so neither is left without the other
+                    // (ADR-t1704-1 decision 2).
+                    let delivered: Vec<AskId> = answers.iter().map(|ask| ask.id).collect();
                     env.queue.revise_sent(
                         proposal.id(),
                         opened.planner.id,
                         &workspace,
                         Some(&opened.launch),
+                        &delivered,
                     )?;
                     for ask in &answers {
-                        env.queue.ask_delivered(ask.id, &workspace)?;
                         info!(ask_id = %ask.id, "answer of ask {} went with the revise of proposal {} to planner {}", ask.id, proposal.id(), opened.planner.id);
                     }
                     views = self.planner_views(env)?;
@@ -1877,6 +1884,24 @@ fn answer_wait_only(busy: &[PlannerBusy]) -> bool {
             .all(|reason| matches!(reason, PlannerBusy::QuestionOpen | PlannerBusy::Revise))
 }
 
+/// What the planners that stopped at the answered questions a revise
+/// carries left (ADR-t1704-1 decision 3), each planner's once, in the
+/// order of their first question.
+fn once_per_planner(
+    found: impl IntoIterator<Item = crate::domain::PlannerHandover>,
+) -> Vec<crate::domain::PlannerHandover> {
+    let mut handovers: Vec<crate::domain::PlannerHandover> = Vec::new();
+    for handover in found {
+        if !handovers
+            .iter()
+            .any(|seen| seen.planner_id == handover.planner_id)
+        {
+            handovers.push(handover);
+        }
+    }
+    handovers
+}
+
 /// Why a planner of the runtime's is not ended (task 884), as the
 /// `busy` of a [`PlannerHold`] and of `planner_released` names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2253,6 +2278,27 @@ mod tests {
         ] {
             assert!(!answer_wait_only(busy), "{busy:?}");
         }
+    }
+
+    /// ADR-t1704-1 decision 3: a revise carrying the answers of several
+    /// planners' questions carries what each of them left, a planner that
+    /// asked twice once.
+    #[test]
+    fn a_revise_carries_what_each_planner_that_asked_left_once() {
+        let of = |planner: i64, note: i64| crate::domain::PlannerHandover {
+            planner_id: PlannerId::new(planner),
+            notes: vec![(note, format!("note of {planner}"))],
+            drafts: Vec::new(),
+        };
+        let handovers = once_per_planner([of(4, 10), of(7, 11), of(4, 10)]);
+        assert_eq!(
+            handovers
+                .iter()
+                .map(|handover| handover.planner_id)
+                .collect::<Vec<_>>(),
+            [PlannerId::new(4), PlannerId::new(7)]
+        );
+        assert!(once_per_planner([]).is_empty());
     }
 
     /// A planner asked to exit is past the exit timeout only once more

@@ -88,6 +88,19 @@ pub(super) fn short_title(title: &str) -> String {
         .unwrap_or_else(|| title.to_owned())
 }
 
+/// What the line naming a planner's tasks left out calls them.
+const TASKS_LEFT_OUT: &str = "tasks (the oldest)";
+
+/// A task's line among a planner's tasks.
+fn task_line(task: &GoalTask) -> String {
+    format!(
+        "- task {} ({}): {}",
+        task.id,
+        task.status.as_str(),
+        short_title(&task.title)
+    )
+}
+
 /// The lines of `tasks`, the newest first within `bytes`, kept in their
 /// order, with a note of how many were left out and how to read them, and
 /// that many: the caller counts them, as lines or as a cut of the item
@@ -96,17 +109,7 @@ pub(super) fn planner_task_lines(tasks: &[GoalTask], bytes: usize, read: &str) -
     if tasks.is_empty() {
         return ("(none)".to_owned(), 0);
     }
-    let lines: Vec<String> = tasks
-        .iter()
-        .map(|t| {
-            format!(
-                "- task {} ({}): {}",
-                t.id,
-                t.status.as_str(),
-                short_title(&t.title)
-            )
-        })
-        .collect();
+    let lines: Vec<String> = tasks.iter().map(task_line).collect();
     let sizes: Vec<usize> = lines.iter().map(String::len).collect();
     let kept = prompt_fit::pick(&sizes, (0..lines.len()).rev(), usize::MAX, bytes);
     let left_out: Vec<String> = tasks
@@ -124,7 +127,7 @@ pub(super) fn planner_task_lines(tasks: &[GoalTask], bytes: usize, read: &str) -
         .join("\n");
     if !left_out.is_empty() {
         text.push('\n');
-        text.push_str(&left_out_note("tasks (the oldest)", &left_out, read));
+        text.push_str(&left_out_note(TASKS_LEFT_OUT, &left_out, read));
     }
     (text, left_out.len())
 }
@@ -295,17 +298,130 @@ pub const BEFORE_YOU_STOP_AT_A_QUESTION: &str = "Before you stop at a planner_qu
 /// The bytes of what the planner before a planner the runtime opens left
 /// for it (ADR-t1704-1 decision 3): its notes, the newest first, and the
 /// lines of the drafts it created or edited; and of one note. The drafts'
-/// lines are taken after the notes, newest first too.
+/// lines are taken after the notes, newest first too. The planners before
+/// a revise's planner share it, their headings and the lines naming what
+/// was left out included ([`handover_budgets`]).
 pub const PLANNER_HANDOVER_BYTES: usize = 8_000;
 pub const PLANNER_HANDOVER_NOTE_BYTES: usize = 2_000;
 
-/// What a planner the runtime opens carries from the planner before it
-/// (ADR-t1704-1 decision 3): the answered `planner_question`s that
-/// planner stopped at, and what it left in the queue.
+/// The least bytes of notes and draft lines (or all it has, when less) a
+/// planner is given a section of its own with when several planners share
+/// [`PLANNER_HANDOVER_BYTES`].
+pub const PLANNER_HANDOVER_MIN_SHARE: usize = 1_000;
+
+/// What a planner the runtime opens carries from the planners before it
+/// (ADR-t1704-1 decision 3): the answered `planner_question`s they
+/// stopped at, and what each of them left in the queue, one per planner.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Carried<'a> {
     pub answers: &'a [Ask],
-    pub handover: Option<&'a PlannerHandover>,
+    pub handovers: &'a [PlannerHandover],
+}
+
+const HANDOVER_NOTES: &str = "notes (the oldest; event IDs)";
+const HANDOVER_NOTES_READ: &str =
+    "`dagq events --full --all --after ID --limit 1` with ID one less than each";
+const HANDOVER_DRAFTS_READ: &str = "`dagq show ID --full` for each";
+
+/// The bytes of a planner's notes and draft lines when none is left out
+/// or cut: what [`handover_section_within`] takes of each when its budget
+/// holds them.
+pub(super) fn handover_needs(handover: &PlannerHandover) -> (usize, usize) {
+    let notes = handover
+        .notes
+        .iter()
+        .map(|(id, text)| note_line(*id, text, PLANNER_HANDOVER_NOTE_BYTES).0.len() + 1)
+        .sum();
+    let drafts = handover
+        .drafts
+        .iter()
+        .map(|task| task_line(task).len() + 1)
+        .sum();
+    (notes, drafts)
+}
+
+/// The heading of a planner's section around its `notes` and `drafts`.
+fn handover_heading(planner: crate::domain::PlannerId, notes: &str, drafts: &str) -> String {
+    format!(
+        "\n## What planner {planner} before you left\n\nIt stopped at the question above, and the runtime ended it while only the person's answer was left; its session is not resumed. Go on from these records and the queue as it is now, and do not redo what it decided.\n\nIts notes, oldest first:\n{notes}\nThe drafts it created or edited, still drafts (as it saved them; read each with `dagq show ID --full`):\n{drafts}\n",
+    )
+}
+
+/// The most bytes a planner's section takes besides the notes and draft
+/// lines it keeps: its heading, and the lines naming its notes and drafts
+/// left out at their longest (all of them left out, the longest IDs
+/// named).
+pub(super) fn handover_fixed(handover: &PlannerHandover) -> usize {
+    let longest = |mut ids: Vec<String>| {
+        ids.sort_by_key(|id| std::cmp::Reverse(id.len()));
+        ids
+    };
+    let notes = if handover.notes.is_empty() {
+        "(none)\n".len()
+    } else {
+        let ids = handover.notes.iter().map(|(id, _)| id.to_string());
+        left_out_note(HANDOVER_NOTES, &longest(ids.collect()), HANDOVER_NOTES_READ).len()
+    };
+    let drafts = if handover.drafts.is_empty() {
+        "(none)".len()
+    } else {
+        let ids = handover.drafts.iter().map(|task| task.id.to_string());
+        1 + left_out_note(
+            TASKS_LEFT_OUT,
+            &longest(ids.collect()),
+            HANDOVER_DRAFTS_READ,
+        )
+        .len()
+    };
+    handover_heading(handover.planner_id, "", "").len() + notes + drafts
+}
+
+/// How the planners whose material goes with one prompt share
+/// [`PLANNER_HANDOVER_BYTES`]: how many get a section of their own (the
+/// first ones) and each one's bytes of notes and of draft lines. One
+/// planner alone is held as [`handover_section`] holds it. Several are
+/// held, all they take included, to the limit: as many get a section as
+/// leave each at least [`PLANNER_HANDOVER_MIN_SHARE`] (or all it has)
+/// once their headings and lines naming what was left out
+/// ([`handover_fixed`]) and the paragraph naming the planners past them
+/// ([`past_handovers`]) are set aside, and they share what is left of the
+/// limit: one that needs less than an even share keeps all of it and
+/// leaves the rest to the others, and one held below its need gives a
+/// quarter of its bytes to its draft lines, as one alone does.
+pub(super) fn handover_budgets(handovers: &[PlannerHandover]) -> (usize, Vec<(usize, usize)>) {
+    let n = handovers.len();
+    if n <= 1 {
+        let bytes = PLANNER_HANDOVER_BYTES;
+        return (n, vec![(bytes - bytes / 4, bytes / 4); n]);
+    }
+    let needs: Vec<(usize, usize)> = handovers.iter().map(handover_needs).collect();
+    let set_aside =
+        |shown: usize, fixed: usize| fixed + past_handovers(&handovers[shown..]).0.len();
+    let (mut shown, mut fixed) = (1, handover_fixed(&handovers[0]));
+    while shown < n {
+        let next_fixed = fixed + handover_fixed(&handovers[shown]);
+        let floor: usize = needs[..=shown]
+            .iter()
+            .map(|(notes, drafts)| (notes + drafts).min(PLANNER_HANDOVER_MIN_SHARE))
+            .sum();
+        if set_aside(shown + 1, next_fixed) + floor > PLANNER_HANDOVER_BYTES {
+            break;
+        }
+        (shown, fixed) = (shown + 1, next_fixed);
+    }
+    let mut left = PLANNER_HANDOVER_BYTES.saturating_sub(set_aside(shown, fixed));
+    let mut order: Vec<usize> = (0..shown).collect();
+    order.sort_by_key(|&i| (needs[i].0 + needs[i].1, i));
+    let mut budgets = vec![(0, 0); shown];
+    for (taken, &i) in order.iter().enumerate() {
+        let (notes, drafts) = needs[i];
+        let bytes = (notes + drafts).min(left / (shown - taken));
+        left -= bytes;
+        let to_drafts = drafts.min(bytes / 4);
+        let to_notes = notes.min(bytes - to_drafts);
+        budgets[i] = (to_notes, drafts.min(bytes - to_notes));
+    }
+    (shown, budgets)
 }
 
 /// The section of what the planner before this one left as it ended for a
@@ -316,35 +432,45 @@ pub struct Carried<'a> {
 /// counts once in `handover` (left out, or kept and cut), and each draft
 /// line left out once.
 pub(super) fn handover_section(fit: &mut Fit, handover: &PlannerHandover) -> String {
-    let read_note = |id: i64| {
-        format!(
-            "read it whole with `dagq events --full --all --after {} --limit 1`",
-            id - 1
-        )
+    let (_, budgets) = handover_budgets(std::slice::from_ref(handover));
+    handover_section_within(fit, handover, budgets[0])
+}
+
+/// A note's line in a handover section, its text cut to `bytes`, and
+/// whether it was cut.
+fn note_line(id: i64, text: &str, bytes: usize) -> (String, bool) {
+    let read = format!(
+        "read it whole with `dagq events --full --all --after {} --limit 1`",
+        id - 1
+    );
+    let (text, cut) = prompt_fit::cut_part(text, bytes, Keep::Start, &read);
+    (
+        format!("- (event {id}) {}\n", text.replace('\n', "\n  ")),
+        cut,
+    )
+}
+
+/// [`handover_section`] held to `notes_bytes` of notes and `drafts_bytes`
+/// of draft lines ([`handover_budgets`]): a note is cut to
+/// [`PLANNER_HANDOVER_NOTE_BYTES`], or to half the notes' bytes when they
+/// do not hold all its notes, so that the newest is kept.
+fn handover_section_within(
+    fit: &mut Fit,
+    handover: &PlannerHandover,
+    (notes_bytes, drafts_bytes): (usize, usize),
+) -> String {
+    let note_bytes = if notes_bytes >= handover_needs(handover).0 {
+        PLANNER_HANDOVER_NOTE_BYTES
+    } else {
+        PLANNER_HANDOVER_NOTE_BYTES.min(notes_bytes / 2)
     };
     let (lines, cuts): (Vec<String>, Vec<bool>) = handover
         .notes
         .iter()
-        .map(|(id, text)| {
-            let (text, cut) = prompt_fit::cut_part(
-                text,
-                PLANNER_HANDOVER_NOTE_BYTES,
-                Keep::Start,
-                &read_note(*id),
-            );
-            (
-                format!("- (event {id}) {}\n", text.replace('\n', "\n  ")),
-                cut,
-            )
-        })
+        .map(|(id, text)| note_line(*id, text, note_bytes))
         .unzip();
     let sizes: Vec<usize> = lines.iter().map(String::len).collect();
-    let kept = prompt_fit::pick(
-        &sizes,
-        (0..lines.len()).rev(),
-        usize::MAX,
-        PLANNER_HANDOVER_BYTES - PLANNER_HANDOVER_BYTES / 4,
-    );
+    let kept = prompt_fit::pick(&sizes, (0..lines.len()).rev(), usize::MAX, notes_bytes);
     fit.picked("handover", &kept, &cuts);
     let left_out: Vec<String> = handover
         .notes
@@ -364,22 +490,77 @@ pub(super) fn handover_section(fit: &mut Fit, handover: &PlannerHandover) -> Str
     }
     if !left_out.is_empty() {
         notes.push_str(&left_out_note(
-            "notes (the oldest; event IDs)",
+            HANDOVER_NOTES,
             &left_out,
-            "`dagq events --full --all --after ID --limit 1` with ID one less than each",
+            HANDOVER_NOTES_READ,
         ));
     }
-    let (drafts, drafts_left_out) = planner_task_lines(
-        &handover.drafts,
-        PLANNER_HANDOVER_BYTES / 4,
-        "`dagq show ID --full` for each",
-    );
+    let (drafts, drafts_left_out) =
+        planner_task_lines(&handover.drafts, drafts_bytes, HANDOVER_DRAFTS_READ);
     fit.omit("handover", drafts_left_out);
-    let text = format!(
-        "\n## What planner {planner} before you left\n\nIt stopped at the question above, and the runtime ended it while only the person's answer was left; its session is not resumed. Go on from these records and the queue as it is now, and do not redo what it decided.\n\nIts notes, oldest first:\n{notes}\nThe drafts it created or edited, still drafts (as it saved them; read each with `dagq show ID --full`):\n{drafts}\n",
-        planner = handover.planner_id,
-    );
+    let text = handover_heading(handover.planner_id, &notes, &drafts);
     fit.section("handover", &text);
+    text
+}
+
+/// The paragraph naming the planners past the sections of a revise's
+/// planner's prompt, with their notes and drafts, and how many notes and
+/// drafts it leaves out: each list names at most as many IDs as any line
+/// naming what was left out, with how many and how to read them all.
+fn past_handovers(past: &[PlannerHandover]) -> (String, usize) {
+    if past.is_empty() {
+        return (String::new(), 0);
+    }
+    let planners: Vec<String> = past.iter().map(|h| h.planner_id.to_string()).collect();
+    let notes: Vec<String> = past
+        .iter()
+        .flat_map(|h| h.notes.iter().map(|(id, _)| id.to_string()))
+        .collect();
+    let drafts: Vec<String> = past
+        .iter()
+        .flat_map(|h| h.drafts.iter().map(|task| task.id.to_string()))
+        .collect();
+    let mut text = "\n## What the other planners before you left\n\nThey stopped at the questions above, and the runtime ended them while only the person's answer was left; their sessions are not resumed. This section's limit has no room for their records, so read them before you go on:\n".to_owned();
+    text.push_str(&left_out_note(
+        "planners (planner IDs)",
+        &planners,
+        "`dagq events --all --kind observation --kind task_created --kind task_edited --full --limit 1000`, the events whose actor is each planner",
+    ));
+    if !notes.is_empty() {
+        text.push_str(&left_out_note(
+            "notes (event IDs)",
+            &notes,
+            HANDOVER_NOTES_READ,
+        ));
+    }
+    if !drafts.is_empty() {
+        text.push_str(&left_out_note(
+            "drafts they created or edited, still drafts (task IDs)",
+            &drafts,
+            HANDOVER_DRAFTS_READ,
+        ));
+    }
+    (text, notes.len() + drafts.len())
+}
+
+/// The sections of what each planner before a revise's planner left
+/// (ADR-t1704-1 decision 3), each planner once, held together to
+/// [`handover_budgets`]. The planners past the sections it has room for
+/// are named in one paragraph ([`past_handovers`]), their notes and drafts
+/// each counted in `handover` as left out.
+fn handovers_text(fit: &mut Fit, handovers: &[PlannerHandover]) -> String {
+    let (shown, budgets) = handover_budgets(handovers);
+    let mut text: String = handovers[..shown]
+        .iter()
+        .zip(budgets)
+        .map(|(handover, budget)| handover_section_within(fit, handover, budget))
+        .collect();
+    let (past, left_out) = past_handovers(&handovers[shown..]);
+    if !past.is_empty() {
+        fit.omit("handover", left_out);
+        fit.section("handover", &past);
+        text.push_str(&past);
+    }
     text
 }
 
@@ -536,9 +717,7 @@ pub fn runtime_planner_prompt(
         carried_text.push_str("\nApply these answers together with the reasons above.\n");
     }
     fit.section("answer", &carried_text);
-    if let Some(handover) = carried.handover {
-        carried_text.push_str(&handover_section(&mut fit, handover));
-    }
+    carried_text.push_str(&handovers_text(&mut fit, carried.handovers));
     Ok(fit.finish(format!(
         "You are a planner the dagq runtime opened for proposal {proposal} of the queue at {db}; no person watches this session.\n\
          Plan review sent the proposal back. Its reasons:\n{reasons}\nFull reasons: {reason_read}.\n\

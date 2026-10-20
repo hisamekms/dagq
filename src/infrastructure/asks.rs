@@ -710,23 +710,7 @@ impl SqliteQueue {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let ask = read_ask(&tx, id)?;
-        if ask.closed_at.is_some() {
-            return Ok(ask);
-        }
-        ensure!(ask.answered_at.is_some(), "ask {id} is not answered");
-        tx.execute(
-            "UPDATE asks SET closed_at=?2 WHERE id=?1",
-            params![id, self.generators.clock.now()],
-        )?;
-        ask_event(
-            &tx,
-            ask.task_id,
-            ask.run_id.as_ref(),
-            EventKind::AskDelivered,
-            json!({"ask_id": id, "workspace_id": workspace_id}),
-        )?;
-        let closed = read_ask(&tx, id)?;
+        let closed = deliver_ask_in(&tx, id, workspace_id, self.generators.clock.now())?;
         tx.commit()?;
         Ok(closed)
     }
@@ -1251,6 +1235,30 @@ fn ask_event(
         ],
     )?;
     Ok(())
+}
+
+/// [`SqliteQueue::ask_delivered`] inside the caller's transaction, which
+/// commits it with what else the delivery records.
+pub(super) fn deliver_ask_in(
+    conn: &Connection,
+    id: AskId,
+    workspace_id: &str,
+    now: i64,
+) -> Result<Ask> {
+    let ask = read_ask(conn, id)?;
+    if ask.closed_at.is_some() {
+        return Ok(ask);
+    }
+    ensure!(ask.answered_at.is_some(), "ask {id} is not answered");
+    conn.execute("UPDATE asks SET closed_at=?2 WHERE id=?1", params![id, now])?;
+    ask_event(
+        conn,
+        ask.task_id,
+        ask.run_id.as_ref(),
+        EventKind::AskDelivered,
+        json!({"ask_id": id, "workspace_id": workspace_id}),
+    )?;
+    read_ask(conn, id)
 }
 
 pub(super) fn read_ask(conn: &Connection, id: AskId) -> Result<Ask> {

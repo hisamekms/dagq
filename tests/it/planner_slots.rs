@@ -936,3 +936,68 @@ fn a_revise_stopped_at_a_question_waits_for_the_answer_and_goes_with_it_to_one_n
     }
     assert!(queue.asks(Default::default()).unwrap().is_empty());
 }
+
+/// ADR-t1704-1 decision 2: the revise's record (`plan_revise_sent`) and the
+/// closes (`ask_delivered`) of the answers that went with it commit in one
+/// transaction; one that fails (an ask not answered) leaves neither, the
+/// revise still claimed for the supervisor to take back, and the same
+/// delivery with the answered ones alone records both.
+#[test]
+fn a_revise_sent_closes_the_answers_it_carries_in_its_transaction_or_records_nothing() {
+    use dagq::application::PlanReviewStore;
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let task = add(&mut queue, "split", &[TaskId::new(1)], Priority::Normal);
+    let proposal = submit(&mut queue, &[task], None);
+    let conn = Connection::open(&fx.db).unwrap();
+    conn.execute(
+        "UPDATE proposals SET status='revising' WHERE id=?1",
+        [proposal.as_i64()],
+    )
+    .unwrap();
+    let mut asked = Vec::new();
+    for text in ["split?", "merge?", "drop?"] {
+        let about = add(&mut queue, text, &[TaskId::new(1)], Priority::Normal);
+        asked.push(question(&mut queue, about, text).id);
+    }
+    let (first, second, open) = (asked[0], asked[1], asked[2]);
+    queue.answer(first, "adopt").unwrap();
+    queue.answer(second, "cancel").unwrap();
+    let planner = queue.open_planner(PlannerOrigin::Runtime, None).unwrap();
+    assert!(queue.claim_revise(proposal).unwrap());
+    let revise_planner = || -> Option<i64> {
+        conn.query_row(
+            "SELECT revise_planner_id FROM proposals WHERE id=?1",
+            [proposal.as_i64()],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    let closed = |queue: &SqliteQueue, ask| queue.read_ask(ask).unwrap().closed_at.is_some();
+    // The last ask is not answered: nothing of the delivery is kept.
+    assert!(
+        queue
+            .revise_sent(proposal, planner.id, "ws", None, &[first, second, open])
+            .is_err()
+    );
+    assert_eq!(revise_planner(), None);
+    assert!(events(&queue, "plan_revise_sent").is_empty());
+    assert!(events(&queue, "ask_delivered").is_empty());
+    assert!(!closed(&queue, first) && !closed(&queue, second));
+    assert!(queue.revising_proposals().unwrap()[0].sent_at.is_some());
+    // With the answered ones alone, the record and both closes.
+    queue
+        .revise_sent(proposal, planner.id, "ws", None, &[first, second])
+        .unwrap();
+    assert_eq!(revise_planner(), Some(planner.id.as_i64()));
+    assert_eq!(events(&queue, "plan_revise_sent").len(), 1);
+    let delivered = events(&queue, "ask_delivered");
+    let mut ids: Vec<i64> = delivered
+        .iter()
+        .map(|e| e["ask_id"].as_i64().unwrap())
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(ids, [first.as_i64(), second.as_i64()]);
+    assert!(closed(&queue, first) && closed(&queue, second));
+    assert!(!closed(&queue, open));
+}

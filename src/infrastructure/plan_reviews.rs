@@ -15,7 +15,7 @@ use std::path::Path;
 use tracing::warn;
 
 use super::{
-    asks::{insert_ask, read_ask, record_ask_closed},
+    asks::{deliver_ask_in, insert_ask, read_ask, record_ask_closed},
     proposals, sessions,
     sqlite::{
         SqliteQueue, cancel_task, change_priority, check_duplicate, enum_col, event,
@@ -901,13 +901,16 @@ impl PlanReviewStore for SqliteQueue {
     /// findings delivered to a live planner raise nothing, since the runtime
     /// switches no model or effort inside a running session. So
     /// `effort_raised` says whether an opened planner's effort went up, and
-    /// `effort_not_raised` says why a live planner's did not.
+    /// `effort_not_raised` says why a live planner's did not. The answers
+    /// that went with it are closed (`ask_delivered`) in the same
+    /// transaction.
     fn revise_sent(
         &mut self,
         proposal_id: ProposalId,
         planner: PlannerId,
         workspace: &str,
         opened: Option<&crate::domain::actor_model::ActorLaunch>,
+        answers: &[AskId],
     ) -> Result<()> {
         let tx = self
             .conn
@@ -934,6 +937,10 @@ impl PlanReviewStore for SqliteQueue {
                 "effort_not_raised": opened.is_none().then_some(LIVE_PLANNER_NOT_RAISED),
             }),
         )?;
+        let now = self.generators.clock.now();
+        for &ask in answers {
+            deliver_ask_in(&tx, ask, workspace, now)?;
+        }
         tx.commit()?;
         Ok(())
     }

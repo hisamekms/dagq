@@ -3846,7 +3846,7 @@ fn a_runtime_planner_prompt_of_many_reasons_and_carried_answers_stays_within_its
         Some(TaskId::new(42)),
         Carried {
             answers: &answers,
-            handover: Some(&handover),
+            handovers: std::slice::from_ref(&handover),
         },
     )
     .unwrap();
@@ -3912,7 +3912,7 @@ fn a_planner_carrying_an_answer_shows_what_the_planner_before_it_left_within_its
         Some(TaskId::new(42)),
         Carried {
             answers: &answers,
-            handover: Some(&handover),
+            handovers: std::slice::from_ref(&handover),
         },
     )
     .unwrap();
@@ -3941,6 +3941,357 @@ fn a_planner_carrying_an_answer_shows_what_the_planner_before_it_left_within_its
     assert!(bytes.sections["handover"] > 0);
     assert!(bytes.sections["answer"] > 0);
     assert!(text.contains(BEFORE_YOU_STOP_AT_A_QUESTION));
+}
+
+/// ADR-t1704-1 decision 3: a revise carrying the answers of two
+/// planners' questions shows what each left, in a section of its own,
+/// the two within the handover's one limit, with the notes and draft
+/// lines left out counted and named the same way.
+#[test]
+fn a_planner_carrying_answers_of_two_planners_shows_what_each_left_within_one_limit() {
+    let of = |planner: i64, first_note: i64, first_draft: i64| PlannerHandover {
+        planner_id: crate::domain::PlannerId::new(planner),
+        notes: (0..10)
+            .map(|n| (first_note + n, big(&format!("note {planner}-{n}"), 3_000)))
+            .collect(),
+        drafts: (first_draft..first_draft + 100)
+            .map(|id| GoalTask {
+                id: TaskId::new(id),
+                title: big("draft", 100),
+                status: TaskStatus::Draft,
+                priority: Default::default(),
+                priority_source: crate::domain::PrioritySource::Goal,
+                priority_by: crate::domain::plan_request::PriorityBy::Ai,
+            })
+            .collect(),
+    };
+    let handovers = [of(9, 100, 1), of(12, 200, 1_001)];
+    let answers = [asked(5, 100), asked(6, 100)];
+    let fitted = runtime_planner_prompt(
+        Path::new("/q/queue.db"),
+        ProposalId::new(3),
+        &[],
+        &["split it".to_owned()],
+        Some(TaskId::new(42)),
+        Carried {
+            answers: &answers,
+            handovers: &handovers,
+        },
+    )
+    .unwrap();
+    within(&fitted, RUNTIME_PLANNER_PROMPT_LIMIT);
+    sections_within(&fitted);
+    let (text, bytes) = (&fitted.text, &fitted.bytes);
+    assert!(text.contains("## What planner 9 before you left"), "{text}");
+    assert!(
+        text.contains("## What planner 12 before you left"),
+        "{text}"
+    );
+    // Each planner's newest note is kept, the oldest named as left out.
+    assert!(text.contains("- (event 109) note 9-9"));
+    assert!(text.contains("- (event 209) note 12-9"));
+    assert!(text.contains("notes (the oldest; event IDs) left out by this section's limit: 100"));
+    assert!(text.contains("notes (the oldest; event IDs) left out by this section's limit: 200"));
+    assert!(text.contains("- task 100 (draft)") && text.contains("- task 1100 (draft)"));
+    // The two together, headings and lines of what was left out
+    // included, take no more than the one limit.
+    assert!(
+        bytes.sections["handover"] <= PLANNER_HANDOVER_BYTES,
+        "{bytes:?}"
+    );
+    let lines_kept = (1..=100)
+        .chain(1_001..=1_100)
+        .filter(|id| text.contains(&format!("- task {id} (draft)")))
+        .count();
+    assert_eq!(
+        bytes.omitted["handover"],
+        20 + (200 - lines_kept),
+        "{bytes:?}"
+    );
+}
+
+/// A planner's handover with `notes` notes and `drafts` drafts of a few
+/// bytes each: planner `planner`'s notes are events `planner * 100 + n`
+/// and its drafts tasks `planner * 100 + n`.
+fn small_handover(planner: i64, notes: i64, drafts: i64) -> PlannerHandover {
+    PlannerHandover {
+        planner_id: crate::domain::PlannerId::new(planner),
+        notes: (1..=notes)
+            .map(|n| (planner * 100 + n, big(&format!("note {planner}-{n}"), 200)))
+            .collect(),
+        drafts: (1..=drafts)
+            .map(|n| GoalTask {
+                id: TaskId::new(planner * 100 + n),
+                title: format!("draft {planner}-{n}"),
+                status: TaskStatus::Draft,
+                priority: Default::default(),
+                priority_source: crate::domain::PrioritySource::Goal,
+                priority_by: crate::domain::plan_request::PriorityBy::Ai,
+            })
+            .collect(),
+    }
+}
+
+fn revise_prompt_carrying(handovers: &[PlannerHandover]) -> FittedPrompt {
+    let answers = [asked(5, 100)];
+    let fitted = runtime_planner_prompt(
+        Path::new("/q/queue.db"),
+        ProposalId::new(3),
+        &[],
+        &["split it".to_owned()],
+        Some(TaskId::new(42)),
+        Carried {
+            answers: &answers,
+            handovers,
+        },
+    )
+    .unwrap();
+    within(&fitted, RUNTIME_PLANNER_PROMPT_LIMIT);
+    sections_within(&fitted);
+    assert!(
+        fitted.bytes.sections["handover"] <= PLANNER_HANDOVER_BYTES,
+        "{:?}",
+        fitted.bytes
+    );
+    fitted
+}
+
+/// Three planners whose notes and drafts are small: each gets its section
+/// with all of them, and nothing is left out.
+#[test]
+fn a_planner_carrying_the_small_material_of_three_planners_shows_all_of_it() {
+    let handovers = [
+        small_handover(1, 1, 1),
+        small_handover(2, 2, 3),
+        small_handover(3, 1, 2),
+    ];
+    let fitted = revise_prompt_carrying(&handovers);
+    let text = &fitted.text;
+    for handover in &handovers {
+        let planner = handover.planner_id;
+        assert!(
+            text.contains(&format!("## What planner {planner} before you left")),
+            "{text}"
+        );
+        for (id, _) in &handover.notes {
+            assert!(text.contains(&format!("- (event {id}) note")), "{text}");
+        }
+        for task in &handover.drafts {
+            assert!(
+                text.contains(&format!("- task {} (draft)", task.id)),
+                "{text}"
+            );
+        }
+    }
+    assert!(!text.contains("left out by this section's limit"), "{text}");
+    assert!(
+        !fitted.bytes.omitted.contains_key("handover"),
+        "{:?}",
+        fitted.bytes
+    );
+}
+
+/// How a line naming what was left out names `ids`: at most 40, then how
+/// many more.
+fn named(ids: &[String]) -> String {
+    let mut text = ids.iter().take(40).cloned().collect::<Vec<_>>().join(", ");
+    if ids.len() > 40 {
+        text.push_str(&format!(" and {} more", ids.len() - 40));
+    }
+    text
+}
+
+/// The notes and draft lines of `handovers` the prompt's text shows.
+fn shown_items(text: &str, handovers: &[PlannerHandover]) -> usize {
+    handovers
+        .iter()
+        .map(|h| {
+            h.notes
+                .iter()
+                .filter(|(id, _)| text.contains(&format!("- (event {id}) ")))
+                .count()
+                + h.drafts
+                    .iter()
+                    .filter(|t| text.contains(&format!("- task {} (draft)", t.id)))
+                    .count()
+        })
+        .sum()
+}
+
+/// More planners than the handover's limit has sections for: the first
+/// get theirs, and the rest are named with each of their notes and
+/// drafts, counted one by one as the shown planners' are, and how to read
+/// every draft such a planner created or edited.
+#[test]
+fn a_planner_carrying_answers_of_many_planners_names_the_notes_and_drafts_past_the_limit() {
+    let handovers: Vec<PlannerHandover> = (1..=7).map(|p| small_handover(p, 4, 10)).collect();
+    let fitted = revise_prompt_carrying(&handovers);
+    let (text, bytes) = (&fitted.text, &fitted.bytes);
+    let (shown, _) = handover_budgets(&handovers);
+    assert!((2..7).contains(&shown), "{shown}");
+    for planner in 1..=7 {
+        assert_eq!(
+            text.contains(&format!("## What planner {planner} before you left")),
+            planner <= shown as i64,
+            "{text}"
+        );
+    }
+    assert!(text.contains("## What the other planners before you left"));
+    let past: Vec<String> = ((shown as i64 + 1)..=7).map(|p| p.to_string()).collect();
+    assert!(text.contains(&format!(
+        "({} planners (planner IDs) left out by this section's limit: {}. To read them: `dagq events --all --kind observation --kind task_created --kind task_edited --full --limit 1000`, the events whose actor is each planner.)",
+        past.len(),
+        named(&past)
+    )));
+    let ids = |of: fn(&PlannerHandover) -> Vec<i64>| -> Vec<String> {
+        handovers[shown..]
+            .iter()
+            .flat_map(of)
+            .map(|id| id.to_string())
+            .collect()
+    };
+    let notes = ids(|h| h.notes.iter().map(|(id, _)| *id).collect());
+    let drafts = ids(|h| h.drafts.iter().map(|task| task.id.as_i64()).collect());
+    assert!(text.contains(&format!(
+        "({} notes (event IDs) left out by this section's limit: {}.",
+        notes.len(),
+        named(&notes)
+    )));
+    assert!(text.contains(&format!(
+        "({} drafts they created or edited, still drafts (task IDs) left out by this section's limit: {}. To read them: `dagq show ID --full` for each.)",
+        drafts.len(),
+        named(&drafts)
+    )));
+    // Every note and draft line not shown counts once, the past planners'
+    // too.
+    assert_eq!(
+        bytes.omitted["handover"],
+        7 * 14 - shown_items(text, &handovers[..shown]),
+        "{bytes:?}"
+    );
+}
+
+/// However many planners asked, with nothing left or with notes and
+/// drafts of long IDs, the handover takes no more than its limit, its
+/// headings and the lines naming what was left out included; the
+/// planners, notes and drafts past it are counted and named at most 40 at
+/// a time with how many more.
+#[test]
+fn a_planner_carrying_answers_of_thousands_of_planners_stays_within_the_handover_limit() {
+    let empty: Vec<PlannerHandover> = (1..=2_000)
+        .map(|planner| PlannerHandover {
+            planner_id: crate::domain::PlannerId::new(planner),
+            notes: Vec::new(),
+            drafts: Vec::new(),
+        })
+        .collect();
+    let fitted = revise_prompt_carrying(&empty);
+    assert!(
+        fitted
+            .text
+            .contains("planners (planner IDs) left out by this section's limit:")
+    );
+    assert!(
+        fitted
+            .text
+            .contains(" more. To read them: `dagq events --all --kind observation")
+    );
+    assert!(
+        !fitted.bytes.omitted.contains_key("handover"),
+        "{:?}",
+        fitted.bytes
+    );
+    let long = 1_000_000_000_000_i64;
+    let full: Vec<PlannerHandover> = (1..=2_000)
+        .map(|planner| PlannerHandover {
+            planner_id: crate::domain::PlannerId::new(long + planner),
+            notes: (0..3)
+                .map(|n| {
+                    (
+                        long + planner * 10 + n,
+                        big(&format!("note {planner}-{n}"), 3_000),
+                    )
+                })
+                .collect(),
+            drafts: (0..30)
+                .map(|n| GoalTask {
+                    id: TaskId::new(long + planner * 100 + n),
+                    title: big("draft", 100),
+                    status: TaskStatus::Draft,
+                    priority: Default::default(),
+                    priority_source: crate::domain::PrioritySource::Goal,
+                    priority_by: crate::domain::plan_request::PriorityBy::Ai,
+                })
+                .collect(),
+        })
+        .collect();
+    let fitted = revise_prompt_carrying(&full);
+    let (shown, _) = handover_budgets(&full);
+    assert!(shown >= 1);
+    assert!(
+        fitted
+            .text
+            .contains("drafts they created or edited, still drafts (task IDs) left out")
+    );
+    assert_eq!(
+        fitted.bytes.omitted["handover"],
+        // The shown notes are cut, so each counts too.
+        2_000 * 33 - shown_items(&fitted.text, &full[..shown])
+            + full[..shown]
+                .iter()
+                .flat_map(|h| &h.notes)
+                .filter(|(id, _)| fitted.text.contains(&format!("- (event {id}) ")))
+                .count(),
+        "{:?}",
+        fitted.bytes
+    );
+}
+
+/// One planner gets the limit as before; several share what their
+/// headings, the lines naming what was left out and the paragraph naming
+/// the planners past them leave, one that needs less keeping all it needs
+/// and leaving the rest to the others.
+#[test]
+fn the_handover_limit_is_shared_by_what_each_planner_needs() {
+    let all = PLANNER_HANDOVER_BYTES;
+    assert_eq!(
+        handover_budgets(&[big_handover()]),
+        (1, vec![(all - all / 4, all / 4)])
+    );
+    let small = [
+        small_handover(1, 1, 1),
+        small_handover(2, 2, 0),
+        small_handover(3, 0, 2),
+    ];
+    assert_eq!(
+        handover_budgets(&small),
+        (3, small.iter().map(handover_needs).collect())
+    );
+    let pair = [big_handover(), small_handover(2, 2, 1)];
+    let (shown, budgets) = handover_budgets(&pair);
+    assert_eq!(shown, 2);
+    let (notes, drafts) = handover_needs(&pair[1]);
+    assert_eq!(budgets[1], (notes, drafts));
+    let left = all - handover_fixed(&pair[0]) - handover_fixed(&pair[1]) - notes - drafts;
+    assert_eq!(budgets[0], (left - left / 4, left / 4));
+    for planners in [2, 3, 7, 12, 40] {
+        let handovers: Vec<PlannerHandover> = (1..=planners)
+            .map(|planner| PlannerHandover {
+                planner_id: crate::domain::PlannerId::new(planner),
+                ..big_handover()
+            })
+            .collect();
+        let (shown, budgets) = handover_budgets(&handovers);
+        let fixed: usize = handovers[..shown].iter().map(handover_fixed).sum();
+        let used: usize = budgets.iter().map(|(n, d)| n + d).sum();
+        assert!(used + fixed <= all, "{planners}: {budgets:?}");
+        assert!(
+            budgets
+                .iter()
+                .all(|&(n, d)| n + d >= PLANNER_HANDOVER_MIN_SHARE),
+            "{planners}: {budgets:?}"
+        );
+    }
 }
 
 #[test]
