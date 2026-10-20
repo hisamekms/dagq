@@ -106,11 +106,10 @@ containerはdagq専用の名前のPodman machineだけで動かす（[ADR-t2113-
   runの終わりと着地でrunのbuildの出力を消すのは、relayの見張りが終わったrunを閉じる`RelayControl::close`で、runのcontainer・relay・socketのvolumeと一緒に消す（下の「brokerへの経路」）。
   machineを作り直すとvolumeは消え、workerのcacheは冷えた状態から始まる。
 - 食い違いと作り直し: volumeはinitでしか決まらない。
-  `ensure`と`MachineGate`は、queueのdirがmountされていないか、3つの種類の外のdir（`$HOME`など）がmountされていれば、作り直しの手順を添えて使えないと答える。
+  `ensure`と`MachineGate`は、queueのdirがmountされていないか、`dagq/`の下のqueueの3つのdirでないdir（`$HOME`、別の場所の同名のdir）がmountされていれば、作り直しの手順を添えて使えないと答える。
   作り直しは`podman machine stop dagq`と`podman machine rm dagq`で、次の`ensure`が今の`host.toml`とhostのqueueでinitする。
   作った後に足したqueueと資源の変更も、同じ手順で反映する。
 - 使えるかの答え: `MachineGate`はlockを取らずmachineを変えずに見るだけで、無いか止まっているmachineは使えるとする（containerの起動の前の`ensure`が動かす）。
-- 実物のpodmanで流すtestは`#[ignore]`で、関門に数えない。
 
 ## image
 

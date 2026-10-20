@@ -187,7 +187,7 @@ fn check_mounts(podman: &dyn PodmanMachine, required: &MachineMounts) -> Result<
     let mounted = podman.mounts().map_err(|error| {
         format!("read the volumes of the podman machine {MACHINE_NAME}: {error:#}")
     })?;
-    match mounts_mismatch(required, &mounted) {
+    match mounts_mismatch(required, required.data_root(), &mounted) {
         Some(why) => Err(why),
         None => Ok(()),
     }

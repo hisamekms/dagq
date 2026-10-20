@@ -7,7 +7,7 @@
 //! named volumes inside it ([`QueueKey`]). The commands and the lock are
 //! the adapters'; this is what they decide with.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// The name of the dagq machine, and of the connection podman makes for
 /// it: every podman command dagq runs names it, so the person's default
@@ -80,6 +80,16 @@ impl MachineMounts {
 
     pub fn dirs(&self) -> [&Path; 3] {
         [&self.runs, &self.clones, &self.verifications]
+    }
+
+    /// The directory the queues are under (`<data home>/dagq`): the parent
+    /// of the queue directory, each queue's directory being one of its
+    /// entries.
+    pub fn data_root(&self) -> &Path {
+        self.runs
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(Path::new(""))
     }
 }
 
@@ -205,10 +215,15 @@ pub fn lease_held(seen: OwnerSeen) -> bool {
 /// Why the volumes the dagq machine was created with (`mounted`, their
 /// host paths) do not serve a queue whose directories are `required`:
 /// one of them not mounted, or a mount that is not a run, clone or
-/// verification directory (such as `$HOME`, which Podman mounts by
-/// default). `None` when they serve it. Volumes are set only when a
-/// machine is created, so the way out is to create it again.
-pub fn mounts_mismatch(required: &MachineMounts, mounted: &[PathBuf]) -> Option<String> {
+/// verification directory of a queue directly under `data_root` (such as
+/// `$HOME`, which Podman mounts by default, or a directory elsewhere with
+/// one of their names). `None` when they serve it. Volumes are set only
+/// when a machine is created, so the way out is to create it again.
+pub fn mounts_mismatch(
+    required: &MachineMounts,
+    data_root: &Path,
+    mounted: &[PathBuf],
+) -> Option<String> {
     let missing: Vec<String> = required
         .dirs()
         .into_iter()
@@ -217,12 +232,7 @@ pub fn mounts_mismatch(required: &MachineMounts, mounted: &[PathBuf]) -> Option<
         .collect();
     let unexpected: Vec<String> = mounted
         .iter()
-        .filter(|mount| {
-            !mount
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| MOUNT_DIR_NAMES.contains(&name))
-        })
+        .filter(|mount| !is_queue_mount(data_root, mount))
         .map(|mount| mount.display().to_string())
         .collect();
     if missing.is_empty() && unexpected.is_empty() {
@@ -244,6 +254,20 @@ volumes are set only when a machine is created: run `podman machine stop {MACHIN
 `podman machine rm {MACHINE_NAME}`, and the next container creates it again",
         parts.join("; ")
     ))
+}
+
+/// Whether `mount` is `<data_root>/<queue>/<name>`, `<name>` one of
+/// [`MOUNT_DIR_NAMES`] and `<queue>` a plain name (not `.` or `..`).
+fn is_queue_mount(data_root: &Path, mount: &Path) -> bool {
+    let Ok(rest) = mount.strip_prefix(data_root) else {
+        return false;
+    };
+    let parts: Vec<Component<'_>> = rest.components().collect();
+    matches!(
+        parts.as_slice(),
+        [Component::Normal(_), Component::Normal(name)]
+            if name.to_str().is_some_and(|name| MOUNT_DIR_NAMES.contains(&name))
+    )
 }
 
 /// A queue's name among the named volumes of the machine, which every
@@ -397,23 +421,51 @@ mod tests {
     fn mounts_that_lack_the_queue_s_or_hold_more_do_not_match() {
         let required = MachineMounts::of_queue(Path::new("/q/a"));
         let mut mounted: Vec<PathBuf> = required.dirs().map(Path::to_path_buf).to_vec();
-        assert_eq!(mounts_mismatch(&required, &mounted), None);
+        let root = Path::new("/q");
+        assert_eq!(mounts_mismatch(&required, root, &mounted), None);
         // Another queue's directories beside them serve it too.
         mounted.extend(
             MachineMounts::of_queue(Path::new("/q/b"))
                 .dirs()
                 .map(Path::to_path_buf),
         );
-        assert_eq!(mounts_mismatch(&required, &mounted), None);
+        assert_eq!(mounts_mismatch(&required, root, &mounted), None);
 
-        let why = mounts_mismatch(&required, &mounted[1..]).unwrap();
+        let why = mounts_mismatch(&required, root, &mounted[1..]).unwrap();
         assert!(why.contains("not mounted: /q/a/runs"), "{why}");
         assert!(why.contains("podman machine rm dagq"), "{why}");
 
         mounted.push(PathBuf::from("/Users/me"));
-        let why = mounts_mismatch(&required, &mounted).unwrap();
+        let why = mounts_mismatch(&required, root, &mounted).unwrap();
         assert!(why.contains("beyond the run, clone and verification directories: /Users/me"));
         assert!(!why.contains("not mounted"), "{why}");
+    }
+
+    #[test]
+    fn a_directory_named_like_a_queue_s_but_not_under_the_data_root_does_not_match() {
+        let required = MachineMounts::of_queue(Path::new("/data/dagq/a"));
+        let root = required.data_root();
+        assert_eq!(root, Path::new("/data/dagq"));
+        let served: Vec<PathBuf> = required.dirs().map(Path::to_path_buf).to_vec();
+        for stray in [
+            "/Users/me/runs",
+            "/data/runs",
+            "/data/dagq/runs",
+            "/data/dagq/a/b/clones",
+            "/data/dagq/../me/verification",
+            "/data/dagq/a/cache",
+        ] {
+            let mut mounted = served.clone();
+            mounted.push(PathBuf::from(stray));
+            let why = mounts_mismatch(&required, root, &mounted).unwrap();
+            assert!(
+                why.contains(&format!(
+                    "beyond the run, clone and verification directories: {stray}"
+                )),
+                "{why}"
+            );
+            assert!(!why.contains("not mounted"), "{why}");
+        }
     }
 
     #[test]
