@@ -7,6 +7,7 @@ use dagq::domain::EventKind;
 use dagq::infrastructure::git_binary::git_executable;
 pub mod agent_eval;
 pub mod background_wrappers;
+pub mod ci_watch;
 pub mod headless;
 mod reviewer;
 pub use headless::{CODEX_HOME, Stand, set_codex_model};

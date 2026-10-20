@@ -21,7 +21,7 @@ use crate::application::{FindingPlannerStart, PlannerAnswerRoute};
 use crate::domain::{
     Ask, AskId, AskKind, Finding, FindingAnswer, FindingId, FindingStatus, FindingTarget,
     ImprovementLimit, MAX_FINDING_PLANNERS, NewFinding, PlannerId, PlannerOrigin, Proposal,
-    ProposalId, ProposalStatus, Submission, TaskStatus, finding,
+    ProposalId, ProposalStatus, Submission, TaskStatus, counts_as_improvement, finding,
 };
 
 /// The findings waiting for a planner of the runtime's: `open`, marked for
@@ -112,9 +112,10 @@ impl SqliteQueue {
     /// `planner_question` about the finding, whose planner is gone. A
     /// finding that had [`MAX_FINDING_PLANNERS`] planners since its mark
     /// records `finding_planner_exhausted` (the inbox's attention) instead.
-    /// Without `answer`, no planner is opened while the improvements
-    /// running reach `limit` (ADR-0051 decision 25), counted in the same
-    /// transaction. A planner carrying a person's answer is opened past
+    /// Without `answer`, no planner is opened for an improvement while the
+    /// improvements running reach `limit` (ADR-0051 decision 25), counted
+    /// in the same transaction; a `ci_failure` finding, no improvement
+    /// ([`counts_as_improvement`]), does not wait for it. A planner carrying a person's answer is opened past
     /// that limit and past [`MAX_FINDING_PLANNERS`]: the planner that asked
     /// was counted already, and the answer is a person's decision. While a
     /// planner of the finding asked to exit because only a person's answer
@@ -150,15 +151,15 @@ impl SqliteQueue {
         if !eligible {
             return Ok(FindingPlannerStart::Skipped);
         }
+        let current = read_finding(&tx, finding)?;
         // A planner carrying a person's answer stays counted until it
         // submits or ends.
-        if answer.is_none() {
+        if answer.is_none() && counts_as_improvement(&current.kind) {
             let improvements = improvement_limit(&tx, limit)?;
             if improvements.reached() {
                 return Ok(FindingPlannerStart::AtLimit(improvements));
             }
         }
-        let current = read_finding(&tx, finding)?;
         let opened = planners_since_mark(&tx, &current)?;
         // A person's answer is carried past the limit, as a draft's is.
         if opened >= MAX_FINDING_PLANNERS && answer.is_none() {
@@ -387,20 +388,26 @@ fn planners_since_mark(conn: &Connection, finding: &Finding) -> Result<usize> {
 
 /// The improvements running ([`ImprovementLimit`]): each distinct
 /// proposal of a planner of the runtime's (`owner_origin` `runtime`)
-/// linked to a finding while [`finding::improvement_running`] (a proposal a
-/// person submitted from a planner of their own is not counted, ADR-0051
-/// decision 25), and each planner of the runtime's not closed whose finding
-/// is still `open`: it may submit one, and counting it keeps planners
+/// linked to a finding that [`counts_as_improvement`] while
+/// [`finding::improvement_running`] (a proposal a person submitted from a
+/// planner of their own is not counted, ADR-0051 decision 25), and each
+/// planner of the runtime's not closed whose finding is still `open` and
+/// an improvement: it may submit one, and counting it keeps planners
 /// opened together from going past the limit (one that submitted made its
 /// finding `proposed`, and its proposal is the one counted).
 fn improvement_limit(conn: &Connection, limit: usize) -> Result<ImprovementLimit> {
-    let proposals: Vec<ProposalId> = conn
+    let mut proposals: Vec<ProposalId> = conn
         .prepare(
-            "SELECT DISTINCT f.proposal_id FROM findings f JOIN proposals p ON p.id = f.proposal_id
-             WHERE p.owner_origin='runtime'",
+            "SELECT f.proposal_id, f.kind FROM findings f JOIN proposals p ON p.id = f.proposal_id
+             WHERE p.owner_origin='runtime' ORDER BY f.proposal_id",
         )?
-        .query_map([], |r| r.get(0))?
+        .query_map([], |r| Ok((r.get(0)?, r.get::<_, String>(1)?)))?
+        .filter_map(|row| match row {
+            Ok((proposal, kind)) => counts_as_improvement(&kind).then_some(Ok(proposal)),
+            Err(error) => Some(Err(error)),
+        })
         .collect::<rusqlite::Result<_>>()?;
+    proposals.dedup();
     let mut running = 0;
     for proposal in proposals {
         let (status, tasks) = proposal_state(conn, proposal)?;
@@ -408,14 +415,19 @@ fn improvement_limit(conn: &Connection, limit: usize) -> Result<ImprovementLimit
             running += 1;
         }
     }
-    let planners: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM planners p JOIN findings f ON f.id = p.finding_id
-         WHERE p.origin='runtime' AND p.closed_at IS NULL AND f.status='open'",
-        [],
-        |r| r.get(0),
-    )?;
+    let planners: Vec<String> = conn
+        .prepare(
+            "SELECT f.kind FROM planners p JOIN findings f ON f.id = p.finding_id
+             WHERE p.origin='runtime' AND p.closed_at IS NULL AND f.status='open'",
+        )?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let planners = planners
+        .iter()
+        .filter(|kind| counts_as_improvement(kind))
+        .count();
     Ok(ImprovementLimit {
-        running: running + usize::try_from(planners).unwrap_or_default(),
+        running: running + planners,
         limit,
     })
 }
@@ -704,4 +716,58 @@ fn record_from_ask(
         now,
     )?;
     Ok(recorded.finding.id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{FindingTarget, ci_watch};
+
+    fn marked(queue: &mut SqliteQueue, kind: &str, subject: &str) -> FindingId {
+        queue
+            .record_finding(NewFinding {
+                kind: kind.into(),
+                target: FindingTarget::Queue,
+                subject: subject.into(),
+                summary: format!("{subject} again"),
+                detail: None,
+                impact: None,
+                evidence: Vec::new(),
+                propose: Some("remedy it".into()),
+                by: "supervisor".into(),
+            })
+            .unwrap()
+            .finding
+            .id
+    }
+
+    /// ADR-t2893-1: at the improvements' limit (ADR-0051 decision 25) an
+    /// improvement's planner waits, while a `ci_failure` finding's is
+    /// opened and not counted.
+    #[test]
+    fn a_ci_failure_finding_neither_waits_at_the_improvements_limit_nor_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let hotspot = marked(&mut queue, "conflict_hotspot", "src/a.rs");
+        let red = marked(&mut queue, ci_watch::FINDING_KIND, "tests::a");
+        let kpi = marked(&mut queue, "kpi", "revise_rate");
+        assert!(matches!(
+            queue.open_finding_planner(hotspot, None, 1).unwrap(),
+            FindingPlannerStart::Opened { .. }
+        ));
+        let at_limit = ImprovementLimit {
+            running: 1,
+            limit: 1,
+        };
+        assert_eq!(queue.improvements(1).unwrap(), at_limit);
+        assert!(matches!(
+            queue.open_finding_planner(red, None, 1).unwrap(),
+            FindingPlannerStart::Opened { .. }
+        ));
+        assert_eq!(queue.improvements(1).unwrap(), at_limit);
+        assert!(matches!(
+            queue.open_finding_planner(kpi, None, 1).unwrap(),
+            FindingPlannerStart::AtLimit(limit) if limit == at_limit
+        ));
+    }
 }

@@ -100,7 +100,8 @@ pass: [ci_watch]を読み直す → 終わった確かめの答え（読めな�
 - 記録は`SqliteQueue::record_ci_check`が実行の記録と同じトランザクションで行い、findingの組み立ては`application::ci_watch::check`と`decide`の`FailureFinding`、鍵は`failure_key`が持つ。
 - 同じ鍵の`resolved`は開き直り、`dismissed`は回数と根拠を足すだけである（`domain::finding::merge`、[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)決定18）。
 - 修正taskが持つものは`FailureFinding::detail`、Buildが範囲を含むかは`binary_contains`（[Build identifier](build-identifier.md)）。
-- plannerへの載せ方は[Finding planners](finding-planners.md)の「CIの見張りの`ci_failure`のfinding」。
+- findingは改善の上限に数えず待たせず、runtimeのplannerの枠が空いた回にdraftと改善のfindingより先にplannerが立つ（[ADR-t2893-1](../../adr/2026-10-20-t2893-1-ci-failure-findings-are-repairs-outside-the-improvement-limit.md)）。
+- plannerへの載せ方と立つ順は[Finding planners](finding-planners.md)の「CIの見張りの`ci_failure`のfinding」。
 - 閉じ方は`CiCheckRecord::resolve`のdoc commentが持ち、plannerが立っているfindingはruntimeが閉じない。
 
 ## 一覧の読み方

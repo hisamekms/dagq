@@ -206,7 +206,7 @@ observerはKPIの目標割れの継続を種類`kpi`のfindingにし、そこか
   `kpi`か`forecast`のfindingの目標が`ok`に戻ったら、戻った期間を理由に`finding resolve`する。
   影響と続いた期間から改善が要ると読めば`--propose`を付け、目標割れを`blocked`のaskにはしない。
   `trend`は印と並べて読み、入力に無い数字を計算しない。
-- **改善の上限**（[Finding planners](finding-planners.md)の3と11）: runtimeのplannerがfindingに紐づけて出したproposalのうち終わっていないもの（人が開いたplannerのproposalは数えない）と、`open`のfindingのために立ったruntimeのplannerの数が、`dagq.toml`の`[kpi]`の`max_improvement_proposals`（host.tomlでは変えない）に達しているあいだ、supervisorは印の付いたfindingに新しいplannerを立てない。
+- **改善の上限**（[Finding planners](finding-planners.md)の3と11）: runtimeのplannerがfindingに紐づけて出したproposalのうち終わっていないもの（人のproposalと`ci_failure`のfindingのものは数えない）と、`open`の改善のfindingのために立ったruntimeのplannerの数が、`dagq.toml`の`[kpi]`の`max_improvement_proposals`に達しているあいだ、supervisorは印の付いた改善のfindingに新しいplannerを立てない。
   findingは`open`のまま待ち、1つ終われば印の古い順に立つ。
 - **優先度**: 改善のproposalのtaskは個別の優先度を持たずgoalから継ぎ、`normal`以下はgoalと所属で守る（[Finding planners](finding-planners.md)の6）。
 

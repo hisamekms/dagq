@@ -386,6 +386,71 @@ fn improvement_planners_wait_at_the_limit_and_their_tasks_are_normal_at_most() {
     );
 }
 
+/// ADR-t2893-1: the `ci_failure` finding the supervisor's CI watch
+/// records on a red run gets its planner in the same supervisor's pass
+/// that has a free place for one, though the improvements running are at
+/// their limit and an improvement marked before it waits; it is neither
+/// counted as an improvement nor listed as waiting for the limit.
+#[test]
+fn a_red_runs_ci_failure_finding_gets_its_planner_past_the_improvements_limit() {
+    let fx = fixture();
+    let gh = crate::runtime_support::ci_watch::watched_in(
+        &fx.repo.with_file_name("bin"),
+        &fx.repo,
+        "\n[kpi]\nmax_improvement_proposals = 1\n",
+    );
+    std::fs::write(gh.with_file_name("authed"), "").unwrap();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let first = record(&mut queue, FindingTarget::Queue, "src/a.rs", Some("a"));
+    let second = record(&mut queue, FindingTarget::Queue, "src/b.rs", Some("b"));
+    let reviewer = StubReviewer::new(&[]);
+    let backend = PlanWorkspace::default();
+    let mut watching = options(2, Duration::from_secs(3600));
+    watching.ci_watch = Some(runtime::CiWatchOptions {
+        program: gh.to_str().unwrap().to_owned(),
+        interval: None,
+    });
+    let one_shot = dagq::compose::OneShot::new(dagq::infrastructure::clock::system());
+
+    // Green: the oldest improvement takes the limit, the other waits.
+    let green = crate::runtime_support::ci_watch::head(&fx.repo);
+    crate::runtime_support::ci_watch::runs(&gh, &[(1, "success", &green)]);
+    supervise_with(&fx, &backend, &reviewer, &watching);
+    let planners = queue.planners(false).unwrap();
+    assert_eq!(planners.len(), 1, "{planners:?}");
+    assert_eq!(planners[0].finding_id, Some(first));
+
+    // Red: the watch records the finding and the next place goes to it.
+    let red = crate::runtime_support::ci_watch::commit(&fx.repo, "two");
+    crate::runtime_support::ci_watch::runs(&gh, &[(1, "success", &green), (2, "failure", &red)]);
+    crate::runtime_support::ci_watch::red(&gh, 2, &["runtime_claim::fails"], &[]);
+    supervise_with(&fx, &backend, &reviewer, &watching);
+    let repair = queue
+        .findings(&FindingQuery::default())
+        .unwrap()
+        .into_iter()
+        .map(|view| view.finding)
+        .find(|finding| finding.kind == "ci_failure")
+        .expect("the red run's finding");
+    assert!(repair.propose_reason.is_some());
+    let opened = finding_events(&fx.db, repair.id, "finding_planner_opened");
+    assert_eq!(opened.len(), 1, "{opened:?}");
+    let planners = queue.planners(false).unwrap();
+    assert_eq!(
+        planners
+            .iter()
+            .map(|planner| planner.finding_id)
+            .collect::<Vec<_>>(),
+        [Some(first), Some(repair.id)]
+    );
+    assert!(finding_events(&fx.db, second, "finding_planner_opened").is_empty());
+    assert_eq!(
+        one_shot.improvements_of(&queue).unwrap(),
+        json!({"running": 1, "limit": 1, "reached": true,
+               "waiting": [{"finding_id": second, "reason": "improvement_limit"}]})
+    );
+}
+
 #[test]
 fn a_propose_answer_marks_the_finding_and_a_planner_takes_it() {
     let fx = fixture();

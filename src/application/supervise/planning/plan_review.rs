@@ -1061,11 +1061,14 @@ impl PlanningState {
         // (ADR-t1394-1) come before the runtime's own drafts and findings:
         // a person waits on them.
         self.open_request_planners(env, &mut runtime_open)?;
-        self.open_draft_planners(env, &mut runtime_open)?;
-        // Then the findings marked for a proposal (ADR-0044 decision 19),
-        // within the same limit, once those whose proposal ended are
-        // settled.
+        // Then, once the findings whose proposal ended are settled, the
+        // repairs of the landing branch's CI (ADR-t2893-1), before the
+        // drafts and the improvements, within the same limit.
         self.settle_findings(env)?;
+        self.open_repair_planners(env, &mut runtime_open)?;
+        self.open_draft_planners(env, &mut runtime_open)?;
+        // Then the improvements marked for a proposal (ADR-0044 decision
+        // 19), within the same limit.
         self.open_finding_planners(env, &mut runtime_open)?;
         // A headless planner's turn that failed at Claude waits for it, and
         // one its wrapper stopped at its limit tells the inbox

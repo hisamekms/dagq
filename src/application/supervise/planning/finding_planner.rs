@@ -10,7 +10,9 @@
 //! to a new planner when that one is gone). A planner that ends with the finding
 //! undecided is followed by another, at most
 //! [`crate::domain::MAX_FINDING_PLANNERS`] per mark. The end of a linked
-//! proposal resolves the finding, or opens it again.
+//! proposal resolves the finding, or opens it again. A `ci_failure`
+//! finding, the repair of the landing branch's CI, gets its planner before
+//! the drafts' and past the improvements' limit (ADR-t2893-1).
 
 use super::*;
 use crate::domain::EventKind;
@@ -21,8 +23,8 @@ use crate::{
         prompt::{FindingPlannerMaterial, FittedPrompt, finding_planner_prompt},
     },
     domain::{
-        Ask, FindingId, GoalId, ImprovementLimit, kpi::config::DEFAULT_MAX_IMPROVEMENT_PROPOSALS,
-        planner::answer_waits,
+        Ask, FindingId, GoalId, ImprovementLimit, counts_as_improvement,
+        kpi::config::DEFAULT_MAX_IMPROVEMENT_PROPOSALS, planner::answer_waits,
     },
 };
 
@@ -169,17 +171,50 @@ impl PlanningState {
         Ok(())
     }
 
-    /// Open a planner for each finding waiting for one, the oldest mark
-    /// first, while the runtime's planners are below the limit and the
-    /// improvements running below theirs (ADR-0051 decision 25). It runs in
-    /// `tend_planners` after the revises, the answers, the planning
-    /// requests' planners and the draft planners, and not in a drain.
+    /// Open a planner for each `ci_failure` finding waiting for one, the
+    /// oldest mark first, while the runtime's planners are below the limit;
+    /// the improvements' limit does not hold them (ADR-t2893-1). It runs in
+    /// `tend_planners` after the revises, the answers and the planning
+    /// requests' planners, before the draft planners, so neither the drafts
+    /// nor the improvements marked before take the place of the repair of
+    /// the landing branch's CI.
+    pub(in crate::application::supervise) fn open_repair_planners(
+        &mut self,
+        env: &mut PlanningEnv<'_>,
+        runtime_open: &mut usize,
+    ) -> Result<()> {
+        self.open_planners_of(env, runtime_open, false)
+    }
+
+    /// Open a planner for each improvement finding waiting for one, the
+    /// oldest mark first, while the runtime's planners are below the limit
+    /// and the improvements running below theirs (ADR-0051 decision 25).
+    /// It runs in `tend_planners` after the revises, the answers, the
+    /// planning requests' planners, the repairs' and the draft planners,
+    /// and not in a drain.
     pub(in crate::application::supervise) fn open_finding_planners(
         &mut self,
         env: &mut PlanningEnv<'_>,
         runtime_open: &mut usize,
     ) -> Result<()> {
-        let findings = env.queue.planner_findings()?;
+        self.open_planners_of(env, runtime_open, true)
+    }
+
+    /// Open the planners of the findings waiting for one that are
+    /// improvements ([`counts_as_improvement`]) or are not, the oldest mark
+    /// first.
+    fn open_planners_of(
+        &mut self,
+        env: &mut PlanningEnv<'_>,
+        runtime_open: &mut usize,
+        improvements: bool,
+    ) -> Result<()> {
+        let findings: Vec<_> = env
+            .queue
+            .planner_findings()?
+            .into_iter()
+            .filter(|finding| counts_as_improvement(&finding.kind) == improvements)
+            .collect();
         if findings.is_empty() {
             return Ok(());
         }

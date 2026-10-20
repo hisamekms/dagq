@@ -432,6 +432,15 @@ impl ImprovementLimit {
     }
 }
 
+/// Whether a finding of `kind` is an improvement: its planners and the
+/// proposals linked to it count against the [`ImprovementLimit`], and its
+/// planner waits at it (ADR-0051 decision 25). A `ci_failure` finding is
+/// not: it repairs the landing branch's CI, and its planner is opened
+/// whatever the improvements running, before the drafts' (ADR-t2893-1).
+pub fn counts_as_improvement(kind: &str) -> bool {
+    kind != super::ci_watch::FINDING_KIND
+}
+
 /// Whether a proposal linked to a finding still counts against the
 /// [`ImprovementLimit`]: not canceled and a task still to be done — the
 /// proposal [`settle`] leaves unsettled.
@@ -964,6 +973,14 @@ mod tests {
             settle(ProposalStatus::Canceled, &[Draft]),
             Some((FindingStatus::Open, "its proposal was canceled".into()))
         );
+    }
+
+    #[test]
+    fn every_finding_but_a_ci_failure_counts_as_an_improvement() {
+        for kind in ["kpi", "conflict_hotspot", "failure", "wait", "stall"] {
+            assert!(counts_as_improvement(kind), "{kind}");
+        }
+        assert!(!counts_as_improvement(super::super::ci_watch::FINDING_KIND));
     }
 
     #[test]

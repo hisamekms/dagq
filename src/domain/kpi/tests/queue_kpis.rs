@@ -737,6 +737,35 @@ fn counts_the_improvement_proposals_running_at_each_periods_end() {
     }));
 }
 
+/// A proposal linked to a `ci_failure` finding alone repairs the landing
+/// branch's CI and is no improvement (ADR-t2893-1); one that also remedies
+/// an improvement's finding counts.
+#[test]
+fn a_proposal_of_a_ci_failure_finding_alone_is_no_improvement() {
+    let mut queue = Queue::default();
+    let at = MONDAY + HOUR;
+    for (finding, kind) in [(1, "ci_failure"), (2, "ci_failure"), (3, "kpi")] {
+        queue.queue_event(
+            "finding_recorded",
+            json!({"finding_id": finding, "kind": kind, "propose": true}),
+            at - 60,
+        );
+    }
+    improvement(&mut queue, 1, 10, &[101], Some("planner"), at);
+    improvement(&mut queue, 2, 11, &[111], Some("planner"), at);
+    improvement(&mut queue, 3, 11, &[], Some("planner"), at);
+    let query = KpiQuery {
+        at: Some(Cursor::Time((MONDAY + DAY) * 1000)),
+        last: 1,
+        ..KpiQuery::default()
+    };
+    let result = queue.kpi(MONDAY + 2 * DAY, &KpiConfig::default(), &query);
+    assert_eq!(
+        measure(&result.periods[0], "improvement_proposals", ALL).value,
+        Some(1.0)
+    );
+}
+
 /// A running improvement whose link does not record who submitted it
 /// cannot be told from a person's: the KPI has no value then and says
 /// why, while one of the same kind that ended does not stop the count.

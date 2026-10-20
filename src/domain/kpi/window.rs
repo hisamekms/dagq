@@ -13,7 +13,7 @@ use super::{ALL, Axis, KpiInput, Kpis, Measure, UNKNOWN, float, round3};
 use crate::domain::{
     DraftOrigin, EventId, GoalId, HEARTBEAT_TIMEOUT_SECS, RunEvent, RunId, TaskChange, TaskId,
     areas::RunAreas,
-    event_attention,
+    counts_as_improvement, event_attention,
     forecast::score::{self, Scoring, Target},
     host_metrics::{HostSummary, PROCESS_KINDS},
     improvement_running,
@@ -1768,8 +1768,9 @@ impl<'a> Context<'a> {
     /// proposals running at the window's end, by the rule of
     /// `SqliteQueue::improvements`' proposals (its planners are not
     /// counted) rebuilt from the events up to `upto`, as no table's state
-    /// of then is kept. A proposal counts while a finding is linked to it,
-    /// its owner is a planner of the runtime's, and [`improvement_running`]
+    /// of then is kept. A proposal counts while a finding that
+    /// [`counts_as_improvement`] (its `finding_recorded`'s `kind`) is linked
+    /// to it, its owner is a planner of the runtime's, and [`improvement_running`]
     /// holds for it then. The events carry each of these facts:
     /// - the link: a `finding_status_changed` to `proposed` with its
     ///   `proposal_id` links the finding, and one to `open` that names a
@@ -1802,16 +1803,29 @@ impl<'a> Context<'a> {
         let mut members: HashMap<i64, Vec<TaskId>> = HashMap::new();
         let mut withdrawn: HashSet<i64> = HashSet::new();
         let mut statuses: HashMap<TaskId, TaskStatus> = HashMap::new();
+        let mut repairs: HashSet<i64> = HashSet::new();
         let field = |event: &RunEvent, key: &str| event.payload.get(key).and_then(Value::as_i64);
         for event in self.events.iter().filter(|event| event.id <= upto) {
             let Some(kind) = event.kind.known() else {
                 continue;
             };
             match kind {
+                EventKind::FindingRecorded => {
+                    if let (Some(finding), Some(kind)) = (
+                        field(event, "finding_id"),
+                        event.payload.get("kind").and_then(Value::as_str),
+                    ) && !counts_as_improvement(kind)
+                    {
+                        repairs.insert(finding);
+                    }
+                }
                 EventKind::FindingStatusChanged => {
                     let Some(finding) = field(event, "finding_id") else {
                         continue;
                     };
+                    if repairs.contains(&finding) {
+                        continue;
+                    }
                     let proposal = field(event, "proposal_id");
                     match (event.payload["to"].as_str(), proposal) {
                         (Some("proposed"), Some(proposal)) => {

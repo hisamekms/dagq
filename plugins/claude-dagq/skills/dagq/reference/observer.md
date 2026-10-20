@@ -29,7 +29,7 @@ The observer reads the KPIs (`reference/kpi.md`) with the targets of `dagq.toml`
 - A target in `breach` becomes a finding `--kind kpi --queue --subject '<KPI>/<stratum>'` (e.g. `phase.work/area=<area>`) with the breach's event as evidence; the day and the week of one KPI and stratum are one finding. `missed` and `not_judged` make none, and a breach is never a `blocked` ask. The observer resolves it once the target is `ok` again, and marks it `--propose` when the impact and the length call for a remedy.
 - A breach of a `forecast.*` target becomes `--kind forecast --queue --subject '<metric>/<stratum>'` without the `forecast.` prefix (e.g. `p90_hit_rate/all`), never a `kpi` finding, under the same rules. A forecast bias is judged only as such a breach.
 - Read a `kpi` finding with `kpi` and the `marks` around `breach_since`: a change there may be the cause, or the remedy.
-- **Improvement limit.** While the open improvement work for findings reaches `[kpi] max_improvement_proposals` of `dagq.toml`, another marked finding waits `open` for a planner (`findings` shows it as `improvements`).
+- **Improvement limit.** While the open improvement work for findings reaches `[kpi] max_improvement_proposals` of `dagq.toml`, another marked finding waits `open` for a planner (`findings` shows it as `improvements`). A CI watch's `ci_failure` finding is a repair, not an improvement: it is not counted and does not wait.
 - **Priority.** An improvement's tasks take their goal's priority, `normal` or below; a priority a person set stays.
 
 ## Where a finding goes
