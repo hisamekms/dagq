@@ -38,7 +38,7 @@ use crate::domain::{
         worker_deferral_ended, worker_deferrals_in_place, worker_step,
     },
     claim_order::{
-        self, ClaimHolds, ClassLimits, class_deferrals_in_place, class_deferred,
+        self, ClaimHolds, ClassDeferralStep, ClassLimits, class_deferrals_in_place, class_deferred,
         investigation_deferred,
     },
     container_runtime::{CONTAINER_UNAVAILABLE, Runtime},
@@ -587,18 +587,17 @@ impl Supervisor<'_> {
             (kind, payload)
         };
         class_deferrals.retain(|id, (why, since)| {
-            if reasons.get(id) == Some(&why.as_str()) {
-                return true;
-            }
-            // Deferred for another reason this pass: its record supersedes
-            // this one.
-            if candidates.contains(id) && !passed.contains(id) {
-                return false;
-            }
-            let ended = if candidates.contains(id) {
-                "cleared"
-            } else {
-                "not_candidate"
+            let ended = match claim_order::class_deferral_step(
+                why,
+                reasons.get(id).copied(),
+                candidates.contains(id),
+                passed.contains(id),
+            ) {
+                ClassDeferralStep::Open => return true,
+                // Deferred for another reason this pass: its record
+                // supersedes this one.
+                ClassDeferralStep::Superseded => return false,
+                ClassDeferralStep::Ended(ended) => ended,
             };
             events.push((
                 *id,

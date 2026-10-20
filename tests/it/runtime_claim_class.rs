@@ -4,7 +4,10 @@
 //! `candidates` shows, and the slot goes to an implementation; without it
 //! the Spikes may take every slot; `[supervisor] class_aging` lets the
 //! class that waited past it go first within one effective priority, as
-//! `candidates` and `graph` show it, and the claim records it. Which candidate a limit holds and
+//! `candidates` and `graph` show it, and the claim records it; a
+//! `spike_limit` deferral another deferral supersedes goes without an end,
+//! and one a restart reads back ends as `cleared` once `max_spikes` is
+//! gone. Which candidate a limit holds and
 //! which one ages, with the interrupts, the deferrals and the threshold,
 //! is judged by the unit tests of `domain::claim_order`.
 use crate::runtime_support;
@@ -742,4 +745,120 @@ fn the_load_hold_holds_a_spike_too() {
             .status(),
         TaskStatus::Ready
     );
+}
+
+/// Two slots and `max_spikes = 1`: while the first Spike holds its slot
+/// the second is deferred for the limit. Once Claude is held (its hold ask
+/// open, no Codex), the next pass defers it for its worker before the
+/// order: the `spike_limit` record goes without an end of its own and the
+/// `provider_unavailable` one is the task's latest, as `candidates` shows.
+/// Which deferral supersedes which is judged by
+/// `domain::claim_order::class_deferral_step`.
+#[test]
+fn a_spike_limit_deferral_another_deferral_supersedes_ends_without_a_record() {
+    let (_dir, repo, db) = fixture();
+    fs::write(repo.join("dagq.toml"), "[supervisor]\nmax_spikes = 1\n").unwrap();
+    cancel(&db, TaskId::new(1));
+    let first = add_task(&db, "spike one", ExecutionClass::Spike, Priority::Normal);
+    let second = add_task(&db, "spike two", ExecutionClass::Spike, Priority::Normal);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (supervisor, backend) = slots(&db, &repo, &stop, 2);
+    wait_until(&db, Duration::from_secs(60), |_| {
+        claimed_tasks(&db).len() == 1 && !events(&db, "claim_deferred").is_empty()
+    });
+    assert_eq!(claimed_tasks(&db), [first.as_i64()]);
+    let deferred = events(&db, "claim_deferred");
+    assert_eq!(deferred.len(), 1, "{deferred:?}");
+    assert_eq!(
+        (deferred[0].0, deferred[0].1["reason"].clone()),
+        (Some(second), json!("spike_limit"))
+    );
+
+    let hold = open_hold_ask(&db, dagq::domain::AskReason::Authentication, None);
+    wait_until(&db, Duration::from_secs(60), |_| {
+        events(&db, "claim_deferred").len() == 2
+    });
+    stop.store(true, Ordering::SeqCst);
+    let deferred = events(&db, "claim_deferred");
+    assert_eq!(
+        (deferred[1].0, deferred[1].1["reason"].clone()),
+        (Some(second), json!("provider_unavailable")),
+        "{deferred:?}"
+    );
+    let view = crate::common::cli::ok(&db, &["candidates"]);
+    let shown: Vec<(Value, Value)> = view["deferred"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|open| (open["task_id"].clone(), open["reason"].clone()))
+        .collect();
+    assert_eq!(
+        shown,
+        [(json!(second.as_i64()), json!("provider_unavailable"))],
+        "{view}"
+    );
+    // The hold holds the first Spike's review too: answered, the run goes
+    // on to its landing.
+    SqliteQueue::open(&db)
+        .unwrap()
+        .answer(hold.id, "done")
+        .unwrap();
+    release(&db, first);
+    let outcome = joined(supervisor, "the supervisor to drain").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(claimed_tasks(&db), [first.as_i64()]);
+    let ended = events(&db, "claim_deferral_ended");
+    assert!(
+        ended
+            .iter()
+            .all(|(_, payload)| payload["reason"] != "spike_limit"),
+        "{ended:?}"
+    );
+}
+
+/// A `spike_limit` deferral a supervisor leaves open is read back by the
+/// next one: started once `max_spikes` is gone from `dagq.toml`, its pass
+/// ends it as `cleared` and claims the Spike. (Which deferral reads back
+/// as the order's is judged by the unit tests of `domain::claim_order`.)
+#[test]
+fn a_spike_limit_deferral_read_back_at_a_restart_is_cleared_without_the_limit() {
+    let (_dir, repo, db) = fixture();
+    fs::write(repo.join("dagq.toml"), "[supervisor]\nmax_spikes = 1\n").unwrap();
+    cancel(&db, TaskId::new(1));
+    let first = add_task(&db, "spike one", ExecutionClass::Spike, Priority::Normal);
+    let second = add_task(&db, "spike two", ExecutionClass::Spike, Priority::Normal);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (supervisor, backend) = slots(&db, &repo, &stop, 2);
+    wait_until(&db, Duration::from_secs(60), |_| {
+        claimed_tasks(&db).len() == 1 && !events(&db, "claim_deferred").is_empty()
+    });
+    stop.store(true, Ordering::SeqCst);
+    release(&db, first);
+    let outcome = joined(supervisor, "the supervisor to drain").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(claimed_tasks(&db), [first.as_i64()]);
+    // Left open by the supervisor that stopped.
+    assert!(events(&db, "claim_deferral_ended").is_empty());
+    let view = crate::common::cli::ok(&db, &["candidates"]);
+    assert_eq!(view["deferred"][0]["task_id"], second.as_i64(), "{view}");
+    assert_eq!(view["deferred"][0]["reason"], "spike_limit", "{view}");
+
+    fs::write(repo.join("dagq.toml"), "[supervisor]\n").unwrap();
+    let backend = TestWorkspace::new(&db, false, &agent());
+    let outcome = supervise_with(&db, &repo, &backend, &supervise_options(2, true)).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let ended = events(&db, "claim_deferral_ended");
+    assert_eq!(ended.len(), 1, "{ended:?}");
+    assert_eq!(
+        (
+            ended[0].0,
+            ended[0].1["reason"].clone(),
+            ended[0].1["why"].clone()
+        ),
+        (Some(second), json!("spike_limit"), json!("cleared"))
+    );
+    assert_eq!(claimed_tasks(&db), [first.as_i64(), second.as_i64()]);
 }

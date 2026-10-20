@@ -264,6 +264,40 @@ pub fn light_room_deferred(token: &LeaseToken) -> (EventKind, Value) {
     )
 }
 
+/// What a pass makes of an order's deferral in place of `why`, from the
+/// reason the order defers the task for this pass (`now`), whether it is
+/// still a candidate and whether it passed the deferrals before the
+/// order's (worker, build, hotspot).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassDeferralStep {
+    /// Deferred for the same reason: the record stays open.
+    Open,
+    /// A candidate another deferral held before the order: that one's
+    /// `claim_deferred` is the task's latest record now, so this one is
+    /// dropped without an end of its own.
+    Superseded,
+    /// It ends with this `why` (`cleared` or `not_candidate`).
+    Ended(&'static str),
+}
+
+/// [`ClassDeferralStep`] of a deferral of `why`.
+pub fn class_deferral_step(
+    why: &str,
+    now: Option<&str>,
+    candidate: bool,
+    passed: bool,
+) -> ClassDeferralStep {
+    if now == Some(why) {
+        ClassDeferralStep::Open
+    } else if candidate && !passed {
+        ClassDeferralStep::Superseded
+    } else if candidate {
+        ClassDeferralStep::Ended("cleared")
+    } else {
+        ClassDeferralStep::Ended("not_candidate")
+    }
+}
+
 /// The claim order's deferrals in place from each task's latest
 /// `claim_defer::DEFERRAL_KINDS` event: an open `claim_deferred` of an
 /// [`ORDER_DEFERRALS`] reason, with its reason and since when (unix
@@ -587,5 +621,25 @@ mod tests {
         assert_eq!(in_place[&TaskId::new(3)].0, LIGHT_ROOM);
         let workers = crate::domain::claim_defer::worker_deferrals_in_place(&latest);
         assert_eq!(workers.keys().collect::<Vec<_>>(), [&TaskId::new(2)]);
+    }
+
+    #[test]
+    fn an_order_s_deferral_superseded_by_another_ends_without_a_record_of_its_own() {
+        use ClassDeferralStep::*;
+        let step = class_deferral_step;
+        // Held by the same reason, whether or not it passed before.
+        assert_eq!(step(SPIKE_LIMIT, Some(SPIKE_LIMIT), true, true), Open);
+        // A worker, build or hotspot deferral held it before the order.
+        assert_eq!(step(SPIKE_LIMIT, None, true, false), Superseded);
+        // The order passed it, or holds it for another of its reasons.
+        assert_eq!(step(SPIKE_LIMIT, None, true, true), Ended("cleared"));
+        assert_eq!(
+            step(SPIKE_LIMIT, Some(LIGHT_ROOM), true, true),
+            Ended("cleared")
+        );
+        assert_eq!(
+            step(SPIKE_LIMIT, None, false, false),
+            Ended("not_candidate")
+        );
     }
 }
