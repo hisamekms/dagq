@@ -40,6 +40,7 @@ sessionを開くeventのpayloadにmodelとeffortと群を持たせる（`WorkerS
 | `run_claimed` | claim（retryで新しいrunをclaimしたときも） |
 | `resume_started` | `needs_session`のresume。値は直前のsessionのもので、taskに由来する失敗の後は1段上げたもの |
 | `revise_requested` | reviewの`revise`の差し戻し。値は直前のsessionを1段上げたもの |
+| `task_released`（`model`あり） | holdの解除が選んだmodel。以後のresume・reviseとtaskの以後のrunのclaimはそこから開き、段上げもそこから（`WorkerSession::claimed`） |
 
 ### Codexのrun
 

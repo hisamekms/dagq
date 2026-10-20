@@ -13,6 +13,7 @@ use dagq::domain::{
     ClaimOutcome, LeaseToken, RunPlan, podman_machine::MachineMounts, provider_switch::WorkerRoute,
     run_clone, validation::Validation, worker::Worker,
 };
+use dagq::infrastructure::git_binary::git_executable;
 use dagq::infrastructure::location::runs_dir;
 use runtime_support::*;
 use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
@@ -178,8 +179,9 @@ fn turn_end(run: &ContainerRun) {
 fn write_state(run: &ContainerRun, branch: Option<&str>, head: &str, status: &str) {
     fs::write(
         run.run_dir.join(run_clone::RUN_STATE_FILE),
-        json!({"branch": branch, "head": head, "status": status, "rebase_in_progress": false})
-            .to_string(),
+        json!({"branch": branch, "head": head, "status": status, "rebase_in_progress": false,
+               "turn_ended": true})
+        .to_string(),
     )
     .unwrap();
 }
@@ -456,7 +458,8 @@ fn a_container_run_lands_from_its_bundle_through_its_landing_worktree() {
         run_git::session_head(&repository, &run.run).unwrap(),
         run_git::SessionHead {
             head: sha(&head),
-            clean: true
+            clean: true,
+            last_turn: true,
         }
     );
     // The review's processes work in the landing worktree.
@@ -1033,6 +1036,7 @@ fn nothing_a_worker_plants_in_its_clone_runs_on_the_control_side() {
     run_git::rebase_in_progress(&repository, &run.run).unwrap();
     dagq::application::review::run_commits(&repository, &run.run).unwrap();
     dagq::application::inherit::carried_head(&run.run, &LocalRunFiles, &repository).unwrap();
+    dagq::application::inherit::released_work(&run.run, &LocalRunFiles, &repository).unwrap();
     // The review's job and program and the e2e in the landing worktree.
     start_in_tree(&repo, &run, None);
     // The clone path itself is refused to git, whoever asks.
@@ -1054,6 +1058,316 @@ fn nothing_a_worker_plants_in_its_clone_runs_on_the_control_side() {
         .arg("status")
         .bounded_output();
     assert_eq!(marks(&marks_dir), ["proof"]);
+}
+
+/// A held run in a container released to a new run (it has no session) is
+/// read from the facts its executor wrote, with no git in its clone
+/// (container-runtime.md「git」): while they record uncommitted work, a
+/// rebase stopped half way or a head its bundle does not hold, which the
+/// control side cannot save, the release is refused and changes nothing;
+/// clean, the head imported from its bundle is kept under
+/// `refs/dagq/runs/<run-id>` and carried over, though nothing validated it.
+#[test]
+fn a_held_container_run_is_released_to_a_new_run_only_with_nothing_unsaved_in_its_clone() {
+    let (_fixture, repo, db) = fixture();
+    let run = claim_in_container(&db, &repo, TaskId::new(1));
+    let head = commit(&run, &[("feature.txt", "feature\n")], "feature");
+    turn_end(&run);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue
+        .finish_supervision_live(run.run.id(), &run.token)
+        .unwrap();
+    queue.release_lease(run.run.id(), &run.token).unwrap();
+    let as_user = |args: &[&str]| crate::common::cli::invoke_with(&[], &db, args);
+    let held = as_user(&["hold", "1", "--reason", "the login expired"]);
+    assert!(
+        held.status.success(),
+        "{}",
+        String::from_utf8_lossy(&held.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&held.stdout).unwrap()["state"],
+        "held"
+    );
+    let branch = format!("refs/heads/{}", run.branch());
+    for (state_head, status, rebase) in [
+        (&head, " M feature.txt", false),
+        (&head, "", true),
+        (&run.base, "", false),
+    ] {
+        fs::write(
+            run.run_dir.join(run_clone::RUN_STATE_FILE),
+            json!({"branch": branch, "head": state_head, "status": status,
+                   "rebase_in_progress": rebase, "turn_ended": true})
+            .to_string(),
+        )
+        .unwrap();
+        let refused = as_user(&["release", "1"]);
+        assert!(!refused.status.success(), "{status:?} {rebase}");
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(stderr.contains("cannot be saved"), "{stderr}");
+        let detail = queue.show(run.task).unwrap();
+        assert!(queue.task_hold(run.task).unwrap().is_some());
+        assert_eq!(detail.runs[0].status(), RunStatus::Validating);
+        assert_eq!(detail.task.status(), TaskStatus::InProgress);
+        assert!(payloads(&detail, "task_released").is_empty());
+    }
+    turn_end(&run);
+    let released = as_user(&["release", "1"]);
+    assert!(
+        released.status.success(),
+        "{}",
+        String::from_utf8_lossy(&released.stderr)
+    );
+    let released: Value = serde_json::from_slice(&released.stdout).unwrap();
+    assert_eq!(released["decision"], "retry_inherit", "{released}");
+    assert_eq!(released["inherit"]["head"], json!(head));
+    assert!(released["inherit"].get("saved").is_none(), "{released}");
+    assert_eq!(
+        git_out(
+            &repo,
+            &["rev-parse", &format!("refs/dagq/runs/{}", run.run.id())]
+        ),
+        head
+    );
+    let detail = queue.show(run.task).unwrap();
+    assert_eq!(detail.task.status(), TaskStatus::Ready);
+    assert_eq!(detail.runs[0].status(), RunStatus::Failed);
+}
+
+/// A held container run is released with the head its clone's last turn
+/// left, as its executor's facts say, past the commit its validation
+/// accepted: that head is carried over and kept.
+#[test]
+fn a_held_container_run_is_released_with_the_head_its_last_turn_left_past_its_validated_commit() {
+    let (_fixture, repo, db) = fixture();
+    let mut run = claim_in_container(&db, &repo, TaskId::new(1));
+    let validated = commit(&run, &[("feature.txt", "feature\n")], "feature");
+    turn_end(&run);
+    write_receipt(&run, &validated);
+    assert_eq!(validate(&db, &repo, &mut run).as_str(), validated);
+    let later = commit(&run, &[("later.txt", "later\n")], "later");
+    turn_end(&run);
+    let as_user = |args: &[&str]| crate::common::cli::invoke_with(&[], &db, args);
+    let held = as_user(&["hold", "1", "--reason", "the login expired"]);
+    assert!(
+        held.status.success(),
+        "{}",
+        String::from_utf8_lossy(&held.stderr)
+    );
+    let released = as_user(&["release", "1", "--provider", "codex"]);
+    assert!(
+        released.status.success(),
+        "{}",
+        String::from_utf8_lossy(&released.stderr)
+    );
+    let released: Value = serde_json::from_slice(&released.stdout).unwrap();
+    assert_eq!(released["decision"], "retry_inherit", "{released}");
+    assert_eq!(released["inherit"]["head"], json!(later), "{released}");
+    assert_eq!(
+        git_out(
+            &repo,
+            &["rev-parse", &format!("refs/dagq/runs/{}", run.run.id())]
+        ),
+        later
+    );
+}
+
+/// A turn of `run` through its container's executor (`dagq relay turn`),
+/// run on the host as the fake podman of `run_container` runs it: `agent`
+/// is a shell script the executor runs in the clone. The executor's exit
+/// code, `None` when it was killed with its "container".
+fn relay_turn(run: &ContainerRun, agent: &str) -> Option<i32> {
+    fs::write(
+        run.run_dir.join(dagq::domain::run_container::TOKEN_FILE),
+        "relay-token\n",
+    )
+    .unwrap();
+    let text = |path: &Path| path.to_str().unwrap().to_owned();
+    let output = Command::new(env!("CARGO_BIN_EXE_dagq"))
+        .without_actor_env()
+        .owned_by_test()
+        .env(dagq::domain::actor::RUN_ID_ENV, run.run.id().as_str())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "worker")
+        .env("GIT_AUTHOR_EMAIL", "worker@example.invalid")
+        .env("GIT_COMMITTER_NAME", "worker")
+        .env("GIT_COMMITTER_EMAIL", "worker@example.invalid")
+        .args(["relay", "turn", "--run-dir", &text(&run.run_dir)])
+        .args(["--clone", &text(&run.clone), "--base", &run.base])
+        .args(["--branch", &run.branch(), "--", "sh", "-c", agent])
+        .current_dir(&run.clone)
+        .bounded_output()
+        .unwrap();
+    output.status.code()
+}
+
+/// The run's state as its executor last wrote it.
+fn run_state(run: &ContainerRun) -> run_clone::RunState {
+    run_clone::RunState::parse(
+        &fs::read_to_string(run.run_dir.join(run_clone::RUN_STATE_FILE)).unwrap(),
+    )
+    .unwrap()
+}
+
+/// The executor's turn (`dagq relay turn`) marks the state its last turn's
+/// end wrote before the agent runs, the other facts as they were, and the
+/// turn's end writes the state of that turn; with no state yet it marks
+/// nothing. A mark that cannot be written runs no agent and leaves the
+/// state. Before the agent runs, a state that cannot be read, or a symlink
+/// in its place (not what it points at), is gone, and a directory in its
+/// place is left. (What a turn's start does with what it finds is
+/// `run_clone::turn_start`'s, whose unit test holds each case.)
+#[test]
+fn a_container_turn_marks_its_last_state_before_its_agent_runs_and_writes_it_anew_at_its_end() {
+    let (_fixture, repo, db) = fixture();
+    let run = claim_in_container(&db, &repo, TaskId::new(1));
+    let state = run.run_dir.join(run_clone::RUN_STATE_FILE);
+    let none = format!("[ ! -e {0} ] && [ ! -L {0} ]", shell_path(&state));
+    assert_eq!(relay_turn(&run, &none), Some(0));
+    let ended = run_state(&run);
+    assert_eq!(ended.turn_ended, Some(true));
+
+    let seen = run.run_dir.join("seen-state.json");
+    let copy = format!(
+        "cp {} {} && echo b > b.txt",
+        shell_path(&state),
+        shell_path(&seen)
+    );
+    assert_eq!(relay_turn(&run, &copy), Some(0));
+    let marked = run_clone::RunState::parse(&fs::read_to_string(&seen).unwrap()).unwrap();
+    assert_eq!(
+        marked,
+        run_clone::RunState {
+            turn_ended: Some(false),
+            ..ended
+        }
+    );
+    let after = run_state(&run);
+    assert_eq!(after.status, "?? b.txt\n");
+    assert_eq!(after.turn_ended, Some(true));
+
+    // The run directory taken from the executor: no mark, no agent.
+    fs::set_permissions(&run.run_dir, fs::Permissions::from_mode(0o555)).unwrap();
+    let refused = relay_turn(&run, ": > ran.txt");
+    fs::set_permissions(&run.run_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_ne!(refused, Some(0));
+    assert!(!run.clone.join("ran.txt").exists());
+    assert_eq!(run_state(&run), after);
+
+    fs::write(&state, b"\xff not a state").unwrap();
+    assert_eq!(relay_turn(&run, &none), Some(0));
+    assert_eq!(run_state(&run).turn_ended, Some(true));
+
+    let elsewhere = run.run_dir.join("state-elsewhere.json");
+    fs::rename(&state, &elsewhere).unwrap();
+    let pointed = fs::read(&elsewhere).unwrap();
+    symlink(&elsewhere, &state).unwrap();
+    assert_eq!(relay_turn(&run, &none), Some(0));
+    assert_eq!(fs::read(&elsewhere).unwrap(), pointed);
+    assert!(fs::symlink_metadata(&state).unwrap().is_file());
+
+    fs::remove_file(&state).unwrap();
+    fs::create_dir(&state).unwrap();
+    let left = format!("[ -d {} ]", shell_path(&state));
+    assert_eq!(relay_turn(&run, &left), Some(0));
+    assert!(state.is_dir());
+}
+
+/// A held container run whose last turn was cut off with its container is
+/// not released to a new run from the facts an earlier turn's end left: the
+/// executor marks them at the cut-off turn's start, before its agent ran,
+/// so `release --provider codex` is refused and changes nothing, and the
+/// clean, older head is not carried over without the turn's commit and
+/// uncommitted work. Once a turn's end records them, the release carries
+/// over the latest head.
+#[test]
+fn a_held_container_run_whose_last_turn_was_cut_off_is_not_released_from_an_earlier_turns_facts() {
+    let (_fixture, repo, db) = fixture();
+    let run = claim_in_container(&db, &repo, TaskId::new(1));
+    // The first turn ends: its executor records a clean head.
+    let commit_file = |text: &str, message: &str| {
+        format!("echo {text} >> feature.txt && git add feature.txt && git commit -q -m {message}")
+    };
+    assert_eq!(
+        relay_turn(&run, &commit_file("feature", "feature")),
+        Some(0)
+    );
+    let first = in_clone(&run.clone, &["rev-parse", "HEAD"]);
+    let ended = run_state(&run);
+    assert_eq!(
+        (ended.head.as_str(), ended.status.as_str()),
+        (first.as_str(), "")
+    );
+    assert_eq!(ended.turn_ended, Some(true));
+    // The next turn commits and leaves uncommitted work, and its container
+    // goes before the executor writes the turn's end.
+    let cut_off = format!(
+        "{} && echo wip > wip.txt && kill -9 $PPID",
+        commit_file("more", "more")
+    );
+    assert_eq!(relay_turn(&run, &cut_off), None);
+    let latest = in_clone(&run.clone, &["rev-parse", "HEAD"]);
+    assert_ne!(latest, first);
+    // What is left reads clean, at the first turn's head, but marked.
+    let left = run_state(&run);
+    assert_eq!(
+        (left.head.as_str(), left.status.as_str()),
+        (first.as_str(), "")
+    );
+    assert_eq!(left.turn_ended, Some(false));
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue
+        .finish_supervision_live(run.run.id(), &run.token)
+        .unwrap();
+    queue.release_lease(run.run.id(), &run.token).unwrap();
+    let as_user = |args: &[&str]| crate::common::cli::invoke_with(&[], &db, args);
+    let held = as_user(&["hold", "1", "--reason", "the login expired"]);
+    assert!(
+        held.status.success(),
+        "{}",
+        String::from_utf8_lossy(&held.stderr)
+    );
+    let before = queue.show(run.task).unwrap();
+    let refused = as_user(&["release", "1", "--provider", "codex"]);
+    assert!(!refused.status.success());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("did not record the end of the last turn"),
+        "{stderr}"
+    );
+    let detail = queue.show(run.task).unwrap();
+    assert!(queue.task_hold(run.task).unwrap().is_some());
+    assert_eq!(detail.task.worker(), before.task.worker());
+    assert_eq!(detail.task.status(), TaskStatus::InProgress);
+    assert_eq!(detail.runs[0].status(), before.runs[0].status());
+    assert!(payloads(&detail, "task_released").is_empty());
+    let kept = format!("refs/dagq/runs/{}", run.run.id());
+    assert!(
+        !Command::new(git_executable().expect("git executable"))
+            .arg("-C")
+            .arg(&repo)
+            .args(["rev-parse", "--verify", "-q", &kept])
+            .bounded_status()
+            .unwrap()
+            .success()
+    );
+    // A turn's end records the latest work, and the release carries it.
+    let commit_wip = "git add wip.txt && git commit -q -m wip";
+    assert_eq!(relay_turn(&run, commit_wip), Some(0));
+    let head = in_clone(&run.clone, &["rev-parse", "HEAD"]);
+    assert_eq!(in_clone(&run.clone, &["rev-parse", "HEAD~1"]), latest);
+    let released = as_user(&["release", "1", "--provider", "codex"]);
+    assert!(
+        released.status.success(),
+        "{}",
+        String::from_utf8_lossy(&released.stderr)
+    );
+    let released: Value = serde_json::from_slice(&released.stdout).unwrap();
+    assert_eq!(released["decision"], "retry_inherit", "{released}");
+    assert_eq!(released["inherit"]["head"], json!(head));
+    assert_eq!(git_out(&repo, &["rev-parse", &kept]), head);
 }
 
 /// Configuration of `scope` that defines the drivers `name` names, each

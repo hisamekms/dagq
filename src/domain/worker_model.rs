@@ -28,6 +28,7 @@ use super::{
     prediction::{PREDICTION_WINDOW, TaskNature, percentile, window},
     reason::event_code,
     resume,
+    task_hold::Released,
 };
 
 /// The model of the control and of every session outside the trial.
@@ -47,6 +48,9 @@ pub const LADDER: [(&str, &str); 4] = [
     (OPUS, HIGH),
     (OPUS, XHIGH),
 ];
+/// The models a release may choose for a Claude worker
+/// ([`check_model`]): those of [`LADDER`].
+pub const MODELS: [&str; 2] = [SONNET, OPUS];
 /// Why a Codex run's session events name no model.
 pub const CODEX_MODEL_UNKNOWN: &str = "codex runs its own model, not the claim's Claude model: each turn_finished records the model codex used";
 
@@ -59,6 +63,21 @@ pub const SESSION_EVENTS: [EventKind; 3] = [
     EventKind::ResumeStarted,
     EventKind::ReviseRequested,
 ];
+
+/// Whether `provider` takes `model` for a worker session a release chose
+/// (ADR-t1879-1). Claude takes the models of [`LADDER`] ([`MODELS`]), at a
+/// resume as at a claim, since each of its turns names its model: a model
+/// alone goes on in the same session. Codex takes none: it runs its own
+/// model and the runtime passes it none.
+pub fn check_model(provider: Provider, model: &str) -> Result<(), DomainError> {
+    match provider {
+        Provider::Claude if MODELS.contains(&model) => Ok(()),
+        _ => Err(DomainError::WorkerModelRefused {
+            provider,
+            model: model.to_owned(),
+        }),
+    }
+}
 
 /// Whether a run parked with `code` resumes one step higher: a failed
 /// verification (`integrate`'s or the landing recheck's) or a review's
@@ -234,7 +253,22 @@ impl WorkerSession {
         openings(events)
             .into_iter()
             .rev()
-            .find_map(|index| Self::recorded(&events[index].payload))
+            .find_map(|index| Self::opened_by(&events[index]))
+    }
+
+    /// The session `event` opened or chose: a release's from its restored
+    /// record ([`Released`]), any other's from its payload.
+    fn opened_by(event: &RunEvent) -> Option<Self> {
+        if event.kind == EventKind::TaskReleased {
+            let released = Released::of_event(event)?;
+            let (model, effort) = released.session()?;
+            return Some(Self {
+                model: model.to_owned(),
+                effort: effort.to_owned(),
+                group: None,
+            });
+        }
+        Self::recorded(&event.payload)
     }
 
     /// The session a payload records: a Codex run's step is its
@@ -273,6 +307,40 @@ impl WorkerSession {
                 true,
             ),
             _ => (self, false),
+        }
+    }
+
+    /// The session the task goes on with once a release chose `model`
+    /// (ADR-t1879-1), `current` being the one opened last: `model` at
+    /// `current`'s effort when that is a step of [`LADDER`], else at the
+    /// lowest step of `model`, so that a later task-caused failure still
+    /// raises it; in no trial group.
+    pub fn released(model: &str, current: &Self) -> Self {
+        let effort = if LADDER.contains(&(model, current.effort.as_str())) {
+            current.effort.clone()
+        } else {
+            LADDER.iter().find(|(step, _)| *step == model).map_or_else(
+                || current.effort.clone(),
+                |(_, effort)| (*effort).to_owned(),
+            )
+        };
+        Self {
+            model: model.to_owned(),
+            effort,
+            group: None,
+        }
+    }
+
+    /// The session a claim of the task opens, `self` being the one the
+    /// claim chose: after a release that chose a model (the latest among
+    /// `task_events`, the task's), that model with a raise since it carried
+    /// on ([`Self::inheriting`] over the events after it); otherwise
+    /// [`Self::inheriting`]. Whether a raise was inherited.
+    pub fn claimed(self, task_events: &[RunEvent]) -> (Self, bool) {
+        let chosen = task_events.iter().rposition(chose_session);
+        match chosen.and_then(|at| Some((at, Self::opened_by(&task_events[at])?))) {
+            Some((at, released)) => released.inheriting(&task_events[at + 1..]),
+            None => self.inheriting(task_events),
         }
     }
 
@@ -330,10 +398,19 @@ pub fn for_resume(events: &[RunEvent]) -> (WorkerSession, Option<Escalation>) {
     }
 }
 
+/// Whether `event` is a release that chose the session of the task's later
+/// turns (`task_released` with a model, ADR-t1879-1), read from its
+/// restored record ([`Released`]).
+fn chose_session(event: &RunEvent) -> bool {
+    Released::of_event(event).is_some_and(|released| released.session().is_some())
+}
+
 /// The indexes of `events` that opened a worker session, oldest first: the
 /// [`SESSION_EVENTS`], but a `revise_requested` the supervisor withdrew
 /// (a `revise_unsent` of the same run and attempt), whose request and raise
-/// never reached the session.
+/// never reached the session; and a release that chose the session of the
+/// later turns ([`chose_session`]), from which the next one starts and is
+/// raised.
 fn openings(events: &[RunEvent]) -> Vec<usize> {
     let withdrawn: Vec<(Option<&str>, Option<u64>)> = events
         .iter()
@@ -349,12 +426,13 @@ fn openings(events: &[RunEvent]) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter(|(_, event)| {
-            event.kind.is_in(&SESSION_EVENTS)
-                && !(event.kind == EventKind::ReviseRequested
-                    && withdrawn.contains(&(
-                        event.run_id.as_ref().map(|id| id.as_str()),
-                        restore_payload::<ReviseRequested>(&event.payload).attempt,
-                    )))
+            chose_session(event)
+                || event.kind.is_in(&SESSION_EVENTS)
+                    && !(event.kind == EventKind::ReviseRequested
+                        && withdrawn.contains(&(
+                            event.run_id.as_ref().map(|id| id.as_str()),
+                            restore_payload::<ReviseRequested>(&event.payload).attempt,
+                        )))
         })
         .map(|(index, _)| index)
         .collect()
@@ -460,7 +538,7 @@ impl std::fmt::Display for TrialGroup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{EventId, RunId};
+    use crate::domain::{EventId, RunId, event_kind};
 
     const RUN: &str = "11111111-1111-4111-8111-111111111111";
 
@@ -889,5 +967,124 @@ mod tests {
         assert_eq!(TrialGroup::Treatment.other(), TrialGroup::Control);
         assert_eq!(TrialGroup::Control.to_string(), "control");
         assert!("x".parse::<TrialGroup>().is_err());
+    }
+
+    fn released(id: i64, model: &str, effort: &str) -> RunEvent {
+        event(
+            id,
+            7,
+            event_kind::TASK_RELEASED,
+            json!({"hold_id": 1, "model": model, "effort": effort}),
+        )
+    }
+
+    #[test]
+    fn claude_takes_a_ladder_model_and_codex_takes_none() {
+        for model in MODELS {
+            assert_eq!(check_model(Provider::Claude, model), Ok(()));
+            let refused = check_model(Provider::Codex, model).unwrap_err();
+            assert!(
+                refused.to_string().contains("codex runs its own model"),
+                "{refused}"
+            );
+        }
+        let unknown = check_model(Provider::Claude, "gpt-5").unwrap_err();
+        assert_eq!(
+            unknown,
+            DomainError::WorkerModelRefused {
+                provider: Provider::Claude,
+                model: "gpt-5".into()
+            }
+        );
+        assert!(unknown.to_string().contains(OPUS), "{unknown}");
+    }
+
+    #[test]
+    fn a_model_a_release_chose_is_the_next_sessions_and_is_raised_from() {
+        let parked = event(
+            3,
+            7,
+            "integration_deferred",
+            json!({"code": "verification_failed"}),
+        );
+        // Opened at Opus high, parked by a failure that raises, then a
+        // release chose Sonnet: the resume opens Sonnet, not Opus xhigh.
+        let events = [
+            opened(1, event_kind::RUN_CLAIMED, OPUS, HIGH),
+            parked.clone(),
+            released(4, SONNET, MEDIUM),
+        ];
+        let (session, raise) = for_resume(&events);
+        assert_eq!(
+            (session.model.as_str(), session.effort.as_str()),
+            (SONNET, MEDIUM)
+        );
+        assert_eq!(raise, None);
+        assert_eq!(WorkerSession::current(&events).model, SONNET);
+        // A failure after the release raises from the chosen model.
+        let mut later = events.to_vec();
+        later.push(opened(5, event_kind::RESUME_STARTED, SONNET, MEDIUM));
+        later.push(parked);
+        let (session, raise) = for_resume(&later);
+        assert_eq!(
+            (session.model.as_str(), session.effort.as_str()),
+            (OPUS, MEDIUM)
+        );
+        assert!(raise.is_some());
+        // A release with no model chooses nothing.
+        let plain = event(6, 7, event_kind::TASK_RELEASED, json!({"hold_id": 2}));
+        assert_eq!(
+            WorkerSession::current(&[opened(1, event_kind::RUN_CLAIMED, OPUS, HIGH), plain]).effort,
+            HIGH
+        );
+    }
+
+    #[test]
+    fn a_model_a_release_chose_stays_on_the_ladder() {
+        let at = |model: &str, effort: &str| WorkerSession {
+            model: model.into(),
+            effort: effort.into(),
+            group: None,
+        };
+        assert_eq!(
+            WorkerSession::released(OPUS, &at(SONNET, MEDIUM)),
+            at(OPUS, MEDIUM)
+        );
+        assert_eq!(
+            WorkerSession::released(OPUS, &at(OPUS, XHIGH)),
+            at(OPUS, XHIGH)
+        );
+        let sonnet = WorkerSession::released(SONNET, &at(OPUS, XHIGH));
+        assert_eq!(sonnet, at(SONNET, MEDIUM));
+        assert!(sonnet.raised().is_some());
+    }
+
+    #[test]
+    fn a_claim_after_a_release_that_chose_a_model_opens_it_with_later_raises() {
+        let chosen = released(2, SONNET, MEDIUM);
+        let (session, inherited) = WorkerSession::default().claimed(&[
+            opened(1, event_kind::RUN_CLAIMED, OPUS, HIGH),
+            chosen.clone(),
+        ]);
+        assert_eq!(
+            (session.model.as_str(), session.effort.as_str()),
+            (SONNET, MEDIUM)
+        );
+        assert_eq!(session.group, None);
+        assert!(!inherited);
+        // A raise after the release stays with the next run.
+        let mut raised = opened(3, event_kind::REVISE_REQUESTED, OPUS, MEDIUM);
+        raised.payload["escalated_from"] = json!({"model": SONNET, "effort": MEDIUM});
+        let (session, inherited) = WorkerSession::default().claimed(&[chosen, raised]);
+        assert_eq!(
+            (session.model.as_str(), session.effort.as_str()),
+            (OPUS, MEDIUM)
+        );
+        assert!(inherited);
+        // Without a release, the claim's own choice as before.
+        let (session, inherited) =
+            WorkerSession::default().claimed(&[opened(1, event_kind::RUN_CLAIMED, OPUS, HIGH)]);
+        assert_eq!(session, WorkerSession::default());
+        assert!(!inherited);
     }
 }

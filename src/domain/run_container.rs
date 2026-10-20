@@ -449,9 +449,10 @@ fn mount_path(path: &Path) -> Result<String, String> {
 }
 
 /// What the run's container runs: `dagq relay turn` of the image's client,
-/// which imports main's bundle into the clone, starts the forwarder, runs
-/// `agent` (the agent's arguments, [`AGENT`] first) with [`turn_env`], and
-/// writes the run branch's bundle and the run's state at its end
+/// which marks the run's state as of a turn that has not ended, imports
+/// main's bundle into the clone, starts the forwarder, runs `agent` (the
+/// agent's arguments, [`AGENT`] first) with [`turn_env`], and writes the
+/// run branch's bundle and the run's state at its end
 /// ([`super::run_clone`]).
 pub fn launcher_command(
     run_dir: &Path,

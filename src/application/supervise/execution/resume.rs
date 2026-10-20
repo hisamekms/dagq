@@ -247,7 +247,7 @@ impl Supervisor<'_> {
             return Ok(None);
         };
         let task = self.queue.show(run.task_id())?.task;
-        let Ok(run_git::SessionHead { head, clean }) =
+        let Ok(run_git::SessionHead { head, clean, .. }) =
             run_git::session_head(&*self.repository, run)
         else {
             return Ok(None);
@@ -1590,7 +1590,7 @@ impl ResumeWatch {
         // worktree: a receipt rewritten after this read is judged
         // at the next poll, never as idle without it.
         let idle = sv.session_idle(&self.idle_marker)?;
-        let run_git::SessionHead { head, clean } = run_git::session_head(&*sv.repository, run)?;
+        let run_git::SessionHead { head, clean, .. } = run_git::session_head(&*sv.repository, run)?;
         // Resolved (or failed) and idle after the receipt; or idle
         // after the request with no such receipt, which a session
         // that could not resolve it (or stopped at a question)

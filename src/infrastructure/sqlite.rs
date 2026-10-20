@@ -2686,11 +2686,11 @@ pub(super) fn claim_task(
         worker_model::choose(trial, task.id(), &trial_events(tx, trial)?)
     };
     // A step the task was raised to stays with its later runs (ADR-0079
-    // decision 5).
+    // decision 5), and so does a model a release chose (ADR-t1879-1).
     let (session, inherited) = choice
         .session
         .clone()
-        .inheriting(&session_events(tx, task.id())?);
+        .claimed(&session_events(tx, task.id())?);
     let now = timestamp(at);
     let run_id = RunId::new(ids.uuid())?;
     let actual = crate::domain::worker::Worker {
@@ -2878,10 +2878,14 @@ fn trial_events(conn: &Connection, trial: &WorkerTrial) -> Result<Vec<RunEvent>>
 }
 
 /// The events of `task`'s earlier runs that opened a worker session
-/// (`worker_model::SESSION_EVENTS`), oldest first.
+/// (`worker_model::SESSION_EVENTS`) and its releases, which may choose the
+/// next one's model, oldest first.
 fn session_events(conn: &Connection, task: TaskId) -> Result<Vec<RunEvent>> {
     let kinds = worker_model::SESSION_EVENTS
-        .map(|kind| format!("'{kind}'"))
+        .iter()
+        .chain([&EventKind::TaskReleased])
+        .map(|kind| format!("'{}'", kind.as_str()))
+        .collect::<Vec<_>>()
         .join(",");
     Ok(conn
         .prepare(&format!(

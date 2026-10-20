@@ -4,14 +4,16 @@
 //! in a container run's clone, beside the worker itself: the control side
 //! runs none there.
 //!
-//! In order: main's bundle the control side left in the run directory is
-//! fetched into the clone's [`CLONE_MAIN_REF`]; the forwarder starts on the
-//! container's loopback; the agent runs in the clone with [`turn_env`],
-//! made from the run token's file and the run; and whatever the agent did,
-//! the run branch's bundle and the run's state are written to the run
-//! directory, each to a temporary file renamed into place. Its exit code
-//! is the agent's. It writes nothing to its standard output, which is the
-//! agent's (the turn's output the wrapper reads).
+//! In order: the run's state the last turn left is marked as of a turn
+//! that has not ended ([`mark_turn_started`]); main's bundle the control
+//! side left in the run directory is fetched into the clone's
+//! [`CLONE_MAIN_REF`]; the forwarder starts on the container's loopback;
+//! the agent runs in the clone with [`turn_env`], made from the run token's
+//! file and the run; and whatever the agent did, the run branch's bundle
+//! and the run's state are written to the run directory, each to a
+//! temporary file renamed into place. Its exit code is the agent's. It
+//! writes nothing to its standard output, which is the agent's (the turn's
+//! output the wrapper reads).
 //!
 //! [Container runtime]: ../../docs/design/container-runtime.md
 
@@ -32,7 +34,8 @@ use crate::domain::actor::RUN_ID_ENV;
 use crate::domain::broker_relay::socket_path;
 use crate::domain::queue_service::CREDENTIAL_FILE_ENV;
 use crate::domain::run_clone::{
-    CLONE_MAIN_REF, MAIN_BUNDLE_FILE, RUN_BUNDLE_FILE, RUN_STATE_FILE, RunState,
+    self, CLONE_MAIN_REF, MAIN_BUNDLE_FILE, RUN_BUNDLE_FILE, RUN_STATE_FILE, RunState, StateFound,
+    TurnStart,
 };
 use crate::domain::run_container::{TOKEN_FILE, turn_env, verification_env};
 
@@ -53,8 +56,8 @@ pub struct TurnOptions {
 
 /// Run the turn of [`TurnOptions`] with the variables `env` reads: the
 /// agent's exit code (128 and the signal's number for an agent killed by
-/// one). An error before the agent starts (no run, no token) runs no agent
-/// and writes no state.
+/// one). An error before the agent starts (no run, no token, a state that
+/// cannot be marked) runs no agent and writes no state of the turn's end.
 pub fn run_turn(options: &TurnOptions, env: impl Fn(&str) -> Option<String>) -> Result<i32> {
     let run = env(RUN_ID_ENV).with_context(|| format!("{RUN_ID_ENV} names no run"))?;
     let token_file =
@@ -63,6 +66,9 @@ pub fn run_turn(options: &TurnOptions, env: impl Fn(&str) -> Option<String>) -> 
         .with_context(|| format!("read the run token's file {}", token_file.display()))?;
     let token = token.trim();
     ensure!(!token.is_empty(), "{} holds no token", token_file.display());
+    // Before the agent can change the clone: a turn cut off with its
+    // container leaves the state marked, not taken for its work.
+    mark_turn_started(&options.run_dir)?;
     // A bundle that cannot be fetched leaves the ref where it was: the
     // agent's rebase then finds main as it was, and the control side asks
     // again; the turn itself goes on.
@@ -249,10 +255,33 @@ pub fn import_main(clone: &Path, run_dir: &Path) -> Result<bool> {
     Ok(true)
 }
 
+/// Mark the run's state in `run_dir` as of a turn that has not ended, or
+/// remove what cannot be read as one, as [`run_clone::turn_start`] decides
+/// for what is there: no facts an earlier turn left stand as the last
+/// turn's while the agent runs.
+pub fn mark_turn_started(run_dir: &Path) -> Result<()> {
+    let path = run_dir.join(RUN_STATE_FILE);
+    let found = match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => fs::read(&path)
+            .ok()
+            .and_then(|bytes| RunState::parse(&String::from_utf8_lossy(&bytes)).ok())
+            .map_or(StateFound::Unreadable, StateFound::State),
+        Ok(metadata) if metadata.file_type().is_symlink() => StateFound::Unreadable,
+        Ok(_) => StateFound::Other,
+        Err(error) if error.kind() == ErrorKind::NotFound => StateFound::Nothing,
+        Err(error) => return Err(error).with_context(|| format!("look at {}", path.display())),
+    };
+    match run_clone::turn_start(found) {
+        TurnStart::Leave => Ok(()),
+        TurnStart::Mark(state) => write_state(run_dir, &state),
+        TurnStart::Remove => remove_if_there(&path),
+    }
+}
+
 /// Write the run's facts of the turn's end in `run_dir` (ADR-t2179-1
 /// decision 2): the run branch's bundle on top of `base`, removed while
-/// the branch has no new commit, then the run's state. Each is written to
-/// a temporary file and renamed, the bundle first.
+/// the branch has no new commit, then the run's state, of the turn's end.
+/// Each is written to a temporary file and renamed, the bundle first.
 pub fn write_turn_end(clone: &Path, run_dir: &Path, base: &str, branch: &str) -> Result<RunState> {
     let head = git_ok(clone, &["rev-parse", "--verify", "HEAD^{commit}"])?
         .trim()
@@ -314,14 +343,21 @@ pub fn write_turn_end(clone: &Path, run_dir: &Path, base: &str, branch: &str) ->
         head,
         status,
         rebase_in_progress,
+        turn_ended: Some(true),
     };
+    write_state(run_dir, &state)?;
+    Ok(state)
+}
+
+/// Write `state` as the run's state in `run_dir`, to a temporary file
+/// renamed into place.
+fn write_state(run_dir: &Path, state: &RunState) -> Result<()> {
     let tmp = run_dir.join(format!("{RUN_STATE_FILE}.tmp"));
     remove_if_there(&tmp)?;
-    fs::write(&tmp, serde_json::to_vec(&state)?)
+    fs::write(&tmp, serde_json::to_vec(state)?)
         .with_context(|| format!("write {}", tmp.display()))?;
     fs::rename(&tmp, run_dir.join(RUN_STATE_FILE))
-        .with_context(|| format!("rename {} into place", tmp.display()))?;
-    Ok(state)
+        .with_context(|| format!("rename {} into place", tmp.display()))
 }
 
 /// Remove `path` (never what a symlink there points at), if it is there.

@@ -8,8 +8,53 @@
 use anyhow::Result;
 
 use super::{DenialLog, Gate};
-use crate::domain::task_hold::{HoldRecorded, HoldTarget, ReleaseRecorded};
-use crate::domain::{ActorContext, Authorizer, Capability, Resource, RunId, TaskId};
+use crate::application::inherit::{ReleasedBranches, ReleasedRead};
+use crate::domain::task_hold::{
+    self, HoldRecorded, HoldState, HoldTarget, ProgressVersion, ReleaseChoice, ReleaseFacts,
+    ReleaseReadAt, ReleaseRecorded, TaskHold,
+};
+use crate::domain::{
+    ActorContext, Authorizer, Capability, CommitSha, Resource, RunId, Task, TaskId, TaskRun,
+};
+
+/// What a release reads before its store's transaction: the task, its
+/// open hold, its latest run with its [`ProgressVersion`], whether it has
+/// a session a resume goes on in and whether a result was kept for it
+/// ([`ReleaseFacts`]).
+#[derive(Debug, Clone)]
+pub struct ReleaseView {
+    pub task: Task,
+    pub hold: Option<TaskHold>,
+    pub run: Option<TaskRun>,
+    pub version: Option<ProgressVersion>,
+    pub session: bool,
+    pub kept: bool,
+}
+
+impl ReleaseView {
+    /// What the release decides on ([`task_hold::release_decision`]).
+    pub fn facts(&self) -> ReleaseFacts {
+        ReleaseFacts {
+            task: self.task.status(),
+            run: self.run.as_ref().map(TaskRun::status),
+            run_provider: self.run.as_ref().map(TaskRun::actual_provider),
+            session: self.session,
+            kept: self.kept,
+        }
+    }
+}
+
+/// A release as the store applies it: what it names, the provider and
+/// model it chose, and, for a release that ends the run for a new one,
+/// the work read of that run ([`ReleasedBranches::released_work`]) with
+/// the hold and the run's version it was read at, which the store's
+/// transaction checks again ([`task_hold::check_release_read`]).
+#[derive(Debug, Clone)]
+pub struct ReleaseRequest {
+    pub target: HoldTarget,
+    pub choice: ReleaseChoice,
+    pub work: Option<(ReleaseReadAt, ReleasedRead)>,
+}
 
 /// What the hold commands read and change of the queue.
 pub trait HoldStore: DenialLog {
@@ -24,12 +69,19 @@ pub trait HoldStore: DenialLog {
         by_role: &str,
         by_id: &str,
     ) -> Result<HoldRecorded>;
-    /// Release the open hold of the task `target` names.
+    /// What a release of the task `target` names reads before its
+    /// transaction.
+    fn release_view(&self, target: &HoldTarget) -> Result<ReleaseView>;
+    /// Release the open hold of the task `request.target` names. A release
+    /// that carries the run's work over calls `keep` with the run and the
+    /// head to keep inside its transaction, before it commits: an error
+    /// refuses the release, which changes nothing.
     fn release_task(
         &mut self,
-        target: &HoldTarget,
+        request: &ReleaseRequest,
         by_role: &str,
         by_id: &str,
+        keep: &dyn Fn(&TaskRun, &CommitSha) -> Result<()>,
     ) -> Result<ReleaseRecorded>;
 }
 
@@ -66,12 +118,51 @@ impl<'a, S: HoldStore> Holds<'a, S> {
         )
     }
 
-    /// `release`: release the open hold of the task `target` names.
-    pub fn release(&mut self, target: &HoldTarget) -> Result<ReleaseRecorded> {
+    /// `release`: release the open hold of the task `target` names, with
+    /// the provider and model of `choice` for the task's later turns and
+    /// runs (ADR-t1879-1). Once the run waits, a release that ends it for
+    /// a new one ([`task_hold::ends_run`]) reads its work first
+    /// (`branches`: its own commits, and its uncommitted work saved as a
+    /// commit; a release whose work cannot be saved is refused) and keeps
+    /// the head the next run carries over under `refs/dagq/runs/<run-id>`
+    /// in the store's transaction, before it commits: a head that cannot be
+    /// kept refuses the release, which then changes nothing, as does a
+    /// task whose hold or run moved since the work was read
+    /// (`release_read_moved`). While the run settles nothing is read: the
+    /// store refuses it with `hold_not_settled`.
+    pub fn release(
+        &mut self,
+        target: &HoldTarget,
+        choice: ReleaseChoice,
+        branches: &dyn ReleasedBranches,
+    ) -> Result<ReleaseRecorded> {
         self.authorize(target)?;
+        let view = self.store.release_view(target)?;
+        let work = match (&view.hold, &view.run, &view.version) {
+            (Some(hold), Some(run), Some(version))
+                if hold.state() == HoldState::Held
+                    && task_hold::ends_run(view.facts(), &choice) =>
+            {
+                let at = ReleaseReadAt {
+                    hold: hold.id,
+                    run: run.id().clone(),
+                    version: version.clone(),
+                };
+                Some((at, branches.released_work(run)?))
+            }
+            _ => None,
+        };
         let actor = self.gate.actor;
-        self.store
-            .release_task(target, actor.role().as_str(), actor.actor_id())
+        self.store.release_task(
+            &ReleaseRequest {
+                target: target.clone(),
+                choice,
+                work,
+            },
+            actor.role().as_str(),
+            actor.actor_id(),
+            &|run, head| branches.keep(run, head),
+        )
     }
 
     fn authorize(&self, target: &HoldTarget) -> Result<()> {
@@ -94,7 +185,6 @@ mod tests {
     use serde_json::Value;
 
     use super::*;
-    use crate::domain::task_hold::{HoldState, TaskHold};
     use crate::domain::{ActorRole, HoldId, StaticPolicy};
 
     #[derive(Default)]
@@ -145,17 +235,67 @@ mod tests {
             })
         }
 
+        fn release_view(&self, _: &HoldTarget) -> Result<ReleaseView> {
+            let task = Task::new(
+                TaskId::new(7),
+                crate::domain::NewTask {
+                    title: "t".into(),
+                    description: String::new(),
+                    acceptance: String::new(),
+                    verification_commands: Vec::new(),
+                    dependencies: Vec::new(),
+                    goal_dependencies: Vec::new(),
+                    goal_id: None,
+                    context: String::new(),
+                    required_evidence: Vec::new(),
+                    paths: Vec::new(),
+                    priority: Default::default(),
+                    change: None,
+                    provider: None,
+                    worker_mode: None,
+                    wait_for_build: false,
+                    execution_class: Default::default(),
+                },
+                "now".into(),
+            )?;
+            Ok(ReleaseView {
+                task,
+                hold: Some(hold(TaskId::new(7))),
+                run: None,
+                version: None,
+                session: false,
+                kept: false,
+            })
+        }
+
         fn release_task(
             &mut self,
-            target: &HoldTarget,
+            request: &ReleaseRequest,
             _: &str,
             _: &str,
+            _: &dyn Fn(&TaskRun, &CommitSha) -> Result<()>,
         ) -> Result<ReleaseRecorded> {
-            self.released.push(target.clone());
+            self.released.push(request.target.clone());
             Ok(ReleaseRecorded {
                 hold: hold(TaskId::new(7)),
                 continuation: "claim",
+                decision: task_hold::ReleaseDecision::Claim,
+                provider: None,
+                model: None,
+                inherit: None,
             })
+        }
+    }
+
+    /// Branches a release with no run never reads.
+    struct NoBranches;
+
+    impl ReleasedBranches for NoBranches {
+        fn released_work(&self, _: &TaskRun) -> Result<ReleasedRead> {
+            anyhow::bail!("no run's work is read")
+        }
+        fn keep(&self, _: &TaskRun, _: &CommitSha) -> Result<()> {
+            anyhow::bail!("no head is kept")
         }
     }
 
@@ -179,7 +319,7 @@ mod tests {
             let mut holds = Holds::new(&mut store, &actor, &StaticPolicy);
             for target in &targets {
                 let held = holds.hold(target, "the login expired", None);
-                let released = holds.release(target);
+                let released = holds.release(target, ReleaseChoice::default(), &NoBranches);
                 assert_eq!(held.is_ok(), may, "{actor:?}");
                 assert_eq!(released.is_ok(), may, "{actor:?}");
                 if let Err(error) = held {

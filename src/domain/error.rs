@@ -2,8 +2,8 @@ use std::fmt;
 
 use super::{
     AskKind, AskReason, CheckStatus, FindingId, FindingStatus, GoalId, GoalVerdict, HoldId,
-    ProposalId, ProposalStatus, ReceiptResult, ReplanId, RequestId, RunId, RunStatus, TaskAction,
-    TaskId, TaskStatus,
+    ProposalId, ProposalStatus, Provider, ReceiptResult, ReplanId, RequestId, RunId, RunStatus,
+    TaskAction, TaskId, TaskStatus,
     plan_request::RequestStatus,
     task_replan::{GuardedStep, ReplanStatus},
 };
@@ -346,6 +346,19 @@ pub enum DomainError {
     HoldNotSettled {
         task_id: TaskId,
         hold: HoldId,
+    },
+    /// A release whose task moved between its reading of the run's work and
+    /// its transaction: the hold it read was released (and another may be
+    /// open), or the run went on ([`super::task_hold::check_release_read`]).
+    ReleaseReadMoved {
+        task_id: TaskId,
+        hold: HoldId,
+    },
+    /// A release chose a model its worker's provider does not take
+    /// ([`super::worker_model::check_model`]).
+    WorkerModelRefused {
+        provider: Provider,
+        model: String,
     },
     /// A replanning operation on a run its task no longer waits on.
     RunNotReplannable {
@@ -928,6 +941,21 @@ impl fmt::Display for DomainError {
                 f,
                 "hold_not_settled: task {task_id}'s hold {hold} is still settling (a step that was going when it was held still goes); release it once it waits"
             ),
+            Self::ReleaseReadMoved { task_id, hold } => write!(
+                f,
+                "release_read_moved: task {task_id}'s hold or run moved while the run's work was read (a release, a resume or a hold came in between; hold {hold} is open now); nothing is released, release it again"
+            ),
+            Self::WorkerModelRefused { provider, model } => match provider {
+                Provider::Codex => write!(
+                    f,
+                    "model {model} is refused: codex runs its own model and the runtime passes it none, so --model does not go with a codex worker"
+                ),
+                Provider::Claude => write!(
+                    f,
+                    "model {model} is not one claude takes for a worker: {}",
+                    super::worker_model::MODELS.join(", ")
+                ),
+            },
             Self::RunNotReplannable {
                 run_id,
                 status,

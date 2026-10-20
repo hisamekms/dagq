@@ -132,6 +132,8 @@ workerのproviderはtaskが選び、経路は非対話だけ（[ADR-t813-2](../a
 - 実行ファイルの解決は[Provider executables](provider-executables.md)、`up`での固定は[運用](../development/operations.md)の「`up`のコマンド」。
 - 落とし穴: Claudeの`permissions.deny`はコマンドの先頭しか拒めないので、pidで止める規則をpromptでも伝える。
 - Codexで動かすtaskは`subagent_review`を要るevidenceから外す（`domain::required_of`）。
+- 約束: `in_progress`のtaskのproviderとmodelを変えるのはholdの解除だけ。
+  Claudeはturnごとにmodelを受けるのでmodelだけならresumeで続け、Codexはmodelを受けないので`--model`を拒み、providerを変えればrunを終えて成果を引き継ぐ新しいrunにする（`worker_model::check_model`、[needs_session](supervisor-lifecycle/needs-session.md#taskのhold)）。
 
 ### Codexの非対話のworker
 

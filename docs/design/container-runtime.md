@@ -211,7 +211,7 @@ executorは`application::run_container::PodmanActorExecutor`、設定の読み�
   podmanのcwdはrun dirで、制御側はcloneでプログラムを起動しない（上の「git」）。
 - buildの出力: `dagq.toml`の`[container.build_output]`が名指すcontainerの中のdirに、runごとのvolumeをmountする（綴りと意味と既定の無しは`run_env::CONTAINER_BUILD_OUTPUT_TABLE`のdoc comment）。
   runtimeは言語の道具を知らず、projectが`[run.env]`で道具をそこに向ける。
-- containerの中: `dagq relay turn`がturnの始めにmainのbundleをcloneの`refs/remotes/dagq/main`に取り込み、転送を起動し、tokenのファイルを読んで`ANTHROPIC_AUTH_TOKEN`とproxyのURLに入れ、agentをcloneで動かす。
+- containerの中: `dagq relay turn`がturnの始めに状態のファイルへ終わっていない印を付け、mainのbundleをcloneに取り込み、転送を起動し、tokenからagentのenvを作り、agentをcloneで動かす。
   agentが終われば結果に依らず、run branchのbundleと状態のファイルを上の「git」の形で書く。
   agentのhomeはrun dirの下に置き、次のturnがsessionをresumeできる。
 - transcript: agentのhomeの`.claude`の下に、containerの中のcwd（clone）を名にしたprojectのdirでできる。

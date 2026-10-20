@@ -604,6 +604,28 @@ pub fn park_for_hold(mut run: TaskRun, reason: String) -> Result<TaskRun, Domain
     Ok(run)
 }
 
+/// End a run whose task's hold a person released with a new run
+/// (ADR-t1879-1): a run at rest in its hold's wait (waiting for a session,
+/// to land or for its validation, or stopped) becomes `failed` with
+/// `reason` as `last_error`. Its task is ready again in the same step, so
+/// no recovery job takes it.
+pub fn end_for_release(mut run: TaskRun, reason: String) -> Result<TaskRun, DomainError> {
+    require_status(
+        &run,
+        &[
+            RunStatus::Validating,
+            RunStatus::AwaitingIntegration,
+            RunStatus::NeedsSession,
+            RunStatus::Failed,
+            RunStatus::Interrupted,
+        ],
+        "end for a release",
+    )?;
+    run.status = RunStatus::Failed;
+    run.last_error = Some(reason);
+    Ok(run)
+}
+
 /// A runtime error on the run: `message` becomes `last_error` and the
 /// status stays, whether or not its supervisor lets it go.
 pub fn abandon(mut run: TaskRun, message: String) -> Result<TaskRun, DomainError> {

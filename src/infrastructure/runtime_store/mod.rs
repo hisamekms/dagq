@@ -150,6 +150,32 @@ fn save_run_row(
     )? == 1)
 }
 
+/// End run `id` for the release of its task's hold that chose a new run
+/// (ADR-t1879-1), inside the caller's transaction: `failed` with `reason`
+/// ([`run::end_for_release`]), and, when the next run carries its work
+/// over, `triage_finished` with `carried` as its payload (a retry by hand,
+/// `retry_inherit` with the role that released it as `by`, which the
+/// automatic retry's once-per-task count leaves out). The stored run comes
+/// back.
+pub(super) fn end_released_run(
+    conn: &Connection,
+    id: &RunId,
+    reason: String,
+    carried: Option<serde_json::Value>,
+) -> Result<TaskRun> {
+    let run = stored_run(conn, id)?.with_context(|| format!("run {id} does not exist"))?;
+    let from = run.status();
+    let run = run::end_for_release(run, reason)?;
+    ensure!(
+        save_run(conn, &run, from, None)?,
+        "run {id} changed while it was released; nothing is released, try again"
+    );
+    if let Some(payload) = carried {
+        run_event(conn, id, EventKind::TriageFinished, payload)?;
+    }
+    Ok(run)
+}
+
 /// Read the run, apply the domain `command` and save the result, inside
 /// the caller's transaction; the stored (not relocated) run comes back.
 /// A missing run, a command the domain refuses and a row that changed

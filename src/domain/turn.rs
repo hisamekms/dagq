@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 
 use super::{
     DomainError, RunEvent,
+    run::payload::{restore, typed},
     stats::timestamp_millis,
     tokens::{ExecutionContext, ModelTokens, RolloutUsage, TokenSource, TokenUsage},
     transcript::Turn,
@@ -1068,6 +1069,54 @@ pub fn codex_span_turns(
     Ok(turns)
 }
 
+/// A turn of a run's worker as its `turn_started`, `turn_finished` and
+/// `turn_session_identified` record it, restored as the typed values the
+/// readers of other contexts decide by (C6 of docs/design/architecture.md).
+/// It never refuses a payload: a missing key, `null` or a value of another
+/// type (an older writer) reads as absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordedTurn {
+    /// The wrapper started turn `turn`, counted across the run.
+    Started { turn: Option<u64> },
+    /// Turn `turn` ended; `answered` when its model answered in its
+    /// session (`session_created`), which then has a conversation to
+    /// resume.
+    Finished { turn: Option<u64>, answered: bool },
+    /// The provider named the session it started (`Some`, Codex's thread),
+    /// or said it kept none of the id the turn was to resume (`None`),
+    /// which the wrapper then forgot.
+    Session { id: Option<String> },
+}
+
+/// The keys of a turn's event [`RecordedTurn`] reads.
+#[derive(Debug, Default, Deserialize)]
+struct RecordedTurnPayload {
+    #[serde(default, deserialize_with = "typed")]
+    turn: Option<u64>,
+    #[serde(default, deserialize_with = "typed")]
+    session_created: Option<bool>,
+    #[serde(default, deserialize_with = "typed")]
+    session_id: Option<String>,
+}
+
+impl RecordedTurn {
+    /// `event` restored; `None` for an event of another kind.
+    pub fn restore(event: &RunEvent) -> Option<Self> {
+        let payload: RecordedTurnPayload = restore(&event.payload);
+        Some(match event.kind.known()? {
+            EventKind::TurnStarted => Self::Started { turn: payload.turn },
+            EventKind::TurnFinished => Self::Finished {
+                turn: payload.turn,
+                answered: payload.session_created == Some(true),
+            },
+            EventKind::TurnSessionIdentified => Self::Session {
+                id: payload.session_id,
+            },
+            _ => return None,
+        })
+    }
+}
+
 impl std::fmt::Display for TurnOutcome {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
@@ -1079,7 +1128,78 @@ mod tests {
     use super::*;
     use crate::domain::event_kind::TURN_FINISHED;
     use crate::domain::event_kind::TURN_REQUESTED;
+    use crate::domain::event_kind::TURN_SESSION_IDENTIFIED;
     use crate::domain::event_kind::TURN_STARTED;
+
+    /// Each turn's event restores as what it says; a key an older writer
+    /// left out, wrote `null` or of another type reads as absent, and an
+    /// event of another kind restores as none.
+    #[test]
+    fn a_recorded_turn_restores_what_its_event_says_and_reads_an_older_one_as_absent() {
+        let event = |kind: &str, payload: Value| RunEvent {
+            id: crate::domain::EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.into(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        };
+        let restored = |kind: &str, payload: Value| RecordedTurn::restore(&event(kind, payload));
+        assert_eq!(
+            restored(TURN_STARTED, json!({"turn": 2, "resume": true})),
+            Some(RecordedTurn::Started { turn: Some(2) })
+        );
+        assert_eq!(
+            restored(TURN_FINISHED, json!({"turn": 2, "session_created": true})),
+            Some(RecordedTurn::Finished {
+                turn: Some(2),
+                answered: true
+            })
+        );
+        assert_eq!(
+            restored(
+                TURN_SESSION_IDENTIFIED,
+                json!({"turn": 1, "session_id": "thread-1"})
+            ),
+            Some(RecordedTurn::Session {
+                id: Some("thread-1".to_owned())
+            })
+        );
+        for older in [
+            json!({}),
+            json!(null),
+            json!({"turn": "2", "session_created": "true", "session_id": 7}),
+        ] {
+            assert_eq!(
+                restored(TURN_STARTED, older.clone()),
+                Some(RecordedTurn::Started { turn: None }),
+                "{older}"
+            );
+            assert_eq!(
+                restored(TURN_FINISHED, older.clone()),
+                Some(RecordedTurn::Finished {
+                    turn: None,
+                    answered: false
+                }),
+                "{older}"
+            );
+            assert_eq!(
+                restored(TURN_SESSION_IDENTIFIED, older.clone()),
+                Some(RecordedTurn::Session { id: None }),
+                "{older}"
+            );
+        }
+        assert_eq!(
+            restored(
+                TURN_SESSION_IDENTIFIED,
+                json!({"session_id": null, "missing": "thread-1"})
+            ),
+            Some(RecordedTurn::Session { id: None })
+        );
+        assert_eq!(restored(TURN_REQUESTED, json!({"turn": 1})), None);
+    }
 
     #[test]
     fn the_answers_whose_turn_never_started_are_waiting_or_taken_but_not_dropped() {

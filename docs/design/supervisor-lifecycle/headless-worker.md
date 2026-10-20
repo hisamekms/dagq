@@ -289,8 +289,8 @@ workerのsession wrapperは、supervisorから切り離したprocess（自分の
 保留の柵を越えたrunには次のturnを送らず、wrapperもturnを始める前ごとに柵を見て終わり、柵の後のreceiptは受理せず、上限を過ぎた書き手は記録したhandleとturnだけを止める（`replan_park.rs`、[taskの再計画](../../plans/task-replanning.md#実装の状態)）。
 
 taskのholdも同じ柵の理由の1つで、別の止め方を持たない（[ADR-t1879-1](../../adr/2026-10-07-t1879-1-hold-a-task-at-the-turn-boundary-and-release-it-explicitly.md)決定7）。
-走っていたturnの終わりを待ってsessionを閉じ、snapshotを取らずworktreeをそのままに`needs_session`で待たせ、そのturnのreceiptは検証するが次の工程は始めず、解除の後は同じsessionで続ける。
-書き手の終わりの確かめ方と、leaseの返却を書き手の終わりと数えないことは`replan_park.rs`のmodule docが持つ（[needs_session](needs-session.md#taskのhold)）。
+走っていたturnの終わりを待ってsessionを閉じ、snapshotを取らずworktreeをそのままに`needs_session`で待たせ、そのturnのreceiptは検証するが次の工程は始めない。
+解除の後の続け方は[needs_session](needs-session.md#taskのhold)が、書き手の終わりの確かめ方と、leaseの返却を書き手の終わりと数えないことは`replan_park.rs`のmodule docが持つ。
 
 ## 非対話のruntimeのplanner<a id="非対話のruntimeのplanner"></a>
 

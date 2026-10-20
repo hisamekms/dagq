@@ -847,14 +847,11 @@ impl Supervisor<'_> {
         let unreadable = |error: anyhow::Error| format!("{error:#}");
         match action {
             RecoveryAction::Retry => {
-                let failures = self
-                    .queue
-                    .show(run.task_id())
-                    .map_err(unreadable)?
-                    .runs
-                    .iter()
-                    .filter(|r| matches!(r.status(), RunStatus::Failed | RunStatus::Interrupted))
-                    .count();
+                let detail = self.queue.show(run.task_id()).map_err(unreadable)?;
+                let failures = crate::domain::recovery::retry_failures(
+                    detail.runs.iter().map(|r| (r.id(), r.status())),
+                    &detail.events,
+                );
                 if failures >= TRIAGE_RETRY_FAILURES {
                     return Err(format!(
                         "task {} has {failures} failed or interrupted runs, so it is not retried without a person",

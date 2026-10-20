@@ -417,6 +417,7 @@ pub(super) const TRANSACTIONS: &[Transaction] = &[
     transaction("T11", Execution, "src/infrastructure/runtime_store/coordination.rs", "heartbeat", "the registration and the leases agree"),
     transaction("T12", Execution, "src/infrastructure/runtime_store/transitions.rs", "close_satisfied", "a verified already_satisfied claim's run closes without a commit and its task completes in one step (ADR-t1818-1)"),
     transaction("T12", Execution, "src/infrastructure/runtime_store/transitions.rs", "decide_satisfied", "a person's retry or cancel fails the run and moves its task in one step (ADR-t1818-1)"),
+    transaction("T13", Planning, "src/infrastructure/task_holds.rs", "release_task", "a release that chooses a new run closes the hold, ends the run and readies its task in one step, and refuses before it records anything while the run settles (ADR-t1879-1)"),
 ];
 
 const COORDINATION: &str = "src/infrastructure/runtime_store/coordination.rs";
@@ -612,6 +613,7 @@ pub(super) const PORTS: &[Port] = &[
 pub(super) const OUTER_PORTS: &[OuterPort] = &[
     outer_port("src/application/inherit.rs", "InheritStore", Some(Execution), Public(Only(&[Planning]))), // ready --inherit (T10)
     outer_port("src/application/inherit.rs", "CarriedBranches", Some(Execution), Public(Only(&[Planning]))), // ready --inherit (T10)
+    outer_port("src/application/inherit.rs", "ReleasedBranches", Some(Execution), Public(Only(&[Planning]))), // the release of a task's hold that ends its run for a new one (T13)
     outer_port("src/application/agent_eval.rs", "EvalStore", Some(Execution), Public(Only(&[Host]))), // through AgentEvals to the CLI and the queue service; they write requests only
     outer_port("src/application/agent_cases.rs", "CaseSetStore", Some(Execution), Public(Only(&[Host]))), // through AgentCaseSets to the CLI and the queue service; they write requests and a person's decisions only
     outer_port("src/application/commands/requests.rs", "RequestStore", Some(Planning), Internal),

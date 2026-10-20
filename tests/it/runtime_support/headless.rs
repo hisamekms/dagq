@@ -348,11 +348,15 @@ pub fn launch_background(
         return Ok(handle);
     }
     let (db, ready) = (backend.db.clone(), backend.headless_ready.clone());
+    let gate = backend.launch_gate.clone().filter(|_| !resume);
     let sccache = backend.sccache.clone();
     let inherited_env = backend.inherited_env.clone();
     let processes = backend.wrapper_processes.clone();
     let containers = backend.containers.clone();
     let worker = thread::spawn(move || {
+        if let Some(gate) = &gate {
+            wait_for_file(gate);
+        }
         let spawner = ReadySpawner {
             inner: StubSpawner { db: db.clone() },
             ready,

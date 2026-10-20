@@ -640,6 +640,16 @@ pub fn edit(mut task: Task, edit: TaskEdit) -> Result<Task, DomainError> {
     Ok(task)
 }
 
+/// A release's change of the provider of `task`'s worker (ADR-t1879-1):
+/// its later turns and runs take `provider` in its default mode. A release
+/// is the only change of an `in_progress` task's provider; `edit` changes
+/// a draft's or a submitted one's.
+pub fn release_on(mut task: Task, provider: Provider) -> Result<Task, DomainError> {
+    task.worker = task.worker.with(Some(provider), None)?;
+    task.named_mode = None;
+    Ok(task)
+}
+
 /// Replace only verification commands after a run has ended. The store
 /// checks the run history in the same transaction before calling this.
 pub fn edit_ended_verify(mut task: Task, edit: TaskEdit) -> Result<Task, DomainError> {

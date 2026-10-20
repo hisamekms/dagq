@@ -1801,6 +1801,15 @@ pub trait Repository: RepositoryReads {
         let _ = worktree;
         anyhow::bail!("this repository lists no untracked files")
     }
+    /// A commit on top of the worktree's head whose tree is the worktree as
+    /// it stands (its staged, unstaged and untracked work Git does not
+    /// ignore), with `message`, made without changing the worktree or its
+    /// index; `None` for a clean worktree. What a release that ends a run
+    /// for a new one saves of its uncommitted work (ADR-t1879-1).
+    fn worktree_snapshot(&self, worktree: &Path, message: &str) -> Result<Option<CommitSha>> {
+        let _ = (worktree, message);
+        anyhow::bail!("this repository saves no worktree")
+    }
     /// The Git operation half done in the worktree (`rebase`, `merge`,
     /// `cherry-pick`, `revert`), if any.
     fn git_operation(&self, worktree: &Path) -> Result<Option<&'static str>> {

@@ -111,31 +111,37 @@ impl Supervisor<'_> {
             ))
     }
     /// What `run` inherits from an earlier run of its task that was retried
-    /// with its branch carried over (ADR-0047 decision 24): the latest such
-    /// run, so that a run after it that failed early (and was retried by
-    /// the triage) does not lose the carried-over work. Its own commits are
-    /// counted from their merge base with `run`'s base, the current main.
+    /// with its branch carried over (ADR-0047 decision 24): the one
+    /// [`crate::domain::resume::inherited_from`] picks, the latest such run
+    /// unless a release started afresh since. Its own commits are counted
+    /// from their merge base with `run`'s base, the current main.
     fn inheritance(&mut self, run: &TaskRun) -> Result<Option<Inheritance>> {
         let runs = self.queue.show(run.task_id())?.runs;
-        for previous in runs
+        let previous: Vec<&TaskRun> = runs
             .iter()
             .take_while(|other| other.id() != run.id())
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
+            .collect();
+        let events = previous
+            .iter()
+            .map(|previous| self.queue.run_events(previous.id()))
+            .collect::<Result<Vec<_>>>()?;
+        let Some(at) = crate::domain::resume::inherited_from(events.iter().map(Vec::as_slice))
+        else {
+            return Ok(None);
+        };
+        let Some(mut inherited) = Inheritance::of(&*self.files, previous[at], &events[at]) else {
+            return Ok(None);
+        };
+        if let Ok(Some(base)) = self
+            .repository
+            .merge_base(run.base_commit().as_str(), &inherited.head)
         {
-            let events = self.queue.run_events(previous.id())?;
-            if let Some(mut inherited) = Inheritance::of(&*self.files, previous, &events) {
-                if let Ok(Some(base)) = self
-                    .repository
-                    .merge_base(run.base_commit().as_str(), &inherited.head)
-                {
-                    inherited.base = base;
-                }
-                return Ok(Some(inherited));
-            }
+            inherited.base = base;
         }
-        Ok(None)
+        Ok(Some(inherited))
     }
     /// Write `run`'s prompt (`prompt.txt` in `run_dir`) for its task, as
     /// its worker's route and provider take it, with the known failures in

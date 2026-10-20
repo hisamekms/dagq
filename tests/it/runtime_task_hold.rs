@@ -142,10 +142,10 @@ fn answered_decide(queue: &mut SqliteQueue, run: &TaskRun, answer: &str) -> AskI
 }
 
 /// (1) A hold that comes after the fill pass read its candidates keeps
-/// each start the pass then calls: the claim of a ready task, the
-/// recovery job of a stopped run and the resume of a `needs_session` run,
-/// whether the task or its run was named;
-/// and the release lets each go again.
+/// each start the pass then calls: the claim of a ready task, the resume
+/// of a `needs_session` run and the recovery job of a stopped run, whether
+/// the task or its run was named; the release lets the claim and the
+/// resume go again, and ends the stopped run for a new one.
 #[test]
 fn a_hold_after_the_line_was_read_keeps_the_claim_the_recovery_job_and_the_resume() {
     let (_dir, repo, db) = fixture();
@@ -175,7 +175,64 @@ fn a_hold_after_the_line_was_read_keeps_the_claim_the_recovery_job_and_the_resum
     );
     assert_eq!(queue.show(ready).unwrap().task.status(), TaskStatus::Ready);
 
+    // The ready task is claimed once released.
+    release(&db, &ready.to_string());
+    let ClaimOutcome::Claimed { run: claimed } = queue.claim(&base).unwrap() else {
+        panic!("the released task is claimed")
+    };
+    assert_eq!(claimed.task_id(), ready);
+
+    // The resume: a run a recovery round parked, a candidate when read,
+    // held, neither resumed nor given up; resumed in its session once
+    // released (a turn of it started, so it has one).
+    queue
+        .record_runtime_event(run.id(), EventKind::TurnStarted, json!({"turn": 1}))
+        .unwrap();
+    assert!(begin_round(&mut queue, &run).is_some());
+    let parked = finish_round(
+        &mut queue,
+        &run,
+        &TriageAction::Resume {
+            instruction: "go on".into(),
+        },
+    );
+    assert_eq!(parked.status(), RunStatus::NeedsSession);
+    assert!(
+        queue
+            .runs_needing_session()
+            .unwrap()
+            .iter()
+            .any(|candidate| candidate.run.id() == run.id())
+    );
+    hold(&db, "1");
+    let token = LeaseToken::new("s");
+    let resume = |queue: &mut SqliteQueue| {
+        queue
+            .begin_resume(run.id(), &token, &base, None, Default::default())
+            .unwrap()
+    };
+    assert!(resume(&mut queue).is_none());
+    assert_eq!(
+        queue.run(run.id()).unwrap().status(),
+        RunStatus::NeedsSession
+    );
+    release(&db, "1");
+    assert!(resume(&mut queue).is_some());
+    let stopped = queue
+        .finish_resume(
+            run.id(),
+            &token,
+            Some(RunStatus::Failed),
+            Some("the session failed"),
+            false,
+            json!({}),
+        )
+        .unwrap();
+    assert_eq!(stopped.status(), RunStatus::Failed);
+
     // The recovery job: due when read, held by its run's ID, not started.
+    // Its release, with nothing kept for the run, ends the stopped run for
+    // a new one (ADR-t1879-1): no round starts, and the task is ready.
     assert!(
         queue
             .runs_to_triage()
@@ -187,55 +244,19 @@ fn a_hold_after_the_line_was_read_keeps_the_claim_the_recovery_job_and_the_resum
     assert_eq!(held["hold"]["task_id"], 1);
     assert_eq!(held["hold"]["run_id"], json!(run.id()));
     assert!(begin_round(&mut queue, &run).is_none());
-    assert!(!kinds(&queue, &run).contains(&"triage_started".to_owned()));
-
-    // The release lets it start; its round parks the run for a resume.
-    release(&db, "1");
-    assert!(begin_round(&mut queue, &run).is_some());
-    let parked = finish_round(
-        &mut queue,
-        &run,
-        &TriageAction::Resume {
-            instruction: "go on".into(),
-        },
-    );
-    assert_eq!(parked.status(), RunStatus::NeedsSession);
-
-    // The resume: a candidate when read, held, neither resumed nor given
-    // up.
     assert!(
-        queue
-            .runs_needing_session()
-            .unwrap()
+        !kinds(&queue, &run)
             .iter()
-            .any(|candidate| candidate.run.id() == run.id())
+            .skip_while(|kind| *kind != "task_held")
+            .any(|kind| kind == "triage_started")
     );
-    hold(&db, "1");
-    let resume = |queue: &mut SqliteQueue| {
-        queue
-            .begin_resume(
-                run.id(),
-                &LeaseToken::new("s"),
-                &base,
-                None,
-                Default::default(),
-            )
-            .unwrap()
-    };
-    assert!(resume(&mut queue).is_none());
+    let released = release(&db, "1");
+    assert_eq!(released["continuation"], "new_run", "{released}");
+    assert!(begin_round(&mut queue, &run).is_none());
     assert_eq!(
-        queue.run(run.id()).unwrap().status(),
-        RunStatus::NeedsSession
+        queue.show(TaskId::new(1)).unwrap().task.status(),
+        TaskStatus::Ready
     );
-    release(&db, "1");
-    assert!(resume(&mut queue).is_some());
-
-    // The ready task is claimed once released.
-    release(&db, &ready.to_string());
-    let ClaimOutcome::Claimed { run: claimed } = queue.claim(&base).unwrap() else {
-        panic!("the released task is claimed")
-    };
-    assert_eq!(claimed.task_id(), ready);
 }
 
 /// (2) A recovery job's verdict that would move a task held after the job

@@ -277,11 +277,10 @@ pub fn ended_run_material(
     config: ResumeConfig,
     dir: &Path,
 ) -> String {
-    let failures = detail
-        .runs
-        .iter()
-        .filter(|r| matches!(r.status(), RunStatus::Failed | RunStatus::Interrupted))
-        .count();
+    let failures = crate::domain::recovery::retry_failures(
+        detail.runs.iter().map(|r| (r.id(), r.status())),
+        &detail.events,
+    );
     let read = |path: &Path| {
         files
             .read(path)

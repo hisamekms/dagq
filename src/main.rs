@@ -637,10 +637,21 @@ enum Command {
         #[arg(long)]
         until: Option<dagq::domain::stats::Cursor>,
     },
-    /// Release the hold of a task (TARGET: a task ID, or a run ID for its task): the runtime
-    /// takes the task by its own paths again from its next pass. Prints {"hold",
-    /// "continuation"}.
-    Release { target: String },
+    /// Release the hold of a task (TARGET: a task ID, or a run ID for its task), refused while
+    /// the step that went when it was held still goes (hold_not_settled). A held run with a
+    /// session goes on in it; a run that stopped, has no session, or is given another
+    /// --provider ends, and the next run carries its branch (and its uncommitted work, saved
+    /// as a commit) over. Prints {"hold", "continuation", "decision", ...}.
+    Release {
+        target: String,
+        /// The provider of the task's later turns and runs.
+        #[arg(long)]
+        provider: Option<String>,
+        /// The model of the task's later turns and runs (one the provider takes; codex takes
+        /// none).
+        #[arg(long)]
+        model: Option<String>,
+    },
     // ADR-t1521-1, ADR-t1521-2.
     /// Ask to replan a long-running run (a person's request, or a worker's proposal on its own
     /// run): the runtime diagnoses it and, only when it replans, parks the run at a safe boundary
@@ -2646,7 +2657,7 @@ fn requests(command: &Command) -> Vec<(Capability, Resource)> {
             ),
         },
         // The task of a run named is read from the queue.
-        Command::Hold { target, .. } | Command::Release { target } => {
+        Command::Hold { target, .. } | Command::Release { target, .. } => {
             one(C::TaskHold, hold_target_resource(target))
         }
         // The task of the run is read from the queue.
@@ -4484,10 +4495,22 @@ fn execute(cli: Cli) -> Result<Value> {
                 hold_until(until)?,
             )?)?
         }
-        Command::Release { target } => {
+        Command::Release {
+            target,
+            provider,
+            model,
+        } => {
+            let choice = dagq::domain::task_hold::ReleaseChoice {
+                provider: provider.as_deref().map(str::parse).transpose()?,
+                model,
+            };
             let mut holds =
                 dagq::application::commands::holds::Holds::new(&mut queue, &actor, &StaticPolicy);
-            serde_json::to_value(holds.release(&hold_target(&target)?)?)?
+            serde_json::to_value(holds.release(
+                &hold_target(&target)?,
+                choice,
+                &dagq::infrastructure::adapters::RunRepositories,
+            )?)?
         }
         Command::Replans { id: Some(id), .. } => {
             json!({"replans": [queue.replan_operation(dagq::domain::ReplanId::new(id))?]})

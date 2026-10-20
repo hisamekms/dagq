@@ -1982,6 +1982,32 @@ impl GitRepository {
         Ok(stdout)
     }
 
+    /// A commit on top of the worktree's head whose tree is the worktree
+    /// as it stands, staged, unstaged and untracked files Git does not
+    /// ignore alike, with `message`; `None` for a clean worktree. It is made
+    /// through an index of its own, so neither the worktree nor its index
+    /// changes.
+    pub fn worktree_snapshot(&self, worktree: &Path, message: &str) -> Result<Option<CommitSha>> {
+        run_clones::refuse_clone(worktree)?;
+        let head = self.head(worktree)?;
+        let index = env::temp_dir().join(format!("dagq-index-{}", uuid::Uuid::new_v4()));
+        let with_index = |args: &[&str]| {
+            let mut command = self.read_worktree(worktree);
+            command.env("GIT_INDEX_FILE", &index).args(args);
+            output(&mut command)
+        };
+        let tree = with_index(&["read-tree", head.as_str()])
+            .and_then(|_| with_index(&["add", "--all", "--", "."]))
+            .and_then(|_| with_index(&["write-tree"]));
+        let _ = fs::remove_file(&index);
+        let tree = tree?.trim().to_owned();
+        if tree == self.tree_of(head.as_str())? {
+            return Ok(None);
+        }
+        self.commit_tree(&tree, head.as_str(), &[message.to_owned()])
+            .map(Some)
+    }
+
     /// The worktree's untracked files Git does not ignore.
     pub fn untracked_paths(&self, worktree: &Path) -> Result<Vec<String>> {
         run_clones::refuse_clone(worktree)?;
@@ -2930,6 +2956,23 @@ impl crate::application::inherit::CarriedBranches for RunRepositories {
     }
 }
 
+impl crate::application::inherit::ReleasedBranches for RunRepositories {
+    fn released_work(&self, run: &TaskRun) -> Result<crate::application::inherit::ReleasedRead> {
+        match Self::of(run)? {
+            Some(repository) => crate::application::inherit::released_work(
+                run,
+                &super::run_files::LocalRunFiles,
+                &repository,
+            ),
+            None => Ok(Default::default()),
+        }
+    }
+
+    fn keep(&self, run: &TaskRun, head: &CommitSha) -> Result<()> {
+        crate::application::inherit::CarriedBranches::keep(self, run, head)
+    }
+}
+
 /// The Git port over the inherent methods above, which callers that hold a
 /// `GitRepository` keep using directly.
 impl Repository for GitRepository {
@@ -2979,6 +3022,9 @@ impl Repository for GitRepository {
     }
     fn untracked_paths(&self, worktree: &Path) -> Result<Vec<String>> {
         GitRepository::untracked_paths(self, worktree)
+    }
+    fn worktree_snapshot(&self, worktree: &Path, message: &str) -> Result<Option<CommitSha>> {
+        GitRepository::worktree_snapshot(self, worktree, message)
     }
     fn git_operation(&self, worktree: &Path) -> Result<Option<&'static str>> {
         GitRepository::git_operation(self, worktree)

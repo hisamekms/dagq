@@ -161,4 +161,5 @@ jobは状態を変えず読むだけ（`TRIAGE_ACCESS`）で、verdictはClaude�
 holdの開いたtaskの止まったrunには復旧jobを起動せず、`begin_triage`の確定の中でもholdを確かめ直す。
 holdの前に起動したjobのverdict（確定の中か適用の直前で読む）と`decide`の回答は、taskを進めず`hold_result_kept`に残し、ラウンドは`action: held`で終わる。
 解除の後の最初のpassが、版が変わっていなければ適用し、変わっていれば捨てて次のラウンドを待たせる（生きているsessionへのverdictは捨てる）。
+残した結果の無い止まったrunと、providerかmodelを選んだ解除は、復旧jobに回さず新しいrunにし、終えたrunはretryの失敗の数に数えない（`recovery::retry_failures`、[needs_session](needs-session.md#taskのhold)）。
 詳細は[taskのhold](../../plans/task-hold.md)が持つ。

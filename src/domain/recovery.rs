@@ -8,9 +8,31 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AskId, AskKind, AskReason, CommitSha, DomainError, RunEvent, RunStatus, TRIAGE_OPTIONS, TaskId,
-    parse_json_object,
+    AskId, AskKind, AskReason, CommitSha, DomainError, RunEvent, RunId, RunStatus, TRIAGE_OPTIONS,
+    TaskId, parse_json_object, task_hold::Released,
 };
+
+/// How many of a task's runs, by their `statuses` in the order of `runs`
+/// (each with its ID), count toward [`super::TRIAGE_RETRY_FAILURES`]: the
+/// `failed` and `interrupted` ones, but those a release of the task's hold
+/// ended for a new run (ADR-t1879-1), which a person chose and the run did
+/// not cause, as the task's `task_events` tell ([`Released::ended_run`] of
+/// the run's `task_released`).
+pub fn retry_failures<'a>(
+    runs: impl IntoIterator<Item = (&'a RunId, RunStatus)>,
+    task_events: &[RunEvent],
+) -> usize {
+    let released: Vec<&RunId> = task_events
+        .iter()
+        .filter(|event| Released::of_event(event).is_some_and(|released| released.ended_run()))
+        .filter_map(|event| event.run_id.as_ref())
+        .collect();
+    runs.into_iter()
+        .filter(|(id, status)| {
+            matches!(status, RunStatus::Failed | RunStatus::Interrupted) && !released.contains(id)
+        })
+        .count()
+}
 
 // The alert a recovery job is started for (`recovery_requested`'s `alert`,
 // ADR-0047 decision 39).
@@ -947,6 +969,37 @@ pub fn run_processes<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_run_a_release_ended_is_no_failure_toward_the_retry_limit() {
+        let id = |n: u8| RunId::new(format!("{n}1111111-1111-4111-8111-111111111111")).unwrap();
+        let (first, second, third) = (id(1), id(2), id(3));
+        let released = |run: &RunId, decision: &str| RunEvent {
+            id: super::super::EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: Some(run.clone()),
+            kind: super::super::EventKind::TaskReleased.into(),
+            payload: serde_json::json!({"hold_id": 1, "decision": decision}),
+            created_at: String::new(),
+            actor: None,
+        };
+        let runs = [
+            (&first, RunStatus::Failed),
+            (&second, RunStatus::Interrupted),
+            (&third, RunStatus::NeedsSession),
+        ];
+        assert_eq!(retry_failures(runs, &[]), 2);
+        // Ended by a release for a new run: not counted.
+        for decision in ["retry_inherit", "retry_fresh"] {
+            assert_eq!(retry_failures(runs, &[released(&first, decision)]), 1);
+        }
+        // A release that let the run go on, or a record before decisions.
+        assert_eq!(retry_failures(runs, &[released(&first, "resume")]), 2);
+        let mut old = released(&first, "resume");
+        old.payload = serde_json::json!({"hold_id": 1, "continuation": "continue"});
+        assert_eq!(retry_failures(runs, &[old]), 2);
+    }
 
     /// One of each action: the match makes a new variant fail to build
     /// until it is listed here and in [`RecoveryAction::NAMES`].

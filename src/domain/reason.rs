@@ -86,6 +86,7 @@ reason_codes! {
     Orphaned => "orphaned": "the run's registered processes were found dead and it was recovered",
     PushFailed => "push_failed": "the push of the landed main failed",
     GitFailed => "git_failed": "a Git command of the runtime failed (removing a landed worktree)",
+    Released => "released": "a person or the inbox released the run's task from its hold and chose a new run (another provider, no session to go on in, or a run that had stopped), so the run ended and the next run carries its work over",
     HoldCanceled => "hold_canceled": "a person answered cancel_affected to the authentication or usage-limit ask that held the run, and the supervisor gave the run up",
     Other => "other": "none of the above; the free text says why",
 }

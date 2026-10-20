@@ -291,4 +291,4 @@ Spikeは実装とworkerの総枠を共有し、枠を予約しない（[ADR-t148
   期限を過ぎたか、期限が無く既定の時間を超えたholdはattentionになり、`watch`には同じholdにつき一定の間隔ごとに1回だけ知らせる。
   holdは自動では解かれない。
   欄と判定の詳細は定義のそばのdoc commentと`--help`、[taskのhold](../../plans/task-hold.md)が持つ。
-- 解除の続け方の選択は予定で、[taskのhold](../../plans/task-hold.md)が持つ。
+- 解除の続け方の選択は[needs_session](needs-session.md#taskのhold)が持つ。

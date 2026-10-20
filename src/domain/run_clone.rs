@@ -40,7 +40,8 @@ pub const RUN_BUNDLE_FILE: &str = "run-branch.bundle";
 
 /// The run's state in the run directory ([`RunState`]), written by the
 /// container's executor with the bundle, at the end of each turn, after the
-/// bundle and by a rename like it.
+/// bundle and by a rename like it; marked by a rename at the start of each
+/// turn, before its agent runs ([`RunState::turn_ended`]).
 pub const RUN_STATE_FILE: &str = "run-state.json";
 
 /// Main's bundle in the run directory: a `git bundle` whose one ref is the
@@ -112,12 +113,13 @@ fn queue_dir(runs_dir: &Path) -> &Path {
 }
 
 /// The run's state as the container's executor read it in the clone at the
-/// end of a turn ([`RUN_STATE_FILE`]), as JSON:
+/// end of a turn ([`RUN_STATE_FILE`]), and marked at the start of the next
+/// ([`Self::turn_ended`]), as JSON:
 ///
 /// ```json
 /// {"branch": "refs/heads/dagq/<run id>", "head": "<full commit id>",
 ///  "status": "<git status --porcelain --untracked-files=all>",
-///  "rebase_in_progress": false}
+///  "rebase_in_progress": false, "turn_ended": true}
 /// ```
 ///
 /// `branch` is the ref `HEAD` points at (`null` when detached), `head` the
@@ -134,6 +136,14 @@ pub struct RunState {
     pub status: String,
     #[serde(default)]
     pub rebase_in_progress: bool,
+    /// Whether the state is of the end of the last turn the executor
+    /// started: `false` from that turn's start, before its agent runs,
+    /// until its end writes the state again, so the state a turn cut off
+    /// (its container gone with it) left is not taken for that turn's
+    /// work; absent from an executor that marks no turn, whose state
+    /// cannot tell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_ended: Option<bool>,
 }
 
 impl RunState {
@@ -154,6 +164,51 @@ impl RunState {
     pub fn head(&self) -> CommitSha {
         CommitSha::parse(self.head.to_ascii_lowercase(), "head")
             .expect("checked when the state was parsed")
+    }
+
+    /// Whether it says what the last turn the executor started left: only
+    /// when that turn's end wrote it ([`Self::turn_ended`]).
+    pub fn of_the_last_turn(&self) -> bool {
+        self.turn_ended == Some(true)
+    }
+}
+
+/// What a container's executor finds where the run's state goes when a
+/// turn starts ([`RUN_STATE_FILE`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StateFound {
+    Nothing,
+    /// A plain file whose bytes read as a state.
+    State(RunState),
+    /// A plain file whose bytes are no state, or a symlink in its place.
+    Unreadable,
+    /// Something else in its place (a directory), which no reader takes
+    /// for a state and the turn's end cannot write over either.
+    Other,
+}
+
+/// What the executor does with the state it found before its agent runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TurnStart {
+    Leave,
+    /// Write it back as of a turn that has not ended.
+    Mark(RunState),
+    Remove,
+}
+
+/// What a turn's start does with the state `found`, so that no facts an
+/// earlier turn left stand as the last turn's while the agent runs: a
+/// state is marked as of a turn that has not ended ([`RunState::turn_ended`]
+/// `false`), its other facts as they were; what cannot be read as one is
+/// removed; nothing, or something no reader takes for a state, is left.
+pub fn turn_start(found: StateFound) -> TurnStart {
+    match found {
+        StateFound::State(state) => TurnStart::Mark(RunState {
+            turn_ended: Some(false),
+            ..state
+        }),
+        StateFound::Unreadable => TurnStart::Remove,
+        StateFound::Nothing | StateFound::Other => TurnStart::Leave,
     }
 }
 
@@ -357,6 +412,59 @@ mod tests {
         assert!(RunState::parse(r#"{"branch":null,"head":"main"}"#).is_err());
         assert!(RunState::parse("not json").is_err());
         assert!(RunState::parse(&format!(r#"{{"head":"{HEAD}","extra":1}}"#)).is_err());
+    }
+
+    /// Only a state the last turn's end wrote is of that turn: one marked
+    /// at a turn's start, or one with no mark at all, is not.
+    #[test]
+    fn a_state_is_of_the_last_turn_only_once_its_end_wrote_it() {
+        let read = |mark: &str| RunState::parse(&format!(r#"{{"head":"{HEAD}"{mark}}}"#)).unwrap();
+        let ended = read(r#","turn_ended":true"#);
+        assert_eq!(ended.turn_ended, Some(true));
+        assert!(ended.of_the_last_turn());
+        let started = read(r#","turn_ended":false"#);
+        assert_eq!(started.turn_ended, Some(false));
+        assert!(!started.of_the_last_turn());
+        let unmarked = read("");
+        assert_eq!(unmarked.turn_ended, None);
+        assert!(!unmarked.of_the_last_turn());
+        assert!(
+            !serde_json::to_string(&unmarked)
+                .unwrap()
+                .contains("turn_ended")
+        );
+        assert_eq!(
+            RunState::parse(&serde_json::to_string(&ended).unwrap()).unwrap(),
+            ended
+        );
+    }
+
+    /// A turn's start marks a state, the last turn's end's or one with no
+    /// mark, keeping its other facts; removes what is no state; and leaves
+    /// nothing, or something no reader takes for a state, as it is.
+    #[test]
+    fn a_turn_s_start_marks_a_state_removes_what_is_no_state_and_leaves_the_rest() {
+        let ended = RunState::parse(&format!(
+            r#"{{"branch":null,"head":"{HEAD}","status":" M a\n","turn_ended":true}}"#
+        ))
+        .unwrap();
+        let unmarked = RunState {
+            turn_ended: None,
+            ..ended.clone()
+        };
+        let marked = RunState {
+            turn_ended: Some(false),
+            ..ended.clone()
+        };
+        for state in [ended, unmarked] {
+            assert_eq!(
+                turn_start(StateFound::State(state)),
+                TurnStart::Mark(marked.clone())
+            );
+        }
+        assert_eq!(turn_start(StateFound::Unreadable), TurnStart::Remove);
+        assert_eq!(turn_start(StateFound::Nothing), TurnStart::Leave);
+        assert_eq!(turn_start(StateFound::Other), TurnStart::Leave);
     }
 
     #[test]

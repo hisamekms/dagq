@@ -300,7 +300,7 @@ impl ReviseWatch {
         run: &TaskRun,
         receipt: &Path,
     ) -> Result<ReviseOutcome> {
-        let crate::application::run_git::SessionHead { head, clean } =
+        let crate::application::run_git::SessionHead { head, clean, .. } =
             crate::application::run_git::session_head(&*sv.repository, run)?;
         let parsed = sv
             .files

@@ -7,6 +7,7 @@ use super::{
     CommitSha, MAX_RESUME_ATTEMPTS, ReasonCode, RunEvent,
     reason::{event_code, explains_last_error},
     recheck,
+    task_hold::Released,
 };
 use crate::domain::EventKind;
 use crate::domain::run::{ConflictPrecheck, restore_payload};
@@ -409,6 +410,31 @@ pub fn retried_with_inheritance(run_events: &[RunEvent]) -> bool {
         .is_some_and(is_inherit_retry)
 }
 
+/// Which of a task's earlier runs the next run inherits, given each one's
+/// events newest first (`previous`): the latest ended by a retry that
+/// carried its branch over ([`retried_with_inheritance`]), so that a run
+/// after it that failed early does not lose the carried-over work; but
+/// none past a run a release of the task's hold ended for a new run from
+/// the current main (`retry_fresh` with nothing saved, ADR-t1879-1), which
+/// a person chose to start afresh. Its index in `previous`.
+pub fn inherited_from<'a>(previous: impl IntoIterator<Item = &'a [RunEvent]>) -> Option<usize> {
+    for (index, events) in previous.into_iter().enumerate() {
+        if retried_with_inheritance(events) {
+            return Some(index);
+        }
+        if events
+            .iter()
+            .filter_map(Released::of_event)
+            .any(|released| {
+                released.decision == Some(super::task_hold::ReleaseDecision::RetryFresh)
+            })
+        {
+            return None;
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
@@ -442,6 +468,66 @@ mod tests {
 
     fn pass() -> RunEvent {
         event("review_finished", json!({"verdict": "pass"}))
+    }
+
+    /// A release of a task's hold that ends its run for a new one carries
+    /// the branch over by hand (ADR-t1879-1): it neither uses the task's
+    /// one automatic retry nor gives back one used already.
+    #[test]
+    fn a_releases_carry_over_is_by_hand_and_leaves_the_automatic_retry_as_it_was() {
+        let reviewed = [pass(), conflict()];
+        for by in ["user", "inbox"] {
+            let released = event(
+                "triage_finished",
+                json!({"action": RETRY_INHERIT, "by": by, "released": 3}),
+            );
+            assert!(is_inherit_retry(&released));
+            assert!(!uses_automatic_inherit(&released), "{by}");
+            assert!(inherits_on_exhaustion(
+                &reviewed,
+                std::slice::from_ref(&released)
+            ));
+            let automatic = event(
+                "triage_finished",
+                json!({"action": RETRY_INHERIT, "by": "runtime"}),
+            );
+            assert!(!inherits_on_exhaustion(
+                &reviewed,
+                &[automatic.clone(), released.clone()]
+            ));
+            assert!(!inherits_on_exhaustion(&reviewed, &[released, automatic]));
+        }
+    }
+
+    /// The next run inherits the latest run that carried its branch over,
+    /// past runs that failed early, but not past a run a release ended for
+    /// a fresh run.
+    #[test]
+    fn a_fresh_release_bounds_the_search_for_a_carried_over_run() {
+        let carried = vec![event(
+            "triage_finished",
+            json!({"action": RETRY_INHERIT, "by": "runtime"}),
+        )];
+        let failed_early = vec![event("triage_finished", json!({"action": "retry"}))];
+        let fresh = vec![event(
+            "task_released",
+            json!({"hold_id": 1, "decision": "retry_fresh"}),
+        )];
+        let resumed = vec![event(
+            "task_released",
+            json!({"hold_id": 1, "decision": "resume"}),
+        )];
+        let newest_first =
+            |runs: &[&Vec<RunEvent>]| inherited_from(runs.iter().map(|events| events.as_slice()));
+        assert_eq!(newest_first(&[&carried]), Some(0));
+        assert_eq!(newest_first(&[&failed_early, &carried]), Some(1));
+        assert_eq!(newest_first(&[&resumed, &carried]), Some(1));
+        assert_eq!(newest_first(&[&fresh, &carried]), None);
+        assert_eq!(newest_first(&[&failed_early, &fresh, &carried]), None);
+        assert_eq!(newest_first(&[]), None);
+        // A fresh release whose saved work is carried over is inherited.
+        let fresh_saved = [fresh.clone(), carried.clone()].concat();
+        assert_eq!(newest_first(&[&fresh_saved]), Some(0));
     }
 
     #[test]

@@ -30,8 +30,8 @@ use crate::domain::EventKind;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    DomainError, EventId, HoldId, RunEvent, RunId, RunStatus, TaskId, TaskStatus, error::require,
-    task_replan::GuardedStep,
+    CommitSha, DomainError, EventId, HoldId, Provider, RunEvent, RunId, RunStatus, TaskId,
+    TaskStatus, error::require, task_replan::GuardedStep, turn::RecordedTurn,
 };
 
 /// An open hold of a task, as the queue keeps it.
@@ -102,13 +102,232 @@ pub struct HoldRecorded {
     pub state: HoldState,
 }
 
-/// A release as `release` recorded it: the hold it closed and how the
-/// task goes on (`claim`: back among the claims; `continue`: its run goes
-/// on by the supervisor's paths).
+/// A release as `release` recorded it: the hold it closed, how the task
+/// goes on (`continuation`, [`ReleaseDecision::continuation`], and
+/// `decision`), the provider and model it chose, and what the next run
+/// carries over when it chose one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ReleaseRecorded {
     pub hold: TaskHold,
     pub continuation: &'static str,
+    pub decision: ReleaseDecision,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<Provider>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inherit: Option<ReleasedWork>,
+}
+
+/// What a release chooses besides lifting the mark (ADR-t1879-1): the
+/// provider and the model of the task's later turns and runs, each `None`
+/// to keep the task's. Only a release changes them on an `in_progress`
+/// task (`edit` takes a draft's or a submitted one's).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReleaseChoice {
+    pub provider: Option<Provider>,
+    pub model: Option<String>,
+}
+
+// How a released task goes on, `task_released`'s `decision`: `claim`, a
+// task with no run going is among the claims again; `resume`, its run goes
+// on in its session by its own path (a run waiting for a session through
+// the resume's entry, which may open a new session for a large context,
+// ADR-t2080-1; a run waiting to land to its landing); `retry_inherit`, its
+// run ends and the next run carries its branch over; `retry_fresh`, its
+// run ends with no commit of its own and the next run starts from the
+// current main (with the uncommitted work saved, when there was some).
+string_enum!(ReleaseDecision {
+    Claim => "claim",
+    Resume => "resume",
+    RetryInherit => "retry_inherit",
+    RetryFresh => "retry_fresh",
+});
+
+impl ReleaseDecision {
+    /// Whether the release ends the run for a new one.
+    pub const fn new_run(self) -> bool {
+        matches!(self, Self::RetryInherit | Self::RetryFresh)
+    }
+
+    /// `task_released`'s `continuation`: `claim`, `continue` (the run goes
+    /// on) or `new_run`.
+    pub const fn continuation(self) -> &'static str {
+        match self {
+            Self::Claim => "claim",
+            Self::Resume => "continue",
+            Self::RetryInherit | Self::RetryFresh => "new_run",
+        }
+    }
+}
+
+/// `task_released` as the store records it and the readers of other
+/// contexts restore it ([`Self::of_event`]), the run that the release
+/// found latest being the event's run. Events written before a field was
+/// recorded restore it as its default: no `decision`, no model.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Released {
+    pub hold_id: Option<HoldId>,
+    #[serde(default)]
+    pub continuation: String,
+    #[serde(default)]
+    pub decision: Option<ReleaseDecision>,
+    #[serde(default)]
+    pub held_secs: i64,
+    #[serde(default)]
+    pub settled_secs: Option<i64>,
+    #[serde(default)]
+    pub provider: Option<Provider>,
+    /// The model and effort of the task's later sessions the release
+    /// chose; none when it chose no model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    /// What the next run carries over; written, not restored.
+    #[serde(default, skip_deserializing)]
+    pub inherit: Option<ReleasedWork>,
+}
+
+impl Released {
+    /// The release `event` records; `None` for another kind or a payload
+    /// that does not restore.
+    pub fn of_event(event: &RunEvent) -> Option<Self> {
+        if event.kind != EventKind::TaskReleased {
+            return None;
+        }
+        serde_json::from_value(event.payload.clone()).ok()
+    }
+
+    /// The model and effort the release chose for the task's later
+    /// sessions, if it chose a model.
+    pub fn session(&self) -> Option<(&str, &str)> {
+        Some((self.model.as_deref()?, self.effort.as_deref()?))
+    }
+
+    /// Whether the release ended the event's run for a new one.
+    pub fn ended_run(&self) -> bool {
+        self.decision.is_some_and(ReleaseDecision::new_run)
+    }
+}
+
+/// What a release reads of a task and its latest run to choose how it
+/// goes on: the task's status, the run's status and the provider it runs
+/// on, whether it has a session a resume goes on in
+/// ([`session_to_resume`]), and whether a recovery job's result or a
+/// person's answer to it was kept for the run while it was held and is
+/// not settled yet (`kept`, [`disposition`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReleaseFacts {
+    pub task: TaskStatus,
+    pub run: Option<RunStatus>,
+    pub run_provider: Option<Provider>,
+    pub session: bool,
+    pub kept: bool,
+}
+
+/// Whether the release of a task at `facts` with `choice` ends its run for
+/// a new one: an `in_progress` task whose waiting run has no session to go
+/// on in or is asked to go on with another provider, whose session it
+/// cannot carry (a model alone does not: [`super::worker_model::check_model`]
+/// refuses one a provider does not take), or whose run stopped (`failed`,
+/// `interrupted`). A stopped run whose kept result the release leaves as
+/// it is (no provider and no model chosen) goes on by that result instead,
+/// applied after the release as when nothing moved.
+pub fn ends_run(facts: ReleaseFacts, choice: &ReleaseChoice) -> bool {
+    let Some(run) = facts.run else {
+        return false;
+    };
+    let other_provider = choice
+        .provider
+        .is_some_and(|provider| Some(provider) != facts.run_provider);
+    facts.task == TaskStatus::InProgress
+        && match run {
+            RunStatus::Failed | RunStatus::Interrupted => {
+                choice.provider.is_some() || choice.model.is_some() || !facts.kept
+            }
+            _ if run.is_unfinished() => !facts.session || other_provider,
+            _ => false,
+        }
+}
+
+/// How the release of a task at `facts` with `choice` goes on;
+/// `own_commits` says whether the run's branch holds commits of its own on
+/// top of its base, read only when the run ends ([`ends_run`]).
+pub fn release_decision(
+    facts: ReleaseFacts,
+    choice: &ReleaseChoice,
+    own_commits: bool,
+) -> ReleaseDecision {
+    if facts.task != TaskStatus::InProgress {
+        ReleaseDecision::Claim
+    } else if !ends_run(facts, choice) {
+        ReleaseDecision::Resume
+    } else if own_commits {
+        ReleaseDecision::RetryInherit
+    } else {
+        ReleaseDecision::RetryFresh
+    }
+}
+
+/// Why a release ended the run at `facts` for a new one, choosing
+/// `provider` ([`ends_run`]), in a person's words: the run's `last_error`
+/// after `released: ` and the reason of the retry by hand that carries it
+/// over.
+pub fn new_run_reason(facts: ReleaseFacts, provider: Option<Provider>) -> String {
+    match (facts.run, provider) {
+        (Some(run @ (RunStatus::Failed | RunStatus::Interrupted)), _) => format!(
+            "the hold was released and the run had stopped ({})",
+            run.as_str()
+        ),
+        (_, Some(provider)) if Some(provider) != facts.run_provider => format!(
+            "the hold was released with the provider changed to {}, which cannot go on in the run's session",
+            provider.as_str()
+        ),
+        _ => "the hold was released and the run had no session to go on in".to_owned(),
+    }
+}
+
+/// Whether the run's worker has had a session of its provider that the
+/// resume's entry goes on from, as the run's `events` tell by what the
+/// provider said since it last said it had no session it was to resume
+/// (Codex's thread gone), read as the execution context restores its turns
+/// ([`RecordedTurn`]): a turn whose model answered, a session the provider
+/// named (Codex's thread), or a turn, any of them, cut off before it ended
+/// (its wrapper died in it, so its answer is unknown and the provider may
+/// keep its session). A session started anew
+/// since (a large context's, another provider's) leaves it so: the
+/// resume's entry opens that one. A wrapper started, or turns that all
+/// ended with no answer (one a hold fenced before it began among them),
+/// leave no session.
+pub fn session_to_resume(events: &[RunEvent]) -> bool {
+    let turns: Vec<RecordedTurn> = events.iter().filter_map(RecordedTurn::restore).collect();
+    let since = turns
+        .iter()
+        .rposition(|turn| *turn == RecordedTurn::Session { id: None })
+        .map_or(&turns[..], |gone| &turns[gone + 1..]);
+    let ended = |started: Option<u64>| {
+        since
+            .iter()
+            .any(|turn| matches!(turn, RecordedTurn::Finished { turn, .. } if *turn == started))
+    };
+    since.iter().any(|turn| match turn {
+        RecordedTurn::Finished { answered, .. } => *answered,
+        RecordedTurn::Session { id } => id.is_some(),
+        RecordedTurn::Started { turn } => !ended(*turn),
+    })
+}
+
+/// What a release that ends a run for a new one carries over: the run's
+/// `branch`, the commit of its own work (`head`: its own commits, with its
+/// uncommitted work on top when there was some) and the commit that saved
+/// the uncommitted work (`saved`), kept as `refs/dagq/runs/<run-id>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReleasedWork {
+    pub branch: Option<String>,
+    pub head: CommitSha,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub saved: Option<CommitSha>,
 }
 
 // Where a hold stands: `settling` while a step that was going when it was
@@ -279,6 +498,43 @@ pub fn check_release(
         DomainError::HoldNotSettled {
             task_id: task,
             hold: open.id,
+        }
+    })
+}
+
+/// Where a release that ends a run for a new one read the run's work,
+/// before its store's transaction: the hold open then, the run and its
+/// [`ProgressVersion`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseReadAt {
+    pub hold: HoldId,
+    pub run: RunId,
+    pub version: ProgressVersion,
+}
+
+/// Whether a release may go on with what it read before its store's
+/// transaction, now that the transaction finds the task's latest run at
+/// `now` (`None` with no run) under its open hold `hold`. A release that
+/// ends the run (`ends`) or read the run's work (`read`) goes on only with
+/// the same hold open and the same run, which has not gone on: a hold
+/// released, the run resumed or ended and held again in between would
+/// otherwise end the newer hold and carry older work over, or drop the
+/// work read. Refused, which changes nothing, also when the release ends
+/// the run with no work read (`release_read_moved`).
+pub fn check_release_read(
+    task: TaskId,
+    hold: HoldId,
+    ends: bool,
+    read: Option<&ReleaseReadAt>,
+    now: Option<&ReleaseReadAt>,
+) -> Result<(), DomainError> {
+    if !ends && read.is_none() {
+        return Ok(());
+    }
+    require(read.is_some() && read == now, || {
+        DomainError::ReleaseReadMoved {
+            task_id: task,
+            hold,
         }
     })
 }
@@ -502,6 +758,7 @@ mod tests {
     use crate::domain::event_kind::HOLD_RESULT_KEPT;
     use crate::domain::event_kind::LEASE_RELEASED;
     use crate::domain::event_kind::TASK_HELD;
+    use crate::domain::event_kind::TASK_HOLD_REMINDED;
     use crate::domain::event_kind::TASK_RELEASED;
     use crate::domain::event_kind::WORKSPACE_CLOSED;
     use serde_json::json;
@@ -517,6 +774,233 @@ mod tests {
             by_id: "user".into(),
             created_at: 100,
             settled_at: settled.then_some(100),
+        }
+    }
+
+    fn facts(run: Option<RunStatus>, session: bool) -> ReleaseFacts {
+        ReleaseFacts {
+            task: TaskStatus::InProgress,
+            run,
+            run_provider: run.map(|_| Provider::Claude),
+            session,
+            kept: false,
+        }
+    }
+
+    fn choose(provider: Option<Provider>, model: Option<&str>) -> ReleaseChoice {
+        ReleaseChoice {
+            provider,
+            model: model.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_release_resumes_a_waiting_run_with_its_session_on_the_same_provider() {
+        for run in [
+            RunStatus::NeedsSession,
+            RunStatus::AwaitingIntegration,
+            RunStatus::Validating,
+        ] {
+            let facts = facts(Some(run), true);
+            for choice in [
+                choose(None, None),
+                choose(Some(Provider::Claude), None),
+                choose(None, Some("claude-sonnet-5")),
+            ] {
+                assert!(!ends_run(facts, &choice), "{run:?} {choice:?}");
+                for own in [true, false] {
+                    assert_eq!(
+                        release_decision(facts, &choice, own),
+                        ReleaseDecision::Resume,
+                        "{run:?} {choice:?} {own}"
+                    );
+                }
+            }
+        }
+        assert_eq!(ReleaseDecision::Resume.continuation(), "continue");
+        assert!(!ReleaseDecision::Resume.new_run());
+    }
+
+    #[test]
+    fn a_release_ends_the_run_for_another_provider_no_session_or_a_stopped_run() {
+        let codex = choose(Some(Provider::Codex), None);
+        let none = choose(None, None);
+        let cases = [
+            (facts(Some(RunStatus::NeedsSession), true), &codex),
+            (facts(Some(RunStatus::AwaitingIntegration), true), &codex),
+            (facts(Some(RunStatus::NeedsSession), false), &none),
+            (facts(Some(RunStatus::Failed), true), &none),
+            (facts(Some(RunStatus::Interrupted), true), &none),
+        ];
+        for (facts, choice) in cases {
+            assert!(ends_run(facts, choice), "{facts:?} {choice:?}");
+            assert_eq!(
+                release_decision(facts, choice, true),
+                ReleaseDecision::RetryInherit
+            );
+            assert_eq!(
+                release_decision(facts, choice, false),
+                ReleaseDecision::RetryFresh
+            );
+        }
+        assert_eq!(ReleaseDecision::RetryInherit.continuation(), "new_run");
+        assert!(ReleaseDecision::RetryFresh.new_run());
+    }
+
+    #[test]
+    fn a_stopped_run_goes_on_by_its_kept_result_unless_the_release_chose_a_provider_or_a_model() {
+        for run in [RunStatus::Failed, RunStatus::Interrupted] {
+            let kept = ReleaseFacts {
+                kept: true,
+                ..facts(Some(run), true)
+            };
+            assert!(!ends_run(kept, &choose(None, None)), "{run:?}");
+            assert_eq!(
+                release_decision(kept, &choose(None, None), true),
+                ReleaseDecision::Resume
+            );
+            for choice in [
+                choose(Some(Provider::Claude), None),
+                choose(None, Some("claude-sonnet-5")),
+            ] {
+                assert!(ends_run(kept, &choice), "{run:?} {choice:?}");
+            }
+        }
+        // A kept result does not keep a run that has no session.
+        let sessionless = ReleaseFacts {
+            kept: true,
+            ..facts(Some(RunStatus::NeedsSession), false)
+        };
+        assert!(ends_run(sessionless, &choose(None, None)));
+    }
+
+    #[test]
+    fn a_new_run_says_why_the_run_ended() {
+        let codex = Some(Provider::Codex);
+        assert!(
+            new_run_reason(facts(Some(RunStatus::Failed), true), codex)
+                .contains("stopped (failed)")
+        );
+        assert!(
+            new_run_reason(facts(Some(RunStatus::NeedsSession), true), codex)
+                .contains("provider changed to codex")
+        );
+        assert!(
+            new_run_reason(facts(Some(RunStatus::NeedsSession), false), None)
+                .contains("no session")
+        );
+    }
+
+    #[test]
+    fn a_release_of_a_task_with_no_run_going_lifts_the_mark_only() {
+        let codex = choose(Some(Provider::Codex), None);
+        for task in [
+            TaskStatus::Ready,
+            TaskStatus::Submitted,
+            TaskStatus::Completed,
+        ] {
+            let facts = ReleaseFacts {
+                task,
+                ..facts(Some(RunStatus::Failed), false)
+            };
+            assert!(!ends_run(facts, &codex), "{task:?}");
+            assert_eq!(
+                release_decision(facts, &codex, true),
+                ReleaseDecision::Claim
+            );
+        }
+        // A run that ended leaves nothing to end.
+        assert!(!ends_run(facts(Some(RunStatus::Integrated), false), &codex));
+        assert!(!ends_run(facts(None, false), &codex));
+        assert_eq!(ReleaseDecision::Claim.continuation(), "claim");
+    }
+
+    #[test]
+    fn a_session_to_resume_is_one_its_provider_answered_in_named_or_was_cut_off_in() {
+        use crate::domain::event_kind::{
+            EventKind, PROVIDER_SWITCHED, SESSION_RENEWED, TURN_FINISHED, TURN_SESSION_IDENTIFIED,
+            TURN_STARTED, WORKSPACE_CREATED, WRAPPER_LAUNCHED,
+        };
+        let event = |kind: &str, payload: serde_json::Value| RunEvent {
+            id: EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.into(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        };
+        let plain = |kind: &str| event(kind, json!({}));
+        let started = |turn: u64| event(TURN_STARTED, json!({"turn": turn}));
+        let finished = |turn: u64, created: bool| {
+            event(
+                TURN_FINISHED,
+                json!({"turn": turn, "session_created": created}),
+            )
+        };
+        let named =
+            |id: serde_json::Value| event(TURN_SESSION_IDENTIFIED, json!({"session_id": id}));
+        let with = |events: &[RunEvent], more: &[RunEvent]| [events, more].concat();
+        // A wrapper started, fenced by a hold before its first turn, or
+        // turns that all ended with no answer: no session.
+        let launched = [
+            plain("run_claimed"),
+            plain(WORKSPACE_CREATED),
+            plain(WRAPPER_LAUNCHED),
+        ];
+        assert!(!session_to_resume(&launched));
+        let withheld = plain(EventKind::TurnWithheld.as_str());
+        assert!(!session_to_resume(&with(&launched, &[withheld])));
+        let unanswered = with(&launched, &[started(1), finished(1, false)]);
+        assert!(!session_to_resume(&unanswered));
+        // A turn its model answered in (Claude's), a session the provider
+        // named with no answer yet (Codex's thread), or a turn cut off
+        // before it ended, the last or an earlier one, is one.
+        let answered = with(&launched, &[started(1), finished(1, true)]);
+        assert!(session_to_resume(&answered));
+        let thread = with(
+            &launched,
+            &[started(1), named(json!("thread-1")), finished(1, false)],
+        );
+        assert!(session_to_resume(&thread));
+        assert!(session_to_resume(&with(&launched, &[started(1)])));
+        assert!(session_to_resume(&with(&unanswered, &[started(2)])));
+        assert!(session_to_resume(&with(
+            &launched,
+            &[started(1), started(2), finished(2, false)]
+        )));
+        // An older turn's event with no answer recorded answered nothing,
+        // and one that named no session id said the session was gone.
+        let older = with(
+            &launched,
+            &[started(1), event(TURN_FINISHED, json!({"turn": 1}))],
+        );
+        assert!(!session_to_resume(&older));
+        assert!(!session_to_resume(&with(
+            &answered,
+            &[event(TURN_SESSION_IDENTIFIED, json!({}))]
+        )));
+        // A thread the provider said is gone leaves none, whatever was said
+        // in it, until it names another.
+        let gone = with(
+            &answered,
+            &[started(2), finished(2, false), named(json!(null))],
+        );
+        assert!(!session_to_resume(&gone));
+        assert!(!session_to_resume(&with(
+            &thread,
+            &[started(2), finished(2, false), named(json!(null))]
+        )));
+        assert!(session_to_resume(&with(&gone, &[named(json!("thread-2"))])));
+        // A session started anew (another provider, or a large context)
+        // goes on from the one before it, before its own first turn.
+        for anew in [PROVIDER_SWITCHED, SESSION_RENEWED] {
+            assert!(
+                session_to_resume(&with(&answered, &[plain(anew)])),
+                "{anew}"
+            );
+            assert!(!session_to_resume(&with(&unanswered, &[plain(anew)])));
         }
     }
 
@@ -703,6 +1187,68 @@ mod tests {
             "payload": {}, "created_at": "t",
         }))
         .unwrap()
+    }
+
+    /// A release's read of the run's work stands only while the hold it
+    /// read is open and the run has not gone on: another hold after a
+    /// release, a resume under the same hold, another run or none, no read
+    /// for a release that ends the run, or a read for one that no longer
+    /// does, refuses it; the hold's and the leases' own records do not. A
+    /// release that neither ends the run nor read its work goes on.
+    #[test]
+    fn a_release_carries_over_only_the_work_it_read_under_the_same_hold_and_progress() {
+        let task = TaskId::new(7);
+        let events = vec![event(1, "run_claimed"), event(2, "integration_deferred")];
+        let at = |hold: i64, run: &str, events: &[RunEvent]| ReleaseReadAt {
+            hold: HoldId::new(hold),
+            run: RunId::new(run).unwrap(),
+            version: ProgressVersion::of(
+                TaskStatus::InProgress,
+                "t1",
+                RunStatus::NeedsSession,
+                events,
+            ),
+        };
+        let read = at(1, "r1", &events);
+        let mut quiet = events.clone();
+        quiet.extend([event(3, TASK_HOLD_REMINDED), event(4, LEASE_RELEASED)]);
+        let quiet = at(1, "r1", &quiet);
+        assert_eq!(
+            check_release_read(task, HoldId::new(1), true, Some(&read), Some(&quiet)),
+            Ok(())
+        );
+        assert_eq!(
+            check_release_read(task, HoldId::new(1), false, None, Some(&quiet)),
+            Ok(())
+        );
+        assert_eq!(
+            check_release_read(task, HoldId::new(1), false, None, None),
+            Ok(())
+        );
+        let mut resumed = events.clone();
+        resumed.extend([event(3, "resume_started")]);
+        let mut held_again = events.clone();
+        held_again.extend([event(3, TASK_RELEASED), event(4, TASK_HELD)]);
+        for (ends, read, now) in [
+            (true, Some(&read), Some(at(1, "r1", &resumed))),
+            (true, Some(&read), Some(at(2, "r1", &held_again))),
+            (true, Some(&read), Some(at(2, "r1", &resumed))),
+            (true, Some(&read), Some(at(1, "r2", &events))),
+            (true, Some(&read), None),
+            (true, None, Some(at(1, "r1", &events))),
+            (false, Some(&read), Some(at(2, "r2", &events))),
+        ] {
+            let hold = now.as_ref().map_or(HoldId::new(1), |now| now.hold);
+            let refused = check_release_read(task, hold, ends, read, now.as_ref()).unwrap_err();
+            assert_eq!(
+                refused,
+                DomainError::ReleaseReadMoved {
+                    task_id: task,
+                    hold
+                }
+            );
+            assert!(refused.to_string().contains("release_read_moved"));
+        }
     }
 
     #[test]

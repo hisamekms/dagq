@@ -21,6 +21,12 @@ use crate::domain::{CommitSha, TaskRun, run_clone::CLONE_MAIN_REF};
 pub struct SessionHead {
     pub head: CommitSha,
     pub clean: bool,
+    /// Whether it is what the last turn left: always on the host, whose
+    /// worktree is read as it is; for a run in a container, only when its
+    /// executor's state is of the end of the last turn it started
+    /// ([`RunState::of_the_last_turn`](crate::domain::run_clone::RunState::of_the_last_turn)),
+    /// not one a turn cut off with its container left.
+    pub last_turn: bool,
 }
 
 fn worktree(run: &TaskRun) -> Result<&Path> {
@@ -63,12 +69,17 @@ pub fn session_head(repository: &dyn Repository, run: &TaskRun) -> Result<Sessio
         let CloneFacts { head, state } = facts(repository, run)?;
         let clean =
             state.status.trim().is_empty() && !state.rebase_in_progress && state.head() == head;
-        Ok(SessionHead { head, clean })
+        Ok(SessionHead {
+            head,
+            clean,
+            last_turn: state.of_the_last_turn(),
+        })
     } else {
         let worktree = worktree(run)?;
         Ok(SessionHead {
             head: repository.head(worktree)?,
             clean: repository.status(worktree)?.trim().is_empty(),
+            last_turn: true,
         })
     }
 }

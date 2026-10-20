@@ -2039,3 +2039,87 @@ task = 2141
 name = "runtime_recheck::a_recheck_whose_command_passes_on_main_resumes_each_run_that_fails_it_the_same_way"
 reason = "B 境界（Git・プロセス・SQLite・supervisor の配線）: 2 本の待つ run が同じ出力で落ち main の木だけでは通るとき、実際の supervisor が両方を park_rechecked して resume することを確かめる。判断の case は domain::recheck の unit test"
 task = 2141
+
+# 9.5s to 12.3s (stress 5 under the host's load of other runs, task 1882)
+[[test]]
+name = "runtime_task_release::a_held_run_released_on_its_provider_resumes_its_session_with_the_model_chosen"
+reason = "B 境界（CLI・SQLite・supervisor の配線・wrapper）: 着地の衝突で needs_session になった run を CLI で hold し、知らない model と codex への model を CLI が拒んで何も変えず、--model つきの release の後に supervisor が begin_resume を通って同じ session に一度だけ resume し、選んだ model が resume_started に載って着地することを、実際の supervisor と wrapper で確かめる（同じ session に続く release の代表の 1 case）。分岐と model の判断は domain::task_hold・domain::worker_model、閾値・未計測・未設定の判断は domain::fresh_session の unit test"
+task = 1882
+
+# 9.3s to 12.7s (stress 5 under the host's load of other runs, task 1882)
+[[test]]
+name = "runtime_task_release::a_held_run_released_past_the_threshold_resumes_in_a_new_session_of_the_same_run"
+reason = "B 境界（CLI・SQLite・Git・supervisor の配線・wrapper）: release した needs_session の run が、dagq.toml の閾値を超える peak_context のとき、同じ resume の入口から同じ run・worktree・branch・provider の新しい session で続いて着地することを、実際の supervisor と wrapper で確かめる。閾値の判断は domain::fresh_session の unit test"
+task = 1882
+
+# 6.0s to 9.5s (stress 5 under the host's load of other runs, task 1882)
+[[test]]
+name = "runtime_task_release::a_release_whose_hold_or_run_moved_after_it_read_the_work_is_refused_and_changes_nothing"
+reason = "B 境界（CLI・SQLite・Git・store の確定）: 着地の衝突で needs_session になった run（supervisor と integrate で作る）の成果を release が読んだ後、確定の前に別の release・resume の記録・新しい hold が入ると、確定が hold ID と進行の版の食い違いで拒み何も変えないことを、実際の CLI・queue・Git で確かめる。照合の判断は domain::task_hold の unit test"
+task = 1882
+
+# 6.2s to 9.8s (stress 5 under the host's load of other runs, task 1882)
+[[test]]
+name = "runtime_task_release::a_release_carries_the_worktrees_head_past_the_runs_validated_commit"
+reason = "B 境界（CLI・SQLite・Git）: 着地の衝突で needs_session になった検証済みの run（supervisor と integrate で作る）の worktree に hold の間に commit を足し、clean のまま release --provider codex すると、検証済みの commit ではなくその commit が task_released・手での retry_inherit の記録・refs/dagq/runs に引き継がれることを、実際の CLI・queue・Git で確かめる。分岐の判断は domain::task_hold の unit test"
+task = 1882
+
+# 4.6s to 10.7s (stress 5, three times, under the host's load of other runs, task 1882)
+[[test]]
+name = "runtime_task_release::a_run_held_after_its_wrapper_started_and_before_its_first_turn_is_released_to_a_new_run"
+reason = "B 境界（supervisor の配線・wrapper・CLI・SQLite・Git）: wrapper の起動の後・初回の turn の前にかけた hold で、wrapper の fence が turn を始めずに session を終え、provider の session の無いまま待ちに入った run の release が resume にならず、待ちの間に branch に足した commit を引き継ぐ新しい run になって着地することを、実際の supervisor と wrapper で確かめる。何を session と数えるかの判断は domain::task_hold の unit test"
+task = 1882
+
+# 7.0s to 9.5s (stress 5 under the host's load of other runs, task 1882)
+[[test]]
+name = "runtime_task_release::a_release_racing_a_turn_is_refused_until_the_wait_and_then_moves_the_work_to_codex"
+reason = "B 境界（supervisor の配線・wrapper・CLI・SQLite・Git）: turn の途中の release --provider codex --model が hold_not_settled で拒まれ何も変えず、turn が最後まで走って待ちへ入った後の release が未 commit の差分を commit に保存して run を終え、Codex の新しい run が引き継いで一度だけ着地することを、実際の Claude と Codex の wrapper で確かめる。分岐の判断は domain::task_hold の unit test"
+task = 1882
+
+# 6.5s to 8.9s (stress 5 under the host's load of other runs, task 1882)
+[[test]]
+name = "runtime_task_release::a_release_racing_a_validation_is_refused_until_the_wait_and_then_moves_the_work_to_codex"
+reason = "B 境界（validation・supervisor の配線・CLI）: validation の終わりより先の release --provider codex が拒まれ、待ちが先なら Codex の新しい run が一度だけ始まって着地することを、実際の validation と wrapper で確かめる。分岐の判断は domain::task_hold の unit test"
+task = 1882
+
+# 8.0s to 11.0s (stress 5 under the host's load of other runs, task 1882)
+[[test]]
+name = "runtime_task_release::a_release_racing_a_review_is_refused_until_the_wait_and_then_moves_the_work_to_codex"
+reason = "B 境界（review の job・supervisor の配線・CLI）: review の途中の release --provider codex が拒まれ、review が verdict を記録して待ちへ入った後の release で Codex の新しい run が一度だけ始まって着地することを、実際の review の job と wrapper で確かめる。分岐の判断は domain::task_hold の unit test"
+task = 1882
+
+# 5.0s to 7.4s (stress 5 under the host's load of other runs, task 1882)
+[[test]]
+name = "runtime_task_release::a_run_with_no_commit_of_its_own_is_released_to_a_new_run_with_its_uncommitted_work"
+reason = "B 境界（Git・CLI・supervisor の配線）: 独自の commit の無い run の release が、worktree を変えずに未 commit の差分を一時の index で commit に保存し、今の main からの新しい run がそれを引き継いで着地することを、実際の Git と wrapper で確かめる。分岐の判断は domain::task_hold の unit test"
+task = 1882
+
+# 5.2s to 6.6s (stress 5 under the host's load of other runs, task 1882)
+[[test]]
+name = "runtime_task_release::a_release_whose_carried_head_cannot_be_kept_is_refused_and_changes_nothing"
+reason = "B 境界（supervisor の配線・復旧 job・CLI・SQLite・Git）: 復旧 job が人に上げた failed の run（実際の supervisor と復旧 job で作る）の release が、refs/dagq/runs/<run> を書けないと確定ごと戻って hold・run・decide の ask・task と worktree の未 commit の差分を変えず、書けるようになった後の同じ release が保存した commit を run の commit の上に残すことを、実際の CLI・queue・Git で確かめる。分岐の判断は domain::task_hold の unit test"
+task = 1882
+
+# 7.0s to 8.8s (the module run under the host's load of other runs, task 1882)
+[[test]]
+name = "runtime_task_release::a_failed_run_released_to_a_new_run_leaves_the_recovery_jobs_retry_inherit_unused"
+reason = "B 境界（復旧 job・supervisor の配線・CLI・Git）: 復旧 job が人に上げた failed の run を release すると decide の ask が閉じて次の run が branch を引き継ぎ、その run が失敗したとき復旧 job の retry_inherit が一度だけ適用されることを、実際の supervisor と復旧 job で確かめる。枠の判断は domain::resume の unit test"
+task = 1882
+
+# 7.5s to 9.4s (the module run under the host's load of other runs, task 1882)
+[[test]]
+name = "runtime_task_release::a_release_after_the_automatic_retry_inherit_leaves_it_used"
+reason = "B 境界（復旧 job・supervisor の配線・CLI・Git）: 復旧 job の自動の retry_inherit の後の release が branch を引き継げ、その次の run の復旧 job の retry_inherit が once per task で拒まれて人に上がることを、実際の supervisor と復旧 job で確かめる。枠の判断は domain::resume の unit test"
+task = 1882
+
+# 5.0s to 6.3s (the module run under the host's load of other runs, task 1882)
+[[test]]
+name = "runtime_task_release::a_run_a_release_ended_is_no_failure_toward_the_recovery_jobs_retry"
+reason = "B 境界（復旧 job・supervisor の配線・CLI）: release が終えた run を TRIAGE_RETRY_FAILURES に数えず、次の run の失敗で復旧 job の retry が適用されることを、実際の supervisor と復旧 job で確かめる。数え方の判断は domain::recovery の unit test"
+task = 1882
+
+# 8.5s to 11.5s (the module run under the host's load of other runs, task 1882)
+[[test]]
+name = "runtime_task_release::a_fresh_release_after_an_earlier_carry_over_starts_from_main_with_nothing_inherited"
+reason = "B 境界（復旧 job・supervisor の配線・CLI・Git）: 前の run が retry_inherit で引き継がれた task で、何も残さずに失敗した run を release すると retry_fresh になり、次の run の prompt と run_inherited に前の引き継ぎが載らないことを、実際の supervisor・復旧 job・run の prompt で確かめる。探索の境界の判断は domain::resume::inherited_from の unit test"
+task = 1882

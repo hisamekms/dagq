@@ -20,13 +20,16 @@ use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde_json::json;
 
 use super::sqlite::{SqliteQueue, event, read_task};
+use crate::application::commands::holds::{ReleaseRequest, ReleaseView};
 use crate::domain::event_kind::EventKind;
 use crate::domain::task_hold::{
     self, HoldGuard, HoldRecorded, HoldState, HoldTarget, ProgressVersion, ReleaseRecorded,
     RunHoldWait, TaskHold,
 };
 use crate::domain::task_replan::GuardedStep;
-use crate::domain::{HoldId, RunId, RunStatus, TaskId, TaskStatus, run_phase};
+use crate::domain::{
+    HoldId, RunId, RunStatus, TaskId, TaskRun, TaskStatus, run_phase, worker_model,
+};
 
 impl SqliteQueue {
     /// Hold the task `target` names for `reason` until `until` (a time to
@@ -112,25 +115,79 @@ impl SqliteQueue {
         Ok(HoldRecorded { hold, state })
     }
 
-    /// Release the open hold of the task `target` names, as `by_role` with
-    /// actor id `by_id`. In one transaction: check there is one and that it
-    /// may be released now ([`task_hold::check_release`]: refused while the
-    /// run has not settled, unless the task ended, which leaves nothing to
-    /// settle; a refusal changes nothing and records nothing),
-    /// close the row and record `task_released`, which closes the run's
-    /// `held` phase with the phase it rests in. The supervisor's next pass
-    /// takes the task by its own paths again.
+    /// What a release of the task `target` names reads before its
+    /// transaction: the task, its open hold, its latest run with its
+    /// [`ProgressVersion`] and whether it has a session a resume goes on in
+    /// ([`task_hold::session_to_resume`]).
+    pub fn release_view(&self, target: &HoldTarget) -> Result<ReleaseView> {
+        let task = read_task(&self.conn, resolve(&self.conn, target)?)?;
+        // The hold before the run: a hold that settles in between is read
+        // as settling, never as held with the version from before.
+        let hold = open_hold_of(&self.conn, task.id())?;
+        let run = latest_task_run(&self.conn, &self.runs_dir, task.id())?;
+        let (version, session, kept) = match &run {
+            Some(run) => (
+                Some(progress_version(&self.conn, task.id(), run.id())?),
+                task_hold::session_to_resume(&super::runtime_store::run_events_of(
+                    &self.conn,
+                    run.id(),
+                )?),
+                kept_unsettled(&self.conn, run.id())?,
+            ),
+            None => (None, false, false),
+        };
+        Ok(ReleaseView {
+            hold,
+            task,
+            run,
+            version,
+            session,
+            kept,
+        })
+    }
+
+    /// Release the open hold of the task `request.target` names, as
+    /// `by_role` with actor id `by_id`, going on as
+    /// [`task_hold::release_decision`] decides. In one transaction: check
+    /// there is one and that it may be released now
+    /// ([`task_hold::check_release`]: refused while the run has not
+    /// settled, unless the task ended, which leaves nothing to settle),
+    /// before anything of the choice is read or written; check the model
+    /// chosen against the provider the task goes on with
+    /// ([`worker_model::check_model`]); close the row and record
+    /// `task_released` with the decision, the provider, the model and what
+    /// the next run carries over; record the provider on the task. A
+    /// release that ends the run for a new one (T13) needs the work the
+    /// caller read of that same run (`request.work`) and no writer of it
+    /// left; it ends the run ([`super::runtime_store::end_released_run`],
+    /// a retry by hand when it carries work over) and makes the task ready
+    /// again without a plan review; the head it carries over is kept
+    /// (`keep`) last, before the commit, so that a head that cannot be kept
+    /// refuses the release. Otherwise the run's `held` phase closes with
+    /// the phase it rests in, and the supervisor's next pass takes the task
+    /// by its own paths again. A refusal changes nothing and records
+    /// nothing.
     pub fn release_task(
         &mut self,
-        target: &HoldTarget,
+        request: &ReleaseRequest,
         by_role: &str,
         by_id: &str,
+        keep: &dyn Fn(&TaskRun, &crate::domain::CommitSha) -> Result<()>,
     ) -> Result<ReleaseRecorded> {
+        // The spans a carry-over's `triage_finished` closes read their
+        // transcripts first (task 543), as `ready --inherit` does.
+        let _read = match &request.work {
+            Some((at, _)) => Some(super::sessions::read_before(
+                &self.conn,
+                super::sessions::Closing::Run(&at.run, &[crate::domain::EventKind::TriageFinished]),
+            )?),
+            None => None,
+        };
         let now = self.generators.clock.now();
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let task_id = resolve(&tx, target)?;
+        let task_id = resolve(&tx, &request.target)?;
         let task = read_task(&tx, task_id)?;
         let open = open_hold_of(&tx, task_id)?;
         // A task that ended has nothing left to settle: its hold no longer
@@ -144,32 +201,193 @@ impl SqliteQueue {
         };
         task_hold::check_release(task_id, open.as_ref(), wait)?;
         let hold = open.context("checked above")?;
-        let continuation = if task.status() == TaskStatus::InProgress {
-            "continue"
-        } else {
-            "claim"
+        let latest = latest_task_run(&tx, &self.runs_dir, task_id)?;
+        let facts = task_hold::ReleaseFacts {
+            task: task.status(),
+            run: latest.as_ref().map(TaskRun::status),
+            run_provider: latest.as_ref().map(TaskRun::actual_provider),
+            session: match &latest {
+                Some(run) => task_hold::session_to_resume(&super::runtime_store::run_events_of(
+                    &tx,
+                    run.id(),
+                )?),
+                None => false,
+            },
+            kept: match &latest {
+                Some(run) => kept_unsettled(&tx, run.id())?,
+                None => false,
+            },
+        };
+        let choice = &request.choice;
+        let ends = task_hold::ends_run(facts, choice);
+        // The provider the task's next turn takes: the one chosen, else the
+        // run's own while it goes on, else the task's.
+        let goes_on = match (&latest, ends || task.status() != TaskStatus::InProgress) {
+            (Some(run), false) => run.actual_provider(),
+            _ => task.worker().provider,
+        };
+        if let Some(model) = &choice.model {
+            worker_model::check_model(choice.provider.unwrap_or(goes_on), model)?;
+        }
+        // What the request read before this transaction stands only while
+        // the hold it was read under is open and the run has not gone on.
+        let read = request.work.as_ref();
+        let found = match &latest {
+            Some(run) if ends || read.is_some() => Some(task_hold::ReleaseReadAt {
+                hold: hold.id,
+                run: run.id().clone(),
+                version: progress_version(&tx, task_id, run.id())?,
+            }),
+            _ => None,
+        };
+        task_hold::check_release_read(
+            task_id,
+            hold.id,
+            ends,
+            read.map(|(at, _)| at),
+            found.as_ref(),
+        )?;
+        let work = read
+            .filter(|_| ends && latest.is_some())
+            .map(|(_, work)| work);
+        let decision =
+            task_hold::release_decision(facts, choice, work.is_some_and(|work| work.own.is_some()));
+        let inherit = match (&latest, work.and_then(|work| Some((work.head()?, work)))) {
+            (Some(run), Some((head, work))) => Some(task_hold::ReleasedWork {
+                branch: run.branch().map(str::to_owned),
+                head: head.clone(),
+                saved: work.saved.clone(),
+            }),
+            _ => None,
+        };
+        let session = match &choice.model {
+            Some(model) => {
+                let events = match &latest {
+                    Some(run) => super::runtime_store::run_events_of(&tx, run.id())?,
+                    None => Vec::new(),
+                };
+                Some(worker_model::WorkerSession::released(
+                    model,
+                    &worker_model::WorkerSession::current(&events),
+                ))
+            }
+            None => None,
         };
         tx.execute(
             "UPDATE task_holds SET released_at=?2, released_by_role=?3, released_by_id=?4,
                continuation=?5
              WHERE id=?1 AND released_at IS NULL",
-            params![hold.id, now, by_role, by_id, continuation],
+            params![hold.id, now, by_role, by_id, decision.continuation()],
         )?;
-        let latest = latest_run(&tx, task_id)?;
+        let record = task_hold::Released {
+            hold_id: Some(hold.id),
+            continuation: decision.continuation().to_owned(),
+            decision: Some(decision),
+            held_secs: now - hold.created_at,
+            settled_secs: hold.settled_at.map(|at| now - at),
+            provider: choice.provider,
+            model: session.as_ref().map(|session| session.model.clone()),
+            effort: session.as_ref().map(|session| session.effort.clone()),
+            inherit: inherit.clone(),
+        };
         event(
             &tx,
             task_id,
-            latest.as_ref().map(|(run, _)| run),
+            latest.as_ref().map(TaskRun::id),
             EventKind::TaskReleased,
-            json!({"hold_id": hold.id, "continuation": continuation,
-                   "held_secs": now - hold.created_at,
-                   "settled_secs": hold.settled_at.map(|at| now - at)}),
+            serde_json::to_value(&record)?,
         )?;
-        if let Some((run, _)) = &latest {
-            leave_held_phase(&tx, run)?;
+        if let Some(provider) = choice.provider
+            && provider != task.worker().provider
+        {
+            let task = crate::domain::task::release_on(task.clone(), provider)?;
+            tx.execute(
+                "UPDATE tasks SET worker_provider=?2, worker_mode=?3 WHERE id=?1",
+                params![
+                    task_id,
+                    task.worker().provider.as_str(),
+                    task.stored_worker_mode().map(|mode| mode.as_str()),
+                ],
+            )?;
+        }
+        if let (Some(run), true) = (&latest, decision.new_run()) {
+            let alive: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM run_leases WHERE run_id=?1
+                     AND heartbeat_at >= ?2-?3)
+                   OR EXISTS(SELECT 1 FROM run_processes WHERE run_id=?1
+                     AND exited_at IS NULL AND heartbeat_at >= ?2-?3)",
+                params![run.id(), now, crate::domain::HEARTBEAT_TIMEOUT_SECS],
+                |r| r.get(0),
+            )?;
+            anyhow::ensure!(
+                !alive,
+                "run {} is still leased or a process of it still runs; nothing is released, try again once it waits",
+                run.id()
+            );
+            let why = task_hold::new_run_reason(facts, choice.provider);
+            let carried = inherit.as_ref().map(|inherit| {
+                json!({"action": crate::domain::resume::RETRY_INHERIT, "by": by_role,
+                       "reason": why, "inherit": inherit, "released": hold.id,
+                       "status": run.status()})
+            });
+            super::runtime_store::end_released_run(
+                &tx,
+                run.id(),
+                format!("{}: {why}", crate::domain::ReasonCode::Released),
+                carried,
+            )?;
+            // The recovery job's `decide` asks on the run are answered by
+            // the release: nothing of them applies to the run any more.
+            let decides: Vec<crate::domain::Ask> = tx
+                .prepare(
+                    "SELECT * FROM asks WHERE run_id=?1 AND kind='decide' AND asked_by=?2
+                     AND closed_at IS NULL ORDER BY id",
+                )?
+                .query_map(
+                    params![run.id(), crate::application::TRIAGE_ASKER],
+                    super::asks::ask_row,
+                )?
+                .collect::<rusqlite::Result<_>>()?;
+            for ask in &decides {
+                super::asks::close_by_runtime(
+                    &tx,
+                    ask,
+                    &format!("released from its hold by {by_role} with a new run: {why}"),
+                    now,
+                )?;
+            }
+            leave_held_phase(&tx, run.id())?;
+            super::sqlite::transition_task(
+                &tx,
+                task_id,
+                crate::domain::TaskAction::Ready,
+                &self.generators.clock.timestamp(),
+            )?;
+        } else if let Some(run) = &latest {
+            leave_held_phase(&tx, run.id())?;
+        }
+        // Kept last, while the transaction can still be rolled back: a ref
+        // that cannot be written leaves the hold, the run and the task as
+        // they were, and the worktree's work where it is. A commit that
+        // fails after it leaves only the ref, which holds the run's own work.
+        if let (Some(run), Some(inherit)) = (&latest, &inherit) {
+            keep(run, &inherit.head).with_context(|| {
+                format!(
+                    "the work run {} carries over could not be kept as {}; nothing is released",
+                    run.id(),
+                    crate::application::inherit::run_ref(run.id())
+                )
+            })?;
         }
         tx.commit()?;
-        Ok(ReleaseRecorded { hold, continuation })
+        Ok(ReleaseRecorded {
+            hold,
+            continuation: decision.continuation(),
+            decision,
+            provider: choice.provider,
+            model: session.map(|session| session.model),
+            inherit,
+        })
     }
 
     /// The open hold of `task`, if any.
@@ -427,6 +645,38 @@ fn record_phase(
     )
 }
 
+/// Whether a result was kept for `run` while its task was held
+/// (`hold_result_kept`) that is neither applied nor discarded yet.
+fn kept_unsettled(conn: &Connection, run: &RunId) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM run_events e WHERE e.run_id=?1 AND e.kind=?2
+           AND NOT EXISTS (SELECT 1 FROM run_events s WHERE s.run_id=e.run_id
+             AND s.kind IN (?3,?4) AND json_extract(s.payload,'$.kept_id')=e.id))",
+        params![
+            run,
+            EventKind::HoldResultKept.as_str(),
+            EventKind::HoldResultApplied.as_str(),
+            EventKind::HoldResultDiscarded.as_str()
+        ],
+        |r| r.get(0),
+    )?)
+}
+
+/// The latest run of `task` as stored, if it has one.
+fn latest_task_run(
+    conn: &Connection,
+    runs_dir: &std::path::Path,
+    task: TaskId,
+) -> Result<Option<TaskRun>> {
+    Ok(conn
+        .query_row(
+            "SELECT * FROM task_runs WHERE task_id=?1 ORDER BY rowid DESC LIMIT 1",
+            [task],
+            super::sqlite::run_row(runs_dir),
+        )
+        .optional()?)
+}
+
 /// The task `target` names; a run the queue does not know is an error.
 fn resolve(conn: &Connection, target: &HoldTarget) -> Result<TaskId> {
     match target {
@@ -544,13 +794,18 @@ impl crate::application::commands::holds::HoldStore for SqliteQueue {
         SqliteQueue::hold_task(self, target, reason, until, by_role, by_id)
     }
 
+    fn release_view(&self, target: &HoldTarget) -> Result<ReleaseView> {
+        SqliteQueue::release_view(self, target)
+    }
+
     fn release_task(
         &mut self,
-        target: &HoldTarget,
+        request: &ReleaseRequest,
         by_role: &str,
         by_id: &str,
+        keep: &dyn Fn(&TaskRun, &crate::domain::CommitSha) -> Result<()>,
     ) -> Result<ReleaseRecorded> {
-        SqliteQueue::release_task(self, target, by_role, by_id)
+        SqliteQueue::release_task(self, request, by_role, by_id, keep)
     }
 }
 

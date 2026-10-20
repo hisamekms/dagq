@@ -42,6 +42,9 @@ workerのrunは全て非対話（turnごとに別のprocess）で、この文書
 - `status`の`held`とattention・知らせ（「statusとattentionと知らせ」の`status`・attention・知らせ。欄は`held`、attentionと知らせのkindは`task_hold_reminded`）と「計測とtimeline」は済んだ。
   今の姿は[計測](../design/measurement.md#区間とタグ)・[人の答えを待つrun](../design/supervisor-lifecycle/waiting.md#taskのhold)と、`health::held_tasks`・`TaskHold::reminder_due`・`domain::timeline`のdoc commentが持つ。
 
+- 「解除の分岐」のうち、`release`の`--provider`・`--model`、同じproviderのresume、成果（branchの今のheadと、commitに保存した未commitの差分）を引き継ぐ新しいrun、引き継ぎを自動の`retry_inherit`の1回に数えないことは済んだ。
+  今の姿は[needs_session](../design/supervisor-lifecycle/needs-session.md#taskのhold)・[provider-lifecycle](../design/provider-lifecycle.md#workerのproviderと経路)・[Worker model](../design/supervisor-lifecycle/worker-model.md#記録)と、`task_hold::release_decision`・`inherit::released_work`のdoc commentが持つ。
+
 ## 目的と境界
 
 - 環境・認証・外のサービスの都合でtaskを待たせる間、supervisorがそのtaskを拾わないことを保証する。

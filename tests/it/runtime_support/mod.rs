@@ -558,6 +558,10 @@ pub struct TestWorkspace {
     pub containers: Option<Arc<dyn dagq::application::run_container::RunContainers>>,
     /// Wait for this per-turn marker before the wrapper starts its timers.
     pub headless_ready: Option<PathBuf>,
+    /// A first session's wrapper, its process started, waits for this file
+    /// before it starts (its thread fails past a step's limit): a test acts
+    /// between the wrapper's launch and its first turn.
+    pub launch_gate: Option<PathBuf>,
     /// The `codex` a headless Codex run's wrapper calls for its turns
     /// ([`headless_codex`]).
     pub codex: Option<PathBuf>,
@@ -600,6 +604,7 @@ impl TestWorkspace {
             headless: None,
             containers: None,
             headless_ready: None,
+            launch_gate: None,
             codex: None,
             sccache: None,
             inherited_env: Vec::new(),
