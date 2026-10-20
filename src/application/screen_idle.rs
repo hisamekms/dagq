@@ -1,6 +1,6 @@
 //! The inputs a session took, next to its idle marker (ADR-0016): the
-//! stamp the supervisor leaves each time it hands a session an input its
-//! own hook may not record, and the last input, which an idle marker
+//! stamp left for each request of a runtime planner's next turn, an input
+//! its own hook may not record, and the last input, which an idle marker
 //! must be newer than to tell the session's turn ended. No screen is read
 //! here: the inference of idleness from a cmux capture (ADR-t803-1) has no
 //! session left to judge (ADR-t1433-2, ADR-t1433-5).
@@ -14,9 +14,11 @@ use std::{
 
 use super::{RunFiles, unix_seconds};
 
-/// The stamp the supervisor leaves next to the idle marker each time it
-/// types a text into the session: an input the agent's own hook may have
-/// failed to record.
+/// The stamp left next to a runtime planner's idle marker for each request
+/// of its next turn, by the supervisor before it writes the request and by
+/// the background wrapper before it takes it: an input the agent's own hook
+/// may have failed to record. The name stays for the stamps already
+/// written.
 pub const SUPERVISOR_INPUT_FILE: &str = "supervisor-input.json";
 
 /// Why the idle marker could not tell.
@@ -29,16 +31,17 @@ pub enum MarkerState {
     Stale,
 }
 
-/// The supervisor's input stamp next to `idle_marker`.
+/// The input stamp next to `idle_marker`.
 pub fn supervisor_input_path(idle_marker: &Path) -> PathBuf {
     idle_marker.with_file_name(SUPERVISOR_INPUT_FILE)
 }
 
-/// Leave the stamp of a text the supervisor typed into the session whose
-/// idle marker is `idle_marker`. For a planner it is written before every
-/// request the supervisor writes for it (a revise, an answer to its
-/// `planner_question`, a retry) and again by the wrapper before it takes a
-/// request, so an idle marker from before the request ends no turn.
+/// Leave the input stamp next to `idle_marker`, a runtime planner's idle
+/// marker. The supervisor writes it before every request of the planner's
+/// next turn it writes (a revise, an answer to its `planner_question`, a
+/// retry; `stamp_planner_input` of the plan review), and the background
+/// wrapper again before it takes a request, so an idle marker from before
+/// the request ends no turn.
 pub fn record_supervisor_input(files: &dyn RunFiles, idle_marker: &Path) -> io::Result<()> {
     files.write(
         &supervisor_input_path(idle_marker),
@@ -47,7 +50,7 @@ pub fn record_supervisor_input(files: &dyn RunFiles, idle_marker: &Path) -> io::
 }
 
 /// The last input the session whose idle marker is `idle_marker` took, as
-/// its input marker and the supervisor's stamp record it, and `opened`,
+/// its input marker and the input stamp record it, and `opened`,
 /// when the session opened: the latest, as a file time.
 pub fn last_input(files: &dyn RunFiles, idle_marker: &Path, opened: SystemTime) -> SystemTime {
     [
