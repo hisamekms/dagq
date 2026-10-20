@@ -1,0 +1,475 @@
+{
+ "windows": {
+  "before": [
+   "2026-09-30T10:27:40.972Z",
+   "2026-10-07T10:27:40.972Z"
+  ],
+  "after": [
+   "2026-10-07T10:27:40.972Z",
+   "2026-10-14T10:27:40.972Z"
+  ]
+ },
+ "ab": {
+  "before": {
+   "all": {
+    "n": 429,
+    "verify": {
+     "median": 517,
+     "p75": 654,
+     "p90": 942
+    },
+    "landing_queue": {
+     "median": 2,
+     "p75": 340,
+     "p90": 931
+    }
+   },
+   "no_person_wait": {
+    "n": 323,
+    "verify": {
+     "median": 512,
+     "p75": 635,
+     "p90": 840
+    },
+    "landing_queue": {
+     "median": 2,
+     "p75": 118,
+     "p90": 432
+    }
+   },
+   "stats_overall": {
+    "verify": {
+     "count": 429,
+     "max": 3905,
+     "median": 517,
+     "p90": 942,
+     "tail_total": 14606,
+     "total": 201324
+    },
+    "landing_queue": {
+     "count": 429,
+     "max": 19532,
+     "median": 2,
+     "p90": 931,
+     "tail_total": 59559,
+     "total": 192284
+    }
+   },
+   "landing_utilization": {
+    "attempt_secs": {
+     "count": 481,
+     "max": 2786,
+     "median": 492,
+     "min": 0,
+     "p90": 845
+    },
+    "attempts": 481,
+    "busy_secs": 202888,
+    "landed": 429,
+    "peak_hour": {
+     "start": "2026-10-03T07:27:40.972Z",
+     "utilization": 0.978
+    },
+    "queue": {
+     "max": 13,
+     "mean": 0.379,
+     "runs": 434
+    },
+    "utilization": 0.335,
+    "window_secs": 604800
+   },
+   "by_gate": {
+    "llvm-cov": {
+     "n": 274,
+     "verify": {
+      "median": 620.0,
+      "p75": 767,
+      "p90": 1092
+     },
+     "landing_queue": {
+      "median": 3.0,
+      "p75": 338,
+      "p90": 971
+     }
+    },
+    "landing-it": {
+     "n": 0,
+     "verify": {
+      "median": null,
+      "p75": null,
+      "p90": null
+     },
+     "landing_queue": {
+      "median": null,
+      "p75": null,
+      "p90": null
+     }
+    },
+    "none": {
+     "n": 155,
+     "verify": {
+      "median": 4,
+      "p75": 10,
+      "p90": 32
+     },
+     "landing_queue": {
+      "median": 2,
+      "p75": 345,
+      "p90": 779
+     }
+    }
+   }
+  },
+  "after": {
+   "all": {
+    "n": 253,
+    "verify": {
+     "median": 554,
+     "p75": 863,
+     "p90": 1260
+    },
+    "landing_queue": {
+     "median": 2,
+     "p75": 231,
+     "p90": 776
+    }
+   },
+   "no_person_wait": {
+    "n": 182,
+    "verify": {
+     "median": 497.0,
+     "p75": 781,
+     "p90": 1159
+    },
+    "landing_queue": {
+     "median": 2.0,
+     "p75": 38,
+     "p90": 568
+    }
+   },
+   "stats_overall": {
+    "verify": {
+     "count": 253,
+     "max": 5712,
+     "median": 554,
+     "p90": 1260,
+     "tail_total": 24772,
+     "total": 150562
+    },
+    "landing_queue": {
+     "count": 253,
+     "max": 51184,
+     "median": 2,
+     "p90": 776,
+     "tail_total": 141491,
+     "total": 181098
+    }
+   },
+   "landing_utilization": {
+    "attempt_secs": {
+     "count": 281,
+     "max": 4677,
+     "median": 548,
+     "min": 0,
+     "p90": 1152
+    },
+    "attempts": 281,
+    "busy_secs": 151746,
+    "landed": 253,
+    "peak_hour": {
+     "start": "2026-10-13T12:27:40.972Z",
+     "utilization": 0.98
+    },
+    "queue": {
+     "max": 7,
+     "mean": 0.245,
+     "runs": 254
+    },
+    "utilization": 0.251,
+    "window_secs": 604800
+   },
+   "by_gate": {
+    "llvm-cov": {
+     "n": 0,
+     "verify": {
+      "median": null,
+      "p75": null,
+      "p90": null
+     },
+     "landing_queue": {
+      "median": null,
+      "p75": null,
+      "p90": null
+     }
+    },
+    "landing-it": {
+     "n": 161,
+     "verify": {
+      "median": 778,
+      "p75": 1034,
+      "p90": 1473
+     },
+     "landing_queue": {
+      "median": 3,
+      "p75": 75,
+      "p90": 568
+     }
+    },
+    "none": {
+     "n": 92,
+     "verify": {
+      "median": 7.5,
+      "p75": 34,
+      "p90": 377
+     },
+     "landing_queue": {
+      "median": 2.0,
+      "p75": 413,
+      "p90": 1107
+     }
+    }
+   }
+  }
+ },
+ "gate": {
+  "before": {
+   "n": 313,
+   "median": 568.964,
+   "p90": 806.959,
+   "load_median": 13.29
+  },
+  "after": {
+   "n": 183,
+   "median": 699.958,
+   "p90": 961.748,
+   "load_median": 12.44
+  },
+  "after_full": {
+   "n": 170,
+   "median": 713.8005,
+   "p90": 971.752
+  },
+  "after_narrowed": {
+   "n": 13,
+   "median": 149.019,
+   "p90": 223.117
+  },
+  "after_full_reasons": {
+   "threshold": 74,
+   "source_not_in_tree": 81,
+   "common_file": 28
+  },
+  "replay_agrees": 176,
+  "replay_compared": 181,
+  "after_narrowed_landings_verify": {
+   "n": 12,
+   "median": 192.0,
+   "p90": 859,
+   "values": [
+    76,
+    91,
+    104,
+    142,
+    162,
+    189,
+    195,
+    201,
+    325,
+    344,
+    859,
+    1264
+   ]
+  },
+  "daily": {
+   "after 2026-10-07": {
+    "n": 29,
+    "tests_median": 3095,
+    "nextest_secs_median": 448.814,
+    "failed": 2
+   },
+   "after 2026-10-08": {
+    "n": 56,
+    "tests_median": 3129.0,
+    "nextest_secs_median": 573.6030000000001,
+    "failed": 6
+   },
+   "after 2026-10-09": {
+    "n": 22,
+    "tests_median": 3115.0,
+    "nextest_secs_median": 660.742,
+    "failed": 1
+   },
+   "after 2026-10-11": {
+    "n": 17,
+    "tests_median": 3197,
+    "nextest_secs_median": 633.58,
+    "failed": 3
+   },
+   "after 2026-10-12": {
+    "n": 34,
+    "tests_median": 3454.5,
+    "nextest_secs_median": 703.2445,
+    "failed": 3
+   },
+   "after 2026-10-13": {
+    "n": 3,
+    "tests_median": 3584,
+    "nextest_secs_median": 952.138,
+    "failed": 0
+   },
+   "after 2026-10-14": {
+    "n": 7,
+    "tests_median": 3369,
+    "nextest_secs_median": 567.671,
+    "failed": 1
+   },
+   "before 2026-10-01": {
+    "n": 3,
+    "tests_median": 2246,
+    "nextest_secs_median": 420.924,
+    "failed": 3
+   },
+   "before 2026-10-02": {
+    "n": 12,
+    "tests_median": 2432.5,
+    "nextest_secs_median": 398.27099999999996,
+    "failed": 12
+   },
+   "before 2026-10-03": {
+    "n": 8,
+    "tests_median": 2676.0,
+    "nextest_secs_median": 667.5385,
+    "failed": 8
+   },
+   "before 2026-10-04": {
+    "n": 3,
+    "tests_median": 2767,
+    "nextest_secs_median": 435.934,
+    "failed": 3
+   },
+   "before 2026-10-05": {
+    "n": 3,
+    "tests_median": 2871,
+    "nextest_secs_median": 618.27,
+    "failed": 3
+   },
+   "before 2026-10-06": {
+    "n": 4,
+    "tests_median": 2906.5,
+    "nextest_secs_median": 539.4425,
+    "failed": 4
+   },
+   "before 2026-10-07": {
+    "n": 3,
+    "tests_median": 2989,
+    "nextest_secs_median": 454.133,
+    "failed": 3
+   }
+  }
+ },
+ "c": {
+  "before": {
+   "landings": 428,
+   "per_hour": 2.55,
+   "busy_hours": 8,
+   "busy_per_hour": 3.75,
+   "active_hours": 121,
+   "active_per_hour": 3.54,
+   "slot_busy_secs": 202889,
+   "max_landings_in_an_hour": 13
+  },
+  "after": {
+   "landings": 254,
+   "per_hour": 1.51,
+   "busy_hours": 4,
+   "busy_per_hour": 2.25,
+   "active_hours": 105,
+   "active_per_hour": 2.42,
+   "slot_busy_secs": 151748,
+   "max_landings_in_an_hour": 10
+  }
+ },
+ "d": {
+  "before": {
+   "gh_red_secs": 539229,
+   "gh_red_hours": 149.8,
+   "gh_red_share": 0.892,
+   "gh_red_intervals": 10,
+   "events_red_secs": 15717,
+   "events_turned_red": 5
+  },
+  "after": {
+   "gh_red_secs": 375643,
+   "gh_red_hours": 104.3,
+   "gh_red_share": 0.621,
+   "gh_red_intervals": 45,
+   "events_red_secs": 370246,
+   "events_turned_red": 36
+  }
+ },
+ "e": {
+  "before": {
+   "ci_failure_findings": 5,
+   "with_a_proposal_or_planner": 0,
+   "ci_failure_issues": 10
+  },
+  "after": {
+   "ci_failure_findings": 19,
+   "with_a_proposal_or_planner": 0,
+   "ci_failure_issues": 36
+  }
+ },
+ "f": {
+  "before": {
+   "update_restored": 1,
+   "update_failed": 16,
+   "update_installed": 207
+  },
+  "after": {
+   "update_restored": 0,
+   "update_failed": 5,
+   "update_installed": 138
+  }
+ },
+ "g": {
+  "before": {
+   "resumes": {
+    "environment": 22,
+    "own": 5,
+    "interaction": 4,
+    "existing_flaky": 3,
+    "main_broken": 4
+   },
+   "asks": {
+    "environment": 4,
+    "own": 3,
+    "main_broken": 5
+   },
+   "asks_wait_secs": {
+    "environment": 191002,
+    "own": 16777,
+    "main_broken": 71067
+   }
+  },
+  "after": {
+   "resumes": {
+    "own": 7,
+    "interaction": 7,
+    "existing_flaky": 2,
+    "main_broken": 3
+   },
+   "asks": {
+    "main_broken": 2,
+    "environment": 1,
+    "own": 5,
+    "waits_other_task": 13
+   },
+   "asks_wait_secs": {
+    "main_broken": 15416,
+    "environment": 80,
+    "own": 50548,
+    "waits_other_task": 303884
+   }
+  }
+ }
+}

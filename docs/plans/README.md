@@ -34,6 +34,7 @@ tags:
 - [docs/design の4指標（総量と伸び・docs/design を変えた着地の割合・docs の衝突と claim の控え・道具の結果に占める docs）と docs だけの衝突の種類（M5）の定義と基準値](docs-slim.md)（goal 159、task 1946・1966）
 - [design 文書の削減（A・C）の前後比較に使う run の review の差し戻しの指標（M7）の定義と、比べる区間・参考の値・想定効果](docs-reduction.md)（goal 194）
 - [過去の着地の差分に IT の対応表を当てた、絞った IT の時間と見逃しの測定と、全部流す閾値・共通のファイル・表の古さの上限](landing-it-selection.md)（goal 157、task 1924）
+- [着地の検証を unit test 全件と絞った IT に切り替えた前後 7 日の verify・landing_queue・着地の数・main が赤だった時間・修正 task・事故・他人の壊れによる resume と ask の比較](landing-verify-switch.md)（goal 157、task 1929）
 - [上限を入れた後の本番のobserverのpromptのbyte数と節ごとの大きさ、上限を見直すかの結論](observer-prompt-size.md)（task 1575）
 - [broker の image の build のキャッシュの前後の、着地前の e2e と関門の e2e の時間・broker の e2e の完了順・e2e の待ちの測定と、broker の e2e を差分で絞る案の判断](broker-e2e-image-cache.md)（goal 93、task 1452）
 - [夜の人の答え待ちが着地を遅らせた量](night-human-wait-measurement.md)（goal 62、task 919）

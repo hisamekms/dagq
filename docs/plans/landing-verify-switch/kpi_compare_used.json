@@ -1,0 +1,756 @@
+{
+ "split": {
+  "end": "2026-10-07T10:27:40.972Z",
+  "marks": [
+   {
+    "at": "2026-10-07T10:27:40.972Z",
+    "detail": {
+     "at": "2026-10-07T10:27:40.972Z",
+     "by": "planner",
+     "label": "landing verification: unit tests + selected IT (ADR-t1925-1)",
+     "note": "task 1927 の着地（ec310498）で dagq.toml の [landing_verification] が coverage の関門を unit test 全件と scripts/landing-it.sh の絞った IT に置き換えた。goal 157 段 4（task 1929）の前後比較の T。"
+    },
+    "id": 123128,
+    "kind": "mark_recorded",
+    "label": "landing verification: unit tests + selected IT (ADR-t1925-1)",
+    "recorded_at": "2026-10-07T10:29:11.020Z",
+    "retracted_by": null
+   }
+  ],
+  "separable": true,
+  "start": "2026-10-07T10:27:40.972Z"
+ },
+ "strata": {
+  "land_phase.verify": {
+   "after": {
+    "max": 5712.0,
+    "median": 554.0,
+    "min": 0.0,
+    "n": 253,
+    "p90": 1260.0
+   },
+   "before": {
+    "max": 3905.0,
+    "median": 517.0,
+    "min": 0.0,
+    "n": 429,
+    "p90": 942.0
+   },
+   "delta": 37.0,
+   "judged": true,
+   "previous": 517.0,
+   "ratio": 1.072,
+   "reason": null,
+   "verdict": "worsened"
+  },
+  "land_phase.landing_queue": {
+   "after": {
+    "max": 51184.0,
+    "median": 2.0,
+    "min": 0.0,
+    "n": 253,
+    "p90": 776.0
+   },
+   "before": {
+    "max": 19532.0,
+    "median": 2.0,
+    "min": 1.0,
+    "n": 429,
+    "p90": 931.0
+   },
+   "delta": 0.0,
+   "judged": true,
+   "previous": 2.0,
+   "ratio": 1.0,
+   "reason": null,
+   "verdict": "unchanged"
+  },
+  "landings": {
+   "after": {
+    "n": 253,
+    "value": 253.0
+   },
+   "before": {
+    "n": 429,
+    "value": 429.0
+   },
+   "delta": -176.0,
+   "judged": true,
+   "previous": 429.0,
+   "ratio": 0.59,
+   "reason": null,
+   "verdict": "worsened"
+  },
+  "slot_usage": {
+   "after": {
+    "n": 271,
+    "value": 1.841
+   },
+   "before": {
+    "n": 478,
+    "value": 2.41
+   },
+   "delta": -0.569,
+   "judged": true,
+   "previous": 2.41,
+   "ratio": 0.764,
+   "reason": null,
+   "verdict": "worsened"
+  },
+  "revise_rate": {
+   "after": {
+    "n": 253,
+    "value": 0.68
+   },
+   "before": {
+    "n": 429,
+    "value": 0.42
+   },
+   "delta": 0.26,
+   "judged": true,
+   "previous": 0.42,
+   "ratio": 1.619,
+   "reason": null,
+   "verdict": "worsened"
+  },
+  "first_pass_rate": {
+   "after": {
+    "n": 253,
+    "value": 0.257
+   },
+   "before": {
+    "n": 429,
+    "value": 0.366
+   },
+   "delta": -0.109,
+   "judged": true,
+   "previous": 0.366,
+   "ratio": 0.702,
+   "reason": null,
+   "verdict": "worsened"
+  },
+  "phase.work": {
+   "after": {
+    "max": 25288.0,
+    "median": 1187.0,
+    "min": 21.0,
+    "n": 253,
+    "p90": 3508.0
+   },
+   "before": {
+    "max": 10932.0,
+    "median": 805.0,
+    "min": 34.0,
+    "n": 425,
+    "p90": 2506.0
+   },
+   "delta": 382.0,
+   "judged": true,
+   "previous": 805.0,
+   "ratio": 1.475,
+   "reason": null,
+   "verdict": "worsened"
+  },
+  "cpu_per_landing": {
+   "after": {
+    "n": 253,
+    "value": 2973.048
+   },
+   "before": {
+    "n": 429,
+    "value": 2488.55
+   },
+   "delta": 484.498,
+   "judged": true,
+   "previous": 2488.55,
+   "ratio": 1.195,
+   "reason": null,
+   "verdict": "worsened"
+  },
+  "load_per_core": {
+   "after": {
+    "max": 11.759,
+    "median": 0.621,
+    "min": null,
+    "n": 10794,
+    "p90": 1.85
+   },
+   "before": {
+    "max": 27.663,
+    "median": 1.075,
+    "min": null,
+    "n": 13607,
+    "p90": 3.034
+   },
+   "delta": -0.454,
+   "judged": true,
+   "previous": 1.075,
+   "ratio": 0.578,
+   "reason": null,
+   "verdict": "improved"
+  },
+  "candidates": {
+   "after": {
+    "max": 122.0,
+    "median": null,
+    "min": null,
+    "n": 796,
+    "p90": null,
+    "value": 86.791
+   },
+   "before": {
+    "max": 156.0,
+    "median": null,
+    "min": null,
+    "n": 1360,
+    "p90": null,
+    "value": 92.276
+   },
+   "delta": -5.485,
+   "judged": true,
+   "previous": 92.276,
+   "ratio": 0.941,
+   "reason": null,
+   "verdict": null
+  },
+  "landing_utilization": {
+   "after": {
+    "max": 0.98,
+    "median": null,
+    "min": null,
+    "n": 281,
+    "p90": null,
+    "value": 0.251
+   },
+   "before": {
+    "max": 0.978,
+    "median": null,
+    "min": null,
+    "n": 481,
+    "p90": null,
+    "value": 0.335
+   },
+   "delta": -0.084,
+   "judged": true,
+   "previous": 0.335,
+   "ratio": 0.749,
+   "reason": null,
+   "verdict": null
+  },
+  "verification_failed_rate": {
+   "after": {
+    "n": 276,
+    "value": 0.051
+   },
+   "before": {
+    "n": 469,
+    "value": 0.034
+   },
+   "delta": 0.017,
+   "judged": true,
+   "previous": 0.034,
+   "ratio": 1.5,
+   "reason": null,
+   "verdict": "worsened"
+  }
+ },
+ "confounders": [
+  {
+   "at": "2026-09-30T10:41:25.948Z",
+   "detail": {
+    "at": null,
+    "by": "inbox",
+    "label": "Codex の既定モデルを GPT-5.6 SOL に変更",
+    "note": "人の明示指定で Codex 全体の ~/.codex/config.toml の root に model = \"gpt-5.6-sol\" を追加。他の設定はバイト単位で保持。dagq の Codex worker と model未指定のCodex jobはCLI既定を使用する。実行中turnは停止していない。"
+   },
+   "id": 51928,
+   "kind": "mark_recorded",
+   "label": "Codex の既定モデルを GPT-5.6 SOL に変更",
+   "position": "before",
+   "recorded_at": "2026-09-30T10:41:25.948Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-09-30T10:48:18.612Z",
+   "detail": {
+    "at": null,
+    "by": "inbox",
+    "label": "Codex の既定モデルを GPT-6 Sol に変更",
+    "note": "人の明示指定で ~/.codex/config.toml の root model を gpt-5.6-sol から gpt-6-sol に変更。dagq がCodex modelを明示するplanner依頼も gpt-6-sol に更新。実行中turnは停止していない。"
+   },
+   "id": 51978,
+   "kind": "mark_recorded",
+   "label": "Codex の既定モデルを GPT-6 Sol に変更",
+   "position": "before",
+   "recorded_at": "2026-09-30T10:48:18.612Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-09-30T13:43:45.000Z",
+   "detail": {
+    "dagq_version": "0.4.0-dev+fddd507508fb4e7862a1931d98720384c742c57a",
+    "last_heartbeat_at": 1790775825,
+    "outcome": "pruned",
+    "supervisor": "95303eca-4d0b-4976-84a5-0fa6736acf94"
+   },
+   "id": 52991,
+   "kind": "supervisor_stopped",
+   "label": "supervisor stopped: 0.4.0-dev+fddd507508fb4e7862a1931d98720384c742c57a",
+   "position": "before",
+   "recorded_at": "2026-09-30T13:43:47.911Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-09-30T13:53:31.803Z",
+   "detail": {
+    "dagq_version": "0.4.0-dev+fddd507508fb4e7862a1931d98720384c742c57a",
+    "outcome": "stopped",
+    "supervisor": "b8a94306-a98c-4494-9d86-7bd739d74a12"
+   },
+   "id": 53021,
+   "kind": "supervisor_stopped",
+   "label": "supervisor stopped: 0.4.0-dev+fddd507508fb4e7862a1931d98720384c742c57a",
+   "position": "before",
+   "recorded_at": "2026-09-30T13:53:31.803Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-01T14:59:11.446Z",
+   "detail": {
+    "attribute": "claude_version",
+    "claim_event": 54712,
+    "from": "2.1.283",
+    "run_id": "632a4d51-af87-47a4-b419-fc2087496ce5",
+    "task_id": 1207,
+    "to": "2.1.286"
+   },
+   "id": null,
+   "kind": "derived:claude_version",
+   "label": "claude_version 2.1.283 → 2.1.286",
+   "position": "before",
+   "recorded_at": "2026-10-01T14:59:11.446Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-01T14:59:11.446Z",
+   "detail": {
+    "attribute": "codex_version",
+    "claim_event": 54712,
+    "from": "0.155.1",
+    "run_id": "632a4d51-af87-47a4-b419-fc2087496ce5",
+    "task_id": 1207,
+    "to": "0.159.2"
+   },
+   "id": null,
+   "kind": "derived:codex_version",
+   "label": "codex_version 0.155.1 → 0.159.2",
+   "position": "before",
+   "recorded_at": "2026-10-01T14:59:11.446Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-02T03:07:27.872Z",
+   "detail": {
+    "at": "2026-10-02T03:07:27.872Z",
+    "by": "planner",
+    "label": "run review を Codex に",
+    "note": "task 1208 の着地（2cb08f4b）で dagq.toml の [roles.review] provider = \"codex\" が main checkout に入った。固定バイナリ 0.4.0-dev+2f81af33 の doctor の roles.review は provider codex・source dagq.toml・effort medium。task 1341 の planner が記録"
+   },
+   "id": 60152,
+   "kind": "mark_recorded",
+   "label": "run review を Codex に",
+   "position": "before",
+   "recorded_at": "2026-10-02T03:08:42.801Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-02T08:05:36.000Z",
+   "detail": {
+    "at": "2026-10-02T08:05:36.000Z",
+    "by": "planner",
+    "label": "Claude worker default → headless (task 1340)",
+    "note": "task 1340（ADR-t1340-1）を含む固定バイナリ 0.4.0-dev+c05e8644 が自動更新で入り、経路を指定しない Claude の task の worker が非対話（headless）になった。--interactive の task は対話のまま。評価は goal 85 の task が kpi --compare <この印> --area runtime と経路ごとに行う。"
+   },
+   "id": 61916,
+   "kind": "mark_recorded",
+   "label": "Claude worker default → headless (task 1340)",
+   "position": "before",
+   "recorded_at": "2026-10-02T10:15:17.337Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-03T11:43:00.000Z",
+   "detail": {
+    "dagq_version": "0.4.0-dev+151a49556925aa7ac19c07b3c5aed97389bd422c",
+    "last_heartbeat_at": 1791027780,
+    "outcome": "pruned",
+    "supervisor": "f5b8bc25-86cb-485a-a307-52b7b2ca76c7"
+   },
+   "id": 75174,
+   "kind": "supervisor_stopped",
+   "label": "supervisor stopped: 0.4.0-dev+151a49556925aa7ac19c07b3c5aed97389bd422c",
+   "position": "before",
+   "recorded_at": "2026-10-03T11:43:10.630Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-03T11:56:25.492Z",
+   "detail": {
+    "dagq_version": "0.4.0-dev+151a49556925aa7ac19c07b3c5aed97389bd422c",
+    "outcome": "stopped",
+    "supervisor": "8b9a5801-bb36-441f-9db6-7726b09304d2"
+   },
+   "id": 75308,
+   "kind": "supervisor_stopped",
+   "label": "supervisor stopped: 0.4.0-dev+151a49556925aa7ac19c07b3c5aed97389bd422c",
+   "position": "before",
+   "recorded_at": "2026-10-03T11:56:25.492Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-03T13:35:24.614Z",
+   "detail": {
+    "attribute": "claude_version",
+    "claim_event": 76066,
+    "from": "2.1.286",
+    "run_id": "4a9dbadb-f295-4ec6-a5d5-7187a524d001",
+    "task_id": 1364,
+    "to": "2.1.288"
+   },
+   "id": null,
+   "kind": "derived:claude_version",
+   "label": "claude_version 2.1.286 → 2.1.288",
+   "position": "before",
+   "recorded_at": "2026-10-03T13:35:24.614Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-03T13:35:24.614Z",
+   "detail": {
+    "attribute": "codex_version",
+    "claim_event": 76066,
+    "from": "0.159.2",
+    "run_id": "4a9dbadb-f295-4ec6-a5d5-7187a524d001",
+    "task_id": 1364,
+    "to": "0.160.0"
+   },
+   "id": null,
+   "kind": "derived:codex_version",
+   "label": "codex_version 0.159.2 → 0.160.0",
+   "position": "before",
+   "recorded_at": "2026-10-03T13:35:24.614Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-03T18:17:16.089Z",
+   "detail": {
+    "at": "2026-10-03T18:17:16.089Z",
+    "by": "planner",
+    "label": "runtime planner headless",
+    "note": "task 1402 の着地（commit 0ca50369、event 78034、2026-10-03T18:17:16Z）で main checkout の dagq.toml に [roles.runtime_planner] route = \"headless\" が入った。最初の非対話の runtime の planner は planner 899（event 78161、18:54:22Z、session_opened route headless）。goal 87 受け入れ (4) の 1 週間後の評価（task 1403）の起点。task 1612 の planner が記録"
+   },
+   "id": 78166,
+   "kind": "mark_recorded",
+   "label": "runtime planner headless",
+   "position": "before",
+   "recorded_at": "2026-10-03T18:55:19.479Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-04T04:09:32.520Z",
+   "detail": {
+    "at": "2026-10-04T04:09:32.520Z",
+    "by": "planner",
+    "label": "headless wrapper background",
+    "note": "dagq.toml [headless] wrapper = \"background\"; workspace wrapper before (goal 89, task 1408). At = first wrapper_launched event 82004 (run cc801ef6, task 1507), 7s after 1408 run_integrated 81976"
+   },
+   "id": 82010,
+   "kind": "mark_recorded",
+   "label": "headless wrapper background",
+   "position": "before",
+   "recorded_at": "2026-10-04T04:09:54.189Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-04T06:49:52.791Z",
+   "detail": {
+    "dagq_version": "0.4.0-dev+076bbb727da3fcbd1c883d8e986c8599eee1408d",
+    "outcome": "stopped",
+    "supervisor": "a941a419-ae54-491e-b194-a1ab5a6c6f05"
+   },
+   "id": 82697,
+   "kind": "supervisor_stopped",
+   "label": "supervisor stopped: 0.4.0-dev+076bbb727da3fcbd1c883d8e986c8599eee1408d",
+   "position": "before",
+   "recorded_at": "2026-10-04T06:49:52.791Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-04T06:50:15.946Z",
+   "detail": {
+    "attribute": "claude_version",
+    "claim_event": 82746,
+    "from": "2.1.288",
+    "run_id": "31ae076a-affc-4cf0-b2e7-5e7eaea69ded",
+    "task_id": 1572,
+    "to": "2.1.289"
+   },
+   "id": null,
+   "kind": "derived:claude_version",
+   "label": "claude_version 2.1.288 → 2.1.289",
+   "position": "before",
+   "recorded_at": "2026-10-04T06:50:15.946Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-04T23:50:31.722Z",
+   "detail": {
+    "dagq_version": "0.4.0-dev+cbe04981dda0ecd209132a476ca2032b1bd9e278",
+    "outcome": "stopped",
+    "supervisor": "1ad50c7f-3a4d-4983-9e61-49d9fe5ecfe8"
+   },
+   "id": 99012,
+   "kind": "supervisor_stopped",
+   "label": "supervisor stopped: 0.4.0-dev+cbe04981dda0ecd209132a476ca2032b1bd9e278",
+   "position": "before",
+   "recorded_at": "2026-10-04T23:50:31.722Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-05T15:35:56.713Z",
+   "detail": {
+    "dagq_version": "0.4.0-dev+6ed11469dff774d9f0068533bb7c7777ebd5549c",
+    "outcome": "stopped",
+    "supervisor": "ec85ae9d-a2d2-4369-9cca-ae33e35c294d"
+   },
+   "id": 105632,
+   "kind": "supervisor_stopped",
+   "label": "supervisor stopped: 0.4.0-dev+6ed11469dff774d9f0068533bb7c7777ebd5549c",
+   "position": "before",
+   "recorded_at": "2026-10-05T15:35:56.713Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-07T13:18:33.000Z",
+   "detail": {
+    "dagq_version": "0.4.0-dev+a4cb6a33b3d99c2fad8f9b6f0fb4b6c7fc390ca1",
+    "last_heartbeat_at": 1791379113,
+    "outcome": "pruned",
+    "supervisor": "150f736c-7a19-4559-9fa5-5e0261d43431"
+   },
+   "id": 125290,
+   "kind": "supervisor_stopped",
+   "label": "supervisor stopped: 0.4.0-dev+a4cb6a33b3d99c2fad8f9b6f0fb4b6c7fc390ca1",
+   "position": "after",
+   "recorded_at": "2026-10-07T13:18:41.486Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-07T14:34:22.000Z",
+   "detail": {
+    "dagq_version": "0.4.0-dev+a4cb6a33b3d99c2fad8f9b6f0fb4b6c7fc390ca1",
+    "last_heartbeat_at": 1791383662,
+    "outcome": "pruned",
+    "supervisor": "8d70230c-6a86-42b7-b088-fbc90702d8c7"
+   },
+   "id": 125852,
+   "kind": "supervisor_stopped",
+   "label": "supervisor stopped: 0.4.0-dev+a4cb6a33b3d99c2fad8f9b6f0fb4b6c7fc390ca1",
+   "position": "after",
+   "recorded_at": "2026-10-07T14:34:25.534Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-07T14:39:28.671Z",
+   "detail": {
+    "attribute": "claude_version",
+    "claim_event": 125971,
+    "from": "2.1.289",
+    "run_id": "8f3514c0-f119-4c60-88e5-532b3832bf2e",
+    "task_id": 2079,
+    "to": "2.1.292"
+   },
+   "id": null,
+   "kind": "derived:claude_version",
+   "label": "claude_version 2.1.289 → 2.1.292",
+   "position": "after",
+   "recorded_at": "2026-10-07T14:39:28.671Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-07T22:30:33.599Z",
+   "detail": {
+    "dagq_version": "0.4.0-dev+9da5bef61e71b863a365e51add4270f01a6dccdb",
+    "outcome": "stopped",
+    "supervisor": "4a25bd66-499b-4493-bcc0-d8b36c8d5b37"
+   },
+   "id": 129892,
+   "kind": "supervisor_stopped",
+   "label": "supervisor stopped: 0.4.0-dev+9da5bef61e71b863a365e51add4270f01a6dccdb",
+   "position": "after",
+   "recorded_at": "2026-10-07T22:30:33.599Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-07T22:32:16.536Z",
+   "detail": {
+    "attribute": "claude_version",
+    "claim_event": 129912,
+    "from": "2.1.292",
+    "run_id": "1b74f1cc-1f57-42ac-9818-156024d011a4",
+    "task_id": 2058,
+    "to": "2.1.293"
+   },
+   "id": null,
+   "kind": "derived:claude_version",
+   "label": "claude_version 2.1.292 → 2.1.293",
+   "position": "after",
+   "recorded_at": "2026-10-07T22:32:16.536Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-08T05:33:34.355Z",
+   "detail": {
+    "attribute": "claude_version",
+    "claim_event": 134595,
+    "from": "2.1.293",
+    "run_id": "19d68ea5-cfe3-4f4c-a1e5-478fab5c888e",
+    "task_id": 2125,
+    "to": "2.1.294"
+   },
+   "id": null,
+   "kind": "derived:claude_version",
+   "label": "claude_version 2.1.293 → 2.1.294",
+   "position": "after",
+   "recorded_at": "2026-10-08T05:33:34.355Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-08T11:14:15.666Z",
+   "detail": {
+    "dagq_version": "0.4.0-dev+8e24119c64526c76b23ba3e3f8b764c3ce08451b",
+    "outcome": "stopped",
+    "supervisor": "cf80e0ae-9086-4c6b-a83c-eef4845514a9"
+   },
+   "id": 137231,
+   "kind": "supervisor_stopped",
+   "label": "supervisor stopped: 0.4.0-dev+8e24119c64526c76b23ba3e3f8b764c3ce08451b",
+   "position": "after",
+   "recorded_at": "2026-10-08T11:14:15.666Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-08T20:11:38.548Z",
+   "detail": {
+    "attribute": "claude_version",
+    "claim_event": 141000,
+    "from": "2.1.294",
+    "run_id": "cbff6c35-4b4e-40b6-a6da-7330ba6acd85",
+    "task_id": 2190,
+    "to": "2.1.295"
+   },
+   "id": null,
+   "kind": "derived:claude_version",
+   "label": "claude_version 2.1.294 → 2.1.295",
+   "position": "after",
+   "recorded_at": "2026-10-08T20:11:38.548Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-11T05:39:11.313Z",
+   "detail": {
+    "attribute": "claude_version",
+    "claim_event": 148876,
+    "from": "2.1.295",
+    "run_id": "c03e2ee2-1d1d-4183-b1cf-a908ed2fc6ff",
+    "task_id": 1716,
+    "to": "2.1.296"
+   },
+   "id": null,
+   "kind": "derived:claude_version",
+   "label": "claude_version 2.1.295 → 2.1.296",
+   "position": "after",
+   "recorded_at": "2026-10-11T05:39:11.313Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-11T05:39:22.038Z",
+   "detail": {
+    "at": null,
+    "by": "planner",
+    "label": "list",
+    "note": null
+   },
+   "id": 148902,
+   "kind": "mark_recorded",
+   "label": "list",
+   "position": "after",
+   "recorded_at": "2026-10-11T05:39:22.038Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-13T12:00:48.613Z",
+   "detail": {
+    "dagq_version": "0.4.0-dev+5d75c6a0adcb1f07f8b23341df23e1100948261c",
+    "outcome": "stopped",
+    "supervisor": "e648f925-c388-4e97-9150-d0516318b4ea"
+   },
+   "id": 180796,
+   "kind": "supervisor_stopped",
+   "label": "supervisor stopped: 0.4.0-dev+5d75c6a0adcb1f07f8b23341df23e1100948261c",
+   "position": "after",
+   "recorded_at": "2026-10-13T12:00:48.613Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-13T15:19:48.184Z",
+   "detail": {
+    "dagq_version": "0.4.0-dev+5090da6a870fa444ab513d5bbe649d639ab3c357",
+    "outcome": "stopped",
+    "supervisor": "a4e43975-f67c-4ddc-861b-21eec25b8208"
+   },
+   "id": 182452,
+   "kind": "supervisor_stopped",
+   "label": "supervisor stopped: 0.4.0-dev+5090da6a870fa444ab513d5bbe649d639ab3c357",
+   "position": "after",
+   "recorded_at": "2026-10-13T15:19:48.184Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-13T16:53:31.259Z",
+   "detail": {
+    "at": "2026-10-13T16:53:31.259Z",
+    "by": "planner",
+    "label": "supervisor max_spikes 1, max_investigations 2",
+    "note": "dagq.toml [supervisor] max_spikes = 1 and max_investigations = 2 (task 1498, commit c2b3ca57) took effect: the supervisor read them at supervisor_config_changed event 184490 (2026-10-13T16:53:31Z, from null/default to 1 and 2 from dagq.toml; parallel 3, runtime_planners 2 unchanged). Point for goal 96 acceptance (5): per-class claim waits, total time to landing including Spikes, planner place occupancy before and after. Recorded by the runtime planner of follow-up draft 2464."
+   },
+   "id": 184541,
+   "kind": "mark_recorded",
+   "label": "supervisor max_spikes 1, max_investigations 2",
+   "position": "after",
+   "recorded_at": "2026-10-13T16:54:47.515Z",
+   "retracted_by": null
+  },
+  {
+   "at": "2026-10-14T02:53:11.463Z",
+   "detail": {
+    "attribute": "claude_version",
+    "claim_event": 186650,
+    "from": "2.1.296",
+    "run_id": "819261e7-8a36-4499-a020-af87d3851304",
+    "task_id": 2265,
+    "to": "2.1.299"
+   },
+   "id": null,
+   "kind": "derived:claude_version",
+   "label": "claude_version 2.1.296 → 2.1.299",
+   "position": "after",
+   "recorded_at": "2026-10-14T02:53:11.463Z",
+   "retracted_by": null
+  }
+ ],
+ "supervisor_started": {
+  "before": 214,
+  "after": 145
+ }
+}
