@@ -210,6 +210,176 @@ fn a_requested_round_runs_one_agent_job_per_run_and_records_its_scores() {
     assert_eq!(listed["evals"][0]["status"], "refused");
 }
 
+/// A case's tree is a repository of its own (ADR-t1728-1 decision 4):
+/// whatever its job runs in it, the tree's Git reaches the base's files
+/// on the landing branch's name and the change on top at a detached
+/// `HEAD`, and no
+/// commit, tree or blob there holds a case list, a patch or what a case
+/// expects, though the repository's base commit holds them; it shares no
+/// object, ref or Git directory with the repository (no alternates,
+/// `commondir` or `gitdir`), and finds neither the base nor the head the
+/// material names. What changed from the landing branch is the case's
+/// change, as a program review sees it in a run's worktree. The material
+/// is the repository's change as before: the patch committed on the base,
+/// its commit and full diff.
+#[test]
+fn a_cases_tree_has_a_git_of_its_own_that_holds_no_case() {
+    let fx = fixture();
+    let base = commit_agents(&fx.repo);
+    let patch = fs::read_dir(fx.repo.join(".dagq/agent-cases/patches"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let hash = patch.file_stem().unwrap().to_str().unwrap().to_owned();
+    common::cli::ok(&fx.db, &["agent", "eval", "demo"]);
+    let out = tempfile::tempdir().unwrap();
+    let agent = EvalAgent::new(out.path(), &[violation(), clean()]);
+    let outcome = supervise(&fx, &agent);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+
+    let launches = agent.launches();
+    let trees = agent.trees_git.lock().unwrap().clone();
+    assert_eq!((launches.len(), trees.len()), (2, 2));
+    for (launch, tree) in launches.iter().zip(&trees) {
+        assert_eq!(tree.commits.len(), 2, "{tree:?}");
+        assert_eq!(tree.refs, ["refs/heads/main"], "{tree:?}");
+        assert_eq!(tree.changed, ["notes.txt"], "{tree:?}");
+        // The job is told to read its tree and its material alone.
+        let reads = launch.reads.as_ref().expect("a case's job names its reads");
+        assert_eq!(
+            reads.readable,
+            [
+                launch.cwd.clone(),
+                launch.material.parent().unwrap().to_owned()
+            ]
+        );
+        let real = |path: &Path| path.canonicalize().unwrap();
+        for kept in [fx.repo.clone(), fx.db.parent().unwrap().to_owned()] {
+            assert!(
+                reads
+                    .unreadable
+                    .iter()
+                    .any(|path| real(path) == real(&kept)),
+                "{kept:?} in {reads:?}"
+            );
+        }
+        for word in [
+            "needs-d1",
+            "clean-one",
+            "\"expected\"",
+            "\"verdict\"",
+            "diff --git",
+            hash.as_str(),
+            base.as_str(),
+        ] {
+            assert!(!tree.objects.contains(word), "{word} in {}", tree.objects);
+        }
+        assert!(tree.paths.contains("notes.txt"), "{}", tree.paths);
+        assert!(tree.paths.contains(".dagq/agents/demo/AGENT.md"));
+        for path in [
+            ".dagq/agents/demo/evals",
+            ".dagq/agents/huge/evals",
+            ".dagq/agent-cases",
+        ] {
+            assert!(!tree.paths.contains(path), "{path} in {}", tree.paths);
+        }
+        assert!(!tree.shows_list);
+        assert!(tree.own_git_dir, "{tree:?}");
+        assert!(tree.links.is_empty(), "{tree:?}");
+        assert_eq!(tree.common_dir, tree.dot_git, "{tree:?}");
+        assert!(tree.dot_git.ends_with("tree/.git"), "{tree:?}");
+        assert!(!tree.common_dir.starts_with(fx.repo.canonicalize().unwrap()));
+        assert!(!tree.has_base && !tree.has_head, "{tree:?}");
+    }
+
+    // The material: the patch committed on the base in the repository.
+    let material = fs::read_to_string(&launches[0].material).unwrap();
+    let head = material
+        .lines()
+        .find_map(|line| line.strip_prefix("head "))
+        .unwrap()
+        .to_owned();
+    assert!(material.contains(&format!("base {base}")), "{material}");
+    assert_eq!(git_out(&fx.repo, &["rev-parse", &format!("{head}^")]), base);
+    assert_eq!(
+        git_out(&fx.repo, &["log", "-1", "--format=%s", &head]),
+        "dagq agent eval case"
+    );
+    assert!(material.contains("dagq agent eval case"), "{material}");
+    assert!(material.contains("+hello"), "{material}");
+    assert!(!material.contains("dev.json"), "{material}");
+}
+
+/// A case's tree is made whatever the landing branch is named, `case` and
+/// `case/topic` included: its Git has the landing branch's ref alone, at
+/// the base's files, and the change at a detached `HEAD` on top, so no
+/// name of the tree's clashes with it; the case lists are in neither.
+#[test]
+fn a_cases_tree_is_made_whatever_the_landing_branch_is_named() {
+    use dagq::infrastructure::adapters::GitRepository;
+    for branch in ["case", "case/topic"] {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(repo.join(".dagq/agents/demo/evals")).unwrap();
+        git(
+            &repo,
+            &["init", "-q", &format!("--initial-branch={branch}")],
+        );
+        git(&repo, &["config", "user.name", "test"]);
+        git(&repo, &["config", "user.email", "test@localhost"]);
+        fs::write(
+            repo.join("dagq.toml"),
+            format!("[repository]\nbranch = \"{branch}\"\n"),
+        )
+        .unwrap();
+        fs::write(
+            repo.join(".dagq/agents/demo/evals/dev.json"),
+            r#"{"cases": [{"id": "needs-d1", "expected": {"verdict": "violation"}}]}"#,
+        )
+        .unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-q", "-m", "base"]);
+        let base = git_out(&repo, &["rev-parse", "HEAD"]);
+        let patch = dir.path().join("change.patch");
+        fs::write(
+            &patch,
+            "diff --git a/notes.txt b/notes.txt\nnew file mode 100644\n--- /dev/null\n+++ b/notes.txt\n@@ -0,0 +1 @@\n+hello\n",
+        )
+        .unwrap();
+        let tree = dir.path().join("case/tree");
+        let head = GitRepository::inspect(&repo)
+            .unwrap()
+            .add_case_tree(&tree, &base, &patch, &[".dagq/agents/*/evals"])
+            .unwrap_or_else(|error| panic!("{branch}: {error:#}"));
+        assert_eq!(
+            git_out(&repo, &["rev-parse", &format!("{head}^")]),
+            base,
+            "{branch}"
+        );
+        assert_eq!(
+            git_out(&tree, &["for-each-ref", "--format=%(refname)"]),
+            format!("refs/heads/{branch}")
+        );
+        assert_eq!(git_out(&tree, &["rev-list", "--all"]).lines().count(), 2);
+        assert_eq!(
+            git_out(&tree, &["diff", "--name-only", &format!("{branch}...HEAD")]),
+            "notes.txt"
+        );
+        // Every commit's whole content, from its root.
+        let history = git_out(&tree, &["log", "--all", "--root", "-p", "--format=%H %s"]);
+        assert!(history.contains("+hello"), "{branch}: {history}");
+        assert!(!history.contains("needs-d1"), "{branch}: {history}");
+        assert!(!history.contains("evals/"), "{branch}: {history}");
+        assert!(!tree.join(".dagq/agents/demo/evals").exists());
+        assert_eq!(
+            fs::read_to_string(tree.join("notes.txt")).unwrap(),
+            "hello\n"
+        );
+    }
+}
+
 /// Record round `id` as started by `owner` on `head` with one run of
 /// `needs-d1` started, as a supervisor that ran it leaves it.
 fn started_by(db: &Path, id: i64, head: &str, owner: &str) {

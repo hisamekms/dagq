@@ -1491,6 +1491,8 @@ impl Supervisor<'_> {
                 cwd: &worktree,
                 dir: &dir,
                 language: language.as_ref(),
+                // A run's review's agent reads as its sandbox lets it.
+                reads: None,
             })
             .with_context(|| format!("the job of the agent {}", agent.name))?;
             self.files

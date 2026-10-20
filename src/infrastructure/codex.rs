@@ -17,13 +17,14 @@
 
 use anyhow::{Context, Result, bail};
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::Command,
 };
 
 use crate::application::{
-    AgentJobLaunch, AgentProvider, CommandSpec, RUN_TMP_DIR, TurnReader, TurnTarget,
+    AgentJobLaunch, AgentProvider, AgentReads, CommandSpec, RUN_TMP_DIR, TurnReader, TurnTarget,
 };
 use crate::domain::{
     TaskRun,
@@ -341,6 +342,23 @@ pub const JOB_PROFILE: &str = "dagq_job";
 /// a write are refused, and without the socket's entry the socket is
 /// refused too.
 pub fn job_service_config(socket: &Path) -> Result<Vec<String>> {
+    let [proxy, enabled, sockets] = job_network_config(socket)?;
+    let [default, extends] = job_profile_config();
+    Ok(vec![proxy, default, extends, enabled, sockets])
+}
+
+/// The `-c` that make [`JOB_PROFILE`] the job's permission profile, on
+/// top of Codex's `:read-only`.
+fn job_profile_config() -> [String; 2] {
+    [
+        format!(r#"default_permissions="{JOB_PROFILE}""#),
+        format!(r#"permissions.{JOB_PROFILE}.extends=":read-only""#),
+    ]
+}
+
+/// The `-c` of [`job_service_config`] that open [`JOB_PROFILE`]'s network
+/// to the socket alone, through Codex's proxy.
+fn job_network_config(socket: &Path) -> Result<[String; 3]> {
     // The sandbox matches the real path (`/tmp` is `/private/tmp`); a
     // socket not made yet is named under its real directory.
     let real = socket.canonicalize().or_else(|_| {
@@ -352,16 +370,143 @@ pub fn job_service_config(socket: &Path) -> Result<Vec<String>> {
     let socket = real
         .to_str()
         .with_context(|| format!("{} is not UTF-8", real.display()))?;
-    Ok(vec![
+    Ok([
         "features.network_proxy=true".to_owned(),
-        format!(r#"default_permissions="{JOB_PROFILE}""#),
-        format!(r#"permissions.{JOB_PROFILE}.extends=":read-only""#),
         format!("permissions.{JOB_PROFILE}.network.enabled=true"),
         format!(
             r#"permissions.{JOB_PROFILE}.network.unix_sockets={{{}="allow"}}"#,
             serde_json::to_string(socket)?
         ),
     ])
+}
+
+/// The `-c` of a case's agent job in place of `--sandbox read-only` that
+/// let it read only where it may ([`AgentReads`]): the [`JOB_PROFILE`]
+/// permission profile on top of `:read-only` (no write anywhere, no
+/// network; [`Codex::reach_queue_service`] opens the socket alone as for
+/// any job) with a `filesystem` table that reads nothing (`:root`), no
+/// `/tmp` and no `$TMPDIR` (`:slash_tmp`, `:tmpdir`: without them a
+/// `filesystem` table lets the job write `/tmp`), but the system's paths
+/// a command needs (`:minimal`), the places the commands are found
+/// ([`command_places`] of `search`, the job's PATH), and the readable
+/// places, never the unreadable ones. A deeper entry wins over the one it
+/// is inside, so a readable tree inside the queue's data directory stays
+/// readable. Paths are given as their real paths, which the sandbox
+/// matches. Checked with `codex sandbox` of codex-cli 0.162.1 (`-c` of
+/// this profile, the socket's `-c` of [`job_service_config`] beside them):
+/// a file of a readable place reads, a file beside it and one of an
+/// unreadable place inside a readable one are refused, a deeper readable
+/// place inside an unreadable one reads, writes to a readable place,
+/// `/tmp` and `$TMPDIR` are refused, the socket answers and a TCP request
+/// gets the proxy's 403; with this function's own output for a case's
+/// layout and the host's PATH, the tree and its material read, another
+/// case's material, a set's file, the repository's Git directory, the
+/// home, `~/.cargo` and `~/.local/share/dagq` are refused, and `rg`
+/// (mise's), Homebrew's `fish` and `dagq` (`~/.local/bin`) run.
+pub fn agent_reads_config(
+    reads: &AgentReads,
+    search: Option<&std::ffi::OsStr>,
+    home: Option<&Path>,
+) -> Result<Vec<String>> {
+    let real = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_owned());
+    let unreadable: Vec<PathBuf> = reads.unreadable.iter().map(|path| real(path)).collect();
+    let mut entries: BTreeMap<String, &str> = [
+        (":root", "none"),
+        (":minimal", "read"),
+        (":slash_tmp", "none"),
+        (":tmpdir", "none"),
+    ]
+    .into_iter()
+    .map(|(path, access)| (path.to_owned(), access))
+    .collect();
+    for place in command_places(search, home) {
+        if unreadable.iter().any(|kept| place.starts_with(kept)) {
+            continue;
+        }
+        if let Some(text) = place.to_str() {
+            entries.insert(text.to_owned(), "read");
+        }
+    }
+    for path in &unreadable {
+        entries.insert(utf8(path)?.to_owned(), "none");
+    }
+    for path in &reads.readable {
+        entries.insert(utf8(&real(path))?.to_owned(), "read");
+    }
+    let table = entries
+        .iter()
+        .map(|(path, access)| Ok(format!("{}=\"{access}\"", serde_json::to_string(path)?)))
+        .collect::<Result<Vec<_>>>()?
+        .join(", ");
+    let [default, extends] = job_profile_config();
+    Ok(vec![
+        default,
+        extends,
+        format!("permissions.{JOB_PROFILE}.filesystem={{{table}}}"),
+    ])
+}
+
+/// `path` as UTF-8, which a `-c` value is.
+fn utf8(path: &Path) -> Result<&str> {
+    path.to_str()
+        .with_context(|| format!("{} is not UTF-8", path.display()))
+}
+
+/// The places a case's agent job reads its commands from, beyond Codex's
+/// `:minimal`, from `search` (PATH), each as its real path. A directory of
+/// PATH is never `/`, `home` or a directory above it, and none is widened
+/// inside `home`, where the user's credentials are (`~/.cargo` beside
+/// `~/.cargo/bin`): there it gives itself and the directory each of its
+/// symbolic links points into. Outside `home`, one named `bin` or `sbin`
+/// gives the prefix it is in (Homebrew's links and libraries point into
+/// its `Cellar` and `opt`), unless that prefix is `/` or above `home`.
+pub fn command_places(search: Option<&std::ffi::OsStr>, home: Option<&Path>) -> Vec<PathBuf> {
+    let Some(search) = search else {
+        return Vec::new();
+    };
+    let home = home.map(|home| home.canonicalize().unwrap_or_else(|_| home.to_owned()));
+    // `/`, the home and what is above it are never read whole.
+    let whole = |path: &Path| {
+        path.parent().is_some() && home.as_deref().is_none_or(|home| !home.starts_with(path))
+    };
+    let in_home = |path: &Path| home.as_deref().is_some_and(|home| path.starts_with(home));
+    let mut places = Vec::new();
+    for dir in std::env::split_paths(search).filter(|dir| dir.is_absolute()) {
+        let Ok(real) = dir.canonicalize() else {
+            continue;
+        };
+        if !whole(&real) {
+            continue;
+        }
+        if in_home(&real) {
+            let links = fs::read_dir(&real)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|entry| entry.is_symlink())
+                .filter_map(|entry| entry.canonicalize().ok())
+                .filter_map(|target| target.parent().map(Path::to_owned))
+                .filter(|target| whole(target));
+            places.extend(links);
+            places.push(real);
+            continue;
+        }
+        let named_bin = |path: &Path| {
+            path.file_name()
+                .is_some_and(|name| name == "bin" || name == "sbin")
+        };
+        let prefix = [&dir, &real]
+            .into_iter()
+            .find(|path| named_bin(path))
+            .and_then(|path| path.parent())
+            .and_then(|prefix| prefix.canonicalize().ok())
+            .filter(|prefix| whole(prefix) && !in_home(prefix));
+        places.push(prefix.unwrap_or(real));
+    }
+    places.sort();
+    places.dedup();
+    places
 }
 
 /// The features of Codex's tools that run a command (codex-cli 0.160.0's
@@ -475,6 +620,15 @@ impl AgentProvider for Codex {
         command.arg("-c").arg(distrust_config(&job.cwd)?);
         for config in agent_job_tools_config(&job.tools) {
             command.arg("-c").arg(config);
+        }
+        if let Some(reads) = &job.reads {
+            let search = std::env::var_os("PATH");
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            let configs = agent_reads_config(reads, search.as_deref(), home.as_deref())?;
+            command.remove_arg_pair("--sandbox", JOB_SANDBOX);
+            for config in configs {
+                command.arg("-c").arg(config);
+            }
         }
         Ok(command)
     }
@@ -641,20 +795,34 @@ impl AgentProvider for Codex {
     /// offline. A worker's turn needs nothing: its sandbox's network is
     /// open (ADR-t813-3 decision 4), and the socket is reached through it.
     fn reach_queue_service(&self, command: &mut CommandSpec, socket: &Path) {
-        if !command.remove_arg_pair("--sandbox", JOB_SANDBOX) {
+        // A case's agent job is in the profile already
+        // ([`agent_reads_config`]): only its network is opened, once.
+        let [profile, _] = job_profile_config();
+        let has = |config: &str| command.get_args().any(|arg| arg == config);
+        let profiled =
+            has(&profile) && !has(&format!("permissions.{JOB_PROFILE}.network.enabled=true"));
+        if !profiled && !command.remove_arg_pair("--sandbox", JOB_SANDBOX) {
             return;
         }
-        match job_service_config(socket) {
+        let configs = if profiled {
+            job_network_config(socket).map(Vec::from)
+        } else {
+            job_service_config(socket)
+        };
+        match configs {
             Ok(configs) => {
                 for config in configs {
                     command.option_args(["-c".to_owned(), config]);
                 }
             }
             Err(error) => {
-                // The job keeps the read-only sandbox, and its `dagq`
-                // reports the service unreachable.
+                // The job keeps the read-only sandbox (or its profile with
+                // no network), and its `dagq` reports the service
+                // unreachable.
                 tracing::warn!("a Codex job cannot be let reach the queue service: {error:#}");
-                command.option_args(["--sandbox", JOB_SANDBOX]);
+                if !profiled {
+                    command.option_args(["--sandbox", JOB_SANDBOX]);
+                }
             }
         }
     }
@@ -1610,6 +1778,7 @@ mod tests {
             material: dir.path().join("material.md"),
             prompt: "PROMPT-TEXT".into(),
             tools,
+            reads: None,
         };
         let args = |command: &CommandSpec| -> Vec<String> {
             command
@@ -1638,5 +1807,235 @@ mod tests {
         let none = args(&none);
         assert_eq!(none[..args(&expected).len()], args(&expected)[..]);
         assert!(none.contains(&"features.shell_tool=false".to_owned()));
+        assert!(
+            !none.iter().any(|arg| arg.contains(".filesystem=")),
+            "a run's review's agent reads as its sandbox lets it: {none:?}"
+        );
+    }
+
+    /// A queue's data directory and a repository beside a case's tree, as
+    /// the eval lays them out: the case's tree and material, another
+    /// case's and run's files, a production set, and the commands' places.
+    struct CaseLayout {
+        _dir: tempfile::TempDir,
+        root: PathBuf,
+        reads: AgentReads,
+    }
+
+    fn case_layout() -> CaseLayout {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        for sub in [
+            "repo/.git/objects",
+            "data/agent-evals/7/3/tree",
+            "data/agent-evals/7/3/material",
+            "data/agent-evals/7/3/run-0",
+            "data/agent-evals/7/4/material",
+            "data/agent-evals/8/0/tree",
+            "data/agent-cases/1/patches",
+            "tools/bin",
+            "tools/Cellar/rg",
+            "home/bin",
+            "home/.codex",
+            "home/.cargo/bin",
+            "home/.local/bin",
+            "home/.local/share/tool/1.0/bin",
+        ] {
+            fs::create_dir_all(root.join(sub)).unwrap();
+        }
+        std::os::unix::fs::symlink(
+            root.join("home/.local/share/tool/1.0/bin/tool"),
+            root.join("home/.local/bin/tool"),
+        )
+        .unwrap();
+        fs::write(root.join("home/.local/share/tool/1.0/bin/tool"), "").unwrap();
+        let reads = AgentReads {
+            readable: vec![
+                root.join("data/agent-evals/7/3/tree"),
+                root.join("data/agent-evals/7/3/material"),
+            ],
+            unreadable: vec![root.join("repo"), root.join("repo/.git"), root.join("data")],
+        };
+        CaseLayout {
+            _dir: dir,
+            root,
+            reads,
+        }
+    }
+
+    /// The `filesystem` table of [`agent_reads_config`]'s profile, path to
+    /// access.
+    fn filesystem(configs: &[String]) -> serde_json::Map<String, serde_json::Value> {
+        let prefix = format!("permissions.{JOB_PROFILE}.filesystem=");
+        let table = configs
+            .iter()
+            .find_map(|config| config.strip_prefix(&prefix))
+            .unwrap_or_else(|| panic!("no filesystem table in {configs:?}"));
+        serde_json::from_str(&table.replace("\"=\"", "\":\"")).unwrap()
+    }
+
+    /// What the table lets `path` be: its deepest entry's access, or
+    /// `:root`'s.
+    fn access(table: &serde_json::Map<String, serde_json::Value>, path: &Path) -> String {
+        table
+            .iter()
+            .filter(|(place, _)| place.starts_with('/') && path.starts_with(place.as_str()))
+            .max_by_key(|(place, _)| place.len())
+            .or_else(|| table.get_key_value(":root"))
+            .map(|(_, access)| access.as_str().unwrap().to_owned())
+            .unwrap()
+    }
+
+    /// A case's agent job (ADR-t1233-5 decision 4's profile, narrowed)
+    /// reads its tree, its material's directory, the system's paths and
+    /// the commands' places, and nothing else: not the repository's
+    /// checkout or Git directory, nor the queue's data directory (another
+    /// case's or run's files, a production set), nor the home or what is
+    /// beside a PATH directory there (`~/.cargo/credentials.toml`), nor
+    /// `/` or the home whole when PATH names them; it writes nowhere, `/tmp` and `$TMPDIR` included,
+    /// and opens no network of its own.
+    #[test]
+    fn a_cases_agent_job_reads_only_its_tree_its_material_and_the_commands_places() {
+        let layout = case_layout();
+        let root = &layout.root;
+        let search = std::env::join_paths([
+            root.join("tools/bin"),
+            root.join("home/bin"),
+            root.join("home/.cargo/bin"),
+            root.join("home/.local/bin"),
+            root.join("home"),
+            root.clone(),
+            PathBuf::from("/"),
+            PathBuf::from("relative/bin"),
+            root.join("gone/bin"),
+            root.join("data/agent-evals/7/3/run-0"),
+        ])
+        .unwrap();
+        let configs =
+            agent_reads_config(&layout.reads, Some(&search), Some(&root.join("home"))).unwrap();
+        assert_eq!(
+            configs[..2],
+            job_profile_config(),
+            "the job's profile on top of :read-only"
+        );
+        assert_eq!(configs.len(), 3, "no network nor write: {configs:?}");
+        let table = filesystem(&configs);
+        for (special, expected) in [
+            (":root", "none"),
+            (":minimal", "read"),
+            (":slash_tmp", "none"),
+            (":tmpdir", "none"),
+        ] {
+            assert_eq!(table[special], expected, "{special}: {table:?}");
+        }
+        assert!(table.values().all(|access| access != "write"), "{table:?}");
+        for (path, expected) in [
+            ("data/agent-evals/7/3/tree/src/lib.rs", "read"),
+            ("data/agent-evals/7/3/material/material.md", "read"),
+            ("tools/bin/rg", "read"),
+            ("tools/Cellar/rg/rg", "read"),
+            ("home/bin/tool", "read"),
+            ("home/.codex/auth.json", "none"),
+            ("home/.cargo/bin/cargo", "read"),
+            ("home/.cargo/credentials.toml", "none"),
+            ("home/.local/bin/tool", "read"),
+            ("home/.local/share/tool/1.0/bin/tool", "read"),
+            ("home/.local/share/tool/1.0/lib", "none"),
+            ("home/.local/share/other", "none"),
+            ("home/notes.txt", "none"),
+            ("elsewhere", "none"),
+            ("data/agent-evals/7/3/change.patch", "none"),
+            ("data/agent-evals/7/3/run-0/agent.out", "none"),
+            ("data/agent-evals/7/4/material/material.md", "none"),
+            (
+                "data/agent-evals/8/0/tree/.dagq/agents/demo/evals/dev.json",
+                "none",
+            ),
+            ("data/agent-cases/1/cases.json", "none"),
+            ("repo/.dagq/agents/demo/evals/dev.json", "none"),
+            ("repo/.git/objects/pack", "none"),
+        ] {
+            assert_eq!(
+                access(&table, &root.join(path)),
+                expected,
+                "{path}: {table:?}"
+            );
+        }
+        assert!(
+            !table.keys().any(|place| place.starts_with("relative")),
+            "{table:?}"
+        );
+        // `/`, the home and what is above it are never read whole.
+        for whole in [PathBuf::from("/"), root.clone(), root.join("home")] {
+            assert!(
+                !table.contains_key(whole.to_str().unwrap()),
+                "{whole:?}: {table:?}"
+            );
+        }
+    }
+
+    /// The launch of a case's agent job is a run's review's agent's
+    /// (distrusted, its tools' features), with the read-only sandbox's
+    /// flag in place of [`agent_reads_config`]'s profile and nothing else
+    /// changed; reaching the queue service then opens the profile's
+    /// network to the socket alone, as for any job.
+    #[test]
+    fn a_cases_agent_job_is_a_reviews_agent_job_with_its_reads_profile() {
+        let layout = case_layout();
+        let codex = Codex::new("/bin/codex".into());
+        let launch = |reads: Option<AgentReads>| AgentJobLaunch {
+            cwd: layout.reads.readable[0].clone(),
+            dir: layout.root.join("data/agent-evals/7/3/run-0"),
+            material: layout.reads.readable[1].join("material.md"),
+            prompt: "PROMPT-TEXT".into(),
+            tools: AgentTools::new([AgentTool::Read]),
+            reads,
+        };
+        let args = |command: &CommandSpec| -> Vec<String> {
+            command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect()
+        };
+        let review = args(&codex.agent_job_command(&launch(None)).unwrap());
+        let mut case = codex
+            .agent_job_command(&launch(Some(layout.reads.clone())))
+            .unwrap();
+        let search = std::env::var_os("PATH");
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let mut expected = review.clone();
+        let at = expected
+            .windows(2)
+            .position(|pair| pair == ["--sandbox", JOB_SANDBOX])
+            .unwrap();
+        expected.drain(at..at + 2);
+        for config in agent_reads_config(&layout.reads, search.as_deref(), home.as_deref()).unwrap()
+        {
+            expected.extend(["-c".to_owned(), config]);
+        }
+        assert_eq!(args(&case), expected);
+        assert_eq!(case.get_stdin(), Some("PROMPT-TEXT"));
+
+        let socket = layout.root.join("data/service/queue.sock");
+        fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        codex.reach_queue_service(&mut case, &socket);
+        let reached = args(&case);
+        let [proxy, enabled, sockets] = job_network_config(&socket).unwrap();
+        let mut with_network = expected.clone();
+        for config in [proxy, enabled, sockets] {
+            with_network.extend(["-c".to_owned(), config]);
+        }
+        assert_eq!(reached, with_network);
+        assert!(!reached.iter().any(|arg| arg == "--sandbox"), "{reached:?}");
+        let mut reviewed = codex.agent_job_command(&launch(None)).unwrap();
+        codex.reach_queue_service(&mut reviewed, &socket);
+        let reviewed = args(&reviewed);
+        assert!(
+            !reviewed.iter().any(|arg| arg.contains(".filesystem=")),
+            "{reviewed:?}"
+        );
+        for config in job_service_config(&socket).unwrap() {
+            assert!(reviewed.contains(&config), "{config}: {reviewed:?}");
+        }
     }
 }

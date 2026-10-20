@@ -6889,6 +6889,7 @@ fn the_whole_review_carries_the_known_failures_and_an_agents_job_does_not() {
         cwd: Path::new("/runs/r/worktree"),
         dir: Path::new("/runs/r/review-1-agents/design"),
         language: None,
+        reads: None,
     })
     .unwrap();
     assert!(!agent.prompt.text.contains("fail already"));

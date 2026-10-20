@@ -4,7 +4,7 @@
 //! cases), the supervisor that runs them, and the queue's events read
 //! back. Shared by the eval's and the production sets' tests.
 
-use crate::common::shell_path;
+use crate::common::{Bounded, shell_path};
 use crate::plan_review::{Fixture, PlanWorkspace, git, options};
 
 use anyhow::{Result, bail};
@@ -49,7 +49,101 @@ pub(crate) struct EvalAgent {
     launches: Mutex<Vec<AgentJobLaunch>>,
     /// Whether each job's tree held the case lists or the patches.
     pub(crate) saw_cases: Mutex<Vec<bool>>,
+    /// What each job's tree's Git reaches, read as its job starts.
+    pub(crate) trees_git: Mutex<Vec<TreeGit>>,
     out: PathBuf,
+}
+
+/// What the Git of a case's tree reaches from inside it, as a job in the
+/// tree could read it.
+#[derive(Debug, Clone)]
+pub(crate) struct TreeGit {
+    /// Every object's content (`git cat-file --batch-all-objects --batch`).
+    pub(crate) objects: String,
+    /// Every object any ref reaches, with its path (`git rev-list --all
+    /// --objects`), and every path of every commit's (`git log --all
+    /// --name-only`).
+    pub(crate) paths: String,
+    /// `git rev-list --all`.
+    pub(crate) commits: Vec<String>,
+    /// `git for-each-ref --format=%(refname)`.
+    pub(crate) refs: Vec<String>,
+    /// `git rev-parse --git-common-dir`, as a real path.
+    pub(crate) common_dir: PathBuf,
+    /// The tree's `.git`, as a real path.
+    pub(crate) dot_git: PathBuf,
+    /// Whether `.git` is a directory of the tree's own.
+    pub(crate) own_git_dir: bool,
+    /// Which of `objects/info/alternates`, `commondir` and `gitdir` its
+    /// Git directory has.
+    pub(crate) links: Vec<&'static str>,
+    /// Whether `git cat-file -e` finds the material's base and head
+    /// commits, which are the repository's.
+    pub(crate) has_base: bool,
+    pub(crate) has_head: bool,
+    /// Whether `git show HEAD:.dagq/agents/demo/evals/dev.json` reads.
+    pub(crate) shows_list: bool,
+    /// `git diff --name-only main...HEAD`, what a program review that
+    /// compares with the landing branch sees changed.
+    pub(crate) changed: Vec<String>,
+}
+
+/// [`TreeGit`] of the tree `cwd`, whose material at `material` names the
+/// change's base and head.
+fn tree_git(cwd: &Path, material: &Path) -> TreeGit {
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(cwd)
+            .args(args)
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+            .env_remove("GIT_COMMON_DIR")
+            .bounded_output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+        )
+    };
+    let lines = |text: String| text.lines().map(str::to_owned).collect::<Vec<_>>();
+    let text = fs::read_to_string(material).unwrap();
+    let named = |key: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(key))
+            .unwrap()
+            .to_owned()
+    };
+    let (base, head) = (named("base "), named("head "));
+    let dot_git = cwd.join(".git");
+    TreeGit {
+        objects: git(&["cat-file", "--batch-all-objects", "--batch"]).1,
+        paths: git(&["rev-list", "--all", "--objects"]).1
+            + &git(&["log", "--all", "--name-only", "--format=%H"]).1,
+        commits: lines(git(&["rev-list", "--all"]).1),
+        refs: lines(git(&["for-each-ref", "--format=%(refname)"]).1),
+        common_dir: cwd
+            .join(git(&["rev-parse", "--git-common-dir"]).1.trim())
+            .canonicalize()
+            .unwrap(),
+        own_git_dir: dot_git.is_dir(),
+        dot_git: dot_git.canonicalize().unwrap(),
+        links: [
+            ("objects/info/alternates", "alternates"),
+            ("commondir", "commondir"),
+            ("gitdir", "gitdir"),
+        ]
+        .into_iter()
+        .filter(|(path, _)| dot_git.join(path).exists())
+        .map(|(_, name)| name)
+        .collect(),
+        has_base: git(&["cat-file", "-e", &format!("{base}^{{commit}}")]).0,
+        has_head: git(&["cat-file", "-e", &format!("{head}^{{commit}}")]).0,
+        shows_list: git(&["show", "HEAD:.dagq/agents/demo/evals/dev.json"]).0,
+        changed: lines(git(&["diff", "--name-only", "main...HEAD"]).1),
+    }
 }
 
 impl EvalAgent {
@@ -58,6 +152,7 @@ impl EvalAgent {
             replies: Mutex::new(replies.to_vec()),
             launches: Mutex::new(Vec::new()),
             saw_cases: Mutex::new(Vec::new()),
+            trees_git: Mutex::new(Vec::new()),
             out: out.to_owned(),
         }
     }
@@ -90,6 +185,10 @@ impl AgentProvider for EvalAgent {
             job.cwd.join(".dagq/agents/demo/evals").exists()
                 || job.cwd.join(".dagq/agent-cases").exists(),
         );
+        self.trees_git
+            .lock()
+            .unwrap()
+            .push(tree_git(&job.cwd, &job.material));
         let mut replies = self.replies.lock().unwrap();
         let reply = if replies.len() > 1 {
             replies.remove(0)

@@ -227,14 +227,21 @@ landing branchの定義を新しい本番のreviewで測り直す時期をsuperv
   経路はheadlessのjobの共通の経路（起動・時間の上限・やり直し・記録・引き継ぎ。[Headless job processes](supervisor-lifecycle/headless-job-processes.md)）、1本のagentのjobの組み立て（`application::agent_job::build`、[Prompt](supervisor-lifecycle/prompt.md#agentのjobの上限)）、上の「道具の宣言」の変換、行き先のproviderは`[roles.review]`。
   eval専用の起動の組み立ては作らない。
 - 本番のrunのreviewのagentのjobも同じ組み立て・起動のコマンド・1つのverdictの読み取りを使う。
-  同じ定義・provider・道具の宣言ならargvは一致し、違うのはstdinのpromptの材料の行だけである。
+  ケースのjobは組み立ての入力の読める場所の欄（`AgentReads`）を持ち、本番のrunのreviewのagentのjobはその欄を空にする。
+  同じ定義・provider・道具の宣言なら、argvの差はその欄からproviderが作る読み取りの制限の引数だけで、stdinのpromptの差は材料の行だけである。
 - 実行の入口は`application::supervise::execution::agent_eval`。
-- ケースのtreeは`base_commit`にpatchを当ててcommitした使い捨てのworktreeで、queueのdata dirの`agent-evals/`の下に周ごとに置く。
-  jobのcwdはそのtreeで、材料のファイル（commitの一覧と全文の差分`<base_commit>...<patchを当てたcommit>`）はケースのdirの材料だけのdirに書く。
-  Claudeのjobが読めるのはtreeとそのdirだけで（`--add-dir`）、同じケースのほかの実行の出力は読めない。
-  Codexのjobはread-onlyのsandboxのshellで読むので、treeの外（ほかの実行の出力やcommitに残るケースの一覧）も読めてしまう: 道具の宣言で読み取りを狭めても、読める場所はsandboxが決める。
+- ケースのtreeは、queueのdata dirの`agent-evals/`の下に周ごとに置く、tree自身のGitのrepositoryである。
+  supervisorは`base_commit`にpatchを当てたcommitをrepositoryの中に作り、材料のファイル（commitの一覧と全文の差分`<base_commit>...<patchを当てたcommit>`）をそこから作って、ケースのdirの材料だけのdirに書く。
+  treeはbaseとそのcommitのファイルからevalのケースの一覧とpatchの置き場を除いたもので、それぞれを1つのcommitにし、baseのcommitをlanding branchの名前に、そのcommitをdetachedの`HEAD`に置く（ほかのrefは無い）。
+  landing branchと比べるprogramのreviewには、runのworktreeと同じくケースの差分が見える。
+  treeのGitはrepositoryとobject・ref・Git directoryを共有しないので、treeの中から辿れるどのcommitにもケースの一覧・patchの置き場・期待は無い。
+  採点の期待はsupervisorがtreeの外で持つ。
+- jobのcwdはそのtreeで、Codexのjobが読めるのはtree・ケースの材料のdir・commandの実行に要るsystemの場所だけである。
+  repositoryのcheckoutとGit directory、queueのdata dirのほか（ほかのケースと実行の出力、productionのケースの集合）は読めない。
+  Claudeのjobは読める場所の欄を使わず、`--add-dir`でtree・材料のdir・自分のjobのdirを足す今の起動のままである（shellを宣言した定義のcommandは限らない）。
+  Codexのjobは、`--sandbox read-only`の代わりに、読める場所の欄から作るjobのpermission profileの読み取りの設定で限る（`infrastructure::codex::agent_reads_config`）。
+  書き込みとnetworkはread-onlyのsandbox・jobのpermission profile（ADR-t1233-5）・`untrusted`（ADR-t1570-1）のまま変えない。
   ケースのdirは番号で名付け、promptにもpathにもケースのidと期待を出さない。
-  treeの作業ファイルからはevalのケースの一覧とpatchの置き場を消す（commitには残る）ので、Claudeのjobは自分の期待を読めない。
 - providerのloginか使用量の上限で止まった実行は、providerを控えて同じ実行を待たせ、やり直しに数えない。
 - 起動を止めたsupervisor（drain・stop・serviceの停止）は、流れている実行が終われば周を手放し、次に動くsupervisorがeventから読み直す。
 - providerを切り替えない: 成績・1回の見込み・tokenの換算がproviderごとで、切り替えると別のproviderの成績が混ざるため。

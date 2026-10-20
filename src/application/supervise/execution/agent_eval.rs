@@ -42,6 +42,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use super::jobs::{HeadlessJob, JobFailed, JobSubject, ProgramEnd, start_program_against};
 use super::*;
+use crate::application::AgentReads;
 use crate::application::agent_eval::{Incomplete, finished as finished_payload};
 use crate::application::agent_job::{self, AgentJob};
 use crate::application::review::CONFIG_FILE;
@@ -144,10 +145,35 @@ impl CaseChecking {
     }
 }
 
-/// What the case's tree leaves out of its working tree (not its commit):
-/// the eval's own case lists, with each case's expected verdict, and their
-/// patches, which a job in the tree could otherwise read.
+/// What the case's tree leaves out (its files and its Git's two commits,
+/// the base's and the change's; the material's commit in the repository
+/// keeps them): the eval's own
+/// case lists, with each case's expected verdict, and their patches,
+/// which a job in the tree could otherwise read.
 const HIDDEN: [&str; 2] = [".dagq/agents/*/evals", ".dagq/agent-cases"];
+
+/// Where the agent job of a case (an eval's run, a set's labeling) may
+/// read ([`AgentReads`]): the case's tree and its material's directory,
+/// never the repository's checkout or Git directory nor the queue's data
+/// directory (the case lists and patches, the other cases' and runs'
+/// files, the sets), whose expectations the job must not see.
+pub(super) fn case_reads(layout: &Layout, tree: &Path, material: &Path) -> AgentReads {
+    let mut unreadable = vec![
+        layout.repo_root.clone(),
+        layout.main_checkout.clone(),
+        layout.common_dir.clone(),
+    ];
+    unreadable.extend(layout.agent_evals_dir.parent().map(Path::to_owned));
+    unreadable.dedup();
+    AgentReads {
+        readable: [Some(tree), material.parent()]
+            .into_iter()
+            .flatten()
+            .map(Path::to_owned)
+            .collect(),
+        unreadable,
+    }
+}
 
 /// What a round reads of the landing branch's commit.
 struct Snapshot {
@@ -1093,6 +1119,7 @@ impl Supervisor<'_> {
                 .create_dir_all(&dir)
                 .with_context(|| format!("create {}", dir.display()))?;
             let language = self.verifier.language();
+            let reads = case_reads(self.layout, &tree.tree, &tree.material);
             let built = agent_job::build(&AgentJob {
                 agent: &round.agent,
                 definition: &round.definition,
@@ -1106,6 +1133,7 @@ impl Supervisor<'_> {
                 cwd: &tree.tree,
                 dir: &dir,
                 language: language.as_ref(),
+                reads: Some(&reads),
             })?;
             self.files
                 .write(&dir.join("prompt.txt"), built.prompt.text.as_bytes())?;
@@ -1395,4 +1423,39 @@ fn selected_cases(
         ));
     }
     Ok(cases)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A case's job reads its tree and its material's directory, and
+    /// never the repository's checkout, its Git directory or the queue's
+    /// data directory, where the case lists, the other cases' and runs'
+    /// files and the production sets are.
+    #[test]
+    fn a_cases_job_reads_its_tree_and_material_and_never_the_repository_or_the_queue() {
+        let layout = Layout::for_test(Path::new("/q"));
+        let case = layout.agent_evals_dir.join("7/3");
+        let reads = case_reads(
+            &layout,
+            &case.join("tree"),
+            &case.join("material/material.md"),
+        );
+        assert_eq!(
+            reads.readable,
+            [case.join("tree"), case.join("material")],
+            "{reads:?}"
+        );
+        assert_eq!(
+            reads.unreadable,
+            [
+                PathBuf::from("/repo"),
+                PathBuf::from("/repo/.git"),
+                PathBuf::from("/q")
+            ],
+            "{reads:?}"
+        );
+        assert!(layout.agent_cases_dir.starts_with("/q"));
+    }
 }

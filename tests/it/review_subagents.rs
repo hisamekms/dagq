@@ -487,6 +487,7 @@ fn a_run_rebased_onto_a_main_that_moved_on_is_reviewed_from_their_merge_base() {
         cwd: &rebasing,
         dir: &job_dir,
         language: None,
+        reads: None,
     })
     .unwrap();
     let prompt = &built.prompt.text;
@@ -1095,6 +1096,7 @@ fn the_real_claude_review_jobs_keep_their_limits() {
             material,
             prompt: prompt.to_owned(),
             tools,
+            reads: None,
         };
         let mut command = claude.agent_job_command(&launch).unwrap();
         claude.without_mcp(&mut command);
@@ -1235,6 +1237,7 @@ fn a_codex_review_runs_its_whole_review_and_its_agents_on_codex() {
         args.contains("permissions.dagq_job") || args.contains(" --sandbox| read-only|"),
         "{args}"
     );
+    assert!(!args.contains(".filesystem="), "{args}");
     let finished = payloads(&detail, "review_finished");
     assert_eq!(finished[0]["agents"][0]["summary"], "codex agent passed");
 }
@@ -1910,8 +1913,13 @@ fn without_material(prompt: &str) -> String {
 /// The eval of an agent and a run's review start the agent's job the one
 /// way (ADR-t1728-1 (e), ADR-t1895-1). (a) With the same definition,
 /// provider and declared tools, Claude Code's and Codex's commands of the
-/// eval's job and of the review's agent job are the same argv, and their
-/// prompts (on standard input) differ only by the material's lines. (b)
+/// eval's job and of the review's agent job are the same argv but for the
+/// read restriction the eval's case gives its job (its tree and material
+/// read, never the repository nor the queue's data directory): Codex
+/// takes the narrowed profile of `agent_reads_config` for `--sandbox
+/// read-only`, the review's agent none, and Claude Code's argv is the
+/// same; their prompts (on standard input) differ only by the material's
+/// lines. (b)
 /// The eval's case starts the job of the agent it measures alone: no whole
 /// review's job and no other agent's. (c) Their limits are apart: with
 /// `[review.jobs] concurrency = 1` the review's whole job runs until the
@@ -2014,9 +2022,37 @@ fn the_eval_and_a_review_start_an_agents_job_the_one_way_within_their_own_limits
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>()
     };
+    // The eval's case names where its job reads, the review's agent
+    // nothing.
+    let reads = eval.reads.as_ref().expect("the eval's job names its reads");
+    assert_eq!(
+        reads.readable,
+        [eval.cwd.clone(), eval.material.parent().unwrap().to_owned()]
+    );
+    let real = |path: &Path| path.canonicalize().unwrap();
+    for kept in [repo.clone(), db.parent().unwrap().to_owned()] {
+        assert!(
+            reads
+                .unreadable
+                .iter()
+                .any(|path| real(path) == real(&kept)),
+            "{kept:?} in {reads:?}"
+        );
+    }
+    assert_eq!(review.reads, None);
+    let unrestricted = dagq::application::AgentJobLaunch {
+        reads: None,
+        ..eval.clone()
+    };
+    let search = std::env::var_os("PATH");
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let restriction =
+        dagq::infrastructure::codex::agent_reads_config(reads, search.as_deref(), home.as_deref())
+            .unwrap();
     for provider in [&claude as &dyn AgentProvider, &codex] {
         let args = argv(provider, eval);
-        assert_eq!(args, argv(provider, review));
+        // Without its reads the eval's argv is the review's.
+        assert_eq!(argv(provider, &unrestricted), argv(provider, review));
         assert!(
             !args
                 .iter()
@@ -2032,6 +2068,25 @@ fn the_eval_and_a_review_start_an_agents_job_the_one_way_within_their_own_limits
             "{args:?}"
         );
     }
+    assert_eq!(argv(&claude, eval), argv(&claude, review));
+    let mut narrowed = argv(&codex, review);
+    let at = narrowed
+        .windows(2)
+        .position(|pair| pair == ["--sandbox", "read-only"])
+        .expect("the review's agent job is in the read-only sandbox");
+    narrowed.drain(at..at + 2);
+    narrowed.extend(
+        restriction
+            .iter()
+            .flat_map(|config| ["-c".to_owned(), config.clone()]),
+    );
+    assert_eq!(argv(&codex, eval), narrowed);
+    assert!(
+        !argv(&codex, review)
+            .iter()
+            .any(|arg| arg.contains(".filesystem=")),
+        "the review's agent job reads as its sandbox lets it"
+    );
     for launch in [eval, review] {
         for word in ["Required review subagents", "\"agents\" array"] {
             assert!(!launch.prompt.contains(word), "{word}");

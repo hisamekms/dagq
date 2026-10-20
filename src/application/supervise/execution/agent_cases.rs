@@ -37,6 +37,7 @@
 
 use std::collections::BTreeSet;
 
+use super::agent_eval::case_reads;
 use super::jobs::{HeadlessJob, JobFailed, JobSubject};
 use super::*;
 use crate::application::agent_cases::{set_dir, sets_of, view, write_patch};
@@ -475,6 +476,7 @@ impl Supervisor<'_> {
             .create_dir_all(&run_dir)
             .with_context(|| format!("create {}", run_dir.display()))?;
         let language = self.verifier.language();
+        let reads = case_reads(self.layout, &tree, &material);
         let built = agent_job::build(&AgentJob {
             agent: &labeling.agent,
             definition: &labeling.definition,
@@ -486,6 +488,7 @@ impl Supervisor<'_> {
             cwd: &tree,
             dir: &run_dir,
             language: language.as_ref(),
+            reads: Some(&reads),
         })?;
         self.files
             .write(&run_dir.join("prompt.txt"), built.prompt.text.as_bytes())?;

@@ -209,7 +209,7 @@ pub enum PluginState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentJobLaunch {
     /// Where the job runs and reads the change's files: the tree of the
-    /// change (an eval case's worktree).
+    /// change (a run's review's worktree, an eval case's tree).
     pub cwd: std::path::PathBuf,
     /// The job's own directory, outside `cwd`: its settings and its debug
     /// file.
@@ -224,6 +224,27 @@ pub struct AgentJobLaunch {
     /// `--allowedTools` and `--disallowedTools`, Codex's features on top of
     /// its read-only sandbox.
     pub tools: crate::domain::review_subagents::AgentTools,
+    /// Where the job may read, which the provider turns into a read
+    /// restriction of its own; `None` leaves its reads to its sandbox as
+    /// they are (a run's review's agent).
+    pub reads: Option<AgentReads>,
+}
+
+/// The places an agent job of a case (an eval's run, a set's labeling)
+/// may read: its provider lets it read these and the places the system's
+/// commands need, and nothing else (Codex's permission profile,
+/// `infrastructure::codex::agent_reads_config`). Claude Code's job does
+/// not use it: its reads stay those of its launch's `--add-dir` and its
+/// declared tools.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentReads {
+    /// The case's tree and its material's directory.
+    pub readable: Vec<std::path::PathBuf>,
+    /// The places it never reads, even inside one the system's commands
+    /// are read from: the repository's main checkout and Git directory,
+    /// and the queue's data directory (the other cases and runs, and the
+    /// sets). A readable place inside one stays readable.
+    pub unreadable: Vec<std::path::PathBuf>,
 }
 
 /// The rounds of the eval as supervisors own them (ADR-t1728-1 decision
@@ -1922,14 +1943,16 @@ pub trait Repository: RepositoryReads {
     /// Add the run's worktree on its new branch from its base commit; Git's
     /// output.
     fn create_worktree(&self, run: &TaskRun) -> Result<String>;
-    /// The tree of an eval's case (ADR-t1728-1 decision 4) at `path`, a
-    /// worktree without a branch: `base` checked out detached, the patch
-    /// file `patch` applied and committed on top; the commit's SHA, the
-    /// head of the change `<base>...<head>`. A tree left at `path` is
-    /// removed first. No hook of the repository runs. `hidden` (relative
-    /// paths, one `*` segment matching a directory's entries) is then
-    /// removed from the working tree, not from the commit: what the job
-    /// must not read there (the eval's own cases and patches).
+    /// The tree of an eval's case (ADR-t1728-1 decision 4) at `path`: the
+    /// patch file `patch` applied on `base` and committed in this
+    /// repository, whose SHA it returns (the head of the change
+    /// `<base>...<head>`, the material's), and that commit's files at
+    /// `path` without `hidden` (relative paths, one `*` segment matching a
+    /// directory's entries: the eval's own cases and patches), in a
+    /// repository of the tree's own: the base's files so committed on the
+    /// landing branch's name and the head's on top at a detached `HEAD`,
+    /// sharing no object, ref or Git directory with this one. A tree
+    /// left at `path` is removed first. No hook of the repository runs.
     fn add_case_tree(
         &self,
         path: &Path,

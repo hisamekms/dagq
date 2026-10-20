@@ -64,6 +64,13 @@ fn expand_one_star(root: &Path, pattern: &str) -> Vec<PathBuf> {
     found
 }
 
+/// The temporary index of the case's tree at `path`, beside it.
+fn case_index(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".index");
+    PathBuf::from(name)
+}
+
 pub fn executable(path: &Path) -> Result<PathBuf> {
     let candidate = if path.components().count() > 1 || path.is_absolute() {
         path.to_owned()
@@ -2689,11 +2696,20 @@ impl GitRepository {
         Ok(())
     }
 
-    /// `git worktree add --detach` of `base` at `path`, then `git apply`
-    /// of `patch` and a commit of it there, every command with no hook
-    /// (`core.hooksPath=/dev/null`) and the commit with dagq's own name;
-    /// then `hidden` (paths relative to the tree, a `*` matching one
-    /// directory's entries) is removed from the working tree only.
+    /// The case's commit made in this repository without a worktree: `base`
+    /// read into a temporary index beside `path`, `patch` applied to it
+    /// and committed on top with dagq's own name, so the material's
+    /// `<base>...<head>` reads here; its SHA is returned. The tree at
+    /// `path` is a repository of its own with the base's files and then
+    /// the head's checked out from that index, each without `hidden`
+    /// (paths relative to the tree, a `*` matching one directory's
+    /// entries) and committed: the base's commit, with no parent, on the
+    /// landing branch's name and the head's on top of it at a detached
+    /// `HEAD` (no other ref, so none clashes with that name), so a
+    /// program review that compares with the landing branch sees the
+    /// case's change as in a run's worktree. It shares no object, ref,
+    /// alternate or Git directory with this repository, so nothing its Git
+    /// reaches holds what was hidden. No hook runs.
     pub fn add_case_tree(
         &self,
         path: &Path,
@@ -2702,37 +2718,128 @@ impl GitRepository {
         hidden: &[&str],
     ) -> Result<CommitSha> {
         self.remove_case_tree(path)?;
-        let git = |dir: &Path| {
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+        }
+        let index = case_index(path);
+        let made = self.case_trees(&index, path, base, patch, hidden);
+        let _ = fs::remove_file(&index);
+        made
+    }
+
+    /// [`Self::add_case_tree`] through the temporary `index`.
+    fn case_trees(
+        &self,
+        index: &Path,
+        path: &Path,
+        base: &str,
+        patch: &Path,
+        hidden: &[&str],
+    ) -> Result<CommitSha> {
+        let here = || {
             let mut command = self.command();
             command
                 .arg("-C")
-                .arg(dir)
-                .args(["-c", "core.hooksPath=/dev/null"]);
+                .arg(&self.root)
+                .args(["-c", "core.hooksPath=/dev/null"])
+                .env("GIT_INDEX_FILE", index);
             command
         };
-        output(
-            git(&self.root)
-                .args(["worktree", "add", "--detach", "--force"])
+        let tree = || {
+            let mut command = self.command();
+            command
+                .arg("-C")
                 .arg(path)
-                .arg(base),
+                .args(["-c", "core.hooksPath=/dev/null"])
+                .env_remove("GIT_INDEX_FILE");
+            command
+        };
+        let commit = |command: &mut Command, message: &str| {
+            output(command.args([
+                "-c",
+                "user.name=dagq",
+                "-c",
+                "user.email=dagq@localhost",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "--no-verify",
+                "--allow-empty",
+                "--message",
+                message,
+            ]))
+        };
+        let landing = self
+            .landing_branch()
+            .unwrap_or_else(|_| LandingBranch::main())
+            .name;
+        output(here().arg("read-tree").arg(base))?;
+        self.case_files(&here, path, hidden)?;
+        output(
+            tree()
+                .args(["init", "--quiet", "--template="])
+                .arg(format!("--initial-branch={landing}")),
         )?;
-        output(git(path).args(["apply", "--whitespace=nowarn"]).arg(patch))?;
-        output(git(path).args(["add", "--all"]))?;
-        output(git(path).args([
-            "-c",
-            "user.name=dagq",
-            "-c",
-            "user.email=dagq@localhost",
-            "-c",
-            "commit.gpgsign=false",
-            "commit",
-            "--quiet",
-            "--no-verify",
-            "--allow-empty",
-            "--message",
-            "dagq agent eval case",
-        ]))?;
-        let head = self.head(path)?;
+        output(tree().args(["add", "--all", "--force"]))?;
+        commit(&mut tree(), "chore: the eval case's base")?;
+        // The change goes on a detached HEAD: any branch name could be the
+        // landing branch's, or above or below it (`case`, `case/topic`).
+        output(tree().args(["switch", "--quiet", "--detach"]))?;
+        output(
+            here()
+                .args(["apply", "--cached", "--whitespace=nowarn"])
+                .arg(patch),
+        )?;
+        let written = output(here().arg("write-tree"))?;
+        let head = output(
+            here()
+                .args([
+                    "-c",
+                    "user.name=dagq",
+                    "-c",
+                    "user.email=dagq@localhost",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "commit-tree",
+                    "--no-gpg-sign",
+                    "-p",
+                    base,
+                    "-m",
+                    "dagq agent eval case",
+                ])
+                .arg(written.trim()),
+        )?;
+        for entry in fs::read_dir(path).with_context(|| format!("read {}", path.display()))? {
+            let entry = entry?.path();
+            if entry.file_name().is_some_and(|name| name == ".git") {
+                continue;
+            }
+            if entry.is_dir() && !entry.is_symlink() {
+                fs::remove_dir_all(&entry)
+            } else {
+                fs::remove_file(&entry)
+            }
+            .with_context(|| format!("remove {}", entry.display()))?;
+        }
+        self.case_files(&here, path, hidden)?;
+        output(tree().args(["add", "--all", "--force"]))?;
+        commit(&mut tree(), "chore: the eval case's change")?;
+        object_id(&head, "the case's commit")
+    }
+
+    /// The files of the temporary index of `here` checked out at `path`,
+    /// without `hidden`.
+    fn case_files(&self, here: &dyn Fn() -> Command, path: &Path, hidden: &[&str]) -> Result<()> {
+        fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
+        let mut prefix = std::ffi::OsString::from("--prefix=");
+        prefix.push(path.as_os_str());
+        prefix.push("/");
+        output(
+            here()
+                .args(["checkout-index", "--all", "--force"])
+                .arg(prefix),
+        )?;
         for pattern in hidden {
             for found in expand_one_star(path, pattern) {
                 if found.is_dir() {
@@ -2743,23 +2850,16 @@ impl GitRepository {
                 .with_context(|| format!("remove {}", found.display()))?;
             }
         }
-        Ok(head)
+        Ok(())
     }
 
-    /// `git worktree remove --force` of `path`, its directory removed if
-    /// that left it, then `git worktree prune`.
+    /// Remove the case's tree at `path` ([`Self::add_case_tree`]), one
+    /// already gone left at that. A tree an older runtime made as a linked
+    /// worktree is forgotten too (`git worktree prune`).
     pub fn remove_case_tree(&self, path: &Path) -> Result<()> {
+        let _ = fs::remove_file(case_index(path));
         if path.exists() {
-            let _ = output(
-                self.command()
-                    .arg("-C")
-                    .arg(&self.root)
-                    .args(["worktree", "remove", "--force"])
-                    .arg(path),
-            );
-            if path.exists() {
-                fs::remove_dir_all(path).with_context(|| format!("remove {}", path.display()))?;
-            }
+            fs::remove_dir_all(path).with_context(|| format!("remove {}", path.display()))?;
         }
         output(
             self.command()
@@ -5681,6 +5781,7 @@ mod tests {
             material: dir.path().join("material.md"),
             prompt: "PROMPT-TEXT review the change".into(),
             tools,
+            reads: None,
         };
         let command = claude
             .agent_job_command(&launch(AgentRole::Review.default_tools()))
@@ -5819,6 +5920,7 @@ mod tests {
                 cwd,
                 dir: &job_dir,
                 language: None,
+                reads: None,
             })
             .unwrap();
             let args: Vec<String> = claude

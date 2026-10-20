@@ -20,17 +20,21 @@
 //! What a case expects (its verdict, codes, split and id) is never in it.
 //! The job reads only the material file and the files of the tree it runs
 //! in, with the tools its definition declares; it is given no way to read
-//! the queue.
+//! the queue. A case's job also names where it may read
+//! ([`AgentJob::reads`]): Codex adds a read restriction from it, and
+//! Claude Code's launch does not use it (its `--add-dir` stays as it is);
+//! that is all the launch of a case's job and of a run's review's agent
+//! differ by.
 
 use std::fmt;
 use std::path::Path;
 
-use super::AgentJobLaunch;
 use super::prompt::{
     AGENT_JOB_DEFINITION_BYTES, AGENT_JOB_INSTRUCTIONS_BYTES, AGENT_JOB_MATERIAL_BYTES,
     AGENT_JOB_PROMPT_LIMIT, FittedPrompt,
 };
 use super::prompt_fit::{Fit, Keep};
+use super::{AgentJobLaunch, AgentReads};
 use crate::domain::language::Language;
 use crate::domain::review_subagents::AgentTools;
 
@@ -56,6 +60,10 @@ pub struct AgentJob<'a> {
     /// The job's own directory.
     pub dir: &'a Path,
     pub language: Option<&'a Language>,
+    /// Where the job may read ([`AgentReads`]): a case's job gives it, a
+    /// run's review's agent `None`, whose launch is then as it was. The
+    /// prompt does not change with it.
+    pub reads: Option<&'a AgentReads>,
 }
 
 /// A definition past the agent job's limit (ADR-t1869-1): no prompt is
@@ -199,6 +207,7 @@ pub fn build(job: &AgentJob<'_>) -> Result<BuiltAgentJob, DefinitionOverLimit> {
             material: job.material.to_owned(),
             prompt: prompt.text.clone(),
             tools: job.tools.clone(),
+            reads: job.reads.cloned(),
         },
         prompt,
     })
@@ -237,6 +246,7 @@ mod tests {
             cwd: &paths.cwd,
             dir: &paths.dir,
             language: None,
+            reads: None,
         }
     }
 
