@@ -414,6 +414,9 @@ impl Supervisor<'_> {
             let task = self.queue.show(moved.task_id())?.task;
             self.write_prompt(&task, &moved, Path::new(run_dir))?;
         }
+        // The new provider's session is the run's before its first turn
+        // starts (a Codex thread once its turn names it).
+        self.register_run_sessions(moved.id());
         // The headless session takes the call as its next turn.
         request_turn(self, &moved, workspace, Input::from(text), PROVIDER_SWITCH)?;
         Ok(moved)

@@ -2003,3 +2003,9 @@ task = 1871
 name = "runtime_sccache::a_lost_session_is_opened_again_after_the_supervisor_started_the_missing_server"
 reason = "B 境界（守る境界）: the supervisor's wiring of a lost headless session's reopen to the sccache server process: the server started and recorded in SQLite before the reopened wrapper is"
 task = 2112
+
+# 10.108s on the worker's stress run
+[[test]]
+name = "runtime_provider_switch::a_codex_turn_at_its_usage_limit_moves_to_claude_without_an_ask"
+reason = "B 境界（守る境界）: the supervisor's wiring of a provider switch with real stub processes, the Codex thread and the Claude session the switch opened registered to the run before its turn"
+task = 2869

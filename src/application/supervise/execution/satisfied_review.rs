@@ -588,6 +588,8 @@ impl Supervisor<'_> {
         launch: &ActorLaunch,
     ) -> Result<Result<StartedReview>> {
         let run_dir = PathBuf::from(run.run_dir().context("missing run directory")?);
+        // The review's session is the run's before it starts.
+        self.register_run_job_session(run.id(), session_id);
         let stdout = run_dir.join(format!("{output}.out"));
         let stderr = run_dir.join(format!("{output}.err"));
         let tree = integration::fresh_satisfied_scratch(

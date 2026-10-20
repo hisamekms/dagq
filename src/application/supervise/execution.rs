@@ -1024,6 +1024,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         service_access: ports.service_access,
         telemetry_tokens: ports.telemetry_tokens,
         telemetry_retries: telemetry_tokens::Retries::default(),
+        telemetry_sessions: std::collections::HashSet::new(),
         pauses: ports.pauses.clone(),
         files: ports.files.clone(),
         processes: ports.processes.clone(),
@@ -1197,6 +1198,10 @@ struct Supervisor<'a> {
     /// not make yet and no sweep would make for it: tried again on each
     /// sweep ([`Self::sweep_telemetry`]).
     telemetry_retries: telemetry_tokens::Retries,
+    /// The runs' sessions this process registered to their run
+    /// ([`telemetry_tokens::register_run_sessions`]), so each is asked of
+    /// the queue once.
+    telemetry_sessions: std::collections::HashSet<String>,
     /// Where tests pause it ([`Ports::pauses`]).
     pauses: Option<Pauses>,
     files: Arc<dyn RunFiles>,
@@ -1600,6 +1605,46 @@ impl Supervisor<'_> {
             self.registration.token(),
             &mut self.telemetry_retries,
         );
+        self.register_run_sessions(run.id());
+    }
+
+    /// Register to `run` the sessions its events tell of
+    /// ([`telemetry_tokens::register_run_sessions`]), before its wrapper
+    /// starts the next turn: the claim's, a resume's, an adoption's, and a
+    /// switch's or a renewal's new one. Events that cannot be read, and a
+    /// registration that failed, are logged and tried again at the next
+    /// pass ([`Self::sweep_telemetry`]); the run goes on as it would.
+    pub(super) fn register_run_sessions(&mut self, run: &RunId) {
+        match self.queue.run_events(run) {
+            Ok(events) => telemetry_tokens::register_run_sessions(
+                self.telemetry_tokens,
+                &self.layout.db,
+                run,
+                &events,
+                &mut self.telemetry_sessions,
+            ),
+            Err(error) => {
+                warn!(run_id = %run, "the events of run {run} could not be read to register its sessions; the next pass tries again: {error:#}");
+            }
+        }
+    }
+
+    /// Register `session_id`, the session of a job this process starts on
+    /// `run` named ahead (a review's, a recovery job's), to the run before
+    /// the job starts ([`telemetry_tokens::register_session`]); `None` is
+    /// left to the job's end, whose event names its thread.
+    pub(super) fn register_run_job_session(&mut self, run: &RunId, session_id: Option<&str>) {
+        if let Some(session_id) = session_id
+            && !self.telemetry_sessions.contains(session_id)
+            && telemetry_tokens::register_session(
+                self.telemetry_tokens,
+                &self.layout.db,
+                &crate::domain::session_step::StepTarget::run(run),
+                session_id,
+            )
+        {
+            self.telemetry_sessions.insert(session_id.to_owned());
+        }
     }
 
     /// Before this process starts an executor on `run` (a review, a
@@ -1628,6 +1673,7 @@ impl Supervisor<'_> {
     /// or whose runner is gone, by the queue and this host's processes
     /// ([`telemetry_tokens::sweep_targets`]).
     fn sweep_telemetry(&mut self) {
+        self.register_held_sessions();
         let processes = &self.processes;
         telemetry_tokens::sweep_targets(
             self.telemetry_tokens,
@@ -1650,6 +1696,26 @@ impl Supervisor<'_> {
             &states,
         );
         self.telemetry_retries = retries;
+    }
+
+    /// Register the sessions of each run whose telemetry token this
+    /// process issued and still holds ([`Self::register_run_sessions`]),
+    /// before the sweep revokes those of the runs that ended: a thread a
+    /// Codex turn or a job's end named since the last pass, as its
+    /// executor reports it, and a registration that failed before. The
+    /// tokens that cannot be listed are left to the next pass.
+    fn register_held_sessions(&mut self) {
+        let Ok(held) = self.telemetry_tokens.held_telemetry(&self.layout.db) else {
+            return;
+        };
+        let lease = self.registration.token().clone();
+        for token in held {
+            if token.issued_under.as_ref() == Some(&lease)
+                && let Some(run) = token.target.run_id()
+            {
+                self.register_run_sessions(&run);
+            }
+        }
     }
 
     /// Where the revocations this registration holds wait for the exec of

@@ -298,6 +298,18 @@ esac"#
         calls[1].starts_with("start codex-thread-2 You are executing dagq task 2"),
         "{calls:?}"
     );
+    // The claim's session, and the thread Codex named after the switch
+    // once a pass read it, are the run's telemetry target's (ADR-t1662-3
+    // decision 10).
+    // So is the session the runtime gave its review's job on Claude.
+    let reviewed = payloads(&detail, "review_started");
+    let review = reviewed[0]["session_id"].as_str().unwrap();
+    for session in [run.id().as_str(), "codex-thread-2", review] {
+        assert_eq!(
+            common::service::session_owner(&db, session),
+            Some(format!("run:{}", run.id()))
+        );
+    }
     let requested: Vec<&Value> = payloads(&detail, "turn_requested")
         .into_iter()
         .map(|p| &p["what"])
@@ -385,6 +397,17 @@ fn a_codex_turn_at_its_usage_limit_moves_to_claude_without_an_ask() {
         )),
         "{calls:?}"
     );
+    // The Codex thread, and the Claude session the switch opened, are the
+    // run's telemetry target's (ADR-t1662-3 decision 10).
+    for session in [
+        "codex-thread-1".to_owned(),
+        session_name(run.id().as_str(), 1),
+    ] {
+        assert_eq!(
+            common::service::session_owner(&db, &session),
+            Some(format!("run:{}", run.id()))
+        );
+    }
     // Codex's hold opened no ask.
     let held = queue_events(&db, "provider_held");
     assert_eq!(held.len(), 1, "{held:?}");

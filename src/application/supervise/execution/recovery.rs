@@ -1359,6 +1359,8 @@ fn spawn_job(
     launch: &ActorLaunch,
     (stdout, stderr): (PathBuf, PathBuf),
 ) -> Result<HeadlessJob> {
+    // The job's session is the run's before it starts.
+    sv.register_run_job_session(run, session_id);
     let agent = sv
         .job_agent(launch.provider)
         .with_context(|| format!("no {} runs on this supervisor", launch.provider.as_str()))?;

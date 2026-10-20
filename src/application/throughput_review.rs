@@ -449,6 +449,9 @@ fn review_period<Q: AskStore + RunLog>(
     // revokes it at the finish.
     if let Some(telemetry) = &environment.telemetry {
         telemetry.issue(&*queue, &review_target(started));
+        // The session named ahead (Claude's) is the review's before its
+        // agent starts.
+        telemetry.register(&review_target(started), session_id.as_deref());
     }
     tracing::info!(
         mode = options.mode.as_str(),
@@ -517,6 +520,13 @@ fn review_period<Q: AskStore + RunLog>(
     // the id that closes its span and the model `stats` reads.
     if let Some(session) = provider.job_session(&stdout, started_ms) {
         session.record(&mut payload);
+        // A thread its agent named itself (Codex's) is the review's once
+        // read, before [`review`] revokes its token at the finish.
+        if let Some(telemetry) = &environment.telemetry
+            && session.named
+        {
+            telemetry.register(&review_target(started), session.session_id.as_deref());
+        }
     }
     // A Codex job that stopped where Codex cannot be used starts again on
     // the other provider (ADR-t1063-1 decision 4): the supervisor holds

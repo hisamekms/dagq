@@ -307,6 +307,9 @@ pub fn observe<Q: AskStore + ObserverLog + QueueRecords + RunLog + TaskReads>(
     );
     if let Some(telemetry) = &telemetry {
         telemetry.issue(&*queue, &target);
+        // The session named ahead (Claude's) is the observation's before
+        // its agent starts.
+        telemetry.register(&target, session_id.as_deref());
     }
     // Its end: the finish recorded, or a failure that records none.
     let ended = |queue: &Q| {
@@ -428,6 +431,13 @@ pub fn observe<Q: AskStore + ObserverLog + QueueRecords + RunLog + TaskReads>(
     // are the id and the model it and `stats` read.
     if let Some(session) = provider.job_session(&stdout, started_ms) {
         session.record(&mut payload);
+        // A thread its agent named itself (Codex's) is the observation's
+        // once read, before its token is revoked.
+        if let Some(telemetry) = &telemetry
+            && session.named
+        {
+            telemetry.register(&target, session.session_id.as_deref());
+        }
     }
     if let Some(unusable) = provider_unusable {
         payload["provider_unusable"] = unusable;

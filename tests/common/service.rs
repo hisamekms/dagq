@@ -265,3 +265,15 @@ pub fn target_token_events(
         })
         .collect()
 }
+
+/// The target the control side registered `session` to
+/// ([`dagq::application::SessionOwners`]): `<kind>:<id>`, `None` for one
+/// it never registered.
+pub fn session_owner(db: &Path, session: &str) -> Option<String> {
+    use dagq::application::SessionOwners;
+    dagq::infrastructure::sqlite::SqliteQueue::open(db)
+        .unwrap()
+        .session_owner(session)
+        .unwrap()
+        .map(|owner| format!("{}:{}", owner.target.kind.as_str(), owner.target.id))
+}

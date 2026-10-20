@@ -311,7 +311,12 @@ impl PlanningState {
             return Ok(());
         }
         let proposal = env.queue.show_proposal(proposal_id)?;
-        issue_job_telemetry(env, TargetKind::PlanReview, job.id);
+        issue_job_telemetry(
+            env,
+            TargetKind::PlanReview,
+            job.id,
+            job.session_id.as_deref(),
+        );
         match self.spawn_plan_review(env, &job, &proposal, &launch) {
             Ok((prompt_bytes, Ok(headless))) => {
                 info!(task_id = %job.anchor, "proposal {proposal_id} plan review {} started on {} with a prompt of {} bytes", job.attempt, launch.provider.as_str(), prompt_bytes.total);
@@ -676,13 +681,14 @@ impl PlanningState {
             return Ok(false);
         };
         let watch = self.plan_review.take().expect("polled above");
-        end_job_telemetry(env, TargetKind::PlanReview, watch.job.id);
         let duration_secs = watch.headless.elapsed().as_secs();
         let stdout = env
             .files
             .read_to_string(watch.headless.stdout())
             .unwrap_or_default();
         let session = agent.job_session(&stdout, watch.headless.started_at());
+        register_job_session(env, TargetKind::PlanReview, watch.job.id, session.as_ref());
+        end_job_telemetry(env, TargetKind::PlanReview, watch.job.id);
         let verdict = outcome.and_then(|stdout| PlanReviewVerdict::parse(&stdout));
         // Only a job that failed or printed no verdict is read for a wall:
         // a verdict's own text may quote anything (task 438).

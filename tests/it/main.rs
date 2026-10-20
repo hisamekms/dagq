@@ -187,6 +187,7 @@ mod runtime_sweep;
 mod runtime_task_hold;
 mod runtime_task_hold_park;
 mod runtime_telemetry_lease;
+mod runtime_telemetry_sessions;
 mod runtime_throughput_review;
 mod runtime_toolchains;
 mod runtime_triage;

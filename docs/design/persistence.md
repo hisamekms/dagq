@@ -206,7 +206,7 @@ serviceのファイル（socket・lock・`state.json`・token）はqueueのデ�
 - stepの残るsessionは消したseqを連続する区間ごとに`session_step_removed`に持ち、それを抜けと数えず、届き直しても足さない（stepの残らないsessionの行は消す）。
 - stepはseqの順に届くとは限らないので、消したseqより小さい届いていないseqは抜けのまま残り、届けば足す。
 - `session_resources`はexecutorが中から測った資源のsampleを、stepと同じく`(session_id, seq)`ごとに1行で持ち、保持もstepと同じに消す。
-- `session_owners`は制御側がexecutorの送る前に登録したsessionの対象を持つ。
+- `session_owners`は制御側が登録したsessionの対象を持つ（時点は[計測](measurement.md#送る口)）。
   登録・step・sampleのどれかが別の対象のsessionは、登録もstepもsampleも拒む。
   保持は、登録が90日より前でstepもsampleも残らないsessionの行を消す。
 

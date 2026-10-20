@@ -237,6 +237,30 @@ pub fn actor_id(target: &StepTarget) -> String {
     format!("{ACTOR_PREFIX}:{}:{}", target.kind.as_str(), target.id)
 }
 
+/// The sessions of `run_id` its events tell the control side of, each
+/// once, in the order they started: the one its worker's session wrapper
+/// names at the claim and after each switch or renewal
+/// ([`super::turn::session_name`], for a provider whose session the
+/// runtime names ahead), and every session id an event of the run names
+/// (`session_id`: the thread a provider named itself, as its turn or its
+/// job's end recorded it). What the control side registers to the run
+/// before or while its executor reports; a name its provider did not use
+/// is registered to the run and reported by none.
+pub fn run_sessions(run_id: &str, events: &[super::RunEvent]) -> Vec<String> {
+    let mut sessions: Vec<String> = (0..=super::provider_switch::session_starts(events))
+        .map(|starts| super::turn::session_name(run_id, starts))
+        .collect();
+    for event in events {
+        if let Some(id) = event.payload["session_id"].as_str()
+            && !id.is_empty()
+            && !sessions.iter().any(|known| known == id)
+        {
+            sessions.push(id.to_owned());
+        }
+    }
+    sessions
+}
+
 string_enum!(
 /// Why a telemetry token was revoked (ADR-t1662-3 decision 11), as
 /// `telemetry_token_revoked` records it once the revocation succeeded.
@@ -782,5 +806,51 @@ mod tests {
         }
         assert_eq!(TokenRevocation::PlannerClosed.as_str(), "planner_closed");
         assert_eq!(TokenRevocation::JobEnded.as_str(), "job_ended");
+    }
+
+    /// A run's sessions: the one its claim names, one more for each switch
+    /// and renewal, and each session id its events name (a Codex thread a
+    /// turn identified, a job's), each once, the missing thread's null
+    /// none.
+    #[test]
+    fn a_runs_sessions_are_its_named_ones_and_those_its_events_name() {
+        use crate::domain::{EventId, EventKind, RunEvent, TaskId, turn::session_name};
+        let event = |kind: EventKind, payload: Value| RunEvent {
+            id: EventId::new(1),
+            task_id: Some(TaskId::new(1)),
+            goal_id: None,
+            run_id: None,
+            kind: kind.into(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        };
+        assert_eq!(run_sessions("r1", &[]), ["r1"]);
+        let events = [
+            event(EventKind::RunClaimed, json!({})),
+            event(
+                EventKind::TurnSessionIdentified,
+                json!({"session_id": "thread-1"}),
+            ),
+            event(EventKind::TurnFinished, json!({"session_id": "thread-1"})),
+            event(EventKind::ProviderSwitched, json!({"to": "claude"})),
+            event(EventKind::SessionRenewed, json!({"session": "x"})),
+            event(
+                EventKind::TurnSessionIdentified,
+                json!({"session_id": null}),
+            ),
+            event(EventKind::TurnSessionIdentified, json!({"session_id": ""})),
+            event(EventKind::ReviewFinished, json!({"session_id": "thread-2"})),
+        ];
+        assert_eq!(
+            run_sessions("r1", &events),
+            [
+                "r1".to_owned(),
+                session_name("r1", 1),
+                session_name("r1", 2),
+                "thread-1".to_owned(),
+                "thread-2".to_owned(),
+            ]
+        );
     }
 }

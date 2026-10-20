@@ -881,6 +881,18 @@ pub trait TelemetryTokens: Send + Sync {
     /// whether its token is due ([`crate::domain::telemetry::target_token_due`]):
     /// what the sweep reads, as the service does at each request.
     fn target_facts(&self, db: &std::path::Path, target: &StepTarget) -> Result<TargetFacts>;
+    /// Register `session_id` as `target`'s in the queue at `db`
+    /// ([`crate::application::SessionOwners::register_session`]), as the
+    /// control side does when it starts or learns of the session, before
+    /// or while its executor reports: again to the same target changes
+    /// nothing, and one of another target is refused. No use case of the
+    /// service registers.
+    fn register_telemetry_session(
+        &self,
+        db: &std::path::Path,
+        target: &StepTarget,
+        session_id: &str,
+    ) -> Result<()>;
 }
 
 /// `up`'s step (ADR-t1233-4 decision 1): reuse a service of this build

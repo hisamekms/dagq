@@ -618,6 +618,20 @@ impl TelemetryTokens for SystemServiceAccess {
         SqliteQueue::open(db)?.telemetry_target(target)
     }
 
+    fn register_telemetry_session(
+        &self,
+        db: &Path,
+        target: &StepTarget,
+        session_id: &str,
+    ) -> Result<()> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| {
+                i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+            });
+        SessionOwners::register_session(&SqliteQueue::open(db)?, target, session_id, now_ms)
+    }
+
     fn held_telemetry(&self, db: &Path) -> Result<Vec<HeldTelemetry>> {
         Ok(records(&queue_dir_of(db))?
             .into_iter()

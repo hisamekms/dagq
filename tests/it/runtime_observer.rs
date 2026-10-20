@@ -168,6 +168,15 @@ fn the_observer_takes_its_role_table_and_records_what_it_started_with() {
         assert!(start.payload["timeout_secs"].is_u64(), "{}", start.payload);
         let id = start.id.as_i64().to_string();
         expected.push((id.clone(), "issued", None));
+        // The session id its start names is registered to it, by its kind
+        // and id, so its executor's reports are its own.
+        assert_eq!(
+            crate::common::service::session_owner(
+                &db,
+                start.payload["session_id"].as_str().unwrap()
+            ),
+            Some(format!("observer:{id}"))
+        );
         expected.push((id, "revoked", Some("job_ended".to_owned())));
     }
     assert_eq!(

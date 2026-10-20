@@ -224,6 +224,11 @@ fn launch_planner(
     );
     if let Some(telemetry) = &launch.telemetry {
         telemetry.issue(queue, &target);
+        // The session its wrapper names its agent by
+        // ([`turn::planner_session_name`]) is the planner's before the
+        // wrapper starts.
+        let session = turn::planner_session_name(&dir.display().to_string(), planner.created_at);
+        telemetry.register(&target, Some(&session));
     }
     let closed = |error: &anyhow::Error| -> Result<()> {
         queue.close_planner(planner.id, Some(&format!("{error:#}")))?;

@@ -190,8 +190,14 @@ fn an_hour_no_rule_meets_is_reviewed_and_saved_but_not_told_to_the_inbox() {
         ),
         [
             (id.clone(), "issued", None),
-            (id, "revoked", Some("job_ended".to_owned()))
+            (id.clone(), "revoked", Some("job_ended".to_owned()))
         ]
+    );
+    // The session id its start names is registered to it, by its kind and
+    // id, so its executor's reports are its own.
+    assert_eq!(
+        crate::common::service::session_owner(&db, started[0]["session_id"].as_str().unwrap()),
+        Some(format!("throughput_review:{id}"))
     );
     let dir = PathBuf::from(done["dir"].as_str().unwrap());
     assert!(
@@ -933,4 +939,38 @@ fn the_reply_uses_only_stdout_for_text_and_structured_providers() {
         assert_eq!(saved["conclusion"], json!(["- unchanged"]));
         assert!(!dir.join("output.log").exists());
     }
+}
+
+/// A session that cannot be registered (ADR-t1662-3 decision 10) changes
+/// nothing of the review's: it succeeds and is saved as any other, its
+/// token issued and revoked, and its session is no target's, so its
+/// executor's reports are refused.
+#[test]
+fn a_review_whose_session_cannot_be_registered_succeeds_as_any_other() {
+    let (_dir, _repo, db) = fixture();
+    land(&db, &[4; 28]);
+    Connection::open(&db)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER refuse_owner BEFORE INSERT ON session_owners
+             BEGIN SELECT RAISE(ABORT, 'registration refused by the test'); END;",
+        )
+        .unwrap();
+    let provider = ReviewProvider::new(QUIET_REVIEWER);
+    let done = review(&db, &provider, &options(ReviewMode::Hourly)).unwrap();
+    assert_eq!(done["outcome"], "succeeded", "{done}");
+    let started = queue_events(&db, "throughput_review_started");
+    let session = started[0]["session_id"].as_str().unwrap();
+    assert_eq!(common::service::session_owner(&db, session), None);
+    let id = done["started_event_id"].as_i64().unwrap().to_string();
+    assert_eq!(
+        common::service::target_token_events(
+            &db,
+            dagq::domain::session_step::TargetKind::ThroughputReview
+        ),
+        [
+            (id.clone(), "issued", None),
+            (id, "revoked", Some("job_ended".to_owned()))
+        ]
+    );
 }

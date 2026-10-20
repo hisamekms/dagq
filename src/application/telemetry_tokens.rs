@@ -46,6 +46,16 @@
 //! and revocation, each only once it succeeded. Their file is under the
 //! queue's `service/`, outside the planner's directory and the job's, and
 //! no agent is given it.
+//!
+//! The control side also registers each session it starts, or learns of,
+//! to its target ([`register_session`], ADR-t1662-3 decision 10): the
+//! queue service records a report only for a session registered to the
+//! token's target. A session the runtime names ahead (Claude's
+//! `--session-id`, a worker's by its run and its session starts) is
+//! registered before its agent starts; one its agent names (a Codex
+//! thread) once its events or its job's output name it, and what the
+//! executor sent before is refused and sent again. A registration is
+//! telemetry too: one that failed is logged and changes no outcome.
 
 use std::path::{Path, PathBuf};
 
@@ -60,7 +70,7 @@ use crate::domain::session_step::StepTarget;
 use crate::domain::telemetry::{
     HeldTelemetry, RunTokenState, TokenRevocation, run_token_due, target_token_due,
 };
-use crate::domain::{EventKind, LeaseToken, RunId, TaskId};
+use crate::domain::{EventKind, LeaseToken, RunEvent, RunId, TaskId};
 
 /// Where the issue and the revocation are recorded: the run's events, and
 /// the queue's for a target of no run. Every [`EventStore`] is one.
@@ -131,6 +141,15 @@ impl TargetTelemetry<'_> {
         }
     }
 
+    /// Register `session_id` as `target`'s ([`register_session`]): before
+    /// its agent starts for a session named ahead, once it is read for one
+    /// its agent named. `None` registers nothing.
+    pub fn register(&self, target: &StepTarget, session_id: Option<&str>) {
+        if let Some(session_id) = session_id {
+            register_session(self.tokens, self.db, target, session_id);
+        }
+    }
+
     /// Revoke the token of `target` at its end ([`revoke_target`]). One
     /// that cannot be revoked is logged: the service refuses it from the
     /// end on, and the sweep revokes it ([`sweep_targets`]).
@@ -141,6 +160,71 @@ impl TargetTelemetry<'_> {
                 target.kind.as_str(),
                 target.id
             );
+        }
+    }
+}
+
+/// Register `session_id` as `target`'s in the queue at `db`, as the
+/// control side starts or learns of the session: whether it is
+/// registered. One that failed (the queue locked, a session of another
+/// target) is logged: the executor's reports of it are refused, and the
+/// target's outcome does not change.
+pub fn register_session(
+    tokens: &dyn TelemetryTokens,
+    db: &Path,
+    target: &StepTarget,
+    session_id: &str,
+) -> bool {
+    try_register(tokens, db, target, session_id).is_ok()
+}
+
+/// [`register_session`]: what the registration returned, logged when it
+/// failed.
+fn try_register(
+    tokens: &dyn TelemetryTokens,
+    db: &Path,
+    target: &StepTarget,
+    session_id: &str,
+) -> Result<()> {
+    tokens
+        .register_telemetry_session(db, target, session_id)
+        .inspect_err(|error| {
+            warn!(
+                "session {session_id} could not be registered to {} {}; its executor's reports are refused: {error:#}",
+                target.kind.as_str(),
+                target.id
+            );
+        })
+}
+
+/// Register to `run` each of its sessions its `events` tell of
+/// ([`crate::domain::telemetry::run_sessions`]) that is not in
+/// `registered`, the sessions this process registered already, which
+/// takes each one registered now and each one another target holds (never
+/// the run's, so not asked again). At the claim, a resume, an adoption, a
+/// switch or a renewal before the next turn starts, and at every pass for
+/// a thread a turn or a job's end named since.
+pub fn register_run_sessions(
+    tokens: &dyn TelemetryTokens,
+    db: &Path,
+    run: &RunId,
+    events: &[RunEvent],
+    registered: &mut std::collections::HashSet<String>,
+) {
+    let target = StepTarget::run(run);
+    for session in crate::domain::telemetry::run_sessions(run.as_str(), events) {
+        if registered.contains(&session) {
+            continue;
+        }
+        let done = match try_register(tokens, db, &target, &session) {
+            Ok(()) => true,
+            Err(error) => matches!(
+                error.downcast_ref::<crate::domain::session_step::StepError>(),
+                Some(crate::domain::session_step::StepError::SessionOfAnotherTarget)
+            ),
+        };
+        if done {
+            registered.insert(session);
         }
     }
 }
@@ -561,6 +645,11 @@ mod tests {
         /// What the queue holds of each target of no run by its id; one
         /// not here has ended, and `unreadable` cannot be read.
         targets: Mutex<BTreeMap<String, TargetFacts>>,
+        /// The sessions registered, each with its target, and how many
+        /// registrations were asked.
+        owners: Mutex<BTreeMap<String, StepTarget>>,
+        registrations: Mutex<u32>,
+        failing_registrations: Mutex<u32>,
     }
 
     impl Tokens {
@@ -625,6 +714,27 @@ mod tests {
                     issued_under: lease.as_deref().map(LeaseToken::new),
                 })
                 .collect())
+        }
+        fn register_telemetry_session(
+            &self,
+            _: &Path,
+            target: &StepTarget,
+            session_id: &str,
+        ) -> Result<()> {
+            *self.registrations.lock().unwrap() += 1;
+            if Self::fail(&self.failing_registrations) {
+                return Err(anyhow!("the queue is locked"));
+            }
+            let mut owners = self.owners.lock().unwrap();
+            match owners.get(session_id) {
+                Some(owner) if owner != target => {
+                    Err(crate::domain::session_step::StepError::SessionOfAnotherTarget.into())
+                }
+                _ => {
+                    owners.insert(session_id.to_owned(), target.clone());
+                    Ok(())
+                }
+            }
         }
         fn target_facts(&self, _: &Path, target: &StepTarget) -> Result<TargetFacts> {
             if target.id == "404" {
@@ -1380,5 +1490,96 @@ mod tests {
                 ),
             ]
         );
+    }
+
+    /// ADR-t1662-3 decision 10: the control side registers a run's
+    /// sessions as its events tell of them, each once by this process
+    /// (asked of the queue once), a renewal's and a thread a turn named
+    /// later included; one that failed to register is asked again at the
+    /// next look, and none changes what the caller goes on with.
+    #[test]
+    fn a_runs_sessions_are_registered_to_it_once_each_and_a_failure_again_later() {
+        use crate::domain::{EventId, turn::session_name};
+        let tokens = Tokens::default();
+        let run = run("r1");
+        let event = |kind: EventKind, payload: serde_json::Value| RunEvent {
+            id: EventId::new(1),
+            task_id: Some(TaskId::new(1)),
+            goal_id: None,
+            run_id: Some(run.clone()),
+            kind: kind.into(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        };
+        let mut registered = std::collections::HashSet::new();
+        // The claim: the session its wrapper names by the run.
+        register_run_sessions(&tokens, Path::new(DB), &run, &[], &mut registered);
+        register_run_sessions(&tokens, Path::new(DB), &run, &[], &mut registered);
+        assert_eq!(*tokens.registrations.lock().unwrap(), 1);
+        // A renewal, then a Codex thread a turn named, the first asked
+        // when the queue was locked.
+        let mut events = vec![event(EventKind::SessionRenewed, serde_json::json!({}))];
+        *tokens.failing_registrations.lock().unwrap() = 1;
+        register_run_sessions(&tokens, Path::new(DB), &run, &events, &mut registered);
+        assert!(!registered.contains(&session_name("r1", 1)));
+        events.push(event(
+            EventKind::TurnSessionIdentified,
+            serde_json::json!({"session_id": "thread-1"}),
+        ));
+        register_run_sessions(&tokens, Path::new(DB), &run, &events, &mut registered);
+        let owners = tokens.owners.lock().unwrap().clone();
+        let of_run = StepTarget::run(&run);
+        assert_eq!(
+            owners,
+            BTreeMap::from([
+                ("r1".to_owned(), of_run.clone()),
+                (session_name("r1", 1), of_run.clone()),
+                ("thread-1".to_owned(), of_run),
+            ])
+        );
+        assert_eq!(*tokens.registrations.lock().unwrap(), 4);
+        // A thread another target holds is not taken, and not asked again.
+        tokens
+            .owners
+            .lock()
+            .unwrap()
+            .insert("planners".to_owned(), target(TargetKind::Planner, 3));
+        events.push(event(
+            EventKind::TurnSessionIdentified,
+            serde_json::json!({"session_id": "planners"}),
+        ));
+        register_run_sessions(&tokens, Path::new(DB), &run, &events, &mut registered);
+        register_run_sessions(&tokens, Path::new(DB), &run, &events, &mut registered);
+        assert_eq!(*tokens.registrations.lock().unwrap(), 5);
+        assert_eq!(
+            tokens.owners.lock().unwrap().get("planners"),
+            Some(&target(TargetKind::Planner, 3))
+        );
+    }
+
+    /// A target of no run's session is registered to it alone: again to
+    /// the same target changes nothing, to another one is refused and
+    /// logged, and `None` (a session its agent names, not read yet)
+    /// registers nothing.
+    #[test]
+    fn a_target_of_no_runs_session_is_registered_to_it_and_refused_to_another() {
+        let tokens = Tokens::default();
+        let telemetry = TargetTelemetry {
+            tokens: &tokens,
+            db: Path::new(DB),
+            lease: None,
+        };
+        let planner = target(TargetKind::Planner, 3);
+        let review = target(TargetKind::GoalReview, 5);
+        telemetry.register(&planner, Some("p-1"));
+        telemetry.register(&planner, Some("p-1"));
+        telemetry.register(&review, None);
+        assert!(!register_session(&tokens, Path::new(DB), &review, "p-1"));
+        assert_eq!(
+            *tokens.owners.lock().unwrap(),
+            BTreeMap::from([("p-1".to_owned(), planner)])
+        );
+        assert_eq!(*tokens.registrations.lock().unwrap(), 3);
     }
 }

@@ -369,6 +369,16 @@ fn each_runtime_planner_starts_its_wrapper_in_the_background_without_a_workspace
             .telemetry_credential(db, &StepTarget::of(TargetKind::Planner, id))
             .unwrap();
         assert!(!credential.starts_with(&dir), "{credential:?}");
+        // The session its wrapper names its agent by is registered to it
+        // before the wrapper starts, so its executor's reports are its own.
+        let session = dagq::domain::turn::planner_session_name(
+            &dir.display().to_string(),
+            opened.planner.created_at,
+        );
+        assert_eq!(
+            crate::common::service::session_owner(db, &session),
+            Some(format!("planner:{id}"))
+        );
         let token = std::fs::read_to_string(&credential).unwrap();
         for text in [credential.to_str().unwrap(), token.trim()] {
             assert!(!command.contains(text), "{command}");

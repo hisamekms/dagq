@@ -1016,6 +1016,8 @@ impl Supervisor<'_> {
         info!(run_id = %run.id(), "run {}'s worker goes on in a new session ({}): its previous turn's context took {} tokens, above {}", run.id(), payload["session"], fresh.0, fresh.1);
         self.queue
             .record_runtime_event(run.id(), EventKind::SessionRenewed, payload)?;
+        // The new session is the run's before its first turn starts.
+        self.register_run_sessions(run.id());
         Ok(())
     }
 }

@@ -51,12 +51,36 @@ impl PlanningState {
 }
 
 /// Issue the telemetry token of the job of `kind` and `id` (a plan review,
-/// a goal review) as its agent is started (ADR-t1662-3 decision 11): one
-/// not issued is logged, and the job goes on without telemetry.
-fn issue_job_telemetry(env: &contexts::PlanningEnv<'_>, kind: TargetKind, id: i64) {
-    env.jobs
-        .target_telemetry(&env.pass)
-        .issue(&*env.pass.queue, &StepTarget::of(kind, id));
+/// a goal review) as its agent is started (ADR-t1662-3 decision 11), and
+/// register to it `session_id`, the session named ahead (Claude's): one
+/// not issued or not registered is logged, and the job goes on without
+/// telemetry.
+fn issue_job_telemetry(
+    env: &contexts::PlanningEnv<'_>,
+    kind: TargetKind,
+    id: i64,
+    session_id: Option<&str>,
+) {
+    let telemetry = env.jobs.target_telemetry(&env.pass);
+    let target = StepTarget::of(kind, id);
+    telemetry.issue(&*env.pass.queue, &target);
+    telemetry.register(&target, session_id);
+}
+
+/// Register to the job of `kind` and `id` the session its agent named
+/// itself, as its output read at its end names it (a Codex thread), before
+/// its token is revoked ([`end_job_telemetry`]).
+fn register_job_session(
+    env: &contexts::PlanningEnv<'_>,
+    kind: TargetKind,
+    id: i64,
+    session: Option<&crate::domain::headless_job::JobSession>,
+) {
+    let named = session.filter(|session| session.named);
+    env.jobs.target_telemetry(&env.pass).register(
+        &StepTarget::of(kind, id),
+        named.and_then(|session| session.session_id.as_deref()),
+    );
 }
 
 /// Revoke the telemetry token of the job of `kind` and `id` at its end

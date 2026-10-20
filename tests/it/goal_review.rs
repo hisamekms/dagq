@@ -172,8 +172,14 @@ fn an_achieved_goal_is_closed_with_its_evidence() {
         ),
         [
             (id.clone(), "issued", None),
-            (id, "revoked", Some("job_ended".to_owned()))
+            (id.clone(), "revoked", Some("job_ended".to_owned()))
         ]
+    );
+    // The session id the runtime gave its job is registered to it, by its
+    // kind and id, so its executor's reports are its own.
+    assert_eq!(
+        crate::common::service::session_owner(&fx.db, started[0]["session_id"].as_str().unwrap()),
+        Some(format!("goal_review:{id}"))
     );
 
     // A closed goal is no candidate.

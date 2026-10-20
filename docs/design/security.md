@@ -109,6 +109,7 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
   workerはLLMのCLIを打たず、evalのjobはsupervisorだけが起動する。
 - executor-telemetryはexecutor（session wrapper・runner、非対話のjobを起動するプロセス、着地の検証）がsessionのstepを送るためのqueue serviceのprincipalで、制御側が対象（runか、runを持たない対象の種類とid）ごとに発行するtokenでだけ名乗れ、processの`DAGQ_ROLE`にはならない（[ADR-t1662-3](../adr/2026-10-04-t1662-3-executors-send-telemetry-and-commands-are-classified-by-shape.md)の決定9〜11）。
   持つのは`telemetry.report`（ユースケース`telemetry_report`）だけで、対象はtokenの対象の、制御側がその対象に登録したsessionだけ（他の対象の名で送ったものと、未登録か他の対象のsessionは`authorization_denied`）。
+  sessionの持ち主はagentのsessionを起動する制御側だけが登録し（起動の前か、agentが名前を決めるsessionはそれを読んだ時点。[計測](measurement.md#送る口)の「sessionの登録」）、他の対象に登録済みのsessionは登録し直せず、agentとAI actorとserviceのユースケースは登録しない。
   読み取りを含めほかのユースケースは全て`authorization_denied`で拒まれる。
   agentのtoken（worker・各job・observer・planner）とほかの全roleは`telemetry.report`を持たない。
   runの対象のtokenはsupervisorだけがclaim・resume・runの引き継ぎと、runの上でexecutorを起動するとき自分のleaseのものが無ければ、自分のleaseの下で発行し（前のものは失効させて発行し直す）、runの終わりとleaseの喪失で失効させる。

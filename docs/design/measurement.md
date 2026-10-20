@@ -27,7 +27,7 @@ related:
 # 計測
 
 > **一部だけ実装済み**: 「SSOTとビュー」のport・「区間とタグ」のrunの工程の記録（`run_phase_changed`）・「終端」・「claimの前」・「supervisorの一生」・「今の判定の記録」と「runの比較の軸」の記録、run・task・session・queue・nodeの台帳と「畳む関数」・「台帳を作る係」・「共通の読み取り関数」・「並走の比較と照合」と「送る口」の受け口は実装済みで、今の姿を書く。
-> 「送る口」のexecutorの送信・sessionの登録の時機は予定。
+> 「送る口」のexecutorの送信は予定。
 > ほかの節は計測の作り直しの今の予定で、まだ`src/`に無い。
 > 今動いている計測は[計測のコマンド](supervisor-lifecycle/commands.md)と最初のcommitの観測（`first_commit_observed`）が持ち、この文書はそれらを変えない。
 
@@ -264,9 +264,10 @@ claimの属性は`run_claimed`の`attributes`（キーと値の開いた組）�
   stepと資源は`(session_id, seq)`と対象を持つ。
   送れなくても結果を変えない。
 - **principal**: role `executor-telemetry`。
-  agentを起動する制御側が対象ごとに発行し、runの終わり・leaseの喪失・jobの終わり・`planner_closed`で失効させ、失効の記録は成功の後だけ書く（[Queue service](queue-service.md#principalとtoken)）。
-  tokenのファイルはagentのworktree・run dir・plannerのdirの外に置き、agentのenvとargvに渡さない。
+  agentを起動する制御側が対象ごとに発行・失効させ、agentには渡さない（時点・記録・場所は[Queue service](queue-service.md#principalとtoken)）。
 - **所属**: runの対象のstepはrunの行に畳み、runを持たない対象のstepはSessionStepStoreに持ってsessionの行で読む。
+- **sessionの登録**: 制御側がsessionを起動の前に、agentが名前を決めるsession（Codexのthread）は出力で読んだ時点で対象に登録する（経路は`application::telemetry_tokens`のmodule doc）。
+  登録の前に送ったものは拒まれ、executorが送り直す。
 - **差し替える口**: 実行環境の口・資源の口・送る口（資源の単位は`ResourceSample`のdoc comment）。
   3つの口のアダプタは同じ適合test一式を通す。
 - **OpenTelemetry**: 区間はspan、stepは子のspan、タグと属性はattributeに写す。記録の経路にはしない。

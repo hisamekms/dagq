@@ -143,7 +143,7 @@ paramsの形は`domain::telemetry::TelemetryReport`（1つのsessionの、1つ�
   溜まったstep（serviceが答えなかった後など）は何回かに分けて送る
 - 認可: `telemetry.report`を、paramsが名指す対象と、そのsessionを制御側が登録した対象（`Resource::Telemetry`）でprincipalに通す。
   持つのはexecutor-telemetryだけで、tokenの対象と違う対象（他のrun・他のplanner・他のjob）と、tokenの対象に登録されていないsession（未登録も）は`authorization_denied`（記録は他のユースケースと同じ）。
-  sessionの持ち主は、executorが送る前に制御側が`SessionOwners::register_session`でDBに直接登録し、serviceのユースケースからは登録できないので、別の対象のtokenが他の対象のsessionを先に取れない
+  sessionの持ち主は制御側が`SessionOwners::register_session`でDBに直接登録し（時点は[計測](measurement.md#送る口)）、serviceのユースケースからは登録できないので、別の対象のtokenが他の対象のsessionを先に取れない
   agentのtoken（worker・各job・observer・planner）では、自分のrunの対象でも、paramsを読む前に`authorization_denied`
 - 書き込み: 受けたstepとsampleを受けた時刻とともに書き（`SessionStepStore::record_steps`、`SessionResourceStore::record_resources`の順）、答えはそれぞれの足した数と既に持っていた数。
   間で失敗すればstepだけが残り、送り直しは同じstepを足さない。
@@ -289,7 +289,7 @@ workerとjobのClaudeの`permissions.deny`には`dagq service`の制御のコマ
 - 実Codexでの読み取りだけのjobのsocketへの到達の確認（`codex sandbox`とstubのCodexまで。上の「Codexのsandboxからの到達」）
 - `dagq ci failures`（`ci.read`。[CI watch](supervisor-lifecycle/ci-watch.md)）の読み取りのユースケース。
   clientのmodeでは`no_use_case`で断る
-- telemetryのsessionの持ち主の登録とexecutorからの送信
+- executorからのtelemetryの送信
 - queueのbrokerはrun tokenのほかを通さないので、containerのrunのexecutorの`telemetry_report`の経路は無い（[Queue broker](queue-broker.md)の`TokenRefusal`）
 - 段(4)〜(6)の残り: brokerの残りの宛て（[Queue broker](queue-broker.md#まだ無いもの)）、supervisor・wrapper・hook・CLIのservice経由化、integrateのverificationの隔離
 

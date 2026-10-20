@@ -267,6 +267,14 @@ fn a_resume_past_the_threshold_opens_a_new_session() {
     assert_eq!(text, new_session_turn(&landed, "resume-1.txt"));
     assert!(text.contains("The earlier session would have been sent this next"));
     assert!(text.contains(&format!("main is now {main} ")), "{text}");
+    // The claim's session and the one the resume opened are the run's
+    // telemetry target's (ADR-t1662-3 decision 10).
+    for session in [run.id().as_str(), name.as_str()] {
+        assert_eq!(
+            crate::common::service::session_owner(&db, session),
+            Some(format!("run:{}", run.id()))
+        );
+    }
 }
 
 /// A `needs_session` resume whose worker's previous turn took context at
