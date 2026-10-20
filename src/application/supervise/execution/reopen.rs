@@ -383,6 +383,10 @@ impl Supervisor<'_> {
             .context("snapshot runtime binary")?;
         self.prepare_turns(run, &run_dir)?;
         let run_env = self.verifier.run_env(&run_dir)?;
+        // As before a worker's session or a resume (ADR-t2086-1): the
+        // reopened session's first turn builds through the server its
+        // wrapper looks at.
+        self.ensure_sccache(crate::domain::sccache::CheckReason::BeforeReopen);
         self.warn_ignored_wrapper_setting();
         let log = self.session_log(&run_dir, Some(lost.attempt), true);
         let command = background::wrapper_command(vec![

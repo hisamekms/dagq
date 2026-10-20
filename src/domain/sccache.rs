@@ -178,6 +178,9 @@ pub enum CheckReason {
     BeforeWorker,
     /// Before a run's `needs_session` resume opens, on either provider.
     BeforeResume,
+    /// Before the wrapper of a headless run's session lost while it waits
+    /// is started again.
+    BeforeReopen,
     /// Before the run's review job starts, on either provider.
     BeforeReview,
     /// Before a landing of the supervisor's runs its verification commands.
@@ -195,10 +198,39 @@ impl CheckReason {
             Self::Missing => "missing",
             Self::BeforeWorker => "before_worker",
             Self::BeforeResume => "before_resume",
+            Self::BeforeReopen => "before_reopen",
             Self::BeforeReview => "before_review",
             Self::BeforeIntegrate => "before_integrate",
             Self::BeforeRecheck => "before_recheck",
             Self::BeforeE2e => "before_e2e",
+        }
+    }
+}
+
+/// What the supervisor's look does once it knows whether the server
+/// listens and whether the wait after its last failed start (or restart)
+/// is still on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LookStep {
+    /// None listens and the last start failed within the wait: nothing is
+    /// started, and the server is not confirmed.
+    WaitToStart,
+    /// One listens, but its last restart failed within the wait: it is not
+    /// confirmed.
+    WaitToRestart,
+    /// One listens: its health is observed.
+    Observe,
+    /// None listens: the supervisor starts it.
+    Start,
+}
+
+impl LookStep {
+    pub const fn of(listening: bool, retry_waits: bool) -> Self {
+        match (listening, retry_waits) {
+            (false, true) => Self::WaitToStart,
+            (false, false) => Self::Start,
+            (true, true) => Self::WaitToRestart,
+            (true, false) => Self::Observe,
         }
     }
 }
@@ -552,6 +584,21 @@ mod tests {
         assert_eq!(GuardStep::after_sccache(false, b""), None);
     }
 
+    /// The look before a lost session's wrapper starts again: a missing
+    /// server is started, one that listens is observed, a wait after a
+    /// failed start holds both; a `[run.env]` naming no sccache is no
+    /// target, so nothing is looked at and the session opens as it would.
+    #[test]
+    fn a_reopen_starts_a_missing_server_and_leaves_an_unconfigured_one_alone() {
+        assert_eq!(CheckReason::BeforeReopen.as_str(), "before_reopen");
+        assert_eq!(LookStep::of(false, false), LookStep::Start);
+        assert_eq!(LookStep::of(true, false), LookStep::Observe);
+        assert_eq!(LookStep::of(false, true), LookStep::WaitToStart);
+        assert_eq!(LookStep::of(true, true), LookStep::WaitToRestart);
+        assert_eq!(target(&[("PATH", "/usr/bin")]), None);
+        assert_eq!(target(&[(WRAPPER_VAR, "/usr/bin/ccache")]), None);
+    }
+
     #[test]
     fn the_reasons_have_their_names() {
         let names: Vec<&str> = [
@@ -559,6 +606,7 @@ mod tests {
             CheckReason::Missing,
             CheckReason::BeforeWorker,
             CheckReason::BeforeResume,
+            CheckReason::BeforeReopen,
             CheckReason::BeforeReview,
             CheckReason::BeforeIntegrate,
             CheckReason::BeforeRecheck,
@@ -574,6 +622,7 @@ mod tests {
                 "missing",
                 "before_worker",
                 "before_resume",
+                "before_reopen",
                 "before_review",
                 "before_integrate",
                 "before_recheck",

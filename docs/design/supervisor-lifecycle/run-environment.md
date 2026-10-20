@@ -161,14 +161,14 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 
 sccacheのserverはsupervisorがsandboxの外で起動して持ち、runtimeが`[run.env]`を渡すほかのprocessには、sandboxの中でも外でも起動させない（[ADR-t1215-1](../../adr/2026-10-02-t1215-1-supervisor-owns-the-sccache-server.md)、[ADR-t2086-1](../../adr/2026-10-08-t2086-1-no-runtime-process-starts-the-sccache-server.md)）。
 clientが起動したserverはclientのsandboxを引き継いで他のrunのbuildも失敗させ、起動の記録も残さないため。
-適用先は渡し先(a)〜(d)（providerを問わない）と、着地前の再確認とe2eのコマンド。
+適用先は渡し先(a)〜(d)と(a)の開き直し（providerを問わない）、着地前の再確認とe2eのコマンド。
 適用先には、どのprocessも開けない`SCCACHE_ERROR_LOG`を渡す（supervisor自身の起動には渡さない）。
 clientは自分を起動し直してserverにし、その子はlistenの前にこのlogを開いて終わるので、途中でserverが止まっても適用先からは起動されない。
 開始の直前にserverを確かめたものは、`RUSTC_WRAPPER`をguard（dagqへのlink）にする。
 guardはcompileごとにportを確かめ、listenしていれば`[run.env]`のsccacheを通してcacheを使う。
 listenしていないとき、確認の直後に止まったserverの起動を拒まれてclientが自分のerrorで失敗したときは、compilerを直接実行する。
 serverを確かめられないもの、guardを作れなかったもの、containerのverificationはwrapperを外してcacheなしでbuildを通し、eventに残す。
-supervisorが始めるものの前の確認は、居ないserverをsupervisorが起動する機会でもある。
+supervisorが始めるものの前の確認は、居ないserverを起動する機会でもある。
 wrapperのturnの前・人の`integrate`・e2eのgateの確認とguardはportを見るだけで起動しない。
 runtimeの外からの起動までは防げず、下の検知が扱う。
 workerのcacheのdirは`dagq.toml`が与え、hostのcacheはcontainerに、workerのcacheはverificationにmountしない。

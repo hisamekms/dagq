@@ -1219,3 +1219,157 @@ fn a_server_that_stops_during_a_turn_a_review_or_a_verification_is_not_started_b
     let review = fs::read_to_string(dir.path().join("codex-review-wrapper.log")).unwrap();
     assert_eq!(review.trim(), guard.display().to_string());
 }
+
+/// The ids and payloads of the events of `kind`, in order.
+fn events_with_ids(db: &Path, kind: &str) -> Vec<(i64, Value)> {
+    Connection::open(db)
+        .unwrap()
+        .prepare("SELECT id, payload FROM run_events WHERE kind=?1 ORDER BY id")
+        .unwrap()
+        .query_map([kind], |r| Ok((r.get(0)?, r.get::<_, String>(1)?)))
+        .unwrap()
+        .map(|row| {
+            let (id, payload) = row.unwrap();
+            (id, serde_json::from_str(&payload).unwrap())
+        })
+        .collect()
+}
+
+fn calls_starting(program: &Path, prefix: &str) -> usize {
+    calls(program)
+        .iter()
+        .filter(|call| call.starts_with(prefix))
+        .count()
+}
+
+/// Wait until `program` was called with `prefix` more than `than` times.
+fn await_calls(program: &Path, prefix: &str, than: usize, what: &str) {
+    let _waiting = common::within(common::STEP_LIMIT, what);
+    while calls_starting(program, prefix) <= than {
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// A headless run's session lost while it waits for its answer is opened
+/// again only after the supervisor looked at the server: the server that
+/// stopped meanwhile is started (`before_reopen`) before the reopened
+/// wrapper's workspace is recorded, so its first turn has it.
+#[test]
+fn a_lost_session_is_opened_again_after_the_supervisor_started_the_missing_server() {
+    use runtime_support::headless;
+    let (dir, repo, db, mut backend) = headless::headless_fixture(&[]);
+    backend.wrapper_processes = Some(Arc::new(WrapperProcesses));
+    let (program, path) = stub_sccache(dir.path(), "sccache");
+    let port = free_port();
+    fs::write(
+        repo.join("dagq.toml"),
+        format!(
+            "[run.env]\nRUSTC_WRAPPER = '{}'\nSCCACHE_SERVER_PORT = '{port}'\nPATH = '{path}'\n",
+            program.display()
+        ),
+    )
+    .unwrap();
+    git(&repo, &["add", "dagq.toml"]);
+    git(&repo, &["commit", "-m", "sccache as the wrapper"]);
+    set_turns(
+        dir.path(),
+        &format!(
+            r#"case "$TURN" in
+1) ask "which file"; say asked ;;
+*) case "$PROMPT" in "answer to ask "*) {} ;; *) say lost ;; esac ;;
+esac"#,
+            headless::FINISH
+        ),
+    );
+    let backend = Arc::new(backend);
+    let (mut options, ahead) = supervise_options_ahead(4, true);
+    options.stall = Some(Default::default());
+    let (lsof, ps) = process_tools(dir.path());
+    options.processes = Some(runtime::ProcessesPort(
+        backend.wrapper_processes.clone().unwrap(),
+    ));
+    options.sccache = Some(SccacheOptions {
+        lsof,
+        ps,
+        start_timeout: Duration::from_secs(120),
+    });
+    // The service the supervisor starts takes the test as its owner.
+    let dagq = common::service::owned_executable(db.parent().unwrap());
+    let supervisor = {
+        let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+        thread::spawn(move || {
+            let reviewer = TestReviewer::new(&[verdict("pass", &[], "fine")]);
+            runtime::supervise_with_reviewer(
+                &db,
+                &repo,
+                &*backend,
+                &claude_stub(&db),
+                &reviewer,
+                &dagq,
+                &options,
+            )
+        })
+    };
+    // The server the supervisor's first look starts listens.
+    await_calls(
+        &program,
+        "--start-server",
+        0,
+        "the supervisor's first start",
+    );
+    let first = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap();
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        queue
+            .show(headless::TASK)
+            .unwrap()
+            .events
+            .iter()
+            .any(|e| e.kind == EventKind::RunWaitingStarted)
+    });
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(headless::TASK).unwrap().runs[0].clone();
+    let ask = queue
+        .asks(AskQuery::default())
+        .unwrap()
+        .into_iter()
+        .find(|ask| ask.kind == AskKind::WorkerQuestion)
+        .unwrap();
+    // Just after a look of the supervisor's passes found it (its interval
+    // run out on the injected clock), so that the next one is not due
+    // before the reopen: the server stops, and the wrapper ends as one
+    // lost while the run waits.
+    let observed = calls_starting(&program, "--show-stats");
+    ahead.by(Duration::from_secs(10));
+    await_calls(&program, "--show-stats", observed, "a pass's look");
+    drop(first);
+    fs::write(
+        dagq::domain::turn::exit_path(Path::new(run.run_dir().unwrap())),
+        "",
+    )
+    .unwrap();
+    await_calls(&program, "--start-server", 1, "the start before the reopen");
+    let _second = TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap();
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        payloads(&queue.show(headless::TASK).unwrap(), "workspace_created")
+            .iter()
+            .any(|p| p["reopened"] == 1)
+    });
+    queue.answer(ask.id, "change.txt").unwrap();
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = headless::detail(&db);
+    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+
+    let started = events_with_ids(&db, "sccache_server_started");
+    let reasons: Vec<_> = started.iter().map(|(_, p)| p["reason"].clone()).collect();
+    assert_eq!(reasons, [json!("startup"), json!("before_reopen")]);
+    assert_eq!(started[1].1["port"], port);
+    // Before the reopened wrapper was recorded as the run's session.
+    let reopened = events_with_ids(&db, "workspace_created")
+        .into_iter()
+        .find(|(_, p)| p["reopened"] == 1)
+        .unwrap();
+    assert!(started[1].0 < reopened.0, "{started:?} {reopened:?}");
+    assert!(queue_events(&db, "sccache_server_start_failed").is_empty());
+}

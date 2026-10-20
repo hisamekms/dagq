@@ -4,10 +4,11 @@
 //! fails then. So the supervisor, outside any sandbox, is the only one to
 //! start it (ADR-t2086-1): it looks at the server at its start, every
 //! [`LOOK_INTERVAL`] after, and just before each process it gives
-//! `[run.env]` starts (a worker's session or resume, the run's review on
-//! either provider, a landing's verification, the landing recheck, a run's
-//! e2e); it starts a missing one with `SCCACHE_IDLE_TIMEOUT=0` and records
-//! `sccache_server_started` (or `sccache_server_start_failed`). The look
+//! `[run.env]` starts (a worker's session, its resume or its lost session
+//! opened again, the run's review on either provider, a landing's
+//! verification, the landing recheck, a run's e2e); it starts a missing
+//! one with `SCCACHE_IDLE_TIMEOUT=0` and records `sccache_server_started`
+//! (or `sccache_server_start_failed`). The look
 //! is a connect to the server's loopback port. Only confirmed existing
 //! servers are queried for process identity and stats; foreign servers
 //! are recorded, and failure-only deltas or known confinement cause a
@@ -23,7 +24,8 @@
 use super::*;
 use crate::application::SccacheServer;
 use crate::domain::sccache::{
-    CheckReason, GuardLook, IDLE_TIMEOUT, IDLE_TIMEOUT_VAR, SccacheTarget, ServerCheck, WRAPPER_VAR,
+    CheckReason, GuardLook, IDLE_TIMEOUT, IDLE_TIMEOUT_VAR, LookStep, SccacheTarget, ServerCheck,
+    WRAPPER_VAR,
 };
 
 /// How often a pass looks at the server.
@@ -97,13 +99,15 @@ impl HostOpsState {
                 ));
             }
         };
-        if !running
-            && retry_waiting(
+        let step = LookStep::of(
+            running,
+            retry_waiting(
                 self.sccache
                     .failed_at
                     .map(|at| pass.generators.clock.monotonic().duration_since(at)),
-            )
-        {
+            ),
+        );
+        if step == LookStep::WaitToStart {
             return unconfirmed(format!(
                 "no sccache server listens on port {}, and the last start failed",
                 target.port
@@ -124,18 +128,12 @@ impl HostOpsState {
                     warn!("sccache pending restart could not be read: {error:#}");
                     None
                 });
-        if running
-            && retry_waiting(
-                self.sccache
-                    .failed_at
-                    .map(|at| pass.generators.clock.monotonic().duration_since(at)),
-            )
-        {
+        if step == LookStep::WaitToRestart {
             return unconfirmed(
                 "the unhealthy sccache server's restart is waiting for retry".into(),
             );
         }
-        if running {
+        if step == LookStep::Observe {
             let program = program.as_deref().unwrap_or(&target.program);
             match crate::application::sccache::observe(
                 &*pass.queue,
