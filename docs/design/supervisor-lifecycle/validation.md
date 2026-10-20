@@ -81,6 +81,7 @@ reviewの段の順は、先頭の[プログラムのreview](review-programs.md)�
 
 [ADR-t1818-1](../../adr/2026-10-05-t1818-1-worker-claims-already-satisfied-and-runtime-closes-on-a-verified-snapshot.md)の、workerが「baseがすでに受け入れ条件を満たす」と書いたrunの経路。
 verifyが通ればreview jobが同じheadで主張を判定し、`high`のpassならmainのheadをsnapshotと確かめ直して閉じ、それ以外は人のaskに上げて人の答えで閉じる。
+復旧jobの`hand_off`が`validating`に戻した`failed`のrun（commitの無いreceiptで落ちたもの。[Triage](triage.md)の5）も、下のvalidatingの受理の後と同じところから同じ経路を通る。
 
 - **validating**: 受理してもrunは`awaiting_integration`にせず`validating`のまま残し、`result_commit`を持たない（`AfterValidation::Satisfied`）。
   sessionに終了を依頼してworkspaceを閉じる。

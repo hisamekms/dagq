@@ -4363,6 +4363,31 @@ fn spawn_validation(
 ) -> thread::JoinHandle<Result<Validation>> {
     spawn_traced(move || {
         let mut queue = queues.open()?;
+        // A run a recovery round handed off (an adopted one) is a claim its
+        // round already checked, whose receipt names no claim: it is
+        // accepted as one again, not judged as the worker wrote it
+        // (ADR-t1818-2 decision 3).
+        if crate::domain::satisfied::handed_off_since_resume(&queue.run_events(run.id())?) {
+            let receipt = files
+                .read_to_string(Path::new(run.receipt_path().unwrap_or_default()))
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or(Value::Null);
+            return Ok(Validation {
+                accepted: true,
+                result_commit: None,
+                reason: None,
+                code: None,
+                receipt,
+                evidence_missing: Vec::new(),
+                spike_result_missing: Vec::new(),
+                scope_violation: Vec::new(),
+                allowed_paths: Vec::new(),
+                e2e_requirement: None,
+                already_satisfied: true,
+                load: LoadSummary::default(),
+            });
+        }
         let task = queue.show(run.task_id())?.task;
         let checked = check_receipt(&*repository, &*files, &task, &run, &e2e_paths)?;
         Ok(match checked {

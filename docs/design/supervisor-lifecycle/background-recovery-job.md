@@ -62,6 +62,8 @@ runの異常を、runtimeの自動修正、復旧job、人へのaskの3段で扱
 runtimeの自動修正が直さなかったものをjobが状況を読んで許された操作で直し、直せないか自信が無いときだけ、そのalertのaskでinboxに上げる（[ADR-0047](../../adr/0047-irregularities-in-three-layers-recovery-job-ask-reasons-and-goal-review.md)の決定39・40）。
 
 - alertは`stalled`（receiptの無いturn、権限拒否の上限）、`idle_process`（CPU時間が伸びないプロセス）、終わったrunの`failed`で、alertごとに許す操作は`recovery`とtriageのverdictの検査が持つ。
+  終わったrunの操作は、commitの無いreceiptで落ちたrunをbaseがすでに受け入れ条件を満たすことの確かめに渡す`hand_off`を含み、前提と適用は[Triage](triage.md)の5が持つ。
+  生きているsessionには当てはまらず、verdictにあれば拒んでescalateする。
 - 対話の経路のalert（workerの画面に由来するもの、idle markerの対話の`background_tasks`に由来するもの）は無い。
   過去のそれらのevent・ask・復旧jobは履歴として読める。
 - `answer_known_dialog`・`close_and_proceed`はworkerに適用せず、過去のverdictに書かれていても拒む。

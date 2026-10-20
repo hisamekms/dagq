@@ -966,7 +966,7 @@ pub fn session_takes_answers(status: RunStatus, events: &[RunEvent], ask_created
 }
 
 /// Where the recovery of a run that ended stands, from its latest round,
-/// resume or restart. A round whose job failed because its provider could
+/// resume or restart; a round that handed the run off finished nothing. A round whose job failed because its provider could
 /// not be used (`triage_failed` with `provider_unusable`, ADR-t1063-1
 /// decision 4, task 1225) is due again: the next round starts on the other
 /// provider, or, when none can run it, fails to a person told why.
@@ -998,6 +998,16 @@ pub fn triage_state(events: &[RunEvent]) -> TriageState {
             TriageState::Waiting {
                 until: e.payload["recheck_at"].as_i64().unwrap_or(0),
             }
+        }
+        // A round that handed the run to the claim's course (ADR-t1818-2
+        // decision 3) left it `validating`: a run that ends `failed` or
+        // `interrupted` again past it (but for a person's answer, which
+        // moves the task on) is due a round of its own.
+        Some(e)
+            if e.kind == EventKind::TriageFinished
+                && e.payload["action"] == recovery::HAND_OFF_KIND =>
+        {
+            TriageState::Pending
         }
         Some(e) if e.kind == EventKind::TriageFinished => TriageState::Finished,
         Some(e)
@@ -4857,6 +4867,14 @@ mod attention_tests {
         );
         events.push(event(4, "triage_finished"));
         assert_eq!(triage_state(&events), TriageState::Finished);
+        // A run handed off to the claim's course that ended again is due
+        // a round (ADR-t1818-2 decision 3).
+        let mut handed = event(4, "triage_finished");
+        handed.payload = serde_json::json!({"action": "hand_off", "status": "validating"});
+        assert_eq!(
+            triage_state(&[handed, event(5, "validation_finished")]),
+            TriageState::Pending
+        );
         // A run resumed after its triage is triaged again once it fails.
         events.push(event(5, "resume_started"));
         events.push(event(6, "resume_finished"));

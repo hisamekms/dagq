@@ -192,6 +192,9 @@ claimのたびに、supervisorはworkerが読む指示の内容のhashを3つ求
 - `send_instruction`は次のturnの依頼で、画面の代わりにturnの抜粋を読む。
 - verdictのschemaの後に、jobの足すoptionの種類の宣言と、runtimeの操作や完了・cancelと紛らわしいoptionを足さない規則を書く（[ADR-t1818-2](../../adr/2026-10-05-t1818-2-recovery-job-options-map-to-runtime-options-or-pass-back.md)。終わったrunは`RECOVERY_ENDED_OPTIONS_RULE`、生きているsessionは`RECOVERY_LIVE_OPTIONS_RULE`）。
   固定の文で末尾にあるので、全体の上限を超えて中ほどを切っても残り、`RECOVERY_PROMPT_LIMIT`の中に収まる。
+- 終わったrunの許す操作の説明（`recovery_action_help`）は、baseがすでに受け入れ条件を満たすことの確かめへの引き渡し（`hand_off`）を、適用の前提（commitの無いreceiptの`commit_mismatch`、baseより先のcommitが無い）とともに書く（[Triage](triage.md)の5）。
+  説明と規則の文が増えても、節の上限の和と指示の文は`RECOVERY_PROMPT_LIMIT`の中に言語の指示の空きを残して収まり、上限は変えない（値と内訳はその定数のdoc comment）。
+- 引き渡されたrunの主張の判定のprompt（`claim_review_prompt`）は、workerが主張を書かなかったことと復旧jobの見立てを載せ、見立ては自分の上限（`CLAIM_REVIEW_HAND_OFF_BYTES`）で切る。
 - 判定と上限は[復旧job](background-recovery-job.md)と下の[上限](#goal-reviewrunのreview復旧jobruntimeのplannerの上限)が持つ。
 
 ## repositoryの規則を読む順

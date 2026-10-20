@@ -11,9 +11,9 @@ use crate::domain::EventKind;
 use crate::domain::actor_model::{ActorLaunch, JobStartRoute, ModelRole};
 use crate::domain::landing_release::{self, ProcessesStep};
 use crate::domain::recovery::{
-    ENDED_ACTIONS, MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, ProcessInfo, RecoveryAction,
-    SortedOptions, VERIFY_FIX_OPTION, attempts, current_alert, pending_request, run_processes,
-    sort_job_options, verification_failed, verify_fix_round,
+    ENDED_ACTIONS, HandOffFacts, MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, ProcessInfo,
+    RecoveryAction, SortedOptions, VERIFY_FIX_OPTION, attempts, current_alert, hand_off_refusal,
+    pending_request, run_processes, sort_job_options, verification_failed, verify_fix_round,
 };
 
 impl Supervisor<'_> {
@@ -901,6 +901,48 @@ impl Supervisor<'_> {
                 Ok((
                     TriageAction::Resume { instruction },
                     json!({"counted_resumes": resumes.counted, "kill_only_resumes": resumes.kill_only, "resumes": resumes.total(), "worktree": true}),
+                ))
+            }
+            RecoveryAction::HandOff => {
+                let detail = self.queue.show(run.task_id()).map_err(unreadable)?;
+                let latest = detail.task.status() == TaskStatus::InProgress
+                    && detail.runs.last().map(TaskRun::id) == Some(run.id());
+                let events = self.queue.run_events(run.id()).map_err(unreadable)?;
+                let head = crate::application::run_git::head(&*self.repository, run)
+                    .map_err(|error| format!("{error:#}"));
+                let uncommitted = crate::application::run_git::status(&*self.repository, run)
+                    .map_err(|error| format!("{error:#}"));
+                let required = crate::domain::required_of(
+                    detail.task.required_evidence(),
+                    run.actual_provider(),
+                );
+                let evidence_missing = self
+                    .files
+                    .read_to_string(Path::new(run.receipt_path().unwrap_or_default()))
+                    .map_err(|error| format!("{error:#}"))
+                    .and_then(|text| Receipt::parse(&text).map_err(|error| format!("{error:#}")))
+                    .map(|receipt| {
+                        receipt
+                            .missing_evidence(&required)
+                            .iter()
+                            .map(|check| check.as_str().to_owned())
+                            .collect()
+                    });
+                let facts = HandOffFacts {
+                    status: run.status(),
+                    latest,
+                    base: Some(run.base_commit()),
+                    events: &events,
+                    head,
+                    uncommitted,
+                    evidence_missing,
+                };
+                if let Some(why) = hand_off_refusal(&facts) {
+                    return Err(format!("the hand-off does not apply: {why}"));
+                }
+                Ok((
+                    TriageAction::HandOff,
+                    json!({"base": run.base_commit(), "commit_mismatch_at_base": true, "own_commits": false, "latest": true}),
                 ))
             }
             RecoveryAction::Wait { recheck_after_secs } => {

@@ -829,6 +829,11 @@ pub enum TriageAction {
     /// The run becomes `needs_session` with `instruction` as `last_error`,
     /// and the supervisor resumes it (ADR-0019 decision 1).
     Resume { instruction: String },
+    /// The run becomes `validating` with neither `result_commit` nor
+    /// `last_error`, resting as an `already_satisfied` claim whose
+    /// verification on main has not started (ADR-t1818-2 decision 3); the
+    /// task stays `in_progress`.
+    HandOff,
     /// Nothing moves; the job runs again from `recheck_at` (unix seconds)
     /// if the run is still where it was.
     Wait { recheck_at: i64 },
@@ -842,6 +847,7 @@ impl TriageAction {
             Self::Retry => "retry",
             Self::RetryInherit { .. } => crate::domain::resume::RETRY_INHERIT,
             Self::Resume { .. } => "resume",
+            Self::HandOff => crate::domain::recovery::HAND_OFF_KIND,
             Self::Wait { .. } => "wait",
             Self::Ask { .. } => "ask",
         }
@@ -853,7 +859,7 @@ impl TriageAction {
     pub const fn moves_on(&self) -> bool {
         matches!(
             self,
-            Self::Retry | Self::RetryInherit { .. } | Self::Resume { .. }
+            Self::Retry | Self::RetryInherit { .. } | Self::Resume { .. } | Self::HandOff
         )
     }
 
@@ -868,7 +874,7 @@ impl TriageAction {
             Self::Resume { instruction } => kept["instruction"] = serde_json::json!(instruction),
             Self::Wait { recheck_at } => kept["recheck_at"] = serde_json::json!(recheck_at),
             Self::Ask { ask_id } => kept["ask_id"] = serde_json::json!(ask_id),
-            Self::Retry => {}
+            Self::Retry | Self::HandOff => {}
         }
         kept
     }
@@ -884,6 +890,7 @@ impl TriageAction {
             "resume" => Self::Resume {
                 instruction: kept["instruction"].as_str()?.to_owned(),
             },
+            crate::domain::recovery::HAND_OFF_KIND => Self::HandOff,
             "wait" => Self::Wait {
                 recheck_at: kept["recheck_at"].as_i64()?,
             },

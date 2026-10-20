@@ -204,12 +204,30 @@ impl Supervisor<'_> {
             .ok()
             .and_then(|text| Receipt::parse(&text).ok());
         let tree = integration::satisfied_scratch(&self.layout.satisfied_dir, run.id());
+        let events = self.queue.run_events(run.id())?;
+        // The job's diagnosis: that of the round itself, or for a hand-off
+        // a hold kept and the runtime applied later, that of the round
+        // whose verdict it kept.
+        let handed_off = events.iter().rposition(satisfied::handed_off).map(|at| {
+            let round = if events[at].payload.get("kept_id").is_some() {
+                events[..at].iter().rev().find(|e| {
+                    e.kind == EventKind::TriageFinished
+                        && e.payload["kept_action"] == crate::domain::recovery::HAND_OFF_KIND
+                })
+            } else {
+                None
+            };
+            round.unwrap_or(&events[at]).payload["reason"]
+                .as_str()
+                .unwrap_or_default()
+        });
         let fitted = claim_review_prompt(
             &task,
             run,
             (receipt.as_ref(), receipt_path),
             &verification,
             &tree,
+            handed_off,
         )
         .with_language(self.verifier.language().as_ref());
         self.files.write(

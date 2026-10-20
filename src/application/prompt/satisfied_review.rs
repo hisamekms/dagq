@@ -9,8 +9,8 @@ use crate::domain::satisfied::SnapshotVerification;
 /// The bytes the whole prompt of a claim's judgment takes at most, the
 /// language's instruction included (ADR-t1566-1 decision 4): the run
 /// review's own room less its project's rules and known failures, which
-/// the judgment does not carry. Its sections at their limits (23,000
-/// bytes) and its instructions with the schema (about 3,000) fit in it
+/// the judgment does not carry. Its sections at their limits (25,000
+/// bytes) and its instructions with the schema (about 3,500) fit in it
 /// with the language's room.
 pub const CLAIM_REVIEW_PROMPT_LIMIT: usize = 32_000;
 /// The bytes of the task's title and of its acceptance, as the run
@@ -27,13 +27,20 @@ pub const CLAIM_REVIEW_VERIFY_BYTES: usize = 4_000;
 /// pointing at the receipt in the run directory.
 pub const CLAIM_REVIEW_SUMMARY_BYTES: usize = 4_000;
 pub const CLAIM_REVIEW_CHECKS_BYTES: usize = 6_000;
+/// The bytes of the recovery job's diagnosis of a run it handed off
+/// (ADR-t1818-2 decision 3), which stands for the grounds the worker did
+/// not write: cut from its end past this (the job's output in the run
+/// directory holds it whole).
+pub const CLAIM_REVIEW_HAND_OFF_BYTES: usize = 2_000;
 
 /// What the review is asked of a claim (ADR-t1818-1 decision 4): the
 /// task's title, acceptance and verification commands, the worker's
 /// grounds (the receipt's summary and `base_checks`, read from `receipt`,
 /// whose file is `receipt_path`), and the snapshot `verification` that
 /// passed on its head, which `tree`, a checkout of that head made for the
-/// judgment, holds. It is judged on that head alone, never the run's
+/// judgment, holds. `handed_off` is the recovery job's diagnosis when the
+/// claim is the job's hand-off of a failed run rather than the worker's
+/// (ADR-t1818-2 decision 3): the prompt says so and carries it. It is judged on that head alone, never the run's
 /// worktree or main as it moved since. The verdict is the claim's own
 /// (`ClaimJudgment`): `pass` only when every criterion holds there with no
 /// change, its confidence whatever the verdict, and the `approve_close`
@@ -46,6 +53,7 @@ pub fn claim_review_prompt(
     (receipt, receipt_path): (Option<&Receipt>, &str),
     verification: &SnapshotVerification,
     tree: &Path,
+    handed_off: Option<&str>,
 ) -> FittedPrompt {
     let mut fit = Fit::new(CLAIM_REVIEW_PROMPT_LIMIT);
     let title = fit.text(
@@ -97,9 +105,25 @@ pub fn claim_review_prompt(
         &format!("{at_receipt}, its base_checks"),
     );
     fit.section("base_checks", &checks);
+    let claim = match handed_off {
+        None => "Its worker reported already_satisfied: the base already met the task's acceptance, so it made no change and no commit.\n".to_owned(),
+        Some(diagnosis) => {
+            let diagnosis = fit.text(
+                "hand_off",
+                or_none(diagnosis),
+                CLAIM_REVIEW_HAND_OFF_BYTES,
+                Keep::Start,
+                "read the recovery job's output (recovery-*.out) in the run directory",
+            );
+            fit.section("hand_off", &diagnosis);
+            format!(
+                "Its worker made no change and no commit but did not report already_satisfied, so the run failed; the recovery job then handed it over as a claim that the base already met the task's acceptance. Its worker's summary and checks below are the grounds it left, with the recovery job's diagnosis:\n{diagnosis}\n"
+            )
+        }
+    };
     let text = format!(
         "You judge a claim of run {run_id} of dagq task {task_id} ({title}).\n\
-         Its worker reported already_satisfied: the base already met the task's acceptance, so it made no change and no commit.\n\
+         {claim}\
          The runtime then ran the task's {count} verification commands on main at {head} (the snapshot), and every one passed.\n\
          The directory {tree} is a checkout of main at {head} made for this judgment: judge the claim on that head and on nothing else (not the worker's worktree, not main as it may have moved since). Read it as you need; do not change any file.\n\n\
          Acceptance criteria of the task:\n{acceptance}\n\n\

@@ -3382,6 +3382,7 @@ fn a_claims_review_prompt_names_its_snapshot_and_stays_within_its_limits() {
         (Some(&small), "/runs/run/receipt.json"),
         &verification,
         tree,
+        None,
     );
     within(&fitted, CLAIM_REVIEW_PROMPT_LIMIT);
     assert!(
@@ -3408,6 +3409,7 @@ fn a_claims_review_prompt_names_its_snapshot_and_stays_within_its_limits() {
         (Some(&huge), "/runs/run/receipt.json"),
         &verification,
         tree,
+        None,
     );
     within(&fitted, CLAIM_REVIEW_PROMPT_LIMIT);
     for section in ["title", "acceptance", "verify", "summary", "base_checks"] {
@@ -3435,11 +3437,50 @@ fn a_claims_review_prompt_names_its_snapshot_and_stays_within_its_limits() {
         (None, "/runs/run/receipt.json"),
         &verification,
         tree,
+        None,
     );
     assert!(
         unread.text.contains("The worker's summary:\n(none)"),
         "{}",
         unread.text
+    );
+    // A run the recovery job handed off says so and carries its
+    // diagnosis, cut past its limit.
+    let handed = claim_review_prompt(
+        &task_with_evidence(7, Vec::new()),
+        &run,
+        (Some(&small), "/runs/run/receipt.json"),
+        &verification,
+        tree,
+        Some("seed.txt is on main already"),
+    );
+    for said in [
+        "did not report already_satisfied",
+        "the recovery job then handed it over",
+        "seed.txt is on main already",
+        "the base meets it",
+    ] {
+        assert!(handed.text.contains(said), "{said}: {}", handed.text);
+    }
+    assert!(
+        !handed
+            .text
+            .contains("Its worker reported already_satisfied")
+    );
+    let long = claim_review_prompt(
+        &task_with_evidence(7, Vec::new()),
+        &run,
+        (Some(&small), "/runs/run/receipt.json"),
+        &verification,
+        tree,
+        Some(&big("diagnosis", 20_000)),
+    );
+    within(&long, CLAIM_REVIEW_PROMPT_LIMIT);
+    assert_eq!(
+        long.bytes.omitted.get("hand_off"),
+        Some(&1),
+        "{:?}",
+        long.bytes
     );
 }
 

@@ -910,7 +910,9 @@ impl SqliteQueue {
     /// `triage_finished` with `payload`, the `action` and the run's status
     /// after it, then each of `also`, in one transaction: `Retry` makes the
     /// task `ready`, `RetryInherit` too with the branch to carry over,
-    /// `Resume` the run `needs_session`, `Wait` and `Ask` change nothing.
+    /// `Resume` the run `needs_session`, `HandOff` the run `validating`
+    /// (still the latest run of its `in_progress` task, checked again),
+    /// `Wait` and `Ask` change nothing.
     /// An action that moves on a task its hold guards (ADR-t1879-1
     /// decision 6), read in the same transaction, is kept instead
     /// ([`keep_held_verdict`]). The lease stays for the workspace's close.
@@ -1708,6 +1710,29 @@ fn apply_triage_action(
             )?;
             payload["instruction"] = json!(instruction);
             payload["code"] = json!(ReasonCode::TriageResume);
+        }
+        TriageAction::HandOff => {
+            // Still the latest run of a task nobody moved on, checked again
+            // where no person's `ready` or answer can come in between.
+            let latest: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM task_runs r JOIN tasks t ON t.id=r.task_id
+                 WHERE r.id=?1 AND t.status='in_progress'
+                 AND r.rowid=(SELECT MAX(rowid) FROM task_runs WHERE task_id=r.task_id))",
+                [id],
+                |r| r.get(0),
+            )?;
+            ensure!(
+                latest,
+                "run {id} is no longer the latest run of an in_progress task"
+            );
+            apply(
+                conn,
+                refusals,
+                id,
+                None,
+                || format!("run {id} changed"),
+                run::hand_off_after_triage,
+            )?;
         }
         TriageAction::Ask { ask_id } => payload["ask_id"] = json!(ask_id),
     }

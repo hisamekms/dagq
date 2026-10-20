@@ -789,6 +789,18 @@ pub fn resume_after_triage(mut run: TaskRun, instruction: String) -> Result<Task
     Ok(run)
 }
 
+/// The triage hands a failed run with no commit past its base to the
+/// check that the base already meets the acceptance (ADR-t1818-2 decision
+/// 3): `validating` as an accepted `already_satisfied` claim, with neither
+/// `result_commit` nor `last_error`.
+pub fn hand_off_after_triage(mut run: TaskRun) -> Result<TaskRun, DomainError> {
+    require_status(&run, &[RunStatus::Failed], "hand off")?;
+    run.status = RunStatus::Validating;
+    run.result_commit = None;
+    run.last_error = None;
+    Ok(run)
+}
+
 /// The session of a run that came to rest (awaiting integration or a
 /// session) was stopped at `closed_at`: its background wrapper, or before
 /// ADR-t1433-3 the cmux workspace whose close cmux confirmed.

@@ -8,7 +8,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AskId, AskKind, AskReason, DomainError, RunEvent, RunStatus, TRIAGE_OPTIONS, TaskId,
+    AskId, AskKind, AskReason, CommitSha, DomainError, RunEvent, RunStatus, TRIAGE_OPTIONS, TaskId,
     parse_json_object,
 };
 
@@ -44,8 +44,9 @@ pub const MAX_RECHECK_SECS: u64 = 3600;
 
 /// The actions a recovery job may choose for a run that ended `failed` or
 /// `interrupted` (its session is gone): the ones that move the run or its
-/// task on, and `wait`.
-pub const ENDED_ACTIONS: [&str; 4] = ["retry", "retry_inherit", "resume", "wait"];
+/// task on, the hand-off to the check that the base already meets the
+/// acceptance (ADR-t1818-2 decision 3, [`hand_off_refusal`]), and `wait`.
+pub const ENDED_ACTIONS: [&str; 5] = ["retry", "retry_inherit", "resume", "hand_off", "wait"];
 
 // The actions of the retired interactive worker's live alerts
 // (`stuck_exit`, `prompt_waiting` and its `stalled`) went with it (task
@@ -263,6 +264,11 @@ pub enum RecoveryAction {
         dialog: String,
     },
     CloseAndProceed,
+    /// Hand a run that failed with no commit past its base to the check
+    /// that the base already meets the acceptance (ADR-t1818-2 decision
+    /// 3): the run is verified on main and judged as an `already_satisfied`
+    /// claim would be.
+    HandOff,
     Wait {
         recheck_after_secs: u64,
     },
@@ -270,7 +276,7 @@ pub enum RecoveryAction {
 
 impl RecoveryAction {
     /// The name of every action, as [`Self::name`] gives it.
-    pub const NAMES: [&'static str; 8] = [
+    pub const NAMES: [&'static str; 9] = [
         "retry",
         "retry_inherit",
         "resume",
@@ -278,6 +284,7 @@ impl RecoveryAction {
         "stop_processes",
         "answer_known_dialog",
         "close_and_proceed",
+        "hand_off",
         "wait",
     ];
 
@@ -290,6 +297,7 @@ impl RecoveryAction {
             Self::StopProcesses { .. } => "stop_processes",
             Self::AnswerKnownDialog { .. } => "answer_known_dialog",
             Self::CloseAndProceed => "close_and_proceed",
+            Self::HandOff => HAND_OFF_KIND,
             Self::Wait { .. } => "wait",
         }
     }
@@ -414,6 +422,118 @@ impl RecoveryVerdict {
     pub fn applies(&self) -> bool {
         self.verdict == RecoveryDecision::Repair && self.confidence == RecoveryConfidence::High
     }
+}
+
+/// What the runtime reads of a run that ended when its recovery job
+/// chooses [`RecoveryAction::HandOff`] (ADR-t1818-2 decision 3).
+#[derive(Debug)]
+pub struct HandOffFacts<'a> {
+    pub status: RunStatus,
+    /// Whether the run is the latest of its task and the task is
+    /// `in_progress`.
+    pub latest: bool,
+    pub base: Option<&'a CommitSha>,
+    /// The run's events, oldest first.
+    pub events: &'a [RunEvent],
+    /// The head of the run's branch where it works; `Err` says why it
+    /// could not be read.
+    pub head: Result<CommitSha, String>,
+    /// What is uncommitted where it works (`git status --porcelain`, blank
+    /// when clean); `Err` says why it could not be read.
+    pub uncommitted: Result<String, String>,
+    /// The task's required checks its receipt does not back, as an
+    /// `already_satisfied` receipt's validation reads them; `Err` says why
+    /// the receipt could not be read.
+    pub evidence_missing: Result<Vec<String>, String>,
+}
+
+/// Why the hand-off of a run does not apply now, or `None` when it does
+/// (ADR-t1818-2 decision 3): the run is `failed` and the latest run of its
+/// `in_progress` task; its failure is its latest validation since its
+/// latest resume, rejected as `commit_mismatch` with the receipt's
+/// `commit` and the checked commit at its base (the worker made no commit
+/// and did not claim `already_satisfied`); its branch holds no commit past
+/// the base and nothing uncommitted, so nothing is thrown away; and its
+/// receipt backs the task's required checks, as validation asks of an
+/// `already_satisfied` receipt (it checked neither before rejecting the
+/// commit). The lease is the round's own, checked by the caller.
+pub fn hand_off_refusal(facts: &HandOffFacts<'_>) -> Option<String> {
+    if facts.status != RunStatus::Failed {
+        return Some(format!(
+            "the run is {}, and only a failed run is handed off",
+            facts.status.as_str()
+        ));
+    }
+    if !facts.latest {
+        return Some("it is not the latest run of an in_progress task".to_owned());
+    }
+    let Some(base) = facts.base else {
+        return Some("the run has no base commit".to_owned());
+    };
+    let Some(validation) = facts
+        .events
+        .iter()
+        .rev()
+        .take_while(|e| e.kind != EventKind::ResumeStarted)
+        .find(|e| e.kind == EventKind::ValidationFinished)
+    else {
+        return Some("its receipt was never validated since its last session".to_owned());
+    };
+    let payload = &validation.payload;
+    if payload["accepted"] == true || payload["code"] != super::ReasonCode::CommitMismatch.as_str()
+    {
+        return Some(format!(
+            "its latest validation did not fail as commit_mismatch (code {})",
+            payload["code"].as_str().unwrap_or("none")
+        ));
+    }
+    let at_base = |value: &serde_json::Value| value.as_str() == Some(base.as_str());
+    if !at_base(&payload["receipt"]["commit"]) {
+        return Some(format!(
+            "its receipt's commit ({}) is not its base {base}",
+            payload["receipt"]["commit"].as_str().unwrap_or("none")
+        ));
+    }
+    match &facts.head {
+        Err(why) => {
+            return Some(format!(
+                "whether its branch holds commits past its base could not be read: {why}"
+            ));
+        }
+        Ok(head) if head != base => {
+            return Some(format!(
+                "its branch is at {head}, past its base {base}: the hand-off would throw that away"
+            ));
+        }
+        Ok(_) => {}
+    }
+    match &facts.uncommitted {
+        Err(why) => {
+            return Some(format!(
+                "whether its worktree holds uncommitted work could not be read: {why}"
+            ));
+        }
+        Ok(status) if !status.trim().is_empty() => {
+            return Some(format!(
+                "its worktree holds uncommitted work, which the hand-off would throw away:\n{}",
+                status.trim_end()
+            ));
+        }
+        Ok(_) => {}
+    }
+    match &facts.evidence_missing {
+        Err(why) => return Some(format!("its receipt could not be read: {why}")),
+        Ok(missing) if !missing.is_empty() => {
+            return Some(format!(
+                "its receipt does not back the task's required checks: {}",
+                missing.join(", ")
+            ));
+        }
+        Ok(_) => {}
+    }
+    (!at_base(&payload["result_commit"])).then(|| {
+        format!("its validation did not find the receipt's commit at the head of its branch, at its base {base}")
+    })
 }
 
 /// One option a recovery job adds to the ask of its escalation, with the
@@ -819,6 +939,7 @@ mod tests {
                 dialog: String::new(),
             },
             RecoveryAction::CloseAndProceed,
+            RecoveryAction::HandOff,
             RecoveryAction::Wait {
                 recheck_after_secs: 0,
             },
@@ -832,6 +953,7 @@ mod tests {
                 | RecoveryAction::StopProcesses { .. }
                 | RecoveryAction::AnswerKnownDialog { .. }
                 | RecoveryAction::CloseAndProceed
+                | RecoveryAction::HandOff
                 | RecoveryAction::Wait { .. } => {}
             }
         }
@@ -1568,6 +1690,149 @@ mod tests {
         assert_eq!(
             "stalled".parse::<RecoveryAlert>().unwrap(),
             RecoveryAlert::Stalled
+        );
+    }
+
+    /// ADR-t1818-2 decision 3's preconditions, each one broken in turn: a
+    /// failed latest run whose validation since its last session rejected a
+    /// receipt naming its base (no commit made, no claim) and whose branch
+    /// is still at its base is handed off; anything else is refused with
+    /// why.
+    #[test]
+    fn a_run_is_handed_off_only_when_it_failed_with_no_commit_past_its_base() {
+        let base = CommitSha::parse("a".repeat(40), "base").unwrap();
+        let other = CommitSha::parse("b".repeat(40), "head").unwrap();
+        let rejected = |code: &str, commit: &CommitSha| {
+            event(
+                "validation_finished",
+                serde_json::json!({"accepted": false, "code": code, "result_commit": commit,
+                    "receipt": {"result": "succeeded", "commit": commit}}),
+            )
+        };
+        fn sound<'a>(base: &'a CommitSha, events: &'a [RunEvent]) -> HandOffFacts<'a> {
+            HandOffFacts {
+                status: RunStatus::Failed,
+                latest: true,
+                base: Some(base),
+                events,
+                head: Ok(base.clone()),
+                uncommitted: Ok(String::new()),
+                evidence_missing: Ok(Vec::new()),
+            }
+        }
+        let events = &[rejected("commit_mismatch", &base)][..];
+        assert_eq!(hand_off_refusal(&sound(&base, events)), None);
+        let refused = |facts: HandOffFacts<'_>, says: &str| {
+            let why = hand_off_refusal(&facts).expect("refused");
+            assert!(why.contains(says), "{says}: {why}");
+        };
+        refused(
+            HandOffFacts {
+                status: RunStatus::Interrupted,
+                ..sound(&base, events)
+            },
+            "only a failed run",
+        );
+        refused(
+            HandOffFacts {
+                latest: false,
+                ..sound(&base, events)
+            },
+            "not the latest run",
+        );
+        refused(
+            HandOffFacts {
+                base: None,
+                ..sound(&base, events)
+            },
+            "no base commit",
+        );
+        refused(
+            HandOffFacts {
+                head: Ok(other.clone()),
+                ..sound(&base, events)
+            },
+            "past its base",
+        );
+        refused(
+            HandOffFacts {
+                head: Err("its worktree is gone".to_owned()),
+                ..sound(&base, events)
+            },
+            "its worktree is gone",
+        );
+        refused(
+            HandOffFacts {
+                uncommitted: Ok(" M src/lib.rs\n".to_owned()),
+                ..sound(&base, events)
+            },
+            "uncommitted work",
+        );
+        refused(
+            HandOffFacts {
+                uncommitted: Err("no worktree".to_owned()),
+                ..sound(&base, events)
+            },
+            "could not be read: no worktree",
+        );
+        refused(
+            HandOffFacts {
+                evidence_missing: Ok(vec!["tests".to_owned()]),
+                ..sound(&base, events)
+            },
+            "required checks: tests",
+        );
+        refused(
+            HandOffFacts {
+                evidence_missing: Err("gone".to_owned()),
+                ..sound(&base, events)
+            },
+            "receipt could not be read",
+        );
+        refused(sound(&base, &[]), "never validated");
+        // A session resumed after the rejection has not been validated
+        // since.
+        refused(
+            sound(
+                &base,
+                &[
+                    rejected("commit_mismatch", &base),
+                    event("resume_started", serde_json::json!({})),
+                ],
+            ),
+            "never validated",
+        );
+        refused(
+            sound(&base, &[rejected("worktree_dirty", &base)]),
+            "code worktree_dirty",
+        );
+        refused(
+            sound(
+                &base,
+                &[event(
+                    "validation_finished",
+                    serde_json::json!({"accepted": true, "result_commit": other}),
+                )],
+            ),
+            "did not fail as commit_mismatch",
+        );
+        // A receipt naming another commit.
+        refused(
+            sound(&base, &[rejected("commit_mismatch", &other)]),
+            "is not its base",
+        );
+        // A receipt naming the base while the branch was elsewhere when it
+        // was validated.
+        refused(
+            sound(
+                &base,
+                &[event(
+                    "validation_finished",
+                    serde_json::json!({"accepted": false, "code": "commit_mismatch",
+                        "result_commit": null, "receipt": {"commit": base}}),
+                )],
+            ),
+            "did not find the receipt's commit",
         );
     }
 }

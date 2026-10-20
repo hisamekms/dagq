@@ -141,7 +141,8 @@ pub fn latest_verified(events: &[RunEvent]) -> Option<Verified> {
 
 /// Whether `event` is a step of a claim's course and, if so, whether the
 /// claim [`rests`] after it: its acceptance (`validation_finished` with
-/// `already_satisfied`), a verification's end and the end of the review's
+/// `already_satisfied`, or a recovery round's hand-off of a failed run,
+/// [`handed_off`]), a verification's end and the end of the review's
 /// judgment start a rest, and the snapshot a verification starts on and
 /// the start of a judgment end it. The KPI's slot occupancy leaves the
 /// rests out by these steps, as the supervisor's count does.
@@ -152,8 +153,19 @@ pub fn rests_after(event: &RunEvent) -> Option<bool> {
         Some(EventKind::ValidationFinished) if event.payload["already_satisfied"] == true => {
             Some(true)
         }
+        _ if handed_off(event) => Some(true),
         _ => None,
     }
+}
+
+/// Whether `event` is a recovery round's hand-off of a failed run to the
+/// claim's course (`triage_finished` with action `hand_off`, ADR-t1818-2
+/// decision 3): the run is `validating` from then on, accepted as a claim
+/// whose verification has not started.
+pub fn handed_off(event: &RunEvent) -> bool {
+    event.kind == EventKind::TriageFinished
+        && event.payload["action"] == super::recovery::HAND_OFF_KIND
+        && event.payload["status"] == RunStatus::Validating.as_str()
 }
 
 /// How many judgments of the claim the review began among a run's
@@ -205,12 +217,23 @@ pub fn answer_awaited(events: &[RunEvent]) -> bool {
     !open.is_empty()
 }
 
-/// Whether the claim was accepted and its verification has not started
-/// since: the supervisor starts it once it may (a free slot, the
+/// Whether a recovery round handed the run off ([`handed_off`]) since its
+/// latest resume: its claim is the round's, and validating it again (an
+/// adopter's) accepts it as a claim without judging its receipt.
+pub fn handed_off_since_resume(events: &[RunEvent]) -> bool {
+    events
+        .iter()
+        .rev()
+        .take_while(|e| e.kind != EventKind::ResumeStarted)
+        .any(handed_off)
+}
+
+/// Whether the claim was accepted (or a failed run handed off to its
+/// course) and its verification has not started since: the supervisor starts it once it may (a free slot, the
 /// verification's runtime usable), unless an `approve_close` ask of the run
 /// is still open.
 pub fn awaits_verification(events: &[RunEvent]) -> bool {
-    last_step(events).is_some_and(|e| e.kind == EventKind::ValidationFinished)
+    last_step(events).is_some_and(|e| e.kind == EventKind::ValidationFinished || handed_off(e))
 }
 
 /// Whether a run in `status`, `leased` or not, with these `events` is
@@ -546,6 +569,30 @@ mod tests {
             ..event(1, event_kind::VALIDATION_FINISHED)
         };
         assert!(blocks_recovery(RunStatus::Validating, false, &[accepted]));
+        // A failed run a recovery round handed off (ADR-t1818-2 decision
+        // 3) rests the same way until its verification starts; a round
+        // whose hand-off a hold kept (the run stays failed) does not.
+        let handed = RunEvent {
+            payload: json!({"action": "hand_off", "status": "validating"}),
+            ..event(1, event_kind::TRIAGE_FINISHED)
+        };
+        assert!(handed_off(&handed));
+        assert!(awaits_verification(std::slice::from_ref(&handed)));
+        assert!(blocks_recovery(
+            RunStatus::Validating,
+            false,
+            std::slice::from_ref(&handed)
+        ));
+        let kept = RunEvent {
+            payload: json!({"action": "held", "kept_action": "hand_off", "status": "failed"}),
+            ..event(1, event_kind::TRIAGE_FINISHED)
+        };
+        assert!(!handed_off(&kept) && !awaits_verification(&[kept]));
+        let started = [handed, event(2, event_kind::RUN_SATISFIED_SNAPSHOT)];
+        assert!(!awaits_verification(&started));
+        assert!(handed_off_since_resume(&started));
+        let resumed = [started[0].clone(), event(3, event_kind::RESUME_STARTED)];
+        assert!(!handed_off_since_resume(&resumed));
     }
 
     /// The review's judgment after a passed verification ends the rest the

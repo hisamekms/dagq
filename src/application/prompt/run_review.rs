@@ -499,6 +499,9 @@ pub(super) fn recovery_action_help(action: &str) -> &'static str {
         "resume" => {
             "{\"action\": \"resume\", \"instruction\": string}: send the run back to a session of its own in its worktree, with the instruction (what to do: fix the failing test, commit and rewrite the receipt, rebase) added to the resolution request. Only while its resumes are not used up."
         }
+        "hand_off" => {
+            "{\"action\": \"hand_off\"}: hand the run to the check that the base already meets the acceptance, as if its worker had reported already_satisfied: the runtime runs the task's verification commands on main and the review judges whether main meets every criterion with no change; the task closes only if both pass, else a person is asked. Only for a failed run whose receipt names its base as its commit (it failed commit_mismatch: no commit was made on top of base) and whose branch holds no commit past the base, when the receipt and the files show the base already meets every criterion. Your diagnosis says why; you do not close the task yourself."
+        }
         _ => "",
     }
 }
@@ -513,7 +516,8 @@ pub(crate) const HEADLESS_NEVER: [&str; 2] = ["answer_known_dialog", "close_and_
 /// it took 19,773 bytes at the median, 27,553 at p90 and 66,814 at most,
 /// of which a headless session's last turns took 46,559. The limit is the
 /// sum of the sections' limits below (81,000 bytes) and the instructions
-/// (about 6,000) with room for the language's instruction.
+/// (about 7,500 for a run that ended, its allowed actions and the options'
+/// rule included) with room for the language's instruction.
 pub const RECOVERY_PROMPT_LIMIT: usize = 96_000;
 
 /// The bytes of the task's title, description (2,166 at most in
@@ -842,9 +846,10 @@ pub(super) fn binary_sections(
 /// How the recovery job of a run that ended declares its options
 /// (ADR-t1818-2 decisions 1 and 2): the kinds, what the runtime does with
 /// each, that an option which reads as a runtime operation or the task's
-/// end is left out, and the hand-off a later round may choose; the verify
+/// end is left out, and the hand-off a later round may choose (the
+/// `hand_off` action when the job is sure itself); the verify
 /// fix is the runtime's own option (ADR-t883-1).
-pub(super) const RECOVERY_ENDED_OPTIONS_RULE: &str = "Each option declares its kind. \"retry\", \"resume\" or \"cancel\" stands for that answer of the person's ask: the runtime offers its own option instead and shows your text as your recommendation for it. \"recover\" is an answer that comes back to you: choosing it moves nothing, and you run again with the person's choice; the ask says so on each such option. \"hand_off\" is a recover option that asks your next round to hand the run to the check that the base already meets the acceptance (a run whose receipt has no commit past the base): it is shown with its own mark whatever its words, and the task closes only if that check and its review pass. An option with no kind or another kind is left out, and so is a recover option whose text reads as a runtime operation or as the task's end (retry, retry_inherit, resume, cancel, done, complete, close, obsolete): the runtime cannot mark a task done or cancel it from your option, so do not offer that. When a broken verification command caused the run to fail, the runtime itself offers the person `edit the task's --verify, then retry_inherit` (user or inbox can edit only verification commands after the run ends; you cannot edit): do not add it, recommend it in your question. Once the task_edited event and current commands show the correction, retry_inherit carries the committed work forward and integration uses the corrected commands. ";
+pub(super) const RECOVERY_ENDED_OPTIONS_RULE: &str = "Each option declares its kind. \"retry\", \"resume\" or \"cancel\" stands for that answer of the person's ask: the runtime offers its own option instead and shows your text as your recommendation for it. \"recover\" is an answer that comes back to you: choosing it moves nothing, and you run again with the person's choice; the ask says so on each such option. \"hand_off\" is a recover option that asks your next round to hand the run to the check that the base already meets the acceptance (a run whose receipt has no commit past the base): it is shown with its own mark whatever its words, and the task closes only if that check and its review pass. When you are sure yourself, choose the hand_off action instead of offering it. An option with no kind or another kind is left out, and so is a recover option whose text reads as a runtime operation or as the task's end (retry, retry_inherit, resume, cancel, done, complete, close, obsolete): the runtime cannot mark a task done or cancel it from your option, so do not offer that. When a broken verification command caused the run to fail, the runtime itself offers the person `edit the task's --verify, then retry_inherit` (user or inbox can edit only verification commands after the run ends; you cannot edit): do not add it, recommend it in your question. Once the task_edited event and current commands show the correction, retry_inherit carries the committed work forward and integration uses the corrected commands. ";
 
 /// How the recovery job of a live session declares its options
 /// (ADR-t1818-2 decisions 1 and 2): `wait` and `stop` are the runtime's,

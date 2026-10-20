@@ -1555,3 +1555,132 @@ fn a_triage_whose_lease_moved_is_triaged_again_only_after_its_slot_is_dropped() 
     assert_eq!(acquired[1], "taken");
     assert_eq!(reviewer.triage_prompts().len(), 2);
 }
+
+/// Set the verification commands of task 1 (a ready task's are not
+/// editable through the CLI).
+fn verified_by(db: &Path, commands: &str) {
+    rusqlite::Connection::open(db)
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET verification_commands=?1 WHERE id=1",
+            [commands],
+        )
+        .unwrap();
+}
+
+/// ADR-t1818-2 decision 3: the worker found the base already meets the
+/// task but wrote `succeeded` naming its base, so validation failed the run
+/// as `commit_mismatch`. The recovery job's `hand_off` applies (no commit
+/// past the base): the run becomes `validating` with no `result_commit`,
+/// recorded as `triage_finished` and `auto_repaired` (`repair:
+/// hand_off`), and goes down the claim's course: the task's verification
+/// on main, the review's judgment carrying the job's diagnosis, and on a
+/// `high` pass the task closes without a commit and with no ask (what a
+/// close then frees is `runtime_already_satisfied`'s).
+#[test]
+fn a_failed_run_with_no_commit_handed_off_by_its_recovery_job_is_verified_judged_and_closed() {
+    let (_dir, repo, db) = fixture();
+    verified_by(&db, r#"["test -f seed.txt"]"#);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    backend.script_for(1, "receipt \"$(git rev-parse HEAD)\"; idle; await_exit");
+    let judged = json!({"verdict": "pass", "reasons": ["seed.txt is there"],
+        "summary": "main meets it", "confidence": "high", "recommendation": "close"});
+    let reviewer = TestReviewer::new(&[
+        format!("printf '%s\\n' '{judged}'"),
+        verdict("pass", &[], "fine"),
+    ])
+    .with_triages(&[repair(
+        json!({"action": "hand_off"}),
+        "seed.txt is on the base already",
+    )]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.runs.len(), 1);
+    let run = detail.runs[0].clone();
+    assert!(queue.asks(Default::default()).unwrap().is_empty());
+    assert_eq!(detail.task.status(), TaskStatus::Completed);
+    assert_eq!(run.status(), RunStatus::Succeeded);
+    assert_eq!(run.result_commit(), None);
+    assert!(queue.run_lease(run.id()).unwrap().is_none());
+    let validated = payloads(&detail, "validation_finished");
+    assert_eq!(validated[0]["code"], "commit_mismatch");
+    let finished = payloads(&detail, "triage_finished");
+    assert_eq!(finished.len(), 1);
+    assert_eq!(finished[0]["action"], "hand_off");
+    assert_eq!(finished[0]["status"], "validating");
+    let repaired = payloads(&detail, "auto_repaired");
+    assert_eq!(repaired[0]["repair"], "hand_off");
+    assert_eq!(repaired[0]["conditions"]["own_commits"], false);
+    assert_eq!(
+        payloads(&detail, "recovery_finished")[0]["applied"],
+        json!(["hand_off"])
+    );
+    let kinds = event_kinds(&detail);
+    for (before, after) in [
+        ("triage_finished", "run_satisfied_snapshot"),
+        ("run_satisfied_snapshot", "run_satisfied_verified"),
+        ("run_satisfied_verified", "run_satisfied_review_started"),
+        ("run_satisfied_judged", "run_satisfied_closed"),
+    ] {
+        assert!(
+            position(&kinds, before) < position(&kinds, after),
+            "{before} < {after}: {kinds:?}"
+        );
+    }
+    assert_eq!(
+        payloads(&detail, "run_satisfied_verified")[0]["passed"],
+        true
+    );
+    assert_eq!(
+        payloads(&detail, "run_satisfied_closed")[0]["closed_by"],
+        "judgment"
+    );
+    let prompt = std::fs::read_to_string(
+        Path::new(run.run_dir().unwrap()).join("satisfied-review-prompt-1.txt"),
+    )
+    .unwrap();
+    for said in [
+        "did not report already_satisfied",
+        "seed.txt is on the base already",
+    ] {
+        assert!(prompt.contains(said), "{said}: {prompt}");
+    }
+}
+
+/// ADR-t1818-2 decision 3's preconditions broken: the worker committed
+/// and its session failed before any receipt, so the run did not fail as
+/// a receipt naming its base, and the hand-off would throw the commit
+/// away. The runtime does not apply it: the verdict becomes the `decide`
+/// ask saying why, and the run stays `failed`.
+#[test]
+fn a_hand_off_of_a_run_that_did_not_fail_at_its_base_is_refused_and_asked() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, "commit work; exit 7");
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "unused")])
+        .with_triages(&[repair(json!({"action": "hand_off"}), "the base meets it")]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.runs.len(), 1);
+    let run = detail.runs[0].clone();
+    assert_eq!(run.status(), RunStatus::Failed);
+    assert_eq!(detail.task.status(), TaskStatus::InProgress);
+    assert!(payloads(&detail, "auto_repaired").is_empty());
+    assert!(payloads(&detail, "run_satisfied_snapshot").is_empty());
+    let finished = payloads(&detail, "triage_finished");
+    assert_eq!(finished.len(), 1);
+    assert_eq!(finished[0]["action"], "ask");
+    let ask = queue
+        .read_ask(AskId::new(finished[0]["ask_id"].as_i64().unwrap()))
+        .unwrap();
+    assert_eq!(ask.kind, AskKind::Decide);
+    for part in [
+        "the hand-off does not apply",
+        "its receipt was never validated",
+    ] {
+        assert!(ask.question.contains(part), "{part}: {}", ask.question);
+    }
+}
