@@ -96,13 +96,21 @@ impl<S: tracing::Subscriber> Layer<S> for BusyWrites {
 }
 
 /// Wait for `done`, polling, up to `limit`.
-fn until(limit: Duration, what: &str, mut done: impl FnMut() -> bool) {
+fn until(limit: Duration, what: &str, done: impl FnMut() -> bool) {
     let _waiting = common::within(limit + Duration::from_secs(5), what);
+    assert!(wait(limit, done), "timed out waiting for {what}");
+}
+
+/// Whether `done` held, polling, within `limit`.
+fn wait(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + limit;
     while !done() {
-        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        if Instant::now() >= deadline {
+            return false;
+        }
         thread::sleep(Duration::from_millis(20));
     }
+    true
 }
 
 #[test]
@@ -116,6 +124,13 @@ fn a_busy_heartbeat_is_tried_again_and_its_failures_are_recorded() {
     let busy = BusyWrites::default();
     let _subscriber =
         tracing::subscriber::set_default(tracing_subscriber::registry().with(busy.clone()));
+    // With one dispatcher registered, tracing asks the default of the
+    // thread that first reaches a callsite; another test's heartbeat
+    // thread, with no subscriber, meeting its own lock first would switch
+    // the busy WARN off for good, and none would be counted here. A second
+    // one makes every callsite ask both.
+    let _second = tracing::Dispatch::new(tracing_subscriber::registry());
+    tracing::callsite::rebuild_interest_cache();
     let heartbeat = start(&db, policy(Duration::from_secs(60)));
     // The heartbeat runs before the lock is taken.
     until(Duration::from_secs(20), "the first heartbeat", || {
@@ -125,13 +140,22 @@ fn a_busy_heartbeat_is_tried_again_and_its_failures_are_recorded() {
     // Writes fail on the lock (each waits 100ms, 50ms apart) and the
     // supervisor goes on: the lock is held until two writes failed on it,
     // not for a fixed time a loaded host may let pass with none tried.
-    until(
-        Duration::from_secs(20),
-        "two heartbeat writes to fail on the lock",
-        || {
-            heartbeat.check().unwrap();
-            busy.count() >= 2
-        },
+    let mut stopped = None;
+    let waited = {
+        let what = "two heartbeat writes to fail on the lock";
+        let _waiting = common::within(Duration::from_secs(25), what);
+        wait(Duration::from_secs(20), || {
+            stopped = heartbeat.check().err().map(|error| format!("{error:#}"));
+            stopped.is_some() || busy.count() >= 2
+        })
+    };
+    // What the heartbeat did, read past the lock: a reader is not blocked.
+    let heartbeat_at = queue.supervisors().unwrap()[0].heartbeat_at;
+    assert!(
+        waited && stopped.is_none(),
+        "two heartbeat writes to fail on the lock: {} busy WARNs counted, \
+         heartbeat_at {heartbeat_at}, heartbeat stopped: {stopped:?}",
+        busy.count()
     );
     drop(held);
     let mut retried = None;
