@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     Ask, CommitSha, EventId, Goal, GoalId, GoalStatus, GoalTag, GoalVerdict, LeaseToken, Priority,
-    PrioritySource, PushReport, RunId, SupervisorMode, Task, TaskId, TaskRun, TaskStatus,
+    PrioritySource, PushReport, RecordedKind, RunId, SupervisorMode, Task, TaskId, TaskRun,
+    TaskStatus,
 };
 
 /// Number of a goal's tasks in each status; progress is derived from these.
@@ -120,7 +121,7 @@ pub struct RunEvent {
     pub task_id: Option<TaskId>,
     pub goal_id: Option<GoalId>,
     pub run_id: Option<RunId>,
-    pub kind: String,
+    pub kind: RecordedKind,
     pub payload: serde_json::Value,
     pub created_at: String,
     /// Who wrote it (ADR-t728-1 decision 4); `None` for an event written

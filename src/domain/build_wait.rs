@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 pub use super::views::Landing;
 use super::{
     EventKind, LeaseToken, RunEvent, TaskId,
-    claim_defer::{CLAIM_DEFERRED, Decision, Deferral, worker_deferral_ended},
+    claim_defer::{Decision, Deferral, worker_deferral_ended},
     stats::timestamp_millis,
 };
 
@@ -191,7 +191,7 @@ pub fn deferrals_in_place(latest: &[RunEvent]) -> HashMap<TaskId, i64> {
     latest
         .iter()
         .filter(|event| {
-            event.kind == CLAIM_DEFERRED
+            event.kind == EventKind::ClaimDeferred
                 && event.payload.get("reason").and_then(Value::as_str) == Some(NOT_IN_BUILD)
         })
         .filter_map(|event| {
@@ -204,6 +204,7 @@ pub fn deferrals_in_place(latest: &[RunEvent]) -> HashMap<TaskId, i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::claim_defer::CLAIM_DEFERRED;
     use crate::domain::{EventId, claim_defer::worker_deferrals_in_place};
 
     const LANDED: &str = "1111111111111111111111111111111111111111";

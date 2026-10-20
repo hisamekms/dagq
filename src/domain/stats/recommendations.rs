@@ -7,6 +7,8 @@
 //! `send_back: <reason>`), and the decisions from the events listed in
 //! [`DECIDED_WITHOUT_ASK`].
 
+use crate::domain::EventKind;
+use crate::domain::run::{AskOpened, ConcernDecided, restore_payload};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Serialize;
@@ -57,7 +59,7 @@ pub struct RecommendationMatch {
 /// An event that records an AI's judgement made without an ask: the ask
 /// kind it stood in for, and which of its events count.
 pub struct DecidedWithoutAsk {
-    pub event: &'static str,
+    pub event: EventKind,
     pub ask_kind: &'static str,
     pub applies: fn(&Value) -> bool,
     /// How many decisions one such event records.
@@ -65,7 +67,7 @@ pub struct DecidedWithoutAsk {
     /// The event that records a decision of `event` going to a person
     /// after all, matched by the run and the payload's `attempt`: a
     /// decision it names is not counted, wherever it falls.
-    pub escalated_by: Option<&'static str>,
+    pub escalated_by: Option<EventKind>,
 }
 
 /// The records of the AI's own decisions, per ask kind (ADR-t451-1): a
@@ -76,7 +78,7 @@ pub const DECIDED_WITHOUT_ASK: &[DecidedWithoutAsk] = &[
     DecidedWithoutAsk {
         // A follow_up draft a planner of the runtime's adopted on its own,
         // with no planner_question answered: not a person's submission.
-        event: "follow_up_adopted",
+        event: EventKind::FollowUpAdopted,
         ask_kind: "planner_question",
         applies: |payload| payload["by"].as_str() == Some("planner") && payload["ask_id"].is_null(),
         decisions: one,
@@ -86,7 +88,7 @@ pub const DECIDED_WITHOUT_ASK: &[DecidedWithoutAsk] = &[
         // A plan review's sure concern the runtime applied as its
         // `ready` or `send_back` (ADR-t451-1 decision 4), not one it left
         // to a person in an approve_plan ask.
-        event: crate::domain::event_kind::PLAN_CONCERN_DECIDED,
+        event: EventKind::PlanConcernDecided,
         ask_kind: "approve_plan",
         applies: |payload| payload["applied"].as_bool() == Some(true),
         decisions: one,
@@ -98,18 +100,18 @@ pub const DECIDED_WITHOUT_ASK: &[DecidedWithoutAsk] = &[
         // records `applied: false`, and a send_back the session did not
         // fix, which reached a person in approve_landing after all,
         // `concern_send_back_escalated` (task 1392).
-        event: crate::domain::event_kind::CONCERN_DECIDED,
+        event: EventKind::ConcernDecided,
         ask_kind: "approve_landing",
-        applies: |payload| payload["applied"].as_bool() == Some(true),
+        applies: |payload| restore_payload::<ConcernDecided>(payload).applied == Some(true),
         decisions: one,
-        escalated_by: Some(crate::domain::event_kind::CONCERN_SEND_BACK_ESCALATED),
+        escalated_by: Some(EventKind::ConcernSendBackEscalated),
     },
     DecidedWithoutAsk {
         // The findings an observation recorded or updated and kept to the
         // finding, its reading being to wait or leave it, instead of a
         // blocked ask (ADR-t451-1 decision 2). An observation recorded
         // before the count reads as none.
-        event: crate::domain::event_kind::OBSERVE_FINISHED,
+        event: EventKind::ObserveFinished,
         ask_kind: "blocked",
         applies: |payload| findings_without_ask(payload) > 0,
         decisions: findings_without_ask,
@@ -136,14 +138,14 @@ pub fn recommendations(
 ) -> Recommendations {
     let mut stats = Recommendations::default();
     let mut recommended: HashMap<String, String> = HashMap::new();
-    let escalated: HashSet<(&str, Option<&RunId>, Option<u64>)> = events
+    let escalated: HashSet<(EventKind, Option<&RunId>, Option<u64>)> = events
         .iter()
-        .map(|event| {
-            (
-                event.kind.as_str(),
+        .filter_map(|event| {
+            Some((
+                event.kind.known()?,
                 event.run_id.as_ref(),
                 event.payload["attempt"].as_u64(),
-            )
+            ))
         })
         .filter(|(kind, _, _)| {
             DECIDED_WITHOUT_ASK
@@ -153,11 +155,11 @@ pub fn recommendations(
         .collect();
     for event in events.iter().filter(|event| event.id <= upto) {
         let payload = &event.payload;
-        match event.kind.as_str() {
-            "ask_opened" => {
+        match event.kind.known() {
+            Some(EventKind::AskOpened) => {
                 if event.id > after
                     && counts(event.task_id)
-                    && payload["kind"].as_str() == Some("blocked")
+                    && restore_payload::<AskOpened>(payload).kind == Some("blocked")
                 {
                     stats.observer.blocked_asks += 1;
                 }
@@ -167,7 +169,7 @@ pub fn recommendations(
                     recommended.insert(id, option.trim().to_owned());
                 }
             }
-            "ask_answered" if event.id > after && counts(event.task_id) => {
+            Some(EventKind::AskAnswered) if event.id > after && counts(event.task_id) => {
                 let Some(option) = ask_id(payload).and_then(|id| recommended.get(&id)) else {
                     continue;
                 };
@@ -183,7 +185,7 @@ pub fn recommendations(
                     entry.matched += 1;
                 }
             }
-            kind if event.id > after && counts(event.task_id) => {
+            Some(kind) if event.id > after && counts(event.task_id) => {
                 for decided in DECIDED_WITHOUT_ASK
                     .iter()
                     .filter(|decided| decided.event == kind && (decided.applies)(payload))
@@ -202,7 +204,7 @@ pub fn recommendations(
                         .decided_without_ask
                         .entry(decided.ask_kind.to_owned())
                         .or_default() += decisions;
-                    if decided.event == crate::domain::event_kind::OBSERVE_FINISHED {
+                    if decided.event == EventKind::ObserveFinished {
                         stats.observer.findings_without_ask += decisions;
                     }
                 }

@@ -1,6 +1,7 @@
 //! Queue tests: editing a task (paths, fields, priority), the priority order,
 //! and `list`.
 use crate::common;
+use dagq::domain::EventKind;
 
 use dagq::{
     application::{
@@ -66,7 +67,7 @@ fn paths_are_stored_and_replaced_while_the_task_is_editable() {
         .unwrap()
         .events
         .into_iter()
-        .filter(|e| e.kind == "task_paths_changed")
+        .filter(|e| e.kind == EventKind::TaskPathsChanged)
         .map(|e| (e.run_id, e.payload))
         .collect();
     assert_eq!(
@@ -147,7 +148,7 @@ fn edit_task_replaces_draft_fields_and_records_the_change() {
         .unwrap()
         .events
         .into_iter()
-        .filter(|e| e.kind == "task_edited")
+        .filter(|e| e.kind == EventKind::TaskEdited)
         .map(|e| (e.run_id, e.payload))
         .collect();
     assert_eq!(
@@ -314,7 +315,7 @@ fn ended_run_allows_only_verify_correction_before_inherited_retry() {
         .unwrap()
         .events
         .into_iter()
-        .find(|e| e.kind == "task_edited")
+        .find(|e| e.kind == EventKind::TaskEdited)
         .unwrap();
     assert_eq!(
         event.payload["from"]["verification_commands"],
@@ -386,7 +387,7 @@ fn an_edit_authorized_on_another_status_changes_nothing() {
             .unwrap()
             .events
             .into_iter()
-            .filter(|e| e.kind == "task_edited")
+            .filter(|e| e.kind == EventKind::TaskEdited)
             .count()
     };
     assert_eq!(edited_events(&mut queue), 0);
@@ -424,7 +425,7 @@ fn clearing_an_own_priority_records_the_change_of_its_source() {
         .unwrap()
         .events
         .into_iter()
-        .filter(|e| e.kind == "task_priority_changed")
+        .filter(|e| e.kind == EventKind::TaskPriorityChanged)
         .map(|e| e.payload)
         .collect();
     assert_eq!(
@@ -466,7 +467,7 @@ fn priority_is_stored_changed_while_editable_and_checked_on_read() {
         .unwrap()
         .events
         .into_iter()
-        .filter(|e| e.kind == "task_priority_changed")
+        .filter(|e| e.kind == EventKind::TaskPriorityChanged)
         .map(|e| e.payload)
         .collect();
     assert_eq!(

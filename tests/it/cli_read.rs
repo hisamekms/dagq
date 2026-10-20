@@ -1008,6 +1008,58 @@ fn status_watch_and_show_read_kinds_a_newer_binary_wrote() {
     ok(&db, &["stats", "--full"]);
 }
 
+/// A queue with a kind this binary no longer writes and one it does not
+/// know at all: `events`, `show` and `timeline` read both and print each
+/// kind as it was recorded (ADR-0073 decision 21).
+#[test]
+fn old_and_unknown_kinds_are_read_and_printed_as_they_were_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("queue.db");
+    let run = run_with_events(
+        &db,
+        &[
+            (
+                "agent_started",
+                serde_json::json!({"session_id": "s"}),
+                "00:00:05",
+            ),
+            (
+                "retired_screen_kind",
+                serde_json::json!({"x": 1}),
+                "00:01:00",
+            ),
+        ],
+    );
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO run_events(task_id,kind,payload)
+             VALUES (1,'task_canceled_as_duplicate','{\"duplicate_of\":2}')",
+            [],
+        )
+        .unwrap();
+    let kinds = |events: &Value| -> Vec<String> {
+        events
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["kind"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let recorded = ["retired_screen_kind", "task_canceled_as_duplicate"];
+    let events = kinds(&ok(&db, &["events", "--after", "0", "--all", "--full"])["events"]);
+    let show = kinds(&ok(&db, &["show", "1", "--full"])["events"]);
+    for kind in recorded {
+        assert!(events.iter().any(|k| k == kind), "{kind}: {events:?}");
+        assert!(show.iter().any(|k| k == kind), "{kind}: {show:?}");
+    }
+    let timeline = kinds(&ok(&db, &["timeline", &run, "--full"])["events"]);
+    assert!(
+        timeline.iter().any(|k| k == "retired_screen_kind"),
+        "{timeline:?}"
+    );
+}
+
 /// A queue that has the removed resource broker's events (ADR-t2125-1):
 /// `events`, `timeline`, `show`, `status` and `doctor` read them as kinds
 /// this binary does not know, and an unhealthy broker or claims held for

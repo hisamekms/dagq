@@ -8,6 +8,7 @@
 //! an investigation waits for, is judged by the unit tests of
 //! `domain::investigation`.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use dagq::domain::{ExecutionClass, GoalId, NewGoal, Priority};
 use runtime_support::*;
@@ -81,7 +82,7 @@ fn events(db: &Path, kind: &str) -> Vec<(Option<TaskId>, Value)> {
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == kind)
+        .filter(|event| event.kind.as_str() == kind)
         .map(|event| (event.task_id, event.payload))
         .collect()
 }
@@ -129,7 +130,8 @@ fn a_spike_s_landing_records_one_request_whatever_the_verdict_and_passes_add_non
         let recorded = all
             .iter()
             .position(|event| {
-                event.kind == "request_recorded" && event.payload["spike_task_id"] == spike.as_i64()
+                event.kind == EventKind::RequestRecorded
+                    && event.payload["spike_task_id"] == spike.as_i64()
             })
             .unwrap_or_else(|| panic!("no request of {spike}"));
         assert_eq!(all[recorded].payload["requested_by"], "runtime");
@@ -137,7 +139,7 @@ fn a_spike_s_landing_records_one_request_whatever_the_verdict_and_passes_add_non
             .iter()
             .position(|event| {
                 event.task_id == Some(spike)
-                    && event.kind == "task_status_changed"
+                    && event.kind == EventKind::TaskStatusChanged
                     && event.payload["to"] == "completed"
             })
             .unwrap();

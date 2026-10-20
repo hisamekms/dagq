@@ -19,7 +19,12 @@ impl SqliteQueue {
                 )?
                 .query_map(
                     params![
-                        serde_json::to_string(crate::domain::UPDATE_EVENT_KINDS)?,
+                        serde_json::to_string(
+                            &crate::domain::UPDATE_EVENT_KINDS
+                                .iter()
+                                .map(|kind| kind.as_str())
+                                .collect::<Vec<_>>()
+                        )?,
                         i64::try_from(limit).unwrap_or(i64::MAX)
                     ],
                     event_row,
@@ -96,7 +101,7 @@ impl SqliteQueue {
         // or COMMIT rolls back as the transaction drops (task 1500), so the
         // connection leaves no transaction open and the closes' lines are
         // known rolled back.
-        let _read = read_before(&self.conn, Closing::Event(id, kind.as_str(), &payload))?;
+        let _read = read_before(&self.conn, Closing::Event(id, kind, &payload))?;
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         run_event(&tx, id, kind, payload)?;
         tx.commit()?;
@@ -129,7 +134,7 @@ impl SqliteQueue {
         // Immediate like every other write: a deferred one that read first
         // (the schema, to prepare the insert) got SQLITE_BUSY at once, past
         // the busy timeout, when another supervisor wrote at the same time.
-        let _read = read_before(&self.conn, Closing::Queue(kind.as_str(), &payload))?;
+        let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let id = queue_event(&tx, kind, &payload)?;
         tx.commit()?;
@@ -143,7 +148,7 @@ impl SqliteQueue {
     pub fn claim_inbox_nudge(&self, payload: serde_json::Value) -> Result<bool> {
         let kind = EventKind::InboxNudged;
         crate::domain::check_event_target(kind, None, None)?;
-        let _read = read_before(&self.conn, Closing::Queue(kind.as_str(), &payload))?;
+        let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let claimed: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM run_events
@@ -185,7 +190,7 @@ impl SqliteQueue {
             kind.as_str()
         );
         crate::domain::check_event_target(kind, None, None)?;
-        let _read = read_before(&self.conn, Closing::Queue(kind.as_str(), &payload))?;
+        let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let latest: Option<(String, Option<i64>)> = tx
             .query_row(
@@ -1145,7 +1150,7 @@ mod tests {
             .unwrap();
         let ids: Vec<_> = latest.iter().map(|event| event.id).collect();
         assert_eq!(ids, [a, b]);
-        assert_eq!(latest[0].kind, "ci_watch_resumed");
+        assert_eq!(latest[0].kind, EventKind::CiWatchResumed);
         assert!(
             queue
                 .latest_events_by_supervisor(&kinds, &[])

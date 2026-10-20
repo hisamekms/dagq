@@ -201,7 +201,7 @@ fn an_adopter_stops_the_review_a_dead_supervisor_left_and_only_its_own_runs() {
         detail
             .events
             .iter()
-            .position(|e| e.kind == kind && e.payload["attempt"] == attempt)
+            .position(|e| e.kind.as_str() == kind && e.payload["attempt"] == attempt)
             .unwrap()
     };
     assert!(at("headless_job_stopped", 1) < at("review_started", 2));
@@ -355,7 +355,7 @@ fn an_adopter_stops_the_whole_and_agent_jobs_a_dead_supervisor_left_and_reviews_
     let restarted = detail
         .events
         .iter()
-        .position(|e| e.kind == "review_started" && e.payload["attempt"] == 2)
+        .position(|e| e.kind == EventKind::ReviewStarted && e.payload["attempt"] == 2)
         .unwrap();
     assert!(last_stop < restarted, "{kinds:?}");
     let started: Vec<(Value, Value)> = payloads(&detail, "review_job_started")

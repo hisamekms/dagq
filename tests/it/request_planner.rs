@@ -15,6 +15,7 @@ use crate::plan_review::{
 use crate::runtime_support::planner_turns::{
     block_next_request, exit_requested, idle, turn_requests,
 };
+use dagq::domain::EventKind;
 use dagq::{
     application::{PlanRequestStore, RequestPlannerStart, TaskReads, TaskStore},
     domain::{
@@ -762,7 +763,7 @@ fn an_answer_about_a_draft_a_requests_planner_left_reaches_it_or_a_new_one_after
         .events
         .into_iter()
         .rev()
-        .find(|event| event.kind == "ask_answered")
+        .find(|event| event.kind == EventKind::AskAnswered)
         .unwrap();
     assert_eq!(answered.payload["runtime_delivers"], true);
     supervise(&fx, &backend, &reviewer);

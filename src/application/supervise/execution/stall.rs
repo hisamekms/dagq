@@ -471,14 +471,14 @@ fn ask_resolved_in(events: &[RunEvent], id: AskId) -> bool {
 
 /// The `stall_resolved` of this watch's phase that `event` is, if it is one.
 fn resolved_of(event: &RunEvent) -> Option<StallResolved<'_>> {
-    (event.kind == event_kind::STALL_RESOLVED)
+    (event.kind == EventKind::StallResolved)
         .then(|| restore::<StallResolved>(&event.payload))
         .filter(|r| r.phase == Some(PHASE))
 }
 
 /// The `stall_nudged` of this watch's phase that `event` is, if it is one.
 fn nudged_of(event: &RunEvent) -> Option<StallNudged<'_>> {
-    (event.kind == event_kind::STALL_NUDGED)
+    (event.kind == EventKind::StallNudged)
         .then(|| restore::<StallNudged>(&event.payload))
         .filter(|n| n.phase == Some(PHASE))
 }
@@ -500,7 +500,7 @@ fn idle_job(event: &RunEvent) -> Option<RecoveryRecord<'_>> {
 fn threshold_of(events: &[RunEvent], id: AskId) -> &'static str {
     let recovery = events
         .iter()
-        .filter(|e| e.kind == event_kind::RECOVERY_FINISHED)
+        .filter(|e| e.kind == EventKind::RecoveryFinished)
         .map(|e| restore::<RecoveryRecord>(&e.payload))
         .find(|r| r.ask_id == Some(id.as_i64()));
     match recovery {
@@ -686,7 +686,7 @@ impl StallWatch {
         // is every request it wrote for a headless session's next turn.
         for at in events
             .iter()
-            .filter(|e| e.kind == event_kind::ASK_DELIVERED || e.kind == event_kind::TURN_REQUESTED)
+            .filter(|e| e.kind == EventKind::AskDelivered || e.kind == EventKind::TurnRequested)
             .filter_map(at_event)
         {
             watch.input_sent(at, None);
@@ -708,7 +708,7 @@ impl StallWatch {
         for at in events
             .iter()
             .filter(|e| {
-                e.kind == event_kind::AUTO_REPAIRED
+                e.kind == EventKind::AutoRepaired
                     && restore::<AutoRepaired>(&e.payload).repair == Some("send_instruction")
             })
             .filter_map(at_event)
@@ -721,14 +721,14 @@ impl StallWatch {
                 .filter_map(|e| idle_job(e).map(|record| (e, record)))
         };
         watch.recovered_from = idle_jobs()
-            .rfind(|(e, record)| e.kind == event_kind::RECOVERY_FINISHED && record.repaired())
+            .rfind(|(e, record)| e.kind == EventKind::RecoveryFinished && record.repaired())
             .and_then(|(e, _)| at_event(e));
         // The idle's recovery job the previous supervisor requested and
         // whose end is not recorded: a job it left running is gone (the
         // adopter starts another, counted as one more), and the session
         // moving on ends it as this watch's own would.
         if let Some((requested, record)) =
-            idle_jobs().rfind(|(e, _)| e.kind == event_kind::RECOVERY_REQUESTED)
+            idle_jobs().rfind(|(e, _)| e.kind == EventKind::RecoveryRequested)
         {
             let attempt = record.attempt.unwrap_or(0) as usize;
             let of_attempt =
@@ -741,9 +741,7 @@ impl StallWatch {
             if !ended {
                 let applied = idle_jobs()
                     .filter(|(e, _)| of_attempt(e))
-                    .find(|(e, record)| {
-                        e.kind == event_kind::RECOVERY_FINISHED && record.repaired()
-                    });
+                    .find(|(e, record)| e.kind == EventKind::RecoveryFinished && record.repaired());
                 let reason = IDLE_REASONS
                     .into_iter()
                     .find(|reason| record.reason == Some(*reason))
@@ -825,9 +823,9 @@ impl StallWatch {
             // Nothing was sent to the session since: an ask opened again
             // then settled by a receipt or a question is not opened again.
             && !events[at..].iter().any(|e| {
-                e.kind == event_kind::TURN_REQUESTED
-                    || e.kind == event_kind::ASK_DELIVERED
-                    || e.kind == event_kind::STALL_NUDGED
+                e.kind == EventKind::TurnRequested
+                    || e.kind == EventKind::AskDelivered
+                    || e.kind == EventKind::StallNudged
             })
             && let Some(previous) = reopened.ask_id.map(AskId::new)
             && latest.is_some_and(|ask| ask.id == previous && ask.closed_at.is_some())
@@ -2149,7 +2147,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: format!("2026-09-30T00:00:{secs:02}.{ms:03}Z"),
             actor: None,

@@ -530,7 +530,7 @@ pub struct RevisingProposal {
 pub struct PlanReviewHold {
     pub proposal_id: ProposalId,
     pub anchor: TaskId,
-    pub kind: &'static str,
+    pub kind: EventKind,
     pub error: Option<String>,
 }
 

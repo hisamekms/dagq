@@ -21,7 +21,7 @@ fn event(id: i64, kind: &str, payload: Value, secs: i64) -> RunEvent {
         task_id: None,
         goal_id: None,
         run_id: None,
-        kind: kind.to_owned(),
+        kind: kind.into(),
         payload,
         created_at: utc_text(secs * 1000),
         actor: None,

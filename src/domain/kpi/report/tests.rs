@@ -45,7 +45,7 @@ fn event(
         task_id: task.map(TaskId::new),
         goal_id: None,
         run_id: run.map(|run| RunId::new(run).unwrap()),
-        kind: kind.to_owned(),
+        kind: kind.into(),
         payload,
         created_at: marks::utc_text(secs * 1000),
         actor: None,

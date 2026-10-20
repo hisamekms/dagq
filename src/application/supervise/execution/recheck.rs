@@ -1419,7 +1419,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: recheck::LANDING_RECHECK_FINISHED.to_owned(),
+            kind: recheck::LANDING_RECHECK_FINISHED.into(),
             payload: json!({"main": main, "supervisor": supervisor}),
             created_at: String::new(),
             actor: None,

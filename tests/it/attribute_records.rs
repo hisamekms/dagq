@@ -3,6 +3,7 @@
 //! the measurement's fold of the EventStore (`domain::ledger::attributes`)
 //! gives what the store reads now (docs/design/attribute-records.md).
 use crate::common;
+use dagq::domain::EventKind;
 
 use dagq::application::{GraphInput, TaskReads, TaskStore};
 use dagq::domain::ledger::attributes::{Folded, fold};
@@ -25,7 +26,7 @@ fn latest(queue: &mut SqliteQueue, task: TaskId, kind: &str) -> Value {
         .events
         .iter()
         .rev()
-        .find(|event| event.kind == kind)
+        .find(|event| event.kind.as_str() == kind)
         .unwrap_or_else(|| panic!("no {kind} on task {task}"))
         .payload
         .clone()
@@ -314,7 +315,7 @@ fn unfinished_changes(queue: &SqliteQueue, run: &dagq::domain::RunId) -> Vec<Val
         .unwrap()
         .into_iter()
         .filter(|event| {
-            event.kind == event_kind::RUN_UNFINISHED_CHANGED && event.run_id.as_ref() == Some(run)
+            event.kind == EventKind::RunUnfinishedChanged && event.run_id.as_ref() == Some(run)
         })
         .map(|event| event.payload)
         .collect()
@@ -325,7 +326,7 @@ fn attributes_baselines(queue: &SqliteQueue) -> usize {
         .all_events()
         .unwrap()
         .iter()
-        .filter(|event| event.kind == event_kind::ATTRIBUTES_BASELINE)
+        .filter(|event| event.kind == EventKind::AttributesBaseline)
         .count()
 }
 
@@ -506,7 +507,7 @@ fn a_supervisors_pass_writes_the_baseline_of_what_an_older_binary_changed() {
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == event_kind::ATTRIBUTES_BASELINE && event.goal_id.is_none())
+        .filter(|event| event.kind == EventKind::AttributesBaseline && event.goal_id.is_none())
         .map(|event| event.task_id)
         .collect();
     // The two tasks that differed, then the mark that closes the group.

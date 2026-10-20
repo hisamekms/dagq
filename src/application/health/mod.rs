@@ -486,7 +486,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: "claim_held".to_owned(),
+            kind: "claim_held".into(),
             payload: json!({"reason": "load", "supervisor": "tok"}),
             created_at: "2026-10-06 22:40:00".to_owned(),
             actor: None,

@@ -116,7 +116,16 @@ impl SqliteQueue {
 /// The findings whose folded attributes differ from their row's, as
 /// stored.
 fn differing_findings(conn: &Connection) -> Result<Vec<Finding>> {
-    let folded = match findings::fold(&events_of(conn, findings::KINDS)?, None) {
+    let folded = match findings::fold(
+        &events_of(
+            conn,
+            &findings::KINDS
+                .iter()
+                .map(|kind| kind.as_str())
+                .collect::<Vec<_>>(),
+        )?,
+        None,
+    ) {
         findings::Folded::Findings(folded) => folded,
         findings::Folded::BeforeBaseline => findings::Findings::default(),
     };
@@ -149,7 +158,13 @@ type Differing = (
 /// The tasks and goals whose folded attributes differ from the state's,
 /// with the state's.
 fn differing(conn: &Connection) -> Result<Differing> {
-    let folded = match fold(&events_of(conn, KINDS)?, None) {
+    let folded = match fold(
+        &events_of(
+            conn,
+            &KINDS.iter().map(|kind| kind.as_str()).collect::<Vec<_>>(),
+        )?,
+        None,
+    ) {
         Folded::Attributes(attributes) => attributes,
         Folded::BeforeBaseline => Attributes::default(),
     };

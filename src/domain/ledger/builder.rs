@@ -49,6 +49,7 @@
 //!   waits where they are kept. Nothing a pass makes grows with the events
 //!   before its new ones.
 
+use crate::domain::EventKind;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -63,7 +64,7 @@ use super::{
 use crate::domain::host_metrics::NodeSample;
 use crate::domain::pre_claim::PreClaimBook;
 use crate::domain::supervisor_life::{Lives, supervisor_of};
-use crate::domain::{EventId, RunEvent, TaskId, event_kind};
+use crate::domain::{EventId, RunEvent, TaskId};
 
 /// How often the supervisor's pass builds the ledger.
 pub const INTERVAL_SECS: u64 = 60;
@@ -160,7 +161,7 @@ impl Kept {
                 Owner::Queue => self.queue.push(event.clone()),
                 Owner::Run | Owner::Task => {}
             }
-            if event.kind == event_kind::PUSH_FINISHED {
+            if event.kind == EventKind::PushFinished {
                 self.pushes.push(event.clone());
             }
         }
@@ -261,7 +262,7 @@ impl Builder {
                 self.rows_after.get_or_insert(self.events);
             }
             self.touched.append(&mut touched);
-            if event.kind == event_kind::PUSH_FINISHED {
+            if event.kind == EventKind::PushFinished {
                 for (run, task) in &self.pending_pushes {
                     self.marks.insert(Target::Run(run.clone()));
                     if let Some(task) = task {

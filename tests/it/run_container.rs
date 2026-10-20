@@ -331,7 +331,7 @@ fn a_worker_s_turn_runs_in_its_hardened_container_and_leaves_its_bundle_and_stat
                     .unwrap()
                     .events
                     .iter()
-                    .filter(|event| event.kind == "turn_finished")
+                    .filter(|event| event.kind == EventKind::TurnFinished)
                     .count()
                     >= count
             });
@@ -481,7 +481,7 @@ fn a_worker_s_turn_runs_in_its_hardened_container_and_leaves_its_bundle_and_stat
     let finished: Vec<&Value> = detail
         .events
         .iter()
-        .filter(|event| event.kind == "turn_finished")
+        .filter(|event| event.kind == EventKind::TurnFinished)
         .map(|event| &event.payload)
         .collect();
     assert_eq!(finished.len(), 2, "{:?}", detail.events);
@@ -840,7 +840,7 @@ fn a_container_turn_ended_before_its_result_is_resumed_and_measured_from_the_age
                 .unwrap()
                 .events
                 .iter()
-                .filter(|event| event.kind == "turn_finished")
+                .filter(|event| event.kind == EventKind::TurnFinished)
                 .count()
                 >= count
         });

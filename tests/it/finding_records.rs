@@ -5,6 +5,7 @@
 //! the count and the lines the report makes of the store's findings
 //! (docs/design/attribute-records.md "findingの属性").
 use crate::common;
+use dagq::domain::EventKind;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -205,7 +206,9 @@ fn assert_recorded(queue: &SqliteQueue, finding: FindingId, kind: &str) {
         .unwrap()
         .into_iter()
         .rev()
-        .find(|event| event.kind == kind && event.payload["finding_id"] == finding.as_i64())
+        .find(|event| {
+            event.kind.as_str() == kind && event.payload["finding_id"] == finding.as_i64()
+        })
         .unwrap_or_else(|| panic!("no {kind} about finding {finding}"))
         .payload;
     assert_eq!(
@@ -436,7 +439,7 @@ fn baselines(queue: &SqliteQueue) -> Vec<Value> {
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == event_kind::FINDING_BASELINE)
+        .filter(|event| event.kind == EventKind::FindingBaseline)
         .map(|event| event.payload)
         .collect()
 }

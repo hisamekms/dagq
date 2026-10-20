@@ -14,7 +14,6 @@ use serde_json::{Value, json};
 
 use super::{
     EventKind, ExecutionClass, LeaseToken, Priority, RunEvent, TaskId,
-    claim_defer::CLAIM_DEFERRED,
     investigation::{INVESTIGATION_LIMIT, InvestigationLimit, investigation_message},
     stats::timestamp_millis,
 };
@@ -272,7 +271,7 @@ pub fn light_room_deferred(token: &LeaseToken) -> (EventKind, Value) {
 pub fn class_deferrals_in_place(latest: &[RunEvent]) -> HashMap<TaskId, (String, i64)> {
     latest
         .iter()
-        .filter(|event| event.kind == CLAIM_DEFERRED)
+        .filter(|event| event.kind == EventKind::ClaimDeferred)
         .filter_map(|event| {
             let reason = event.payload.get("reason").and_then(Value::as_str)?;
             if !ORDER_DEFERRALS.contains(&reason) {
@@ -287,6 +286,7 @@ pub fn class_deferrals_in_place(latest: &[RunEvent]) -> HashMap<TaskId, (String,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::claim_defer::CLAIM_DEFERRED;
 
     const MIN: i64 = 60_000;
     const NOW: i64 = 1_000 * MIN;
@@ -553,7 +553,7 @@ mod tests {
             task_id: Some(TaskId::new(task)),
             goal_id: None,
             run_id: None,
-            kind: CLAIM_DEFERRED.to_owned(),
+            kind: CLAIM_DEFERRED.into(),
             payload: json!({"reason": reason}),
             created_at: "2026-10-11 10:00:00".to_owned(),
             actor: None,

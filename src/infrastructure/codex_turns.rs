@@ -1328,7 +1328,7 @@ mod tests {
                 task_id: None,
                 goal_id: None,
                 run_id: None,
-                kind: TURN_FINISHED.to_owned(),
+                kind: TURN_FINISHED.into(),
                 payload,
                 created_at: String::new(),
                 actor: None,

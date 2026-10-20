@@ -28,7 +28,7 @@ use crate::domain::container_image::{
     client_source, context_paths,
 };
 use crate::domain::podman_machine::QueueKey;
-use crate::domain::{ActorContext, EventKind};
+use crate::domain::{ActorContext, EventKind, RecordedKind};
 
 /// The runtime's base Containerfile: Claude Code, the Linux dagq client
 /// and a non-root user, nothing of a language.
@@ -232,7 +232,7 @@ impl ImageRecords for QueueImageRecords {
         EventStore::record_queue_event(&self.open()?, kind, payload).map(drop)
     }
 
-    fn latest(&self) -> Result<Option<(String, Value)>> {
+    fn latest(&self) -> Result<Option<(RecordedKind, Value)>> {
         Ok(
             EventStore::latest_queue_event(&self.open()?, &CONTAINER_IMAGE_KINDS)?
                 .map(|event| (event.kind, event.payload)),

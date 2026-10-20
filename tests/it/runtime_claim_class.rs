@@ -8,6 +8,7 @@
 //! which one ages, with the interrupts, the deferrals and the threshold,
 //! is judged by the unit tests of `domain::claim_order`.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use dagq::domain::{
     ClaimOutcome, ExecutionClass, LeaseToken, Priority, provider_switch::WorkerRoute,
@@ -97,7 +98,7 @@ fn events(db: &Path, kind: &str) -> Vec<(Option<TaskId>, Value)> {
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == kind)
+        .filter(|event| event.kind.as_str() == kind)
         .map(|event| (event.task_id, event.payload))
         .collect()
 }
@@ -692,7 +693,7 @@ fn the_aging_s_clock_is_read_from_the_task_s_its_dependencies_and_its_goal_s_eve
         .all_events()
         .unwrap()
         .into_iter()
-        .rfind(|event| event.kind == "goal_status_changed")
+        .rfind(|event| event.kind == EventKind::GoalStatusChanged)
         .and_then(|event| dagq::domain::stats::timestamp_millis(&event.created_at))
         .unwrap();
     assert_eq!(ready_at(&queue), Some(opened));

@@ -1,6 +1,8 @@
 //! The recovery job (ADR-0047 decisions 39 and 40): the alerts it is
 //! started for, the verdict it prints, and which processes belong to a run
 //! so that `stop_processes` can touch only them.
+use crate::domain::EventKind;
+use crate::domain::run::{RecoveryRecord, StallResolved, restore_payload};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -104,7 +106,10 @@ impl RecoveryAlert {
 pub fn attempts(events: &[RunEvent], alert: RecoveryAlert) -> usize {
     events
         .iter()
-        .filter(|e| e.kind == "recovery_requested" && e.payload["alert"] == alert.as_str())
+        .filter(|e| {
+            e.kind == EventKind::RecoveryRequested
+                && restore_payload::<RecoveryRecord>(&e.payload).alert == Some(alert.as_str())
+        })
         .count()
 }
 
@@ -113,9 +118,9 @@ pub fn attempts(events: &[RunEvent], alert: RecoveryAlert) -> usize {
 /// (`long_background` after the receipt of a run that then failed, task
 /// 918) is not that run's triage.
 fn ended_request(event: &RunEvent) -> bool {
-    event.kind == "recovery_requested"
-        && event.payload["alert"]
-            .as_str()
+    event.kind == EventKind::RecoveryRequested
+        && restore_payload::<RecoveryRecord>(&event.payload)
+            .alert
             .and_then(|alert| alert.parse::<RecoveryAlert>().ok())
             .is_some_and(|alert| alert.ask_kind() == AskKind::Decide)
 }
@@ -132,8 +137,7 @@ pub const VERIFY_FIX_OPTION: &str = "edit the task's --verify, then retry_inheri
 /// [`VERIFY_FIX_OPTION`].
 pub fn verification_failed(run_events: &[RunEvent]) -> bool {
     run_events.iter().any(|e| {
-        e.kind == super::event_kind::INTEGRATION_DEFERRED
-            && e.payload["code"] == "verification_failed"
+        e.kind == EventKind::IntegrationDeferred && e.payload["code"] == "verification_failed"
     })
 }
 
@@ -148,15 +152,15 @@ pub fn verify_fix_round(run_events: &[RunEvent], task_events: &[RunEvent]) -> bo
     let chosen = run_events
         .iter()
         .rev()
-        .take_while(|e| e.kind != "triage_started")
-        .find(|e| e.kind == "triage_decided" && e.payload["action"] == super::RECOVER_AGAIN)
+        .take_while(|e| e.kind != EventKind::TriageStarted)
+        .find(|e| e.kind == EventKind::TriageDecided && e.payload["action"] == super::RECOVER_AGAIN)
         .is_some_and(|e| e.payload["answer"] == VERIFY_FIX_OPTION);
     let Some(began) = run_events.first().map(|e| e.id) else {
         return false;
     };
     chosen
         && task_events.iter().any(|e| {
-            e.kind == super::event_kind::TASK_EDITED
+            e.kind == EventKind::TaskEdited
                 && e.id > began
                 && e.payload["to"].get("verification_commands").is_some()
         })
@@ -170,7 +174,12 @@ pub fn pending_request(events: &[RunEvent]) -> Option<&RunEvent> {
     events
         .iter()
         .rev()
-        .take_while(|e| !matches!(e.kind.as_str(), "triage_started" | "resume_started"))
+        .take_while(|e| {
+            !matches!(
+                e.kind.known(),
+                Some(EventKind::TriageStarted | EventKind::ResumeStarted)
+            )
+        })
         .find(|e| ended_request(e))
 }
 
@@ -181,9 +190,9 @@ pub fn current_alert(events: &[RunEvent]) -> Option<RecoveryAlert> {
     events
         .iter()
         .rev()
-        .take_while(|e| e.kind != "resume_started")
+        .take_while(|e| e.kind != EventKind::ResumeStarted)
         .find(|e| ended_request(e))
-        .and_then(|e| e.payload["alert"].as_str())
+        .and_then(|e| restore_payload::<RecoveryRecord>(&e.payload).alert)
         .and_then(|alert| alert.parse().ok())
 }
 
@@ -199,17 +208,22 @@ pub fn current_alert(events: &[RunEvent]) -> Option<RecoveryAlert> {
 /// session moved on).
 fn clears(event: &RunEvent, alert: &str) -> bool {
     matches!(
-        event.kind.as_str(),
-        "session_exited"
-            | "workspace_closed"
-            | "supervision_finished"
-            | "run_recovered"
-            | "runtime_error"
-    ) || (alert == RecoveryAlert::PromptWaiting.as_str() && event.kind == "prompt_cleared")
-        || (alert == RecoveryAlert::LongBackground.as_str() && event.kind == "receipt_observed")
+        event.kind.known(),
+        Some(
+            EventKind::SessionExited
+                | EventKind::WorkspaceClosed
+                | EventKind::SupervisionFinished
+                | EventKind::RunRecovered
+                | EventKind::RuntimeError
+        )
+    ) || (alert == RecoveryAlert::PromptWaiting.as_str() && event.kind == EventKind::PromptCleared)
+        || (alert == RecoveryAlert::LongBackground.as_str()
+            && event.kind == EventKind::ReceiptObserved)
         || (alert == RecoveryAlert::Stalled.as_str()
-            && (event.kind == "receipt_observed"
-                || (event.kind == "stall_resolved" && event.payload["detection"] == "recovery")))
+            && (event.kind == EventKind::ReceiptObserved
+                || (event.kind == EventKind::StallResolved
+                    && restore_payload::<StallResolved>(&event.payload).detection
+                        == Some("recovery"))))
 }
 
 /// The latest `recovery_failed` of a live session (of `alert`, or any)
@@ -220,7 +234,7 @@ fn clears(event: &RunEvent, alert: &str) -> bool {
 /// now); it is still read for a run adopted from one.
 pub fn failed_live(events: &[RunEvent], alert: Option<RecoveryAlert>) -> Option<&RunEvent> {
     let (index, failed) = events.iter().enumerate().rev().find(|(_, e)| {
-        e.kind == "recovery_failed"
+        e.kind == EventKind::RecoveryFailed
             && alert.is_none_or(|alert| e.payload["alert"] == alert.as_str())
     })?;
     let failed_alert = failed.payload["alert"].as_str().unwrap_or_default();
@@ -698,13 +712,16 @@ pub fn live_pass_back(events: &[RunEvent], alert: RecoveryAlert, threshold: &str
     events
         .iter()
         .rev()
-        .take_while(|e| !(e.kind == "recovery_requested" && e.payload["alert"] == alert.as_str()))
+        .take_while(|e| {
+            !(e.kind == EventKind::RecoveryRequested
+                && restore_payload::<RecoveryRecord>(&e.payload).alert == Some(alert.as_str()))
+        })
         .find(|e| {
-            e.kind == "stall_resolved"
-                && e.payload["outcome"] == ANSWERED_RECOVER
+            e.kind == EventKind::StallResolved
+                && restore_payload::<StallResolved>(&e.payload).outcome == Some(ANSWERED_RECOVER)
                 && e.payload["threshold"] == threshold
         })
-        .and_then(|e| e.payload["ask_id"].as_i64())
+        .and_then(|e| restore_payload::<StallResolved>(&e.payload).ask_id)
         .map(AskId::new)
 }
 

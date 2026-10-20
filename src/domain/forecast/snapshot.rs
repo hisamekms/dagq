@@ -4,15 +4,11 @@
 //! recorded. Pure: the application reads the trigger events and the latest
 //! snapshot, and writes the event.
 
+use crate::domain::EventKind;
 use serde::{Deserialize, Serialize};
 
 use super::Forecast;
-use crate::domain::{
-    RunEvent, RunId, TaskId, event_kind,
-    marks::{
-        MARK_RECORDED, MARK_RETRACTED, RUN_ENV_CHANGED, SUPERVISOR_STARTED, SUPERVISOR_STOPPED,
-    },
-};
+use crate::domain::{RunEvent, RunId, TaskId};
 
 /// The event of one snapshot. A KPI bookkeeping event (ADR-0051 decision
 /// 24): it never wakes the observer.
@@ -25,38 +21,38 @@ pub const MOVE_MIN_SECS: i64 = 1800;
 
 /// The changes of the plan on one task: a trigger only while that task is
 /// forecast (`ready` or `in_progress`), so registering a draft is none.
-const TASK_MARK_KINDS: [&str; 5] = [
-    event_kind::TASK_PRIORITY_CHANGED,
-    event_kind::DEPENDENCY_ADDED,
-    event_kind::DEPENDENCY_REMOVED,
-    event_kind::GOAL_DEPENDENCY_ADDED,
-    event_kind::GOAL_DEPENDENCY_REMOVED,
+const TASK_MARK_KINDS: [EventKind; 5] = [
+    EventKind::TaskPriorityChanged,
+    EventKind::DependencyAdded,
+    EventKind::DependencyRemoved,
+    EventKind::GoalDependencyAdded,
+    EventKind::GoalDependencyRemoved,
 ];
 /// The recorded change marks (ADR-0051 decisions 10-12); a start or a
 /// handoff also carries a change of `parallel`, which is a derived mark.
-const QUEUE_MARK_KINDS: [&str; 5] = [
-    SUPERVISOR_STARTED,
-    SUPERVISOR_STOPPED,
-    RUN_ENV_CHANGED,
-    MARK_RECORDED,
-    MARK_RETRACTED,
+const QUEUE_MARK_KINDS: [EventKind; 5] = [
+    EventKind::SupervisorStarted,
+    EventKind::SupervisorStopped,
+    EventKind::RunEnvChanged,
+    EventKind::MarkRecorded,
+    EventKind::MarkRetracted,
 ];
 
 /// The kinds of the events [`trigger`] may take for one.
-pub const TRIGGER_KINDS: [&str; 13] = [
-    event_kind::PLAN_REVIEW_FINISHED,
-    event_kind::PLAN_DECIDED,
-    event_kind::RUN_INTEGRATED,
-    SUPERVISOR_STARTED,
-    SUPERVISOR_STOPPED,
-    RUN_ENV_CHANGED,
-    MARK_RECORDED,
-    MARK_RETRACTED,
-    event_kind::TASK_PRIORITY_CHANGED,
-    event_kind::DEPENDENCY_ADDED,
-    event_kind::DEPENDENCY_REMOVED,
-    event_kind::GOAL_DEPENDENCY_ADDED,
-    event_kind::GOAL_DEPENDENCY_REMOVED,
+pub const TRIGGER_KINDS: [EventKind; 13] = [
+    EventKind::PlanReviewFinished,
+    EventKind::PlanDecided,
+    EventKind::RunIntegrated,
+    EventKind::SupervisorStarted,
+    EventKind::SupervisorStopped,
+    EventKind::RunEnvChanged,
+    EventKind::MarkRecorded,
+    EventKind::MarkRetracted,
+    EventKind::TaskPriorityChanged,
+    EventKind::DependencyAdded,
+    EventKind::DependencyRemoved,
+    EventKind::GoalDependencyAdded,
+    EventKind::GoalDependencyRemoved,
 ];
 
 /// Why a snapshot was taken.
@@ -91,9 +87,9 @@ pub enum Trigger {
 pub fn trigger(event: &RunEvent) -> Option<Trigger> {
     let event_id = event.id.as_i64();
     let proposal_id = || event.payload.get("proposal_id").and_then(|p| p.as_i64());
-    let kind = event.kind.as_str();
-    match kind {
-        event_kind::PLAN_REVIEW_FINISHED
+    let kind = &event.kind;
+    match kind.known() {
+        Some(EventKind::PlanReviewFinished)
             if event.payload.get("decision").and_then(|d| d.as_str()) == Some("pass") =>
         {
             Some(Trigger::PlanReview {
@@ -101,7 +97,7 @@ pub fn trigger(event: &RunEvent) -> Option<Trigger> {
                 proposal_id: proposal_id(),
             })
         }
-        event_kind::PLAN_DECIDED
+        Some(EventKind::PlanDecided)
             if event.payload.get("status").and_then(|s| s.as_str()) == Some("accepted") =>
         {
             Some(Trigger::PlanReview {
@@ -109,19 +105,19 @@ pub fn trigger(event: &RunEvent) -> Option<Trigger> {
                 proposal_id: proposal_id(),
             })
         }
-        event_kind::RUN_INTEGRATED => Some(Trigger::Landing {
+        Some(EventKind::RunIntegrated) => Some(Trigger::Landing {
             event_id,
             task_id: event.task_id,
             run_id: event.run_id.clone(),
         }),
-        _ if QUEUE_MARK_KINDS.contains(&kind) => Some(Trigger::Mark {
+        _ if kind.is_in(&QUEUE_MARK_KINDS) => Some(Trigger::Mark {
             event_id,
-            kind: kind.to_owned(),
+            kind: kind.to_string(),
             task_id: None,
         }),
-        _ if TASK_MARK_KINDS.contains(&kind) && event.task_id.is_some() => Some(Trigger::Mark {
+        _ if kind.is_in(&TASK_MARK_KINDS) && event.task_id.is_some() => Some(Trigger::Mark {
             event_id,
-            kind: kind.to_owned(),
+            kind: kind.to_string(),
             task_id: event.task_id,
         }),
         _ => None,
@@ -273,6 +269,8 @@ pub struct Snapshot<'a> {
 
 #[cfg(test)]
 mod tests {
+    use crate::domain::event_kind;
+    use crate::domain::marks::SUPERVISOR_STARTED;
     use serde_json::{Value, json};
 
     use super::*;

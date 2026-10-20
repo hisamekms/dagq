@@ -5,6 +5,7 @@
 //! answer, a landing or a resume (task 1289), and the temporary files
 //! directories of the runs whose task is over (task 1290).
 use crate::{common, runtime_support};
+use dagq::domain::EventKind;
 use dagq::infrastructure::git_binary::git_executable;
 
 use dagq::domain::disk::DiskConfig;
@@ -38,7 +39,7 @@ fn payloads_of(queue: &SqliteQueue, run: &TaskRun, kind: &str) -> Vec<Value> {
         .run_events(run.id())
         .unwrap()
         .into_iter()
-        .filter(|e| e.kind == kind)
+        .filter(|e| e.kind.as_str() == kind)
         .map(|e| e.payload)
         .collect()
 }
@@ -1553,7 +1554,7 @@ fn draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing() {
             .all_events()
             .unwrap()
             .into_iter()
-            .filter(|event| event.kind == "auto_repaired")
+            .filter(|event| event.kind == EventKind::AutoRepaired)
             .map(|event| event.payload)
             .collect();
         assert_eq!(repaired.len(), 2, "{repaired:?}");
@@ -1993,7 +1994,7 @@ fn the_rest_of_a_cleanup_for_room_holds_and_asks_nothing_until_it_is_done() {
             .all_events()
             .unwrap()
             .into_iter()
-            .filter(|event| event.kind == kind)
+            .filter(|event| event.kind.as_str() == kind)
             .map(|event| event.payload)
             .filter(|payload| kind != "auto_repaired" || payload["repair"] == "disk_cleanup")
             .collect()
@@ -2168,7 +2169,7 @@ fn a_drain_on_a_provisioning_failure_takes_cleanup_requests_and_lets_the_job_fin
             .run_events(run.id())
             .unwrap()
             .into_iter()
-            .filter(|e| e.kind == "build_outputs_removed")
+            .filter(|e| e.kind == EventKind::BuildOutputsRemoved)
             .map(|e| e.id)
             .max()
             .unwrap()
@@ -2203,7 +2204,7 @@ fn a_drain_on_a_provisioning_failure_takes_cleanup_requests_and_lets_the_job_fin
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == "cleanup_failed")
+        .filter(|event| event.kind == EventKind::CleanupFailed)
         .map(|event| event.payload)
         .collect();
     assert!(failed.is_empty(), "{failed:?}");
@@ -2275,7 +2276,7 @@ fn the_pass_after_a_long_cleanup_for_room_asks_and_holds() {
             .all_events()
             .unwrap()
             .into_iter()
-            .filter(|event| event.kind == kind)
+            .filter(|event| event.kind.as_str() == kind)
             .map(|event| event.payload)
             .filter(|payload| kind != "auto_repaired" || payload["repair"] == "disk_cleanup")
             .collect()
@@ -2440,7 +2441,7 @@ fn a_waiting_runs_build_outputs_go_for_room_and_its_answer_waits_for_the_cleanup
                     .run_events(run.id())
                     .unwrap()
                     .into_iter()
-                    .map(|e| e.kind)
+                    .map(|e| e.kind.to_string())
                     .collect();
                 kinds.iter().any(|k| k == "run_waiting_started")
                     && kinds
@@ -2498,7 +2499,7 @@ fn a_waiting_runs_build_outputs_go_for_room_and_its_answer_waits_for_the_cleanup
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|e| e.kind == "auto_repaired" && e.payload["repair"] == "disk_cleanup")
+        .filter(|e| e.kind == EventKind::AutoRepaired && e.payload["repair"] == "disk_cleanup")
         .map(|e| e.payload)
         .collect();
     assert_eq!(repaired.len(), 1, "{repaired:?}");

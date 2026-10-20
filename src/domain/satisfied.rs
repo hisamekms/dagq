@@ -5,11 +5,12 @@
 //! on a newer head. Everything is read from the run's events, so a
 //! supervisor started later compares the same snapshot.
 
+use crate::domain::EventKind;
+use crate::domain::run::{AskOpened, restore_payload};
 use serde_json::{Value, json};
 
 use super::{
     AskId, AskKind, CommitSha, EventId, ReasonCode, RunEvent, RunStatus, cancel_reason::NewCancel,
-    event_kind,
 };
 
 /// The answer that closes the task as `completed` without a commit.
@@ -127,7 +128,7 @@ pub fn latest_verified(events: &[RunEvent]) -> Option<Verified> {
     events
         .iter()
         .rev()
-        .filter(|e| e.kind == event_kind::RUN_SATISFIED_VERIFIED)
+        .filter(|e| e.kind == EventKind::RunSatisfiedVerified)
         .find_map(|e| {
             Some(Verified {
                 head: CommitSha::parse(e.payload["head"].as_str()?, "snapshot head").ok()?,
@@ -145,12 +146,12 @@ pub fn latest_verified(events: &[RunEvent]) -> Option<Verified> {
 /// the start of a judgment end it. The KPI's slot occupancy leaves the
 /// rests out by these steps, as the supervisor's count does.
 pub fn rests_after(event: &RunEvent) -> Option<bool> {
-    match event.kind.as_str() {
-        event_kind::RUN_SATISFIED_VERIFIED | event_kind::RUN_SATISFIED_JUDGED => Some(true),
-        event_kind::RUN_SATISFIED_SNAPSHOT | event_kind::RUN_SATISFIED_REVIEW_STARTED => {
-            Some(false)
+    match event.kind.known() {
+        Some(EventKind::RunSatisfiedVerified | EventKind::RunSatisfiedJudged) => Some(true),
+        Some(EventKind::RunSatisfiedSnapshot | EventKind::RunSatisfiedReviewStarted) => Some(false),
+        Some(EventKind::ValidationFinished) if event.payload["already_satisfied"] == true => {
+            Some(true)
         }
-        event_kind::VALIDATION_FINISHED if event.payload["already_satisfied"] == true => Some(true),
         _ => None,
     }
 }
@@ -161,7 +162,7 @@ pub fn rests_after(event: &RunEvent) -> Option<bool> {
 pub fn judgments(events: &[RunEvent]) -> usize {
     events
         .iter()
-        .filter(|e| e.kind == event_kind::RUN_SATISFIED_REVIEW_STARTED)
+        .filter(|e| e.kind == EventKind::RunSatisfiedReviewStarted)
         .count()
 }
 
@@ -186,14 +187,17 @@ pub fn rests(events: &[RunEvent]) -> bool {
 /// answered nor closed since. An answered close that waits for a slot or a
 /// container waits for no person.
 pub fn answer_awaited(events: &[RunEvent]) -> bool {
-    let mut open: Vec<&Value> = Vec::new();
+    let mut open: Vec<i64> = Vec::new();
     for event in events {
-        match event.kind.as_str() {
-            event_kind::ASK_OPENED if event.payload["kind"] == "approve_close" => {
-                open.push(&event.payload["ask_id"]);
+        match event.kind.known() {
+            Some(EventKind::AskOpened) => {
+                let opened = restore_payload::<AskOpened>(&event.payload);
+                if opened.kind == Some("approve_close") {
+                    open.extend(opened.ask_id);
+                }
             }
-            event_kind::ASK_ANSWERED | event_kind::ASK_CLOSED => {
-                open.retain(|id| **id != event.payload["ask_id"]);
+            Some(EventKind::AskAnswered | EventKind::AskClosed) => {
+                open.retain(|id| Some(*id) != event.payload["ask_id"].as_i64());
             }
             _ => {}
         }
@@ -206,7 +210,7 @@ pub fn answer_awaited(events: &[RunEvent]) -> bool {
 /// verification's runtime usable), unless an `approve_close` ask of the run
 /// is still open.
 pub fn awaits_verification(events: &[RunEvent]) -> bool {
-    last_step(events).is_some_and(|e| e.kind == event_kind::VALIDATION_FINISHED)
+    last_step(events).is_some_and(|e| e.kind == EventKind::ValidationFinished)
 }
 
 /// Whether a run in `status`, `leased` or not, with these `events` is
@@ -353,6 +357,7 @@ pub fn question(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::event_kind;
 
     const S1: &str = "0000000000000000000000000000000000000001";
     const S2: &str = "0000000000000000000000000000000000000002";

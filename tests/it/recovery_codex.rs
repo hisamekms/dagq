@@ -83,7 +83,7 @@ fn run_payloads(detail: &dagq::domain::TaskDetail, run: &TaskRun, kind: &str) ->
     detail
         .events
         .iter()
-        .filter(|e| e.kind == kind && e.run_id.as_ref() == Some(run.id()))
+        .filter(|e| e.kind.as_str() == kind && e.run_id.as_ref() == Some(run.id()))
         .map(|e| e.payload.clone())
         .collect()
 }

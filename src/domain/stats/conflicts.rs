@@ -19,6 +19,7 @@
 //! started with and reads again each pass (ADR-0080, ADR-t774-1,
 //! ADR-t775-1): for the claims it defers on the alerted files (ADR-0069),
 //! and for the alert in the plan review's prompt.
+use crate::domain::EventKind;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde::Serialize;
@@ -240,8 +241,8 @@ struct Tally {
 /// The conflicted files of `event`, when it is a conflict event.
 fn conflicted(event: &RunEvent) -> Option<Vec<&str>> {
     if !matches!(
-        event.kind.as_str(),
-        "integration_deferred" | "conflict_precheck"
+        event.kind.known(),
+        Some(EventKind::IntegrationDeferred | EventKind::ConflictPrecheck)
     ) {
         return None;
     }
@@ -454,7 +455,7 @@ mod tests {
             task_id: Some(TaskId::new(task)),
             goal_id: None,
             run_id: Some(RunId::new(run).unwrap()),
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: at(secs),
             actor: None,

@@ -6,11 +6,12 @@
 //! [`SUPERVISOR_ALIVE_INTERVAL_SECS`]). The registrations and their
 //! heartbeats are state, which the measurement does not read.
 
+use crate::domain::EventKind;
 use std::collections::HashMap;
 
 use serde_json::Value;
 
-use super::{EventId, HEARTBEAT_TIMEOUT_SECS, RunEvent, event_kind, stats::timestamp_millis};
+use super::{EventId, HEARTBEAT_TIMEOUT_SECS, RunEvent, stats::timestamp_millis};
 
 /// How often a supervisor records `supervisor_alive` at most: its
 /// heartbeat writes the registration every two seconds, and one event
@@ -139,7 +140,7 @@ impl Life {
         let Some(at) = timestamp_millis(&event.created_at) else {
             return;
         };
-        if event.kind == event_kind::SUPERVISOR_STOPPED {
+        if event.kind == EventKind::SupervisorStopped {
             let heartbeat = event
                 .payload
                 .get("last_heartbeat_at")
@@ -169,14 +170,14 @@ impl Life {
 }
 
 /// The kinds of event of a supervisor's own life and settings.
-pub const KINDS: [&str; 7] = [
-    event_kind::EventKind::SupervisorStarted.as_str(),
-    event_kind::EventKind::SupervisorAlive.as_str(),
-    event_kind::EventKind::SupervisorStopped.as_str(),
-    event_kind::EventKind::SupervisorDraining.as_str(),
-    event_kind::EventKind::SupervisorHandedOff.as_str(),
-    event_kind::EventKind::SupervisorHeartbeatRetried.as_str(),
-    event_kind::EventKind::SupervisorConfigChanged.as_str(),
+pub const KINDS: [EventKind; 7] = [
+    EventKind::SupervisorStarted,
+    EventKind::SupervisorAlive,
+    EventKind::SupervisorStopped,
+    EventKind::SupervisorDraining,
+    EventKind::SupervisorHandedOff,
+    EventKind::SupervisorHeartbeatRetried,
+    EventKind::SupervisorConfigChanged,
 ];
 
 /// The supervisor an event names as its writer (its `supervisor`), if it
@@ -197,7 +198,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: crate::domain::marks::utc_text(minute * 60_000),
             actor: None,
@@ -223,7 +224,7 @@ mod tests {
             let Some(at) = timestamp_millis(&event.created_at) else {
                 continue;
             };
-            if event.kind == event_kind::SUPERVISOR_STOPPED {
+            if event.kind == EventKind::SupervisorStopped {
                 let heartbeat = event
                     .payload
                     .get("last_heartbeat_at")

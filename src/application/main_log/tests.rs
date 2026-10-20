@@ -148,7 +148,7 @@ impl Queue {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: utc_text(at * 1000),
             actor: None,
@@ -191,7 +191,7 @@ impl Queue {
     fn count(&self, kind: &str) -> usize {
         self.events
             .iter()
-            .filter(|event| event.kind == kind)
+            .filter(|event| event.kind.as_str() == kind)
             .count()
     }
 }
@@ -363,7 +363,8 @@ fn the_first_record_takes_the_readers_range_once() {
     // A first record whose reach was never written is taken again.
     let mut cut = Queue::since(T);
     cut.pass(&main, T + 10);
-    cut.events.retain(|event| event.kind != MAIN_OBSERVED);
+    cut.events
+        .retain(|event| event.kind != EventKind::MainObserved);
     cut.pass(&main, T + 11);
     assert_eq!(cut.count(COMMITS), 2);
     assert_eq!(cut.log().history, queue.log().history);

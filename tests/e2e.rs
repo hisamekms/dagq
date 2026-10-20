@@ -11,6 +11,7 @@
 //! The launchd `up` / `down` test runs its body under `--ignored` with no
 //! other setting. It loads a LaunchAgent of its own under a disposable HOME
 //! and label, and fails, not skips, on a host where launchd cannot be used.
+use dagq::domain::EventKind;
 #[path = "e2e/cleanup.rs"]
 mod cleanup;
 mod common;
@@ -1990,7 +1991,7 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
     let installed = |sha: &str| {
         updates()
             .iter()
-            .any(|u| u.kind == "update_installed" && u.payload["commit"] == sha)
+            .any(|u| u.kind == EventKind::UpdateInstalled && u.payload["commit"] == sha)
     };
     let started = Instant::now();
     let run = loop {

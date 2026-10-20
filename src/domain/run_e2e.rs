@@ -11,12 +11,12 @@
 //! e2e to run); a `run_e2e_failed` parks the run, and the commit its
 //! resumed session makes needs its own.
 
+use crate::domain::EventKind;
 use serde_json::{Value, json};
 
 use super::{
     RunEvent,
     e2e_quarantine::{Mark, QuarantineFile},
-    event_kind::{RUN_E2E_FAILED, RUN_E2E_FINISHED, RUN_E2E_STARTED, VALIDATION_FINISHED},
 };
 
 /// `run_e2e_finished`'s `outcome` of an e2e that passed (flaky tests and
@@ -44,7 +44,7 @@ pub fn required(events: &[RunEvent]) -> bool {
     events
         .iter()
         .rev()
-        .find(|e| e.kind == VALIDATION_FINISHED)
+        .find(|e| e.kind == EventKind::ValidationFinished)
         .is_some_and(|e| e.payload["e2e_requirement"]["required"] == true)
 }
 
@@ -64,12 +64,12 @@ pub fn due(events: &[RunEvent], commit: &str) -> Option<Due> {
     let validation = events
         .iter()
         .rev()
-        .find(|e| e.kind == VALIDATION_FINISHED)?;
+        .find(|e| e.kind == EventKind::ValidationFinished)?;
     if validation.payload["e2e_requirement"]["required"] != true {
         return None;
     }
     let done = events.iter().any(|e| {
-        e.kind == RUN_E2E_FINISHED
+        e.kind == EventKind::RunE2eFinished
             && e.payload["commit"] == commit
             && matches!(e.payload["outcome"].as_str(), Some(PASSED | NOT_CONFIGURED))
     });
@@ -77,7 +77,11 @@ pub fn due(events: &[RunEvent], commit: &str) -> Option<Due> {
         return None;
     }
     Some(Due {
-        attempt: events.iter().filter(|e| e.kind == RUN_E2E_STARTED).count() + 1,
+        attempt: events
+            .iter()
+            .filter(|e| e.kind == EventKind::RunE2eStarted)
+            .count()
+            + 1,
         requirement: validation.payload["e2e_requirement"].clone(),
     })
 }
@@ -87,8 +91,8 @@ pub fn unavailable_in_a_row(events: &[RunEvent]) -> usize {
     events
         .iter()
         .rev()
-        .filter(|e| e.kind == RUN_E2E_FINISHED || e.kind == RUN_E2E_FAILED)
-        .take_while(|e| e.kind == RUN_E2E_FINISHED && e.payload["outcome"] == UNAVAILABLE)
+        .filter(|e| e.kind == EventKind::RunE2eFinished || e.kind == EventKind::RunE2eFailed)
+        .take_while(|e| e.kind == EventKind::RunE2eFinished && e.payload["outcome"] == UNAVAILABLE)
         .count()
 }
 
@@ -98,8 +102,8 @@ pub fn standing_attention(events: &[RunEvent]) -> Option<&RunEvent> {
     events
         .iter()
         .rev()
-        .find(|e| e.kind == RUN_E2E_FINISHED || e.kind == RUN_E2E_FAILED)
-        .filter(|e| e.kind == RUN_E2E_FINISHED && e.payload["attention"] == true)
+        .find(|e| e.kind == EventKind::RunE2eFinished || e.kind == EventKind::RunE2eFailed)
+        .filter(|e| e.kind == EventKind::RunE2eFinished && e.payload["attention"] == true)
 }
 
 /// The file under `tests/` that holds the e2e test `name`: a test of a
@@ -150,6 +154,10 @@ pub fn marks_for_run(
 mod tests {
     use super::*;
     use crate::domain::EventId;
+    use crate::domain::event_kind::RUN_E2E_FAILED;
+    use crate::domain::event_kind::RUN_E2E_FINISHED;
+    use crate::domain::event_kind::RUN_E2E_STARTED;
+    use crate::domain::event_kind::VALIDATION_FINISHED;
 
     fn event(kind: &str, payload: Value) -> RunEvent {
         RunEvent {
@@ -157,7 +165,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: String::new(),
             actor: None,

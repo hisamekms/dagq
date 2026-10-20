@@ -364,7 +364,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: OBSERVE_FINISHED.to_owned(),
+            kind: OBSERVE_FINISHED.into(),
             payload,
             created_at: "2026-10-05T00:00:00Z".to_owned(),
             actor: None,

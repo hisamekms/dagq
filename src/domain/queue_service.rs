@@ -13,6 +13,7 @@
 //!
 //! [Queue service]: ../../docs/design/queue-service.md
 
+use crate::domain::{EventKind, RecordedKind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -539,8 +540,8 @@ pub const QUEUE_SERVICE_ATTENTION_KINDS: [&str; 4] = [
 
 /// Whether the attention stands: the latest of
 /// [`QUEUE_SERVICE_ATTENTION_KINDS`] is [`QUEUE_SERVICE_DOWN`].
-pub fn attention_stands(latest: Option<&str>) -> bool {
-    latest == Some(QUEUE_SERVICE_DOWN)
+pub fn attention_stands(latest: Option<&RecordedKind>) -> bool {
+    latest.is_some_and(|kind| *kind == EventKind::QueueServiceDown)
 }
 
 #[cfg(test)]
@@ -824,8 +825,10 @@ mod tests {
         assert!(!worker_token_ended(&job, None));
         let telemetry = Principal::telemetry(&StepTarget::run(&run), Some(TaskId::new(4)));
         assert!(!worker_token_ended(&telemetry, Some(RunStatus::Failed)));
-        assert!(attention_stands(Some(QUEUE_SERVICE_DOWN)));
-        assert!(!attention_stands(Some(QUEUE_SERVICE_RUNNING)));
+        assert!(attention_stands(Some(&EventKind::QueueServiceDown.into())));
+        assert!(!attention_stands(Some(
+            &EventKind::QueueServiceRunning.into()
+        )));
         assert!(!attention_stands(None));
     }
 

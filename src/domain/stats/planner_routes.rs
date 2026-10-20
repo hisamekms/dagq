@@ -7,6 +7,8 @@
 //! failures, and the tokens of their sessions, each counted under the
 //! route of the planner it is about (`interactive` / `headless`, `unknown`
 //! when nothing recorded which).
+use crate::domain::EventKind;
+use crate::domain::run::{AskOpened, restore_payload};
 use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
@@ -16,15 +18,7 @@ use super::{
     EventId, RunEvent, TaskId, asks::UNKNOWN, executions::ExecutionTotals, sessions::INTERACTIVE,
     sessions::TimeSummary, timestamp_millis,
 };
-use crate::domain::{
-    event_kind::{
-        ASK_OPENED, DRAFT_PLANNER_OPENED, DRAFT_PLANNER_SETTLED, FINDING_PLANNER_OPENED,
-        FINDING_STATUS_CHANGED, PLAN_REVIEW_STARTED, PLAN_REVISE_SENT, REQUEST_DECLINED,
-        REQUEST_PLANNER_OPENED, REQUEST_PROPOSED, SESSION_OPENED, TURN_FINISHED, TURN_REQUESTED,
-        TURN_SESSION_IDENTIFIED, TURN_STARTED,
-    },
-    sessions::{HEADLESS_ROUTE, RUNTIME_PLANNER},
-};
+use crate::domain::sessions::{HEADLESS_ROUTE, RUNTIME_PLANNER};
 
 /// The ask kind a planner asks a person with.
 const PLANNER_QUESTION: &str = "planner_question";
@@ -113,8 +107,8 @@ pub fn planner_routes(
                     .or_default() += 1;
             }
         };
-        match event.kind.as_str() {
-            PLAN_REVISE_SENT => {
+        match event.kind.known() {
+            Some(EventKind::PlanReviseSent) => {
                 if let Some(proposal) = payload["proposal_id"].as_i64() {
                     revises.insert(proposal, (at, planner));
                 }
@@ -122,7 +116,7 @@ pub fn planner_routes(
                     opened("revise", planner);
                 }
             }
-            PLAN_REVIEW_STARTED => {
+            Some(EventKind::PlanReviewStarted) => {
                 let sent = payload["proposal_id"]
                     .as_i64()
                     .and_then(|proposal| revises.remove(&proposal));
@@ -130,7 +124,7 @@ pub fn planner_routes(
                     took("revise_to_review", planner, from);
                 }
             }
-            DRAFT_PLANNER_OPENED => {
+            Some(EventKind::DraftPlannerOpened) => {
                 if let Some(planner) = planner {
                     drafts.insert((planner, event.task_id), at);
                     // One planner opens for a bundle of drafts, one event
@@ -141,19 +135,19 @@ pub fn planner_routes(
                     }
                 }
             }
-            DRAFT_PLANNER_SETTLED => {
+            Some(EventKind::DraftPlannerSettled) => {
                 let from = planner.and_then(|planner| drafts.remove(&(planner, event.task_id)));
                 if let Some(from) = from {
                     took("draft_settle", planner, from);
                 }
             }
-            FINDING_PLANNER_OPENED => {
+            Some(EventKind::FindingPlannerOpened) => {
                 if let Some(finding) = payload["finding_id"].as_i64() {
                     findings.insert(finding, (at, planner));
                 }
                 opened("finding", planner);
             }
-            FINDING_STATUS_CHANGED => {
+            Some(EventKind::FindingStatusChanged) => {
                 let from = payload["finding_id"]
                     .as_i64()
                     .and_then(|finding| findings.remove(&finding));
@@ -161,13 +155,13 @@ pub fn planner_routes(
                     took("finding_settle", planner, from);
                 }
             }
-            REQUEST_PLANNER_OPENED => {
+            Some(EventKind::RequestPlannerOpened) => {
                 if let Some(request) = payload["request_id"].as_i64() {
                     requests.insert(request, (at, planner));
                 }
                 opened("request", planner);
             }
-            REQUEST_PROPOSED | REQUEST_DECLINED => {
+            Some(EventKind::RequestProposed | EventKind::RequestDeclined) => {
                 let from = payload["request_id"]
                     .as_i64()
                     .and_then(|request| requests.remove(&request));
@@ -175,18 +169,23 @@ pub fn planner_routes(
                     took("request_settle", planner, from);
                 }
             }
-            ASK_OPENED if inside && payload["kind"] == PLANNER_QUESTION => {
+            Some(EventKind::AskOpened)
+                if inside
+                    && restore_payload::<AskOpened>(payload).kind == Some(PLANNER_QUESTION) =>
+            {
                 let asker = event
                     .actor
                     .as_ref()
                     .map(|actor| actor.id.as_str())
-                    .or_else(|| payload["asked_by"].as_str());
+                    .or_else(|| restore_payload::<AskOpened>(payload).asked_by);
                 routes
                     .entry(route(asker.and_then(planner_of_actor)))
                     .or_default()
                     .planner_questions += 1;
             }
-            TURN_FINISHED if inside && event.run_id.is_none() && planner.is_some() => {
+            Some(EventKind::TurnFinished)
+                if inside && event.run_id.is_none() && planner.is_some() =>
+            {
                 let health = routes.entry(route(planner)).or_default();
                 health.turns += 1;
                 *health
@@ -228,13 +227,14 @@ fn planner_route_map(events: &[RunEvent]) -> HashMap<i64, String> {
         let Some(planner) = payload["planner_id"].as_i64() else {
             continue;
         };
-        let route = match event.kind.as_str() {
-            TURN_REQUESTED | TURN_STARTED | TURN_FINISHED | TURN_SESSION_IDENTIFIED
-                if event.run_id.is_none() =>
-            {
-                HEADLESS_ROUTE
-            }
-            SESSION_OPENED if payload["kind"] == RUNTIME_PLANNER => {
+        let route = match event.kind.known() {
+            Some(
+                EventKind::TurnRequested
+                | EventKind::TurnStarted
+                | EventKind::TurnFinished
+                | EventKind::TurnSessionIdentified,
+            ) if event.run_id.is_none() => HEADLESS_ROUTE,
+            Some(EventKind::SessionOpened) if payload["kind"] == RUNTIME_PLANNER => {
                 payload["route"].as_str().unwrap_or(INTERACTIVE)
             }
             _ => continue,
@@ -263,6 +263,18 @@ fn text(payload: &Value, key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::event_kind::ASK_OPENED;
+    use crate::domain::event_kind::DRAFT_PLANNER_OPENED;
+    use crate::domain::event_kind::DRAFT_PLANNER_SETTLED;
+    use crate::domain::event_kind::FINDING_PLANNER_OPENED;
+    use crate::domain::event_kind::FINDING_STATUS_CHANGED;
+    use crate::domain::event_kind::PLAN_REVIEW_STARTED;
+    use crate::domain::event_kind::PLAN_REVISE_SENT;
+    use crate::domain::event_kind::REQUEST_DECLINED;
+    use crate::domain::event_kind::REQUEST_PLANNER_OPENED;
+    use crate::domain::event_kind::SESSION_OPENED;
+    use crate::domain::event_kind::TURN_FINISHED;
+    use crate::domain::event_kind::TURN_STARTED;
     use crate::domain::{EventActor, RunId, stats::sessions::KindSessions};
     use serde_json::json;
 
@@ -272,7 +284,7 @@ mod tests {
             task_id: task.map(TaskId::new),
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: format!("2026-10-03T00:{:02}:{:02}Z", secs / 60, secs % 60),
             actor: None,

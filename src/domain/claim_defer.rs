@@ -23,7 +23,6 @@ use serde_json::{Value, json};
 use super::{
     Ask, AskKind, EventId, LeaseToken, RunEvent, RunStatus, TaskId,
     claim_hold::{HoldSpan, SpanEnd},
-    event_kind::{LEASE_ACQUIRED, LEASE_RELEASED},
     scope::glob_matches,
     stats::timestamp_millis,
     waiting::WaitState,
@@ -43,7 +42,11 @@ pub const CLAIM_DEFERRAL_ENDED: &str =
     crate::domain::event_kind::EventKind::ClaimDeferralEnded.as_str();
 /// The kinds that say where a task's deferral stands; a claim of the task
 /// ends whatever came before it.
-pub const DEFERRAL_KINDS: [&str; 3] = [CLAIM_DEFERRED, CLAIM_DEFERRAL_ENDED, "run_claimed"];
+pub const DEFERRAL_KINDS: [EventKind; 3] = [
+    EventKind::ClaimDeferred,
+    EventKind::ClaimDeferralEnded,
+    EventKind::RunClaimed,
+];
 
 /// The files meet on a hotspot. A task is also deferred while the
 /// supervisor cannot run its worker ([`super::worker::PROVIDER_UNAVAILABLE`],
@@ -136,7 +139,9 @@ pub fn owner_waiting_since(asks: &[Ask], leased: bool, events: &[RunEvent]) -> O
         _ => events
             .iter()
             .rev()
-            .find(|event| event.kind == LEASE_ACQUIRED || event.kind == LEASE_RELEASED)
+            .find(|event| {
+                event.kind == EventKind::LeaseAcquired || event.kind == EventKind::LeaseReleased
+            })
             .and_then(seconds),
     };
     Some(since.map_or(asked, |since| since.max(asked)))
@@ -308,21 +313,23 @@ pub fn deferrals_in_place(latest: &[RunEvent]) -> HashMap<TaskId, Deferral> {
                 return None;
             }
             let since = || timestamp_millis(&event.created_at).map(|ms| ms / 1000);
-            match event.kind.as_str() {
-                CLAIM_DEFERRED => Some((
+            match event.kind.known() {
+                Some(EventKind::ClaimDeferred) => Some((
                     task,
                     Deferral {
                         since: since()?,
                         expired: false,
                     },
                 )),
-                CLAIM_DEFERRAL_ENDED if text(event, "why") == Some("expired") => Some((
-                    task,
-                    Deferral {
-                        since: since()?,
-                        expired: true,
-                    },
-                )),
+                Some(EventKind::ClaimDeferralEnded) if text(event, "why") == Some("expired") => {
+                    Some((
+                        task,
+                        Deferral {
+                            since: since()?,
+                            expired: true,
+                        },
+                    ))
+                }
                 _ => None,
             }
         })
@@ -436,7 +443,7 @@ pub fn left(deferral: Deferral, now: i64, token: &LeaseToken) -> Option<(EventKi
 pub fn worker_deferrals_in_place(latest: &[RunEvent]) -> HashMap<TaskId, (String, i64)> {
     latest
         .iter()
-        .filter(|event| event.kind == CLAIM_DEFERRED)
+        .filter(|event| event.kind == EventKind::ClaimDeferred)
         .filter_map(|event| {
             let reason = text(event, "reason")?;
             // The wait for a build is kept apart too
@@ -609,7 +616,7 @@ pub struct OpenDeferral {
 
 impl OpenDeferral {
     pub fn of(event: &RunEvent) -> Option<Self> {
-        (event.kind == CLAIM_DEFERRED).then(|| Self {
+        (event.kind == EventKind::ClaimDeferred).then(|| Self {
             task_id: event.task_id.unwrap_or(TaskId::new(0)),
             reason: text(event, "reason").unwrap_or("unknown").to_owned(),
             since: event.created_at.clone(),
@@ -717,7 +724,7 @@ pub fn deferral_spans(events: &[RunEvent]) -> Vec<HoldSpan<'_>> {
             });
             spans.push(held);
         }
-        if event.kind == CLAIM_DEFERRED {
+        if event.kind == EventKind::ClaimDeferred {
             open.insert(
                 task,
                 HoldSpan {
@@ -737,10 +744,10 @@ pub fn deferral_spans(events: &[RunEvent]) -> Vec<HoldSpan<'_>> {
 /// `claim_deferred` also starts the task's next one.
 pub fn deferral_end(event: &RunEvent) -> Option<(TaskId, &str)> {
     let task = event.task_id?;
-    let why = match event.kind.as_str() {
-        CLAIM_DEFERRED => ENDED_SUPERSEDED,
-        CLAIM_DEFERRAL_ENDED => text(event, "why").unwrap_or("unknown"),
-        "run_claimed" => ENDED_CLAIMED,
+    let why = match event.kind.known()? {
+        EventKind::ClaimDeferred => ENDED_SUPERSEDED,
+        EventKind::ClaimDeferralEnded => text(event, "why").unwrap_or("unknown"),
+        EventKind::RunClaimed => ENDED_CLAIMED,
         _ => return None,
     };
     Some((task, why))
@@ -760,7 +767,7 @@ mod tests {
             task_id: Some(TaskId::new(task)),
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: format!("2026-09-26T01:{at}.000Z"),
             actor: None,
@@ -1525,7 +1532,7 @@ mod tests {
             task_id: Some(TaskId::new(task)),
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: "2026-10-12 10:00:00".to_owned(),
             actor: None,

@@ -44,6 +44,8 @@
 //! Next to the gaps, `commands` lists the heavy commands (e2e, llvm-cov,
 //! test, build/clippy, chains) the run's sessions ran, from the `work` their
 //! `session_closed` recorded (task 514).
+use crate::domain::EventKind;
+use crate::domain::run::{AskOpened, ConflictPrecheck, restore_payload};
 use std::collections::BTreeSet;
 
 use serde::Serialize;
@@ -56,7 +58,7 @@ use super::{AskKind, EventId, RunEvent, stats::timestamp_millis};
 pub fn provider_switches(events: &[RunEvent]) -> Vec<Value> {
     events
         .iter()
-        .filter(|e| e.kind == super::event_kind::PROVIDER_SWITCHED)
+        .filter(|e| e.kind == EventKind::ProviderSwitched)
         .map(|e| {
             let mut switch = e.payload.clone();
             if let Some(object) = switch.as_object_mut() {
@@ -139,66 +141,72 @@ impl State {
 
     fn apply(&mut self, event: &RunEvent) {
         let payload = &event.payload;
-        match event.kind.as_str() {
-            "agent_started" => self.start("session"),
-            "resume_started" => {
+        match event.kind.known() {
+            Some(EventKind::AgentStarted) => self.start("session"),
+            Some(EventKind::ResumeStarted) => {
                 // The resumed session makes a new receipt for a new validation.
                 self.start("resume");
                 self.receipt = false;
                 self.accepted = false;
             }
-            "revise_requested" => self.request("revise"),
-            "conflict_precheck" if payload["requested"] == true => self.request("conflict"),
-            "receipt_observed" => {
+            Some(EventKind::ReviseRequested) => self.request("revise"),
+            Some(EventKind::ConflictPrecheck)
+                if restore_payload::<ConflictPrecheck>(payload).requested == Some(true) =>
+            {
+                self.request("conflict")
+            }
+            Some(EventKind::ReceiptObserved) => {
                 self.receipt = true;
                 self.answered = true;
             }
-            "revise_finished" | "conflict_resolved" => self.answered = true,
+            Some(EventKind::ReviseFinished | EventKind::ConflictResolved) => self.answered = true,
             // A request that could not be sent leaves the session in the
             // phase it replaced, after the receipt the review followed.
-            "revise_unsent" => self.withdraw(),
-            "conflict_precheck" if payload["unsent"] == true => self.withdraw(),
-            "session_idle_observed" => {
+            Some(EventKind::ReviseUnsent) => self.withdraw(),
+            Some(EventKind::ConflictPrecheck) if payload["unsent"] == true => self.withdraw(),
+            Some(EventKind::SessionIdleObserved) => {
                 self.idle = Some(payload["background_running"] == true);
             }
-            "stall_nudged" => {
+            Some(EventKind::StallNudged) => {
                 self.nudged = true;
                 self.idle = Some(payload["background_running"] == true);
             }
-            "session_exited" => self.phase = None,
-            "validation_finished" => self.accepted = payload["accepted"] == true,
-            "integration_started" => self.integrating = true,
-            "run_e2e_waiting" => self.e2e = Some("waiting_e2e"),
-            "run_e2e_started" => self.e2e = Some("e2e"),
-            "run_e2e_finished" | "run_e2e_failed" => self.e2e = None,
-            "ask_opened" if holds_the_run(payload) => {
+            Some(EventKind::SessionExited) => self.phase = None,
+            Some(EventKind::ValidationFinished) => self.accepted = payload["accepted"] == true,
+            Some(EventKind::IntegrationStarted) => self.integrating = true,
+            Some(EventKind::RunE2eWaiting) => self.e2e = Some("waiting_e2e"),
+            Some(EventKind::RunE2eStarted) => self.e2e = Some("e2e"),
+            Some(EventKind::RunE2eFinished | EventKind::RunE2eFailed) => self.e2e = None,
+            Some(EventKind::AskOpened) if holds_the_run(&restore_payload(payload)) => {
                 if let Some(id) = ask_id(payload) {
                     self.open_asks.insert(id);
                 }
             }
-            "ask_answered" => {
+            Some(EventKind::AskAnswered) => {
                 if let Some(id) = ask_id(payload) {
                     self.open_asks.remove(&id);
                 }
             }
-            super::event_kind::RUN_PHASE_CHANGED => {
+            Some(EventKind::RunPhaseChanged) => {
                 self.held = super::run_phase::Recorded::of_event(event)
                     .is_some_and(|record| record.is(super::run_phase::Phase::Held));
             }
-            super::event_kind::TASK_RELEASED => self.held = false,
+            Some(EventKind::TaskReleased) => self.held = false,
             _ => {}
         }
         if matches!(
-            event.kind.as_str(),
-            "run_integrated"
-                | "integration_deferred"
-                | "integration_error"
-                | "integration_held"
-                | "integration_failed"
-                | "runtime_error"
-                | "run_adopted"
-                | "run_recovered"
-                | "resume_started"
+            event.kind.known(),
+            Some(
+                EventKind::RunIntegrated
+                    | EventKind::IntegrationDeferred
+                    | EventKind::IntegrationError
+                    | EventKind::IntegrationHeld
+                    | EventKind::IntegrationFailed
+                    | EventKind::RuntimeError
+                    | EventKind::RunAdopted
+                    | EventKind::RunRecovered
+                    | EventKind::ResumeStarted
+            )
         ) {
             self.integrating = false;
             self.e2e = None;
@@ -207,7 +215,12 @@ impl State {
 
     /// The reason of a gap that starts in this state and ends at `end`.
     fn reason(&self, end: Option<&RunEvent>, gap: &mut Gap) {
-        if end.is_some_and(|e| matches!(e.kind.as_str(), "run_adopted" | "run_recovered")) {
+        if end.is_some_and(|e| {
+            matches!(
+                e.kind.known(),
+                Some(EventKind::RunAdopted | EventKind::RunRecovered)
+            )
+        }) {
             gap.reason = "no_supervisor";
         } else if self.held {
             gap.reason = "held";
@@ -245,9 +258,9 @@ fn ask_id(payload: &Value) -> Option<i64> {
 
 /// Whether an ask holds the run it is opened on: the observer's `blocked`
 /// and the planner's question do not.
-fn holds_the_run(payload: &Value) -> bool {
+fn holds_the_run(opened: &AskOpened<'_>) -> bool {
     !matches!(
-        payload["kind"].as_str(),
+        opened.kind,
         Some(kind) if kind == AskKind::Blocked.as_str() || kind == AskKind::PlannerQuestion.as_str()
     )
 }
@@ -324,7 +337,7 @@ pub struct HeavyCommand {
 pub fn heavy_commands(events: &[RunEvent]) -> Vec<HeavyCommand> {
     let mut commands: Vec<HeavyCommand> = events
         .iter()
-        .filter(|event| event.kind == super::sessions::SESSION_CLOSED)
+        .filter(|event| event.kind == EventKind::SessionClosed)
         .flat_map(|event| {
             let heavy = event.payload["work"]["heavy"].as_array().cloned();
             heavy.into_iter().flatten().filter_map(move |row| {
@@ -361,7 +374,7 @@ mod tests {
                 task_id: Some(TaskId::new(1)),
                 goal_id: None,
                 run_id: Some(RunId::new("r").unwrap()),
-                kind: (*kind).to_owned(),
+                kind: (*kind).into(),
                 payload: payload.clone(),
                 created_at: format!("2026-09-24T{at}Z"),
                 actor: None,
@@ -391,7 +404,7 @@ mod tests {
         let all = merged(&run, &[update.clone(), run[0].clone()]);
         let ids: Vec<i64> = all.iter().map(|event| event.id.as_i64()).collect();
         assert_eq!(ids, [1, 2, 3]);
-        assert_eq!(all[1].kind, "update_installed");
+        assert_eq!(all[1].kind, EventKind::UpdateInstalled);
         assert_eq!(merged(&run, &[]).len(), 2);
     }
 

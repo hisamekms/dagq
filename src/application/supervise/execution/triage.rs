@@ -348,7 +348,7 @@ impl Supervisor<'_> {
             }
             let events = self.queue.run_events(run.id())?;
             let reason = RunHistory::from_events(&events)
-                .last(event_kind::TRIAGE_FINISHED)
+                .last(EventKind::TriageFinished)
                 .and_then(|e| e.payload.get("reason").and_then(Value::as_str))
                 .map_or_else(
                     || run.last_error().map(str::to_owned).unwrap_or_default(),
@@ -467,9 +467,9 @@ impl Supervisor<'_> {
                 if let Some(decided) = events
                     .iter()
                     .rev()
-                    .take_while(|e| e.kind != event_kind::TRIAGE_STARTED)
+                    .take_while(|e| e.kind != EventKind::TriageStarted)
                     .find(|e| {
-                        e.kind == event_kind::TRIAGE_DECIDED
+                        e.kind == EventKind::TriageDecided
                             && e.payload["action"] == crate::domain::RECOVER_AGAIN
                     })
                 {
@@ -595,7 +595,7 @@ impl Supervisor<'_> {
         let facts = events
             .iter()
             .rev()
-            .find(|e| e.kind == event_kind::RECOVERY_REQUESTED)
+            .find(|e| e.kind == EventKind::RecoveryRequested)
             .map_or_else(
                 || json!({"alert": alert}),
                 |e| {
@@ -627,7 +627,7 @@ impl Supervisor<'_> {
             detail
                 .events
                 .iter()
-                .filter(|event| event.kind == event_kind::TASK_EDITED)
+                .filter(|event| event.kind == EventKind::TaskEdited)
                 .map(serde_json::to_value)
                 .collect::<Result<Vec<_>, _>>()?,
         );
@@ -655,7 +655,7 @@ impl Supervisor<'_> {
         let session_id = events
             .iter()
             .rev()
-            .find(|e| e.kind == event_kind::TRIAGE_STARTED)
+            .find(|e| e.kind == EventKind::TriageStarted)
             .and_then(|e| e.payload["session_id"].as_str())
             .map(str::to_owned);
         let launch = launch_of(&events);
@@ -1162,7 +1162,7 @@ fn launch_of(events: &[RunEvent]) -> ActorLaunch {
     events
         .iter()
         .rev()
-        .find(|e| e.kind == event_kind::TRIAGE_STARTED)
+        .find(|e| e.kind == EventKind::TriageStarted)
         .map_or_else(
             || ActorLaunch::default_of(ModelRole::Recovery),
             |e| ActorLaunch::recorded(&e.payload, ModelRole::Recovery),

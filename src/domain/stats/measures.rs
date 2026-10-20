@@ -8,6 +8,7 @@
 //! (their `failure`, task 467), per run and per class, with the retries of
 //! the commands that failed on the host (task 639) and of the landings
 //! whose failed tests were all flaky (task 768).
+use crate::domain::EventKind;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
@@ -178,7 +179,7 @@ impl RunVerifyFailure {
     /// The failure a `verification_command` of `integrate` records, if any.
     fn of(event: &RunEvent) -> Option<Self> {
         let payload = &event.payload;
-        if event.kind != "verification_command" || payload["phase"] != "integration" {
+        if event.kind != EventKind::VerificationCommand || payload["phase"] != "integration" {
             return None;
         }
         let failure = &payload["failure"];
@@ -220,8 +221,8 @@ impl MeasureTrack {
         let text = |key: &str| payload.get(key).and_then(Value::as_str).map(str::to_owned);
         let turn_provider = self.after_claim.observe(event);
         let measures = &mut self.measures;
-        match event.kind.as_str() {
-            "run_claimed" if !self.claimed => {
+        match event.kind.known() {
+            Some(EventKind::RunClaimed) if !self.claimed => {
                 self.claimed = true;
                 measures.dagq_version = text("dagq_version");
                 measures.claude_version = text("claude_version");
@@ -238,9 +239,11 @@ impl MeasureTrack {
                 measures.worker_effort = text("effort");
                 measures.trial_group = text("group");
             }
-            "provider_switched" => measures.provider_switches += 1,
-            "turn_started" => self.turn_started = super::timestamp_millis(&event.created_at),
-            "turn_finished" => {
+            Some(EventKind::ProviderSwitched) => measures.provider_switches += 1,
+            Some(EventKind::TurnStarted) => {
+                self.turn_started = super::timestamp_millis(&event.created_at)
+            }
+            Some(EventKind::TurnFinished) => {
                 // A turn recorded without its provider ran on the one the
                 // run was on then.
                 let provider = turn_provider.unwrap_or_default();
@@ -272,15 +275,15 @@ impl MeasureTrack {
                         .add(&payload["tokens"]);
                 }
             }
-            "receipt_observed" if !self.receipt_seen => {
+            Some(EventKind::ReceiptObserved) if !self.receipt_seen => {
                 self.receipt_seen = true;
                 measures.load.work = IntervalLoad::of(payload);
             }
-            "validation_finished" if !self.validated_seen => {
+            Some(EventKind::ValidationFinished) if !self.validated_seen => {
                 self.validated_seen = true;
                 measures.load.validate = IntervalLoad::of(payload);
             }
-            "verification_command" if payload["phase"] == "integration" => {
+            Some(EventKind::VerificationCommand) if payload["phase"] == "integration" => {
                 measures.verify_failures.extend(RunVerifyFailure::of(event));
                 let Some(load) = IntervalLoad::of(payload) else {
                     return;
@@ -462,7 +465,7 @@ fn integration_commands(
     events
         .iter()
         .filter(move |event| {
-            event.kind == "verification_command"
+            event.kind == EventKind::VerificationCommand
                 && event.id > after
                 && event.id <= upto
                 && counts(event.task_id)
@@ -575,22 +578,24 @@ pub(super) fn verification_failures(
             }
         }
         if let Some(run) = &event.run_id {
-            match event.kind.as_str() {
-                "integration_retried" => {
+            match event.kind.known() {
+                Some(EventKind::IntegrationRetried) => {
                     if let Some(class) = event.payload["failure"]["class"].as_str() {
                         by_class.entry(class.to_owned()).or_default().retried += 1;
                         relanding.insert(run.as_str(), class.to_owned());
                     }
                 }
-                "run_integrated" => {
+                Some(EventKind::RunIntegrated) => {
                     if let Some(class) = relanding.remove(run.as_str()) {
                         by_class.entry(class).or_default().retry_passed += 1;
                     }
                 }
-                "integration_deferred"
-                | "integration_held"
-                | "integration_failed"
-                | "integration_error" => {
+                Some(
+                    EventKind::IntegrationDeferred
+                    | EventKind::IntegrationHeld
+                    | EventKind::IntegrationFailed
+                    | EventKind::IntegrationError,
+                ) => {
                     if let Some(class) = relanding.remove(run.as_str()) {
                         by_class.entry(class).or_default().retry_failed += 1;
                     }
@@ -626,7 +631,7 @@ pub(super) fn verification_failures(
 /// retried (task 639), when it is a retry.
 fn retried_class(event: &RunEvent) -> Option<&str> {
     let payload = &event.payload;
-    (event.kind == "verification_command"
+    (event.kind == EventKind::VerificationCommand
         && payload["phase"] == "integration"
         && payload["retry"] == true)
         .then(|| payload["retry_of"]["failure"]["class"].as_str())
@@ -644,7 +649,7 @@ mod tests {
             task_id: Some(TaskId::new(1)),
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: "1970-01-01T00:00:00.000Z".to_owned(),
             actor: None,

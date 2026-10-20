@@ -16,6 +16,7 @@ use crate::domain::recovery::{
     JobOption, MAX_RECHECK_SECS, MAX_RECOVERY_ATTEMPTS, ProcessInfo, RecoveryAction, SortedOptions,
     attempts, failed_live, live_pass_back, run_processes, sort_job_options, without_label,
 };
+use crate::domain::run::{RecoveryRecord, restore_payload};
 
 /// The actions a recovery job may choose for an `idle_process` alert;
 /// `send_instruction` holds only while the session is idle at its prompt.
@@ -474,9 +475,11 @@ impl RecoveryWatch {
         // it starts no job before the wait is over.
         for reason in IDLE_REASONS {
             let finished = events.iter().rfind(|e| {
-                e.kind == "recovery_finished"
-                    && e.payload["alert"] == RecoveryAlert::Stalled.as_str()
-                    && e.payload["reason"] == reason
+                e.kind == EventKind::RecoveryFinished && {
+                    let record = restore_payload::<RecoveryRecord>(&e.payload);
+                    record.alert == Some(RecoveryAlert::Stalled.as_str())
+                        && record.reason == Some(reason)
+                }
             });
             if let Some(at) = finished
                 .and_then(|e| e.payload["recheck_at_ms"].as_i64())
@@ -1088,9 +1091,11 @@ fn applied_recheck(
         .iter()
         .rev()
         .find(|e| {
-            e.kind == event_kind::RECOVERY_FINISHED
-                && e.payload["alert"] == job.alert.as_str()
-                && e.payload["attempt"] == job.attempt
+            e.kind == EventKind::RecoveryFinished && {
+                let record = restore_payload::<RecoveryRecord>(&e.payload);
+                record.alert == Some(job.alert.as_str())
+                    && record.attempt == u64::try_from(job.attempt).ok()
+            }
         })
         .and_then(|e| e.payload["recheck_at_ms"].as_i64())
         .map(at_millis))
@@ -1151,7 +1156,7 @@ fn spawn_live(
         detail
             .events
             .iter()
-            .filter(|event| event.kind == event_kind::TASK_EDITED)
+            .filter(|event| event.kind == EventKind::TaskEdited)
             .map(serde_json::to_value)
             .collect::<Result<Vec<_>, _>>()?,
     );
@@ -1254,8 +1259,8 @@ pub(super) fn repair_history(sv: &Supervisor<'_>, run: &TaskRun) -> Result<Vec<V
         .iter()
         .filter(|e| {
             matches!(
-                e.kind.as_str(),
-                event_kind::RECOVERY_FINISHED | event_kind::AUTO_REPAIRED
+                e.kind.known(),
+                Some(EventKind::RecoveryFinished | EventKind::AutoRepaired)
             )
         })
         .map(crate::application::health::compact_event)

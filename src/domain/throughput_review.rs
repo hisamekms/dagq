@@ -6,11 +6,11 @@
 //! but what its review stresses and whether the inbox hears of it. The
 //! thresholds below are the initial values a person set on 2026-09-28.
 
+use crate::domain::EventKind;
 use serde::{Deserialize, Serialize};
 
 use super::{
     DomainError, EventId, Provider, RunEvent,
-    event_kind::{THROUGHPUT_REVIEW_FINISHED, THROUGHPUT_REVIEW_STARTED},
     kpi::{DAY_MS, Period},
     provider_switch::SwitchReason,
     stats::timestamp_millis,
@@ -111,7 +111,7 @@ pub fn window(mode: ReviewMode, now_ms: i64, offset_ms: i64) -> Window {
 /// other provider (ADR-t1063-1 decision 4, task 1220).
 pub fn reviewed(events: &[RunEvent], mode: ReviewMode, period: &str) -> bool {
     events.iter().any(|event| {
-        event.kind == THROUGHPUT_REVIEW_FINISHED
+        event.kind == EventKind::ThroughputReviewFinished
             && event.payload["mode"] == mode.as_str()
             && event.payload["period"] == period
             && event.payload.get("provider_unusable").is_none()
@@ -130,12 +130,12 @@ pub fn running(
     now_ms: i64,
 ) -> bool {
     started.iter().any(|event| {
-        event.kind == THROUGHPUT_REVIEW_STARTED
+        event.kind == EventKind::ThroughputReviewStarted
             && event.payload["mode"] == mode.as_str()
             && event.payload["period"] == period
             && timestamp_millis(&event.created_at).is_some_and(|at| now_ms - at < RUNNING_MS)
             && !finished.iter().any(|end| {
-                end.kind == THROUGHPUT_REVIEW_FINISHED
+                end.kind == EventKind::ThroughputReviewFinished
                     && event.payload["dir"].is_string()
                     && end.payload["dir"] == event.payload["dir"]
             })
@@ -150,7 +150,7 @@ pub fn children_finished(finished: &[RunEvent], parent_pid: u32, since_ms: i64) 
     finished
         .iter()
         .filter(|event| {
-            event.kind == THROUGHPUT_REVIEW_FINISHED
+            event.kind == EventKind::ThroughputReviewFinished
                 && event.payload["parent_pid"].as_u64() == Some(u64::from(parent_pid))
                 && timestamp_millis(&event.created_at).is_some_and(|at| at >= since_ms)
         })
@@ -424,6 +424,8 @@ pub fn finishes_to_hold<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::event_kind::THROUGHPUT_REVIEW_FINISHED;
+    use crate::domain::event_kind::THROUGHPUT_REVIEW_STARTED;
 
     const JST: i64 = 9 * HOUR_MS;
     // 2026-09-29T13:25:00+09:00 (a Tuesday).

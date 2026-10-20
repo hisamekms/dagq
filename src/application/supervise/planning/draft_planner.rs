@@ -266,7 +266,7 @@ impl PlanningState {
                 .run_events(&RunId::new(run)?)?
                 .into_iter()
                 .rev()
-                .find(|event| event.kind == event_kind::INTEGRATION_RECEIPT)
+                .find(|event| event.kind == EventKind::IntegrationReceipt)
                 .map(|event| event.payload["receipt"].clone()),
             _ => None,
         };
@@ -307,7 +307,7 @@ impl PlanningState {
                 notes: detail
                     .events
                     .iter()
-                    .filter(|event| event.kind == event_kind::OBSERVATION && event.run_id.is_none())
+                    .filter(|event| event.kind == EventKind::Observation && event.run_id.is_none())
                     .filter_map(|event| event.payload["text"].as_str().map(str::to_owned))
                     .collect(),
             });

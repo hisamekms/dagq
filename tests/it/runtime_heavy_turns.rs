@@ -7,6 +7,7 @@
 //! update job's process, the stub build and e2e, the stub verification and
 //! recheck commands, Git, SQLite and the supervisor's wiring.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use runtime_support::*;
 
@@ -104,7 +105,7 @@ fn updates(db: &Path) -> Vec<dagq::domain::RunEvent> {
 fn update_step(db: &Path, kind: &str) -> Option<EventId> {
     updates(db)
         .into_iter()
-        .find(|update| update.kind == kind)
+        .find(|update| update.kind.as_str() == kind)
         .map(|update| update.id)
 }
 
@@ -115,7 +116,7 @@ fn run_step(db: &Path, run: &RunId, kind: &str) -> Option<EventId> {
         .run_events(run)
         .unwrap()
         .into_iter()
-        .find(|event| event.kind == kind)
+        .find(|event| event.kind.as_str() == kind)
         .map(|event| event.id)
 }
 
@@ -145,7 +146,7 @@ fn await_update_failed(db: &Path) {
 fn job_log(db: &Path) -> String {
     updates(db)
         .into_iter()
-        .find(|update| update.kind == "update_started")
+        .find(|update| update.kind == EventKind::UpdateStarted)
         .and_then(|started| started.payload["log"].as_str().map(PathBuf::from))
         .and_then(|log| fs::read_to_string(log).ok())
         .unwrap_or_default()

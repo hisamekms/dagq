@@ -14,6 +14,7 @@
 //! the close only checks that analysis against what it reads of the queue,
 //! and inserts.
 
+use crate::domain::RecordedKind;
 use crate::domain::event_kind::{self, EventKind};
 use std::cell::RefCell;
 
@@ -344,12 +345,12 @@ impl WorktimeLines {
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Closing<'a> {
     /// The run's, by events of these kinds on it.
-    Run(&'a RunId, &'a [&'a str]),
+    Run(&'a RunId, &'a [EventKind]),
     /// The run's, by an event of this kind and payload on it: a revise's
     /// closes end when it was sent.
-    Event(&'a RunId, &'a str, &'a Value),
+    Event(&'a RunId, EventKind, &'a Value),
     /// The observer's, by an event of the queue of this kind and payload.
-    Queue(&'a str, &'a Value),
+    Queue(EventKind, &'a Value),
     /// The plan review's of this id, or of every plan review when `None`;
     /// closed as inferred when `true`, as `close_plan_review` closes them.
     PlanReviews(Option<i64>, bool),
@@ -416,10 +417,10 @@ pub(super) fn read_before(conn: &Connection, closing: Closing<'_>) -> Result<Rea
     }
     let spans = match closing {
         Closing::Run(run_id, kinds) => {
-            let kinds: Vec<&str> = kinds
+            let kinds: Vec<EventKind> = kinds
                 .iter()
                 .copied()
-                .filter(|kind| scope(kind) == Some(Scope::Run))
+                .filter(|kind| scope(*kind) == Some(Scope::Run))
                 .collect();
             if kinds.is_empty() {
                 Vec::new()
@@ -428,7 +429,7 @@ pub(super) fn read_before(conn: &Connection, closing: Closing<'_>) -> Result<Rea
                 let context = SpanContext::default();
                 kinds
                     .iter()
-                    .flat_map(|kind| changes(kind, &Value::Null, &open, &context))
+                    .flat_map(|kind| changes(*kind, &Value::Null, &open, &context))
                     .filter_map(closed_span)
                     .collect()
             }
@@ -439,7 +440,7 @@ pub(super) fn read_before(conn: &Connection, closing: Closing<'_>) -> Result<Rea
                 // A revise's closes end when it was sent, as `write_changes`
                 // ends them when that was before the event.
                 let sent = crate::domain::request_sent_at_millis(payload)
-                    .filter(|_| kind == EventKind::ReviseRequested.as_str());
+                    .filter(|_| kind == EventKind::ReviseRequested);
                 changes(kind, payload, &open, &SpanContext::default())
                     .into_iter()
                     .filter_map(closed_span)
@@ -629,7 +630,6 @@ pub(super) fn follow(
     kind: EventKind,
     payload: &Value,
 ) -> Result<()> {
-    let kind = kind.as_str();
     let Some(scope) = scope(kind) else {
         return Ok(());
     };
@@ -746,7 +746,6 @@ pub(super) fn follow_goal(
     kind: EventKind,
     payload: &Value,
 ) -> Result<()> {
-    let kind = kind.as_str();
     if scope(kind) != Some(Scope::Goal) {
         return Ok(());
     }
@@ -787,7 +786,7 @@ fn write_changes(
     conn: &Connection,
     event_id: EventId,
     (task_id, run_id): (Option<TaskId>, Option<&RunId>),
-    kind: &str,
+    kind: EventKind,
     payload: &Value,
     open: &[OpenSpan],
     context: &SpanContext,
@@ -2144,7 +2143,7 @@ pub(super) fn close_inferred_hook_spans(conn: &Connection, ended: &[EventId]) ->
 /// The open spans of the job of the queue an event of `kind` is about
 /// ([`queue_span_kind`]: the observer's or the throughput review's), or
 /// `None` when it is not an event of the queue's spans.
-fn queue_open_spans(conn: &Connection, kind: &str) -> Result<Option<Vec<OpenSpan>>> {
+fn queue_open_spans(conn: &Connection, kind: EventKind) -> Result<Option<Vec<OpenSpan>>> {
     let Some(span_kind) = queue_span_kind(kind).filter(|_| scope(kind) == Some(Scope::Queue))
     else {
         return Ok(None);
@@ -2242,7 +2241,9 @@ fn renewed_session(conn: &Connection, run_id: &RunId) -> Result<Option<String>> 
             |r| Ok((r.get("kind")?, json_col(r, "payload")?)),
         )
         .optional()?;
-    Ok(last.and_then(|(kind, payload)| fresh_session::renewed_session(&kind, &payload)))
+    Ok(last.and_then(|(kind, payload)| {
+        fresh_session::renewed_session(&RecordedKind::from_name(&kind), &payload)
+    }))
 }
 
 fn proposal_goals(conn: &Connection, proposal: Option<i64>) -> Result<Vec<i64>> {
@@ -2529,7 +2530,7 @@ pub(super) mod tests {
             .iter()
             .map(|e| {
                 (
-                    e.kind.clone(),
+                    e.kind.to_string(),
                     e.payload["kind"].as_str().unwrap().to_owned(),
                     e.payload
                         .get("reason")
@@ -2586,7 +2587,7 @@ pub(super) mod tests {
             .unwrap();
         assert_eq!(time(events[0].id), time(started));
         assert_eq!(time(events[12].id), time(observed));
-        for closed in events.iter().filter(|e| e.kind == SESSION_CLOSED) {
+        for closed in events.iter().filter(|e| e.kind == EventKind::SessionClosed) {
             assert_eq!(closed.payload["active"], "unavailable");
         }
         assert_eq!(
@@ -3221,7 +3222,7 @@ pub(super) mod tests {
         let spans = spans(&queue);
         assert_eq!(spans[1].payload["active_secs"], 20);
         assert_eq!(spans[1].created_at, millis_text(sent * 1000));
-        assert_eq!(spans[2].kind, SESSION_OPENED);
+        assert_eq!(spans[2].kind, EventKind::SessionOpened);
         assert_eq!(spans[2].created_at, millis_text(sent * 1000));
         event(
             conn,
@@ -3264,7 +3265,7 @@ pub(super) mod tests {
         .unwrap();
         let spans = spans(&queue);
         assert_eq!(spans[1].created_at, millis_text(sent));
-        assert_eq!(spans[2].kind, SESSION_OPENED);
+        assert_eq!(spans[2].kind, EventKind::SessionOpened);
         assert_eq!(spans[2].created_at, millis_text(sent));
     }
 
@@ -4556,7 +4557,7 @@ pub(super) mod tests {
         )
         .unwrap();
         let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate).unwrap();
-        let read = read_before(&tx, Closing::Run(&run, &["run_recovered"])).unwrap();
+        let read = read_before(&tx, Closing::Run(&run, &[EventKind::RunRecovered])).unwrap();
         assert!(read.spans.is_empty());
         drop(read);
         tx.rollback().unwrap();
@@ -5021,7 +5022,7 @@ pub(super) mod tests {
     fn close_after(between: Between) -> (Vec<Value>, Vec<Value>, Vec<Value>, usize) {
         let (dir, queue, task_id, run, run_dir, start) = closing_worker();
         let conn = &queue.conn;
-        let read = read_before(conn, Closing::Run(&run, &["session_exited"])).unwrap();
+        let read = read_before(conn, Closing::Run(&run, &[EventKind::SessionExited])).unwrap();
         let before = analysed();
         if between == Between::EditsVerification {
             conn.execute(
@@ -5324,7 +5325,7 @@ pub(super) mod tests {
         };
         let mut under_lock = 0;
         if prepared {
-            let read = read_before(conn, Closing::Run(&run, &["session_exited"])).unwrap();
+            let read = read_before(conn, Closing::Run(&run, &[EventKind::SessionExited])).unwrap();
             let before = analysed();
             conn.execute_batch("BEGIN IMMEDIATE").unwrap();
             close();

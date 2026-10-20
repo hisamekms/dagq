@@ -1,6 +1,7 @@
 //! Runtime tests: The review job of a run, its revise and concern, and the
 //! landing asks it opens.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use runtime_support::*;
 
@@ -728,7 +729,7 @@ fn integrate_by_hand_closes_the_landing_and_blocked_asks_of_the_run() {
     let closed_of_task = detail
         .events
         .iter()
-        .find(|e| e.kind == "ask_answered" && e.payload["ask_id"] == of_task.id.as_i64())
+        .find(|e| e.kind == EventKind::AskAnswered && e.payload["ask_id"] == of_task.id.as_i64())
         .unwrap();
     assert!(closed_of_task.run_id.is_none());
 }
@@ -851,7 +852,7 @@ fn a_review_that_exits_non_zero_twice_closes_the_session_and_asks_a_person() {
     let canceled = detail
         .events
         .iter()
-        .rfind(|event| event.kind == "task_status_changed")
+        .rfind(|event| event.kind == EventKind::TaskStatusChanged)
         .unwrap();
     assert_eq!(
         canceled.payload,
@@ -1077,7 +1078,7 @@ fn a_failed_review_span_ends_with_its_job_not_with_the_exit() {
             .events
             .iter()
             .rev()
-            .find(|e| e.kind == kind)
+            .find(|e| e.kind.as_str() == kind)
             .unwrap_or_else(|| panic!("no {kind} in {:?}", event_kinds(&detail)))
     };
     // Reviewed once more with the same input, so the same prompt.
@@ -1099,7 +1100,7 @@ fn a_failed_review_span_ends_with_its_job_not_with_the_exit() {
     let reviews_closed: Vec<_> = detail
         .events
         .iter()
-        .filter(|e| e.kind == "session_closed" && e.payload["kind"] == "review")
+        .filter(|e| e.kind == EventKind::SessionClosed && e.payload["kind"] == "review")
         .collect();
     assert_eq!(reviews_closed.len(), 1);
     assert!(
@@ -1323,14 +1324,14 @@ fn the_default_test_reviewer_skips_retry_but_still_asks_after_its_job() {
     let closed = detail
         .events
         .iter()
-        .filter(|e| e.kind == "session_closed" && e.payload["kind"] == "review")
+        .filter(|e| e.kind == EventKind::SessionClosed && e.payload["kind"] == "review")
         .collect::<Vec<_>>();
     assert_eq!(closed.len(), 1);
     assert_eq!(closed[0].payload["reason"], "job_finished");
     let failed_event = detail
         .events
         .iter()
-        .find(|e| e.kind == "review_failed")
+        .find(|e| e.kind == EventKind::ReviewFailed)
         .unwrap();
     assert!(closed[0].id < failed_event.id);
 }

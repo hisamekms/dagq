@@ -40,7 +40,7 @@ fn events(db: &Path, kind: &str) -> Vec<(i64, Value)> {
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == kind)
+        .filter(|event| event.kind.as_str() == kind)
         .map(|event| (timestamp_millis(&event.created_at).unwrap(), event.payload))
         .collect()
 }

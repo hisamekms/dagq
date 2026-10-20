@@ -11,10 +11,7 @@ use crate::domain::EventKind;
 use anyhow::Result;
 use serde_json::{Value, json};
 
-use super::update::{
-    UPDATE_ANSWERED, UPDATE_DROPPED, UPDATE_FAILED, UPDATE_INSTALLED, UPDATE_RETRY, UPDATE_STARTED,
-    step_release,
-};
+use super::update::step_release;
 use super::{InstalledPlugin, RunLog};
 use crate::domain::release_update::{
     RELEASE_CHECK_KINDS, RELEASE_CHECKED, ReleaseMode, ReleaseUpdateConfig, acts_on_releases,
@@ -70,7 +67,7 @@ pub fn check(
         return Ok(None);
     }
     let previous = match last {
-        Some(event) if event.kind == RELEASE_CHECKED => Some(event),
+        Some(event) if event.kind == EventKind::ReleaseChecked => Some(event),
         _ => queue.latest_queue_event(&[RELEASE_CHECKED])?,
     };
     let fetched = index
@@ -165,7 +162,7 @@ pub fn status(
     };
     let last = queue.latest_queue_event(&RELEASE_CHECK_KINDS)?;
     let last_checked = match &last {
-        Some(event) if event.kind == RELEASE_CHECKED => Some(event.clone()),
+        Some(event) if event.kind == EventKind::ReleaseChecked => Some(event.clone()),
         _ => queue.latest_queue_event(&[RELEASE_CHECKED])?,
     };
     Ok(crate::domain::release_update::status(
@@ -196,8 +193,8 @@ pub enum ReleaseAction {
 /// Whether `update` asks for a job of its release: a `retry`, or an
 /// `install` answer.
 fn is_request(update: &RunEvent) -> bool {
-    update.kind == UPDATE_RETRY
-        || (update.kind == UPDATE_ANSWERED
+    update.kind == EventKind::UpdateRetry
+        || (update.kind == EventKind::UpdateAnswered
             && update.payload["answer"].as_str().map(str::trim) == Some("install"))
 }
 
@@ -218,10 +215,10 @@ fn followed(updates: &[RunEvent], at: usize, current: &str) -> bool {
     let Some(version) = step_release(request) else {
         return true;
     };
-    updates[..at].iter().any(|later| match later.kind.as_str() {
-        UPDATE_STARTED => step_release(later)
+    updates[..at].iter().any(|later| match later.kind.known() {
+        Some(EventKind::UpdateStarted) => step_release(later)
             .is_some_and(|started| started == version || is_newer(started, version)),
-        UPDATE_DROPPED => {
+        Some(EventKind::UpdateDropped) => {
             later.payload.get("ask_id").is_some()
                 && later.payload.get("ask_id") == request.payload.get("ask_id")
                 && step_release(later) == Some(version)
@@ -360,9 +357,9 @@ pub fn next_action(
     // binary decided.
     let decided = updates.iter().any(|update| {
         step_release(update) == Some(latest)
-            && match update.kind.as_str() {
-                UPDATE_STARTED => true,
-                UPDATE_ANSWERED => plugin_only(update) != Some(true),
+            && match update.kind.known() {
+                Some(EventKind::UpdateStarted) => true,
+                Some(EventKind::UpdateAnswered) => plugin_only(update) != Some(true),
                 _ => false,
             }
     });
@@ -417,10 +414,12 @@ pub fn next_plugin_action(
     }
     let decided = updates.iter().any(|update| {
         step_release(update) == Some(current)
-            && match update.kind.as_str() {
-                UPDATE_STARTED | UPDATE_ANSWERED => update.payload["plugin_only"] == true,
-                UPDATE_INSTALLED => update.payload.get("plugin").is_some(),
-                UPDATE_FAILED => update.payload["stage"] == "plugin",
+            && match update.kind.known() {
+                Some(EventKind::UpdateStarted | EventKind::UpdateAnswered) => {
+                    update.payload["plugin_only"] == true
+                }
+                Some(EventKind::UpdateInstalled) => update.payload.get("plugin").is_some(),
+                Some(EventKind::UpdateFailed) => update.payload["stage"] == "plugin",
                 _ => false,
             }
     });
@@ -469,6 +468,12 @@ pub fn live_builds(supervisors: &Value) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::UPDATE_ANSWERED;
+    use crate::domain::UPDATE_DROPPED;
+    use crate::domain::UPDATE_FAILED;
+    use crate::domain::UPDATE_INSTALLED;
+    use crate::domain::UPDATE_RETRY;
+    use crate::domain::UPDATE_STARTED;
 
     /// Only the supervisors alive and not stale name the builds that run.
     #[test]
@@ -491,7 +496,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: String::new(),
             actor: None,

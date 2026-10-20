@@ -126,14 +126,14 @@ pub(super) fn recorded_stale_nudge(
     let nudged = events
         .iter()
         .rev()
-        .find(|e| e.kind == event_kind::STALE_RECEIPT_NUDGED && of_phase(e))?;
+        .find(|e| e.kind == EventKind::StaleReceiptNudged && of_phase(e))?;
     let at = super::file_time::recorded_at(nudged);
     Some(StaleNudge {
         at,
         typed_at: at,
         settled: events
             .iter()
-            .any(|e| e.kind == event_kind::STALE_RECEIPT_RESOLVED && of_phase(e)),
+            .any(|e| e.kind == EventKind::StaleReceiptResolved && of_phase(e)),
     })
 }
 
@@ -410,7 +410,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: created_at.to_owned(),
             actor: None,

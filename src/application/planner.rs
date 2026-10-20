@@ -143,7 +143,10 @@ pub fn open_runtime_planner(
     // to the proposal that reopened them, not to their current tasks.
     let review_anchor = launch
         .queue
-        .latest_events_of("plan_review_finished", usize::MAX >> 1)?
+        .latest_events_of(
+            crate::domain::EventKind::PlanReviewFinished.as_str(),
+            usize::MAX >> 1,
+        )?
         .into_iter()
         .find(|event| {
             event.payload["proposal_id"] == serde_json::json!(proposal)

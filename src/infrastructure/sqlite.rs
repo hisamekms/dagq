@@ -19,7 +19,7 @@
 //! refuse without writing when it changed. Writers that are not authorized
 //! per command (the supervisor's landing, draft planners) skip the check.
 use crate::domain::claim_facts;
-use crate::domain::event_kind::{self, EventKind};
+use crate::domain::event_kind::{self, EventKind, RecordedKind};
 use crate::domain::task_replan::GuardedStep;
 use std::{
     collections::BTreeMap,
@@ -3532,7 +3532,7 @@ pub(super) fn event_row(row: &Row<'_>) -> rusqlite::Result<RunEvent> {
         task_id: row.get("task_id")?,
         goal_id: row.get("goal_id")?,
         run_id: row.get("run_id")?,
-        kind: row.get("kind")?,
+        kind: RecordedKind::from_name(&row.get::<_, String>("kind")?),
         payload: json_col(row, "payload")?,
         created_at: row.get("created_at")?,
         actor: event_actor(row)?,

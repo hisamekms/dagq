@@ -5,6 +5,8 @@
 //! position how many asks carry it; and the `reason_category` each primary
 //! topic came with. An ask opened before topics were kept is
 //! [`UNLABELED_TOPIC`], and nothing recorded is rewritten.
+use crate::domain::EventKind;
+use crate::domain::run::{AskOpened, ReviewFinished, restore_payload};
 use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
@@ -136,10 +138,12 @@ pub fn worker_question_topics(
     let mut concerns: HashMap<String, Vec<EventId>> = HashMap::new();
     for event in events {
         let run = event.run_id.as_ref().map(|run| run.as_str().to_owned());
-        match event.kind.as_str() {
-            "run_claimed" if inside(event) => table.runs += 1,
-            "ask_opened"
-                if inside(event) && event.payload["kind"].as_str() == Some("worker_question") =>
+        match event.kind.known() {
+            Some(EventKind::RunClaimed) if inside(event) => table.runs += 1,
+            Some(EventKind::AskOpened)
+                if inside(event)
+                    && restore_payload::<AskOpened>(&event.payload).kind
+                        == Some("worker_question") =>
             {
                 let topics = topics_of(&event.payload);
                 if let Some(id) = id_of(&event.payload) {
@@ -158,7 +162,7 @@ pub fn worker_question_topics(
                 });
                 continue;
             }
-            "ask_answered" => {
+            Some(EventKind::AskAnswered) => {
                 if let Some(question) = id_of(&event.payload)
                     .and_then(|id| by_id.get(&id))
                     .and_then(|index| questions.get_mut(*index))
@@ -171,19 +175,21 @@ pub fn worker_question_topics(
                     ));
                 }
             }
-            "run_integrated" => {
+            Some(EventKind::RunIntegrated) => {
                 if let Some(run) = &run {
                     landed.entry(run.clone()).or_default().push(event.id);
                 }
             }
-            "review_finished" if event.payload["verdict"].as_str() == Some("concern") => {
+            Some(EventKind::ReviewFinished)
+                if restore_payload::<ReviewFinished>(&event.payload).verdict == Some("concern") =>
+            {
                 if let Some(run) = &run {
                     concerns.entry(run.clone()).or_default().push(event.id);
                 }
             }
             _ => {}
         }
-        let status = if event.kind == "run_integrated" {
+        let status = if event.kind == EventKind::RunIntegrated {
             Some("integrated")
         } else {
             payload_status(&event.payload)

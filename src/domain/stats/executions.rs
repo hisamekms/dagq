@@ -17,6 +17,8 @@
 //! advisory: the files they are counted from are the executing side's to
 //! change, so they bill or authorize nothing.
 
+use crate::domain::EventKind;
+use crate::domain::run::{JobEnd, restore_payload};
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Serialize, Serializer};
@@ -24,11 +26,10 @@ use serde_json::Value;
 
 use super::{context::RecordedContext, rfc3339_millis, timestamp_millis, tokens::Usd};
 use crate::domain::{
-    GoalId, Provider, RunEvent, RunId, TaskId, event_kind, headless_job,
+    GoalId, Provider, RunEvent, RunId, TaskId, headless_job,
     sessions::{
         GOAL_REVIEW, HEADLESS_ROUTE, KINDS, OBSERVER, PLAN_REVIEW, REVIEW, RUN_SESSION,
-        RUNTIME_PLANNER, SESSION_OPENED, SESSION_TOKENS, THROUGHPUT_REVIEW, TOKEN_CUT_KINDS,
-        TRIAGE, WORKER,
+        RUNTIME_PLANNER, THROUGHPUT_REVIEW, TOKEN_CUT_KINDS, TRIAGE, WORKER,
     },
     tokens::{MODEL_UNKNOWN, TokenSource},
 };
@@ -134,41 +135,47 @@ fn actor_of(
     run_kind: Option<&'static str>,
 ) -> Option<(&'static str, Option<&'static str>)> {
     let job = |actor| Some((actor, None));
-    match event.kind.as_str() {
-        event_kind::TURN_FINISHED if event.run_id.is_some() => {
+    match event.kind.known() {
+        Some(EventKind::TurnFinished) if event.run_id.is_some() => {
             Some((run_kind.unwrap_or(WORKER), Some(HEADLESS_ROUTE)))
         }
-        event_kind::TURN_FINISHED if event.payload["planner_id"].is_i64() => {
+        Some(EventKind::TurnFinished) if event.payload["planner_id"].is_i64() => {
             Some((RUNTIME_PLANNER, Some(HEADLESS_ROUTE)))
         }
         // Each agent job of a review records its own (ADR-t1895-1); a
         // review's end recorded its one job's before its agents ran as
         // jobs. The review's judgment of an `already_satisfied` claim is a
         // review job too.
-        event_kind::REVIEW_JOB_FINISHED
-        | event_kind::RUN_SATISFIED_REVIEW_JOB_FINISHED
-        | event_kind::REVIEW_FINISHED
-        | event_kind::REVIEW_FAILED
-        | event_kind::REVIEW_RETRIED => job(REVIEW),
+        Some(
+            EventKind::ReviewJobFinished
+            | EventKind::RunSatisfiedReviewJobFinished
+            | EventKind::ReviewFinished
+            | EventKind::ReviewFailed
+            | EventKind::ReviewRetried,
+        ) => job(REVIEW),
         // A recovery job also records its tokens on its `triage_*`, which
         // are not counted again.
-        event_kind::RECOVERY_FINISHED => job(TRIAGE),
-        event_kind::PLAN_REVIEW_FINISHED
-        | event_kind::PLAN_REVIEW_FAILED
-        | event_kind::PLAN_REVIEW_DISCARDED => job(PLAN_REVIEW),
-        event_kind::GOAL_REVIEW_FINISHED | event_kind::GOAL_REVIEW_FAILED => job(GOAL_REVIEW),
-        event_kind::OBSERVE_FINISHED => job(OBSERVER),
-        event_kind::THROUGHPUT_REVIEW_FINISHED => job(THROUGHPUT_REVIEW),
+        Some(EventKind::RecoveryFinished) => job(TRIAGE),
+        Some(
+            EventKind::PlanReviewFinished
+            | EventKind::PlanReviewFailed
+            | EventKind::PlanReviewDiscarded,
+        ) => job(PLAN_REVIEW),
+        Some(EventKind::GoalReviewFinished | EventKind::GoalReviewFailed) => job(GOAL_REVIEW),
+        Some(EventKind::ObserveFinished) => job(OBSERVER),
+        Some(EventKind::ThroughputReviewFinished) => job(THROUGHPUT_REVIEW),
         // A job its supervisor stopped with no other event to end it, by
         // the kind of its `headless_jobs` row.
-        event_kind::HEADLESS_JOB_STOPPED => match event.payload["kind"].as_str()? {
-            headless_job::REVIEW => job(REVIEW),
-            headless_job::RECOVERY => job(TRIAGE),
-            headless_job::PLAN_REVIEW => job(PLAN_REVIEW),
-            headless_job::GOAL_REVIEW => job(GOAL_REVIEW),
-            _ => None,
-        },
-        SESSION_TOKENS => {
+        Some(EventKind::HeadlessJobStopped) => {
+            match restore_payload::<JobEnd>(&event.payload).kind? {
+                headless_job::REVIEW => job(REVIEW),
+                headless_job::RECOVERY => job(TRIAGE),
+                headless_job::PLAN_REVIEW => job(PLAN_REVIEW),
+                headless_job::GOAL_REVIEW => job(GOAL_REVIEW),
+                _ => None,
+            }
+        }
+        Some(EventKind::SessionTokens) => {
             let kind = event.payload["kind"].as_str()?;
             let kind = TOKEN_CUT_KINDS.into_iter().find(|cut| *cut == kind)?;
             Some((kind, Some(INTERACTIVE)))
@@ -182,7 +189,7 @@ fn actor_of(
 /// Code transcript, measured or not.
 fn provider_of(event: &RunEvent) -> String {
     let payload = &event.payload;
-    if event.kind == SESSION_TOKENS {
+    if event.kind == EventKind::SessionTokens {
         return Provider::Claude.as_str().to_owned();
     }
     if let Some(provider) = payload["provider"].as_str() {
@@ -201,7 +208,7 @@ pub fn executions(events: &[RunEvent]) -> Vec<Execution> {
     let mut run_kinds: HashMap<&RunId, &'static str> = HashMap::new();
     let mut executions = Vec::new();
     for event in events {
-        if event.kind == SESSION_OPENED
+        if event.kind == EventKind::SessionOpened
             && let Some(run) = &event.run_id
             && let Some(kind) = event.payload["kind"].as_str()
             && let Some(kind) = RUN_SESSION.into_iter().find(|own| *own == kind)
@@ -221,7 +228,7 @@ pub fn executions(events: &[RunEvent]) -> Vec<Execution> {
         let Some((actor, route)) = actor_of(event, run_kind) else {
             continue;
         };
-        let at = if event.kind == SESSION_TOKENS {
+        let at = if event.kind == EventKind::SessionTokens {
             payload["at"].as_str().and_then(rfc3339_millis)
         } else {
             timestamp_millis(&event.created_at)
@@ -587,7 +594,7 @@ mod tests {
             task_id: run.map(|_| TaskId::new(1)),
             goal_id: None,
             run_id: run.map(|run| RunId::new(run).unwrap()),
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: at.to_owned(),
             actor: None,

@@ -44,7 +44,7 @@ use super::{
     },
 };
 use crate::domain::{
-    ActorContext, ActorRole, PlannerId, Provider, RunEvent, TaskRun, event_kind,
+    ActorContext, ActorRole, PlannerId, Provider, RunEvent, TaskRun,
     provider_switch::{session_starts, since_session_start},
     sccache::SccacheTarget,
     stall::StallConfig,
@@ -209,12 +209,12 @@ impl Agent {
         Self {
             provider,
             starts: session_starts(events),
-            created: current.iter().any(|e| {
-                e.kind == event_kind::TURN_FINISHED && e.payload["session_created"] == true
-            }),
+            created: current
+                .iter()
+                .any(|e| e.kind == EventKind::TurnFinished && e.payload["session_created"] == true),
             identified: current
                 .iter()
-                .rfind(|e| e.kind == event_kind::TURN_SESSION_IDENTIFIED)
+                .rfind(|e| e.kind == EventKind::TurnSessionIdentified)
                 .and_then(|e| e.payload["session_id"].as_str().map(str::to_owned)),
             name,
         }
@@ -524,7 +524,7 @@ impl<'a> Turns<'a> {
         let events = self.events()?;
         let mut turn = events
             .iter()
-            .filter(|e| e.kind == event_kind::TURN_STARTED)
+            .filter(|e| e.kind == EventKind::TurnStarted)
             .count() as u64;
         // The session of the provider the run is on: what it did since the
         // run last moved to it (ADR-t813-2).
@@ -568,10 +568,9 @@ impl<'a> Turns<'a> {
                 let renewed = events
                     .iter()
                     .rfind(|e| {
-                        e.kind == event_kind::PROVIDER_SWITCHED
-                            || e.kind == event_kind::SESSION_RENEWED
+                        e.kind == EventKind::ProviderSwitched || e.kind == EventKind::SessionRenewed
                     })
-                    .is_some_and(|e| e.kind == event_kind::SESSION_RENEWED);
+                    .is_some_and(|e| e.kind == EventKind::SessionRenewed);
                 let why = if renewed {
                     "the run's worker starts over for its large context".to_owned()
                 } else {
@@ -1583,6 +1582,7 @@ fn turn_look(
 mod tests {
     use super::*;
     use crate::application::memory_files::MemoryFiles;
+    use crate::domain::event_kind;
 
     fn run_event(kind: &str, payload: serde_json::Value) -> RunEvent {
         RunEvent {

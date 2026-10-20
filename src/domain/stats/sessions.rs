@@ -6,6 +6,7 @@
 //! the window like the open time; `active_ratio` is the active time over
 //! the open time of the spans that have it.
 
+use crate::domain::EventKind;
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Serialize, Serializer};
@@ -16,7 +17,7 @@ use super::{
 };
 use crate::domain::{
     EventId, GoalId, RunEvent, RunId, TaskId,
-    sessions::{HOOK_KINDS, INFERRED, KINDS, SESSION_CLOSED, SESSION_OPENED, SESSION_TURNS},
+    sessions::{HOOK_KINDS, INFERRED, KINDS},
     transcript::Turn,
 };
 
@@ -90,8 +91,8 @@ pub fn spans(events: &[RunEvent]) -> Vec<Span> {
     let mut spans: Vec<Span> = Vec::new();
     let mut index: HashMap<EventId, usize> = HashMap::new();
     for event in events {
-        match event.kind.as_str() {
-            SESSION_OPENED => {
+        match event.kind.known() {
+            Some(EventKind::SessionOpened) => {
                 let Some(start) = timestamp_millis(&event.created_at) else {
                     continue;
                 };
@@ -131,7 +132,7 @@ pub fn spans(events: &[RunEvent]) -> Vec<Span> {
                     planner_id: event.payload["planner_id"].as_i64(),
                 });
             }
-            SESSION_TURNS => {
+            Some(EventKind::SessionTurns) => {
                 let opened = event.payload["opened_event_id"].as_i64().map(EventId::new);
                 let Some(span) = opened
                     .and_then(|opened| index.get(&opened))
@@ -151,7 +152,7 @@ pub fn spans(events: &[RunEvent]) -> Vec<Span> {
                     })
                 }));
             }
-            SESSION_CLOSED => {
+            Some(EventKind::SessionClosed) => {
                 let opened = event.payload["opened_event_id"].as_i64().map(EventId::new);
                 let Some(span) = opened
                     .and_then(|opened| index.get(&opened))
@@ -519,6 +520,9 @@ impl Tally {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::event_kind::SESSION_CLOSED;
+    use crate::domain::event_kind::SESSION_OPENED;
+    use crate::domain::event_kind::SESSION_TURNS;
     use serde_json::json;
 
     fn event(id: i64, run: Option<&str>, kind: &str, payload: Value, secs: i64) -> RunEvent {
@@ -527,7 +531,7 @@ mod tests {
             task_id: run.map(|_| TaskId::new(1)),
             goal_id: None,
             run_id: run.map(|run| RunId::new(run).unwrap()),
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: format!("1970-01-01T00:{:02}:{:02}.000Z", secs / 60, secs % 60),
             actor: None,

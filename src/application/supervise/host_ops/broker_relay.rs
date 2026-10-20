@@ -40,8 +40,8 @@ use crate::application::RunNotFound;
 use crate::application::broker_relay::{RelayControl, close};
 use crate::application::queue_broker::QueueBrokerControl;
 use crate::domain::broker_relay::{
-    QUEUE_RELAY_ATTENTION_KINDS, QUEUE_RELAY_DOWN, RelayAction, RelayFate, RelayRun, RelaySeen,
-    address_port, relay_action, relay_fate,
+    QUEUE_RELAY_ATTENTION_KINDS, RelayAction, RelayFate, RelayRun, RelaySeen, address_port,
+    relay_action, relay_fate,
 };
 use crate::domain::queue_broker::{in_window, look_due};
 use crate::domain::queue_service::ServiceState;
@@ -213,7 +213,7 @@ impl HostOpsState {
 
     fn broker_relay_attention_stands(&mut self, env: &mut HostEnv<'_>) -> bool {
         match env.queue.latest_queue_event(&QUEUE_RELAY_ATTENTION_KINDS) {
-            Ok(latest) => latest.is_some_and(|event| event.kind == QUEUE_RELAY_DOWN),
+            Ok(latest) => latest.is_some_and(|event| event.kind == EventKind::QueueRelayDown),
             Err(error) => {
                 warn!(error = %format_args!("{error:#}"), "the relays' events could not be read: {error:#}");
                 false

@@ -13,6 +13,7 @@ use crate::plan_review::{
 use crate::runtime_support::planner_turns::{
     block_next_request, exit_requested, take_turns, turn_requests,
 };
+use dagq::domain::EventKind;
 use dagq::{
     application::{Clock, Generators, TaskReads, TaskStore, planner_idle_marker},
     domain::{
@@ -552,7 +553,7 @@ fn an_answer_given_as_its_planner_is_ended_goes_once_to_the_next_planner() {
         .unwrap()
         .events
         .into_iter()
-        .filter(|event| event.kind == "ask_delivered")
+        .filter(|event| event.kind == EventKind::AskDelivered)
         .map(|event| event.payload)
         .collect();
     assert_eq!(delivered.len(), 1, "{delivered:?}");
@@ -616,7 +617,7 @@ fn an_answer_that_could_not_be_sent_to_its_planner_goes_once_to_a_new_planner_an
         .unwrap()
         .events
         .into_iter()
-        .filter(|event| event.kind == "ask_delivery_failed")
+        .filter(|event| event.kind == EventKind::AskDeliveryFailed)
         .map(|event| event.payload)
         .collect();
     assert_eq!(failed.len(), 1, "{failed:?}");
@@ -639,7 +640,7 @@ fn an_answer_that_could_not_be_sent_to_its_planner_goes_once_to_a_new_planner_an
             .unwrap()
             .events
             .iter()
-            .filter(|event| event.kind == "ask_delivery_failed")
+            .filter(|event| event.kind == EventKind::AskDeliveryFailed)
             .count(),
         1
     );
@@ -673,7 +674,7 @@ fn an_answer_that_could_not_be_sent_to_its_planner_goes_once_to_a_new_planner_an
         .unwrap()
         .events
         .into_iter()
-        .filter(|event| event.kind == "ask_delivered")
+        .filter(|event| event.kind == EventKind::AskDelivered)
         .count();
     assert_eq!(delivered, 1);
     assert_eq!(backend.launched().len(), 2);
@@ -736,7 +737,7 @@ fn a_planner_is_ended_for_an_answer_it_could_not_be_sent_only_after_reading_the_
         .unwrap()
         .events
         .into_iter()
-        .filter(|event| event.kind == "ask_delivery_failed")
+        .filter(|event| event.kind == EventKind::AskDeliveryFailed)
         .count();
     assert_eq!(failed, 1);
     assert!(!exit_requested(&fx.db, planner.id));

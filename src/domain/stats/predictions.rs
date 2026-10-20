@@ -5,6 +5,7 @@
 //! accuracy (a rank correlation, the lower third's hits) is computed from
 //! these rows, not here.
 
+use crate::domain::EventKind;
 use std::collections::BTreeMap;
 
 use serde::Serialize;
@@ -75,7 +76,7 @@ pub fn attach(
 ) {
     let recorded: Vec<Recorded<'_>> = events
         .iter()
-        .filter(|event| event.kind == "task_weight_predicted")
+        .filter(|event| event.kind == EventKind::TaskWeightPredicted)
         .filter_map(|event| {
             Some(Recorded {
                 id: event.id,
@@ -167,7 +168,7 @@ mod tests {
             task_id: Some(TaskId::new(task)),
             goal_id: None,
             run_id: run.map(|run| RunId::new(run).unwrap()),
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: "2027-01-15T08:00:00.000Z".to_owned(),
             actor: None,

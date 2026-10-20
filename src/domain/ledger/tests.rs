@@ -31,7 +31,7 @@ impl Log {
             task_id: Some(TaskId::new(TASK)),
             goal_id: None,
             run_id: run.map(|run| RunId::new(run).unwrap()),
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: utc_text(ms(secs)),
             actor: None,
@@ -74,7 +74,7 @@ impl Log {
     fn pushes(&self) -> Vec<RunEvent> {
         self.events
             .iter()
-            .filter(|event| event.kind == "push_finished")
+            .filter(|event| event.kind == EventKind::PushFinished)
             .cloned()
             .collect()
     }

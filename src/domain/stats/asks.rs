@@ -7,6 +7,8 @@
 //! open in the window, next to `auto_repairs` of the same window. Per kind
 //! and per asker, how long the asks waited for their answer and for the
 //! answer to be applied, and how long the open ones have waited (task 468).
+use crate::domain::EventKind;
+use crate::domain::run::{AskOpened, restore_payload};
 use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
@@ -152,22 +154,22 @@ struct AskTrack {
 /// The events that do not apply an answer, though they name the ask: the
 /// ask's own, and a run's wait on it, which ends when the answer arrives,
 /// before it is delivered once the run has its slot back.
-const NOT_APPLYING: &[&str] = &[
-    "ask_opened",
-    "ask_answered",
-    "ask_updated",
-    "ask_delivery_failed",
-    "planner_answer_claimed",
-    "run_waiting_started",
-    "run_waiting_ask_added",
-    "run_waiting_ended",
-    "run_waiting_deferred",
-    "run_slot_regained",
+const NOT_APPLYING: &[EventKind] = &[
+    EventKind::AskOpened,
+    EventKind::AskAnswered,
+    EventKind::AskUpdated,
+    EventKind::AskDeliveryFailed,
+    EventKind::PlannerAnswerClaimed,
+    EventKind::RunWaitingStarted,
+    EventKind::RunWaitingAskAdded,
+    EventKind::RunWaitingEnded,
+    EventKind::RunWaitingDeferred,
+    EventKind::RunSlotRegained,
     // The verification an answer to close an `already_satisfied` claim runs
     // again (ADR-t1818-1): the answer is applied when the claim closes, or
     // when the ask closes after the verification failed, not when it starts.
-    crate::domain::event_kind::RUN_SATISFIED_SNAPSHOT,
-    crate::domain::event_kind::RUN_SATISFIED_VERIFIED,
+    EventKind::RunSatisfiedSnapshot,
+    EventKind::RunSatisfiedVerified,
 ];
 
 /// The asks of one `reason_category` in a window.
@@ -241,14 +243,18 @@ pub fn asks(
         .filter(|event| event.id > after && event.id <= upto && counts(event.task_id))
     {
         let payload = &event.payload;
-        match event.kind.as_str() {
-            "ask_opened" => {
+        match event.kind.known() {
+            Some(EventKind::AskOpened) => {
+                let ask = restore_payload::<AskOpened>(payload);
                 let opened = &mut stats.opened;
                 opened.count += 1;
-                *opened.by_kind.entry(text(payload, "kind")).or_default() += 1;
+                *opened
+                    .by_kind
+                    .entry(ask.kind.unwrap_or(UNKNOWN).to_owned())
+                    .or_default() += 1;
                 *opened
                     .by_asked_by
-                    .entry(text(payload, "asked_by"))
+                    .entry(ask.asked_by.unwrap_or(UNKNOWN).to_owned())
                     .or_default() += 1;
                 let reason = text(payload, "reason_category");
                 *opened.by_reason_category.entry(reason.clone()).or_default() += 1;
@@ -261,7 +267,7 @@ pub fn asks(
                     counts.open += 1;
                 }
             }
-            "ask_answered" => {
+            Some(EventKind::AskAnswered) => {
                 let reason = match payload.get("reason_category").and_then(Value::as_str) {
                     Some(reason) => reason.to_owned(),
                     None => tracks
@@ -310,7 +316,7 @@ fn tracks(events: &[RunEvent], upto: EventId) -> HashMap<AskKey, AskTrack> {
     // The runs back in a slot: the event, the run and how long it waited.
     let mut regained: Vec<(EventId, String, i64)> = Vec::new();
     for event in events.iter().filter(|event| event.id <= upto) {
-        if event.kind == "run_slot_regained"
+        if event.kind == EventKind::RunSlotRegained
             && let Some(run) = &event.run_id
         {
             regained.push((
@@ -320,30 +326,28 @@ fn tracks(events: &[RunEvent], upto: EventId) -> HashMap<AskKey, AskTrack> {
             ));
         }
         let at = || (event.id, timestamp_millis(&event.created_at));
-        if event.kind == "ask_closed"
+        if event.kind == EventKind::AskClosed
             && let Some(track) = tracks.get_mut(&ask_key(event))
             && track.closed.is_none()
         {
             track.closed = Some(at());
         }
-        match event.kind.as_str() {
-            "ask_opened" => {
+        match event.kind.known() {
+            Some(EventKind::AskOpened) => {
                 let key = ask_key(event);
                 if let Some(id) = &key.0 {
                     by_id.insert(id.clone(), key.clone());
                 }
+                let ask = restore_payload::<AskOpened>(&event.payload);
                 tracks.insert(
                     key,
                     AskTrack {
                         reason: text(&event.payload, "reason_category"),
-                        kind: text(&event.payload, "kind"),
-                        asked_by: text(&event.payload, "asked_by"),
-                        topic: (event.payload["kind"].as_str() == Some("worker_question")).then(
-                            || {
-                                super::worker_question_topics::topics_of(&event.payload)
-                                    .swap_remove(0)
-                            },
-                        ),
+                        kind: ask.kind.unwrap_or(UNKNOWN).to_owned(),
+                        asked_by: ask.asked_by.unwrap_or(UNKNOWN).to_owned(),
+                        topic: (ask.kind == Some("worker_question")).then(|| {
+                            super::worker_question_topics::topics_of(&event.payload).swap_remove(0)
+                        }),
                         task_id: event.task_id,
                         opened_ms: timestamp_millis(&event.created_at),
                         answered: None,
@@ -355,7 +359,7 @@ fn tracks(events: &[RunEvent], upto: EventId) -> HashMap<AskKey, AskTrack> {
                     },
                 );
             }
-            "ask_answered" => {
+            Some(EventKind::AskAnswered) => {
                 if let Some(track) = tracks.get_mut(&ask_key(event))
                     && track.answered.is_none()
                 {
@@ -366,7 +370,7 @@ fn tracks(events: &[RunEvent], upto: EventId) -> HashMap<AskKey, AskTrack> {
                     }
                 }
             }
-            kind if !NOT_APPLYING.contains(&kind) => {
+            kind if !kind.is_some_and(|kind| NOT_APPLYING.contains(&kind)) => {
                 // Only `ask_id` names the ask here: another event's `id`
                 // may be something else.
                 if let Some(track) = event
@@ -536,7 +540,7 @@ mod tests {
             task_id: task_id.map(TaskId::new),
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: String::new(),
             actor: None,

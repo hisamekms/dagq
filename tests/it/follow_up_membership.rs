@@ -1,5 +1,6 @@
 //! Membership, immutable provenance, adoption and migration at the SQLite/CLI boundary.
 use crate::common::{self, queue::*};
+use dagq::domain::EventKind;
 use dagq::domain::follow_up::{MembershipClassification as Class, MembershipJudgement};
 use dagq::{
     application::{TaskReads, TaskStore},
@@ -958,7 +959,7 @@ impl Landed {
             .unwrap()
             .events
             .into_iter()
-            .filter(|e| e.kind == kind)
+            .filter(|e| e.kind.as_str() == kind)
             .map(|e| e.payload)
             .collect()
     }
@@ -1153,7 +1154,7 @@ fn each_answer_to_a_correction_is_applied_and_keeps_the_history() {
                 .unwrap()
                 .events
                 .iter()
-                .filter(|e| e.kind == "ask_closed" && e.payload["ask_id"] == json!(ask.id))
+                .filter(|e| e.kind == EventKind::AskClosed && e.payload["ask_id"] == json!(ask.id))
                 .count(),
             1
         );
@@ -1569,7 +1570,7 @@ fn correction_answer_attention_uses_the_recorded_delivery_decision() {
                 .events
                 .into_iter()
                 .rev()
-                .find(|e| e.kind == "ask_answered")
+                .find(|e| e.kind == EventKind::AskAnswered)
                 .unwrap()
                 .payload;
         assert_eq!(answered["runtime_delivers"], runtime_delivers);

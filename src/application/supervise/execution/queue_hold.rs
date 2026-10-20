@@ -44,7 +44,7 @@ use crate::domain::EventKind;
 use crate::domain::{
     Ask, GoalId, PlannerOrigin, ProposalId, RunEvent,
     proposal::{PlannerOwner, Submission as Resubmission},
-    queue_hold::{self, CANCEL_AFFECTED, DONE, HOLD_ANSWER_APPLIED},
+    queue_hold::{self, CANCEL_AFFECTED, DONE},
     stats::timestamp_millis,
 };
 
@@ -328,7 +328,7 @@ impl Supervisor<'_> {
         let held: Vec<ProposalId> = match self.queue.plan_review_holds() {
             Ok(holds) => holds
                 .into_iter()
-                .filter(|hold| hold.kind == event_kind::PLAN_REVIEW_FAILED)
+                .filter(|hold| hold.kind == EventKind::PlanReviewFailed)
                 .map(|hold| hold.proposal_id)
                 .collect(),
             Err(error) => {
@@ -397,7 +397,7 @@ impl Supervisor<'_> {
         let latest = events
             .iter()
             .rev()
-            .find(|e| e.kind == event_kind::TRIAGE_FAILED)
+            .find(|e| e.kind == EventKind::TriageFailed)
             .map(|e| e.id);
         if triage_state(&events) != TriageState::Failed || latest != Some(event.id) {
             return Ok(false);
@@ -434,7 +434,7 @@ fn hold_outcome(phase: &Phase, answer: &str) -> &'static str {
 fn applied_to(events: &[RunEvent], ask_id: AskId) -> Option<&Value> {
     events
         .iter()
-        .find(|e| e.kind == HOLD_ANSWER_APPLIED && e.payload["ask_id"] == json!(ask_id))
+        .find(|e| e.kind == EventKind::HoldAnswerApplied && e.payload["ask_id"] == json!(ask_id))
         .map(|e| &e.payload)
 }
 

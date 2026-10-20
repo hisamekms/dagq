@@ -15,9 +15,10 @@
 //! holds), or the test failed the rerun of [`FAILURES_IN_A_ROW`] gates in a
 //! row counting this one (it is broken, not flaky).
 
+use crate::domain::EventKind;
 use serde_json::{Value, json};
 
-use super::{RunEvent, UPDATE_E2E_PASSED, UPDATE_FAILED};
+use super::RunEvent;
 
 /// Where the marks live, relative to the checkout.
 pub const FILE: &str = ".config/e2e-quarantine.toml";
@@ -362,12 +363,12 @@ fn date(text: &str) -> Option<i64> {
 pub fn failures_in_a_row<'a>(history: impl IntoIterator<Item = &'a RunEvent>, test: &str) -> usize {
     let mut count = 0;
     for event in history {
-        let run_passed = event.kind == super::event_kind::RUN_E2E_FINISHED
-            && event.payload["outcome"] == "passed";
-        let passed = event.kind == UPDATE_E2E_PASSED || run_passed;
+        let run_passed =
+            event.kind == EventKind::RunE2eFinished && event.payload["outcome"] == "passed";
+        let passed = event.kind == EventKind::UpdateE2ePassed || run_passed;
         let gate = passed
-            || (event.kind == UPDATE_FAILED && event.payload["stage"] == "e2e")
-            || event.kind == super::event_kind::RUN_E2E_FAILED;
+            || (event.kind == EventKind::UpdateFailed && event.payload["stage"] == "e2e")
+            || event.kind == EventKind::RunE2eFailed;
         if !gate {
             continue;
         }
@@ -394,6 +395,7 @@ pub fn failures_in_a_row<'a>(history: impl IntoIterator<Item = &'a RunEvent>, te
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::UPDATE_FAILED;
 
     fn mark(name: &str, until: &str) -> String {
         format!("[[test]]\nname = \"{name}\"\nreason = \"flaky\"\ntask = 7\nuntil = {until}\n")
@@ -544,7 +546,7 @@ name = \"b\"\nreason = \"x\\ty\"\ntask = 3\nuntil = \"2024-02-29\"\n";
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: String::new(),
             actor: None,

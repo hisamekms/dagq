@@ -2,6 +2,7 @@
 //! for a task of `[supervisor] light_changes` that declares its `--paths`,
 //! and only for one (ADR-t1591-1).
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use dagq::domain::{ExecutionClass, LeaseToken, Priority, change::TaskChange};
 use runtime_support::*;
@@ -72,7 +73,7 @@ fn claims(db: &Path) -> Vec<(TaskId, Value)> {
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == "run_claimed")
+        .filter(|event| event.kind == EventKind::RunClaimed)
         .map(|event| (event.task_id.unwrap(), event.payload))
         .collect()
 }
@@ -84,7 +85,7 @@ fn landing_queued(db: &Path, task: TaskId) -> bool {
         .unwrap()
         .events
         .iter()
-        .any(|event| event.kind == "landing_queued")
+        .any(|event| event.kind == EventKind::LandingQueued)
 }
 
 /// With `light_changes = ["docs"]` and one slot, a run whose review passed
@@ -155,7 +156,7 @@ fn the_landing_queue_leaves_room_for_light_tasks_only() {
             .all_events()
             .unwrap()
             .iter()
-            .any(|event| event.kind == "supervisor_config_changed")
+            .any(|event| event.kind == EventKind::SupervisorConfigChanged)
     );
 
     let status = runtime::status(&db).unwrap();
@@ -220,7 +221,7 @@ fn task_events(db: &Path, task: TaskId) -> Vec<(i64, String)> {
         .unwrap()
         .events
         .iter()
-        .map(|event| (event.id.as_i64(), event.kind.clone()))
+        .map(|event| (event.id.as_i64(), event.kind.to_string()))
         .collect()
 }
 

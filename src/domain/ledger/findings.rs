@@ -7,21 +7,21 @@
 //! `finding_baseline` on. Measurement only: no decision of the runtime
 //! reads it.
 
+use crate::domain::EventKind;
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
 use super::super::{
     FindingAttributes, FindingId, FindingStatus, GoalId, Impact, RunEvent, RunId, TaskId,
-    event_kind,
 };
 
 /// The kinds [`fold`] reads: a reader may give it only these.
-pub const KINDS: &[&str] = &[
-    event_kind::FINDING_BASELINE,
-    event_kind::FINDING_RECORDED,
-    event_kind::FINDING_UPDATED,
-    event_kind::FINDING_STATUS_CHANGED,
+pub const KINDS: &[EventKind] = &[
+    EventKind::FindingBaseline,
+    EventKind::FindingRecorded,
+    EventKind::FindingUpdated,
+    EventKind::FindingStatusChanged,
 ];
 
 /// The key of a record's attributes in its payload.
@@ -70,15 +70,15 @@ pub fn fold(events: &[RunEvent], window_end: Option<i64>) -> Folded {
 /// [`fold`] for a window that ends at `end`: an event, a time or both.
 pub fn fold_within(events: &[RunEvent], end: super::WindowEnd) -> Folded {
     let is_mark =
-        |event: &RunEvent| event.kind == event_kind::FINDING_BASELINE && values(event).is_none();
+        |event: &RunEvent| event.kind == EventKind::FindingBaseline && values(event).is_none();
     let is_record =
-        |event: &RunEvent| event.kind == event_kind::FINDING_BASELINE && values(event).is_some();
+        |event: &RunEvent| event.kind == EventKind::FindingBaseline && values(event).is_some();
     let Some(taken) = super::baseline::taken(events, end, is_mark, is_record) else {
         return Folded::BeforeBaseline;
     };
     let mut findings = Findings::default();
     for (event, _) in events.iter().zip(&taken).filter(|(_, taken)| **taken) {
-        if !KINDS.contains(&event.kind.as_str()) {
+        if !event.kind.is_in(KINDS) {
             continue;
         }
         if let Some(finding) = values(event).and_then(restore) {

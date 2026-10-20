@@ -1170,10 +1170,7 @@ impl SqliteQueue {
     /// `cleanup_failed` need not order those events.
     pub fn workspace_closed(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(
-            &self.conn,
-            Closing::Run(id, &[event_kind::WORKSPACE_CLOSED]),
-        )?;
+        let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::WorkspaceClosed]))?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1241,10 +1238,7 @@ impl SqliteQueue {
         mut payload: serde_json::Value,
     ) -> Result<()> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(
-            &self.conn,
-            Closing::Run(id, &[event_kind::WORKSPACE_CLOSED]),
-        )?;
+        let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::WorkspaceClosed]))?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1712,7 +1706,7 @@ mod tests {
         run_events_of(&queue.conn, run)
             .unwrap()
             .into_iter()
-            .map(|event| (event.id.as_i64(), event.kind, event.payload))
+            .map(|event| (event.id.as_i64(), event.kind.to_string(), event.payload))
             .collect()
     }
 

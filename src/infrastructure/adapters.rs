@@ -4180,6 +4180,7 @@ pub const PRINT_MODE_DENIED_TOOLS: [&str; 2] = ["ScheduleWakeup", "CronCreate"];
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::EventKind;
     use crate::domain::{Provider, RunId, RunStatus};
 
     #[test]
@@ -5057,7 +5058,7 @@ mod tests {
             let reach = events
                 .iter()
                 .rev()
-                .find(|event| event.kind == "main_observed")
+                .find(|event| event.kind == EventKind::MainObserved)
                 .and_then(Reach::of);
             let recorded = Recorded {
                 reach,
@@ -5070,7 +5071,7 @@ mod tests {
                     task_id: None,
                     goal_id: None,
                     run_id: None,
-                    kind: kind.as_str().to_owned(),
+                    kind: kind.as_str().into(),
                     payload,
                     created_at: crate::domain::marks::utc_text(now * 1000),
                     actor: None,
@@ -5106,7 +5107,11 @@ mod tests {
         fs::write(dir.path().join("other.txt"), "o\n").unwrap();
         commit(&[&["add", "other.txt"]]);
         pass(&mut events, 2_000_000_200);
-        assert!(events.iter().any(|event| event.kind == "main_rewritten"));
+        assert!(
+            events
+                .iter()
+                .any(|event| event.kind == EventKind::MainRewritten)
+        );
         matches_git(&events);
         // A merge that keeps the head recorded only as its second parent
         // leaves the first-parent line: recorded again, not appended.
@@ -5120,7 +5125,10 @@ mod tests {
             assert!(git_in(dir.path(), step).status.success(), "{step:?}");
         }
         pass(&mut events, 2_000_000_300);
-        let rewrites = events.iter().filter(|e| e.kind == "main_rewritten").count();
+        let rewrites = events
+            .iter()
+            .filter(|e| e.kind == EventKind::MainRewritten)
+            .count();
         assert_eq!(rewrites, 2);
         matches_git(&events);
     }

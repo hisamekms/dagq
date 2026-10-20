@@ -197,18 +197,17 @@ pub fn step_commit(update: &RunEvent) -> Option<&str> {
 
 /// The steps a job writes before the one that ends it: a job whose latest
 /// step is one of these and whose process is gone was interrupted.
-pub const JOB_STEPS: &[&str] = &[
-    UPDATE_STARTED,
-    UPDATE_BUILT,
-    UPDATE_E2E_PASSED,
-    UPDATE_RESTORED,
+pub const JOB_STEPS: &[EventKind] = &[
+    EventKind::UpdateStarted,
+    EventKind::UpdateBuilt,
+    EventKind::UpdateE2ePassed,
+    EventKind::UpdateRestored,
 ];
 
 /// Whether `update` is a step of a job still working: one of
 /// [`JOB_STEPS`] and the job's process lives.
 pub fn in_progress(update: &RunEvent, processes: &dyn ProcessControl) -> bool {
-    JOB_STEPS.contains(&update.kind.as_str())
-        && job_pid(update).is_some_and(|pid| processes.alive(pid))
+    update.kind.is_in(JOB_STEPS) && job_pid(update).is_some_and(|pid| processes.alive(pid))
 }
 
 /// Whether `update` is the supervisor's word about an answer (an
@@ -216,8 +215,8 @@ pub fn in_progress(update: &RunEvent, processes: &dyn ProcessControl) -> bool {
 /// step a job wrote.
 fn is_answer_step(update: &RunEvent) -> bool {
     matches!(
-        update.kind.as_str(),
-        UPDATE_ANSWERED | UPDATE_RETRY | UPDATE_DROPPED
+        update.kind.known(),
+        Some(EventKind::UpdateAnswered | EventKind::UpdateRetry | EventKind::UpdateDropped)
     )
 }
 
@@ -234,7 +233,7 @@ pub fn latest_job_step(updates: &[RunEvent]) -> Option<&RunEvent> {
 /// `updates`.
 pub fn failed_step(updates: &[RunEvent], ask_id: crate::domain::AskId) -> Option<&RunEvent> {
     updates.iter().find(|update| {
-        update.kind == UPDATE_FAILED
+        update.kind == EventKind::UpdateFailed
             && update.payload.get("ask_id").and_then(Value::as_i64) == Some(ask_id.as_i64())
     })
 }
@@ -416,25 +415,36 @@ pub fn status(
         Some(step) if in_progress(step, processes) => step,
         _ => latest,
     };
-    let state = match latest.kind.as_str() {
-        UPDATE_STARTED if in_progress(latest, processes) => "building",
+    let state = match latest.kind.known() {
+        Some(EventKind::UpdateStarted) if in_progress(latest, processes) => "building",
         // A build of main runs its e2e after it is built (ADR-t963-1); a
         // release goes on to its install.
-        UPDATE_BUILT if in_progress(latest, processes) && step_release(latest).is_none() => {
+        Some(EventKind::UpdateBuilt)
+            if in_progress(latest, processes) && step_release(latest).is_none() =>
+        {
             "testing"
         }
-        UPDATE_BUILT | UPDATE_E2E_PASSED if in_progress(latest, processes) => "installing",
-        UPDATE_RESTORED if in_progress(latest, processes) => "restoring",
-        UPDATE_STARTED | UPDATE_BUILT | UPDATE_E2E_PASSED | UPDATE_RESTORED => "interrupted",
-        UPDATE_INSTALLED if crate::domain::stats::updates::plugin_only(latest) => {
+        Some(EventKind::UpdateBuilt | EventKind::UpdateE2ePassed)
+            if in_progress(latest, processes) =>
+        {
+            "installing"
+        }
+        Some(EventKind::UpdateRestored) if in_progress(latest, processes) => "restoring",
+        Some(
+            EventKind::UpdateStarted
+            | EventKind::UpdateBuilt
+            | EventKind::UpdateE2ePassed
+            | EventKind::UpdateRestored,
+        ) => "interrupted",
+        Some(EventKind::UpdateInstalled) if crate::domain::stats::updates::plugin_only(latest) => {
             "plugin_installed"
         }
-        UPDATE_INSTALLED => "installed",
-        UPDATE_FAILED => "failed",
-        UPDATE_AWAITING_APPROVAL => "awaiting_approval",
-        UPDATE_RETRY => "retry_requested",
-        UPDATE_ANSWERED => "skipped",
-        UPDATE_DROPPED => "dropped",
+        Some(EventKind::UpdateInstalled) => "installed",
+        Some(EventKind::UpdateFailed) => "failed",
+        Some(EventKind::UpdateAwaitingApproval) => "awaiting_approval",
+        Some(EventKind::UpdateRetry) => "retry_requested",
+        Some(EventKind::UpdateAnswered) => "skipped",
+        Some(EventKind::UpdateDropped) => "dropped",
         _ => "unknown",
     };
     // The commit is the one the latest job worked on; an answer's row
@@ -468,7 +478,7 @@ pub enum Trigger {
 pub fn base_commit(updates: &[RunEvent], version: &str, fallback: Option<&str>) -> Option<String> {
     updates
         .iter()
-        .find(|update| update.kind == UPDATE_STARTED && step_release(update).is_none())
+        .find(|update| update.kind == EventKind::UpdateStarted && step_release(update).is_none())
         .and_then(step_commit)
         .map(str::to_owned)
         .or_else(|| build_commit(version).map(str::to_owned))
@@ -482,8 +492,13 @@ pub fn retry_requested(updates: &[RunEvent]) -> bool {
     updates
         .iter()
         .filter(|update| step_release(update).is_none() && !step_install(update))
-        .find(|update| matches!(update.kind.as_str(), UPDATE_STARTED | UPDATE_RETRY))
-        .is_some_and(|update| update.kind == UPDATE_RETRY)
+        .find(|update| {
+            matches!(
+                update.kind.known(),
+                Some(EventKind::UpdateStarted | EventKind::UpdateRetry)
+            )
+        })
+        .is_some_and(|update| update.kind == EventKind::UpdateRetry)
 }
 
 /// The update job's settings: the commit to build, the supervisor that
@@ -2102,7 +2117,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: "2026-09-28T01:00:00.000Z".to_owned(),
             actor: None,
@@ -2153,7 +2168,7 @@ mod tests {
         let interrupted = [manual.clone(), started];
         assert_eq!(
             latest_job_step_of(&interrupted, false).unwrap().kind,
-            UPDATE_STARTED
+            EventKind::UpdateStarted
         );
         assert!(!retry_requested(&interrupted));
         assert_eq!(status_of_only(&manual)["state"], "idle");
@@ -2230,10 +2245,13 @@ mod tests {
         );
         let updates = [dropped, started];
         assert_eq!(status(&[], &updates, &NoneAlive, 0)["state"], "dropped");
-        assert_eq!(latest_job_step(&updates).unwrap().kind, UPDATE_STARTED);
+        assert_eq!(
+            latest_job_step(&updates).unwrap().kind,
+            EventKind::UpdateStarted
+        );
         assert_eq!(
             latest_job_step_of(&updates, true).unwrap().kind,
-            UPDATE_STARTED
+            EventKind::UpdateStarted
         );
     }
 

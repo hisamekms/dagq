@@ -4,6 +4,7 @@
 //! the worker in place of the nudge, once.
 use crate::common;
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use dagq::domain::LeaseToken;
 use dagq::domain::turn::exit_path;
@@ -28,7 +29,7 @@ fn waiting_run(db: &Path) -> (TaskRun, dagq::domain::Ask) {
             .unwrap()
             .events
             .iter()
-            .any(|e| e.kind == "run_waiting_started")
+            .any(|e| e.kind == EventKind::RunWaitingStarted)
     });
     let mut queue = SqliteQueue::open(db).unwrap();
     let run = queue.show(TASK).unwrap().runs[0].clone();
@@ -51,7 +52,7 @@ fn end_wrapper(db: &Path, run: &TaskRun) {
             .unwrap()
             .events
             .iter()
-            .any(|e| e.kind == "session_exited")
+            .any(|e| e.kind == EventKind::SessionExited)
     });
 }
 

@@ -10,6 +10,7 @@
 //! events, the queue's pushes, the waits before a claim and `now_ms` are
 //! all, and the same input gives the same output.
 
+use crate::domain::EventKind;
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
 
@@ -21,7 +22,7 @@ use crate::domain::claim_facts::ATTRIBUTES;
 use crate::domain::pre_claim::{IntervalKind, PreClaimInterval};
 use crate::domain::run_phase::{Attempt, Blocker, Holds, PUSHED, Phase};
 use crate::domain::stats::timestamp_millis;
-use crate::domain::{EventId, RunEvent, TaskId, event_kind};
+use crate::domain::{EventId, RunEvent, TaskId};
 
 /// The phase name of time no record accounts for.
 pub const UNATTRIBUTED: &str = "unattributed";
@@ -120,13 +121,13 @@ pub struct Milestones {
 
 impl Milestones {
     fn observe(&mut self, event: &RunEvent, at: i64) {
-        let slot = match event.kind.as_str() {
-            event_kind::RUN_CLAIMED => &mut self.claimed,
-            event_kind::AGENT_STARTED => &mut self.agent_started,
-            event_kind::FIRST_COMMIT_OBSERVED => &mut self.first_commit,
-            event_kind::RECEIPT_OBSERVED => &mut self.receipt,
-            event_kind::VALIDATION_FINISHED => &mut self.validated,
-            event_kind::RUN_INTEGRATED => &mut self.integrated,
+        let slot = match event.kind.known() {
+            Some(EventKind::RunClaimed) => &mut self.claimed,
+            Some(EventKind::AgentStarted) => &mut self.agent_started,
+            Some(EventKind::FirstCommitObserved) => &mut self.first_commit,
+            Some(EventKind::ReceiptObserved) => &mut self.receipt,
+            Some(EventKind::ValidationFinished) => &mut self.validated,
+            Some(EventKind::RunIntegrated) => &mut self.integrated,
             _ => return,
         };
         slot.get_or_insert(at);
@@ -210,7 +211,7 @@ fn at(event: &RunEvent) -> Option<i64> {
 pub fn fold_run(events: &[RunEvent], pushes: &[RunEvent], now_ms: i64) -> Option<RunLife> {
     let records: Vec<Record> = events
         .iter()
-        .filter(|event| event.kind == event_kind::RUN_PHASE_CHANGED)
+        .filter(|event| event.kind == EventKind::RunPhaseChanged)
         .filter_map(|event| {
             Some(Record {
                 event,
@@ -229,7 +230,7 @@ pub fn fold_run(events: &[RunEvent], pushes: &[RunEvent], now_ms: i64) -> Option
         if let Some(at) = at(event) {
             milestones.observe(event, at);
         }
-        if event.kind == event_kind::RUN_CLAIMED
+        if event.kind == EventKind::RunClaimed
             && attributes.is_empty()
             && let Some(Value::Object(set)) = event.payload.get(ATTRIBUTES)
         {
@@ -292,7 +293,7 @@ pub fn fold_run(events: &[RunEvent], pushes: &[RunEvent], now_ms: i64) -> Option
 /// its end.
 fn finished(events: &[RunEvent]) -> bool {
     events.iter().any(|event| {
-        event.kind == event_kind::RUN_INTEGRATED
+        event.kind == EventKind::RunIntegrated
             || matches!(
                 event.payload["status"].as_str(),
                 Some("failed" | "interrupted" | "succeeded" | "integrated")
@@ -311,10 +312,10 @@ fn later_push<'p>(
     let failed = events
         .iter()
         .rev()
-        .find(|event| event.kind == event_kind::PUSH_FAILED && event.id < after);
+        .find(|event| event.kind == EventKind::PushFailed && event.id < after);
     let target = |event: &RunEvent, key: &str| event.payload[key].as_str().map(str::to_owned);
     pushes.iter().find(|push| {
-        push.kind == event_kind::PUSH_FINISHED
+        push.kind == EventKind::PushFinished
             && push.id > after
             && failed.is_none_or(|failed| {
                 ["remote", "branch"].iter().all(|key| {
@@ -388,7 +389,7 @@ pub fn fold_task(
     let mut runs: Vec<(String, Option<i64>, Option<RunLife>)> = Vec::new();
     for claim in events
         .iter()
-        .filter(|event| event.kind == event_kind::RUN_CLAIMED)
+        .filter(|event| event.kind == EventKind::RunClaimed)
     {
         let Some(run) = &claim.run_id else { continue };
         let own: Vec<RunEvent> = events
@@ -412,7 +413,7 @@ pub fn fold_task(
         .collect();
     let start = events
         .iter()
-        .find(|event| event.kind == event_kind::TASK_CREATED)
+        .find(|event| event.kind == EventKind::TaskCreated)
         .or(events.first())
         .and_then(at)
         .unwrap_or(now_ms);
@@ -499,8 +500,8 @@ fn statuses(events: &[RunEvent], start: i64) -> Vec<(i64, String)> {
         .iter()
         .filter(|event| {
             matches!(
-                event.kind.as_str(),
-                event_kind::TASK_STATUS_CHANGED | event_kind::RUN_CLAIMED
+                event.kind.known(),
+                Some(EventKind::TaskStatusChanged | EventKind::RunClaimed)
             )
         })
         .filter_map(|event| Some((at(event)?, &event.payload)))

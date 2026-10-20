@@ -1179,7 +1179,7 @@ pub fn recent_run_sizes<L: RunLog + ?Sized>(log: &L, sample_runs: i64) -> anyhow
     let limit = usize::try_from(sample_runs).unwrap_or(0);
     let mut events = Vec::new();
     for kind in crate::domain::disk::RUN_SIZE_EVENTS {
-        events.extend(log.latest_events_of(kind, limit)?);
+        events.extend(log.latest_events_of(kind.as_str(), limit)?);
     }
     Ok(crate::domain::disk::run_size(&events).into_iter().collect())
 }

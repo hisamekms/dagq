@@ -18,12 +18,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use serde::Serialize;
 
 use super::{EventId, RunEvent, Summary, TaskId, summary, timestamp_millis};
-use crate::domain::event_kind::{
-    DRAFT_PLANNER_OPENED, FOLLOW_UP_REGISTERED, PLAN_REVIEW_STARTED, RUN_CLAIMED, RUN_INTEGRATED,
-    TASK_CREATED, TASK_REOPENED, TASK_STATUS_CHANGED, TASK_SUBMITTED,
-};
 use crate::domain::run::payload::restore;
-use crate::domain::{ProposalId, RunStatus, TaskStatus, UNLABELED_CATEGORY, cancel_reason};
+use crate::domain::{
+    EventKind, ProposalId, RunStatus, TaskStatus, UNLABELED_CATEGORY, cancel_reason,
+};
 
 /// The cancels of one reason in a window.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -103,9 +101,9 @@ pub fn cancel_reasons(
     let mut reasons: BTreeMap<String, CancelReason> = BTreeMap::new();
     for event in events.iter().filter(|event| event.id <= upto) {
         let at = timestamp_millis(&event.created_at);
-        match event.kind.as_str() {
+        match event.kind.known() {
             // The follow_up's event is its source run's; the draft is named.
-            FOLLOW_UP_REGISTERED => {
+            Some(EventKind::FollowUpRegistered) => {
                 let registered: restored::FollowUpRegistered = restore(&event.payload);
                 if let Some(task_id) = registered.task_id {
                     tasks.entry(task_id).or_default().category = Some(
@@ -117,7 +115,7 @@ pub fn cancel_reasons(
                 continue;
             }
             // The plan review's event is on the proposal's first task.
-            PLAN_REVIEW_STARTED => {
+            Some(EventKind::PlanReviewStarted) => {
                 let started: restored::OfProposal = restore(&event.payload);
                 if let Some(proposal) = started.proposal_id {
                     *reviews.entry(proposal).or_default() += 1;
@@ -132,11 +130,11 @@ pub fn cancel_reasons(
         let history = tasks.entry(task_id).or_default();
         if let Some(run_id) = &event.run_id {
             let span = history.runs.entry(run_id.to_string()).or_default();
-            if event.kind == RUN_CLAIMED {
+            if event.kind == EventKind::RunClaimed {
                 span.claimed = span.claimed.or(at);
             }
             // A run's status ends it, or opens it again (a resume).
-            let status = if event.kind == RUN_INTEGRATED {
+            let status = if event.kind == EventKind::RunIntegrated {
                 Some(RunStatus::Integrated)
             } else {
                 restore::<restored::RunStatusOf>(&event.payload).status
@@ -145,11 +143,11 @@ pub fn cancel_reasons(
                 span.ended = (!RunStatus::is_unfinished(status)).then_some(at).flatten();
             }
         }
-        match event.kind.as_str() {
-            TASK_CREATED => history.created = at,
+        match event.kind.known() {
+            Some(EventKind::TaskCreated) => history.created = at,
             // A submit, or a reopen into a proposal of its own (which
             // records no `task_submitted`), moves it into a proposal.
-            TASK_SUBMITTED | TASK_REOPENED => {
+            Some(EventKind::TaskSubmitted | EventKind::TaskReopened) => {
                 let joined: restored::OfProposal = restore(&event.payload);
                 history.submitted = true;
                 history.leave(&reviews);
@@ -157,8 +155,8 @@ pub fn cancel_reasons(
                     .proposal_id
                     .map(|proposal| (proposal, reviews.get(&proposal).copied().unwrap_or(0)));
             }
-            DRAFT_PLANNER_OPENED => history.runtime_planners += 1,
-            TASK_STATUS_CHANGED => {
+            Some(EventKind::DraftPlannerOpened) => history.runtime_planners += 1,
+            Some(EventKind::TaskStatusChanged) => {
                 let changed = cancel_reason::Recorded::of(&event.payload);
                 match changed.to {
                     Some(TaskStatus::Submitted) => history.submitted = true,
@@ -304,6 +302,11 @@ fn count(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::event_kind::PLAN_REVIEW_STARTED;
+    use crate::domain::event_kind::TASK_CREATED;
+    use crate::domain::event_kind::TASK_REOPENED;
+    use crate::domain::event_kind::TASK_STATUS_CHANGED;
+    use crate::domain::event_kind::TASK_SUBMITTED;
     use crate::domain::{EventActor, RunId};
     use serde_json::{Value, json};
 

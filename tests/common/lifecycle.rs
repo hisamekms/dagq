@@ -2,6 +2,7 @@
 //! lifecycle tests (`tests/lifecycle_*.rs`).
 
 use super::Bounded;
+use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
 use dagq::infrastructure::git_binary::git_executable;
 
@@ -383,7 +384,7 @@ pub fn backend_failures(fixture: &Fixture) -> Vec<dagq::domain::RunEvent> {
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == "backend_call_failed")
+        .filter(|event| event.kind == EventKind::BackendCallFailed)
         .collect()
 }
 

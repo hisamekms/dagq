@@ -3,6 +3,7 @@
 //! change, the run's areas and the attributes of the claim, and the KPIs no run carries (asks,
 //! attentions, backend failures, load, verification commands, slots,
 //! findings, sessions of the other kinds) over the whole window.
+use crate::domain::EventKind;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Serialize;
@@ -30,7 +31,6 @@ use crate::domain::{
         measures::verification_durations,
         timestamp_millis,
     },
-    waiting::{RUN_SLOT_REGAINED, RUN_WAITING_STARTED},
 };
 
 /// The `group=` of a run claimed outside the worker model trial.
@@ -186,7 +186,7 @@ fn supervisor_lives(
     };
     let starts: Vec<(i64, i64, Option<String>)> = events
         .iter()
-        .filter(|event| event.kind == marks::SUPERVISOR_STARTED)
+        .filter(|event| event.kind == EventKind::SupervisorStarted)
         .filter_map(|event| {
             Some((
                 event_ms(event)?,
@@ -204,7 +204,7 @@ fn supervisor_lives(
             let next = starts.get(index + 1).map(|next| next.0);
             let stop = events
                 .iter()
-                .filter(|event| event.kind == marks::SUPERVISOR_STOPPED)
+                .filter(|event| event.kind == EventKind::SupervisorStopped)
                 .filter(own)
                 .filter_map(|event| {
                     let at = event_ms(event)?;
@@ -281,7 +281,7 @@ impl<'a> Context<'a> {
         let mut waits: HashMap<RunId, Vec<(i64, Option<i64>)>> = HashMap::new();
         for event in events {
             let at = event_ms(event);
-            if event.kind == "task_status_changed"
+            if event.kind == EventKind::TaskStatusChanged
                 && event.payload["to"] == "ready"
                 && let (Some(task_id), Some(at)) = (event.task_id, at)
             {
@@ -290,8 +290,8 @@ impl<'a> Context<'a> {
             let (Some(run_id), Some(task_id)) = (&event.run_id, event.task_id) else {
                 continue;
             };
-            match event.kind.as_str() {
-                "run_claimed" => {
+            match event.kind.known() {
+                Some(EventKind::RunClaimed) => {
                     if runs_per_task
                         .entry(task_id)
                         .or_default()
@@ -301,19 +301,21 @@ impl<'a> Context<'a> {
                         claims.push((run_id.clone(), task_id, at));
                     }
                 }
-                "revise_requested" => *revises.entry(run_id.clone()).or_default() += 1,
-                "verification_command" if event.payload["phase"] == "integration" => {
+                Some(EventKind::ReviseRequested) => {
+                    *revises.entry(run_id.clone()).or_default() += 1
+                }
+                Some(EventKind::VerificationCommand) if event.payload["phase"] == "integration" => {
                     verify_attempts
                         .entry(run_id.clone())
                         .or_default()
                         .insert(event.payload["attempt"].as_i64());
                 }
-                RUN_WAITING_STARTED => {
+                Some(EventKind::RunWaitingStarted) => {
                     if let Some(at) = at {
                         waits.entry(run_id.clone()).or_default().push((at, None));
                     }
                 }
-                RUN_SLOT_REGAINED => end_wait(&mut waits, run_id, at),
+                Some(EventKind::RunSlotRegained) => end_wait(&mut waits, run_id, at),
                 _ => {}
             }
             // A claim of `already_satisfied` rests out of the slots, as a
@@ -333,8 +335,8 @@ impl<'a> Context<'a> {
             }
             // A run's end ([`Occupancy`]).
             let status = event.payload.get("status").and_then(Value::as_str);
-            if (event.kind == "run_integrated"
-                || event.kind == crate::domain::event_kind::RUN_SATISFIED_CLOSED
+            if (event.kind == EventKind::RunIntegrated
+                || event.kind == EventKind::RunSatisfiedClosed
                 || matches!(status, Some("succeeded" | "failed" | "interrupted")))
                 && let Some(at) = at
             {
@@ -684,7 +686,7 @@ impl<'a> Context<'a> {
         for event in events
             .iter()
             .filter(in_window)
-            .filter(|e| e.kind == "ask_opened")
+            .filter(|e| e.kind == EventKind::AskOpened)
         {
             *asks.entry(ALL.to_owned()).or_default() += 1;
             if event.task_id.is_some() && axes.contains(&Axis::Change) {
@@ -733,7 +735,7 @@ impl<'a> Context<'a> {
         let claim_loads: Vec<f64> = events
             .iter()
             .filter(in_window)
-            .filter(|event| event.kind == "run_claimed")
+            .filter(|event| event.kind == EventKind::RunClaimed)
             .filter_map(|event| event.payload.get("load_avg").and_then(Value::as_f64))
             .collect();
         let max_load = claim_loads
@@ -1669,7 +1671,7 @@ impl<'a> Context<'a> {
         let samples: Vec<(i64, &Value)> = self
             .events
             .iter()
-            .filter(|event| event.kind == CANDIDATES_SAMPLED)
+            .filter(|event| event.kind == EventKind::CandidatesSampled)
             .filter_map(|event| Some((event_ms(event)?, &event.payload)))
             .collect();
         let mut weighted = 0.0;
@@ -1734,14 +1736,14 @@ impl<'a> Context<'a> {
             let Some(id) = event.payload.get("finding_id").and_then(Value::as_i64) else {
                 continue;
             };
-            match event.kind.as_str() {
-                "finding_recorded" => {
+            match event.kind.known() {
+                Some(EventKind::FindingRecorded) => {
                     status.insert(id, ("open".to_owned(), event_ms(event)));
                     if event.id > after {
                         result.recorded += 1;
                     }
                 }
-                "finding_status_changed" => {
+                Some(EventKind::FindingStatusChanged) => {
                     let to = event.payload["to"].as_str().unwrap_or(UNKNOWN).to_owned();
                     let entry = status.entry(id).or_insert((String::new(), None));
                     if to == "resolved"
@@ -1794,7 +1796,7 @@ impl<'a> Context<'a> {
     /// goal. `None` (`unavailable`: `not_recorded`) when a proposal that
     /// would run has no record of its owner's origin.
     fn improvement_proposals(&self, upto: EventId) -> Option<usize> {
-        use crate::domain::{ProposalStatus, TaskStatus, event_kind as kinds};
+        use crate::domain::{EventKind, ProposalStatus, TaskStatus};
         let mut links: HashMap<i64, i64> = HashMap::new();
         let mut owners: HashMap<i64, Option<bool>> = HashMap::new();
         let mut members: HashMap<i64, Vec<TaskId>> = HashMap::new();
@@ -1802,8 +1804,11 @@ impl<'a> Context<'a> {
         let mut statuses: HashMap<TaskId, TaskStatus> = HashMap::new();
         let field = |event: &RunEvent, key: &str| event.payload.get(key).and_then(Value::as_i64);
         for event in self.events.iter().filter(|event| event.id <= upto) {
-            match event.kind.as_str() {
-                kinds::FINDING_STATUS_CHANGED => {
+            let Some(kind) = event.kind.known() else {
+                continue;
+            };
+            match kind {
+                EventKind::FindingStatusChanged => {
                     let Some(finding) = field(event, "finding_id") else {
                         continue;
                     };
@@ -1822,12 +1827,12 @@ impl<'a> Context<'a> {
                         _ => {}
                     }
                 }
-                kinds::TASK_SUBMITTED | kinds::TASK_REOPENED => {
+                EventKind::TaskSubmitted | EventKind::TaskReopened => {
                     let (Some(proposal), Some(task)) = (field(event, "proposal_id"), event.task_id)
                     else {
                         continue;
                     };
-                    if event.kind == kinds::TASK_REOPENED {
+                    if kind == EventKind::TaskReopened {
                         for tasks in members.values_mut() {
                             tasks.retain(|&member| member != task);
                         }
@@ -1841,7 +1846,7 @@ impl<'a> Context<'a> {
                         owners.insert(proposal, runtime_owner(origin));
                     }
                 }
-                kinds::TASK_STATUS_CHANGED => {
+                EventKind::TaskStatusChanged => {
                     if let (Some(task), Some(Ok(to))) = (
                         event.task_id,
                         event.payload["to"].as_str().map(str::parse::<TaskStatus>),
@@ -1849,7 +1854,7 @@ impl<'a> Context<'a> {
                         statuses.insert(task, to);
                     }
                 }
-                kinds::PROPOSAL_WITHDRAWN => {
+                EventKind::ProposalWithdrawn => {
                     withdrawn.extend(field(event, "proposal_id"));
                 }
                 _ => {}

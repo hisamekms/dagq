@@ -2,6 +2,7 @@
 //! container by `dagq.toml` (goal 38). No part of the container runtime is
 //! built, so what is set to it waits and never runs on the host instead.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use runtime_support::headless::resume_launches;
 use runtime_support::*;
@@ -282,7 +283,7 @@ esac"#,
             .unwrap()
             .events
             .iter()
-            .any(|e| e.kind == "run_waiting_started")
+            .any(|e| e.kind == EventKind::RunWaitingStarted)
     });
     let mut queue = SqliteQueue::open(&db).unwrap();
     let run = queue.show(TASK).unwrap().runs[0].clone();
@@ -305,7 +306,7 @@ esac"#,
             .unwrap()
             .events
             .iter()
-            .any(|e| e.kind == "runtime_error" && e.payload.to_string().contains(refused))
+            .any(|e| e.kind == EventKind::RuntimeError && e.payload.to_string().contains(refused))
     });
     stop.store(true, std::sync::atomic::Ordering::SeqCst);
     let _ = joined(supervisor, "the supervisor thread to return");
@@ -317,7 +318,7 @@ esac"#,
             .unwrap()
             .events
             .iter()
-            .any(|e| e.kind == "session_exited")
+            .any(|e| e.kind == EventKind::SessionExited)
     });
     let detail = SqliteQueue::open(&db).unwrap().show(TASK).unwrap();
     assert!(!payloads(&detail, "turn_requested").is_empty());

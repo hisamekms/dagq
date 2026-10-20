@@ -9,6 +9,7 @@
 //! from its `attributes_baseline` on. Measurement only: no decision of the
 //! runtime reads it.
 
+use crate::domain::EventKind;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use self::payload::{
@@ -19,7 +20,7 @@ use self::payload::{
 use super::super::{
     DraftOrigin, ExecutionClass, GoalId, GoalStatus, GoalSummary, GoalTag, GoalVerdict, Priority,
     PrioritySource, RunEvent, RunId, TaskChange, TaskId, TaskStatus, TaskStatusCounts,
-    base_priority, event_kind, plan_request::PriorityBy,
+    base_priority, plan_request::PriorityBy,
 };
 
 /// A task's attributes as its records leave them.
@@ -87,25 +88,25 @@ pub fn reconcile_due(since_last: Option<std::time::Duration>) -> bool {
 }
 
 /// The kinds [`fold`] reads: a reader may give it only these.
-pub const KINDS: &[&str] = &[
-    event_kind::ATTRIBUTES_BASELINE,
-    event_kind::TASK_CREATED,
-    event_kind::TASK_EDITED,
-    event_kind::TASK_STATUS_CHANGED,
-    event_kind::RUN_CLAIMED,
-    event_kind::RUN_UNFINISHED_CHANGED,
-    event_kind::TASK_GOAL_CHANGED,
-    event_kind::TASK_PRIORITY_CHANGED,
-    event_kind::DEPENDENCY_ADDED,
-    event_kind::DEPENDENCY_REMOVED,
-    event_kind::GOAL_DEPENDENCY_ADDED,
-    event_kind::GOAL_DEPENDENCY_REMOVED,
-    event_kind::DRAFT_ORIGIN_RECORDED,
-    event_kind::GOAL_CREATED,
-    event_kind::GOAL_UPDATED,
-    event_kind::GOAL_STATUS_CHANGED,
-    event_kind::GOAL_CLOSED,
-    event_kind::GOAL_REOPENED,
+pub const KINDS: &[EventKind] = &[
+    EventKind::AttributesBaseline,
+    EventKind::TaskCreated,
+    EventKind::TaskEdited,
+    EventKind::TaskStatusChanged,
+    EventKind::RunClaimed,
+    EventKind::RunUnfinishedChanged,
+    EventKind::TaskGoalChanged,
+    EventKind::TaskPriorityChanged,
+    EventKind::DependencyAdded,
+    EventKind::DependencyRemoved,
+    EventKind::GoalDependencyAdded,
+    EventKind::GoalDependencyRemoved,
+    EventKind::DraftOriginRecorded,
+    EventKind::GoalCreated,
+    EventKind::GoalUpdated,
+    EventKind::GoalStatusChanged,
+    EventKind::GoalClosed,
+    EventKind::GoalReopened,
 ];
 
 /// The attributes at `window_end` (unix seconds; none for every event)
@@ -122,7 +123,7 @@ pub fn fold(events: &[RunEvent], window_end: Option<i64>) -> Folded {
 /// [`fold`] for a window that ends at `end`: an event, a time or both.
 pub fn fold_within(events: &[RunEvent], end: super::WindowEnd) -> Folded {
     let is_mark = |event: &RunEvent| {
-        event.kind == event_kind::ATTRIBUTES_BASELINE
+        event.kind == EventKind::AttributesBaseline
             && event.task_id.is_none()
             && event.goal_id.is_none()
     };
@@ -145,15 +146,15 @@ pub fn fold_within(events: &[RunEvent], end: super::WindowEnd) -> Folded {
 
 /// A task's or goal's `attributes_baseline` (not the queue's mark).
 fn is_baseline(event: &RunEvent) -> bool {
-    event.kind == event_kind::ATTRIBUTES_BASELINE
+    event.kind == EventKind::AttributesBaseline
         && (event.task_id.is_some() || event.goal_id.is_some())
 }
 
 impl Attributes {
     fn apply_task(&mut self, id: TaskId, event: &RunEvent) {
         let payload = &event.payload;
-        let kind = event.kind.as_str();
-        if kind == event_kind::TASK_CREATED || kind == event_kind::ATTRIBUTES_BASELINE {
+        let kind = &event.kind;
+        if *kind == EventKind::TaskCreated || *kind == EventKind::AttributesBaseline {
             // A creation record of a binary before the record carries no
             // title: the task is known from its baseline on.
             if let Some(task) = created(restore(payload)) {
@@ -164,8 +165,8 @@ impl Attributes {
         let Some(task) = self.tasks.get_mut(&id) else {
             return;
         };
-        match kind {
-            event_kind::TASK_EDITED => {
+        match kind.known() {
+            Some(EventKind::TaskEdited) => {
                 let to = restore::<TaskEdited>(payload).to.unwrap_or_default();
                 if let Some(title) = to.title {
                     task.title = title;
@@ -177,7 +178,7 @@ impl Attributes {
                     task.execution_class = class_of(Some(&class));
                 }
             }
-            event_kind::TASK_STATUS_CHANGED => {
+            Some(EventKind::TaskStatusChanged) => {
                 if let Some(status) = restore::<StatusChanged>(payload)
                     .to
                     .as_deref()
@@ -186,21 +187,21 @@ impl Attributes {
                     task.status = status;
                 }
             }
-            event_kind::RUN_CLAIMED => {
+            Some(EventKind::RunClaimed) => {
                 task.status = TaskStatus::InProgress;
                 task.unfinished_run = event.run_id.clone();
             }
-            event_kind::RUN_UNFINISHED_CHANGED => {
+            Some(EventKind::RunUnfinishedChanged) => {
                 if restore::<UnfinishedChanged>(payload).unfinished == Some(true) {
                     task.unfinished_run = event.run_id.clone();
                 } else if task.unfinished_run == event.run_id {
                     task.unfinished_run = None;
                 }
             }
-            event_kind::TASK_GOAL_CHANGED => {
+            Some(EventKind::TaskGoalChanged) => {
                 task.goal_id = restore::<GoalChanged>(payload).to.map(GoalId::new);
             }
-            event_kind::TASK_PRIORITY_CHANGED => {
+            Some(EventKind::TaskPriorityChanged) => {
                 let changed = restore::<PriorityChanged>(payload);
                 match changed.own {
                     Some(own) => {
@@ -221,27 +222,27 @@ impl Attributes {
                     }
                 }
             }
-            event_kind::DEPENDENCY_ADDED | event_kind::DEPENDENCY_REMOVED => {
+            Some(EventKind::DependencyAdded | EventKind::DependencyRemoved) => {
                 if let Some(predecessor) = restore::<DependencyChanged>(payload).predecessor_id {
                     let predecessor = TaskId::new(predecessor);
-                    if kind == event_kind::DEPENDENCY_ADDED {
+                    if *kind == EventKind::DependencyAdded {
                         task.depends_on.insert(predecessor);
                     } else {
                         task.depends_on.remove(&predecessor);
                     }
                 }
             }
-            event_kind::GOAL_DEPENDENCY_ADDED | event_kind::GOAL_DEPENDENCY_REMOVED => {
+            Some(EventKind::GoalDependencyAdded | EventKind::GoalDependencyRemoved) => {
                 if let Some(goal) = restore::<GoalDependencyChanged>(payload).goal_id {
                     let goal = GoalId::new(goal);
-                    if kind == event_kind::GOAL_DEPENDENCY_ADDED {
+                    if *kind == EventKind::GoalDependencyAdded {
                         task.goal_dependencies.insert(goal);
                     } else {
                         task.goal_dependencies.remove(&goal);
                     }
                 }
             }
-            event_kind::DRAFT_ORIGIN_RECORDED => {
+            Some(EventKind::DraftOriginRecorded) => {
                 task.origin = restore::<OriginRecorded>(payload)
                     .origin
                     .as_deref()
@@ -253,13 +254,13 @@ impl Attributes {
 
     fn apply_goal(&mut self, id: GoalId, event: &RunEvent) {
         let payload = &event.payload;
-        match event.kind.as_str() {
-            event_kind::GOAL_CREATED | event_kind::ATTRIBUTES_BASELINE => {
+        match event.kind.known() {
+            Some(EventKind::GoalCreated | EventKind::AttributesBaseline) => {
                 if let Some(goal) = restore::<GoalCreated>(payload).goal.and_then(goal_of) {
                     self.goals.insert(id, goal);
                 }
             }
-            event_kind::GOAL_UPDATED => {
+            Some(EventKind::GoalUpdated) => {
                 let updated = restore::<GoalUpdated>(payload);
                 if let Some(mut goal) = updated.new.and_then(goal_of) {
                     if let Some(by) = updated.priority_by.as_deref().and_then(parsed) {
@@ -268,7 +269,7 @@ impl Attributes {
                     self.goals.insert(id, goal);
                 }
             }
-            event_kind::GOAL_STATUS_CHANGED => {
+            Some(EventKind::GoalStatusChanged) => {
                 let status = restore::<StatusChanged>(payload)
                     .to
                     .as_deref()
@@ -277,7 +278,7 @@ impl Attributes {
                     goal.status = status;
                 }
             }
-            event_kind::GOAL_CLOSED => {
+            Some(EventKind::GoalClosed) => {
                 if let Some(goal) = self.goals.get_mut(&id) {
                     goal.verdict = restore::<GoalClosed>(payload)
                         .verdict
@@ -286,7 +287,7 @@ impl Attributes {
                     goal.closed = true;
                 }
             }
-            event_kind::GOAL_REOPENED => {
+            Some(EventKind::GoalReopened) => {
                 if let Some(goal) = self.goals.get_mut(&id) {
                     goal.status = GoalStatus::Open;
                     goal.verdict = None;

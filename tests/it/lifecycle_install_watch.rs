@@ -13,6 +13,7 @@ use crate::lifecycle_install::{
 };
 use crate::runtime_support;
 use common::lifecycle::*;
+use dagq::domain::EventKind;
 
 use anyhow::Result;
 use dagq::{
@@ -208,7 +209,7 @@ fn recorded_failure(installed: &Installed) -> Option<Value> {
         .update_events(20)
         .unwrap()
         .into_iter()
-        .find(|u| u.kind == "update_failed")
+        .find(|u| u.kind == EventKind::UpdateFailed)
         .map(|u| u.payload)
 }
 
@@ -271,7 +272,7 @@ fn a_build_that_stops_after_it_registered_goes_back_and_tells_the_inbox() {
         .update_events(20)
         .unwrap()
         .into_iter()
-        .map(|u| u.kind)
+        .map(|u| u.kind.to_string())
         .collect();
     assert_eq!(kinds, ["update_failed"]);
     let question = asked(&installed);
@@ -559,7 +560,7 @@ fn a_persons_install_failure_leaves_the_automatic_update_alone() {
     assert!(
         updates
             .iter()
-            .any(|u| u.kind == "update_answered" && u.payload["ask_id"] == job.id.as_i64()),
+            .any(|u| u.kind == EventKind::UpdateAnswered && u.payload["ask_id"] == job.id.as_i64()),
         "{kinds:?}"
     );
     assert!(!kinds.contains(&"update_retry"), "{kinds:?}");

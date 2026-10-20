@@ -16,6 +16,7 @@
 //!
 //! [Container runtime]: ../../docs/design/container-runtime.md
 
+use crate::domain::{EventKind, RecordedKind};
 use serde::{Deserialize, Serialize};
 
 use super::RunStatus;
@@ -311,8 +312,8 @@ pub const QUEUE_RELAY_ATTENTION_KINDS: [&str; 2] = [QUEUE_RELAY_DOWN, QUEUE_RELA
 
 /// Whether the attention stands: the latest of
 /// [`QUEUE_RELAY_ATTENTION_KINDS`] is [`QUEUE_RELAY_DOWN`].
-pub fn attention_stands(latest: Option<&str>) -> bool {
-    latest == Some(QUEUE_RELAY_DOWN)
+pub fn attention_stands(latest: Option<&RecordedKind>) -> bool {
+    latest.is_some_and(|kind| *kind == EventKind::QueueRelayDown)
 }
 
 #[cfg(test)]
@@ -510,8 +511,10 @@ mod tests {
         }
         assert_eq!(address_port("127.0.0.1:4321"), Some(4321));
         assert_eq!(address_port("127.0.0.1"), None);
-        assert!(attention_stands(Some(QUEUE_RELAY_DOWN)));
-        assert!(!attention_stands(Some(QUEUE_RELAY_RUNNING)));
+        assert!(attention_stands(Some(&EventKind::QueueRelayDown.into())));
+        assert!(!attention_stands(Some(
+            &EventKind::QueueRelayRunning.into()
+        )));
         assert!(!attention_stands(None));
     }
 }

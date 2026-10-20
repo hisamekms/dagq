@@ -788,7 +788,7 @@ mod tests {
                 task_id: None,
                 goal_id: None,
                 run_id: None,
-                kind: kind.as_str().to_owned(),
+                kind: kind.as_str().into(),
                 payload,
                 created_at: String::new(),
                 actor: None,
@@ -800,7 +800,7 @@ mod tests {
             self.events
                 .borrow()
                 .iter()
-                .filter(|event| event.kind == event_kind::RUN_PHASE_CHANGED)
+                .filter(|event| event.kind == EventKind::RunPhaseChanged)
                 .map(|event| {
                     let p = &event.payload;
                     let attempt = format!(

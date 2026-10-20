@@ -2241,7 +2241,7 @@ mod tests {
             .unwrap()
             .events
             .into_iter()
-            .filter(|event| event.kind == kind)
+            .filter(|event| event.kind.as_str() == kind)
             .map(|event| event.payload)
             .collect()
     }

@@ -13,6 +13,7 @@
 //! gave it once: the store does not write over them. Measurement only: no
 //! decision of the runtime reads it.
 
+use crate::domain::EventKind;
 pub mod attributes;
 mod baseline;
 pub mod builder;
@@ -43,7 +44,7 @@ use super::after_claim::AfterClaim;
 use super::claim_facts::{self, ATTRIBUTES};
 use super::pre_claim::PreClaimInterval;
 use super::stats::{self, RunStats};
-use super::{EventId, RunEvent, TaskId, event_kind};
+use super::{EventId, RunEvent, TaskId};
 
 /// The version of the fold: raised when what a row holds or how it is
 /// folded changes, so every row is built again (a legacy row's frozen
@@ -403,7 +404,7 @@ fn fill_legacy_run(row: &mut LedgerRow, events: &[RunEvent]) {
     row.outcome = run.status.clone();
     let recorded = events
         .iter()
-        .find(|event| event.kind == event_kind::RUN_CLAIMED)
+        .find(|event| event.kind == EventKind::RunClaimed)
         .and_then(|claim| claim.payload.get(ATTRIBUTES))
         .and_then(Value::as_object);
     row.attributes = match recorded {
@@ -501,7 +502,7 @@ pub fn build(events: &[RunEvent], now_ms: i64, built_at: &str) -> Vec<LedgerRow>
     use std::collections::BTreeSet;
     let pushes: Vec<RunEvent> = events
         .iter()
-        .filter(|event| event.kind == event_kind::PUSH_FINISHED)
+        .filter(|event| event.kind == EventKind::PushFinished)
         .cloned()
         .collect();
     let pre_claim = super::pre_claim::pre_claim_intervals(events, now_ms);

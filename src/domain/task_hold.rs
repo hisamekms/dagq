@@ -26,16 +26,11 @@
 //! a stall, an idle session or a run for a recovery job: nothing of the
 //! run runs, and nothing watches it until the release lets it resume.
 
+use crate::domain::EventKind;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    DomainError, EventId, HoldId, RunEvent, RunId, RunStatus, TaskId, TaskStatus,
-    error::require,
-    event_kind::{
-        HOLD_DEFERRED, HOLD_RESULT_APPLIED, HOLD_RESULT_DISCARDED, HOLD_RESULT_KEPT,
-        LEASE_ACQUIRED, LEASE_RELEASED, TASK_HELD, TASK_HOLD_REMINDED, TASK_RELEASED,
-        WORKSPACE_CLOSED,
-    },
+    DomainError, EventId, HoldId, RunEvent, RunId, RunStatus, TaskId, TaskStatus, error::require,
     task_replan::GuardedStep,
 };
 
@@ -323,17 +318,17 @@ pub struct ProgressVersion {
 /// The kinds a run's [`ProgressVersion`] does not count: the hold's own
 /// records, and the leases a recovery round takes and gives back and the
 /// session it closes at its end, which move nothing on.
-const NOT_PROGRESS: [&str; 10] = [
-    TASK_HELD,
-    TASK_HOLD_REMINDED,
-    TASK_RELEASED,
-    HOLD_DEFERRED,
-    HOLD_RESULT_KEPT,
-    HOLD_RESULT_APPLIED,
-    HOLD_RESULT_DISCARDED,
-    LEASE_ACQUIRED,
-    LEASE_RELEASED,
-    WORKSPACE_CLOSED,
+const NOT_PROGRESS: [EventKind; 10] = [
+    EventKind::TaskHeld,
+    EventKind::TaskHoldReminded,
+    EventKind::TaskReleased,
+    EventKind::HoldDeferred,
+    EventKind::HoldResultKept,
+    EventKind::HoldResultApplied,
+    EventKind::HoldResultDiscarded,
+    EventKind::LeaseAcquired,
+    EventKind::LeaseReleased,
+    EventKind::WorkspaceClosed,
 ];
 
 impl ProgressVersion {
@@ -352,7 +347,7 @@ impl ProgressVersion {
             last_event: events
                 .iter()
                 .rev()
-                .find(|event| !NOT_PROGRESS.contains(&event.kind.as_str()))
+                .find(|event| !event.kind.is_in(&NOT_PROGRESS))
                 .map(|event| event.id),
         }
     }
@@ -462,7 +457,7 @@ pub fn held_spans(events: &[RunEvent]) -> Vec<(i64, Option<i64>)> {
                 spans.push((start, Some(at.max(start))));
                 open = None;
             }
-            (Some(start), None) if event.kind == TASK_RELEASED => {
+            (Some(start), None) if event.kind == EventKind::TaskReleased => {
                 spans.push((start, Some(at.max(start))));
                 open = None;
             }
@@ -484,9 +479,9 @@ pub fn task_hold_spans(events: &[RunEvent]) -> Vec<(i64, Option<i64>)> {
         let Some(at) = super::stats::timestamp_millis(&event.created_at) else {
             continue;
         };
-        if event.kind == TASK_HELD {
+        if event.kind == EventKind::TaskHeld {
             spans.push((hold_id(event), at, None));
-        } else if event.kind == TASK_RELEASED
+        } else if event.kind == EventKind::TaskReleased
             && let Some(span) = spans
                 .iter_mut()
                 .find(|(id, _, end)| end.is_none() && (id.is_none() || *id == hold_id(event)))
@@ -503,6 +498,12 @@ pub fn task_hold_spans(events: &[RunEvent]) -> Vec<(i64, Option<i64>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::event_kind::HOLD_RESULT_DISCARDED;
+    use crate::domain::event_kind::HOLD_RESULT_KEPT;
+    use crate::domain::event_kind::LEASE_RELEASED;
+    use crate::domain::event_kind::TASK_HELD;
+    use crate::domain::event_kind::TASK_RELEASED;
+    use crate::domain::event_kind::WORKSPACE_CLOSED;
     use serde_json::json;
 
     fn hold(settled: bool) -> TaskHold {

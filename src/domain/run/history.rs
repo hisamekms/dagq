@@ -9,11 +9,12 @@ use super::payload::{
     AskOf, AskOpened, FollowUpRegistered, HeadRewritten, IntegrationApproved, Parking, PushFailed,
     ResumeFinished, RunRecovered, StatusOf, WorkspaceClosed, restore,
 };
+use crate::domain::EventKind;
 use crate::domain::resume::{ResumeConfig, ResumeCount};
 use crate::domain::{
     ASK_EVENT_KINDS, AskId, AttentionNext, EventId, MAX_RESUME_ATTEMPTS, MAX_REVISE_ATTEMPTS,
-    RunEvent, RunStatus, TriageState, abandon_left_session_open, event_attention, event_kind,
-    recheck, run_attention, triage_state,
+    RunEvent, RunStatus, TriageState, abandon_left_session_open, event_attention, recheck,
+    run_attention, triage_state,
 };
 
 /// The events of one run, oldest first, borrowed from whoever read them.
@@ -27,25 +28,25 @@ pub struct RunHistory<'a> {
 /// resume, an adopter's park of a run whose workspace was gone, and the
 /// runtime's e2e that failed after the review (ADR-t1233-2), and the parks
 /// at a turn's end for a replanning or a hold.
-const PARKING: [&str; 12] = [
-    event_kind::INTEGRATION_DEFERRED,
-    event_kind::INTEGRATION_ERROR,
-    event_kind::EVIDENCE_MISSING,
-    event_kind::SCOPE_VIOLATION,
-    event_kind::LANDING_DECIDED,
-    event_kind::TRIAGE_FINISHED,
-    event_kind::TRIAGE_DECIDED,
-    event_kind::RECOVERY_PARKED,
-    event_kind::SESSION_GONE_PARKED,
-    event_kind::RUN_E2E_FAILED,
-    event_kind::REPLAN_PARKED,
-    event_kind::HOLD_PARKED,
+const PARKING: [EventKind; 12] = [
+    EventKind::IntegrationDeferred,
+    EventKind::IntegrationError,
+    EventKind::EvidenceMissing,
+    EventKind::ScopeViolation,
+    EventKind::LandingDecided,
+    EventKind::TriageFinished,
+    EventKind::TriageDecided,
+    EventKind::RecoveryParked,
+    EventKind::SessionGoneParked,
+    EventKind::RunE2eFailed,
+    EventKind::ReplanParked,
+    EventKind::HoldParked,
 ];
 
 /// The parks at a turn's end (ADR-t1521-2 decision 1, ADR-t1879-1 decision
 /// 7): what came before one (an approval, a review, the answers owed) was
 /// of the work before the fence.
-const FENCE_PARKS: [&str; 2] = [event_kind::REPLAN_PARKED, event_kind::HOLD_PARKED];
+const FENCE_PARKS: [EventKind; 2] = [EventKind::ReplanParked, EventKind::HoldParked];
 
 /// The first five of [`PARKING`], the landing recheck's failures, the
 /// runtime's failed e2e and the parks at a turn's end: what parks a run
@@ -54,22 +55,22 @@ const FENCE_PARKS: [&str; 2] = [event_kind::REPLAN_PARKED, event_kind::HOLD_PARK
 /// does not let the receipt written after its fence move the run on. A recheck failure the host kept from judging the code
 /// ([`recheck::RecordedFailure::skipped`]) parks nothing, and
 /// [`RunHistory::unresolved_since_park`] passes it over.
-const RESOLVABLE_PARKING: [&str; 9] = [
-    event_kind::INTEGRATION_DEFERRED,
-    event_kind::INTEGRATION_ERROR,
-    event_kind::EVIDENCE_MISSING,
-    event_kind::SCOPE_VIOLATION,
-    event_kind::LANDING_DECIDED,
-    event_kind::LANDING_RECHECK_FAILED,
-    event_kind::RUN_E2E_FAILED,
-    event_kind::REPLAN_PARKED,
-    event_kind::HOLD_PARKED,
+const RESOLVABLE_PARKING: [EventKind; 9] = [
+    EventKind::IntegrationDeferred,
+    EventKind::IntegrationError,
+    EventKind::EvidenceMissing,
+    EventKind::ScopeViolation,
+    EventKind::LandingDecided,
+    EventKind::LandingRecheckFailed,
+    EventKind::RunE2eFailed,
+    EventKind::ReplanParked,
+    EventKind::HoldParked,
 ];
 
-const RESUMES: [&str; 3] = [
-    event_kind::RESUME_STARTED,
-    event_kind::RESUME_FINISHED,
-    event_kind::RESUME_SKIPPED,
+const RESUMES: [EventKind; 3] = [
+    EventKind::ResumeStarted,
+    EventKind::ResumeFinished,
+    EventKind::ResumeSkipped,
 ];
 
 /// What kind of request the latest parking of a run makes of its resumed
@@ -145,30 +146,27 @@ impl<'a> RunHistory<'a> {
     }
 
     /// Whether an event of `kind` was recorded.
-    pub fn has(&self, kind: &str) -> bool {
+    pub fn has(&self, kind: EventKind) -> bool {
         self.events.iter().any(|e| e.kind == kind)
     }
 
     /// How many events of `kind` were recorded.
-    pub fn count(&self, kind: &str) -> usize {
+    pub fn count(&self, kind: EventKind) -> usize {
         self.events.iter().filter(|e| e.kind == kind).count()
     }
 
     /// The latest event of `kind`.
-    pub fn last(&self, kind: &str) -> Option<&'a RunEvent> {
+    pub fn last(&self, kind: EventKind) -> Option<&'a RunEvent> {
         self.last_of(&[kind])
     }
 
     /// The latest event of any of `kinds`.
-    pub fn last_of(&self, kinds: &[&str]) -> Option<&'a RunEvent> {
-        self.events
-            .iter()
-            .rev()
-            .find(|e| kinds.contains(&e.kind.as_str()))
+    pub fn last_of(&self, kinds: &[EventKind]) -> Option<&'a RunEvent> {
+        self.events.iter().rev().find(|e| e.kind.is_in(kinds))
     }
 
     /// The latest event of `kind` before event `id`.
-    pub fn last_before(&self, id: EventId, kind: &str) -> Option<&'a RunEvent> {
+    pub fn last_before(&self, id: EventId, kind: EventKind) -> Option<&'a RunEvent> {
         self.events
             .iter()
             .rev()
@@ -176,7 +174,7 @@ impl<'a> RunHistory<'a> {
     }
 
     /// Whether an event of `kind` was recorded after event `id`.
-    pub fn has_after(&self, id: EventId, kind: &str) -> bool {
+    pub fn has_after(&self, id: EventId, kind: EventKind) -> bool {
         self.events.iter().any(|e| e.id > id && e.kind == kind)
     }
 
@@ -189,7 +187,7 @@ impl<'a> RunHistory<'a> {
     pub fn approved(&self) -> bool {
         self.since_fence_park()
             .iter()
-            .any(|e| e.kind == event_kind::INTEGRATION_APPROVED)
+            .any(|e| e.kind == EventKind::IntegrationApproved)
     }
 
     /// The events after the run's latest park at a turn's end
@@ -198,7 +196,7 @@ impl<'a> RunHistory<'a> {
         let start = self
             .events
             .iter()
-            .rposition(|e| FENCE_PARKS.contains(&e.kind.as_str()))
+            .rposition(|e| e.kind.is_in(&FENCE_PARKS))
             .map_or(0, |at| at + 1);
         &self.events[start..]
     }
@@ -211,7 +209,7 @@ impl<'a> RunHistory<'a> {
     /// first; `None` when the run is not queued so.
     pub fn queued_approval(&self) -> Option<EventId> {
         let approved = self.events.iter().rev().find(|e| {
-            e.kind == event_kind::INTEGRATION_APPROVED
+            e.kind == EventKind::IntegrationApproved
                 && restore::<IntegrationApproved>(&e.payload).names_ask()
         })?;
         (!self.moved_on_after(approved.id)).then_some(approved.id)
@@ -224,12 +222,14 @@ impl<'a> RunHistory<'a> {
         self.events.iter().any(|e| {
             e.id > id
                 && (matches!(
-                    e.kind.as_str(),
-                    event_kind::INTEGRATION_STARTED
-                        | event_kind::REVIEW_STARTED
-                        | event_kind::RESUME_STARTED
-                        | event_kind::LANDING_DECIDED
-                ) || e.kind == event_kind::ASK_OPENED
+                    e.kind.known(),
+                    Some(
+                        EventKind::IntegrationStarted
+                            | EventKind::ReviewStarted
+                            | EventKind::ResumeStarted
+                            | EventKind::LandingDecided
+                    )
+                ) || e.kind == EventKind::AskOpened
                     && restore::<AskOpened>(&e.payload).kind == Some("approve_landing"))
         })
     }
@@ -245,9 +245,9 @@ impl<'a> RunHistory<'a> {
             .events
             .iter()
             .rev()
-            .find(|e| e.kind == event_kind::REVIEW_RETRY_QUEUED)?;
+            .find(|e| e.kind == EventKind::ReviewRetryQueued)?;
         (!self.moved_on_after(queued.id)
-            && !self.has_after(queued.id, event_kind::REVIEW_PROGRAMS_STARTED))
+            && !self.has_after(queued.id, EventKind::ReviewProgramsStarted))
         .then_some(queued.id)
     }
 
@@ -255,7 +255,7 @@ impl<'a> RunHistory<'a> {
     /// `ask_id`.
     pub fn review_retry_queued_by_ask(&self, ask_id: AskId) -> bool {
         self.events.iter().any(|e| {
-            e.kind == event_kind::REVIEW_RETRY_QUEUED
+            e.kind == EventKind::ReviewRetryQueued
                 && e.payload["ask_id"].as_i64() == Some(ask_id.as_i64())
         })
     }
@@ -269,7 +269,7 @@ impl<'a> RunHistory<'a> {
     /// otherwise. `None` when the run was not recovered so.
     pub fn recovered_landing(&self) -> Option<RecoveredLanding> {
         let recovered = self.events.iter().rev().find(|e| {
-            e.kind == event_kind::RUN_RECOVERED
+            e.kind == EventKind::RunRecovered
                 && restore::<RunRecovered>(&e.payload).previous_status
                     == Some(RunStatus::Integrating.as_str())
         })?;
@@ -304,8 +304,8 @@ impl<'a> RunHistory<'a> {
         let mut current = commit.to_ascii_lowercase();
         for event in self.events.iter().filter(|e| {
             matches!(
-                e.kind.as_str(),
-                event_kind::INTEGRATION_REBASED | event_kind::MIGRATION_RENUMBERED
+                e.kind.known(),
+                Some(EventKind::IntegrationRebased | EventKind::MigrationRenumbered)
             )
         }) {
             let rewritten: HeadRewritten = restore(&event.payload);
@@ -335,7 +335,7 @@ impl<'a> RunHistory<'a> {
         let events = self.since_fence_park();
         let Some(at) = events
             .iter()
-            .rposition(|e| e.kind == event_kind::REVIEW_FINISHED)
+            .rposition(|e| e.kind == EventKind::ReviewFinished)
         else {
             return false;
         };
@@ -349,7 +349,7 @@ impl<'a> RunHistory<'a> {
     /// `ask_id`.
     pub fn approved_by_ask(&self, ask_id: AskId) -> bool {
         self.events.iter().any(|e| {
-            e.kind == event_kind::INTEGRATION_APPROVED
+            e.kind == EventKind::IntegrationApproved
                 && restore::<IntegrationApproved>(&e.payload).ask_id() == Some(ask_id.as_i64())
         })
     }
@@ -360,7 +360,7 @@ impl<'a> RunHistory<'a> {
     pub fn landing_pushes(&self) -> bool {
         self.events
             .iter()
-            .find(|e| e.kind == event_kind::INTEGRATION_APPROVED)
+            .find(|e| e.kind == EventKind::IntegrationApproved)
             .is_none_or(|e| restore::<IntegrationApproved>(&e.payload).push != Some(false))
     }
 
@@ -374,18 +374,18 @@ impl<'a> RunHistory<'a> {
     /// `revise_requested` but those a `revise_unsent` withdrew (the request
     /// is recorded before it is typed).
     pub fn revise_attempts(&self) -> usize {
-        self.count(event_kind::REVISE_REQUESTED)
-            .saturating_sub(self.count(event_kind::REVISE_UNSENT))
+        self.count(EventKind::ReviseRequested)
+            .saturating_sub(self.count(EventKind::ReviseUnsent))
     }
 
     /// How many headless reviews were started.
     pub fn review_attempts(&self) -> usize {
-        self.count(event_kind::REVIEW_STARTED)
+        self.count(EventKind::ReviewStarted)
     }
 
     /// How many headless triages were started.
     pub fn triage_attempts(&self) -> usize {
-        self.count(event_kind::TRIAGE_STARTED)
+        self.count(EventKind::TriageStarted)
     }
 
     /// How many conflict resolutions the precheck sent to the live
@@ -405,11 +405,8 @@ impl<'a> RunHistory<'a> {
     /// Whether the run's `/exit` request timed out with no session exit
     /// since.
     pub fn exit_pending(&self) -> bool {
-        self.last_of(&[
-            event_kind::EXIT_REQUEST_TIMED_OUT,
-            event_kind::SESSION_EXITED,
-        ])
-        .is_some_and(|e| e.kind == event_kind::EXIT_REQUEST_TIMED_OUT)
+        self.last_of(&[EventKind::ExitRequestTimedOut, EventKind::SessionExited])
+            .is_some_and(|e| e.kind == EventKind::ExitRequestTimedOut)
     }
 
     /// Why the run waits for a session: its latest `integration_deferred`
@@ -425,35 +422,34 @@ impl<'a> RunHistory<'a> {
             .events
             .iter()
             .rev()
-            .find(|e| PARKING.contains(&e.kind.as_str()) || recheck::parks(e))?;
+            .find(|e| e.kind.is_in(&PARKING) || recheck::parks(e))?;
         let parking: Parking = restore(&event.payload);
-        let reason = if event.kind == event_kind::TRIAGE_FINISHED
-            || event.kind == event_kind::RECOVERY_PARKED
-        {
-            parking.instruction
-        } else {
-            parking.reason
-        };
-        let cause = if event.kind == event_kind::EVIDENCE_MISSING || parking.names_checks {
+        let reason =
+            if event.kind == EventKind::TriageFinished || event.kind == EventKind::RecoveryParked {
+                parking.instruction
+            } else {
+                parking.reason
+            };
+        let cause = if event.kind == EventKind::EvidenceMissing || parking.names_checks {
             ParkCause::EvidenceMissing
-        } else if event.kind == event_kind::SCOPE_VIOLATION || parking.names_scope_violation {
+        } else if event.kind == EventKind::ScopeViolation || parking.names_scope_violation {
             ParkCause::ScopeViolation
-        } else if event.kind == event_kind::LANDING_DECIDED {
+        } else if event.kind == EventKind::LandingDecided {
             ParkCause::SentBack
-        } else if event.kind == event_kind::TRIAGE_FINISHED
-            || event.kind == event_kind::TRIAGE_DECIDED
-            || event.kind == event_kind::RECOVERY_PARKED
+        } else if event.kind == EventKind::TriageFinished
+            || event.kind == EventKind::TriageDecided
+            || event.kind == EventKind::RecoveryParked
         {
             ParkCause::Triage
-        } else if event.kind == event_kind::LANDING_RECHECK_FAILED {
+        } else if event.kind == EventKind::LandingRecheckFailed {
             ParkCause::Recheck
-        } else if event.kind == event_kind::SESSION_GONE_PARKED {
+        } else if event.kind == EventKind::SessionGoneParked {
             ParkCause::SessionGone
-        } else if event.kind == event_kind::RUN_E2E_FAILED {
+        } else if event.kind == EventKind::RunE2eFailed {
             ParkCause::E2e
-        } else if event.kind == event_kind::REPLAN_PARKED {
+        } else if event.kind == EventKind::ReplanParked {
             ParkCause::Replan
-        } else if event.kind == event_kind::HOLD_PARKED {
+        } else if event.kind == EventKind::HoldParked {
             ParkCause::Hold
         } else {
             ParkCause::Landing
@@ -470,19 +466,17 @@ impl<'a> RunHistory<'a> {
     /// nothing and is not read.
     pub fn unresolved_since_park(&self) -> bool {
         let parking = |e: &RunEvent| {
-            RESOLVABLE_PARKING.contains(&e.kind.as_str())
-                && !(e.kind == event_kind::LANDING_RECHECK_FAILED
+            e.kind.is_in(&RESOLVABLE_PARKING)
+                && !(e.kind == EventKind::LandingRecheckFailed
                     && recheck::RecordedFailure::restore(e).skipped())
         };
         let parked = self.events.iter().rev().find(|e| parking(e));
         let last = self.events.iter().rev().find(|e| {
-            parking(e)
-                || e.kind == event_kind::RESUME_FINISHED
-                || e.kind == event_kind::RESUME_SKIPPED
+            parking(e) || e.kind == EventKind::ResumeFinished || e.kind == EventKind::ResumeSkipped
         });
-        parked.is_some_and(|e| e.kind != event_kind::LANDING_DECIDED)
+        parked.is_some_and(|e| e.kind != EventKind::LandingDecided)
             && last.is_some_and(|e| {
-                e.kind == event_kind::RESUME_FINISHED
+                e.kind == EventKind::ResumeFinished
                     && restore::<ResumeFinished>(&e.payload).outcome == Some("unresolved")
             })
     }
@@ -504,13 +498,13 @@ impl<'a> RunHistory<'a> {
             .events
             .iter()
             .filter(|e| {
-                e.kind == event_kind::TURN_SESSION_IDENTIFIED && !e.payload["missing"].is_null()
+                e.kind == EventKind::TurnSessionIdentified && !e.payload["missing"].is_null()
             })
             .filter_map(|e| e.payload["turn"].as_u64())
             .collect();
         self.events[from.min(self.events.len())..]
             .iter()
-            .filter(|e| e.kind == event_kind::TURN_STARTED)
+            .filter(|e| e.kind == EventKind::TurnStarted)
             .filter(move |e| {
                 e.payload["turn"]
                     .as_u64()
@@ -526,11 +520,7 @@ impl<'a> RunHistory<'a> {
     /// ([`Self::requests_run`]); a park that comes before one keeps them.
     /// Empty when the run was never parked so, or owes nothing.
     pub fn owed_answers(&self) -> Vec<serde_json::Value> {
-        let Some(parked) = self
-            .events
-            .iter()
-            .rposition(|e| FENCE_PARKS.contains(&e.kind.as_str()))
-        else {
+        let Some(parked) = self.events.iter().rposition(|e| e.kind.is_in(&FENCE_PARKS)) else {
             return Vec::new();
         };
         if self.turns_run(parked + 1).next().is_some() {
@@ -554,7 +544,7 @@ impl<'a> RunHistory<'a> {
     /// moved on without a session, and no resume opened one since.
     pub fn last_resume_skipped(&self) -> bool {
         self.last_of(&RESUMES)
-            .is_some_and(|e| e.kind == event_kind::RESUME_SKIPPED)
+            .is_some_and(|e| e.kind == EventKind::ResumeSkipped)
     }
 
     /// The session of the run's last resume (see [`ResumedSession`]).
@@ -563,13 +553,13 @@ impl<'a> RunHistory<'a> {
             return ResumedSession::NotResumed;
         };
         let finished: ResumeFinished = restore(&event.payload);
-        if event.kind == event_kind::RESUME_FINISHED
+        if event.kind == EventKind::ResumeFinished
             && finished.status == Some(RunStatus::Validating.as_str())
             && let (Some(workspace), Some(attempt)) = (finished.workspace_id, finished.attempt)
         {
             let closed = self.events.iter().any(|e| {
                 e.id > event.id
-                    && e.kind == event_kind::WORKSPACE_CLOSED
+                    && e.kind == EventKind::WorkspaceClosed
                     && restore::<WorkspaceClosed>(&e.payload).workspace_id == Some(workspace)
             });
             if !closed {
@@ -587,7 +577,7 @@ impl<'a> RunHistory<'a> {
     pub fn failed_deliveries(&self) -> Vec<AskId> {
         self.events
             .iter()
-            .filter(|e| e.kind == event_kind::ASK_DELIVERY_FAILED)
+            .filter(|e| e.kind == EventKind::AskDeliveryFailed)
             .filter_map(|e| restore::<AskOf>(&e.payload).ask_id)
             .map(AskId::new)
             .collect()
@@ -597,7 +587,7 @@ impl<'a> RunHistory<'a> {
     pub fn registered_follow_ups(&self) -> Vec<u64> {
         self.events
             .iter()
-            .filter(|e| e.kind == event_kind::FOLLOW_UP_REGISTERED)
+            .filter(|e| e.kind == EventKind::FollowUpRegistered)
             .filter_map(|e| restore::<FollowUpRegistered>(&e.payload).index)
             .collect()
     }
@@ -607,7 +597,7 @@ impl<'a> RunHistory<'a> {
     pub fn registered_review_follow_ups(&self) -> Vec<crate::domain::ReviewFollowUpKey> {
         self.events
             .iter()
-            .filter(|e| e.kind == event_kind::FOLLOW_UP_REGISTERED)
+            .filter(|e| e.kind == EventKind::FollowUpRegistered)
             .filter_map(|e| {
                 let registered = restore::<FollowUpRegistered>(&e.payload);
                 (registered.from == Some("review")).then(|| {
@@ -627,13 +617,13 @@ impl<'a> RunHistory<'a> {
         self.events
             .iter()
             .rev()
-            .take_while(|e| e.kind != event_kind::SESSION_EXITED)
+            .take_while(|e| e.kind != EventKind::SessionExited)
             .any(|e| abandon_left_session_open(&e.kind, &e.payload))
     }
 
     /// The `error` of the latest `push_failed`.
     pub fn push_failure(&self) -> Option<&'a str> {
-        self.last(event_kind::PUSH_FAILED)
+        self.last(EventKind::PushFailed)
             .and_then(|e| restore::<PushFailed>(&e.payload).error)
     }
 }
@@ -656,24 +646,23 @@ pub fn run_attention_of<'a>(
     };
     let event = history.events.iter().rev().find(|e| match next {
         // The error the owner gave up with, whatever its payload.
-        AttentionNext::RecoverRun => e.kind == event_kind::RUNTIME_ERROR,
+        AttentionNext::RecoverRun => e.kind == EventKind::RuntimeError,
         // Whatever parked the run for a session last.
         AttentionNext::Resuming => {
             restore::<StatusOf>(&e.payload).status == Some(RunStatus::NeedsSession.as_str())
         }
         // A failed review whose `approve_landing` ask was closed
         // without moving the run (task 328) is reviewed by hand.
-        AttentionNext::ReviewAndIntegrate if e.kind == event_kind::REVIEW_FAILED => true,
+        AttentionNext::ReviewAndIntegrate if e.kind == EventKind::ReviewFailed => true,
         // An ask about the run is its own attention, not the run's.
-        _ => {
-            !ASK_EVENT_KINDS.contains(&e.kind.as_str())
-                && event_attention(&e.kind, &e.payload).is_some()
-        }
+        _ => !e.kind.is_in(ASK_EVENT_KINDS) && event_attention(&e.kind, &e.payload).is_some(),
     });
     let kind = event.map(|e| e.kind.as_str());
     let next = match next {
         // After a failed headless review the run is a person's to review.
-        AttentionNext::ReviewAndIntegrate if kind == Some(event_kind::REVIEW_FAILED) => {
+        AttentionNext::ReviewAndIntegrate
+            if event.is_some_and(|e| e.kind == EventKind::ReviewFailed) =>
+        {
             AttentionNext::ReviewByHand
         }
         // Given up on with its session left open (task 237): the session
@@ -751,7 +740,7 @@ pub fn decide_revise(history: &RunHistory<'_>) -> ReviseDecision {
         ReviseDecision::Ask
     } else {
         ReviseDecision::Request {
-            attempt: history.count(event_kind::REVISE_REQUESTED) + 1,
+            attempt: history.count(EventKind::ReviseRequested) + 1,
             number: revises + 1,
         }
     }
@@ -798,6 +787,7 @@ pub fn after_validation(
 
 #[cfg(test)]
 mod tests {
+    use crate::domain::event_kind;
     use serde_json::{Value, json};
 
     use super::*;
@@ -847,11 +837,11 @@ mod tests {
         assert_eq!(history.triage_attempts(), 1);
         assert!(!history.approved());
         assert!(history.landing_pushes());
-        assert!(history.has_after(EventId::new(1), "resume_started"));
-        assert!(!history.has_after(EventId::new(4), "resume_started"));
+        assert!(history.has_after(EventId::new(1), EventKind::ResumeStarted));
+        assert!(!history.has_after(EventId::new(4), EventKind::ResumeStarted));
         assert_eq!(
             history
-                .last_before(EventId::new(4), "resume_started")
+                .last_before(EventId::new(4), EventKind::ResumeStarted)
                 .map(|e| e.id),
             Some(EventId::new(1))
         );

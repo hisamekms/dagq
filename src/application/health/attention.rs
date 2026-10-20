@@ -2,6 +2,7 @@
 //! them (observation and analysis).
 
 use super::*;
+use crate::domain::EventKind;
 
 /// `text` cut to `limit` characters with `…` appended, or `None` when it fits.
 pub fn truncate(text: &str, limit: usize) -> Option<String> {
@@ -47,14 +48,14 @@ pub fn compact_event(event: &RunEvent) -> Value {
     if let Some(reason) = payload.get("reason_category") {
         object.insert("reason_category".into(), reason.clone());
     }
-    if event.kind == crate::domain::event_kind::EventKind::AskOpened.as_str() {
+    if event.kind == EventKind::AskOpened {
         // The asking AI's recommendation and confidence (ADR-t451-1
         // decision 1), null without them and for an ask opened before.
         for key in ["recommendation", "confidence"] {
             object.insert(key.into(), payload.get(key).cloned().unwrap_or(Value::Null));
         }
     }
-    if crate::domain::UPDATE_EVENT_KINDS.contains(&event.kind.as_str()) {
+    if event.kind.is_in(crate::domain::UPDATE_EVENT_KINDS) {
         // Which build a step of the automatic update is about, and where
         // a failure happened.
         for key in ["commit", "release", "version", "stage", "plugin"] {
@@ -63,7 +64,7 @@ pub fn compact_event(event: &RunEvent) -> Value {
             }
         }
     }
-    if event.kind == crate::domain::event_kind::THROUGHPUT_REVIEW_REPORTED {
+    if event.kind == EventKind::ThroughputReviewReported {
         // What the inbox shows the person of a throughput review
         // (ADR-t996-1): its period, conclusion and where the whole is.
         for key in [
@@ -79,7 +80,7 @@ pub fn compact_event(event: &RunEvent) -> Value {
             }
         }
     }
-    if event.kind == crate::domain::event_kind::THROUGHPUT_REVIEW_FINISHED {
+    if event.kind == EventKind::ThroughputReviewFinished {
         // Which review ended how, and the directory whose `output.out`
         // and `output.err` say why a failed one did (task 1099).
         for key in ["mode", "period", "outcome", "dir"] {
@@ -88,7 +89,7 @@ pub fn compact_event(event: &RunEvent) -> Value {
             }
         }
     }
-    if event.kind == crate::domain::event_kind::OBSERVE_FINISHED {
+    if event.kind == EventKind::ObserveFinished {
         // Which observation ended how, how many in a row failed, and the
         // directory whose `output.out` and `output.err` say why (task
         // 1574); `reason` carries its error.
@@ -278,7 +279,7 @@ pub fn attention(
                 ask_id: None,
                 reason_category: None,
                 status: run.status().as_str().into(),
-                kind: event.kind.clone(),
+                kind: event.kind.to_string(),
                 last_error: event.payload["error"].as_str().map(truncate_reason),
                 last_error_code: None,
                 next: AttentionNext::CheckE2e,
@@ -298,7 +299,7 @@ pub fn attention(
                 ask_id: None,
                 reason_category: None,
                 status: run.status().as_str().into(),
-                kind: event.kind.clone(),
+                kind: event.kind.to_string(),
                 last_error: event.payload["error"].as_str().map(truncate_reason),
                 last_error_code: None,
                 next: AttentionNext::StopLandingProcesses,
@@ -317,7 +318,7 @@ pub fn attention(
                 ask_id: None,
                 reason_category: Some(crate::domain::AskReason::RecoveryFailed),
                 status: run.status().as_str().into(),
-                kind: failed.kind.clone(),
+                kind: failed.kind.to_string(),
                 last_error: failed.payload["error"].as_str().map(truncate_reason),
                 last_error_code: Some(ReasonCode::JobFailed),
                 next: AttentionNext::RecoverByHand,
@@ -377,7 +378,7 @@ pub fn attention(
     if let Some(event) = queue.latest_queue_event(&[
         crate::domain::sccache::RESTART_FAILED,
         crate::domain::sccache::SCCACHE_SERVER_STARTED,
-    ])? && event.kind == crate::domain::sccache::RESTART_FAILED
+    ])? && event.kind == EventKind::SccacheServerRestartFailed
     {
         attention.push(Attention {
             run_id: None,
@@ -388,7 +389,7 @@ pub fn attention(
             ask_id: None,
             reason_category: None,
             status: "failed".into(),
-            kind: event.kind,
+            kind: event.kind.to_string(),
             last_error: event.payload["error"].as_str().map(truncate_reason),
             last_error_code: None,
             next: AttentionNext::CheckSccache,
@@ -398,7 +399,7 @@ pub fn attention(
     // claims and landings until a person installs it or takes it out of
     // dagq.toml (ADR-0049 decision 9).
     if let Some(event) = queue.latest_queue_event(&RUN_ENV_PROGRAM_KINDS)?
-        && event.kind == RUN_ENV_PROGRAM_MISSING
+        && event.kind == EventKind::RunEnvProgramMissing
     {
         attention.push(Attention {
             run_id: None,
@@ -422,7 +423,7 @@ pub fn attention(
     // be used or a task sets it back to the host (goal 38).
     if let Some(event) =
         queue.latest_queue_event(&crate::domain::container_runtime::CONTAINER_RUNTIME_KINDS)?
-        && event.kind == crate::domain::container_runtime::CONTAINER_RUNTIME_UNAVAILABLE
+        && event.kind == EventKind::ContainerRuntimeUnavailable
     {
         attention.push(Attention {
             run_id: None,
@@ -431,7 +432,7 @@ pub fn attention(
             ask_id: None,
             reason_category: None,
             status: "unavailable".into(),
-            kind: event.kind,
+            kind: event.kind.to_string(),
             last_error: event
                 .payload
                 .get("message")
@@ -446,7 +447,7 @@ pub fn attention(
     // `dagq.toml` (ADR-t1920-1 decision 2).
     if let Some(event) =
         queue.latest_queue_event(&crate::domain::ci_watch::CI_WATCH_ACCESS_KINDS)?
-        && event.kind == crate::domain::ci_watch::CI_WATCH_UNAVAILABLE
+        && event.kind == EventKind::CiWatchUnavailable
     {
         attention.push(Attention {
             run_id: None,
@@ -493,7 +494,7 @@ pub fn attention(
     // The host's KPI push command that failed a message three times waits
     // for a person until a push succeeds (ADR-0051 decision 23).
     if let Some(event) = queue.latest_queue_event(&KPI_PUSH_ATTENTION_KINDS)?
-        && event.kind == KPI_PUSH_ABANDONED
+        && event.kind == EventKind::KpiPushAbandoned
     {
         attention.push(Attention {
             run_id: None,
@@ -517,7 +518,7 @@ pub fn attention(
     // writes it here, on the DB, not through the service.
     if let Some(event) =
         queue.latest_queue_event(&crate::domain::queue_service::QUEUE_SERVICE_ATTENTION_KINDS)?
-        && crate::domain::queue_service::attention_stands(Some(event.kind.as_str()))
+        && crate::domain::queue_service::attention_stands(Some(&event.kind))
     {
         let reason = event.payload.get("reason").and_then(Value::as_str);
         let message = event.payload.get("message").and_then(Value::as_str);
@@ -538,7 +539,7 @@ pub fn attention(
     // way.
     if let Some(event) =
         queue.latest_queue_event(&crate::domain::queue_broker::QUEUE_BROKER_ATTENTION_KINDS)?
-        && crate::domain::queue_broker::attention_stands(Some(event.kind.as_str()))
+        && crate::domain::queue_broker::attention_stands(Some(&event.kind))
     {
         let reason = event.payload.get("reason").and_then(Value::as_str);
         let message = event.payload.get("message").and_then(Value::as_str);
@@ -558,7 +559,7 @@ pub fn attention(
     // And the relays of the runs' containers (ADR-t2114-3 decision 4).
     if let Some(event) =
         queue.latest_queue_event(&crate::domain::broker_relay::QUEUE_RELAY_ATTENTION_KINDS)?
-        && crate::domain::broker_relay::attention_stands(Some(event.kind.as_str()))
+        && crate::domain::broker_relay::attention_stands(Some(&event.kind))
     {
         let reason = event.payload.get("reason").and_then(Value::as_str);
         let message = event.payload.get("message").and_then(Value::as_str);
@@ -658,13 +659,11 @@ pub fn attention(
         });
     }
     for hold in queue.plan_review_holds()? {
-        if hold.kind == event_kind::PLAN_REVIEW_FAILED
-            && held(HoldJob::PlanReview(hold.proposal_id))
-        {
+        if hold.kind == EventKind::PlanReviewFailed && held(HoldJob::PlanReview(hold.proposal_id)) {
             continue;
         }
         let (status, next) = match hold.kind {
-            event_kind::PLAN_REVIEW_FAILED => ("submitted", AttentionNext::PlanReviewByHand),
+            EventKind::PlanReviewFailed => ("submitted", AttentionNext::PlanReviewByHand),
             _ => ("revising", AttentionNext::CheckPlanner),
         };
         attention.push(Attention {
@@ -674,7 +673,7 @@ pub fn attention(
             ask_id: None,
             reason_category: None,
             status: status.into(),
-            kind: hold.kind.into(),
+            kind: hold.kind.as_str().into(),
             last_error: hold.error.as_deref().map(truncate_reason),
             last_error_code: hold.error.as_ref().map(|_| ReasonCode::JobFailed),
             next,
@@ -751,7 +750,7 @@ pub fn attention(
             // failed send, a run no longer running or one nobody supervises
             // leaves it to the inbox.
             let failed = queue.run_events(run_id)?.iter().any(|e| {
-                e.kind == event_kind::ASK_DELIVERY_FAILED
+                e.kind == EventKind::AskDeliveryFailed
                     && e.payload
                         .get("ask_id")
                         .and_then(Value::as_i64)

@@ -29,7 +29,7 @@ fn actor_of(
     let event = detail
         .events
         .iter()
-        .find(|e| e.kind == kind && e.run_id.as_ref() == Some(run.id()))
+        .find(|e| e.kind.as_str() == kind && e.run_id.as_ref() == Some(run.id()))
         .unwrap_or_else(|| panic!("no {kind} of {}", run.id()));
     let actor = event.actor.clone().expect("an actor");
     (actor.role, actor.id, actor.requested_by)
@@ -161,7 +161,7 @@ fn assert_asked_at_the_jobs_request(db: &Path, attempt: usize, supervisor: &str)
     let opened = detail
         .events
         .iter()
-        .position(|e| e.kind == "ask_opened")
+        .position(|e| e.kind == EventKind::AskOpened)
         .unwrap();
     let after: Vec<_> = detail.events[opened + 1..]
         .iter()

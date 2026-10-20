@@ -234,7 +234,7 @@ fn a_window_takes_the_node_rows_of_its_times() {
         task_id: None,
         goal_id: None,
         run_id: None,
-        kind: "supervisor_started".to_owned(),
+        kind: "supervisor_started".into(),
         payload: json!({}),
         created_at: crate::domain::marks::utc_text((T0 + 4000) * 1000),
         actor: None,

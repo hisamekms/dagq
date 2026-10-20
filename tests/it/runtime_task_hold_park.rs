@@ -341,7 +341,7 @@ fn a_hold_during_a_turn_lets_it_end_and_the_run_waits_with_its_session_until_the
         detail
             .events
             .iter()
-            .position(|e| e.kind == kind && phase.is_none_or(|p| e.payload["phase"] == p))
+            .position(|e| e.kind.as_str() == kind && phase.is_none_or(|p| e.payload["phase"] == p))
             .unwrap_or_else(|| panic!("no {kind} {phase:?}"))
     };
     assert!(at("task_held", None) < at("turn_finished", None));
@@ -995,7 +995,7 @@ fn a_hold_whose_resume_was_given_up_with_its_wrapper_running_settles_once_it_end
         detail
             .events
             .iter()
-            .rposition(|e| e.kind == kind && phase.is_none_or(|p| e.payload["phase"] == p))
+            .rposition(|e| e.kind.as_str() == kind && phase.is_none_or(|p| e.payload["phase"] == p))
             .unwrap_or_else(|| panic!("no {kind} {phase:?}"))
     };
     assert!(at("turn_finished", None) < at("run_phase_changed", Some("held")));

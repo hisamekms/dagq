@@ -3,13 +3,13 @@
 //! providers and by phase, with the runs that moved, and the holds of
 //! Codex (`provider_held`) by reason, so that how often a provider could
 //! not be used reads from one place.
+use crate::domain::EventKind;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 use serde_json::Value;
 
 use super::{EventId, RunEvent, TaskId, asks::UNKNOWN};
-use crate::domain::event_kind;
 
 /// The switches and provider holds of a window.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -51,8 +51,8 @@ pub fn provider_switches(
         .filter(|event| event.id > after && event.id <= upto)
     {
         let payload = &event.payload;
-        match event.kind.as_str() {
-            event_kind::PROVIDER_SWITCHED if counts(event.task_id) => {
+        match event.kind.known() {
+            Some(EventKind::ProviderSwitched) if counts(event.task_id) => {
                 stats.count += 1;
                 if let Some(run) = &event.run_id {
                     runs.insert(run.clone());
@@ -68,7 +68,7 @@ pub fn provider_switches(
                     .or_default() += 1;
                 *stats.by_phase.entry(text(payload, "phase")).or_default() += 1;
             }
-            event_kind::PROVIDER_HELD => {
+            Some(EventKind::ProviderHeld) => {
                 *stats
                     .holds_by_reason
                     .entry(text(payload, "reason"))
@@ -85,6 +85,7 @@ pub fn provider_switches(
 mod tests {
     use super::*;
     use crate::domain::RunId;
+    use crate::domain::event_kind;
     use serde_json::json;
 
     fn event(id: i64, kind: &str, run: Option<&str>, payload: Value) -> RunEvent {
@@ -93,7 +94,7 @@ mod tests {
             task_id: run.map(|_| TaskId::new(1)),
             goal_id: None,
             run_id: run.map(|r| RunId::new(r).unwrap()),
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: "2026-09-28T00:00:00Z".to_owned(),
             actor: None,

@@ -30,8 +30,8 @@
 use super::*;
 use crate::application::queue_broker::QueueBrokerControl;
 use crate::domain::queue_broker::{
-    BrokerSeen, QUEUE_BROKER_ATTENTION_KINDS, QUEUE_BROKER_DOWN, QUEUE_BROKER_STOP_REQUESTED,
-    WatchStep, in_window, look_due, watch_step,
+    BrokerSeen, QUEUE_BROKER_ATTENTION_KINDS, QUEUE_BROKER_STOP_REQUESTED, WatchStep, in_window,
+    look_due, watch_step,
 };
 use crate::domain::queue_service::ServiceState;
 
@@ -182,7 +182,7 @@ impl HostOpsState {
 
     fn queue_broker_attention_stands(&mut self, env: &mut HostEnv<'_>) -> bool {
         match env.queue.latest_queue_event(&QUEUE_BROKER_ATTENTION_KINDS) {
-            Ok(latest) => latest.is_some_and(|event| event.kind == QUEUE_BROKER_DOWN),
+            Ok(latest) => latest.is_some_and(|event| event.kind == EventKind::QueueBrokerDown),
             Err(error) => {
                 warn!(error = %format_args!("{error:#}"), "the queue broker's events could not be read: {error:#}");
                 false

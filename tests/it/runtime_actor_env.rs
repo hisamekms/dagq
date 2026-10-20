@@ -72,7 +72,7 @@ fn the_review_and_the_recovery_job_run_as_their_own_actors() {
         let event = detail
             .events
             .iter()
-            .find(|e| e.kind == kind && e.run_id.as_ref() == Some(run.id()))
+            .find(|e| e.kind.as_str() == kind && e.run_id.as_ref() == Some(run.id()))
             .unwrap_or_else(|| panic!("no {kind} of {}", run.id()));
         let actor = event.actor.clone().expect("an actor");
         (actor.role, actor.id, actor.requested_by)

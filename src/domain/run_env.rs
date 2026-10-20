@@ -7,6 +7,7 @@
 //! file (`infrastructure::run_env`); this is what a check found and what
 //! it means.
 
+use crate::domain::RecordedKind;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -76,11 +77,12 @@ install it where this PATH finds it, or register a task that takes the variable 
     /// The event the supervisor records when its check differs from the
     /// latest one on the queue (`last`, a kind of [`RUN_ENV_PROGRAM_KINDS`]):
     /// missing after anything but missing, found after missing, else none.
-    pub fn transition(&self, last: Option<&str>) -> Option<(super::EventKind, Value)> {
+    pub fn transition(&self, last: Option<&RecordedKind>) -> Option<(super::EventKind, Value)> {
         let missing = self.missing();
+        let was_missing = last.is_some_and(|kind| *kind == super::EventKind::RunEnvProgramMissing);
         let programs = serde_json::to_value(&self.programs).unwrap_or(Value::Null);
         match missing.first() {
-            Some(first) if last != Some(RUN_ENV_PROGRAM_MISSING) => Some((
+            Some(first) if !was_missing => Some((
                 super::EventKind::RunEnvProgramMissing,
                 json!({
                     "variable": first.variable,
@@ -90,7 +92,7 @@ install it where this PATH finds it, or register a task that takes the variable 
                     "message": self.missing_message(),
                 }),
             )),
-            None if last == Some(RUN_ENV_PROGRAM_MISSING) => Some((
+            None if was_missing => Some((
                 super::EventKind::RunEnvProgramFound,
                 json!({"path": self.path, "programs": programs}),
             )),
@@ -126,7 +128,10 @@ mod tests {
         assert!(none.missing().is_empty());
         assert_eq!(none.missing_message(), None);
         assert_eq!(none.transition(None), None);
-        assert_eq!(none.transition(Some(RUN_ENV_PROGRAM_FOUND)), None);
+        assert_eq!(
+            none.transition(Some(&EventKind::RunEnvProgramFound.into())),
+            None
+        );
     }
 
     #[test]
@@ -155,7 +160,8 @@ mod tests {
             "sccache",
             Some("/bin/sccache"),
         )]);
-        for last in [None, Some(RUN_ENV_PROGRAM_FOUND)] {
+        let found_kind = RecordedKind::from(EventKind::RunEnvProgramFound);
+        for last in [None, Some(&found_kind)] {
             let (kind, payload) = missing.transition(last).unwrap();
             assert_eq!(kind, EventKind::RunEnvProgramMissing);
             assert_eq!(payload["variable"], "RUSTC_WRAPPER");
@@ -163,11 +169,19 @@ mod tests {
             assert_eq!(payload["path"], "/usr/bin:/bin");
             assert_eq!(payload["programs"][0]["resolved"], Value::Null);
         }
-        assert_eq!(missing.transition(Some(RUN_ENV_PROGRAM_MISSING)), None);
-        let (kind, payload) = found.transition(Some(RUN_ENV_PROGRAM_MISSING)).unwrap();
+        assert_eq!(
+            missing.transition(Some(&EventKind::RunEnvProgramMissing.into())),
+            None
+        );
+        let (kind, payload) = found
+            .transition(Some(&EventKind::RunEnvProgramMissing.into()))
+            .unwrap();
         assert_eq!(kind, EventKind::RunEnvProgramFound);
         assert_eq!(payload["programs"][0]["resolved"], "/bin/sccache");
         assert_eq!(found.transition(None), None);
-        assert_eq!(found.transition(Some(RUN_ENV_PROGRAM_FOUND)), None);
+        assert_eq!(
+            found.transition(Some(&EventKind::RunEnvProgramFound.into())),
+            None
+        );
     }
 }

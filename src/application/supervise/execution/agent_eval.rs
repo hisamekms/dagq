@@ -273,7 +273,7 @@ impl Supervisor<'_> {
             .queue
             .events_of_between(&kinds, EventId::new(0), upto, every)?;
         Ok(record::rounds(events.iter().map(|event| {
-            (event.id.as_i64(), event.kind.as_str(), &event.payload)
+            (event.id.as_i64(), &event.kind, &event.payload)
         })))
     }
 

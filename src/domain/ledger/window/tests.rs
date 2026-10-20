@@ -1,3 +1,4 @@
+use crate::domain::EventKind;
 use serde_json::{Value, json};
 
 use super::*;
@@ -36,7 +37,7 @@ impl Log {
             task_id: task.map(TaskId::new),
             goal_id: goal.map(GoalId::new),
             run_id: run.then(|| RunId::new(RUN).unwrap()),
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: utc_text(T0 + minute * MIN),
             actor: None,
@@ -386,7 +387,7 @@ fn the_runs_sessions_jobs_and_executions_are_in_its_row() {
         .find(|row| row.kind == LedgerKind::Task && row.key == "7")
         .unwrap();
     assert_eq!(task.records.len(), 1);
-    assert_eq!(task.records[0].kind, event_kind::TASK_CREATED);
+    assert_eq!(task.records[0].kind, EventKind::TaskCreated);
 }
 
 /// The queue's intervals are rows from their start to their end with

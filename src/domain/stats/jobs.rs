@@ -12,13 +12,15 @@
 //! whose times differ by an order (task 1173).
 //! With `--goal`, a goal review counts for its goal though it has no task,
 //! and the jobs of queue events (observer, throughput review) are none.
+use crate::domain::EventKind;
+use crate::domain::run::{ReviewFinished, restore_payload};
 use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
 use serde_json::Value;
 
 use super::{EventId, RunEvent, Summary, summary, timestamp_millis};
-use crate::domain::{event_kind, sessions::SpanRef};
+use crate::domain::sessions::SpanRef;
 
 /// The kinds of job, in the order `stats` lists them.
 pub const JOB_KINDS: [&str; 6] = [
@@ -118,17 +120,17 @@ fn text(payload: &Value, key: &str) -> Option<String> {
 /// The kind of job an event starts, and the key its end is matched by.
 fn start_of(event: &RunEvent) -> Option<(&'static str, String)> {
     let run = || event.run_id.as_ref().map(|run| run.as_str().to_owned());
-    match event.kind.as_str() {
-        event_kind::REVIEW_STARTED => Some(("review", run()?)),
-        event_kind::TRIAGE_STARTED | event_kind::RECOVERY_REQUESTED => Some(("recovery", run()?)),
-        event_kind::PLAN_REVIEW_STARTED => {
+    match event.kind.known() {
+        Some(EventKind::ReviewStarted) => Some(("review", run()?)),
+        Some(EventKind::TriageStarted | EventKind::RecoveryRequested) => Some(("recovery", run()?)),
+        Some(EventKind::PlanReviewStarted) => {
             Some(("plan_review", text(&event.payload, "plan_review_id")?))
         }
-        event_kind::GOAL_REVIEW_STARTED => {
+        Some(EventKind::GoalReviewStarted) => {
             Some(("goal_review", text(&event.payload, "goal_review_id")?))
         }
-        event_kind::OBSERVE_STARTED => Some(("observer", String::new())),
-        event_kind::THROUGHPUT_REVIEW_STARTED => Some(("throughput_review", review_key(event)?)),
+        Some(EventKind::ObserveStarted) => Some(("observer", String::new())),
+        Some(EventKind::ThroughputReviewStarted) => Some(("throughput_review", review_key(event)?)),
         _ => None,
     }
 }
@@ -156,43 +158,47 @@ fn end_of(event: &RunEvent) -> Option<(&'static str, String, bool, Option<String
     let run = || event.run_id.as_ref().map(|run| run.as_str().to_owned());
     let payload = &event.payload;
     let verdict = || Some(text(payload, "verdict").unwrap_or_else(|| UNKNOWN.to_owned()));
-    match event.kind.as_str() {
-        event_kind::REVIEW_FINISHED => Some(("review", run()?, false, verdict())),
-        event_kind::REVIEW_FAILED => Some(("review", run()?, true, None)),
+    match event.kind.known() {
+        Some(EventKind::ReviewFinished) => {
+            let verdict = restore_payload::<ReviewFinished>(payload).verdict;
+            let verdict = verdict.unwrap_or(UNKNOWN).to_owned();
+            Some(("review", run()?, false, Some(verdict)))
+        }
+        Some(EventKind::ReviewFailed) => Some(("review", run()?, true, None)),
         // A job stopped before its verdict (`session_ended`,
         // `dialog_cleared`, ...) ran without failing and gave none.
-        event_kind::RECOVERY_FINISHED => {
+        Some(EventKind::RecoveryFinished) => {
             let failed = payload["outcome"] == "job_failed";
             let verdict = text(payload, "verdict").filter(|_| !failed);
             Some(("recovery", run()?, failed, verdict))
         }
-        event_kind::PLAN_REVIEW_FINISHED => Some((
+        Some(EventKind::PlanReviewFinished) => Some((
             "plan_review",
             text(payload, "plan_review_id")?,
             false,
             verdict(),
         )),
-        event_kind::PLAN_REVIEW_FAILED => {
+        Some(EventKind::PlanReviewFailed) => {
             Some(("plan_review", text(payload, "plan_review_id")?, true, None))
         }
         // Its proposal was edited, or moved on, while it ran: the job ran,
         // and its verdict was not applied.
-        event_kind::PLAN_REVIEW_DISCARDED => {
+        Some(EventKind::PlanReviewDiscarded) => {
             Some(("plan_review", text(payload, "plan_review_id")?, false, None))
         }
-        event_kind::GOAL_REVIEW_FINISHED => Some((
+        Some(EventKind::GoalReviewFinished) => Some((
             "goal_review",
             text(payload, "goal_review_id")?,
             false,
             verdict(),
         )),
-        event_kind::GOAL_REVIEW_FAILED => {
+        Some(EventKind::GoalReviewFailed) => {
             Some(("goal_review", text(payload, "goal_review_id")?, true, None))
         }
         // An observation no provider could run started no agent either
         // (task 1223).
-        event_kind::OBSERVE_FINISHED if payload["unavailable"] == true => None,
-        event_kind::OBSERVE_FINISHED => match payload["outcome"].as_str() {
+        Some(EventKind::ObserveFinished) if payload["unavailable"] == true => None,
+        Some(EventKind::ObserveFinished) => match payload["outcome"].as_str() {
             Some("skipped") => None,
             outcome => Some((
                 "observer",
@@ -202,7 +208,7 @@ fn end_of(event: &RunEvent) -> Option<(&'static str, String, bool, Option<String
             )),
         },
         // A skipped hour, which only past records hold, started no agent.
-        event_kind::THROUGHPUT_REVIEW_FINISHED => match payload["outcome"].as_str() {
+        Some(EventKind::ThroughputReviewFinished) => match payload["outcome"].as_str() {
             Some("skipped") => None,
             outcome => Some((
                 "throughput_review",
@@ -243,7 +249,7 @@ pub struct JobLife {
 pub fn session_models(events: &[RunEvent]) -> HashMap<String, (String, EventId)> {
     events
         .iter()
-        .filter(|event| event.kind == event_kind::SESSION_CLOSED)
+        .filter(|event| event.kind == EventKind::SessionClosed)
         .filter_map(|event| {
             let close = SpanRef::of(event);
             Some((close.session_id?, (close.model?, event.id)))
@@ -447,6 +453,7 @@ pub fn jobs(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::event_kind;
     use crate::domain::{GoalId, RunId, TaskId};
     use serde_json::json;
 
@@ -456,7 +463,7 @@ mod tests {
             task_id: run.map(|_| TaskId::new(1)),
             goal_id: None,
             run_id: run.map(|r| RunId::new(r).unwrap()),
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: format!("2026-09-29T00:00:{:02}Z", id.min(59)),
             actor: None,

@@ -57,14 +57,13 @@ fn mid_resume(events: &[RunEvent]) -> bool {
         .iter()
         .rev()
         .find(|event| {
-            [
-                EventKind::ResumeStarted.as_str(),
-                EventKind::ResumeFinished.as_str(),
-                EventKind::ResumeSkipped.as_str(),
-            ]
-            .contains(&event.kind.as_str())
+            event.kind.is_in(&[
+                EventKind::ResumeStarted,
+                EventKind::ResumeFinished,
+                EventKind::ResumeSkipped,
+            ])
         })
-        .is_some_and(|event| event.kind == EventKind::ResumeStarted.as_str())
+        .is_some_and(|event| event.kind == EventKind::ResumeStarted)
 }
 
 /// What parks a run at its turn's end: a replanning past its pause's

@@ -488,7 +488,7 @@ mod tests {
             task_id: Some(TaskId::new(1)),
             goal_id: None,
             run_id: Some(RunId::new("r1").unwrap()),
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: "2026-10-01T09:00:00Z".to_owned(),
             actor: None,

@@ -548,6 +548,7 @@ pub fn task_priority_at_creation(
 
 #[cfg(test)]
 mod tests {
+    use crate::domain::EventKind;
 
     /// A Spike's request: the runtime's words naming the Spike, its goal
     /// and the five ways on; its references the Spike and its goal. Its
@@ -576,10 +577,13 @@ mod tests {
         let of_person = serde_json::json!({"request_id": 1, "spike_task_id": null});
         use super::super::{event_attention, event_kind};
         for kind in [event_kind::REQUEST_PROPOSED, event_kind::REQUEST_DECLINED] {
-            assert_eq!(event_attention(kind, &of_spike), None, "{kind}");
-            assert!(event_attention(kind, &of_person).is_some(), "{kind}");
+            assert_eq!(event_attention(&kind.into(), &of_spike), None, "{kind}");
+            assert!(
+                event_attention(&kind.into(), &of_person).is_some(),
+                "{kind}"
+            );
         }
-        assert!(event_attention(event_kind::REQUEST_PLANNER_EXHAUSTED, &of_spike).is_some());
+        assert!(event_attention(&EventKind::RequestPlannerExhausted.into(), &of_spike).is_some());
     }
     use super::*;
 

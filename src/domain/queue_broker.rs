@@ -64,6 +64,7 @@
 //!
 //! [Queue broker]: ../../docs/design/queue-broker.md
 
+use crate::domain::{EventKind, RecordedKind};
 use std::time::Duration;
 
 use super::queue_service::{ServiceErrorCode, ServiceState, run_holds_token};
@@ -800,8 +801,8 @@ pub const QUEUE_BROKER_ATTENTION_KINDS: [&str; 4] = [
 
 /// Whether the attention stands: the latest of
 /// [`QUEUE_BROKER_ATTENTION_KINDS`] is [`QUEUE_BROKER_DOWN`].
-pub fn attention_stands(latest: Option<&str>) -> bool {
-    latest == Some(QUEUE_BROKER_DOWN)
+pub fn attention_stands(latest: Option<&RecordedKind>) -> bool {
+    latest.is_some_and(|kind| *kind == EventKind::QueueBrokerDown)
 }
 
 #[cfg(test)]
@@ -1151,8 +1152,10 @@ mod tests {
             reason: "x".into(),
         };
         assert_eq!(bad.status(), 400);
-        assert!(attention_stands(Some(QUEUE_BROKER_DOWN)));
-        assert!(!attention_stands(Some(QUEUE_BROKER_RUNNING)));
+        assert!(attention_stands(Some(&EventKind::QueueBrokerDown.into())));
+        assert!(!attention_stands(Some(
+            &EventKind::QueueBrokerRunning.into()
+        )));
         assert!(!attention_stands(None));
     }
 

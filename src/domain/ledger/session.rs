@@ -21,8 +21,7 @@ use crate::domain::{
     EventId, EventKind, RunEvent,
     headless_job::JobRef,
     sessions::{
-        GOAL_REVIEW, HOOK_KINDS, INFERRED, OBSERVER, PLAN_REVIEW, SESSION_CLOSED, SESSION_OPENED,
-        SpanRef, THROUGHPUT_REVIEW,
+        GOAL_REVIEW, HOOK_KINDS, INFERRED, OBSERVER, PLAN_REVIEW, SpanRef, THROUGHPUT_REVIEW,
     },
     stats::{
         executions::{Execution, executions},
@@ -101,7 +100,7 @@ fn entries(executions: &[Execution]) -> Value {
 pub fn run_sessions(events: &[RunEvent]) -> Map<String, Value> {
     let opens: HashMap<EventId, &RunEvent> = events
         .iter()
-        .filter(|event| event.kind == SESSION_OPENED)
+        .filter(|event| event.kind == EventKind::SessionOpened)
         .map(|event| (event.id, event))
         .collect();
     let mut kept = Map::new();
@@ -196,14 +195,11 @@ fn span_target(open: &RunEvent) -> String {
 }
 
 /// The kinds of the observer's and the throughput reviews' events.
-const OBSERVER_KINDS: [&str; 2] = [
-    EventKind::ObserveStarted.as_str(),
-    EventKind::ObserveFinished.as_str(),
-];
-const THROUGHPUT_REVIEW_KINDS: [&str; 3] = [
-    EventKind::ThroughputReviewStarted.as_str(),
-    EventKind::ThroughputReviewFinished.as_str(),
-    EventKind::ThroughputReviewReported.as_str(),
+const OBSERVER_KINDS: [EventKind; 2] = [EventKind::ObserveStarted, EventKind::ObserveFinished];
+const THROUGHPUT_REVIEW_KINDS: [EventKind; 3] = [
+    EventKind::ThroughputReviewStarted,
+    EventKind::ThroughputReviewFinished,
+    EventKind::ThroughputReviewReported,
 ];
 
 /// The session rows of `events`: the session's and job's events of no run
@@ -264,7 +260,7 @@ impl SessionBook {
     /// a record of, and a job's whose model its close gives.
     pub fn add(&mut self, event: &RunEvent, touched: &mut BTreeSet<(LedgerKind, String)>) {
         let span = SpanRef::of(event);
-        let at = if event.kind == SESSION_OPENED {
+        let at = if event.kind == EventKind::SessionOpened {
             let kind = span.kind.as_deref().unwrap_or_default();
             let id = span_target(event);
             let at = self.open_row(kind, &id, "session");
@@ -311,7 +307,7 @@ impl SessionBook {
         };
         self.rows[at].records.push(event.id);
         touched.insert((LedgerKind::Session, self.rows[at].key.clone()));
-        if event.kind == SESSION_CLOSED
+        if event.kind == EventKind::SessionClosed
             && let (Some(session), Some(model)) = (span.session_id, span.model)
         {
             for job in self.jobs_by_session.get(&session).into_iter().flatten() {
@@ -383,10 +379,10 @@ fn outside_of(event: &RunEvent) -> (String, String) {
     if let Some(id) = job.goal_review_id {
         return (GOAL_REVIEW.into(), id);
     }
-    if OBSERVER_KINDS.contains(&event.kind.as_str()) {
+    if event.kind.is_in(&OBSERVER_KINDS) {
         return (OBSERVER.into(), String::new());
     }
-    if THROUGHPUT_REVIEW_KINDS.contains(&event.kind.as_str()) {
+    if event.kind.is_in(&THROUGHPUT_REVIEW_KINDS) {
         return (THROUGHPUT_REVIEW.into(), String::new());
     }
     // A job its supervisor stopped names only its kind and what it was of.

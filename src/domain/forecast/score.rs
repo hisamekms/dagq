@@ -4,27 +4,25 @@
 //! read, nothing recorded: a sample is one (snapshot, target) pair, with
 //! the change marks between the snapshot and the finish counted so the
 //! error of the method can be read apart from the plan's changes. Pure.
+use crate::domain::EventKind;
 use std::collections::{HashMap, HashSet};
 
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::snapshot::FORECAST_RECORDED;
 use crate::domain::{
-    EventId, GoalId, GoalVerdict, RunEvent, TaskId, event_kind,
-    marks::{MARK_RETRACTED, Mark},
-    stats::timestamp_millis,
+    EventId, GoalId, GoalVerdict, RunEvent, TaskId, marks::Mark, stats::timestamp_millis,
 };
 
 /// The changes of one task's plan that count as a change mark between a
 /// snapshot and a finish, when the snapshot forecast that task (the task
 /// triggers of [`super::snapshot`]).
-const TASK_MARK_KINDS: [&str; 5] = [
-    event_kind::TASK_PRIORITY_CHANGED,
-    event_kind::DEPENDENCY_ADDED,
-    event_kind::DEPENDENCY_REMOVED,
-    event_kind::GOAL_DEPENDENCY_ADDED,
-    event_kind::GOAL_DEPENDENCY_REMOVED,
+const TASK_MARK_KINDS: [EventKind; 5] = [
+    EventKind::TaskPriorityChanged,
+    EventKind::DependencyAdded,
+    EventKind::DependencyRemoved,
+    EventKind::GoalDependencyAdded,
+    EventKind::GoalDependencyRemoved,
 ];
 
 /// The bands of the remaining time a snapshot's p50 gave (its
@@ -182,8 +180,8 @@ pub fn score(events: &[RunEvent], marks: &[Mark]) -> Scoring {
             ms,
             excluded,
         };
-        match event.kind.as_str() {
-            event_kind::TASK_STATUS_CHANGED => {
+        match event.kind.known() {
+            Some(EventKind::TaskStatusChanged) => {
                 let excluded = match event.payload.get("to").and_then(Value::as_str) {
                     Some("completed") => None,
                     Some("canceled") => Some(Excluded::Canceled),
@@ -196,7 +194,7 @@ pub fn score(events: &[RunEvent], marks: &[Mark]) -> Scoring {
                         .push(finish(excluded));
                 }
             }
-            event_kind::GOAL_CLOSED => {
+            Some(EventKind::GoalClosed) => {
                 let achieved = event.payload.get("verdict").and_then(Value::as_str)
                     == Some(GoalVerdict::Achieved.as_str());
                 if let Some(goal) = event.goal_id {
@@ -206,7 +204,7 @@ pub fn score(events: &[RunEvent], marks: &[Mark]) -> Scoring {
                         .push(finish((!achieved).then_some(Excluded::Abandoned)));
                 }
             }
-            kind if TASK_MARK_KINDS.contains(&kind) => {
+            Some(kind) if TASK_MARK_KINDS.contains(&kind) => {
                 if let Some(task) = event.task_id {
                     task_marks.push((event.id, ms, task));
                 }
@@ -218,12 +216,17 @@ pub fn score(events: &[RunEvent], marks: &[Mark]) -> Scoring {
     // retraction; a derived one has no event of its own.
     let queue_marks: Vec<(Option<EventId>, i64)> = marks
         .iter()
-        .filter(|mark| mark.retracted_by.is_none() && mark.kind != MARK_RETRACTED)
+        .filter(|mark| {
+            mark.retracted_by.is_none() && mark.event_kind() != Some(EventKind::MarkRetracted)
+        })
         .filter_map(|mark| Some((mark.id, timestamp_millis(&mark.at)?)))
         .collect();
 
     let mut scoring = Scoring::default();
-    for event in events.iter().filter(|e| e.kind == FORECAST_RECORDED) {
+    for event in events
+        .iter()
+        .filter(|e| e.kind == EventKind::ForecastRecorded)
+    {
         let Ok(recorded) = Recorded::deserialize(&event.payload) else {
             continue;
         };
@@ -300,10 +303,12 @@ pub fn score(events: &[RunEvent], marks: &[Mark]) -> Scoring {
 
 #[cfg(test)]
 mod tests {
+    use crate::domain::event_kind;
+    use crate::domain::forecast::snapshot::FORECAST_RECORDED;
     use serde_json::json;
 
     use super::*;
-    use crate::domain::marks::{self, MARK_RECORDED};
+    use crate::domain::marks::{self, MARK_RECORDED, MARK_RETRACTED};
 
     const T0: i64 = 1_790_000_000;
     const HOUR: i64 = 3600;

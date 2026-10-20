@@ -13,13 +13,14 @@
 //! provider cannot be used then waits for its hold to end and goes on
 //! there; `--no-claude` still sends a Claude task to Codex.
 
+use crate::domain::EventKind;
+use crate::domain::RecordedKind;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{
     DomainError, Provider, RunEvent, RunId,
     claim_hold::HoldReason,
-    event_kind,
     queue_hold::Wall,
     turn::TurnFailure,
     worker::{Worker, WorkerMode},
@@ -150,7 +151,7 @@ impl Default for ProviderFallback {
 pub fn switches(events: &[RunEvent]) -> usize {
     events
         .iter()
-        .filter(|e| e.kind == event_kind::PROVIDER_SWITCHED)
+        .filter(|e| e.kind == EventKind::ProviderSwitched)
         .count()
 }
 
@@ -164,7 +165,7 @@ pub fn switch_of_turn(events: &[RunEvent], turn: u64) -> Option<&RunEvent> {
     events
         .iter()
         .rev()
-        .find(|e| e.kind == event_kind::PROVIDER_SWITCHED && e.payload["turn"] == turn)
+        .find(|e| e.kind == EventKind::ProviderSwitched && e.payload["turn"] == turn)
 }
 
 /// Whether the run already waits for a provider after turn `turn`
@@ -172,14 +173,14 @@ pub fn switch_of_turn(events: &[RunEvent], turn: u64) -> Option<&RunEvent> {
 pub fn waiting_on(events: &[RunEvent], turn: u64) -> bool {
     events
         .iter()
-        .any(|e| e.kind == event_kind::PROVIDER_WAITING && e.payload["turn"] == turn)
+        .any(|e| e.kind == EventKind::ProviderWaiting && e.payload["turn"] == turn)
 }
 
 /// Whether `event` starts a new session of the run's worker: a switch of
 /// its provider, or a new session of the same one for a large context
 /// (`session_renewed`, ADR-t2080-1 decision 5).
 fn starts_session(event: &RunEvent) -> bool {
-    event.kind == event_kind::PROVIDER_SWITCHED || event.kind == event_kind::SESSION_RENEWED
+    event.kind == EventKind::ProviderSwitched || event.kind == EventKind::SessionRenewed
 }
 
 /// How many new sessions the run's worker started after its first: its
@@ -560,8 +561,8 @@ impl ProviderHold {
     /// The hold in place, from the latest `provider_held` or
     /// `provider_released` of its provider (`kind` and `payload`): a hold
     /// not released since. Its time may be up; the caller releases it.
-    pub fn in_place(kind: &str, payload: &Value) -> Option<Self> {
-        if kind != event_kind::PROVIDER_HELD {
+    pub fn in_place(kind: &RecordedKind, payload: &Value) -> Option<Self> {
+        if *kind != EventKind::ProviderHeld {
             return None;
         }
         Some(Self {
@@ -576,6 +577,7 @@ impl ProviderHold {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::event_kind;
     use crate::domain::{EventId, TaskId};
 
     fn event(kind: &str, payload: Value) -> RunEvent {
@@ -584,7 +586,7 @@ mod tests {
             task_id: Some(TaskId::new(1)),
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: String::new(),
             actor: None,
@@ -887,18 +889,21 @@ mod tests {
         let payload = hold.held_payload(Some(&run));
         assert_eq!(payload["run_id"], "r1");
         assert_eq!(
-            ProviderHold::in_place(event_kind::PROVIDER_HELD, &payload),
+            ProviderHold::in_place(&EventKind::ProviderHeld.into(), &payload),
             Some(hold)
         );
         assert_eq!(
             ProviderHold::in_place(
-                event_kind::PROVIDER_RELEASED,
+                &EventKind::ProviderReleased.into(),
                 &hold.released_payload("done")
             ),
             None
         );
         assert_eq!(
-            ProviderHold::in_place(event_kind::PROVIDER_HELD, &json!({"provider": "codex"})),
+            ProviderHold::in_place(
+                &EventKind::ProviderHeld.into(),
+                &json!({"provider": "codex"})
+            ),
             None
         );
     }

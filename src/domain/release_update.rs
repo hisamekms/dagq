@@ -3,6 +3,7 @@
 //! of the sparse index, when a look is due and how `status` reads the
 //! result. The ask and the job that installs a release are not here.
 
+use crate::domain::EventKind;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -143,7 +144,7 @@ pub fn check_due(
         return true;
     };
     if first_pass
-        && last.kind == RELEASE_CHECKED
+        && last.kind == EventKind::ReleaseChecked
         && last.payload["current"].as_str() != Some(current)
     {
         return true;
@@ -176,7 +177,7 @@ pub fn status(
     } else {
         match last {
             None => "unchecked",
-            Some(event) if event.kind == RELEASE_CHECK_FAILED => "check_failed",
+            Some(event) if event.kind == EventKind::ReleaseCheckFailed => "check_failed",
             Some(_) => match (latest, current) {
                 (Some(latest), Some(current)) if is_newer(latest, current) => "update_available",
                 _ => "up_to_date",
@@ -190,7 +191,7 @@ pub fn status(
         "checked_at": last.and_then(|event| event.payload["checked_at"].as_i64()),
         "state": state,
     });
-    if let Some(event) = last.filter(|event| event.kind == RELEASE_CHECK_FAILED) {
+    if let Some(event) = last.filter(|event| event.kind == EventKind::ReleaseCheckFailed) {
         value["error"] = event.payload["error"].clone();
     }
     value
@@ -208,7 +209,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: String::new(),
             actor: None,

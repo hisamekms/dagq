@@ -7,6 +7,7 @@
 //! verifying (and judging) again on main's new head when main moved since.
 use crate::common;
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use runtime_support::*;
 
@@ -332,7 +333,7 @@ fn after_a_restart_a_close_verifies_main_again_and_a_failure_does_not_close() {
     let judged: Vec<_> = detail
         .events
         .iter()
-        .filter(|e| e.kind == "run_satisfied_review_started")
+        .filter(|e| e.kind == EventKind::RunSatisfiedReviewStarted)
         .map(|e| e.run_id.clone())
         .collect();
     assert_eq!(judged, [Some(run.id().clone())]);
@@ -835,7 +836,11 @@ fn a_claim_waiting_for_its_close_answer_is_parked_and_the_answer_does_not_close_
 }
 
 /// The actor's `requested_by` of every event of `kind` of `run`.
-fn requested_by(detail: &dagq::domain::TaskDetail, run: &RunId, kind: &str) -> Vec<Option<String>> {
+fn requested_by(
+    detail: &dagq::domain::TaskDetail,
+    run: &RunId,
+    kind: EventKind,
+) -> Vec<Option<String>> {
     detail
         .events
         .iter()
@@ -954,20 +959,20 @@ fn a_passed_claim_is_judged_on_its_head_and_asks_the_person_with_the_judgment() 
     // and nothing before it or after the ask.
     let job = Some(format!("review-job:{}:satisfied-1", run.id()));
     assert_eq!(
-        requested_by(&detail, run.id(), "run_satisfied_judged"),
+        requested_by(&detail, run.id(), EventKind::RunSatisfiedJudged),
         std::slice::from_ref(&job)
     );
     let opened: Vec<_> = detail
         .events
         .iter()
-        .filter(|e| e.kind == "ask_opened" && e.payload["kind"] == "approve_close")
+        .filter(|e| e.kind == EventKind::AskOpened && e.payload["kind"] == "approve_close")
         .map(|e| e.actor.as_ref().and_then(|a| a.requested_by.clone()))
         .collect();
     assert_eq!(opened, [job]);
     for kind in [
-        "run_satisfied_review_started",
-        "run_satisfied_review_job_finished",
-        "lease_released",
+        EventKind::RunSatisfiedReviewStarted,
+        EventKind::RunSatisfiedReviewJobFinished,
+        EventKind::LeaseReleased,
     ] {
         assert!(
             requested_by(&detail, run.id(), kind)
@@ -1034,14 +1039,14 @@ fn an_unreadable_judgment_runs_once_more_and_then_asks_as_a_failed_job() {
         ask.question
     );
     assert_eq!(
-        requested_by(&detail, run.id(), "run_satisfied_judged"),
+        requested_by(&detail, run.id(), EventKind::RunSatisfiedJudged),
         [None]
     );
     assert!(
         detail
             .events
             .iter()
-            .filter(|e| e.kind == "ask_opened")
+            .filter(|e| e.kind == EventKind::AskOpened)
             .all(|e| e.actor.as_ref().is_none_or(|a| a.requested_by.is_none()))
     );
     assert!(queue.run_lease(run.id()).unwrap().is_none());
@@ -1176,7 +1181,7 @@ fn a_high_pass_on_the_snapshot_main_is_still_at_closes_the_claim_with_no_ask() {
     let verified = &detail
         .events
         .iter()
-        .find(|e| e.kind == "run_satisfied_verified")
+        .find(|e| e.kind == EventKind::RunSatisfiedVerified)
         .unwrap();
     let closed = payloads(&detail, "run_satisfied_closed");
     assert_eq!(
@@ -1189,7 +1194,7 @@ fn a_high_pass_on_the_snapshot_main_is_still_at_closes_the_claim_with_no_ask() {
         ]
     );
     let job = Some(format!("review-job:{}:satisfied-1", run.id()));
-    for kind in ["run_satisfied_judged", "run_satisfied_closed"] {
+    for kind in [EventKind::RunSatisfiedJudged, EventKind::RunSatisfiedClosed] {
         assert_eq!(
             requested_by(&detail, run.id(), kind),
             std::slice::from_ref(&job),
@@ -1260,15 +1265,15 @@ fn a_high_pass_main_moved_past_during_the_review_is_verified_and_judged_again_on
     // second for the close.
     let job = |attempt: usize| Some(format!("review-job:{}:satisfied-{attempt}", run.id()));
     assert_eq!(
-        requested_by(&detail, run.id(), "run_satisfied_snapshot"),
+        requested_by(&detail, run.id(), EventKind::RunSatisfiedSnapshot),
         [None, job(1)]
     );
     assert_eq!(
-        requested_by(&detail, run.id(), "run_satisfied_judged"),
+        requested_by(&detail, run.id(), EventKind::RunSatisfiedJudged),
         [job(1), job(2)]
     );
     assert_eq!(
-        requested_by(&detail, run.id(), "run_satisfied_closed"),
+        requested_by(&detail, run.id(), EventKind::RunSatisfiedClosed),
         [job(2)]
     );
 }
@@ -1310,7 +1315,7 @@ fn a_high_pass_main_keeps_moving_past_is_asked_of_the_person_past_the_limit() {
     let opened: Vec<_> = detail
         .events
         .iter()
-        .filter(|e| e.kind == "ask_opened" && e.payload["kind"] == "approve_close")
+        .filter(|e| e.kind == EventKind::AskOpened && e.payload["kind"] == "approve_close")
         .map(|e| e.actor.as_ref().and_then(|a| a.requested_by.clone()))
         .collect();
     assert_eq!(

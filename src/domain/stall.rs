@@ -19,6 +19,7 @@
 //! ran ends, so none of them reaches its wait: the turn that ran when the
 //! task was held is watched and limited as before, and nothing is from its
 //! end to the release.
+use crate::domain::EventKind;
 use std::{collections::HashMap, time::Duration};
 
 use serde::{Deserialize, Serialize};
@@ -223,7 +224,7 @@ impl StallConfig {
         let event = events
             .iter()
             .rev()
-            .find(|event| event.kind == STALL_CONFIG_LOADED)?;
+            .find(|event| event.kind == EventKind::StallConfigLoaded)?;
         let mut config = Self::default();
         for key in Self::KEYS {
             if let Some(secs) = event
@@ -281,7 +282,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: String::new(),
             actor: None,

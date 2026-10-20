@@ -235,7 +235,11 @@ esac"#
     // the request's clock after the answer's send left that idle unseen
     // (task 931).
     let at = |kind: &str| {
-        let event = detail.events.iter().find(|e| e.kind == kind).unwrap();
+        let event = detail
+            .events
+            .iter()
+            .find(|e| e.kind.as_str() == kind)
+            .unwrap();
         dagq::domain::stats::timestamp_millis(&event.created_at).unwrap()
     };
     let settled_ms = at("stale_receipt_resolved") - at("ask_delivered");

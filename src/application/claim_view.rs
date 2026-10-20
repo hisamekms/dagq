@@ -22,6 +22,7 @@
 //! candidates (`fill_slots`, the samples of `stats` and `kpi`, the
 //! observer) do not go through here.
 
+use crate::domain::EventKind;
 use anyhow::Result;
 use serde::Serialize;
 
@@ -106,7 +107,7 @@ pub struct ClaimView<T> {
 /// Each task's open deferral as the supervisor last recorded it.
 pub fn open_deferrals(queue: &(impl RunLog + ?Sized)) -> Result<Vec<OpenDeferral>> {
     Ok(queue
-        .latest_task_events(&DEFERRAL_KINDS)?
+        .latest_task_events(&DEFERRAL_KINDS.map(EventKind::as_str))?
         .iter()
         .filter_map(OpenDeferral::of)
         .collect())

@@ -90,12 +90,12 @@ pub fn judge(events: &[RunEvent], now: i64, inputs: &LiveInputs) -> Judged {
 }
 
 /// The kinds of the record of the judgments of now.
-pub const RECORD_KINDS: [&str; 5] = [
-    EventKind::LiveAlertBaseline.as_str(),
-    EventKind::LiveAlertInputChanged.as_str(),
-    EventKind::LiveAlertReached.as_str(),
-    EventKind::LiveAlertStarted.as_str(),
-    EventKind::LiveAlertEnded.as_str(),
+pub const RECORD_KINDS: [EventKind; 5] = [
+    EventKind::LiveAlertBaseline,
+    EventKind::LiveAlertInputChanged,
+    EventKind::LiveAlertReached,
+    EventKind::LiveAlertStarted,
+    EventKind::LiveAlertEnded,
 ];
 
 /// One record of a stream as its payload holds it: the supervisor whose
@@ -111,14 +111,11 @@ pub struct StreamRecord {
 impl StreamRecord {
     pub fn of(event: &RunEvent) -> Option<Self> {
         let payload = &event.payload;
-        let kind = event.kind.as_str();
-        let alert = [
-            EventKind::LiveAlertStarted.as_str(),
-            EventKind::LiveAlertEnded.as_str(),
-        ]
-        .contains(&kind)
-        .then(|| AlertKey::deserialize(payload).ok())
-        .flatten();
+        let alert = event
+            .kind
+            .is_in(&[EventKind::LiveAlertStarted, EventKind::LiveAlertEnded])
+            .then(|| AlertKey::deserialize(payload).ok())
+            .flatten();
         Some(Self {
             supervisor: payload.get("supervisor")?.as_str()?.to_owned(),
             version: payload.get("version").and_then(Value::as_u64),
@@ -582,10 +579,13 @@ pub fn fold_within(
         .collect();
     let mut streams: BTreeMap<String, StreamFold> = BTreeMap::new();
     for event in &upto {
-        let kind = event.kind.as_str();
-        if !kind.starts_with("live_alert_") {
+        let Some(kind) = event
+            .kind
+            .known()
+            .filter(|kind| RECORD_KINDS.contains(kind))
+        else {
             continue;
-        }
+        };
         let (Some(supervisor), Some(at)) = (
             event.payload.get("supervisor").and_then(Value::as_str),
             timestamp_millis(&event.created_at),
@@ -595,7 +595,7 @@ pub fn fold_within(
         let stream = streams.entry(supervisor.to_owned()).or_default();
         let version = event.payload.get("version").and_then(Value::as_u64);
         match kind {
-            k if k == EventKind::LiveAlertBaseline.as_str() => {
+            EventKind::LiveAlertBaseline => {
                 *stream = StreamFold {
                     slots: event.payload.get("slots").cloned(),
                     config: event.payload.get("config").cloned(),
@@ -617,7 +617,7 @@ pub fn fold_within(
                     failing: false,
                 };
             }
-            k if k == EventKind::LiveAlertInputChanged.as_str() => {
+            EventKind::LiveAlertInputChanged => {
                 if !stream.baselined {
                     continue;
                 }
@@ -641,14 +641,12 @@ pub fn fold_within(
                 }
                 stream.last_ok = Some((at, event.id));
             }
-            k if k == EventKind::LiveAlertStarted.as_str()
-                || k == EventKind::LiveAlertEnded.as_str() =>
-            {
+            EventKind::LiveAlertStarted | EventKind::LiveAlertEnded => {
                 if stream.baselined {
                     stream.last_ok = Some((at, event.id));
                 }
             }
-            k if k == EventKind::LiveAlertReached.as_str() => {
+            EventKind::LiveAlertReached => {
                 if event.payload.get("ok").and_then(Value::as_bool) == Some(true) {
                     stream.failing = false;
                     stream.confirmed = stream.confirmed.max(version.unwrap_or(0));

@@ -1,6 +1,7 @@
 //! The cross strata (`--cross`).
 
 use super::*;
+use crate::domain::EventKind;
 
 #[test]
 fn cross_strata_intersect_filters_and_axes_without_changing_existing_output() {
@@ -28,7 +29,8 @@ fn cross_strata_intersect_filters_and_axes_without_changing_existing_output() {
                 .events
                 .iter_mut()
                 .find(|event| {
-                    event.run_id.as_ref() == Some(&run_id(&run)) && event.kind == "run_claimed"
+                    event.run_id.as_ref() == Some(&run_id(&run))
+                        && event.kind == EventKind::RunClaimed
                 })
                 .unwrap();
             claim.payload["worker_mode"] = json!(route);

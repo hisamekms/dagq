@@ -13,6 +13,7 @@
 //!
 //! Marks only split periods; they change no run and raise no attention.
 
+use crate::domain::EventKind;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::Serialize;
@@ -47,23 +48,21 @@ pub const MARK_RECORDED: &str = crate::domain::event_kind::EventKind::MarkRecord
 /// mark stays, and the KPIs do not split at it.
 pub const MARK_RETRACTED: &str = crate::domain::event_kind::EventKind::MarkRetracted.as_str();
 /// Every kind of recorded mark.
-pub const RECORDED_KINDS: [&str; 5] = [
-    SUPERVISOR_STARTED,
-    SUPERVISOR_STOPPED,
-    RUN_ENV_CHANGED,
-    MARK_RECORDED,
-    MARK_RETRACTED,
+pub const RECORDED_KINDS: [EventKind; 5] = [
+    EventKind::SupervisorStarted,
+    EventKind::SupervisorStopped,
+    EventKind::RunEnvChanged,
+    EventKind::MarkRecorded,
+    EventKind::MarkRetracted,
 ];
 /// The marks `dagq mark --retract` retracts: the ones that stand for a
 /// change a person may find was none. The supervisor's start and stop are
 /// what happened to the process, and a retraction retracts nothing.
-pub const RETRACTABLE_KINDS: [&str; 2] = [MARK_RECORDED, RUN_ENV_CHANGED];
+pub const RETRACTABLE_KINDS: [EventKind; 2] = [EventKind::MarkRecorded, EventKind::RunEnvChanged];
 /// The prefix of a derived mark's kind: `derived:<attribute>`.
 pub const DERIVED_PREFIX: &str = "derived:";
 /// The longest label `dagq mark` takes, in characters.
 pub const MAX_LABEL_CHARS: usize = 120;
-
-const RUN_CLAIMED: &str = super::event_kind::RUN_CLAIMED;
 
 /// The normalized `[run.env]`: the hash of its `KEY=VALUE` lines in key
 /// order, and each key's own hash so the next change can name the keys it
@@ -184,7 +183,7 @@ pub fn retraction_payload(events: &[RunEvent], target: EventId, by: &str) -> Res
     let mark = events
         .iter()
         .find(|event| event.id == target && is_queue_event(event))
-        .filter(|event| RETRACTABLE_KINDS.contains(&event.kind.as_str()))
+        .filter(|event| event.kind.is_in(&RETRACTABLE_KINDS))
         .ok_or_else(|| {
             format!("event {target} is not a mark that can be retracted (dagq mark, or a [run.env] change)")
         })?;
@@ -222,23 +221,31 @@ pub struct Mark {
     pub detail: Value,
 }
 
+impl Mark {
+    /// The kind of the event a recorded mark is; `None` for a derived one.
+    /// A reader names a mark's kind by its variant, as it names an event's.
+    pub fn event_kind(&self) -> Option<EventKind> {
+        EventKind::from_name(&self.kind)
+    }
+}
+
 /// Every mark in `events` (all of the queue's, ascending id) whose time is
 /// after `since` and at or before `until`, oldest first.
 pub fn marks(events: &[RunEvent], since: Option<Cursor>, until: Option<Cursor>) -> Vec<Mark> {
     let retracted = retractions(events);
     let mut marks: Vec<Mark> = events
         .iter()
-        .filter(|event| is_queue_event(event) && RECORDED_KINDS.contains(&event.kind.as_str()))
+        .filter(|event| is_queue_event(event) && event.kind.is_in(&RECORDED_KINDS))
         .map(|event| Mark {
             id: Some(event.id),
-            kind: event.kind.clone(),
-            at: match event.kind.as_str() {
-                MARK_RECORDED => event
+            kind: event.kind.to_string(),
+            at: match event.kind.known() {
+                Some(EventKind::MarkRecorded) => event
                     .payload
                     .get("at")
                     .and_then(Value::as_str)
                     .map(str::to_owned),
-                SUPERVISOR_STOPPED if event.payload["outcome"] == "pruned" => event
+                Some(EventKind::SupervisorStopped) if event.payload["outcome"] == "pruned" => event
                     .payload
                     .get("last_heartbeat_at")
                     .and_then(Value::as_i64)
@@ -328,7 +335,7 @@ fn retractions(events: &[RunEvent]) -> HashMap<EventId, EventId> {
     let mut retracted = HashMap::new();
     for event in events
         .iter()
-        .filter(|event| event.kind == MARK_RETRACTED && is_queue_event(event))
+        .filter(|event| event.kind == EventKind::MarkRetracted && is_queue_event(event))
     {
         if let Some(mark) = event.payload.get("mark").and_then(Value::as_i64) {
             retracted.entry(EventId::new(mark)).or_insert(event.id);
@@ -345,13 +352,17 @@ fn recorded_label(event: &RunEvent) -> String {
         .payload
         .get("parallel")
         .map_or(Value::Null, Clone::clone);
-    match event.kind.as_str() {
-        SUPERVISOR_STARTED if event.payload.get("handoff") == Some(&Value::Bool(true)) => {
+    match event.kind.known() {
+        Some(EventKind::SupervisorStarted)
+            if event.payload.get("handoff") == Some(&Value::Bool(true)) =>
+        {
             format!("supervisor handed off to {version}, parallel {parallel}")
         }
-        SUPERVISOR_STARTED => format!("supervisor started: {version}, parallel {parallel}"),
-        SUPERVISOR_STOPPED => format!("supervisor stopped: {version}"),
-        RUN_ENV_CHANGED => {
+        Some(EventKind::SupervisorStarted) => {
+            format!("supervisor started: {version}, parallel {parallel}")
+        }
+        Some(EventKind::SupervisorStopped) => format!("supervisor stopped: {version}"),
+        Some(EventKind::RunEnvChanged) => {
             let changed: Vec<&str> = event
                 .payload
                 .get("changed")
@@ -360,7 +371,7 @@ fn recorded_label(event: &RunEvent) -> String {
                 .unwrap_or_default();
             format!("[run.env] changed: {}", changed.join(", "))
         }
-        MARK_RETRACTED => format!(
+        Some(EventKind::MarkRetracted) => format!(
             "retracted mark {}: {}",
             event.payload.get("mark").map_or(Value::Null, Clone::clone),
             text("label").unwrap_or_default()
@@ -409,11 +420,11 @@ fn claim_value(payload: &Value, attribute: &str) -> Option<String> {
 fn derived_marks(events: &[RunEvent]) -> Vec<Mark> {
     let claims: Vec<&RunEvent> = events
         .iter()
-        .filter(|event| event.kind == RUN_CLAIMED && event.run_id.is_some())
+        .filter(|event| event.kind == EventKind::RunClaimed && event.run_id.is_some())
         .collect();
     let starts: Vec<&RunEvent> = events
         .iter()
-        .filter(|event| event.kind == SUPERVISOR_STARTED && is_queue_event(event))
+        .filter(|event| event.kind == EventKind::SupervisorStarted && is_queue_event(event))
         .collect();
     let mut marks = Vec::new();
     for (attribute, start_key) in DERIVED {
@@ -486,7 +497,7 @@ mod tests {
         RunEvent {
             task_id: Some(TaskId::new(id)),
             run_id: Some(RunId::new(format!("00000000-0000-4000-8000-{id:012}")).unwrap()),
-            ..queue_event(id, RUN_CLAIMED, payload, at)
+            ..queue_event(id, EventKind::RunClaimed.as_str(), payload, at)
         }
     }
 

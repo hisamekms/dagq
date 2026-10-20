@@ -22,7 +22,7 @@ fn run_payloads(detail: &dagq::domain::TaskDetail, run: &TaskRun, kind: &str) ->
     detail
         .events
         .iter()
-        .filter(|e| e.kind == kind && e.run_id.as_ref() == Some(run.id()))
+        .filter(|e| e.kind.as_str() == kind && e.run_id.as_ref() == Some(run.id()))
         .map(|e| e.payload.clone())
         .collect()
 }
@@ -154,7 +154,7 @@ fn the_recovery_job_reads_the_supervisors_build_and_the_dependencies_it_holds() 
         .run_events(&landed_run)
         .unwrap()
         .into_iter()
-        .find(|e| e.kind == "run_integrated")
+        .find(|e| e.kind == EventKind::RunIntegrated)
         .unwrap()
         .payload["commit"]
         .as_str()
@@ -194,7 +194,7 @@ fn the_recovery_job_reads_the_supervisors_build_and_the_dependencies_it_holds() 
     let events = queue.run_events(first.id()).unwrap();
     let written = events
         .iter()
-        .find(|e| e.kind == "recovery_prompt_written")
+        .find(|e| e.kind == EventKind::RecoveryPromptWritten)
         .unwrap();
     let sections = &written.payload["prompt_bytes"]["sections"];
     for section in ["binary", "dependencies", "replacements"] {
@@ -609,7 +609,7 @@ fn an_escalation_waits_for_a_person_and_the_supervisor_applies_the_answer() {
         .run_events(run.id())
         .unwrap()
         .into_iter()
-        .rfind(|e| e.kind == "ask_answered")
+        .rfind(|e| e.kind == EventKind::AskAnswered)
         .unwrap();
     assert_eq!(answered.payload["runtime_delivers"], true);
     assert_eq!(
@@ -1492,7 +1492,7 @@ fn a_triage_whose_lease_moved_is_triaged_again_only_after_its_slot_is_dropped() 
             .unwrap()
             .events
             .iter()
-            .any(|e| e.kind == "triage_started")
+            .any(|e| e.kind == EventKind::TriageStarted)
     });
     // The pass that started the round steps its slot before it ends: the
     // lease moves only after that, in the sleep of the next pass, so that

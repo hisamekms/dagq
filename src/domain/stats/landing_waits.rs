@@ -5,6 +5,8 @@
 //! the waits took. Main moves while a reviewed run waits, and the landing's
 //! rebase then conflicts; this shows whether that still happens.
 
+use crate::domain::EventKind;
+use crate::domain::run::{AskOpened, restore_payload};
 use std::collections::BTreeMap;
 
 use serde::Serialize;
@@ -12,11 +14,6 @@ use serde_json::Value;
 
 use super::asks::Spread;
 use super::{EventId, RunEvent, TaskId, timestamp_millis};
-use crate::domain::event_kind::{
-    ASK_ANSWERED, ASK_CLOSED, ASK_OPENED, INTEGRATION_DEFERRED, INTEGRATION_HELD,
-    INTEGRATION_STARTED, LANDING_RECHECK_FAILED, RESUME_STARTED, REVIEW_FAILED, REVIEW_FINISHED,
-    RUN_INTEGRATED, RUN_RECOVERED, RUNTIME_ERROR, VALIDATION_FINISHED,
-};
 use crate::domain::{AskKind, ReasonCode, RunId, RunStatus};
 
 /// Whether a reviewed run waits in an ask of `kind` for a person.
@@ -102,7 +99,7 @@ pub fn landing_waits(
     let mut by_wait: BTreeMap<String, usize> = BTreeMap::new();
     let mut waited_runs = Vec::new();
     for landing in events.iter().filter(|event| {
-        event.kind == RUN_INTEGRATED
+        event.kind == EventKind::RunIntegrated
             && event.id > after
             && event.id <= upto
             && counts(event.task_id)
@@ -160,11 +157,16 @@ fn walk(run: &[&RunEvent], landing: &RunEvent) -> Landed {
         .collect();
     let boundary = before
         .iter()
-        .find(|event| matches!(event.kind.as_str(), REVIEW_FINISHED | REVIEW_FAILED))
+        .find(|event| {
+            matches!(
+                event.kind.known(),
+                Some(EventKind::ReviewFinished | EventKind::ReviewFailed)
+            )
+        })
         .or_else(|| {
             before
                 .iter()
-                .find(|event| event.kind == VALIDATION_FINISHED)
+                .find(|event| event.kind == EventKind::ValidationFinished)
         })
         .map_or(EventId::new(0), |event| event.id);
     let landed_ms = timestamp_millis(&landing.created_at);
@@ -172,13 +174,17 @@ fn walk(run: &[&RunEvent], landing: &RunEvent) -> Landed {
     let mut landed = Landed::default();
     for (index, event) in before.iter().enumerate() {
         let payload = &event.payload;
-        match event.kind.as_str() {
+        match event.kind.known() {
             // `approve_landing` opens only after a verdict, at times in the
             // same transaction as a failed review: counted wherever it falls
             // before the landing. A `stuck_exit` of the first session's
             // `/exit` (old interactive runs) is no wait after the review.
-            ASK_OPENED => {
-                let kind = AskKind::read(payload["kind"].as_str().unwrap_or_default());
+            Some(EventKind::AskOpened) => {
+                let kind = AskKind::read(
+                    restore_payload::<AskOpened>(payload)
+                        .kind
+                        .unwrap_or_default(),
+                );
                 if !waits_in(&kind) || (kind == AskKind::StuckExit && event.id <= boundary) {
                     continue;
                 }
@@ -189,8 +195,10 @@ fn walk(run: &[&RunEvent], landing: &RunEvent) -> Landed {
                 let end = before[index + 1..]
                     .iter()
                     .find(|other| {
-                        matches!(other.kind.as_str(), ASK_ANSWERED | ASK_CLOSED)
-                            && id.is_some()
+                        matches!(
+                            other.kind.known(),
+                            Some(EventKind::AskAnswered | EventKind::AskClosed)
+                        ) && id.is_some()
                             && ask_id(&other.payload) == id
                     })
                     .map_or(landed_ms, |other| timestamp_millis(&other.created_at));
@@ -202,17 +210,21 @@ fn walk(run: &[&RunEvent], landing: &RunEvent) -> Landed {
             // at a verification that failed again: up to the run's next
             // `run_recovered`, `integration_started` or `resume_started`,
             // else the landing.
-            RUNTIME_ERROR | INTEGRATION_HELD if event.id > boundary => {
-                if event.kind == RUNTIME_ERROR && payload["lease_released"] != true {
+            Some(EventKind::RuntimeError | EventKind::IntegrationHeld) if event.id > boundary => {
+                if event.kind == EventKind::RuntimeError && payload["lease_released"] != true {
                     continue;
                 }
-                push_wait(&mut landed, &event.kind);
+                push_wait(&mut landed, &event.kind.to_string());
                 let end = before[index + 1..]
                     .iter()
                     .find(|other| {
                         matches!(
-                            other.kind.as_str(),
-                            RUN_RECOVERED | INTEGRATION_STARTED | RESUME_STARTED
+                            other.kind.known(),
+                            Some(
+                                EventKind::RunRecovered
+                                    | EventKind::IntegrationStarted
+                                    | EventKind::ResumeStarted
+                            )
                         )
                     })
                     .map_or(landed_ms, |other| timestamp_millis(&other.created_at));
@@ -221,14 +233,14 @@ fn walk(run: &[&RunEvent], landing: &RunEvent) -> Landed {
                 }
             }
             // A held run's parking repeats the finding (`repeat: true`).
-            LANDING_RECHECK_FAILED
+            Some(EventKind::LandingRecheckFailed)
                 if event.id > boundary
                     && payload["code"] == REBASE_CONFLICT
                     && payload["repeat"] != true =>
             {
                 landed.recheck_conflicts += 1;
             }
-            INTEGRATION_DEFERRED
+            Some(EventKind::IntegrationDeferred)
                 if event.id > boundary
                     && payload["code"] == REBASE_CONFLICT
                     && payload["status"]
@@ -300,7 +312,7 @@ mod tests {
                 task_id: Some(TaskId::new(task)),
                 goal_id: None,
                 run_id: Some(RunId::new(run).unwrap()),
-                kind: kind.to_owned(),
+                kind: kind.into(),
                 payload,
                 created_at: crate::domain::marks::utc_text(secs * 1000),
                 actor: None,

@@ -5,6 +5,8 @@
 //! what a person's answer made of them; per code of any item how many
 //! verdicts carry it; and per change of task the rate. A verdict recorded
 //! before the codes is `unlabeled`, and nothing recorded is rewritten.
+use crate::domain::EventKind;
+use crate::domain::run::{ReviewFinished, ReviseRequested, restore_payload};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::Serialize;
@@ -12,7 +14,7 @@ use serde_json::Value;
 
 use super::{Summary, summary, timestamp_millis};
 use crate::domain::{
-    EventId, RunEvent, TaskChange, TaskId, event_kind,
+    EventId, RunEvent, TaskChange, TaskId,
     review_reason::{DEVIATION_REJECTED, OUTCOMES, UNLABELED},
 };
 
@@ -147,13 +149,13 @@ fn ask_times(events: &[RunEvent]) -> HashMap<String, (Option<i64>, Option<i64>)>
                     .or_else(|| event.payload.get("id"))?,
             )
         };
-        match event.kind.as_str() {
-            event_kind::ASK_OPENED => {
+        match event.kind.known() {
+            Some(EventKind::AskOpened) => {
                 if let Some(id) = id() {
                     times.entry(id).or_default().0 = ms(event);
                 }
             }
-            event_kind::ASK_ANSWERED => {
+            Some(EventKind::AskAnswered) => {
                 if let Some(id) = id() {
                     let entry = times.entry(id).or_default();
                     entry.1 = entry.1.or(ms(event));
@@ -186,13 +188,15 @@ fn run_verdicts<'a>(
     for event in events {
         if let Some(run_id) = &event.run_id
             && matches!(
-                event.kind.as_str(),
-                event_kind::REVIEW_FINISHED
-                    | event_kind::REVISE_REQUESTED
-                    | event_kind::REVISE_FINISHED
-                    | event_kind::REVIEW_OUTCOME
-                    | event_kind::RESUME_STARTED
-                    | event_kind::RESUME_FINISHED
+                event.kind.known(),
+                Some(
+                    EventKind::ReviewFinished
+                        | EventKind::ReviseRequested
+                        | EventKind::ReviseFinished
+                        | EventKind::ReviewOutcome
+                        | EventKind::ResumeStarted
+                        | EventKind::ResumeFinished
+                )
             )
         {
             by_run.entry(run_id.as_str()).or_default().push(event);
@@ -201,10 +205,12 @@ fn run_verdicts<'a>(
     let mut verdicts = Vec::new();
     for run_events in by_run.values() {
         for (index, event) in run_events.iter().enumerate() {
-            if event.kind != event_kind::REVIEW_FINISHED {
+            if event.kind != EventKind::ReviewFinished {
                 continue;
             }
-            let decision = event.payload["verdict"].as_str().unwrap_or_default();
+            let decision = restore_payload::<ReviewFinished>(&event.payload)
+                .verdict
+                .unwrap_or_default();
             if !matches!(decision, "revise" | "concern") {
                 verdicts.push((*event, None));
                 continue;
@@ -213,23 +219,23 @@ fn run_verdicts<'a>(
             let after: Vec<&RunEvent> = run_events[index + 1..]
                 .iter()
                 .copied()
-                .take_while(|e| e.kind != event_kind::REVIEW_FINISHED)
+                .take_while(|e| e.kind != EventKind::ReviewFinished)
                 .collect();
-            let find = |kind: &str, from: usize| {
+            let find = |kind: EventKind, from: usize| {
                 after
                     .iter()
                     .enumerate()
                     .skip(from)
                     .find(|(_, e)| e.kind == kind)
             };
-            let revise_secs = find(event_kind::REVISE_REQUESTED, 0).and_then(|(at, requested)| {
-                let attempt = &requested.payload["attempt"];
+            let revise_secs = find(EventKind::ReviseRequested, 0).and_then(|(at, requested)| {
+                let attempt = restore_payload::<ReviseRequested>(&requested.payload).attempt;
                 let (_, finished) = after.iter().enumerate().skip(at).find(|(_, e)| {
-                    e.kind == event_kind::REVISE_FINISHED && e.payload["attempt"] == *attempt
+                    e.kind == EventKind::ReviseFinished && e.payload["attempt"].as_u64() == attempt
                 })?;
                 secs(ms(requested), ms(finished))
             });
-            let outcome = find(event_kind::REVIEW_OUTCOME, 0);
+            let outcome = find(EventKind::ReviewOutcome, 0);
             let concern_wait_secs = outcome.and_then(|(_, outcome)| {
                 let ask = text_id(&outcome.payload["ask_id"]).and_then(|id| asks.get(&id));
                 match ask {
@@ -243,8 +249,8 @@ fn run_verdicts<'a>(
             let send_back_resume_secs = outcome
                 .filter(|_| outcome_text == Some(DEVIATION_REJECTED))
                 .and_then(|(at, _)| {
-                    let (at, started) = find(event_kind::RESUME_STARTED, at)?;
-                    let (_, finished) = find(event_kind::RESUME_FINISHED, at)?;
+                    let (at, started) = find(EventKind::ResumeStarted, at)?;
+                    let (_, finished) = find(EventKind::ResumeFinished, at)?;
                     secs(ms(started), ms(finished))
                 });
             let (primary, codes) = codes_of(&event.payload);
@@ -275,10 +281,12 @@ fn plan_verdicts<'a>(
     let mut by_proposal: HashMap<i64, Vec<&RunEvent>> = HashMap::new();
     for event in events.iter().filter(|e| {
         matches!(
-            e.kind.as_str(),
-            event_kind::PLAN_REVIEW_STARTED
-                | event_kind::PLAN_REVIEW_FINISHED
-                | event_kind::PLAN_REVIEW_OUTCOME
+            e.kind.known(),
+            Some(
+                EventKind::PlanReviewStarted
+                    | EventKind::PlanReviewFinished
+                    | EventKind::PlanReviewOutcome
+            )
         )
     }) {
         if let Some(proposal) = event.payload["proposal_id"].as_i64() {
@@ -288,7 +296,7 @@ fn plan_verdicts<'a>(
     let mut verdicts = Vec::new();
     for proposal_events in by_proposal.values() {
         for (index, event) in proposal_events.iter().copied().enumerate() {
-            if event.kind != event_kind::PLAN_REVIEW_FINISHED {
+            if event.kind != EventKind::PlanReviewFinished {
                 continue;
             }
             let decision = event.payload["decision"]
@@ -302,7 +310,7 @@ fn plan_verdicts<'a>(
             let later = || proposal_events[index + 1..].iter().copied();
             let next_review = |from: i64| {
                 later()
-                    .filter(|e| e.kind == event_kind::PLAN_REVIEW_STARTED)
+                    .filter(|e| e.kind == EventKind::PlanReviewStarted)
                     .filter_map(ms)
                     .find(|&at| at >= from)
             };
@@ -311,7 +319,7 @@ fn plan_verdicts<'a>(
                 .flatten();
             let plan_review_id = &event.payload["plan_review_id"];
             let outcome = later().find(|e| {
-                e.kind == event_kind::PLAN_REVIEW_OUTCOME
+                e.kind == EventKind::PlanReviewOutcome
                     && e.payload["plan_review_id"] == *plan_review_id
             });
             let concern_wait_secs = outcome.and_then(|outcome| {
@@ -536,7 +544,7 @@ mod tests {
             id: EventId::new(id),
             task_id: Some(TaskId::new(task)),
             run_id: run.map(|run| RunId::new(run).unwrap()),
-            kind: kind.to_owned(),
+            kind: kind.into(),
             goal_id: None,
             payload,
             created_at: format!("2026-09-28T00:{:02}:{:02}Z", secs / 60, secs % 60),

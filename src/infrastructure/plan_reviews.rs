@@ -1205,9 +1205,9 @@ impl PlanReviewStore for SqliteQueue {
                     proposal_id,
                     anchor,
                     kind: if failed {
-                        event_kind::PLAN_REVIEW_FAILED
+                        EventKind::PlanReviewFailed
                     } else {
-                        event_kind::PLANNER_UNRESPONSIVE
+                        EventKind::PlannerUnresponsive
                     },
                     error: if failed { error } else { None },
                 })

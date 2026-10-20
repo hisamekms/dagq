@@ -282,7 +282,7 @@ mod tests {
             task_id: Some(TaskId::new(7)),
             goal_id: None,
             run_id: Some(RunId::new(RUN).unwrap()),
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: crate::domain::marks::utc_text((1_900_000_000 + secs) * 1000),
             actor: None,

@@ -33,7 +33,7 @@ pub trait EvalStore: DenialLog {
 pub fn rounds(store: &dyn EvalStore) -> Result<Vec<Round>> {
     let events = store.eval_events()?;
     Ok(record::rounds(events.iter().map(|event| {
-        (event.id.as_i64(), event.kind.as_str(), &event.payload)
+        (event.id.as_i64(), &event.kind, &event.payload)
     })))
 }
 
@@ -400,6 +400,7 @@ pub fn finished(round: &Round, all_cases: &[Case], incomplete: Option<Incomplete
 mod tests {
     use super::*;
     use crate::domain::agent_eval::read_case_file;
+    use crate::domain::event_kind::RecordedKind;
     use std::collections::BTreeSet;
 
     const PATCH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -469,10 +470,14 @@ mod tests {
                        "cost": cost, "abandoned": false}),
             ));
         }
+        let events: Vec<(i64, RecordedKind, Value)> = events
+            .into_iter()
+            .map(|(id, kind, payload)| (id, kind.into(), payload))
+            .collect();
         record::rounds(
             events
                 .iter()
-                .map(|(id, kind, payload)| (*id, kind.as_str(), payload)),
+                .map(|(id, kind, payload)| (*id, kind, payload)),
         )
         .remove(0)
     }

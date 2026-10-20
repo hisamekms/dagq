@@ -232,12 +232,12 @@ impl Supervisor<'_> {
                 let events = self.queue.run_events(run.id())?;
                 let history = RunHistory::from_events(&events);
                 let receipt_seen =
-                    self.files.is_file(&receipt_path) && history.has(event_kind::RECEIPT_OBSERVED);
+                    self.files.is_file(&receipt_path) && history.has(EventKind::ReceiptObserved);
                 // The clock the session's waits are judged on (task 1557).
                 let now = self.generators.clock.monotonic();
                 let since = |event: &RunEvent| self.instant_of(event, now);
                 let exit_requested = self.exit_requested_at(&events, |_| true, now);
-                let first_commit_seen = history.has(event_kind::FIRST_COMMIT_OBSERVED);
+                let first_commit_seen = history.has(EventKind::FirstCommitObserved);
                 Phase::Session(SessionWatch {
                     workspace: run
                         .workspace_id()
@@ -249,7 +249,7 @@ impl Supervisor<'_> {
                     startup: now,
                     receipt_seen,
                     receipt_seen_at: history
-                        .last(event_kind::RECEIPT_OBSERVED)
+                        .last(EventKind::ReceiptObserved)
                         .filter(|_| receipt_seen)
                         .map(since),
                     exit_requested,
@@ -316,7 +316,7 @@ impl Supervisor<'_> {
         let Some(anchor) = crate::domain::review_anchor(&events) else {
             return self.start_review(run, session);
         };
-        if anchor.kind == event_kind::REVIEW_STARTED
+        if anchor.kind == EventKind::ReviewStarted
             && let Some(phase) = self.adopt_failed_review_ask(run, &session, &events, anchor)?
         {
             return Ok(phase);
@@ -460,8 +460,8 @@ impl Supervisor<'_> {
         let Some(ask) = self.unclosed_landing_ask_after(events, started)? else {
             return Ok(None);
         };
-        let after = |kind: &str| events.iter().any(|e| e.id > started.id && e.kind == kind);
-        if !after(event_kind::REVIEW_FAILED) {
+        let after = |kind: EventKind| events.iter().any(|e| e.id > started.id && e.kind == kind);
+        if !after(EventKind::ReviewFailed) {
             let attempt = restore::<AttemptOf>(&started.payload).attempt.unwrap_or(1);
             // The failure is in the ask's first line (`open_failed_review_ask`),
             // and a `send_back` names it to the resumed session.
@@ -511,7 +511,7 @@ impl Supervisor<'_> {
         let mut watch = ExitWatch::new(session.clone(), AfterExit::Rest { close: true });
         // The failed review's exit was requested before the ask: never a
         // second one (task 959).
-        watch.requested = after(event_kind::EXIT_REQUESTED);
+        watch.requested = after(EventKind::ExitRequested);
         Ok(Some(Phase::Exiting(watch)))
     }
     /// The last `approve_landing` ask the supervisor opened after event
@@ -555,7 +555,7 @@ impl Supervisor<'_> {
     ) -> Option<Instant> {
         let requested = events
             .iter()
-            .rfind(|e| e.kind == event_kind::EXIT_REQUESTED && of(e))?;
+            .rfind(|e| e.kind == EventKind::ExitRequested && of(e))?;
         Some(self.instant_of(requested, now))
     }
 }
@@ -658,7 +658,7 @@ impl Supervisor<'_> {
         run: &TaskRun,
         history: &RunHistory<'_>,
     ) -> Result<bool> {
-        let Some(review) = history.last(event_kind::REVIEW_FINISHED) else {
+        let Some(review) = history.last(EventKind::ReviewFinished) else {
             return Ok(false);
         };
         // A send-back one of the review's subagents decided while the
@@ -667,8 +667,8 @@ impl Supervisor<'_> {
         let finished: ReviewFinished = restore(&review.payload);
         if finished.verdict != Some(ReviewDecision::Concern.as_str())
             || (finished.agents_decided() && !finished.parent_decided())
-            || history.has_after(review.id, event_kind::CONCERN_DECIDED)
-            || !history.has_after(review.id, event_kind::REVISE_REQUESTED)
+            || history.has_after(review.id, EventKind::ConcernDecided)
+            || !history.has_after(review.id, EventKind::ReviseRequested)
         {
             return Ok(false);
         }
@@ -676,7 +676,7 @@ impl Supervisor<'_> {
             return Ok(false);
         };
         let escalated = history
-            .has_after(review.id, event_kind::REVISE_UNSENT)
+            .has_after(review.id, EventKind::ReviseUnsent)
             .then_some(EscalatedBecause::Unsent);
         self.for_job(&ActorContext::review_job(run.id(), attempt), |sv| {
             sv.record_concern_decided(run, attempt as usize, &verdict, escalated)
@@ -699,7 +699,7 @@ impl Supervisor<'_> {
             ConcernDecision::SendBack => Some(EscalatedBecause::Unsent),
             ConcernDecision::Ask(why) => Some(why),
         };
-        if !history.has_after(anchor.id, event_kind::CONCERN_DECIDED)
+        if !history.has_after(anchor.id, EventKind::ConcernDecided)
             && let Some(attempt) = restore::<AttemptOf>(&anchor.payload).attempt
         {
             let attempt = attempt as usize;
@@ -707,7 +707,7 @@ impl Supervisor<'_> {
                 sv.record_concern_decided(run, attempt, &verdict, escalated)
             })?;
         }
-        let exited = history.has_after(anchor.id, event_kind::EXIT_REQUESTED);
+        let exited = history.has_after(anchor.id, EventKind::ExitRequested);
         let then = match escalated {
             None if !exited => return Ok(Ok(self.adopted_precheck(run, session, verdict, job)?)),
             None => AfterExit::Land,
@@ -765,7 +765,7 @@ fn review_job_before(
     before: EventId,
 ) -> Option<ActorContext> {
     history
-        .last_before(before, event_kind::REVIEW_FINISHED)
+        .last_before(before, EventKind::ReviewFinished)
         .and_then(|event| review_job(run, event))
 }
 
@@ -778,7 +778,7 @@ fn programs_rejected_after<'a>(
     review: Option<&RunEvent>,
 ) -> Option<&'a RunEvent> {
     history
-        .last_before(before, event_kind::REVIEW_PROGRAMS_FINISHED)
+        .last_before(before, EventKind::ReviewProgramsFinished)
         .filter(|programs| programs.payload["outcome"] == "rejected")
         .filter(|programs| review.is_none_or(|review| review.id < programs.id))
 }
@@ -787,7 +787,7 @@ fn programs_rejected_after<'a>(
 /// pass a conflict precheck followed, or the revise a `revise_unsent` did.
 pub(super) fn passed_before(history: &RunHistory<'_>, before: EventId) -> Option<ReviewVerdict> {
     history
-        .last_before(before, event_kind::REVIEW_FINISHED)
+        .last_before(before, EventKind::ReviewFinished)
         .and_then(|e| verdict_of(e).ok())
 }
 
@@ -831,10 +831,10 @@ fn agents_ask(
 /// review before it is a concern whose `concern_decided` (recorded after
 /// the request, or backfilled) says it was applied (task 1392).
 fn sent_back_concern(history: &RunHistory<'_>, anchor: &RunEvent) -> Option<SentBackConcern> {
-    let review = history.last_before(anchor.id, event_kind::REVIEW_FINISHED)?;
+    let review = history.last_before(anchor.id, EventKind::ReviewFinished)?;
     let attempt = restore::<AttemptOf>(&review.payload).attempt?;
     let applied = history.events().iter().any(|event| {
-        event.id > review.id && event.kind == event_kind::CONCERN_DECIDED && {
+        event.id > review.id && event.kind == EventKind::ConcernDecided && {
             let decided: ConcernDecided = restore(&event.payload);
             decided.attempt == Some(attempt) && decided.applied == Some(true)
         }
@@ -953,9 +953,9 @@ fn review_resumption(
     live: bool,
     landing_ask_open: bool,
 ) -> ReviewResumption {
-    let exited = history.has_after(anchor.id, event_kind::EXIT_REQUESTED);
-    let then = match anchor.kind.as_str() {
-        event_kind::REVISE_REQUESTED => {
+    let exited = history.has_after(anchor.id, EventKind::ExitRequested);
+    let then = match anchor.kind.known() {
+        Some(EventKind::ReviseRequested) => {
             if !live {
                 return ReviewResumption::Review;
             }
@@ -967,7 +967,7 @@ fn review_resumption(
                 concern: sent_back_concern(history, anchor),
             };
         }
-        event_kind::CONFLICT_PRECHECK
+        Some(EventKind::ConflictPrecheck)
             if restore::<ConflictPrecheck>(&anchor.payload).requested == Some(true) =>
         {
             return match passed_before(history, anchor.id) {
@@ -983,12 +983,12 @@ fn review_resumption(
         }
         // A revise request recorded but not sent asks a person, as it
         // did before the supervisor was replaced.
-        event_kind::REVISE_UNSENT => {
+        Some(EventKind::ReviseUnsent) => {
             let unsent: ReviseUnsent = restore(&anchor.payload);
             // A revise the review's subagents decided (ADR-t1453-1
             // decision 7) is asked with their reasons, as the
             // supervisor that could not send it asked.
-            let review = history.last_before(anchor.id, event_kind::REVIEW_FINISHED);
+            let review = history.last_before(anchor.id, EventKind::ReviewFinished);
             if let Some(rejected) = programs_rejected_after(history, anchor.id, review) {
                 // A revise a program review sent (ADR-t1895-2 decision 3)
                 // is asked with its reason, not an earlier review's.
@@ -1031,7 +1031,7 @@ fn review_resumption(
                 })
             }
         }
-        event_kind::REVIEW_FINISHED => {
+        Some(EventKind::ReviewFinished) => {
             let finished: ReviewFinished = restore(&anchor.payload);
             // A send-back past the run's revises judged with no code
             // finding (ADR-t2599-1) goes on as a pass: prechecked (again)
@@ -1091,7 +1091,7 @@ fn review_resumption(
         // A precheck that sent nothing decided to land (no session to
         // ask) or to ask a person (past the limit); before its exit request
         // it is prechecked again, as main may have moved.
-        event_kind::CONFLICT_PRECHECK => match passed_before(history, anchor.id) {
+        Some(EventKind::ConflictPrecheck) => match passed_before(history, anchor.id) {
             Some(verdict) if !exited => {
                 return ReviewResumption::Precheck {
                     verdict,
@@ -1108,10 +1108,10 @@ fn review_resumption(
             }),
             None => None,
         },
-        event_kind::VALIDATION_FINISHED if history.approved() => Some(AfterExit::Land),
+        Some(EventKind::ValidationFinished) if history.approved() => Some(AfterExit::Land),
         // A rebased run a landing recheck resumed waits for the answer
         // to its approve_landing ask, not a review (ADR-0068 decision 4).
-        event_kind::VALIDATION_FINISHED
+        Some(EventKind::ValidationFinished)
             if crate::domain::resume::parked_by_recheck(history.events()) && landing_ask_open =>
         {
             Some(AfterExit::Rest { close: true })
@@ -1126,7 +1126,7 @@ fn review_resumption(
 fn exit_requested_after(events: &[RunEvent], anchor: EventId) -> bool {
     events
         .iter()
-        .any(|e| e.id > anchor && e.kind == event_kind::EXIT_REQUESTED)
+        .any(|e| e.id > anchor && e.kind == EventKind::ExitRequested)
 }
 
 /// The last `approve_landing` ask the supervisor opened after event
@@ -1135,7 +1135,7 @@ fn landing_ask_after(events: &[RunEvent], anchor: EventId) -> Option<AskId> {
     events
         .iter()
         .rev()
-        .filter(|e| e.id > anchor && e.kind == event_kind::ASK_OPENED)
+        .filter(|e| e.id > anchor && e.kind == EventKind::AskOpened)
         .map(|e| restore::<AskOpened>(&e.payload))
         .find(|opened| {
             opened.kind == Some(AskKind::ApproveLanding.as_str())
@@ -1149,7 +1149,7 @@ fn landing_ask_after(events: &[RunEvent], anchor: EventId) -> Option<AskId> {
 fn last_request_before(events: &[RunEvent], anchor: EventId) -> Option<u64> {
     events
         .iter()
-        .filter(|e| e.id < anchor && e.kind == event_kind::TURN_REQUESTED)
+        .filter(|e| e.id < anchor && e.kind == EventKind::TurnRequested)
         .filter_map(|e| restore::<TurnRequested>(&e.payload).seq)
         .next_back()
 }
@@ -1170,13 +1170,17 @@ fn adopted_review_failed(
     started: EventId,
     ran: impl FnOnce() -> Option<Option<crate::domain::headless_job::JobSession>>,
 ) -> Value {
-    let ends_review = |event: &RunEvent| match event.kind.as_str() {
+    let ends_review = |event: &RunEvent| match event.kind.known() {
         // Each job of the review records its own Execution at its end.
-        event_kind::REVIEW_JOB_FINISHED
-        | event_kind::REVIEW_FINISHED
-        | event_kind::REVIEW_FAILED
-        | event_kind::REVIEW_RETRIED => true,
-        event_kind::HEADLESS_JOB_STOPPED => event.payload["kind"] == headless_job::REVIEW,
+        Some(
+            EventKind::ReviewJobFinished
+            | EventKind::ReviewFinished
+            | EventKind::ReviewFailed
+            | EventKind::ReviewRetried,
+        ) => true,
+        Some(EventKind::HeadlessJobStopped) => {
+            restore::<crate::domain::run::JobEnd>(&event.payload).kind == Some(headless_job::REVIEW)
+        }
         _ => false,
     };
     let recorded = events
@@ -1219,7 +1223,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: event_kind::REVIEW_FINISHED.to_owned(),
+            kind: event_kind::REVIEW_FINISHED.into(),
             payload,
             created_at: String::new(),
             actor: None,
@@ -1250,7 +1254,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: String::new(),
             actor: None,
@@ -1392,7 +1396,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: "2026-09-30T00:00:00.000Z".to_owned(),
             actor: None,

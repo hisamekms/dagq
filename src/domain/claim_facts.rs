@@ -108,40 +108,40 @@ pub fn claimable_since(task: TaskId, events: &[RunEvent]) -> Option<String> {
     let mut candidate = false;
     let mut since = None;
     for event in sorted {
-        let kind = event.kind.as_str();
+        let kind = &event.kind;
         let payload = &event.payload;
         if event.task_id == Some(task) {
-            if kind == K::TaskCreated.as_str() {
+            if *kind == K::TaskCreated {
                 let created: restored::TaskCreated = restore(payload);
                 ready = created.status == Some(TaskStatus::Ready);
                 goal = created.goal_id;
-            } else if kind == K::TaskStatusChanged.as_str() {
+            } else if *kind == K::TaskStatusChanged {
                 let changed: restored::TaskStatusChanged = restore(payload);
                 ready = changed.to == Some(TaskStatus::Ready);
-            } else if kind == K::RunClaimed.as_str() {
+            } else if *kind == K::RunClaimed {
                 ready = false;
-            } else if kind == K::DependencyAdded.as_str() {
+            } else if *kind == K::DependencyAdded {
                 let added: restored::DependencyChanged = restore(payload);
                 dependencies.extend(added.predecessor_id);
-            } else if kind == K::DependencyRemoved.as_str() {
+            } else if *kind == K::DependencyRemoved {
                 let removed: restored::DependencyChanged = restore(payload);
                 if let Some(id) = removed.predecessor_id {
                     dependencies.remove(&id);
                 }
-            } else if kind == K::GoalDependencyAdded.as_str() {
+            } else if *kind == K::GoalDependencyAdded {
                 let added: restored::GoalDependencyChanged = restore(payload);
                 goal_dependencies.extend(added.goal_id);
-            } else if kind == K::GoalDependencyRemoved.as_str() {
+            } else if *kind == K::GoalDependencyRemoved {
                 let removed: restored::GoalDependencyChanged = restore(payload);
                 if let Some(id) = removed.goal_id {
                     goal_dependencies.remove(&id);
                 }
-            } else if kind == K::TaskGoalChanged.as_str() {
+            } else if *kind == K::TaskGoalChanged {
                 let moved: restored::TaskGoalChanged = restore(payload);
                 goal = moved.to;
             }
         } else if let Some(other) = event.task_id {
-            if kind == K::TaskStatusChanged.as_str() {
+            if *kind == K::TaskStatusChanged {
                 let changed: restored::TaskStatusChanged = restore(payload);
                 if changed.to == Some(TaskStatus::Completed) {
                     completed.insert(other);
@@ -150,26 +150,26 @@ pub fn claimable_since(task: TaskId, events: &[RunEvent]) -> Option<String> {
                 }
             }
         } else if let Some(goal_id) = event.goal_id {
-            if kind == K::GoalCreated.as_str() {
+            if *kind == K::GoalCreated {
                 let created: restored::GoalCreated = restore(payload);
                 if created.goal.and_then(|goal| goal.status) == Some(GoalStatus::Draft) {
                     drafts.insert(goal_id);
                 }
-            } else if kind == K::GoalStatusChanged.as_str() {
+            } else if *kind == K::GoalStatusChanged {
                 let changed: restored::GoalStatusChanged = restore(payload);
                 if changed.to == Some(GoalStatus::Draft) {
                     drafts.insert(goal_id);
                 } else {
                     drafts.remove(&goal_id);
                 }
-            } else if kind == K::GoalClosed.as_str() {
+            } else if *kind == K::GoalClosed {
                 let closed: restored::GoalClosed = restore(payload);
                 if closed.verdict == Some(GoalVerdict::Achieved) {
                     achieved.insert(goal_id);
                 } else {
                     achieved.remove(&goal_id);
                 }
-            } else if kind == K::GoalReopened.as_str() {
+            } else if *kind == K::GoalReopened {
                 // Reopened open, whatever it was before it closed.
                 achieved.remove(&goal_id);
                 drafts.remove(&goal_id);
@@ -387,7 +387,7 @@ mod tests {
             task_id: (task != 0).then(|| TaskId::new(task)),
             goal_id: goal.map(crate::domain::GoalId::new),
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: format!("2026-10-01T10:{minute:02}:00.000Z"),
             actor: None,

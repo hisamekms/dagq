@@ -507,7 +507,7 @@ impl SqliteQueue {
         agent_pid: u32,
     ) -> Result<()> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &[event_kind::AGENT_STARTED]))?;
+        let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::AgentStarted]))?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -617,7 +617,7 @@ impl SqliteQueue {
 
     pub fn register_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32) -> Result<()> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &[event_kind::AGENT_STARTED]))?;
+        let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::AgentStarted]))?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -681,7 +681,7 @@ impl SqliteQueue {
 
     pub fn wrapper_exited(&mut self, id: &RunId, pid: u32, exit_code: i32) -> Result<()> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &[event_kind::SESSION_EXITED]))?;
+        let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::SessionExited]))?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;

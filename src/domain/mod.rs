@@ -879,15 +879,17 @@ pub const RECOVER_AGAIN: &str = "recover";
 pub fn review_anchor(events: &[RunEvent]) -> Option<&RunEvent> {
     events.iter().rev().find(|e| {
         matches!(
-            e.kind.as_str(),
-            "validation_finished"
-                | "review_started"
-                | "review_finished"
-                | "revise_requested"
-                | "revise_unsent"
-                | "revise_finished"
-                | "conflict_precheck"
-                | "conflict_resolved"
+            e.kind.known(),
+            Some(
+                EventKind::ValidationFinished
+                    | EventKind::ReviewStarted
+                    | EventKind::ReviewFinished
+                    | EventKind::ReviseRequested
+                    | EventKind::ReviseUnsent
+                    | EventKind::ReviseFinished
+                    | EventKind::ConflictPrecheck
+                    | EventKind::ConflictResolved
+            )
         )
     })
 }
@@ -920,11 +922,13 @@ pub fn request_sent_at_millis(payload: &serde_json::Value) -> Option<i64> {
 pub fn fix_requested_at(events: &[RunEvent]) -> Option<i64> {
     review_anchor(events)
         .filter(|anchor| {
-            (anchor.kind == "revise_requested"
-                || (anchor.kind == "conflict_precheck" && anchor.payload["requested"] == true))
+            (anchor.kind == EventKind::ReviseRequested
+                || (anchor.kind == EventKind::ConflictPrecheck
+                    && run::restore_payload::<run::ConflictPrecheck>(&anchor.payload).requested
+                        == Some(true)))
                 && !events
                     .iter()
-                    .any(|e| e.id > anchor.id && e.kind == "exit_requested")
+                    .any(|e| e.id > anchor.id && e.kind == EventKind::ExitRequested)
         })
         .map(|anchor| request_sent_at_millis(&anchor.payload).map_or(0, |ms| ms.div_euclid(1000)))
 }
@@ -935,11 +939,14 @@ pub fn fix_requested_at(events: &[RunEvent]) -> Option<i64> {
 pub fn resume_in_progress(events: &[RunEvent]) -> bool {
     events
         .iter()
-        .rposition(|e| e.kind == "resume_started")
+        .rposition(|e| e.kind == EventKind::ResumeStarted)
         .is_some_and(|start| {
-            !events[start + 1..]
-                .iter()
-                .any(|e| matches!(e.kind.as_str(), "resume_finished" | "exit_requested"))
+            !events[start + 1..].iter().any(|e| {
+                matches!(
+                    e.kind.known(),
+                    Some(EventKind::ResumeFinished | EventKind::ExitRequested)
+                )
+            })
         })
 }
 
@@ -966,36 +973,40 @@ pub fn session_takes_answers(status: RunStatus, events: &[RunEvent], ask_created
 pub fn triage_state(events: &[RunEvent]) -> TriageState {
     let last = events.iter().rev().find(|e| {
         matches!(
-            e.kind.as_str(),
-            "resume_started" | "triage_finished" | "triage_failed"
-        ) || (e.kind == "triage_decided" && e.payload["action"] == RECOVER_AGAIN)
-            || (e.kind == event_kind::HOLD_RESULT_DISCARDED
+            e.kind.known(),
+            Some(EventKind::ResumeStarted | EventKind::TriageFinished | EventKind::TriageFailed)
+        ) || (e.kind == EventKind::TriageDecided && e.payload["action"] == RECOVER_AGAIN)
+            || (e.kind == EventKind::HoldResultDiscarded
                 && e.payload[task_hold::SUPERSEDED] != true)
             // A triage that failed while a login or usage limit held the
             // queue, started again once it is fixed (task 437).
-            || (e.kind == event_kind::JOB_RESTARTED && e.payload["job"] == "triage")
+            || (e.kind == EventKind::JobRestarted && e.payload["job"] == "triage")
     });
     match last {
         // A round whose verdict a hold kept applied nothing, and a kept
         // result discarded at the release leaves the run as if none came
         // (ADR-t1879-1): its next round is due.
         Some(e)
-            if (e.kind == "triage_finished" && e.payload["action"] == task_hold::HELD_ACTION)
-                || (e.kind == event_kind::HOLD_RESULT_DISCARDED
+            if (e.kind == EventKind::TriageFinished
+                && e.payload["action"] == task_hold::HELD_ACTION)
+                || (e.kind == EventKind::HoldResultDiscarded
                     && e.payload[task_hold::SUPERSEDED] != true) =>
         {
             TriageState::Pending
         }
-        Some(e) if e.kind == "triage_finished" && e.payload["action"] == "wait" => {
+        Some(e) if e.kind == EventKind::TriageFinished && e.payload["action"] == "wait" => {
             TriageState::Waiting {
                 until: e.payload["recheck_at"].as_i64().unwrap_or(0),
             }
         }
-        Some(e) if e.kind == "triage_finished" => TriageState::Finished,
-        Some(e) if e.kind == "triage_failed" && e.payload.get("provider_unusable").is_some() => {
+        Some(e) if e.kind == EventKind::TriageFinished => TriageState::Finished,
+        Some(e)
+            if e.kind == EventKind::TriageFailed
+                && e.payload.get("provider_unusable").is_some() =>
+        {
             TriageState::Pending
         }
-        Some(e) if e.kind == "triage_failed" => TriageState::Failed,
+        Some(e) if e.kind == EventKind::TriageFailed => TriageState::Failed,
         _ => TriageState::Pending,
     }
 }
@@ -1169,7 +1180,7 @@ pub mod disk;
 pub mod e2e_quarantine;
 mod error;
 pub mod event_kind;
-pub use event_kind::EventKind;
+pub use event_kind::{EventKind, RecordedKind};
 pub mod execution_class;
 pub mod exit;
 pub mod finding;
@@ -2652,17 +2663,17 @@ pub const UPDATE_DROPPED: &str = crate::domain::event_kind::EventKind::UpdateDro
 
 /// Every step of the automatic update, each with `commit` (the main commit
 /// it is about) in its payload but for the answers.
-pub const UPDATE_EVENT_KINDS: &[&str] = &[
-    UPDATE_STARTED,
-    UPDATE_BUILT,
-    UPDATE_E2E_PASSED,
-    UPDATE_INSTALLED,
-    UPDATE_FAILED,
-    UPDATE_RESTORED,
-    UPDATE_AWAITING_APPROVAL,
-    UPDATE_ANSWERED,
-    UPDATE_RETRY,
-    UPDATE_DROPPED,
+pub const UPDATE_EVENT_KINDS: &[EventKind] = &[
+    EventKind::UpdateStarted,
+    EventKind::UpdateBuilt,
+    EventKind::UpdateE2ePassed,
+    EventKind::UpdateInstalled,
+    EventKind::UpdateFailed,
+    EventKind::UpdateRestored,
+    EventKind::UpdateAwaitingApproval,
+    EventKind::UpdateAnswered,
+    EventKind::UpdateRetry,
+    EventKind::UpdateDropped,
 ];
 
 /// `updates` (newest first, as recorded) with each `update_started` put
@@ -2684,7 +2695,7 @@ pub fn in_job_order(mut updates: Vec<RunEvent>) -> Vec<RunEvent> {
     // Oldest first: a start already put behind its steps is not passed
     // again by a newer one.
     for index in (0..updates.len()).rev() {
-        if updates[index].kind != UPDATE_STARTED {
+        if updates[index].kind != EventKind::UpdateStarted {
             continue;
         }
         let started = job(&updates[index]);
@@ -2696,8 +2707,13 @@ pub fn in_job_order(mut updates: Vec<RunEvent>) -> Vec<RunEvent> {
             .iter()
             .position(|update| {
                 matches!(
-                    update.kind.as_str(),
-                    UPDATE_STARTED | UPDATE_RETRY | UPDATE_ANSWERED | UPDATE_DROPPED
+                    update.kind.known(),
+                    Some(
+                        EventKind::UpdateStarted
+                            | EventKind::UpdateRetry
+                            | EventKind::UpdateAnswered
+                            | EventKind::UpdateDropped
+                    )
                 )
             })
             .unwrap_or(before.len());
@@ -2730,12 +2746,12 @@ pub fn check_event_target(
 
 /// The attention kinds an ask writes (ADR-0022): about the ask, even when it
 /// names a run.
-pub const ASK_EVENT_KINDS: &[&str] = &[
-    "ask_opened",
-    "ask_answered",
-    "ask_delivered",
-    "ask_delivery_failed",
-    "ask_closed",
+pub const ASK_EVENT_KINDS: &[EventKind] = &[
+    EventKind::AskOpened,
+    EventKind::AskAnswered,
+    EventKind::AskDelivered,
+    EventKind::AskDeliveryFailed,
+    EventKind::AskClosed,
 ];
 
 /// `session.exit` of an abandon's `runtime_error` (task 237): the
@@ -2748,8 +2764,8 @@ pub const ABANDON_EXIT_FAILED: &str = "failed";
 
 /// Whether a `runtime_error` is an abandon that left the run's live session
 /// open: the lease went and the `/exit` could not be sent (task 237).
-pub fn abandon_left_session_open(kind: &str, payload: &serde_json::Value) -> bool {
-    kind == event_kind::RUNTIME_ERROR
+pub fn abandon_left_session_open(kind: &RecordedKind, payload: &serde_json::Value) -> bool {
+    *kind == EventKind::RuntimeError
         && payload.get("lease_released") == Some(&serde_json::Value::Bool(true))
         && payload
             .pointer("/session/exit")
@@ -2813,93 +2829,89 @@ pub fn abandon_left_session_open(kind: &str, payload: &serde_json::Value) -> boo
 /// stopped) writes a `runtime_error` with `lease_released: true` though the
 /// run reached `awaiting_integration`: this says `recover run`, `status`
 /// says `review and integrate`.
-pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<AttentionNext> {
+pub fn event_attention(kind: &RecordedKind, payload: &serde_json::Value) -> Option<AttentionNext> {
     let status = payload
         .get("status")
         .and_then(serde_json::Value::as_str)
         .and_then(|status| status.parse::<RunStatus>().ok());
-    match (kind, status) {
+    match (kind.known(), status) {
         // The supervisor that validated the run reviews it and acts on the
         // verdict itself (ADR-0023 decision 2, ADR-0027).
-        ("validation_finished", Some(RunStatus::AwaitingIntegration)) => None,
+        (Some(EventKind::ValidationFinished), Some(RunStatus::AwaitingIntegration)) => None,
         // A failed review whose `approve_landing` ask was opened with it
         // waits in that ask (task 328); one without an ask is reviewed by
         // hand.
-        ("review_failed", _) if payload.get("ask_id").is_some() => None,
-        ("review_failed", _) => Some(AttentionNext::ReviewByHand),
+        (Some(EventKind::ReviewFailed), _) if payload.get("ask_id").is_some() => None,
+        (Some(EventKind::ReviewFailed), _) => Some(AttentionNext::ReviewByHand),
         // The supervisor triages a failed run and acts on the verdict
         // (ADR-0024 decision 3); only a triage that failed is a person's.
         // One whose provider could not be used starts again on the other
         // provider by itself (ADR-t1063-1 decision 4, task 1225), or, with
         // `[provider_fallback] jobs = false`, on the same one once its hold
         // ends.
-        ("triage_failed", _) if payload.get("provider_unusable").is_some() => None,
-        ("triage_failed", _) => Some(AttentionNext::TriageByHand),
+        (Some(EventKind::TriageFailed), _) if payload.get("provider_unusable").is_some() => None,
+        (Some(EventKind::TriageFailed), _) => Some(AttentionNext::TriageByHand),
         // The recovery job of a live session's alert failed (ADR-0047
         // decision 40): the session is a person's to recover by hand. Only
         // past records hold it: the runtime now opens the alert's ask when
         // the job fails, whose `ask_opened` is the attention.
-        ("recovery_failed", _) => Some(AttentionNext::RecoverByHand),
+        (Some(EventKind::RecoveryFailed), _) => Some(AttentionNext::RecoverByHand),
         // The supervisor reviews a submitted proposal and acts on the
         // verdict (ADR-0041 decision 11); only a plan review that failed
         // and a planner that did not answer a revise are a person's.
         // A plan or goal review whose provider could not be used starts
         // again on the other one by itself (ADR-t1063-1 decision 4).
-        ("plan_review_failed", _) if payload.get("provider_unusable").is_some() => None,
-        ("plan_review_failed", _) => Some(AttentionNext::PlanReviewByHand),
-        ("goal_review_failed", _) if payload.get("provider_unusable").is_some() => None,
-        ("goal_review_failed", _) => Some(AttentionNext::GoalReviewByHand),
-        ("planner_unresponsive", _) => Some(AttentionNext::CheckPlanner),
-        ("draft_planner_exhausted", _) => Some(AttentionNext::DecideDraft),
-        ("finding_planner_exhausted", _) => Some(AttentionNext::DecideFinding),
-        // Derived on each read and never recorded (task 1660); mapped for
-        // a reader that names it.
-        (follow_up::GOAL_FOLLOW_UPS_UNSETTLED, _) => payload
-            .get("goal_id")
-            .and_then(serde_json::Value::as_i64)
-            .map(|goal| AttentionNext::DecideFollowUps {
-                goal_id: GoalId::new(goal),
-            }),
+        (Some(EventKind::PlanReviewFailed), _) if payload.get("provider_unusable").is_some() => {
+            None
+        }
+        (Some(EventKind::PlanReviewFailed), _) => Some(AttentionNext::PlanReviewByHand),
+        (Some(EventKind::GoalReviewFailed), _) if payload.get("provider_unusable").is_some() => {
+            None
+        }
+        (Some(EventKind::GoalReviewFailed), _) => Some(AttentionNext::GoalReviewByHand),
+        (Some(EventKind::PlannerUnresponsive), _) => Some(AttentionNext::CheckPlanner),
+        (Some(EventKind::DraftPlannerExhausted), _) => Some(AttentionNext::DecideDraft),
+        (Some(EventKind::FindingPlannerExhausted), _) => Some(AttentionNext::DecideFinding),
         // A Spike's request has nobody who asked (ADR-t1487-1): its
         // proposal and its decline are told to the inbox by their events
         // alone; only its running out of planners is a person's.
-        (event_kind::REQUEST_PROPOSED | event_kind::REQUEST_DECLINED, _)
+        (Some(EventKind::RequestProposed | EventKind::RequestDeclined), _)
             if payload.get("spike_task_id").is_some_and(|id| !id.is_null()) =>
         {
             None
         }
-        (event_kind::REQUEST_PROPOSED, _) => Some(AttentionNext::ReportRequest),
-        (event_kind::REQUEST_DECLINED | event_kind::REQUEST_PLANNER_EXHAUSTED, _) => {
+        (Some(EventKind::RequestProposed), _) => Some(AttentionNext::ReportRequest),
+        (Some(EventKind::RequestDeclined | EventKind::RequestPlannerExhausted), _) => {
             Some(AttentionNext::RephraseRequest)
         }
-        (event_kind::DEPENDENCY_STRANDED, _) => Some(AttentionNext::DecideWaiting),
-        ("push_failed", _) => Some(AttentionNext::PushMain),
+        (Some(EventKind::DependencyStranded), _) => Some(AttentionNext::DecideWaiting),
+        (Some(EventKind::PushFailed), _) => Some(AttentionNext::PushMain),
         // A verification command failed on the host again after its retry
         // (task 639): the run waits for a person, not a resume.
-        (event_kind::INTEGRATION_HELD, _) => Some(AttentionNext::ReviewAndIntegrate),
+        (Some(EventKind::IntegrationHeld), _) => Some(AttentionNext::ReviewAndIntegrate),
         // The release of a dead landing could not stop what its worktree
         // still runs (task 1129).
-        (event_kind::LANDING_RELEASE_STUCK, _) => Some(AttentionNext::StopLandingProcesses),
-        (sccache::RESTART_FAILED, _) => Some(AttentionNext::CheckSccache),
-        (run_env::RUN_ENV_PROGRAM_MISSING, _) => Some(AttentionNext::InstallTool),
+        (Some(EventKind::LandingReleaseStuck), _) => Some(AttentionNext::StopLandingProcesses),
+        (Some(EventKind::SccacheServerRestartFailed), _) => Some(AttentionNext::CheckSccache),
+        (Some(EventKind::RunEnvProgramMissing), _) => Some(AttentionNext::InstallTool),
         // A target set to the container that cannot be used waits, never on
         // the host (ADR-t2113-1 decision 4): the container is made usable,
         // or a task sets the runtime back to the host.
-        (container_runtime::CONTAINER_RUNTIME_UNAVAILABLE, _) => Some(AttentionNext::FixDagqToml),
+        (Some(EventKind::ContainerRuntimeUnavailable), _) => Some(AttentionNext::FixDagqToml),
         // The means to read the CI went away (ADR-t1920-1 decision 2); its
         // return is no attention.
-        (ci_watch::CI_WATCH_UNAVAILABLE, _) => Some(ci_watch::Unavailable::next_of(
+        (Some(EventKind::CiWatchUnavailable), _) => Some(ci_watch::Unavailable::next_of(
             payload.get("reason").and_then(serde_json::Value::as_str),
         )),
         // `required_jobs` names a job a success run lacks (ADR-t2034-1
         // decision 5): `dagq.toml` or the workflow is fixed by a task.
-        (ci_watch::CI_JOBS_MISSING, _) => Some(AttentionNext::FixDagqToml),
+        (Some(EventKind::CiJobsMissing), _) => Some(AttentionNext::FixDagqToml),
         // The failure and the breaking build of the automatic update reach
         // the inbox as their asks; only the replaced binary is a notice.
-        (UPDATE_INSTALLED, _) => Some(AttentionNext::ReportUpdate),
+        (Some(EventKind::UpdateInstalled), _) => Some(AttentionNext::ReportUpdate),
         // A throughput review's conclusion is a notice too (ADR-t996-1),
         // but for a quiet hour's (ADR-t1172-1 decision 3).
-        (event_kind::THROUGHPUT_REVIEW_REPORTED, _) => {
+        (Some(EventKind::ThroughputReviewReported), _) => {
             reported_review_notifies(payload).then_some(AttentionNext::ReportReview)
         }
         // One that did not reach its conclusion is a notice as well (task
@@ -2907,12 +2919,12 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         // none, and so is one whose
         // provider could not be used, which starts again on the other one
         // (ADR-t1063-1 decision 4, task 1220).
-        (event_kind::THROUGHPUT_REVIEW_FINISHED, _)
+        (Some(EventKind::ThroughputReviewFinished), _)
             if payload.get("provider_unusable").is_some() =>
         {
             None
         }
-        (event_kind::THROUGHPUT_REVIEW_FINISHED, _)
+        (Some(EventKind::ThroughputReviewFinished), _)
             if matches!(
                 payload.get("outcome").and_then(serde_json::Value::as_str),
                 Some("error" | "failed")
@@ -2923,7 +2935,7 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         // The observer failed twice in a row (task 1574): once is not told,
         // and a longer run is told once, so an observer that stays down
         // does not wake the inbox every hour.
-        (event_kind::OBSERVE_FINISHED, _)
+        (Some(EventKind::ObserveFinished), _)
             if observer_failed(payload)
                 && payload
                     .get(CONSECUTIVE_FAILURES)
@@ -2932,43 +2944,45 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         {
             Some(AttentionNext::CheckObserver)
         }
-        (kpi::push::KPI_PUSH_ABANDONED, _) => Some(AttentionNext::FixPush),
-        (queue_service::QUEUE_SERVICE_DOWN, _) => Some(AttentionNext::QueueServiceStatus),
-        (queue_broker::QUEUE_BROKER_DOWN, _) => Some(AttentionNext::QueueBrokerLog),
-        (broker_relay::QUEUE_RELAY_DOWN, _) => Some(AttentionNext::QueueRelayMachine),
+        (Some(EventKind::KpiPushAbandoned), _) => Some(AttentionNext::FixPush),
+        (Some(EventKind::QueueServiceDown), _) => Some(AttentionNext::QueueServiceStatus),
+        (Some(EventKind::QueueBrokerDown), _) => Some(AttentionNext::QueueBrokerLog),
+        (Some(EventKind::QueueRelayDown), _) => Some(AttentionNext::QueueRelayMachine),
         // A hold past its `until` or a day on, told once per day
         // (ADR-t1879-1).
-        (event_kind::TASK_HOLD_REMINDED, _) => payload
+        (Some(EventKind::TaskHoldReminded), _) => payload
             .get("task_id")
             .and_then(serde_json::Value::as_i64)
             .map(|task| AttentionNext::ReleaseOrKeepHold {
                 task_id: TaskId::new(task),
             }),
-        (event_kind::RUNTIME_ERROR, _) if abandon_left_session_open(kind, payload) => {
+        (Some(EventKind::RuntimeError), _) if abandon_left_session_open(kind, payload) => {
             Some(AttentionNext::ExitSession)
         }
-        ("runtime_error", _)
+        (Some(EventKind::RuntimeError), _)
             if payload.get("lease_released") == Some(&serde_json::Value::Bool(true)) =>
         {
             Some(AttentionNext::RecoverRun)
         }
-        (event_kind::RESUME_FINISHED, Some(RunStatus::AwaitingIntegration)) => {
+        (Some(EventKind::ResumeFinished), Some(RunStatus::AwaitingIntegration)) => {
             Some(AttentionNext::ReviewAndIntegrate)
         }
-        (event_kind::ASK_OPENED, _) => {
-            ask_id(payload).map(|ask_id| AttentionNext::AnswerAsk { ask_id })
-        }
-        (event_kind::ASK_ANSWERED, _)
+        (Some(EventKind::AskOpened), _) => run::restore_payload::<run::AskOpened>(payload)
+            .ask_id
+            .map(|ask_id| AttentionNext::AnswerAsk {
+                ask_id: AskId::new(ask_id),
+            }),
+        (Some(EventKind::AskAnswered), _)
             if payload.get("runtime_closed") == Some(&serde_json::Value::Bool(true)) =>
         {
             None
         }
         // A `propose` or `dismiss` answer the runtime applied to the ask's
         // finding (ADR-0044 decision 19).
-        ("ask_answered", _) if payload.get("finding_applied").is_some() => None,
+        (Some(EventKind::AskAnswered), _) if payload.get("finding_applied").is_some() => None,
         // The supervisor delivers the answer of a `worker_question` to the
         // worker's session; one it does not deliver is the inbox's to send.
-        ("ask_answered", _)
+        (Some(EventKind::AskAnswered), _)
             if payload.get("kind").and_then(serde_json::Value::as_str)
                 == Some(AskKind::WorkerQuestion.as_str()) =>
         {
@@ -2982,7 +2996,7 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         // The supervisor delivers the answer of a `planner_question` to a
         // planner of the runtime's as its next turn (ADR-0041 decision 13,
         // ADR-t1433-2); one none carries is the inbox's, never a worker's.
-        ("ask_answered", _)
+        (Some(EventKind::AskAnswered), _)
             if payload.get("kind").and_then(serde_json::Value::as_str)
                 == Some(AskKind::PlannerQuestion.as_str()) =>
         {
@@ -3001,7 +3015,7 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         // a triage's `decide` one, a plan review's `approve_plan` one, that
         // of the automatic update's failure (`update_failed`), or an option
         // of a `queue_hold` ask (task 437).
-        ("ask_answered", _)
+        (Some(EventKind::AskAnswered), _)
             if matches!(
                 payload.get("kind").and_then(serde_json::Value::as_str),
                 Some(kind) if kind == AskKind::ApproveLanding.as_str()
@@ -3016,13 +3030,13 @@ pub fn event_attention(kind: &str, payload: &serde_json::Value) -> Option<Attent
         {
             None
         }
-        (event_kind::ASK_ANSWERED, _) => {
+        (Some(EventKind::AskAnswered), _) => {
             ask_id(payload).map(|ask_id| AttentionNext::ReadAnswer { ask_id })
         }
         // An answer a planner of the runtime's could not be sent goes to a
         // new planner by itself; that of a worker is the inbox's.
-        (event_kind::ASK_DELIVERY_FAILED, _) if payload.get("planner_id").is_some() => None,
-        (event_kind::ASK_DELIVERY_FAILED, _) => {
+        (Some(EventKind::AskDeliveryFailed), _) if payload.get("planner_id").is_some() => None,
+        (Some(EventKind::AskDeliveryFailed), _) => {
             ask_id(payload).map(|ask_id| AttentionNext::DeliverAnswer { ask_id })
         }
         _ => None,
@@ -3084,10 +3098,10 @@ fn reported_review_notifies(payload: &serde_json::Value) -> bool {
 /// them with the next event that does. Every other attention wakes it, the
 /// daily and weekly reviews and every failed `throughput_review_finished`
 /// included. Which events are attention is [`event_attention`]'s, unchanged.
-pub fn wakes_inbox(kind: &str, payload: &serde_json::Value) -> bool {
-    match kind {
-        UPDATE_INSTALLED => false,
-        event_kind::THROUGHPUT_REVIEW_REPORTED => {
+pub fn wakes_inbox(kind: &RecordedKind, payload: &serde_json::Value) -> bool {
+    match kind.known() {
+        Some(EventKind::UpdateInstalled) => false,
+        Some(EventKind::ThroughputReviewReported) => {
             payload.get("mode").and_then(serde_json::Value::as_str)
                 != Some(throughput_review::ReviewMode::Hourly.as_str())
         }
@@ -3616,10 +3630,7 @@ mod attention_tests {
             );
         }
         for kind in UPDATE_EVENT_KINDS {
-            assert!(
-                EventKind::from_name(kind).is_some_and(EventKind::is_queue),
-                "{kind}"
-            );
+            assert!(kind.is_queue(), "{kind}");
         }
         for kind in [
             EventKind::TaskCreated,
@@ -3821,40 +3832,51 @@ mod attention_tests {
     #[test]
     fn only_update_installed_and_the_hourly_review_leave_the_inbox_asleep() {
         let reported = |mode: &str| json!({"mode": mode, "label": "x", "reasons": ["no_landing"]});
-        assert!(!wakes_inbox(UPDATE_INSTALLED, &json!({"version": "1"})));
         assert!(!wakes_inbox(
-            event_kind::THROUGHPUT_REVIEW_REPORTED,
+            &EventKind::UpdateInstalled.into(),
+            &json!({"version": "1"})
+        ));
+        assert!(!wakes_inbox(
+            &EventKind::ThroughputReviewReported.into(),
             &reported("hourly")
         ));
         for mode in ["daily", "weekly"] {
             assert!(wakes_inbox(
-                event_kind::THROUGHPUT_REVIEW_REPORTED,
+                &EventKind::ThroughputReviewReported.into(),
                 &reported(mode)
             ));
         }
         // A report without its mode wakes it, as before.
         assert!(wakes_inbox(
-            event_kind::THROUGHPUT_REVIEW_REPORTED,
+            &EventKind::ThroughputReviewReported.into(),
             &json!({})
         ));
         for mode in ["hourly", "daily", "weekly"] {
             for outcome in ["error", "failed"] {
                 let payload = json!({"mode": mode, "outcome": outcome});
                 assert!(
-                    event_attention(event_kind::THROUGHPUT_REVIEW_FINISHED, &payload).is_some()
+                    event_attention(&EventKind::ThroughputReviewFinished.into(), &payload)
+                        .is_some()
                 );
                 assert!(wakes_inbox(
-                    event_kind::THROUGHPUT_REVIEW_FINISHED,
+                    &EventKind::ThroughputReviewFinished.into(),
                     &payload
                 ));
             }
         }
-        assert!(wakes_inbox(event_kind::ASK_OPENED, &json!({"ask_id": 1})));
-        assert!(wakes_inbox("push_failed", &json!({})));
+        assert!(wakes_inbox(
+            &EventKind::AskOpened.into(),
+            &json!({"ask_id": 1})
+        ));
+        assert!(wakes_inbox(&EventKind::PushFailed.into(), &json!({})));
         // Both stay attention, which `events` and `status` show.
-        assert!(event_attention(UPDATE_INSTALLED, &json!({})).is_some());
+        assert!(event_attention(&EventKind::UpdateInstalled.into(), &json!({})).is_some());
         assert!(
-            event_attention(event_kind::THROUGHPUT_REVIEW_REPORTED, &reported("hourly")).is_some()
+            event_attention(
+                &EventKind::ThroughputReviewReported.into(),
+                &reported("hourly")
+            )
+            .is_some()
         );
     }
 
@@ -3864,7 +3886,8 @@ mod attention_tests {
     /// decision 3).
     #[test]
     fn a_quiet_hours_review_is_no_attention_and_one_that_met_a_rule_is() {
-        let reported = |payload| event_attention(event_kind::THROUGHPUT_REVIEW_REPORTED, &payload);
+        let reported =
+            |payload| event_attention(&EventKind::ThroughputReviewReported.into(), &payload);
         for quiet in [
             json!({"mode": "hourly", "period": "2026-09-30T04", "reasons": []}),
             json!({"mode": "hourly", "period": "2026-09-30T04", "reasons": null}),
@@ -3888,12 +3911,12 @@ mod attention_tests {
             for reasons in [json!([]), json!(["no_landing"])] {
                 let failed = json!({"mode": mode, "outcome": "failed", "reasons": reasons});
                 assert_eq!(
-                    event_attention(event_kind::THROUGHPUT_REVIEW_FINISHED, &failed),
+                    event_attention(&EventKind::ThroughputReviewFinished.into(), &failed),
                     Some(AttentionNext::CheckReview)
                 );
                 let succeeded = json!({"mode": mode, "outcome": "succeeded", "reasons": reasons});
                 assert_eq!(
-                    event_attention(event_kind::THROUGHPUT_REVIEW_FINISHED, &succeeded),
+                    event_attention(&EventKind::ThroughputReviewFinished.into(), &succeeded),
                     None
                 );
             }
@@ -3937,10 +3960,10 @@ mod attention_tests {
     fn the_second_failure_of_the_observer_wakes_the_inbox() {
         let payload = json!({"outcome": "error", "consecutive_failures": 2});
         assert_eq!(
-            event_attention(event_kind::OBSERVE_FINISHED, &payload),
+            event_attention(&EventKind::ObserveFinished.into(), &payload),
             Some(AttentionNext::CheckObserver)
         );
-        assert!(wakes_inbox(event_kind::OBSERVE_FINISHED, &payload));
+        assert!(wakes_inbox(&EventKind::ObserveFinished.into(), &payload));
     }
 
     #[test]
@@ -4434,13 +4457,9 @@ mod attention_tests {
                 json!({"finding_id": 2, "planners": 3}),
                 Some(DecideFinding),
             ),
-            (
-                "goal_follow_ups_unsettled",
-                json!({"goal_id": 108}),
-                Some(DecideFollowUps {
-                    goal_id: GoalId::new(108),
-                }),
-            ),
+            // Derived on each read, never recorded (task 1660): no event
+            // of its name is an attention.
+            ("goal_follow_ups_unsettled", json!({"goal_id": 108}), None),
             (
                 "dependency_stranded",
                 json!({"goal_id": 2, "verdict": "abandoned", "waiting": [5]}),
@@ -4497,7 +4516,7 @@ mod attention_tests {
         ];
         for (kind, payload, expected) in cases {
             assert_eq!(
-                event_attention(kind, &payload),
+                event_attention(&kind.into(), &payload),
                 expected,
                 "{kind} {payload}"
             );
@@ -4602,7 +4621,10 @@ mod attention_tests {
             json!("restart supervisor")
         );
         // A dialog and a used-up resume are asks, not attention (ADR-0024).
-        assert_eq!(event_attention("prompt_waiting", &json!({})), None);
+        assert_eq!(
+            event_attention(&EventKind::PromptWaiting.into(), &json!({})),
+            None
+        );
     }
 
     #[test]
@@ -4728,7 +4750,7 @@ mod attention_tests {
         assert_eq!(TriageByHand.to_string(), "triage by hand");
         assert_eq!(RecoverByHand.to_string(), "recover by hand");
         assert_eq!(
-            event_attention("recovery_failed", &serde_json::json!({})),
+            event_attention(&EventKind::RecoveryFailed.into(), &serde_json::json!({})),
             Some(RecoverByHand)
         );
         // The stuck_exit ask is the attention of a session holding `/exit`.
@@ -4830,7 +4852,7 @@ mod attention_tests {
         events.push(event(3, "triage_failed"));
         assert_eq!(triage_state(&events), TriageState::Failed);
         assert_eq!(
-            event_attention("triage_failed", &serde_json::json!({})),
+            event_attention(&EventKind::TriageFailed.into(), &serde_json::json!({})),
             Some(AttentionNext::TriageByHand)
         );
         events.push(event(4, "triage_finished"));

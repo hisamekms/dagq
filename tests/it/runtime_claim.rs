@@ -2,6 +2,7 @@
 //! failures, stats and `recover`, the injected clock and IDs, migrations and
 //! the adapters.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
 use dagq::infrastructure::git_binary::git_executable;
 
@@ -74,7 +75,7 @@ fn provisioning_failure_retains_the_run_and_stops_claiming_other_tasks() {
     let abandoned = detail
         .events
         .iter()
-        .find(|e| e.kind == "runtime_error")
+        .find(|e| e.kind == EventKind::RuntimeError)
         .unwrap();
     assert!(failures[0].id < abandoned.id);
     assert_eq!(abandoned.payload["code"], "backend_failed");
@@ -119,7 +120,7 @@ fn a_failed_workspace_close_is_recorded_before_the_cleanup_failure_with_its_code
     let cleanup = detail
         .events
         .iter()
-        .find(|e| e.kind == "cleanup_failed")
+        .find(|e| e.kind == EventKind::CleanupFailed)
         .unwrap();
     assert_eq!(
         cleanup
@@ -241,7 +242,7 @@ fn supervisor_claims_the_candidate_that_releases_the_most_tasks_first() {
         detail
             .events
             .iter()
-            .find(|event| event.kind == "run_claimed")
+            .find(|event| event.kind == EventKind::RunClaimed)
             .unwrap()
             .id
     };
@@ -293,7 +294,7 @@ fn the_claim_records_the_versions_of_the_workers_instructions() {
     let claimed = &detail
         .events
         .iter()
-        .find(|event| event.kind == "run_claimed")
+        .find(|event| event.kind == EventKind::RunClaimed)
         .unwrap()
         .payload;
     let blob = Command::new(git_executable().unwrap())
@@ -932,7 +933,7 @@ fn workspace_close_is_recorded_once_and_only_for_accepted_runs() {
         .unwrap()
         .events
         .iter()
-        .map(|e| e.kind.clone())
+        .map(|e| e.kind.to_string())
         .collect();
     assert_eq!(kinds.iter().filter(|k| *k == "workspace_closed").count(), 1);
     assert_eq!(kinds.iter().filter(|k| *k == "cleanup_failed").count(), 1);
@@ -1157,7 +1158,7 @@ fn main_vanishing_after_the_landing_branch_check_holds_the_claim() {
             .all_events()
             .unwrap()
             .iter()
-            .all(|event| event.kind != "backend_call_failed")
+            .all(|event| event.kind != EventKind::BackendCallFailed)
     );
     let task = queue.show(TaskId::new(1)).unwrap();
     assert_eq!(task.task.status(), TaskStatus::Ready);
@@ -1466,7 +1467,7 @@ fn recover_requires_dead_processes_and_stale_lease_then_allows_a_new_run() {
     let recovered = detail
         .events
         .iter()
-        .find(|e| e.kind == "run_recovered")
+        .find(|e| e.kind == EventKind::RunRecovered)
         .unwrap();
     assert_eq!(recovered.payload["previous_status"], "running");
     assert_eq!(recovered.payload["lease_deleted"], true);
@@ -1536,7 +1537,7 @@ fn recover_ignores_exited_processes_and_tolerates_a_missing_lease() {
     let recovered = detail
         .events
         .iter()
-        .find(|e| e.kind == "run_recovered")
+        .find(|e| e.kind == EventKind::RunRecovered)
         .unwrap();
     assert_eq!(recovered.payload["lease_deleted"], false);
     assert_eq!(recovered.payload["run"]["lease"], Value::Null);
@@ -1734,7 +1735,7 @@ fn the_claim_records_its_slots_its_line_and_its_attributes() {
     let claimed = |task: TaskId| {
         events
             .iter()
-            .find(|event| event.kind == "run_claimed" && event.task_id == Some(task))
+            .find(|event| event.kind == EventKind::RunClaimed && event.task_id == Some(task))
             .unwrap()
     };
     let (first, second) = (claimed(first), claimed(second));
@@ -1760,13 +1761,13 @@ fn the_claim_records_its_slots_its_line_and_its_attributes() {
     let between: Vec<&str> = events
         .iter()
         .filter(|event| event.id > first.id && event.id < second.id)
-        .filter(|event| event.kind.starts_with("slots_full_"))
+        .filter(|event| event.kind.as_str().starts_with("slots_full_"))
         .map(|event| event.kind.as_str())
         .collect();
     assert_eq!(between, ["slots_full_started", "slots_full_ended"]);
     let started = events
         .iter()
-        .find(|event| event.kind == "slots_full_started")
+        .find(|event| event.kind == EventKind::SlotsFullStarted)
         .unwrap();
     assert_eq!(started.payload["class"], "heavy");
     assert_eq!(started.payload["slots"], 1);
@@ -1785,7 +1786,7 @@ fn the_supervisor_records_the_landed_commit_once() {
         let events = SqliteQueue::open(db).unwrap().all_events().unwrap();
         events
             .iter()
-            .filter(|event| event.kind == "main_commits_recorded")
+            .filter(|event| event.kind == EventKind::MainCommitsRecorded)
             .flat_map(|event| {
                 event.payload["commits"]
                     .as_array()
@@ -1814,7 +1815,7 @@ fn the_supervisor_records_the_landed_commit_once() {
     let events = SqliteQueue::open(&db).unwrap().all_events().unwrap();
     let landing = events
         .iter()
-        .find(|event| event.kind == "run_integrated")
+        .find(|event| event.kind == EventKind::RunIntegrated)
         .unwrap();
     let landed = landing.payload["commit"].as_str().unwrap();
     let after = recorded(&db);
@@ -1825,7 +1826,7 @@ fn the_supervisor_records_the_landed_commit_once() {
     let observed = events
         .iter()
         .rev()
-        .find(|event| event.kind == "main_observed")
+        .find(|event| event.kind == EventKind::MainObserved)
         .unwrap();
     assert_eq!(observed.payload["head"], landed);
     // Main at rest: the next passes record no commit.

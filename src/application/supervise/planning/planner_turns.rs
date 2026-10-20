@@ -17,6 +17,7 @@ use super::headless::{last_turn, provider_failure};
 use super::provider::{PROVIDER_RETRY, retry_text};
 use super::*;
 use crate::application::{planner::PlannerView, planner_idle_marker};
+use crate::domain::run::{TurnRequested, restore_payload};
 use crate::domain::{
     EventKind, PlannerId, PlannerOrigin, PlannerRoute, PlannerSession, PlannerState,
     provider_switch::{self, SwitchReason},
@@ -164,8 +165,8 @@ impl PlanningState {
         let what = format!("answer of ask {ask}");
         let Some(seq) = events
             .iter()
-            .rfind(|e| e.kind == event_kind::TURN_REQUESTED && e.payload["what"] == what.as_str())
-            .and_then(|e| e.payload["seq"].as_u64())
+            .rfind(|e| e.kind == EventKind::TurnRequested && e.payload["what"] == what.as_str())
+            .and_then(|e| restore_payload::<TurnRequested>(&e.payload).seq)
         else {
             return Ok(None);
         };
@@ -226,7 +227,7 @@ impl PlanningState {
         let Some((finished_at, finished)) = events
             .iter()
             .enumerate()
-            .rfind(|(_, e)| e.kind == event_kind::TURN_FINISHED)
+            .rfind(|(_, e)| e.kind == EventKind::TurnFinished)
             .map(|(at, e)| (at, e.payload.clone()))
         else {
             return Ok(());

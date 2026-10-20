@@ -54,7 +54,7 @@ pub trait RelayRecords: Send + Sync {
 pub fn down_message(events: &dyn EventStore) -> Result<Option<String>> {
     Ok(events
         .latest_queue_event(&QUEUE_RELAY_ATTENTION_KINDS)?
-        .filter(|event| attention_stands(Some(event.kind.as_str())))
+        .filter(|event| attention_stands(Some(&event.kind)))
         .map(|event| {
             event
                 .payload

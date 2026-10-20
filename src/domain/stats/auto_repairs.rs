@@ -7,6 +7,8 @@
 //! and outcome, and how many were applied or escalated. Derived from
 //! `auto_repaired` / `ask_opened` / `recovery_finished` like the rest of
 //! `stats`.
+use crate::domain::EventKind;
+use crate::domain::run::{AutoRepaired, RecoveryRecord, restore_payload};
 use std::collections::BTreeMap;
 
 use serde::Serialize;
@@ -111,9 +113,12 @@ pub fn auto_repairs(
     {
         let day = || event.created_at.get(..10).unwrap_or(UNKNOWN).to_owned();
         let payload = &event.payload;
-        match event.kind.as_str() {
-            "auto_repaired" => {
-                let repair = text(payload, "repair");
+        match event.kind.known() {
+            Some(EventKind::AutoRepaired) => {
+                let repair = restore_payload::<AutoRepaired>(payload)
+                    .repair
+                    .unwrap_or(UNKNOWN)
+                    .to_owned();
                 stats.count += 1;
                 let layer = stats.by_layer.entry(text(payload, "layer")).or_default();
                 layer.count += 1;
@@ -122,14 +127,14 @@ pub fn auto_repairs(
                 day.auto_repaired += 1;
                 *day.by_repair.entry(repair).or_default() += 1;
             }
-            "ask_opened" => {
+            Some(EventKind::AskOpened) => {
                 let day = stats.by_day.entry(day()).or_default();
                 day.asks_opened += 1;
                 *day.asks_by_reason
                     .entry(text(payload, "reason_category"))
                     .or_default() += 1;
             }
-            "recovery_finished" => {
+            Some(EventKind::RecoveryFinished) => {
                 let key = |key: &str| {
                     payload
                         .get(key)
@@ -150,7 +155,11 @@ pub fn auto_repairs(
                 *jobs.by_verdict.entry(verdict.clone()).or_default() += 1;
                 *jobs.by_confidence.entry(key("confidence")).or_default() += 1;
                 *jobs.by_outcome.entry(key("outcome")).or_default() += 1;
-                let alert = jobs.by_alert.entry(text(payload, "alert")).or_default();
+                let alert = restore_payload::<RecoveryRecord>(payload)
+                    .alert
+                    .unwrap_or(UNKNOWN)
+                    .to_owned();
+                let alert = jobs.by_alert.entry(alert).or_default();
                 alert.count += 1;
                 alert.applied += i64::from(applied);
                 alert.escalated += i64::from(escalated);
@@ -177,7 +186,7 @@ mod tests {
             task_id: task_id.map(TaskId::new),
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: at.to_owned(),
             actor: None,

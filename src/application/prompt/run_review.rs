@@ -2,6 +2,7 @@
 //! (execution and landing).
 
 use super::*;
+use crate::domain::EventKind;
 
 /// The bytes the whole run review prompt takes at most, the language's
 /// instruction included (task 1571, ADR-t1566-1 decision 4): in production
@@ -351,10 +352,7 @@ pub fn ended_run_material(
     let turns: Vec<String> = detail
         .events
         .iter()
-        .filter(|e| {
-            e.run_id.as_ref() == Some(run.id())
-                && e.kind == crate::domain::event_kind::TURN_FINISHED
-        })
+        .filter(|e| e.run_id.as_ref() == Some(run.id()) && e.kind == EventKind::TurnFinished)
         .map(|e| e.payload.to_string())
         .collect();
     if !turns.is_empty() {
@@ -393,7 +391,7 @@ pub fn ended_run_material(
                 .events
                 .iter()
                 .filter(|e| {
-                    e.run_id.as_ref() == Some(r.id()) && e.kind == event_kind::TRIAGE_FINISHED
+                    e.run_id.as_ref() == Some(r.id()) && e.kind == EventKind::TriageFinished
                 })
                 .map(|e| format!("{}", e.payload.get("action").unwrap_or(&Value::Null)))
                 .collect();
@@ -628,7 +626,7 @@ pub fn binary_facts(
     let mut replaced: Vec<&RunEvent> = updates
         .iter()
         .filter(|e| {
-            e.kind == crate::domain::UPDATE_INSTALLED
+            e.kind == EventKind::UpdateInstalled
                 && !crate::domain::stats::updates::plugin_only(e)
                 && after_claim(e)
         })
@@ -636,7 +634,7 @@ pub fn binary_facts(
             events
                 .iter()
                 .filter(own)
-                .filter(|e| e.kind == event_kind::EventKind::SupervisorHandedOff.as_str()),
+                .filter(|e| e.kind == EventKind::SupervisorHandedOff),
         )
         .collect();
     replaced.sort_by_key(|e| e.id);

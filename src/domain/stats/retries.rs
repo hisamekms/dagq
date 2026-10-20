@@ -9,6 +9,8 @@
 //! passed on that main, so it is kept in `rebased_onto` instead. A
 //! deferral whose failure is `flaky` never names a landing either: an
 //! unstable test is not the fault of the main the run was rebased onto.
+use crate::domain::EventKind;
+use crate::domain::run::{ReviseRequested, restore_payload};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::Serialize;
@@ -23,16 +25,16 @@ pub const BREAKING_CODES: [&str; 3] = ["rebase_conflict", "verification_failed",
 
 /// The events that park a run for a resume, whose code is the resume's
 /// reason (as the supervisor's `resume_reason` picks them).
-const PARKING: [&str; 9] = [
-    "integration_deferred",
-    "integration_error",
-    "evidence_missing",
-    "scope_violation",
-    "landing_decided",
-    "triage_finished",
-    "triage_decided",
-    "session_gone_parked",
-    "replan_parked",
+const PARKING: [EventKind; 9] = [
+    EventKind::IntegrationDeferred,
+    EventKind::IntegrationError,
+    EventKind::EvidenceMissing,
+    EventKind::ScopeViolation,
+    EventKind::LandingDecided,
+    EventKind::TriageFinished,
+    EventKind::TriageDecided,
+    EventKind::SessionGoneParked,
+    EventKind::ReplanParked,
 ];
 
 /// The reason of a deferral or resume whose event carries no code.
@@ -205,28 +207,31 @@ pub fn retries(events: &[RunEvent]) -> HashMap<RunId, Retries> {
         let walk = walks.entry(run_id.clone()).or_default();
         let at = super::timestamp_millis(&event.created_at);
         let code = || event_code(event).map_or(UNKNOWN, |code| code.as_str());
-        let kind = event.kind.as_str();
-        if PARKING.contains(&kind) {
+        let kind = &event.kind;
+        if kind.is_in(&PARKING) {
             walk.parked = Some(code().to_owned());
         }
         if payload_status(&event.payload) == Some("needs_session")
-            && !matches!(kind, "integration_error" | "resume_finished")
+            && !matches!(
+                kind.known(),
+                Some(EventKind::IntegrationError | EventKind::ResumeFinished)
+            )
             && let Some(index) = walk.watching.take()
         {
             walk.retries.resume_attempts[index].resolved = Some(false);
         }
-        match kind {
-            "integration_started" => {
+        match kind.known() {
+            Some(EventKind::IntegrationStarted) => {
                 walk.retries.integrate_attempts += 1;
                 walk.main = text(&event.payload["main"]);
                 walk.passed.clear();
             }
-            "verification_command"
+            Some(EventKind::VerificationCommand)
                 if event.payload["phase"] == "integration" && event.payload["exit_code"] == 0 =>
             {
                 walk.passed.extend(text(&event.payload["command"]));
             }
-            "integration_deferred" => {
+            Some(EventKind::IntegrationDeferred) => {
                 *walk.retries.deferrals.entry(code().to_owned()).or_default() += 1;
                 if let Some(files) = event.payload["conflicts"].as_array() {
                     walk.conflicts.extend(files.iter().filter_map(text));
@@ -244,7 +249,7 @@ pub fn retries(events: &[RunEvent]) -> HashMap<RunId, Retries> {
                     });
                 }
             }
-            "run_integrated" => {
+            Some(EventKind::RunIntegrated) => {
                 if let Some(commit) =
                     text(&event.payload["result_commit"]).or_else(|| text(&event.payload["commit"]))
                 {
@@ -259,7 +264,7 @@ pub fn retries(events: &[RunEvent]) -> HashMap<RunId, Retries> {
                     );
                 }
             }
-            "resume_started" => {
+            Some(EventKind::ResumeStarted) => {
                 let attempts = &mut walk.retries.resume_attempts;
                 let (escalated_from, escalated_to) = escalation(&event.payload).unzip();
                 attempts.push(ResumeAttempt {
@@ -276,7 +281,7 @@ pub fn retries(events: &[RunEvent]) -> HashMap<RunId, Retries> {
                 walk.resume_start = at;
                 walk.watching = None;
             }
-            "revise_requested" => {
+            Some(EventKind::ReviseRequested) => {
                 let payload = &event.payload;
                 let raise = escalation(payload)
                     .map(|(from, to)| (from, to, true))
@@ -288,8 +293,11 @@ pub fn retries(events: &[RunEvent]) -> HashMap<RunId, Retries> {
                         ))
                     });
                 if let Some((from, to, switched)) = raise {
+                    let attempt = restore_payload::<ReviseRequested>(payload).attempt;
                     walk.retries.revise_escalations.push(ReviseEscalation {
-                        attempt: payload["attempt"].as_i64().unwrap_or_default(),
+                        attempt: attempt
+                            .and_then(|attempt| i64::try_from(attempt).ok())
+                            .unwrap_or_default(),
                         from,
                         to,
                         switched,
@@ -297,13 +305,13 @@ pub fn retries(events: &[RunEvent]) -> HashMap<RunId, Retries> {
                 }
             }
             // A withdrawn revise never reached the session.
-            "revise_unsent" => {
+            Some(EventKind::ReviseUnsent) => {
                 let attempt = event.payload["attempt"].as_i64().unwrap_or_default();
                 walk.retries
                     .revise_escalations
                     .retain(|revise| revise.attempt != attempt);
             }
-            "resume_finished" => {
+            Some(EventKind::ResumeFinished) => {
                 let index = walk.retries.resume_attempts.len().checked_sub(1);
                 if let (Some(index), Some(start)) = (index, walk.resume_start.take()) {
                     let attempt = &mut walk.retries.resume_attempts[index];
@@ -479,7 +487,7 @@ mod tests {
             task_id: Some(TaskId::new(task)),
             goal_id: None,
             run_id: Some(RunId::new(run).unwrap()),
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: format!("2026-09-26T00:{:02}:{:02}.000Z", secs / 60, secs % 60),
             actor: None,

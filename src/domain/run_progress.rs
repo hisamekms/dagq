@@ -13,11 +13,11 @@
 //! This is not `stats`' `watched_phase`, which only times the sessions the
 //! supervisor watches.
 
+use crate::domain::EventKind;
+use crate::domain::run::{ConflictPrecheck, restore_payload};
 use serde::Serialize;
 
-use super::{
-    RunEvent, RunStatus, event_kind, run_e2e, stats::timestamp_millis, waiting::WaitState,
-};
+use super::{RunEvent, RunStatus, run_e2e, stats::timestamp_millis, waiting::WaitState};
 
 /// The step a listed run is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -67,50 +67,62 @@ impl Phase {
     /// before it with no next one, `None` when it moves nothing.
     fn started_by(event: &RunEvent) -> Option<Option<Self>> {
         let payload = &event.payload;
-        Some(match event.kind.as_str() {
-            "run_claimed" => Some(Self::Claim),
-            "agent_started" => Some(Self::Session),
-            "supervision_finished" | "revise_finished" | "conflict_resolved" => {
-                Some(Self::Validate)
-            }
-            "resume_started" => Some(Self::Resume),
-            "resume_finished" => {
+        Some(match event.kind.known() {
+            Some(EventKind::RunClaimed) => Some(Self::Claim),
+            Some(EventKind::AgentStarted) => Some(Self::Session),
+            Some(
+                EventKind::SupervisionFinished
+                | EventKind::ReviseFinished
+                | EventKind::ConflictResolved,
+            ) => Some(Self::Validate),
+            Some(EventKind::ResumeStarted) => Some(Self::Resume),
+            Some(EventKind::ResumeFinished) => {
                 (payload["status"] == RunStatus::Validating.as_str()).then_some(Self::Validate)
             }
-            "validation_finished" => (payload["accepted"] == true).then_some(Self::Validated),
-            event_kind::REVIEW_PROGRAMS_STARTED | "review_started" | "review_retried" => {
-                Some(Self::Review)
+            Some(EventKind::ValidationFinished) => {
+                (payload["accepted"] == true).then_some(Self::Validated)
             }
-            "revise_requested" => Some(Self::Revise),
-            "conflict_precheck" if payload["requested"] == true => Some(Self::ConflictFix),
+            Some(
+                EventKind::ReviewProgramsStarted
+                | EventKind::ReviewStarted
+                | EventKind::ReviewRetried,
+            ) => Some(Self::Review),
+            Some(EventKind::ReviseRequested) => Some(Self::Revise),
+            Some(EventKind::ConflictPrecheck)
+                if restore_payload::<ConflictPrecheck>(payload).requested == Some(true) =>
+            {
+                Some(Self::ConflictFix)
+            }
             // A precheck that found no conflict moves nothing.
-            "conflict_precheck" if payload["unsent"] != true => return None,
-            "exit_requested" | "exit_retried" => Some(Self::Exit),
-            "landing_queued" => Some(Self::LandingQueue),
-            "run_e2e_waiting" => Some(Self::E2eWaiting),
-            "run_e2e_started" => Some(Self::E2e),
-            "run_e2e_finished" => match payload["outcome"].as_str() {
+            Some(EventKind::ConflictPrecheck) if payload["unsent"] != true => return None,
+            Some(EventKind::ExitRequested | EventKind::ExitRetried) => Some(Self::Exit),
+            Some(EventKind::LandingQueued) => Some(Self::LandingQueue),
+            Some(EventKind::RunE2eWaiting) => Some(Self::E2eWaiting),
+            Some(EventKind::RunE2eStarted) => Some(Self::E2e),
+            Some(EventKind::RunE2eFinished) => match payload["outcome"].as_str() {
                 Some(run_e2e::PASSED | run_e2e::NOT_CONFIGURED) => Some(Self::LandingQueue),
                 Some(run_e2e::UNAVAILABLE) => Some(Self::E2eRetryWait),
                 _ => None,
             },
-            "integration_started" => Some(Self::Integrating),
-            "triage_started" => Some(Self::Recovery),
-            "resume_skipped"
-            | "review_finished"
-            | "review_failed"
-            | "revise_unsent"
-            | "conflict_precheck"
-            | "session_exited"
-            | "run_e2e_failed"
-            | "run_integrated"
-            | "integration_deferred"
-            | "integration_error"
-            | "integration_held"
-            | "integration_failed"
-            | "triage_finished"
-            | "triage_failed"
-            | "run_recovered" => None,
+            Some(EventKind::IntegrationStarted) => Some(Self::Integrating),
+            Some(EventKind::TriageStarted) => Some(Self::Recovery),
+            Some(
+                EventKind::ResumeSkipped
+                | EventKind::ReviewFinished
+                | EventKind::ReviewFailed
+                | EventKind::ReviseUnsent
+                | EventKind::ConflictPrecheck
+                | EventKind::SessionExited
+                | EventKind::RunE2eFailed
+                | EventKind::RunIntegrated
+                | EventKind::IntegrationDeferred
+                | EventKind::IntegrationError
+                | EventKind::IntegrationHeld
+                | EventKind::IntegrationFailed
+                | EventKind::TriageFinished
+                | EventKind::TriageFailed
+                | EventKind::RunRecovered,
+            ) => None,
             _ => return None,
         })
     }
@@ -218,7 +230,7 @@ impl Progress {
         let mut current: Option<(Phase, &RunEvent)> = None;
         for event in events {
             // The agent of a resumed session starts within the resume.
-            if event.kind == "agent_started"
+            if event.kind == EventKind::AgentStarted
                 && current.is_some_and(|(phase, _)| phase == Phase::Resume)
             {
                 continue;
@@ -251,6 +263,7 @@ impl Progress {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::event_kind;
     use crate::domain::{EventId, TaskId};
     use serde_json::{Value, json};
 
@@ -260,7 +273,7 @@ mod tests {
             task_id: Some(TaskId::new(1)),
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: format!("2026-10-04T00:00:{id:02}.000Z"),
             actor: None,

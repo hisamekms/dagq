@@ -685,7 +685,7 @@ impl Supervisor<'_> {
         let anchor = events
             .iter()
             .rfind(|e| {
-                e.kind == event_kind::RESUME_STARTED
+                e.kind == EventKind::ResumeStarted
                     && e.payload["attempt"].as_u64() == Some(attempt as u64)
             })
             .map(|e| e.id);
@@ -756,13 +756,13 @@ impl Supervisor<'_> {
         let started_at = self.files.modified(&request)?;
         let message_sent_at = since
             .iter()
-            .filter(|e| e.kind == RESUME_REQUEST_SENT)
+            .filter(|e| e.kind == EventKind::ResumeRequestSent)
             .find(of_attempt)
             .and_then(|e| e.payload["sent_at"].as_f64())
             .map(|at: f64| UNIX_EPOCH + Duration::from_secs_f64(at.max(0.0)));
         let exit = since
             .iter()
-            .filter(|e| e.kind == event_kind::EXIT_REQUESTED)
+            .filter(|e| e.kind == EventKind::ExitRequested)
             .rfind(of_attempt);
         // A silent wrapper's `/exit` follows its expiry in the same tick;
         // a silence that ended before an `/exit` for another reason does
@@ -772,7 +772,7 @@ impl Supervisor<'_> {
                 .iter()
                 .rev()
                 .find(|e| e.id < exit.id)
-                .is_some_and(|e| e.kind == event_kind::WRAPPER_HEARTBEAT_EXPIRED)
+                .is_some_and(|e| e.kind == EventKind::WrapperHeartbeatExpired)
         });
         self.rebuilt_resume(
             run,
@@ -1158,17 +1158,17 @@ pub(super) struct ResumeWatch {
 pub(super) fn resume_in_progress(events: &[RunEvent]) -> Option<(EventId, usize, String)> {
     let started = events.iter().rev().find(|e| {
         matches!(
-            e.kind.as_str(),
-            event_kind::RESUME_STARTED | event_kind::RESUME_FINISHED | event_kind::RESUME_SKIPPED
+            e.kind.known(),
+            Some(EventKind::ResumeStarted | EventKind::ResumeFinished | EventKind::ResumeSkipped)
         )
     })?;
-    if started.kind != event_kind::RESUME_STARTED {
+    if started.kind != EventKind::ResumeStarted {
         return None;
     }
     let attempt = started.payload["attempt"].as_u64()?;
     let workspace = events
         .iter()
-        .filter(|e| e.id > started.id && e.kind == event_kind::WORKSPACE_CREATED)
+        .filter(|e| e.id > started.id && e.kind == EventKind::WorkspaceCreated)
         .find(|e| e.payload["resume_attempt"].as_u64() == Some(attempt))?
         .payload["workspace_id"]
         .as_str()?
@@ -1732,7 +1732,7 @@ mod tests {
             task_id: Some(TaskId::new(1)),
             goal_id: None,
             run_id: Some(RunId::new("r").unwrap()),
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: format!("t{id}"),
             actor: None,

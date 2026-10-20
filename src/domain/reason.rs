@@ -7,6 +7,7 @@
 //! payload, never paths or workspace IDs (ADR-0032). Events written before
 //! the codes have none.
 
+use crate::domain::EventKind;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -204,38 +205,42 @@ pub fn event_code(event: &RunEvent) -> Option<ReasonCode> {
 /// it: the events whose code explains the run's current error.
 pub(crate) fn explains_last_error(event: &RunEvent) -> bool {
     let status = event.payload.get("status").and_then(Value::as_str);
-    match event.kind.as_str() {
-        "supervision_finished"
-        | "validation_finished"
-        | "integration_deferred"
-        | "integration_failed"
-        | "integration_error"
-        | "integration_held"
-        | "runtime_error"
-        | "landing_decided"
-        | "session_gone_parked"
-        | "replan_parked"
-        | "hold_parked"
-        | "run_e2e_failed" => true,
+    match event.kind.known() {
+        Some(
+            EventKind::SupervisionFinished
+            | EventKind::ValidationFinished
+            | EventKind::IntegrationDeferred
+            | EventKind::IntegrationFailed
+            | EventKind::IntegrationError
+            | EventKind::IntegrationHeld
+            | EventKind::RuntimeError
+            | EventKind::LandingDecided
+            | EventKind::SessionGoneParked
+            | EventKind::ReplanParked
+            | EventKind::HoldParked
+            | EventKind::RunE2eFailed,
+        ) => true,
         // Recovery only interrupts; one mid-integration goes back to
         // `awaiting_integration` with the `last_error` it had.
-        "run_recovered" => status == Some("interrupted"),
+        Some(EventKind::RunRecovered) => status == Some("interrupted"),
         // The triage's or the supervisor sweep's own close failure (`by:
         // triage` / `supervisor`) leaves `last_error`.
-        "cleanup_failed" => !matches!(
+        Some(EventKind::CleanupFailed) => !matches!(
             event.payload.get("by").and_then(Value::as_str),
             Some("triage" | "supervisor")
         ),
         // Only a triage that sent the run back to its session (or handed
         // it to a person after its last resume) replaced `last_error`;
         // a retry or an ask left it, and those carry no code.
-        "triage_finished" | "triage_decided" => event.payload.get(CODE_KEY).is_some(),
+        Some(EventKind::TriageFinished | EventKind::TriageDecided) => {
+            event.payload.get(CODE_KEY).is_some()
+        }
         // The runtime failed the run whose resumes were used up and handed
         // it to the recovery job (ADR-0047 decision 39).
-        "recovery_requested" => event.payload.get(CODE_KEY).is_some(),
+        Some(EventKind::RecoveryRequested) => event.payload.get(CODE_KEY).is_some(),
         // A resume's own error leaves `last_error` as it was; a rewritten
         // `failed` receipt replaces it.
-        "resume_finished" => status == Some("failed"),
+        Some(EventKind::ResumeFinished) => status == Some("failed"),
         _ => false,
     }
 }
@@ -266,8 +271,11 @@ pub fn run_error_code(run: &TaskRun, events: &[RunEvent]) -> Option<ReasonCode> 
 /// and `backend_call_failed` beside the step that failed with it (which
 /// `stats` counts in `backend_failures`). `stats` leaves them out of its
 /// `reason_codes`.
-pub const REPEATED_CODE_KINDS: [&str; 3] =
-    ["evidence_missing", "scope_violation", "backend_call_failed"];
+pub const REPEATED_CODE_KINDS: [EventKind; 3] = [
+    EventKind::EvidenceMissing,
+    EventKind::ScopeViolation,
+    EventKind::BackendCallFailed,
+];
 
 #[cfg(test)]
 mod tests {
@@ -281,7 +289,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: String::new(),
             actor: None,

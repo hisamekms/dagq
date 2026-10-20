@@ -42,7 +42,7 @@ pub fn sets_of(events: &[RunEvent]) -> Vec<CaseSet> {
     production::sets(
         events
             .iter()
-            .map(|event| (event.id.as_i64(), event.kind.as_str(), &event.payload)),
+            .map(|event| (event.id.as_i64(), &event.kind, &event.payload)),
     )
 }
 
@@ -432,7 +432,7 @@ mod tests {
                 task_id: None,
                 goal_id: None,
                 run_id: None,
-                kind: kind.as_str().to_owned(),
+                kind: kind.as_str().into(),
                 payload,
                 created_at: String::new(),
                 actor: None,
@@ -462,7 +462,7 @@ mod tests {
                 .unwrap();
             assert_eq!(asked["status"], "waiting", "{role:?}");
             let recorded = &store.events.lock().unwrap()[0];
-            assert_eq!(recorded.kind, "agent_cases_requested");
+            assert_eq!(recorded.kind, EventKind::AgentCasesRequested);
             assert_eq!(recorded.payload["requested_by"], role.as_str());
             assert_eq!(recorded.payload["since"], "2026-10-05T00:00:00.000Z");
         }

@@ -846,7 +846,7 @@ pub fn view(probe: &ServiceProbe, log: Option<&dyn super::RunLog>) -> Value {
     {
         None => Value::Null,
         Some(Ok(latest)) => json!(latest.is_some_and(|event| {
-            crate::domain::queue_service::attention_stands(Some(event.kind.as_str()))
+            crate::domain::queue_service::attention_stands(Some(&event.kind))
         })),
         Some(Err(error)) => json!({"error": format!("{error:#}")}),
     };

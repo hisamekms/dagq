@@ -7,6 +7,7 @@ use crate::common::WithoutActor;
 use crate::plan_review::{
     Fixture, PlanWorkspace, StubReviewer, add, fixture, job_actors, options, supervise_with,
 };
+use dagq::domain::EventKind;
 
 use dagq::{
     application::{GoalReviewStore, TaskReads, TaskStore},
@@ -78,7 +79,7 @@ pub(crate) fn goal_events(queue: &mut SqliteQueue, goal: GoalId, kind: &str) -> 
         .unwrap()
         .events
         .into_iter()
-        .filter(|e| e.kind == kind)
+        .filter(|e| e.kind.as_str() == kind)
         .map(|e| e.payload)
         .collect()
 }
@@ -200,7 +201,7 @@ fn a_goal_review_records_its_launch_and_session() {
             .unwrap()
             .events
             .into_iter()
-            .filter(|e| e.kind == kind)
+            .filter(|e| e.kind.as_str() == kind)
             .map(|e| e.payload)
             .collect()
     };
@@ -254,7 +255,7 @@ fn gaps_become_drafts_of_the_open_goal_and_a_review_waits_for_them() {
         .unwrap()
         .events
         .into_iter()
-        .find(|event| event.kind == "draft_origin_recorded")
+        .find(|event| event.kind == EventKind::DraftOriginRecorded)
         .map(|event| event.payload);
     assert_eq!(recorded, Some(json!({"origin": "goal_gap"})));
 
@@ -543,7 +544,7 @@ fn goal_answered(queue: &mut SqliteQueue, task: TaskId) -> Value {
         .events
         .into_iter()
         .rev()
-        .find(|e| e.kind == "ask_answered")
+        .find(|e| e.kind == EventKind::AskAnswered)
         .unwrap()
         .payload
 }
@@ -581,7 +582,7 @@ fn a_goal_review_verdict_is_applied_at_its_jobs_request_and_a_broken_one_fails_c
             !detail
                 .events
                 .iter()
-                .any(|e| e.kind == "goal_review_finished" || e.kind == "goal_closed"),
+                .any(|e| e.kind == EventKind::GoalReviewFinished || e.kind == EventKind::GoalClosed),
             "{expected}"
         );
         let failed = goal_events(&mut queue, goal, "goal_review_failed");
@@ -618,7 +619,7 @@ fn a_goal_review_verdict_is_applied_at_its_jobs_request_and_a_broken_one_fails_c
         let event = detail
             .events
             .iter()
-            .find(|e| e.kind == kind)
+            .find(|e| e.kind.as_str() == kind)
             .unwrap_or_else(|| panic!("no {kind}"));
         let actor = event.actor.clone().expect("an actor");
         assert_eq!(
@@ -817,7 +818,7 @@ fn the_supervisor_applies_a_reopen_answer_to_a_correction() {
         .events
         .into_iter()
         .rev()
-        .find(|e| e.kind == "ask_answered")
+        .find(|e| e.kind == EventKind::AskAnswered)
         .unwrap()
         .payload;
     assert_eq!(answered["runtime_delivers"], true);

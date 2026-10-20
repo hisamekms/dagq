@@ -12,7 +12,7 @@ impl MemoryLog {
         self.events
             .borrow()
             .iter()
-            .filter(|event| event.kind == kind)
+            .filter(|event| event.kind.as_str() == kind)
             .map(|event| event.payload.clone())
             .collect()
     }
@@ -624,12 +624,15 @@ fn failed_restart(stop_fails: bool) {
     );
     assert!(pending_restart(&queue, &server, 4226).unwrap().is_some());
     assert_eq!(
-        crate::domain::event_attention(RESTART_FAILED, &failure)
+        crate::domain::event_attention(&EventKind::SccacheServerRestartFailed.into(), &failure)
             .unwrap()
             .to_string(),
         "stop sccache on the host; the supervisor starts it"
     );
-    assert!(crate::domain::wakes_inbox(RESTART_FAILED, &failure));
+    assert!(crate::domain::wakes_inbox(
+        &EventKind::SccacheServerRestartFailed.into(),
+        &failure
+    ));
     assert_eq!(server.calls.borrow().len(), if stop_fails { 3 } else { 6 });
 }
 #[test]

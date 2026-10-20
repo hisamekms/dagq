@@ -35,7 +35,7 @@ fn hold_past_the_stage_timeout(
         .run_events(run.id())
         .unwrap()
         .into_iter()
-        .find(|e| e.kind == kind)
+        .find(|e| e.kind.as_str() == kind)
         .unwrap_or_else(|| panic!("no {kind} of {}", run.id()));
     let at = UNIX_EPOCH
         + Duration::from_millis(
@@ -125,7 +125,7 @@ fn kinds_of(db: &Path, task: i64) -> Vec<String> {
         .unwrap()
         .events
         .into_iter()
-        .map(|e| e.kind)
+        .map(|e| e.kind.to_string())
         .collect()
 }
 
@@ -469,8 +469,11 @@ fn a_resume_question_waits_in_its_slot_then_outside_it_with_its_clock_stopped() 
     assert_eq!(payloads(&detail, "ask_delivered").len(), 1);
     // The wait records the time it took on the queue's clock, which the
     // moved monotonic clock does not stretch.
-    let event = |kind: &str| detail.events.iter().find(|e| e.kind == kind).unwrap();
-    let (began, ended) = (event("run_waiting_started"), event("run_waiting_ended"));
+    let event = |kind: EventKind| detail.events.iter().find(|e| e.kind == kind).unwrap();
+    let (began, ended) = (
+        event(EventKind::RunWaitingStarted),
+        event(EventKind::RunWaitingEnded),
+    );
     assert_eq!(ended.payload["cause"], "answered");
     let millis = |e: &dagq::domain::RunEvent| timestamp_millis(&e.created_at).unwrap();
     let span = (millis(ended) - millis(began)) / 1000;

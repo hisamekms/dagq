@@ -6,6 +6,7 @@
 //! it changed, or refuses with [`DomainError::RunTransitionNotAllowed`]
 //! naming the status it found and the operation.
 
+use crate::domain::EventKind;
 use serde::Serialize;
 
 use super::{
@@ -834,10 +835,10 @@ pub fn run_workspaces(run: &TaskRun, events: &[RunEvent]) -> Vec<RunWorkspace> {
             continue;
         };
         let known = workspaces.iter().position(|w| w.workspace_id == workspace);
-        match event.kind.as_str() {
-            "workspace_created" | "resume_finished" => {
-                let closed =
-                    event.kind == "resume_finished" && event.payload["workspace_closed"] == true;
+        match event.kind.known() {
+            Some(EventKind::WorkspaceCreated | EventKind::ResumeFinished) => {
+                let closed = event.kind == EventKind::ResumeFinished
+                    && event.payload["workspace_closed"] == true;
                 match known {
                     Some(index) => workspaces[index].closed |= closed,
                     None => workspaces.push(RunWorkspace {
@@ -851,7 +852,7 @@ pub fn run_workspaces(run: &TaskRun, events: &[RunEvent]) -> Vec<RunWorkspace> {
                     }),
                 }
             }
-            "workspace_closed" => {
+            Some(EventKind::WorkspaceClosed) => {
                 if let Some(index) = known {
                     workspaces[index].closed = true;
                 }

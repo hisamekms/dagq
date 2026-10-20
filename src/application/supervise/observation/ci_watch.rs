@@ -230,7 +230,7 @@ impl ObservationState {
                 // before it failed).
                 if let Ok(last) = env.queue.latest_queue_event(&CI_WATCH_ACCESS_KINDS) {
                     self.ci.available = Some(available_after_failure(
-                        last.as_ref().map(|event| event.kind.as_str()),
+                        last.as_ref().map(|event| &event.kind),
                     ));
                 }
                 if let Some(mut payload) =

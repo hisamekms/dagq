@@ -102,7 +102,7 @@ mod tests {
                 task_id: None,
                 goal_id: None,
                 run_id: None,
-                kind: kind.as_str().to_owned(),
+                kind: kind.as_str().into(),
                 payload,
                 created_at: utc_text(NOW),
                 actor: None,
@@ -126,7 +126,7 @@ mod tests {
         assert_eq!(mark["id"], json!(1));
         assert_eq!(mark["at"], json!(utc_text(NOW)));
         let recorded = &log.0.borrow()[0];
-        assert_eq!(recorded.kind, "mark_recorded");
+        assert_eq!(recorded.kind, EventKind::MarkRecorded);
         assert_eq!(
             recorded.payload,
             json!({"label": "parallel 4", "note": "more slots", "at": utc_text(NOW), "by": "person"})

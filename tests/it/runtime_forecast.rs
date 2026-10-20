@@ -1,6 +1,7 @@
 //! Runtime tests: the forecast snapshots the supervisor records
 //! (ADR-0070 decision 3).
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use runtime_support::*;
 
@@ -10,7 +11,7 @@ fn snapshots(db: &Path) -> Vec<Value> {
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == "forecast_recorded")
+        .filter(|event| event.kind == EventKind::ForecastRecorded)
         .map(|event| event.payload)
         .collect()
 }
@@ -130,7 +131,7 @@ fn snapshots_are_recorded_at_the_day_a_moving_landing_and_a_start() {
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == "run_integrated")
+        .filter(|event| event.kind == EventKind::RunIntegrated)
         .count();
     assert_eq!(integrated, 2);
 

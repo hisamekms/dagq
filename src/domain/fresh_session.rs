@@ -11,9 +11,10 @@
 //! `session_renewed`. The request for a conflict after a passed review
 //! is not judged: it goes on in the worker's session.
 
+use crate::domain::{EventKind, RecordedKind};
 use serde_json::{Value, json};
 
-use super::{Provider, RunEvent, event_kind, provider_switch, turn};
+use super::{Provider, RunEvent, provider_switch, turn};
 
 /// `[fresh_session]` of `dagq.toml` (ADR-t2080-1 decision 3).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -74,7 +75,7 @@ pub fn next_session(peak_context: Option<i64>, threshold: Option<u64>) -> NextSe
 pub fn previous_peak_context(events: &[RunEvent]) -> Option<i64> {
     provider_switch::since_session_start(events)
         .iter()
-        .rfind(|e| e.kind == event_kind::TURN_FINISHED)
+        .rfind(|e| e.kind == EventKind::TurnFinished)
         .and_then(|e| e.payload["peak_context"].as_i64())
 }
 
@@ -90,13 +91,13 @@ pub fn previous_peak_context(events: &[RunEvent]) -> Option<i64> {
 pub fn unrequested_renewal(events: &[RunEvent]) -> Option<(u64, u64)> {
     let at = events
         .iter()
-        .rposition(|e| e.kind == event_kind::SESSION_RENEWED)?;
+        .rposition(|e| e.kind == EventKind::SessionRenewed)?;
     let renewal = &events[at];
     let after = &events[at + 1..];
     if after.iter().any(|e| {
-        e.kind == event_kind::PROVIDER_SWITCHED
-            || e.kind == event_kind::TURN_REQUESTED
-            || e.kind == event_kind::TURN_STARTED
+        e.kind == EventKind::ProviderSwitched
+            || e.kind == EventKind::TurnRequested
+            || e.kind == EventKind::TurnStarted
     }) {
         return None;
     }
@@ -110,7 +111,7 @@ pub fn unrequested_renewal(events: &[RunEvent]) -> Option<(u64, u64)> {
 pub fn renewals(events: &[RunEvent]) -> usize {
     events
         .iter()
-        .filter(|e| e.kind == event_kind::SESSION_RENEWED)
+        .filter(|e| e.kind == EventKind::SessionRenewed)
         .count()
 }
 
@@ -119,8 +120,8 @@ pub fn renewals(events: &[RunEvent]) -> usize {
 /// [`provider_switch::session_starts`] counts them): the `session` a
 /// `session_renewed` names. `None` for a provider switch, and for a
 /// renewal recorded before it named its session.
-pub fn renewed_session(kind: &str, payload: &Value) -> Option<String> {
-    (kind == event_kind::SESSION_RENEWED)
+pub fn renewed_session(kind: &RecordedKind, payload: &Value) -> Option<String> {
+    (*kind == EventKind::SessionRenewed)
         .then(|| payload["session"].as_str().map(str::to_owned))
         .flatten()
 }
@@ -141,7 +142,7 @@ pub fn renewed_payload(
 ) -> Value {
     let after_turn = events
         .iter()
-        .rfind(|e| e.kind == event_kind::TURN_FINISHED)
+        .rfind(|e| e.kind == EventKind::TurnFinished)
         .and_then(|e| e.payload["turn"].as_u64());
     json!({
         "after_turn": after_turn,
@@ -157,6 +158,7 @@ pub fn renewed_payload(
 mod tests {
     use super::*;
     use crate::domain::EventId;
+    use crate::domain::event_kind;
 
     fn event(kind: &str, payload: Value) -> RunEvent {
         RunEvent {
@@ -326,11 +328,11 @@ mod tests {
     fn the_renewed_session_is_the_one_the_last_renewal_names() {
         let renewal = json!({"peak_context": 500_000, "threshold": 400_000, "session": "new"});
         assert_eq!(
-            renewed_session(event_kind::SESSION_RENEWED, &renewal).as_deref(),
+            renewed_session(&EventKind::SessionRenewed.into(), &renewal).as_deref(),
             Some("new")
         );
         assert_eq!(
-            renewed_session(event_kind::PROVIDER_SWITCHED, &renewal),
+            renewed_session(&EventKind::ProviderSwitched.into(), &renewal),
             None
         );
         for payload in [
@@ -339,7 +341,7 @@ mod tests {
             Value::Null,
         ] {
             assert_eq!(
-                renewed_session(event_kind::SESSION_RENEWED, &payload),
+                renewed_session(&EventKind::SessionRenewed.into(), &payload),
                 None,
                 "{payload}"
             );

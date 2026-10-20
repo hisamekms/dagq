@@ -4,6 +4,7 @@
 //! for a breaking migration is `lifecycle_install_drain`.
 
 use crate::common;
+use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
 
 use common::install::*;
@@ -604,7 +605,7 @@ fn the_update_job_installs_watches_restores_and_asks() {
             .update_events(10)
             .unwrap()
             .into_iter()
-            .map(|u| u.kind)
+            .map(|u| u.kind.to_string())
             .collect::<Vec<_>>()
     };
     assert_eq!(
@@ -820,7 +821,7 @@ fn the_update_job_replaces_nothing_unless_the_build_passes_its_e2e() {
         .update_events(10)
         .unwrap()
         .into_iter()
-        .find(|u| u.kind == "update_e2e_passed")
+        .find(|u| u.kind == EventKind::UpdateE2ePassed)
         .unwrap();
     assert_eq!(passed.payload["secs"], 170);
     assert_eq!(passed.payload["log"], json!(e2e_log));
@@ -872,7 +873,7 @@ fn the_update_job_passes_flaky_and_quarantined_e2e_and_fails_the_rest() {
         .update_events(10)
         .unwrap()
         .into_iter()
-        .find(|u| u.kind == "update_e2e_passed")
+        .find(|u| u.kind == EventKind::UpdateE2ePassed)
         .unwrap()
         .payload;
     assert_eq!(passed["flaky"], json!(["e2e::a"]), "{passed}");
@@ -1175,7 +1176,7 @@ fn update_two_steps(
         .update_events(20)
         .unwrap()
         .into_iter()
-        .find(|u| u.kind == "update_failed")
+        .find(|u| u.kind == EventKind::UpdateFailed)
         .map(|u| u.payload);
     (report, binaries.calls(), restarted, target, failed)
 }
@@ -2137,7 +2138,7 @@ fn the_release_job_installs_a_release_like_a_build_and_asks_on_a_failure() {
                 assert_eq!(u.payload["source"], "release", "{u:?}");
                 assert_eq!(u.payload["release"], "9.9.9", "{u:?}");
                 assert!(u.payload.get("commit").is_none(), "{u:?}");
-                u.kind
+                u.kind.to_string()
             })
             .collect::<Vec<_>>()
     };
@@ -2273,7 +2274,7 @@ fn the_release_job_brings_the_plugin_after_the_binary() {
             .update_events(20)
             .unwrap()
             .into_iter()
-            .find(|u| u.kind == kind)
+            .find(|u| u.kind.as_str() == kind)
             .unwrap()
     };
     let job = |plugin: Option<&FakePlugin>, alive: bool| {
@@ -2412,7 +2413,7 @@ fn the_plugin_only_job_updates_the_plugin_and_nothing_else() {
     assert!(binaries.calls().is_empty(), "{:?}", binaries.calls());
     assert_eq!(plugin.calls().len(), 3, "{:?}", plugin.calls());
     let installed = &queue.update_events(1).unwrap()[0];
-    assert_eq!(installed.kind, "update_installed");
+    assert_eq!(installed.kind, EventKind::UpdateInstalled);
     assert_eq!(installed.payload["release"], "9.9.9");
     assert_eq!(installed.payload["plugin"]["updated"], true);
     assert!(installed.payload["message"].is_string(), "{installed:?}");
@@ -2433,7 +2434,7 @@ fn the_plugin_only_job_updates_the_plugin_and_nothing_else() {
     assert_eq!(report["outcome"], "failed", "{report}");
     assert_eq!(report["stage"], "plugin", "{report}");
     let failed = &queue.update_events(1).unwrap()[0];
-    assert_eq!(failed.kind, "update_failed");
+    assert_eq!(failed.kind, EventKind::UpdateFailed);
     assert_eq!(failed.payload["plugin_only"], true);
     assert!(binaries.calls().is_empty());
 }

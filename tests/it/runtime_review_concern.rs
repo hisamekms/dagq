@@ -486,7 +486,7 @@ fn an_adopter_records_a_send_back_left_unrecorded_by_a_dead_supervisor() {
     let decided = detail
         .events
         .iter()
-        .find(|e| e.kind == "concern_decided")
+        .find(|e| e.kind == EventKind::ConcernDecided)
         .unwrap();
     // Recorded at the review job's request, as the live supervisor does.
     assert_eq!(

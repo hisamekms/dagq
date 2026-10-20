@@ -7,7 +7,7 @@
 
 use serde_json::{Value, json};
 
-use super::EventId;
+use super::{EventId, EventKind};
 
 pub const SESSION_OPENED: &str = super::event_kind::SESSION_OPENED;
 pub const SESSION_CLOSED: &str = super::event_kind::SESSION_CLOSED;
@@ -91,23 +91,34 @@ pub enum Scope {
 }
 
 /// The scope of an event of `kind`, when it may open or close a span.
-pub fn scope(kind: &str) -> Option<Scope> {
+pub fn scope(kind: EventKind) -> Option<Scope> {
     match kind {
-        "agent_started" | "revise_requested" | "revise_unsent" | "session_exited"
-        | "workspace_closed" | "run_recovered" | "review_started" | "review_finished"
-        | "review_failed" | "review_retried" | "triage_started" | "triage_finished"
-        | "triage_failed" => Some(Scope::Run),
-        "plan_review_started" | "plan_review_finished" | "plan_review_failed" => {
-            Some(Scope::Proposal)
-        }
-        "observe_started"
-        | "observe_finished"
-        | "throughput_review_started"
-        | "throughput_review_finished" => Some(Scope::Queue),
-        "goal_review_started" | "goal_review_finished" | "goal_review_failed" => Some(Scope::Goal),
+        EventKind::AgentStarted
+        | EventKind::ReviseRequested
+        | EventKind::ReviseUnsent
+        | EventKind::SessionExited
+        | EventKind::WorkspaceClosed
+        | EventKind::RunRecovered
+        | EventKind::ReviewStarted
+        | EventKind::ReviewFinished
+        | EventKind::ReviewFailed
+        | EventKind::ReviewRetried
+        | EventKind::TriageStarted
+        | EventKind::TriageFinished
+        | EventKind::TriageFailed => Some(Scope::Run),
+        EventKind::PlanReviewStarted
+        | EventKind::PlanReviewFinished
+        | EventKind::PlanReviewFailed => Some(Scope::Proposal),
+        EventKind::ObserveStarted
+        | EventKind::ObserveFinished
+        | EventKind::ThroughputReviewStarted
+        | EventKind::ThroughputReviewFinished => Some(Scope::Queue),
+        EventKind::GoalReviewStarted
+        | EventKind::GoalReviewFinished
+        | EventKind::GoalReviewFailed => Some(Scope::Goal),
         // A headless planner's turns and its close (a run's turns are its
         // span's by `route`, not by these events).
-        "turn_started" | "planner_closed" => Some(Scope::Planner),
+        EventKind::TurnStarted | EventKind::PlannerClosed => Some(Scope::Planner),
         _ => None,
     }
 }
@@ -115,10 +126,12 @@ pub fn scope(kind: &str) -> Option<Scope> {
 /// The kind of the spans an event of the queue ([`Scope::Queue`]) of
 /// `kind` is about: each job of the queue has its own, and an event of one
 /// neither sees nor closes the other's.
-pub fn queue_span_kind(kind: &str) -> Option<&'static str> {
+pub fn queue_span_kind(kind: EventKind) -> Option<&'static str> {
     match kind {
-        "observe_started" | "observe_finished" => Some(OBSERVER),
-        "throughput_review_started" | "throughput_review_finished" => Some(THROUGHPUT_REVIEW),
+        EventKind::ObserveStarted | EventKind::ObserveFinished => Some(OBSERVER),
+        EventKind::ThroughputReviewStarted | EventKind::ThroughputReviewFinished => {
+            Some(THROUGHPUT_REVIEW)
+        }
         _ => None,
     }
 }
@@ -273,7 +286,7 @@ impl SpanChange {
 /// spans open in its scope (oldest first) and what `context` knows. Closes
 /// come first. An event that is not about spans changes none.
 pub fn changes(
-    kind: &str,
+    kind: EventKind,
     payload: &Value,
     open: &[OpenSpan],
     context: &SpanContext,
@@ -291,7 +304,7 @@ pub fn changes(
     match kind {
         // A session starting while another is still recorded open: that
         // one ended without a `session_exited` (ADR-0048 decision 7).
-        "agent_started" => {
+        EventKind::AgentStarted => {
             let mut changes = close(&RUN_SESSION, INFERRED);
             let (span, attempt) = if context.resumes > 0 {
                 (RESUME, context.resumes)
@@ -312,7 +325,7 @@ pub fn changes(
         }
         // The same session goes on as a revise (the new one when it was
         // renewed before the revise).
-        "revise_requested" => {
+        EventKind::ReviseRequested => {
             let mut changes = close(&RUN_SESSION, NEXT_SPAN);
             let session_id = open
                 .iter()
@@ -336,7 +349,7 @@ pub fn changes(
         // A revise that could not be sent never reached the session: it goes
         // on as what it was before (the revise sent before it, else the
         // worker or the resume).
-        "revise_unsent" => {
+        EventKind::ReviseUnsent => {
             let mut changes = close(&[REVISE], NEXT_SPAN);
             let reopened = open.iter().rev().find(|span| span.kind() == REVISE);
             let (span, attempt) = if context.revises > 0 {
@@ -361,25 +374,27 @@ pub fn changes(
             })));
             changes
         }
-        "session_exited" => close(&RUN_SESSION, EXITED),
+        EventKind::SessionExited => close(&RUN_SESSION, EXITED),
         // The session went with its workspace, or the run was recovered.
-        "workspace_closed" => close(&RUN_SESSION, INFERRED),
+        EventKind::WorkspaceClosed => close(&RUN_SESSION, INFERRED),
         // A recovered run's review died with its supervisor too.
-        "run_recovered" => close(&[WORKER, RESUME, REVISE, REVIEW], INFERRED),
-        "review_started" => {
+        EventKind::RunRecovered => close(&[WORKER, RESUME, REVISE, REVIEW], INFERRED),
+        EventKind::ReviewStarted => {
             let mut changes = close(&[REVIEW], INFERRED);
             changes.push(job(REVIEW, payload, context.worktree.as_deref()));
             changes
         }
-        "review_finished" | "review_failed" | "review_retried" => close(&[REVIEW], JOB_FINISHED),
+        EventKind::ReviewFinished | EventKind::ReviewFailed | EventKind::ReviewRetried => {
+            close(&[REVIEW], JOB_FINISHED)
+        }
         // A run is triaged once its session is gone.
-        "triage_started" => {
+        EventKind::TriageStarted => {
             let mut changes = close(&[WORKER, RESUME, REVISE, REVIEW, TRIAGE], INFERRED);
             changes.push(job(TRIAGE, payload, context.run_dir.as_deref()));
             changes
         }
-        "triage_finished" | "triage_failed" => close(&[TRIAGE], JOB_FINISHED),
-        "plan_review_started" => {
+        EventKind::TriageFinished | EventKind::TriageFailed => close(&[TRIAGE], JOB_FINISHED),
+        EventKind::PlanReviewStarted => {
             let mut changes = close(&[PLAN_REVIEW], INFERRED);
             let mut opened = job(PLAN_REVIEW, payload, text("cwd"));
             if let SpanChange::Open(opened) = &mut opened {
@@ -390,7 +405,7 @@ pub fn changes(
             changes.push(opened);
             changes
         }
-        "plan_review_finished" | "plan_review_failed" => open
+        EventKind::PlanReviewFinished | EventKind::PlanReviewFailed => open
             .iter()
             .filter(|span| {
                 span.kind() == PLAN_REVIEW
@@ -401,7 +416,7 @@ pub fn changes(
                 reason: JOB_FINISHED,
             })
             .collect(),
-        "goal_review_started" => {
+        EventKind::GoalReviewStarted => {
             let mut changes = close(&[GOAL_REVIEW], INFERRED);
             let mut opened = job(GOAL_REVIEW, payload, text("cwd"));
             if let SpanChange::Open(opened) = &mut opened {
@@ -413,7 +428,7 @@ pub fn changes(
             changes.push(opened);
             changes
         }
-        "goal_review_finished" | "goal_review_failed" => open
+        EventKind::GoalReviewFinished | EventKind::GoalReviewFailed => open
             .iter()
             .filter(|span| {
                 span.kind() == GOAL_REVIEW
@@ -425,12 +440,12 @@ pub fn changes(
             })
             .collect(),
         // An observer that died with its supervisor recorded no finish.
-        "observe_started" => {
+        EventKind::ObserveStarted => {
             let mut changes = close(&[OBSERVER], INFERRED);
             changes.push(job(OBSERVER, payload, text("dir")));
             changes
         }
-        "observe_finished" => open
+        EventKind::ObserveFinished => open
             .iter()
             .filter(|span| span.kind() == OBSERVER && span.payload["cwd"] == payload["dir"])
             .map(|span| SpanChange::Close {
@@ -444,8 +459,8 @@ pub fn changes(
         // the spans open past their time; a finish closes its own span,
         // by the session id or its directory, and the spans open past
         // their time.
-        "throughput_review_started" | "throughput_review_finished" => {
-            let started = kind == "throughput_review_started";
+        EventKind::ThroughputReviewStarted | EventKind::ThroughputReviewFinished => {
+            let started = kind == EventKind::ThroughputReviewStarted;
             let own = |span: &OpenSpan| {
                 if started {
                     span.payload["mode"] == payload["mode"]
@@ -495,7 +510,7 @@ pub fn changes(
         // decision 4), in the shape of the hook's span of an interactive
         // one with the route of a headless worker's; its later turns go on
         // in it.
-        "turn_started" => {
+        EventKind::TurnStarted => {
             let Some(planner) = payload["planner_id"].as_i64() else {
                 return Vec::new();
             };
@@ -522,7 +537,7 @@ pub fn changes(
         }
         // The planner's session ended with its close: an exit the runtime
         // saw, or a session found gone (its running turn's end unknown).
-        "planner_closed" => {
+        EventKind::PlannerClosed => {
             let reason = match text("code") {
                 Some("runtime_lost" | "runtime_session_gone" | "abandoned") => INFERRED,
                 _ => EXITED,
@@ -840,21 +855,27 @@ mod tests {
 
     #[test]
     fn scopes_cover_the_starts_and_ends_of_every_recorded_kind() {
-        assert_eq!(scope("agent_started"), Some(Scope::Run));
-        assert_eq!(scope("triage_failed"), Some(Scope::Run));
-        assert_eq!(scope("plan_review_failed"), Some(Scope::Proposal));
-        assert_eq!(scope("observe_finished"), Some(Scope::Queue));
-        assert_eq!(scope("run_claimed"), None);
-        assert_eq!(scope(SESSION_OPENED), None);
-        assert_eq!(scope("goal_review_failed"), Some(Scope::Goal));
-        assert_eq!(scope("throughput_review_started"), Some(Scope::Queue));
-        assert_eq!(scope("throughput_review_finished"), Some(Scope::Queue));
-        assert_eq!(queue_span_kind("observe_finished"), Some(OBSERVER));
+        assert_eq!(scope(EventKind::AgentStarted), Some(Scope::Run));
+        assert_eq!(scope(EventKind::TriageFailed), Some(Scope::Run));
+        assert_eq!(scope(EventKind::PlanReviewFailed), Some(Scope::Proposal));
+        assert_eq!(scope(EventKind::ObserveFinished), Some(Scope::Queue));
+        assert_eq!(scope(EventKind::RunClaimed), None);
+        assert_eq!(scope(EventKind::SessionOpened), None);
+        assert_eq!(scope(EventKind::GoalReviewFailed), Some(Scope::Goal));
         assert_eq!(
-            queue_span_kind("throughput_review_started"),
+            scope(EventKind::ThroughputReviewStarted),
+            Some(Scope::Queue)
+        );
+        assert_eq!(
+            scope(EventKind::ThroughputReviewFinished),
+            Some(Scope::Queue)
+        );
+        assert_eq!(queue_span_kind(EventKind::ObserveFinished), Some(OBSERVER));
+        assert_eq!(
+            queue_span_kind(EventKind::ThroughputReviewStarted),
             Some(THROUGHPUT_REVIEW)
         );
-        assert_eq!(queue_span_kind("goal_review_started"), None);
+        assert_eq!(queue_span_kind(EventKind::GoalReviewStarted), None);
         assert_eq!(KINDS.len(), 12);
     }
 
@@ -868,7 +889,7 @@ mod tests {
             ..SpanContext::default()
         };
         let started = changes(
-            "agent_started",
+            EventKind::AgentStarted,
             &json!({"pid": 1, "session_id": "run-1"}),
             &[],
             &context,
@@ -887,7 +908,7 @@ mod tests {
             ..context.clone()
         };
         let revised = changes(
-            "revise_requested",
+            EventKind::ReviseRequested,
             &json!({"workspace_id": "W"}),
             std::slice::from_ref(&worker),
             &revise_context,
@@ -899,7 +920,7 @@ mod tests {
         assert_eq!(payload["attempt"], 1);
 
         let revise = span(12, payload.clone());
-        let exited = changes("session_exited", &json!({}), &[revise], &context);
+        let exited = changes(EventKind::SessionExited, &json!({}), &[revise], &context);
         assert_eq!(exited.len(), 1);
         assert_eq!(closed(&exited[0]), (12, EXITED));
         let closed_payload = SpanChange::closed_payload(&worker, EXITED);
@@ -919,14 +940,19 @@ mod tests {
             provider: Some("codex".into()),
             ..SpanContext::default()
         };
-        let started = changes("agent_started", &json!({"session_id": null}), &[], &context);
+        let started = changes(
+            EventKind::AgentStarted,
+            &json!({"session_id": null}),
+            &[],
+            &context,
+        );
         let payload = opened(&started[0]);
         assert_eq!(payload["route"], HEADLESS_ROUTE);
         assert_eq!(payload["provider"], "codex");
         let codex = span(3, payload.clone());
         assert!(codex.headless() && !codex.claude());
         let revised = changes(
-            "revise_requested",
+            EventKind::ReviseRequested,
             &json!({}),
             std::slice::from_ref(&codex),
             &SpanContext {
@@ -959,7 +985,7 @@ mod tests {
             json!({"kind": REVISE, "session_id": "run-1", "attempt": 1}),
         );
         let withdrawn = changes(
-            "revise_unsent",
+            EventKind::ReviseUnsent,
             &json!({"attempt": 1}),
             std::slice::from_ref(&revise),
             &context,
@@ -975,7 +1001,7 @@ mod tests {
             revises: 1,
             ..context.clone()
         };
-        let withdrawn = changes("revise_unsent", &json!({}), &[revise], &after_one);
+        let withdrawn = changes(EventKind::ReviseUnsent, &json!({}), &[revise], &after_one);
         let payload = opened(&withdrawn[1]);
         assert_eq!(payload["kind"], REVISE);
         assert_eq!(payload["attempt"], 1);
@@ -996,9 +1022,9 @@ mod tests {
         };
         let before = span(5, json!({"kind": REVISE, "session_id": "run-1"}));
         for (kind, payload) in [
-            ("agent_started", json!({"session_id": "run-1"})),
-            ("revise_requested", json!({})),
-            ("revise_unsent", json!({})),
+            (EventKind::AgentStarted, json!({"session_id": "run-1"})),
+            (EventKind::ReviseRequested, json!({})),
+            (EventKind::ReviseUnsent, json!({})),
         ] {
             let open = [before.clone()];
             let changed = changes(kind, &payload, &open, &renewed);
@@ -1022,7 +1048,7 @@ mod tests {
         };
         let lost = span(5, json!({"kind": WORKER, "session_id": "r"}));
         let started = changes(
-            "agent_started",
+            EventKind::AgentStarted,
             &json!({"session_id": "r"}),
             &[lost],
             &context,
@@ -1032,7 +1058,10 @@ mod tests {
         assert_eq!(payload["kind"], RESUME);
         assert_eq!(payload["attempt"], 2);
         assert_eq!(payload["workspace_id"], Value::Null);
-        for (kind, closes) in [("workspace_closed", 1), ("run_recovered", 2)] {
+        for (kind, closes) in [
+            (EventKind::WorkspaceClosed, 1),
+            (EventKind::RunRecovered, 2),
+        ] {
             let open = span(7, json!({"kind": RESUME}));
             let review = span(8, json!({"kind": REVIEW}));
             let changed = changes(kind, &json!({}), &[open, review], &context);
@@ -1051,7 +1080,7 @@ mod tests {
             ..SpanContext::default()
         };
         let review = changes(
-            "review_started",
+            EventKind::ReviewStarted,
             &json!({"attempt": 2, "session_id": "s-review"}),
             &[span(1, json!({"kind": REVIEW}))],
             &context,
@@ -1062,13 +1091,17 @@ mod tests {
         assert_eq!(payload["session_id"], "s-review");
         assert_eq!(payload["attempt"], 2);
         assert_eq!(payload["cwd"], "/wt");
-        for kind in ["review_finished", "review_failed", "review_retried"] {
+        for kind in [
+            EventKind::ReviewFinished,
+            EventKind::ReviewFailed,
+            EventKind::ReviewRetried,
+        ] {
             let changed = changes(kind, &json!({}), &[span(3, payload.clone())], &context);
             assert_eq!(closed(&changed[0]), (3, JOB_FINISHED), "{kind}");
         }
 
         let triage = changes(
-            "triage_started",
+            EventKind::TriageStarted,
             &json!({"attempt": 1, "session_id": "s-triage"}),
             &[span(4, json!({"kind": WORKER}))],
             &context,
@@ -1077,7 +1110,7 @@ mod tests {
         let payload = opened(&triage[1]);
         assert_eq!(payload["kind"], TRIAGE);
         assert_eq!(payload["cwd"], "/run");
-        for kind in ["triage_finished", "triage_failed"] {
+        for kind in [EventKind::TriageFinished, EventKind::TriageFailed] {
             let changed = changes(kind, &json!({}), &[span(6, payload.clone())], &context);
             assert_eq!(closed(&changed[0]), (6, JOB_FINISHED), "{kind}");
         }
@@ -1087,7 +1120,7 @@ mod tests {
             ..SpanContext::default()
         };
         let plan = changes(
-            "plan_review_started",
+            EventKind::PlanReviewStarted,
             &json!({"proposal_id": 9, "plan_review_id": 2, "attempt": 1, "session_id": "s-plan"}),
             &[],
             &plan_context,
@@ -1099,7 +1132,7 @@ mod tests {
         assert_eq!(payload["goal_ids"], json!([3, 4]));
         let other = span(8, json!({"kind": PLAN_REVIEW, "plan_review_id": 1}));
         let finished = changes(
-            "plan_review_failed",
+            EventKind::PlanReviewFailed,
             &json!({"plan_review_id": 2}),
             &[other, span(9, payload.clone())],
             &plan_context,
@@ -1113,7 +1146,7 @@ mod tests {
         };
         let launch = json!({"role": "goal_review", "provider": "claude", "model": null, "effort": null, "source": "default"});
         let goal = changes(
-            "goal_review_started",
+            EventKind::GoalReviewStarted,
             &json!({"goal_review_id": 5, "attempt": 2, "session_id": "s-goal", "cwd": "/repo", "launch": launch}),
             &[span(11, json!({"kind": GOAL_REVIEW, "goal_review_id": 4}))],
             &goal_context,
@@ -1128,7 +1161,7 @@ mod tests {
         assert_eq!(payload["goal_ids"], json!([73]));
         assert_eq!(payload["goal_review_id"], 5);
         assert_eq!(payload["launch"], launch);
-        for kind in ["goal_review_finished", "goal_review_failed"] {
+        for kind in [EventKind::GoalReviewFinished, EventKind::GoalReviewFailed] {
             let other = span(12, json!({"kind": GOAL_REVIEW, "goal_review_id": 4}));
             let changed = changes(
                 kind,
@@ -1139,11 +1172,11 @@ mod tests {
             assert_eq!(changed.len(), 1, "{kind}");
             assert_eq!(closed(&changed[0]), (13, JOB_FINISHED), "{kind}");
         }
-        assert_eq!(scope("goal_review_started"), Some(Scope::Goal));
-        assert_eq!(scope("goal_review_rearmed"), None);
+        assert_eq!(scope(EventKind::GoalReviewStarted), Some(Scope::Goal));
+        assert_eq!(scope(EventKind::GoalReviewRearmed), None);
 
         let observe = changes(
-            "observe_started",
+            EventKind::ObserveStarted,
             &json!({"mode": "hourly", "dir": "/obs/1", "session_id": "s-obs"}),
             &[span(10, json!({"kind": OBSERVER, "cwd": "/obs/0"}))],
             &SpanContext::default(),
@@ -1152,13 +1185,13 @@ mod tests {
         let payload = opened(&observe[1]);
         assert_eq!(payload["cwd"], "/obs/1");
         let finished = changes(
-            "observe_finished",
+            EventKind::ObserveFinished,
             &json!({"dir": "/obs/1"}),
             &[span(11, payload.clone())],
             &SpanContext::default(),
         );
         assert_eq!(closed(&finished[0]), (11, JOB_FINISHED));
-        assert!(changes("run_claimed", &json!({}), &[], &context).is_empty());
+        assert!(changes(EventKind::RunClaimed, &json!({}), &[], &context).is_empty());
     }
 
     /// Throughput reviews run side by side: a start closes only a span of
@@ -1176,7 +1209,7 @@ mod tests {
         };
         let launch = json!({"role": "throughput_review", "provider": "claude"});
         let started = changes(
-            "throughput_review_started",
+            EventKind::ThroughputReviewStarted,
             &json!({"mode": "hourly", "period": "2026-09-29T13", "dir": "/r/h13",
                     "session_id": "s-h13", "launch": launch}),
             &[],
@@ -1196,7 +1229,7 @@ mod tests {
         let running = aged(10, 0, hourly.clone());
         let observer = aged(9, 0, json!({"kind": OBSERVER, "cwd": "/obs"}));
         let daily = changes(
-            "throughput_review_started",
+            EventKind::ThroughputReviewStarted,
             &json!({"mode": "daily", "period": "2026-09-28", "dir": "/r/d", "session_id": "s-d"}),
             &[observer, running.clone()],
             &at(60_000),
@@ -1206,7 +1239,7 @@ mod tests {
 
         // The hourly finish closes its own span only.
         let finished = changes(
-            "throughput_review_finished",
+            EventKind::ThroughputReviewFinished,
             &json!({"mode": "hourly", "period": "2026-09-29T13", "outcome": "succeeded",
                     "session_id": "s-h13"}),
             &[running.clone(), daily.clone()],
@@ -1221,7 +1254,7 @@ mod tests {
                              "session_id": null, "dir": null});
         assert!(
             changes(
-                "throughput_review_finished",
+                EventKind::ThroughputReviewFinished,
                 &unstarted,
                 std::slice::from_ref(&daily),
                 &at(120_000)
@@ -1229,7 +1262,7 @@ mod tests {
             .is_empty()
         );
         let late = changes(
-            "throughput_review_finished",
+            EventKind::ThroughputReviewFinished,
             &unstarted,
             std::slice::from_ref(&daily),
             &at(60_000 + THROUGHPUT_REVIEW_OPEN_MS),
@@ -1239,7 +1272,7 @@ mod tests {
 
         // A review of the same period started again: the earlier one died.
         let again = changes(
-            "throughput_review_started",
+            EventKind::ThroughputReviewStarted,
             &json!({"mode": "hourly", "period": "2026-09-29T13", "dir": "/r/h13b", "session_id": "s-h13b"}),
             &[running, daily],
             &at(120_000),
@@ -1251,7 +1284,7 @@ mod tests {
         // A span with no time recorded is not aged out.
         assert!(
             changes(
-                "throughput_review_finished",
+                EventKind::ThroughputReviewFinished,
                 &unstarted,
                 &[span(
                     12,
@@ -1264,7 +1297,7 @@ mod tests {
         // The observer's events leave the throughput review's spans alone.
         assert!(
             changes(
-                "observe_finished",
+                EventKind::ObserveFinished,
                 &json!({"dir": "/r/h13"}),
                 &[aged(13, 0, hourly)],
                 &at(THROUGHPUT_REVIEW_OPEN_MS * 2),
@@ -1489,8 +1522,8 @@ mod tests {
     /// was found gone.
     #[test]
     fn a_headless_planners_turns_open_its_span_and_its_close_ends_it() {
-        assert_eq!(scope("turn_started"), Some(Scope::Planner));
-        assert_eq!(scope("planner_closed"), Some(Scope::Planner));
+        assert_eq!(scope(EventKind::TurnStarted), Some(Scope::Planner));
+        assert_eq!(scope(EventKind::PlannerClosed), Some(Scope::Planner));
         let context = SpanContext {
             proposal_id: Some(4),
             goal_ids: vec![9],
@@ -1498,7 +1531,7 @@ mod tests {
         };
         let turn = json!({"planner_id": 2, "session_id": "s-p", "provider": "claude",
                           "launch": {"model": "opus", "effort": "high"}});
-        let first = changes("turn_started", &turn, &[], &context);
+        let first = changes(EventKind::TurnStarted, &turn, &[], &context);
         assert_eq!(first.len(), 1);
         let payload = opened(&first[0]);
         assert_eq!(payload["kind"], RUNTIME_PLANNER);
@@ -1509,10 +1542,10 @@ mod tests {
         assert_eq!(payload["proposal_id"], 4);
         assert_eq!(payload["goal_ids"], json!([9]));
         let open = [span(5, payload.clone())];
-        assert!(changes("turn_started", &turn, &open, &context).is_empty());
-        assert!(changes("turn_started", &json!({"turn": 1}), &[], &context).is_empty());
+        assert!(changes(EventKind::TurnStarted, &turn, &open, &context).is_empty());
+        assert!(changes(EventKind::TurnStarted, &json!({"turn": 1}), &[], &context).is_empty());
         let without = changes(
-            "turn_started",
+            EventKind::TurnStarted,
             &json!({"planner_id": 3}),
             &[],
             &SpanContext::default(),
@@ -1526,7 +1559,12 @@ mod tests {
             ("runtime_session_gone", INFERRED),
             ("abandoned", INFERRED),
         ] {
-            let ended = changes("planner_closed", &json!({"code": code}), &open, &context);
+            let ended = changes(
+                EventKind::PlannerClosed,
+                &json!({"code": code}),
+                &open,
+                &context,
+            );
             assert_eq!(closed(&ended[0]), (5, reason), "{code}");
         }
     }

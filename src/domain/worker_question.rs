@@ -7,8 +7,10 @@
 //! 2). The list and its definitions are the design's (ask), so a code is
 //! added or removed without an ADR.
 
+use crate::domain::EventKind;
 /// The topic codes with their definitions, heaviest first: the order that
 /// picks the primary code when two triggers came at once.
+use crate::domain::run::{AskOpened, restore_payload};
 pub const WORKER_QUESTION_TOPICS: &[(&str, &str)] = &[
     (
         "discard_work",
@@ -88,27 +90,30 @@ pub struct ClosedQuestion {
 /// not yet told to the worker (no `stall_nudged` names it as its
 /// `closed_ask`), in the order they were closed.
 pub fn closed_undelivered(events: &[super::RunEvent]) -> Vec<ClosedQuestion> {
-    use super::event_kind::{ASK_ANSWERED, ASK_CLOSED, ASK_DELIVERED, ASK_OPENED, STALL_NUDGED};
     let id_of = |e: &super::RunEvent| e.payload["ask_id"].as_i64();
-    let names = |kind: &str, field: &str, id: i64| {
+    let names = |kind: EventKind, field: &str, id: i64| {
         events
             .iter()
             .any(|e| e.kind == kind && e.payload[field].as_i64() == Some(id))
     };
     let questions: Vec<i64> = events
         .iter()
-        .filter(|e| e.kind == ASK_OPENED && e.payload["kind"] == "worker_question")
+        .filter(|e| {
+            e.kind == EventKind::AskOpened
+                && restore_payload::<AskOpened>(&e.payload).kind == Some("worker_question")
+        })
         .filter_map(id_of)
         .collect();
     let mut closed: Vec<ClosedQuestion> = events
         .iter()
         .filter(|e| {
-            e.kind == ASK_CLOSED || (e.kind == ASK_ANSWERED && e.payload["runtime_closed"] == true)
+            e.kind == EventKind::AskClosed
+                || (e.kind == EventKind::AskAnswered && e.payload["runtime_closed"] == true)
         })
         .filter_map(|e| id_of(e).map(|id| (id, e)))
         .filter(|(id, _)| questions.contains(id))
-        .filter(|(id, _)| !names(ASK_DELIVERED, "ask_id", *id))
-        .filter(|(id, _)| !names(STALL_NUDGED, "closed_ask", *id))
+        .filter(|(id, _)| !names(EventKind::AskDelivered, "ask_id", *id))
+        .filter(|(id, _)| !names(EventKind::StallNudged, "closed_ask", *id))
         .map(|(ask_id, e)| ClosedQuestion {
             ask_id,
             closed: e.clone(),

@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{
-    AskConfidence, CommitSha, ReviewDecision, RunEvent, concern, event_kind, parse_json_object,
+    AskConfidence, CommitSha, EventKind, ReviewDecision, RunEvent, concern, parse_json_object,
     receipt::BaseCheck,
     review_reason,
     satisfied::{self, SatisfiedAnswer, SnapshotVerification, Verified},
@@ -177,7 +177,7 @@ pub fn decide(
 pub fn rejudged(events: &[RunEvent]) -> usize {
     events
         .iter()
-        .filter(|e| e.kind == event_kind::RUN_SATISFIED_JUDGED && e.payload["step"] == REJUDGE)
+        .filter(|e| e.kind == EventKind::RunSatisfiedJudged && e.payload["step"] == REJUDGE)
         .count()
 }
 
@@ -331,6 +331,7 @@ fn ask(judgment: &ClaimJudgment, because: AskBecause) -> JudgmentAsk {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::event_kind;
 
     fn sha(c: char) -> CommitSha {
         CommitSha::parse(c.to_string().repeat(40), "test").unwrap()

@@ -1,4 +1,5 @@
 use crate::common;
+use dagq::domain::EventKind;
 use dagq::infrastructure::git_binary::git_executable;
 
 use common::cli::*;
@@ -794,7 +795,7 @@ exec {quoted_bin} \"$@\"\n"
     let installed = |sha: &str| {
         updates()
             .iter()
-            .any(|u| u.kind == "update_installed" && u.payload["commit"] == sha)
+            .any(|u| u.kind == EventKind::UpdateInstalled && u.payload["commit"] == sha)
     };
 
     // The test binary names a commit this repository does not have, so the
@@ -823,7 +824,7 @@ exec {quoted_bin} \"$@\"\n"
     let started = |sha: &str| {
         updates()
             .iter()
-            .any(|u| u.kind == "update_started" && u.payload["commit"] == sha)
+            .any(|u| u.kind == EventKind::UpdateStarted && u.payload["commit"] == sha)
     };
     let docs = commit("docs/notes.md");
     wait(
@@ -897,15 +898,15 @@ exec {quoted_bin} \"$@\"\n"
     wait("the failed update", &mut || {
         // Reaps the supervisor once the broken build's exec ended it.
         let _ = supervisor.child().try_wait();
-        updates()
-            .iter()
-            .any(|u| u.kind == "update_failed" && u.payload["commit"] == broken_commit.as_str())
+        updates().iter().any(|u| {
+            u.kind == EventKind::UpdateFailed && u.payload["commit"] == broken_commit.as_str()
+        })
     });
     let failed = updates()
         .into_iter()
-        .find(|u| u.kind == "update_failed")
+        .find(|u| u.kind == EventKind::UpdateFailed)
         .unwrap();
-    let assert_supervisor_actor = |kind: &str, commit: &str| {
+    let assert_supervisor_actor = |kind: EventKind, commit: &str| {
         let event = updates()
             .into_iter()
             .find(|event| event.kind == kind && event.payload["commit"] == commit)
@@ -920,8 +921,8 @@ exec {quoted_bin} \"$@\"\n"
             event.kind
         );
     };
-    assert_supervisor_actor("update_installed", &source);
-    assert_supervisor_actor("update_failed", &broken_commit);
+    assert_supervisor_actor(EventKind::UpdateInstalled, &source);
+    assert_supervisor_actor(EventKind::UpdateFailed, &broken_commit);
     assert_eq!(failed.payload["stage"], "install", "{failed:?}");
     // Every supervisor failed the handoff: each is brought back (task 716).
     assert_eq!(failed.payload["kept"], false, "{failed:?}");

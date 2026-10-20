@@ -3,6 +3,7 @@
 //! token as an adopter's would, and what the supervisor wrote and kept
 //! after it.
 use super::*;
+use dagq::domain::EventKind;
 
 /// Move `run`'s lease to the token `taken`, stale, as a killed
 /// supervisor's would look to an adopter, and with `session_ended` mark
@@ -48,7 +49,7 @@ pub fn run_events_after(queue: &SqliteQueue, run: &TaskRun, after: i64) -> Vec<S
         .unwrap()
         .into_iter()
         .filter(|event| event.run_id.as_ref() == Some(run.id()) && event.id.as_i64() > after)
-        .map(|event| event.kind)
+        .map(|event| event.kind.to_string())
         .collect()
 }
 
@@ -61,7 +62,7 @@ pub fn draining_runs(db: &Path) -> Value {
             .all_events()
             .unwrap()
             .into_iter()
-            .find(|event| event.kind == "supervisor_draining");
+            .find(|event| event.kind == EventKind::SupervisorDraining);
         draining.is_some()
     });
     draining.unwrap().payload["runs"].clone()

@@ -3,6 +3,7 @@
 //! old images removed, and an unobtainable client or a failed build
 //! answered as an unusable container and recorded on the queue. The real
 //! `podman` is in the ignored test at the end.
+use dagq::domain::EventKind;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -10,9 +11,7 @@ use std::sync::Arc;
 
 use dagq::application::ContainerRuntime;
 use dagq::application::container_image::{ImageGate, ImageRecords, ImageSpecs, prepare};
-use dagq::domain::container_image::{
-    CONTAINER_IMAGE_BUILT, CONTAINER_IMAGE_FAILED, FAILURE_HOLD_SECS,
-};
+use dagq::domain::container_image::FAILURE_HOLD_SECS;
 use dagq::domain::container_runtime::{Availability, RuntimeTarget};
 use dagq::infrastructure::container_image::{CheckoutImages, PodmanImages, QueueImageRecords};
 use dagq::infrastructure::podman_machine::PodmanCli;
@@ -265,7 +264,7 @@ fn the_project_image_is_built_on_the_base_from_the_main_checkout_and_old_ones_go
         ]
     );
     let (kind, payload) = host.records().latest().unwrap().unwrap();
-    assert_eq!(kind, CONTAINER_IMAGE_BUILT);
+    assert_eq!(kind, EventKind::ContainerImageBuilt);
     assert_eq!(payload["image"], run.as_str());
     assert_eq!(
         payload["removed"],
@@ -343,7 +342,7 @@ fn an_unobtainable_client_or_a_failed_build_is_unusable_and_recorded() {
         "nothing is built without a client"
     );
     let (kind, payload) = host.records().latest().unwrap().unwrap();
-    assert_eq!(kind, CONTAINER_IMAGE_FAILED);
+    assert_eq!(kind, EventKind::ContainerImageFailed);
     assert_eq!(payload["reason"], why.as_str());
 
     // A failed build: recorded with podman's words, and the gate answers
@@ -352,7 +351,7 @@ fn an_unobtainable_client_or_a_failed_build_is_unusable_and_recorded() {
     let failed = prepare(&host.specs(BUILD), &host.builder, &host.records(), 1_000).unwrap_err();
     assert!(failed.contains("step 3/5 failed"), "{failed}");
     let (kind, payload) = host.records().latest().unwrap().unwrap();
-    assert_eq!(kind, CONTAINER_IMAGE_FAILED);
+    assert_eq!(kind, EventKind::ContainerImageFailed);
     assert_eq!(payload["image"], host.specs(BUILD).images().unwrap().run());
     let Availability::Unavailable(held) = host
         .gate(BUILD, 1_001)

@@ -4,11 +4,13 @@
 //!
 //! The write port takes an [`EventKind`], the kinds this binary knows, and
 //! writes its [`EventKind::as_str`] (ADR-0073 decision 20): no event is
-//! written with a kind given as text. The readers keep the kind as text and
-//! take one they do not know (decision 21), so they name a kind by one of
-//! the constants here, or by the constant of the domain module that owns it
-//! (`recheck::LANDING_RECHECK_FINISHED`, `claim_hold::CLAIM_HELD`, ...),
-//! never by a literal; each is the `as_str` of its [`EventKind`].
+//! written with a kind given as text. A reader takes an event's kind as a
+//! [`RecordedKind`], which keeps one it does not know as its text
+//! (decision 21) and compares only with an [`EventKind`], so a reader names
+//! a kind by its variant, never by text. The constants here and in the
+//! domain modules that own a kind (`recheck::LANDING_RECHECK_FINISHED`,
+//! `claim_hold::CLAIM_HELD`, ...) are the `as_str` of an [`EventKind`], for
+//! the read ports that select events by their text.
 //!
 //! Each kind is owned by one context of docs/design/architecture.md, and
 //! only that context writes it; a kind named by a prefix (`run_*`) does
@@ -74,6 +76,15 @@ macro_rules! event_kinds {
             pub const fn as_str(self) -> &'static str {
                 match self {
                     $(EventKind::$variant => $name,)*
+                }
+            }
+
+            /// The kind named `name`, `None` for a kind this binary does not
+            /// know (another binary's, which a reader keeps as text).
+            pub fn from_name(name: &str) -> Option<EventKind> {
+                match name {
+                    $($name => Some(EventKind::$variant),)*
+                    _ => None,
                 }
             }
         }
@@ -403,6 +414,9 @@ event_kinds! {
     SupervisorAlive => "supervisor_alive",
     SupervisorStarted => "supervisor_started",
     SupervisorStopped => "supervisor_stopped",
+    // No longer written (a duplicate cancel is a `task_status_changed`
+    // with `duplicate_of`): kept so that old records are read.
+    TaskCanceledAsDuplicate => "task_canceled_as_duplicate",
     TaskCreated => "task_created",
     TaskEdited => "task_edited",
     TaskGoalChanged => "task_goal_changed",
@@ -451,15 +465,6 @@ event_kinds! {
 }
 
 impl EventKind {
-    /// The kind named `name`, `None` for a kind this binary does not know
-    /// (another binary's, which a reader keeps as text).
-    pub fn from_name(name: &str) -> Option<EventKind> {
-        EventKind::ALL
-            .iter()
-            .copied()
-            .find(|kind| kind.as_str() == name)
-    }
-
     /// Whether an event of this kind may belong to no task, goal or run:
     /// the queue's own events (ADR-0073 decision 22). The queue enumerated
     /// them in a CHECK until migration 0039; the write port checks them
@@ -759,6 +764,115 @@ impl PartialEq<EventKind> for &str {
 impl PartialEq<EventKind> for String {
     fn eq(&self, other: &EventKind) -> bool {
         self == other.as_str()
+    }
+}
+
+/// The kind of an event as a reader takes it from `run_events`: one this
+/// binary knows, or another binary's kept as its text (decision 21), so
+/// that an old or newer queue's events still read and print their kind
+/// unchanged. A wrapper rather than a variant of [`EventKind`], so that the
+/// write port still takes only the kinds this binary knows (decision 20).
+/// It compares with an [`EventKind`] and not with text: a reader names a
+/// kind by its variant.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RecordedKind {
+    Known(EventKind),
+    /// A kind this binary does not know, as it was recorded. Never the
+    /// name of a known kind: [`RecordedKind::from_name`] reads that as
+    /// [`RecordedKind::Known`].
+    Other(String),
+}
+
+impl RecordedKind {
+    /// The kind named `name` as it was recorded.
+    pub fn from_name(name: &str) -> RecordedKind {
+        EventKind::from_name(name)
+            .map_or_else(|| RecordedKind::Other(name.to_owned()), RecordedKind::Known)
+    }
+
+    /// The kind this binary knows, `None` for another binary's.
+    pub const fn known(&self) -> Option<EventKind> {
+        match self {
+            RecordedKind::Known(kind) => Some(*kind),
+            RecordedKind::Other(_) => None,
+        }
+    }
+
+    /// Whether this is one of `kinds`; never for another binary's kind.
+    pub fn is_in(&self, kinds: &[EventKind]) -> bool {
+        self.known().is_some_and(|kind| kinds.contains(&kind))
+    }
+
+    /// The text of the kind in `run_events.kind`, which the CLI prints.
+    pub fn as_str(&self) -> &str {
+        match self {
+            RecordedKind::Known(kind) => kind.as_str(),
+            RecordedKind::Other(name) => name,
+        }
+    }
+}
+
+impl From<EventKind> for RecordedKind {
+    fn from(kind: EventKind) -> RecordedKind {
+        RecordedKind::Known(kind)
+    }
+}
+
+/// The kind named by the text, as [`RecordedKind::from_name`] reads it.
+impl From<&str> for RecordedKind {
+    fn from(name: &str) -> RecordedKind {
+        RecordedKind::from_name(name)
+    }
+}
+
+impl From<String> for RecordedKind {
+    fn from(name: String) -> RecordedKind {
+        RecordedKind::from_name(&name)
+    }
+}
+
+impl PartialEq<EventKind> for RecordedKind {
+    fn eq(&self, other: &EventKind) -> bool {
+        self.known() == Some(*other)
+    }
+}
+
+impl PartialEq<RecordedKind> for EventKind {
+    fn eq(&self, other: &RecordedKind) -> bool {
+        other == self
+    }
+}
+
+/// Ordered by the text, as the kinds were ordered while they were read as
+/// text.
+impl Ord for RecordedKind {
+    fn cmp(&self, other: &RecordedKind) -> std::cmp::Ordering {
+        self.as_str().cmp(other.as_str())
+    }
+}
+
+impl PartialOrd for RecordedKind {
+    fn partial_cmp(&self, other: &RecordedKind) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl std::fmt::Display for RecordedKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl serde::Serialize for RecordedKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for RecordedKind {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
+        Ok(RecordedKind::from_name(&name))
     }
 }
 
@@ -1696,6 +1810,10 @@ mod tests {
             (EventKind::SupervisorAlive, "supervisor_alive"),
             (EventKind::SupervisorStarted, "supervisor_started"),
             (EventKind::SupervisorStopped, "supervisor_stopped"),
+            (
+                EventKind::TaskCanceledAsDuplicate,
+                "task_canceled_as_duplicate",
+            ),
             (EventKind::TaskCreated, "task_created"),
             (EventKind::TaskEdited, "task_edited"),
             (EventKind::TaskHeld, "task_held"),
@@ -1771,6 +1889,43 @@ mod tests {
         names.dedup();
         assert_eq!(names.len(), EventKind::ALL.len());
         assert_eq!(EventKind::from_name("future_kind"), None);
+    }
+
+    /// A recorded kind keeps its text whether this binary knows it or not,
+    /// and compares only with a known kind.
+    #[test]
+    fn a_recorded_kind_keeps_its_text_and_names_only_known_kinds() {
+        let known = RecordedKind::from_name("run_claimed");
+        assert_eq!(known, RecordedKind::Known(EventKind::RunClaimed));
+        assert_eq!(known, EventKind::RunClaimed);
+        assert_eq!(EventKind::RunClaimed, known);
+        assert_eq!(known.known(), Some(EventKind::RunClaimed));
+        assert!(known.is_in(&[EventKind::TaskCreated, EventKind::RunClaimed]));
+        let other = RecordedKind::from("retired_screen_kind");
+        assert_eq!(other, RecordedKind::Other("retired_screen_kind".to_owned()));
+        assert_eq!(other.known(), None);
+        assert!(!other.is_in(EventKind::ALL));
+        for (kind, text) in [(&known, "run_claimed"), (&other, "retired_screen_kind")] {
+            assert_eq!(kind.as_str(), text);
+            assert_eq!(kind.to_string(), text);
+            let json = serde_json::to_value(kind).unwrap();
+            assert_eq!(json, serde_json::json!(text));
+            assert_eq!(&serde_json::from_value::<RecordedKind>(json).unwrap(), kind);
+        }
+        // Ordered by the text, as when the kinds were read as text.
+        let mut kinds = [
+            RecordedKind::from("zz_future"),
+            known.clone(),
+            RecordedKind::from("aa_past"),
+        ];
+        kinds.sort();
+        let texts: Vec<&str> = kinds.iter().map(RecordedKind::as_str).collect();
+        assert_eq!(texts, ["aa_past", "run_claimed", "zz_future"]);
+        // A kind kept only so that old records are read is known.
+        assert_eq!(
+            RecordedKind::from_name("task_canceled_as_duplicate").known(),
+            Some(EventKind::TaskCanceledAsDuplicate)
+        );
     }
 
     #[test]

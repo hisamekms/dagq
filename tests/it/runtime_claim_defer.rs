@@ -57,7 +57,7 @@ fn events(db: &Path, kind: &str) -> Vec<(Option<TaskId>, Value)> {
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == kind)
+        .filter(|event| event.kind.as_str() == kind)
         .map(|event| (event.task_id, event.payload))
         .collect()
 }
@@ -206,7 +206,7 @@ fn a_task_meeting_a_run_on_a_hotspot_waits_and_the_next_one_is_claimed() {
         .all_events()
         .unwrap()
         .into_iter()
-        .find(|event| event.kind == "claim_deferred")
+        .find(|event| event.kind == EventKind::ClaimDeferred)
         .and_then(|event| dagq::domain::stats::timestamp_millis(&event.created_at))
         .unwrap();
     await_second_after(deferred_at.div_euclid(1000));
@@ -869,7 +869,7 @@ fn a_deferral_stays_shown_while_the_supervisor_does_not_judge_the_claims() {
         .all_events()
         .unwrap()
         .into_iter()
-        .find(|event| event.kind == "claim_deferred")
+        .find(|event| event.kind == EventKind::ClaimDeferred)
         .and_then(|event| dagq::domain::stats::timestamp_millis(&event.created_at))
         .unwrap();
     // Past the limit, more passes with no free slot: no judgment.

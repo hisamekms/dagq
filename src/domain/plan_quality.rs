@@ -7,17 +7,14 @@
 //! the follow-ups adopted into it and canceled later, and the task-caused
 //! rework of its tasks' runs. Pure: derived from `run_events` only, split
 //! into strata by those models and efforts and each feature, for `kpi`.
+use crate::domain::run::{ReviewFinished, restore_payload};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde_json::{Value, json};
 
 use super::{
-    EventId, RunEvent, TaskId, cancel_reason,
-    event_kind::{
-        DRAFT_PLANNER_OPENED, PLAN_REVIEW_STARTED, PLAN_REVISE_SENT, PROPOSAL_RESUBMITTED,
-        PROPOSAL_SUBMITTED, TASK_SUBMITTED,
-    },
-    sessions::{PLAN_REVIEW, PLANNER, RUNTIME_PLANNER, SESSION_CLOSED, SESSION_OPENED},
+    EventId, EventKind, RunEvent, TaskId, cancel_reason,
+    sessions::{PLAN_REVIEW, PLANNER, RUNTIME_PLANNER},
 };
 
 /// Where a proposal came from: a follow-up draft, a goal's gap, an
@@ -230,17 +227,22 @@ impl<'a> Submissions<'a> {
         let mut index = Self::default();
         for event in events {
             let id = |key: &str| event.payload[key].as_i64();
-            match event.kind.as_str() {
-                PROPOSAL_SUBMITTED | TASK_SUBMITTED | PROPOSAL_RESUBMITTED | PLAN_REVISE_SENT
-                | PLAN_REVIEW_STARTED => {
+            match event.kind.known() {
+                Some(
+                    EventKind::ProposalSubmitted
+                    | EventKind::TaskSubmitted
+                    | EventKind::ProposalResubmitted
+                    | EventKind::PlanReviseSent
+                    | EventKind::PlanReviewStarted,
+                ) => {
                     if let Some(proposal) = id("proposal_id") {
                         index.by_proposal.entry(proposal).or_default().push(event);
                     }
                 }
-                DRAFT_PLANNER_OPENED => {
+                Some(EventKind::DraftPlannerOpened) => {
                     index.drafts.entry(event.task_id).or_default().push(event);
                 }
-                SESSION_OPENED
+                Some(EventKind::SessionOpened)
                     if matches!(
                         event.payload["kind"].as_str(),
                         Some(PLANNER | RUNTIME_PLANNER)
@@ -262,7 +264,7 @@ impl<'a> Submissions<'a> {
                             .push(event);
                     }
                 }
-                SESSION_CLOSED => {
+                Some(EventKind::SessionClosed) => {
                     if let Some(opened) = id("opened_event_id") {
                         let close = index.closes.entry(opened).or_insert((event, event.id));
                         close.1 = close.1.min(event.id);
@@ -292,7 +294,9 @@ impl<'a> Submissions<'a> {
         let explicit = records
             .iter()
             // A retry without a planner records the operation, not a new planner submission.
-            .filter(|e| e.kind == PROPOSAL_SUBMITTED && e.payload["planner_id"].as_i64().is_some())
+            .filter(|e| {
+                e.kind == EventKind::ProposalSubmitted && e.payload["planner_id"].as_i64().is_some()
+            })
             .max_by_key(|e| e.id);
         // A modern submit writes its task_submitted / proposal_resubmitted and
         // then its explicit link in one transaction, before any later review of
@@ -303,29 +307,31 @@ impl<'a> Submissions<'a> {
             records
                 .iter()
                 .filter(|e| e.id > record.id)
-                .filter(|e| e.kind == PROPOSAL_SUBMITTED || e.kind == PLAN_REVIEW_STARTED)
+                .filter(|e| {
+                    e.kind == EventKind::ProposalSubmitted || e.kind == EventKind::PlanReviewStarted
+                })
                 .min_by_key(|e| e.id)
-                .is_some_and(|e| e.kind == PROPOSAL_SUBMITTED)
+                .is_some_and(|e| e.kind == EventKind::ProposalSubmitted)
         };
         let legacy = records
             .iter()
             .filter(|e| {
-                e.kind == TASK_SUBMITTED
-                    || (e.kind == PROPOSAL_RESUBMITTED && planner_of(e).is_some())
+                e.kind == EventKind::TaskSubmitted
+                    || (e.kind == EventKind::ProposalResubmitted && planner_of(e).is_some())
             })
             .filter(|e| !linked(e))
             .max_by_key(|e| e.id);
         let Some(&submission) = explicit.into_iter().chain(legacy).max_by_key(|e| e.id) else {
             return PlannerSubmission::default();
         };
-        let direct = submission.kind == PROPOSAL_SUBMITTED;
+        let direct = submission.kind == EventKind::ProposalSubmitted;
         let mut planner = planner_of(submission);
         if !direct && planner.is_none() {
             // Older revise and draft-planner records predate explicit submission links.
             let drafts = self.drafts.get(&submission.task_id).into_iter().flatten();
             planner = records
                 .iter()
-                .filter(|e| e.kind == PLAN_REVISE_SENT)
+                .filter(|e| e.kind == EventKind::PlanReviseSent)
                 .chain(drafts)
                 .filter(|e| e.id < submission.id)
                 .max_by_key(|e| e.id)
@@ -388,10 +394,12 @@ struct TaskFate {
 /// failed, review raised a concern, or the run was sent back to revise.
 /// Conflicts and kills are not the task's.
 pub fn rework(event: &RunEvent) -> bool {
-    match event.kind.as_str() {
-        "integration_deferred" => event.payload["code"] == "verification_failed",
-        "review_finished" => event.payload["verdict"] == "concern",
-        "revise_requested" => true,
+    match event.kind.known() {
+        Some(EventKind::IntegrationDeferred) => event.payload["code"] == "verification_failed",
+        Some(EventKind::ReviewFinished) => {
+            restore_payload::<ReviewFinished>(&event.payload).verdict == Some("concern")
+        }
+        Some(EventKind::ReviseRequested) => true,
         _ => false,
     }
 }
@@ -415,15 +423,15 @@ pub fn plan_quality(
     let mut tasks: HashMap<TaskId, TaskFate> = HashMap::new();
     let follow_ups: HashSet<i64> = events
         .iter()
-        .filter(|e| e.kind == "follow_up_registered")
+        .filter(|e| e.kind == EventKind::FollowUpRegistered)
         .filter_map(|e| e.payload.get("task_id").and_then(Value::as_i64))
         .collect();
     // Proposal → the first time one of its tasks became ready.
     let mut accepted: BTreeMap<i64, EventId> = BTreeMap::new();
     for event in events {
         let id = |key: &str| event.payload.get(key).and_then(Value::as_i64);
-        match event.kind.as_str() {
-            "plan_review_started" => {
+        match event.kind.known() {
+            Some(EventKind::PlanReviewStarted) => {
                 if let Some(review_id) = id("plan_review_id") {
                     let review = reviews.entry(review_id).or_default();
                     review.proposal = id("proposal_id");
@@ -432,7 +440,7 @@ pub fn plan_quality(
                     review.anchor = event.task_id;
                 }
             }
-            "plan_review_finished" => {
+            Some(EventKind::PlanReviewFinished) => {
                 if let Some(review_id) = id("plan_review_id") {
                     let decision = event.payload["decision"]
                         .as_str()
@@ -444,13 +452,13 @@ pub fn plan_quality(
                     review.anchor = review.anchor.or(event.task_id);
                 }
             }
-            SESSION_OPENED if event.payload["kind"] == PLAN_REVIEW => {
+            Some(EventKind::SessionOpened) if event.payload["kind"] == PLAN_REVIEW => {
                 if let Some(review_id) = id("plan_review_id") {
                     sessions.insert(event.id, review_id);
                     reviews.entry(review_id).or_default().session = Some(event.id);
                 }
             }
-            SESSION_CLOSED if event.payload["kind"] == PLAN_REVIEW => {
+            Some(EventKind::SessionClosed) if event.payload["kind"] == PLAN_REVIEW => {
                 let review = id("opened_event_id")
                     .and_then(|opened| sessions.get(&EventId::new(opened)))
                     .and_then(|review_id| reviews.get_mut(review_id));
@@ -466,10 +474,10 @@ pub fn plan_quality(
             continue;
         };
         let fate = tasks.entry(task_id).or_default();
-        match event.kind.as_str() {
-            "task_submitted" => fate.proposal = id("proposal_id"),
-            "task_created" => fate.follow_up = follow_ups.contains(&task_id.as_i64()),
-            "task_status_changed" => {
+        match event.kind.known() {
+            Some(EventKind::TaskSubmitted) => fate.proposal = id("proposal_id"),
+            Some(EventKind::TaskCreated) => fate.follow_up = follow_ups.contains(&task_id.as_i64()),
+            Some(EventKind::TaskStatusChanged) => {
                 let from = event.payload["from"].as_str();
                 let to = event.payload["to"].as_str();
                 if from == Some("draft") && to != Some("canceled") {
@@ -492,8 +500,10 @@ pub fn plan_quality(
                     }
                 }
             }
-            "task_canceled_as_duplicate" if fate.ready => fate.duplicate_after_ready = true,
-            "run_claimed" => fate.run = true,
+            Some(EventKind::TaskCanceledAsDuplicate) if fate.ready => {
+                fate.duplicate_after_ready = true
+            }
+            Some(EventKind::RunClaimed) => fate.run = true,
             _ if rework(event) => fate.reworked = true,
             _ => {}
         }
@@ -566,6 +576,8 @@ pub fn plan_quality(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::event_kind::SESSION_CLOSED;
+    use crate::domain::event_kind::SESSION_OPENED;
     use crate::domain::{PlannerOrigin, RunId};
 
     fn event(id: i64, task: Option<i64>, kind: &str, payload: Value) -> RunEvent {
@@ -574,7 +586,7 @@ mod tests {
             task_id: task.map(TaskId::new),
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: format!("1970-01-01T00:00:{:02}.000Z", id % 60),
             actor: None,
@@ -818,7 +830,7 @@ mod tests {
         // Old retries without explicit links preserve the original open-at-submit span too.
         let legacy: Vec<_> = events
             .iter()
-            .filter(|e| e.kind != "proposal_submitted")
+            .filter(|e| e.kind != EventKind::ProposalSubmitted)
             .cloned()
             .collect();
         let old = planner_submission(&legacy, 7, EventId::new(9));
@@ -932,7 +944,7 @@ mod tests {
             Some("reviser")
         );
         // Without explicit records, the same old submission still uses legacy inference.
-        events.retain(|e| e.kind != "proposal_submitted");
+        events.retain(|e| e.kind != EventKind::ProposalSubmitted);
         assert_eq!(
             planner_submission(&events, 7, before).model.as_deref(),
             Some("reviser")

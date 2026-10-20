@@ -17,7 +17,7 @@ use super::{
     asks::{ask_ends, ask_key},
     timestamp_millis,
 };
-use crate::domain::event_kind::{ASK_OPENED, INBOX_WATCHER_ABSENT, INBOX_WATCHER_RETURNED};
+use crate::domain::EventKind;
 
 /// The seconds each ask whose task `counts` accepts waited to be seen,
 /// of those seen after `after` up to `upto`: an ask opened while the
@@ -52,15 +52,15 @@ pub fn seen_waits(
             }
             !ended
         });
-        match event.kind.as_str() {
-            INBOX_WATCHER_ABSENT => alive = Some(false),
-            INBOX_WATCHER_RETURNED => {
+        match event.kind.known() {
+            Some(EventKind::InboxWatcherAbsent) => alive = Some(false),
+            Some(EventKind::InboxWatcherReturned) => {
                 alive = Some(true);
                 for (opened, _) in unseen.drain(..) {
                     seen(opened, event, &mut waits);
                 }
             }
-            ASK_OPENED if counts(event.task_id) => match alive {
+            Some(EventKind::AskOpened) if counts(event.task_id) => match alive {
                 None => {}
                 Some(true) => {
                     if event.id > after {
@@ -84,6 +84,9 @@ pub fn seen_waits(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::event_kind::ASK_OPENED;
+    use crate::domain::event_kind::INBOX_WATCHER_ABSENT;
+    use crate::domain::event_kind::INBOX_WATCHER_RETURNED;
     use serde_json::json;
 
     fn at(id: i64, task: Option<i64>, kind: &str, secs: i64) -> RunEvent {
@@ -92,7 +95,7 @@ mod tests {
             task_id: task.map(TaskId::new),
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload: json!({}),
             created_at: crate::domain::marks::utc_text(secs * 1000),
             actor: None,

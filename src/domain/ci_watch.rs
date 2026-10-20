@@ -8,6 +8,7 @@
 //! (`infrastructure::ci_watch`, `application::ci_watch`); this is what the
 //! readings mean.
 
+use crate::domain::RecordedKind;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
@@ -61,14 +62,14 @@ pub const CI_WATCH_HOLD: super::claim_hold::OwnHold = super::claim_hold::OwnHold
     resumed: EventKind::CiWatchResumed,
 };
 /// Every kind the watch records, oldest first in the queue.
-pub const CI_WATCH_KINDS: [&str; 7] = [
-    CI_CHECKED,
-    CI_TURNED_RED,
-    CI_TURNED_GREEN,
-    CI_WATCH_UNAVAILABLE,
-    CI_WATCH_AVAILABLE,
-    CI_CHECK_FAILED,
-    CI_JOBS_MISSING,
+pub const CI_WATCH_KINDS: [EventKind; 7] = [
+    EventKind::CiChecked,
+    EventKind::CiTurnedRed,
+    EventKind::CiTurnedGreen,
+    EventKind::CiWatchUnavailable,
+    EventKind::CiWatchAvailable,
+    EventKind::CiCheckFailed,
+    EventKind::CiJobsMissing,
 ];
 
 /// The kind of the finding a red run records (ADR-t1920-1 decision 4).
@@ -621,11 +622,11 @@ impl WatchState {
     pub fn fold(events: &[RunEvent]) -> Self {
         let mut state = Self::default();
         for event in events {
-            state.recorded |= CI_WATCH_KINDS.contains(&event.kind.as_str());
-            if event.kind == CI_JOBS_MISSING {
+            state.recorded |= event.kind.is_in(&CI_WATCH_KINDS);
+            if event.kind == EventKind::CiJobsMissing {
                 state.jobs_missing = Some(event.payload.clone());
             }
-            if event.kind == CI_CHECKED {
+            if event.kind == EventKind::CiChecked {
                 state.apply(&event.payload, &event.created_at);
                 state.last_event = Some(event.id.as_i64());
             }
@@ -1234,7 +1235,7 @@ impl Access {
     /// latest one on the queue (`last`, its kind and payload, one of
     /// [`CI_WATCH_ACCESS_KINDS`]): unavailable after anything but the same
     /// reason, available after unavailable, else none.
-    pub fn transition(&self, last: Option<(&str, &Value)>) -> Option<(EventKind, Value)> {
+    pub fn transition(&self, last: Option<(&RecordedKind, &Value)>) -> Option<(EventKind, Value)> {
         match self {
             Self::Unavailable {
                 reason,
@@ -1243,7 +1244,7 @@ impl Access {
                 message,
             } => {
                 let same = last.is_some_and(|(kind, payload)| {
-                    kind == CI_WATCH_UNAVAILABLE && payload["reason"] == reason.as_str()
+                    *kind == EventKind::CiWatchUnavailable && payload["reason"] == reason.as_str()
                 });
                 (!same).then(|| {
                     (
@@ -1260,7 +1261,7 @@ impl Access {
             Self::Available {
                 program, resolved, ..
             } => last
-                .is_some_and(|(kind, _)| kind == CI_WATCH_UNAVAILABLE)
+                .is_some_and(|(kind, _)| *kind == EventKind::CiWatchUnavailable)
                 .then(|| {
                     (
                         EventKind::CiWatchAvailable,
@@ -1308,8 +1309,8 @@ impl FailureStreak {
 }
 
 /// `watch` of `ci failures` and `status`: whether the watch reads.
-pub fn watch_label(enabled: bool, last_access: Option<&str>) -> &'static str {
-    if last_access == Some(CI_WATCH_UNAVAILABLE) {
+pub fn watch_label(enabled: bool, last_access: Option<&RecordedKind>) -> &'static str {
+    if last_access.is_some_and(|kind| *kind == EventKind::CiWatchUnavailable) {
         "unavailable"
     } else if enabled {
         "available"
@@ -1325,7 +1326,7 @@ pub fn failures_view(
     workflow: Option<&str>,
     branch: Option<&str>,
     watch: &WatchState,
-    last_access: Option<&str>,
+    last_access: Option<&RecordedKind>,
     kept: &BTreeSet<i64>,
 ) -> Value {
     if !enabled && !watch.recorded {
@@ -1349,7 +1350,7 @@ pub fn failures_view(
 }
 
 /// `status`'s `ci`: null until the watch recorded anything.
-pub fn status_view(enabled: bool, watch: &WatchState, last_access: Option<&str>) -> Value {
+pub fn status_view(enabled: bool, watch: &WatchState, last_access: Option<&RecordedKind>) -> Value {
     if !watch.recorded {
         return Value::Null;
     }
@@ -1403,8 +1404,8 @@ pub fn check_due(since_start: Option<Duration>, interval: Duration) -> bool {
 /// `ci_watch_unavailable` / `ci_watch_available` says (`last`, its kind),
 /// there when none is recorded. The check may have recorded the means'
 /// return before it failed.
-pub fn available_after_failure(last: Option<&str>) -> bool {
-    last != Some(CI_WATCH_UNAVAILABLE)
+pub fn available_after_failure(last: Option<&RecordedKind>) -> bool {
+    !last.is_some_and(|kind| *kind == EventKind::CiWatchUnavailable)
 }
 
 /// Why a supervisor with `[ci_watch]` (`watched`) holds its claims, resumes
@@ -2221,7 +2222,7 @@ mod tests {
         assert_eq!(kind, EventKind::CiWatchUnavailable);
         assert_eq!(payload["reason"], "gh_missing");
         assert_eq!(
-            missing.transition(Some((CI_WATCH_UNAVAILABLE, &payload))),
+            missing.transition(Some((&EventKind::CiWatchUnavailable.into(), &payload))),
             None
         );
         let unauthenticated = Access::Unavailable {
@@ -2232,17 +2233,17 @@ mod tests {
         };
         assert!(
             unauthenticated
-                .transition(Some((CI_WATCH_UNAVAILABLE, &payload)))
+                .transition(Some((&EventKind::CiWatchUnavailable.into(), &payload)))
                 .is_some()
         );
         let (kind, back) = available
-            .transition(Some((CI_WATCH_UNAVAILABLE, &payload)))
+            .transition(Some((&EventKind::CiWatchUnavailable.into(), &payload)))
             .unwrap();
         assert_eq!(kind, EventKind::CiWatchAvailable);
         assert_eq!(back["resolved"], "/bin/gh");
         assert_eq!(available.transition(None), None);
         assert_eq!(
-            available.transition(Some((CI_WATCH_AVAILABLE, &back))),
+            available.transition(Some((&EventKind::CiWatchAvailable.into(), &back))),
             None
         );
         assert_eq!(Unavailable::GhMissing.next(), AttentionNext::InstallTool);
@@ -2295,7 +2296,7 @@ mod tests {
             Some("ci.yml"),
             Some("main"),
             &watch,
-            Some(CI_WATCH_UNAVAILABLE),
+            Some(&EventKind::CiWatchUnavailable.into()),
             &BTreeSet::new(),
         );
         assert_eq!(view["state"], "red");
@@ -2391,8 +2392,12 @@ mod tests {
     #[test]
     fn after_a_passing_failure_the_queue_s_last_answer_stands() {
         assert!(available_after_failure(None));
-        assert!(available_after_failure(Some(CI_WATCH_AVAILABLE)));
-        assert!(!available_after_failure(Some(CI_WATCH_UNAVAILABLE)));
+        assert!(available_after_failure(Some(
+            &EventKind::CiWatchAvailable.into()
+        )));
+        assert!(!available_after_failure(Some(
+            &EventKind::CiWatchUnavailable.into()
+        )));
     }
 
     #[test]

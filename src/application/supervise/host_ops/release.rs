@@ -466,7 +466,7 @@ fn job_look<'a>(updates: &'a [RunEvent], in_progress: impl Fn(&RunEvent) -> bool
         return JobLook::Running;
     }
     match latest_job_step_of(updates, true) {
-        Some(step) if JOB_STEPS.contains(&step.kind.as_str()) && !in_progress(step) => {
+        Some(step) if step.kind.is_in(JOB_STEPS) && !in_progress(step) => {
             step_release(step).map_or(JobLook::None, |version| JobLook::Interrupted(step, version))
         }
         _ => JobLook::None,
@@ -726,7 +726,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: String::new(),
             actor: None,
@@ -757,8 +757,7 @@ mod tests {
     fn a_release_job_that_died_is_reported_once_and_a_live_one_waits() {
         let alive = |pids: &'static [u32]| {
             move |step: &RunEvent| {
-                JOB_STEPS.contains(&step.kind.as_str())
-                    && job_pid(step).is_some_and(|pid| pids.contains(&pid))
+                step.kind.is_in(JOB_STEPS) && job_pid(step).is_some_and(|pid| pids.contains(&pid))
             }
         };
         // Newest first.

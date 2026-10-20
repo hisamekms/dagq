@@ -4,6 +4,7 @@
 //! build has them; a task that declares nothing is claimed as before.
 use crate::common::cli::{ok, queue};
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use dagq::domain::{ClaimOutcome, LeaseToken, provider_switch::WorkerRoute, worker::Worker};
 use runtime_support::*;
@@ -41,7 +42,7 @@ fn events(db: &Path, kind: &str) -> Vec<(Option<TaskId>, Value)> {
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == kind)
+        .filter(|event| event.kind.as_str() == kind)
         .map(|event| (event.task_id, event.payload))
         .collect()
 }
@@ -112,9 +113,11 @@ fn a_task_waits_for_a_build_that_contains_its_dependencies_landings() {
     let shown = SqliteQueue::open(&db).unwrap().show(waiting).unwrap();
     assert!(shown.task.wait_for_build());
     assert!(
-        shown.events.iter().any(
-            |event| event.kind == "claim_deferred" && event.payload["reason"] == "not_in_build"
-        ),
+        shown
+            .events
+            .iter()
+            .any(|event| event.kind == EventKind::ClaimDeferred
+                && event.payload["reason"] == "not_in_build"),
         "show carries the wait"
     );
     let shown = ok(&db, &["show", &waiting.to_string()]);

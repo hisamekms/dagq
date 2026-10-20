@@ -9,6 +9,7 @@
 //! its first failure, a test that `integrate`'s verification saw fail and
 //! pass when nextest ran it again (`verification_command.flaky_tests`,
 //! task 768).
+use crate::domain::EventKind;
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
@@ -72,13 +73,13 @@ enum Source {
 /// the names it gives as flaky (task 768).
 fn named(event: &RunEvent) -> Option<(Source, Vec<&str>, Vec<&str>)> {
     let payload = &event.payload;
-    let (source, names, flaky) = match event.kind.as_str() {
-        "verification_command" if payload["phase"] == "integration" => (
+    let (source, names, flaky) = match event.kind.known() {
+        Some(EventKind::VerificationCommand) if payload["phase"] == "integration" => (
             Source::Integrate,
             strings(&payload["failed_tests"]),
             strings(&payload["flaky_tests"]),
         ),
-        "session_closed" => (
+        Some(EventKind::SessionClosed) => (
             Source::Worker,
             strings(&payload["work"]["failed_tests"]),
             Vec::new(),
@@ -192,7 +193,7 @@ mod tests {
             task_id: Some(TaskId::new(id)),
             goal_id: None,
             run_id: Some(RunId::new(run).unwrap()),
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: format!("2026-09-27T00:00:{at}.000Z"),
             actor: None,
@@ -285,7 +286,7 @@ mod tests {
         for test in &stats.tests {
             for id in &test.integrate_event_ids {
                 let event = events.iter().find(|event| event.id == *id).unwrap();
-                assert_eq!(event.kind, "verification_command");
+                assert_eq!(event.kind, EventKind::VerificationCommand);
                 assert_eq!(event.payload["phase"], "integration");
                 assert!(
                     event.payload["failed_tests"]

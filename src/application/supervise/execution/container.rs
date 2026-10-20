@@ -33,7 +33,7 @@ impl Supervisor<'_> {
         let check = ContainerCheck::of(&runtimes, |target| container.availability(target));
         let last = self.queue.latest_queue_event(&CONTAINER_RUNTIME_KINDS)?;
         if let Some((kind, mut payload)) =
-            check.transition(last.as_ref().map(|e| (e.kind.as_str(), &e.payload)))
+            check.transition(last.as_ref().map(|e| (&e.kind, &e.payload)))
         {
             payload["supervisor"] = json!(self.registration.token());
             self.queue.record_queue_event(kind, payload)?;

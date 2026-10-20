@@ -4,7 +4,7 @@ use crate::plan_review::{
     PlanWorkspace, StubReviewer, add, events, fixture, status, submit, supervise,
 };
 use dagq::{
-    domain::{AskKind, PlannerOrigin, Priority, TaskId, TaskStatus},
+    domain::{AskKind, EventKind, PlannerOrigin, Priority, TaskId, TaskStatus},
     infrastructure::sqlite::SqliteQueue,
     runtime,
 };
@@ -68,7 +68,7 @@ fn a_plan_review_at_the_usage_limit_joins_the_cost_ask_and_starts_again_after_do
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|e| e.kind == "usage_limited")
+        .filter(|e| e.kind == EventKind::UsageLimited)
         .collect();
     assert_eq!(limited.len(), 1, "{limited:?}");
     assert_eq!(limited[0].task_id, None);
@@ -99,7 +99,7 @@ fn a_plan_review_at_the_usage_limit_joins_the_cost_ask_and_starts_again_after_do
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|e| e.kind == "queue_hold_applied")
+        .filter(|e| e.kind == EventKind::QueueHoldApplied)
         .collect();
     assert_eq!(applied[0].payload["jobs"], json!([entry]));
     assert_eq!(
@@ -114,7 +114,7 @@ fn a_plan_review_at_the_usage_limit_joins_the_cost_ask_and_starts_again_after_do
     assert!(links[1]["opened_event_id"].is_null());
     let restarted = history
         .iter()
-        .filter(|e| e.kind == "plan_review_started")
+        .filter(|e| e.kind == EventKind::PlanReviewStarted)
         .max_by_key(|e| e.id)
         .unwrap();
     let attributed = planner_submission(&history, proposal.as_i64(), restarted.id);

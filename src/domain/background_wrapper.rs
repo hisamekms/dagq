@@ -6,6 +6,7 @@
 //! and the start the system recorded for it, so a pid another process took
 //! later is never taken for the wrapper (decision 2).
 
+use crate::domain::EventKind;
 use std::fmt;
 
 /// What `[headless] wrapper` of `dagq.toml` says. A worker's and a runtime
@@ -111,7 +112,7 @@ where
 {
     events
         .rev()
-        .find(|event| event.kind == super::event_kind::WORKSPACE_CREATED)
+        .find(|event| event.kind == EventKind::WorkspaceCreated)
         .and_then(|event| event.payload["workspace_id"].as_str())
         .or(first)
 }
@@ -126,11 +127,11 @@ where
 {
     events
         .rev()
-        .take_while(|event| event.kind != super::event_kind::WORKSPACE_CREATED)
+        .take_while(|event| event.kind != EventKind::WorkspaceCreated)
         .any(|event| {
             matches!(
-                event.kind.as_str(),
-                super::event_kind::SESSION_EXITED | super::event_kind::WORKSPACE_CLOSED
+                event.kind.known(),
+                Some(EventKind::SessionExited | EventKind::WorkspaceClosed)
             )
         })
 }
@@ -145,7 +146,7 @@ where
 pub fn launched_as(events: &[super::RunEvent], pid: u32, own_start: Option<&str>) -> bool {
     events
         .iter()
-        .rfind(|event| event.kind == super::event_kind::WRAPPER_LAUNCHED)
+        .rfind(|event| event.kind == EventKind::WrapperLaunched)
         .is_some_and(|event| {
             event.payload["pid"].as_u64() == Some(u64::from(pid))
                 && match event.payload["start"].as_str() {
@@ -163,7 +164,7 @@ pub fn launched_as(events: &[super::RunEvent], pid: u32, own_start: Option<&str>
 fn last_session_events(events: &[super::RunEvent]) -> &[super::RunEvent] {
     let from = events
         .iter()
-        .rposition(|event| event.kind == super::event_kind::WORKSPACE_CREATED)
+        .rposition(|event| event.kind == EventKind::WorkspaceCreated)
         .unwrap_or(0);
     &events[from..]
 }
@@ -176,7 +177,7 @@ pub fn launch_of(events: &[super::RunEvent], pid: u32) -> Option<BackgroundHandl
     last_session_events(events)
         .iter()
         .rev()
-        .filter(|event| event.kind == super::event_kind::WRAPPER_LAUNCHED)
+        .filter(|event| event.kind == EventKind::WrapperLaunched)
         .find(|event| event.payload["pid"].as_u64() == Some(u64::from(pid)))
         .and_then(|event| {
             Some(BackgroundHandle {
@@ -209,7 +210,7 @@ pub fn wrapper_is_recorded(events: &[super::RunEvent], pid: u32, start_now: Opti
 pub fn background_turn(events: &[super::RunEvent], pid: u32) -> Option<BackgroundHandle> {
     let session = last_session_events(events);
     let background = session.first().is_some_and(|event| {
-        event.kind == super::event_kind::WORKSPACE_CREATED
+        event.kind == EventKind::WorkspaceCreated
             && event.payload["workspace_id"]
                 .as_str()
                 .is_some_and(is_background)
@@ -220,7 +221,7 @@ pub fn background_turn(events: &[super::RunEvent], pid: u32) -> Option<Backgroun
     session
         .iter()
         .rev()
-        .filter(|event| event.kind == super::event_kind::TURN_STARTED)
+        .filter(|event| event.kind == EventKind::TurnStarted)
         .find(|event| event.payload["pid"].as_u64() == Some(u64::from(pid)))
         .and_then(|event| {
             Some(BackgroundHandle {
@@ -239,18 +240,18 @@ pub fn background_turn(events: &[super::RunEvent], pid: u32) -> Option<Backgroun
 /// (ADR-t1404-1 decision 3).
 pub fn last_turn_of(events: &[super::RunEvent], handle: &str) -> Option<BackgroundHandle> {
     let launched = events.iter().rposition(|event| {
-        event.kind == super::event_kind::WRAPPER_LAUNCHED
+        event.kind == EventKind::WrapperLaunched
             && event.payload["workspace_id"].as_str() == Some(handle)
     })?;
     events[launched + 1..]
         .iter()
         .take_while(|event| {
             !matches!(
-                event.kind.as_str(),
-                super::event_kind::WORKSPACE_CREATED | super::event_kind::WRAPPER_LAUNCHED
+                event.kind.known(),
+                Some(EventKind::WorkspaceCreated | EventKind::WrapperLaunched)
             )
         })
-        .filter(|event| event.kind == super::event_kind::TURN_STARTED)
+        .filter(|event| event.kind == EventKind::TurnStarted)
         .last()
         .and_then(|event| {
             let pid = u32::try_from(event.payload["pid"].as_u64()?).ok()?;
@@ -268,7 +269,7 @@ pub fn last_turn_of(events: &[super::RunEvent], handle: &str) -> Option<Backgrou
 pub fn last_planner_turn(events: &[super::RunEvent]) -> Option<BackgroundHandle> {
     events
         .iter()
-        .rfind(|event| event.kind == super::event_kind::TURN_STARTED)
+        .rfind(|event| event.kind == EventKind::TurnStarted)
         .and_then(|event| {
             let pid = u32::try_from(event.payload["pid"].as_u64()?).ok()?;
             Some(BackgroundHandle {
@@ -316,7 +317,7 @@ impl BackgroundSession {
 pub fn last_background_session(events: &[super::RunEvent]) -> Option<BackgroundSession> {
     events
         .iter()
-        .rfind(|event| event.kind == super::event_kind::WRAPPER_LAUNCHED)
+        .rfind(|event| event.kind == EventKind::WrapperLaunched)
         .and_then(|event| {
             BackgroundSession::of(
                 event.payload["workspace_id"].as_str()?,
@@ -332,10 +333,10 @@ pub fn last_background_session(events: &[super::RunEvent]) -> Option<BackgroundS
 pub fn current_background_session(events: &[super::RunEvent]) -> Option<BackgroundSession> {
     let launched = events
         .iter()
-        .rposition(|event| event.kind == super::event_kind::WRAPPER_LAUNCHED)?;
+        .rposition(|event| event.kind == EventKind::WrapperLaunched)?;
     if events[launched + 1..]
         .iter()
-        .any(|event| event.kind == super::event_kind::WORKSPACE_CREATED)
+        .any(|event| event.kind == EventKind::WorkspaceCreated)
     {
         return None;
     }

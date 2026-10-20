@@ -401,8 +401,8 @@ fn a_handoff_leaves_the_session_running_and_the_next_process_drives_it_on() {
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind.starts_with("supervisor_") && event.task_id.is_none())
-        .map(|event| (event.kind, event.payload))
+        .filter(|event| event.kind.as_str().starts_with("supervisor_") && event.task_id.is_none())
+        .map(|event| (event.kind.to_string(), event.payload))
         .collect();
     let kinds: Vec<&str> = marks.iter().map(|(kind, _)| kind.as_str()).collect();
     assert_eq!(
@@ -707,7 +707,7 @@ fn auto_update_builds_runtime_landings_and_retries_on_the_answer() {
     let of = |kind: &str, sha: &str| {
         updates()
             .iter()
-            .filter(|u| u.kind == kind && u.payload["commit"] == sha)
+            .filter(|u| u.kind.as_str() == kind && u.payload["commit"] == sha)
             .count()
     };
     let wait_failed = |sha: &str, times: usize| {
@@ -730,7 +730,7 @@ fn auto_update_builds_runtime_landings_and_retries_on_the_answer() {
     wait_failed(&seed, 1);
     let failed = updates()
         .into_iter()
-        .find(|u| u.kind == "update_failed")
+        .find(|u| u.kind == EventKind::UpdateFailed)
         .unwrap();
     assert_eq!(failed.payload["stage"], "build", "{failed:?}");
     let status = runtime::status(&db).unwrap();
@@ -756,7 +756,7 @@ fn auto_update_builds_runtime_landings_and_retries_on_the_answer() {
     supervise_with(&db, &repo, &backend, &options).unwrap();
     assert_eq!(of("update_started", &docs), 1, "{:?}", updates());
     assert!(queue.read_ask(ask.id).unwrap().closed_at.is_some());
-    assert!(updates().iter().any(|u| u.kind == "update_retry"));
+    assert!(updates().iter().any(|u| u.kind == EventKind::UpdateRetry));
     wait_failed(&docs, 1);
 
     // A change of the runtime starts the job for it.
@@ -776,7 +776,7 @@ fn auto_update_builds_runtime_landings_and_retries_on_the_answer() {
         .unwrap();
     supervise_with(&db, &repo, &backend, &options).unwrap();
     let latest = updates().remove(0);
-    assert_eq!(latest.kind, "update_failed", "{latest:?}");
+    assert_eq!(latest.kind, EventKind::UpdateFailed, "{latest:?}");
     assert_eq!(latest.payload["stage"], "interrupted", "{latest:?}");
     assert_eq!(of("update_started", &source), 2);
     // So is one that died after it put the old binary back.
@@ -788,7 +788,7 @@ fn auto_update_builds_runtime_landings_and_retries_on_the_answer() {
         .unwrap();
     supervise_with(&db, &repo, &backend, &options).unwrap();
     let latest = updates().remove(0);
-    assert_eq!(latest.kind, "update_failed", "{latest:?}");
+    assert_eq!(latest.kind, EventKind::UpdateFailed, "{latest:?}");
     assert_eq!(latest.payload["after"], "update_restored", "{latest:?}");
     assert_eq!(of("update_started", &source), 2);
     queue
@@ -1110,7 +1110,7 @@ fn recorded_millis(
     let event = detail
         .events
         .iter()
-        .find(|e| e.kind == kind && keep(&e.payload))
+        .find(|e| e.kind.as_str() == kind && keep(&e.payload))
         .unwrap_or_else(|| panic!("no {kind}: {:?}", event_kinds(detail)));
     dagq::domain::stats::timestamp_millis(&event.created_at).unwrap()
 }
@@ -1271,7 +1271,7 @@ fn start_resume_wrapper(
         .unwrap()
         .iter()
         .rev()
-        .find(|e| e.kind == "workspace_created")
+        .find(|e| e.kind == EventKind::WorkspaceCreated)
         .and_then(|e| e.payload["workspace_id"].as_str().map(str::to_owned))
         .expect("the resume's handle");
     let pid = backend

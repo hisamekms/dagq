@@ -32,7 +32,7 @@
 use super::*;
 use crate::application::queue_service::{QueueServiceControl, ServiceProbe};
 use crate::domain::queue_service::{
-    QUEUE_SERVICE_ATTENTION_KINDS, QUEUE_SERVICE_DOWN, QUEUE_SERVICE_STOP_REQUESTED, ServiceState,
+    QUEUE_SERVICE_ATTENTION_KINDS, QUEUE_SERVICE_STOP_REQUESTED, ServiceState,
 };
 
 /// How often a supervisor at work looks at the service.
@@ -273,7 +273,7 @@ impl HostOpsState {
 
     fn queue_service_attention_stands(&mut self, env: &mut HostEnv<'_>) -> bool {
         match env.queue.latest_queue_event(&QUEUE_SERVICE_ATTENTION_KINDS) {
-            Ok(latest) => latest.is_some_and(|event| event.kind == QUEUE_SERVICE_DOWN),
+            Ok(latest) => latest.is_some_and(|event| event.kind == EventKind::QueueServiceDown),
             Err(error) => {
                 warn!(error = %format_args!("{error:#}"), "the queue service's events could not be read: {error:#}");
                 false

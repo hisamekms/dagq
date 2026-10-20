@@ -4,6 +4,7 @@
 //! records a snapshot of it at its triggers (ADR-0070 decision 3,
 //! [`pending`] and [`record_snapshot`]).
 
+use crate::domain::EventKind;
 use crate::domain::LeaseToken;
 use std::collections::HashMap;
 
@@ -193,7 +194,7 @@ pub fn pending(
         let after = read.triggers_through.max(checked.unwrap_or(0));
         if after < through {
             let events = queue.events_of_between(
-                &TRIGGER_KINDS,
+                &TRIGGER_KINDS.map(EventKind::as_str),
                 EventId::new(after),
                 EventId::new(through),
                 TRIGGERS_READ,

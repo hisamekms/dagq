@@ -5,6 +5,7 @@
 //! into an interactive session as the next turn's request.
 use crate::common;
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use dagq::domain::{AskReason, worker::WorkerMode};
 use dagq::{application::RunFiles, runtime::RunFilesPort};
@@ -186,7 +187,7 @@ esac"#
             .unwrap()
             .events
             .iter()
-            .any(|e| e.kind == "run_waiting_started")
+            .any(|e| e.kind == EventKind::RunWaitingStarted)
     });
     let ask = SqliteQueue::open(&db)
         .unwrap()
@@ -648,7 +649,7 @@ fn a_stop_answer_to_a_run_out_of_its_slot_waits_for_the_slot() {
             .unwrap()
             .events
             .iter()
-            .any(|e| e.kind == "run_waiting_started")
+            .any(|e| e.kind == EventKind::RunWaitingStarted)
     });
     let ask = stalled_asks(&SqliteQueue::open(&db).unwrap()).remove(0);
     assert_eq!(ask.options, ["wait", "stop", "propose"]);
@@ -695,7 +696,7 @@ fn a_stop_answer_to_a_run_out_of_its_slot_waits_for_the_slot() {
     let stop = detail
         .events
         .iter()
-        .position(|e| e.kind == "stall_resolved" && e.payload["outcome"] == "answered_stop")
+        .position(|e| e.kind == EventKind::StallResolved && e.payload["outcome"] == "answered_stop")
         .expect("answered_stop");
     assert!(position(&kinds, "run_slot_regained") < stop, "{kinds:?}");
     assert!(
@@ -838,7 +839,7 @@ esac"#
             .unwrap()
             .events
             .iter()
-            .any(|e| e.kind == "run_waiting_started")
+            .any(|e| e.kind == EventKind::RunWaitingStarted)
     });
     let ask = SqliteQueue::open(&db)
         .unwrap()

@@ -7,6 +7,7 @@
 //! settled can be read from one place; and the bundles of drafts the
 //! runtime's planners were opened for (ADR-t807-1) with their sizes. Derived from `run_events` and the
 //! origin each such draft has (`draft_origins`); no table of its own.
+use crate::domain::EventKind;
 use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
@@ -116,7 +117,10 @@ pub fn draft_flow(
             )
         })
         .collect();
-    for event in events.iter().filter(|e| e.kind == "follow_up_registered") {
+    for event in events
+        .iter()
+        .filter(|e| e.kind == EventKind::FollowUpRegistered)
+    {
         if let Some(task_id) = event.payload.get("task_id").and_then(Value::as_i64) {
             drafts
                 .entry(TaskId::new(task_id))
@@ -132,10 +136,10 @@ pub fn draft_flow(
     let mut bundles: BTreeMap<i64, usize> = BTreeMap::new();
     for event in events {
         let in_window = event.id > after && event.id <= upto && counts(event.task_id);
-        if event.kind == "run_integrated" && in_window {
+        if event.kind == EventKind::RunIntegrated && in_window {
             flow.landings += 1;
         }
-        if event.kind == "draft_planner_opened"
+        if event.kind == EventKind::DraftPlannerOpened
             && in_window
             && let Some(planner) = event.payload["planner_id"].as_i64()
         {
@@ -146,14 +150,14 @@ pub fn draft_flow(
         let Some(draft) = event.task_id.and_then(|task_id| drafts.get_mut(&task_id)) else {
             continue;
         };
-        match event.kind.as_str() {
-            "task_created" => {
+        match event.kind.known() {
+            Some(EventKind::TaskCreated) => {
                 if let Some(at) = timestamp_millis(&event.created_at) {
                     draft.created = Some((event.id, at));
                 }
                 draft.draft_at_end = event.id <= upto;
             }
-            "task_status_changed" => {
+            Some(EventKind::TaskStatusChanged) => {
                 let to = event.payload["to"].as_str();
                 if event.payload["from"] == "draft" && draft.settled.is_none() {
                     draft.settled = Some((event.id, to == Some("canceled")));
@@ -162,7 +166,9 @@ pub fn draft_flow(
                     draft.draft_at_end = to == Some("draft");
                 }
             }
-            "ask_answered" if in_window && event.payload["option"] == "keep_draft" => {
+            Some(EventKind::AskAnswered)
+                if in_window && event.payload["option"] == "keep_draft" =>
+            {
                 kept.extend(event.task_id);
             }
             _ => {}
@@ -217,7 +223,7 @@ mod tests {
             task_id: Some(TaskId::new(task_id)),
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: format!("1970-01-01T00:{:02}:{:02}.000Z", secs / 60, secs % 60),
             actor: None,

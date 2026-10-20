@@ -7,6 +7,7 @@
 //! areas are read from Git, not yet from the record of it the supervisor
 //! keeps ([`crate::domain::stats::main_log`]).
 
+use crate::domain::EventKind;
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
@@ -207,7 +208,7 @@ fn finish(
     let landings: Vec<crate::domain::RunEvent> = events
         .iter()
         .filter(|event| {
-            event.kind == "run_integrated"
+            event.kind == EventKind::RunIntegrated
                 && event
                     .run_id
                     .as_ref()
@@ -521,7 +522,7 @@ mod tests {
             task_id: Some(TaskId::new(1)),
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: at.to_owned(),
             actor: None,

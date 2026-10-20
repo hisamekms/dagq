@@ -31,6 +31,8 @@
 //!   of outcome `left_to_phase`, which is its own end).
 //!
 //! A detection with no end recorded yet is `pending`.
+use crate::domain::EventKind;
+use crate::domain::run::{AskOpened, RecoveryRecord, StallNudged, StallResolved, restore_payload};
 use std::collections::BTreeMap;
 
 use serde::Serialize;
@@ -170,6 +172,21 @@ fn text<'a>(event: &'a RunEvent, key: &str) -> Option<&'a str> {
     event.payload.get(key).and_then(Value::as_str)
 }
 
+/// `event` restored when it is a `stall_resolved`.
+fn resolution(event: &RunEvent) -> Option<StallResolved<'_>> {
+    (event.kind == EventKind::StallResolved).then(|| restore_payload(&event.payload))
+}
+
+/// `event` restored when it is a `recovery_requested`.
+fn recovery_requested(event: &RunEvent) -> Option<RecoveryRecord<'_>> {
+    (event.kind == EventKind::RecoveryRequested).then(|| restore_payload(&event.payload))
+}
+
+/// `event` restored when it is a `recovery_finished`.
+fn recovery_finished(event: &RunEvent) -> Option<RecoveryRecord<'_>> {
+    (event.kind == EventKind::RecoveryFinished).then(|| restore_payload(&event.payload))
+}
+
 /// The setting a recorded name stands for; the idle one when missing.
 fn threshold_named(name: Option<&str>) -> &'static str {
     match name {
@@ -182,10 +199,14 @@ fn threshold_named(name: Option<&str>) -> &'static str {
 
 /// Whether `event` ended the run's session or the run.
 fn ends_session(event: &RunEvent) -> bool {
-    let ended = match event.kind.as_str() {
+    let ended = match event.kind.known() {
         // A session handed to validation alive has not ended (ADR-0027).
-        "supervision_finished" => event.payload.get("session_live") != Some(&Value::Bool(true)),
-        "workspace_closed" | "run_recovered" | "run_integrated" => true,
+        Some(EventKind::SupervisionFinished) => {
+            event.payload.get("session_live") != Some(&Value::Bool(true))
+        }
+        Some(EventKind::WorkspaceClosed | EventKind::RunRecovered | EventKind::RunIntegrated) => {
+            true
+        }
         _ => false,
     };
     ended || matches!(text(event, "status"), Some("failed" | "interrupted"))
@@ -229,22 +250,27 @@ pub fn detections(events: &[RunEvent], now_ms: i64) -> Vec<Detection> {
                 outcome: PENDING.to_owned(),
                 resolved_after_secs: None,
             };
-            match event.kind.as_str() {
-                "stall_nudged" => {
+            match event.kind.known() {
+                Some(EventKind::StallNudged) => {
+                    let nudged = restore_payload::<StallNudged>(&event.payload);
                     let mut nudge = detection(IDLE, "nudge");
                     nudge.threshold_secs = int(event, "threshold_secs");
-                    nudge.detected_after_secs = int(event, "idle_secs");
+                    nudge.detected_after_secs = nudged.idle_secs;
                     if let Some(end) = later.iter().find(|e| {
-                        e.kind == "stall_resolved"
-                            && text(e, "detection") == Some("nudge")
-                            && e.payload.get("phase") == event.payload.get("phase")
+                        resolution(e).is_some_and(|resolved| {
+                            resolved.detection == Some("nudge") && resolved.phase == nudged.phase
+                        })
                     }) {
                         resolved_by(&mut nudge, end);
                     }
                     found.push(nudge);
                 }
-                "recovery_requested" if text(event, "alert") == Some("stalled") => {
-                    let threshold = if text(event, "reason") == Some("send_unconfirmed") {
+                Some(EventKind::RecoveryRequested)
+                    if restore_payload::<RecoveryRecord>(&event.payload).alert
+                        == Some("stalled") =>
+                {
+                    let requested = restore_payload::<RecoveryRecord>(&event.payload);
+                    let threshold = if requested.reason == Some("send_unconfirmed") {
                         SEND
                     } else {
                         IDLE
@@ -252,22 +278,25 @@ pub fn detections(events: &[RunEvent], now_ms: i64) -> Vec<Detection> {
                     let mut job = detection(threshold, "recovery");
                     job.threshold_secs = int(event, "threshold_secs");
                     job.detected_after_secs =
-                        int(event, "idle_secs").or_else(|| int(event, "waited_secs"));
+                        requested.idle_secs.or_else(|| int(event, "waited_secs"));
                     if let Some(end) = later.iter().find(|e| {
-                        e.kind == "stall_resolved"
-                            && text(e, "detection") == Some("recovery")
-                            && e.payload.get("attempt") == event.payload.get("attempt")
+                        resolution(e).is_some_and(|resolved| {
+                            resolved.detection == Some("recovery")
+                                && resolved.attempt == requested.attempt
+                        })
                     }) {
                         resolved_by(&mut job, end);
                     }
                     found.push(job);
                 }
-                "ask_opened" if text(event, "kind") == Some("stalled") => {
-                    let id = event.payload.get("ask_id");
+                Some(EventKind::AskOpened)
+                    if restore_payload::<AskOpened>(&event.payload).kind == Some("stalled") =>
+                {
+                    let id = restore_payload::<AskOpened>(&event.payload).ask_id;
                     let end = later.iter().find(|e| {
-                        e.kind == "stall_resolved"
-                            && text(e, "detection") == Some("ask")
-                            && e.payload.get("ask_id") == id
+                        resolution(e).is_some_and(|resolved| {
+                            resolved.detection == Some("ask") && resolved.ask_id == id
+                        })
                     });
                     // An `idle_process` job's ask not ended yet is told by
                     // the `recovery_finished` that names it.
@@ -275,9 +304,9 @@ pub fn detections(events: &[RunEvent], now_ms: i64) -> Vec<Detection> {
                         .is_none()
                         .then(|| {
                             later.iter().find(|e| {
-                                e.kind == "recovery_finished"
-                                    && e.payload.get("ask_id") == id
-                                    && text(e, "alert") == Some("idle_process")
+                                recovery_finished(e).is_some_and(|finished| {
+                                    finished.ask_id == id && finished.alert == Some("idle_process")
+                                })
                             })
                         })
                         .flatten();
@@ -294,8 +323,9 @@ pub fn detections(events: &[RunEvent], now_ms: i64) -> Vec<Detection> {
                     }
                     found.push(ask);
                 }
-                "recovery_finished"
-                    if text(event, "alert") == Some("idle_process")
+                Some(EventKind::RecoveryFinished)
+                    if restore_payload::<RecoveryRecord>(&event.payload).alert
+                        == Some("idle_process")
                         && text(event, "outcome") == Some("left_to_phase") =>
                 {
                     // Left to the phase's own timeout: no ask, so this is
@@ -305,7 +335,7 @@ pub fn detections(events: &[RunEvent], now_ms: i64) -> Vec<Detection> {
                     idle_job_detected(&mut left, &run[..i], event);
                     found.push(left);
                 }
-                "submit_retried" if text(event, "input") != Some("exit") => {
+                Some(EventKind::SubmitRetried) if text(event, "input") != Some("exit") => {
                     let mut retry = detection(SEND, "enter_retry");
                     retry.outcome = if event.payload.get("submitted") == Some(&Value::Bool(true)) {
                         "resolved_by_enter"
@@ -315,7 +345,7 @@ pub fn detections(events: &[RunEvent], now_ms: i64) -> Vec<Detection> {
                     .to_owned();
                     found.push(retry);
                 }
-                "submit_resent" => {
+                Some(EventKind::SubmitResent) => {
                     let waited = int(event, "waited_secs");
                     let mut resend = detection(SEND, "resend");
                     resend.threshold_secs = waited;
@@ -326,7 +356,7 @@ pub fn detections(events: &[RunEvent], now_ms: i64) -> Vec<Detection> {
                     let bound = later
                         .iter()
                         .take_while(|e| {
-                            e.kind != "submit_resent"
+                            e.kind != EventKind::SubmitResent
                                 && at(e).zip(sent).zip(waited).is_some_and(
                                     |((at, sent), waited)| at - sent <= 2 * waited * 1000,
                                 )
@@ -338,9 +368,9 @@ pub fn detections(events: &[RunEvent], now_ms: i64) -> Vec<Detection> {
                     // input box (whose check then ends without one).
                     if let Some(end) = bound.iter().find(|e| {
                         same_what(e)
-                            && ((e.kind == "submit_not_started"
+                            && ((e.kind == EventKind::SubmitNotStarted
                                 && e.payload.get("resent") == Some(&Value::Bool(true)))
-                                || (e.kind == "submit_unconfirmed"
+                                || (e.kind == EventKind::SubmitUnconfirmed
                                     && text(e, "input") != Some("exit")))
                     }) {
                         resend.outcome = "escalated".to_owned();
@@ -363,13 +393,15 @@ pub fn detections(events: &[RunEvent], now_ms: i64) -> Vec<Detection> {
                     }
                     found.push(resend);
                 }
-                "submit_unconfirmed" | "submit_not_started"
+                Some(EventKind::SubmitUnconfirmed | EventKind::SubmitNotStarted)
                     if text(event, "input") != Some("exit") =>
                 {
                     // The `answer_prompt` ask the supervisor opens right
                     // after; none when one was open already.
                     let Some(opened) = later.first().filter(|e| {
-                        e.kind == "ask_opened" && text(e, "kind") == Some("answer_prompt")
+                        e.kind == EventKind::AskOpened
+                            && restore_payload::<AskOpened>(&e.payload).kind
+                                == Some("answer_prompt")
                     }) else {
                         continue;
                     };
@@ -377,16 +409,16 @@ pub fn detections(events: &[RunEvent], now_ms: i64) -> Vec<Detection> {
                         event_id: opened.id,
                         ..detection(SEND, "ask")
                     };
-                    if event.kind == "submit_not_started" {
+                    if event.kind == EventKind::SubmitNotStarted {
                         ask.threshold_secs = int(event, "waited_secs");
                         ask.detected_after_secs = int(event, "waited_secs");
                     }
-                    let id = opened.payload.get("ask_id");
+                    let id = restore_payload::<AskOpened>(&opened.payload).ask_id;
                     let after: Vec<&&RunEvent> =
                         later.iter().filter(|e| e.id > opened.id).collect();
                     let answered = after
                         .iter()
-                        .position(|e| e.kind == "ask_answered" && e.payload.get("ask_id") == id);
+                        .position(|e| e.kind == EventKind::AskAnswered && int(e, "ask_id") == id);
                     let ended_before = |upto: usize| after[..upto].iter().any(|e| ends_session(e));
                     match answered {
                         Some(j) => {
@@ -443,26 +475,30 @@ pub fn run_ended_resolutions(
     answer_of: &dyn Fn(i64) -> Option<String>,
     now_ms: i64,
 ) -> Vec<Value> {
-    let resolved = |later: &[RunEvent], detection: &str, same: &dyn Fn(&RunEvent) -> bool| {
+    let resolved = |later: &[RunEvent],
+                    detection: &str,
+                    same: &dyn Fn(&RunEvent, &StallResolved<'_>) -> bool| {
         later.iter().any(|e| {
-            e.kind == "stall_resolved" && text(e, "detection") == Some(detection) && same(e)
+            resolution(e)
+                .is_some_and(|resolved| resolved.detection == Some(detection) && same(e, &resolved))
         })
     };
     // The idle's own `stalled` ask (not one of another alert's job).
     let idle_ask = |e: &RunEvent| {
-        e.kind == "ask_opened"
-            && text(e, "kind") == Some("stalled")
-            && ask_threshold(events, e.payload.get("ask_id")).0 == IDLE
+        e.kind == EventKind::AskOpened && {
+            let opened = restore_payload::<AskOpened>(&e.payload);
+            opened.kind == Some("stalled") && ask_threshold(events, opened.ask_id).0 == IDLE
+        }
     };
     let idle_job = |e: &RunEvent| {
-        e.kind == "recovery_requested"
-            && text(e, "alert") == Some("stalled")
-            && text(e, "reason") != Some("send_unconfirmed")
+        recovery_requested(e).is_some_and(|requested| {
+            requested.alert == Some("stalled") && requested.reason != Some("send_unconfirmed")
+        })
     };
     let mut ends = Vec::new();
     for (i, event) in events.iter().enumerate() {
         let later = &events[i + 1..];
-        let end = |phase: Option<&Value>,
+        let end = |phase: Option<&str>,
                    detection: &str,
                    threshold: &str,
                    threshold_secs: Option<i64>,
@@ -471,7 +507,7 @@ pub fn run_ended_resolutions(
             let (outcome, end_ms) =
                 outcome.map_or(("run_ended", Some(now_ms)), |(outcome, e)| (outcome, at(e)));
             serde_json::json!({
-                "phase": phase.cloned().unwrap_or_else(|| Value::from("session")),
+                "phase": phase.unwrap_or("session"),
                 "detection": detection,
                 "threshold": threshold,
                 "threshold_secs": threshold_secs,
@@ -480,12 +516,16 @@ pub fn run_ended_resolutions(
                 "resolved_after_secs": secs(at(event), end_ms).unwrap_or(0).max(0),
             })
         };
-        match event.kind.as_str() {
-            "stall_nudged" => {
-                let phase = event.payload.get("phase");
-                if !resolved(later, "nudge", &|e| e.payload.get("phase") == phase) {
+        match event.kind.known() {
+            Some(EventKind::StallNudged) => {
+                let nudged = restore_payload::<StallNudged>(&event.payload);
+                let phase = nudged.phase;
+                if !resolved(later, "nudge", &|_, resolved| resolved.phase == phase) {
                     let escalated = later.iter().find(|e| {
-                        (idle_job(e) && e.payload.get("phase").is_none_or(|p| Some(p) == phase))
+                        (idle_job(e)
+                            && e.payload
+                                .get("phase")
+                                .is_none_or(|p| p.as_str().is_some() && p.as_str() == phase))
                             || idle_ask(e)
                     });
                     ends.push(end(
@@ -493,20 +533,23 @@ pub fn run_ended_resolutions(
                         "nudge",
                         IDLE,
                         int(event, "threshold_secs"),
-                        int(event, "idle_secs"),
+                        nudged.idle_secs,
                         escalated.map(|e| ("escalated", e)),
                     ));
                 }
             }
-            "recovery_requested" if text(event, "alert") == Some("stalled") => {
-                let attempt = event.payload.get("attempt");
+            Some(EventKind::RecoveryRequested)
+                if restore_payload::<RecoveryRecord>(&event.payload).alert == Some("stalled") =>
+            {
+                let requested = restore_payload::<RecoveryRecord>(&event.payload);
+                let attempt = requested.attempt;
                 let send = event.payload.get("send_event");
-                if resolved(later, "recovery", &|e| {
-                    e.payload.get("attempt") == attempt && e.payload.get("send_event") == send
+                if resolved(later, "recovery", &|e, resolved| {
+                    resolved.attempt == attempt && e.payload.get("send_event") == send
                 }) {
                     continue;
                 }
-                let threshold = if text(event, "reason") == Some("send_unconfirmed") {
+                let threshold = if requested.reason == Some("send_unconfirmed") {
                     SEND
                 } else {
                     IDLE
@@ -517,12 +560,12 @@ pub fn run_ended_resolutions(
                         later.iter().find(|e| {
                             // An ask open already (`already_asked`) is no
                             // escalation of the watch's.
-                            (e.kind == "recovery_finished"
-                                && text(e, "alert") == Some("stalled")
-                                && e.payload.get("attempt") == attempt
-                                && e.payload.get("reason") == event.payload.get("reason")
-                                && e.payload.get("escalated") == Some(&Value::Bool(true)))
-                                || idle_job(e)
+                            recovery_finished(e).is_some_and(|finished| {
+                                finished.alert == Some("stalled")
+                                    && finished.attempt == attempt
+                                    && finished.reason == requested.reason
+                                    && e.payload.get("escalated") == Some(&Value::Bool(true))
+                            }) || idle_job(e)
                                 || idle_ask(e)
                         })
                     })
@@ -532,31 +575,32 @@ pub fn run_ended_resolutions(
                     "recovery",
                     threshold,
                     int(event, "threshold_secs"),
-                    int(event, "idle_secs").or_else(|| int(event, "waited_secs")),
+                    requested.idle_secs.or_else(|| int(event, "waited_secs")),
                     escalated.map(|e| ("escalated", e)),
                 );
-                payload["attempt"] = attempt.cloned().unwrap_or(Value::Null);
+                payload["attempt"] = serde_json::json!(attempt);
                 if let Some(send) = send {
                     payload["send_event"] = send.clone();
                     payload["reason"] = Value::from("send_unconfirmed");
                 }
                 ends.push(payload);
             }
-            "ask_opened" if text(event, "kind") == Some("stalled") => {
-                let id = event.payload.get("ask_id");
-                if resolved(later, "ask", &|e| e.payload.get("ask_id") == id) {
+            Some(EventKind::AskOpened)
+                if restore_payload::<AskOpened>(&event.payload).kind == Some("stalled") =>
+            {
+                let id = restore_payload::<AskOpened>(&event.payload).ask_id;
+                if resolved(later, "ask", &|_, resolved| resolved.ask_id == id) {
                     continue;
                 }
                 let (threshold, requested) = ask_threshold(events, id);
                 // A person answered it while no supervisor applied it.
                 let answered = later.iter().find(|e| {
-                    e.kind == "ask_answered"
-                        && e.payload.get("ask_id") == id
+                    e.kind == EventKind::AskAnswered
+                        && int(e, "ask_id") == id
                         && e.payload.get("runtime_closed") != Some(&Value::Bool(true))
                 });
                 let answered = answered.map(|e| {
                     let answer = id
-                        .and_then(Value::as_i64)
                         .and_then(answer_of)
                         .or_else(|| text(e, "option").map(str::to_owned));
                     if answer.as_deref().is_some_and(answer_waits) {
@@ -570,10 +614,14 @@ pub fn run_ended_resolutions(
                     "ask",
                     threshold,
                     requested.and_then(|e| int(e, "threshold_secs")),
-                    requested.and_then(|e| int(e, "idle_secs").or_else(|| int(e, "waited_secs"))),
+                    requested.and_then(|e| {
+                        restore_payload::<RecoveryRecord>(&e.payload)
+                            .idle_secs
+                            .or_else(|| int(e, "waited_secs"))
+                    }),
                     answered,
                 );
-                payload["ask_id"] = id.cloned().unwrap_or(Value::Null);
+                payload["ask_id"] = serde_json::json!(id);
                 ends.push(payload);
             }
             _ => {}
@@ -598,25 +646,25 @@ pub fn answer_waits(answer: &str) -> bool {
 /// The setting of the `stalled` ask `id` among `events`, told by the
 /// recovery job that escalated to it, and that job's request (its value
 /// and idle time).
-fn ask_threshold<'a>(
-    events: &'a [RunEvent],
-    id: Option<&Value>,
-) -> (&'static str, Option<&'a RunEvent>) {
+fn ask_threshold(events: &[RunEvent], id: Option<i64>) -> (&'static str, Option<&RunEvent>) {
     let finished = events
         .iter()
-        .find(|e| e.kind == "recovery_finished" && e.payload.get("ask_id") == id);
-    let threshold = match finished.and_then(|e| text(e, "alert")) {
+        .find_map(|e| recovery_finished(e).filter(|finished| finished.ask_id == id));
+    let threshold = match finished.as_ref().and_then(|finished| finished.alert) {
         Some("idle_process") => IDLE_PROCESS,
         Some("long_background") => BACKGROUND,
-        _ if finished.and_then(|e| text(e, "reason")) == Some("send_unconfirmed") => SEND,
+        _ if finished.as_ref().and_then(|finished| finished.reason) == Some("send_unconfirmed") => {
+            SEND
+        }
         _ => IDLE,
     };
     let requested = finished.and_then(|finished| {
         events.iter().rev().find(|e| {
-            e.kind == "recovery_requested"
-                && e.payload.get("alert") == finished.payload.get("alert")
-                && e.payload.get("attempt") == finished.payload.get("attempt")
-                && e.payload.get("reason") == finished.payload.get("reason")
+            recovery_requested(e).is_some_and(|requested| {
+                requested.alert == finished.alert
+                    && requested.attempt == finished.attempt
+                    && requested.reason == finished.reason
+            })
         })
     });
     (threshold, requested)
@@ -628,15 +676,16 @@ fn ask_threshold<'a>(
 /// that job had finished already: an escalation after the jobs were used
 /// up starts no job and names the last one's attempt.
 fn idle_job_detected(detection: &mut Detection, before: &[&RunEvent], finished: &RunEvent) {
+    let attempt = restore_payload::<RecoveryRecord>(&finished.payload).attempt;
     let Some(requested) = before
         .iter()
         .rev()
         .find(|e| {
-            matches!(e.kind.as_str(), "recovery_requested" | "recovery_finished")
-                && text(e, "alert") == Some("idle_process")
-                && e.payload.get("attempt") == finished.payload.get("attempt")
+            recovery_requested(e)
+                .or_else(|| recovery_finished(e))
+                .is_some_and(|job| job.alert == Some("idle_process") && job.attempt == attempt)
         })
-        .filter(|e| e.kind == "recovery_requested")
+        .filter(|e| e.kind == EventKind::RecoveryRequested)
     else {
         return;
     };
@@ -654,12 +703,14 @@ fn idle_job_detected(detection: &mut Detection, before: &[&RunEvent], finished: 
 
 /// Take the end the supervisor recorded in `stall_resolved`.
 fn resolved_by(detection: &mut Detection, end: &RunEvent) {
-    if let Some(outcome) = text(end, "outcome") {
+    let resolved = restore_payload::<StallResolved>(&end.payload);
+    if let Some(outcome) = resolved.outcome {
         detection.outcome = outcome.to_owned();
     }
     detection.threshold_secs = int(end, "threshold_secs").or(detection.threshold_secs);
-    detection.detected_after_secs =
-        int(end, "detected_after_secs").or(detection.detected_after_secs);
+    detection.detected_after_secs = resolved
+        .detected_after_secs
+        .or(detection.detected_after_secs);
     detection.resolved_after_secs = int(end, "resolved_after_secs");
 }
 
@@ -672,15 +723,15 @@ pub fn preemptions(events: &[RunEvent]) -> Vec<Preemption> {
     let mut found = Vec::new();
     for run in by_run(events) {
         for (i, event) in run.iter().enumerate() {
-            match event.kind.as_str() {
-                "stall_preempted" => found.push(Preemption {
+            match event.kind.known() {
+                Some(EventKind::StallPreempted) => found.push(Preemption {
                     event_id: event.id,
                     task_id: event.task_id,
                     threshold: threshold_named(text(event, "threshold")),
                     via: "input",
                     threshold_secs: int(event, "threshold_secs"),
                 }),
-                "run_recovered" if text(event, "by") != Some("supervisor") => {
+                Some(EventKind::RunRecovered) if text(event, "by") != Some("supervisor") => {
                     let Some(previous) = text(event, "previous_status")
                         .and_then(|status| status.parse::<RunStatus>().ok())
                     else {
@@ -695,8 +746,11 @@ pub fn preemptions(events: &[RunEvent]) -> Vec<Preemption> {
                         .filter(|e| at(e).is_some_and(|at| at >= start))
                         .collect();
                     let detected_or_done = phase.iter().any(|e| {
-                        matches!(e.kind.as_str(), "receipt_observed" | "stall_nudged")
-                            || (e.kind == "ask_opened" && text(e, "kind") == Some("stalled"))
+                        matches!(
+                            e.kind.known(),
+                            Some(EventKind::ReceiptObserved | EventKind::StallNudged)
+                        ) || (e.kind == EventKind::AskOpened
+                            && restore_payload::<AskOpened>(&e.payload).kind == Some("stalled"))
                     });
                     if detected_or_done || waits_for_a_person(before, start) {
                         continue;
@@ -721,26 +775,29 @@ pub fn preemptions(events: &[RunEvent]) -> Vec<Preemption> {
 /// `answer_prompt` ask open, or a dialog recorded since `start` not
 /// cleared: a session that waits for a person is not stalled.
 fn waits_for_a_person(events: &[&RunEvent], start: i64) -> bool {
-    let mut open: Vec<Option<&Value>> = Vec::new();
+    let mut open: Vec<Option<i64>> = Vec::new();
     for event in events {
-        match event.kind.as_str() {
-            "ask_opened"
-                if matches!(
-                    text(event, "kind"),
-                    Some("worker_question" | "answer_prompt")
-                ) =>
-            {
-                open.push(event.payload.get("ask_id"));
+        match event.kind.known() {
+            Some(EventKind::AskOpened) => {
+                let opened = restore_payload::<AskOpened>(&event.payload);
+                if matches!(opened.kind, Some("worker_question" | "answer_prompt")) {
+                    open.push(opened.ask_id);
+                }
             }
-            "ask_answered" => open.retain(|id| *id != event.payload.get("ask_id")),
+            Some(EventKind::AskAnswered) => open.retain(|id| *id != int(event, "ask_id")),
             _ => {}
         }
     }
     let dialog = events
         .iter()
         .rev()
-        .find(|e| matches!(e.kind.as_str(), "prompt_waiting" | "prompt_cleared"))
-        .is_some_and(|e| e.kind == "prompt_waiting" && at(e).is_some_and(|at| at >= start));
+        .find(|e| {
+            matches!(
+                e.kind.known(),
+                Some(EventKind::PromptWaiting | EventKind::PromptCleared)
+            )
+        })
+        .is_some_and(|e| e.kind == EventKind::PromptWaiting && at(e).is_some_and(|at| at >= start));
     !open.is_empty() || dialog
 }
 
@@ -834,7 +891,7 @@ mod tests {
             task_id: Some(TaskId::new(1)),
             goal_id: None,
             run_id: Some(RunId::new(run).unwrap()),
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: at(secs),
             actor: None,

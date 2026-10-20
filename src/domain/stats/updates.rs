@@ -4,15 +4,14 @@
 //! releases a plugin-only job brought the plugin to, so how often the
 //! binary was replaced and how often it failed can be read next to the
 //! runs. Derived from `run_events` like the rest of `stats`.
+use crate::domain::EventKind;
 use std::collections::BTreeMap;
 
 use serde::Serialize;
 use serde_json::Value;
 
 use super::{
-    super::{
-        UPDATE_E2E_PASSED, UPDATE_EVENT_KINDS, UPDATE_FAILED, UPDATE_INSTALLED, e2e_quarantine,
-    },
+    super::{UPDATE_EVENT_KINDS, e2e_quarantine},
     EventId, RunEvent, TaskId,
     asks::UNKNOWN,
 };
@@ -118,7 +117,7 @@ impl E2eGateStats {
             rerun.is_some_and(|rerun| rerun["timed_out"] != true && rerun.get("error").is_none());
         let flaky = names(payload, "flaky");
         let quarantined = names(payload, "quarantined");
-        let gate_failed = event.kind == UPDATE_FAILED;
+        let gate_failed = event.kind == EventKind::UpdateFailed;
         for name in failed {
             let test = self.tests.entry(name.to_owned()).or_default();
             test.failed += 1;
@@ -205,30 +204,30 @@ pub fn updates(
     for event in events.iter().filter(|event| {
         event.id > after
             && event.id <= upto
-            && UPDATE_EVENT_KINDS.contains(&event.kind.as_str())
+            && event.kind.is_in(UPDATE_EVENT_KINDS)
             && counts(event.task_id)
     }) {
         stats.count += 1;
-        let plugin_only = event.kind == UPDATE_INSTALLED && plugin_only(event);
-        let install = event.kind == UPDATE_FAILED && by_install(event);
+        let plugin_only = event.kind == EventKind::UpdateInstalled && plugin_only(event);
+        let install = event.kind == EventKind::UpdateFailed && by_install(event);
         let kind = if plugin_only {
             PLUGIN_ONLY_INSTALLED
         } else if install {
             INSTALL_FAILED
         } else {
-            event.kind.as_str()
+            &event.kind.to_string()
         };
         *stats.by_kind.entry(kind.to_owned()).or_default() += 1;
         let text = |key: &str| event.payload.get(key).and_then(Value::as_str);
-        match event.kind.as_str() {
-            UPDATE_FAILED if install => {
+        match event.kind.known() {
+            Some(EventKind::UpdateFailed) if install => {
                 let stage = text("stage").unwrap_or(UNKNOWN);
                 *stats
                     .install_failed_by_stage
                     .entry(stage.to_owned())
                     .or_default() += 1;
             }
-            UPDATE_FAILED => {
+            Some(EventKind::UpdateFailed) => {
                 let stage = text("stage").unwrap_or(UNKNOWN);
                 *stats.failed_by_stage.entry(stage.to_owned()).or_default() += 1;
                 if stage == E2E_STAGE {
@@ -241,16 +240,16 @@ pub fn updates(
                     gates.push(event);
                 }
             }
-            UPDATE_E2E_PASSED => {
+            Some(EventKind::UpdateE2ePassed) => {
                 stats.e2e.passed += 1;
                 stats.e2e.add_secs(event);
                 stats.e2e.add_tests(event);
                 gates.push(event);
             }
-            UPDATE_INSTALLED if plugin_only => stats
+            Some(EventKind::UpdateInstalled) if plugin_only => stats
                 .plugin_installed
                 .push(text("version").unwrap_or(UNKNOWN).to_owned()),
-            UPDATE_INSTALLED => stats
+            Some(EventKind::UpdateInstalled) => stats
                 .installed
                 .push(text("version").unwrap_or(UNKNOWN).to_owned()),
             _ => {}
@@ -271,7 +270,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: "2026-09-26T01:00:00.000Z".to_owned(),
             actor: None,

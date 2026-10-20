@@ -7,6 +7,7 @@
 //! attempts never overlap and their sum never exceeds the window. Next to
 //! it: each attempt's time, and how many runs waited for the slot
 //! (`landing_queued` to their `integration_started`).
+use crate::domain::EventKind;
 use std::collections::HashMap;
 
 use serde::Serialize;
@@ -20,26 +21,26 @@ const HOUR_MS: i64 = 3_600_000;
 
 /// The events that end an `integrate` attempt of their run (the
 /// timeline's `integrating` gap ends at the same ones).
-const ENDS: [&str; 9] = [
-    "run_integrated",
-    "integration_deferred",
-    "integration_error",
-    "integration_held",
-    "integration_failed",
-    "runtime_error",
-    "run_adopted",
-    "run_recovered",
-    "resume_started",
+const ENDS: [EventKind; 9] = [
+    EventKind::RunIntegrated,
+    EventKind::IntegrationDeferred,
+    EventKind::IntegrationError,
+    EventKind::IntegrationHeld,
+    EventKind::IntegrationFailed,
+    EventKind::RuntimeError,
+    EventKind::RunAdopted,
+    EventKind::RunRecovered,
+    EventKind::ResumeStarted,
 ];
 
 /// The events that end a run's wait for the slot besides its
 /// `integration_started`: it landed, left for a session, or was taken over.
-const WAIT_ENDS: [&str; 5] = [
-    "run_integrated",
-    "resume_started",
-    "revise_requested",
-    "run_adopted",
-    "run_recovered",
+const WAIT_ENDS: [EventKind; 5] = [
+    EventKind::RunIntegrated,
+    EventKind::ResumeStarted,
+    EventKind::ReviseRequested,
+    EventKind::RunAdopted,
+    EventKind::RunRecovered,
 ];
 
 /// A status that ends a wait or an attempt whatever event carries it.
@@ -80,12 +81,15 @@ pub fn spans(events: &[RunEvent], now_ms: i64) -> (Vec<Attempt>, Vec<Wait>) {
         let (Some(run_id), Some(at)) = (&event.run_id, timestamp_millis(&event.created_at)) else {
             continue;
         };
-        let kind = event.kind.as_str();
-        if kind == "integration_started" || WAIT_ENDS.contains(&kind) || leaves(&event.payload) {
+        let kind = &event.kind;
+        if *kind == EventKind::IntegrationStarted
+            || kind.is_in(&WAIT_ENDS)
+            || leaves(&event.payload)
+        {
             if let Some(index) = waiting.remove(run_id) {
                 waits[index].end = at.max(waits[index].start);
             }
-        } else if kind == "landing_queued" && !waiting.contains_key(run_id) {
+        } else if *kind == EventKind::LandingQueued && !waiting.contains_key(run_id) {
             waiting.insert(run_id.clone(), waits.len());
             waits.push(Wait {
                 run_id: run_id.clone(),
@@ -123,19 +127,19 @@ impl Attempts {
     /// before; an event of no run or of no readable time is not read.
     pub fn add(&mut self, event: &RunEvent, run_id: &RunId, at: i64) -> Stepped {
         let mut stepped = Stepped::default();
-        let kind = event.kind.as_str();
-        let ends_own = ENDS.contains(&kind) || leaves(&event.payload);
-        if (kind == "integration_started"
+        let kind = &event.kind;
+        let ends_own = kind.is_in(&ENDS) || leaves(&event.payload);
+        if (*kind == EventKind::IntegrationStarted
             || (ends_own && self.open.as_ref().is_some_and(|o| o.0 == *run_id)))
             && let Some((_, index)) = self.open.take()
         {
             let attempt = &mut self.attempts[index];
             attempt.end = at.max(attempt.start);
-            attempt.landed = kind == "run_integrated";
+            attempt.landed = *kind == EventKind::RunIntegrated;
             attempt.open = false;
             stepped.ended = Some(index);
         }
-        if kind == "integration_started" {
+        if *kind == EventKind::IntegrationStarted {
             // After the one before, even if the clocks disagree.
             let start = self.attempts.last().map_or(at, |last| at.max(last.end));
             self.open = Some((run_id.clone(), self.attempts.len()));
@@ -361,7 +365,7 @@ mod tests {
                 task_id: Some(TaskId::new(*run as i64 + 1)),
                 goal_id: None,
                 run_id: Some(RunId::new(RUNS[*run]).unwrap()),
-                kind: (*kind).to_owned(),
+                kind: (*kind).into(),
                 payload: payload.clone(),
                 created_at: utc_text(secs * 1000),
                 actor: None,

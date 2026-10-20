@@ -272,7 +272,7 @@ impl HostOpsState {
             crate::domain::sccache::SCCACHE_SERVER_START_FAILED,
         ]);
         if let Ok(Some(event)) = &latest
-            && event.kind == crate::domain::sccache::SCCACHE_SERVER_START_FAILED
+            && event.kind == EventKind::SccacheServerStartFailed
             && event.payload["error"] == payload["error"]
             && event.payload["program"] == payload["program"]
         {

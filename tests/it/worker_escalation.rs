@@ -213,7 +213,7 @@ fn a_retry_inherits_the_raised_step() {
     let claimed = queue.run_events(second.id()).unwrap();
     let claimed = &claimed
         .iter()
-        .find(|e| e.kind == "run_claimed")
+        .find(|e| e.kind == EventKind::RunClaimed)
         .unwrap()
         .payload;
     assert_eq!(
@@ -226,7 +226,7 @@ fn a_retry_inherits_the_raised_step() {
     assert!(
         first_claimed
             .iter()
-            .find(|e| e.kind == "run_claimed")
+            .find(|e| e.kind == EventKind::RunClaimed)
             .unwrap()
             .payload
             .get("escalation_inherited")

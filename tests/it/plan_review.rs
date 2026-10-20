@@ -431,7 +431,7 @@ pub(crate) fn events(queue: &mut SqliteQueue, id: TaskId, kind: &str) -> Vec<Val
         .unwrap()
         .events
         .into_iter()
-        .filter(|e| e.kind == kind)
+        .filter(|e| e.kind.as_str() == kind)
         .map(|e| e.payload)
         .collect()
 }
@@ -2267,7 +2267,7 @@ fn a_plan_review_verdict_is_applied_at_its_jobs_request_and_a_broken_one_fails_c
             .unwrap()
             .events
             .into_iter()
-            .map(|e| e.kind)
+            .map(|e| e.kind.to_string())
             .collect();
         assert!(
             !kinds.iter().any(|k| k == "plan_review_finished"),
@@ -2305,7 +2305,7 @@ fn a_plan_review_verdict_is_applied_at_its_jobs_request_and_a_broken_one_fails_c
         let event = detail
             .events
             .iter()
-            .find(|e| e.kind == kind)
+            .find(|e| e.kind.as_str() == kind)
             .unwrap_or_else(|| panic!("no {kind}"));
         let actor = event.actor.clone().expect("an actor");
         assert_eq!(

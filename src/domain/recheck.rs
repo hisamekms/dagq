@@ -5,6 +5,7 @@
 //! for one found still landing. The supervisor runs the checks; this
 //! module is the record.
 
+use crate::domain::EventKind;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -329,7 +330,7 @@ impl<'a> RecordedFailure<'a> {
 
 /// Whether the event parked its run for a session.
 pub fn parks(event: &RunEvent) -> bool {
-    event.kind == LANDING_RECHECK_FAILED && event.payload["action"] == RESUMED
+    event.kind == EventKind::LandingRecheckFailed && event.payload["action"] == RESUMED
 }
 
 /// The failure a recheck recorded as [`HELD`] on the run against `main`
@@ -339,7 +340,7 @@ pub fn held_against<'a>(events: &'a [RunEvent], main: &str, head: &str) -> Optio
     events
         .iter()
         .rev()
-        .find(|e| e.kind == LANDING_RECHECK_FAILED)
+        .find(|e| e.kind == EventKind::LandingRecheckFailed)
         .filter(|e| {
             e.payload["action"] == HELD && e.payload["main"] == main && e.payload["head"] == head
         })
@@ -363,14 +364,15 @@ pub fn landing_at(latest_integrated: Option<&RunEvent>, main: &str) -> Option<La
 /// 4), by its landing that parked it, or by a recheck, failed or clean.
 /// What that found is handled, and is not judged again.
 pub fn judged_against(events: &[RunEvent], main: &str, head: &str) -> bool {
-    use super::event_kind::{CONFLICT_PRECHECK, INTEGRATION_DEFERRED};
     events.iter().any(|event| {
         matches!(
-            event.kind.as_str(),
-            CONFLICT_PRECHECK
-                | INTEGRATION_DEFERRED
-                | LANDING_RECHECK_FAILED
-                | LANDING_RECHECK_CLEAN
+            event.kind.known(),
+            Some(
+                EventKind::ConflictPrecheck
+                    | EventKind::IntegrationDeferred
+                    | EventKind::LandingRecheckFailed
+                    | EventKind::LandingRecheckClean
+            )
         ) && event.payload["main"] == main
             && event.payload["head"] == head
     })
@@ -421,7 +423,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: LANDING_RECHECK_FAILED.to_owned(),
+            kind: LANDING_RECHECK_FAILED.into(),
             payload,
             created_at: String::new(),
             actor: None,
@@ -700,7 +702,7 @@ mod tests {
         RunEvent {
             run_id: run.map(|run| RunId::new(run).unwrap()),
             task_id: run.map(|_| TaskId::new(7)),
-            kind: "run_integrated".to_owned(),
+            kind: "run_integrated".into(),
             ..event(payload)
         }
     }
@@ -739,7 +741,7 @@ mod tests {
             LANDING_RECHECK_CLEAN,
         ] {
             let judged = RunEvent {
-                kind: kind.to_owned(),
+                kind: kind.into(),
                 ..event(json!({"main": main, "head": head}))
             };
             assert!(
@@ -753,7 +755,7 @@ mod tests {
             assert!(!judged_against(&[judged], main, "h2"), "{kind}");
         }
         let other = RunEvent {
-            kind: "review_finished".to_owned(),
+            kind: "review_finished".into(),
             ..event(json!({"main": main, "head": head}))
         };
         assert!(!judged_against(&[other], main, head));
@@ -765,7 +767,7 @@ mod tests {
     #[test]
     fn who_checked_a_main_is_read_from_the_finished_rechecks() {
         let finished = |main: &str, supervisor: &str| RunEvent {
-            kind: LANDING_RECHECK_FINISHED.to_owned(),
+            kind: LANDING_RECHECK_FINISHED.into(),
             ..event(json!({"main": main, "supervisor": supervisor}))
         };
         assert_eq!(checked_by(&[], "m", "me"), CheckedBy::No);

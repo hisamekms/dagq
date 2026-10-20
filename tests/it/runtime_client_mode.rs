@@ -5,6 +5,7 @@
 //! database, and their `dagq` reads and writes through the service as their
 //! own principal.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use runtime_support::*;
 
@@ -111,7 +112,7 @@ await_message; resolve; receipt "$(git rev-parse HEAD)"; idle; await_exit"#,
     let notes: Vec<_> = detail
         .events
         .iter()
-        .filter(|event| event.kind == "observation")
+        .filter(|event| event.kind == EventKind::Observation)
         .collect();
     assert_eq!(notes.len(), 2, "{notes:?}");
     for note in notes {

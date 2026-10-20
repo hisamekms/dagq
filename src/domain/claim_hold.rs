@@ -30,14 +30,14 @@ pub const CLAIM_HELD: &str = crate::domain::event_kind::EventKind::ClaimHeld.as_
 /// that ended, `supervisor`).
 pub const CLAIM_RESUMED: &str = crate::domain::event_kind::EventKind::ClaimResumed.as_str();
 /// The two kinds, for reading the latest of them.
-pub const CLAIM_HOLD_KINDS: [&str; 2] = [CLAIM_HELD, CLAIM_RESUMED];
+pub const CLAIM_HOLD_KINDS: [EventKind; 2] = [EventKind::ClaimHeld, EventKind::ClaimResumed];
 /// Recorded when the supervisor starts holding the landings' verification
 /// (task 377), with the payload of `claim_held`.
 pub const LANDING_HELD: &str = crate::domain::event_kind::EventKind::LandingHeld.as_str();
 /// Recorded when landings resume, with the payload of `claim_resumed`.
 pub const LANDING_RESUMED: &str = crate::domain::event_kind::EventKind::LandingResumed.as_str();
 /// The two kinds, for reading the latest of them.
-pub const LANDING_HOLD_KINDS: [&str; 2] = [LANDING_HELD, LANDING_RESUMED];
+pub const LANDING_HOLD_KINDS: [EventKind; 2] = [EventKind::LandingHeld, EventKind::LandingResumed];
 
 /// What a hold holds: new claims or the landings' verification, each
 /// recorded by its pair of queue events.
@@ -341,7 +341,7 @@ impl OwnHold {
 
     /// Whether `latest` (a supervisor's latest record) is a hold.
     pub fn holds(self, latest: Option<&RunEvent>) -> bool {
-        latest.is_some_and(|event| event.kind == self.held.as_str())
+        latest.is_some_and(|event| event.kind == self.held)
     }
 
     /// The event the supervisor `token` records when its hold (`hold`: the
@@ -537,10 +537,12 @@ pub fn hold_end(
     opener: Option<Option<&str>>,
     event: &RunEvent,
 ) -> Option<&'static str> {
-    match event.kind.as_str() {
+    match event.kind.known()? {
         kind if kind == kinds.held => Some(ENDED_REPLACED),
         kind if kind == kinds.resumed => Some(ENDED_RESUMED),
-        "supervisor_stopped" if opener.is_some_and(|by| by == text(event, "supervisor")) => {
+        EventKind::SupervisorStopped
+            if opener.is_some_and(|by| by == text(event, "supervisor")) =>
+        {
             Some(ENDED_SUPERVISOR_GONE)
         }
         _ => None,
@@ -561,7 +563,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: format!("2026-09-26T01:{at}.000Z"),
             actor: None,

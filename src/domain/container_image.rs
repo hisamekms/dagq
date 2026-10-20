@@ -13,8 +13,8 @@
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use super::EventKind;
 use super::podman_machine::QueueKey;
+use super::{EventKind, RecordedKind};
 
 /// The Claude Code the base installs. Pinned so the base's tag is decided
 /// from the inputs without a network, and the same base is rebuilt the
@@ -328,9 +328,13 @@ pub fn built_payload(image: &str, built: &[&str], removed: &[String]) -> Value {
 /// Why `image` cannot be used at `now` (Unix seconds) from the latest
 /// image event of the queue (its kind and payload): a failure of the same
 /// image within [`FAILURE_HOLD_SECS`].
-pub fn failure_holds(last: Option<(&str, &Value)>, image: &str, now: i64) -> Option<String> {
+pub fn failure_holds(
+    last: Option<(&RecordedKind, &Value)>,
+    image: &str,
+    now: i64,
+) -> Option<String> {
     let (kind, payload) = last?;
-    if kind != CONTAINER_IMAGE_FAILED || payload["image"].as_str() != Some(image) {
+    if *kind != EventKind::ContainerImageFailed || payload["image"].as_str() != Some(image) {
         return None;
     }
     let at = payload["at"].as_i64()?;
@@ -582,25 +586,30 @@ mod tests {
     #[test]
     fn a_failure_of_the_same_image_holds_until_its_time_is_up() {
         let failed = failure_payload(Some("img:1"), "boom", 1_000);
-        let holds = |kind: &str, image: &str, now: i64| {
-            failure_holds(Some((kind, &failed)), image, now).is_some()
+        let holds = |kind: EventKind, image: &str, now: i64| {
+            failure_holds(Some((&kind.into(), &failed)), image, now).is_some()
         };
-        assert!(holds(CONTAINER_IMAGE_FAILED, "img:1", 1_000));
+        assert!(holds(EventKind::ContainerImageFailed, "img:1", 1_000));
         assert!(holds(
-            CONTAINER_IMAGE_FAILED,
+            EventKind::ContainerImageFailed,
             "img:1",
             1_000 + FAILURE_HOLD_SECS - 1
         ));
         assert!(!holds(
-            CONTAINER_IMAGE_FAILED,
+            EventKind::ContainerImageFailed,
             "img:1",
             1_000 + FAILURE_HOLD_SECS
         ));
         // Another image (the inputs changed) is tried at once.
-        assert!(!holds(CONTAINER_IMAGE_FAILED, "img:2", 1_000));
-        assert!(!holds(CONTAINER_IMAGE_BUILT, "img:1", 1_000));
+        assert!(!holds(EventKind::ContainerImageFailed, "img:2", 1_000));
+        assert!(!holds(EventKind::ContainerImageBuilt, "img:1", 1_000));
         assert_eq!(failure_holds(None, "img:1", 1_000), None);
-        let why = failure_holds(Some((CONTAINER_IMAGE_FAILED, &failed)), "img:1", 1_010).unwrap();
+        let why = failure_holds(
+            Some((&EventKind::ContainerImageFailed.into(), &failed)),
+            "img:1",
+            1_010,
+        )
+        .unwrap();
         assert!(why.contains("boom") && why.contains("10s ago"), "{why}");
     }
 

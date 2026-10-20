@@ -62,7 +62,7 @@ fn retried_with_its_branch_past(limit: usize, config: Option<&str>) {
         detail
             .events
             .iter()
-            .filter(|e| e.kind == kind && e.run_id.as_ref() == Some(first.id()))
+            .filter(|e| e.kind.as_str() == kind && e.run_id.as_ref() == Some(first.id()))
             .map(|e| &e.payload)
             .collect()
     };
@@ -114,7 +114,8 @@ fn retried_with_its_branch_past(limit: usize, config: Option<&str>) {
         detail
             .events
             .iter()
-            .any(|e| e.kind == "run_inherited" && e.run_id.as_ref() == Some(detail.runs[1].id())),
+            .any(|e| e.kind == EventKind::RunInherited
+                && e.run_id.as_ref() == Some(detail.runs[1].id())),
         "{:?}",
         event_kinds(&detail)
     );

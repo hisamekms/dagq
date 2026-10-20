@@ -20,7 +20,7 @@ fn closes_of(queue: &SqliteQueue, run: &TaskRun) -> Vec<Value> {
         .run_events(run.id())
         .unwrap()
         .into_iter()
-        .filter(|e| e.kind == "workspace_closed")
+        .filter(|e| e.kind == EventKind::WorkspaceClosed)
         .map(|e| e.payload)
         .collect()
 }
@@ -178,7 +178,7 @@ fn the_sweep_stops_every_wrapper_left_running_by_a_landed_run() {
             .run_events(run.id())
             .unwrap()
             .into_iter()
-            .filter(|e| e.kind == "cleanup_failed")
+            .filter(|e| e.kind == EventKind::CleanupFailed)
             .map(|e| e.payload)
             .collect()
     };
@@ -224,7 +224,7 @@ fn payloads_of(queue: &SqliteQueue, run: &TaskRun, kind: &str) -> Vec<Value> {
         .run_events(run.id())
         .unwrap()
         .into_iter()
-        .filter(|e| e.kind == kind)
+        .filter(|e| e.kind.as_str() == kind)
         .map(|e| e.payload)
         .collect()
 }

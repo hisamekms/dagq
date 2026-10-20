@@ -18,11 +18,13 @@
 //! it is in no trial group, and each of its turns records the model Codex
 //! says it used.
 
+use crate::domain::EventKind;
+use crate::domain::run::{ReviseRequested, restore_payload};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::{
-    DomainError, Provider, ReasonCode, RunEvent, TaskId, event_kind,
+    DomainError, Provider, ReasonCode, RunEvent, TaskId,
     prediction::{PREDICTION_WINDOW, TaskNature, percentile, window},
     reason::event_code,
     resume,
@@ -52,10 +54,10 @@ pub const CODEX_MODEL_UNKNOWN: &str = "codex runs its own model, not the claim's
 /// the codes that parked the run ([`raises`]).
 pub const REVISE: &str = "revise";
 /// The events that open a worker session and record its model and effort.
-pub const SESSION_EVENTS: [&str; 3] = [
-    event_kind::RUN_CLAIMED,
-    event_kind::RESUME_STARTED,
-    event_kind::REVISE_REQUESTED,
+pub const SESSION_EVENTS: [EventKind; 3] = [
+    EventKind::RunClaimed,
+    EventKind::ResumeStarted,
+    EventKind::ReviseRequested,
 ];
 
 /// Whether a run parked with `code` resumes one step higher: a failed
@@ -188,7 +190,7 @@ impl WorkerSession {
     pub fn of_run(events: &[RunEvent]) -> Self {
         let Some(claimed) = events
             .iter()
-            .find(|event| event.kind == event_kind::RUN_CLAIMED)
+            .find(|event| event.kind == EventKind::RunClaimed)
         else {
             return Self::default();
         };
@@ -333,13 +335,13 @@ pub fn for_resume(events: &[RunEvent]) -> (WorkerSession, Option<Escalation>) {
 /// (a `revise_unsent` of the same run and attempt), whose request and raise
 /// never reached the session.
 fn openings(events: &[RunEvent]) -> Vec<usize> {
-    let withdrawn: Vec<(Option<&str>, &Value)> = events
+    let withdrawn: Vec<(Option<&str>, Option<u64>)> = events
         .iter()
-        .filter(|event| event.kind == event_kind::REVISE_UNSENT)
+        .filter(|event| event.kind == EventKind::ReviseUnsent)
         .map(|event| {
             (
                 event.run_id.as_ref().map(|id| id.as_str()),
-                &event.payload["attempt"],
+                event.payload["attempt"].as_u64(),
             )
         })
         .collect();
@@ -347,11 +349,11 @@ fn openings(events: &[RunEvent]) -> Vec<usize> {
         .iter()
         .enumerate()
         .filter(|(_, event)| {
-            SESSION_EVENTS.contains(&event.kind.as_str())
-                && !(event.kind == event_kind::REVISE_REQUESTED
+            event.kind.is_in(&SESSION_EVENTS)
+                && !(event.kind == EventKind::ReviseRequested
                     && withdrawn.contains(&(
                         event.run_id.as_ref().map(|id| id.as_str()),
-                        &event.payload["attempt"],
+                        restore_payload::<ReviseRequested>(&event.payload).attempt,
                     )))
         })
         .map(|(index, _)| index)
@@ -399,15 +401,15 @@ pub fn choose(trial: &WorkerTrial, task: TaskId, events: &[RunEvent]) -> TrialCh
         let Some(task_id) = event.task_id else {
             continue;
         };
-        match event.kind.as_str() {
-            event_kind::RUN_CLAIMED => {
+        match event.kind.known() {
+            Some(EventKind::RunClaimed) => {
                 if let Some(group) = group_of(&event.payload)
                     && joined.iter().all(|(other, _)| *other != task_id)
                 {
                     joined.push((task_id, group));
                 }
             }
-            event_kind::TASK_WEIGHT_PREDICTED => {
+            Some(EventKind::TaskWeightPredicted) => {
                 let prediction = &event.payload["prediction"];
                 let Some(tokens) = prediction["expected_output_tokens"].as_u64() else {
                     continue;
@@ -468,7 +470,7 @@ mod tests {
             task_id: Some(TaskId::new(task)),
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: "2027-01-15T08:00:00.000Z".to_owned(),
             actor: None,

@@ -372,7 +372,7 @@ fn a_running_round_takes_no_run_slot_and_holds_no_review() {
     let all = SqliteQueue::open(&db).unwrap().all_events().unwrap();
     let at = |kind: &str, task: Option<TaskId>| {
         all.iter()
-            .find(|event| event.kind == kind && (task.is_none() || event.task_id == task))
+            .find(|event| event.kind.as_str() == kind && (task.is_none() || event.task_id == task))
             .unwrap_or_else(|| panic!("no {kind}"))
             .id
     };
@@ -387,7 +387,7 @@ fn a_running_round_takes_no_run_slot_and_holds_no_review() {
     for task in [first, second] {
         assert!(
             all.iter()
-                .any(|event| event.kind == "run_integrated" && event.task_id == Some(task)),
+                .any(|event| event.kind == EventKind::RunIntegrated && event.task_id == Some(task)),
             "{task} landed"
         );
     }

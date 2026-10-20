@@ -1,6 +1,7 @@
 //! Queue tests: claims and runs, the database's guards on them, the injected
 //! clock and IDs, and the asks that runs open.
 use crate::common;
+use dagq::domain::EventKind;
 
 use std::{
     sync::{Arc, Barrier, Mutex},
@@ -287,11 +288,17 @@ fn a_login_that_stops_several_runs_is_one_ask_that_lists_them() {
             100,
         )
         .unwrap();
-    let opened: Vec<_> = events.iter().filter(|e| e.kind == "ask_opened").collect();
+    let opened: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == EventKind::AskOpened)
+        .collect();
     assert_eq!(opened.len(), 1);
     assert_eq!(opened[0].payload["reason_category"], "authentication");
     assert_eq!(opened[0].task_id, None);
-    let updated: Vec<_> = events.iter().filter(|e| e.kind == "ask_updated").collect();
+    let updated: Vec<_> = events
+        .iter()
+        .filter(|e| e.kind == EventKind::AskUpdated)
+        .collect();
     assert_eq!(updated.len(), 1);
     assert_eq!(updated[0].run_id.as_ref(), Some(&runs[1]));
     assert_eq!(updated[0].payload["affected"].as_array().unwrap().len(), 2);

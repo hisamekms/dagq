@@ -1,3 +1,4 @@
+use crate::domain::event_kind;
 use serde_json::{Value, json};
 
 use super::*;
@@ -30,7 +31,7 @@ impl Log {
             task_id: None,
             run_id: None,
             goal_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: utc_text((T0 + n) * 1000),
             actor: None,

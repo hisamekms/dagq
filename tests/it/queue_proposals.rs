@@ -1,5 +1,6 @@
 //! Queue tests: submitting proposals, plan review's verdicts and withdrawal.
 use crate::common;
+use dagq::domain::EventKind;
 
 use dagq::{
     application::{StatusFilter, TaskQuery, TaskReads, TaskStore, dependency_graph},
@@ -60,7 +61,7 @@ fn submitted_tasks_wait_for_plan_review_which_readies_or_sends_them_back() {
     }
     assert_eq!(status_of(&mut queue, later), TaskStatus::Draft);
     let events = queue.show(a).unwrap().events;
-    assert!(events.iter().any(|e| e.kind == "task_submitted"
+    assert!(events.iter().any(|e| e.kind == EventKind::TaskSubmitted
         && e.payload == serde_json::json!({"proposal_id": 1, "owner_origin": "person"})));
     assert!(
         queue
@@ -68,7 +69,7 @@ fn submitted_tasks_wait_for_plan_review_which_readies_or_sends_them_back() {
             .unwrap()
             .events
             .iter()
-            .any(|e| e.kind == "goal_submitted")
+            .any(|e| e.kind == EventKind::GoalSubmitted)
     );
     assert_eq!(
         queue.list_goals().unwrap()[0].tasks.submitted,
@@ -213,10 +214,8 @@ fn submitted_tasks_wait_for_plan_review_which_readies_or_sends_them_back() {
     let bypassed = queue.transition(a, TaskAction::BypassReview).unwrap();
     assert_eq!(bypassed.status(), TaskStatus::Ready);
     let events = queue.show(a).unwrap().events;
-    assert!(
-        events.iter().any(|e| e.kind == "review_bypassed"
-            && e.payload == serde_json::json!({"from": "submitted"}))
-    );
+    assert!(events.iter().any(|e| e.kind == EventKind::ReviewBypassed
+        && e.payload == serde_json::json!({"from": "submitted"})));
     // Approving the proposal leaves the bypassed task as it is.
     queue.approve_proposal(ProposalId::new(2)).unwrap();
     assert_eq!(status_of(&mut queue, a), TaskStatus::Ready);
@@ -248,7 +247,7 @@ fn a_withdrawn_proposal_releases_its_goals_and_tasks_as_drafts() {
     for id in [a, b] {
         assert_eq!(status_of(&mut queue, id), TaskStatus::Draft);
         assert!(queue.show(id).unwrap().events.iter().any(|e| {
-            e.kind == "proposal_withdrawn"
+            e.kind == EventKind::ProposalWithdrawn
                 && e.payload == serde_json::json!({"proposal_id": 1, "from": "submitted"})
         }));
     }
@@ -258,7 +257,7 @@ fn a_withdrawn_proposal_releases_its_goals_and_tasks_as_drafts() {
             .unwrap()
             .events
             .iter()
-            .any(|e| e.kind == "proposal_withdrawn")
+            .any(|e| e.kind == EventKind::ProposalWithdrawn)
     );
     assert!(queue.proposals(false).unwrap().is_empty());
     assert_eq!(
@@ -280,7 +279,7 @@ fn a_withdrawn_proposal_releases_its_goals_and_tasks_as_drafts() {
     assert_eq!(status_of(&mut queue, a), TaskStatus::Draft);
     assert_eq!(status_of(&mut queue, b), TaskStatus::Canceled);
     assert!(queue.show(a).unwrap().events.iter().any(|e| {
-        e.kind == "proposal_withdrawn"
+        e.kind == EventKind::ProposalWithdrawn
             && e.payload == serde_json::json!({"proposal_id": 2, "from": "revising"})
     }));
 
@@ -320,7 +319,7 @@ fn approving_a_proposal_withholds_the_tasks_of_a_closed_goal() {
         .collect();
     assert_eq!(ready, [b]);
     assert!(queue.show(a).unwrap().events.iter().any(|e| {
-        e.kind == "approve_withheld"
+        e.kind == EventKind::ApproveWithheld
             && e.payload
                 == serde_json::json!({"proposal_id": 1, "goal_id": goal, "verdict": "abandoned"})
     }));
@@ -332,7 +331,7 @@ fn stranded_events(queue: &mut SqliteQueue, id: TaskId) -> Vec<serde_json::Value
         .unwrap()
         .events
         .into_iter()
-        .filter(|e| e.kind == "dependency_stranded")
+        .filter(|e| e.kind == EventKind::DependencyStranded)
         .map(|e| e.payload)
         .collect()
 }
@@ -615,7 +614,7 @@ fn submission_records_the_planner_and_open_span_even_without_draft_transitions()
     let events = queue.all_events().unwrap();
     let links: Vec<_> = events
         .iter()
-        .filter(|e| e.kind == "proposal_submitted")
+        .filter(|e| e.kind == EventKind::ProposalSubmitted)
         .collect();
     assert_eq!(links.len(), 2);
     assert_eq!(links[0].payload["planner_id"], planner.id.as_i64());

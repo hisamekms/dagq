@@ -15,11 +15,11 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::domain::EventKind;
 use crate::domain::container_image::{
     ImageBuild, Images, built_payload, failure_holds, failure_payload, steps,
 };
 use crate::domain::container_runtime::{Availability, RuntimeTarget};
+use crate::domain::{EventKind, RecordedKind};
 
 /// The images of the queue as they are decided now: from the runtime's
 /// build, and from `dagq.toml` and the files it names in the main
@@ -46,7 +46,7 @@ pub trait ImageRecords {
     /// The latest event of the queue of
     /// [`crate::domain::container_image::CONTAINER_IMAGE_KINDS`], its kind
     /// and payload.
-    fn latest(&self) -> Result<Option<(String, Value)>>;
+    fn latest(&self) -> Result<Option<(RecordedKind, Value)>>;
 }
 
 /// Make the image a container of the queue runs be there, at `now` (Unix
@@ -146,9 +146,7 @@ impl<C: super::ContainerRuntime> super::ContainerRuntime for ImageGate<C> {
                 ));
             }
         };
-        let last = last
-            .as_ref()
-            .map(|(kind, payload)| (kind.as_str(), payload));
+        let last = last.as_ref().map(|(kind, payload)| (kind, payload));
         match failure_holds(last, images.run(), (self.now)()) {
             Some(why) => Availability::Unavailable(why),
             None => self.container.availability(target),
@@ -165,8 +163,7 @@ mod tests {
     use super::*;
     use crate::application::ContainerRuntime;
     use crate::domain::container_image::{
-        BaseInputs, CONTAINER_IMAGE_BUILT, CONTAINER_IMAGE_FAILED, ClientSource, ContextFile,
-        FAILURE_HOLD_SECS, ProjectImage,
+        BaseInputs, ClientSource, ContextFile, FAILURE_HOLD_SECS, ProjectImage,
     };
     use crate::domain::podman_machine::QueueKey;
 
@@ -212,17 +209,14 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct Records(Mutex<Vec<(String, Value)>>);
+    struct Records(Mutex<Vec<(RecordedKind, Value)>>);
 
     impl ImageRecords for Records {
         fn record(&self, kind: EventKind, payload: Value) -> Result<()> {
-            self.0
-                .lock()
-                .unwrap()
-                .push((kind.as_str().to_owned(), payload));
+            self.0.lock().unwrap().push((kind.into(), payload));
             Ok(())
         }
-        fn latest(&self) -> Result<Option<(String, Value)>> {
+        fn latest(&self) -> Result<Option<(RecordedKind, Value)>> {
             Ok(self.0.lock().unwrap().last().cloned())
         }
     }
@@ -279,7 +273,7 @@ mod tests {
         );
         let recorded = records.0.lock().unwrap().clone();
         assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0].0, CONTAINER_IMAGE_BUILT);
+        assert_eq!(recorded[0].0, EventKind::ContainerImageBuilt);
         // The image in use is kept and not reported as removed.
         assert_eq!(
             recorded[0].1["removed"],
@@ -324,7 +318,7 @@ mod tests {
         // The base failed: the project image is not tried on nothing.
         assert_eq!(machine.calls.lock().unwrap().len(), 1);
         let recorded = records.0.lock().unwrap().clone();
-        assert_eq!(recorded[0].0, CONTAINER_IMAGE_FAILED);
+        assert_eq!(recorded[0].0, EventKind::ContainerImageFailed);
         assert_eq!(recorded[0].1["image"], images.run());
 
         let gate = |now: i64, specs: Result<Images, String>| ImageGate {
@@ -359,7 +353,7 @@ mod tests {
         let why = prepare(&Specs(no_client), &Machine::default(), &*records, 102).unwrap_err();
         assert!(why.contains("cannot be had"), "{why}");
         let last = records.latest().unwrap().unwrap();
-        assert_eq!(last.0, CONTAINER_IMAGE_FAILED);
+        assert_eq!(last.0, EventKind::ContainerImageFailed);
         assert_eq!(last.1["image"], Value::Null);
     }
 }

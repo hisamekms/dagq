@@ -7,7 +7,6 @@
 //! revise, a receipt that does not match).
 
 use crate::domain::PlannerHandover;
-use crate::domain::event_kind;
 use crate::domain::follow_up::FOLLOW_UP_ASK_DEPTH;
 use crate::domain::headless_job::JobAccess;
 use crate::domain::resume::ResumeConfig;

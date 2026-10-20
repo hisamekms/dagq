@@ -8,6 +8,7 @@
 //! the resume.
 use crate::common;
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use dagq::domain::replan_snapshot::SnapshotManifest;
 use dagq::domain::task_replan::{
@@ -710,8 +711,8 @@ fn the_park_touches_no_other_runs_session() {
             .events
             .iter()
             .filter(|event| {
-                (event.kind == "wrapper_stopped" && event.payload["route"] == "replan")
-                    || (event.kind == "workspace_closed" && event.payload["by"] == "replan")
+                (event.kind == EventKind::WrapperStopped && event.payload["route"] == "replan")
+                    || (event.kind == EventKind::WorkspaceClosed && event.payload["by"] == "replan")
             })
             .map(|event| event.payload.clone())
             .collect()
@@ -1613,12 +1614,12 @@ esac"#
     let events = &detail.events;
     let resumed_at = events
         .iter()
-        .position(|event| event.kind == "resume_started")
+        .position(|event| event.kind == EventKind::ResumeStarted)
         .unwrap();
     assert!(
         events[resumed_at..].iter().all(|event| {
-            !(event.kind == "wrapper_stopped" && event.payload["route"] == "replan")
-                && !(event.kind == "workspace_closed" && event.payload["by"] == "replan")
+            !(event.kind == EventKind::WrapperStopped && event.payload["route"] == "replan")
+                && !(event.kind == EventKind::WorkspaceClosed && event.payload["by"] == "replan")
         }),
         "{:?}",
         event_kinds(&detail)

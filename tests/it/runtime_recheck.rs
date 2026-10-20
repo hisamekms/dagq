@@ -11,6 +11,7 @@
 //! queue's lock and the supervisor's wiring.
 use crate::runtime_support;
 
+use dagq::domain::EventKind;
 use dagq::domain::stats::StatsQuery;
 use runtime_support::*;
 
@@ -342,7 +343,7 @@ fn an_answer_given_while_the_recheck_resumes_the_run_applies_once_it_waits_again
             let delivers = detail
                 .events
                 .iter()
-                .find(|e| e.kind == "ask_answered" && e.payload["ask_id"] == json!(ask.id))
+                .find(|e| e.kind == EventKind::AskAnswered && e.payload["ask_id"] == json!(ask.id))
                 .unwrap()
                 .payload["runtime_delivers"]
                 .clone();

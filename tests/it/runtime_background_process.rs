@@ -304,7 +304,11 @@ fn a_canceled_landing_leaves_nothing_of_the_background_session() {
     let wrapper = recorded(&db, "wrapper_launched").remove(0);
     // The concern ended the session before it asked: its exit request,
     // then the close of its handle, whose wrapper is gone.
-    let kinds: Vec<String> = detail(&db).events.iter().map(|e| e.kind.clone()).collect();
+    let kinds: Vec<String> = detail(&db)
+        .events
+        .iter()
+        .map(|e| e.kind.to_string())
+        .collect();
     let at = |kind: &str| kinds.iter().position(|k| k == kind).unwrap();
     assert!(at("exit_requested") < at("workspace_closed"), "{kinds:?}");
     assert!(at("workspace_closed") < at("ask_opened"), "{kinds:?}");

@@ -12,6 +12,7 @@
 use crate::common;
 use crate::runtime_support;
 use crate::runtime_support::codex::{FINISH, TASK, codex_fixture, detail};
+use dagq::domain::EventKind;
 
 use dagq::{
     domain::sccache::{GUARD_NAME, REFUSED_ERROR_LOG, SccacheTarget},
@@ -751,11 +752,10 @@ esac
             .unwrap()
             .contains("replacement refused")
     );
-    assert!(
-        failures
-            .iter()
-            .all(|failure| dagq::domain::wakes_inbox("sccache_server_restart_failed", failure))
-    );
+    assert!(failures.iter().all(|failure| dagq::domain::wakes_inbox(
+        &EventKind::SccacheServerRestartFailed.into(),
+        failure
+    )));
     assert_eq!(queue_events(&db, "supervisor_started").len(), 1);
     assert_eq!(queue_events(&db, "sccache_server_start_failed").len(), 1);
     assert!(queue_events(&db, "sccache_server_started").is_empty());

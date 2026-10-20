@@ -11,6 +11,7 @@
 //! its recovery job.
 
 use super::*;
+use crate::domain::run::{AutoRepaired, restore_payload};
 use crate::domain::{EventKind, RunEvent, RunProcess};
 
 /// How many times in a row (with no turn of the session between them) the
@@ -100,13 +101,14 @@ pub(super) enum Reopen {
 pub(super) fn attempts_in_a_row(events: &[RunEvent]) -> usize {
     let since = events
         .iter()
-        .rposition(|e| e.kind == event_kind::TURN_STARTED)
+        .rposition(|e| e.kind == EventKind::TurnStarted)
         .map_or(0, |at| at + 1);
     events[since..]
         .iter()
         .filter(|e| {
-            (e.kind == event_kind::AUTO_REPAIRED && e.payload["repair"] == REOPEN_REPAIR)
-                || (e.kind == event_kind::SESSION_REOPEN_FAILED
+            (e.kind == EventKind::AutoRepaired
+                && restore_payload::<AutoRepaired>(&e.payload).repair == Some(REOPEN_REPAIR))
+                || (e.kind == EventKind::SessionReopenFailed
                     && e.payload["cause"] != NOT_REGISTERED)
         })
         .count()
@@ -463,14 +465,14 @@ impl Supervisor<'_> {
         let events = self.queue.run_events(run.id())?;
         let Some(turn) = events
             .iter()
-            .rfind(|e| e.kind == event_kind::TURN_STARTED)
+            .rfind(|e| e.kind == EventKind::TurnStarted)
             .and_then(|e| e.payload["turn"].as_u64())
         else {
             return Ok(None);
         };
-        let finished = events.iter().any(|e| {
-            e.kind == event_kind::TURN_FINISHED && e.payload["turn"].as_u64() == Some(turn)
-        });
+        let finished = events
+            .iter()
+            .any(|e| e.kind == EventKind::TurnFinished && e.payload["turn"].as_u64() == Some(turn));
         if finished {
             return Ok(None);
         }

@@ -12,10 +12,10 @@
 //! added or removed without an ADR; a new code counts as a code finding
 //! until an ADR puts it in [`CONVERGED_CODES`] (fail closed).
 
+use crate::domain::EventKind;
 use serde::Deserialize;
 
 use super::RunEvent;
-use super::event_kind;
 
 /// The code of an item that carried none: an item in the old form (text
 /// only), an empty `codes`, and a sent-back verdict with no reasons.
@@ -407,7 +407,7 @@ pub fn converged(findings: &[Finding], code: Option<&CodePaths>) -> bool {
 /// judged converged ([`converged`]), which lets the run land as a passed
 /// review does.
 pub fn judged_converged(event: &RunEvent) -> bool {
-    event.kind == event_kind::REVISE_LIMIT_JUDGED && event.payload["converged"] == true
+    event.kind == EventKind::ReviseLimitJudged && event.payload["converged"] == true
 }
 
 /// The codes of `list` and their definitions, one line each, for a
@@ -671,7 +671,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: String::new(),
             actor: None,

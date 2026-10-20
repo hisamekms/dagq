@@ -4,10 +4,11 @@
 //! Codex turn reported. `stats` (its `MeasureTrack`) and the ledger's run
 //! fold read them by this one rule.
 
+use crate::domain::EventKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::{RunEvent, event_kind};
+use super::RunEvent;
 
 /// The provider of a turn recorded without one, when the run named none
 /// either.
@@ -46,19 +47,19 @@ impl AfterClaimTrack {
     pub fn observe(&mut self, event: &RunEvent) -> Option<String> {
         let payload = &event.payload;
         let text = |key: &str| payload.get(key).and_then(Value::as_str).map(str::to_owned);
-        match event.kind.as_str() {
-            event_kind::RUN_CLAIMED if !self.claimed => {
+        match event.kind.known() {
+            Some(EventKind::RunClaimed) if !self.claimed => {
                 self.claimed = true;
                 self.on_codex |= payload["provider"] == "codex";
                 self.claim_provider = text("provider");
                 None
             }
-            event_kind::PROVIDER_SWITCHED => {
+            Some(EventKind::ProviderSwitched) => {
                 self.switched_to = text("to");
                 self.on_codex |= payload["to"] == "codex";
                 None
             }
-            event_kind::TURN_FINISHED => {
+            Some(EventKind::TurnFinished) => {
                 let provider = text("provider")
                     .or_else(|| self.switched_to.clone())
                     .or_else(|| self.claim_provider.clone())

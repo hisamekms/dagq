@@ -1,7 +1,6 @@
 use serde_json::{Value, json};
 
 use super::*;
-use crate::domain::event_kind;
 use crate::domain::ledger::{
     owner::{Owner, owner},
     testkit::{Log, ms, run_id},
@@ -14,7 +13,7 @@ use crate::domain::stats::landing_utilization;
 fn landing_slots_by_rescan(all: &[RunEvent], now_ms: i64, built_at: &str) -> Vec<LedgerRow> {
     let (attempts, _) = landing_utilization::spans(all, now_ms);
     let starts = all.iter().filter(|event| {
-        event.kind == event_kind::INTEGRATION_STARTED
+        event.kind == EventKind::IntegrationStarted
             && event.run_id.is_some()
             && timestamp_millis(&event.created_at).is_some()
     });

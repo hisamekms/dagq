@@ -2,6 +2,7 @@
 //! claims and the unfinished runs (observation and analysis).
 
 use super::*;
+use crate::domain::EventKind;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DoctorReport {
@@ -101,7 +102,7 @@ pub fn status(
         // The claims deferred now on a conflict hotspot (ADR-0069): each
         // task's open `claim_deferred`, with the files and the runs.
         "claim_deferrals": queue
-            .latest_task_events(&crate::domain::claim_defer::DEFERRAL_KINDS)?
+            .latest_task_events(&crate::domain::claim_defer::DEFERRAL_KINDS.map(EventKind::as_str))?
             .iter()
             .filter_map(crate::domain::claim_defer::OpenDeferral::of)
             .collect::<Vec<_>>(),
@@ -279,7 +280,7 @@ pub(super) fn slots_and_waits(
             crate::domain::event_kind::PROVIDER_HELD,
             crate::domain::event_kind::PROVIDER_RELEASED,
         ])?
-        .filter(|event| event.kind == crate::domain::event_kind::PROVIDER_HELD);
+        .filter(|event| event.kind == EventKind::ProviderHeld);
     // The queue's latest claim, which the claim spacing counts from
     // (ADR-t1479-1).
     let last_claim = queue.latest_event_of(crate::domain::event_kind::RUN_CLAIMED)?;
@@ -440,15 +441,15 @@ pub fn claim_holds(
             )
         })
         .collect();
-    let on = |kinds: &[&str], held: &str| -> Result<Option<RunEvent>> {
+    let on = |kinds: &[&str], held: EventKind| -> Result<Option<RunEvent>> {
         Ok(queue
             .latest_queue_event(kinds)?
             .filter(|event| event.kind == held))
     };
     let claims = crate::domain::claim_hold::CLAIMS;
     let records = [
-        on(&claims.kinds(), claims.held.as_str())?,
-        on(&RUN_ENV_PROGRAM_KINDS, RUN_ENV_PROGRAM_MISSING)?,
+        on(&claims.kinds(), claims.held)?,
+        on(&RUN_ENV_PROGRAM_KINDS, EventKind::RunEnvProgramMissing)?,
     ];
     let last_claim = queue.latest_event_of(event_kind::RUN_CLAIMED)?;
     let spacing = live

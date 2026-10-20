@@ -9,6 +9,8 @@
 //! short of `wait_to_land`.
 //! The `verify` phase is also split by verification command (task 509),
 //! and the `landing_queue` phase by what queued the run (`via`, task 949).
+use crate::domain::EventKind;
+use crate::domain::run::{AskOpened, ConflictPrecheck, restore_payload};
 use std::collections::{BTreeMap, HashMap};
 
 use serde::ser::SerializeMap;
@@ -16,7 +18,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{RunEvent, Summary, median, payload_status};
-use crate::domain::event_kind;
 
 /// The phases, in the order a landing goes through them, as `stats`'
 /// `land_phases` names them: the runtime's e2e on the host shows there as
@@ -377,57 +378,67 @@ impl LandClock {
 
     /// Take the run's next event, recorded at `at`.
     pub fn observe(&mut self, event: &RunEvent, at: i64) {
-        let kind = event.kind.as_str();
+        let kind = &event.kind;
         if let Some(integrated) = self.integrated {
             if self.push.is_none()
-                && matches!(kind, "push_finished" | "push_failed" | "push_skipped")
+                && matches!(
+                    kind.known(),
+                    Some(EventKind::PushFinished | EventKind::PushFailed | EventKind::PushSkipped)
+                )
             {
                 self.push = Some((at - integrated).max(0) / 1000);
             }
             return;
         }
-        if kind == "verification_command" {
+        if *kind == EventKind::VerificationCommand {
             self.command(&event.payload, at);
         }
-        let next = if kind == "run_integrated" {
+        let next = if *kind == EventKind::RunIntegrated {
             self.enter(self.phase, at);
             self.integrated = Some(at);
             return;
         } else if payload_status(&event.payload) == Some("needs_session") {
             Some(RESUME)
         } else {
-            match kind {
-                event_kind::REVIEW_PROGRAMS_STARTED | "review_started" | "review_retried" => {
-                    Some(REVIEW)
-                }
-                "review_finished" | "validation_finished" => Some(EXIT),
-                "review_failed" => Some(ASK),
-                "revise_requested" => Some(REVISE),
+            match kind.known() {
+                Some(
+                    EventKind::ReviewProgramsStarted
+                    | EventKind::ReviewStarted
+                    | EventKind::ReviewRetried,
+                ) => Some(REVIEW),
+                Some(EventKind::ReviewFinished | EventKind::ValidationFinished) => Some(EXIT),
+                Some(EventKind::ReviewFailed) => Some(ASK),
+                Some(EventKind::ReviseRequested) => Some(REVISE),
                 // The request could not be sent: the session is asked to exit.
-                "revise_unsent" => Some(EXIT),
-                "conflict_precheck" if event.payload["requested"] == true => Some(CONFLICT),
-                "conflict_precheck" => Some(EXIT),
-                "landing_queued" => Some(LANDING_QUEUE),
-                "run_e2e_waiting" => Some(E2E_WAIT),
-                "run_e2e_started" => Some(E2E),
-                "run_e2e_finished" => Some(LANDING_QUEUE),
+                Some(EventKind::ReviseUnsent) => Some(EXIT),
+                Some(EventKind::ConflictPrecheck)
+                    if restore_payload::<ConflictPrecheck>(&event.payload).requested
+                        == Some(true) =>
+                {
+                    Some(CONFLICT)
+                }
+                Some(EventKind::ConflictPrecheck) => Some(EXIT),
+                Some(EventKind::LandingQueued) => Some(LANDING_QUEUE),
+                Some(EventKind::RunE2eWaiting) => Some(E2E_WAIT),
+                Some(EventKind::RunE2eStarted) => Some(E2E),
+                Some(EventKind::RunE2eFinished) => Some(LANDING_QUEUE),
                 // The landing gave the lease back: the run waits for a
                 // person's `review and integrate`, not for the slot.
-                "integration_error" | "integration_held" => Some(ASK),
-                "integration_started" => Some(REBASE),
-                "integration_rebased" => Some(VERIFY),
+                Some(EventKind::IntegrationError | EventKind::IntegrationHeld) => Some(ASK),
+                Some(EventKind::IntegrationStarted) => Some(REBASE),
+                Some(EventKind::IntegrationRebased) => Some(VERIFY),
                 // The observer's `blocked` and a planner's question are
                 // about the run but do not hold it (like the timeline's gaps).
-                "ask_opened"
+                Some(EventKind::AskOpened)
                     if matches!(
-                        event.payload["kind"].as_str(),
+                        restore_payload::<AskOpened>(&event.payload).kind,
                         Some("blocked" | "planner_question")
                     ) =>
                 {
                     None
                 }
-                "ask_opened" => {
-                    let opened = event.payload.get("kind").and_then(Value::as_str);
+                Some(EventKind::AskOpened) => {
+                    let opened = restore_payload::<AskOpened>(&event.payload).kind;
                     if let Some(key) = ask_key(&event.payload) {
                         self.asks.insert(key, opened.map(str::to_owned));
                     }
@@ -443,7 +454,7 @@ impl LandClock {
                     }
                     Some(ASK)
                 }
-                "ask_answered" => {
+                Some(EventKind::AskAnswered) => {
                     let opened = ask_key(&event.payload).and_then(|key| self.asks.remove(&key));
                     let answered = event
                         .payload
@@ -477,18 +488,19 @@ impl LandClock {
         };
         let next = self.through_hold(event, next);
         // What queued the run, for the `landing_queue` it enters now.
-        let via = match (kind, next) {
-            ("landing_queued", _) => Some(
+        let via = match (kind.known(), next) {
+            (Some(EventKind::LandingQueued), _) => Some(
                 event.payload["via"]
                     .as_str()
                     .unwrap_or(UNKNOWN_VIA)
                     .to_owned(),
             ),
-            ("ask_answered", Some(LANDING_QUEUE)) => Some(APPROVE_VIA.to_owned()),
+            (Some(EventKind::AskAnswered), Some(LANDING_QUEUE)) => Some(APPROVE_VIA.to_owned()),
             _ => None,
         };
         if let Some(next) = next {
-            if next != ASK && next != HELD && kind != "ask_answered" && self.phase != HELD {
+            if next != ASK && next != HELD && *kind != EventKind::AskAnswered && self.phase != HELD
+            {
                 self.asks.clear();
                 self.before_ask = None;
             }
@@ -516,7 +528,7 @@ impl LandClock {
         if self.phase != HELD {
             return next;
         }
-        if event.kind == event_kind::TASK_RELEASED || record.is_some() {
+        if event.kind == EventKind::TaskReleased || record.is_some() {
             return next.or(self.before_held.take()).or(Some(EXIT));
         }
         if next.is_some() {
@@ -605,6 +617,7 @@ impl LandClock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::event_kind;
     use crate::domain::{EventId, TaskId};
     use serde_json::json;
 
@@ -614,7 +627,7 @@ mod tests {
             task_id: Some(TaskId::new(1)),
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload: payload.clone(),
             created_at: String::new(),
             actor: None,

@@ -11,6 +11,7 @@
 //! factor per step, never below `min_free_bytes`. The `[disk]` table of
 //! `dagq.toml` sets them.
 
+use crate::domain::EventKind;
 use serde::Serialize;
 use std::path::Path;
 
@@ -25,7 +26,11 @@ pub const SCRATCHPAD_REMOVED: &str = super::event_kind::SCRATCHPAD_REMOVED;
 /// `TMPDIR` the runtime gave them (task 1290).
 pub const RUN_TMP_REMOVED: &str = super::event_kind::RUN_TMP_REMOVED;
 /// The kinds of the events a run's size is read from.
-pub const RUN_SIZE_EVENTS: [&str; 3] = [BUILD_OUTPUTS_REMOVED, SCRATCHPAD_REMOVED, RUN_TMP_REMOVED];
+pub const RUN_SIZE_EVENTS: [EventKind; 3] = [
+    EventKind::BuildOutputsRemoved,
+    EventKind::ScratchpadRemoved,
+    EventKind::RunTmpRemoved,
+];
 /// The `subject` of the `cost` ask about the disk (ADR-0047 decision 42).
 pub const DISK_SUBJECT: &str = "disk";
 /// The options of the disk ask (ADR-0047 decision 44): `done` once a

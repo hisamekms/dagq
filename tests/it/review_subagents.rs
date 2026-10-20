@@ -8,6 +8,7 @@
 //! jobs' judgments decides where the run goes. A repository without the
 //! table reviews with the whole review's job alone.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use runtime_support::*;
 use sha2::{Digest, Sha256};
@@ -908,7 +909,7 @@ fn the_reviews_of_two_runs_share_the_limit_of_jobs_at_once() {
     assert_eq!(most, 1, "no two jobs ran at once");
     let reviews = events
         .iter()
-        .filter(|e| e.kind == "review_finished")
+        .filter(|e| e.kind == EventKind::ReviewFinished)
         .count();
     assert_eq!(reviews, 2);
 }
@@ -1273,14 +1274,14 @@ fn with_the_fallback_off_an_agents_job_waits_for_its_provider_and_lands() {
             .all_events()
             .unwrap()
             .iter()
-            .any(|event| event.kind == "provider_held")
+            .any(|event| event.kind == EventKind::ProviderHeld)
     });
     let held = SqliteQueue::open(&db)
         .unwrap()
         .all_events()
         .unwrap()
         .into_iter()
-        .find(|event| event.kind == "provider_held")
+        .find(|event| event.kind == EventKind::ProviderHeld)
         .unwrap();
     assert_eq!(held.payload["provider"], "codex");
     SqliteQueue::open(&db)
@@ -1329,7 +1330,7 @@ fn with_the_fallback_off_an_agents_job_waits_for_its_provider_and_lands() {
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == "provider_held")
+        .filter(|event| event.kind == EventKind::ProviderHeld)
         .map(|event| event.payload["provider"].clone())
         .collect();
     assert!(
@@ -1472,7 +1473,7 @@ fn an_agent_that_names_codex_moves_alone_to_claude_and_keeps_where_its_provider_
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == "provider_held")
+        .filter(|event| event.kind == EventKind::ProviderHeld)
         .map(|event| event.payload["provider"].clone())
         .collect();
     assert_eq!(held, [json!("codex")]);
@@ -1548,7 +1549,7 @@ fn codex_agent_waits_alone_and_the_review_lands(stdout: &str, stderr: &str, reas
             .all_events()
             .unwrap()
             .iter()
-            .any(|event| event.kind == "provider_held");
+            .any(|event| event.kind == EventKind::ProviderHeld);
         held && answered(&detail).len() == 2
     });
     let detail = SqliteQueue::open(&db).unwrap().show(TASK).unwrap();
@@ -1559,7 +1560,7 @@ fn codex_agent_waits_alone_and_the_review_lands(stdout: &str, stderr: &str, reas
         .all_events()
         .unwrap()
         .into_iter()
-        .find(|event| event.kind == "provider_held")
+        .find(|event| event.kind == EventKind::ProviderHeld)
         .unwrap();
     assert_eq!(held.payload["provider"], "codex");
     assert_eq!(held.payload["reason"], reason);
@@ -1607,7 +1608,7 @@ fn codex_agent_waits_alone_and_the_review_lands(stdout: &str, stderr: &str, reas
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == "provider_held")
+        .filter(|event| event.kind == EventKind::ProviderHeld)
         .map(|event| event.payload["provider"].clone())
         .collect();
     assert!(
@@ -1702,7 +1703,7 @@ fn a_hold_before_the_review_begins_holds_only_the_jobs_of_its_provider() {
         .all_events()
         .unwrap()
         .into_iter()
-        .find(|event| event.kind == "provider_held")
+        .find(|event| event.kind == EventKind::ProviderHeld)
         .unwrap();
     SqliteQueue::open(&db)
         .unwrap()
@@ -1966,7 +1967,7 @@ fn the_eval_and_a_review_start_an_agents_job_the_one_way_within_their_own_limits
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == "agent_eval_run_finished")
+        .filter(|event| event.kind == EventKind::AgentEvalRunFinished)
         .map(|event| event.payload)
         .collect::<Vec<_>>();
     assert_eq!(eval_runs.len(), 1, "{eval_runs:?}");
@@ -2102,7 +2103,7 @@ fn a_review_whose_agent_waits_for_its_provider_is_parked_without_starting_it() {
             .all_events()
             .unwrap()
             .iter()
-            .any(|event| event.kind == "provider_held")
+            .any(|event| event.kind == EventKind::ProviderHeld)
     });
     let run = SqliteQueue::open(&db).unwrap().show(TASK).unwrap().runs[0].clone();
     let op = pause_replan(&db, run.id());

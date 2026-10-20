@@ -12,7 +12,7 @@ use super::{
     park_for_hold, park_for_replan, park_gone_session, park_live,
 };
 use crate::domain::{
-    DomainError, Reason, ReasonCode, RunEvent, RunStatus, event_kind, recheck,
+    DomainError, Reason, ReasonCode, RunEvent, RunStatus, recheck,
     recovery::{self, RecoveryAlert},
     resume::{self, Exhaustion, ResumeCount},
     validation::Validation,
@@ -342,7 +342,7 @@ pub fn record_exhausted_resumes(
             let resumed = events
                 .iter()
                 .rev()
-                .find(|e| e.kind == event_kind::RESUME_FINISHED)
+                .find(|e| e.kind == EventKind::ResumeFinished)
                 .map(|e| e.id);
             payload["alert"] = json!(RecoveryAlert::ResumeExhausted);
             payload["attempt"] =
@@ -382,6 +382,7 @@ pub fn record_exhausted_resumes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::event_kind;
     use crate::domain::{
         CommitSha, EventId, EvidenceCheck, Provider, RunId, RunRecord, TaskId, measure::LoadSummary,
     };
@@ -722,7 +723,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: event_kind::RESUME_FINISHED.to_owned(),
+            kind: event_kind::RESUME_FINISHED.into(),
             payload: json!({}),
             created_at: String::new(),
             actor: None,

@@ -3,6 +3,7 @@
 #![allow(dead_code, unused_imports)]
 
 use crate::common;
+use dagq::domain::EventKind;
 use dagq::infrastructure::git_binary::git_executable;
 pub mod agent_eval;
 pub mod background_wrappers;
@@ -1020,7 +1021,7 @@ pub fn first_event_millis(detail: &dagq::domain::TaskDetail, kind: &str) -> i64 
     detail
         .events
         .iter()
-        .find(|event| event.kind == kind)
+        .find(|event| event.kind.as_str() == kind)
         .and_then(|event| dagq::domain::stats::timestamp_millis(&event.created_at))
         .unwrap_or_else(|| panic!("no {kind} event"))
 }
@@ -1498,7 +1499,7 @@ pub fn rejection_reason(detail: &dagq::domain::TaskDetail) -> String {
     let event = detail
         .events
         .iter()
-        .find(|e| e.kind == "validation_finished")
+        .find(|e| e.kind == EventKind::ValidationFinished)
         .unwrap();
     assert_eq!(event.payload["status"], "failed");
     assert_eq!(event.payload["accepted"], false);
@@ -1552,7 +1553,7 @@ pub fn backend_failures(detail: &dagq::domain::TaskDetail) -> Vec<&dagq::domain:
     detail
         .events
         .iter()
-        .filter(|e| e.kind == "backend_call_failed")
+        .filter(|e| e.kind == EventKind::BackendCallFailed)
         .collect()
 }
 
@@ -1724,7 +1725,7 @@ pub fn events_of(db: &Path, run_id: &RunId, kind: &str) -> Vec<Value> {
         .run_events(run_id)
         .unwrap()
         .into_iter()
-        .filter(|e| e.kind == kind)
+        .filter(|e| e.kind.as_str() == kind)
         .map(|e| e.payload)
         .collect()
 }
@@ -1758,7 +1759,7 @@ pub fn integration_verifications(detail: &dagq::domain::TaskDetail) -> Vec<&Valu
     detail
         .events
         .iter()
-        .filter(|e| e.kind == "verification_command" && e.payload["phase"] == "integration")
+        .filter(|e| e.kind == EventKind::VerificationCommand && e.payload["phase"] == "integration")
         .map(|e| &e.payload)
         .collect()
 }
@@ -1768,7 +1769,7 @@ pub fn integration_receipts(detail: &dagq::domain::TaskDetail) -> Vec<&Value> {
     detail
         .events
         .iter()
-        .filter(|e| e.kind == "integration_receipt")
+        .filter(|e| e.kind == EventKind::IntegrationReceipt)
         .map(|e| &e.payload)
         .collect()
 }
@@ -1955,7 +1956,7 @@ pub fn payloads<'a>(detail: &'a dagq::domain::TaskDetail, kind: &str) -> Vec<&'a
     detail
         .events
         .iter()
-        .filter(|e| e.kind == kind)
+        .filter(|e| e.kind.as_str() == kind)
         .map(|e| &e.payload)
         .collect()
 }
@@ -2122,7 +2123,7 @@ pub fn adoption_events(detail: &dagq::domain::TaskDetail) -> Vec<&Value> {
     detail
         .events
         .iter()
-        .filter(|e| e.kind == "run_adopted")
+        .filter(|e| e.kind == EventKind::RunAdopted)
         .map(|e| &e.payload)
         .collect()
 }

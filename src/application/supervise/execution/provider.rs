@@ -211,7 +211,7 @@ impl Supervisor<'_> {
         let Some((finished_at, finished)) = events
             .iter()
             .enumerate()
-            .rfind(|(_, e)| e.kind == event_kind::TURN_FINISHED)
+            .rfind(|(_, e)| e.kind == EventKind::TurnFinished)
             .map(|(at, e)| (at, e.payload.clone()))
         else {
             return Ok(WallStep::Held);
@@ -223,7 +223,7 @@ impl Supervisor<'_> {
         // A request after the turn (a retry, the hold's continue) answers it.
         if let Some(requested) = events[finished_at..]
             .iter()
-            .find(|e| e.kind == event_kind::TURN_REQUESTED)
+            .find(|e| e.kind == EventKind::TurnRequested)
         {
             return Ok(WallStep::Switched(recorded_at(requested)));
         }
@@ -240,7 +240,7 @@ impl Supervisor<'_> {
         let to = from.other();
         let started = events
             .iter()
-            .rfind(|e| e.kind == event_kind::TURN_STARTED && e.payload["turn"] == turn)
+            .rfind(|e| e.kind == EventKind::TurnStarted && e.payload["turn"] == turn)
             .map(|e| e.payload.clone())
             .unwrap_or_default();
         let request = started["request"].as_u64();
@@ -1404,7 +1404,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: event_kind::PROVIDER_SWITCHED.to_owned(),
+            kind: event_kind::PROVIDER_SWITCHED.into(),
             payload: json!({}),
             created_at: String::new(),
             actor: None,

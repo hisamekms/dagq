@@ -1,6 +1,7 @@
 //! The KPIs of the plans: plan quality, drafts, follow-ups and the forecast.
 
 use super::*;
+use crate::domain::EventKind;
 
 /// The quality of the plans per day (ADR-0079 decision 7): the revises of
 /// plan review split by the model and effort of its session, and the
@@ -122,7 +123,7 @@ fn plan_quality_is_split_by_the_judging_session_and_the_proposal() {
     let opened: HashMap<i64, i64> = queue
         .events
         .iter()
-        .filter(|e| e.kind == "session_opened")
+        .filter(|e| e.kind == EventKind::SessionOpened)
         .map(|e| (e.payload["marker"].as_i64().unwrap(), e.id.as_i64()))
         .collect();
     for event in &mut queue.events {

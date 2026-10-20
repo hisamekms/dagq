@@ -300,7 +300,8 @@ impl Supervisor<'_> {
             || self.claim.defer.build_deferrals.is_none()
             || self.claim.defer.class_deferrals.is_none()
         {
-            self.queue.latest_task_events(&DEFERRAL_KINDS)?
+            self.queue
+                .latest_task_events(&DEFERRAL_KINDS.map(EventKind::as_str))?
         } else {
             Vec::new()
         };

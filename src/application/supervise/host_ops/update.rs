@@ -175,7 +175,7 @@ impl HostOpsState {
         // Of the automatic update's jobs only: the release update's is the
         // release pass's to report.
         if let Some(step) = latest_job_step_of(&updates, false)
-            && JOB_STEPS.contains(&step.kind.as_str())
+            && step.kind.is_in(JOB_STEPS)
         {
             if let Some(pid) = job_pid(step) {
                 env.processes.reap(pid);

@@ -4,6 +4,7 @@
 //! starts none now, ADR-t1433-4), which `down` leaves to a person.
 
 use crate::common;
+use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
 
 use common::lifecycle::*;
@@ -191,7 +192,7 @@ fn down_reports_not_running_without_a_live_registration_and_still_unloads_the_ag
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == "supervisor_stopped")
+        .filter(|event| event.kind == EventKind::SupervisorStopped)
         .collect();
     assert_eq!(stops.len(), 1, "{stops:?}");
     assert_eq!(stops[0].payload["supervisor"], "dead");

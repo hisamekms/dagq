@@ -17,8 +17,9 @@ use super::{
     COMPARE_AXES, Change, CompareSpec, DAY_MS, KpiQuery, Kpis, Measure, cursor_ms, window::Context,
 };
 use crate::domain::{
+    EventKind,
     host_metrics::HostSummary,
-    marks::{self, DERIVED_PREFIX, MARK_RETRACTED, Mark, SUPERVISOR_STARTED, SUPERVISOR_STOPPED},
+    marks::{self, DERIVED_PREFIX, Mark},
     stats::{Cursor, executions::Coverage, timestamp_millis},
 };
 
@@ -98,7 +99,9 @@ pub struct Comparison {
 fn splitting(marks: &[Mark]) -> Vec<&Mark> {
     marks
         .iter()
-        .filter(|mark| mark.retracted_by.is_none() && mark.kind != MARK_RETRACTED)
+        .filter(|mark| {
+            mark.retracted_by.is_none() && mark.event_kind() != Some(EventKind::MarkRetracted)
+        })
         .collect()
 }
 
@@ -115,15 +118,15 @@ fn routine(marks: &[&Mark]) -> Vec<bool> {
     let mut parallel: Option<&serde_json::Value> = None;
     marks
         .iter()
-        .map(|mark| match mark.kind.as_str() {
-            SUPERVISOR_STARTED => {
+        .map(|mark| match mark.event_kind() {
+            Some(EventKind::SupervisorStarted) => {
                 let this = mark.detail.get("parallel");
                 let same = matches!((parallel, this), (Some(before), Some(now)) if before == now);
                 parallel = this;
                 same
             }
-            SUPERVISOR_STOPPED => true,
-            kind => kind.strip_prefix(DERIVED_PREFIX) == Some("dagq_version"),
+            Some(EventKind::SupervisorStopped) => true,
+            _ => mark.kind.strip_prefix(DERIVED_PREFIX) == Some("dagq_version"),
         })
         .collect()
 }

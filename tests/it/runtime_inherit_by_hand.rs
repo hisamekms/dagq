@@ -9,6 +9,7 @@ use crate::runtime_support;
 use dagq::application::TRIAGE_ASKER;
 use dagq::application::commands::planning::Planning;
 use dagq::application::inherit::InheritedByHand;
+use dagq::domain::EventKind;
 use dagq::domain::{
     ActorContext, ActorRole, AskReason, HEARTBEAT_TIMEOUT_SECS, LeaseToken, StaticPolicy,
     actor_model::{ActorLaunch, ModelRole},
@@ -68,7 +69,7 @@ fn inherit_retries(detail: &dagq::domain::TaskDetail, run: &TaskRun) -> Vec<Valu
         .events
         .iter()
         .filter(|e| {
-            e.kind == "triage_finished"
+            e.kind == EventKind::TriageFinished
                 && e.run_id.as_ref() == Some(run.id())
                 && e.payload["action"] == "retry_inherit"
         })
@@ -82,7 +83,7 @@ fn readied(detail: &dagq::domain::TaskDetail) -> usize {
         .events
         .iter()
         .filter(|e| {
-            e.kind == "task_status_changed"
+            e.kind == EventKind::TaskStatusChanged
                 && e.payload["from"] == "in_progress"
                 && e.payload["to"] == "ready"
         })
@@ -169,7 +170,7 @@ fn carried_over_by_the_inbox(interrupted: bool) {
     let recorded = detail
         .events
         .iter()
-        .rfind(|e| e.kind == "triage_finished")
+        .rfind(|e| e.kind == EventKind::TriageFinished)
         .unwrap();
     assert_eq!(
         serde_json::to_value(&recorded.actor).unwrap()["role"],
@@ -187,7 +188,7 @@ fn carried_over_by_the_inbox(interrupted: bool) {
     let inherited: Vec<&Value> = detail
         .events
         .iter()
-        .filter(|e| e.kind == "run_inherited" && e.run_id.as_ref() == Some(second.id()))
+        .filter(|e| e.kind == EventKind::RunInherited && e.run_id.as_ref() == Some(second.id()))
         .map(|e| &e.payload)
         .collect();
     assert_eq!(inherited.len(), 1);
@@ -695,6 +696,6 @@ fn a_retry_by_hand_over_a_stale_round_takes_its_right_to_apply_away() {
         !detail
             .events
             .iter()
-            .any(|e| e.kind == "triage_decided" && e.run_id.as_ref() == Some(run.id()))
+            .any(|e| e.kind == EventKind::TriageDecided && e.run_id.as_ref() == Some(run.id()))
     );
 }

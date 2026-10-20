@@ -93,7 +93,9 @@ pub fn pending_restart(
 ) -> Result<Option<Value>> {
     let Some(event) = queue
         .latest_queue_event(&[RESTART_FAILED, SCCACHE_SERVER_STARTED])?
-        .filter(|event| event.kind == RESTART_FAILED && event.payload["port"] == port)
+        .filter(|event| {
+            event.kind == EventKind::SccacheServerRestartFailed && event.payload["port"] == port
+        })
     else {
         return Ok(None);
     };
@@ -162,7 +164,7 @@ pub fn observe(
         let already = queue
             .latest_queue_event(&[UNHEALTHY, SCCACHE_SERVER_STARTED])?
             .is_some_and(|event| {
-                event.kind == UNHEALTHY
+                event.kind == EventKind::SccacheServerUnhealthy
                     && same_identity(&event.payload, &payload)
                     && event.payload["reason"] == payload["reason"]
             });
@@ -202,8 +204,10 @@ pub fn report(
                 == process.pid
                 && event.payload["started_at"] == process.started_at
                 && event.payload["port"] == target.port
-                && matches!(event.kind.as_str(), UNHEALTHY | RESTART_FAILED))
-            {
+                && matches!(
+                    event.kind.known(),
+                    Some(EventKind::SccacheServerUnhealthy | EventKind::SccacheServerRestartFailed)
+                )) {
                 "unhealthy"
             } else if report["started_by"] == "unknown" {
                 "unknown_origin"
@@ -317,7 +321,7 @@ pub fn record_restart_failure(
     let already = queue
         .latest_queue_event(&[RESTART_FAILED, SCCACHE_SERVER_STARTED])?
         .is_some_and(|event| {
-            event.kind == RESTART_FAILED
+            event.kind == EventKind::SccacheServerRestartFailed
                 && same_identity(&event.payload, &payload)
                 && event.payload["program"] == payload["program"]
                 && event.payload["error"] == payload["error"]

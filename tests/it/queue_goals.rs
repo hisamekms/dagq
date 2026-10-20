@@ -1,5 +1,6 @@
 //! Queue tests: goals, set-goal, goal events and verdicts, notes and findings.
 use crate::common;
+use dagq::domain::EventKind;
 
 use dagq::{
     application::{TaskQuery, TaskReads, TaskStore},
@@ -64,7 +65,7 @@ fn draft_goal_tasks_are_not_candidates_until_the_goal_is_ready() {
     assert_eq!(opened.status(), GoalStatus::Open);
     assert_eq!(ids(&queue), [task.id()]);
     let events = queue.show_goal(draft.id()).unwrap().events;
-    assert_eq!(events.last().unwrap().kind, "goal_status_changed");
+    assert_eq!(events.last().unwrap().kind, EventKind::GoalStatusChanged);
     assert_eq!(
         events.last().unwrap().payload,
         serde_json::json!({"from": "draft", "to": "open"})
@@ -114,7 +115,7 @@ fn notes_attach_to_tasks_runs_and_goals_and_page_by_cursor() {
     let on_goal = queue
         .add_note(note(NoteTarget::Goal(goal.id()), "goal note"))
         .unwrap();
-    assert_eq!(on_goal.kind, "observation");
+    assert_eq!(on_goal.kind, EventKind::Observation);
     assert_eq!(on_goal.goal_id, Some(goal.id()));
     assert_eq!(on_goal.task_id, None);
     assert_eq!(
@@ -465,7 +466,9 @@ fn findings_on_a_run_or_a_goal_ride_on_their_target() {
         .unwrap()
         .events
         .into_iter()
-        .find(|event| event.kind == "finding_recorded" && event.run_id.as_ref() == Some(run.id()))
+        .find(|event| {
+            event.kind == EventKind::FindingRecorded && event.run_id.as_ref() == Some(run.id())
+        })
         .unwrap();
     assert_eq!(
         recorded.payload["finding"],

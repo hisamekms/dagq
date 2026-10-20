@@ -3,6 +3,7 @@
 //! adapters for and records why it defers the others, and its providers'
 //! executables are recorded on its registration.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use dagq::domain::{
     ClaimOutcome, LeaseToken, Provider,
@@ -85,7 +86,7 @@ fn a_claude_task_without_a_mode_is_claimed_headless() {
             .run_events(run.id())
             .unwrap()
             .into_iter()
-            .filter(|e| e.kind == "worker_mode_converted")
+            .filter(|e| e.kind == EventKind::WorkerModeConverted)
             .collect();
         assert_eq!(conversions.len(), usize::from(task == watched));
         if let Some(event) = conversions.first() {
@@ -103,7 +104,7 @@ fn events(db: &Path, kind: &str) -> Vec<(Option<TaskId>, Value)> {
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == kind)
+        .filter(|event| event.kind.as_str() == kind)
         .map(|event| (event.task_id, event.payload))
         .collect()
 }

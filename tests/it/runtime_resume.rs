@@ -53,7 +53,7 @@ fn conflicting_run_needs_a_session_and_lands_after_the_session_resolves_it() {
     let deferred = detail
         .events
         .iter()
-        .find(|e| e.kind == "integration_deferred")
+        .find(|e| e.kind == EventKind::IntegrationDeferred)
         .unwrap();
     assert_eq!(deferred.payload["status"], "needs_session");
     assert_eq!(deferred.payload["code"], "rebase_conflict");
@@ -159,7 +159,7 @@ fn conflicting_run_needs_a_session_and_lands_after_the_session_resolves_it() {
         .events
         .iter()
         .rev()
-        .find(|e| e.kind == "integration_rebased")
+        .find(|e| e.kind == EventKind::IntegrationRebased)
         .unwrap();
     assert_eq!(rebased.payload["head_before"], json!(resolved));
     assert_eq!(rebased.payload["head_after"], json!(resolved));
@@ -184,7 +184,7 @@ fn conflicting_run_needs_a_session_and_lands_after_the_session_resolves_it() {
     let validated = detail
         .events
         .iter()
-        .find(|e| e.kind == "validation_finished")
+        .find(|e| e.kind == EventKind::ValidationFinished)
         .unwrap();
     assert_eq!(validated.payload["receipt"]["commit"], json!(source));
     assert!(validated.payload["receipt"].get("follow_ups").is_none());
@@ -1008,7 +1008,7 @@ fn a_run_whose_conflict_only_resumes_are_used_up_is_retried_with_its_branch() {
     let started: Vec<&Value> = detail
         .events
         .iter()
-        .filter(|e| e.kind == "resume_started" && e.run_id.as_ref() == Some(run.id()))
+        .filter(|e| e.kind == EventKind::ResumeStarted && e.run_id.as_ref() == Some(run.id()))
         .map(|e| &e.payload)
         .collect();
     assert_eq!(
@@ -1090,7 +1090,7 @@ fn a_run_whose_conflict_only_resumes_are_used_up_is_retried_with_its_branch() {
     let inherited: Vec<&Value> = detail
         .events
         .iter()
-        .filter(|e| e.kind == "run_inherited")
+        .filter(|e| e.kind == EventKind::RunInherited)
         .map(|e| &e.payload)
         .collect();
     assert_eq!(inherited.len(), 1);
@@ -1100,7 +1100,7 @@ fn a_run_whose_conflict_only_resumes_are_used_up_is_retried_with_its_branch() {
         detail
             .events
             .iter()
-            .any(|e| e.kind == "run_inherited" && e.run_id.as_ref() == Some(next.id()))
+            .any(|e| e.kind == EventKind::RunInherited && e.run_id.as_ref() == Some(next.id()))
     );
     let prompt = fs::read_to_string(Path::new(next.run_dir().unwrap()).join("prompt.txt")).unwrap();
     // Its own commits start at the merge base of its head and the new
@@ -1309,7 +1309,7 @@ fn a_used_up_run_is_retried_with_its_branch_by_its_recovery_job() {
     let of = |kind: &str| -> Vec<Value> {
         events
             .iter()
-            .filter(|e| e.kind == kind)
+            .filter(|e| e.kind.as_str() == kind)
             .map(|e| e.payload.clone())
             .collect()
     };
@@ -1334,7 +1334,7 @@ fn a_used_up_run_is_retried_with_its_branch_by_its_recovery_job() {
     let inherited: Vec<&Value> = detail
         .events
         .iter()
-        .filter(|e| e.kind == "run_inherited" && e.run_id.as_ref() == Some(next.id()))
+        .filter(|e| e.kind == EventKind::RunInherited && e.run_id.as_ref() == Some(next.id()))
         .map(|e| &e.payload)
         .collect();
     assert_eq!(inherited[0]["inherit_from_run"], json!(run.id()));
@@ -1446,7 +1446,7 @@ fn a_session_nobody_watches_blocks_the_resume_until_it_ends() {
     let acquired = detail
         .events
         .iter()
-        .filter(|e| e.kind == "lease_acquired" && e.payload["reason"] == "resume")
+        .filter(|e| e.kind == EventKind::LeaseAcquired && e.payload["reason"] == "resume")
         .map(|e| e.payload["previous_token"].clone())
         .collect::<Vec<_>>();
     assert_eq!(acquired, [json!(null), json!("dead-supervisor")]);
@@ -1544,7 +1544,7 @@ fn failed_receipt_from_a_session_ends_the_run_without_landing() {
     let failed_event = detail
         .events
         .iter()
-        .find(|e| e.kind == "integration_failed")
+        .find(|e| e.kind == EventKind::IntegrationFailed)
         .unwrap();
     assert_eq!(failed_event.payload["status"], "failed");
     assert_eq!(failed_event.payload["reason"], json!(reason));
@@ -1777,9 +1777,14 @@ fn a_resume_whose_lease_moved_is_resumed_again_only_after_its_slot_is_dropped() 
     };
     wait_until(&db, Duration::from_secs(30), |queue| {
         let events = queue.run_events(run.id()).unwrap();
-        let started = events.iter().position(|e| e.kind == "resume_started");
-        started.is_some_and(|at| events[at..].iter().any(|e| e.kind == "turn_started"))
-            && wrapper_lives(&db, &run)
+        let started = events
+            .iter()
+            .position(|e| e.kind == EventKind::ResumeStarted);
+        started.is_some_and(|at| {
+            events[at..]
+                .iter()
+                .any(|e| e.kind == EventKind::TurnStarted)
+        }) && wrapper_lives(&db, &run)
     });
     let moved = take_lease(&db, &run, true);
     let mut queue = SqliteQueue::open(&db).unwrap();
@@ -1842,7 +1847,7 @@ fn a_resume_whose_lease_moved_is_resumed_again_only_after_its_slot_is_dropped() 
     let acquired = detail
         .events
         .iter()
-        .filter(|e| e.kind == "lease_acquired" && e.payload["reason"] == "resume")
+        .filter(|e| e.kind == EventKind::LeaseAcquired && e.payload["reason"] == "resume")
         .map(|e| e.payload["previous_token"].clone())
         .collect::<Vec<_>>();
     // The second attempt replaced the moved, stale lease.
@@ -1909,7 +1914,7 @@ fn a_historical_interactive_run_resumes_headless_and_records_its_conversion() {
     let events = queue.run_events(run.id()).unwrap();
     let converted: Vec<_> = events
         .iter()
-        .filter(|e| e.kind == "worker_mode_converted")
+        .filter(|e| e.kind == EventKind::WorkerModeConverted)
         .collect();
     assert_eq!(converted.len(), 1);
     assert_eq!(
@@ -1933,7 +1938,7 @@ fn a_historical_interactive_run_resumes_headless_and_records_its_conversion() {
             .run_events(run.id())
             .unwrap()
             .iter()
-            .filter(|e| e.kind == "worker_mode_converted")
+            .filter(|e| e.kind == EventKind::WorkerModeConverted)
             .count(),
         1
     );
@@ -2156,7 +2161,7 @@ fn a_landing_ask_is_closed_when_its_run_fails_on_used_up_resumes() {
     let closed_at = detail
         .events
         .iter()
-        .position(|e| e.kind == "ask_answered" && e.payload["ask_id"] == ask.id.as_i64())
+        .position(|e| e.kind == EventKind::AskAnswered && e.payload["ask_id"] == ask.id.as_i64())
         .expect("the ask was answered by the runtime");
     let last_resume = kinds.iter().rposition(|k| *k == "resume_finished").unwrap();
     assert!(last_resume < closed_at, "{kinds:?}");
@@ -2258,9 +2263,13 @@ fn a_landing_ask_of_an_earlier_run_is_closed_when_another_run_lands_the_task() {
             .any(|p| p["ask_id"] == ask.id.as_i64())
     );
     // The answer was not applied to the earlier run.
-    assert!(!detail.events.iter().any(
-        |e| e.kind == "integration_approved" && e.run_id.as_ref() == Some(detail.runs[0].id())
-    ));
+    assert!(
+        !detail
+            .events
+            .iter()
+            .any(|e| e.kind == EventKind::IntegrationApproved
+                && e.run_id.as_ref() == Some(detail.runs[0].id()))
+    );
     assert!(queue.asks(Default::default()).unwrap().is_empty());
 }
 

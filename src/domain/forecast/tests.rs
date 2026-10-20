@@ -346,7 +346,7 @@ fn event(id: i64, run: &str, task: i64, kind: &str, at: &str, payload: Value) ->
         task_id: (task > 0).then_some(TaskId::new(task)),
         goal_id: None,
         run_id: (!run.is_empty()).then(|| RunId::new(run).unwrap()),
-        kind: kind.to_owned(),
+        kind: kind.into(),
         payload,
         created_at: at.to_owned(),
         actor: None,

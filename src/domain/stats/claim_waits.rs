@@ -4,6 +4,7 @@
 //! class reads as an implementation's (ADR-t1487-1), and one without a
 //! `ready_at` is not counted.
 
+use crate::domain::EventKind;
 use std::collections::BTreeMap;
 
 use serde::Deserialize;
@@ -11,7 +12,6 @@ use serde::Deserialize;
 use super::asks::Spread;
 use super::{EventId, RunEvent, TaskId, timestamp_millis};
 use crate::domain::ExecutionClass;
-use crate::domain::event_kind::RUN_CLAIMED;
 use crate::domain::run::payload::{restore, typed};
 
 /// What [`claim_waits`] reads of a `run_claimed`, restored as typed values:
@@ -36,7 +36,10 @@ pub fn claim_waits(
 ) -> BTreeMap<&'static str, Spread> {
     let mut secs: BTreeMap<&'static str, Vec<i64>> = BTreeMap::new();
     for event in events.iter().filter(|event| {
-        event.kind == RUN_CLAIMED && event.id > after && event.id <= upto && counts(event.task_id)
+        event.kind == EventKind::RunClaimed
+            && event.id > after
+            && event.id <= upto
+            && counts(event.task_id)
     }) {
         let claimed: Claimed = restore(&event.payload);
         let Some(ready_at) = claimed.ready_at.as_deref().and_then(timestamp_millis) else {
@@ -58,6 +61,7 @@ pub fn claim_waits(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::event_kind::RUN_CLAIMED;
     use serde_json::{Value, json};
 
     fn claimed(id: i64, task: i64, at: &str, payload: Value) -> RunEvent {
@@ -66,7 +70,7 @@ mod tests {
             task_id: Some(TaskId::new(task)),
             goal_id: None,
             run_id: None,
-            kind: RUN_CLAIMED.to_owned(),
+            kind: RUN_CLAIMED.into(),
             payload,
             created_at: at.to_owned(),
             actor: None,

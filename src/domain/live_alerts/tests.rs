@@ -34,7 +34,7 @@ impl Log {
             task_id: run.map(|(_, task)| task),
             goal_id: None,
             run_id: run.map(|(run, _)| run.clone()),
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: crate::domain::marks::utc_text(at_ms),
             actor: None,
@@ -96,7 +96,7 @@ impl Log {
     fn payloads(&self, kind: EventKind) -> Vec<&Value> {
         self.events
             .iter()
-            .filter(|event| event.kind == kind.as_str())
+            .filter(|event| event.kind == kind)
             .map(|event| &event.payload)
             .collect()
     }
@@ -758,7 +758,12 @@ fn a_silent_supervisor_is_stopped_apart_from_a_stale_or_failing_one() {
     let past_grace = (T0 + 30 * MIN + GRACE_SECS * SEC + SEC) / 1000;
 
     let (silent, _) = observed();
-    assert!(!silent.events.iter().any(|e| e.kind == "supervisor_stopped"));
+    assert!(
+        !silent
+            .events
+            .iter()
+            .any(|e| e.kind == EventKind::SupervisorStopped)
+    );
     assert_eq!(
         missing_reason(&fold(&silent.events, (T0 + 40 * MIN) / 1000)),
         None

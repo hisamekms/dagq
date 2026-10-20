@@ -24,7 +24,7 @@ impl Events {
             task_id: Some(TaskId::new(task)),
             goal_id: None,
             run_id: run.map(|run| RunId::new(run).unwrap()),
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: format!(
                 "2026-09-23T{:02}:{:02}:00.000Z",

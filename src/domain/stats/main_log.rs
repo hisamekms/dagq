@@ -54,13 +54,13 @@ pub const MAIN_READ_RECOVERED: &str = EventKind::MainReadRecovered.as_str();
 pub const MAIN_REWRITTEN: &str = EventKind::MainRewritten.as_str();
 
 /// The kinds of the record, which [`fold_main_log`] reads.
-pub const MAIN_LOG_KINDS: [&str; 6] = [
-    MAIN_COMMITS_RECORDED,
-    MAIN_PATHS_RECORDED,
-    MAIN_OBSERVED,
-    MAIN_READ_FAILED,
-    MAIN_READ_RECOVERED,
-    MAIN_REWRITTEN,
+pub const MAIN_LOG_KINDS: [EventKind; 6] = [
+    EventKind::MainCommitsRecorded,
+    EventKind::MainPathsRecorded,
+    EventKind::MainObserved,
+    EventKind::MainReadFailed,
+    EventKind::MainReadRecovered,
+    EventKind::MainRewritten,
 ];
 
 /// The payloads of `main_commits_recorded` for `commits` after `after`,
@@ -211,7 +211,7 @@ impl MainReading {
     /// left.
     pub fn of(event: Option<&RunEvent>) -> Self {
         match event {
-            Some(event) if event.kind == MAIN_READ_FAILED => Self::Failing {
+            Some(event) if event.kind == EventKind::MainReadFailed => Self::Failing {
                 since: event.payload["at"]
                     .as_i64()
                     .or_else(|| timestamp_millis(&event.created_at).map(|ms| ms / 1000))
@@ -261,8 +261,8 @@ pub fn fold_main_log(events: &[RunEvent]) -> MainLog {
     let mut bases: HashMap<String, (u64, BTreeSet<u64>, HashSet<String>)> = HashMap::new();
     for event in events {
         let payload = &event.payload;
-        match event.kind.as_str() {
-            MAIN_COMMITS_RECORDED => {
+        match event.kind.known() {
+            Some(EventKind::MainCommitsRecorded) => {
                 for commit in payload["commits"]
                     .as_array()
                     .into_iter()
@@ -280,7 +280,7 @@ pub fn fold_main_log(events: &[RunEvent]) -> MainLog {
                     log.history.commits.push(commit);
                 }
             }
-            MAIN_PATHS_RECORDED => {
+            Some(EventKind::MainPathsRecorded) => {
                 let (Some(head), Some(part), Some(parts)) = (
                     payload["head"].as_str(),
                     payload["part"].as_u64(),
@@ -315,7 +315,7 @@ pub fn fold_main_log(events: &[RunEvent]) -> MainLog {
                     }
                 }
             }
-            MAIN_REWRITTEN => {
+            Some(EventKind::MainRewritten) => {
                 let base = payload["base"].as_str();
                 let keep = base
                     .and_then(|base| log.history.commits.iter().position(|c| c.sha == base))
@@ -324,13 +324,13 @@ pub fn fold_main_log(events: &[RunEvent]) -> MainLog {
                 seen = log.history.commits.iter().map(|c| c.sha.clone()).collect();
                 paths = None;
             }
-            MAIN_OBSERVED => {
+            Some(EventKind::MainObserved) => {
                 if let Some(reach) = Reach::of(event) {
                     log.head = Some(reach.head);
                     log.recorded_through = Some(reach.at);
                 }
             }
-            MAIN_READ_FAILED | MAIN_READ_RECOVERED => {
+            Some(EventKind::MainReadFailed | EventKind::MainReadRecovered) => {
                 log.reading = MainReading::of(Some(event));
             }
             _ => {}

@@ -9,6 +9,7 @@
 
 use crate::common::cli::{invoke_with, ok, ok_as, queue};
 use crate::common::queue::{base, new_goal, new_task};
+use dagq::domain::EventKind;
 use dagq::{
     application::{PlanRequestStore, TaskReads, TaskStore, commands::replans::Replans},
     domain::{
@@ -543,7 +544,7 @@ fn a_run_out_of_resumes_is_not_given_up_while_a_replanning_guards_it() {
             .run_events(&run)
             .unwrap()
             .iter()
-            .all(|event| event.kind != "recovery_requested")
+            .all(|event| event.kind != EventKind::RecoveryRequested)
     );
     conn.execute(
         "UPDATE replan_operations SET status='candidate' WHERE id=?1",
@@ -623,7 +624,7 @@ fn two_supervisors_restore_a_parked_run_one_at_a_time_and_a_loser_writes_nothing
             .run_events(&run)
             .unwrap()
             .iter()
-            .filter(|event| event.kind == kind)
+            .filter(|event| event.kind.as_str() == kind)
             .count()
     };
     let status = |queue: &SqliteQueue| queue.replan_operation(id).unwrap().status;

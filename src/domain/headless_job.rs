@@ -3,6 +3,7 @@
 //! the one that started it died can stop it before it starts its own, and
 //! a job's timeout stops the processes the job started too.
 
+use crate::domain::EventKind;
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -370,23 +371,22 @@ impl JobOn<'_> {
     /// The kinds of the events besides `headless_job_stopped` that end a
     /// job of this kind with its Execution (ADR-t1486-1); none for a kind
     /// that starts no agent.
-    fn end_kinds(&self) -> &'static [&'static str] {
-        use super::event_kind as k;
+    fn end_kinds(&self) -> &'static [EventKind] {
         match self.kind {
             REVIEW => &[
-                k::REVIEW_JOB_FINISHED,
-                k::REVIEW_FINISHED,
-                k::REVIEW_FAILED,
-                k::REVIEW_RETRIED,
-                k::RUN_SATISFIED_REVIEW_JOB_FINISHED,
+                EventKind::ReviewJobFinished,
+                EventKind::ReviewFinished,
+                EventKind::ReviewFailed,
+                EventKind::ReviewRetried,
+                EventKind::RunSatisfiedReviewJobFinished,
             ],
-            RECOVERY => &[k::RECOVERY_FINISHED],
+            RECOVERY => &[EventKind::RecoveryFinished],
             PLAN_REVIEW => &[
-                k::PLAN_REVIEW_FINISHED,
-                k::PLAN_REVIEW_FAILED,
-                k::PLAN_REVIEW_DISCARDED,
+                EventKind::PlanReviewFinished,
+                EventKind::PlanReviewFailed,
+                EventKind::PlanReviewDiscarded,
             ],
-            GOAL_REVIEW => &[k::GOAL_REVIEW_FINISHED, k::GOAL_REVIEW_FAILED],
+            GOAL_REVIEW => &[EventKind::GoalReviewFinished, EventKind::GoalReviewFailed],
             _ => &[],
         }
     }
@@ -394,8 +394,9 @@ impl JobOn<'_> {
     /// The kinds of event [`Self::execution_recorded`] looks among: the
     /// ends of this kind of job and `headless_job_stopped`.
     pub fn ending_kinds(&self) -> Vec<&'static str> {
-        let mut kinds = self.end_kinds().to_vec();
-        kinds.push(super::event_kind::HEADLESS_JOB_STOPPED);
+        let mut kinds: Vec<&'static str> =
+            self.end_kinds().iter().map(|kind| kind.as_str()).collect();
+        kinds.push(EventKind::HeadlessJobStopped.as_str());
         kinds
     }
 
@@ -412,19 +413,19 @@ impl JobOn<'_> {
             // another: it is not this row's end, though written in the
             // second this one started.
             let restarted = end.runs_again == Some(true) || end.outcome == Some("held");
-            let ends = if event.kind == super::event_kind::HEADLESS_JOB_STOPPED {
+            let ends = if event.kind == EventKind::HeadlessJobStopped {
                 end.kind == Some(self.kind) && end.label == self.label
-            } else if event.kind == super::event_kind::REVIEW_JOB_FINISHED {
+            } else if event.kind == EventKind::ReviewJobFinished {
                 // One job of a review among its others of the attempt.
                 self.kind == REVIEW && end.agent == self.label && !restarted
-            } else if event.kind == super::event_kind::RUN_SATISFIED_REVIEW_JOB_FINISHED {
+            } else if event.kind == EventKind::RunSatisfiedReviewJobFinished {
                 // The one job of a claim's judgment, which no other end of
                 // a review names.
                 self.kind == REVIEW && self.label == Some(SATISFIED_REVIEW_LABEL) && !restarted
             } else {
                 // An attempt's end names no job of its: the whole review's,
                 // the one job a review ran before its agents ran as jobs.
-                self.end_kinds().contains(&event.kind.as_str()) && self.label.is_none()
+                event.kind.is_in(self.end_kinds()) && self.label.is_none()
             };
             let on = match (self.run_id, self.proposal_id, self.goal_id) {
                 (Some(run), _, _) => event.run_id.as_ref() == Some(run),
@@ -740,7 +741,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: run.map(|run| crate::domain::RunId::new(run).unwrap()),
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: at.to_owned(),
             actor: None,

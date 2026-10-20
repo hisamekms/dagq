@@ -47,7 +47,7 @@ fn kinds_of(db: &Path, task: i64) -> Vec<String> {
         .unwrap()
         .events
         .into_iter()
-        .map(|e| e.kind)
+        .map(|e| e.kind.to_string())
         .collect()
 }
 

@@ -4,6 +4,7 @@
 //! start event and the session's span record what it started with and
 //! where that came from.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use runtime_support::*;
 
@@ -24,7 +25,7 @@ fn launches(queue: &mut SqliteQueue, kind: &str) -> Vec<Value> {
         .unwrap()
         .events
         .iter()
-        .filter(|e| e.kind == kind)
+        .filter(|e| e.kind.as_str() == kind)
         .map(|e| e.payload["launch"].clone())
         .collect()
 }
@@ -36,7 +37,7 @@ fn span_launches(queue: &mut SqliteQueue, span_kind: &str) -> Vec<Value> {
         .unwrap()
         .events
         .iter()
-        .filter(|e| e.kind == "session_opened" && e.payload["kind"] == span_kind)
+        .filter(|e| e.kind == EventKind::SessionOpened && e.payload["kind"] == span_kind)
         .map(|e| e.payload["launch"].clone())
         .collect()
 }

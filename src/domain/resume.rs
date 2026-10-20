@@ -4,10 +4,12 @@
 //! run's events alone.
 
 use super::{
-    CommitSha, MAX_RESUME_ATTEMPTS, ReasonCode, RunEvent, event_kind,
+    CommitSha, MAX_RESUME_ATTEMPTS, ReasonCode, RunEvent,
     reason::{event_code, explains_last_error},
     recheck,
 };
+use crate::domain::EventKind;
+use crate::domain::run::{ConflictPrecheck, restore_payload};
 use serde_json::{Value, json};
 
 /// How many conflict-only attempts of one run the supervisor makes: the
@@ -56,18 +58,18 @@ pub const RETRY_INHERIT: &str = "retry_inherit";
 
 /// The events that park a run for a session, or decide what it resumes
 /// with: the latest of them before a resume is why it was resumed.
-const PARKING: [&str; 11] = [
-    "integration_deferred",
-    "integration_error",
-    "evidence_missing",
-    "scope_violation",
-    "landing_decided",
-    "triage_finished",
-    "triage_decided",
-    "session_gone_parked",
-    "run_e2e_failed",
-    "replan_parked",
-    "hold_parked",
+const PARKING: [EventKind; 11] = [
+    EventKind::IntegrationDeferred,
+    EventKind::IntegrationError,
+    EventKind::EvidenceMissing,
+    EventKind::ScopeViolation,
+    EventKind::LandingDecided,
+    EventKind::TriageFinished,
+    EventKind::TriageDecided,
+    EventKind::SessionGoneParked,
+    EventKind::RunE2eFailed,
+    EventKind::ReplanParked,
+    EventKind::HoldParked,
 ];
 
 /// What the events so far say about the run: whether its landing was
@@ -90,28 +92,28 @@ struct History {
 
 impl History {
     fn see(&mut self, event: &RunEvent) {
-        match event.kind.as_str() {
-            "integration_approved" => self.approved = true,
-            "review_finished" => {
+        match event.kind.known() {
+            Some(EventKind::IntegrationApproved) => self.approved = true,
+            Some(EventKind::ReviewFinished) => {
                 self.passed = super::concern::lets_land(&event.payload);
             }
             _ if super::review_reason::judged_converged(event) => self.passed = true,
-            kind if PARKING.contains(&kind) || recheck::parks(event) => {
+            Some(kind) if PARKING.contains(&kind) || recheck::parks(event) => {
                 self.conflict = matches!(
                     kind,
-                    "integration_deferred" | recheck::LANDING_RECHECK_FAILED
+                    EventKind::IntegrationDeferred | EventKind::LandingRecheckFailed
                 ) && event.payload["code"] == ReasonCode::RebaseConflict.as_str();
-                self.rechecked = kind == recheck::LANDING_RECHECK_FAILED;
+                self.rechecked = kind == EventKind::LandingRecheckFailed;
                 // The recovery job's or a person's `resume` carries
                 // `triage_resume`; the error it replaces is what ended the
                 // run.
-                self.killed = matches!(kind, "triage_finished" | "triage_decided")
+                self.killed = matches!(kind, EventKind::TriageFinished | EventKind::TriageDecided)
                     && event_code(event) == Some(ReasonCode::TriageResume)
                     && self.error == Some(ReasonCode::SessionKilled);
             }
             // Only the resume right after the kill's `resume` is kill-only:
             // a later one, with no kill in between, is judged as usual.
-            event_kind::RESUME_STARTED => self.killed = false,
+            Some(EventKind::ResumeStarted) => self.killed = false,
             _ => {}
         }
         if explains_last_error(event) {
@@ -147,7 +149,7 @@ impl History {
 /// Whether `event` parked its run for a session (or decided what it
 /// resumes with): one of the parking events, or a landing recheck's park.
 pub fn parks(event: &RunEvent) -> bool {
-    PARKING.contains(&event.kind.as_str()) || recheck::parks(event)
+    event.kind.is_in(&PARKING) || recheck::parks(event)
 }
 
 fn history(events: &[RunEvent]) -> History {
@@ -231,7 +233,7 @@ impl ResumeCount {
         let mut count = Self::default();
         let mut withdrawn = 0;
         for event in events {
-            if event.kind == "resume_started" {
+            if event.kind == EventKind::ResumeStarted {
                 if history.conflict_only() {
                     count.conflict_only += 1;
                 } else if history.kill_only() {
@@ -239,8 +241,8 @@ impl ResumeCount {
                 } else {
                     count.counted += 1;
                 }
-            } else if event.kind == event_kind::CONFLICT_PRECHECK {
-                if event.payload["requested"] == true {
+            } else if event.kind == EventKind::ConflictPrecheck {
+                if restore_payload::<ConflictPrecheck>(&event.payload).requested == Some(true) {
                     count.conflict_requests += 1;
                 }
                 if event.payload["unsent"] == true {
@@ -366,7 +368,7 @@ pub enum Exhaustion {
 /// runtime's or the recovery job's, or a person's by hand
 /// ([`is_inherit_retry_by_hand`]).
 pub fn is_inherit_retry(event: &RunEvent) -> bool {
-    event.kind == "triage_finished" && event.payload["action"] == RETRY_INHERIT
+    event.kind == EventKind::TriageFinished && event.payload["action"] == RETRY_INHERIT
 }
 
 /// Whether the event is a retry that carried a run's branch over by hand
@@ -398,7 +400,12 @@ pub fn retried_with_inheritance(run_events: &[RunEvent]) -> bool {
     run_events
         .iter()
         .rev()
-        .find(|e| matches!(e.kind.as_str(), "triage_finished" | "triage_decided"))
+        .find(|e| {
+            matches!(
+                e.kind.known(),
+                Some(EventKind::TriageFinished | EventKind::TriageDecided)
+            )
+        })
         .is_some_and(is_inherit_retry)
 }
 
@@ -415,7 +422,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: String::new(),
             actor: None,

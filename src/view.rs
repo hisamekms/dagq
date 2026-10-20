@@ -5,11 +5,12 @@
 //! task's `claim_deferral`. An object with a truncated string carries
 //! `truncated: true`, and `--full` prints the stored records unchanged.
 
+use crate::domain::EventKind;
 use serde_json::{Map, Value, json};
 
 use crate::domain::{
-    GoalDetail, OBSERVATION_KIND, RunEvent, TaskDetail,
-    background_wrapper::current_background_session, claim_defer, reason,
+    GoalDetail, RunEvent, TaskDetail, background_wrapper::current_background_session, claim_defer,
+    reason,
 };
 
 /// The one key of a command's value that is printed as is instead of as
@@ -117,7 +118,7 @@ pub fn task_detail(detail: &TaskDetail, events: usize) -> Value {
         .events
         .iter()
         .rev()
-        .find(|event| claim_defer::DEFERRAL_KINDS.contains(&event.kind.as_str()))
+        .find(|event| event.kind.is_in(&claim_defer::DEFERRAL_KINDS))
         .and_then(claim_defer::OpenDeferral::of);
     let mut shown = json!({
         "task": task,
@@ -217,7 +218,7 @@ fn run_events(detail: &TaskDetail, run: &crate::domain::TaskRun) -> Vec<RunEvent
 fn observations(events: &[RunEvent]) -> Vec<Value> {
     let notes: Vec<&RunEvent> = events
         .iter()
-        .filter(|event| event.kind == OBSERVATION_KIND)
+        .filter(|event| event.kind == EventKind::Observation)
         .collect();
     latest(&notes, DEFAULT_OBSERVATIONS)
         .iter()
@@ -292,6 +293,7 @@ pub fn goal_detail(detail: &GoalDetail) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::OBSERVATION_KIND;
     use crate::domain::{
         CommitSha, EventId, Goal, GoalId, GoalTask, Provider, RunId, RunProcess, RunStatus, Task,
         TaskId, TaskRun, TaskStatus,
@@ -352,7 +354,7 @@ mod tests {
             task_id: Some(TaskId::new(1)),
             goal_id: None,
             run_id: Some(RunId::new("b").unwrap()),
-            kind: format!("kind{id}"),
+            kind: format!("kind{id}").into(),
             payload,
             created_at: format!("t{id}"),
             actor: None,

@@ -7,6 +7,8 @@
 //! [`super::drafts`]: a draft's category is the one its
 //! `follow_up_registered` recorded, `unlabeled` for one registered before
 //! categories were kept, and a value outside the list is a row of its own.
+use crate::domain::EventKind;
+use crate::domain::run::{AskOpened, restore_payload};
 use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
@@ -94,7 +96,10 @@ pub fn follow_up_categories(
     counts: impl Fn(Option<TaskId>) -> bool,
 ) -> BTreeMap<String, CategoryFlow> {
     let mut drafts: HashMap<TaskId, Draft> = HashMap::new();
-    for event in events.iter().filter(|e| e.kind == "follow_up_registered") {
+    for event in events
+        .iter()
+        .filter(|e| e.kind == EventKind::FollowUpRegistered)
+    {
         if let Some(task_id) = event.payload.get("task_id").and_then(Value::as_i64) {
             let category = event
                 .payload
@@ -114,14 +119,14 @@ pub fn follow_up_categories(
             continue;
         };
         let at = timestamp_millis(&event.created_at);
-        match event.kind.as_str() {
-            "task_created" => {
+        match event.kind.known() {
+            Some(EventKind::TaskCreated) => {
                 if let Some(at) = at {
                     draft.created = Some((event.id, at));
                 }
                 draft.draft_at_end = event.id <= upto;
             }
-            "task_status_changed" => {
+            Some(EventKind::TaskStatusChanged) => {
                 let to = event.payload["to"].as_str();
                 if event.payload["from"] == "draft"
                     && draft.left.is_none()
@@ -135,22 +140,26 @@ pub fn follow_up_categories(
                     draft.draft_at_end = to == Some("draft");
                 }
             }
-            "draft_planner_settled" if window(event.id) => {
+            Some(EventKind::DraftPlannerSettled) if window(event.id) => {
                 if let Some(outcome) = event.payload["outcome"].as_str() {
                     draft.outcome = Some(outcome.to_owned());
                 }
             }
-            "draft_planner_exhausted" if window(event.id) => {
+            Some(EventKind::DraftPlannerExhausted) if window(event.id) => {
                 flows.entry(draft.category.clone()).or_default().exhausted += 1;
             }
-            "ask_opened" if window(event.id) && event.payload["kind"] == "planner_question" => {
+            Some(EventKind::AskOpened)
+                if window(event.id)
+                    && restore_payload::<AskOpened>(&event.payload).kind
+                        == Some("planner_question") =>
+            {
                 flows
                     .entry(draft.category.clone())
                     .or_default()
                     .planner_questions += 1;
             }
             // An ask the runtime closed itself was not answered.
-            "ask_answered"
+            Some(EventKind::AskAnswered)
                 if window(event.id)
                     && event.payload["kind"] == "planner_question"
                     && event.payload["runtime_closed"] != true =>
@@ -163,7 +172,7 @@ pub fn follow_up_categories(
                     .entry(option.to_owned())
                     .or_default() += 1;
             }
-            "run_integrated" if window(event.id) => {
+            Some(EventKind::RunIntegrated) if window(event.id) => {
                 flows.entry(draft.category.clone()).or_default().landed += 1;
             }
             _ => {}
@@ -230,7 +239,7 @@ mod tests {
             task_id: Some(TaskId::new(task_id)),
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: format!("1970-01-01T00:{:02}:{:02}.000Z", secs / 60, secs % 60),
             actor: None,

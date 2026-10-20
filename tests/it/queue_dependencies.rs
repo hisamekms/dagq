@@ -107,7 +107,7 @@ fn dependencies_reject_self_cycles_and_missing_tasks_and_can_be_removed() {
     assert_eq!(queue.candidates().unwrap()[0].id(), c);
     assert!(queue.remove_dependency(c, b).is_err());
     assert_eq!(
-        queue.show(c).unwrap().events.last().unwrap().kind,
+        queue.show(c).unwrap().events.last().unwrap().kind.as_str(),
         "dependency_removed"
     );
 }

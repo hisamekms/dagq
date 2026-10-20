@@ -46,7 +46,7 @@ fn kinds(queue: &SqliteQueue, run: &TaskRun) -> Vec<String> {
         .run_events(run.id())
         .unwrap()
         .into_iter()
-        .map(|e| e.kind)
+        .map(|e| e.kind.to_string())
         .collect()
 }
 
@@ -57,7 +57,7 @@ fn last(queue: &SqliteQueue, run: &TaskRun, kind: &str) -> dagq::domain::RunEven
         .unwrap()
         .into_iter()
         .rev()
-        .find(|e| e.kind == kind)
+        .find(|e| e.kind.as_str() == kind)
         .unwrap_or_else(|| panic!("no {kind}"))
 }
 
@@ -337,7 +337,7 @@ fn an_answer_reaching_a_held_task_is_applied_or_discarded_after_the_release() {
         .run_events(run.id())
         .unwrap()
         .into_iter()
-        .filter(|e| e.kind == "hold_result_kept")
+        .filter(|e| e.kind == EventKind::HoldResultKept)
         .collect();
     assert_eq!(kept.len(), 1);
     assert_eq!(kept[0].payload["source"], "triage_answer");
@@ -442,7 +442,7 @@ fn the_supervisor_claims_no_held_task() {
     let deferred: Vec<_> = detail
         .events
         .iter()
-        .filter(|e| e.kind == "hold_deferred")
+        .filter(|e| e.kind == EventKind::HoldDeferred)
         .collect();
     assert_eq!(deferred.len(), 1, "{deferred:?}");
     assert_eq!(deferred[0].payload["step"], "claim");

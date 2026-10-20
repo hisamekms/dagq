@@ -39,7 +39,7 @@ use serde_json::{Value, json};
 use super::Split;
 use super::programs::CaseCheck;
 use super::round::{RoundKey, RunCost, Waiting, held_out};
-use crate::domain::{EventKind, Provider};
+use crate::domain::{EventKind, Provider, RecordedKind};
 
 /// A request of an eval (`agent_eval_requested`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,10 +300,12 @@ pub const KINDS: [EventKind; 9] = [
 /// The rounds the eval's events (`(id, kind, payload)`, oldest first)
 /// say, oldest first. An event of a round with no request, or one that
 /// does not read, is left out.
-pub fn rounds<'a>(events: impl IntoIterator<Item = (i64, &'a str, &'a Value)>) -> Vec<Round> {
+pub fn rounds<'a>(
+    events: impl IntoIterator<Item = (i64, &'a RecordedKind, &'a Value)>,
+) -> Vec<Round> {
     let mut rounds: BTreeMap<i64, Round> = BTreeMap::new();
     for (id, kind, payload) in events {
-        if kind == EventKind::AgentEvalRequested {
+        if *kind == EventKind::AgentEvalRequested {
             if let Some(request) = Request::read(payload) {
                 rounds.insert(
                     id,
@@ -334,24 +336,24 @@ pub fn rounds<'a>(events: impl IntoIterator<Item = (i64, &'a str, &'a Value)>) -
             .as_u64()
             .and_then(|n| u32::try_from(n).ok())
             .unwrap_or(0);
-        if kind == EventKind::AgentEvalRefused {
+        if *kind == EventKind::AgentEvalRefused {
             round.refused = Some(payload.clone());
-        } else if kind == EventKind::AgentEvalWaiting {
+        } else if *kind == EventKind::AgentEvalWaiting {
             round.waiting = payload["reason"].as_str().map(str::to_owned);
-        } else if kind == EventKind::AgentEvalStarted {
+        } else if *kind == EventKind::AgentEvalStarted {
             round.started = Started::read(payload);
             round.started_payload = Some(payload.clone());
             round.waiting = None;
             round.owner = payload["supervisor"].as_str().map(str::to_owned);
-        } else if kind == EventKind::AgentEvalTakenUp {
+        } else if *kind == EventKind::AgentEvalTakenUp {
             round.owner = payload["supervisor"].as_str().map(str::to_owned);
-        } else if kind == EventKind::AgentEvalRunStarted {
+        } else if *kind == EventKind::AgentEvalRunStarted {
             round.runs.push(RunRecord {
                 case,
                 round: run,
                 end: None,
             });
-        } else if kind == EventKind::AgentEvalRunFinished {
+        } else if *kind == EventKind::AgentEvalRunFinished {
             let end = RunEnd {
                 result: Some(payload["result"].clone()).filter(|result| !result.is_null()),
                 cost: RunCost::read(&payload["cost"]).unwrap_or(RunCost {
@@ -368,11 +370,11 @@ pub fn rounds<'a>(events: impl IntoIterator<Item = (i64, &'a str, &'a Value)>) -
             {
                 record.end = Some(end);
             }
-        } else if kind == EventKind::AgentEvalCaseChecked {
+        } else if *kind == EventKind::AgentEvalCaseChecked {
             if let Some(check) = CaseCheck::read(payload) {
                 round.checks.insert(case, check);
             }
-        } else if kind == EventKind::AgentEvalFinished {
+        } else if *kind == EventKind::AgentEvalFinished {
             round.finished = Some(payload.clone());
         }
     }
@@ -531,10 +533,12 @@ mod tests {
                 json!({"eval_id": 1, "supervisor": "s2", "from": "s1"}),
             ),
         ];
+        let kinds: Vec<RecordedKind> = events.iter().map(|(_, kind, _)| (*kind).into()).collect();
         let rounds = rounds(
             events
                 .iter()
-                .map(|(id, kind, payload)| (*id, *kind, payload)),
+                .zip(&kinds)
+                .map(|((id, _, payload), kind)| (*id, kind, payload)),
         );
         assert_eq!(rounds.len(), 3);
         let first = &rounds[0];
@@ -591,10 +595,12 @@ mod tests {
             ),
             (4, EventKind::AgentEvalRunFinished.as_str(), retried),
         ];
+        let kinds: Vec<RecordedKind> = events.iter().map(|(_, kind, _)| (*kind).into()).collect();
         let rounds = rounds(
             events
                 .iter()
-                .map(|(id, kind, payload)| (*id, *kind, payload)),
+                .zip(&kinds)
+                .map(|((id, _, payload), kind)| (*id, kind, payload)),
         );
         assert_eq!(rounds[0].retried(), BTreeSet::from([("a".to_owned(), 0)]));
         assert!(rounds[0].left().contains(&("a".to_owned(), 0)));
@@ -624,10 +630,12 @@ mod tests {
             ),
             (3, EventKind::AgentEvalCaseChecked.as_str(), stopped),
         ];
+        let kinds: Vec<RecordedKind> = events.iter().map(|(_, kind, _)| (*kind).into()).collect();
         let rounds = rounds(
             events
                 .iter()
-                .map(|(id, kind, payload)| (*id, *kind, payload)),
+                .zip(&kinds)
+                .map(|((id, _, payload), kind)| (*id, kind, payload)),
         );
         assert_eq!(
             rounds[0].checks.get("a"),

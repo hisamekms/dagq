@@ -330,8 +330,8 @@ fn held_unreleased(events: &[RunEvent]) -> bool {
     events
         .iter()
         .rev()
-        .take_while(|event| event.kind != event_kind::TASK_RELEASED)
-        .find(|event| event.kind == event_kind::RUN_PHASE_CHANGED)
+        .take_while(|event| event.kind != EventKind::TaskReleased)
+        .find(|event| event.kind == EventKind::RunPhaseChanged)
         .is_some_and(|event| event.payload["phase"] == Phase::Held.name())
 }
 
@@ -439,7 +439,7 @@ impl Recorded {
 
     /// What `event` records, when it is a `run_phase_changed` ([`Self::of`]).
     pub fn of_event(event: &RunEvent) -> Option<Self> {
-        if event.kind == event_kind::RUN_PHASE_CHANGED {
+        if event.kind == EventKind::RunPhaseChanged {
             Self::of(&event.payload)
         } else {
             None
@@ -457,7 +457,7 @@ pub fn last_recorded(events: &[RunEvent]) -> Option<Recorded> {
     events
         .iter()
         .rev()
-        .find(|event| event.kind == event_kind::RUN_PHASE_CHANGED)
+        .find(|event| event.kind == EventKind::RunPhaseChanged)
         .and_then(|event| Recorded::of(&event.payload))
 }
 
@@ -598,7 +598,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: String::new(),
             actor: None,
@@ -934,7 +934,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: String::new(),
             actor: None,

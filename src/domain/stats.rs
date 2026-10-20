@@ -43,6 +43,8 @@
 //! `unlabeled`. Most period aggregates count what happened in the window
 //! and read how it ended from the events past it too; each aggregate's
 //! doc says which.
+use crate::domain::EventKind;
+use crate::domain::run::{AskOpened, ReviewFinished, restore_payload};
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
@@ -992,11 +994,13 @@ pub fn stats(
     let mut reviews: HashMap<&str, Vec<RunEvent>> = HashMap::new();
     for event in events.iter().filter(|event| {
         matches!(
-            event.kind.as_str(),
-            super::event_kind::REVIEW_FINISHED
-                | super::event_kind::REVISE_REQUESTED
-                | super::event_kind::REVISE_FINISHED
-                | super::event_kind::REVIEW_OUTCOME
+            event.kind.known(),
+            Some(
+                EventKind::ReviewFinished
+                    | EventKind::ReviseRequested
+                    | EventKind::ReviseFinished
+                    | EventKind::ReviewOutcome
+            )
         )
     }) {
         if let Some(run_id) = &event.run_id {
@@ -1452,38 +1456,43 @@ pub fn slot_alert(slots: SlotSnapshot, held: bool, deferred: usize) -> Option<Al
 /// `revise_requested` the session has not answered), with the unix
 /// millisecond it started. `None` when no session is watched.
 fn watched_phase(status: RunStatus, events: &[&RunEvent]) -> Option<(&'static str, i64)> {
-    let latest = |kinds: &[&str]| {
+    let latest = |kinds: &[EventKind]| {
         events
             .iter()
             .rev()
-            .find(|event| kinds.contains(&event.kind.as_str()))
+            .find(|event| event.kind.is_in(kinds))
             .copied()
     };
     let at = |event: &RunEvent| timestamp_millis(&event.created_at);
     match status {
         RunStatus::Running => {
-            let start = latest(&["agent_started"]).or_else(|| latest(&["run_claimed"]))?;
+            let start =
+                latest(&[EventKind::AgentStarted]).or_else(|| latest(&[EventKind::RunClaimed]))?;
             Some(("session", at(start)?))
         }
         RunStatus::NeedsSession => {
-            let event = latest(&["resume_started", "resume_finished", "resume_skipped"])?;
-            (event.kind == "resume_started")
+            let event = latest(&[
+                EventKind::ResumeStarted,
+                EventKind::ResumeFinished,
+                EventKind::ResumeSkipped,
+            ])?;
+            (event.kind == EventKind::ResumeStarted)
                 .then(|| at(event).map(|start| ("resume", start)))
                 .flatten()
         }
         RunStatus::Validating | RunStatus::AwaitingIntegration => {
             let event = latest(&[
-                "validation_finished",
-                "review_started",
-                "review_finished",
-                "revise_requested",
-                "revise_unsent",
-                "revise_finished",
-                "revise_receipt_rejected",
-                "conflict_precheck",
-                "conflict_resolved",
+                EventKind::ValidationFinished,
+                EventKind::ReviewStarted,
+                EventKind::ReviewFinished,
+                EventKind::ReviseRequested,
+                EventKind::ReviseUnsent,
+                EventKind::ReviseFinished,
+                EventKind::ReviseReceiptRejected,
+                EventKind::ConflictPrecheck,
+                EventKind::ConflictResolved,
             ])?;
-            (event.kind == "revise_requested")
+            (event.kind == EventKind::ReviseRequested)
                 .then(|| at(event).map(|start| ("revise", start)))
                 .flatten()
         }
@@ -1581,7 +1590,7 @@ pub fn judge_running_alerts(
             .iter()
             .filter(|event| event.run_id.as_ref() == Some(&run.run_id))
             .collect();
-        let since = |start: i64, kind: &str| {
+        let since = |start: i64, kind: EventKind| {
             run_events.iter().any(|event| {
                 event.kind == kind
                     && timestamp_millis(&event.created_at).is_some_and(|at| at >= start)
@@ -1601,9 +1610,14 @@ pub fn judge_running_alerts(
             let dialog = run_events
                 .iter()
                 .rev()
-                .find(|event| matches!(event.kind.as_str(), "prompt_waiting" | "prompt_cleared"))
+                .find(|event| {
+                    matches!(
+                        event.kind.known(),
+                        Some(EventKind::PromptWaiting | EventKind::PromptCleared)
+                    )
+                })
                 .is_some_and(|event| {
-                    event.kind == "prompt_waiting"
+                    event.kind == EventKind::PromptWaiting
                         && timestamp_millis(&event.created_at).is_some_and(|at| at >= start)
                 });
             let idle_secs = (now_ms - idle) / 1000;
@@ -1622,7 +1636,7 @@ pub fn judge_running_alerts(
                 alert.phase = Some(phase);
                 alert.value = Some(idle_secs);
                 alert.threshold = Some(config.idle_without_receipt_secs);
-                alert.nudged = Some(since(start, "stall_nudged"));
+                alert.nudged = Some(since(start, EventKind::StallNudged));
                 alert.asked = Some(open_ask(&["stalled"]));
                 alert.background_tasks.clone_from(background);
                 alerts.push(alert);
@@ -1634,10 +1648,12 @@ pub fn judge_running_alerts(
         let ended = |idle: i64| {
             run_events.iter().any(|event| {
                 timestamp_millis(&event.created_at).is_some_and(|at| at >= idle)
-                    && match event.kind.as_str() {
-                        "workspace_closed" => true,
-                        "supervision_finished" => event.payload["session_live"] != true,
-                        "resume_finished" => {
+                    && match event.kind.known() {
+                        Some(EventKind::WorkspaceClosed) => true,
+                        Some(EventKind::SupervisionFinished) => {
+                            event.payload["session_live"] != true
+                        }
+                        Some(EventKind::ResumeFinished) => {
                             event.payload["status"] != RunStatus::Validating.as_str()
                         }
                         _ => false,
@@ -1665,7 +1681,7 @@ pub fn judge_running_alerts(
         if run.status == RunStatus::Running
             && let Some(claimed) = run_events
                 .iter()
-                .filter(|event| event.kind == super::event_kind::RUN_CLAIMED)
+                .filter(|event| event.kind == EventKind::RunClaimed)
                 .find_map(|event| timestamp_millis(&event.created_at))
             && let Some(&threshold) = outliers.get(&run.run_id)
         {
@@ -1726,7 +1742,7 @@ fn reason_codes(
     for event in events.iter().filter(|event| {
         event.id > after
             && event.id <= upto
-            && !REPEATED_CODE_KINDS.contains(&event.kind.as_str())
+            && !event.kind.is_in(&REPEATED_CODE_KINDS)
             && counts(event.task_id)
     }) {
         let Some(code) = event_code(event) else {
@@ -1736,7 +1752,7 @@ fn reason_codes(
         *codes.by_code.entry(code.as_str().to_owned()).or_default() += 1;
         *codes
             .by_kind
-            .entry(event.kind.clone())
+            .entry(event.kind.to_string())
             .or_default()
             .entry(code.as_str().to_owned())
             .or_default() += 1;
@@ -1755,7 +1771,7 @@ fn duplicate_cancels(
 ) -> DuplicateCancels {
     let mut cancels = DuplicateCancels::default();
     for event in events.iter().filter(|event| {
-        event.kind == super::event_kind::TASK_STATUS_CHANGED
+        event.kind == EventKind::TaskStatusChanged
             && event.id > after
             && event.id <= upto
             && counts(event.task_id)
@@ -1782,20 +1798,18 @@ fn landing_rechecks(
     upto: EventId,
     counts: impl Fn(Option<TaskId>) -> bool,
 ) -> LandingRechecks {
-    use super::recheck::{
-        FailedAction, LANDING_RECHECK_FAILED, LANDING_RECHECK_FINISHED, RecordedFailure,
-    };
+    use super::recheck::{FailedAction, RecordedFailure};
     let mut rechecks = LandingRechecks::default();
     for event in events
         .iter()
         .filter(|event| event.id > after && event.id <= upto && counts(event.task_id))
     {
-        match event.kind.as_str() {
-            LANDING_RECHECK_FINISHED => {
+        match event.kind.known() {
+            Some(EventKind::LandingRecheckFinished) => {
                 rechecks.rechecks += 1;
                 rechecks.runs_checked += event.payload["checked"].as_i64().unwrap_or(0);
             }
-            LANDING_RECHECK_FAILED => {
+            Some(EventKind::LandingRecheckFailed) => {
                 let recorded = RecordedFailure::restore(event);
                 if recorded.action == Some(FailedAction::Resumed) {
                     rechecks.resumed += 1;
@@ -1838,7 +1852,7 @@ fn backend_failures(
 ) -> BackendFailures {
     let mut failures = BackendFailures::default();
     for event in events.iter().filter(|event| {
-        event.kind == "backend_call_failed"
+        event.kind == EventKind::BackendCallFailed
             && event.id > after
             && event.id <= upto
             && counts(event.task_id)
@@ -2211,45 +2225,43 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
         // The latest validation that recorded it decides: a resumed run's
         // diff may differ, and one refused before its diff was read (a
         // dirty worktree) leaves the earlier decision.
-        if event.kind == "validation_finished"
+        if event.kind == EventKind::ValidationFinished
             && let Some(e2e) = e2e_of(&event.payload)
         {
             run.e2e = Some(e2e);
         }
-        match event.kind.as_str() {
-            "run_claimed" => {
+        match event.kind.known() {
+            Some(EventKind::RunClaimed) => {
                 track.claimed = track.claimed.or(at);
                 run.claimed_at
                     .get_or_insert_with(|| event.created_at.clone());
             }
-            "agent_started" => track.agent_started = track.agent_started.or(at),
-            "first_commit_observed" if run.startup.is_none() => {
+            Some(EventKind::AgentStarted) => track.agent_started = track.agent_started.or(at),
+            Some(EventKind::FirstCommitObserved) if run.startup.is_none() => {
                 run.startup = seconds_between(track.agent_started, at);
             }
-            "receipt_observed" if track.receipt.is_none() => {
+            Some(EventKind::ReceiptObserved) if track.receipt.is_none() => {
                 track.receipt = at;
                 run.work = seconds_between(track.claimed, at);
             }
-            "validation_finished" if track.validated.is_none() => {
+            Some(EventKind::ValidationFinished) if track.validated.is_none() => {
                 track.validated = at;
                 track.land = at.map(|at| LandClock::start(event, at));
                 run.validated_at = Some(event.created_at.clone());
                 run.validate = seconds_between(track.receipt, at);
             }
-            "integration_started" => run.status = Some("integrating".to_owned()),
-            "resume_started" => run.resumes += 1,
-            "review_finished" => {
-                run.review_verdict = event
-                    .payload
-                    .get("verdict")
-                    .and_then(Value::as_str)
+            Some(EventKind::IntegrationStarted) => run.status = Some("integrating".to_owned()),
+            Some(EventKind::ResumeStarted) => run.resumes += 1,
+            Some(EventKind::ReviewFinished) => {
+                run.review_verdict = restore_payload::<ReviewFinished>(&event.payload)
+                    .verdict
                     .map(str::to_owned);
             }
-            super::event_kind::RUN_SATISFIED_CLOSED => {
+            Some(EventKind::RunSatisfiedClosed) => {
                 run.status = Some(ALREADY_SATISFIED.to_owned());
                 run.finished_event_id.get_or_insert(event.id);
             }
-            "run_integrated" => {
+            Some(EventKind::RunIntegrated) => {
                 // The same end as `wait_to_land`'s, which the hold's waits
                 // in it are taken from.
                 track.integrated = at;
@@ -2267,7 +2279,10 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
                 // before the attempt, and `resume_finished` reports the run
                 // still parked (ADR-0019); neither parks anything new.
                 "needs_session"
-                    if !matches!(event.kind.as_str(), "integration_error" | "resume_finished") =>
+                    if !matches!(
+                        event.kind.known(),
+                        Some(EventKind::IntegrationError | EventKind::ResumeFinished)
+                    ) =>
                 {
                     run.needs_session += 1
                 }
@@ -2314,7 +2329,7 @@ impl Track {
                 self.held.push((start, at.max(start)));
                 self.held_since = None;
             }
-            (Some(start), None) if event.kind == super::event_kind::TASK_RELEASED => {
+            (Some(start), None) if event.kind == EventKind::TaskReleased => {
                 self.held.push((start, at.max(start)));
                 self.held_since = None;
             }
@@ -2384,8 +2399,8 @@ fn open_asks(events: &[RunEvent]) -> Vec<OpenAsk> {
     };
     let mut open: Vec<(_, OpenAsk)> = Vec::new();
     for event in events {
-        match event.kind.as_str() {
-            "ask_opened" => {
+        match event.kind.known() {
+            Some(EventKind::AskOpened) => {
                 if let Some(opened_ms) = timestamp_millis(&event.created_at) {
                     open.push((
                         key(event),
@@ -2393,21 +2408,19 @@ fn open_asks(events: &[RunEvent]) -> Vec<OpenAsk> {
                             id: key(event).0,
                             task_id: event.task_id,
                             run_id: event.run_id.clone(),
-                            kind: event
-                                .payload
-                                .get("kind")
-                                .and_then(Value::as_str)
+                            kind: restore_payload::<AskOpened>(&event.payload)
+                                .kind
                                 .map(str::to_owned),
                             opened_ms,
                         },
                     ));
                 }
             }
-            "ask_answered" => {
+            Some(EventKind::AskAnswered) => {
                 let answered = key(event);
                 open.retain(|(opened, _)| *opened != answered);
             }
-            "run_integrated" => {
+            Some(EventKind::RunIntegrated) => {
                 open.retain(|(_, ask)| {
                     let of_run = ask.run_id.is_some() && ask.run_id == event.run_id;
                     let of_task = ask.run_id.is_none()
@@ -2483,7 +2496,7 @@ mod tests {
             task_id: Some(TaskId::new(task_id)),
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: String::new(),
             actor: None,

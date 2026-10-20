@@ -5,6 +5,7 @@
 //! file no area matches is in [`OTHER`] too. Nothing is stored: the areas
 //! are derived whenever `stats` and `kpi` read, from the landed commits'
 //! diffs in Git, so changing the map reclassifies every run.
+use crate::domain::EventKind;
 use std::collections::{BTreeSet, HashMap};
 
 use serde_json::Value;
@@ -95,7 +96,7 @@ impl AreaMap {
 pub fn landed_commits(events: &[RunEvent]) -> Vec<(RunId, String)> {
     events
         .iter()
-        .filter(|event| event.kind == "run_integrated")
+        .filter(|event| event.kind == EventKind::RunIntegrated)
         .filter_map(|event| {
             let commit = ["commit", "result_commit"]
                 .iter()
@@ -190,7 +191,7 @@ mod tests {
             task_id: Some(TaskId::new(1)),
             goal_id: None,
             run_id: Some(RunId::new(run).unwrap()),
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: "2026-09-29T00:00:00.000Z".into(),
             actor: None,

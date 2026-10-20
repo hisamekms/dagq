@@ -515,7 +515,7 @@ impl SqliteQueue {
         mut report: serde_json::Value,
     ) -> Result<TaskRun> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &[event_kind::RUN_RECOVERED]))?;
+        let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::RunRecovered]))?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -838,7 +838,7 @@ impl SqliteQueue {
         launch: &crate::domain::actor_model::ActorLaunch,
     ) -> Result<Option<(TaskRun, usize)>> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &[event_kind::TRIAGE_STARTED]))?;
+        let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::TriageStarted]))?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -923,8 +923,8 @@ impl SqliteQueue {
         also: Vec<(EventKind, serde_json::Value)>,
     ) -> Result<TaskRun> {
         // The spans it closes read their transcripts first (task 543).
-        let kinds: Vec<&str> = std::iter::once(event_kind::TRIAGE_FINISHED)
-            .chain(also.iter().map(|(kind, _)| kind.as_str()))
+        let kinds: Vec<EventKind> = std::iter::once(EventKind::TriageFinished)
+            .chain(also.iter().map(|(kind, _)| *kind))
             .collect();
         let _read = read_before(&self.conn, Closing::Run(id, &kinds))?;
         let tx = self
@@ -998,7 +998,7 @@ impl SqliteQueue {
         config: resume::ResumeConfig,
     ) -> Result<Option<TaskRun>> {
         // The spans it closes read their transcripts first (task 543).
-        let _read = read_before(&self.conn, Closing::Run(id, &[event_kind::TRIAGE_FINISHED]))?;
+        let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::TriageFinished]))?;
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -1366,7 +1366,7 @@ impl SqliteQueue {
         let _read = match &request.run {
             Some(id) => Some(read_before(
                 &self.conn,
-                Closing::Run(id, &[event_kind::TRIAGE_FINISHED]),
+                Closing::Run(id, &[EventKind::TriageFinished]),
             )?),
             None => None,
         };

@@ -35,7 +35,7 @@ fn event(id: i64, run: bool, kind: &str, payload: Value, secs: i64) -> RunEvent 
         task_id: run.then(|| TaskId::new(7)),
         goal_id: None,
         run_id: run.then(|| RunId::new(RUN).unwrap()),
-        kind: kind.to_owned(),
+        kind: kind.to_owned().into(),
         payload,
         created_at: utc_text((T0 + secs) * 1000),
         actor: None,

@@ -60,7 +60,6 @@ use crate::application::update::{self, UpdatePaths};
 use crate::application::{EndedRunWorktree, HostOpsQueue, RUN_TMP_DIR, WorktreeCleanup};
 use crate::domain::EventKind;
 use crate::domain::disk::{ProcessExecutable, worktree_executables};
-use crate::domain::event_kind;
 use crate::domain::recovery::{ProcessInfo, run_processes};
 use crate::domain::toolchain::{BUILTIN, Toolchains};
 use std::collections::HashMap;
@@ -555,12 +554,12 @@ fn turn_idle(events: &[RunEvent]) -> bool {
         .iter()
         .filter(|event| {
             matches!(
-                event.kind.as_str(),
-                event_kind::TURN_REQUESTED | event_kind::TURN_STARTED | event_kind::TURN_FINISHED
+                event.kind.known(),
+                Some(EventKind::TurnRequested | EventKind::TurnStarted | EventKind::TurnFinished)
             )
         })
         .max_by_key(|event| event.id)
-        .is_some_and(|event| event.kind == event_kind::TURN_FINISHED)
+        .is_some_and(|event| event.kind == EventKind::TurnFinished)
 }
 
 /// Whether something runs for a waiting run in its `worktree`, besides
@@ -1294,7 +1293,7 @@ struct SessionPids {
 /// and starts no turn of a run the job has reserved, so they stay the
 /// session's while the job passes it.
 fn session_pids(events: &[RunEvent]) -> SessionPids {
-    let latest = |kind: &str| {
+    let latest = |kind: EventKind| {
         events
             .iter()
             .filter(|event| event.kind == kind)
@@ -1303,8 +1302,8 @@ fn session_pids(events: &[RunEvent]) -> SessionPids {
             .and_then(|pid| u32::try_from(pid).ok())
     };
     SessionPids {
-        wrapper: latest(event_kind::WRAPPER_STARTED),
-        agent: latest(event_kind::TURN_STARTED),
+        wrapper: latest(EventKind::WrapperStarted),
+        agent: latest(EventKind::TurnStarted),
     }
 }
 
@@ -2998,7 +2997,7 @@ mod tests {
             task_id: Some(TaskId::new(1)),
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload: json!({}),
             created_at: String::new(),
             actor: None,

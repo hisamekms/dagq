@@ -14,7 +14,7 @@ fn queue_events(db: &Path, kind: &str) -> Vec<Value> {
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == kind)
+        .filter(|event| event.kind.as_str() == kind)
         .map(|event| event.payload)
         .collect()
 }
@@ -45,7 +45,7 @@ fn kinds_of(db: &Path, task: i64) -> Vec<String> {
         .unwrap()
         .events
         .into_iter()
-        .map(|event| event.kind)
+        .map(|event| event.kind.to_string())
         .collect()
 }
 

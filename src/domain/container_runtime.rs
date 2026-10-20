@@ -6,6 +6,7 @@
 //! host, while the container runtime cannot be used (ADR-t2113-1 decision
 //! 4): this is what the supervisor judges and records of it.
 
+use crate::domain::RecordedKind;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -190,14 +191,14 @@ container can be used, or until a task sets the runtime back to \"host\""
     /// same reasons unavailable, so a change of which target waits or why
     /// is told again; available after unavailable; else none. `targets`
     /// of the payload is each target that cannot be used with its `reason`.
-    pub fn transition(&self, last: Option<(&str, &Value)>) -> Option<(EventKind, Value)> {
+    pub fn transition(&self, last: Option<(&RecordedKind, &Value)>) -> Option<(EventKind, Value)> {
         let targets: Vec<Value> = self
             .unavailable
             .iter()
             .map(|(target, why)| json!({"target": target.as_str(), "reason": why}))
             .collect();
         let told = last
-            .filter(|(kind, _)| *kind == CONTAINER_RUNTIME_UNAVAILABLE)
+            .filter(|(kind, _)| **kind == EventKind::ContainerRuntimeUnavailable)
             .map(|(_, payload)| &payload["targets"]);
         match self.message() {
             Some(message) if told != Some(&Value::Array(targets.clone())) => Some((
@@ -252,13 +253,15 @@ mod tests {
         assert_eq!(kind, EventKind::ContainerRuntimeUnavailable);
         assert_eq!(payload["targets"][0]["target"], "worker");
         // Recorded once, ended once.
-        let told = Some((CONTAINER_RUNTIME_UNAVAILABLE, &payload));
+        let unavailable = RecordedKind::from(EventKind::ContainerRuntimeUnavailable);
+        let told = Some((&unavailable, &payload));
         assert_eq!(check.transition(told), None);
         let (kind, _) = ContainerCheck::default().transition(told).unwrap();
         assert_eq!(kind, EventKind::ContainerRuntimeAvailable);
         let ended = json!({});
         assert_eq!(
-            ContainerCheck::default().transition(Some((CONTAINER_RUNTIME_AVAILABLE, &ended))),
+            ContainerCheck::default()
+                .transition(Some((&EventKind::ContainerRuntimeAvailable.into(), &ended))),
             None
         );
         // Available: nothing to say.
@@ -286,7 +289,8 @@ mod tests {
         let (_, told) = ContainerCheck::of(&worker, unusable("no machine"))
             .transition(None)
             .unwrap();
-        let last = Some((CONTAINER_RUNTIME_UNAVAILABLE, &told));
+        let unavailable = RecordedKind::from(EventKind::ContainerRuntimeUnavailable);
+        let last = Some((&unavailable, &told));
         let (kind, payload) = ContainerCheck::of(&verification, unusable("no machine"))
             .transition(last)
             .unwrap();

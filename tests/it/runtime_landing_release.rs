@@ -97,7 +97,7 @@ fn phases(detail: &dagq::domain::TaskDetail) -> Vec<(&str, &str, &Value)> {
     detail
         .events
         .iter()
-        .filter(|e| e.kind == "run_phase_changed")
+        .filter(|e| e.kind == EventKind::RunPhaseChanged)
         .map(|e| {
             (
                 e.payload["phase"].as_str().unwrap(),
@@ -116,11 +116,11 @@ fn recovery_phases(detail: &dagq::domain::TaskDetail) -> Vec<Option<&str>> {
     events
         .iter()
         .enumerate()
-        .filter(|(_, e)| e.kind == "run_recovered")
+        .filter(|(_, e)| e.kind == EventKind::RunRecovered)
         .map(|(i, _)| {
             events
                 .get(i + 1)
-                .filter(|e| e.kind == "run_phase_changed")
+                .filter(|e| e.kind == EventKind::RunPhaseChanged)
                 .map(|e| {
                     assert_eq!(e.payload["cause"], "run_recovered");
                     e.payload["phase"].as_str().unwrap()
@@ -135,15 +135,15 @@ fn phases_from_dead_landing(detail: &dagq::domain::TaskDetail) -> Vec<&str> {
     let recovered = detail
         .events
         .iter()
-        .position(|e| e.kind == "run_recovered")
+        .position(|e| e.kind == EventKind::RunRecovered)
         .unwrap();
     let landing = detail.events[..recovered]
         .iter()
-        .rposition(|e| e.kind == "run_phase_changed" && e.payload["phase"] == "landing")
+        .rposition(|e| e.kind == EventKind::RunPhaseChanged && e.payload["phase"] == "landing")
         .unwrap_or_else(|| panic!("{:?}", phases(detail)));
     detail.events[landing..]
         .iter()
-        .filter(|e| e.kind == "run_phase_changed")
+        .filter(|e| e.kind == EventKind::RunPhaseChanged)
         .map(|e| e.payload["phase"].as_str().unwrap())
         .collect()
 }

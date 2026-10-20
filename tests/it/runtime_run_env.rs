@@ -333,7 +333,7 @@ fn supervisor_starts_and_run_env_changes_are_recorded_as_marks_once() {
             .all_events()
             .unwrap()
             .into_iter()
-            .filter(|event| event.kind == kind)
+            .filter(|event| event.kind.as_str() == kind)
             .inspect(|event| assert!(event.task_id.is_none() && event.run_id.is_none()))
             .map(|event| event.payload)
             .collect()

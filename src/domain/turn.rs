@@ -8,6 +8,7 @@
 //! next turn (a resume of the same session), and writes the run's idle
 //! marker when the turn's process ended ([`idle_marker`]).
 
+use crate::domain::EventKind;
 use std::{
     path::{Path, PathBuf},
     time::Duration,
@@ -18,7 +19,6 @@ use serde_json::{Value, json};
 
 use super::{
     DomainError, RunEvent,
-    event_kind::{TURN_FINISHED, TURN_REQUESTED, TURN_STARTED},
     stats::timestamp_millis,
     tokens::{ExecutionContext, ModelTokens, RolloutUsage, TokenSource, TokenUsage},
     transcript::Turn,
@@ -144,7 +144,7 @@ pub fn idle_after_turn(mark: Option<&TurnMark>, waiting: bool) -> bool {
 pub fn wall_answered(events: &[RunEvent]) -> bool {
     events
         .iter()
-        .any(|e| e.kind == TURN_REQUESTED && e.payload["what"] == PROVIDER_RETRY)
+        .any(|e| e.kind == EventKind::TurnRequested && e.payload["what"] == PROVIDER_RETRY)
 }
 
 /// Whether a headless planner's wrapper waiting at the provider's wall
@@ -170,7 +170,10 @@ pub fn renew_wall_marker(
 /// a retry carries the call itself rather than a retry of a retry. `None`
 /// when that turn took no request (the initial prompt).
 pub fn request_to_retry(events: &[RunEvent]) -> Option<u64> {
-    let mut started = events.iter().rev().filter(|e| e.kind == TURN_STARTED);
+    let mut started = events
+        .iter()
+        .rev()
+        .filter(|e| e.kind == EventKind::TurnStarted);
     loop {
         let turn = started.next()?;
         if turn.payload["what"] != PROVIDER_RETRY {
@@ -188,7 +191,7 @@ pub fn request_to_retry(events: &[RunEvent]) -> Option<u64> {
 pub fn request_read(events: &[RunEvent], seq: u64) -> bool {
     let Some(mut at) = events
         .iter()
-        .position(|e| e.kind == TURN_STARTED && e.payload["request"] == seq)
+        .position(|e| e.kind == EventKind::TurnStarted && e.payload["request"] == seq)
     else {
         return false;
     };
@@ -196,7 +199,7 @@ pub fn request_read(events: &[RunEvent], seq: u64) -> bool {
         let turn = &events[at].payload["turn"];
         let Some(finished) = events[at..]
             .iter()
-            .position(|e| e.kind == TURN_FINISHED && e.payload["turn"] == *turn)
+            .position(|e| e.kind == EventKind::TurnFinished && e.payload["turn"] == *turn)
             .map(|offset| at + offset)
         else {
             return false;
@@ -207,7 +210,7 @@ pub fn request_read(events: &[RunEvent], seq: u64) -> bool {
         }
         let Some(next) = events[finished..]
             .iter()
-            .position(|e| e.kind == TURN_STARTED)
+            .position(|e| e.kind == EventKind::TurnStarted)
             .map(|offset| finished + offset)
         else {
             return false;
@@ -744,7 +747,9 @@ pub fn turn_own_cost(events: &[RunEvent], turn: u64, session: &str, total: f64) 
     let earlier = events
         .iter()
         .rev()
-        .filter(|e| e.kind == TURN_FINISHED && e.payload["session_id"].as_str() == Some(session))
+        .filter(|e| {
+            e.kind == EventKind::TurnFinished && e.payload["session_id"].as_str() == Some(session)
+        })
         .find_map(|e| match e.payload.get("session_cost_usd") {
             Some(recorded) => recorded.as_f64(),
             None => e.payload["cost_usd"].as_f64(),
@@ -759,7 +764,7 @@ pub fn turn_own_cost(events: &[RunEvent], turn: u64, session: &str, total: f64) 
 fn resumed(events: &[RunEvent], turn: u64) -> bool {
     events
         .iter()
-        .rfind(|e| e.kind == TURN_STARTED && e.payload["turn"].as_u64() == Some(turn))
+        .rfind(|e| e.kind == EventKind::TurnStarted && e.payload["turn"].as_u64() == Some(turn))
         .is_some_and(|e| e.payload["resume"] == true)
 }
 
@@ -783,7 +788,9 @@ pub fn turn_own_models(
     events
         .iter()
         .rev()
-        .filter(|e| e.kind == TURN_FINISHED && e.payload["session_id"].as_str() == Some(session))
+        .filter(|e| {
+            e.kind == EventKind::TurnFinished && e.payload["session_id"].as_str() == Some(session)
+        })
         .find_map(|e| ModelTokens::from_payloads(&e.payload["tokens_total_by_model"]))
         .and_then(|earlier| ModelTokens::since(totals, &earlier))
         .unwrap_or_else(|| totals.to_vec())
@@ -797,7 +804,9 @@ pub fn turn_own_models(
 pub fn counted_rollout_turns(events: &[RunEvent], session: &str) -> Vec<String> {
     events
         .iter()
-        .filter(|e| e.kind == TURN_FINISHED && e.payload["session_id"].as_str() == Some(session))
+        .filter(|e| {
+            e.kind == EventKind::TurnFinished && e.payload["session_id"].as_str() == Some(session)
+        })
         .filter_map(|e| e.payload["tokens_turns"].as_array())
         .flatten()
         .filter_map(|turn| turn.as_str().map(str::to_owned))
@@ -817,11 +826,9 @@ pub fn counted_rollout_turns(events: &[RunEvent], session: &str) -> Vec<String> 
 pub fn thread_total_own(events: &[RunEvent], session: &str, total: &TokenUsage) -> TokenUsage {
     let mut earlier: Option<TokenUsage> = None;
     let mut after = TokenUsage::default();
-    for event in events
-        .iter()
-        .rev()
-        .filter(|e| e.kind == TURN_FINISHED && e.payload["session_id"].as_str() == Some(session))
-    {
+    for event in events.iter().rev().filter(|e| {
+        e.kind == EventKind::TurnFinished && e.payload["session_id"].as_str() == Some(session)
+    }) {
         if let Some(recorded) = TokenUsage::from_payload(&event.payload["tokens_total"]) {
             earlier = Some(recorded);
             break;
@@ -880,9 +887,9 @@ impl HeadlessSpan {
             let Some(at) = timestamp_millis(&event.created_at) else {
                 continue;
             };
-            match event.kind.as_str() {
-                TURN_STARTED => span.running = Some(at.max(start)),
-                TURN_FINISHED => {
+            match event.kind.known() {
+                Some(EventKind::TurnStarted) => span.running = Some(at.max(start)),
+                Some(EventKind::TurnFinished) => {
                     let begun = span.running.take().unwrap_or(start);
                     span.finished.push(Turn {
                         start: begun,
@@ -938,7 +945,7 @@ pub fn turns_model(events: &[RunEvent]) -> Option<String> {
     let mut counts: Vec<(&str, usize)> = Vec::new();
     for model in events
         .iter()
-        .filter(|event| event.kind == TURN_FINISHED)
+        .filter(|event| event.kind == EventKind::TurnFinished)
         .filter_map(|event| event.payload["model"].as_str())
     {
         match counts.iter_mut().find(|(seen, _)| *seen == model) {
@@ -1014,8 +1021,8 @@ pub fn codex_span_turns(
         let codex = event.payload["provider"]
             .as_str()
             .is_none_or(|provider| provider == "codex");
-        match event.kind.as_str() {
-            TURN_STARTED => {
+        match event.kind.known() {
+            Some(EventKind::TurnStarted) => {
                 if seen.last().is_some_and(|last| last.end.is_none()) {
                     seen.pop();
                 }
@@ -1026,7 +1033,7 @@ pub fn codex_span_turns(
                     codex,
                 });
             }
-            TURN_FINISHED => match seen.last_mut() {
+            Some(EventKind::TurnFinished) => match seen.last_mut() {
                 Some(last) if last.end.is_none() => {
                     last.end = Some(at.max(last.start.unwrap_or(start)));
                     last.codex &= codex;
@@ -1070,6 +1077,9 @@ impl std::fmt::Display for TurnOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::event_kind::TURN_FINISHED;
+    use crate::domain::event_kind::TURN_REQUESTED;
+    use crate::domain::event_kind::TURN_STARTED;
 
     #[test]
     fn the_answers_whose_turn_never_started_are_waiting_or_taken_but_not_dropped() {
@@ -1286,7 +1296,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: String::new(),
             actor: None,
@@ -1558,7 +1568,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: String::new(),
             actor: None,
@@ -1641,7 +1651,7 @@ mod tests {
                 task_id: None,
                 goal_id: None,
                 run_id: None,
-                kind: TURN_FINISHED.to_owned(),
+                kind: TURN_FINISHED.into(),
                 payload,
                 created_at: String::new(),
                 actor: None,
@@ -1685,7 +1695,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: TURN_FINISHED.to_owned(),
+            kind: TURN_FINISHED.into(),
             payload: json!({"session_id": session, "tokens_turns": turns}),
             created_at: String::new(),
             actor: None,
@@ -1713,7 +1723,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: String::new(),
             actor: None,
@@ -1785,7 +1795,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: super::super::transcript::millis_text(secs * 1000),
             actor: None,
@@ -1874,7 +1884,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: super::super::transcript::millis_text(secs * 1000),
             actor: None,
@@ -1968,7 +1978,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: TURN_FINISHED.to_owned(),
+            kind: TURN_FINISHED.into(),
             payload: json!({"model": model}),
             created_at: String::new(),
             actor: None,

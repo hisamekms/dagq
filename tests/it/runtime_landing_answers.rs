@@ -3,6 +3,7 @@
 //! lands once there is room, before new claims (task 949).
 use crate::common;
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use runtime_support::*;
 use std::time::Instant;
@@ -44,7 +45,7 @@ fn first_event(queue: &mut SqliteQueue, task: i64, kind: &str) -> i64 {
         .unwrap()
         .events
         .iter()
-        .find(|e| e.kind == kind)
+        .find(|e| e.kind.as_str() == kind)
         .unwrap_or_else(|| panic!("task {task} has no {kind}"))
         .id
         .as_i64()
@@ -284,7 +285,7 @@ fn delivers(queue: &mut SqliteQueue, ask: dagq::domain::AskId) -> Value {
         .unwrap()
         .events
         .into_iter()
-        .find(|e| e.kind == "ask_answered" && e.payload["ask_id"] == json!(ask))
+        .find(|e| e.kind == EventKind::AskAnswered && e.payload["ask_id"] == json!(ask))
         .unwrap();
     answered.payload["runtime_delivers"].clone()
 }

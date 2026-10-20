@@ -48,7 +48,7 @@ impl SqliteQueue {
             kind.as_str()
         );
         crate::domain::check_event_target(kind, None, None)?;
-        let _read = read_before(&self.conn, Closing::Queue(kind.as_str(), &payload))?;
+        let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         if any_of_round(
             &tx,
@@ -90,7 +90,7 @@ impl SqliteQueue {
         crate::domain::check_event_target(kind, None, None)?;
         let now = self.generators.clock.now();
         let payload = json!({"eval_id": eval_id, "supervisor": token});
-        let _read = read_before(&self.conn, Closing::Queue(kind.as_str(), &payload))?;
+        let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         if any_of_round(&tx, eval_id, &[EventKind::AgentEvalFinished])? {
             return Ok(false);
@@ -153,7 +153,7 @@ impl SqliteQueue {
         crate::domain::check_event_target(kind, None, None)?;
         let now = self.generators.clock.now();
         let payload = json!({"set_id": set_id, "supervisor": token});
-        let _read = read_before(&self.conn, Closing::Queue(kind.as_str(), &payload))?;
+        let _read = read_before(&self.conn, Closing::Queue(kind, &payload))?;
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let settled: bool = tx.query_row(
             &format!("SELECT EXISTS(SELECT 1 FROM run_events WHERE {OF_SET})"),

@@ -89,7 +89,7 @@ pub fn check<Q: RunLog + QueueRecords + ?Sized>(
     let access = source.access()?;
     let last = queue.latest_queue_event(&CI_WATCH_ACCESS_KINDS)?;
     if let Some((kind, mut payload)) =
-        access.transition(last.as_ref().map(|e| (e.kind.as_str(), &e.payload)))
+        access.transition(last.as_ref().map(|e| (&e.kind, &e.payload)))
     {
         payload["supervisor"] = json!(supervisor);
         queue.record_queue_event(kind, payload)?;
@@ -292,7 +292,7 @@ pub fn known_failures<Q: RunLog + QueueRecords + ?Sized>(
         workflow.as_deref(),
         branch.as_deref(),
         &watch,
-        last.as_ref().map(|event| event.kind.as_str()),
+        last.as_ref().map(|event| &event.kind),
         &kept,
     ))
 }
@@ -344,7 +344,7 @@ pub fn status<Q: RunLog + QueueRecords + ?Sized>(queue: &Q, enabled: bool) -> Re
     Ok(status_view(
         enabled,
         &watch,
-        last.as_ref().map(|event| event.kind.as_str()),
+        last.as_ref().map(|event| &event.kind),
     ))
 }
 

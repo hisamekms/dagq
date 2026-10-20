@@ -1811,3 +1811,171 @@ task = 2867
 name = "runtime_recheck::an_answer_given_while_the_recheck_resumes_the_run_applies_once_it_waits_again"
 reason = "B 境界（supervisorの配線）: an approve_landing answer given during the recheck's resume, not delivered then, applied by the supervisor after the validation"
 task = 2867
+
+# 11.759s in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_light_slots::the_landing_queue_leaves_room_for_light_tasks_only"
+reason = "B 境界（守る境界）: the supervisor's slot wiring: one supervisor claims a light task beside a run waiting for its landing turn, with Git, SQLite and the stub worker processes"
+task = 2394
+
+# 10.485s in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_claim_defer::a_deferral_stays_shown_while_the_supervisor_does_not_judge_the_claims"
+reason = "B 境界（守る境界）: the supervisor's wiring of its claim pass and `candidates` over SQLite while the slots are full and the claims are held"
+task = 2394
+
+# 9.123s in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_sccache::failed_restarts_in_one_supervisor_keep_retrying_but_notify_once_per_fault"
+reason = "B 境界（守る境界）: the supervisor's wiring to the sccache server process: restarts retried by one supervisor and their attention recorded once per fault in SQLite"
+task = 2394
+
+# 7.884s in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_triage::the_recovery_job_reads_the_supervisors_build_and_the_dependencies_it_holds"
+reason = "B 境界（守る境界）: recovery: the recovery job's process reads the supervisor's build and the dependencies' landed commits from Git and SQLite"
+task = 2394
+
+# 7.834s in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_headless::a_stop_answer_to_a_run_out_of_its_slot_waits_for_the_slot"
+reason = "B 境界（守る境界）: the supervisor's slot wiring for a headless run waiting outside its slot, its exit and its recovery job (processes, SQLite)"
+task = 2394
+
+# 7.706s in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_actor_env::the_review_and_the_recovery_job_run_as_their_own_actors"
+reason = "B 境界（守る境界）: the supervisor's wiring of the review and recovery job processes and the actor environment each is started with"
+task = 2394
+
+# 7.042s in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_claim::recover_requires_dead_processes_and_stale_lease_then_allows_a_new_run"
+reason = "B 境界（守る境界）: recovery: `recover` checks live processes and the stale lease in SQLite before a new run is claimed"
+task = 2394
+
+# 6.906s in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_resume::failed_receipt_from_a_session_ends_the_run_without_landing"
+reason = "B 境界（守る境界）: the supervisor's wiring of a resumed session's failed receipt: the run ends without touching main (Git, SQLite, processes)"
+task = 2394
+
+# 6.697s in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_integrate::integration_slot_is_exclusive_and_an_abandoned_landing_is_recoverable"
+reason = "B 境界（守る境界）: recovery: an `integrate` process that dies leaves a stale landing lease that `recover` puts back, across processes, Git and SQLite"
+task = 2394
+
+# 6.345s in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_headless::a_worker_question_is_answered_by_a_resume_of_the_same_session"
+reason = "B 境界（守る境界）: the supervisor's wiring of a headless worker's ask and the resume of the same session that carries the answer (processes, SQLite)"
+task = 2394
+
+# 6.071s in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_resume::a_historical_interactive_run_resumes_headless_and_records_its_conversion"
+reason = "B 境界（守る境界）: adopt and resume: a run an older binary left interactive is resumed headless by the supervisor (processes, SQLite)"
+task = 2394
+
+# 6.046s in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "goal_review::a_goal_review_verdict_is_applied_at_its_jobs_request_and_a_broken_one_fails_closed"
+reason = "B 境界（守る境界）: the supervisor's wiring of the goal-review job process and the verdict it applies at the job's request in SQLite"
+task = 2394
+
+# 5.905s in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_ask::asks_of_a_run_are_attention_for_the_inbox_until_closed"
+reason = "B 境界（守る境界）: the supervisor's wiring of a run's asks and the inbox's attention over SQLite with the stub worker and review processes"
+task = 2394
+
+# 5.862s in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_sweep::the_sweep_stops_every_wrapper_left_running_by_a_landed_run"
+reason = "B 境界（守る境界）: recovery: the sweep stops the wrapper processes a landed run left running and records a failure to stop one"
+task = 2394
+
+# 5.845s in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_repair::a_process_without_cpu_progress_is_an_idle_process_alert_for_the_recovery_job"
+reason = "B 境界（守る境界）: recovery: an orphan process without CPU progress becomes the recovery job's idle_process alert and is stopped"
+task = 2394
+
+# 5.807s in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_claim::the_supervisor_records_the_landed_commit_once"
+reason = "B 境界（守る境界）: the supervisor's wiring to Git: main's history is recorded once in SQLite after a landing"
+task = 2394
+
+# 5.555s in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_run_env::supervisor_starts_and_run_env_changes_are_recorded_as_marks_once"
+reason = "B 境界（守る境界）: the supervisor's wiring of its start and of the [run.env] it reads from dagq.toml, recorded as marks in SQLite"
+task = 2394
+
+# 11.313s in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_integrate::runs_land_fifo_by_validation_time_and_later_ones_are_rebased"
+reason = "B 境界（守る境界）: the landing's wiring to Git: two runs land in validation order, the second rebased onto main, over the main checkout and SQLite"
+task = 2394
+
+# 8.696s in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_integrate::conflict_free_run_lands_as_one_squash_commit_and_releases_dependents"
+reason = "B 境界（守る境界）: the landing's wiring to Git: a run lands as one squash commit on main and its dependents are released in SQLite"
+task = 2394
+
+# 7.427s in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_integrate::integrate_records_the_requester_and_the_integrator"
+reason = "B 境界（守る境界）: the `integrate` process's landing and push through Git, with the requester and the Integrator recorded as actors in SQLite"
+task = 2394
+
+# 5.206s in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_review::integrate_by_hand_closes_the_landing_and_blocked_asks_of_the_run"
+reason = "B 境界（守る境界）: a person's `integrate` lands a reviewed run through Git and closes its asks in SQLite"
+task = 2394
+
+# 5.991s in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "plan_review::a_plan_review_verdict_is_applied_at_its_jobs_request_and_a_broken_one_fails_closed"
+reason = "B 境界（守る境界）: the supervisor's wiring of the plan-review job process and the verdict it applies at the job's request in SQLite"
+task = 2394
+
+# 4.870s, near the threshold, in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "attribute_records::a_supervisors_pass_writes_the_baseline_of_what_an_older_binary_changed"
+reason = "B 境界（守る境界）: the supervisor's pass over a queue an older binary wrote (SQLite) and the baseline records it writes for it"
+task = 2394
+
+# 4.966s, near the threshold, in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_handoff::a_handoff_leaves_the_session_running_and_the_next_process_drives_it_on"
+reason = "B 境界（守る境界）: adopt across processes: the supervisor process that continues a handoff takes the run over under the same token while the session runs"
+task = 2394
+
+# 4.795s, near the threshold, in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_review::a_failed_review_span_ends_with_its_job_not_with_the_exit"
+reason = "B 境界（守る境界）: the supervisor's wiring of the review job processes and the span and ask it records in SQLite when a run of the job cannot start"
+task = 2394
+
+# 4.703s, near the threshold, in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_review::the_default_test_reviewer_skips_retry_but_still_asks_after_its_job"
+reason = "B 境界（守る境界）: the supervisor's wiring of the review job process and the landing ask it opens in SQLite after the job"
+task = 2394
+
+# 4.597s, near the threshold, in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_session::valid_receipt_is_verified_and_awaits_integration"
+reason = "B 境界（守る境界）: the supervisor's wiring of a worker session's receipt, its validation against Git and the run's state in SQLite"
+task = 2394
+
+# 4.573s, near the threshold, in task 2394's stress, whose change to it was the type of its kind comparisons
+[[test]]
+name = "runtime_triage::an_escalation_waits_for_a_person_and_the_supervisor_applies_the_answer"
+reason = "B 境界（守る境界）: recovery: the recovery job process escalates, a wrapper process is stopped at the round's end, and the supervisor applies the answer in SQLite"
+task = 2394

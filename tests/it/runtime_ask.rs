@@ -65,7 +65,7 @@ fn receipt_follow_ups_appear_as_one_atomic_planner_bundle() {
             .run_events(run.id())
             .unwrap()
             .iter()
-            .all(|e| e.kind != "follow_up_registered")
+            .all(|e| e.kind != EventKind::FollowUpRegistered)
     );
     conn.execute_batch("DROP TRIGGER fail_second_origin")
         .unwrap();
@@ -92,7 +92,7 @@ fn receipt_follow_ups_appear_as_one_atomic_planner_bundle() {
         .run_events(run.id())
         .unwrap()
         .into_iter()
-        .filter(|e| e.kind == "follow_up_registered")
+        .filter(|e| e.kind == EventKind::FollowUpRegistered)
         .collect();
     assert_eq!(registered.len(), 3);
     for (index, recorded) in registered.iter().enumerate() {
@@ -293,7 +293,7 @@ fn asks_of_a_run_are_attention_for_the_inbox_until_closed() {
     assert_eq!(answered.answer.as_deref(), Some("land"));
     let events = queue.run_events(run.id()).unwrap();
     let last = events.last().unwrap();
-    assert_eq!(last.kind, "ask_answered");
+    assert_eq!(last.kind, EventKind::AskAnswered);
     assert_eq!(last.payload["ask_id"], json!(opened.ask.id));
     let woke = watch_role(
         &db,
@@ -711,7 +711,7 @@ fn a_follow_up_draft_records_its_origin_and_its_planner_question_is_delivered_by
         .unwrap()
         .events
         .into_iter()
-        .filter(|e| e.kind == "follow_up_adopted")
+        .filter(|e| e.kind == EventKind::FollowUpAdopted)
         .collect();
     assert_eq!(adopted.len(), 1);
     assert_eq!(adopted[0].payload["by"], "person");

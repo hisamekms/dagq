@@ -7,13 +7,8 @@
 
 use super::{attributes, findings};
 use crate::domain::{
-    EventKind, RunEvent, claim_defer, claim_hold,
-    event_kind::{self, SLOTS_FULL_ENDED, SLOTS_FULL_STARTED},
-    headless_job::JobRef,
-    live_alerts,
-    sessions::{SESSION_CLOSED, SESSION_OPENED, SESSION_TOKENS, SESSION_TURNS, SpanRef},
-    stats::main_log::MAIN_LOG_KINDS,
-    supervisor_life,
+    EventKind, RecordedKind, RunEvent, claim_hold, headless_job::JobRef, live_alerts,
+    sessions::SpanRef, stats::main_log::MAIN_LOG_KINDS, supervisor_life,
 };
 
 /// The kind of row an event is a record of.
@@ -33,19 +28,15 @@ pub enum Owner {
 /// before a claim and the landings' holds (intervals of a supervisor or the
 /// queue), the record of the judgments of now, main's history, the
 /// supervisors' lives and the findings.
-fn queue_wide(kind: &str) -> bool {
-    live_alerts::RECORD_KINDS.contains(&kind)
-        || supervisor_life::KINDS.contains(&kind)
-        || [SLOTS_FULL_STARTED, SLOTS_FULL_ENDED].contains(&kind)
-        || claim_hold::CLAIM_HOLD_KINDS.contains(&kind)
-        || claim_hold::LANDING_HOLD_KINDS.contains(&kind)
-        || [
-            claim_defer::CLAIM_DEFERRED,
-            claim_defer::CLAIM_DEFERRAL_ENDED,
-        ]
-        .contains(&kind)
-        || MAIN_LOG_KINDS.contains(&kind)
-        || findings::KINDS.contains(&kind)
+fn queue_wide(kind: &RecordedKind) -> bool {
+    kind.is_in(&live_alerts::RECORD_KINDS)
+        || kind.is_in(&supervisor_life::KINDS)
+        || kind.is_in(&[EventKind::SlotsFullStarted, EventKind::SlotsFullEnded])
+        || kind.is_in(&claim_hold::CLAIM_HOLD_KINDS)
+        || kind.is_in(&claim_hold::LANDING_HOLD_KINDS)
+        || kind.is_in(&[EventKind::ClaimDeferred, EventKind::ClaimDeferralEnded])
+        || kind.is_in(&MAIN_LOG_KINDS)
+        || kind.is_in(findings::KINDS)
 }
 
 /// Whether an event of no run is a session's or a job's: a span's, a
@@ -53,42 +44,39 @@ fn queue_wide(kind: &str) -> bool {
 /// goal review's (they name their id), the observer's or a throughput
 /// review's, or a job of no run its supervisor stopped.
 fn of_session(event: &RunEvent) -> bool {
-    let kind = event.kind.as_str();
+    let kind = &event.kind;
     let job = JobRef::of(&event.payload);
-    [
-        SESSION_OPENED,
-        SESSION_CLOSED,
-        SESSION_TURNS,
-        SESSION_TOKENS,
-    ]
-    .contains(&kind)
-        || SpanRef::of(event).planner_id.is_some()
+    kind.is_in(&[
+        EventKind::SessionOpened,
+        EventKind::SessionClosed,
+        EventKind::SessionTurns,
+        EventKind::SessionTokens,
+    ]) || SpanRef::of(event).planner_id.is_some()
         || job.plan_review_id.is_some()
         || job.goal_review_id.is_some()
-        || [
-            EventKind::ObserveStarted.as_str(),
-            EventKind::ObserveFinished.as_str(),
-            EventKind::ThroughputReviewStarted.as_str(),
-            EventKind::ThroughputReviewFinished.as_str(),
-            EventKind::ThroughputReviewReported.as_str(),
-        ]
-        .contains(&kind)
-        || kind == event_kind::GOAL_REVIEW_REARMED
-        || kind == event_kind::HEADLESS_JOB_STOPPED
+        || kind.is_in(&[
+            EventKind::ObserveStarted,
+            EventKind::ObserveFinished,
+            EventKind::ThroughputReviewStarted,
+            EventKind::ThroughputReviewFinished,
+            EventKind::ThroughputReviewReported,
+        ])
+        || *kind == EventKind::GoalReviewRearmed
+        || *kind == EventKind::HeadlessJobStopped
 }
 
 /// The kind of row `event` is a record of: the queue's for its own kinds,
 /// else its run's; a task's or a goal's attribute record its task's or the
 /// queue's; else a session's, its task's, or the queue's.
 pub fn owner(event: &RunEvent) -> Owner {
-    let kind = event.kind.as_str();
+    let kind = &event.kind;
     if queue_wide(kind) {
         return Owner::Queue;
     }
     if event.run_id.is_some() {
         return Owner::Run;
     }
-    if attributes::KINDS.contains(&kind) || kind == event_kind::ATTRIBUTES_BASELINE {
+    if kind.is_in(attributes::KINDS) || *kind == EventKind::AttributesBaseline {
         return if event.task_id.is_some() {
             Owner::Task
         } else {

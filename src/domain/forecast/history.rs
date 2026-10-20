@@ -3,6 +3,7 @@
 //! from a goal's last landing to its close as achieved, the people's
 //! answers to asks, and where a run in flight is.
 
+use crate::domain::EventKind;
 use std::collections::HashMap;
 
 use serde_json::Value;
@@ -10,7 +11,6 @@ use serde_json::Value;
 use super::{Phase, Running};
 use crate::domain::{
     EventId, GoalId, GoalVerdict, RunEvent, RunStatus, TaskChange, TaskId,
-    event_kind::{GOAL_CLOSED, RUN_INTEGRATED},
     stats::{self, LiveSnapshot, SlotSnapshot, StatsQuery, timestamp_millis},
     waiting::WaitState,
 };
@@ -100,13 +100,13 @@ pub fn history(
         let Some(at) = timestamp_millis(&event.created_at) else {
             continue;
         };
-        match event.kind.as_str() {
-            RUN_INTEGRATED => {
+        match event.kind.known() {
+            Some(EventKind::RunIntegrated) => {
                 if let Some(goal) = event.task_id.and_then(|t| goals.get(&t).copied().flatten()) {
                     last_landings.insert(goal, at);
                 }
             }
-            GOAL_CLOSED
+            Some(EventKind::GoalClosed)
                 if event.payload.get("verdict").and_then(Value::as_str)
                     == Some(GoalVerdict::Achieved.as_str()) =>
             {
@@ -156,7 +156,7 @@ pub fn in_flight(status: RunStatus) -> bool {
 /// it has been there, and how long it has waited for a person while it
 /// waits.
 pub fn running(events: &[RunEvent], now_ms: i64) -> Running {
-    let first = |kind: &str| {
+    let first = |kind: EventKind| {
         events
             .iter()
             .find(|event| event.kind == kind)
@@ -164,9 +164,9 @@ pub fn running(events: &[RunEvent], now_ms: i64) -> Running {
     };
     let secs = |since: Option<i64>| since.map_or(0, |since| (now_ms - since).max(0) / 1000);
     let (phase, since) = match (
-        first("validation_finished"),
-        first("receipt_observed"),
-        first("run_claimed"),
+        first(EventKind::ValidationFinished),
+        first(EventKind::ReceiptObserved),
+        first(EventKind::RunClaimed),
     ) {
         (Some(validated), _, _) => (Phase::WaitToLand, Some(validated)),
         (None, Some(receipt), _) => (Phase::Validate, Some(receipt)),

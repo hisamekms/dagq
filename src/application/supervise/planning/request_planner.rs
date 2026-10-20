@@ -262,7 +262,7 @@ impl PlanningState {
                             .events
                             .iter()
                             .rev()
-                            .find(|event| event.kind == event_kind::INTEGRATION_RECEIPT)
+                            .find(|event| event.kind == EventKind::IntegrationReceipt)
                             .and_then(|event| {
                                 event.payload["receipt"]
                                     .get(crate::domain::execution_class::SPIKE_RESULT_FIELD)
@@ -327,7 +327,7 @@ impl PlanningState {
                     .events
                     .iter()
                     .rev()
-                    .find(|event| event.kind == event_kind::INTEGRATION_RECEIPT)
+                    .find(|event| event.kind == EventKind::IntegrationReceipt)
                     .map(|event| event.payload["receipt"].clone());
                 RequestRefMaterial::Task {
                     task: Box::new(detail.task),
@@ -342,7 +342,7 @@ impl PlanningState {
                 let receipt = events
                     .iter()
                     .rev()
-                    .find(|event| event.kind == event_kind::INTEGRATION_RECEIPT)
+                    .find(|event| event.kind == EventKind::IntegrationReceipt)
                     .map(|event| event.payload["receipt"].clone());
                 RequestRefMaterial::Run {
                     run: run.clone(),

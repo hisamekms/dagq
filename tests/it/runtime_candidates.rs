@@ -2,6 +2,7 @@
 //! decision 3), recorded when the claimable ready tasks, the free slots or
 //! the ready tasks change, and `kpi` reading it.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use runtime_support::*;
 use std::sync::atomic::AtomicBool;
@@ -18,7 +19,7 @@ fn samples(db: &Path) -> Vec<Value> {
         .all_events()
         .unwrap()
         .into_iter()
-        .filter(|event| event.kind == "candidates_sampled")
+        .filter(|event| event.kind == EventKind::CandidatesSampled)
         .map(|event| event.payload)
         .collect()
 }
@@ -96,7 +97,7 @@ fn the_supervisor_samples_the_candidates_when_they_change() {
         .all_events()
         .unwrap()
         .iter()
-        .filter(|event| event.kind == "supervisor_stopped")
+        .filter(|event| event.kind == EventKind::SupervisorStopped)
         .filter_map(|event| dagq::domain::stats::timestamp_millis(&event.created_at))
         .max()
         .unwrap();

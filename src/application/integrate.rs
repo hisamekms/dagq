@@ -2463,7 +2463,7 @@ fn verification_runtime(
     let check = ContainerCheck::of(&runtimes, |target| container.availability(target));
     let last = queue.latest_queue_event(&CONTAINER_RUNTIME_KINDS)?;
     if let Some((kind, mut payload)) =
-        check.transition(last.as_ref().map(|e| (e.kind.as_str(), &e.payload)))
+        check.transition(last.as_ref().map(|e| (&e.kind, &e.payload)))
     {
         payload["by"] = json!("integrate");
         queue.record_queue_event(kind, payload)?;
@@ -4530,7 +4530,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: String::new(),
             actor: None,

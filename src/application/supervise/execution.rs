@@ -2661,8 +2661,7 @@ impl Supervisor<'_> {
             }
         };
         let last = self.queue.latest_queue_event(&RUN_ENV_PROGRAM_KINDS)?;
-        if let Some((kind, mut payload)) = check.transition(last.as_ref().map(|e| e.kind.as_str()))
-        {
+        if let Some((kind, mut payload)) = check.transition(last.as_ref().map(|e| &e.kind)) {
             payload["supervisor"] = json!(self.registration.token());
             self.queue.record_queue_event(kind, payload)?;
             match check.missing_message() {
@@ -4151,12 +4150,12 @@ fn latest_review_reasons(queue: &dyn Queue, run_id: &RunId) -> Result<Vec<String
         .rev()
         .find(|e| {
             matches!(
-                e.kind.as_str(),
-                event_kind::REVIEW_FINISHED | event_kind::REVIEW_FAILED
+                e.kind.known(),
+                Some(EventKind::ReviewFinished | EventKind::ReviewFailed)
             )
         })
-        .and_then(|e| match e.kind.as_str() {
-            event_kind::REVIEW_FAILED => e.payload["error"]
+        .and_then(|e| match e.kind.known() {
+            Some(EventKind::ReviewFailed) => e.payload["error"]
                 .as_str()
                 .map(|error| vec![format!("the headless review failed: {error}")]),
             _ => serde_json::from_value(e.payload["reasons"].clone()).ok(),

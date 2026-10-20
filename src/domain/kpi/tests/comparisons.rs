@@ -314,7 +314,7 @@ fn event_id(queue: &mut Queue, kind: &str, secs: i64) -> EventId {
     queue
         .events
         .iter()
-        .find(|event| event.kind == kind && event.created_at == at)
+        .find(|event| event.kind.as_str() == kind && event.created_at == at)
         .unwrap()
         .id
 }

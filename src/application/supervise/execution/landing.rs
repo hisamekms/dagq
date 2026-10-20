@@ -33,6 +33,7 @@ use crate::domain::review_programs::{
 };
 use crate::domain::review_reason;
 use crate::domain::review_subagents::{Destination, VerdictRoute};
+use crate::domain::run::{AttemptOf, restore_payload};
 use crate::domain::worker_model::{self, Escalation};
 
 /// The answer the supervisor closes an earlier, unclosed `approve_landing`
@@ -197,7 +198,7 @@ impl Supervisor<'_> {
         let events = self.queue.run_events(run.id())?;
         let history = RunHistory::from_events(&events);
         let attempt = history.review_attempts() + 1;
-        let round = history.count(event_kind::REVIEW_PROGRAMS_STARTED) + 1;
+        let round = history.count(EventKind::ReviewProgramsStarted) + 1;
         let snapshot = match self.review_programs(run) {
             Ok(Some(snapshot)) if !snapshot.programs.is_empty() => snapshot,
             Ok(_) => return self.resume_review(run, session, retried),
@@ -1953,8 +1954,9 @@ impl Supervisor<'_> {
             .iter()
             .rev()
             .find(|event| {
-                event.kind == EventKind::ReviewStarted.as_str()
-                    && event.payload["attempt"].as_u64() == u64::try_from(attempt).ok()
+                event.kind == EventKind::ReviewStarted
+                    && restore_payload::<AttemptOf>(&event.payload).attempt
+                        == u64::try_from(attempt).ok()
             })
             .and_then(|event| review_reason::CodePaths::recorded(&event.payload));
         let code = code.as_ref();
@@ -2687,16 +2689,16 @@ impl Supervisor<'_> {
         let events = self.queue.run_events(run.id())?;
         let recorded = events
             .iter()
-            .any(|e| e.kind == event_kind::REVIEW_OUTCOME && e.payload["ask_id"] == json!(ask_id));
+            .any(|e| e.kind == EventKind::ReviewOutcome && e.payload["ask_id"] == json!(ask_id));
         let review = events.iter().rev().find(|e| {
             matches!(
-                e.kind.as_str(),
-                event_kind::REVIEW_FINISHED | event_kind::REVIEW_FAILED
+                e.kind.known(),
+                Some(EventKind::ReviewFinished | EventKind::ReviewFailed)
             )
         });
         let Some(review) = review.filter(|review| {
             !recorded
-                && review.kind == event_kind::REVIEW_FINISHED
+                && review.kind == EventKind::ReviewFinished
                 && !concern::lets_land(&review.payload)
         }) else {
             return Ok(());

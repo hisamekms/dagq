@@ -222,7 +222,7 @@ impl SessionRegistry for SqliteQueue {
         id: &RunId,
         session: Option<&crate::domain::headless_job::JobSession>,
     ) -> Result<usize> {
-        let _read = read_before(&self.conn, Closing::Run(id, &[event_kind::REVIEW_FAILED]))?;
+        let _read = read_before(&self.conn, Closing::Run(id, &[EventKind::ReviewFailed]))?;
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let ending = session.map(|session| {
             let mut ending = serde_json::json!({});

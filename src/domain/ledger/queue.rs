@@ -36,10 +36,6 @@ use crate::domain::{
     supervisor_life::{Lives, supervisor_of},
 };
 
-const LIVE_ALERT_BASELINE: &str = EventKind::LiveAlertBaseline.as_str();
-const LIVE_ALERT_STARTED: &str = EventKind::LiveAlertStarted.as_str();
-const LIVE_ALERT_ENDED: &str = EventKind::LiveAlertEnded.as_str();
-
 /// A queue row as it is folded.
 struct Building {
     start: EventId,
@@ -409,13 +405,13 @@ impl QueueBook {
             // An end the slots full of its supervisor recorded: its life
             // no longer ends it.
             if let Some(supervisor) = supervisor_of(event)
-                && event.kind == crate::domain::event_kind::SLOTS_FULL_ENDED
+                && event.kind == EventKind::SlotsFullEnded
                 && let Some(rows) = self.lives_of.get_mut(supervisor)
             {
                 rows.remove(&start);
             }
             // A hold its supervisor's stop ended reads its later life.
-            if event.kind == crate::domain::event_kind::SUPERVISOR_STOPPED
+            if event.kind == EventKind::SupervisorStopped
                 && let Some(supervisor) = supervisor_of(event)
             {
                 self.lives_of
@@ -449,9 +445,9 @@ impl QueueBook {
     /// baseline, ended there (`replaced`) or by the end of its
     /// supervisor's life; whether it is one.
     fn stream(&mut self, event: &RunEvent, touched: &mut BTreeSet<(LedgerKind, String)>) -> bool {
-        let kind = event.kind.as_str();
-        if !live_alerts::RECORD_KINDS.contains(&kind)
-            || [LIVE_ALERT_STARTED, LIVE_ALERT_ENDED].contains(&kind)
+        let kind = &event.kind;
+        if !kind.is_in(&live_alerts::RECORD_KINDS)
+            || kind.is_in(&[EventKind::LiveAlertStarted, EventKind::LiveAlertEnded])
         {
             return false;
         }
@@ -461,7 +457,7 @@ impl QueueBook {
         let supervisor = record.supervisor;
         let current = self.streams.get(&supervisor).copied();
         let at = match current {
-            Some(at) if kind != LIVE_ALERT_BASELINE => at,
+            Some(at) if *kind != EventKind::LiveAlertBaseline => at,
             _ => {
                 if let Some(at) = current
                     && let Some(row) = self.rows.get_mut(&at)
@@ -476,7 +472,7 @@ impl QueueBook {
                 }
                 let mut row = Assigned::new(Of::Stream, event, supervisor.clone());
                 row.records.clear();
-                row.baseline = kind == LIVE_ALERT_BASELINE;
+                row.baseline = *kind == EventKind::LiveAlertBaseline;
                 self.rows.insert(event.id, row);
                 self.lives_of
                     .entry(supervisor.clone())
@@ -510,15 +506,15 @@ impl QueueBook {
         };
         let about = alert.run_id.clone().unwrap_or_else(|| alert.kind.clone());
         let key = (supervisor, alert);
-        match event.kind.as_str() {
-            LIVE_ALERT_STARTED => {
+        match event.kind.known() {
+            Some(EventKind::LiveAlertStarted) => {
                 self.rows
                     .insert(event.id, Assigned::new(Of::Alert, event, about));
                 self.alerts.insert(key, event.id);
                 touched.insert((LedgerKind::Queue, event.id.to_string()));
                 true
             }
-            LIVE_ALERT_ENDED => {
+            Some(EventKind::LiveAlertEnded) => {
                 let Some(at) = self.alerts.remove(&key) else {
                     return false;
                 };
@@ -537,9 +533,7 @@ impl QueueBook {
     /// Assign a record of a finding: one finding from its first record,
     /// every record of its values; whether it is one.
     fn finding(&mut self, event: &RunEvent, touched: &mut BTreeSet<(LedgerKind, String)>) -> bool {
-        if !findings::KINDS.contains(&event.kind.as_str())
-            || event.payload.get(findings::VALUES).is_none()
-        {
+        if !event.kind.is_in(findings::KINDS) || event.payload.get(findings::VALUES).is_none() {
             return false;
         }
         let Some(finding) = findings::values_of(event) else {
@@ -603,7 +597,7 @@ impl QueueBook {
             }
         };
         if row.kind.is_empty() {
-            row.kind = event(at.owned, id)?.kind.clone();
+            row.kind = event(at.owned, id)?.kind.to_string();
         }
         let life = row.life.as_deref().and_then(|s| at.lives.last_of(s));
         let mut ledger = finish(row, at.owned, at.built_at);

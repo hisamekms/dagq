@@ -13,11 +13,7 @@
 use serde_json::{Value, json};
 
 use super::{
-    EventKind, RecoveredLanding, RunEvent, RunHistory, RunStatus,
-    event_kind::{
-        INTEGRATION_STARTED, LANDING_RELEASE_STUCK, LANDING_RELEASE_WAITING, RUN_RECOVERED,
-    },
-    heartbeat_stale,
+    EventKind, RecoveredLanding, RunEvent, RunHistory, RunStatus, heartbeat_stale,
     recovery::ProcessInfo,
 };
 
@@ -43,7 +39,7 @@ pub const UNLISTED: &str = "unlisted";
 fn this_landing(events: &[RunEvent]) -> &[RunEvent] {
     let start = events
         .iter()
-        .rposition(|e| e.kind == INTEGRATION_STARTED)
+        .rposition(|e| e.kind == EventKind::IntegrationStarted)
         .map_or(0, |i| i + 1);
     &events[start..]
 }
@@ -53,7 +49,7 @@ fn this_landing(events: &[RunEvent]) -> &[RunEvent] {
 pub fn waiting_since(events: &[RunEvent]) -> Option<i64> {
     this_landing(events)
         .iter()
-        .find(|e| e.kind == LANDING_RELEASE_WAITING)
+        .find(|e| e.kind == EventKind::LandingReleaseWaiting)
         .and_then(|e| e.payload["seen_at"].as_i64())
 }
 
@@ -63,7 +59,7 @@ pub fn stuck(events: &[RunEvent]) -> Option<&RunEvent> {
     this_landing(events)
         .iter()
         .rev()
-        .find(|e| e.kind == LANDING_RELEASE_STUCK)
+        .find(|e| e.kind == EventKind::LandingReleaseStuck)
 }
 
 /// The lease of an `integrating` run as the release reads it: whether
@@ -197,7 +193,7 @@ pub fn released(
     status: &str,
 ) -> Option<(bool, Value)> {
     if history
-        .last(RUN_RECOVERED)
+        .last(EventKind::RunRecovered)
         .is_none_or(|e| e.payload["previous_status"] != RunStatus::Integrating.as_str())
     {
         return None;
@@ -226,6 +222,10 @@ pub fn released(
 mod tests {
     use super::*;
     use crate::domain::EventId;
+    use crate::domain::event_kind::INTEGRATION_STARTED;
+    use crate::domain::event_kind::LANDING_RELEASE_STUCK;
+    use crate::domain::event_kind::LANDING_RELEASE_WAITING;
+    use crate::domain::event_kind::RUN_RECOVERED;
 
     fn event(kind: &str, payload: Value) -> RunEvent {
         event_at(1, kind, payload)
@@ -237,7 +237,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: String::new(),
             actor: None,

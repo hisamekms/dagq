@@ -42,7 +42,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Value, json};
 
 use super::review::{Judgement, ReviewOutcome};
-use crate::domain::{EventKind, ReviewDecision};
+use crate::domain::run::{AttemptOf, restore_payload};
+use crate::domain::{EventKind, RecordedKind, ReviewDecision};
 
 /// The kinds of the production cases' events.
 pub const KINDS: [EventKind; 7] = [
@@ -222,7 +223,7 @@ impl Period {
 #[derive(Debug, Clone, Copy)]
 pub struct ReviewEvent<'a> {
     pub run_id: &'a str,
-    pub kind: &'a str,
+    pub kind: &'a RecordedKind,
     pub payload: &'a Value,
     pub created_at: &'a str,
 }
@@ -291,18 +292,16 @@ pub fn candidates<'a>(
     period: Period,
     events: impl IntoIterator<Item = ReviewEvent<'a>>,
 ) -> Vec<Candidate> {
-    let started_kind = EventKind::ReviewStarted.as_str();
-    let finished_kind = EventKind::ReviewFinished.as_str();
     // Each selected review's (run, attempt), with its base, head and start.
     type Started = ((String, u64), (String, String, String));
     let mut started: Vec<Started> = Vec::new();
     let mut found: BTreeMap<(String, u64), Candidate> = BTreeMap::new();
     for event in events {
-        let Some(attempt) = event.payload["attempt"].as_u64() else {
+        let Some(attempt) = restore_payload::<AttemptOf>(event.payload).attempt else {
             continue;
         };
         let key = (event.run_id.to_owned(), attempt);
-        if event.kind == started_kind {
+        if *event.kind == EventKind::ReviewStarted {
             let subagents = &event.payload["subagents"];
             let selected = subagents["agents"]
                 .as_array()
@@ -323,7 +322,7 @@ pub fn candidates<'a>(
                     event.created_at.to_owned(),
                 ),
             ));
-        } else if event.kind == finished_kind {
+        } else if *event.kind == EventKind::ReviewFinished {
             let Some((_, (base, head, at))) = started.iter().find(|(seen, _)| *seen == key) else {
                 continue;
             };
@@ -919,10 +918,12 @@ impl CaseSet {
 /// first) say, oldest first. An event of a set with no request, or one
 /// that does not read, is left out; a set's first `prepared` and `built`
 /// hold.
-pub fn sets<'a>(events: impl IntoIterator<Item = (i64, &'a str, &'a Value)>) -> Vec<CaseSet> {
+pub fn sets<'a>(
+    events: impl IntoIterator<Item = (i64, &'a RecordedKind, &'a Value)>,
+) -> Vec<CaseSet> {
     let mut sets: BTreeMap<i64, CaseSet> = BTreeMap::new();
     for (id, kind, payload) in events {
-        if kind == EventKind::AgentCasesRequested.as_str() {
+        if *kind == EventKind::AgentCasesRequested {
             if let Some(request) = CasesRequest::read(payload) {
                 sets.insert(
                     id,
@@ -949,11 +950,11 @@ pub fn sets<'a>(events: impl IntoIterator<Item = (i64, &'a str, &'a Value)>) -> 
             continue;
         };
         let case = payload["case"].as_str().unwrap_or_default().to_owned();
-        if kind == EventKind::AgentCasesTaken.as_str() {
+        if *kind == EventKind::AgentCasesTaken {
             set.owner = payload["supervisor"].as_str().map(str::to_owned);
-        } else if kind == EventKind::AgentCasesRefused.as_str() {
+        } else if *kind == EventKind::AgentCasesRefused {
             set.refused.get_or_insert_with(|| payload.clone());
-        } else if kind == EventKind::AgentCasesPrepared.as_str() && set.prepared.is_none() {
+        } else if *kind == EventKind::AgentCasesPrepared && set.prepared.is_none() {
             set.frame = Frame::read(&payload["frame"]);
             set.prepared = Some(
                 payload["cases"]
@@ -964,7 +965,7 @@ pub fn sets<'a>(events: impl IntoIterator<Item = (i64, &'a str, &'a Value)>) -> 
                     .collect(),
             );
             set.skipped = payload["skipped"].as_array().cloned().unwrap_or_default();
-        } else if kind == EventKind::AgentCasesLabeled.as_str() {
+        } else if *kind == EventKind::AgentCasesLabeled {
             set.labels.insert(
                 case,
                 LabelRecord {
@@ -973,7 +974,7 @@ pub fn sets<'a>(events: impl IntoIterator<Item = (i64, &'a str, &'a Value)>) -> 
                     made_by: payload["made_by"].as_str().unwrap_or_default().to_owned(),
                 },
             );
-        } else if kind == EventKind::AgentCasesBuilt.as_str() && set.built.is_none() {
+        } else if *kind == EventKind::AgentCasesBuilt && set.built.is_none() {
             set.built = Some(Built {
                 digest: payload["digest"].as_str().unwrap_or_default().to_owned(),
                 cases: payload["cases"]
@@ -984,7 +985,7 @@ pub fn sets<'a>(events: impl IntoIterator<Item = (i64, &'a str, &'a Value)>) -> 
                     .map(str::to_owned)
                     .collect(),
             });
-        } else if kind == EventKind::AgentCasesDecided.as_str()
+        } else if *kind == EventKind::AgentCasesDecided
             && let Some(label) = Label::read(payload)
         {
             set.decisions.insert(
@@ -1051,12 +1052,17 @@ mod tests {
             ("r1", "review_finished", &f3, "2026-10-05T02:10:00.000Z"),
             ("r3", "review_started", &s4, "2026-10-06T00:00:00.000Z"),
         ];
+        let kinds: Vec<RecordedKind> = events
+            .iter()
+            .map(|(_, kind, _, _)| (*kind).into())
+            .collect();
         let found = candidates(
             "demo",
             period(Some("2026-10-05"), Some("2026-10-07")).unwrap(),
             events
                 .iter()
-                .map(|(run_id, kind, payload, created_at)| ReviewEvent {
+                .zip(&kinds)
+                .map(|((run_id, _, payload, created_at), kind)| ReviewEvent {
                     run_id,
                     kind,
                     payload,
@@ -1380,10 +1386,13 @@ mod tests {
             (3, "agent_cases_labeled", labeled(&agree, Some(&violation))),
         ];
         let read = |events: &[(i64, &str, Value)]| {
+            let kinds: Vec<RecordedKind> =
+                events.iter().map(|(_, kind, _)| (*kind).into()).collect();
             sets(
                 events
                     .iter()
-                    .map(|(id, kind, payload)| (*id, *kind, payload)),
+                    .zip(&kinds)
+                    .map(|((id, _, payload), kind)| (*id, kind, payload)),
             )
             .remove(0)
         };

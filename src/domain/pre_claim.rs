@@ -17,7 +17,6 @@ use serde_json::{Value, json};
 
 use super::{
     EventId, EventKind, LeaseToken, RunEvent, TaskId, claim_defer, claim_hold,
-    event_kind::{SLOTS_FULL_ENDED, SLOTS_FULL_STARTED},
     light_slots::ClaimRoom,
     marks::utc_text,
     stats::timestamp_millis,
@@ -110,11 +109,11 @@ pub fn open_slots_full(events: &[RunEvent], token: &str) -> BTreeSet<SlotClass> 
         let Some(class) = text(event, "class").and_then(SlotClass::of) else {
             continue;
         };
-        match event.kind.as_str() {
-            SLOTS_FULL_STARTED => {
+        match event.kind.known() {
+            Some(EventKind::SlotsFullStarted) => {
                 open.insert(class);
             }
-            SLOTS_FULL_ENDED => {
+            Some(EventKind::SlotsFullEnded) => {
                 open.remove(&class);
             }
             _ => {}
@@ -176,7 +175,7 @@ pub fn pre_claim_intervals(events: &[RunEvent], now_ms: i64) -> Vec<PreClaimInte
 /// The supervisor and the class a `slots_full_*` names; none for another
 /// event, or one that names neither.
 pub fn slots_full_of(event: &RunEvent) -> Option<(String, SlotClass)> {
-    if event.kind != SLOTS_FULL_STARTED && event.kind != SLOTS_FULL_ENDED {
+    if event.kind != EventKind::SlotsFullStarted && event.kind != EventKind::SlotsFullEnded {
         return None;
     }
     Some((
@@ -270,7 +269,7 @@ impl PreClaimBook {
         }
         let mut ended: Option<EventId> = None;
         if let Some(key) = slots_full_of(event) {
-            if event.kind == SLOTS_FULL_STARTED {
+            if event.kind == EventKind::SlotsFullStarted {
                 // One already open goes on (a process that took over the
                 // token and found it open records no new start).
                 if let std::collections::btree_map::Entry::Vacant(open) = self.slots.entry(key) {
@@ -320,7 +319,7 @@ impl PreClaimBook {
                 self.close(start, event, why, by);
                 ended = Some(ended.map_or(start, |first| first.min(start)));
             }
-            if event.kind == claim_defer::CLAIM_DEFERRED {
+            if event.kind == EventKind::ClaimDeferred {
                 self.open
                     .insert(event.id, opened(IntervalKind::ClaimDeferral, event));
                 self.deferrals.insert(task, event.id);
@@ -599,6 +598,8 @@ mod tests {
     use super::*;
     use crate::domain::claim_defer::claim_deferrals;
     use crate::domain::claim_hold::claim_holds;
+    use crate::domain::event_kind::SLOTS_FULL_ENDED;
+    use crate::domain::event_kind::SLOTS_FULL_STARTED;
     use crate::domain::supervisor_life::SUPERVISOR_ALIVE_INTERVAL_SECS;
 
     const MIN: i64 = 60_000;
@@ -609,7 +610,7 @@ mod tests {
             task_id: task.map(TaskId::new),
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: utc_text(minute * MIN),
             actor: None,

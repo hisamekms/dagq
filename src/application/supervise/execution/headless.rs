@@ -330,7 +330,7 @@ pub(super) fn between_turns(sv: &Supervisor<'_>, idle_marker: &Path, events: &[R
     };
     events
         .iter()
-        .filter(|event| event.kind == event_kind::TURN_STARTED)
+        .filter(|event| event.kind == EventKind::TurnStarted)
         .filter_map(|event| event.payload["turn"].as_u64())
         .max()
         .is_none_or(|started| mark.turn >= started)
@@ -350,7 +350,7 @@ pub(super) fn turns_excerpt(sv: &Supervisor<'_>, run: &TaskRun) -> String {
 fn format_turns_excerpt(events: &[RunEvent]) -> String {
     let finished: Vec<String> = events
         .iter()
-        .filter(|e| e.kind == event_kind::TURN_FINISHED)
+        .filter(|e| e.kind == EventKind::TurnFinished)
         .rev()
         .take(5)
         .map(|e| {

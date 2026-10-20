@@ -663,7 +663,7 @@ fn conflict_free_run_lands_as_one_squash_commit_and_releases_dependents() {
     let claimed = &detail
         .events
         .iter()
-        .find(|e| e.kind == "run_claimed")
+        .find(|e| e.kind == EventKind::RunClaimed)
         .unwrap()
         .payload;
     assert!(claimed.get("rustc_release").is_none(), "{claimed}");
@@ -707,7 +707,7 @@ fn conflict_free_run_lands_as_one_squash_commit_and_releases_dependents() {
     let phases: Vec<(&str, &str, &str, &str)> = detail
         .events
         .iter()
-        .filter(|e| e.kind == "run_phase_changed")
+        .filter(|e| e.kind == EventKind::RunPhaseChanged)
         .map(|e| {
             (
                 e.payload["phase"].as_str().unwrap(),
@@ -762,7 +762,7 @@ fn conflict_free_run_lands_as_one_squash_commit_and_releases_dependents() {
     let integrated = detail
         .events
         .iter()
-        .find(|e| e.kind == "run_integrated")
+        .find(|e| e.kind == EventKind::RunIntegrated)
         .unwrap();
     assert_eq!(integrated.run_id.as_ref(), Some(run.id()));
     assert_eq!(
@@ -790,7 +790,7 @@ fn conflict_free_run_lands_as_one_squash_commit_and_releases_dependents() {
         &detail
             .events
             .iter()
-            .find(|e| e.kind == kind)
+            .find(|e| e.kind.as_str() == kind)
             .unwrap_or_else(|| panic!("no {kind}"))
             .payload
     };
@@ -814,10 +814,9 @@ fn conflict_free_run_lands_as_one_squash_commit_and_releases_dependents() {
     assert_load(event("receipt_observed"));
     assert_load(event("validation_finished"));
     assert!(
-        detail
-            .events
-            .iter()
-            .all(|e| e.kind != "verification_command" || e.payload["phase"] == "integration"),
+        detail.events.iter().all(
+            |e| e.kind != EventKind::VerificationCommand || e.payload["phase"] == "integration"
+        ),
         "{:?}",
         event_kinds(&detail)
     );
@@ -827,7 +826,7 @@ fn conflict_free_run_lands_as_one_squash_commit_and_releases_dependents() {
     let changed = detail
         .events
         .iter()
-        .find(|e| e.kind == "task_status_changed" && e.payload["to"] == "completed")
+        .find(|e| e.kind == EventKind::TaskStatusChanged && e.payload["to"] == "completed")
         .unwrap();
     assert_eq!(changed.run_id.as_ref(), Some(run.id()));
     assert!(queue.run_leases().unwrap().is_empty());
@@ -1236,7 +1235,7 @@ fn runs_land_fifo_by_validation_time_and_later_ones_are_rebased() {
             .unwrap()
             .events
             .iter()
-            .find(|e| e.kind == "validation_finished")
+            .find(|e| e.kind == EventKind::ValidationFinished)
             .unwrap()
             .id
     };
@@ -1299,7 +1298,7 @@ fn runs_land_fifo_by_validation_time_and_later_ones_are_rebased() {
         .unwrap()
         .events
         .into_iter()
-        .find(|e| e.kind == "integration_rebased")
+        .find(|e| e.kind == EventKind::IntegrationRebased)
         .unwrap();
     assert_eq!(rebased.payload["main"], json!(first_landed));
     assert_eq!(
@@ -1512,7 +1511,7 @@ fn integration_slot_is_exclusive_and_an_abandoned_landing_is_recoverable() {
         .unwrap()
         .events
         .into_iter()
-        .find(|e| e.kind == "run_recovered")
+        .find(|e| e.kind == EventKind::RunRecovered)
         .unwrap();
     assert_eq!(event.payload["previous_status"], "integrating");
     assert_eq!(event.payload["status"], "awaiting_integration");
@@ -2073,7 +2072,7 @@ fn integrate_renumbers_a_migration_whose_number_main_took() {
     let renumbered = detail
         .events
         .iter()
-        .find(|e| e.kind == "migration_renumbered")
+        .find(|e| e.kind == EventKind::MigrationRenumbered)
         .unwrap();
     let history = git_out(
         &repo,
@@ -2112,7 +2111,7 @@ fn integrate_renumbers_a_migration_whose_number_main_took() {
     let claimed = &detail
         .events
         .iter()
-        .find(|e| e.kind == "run_claimed")
+        .find(|e| e.kind == EventKind::RunClaimed)
         .unwrap()
         .payload;
     for key in ["rustc_release", "rustc_host"] {
@@ -2178,7 +2177,7 @@ fn a_refused_renumbering_commit_is_undone_and_needs_a_session() {
     let deferred = detail
         .events
         .iter()
-        .rfind(|e| e.kind == "integration_deferred")
+        .rfind(|e| e.kind == EventKind::IntegrationDeferred)
         .unwrap();
     assert_eq!(deferred.payload["code"], "migration_number_taken");
     assert_eq!(deferred.payload["next_number"], "0003");
@@ -2303,7 +2302,7 @@ fn integrate_records_the_requester_and_the_integrator() {
         let actor = detail
             .events
             .iter()
-            .find(|e| e.kind == kind && e.run_id.as_ref() == Some(run.id()))
+            .find(|e| e.kind.as_str() == kind && e.run_id.as_ref() == Some(run.id()))
             .unwrap_or_else(|| panic!("no {kind}"))
             .actor
             .clone()

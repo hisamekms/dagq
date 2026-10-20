@@ -28,11 +28,11 @@ use serde_json::{Value, json};
 
 /// The goal events the goal review is shown: notes, edits, and what was
 /// decided about the goal before.
-const GOAL_REVIEW_EVENTS: &[&str] = &[
-    "observation",
-    event_kind::GOAL_UPDATED,
-    event_kind::GOAL_DECIDED,
-    event_kind::GOAL_REVIEW_REARMED,
+const GOAL_REVIEW_EVENTS: &[EventKind] = &[
+    EventKind::Observation,
+    EventKind::GoalUpdated,
+    EventKind::GoalDecided,
+    EventKind::GoalReviewRearmed,
 ];
 
 /// The goal review job running now: one at a time, queue-wide.
@@ -281,7 +281,7 @@ impl PlanningState {
         let events = detail
             .events
             .iter()
-            .filter(|event| GOAL_REVIEW_EVENTS.contains(&event.kind.as_str()))
+            .filter(|event| event.kind.is_in(GOAL_REVIEW_EVENTS))
             .map(|event| json!({"kind": event.kind, "at": event.created_at, "payload": event.payload}))
             .collect();
         let previous = env

@@ -7,6 +7,7 @@
 //! queue and writes nothing; which transition is an attention is decided
 //! by `domain`.
 pub use crate::application::health::compact_event;
+use crate::domain::EventKind;
 use crate::{
     application::health::{for_role, pulses, supervisors},
     application::{
@@ -16,7 +17,6 @@ use crate::{
     domain::{
         ATTENTION_KINDS, EventFilter, EventId, RunEvent, RunId, SessionRole, UPDATE_EVENT_KINDS,
         event_attention,
-        event_kind::ASK_OPENED,
         kpi::push::{PushConfig, ask_opened_message},
         timeline::{self, Gap},
         wakes_inbox,
@@ -110,7 +110,7 @@ fn read_events(
             {
                 woken |= wakes(role, &event);
                 events.push(shown(&event, query.full));
-                if event.kind == ASK_OPENED {
+                if event.kind == EventKind::AskOpened {
                     opened.push(event);
                 }
                 if events.len() == limit {
@@ -236,7 +236,12 @@ pub fn timeline_in(
                 EventId::new(first.id.as_i64() - 1),
                 upto,
                 &EventFilter {
-                    kinds: Some(UPDATE_EVENT_KINDS.iter().map(|&k| k.to_owned()).collect()),
+                    kinds: Some(
+                        UPDATE_EVENT_KINDS
+                            .iter()
+                            .map(|kind| kind.as_str().to_owned())
+                            .collect(),
+                    ),
                     ..EventFilter::default()
                 },
                 TIMELINE_UPDATES_LIMIT,
@@ -574,7 +579,7 @@ mod tests {
                     filter
                         .kinds
                         .as_ref()
-                        .is_none_or(|kinds| kinds.contains(&event.kind))
+                        .is_none_or(|kinds| kinds.iter().any(|kind| kind == event.kind.as_str()))
                 })
                 .take(limit)
                 .cloned()
@@ -588,7 +593,7 @@ mod tests {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: "2026-10-04T00:00:00Z".to_owned(),
             actor: None,

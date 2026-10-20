@@ -1,5 +1,6 @@
 //! Runtime tests: Repairs of long background work.
 use crate::runtime_support;
+use dagq::domain::EventKind;
 
 use runtime_support::*;
 
@@ -271,7 +272,7 @@ fn a_live_escalation_is_recorded_at_the_recovery_jobs_request_unless_the_job_fai
             let events: Vec<_> = detail
                 .events
                 .iter()
-                .filter(|e| e.kind == kind && e.run_id.as_ref() == Some(run.id()))
+                .filter(|e| e.kind.as_str() == kind && e.run_id.as_ref() == Some(run.id()))
                 .collect();
             assert_eq!(events.len(), 1, "{kind}: {events:?}");
             let actor = events[0].actor.clone().expect("an actor");
@@ -385,7 +386,7 @@ fn a_process_without_cpu_progress_is_an_idle_process_alert_for_the_recovery_job(
     let requested_ms = detail
         .events
         .iter()
-        .find(|e| e.kind == "recovery_requested")
+        .find(|e| e.kind == EventKind::RecoveryRequested)
         .and_then(|e| dagq::domain::stats::timestamp_millis(&e.created_at))
         .unwrap();
     assert!(

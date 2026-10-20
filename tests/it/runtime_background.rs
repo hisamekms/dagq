@@ -28,7 +28,7 @@ fn has(queue: &mut SqliteQueue, id: &RunId, kind: &str) -> bool {
         .run_events(id)
         .unwrap()
         .iter()
-        .any(|event| event.kind == kind)
+        .any(|event| event.kind.as_str() == kind)
 }
 
 /// Acceptance: a headless run opens no workspace: the supervisor starts its
@@ -424,7 +424,7 @@ fn count(db: &Path, run: &TaskRun, kind: &str) -> usize {
         .run_events(run.id())
         .unwrap()
         .iter()
-        .filter(|event| event.kind == kind)
+        .filter(|event| event.kind.as_str() == kind)
         .count()
 }
 

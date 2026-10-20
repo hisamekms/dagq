@@ -9,12 +9,12 @@ use serde_json::{Value, json};
 
 use super::sqlite::SqliteQueue;
 use crate::domain::kpi::push::{
-    KPI_BREACH_KINDS, KPI_BREACH_STARTED, KPI_PUSH_ABANDONED, KPI_PUSH_ATTENTION_KINDS, breach_key,
+    KPI_BREACH_KINDS, KPI_PUSH_ABANDONED, KPI_PUSH_ATTENTION_KINDS, breach_key,
 };
-use crate::domain::{EventId, EventKind};
+use crate::domain::{EventId, EventKind, RecordedKind};
 
 /// Every breach event, oldest first: (id, kind, payload).
-fn breach_events(tx: &rusqlite::Connection) -> Result<Vec<(EventId, String, Value)>> {
+fn breach_events(tx: &rusqlite::Connection) -> Result<Vec<(EventId, RecordedKind, Value)>> {
     let mut statement = tx.prepare(
         "SELECT id, kind, payload FROM run_events WHERE kind IN (?1, ?2)
            AND run_id IS NULL AND task_id IS NULL AND goal_id IS NULL ORDER BY id",
@@ -31,7 +31,7 @@ fn breach_events(tx: &rusqlite::Connection) -> Result<Vec<(EventId, String, Valu
         let (id, kind, payload) = row?;
         events.push((
             id,
-            kind,
+            RecordedKind::from_name(&kind),
             serde_json::from_str(&payload).unwrap_or(Value::Null),
         ));
     }
@@ -41,7 +41,7 @@ fn breach_events(tx: &rusqlite::Connection) -> Result<Vec<(EventId, String, Valu
 /// The breaches started and not resolved: the latest event of each
 /// period, KPI and stratum when it is a start, with its id.
 fn open_in(conn: &rusqlite::Connection) -> Result<Vec<(EventId, Value)>> {
-    let mut latest: Vec<(EventId, String, Value)> = Vec::new();
+    let mut latest: Vec<(EventId, RecordedKind, Value)> = Vec::new();
     for (id, kind, payload) in breach_events(conn)? {
         let key = breach_key(&payload);
         latest.retain(|(_, _, kept)| breach_key(kept) != key);
@@ -49,7 +49,7 @@ fn open_in(conn: &rusqlite::Connection) -> Result<Vec<(EventId, Value)>> {
     }
     Ok(latest
         .into_iter()
-        .filter(|(_, kind, _)| kind == KPI_BREACH_STARTED)
+        .filter(|(_, kind, _)| *kind == EventKind::KpiBreachStarted)
         .map(|(id, _, payload)| (id, payload))
         .collect())
 }
@@ -107,7 +107,7 @@ impl SqliteQueue {
                     events
                         .iter()
                         .filter(|(_, kind, event)| {
-                            kind == KPI_BREACH_STARTED
+                            *kind == EventKind::KpiBreachStarted
                                 && event.get("pushed") == Some(&Value::Bool(true))
                                 && event.get("day").and_then(Value::as_i64) == Some(day)
                         })

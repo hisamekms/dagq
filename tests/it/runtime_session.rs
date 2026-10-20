@@ -2,6 +2,7 @@
 //! receipt and the exit request.
 use crate::common;
 use crate::runtime_support;
+use dagq::domain::EventKind;
 use dagq::infrastructure::git_binary::git_executable;
 
 use runtime_support::*;
@@ -175,7 +176,7 @@ fn valid_receipt_is_verified_and_awaits_integration() {
     let finished = detail
         .events
         .iter()
-        .find(|e| e.kind == "validation_finished")
+        .find(|e| e.kind == EventKind::ValidationFinished)
         .unwrap();
     assert_eq!(finished.payload["status"], "awaiting_integration");
     assert_eq!(finished.payload["result_commit"], json!(commit));
@@ -187,7 +188,7 @@ fn valid_receipt_is_verified_and_awaits_integration() {
     let closed = detail
         .events
         .iter()
-        .find(|e| e.kind == "workspace_closed")
+        .find(|e| e.kind == EventKind::WorkspaceClosed)
         .unwrap();
     assert!(closed.id > finished.id);
     assert_eq!(closed.payload["workspace_id"], background_session(run));
@@ -224,7 +225,7 @@ fn failed_workspace_close_is_recorded_without_changing_run_status() {
     let failed = detail
         .events
         .iter()
-        .find(|e| e.kind == "cleanup_failed")
+        .find(|e| e.kind == EventKind::CleanupFailed)
         .unwrap();
     assert_eq!(failed.payload["workspace_id"], session);
     assert_eq!(failed.payload["message"], json!(error));
@@ -232,7 +233,7 @@ fn failed_workspace_close_is_recorded_without_changing_run_status() {
     let finished = detail
         .events
         .iter()
-        .find(|e| e.kind == "validation_finished")
+        .find(|e| e.kind == EventKind::ValidationFinished)
         .unwrap();
     assert_eq!(finished.payload["accepted"], true);
     assert!(failed.id > finished.id);

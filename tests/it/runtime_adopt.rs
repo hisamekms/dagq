@@ -1,6 +1,7 @@
 //! Runtime tests: Concurrent runs and the adoption of runs from a dead supervisor.
 use crate::common;
 use crate::runtime_support;
+use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
 
 use runtime_support::*;
@@ -124,7 +125,7 @@ fn independent_tasks_run_concurrently_and_a_dependent_starts_after_integration()
     for task in [1, 2] {
         let acquired = events
             .iter()
-            .find(|e| e.task_id == Some(TaskId::new(task)) && e.kind == "lease_acquired")
+            .find(|e| e.task_id == Some(TaskId::new(task)) && e.kind == EventKind::LeaseAcquired)
             .unwrap();
         assert!(acquired.id.as_i64() < ended);
         holders.push(acquired.payload["pid"].clone());
@@ -357,7 +358,7 @@ fn stale_lease_of_a_live_wrapper_is_adopted_and_driven_to_awaiting_integration()
     let event = detail
         .events
         .iter()
-        .find(|e| e.kind == "run_adopted")
+        .find(|e| e.kind == EventKind::RunAdopted)
         .unwrap();
     assert_eq!(event.run_id.as_ref(), Some(run.id()));
 }

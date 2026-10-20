@@ -3,11 +3,12 @@
 //! `status` and `stats` show of it. A wait is not a run status: it is the
 //! supervisor's mark on a slot, and these events are its record.
 
+use crate::domain::EventKind;
+use crate::domain::run::{AskOpened, restore_payload};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 
-use super::event_kind::{PROVIDER_SWITCHED, RUN_CLAIMED};
 use super::{AskId, AskKind, EventId, RunEvent, TaskId, stats::timestamp_millis};
 
 /// The run entered a wait (decision 5).
@@ -159,7 +160,9 @@ impl WaitState {
     /// The run's latest wait, from its events (ascending): `None` without
     /// one, or once it is back in a slot or left the run.
     pub fn of(events: &[RunEvent]) -> Option<Self> {
-        let start = events.iter().rposition(|e| e.kind == RUN_WAITING_STARTED)?;
+        let start = events
+            .iter()
+            .rposition(|e| e.kind == EventKind::RunWaitingStarted)?;
         let started = &events[start];
         let mut state = Self {
             asks: ask_of(&started.payload).into_iter().collect(),
@@ -169,9 +172,9 @@ impl WaitState {
             ended: None,
         };
         for event in &events[start + 1..] {
-            match event.kind.as_str() {
-                RUN_WAITING_ASK_ADDED => state.asks.extend(ask_of(&event.payload)),
-                RUN_WAITING_ENDED if state.ended.is_none() => {
+            match event.kind.known() {
+                Some(EventKind::RunWaitingAskAdded) => state.asks.extend(ask_of(&event.payload)),
+                Some(EventKind::RunWaitingEnded) if state.ended.is_none() => {
                     let cause = event.payload["cause"]
                         .as_str()
                         .and_then(WaitCause::parse)
@@ -181,12 +184,17 @@ impl WaitState {
                     }
                     state.ended = Some((timestamp_millis(&event.created_at).unwrap_or(0), cause));
                 }
-                RUN_SLOT_REGAINED => return None,
+                Some(EventKind::RunSlotRegained) => return None,
                 // The supervisor that kept the wait lost the run: another
                 // lease began, it gave the lease up, or `recover` took it.
                 // An adoption and a handoff keep the wait (they write none
                 // of these).
-                "lease_acquired" | "lease_released" | "run_recovered" | "runtime_error" => {
+                Some(
+                    EventKind::LeaseAcquired
+                    | EventKind::LeaseReleased
+                    | EventKind::RunRecovered
+                    | EventKind::RuntimeError,
+                ) => {
                     return None;
                 }
                 _ => {}
@@ -255,10 +263,14 @@ pub fn consumed_asks(events: &[RunEvent]) -> Vec<AskId> {
     let mut consumed = Vec::new();
     let mut current = Vec::new();
     for event in events {
-        match event.kind.as_str() {
-            RUN_WAITING_STARTED => current = ask_of(&event.payload).into_iter().collect(),
-            RUN_WAITING_ASK_ADDED => current.extend(ask_of(&event.payload)),
-            RUN_WAITING_ENDED => consumed.extend(current.drain(..).map(|(id, _)| id)),
+        match event.kind.known() {
+            Some(EventKind::RunWaitingStarted) => {
+                current = ask_of(&event.payload).into_iter().collect()
+            }
+            Some(EventKind::RunWaitingAskAdded) => current.extend(ask_of(&event.payload)),
+            Some(EventKind::RunWaitingEnded) => {
+                consumed.extend(current.drain(..).map(|(id, _)| id))
+            }
             _ => {}
         }
     }
@@ -269,7 +281,7 @@ pub fn consumed_asks(events: &[RunEvent]) -> Vec<AskId> {
 pub fn deferred_asks(events: &[RunEvent]) -> Vec<AskId> {
     events
         .iter()
-        .filter(|e| e.kind == RUN_WAITING_DEFERRED)
+        .filter(|e| e.kind == EventKind::RunWaitingDeferred)
         .filter_map(|e| ask_of(&e.payload).map(|(id, _)| id))
         .collect()
 }
@@ -455,22 +467,24 @@ pub fn waiting_stats(
     for event in events {
         let run = event.run_id.as_ref().map_or("", |id| id.as_str());
         let inside = event.id > after && event.id <= upto && counts(event.task_id);
-        match event.kind.as_str() {
-            RUN_CLAIMED | PROVIDER_SWITCHED => {
+        match event.kind.known() {
+            Some(EventKind::RunClaimed | EventKind::ProviderSwitched) => {
                 if let Some(mode) = event.payload["worker_mode"].as_str() {
                     routes.insert(run, mode.to_owned());
-                } else if event.kind == RUN_CLAIMED {
+                } else if event.kind == EventKind::RunClaimed {
                     routes.remove(run);
                 }
             }
-            "ask_opened" if event.payload["kind"].as_str() == Some("worker_question") => {
+            Some(EventKind::AskOpened)
+                if restore_payload::<AskOpened>(&event.payload).kind == Some("worker_question") =>
+            {
                 if let Some(id) = ask_id(&event.payload) {
                     let primary = super::stats::worker_question_topics::topics_of(&event.payload)
                         .swap_remove(0);
                     topics.insert(id, primary);
                 }
             }
-            RUN_WAITING_STARTED => {
+            Some(EventKind::RunWaitingStarted) => {
                 let kind = text(&event.payload, "ask_kind");
                 let route = routes
                     .get(run)
@@ -489,7 +503,7 @@ pub fn waiting_stats(
                 started_topic.insert(run, topic);
                 started_by.insert(run, kind);
             }
-            RUN_WAITING_ENDED if inside => {
+            Some(EventKind::RunWaitingEnded) if inside => {
                 let kind = started_by.get(run).cloned().unwrap_or_default();
                 let secs = event.payload["waited_secs"].as_i64().unwrap_or(0);
                 if let Some(Some(topic)) = started_topic.get(run) {
@@ -502,13 +516,13 @@ pub fn waiting_stats(
                     .unwrap_or_else(|| UNKNOWN_ROUTE.to_owned());
                 by_route.entry(route).or_default().1.push(secs);
             }
-            RUN_SLOT_REGAINED if inside => {
+            Some(EventKind::RunSlotRegained) if inside => {
                 slot_wait.push(event.payload["slot_wait_secs"].as_i64().unwrap_or(0));
                 if event.payload["over_parallel"] == true {
                     stats.over_parallel += 1;
                 }
             }
-            RUN_WAITING_DEFERRED if inside => stats.deferred += 1,
+            Some(EventKind::RunWaitingDeferred) if inside => stats.deferred += 1,
             _ => {}
         }
     }
@@ -535,6 +549,8 @@ pub fn waiting_stats(
 mod tests {
     use super::*;
     use crate::domain::RunId;
+    use crate::domain::event_kind::PROVIDER_SWITCHED;
+    use crate::domain::event_kind::RUN_CLAIMED;
     use serde_json::json;
 
     fn event(id: i64, run: &str, kind: &str, payload: Value, at: &str) -> RunEvent {

@@ -164,9 +164,10 @@ runtime自身をhostで動かし続けること（up・down・install・自動�
   検査: 観測と分析のuse caseは型（C2の読み取りのtraitだけを取る）、ほかのuse caseの切り方は全体のreview。
 - **C5** 他のcontextの公開していないport（所有の一覧で内部としたもの、一部公開のportは公開していないmethod）を使わない。
   検査: portの参照はmoduleの参照のRustのtest（`src/context_boundaries/modules.rs`、traitを定義のpathで識別する）、一部公開のportのmethodの単位の参照とcontextの決まらないmoduleは全体のreview。
-- **C6** 他のcontextのeventを読むときは、kindを`domain::event_kind`か所有するdomainのmoduleの定数で名指し、状態の判断に使うpayloadは文字列のkeyではなく型付きの復元の値で読む。
-  古いeventの読み取りは保つ。
-  検査: 全体のreview。
+- **C6** 他のcontextのeventを読むときは、kindを`domain::EventKind`の値で名指し、状態の判断に使うpayloadは文字列のkeyではなく型付きの復元の値で読む。
+  読むeventのkindは`domain::RecordedKind`で、`EventKind`とだけ比べられ、文字列とは比べられない。
+  古いeventの読み取りは保ち、今の種類に無いkindは記録された文字列のまま持つ。
+  検査: kindは型（コンパイラ）、payloadの読み方は全体のreview。
 - **C7** 新しいport・table・storeのmoduleとtransactionの関数は、pathから導けないもの（所有するcontextと公開先）を所有の一覧に足してから置く。
   一覧はコードに無い項目を持たない。
   検査: table・storeのmodule・transactionの関数はRustのtest（`src/context_boundaries.rs`）、portと`src/application/`のmoduleの記録はmoduleの参照のRustのtest（`src/context_boundaries/modules.rs`）。

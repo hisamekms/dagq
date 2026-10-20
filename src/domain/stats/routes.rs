@@ -4,16 +4,15 @@
 //! provider, Claude's cost per turn and the waits for a person, each
 //! counted under the route (`worker_mode`: `interactive` / `headless`,
 //! `unknown` before claims recorded it) the run was on when it happened.
+use crate::domain::EventKind;
+use crate::domain::run::{RecoveryRecord, restore_payload};
 use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
 use serde_json::Value;
 
 use super::{EventId, RunEvent, TaskId, asks::UNKNOWN};
-use crate::domain::{
-    event_kind::{PROVIDER_SWITCHED, RECOVERY_REQUESTED, RUN_CLAIMED, STALL_NUDGED, TURN_FINISHED},
-    waiting::{RouteWaits, UNKNOWN_ROUTE},
-};
+use crate::domain::waiting::{RouteWaits, UNKNOWN_ROUTE};
 
 /// The `alert` of a `recovery_requested` counted in [`RouteHealth::stalled`].
 const STALLED: &str = "stalled";
@@ -97,10 +96,10 @@ pub fn route_health(
             .unwrap_or_else(|| UNKNOWN_ROUTE.to_owned());
         let inside = event.id > after && event.id <= upto && counts(event.task_id);
         let payload = &event.payload;
-        match event.kind.as_str() {
+        match event.kind.known() {
             // A headless planner's turns are the queue's, not a run's
             // (ADR-t1394-2).
-            TURN_FINISHED if inside && event.run_id.is_some() => {
+            Some(EventKind::TurnFinished) if inside && event.run_id.is_some() => {
                 let health = routes.entry(route.clone()).or_default();
                 health.turns += 1;
                 *health
@@ -116,19 +115,31 @@ pub fn route_health(
                     costs.entry(route.clone()).or_default().push(cost);
                 }
             }
-            STALL_NUDGED if inside => routes.entry(route.clone()).or_default().stall_nudged += 1,
-            RECOVERY_REQUESTED if inside && payload["alert"] == STALLED => {
+            Some(EventKind::StallNudged) if inside => {
+                routes.entry(route.clone()).or_default().stall_nudged += 1
+            }
+            Some(EventKind::RecoveryRequested)
+                if inside && restore_payload::<RecoveryRecord>(payload).alert == Some(STALLED) =>
+            {
                 *routes
                     .entry(route.clone())
                     .or_default()
                     .stalled
-                    .entry(text(payload, "reason"))
+                    .entry(
+                        restore_payload::<RecoveryRecord>(payload)
+                            .reason
+                            .unwrap_or(UNKNOWN)
+                            .to_owned(),
+                    )
                     .or_default() += 1;
             }
             _ => {}
         }
-        if matches!(event.kind.as_str(), RUN_CLAIMED | PROVIDER_SWITCHED) {
-            if event.kind == PROVIDER_SWITCHED && inside {
+        if matches!(
+            event.kind.known(),
+            Some(EventKind::RunClaimed | EventKind::ProviderSwitched)
+        ) {
+            if event.kind == EventKind::ProviderSwitched && inside {
                 *routes
                     .entry(route.clone())
                     .or_default()
@@ -138,7 +149,7 @@ pub fn route_health(
             }
             if let Some(mode) = payload["worker_mode"].as_str() {
                 current.insert(run, mode.to_owned());
-            } else if event.kind == RUN_CLAIMED {
+            } else if event.kind == EventKind::RunClaimed {
                 current.remove(run);
             }
         }
@@ -155,6 +166,11 @@ pub fn route_health(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::event_kind::PROVIDER_SWITCHED;
+    use crate::domain::event_kind::RECOVERY_REQUESTED;
+    use crate::domain::event_kind::RUN_CLAIMED;
+    use crate::domain::event_kind::STALL_NUDGED;
+    use crate::domain::event_kind::TURN_FINISHED;
     use crate::domain::{RunId, waiting::Durations};
     use serde_json::json;
 
@@ -164,7 +180,7 @@ mod tests {
             task_id: Some(TaskId::new(1)),
             goal_id: None,
             run_id: Some(RunId::new(run).unwrap()),
-            kind: kind.to_owned(),
+            kind: kind.into(),
             payload,
             created_at: "2026-10-02T00:00:00Z".to_owned(),
             actor: None,

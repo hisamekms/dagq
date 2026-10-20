@@ -100,7 +100,7 @@ impl EventStore for SupervisorsAndEvents {
             task_id: None,
             goal_id: None,
             run_id: None,
-            kind: kind.as_str().to_owned(),
+            kind: kind.as_str().into(),
             payload,
             created_at: String::new(),
             actor: None,
@@ -116,7 +116,7 @@ impl EventStore for SupervisorsAndEvents {
             .borrow()
             .iter()
             .rev()
-            .filter(|event| event.kind == kind)
+            .filter(|event| event.kind.as_str() == kind)
             .take(limit)
             .cloned()
             .collect())

@@ -322,7 +322,7 @@ fn a_goal_review_on_codex_runs_read_only_and_records_its_thread_and_model() {
             .unwrap()
             .events
             .into_iter()
-            .filter(|e| e.kind == kind)
+            .filter(|e| e.kind.as_str() == kind)
             .map(|e| e.payload)
             .collect()
     };
