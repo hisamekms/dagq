@@ -23,6 +23,7 @@ mod other_repository;
 mod stub;
 
 use cleanup::{claim_fixture_dir, sweep_abandoned_fixtures};
+use common::service::OwnedByTest;
 use common::{Bounded, Cleanup, Waiting, WithoutActor};
 use dagq::application::ProcessControl;
 use dagq::domain::background_wrapper::BackgroundHandle;
@@ -135,7 +136,9 @@ fn dagq_with(env: &Env, extra: &[(&str, &Path)], args: &[&str]) -> Value {
 fn dagq_output(env: &Env, extra: &[(&str, &Path)], args: &[&str]) -> std::process::Output {
     let mut command = Command::new(BIN);
     // A person's commands, not the actor's of the session running the tests.
-    command.without_actor_env();
+    // The service and the supervisor one starts (`service start`, `up`)
+    // stop once this test process is gone.
+    command.without_actor_env().owned_by_test();
     command
         .current_dir(&env.repo)
         .env("XDG_DATA_HOME", &env.data_home)
@@ -158,7 +161,7 @@ fn dagq_in_files(env: &Env, args: &[&str]) -> Value {
     let stdout = tempfile::tempfile_in(&env.data_home).unwrap();
     let stderr = tempfile::tempfile_in(&env.data_home).unwrap();
     let mut command = Command::new(BIN);
-    command.without_actor_env();
+    command.without_actor_env().owned_by_test();
     let status = command
         .current_dir(&env.repo)
         .env("XDG_DATA_HOME", &env.data_home)
@@ -507,8 +510,10 @@ fn supervise_once(fixture: &Fixture, extra: &[&str], tasks: &[&str]) -> Pass {
     let started = Instant::now();
     let mut child = ChildGuard::new(
         Command::new(BIN)
-            // A person's supervisor, not the session's running the tests.
+            // A person's supervisor, not the session's running the tests,
+            // that stops once this test process is gone.
             .without_actor_env()
+            .owned_by_test()
             .current_dir(&fixture.repo)
             .env("XDG_DATA_HOME", &fixture.env.data_home)
             .arg("supervise")
@@ -1351,8 +1356,10 @@ fn killed_supervisor_run_is_adopted_by_the_next_supervisor_and_lands() {
     // A resident supervisor starts the run; it is killed once the worker runs.
     let mut victim = ChildGuard::new(
         Command::new(BIN)
-            // A person's supervisor, not the session's running the tests.
+            // A person's supervisor, not the session's running the tests,
+            // that stops once this test process is gone.
             .without_actor_env()
+            .owned_by_test()
             .current_dir(&fixture.repo)
             .env("XDG_DATA_HOME", &fixture.env.data_home)
             .args(["supervise", "--parallel", "1"])
@@ -1689,7 +1696,21 @@ fn up_starts_a_launchd_supervisor_that_status_lists_and_down_wait_stops_it() {
     assert!(contents.contains(&format!("<string>{label}</string>")));
     assert!(contents.contains("<string>supervise</string>"));
     assert!(contents.contains(&format!("<string>{}</string>", db.display())));
-    assert!(contents.contains("<key>KeepAlive</key>\n\t<true/>"));
+    // The supervisor stops with this test process, and launchd does not
+    // start it again once it has stopped so.
+    assert!(
+        contents.contains(&format!(
+            "\t\t<key>DAGQ_SERVICE_OWNER_PID</key>\n\t\t<string>{}</string>\n",
+            std::process::id()
+        )),
+        "{contents}"
+    );
+    assert!(
+        contents.contains(
+            "<key>KeepAlive</key>\n\t<dict>\n\t\t<key>SuccessfulExit</key>\n\t\t<false/>\n\t</dict>"
+        ),
+        "{contents}"
+    );
     assert!(
         contents.contains("\t\t<string>--max-load</string>\n\t\t<string>0</string>\n"),
         "{contents}"
@@ -1782,8 +1803,10 @@ fn install_hands_the_supervisor_over_while_a_session_works_and_the_run_lands() {
     let fixed_text = fixed.to_str().unwrap();
     let mut supervisor = ChildGuard::new(
         Command::new(&fixed)
-            // A person's supervisor, not the session's running the tests.
+            // A person's supervisor, not the session's running the tests,
+            // that stops once this test process is gone.
             .without_actor_env()
+            .owned_by_test()
             .current_dir(repo)
             .env("XDG_DATA_HOME", &env.data_home)
             .args(["supervise", "--parallel", "1", "--observe-interval", "0"])
@@ -1960,8 +1983,10 @@ fn auto_update_hands_the_supervisor_over_while_a_session_works_and_the_run_lands
     );
     let mut supervisor = ChildGuard::new(
         Command::new(&fixed)
-            // A person's supervisor, not the session's running the tests.
+            // A person's supervisor, not the session's running the tests,
+            // that stops once this test process is gone.
             .without_actor_env()
+            .owned_by_test()
             .current_dir(repo)
             .env("XDG_DATA_HOME", &env.data_home)
             .args(["supervise", "--parallel", "1", "--observe-interval", "0"])
