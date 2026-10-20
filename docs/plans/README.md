@@ -62,3 +62,4 @@ tags:
 - [AGENTS.md の「変更後に必ず通す」「テストの制約」から移した手元の検証と test の規則の経緯](local-checks-history.md)（goal 94、task 1457）
 - [2026-09-26以降の本番のaskのkindごとの件数と、answerが推奨・見立てどおりだった割合](ask-outcomes-2026-09-26.md)（goal 42、task 451）
 - [ADR-t451-1の実装の着地の前後の、askのkindごとの件数・人の答え待ち・AIが決めた件数と、AIが決めたlandの後の手直し](ask-outcomes-after-adr-t451-1.md)（goal 34、task 1321）
+- [goal 3 の受け入れ条件 (6) の証拠（全タスク着地後の main の CI と TOTAL 行、60d992ca 後の回帰テストの差分、e2e の根拠）](goal-3-acceptance-ci.md)（goal 3、task 2135）

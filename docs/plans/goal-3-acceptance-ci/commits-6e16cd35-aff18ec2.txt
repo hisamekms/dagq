@@ -1,0 +1,124 @@
+aff18ec2 2026-10-20T18:17:52+09:00 reopen した worker の session の前にも supervisor が sccache の server を確かめる
+6db51861 2026-10-20T18:02:28+09:00 fix: screen_idle.rs の doc comment を、supervisor が session に打ち込むのではなく、planner の next turn の依頼を書く前（supervisor）と取り出す前（background wrapper）に stamp を残す、と今の動きに直す
+fec43913 2026-10-20T17:38:25+09:00 Agent jobs launched from claude_agent_job_tool_args must also refuse PRINT_MODE_DENIED_TOOLS
+984d4291 2026-10-20T17:03:24+09:00 test: e2e の test binary に process 全体の期限と後始末の全体の期限を持たせ、1 本の test の上限（tests/e2e.rs の TEST_LIMIT 1800 秒）を縮めて、止まった e2e が着地前と自動更新の e2e の関門の上限（--e2e-timeout の既定 1800 秒）に切られる前に待ちの名前と診断つきで FAILED になるようにする
+5243112c 2026-10-20T16:17:04+09:00 runtime: 空きが claim か着地の閾値の前後を行き来するあいだ disk の ask を開いて閉じる往復をやめ、走っている run が無く不足が一定時間続くか閾値を余裕をもって下回ったときだけ ask を開き、余裕をもって上回ったときだけ閉じる（ヒステリシス）
+28e89b29 2026-10-20T15:17:51+09:00 runtime: agent の定義を変える run は、review の pass の後・着地の前に supervisor が landing branch のケースで dev の eval を流し、閾値を下回れば着地させずに失敗したケースを session に送る（ADR-t1728-1）
+00ff9e65 2026-10-20T14:39:40+09:00 feat: run を持たない対象（runtime の planner・plan review・goal review・throughput review・observer ほか supervisor が起動する run の無い session）に telemetry 専用の token を発行・失効させ、起動元が落ちた後も対象の終わりで拒む
+0a068442 2026-10-20T14:28:55+09:00 runtime: 復旧 job が、commit の無い receipt で base がすでに受け入れ条件を満たしていそうな失敗した run を already_satisfied の経路に渡す操作を持つ（ADR-t1818-2）
+d6235a0e 2026-10-20T14:08:08+09:00 runtime: 復旧 job の binary の事実の入れ替え（update_installed）を最新 200 件の update_* からでなく run の claim 以後の全件から読み、上限で省いたときは件数と読む方法を書く
+b3855190 2026-10-20T12:59:54+09:00 e2e の service start・supervise・up にも test の owner（DAGQ_SERVICE_OWNER_PID）を付ける
+170e1caa 2026-10-20T12:56:19+09:00 landing recheck: a clean result recorded with no command should not settle the same main and head
+3ba2759d 2026-10-20T12:43:00+09:00 feat: supervisor が run の claim・resume で telemetry 専用の token を発行し、run の終わり・lease の喪失・resume の発行し直しで失効させ、失効の記録は失効が成功した後にだけ書く
+b37a1e53 2026-10-20T11:22:35+09:00 refactor: 読み取りの RunEvent の kind を String から domain::event_kind::EventKind（古い kind を保つ未知の値を持つ）にし、kind を文字列リテラルで照合するコードを書けなくして C6 の kind の部分を型で守る
+9faf86df 2026-10-20T10:34:28+09:00 runtime: ask_seen_wait で watcher が戻る前に答えた・閉じた ask を、その終わりの時刻で打ち切って数える
+daff39bd 2026-10-20T10:02:50+09:00 feat: already_satisfied の主張の判定が high の pass なら、閉じる時点で main の head を snapshot と確かめ直し、同じなら人に聞かずに閉じ、進んでいれば新しい head で verify と判定をやり直す
+3f6053dc 2026-10-20T09:07:44+09:00 refactor: C5・C8 を module の参照の Rust の test（ADR-t2397-1 決定4の段2）に移し、C5 の許可の項目を test の表へ移して 2 本の script から C5・C8 を外す
+d837e2ed 2026-10-20T08:37:07+09:00 feat: already_satisfied の run で snapshot の verify が通ったら review job を同じ head の主張の判定として起動し、判定を job の requested_by つきの event に残して人の ask に review の理由・推奨・confidence を載せる
+e554fbbe 2026-10-20T07:56:57+09:00 runtime: queue service の authorization_denied の断りに role・capability・reason を載せ、クライアントモードの dagq がローカルの CLI と同じ denied の形で出す
+6db614d2 2026-10-20T07:39:01+09:00 runtime: run が終わったら worker の queue service の token（credentials/ の値と tokens/ の記録）を失効させて消す
+09814611 2026-10-20T07:13:32+09:00 runtime: クライアントモードの dagq locate が queue service に届くか（hello）と API の版を答え、doctor・service status・planners を制御側のコマンドと分かる専用の断りにする
+d4434d5f 2026-10-20T06:34:49+09:00 runtime: 目標割れの検査（push）と observer の KPI の入力にも host の読み手を渡し、cpu_per_landing・load_per_core の目標を判定する
+7d6eb92e 2026-10-20T06:18:48+09:00 runtime: observe と auto-update の子プロセスが書く event の actor が supervisor であることを test で固定する
+2fd3e05d 2026-10-20T06:03:18+09:00 kpi: improvement_proposals を event から数えて出す（ADR-0051 決定 25 の数え方）
+faaf2c09 2026-10-20T05:38:36+09:00 runtime: planner の session 区間を proposal に結び付け、その model / effort を計画の品質の層に足す（ADR-0079）
+034fbe26 2026-10-20T04:56:55+09:00 kpi: candidates の標本の有効区間を supervisor の停止で切る
+cbcd1c33 2026-10-20T04:33:09+09:00 refactor: L2 の domain だけの禁止（anyhow・std::process・std::net）を check-layer-deps.sh から ADR-t2397-1 決定1 の module の参照の Rust の unit test に移し、script から L2 を外す
+b0669f0d 2026-10-20T03:28:13+09:00 refactor: runtime_waiting_stages の resume の時計の判断を 1557 の後に unit test へ移し、resume の 2 本を縮める
+7b5b4452 2026-10-20T01:55:07+09:00 refactor: 再計画・hold の park が実行中の headless の review job の終了を待って結果を保留する部分を、通常の review 以外の段も使える共通の部品にし、try_park_step が新しい段を黙って park しないよう段の分岐を網羅にする
+91893c7e 2026-10-20T01:31:35+09:00 refactor: run の review job の終わりを provider の認証切れ・利用上限・使えない provider と一般の失敗に分ける部分を、通常の review 以外の run の段の review job も使える共通の関数にする
+d6646a3c 2026-10-20T00:52:28+09:00 fix: approve_landing の land: <理由>・cancel: <理由> の答えを supervisor が land・cancel として適用し、答えたのに着地の列に入らない run を残さない
+d9b6a056 2026-10-20T00:27:42+09:00 fix: 切り替えた worker の session の引き継ぎの prompt に run の local-checks の記録と resume の時間の上限を載せ、文書の読み直しと review の指摘の重複を外し、known failures を task の test に絞る
+8c4f2942 2026-10-19T23:45:20+09:00 C3 を可視性で守る: application::supervise の分けた状態と変える submodule を context ごとの module にまとめ、欄の可視性をその module に絞る
+ce960027 2026-10-19T23:13:21+09:00 feat: executor の telemetry 専用の principal（role と対象 1 つ）と queue service のユースケース telemetry_report（API の版・1 回の上限）と、送る側の TelemetrySink の port を足す
+d5486af0 2026-10-19T22:41:30+09:00 feat: already_satisfied の主張の判定の verdict を、pass でも confidence を保つ専用の入口で読み、verdict・confidence・head の比較から閉じる・ask・やり直しを決める関数を domain に足す
+1784fe9f 2026-10-19T21:54:42+09:00 fix: session_renewed の後の worker の session の work と worktime.jsonl を、新しい session の transcript から数える
+9970ec35 2026-10-19T21:01:56+09:00 fix: already_satisfied の snapshot の検証の scratch worktree を、worker が書ける run dir の外の supervisor 側の場所に毎回作り直し、既存の .git・symlink を信用しない
+8f4e12bf 2026-10-19T20:06:02+09:00 feat: 台帳の domain に step を畳む関数（idle を model_turn・tool_call・subagent・wait に分け親区間の被覆率を出す、保持の後に遅れて届いた抜けの seq も数える）を足す
+66cd57e7 2026-10-19T18:35:50+09:00 feat: session の step を受ける SessionStepStore の port と表（(session_id, seq) の重複除去・抜けの区間・受けた順の id・対象つき）と 90 日より古い step の削除を足す
+cc974147 2026-10-19T17:11:44+09:00 refactor: L1・L3・L6・L8 と L9 の compose の context の module どうしを、src を構文で読む module の参照の Rust の test（ADR-t2397-1 決定1・決定4の段1）に移し、check-layer-deps.sh からその規則を外す
+0bdc83c7 2026-10-19T16:40:43+09:00 fix: 台帳の build pass が、記録に含まない event で終わる queue 行・同じ窓に session/queue/supervisor の event が無い landing_slot 行・別の run の push で pending が閉じた task 行を書き直さず、全件の fold と食い違うのを直す
+9b5b6717 2026-10-19T16:25:12+09:00 fix: 台帳の landing slot の持ち越し処理が過去の試行を event ごとに列挙する二次走査をなくす
+e7c92c77 2026-10-19T15:23:00+09:00 runtime: review の段のプログラムの job の scratch が worker の書ける dir（run dir・worktree）の外にあることを test で確かめ、外れていれば runtime だけが持つ dir に直す
+1ab9faa9 2026-10-19T14:44:17+09:00 fix: 台帳の build pass の周回が pushes・pre_claim・session/queue 行・landing_slots の一時領域を全履歴に比例して作り直さないようにする
+cb910482 2026-10-19T13:44:41+09:00 refactor: clippy.toml の disallowed_methods（と ADR-t2391-1 が決めた disallowed_types）で domain・application・起動部分の時計・乱数の ID（L2・L4・L5・L7 の時刻）を禁じ、許す場所は理由つきの #[expect] だけにして、check-layer-deps.sh の対応する規則を消す
+71c4e259 2026-10-19T11:31:16+09:00 runtime: CLI の --cmux を登録済みの argv のための hidden で無視する引数にし、plist・update の job・restart の argv に --cmux を書かず、inbox の settings の Bash(cmux:*) の deny と CMUX_WORKSPACE_ID の読み取り・Cargo.toml の cmux を外す
+942bcf9c 2026-10-19T10:14:34+09:00 refactor: 観測と分析が使う他の context の port（TaskStore・RunCoordination・SupervisorRegistry・DraftPlannerStore ほか）を読み取りと書き込みの trait に分け、観測と分析の use case には読み取りの trait だけを渡して C2 と観測と分析の C4 を型で守る
+97fcf905 2026-10-19T08:55:39+09:00 runtime: dagq の podman machine の使う者を ensure を呼んだ process の pid でなく run（または verification）ごとの lease で数え、release せずに終わった run で machine が止まらなくなるのを防ぐ
+7ef12c77 2026-10-19T08:19:29+09:00 feature: Spike の周期を再計画の回ごとに数え、同じ調査中の計画の中で追加の Spike を連鎖させても max_spike_cycles が止めるようにする（ADR-t2414-1 で ADR-t1487-1 決定8 を amends）
+1d48f90d 2026-10-19T06:28:53+09:00 runtime: dagq cancel に理由の分類を持たせて記録し、stats と kpi で分類ごとに集計する（ADR-t947-4）
+5236e782 2026-10-19T05:18:14+09:00 runtime: 復旧 job の足した option のうち runtime の操作や完了・cancel と紛らわしいものを runtime の option に寄せるか外し、残る job の option に「復旧 job にもう一度渡る（runtime は何も動かさない）」を ask の上で明示する（ADR-t1818-2）
+3f227175 2026-10-19T03:34:56+09:00 runtime: start_fresh_session が引き継ぎの依頼を書けなかったときに session_renewed だけが残らないようにする
+da3b6253 2026-10-19T01:36:50+09:00 test: C1・C7・X1（store の SQL の書き込み先の table と所有の一覧、境界をまたぐ transaction）の検査を scripts/check-context-boundaries.sh から Rust の test に移し、script の対応する規則と .config/ の一覧の項目を消す
+e35012a7 2026-10-18T23:55:20+09:00 fix: 1 回の plan review が reopen できる ready の task を上限（5 件）までにし、超えたら 1 件も reopen せずに reviewed proposal を互換を守るよう差し戻す
+73fd42af 2026-10-18T23:00:31+09:00 fix: 台帳の build pass が周回ごとに queue の全 event を読み込まず、印の付いた行の畳み直しに要る入力だけを読むようにする
+b32d6934 2026-10-18T21:59:53+09:00 fix: 台帳の queue の行の landing_slots を event 数について線形にし、timestamp_millis が呼び出しごとに String を確保しないようにする
+c5b93cfa 2026-10-18T21:29:12+09:00 refactor: docs/design/domain-model.md を cancel の理由の分類コードの節を残したまま本文 12,288 byte 以下にする
+b09d0282 2026-10-18T20:53:05+09:00 fix: ledger の node 行の retention と host の CSV の取り込みを上限の行数ごとの transaction に分け、その日に済んだ retention を起動し直しで書き込み無しに終える
+bd3eae8f 2026-10-18T20:11:43+09:00 fix: queue DB の write transaction が閾値を超えて write lock を握ったら、その transaction の名前と握った長さを warn に出す
+7ea064a2 2026-10-18T18:55:56+09:00 feat: 自動更新の job の build と e2e の関門を、着地の検証（integrate の verification・landing recheck）と同時に走らせず、host の重い処理を 1 本ずつ順に流す
+e9f94bde 2026-10-18T18:23:20+09:00 refactor: worker の session の文書（session-wrapper・receipt-and-session-exit・headless-worker）を 1 つの地図にまとめる
+3aa72dbf 2026-10-18T17:23:23+09:00 refactor: 着地の文書（integrate・landing-recheck・landing-branch・landing-e2e・integrate-errors）を 1 つの地図にまとめる
+ecd4ffde 2026-10-18T17:08:12+09:00 refactor: 復旧の文書（abandon・idle-without-receipt・cleanup-and-recovery・background-recovery-job）を 1 つの地図にまとめる
+ab08fe0a 2026-10-18T16:10:33+09:00 runtime: hold 中の task を status と attention に理由とともに出し、期限切れと長い hold を知らせ、timeline と run の時間の分析で hold の区間を分ける
+5e39650b 2026-10-18T15:55:53+09:00 runtime: run の worktree のビルド成果物の掃除（sweep の BUILD_OUTPUT_DIRS の target・llvm-cov-target）を toolchain の profile に移し、e2e の関門と checkout からの install が CARGO_TARGET_DIR を自前で持つ理由を design に書く
+1a90c5e5 2026-10-18T15:16:30+09:00 fix: run の review の job が Codex の認証切れ（refresh token の期限切れ・workspace routing discovery unauthorized (401)）で落ちたとき、認証切れと読んで provider の控えに入れ、review_failed と approve_landing の ask にせず、job を切り替え先か控えが解けた後に自動で起動し直す
+ec883347 2026-10-18T12:30:38+09:00 refactor: docs/design/execution-tokens.md を入口と約束だけの数 KB の地図に作り直し、流れの詳細を定義のそばの doc comment に移す
+d2edbc9d 2026-10-18T11:52:27+09:00 refactor: docs/design/supervisor-lifecycle/ci-watch.md を入口と約束だけの数 KB の地図に作り直し、流れの詳細を定義のそばの doc comment に移す
+bb7140c7 2026-10-18T11:18:58+09:00 runtime: run の review の理由に paths を持たせ、上限の後の収束の判定で acceptance_unmet を設定のコードの path に当たるときだけコードの指摘に数える（ADR-t2599-1 の path の決定の実装）
+9c1afaf6 2026-10-18T10:48:18+09:00 refactor: docs/design/supervisor-lifecycle/queue-hold.md を入口と約束だけの数 KB の地図に作り直し、流れの詳細を定義のそばの doc comment に移す
+8016c295 2026-10-18T10:15:51+09:00 refactor: docs/design/supervisor-lifecycle/plan-planners.md を入口と約束だけの数 KB の地図に作り直し、流れの詳細を定義のそばの doc comment に移す
+cfb8b6da 2026-10-18T09:19:33+09:00 refactor: src/domain/review_reason.rs の CodedReason の doc comment の「codes は stats のためだけ（ADR-t947-1 決定3）」を、上限の後の収束の判定もコードを読むこと（ADR-t2599-1）に合わせる
+98668d8c 2026-10-18T09:06:13+09:00 refactor: docs/design/supervisor-lifecycle/review.md を入口と約束だけの数 KB の地図に作り直し、流れの詳細を定義のそばの doc comment に移す
+48f82c4e 2026-10-18T08:33:52+09:00 refactor: docs/design/supervisor-lifecycle/integrate.md を入口と約束だけの数 KB の地図に作り直し、流れの詳細を定義のそばの doc comment に移す
+05629c2a 2026-10-18T08:01:27+09:00 fix: run の review の prompt の理由のコードの案内（reason_codes_section）を、上限の後の収束の判定がコードを読むこと（ADR-t2599-1 決定7）に合わせ、plan review の「集計のためだけ」の案内は保つ
+d464ae49 2026-10-18T07:38:15+09:00 refactor: docs/design/supervisor-lifecycle/supervise.md を入口と約束だけの数 KB の地図に作り直し、流れの詳細を定義のそばの doc comment に移す
+a702c60a 2026-10-18T06:57:13+09:00 refactor: docs/design/domain-model.md を入口と約束だけの数 KB の地図に作り直し、流れの詳細を定義のそばの doc comment に移す
+fa7b004f 2026-10-18T05:53:02+09:00 refactor: docs/design/provider-lifecycle.md を入口と約束だけの数 KB の地図に作り直し、流れの詳細を定義のそばの doc comment に移す
+32927995 2026-10-18T04:55:53+09:00 runtime: run の review の自動の手直しを run を通して 2 回までにし、上限の後に差し戻す review は理由のコードでコードの指摘が無ければ着地させ残りを follow_up の draft に、あれば approve_landing の ask にする（ADR を書いて ADR-0050・ADR-t2256-1 を置き換え、ADR-t947-1 などを amends）
+73a9d289 2026-10-18T04:35:33+09:00 refactor: docs/design/supervisor-lifecycle/plan-review.md を入口と約束だけの数 KB の地図に作り直し、流れの詳細を定義のそばの doc comment に移す
+9985e278 2026-10-18T03:37:08+09:00 test が SIGKILL されたとき、test が起動した実バイナリの supervise も止まるようにする
+2f43f65e 2026-10-18T02:47:15+09:00 runtime: review が失敗して verdict の無い run の approve_landing の ask に retry_review の選択肢を足し、答えると runtime が worker の session を再開せず同じ run・同じ receipt で review を起動し直す
+75d821ea 2026-10-18T01:31:18+09:00 runtime: dagq.tomlのtestのglobと関門の宣言を読み、merge-baseからの差分で関門の要否を決め、toolchain profileに差分の行がtestの関数かの見分けを足す（ADR-t2589-1決定6、ADR-t2268-1決定1のamends）
+06d6315c 2026-10-18T00:27:46+09:00 runtime: hold した task の走っている非対話の run を、1524 の turn 境界の保留の機構に繋いで今の turn の後で session を残した待ちに置き、着地を止める
+4e7ca45d 2026-10-17T23:07:21+09:00 runtime: toolchain の profile が推奨の設定（[toolchains] の宣言・--verify の組み合わせ・review のプログラム）を持ち、dagq init が宣言か推測した profile の案を案内し、built-in の review の生成コマンドは review のプログラムの推奨だけを ADR-t2259-1 決定7 の範囲で案に入れる
+d62529a8 2026-10-17T19:30:43+09:00 runtime: 宣言の無い repository で暗黙に Rust の profile を当てる移行の扱いを外し、どの profile も宣言しなければ言語固有の振る舞いは働かず、言語に依らない host の分類と既定だけで動くようにする
+256e261c 2026-10-17T18:42:06+09:00 runtime: pj を coding agent に一度だけ読ませて dagq.toml の built-in と pj のプログラムの設定・.dagq/review/builtin-<名前>.md・.dagq/review/programs/*.sh を生成し、差分を見せて人の承認でだけ作業ツリーに適用するコマンドを足し、dagq init が推奨の設定とそのコマンドを案内する
+5f9eccd8 2026-10-17T15:38:59+09:00 runtime: 手元の検証の記録のdirをworkerのturnのenvで渡し、receiptのcommitのtreeと照合してreviewの資料に載せる（ADR-t2589-1決定2〜5）
+528a02cc 2026-10-17T14:13:07+09:00 stats の rustc_release・rustc_host と versions.rustc を宣言した Rust の profile で出す
+ea143a72 2026-10-17T12:22:46+09:00 feat: dagq.toml の [tasks] に task の title の接頭辞の一覧（title_prefixes）を置けるようにし、dagq lint がその接頭辞で始まらない title を報告し submit が拒む
+c5b53dd7 2026-10-17T10:57:03+09:00 goal-review.mdに残るcriteriaのevent欄の説明をdoc commentへ移す
+7c1d1afb 2026-10-17T10:00:54+09:00 runtime: landing recheck と自動更新の build の出力の置き場（CARGO_TARGET_DIR）と容量の掃除を toolchain の profile に移す
+6cec8ed7 2026-10-17T09:01:42+09:00 Move into doc comments the meanings kept in finding-planners.md
+2ea01557 2026-10-17T07:13:54+09:00 runtime: integrate の container の verification で podman 自身の起動の失敗（exit 125）を command の失敗と分け、run を session に差し戻さず verification を控える
+4406348b 2026-10-17T06:28:47+09:00 runtime: verification の runtime = container のとき、already_satisfied の主張の main の snapshot の検証を、着地の verification と同じ run ごとの container（snapshot の head の clone）で流す
+65beeafe 2026-10-17T05:15:34+09:00 runtime: container の worker の session の有無と transcript（token・コマンドの計測と observation）を、host の ~/.claude でなく run dir の container-home から container の中の cwd の名で読む
+8116ecf0 2026-10-17T04:18:21+09:00 runtime: 再計画する run を安全な turn 境界で保留し、部分成果と検証の履歴を保存して枠を解放する
+f5fa5359 2026-10-17T02:54:56+09:00 runtime: container run の landing recheck の command が host で run の木を走らせる
+cd43bbe4 2026-10-17T01:09:24+09:00 Move into doc comments the meanings kept in goal-review.md
+a181216a 2026-10-17T00:39:45+09:00 docs: 更新と起動の design 文書（build-identifier を含む）に残した他に記述の無い行を doc comment へ移す
+d2ad0734 2026-10-17T00:28:45+09:00 docs: 方針 A で残した security・queue-service・authorization の他に記述の無い行の意味を doc comment に移し、design の行を消す
+e433df7f 2026-10-17T00:08:57+09:00 refactor: claim の控えと着地の design 文書（claim-defer・claim-hold・disk-space・landing-branch・integrate・landing-e2e・landing-recheck）に残した他に記述の無い意味を doc comment と --help へ移し、design の行を消す
+1de720af 2026-10-16T23:28:47+09:00 docs: 復旧と worker の session の design 文書に残した他に記述の無い意味を doc comment へ移し、design の行を消す
+cf987081 2026-10-16T22:40:30+09:00 Move into doc comments the meanings kept in ask.md
+604cfb06 2026-10-16T19:14:15+09:00 feature: run の review が、差分が触った文書の食い違いと差分と不変条件・約束の食い違いだけを差し戻し、差分が触っていない文書の古い記述は verdict の follow_ups で返して runtime が docs_drift の follow_up の draft に記録するようにし、ADR に決める
+6b67c615 2026-10-16T18:07:27+09:00 docs: queue_hold_applied の runs[].supervisor の意味を doc comment に移し、queue-hold.md の残した行を消す
+3fd50f10 2026-10-16T17:03:00+09:00 docs→doc comment: run の環境と見直しの design 文書で残した行を定義のそばの doc comment に移し、design から消す
+96aa3c59 2026-10-16T15:46:16+09:00 Move into doc comments the meanings kept in draft-planners.md
+5432d553 2026-10-16T13:42:43+09:00 docs: review_failed の adopted: true の意味を doc comment に書いてから review.md の行を消す
+7f9a1298 2026-10-16T11:36:21+09:00 docs: 他に記述の無い supervisor の中核の design の行の意味を定義のそばの doc comment に移し、design の行を消す
+384cb6e3 2026-10-16T11:10:07+09:00 Move into doc comments the meanings kept in observer.md
+24927021 2026-10-16T10:21:15+09:00 refactor: 方針 A の概念と横断の文書（overview・follow-up-membership・agent-eval・measurement）に残した他に記述の無い事実を定義のそばの doc comment と --help に移して design の行を消す（ADR が置き場を measurement.md・agent-eval.md と定める未実装の予定の値は残す）
+c6600f82 2026-10-16T10:01:01+09:00 refactor: ci-watch.md に残した欄の意味を doc comment へ移し、design の行を消す
+55bc336e 2026-10-16T01:56:16+09:00 runtime: CI の見張りの job と test の名前の読み方、host_metrics の process の種類・KPI の toolchain の軸の cargo・rustc の読み方を toolchain の profile に移し、is_dagq_source() で分けていた host の rustc と toolchain の記録を宣言した profile で分ける
+08baace3 2026-10-15T23:30:24+09:00 runtime: integrate の verification を runtime = container のとき run ごとの container（rebase の後の commit の clone・--network none・verification の token で宛先は dagq.toml の registry の allowlist だけ・worker の cache を mount しない・cache なし）で流し、この repository の macOS に固有の test を CI の macOS の job に任せる ADR を書く
+b5b600e0 2026-10-15T14:16:12+09:00 runtime: revise・needs_session・triageの切り替えを接続し、待ちと世代の柵を検証してdesignを更新する
+f5acf229 2026-10-15T13:55:52+09:00 refactor: domain-model.md の今の操作（Current operations）からコマンドごとの記録の列挙を外し、その中身を clap の --help と定義のそばの doc comment に移して、判断の入口と約束だけを残す
+1a7f887b 2026-10-14T19:54:54+09:00 runtime: 同じ queue に引き継ぎ中でない supervisor が 2 つ以上いるか、同じ queue の LaunchAgent が 2 つ以上 load されているとき、doctor と status が知らせる
+b56d7fc5 2026-10-14T16:17:58+09:00 runtime: --db で repository の queue を指しても LaunchAgent の label を queue ディレクトリ名にそろえ、up・down・install が同じ queue の別の label の agent を外す
+af7ea3c2 2026-10-14T15:22:59+09:00 worker の transcript と Codex の turn の落ちた test の名前を宣言した profile で読む
+790de680 2026-10-14T12:27:30+09:00 refactor: 閾値の supervisor-lifecycle/conflict-thresholds.md と stall-thresholds.md の値の意味を定義のそばの doc comment に、決め方を ADR に移して消し、src/・tests/ の doc comment が名指す消した design 文書を新しい置き場に直す
+39619220 2026-10-14T11:32:54+09:00 refactor: コマンドを説明する supervisor-lifecycle の status・events-watch・doctor・logs・review-command の意味を doc comment と --help に移して消し、コマンドをまたぐ約束だけを supervisor-lifecycle/commands.md に寄せる
+d415d37e 2026-10-14T11:05:11+09:00 runtime: worker・resume の Podman の executor を作り、run ごとの container を hardening（非 root・読み取り専用の root filesystem・cap drop・no-new-privileges・memory/cpu/pids の上限・--network none）で起動し、run token をファイルで渡して container の中で env に入れ、止める経路で container を残さない
+8f521dc6 2026-10-14T10:26:15+09:00 refactor: コマンドを説明する supervisor-lifecycle の recover・rebind・dependency-diagram の意味を doc comment と --help に移して消し、コマンドをまたぐ約束だけを supervisor-lifecycle/commands.md に寄せる
+2fd77076 2026-10-14T09:30:31+09:00 runtime: built-in のプログラム builtin:secrets（差分が足す行の token・鍵らしい文字列の検出）をバイナリに同梱し、[review.programs."builtin:<名前>"] の enabled・paths と既定の on で review の先頭のプログラムとして流し、job の開始に版と中身の hash を残す

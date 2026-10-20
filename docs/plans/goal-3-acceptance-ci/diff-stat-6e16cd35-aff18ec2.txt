@@ -1,0 +1,582 @@
+ src/application/actor_executor.rs                                |   68 ++++-
+ src/application/agent_cases.rs                                   |    6 +-
+ src/application/agent_eval.rs                                    |   11 +-
+ src/application/agent_job.rs                                     |   33 ++-
+ src/application/broker_relay.rs                                  |   10 +-
+ src/application/ci_watch.rs                                      |    6 +-
+ src/application/claim_view.rs                                    |    3 +-
+ src/application/commands/operations.rs                           |   79 ++++-
+ src/application/commands/planning.rs                             |   53 ++--
+ src/application/container_image.rs                               |   26 +-
+ src/application/e2e_verdict.rs                                   |    2 +-
+ src/application/execution.rs                                     |   65 ++---
+ src/application/forecast.rs                                      |   11 +-
+ src/application/headless_session.rs                              |  300 ++++++++++++++++---
+ src/application/health/attention.rs                              |   95 ++++---
+ src/application/health/host.rs                                   |  175 ++++++++++++
+ src/application/health/mod.rs                                    |  238 +++++++++++++++-
+ src/application/health/report.rs                                 |  143 ++++++++--
+ src/application/heavy_turn.rs                                    |  335 ++++++++++++++++++++++
+ src/application/inbox_watcher.rs                                 |    4 +-
+ src/application/inherit.rs                                       |    2 +-
+ src/application/install.rs                                       |   40 ++-
+ src/application/integrate.rs                                     |  987 +++++++++++++++++++++++++++++++++++++++++++++++++++++++--------
+ src/application/kpi.rs                                           |   22 +-
+ src/application/ledger_check.rs                                  |   10 +-
+ src/application/lifecycle.rs                                     |  707 ++++++++++++++++++++++++++++++++++++++-------
+ src/application/main_log.rs                                      |   14 +-
+ src/application/main_log/tests.rs                                |    7 +-
+ src/application/marks.rs                                         |    4 +-
+ src/application/mod.rs                                           |   49 +++-
+ src/application/observer/input.rs                                |    3 +
+ src/application/observer/mod.rs                                  |   74 ++++-
+ src/application/planner.rs                                       |   53 +++-
+ src/application/planner_request.rs                               |    7 +-
+ src/application/podman_machine.rs                                |   71 +++--
+ src/application/port_fakes.rs                                    |   73 +++--
+ src/application/ports/execution.rs                               |  440 +++++++++++++++++++++++-----
+ src/application/ports/host.rs                                    |   52 +++-
+ src/application/ports/mod.rs                                     |    2 +-
+ src/application/ports/observation.rs                             |  154 ++++++++--
+ src/application/ports/planning.rs                                |  206 ++++++++++----
+ src/application/ports/shared.rs                                  |   52 +++-
+ src/application/prompt/known_failures.rs                         |   72 +++++
+ src/application/prompt/mod.rs                                    |    5 +-
+ src/application/prompt/plan_review.rs                            |   44 ++-
+ src/application/prompt/planners.rs                               |   75 ++++-
+ src/application/prompt/requests.rs                               |   89 +++++-
+ src/application/prompt/run_review.rs                             |  139 +++++++--
+ src/application/prompt/satisfied_review.rs                       |  158 ++++++++++
+ src/application/prompt/setup_review.rs                           |  280 ++++++++++++++++++
+ src/application/prompt/tests.rs                                  | 1048 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-----
+ src/application/prompt/worker.rs                                 |  273 ++++++++++++++----
+ src/application/push.rs                                          |    6 +-
+ src/application/queue_broker.rs                                  |   47 ++-
+ src/application/queue_reads/mod.rs                               |    3 +-
+ src/application/queue_reads/observation.rs                       |    6 +-
+ src/application/queue_reads/planning.rs                          |   10 +-
+ src/application/queue_service.rs                                 |  586 +++++++++++++++++++++++++++++++++++++-
+ src/application/rebind.rs                                        |    3 +-
+ src/application/recording.rs                                     |  124 ++++++++
+ src/application/release_update.rs                                |   56 ++--
+ src/application/report.rs                                        |   24 +-
+ src/application/review.rs                                        |  332 +++++++++++++++++++--
+ src/application/review_programs.rs                               |  202 ++++++++++---
+ src/application/run_container.rs                                 |  456 +++++++++++++++++++++++++++++
+ src/application/sccache.rs                                       |   14 +-
+ src/application/sccache/tests.rs                                 |    9 +-
+ src/application/screen_idle.rs                                   |   24 +-
+ src/application/session.rs                                       |   24 +-
+ src/application/setup_review.rs                                  |  926 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/application/stats.rs                                         |   37 ++-
+ src/application/supervise.rs                                     |  123 ++++++++
+ src/application/supervise/contexts.rs                            |  298 ++-----------------
+ src/application/supervise/{mod.rs => execution.rs}               | 1368 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-------------------------
+ src/application/supervise/{ => execution}/adopt.rs               |  275 ++++++++++++++----
+ src/application/supervise/{ => execution}/agent_cases.rs         |    2 +-
+ src/application/supervise/{ => execution}/agent_eval.rs          |   57 ++--
+ src/application/supervise/{ => execution}/background.rs          |   12 +-
+ src/application/supervise/{ => execution}/claim_defer.rs         |   39 +--
+ src/application/supervise/{ => execution}/container.rs           |    4 +-
+ src/application/supervise/{ => execution}/deliver.rs             |    0
+ src/application/supervise/{ => execution}/e2e.rs                 |   38 ++-
+ src/application/supervise/execution/eval_gate.rs                 |  444 +++++++++++++++++++++++++++++
+ src/application/supervise/{ => execution}/exit.rs                |   11 +
+ src/application/supervise/{ => execution}/file_time.rs           |    2 +-
+ src/application/supervise/{ => execution}/handoff_slots.rs       |   51 +++-
+ src/application/supervise/{ => execution}/headless.rs            |   36 ++-
+ src/application/supervise/{ => execution}/idle.rs                |    0
+ src/application/supervise/{ => execution}/jobs.rs                |  225 ++++++++++++---
+ src/application/supervise/{ => execution}/landing.rs             |  966 ++++++++++++++++++++++++++++++++++++++++++++++----------------
+ src/application/supervise/{ => execution}/provider.rs            |  194 ++++++++++++-
+ src/application/supervise/{ => execution}/queue_hold.rs          |   58 +++-
+ src/application/supervise/{ => execution}/recheck.rs             |  739 ++++++++++++++++++++++++++++++++++++++---------
+ src/application/supervise/{ => execution}/recovery.rs            |  367 ++++++++++++++++++++----
+ src/application/supervise/{ => execution}/reopen.rs              |   34 ++-
+ src/application/supervise/execution/replan_park.rs               | 1978 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/application/supervise/{ => execution}/resume.rs              |  191 ++++++++++---
+ src/application/supervise/{ => execution}/revise.rs              |   99 ++++---
+ src/application/supervise/{ => execution}/satisfied.rs           |  236 ++++++++++++---
+ src/application/supervise/execution/satisfied_review.rs          |  971 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/application/supervise/{ => execution}/session.rs             |  230 +++++++++++----
+ src/application/supervise/{ => execution}/slot_limits.rs         |    0
+ src/application/supervise/{ => execution}/stages.rs              |   11 +-
+ src/application/supervise/{ => execution}/stale.rs               |    6 +-
+ src/application/supervise/{ => execution}/stall.rs               |  170 ++++++++---
+ src/application/supervise/{ => execution}/stall_recovery.rs      |    2 +-
+ src/application/supervise/{ => execution}/task_hold.rs           |    4 +-
+ src/application/supervise/{ => execution}/triage.rs              |  359 ++++++++++++++++++-----
+ src/application/supervise/{ => execution}/waiting.rs             |  227 ++++++++++++++-
+ src/application/supervise/host_ops.rs                            |  232 +++++++++++++++
+ src/application/supervise/{ => host_ops}/broker_relay.rs         |   14 +-
+ src/application/supervise/{ => host_ops}/cleanup.rs              |  537 ++++++++++++++++++++++++++--------
+ src/application/supervise/{ => host_ops}/disk.rs                 |  486 ++++++++++++++++++++++++++++---
+ src/application/supervise/{ => host_ops}/handoff.rs              |  325 +++++++++++++++++++--
+ src/application/supervise/{ => host_ops}/host_metrics.rs         |   22 +-
+ src/application/supervise/{ => host_ops}/inbox_nudge.rs          |   23 +-
+ src/application/supervise/{ => host_ops}/queue_broker.rs         |   19 +-
+ src/application/supervise/{ => host_ops}/queue_service.rs        |   58 +++-
+ src/application/supervise/{ => host_ops}/release.rs              |  197 +++++++++----
+ src/application/supervise/{ => host_ops}/sccache.rs              |   48 ++--
+ src/application/supervise/{ => host_ops}/sweep.rs                |   22 +-
+ src/application/supervise/{ => host_ops}/update.rs               |  217 ++++++++++----
+ src/application/supervise/ledger/tests.rs                        |  515 ---------------------------------
+ src/application/supervise/observation.rs                         |  177 ++++++++++++
+ src/application/supervise/{ => observation}/ci_watch.rs          |   19 +-
+ src/application/supervise/{ => observation}/forecast.rs          |   68 +++--
+ src/application/supervise/{ => observation}/ledger.rs            |  155 +++++++---
+ src/application/supervise/observation/ledger/tests.rs            | 1083 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/application/supervise/{ => observation}/live_alerts.rs       |    8 +-
+ src/application/supervise/{ => observation}/main_log.rs          |   11 +-
+ src/application/supervise/{ => observation}/observer.rs          |   46 +--
+ src/application/supervise/{ => observation}/push.rs              |   81 +++++-
+ src/application/supervise/{ => observation}/report.rs            |   48 +++-
+ src/application/supervise/{ => observation}/throughput_review.rs |   24 +-
+ src/application/supervise/planning.rs                            |   71 +++++
+ src/application/supervise/{ => planning}/draft_planner.rs        |    8 +-
+ src/application/supervise/{ => planning}/finding_planner.rs      |   20 +-
+ src/application/supervise/{ => planning}/goal_review.rs          |   43 +--
+ src/application/supervise/{ => planning}/plan_review.rs          |  148 +++++++---
+ src/application/supervise/{ => planning}/planner_turns.rs        |   30 +-
+ src/application/supervise/{ => planning}/request_planner.rs      |   23 +-
+ src/application/telemetry_tokens.rs                              | 1384 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/application/throughput_review.rs                             |   77 ++++-
+ src/application/update.rs                                        |  138 ++++++---
+ src/application/watch.rs                                         |   32 ++-
+ src/build_id.rs                                                  |   37 +--
+ src/compose.rs                                                   |   70 ++++-
+ src/compose/execution.rs                                         |  146 +++++++++-
+ src/compose/host.rs                                              |  102 ++++---
+ src/compose/observation.rs                                       |  242 ++++++++++++++--
+ src/compose/supervisor.rs                                        |  149 ++++++++--
+ src/context_boundaries.rs                                        |  338 ++++++++++++++++++++++
+ src/context_boundaries/fixtures.rs                               |  300 +++++++++++++++++++
+ src/context_boundaries/module_fixtures.rs                        |  717 ++++++++++++++++++++++++++++++++++++++++++++++
+ src/context_boundaries/modules.rs                                | 1439 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/context_boundaries/modules/ports.rs                          |  439 ++++++++++++++++++++++++++++
+ src/context_boundaries/ownership.rs                              |  733 +++++++++++++++++++++++++++++++++++++++++++++++
+ src/context_boundaries/port_fixtures.rs                          |  523 ++++++++++++++++++++++++++++++++++
+ src/context_boundaries/source.rs                                 |  313 ++++++++++++++++++++
+ src/context_boundaries/sql.rs                                    |  377 ++++++++++++++++++++++++
+ src/domain/actor.rs                                              |   72 +++--
+ src/domain/actor_model.rs                                        |   19 +-
+ src/domain/after_claim.rs                                        |   11 +-
+ src/domain/agent_eval.rs                                         |    4 +
+ src/domain/agent_eval/before_landing.rs                          |  498 ++++++++++++++++++++++++++++++++
+ src/domain/agent_eval/production.rs                              |   43 +--
+ src/domain/agent_eval/programs.rs                                |    1 +
+ src/domain/agent_eval/record.rs                                  |   77 +++--
+ src/domain/areas.rs                                              |    5 +-
+ src/domain/authorization.rs                                      |  272 +++++++++++++++++-
+ src/domain/background_wrapper.rs                                 |   72 +++--
+ src/domain/broker_relay.rs                                       |   47 +--
+ src/domain/build_wait.rs                                         |    5 +-
+ src/domain/cancel_reason.rs                                      |  351 +++++++++++++++++++++++
+ src/domain/ci_watch.rs                                           |  183 ++++++++----
+ src/domain/claim_defer.rs                                        |   63 ++--
+ src/domain/claim_facts.rs                                        |   30 +-
+ src/domain/claim_hold.rs                                         |   45 +--
+ src/domain/claim_order.rs                                        |    6 +-
+ src/domain/claim_spacing.rs                                      |    4 +-
+ src/domain/concern.rs                                            |   10 +-
+ src/domain/container_image.rs                                    |   31 +-
+ src/domain/container_runtime.rs                                  |   14 +-
+ src/domain/disk.rs                                               |   75 ++++-
+ src/domain/e2e_deadline.rs                                       |  327 +++++++++++++++++++++
+ src/domain/e2e_quarantine.rs                                     |   16 +-
+ src/domain/error.rs                                              |   76 ++++-
+ src/domain/event_kind.rs                                         |  351 +++++++++++++++++++++--
+ src/domain/follow_up.rs                                          |  288 ++++++++++++++++++-
+ src/domain/forecast/history.rs                                   |   16 +-
+ src/domain/forecast/score.rs                                     |   39 +--
+ src/domain/forecast/snapshot.rs                                  |   80 +++---
+ src/domain/forecast/tests.rs                                     |    2 +-
+ src/domain/fresh_session.rs                                      |  114 +++++++-
+ src/domain/goal.rs                                               |    7 +-
+ src/domain/headless_job.rs                                       |  128 +++++++--
+ src/domain/heavy_turn.rs                                         |  137 +++++++++
+ src/domain/host_metrics.rs                                       |   97 +++++--
+ src/domain/idle_process.rs                                       |    4 +-
+ src/domain/ids.rs                                                |    8 +-
+ src/domain/investigation.rs                                      |  113 ++++++--
+ src/domain/kpi.rs                                                |   23 +-
+ src/domain/kpi/candidates.rs                                     |  102 ++++++-
+ src/domain/kpi/compare.rs                                        |   15 +-
+ src/domain/kpi/observe.rs                                        |    3 +-
+ src/domain/kpi/push.rs                                           |    7 +-
+ src/domain/kpi/report/tests.rs                                   |    4 +-
+ src/domain/kpi/tests/comparisons.rs                              |    4 +-
+ src/domain/kpi/tests/cross_strata.rs                             |    8 +-
+ src/domain/kpi/tests/mod.rs                                      |    8 +-
+ src/domain/kpi/tests/periods_and_targets.rs                      |    2 +-
+ src/domain/kpi/tests/plan_kpis.rs                                |  107 ++++++-
+ src/domain/kpi/tests/queue_kpis.rs                               |  315 +++++++++++++++++++-
+ src/domain/kpi/tests/strata.rs                                   |    2 +-
+ src/domain/kpi/window.rs                                         |  338 +++++++++++++++++++---
+ src/domain/landing_branch.rs                                     |   24 +-
+ src/domain/landing_release.rs                                    |   20 +-
+ src/domain/language.rs                                           |    3 +-
+ src/domain/ledger.rs                                             |   15 +-
+ src/domain/ledger/attributes.rs                                  |   87 +++---
+ src/domain/ledger/attributes/tests.rs                            |    3 +-
+ src/domain/ledger/builder.rs                                     |  326 +++++++++++++++++----
+ src/domain/ledger/builder/tests.rs                               |  347 +++++++++++++++++++++-
+ src/domain/ledger/findings.rs                                    |   18 +-
+ src/domain/ledger/findings/tests.rs                              |    3 +-
+ src/domain/ledger/fold.rs                                        |  114 +++++---
+ src/domain/ledger/node/tests.rs                                  |    2 +-
+ src/domain/ledger/owner.rs                                       |   70 ++---
+ src/domain/ledger/queue.rs                                       |  855 ++++++++++++++++++++++++++++++++++++++-----------------
+ src/domain/ledger/queue/tests.rs                                 |  733 +++++++++++++++++++++++++++++++++++++++++++++++
+ src/domain/ledger/session.rs                                     |  209 ++++++++++----
+ src/domain/ledger/steps.rs                                       |  565 ++++++++++++++++++++++++++++++++++++
+ src/domain/ledger/testkit.rs                                     |    2 +-
+ src/domain/ledger/tests.rs                                       |  147 +++++++++-
+ src/domain/ledger/window.rs                                      |   22 +-
+ src/domain/ledger/window/tests.rs                                |    5 +-
+ src/domain/lint.rs                                               |   52 +++-
+ src/domain/live_alerts.rs                                        |   44 ++-
+ src/domain/live_alerts/tests.rs                                  |   11 +-
+ src/domain/local_checks.rs                                       |  459 ++++++++++++++++++++++++++++++
+ src/domain/local_gates.rs                                        |  388 +++++++++++++++++++++++++
+ src/domain/marks.rs                                              |   61 ++--
+ src/domain/measure.rs                                            |   29 +-
+ src/domain/mod.rs                                                |  749 +++++++++++++++++++++++++++++++++++-------------
+ src/domain/plan_quality.rs                                       |  754 ++++++++++++++++++++++++++++++++++++++++++++++--
+ src/domain/plan_request.rs                                       |   29 +-
+ src/domain/plan_review.rs                                        |  230 ++++++++++++++-
+ src/domain/planner.rs                                            |   21 +-
+ src/domain/podman_machine.rs                                     |  108 +++++++
+ src/domain/pre_claim.rs                                          |  642 +++++++++++++++++++++++++++++++++++------
+ src/domain/proposal.rs                                           |    7 +-
+ src/domain/provider_switch.rs                                    |   45 ++-
+ src/domain/queue_broker.rs                                       |   19 +-
+ src/domain/queue_hold.rs                                         |    6 +-
+ src/domain/queue_service.rs                                      |  275 +++++++++++++++++-
+ src/domain/reason.rs                                             |   54 ++--
+ src/domain/recheck.rs                                            |  192 +++++++++++--
+ src/domain/recovery.rs                                           |  921 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++---
+ src/domain/release_update.rs                                     |   14 +-
+ src/domain/replan_snapshot.rs                                    |  538 ++++++++++++++++++++++++++++++++++
+ src/domain/resume.rs                                             |   65 +++--
+ src/domain/review_jobs.rs                                        |  314 +++++++++++++++++++-
+ src/domain/review_programs.rs                                    |  277 ++++++++++++++++++
+ src/domain/review_programs/secrets.rs                            |  477 +++++++++++++++++++++++++++++++
+ src/domain/review_programs/secrets/tests.rs                      |  268 +++++++++++++++++
+ src/domain/review_reason.rs                                      |  505 +++++++++++++++++++++++++++++---
+ src/domain/review_subagents.rs                                   |   53 +++-
+ src/domain/run.rs                                                |  107 ++++++-
+ src/domain/run/history.rs                                        |  702 ++++++++++++++++++++++++++++++++-------------
+ src/domain/run/payload.rs                                        |   20 +-
+ src/domain/run/recorded.rs                                       |   71 ++++-
+ src/domain/run_clone.rs                                          |    4 +-
+ src/domain/run_container.rs                                      |  796 +++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/domain/run_e2e.rs                                            |   28 +-
+ src/domain/run_env.rs                                            |   30 +-
+ src/domain/run_phase.rs                                          |  128 ++++++++-
+ src/domain/run_progress.rs                                       |  193 ++++++++++---
+ src/domain/satisfied.rs                                          |  176 ++++++++++--
+ src/domain/satisfied_judgment.rs                                 |  644 +++++++++++++++++++++++++++++++++++++++++
+ src/domain/sccache.rs                                            |   49 ++++
+ src/domain/search.rs                                             |    3 +-
+ src/domain/session_step.rs                                       |  570 +++++++++++++++++++++++++++++++++++++
+ src/domain/sessions.rs                                           |  415 ++++++++++++++++-----------
+ src/domain/setup_review.rs                                       | 1112 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/domain/slot_limits.rs                                        |   12 +-
+ src/domain/source_repository.rs                                  |    5 +-
+ src/domain/stall.rs                                              |   59 +++-
+ src/domain/stats.rs                                              |  367 ++++++++++++++++++------
+ src/domain/stats/ask_seen.rs                                     |  171 +++++++++--
+ src/domain/stats/asks.rs                                         |  101 ++++---
+ src/domain/stats/auto_repairs.rs                                 |   23 +-
+ src/domain/stats/cancel_reasons.rs                               |  547 +++++++++++++++++++++++++++++++++++
+ src/domain/stats/cargo.rs                                        |   18 +-
+ src/domain/stats/claim_waits.rs                                  |   10 +-
+ src/domain/stats/conflicts.rs                                    |   23 +-
+ src/domain/stats/context.rs                                      |    2 +-
+ src/domain/stats/drafts.rs                                       |   22 +-
+ src/domain/stats/event_sequence_tests.rs                         |  135 ++++++++-
+ src/domain/stats/executions.rs                                   |   77 +++--
+ src/domain/stats/failed_tests.rs                                 |   11 +-
+ src/domain/stats/follow_up_categories.rs                         |   66 ++++-
+ src/domain/stats/jobs.rs                                         |   51 ++--
+ src/domain/stats/landing.rs                                      |  262 ++++++++++++++---
+ src/domain/stats/landing_utilization.rs                          |  131 ++++++---
+ src/domain/stats/landing_waits.rs                                |   54 ++--
+ src/domain/stats/main_log.rs                                     |   28 +-
+ src/domain/stats/main_log/tests.rs                               |    2 +-
+ src/domain/stats/measures.rs                                     |   55 ++--
+ src/domain/stats/planner_routes.rs                               |   70 +++--
+ src/domain/stats/predictions.rs                                  |    5 +-
+ src/domain/stats/providers.rs                                    |   11 +-
+ src/domain/stats/recommendations.rs                              |   40 +--
+ src/domain/stats/retries.rs                                      |   82 ++++--
+ src/domain/stats/review_reasons.rs                               |   66 +++--
+ src/domain/stats/routes.rs                                       |   46 ++-
+ src/domain/stats/sessions.rs                                     |   16 +-
+ src/domain/stats/thresholds.rs                                   |  277 +++++++++++-------
+ src/domain/stats/updates.rs                                      |   29 +-
+ src/domain/stats/worker_question_topics.rs                       |   22 +-
+ src/domain/supervisor_life.rs                                    |  234 +++++++++++++--
+ src/domain/task.rs                                               |    4 +-
+ src/domain/task_hold.rs                                          |  420 +++++++++++++++++++++++++--
+ src/domain/task_replan.rs                                        |  130 ++++++++-
+ src/domain/telemetry.rs                                          |  786 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/domain/throughput_review.rs                                  |   15 +-
+ src/domain/timeline.rs                                           |  139 ++++++---
+ src/domain/title_prefix.rs                                       |  145 ++++++++++
+ src/domain/tokens.rs                                             |   17 +-
+ src/domain/toolchain.rs                                          |  705 ++++++++++++++++++++++++++++++++++++++-------
+ src/domain/toolchain/fake.rs                                     |   72 ++++-
+ src/domain/toolchain/recommend.rs                                |  469 ++++++++++++++++++++++++++++++
+ src/domain/toolchain/rust.rs                                     |  211 +++++++++++++-
+ src/domain/toolchain/rust/test_lines.rs                          |  468 ++++++++++++++++++++++++++++++
+ src/domain/transcript.rs                                         |  103 +++++--
+ src/domain/turn.rs                                               |  158 +++++++---
+ src/domain/verify_failure.rs                                     |   73 ++---
+ src/domain/verify_marks.rs                                       |   16 +-
+ src/domain/views.rs                                              |   51 +++-
+ src/domain/waiting.rs                                            |   59 ++--
+ src/domain/worker.rs                                             |    5 +-
+ src/domain/worker_model.rs                                       |   37 +--
+ src/domain/worker_question.rs                                    |   17 +-
+ src/domain/worktime.rs                                           |   13 +-
+ src/infrastructure/adapters.rs                                   |  796 ++++++++++++++++++++++++++++++++++++++++++---------
+ src/infrastructure/adapters/run_clones.rs                        |  266 +++++++++++++++++
+ src/infrastructure/asks.rs                                       |   12 +-
+ src/infrastructure/binaries.rs                                   |    3 +-
+ src/infrastructure/broker_relay.rs                               |   32 ++-
+ src/infrastructure/ci_watch.rs                                   |   38 ++-
+ src/infrastructure/ci_watch_store.rs                             |    5 +-
+ src/infrastructure/claude_turns.rs                               |    6 +-
+ src/infrastructure/codex.rs                                      |  172 +++++++++--
+ src/infrastructure/codex_turns.rs                                |  190 +++++++++++--
+ src/infrastructure/container_image.rs                            |    4 +-
+ src/infrastructure/container_runtime.rs                          |   34 ++-
+ src/infrastructure/container_turn.rs                             |  461 ++++++++++++++++++++++++++++++
+ src/infrastructure/d2.rs                                         |    3 +-
+ src/infrastructure/draft_planners.rs                             |  106 ++++---
+ src/infrastructure/e2e_gate.rs                                   |   14 +
+ src/infrastructure/finding_planners.rs                           |   29 +-
+ src/infrastructure/findings.rs                                   |    4 +-
+ src/infrastructure/follow_up_membership.rs                       |   23 +-
+ src/infrastructure/git_binary.rs                                 |    4 +
+ src/infrastructure/goal_reviews.rs                               |    9 +-
+ src/infrastructure/host_metrics.rs                               |   11 +-
+ src/infrastructure/inbox_watchers.rs                             |    6 +-
+ src/infrastructure/investigations.rs                             |   54 +++-
+ src/infrastructure/kpi_push.rs                                   |   23 +-
+ src/infrastructure/language.rs                                   |    5 +-
+ src/infrastructure/launchd.rs                                    |  230 ++++++++++++++-
+ src/infrastructure/location.rs                                   |  162 +++++++++--
+ src/infrastructure/mod.rs                                        |    4 +
+ src/infrastructure/observer.rs                                   |   35 ++-
+ src/infrastructure/plan_reviews.rs                               |  101 +++++--
+ src/infrastructure/planning.rs                                   |   14 +-
+ src/infrastructure/podman_machine.rs                             |  250 ++++++++++++++--
+ src/infrastructure/proposals.rs                                  |  132 +++++++--
+ src/infrastructure/push.rs                                       |   12 +-
+ src/infrastructure/queue_broker.rs                               |   64 +++--
+ src/infrastructure/queue_service.rs                              |  612 +++++++++++++++++++++++++++++++++++++--
+ src/infrastructure/related.rs                                    |   17 +-
+ src/infrastructure/release_update.rs                             |   18 +-
+ src/infrastructure/replans.rs                                    |  147 +++++++---
+ src/infrastructure/review_programs.rs                            |   78 ++++-
+ src/infrastructure/review_secrets.rs                             |   58 ++++
+ src/infrastructure/run_container.rs                              |  580 +++++++++++++++++++++++++++++++++++++
+ src/infrastructure/run_env.rs                                    | 1016 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++---
+ src/infrastructure/run_files.rs                                  |  122 ++++++--
+ src/infrastructure/runtime_store/attributes.rs                   |   19 +-
+ src/infrastructure/runtime_store/coordination.rs                 |   65 +++--
+ src/infrastructure/runtime_store/eval_rounds.rs                  |    6 +-
+ src/infrastructure/runtime_store/ledger.rs                       |   66 +++--
+ src/infrastructure/runtime_store/mod.rs                          |   56 +++-
+ src/infrastructure/runtime_store/node_samples.rs                 |   73 +++--
+ src/infrastructure/runtime_store/queue_records.rs                |    2 +-
+ src/infrastructure/runtime_store/recovery.rs                     |  435 +++++++++++++++++++++++++---
+ src/infrastructure/runtime_store/run_log.rs                      |  152 +++++++++-
+ src/infrastructure/runtime_store/session_registry.rs             |   11 +-
+ src/infrastructure/runtime_store/session_steps.rs                |  525 ++++++++++++++++++++++++++++++++++
+ src/infrastructure/runtime_store/transitions.rs                  |  406 ++++++++++++++++++++++++--
+ src/infrastructure/session_tokens.rs                             |   29 +-
+ src/infrastructure/sessions.rs                                   |  224 +++++++++------
+ src/infrastructure/setup_review.rs                               | 1356 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/infrastructure/sqlite.rs                                     | 1468 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++-------------------------------------
+ src/infrastructure/task_holds.rs                                 |  303 +++++++++++++++++++-
+ src/infrastructure/telemetry.rs                                  |   16 +-
+ src/infrastructure/transcripts.rs                                |  342 ++++++++++++++++++++--
+ src/lib.rs                                                       |   29 +-
+ src/lifecycle.rs                                                 |    4 +-
+ src/main.rs                                                      |  775 +++++++++++++++++++++++++++++++++++++------------
+ src/runtime.rs                                                   |   11 +-
+ src/view.rs                                                      |   30 +-
+ tests/common/attributes.rs                                       |    2 +-
+ tests/common/cli.rs                                              |   12 +-
+ tests/common/install.rs                                          |  213 ++++++++++++++
+ tests/common/lifecycle.rs                                        |   80 +++++-
+ tests/common/mod.rs                                              |  241 ++++++++++++++--
+ tests/common/queue.rs                                            |   57 +++-
+ tests/common/service.rs                                          |  105 +++++--
+ tests/common/setup_review.rs                                     |  130 +++++++++
+ tests/common/template.rs                                         |   21 +-
+ tests/common/toolchain.rs                                        |  104 +++++++
+ tests/e2e.rs                                                     |  163 ++++++++---
+ tests/it/actor_model.rs                                          |    5 +-
+ tests/it/agent_eval_rounds.rs                                    |  126 +++++++-
+ tests/it/attribute_records.rs                                    |   11 +-
+ tests/it/broker_relay.rs                                         |   13 +-
+ tests/it/cli_authorization.rs                                    |    5 +-
+ tests/it/cli_dialogue.rs                                         |    1 +
+ tests/it/cli_duplicate_supervisors.rs                            |  193 +++++++++++++
+ tests/it/cli_goals.rs                                            |   10 +-
+ tests/it/cli_kpi.rs                                              |  131 ++++++++-
+ tests/it/cli_operations.rs                                       |    4 +-
+ tests/it/cli_planner_request.rs                                  |   90 ++----
+ tests/it/cli_proposals.rs                                        |   17 +-
+ tests/it/cli_read.rs                                             |  439 ++++++++++++++++++++++++++--
+ tests/it/cli_screen.rs                                           |  113 ++------
+ tests/it/cli_session_event.rs                                    |    1 -
+ tests/it/cli_task_hold.rs                                        |  127 ++++++++-
+ tests/it/cli_tasks.rs                                            |  180 +++++++++++-
+ tests/it/cli_title_prefixes.rs                                   |   59 ++++
+ tests/it/cli_version.rs                                          |  258 +++++++++++++++--
+ tests/it/container_image.rs                                      |   11 +-
+ tests/it/draft_bundles.rs                                        |   59 +++-
+ tests/it/draft_revisit.rs                                        |    4 +-
+ tests/it/finding_planner.rs                                      |    2 +-
+ tests/it/finding_records.rs                                      |    7 +-
+ tests/it/follow_up_membership.rs                                 |    9 +-
+ tests/it/goal_review.rs                                          |   42 ++-
+ tests/it/goal_review_codex.rs                                    |    4 +-
+ tests/it/inbox_nudge.rs                                          |   59 +++-
+ tests/it/ledger_rows.rs                                          |  129 ++++++++-
+ tests/it/lifecycle_down.rs                                       |  105 ++++++-
+ tests/it/lifecycle_install.rs                                    |  503 ++------------------------------
+ tests/it/lifecycle_install_drain.rs                              |  363 +++++++++++++++++++++++
+ tests/it/lifecycle_install_watch.rs                              |   10 +-
+ tests/it/lifecycle_plan.rs                                       |   57 +++-
+ tests/it/lifecycle_up.rs                                         |  317 ++++++++++++++++++++-
+ tests/it/live_alerts.rs                                          |    3 +-
+ tests/it/main.rs                                                 |   20 ++
+ tests/it/node_samples.rs                                         |  128 +++++++++
+ tests/it/plan_review.rs                                          |  184 ++++++------
+ tests/it/plan_review_attribution.rs                              |  131 +++++++++
+ tests/it/plan_review_codex.rs                                    |    2 +-
+ tests/it/plan_review_concern.rs                                  |    2 +-
+ tests/it/planner_headless.rs                                     |   34 ++-
+ tests/it/planner_headless_stats.rs                               |    2 +-
+ tests/it/planner_headless_turns.rs                               |    4 +-
+ tests/it/planner_slots.rs                                        |   13 +-
+ tests/it/podman_machine.rs                                       |  102 ++++++-
+ tests/it/provider_executables.rs                                 |   17 +-
+ tests/it/queue_broker.rs                                         |   28 +-
+ tests/it/queue_dependencies.rs                                   |    4 +-
+ tests/it/queue_goals.rs                                          |   11 +-
+ tests/it/queue_migration.rs                                      |    2 +-
+ tests/it/queue_proposals.rs                                      |  103 +++++--
+ tests/it/queue_runs.rs                                           |   13 +-
+ tests/it/queue_schema.rs                                         |    2 +-
+ tests/it/queue_service.rs                                        |    9 +-
+ tests/it/queue_service_client.rs                                 |  167 ++++++++++-
+ tests/it/queue_service_findings.rs                               |    2 +-
+ tests/it/queue_service_telemetry.rs                              |  401 ++++++++++++++++++++++++++
+ tests/it/queue_tasks.rs                                          |   27 +-
+ tests/it/recovery_codex.rs                                       |   14 +-
+ tests/it/related.rs                                              |    6 +-
+ tests/it/request_planner.rs                                      |    5 +-
+ tests/it/review_follow_ups.rs                                    |  238 ++++++++++++++++
+ tests/it/review_programs.rs                                      |  316 +++++++++++++++++++-
+ tests/it/review_subagents.rs                                     |  175 ++++++++++--
+ tests/it/run_container.rs                                        | 1225 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ tests/it/runtime_actor_env.rs                                    |    2 +-
+ tests/it/runtime_adopt.rs                                        |   14 +-
+ tests/it/runtime_already_satisfied.rs                            |  950 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++-
+ tests/it/runtime_ask.rs                                          |   10 +-
+ tests/it/runtime_background.rs                                   |   34 ++-
+ tests/it/runtime_background_process.rs                           |    6 +-
+ tests/it/runtime_candidates.rs                                   |   58 +++-
+ tests/it/runtime_ci_watch.rs                                     |    9 +-
+ tests/it/runtime_claim.rs                                        |   36 +--
+ tests/it/runtime_claim_build.rs                                  |   11 +-
+ tests/it/runtime_claim_class.rs                                  |    5 +-
+ tests/it/runtime_claim_defer.rs                                  |    6 +-
+ tests/it/runtime_claim_hold.rs                                   |    2 +-
+ tests/it/runtime_claim_spacing.rs                                |    2 +-
+ tests/it/runtime_claim_worker.rs                                 |    5 +-
+ tests/it/runtime_cleanup.rs                                      |   71 ++++-
+ tests/it/runtime_client_mode.rs                                  |  268 +++++++++++++++--
+ tests/it/runtime_codex.rs                                        |  188 +++++-------
+ tests/it/runtime_codex_ask.rs                                    |    9 +-
+ tests/it/runtime_codex_work.rs                                   |   37 ++-
+ tests/it/runtime_container.rs                                    |    9 +-
+ tests/it/runtime_disk.rs                                         |  105 ++++++-
+ tests/it/runtime_forecast.rs                                     |    5 +-
+ tests/it/runtime_fresh_session.rs                                |  632 ++++++++++++++++++++++++++++++++++++++++
+ tests/it/runtime_handoff.rs                                      |  141 ++++++++-
+ tests/it/runtime_headless.rs                                     |    9 +-
+ tests/it/runtime_headless_jobs.rs                                |   44 ++-
+ tests/it/runtime_headless_reopen.rs                              |    5 +-
+ tests/it/runtime_headless_stall.rs                               |  143 ++++++----
+ tests/it/runtime_heartbeat.rs                                    |  186 +++++++++++-
+ tests/it/runtime_heavy_turns.rs                                  |  409 ++++++++++++++++++++++++++
+ tests/it/runtime_host_metrics.rs                                 |   27 +-
+ tests/it/runtime_inherit_by_hand.rs                              |   37 ++-
+ tests/it/runtime_integrate.rs                                    |  129 +++++++--
+ tests/it/runtime_job_verdicts.rs                                 |   11 +-
+ tests/it/runtime_landing_answers.rs                              |  253 +++++++++++++++-
+ tests/it/runtime_landing_release.rs                              |   42 ++-
+ tests/it/runtime_landing_verification.rs                         |    2 +
+ tests/it/runtime_light_slots.rs                                  |    9 +-
+ tests/it/runtime_local_checks.rs                                 |  360 +++++++++++++++++++++++
+ tests/it/runtime_observer.rs                                     |  193 +++++++++----
+ tests/it/runtime_precheck.rs                                     |    5 +-
+ tests/it/runtime_provider_switch.rs                              |    2 +-
+ tests/it/runtime_push.rs                                         |   65 +++++
+ tests/it/runtime_queue_hold.rs                                   |    4 +-
+ tests/it/runtime_queue_hold_detect.rs                            |    2 +-
+ tests/it/runtime_queue_hold_shared.rs                            |    2 +-
+ tests/it/runtime_recheck.rs                                      |  301 +++++++++++++++++++-
+ tests/it/runtime_repair.rs                                       |   30 +-
+ tests/it/runtime_replan_park.rs                                  | 1848 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ tests/it/runtime_replanning.rs                                   |  209 ++++----------
+ tests/it/runtime_resume.rs                                       |   53 ++--
+ tests/it/runtime_review.rs                                       |   63 ++--
+ tests/it/runtime_review_concern.rs                               |   14 +-
+ tests/it/runtime_review_conflict.rs                              |   89 ++++++
+ tests/it/runtime_review_revise_limit.rs                          |  549 +++++++++++++++++++++++++++++++++++
+ tests/it/runtime_run_env.rs                                      |    2 +-
+ tests/it/runtime_run_files.rs                                    |    4 +-
+ tests/it/runtime_sccache.rs                                      |  166 ++++++++++-
+ tests/it/runtime_session.rs                                      |    9 +-
+ tests/it/runtime_slot_limits.rs                                  |    2 +-
+ tests/it/runtime_spike_replan.rs                                 |  239 ++++++++++++----
+ tests/it/runtime_stale_receipt.rs                                |    6 +-
+ tests/it/runtime_support/codex.rs                                |  109 +++++++
+ tests/it/runtime_support/headless.rs                             |   81 +++++-
+ tests/it/runtime_support/headless_stubs.rs                       |   21 +-
+ tests/it/runtime_support/lost_lease.rs                           |    5 +-
+ tests/it/runtime_support/mod.rs                                  |  156 ++++++----
+ tests/it/runtime_support/service.rs                              |   27 +-
+ tests/it/runtime_support/turns.rs                                |   32 +++
+ tests/it/runtime_sweep.rs                                        |   68 +++--
+ tests/it/runtime_task_hold.rs                                    |  193 ++++++++++++-
+ tests/it/runtime_task_hold_park.rs                               | 1012 ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ tests/it/runtime_telemetry_lease.rs                              |  381 +++++++++++++++++++++++++
+ tests/it/runtime_throughput_review.rs                            |   41 +++
+ tests/it/runtime_toolchains.rs                                   |  155 +++++-----
+ tests/it/runtime_triage.rs                                       |  197 +++++++++++--
+ tests/it/runtime_verify_flaky.rs                                 |    5 +-
+ tests/it/runtime_verify_retry.rs                                 |    2 +
+ tests/it/runtime_waiting.rs                                      |   65 ++++-
+ tests/it/runtime_waiting_stages.rs                               |  190 ++++++-------
+ tests/it/session_steps.rs                                        |  493 ++++++++++++++++++++++++++++++++
+ tests/it/setup_review.rs                                         |  522 +++++++++++++++++++++++++++++++++
+ tests/it/setup_review_profiles.rs                                |  233 +++++++++++++++
+ tests/it/supervisor_without_cmux.rs                              |  115 ++++++--
+ tests/it/task_replanning.rs                                      |  207 +++++++++++++-
+ tests/it/telemetry_targets.rs                                    |  377 ++++++++++++++++++++++++
+ tests/it/telemetry_tokens.rs                                     |  528 ++++++++++++++++++++++++++++++++++
+ tests/it/verification_container.rs                               | 1490 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ tests/it/worker_escalation.rs                                    |   11 +-
+ tests/plugin.rs                                                  |    7 +-
+ 581 files changed, 84413 insertions(+), 10867 deletions(-)
