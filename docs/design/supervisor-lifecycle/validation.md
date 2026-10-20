@@ -145,8 +145,10 @@ validatingは今と同じく検証のコマンドを流さず、置き換えも`
 - **中身**: このrepositoryの着地の検証は、fmt・clippy・レイヤーの依存の検査・taskに固有の軽い検査・unit test全件・影響範囲で絞ったITで、行カバレッジの関門はCIだけが見る。
 - **絞ったITに必ず含めるもの**: 差分で足した・変えたtestのファイルが定めるITと、対応表に無いIT（表の生成の後に他の着地が足したか名前が変わったtest）。
   表は差分の前のmainから作られているので、足したtestと他の着地が足したtestを知らない。
+- **CIに任せるもの**: 表のcommitのtreeに無いsrcのファイル（差分が足したファイル）と、表が多くのITに当てるファイル（広い項目）は、表からITを選ばない。
+  それらを通るITのうち上の必ず含めるものに入らないものはCIで初めて流れ、着地の検証は任せたファイルを出力に残す（[ADR-t2892-1](../../adr/2026-10-20-t2892-1-landing-it-leaves-added-sources-and-broad-entries-to-ci.md)）。
 - **ITを全部流す条件**: 絞ったITの見込みの時間が上限を超えるとき、共通のファイルに触れたとき、表が取れないか古すぎるとき。
-  値と根拠は[着地のITの絞り込みの測定](../../plans/landing-it-selection.md)の「決めたこと」にある。
+  広い項目と全部流す条件の値と根拠は[着地のITの絞り込みの測定](../../plans/landing-it-selection.md)の「決めたこと」にある。
 - **既に落ちているtest**: [CI watch](ci-watch.md)の一覧のtestは着地の検証から外す。
   CIの修正taskのrunでは、そのfindingのtestを外さない（他のfindingのtestは外す）。
   runtimeはrunのtaskについて読んだ一覧（修正taskのrunではそのfindingの項目を外す対象から除いたもの）を渡し、外す適用は設定のコマンドとscriptが受け持つ。

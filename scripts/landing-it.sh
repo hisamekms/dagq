@@ -38,11 +38,14 @@
 #     dagq.toml and the like, READ_BY_TESTS),
 #   - the IT nextest lists now that the table does not have (added or renamed
 #     after the table was built).
+# A file the table maps to too many IT (a broad entry) and a src or crates .rs
+# file not in the tree of the table's commit select nothing from the table:
+# their other IT are left to CI, and the output names them.
 # Every IT runs instead, with the reasons printed, when the narrowed IT's
-# estimate is over the threshold, a common file or a src or crates .rs file
-# not in the tree of the table's commit is touched, or the table cannot be
-# had or is too old. The threshold, the common files and the age limit are
-# written once, at the top of scripts/landing-it.py, with their grounds in
+# estimate is over the threshold, a common file is touched, or the table
+# cannot be had or is too old. The threshold, the common files, the age limit
+# and the share that makes an entry broad are written once, at the top of
+# scripts/landing-it.py, with their grounds in
 # docs/plans/landing-it-selection.md, section 「決めたこと」. The tests in the
 # known failures' "failures" are left out; a fix run's own ones are under
 # "kept_for_task" and run, chosen by the diff or not.

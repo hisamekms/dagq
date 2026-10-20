@@ -4,6 +4,8 @@ crates/dagq-broker/src/lib.rs
 src/a.rs
 src/big.rs
 src/c.rs
+src/e.rs
 src/lib.rs
+src/shared.rs
 tests/it/a.rs
 tests/it/c.rs

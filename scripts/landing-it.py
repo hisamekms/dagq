@@ -35,9 +35,7 @@ import sys
 #    measured with coverage.
 FULL_SHARE = 0.5
 # 2. The common files: touching one runs every IT. Globs from the repository
-#    root, "*" within one directory and "**" across any depth. A src or crates
-#    .rs file that is not in the tree of the table's commit runs every IT too
-#    (the table cannot tell what it runs), see choose().
+#    root, "*" within one directory and "**" across any depth.
 COMMON_FILES = [
     "Cargo.lock",
     "Cargo.toml",
@@ -54,6 +52,12 @@ COMMON_FILES = [
 #    runs. Together with it, the IT not in the table (added or renamed after
 #    it was built) always run.
 MAX_TABLE_AGE = datetime.timedelta(hours=48)
+# 4. The broad entries: a file the table maps to more than this share of its
+#    IT (by count) selects none of them; the IT through it are left to CI.
+#    A src or crates .rs file not in the tree of the table's commit (one the
+#    diff added) selects none from the table either. Both still run the
+#    diff's own tests and the IT not in the table, see choose().
+BROAD_SHARE = 0.25
 
 # The table's format this reads (scripts/it-coverage-map.sh).
 TABLE_VERSION = 1
@@ -166,20 +170,31 @@ def full_reasons(diff, tree, table, table_error, now, forced=None):
             "the table is older than %d hours: generated_at %s"
             % (MAX_TABLE_AGE.total_seconds() // 3600, table["generated_at"])
         )
-    files = table.get("files", {})
-    tree_files = set(tree)
     for path in diff:
-        common = [p for p in COMMON_FILES if glob_match(path, p)]
-        if common:
+        if any(glob_match(path, p) for p in COMMON_FILES):
             reasons.append("a common file: %s" % path)
+    return reasons
+
+
+def left_to_ci(diff, tree, table):
+    """The diff's files whose IT the table does not select, each with why:
+    the broad entries and the source files not in the table's tree."""
+    files = table.get("files", {})
+    limit = BROAD_SHARE * len(table.get("tests", {}))
+    tree_files = set(tree)
+    out = []
+    for path in diff:
+        if path in files and len(files[path]) > limit:
+            out.append("%s (the table maps it to %d of %d IT)"
+                       % (path, len(files[path]), len(table.get("tests", {}))))
         elif (
             is_source(path)
             and path not in files
             and path not in tree_files
             and not is_unit_test_module(path)
         ):
-            reasons.append("a source file not in the table's tree: %s" % path)
-    return reasons
+            out.append("%s (not in the table's tree)" % path)
+    return out
 
 
 def known_failures(known):
@@ -224,11 +239,14 @@ def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now
     narrowed = []
     from_table = set()
     not_in_table = []
+    left = []
     if not reasons:
         files = table.get("files", {})
         table_tests = table.get("tests", {})
+        limit = BROAD_SHARE * len(table_tests)
         for path in diff:
-            from_table.update(k for k in files.get(path, []) if k in table_tests)
+            if len(files.get(path, [])) <= limit:
+                from_table.update(k for k in files.get(path, []) if k in table_tests)
             f = test_file_filter(path)
             if f is not None and f not in narrowed:
                 narrowed.append(f)
@@ -245,6 +263,7 @@ def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now
                 % (estimate, limit, FULL_SHARE)
             )
         else:
+            left = left_to_ci(diff, tree, table)
             listed = current_its(listing or {})
             not_in_table = sorted(k for k in listed if k not in table_tests)
             for key in sorted(from_table):
@@ -272,6 +291,7 @@ def choose(diff, tree, table, table_error, listing, known, fix_run, threads, now
         "reasons": reasons,
         "narrowed": [] if full else narrowed,
         "not_in_table": not_in_table,
+        "left_to_ci": left,
         "excluded": [n for n, _ in excluded],
         "kept": [n for n, _ in kept],
         "fix_run": fix_run,
@@ -291,6 +311,7 @@ def report(choice):
             % (len(choice["narrowed"]), len(choice["not_in_table"]))
         )
         lines.extend("landing-it:   %s" % f for f in choice["narrowed"])
+        lines.extend("landing-it: its IT left to CI: %s" % f for f in choice["left_to_ci"])
     for name in choice["excluded"]:
         lines.append("landing-it: left out, fails on main already: %s" % name)
     for name in choice["kept"]:

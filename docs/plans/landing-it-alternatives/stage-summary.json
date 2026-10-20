@@ -1,0 +1,250 @@
+{
+ "kinds": {
+  "llvm_cov_passed": {
+   "n": 276,
+   "duration_secs": {
+    "median": 568.5,
+    "p90": 786.9
+   },
+   "build_secs": {
+    "median": 91.0,
+    "p90": 183.0
+   },
+   "nextest_secs": {
+    "median": 423.6,
+    "p90": 574.5
+   },
+   "rest_secs": {
+    "median": 33.0,
+    "p90": 50.6
+   },
+   "tests_run": {
+    "median": 2722.5,
+    "p90": 2959.0
+   },
+   "unit_tests": {
+    "median": 1551.0,
+    "p90": 1815.0
+   },
+   "unit_serial_secs": {
+    "median": 125.5,
+    "p90": 165.3
+   },
+   "it_tests": {
+    "median": 1126.5,
+    "p90": 1216.0
+   },
+   "it_serial_secs": {
+    "median": 2358.9,
+    "p90": 3256.0
+   },
+   "load_avg_mean": {
+    "median": 12.8,
+    "p90": 22.4
+   },
+   "it_serial_secs_per_test_median": 2.116,
+   "unit_serial_secs_per_test_median": 0.081
+  },
+  "landing_it_narrowed": {
+   "n": 13,
+   "duration_secs": {
+    "median": 149.0,
+    "p90": 223.1
+   },
+   "build_secs": {
+    "median": 78.6,
+    "p90": 157.2
+   },
+   "nextest_secs": {
+    "median": 58.8,
+    "p90": 66.8
+   },
+   "rest_secs": {
+    "median": 7.0,
+    "p90": 8.7
+   },
+   "tests_run": {
+    "median": 2024.0,
+    "p90": 2412.0
+   },
+   "unit_tests": {
+    "median": 1946.0,
+    "p90": 2393.0
+   },
+   "unit_serial_secs": {
+    "median": 142.3,
+    "p90": 269.6
+   },
+   "it_tests": {
+    "median": 56.0,
+    "p90": 97.0
+   },
+   "it_serial_secs": {
+    "median": 144.5,
+    "p90": 180.0
+   },
+   "load_avg_mean": {
+    "median": 7.8,
+    "p90": 15.1
+   },
+   "it_serial_secs_per_test_median": 2.664,
+   "unit_serial_secs_per_test_median": 0.073
+  },
+  "landing_it_full": {
+   "n": 170,
+   "duration_secs": {
+    "median": 713.8,
+    "p90": 971.8
+   },
+   "build_secs": {
+    "median": 50.3,
+    "p90": 228.2
+   },
+   "nextest_secs": {
+    "median": 629.9,
+    "p90": 802.2
+   },
+   "rest_secs": {
+    "median": 6.2,
+    "p90": 9.6
+   },
+   "tests_run": {
+    "median": 3148.0,
+    "p90": 3498.0
+   },
+   "unit_tests": {
+    "median": 1998.5,
+    "p90": 2317.0
+   },
+   "unit_serial_secs": {
+    "median": 202.3,
+    "p90": 282.9
+   },
+   "it_tests": {
+    "median": 1144.5,
+    "p90": 1195.0
+   },
+   "it_serial_secs": {
+    "median": 3578.7,
+    "p90": 4470.2
+   },
+   "load_avg_mean": {
+    "median": 12.5,
+    "p90": 21.1
+   },
+   "it_serial_secs_per_test_median": 3.159,
+   "unit_serial_secs_per_test_median": 0.098
+  }
+ },
+ "it_by_day": {
+  "after 2026-10-07": {
+   "n": 29,
+   "it_secs_per_test_median": 2.16
+  },
+  "after 2026-10-08": {
+   "n": 56,
+   "it_secs_per_test_median": 2.71
+  },
+  "after 2026-10-09": {
+   "n": 22,
+   "it_secs_per_test_median": 3.35
+  },
+  "after 2026-10-11": {
+   "n": 17,
+   "it_secs_per_test_median": 3.28
+  },
+  "after 2026-10-12": {
+   "n": 34,
+   "it_secs_per_test_median": 3.44
+  },
+  "after 2026-10-13": {
+   "n": 3,
+   "it_secs_per_test_median": 4.49
+  },
+  "after 2026-10-14": {
+   "n": 7,
+   "it_secs_per_test_median": 3.29
+  },
+  "before 2026-09-30": {
+   "n": 1,
+   "it_secs_per_test_median": 2.17
+  },
+  "before 2026-10-01": {
+   "n": 35,
+   "it_secs_per_test_median": 2.19
+  },
+  "before 2026-10-02": {
+   "n": 58,
+   "it_secs_per_test_median": 1.89
+  },
+  "before 2026-10-03": {
+   "n": 50,
+   "it_secs_per_test_median": 2.29
+  },
+  "before 2026-10-04": {
+   "n": 59,
+   "it_secs_per_test_median": 2.21
+  },
+  "before 2026-10-05": {
+   "n": 30,
+   "it_secs_per_test_median": 2.41
+  },
+  "before 2026-10-06": {
+   "n": 18,
+   "it_secs_per_test_median": 2.22
+  },
+  "before 2026-10-07": {
+   "n": 25,
+   "it_secs_per_test_median": 1.99
+  }
+ },
+ "common_it": {
+  "tests": 1137,
+  "sum_of_medians_before": 2318.7,
+  "sum_of_medians_after": 3252.5,
+  "ratio": 1.403,
+  "per_test_ratio_median": 1.471,
+  "modules_grown_most": [
+   [
+    "runtime_resume",
+    51.6
+   ],
+   [
+    "runtime_integrate",
+    38.2
+   ],
+   [
+    "runtime_recheck",
+    36.7
+   ],
+   [
+    "runtime_handoff",
+    36.5
+   ],
+   [
+    "runtime_headless",
+    33.7
+   ],
+   [
+    "runtime_triage",
+    26.1
+   ],
+   [
+    "runtime_claim_defer",
+    23.8
+   ],
+   [
+    "runtime_review",
+    22.1
+   ],
+   [
+    "runtime_landing_release",
+    22.0
+   ],
+   [
+    "runtime_headless_stall",
+    19.8
+   ]
+  ]
+ }
+}

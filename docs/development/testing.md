@@ -37,7 +37,7 @@ testを書く・置く・直すときの今の規則。読むのは、`tests/`�
 
 testは`src/lib.rs`のunit testと`tests/it`・`tests/e2e.rs`・`tests/plugin.rs`にある。このrepositoryのcrateにdoctestは無く、nextestはdoctestを流さない。
 
-- 着地で流れるもの: `sh scripts/landing-it.sh`が1回の`cargo nextest run`で、unit test全件と、CIの夜間の対応表と差分で選んだIT（`tests/e2e.rs`を除く。差分で足した・変えたtestと表に無いtestを必ず含み、絞ったITの見込みの時間が上限を超えるとき・共通のファイルや表が判断できないファイルに触れたとき・表が取れないか古すぎるときはITを全部）を流し、1件でも落ちれば失敗する。既に落ちているtest（[CI watch](../design/supervisor-lifecycle/ci-watch.md)の一覧）は外し、CIの修正taskのrunでは直す対象のtestを外さない。選び方と値はscriptの冒頭、根拠は[着地のITの絞り込みの測定](../plans/landing-it-selection.md)の「決めたこと」。e2eは別に、要るrunで着地の前にruntimeがhostで流す（[Validation](../design/supervisor-lifecycle/validation.md)の「runtimeが流すe2e」）。
+- 着地で流れるもの: `sh scripts/landing-it.sh`が1回の`cargo nextest run`で、unit test全件と、CIの夜間の対応表と差分で選んだIT（`tests/e2e.rs`を除く。差分で足した・変えたtestと表に無いtestを必ず含み、表のtreeに無いsrcのファイルと表が多くのITに当てるファイルからはITを選ばずCIに任せ、絞ったITの見込みの時間が上限を超えるとき・共通のファイルに触れたとき・表が取れないか古すぎるときはITを全部）を流し、1件でも落ちれば失敗する。既に落ちているtest（[CI watch](../design/supervisor-lifecycle/ci-watch.md)の一覧）は外し、CIの修正taskのrunでは直す対象のtestを外さない。選び方と値はscriptの冒頭、根拠は[着地のITの絞り込みの測定](../plans/landing-it-selection.md)の「決めたこと」。e2eは別に、要るrunで着地の前にruntimeがhostで流す（[Validation](../design/supervisor-lifecycle/validation.md)の「runtimeが流すe2e」）。
 - CIで流れるもの: coverageの関門（上の「coverage」）が全てのtest binaryを全部実行し、1件でも落ちるか80%を下回れば失敗する。着地の検証が見逃した壊れはここで見つかる。
 
 ## testの置き場所

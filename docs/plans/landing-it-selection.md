@@ -12,6 +12,7 @@ tags:
   - measurement
 related:
   - plan-it-reduction
+  - plan-landing-it-alternatives
   - plan-nextest-measurement
   - plan-coverage-at-landing
   - design-measurement
@@ -27,7 +28,7 @@ goal 157 の段 3a（spike、task 1924）。task 1923 の CI の job が作っ�
 - **閾値（見込みの壁時計 220 秒 = IT 全部の見込み 438.7 秒の半分 219.35 秒を丸めた値。219.35〜220 秒の着地は無い）を当てると、全部流した着地は 247 件（57.3%）**: 閾値超え 196・共通のファイル 33・その他（表の tree に無い src のファイル）18。絞れた 184 件のうち 106 件は IT に当たるファイルを変えておらず 0 本、IT を 1 本以上選んだ 78 件は見込みの壁時計の中央値 4.2 秒・p90 45.8 秒。
 - **IT の時間（見込みの壁時計）は全着地の中央値・p90 とも 438.7 秒（全部流したのが過半のため IT 全部と同じ）、平均は 254 秒（全部流すより 42% 短い）。** 絞った IT の大きさは二山で、閾値の前の見込みの壁時計は 60 秒以下が 182 件、350 秒超が 206 件、その間は 10 件。どの閾値（60〜350 秒）でも結果はほぼ変わらない。
 - **見逃しは 0 件。** 期間に main の CI で新たに赤くなった IT 1,655 件（範囲が複数の着地にまたがるもの 1,165 件。どれもその範囲のどれかの着地の絞った IT に入っていた）。範囲に dagq を通らない人の直接の commit を含み、それが原因で着地のどれにも選ばれなかったものが 6 件（見逃しと別に数える）。閾値を外すと、2026-09-29 の CI の環境の壊れ（fixture の template の cache）で一斉に赤くなった 682 本のうち 57 本が task 1046 の絞った IT に入らなかった。
-- **決めたこと（段 3b へ）**: 全部流す閾値は「絞った IT の見込みの壁時計が IT 全部の見込みの半分を超える」。全部流す共通のファイルは `Cargo.lock`・`Cargo.toml`・`crates/*/Cargo.toml`・`build.rs`・`crates/*/build.rs`・`rust-toolchain.toml`・`.config/nextest.toml`・`migrations/**`・`src/migration_numbers.rs`・`tests/common/**` と、表の tree に無い src・crates の `.rs`。表の古さの上限は生成から 48 時間で、表に無い IT（表の後に足されたテスト）は必ず流す。
+- **決めたこと（段 3b へ）**: 全部流す閾値は「絞った IT の見込みの壁時計が IT 全部の見込みの半分を超える」。全部流す共通のファイルは `Cargo.lock`・`Cargo.toml`・`crates/*/Cargo.toml`・`build.rs`・`crates/*/build.rs`・`rust-toolchain.toml`・`.config/nextest.toml`・`migrations/**`・`src/migration_numbers.rs`・`tests/common/**`。表の古さの上限は生成から 48 時間で、表に無い IT（表の後に足されたテスト）は必ず流す。表の tree に無い src のファイルと、表が IT の 25% より多くに当てるファイルは表から IT を選ばず CI に任せる（「決めたこと」の 2・4、[代替案の比較](landing-it-alternatives.md)）。
 - 比べる今の値: `land_phases.verify` の中央値 516 秒・p90 982 秒（goal 157 の記述、`dagq stats --full`、2026-09-29 以降の着地 439 件）。これは build・unit test・coverage の計測を含む verify 全体で、ここの値は IT のテストの時間だけの見込み（build を含まない）なので、そのまま引き算はしない。
 
 ## 母集団と記録の取り方
@@ -136,9 +137,12 @@ goal 157 の段 3a（spike、task 1924）。task 1923 の CI の job が作っ�
 
 ## 決めたこと（段 3b の ADR と design が使う）
 
+2 と 4 は、切り替えの後 7 日の記録に代替案を当てた[代替案の比較](landing-it-alternatives.md)の結果に拠る（[ADR-t2892-1](../adr/2026-10-20-t2892-1-landing-it-leaves-added-sources-and-broad-entries-to-ci.md)）。
+
 1. **全部流す閾値**: 絞った IT の見込みの壁時計（max(直列の和 ÷ `NEXTEST_TEST_THREADS`, 最長のテスト)）が、同じ表の IT 全部の見込みの壁時計の半分を超えたら IT を全部流す（今の表では 220 秒）。根拠: 絞った IT は 60 秒以下と 350 秒超の二山で、60〜350 秒のどこに置いても全部流す割合は 0.559〜0.582、平均は 252〜257 秒でほぼ変わらない。半分を超える選択は全部流すのに比べて節約が半分未満で、見逃しの危険（閾値を外すと一斉の赤で 57 本を見逃した）を負う価値が小さい。表の秒は coverage の計測つきの CI の runner の値なので、秒の絶対値でなく IT 全部に対する割合で決める。
-2. **IT を全部流す共通のファイル**: `Cargo.lock`・`Cargo.toml`・`crates/*/Cargo.toml`・`build.rs`・`crates/*/build.rs`・`rust-toolchain.toml`・`.config/nextest.toml`・`migrations/**`・`src/migration_numbers.rs`（build.rs が読む）・`tests/common/**`（共通の fixture。`mod.rs`・`template.rs` は IT の 88〜89% に当たる）。加えて、表の tree に無い src・crates の `.rs` に触れたら全部流す。`tests/it/runtime_support/**` と crates の `tests/common` は表で選ぶ（各ファイルに当たるテストが表にあり、大きいものは閾値が全部にする）。`tests/it/main.rs` は mod の行だけで、足した module はテストのファイルの変更として選ばれるので共通にしない。中心の src のファイル（`src/domain/mod.rs` など）は一覧に入れず閾値に任せる（どれが中心かは表とともに変わる）。
+2. **IT を全部流す共通のファイル**: `Cargo.lock`・`Cargo.toml`・`crates/*/Cargo.toml`・`build.rs`・`crates/*/build.rs`・`rust-toolchain.toml`・`.config/nextest.toml`・`migrations/**`・`src/migration_numbers.rs`（build.rs が読む）・`tests/common/**`（共通の fixture。`mod.rs`・`template.rs` は IT の 88〜89% に当たる）。表の tree に無い src・crates の `.rs`（差分が足したファイル）は全部流す理由にせず、表から IT を選ばない（そのファイルを通る IT は差分のテストと表に無い IT のほかは CI に任せる）。根拠: 切り替えの後の 7 日では、足したファイルで全部流した 81 回の差分はほかに広い項目（下の 4）にも触れていて、親の module や同じ directory の項目で選んでも閾値を超えた。`tests/it/runtime_support/**` と crates の `tests/common` は表で選ぶ（各ファイルに当たるテストが表にある）。下の 4 の広い項目の上限は表の全てのファイルに当たるので、多くの IT に当たる helper も表から選ばず CI に任せる（4 の根拠は src・crates のファイルだけで測った）。`tests/it/main.rs` は mod の行だけで、足した module はテストのファイルの変更として選ばれるので共通にしない。中心の src のファイル（`src/domain/mod.rs` など）は一覧に入れず、下の 4 と閾値に任せる（どれが中心かは表とともに変わる）。
 3. **表の古さの上限**: 表の generated_at から 48 時間。それより古い表しか取れなければ IT を全部流す。あわせて、表に無い IT（表の後に足されたか名前の変わったテスト）は必ず流す。根拠: 夜間の job は毎日なので、ふだんの古さは 1 日以内で、48 時間は 1 回の失敗を許す。表に無いテストを必ず流せば足されたテストの漏れ（2 日で約 190 本の上限）は消え、残るのは確かめられない対応の変化だけになる。対応の変化の上限の目安（変わった src のファイルの割合）は 2 日で約 0.55、3 日で約 0.63、7 日でほぼ 1.0 で、7 日の表は選択の根拠にならない。
+4. **広い項目の上限**: 表がファイルを当てる IT の本数が、同じ表の IT の本数の 25% を超えたら、そのファイルからは IT を選ばない（差分の他のファイルの項目・差分のテスト・表に無い IT は選ぶ）。その IT は CI に任せる。根拠: 表の src のファイルの 58〜65% が IT の 25% より多くに当たり、45〜54% が半分より多くに当たる。上限が半分では全部流す割合は 61%（大半が閾値超え）に留まり、25% で 22%（7 割は共通のファイル）、10% で 15% だった。25% と 10% の差は閾値超えの 12 回だけで、10% は IT の 10〜25% に当たる、選び方の手がかりになる項目まで捨てる。記録の上の見逃しはどの上限でも不安定な 2 本だけで、変更による壊れの見逃しは 0 件。割合は本数で測る（表の秒は計測つきの CI の値）。
 
 ## 限界
 

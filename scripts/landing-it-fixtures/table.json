@@ -11,12 +11,16 @@
   "dagq::it::c::small": {"binary_id": "dagq::it", "name": "c::small", "duration_secs": 1.0, "status": "passed", "coverage": true, "files": 1},
   "dagq::it::c::not_run": {"binary_id": "dagq::it", "name": "c::not_run", "duration_secs": null, "status": "not_run", "coverage": false, "files": 0},
   "dagq::plugin::p": {"binary_id": "dagq::plugin", "name": "p", "duration_secs": 1.0, "status": "passed", "coverage": true, "files": 1},
-  "dagq-broker::serve::serve::s": {"binary_id": "dagq-broker::serve", "name": "serve::s", "duration_secs": 1.0, "status": "passed", "coverage": true, "files": 1}
+  "dagq-broker::serve::serve::s": {"binary_id": "dagq-broker::serve", "name": "serve::s", "duration_secs": 1.0, "status": "passed", "coverage": true, "files": 1},
+  "dagq::it::e::one": {"binary_id": "dagq::it", "name": "e::one", "duration_secs": 0.5, "status": "passed", "coverage": true, "files": 2},
+  "dagq::it::e::two": {"binary_id": "dagq::it", "name": "e::two", "duration_secs": 0.5, "status": "passed", "coverage": true, "files": 1}
  },
  "files": {
   "src/a.rs": ["dagq::it::a::one", "dagq::it::a::two"],
   "src/big.rs": ["dagq::it::b::big"],
   "src/c.rs": ["dagq::it::c::small"],
-  "crates/dagq-broker/src/lib.rs": ["dagq-broker::serve::serve::s"]
+  "crates/dagq-broker/src/lib.rs": ["dagq-broker::serve::serve::s"],
+  "src/e.rs": ["dagq::it::e::one", "dagq::it::e::two"],
+  "src/shared.rs": ["dagq::it::a::one", "dagq::it::c::small", "dagq::it::e::one"]
  }
 }

@@ -11,6 +11,8 @@ supersedes:
 amends:
   - adr-0049 decision 1
   - adr-t1410-1 decision 7
+amended_by:
+  - adr-t2892-1
 owners:
   - hisamekms
 tags:

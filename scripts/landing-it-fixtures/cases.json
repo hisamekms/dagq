@@ -160,22 +160,116 @@
   }
  },
  {
-  "name": "a source file not in the table's tree runs every IT",
+  "name": "a source file not in the table's tree leaves its IT to CI and runs the IT not in the table",
   "now": "2026-10-06T12:00:00Z",
   "diff": [
    "src/new_module.rs",
    "crates/dagq-broker/src/new.rs"
   ],
   "want": {
-   "full": true,
-   "reasons": [
-    "a source file not in the table's tree: src/new_module.rs",
-    "a source file not in the table's tree: crates/dagq-broker/src/new.rs"
+   "full": false,
+   "reasons": [],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
    ],
-   "narrowed": [],
-   "not_in_table": [],
+   "not_in_table": [
+    "dagq::it::a::added_after_the_table",
+    "dagq::it::c::renamed_after_the_table"
+   ],
+   "left_to_ci": [
+    "src/new_module.rs (not in the table's tree)",
+    "crates/dagq-broker/src/new.rs (not in the table's tree)"
+   ],
    "excluded": [],
    "kept": []
+  }
+ },
+ {
+  "name": "an added source file with its test file runs the IT that file defines",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/a/new.rs",
+   "src/a.rs",
+   "tests/it/a.rs"
+  ],
+  "want": {
+   "full": false,
+   "reasons": [],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(/^a::/))",
+    "(binary_id(=dagq::it) & test(=a::one))",
+    "(binary_id(=dagq::it) & test(=a::two))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "not_in_table": [
+    "dagq::it::a::added_after_the_table",
+    "dagq::it::c::renamed_after_the_table"
+   ],
+   "left_to_ci": [
+    "src/a/new.rs (not in the table's tree)"
+   ]
+  }
+ },
+ {
+  "name": "a broad entry selects none of its IT and leaves them to CI",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/shared.rs"
+  ],
+  "want": {
+   "full": false,
+   "reasons": [],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "not_in_table": [
+    "dagq::it::a::added_after_the_table",
+    "dagq::it::c::renamed_after_the_table"
+   ],
+   "left_to_ci": [
+    "src/shared.rs (the table maps it to 3 of 9 IT)"
+   ]
+  }
+ },
+ {
+  "name": "a broad entry beside a narrow one selects the narrow one's IT only",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/shared.rs",
+   "src/e.rs"
+  ],
+  "want": {
+   "full": false,
+   "reasons": [],
+   "narrowed": [
+    "(binary_id(=dagq::it) & test(=e::one))",
+    "(binary_id(=dagq::it) & test(=e::two))",
+    "(binary_id(=dagq::it) & test(=a::added_after_the_table))",
+    "(binary_id(=dagq::it) & test(=c::renamed_after_the_table))"
+   ],
+   "left_to_ci": [
+    "src/shared.rs (the table maps it to 3 of 9 IT)"
+   ]
+  }
+ },
+ {
+  "name": "a common file runs every IT beside an added source file and a broad entry",
+  "now": "2026-10-06T12:00:00Z",
+  "diff": [
+   "src/new_module.rs",
+   "src/shared.rs",
+   "migrations/0099_x.sql"
+  ],
+  "want": {
+   "full": true,
+   "reasons": [
+    "a common file: migrations/0099_x.sql"
+   ],
+   "narrowed": [],
+   "left_to_ci": []
   }
  },
  {
