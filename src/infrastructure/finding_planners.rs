@@ -114,8 +114,9 @@ impl SqliteQueue {
     /// records `finding_planner_exhausted` (the inbox's attention) instead.
     /// Without `answer`, no planner is opened for an improvement while the
     /// improvements running reach `limit` (ADR-0051 decision 25), counted
-    /// in the same transaction; a `ci_failure` finding, no improvement
-    /// ([`counts_as_improvement`]), does not wait for it. A planner carrying a person's answer is opened past
+    /// in the same transaction; a `ci_failure` finding the supervisor's CI
+    /// watch recorded, no improvement ([`counts_as_improvement`]), does not
+    /// wait for it. A planner carrying a person's answer is opened past
     /// that limit and past [`MAX_FINDING_PLANNERS`]: the planner that asked
     /// was counted already, and the answer is a person's decision. While a
     /// planner of the finding asked to exit because only a person's answer
@@ -154,7 +155,7 @@ impl SqliteQueue {
         let current = read_finding(&tx, finding)?;
         // A planner carrying a person's answer stays counted until it
         // submits or ends.
-        if answer.is_none() && counts_as_improvement(&current.kind) {
+        if answer.is_none() && counts_as_improvement(&current.kind, &current.recorded_by) {
             let improvements = improvement_limit(&tx, limit)?;
             if improvements.reached() {
                 return Ok(FindingPlannerStart::AtLimit(improvements));
@@ -398,12 +399,15 @@ fn planners_since_mark(conn: &Connection, finding: &Finding) -> Result<usize> {
 fn improvement_limit(conn: &Connection, limit: usize) -> Result<ImprovementLimit> {
     let mut proposals: Vec<ProposalId> = conn
         .prepare(
-            "SELECT f.proposal_id, f.kind FROM findings f JOIN proposals p ON p.id = f.proposal_id
+            "SELECT f.proposal_id, f.kind, f.recorded_by FROM findings f
+             JOIN proposals p ON p.id = f.proposal_id
              WHERE p.owner_origin='runtime' ORDER BY f.proposal_id",
         )?
-        .query_map([], |r| Ok((r.get(0)?, r.get::<_, String>(1)?)))?
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?))
+        })?
         .filter_map(|row| match row {
-            Ok((proposal, kind)) => counts_as_improvement(&kind).then_some(Ok(proposal)),
+            Ok((proposal, kind, by)) => counts_as_improvement(&kind, &by).then_some(Ok(proposal)),
             Err(error) => Some(Err(error)),
         })
         .collect::<rusqlite::Result<_>>()?;
@@ -415,16 +419,16 @@ fn improvement_limit(conn: &Connection, limit: usize) -> Result<ImprovementLimit
             running += 1;
         }
     }
-    let planners: Vec<String> = conn
+    let planners: Vec<(String, String)> = conn
         .prepare(
-            "SELECT f.kind FROM planners p JOIN findings f ON f.id = p.finding_id
+            "SELECT f.kind, f.recorded_by FROM planners p JOIN findings f ON f.id = p.finding_id
              WHERE p.origin='runtime' AND p.closed_at IS NULL AND f.status='open'",
         )?
-        .query_map([], |r| r.get(0))?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
     let planners = planners
         .iter()
-        .filter(|kind| counts_as_improvement(kind))
+        .filter(|(kind, by)| counts_as_improvement(kind, by))
         .count();
     Ok(ImprovementLimit {
         running: running + planners,

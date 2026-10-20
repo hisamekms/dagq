@@ -11,8 +11,9 @@
 //! undecided is followed by another, at most
 //! [`crate::domain::MAX_FINDING_PLANNERS`] per mark. The end of a linked
 //! proposal resolves the finding, or opens it again. A `ci_failure`
-//! finding, the repair of the landing branch's CI, gets its planner before
-//! the drafts' and past the improvements' limit (ADR-t2893-1).
+//! finding the supervisor's CI watch recorded, the repair of the landing
+//! branch's CI, gets its planner before the drafts' and past the
+//! improvements' limit (ADR-t2928-1).
 
 use super::*;
 use crate::domain::EventKind;
@@ -171,9 +172,10 @@ impl PlanningState {
         Ok(())
     }
 
-    /// Open a planner for each `ci_failure` finding waiting for one, the
-    /// oldest mark first, while the runtime's planners are below the limit;
-    /// the improvements' limit does not hold them (ADR-t2893-1). It runs in
+    /// Open a planner for each `ci_failure` finding of the supervisor's CI
+    /// watch waiting for one, the oldest mark first, while the runtime's
+    /// planners are below the limit; the improvements' limit does not hold
+    /// them (ADR-t2928-1). It runs in
     /// `tend_planners` after the revises, the answers and the planning
     /// requests' planners, before the draft planners, so neither the drafts
     /// nor the improvements marked before take the place of the repair of
@@ -213,7 +215,9 @@ impl PlanningState {
             .queue
             .planner_findings()?
             .into_iter()
-            .filter(|finding| counts_as_improvement(&finding.kind) == improvements)
+            .filter(|finding| {
+                counts_as_improvement(&finding.kind, &finding.recorded_by) == improvements
+            })
             .collect();
         if findings.is_empty() {
             return Ok(());

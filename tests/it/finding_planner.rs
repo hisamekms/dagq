@@ -451,6 +451,74 @@ fn a_red_runs_ci_failure_finding_gets_its_planner_past_the_improvements_limit() 
     );
 }
 
+/// ADR-t2928-1: a `ci_failure` finding the supervisor's CI watch did not
+/// record (here the observer's, a row of before `finding record` refused
+/// the kind) is an improvement: at the limit its planner waits behind the
+/// improvement marked before it and is listed as waiting, and once opened
+/// below the limit, it counts.
+#[test]
+fn a_ci_failure_finding_the_ci_watch_did_not_record_waits_at_the_improvements_limit() {
+    let fx = fixture();
+    std::fs::write(
+        fx.repo.join("dagq.toml"),
+        "[kpi]\nmax_improvement_proposals = 1\n",
+    )
+    .unwrap();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let first = record(&mut queue, FindingTarget::Queue, "src/a.rs", Some("a"));
+    let posing = queue
+        .record_finding(NewFinding {
+            kind: "ci_failure".into(),
+            target: FindingTarget::Queue,
+            subject: "ci_failure:0123456789abcdef".into(),
+            summary: "main is red".into(),
+            detail: None,
+            impact: None,
+            evidence: Vec::new(),
+            propose: Some("repair it".into()),
+            by: "observer".into(),
+        })
+        .unwrap()
+        .finding
+        .id;
+    let reviewer = StubReviewer::new(&[]);
+    let backend = PlanWorkspace::default();
+    supervise_with(
+        &fx,
+        &backend,
+        &reviewer,
+        &options(3, Duration::from_secs(3600)),
+    );
+    let planners = queue.planners(false).unwrap();
+    assert_eq!(
+        planners
+            .iter()
+            .map(|planner| planner.finding_id)
+            .collect::<Vec<_>>(),
+        [Some(first)]
+    );
+    assert!(finding_events(&fx.db, posing, "finding_planner_opened").is_empty());
+    let one_shot = dagq::compose::OneShot::new(dagq::infrastructure::clock::system());
+    assert_eq!(
+        one_shot.improvements_of(&queue).unwrap(),
+        json!({"running": 1, "limit": 1, "reached": true,
+               "waiting": [{"finding_id": posing, "reason": "improvement_limit"}]})
+    );
+
+    // Opened below a larger limit, its planner counts as an improvement.
+    assert!(matches!(
+        queue.open_finding_planner(posing, None, 2).unwrap(),
+        dagq::application::FindingPlannerStart::Opened { .. }
+    ));
+    assert_eq!(
+        queue.improvements(2).unwrap(),
+        dagq::domain::ImprovementLimit {
+            running: 2,
+            limit: 2
+        }
+    );
+}
+
 #[test]
 fn a_propose_answer_marks_the_finding_and_a_planner_takes_it() {
     let fx = fixture();

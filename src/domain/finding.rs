@@ -432,13 +432,26 @@ impl ImprovementLimit {
     }
 }
 
-/// Whether a finding of `kind` is an improvement: its planners and the
-/// proposals linked to it count against the [`ImprovementLimit`], and its
-/// planner waits at it (ADR-0051 decision 25). A `ci_failure` finding is
-/// not: it repairs the landing branch's CI, and its planner is opened
-/// whatever the improvements running, before the drafts' (ADR-t2893-1).
-pub fn counts_as_improvement(kind: &str) -> bool {
-    kind != super::ci_watch::FINDING_KIND
+/// Whether a finding of `kind` recorded by `recorded_by` is an
+/// improvement: its planners and the proposals linked to it count against
+/// the [`ImprovementLimit`], and its planner waits at it (ADR-0051
+/// decision 25). A `ci_failure` finding the supervisor's CI watch recorded
+/// is not: it repairs the landing branch's CI, and its planner is opened
+/// whatever the improvements running, before the drafts' (ADR-t2928-1).
+/// A `ci_failure` finding recorded by anyone else is an improvement.
+pub fn counts_as_improvement(kind: &str, recorded_by: &str) -> bool {
+    kind != super::ci_watch::FINDING_KIND || recorded_by != super::ActorRole::Supervisor.as_str()
+}
+
+/// Whether `finding record` may record a finding of `kind`: not a
+/// `ci_failure` one, whoever records it, as only the supervisor's CI watch
+/// records that kind (ADR-t2928-1).
+pub fn check_recordable_kind(kind: &str) -> Result<(), DomainError> {
+    require(kind != super::ci_watch::FINDING_KIND, || {
+        DomainError::ReservedFindingKind {
+            kind: kind.to_owned(),
+        }
+    })
 }
 
 /// Whether a proposal linked to a finding still counts against the
@@ -976,11 +989,30 @@ mod tests {
     }
 
     #[test]
-    fn every_finding_but_a_ci_failure_counts_as_an_improvement() {
+    fn every_finding_but_the_ci_watchs_ci_failure_counts_as_an_improvement() {
+        let ci_failure = super::super::ci_watch::FINDING_KIND;
         for kind in ["kpi", "conflict_hotspot", "failure", "wait", "stall"] {
-            assert!(counts_as_improvement(kind), "{kind}");
+            assert!(counts_as_improvement(kind, "observer"), "{kind}");
+            assert!(counts_as_improvement(kind, "supervisor"), "{kind}");
         }
-        assert!(!counts_as_improvement(super::super::ci_watch::FINDING_KIND));
+        assert!(!counts_as_improvement(ci_failure, "supervisor"));
+        for by in ["observer", "human", "planner", "inbox", ""] {
+            assert!(counts_as_improvement(ci_failure, by), "{by}");
+        }
+    }
+
+    #[test]
+    fn finding_record_refuses_a_ci_failure_and_takes_any_other_kind() {
+        let error = check_recordable_kind(super::super::ci_watch::FINDING_KIND)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("recorded only by the supervisor's CI watch"),
+            "{error}"
+        );
+        for kind in ["kpi", "failure", "ci_failure_like", "ci-failure"] {
+            check_recordable_kind(kind).unwrap();
+        }
     }
 
     #[test]

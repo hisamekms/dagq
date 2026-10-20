@@ -67,7 +67,8 @@ pub fn kpi(
 /// The improvement proposals running against `limit`, `[kpi]`'s
 /// `max_improvement_proposals` (ADR-0051 decision 25), and when they
 /// reached it, the findings waiting for a planner because of it (no
-/// `ci_failure` one, which does not wait for it, ADR-t2893-1).
+/// `ci_failure` one of the supervisor's CI watch, which does not wait for
+/// it, ADR-t2928-1).
 pub fn improvements(
     store: &dyn super::DraftPlannerReads,
     limit: usize,
@@ -77,7 +78,7 @@ pub fn improvements(
         store
             .planner_findings()?
             .iter()
-            .filter(|finding| crate::domain::counts_as_improvement(&finding.kind))
+            .filter(|finding| crate::domain::counts_as_improvement(&finding.kind, &finding.recorded_by))
             .map(|finding| serde_json::json!({"finding_id": finding.id, "reason": "improvement_limit"}))
             .collect()
     } else {

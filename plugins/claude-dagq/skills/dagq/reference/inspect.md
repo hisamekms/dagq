@@ -12,7 +12,7 @@ Each command's flags and the fields it prints are in `"$DAGQ" <command> --help` 
 | `graph` / `candidates` | Dependencies, what each task still waits for and the critical chain / which ready tasks the supervisor claims next, which it deferred and why, and what holds every claim (below) |
 | `events` / `timeline RUN` | What happened, by kind, task, run or goal / where one run's time went between its steps |
 | `notes` / `note` | Notes on a goal, task or run / record one (changes the queue: an `observation` event) |
-| `findings` / `finding dismiss` / `finding resolve` | The observer's findings and how to decide them: `reference/observer.md`. `--covered-by TASK` only for a `ci_failure` finding and an open task that already fixes its tests (`reference/register.md`) |
+| `findings` / `finding dismiss` / `finding resolve` | The observer's findings and how to decide them: `reference/observer.md`. `--covered-by TASK` only for a `ci_failure` finding and an open task that already fixes its tests (`reference/register.md`). `finding record` refuses the `ci_failure` kind: only the supervisor's CI watch records it |
 | `ci failures [--task ID]` | The tests already failing on the branch the supervisor's CI watch watches; `--task ID` sets apart those the task fixes. Workers and jobs may not run it |
 | `status` / `doctor` | Supervisors, slots, waiting runs and the runs in flight / the same per run with what blocks its recovery (`reference/doctor.md` of the recover skill for acting on it) |
 | `stats` | Where time goes, per run, goal and overall |

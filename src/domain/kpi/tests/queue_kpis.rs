@@ -737,23 +737,30 @@ fn counts_the_improvement_proposals_running_at_each_periods_end() {
     }));
 }
 
-/// A proposal linked to a `ci_failure` finding alone repairs the landing
-/// branch's CI and is no improvement (ADR-t2893-1); one that also remedies
-/// an improvement's finding counts.
+/// A proposal linked to a `ci_failure` finding of the supervisor's CI
+/// watch alone repairs the landing branch's CI and is no improvement
+/// (ADR-t2928-1); one that also remedies an improvement's finding counts,
+/// and so does one of a `ci_failure` finding another role recorded.
 #[test]
-fn a_proposal_of_a_ci_failure_finding_alone_is_no_improvement() {
+fn a_proposal_of_the_ci_watchs_ci_failure_finding_alone_is_no_improvement() {
     let mut queue = Queue::default();
     let at = MONDAY + HOUR;
-    for (finding, kind) in [(1, "ci_failure"), (2, "ci_failure"), (3, "kpi")] {
+    for (finding, kind, by) in [
+        (1, "ci_failure", "supervisor"),
+        (2, "ci_failure", "supervisor"),
+        (3, "kpi", "observer"),
+        (4, "ci_failure", "observer"),
+    ] {
         queue.queue_event(
             "finding_recorded",
-            json!({"finding_id": finding, "kind": kind, "propose": true}),
+            json!({"finding_id": finding, "kind": kind, "propose": true, "by": by}),
             at - 60,
         );
     }
     improvement(&mut queue, 1, 10, &[101], Some("planner"), at);
     improvement(&mut queue, 2, 11, &[111], Some("planner"), at);
     improvement(&mut queue, 3, 11, &[], Some("planner"), at);
+    improvement(&mut queue, 4, 12, &[121], Some("planner"), at);
     let query = KpiQuery {
         at: Some(Cursor::Time((MONDAY + DAY) * 1000)),
         last: 1,
@@ -762,7 +769,7 @@ fn a_proposal_of_a_ci_failure_finding_alone_is_no_improvement() {
     let result = queue.kpi(MONDAY + 2 * DAY, &KpiConfig::default(), &query);
     assert_eq!(
         measure(&result.periods[0], "improvement_proposals", ALL).value,
-        Some(1.0)
+        Some(2.0)
     );
 }
 

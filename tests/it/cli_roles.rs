@@ -1050,6 +1050,46 @@ fn findings_are_recorded_once_per_problem_and_listed_by_impact() {
     );
 }
 
+/// ADR-t2928-1: only the supervisor's CI watch records a `ci_failure`
+/// finding, so `finding record` refuses the kind to the observer and to a
+/// person alike, says why, and records nothing.
+#[test]
+fn finding_record_refuses_a_ci_failure_finding_to_the_observer_and_a_person() {
+    let (_dir, db) = queue();
+    let record = [
+        "finding",
+        "record",
+        "--kind",
+        "ci_failure",
+        "--queue",
+        "--subject",
+        "ci_failure:0123456789abcdef",
+        "--summary",
+        "main is red",
+        "--propose",
+        "repair it",
+    ];
+    for role in [Some("observer"), None] {
+        let output = invoke_as(role, &db, &record);
+        assert!(!output.status.success(), "{role:?} recorded a ci_failure");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("recorded only by the supervisor's CI watch"),
+            "{role:?}: {stderr}"
+        );
+    }
+    assert_eq!(
+        ok(&db, &["findings", "--all"])["findings"],
+        serde_json::json!([])
+    );
+    assert!(
+        ok(&db, &["events", "--all", "--kind", "finding_recorded"])["events"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
 /// The supervisor's headless review runs under `DAGQ_ROLE=reviewer`
 /// (ADR-0027): it may read the queue and nothing else.
 #[test]

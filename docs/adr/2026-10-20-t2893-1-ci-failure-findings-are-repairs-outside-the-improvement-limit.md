@@ -2,10 +2,12 @@
 id: adr-t2893-1
 type: adr
 title: CIの見張りのci_failureのfindingは着地先のbranchの修理で改善ではないとし、改善のproposalの上限に数えず待たせず、runtimeのplannerの枠が空いた回にdraftと改善のfindingより先にplannerを立てる（ADR-t1920-1決定4・ADR-0051決定25をamends）
-status: accepted
+status: superseded
 created: 2026-10-20
 updated: 2026-10-20
 accepted_on: 2026-10-20
+superseded_by: adr-t2928-1
+superseded_on: 2026-10-20
 amends:
   - adr-t1920-1 decision 4
   - adr-0051 decision 25
@@ -24,6 +26,8 @@ related:
 ---
 
 # ADR-t2893-1: CIの見張りのfindingは改善の上限に数えず待たせない（ADR-t1920-1決定4・ADR-0051決定25をamends）
+
+> **置き換え済み（2026-10-20）**: このADRの決定は現在有効ではない。現行の決定は[ADR-t2928-1](2026-10-20-t2928-1-only-the-ci-watchs-ci-failure-findings-are-repairs-outside-the-improvement-limit.md)を読む。
 
 ## Context
 

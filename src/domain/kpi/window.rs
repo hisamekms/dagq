@@ -1769,7 +1769,7 @@ impl<'a> Context<'a> {
     /// `SqliteQueue::improvements`' proposals (its planners are not
     /// counted) rebuilt from the events up to `upto`, as no table's state
     /// of then is kept. A proposal counts while a finding that
-    /// [`counts_as_improvement`] (its `finding_recorded`'s `kind`) is linked
+    /// [`counts_as_improvement`] (its `finding_recorded`'s `kind` and `by`) is linked
     /// to it, its owner is a planner of the runtime's, and [`improvement_running`]
     /// holds for it then. The events carry each of these facts:
     /// - the link: a `finding_status_changed` to `proposed` with its
@@ -1811,10 +1811,11 @@ impl<'a> Context<'a> {
             };
             match kind {
                 EventKind::FindingRecorded => {
+                    let by = event.payload.get("by").and_then(Value::as_str);
                     if let (Some(finding), Some(kind)) = (
                         field(event, "finding_id"),
                         event.payload.get("kind").and_then(Value::as_str),
-                    ) && !counts_as_improvement(kind)
+                    ) && !counts_as_improvement(kind, by.unwrap_or_default())
                     {
                         repairs.insert(finding);
                     }

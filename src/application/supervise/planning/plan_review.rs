@@ -1075,7 +1075,7 @@ impl PlanningState {
         // a person waits on them.
         self.open_request_planners(env, &mut runtime_open)?;
         // Then, once the findings whose proposal ended are settled, the
-        // repairs of the landing branch's CI (ADR-t2893-1), before the
+        // repairs of the landing branch's CI (ADR-t2928-1), before the
         // drafts and the improvements, within the same limit.
         self.settle_findings(env)?;
         self.open_repair_planners(env, &mut runtime_open)?;

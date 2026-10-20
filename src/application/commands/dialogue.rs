@@ -155,7 +155,9 @@ impl<'a, S: DialogueStore> Dialogue<'a, S> {
         self.store.mark(change, by)
     }
 
-    /// `finding record` on its target; `by` is the actor's.
+    /// `finding record` on its target; `by` is the actor's. A `ci_failure`
+    /// finding is refused to every role that may record: only the supervisor's CI watch
+    /// records that kind (ADR-t2928-1).
     pub fn record_finding(&mut self, mut finding: NewFinding) -> Result<FindingOutcome> {
         let resource = match &finding.target {
             FindingTarget::Queue => Resource::Queue,
@@ -165,6 +167,7 @@ impl<'a, S: DialogueStore> Dialogue<'a, S> {
         };
         self.gate
             .authorize(&*self.store, Capability::FindingRecord, &resource)?;
+        crate::domain::check_recordable_kind(&finding.kind)?;
         finding.by = self.gate.actor.written_by().to_owned();
         self.store.record_finding(finding)
     }
@@ -233,7 +236,7 @@ mod tests {
 
     use super::*;
     use crate::domain::{
-        ActorRole, AnswerAuthority, AskReason, GoalId, RunId, StaticPolicy, TaskId,
+        ActorRole, AnswerAuthority, AskReason, DomainError, GoalId, RunId, StaticPolicy, TaskId,
     };
 
     /// A store that holds one ask on run `r1`, records the refusals and
@@ -597,6 +600,40 @@ mod tests {
             store.denials.into_inner()[0]["resource"]["planner"],
             Value::Null
         );
+    }
+
+    /// ADR-t2928-1: `finding record` refuses a `ci_failure` finding to
+    /// every role that holds `finding.record`, with a reason that names the
+    /// CI watch, and nothing reaches the store (a role without it is denied
+    /// first, as for any kind).
+    #[test]
+    fn no_role_records_a_ci_failure_finding() {
+        for actor in [
+            ActorContext::user(),
+            ActorContext::instance(ActorRole::Inbox, 1),
+            ActorContext::instance(ActorRole::Observer, 1),
+            ActorContext::instance(ActorRole::Supervisor, 1),
+        ] {
+            let mut store = Store::default();
+            let mut finding = new_finding();
+            finding.kind = crate::domain::ci_watch::FINDING_KIND.into();
+            finding.propose = Some("red".into());
+            let error = Dialogue::new(&mut store, &actor, &StaticPolicy)
+                .record_finding(finding)
+                .unwrap_err();
+            let Some(DomainError::ReservedFindingKind { kind }) = error.downcast_ref() else {
+                panic!("{actor:?}: {error:#}");
+            };
+            assert_eq!(kind, "ci_failure");
+            assert!(
+                error
+                    .to_string()
+                    .contains("only by the supervisor's CI watch"),
+                "{error}"
+            );
+            assert!(store.writer.is_none(), "{actor:?}");
+            assert!(store.denials.into_inner().is_empty(), "{actor:?}");
+        }
     }
 
     #[test]
