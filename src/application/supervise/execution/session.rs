@@ -268,6 +268,9 @@ impl Supervisor<'_> {
             "--codex".into(),
             path_text(&self.layout.codex)?,
         ]);
+        // The executor's telemetry token, with the worker's (ADR-t1662-3
+        // decision 11).
+        self.issue_run_telemetry(&run);
         let handle = self
             .actors()
             .spawn(ActorExecutionSpec::new(

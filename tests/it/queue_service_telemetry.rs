@@ -76,7 +76,7 @@ fn a_telemetry_token_records_its_targets_steps_and_samples_and_reaches_nothing_e
     let run = queue.run.id();
     let target = StepTarget::run(run);
     let file = SystemServiceAccess
-        .issue_telemetry(&queue.db, &target, Some(queue.run.task_id()))
+        .issue_telemetry(&queue.db, &target, Some(queue.run.task_id()), None)
         .unwrap();
     let telemetry_token = service::read_token(&file).unwrap();
     let sink = ServiceTelemetrySink::new(service::socket_path(queue.dir()), file.clone());
@@ -239,7 +239,7 @@ fn a_telemetry_token_records_its_targets_steps_and_samples_and_reaches_nothing_e
     // Revoked, the token is no token.
     assert!(
         SystemServiceAccess
-            .revoke_telemetry(&queue.db, &target)
+            .revoke_telemetry(&queue.db, &target, None)
             .unwrap()
     );
     let refused = call(
@@ -270,13 +270,13 @@ fn a_session_is_recorded_only_for_the_target_the_control_side_registered_it_to()
     let planner_sink = ServiceTelemetrySink::new(
         socket.clone(),
         SystemServiceAccess
-            .issue_telemetry(&queue.db, &planner, None)
+            .issue_telemetry(&queue.db, &planner, None, None)
             .unwrap(),
     );
     let run_sink = ServiceTelemetrySink::new(
         socket,
         SystemServiceAccess
-            .issue_telemetry(&queue.db, &run, Some(queue.run.task_id()))
+            .issue_telemetry(&queue.db, &run, Some(queue.run.task_id()), None)
             .unwrap(),
     );
     register(&queue.db, &planner, "p1");
@@ -367,7 +367,7 @@ fn the_largest_report_is_recorded_and_one_byte_more_is_refused() {
     start(&queue);
     let target = StepTarget::run(queue.run.id());
     let file = SystemServiceAccess
-        .issue_telemetry(&queue.db, &target, Some(queue.run.task_id()))
+        .issue_telemetry(&queue.db, &target, Some(queue.run.task_id()), None)
         .unwrap();
     let telemetry_token = service::read_token(&file).unwrap();
     let sink = ServiceTelemetrySink::new(service::socket_path(queue.dir()), file);

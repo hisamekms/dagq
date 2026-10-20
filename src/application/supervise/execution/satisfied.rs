@@ -229,6 +229,9 @@ impl Supervisor<'_> {
             }
         });
         let head = self.repository.main_head()?;
+        // The verification is the run's executor too (ADR-t1662-3 decision
+        // 11).
+        self.ready_run_telemetry(run);
         self.queue.record_runtime_event(
             run.id(),
             EventKind::RunSatisfiedSnapshot,

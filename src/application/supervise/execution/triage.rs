@@ -659,6 +659,8 @@ impl Supervisor<'_> {
             .and_then(|e| e.payload["session_id"].as_str())
             .map(str::to_owned);
         let launch = launch_of(&events);
+        // The recovery job is the run's executor (ADR-t1662-3 decision 11).
+        self.ready_run_telemetry(run);
         let job = start_job(
             self,
             run.id(),

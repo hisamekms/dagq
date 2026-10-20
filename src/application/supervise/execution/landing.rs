@@ -95,6 +95,9 @@ impl Supervisor<'_> {
         previous: RunStatus,
         main: CommitSha,
     ) -> Result<thread::JoinHandle<Result<IntegrationOutcome>>> {
+        // The verification is the run's executor too (ADR-t1662-3 decision
+        // 11).
+        self.ready_run_telemetry(&run);
         self.ensure_sccache(crate::domain::sccache::CheckReason::BeforeIntegrate);
         let sccache = self.host.sccache_port();
         let queues = self.queues.clone();
@@ -175,6 +178,10 @@ impl Supervisor<'_> {
         run: &TaskRun,
         session: Option<SessionRef>,
     ) -> Result<Phase> {
+        // The review's jobs are the run's executors (ADR-t1662-3 decision
+        // 11): a run reviewed again after its supervisor ended holds no
+        // token of this one's.
+        self.ready_run_telemetry(run);
         self.start_review_programs(run, session, false)
     }
     /// Start the program reviews of `run`'s next review (ADR-t1895-2):

@@ -77,6 +77,11 @@ impl Supervisor<'_> {
                     Some(None) => "gone".to_owned(),
                     None => "none".to_owned(),
                 }, run.task_id(), run.workspace_id().unwrap_or("?"));
+            // The run's executor's telemetry token, issued again for the
+            // adopting supervisor (the one before revoked: the supervisor
+            // that lost the lease may have revoked it already), whether or
+            // not a new session starts (ADR-t1662-3 decision 11).
+            self.issue_run_telemetry(&run);
             let phase = match run.status() {
                 RunStatus::AwaitingIntegration => self.adopt_review(&run),
                 RunStatus::NeedsSession => self.adopt_resume(&run).map(|watch| {

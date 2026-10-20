@@ -505,6 +505,7 @@ pub(super) const MODULES: &[ModuleContext] = &[
     module("src/application/inherit.rs", Execution),
     module("src/application/agent_eval.rs", Execution),
     module("src/application/agent_cases.rs", Execution),
+    module("src/application/telemetry_tokens.rs", Execution),
     module("src/application/prompt/worker.rs", Execution), // prompt
     module("src/application/prompt/requests.rs", Execution), // resume_request
     module("src/application/prompt/run_review.rs", Execution), // recovery_prompt
@@ -658,6 +659,7 @@ pub(super) const OUTER_PORTS: &[OuterPort] = &[
 
 #[rustfmt::skip]
 pub(super) const NOT_PORTS: &[NotPort] = &[
+    not_port("src/application/telemetry_tokens.rs", "TokenLog", "a narrowing of EventStore to the record of a run's events, implemented for every EventStore"),
     not_port("src/application/main_log.rs", "MainReader", "a narrowing of RepositoryReads to its reads of main, implemented for every RepositoryReads"),
     not_port("src/application/queue_reads/mod.rs", "QueueReadSources", "a bound that joins PlanningSources and ObservationSources"),
 ];

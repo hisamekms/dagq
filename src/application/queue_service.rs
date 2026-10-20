@@ -798,20 +798,45 @@ pub trait ServiceAccess: Send + Sync {
 /// How the control side issues and revokes the token of an executor's
 /// telemetry principal (ADR-t1662-3 decision 11): only the control side
 /// calls it, and no command of an AI actor's does. The token's file is
-/// the executor's to read; it is handed to no agent.
+/// the executor's to read, found by its target
+/// ([`Self::telemetry_credential`]); it is handed to no agent, neither in
+/// its environment nor on its command line.
 pub trait TelemetryTokens: Send + Sync {
     /// Issue the token of the telemetry principal of `target` of the queue
-    /// at `db` (of `task`, for a run target), revoking the one it held: the
-    /// file holding it.
+    /// at `db` (of `task`, for a run target), under `issued_under` (the
+    /// lease of the supervisor that issues it), revoking every one it
+    /// held: the file holding it.
     fn issue_telemetry(
         &self,
         db: &std::path::Path,
         target: &StepTarget,
         task: Option<TaskId>,
+        issued_under: Option<&crate::domain::LeaseToken>,
     ) -> Result<std::path::PathBuf>;
-    /// Revoke the token of the telemetry principal of `target`: whether
-    /// there was one.
-    fn revoke_telemetry(&self, db: &std::path::Path, target: &StepTarget) -> Result<bool>;
+    /// Revoke the tokens of the telemetry principal of `target`, only those
+    /// issued under `issued_under` when it is given: whether there was one.
+    /// Once it returns `Ok`, none of them authenticates; an error may leave
+    /// one that does, which [`Self::held_telemetry`] still lists.
+    fn revoke_telemetry(
+        &self,
+        db: &std::path::Path,
+        target: &StepTarget,
+        issued_under: Option<&crate::domain::LeaseToken>,
+    ) -> Result<bool>;
+    /// Where the executor of `target` reads its token: a file outside every
+    /// worktree and run directory, `None` while none holds.
+    fn telemetry_credential(
+        &self,
+        db: &std::path::Path,
+        target: &StepTarget,
+    ) -> Option<std::path::PathBuf>;
+    /// The telemetry tokens held, each with its target and the lease it was
+    /// issued under: the sweep's list, which keeps a token whose revocation
+    /// failed.
+    fn held_telemetry(
+        &self,
+        db: &std::path::Path,
+    ) -> Result<Vec<crate::domain::telemetry::HeldTelemetry>>;
 }
 
 /// `up`'s step (ADR-t1233-4 decision 1): reuse a service of this build

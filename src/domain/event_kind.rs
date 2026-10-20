@@ -33,7 +33,9 @@
 //!   `evidence_missing`), of the screen (`prompt_waiting`,
 //!   `prompt_cleared`, `screen_*`, `idle_inferred`, `input_not_ready`,
 //!   `known_dialog_unanswered`) and of the run environment
-//!   (`run_env_changed`, `run_env_program_*`). Named in full too: `worker_mode_converted`, `supervision_finished`,
+//!   (`run_env_changed`, `run_env_program_*`), and the issue and the
+//!   revocation of a run's executor's telemetry token
+//!   (`telemetry_token_*`). Named in full too: `worker_mode_converted`, `supervision_finished`,
 //!   `agent_started`, `approve_withheld`, `stale_receipt_*`, `slots_full_*`,
 //!   `queue_hold_applied`, `usage_limited`, `auth_required`,
 //!   `conflicts_config_changed`, `first_commit_observed`,
@@ -429,6 +431,8 @@ event_kinds! {
     TaskStatusChanged => "task_status_changed",
     TaskSubmitted => "task_submitted",
     TaskWeightPredicted => "task_weight_predicted",
+    TelemetryTokenIssued => "telemetry_token_issued",
+    TelemetryTokenRevoked => "telemetry_token_revoked",
     ThroughputReviewFinished => "throughput_review_finished",
     ThroughputReviewReported => "throughput_review_reported",
     ThroughputReviewStarted => "throughput_review_started",
@@ -1360,6 +1364,17 @@ pub const SUPERVISOR_ALIVE: &str = EventKind::SupervisorAlive.as_str();
 pub const SUPERVISOR_STOPPED: &str = EventKind::SupervisorStopped.as_str();
 pub const TASK_SUBMITTED: &str = EventKind::TaskSubmitted.as_str();
 pub const TASK_WEIGHT_PREDICTED: &str = EventKind::TaskWeightPredicted.as_str();
+/// The supervisor issued a run's executor its telemetry token at the claim,
+/// a resume, an adoption, or the start of an executor on a run that held
+/// none issued under its lease (ADR-t1662-3 decision 11): `target`. Written
+/// only once the token was issued.
+pub const TELEMETRY_TOKEN_ISSUED: &str = EventKind::TelemetryTokenIssued.as_str();
+/// A run's telemetry token was revoked: `target`, `reason`
+/// ([`super::telemetry::TokenRevocation`]). Written only once the
+/// revocation succeeded, so no token of the run authenticates after it; a
+/// revocation that failed writes nothing and is tried again by the next
+/// sweep.
+pub const TELEMETRY_TOKEN_REVOKED: &str = EventKind::TelemetryTokenRevoked.as_str();
 /// A throughput review ended (ADR-t996-1): `mode`, `period`, `outcome`
 /// (`succeeded`, `failed`, `error`). Every hour is reviewed (ADR-t1172-1);
 /// `skipped`, an hour that met no rule and started no agent, is only in
@@ -1826,6 +1841,8 @@ mod tests {
             (EventKind::TaskStatusChanged, "task_status_changed"),
             (EventKind::TaskSubmitted, "task_submitted"),
             (EventKind::TaskWeightPredicted, "task_weight_predicted"),
+            (EventKind::TelemetryTokenIssued, "telemetry_token_issued"),
+            (EventKind::TelemetryTokenRevoked, "telemetry_token_revoked"),
             (
                 EventKind::ThroughputReviewFinished,
                 "throughput_review_finished",

@@ -1176,6 +1176,8 @@ fn spawn_live(
     };
     let prompt = recovery_prompt(&task, run, attempt, &material)?
         .with_language(sv.verifier.language().as_ref());
+    // The recovery job is the run's executor (ADR-t1662-3 decision 11).
+    sv.ready_run_telemetry(run);
     start_job(
         sv,
         run.id(),

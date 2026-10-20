@@ -313,6 +313,14 @@ pub fn shell_path(path: impl AsRef<std::path::Path>) -> String {
     dagq::infrastructure::adapters::shell_quote(path.as_ref().to_str().unwrap())
 }
 
+/// Set the permission bits of `path` to `mode`: a test makes a file or a
+/// directory of the queue unreadable or unwritable to inject a failure of
+/// the host, and gives the bits back once the failure is to be gone.
+pub fn set_mode(path: impl AsRef<std::path::Path>, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
 /// The shell function `await_file PATH`, for a shell the test starts (a
 /// stub's script, a task's verification, a reviewer's or job's script) to
 /// wait for the file at the absolute `PATH` the test writes: it waits while

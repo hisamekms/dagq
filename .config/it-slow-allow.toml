@@ -1979,3 +1979,15 @@ task = 2394
 name = "runtime_triage::an_escalation_waits_for_a_person_and_the_supervisor_applies_the_answer"
 reason = "B 境界（守る境界）: recovery: the recovery job process escalates, a wrapper process is stopped at the round's end, and the supervisor applies the answer in SQLite"
 task = 2394
+
+# 5.917s on the worker's stress run
+[[test]]
+name = "runtime_telemetry_lease::a_review_after_its_supervisor_ended_and_its_landing_find_a_token_that_holds"
+reason = "B 境界（守る境界）: across two supervisors, the second one's wiring of the review it recovers and of the landing's verification issues the run's telemetry token under its lease after the first one ended, in the queue's token files and SQLite"
+task = 2792
+
+# 5.860s on the worker's stress run
+[[test]]
+name = "runtime_adopt::a_supervisor_that_lost_its_lease_stops_touching_the_run"
+reason = "B 境界（守る境界）: across two supervisors on SQLite, the one whose run's lease another took stops touching the run and writes nothing of it but the revocation of the telemetry token issued under its lease (adoption)"
+task = 2792

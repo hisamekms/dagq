@@ -3,11 +3,46 @@
 //! queue's path (goal 82's stage (3), ADR-t1233-4 decision 4): neither the
 //! environment nor the command line of their processes names the queue
 //! database, and their `dagq` reads and writes through the service as their
-//! own principal.
+//! own principal. The run's executor's telemetry token (ADR-t1662-3
+//! decision 11), issued at the claim and again at the resume, is given to
+//! no agent and ends with the run.
 use crate::runtime_support;
 use dagq::domain::EventKind;
 
 use runtime_support::*;
+
+use dagq::{
+    application::{TelemetrySink, queue_service::TelemetryTokens},
+    domain::{
+        session_step::{Step, StepKind, StepTarget},
+        telemetry::{self, TelemetryReport},
+    },
+    infrastructure::queue_service::{self as service, ServiceTelemetrySink, SystemServiceAccess},
+};
+
+/// Every file under `dir` (but its `.git`) whose bytes hold `needle`.
+fn files_holding(dir: &Path, needle: &str) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = fs::read_dir(dir) else {
+        return found;
+    };
+    for entry in entries {
+        let path = entry.unwrap().path();
+        if path.file_name().is_some_and(|name| name == ".git") {
+            continue;
+        }
+        if path.is_dir() {
+            found.extend(files_holding(&path, needle));
+        } else if fs::read(&path).is_ok_and(|bytes| {
+            bytes
+                .windows(needle.len())
+                .any(|window| window == needle.as_bytes())
+        }) {
+            found.push(path);
+        }
+    }
+    found
+}
 
 /// Shell lines that write the process's environment and command line to
 /// `<dir>/<name>.env` and `<dir>/<name>.args`.
@@ -72,22 +107,26 @@ fn names_no_queue(db: &Path, dir: &Path, name: &str) {
 #[test]
 fn the_worker_and_its_resume_reach_the_queue_only_through_the_service() {
     let (_dir, repo, db) = fixture();
+    let queue_dir = db.parent().unwrap().to_owned();
+    let snapshots = queue_dir.join("snapshots");
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let worker = format!(
-        r#"{dump}"$DAGQ" show 2 > "$(dirname "$RECEIPT")/worker-show.json" || exit 71
+        r#"{dump}{snapshot}"$DAGQ" show 2 > "$(dirname "$RECEIPT")/worker-show.json" || exit 71
 "$DAGQ" note --task 2 --text 'noted by the worker' > /dev/null || exit 72
 {VALID_AGENT}"#,
         dump = dump("$(dirname \"$RECEIPT\")", "worker"),
+        snapshot = runtime_support::service::token_snapshot(&queue_dir, &snapshots, "worker"),
     );
     backend.script_for(2, &worker);
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);
     backend.resume_script_for(
         2,
         &format!(
-            r#"{dump}"$DAGQ" show 2 > "$(dirname "$RECEIPT")/resume-show.json" || exit 73
+            r#"{dump}{snapshot}"$DAGQ" show 2 > "$(dirname "$RECEIPT")/resume-show.json" || exit 73
 "$DAGQ" note --run "$RUN_ID" --text 'noted by the resume' > /dev/null || exit 74
 await_message; resolve; receipt "$(git rev-parse HEAD)"; idle; await_exit"#,
             dump = dump("$(dirname \"$RECEIPT\")", "resume"),
+            snapshot = runtime_support::service::token_snapshot(&queue_dir, &snapshots, "resume"),
         ),
     );
     let outcome = supervise(&db, &repo, &backend).unwrap();
@@ -128,6 +167,91 @@ await_message; resolve; receipt "$(git rev-parse HEAD)"; idle; await_exit"#,
     // first task's (landed by `integrate`, not by the supervisor) with the
     // supervisor's sweep.
     assert_no_tokens(db.parent().unwrap());
+
+    // The run's executor's telemetry token: issued at the claim, issued
+    // again at the resume with the claim's revoked, each in the queue's
+    // file for it, which no agent was given.
+    let target = StepTarget::run(run.id());
+    let file = service::credential_path(&queue_dir, &telemetry::actor_id(&target));
+    let held = |name: &str| {
+        let root = snapshots.join(name);
+        let token = service::read_token(
+            &root
+                .join("service")
+                .join(service::CREDENTIALS_DIR)
+                .join(file.file_name().unwrap()),
+        )
+        .unwrap();
+        (root, token)
+    };
+    let (at_claim, claimed) = held("worker");
+    let (at_resume, resumed) = held("resume");
+    assert_ne!(claimed, resumed);
+    let principal = service::lookup(&at_claim, &claimed).unwrap().unwrap();
+    assert_eq!(principal.target, Some(target.clone()));
+    assert_eq!(service::lookup(&at_resume, &claimed).unwrap(), None);
+    assert!(service::lookup(&at_resume, &resumed).unwrap().is_some());
+    let worktree = Path::new(run.worktree_path().unwrap());
+    for name in ["worker", "resume"] {
+        for dumped in ["env", "args"] {
+            let text = fs::read_to_string(run_dir.join(format!("{name}.{dumped}"))).unwrap();
+            for held in [&claimed, &resumed] {
+                assert!(!text.contains(held.as_str()), "{name}.{dumped}");
+            }
+            assert!(
+                !text.contains(&*file.file_name().unwrap().to_string_lossy()),
+                "{name}.{dumped}: {text}"
+            );
+        }
+    }
+    for dir in [run_dir, worktree] {
+        for held in [&claimed, &resumed] {
+            assert_eq!(files_holding(dir, held), Vec::<PathBuf>::new());
+        }
+    }
+    // The run ended: its token was revoked and recorded, and the service
+    // refuses what was sent with either.
+    assert_eq!(SystemServiceAccess.telemetry_credential(&db, &target), None);
+    assert_eq!(SystemServiceAccess.held_telemetry(&db).unwrap(), []);
+    for held in [&claimed, &resumed] {
+        let sent = queue_dir.join("held-token");
+        fs::write(&sent, held).unwrap();
+        let refused = ServiceTelemetrySink::new(service::socket_path(&queue_dir), sent)
+            .report(&TelemetryReport::new(
+                target.clone(),
+                "s1",
+                vec![Step::new(1, StepKind::ModelTurn, 0, 5)],
+            ))
+            .unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("unauthenticated"),
+            "{refused:#}"
+        );
+    }
+    let recorded: Vec<(EventKind, Value)> = detail
+        .events
+        .iter()
+        .filter(|event| {
+            event.kind.is_in(&[
+                EventKind::TelemetryTokenIssued,
+                EventKind::TelemetryTokenRevoked,
+            ])
+        })
+        .map(|event| (event.kind.known().unwrap(), event.payload["reason"].clone()))
+        .collect();
+    assert_eq!(
+        recorded,
+        [
+            (EventKind::TelemetryTokenIssued, Value::Null),
+            // The supervisor that claimed the run ended (`--once`) with
+            // the run parked and no lease on it: the next one's sweep
+            // revokes the token issued under its lease, before the resume
+            // issues another.
+            (EventKind::TelemetryTokenRevoked, json!("lease_lost")),
+            (EventKind::TelemetryTokenIssued, Value::Null),
+            (EventKind::TelemetryTokenRevoked, json!("run_ended")),
+        ]
+    );
 }
 
 /// The review and the recovery job of a run are given no queue path, and

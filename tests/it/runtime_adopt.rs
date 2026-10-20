@@ -802,8 +802,13 @@ fn a_supervisor_that_lost_its_lease_stops_touching_the_run() {
     let outcome = joined(original, "the first supervisor thread to return").unwrap();
     assert_eq!(queue.run(run.id()).unwrap().status(), RunStatus::Running);
     assert_eq!(queue.run_lease(run.id()).unwrap().unwrap().token, "taken");
-    // It wrote nothing about the run once the lease moved.
-    assert_eq!(run_events_after(&queue, &run, moved), Vec::<String>::new());
+    // It wrote nothing about the run once the lease moved but the
+    // revocation of the telemetry token issued under its lease
+    // (ADR-t1662-3 decision 11).
+    assert_eq!(
+        run_events_after(&queue, &run, moved),
+        ["telemetry_token_revoked"]
+    );
     let draining = draining_runs(&db);
     assert!(
         draining

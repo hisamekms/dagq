@@ -196,6 +196,8 @@ impl Supervisor<'_> {
         // The e2e may not start the sccache server (ADR-t2086-1): a missing
         // one is started here, and the gate looks again and guards it.
         self.ensure_sccache(crate::domain::sccache::CheckReason::BeforeE2e);
+        // The e2e is the run's executor too (ADR-t1662-3 decision 11).
+        self.ready_run_telemetry(run);
         let thread_settings = settings.clone();
         let handle = spawn_traced(move || (port.run)(&worktree, &thread_settings));
         Ok(Some(Phase::E2e(E2eWatch {

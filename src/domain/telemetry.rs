@@ -15,11 +15,11 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::RunId;
 use super::queue_service::MAX_REQUEST_BYTES;
 use super::session_step::{
     self, ResourceSample, Step, StepError, StepTarget, StepsRecorded, TargetKind,
 };
+use super::{DomainError, LeaseToken, RunId};
 
 /// The version of `telemetry_report`'s params this binary sends. A change
 /// a service of the version before must not read in part raises it; a
@@ -235,6 +235,72 @@ pub fn check(report: &TelemetryReport) -> Result<(), TelemetryError> {
 /// the token's principal and never from what a caller names.
 pub fn actor_id(target: &StepTarget) -> String {
     format!("{ACTOR_PREFIX}:{}:{}", target.kind.as_str(), target.id)
+}
+
+string_enum!(
+/// Why a run's telemetry token was revoked (ADR-t1662-3 decision 11), as
+/// `telemetry_token_revoked` records it once the revocation succeeded.
+TokenRevocation {
+    /// A resume issued the run another one.
+    Reissued => "reissued",
+    /// The run ended ([`run_token_due`]).
+    RunEnded => "run_ended",
+    /// The supervisor that held the run's lease lost it.
+    LeaseLost => "lease_lost",
+});
+
+/// A telemetry token the control side holds: its target, and the lease (the
+/// supervisor's token) it was issued under, `None` for one issued under no
+/// lease. A revocation for a lost lease takes only the tokens issued under
+/// that lease, so it never takes the one the supervisor that adopted the run
+/// issued since.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct HeldTelemetry {
+    pub target: StepTarget,
+    pub issued_under: Option<LeaseToken>,
+}
+
+/// What the sweep reads of the run of a run target's token: its status
+/// (`None`: the queue has no such run), the lease on it now, and, with no
+/// lease, whether the supervisor the token was issued under still lives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunTokenState {
+    pub status: Option<super::RunStatus>,
+    pub lease: Option<LeaseView>,
+    pub issuer_alive: bool,
+}
+
+/// The lease on a run as the sweep reads it: whose, and whether its
+/// supervisor stopped beating ([`super::heartbeat_stale`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseView {
+    pub token: LeaseToken,
+    pub stale: bool,
+}
+
+/// Whether the sweep revokes a run's telemetry token issued under
+/// `issued_under`, and why. The run ended or is gone: once the run no
+/// longer holds tokens ([`run_holds_token`](super::queue_service::run_holds_token)),
+/// as the service refuses them from then on. The lease was lost: the run's
+/// lease is another supervisor's, or still the issuer's but stale, or there
+/// is none and the issuer no longer lives. A run with no lease whose issuer
+/// lives (one waiting to land, say) keeps it, and so does a token issued
+/// under no lease while its run holds tokens. A lease lost while its
+/// supervisor lives is revoked by that supervisor ([`TokenRevocation::LeaseLost`]).
+pub fn run_token_due(
+    issued_under: Option<&LeaseToken>,
+    state: &RunTokenState,
+) -> Option<TokenRevocation> {
+    match state.status {
+        Some(status) if super::queue_service::run_holds_token(status) => {}
+        _ => return Some(TokenRevocation::RunEnded),
+    }
+    let issuer = issued_under?;
+    let lost = match &state.lease {
+        Some(lease) => lease.token != *issuer || lease.stale,
+        None => !state.issuer_alive,
+    };
+    lost.then_some(TokenRevocation::LeaseLost)
 }
 
 #[cfg(test)]
@@ -511,5 +577,64 @@ mod tests {
             serde_json::to_value(TelemetryReport::new(run_target(), "s1", vec![])).unwrap();
         params.as_object_mut().unwrap().remove("resources");
         assert_eq!(read(&params).unwrap().resources, vec![]);
+    }
+
+    /// ADR-t1662-3 decision 11: the sweep revokes a run's token once its
+    /// run ends or is gone, and once the lease it was issued under was lost
+    /// (taken by another supervisor, stale, or gone with its supervisor);
+    /// it leaves one whose run and issuer hold it.
+    #[test]
+    fn a_runs_token_is_due_once_its_run_ends_or_its_lease_was_lost() {
+        use crate::domain::RunStatus;
+        let a = LeaseToken::new("a");
+        let lease = |token: &str, stale: bool| {
+            Some(LeaseView {
+                token: LeaseToken::new(token),
+                stale,
+            })
+        };
+        let state = |status, lease, issuer_alive| RunTokenState {
+            status,
+            lease,
+            issuer_alive,
+        };
+        for status in [
+            RunStatus::Integrated,
+            RunStatus::Succeeded,
+            RunStatus::Failed,
+            RunStatus::Interrupted,
+        ] {
+            assert_eq!(
+                run_token_due(Some(&a), &state(Some(status), lease("a", false), true)),
+                Some(TokenRevocation::RunEnded),
+                "{status:?}"
+            );
+        }
+        assert_eq!(
+            run_token_due(None, &state(None, None, true)),
+            Some(TokenRevocation::RunEnded)
+        );
+        for status in [RunStatus::Running, RunStatus::AwaitingIntegration] {
+            let held = |lease, alive| run_token_due(Some(&a), &state(Some(status), lease, alive));
+            assert_eq!(held(lease("a", false), false), None, "{status:?}");
+            // No lease (waiting to land): kept while its issuer lives.
+            assert_eq!(held(None, true), None, "{status:?}");
+            assert_eq!(held(None, false), Some(TokenRevocation::LeaseLost));
+            assert_eq!(
+                held(lease("a", true), true),
+                Some(TokenRevocation::LeaseLost)
+            );
+            assert_eq!(
+                held(lease("b", false), true),
+                Some(TokenRevocation::LeaseLost)
+            );
+            // Issued under no lease: only the run's end ends it.
+            assert_eq!(
+                run_token_due(None, &state(Some(status), lease("b", true), false)),
+                None
+            );
+        }
+        assert_eq!(TokenRevocation::Reissued.as_str(), "reissued");
+        assert_eq!(TokenRevocation::LeaseLost.as_str(), "lease_lost");
     }
 }

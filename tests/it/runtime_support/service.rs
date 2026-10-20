@@ -1,10 +1,12 @@
 //! A supervisor of a test's queue run in its own thread, as the queue
 //! service's and the queue broker's tests keep one: started with options,
-//! waited for some passes, and drained as `down` drains it.
+//! waited for some passes, and drained as `down` drains it; and a copy of
+//! the service's token files as an executor's turn finds them.
 
 use crate::common;
 use crate::common::cli::ok;
-use dagq::infrastructure::sqlite::SqliteQueue;
+use crate::common::shell_path;
+use dagq::infrastructure::{queue_service, sqlite::SqliteQueue};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -112,4 +114,20 @@ pub fn supervisor_token(db: &Path) -> String {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// Shell lines that copy the queue's token records and token files to
+/// `<snapshots>/<name>/service/`, as the control side holds them while the
+/// executor runs, to a place of the test's outside the run. A temporary
+/// file that goes while it is copied is no matter: the test reads the
+/// token files and the records it needs.
+pub fn token_snapshot(queue_dir: &Path, snapshots: &Path, name: &str) -> String {
+    let service = queue_service::service_dir(queue_dir);
+    let to = snapshots.join(name).join("service");
+    format!(
+        "mkdir -p {to} || exit 75; cp -R {tokens} {credentials} {to}/ 2>/dev/null; ",
+        to = shell_path(&to),
+        tokens = shell_path(service.join(queue_service::TOKENS_DIR)),
+        credentials = shell_path(service.join(queue_service::CREDENTIALS_DIR)),
+    )
 }

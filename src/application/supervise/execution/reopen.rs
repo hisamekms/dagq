@@ -400,6 +400,9 @@ impl Supervisor<'_> {
             path_text(&self.layout.codex)?,
             "--resume".into(),
         ]);
+        // The executor's telemetry token again, the one before revoked
+        // (ADR-t1662-3 decision 11).
+        self.issue_run_telemetry(run);
         let workspace = self
             .actors()
             .spawn(ActorExecutionSpec::new(

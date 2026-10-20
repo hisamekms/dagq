@@ -884,6 +884,7 @@ pub fn supervise_with_reviewer(
             crate::application::execution::ExecutionConfig::default(),
         ),
         service_access: &crate::infrastructure::queue_service::SystemServiceAccess,
+        telemetry_tokens: &crate::infrastructure::queue_service::SystemServiceAccess,
         files: options.files.as_ref().map_or_else(
             || Arc::new(LocalRunFiles) as Arc<dyn RunFiles>,
             |port| port.0.clone(),

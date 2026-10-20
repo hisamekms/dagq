@@ -65,6 +65,8 @@ mod task_hold;
 mod triage;
 mod waiting;
 
+use crate::application::telemetry_tokens;
+
 pub(super) use self::background::WorkspaceCloser;
 use self::background::{close_ended_landing_asks, close_open_workspaces};
 pub(crate) use self::background::{
@@ -450,6 +452,10 @@ pub struct Ports<'a> {
     /// The queue service's tokens and socket, which the workers and the
     /// jobs are given instead of the queue's path (goal 82's stage (3)).
     pub service_access: &'a dyn crate::application::queue_service::ServiceAccess,
+    /// The telemetry tokens of the runs' executors, which the supervisor
+    /// issues at the claim, the resume and an executor's start and revokes
+    /// at the run's end and a lost lease (ADR-t1662-3 decision 11).
+    pub telemetry_tokens: &'a dyn crate::application::queue_service::TelemetryTokens,
     /// Where tests pause the supervisor ([`PausePoint`]); none outside them.
     pub pauses: Option<Pauses>,
     pub files: Arc<dyn RunFiles>,
@@ -1015,6 +1021,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         spawner: ports.spawner,
         programs: &ports.programs,
         service_access: ports.service_access,
+        telemetry_tokens: ports.telemetry_tokens,
+        telemetry_retries: telemetry_tokens::Retries::default(),
         pauses: ports.pauses.clone(),
         files: ports.files.clone(),
         processes: ports.processes.clone(),
@@ -1094,6 +1102,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         // A review rebuilt under an open hold ask waits for it (task 437).
         // An answer waits for the rebuilt slots (task 754).
         supervisor.check_queue_hold(false)?;
+        supervisor.take_telemetry_retries();
         supervisor.rebuild_own_runs(previous_version.as_deref())?;
     }
     let result = supervisor.run_loop(settings);
@@ -1181,6 +1190,12 @@ struct Supervisor<'a> {
     /// Where the program jobs of a review run ([`Ports::programs`]).
     programs: &'a crate::application::review_programs::ProgramBackends<'a>,
     service_access: &'a dyn crate::application::queue_service::ServiceAccess,
+    /// The runs' executors' telemetry tokens ([`Ports::telemetry_tokens`]).
+    telemetry_tokens: &'a dyn crate::application::queue_service::TelemetryTokens,
+    /// The revocations of the runs' telemetry tokens this process could
+    /// not make yet and no sweep would make for it: tried again on each
+    /// sweep ([`Self::sweep_telemetry`]).
+    telemetry_retries: telemetry_tokens::Retries,
     /// Where tests pause it ([`Ports::pauses`]).
     pauses: Option<Pauses>,
     files: Arc<dyn RunFiles>,
@@ -1564,6 +1579,158 @@ impl Supervisor<'_> {
         call(&mut env)
     }
 
+    /// Issue `run`'s executor its telemetry token under this process's
+    /// lease at the claim, a resume or its adoption, revoking every one it
+    /// held ([`telemetry_tokens::issue_run`]). One not issued is logged:
+    /// the run goes on without telemetry. A revocation that failed is held
+    /// for the next sweep, in place of any revocation held of the run.
+    pub(super) fn issue_run_telemetry(&mut self, run: &TaskRun) {
+        telemetry_tokens::issue_run(
+            self.telemetry_tokens,
+            &*self.queue,
+            &self.layout.db,
+            (run.id(), run.task_id()),
+            self.registration.token(),
+            &mut self.telemetry_retries,
+        );
+    }
+
+    /// Before this process starts an executor on `run` (a review, a
+    /// recovery job, the landing's or the e2e's verification): the run's
+    /// telemetry token issued under its lease, issued now when the run
+    /// holds none ([`telemetry_tokens::credential_for`]). A run that ended
+    /// holds no token, as the service refuses them.
+    pub(super) fn ready_run_telemetry(&mut self, run: &TaskRun) {
+        if !crate::domain::queue_service::run_holds_token(run.status()) {
+            return;
+        }
+        telemetry_tokens::credential_for(
+            self.telemetry_tokens,
+            &*self.queue,
+            &self.layout.db,
+            (run.id(), run.task_id()),
+            self.registration.token(),
+            &mut self.telemetry_retries,
+        );
+    }
+
+    /// Try again the revocations held, then revoke the telemetry tokens
+    /// that are due by the queue: the runs that ended, and those whose
+    /// lease was lost, each only under the lease it was issued under
+    /// ([`telemetry_tokens::sweep`]).
+    fn sweep_telemetry(&mut self) {
+        let mut retries = std::mem::take(&mut self.telemetry_retries);
+        let now = self.generators.clock.now();
+        let states = |run: &RunId, issuer: Option<&crate::domain::LeaseToken>| {
+            self.run_token_state(run, issuer, now)
+        };
+        telemetry_tokens::sweep(
+            self.telemetry_tokens,
+            &*self.queue,
+            &self.layout.db,
+            self.registration.token(),
+            &mut retries,
+            &states,
+        );
+        self.telemetry_retries = retries;
+    }
+
+    /// Where the revocations this registration holds wait for the exec of
+    /// its handoff ([`telemetry_tokens::Retries::file`]).
+    fn telemetry_retries_file(&self) -> PathBuf {
+        telemetry_tokens::Retries::file(
+            self.layout.db.parent().unwrap_or(Path::new(".")),
+            self.registration.token(),
+        )
+    }
+
+    /// Keep the revocations held for the process the exec of the handoff
+    /// hands the registration to: it keeps every lease, so no sweep would
+    /// make them. One that cannot be kept is logged.
+    fn save_telemetry_retries(&self) {
+        if let Err(error) = self.telemetry_retries.save(
+            &*self.files,
+            &self.telemetry_retries_file(),
+            self.registration.token(),
+        ) {
+            warn!(
+                "the telemetry tokens' revocations still to make could not be kept for the exec: {error:#}"
+            );
+        }
+    }
+
+    /// After the exec of a handoff, take over the revocations the process
+    /// before held, which its next sweeps make.
+    fn take_telemetry_retries(&mut self) {
+        self.telemetry_retries = telemetry_tokens::Retries::take(
+            &*self.files,
+            &self.telemetry_retries_file(),
+            self.registration.token(),
+        );
+    }
+
+    /// What the sweep reads of `run` for a token issued under `issuer` at
+    /// `now` (unix seconds): its status, its lease and whether that lease
+    /// stopped beating, and, with no lease, whether the issuer's
+    /// registration is still there and beating.
+    fn run_token_state(
+        &self,
+        run: &RunId,
+        issuer: Option<&crate::domain::LeaseToken>,
+        now: i64,
+    ) -> Result<crate::domain::telemetry::RunTokenState> {
+        let status = match self.queue.run(run) {
+            Ok(found) => Some(found.status()),
+            Err(error)
+                if error
+                    .downcast_ref::<crate::application::RunNotFound>()
+                    .is_some() =>
+            {
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        let lease = self
+            .queue
+            .run_lease(run)?
+            .map(|lease| crate::domain::telemetry::LeaseView {
+                stale: self.lease_stale(&lease, now),
+                token: lease.token,
+            });
+        let issuer_alive = match (issuer, &lease) {
+            (Some(issuer), None) if issuer != self.registration.token() => {
+                self.queue.supervisors()?.iter().any(|registration| {
+                    registration.token == *issuer
+                        && !crate::domain::heartbeat_stale(
+                            self.processes.alive(registration.pid),
+                            now - registration.heartbeat_at,
+                        )
+                })
+            }
+            _ => true,
+        };
+        Ok(crate::domain::telemetry::RunTokenState {
+            status,
+            lease,
+            issuer_alive,
+        })
+    }
+
+    /// Revoke the telemetry token of `run` issued under this process's
+    /// lease, which it lost ([`telemetry_tokens::revoke_lost`]); a token
+    /// another supervisor issued since is left as it is. One that cannot be
+    /// revoked is held for the next sweep.
+    fn revoke_lost_telemetry(&mut self, run: &RunId) {
+        telemetry_tokens::revoke_lost(
+            self.telemetry_tokens,
+            &*self.queue,
+            &self.layout.db,
+            run,
+            self.registration.token(),
+            &mut self.telemetry_retries,
+        );
+    }
+
     /// The runs the slots hold, which a cleanup and the sweep leave alone.
     fn held_runs(&self) -> Vec<RunId> {
         self.claim.slots.runs()
@@ -1710,6 +1877,13 @@ impl Supervisor<'_> {
     /// the status it went to.
     fn run_loop(&mut self, options: &LoopSettings) -> Result<Value> {
         let result = self.drive(options);
+        // The runs that ended on the last pass end their telemetry tokens
+        // before the process goes; the process an exec hands the
+        // registration to makes the revocations still held.
+        self.sweep_telemetry();
+        if self.registration.execs() {
+            self.save_telemetry_retries();
+        }
         let deadline = self.end_deadline(options.owner_gone_grace);
         self.host
             .host_metrics_finish(deadline, &*self.generators.clock);
@@ -1783,6 +1957,12 @@ impl Supervisor<'_> {
                         &ReasonCode::LeaseLost.into(),
                     );
                 }
+                // The runs' executors' telemetry ends with the lease: the
+                // supervisor that adopts a run issues it another
+                // (ADR-t1662-3 decision 11).
+                for run in self.held_runs() {
+                    self.revoke_lost_telemetry(&run);
+                }
                 return Err(error);
             }
             // An owner gone stops this process like a stop request, with
@@ -1817,6 +1997,9 @@ impl Supervisor<'_> {
             );
             // Before any job starts: none runs twice (task 443).
             self.tend_headless_jobs();
+            // Every pass, draining or handing off too: the telemetry
+            // tokens of the runs that ended (ADR-t1662-3 decision 11).
+            self.sweep_telemetry();
             // What the cleanup job removed is recorded before the disk is
             // read (task 405).
             let ending = cleanup::ends_cleanup(stopping, self.registration.handing_off());
@@ -3206,6 +3389,9 @@ impl Supervisor<'_> {
     /// Drop a slot whose lease another process holds now, writing nothing
     /// about the run: the new owner's record is the record.
     fn disown(&mut self, slot: &Slot) {
+        // The lease went to another process or away: the telemetry token
+        // issued under this one ends with it (ADR-t1662-3 decision 11).
+        self.revoke_lost_telemetry(slot.run.id());
         let mut message = format!(
             "lease of run {} is held by another process; this supervisor stopped watching it",
             slot.run.id()

@@ -67,6 +67,7 @@ pub mod session_log;
 pub mod setup_review;
 pub mod stats;
 pub mod supervise;
+pub mod telemetry_tokens;
 pub mod throughput_review;
 pub mod update;
 pub mod watch;

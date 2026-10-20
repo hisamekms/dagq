@@ -84,8 +84,10 @@ serviceは呼び出しのprincipal（`Principal`）をtokenから決め、クラ
   resumeを待つrun（`needs_session`）はtokenを保つので消さず、resumeは今までどおり発行し直す
 - executorのtelemetryのprincipal（ADR-t1662-3決定9〜11・13）: role `executor-telemetry`で、対象を1つだけ持つ（runの対象は`run_id`、runを持たない対象は種類とid。`domain::session_step::StepTarget`）。
   actor idは対象から作り（`domain::telemetry::actor_id`）、runの対象のtokenはworkerのものと同じくrunの終わりで断る。
-  ADR-t1233-4決定4のAI actorごとのtokenを、制御側が発行するこのprincipalに広げたもので、決定6のwrapper・hook・plannerのDBの直接の読み書きは変えず、段(5)のwrapper自身のprincipalも先取りしない。
-  発行と失効の口は制御側だけが呼ぶapplicationのport `TelemetryTokens`で、AI actorのコマンドからは呼べない
+  発行と失効の口は制御側だけが呼ぶapplicationのport `TelemetryTokens`で、AI actorのコマンドからは呼べない。
+  runの対象のtoken: supervisorだけが自分のleaseの下で、claim・resume・runの引き継ぎとexecutorの起動の前に発行し、runの終わりとleaseの喪失（そのleaseのものだけ）で失効させる。
+  発行と失効のevent（`telemetry_token_*`）は成功した後にだけ書き、失効の失敗は見回りがhandoffのexecの後もやり直す（詳細は`application::telemetry_tokens`のmodule doc）。
+  executorは`TelemetryTokens::telemetry_credential`で場所を引き、agentのenv・argv・worktree・run dirには渡さない
 - 断り: 認証できない要求は`unauthenticated`で断り、queueのevent `queue_service_unauthenticated`（tokenの値は書かない）に残す（理由は`QueueService::authenticate`のdoc comment）。
 - hostの呼び出し元に渡すenvはsocketのpathとtokenのfileのpathで、containerのrunにはsocketの代わりにbrokerのURLを渡す（[クライアントモード](#クライアントモード)、`domain::queue_service::CLIENT_ENV`）。
   envの名前の落とし穴は`CREDENTIAL_FILE_ENV`のdoc comment
@@ -286,8 +288,7 @@ workerとjobのClaudeの`permissions.deny`には`dagq service`の制御のコマ
 - 実Codexでの読み取りだけのjobのsocketへの到達の確認（`codex sandbox`とstubのCodexまで。上の「Codexのsandboxからの到達」）
 - `dagq ci failures`（`ci.read`。[CI watch](supervisor-lifecycle/ci-watch.md)）の読み取りのユースケース。
   clientのmodeでは`no_use_case`で断る
-- executor-telemetryのtokenを発行・失効させる処理（runのclaim・resume、jobの起動、plannerを開くとき）、sessionの持ち主の登録、executorからの送信。
-  portと`telemetry_report`の受け口だけがある
+- runの無い対象（job、planner）のexecutor-telemetryのtokenの発行と失効、sessionの持ち主の登録、executorからの送信
 - queueのbrokerはrun tokenのほかを通さないので、containerのrunのexecutorの`telemetry_report`の経路は無い（[Queue broker](queue-broker.md)の`TokenRefusal`）
 - 段(4)〜(6)の残り: brokerの残りの宛て（[Queue broker](queue-broker.md#まだ無いもの)）、supervisor・wrapper・hook・CLIのservice経由化、integrateのverificationの隔離
 

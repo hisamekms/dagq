@@ -54,17 +54,19 @@ use crate::domain::queue_service::{
     ServiceRequest, ServiceResponse, ServiceState, UseCase,
 };
 use crate::domain::session_step::StepTarget;
-use crate::domain::telemetry::{ReportRecorded, TelemetryReport};
+use crate::domain::telemetry::{HeldTelemetry, ReportRecorded, TelemetryReport};
 use crate::domain::{
     ActorContext, ActorRole, Answerer, Ask, AskId, EventKind, Finding, FindingId, FindingOutcome,
-    FindingStatus, NewAsk, NewFinding, NewNote, PlannerId, ProposalId, RequestId, RunEvent, RunId,
-    RunStatus, TaskId,
+    FindingStatus, LeaseToken, NewAsk, NewFinding, NewNote, PlannerId, ProposalId, RequestId,
+    RunEvent, RunId, RunStatus, TaskId,
 };
 
 /// The tokens' principals in [`SERVICE_DIR`].
 pub const TOKENS_DIR: &str = "tokens";
 /// The tokens' values in [`SERVICE_DIR`].
 pub const CREDENTIALS_DIR: &str = "credentials";
+/// The file in [`SERVICE_DIR`] [`TelemetryLock`] locks.
+const TELEMETRY_LOCK_FILE: &str = "telemetry.lock";
 /// The longest socket path a unix socket takes on macOS (`sun_path`).
 const MAX_SOCKET_PATH: usize = 103;
 /// How long a look waits for `hello`.
@@ -183,6 +185,10 @@ pub(crate) fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 struct TokenRecord {
     principal: Principal,
     issued_at: i64,
+    /// The lease (the supervisor's token) an executor's telemetry token was
+    /// issued under; none for an agent's token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    issued_under: Option<LeaseToken>,
 }
 
 /// A token the control side issued: the file its value is in, for the
@@ -194,7 +200,10 @@ pub struct IssuedToken {
     pub principal: Principal,
 }
 
-fn credential_path(queue_dir: &Path, actor_id: &str) -> PathBuf {
+/// The file the value of the token `actor_id` holds is written to, under
+/// the queue's `service/credentials/`: outside every worktree and run
+/// directory. The control side hands its path, never its value.
+pub fn credential_path(queue_dir: &Path, actor_id: &str) -> PathBuf {
     service_dir(queue_dir)
         .join(CREDENTIALS_DIR)
         .join(sha256_hex(actor_id.as_bytes()))
@@ -212,6 +221,62 @@ fn record_path(queue_dir: &Path, token: &str) -> PathBuf {
 /// Only the control side calls this; no command of an AI actor's does
 /// (ADR-t1233-4 decision 4).
 pub fn issue(queue_dir: &Path, principal: &Principal, now: i64) -> Result<IssuedToken> {
+    write_token(queue_dir, principal, None, now)
+}
+
+/// An exclusive `flock` on the queue's [`TELEMETRY_LOCK_FILE`], held while
+/// it lives: every issue and revocation of an executor's telemetry token
+/// holds it, so those of two supervisors never interleave. A revocation
+/// reads the target's file and removes it only once no record of the value
+/// it read is left; another supervisor's issue into that file in between
+/// would have its new token's file removed.
+pub struct TelemetryLock {
+    _file: File,
+}
+
+impl TelemetryLock {
+    /// Take the lock of the queue at `queue_dir`, waiting while another
+    /// holds it.
+    pub fn take(queue_dir: &Path) -> Result<Self> {
+        let dir = service_dir(queue_dir);
+        private_dir(&dir)?;
+        let path = dir.join(TELEMETRY_LOCK_FILE);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(&path)
+            .with_context(|| format!("open {}", path.display()))?;
+        file.lock()
+            .with_context(|| format!("lock {}", path.display()))?;
+        Ok(Self { _file: file })
+    }
+}
+
+/// [`issue`] for an executor's telemetry principal under `lock`, every
+/// token it held revoked first ([`revoke_under`]), with the lease
+/// `issued_under` the token was issued under kept in its record, for a
+/// revocation of a lost lease to take only its own.
+pub fn issue_under(
+    lock: &TelemetryLock,
+    queue_dir: &Path,
+    principal: &Principal,
+    issued_under: Option<&LeaseToken>,
+    now: i64,
+) -> Result<IssuedToken> {
+    revoke_under(lock, queue_dir, &principal.actor_id, None)?;
+    write_token(queue_dir, principal, issued_under, now)
+}
+
+/// Write a token for `principal` issued under `issued_under` ([`issue`]).
+fn write_token(
+    queue_dir: &Path,
+    principal: &Principal,
+    issued_under: Option<&LeaseToken>,
+    now: i64,
+) -> Result<IssuedToken> {
     principal.check().map_err(anyhow::Error::msg)?;
     revoke(queue_dir, &principal.actor_id)?;
     let mut bytes = [0u8; 32];
@@ -224,15 +289,21 @@ pub fn issue(queue_dir: &Path, principal: &Principal, now: i64) -> Result<Issued
     let record = TokenRecord {
         principal: principal.clone(),
         issued_at: now,
+        issued_under: issued_under.cloned(),
     };
     // The value first: a token whose record is not written yet is no
     // token, and one whose value is written can always be revoked.
     let file = credential_path(queue_dir, &principal.actor_id);
     write_private(&file, token.as_bytes())?;
-    write_private(
+    // A record that cannot be written leaves no file of a value that
+    // authenticates nothing.
+    if let Err(error) = write_private(
         &record_path(queue_dir, &token),
         &serde_json::to_vec(&record)?,
-    )?;
+    ) {
+        let _ = fs::remove_file(&file);
+        return Err(error);
+    }
     Ok(IssuedToken {
         file,
         principal: principal.clone(),
@@ -240,7 +311,15 @@ pub fn issue(queue_dir: &Path, principal: &Principal, now: i64) -> Result<Issued
 }
 
 /// Revoke the token `actor_id` holds (its run ended, its lease was lost,
-/// or a resume issues it another); whether there was one.
+/// or a resume issues it another); whether one was revoked: a record of
+/// it removed, and not only a file whose value authenticated nothing (an
+/// issue that failed after its file, or another revocation that came
+/// first). The record goes first, which is what makes the token unknown to
+/// the service, and the file last: a file that cannot be read or a record
+/// that cannot be removed is an error that leaves both, so the token is
+/// still found to revoke again. A file left once its record is gone is
+/// only logged: the value it holds authenticates nothing, and the next
+/// issue replaces it.
 pub fn revoke(queue_dir: &Path, actor_id: &str) -> Result<bool> {
     let file = credential_path(queue_dir, actor_id);
     let token = match fs::read_to_string(&file) {
@@ -248,13 +327,123 @@ pub fn revoke(queue_dir: &Path, actor_id: &str) -> Result<bool> {
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error).with_context(|| format!("read {}", file.display())),
     };
-    match fs::remove_file(record_path(queue_dir, token.trim())) {
+    let revoked = match fs::remove_file(record_path(queue_dir, token.trim())) {
+        Ok(()) => true,
+        Err(error) if error.kind() == ErrorKind::NotFound => false,
+        Err(error) => return Err(error).context("remove a token's record"),
+    };
+    match fs::remove_file(&file) {
         Ok(()) => {}
         Err(error) if error.kind() == ErrorKind::NotFound => {}
-        Err(error) => return Err(error).context("remove a token's record"),
+        Err(error) => {
+            warn!(
+                actor_id,
+                "the revoked token's file {} could not be removed: {error}",
+                file.display()
+            );
+        }
     }
-    fs::remove_file(&file).with_context(|| format!("remove {}", file.display()))?;
-    Ok(true)
+    Ok(revoked)
+}
+
+/// The records of the tokens that hold, each with its principal: what
+/// [`lookup`] finds a token by. A record gone meanwhile is left out, and so
+/// is one that does not parse, with a warning ([`lookup`] cannot read it
+/// either, so it authenticates nothing); a directory or a record that
+/// cannot be read is an error, as it may still authenticate.
+fn records(queue_dir: &Path) -> Result<Vec<(PathBuf, TokenRecord)>> {
+    let dir = service_dir(queue_dir).join(TOKENS_DIR);
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).with_context(|| format!("read {}", dir.display())),
+    };
+    let mut records = Vec::new();
+    for entry in entries {
+        let path = entry
+            .with_context(|| format!("read {}", dir.display()))?
+            .path();
+        // A record being written is a hidden temporary file.
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        if name.starts_with('.') || !name.ends_with(".json") {
+            continue;
+        }
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+        };
+        match serde_json::from_slice::<TokenRecord>(&bytes) {
+            Ok(record) => records.push((path, record)),
+            Err(error) => warn!(
+                "the token record {} does not parse: {error}",
+                path.display()
+            ),
+        }
+    }
+    Ok(records)
+}
+
+/// The principals of the tokens that hold (see [`records`]).
+pub fn principals(queue_dir: &Path) -> Result<Vec<Principal>> {
+    Ok(records(queue_dir)?
+        .into_iter()
+        .map(|(_, record)| record.principal)
+        .collect())
+}
+
+/// Revoke the tokens of `actor_id` under `lock`, only those issued under
+/// `under` when it is given: every record of them, then the file when the
+/// value it holds has no record left. The file is read first, and one that
+/// cannot be read is an error that revokes nothing. Once it returns `Ok`,
+/// none of those tokens authenticates; an error may leave one that does,
+/// still among the [`principals`]. Whether there was one; a token issued
+/// under another lease (the one a supervisor that adopted the run issued)
+/// is left as it is, and so is its file.
+pub fn revoke_under(
+    _lock: &TelemetryLock,
+    queue_dir: &Path,
+    actor_id: &str,
+    under: Option<&LeaseToken>,
+) -> Result<bool> {
+    let file = credential_path(queue_dir, actor_id);
+    let value = match fs::read_to_string(&file) {
+        Ok(value) => Some(value.trim().to_owned()),
+        Err(error) if error.kind() == ErrorKind::NotFound => None,
+        Err(error) => return Err(error).with_context(|| format!("read {}", file.display())),
+    };
+    let mut revoked = false;
+    for (path, record) in records(queue_dir)? {
+        if record.principal.actor_id != actor_id
+            || under.is_some_and(|under| record.issued_under.as_ref() != Some(under))
+        {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => revoked = true,
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error).context("remove a token's record"),
+        }
+    }
+    if let Some(value) = value
+        && !record_path(queue_dir, &value).exists()
+    {
+        match fs::remove_file(&file) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                warn!(
+                    actor_id,
+                    "the revoked token's file {} could not be removed: {error}",
+                    file.display()
+                );
+            }
+        }
+    }
+    Ok(revoked)
 }
 
 /// Revoke every token whose principal `ended` says has ended (a worker's
@@ -393,16 +582,49 @@ impl TelemetryTokens for SystemServiceAccess {
         db: &Path,
         target: &StepTarget,
         task: Option<TaskId>,
+        issued_under: Option<&LeaseToken>,
     ) -> Result<PathBuf> {
+        let queue_dir = queue_dir_of(db);
         let principal = Principal::telemetry(target, task);
-        Ok(issue(&queue_dir_of(db), &principal, unix_now())?.file)
+        let lock = TelemetryLock::take(&queue_dir)?;
+        Ok(issue_under(&lock, &queue_dir, &principal, issued_under, unix_now())?.file)
     }
 
-    fn revoke_telemetry(&self, db: &Path, target: &StepTarget) -> Result<bool> {
-        revoke(
-            &queue_dir_of(db),
+    fn revoke_telemetry(
+        &self,
+        db: &Path,
+        target: &StepTarget,
+        issued_under: Option<&LeaseToken>,
+    ) -> Result<bool> {
+        let queue_dir = queue_dir_of(db);
+        let lock = TelemetryLock::take(&queue_dir)?;
+        revoke_under(
+            &lock,
+            &queue_dir,
             &crate::domain::telemetry::actor_id(target),
+            issued_under,
         )
+    }
+
+    fn telemetry_credential(&self, db: &Path, target: &StepTarget) -> Option<PathBuf> {
+        let queue_dir = queue_dir_of(db);
+        let file = credential_path(&queue_dir, &crate::domain::telemetry::actor_id(target));
+        // Only a file whose value is a token that holds.
+        let token = read_token(&file).ok()?;
+        matches!(lookup(&queue_dir, &token), Ok(Some(_))).then_some(file)
+    }
+
+    fn held_telemetry(&self, db: &Path) -> Result<Vec<HeldTelemetry>> {
+        Ok(records(&queue_dir_of(db))?
+            .into_iter()
+            .filter(|(_, record)| record.principal.role == ActorRole::ExecutorTelemetry)
+            .filter_map(|(_, record)| {
+                Some(HeldTelemetry {
+                    target: record.principal.target?,
+                    issued_under: record.issued_under,
+                })
+            })
+            .collect())
     }
 }
 
@@ -1774,6 +1996,7 @@ mod tests {
         let record = TokenRecord {
             principal: ended.clone(),
             issued_at: 0,
+            issued_under: None,
         };
         write_private(
             &record_path(dir.path(), &orphan),
@@ -1793,6 +2016,7 @@ mod tests {
             &serde_json::to_vec(&TokenRecord {
                 principal: old.clone(),
                 issued_at: 0,
+                issued_under: None,
             })
             .unwrap(),
         )
