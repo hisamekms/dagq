@@ -32,6 +32,7 @@ related:
   - adr-t1428-1
   - adr-t2259-1
   - adr-t2352-1
+  - adr-t2389-1
   - design-supervisor-lifecycle-review-builtin
   - design-supervisor-lifecycle-review-programs
 ---
@@ -167,8 +168,9 @@ e2eが要るpassしたrunは、着地スロットを待つ段でhostでe2eを流
 
 ## 文書の照合
 
-promptは`REVIEW_DOCS_CHECK`で文書の照合を求める（[ADR-t1942-2](../../adr/2026-10-07-t1942-2-document-check-and-review-in-both-directions.md)決定4、[ADR-t2352-1](../../adr/2026-10-16-t2352-1-review-sends-back-only-documents-the-diff-touched-and-follows-up-the-rest.md)、[built-in](review-builtin.md)）。
+文書の照合は全体のreview（`builtin:acceptance`）だけが行い、promptは`REVIEW_DOCS_CHECK`でそれを求める（[ADR-t1942-2](../../adr/2026-10-07-t1942-2-document-check-and-review-in-both-directions.md)決定4、[ADR-t2352-1](../../adr/2026-10-16-t2352-1-review-sends-back-only-documents-the-diff-touched-and-follows-up-the-rest.md)、[ADR-t2389-1](../../adr/2026-10-12-t2389-1-docs-check-only-in-the-overall-review.md)、[built-in](review-builtin.md)）。
 
+- runtimeの文は汎用の照合だけを持ち、どんな記述を文書の欠陥とするか（コードの書き写し・経緯など）はpjの規則のfile（このrepositoryでは`.dagq/review/builtin-acceptance.md`）が持つ。
 - 差し戻すのは、差分が変えた文書と差分の食い違いと、差分が文書の不変条件・約束・境界を破ることだけ。
 - 差分が触っていない文書の古い記述は`follow_ups`で返し、supervisorが`docs_drift`のdraftにする（[Draft planners](draft-planners.md)）。
 

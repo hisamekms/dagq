@@ -17,14 +17,16 @@ use sha2::{Digest, Sha256};
 /// `app.py` (code that the default globs match) and rewrites both rules on
 /// its branch: the review starts `builtin:security`'s job beside the whole
 /// review's, and not `builtin:tests`'. Both prompts hold main's rules, not
-/// the worker's, the agent's after the binary's definition; both starts
-/// record the built-in, this build and the digests.
+/// the worker's, the agent's after the binary's definition; the rule on
+/// copies of the code and history reaches the whole review from main's
+/// file only, never from the runtime (ADR-t2389-1 decision 2). Both
+/// starts record the built-in, this build and the digests.
 #[test]
 fn a_builtin_reviews_with_the_binarys_definition_and_the_landing_branchs_rules() {
     let (_dir, repo, db) = fixture();
     const MAIN_RULES: &str = "Payments go through pay/ only.\n";
     const RULES: &str = ".dagq/review/builtin-security.md";
-    const MAIN_ACCEPTANCE: &str = "Every change says so in CHANGES.\n";
+    const MAIN_ACCEPTANCE: &str = "Report as docs_drift text a change adds to a document that copies the code or carries history.\n";
     const ACCEPTANCE: &str = ".dagq/review/builtin-acceptance.md";
     fs::create_dir_all(repo.join(".dagq/review")).unwrap();
     fs::write(repo.join(RULES), MAIN_RULES).unwrap();
@@ -69,6 +71,12 @@ fn a_builtin_reviews_with_the_binarys_definition_and_the_landing_branchs_rules()
     let whole = reviewer.prompts();
     assert_eq!(whole.len(), 1, "{whole:?}");
     assert!(whole[0].contains(MAIN_ACCEPTANCE), "{}", whole[0]);
+    assert_eq!(
+        whole[0].matches("copies the code").count(),
+        1,
+        "{}",
+        whole[0]
+    );
     assert!(
         !whole[0].contains("the worker s acceptance"),
         "{}",

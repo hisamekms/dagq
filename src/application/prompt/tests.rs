@@ -2111,7 +2111,16 @@ fn the_review_prompt_takes_the_projects_rules_from_the_landing_branch_only() {
         "{with}"
     );
     for prompt in [&without, &with] {
-        for word in ["AGENTS.md", "CLAUDE.md", "instructions at the root"] {
+        // What makes a document's text a defect (copies of the code,
+        // history) is the project's rules, never the runtime's fixed
+        // sentences (ADR-t2389-1 decision 2).
+        for word in [
+            "AGENTS.md",
+            "CLAUDE.md",
+            "instructions at the root",
+            "copies the code",
+            "history",
+        ] {
             assert!(!prompt.contains(word), "{word}: {prompt}");
         }
         assert!(

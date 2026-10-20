@@ -306,8 +306,9 @@ mod tests {
     }
 
     /// The definitions are generic: no instructions file to look for, and
-    /// no language, tool or document rule of one project (ADR-t2259-1
-    /// decision 6, goal 188's constraints).
+    /// no language, tool or document rule of one project, such as reporting
+    /// copies of the code or history in a document (ADR-t2259-1 decision 6,
+    /// ADR-t2389-1 decision 2, goal 188's constraints).
     #[test]
     fn the_definitions_name_no_project_of_their_own() {
         for agent in BuiltinAgent::ALL {
@@ -324,6 +325,8 @@ mod tests {
                 "docs/",
                 "adr",
                 "dagq",
+                "copies the code",
+                "history",
             ] {
                 assert!(!lower.contains(word), "{word} in {}", agent.name());
             }
