@@ -80,7 +80,7 @@ reason_codes! {
     Cancelled => "cancelled": "a person cancelled the landing",
     TriageResume => "triage_resume": "the triage (or a person answering it) sent the run back to its session",
     ResumeExhausted => "resume_exhausted": "the run still needed a session after its last resume",
-    SessionGone => "session_gone": "an adopter found the workspace of a run whose /exit never reached its session gone, and the run could not land without that session (its head is not the reviewed commit, a worker_question is open, a rebase is in progress), so it waits for a resume instead of landing",
+    SessionGone => "session_gone": "an older supervisor found the workspace of a run whose /exit never reached its session gone and parked the run for a resume; the supervisor no longer records this code, which is read only from runs recorded before",
     ReplanParked => "replan_parked": "the trusted runtime parked the run at a turn's end for a replanning of its task and saved its work; it resumes once the replanning ends in a continuation or a withdrawal",
     Held => "held": "a person or the inbox held the run's task, and the supervisor parked the run at a turn's end with its session and work left in place; it resumes once the hold is released",
     Orphaned => "orphaned": "the run's registered processes were found dead and it was recovered",

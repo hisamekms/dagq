@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 
 use super::{
     TaskRun, decide_landing, exhaust_resumes, finish_session, park_after_e2e, park_after_recheck,
-    park_for_hold, park_for_replan, park_gone_session, park_live,
+    park_for_hold, park_for_replan, park_live,
 };
 use crate::domain::{
     DomainError, Reason, ReasonCode, RunEvent, RunStatus, recheck,
@@ -248,25 +248,6 @@ pub fn record_hold_park(
     let run = park_for_hold(run, reason.to_owned())?;
     let payload = with_status_and_reason(Reason::new(ReasonCode::Held).on(payload), &run, reason);
     Ok((run, vec![NewRunEvent::new(EventKind::HoldParked, payload)]))
-}
-
-/// [`park_gone_session`], recorded as `session_gone_parked` with the
-/// caller's `payload`, `code: session_gone`, the new status and the reason.
-pub fn record_gone_session_park(
-    run: TaskRun,
-    reason: &str,
-    payload: Value,
-) -> Result<Recorded, DomainError> {
-    let run = park_gone_session(run, reason.to_owned())?;
-    let payload = with_status_and_reason(
-        Reason::new(ReasonCode::SessionGone).on(payload),
-        &run,
-        reason,
-    );
-    Ok((
-        run,
-        vec![NewRunEvent::new(EventKind::SessionGoneParked, payload)],
-    ))
 }
 
 /// [`park_after_e2e`], recorded as `run_e2e_failed` with the caller's

@@ -1313,10 +1313,11 @@ pub const SCRATCHPAD_REMOVED: &str = EventKind::ScratchpadRemoved.as_str();
 pub const SCREEN_CAPTURE_FAILED: &str = EventKind::ScreenCaptureFailed.as_str();
 pub const SESSION_CLOSED: &str = EventKind::SessionClosed.as_str();
 pub const SESSION_EXITED: &str = EventKind::SessionExited.as_str();
-/// An adopter parked a run for a resume, whose `/exit` never reached its
-/// session, whose workspace was gone, and which could not land without that
-/// session (task 960): `code: session_gone`, `workspace_id`, `held`, the
-/// status and the reason.
+/// A park for a resume that an older supervisor recorded when the
+/// workspace of a run whose `/exit` never reached its session was gone
+/// (`code: session_gone`, `workspace_id`, `held`, the status and the
+/// reason). The supervisor no longer writes it; readers of a run's history
+/// (show, stats, resume) still read the ones recorded before.
 pub const SESSION_GONE_PARKED: &str = EventKind::SessionGoneParked.as_str();
 pub const SESSION_IDLE_OBSERVED: &str = EventKind::SessionIdleObserved.as_str();
 pub const SESSION_OPENED: &str = EventKind::SessionOpened.as_str();
