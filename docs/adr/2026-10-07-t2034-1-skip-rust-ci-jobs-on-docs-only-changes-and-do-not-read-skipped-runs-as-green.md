@@ -8,6 +8,8 @@ updated: 2026-10-07
 accepted_on: 2026-10-07
 amends:
   - adr-t1920-1 decision 2
+amended_by:
+  - adr-t2134-1
 owners:
   - hisamekms
 tags:

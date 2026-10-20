@@ -23,15 +23,26 @@ env:
 
 jobs:
   # Whether the change is docs only (ADR-t2034-1): every path of git diff --name-only from the
-  # base to this run's commit is under docs/ or a *.md at the root. The base
-  # is the pull request's base or the commit before the push. Without a base
-  # (none, all zeros, or not in the history: the first push of a new branch,
-  # a force push), with an empty diff, or when this job fails, the output is
-  # not true and every job runs. --no-renames lists a renamed file's old path
-  # too, so a file moved out of src/ into docs/ is not docs only.
+  # base to this run's commit is under docs/ or a *.md at the root. A pull
+  # request's base is its base. A push's base is the head commit of the latest
+  # completed push run of this workflow on main whose checks job ended success
+  # or failure, which must be an ancestor of this run's commit (ADR-t2134-1):
+  # GitHub cancels a pending run of the same concurrency group when a newer
+  # one comes, so the commit before the push may never have had its Rust jobs
+  # run, and comparing with it would let a code change pass as docs only.
+  # Without a base (none, all zeros, not in the history, an API that cannot be
+  # read, no such run, a push base that is not an ancestor), with an empty
+  # diff, or when this job fails, the output is not true and every job runs.
+  # The log names the base and where it came from. --no-renames lists a
+  # renamed file's old path too, so a file moved out of src/ into docs/ is not
+  # docs only.
   changes:
     name: docs-only diff
     runs-on: ubuntu-24.04
+    # actions: read for the runs and jobs of this workflow that give a push's base.
+    permissions:
+      contents: read
+      actions: read
     outputs:
       docs_only: ${{ steps.diff.outputs.docs_only }}
     steps:
@@ -41,18 +52,43 @@ jobs:
           # has no base and would always run everything).
           fetch-depth: 0
 
+      # The checks job is found by its name, the same as in [ci_watch]
+      # required_jobs of dagq.toml: a change to the name changes this step too.
       - name: Docs-only diff
         id: diff
         env:
-          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           docs_only=false
-          if [ -n "$BASE" ] && printf '%s' "$BASE" | grep -q '[^0]' && git cat-file -e "$BASE^{commit}" 2>/dev/null &&
-            files=$(git -c core.quotePath=false diff --no-renames --name-only "$BASE" "$GITHUB_SHA") &&
+          base= source=
+          if [ "$EVENT" = pull_request ]; then
+            base=$PR_BASE source="the pull request's base"
+          elif workflow=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" --jq .workflow_id) &&
+            runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow/runs?branch=main&event=push&status=completed&per_page=100" \
+              --jq '.workflow_runs[] | "\(.id) \(.head_sha)"'); then
+            # Newest first; a job list that cannot be read stops the search with no base.
+            while read -r id sha; do
+              [ -n "$id" ] || continue
+              conclusion=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs" \
+                --jq '.jobs[] | select(.name == "fmt / test / clippy / coverage") | .conclusion') || break
+              case $conclusion in
+                success|failure) base=$sha source="run $id ($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$id), checks $conclusion"; break ;;
+              esac
+            done <<EOF
+          $runs
+          EOF
+          fi
+          if [ "$EVENT" != pull_request ] && [ -n "$base" ] && ! git merge-base --is-ancestor "$base" "$GITHUB_SHA" 2>/dev/null; then
+            source="$source, not in the history as an ancestor of this run's commit" base=
+          fi
+          if [ -n "$base" ] && printf '%s' "$base" | grep -q '[^0]' && git cat-file -e "$base^{commit}" 2>/dev/null &&
+            files=$(git -c core.quotePath=false diff --no-renames --name-only "$base" "$GITHUB_SHA") &&
             [ -n "$files" ] && ! printf '%s\n' "$files" | grep -qvE '^(docs/.*|[^/]*\.md)$'; then
             docs_only=true
           fi
-          echo "docs only: $docs_only (base: ${BASE:-none})"
+          echo "docs only: $docs_only (base: ${base:-none}, from: ${source:-no run found or read})"
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
 
   # The checks that need no Rust toolchain, the doc checks among them: they
