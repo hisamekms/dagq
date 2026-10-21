@@ -44,6 +44,8 @@ pub struct Span {
     pub active_unavailable: bool,
     /// Its transcript turns recorded so far (unix milliseconds).
     pub turns: Vec<Turn>,
+    /// The `session_turns` that recorded each of `turns`, in their order.
+    pub turns_recorded: Vec<EventId>,
     /// The work breakdown of a run's own session, recorded when it closed
     /// (task 514).
     pub work: Option<Value>,
@@ -119,6 +121,7 @@ pub fn spans(events: &[RunEvent]) -> Vec<Span> {
                     active: None,
                     active_unavailable: false,
                     turns: Vec::new(),
+                    turns_recorded: Vec::new(),
                     work: None,
                     tokens: None,
                     model: None,
@@ -144,6 +147,7 @@ pub fn spans(events: &[RunEvent]) -> Vec<Span> {
                     measurements(span, &event.payload);
                 }
                 let turns = event.payload["turns"].as_array().into_iter().flatten();
+                let before = span.turns.len();
                 span.turns.extend(turns.filter_map(|turn| {
                     let time = |at: usize| turn.get(at)?.as_str().and_then(rfc3339_millis);
                     Some(Turn {
@@ -151,6 +155,9 @@ pub fn spans(events: &[RunEvent]) -> Vec<Span> {
                         end: time(1)?,
                     })
                 }));
+                let added = span.turns.len() - before;
+                span.turns_recorded
+                    .extend(std::iter::repeat_n(event.id, added));
             }
             Some(EventKind::SessionClosed) => {
                 let opened = event.payload["opened_event_id"].as_i64().map(EventId::new);
@@ -289,6 +296,31 @@ pub struct Sessions {
     /// ([`Span::route`], ADR-t1394-2 decision 4); kinds and routes without
     /// a span are not listed.
     pub by_route: BTreeMap<&'static str, BTreeMap<String, KindSessions>>,
+    /// Each span `by_kind` counted, in the order of their opening, for
+    /// what compares the window span by span (`stats --ledger`); not in
+    /// `stats`' JSON.
+    #[serde(skip)]
+    pub spans: Vec<SpanInWindow>,
+}
+
+/// One span a window counted and its active seconds in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpanInWindow {
+    /// Its `session_opened`: the span's id.
+    pub opened: EventId,
+    pub kind: String,
+    pub run_id: Option<RunId>,
+    /// Whether it closed by the window's last event; else it is open at
+    /// the window's end, and its active time is that of the turns the
+    /// events read hold, recorded before the end or after it.
+    pub closed_in_window: bool,
+    /// The seconds of its turns that overlap the window; none when it has
+    /// no active time recorded (`active.count` leaves it out).
+    pub active: Option<i64>,
+    /// The same of the turns recorded by the window's last event alone:
+    /// what a read of the events to the window's end gives. `active` of a
+    /// span closed in the window.
+    pub active_through_end: Option<i64>,
 }
 
 /// One kind's spans of a run: how many, and their seconds open and active
@@ -409,6 +441,7 @@ pub fn by_kind(
     let mut by_kind: BTreeMap<&'static str, Tally> =
         KINDS.iter().map(|&kind| (kind, Tally::default())).collect();
     let mut by_route: BTreeMap<&'static str, BTreeMap<String, Tally>> = BTreeMap::new();
+    let mut counted = Vec::new();
     for span in spans.iter().filter(|span| {
         span.opened <= window.upto
             && span.closed.is_none_or(|closed| closed > window.after)
@@ -417,10 +450,37 @@ pub fn by_kind(
         let Some(kind) = KINDS.into_iter().find(|kind| *kind == span.kind) else {
             continue;
         };
-        by_kind
+        let active = by_kind
             .entry(kind)
             .or_default()
             .add(span, window, from, end);
+        let closed_in_window = span.closed.is_some_and(|closed| closed <= window.upto);
+        let active_through_end = if closed_in_window {
+            active
+        } else {
+            let through: Vec<&Turn> = span
+                .turns
+                .iter()
+                .zip(&span.turns_recorded)
+                .filter(|(_, by)| **by <= window.upto)
+                .map(|(turn, _)| turn)
+                .collect();
+            (!through.is_empty()).then(|| {
+                through
+                    .iter()
+                    .map(|turn| turn.overlap(from.unwrap_or(i64::MIN), end))
+                    .sum::<i64>()
+                    / 1000
+            })
+        };
+        counted.push(SpanInWindow {
+            opened: span.opened,
+            kind: span.kind.clone(),
+            run_id: span.run_id.clone(),
+            closed_in_window,
+            active,
+            active_through_end,
+        });
         if let Some(route) = &span.route {
             by_route
                 .entry(kind)
@@ -446,6 +506,7 @@ pub fn by_kind(
                 (kind, routes)
             })
             .collect(),
+        spans: counted,
     }
 }
 
@@ -462,8 +523,15 @@ struct Tally {
 
 impl Tally {
     /// Add `span`, its time cut to the window `window` from `from` to
-    /// `end` (unix milliseconds).
-    fn add(&mut self, span: &Span, window: SessionWindow, from: Option<i64>, end: i64) {
+    /// `end` (unix milliseconds); its active seconds in the window, none
+    /// when it has none recorded.
+    fn add(
+        &mut self,
+        span: &Span,
+        window: SessionWindow,
+        from: Option<i64>,
+        end: i64,
+    ) -> Option<i64> {
         let sessions = &mut self.sessions;
         sessions.count += 1;
         let closed_in_window = span.closed.is_some_and(|closed| closed <= window.upto);
@@ -497,15 +565,17 @@ impl Tally {
         } else {
             !span.turns.is_empty()
         };
-        if recorded {
-            let millis: i64 = span
-                .turns
-                .iter()
-                .map(|turn| turn.overlap(from.unwrap_or(i64::MIN), end))
-                .sum();
-            self.active.push(millis / 1000);
-            self.open_of_active += open_secs;
+        if !recorded {
+            return None;
         }
+        let millis: i64 = span
+            .turns
+            .iter()
+            .map(|turn| turn.overlap(from.unwrap_or(i64::MIN), end))
+            .sum();
+        self.active.push(millis / 1000);
+        self.open_of_active += open_secs;
+        Some(millis / 1000)
     }
 
     fn finish(self) -> KindSessions {

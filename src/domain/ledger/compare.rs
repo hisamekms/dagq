@@ -14,7 +14,8 @@
 //! of. The fields of no run or task (`jobs`, `sessions`, ...) are today's
 //! function of `stats` over the events the ledger's rows give back
 //! ([`super::window::LedgerWindow::events`]), against the same function
-//! over the EventStore. The host's load is the summary of the node rows'
+//! over the EventStore; `sessions` lists besides each span whose active
+//! seconds differ ([`spans`]). The host's load is the summary of the node rows'
 //! samples against the summary of today's CSV files, both the
 //! summary `stats`' `host` and `kpi`'s `host`, `cpu_per_landing`,
 //! `load_per_core` and `health.disk` are made of.
@@ -29,6 +30,7 @@ use super::read::read;
 use super::{LEDGER_V, LedgerKind, LedgerRow};
 use crate::domain::host_metrics::{self, HostSample, HostSummary, NodeSample};
 use crate::domain::stats::landing::PHASES;
+use crate::domain::stats::sessions::SpanInWindow;
 use crate::domain::stats::{RunStats, timestamp_millis};
 use crate::domain::{EventId, RunEvent, TaskId};
 
@@ -206,6 +208,98 @@ pub enum FieldReason {
     /// Every row is there and up to date: the rows give other events than
     /// the EventStore (an event of no row, a row's records cut).
     Records,
+    /// Of `sessions`' active time: a span open at the window's end has
+    /// turns its events record after the end, of time in the window
+    /// (a turn is recorded after it ends, so one running at the end comes
+    /// after it). Today's `stats`
+    /// reads every event of the EventStore and counts them; the ledger's
+    /// window gives back the events to its end only
+    /// ([`super::window::LedgerWindow::events`]), so it has fewer turns
+    /// of the span, or none and leaves it out of `active.count`. Each
+    /// such span is a [`SpanDiff`] of [`SpanReason::TurnsAfterEnd`]; a
+    /// window that ends now has no event after it.
+    TurnsAfterEnd,
+}
+
+/// Why a span's active seconds differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpanReason {
+    /// Open at the window's end in today's `stats`, and the ledger's
+    /// active is less (or none) and that of today's turns recorded by the
+    /// window's last event ([`SpanInWindow::active_through_end`]): the
+    /// turns recorded after the end make the whole difference
+    /// ([`FieldReason::TurnsAfterEnd`]).
+    TurnsAfterEnd,
+    /// None of these: a span on one side only, one closed in the window,
+    /// one with no less active time in the ledger's, or one whose ledger
+    /// lacks turns recorded by the window's end too (a row not folded up
+    /// to them).
+    Unexplained,
+}
+
+/// One span whose active seconds in the window differ between today's
+/// `stats` and the ledger's rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SpanDiff {
+    /// The span's `session_opened` event id.
+    pub session: EventId,
+    pub kind: String,
+    pub run_id: Option<String>,
+    /// Its active seconds in the window, none when that side has no
+    /// active time of it (or no span).
+    pub stats: Option<i64>,
+    pub ledger: Option<i64>,
+    /// `ledger - stats`, none when either is none.
+    pub diff: Option<i64>,
+    pub reason: SpanReason,
+}
+
+/// The spans of `today` (today's `stats`' `sessions`) and `ledger` (the
+/// same of the ledger's rows) whose active seconds differ or that one side
+/// has alone, by their `session_opened`.
+pub fn spans(today: &[SpanInWindow], ledger: &[SpanInWindow]) -> Vec<SpanDiff> {
+    let by_id = |spans: &[SpanInWindow]| -> BTreeMap<EventId, SpanInWindow> {
+        spans
+            .iter()
+            .map(|span| (span.opened, span.clone()))
+            .collect()
+    };
+    let (today, ledger) = (by_id(today), by_id(ledger));
+    let ids: BTreeSet<EventId> = today.keys().chain(ledger.keys()).copied().collect();
+    ids.into_iter()
+        .filter_map(|id| {
+            let (a, b) = (today.get(&id), ledger.get(&id));
+            let (stats, ledger) = (a.and_then(|a| a.active), b.and_then(|b| b.active));
+            if a.is_some() && b.is_some() && stats == ledger {
+                return None;
+            }
+            let span = a.or(b)?;
+            let after_end = a.is_some_and(|a| {
+                !a.closed_in_window && ledger < stats && ledger == a.active_through_end
+            });
+            let reason = if b.is_some() && after_end {
+                SpanReason::TurnsAfterEnd
+            } else {
+                SpanReason::Unexplained
+            };
+            Some(SpanDiff {
+                session: id,
+                kind: span.kind.clone(),
+                run_id: span.run_id.as_ref().map(ToString::to_string),
+                stats,
+                ledger,
+                diff: stats.zip(ledger).map(|(stats, ledger)| ledger - stats),
+                reason,
+            })
+        })
+        .collect()
+}
+
+/// Whether a value of `sessions` at `path` is of the spans' active time.
+fn of_active(path: &str) -> bool {
+    path.split('.')
+        .any(|part| matches!(part, "active" | "active_ratio"))
 }
 
 /// A value of a field that differs, by its path in the field's JSON.
@@ -228,6 +322,9 @@ pub struct FieldComparison {
     /// How many differ in all.
     pub differing: usize,
     pub reasons: Vec<FieldReason>,
+    /// Of `sessions`: each span whose active seconds differ ([`spans`]).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub spans: Vec<SpanDiff>,
 }
 
 /// How many differing values of a field are listed.
@@ -282,13 +379,22 @@ fn leaves(path: &str, today: &Value, ledger: &Value, out: &mut Vec<LeafDiff>) {
 
 /// The fields `names` of today's `stats` (`today`, its JSON) beside those
 /// of the ledger's rows (`ledger`), with the reasons the window's session
-/// and queue rows give (`rows`: their reconciliation).
+/// and queue rows give (`rows`: their reconciliation). `sessions` takes
+/// `span_diffs` ([`spans`]): when every one is
+/// [`SpanReason::TurnsAfterEnd`], its values of active time are of
+/// [`FieldReason::TurnsAfterEnd`] in place of [`FieldReason::Records`]
+/// (missing or dirty rows are named still, for they can cut turns too).
 pub fn fields(
     today: &Value,
     ledger: &Value,
     names: &[&str],
     rows: &[KindCount],
+    span_diffs: &[SpanDiff],
 ) -> Vec<FieldComparison> {
+    let after_end = !span_diffs.is_empty()
+        && span_diffs
+            .iter()
+            .all(|span| span.reason == SpanReason::TurnsAfterEnd);
     let runless = rows
         .iter()
         .filter(|count| matches!(count.kind, LedgerKind::Session | LedgerKind::Queue));
@@ -309,8 +415,14 @@ pub fn fields(
                 &mut differences,
             );
             let differing = differences.len();
+            let sessions = *name == "sessions";
+            let records =
+                !(sessions && after_end) || differences.iter().any(|leaf| !of_active(&leaf.path));
             differences.truncate(MAX_LEAVES);
             let mut reasons = Vec::new();
+            if sessions && after_end && differing > 0 {
+                reasons.push(FieldReason::TurnsAfterEnd);
+            }
             if differing > 0 {
                 if missing {
                     reasons.push(FieldReason::RowsMissing);
@@ -318,7 +430,7 @@ pub fn fields(
                 if dirty {
                     reasons.push(FieldReason::RowsDirty);
                 }
-                if reasons.is_empty() {
+                if !(missing || dirty) && records {
                     reasons.push(FieldReason::Records);
                 }
             }
@@ -328,6 +440,11 @@ pub fn fields(
                 differences,
                 differing,
                 reasons,
+                spans: if sessions {
+                    span_diffs.to_vec()
+                } else {
+                    Vec::new()
+                },
             }
         })
         .collect()

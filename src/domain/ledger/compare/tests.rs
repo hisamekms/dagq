@@ -1,6 +1,7 @@
 use serde_json::json;
 
 use super::*;
+use crate::domain::RunId;
 use crate::domain::host_metrics::{HOST_NODE, SampleSource};
 use crate::domain::ledger::builder::{self, Inputs, Target};
 use crate::domain::ledger::node;
@@ -138,7 +139,7 @@ fn a_field_of_no_run_lists_its_differences_and_why() {
         vec!["observe/1".to_owned()],
         Vec::new(),
     )];
-    let compared = fields(&today, &ledger, &["jobs", "sessions"], &rows);
+    let compared = fields(&today, &ledger, &["jobs", "sessions"], &rows, &[]);
     assert!(!compared[0].equal);
     assert_eq!(compared[0].differences[0].path, "jobs.observe.count");
     assert_eq!(compared[0].differences[0].diff, Some(-1.0));
@@ -147,13 +148,253 @@ fn a_field_of_no_run_lists_its_differences_and_why() {
 
     let dirty = [count(LedgerKind::Queue, Vec::new(), vec!["7".to_owned()])];
     assert_eq!(
-        fields(&today, &ledger, &["jobs"], &dirty)[0].reasons,
+        fields(&today, &ledger, &["jobs"], &dirty, &[])[0].reasons,
         [FieldReason::RowsDirty]
     );
     assert_eq!(
-        fields(&today, &ledger, &["jobs"], &[])[0].reasons,
+        fields(&today, &ledger, &["jobs"], &[], &[])[0].reasons,
         [FieldReason::Records]
     );
+}
+
+/// The sessions of a window by `stats --until` (its last event `upto`,
+/// its end `end` seconds): over `events` as today's `stats` reads them,
+/// whole, and over those to its end as the ledger's window gives them,
+/// less `stale` (the events a row not folded up to them lacks).
+fn sessions_of(
+    events: &[RunEvent],
+    upto: EventId,
+    end: i64,
+    stale: &[i64],
+) -> (Value, Value, Vec<SpanDiff>) {
+    use crate::domain::stats::sessions::{SessionWindow, by_kind, spans as span_list};
+    let window = SessionWindow {
+        after: EventId::new(0),
+        upto,
+    };
+    let of = |events: &[RunEvent]| by_kind(&span_list(events), events, window, ms(end), |_| true);
+    let today = of(events);
+    let cut: Vec<RunEvent> = events
+        .iter()
+        .filter(|e| e.id <= upto && !stale.contains(&e.id.as_i64()))
+        .cloned()
+        .collect();
+    let ledger = of(&cut);
+    let diffs = spans(&today.spans, &ledger.spans);
+    (
+        json!({"sessions": today}),
+        json!({"sessions": ledger}),
+        diffs,
+    )
+}
+
+/// Spans open at the window's end whose turns are recorded after it:
+/// today's `stats` counts those turns, the ledger's window does not. One
+/// has turns before the end (its active differs), one has none (the
+/// ledger leaves it out of `active.count`: the count is 1 less); a span
+/// closed in the window agrees. Each is named, and the field's active
+/// values are told apart from the rows' reasons.
+#[test]
+fn turns_recorded_after_the_window_end_are_named_span_by_span() {
+    use crate::domain::marks::utc_text;
+    let (a, b) = (run_id(1), run_id(2));
+    let turns = |log: &mut Log, opened: i64, turns: &[(i64, i64)], secs: i64| {
+        let turns: Vec<Value> = turns
+            .iter()
+            .map(|(from, to)| json!([utc_text(ms(*from)), utc_text(ms(*to))]))
+            .collect();
+        let run = log.events[usize::try_from(opened - 1).unwrap()]
+            .run_id
+            .clone();
+        log.add(
+            None,
+            run.as_ref().map(RunId::as_str),
+            "session_turns",
+            json!({"opened_event_id": opened, "turns": turns}),
+            secs,
+        );
+    };
+    let closed = |log: &mut Log, run: Option<&str>, opened: i64, active: i64, secs: i64| {
+        log.add(
+            None,
+            run,
+            "session_closed",
+            json!({"opened_event_id": opened, "reason": "exited",
+                "active": "recorded", "active_secs": active}),
+            secs,
+        );
+    };
+    let mut log = Log::default();
+    log.add(
+        Some(1),
+        Some(&a),
+        "session_opened",
+        json!({"kind": "worker"}),
+        0,
+    );
+    turns(&mut log, 1, &[(10, 40)], 50);
+    log.add(
+        Some(2),
+        Some(&b),
+        "session_opened",
+        json!({"kind": "revise"}),
+        60,
+    );
+    log.add(
+        None,
+        None,
+        "session_opened",
+        json!({"kind": "runtime_planner", "route": "headless", "planner_id": 3}),
+        70,
+    );
+    turns(&mut log, 4, &[(75, 85)], 85);
+    closed(&mut log, None, 4, 10, 90);
+    let upto = log.last();
+    // After the window's end (100 s): the worker's and the revise's turns
+    // of time in the window, and their closes.
+    turns(&mut log, 1, &[(80, 120)], 130);
+    closed(&mut log, Some(&a), 1, 70, 130);
+    turns(&mut log, 3, &[(60, 95)], 140);
+    closed(&mut log, Some(&b), 3, 35, 140);
+
+    let (today, ledger, diffs) = sessions_of(&log.events, upto, 100, &[]);
+    let named: Vec<_> = diffs
+        .iter()
+        .map(|d| {
+            (
+                d.session.as_i64(),
+                d.kind.as_str(),
+                d.run_id.clone(),
+                d.stats,
+                d.ledger,
+                d.diff,
+                d.reason,
+            )
+        })
+        .collect();
+    assert_eq!(
+        named,
+        [
+            (
+                1,
+                "worker",
+                Some(a.clone()),
+                Some(50),
+                Some(30),
+                Some(-20),
+                SpanReason::TurnsAfterEnd
+            ),
+            (
+                3,
+                "revise",
+                Some(b.clone()),
+                Some(35),
+                None,
+                None,
+                SpanReason::TurnsAfterEnd
+            ),
+        ]
+    );
+    assert_eq!(
+        today["sessions"]["by_kind"]["revise"]["active"]["count"],
+        json!(1)
+    );
+    assert_eq!(
+        ledger["sessions"]["by_kind"]["revise"]["active"]["count"],
+        json!(0)
+    );
+    let compared = &fields(&today, &ledger, &["sessions"], &[], &diffs)[0];
+    assert!(!compared.equal);
+    assert_eq!(compared.reasons, [FieldReason::TurnsAfterEnd]);
+    assert_eq!(compared.spans, diffs);
+    let listed = serde_json::to_value(compared).unwrap();
+    assert_eq!(listed["spans"][1]["session"], json!(3));
+    assert_eq!(listed["spans"][0]["reason"], json!("turns_after_end"));
+
+    // A value not of active time still goes by the rows.
+    let mut other = ledger.clone();
+    other["sessions"]["by_kind"]["revise"]["count"] = json!(9);
+    assert_eq!(
+        fields(&today, &other, &["sessions"], &[], &diffs)[0].reasons,
+        [FieldReason::TurnsAfterEnd, FieldReason::Records]
+    );
+    // A span not of the turns after the end leaves the field to the rows.
+    let mut unexplained = diffs.clone();
+    unexplained[0].reason = SpanReason::Unexplained;
+    assert_eq!(
+        fields(&today, &ledger, &["sessions"], &[], &unexplained)[0].reasons,
+        [FieldReason::Records]
+    );
+    // Missing rows are named beside the turns after the end.
+    let missing = [KindCount {
+        kind: LedgerKind::Session,
+        ended: 1,
+        rows: 0,
+        missing: vec!["x".to_owned()],
+        not_final: Vec::new(),
+        push_pending: Vec::new(),
+        dirty: Vec::new(),
+    }];
+    assert_eq!(
+        fields(&today, &ledger, &["sessions"], &missing, &diffs)[0].reasons,
+        [FieldReason::TurnsAfterEnd, FieldReason::RowsMissing]
+    );
+    // A window that ends now: both read the same events and agree.
+    let (today, ledger, diffs) = sessions_of(&log.events, log.last(), 200, &[]);
+    assert!(diffs.is_empty());
+    assert!(fields(&today, &ledger, &["sessions"], &[], &diffs)[0].equal);
+
+    // A ledger row not folded up to the worker's turns recorded in the
+    // window (event 2) lacks them too: the turns after the end do not
+    // make the difference, and it is not told as theirs.
+    let (today, ledger, diffs) = sessions_of(&log.events, upto, 100, &[2]);
+    let worker = diffs.iter().find(|d| d.session.as_i64() == 1).unwrap();
+    assert_eq!((worker.stats, worker.ledger), (Some(50), None));
+    assert_eq!(worker.reason, SpanReason::Unexplained);
+    assert_eq!(
+        fields(&today, &ledger, &["sessions"], &[], &diffs)[0].reasons,
+        [FieldReason::Records]
+    );
+    // Nor in a window to now, whose end no event comes after: the worker
+    // is open at it and the row lacks its last turns.
+    let now = &log.events[..7];
+    let (_, _, diffs) = sessions_of(now, EventId::new(7), 135, &[7]);
+    let worker = diffs.iter().find(|d| d.session.as_i64() == 1).unwrap();
+    assert_eq!((worker.stats, worker.ledger), (Some(70), Some(30)));
+    assert_eq!(worker.reason, SpanReason::Unexplained);
+}
+
+/// A span the ledger has alone, or with more active time, is not of the
+/// turns after the end.
+#[test]
+fn a_span_on_one_side_or_with_more_in_the_ledger_is_unexplained() {
+    use crate::domain::stats::sessions::SpanInWindow;
+    let span = |opened: i64, closed_in_window: bool, active: Option<i64>| SpanInWindow {
+        opened: EventId::new(opened),
+        kind: "worker".to_owned(),
+        run_id: None,
+        closed_in_window,
+        active,
+        active_through_end: active,
+    };
+    let diffs = spans(
+        &[span(1, false, Some(5)), span(2, true, Some(5))],
+        &[span(1, false, Some(9)), span(3, false, Some(1))],
+    );
+    let reasons: Vec<_> = diffs
+        .iter()
+        .map(|d| (d.session.as_i64(), d.reason))
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            (1, SpanReason::Unexplained),
+            (2, SpanReason::Unexplained),
+            (3, SpanReason::Unexplained),
+        ]
+    );
+    assert_eq!(diffs[0].diff, Some(4));
+    assert_eq!((diffs[1].stats, diffs[1].ledger), (Some(5), None));
 }
 
 fn csv_sample(unix: i64, load: f64) -> HostSample {

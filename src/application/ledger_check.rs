@@ -104,6 +104,7 @@ pub fn ledger_check(
         &serde_json::to_value(&ledger)?,
         &RUNLESS_FIELDS,
         &reconcile.kinds,
+        &compare::spans(&today.sessions.spans, &ledger.sessions.spans),
     );
 
     let ledger_samples: Vec<_> = rows

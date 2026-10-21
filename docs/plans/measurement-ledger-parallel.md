@@ -34,7 +34,7 @@ src/・tests/ は変えていない。
   次は今の `LandClock` が開いている `approve_landing` の ask を忘れる誤り（`exit`・`landing_queue`・`resume` に入る。合わせて 212,460 秒）。
 - **run・task を持たない欄は 13 欄のうち 4 欄が違う（理由はどれも `records`）。**
   `draft_flow`・`auto_repairs`・`planner_routes` の差は、終わっていない task が台帳の行を持たない（行は終わった task だけに作る）ことで全部説明できた。
-  `sessions` の active（transcript の turn の時間）の差（worker・revise で 1 span、runtime_planner で 2 span）は理由を特定できなかった。
+  `sessions` の active（transcript の turn の時間）の差は、期間の終わりに開いていた 5 span（worker 1・revise 2・runtime_planner 2）の、終わりの後に記録された turn で説明できた（この読みの時点の比較の読み取りは `records` に数え、今は理由の分類 `turns_after_end` に分ける）。
 - **session の行 1 件（`inbox//session/23`）が final でない。**
   inbox と planner の span は閉じてから 7 日の猶予の後にしか final にならない（設計どおり）ためで、行の欠けではない。
 - **host の欄は期間の 8 日（JST の日を期間で切ったもの）のどれも、全列の差が 0（標本は全部両方にある）。**
@@ -305,7 +305,7 @@ session・queue の行の照合は (1) の表（行の無い対象 0、final で
 | draft_flow | records | 11 | `registered` 445→356（−89）、`adopted` 163→79（−84）、`backlog` 14→3（−11）、`drafts_per_landing` 1.92→1.53 など（11 個の全部は下の「比較で違った値の全部」） | 期間に登録された follow_up の draft 442 件のうち 89 件は読んだ時点で終わっていない（completed・canceled でない）。台帳は task の行を終わった task にだけ作るので、その `task_created` などの記録が行に無い |
 | auto_repairs | records | 8 | 10-16・10-17 の `asks_opened` と `asks_by_reason.scope` が −1、10-18・10-20 が −2 | その 6 個の ask はどれも run を持たない `planner_question`（task 2584・2654・2723・2754・2906・2916）で、task が終わっていないので行が無い |
 | planner_routes | records | 1 | `headless.planner_questions` 9→3（−6） | auto_repairs と同じ 6 個の `planner_question` |
-| sessions | records | 20 | `by_kind` と `by_route` の active: worker の count −1・total −1,307 秒、revise の count −1・total −873 秒、runtime_planner の count −2・total −112 秒、runtime_planner と worker の active の median（+1 秒・−2 秒）と revise・runtime_planner の active_ratio（−0.001）（20 個の全部は下の「比較で違った値の全部」） | **特定できなかった。** span の数と開いていた時間（open）は一致し、transcript の turn から作る active だけが違う。読みの出力は違う span を名指さない。期間の終わりをまたいだ 6 run（`2ec19963-…`・`07ac2d64-…`・`3d06e8a0-…`・`1af50ca3-…`・`12bbaa9e-…`・`42f92bfb-…`）は候補だが、それらの span の数より差が小さく、確かめられなかった |
+| sessions | records | 20 | `by_kind` と `by_route` の active: worker の count −1・total −1,307 秒、revise の count −1・total −873 秒、runtime_planner の count −2・total −112 秒、runtime_planner と worker の active の median（+1 秒・−2 秒）と revise・runtime_planner の active_ratio（−0.001）（20 個の全部は下の「比較で違った値の全部」） | 期間の終わり（`--until`）に開いていた span の、終わりの後に記録された `session_turns`（turn は終わった後に記録されるので、終わりをまたぐ turn は終わりの後に届く）。今の stats は EventStore の全部の event を読んで窓に重なる turn を数え、台帳の窓は終わりまでの event だけを返すので turn が少なく、終わりの前に turn の無い span は `active.count` から外れる。終わりの後の `session_turns` で窓に重なる turn を持つのは 5 span（worker 1 は run `42f92bfb-…`、revise 2 は run `3d06e8a0-…`・`12bbaa9e-…` でうち 1 つは終わりの前に turn がある、runtime_planner 2 は run を持たない）で、件数の差と合う。各 span の秒の差は、窓に重なる turn の時間を窓の終わり（窓の最後の event の時刻で、`--until` より約 7 秒前）で切ったものと合う。6 run のうち他の 3 run は、終わりの後に窓に重なる turn を記録した span を持たない。今の比較の読み取りは span ごとの差を `fields[].spans` に出し、理由の分類を `records` でなく `turns_after_end` にする |
 
 ### 比較で違った値の全部
 
