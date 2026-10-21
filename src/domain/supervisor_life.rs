@@ -99,6 +99,19 @@ impl Lives {
         }
     }
 
+    /// How many supervisors it holds a life of.
+    pub fn supervisors(&self) -> usize {
+        self.by_token.len()
+    }
+
+    /// Roughly how many bytes it holds.
+    pub fn approx_bytes(&self) -> usize {
+        self.by_token
+            .keys()
+            .map(|token| size_of::<(String, Life)>() + token.len())
+            .sum()
+    }
+
     /// [`supervisor_life_end`] of `token` at `now_ms`.
     pub fn end(&self, token: &str, now_ms: i64) -> Option<LifeEnd> {
         self.by_token.get(token).and_then(|life| life.end(now_ms))

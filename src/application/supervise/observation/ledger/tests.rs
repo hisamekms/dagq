@@ -1622,3 +1622,119 @@ fn the_steps_of_a_target_of_no_run_mark_no_run_or_task() {
             .is_none()
     );
 }
+
+/// A pass drops the records of the session and queue rows the store holds
+/// settled, and once a later event reaches one (a late turn of a closed
+/// session) gives it back its records from the row the store holds: the
+/// rows are those of the fold of every event, and the builder keeps none
+/// of the settled rows' events after.
+#[test]
+fn a_pass_gives_a_settled_row_a_later_event_reaches_its_dropped_records_back() {
+    let mut log = Log::default();
+    log.add(
+        None,
+        None,
+        "session_opened",
+        json!({"kind": "runtime_planner", "planner_id": 7}),
+        0,
+    )
+    .add(
+        None,
+        None,
+        "session_closed",
+        json!({"kind": "runtime_planner", "planner_id": 7, "opened_event_id": 1}),
+        10,
+    )
+    .add(None, None, "mark_added", json!({"mark": "m"}), 20);
+    let memory = Memory::of(&log);
+    let mut builder = Builder::default();
+    while pass(&memory, &mut builder, LATER).backlog > 0 {}
+    // The next pass's due drops what the last one found settled.
+    let built = pass(&memory, &mut builder, LATER);
+    assert_eq!((built.kept.events(), built.kept.dropped_rows), (0, 2));
+
+    log.add(
+        None,
+        None,
+        "session_turns",
+        json!({"kind": "runtime_planner", "planner_id": 7, "opened_event_id": 1}),
+        LATER + 10,
+    );
+    memory.events.replace(log.events.clone());
+    while pass(&memory, &mut builder, LATER + 20).backlog > 0 {}
+    let whole = Inputs::new(&log.events, ms(LATER + 20), BUILT, true);
+    let rows = memory.rows.borrow().clone();
+    for ((kind, key), row) in &rows {
+        let built = build(&target_of(*kind, key), &whole, &[]).unwrap();
+        assert_eq!(built.records, row.records, "{kind:?} {key}");
+        assert_eq!(built.ended_at, row.ended_at, "{kind:?} {key}");
+        assert_eq!(built.detail, row.detail, "{kind:?} {key}");
+    }
+    let session = memory.row(LedgerKind::Session, "runtime_planner/7/session/1");
+    assert_eq!(session.records.len(), 3);
+    let later = 2 * LATER;
+    while pass(&memory, &mut builder, later).backlog > 0 {}
+    assert_eq!(pass(&memory, &mut builder, later).kept.events(), 0);
+}
+
+/// The log says what the builder keeps the first time, an hour after it
+/// last did, and when its bytes changed by half of those logged or more.
+#[test]
+fn the_kept_is_logged_hourly_or_when_it_changes_by_half() {
+    assert!(logs_kept(None, 0));
+    let minute = Duration::from_secs(60);
+    let last = |bytes| Some((minute, bytes));
+    assert!(!logs_kept(last(1000), 1000));
+    assert!(!logs_kept(last(1000), 1499));
+    assert!(!logs_kept(last(1000), 501));
+    assert!(logs_kept(last(1000), 1500));
+    assert!(logs_kept(last(1000), 500));
+    assert!(!logs_kept(Some((KEPT_LOG_INTERVAL - minute, 1000)), 1000));
+    assert!(logs_kept(Some((KEPT_LOG_INTERVAL, 1000)), 1000));
+    // An empty queue's is said once an hour.
+    assert!(!logs_kept(last(0), 0));
+    assert!(logs_kept(last(0), 1));
+}
+
+/// Passes drop a push that closed a pending push once the run it closed
+/// and its task are settled, and a later event of the run folds them on
+/// the push read back by id: the rows are those of the fold of every
+/// event.
+#[test]
+fn a_pass_reads_back_a_dropped_closing_push_for_a_settled_run_folded_again() {
+    let (a, b) = (run_id(1), run_id(2));
+    let mut log = Log::default();
+    log.worked(1, &a, 0)
+        .integrated(1, &a, 700)
+        .push_failed(1, &a, 910)
+        .add(
+            Some(1),
+            None,
+            "task_status_changed",
+            json!({"from": "in_progress", "to": "completed"}),
+            910,
+        )
+        .landed(2, &b, 2000);
+    let memory = Memory::of(&log);
+    let mut builder = Builder::default();
+    while pass(&memory, &mut builder, LATER).backlog > 0 {}
+    // The next pass's due drops what the last one found settled.
+    assert_eq!(pass(&memory, &mut builder, LATER).kept.pushes, 0);
+
+    log.add(Some(1), Some(&a), "note_added", json!({}), LATER + 10);
+    memory.events.replace(log.events.clone());
+    while pass(&memory, &mut builder, LATER + 20).backlog > 0 {}
+    let whole = Inputs::new(&log.events, ms(LATER + 20), BUILT, true);
+    for key in [
+        (LedgerKind::Run, a.clone()),
+        (LedgerKind::Task, "1".to_owned()),
+    ] {
+        let row = memory.row(key.0, &key.1);
+        assert!(row.ended_at.is_some(), "{key:?}");
+        assert_eq!(
+            build(&target_of(key.0, &key.1), &whole, &[]).as_ref(),
+            Some(&row),
+            "{key:?}"
+        );
+    }
+}

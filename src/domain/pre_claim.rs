@@ -317,6 +317,40 @@ pub struct PreClaimBook {
 }
 
 impl PreClaimBook {
+    /// How many waits it holds, ended and open (the holds on the landings
+    /// among them).
+    pub fn waits(&self) -> usize {
+        self.closed.len() + self.open.len() + self.landings.len()
+    }
+
+    /// Roughly how many bytes it holds: its waits with their texts, and
+    /// what it finds them by.
+    pub fn approx_bytes(&self) -> usize {
+        let wait = |wait: &PreClaimInterval| {
+            size_of::<(EventId, (PreClaimInterval, Option<EventId>))>()
+                + [
+                    wait.supervisor.as_deref(),
+                    wait.reason.as_deref(),
+                    Some(wait.started_at.as_str()),
+                    wait.ended_at.as_deref(),
+                    wait.end.as_deref(),
+                    wait.ended_by.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .map(str::len)
+                .sum::<usize>()
+        };
+        let finders = self.slots.len() + self.deferrals.len() + self.life_ends.len();
+        self.closed
+            .values()
+            .chain(self.landings.values())
+            .map(|(interval, _)| wait(interval))
+            .chain(self.open.values().map(wait))
+            .sum::<usize>()
+            + finders * size_of::<(String, i64)>()
+    }
+
     /// The book of `events` (ascending id).
     pub fn of(events: &[RunEvent]) -> Self {
         let mut book = Self::default();

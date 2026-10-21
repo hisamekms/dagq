@@ -56,7 +56,13 @@
 //!   at a time, and the events of each run and task it folds. What the
 //!   folds of the queue as a whole read of the rest is [`Kept`] between
 //!   passes, so no pass reads the whole EventStore again
-//!   ([`Inputs::of`]).
+//!   ([`Inputs::of`]). It drops the records of the session and queue rows
+//!   the store holds settled and the pushes no fold of a row not settled
+//!   reads, so what it keeps does not grow with the rows settled; a
+//!   settled row a later event reaches gets its records back from the row
+//!   the store holds ([`Builder::to_restore`]), a settled run or task its
+//!   push by id ([`Builder::pushes_to_read`]). How much it keeps
+//!   ([`KeptSize`]) goes to the supervisor's log.
 //! - **What a pass makes**: each event is read into [`Kept`] once as it
 //!   comes in (the supervisors' lives, the waits before a claim, the
 //!   landing slot's attempts, which session or queue row it is a record
@@ -70,6 +76,7 @@ use crate::domain::EventKind;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use super::fold::PushedTo;
 use super::steps::{self, StepFold};
 use super::{
     LEDGER_V, LedgerKind, LedgerRow, fold,
@@ -81,6 +88,7 @@ use super::{
 };
 use crate::domain::host_metrics::NodeSample;
 use crate::domain::pre_claim::PreClaimBook;
+use crate::domain::run_phase::{Phase, Recorded};
 use crate::domain::session_step::SessionStep;
 use crate::domain::supervisor_life::{Lives, supervisor_of};
 use crate::domain::{EventId, RunEvent, TaskId};
@@ -130,26 +138,142 @@ impl Target {
 /// What the folds of the queue as a whole (the session and queue rows,
 /// the waits before a claim, the pushes) read of the EventStore up to the
 /// builder's cursor, kept between passes so that a pass reads only what
-/// came in after it: the events a session or queue row owns and the
-/// `push_finished`, whole, and what the folds made of every event so far,
-/// each read once as it came in ([`Self::add`]): the supervisors' lives,
-/// the waits before a claim and the holds on the landings, the landing
-/// slot's attempts, and which session or queue row each event is a record
-/// of. A pass folds of them only the rows it looks at
-/// ([`Inputs::of`]); the events of a run or a task folded are read whole
-/// for its fold ([`Inputs::read`]).
+/// came in after it: what the folds made of every event so far, each read
+/// once as it came in ([`Self::add`]): the supervisors' lives, the waits
+/// before a claim and the holds on the landings, the landing slot's
+/// attempts, and which session or queue row each event is a record of (by
+/// id); and of the events themselves only those a later fold may read. A
+/// pass folds of them only the rows it looks at ([`Inputs::of`]); the
+/// events of a run or a task folded are read whole for its fold
+/// ([`Inputs::read`]).
+///
+/// What it does not keep, by the rules that settle a row today:
+///
+/// - **A settled session or queue row's events**: once the store holds the
+///   row settled (`final`), its records are dropped ([`Builder::track`],
+///   at the next [`Builder::due`]) and only their ids stay in the book. A
+///   settled row is folded again only when a later event reaches it
+///   ([`super::settle`]: a late record of a closed session or an ended
+///   job, an event of the supervisor whose life ended its interval);
+///   then [`Builder::to_restore`] names it and its records come back from
+///   the row the store holds, which owns exactly them
+///   ([`Builder::restore`]), so its fold is that of every event. A row not
+///   settled keeps its events: its grace or a later event folds it again.
+/// - **A `push_finished` no fold not settled reads**: a run's or a
+///   task's fold reads of the pushes only the first after the run's last
+///   `push_pending` to the remote and branch of its last failed push
+///   ([`super::fold::closing_push`]). A push that arrives while no run
+///   waits on one it matches is that of none, and a run that records its
+///   `push_pending` later reads only later pushes; so a push is kept only
+///   when it closed a pending push as it came, and only until the rows of
+///   the runs it closed and of their tasks are settled ([`Builder::track`],
+///   at the next [`Builder::due`]). Of each run whose pending push one
+///   closed, the id of that push stays ([`Builder::pushes_to_read`]): a
+///   settled run or task folded again reads it back by id
+///   ([`Inputs::read_pushes`]), so its fold is that of every push.
+///
+/// What it keeps of the pushes besides is a summary per run: where the
+/// last failed push of each run that failed one went ([`PushedTo`], for a
+/// later `push_pending` of it), the runs waiting on a push, and the push
+/// that closed each run's last pending push. They are as many as the runs
+/// that failed a push, and stay while the process does.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Kept {
     /// The last event read.
     last: EventId,
-    /// Ascending id.
+    /// Ascending id: the records of the session and queue rows not
+    /// dropped, and the pushes a fold not settled reads.
     sessions: Vec<RunEvent>,
     queue: Vec<RunEvent>,
     pushes: Vec<RunEvent>,
+    /// The runs whose last `run_phase_changed` is `push_pending` and that
+    /// no push closed yet.
+    waiting_push: BTreeMap<String, Waiting>,
+    /// Where the last `push_failed` of each run that recorded one went.
+    failed_push: BTreeMap<String, PushedTo>,
+    /// The push that closed each run's last pending push.
+    closing: BTreeMap<String, EventId>,
+    /// The runs and tasks not settled whose folds read each kept push.
+    push_readers: BTreeMap<EventId, BTreeSet<Target>>,
     lives: Lives,
     pre_claim: PreClaimBook,
     session_rows: SessionBook,
     queue_rows: QueueBook,
+    /// The session and queue rows whose records are dropped.
+    dropped: BTreeSet<(LedgerKind, String)>,
+    /// Roughly how many bytes the events kept hold outside their vectors
+    /// ([`event_heap_bytes`]).
+    event_heap: usize,
+}
+
+/// A run waiting on a push: the id of its `push_pending`, where its last
+/// failed push before it went, and its task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Waiting {
+    after: EventId,
+    to: PushedTo,
+    task: Option<TaskId>,
+}
+
+/// How much [`Kept`] holds, for the supervisor's log: the events it keeps
+/// of each kind, the elements of each book, and roughly how many bytes
+/// all of them hold (the room of the events' vectors, used or not, the
+/// events' texts and payloads, and the books' entries; not what an
+/// allocator adds).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KeptSize {
+    pub sessions: usize,
+    pub queue: usize,
+    pub pushes: usize,
+    /// The supervisors with a life.
+    pub lives: usize,
+    /// The waits before a claim and the holds on the landings.
+    pub pre_claim: usize,
+    pub session_rows: usize,
+    pub queue_rows: usize,
+    /// The session and queue rows whose records are dropped.
+    pub dropped_rows: usize,
+    /// The runs of the summaries of the pushes: those that failed one,
+    /// wait on one, or had a pending push closed.
+    pub push_runs: usize,
+    pub bytes: usize,
+}
+
+impl KeptSize {
+    /// The events it keeps.
+    pub const fn events(&self) -> usize {
+        self.sessions + self.queue + self.pushes
+    }
+}
+
+/// Roughly how many bytes `event` holds outside the vector it is in: its
+/// texts and its payload.
+fn event_heap_bytes(event: &RunEvent) -> usize {
+    fn value(of: &serde_json::Value) -> usize {
+        use serde_json::Value;
+        size_of::<Value>()
+            + match of {
+                Value::String(text) => text.len(),
+                Value::Array(items) => items.iter().map(value).sum(),
+                Value::Object(map) => map
+                    .iter()
+                    .map(|(key, item)| size_of::<String>() + key.len() + value(item))
+                    .sum(),
+                Value::Null | Value::Bool(_) | Value::Number(_) => 0,
+            }
+    }
+    event.created_at.len()
+        + event.run_id.as_ref().map_or(0, |run| run.as_str().len())
+        + value(&event.payload)
+}
+
+/// Give back the room of `events` once it is more than twice what they
+/// take: a drop after the events read at a process's start leaves no
+/// vector the size of them all.
+fn shed(events: &mut Vec<RunEvent>) {
+    if events.capacity() > 2 * events.len() {
+        events.shrink_to_fit();
+    }
 }
 
 impl Kept {
@@ -178,14 +302,247 @@ impl Kept {
             match owned {
                 Owner::Session => {
                     self.session_rows.add(event, touched);
+                    self.event_heap += event_heap_bytes(event);
                     self.sessions.push(event.clone());
                 }
-                Owner::Queue => self.queue.push(event.clone()),
+                Owner::Queue => {
+                    self.event_heap += event_heap_bytes(event);
+                    self.queue.push(event.clone());
+                }
                 Owner::Run | Owner::Task => {}
             }
-            if event.kind == EventKind::PushFinished {
+            self.wait_on_push(event);
+        }
+    }
+
+    /// Follow the runs waiting on a push, and keep `event` when it is a
+    /// push that closes one ([`Kept`]).
+    fn wait_on_push(&mut self, event: &RunEvent) {
+        if event.kind == EventKind::PushFinished {
+            let closed: Vec<(String, Option<TaskId>)> = self
+                .waiting_push
+                .iter()
+                .filter(|(_, waiting)| waiting.to.closed_by(event, waiting.after))
+                .map(|(run, waiting)| (run.clone(), waiting.task))
+                .collect();
+            if !closed.is_empty() {
+                let mut readers = BTreeSet::new();
+                for (run, task) in closed {
+                    self.waiting_push.remove(&run);
+                    self.closing.insert(run.clone(), event.id);
+                    readers.insert(Target::Run(run));
+                    readers.extend(task.map(Target::Task));
+                }
+                self.push_readers.insert(event.id, readers);
+                self.event_heap += event_heap_bytes(event);
                 self.pushes.push(event.clone());
             }
+        }
+        let Some(run) = &event.run_id else {
+            return;
+        };
+        if event.kind == EventKind::PushFailed {
+            self.failed_push
+                .insert(run.to_string(), PushedTo::of(event));
+        } else if let Some(recorded) = Recorded::of_event(event) {
+            if recorded.is(Phase::PushPending) {
+                let waiting = Waiting {
+                    after: event.id,
+                    to: self
+                        .failed_push
+                        .get(run.as_str())
+                        .cloned()
+                        .unwrap_or_default(),
+                    task: event.task_id,
+                };
+                self.waiting_push.insert(run.to_string(), waiting);
+            } else {
+                self.waiting_push.remove(run.as_str());
+            }
+        } else if event.kind == EventKind::RunPhaseChanged {
+            // One with no phase is unattributed, as the fold reads it.
+            self.waiting_push.remove(run.as_str());
+        }
+    }
+
+    /// Note the runs and tasks of `settled` settled, and drop the pushes
+    /// no fold not settled reads any more.
+    fn settle_pushes(&mut self, settled: &BTreeSet<Target>) {
+        if settled.is_empty() {
+            return;
+        }
+        let mut unread = BTreeSet::new();
+        for (push, readers) in &mut self.push_readers {
+            readers.retain(|reader| !settled.contains(reader));
+            if readers.is_empty() {
+                unread.insert(*push);
+            }
+        }
+        if unread.is_empty() {
+            return;
+        }
+        for push in &unread {
+            self.push_readers.remove(push);
+        }
+        let mut freed = 0;
+        self.pushes.retain(|push| {
+            let drop = unread.contains(&push.id);
+            if drop {
+                freed += event_heap_bytes(push);
+            }
+            !drop
+        });
+        shed(&mut self.pushes);
+        self.event_heap -= freed;
+    }
+
+    /// The pushes the folds of the runs of `events` read that it no longer
+    /// keeps: each run's that closed its last pending push.
+    fn pushes_to_read(&self, events: &[RunEvent]) -> Vec<EventId> {
+        let runs: BTreeSet<&str> = events
+            .iter()
+            .filter_map(|event| event.run_id.as_ref().map(|run| run.as_str()))
+            .collect();
+        let pushes: BTreeSet<EventId> = runs
+            .into_iter()
+            .filter_map(|run| self.closing.get(run).copied())
+            .filter(|push| {
+                self.pushes
+                    .binary_search_by_key(push, |event| event.id)
+                    .is_err()
+            })
+            .collect();
+        pushes.into_iter().collect()
+    }
+
+    /// The ids of the records of the session or queue row of `kind` and
+    /// `key`; none for a key of no row.
+    fn records_of(&self, kind: LedgerKind, key: &str) -> Option<&[EventId]> {
+        match kind {
+            LedgerKind::Session => self.session_rows.records_of(key),
+            LedgerKind::Queue => self.queue_rows.records_of(key),
+            _ => None,
+        }
+    }
+
+    /// Drop the records of the session and queue rows of `rows`, and note
+    /// them dropped.
+    fn drop_rows(&mut self, rows: impl IntoIterator<Item = (LedgerKind, String)>) {
+        let (mut sessions, mut queue) = (BTreeSet::new(), BTreeSet::new());
+        for (kind, key) in rows {
+            let Some(records) = self.records_of(kind, &key).filter(|ids| !ids.is_empty()) else {
+                continue;
+            };
+            match kind {
+                LedgerKind::Session => sessions.extend(records.iter().copied()),
+                _ => queue.extend(records.iter().copied()),
+            }
+            self.dropped.insert((kind, key));
+        }
+        let mut freed = 0;
+        for (events, ids) in [(&mut self.sessions, sessions), (&mut self.queue, queue)] {
+            if ids.is_empty() {
+                continue;
+            }
+            events.retain(|event| {
+                let drop = ids.contains(&event.id);
+                if drop {
+                    freed += event_heap_bytes(event);
+                }
+                !drop
+            });
+            shed(events);
+        }
+        self.event_heap -= freed;
+    }
+
+    /// Give the dropped row of `kind` and `key` back those of its records
+    /// among `events`; the ids of those still missing. Once none is, the
+    /// row is not dropped.
+    fn restore(&mut self, kind: LedgerKind, key: &str, events: Vec<RunEvent>) -> Vec<EventId> {
+        let row = (kind, key.to_owned());
+        if !self.dropped.contains(&row) {
+            return Vec::new();
+        }
+        let ids: BTreeSet<EventId> = self
+            .records_of(kind, key)
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect();
+        let kept = match kind {
+            LedgerKind::Session => &mut self.sessions,
+            _ => &mut self.queue,
+        };
+        let mut missing: BTreeSet<EventId> = ids
+            .iter()
+            .filter(|id| kept.binary_search_by_key(*id, |event| event.id).is_err())
+            .copied()
+            .collect();
+        for event in events {
+            if missing.remove(&event.id) {
+                self.event_heap += event_heap_bytes(&event);
+                kept.push(event);
+            }
+        }
+        kept.sort_by_key(|event| event.id);
+        if missing.is_empty() {
+            self.dropped.remove(&row);
+        }
+        missing.into_iter().collect()
+    }
+
+    /// How much it holds.
+    pub fn size(&self) -> KeptSize {
+        let to = |to: &PushedTo| {
+            size_of::<PushedTo>()
+                + to.remote.as_ref().map_or(0, String::len)
+                + to.branch.as_ref().map_or(0, String::len)
+        };
+        let runs = self
+            .waiting_push
+            .iter()
+            .map(|(run, waiting)| size_of::<(String, Waiting)>() + run.len() + to(&waiting.to))
+            .chain(
+                self.failed_push
+                    .iter()
+                    .map(|(run, failed)| size_of::<String>() + run.len() + to(failed)),
+            )
+            .chain(
+                self.closing
+                    .keys()
+                    .map(|run| size_of::<(String, EventId)>() + run.len()),
+            )
+            .sum::<usize>()
+            + self
+                .push_readers
+                .values()
+                .map(|readers| size_of::<EventId>() + readers.len() * size_of::<Target>())
+                .sum::<usize>();
+        let dropped: usize = self
+            .dropped
+            .iter()
+            .map(|(_, key)| size_of::<(LedgerKind, String)>() + key.len())
+            .sum();
+        KeptSize {
+            sessions: self.sessions.len(),
+            queue: self.queue.len(),
+            pushes: self.pushes.len(),
+            lives: self.lives.supervisors(),
+            pre_claim: self.pre_claim.waits(),
+            session_rows: self.session_rows.row_count(),
+            queue_rows: self.queue_rows.row_count(),
+            dropped_rows: self.dropped.len(),
+            push_runs: self.waiting_push.len() + self.failed_push.len() + self.closing.len(),
+            bytes: (self.sessions.capacity() + self.queue.capacity() + self.pushes.capacity())
+                * size_of::<RunEvent>()
+                + self.event_heap
+                + runs
+                + dropped
+                + self.lives.approx_bytes()
+                + self.pre_claim.approx_bytes()
+                + self.session_rows.approx_bytes()
+                + self.queue_rows.approx_bytes(),
         }
     }
 
@@ -246,6 +603,12 @@ pub struct Builder {
     /// The session and queue rows an event read since the rows were last
     /// built may have changed ([`Kept::add`]).
     touched: BTreeSet<(LedgerKind, String)>,
+    /// The session and queue rows the store holds settled, whose records
+    /// [`Self::due`] drops from [`Kept`] unless an event reached them since.
+    settled: BTreeSet<(LedgerKind, String)>,
+    /// The runs and tasks the store holds settled, which [`Self::due`]
+    /// notes so in [`Kept`] unless marked again since.
+    settled_folds: BTreeSet<Target>,
     /// Shared with the pass's [`Inputs`], which it drops before the next
     /// events come in: an [`Inputs`] kept past them would copy it whole.
     kept: Arc<Kept>,
@@ -263,6 +626,8 @@ impl Default for Builder {
             pending_pushes: BTreeMap::new(),
             unsaved_steps: BTreeMap::new(),
             touched: BTreeSet::new(),
+            settled: BTreeSet::new(),
+            settled_folds: BTreeSet::new(),
             kept: Arc::default(),
         }
     }
@@ -383,13 +748,29 @@ impl Builder {
         }
     }
 
-    /// Mark again the rows whose grace is over at `now_ms`, and close where
+    /// Mark again the rows whose grace is over at `now_ms`, close where
     /// they are kept the slots full whose supervisor's life ended by then,
     /// so that no read of them this pass makes them again: of the kept
-    /// ends, only those that came by then ([`PreClaimBook::close_lives`]).
+    /// ends, only those that came by then ([`PreClaimBook::close_lives`]);
+    /// and drop the records of the rows the store holds settled that no
+    /// event read since reached ([`Kept`]).
     pub fn due(&mut self, now_ms: i64) {
         let kept = Arc::make_mut(&mut self.kept);
         kept.pre_claim.close_lives(&kept.lives, now_ms);
+        // One an event reached since stays noted until its fold is tracked.
+        let (reached, settled): (BTreeSet<_>, BTreeSet<_>) = std::mem::take(&mut self.settled)
+            .into_iter()
+            .partition(|(kind, key)| {
+                self.touched.contains(&(*kind, key.clone()))
+                    || self.marks.contains(&Target::Row(*kind, key.clone()))
+            });
+        kept.drop_rows(settled);
+        self.settled = reached;
+        let (marked, settled): (BTreeSet<_>, BTreeSet<_>) = std::mem::take(&mut self.settled_folds)
+            .into_iter()
+            .partition(|target| self.marks.contains(target));
+        kept.settle_pushes(&settled);
+        self.settled_folds = marked;
         let due: Vec<Target> = self
             .unsettled
             .iter()
@@ -426,6 +807,21 @@ impl Builder {
     /// input read (a run's steps too): wait on its grace while it ended and
     /// is not settled, and on a later push while it is pending on its push.
     pub fn track(&mut self, target: &Target, row: &LedgerRow) {
+        match target {
+            Target::Row(kind, key) if row.is_final => {
+                self.settled.insert((*kind, key.clone()));
+            }
+            Target::Row(kind, key) => {
+                self.settled.remove(&(*kind, key.clone()));
+            }
+            Target::Run(_) | Target::Task(_) if row.is_final => {
+                self.settled_folds.insert(target.clone());
+            }
+            Target::Run(_) | Target::Task(_) => {
+                self.settled_folds.remove(target);
+            }
+            Target::Node(..) => {}
+        }
         match settles_at(row) {
             Some(at) if !row.is_final => {
                 self.unsettled.insert(target.clone(), at);
@@ -466,6 +862,30 @@ impl Builder {
     /// What the folds of the queue as a whole read, up to [`Self::events`].
     pub const fn kept(&self) -> &Arc<Kept> {
         &self.kept
+    }
+
+    /// The rows of `rows` (those [`Self::rows_to_build`] names) whose
+    /// records [`Kept`] dropped: before they are folded, each is given its
+    /// records back ([`Self::restore`]).
+    pub fn to_restore(&self, rows: &BTreeSet<(LedgerKind, String)>) -> Vec<(LedgerKind, String)> {
+        rows.iter()
+            .filter(|row| self.kept.dropped.contains(*row))
+            .cloned()
+            .collect()
+    }
+
+    /// The pushes the fold of a run or task whose events are `events` reads
+    /// that [`Kept`] no longer keeps (its runs' rows were settled): each is
+    /// read by id and given to the fold ([`Inputs::read_pushes`]).
+    pub fn pushes_to_read(&self, events: &[RunEvent]) -> Vec<EventId> {
+        self.kept.pushes_to_read(events)
+    }
+
+    /// Give the dropped row of `kind` and `key` back its records among
+    /// `events` (the records of the row the store holds of it, or events
+    /// read by id); the ids of those still missing.
+    pub fn restore(&mut self, kind: LedgerKind, key: &str, events: Vec<RunEvent>) -> Vec<EventId> {
+        Arc::make_mut(&mut self.kept).restore(kind, key, events)
     }
 }
 
@@ -647,6 +1067,8 @@ pub struct Inputs {
     tasks: BTreeMap<TaskId, Vec<RunEvent>>,
     /// The session steps of each run read ([`Self::read_steps`]).
     steps: BTreeMap<String, RunSteps>,
+    /// The pushes read for a run's or task's fold ([`Self::read_pushes`]).
+    pushes: BTreeMap<Target, Vec<RunEvent>>,
     kept: Arc<Kept>,
     /// The session and queue rows built.
     pub rows: BTreeMap<(LedgerKind, String), LedgerRow>,
@@ -702,6 +1124,7 @@ impl Inputs {
             runs: BTreeMap::new(),
             tasks: BTreeMap::new(),
             steps: BTreeMap::new(),
+            pushes: BTreeMap::new(),
             kept: Arc::clone(kept),
             rows: built,
         }
@@ -732,9 +1155,33 @@ impl Inputs {
         self.steps.insert(run.to_owned(), steps);
     }
 
-    /// Drop the events [`Self::read`] and the steps [`Self::read_steps`]
-    /// gave `target`, once folded.
+    /// Give the fold of the run or task `target` the pushes `pushes` it
+    /// reads that [`Kept`] no longer keeps ([`Builder::pushes_to_read`]).
+    pub fn read_pushes(&mut self, target: &Target, pushes: Vec<RunEvent>) {
+        if !pushes.is_empty() {
+            self.pushes.insert(target.clone(), pushes);
+        }
+    }
+
+    /// The pushes the fold of `target` reads: those kept, and those read
+    /// for it, ascending id.
+    fn pushes_of(&self, target: &Target) -> std::borrow::Cow<'_, [RunEvent]> {
+        match self.pushes.get(target) {
+            None => std::borrow::Cow::Borrowed(&self.kept.pushes),
+            Some(read) => {
+                let mut pushes: Vec<RunEvent> =
+                    self.kept.pushes.iter().chain(read).cloned().collect();
+                pushes.sort_by_key(|push| push.id);
+                pushes.dedup_by_key(|push| push.id);
+                std::borrow::Cow::Owned(pushes)
+            }
+        }
+    }
+
+    /// Drop the events [`Self::read`], the steps [`Self::read_steps`] and
+    /// the pushes [`Self::read_pushes`] gave `target`, once folded.
     pub fn forget(&mut self, target: &Target) {
+        self.pushes.remove(target);
         match target {
             Target::Run(run) => {
                 self.runs.remove(run);
@@ -759,7 +1206,8 @@ pub fn build(target: &Target, inputs: &Inputs, samples: &[NodeSample]) -> Option
     match target {
         Target::Run(run) => {
             let events = inputs.runs.get(run)?;
-            let mut row = super::run_row(run, events, &kept.pushes, now, &inputs.built_at);
+            let pushes = inputs.pushes_of(target);
+            let mut row = super::run_row(run, events, &pushes, now, &inputs.built_at);
             if !(row.is_legacy() || row.ended_at.is_some() || pending_push(&row)) {
                 return None;
             }
@@ -783,7 +1231,7 @@ pub fn build(target: &Target, inputs: &Inputs, samples: &[NodeSample]) -> Option
             let mut row = super::task_row(
                 *task,
                 events,
-                &kept.pushes,
+                &inputs.pushes_of(target),
                 kept.pre_claim.intervals(&kept.lives, now),
                 now,
                 &inputs.built_at,

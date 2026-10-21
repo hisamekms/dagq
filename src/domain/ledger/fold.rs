@@ -20,6 +20,7 @@ use serde_json::{Map, Value};
 use crate::domain::after_claim::{AfterClaim, AfterClaimTrack};
 use crate::domain::claim_facts::ATTRIBUTES;
 use crate::domain::pre_claim::{IntervalKind, PreClaimInterval};
+use crate::domain::run::payload::typed;
 use crate::domain::run_phase::{Attempt, Blocker, Holds, PUSHED, Phase};
 use crate::domain::stats::timestamp_millis;
 use crate::domain::{EventId, RunEvent, TaskId};
@@ -316,6 +317,36 @@ fn later_push<'p>(
     closing_push(failed, pushes, after)
 }
 
+/// The remote and branch a push records (`push_failed`, `push_finished`),
+/// each absent when its payload does not record it as text.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+pub struct PushedTo {
+    #[serde(default, deserialize_with = "typed")]
+    pub remote: Option<String>,
+    #[serde(default, deserialize_with = "typed")]
+    pub branch: Option<String>,
+}
+
+impl PushedTo {
+    /// What `event` records of where it pushed.
+    pub fn of(event: &RunEvent) -> Self {
+        Self::deserialize(&event.payload).unwrap_or_default()
+    }
+
+    /// Whether `push`, a `push_finished` after the event `after`, closes a
+    /// `push_pending` whose failed push was to this: of the remote and the
+    /// branch, each this records is the same.
+    pub fn closed_by(&self, push: &RunEvent, after: EventId) -> bool {
+        if push.kind != EventKind::PushFinished || push.id <= after {
+            return false;
+        }
+        let to = Self::of(push);
+        [(&self.remote, &to.remote), (&self.branch, &to.branch)]
+            .iter()
+            .all(|(failed, pushed)| failed.is_none() || failed == pushed)
+    }
+}
+
 /// The first `push_finished` of `pushes` after the event `after` to the
 /// remote and branch of the push that failed, `failed` (to any, when there
 /// is none or it did not record them).
@@ -324,16 +355,10 @@ pub(super) fn closing_push<'p>(
     pushes: impl IntoIterator<Item = &'p RunEvent>,
     after: EventId,
 ) -> Option<&'p RunEvent> {
-    let target = |event: &RunEvent, key: &str| event.payload[key].as_str().map(str::to_owned);
-    pushes.into_iter().find(|push| {
-        push.kind == EventKind::PushFinished
-            && push.id > after
-            && failed.is_none_or(|failed| {
-                ["remote", "branch"].iter().all(|key| {
-                    target(failed, key).is_none() || target(failed, key) == target(push, key)
-                })
-            })
-    })
+    let failed = failed.map(PushedTo::of).unwrap_or_default();
+    pushes
+        .into_iter()
+        .find(|push| failed.closed_by(push, after))
 }
 
 /// A wait of the supervisors laid over a task's time ready, cut to it.

@@ -12,7 +12,11 @@
 //! task it folds, and the builder keeps what the folds of the queue as a
 //! whole read ([`crate::domain::ledger::builder::Kept`]): no pass reads
 //! the whole EventStore. Nothing of the runtime's control waits for it or
-//! reads it, and a landing does not build a row.
+//! reads it, and a landing does not build a row. A settled row a later
+//! event reaches, whose records the builder dropped, gets them back from
+//! the row the store holds before it is folded. The log says how much the
+//! builder keeps ([`KeptSize`]) after the first pass, then hourly or when
+//! its bytes change by half ([`logs_kept`]).
 //!
 //! A pass that cannot read or write is logged (once until a pass succeeds
 //! again) and keeps its marks for the next one; after
@@ -21,12 +25,15 @@
 //! events sees the ledger fall behind. A run's or a task's outcome never
 //! depends on it.
 
+use std::collections::BTreeSet;
+
 use super::*;
 use crate::application::LedgerQueue;
 use crate::domain::EventFilter;
 use crate::domain::host_metrics::{local_day, oldest_kept_day};
+use crate::domain::ledger::LedgerKind;
 use crate::domain::ledger::builder::{
-    Builder, CHECKS_PER_PASS, EVENTS_PER_READ, Inputs, RunSteps, STEPS_PER_READ, Target,
+    Builder, CHECKS_PER_PASS, EVENTS_PER_READ, Inputs, KeptSize, RunSteps, STEPS_PER_READ, Target,
     WRITES_PER_PASS, behind, build, hour, writes,
 };
 use crate::domain::session_step::{self, StepTarget};
@@ -34,6 +41,28 @@ use crate::domain::session_step::{self, StepTarget};
 /// How many passes in a row fail before one `ledger_build_failed` is
 /// recorded.
 pub const FAILING_PASSES: u32 = 10;
+
+/// How often the supervisor's log says how much the builder keeps between
+/// passes ([`KeptSize`]) while it changes little.
+pub const KEPT_LOG_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+/// By how many percent of the bytes last logged the builder's kept bytes
+/// change before the log says them again within [`KEPT_LOG_INTERVAL`].
+pub const KEPT_LOG_CHANGE_PERCENT: usize = 50;
+
+/// Whether a pass logs the builder's kept `bytes`, the last log (how long
+/// ago and its bytes) being `last`: the first one, one
+/// [`KEPT_LOG_INTERVAL`] after the last, and one whose bytes changed by
+/// [`KEPT_LOG_CHANGE_PERCENT`] of the last's or more.
+pub fn logs_kept(last: Option<(Duration, usize)>, bytes: usize) -> bool {
+    let Some((since, logged)) = last else {
+        return true;
+    };
+    since >= KEPT_LOG_INTERVAL
+        || bytes != logged
+            && bytes.abs_diff(logged).saturating_mul(100)
+                >= logged.saturating_mul(KEPT_LOG_CHANGE_PERCENT)
+}
 
 /// What the supervisor builds the ledger with.
 #[derive(Clone)]
@@ -62,6 +91,8 @@ pub struct Built {
     pub steps_removed: usize,
     /// Why it stopped short, when it did.
     pub failure: Option<String>,
+    /// How much the builder keeps after it.
+    pub kept: KeptSize,
 }
 
 /// What one pass removes past its retention: the node rows of a local
@@ -131,6 +162,7 @@ pub fn build_pass(
         }
     }
     built.backlog = builder.backlog();
+    built.kept = builder.kept().size();
     built
 }
 
@@ -168,6 +200,7 @@ fn pass(
         return Ok(());
     }
     let rows = builder.rows_to_build(builder.kept());
+    restore(store, builder, &rows)?;
     let mut inputs = Inputs::of(builder.kept(), now_ms, built_at, &rows);
     builder.mark_rows(&inputs.rows);
     let mut targets = builder.take(CHECKS_PER_PASS).into_iter();
@@ -185,6 +218,38 @@ fn pass(
         }
     }
     Ok(())
+}
+
+/// Give each row of `rows` whose records the builder dropped once it was
+/// settled (a later event reached it) its records back before it is
+/// folded: those of the row the store holds of it, and any it lacks read
+/// by id.
+fn restore(
+    store: &dyn LedgerQueue,
+    builder: &mut Builder,
+    rows: &BTreeSet<(LedgerKind, String)>,
+) -> Result<()> {
+    for (kind, key) in builder.to_restore(rows) {
+        let records = store
+            .ledger_row(kind, &key)?
+            .map(|row| row.records)
+            .unwrap_or_default();
+        let read = read_by_id(store, &builder.restore(kind, &key, records))?;
+        if !read.is_empty() {
+            builder.restore(kind, &key, read);
+        }
+    }
+    Ok(())
+}
+
+/// The events of `ids`, each read by its id.
+fn read_by_id(store: &dyn LedgerQueue, ids: &[EventId]) -> Result<Vec<RunEvent>> {
+    let mut read = Vec::new();
+    for id in ids {
+        let before = EventId::new(id.as_i64() - 1);
+        read.extend(store.events_between(before, *id, &EventFilter::default(), 1)?);
+    }
+    Ok(read)
 }
 
 /// How many times a pass folds a target whose row another writer wrote
@@ -257,13 +322,14 @@ fn fold_and_write(
     };
     // The kept pushes and waits reach the cursor; a later event marks it again.
     let through = builder.events;
-    inputs.read(
-        target,
-        events
-            .into_iter()
-            .filter(|event| event.id <= through)
-            .collect(),
-    );
+    let events: Vec<RunEvent> = events
+        .into_iter()
+        .filter(|event| event.id <= through)
+        .collect();
+    // The pushes it reads that the builder dropped once its runs settled.
+    let pushes = read_by_id(store, &builder.pushes_to_read(&events))?;
+    inputs.read_pushes(target, pushes);
+    inputs.read(target, events);
     let row = build(target, inputs, &samples);
     inputs.forget(target);
     let Some(row) = row else {
@@ -307,6 +373,9 @@ pub(in crate::application::supervise) struct LedgerWatch {
     /// [`crate::application::SessionStepStore::remove_steps`]).
     retained: Option<i64>,
     retaining: Option<i64>,
+    /// When the log last said how much the builder keeps, and its bytes
+    /// then ([`logs_kept`]).
+    kept_logged: Option<(Instant, usize)>,
 }
 
 impl LedgerWatch {
@@ -374,6 +443,35 @@ impl LedgerWatch {
         let failure = match job.join() {
             Ok((builder, built)) => {
                 self.builder = Some(builder);
+                let at = env.generators.clock.monotonic();
+                // A failed pass's size is not the builder's.
+                if built.failure.is_none()
+                    && logs_kept(
+                        self.kept_logged.map(|(logged_at, bytes)| {
+                            (at.saturating_duration_since(logged_at), bytes)
+                        }),
+                        built.kept.bytes,
+                    )
+                {
+                    let kept = built.kept;
+                    info!(
+                        events = kept.events(),
+                        sessions = kept.sessions,
+                        queue = kept.queue,
+                        pushes = kept.pushes,
+                        lives = kept.lives,
+                        pre_claim = kept.pre_claim,
+                        session_rows = kept.session_rows,
+                        queue_rows = kept.queue_rows,
+                        dropped_rows = kept.dropped_rows,
+                        push_runs = kept.push_runs,
+                        bytes = kept.bytes,
+                        "the ledger's builder keeps {} events, about {} bytes",
+                        kept.events(),
+                        kept.bytes
+                    );
+                    self.kept_logged = Some((at, kept.bytes));
+                }
                 if built.written > 0 || built.removed > 0 || built.steps_removed > 0 {
                     tracing::debug!(
                         written = built.written,

@@ -342,6 +342,42 @@ impl SessionBook {
         self.rows.len() - 1
     }
 
+    /// How many rows it assigns.
+    pub fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// The ids of the records of the row of `key`, ascending; none for a
+    /// key of no row.
+    pub fn records_of(&self, key: &str) -> Option<&[EventId]> {
+        Some(&self.rows[*self.by_key.get(key)?].records)
+    }
+
+    /// Roughly how many bytes it holds: each row's key, what it is of and
+    /// its records' ids, and what it finds the rows by.
+    pub fn approx_bytes(&self) -> usize {
+        let rows: usize = self
+            .rows
+            .iter()
+            .map(|row| {
+                size_of::<Assigned>()
+                    + size_of::<(String, usize)>()
+                    + 2 * row.key.len()
+                    + row.kind.len()
+                    + row.id.len()
+                    + row.records.len() * size_of::<EventId>()
+            })
+            .sum();
+        let finders = self.rounds.len()
+            + self.by_open.len()
+            + self.by_planner.len()
+            + self.by_job.len()
+            + self.outside.len()
+            + self.models.len()
+            + self.jobs_by_session.len();
+        rows + finders * size_of::<(String, String, usize)>()
+    }
+
     /// The keys of every row, in the order they were made.
     pub fn keys(&self) -> impl Iterator<Item = &str> {
         self.rows.iter().map(|row| row.key.as_str())

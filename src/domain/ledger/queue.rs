@@ -555,6 +555,47 @@ impl QueueBook {
         true
     }
 
+    /// How many rows it assigns: the queue's events' and the landing
+    /// slot's.
+    pub fn row_count(&self) -> usize {
+        self.rows.len() + self.slots.len()
+    }
+
+    /// The ids of the records of the row of `key`, ascending; none for a
+    /// key of no row, and none of a landing slot's, which owns none.
+    pub fn records_of(&self, key: &str) -> Option<&[EventId]> {
+        let id = EventId::new(key.parse().ok()?);
+        self.rows.get(&id).map(|row| row.records.as_slice())
+    }
+
+    /// Roughly how many bytes it holds: each row with what it is about and
+    /// its records' ids, the landing slot's attempts, and what it finds
+    /// the rows by.
+    pub fn approx_bytes(&self) -> usize {
+        let rows: usize = self
+            .rows
+            .values()
+            .map(|row| {
+                size_of::<(EventId, Assigned)>()
+                    + row.about.len()
+                    + row.outcome.as_ref().map_or(0, String::len)
+                    + row.records.len() * size_of::<EventId>()
+            })
+            .sum();
+        let slots: usize = self
+            .slots
+            .iter()
+            .map(|slot| 2 * size_of::<Slot>() + slot.run.len())
+            .sum();
+        let finders = self.streams.len()
+            + self.alerts.len()
+            + self.findings.len()
+            + self.lives_of.values().map(BTreeSet::len).sum::<usize>()
+            + self.slot_of.len()
+            + self.throughs.runs.len();
+        rows + slots + finders * size_of::<(String, EventId)>()
+    }
+
     /// The keys of every row: the queue's events', then the landing
     /// slot's.
     pub fn keys(&self) -> impl Iterator<Item = String> + '_ {

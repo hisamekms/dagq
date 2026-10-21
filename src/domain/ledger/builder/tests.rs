@@ -664,3 +664,397 @@ fn a_runs_token_is_revoked_after_its_last_issue_and_a_later_step_writes_its_row(
     inputs.forget(&target);
     assert_eq!(build(&target, &inputs, &[]), None);
 }
+
+/// Passes at `now_ms` on `builder` after the events `new` came in, as the
+/// supervisor's would on a store that holds every row as it is folded:
+/// each folds the session and queue rows it builds, gives back the records
+/// of those dropped from those of the rows held (`held`), and notes what
+/// it holds of each. Two passes: the first notes the rows settled, the
+/// second's due drops their records.
+fn settle(
+    builder: &mut Builder,
+    held: &mut BTreeMap<Target, LedgerRow>,
+    new: &[RunEvent],
+    now_ms: i64,
+) {
+    builder.mark_events(new);
+    for _ in 0..2 {
+        builder.due(now_ms);
+        let rows = builder.rows_to_build(builder.kept());
+        for (kind, key) in builder.to_restore(&rows) {
+            let records = held[&Target::Row(kind, key.clone())].records.clone();
+            assert_eq!(builder.restore(kind, &key, records), Vec::new());
+        }
+        let inputs = Inputs::of(builder.kept(), now_ms, BUILT, &rows);
+        builder.mark_rows(&inputs.rows);
+        for target in builder.take(usize::MAX) {
+            if let Some(row) = build(&target, &inputs, &[]) {
+                builder.track(&target, &row);
+                held.insert(target, row);
+            }
+        }
+    }
+}
+
+/// `n` session rows and queue rows that end and settle: a planner's
+/// session, a hold on the claims, a mark; and a landed run, whose push
+/// closes no pending push.
+fn settled_history(n: i64) -> Log {
+    let mut log = Log::default();
+    for k in 0..n {
+        let at = k * 10;
+        log.add(
+            None,
+            None,
+            "session_opened",
+            json!({"kind": "runtime_planner", "planner_id": 1000 + k}),
+            at,
+        );
+        let opened = log.last().as_i64();
+        log.add(
+            None,
+            None,
+            "session_closed",
+            json!({"kind": "runtime_planner", "planner_id": 1000 + k, "opened_event_id": opened}),
+            at + 1,
+        )
+        .add(None, None, "claim_held", json!({"supervisor": "h"}), at + 2)
+        .add(
+            None,
+            None,
+            "claim_resumed",
+            json!({"supervisor": "h"}),
+            at + 3,
+        )
+        .add(None, None, "mark_added", json!({"mark": k}), at + 4)
+        .landed(100 + k, &format!("{k:08x}-2222-4222-8222-222222222222"), at);
+    }
+    log
+}
+
+/// The records of the session and queue rows settled and the pushes that
+/// closed no pending push are not kept: a history of more of them keeps
+/// as many events as one of fewer, the session and queue rows open and
+/// the books aside.
+#[test]
+fn the_events_of_settled_rows_are_not_kept_however_many() {
+    let kept = |n: i64| {
+        let mut log = settled_history(n);
+        let before = log.last();
+        log.add(
+            None,
+            None,
+            "session_opened",
+            json!({"kind": "runtime_planner", "planner_id": 1}),
+            900_000,
+        )
+        .add(
+            None,
+            None,
+            "claim_held",
+            json!({"supervisor": "s"}),
+            900_001,
+        );
+        let mut builder = Builder::default();
+        let mut held = BTreeMap::new();
+        settle(
+            &mut builder,
+            &mut held,
+            &log.events[..log.events.iter().position(|e| e.id > before).unwrap()],
+            ms(500_000),
+        );
+        settle(&mut builder, &mut held, &log.after(before), ms(900_002));
+        builder.kept().size()
+    };
+    let (few, many) = (kept(3), kept(300));
+    // The open session and the open hold.
+    assert_eq!((few.sessions, few.queue, few.pushes), (1, 1, 0));
+    assert_eq!(few.events(), many.events());
+    assert_eq!(many.dropped_rows, 300 * 3);
+    assert!(many.session_rows > few.session_rows && many.bytes > few.bytes);
+    assert!(many.lives > 0 && many.pre_claim > few.pre_claim && many.queue_rows > 0);
+}
+
+/// A push that closes a pending push is kept, and a run's and a task's
+/// fold reads it where it is kept as from every push.
+#[test]
+fn a_push_that_closes_a_pending_one_is_kept() {
+    let (a, b, c) = (run_id(1), run_id(2), run_id(3));
+    let mut log = Log::default();
+    log.landed(3, &c, 0)
+        .worked(1, &a, 0)
+        .integrated(1, &a, 700)
+        .push_failed(1, &a, 910)
+        .landed(2, &b, 2000);
+    let kept = Kept::of(&log.events);
+    assert_eq!(kept.size().pushes, 1);
+    let whole: Vec<RunEvent> = log
+        .events
+        .iter()
+        .filter(|event| event.kind == EventKind::PushFinished)
+        .cloned()
+        .collect();
+    assert_eq!(whole.len(), 2);
+    let run_events: Vec<RunEvent> = log
+        .events
+        .iter()
+        .filter(|event| event.run_id.as_ref().map(|run| run.as_str()) == Some(a.as_str()))
+        .cloned()
+        .collect();
+    let task_events: Vec<RunEvent> = log
+        .events
+        .iter()
+        .filter(|event| event.task_id == Some(TaskId::new(1)))
+        .cloned()
+        .collect();
+    let now = ms(9000);
+    let row = super::super::run_row(&a, &run_events, &kept.pushes, now, BUILT);
+    assert!(row.ended_at.is_some());
+    assert_eq!(
+        row,
+        super::super::run_row(&a, &run_events, &whole, now, BUILT)
+    );
+    let waits = Vec::<crate::domain::pre_claim::PreClaimInterval>::new();
+    assert_eq!(
+        super::super::task_row(
+            TaskId::new(1),
+            &task_events,
+            &kept.pushes,
+            &waits,
+            now,
+            BUILT
+        ),
+        super::super::task_row(TaskId::new(1), &task_events, &whole, &waits, now, BUILT)
+    );
+}
+
+/// A later event that reaches a settled row whose records were dropped
+/// (a late turn of a closed session, a later event of the supervisor whose
+/// stop ended a stream) folds it from its records given back from the row
+/// held: the session and queue rows are those of the fold of every event.
+#[test]
+fn a_dropped_row_a_later_event_reaches_folds_as_every_event() {
+    let mut log = Log::default();
+    log.add(
+        None,
+        None,
+        "session_opened",
+        json!({"kind": "runtime_planner", "planner_id": 7}),
+        0,
+    )
+    .add(
+        None,
+        None,
+        "session_closed",
+        json!({"kind": "runtime_planner", "planner_id": 7, "opened_event_id": 1}),
+        10,
+    )
+    .add(
+        None,
+        None,
+        "live_alert_baseline",
+        json!({"supervisor": "s", "version": 1}),
+        20,
+    )
+    .add(
+        None,
+        None,
+        "live_alert_input_changed",
+        json!({"supervisor": "s", "version": 2}),
+        30,
+    )
+    .add(
+        None,
+        None,
+        "supervisor_stopped",
+        json!({"supervisor": "s"}),
+        40,
+    );
+    let mut builder = Builder::default();
+    let mut held = BTreeMap::new();
+    settle(&mut builder, &mut held, &log.events, ms(100_000));
+    assert_eq!(builder.kept().size().events(), 0);
+    let dropped = builder.kept().size().dropped_rows;
+    assert!(dropped >= 2, "{dropped}");
+
+    let before = log.last();
+    log.add(
+        None,
+        None,
+        "session_turns",
+        json!({"kind": "runtime_planner", "planner_id": 7, "opened_event_id": 1}),
+        200_000,
+    )
+    .add(
+        None,
+        None,
+        "supervisor_alive",
+        json!({"supervisor": "s"}),
+        200_001,
+    );
+    let now = ms(200_002);
+    builder.mark_events(&log.after(before));
+    builder.due(now);
+    let rows = builder.rows_to_build(builder.kept());
+    let restored = builder.to_restore(&rows);
+    assert!(
+        restored
+            .iter()
+            .any(|(kind, _)| *kind == LedgerKind::Session),
+        "{restored:?}"
+    );
+    for (kind, key) in restored {
+        let records = held[&Target::Row(kind, key.clone())].records.clone();
+        assert_eq!(builder.restore(kind, &key, records), Vec::new());
+    }
+    let inputs = Inputs::of(builder.kept(), now, BUILT, &rows);
+    let whole = Inputs::new(&log.events, now, BUILT, true);
+    assert!(!inputs.rows.is_empty());
+    for (key, row) in &inputs.rows {
+        assert_eq!(Some(row), whole.rows.get(key), "{key:?}");
+    }
+}
+
+/// The fold at `now_ms` of the run or task `target` as a pass makes it on
+/// `builder`: its events of `log`, and the pushes the builder no longer
+/// keeps read back by id.
+fn fold_of(builder: &Builder, target: &Target, log: &Log, now_ms: i64) -> Option<LedgerRow> {
+    let mut inputs = Inputs::of(builder.kept(), now_ms, BUILT, &BTreeSet::new());
+    let events: Vec<RunEvent> = log
+        .events
+        .iter()
+        .filter(|event| match target {
+            Target::Run(run) => event.run_id.as_ref().map(|id| id.as_str()) == Some(run.as_str()),
+            Target::Task(task) => event.task_id == Some(*task),
+            _ => false,
+        })
+        .cloned()
+        .collect();
+    let ids = builder.pushes_to_read(&events);
+    let pushes = log
+        .events
+        .iter()
+        .filter(|event| ids.contains(&event.id))
+        .cloned()
+        .collect();
+    inputs.read_pushes(target, pushes);
+    inputs.read(target, events);
+    build(target, &inputs, &[])
+}
+
+/// A push that closed a pending push is dropped once the rows of the run
+/// it closed and of its task are settled; a later event of the run folds
+/// it and its task again on the push read back by id, as the fold of
+/// every event.
+#[test]
+fn a_closing_push_goes_once_its_run_and_task_settle_and_comes_back_by_id() {
+    let (a, b) = (run_id(1), run_id(2));
+    let mut log = Log::default();
+    log.worked(1, &a, 0)
+        .integrated(1, &a, 700)
+        .push_failed(1, &a, 910)
+        .add(
+            Some(1),
+            None,
+            "task_status_changed",
+            json!({"from": "in_progress", "to": "completed"}),
+            910,
+        )
+        .landed(2, &b, 2000);
+    let mut builder = Builder::default();
+    builder.mark_events(&log.events);
+    builder.take(usize::MAX);
+    let targets = [Target::Run(a.clone()), Target::Task(TaskId::new(1))];
+    let now = ms(100_000);
+    assert_eq!(builder.kept().size().pushes, 1);
+    // The run settles: the task still reads the push.
+    let run = fold_of(&builder, &targets[0], &log, now).unwrap();
+    assert!(run.is_final && run.ended_at.is_some());
+    builder.track(&targets[0], &run);
+    builder.due(now);
+    assert_eq!(builder.kept().size().pushes, 1);
+    let task = fold_of(&builder, &targets[1], &log, now).unwrap();
+    assert!(task.is_final);
+    builder.track(&targets[1], &task);
+    builder.due(now);
+    assert_eq!(builder.kept().size().pushes, 0);
+    assert_eq!(builder.kept().size().push_runs, 2);
+
+    let before = log.last();
+    log.add(Some(1), Some(&a), "note_added", json!({}), 200_000);
+    builder.mark_events(&log.after(before));
+    let later = ms(200_001);
+    let whole = Inputs::new(&log.events, later, BUILT, false);
+    for target in &targets {
+        let row = fold_of(&builder, target, &log, later);
+        assert!(row.is_some_and(|row| row.ended_at.is_some()));
+        assert_eq!(
+            fold_of(&builder, target, &log, later),
+            build(target, &whole, &[]),
+            "{target:?}"
+        );
+    }
+}
+
+/// The bytes count the room of the kept events' vectors, used or not, and
+/// the texts and payloads of the events in them: a drop of the events of
+/// the rows settled gives back the room the events read at the start took,
+/// and spare room is counted as it is.
+#[test]
+fn the_bytes_count_the_room_of_the_events_and_a_drop_gives_it_back() {
+    let room = |kept: &Kept| {
+        (kept.sessions.capacity() + kept.queue.capacity() + kept.pushes.capacity())
+            * size_of::<RunEvent>()
+    };
+    let heap = |kept: &Kept| {
+        kept.sessions
+            .iter()
+            .chain(&kept.queue)
+            .chain(&kept.pushes)
+            .map(event_heap_bytes)
+            .sum::<usize>()
+    };
+    let mut log = settled_history(300);
+    let before = log.last();
+    log.add(None, None, "mark_added", json!({"mark": "open"}), 900_000)
+        .add(
+            None,
+            None,
+            "session_opened",
+            json!({"kind": "runtime_planner", "planner_id": 1}),
+            900_001,
+        );
+    let mut builder = Builder::default();
+    builder.mark_events(&log.events[..log.events.iter().position(|e| e.id > before).unwrap()]);
+    let read = builder.kept().size();
+    let read_room = room(builder.kept());
+    assert!(read_room >= read.events() * size_of::<RunEvent>());
+    assert_eq!(builder.kept().event_heap, heap(builder.kept()));
+
+    let mut held = BTreeMap::new();
+    settle(&mut builder, &mut held, &[], ms(500_000));
+    settle(&mut builder, &mut held, &log.after(before), ms(900_002));
+    let kept = builder.kept();
+    let dropped = kept.size();
+    assert_eq!((dropped.sessions, dropped.queue, dropped.pushes), (1, 1, 0));
+    assert_eq!(kept.event_heap, heap(kept));
+    for events in [&kept.sessions, &kept.queue, &kept.pushes] {
+        assert!(
+            // One the new events grew from empty holds the least room a vector takes.
+            events.capacity() <= (2 * events.len()).max(4),
+            "{} of {}",
+            events.capacity(),
+            events.len()
+        );
+    }
+    assert!(read.bytes - dropped.bytes >= read_room - room(kept) && read_room > room(kept));
+
+    // Room not used is counted as much as room used.
+    let mut spare = (**kept).clone();
+    let (bytes, capacity) = (spare.size().bytes, spare.queue.capacity());
+    spare.queue.reserve_exact(1000);
+    assert_eq!(
+        spare.size().bytes - bytes,
+        (spare.queue.capacity() - capacity) * size_of::<RunEvent>()
+    );
+}
