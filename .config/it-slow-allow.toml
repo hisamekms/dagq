@@ -2144,3 +2144,9 @@ task = 2432
 name = "runtime_replanning::a_run_waiting_in_the_landing_slot_rests_out_of_it_once_its_task_is_guarded"
 reason = "境界: supervisorの配線（着地の順を自動更新のgateのlockで待つslotのrunに柵を立て、枠を返すSQLiteのtransaction）を実際のlockとsupervisorで通す。選択の判断はchoose_parkのunit test"
 task = 2432
+
+# 5.0-6.4s under load1 6.5 in the stress of task 2240.
+[[test]]
+name = "runtime_review_questions::a_question_open_from_before_the_revise_does_not_stop_its_resume_timeout"
+reason = "B 境界（SQLite・supervisor の配線）: review の間に開いた worker_question が SQLite の has_unclosed_worker_question_since の下限で revise を止めず、その answer の runtime_delivers が SQLite で false になり、revise が supervisor の時計で resume の時間切れに終わって approve_landing の ask になることを 1 case で確かめる。質問を依頼より前の秒に置くため review を待たせ秒を跨ぐ。判断は revise::tests"
+task = 2240

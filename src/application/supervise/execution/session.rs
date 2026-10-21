@@ -361,6 +361,15 @@ pub(super) fn waited_out_after_receipt(
     receipt_seen_at.is_some_and(|at| passed(now, at, timeout))
 }
 
+/// Whether a watch that follows the `worker_question`s created from
+/// `asks_from` ([`SessionWatch::asks_from`]) follows one created at
+/// `created_at` (both unix seconds): its answer is typed and it holds the
+/// session; an earlier one is the inbox's (task 582). The queue's
+/// `has_unclosed_worker_question_since` applies the same bound.
+pub(super) fn follows_ask(created_at: i64, asks_from: i64) -> bool {
+    created_at >= asks_from
+}
+
 /// Watches one session: wrapper registration and heartbeat, receipt and idle
 /// marker, the single exit request, and the wrapper's exit.
 pub(super) struct SessionWatch {
@@ -731,7 +740,7 @@ impl SessionWatch {
         run: &TaskRun,
     ) -> Result<Option<SystemTime>> {
         let mut answers = sv.queue.undelivered_answers(run.id())?;
-        answers.retain(|ask| ask.created_at >= self.asks_from);
+        answers.retain(|ask| follows_ask(ask.created_at, self.asks_from));
         if answers.is_empty() {
             return Ok(None);
         }

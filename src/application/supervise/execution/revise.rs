@@ -210,6 +210,124 @@ pub(super) fn revise_deadline(
     })
 }
 
+/// The first second of the `worker_question`s a revise or conflict
+/// request sent at `sent_at` follows ([`SessionWatch::asks_from`]): a
+/// question from before it (asked during validation or the review, or left
+/// open before the receipt) is the inbox's to deliver by hand, neither
+/// typed here nor holding the revise (task 582).
+pub(super) fn revise_asks_from(sent_at: SystemTime) -> i64 {
+    unix_seconds(sent_at)
+}
+
+/// The first second of the `worker_question`s that hold a revise: those it
+/// follows from the request (`asks_from`) and not passed by a receipt
+/// rewritten after them (`questions_from`, task 583).
+pub(super) fn questions_held_from(asks_from: i64, questions_from: i64) -> i64 {
+    asks_from.max(questions_from)
+}
+
+/// What the `worker_question`s open since [`questions_held_from`] do to a
+/// revise at one poll.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum QuestionHold {
+    /// The session stopped at its own question waits for the answer,
+    /// however long a person takes: it neither went idle without
+    /// rewriting the receipt nor ran out of time.
+    Waits,
+    /// The session rewrote its receipt since the request after its
+    /// questions: the ones created before this second hold it no longer,
+    /// and its time runs from now.
+    PassedFrom(i64),
+    /// A receipt rewritten after them was seen before: they hold no longer.
+    Passed,
+}
+
+/// What open `worker_question`s do to a revise whose receipt was last
+/// written at `receipt_modified` (`None` when it cannot be read), the
+/// request sent at `sent_at` and the questions passed up to
+/// `questions_from`: a receipt rewritten since the request is judged all
+/// the same, as a worker's own session's is (task 583).
+pub(super) fn open_question_hold(
+    receipt_modified: Option<SystemTime>,
+    sent_at: SystemTime,
+    questions_from: i64,
+) -> QuestionHold {
+    let Some(modified) = receipt_modified.filter(|m| rewritten_after(*m, sent_at)) else {
+        return QuestionHold::Waits;
+    };
+    let from = unix_seconds(modified) + 1;
+    if from > questions_from {
+        QuestionHold::PassedFrom(from)
+    } else {
+        QuestionHold::Passed
+    }
+}
+
+/// What a revise held by no question does once it read its turn
+/// ([`turn_outcome`]).
+pub(super) enum TurnOutcome {
+    /// The rewritten receipt is judged ([`judge_receipt`]).
+    JudgeReceipt,
+    /// The revise ends.
+    Ends(ReviseOutcome),
+    /// Nothing ended the turn: its resume timeout decides
+    /// ([`revise_deadline`]). The only outcome the clock is read for.
+    CheckDeadline,
+}
+
+/// A receipt `rewritten` since the request with an idle after it
+/// (`idle_after_receipt`) is judged; no rewritten receipt and an idle since
+/// the last input (`idle_since_input`) ends the revise; otherwise its
+/// deadline is checked.
+pub(super) fn turn_outcome(
+    rewritten: bool,
+    idle_after_receipt: bool,
+    idle_since_input: bool,
+) -> TurnOutcome {
+    if rewritten && idle_after_receipt {
+        return TurnOutcome::JudgeReceipt;
+    }
+    if !rewritten && idle_since_input {
+        return TurnOutcome::Ends(ReviseOutcome::Ended(
+            "went idle without rewriting the receipt".to_owned(),
+        ));
+    }
+    TurnOutcome::CheckDeadline
+}
+
+/// What a rewritten receipt (`parsed`, or why it cannot be read) says about
+/// a revise whose worktree HEAD is `head`, `clean` or not: the head, or why
+/// validation would fail the run and its work and the session is asked to
+/// fix it.
+pub(super) fn judge_receipt(
+    parsed: Result<Receipt>,
+    head: CommitSha,
+    clean: bool,
+) -> ReviseOutcome {
+    match parsed {
+        // A session that gives the change up is validation's to fail.
+        Ok(receipt) if receipt.result() == ReceiptResult::Failed => ReviseOutcome::Rewritten(head),
+        Ok(receipt) if receipt.names_commit(head.as_str()) && clean => {
+            ReviseOutcome::Rewritten(head)
+        }
+        Ok(receipt) if !receipt.names_commit(head.as_str()) => ReviseOutcome::Mismatch(
+            ReasonCode::CommitMismatch,
+            format!(
+                "the rewritten receipt names commit {} but the worktree HEAD is {head}",
+                receipt.commit()
+            ),
+        ),
+        Ok(_) => ReviseOutcome::Mismatch(
+            ReasonCode::WorktreeDirty,
+            format!("the worktree has uncommitted changes on top of HEAD {head}"),
+        ),
+        Err(error) => ReviseOutcome::Mismatch(
+            ReasonCode::ReceiptInvalid,
+            format!("the rewritten receipt is invalid: {error:#}"),
+        ),
+    }
+}
+
 impl ReviseWatch {
     /// `now` is the supervisor's monotonic clock: the resume timeout runs
     /// from it.
@@ -223,11 +341,7 @@ impl ReviseWatch {
         now: Instant,
     ) -> Result<Self> {
         let mut live = Box::new(SessionWatch::fixing(run, &session.workspace, sent_at, now)?);
-        // A question from before the request (asked during validation or
-        // the review, or left open before the receipt) is the inbox's to
-        // deliver by hand: it neither gets its answer typed here nor holds
-        // the revise (task 582).
-        live.asks_from = unix_seconds(sent_at);
+        live.asks_from = revise_asks_from(sent_at);
         Ok(ReviseWatch {
             session,
             attempt,
@@ -276,7 +390,7 @@ impl ReviseWatch {
 
     /// The first second of the `worker_question`s that hold the revise.
     pub(super) fn holds_questions_from(&self) -> i64 {
-        self.live.asks_from.max(self.questions_from)
+        questions_held_from(self.live.asks_from, self.questions_from)
     }
 
     /// Whether the session rewrote `run`'s receipt since the request.
@@ -307,30 +421,7 @@ impl ReviseWatch {
             .read_to_string(receipt)
             .map_err(anyhow::Error::from)
             .and_then(|text| Ok(Receipt::parse(&text)?));
-        Ok(match parsed {
-            // A session that gives the change up is validation's to fail.
-            Ok(receipt) if receipt.result() == ReceiptResult::Failed => {
-                ReviseOutcome::Rewritten(head)
-            }
-            Ok(receipt) if receipt.names_commit(head.as_str()) && clean => {
-                ReviseOutcome::Rewritten(head)
-            }
-            Ok(receipt) if !receipt.names_commit(head.as_str()) => ReviseOutcome::Mismatch(
-                ReasonCode::CommitMismatch,
-                format!(
-                    "the rewritten receipt names commit {} but the worktree HEAD is {head}",
-                    receipt.commit()
-                ),
-            ),
-            Ok(_) => ReviseOutcome::Mismatch(
-                ReasonCode::WorktreeDirty,
-                format!("the worktree has uncommitted changes on top of HEAD {head}"),
-            ),
-            Err(error) => ReviseOutcome::Mismatch(
-                ReasonCode::ReceiptInvalid,
-                format!("the rewritten receipt is invalid: {error:#}"),
-            ),
-        })
+        Ok(judge_receipt(parsed, head, clean))
     }
 
     fn observe(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<Option<ReviseOutcome>> {
@@ -400,16 +491,14 @@ impl ReviseWatch {
             .queue
             .has_unclosed_worker_question_since(run.id(), self.holds_questions_from())?
         {
-            let Ok(modified) = sv.files.modified(receipt) else {
-                return Ok(None);
-            };
-            if !rewritten_after(modified, self.sent_at) {
-                return Ok(None);
-            }
-            let from = unix_seconds(modified) + 1;
-            if from > self.questions_from {
-                self.questions_from = from;
-                self.sent = sv.generators.clock.monotonic();
+            let modified = sv.files.modified(receipt).ok();
+            match open_question_hold(modified, self.sent_at, self.questions_from) {
+                QuestionHold::Waits => return Ok(None),
+                QuestionHold::PassedFrom(from) => {
+                    self.questions_from = from;
+                    self.sent = sv.generators.clock.monotonic();
+                }
+                QuestionHold::Passed => (),
             }
         }
         // A turn at its provider's wall (ADR-t813-2): the call went to the
@@ -451,19 +540,16 @@ impl ReviseWatch {
             Some(idle) if rewritten => idle.idle_after_receipt(&*sv.files, receipt)?.is_some(),
             _ => false,
         };
-        if idle_after_receipt {
-            return self.judge_rewritten(sv, run, receipt).map(Some);
+        let idle_since_input = idle.is_some_and(|idle| idle.idle_since(input_at));
+        match turn_outcome(rewritten, idle_after_receipt, idle_since_input) {
+            TurnOutcome::JudgeReceipt => self.judge_rewritten(sv, run, receipt).map(Some),
+            TurnOutcome::Ends(outcome) => Ok(Some(outcome)),
+            TurnOutcome::CheckDeadline => Ok(revise_deadline(
+                sv.generators.clock.monotonic(),
+                self.sent,
+                sv.sessions.resume_timeout(),
+            )),
         }
-        if !rewritten && idle.is_some_and(|idle| idle.idle_since(input_at)) {
-            return Ok(Some(ReviseOutcome::Ended(
-                "went idle without rewriting the receipt".to_owned(),
-            )));
-        }
-        Ok(revise_deadline(
-            sv.generators.clock.monotonic(),
-            self.sent,
-            sv.sessions.resume_timeout(),
-        ))
     }
 }
 
@@ -510,6 +596,202 @@ mod tests {
         assert_eq!(whole, at_ns(0, 0));
         assert!(!rewritten_after(at_ns(0, 999_999), whole));
         assert!(rewritten_after(at_ns(1, 0), whole));
+    }
+
+    /// The time `secs` and `ms` after the epoch: asks are created to the
+    /// second, files written to the millisecond.
+    fn at(secs: u64, ms: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(secs) + Duration::from_millis(ms)
+    }
+
+    fn sha(c: char) -> CommitSha {
+        CommitSha::parse(c.to_string().repeat(40), "commit").unwrap()
+    }
+
+    fn receipt(result: &str, commit: &CommitSha) -> Receipt {
+        let check = |status: &str| json!({"status": status, "evidence_or_reason": "why"});
+        Receipt::parse(
+            &json!({
+                "run_id": "r",
+                "result": result,
+                "commit": commit,
+                "tests": check("passed"),
+                "e2e": check("not_applicable"),
+                "subagent_review": check("not_applicable"),
+                "summary": "fixed",
+            })
+            .to_string(),
+        )
+        .unwrap()
+    }
+
+    /// Whether a revise sent at `sent_at` follows a `worker_question`
+    /// created at `created_at`, with the questions passed up to
+    /// `questions_from`: its answer typed, and it holding the revise.
+    fn follows(created_at: i64, sent_at: SystemTime, questions_from: i64) -> bool {
+        let held = questions_held_from(revise_asks_from(sent_at), questions_from);
+        super::super::session::follows_ask(created_at, held)
+    }
+
+    /// Task 582: a question created in an earlier second than the revise
+    /// request (asked during the review) is the inbox's: the revise neither
+    /// types its answer nor waits for it, open or answered, so an idle
+    /// session or the resume timeout ends the revise as without it. One
+    /// asked in the request's second or later is the revise's. A run
+    /// awaiting integration takes the answer of the same ones only
+    /// (`domain::tests::answers_are_the_sessions_while_it_runs_or_fixes_a_request`).
+    #[test]
+    fn a_question_from_before_the_revise_neither_gets_its_answer_typed_nor_holds_it() {
+        let sent_at = at(100, 400);
+        assert!(!follows(99, sent_at, 0));
+        assert!(follows(100, sent_at, 0));
+        assert!(follows(101, sent_at, 0));
+        // Idle since the last input without a rewritten receipt, it ends
+        // with no deadline to check (no clock read); otherwise the resume
+        // timeout decides (`a_revise_ends_at_its_resume_timeout_since_the_last_send`).
+        let TurnOutcome::Ends(ReviseOutcome::Ended(why)) = turn_outcome(false, false, true) else {
+            panic!("an idle session without a rewritten receipt ends");
+        };
+        assert_eq!(why, "went idle without rewriting the receipt");
+        assert!(matches!(
+            turn_outcome(false, false, false),
+            TurnOutcome::CheckDeadline
+        ));
+    }
+
+    /// Task 238: a session with a question it asked since the request open,
+    /// its receipt not rewritten since the request (or not readable), waits
+    /// for the answer: nothing else is judged, past the resume timeout too.
+    /// A receipt rewritten since then passes the questions created before
+    /// the second after it, and its time runs from there; seen again, it
+    /// passes nothing new (task 583).
+    #[test]
+    fn an_open_question_holds_the_revise_until_a_receipt_rewritten_after_the_request() {
+        let sent_at = at(100, 400);
+        assert_eq!(open_question_hold(None, sent_at, 0), QuestionHold::Waits);
+        let before = at(100, 300);
+        assert_eq!(
+            open_question_hold(Some(before), sent_at, 0),
+            QuestionHold::Waits
+        );
+        let rewritten = at(102, 200);
+        assert_eq!(
+            open_question_hold(Some(rewritten), sent_at, 0),
+            QuestionHold::PassedFrom(103)
+        );
+        assert_eq!(
+            open_question_hold(Some(rewritten), sent_at, 103),
+            QuestionHold::Passed
+        );
+        // A question asked after the rewritten receipt holds the revise
+        // again until a later one.
+        assert!(follows(103, sent_at, 103));
+        assert!(!follows(102, sent_at, 103));
+    }
+
+    /// Task 583: a receipt rewritten since the request with an idle after
+    /// it is judged whatever questions it went on past; it names the clean
+    /// HEAD, or reports `failed`, or is a mismatch the session is asked to
+    /// fix: another commit, uncommitted changes, an unreadable receipt.
+    #[test]
+    fn a_receipt_rewritten_past_its_questions_is_judged_by_the_head_it_names() {
+        // Judged with no deadline to check (no clock read), however long
+        // the revise took.
+        for idle_since_input in [false, true] {
+            assert!(matches!(
+                turn_outcome(true, true, idle_since_input),
+                TurnOutcome::JudgeReceipt
+            ));
+        }
+        // Rewritten without an idle after it: only the deadline can end it.
+        assert!(matches!(
+            turn_outcome(true, false, true),
+            TurnOutcome::CheckDeadline
+        ));
+        let (head, other) = (sha('b'), sha('a'));
+        let judged = |parsed, clean| judge_receipt(parsed, head.clone(), clean);
+        assert!(matches!(
+            judged(Ok(receipt("succeeded", &head)), true),
+            ReviseOutcome::Rewritten(h) if h == head
+        ));
+        assert!(matches!(
+            judged(Ok(receipt("failed", &other)), false),
+            ReviseOutcome::Rewritten(h) if h == head
+        ));
+        let ReviseOutcome::Mismatch(code, why) = judged(Ok(receipt("succeeded", &other)), true)
+        else {
+            panic!("a receipt for another commit is a mismatch");
+        };
+        assert_eq!(code, ReasonCode::CommitMismatch);
+        assert_eq!(
+            why,
+            format!("the rewritten receipt names commit {other} but the worktree HEAD is {head}")
+        );
+        let ReviseOutcome::Mismatch(code, why) = judged(Ok(receipt("succeeded", &head)), false)
+        else {
+            panic!("a dirty worktree is a mismatch");
+        };
+        assert_eq!(code, ReasonCode::WorktreeDirty);
+        assert_eq!(
+            why,
+            format!("the worktree has uncommitted changes on top of HEAD {head}")
+        );
+        let ReviseOutcome::Mismatch(code, why) = judged(Err(anyhow::anyhow!("not json")), true)
+        else {
+            panic!("an unreadable receipt is a mismatch");
+        };
+        assert_eq!(code, ReasonCode::ReceiptInvalid);
+        assert_eq!(why, "the rewritten receipt is invalid: not json");
+    }
+
+    /// Task 582 and 583: a revise follows the questions from its request's
+    /// second. An open question with no receipt rewritten since the request
+    /// keeps it waiting (no clock read). A receipt rewritten after a
+    /// question passes it: the questions before the second after it hold no
+    /// more and the resume timeout restarts (the clock read). Seen again, it
+    /// passes nothing new (no clock read). Once that receipt is sent back
+    /// to be fixed (a request at a later `sent_at`, which
+    /// [`ReviseWatch::requested`] records without touching the bounds), the
+    /// question still open holds the fix no longer, while one asked after
+    /// the rewritten receipt still does; the session idle without rewriting
+    /// it again is judged so.
+    #[test]
+    fn a_question_passed_by_a_rewritten_receipt_does_not_hold_its_fix() {
+        let sent_at = at(100, 400);
+        let asks_from = revise_asks_from(sent_at);
+        assert_eq!(asks_from, 100);
+        assert_eq!(questions_held_from(asks_from, 0), 100);
+        assert_eq!(open_question_hold(None, sent_at, 0), QuestionHold::Waits);
+
+        let rewritten = at(102, 200);
+        let QuestionHold::PassedFrom(questions_from) =
+            open_question_hold(Some(rewritten), sent_at, 0)
+        else {
+            panic!("the rewritten receipt passes the question");
+        };
+        assert_eq!(questions_from, 103);
+        assert_eq!(
+            open_question_hold(Some(rewritten), sent_at, questions_from),
+            QuestionHold::Passed
+        );
+
+        let fix_sent_at = at(104, 0);
+        let held = questions_held_from(asks_from, questions_from);
+        assert_eq!(held, 103);
+        assert!(!super::super::session::follows_ask(101, held));
+        assert!(super::super::session::follows_ask(103, held));
+        // The old receipt is not rewritten since the fix request: only a
+        // question still held would make the session wait for it.
+        assert!(!rewritten_after(rewritten, fix_sent_at));
+        assert_eq!(
+            open_question_hold(Some(rewritten), fix_sent_at, questions_from),
+            QuestionHold::Waits
+        );
+        assert!(matches!(
+            turn_outcome(false, false, true),
+            TurnOutcome::Ends(ReviseOutcome::Ended(why))
+                if why == "went idle without rewriting the receipt"
+        ));
     }
 
     /// Task 1050: an idle marker of the millisecond of the revise's last

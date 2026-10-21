@@ -1,6 +1,12 @@
 //! Runtime tests: a revise follows only the `worker_question`s asked since
 //! its request; one from before it is the inbox's (task 582). One open
 //! since it holds the judgment only until a rewritten receipt (task 583).
+//! Which question holds the revise, which answer it types, and how a
+//! rewritten receipt is judged are the unit tests' (`revise::tests`,
+//! `domain::tests::answers_are_the_sessions_while_it_runs_or_fixes_a_request`);
+//! these check the queue's bound and `runtime_delivers` on SQLite, the
+//! supervisor's clock, and a session's own `dagq ask` and its answer typed
+//! into it.
 use crate::runtime_support;
 
 use dagq::domain::{AskId, AskReason, NewAsk};
@@ -94,22 +100,12 @@ fn await_revise_after(db: &std::path::Path, ask: AskId) {
     assert!(created_at < sent_at, "{created_at} {sent_at}");
 }
 
-/// The supervisor under test, and the count of its passes.
-fn run_supervisor(
-    db: &std::path::Path,
-    repo: &std::path::Path,
-    backend: &Arc<TestWorkspace>,
-    reviewer: &Arc<TestReviewer>,
-) -> (thread::JoinHandle<Value>, Arc<AtomicU64>) {
-    let (supervisor, passes, _) = run_supervisor_ahead(db, repo, backend, reviewer);
-    (supervisor, passes)
-}
-
-/// [`run_supervisor`] with the [`MonotonicAhead`] of its clock: the test
-/// runs the revise's resume timeout out by moving the clock on, not by
-/// sleeping (task 1557). When the timeout ends a revise at which time is
-/// the unit tests' (`revise::tests`); these check that the revise reads
-/// the supervisor's clock and what the end does.
+/// The supervisor under test, the count of its passes and the
+/// [`MonotonicAhead`] of its clock: the test runs the revise's resume
+/// timeout out by moving the clock on, not by sleeping (task 1557). When
+/// the timeout ends a revise at which time is the unit tests'
+/// (`revise::tests`); these check that the revise reads the supervisor's
+/// clock and what the end does.
 fn run_supervisor_ahead(
     db: &std::path::Path,
     repo: &std::path::Path,
@@ -146,86 +142,14 @@ fn assert_revise_ended(queue: &mut SqliteQueue, why: &str) {
     assert!(asks[1].question.contains(why), "{}", asks[1].question);
 }
 
-/// An answer to a question the worker asked during its review, answered
-/// while the revise waits, is the inbox's to deliver by hand
-/// (`runtime_delivers: false`): the revise does not type it (no
-/// `ask_delivered`), nor waits for its close, and judges the rewritten
-/// receipt; the run lands.
-#[test]
-fn an_answer_to_a_question_from_before_the_revise_is_left_to_the_inbox() {
-    let (_dir, repo, db) = fixture();
-    let base = git_out(&repo, &["rev-parse", "main"]);
-    let backend = Arc::new(TestWorkspace::new(
-        &db,
-        false,
-        &on_revise(
-            "await_file \"$EXIT.go\"\n\
-             printf 'fix\\n' >> change.txt; git commit -q -am fix\n\
-             receipt \"$(git rev-parse HEAD)\"",
-        ),
-    ));
-    let reviewer = Arc::new(TestReviewer::new(&[
-        slow_revise(&db),
-        verdict("pass", &[], "fixed"),
-    ]));
-    let (supervisor, passes) = run_supervisor(&db, &repo, &backend, &reviewer);
-    let ask = ask_during_review(&db);
-    await_revise_after(&db, ask);
-    // Answered while the revise waits: the answer is the inbox's.
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    queue.answer(ask, "the second").unwrap();
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    let answered = payloads(&detail, "ask_answered");
-    assert_eq!(answered.len(), 1);
-    assert_eq!(answered[0]["runtime_delivers"], false, "{}", answered[0]);
-    // The revise watch polls a while with the answer there.
-    await_passes(&passes, SOME_PASSES);
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    assert!(payloads(&detail, "ask_delivered").is_empty());
-    let run = detail.runs[0].clone();
-    let texts = session_texts(&run);
-    assert_eq!(texts.len(), 1, "{texts:?}");
-
-    fs::write(
-        exit_request_path(run.run_dir().unwrap()).with_extension("go"),
-        "",
-    )
-    .unwrap();
-    let outcome = joined(supervisor, "the supervisor thread to return");
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    assert_landed(&repo, &detail.runs[0], "test task", &base);
-    assert_eq!(payloads(&detail, "revise_finished").len(), 1);
-    assert!(payloads(&detail, "ask_delivered").is_empty());
-    let texts = session_texts(&detail.runs[0]);
-    assert_eq!(texts.len(), 1, "{texts:?}");
-    assert!(!texts[0].contains("answer to ask"), "{texts:?}");
-    assert!(queue.read_ask(ask).unwrap().closed_at.is_none());
-}
-
-/// A question left open from the review does not hold a revise: the
-/// session that goes idle without rewriting its receipt is judged so, and
-/// the run goes on to its `approve_landing` ask.
-#[test]
-fn a_question_open_from_before_the_revise_does_not_hold_an_idle_session() {
-    let (_dir, repo, db) = fixture();
-    let backend = Arc::new(TestWorkspace::new(&db, false, &on_revise(":")));
-    let reviewer = Arc::new(TestReviewer::new(&[slow_revise(&db)]));
-    let (supervisor, _) = run_supervisor(&db, &repo, &backend, &reviewer);
-    let ask = ask_during_review(&db);
-    await_revise_after(&db, ask);
-    let outcome = joined(supervisor, "the supervisor thread to return");
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    assert_revise_ended(&mut queue, "went idle without rewriting the receipt");
-    assert!(payloads(&queue.show(TaskId::new(1)).unwrap(), "ask_delivered").is_empty());
-}
-
 /// A question left open from the review does not stop the revise's
-/// resume timeout either: a session that neither rewrites its receipt nor
-/// goes idle runs out of it. The timeout is run out on the supervisor's
-/// clock (task 1557).
+/// resume timeout: a session that neither rewrites its receipt nor goes
+/// idle runs out of it. The timeout is run out on the supervisor's clock
+/// (task 1557). Its answer, given while the revise waits, is the inbox's to
+/// deliver by hand (`runtime_delivers: false`) and stays open. That the
+/// revise would not type it into a session idle at it is
+/// `revise::tests::a_question_passed_by_a_rewritten_receipt_does_not_hold_its_fix`'s
+/// (its `asks_from`): this session never goes idle.
 #[test]
 fn a_question_open_from_before_the_revise_does_not_stop_its_resume_timeout() {
     let (_dir, repo, db) = fixture();
@@ -237,12 +161,26 @@ fn a_question_open_from_before_the_revise_does_not_stop_its_resume_timeout() {
     let (supervisor, passes, ahead) = run_supervisor_ahead(&db, &repo, &backend, &reviewer);
     let ask = ask_during_review(&db);
     await_revise_after(&db, ask);
+    // Answered while the revise waits: the answer is the inbox's.
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue.answer(ask, "the second").unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let answered = payloads(&detail, "ask_answered");
+    assert_eq!(answered.len(), 1);
+    assert_eq!(answered[0]["runtime_delivers"], false, "{}", answered[0]);
     // The pass that sent the request made its watch; the next one is after.
     await_passes(&passes, 1);
     ahead.by(timeout);
     let outcome = joined(supervisor, "the supervisor thread to return");
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert!(payloads(&detail, "ask_delivered").is_empty());
+    let texts = session_texts(&detail.runs[0]);
+    assert!(
+        !texts.iter().any(|t| t.contains("answer to ask")),
+        "{texts:?}"
+    );
+    assert!(queue.read_ask(ask).unwrap().closed_at.is_none());
     assert_revise_ended(
         &mut queue,
         &format!(
@@ -278,85 +216,6 @@ fn open_question(queue: &mut SqliteQueue) -> AskId {
         .unwrap_or_else(|| panic!("{asks:?}"));
     assert!(question.closed_at.is_none(), "{question:?}");
     question.id
-}
-
-/// A session that asks a question during its revise and goes on to rewrite
-/// its receipt and go idle is judged by the rewritten receipt without the
-/// question's close (task 583): one that names another commit is judged a
-/// mismatch, the session is asked to fix it, and the run lands on the
-/// fixed receipt.
-#[test]
-fn a_mismatched_receipt_rewritten_after_an_open_question_is_judged() {
-    let (_dir, repo, db) = fixture();
-    let base = git_out(&repo, &["rev-parse", "main"]);
-    let backend = Arc::new(TestWorkspace::new(
-        &db,
-        false,
-        &asks_after_revise(
-            "printf 'fix\\n' >> change.txt; git commit -q -am fix\n\
-             receipt 0123456789012345678901234567890123456789",
-            "receipt \"$(git rev-parse HEAD)\"",
-        ),
-    ));
-    let reviewer = Arc::new(TestReviewer::new(&[
-        verdict("revise", &["add a line"], "one gap"),
-        verdict("pass", &[], "fixed"),
-    ]));
-    let (supervisor, _) = run_supervisor(&db, &repo, &backend, &reviewer);
-    let outcome = joined(supervisor, "the supervisor thread to return");
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    assert_landed(&repo, &detail.runs[0], "test task", &base);
-    let rejected = payloads(&detail, "revise_receipt_rejected");
-    assert_eq!(rejected.len(), 1, "{rejected:?}");
-    assert_eq!(rejected[0]["code"], "commit_mismatch", "{}", rejected[0]);
-    assert_eq!(payloads(&detail, "revise_finished").len(), 1);
-    let kinds = event_kinds(&detail);
-    assert!(
-        position(&kinds, "revise_requested") < position(&kinds, "ask_opened"),
-        "{kinds:?}"
-    );
-    open_question(&mut queue);
-}
-
-/// A question the session went on past (it rewrote its receipt after it)
-/// holds the revise no longer: once the mismatched receipt is sent back to
-/// be fixed, the session that goes idle without fixing it is judged so
-/// while the question is still open (task 583).
-#[test]
-fn a_question_passed_by_a_rewritten_receipt_does_not_hold_its_fix() {
-    let (_dir, repo, db) = fixture();
-    let backend = Arc::new(TestWorkspace::new(
-        &db,
-        false,
-        &asks_after_revise("receipt 0123456789012345678901234567890123456789", ":"),
-    ));
-    let reviewer = Arc::new(TestReviewer::new(&[verdict(
-        "revise",
-        &["add a line"],
-        "one gap",
-    )]));
-    let (supervisor, _) = run_supervisor(&db, &repo, &backend, &reviewer);
-    let outcome = joined(supervisor, "the supervisor thread to return");
-    assert_eq!(outcome["errors"], json!([]), "{outcome}");
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    let detail = queue.show(TaskId::new(1)).unwrap();
-    assert_eq!(payloads(&detail, "revise_receipt_rejected").len(), 1);
-    open_question(&mut queue);
-    let asks = queue.asks(AskQuery::default()).unwrap();
-    let approve = asks
-        .iter()
-        .find(|a| a.kind == AskKind::ApproveLanding)
-        .unwrap_or_else(|| panic!("{asks:?}"));
-    assert!(
-        approve
-            .question
-            .contains("went idle without rewriting the receipt"),
-        "{}",
-        approve.question
-    );
 }
 
 /// A session idle at a question it asked during its revise, its receipt
