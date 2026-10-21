@@ -239,7 +239,7 @@ stats・kpi・reportの全ての欄は、行を今のstatsの期間の窓（時�
 - runごとに、今のstatsの値と台帳の同じ意味の値、差（秒）と理由の分類。
 - run・taskを持たない欄は、台帳の行が返すeventに今の`stats`の関数を当てた値と並べる。
 - hostの欄は、`stats`の窓とkpiの日ごとの期間ごとに、nodeの行のsampleの要約と今のCSVの要約を並べ、片方にだけあるsampleを理由で分ける。
-- 照合は、窓に終わった対象の数と台帳の行の数、行の無い・確定していない（`push_pending`は別）・dirtyの対象と、行ごとに照合の時点の入力の到達点まで畳んであるか（`up_to_date`）と、確定しdirtyでないrun・taskの行の値の和（`compare::totals`）。
+- 照合は、窓に終わった対象（run・taskは旧方式も「終端」のeventの時刻）と台帳の行を比べ、行の無い・dirtyの対象と、確定していない行を`push_pending`と猶予の中とそれ以外に分け、確定しdirtyでないrun・taskの行の値を足す（`compare::totals`）。
 
 ## runの比較の軸
 

@@ -39,6 +39,7 @@ fn state(kind: LedgerKind, key: &str, is_final: bool, up_to_date: bool) -> RowSt
         row: true,
         is_final,
         push_pending: false,
+        in_grace: false,
         up_to_date,
         reach: 1,
         folded: Some(1),

@@ -313,8 +313,19 @@ fn later_push<'p>(
         .iter()
         .rev()
         .find(|event| event.kind == EventKind::PushFailed && event.id < after);
+    closing_push(failed, pushes, after)
+}
+
+/// The first `push_finished` of `pushes` after the event `after` to the
+/// remote and branch of the push that failed, `failed` (to any, when there
+/// is none or it did not record them).
+pub(super) fn closing_push<'p>(
+    failed: Option<&RunEvent>,
+    pushes: impl IntoIterator<Item = &'p RunEvent>,
+    after: EventId,
+) -> Option<&'p RunEvent> {
     let target = |event: &RunEvent, key: &str| event.payload[key].as_str().map(str::to_owned);
-    pushes.iter().find(|push| {
+    pushes.into_iter().find(|push| {
         push.kind == EventKind::PushFinished
             && push.id > after
             && failed.is_none_or(|failed| {

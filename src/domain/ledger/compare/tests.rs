@@ -132,6 +132,7 @@ fn a_field_of_no_run_lists_its_differences_and_why() {
         missing,
         not_final: Vec::new(),
         push_pending: Vec::new(),
+        in_grace: Vec::new(),
         dirty,
     };
     let rows = [count(
@@ -333,6 +334,7 @@ fn turns_recorded_after_the_window_end_are_named_span_by_span() {
         missing: vec!["x".to_owned()],
         not_final: Vec::new(),
         push_pending: Vec::new(),
+        in_grace: Vec::new(),
         dirty: Vec::new(),
     }];
     assert_eq!(
@@ -577,4 +579,267 @@ fn the_reconciliation_lists_missing_unsettled_pending_and_dirty_rows() {
         ms(9000),
     );
     assert!(after.kinds.iter().all(|k| k.ended == 0));
+}
+
+/// A legacy run and task count in the window of their terminal event
+/// (ADR-t1662-1 decision 16), not of their last input: one that ended
+/// long before the window and has only a later event in it (a
+/// `worktree_removed`, a later event of the task) is not counted; one
+/// whose push, failure or move to `completed` is in it is, and a legacy
+/// run whose push failed with no later push is pending on it.
+#[test]
+fn a_legacy_row_counts_in_the_window_of_its_terminal_event() {
+    let (old, pushed, failed, pending) = (run_id(1), run_id(2), run_id(3), run_id(4));
+    let mut log = Log::default();
+    let completed = |log: &mut Log, task: i64, secs: i64| {
+        log.add(
+            Some(task),
+            None,
+            "task_status_changed",
+            json!({"from": "in_progress", "to": "completed"}),
+            secs,
+        );
+    };
+    // Ended at 1230, long before the window; later events in it.
+    log.legacy(1, &old, 0);
+    completed(&mut log, 1, 1230);
+    // Ended in the window.
+    log.legacy(2, &pushed, 50_000);
+    completed(&mut log, 2, 51_230);
+    log.add(Some(3), Some(&failed), "run_claimed", json!({}), 50_000)
+        .add(
+            Some(3),
+            Some(&failed),
+            "run_unfinished_changed",
+            json!({"from": "in_progress", "to": "failed", "status": "failed", "unfinished": false}),
+            50_600,
+        );
+    log.add(Some(4), Some(&pending), "run_claimed", json!({}), 50_000)
+        .add(
+            Some(4),
+            Some(&pending),
+            "run_integrated",
+            json!({"status": "integrated"}),
+            50_900,
+        )
+        .add(
+            Some(4),
+            Some(&pending),
+            "push_failed",
+            json!({"remote": "origin", "branch": "main"}),
+            50_910,
+        );
+    log.add(Some(1), Some(&old), "worktree_removed", json!({}), 60_000)
+        .add(Some(1), None, "task_note_added", json!({}), 60_000);
+
+    let expected = super::super::build(&log.events, ms(70_000), BUILT);
+    let legacy = |key: &str| expected.iter().any(|r| r.key == key && r.is_legacy());
+    assert!(legacy(&old) && legacy(&pushed) && legacy(&failed) && legacy(&pending));
+    assert!(legacy("1") && legacy("2"));
+    let window = |from: i64, until: i64| {
+        reconcile(
+            &expected,
+            &expected,
+            &log.events,
+            Some(ms(from)),
+            ms(until),
+            ms(70_000),
+        )
+    };
+    let reconciled = window(40_000, 70_000);
+    let kind = |kind| reconciled.kinds.iter().find(|k| k.kind == kind).unwrap();
+    let keys = |kind| -> BTreeSet<String> {
+        reconciled
+            .rows
+            .iter()
+            .filter(|r| r.kind == kind)
+            .map(|r| r.key.clone())
+            .collect()
+    };
+    assert_eq!(
+        keys(LedgerKind::Run),
+        [pushed.clone(), failed.clone(), pending.clone()].into()
+    );
+    assert_eq!(kind(LedgerKind::Run).ended, 3);
+    assert_eq!(
+        kind(LedgerKind::Run).push_pending,
+        std::slice::from_ref(&pending)
+    );
+    assert_eq!(keys(LedgerKind::Task), ["2".to_owned()].into());
+
+    // The window of the old run's end has it and its task.
+    let early = window(0, 2000);
+    let early_keys: BTreeSet<&str> = early
+        .rows
+        .iter()
+        .filter(|r| matches!(r.kind, LedgerKind::Run | LedgerKind::Task))
+        .map(|r| r.key.as_str())
+        .collect();
+    assert_eq!(early_keys, [old.as_str(), "1"].into());
+
+    // A later push to the same branch closes the pending one at its time.
+    let other = run_id(5);
+    log.legacy(5, &other, 80_000).add(
+        Some(5),
+        Some(&other),
+        "push_finished",
+        json!({"remote": "origin", "branch": "main"}),
+        81_300,
+    );
+    let expected = super::super::build(&log.events, ms(90_000), BUILT);
+    let reconciled = reconcile(
+        &expected,
+        &expected,
+        &log.events,
+        Some(ms(81_000)),
+        ms(90_000),
+        ms(90_000),
+    );
+    let runs: BTreeSet<&str> = reconciled
+        .rows
+        .iter()
+        .filter(|r| r.kind == LedgerKind::Run)
+        .map(|r| r.key.as_str())
+        .collect();
+    assert_eq!(runs, [pending.as_str(), other.as_str()].into());
+    assert!(reconciled.rows.iter().all(|r| !r.push_pending));
+}
+
+/// A row not settled within its grace after it ended (an inbox's span
+/// waits a week for its cut) is counted apart, as a pending push is; past
+/// its grace it is not settled for no reason the design gives.
+#[test]
+fn a_row_within_its_grace_is_counted_apart_from_the_unsettled() {
+    let mut log = Log::default();
+    let inbox = log
+        .add(
+            None,
+            None,
+            "session_opened",
+            json!({"kind": "inbox", "session_id": "i"}),
+            0,
+        )
+        .last()
+        .as_i64();
+    log.add(
+        None,
+        None,
+        "session_closed",
+        json!({"opened_event_id": inbox, "session_id": "i", "reason": "exited"}),
+        100,
+    );
+    let planner = log
+        .add(
+            None,
+            None,
+            "session_opened",
+            json!({"kind": "runtime_planner", "planner_id": 5}),
+            0,
+        )
+        .last()
+        .as_i64();
+    log.add(
+        None,
+        None,
+        "session_closed",
+        json!({"kind": "runtime_planner", "planner_id": 5, "opened_event_id": planner}),
+        100,
+    );
+    let day = 24 * 60 * 60;
+    let at = |now: i64| {
+        let expected = super::super::build(&log.events, ms(now), BUILT);
+        let stored: Vec<LedgerRow> = expected
+            .iter()
+            .cloned()
+            .map(|mut row| {
+                row.is_final = false;
+                row
+            })
+            .collect();
+        let reconciled = reconcile(&expected, &stored, &log.events, None, ms(now), ms(now));
+        reconciled
+            .kinds
+            .into_iter()
+            .find(|k| k.kind == LedgerKind::Session)
+            .unwrap()
+    };
+    let spans = |keys: &[String], kind: &str| -> Vec<String> {
+        keys.iter()
+            .filter(|key| key.starts_with(kind) && key.contains("/session/"))
+            .cloned()
+            .collect()
+    };
+
+    // A day after: the inbox's span within its week, the planner's past
+    // its quarter of an hour.
+    let sessions = at(100 + day);
+    assert_eq!(spans(&sessions.in_grace, "inbox/").len(), 1, "{sessions:?}");
+    assert!(spans(&sessions.not_final, "inbox/").is_empty());
+    assert_eq!(spans(&sessions.not_final, "runtime_planner/").len(), 1);
+    assert!(spans(&sessions.in_grace, "runtime_planner/").is_empty());
+
+    // Past the week, not settled: among the unsettled.
+    let sessions = at(100 + 8 * day);
+    assert!(
+        spans(&sessions.in_grace, "inbox/").is_empty(),
+        "{sessions:?}"
+    );
+    assert_eq!(spans(&sessions.not_final, "inbox/").len(), 1);
+}
+
+/// A legacy run ends at a `push_skipped` after `run_integrated`; one made
+/// unfinished again after it failed, and a task moved out of `completed`,
+/// have not ended.
+#[test]
+fn a_legacy_row_reopened_after_its_end_has_not_ended() {
+    let (skipped, reopened) = (run_id(1), run_id(2));
+    let mut log = Log::default();
+    log.add(Some(1), Some(&skipped), "run_claimed", json!({}), 0)
+        .add(
+            Some(1),
+            Some(&skipped),
+            "run_integrated",
+            json!({"status": "integrated"}),
+            100,
+        )
+        .add(Some(1), Some(&skipped), "push_skipped", json!({}), 110)
+        .add(Some(2), Some(&reopened), "run_claimed", json!({}), 0)
+        .add(
+            Some(2),
+            Some(&reopened),
+            "run_unfinished_changed",
+            json!({"to": "failed", "status": "failed", "unfinished": false}),
+            100,
+        )
+        .add(
+            Some(2),
+            None,
+            "task_status_changed",
+            json!({"from": "in_progress", "to": "completed"}),
+            100,
+        )
+        .add(
+            Some(2),
+            Some(&reopened),
+            "run_unfinished_changed",
+            json!({"to": "in_progress", "unfinished": true}),
+            200,
+        )
+        .add(
+            Some(2),
+            None,
+            "task_status_changed",
+            json!({"from": "completed", "to": "ready"}),
+            200,
+        );
+    let expected = super::super::build(&log.events, ms(1000), BUILT);
+    assert!(expected.iter().any(|r| r.key == reopened && r.is_legacy()));
+    let reconciled = reconcile(&expected, &expected, &log.events, None, ms(1000), ms(1000));
+    let keys: BTreeSet<&str> = reconciled
+        .rows
+        .iter()
+        .filter(|r| matches!(r.kind, LedgerKind::Run | LedgerKind::Task))
+        .map(|r| r.key.as_str())
+        .collect();
+    assert_eq!(keys, [skipped.as_str()].into());
 }

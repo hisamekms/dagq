@@ -23,17 +23,20 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::builder::pending_push;
+use super::fold::closing_push;
 use super::read::read;
+use super::settle;
 use super::{LEDGER_V, LedgerKind, LedgerRow};
 use crate::domain::host_metrics::{self, HostSample, HostSummary, NodeSample};
+use crate::domain::run::payload::{restore, typed};
 use crate::domain::stats::landing::PHASES;
 use crate::domain::stats::sessions::SpanInWindow;
 use crate::domain::stats::{RunStats, timestamp_millis};
-use crate::domain::{EventId, RunEvent, TaskId};
+use crate::domain::{EventId, EventKind, RunEvent, RunStatus, TaskId, TaskStatus};
 
 /// How far apart (seconds) two values may be for where an interval starts
 /// or ends (a second cut differently, an event a moment apart) to account
@@ -620,6 +623,10 @@ pub struct RowState {
     pub is_final: bool,
     /// Pending on its push (a run or task): not settled by rule.
     pub push_pending: bool,
+    /// Not settled, but within its grace after it ended
+    /// ([`settle::grace`]: an interactive session's span waits up to
+    /// a week for its cut): not settled by design yet.
+    pub in_grace: bool,
     /// Whether the row is folded up to what its inputs reach now: its
     /// `inputs_through` at the last input of its object (the last event,
     /// the push that closed a pending one, a supervisor's later event, the
@@ -633,20 +640,24 @@ pub struct RowState {
 }
 
 /// One kind's count of what ended in the window against the ledger's
-/// rows of it.
+/// rows of it. Each row with a row of it that is not settled is in one of
+/// `push_pending`, `in_grace` and `not_final`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct KindCount {
     pub kind: LedgerKind,
-    /// What ended in the window: runs and tasks (a pending push counts as
-    /// ended), closed sessions and jobs, ended queue intervals and events,
-    /// node hours past with samples.
+    /// What ended in the window: runs and tasks at their terminal event
+    /// (ADR-t1662-1 decision 16; a pending push counts as ended), closed
+    /// sessions and jobs, ended queue intervals and events, node hours
+    /// past with samples.
     pub ended: usize,
     /// Those the ledger has a row of.
     pub rows: usize,
     pub missing: Vec<String>,
-    /// Rows not settled, a pending push aside.
+    /// Rows not settled past their grace, a pending push aside.
     pub not_final: Vec<String>,
     pub push_pending: Vec<String>,
+    /// Rows not settled within their grace, a pending push aside.
+    pub in_grace: Vec<String>,
     /// Rows not up to date.
     pub dirty: Vec<String>,
 }
@@ -662,18 +673,160 @@ pub struct Reconciliation {
     pub rows: Vec<RowState>,
 }
 
+/// When a row's object ended, for the window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum End {
+    /// It ended at this time.
+    Ended(i64),
+    /// Its push is pending since this time.
+    PushPending(i64),
+}
+
+/// The keys of a run's or task's event a legacy row's end is read by,
+/// restored with [`restore`]: a missing key, or a value an earlier binary
+/// wrote of another type or not known, reads as absent.
+#[derive(Debug, Default, Deserialize)]
+struct EndPayload {
+    /// `run_unfinished_changed`'s.
+    #[serde(default, deserialize_with = "typed")]
+    unfinished: Option<bool>,
+    /// The run's status a run's event moved it to.
+    #[serde(default, deserialize_with = "typed")]
+    status: Option<RunStatus>,
+    /// The status `task_status_changed` moved the task to.
+    #[serde(default, deserialize_with = "typed")]
+    to: Option<TaskStatus>,
+}
+
+fn end_payload(event: &RunEvent) -> EndPayload {
+    restore(&event.payload)
+}
+
+/// The events a legacy run's or task's end is read of: each run's events
+/// and each task's `task_status_changed` (ascending id), and the queue's
+/// `push_finished`.
+struct Terminals<'e> {
+    times: BTreeMap<EventId, i64>,
+    runs: BTreeMap<&'e str, Vec<&'e RunEvent>>,
+    tasks: BTreeMap<TaskId, Vec<&'e RunEvent>>,
+    pushes: Vec<&'e RunEvent>,
+}
+
+impl<'e> Terminals<'e> {
+    fn of(events: &'e [RunEvent]) -> Self {
+        let mut terminals = Self {
+            times: BTreeMap::new(),
+            runs: BTreeMap::new(),
+            tasks: BTreeMap::new(),
+            pushes: Vec::new(),
+        };
+        for event in events {
+            if let Some(at) = timestamp_millis(&event.created_at) {
+                terminals.times.insert(event.id, at);
+            }
+            if let Some(run) = &event.run_id {
+                terminals.runs.entry(run.as_str()).or_default().push(event);
+            }
+            if event.kind == EventKind::TaskStatusChanged
+                && let Some(task) = event.task_id
+            {
+                terminals.tasks.entry(task).or_default().push(event);
+            }
+            if event.kind == EventKind::PushFinished {
+                terminals.pushes.push(event);
+            }
+        }
+        terminals
+    }
+
+    fn at(&self, event: &RunEvent) -> Option<i64> {
+        self.times.get(&event.id).copied()
+    }
+
+    /// The end of the legacy run `run` at its terminal event (ADR-t1662-1
+    /// decision 16): landed, its first `push_finished` or `push_skipped`
+    /// after `run_integrated`, or a `push_failed` before either, pending
+    /// until a later `push_finished` to its remote and branch closes it;
+    /// not landed, its last `run_unfinished_changed` when that leaves it
+    /// finished (failed, canceled, interrupted), or with none of them its
+    /// last status when that is one of an end. None while it is on its way.
+    fn run(&self, run: &str) -> Option<End> {
+        let events = self.runs.get(run)?;
+        if let Some(landed) = events
+            .iter()
+            .position(|event| event.kind == EventKind::RunIntegrated)
+        {
+            for event in &events[landed..] {
+                match event.kind.known() {
+                    Some(EventKind::PushFinished | EventKind::PushSkipped) => {
+                        return self.at(event).map(End::Ended);
+                    }
+                    Some(EventKind::PushFailed) => {
+                        let closed =
+                            closing_push(Some(event), self.pushes.iter().copied(), event.id);
+                        return match closed {
+                            Some(push) => self.at(push).map(End::Ended),
+                            None => self.at(event).map(End::PushPending),
+                        };
+                    }
+                    _ => {}
+                }
+            }
+            return None;
+        }
+        let changes: Vec<&&RunEvent> = events
+            .iter()
+            .filter(|event| event.kind == EventKind::RunUnfinishedChanged)
+            .collect();
+        let end = match changes.last() {
+            Some(last) => Some(*last).filter(|last| end_payload(last).unfinished == Some(false)),
+            None => events
+                .iter()
+                .rev()
+                .find(|event| end_payload(event).status.is_some())
+                .filter(|event| {
+                    matches!(
+                        end_payload(event).status,
+                        Some(RunStatus::Failed | RunStatus::Interrupted | RunStatus::Succeeded)
+                    )
+                }),
+        };
+        end.and_then(|event| self.at(event)).map(End::Ended)
+    }
+
+    /// The end of the legacy task `task` at its terminal event: its last
+    /// `task_status_changed` when that moves it to `completed` or
+    /// `canceled`. None while it is open.
+    fn task(&self, task: TaskId) -> Option<End> {
+        let last = self.tasks.get(&task)?.last()?;
+        matches!(
+            end_payload(last).to,
+            Some(TaskStatus::Completed | TaskStatus::Canceled)
+        )
+        .then(|| self.at(last).map(End::Ended))
+        .flatten()
+    }
+}
+
 /// When `row` (as the inputs fold it now) ended, for the window: its end;
-/// a pending push's start of its wait; a legacy row's last input; none
-/// while it is on its way.
-fn ended_at(row: &LedgerRow, events: &BTreeMap<EventId, i64>) -> Option<i64> {
+/// a pending push's start of its wait; a legacy run's or task's terminal
+/// event ([`Terminals`]); none while it is on its way.
+fn ended_at(row: &LedgerRow, terminals: &Terminals<'_>) -> Option<End> {
     if let Some(end) = row.ended_at {
-        return Some(end);
+        return Some(End::Ended(end));
     }
     if pending_push(row) {
-        return row.intervals.last().map(|last| last.start);
+        return row
+            .intervals
+            .last()
+            .map(|last| End::PushPending(last.start));
     }
-    if row.is_legacy() && matches!(row.kind, LedgerKind::Run | LedgerKind::Task) {
-        return events.get(&row.inputs_through.events).copied();
+    if row.is_legacy() {
+        return match row.kind {
+            LedgerKind::Run => terminals.run(&row.key),
+            LedgerKind::Task => row.task_id.and_then(|task| terminals.task(task)),
+            _ => None,
+        };
     }
     None
 }
@@ -690,9 +843,10 @@ fn reach(row: &LedgerRow) -> i64 {
 /// what the inputs fold to now, `expected` (the rows of
 /// [`super::build`] over the EventStore at `now_ms`, and of
 /// [`super::node::node_rows`] over the NodeSampleStore): of what ended in
-/// `[from_ms, until_ms]` (`events` give a legacy row's time), how many,
-/// how many have a row, and per row whether it is there, settled, pending
-/// on its push and up to date. A node hour counts once it has passed.
+/// `[from_ms, until_ms]` (`events` give a legacy row's terminal event),
+/// how many, how many have a row, and per row whether it is there,
+/// settled, pending on its push, within its grace at `now_ms` and up to
+/// date. A node hour counts once it has passed.
 pub fn reconcile(
     expected: &[LedgerRow],
     stored: &[LedgerRow],
@@ -701,10 +855,7 @@ pub fn reconcile(
     until_ms: i64,
     now_ms: i64,
 ) -> Reconciliation {
-    let times: BTreeMap<EventId, i64> = events
-        .iter()
-        .filter_map(|event| Some((event.id, timestamp_millis(&event.created_at)?)))
-        .collect();
+    let terminals = Terminals::of(events);
     let by_key: BTreeMap<(LedgerKind, &str), &LedgerRow> = stored
         .iter()
         .map(|row| ((row.kind, row.key.as_str()), row))
@@ -719,12 +870,14 @@ pub fn reconcile(
             missing: Vec::new(),
             not_final: Vec::new(),
             push_pending: Vec::new(),
+            in_grace: Vec::new(),
             dirty: Vec::new(),
         };
         for row in expected.iter().filter(|row| row.kind == kind) {
-            let Some(end) = ended_at(row, &times) else {
+            let Some(ended) = ended_at(row, &terminals) else {
                 continue;
             };
+            let (End::Ended(end) | End::PushPending(end)) = ended;
             if end > until_ms
                 || from_ms.is_some_and(|from| end < from)
                 || (kind == LedgerKind::Node && end > now_ms)
@@ -733,13 +886,18 @@ pub fn reconcile(
             }
             count.ended += 1;
             let have = by_key.get(&(kind, row.key.as_str())).copied();
-            let pending = pending_push(row);
+            let pending = matches!(ended, End::PushPending(_));
+            let is_final = have.is_some_and(|have| have.is_final);
             let state = RowState {
                 kind,
                 key: row.key.clone(),
                 row: have.is_some(),
-                is_final: have.is_some_and(|have| have.is_final),
+                is_final,
                 push_pending: pending,
+                in_grace: have.is_some()
+                    && !pending
+                    && !is_final
+                    && now_ms - end < settle::grace(row),
                 up_to_date: have.is_some_and(|have| {
                     (have.is_legacy() || have.ledger_v == LEDGER_V) && reach(have) >= reach(row)
                 }),
@@ -752,6 +910,8 @@ pub fn reconcile(
                     count.rows += 1;
                     if pending {
                         count.push_pending.push(row.key.clone());
+                    } else if state.in_grace {
+                        count.in_grace.push(row.key.clone());
                     } else if !state.is_final {
                         count.not_final.push(row.key.clone());
                     }
