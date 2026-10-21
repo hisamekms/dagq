@@ -73,7 +73,7 @@ impl Log {
     }
 
     /// `task` created at `secs` and `run` of it claimed, worked and
-    /// validated from `secs` to `secs + 660`.
+    /// validated from `secs` to `secs + 660`, then queued for the slot.
     pub(crate) fn worked(&mut self, task: i64, run: &str, secs: i64) -> &mut Self {
         self.add(Some(task), None, "task_created", json!({}), secs)
             .add(
@@ -106,6 +106,13 @@ impl Log {
                 Some(run),
                 "validation_finished",
                 json!({"status": "awaiting_integration"}),
+                secs + 660,
+            )
+            .add(
+                Some(task),
+                Some(run),
+                "landing_queued",
+                json!({"via": "exit"}),
                 secs + 660,
             )
             .phase(task, run, secs + 660, Phase::AwaitingSlot, "x")

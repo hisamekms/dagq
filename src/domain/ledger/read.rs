@@ -117,8 +117,10 @@ fn run_names(values: &mut LedgerValues, row: &LedgerRow, milestones: &Milestones
 
 /// The phase of today's `land_phases` an interval of the wait to land
 /// falls under. The landing is one phase now, so it is all `verify` and
-/// `rebase` stays 0; what the phases do not name (the session's exit, the
-/// hand-offs, unattributed time) is `exit`, as it is today.
+/// `rebase` stays 0; the wait for the landing slot after the review and
+/// the e2e (`awaiting_slot`) is `landing_queue`, as it is today; what the
+/// phases do not name (the session's exit, the hand-offs, unattributed
+/// time) is `exit`, as it is today.
 fn land_phase(interval: &Interval) -> &'static str {
     match interval.phase.as_str() {
         "review" | "review_held" => "review",
@@ -132,7 +134,7 @@ fn land_phase(interval: &Interval) -> &'static str {
         "revise" => "revise",
         "waiting" | "landing_answer" => "ask",
         "needs_session" | "resume" | "recovery" => "resume",
-        "landing_queue" => "landing_queue",
+        "landing_queue" | "awaiting_slot" => "landing_queue",
         "awaiting_e2e" => "e2e_wait",
         "e2e" => "e2e",
         "landing" => "verify",

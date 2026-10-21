@@ -181,6 +181,23 @@ fn a_run_landed_first_time_ends_with_its_push() {
     let land = values.land_phases.unwrap();
     assert_eq!(land.push, Some(30));
     assert_eq!(land.secs.iter().sum::<i64>(), 540);
+    // The wait for the slot after the review is today's `landing_queue`,
+    // not `exit`.
+    let secs = |name: &str| {
+        land.secs[stats::landing::PHASES
+            .iter()
+            .position(|p| *p == name)
+            .unwrap()]
+    };
+    assert_eq!(
+        (
+            secs("review"),
+            secs("landing_queue"),
+            secs("verify"),
+            secs("exit")
+        ),
+        (240, 100, 200, 0)
+    );
 }
 
 #[test]
