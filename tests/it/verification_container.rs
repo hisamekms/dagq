@@ -1098,7 +1098,7 @@ fn a_waiting_run_in_a_container_has_its_recheck_command_run_in_a_verification_s_
     );
     // Not on the host: no scratch worktree, nothing in the run directory's
     // materials.
-    assert!(!queue_dir.join("recheck").join("worktree").exists());
+    assert!(!recheck_scratch(&queue_dir.join("recheck")).exists());
     assert!(!run_dir.join(MATERIALS_DIR).exists());
     // What it left goes.
     let calls = fs::read_to_string(queue.state.join("calls")).unwrap();
@@ -1144,7 +1144,7 @@ fn a_waiting_run_in_a_container_whose_recheck_container_does_not_start_is_not_ju
     assert!(all.last().unwrap().join(" ").contains(&command));
     assert!(!mark.exists());
     let queue_dir = queue.queue_dir();
-    assert!(!queue_dir.join("recheck").join("worktree").exists());
+    assert!(!recheck_scratch(&queue_dir.join("recheck")).exists());
     assert_eq!(
         fs::read_dir(queue_dir.join("verification"))
             .unwrap()

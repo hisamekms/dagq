@@ -81,7 +81,8 @@ pub fn landing_path(runs_dir: &Path, run: &RunId) -> PathBuf {
 
 /// Whether `workplace`, a run's stored worktree path, is a clone
 /// (`<queue dir>/clones/<run id>`) rather than a worktree
-/// (`<queue dir>/runs/<run id>/worktree`): what tells a container run from
+/// (`<queue dir>/runs/<run id>/worktree-<run id>`, or `.../worktree` of a
+/// run made before): what tells a container run from
 /// a host one for as long as the run is kept.
 pub fn is_clone_path(workplace: &Path) -> bool {
     workplace

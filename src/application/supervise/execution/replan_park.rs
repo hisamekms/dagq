@@ -1813,6 +1813,16 @@ impl Supervisor<'_> {
             .as_deref()
             .context("the snapshot names no branch")?;
         self.still_restoring(run, token)?;
+        // What a restore that stopped left, under the old scratch's name
+        // too: either would hold the branch the add below checks out.
+        // What `discard_worktree` refuses at the old name (a link, a file,
+        // a worktree on another branch) holds no such branch, so it is
+        // left there and the restore goes on.
+        if let Some(legacy) = replan_snapshot::legacy_scratch_worktree(worktree)
+            && let Err(error) = repository.discard_worktree(&legacy, branch)
+        {
+            warn!(run_id = %run.id(), "run {}: the old scratch {} is left where it is: {error:#}", run.id(), legacy.display());
+        }
         repository.discard_worktree(&scratch, branch)?;
         self.still_restoring(run, token)?;
         // From the head the manifest recorded: the pinned ref only keeps

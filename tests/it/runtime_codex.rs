@@ -406,7 +406,8 @@ impl RunFiles for WorktreeGoneAtReview {
             .file_name()
             .is_some_and(|name| name == "review-prompt-1.txt")
         {
-            let worktree = path.with_file_name("worktree");
+            let run = path.parent().unwrap().file_name().unwrap();
+            let worktree = path.with_file_name(format!("worktree-{}", run.to_str().unwrap()));
             fs::remove_dir_all(&worktree)?;
             *self.removed.lock().unwrap() = Some(worktree);
         }

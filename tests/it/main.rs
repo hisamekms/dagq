@@ -198,6 +198,7 @@ mod runtime_verify_flaky;
 mod runtime_verify_retry;
 mod runtime_waiting;
 mod runtime_waiting_stages;
+mod runtime_worktree_records;
 mod session_steps;
 mod setup_review;
 mod setup_review_profiles;

@@ -730,7 +730,7 @@ fn happy_path_runs_a_stub_agent_in_the_background_and_lands_on_main() {
             .join(run_id)
     );
     let worktree = Path::new(run["worktree_path"].as_str().unwrap());
-    assert_eq!(worktree, run_dir.join("worktree"));
+    assert_eq!(worktree, run_dir.join(format!("worktree-{run_id}")));
     // The run's own history is kept under its ref; the landing is one
     // squash commit on main with its tree, pushed to origin.
     let head = git(repo, &["rev-parse", &format!("refs/dagq/runs/{run_id}")]);

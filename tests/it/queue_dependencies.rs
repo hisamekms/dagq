@@ -378,7 +378,7 @@ fn awaiting_integration_keeps_dependents_blocked_but_frees_execution_slot() {
         .join(run.id().as_str());
     assert_eq!(
         detail.runs[0].worktree_path(),
-        run_dir.join("worktree").to_str()
+        run_dir.join(format!("worktree-{}", run.id())).to_str()
     );
     assert_eq!(
         detail.runs[0].receipt_path(),

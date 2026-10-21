@@ -535,14 +535,131 @@ pub struct RunPaths {
     pub log: std::path::PathBuf,
 }
 
+/// The last component of the path of the worktree of a run made before
+/// the worktrees had names of their own: every such run's is `worktree`.
+pub const LEGACY_WORKTREE_NAME: &str = "worktree";
+
+/// The last component of the path of run `run_id`'s worktree,
+/// `worktree-<run id>`. Git names a worktree's record in `.git/worktrees`
+/// after it, numbering it on when the name is taken: were every run's
+/// called the same, the runs would share `worktree`, `worktree1`… and an
+/// add would take the name of a record that went while its directory
+/// stayed, pointing that directory's `.git` at another run's record.
+pub fn worktree_name(run_id: &str) -> String {
+    format!("worktree-{run_id}")
+}
+
+/// The last component of the path of the landing recheck's scratch
+/// worktree of the queue whose directory is `queue_dir` (its full path,
+/// links resolved): `worktree-recheck-<16 hex digits of its SHA-256>`, so
+/// the scratches of two queues of one repository have names of their own
+/// even when their directories are named alike, and no run's worktree
+/// ([`worktree_name`]) has it.
+pub fn recheck_scratch_name(queue_dir: &std::path::Path) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(queue_dir.to_string_lossy().as_bytes());
+    let key: String = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("{RECHECK_SCRATCH_PREFIX}{key}")
+}
+
+/// How every [`recheck_scratch_name`] starts.
+pub const RECHECK_SCRATCH_PREFIX: &str = "worktree-recheck-";
+
+/// Whether `worktree` is a worktree of the run directory `run_dir` (named
+/// by its run's ID) by its layout: `<run dir>/worktree-<run id>`, or
+/// `<run dir>/worktree` for a run made before.
+pub fn is_run_worktree(run_dir: &std::path::Path, worktree: &std::path::Path) -> bool {
+    let (Some(parent), Some(name), Some(run)) = (
+        worktree.parent(),
+        worktree.file_name(),
+        run_dir.file_name().and_then(|run| run.to_str()),
+    ) else {
+        return false;
+    };
+    parent == run_dir
+        && (name == LEGACY_WORKTREE_NAME || name.to_str() == Some(&worktree_name(run)))
+}
+
 impl RunPaths {
     pub fn new(runs_dir: &std::path::Path, run_id: &RunId) -> Self {
         let run_dir = runs_dir.join(run_id.as_str());
         Self {
-            worktree: run_dir.join("worktree"),
+            worktree: run_dir.join(worktree_name(run_id.as_str())),
             receipt: run_dir.join("receipt.json"),
             log: run_dir.join("claude.debug.log"),
             run_dir,
+        }
+    }
+
+    /// These paths with the worktree in the layout of `stored`, the
+    /// worktree's path the queue recorded: `<run dir>/worktree` for a run
+    /// made before the worktrees had names of their own, so it is still
+    /// found where it was made. Only the last component is read from it,
+    /// and only to choose between the two layouts.
+    pub fn with_layout_of(self, stored: Option<&str>) -> Self {
+        let legacy = stored.is_some_and(|stored| {
+            std::path::Path::new(stored).file_name() == Some(LEGACY_WORKTREE_NAME.as_ref())
+        });
+        if !legacy {
+            return self;
+        }
+        Self {
+            worktree: self.run_dir.join(LEGACY_WORKTREE_NAME),
+            ..self
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A run's worktree is `<run dir>/worktree-<run id>`, and one made
+    /// before, `<run dir>/worktree`, is the run's too; no other name or
+    /// directory is.
+    #[test]
+    fn a_runs_worktree_is_named_by_its_run_or_made_before() {
+        let runs = std::path::Path::new("/q/runs");
+        let run = RunId::new("r1").unwrap();
+        let paths = RunPaths::new(runs, &run);
+        assert_eq!(paths.worktree, runs.join("r1/worktree-r1"));
+        let run_dir = runs.join("r1");
+        assert!(is_run_worktree(&run_dir, &paths.worktree));
+        assert!(is_run_worktree(&run_dir, &run_dir.join("worktree")));
+        for other in [
+            "r1/worktree-r2",
+            "r2/worktree-r1",
+            "r1/worktree-r1/sub",
+            "r1",
+        ] {
+            assert!(!is_run_worktree(&run_dir, &runs.join(other)), "{other}");
+        }
+        assert_eq!(
+            RunPaths::new(runs, &run)
+                .with_layout_of(Some("/old/q/runs/r1/worktree"))
+                .worktree,
+            run_dir.join("worktree")
+        );
+        let (a, b) = (
+            recheck_scratch_name(std::path::Path::new("/a/queue")),
+            recheck_scratch_name(std::path::Path::new("/b/queue")),
+        );
+        assert!(a.starts_with(RECHECK_SCRATCH_PREFIX), "{a}");
+        assert_ne!(a, b);
+        assert_eq!(a, recheck_scratch_name(std::path::Path::new("/a/queue")));
+        for stored in [
+            None,
+            Some("/q/runs/r1/worktree-r1"),
+            Some("/q/runs/r1/tree"),
+        ] {
+            assert_eq!(
+                RunPaths::new(runs, &run).with_layout_of(stored).worktree,
+                paths.worktree,
+                "{stored:?}"
+            );
         }
     }
 }

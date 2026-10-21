@@ -2154,3 +2154,15 @@ task = 2432
 name = "runtime_review_questions::a_question_open_from_before_the_revise_does_not_stop_its_resume_timeout"
 reason = "B 境界（SQLite・supervisor の配線）: review の間に開いた worker_question が SQLite の has_unclosed_worker_question_since の下限で revise を止めず、その answer の runtime_delivers が SQLite で false になり、revise が supervisor の時計で resume の時間切れに終わって approve_landing の ask になることを 1 case で確かめる。質問を依頼より前の秒に置くため review を待たせ秒を跨ぐ。判断は revise::tests"
 task = 2240
+
+# 9.4s (stress 5 under the host's load of other runs, task 2936)
+[[test]]
+name = "runtime_recheck::a_waiting_run_whose_diff_misses_the_recheck_paths_runs_no_command"
+reason = "B 境界（Git・dagq.toml・supervisor の配線）: main checkout の dagq.toml の [recheck] paths を実際に読み、待っている run の main との差分が paths に当たらないとき、実際の supervisor の 2 つの run（待つ run と着地する run）を通して command を流さず scratch worktree も作らず、landing_recheck_clean・ask の文・status を確かめる。paths の当て方の判断は supervise::recheck の unit test"
+task = 2936
+
+# 12.0s (stress 5 under the host's load of other runs, task 2936)
+[[test]]
+name = "runtime_replan_park::a_restore_of_the_old_layout_stopped_in_the_old_scratch_starts_again"
+reason = "B 境界（Git の worktree の作成・削除・移動と差分の適用・supervisor の配線）: 古い配置（<run dir>/worktree）の run の止まった復元が古い名前の scratch（worktree.restoring）に run の branch を checkout したまま残しても、それを消してから新しい名前の scratch に git worktree add -B し、照合して元の path へ移して着地することを、実際の git worktree と supervisor で確かめる。scratch の名前の判断は domain::replan_snapshot の unit test"
+task = 2936

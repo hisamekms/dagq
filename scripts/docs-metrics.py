@@ -120,8 +120,11 @@ MAP_LIMIT = 30720
 # in a new transcript) is not counted.
 WORKER_PREFIX = "You are executing dagq task "
 REVIEW_PREFIX = "You review run "
-# A project dir of a run worktree: <encoded queue dir>-runs-<run id>-worktree.
-RUN_DIR = re.compile(r"-runs-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-worktree$")
+# A project dir of a run worktree: <encoded queue dir>-runs-<run id>-worktree-<run id>,
+# or -worktree alone for a run whose worktree was made at runs/<run id>/worktree.
+RUN_DIR = re.compile(r"-runs-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})-worktree(?:-\1)?$")
+# The last component of a run worktree's path, either layout.
+WORKTREE_NAME = r"worktree(?:-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?"
 # Encoded temporary dirs (a disposable queue of a test or a smoke).
 TEMP_DIRS = ("-private-var-folders-", "-var-folders-", "-tmp-", "-private-tmp-")
 GREP_COMMANDS = ("grep", "rg", "egrep", "fgrep")
@@ -332,13 +335,14 @@ def m3(path):
 
 def rel(path):
     """A path relative to the worktree: an absolute path under some
-    `.../worktree/` loses that head; `./` goes."""
+    `.../worktree-<run id>/` (or `.../worktree/`) loses that head; `./`
+    goes."""
     if not isinstance(path, str):
         return ""
-    if path.startswith("/") and "/worktree/" in path:
-        path = path.rsplit("/worktree/", 1)[1]
-    elif path.startswith("/") and path.endswith("/worktree"):
-        path = "."
+    if path.startswith("/"):
+        under = re.split(r"/" + WORKTREE_NAME + r"(?:/|$)", path)
+        if len(under) > 1:
+            path = under[-1] or "."
     while path.startswith("./"):
         path = path[2:]
     return path.rstrip("/") or "."

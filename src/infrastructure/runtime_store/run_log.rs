@@ -857,6 +857,7 @@ impl SqliteQueue {
         let ask: Option<i64> = row.get(6)?;
         Ok(EndedRunWorktree {
             worktree: RunPaths::new(&self.runs_dir, &run_id)
+                .with_layout_of(row.get::<_, Option<String>>(7)?.as_deref())
                 .worktree
                 .to_string_lossy()
                 .into_owned(),
@@ -904,7 +905,8 @@ const ENDED_RUN_WORKTREES: &str =
             (r.status IN ('integrated','succeeded','failed','interrupted')
              OR t.status IN ('completed','canceled')) AS ended,
             (SELECT min(a.id) FROM asks a
-             WHERE a.run_id=r.id AND a.answered_at IS NULL AND a.closed_at IS NULL) AS ask_id
+             WHERE a.run_id=r.id AND a.answered_at IS NULL AND a.closed_at IS NULL) AS ask_id,
+            r.worktree_path
      FROM task_runs r
      JOIN tasks t ON t.id=r.task_id
      WHERE r.worktree_path IS NOT NULL

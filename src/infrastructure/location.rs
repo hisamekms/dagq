@@ -334,8 +334,8 @@ mod tests {
         let scratch =
             crate::application::review_programs::program_scratch(&review_programs_dir(db), &run);
         assert_eq!(scratch, Path::new("/q/review-programs/r1"));
-        let run_dir = runs_dir(db).join(run.as_str());
-        for writable in [run_dir.clone(), run_dir.join("worktree")] {
+        let paths = crate::domain::RunPaths::new(&runs_dir(db), &run);
+        for writable in [paths.run_dir, paths.worktree] {
             assert!(
                 !scratch.starts_with(&writable),
                 "{scratch:?} under {writable:?}"
@@ -353,8 +353,8 @@ mod tests {
         let run = crate::domain::RunId::new("r1").unwrap();
         let scratch = crate::application::integrate::satisfied_scratch(&satisfied_dir(db), &run);
         assert_eq!(scratch, Path::new("/q/satisfied/r1"));
-        let run_dir = runs_dir(db).join(run.as_str());
-        for writable in [run_dir.clone(), run_dir.join("worktree")] {
+        let paths = crate::domain::RunPaths::new(&runs_dir(db), &run);
+        for writable in [paths.run_dir, paths.worktree] {
             assert!(
                 !scratch.starts_with(&writable),
                 "{scratch:?} under {writable:?}"

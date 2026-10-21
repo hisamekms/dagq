@@ -475,8 +475,8 @@ fn a_waiting_run_whose_check_fails_on_the_new_main_is_resumed() {
             .join(format!("main-{}.log", &main[..12]))
             .is_file()
     );
-    assert!(!recheck_dir.join("worktree").join("a.txt").exists());
-    assert!(!recheck_dir.join("worktree").join("b.txt").exists());
+    assert!(!recheck_scratch(&recheck_dir).join("a.txt").exists());
+    assert!(!recheck_scratch(&recheck_dir).join("b.txt").exists());
     assert_eq!(status_main_check(&db), "passed");
     let reason = found["reason"].as_str().unwrap();
     assert!(reason.contains("exits with 1 on main"), "{reason}");
@@ -507,7 +507,10 @@ fn status_main_check(db: &Path) -> Value {
 
 /// A repository that declares `[toolchains.<name>]` of which none applies
 /// to the tree (ADR-t2268-1): the recheck runs its command with no build
-/// output's variable added and makes no build output directory.
+/// output's variable added and makes no build output directory. A scratch
+/// worktree of another name it had (the old layout's `recheck/worktree`,
+/// or one named after the queue's path before it moved) goes with its
+/// record.
 #[test]
 fn a_recheck_with_no_declared_profile_that_applies_adds_no_build_output() {
     let (dir, repo, db) = fixture();
@@ -518,6 +521,19 @@ fn a_recheck_with_no_declared_profile_that_applies_adds_no_build_output() {
     .unwrap();
     git(&repo, &["add", "."]);
     git(&repo, &["commit", "-q", "-m", "the recheck and a profile"]);
+    let recheck = fs::canonicalize(dir.path()).unwrap().join("recheck");
+    // What it had before: the old layout's scratch, and one named after
+    // the queue's path before the queue moved.
+    let old_scratches = [
+        recheck.join("worktree"),
+        recheck.join("worktree-recheck-0000000000000000"),
+    ];
+    for old in &old_scratches {
+        git(
+            &repo,
+            &["worktree", "add", "-q", "--detach", old.to_str().unwrap()],
+        );
+    }
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.script_for(
         2,
@@ -541,8 +557,13 @@ fn a_recheck_with_no_declared_profile_that_applies_adds_no_build_output() {
         !tail.contains(&format!("target={}", recheck_dir.join("target").display())),
         "{tail}"
     );
-    assert!(recheck_dir.join("worktree").is_dir());
+    assert!(recheck_scratch(&recheck_dir).is_dir());
     assert!(!recheck_dir.join("target").exists());
+    for old in &old_scratches {
+        assert!(!old.exists(), "{old:?}");
+        let name = old.file_name().unwrap();
+        assert!(!repo.join(".git/worktrees").join(name).exists(), "{name:?}");
+    }
 }
 
 /// Declarations of the Rust profile (ADR-t2268-1 decision 6): each one
@@ -659,7 +680,7 @@ fn a_waiting_run_whose_diff_misses_the_recheck_paths_runs_no_command() {
         "{question}"
     );
     let recheck_dir = fs::canonicalize(dir.path()).unwrap().join("recheck");
-    assert!(!recheck_dir.join("worktree").exists());
+    assert!(!recheck_scratch(&recheck_dir).exists());
     let recheck = &runtime::status(&db).unwrap()["landing_recheck"];
     assert_eq!(recheck["command"], "exit 1", "{recheck}");
     assert_eq!(recheck["clean"], 1);

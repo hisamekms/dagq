@@ -710,6 +710,56 @@ pub fn claude_version(claude: &Path) -> Option<String> {
         .flatten()
 }
 
+/// What [`GitRepository::add_worktree`] checks out in the worktree it
+/// adds.
+#[derive(Clone, Copy)]
+enum AddedCheckout<'a> {
+    /// A branch it makes at the commit, which must not be there yet.
+    NewBranch(&'a str),
+    /// A branch it makes or moves to the commit (`-B`).
+    ResetBranch(&'a str),
+    /// The commit detached, over a record left without its directory.
+    Detached,
+}
+
+/// How many times [`worktree_command`] runs its command.
+const WORKTREE_ATTEMPTS: u32 = 50;
+
+/// [`output`] of the Git worktree command `command` makes, made and run
+/// again while it fails on a record another Git command was writing or
+/// pruning at that moment ([`record_raced`]), which a retry does not meet.
+fn worktree_command(mut command: impl FnMut() -> Command) -> Result<String> {
+    let mut attempt = 1;
+    loop {
+        match output(&mut command()) {
+            Err(error) if attempt < WORKTREE_ATTEMPTS && record_raced(&error) => {
+                std::thread::sleep(Duration::from_millis(10 * u64::from(attempt.min(10))));
+                attempt += 1;
+            }
+            done => return done,
+        }
+    }
+}
+
+/// Whether `error` is Git's failing on a worktree's record as another Git
+/// command changed it: `git worktree add` reads every record, and an add
+/// writes its record's files one by one, so one that reads it then finds
+/// no `commondir` (`failed to read .git/worktrees/<name>/commondir`); a
+/// prune that comes between an add's making its record's directory and
+/// its writing `locked` there removes that directory (`could not open
+/// '.git/worktrees/<name>/locked' for writing`); and a prune that left
+/// `.git/worktrees` empty removes it too before an add makes its record's
+/// directory in it (`could not create directory of
+/// '.git/worktrees/<name>'`). The add dies with what it made removed. The
+/// add runs with `LC_ALL=C` for these to be read.
+fn record_raced(error: &anyhow::Error) -> bool {
+    let error = format!("{error:#}");
+    error.contains("worktrees/")
+        && ((error.contains("failed to read") && error.contains("/commondir"))
+            || (error.contains("could not open") && error.contains("for writing"))
+            || error.contains("could not create directory of"))
+}
+
 /// Remove whatever is at `path` without following it: a directory with
 /// all under it (a link inside is removed, not followed), a link or a file
 /// alone. Nothing at `path` is no error.
@@ -1738,14 +1788,7 @@ impl GitRepository {
                     .arg(&self.root)
                     .args(["worktree", "prune"]),
             )?;
-            output(
-                self.command()
-                    .arg("-C")
-                    .arg(&self.root)
-                    .args(["worktree", "add", "--detach", "--force"])
-                    .arg(path)
-                    .arg(commit),
-            )?;
+            self.add_worktree(path, AddedCheckout::Detached, commit)?;
             return Ok(());
         }
         output(
@@ -1767,14 +1810,7 @@ impl GitRepository {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         }
-        output(
-            self.command()
-                .arg("-C")
-                .arg(&self.root)
-                .args(["worktree", "add", "--detach", "--force"])
-                .arg(path)
-                .arg(commit),
-        )?;
+        self.add_worktree(path, AddedCheckout::Detached, commit)?;
         Ok(())
     }
 
@@ -1953,15 +1989,59 @@ impl GitRepository {
     }
 
     pub fn create_worktree(&self, run: &TaskRun) -> Result<String> {
-        output(
-            self.command()
-                .arg("-C")
-                .arg(&self.root)
-                .args(["worktree", "add", "-b"])
-                .arg(run.branch().context("missing branch")?)
-                .arg(run.worktree_path().context("missing worktree")?)
-                .arg(run.base_commit().as_str()),
+        self.add_worktree(
+            Path::new(run.worktree_path().context("missing worktree")?),
+            AddedCheckout::NewBranch(run.branch().context("missing branch")?),
+            run.base_commit().as_str(),
         )
+    }
+
+    /// `git worktree add` of `commit` at `path`, run again while it fails
+    /// on another worktree's record changing at that moment
+    /// ([`worktree_command`]). The name of its record in `.git/worktrees`
+    /// is the path's last component, which the caller makes unique to the
+    /// run or the scratch ([`crate::domain::RunPaths`]). The branch of a
+    /// [`AddedCheckout::NewBranch`] is made first, since `git worktree add
+    /// -b` makes it before it can fail and a retry would find it made, and
+    /// goes again when the add fails.
+    fn add_worktree(
+        &self,
+        path: &Path,
+        checkout: AddedCheckout<'_>,
+        commit: &str,
+    ) -> Result<String> {
+        // `LC_ALL=C`: [`record_raced`] reads its stderr as English.
+        let git = || {
+            let mut command = self.command();
+            command.env("LC_ALL", "C").arg("-C").arg(&self.root);
+            command
+        };
+        if let AddedCheckout::NewBranch(branch) = checkout {
+            output(git().args(["branch", "--no-track", branch, commit]))?;
+        }
+        let added = worktree_command(|| {
+            let mut command = git();
+            command.args(["worktree", "add"]);
+            match checkout {
+                AddedCheckout::NewBranch(branch) => command.arg(path).arg(branch),
+                AddedCheckout::ResetBranch(branch) => {
+                    command.args(["-B", branch]).arg(path).arg(commit)
+                }
+                AddedCheckout::Detached => {
+                    command.args(["--detach", "--force"]).arg(path).arg(commit)
+                }
+            };
+            command
+        });
+        match (added, checkout) {
+            (Err(error), AddedCheckout::NewBranch(branch)) => {
+                Err(match self.delete_branch_from(&self.root, branch) {
+                    Ok(()) => error,
+                    Err(left) => error.context(format!("and its branch was left: {left:#}")),
+                })
+            }
+            (added, _) => added,
+        }
     }
 
     /// Whether a `git rebase` was left half-done in the worktree (by a
@@ -2081,14 +2161,7 @@ impl GitRepository {
     ) -> Result<()> {
         run_clones::refuse_clone(worktree)?;
         let _ = self.prune_worktrees();
-        output(
-            self.command()
-                .arg("-C")
-                .arg(&self.root)
-                .args(["worktree", "add", "-B", branch])
-                .arg(worktree)
-                .arg(head),
-        )?;
+        self.add_worktree(worktree, AddedCheckout::ResetBranch(branch), head)?;
         for (patch, args) in [
             (index, &["apply", "--index", "--binary", "-"][..]),
             (unstaged, &["apply", "--binary", "-"][..]),
@@ -2681,9 +2754,9 @@ impl GitRepository {
     }
 
     /// `git worktree remove --force` with `LC_ALL=C`, as repair is: cleanup
-    /// matches its stderr as English. Only these two calls fix the locale;
-    /// other Git output (including paths and commit messages) keeps the
-    /// caller's.
+    /// matches its stderr as English. Only these two calls and the add of
+    /// [`Self::add_worktree`] fix the locale; other Git output (including
+    /// paths and commit messages) keeps the caller's.
     fn remove_worktree_command(&self, primary: &Path, worktree: &Path) -> Command {
         let mut command = self.command();
         command
@@ -6853,5 +6926,24 @@ mod tests {
         let versionless = r#"[{"id":"claude-dagq@dagq","enabled":true}]"#;
         assert_eq!(plugin_version(versionless, "claude-dagq").unwrap(), None);
         assert!(plugin_version("No plugins installed.", "claude-dagq").is_err());
+    }
+
+    /// Only a failure on a record another Git command was writing or
+    /// pruning is run again.
+    #[test]
+    fn only_a_record_another_command_was_changing_is_tried_again() {
+        let raced = |message: &str| record_raced(&anyhow::anyhow!("git failed: {message}"));
+        assert!(raced(
+            "fatal: failed to read .git/worktrees/worktree-a/commondir: Undefined error: 0"
+        ));
+        assert!(raced(
+            "fatal: could not open '.git/worktrees/worktree-a/locked' for writing: No such file or directory"
+        ));
+        assert!(raced(
+            "fatal: could not create directory of '.git/worktrees/worktree-a': No such file or directory"
+        ));
+        assert!(!raced("fatal: '/runs/a/worktree-a' already exists"));
+        assert!(!raced("fatal: a branch named 'dagq/a' already exists"));
+        assert!(!raced("fatal: could not open 'x' for writing"));
     }
 }

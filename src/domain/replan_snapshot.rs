@@ -46,13 +46,29 @@ pub fn snapshot_dir(root: &Path, id: &str) -> PathBuf {
 }
 
 /// Where the restore of the worktree `worktree` puts the work together
-/// before it moves it into place: a scratch worktree beside it.
+/// before it moves it into place: a scratch worktree beside it, named
+/// after its run (the run directory it is in) as the run's worktree is
+/// ([`super::worktree_name`]), so its record in `.git/worktrees`, which
+/// the move keeps, has a name no other run's has, whichever layout the
+/// run's worktree has.
 pub fn scratch_worktree(worktree: &Path) -> PathBuf {
-    let name = worktree.file_name().map_or_else(
-        || "worktree".into(),
-        |name| name.to_string_lossy().into_owned(),
-    );
-    worktree.with_file_name(format!("{name}.restoring"))
+    let run = worktree
+        .parent()
+        .and_then(Path::file_name)
+        .map_or_else(|| "run".into(), |run| run.to_string_lossy().into_owned());
+    worktree.with_file_name(format!("{}.restoring", super::worktree_name(&run)))
+}
+
+/// The scratch worktree a restore of `worktree` made before the scratches
+/// were named after their run (`<worktree name>.restoring`, so
+/// `worktree.restoring` beside a worktree of the old layout), when it is
+/// not [`scratch_worktree`]: a restore that stopped then may have left it
+/// with the run's branch checked out, which the next restore discards
+/// first.
+pub fn legacy_scratch_worktree(worktree: &Path) -> Option<PathBuf> {
+    let name = worktree.file_name()?.to_string_lossy().into_owned();
+    let legacy = worktree.with_file_name(format!("{name}.restoring"));
+    (legacy != scratch_worktree(worktree)).then_some(legacy)
 }
 
 /// The directory process `pid` makes snapshot `id` in before it renames it
@@ -390,9 +406,19 @@ mod tests {
         assert_eq!(pinned_ref(ReplanId::new(3)), "refs/dagq/replans/3");
         let root = Path::new("/q/replans");
         assert_eq!(snapshot_dir(root, "replan-3-g2"), root.join("replan-3-g2"));
+        for worktree in ["/q/runs/r1/worktree", "/q/runs/r1/worktree-r1"] {
+            assert_eq!(
+                scratch_worktree(Path::new(worktree)),
+                Path::new("/q/runs/r1/worktree-r1.restoring")
+            );
+        }
         assert_eq!(
-            scratch_worktree(Path::new("/q/runs/r1/worktree")),
-            Path::new("/q/runs/r1/worktree.restoring")
+            legacy_scratch_worktree(Path::new("/q/runs/r1/worktree")),
+            Some(PathBuf::from("/q/runs/r1/worktree.restoring"))
+        );
+        assert_eq!(
+            legacy_scratch_worktree(Path::new("/q/runs/r1/worktree-r1")),
+            None
         );
         assert_eq!(
             staging_dir(root, "replan-3-g2", 42),

@@ -44,6 +44,16 @@ use crate::domain::verify_failure::{self, CommandTimedOut};
 /// the declarations it runs with, under the queue's directory.
 const RECHECK_DIR: &str = "recheck";
 
+/// The scratch worktree of the recheck's directory `dir` (its links
+/// resolved): named after the queue it is in
+/// ([`crate::domain::recheck_scratch_name`]), whose record in
+/// `.git/worktrees` Git names after it.
+fn scratch_worktree(dir: &Path) -> PathBuf {
+    dir.join(crate::domain::recheck_scratch_name(
+        dir.parent().unwrap_or(dir),
+    ))
+}
+
 /// The lock file in [`RECHECK_DIR`] the queue's supervisors share: one
 /// recheck at a time uses the scratch worktree and the build outputs, and
 /// the cleanup for room clears them only under it ([`clear_targets`]).
@@ -1432,8 +1442,25 @@ fn run_on_host(
         look,
         ..
     } = *recheck;
-    let scratch = dir.join("worktree");
     files.create_dir_all(dir)?;
+    let resolved = files
+        .canonicalize(dir)
+        .with_context(|| format!("resolve {}", dir.display()))?;
+    let scratch = scratch_worktree(&resolved);
+    // A scratch left under another name goes with its record, so no
+    // directory left names a record another takes: the old layout's
+    // `worktree`, or one named after the queue's path before it moved.
+    for left in files.read_dir(&resolved).unwrap_or_default() {
+        let Some(name) = left.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if left != scratch
+            && (name == crate::domain::LEGACY_WORKTREE_NAME
+                || name.starts_with(crate::domain::RECHECK_SCRATCH_PREFIX))
+        {
+            recheck.repository.remove_scratch(&left)?;
+        }
+    }
     let mut status = None;
     // Each run on the tree as committed, until one fails.
     for outputs in runs {

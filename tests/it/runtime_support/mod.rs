@@ -84,6 +84,17 @@ pub fn git(repo: &Path, args: &[&str]) {
     );
 }
 
+/// The landing recheck's scratch worktree in the recheck directory
+/// `recheck_dir` of a queue, named after the queue's directory with its
+/// links resolved ([`dagq::domain::recheck_scratch_name`]).
+pub fn recheck_scratch(recheck_dir: &Path) -> PathBuf {
+    let queue = recheck_dir.parent().unwrap();
+    let queue = fs::canonicalize(queue).unwrap_or_else(|_| queue.to_owned());
+    queue
+        .join(recheck_dir.file_name().unwrap())
+        .join(dagq::domain::recheck_scratch_name(&queue))
+}
+
 /// What this repository's `dagq.toml` declares of its toolchains
 /// (ADR-t2268-1): the Rust profile over the whole repository and
 /// `tests/common`'s `within` line as a mark.
@@ -1435,7 +1446,7 @@ fn run_agent_with_review_retry(
     assert_eq!(Path::new(run.run_dir().unwrap()), run_dir);
     assert_eq!(
         Path::new(run.worktree_path().unwrap()),
-        run_dir.join("worktree")
+        run_dir.join(format!("worktree-{}", run.id()))
     );
     // Every outcome keeps the worktree; only an accepted run closes its
     // session, a background wrapper's (task 1439).

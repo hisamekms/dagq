@@ -13,16 +13,31 @@ related:
 
 終わったrunのworktreeが占めるディスクを、supervisorが自動で空ける。
 対象は、slotに居ないrunのうち、生きているsupervisorのleaseが無く`integrated`・`succeeded`・`failed`・`interrupted`で終わったもの（staleなleaseは無いものとして扱う。[掃除](background-recovery-job.md#終わったrunの掃除)と同じ）と、leaseが無くtaskが`completed` / `canceled`になったもの（runの状態を問わない）（`ended_run_worktrees`）。
-worktreeのpathはrun_dirの下の`<runs>/<run-id>/worktree`で、`--repo`のcheckoutとその祖先には触れない。
+worktreeのpathはrun_dirの下の`<runs>/<run-id>/worktree-<run-id>`で、`--repo`のcheckoutとその祖先には触れない。
+Gitはworktreeごとの記録（`.git/worktrees/<名前>`）の名前をpathの最後の要素から採り、使われていれば番号を足す。
+どのworktreeも同じ名前のpathなら記録は`worktree`・`worktree1`…となり、ある記録がpruneで消えるとdirが残っていても次のaddがその名前を使い回し、元のworktreeの`.git`が別のrunの記録を指す。
+`git worktree add`には名前を渡すoptionが無いので、pathの最後の要素をrunごと・scratchごとに一意にして、記録の名前を一意にする（`domain::worktree_name`）。
+addはそのpathにそのまま作り、lockもmoveも使わない。
+landing recheckのscratch worktreeは`<queue>/recheck/worktree-recheck-<key>`で、`<key>`はqueueのdirのlinkを解いた完全なpathのSHA-256の先頭16桁なので、同じrepositoryの別のqueueはdirの名前が同じでも別の名前になる（`domain::recheck_scratch_name`）。
+restoreが作り直すscratchは`<runs>/<run-id>/worktree-<run-id>.restoring`、`already_satisfied`の検証のscratchは`<queue>/satisfied/<run-id>`で、runのworktreeとこの3つのscratchは互いに名前が重ならない。
+古い配置のrunのworktree（`<runs>/<run-id>/worktree`）は、queueが記録したpathの最後の要素が`worktree`ならその配置のまま導き（`RunPaths::with_layout_of`）、resume・検証・後片付けが今までどおり見つけて扱う。
+着地と後片付けがそのrun自身のworktreeかを決める判断（`is_run_worktree`）も、`worktree-<run-id>`と`worktree`の両方を受ける。
+landing recheckは、hostで流すたびにscratchを作る前に、`recheck/`の下の今の名前でないscratch（古い配置の`recheck/worktree`と、queueが動く前のpathから名付けた`worktree-recheck-*`）を記録ごと消す。
+古い配置のrunのrestoreは、前のrestoreが古い名前のscratch（`worktree.restoring`）にrunのbranchをcheckoutしたまま止まっていても、新しいscratchを作る前にそれを消す（`replan_snapshot::legacy_scratch_worktree`）。
+消すのは、linkでなく、そのrunのbranchかdetachedのworktreeか登録の無いdirだけで（`discard_worktree`）、それ以外（link・file・別のbranchのworktree）はrunのbranchを持たないので残して復元を続ける。
+新しいaddは`worktree`・`worktreeN`の名前を使わないので、古い配置の記録の名前を使い回さない。
+同じrepositoryで同時に流れる`git worktree add`は、別のGitのコマンドがその時に変えていた記録で落ちることがある（別のaddが書きかけの記録に`commondir`がまだ無い、addが記録のdirを作ってGit自身の`locked`を書くまでの間にpruneがそのdirを消す）。
+その失敗のときは少し待って同じaddを流し直す（`worktree_command`）。
+新しいbranchはaddの前に作り、addが失敗したら消す。
 消したものはもう無いので、何度見てもよい。
 ただし片付けるものが何も残っていないrunは、同じsupervisorのプロセスの次の掃除からは候補にしない（下の「片付け終わったrun」）。
 
 - **taskが`completed` / `canceled`**: worktreeとbranchを消し、`worktree_removed`を記録する（payloadと残すものは`HostOpsState::request_cleanup`）。
   前のrunのworktreeも、着地した（`integrate`がworktreeを消せなかった）runのものも同じ。
-  - 消す前に（下の`.git`の壊れたdirを消す前とも）、worktreeがそのrun自身の`<runs>/<run-id>/worktree`（`--repo`のcheckoutとその祖先でない）なら、実行ファイルのpathがその下にあるプロセスを止める（止めるものは`domain::disk::worktree_executables`）。
+  - 消す前に（下の`.git`の壊れたdirを消す前とも）、worktreeがそのrun自身の`<runs>/<run-id>`の下のworktree（`--repo`のcheckoutとその祖先でない）なら、実行ファイルのpathがその下にあるプロセスを止める（止めるものは`domain::disk::worktree_executables`）。
     一覧を取れなければ止めずに消す。
-    着地の削除（`integrate`の`remove_landed_worktree`）も、hostのrunのworktreeがそのrun自身のもの（linkを解決してもそのrunのdirの下の`worktree`のまま）なら、消す前に同じようにプロセスを止める（判断は`own_worktree`）。
-    着地の削除の`git worktree remove`が失敗したら（Gitはworktreeのdirを消し切れなくてもadmin dirを消すことがあり、空いた名前を次のworktreeが使う）、そのrun自身の`<runs>/<run-id>/worktree`から`.git`を先に消してからdirを消し、`.git`が他のworktreeのadmin dirを指しうる形で残らないようにする。
+    着地の削除（`integrate`の`remove_landed_worktree`）も、hostのrunのworktreeがそのrun自身のもの（linkを解決してもそのrunのdirの下の同じ名前のまま）なら、消す前に同じようにプロセスを止める（判断は`own_worktree`）。
+    着地の削除の`git worktree remove`が失敗したら（Gitはworktreeのdirを消し切れなくてもadmin dirを消すことがあり、空いた名前を次のworktreeが使う）、そのrun自身のworktreeから`.git`を先に消してからdirを消し、`.git`が他のworktreeのadmin dirを指しうる形で残らないようにする。
     失敗は今までどおり`cleanup_failed`に残す。
   - `git worktree remove`が失敗したら（queueの`rebind`の後などで、worktreeの`.git`が古いcommon dirを指している）、`git worktree repair <worktree>`で直してからもう一度removeし、repairか2回目のremoveも失敗すれば、最初の失敗と合わせて`cleanup_failed`にする。
     repairは`.git`が名指すadmin dirを名前（`worktrees/<name>`）だけで探すので、repairの前に、repositoryのその名前のadmin dirがそのworktreeのものかを確かめる（判断は`owns_admin`）。

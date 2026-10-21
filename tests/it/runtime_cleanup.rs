@@ -100,7 +100,12 @@ impl GatedFiles {
     }
     /// Whether this measure was the one held.
     fn wait_here(&self, dir: &Path) -> bool {
-        if !dir.ends_with("worktree/target") || self.only.as_ref().is_some_and(|only| only != dir) {
+        let in_worktree = dir.file_name().is_some_and(|name| name == "target")
+            && dir
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name.to_string_lossy().starts_with("worktree"));
+        if !in_worktree || self.only.as_ref().is_some_and(|only| only != dir) {
             return false;
         }
         let (lock, changed) = &*self.gate;
@@ -404,6 +409,59 @@ fn a_canceled_task_loses_the_branch_of_a_worktree_already_gone() {
     assert!(payloads_of(&queue, &run, "cleanup_failed").is_empty());
 }
 
+/// A run whose worktree was made before the worktrees had names of their
+/// own, at `<runs>/<id>/worktree`, is found there and removed with its
+/// branch once its task is over, as the run's own worktree.
+#[test]
+fn a_worktree_made_under_the_old_name_goes_with_its_branch_once_its_task_is_over() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
+    supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let made = Path::new(run.worktree_path().unwrap());
+    assert_eq!(
+        made.file_name().unwrap().to_str(),
+        Some(format!("worktree-{}", run.id()).as_str())
+    );
+    // As the run would be had it been made before: its worktree on its
+    // branch at `worktree`, under a record of that name, and recorded there.
+    let branch = run.branch().unwrap().to_owned();
+    let old = made.with_file_name("worktree");
+    git(
+        &repo,
+        &["worktree", "remove", "--force", made.to_str().unwrap()],
+    );
+    git(
+        &repo,
+        &["worktree", "add", "-q", old.to_str().unwrap(), &branch],
+    );
+    assert!(repo.join(".git/worktrees/worktree").is_dir());
+    let raw = Connection::open(&db).unwrap();
+    raw.execute(
+        "UPDATE task_runs SET worktree_path=?1 WHERE id=?2",
+        rusqlite::params![old.to_str().unwrap(), run.id().as_str()],
+    )
+    .unwrap();
+    let run = queue.run(run.id()).unwrap();
+    assert_eq!(run.worktree_path(), old.to_str());
+    let branch = branch.as_str();
+    queue
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+
+    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
+    assert!(!old.exists());
+    assert!(!repo.join(".git/worktrees/worktree").exists());
+    assert!(!branch_exists(&repo, branch));
+    let removed = payloads_of(&queue, &run, "worktree_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(removed[0]["path"], old.to_str().unwrap());
+    assert_eq!(removed[0]["reason"], "task_canceled");
+    assert!(payloads_of(&queue, &run, "cleanup_failed").is_empty());
+}
+
 /// Task 405: a worktree whose `.git` still points at the repository's
 /// common directory before the queue was rebound is repaired, then
 /// removed with its branch.
@@ -500,7 +558,7 @@ fn a_worktree_whose_admin_dir_name_another_took_goes_and_leaves_the_others() {
     let gitfile = fs::read_to_string(worktree.join(".git")).unwrap();
     let admin = PathBuf::from(gitfile.trim().strip_prefix("gitdir: ").unwrap());
     fs::remove_dir_all(&admin).unwrap();
-    let other = dir.path().join("other").join("worktree");
+    let other = dir.path().join("other").join(worktree.file_name().unwrap());
     fs::create_dir_all(other.parent().unwrap()).unwrap();
     git(
         &repo,

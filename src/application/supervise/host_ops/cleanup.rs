@@ -829,8 +829,8 @@ impl HostOpsState {
     ///   `by: supervisor`, `reason` `task_completed` / `task_canceled`, and
     ///   `repaired: true` when the worktree had to be repaired first, after
     ///   the queue's rebind, and `broken_git: true` when Git took it for
-    ///   no worktree, its `.git` broken, so the run's own
-    ///   `<runs>/<run-id>/worktree` directory was removed instead, task
+    ///   no worktree, its `.git` broken, so the run's own worktree
+    ///   directory under `<runs>/<run-id>` was removed instead, task
     ///   1587, `no_admin: true` when its `.git` named an admin dir that is
     ///   another worktree's or none, so only that directory was removed
     ///   and the other's admin dir and branch left, and `stopped_processes` (`pid`, `executable`, `killed`)
@@ -1714,8 +1714,9 @@ fn remove_build_outputs(
     Ok((paths, bytes))
 }
 
-/// Whether the run's task is over and its worktree is the run's own
-/// `<runs>/<run-id>/worktree`, holding no part of the repository's
+/// Whether the run's task is over and its worktree is the run's own under
+/// `<runs>/<run-id>` ([`crate::domain::is_run_worktree`]), holding no part
+/// of the repository's
 /// checkout: the worktree the cleanup stops what runs from under before it
 /// removes it (task 1590), and may remove as a directory when Git cannot
 /// ([`may_remove_broken`]). The worktree of a run whose task goes on only
@@ -1724,7 +1725,7 @@ fn remove_build_outputs(
 fn own_ended_worktree(candidate: &EndedRunWorktree, runs_dir: &Path, repo_root: &Path) -> bool {
     let worktree = Path::new(&candidate.worktree);
     task_over(candidate.task_status)
-        && worktree == runs_dir.join(candidate.run_id.as_str()).join("worktree")
+        && crate::domain::is_run_worktree(&runs_dir.join(candidate.run_id.as_str()), worktree)
         && !repo_root.starts_with(worktree)
 }
 
@@ -1910,8 +1911,9 @@ const BROKEN_GIT: &str = ".git file broken";
 /// Whether the worktree whose removal failed with `removal` and whose
 /// repair failed with `repair` may be removed as a directory (task 1587):
 /// the run's task is over (its sources and commits are not needed, as for
-/// `git worktree remove --force`), the worktree is the run's own
-/// `<runs>/<run-id>/worktree` and holds no part of the repository's
+/// `git worktree remove --force`), the worktree is the run's own under
+/// `<runs>/<run-id>` ([`crate::domain::is_run_worktree`]) and holds no part
+/// of the repository's
 /// checkout, and Git failed on both because the `.git` is broken, so it
 /// can never take it for a worktree. Any other failure stays a failure.
 fn may_remove_broken(

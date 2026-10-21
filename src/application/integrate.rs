@@ -3441,8 +3441,9 @@ fn remove_landed_worktree(
     }
 }
 
-/// The resolved path of `worktree` when it is the run's own `<run
-/// dir>/worktree` holding no part of the repository (`common_dir`), both as
+/// The resolved path of `worktree` when it is the run's own worktree under
+/// its run directory ([`crate::domain::is_run_worktree`]) holding no part
+/// of the repository (`common_dir`), both as
 /// recorded and as `resolved` (the worktree's and the run directory's paths
 /// with their links resolved): the only worktree the landing stops
 /// processes under and removes by itself. A worktree a link replaced, to
@@ -3456,9 +3457,10 @@ fn own_worktree(
 ) -> Option<PathBuf> {
     let common = Path::new(common_dir);
     let (resolved, resolved_dir) = resolved?;
-    (run_dir.is_some_and(|dir| Path::new(dir).join("worktree") == worktree)
+    let name = worktree.file_name()?;
+    (run_dir.is_some_and(|dir| crate::domain::is_run_worktree(Path::new(dir), worktree))
         && !common.starts_with(worktree)
-        && resolved == resolved_dir.join("worktree")
+        && resolved == resolved_dir.join(name)
         && !common.starts_with(&resolved))
     .then_some(resolved)
 }
@@ -3509,7 +3511,8 @@ mod tests {
     const RUN: &str = "00000000-0000-4000-8000-000000000001";
 
     /// The landing stops processes under and removes only the run's own
-    /// `<run dir>/worktree`, as recorded and as resolved: not one with no
+    /// `<run dir>/worktree-<run id>` (or `<run dir>/worktree` of a run made
+    /// before), as recorded and as resolved: not one with no
     /// run directory, elsewhere, holding the repository, replaced by a link
     /// that resolves outside the run directory, or not resolved at all.
     #[test]
@@ -3578,6 +3581,27 @@ mod tests {
             None
         );
         assert_eq!(own_worktree(dir, worktree, common, None), None);
+        // A run's worktree of its own name, and none of another run's.
+        let named = Path::new("/q/runs/r1/worktree-r1");
+        assert_eq!(
+            own_worktree(
+                dir,
+                named,
+                common,
+                resolved("/private/q/runs/r1/worktree-r1", "/private/q/runs/r1")
+            ),
+            Some(PathBuf::from("/private/q/runs/r1/worktree-r1"))
+        );
+        let other = Path::new("/q/runs/r1/worktree-r2");
+        assert_eq!(
+            own_worktree(
+                dir,
+                other,
+                common,
+                resolved("/q/runs/r1/worktree-r2", "/q/runs/r1")
+            ),
+            None
+        );
     }
 
     #[test]

@@ -1336,9 +1336,10 @@ pub use task::{Task, TaskAction};
 pub use title_prefix::TitlePrefixes;
 pub use views::{
     ClaimOutcome, DraftBundleMember, DraftBundleView, EventActor, EventFilter, FollowUpDraft,
-    GoalDetail, GoalPredecessor, GoalSummary, GoalTask, IntegrationOutcome, Landing, Predecessor,
-    RegisteredFollowUp, RunEvent, RunLease, RunPaths, RunProcess, SupervisorRegistration,
-    TaskDetail, TaskOrigin, TaskStatusCounts,
+    GoalDetail, GoalPredecessor, GoalSummary, GoalTask, IntegrationOutcome, LEGACY_WORKTREE_NAME,
+    Landing, Predecessor, RECHECK_SCRATCH_PREFIX, RegisteredFollowUp, RunEvent, RunLease, RunPaths,
+    RunProcess, SupervisorRegistration, TaskDetail, TaskOrigin, TaskStatusCounts, is_run_worktree,
+    recheck_scratch_name, worktree_name,
 };
 pub use worker_question::{UNLABELED_TOPIC, WORKER_QUESTION_TOPICS};
 

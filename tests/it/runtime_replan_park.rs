@@ -399,6 +399,61 @@ fn a_restore_stopped_half_way_starts_again_from_the_snapshot() {
     assert!(!tree.contains("half-applied.txt"), "{tree}");
 }
 
+/// A run of the old layout (its worktree at `<run dir>/worktree`) whose
+/// restore stopped after it checked the run's branch out in the scratch of
+/// the old name (`worktree.restoring`) is restored all the same: that
+/// scratch, the run's own on its branch, is discarded before the branch is
+/// checked out in the new one, and the run resumes and lands with the
+/// saved work only.
+#[test]
+fn a_restore_of_the_old_layout_stopped_in_the_old_scratch_starts_again() {
+    let (_dir, repo, db, backend, op) = park_during_a_turn("");
+    let run = detail(&db).runs[0].clone();
+    let made = PathBuf::from(run.worktree_path().unwrap());
+    let branch = run.branch().unwrap().to_owned();
+    git(
+        &repo,
+        &["worktree", "remove", "--force", made.to_str().unwrap()],
+    );
+    let old = made.with_file_name("worktree");
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET worktree_path=?1 WHERE id=?2",
+            rusqlite::params![old.to_str().unwrap(), run.id().as_str()],
+        )
+        .unwrap();
+    assert_eq!(
+        SqliteQueue::open(&db)
+            .unwrap()
+            .run(run.id())
+            .unwrap()
+            .worktree_path(),
+        old.to_str()
+    );
+    let scratch = old.with_file_name("worktree.restoring");
+    git(
+        &repo,
+        &["worktree", "add", "-q", scratch.to_str().unwrap(), &branch],
+    );
+    fs::write(scratch.join("half-applied.txt"), "partial\n").unwrap();
+    advance(&db, &op, ReplanStatus::ContinuingAfterPark);
+    let (_reviewer, supervisor) =
+        supervise_thread(&db, &repo, backend.clone(), Default::default(), &[]);
+    finished(&db, &backend, supervisor);
+    let detail = detail(&db);
+    assert_eq!(detail.task.status(), TaskStatus::Completed);
+    let restored = payloads(&detail, "replan_restored");
+    assert_eq!(restored.len(), 1, "{restored:?}");
+    assert_eq!(restored[0]["action"], "recreated");
+    assert!(!scratch.exists());
+    let tree = git_out(&repo, &["ls-tree", "--name-only", "main"]);
+    for file in ["notes.txt", "staged.txt", "run.sh"] {
+        assert!(tree.contains(file), "{file} landed: {tree}");
+    }
+    assert!(!tree.contains("half-applied.txt"), "{tree}");
+}
+
 /// Acceptance: a process a turn left running in the worktree outside its
 /// process group (a detached helper, which the wrapper leaves on purpose)
 /// keeps the work from being saved while it may still write it: once the

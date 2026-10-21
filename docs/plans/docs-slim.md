@@ -61,7 +61,7 @@ python3 scripts/docs-metrics.py --since 2026-09-29T00:00:00Z --until 2026-10-06T
 
 ### M4 道具の結果に占める docs
 
-- **対象の dir**: 名前が `-runs-<run id>-worktree` で終わる dir（dagq の `runs/<run id>/worktree` を cwd にした会話）だけを読む。
+- **対象の dir**: 名前が `-runs-<run id>-worktree-<run id>` か `-runs-<run id>-worktree` で終わる dir（dagq の run の worktree `runs/<run id>/worktree-<run id>`、古い配置の `runs/<run id>/worktree` を cwd にした会話）だけを読む。
   それ以外（inbox の repository・planners・plan-reviews・observer・reports・run dir そのもの）と、使い捨ての queue の一時の dir（名前に `-private-var-folders-`・`-var-folders-`・`-tmp-`・`-private-tmp-` を含む）は数えない。
 - **worker と review**: 各会話（dir 直下の jsonl）の最初の user の message が、worker の prompt の冒頭の句 `You are executing dagq task ` で始まれば worker、run の review の prompt の冒頭の句 `You review run ` で始まれば review（句は 2026-10-07 の `src/application/prompt.rs` の文面）。
   どちらにも当たらない会話（recovery・triage の job、新しい会話記録で始まる resume など）は数えない。

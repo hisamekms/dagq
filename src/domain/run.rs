@@ -276,7 +276,7 @@ impl TaskRun {
     /// stale when the queue directory moves; a path that was never planned
     /// stays absent. `repo_path` names the repository, not the queue, and is kept.
     pub fn relocated(self, runs_dir: &std::path::Path) -> Self {
-        let paths = RunPaths::new(runs_dir, &self.id);
+        let paths = RunPaths::new(runs_dir, &self.id).with_layout_of(self.worktree_path.as_deref());
         let resolve = |stored: Option<String>, path: &std::path::Path| {
             stored.map(|_| path.to_string_lossy().into_owned())
         };
@@ -1471,6 +1471,43 @@ mod tests {
         );
         assert!(!moved.in_container());
         assert_eq!(moved.landing_path(), None);
+    }
+
+    /// A run's worktree is re-derived as `<runs>/<id>/worktree-<id>`, but
+    /// for a run made before the worktrees had names of their own, whose
+    /// recorded worktree is `<run dir>/worktree`: it stays found there.
+    #[test]
+    fn a_relocated_run_keeps_the_layout_its_worktree_was_made_in() {
+        let made_before = start_provisioning(run(RunStatus::Claimed), &plan()).unwrap();
+        assert_eq!(
+            made_before
+                .relocated(std::path::Path::new("/moved"))
+                .worktree_path(),
+            Some("/moved/r1/worktree")
+        );
+        let named = RunPlan {
+            worktree_path: "/runs/r1/worktree-r1".into(),
+            ..plan()
+        };
+        let named = start_provisioning(run(RunStatus::Claimed), &named).unwrap();
+        assert_eq!(
+            named
+                .relocated(std::path::Path::new("/moved"))
+                .worktree_path(),
+            Some("/moved/r1/worktree-r1")
+        );
+        // Any other name recorded is not trusted: the run's own goes.
+        let other = RunPlan {
+            worktree_path: "/elsewhere/r2/worktree-r2".into(),
+            ..plan()
+        };
+        let other = start_provisioning(run(RunStatus::Claimed), &other).unwrap();
+        assert_eq!(
+            other
+                .relocated(std::path::Path::new("/moved"))
+                .worktree_path(),
+            Some("/moved/r1/worktree-r1")
+        );
     }
 
     #[test]
