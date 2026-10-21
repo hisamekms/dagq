@@ -57,7 +57,7 @@ landing recheckは、hostで流すたびにscratchを作る前に、`recheck/`�
 
 ## 終わっていないrunのビルド成果物
 
-人の答えを待つrunなどはleaseを返したまま`target/`を持ち続け、空き容量が尽きると`queue_hold`（`cost`）でclaimと着地が止まるので、同じjobが、終わっていないrunのうち誰も作業していないものの、上の「それ以外」と同じビルド成果物も消す。
+人の答えを待つrunなどはleaseを返したまま`target/`を持ち続け、空きが閾値を下回るとclaimと着地が控えられるので（[空き容量](claim-hold.md#空き容量)）、同じjobが、終わっていないrunのうち誰も作業していないものの、上の「それ以外」と同じビルド成果物も消す。
 
 - 対象: run（`awaiting_integration`か`needs_session`）のtaskが`completed` / `canceled`でなく、slotに無く、leaseが1つも無く（staleなleaseも有るものとして扱い、触らない）、生きているsessionが無いもの（`ended_run_worktrees`が返す）。
   例えば、着地の列に並んだrun、`approve_landing`を待つrun、resumeを待つ`needs_session`のrun、`integration_held`で人を待つrunである。
