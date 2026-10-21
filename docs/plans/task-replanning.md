@@ -62,6 +62,7 @@ Claude/Codexで同じ状態機械を使う。
   untrackedは実行権限も保存・復元・照合する。
   保護のあいだはresumeを使い切ったrunも`failed`にせず、復旧jobにも継承retryにも渡さない。
   継続・撤回で閉じた操作のrunは、resumeの前（使い切ったrunは復旧jobか継承retryに渡す前）にworktreeをsnapshotと照合し、無ければ作り直す（`replan_restored`）。
+  照合と作り直しはsnapshotを保存した保留のrunに限り、保留を終えた柵がslotに見つけてsnapshotを作らず休ませたrun（`rest_fenced`）は照合も作り直しもせず、worktreeをそのままresumeする。
   作り直しは隣のscratch worktreeで組み立て（差分はgitの標準入力へ渡す）、snapshotと照合してから元のpathへ移し、途中で止まったscratchは次の試みが捨ててやり直す。
   作り直しはmanifestが記録したheadから始め、固定したrefは到達を保つだけにする。
   復元は一つのsupervisorが始めから結果の記録まで持つ。
