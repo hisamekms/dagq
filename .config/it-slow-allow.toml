@@ -568,6 +568,12 @@ name = "runtime_waiting_stages::a_question_while_revising_waits_outside_the_slot
 reason = "B 境界（守る境界）: representative slot/wait wiring with concurrent task"
 task = 1707
 
+# 8.2s to 8.8s in task 3019's five stress runs at 6 threads, class B, added by task 3019
+[[test]]
+name = "runtime_waiting_stages::a_revise_asking_in_its_slot_is_recorded_waiting_from_each_question"
+reason = "B 境界（supervisor の配線）: 待ちの上限でslotに残るreviseの質問を、supervisorの周回がaskを見つけた所で工程waiting（worker slot）に記録し、答えを打ってreviseに戻し着地まで進む。記録の工程とタグの判断はstages::testsとrun_phase::testsのunit test"
+task = 3019
+
 # 8.5s to 9.4s (median 8.553s) in task 2448's three runs of runtime_waiting_stages:: at 6 threads, class B, added by task 2448
 [[test]]
 name = "runtime_waiting_stages::a_resume_question_waits_in_its_slot_then_outside_it_with_its_clock_stopped"

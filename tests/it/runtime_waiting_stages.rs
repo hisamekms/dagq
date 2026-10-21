@@ -143,6 +143,8 @@ fn supervise_in_thread(
     reviewer: Option<&Arc<TestReviewer>>,
     options: SuperviseOptions,
 ) -> thread::JoinHandle<Result<Value>> {
+    // The service the supervisor starts takes the test as its owner.
+    let dagq = common::service::owned_executable(db.parent().unwrap());
     let (db, repo, backend) = (db.to_owned(), repo.to_owned(), backend.clone());
     let reviewer = reviewer.cloned();
     thread::spawn(move || {
@@ -154,7 +156,7 @@ fn supervise_in_thread(
                 &*backend,
                 &claude_stub(&db),
                 &*reviewer,
-                Path::new(env!("CARGO_BIN_EXE_dagq")),
+                &dagq,
                 &options,
             ),
             None => supervise_with(&db, &repo, &backend, &options),
@@ -244,6 +246,117 @@ fn a_question_while_revising_waits_outside_the_slot_with_its_clock_stopped() {
     );
     let stats = runtime::stats(&db, &Default::default()).unwrap();
     assert_eq!(stats["waiting"]["started"]["worker_question"], 1, "{stats}");
+}
+
+/// A worker that asks twice while it revises: the turn of the revise
+/// request asks, the turn of the first answer asks again, and the turn of
+/// the second answer commits it.
+const REVISE_ASKING_TWICE_AGENT: &str = concat!(
+    r#"answer_to() { printf '%s\n' "$PROMPT" | head -n 1 | tr -d '\n' > "$1"; }"#,
+    r#"
+ask() { "$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question "$1" --cmux /usr/bin/true > /dev/null || exit 70; }
+case "$PROMPT" in
+"answer to ask "*": first"*) ask 'And which word?' ;;
+"answer to ask "*) answer_to answer.txt; git add answer.txt; git commit -q -m answer
+  receipt "$(git rev-parse HEAD)" ;;
+*) if [ "$TURN" -eq 1 ]; then commit work; receipt "$(git rev-parse HEAD)"
+   else ask 'Which line?'
+   fi ;;
+esac
+"#
+);
+
+/// A revise whose questions the waits leave in its slot (a limit of no
+/// waits) is recorded waiting for a person, in its slot, from the pass
+/// that finds each question, and back in its revise once the answer
+/// came, however often it asks: each `waiting` follows its `ask_opened`
+/// with no other phase between them.
+#[test]
+fn a_revise_asking_in_its_slot_is_recorded_waiting_from_each_question() {
+    let (_dir, repo, db) = fixture();
+    let backend = Arc::new(TestWorkspace::new(&db, false, REVISE_ASKING_TWICE_AGENT));
+    let options = SuperviseOptions {
+        max_waiting: Some(0),
+        ..supervise_options(1, true)
+    };
+    let reviewer = Arc::new(TestReviewer::new(&[
+        verdict("revise", &["say which line"], "one gap"),
+        verdict("pass", &[], "fixed"),
+    ]));
+    let supervisor = supervise_in_thread(&db, &repo, &backend, Some(&reviewer), options);
+    let phases = |run: &TaskRun| events_of(&db, run.id(), "run_phase_changed");
+    let waits = |run: &TaskRun| {
+        phases(run)
+            .iter()
+            .filter(|phase| phase["phase"] == "waiting")
+            .count()
+    };
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    for (n, answer) in [(1, "first"), (2, "second")] {
+        wait_until(&db, Duration::from_secs(60), |queue| {
+            run_of(queue, 1).is_some_and(|run| {
+                open_ask_of(queue, &run, AskKind::WorkerQuestion).is_some() && waits(&run) == n
+            })
+        });
+        let run = run_of(&mut queue, 1).unwrap();
+        let ask = open_ask_of(&mut queue, &run, AskKind::WorkerQuestion).unwrap();
+        queue.answer(ask, answer).unwrap();
+    }
+    let outcome = joined(supervisor, "the supervisor thread to return").unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let run = run_of(&mut queue, 1).unwrap();
+    assert_eq!(run.status(), RunStatus::Integrated);
+    assert!(events_of(&db, run.id(), "run_waiting_started").is_empty());
+
+    let events = SqliteQueue::open(&db)
+        .unwrap()
+        .run_events(run.id())
+        .unwrap();
+    let revise = json!({"kind": "revise", "n": 1});
+    let mut asked = 0;
+    for (index, event) in events.iter().enumerate() {
+        if event.kind != EventKind::AskOpened {
+            continue;
+        }
+        asked += 1;
+        let (at, payload) = events[index..]
+            .iter()
+            .find(|e| e.kind == EventKind::RunPhaseChanged)
+            .map(|e| (timestamp_millis(&e.created_at).unwrap(), &e.payload))
+            .expect("a phase after the question");
+        assert_eq!(payload["phase"], "waiting", "{payload}");
+        assert_eq!(payload["blocker"], "human");
+        assert_eq!(payload["holds"], "worker_slot");
+        assert_eq!(payload["cause"], "ask_opened");
+        assert_eq!(payload["attempt"], revise);
+        // In the pass that finds the ask, not a later one.
+        let since = at - timestamp_millis(&event.created_at).unwrap();
+        assert!(since < 5_000, "waiting {since} ms after the question");
+    }
+    assert_eq!(asked, 2);
+    let named: Vec<(String, String)> = phases(&run)
+        .iter()
+        .map(|p| {
+            (
+                p["phase"].as_str().unwrap().to_owned(),
+                p["cause"].as_str().unwrap().to_owned(),
+            )
+        })
+        .skip_while(|(phase, _)| phase != "revise")
+        .take(5)
+        .collect();
+    let pair = |phase: &str, cause: &str| (phase.to_owned(), cause.to_owned());
+    assert_eq!(
+        named,
+        vec![
+            pair("revise", "review_finished"),
+            pair("waiting", "ask_opened"),
+            pair("revise", "ask_answered"),
+            pair("waiting", "ask_opened"),
+            pair("revise", "ask_answered"),
+        ]
+    );
 }
 
 /// A supervisor that takes over a revising headless run whose supervisor

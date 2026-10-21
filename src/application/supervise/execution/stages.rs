@@ -218,7 +218,7 @@ impl Slot {
     pub(super) fn recorded_phase(&self) -> run_phase::Phase {
         match &self.waiting {
             Some(waiting) if waiting.ended.is_some() => run_phase::Phase::Returning,
-            Some(_) => run_phase::Phase::Waiting,
+            Some(_) => run_phase::Phase::Waiting { in_slot: false },
             None if self.in_landing_queue() => run_phase::Phase::LandingQueue,
             None => self.phase.recorded(),
         }
@@ -592,7 +592,11 @@ mod tests {
     }
 
     fn run_of(id: &str, status: RunStatus) -> TaskRun {
-        TaskRun::restore(crate::domain::RunRecord {
+        TaskRun::restore(record_of(id, status)).unwrap()
+    }
+
+    fn record_of(id: &str, status: RunStatus) -> crate::domain::RunRecord {
+        crate::domain::RunRecord {
             id: RunId::new(id).unwrap(),
             task_id: TaskId::new(1),
             status,
@@ -611,8 +615,7 @@ mod tests {
             last_error: None,
             workspace_closed_at: None,
             created_at: String::new(),
-        })
-        .unwrap()
+        }
     }
 
     fn waiting(ended: Option<i64>) -> Waiting {
@@ -893,6 +896,37 @@ mod tests {
             flow
         }
 
+        /// A claimed run sent its first revise.
+        fn revising() -> Self {
+            let mut flow = Self::claimed();
+            let mut run = record_of("r1", RunStatus::AwaitingIntegration);
+            run.run_dir = Some("/runs/r1".to_owned());
+            run.receipt_path = Some("/runs/r1/receipt.json".to_owned());
+            let run = TaskRun::restore(run).unwrap();
+            let now = Instant::now();
+            let sent_at = UNIX_EPOCH + Duration::from_secs(1_000);
+            flow.slot.phase = Phase::Revise(
+                ReviseWatch::new(
+                    &run,
+                    SessionRef {
+                        workspace: "ws".to_owned(),
+                        resume: None,
+                    },
+                    1,
+                    Fix::Revise {
+                        reasons: vec!["say which line".to_owned()],
+                        concern: None,
+                    },
+                    sent_at,
+                    Some(sent_at),
+                    now,
+                )
+                .unwrap(),
+            );
+            flow.slot.note_phase("review_finished", &flow.records);
+            flow
+        }
+
         fn moves(&mut self, phase: P, started: Option<Attempt>) {
             let id = self.slot.run.id().clone();
             self.slot
@@ -1090,6 +1124,119 @@ mod tests {
         );
     }
 
+    /// A revise whose questions the waits leave in its slot, as its polls
+    /// find them ([`Slot::note_questions`]): the first question is a wait
+    /// in the slot; an answer and the next question found by one poll are
+    /// a move back to the revise and into the next wait, so each wait
+    /// starts at its question; the last answer is the revise again. A
+    /// poll that finds the same question records nothing, and a wait that
+    /// then leaves the slot is a new record.
+    #[test]
+    fn a_revises_questions_in_its_slot_are_waits_from_each_question() {
+        let mut flow = Flow::revising();
+        let ask = |id| Some(AskId::new(id));
+        // Each poll: the question it waited for before, and the one after.
+        for (before, after) in [
+            (None, None),
+            (None, ask(1)),
+            (ask(1), ask(1)),
+            (ask(1), ask(2)),
+            (ask(2), None),
+        ] {
+            let Phase::Revise(watch) = &mut flow.slot.phase else {
+                panic!("not a revise");
+            };
+            watch.awaits_answer = after;
+            flow.slot.note_questions(before, &flow.records);
+        }
+        flow.slot.note_questions(None, &flow.records);
+        let Phase::Revise(watch) = &mut flow.slot.phase else {
+            panic!("not a revise");
+        };
+        watch.awaits_answer = ask(3);
+        flow.slot.note_questions(None, &flow.records);
+        flow.slot.waiting = Some(waiting(None));
+        flow.slot.note_phase("run_waiting_started", &flow.records);
+        let recorded: Vec<[String; 4]> = flow
+            .records
+            .events
+            .borrow()
+            .iter()
+            .filter(|event| event.kind == EventKind::RunPhaseChanged)
+            .skip(2)
+            .map(|event| {
+                let p = &event.payload;
+                let text = |key: &str| p[key].as_str().unwrap().to_owned();
+                [text("phase"), text("blocker"), text("holds"), text("cause")]
+            })
+            .collect();
+        let row = |phase: &str, blocker: &str, holds: &str, cause: &str| {
+            [phase, blocker, holds, cause].map(str::to_owned)
+        };
+        assert_eq!(
+            recorded,
+            [
+                row("revise", "ai", "worker_slot", "review_finished"),
+                row("waiting", "human", "worker_slot", "ask_opened"),
+                row("revise", "ai", "worker_slot", "ask_answered"),
+                row("waiting", "human", "worker_slot", "ask_opened"),
+                row("revise", "ai", "worker_slot", "ask_answered"),
+                row("waiting", "human", "worker_slot", "ask_opened"),
+                row("waiting", "human", "none", "run_waiting_started"),
+            ]
+        );
+        assert!(
+            flow.records.phases()[2..]
+                .iter()
+                .all(|(_, attempt, _)| attempt == "revise1")
+        );
+    }
+
+    /// A revise that waited in its slot for its answer and whose next poll
+    /// already moves it on (an answer delivered by hand and the receipt
+    /// rewritten before that poll) records its return to the revise before
+    /// the phase the outcome moves it to, as the step records it: the
+    /// moves of the questions first ([`Slot::note_questions`]), then the
+    /// outcome's ([`Slot::transition`]).
+    #[test]
+    fn a_revise_moved_on_by_the_poll_after_its_answer_returns_to_it_first() {
+        let mut flow = Flow::revising();
+        let Phase::Revise(watch) = &mut flow.slot.phase else {
+            panic!("not a revise");
+        };
+        watch.awaits_answer = Some(AskId::new(1));
+        flow.slot.note_questions(None, &flow.records);
+        // The poll that judges the rewritten receipt waits for no question.
+        let Phase::Revise(watch) = &mut flow.slot.phase else {
+            panic!("not a revise");
+        };
+        let awaited = watch.awaits_answer;
+        watch.awaits_answer = None;
+        flow.slot.note_questions(awaited, &flow.records);
+        flow.slot.transition(
+            Phase::Validating(None, None),
+            "revise_finished",
+            &flow.records,
+        );
+        let phases: Vec<(String, String)> = flow
+            .records
+            .phases()
+            .into_iter()
+            .skip(2)
+            .map(|(phase, _, cause)| (phase, cause))
+            .collect();
+        let pair = |phase: &str, cause: &str| (phase.to_owned(), cause.to_owned());
+        assert_eq!(
+            phases,
+            [
+                pair("revise", "review_finished"),
+                pair("waiting", "ask_opened"),
+                pair("revise", "ask_answered"),
+                pair("validating", "revise_finished"),
+            ]
+        );
+    }
+
     /// A worker's question takes the run out of the slots while a person
     /// answers, and back.
     #[test]
@@ -1107,7 +1254,10 @@ mod tests {
             flow.records.covered(),
             ["provisioning", "worker", "waiting", "returning", "worker"]
         );
-        assert_eq!(P::Waiting.tags().blocker, run_phase::Blocker::Human);
+        assert_eq!(
+            P::Waiting { in_slot: false }.tags().blocker,
+            run_phase::Blocker::Human
+        );
     }
 
     /// A run that does not land ends failed, or canceled by the answer to
@@ -1185,7 +1335,7 @@ mod tests {
         slot.landing_turn = true;
         assert_eq!(slot.recorded_phase(), P::LandingQueue);
         slot.waiting = Some(waiting(None));
-        assert_eq!(slot.recorded_phase(), P::Waiting);
+        assert_eq!(slot.recorded_phase(), P::Waiting { in_slot: false });
         slot.waiting = Some(waiting(Some(1)));
         assert_eq!(slot.recorded_phase(), P::Returning);
     }

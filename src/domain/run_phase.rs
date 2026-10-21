@@ -109,9 +109,10 @@ pub enum Phase {
     Resume,
     /// The recovery job of a failed or interrupted run runs.
     Recovery,
-    /// The run waits outside the slots for a person's answer (ADR-0062),
-    /// a `worker_question` among them.
-    Waiting,
+    /// The run waits for a person's answer: outside the slots (ADR-0062),
+    /// a `worker_question` among them, or, `in_slot`, a revise stopped at
+    /// its own `worker_question` that the waiting limit keeps in its slot.
+    Waiting { in_slot: bool },
     /// The task's verification runs on a snapshot of main for the run's
     /// `already_satisfied` claim (ADR-t1818-1), in its slot.
     Verifying,
@@ -177,7 +178,7 @@ impl Phase {
             Self::Exiting => "exiting",
             Self::Resume => "resume",
             Self::Recovery => "recovery",
-            Self::Waiting => "waiting",
+            Self::Waiting { .. } => "waiting",
             Self::Verifying => "verifying",
             Self::ClaimAnswer => "claim_answer",
             Self::ClaimHeld => "claim_held",
@@ -211,11 +212,12 @@ impl Phase {
             | Self::AgentEval => (B::Ai, H::WorkerSlot),
             Self::Validating | Self::Exiting => (B::Runtime, H::WorkerSlot),
             Self::ReviewHeld => (B::External, H::WorkerSlot),
-            Self::Waiting
+            Self::Waiting { in_slot: false }
             | Self::LandingAnswer
             | Self::ClaimAnswer
             | Self::PushPending
             | Self::Held => (B::Human, H::None),
+            Self::Waiting { in_slot: true } => (B::Human, H::WorkerSlot),
             Self::Verifying => (B::Compute, H::WorkerSlot),
             Self::Returning | Self::LandingQueue | Self::NeedsSession | Self::ClaimHeld => {
                 (B::Queue, H::None)
@@ -405,13 +407,15 @@ impl PhaseChange {
         payload
     }
 
-    /// Whether it records the same phase, attempt and landing slot's
-    /// holder as `recorded`.
+    /// Whether it records the same phase, attempt, landing slot's holder
+    /// and slot held as `recorded` (a phase of one name may hold a slot or
+    /// none, [`Phase::Waiting`]).
     pub fn repeats(&self, recorded: Option<&Recorded>) -> bool {
         recorded.is_some_and(|r| {
             r.phase == self.phase.name()
                 && r.attempt == self.attempt
                 && r.blocked_by == self.blocked_by
+                && r.holds.is_none_or(|holds| holds == self.phase.tags().holds)
         })
     }
 
@@ -421,17 +425,20 @@ impl PhaseChange {
             phase: self.phase.name().to_owned(),
             attempt: self.attempt,
             blocked_by: self.blocked_by.clone(),
+            holds: Some(self.phase.tags().holds),
         }
     }
 }
 
-/// What a recorded `run_phase_changed` says of the phase, the attempt and
-/// the landing slot's holder.
+/// What a recorded `run_phase_changed` says of the phase, the attempt, the
+/// landing slot's holder and the slot held.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recorded {
     pub phase: String,
     pub attempt: Attempt,
     pub blocked_by: Option<String>,
+    /// The slot it held; `None` when the payload does not say.
+    pub holds: Option<Holds>,
 }
 
 impl Recorded {
@@ -442,6 +449,7 @@ impl Recorded {
             phase: payload["phase"].as_str()?.to_owned(),
             attempt: serde_json::from_value(payload["attempt"].clone()).unwrap_or(Attempt::FIRST),
             blocked_by: payload["blocked_by"].as_str().map(str::to_owned),
+            holds: serde_json::from_value(payload["holds"].clone()).ok(),
         })
     }
 
@@ -473,7 +481,7 @@ pub fn last_recorded(events: &[RunEvent]) -> Option<Recorded> {
 mod tests {
     use super::*;
 
-    const ALL: [Phase; 27] = [
+    const ALL: [Phase; 28] = [
         Phase::Provisioning,
         Phase::Worker,
         Phase::Validating,
@@ -483,7 +491,8 @@ mod tests {
         Phase::Exiting,
         Phase::Resume,
         Phase::Recovery,
-        Phase::Waiting,
+        Phase::Waiting { in_slot: false },
+        Phase::Waiting { in_slot: true },
         Phase::Verifying,
         Phase::ClaimAnswer,
         Phase::ClaimHeld,
@@ -521,7 +530,11 @@ mod tests {
             (Phase::LandingQueue, tags(B::Queue, H::None)),
             (Phase::AwaitingSlot, tags(B::Queue, H::WorkerSlot)),
             (Phase::LandingAnswer, tags(B::Human, H::None)),
-            (Phase::Waiting, tags(B::Human, H::None)),
+            (Phase::Waiting { in_slot: false }, tags(B::Human, H::None)),
+            (
+                Phase::Waiting { in_slot: true },
+                tags(B::Human, H::WorkerSlot),
+            ),
             (Phase::Verifying, tags(B::Compute, H::WorkerSlot)),
             (Phase::ClaimAnswer, tags(B::Human, H::None)),
             (Phase::ClaimHeld, tags(B::Queue, H::None)),
@@ -538,14 +551,14 @@ mod tests {
         }
     }
 
-    /// Each phase has its own name, but the two pushes, which differ only
-    /// in the slot they hold.
+    /// Each phase has its own name, but the two pushes and the two waits,
+    /// which differ only in the slot they hold.
     #[test]
     fn phase_names_are_distinct() {
         let mut names: Vec<&str> = ALL.iter().map(|phase| phase.name()).collect();
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), ALL.len() - 1);
+        assert_eq!(names.len(), ALL.len() - 2);
     }
 
     #[test]
@@ -599,6 +612,27 @@ mod tests {
             PhaseChange::new(Phase::Worker, Attempt::FIRST, "x").blocked_by(Some("r1".into()));
         assert_eq!(worker.blocked_by, None);
         assert!(worker.payload().get("blocked_by").is_none());
+    }
+
+    /// A wait that leaves its slot is a new record though its name is the
+    /// same; a record from before `holds` was read repeats by its name.
+    #[test]
+    fn a_wait_that_leaves_its_slot_is_a_new_record() {
+        let attempt = Attempt::of(AttemptKind::Revise, 2);
+        let in_slot = PhaseChange::new(Phase::Waiting { in_slot: true }, attempt, "ask_opened");
+        let out = PhaseChange::new(
+            Phase::Waiting { in_slot: false },
+            attempt,
+            "run_waiting_started",
+        );
+        let recorded = Recorded::of(&in_slot.payload()).unwrap();
+        assert_eq!(recorded, in_slot.recorded());
+        assert_eq!(recorded.holds, Some(Holds::WorkerSlot));
+        assert!(in_slot.repeats(Some(&recorded)));
+        assert!(!out.repeats(Some(&recorded)));
+        let mut unread = in_slot.payload();
+        unread.as_object_mut().unwrap().remove("holds");
+        assert!(out.repeats(Recorded::of(&unread).as_ref()));
     }
 
     fn event(id: i64, kind: &str, payload: Value) -> RunEvent {
@@ -965,6 +999,7 @@ mod tests {
                 phase: "resume".into(),
                 attempt: Attempt::of(AttemptKind::Resume, 1),
                 blocked_by: None,
+                holds: Some(Holds::WorkerSlot),
             })
         );
         assert_eq!(last_recorded(&events[2..]), None);

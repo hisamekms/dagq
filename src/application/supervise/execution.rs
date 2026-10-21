@@ -1398,6 +1398,11 @@ impl Phase {
             Phase::Satisfied(_) | Phase::SatisfiedReview(_) => Recorded::Verifying,
             Phase::ReviewPrograms(_) | Phase::Review(_) => Recorded::Review,
             Phase::ReviewHeld { .. } => Recorded::ReviewHeld,
+            // A revise stopped at its own question waits for a person in
+            // its slot when the waiting limit keeps it there.
+            Phase::Revise(watch) if watch.awaits_answer.is_some() => {
+                Recorded::Waiting { in_slot: true }
+            }
             Phase::Revise(_) => Recorded::Revise,
             Phase::Exiting(_) => Recorded::Exiting,
             Phase::Resume(_) => Recorded::Resume,
@@ -4067,8 +4072,17 @@ impl Supervisor<'_> {
                 Ok(Step::Continue)
             }
             Phase::Revise(watch) => {
-                let Some(outcome) = watch.poll(self, &slot.run)? else {
+                let awaited = watch.awaits_answer;
+                let polled = watch.poll(self, &slot.run)?;
+                // Its own questions stop it, each from the pass that finds
+                // it until the answer lets it go on: an outcome the poll
+                // found after an answer moves it on from its revise.
+                slot.note_questions(awaited, &*self.queue);
+                let Some(outcome) = polled else {
                     return Ok(Step::Continue);
+                };
+                let Phase::Revise(watch) = &mut slot.phase else {
+                    unreachable!("the revise's slot is still in it");
                 };
                 let session = watch.session.clone();
                 let label = watch.fix.label(watch.attempt);

@@ -373,6 +373,7 @@ impl Supervisor<'_> {
                     self.generators.clock.monotonic(),
                 )?;
                 watch.live.adopt(&*self.queue, run, anchor.id)?;
+                watch.awaits_answer = watch.adopted_question(self, run)?;
                 Ok(Phase::Revise(watch))
             }
             // A conflict request with nothing after it waits for the live
@@ -406,6 +407,7 @@ impl Supervisor<'_> {
                     self.generators.clock.monotonic(),
                 )?;
                 watch.live.adopt(&*self.queue, run, anchor.id)?;
+                watch.awaits_answer = watch.adopted_question(self, run)?;
                 Ok(Phase::Revise(watch))
             }
             // A concern is decided again from its verdict (ADR-t451-1

@@ -121,7 +121,11 @@ impl Phase {
     /// monotonic clock.
     pub(super) fn restart_stage_clocks(&mut self, files: &dyn RunFiles, now: Instant) {
         match self {
-            Phase::Revise(watch) => watch.sent = now,
+            // The wait outside the slots took over the one in the slot.
+            Phase::Revise(watch) => {
+                watch.sent = now;
+                watch.awaits_answer = None;
+            }
             Phase::Resume(watch) => watch.restart_clocks(files.now(), now),
             _ => {}
         }
@@ -873,7 +877,9 @@ mod tests {
 
     /// A revise back from a wait counts its resume timeout from the
     /// return too, without the time left before the wait; a phase without
-    /// a stage clock is left as it was.
+    /// a stage clock is left as it was. A revise that waited in its slot
+    /// for the answer to its question is recorded waiting there, and back
+    /// from the wait outside the slots it is its revise again.
     #[test]
     fn a_revise_back_from_a_wait_counts_its_timeout_from_the_return() {
         let files = MemoryFiles::default();
@@ -896,7 +902,10 @@ mod tests {
             live: Box::new(SessionWatch::fixing(&run, "ws", typed, origin).unwrap()),
             questions_from: 1_000,
             delivered_closed: None,
+            awaits_answer: Some(AskId::new(7)),
         });
+        use crate::domain::run_phase::Phase as Recorded;
+        assert_eq!(phase.recorded(), Recorded::Waiting { in_slot: true });
         let back = origin + BEFORE + WAITED;
         assert!(revise_deadline(back, origin, TIMEOUT).is_some());
         phase.restart_stage_clocks(&files, back);
@@ -904,6 +913,8 @@ mod tests {
             panic!("not a revise");
         };
         assert_eq!(watch.sent, back);
+        assert_eq!(watch.awaits_answer, None);
+        assert_eq!(phase.recorded(), Recorded::Revise);
         assert_eq!(watch.sent_at, typed);
         for at in [back, back + (TIMEOUT - BEFORE), back + TIMEOUT - MS] {
             assert!(revise_deadline(at, watch.sent, TIMEOUT).is_none(), "{at:?}");
