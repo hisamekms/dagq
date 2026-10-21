@@ -597,3 +597,70 @@ fn a_pass_makes_as_much_of_the_same_new_inputs_whatever_the_history() {
     assert!(built > 0 && copied > 0, "{few:?}");
     assert_eq!(attempts, 1);
 }
+
+/// A step marks its run only, a step of a target of no run nothing, and
+/// the step cursor moves past both.
+#[test]
+fn a_step_marks_its_run_and_one_of_no_run_nothing() {
+    use crate::domain::RunId;
+    use crate::domain::session_step::{Step, StepKind, StepTarget, TargetKind};
+    let a = run_id(1);
+    let step = |id, target: StepTarget| SessionStep {
+        id,
+        target,
+        session_id: "s".to_owned(),
+        received_at: 0,
+        step: Step::new(id, StepKind::Wait, 0, 1),
+    };
+    let planner = StepTarget {
+        kind: TargetKind::Planner,
+        id: "p".to_owned(),
+    };
+    let mut builder = Builder::default();
+    builder.mark_steps(&[step(3, planner.clone())]);
+    assert_eq!((builder.steps, builder.marked()), (3, false));
+    builder.mark_steps(&[
+        step(4, StepTarget::run(&RunId::new(&a).unwrap())),
+        step(5, planner),
+    ]);
+    assert_eq!(builder.steps, 5);
+    assert_eq!(builder.take(10), [Target::Run(a)]);
+}
+
+/// The token of a run is revoked when none was issued or the last issue
+/// or revocation recorded is a revocation; a stored row a later step
+/// reaches is written again, one that read the same steps is not.
+#[test]
+fn a_runs_token_is_revoked_after_its_last_issue_and_a_later_step_writes_its_row() {
+    let a = run_id(1);
+    let mut log = Log::default();
+    log.worked(1, &a, 0);
+    assert!(telemetry_revoked(&log.events));
+    log.add(Some(1), Some(&a), "telemetry_token_issued", json!({}), 1);
+    assert!(!telemetry_revoked(&log.events));
+    log.add(Some(1), Some(&a), "telemetry_token_revoked", json!({}), 2);
+    assert!(telemetry_revoked(&log.events));
+    log.add(Some(1), Some(&a), "telemetry_token_issued", json!({}), 3)
+        .add(Some(1), Some(&a), "review_finished", json!({}), 4);
+    assert!(!telemetry_revoked(&log.events));
+
+    log.integrated(1, &a, 700).pushed(1, &a, 930);
+    let mut inputs = inputs(&log, 1000);
+    let stored = build(&Target::Run(a.clone()), &inputs, &[]).unwrap();
+    assert_eq!(stored.inputs_through.steps, None);
+    let mut later = stored.clone();
+    later.inputs_through.steps = Some(7);
+    assert!(writes(Some(&stored), &later));
+    assert!(!writes(Some(&later), &later));
+    assert!(!writes(Some(&later), &stored));
+    // A run's steps read into its inputs fold into its row, which goes on
+    // from what the stored row read; forgotten with its events once folded.
+    let target = Target::Run(a.clone());
+    inputs.read_steps(&a, RunSteps::new(Vec::new(), Some(&later)));
+    assert_eq!(
+        build(&target, &inputs, &[]).unwrap().inputs_through.steps,
+        Some(7)
+    );
+    inputs.forget(&target);
+    assert_eq!(build(&target, &inputs, &[]), None);
+}

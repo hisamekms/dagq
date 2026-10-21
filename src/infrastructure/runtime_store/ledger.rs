@@ -37,64 +37,75 @@ fn text(value: &impl serde::Serialize) -> Result<String> {
     Ok(serde_json::to_string(value)?)
 }
 
-impl LedgerStore for SqliteQueue {
-    fn write_ledger_row(&self, row: &LedgerRow) -> Result<bool> {
-        let totals = &row.totals;
-        let mut columns: Vec<(&str, rusqlite::types::Value)> = vec![
-            ("kind", row.kind.as_str().to_owned().into()),
-            ("key", row.key.clone().into()),
-            ("task_id", row.task_id.map(|task| task.as_i64()).into()),
-            ("ledger_v", i64::from(row.ledger_v).into()),
-            ("built_at", row.built_at.clone().into()),
-            ("inputs_through", text(&row.inputs_through)?.into()),
-            ("final", i64::from(row.is_final).into()),
-            ("legacy", i64::from(row.is_legacy()).into()),
-            (
-                "legacy_values",
-                row.legacy.as_ref().map(text).transpose()?.into(),
-            ),
-            ("started_at", row.started_at.into()),
-            ("ended_at", row.ended_at.into()),
-            ("outcome", row.outcome.clone().into()),
-            ("duration_ms", totals.all.duration_ms.into()),
-            ("slot_ms", totals.all.slot_ms.into()),
-            ("unattributed_ms", totals.unattributed_ms.into()),
-            ("attempts", totals.attempts.into()),
-            ("totals", text(totals)?.into()),
-            ("intervals", text(&row.intervals)?.into()),
-            ("attributes", text(&row.attributes)?.into()),
-            (
-                "after_claim",
-                row.after_claim.as_ref().map(text).transpose()?.into(),
-            ),
-            ("detail", text(&row.detail)?.into()),
-            ("inputs_from", row.inputs_from.as_i64().into()),
-            ("records", text(&row.records)?.into()),
-        ];
-        let subject = row.subject.as_ref();
-        columns.extend([
-            ("subject_kind", subject.map(|s| s.kind.clone()).into()),
-            ("subject_id", subject.map(|s| s.id.clone()).into()),
-            ("round", subject.and_then(|s| s.round).into()),
-            ("route", subject.and_then(|s| s.route.clone()).into()),
-            ("provider", subject.and_then(|s| s.provider.clone()).into()),
-            ("model", subject.and_then(|s| s.model.clone()).into()),
-        ]);
-        for (blocker, column) in BLOCKERS {
-            columns.push((column, millis(&totals.by_blocker, tag(blocker)).into()));
-        }
-        for (holds, column) in HOLDS {
-            columns.push((column, millis(&totals.by_holds, tag(holds)).into()));
-        }
-        let names: Vec<&str> = columns.iter().map(|(name, _)| *name).collect();
-        let marks: Vec<String> = (1..=names.len()).map(|n| format!("?{n}")).collect();
-        // A legacy row's values (its legacy values, times, sums and
-        // attributes) are frozen; what it owns, how far it reaches and what
-        // its detail folds of its records (its sessions, jobs and
-        // Executions; a legacy row keeps nothing else there) are not, so
-        // that every event stays some row's records and their Executions
-        // are read.
-        let updates: Vec<String> = names
+/// The row of `kind` and `key` `conn` holds, if there is one.
+fn held_row(conn: &rusqlite::Connection, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
+    conn.query_row(
+        "SELECT * FROM ledger_rows WHERE kind=?1 AND key=?2",
+        params![kind.as_str(), key],
+        ledger_row,
+    )
+    .optional()?
+    .transpose()
+}
+
+/// Write `row` on `conn` as [`LedgerStore::write_ledger_row`] says.
+fn upsert(conn: &rusqlite::Connection, row: &LedgerRow) -> Result<bool> {
+    let totals = &row.totals;
+    let mut columns: Vec<(&str, rusqlite::types::Value)> = vec![
+        ("kind", row.kind.as_str().to_owned().into()),
+        ("key", row.key.clone().into()),
+        ("task_id", row.task_id.map(|task| task.as_i64()).into()),
+        ("ledger_v", i64::from(row.ledger_v).into()),
+        ("built_at", row.built_at.clone().into()),
+        ("inputs_through", text(&row.inputs_through)?.into()),
+        ("final", i64::from(row.is_final).into()),
+        ("legacy", i64::from(row.is_legacy()).into()),
+        (
+            "legacy_values",
+            row.legacy.as_ref().map(text).transpose()?.into(),
+        ),
+        ("started_at", row.started_at.into()),
+        ("ended_at", row.ended_at.into()),
+        ("outcome", row.outcome.clone().into()),
+        ("duration_ms", totals.all.duration_ms.into()),
+        ("slot_ms", totals.all.slot_ms.into()),
+        ("unattributed_ms", totals.unattributed_ms.into()),
+        ("attempts", totals.attempts.into()),
+        ("totals", text(totals)?.into()),
+        ("intervals", text(&row.intervals)?.into()),
+        ("attributes", text(&row.attributes)?.into()),
+        (
+            "after_claim",
+            row.after_claim.as_ref().map(text).transpose()?.into(),
+        ),
+        ("detail", text(&row.detail)?.into()),
+        ("inputs_from", row.inputs_from.as_i64().into()),
+        ("records", text(&row.records)?.into()),
+    ];
+    let subject = row.subject.as_ref();
+    columns.extend([
+        ("subject_kind", subject.map(|s| s.kind.clone()).into()),
+        ("subject_id", subject.map(|s| s.id.clone()).into()),
+        ("round", subject.and_then(|s| s.round).into()),
+        ("route", subject.and_then(|s| s.route.clone()).into()),
+        ("provider", subject.and_then(|s| s.provider.clone()).into()),
+        ("model", subject.and_then(|s| s.model.clone()).into()),
+    ]);
+    for (blocker, column) in BLOCKERS {
+        columns.push((column, millis(&totals.by_blocker, tag(blocker)).into()));
+    }
+    for (holds, column) in HOLDS {
+        columns.push((column, millis(&totals.by_holds, tag(holds)).into()));
+    }
+    let names: Vec<&str> = columns.iter().map(|(name, _)| *name).collect();
+    let marks: Vec<String> = (1..=names.len()).map(|n| format!("?{n}")).collect();
+    // A legacy row's values (its legacy values, times, sums and
+    // attributes) are frozen; what it owns, how far it reaches and what
+    // its detail folds of its records (its sessions, jobs and
+    // Executions; a legacy row keeps nothing else there) are not, so
+    // that every event stays some row's records and their Executions
+    // are read.
+    let updates: Vec<String> = names
             .iter()
             .filter(|name| !matches!(**name, "kind" | "key"))
             .map(|name| match *name {
@@ -106,37 +117,50 @@ impl LedgerStore for SqliteQueue {
                 ),
             })
             .collect();
-        let frozen: bool = self
-            .conn
-            .query_row(
-                "SELECT legacy FROM ledger_rows WHERE kind=?1 AND key=?2",
-                params![row.kind.as_str(), row.key],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(false);
-        self.conn.execute(
-            &format!(
-                "INSERT INTO ledger_rows({}) VALUES ({})
+    let frozen: bool = conn
+        .query_row(
+            "SELECT legacy FROM ledger_rows WHERE kind=?1 AND key=?2",
+            params![row.kind.as_str(), row.key],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(false);
+    conn.execute(
+        &format!(
+            "INSERT INTO ledger_rows({}) VALUES ({})
                  ON CONFLICT(kind, key) DO UPDATE SET {}",
-                names.join(","),
-                marks.join(","),
-                updates.join(","),
-            ),
-            rusqlite::params_from_iter(columns.into_iter().map(|(_, value)| value)),
-        )?;
-        Ok(!frozen)
+            names.join(","),
+            marks.join(","),
+            updates.join(","),
+        ),
+        rusqlite::params_from_iter(columns.into_iter().map(|(_, value)| value)),
+    )?;
+    Ok(!frozen)
+}
+
+impl LedgerStore for SqliteQueue {
+    fn write_ledger_row(&self, row: &LedgerRow) -> Result<bool> {
+        upsert(&self.conn, row)
+    }
+
+    /// Reads the row again and writes under one write lock, so no other
+    /// writer comes between.
+    fn write_ledger_row_over(
+        &self,
+        row: &LedgerRow,
+        read: Option<&LedgerRow>,
+    ) -> Result<Option<bool>> {
+        let tx = self.write_tx("ledger_row_over", TransactionBehavior::Immediate)?;
+        if held_row(&tx, row.kind, &row.key)?.as_ref() != read {
+            return Ok(None);
+        }
+        let written = upsert(&tx, row)?;
+        tx.commit()?;
+        Ok(Some(written))
     }
 
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
-        self.conn
-            .query_row(
-                "SELECT * FROM ledger_rows WHERE kind=?1 AND key=?2",
-                params![kind.as_str(), key],
-                ledger_row,
-            )
-            .optional()?
-            .transpose()
+        held_row(&self.conn, kind, key)
     }
 
     fn ledger_rows(&self, kind: LedgerKind) -> Result<Vec<LedgerRow>> {

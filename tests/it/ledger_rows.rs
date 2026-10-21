@@ -2,7 +2,8 @@
 //! "台帳の形"): every kind written with its version, its inputs, its marks
 //! and its subject, read back as written and once per object, and a legacy
 //! row whose values stay frozen while its records and their Executions
-//! follow the events; a node row folded from the NodeSampleStore, its
+//! follow the events; a write over a row another process wrote since its
+//! read refused; a node row folded from the NodeSampleStore, its
 //! marks and its retention; the events of one task the ledger's fold of
 //! its row reads.
 use crate::common;
@@ -179,6 +180,37 @@ fn every_kind_of_row_is_written_once_and_reads_back() {
         })
         .unwrap();
     assert_eq!(window.events(), events);
+}
+
+/// Two processes on one queue.db (two supervisors' builders): a write over
+/// the row one read is refused once the other wrote that row since, and
+/// the other's row stays; over the row held now it is written.
+#[test]
+fn a_write_over_a_row_another_process_wrote_since_its_read_writes_nothing() {
+    let (dir, queue) = fixture();
+    let other = SqliteQueue::open(dir.path().join("queue.db")).unwrap();
+    let events = vec![
+        event(1, true, "run_claimed", json!({}), 0),
+        phase(2, "worker", "ai", "worker_slot", 0),
+        phase(3, "ended", "runtime", "none", 60),
+    ];
+    let first = ledger::run_row(RUN, &events[..2], &[], 0, BUILT);
+    let later = ledger::run_row(RUN, &events, &[], 0, BUILT);
+    let read = queue.ledger_row(LedgerKind::Run, RUN).unwrap();
+    assert_eq!(read, None);
+    assert!(other.write_ledger_row(&later).unwrap());
+    let held = other.ledger_row(LedgerKind::Run, RUN).unwrap();
+    assert_eq!(
+        queue.write_ledger_row_over(&first, read.as_ref()).unwrap(),
+        None
+    );
+    assert_eq!(queue.ledger_row(LedgerKind::Run, RUN).unwrap(), held);
+    assert_eq!(
+        queue.write_ledger_row_over(&first, held.as_ref()).unwrap(),
+        Some(true)
+    );
+    let now = other.ledger_row(LedgerKind::Run, RUN).unwrap().unwrap();
+    assert_eq!(now.inputs_through.events, EventId::new(2));
 }
 
 /// A legacy run's stored row keeps the values `stats` gave it once, while

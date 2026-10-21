@@ -27,6 +27,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use super::fold::Interval;
 use crate::domain::session_step::{SeqRange, SessionStep, StepKind, gaps};
@@ -157,7 +158,16 @@ pub struct StepFold {
     /// The steps counted of a session whose start was not known: in the
     /// counts and the seqs, covering no time until a fold places them.
     pub unplaced: Vec<UnplacedStep>,
+    /// The start on the supervisor's clock of each session it placed steps
+    /// of: a later fold places that session's late steps by it once the
+    /// retention removed the session's owner with its steps.
+    #[serde(default)]
+    pub starts: BTreeMap<String, i64>,
 }
+
+/// The key of a run row's `detail` that holds its steps folded
+/// ([`StepFold::detail`]); a run with no step counted has none.
+pub const DETAIL_KEY: &str = "steps";
 
 /// Fold a run's `steps` over nothing ([`StepFold::fold_onto`]). `starts`
 /// are its sessions' starts on the supervisor's clock, by session id.
@@ -171,20 +181,18 @@ impl StepFold {
     /// is left out, so a step sent again changes nothing, and one that
     /// came in after the retention removed those around it fills their
     /// gap. Each added step counts by its kind and covers its time on the
-    /// supervisor's clock, its session's start in `starts` plus its
-    /// offset; the steps it held unplaced whose start `starts` now knows
-    /// are placed.
+    /// supervisor's clock, its session's start plus its offset: the start
+    /// this fold kept of the session, else the one in `starts`. The steps
+    /// it held unplaced whose start `starts` now knows are placed.
     pub fn fold_onto(&self, starts: &BTreeMap<String, i64>, steps: &[SessionStep]) -> StepFold {
         let mut fold = self.clone();
         let mut added: BTreeMap<&str, BTreeSet<i64>> = BTreeMap::new();
         let mut unplaced = std::mem::take(&mut fold.unplaced);
         for step in steps {
             let seq = step.step.seq;
-            let counted = self
-                .seqs
-                .get(&step.session_id)
-                .is_some_and(|ranges| ranges.iter().any(|range| range.contains(seq)));
-            if counted || !added.entry(&step.session_id).or_default().insert(seq) {
+            if self.holds(&step.session_id, seq)
+                || !added.entry(&step.session_id).or_default().insert(seq)
+            {
                 continue;
             }
             *fold.counts.entry(step.step.kind).or_default() += 1;
@@ -197,8 +205,15 @@ impl StepFold {
             });
         }
         for step in unplaced {
-            match starts.get(&step.session_id) {
-                Some(&start) => fold.placed.push(step.place(start)),
+            let start = self
+                .starts
+                .get(&step.session_id)
+                .or_else(|| starts.get(&step.session_id));
+            match start {
+                Some(&start) => {
+                    fold.starts.insert(step.session_id.clone(), start);
+                    fold.placed.push(step.place(start));
+                }
                 None => fold.unplaced.push(step),
             }
         }
@@ -210,6 +225,35 @@ impl StepFold {
             *ranges = merge_ranges(std::mem::take(ranges));
         }
         fold
+    }
+
+    /// What a run row's `detail` holds of it over the run's `intervals`
+    /// under [`DETAIL_KEY`]: the fold itself (`fold`, what a later fold goes
+    /// on from, [`Self::of_detail`]), each interval's kinds and coverage
+    /// (`parents`), the steps and the time outside every interval
+    /// (`outside`, `outside_ms`), and the gaps (`gaps`, `missing`).
+    pub fn detail(&self, intervals: &[Interval]) -> Value {
+        json!({
+            "fold": self,
+            "parents": self.parents(intervals),
+            "outside": self.outside(intervals),
+            "outside_ms": self.outside_ms(intervals),
+            "gaps": self.gaps(),
+            "missing": self.missing(),
+        })
+    }
+
+    /// The fold a run row's `detail` holds ([`Self::detail`]); none when it
+    /// holds none, or one this binary cannot read.
+    pub fn of_detail(detail: &Value) -> Option<Self> {
+        serde_json::from_value(detail.get(DETAIL_KEY)?.get("fold")?.clone()).ok()
+    }
+
+    /// Whether it counted the seq `seq` of `session_id`.
+    pub fn holds(&self, session_id: &str, seq: i64) -> bool {
+        self.seqs
+            .get(session_id)
+            .is_some_and(|ranges| ranges.iter().any(|range| range.contains(seq)))
     }
 
     /// How many steps it counted.
@@ -484,6 +528,18 @@ mod tests {
         // Sent again once more, nothing changes.
         let resent = [step(SESSION, 2, StepKind::Wait, 200, 200)];
         assert_eq!(later.fold_onto(&starts(), &resent), later);
+
+        // The retention removed the session's owner with its steps too: the
+        // start the stored fold kept places seq 2 all the same.
+        let stored = StepFold::of_detail(&json!({ DETAIL_KEY: first.detail(&intervals) }))
+            .expect("the fold a row's detail holds");
+        assert_eq!(stored.starts[SESSION], 1_000);
+        let without_owner = stored.fold_onto(
+            &BTreeMap::new(),
+            &[step(SESSION, 2, StepKind::Wait, 200, 200)],
+        );
+        assert_eq!(without_owner, later);
+        assert!(without_owner.unplaced.is_empty());
     }
 
     #[test]

@@ -89,6 +89,18 @@ pub trait LedgerStore {
     /// records and their range follow `row`; `false` then. Writing the
     /// same row again leaves one row.
     fn write_ledger_row(&self, row: &LedgerRow) -> Result<bool>;
+    /// Write `row` as [`Self::write_ledger_row`] does only while the row of
+    /// its kind and key the store holds is still `read` (`None`: none),
+    /// the one its fold went on from. `None`, nothing written, when another
+    /// writer (another supervisor's builder) wrote it since: the caller
+    /// folds it again over the row held now, so a fold over an older read
+    /// never takes back what that writer folded (the steps its retention
+    /// removed since).
+    fn write_ledger_row_over(
+        &self,
+        row: &LedgerRow,
+        read: Option<&LedgerRow>,
+    ) -> Result<Option<bool>>;
     /// The row of `kind` and `key`, if there is one.
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>>;
     /// Every row of `kind`, by key.
@@ -269,11 +281,18 @@ pub trait TelemetrySink {
 
 /// What builds the ledger reads and writes (docs/design/measurement.md
 /// "台帳を作る係"): the EventStore, the NodeSampleStore and the
-/// SessionStepStore, its inputs, and the LedgerStore. Every store of the
-/// four is one.
-pub trait LedgerQueue: EventStore + LedgerStore + NodeSampleStore + SessionStepStore {}
+/// SessionStepStore (with the owners, whose registration places a
+/// session's steps on the supervisor's clock), its inputs, and the
+/// LedgerStore. Every store of the five is one.
+pub trait LedgerQueue:
+    EventStore + LedgerStore + NodeSampleStore + SessionStepStore + SessionOwners
+{
+}
 
-impl<T: EventStore + LedgerStore + NodeSampleStore + SessionStepStore + ?Sized> LedgerQueue for T {}
+impl<T: EventStore + LedgerStore + NodeSampleStore + SessionStepStore + SessionOwners + ?Sized>
+    LedgerQueue for T
+{
+}
 
 /// What reports read and record of the queue as a whole: the findings,
 /// the written reports, KPI breaches, forecasts and the CI watch.

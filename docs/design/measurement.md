@@ -163,8 +163,8 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 - **作り直し**: 版が上がった行と、到達点より後に入力が届いた行は畳み直す（`ledger::rebuilds`、確定の印の後と旧方式の行も同じ）。
 - **記録**: どのeventも、どれか1つの行の記録になる（`domain::ledger::owner`）。
   行は自分の記録とその入力のevent idの範囲を持ち、行だけから今の統計の関数の入力が戻る。
-- **run**（実装済み）: 区間の列・タグごとの合計・claimの属性の組（キーを知らずにそのまま）・claimの後の事実と、そのrunの上のsessionとjob・Executionの列。
-  予定: `steps`・`change`・`area`・`nature`。
+- **run**（実装済み）: 区間の列・タグごとの合計・claimの属性の組（キーを知らずにそのまま）・claimの後の事実と、そのrunの上のsessionとjob・Executionの列・stepの畳み（`steps`）。
+  予定: `change`・`area`・`nature`。
 - **task**（実装済み）: 区間の列と重ねたsupervisor単位の区間。
 - **session**（実装済み）: runを持たない対象のsessionとjobの1回（`domain::ledger::session`）。
 - **queue**（実装済み）: run・task・sessionに属さないqueue全体の区間か出来事の1つ（`domain::ledger::queue`）。
@@ -179,8 +179,7 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
   最後の記録が`ended`なら閉じ、`push_pending`なら後の`push_finished`で閉じ、ほかは今の時刻まで畳んで終わりを持たない（確定していない）。
 - **task**: statusの移りを工程にし、runの間はそのrunの区間を差し込み、readyの間は`ready_at`で依存の待ちを分けてsupervisor単位の区間を重ねる。
 - **claimの後の事実**は`domain::after_claim`が作り、statsの`MeasureTrack`も同じものを使う。
-- **step**: runのstepは`domain::ledger::steps`が親の区間ごとにkindの内訳と被覆率に畳み（内側の層は重なってよい。係の取り込みは予定）、区間の外のstepとseqの抜けを数える。
-  結果は数えたseqを持ち、保持で消えたstepの送り直しは数えず、抜けを埋める遅れたseqは足す。
+- **step**: runのstepは`domain::ledger::steps`が親の区間ごとにkindの内訳と被覆率に畳み（内側の層は重なってよい）、区間の外のstepとseqの抜けを数える。
 
 置き換える今の組み立て（段3で撤去）はADR-t1662-1決定20が挙げる。
 
@@ -191,18 +190,18 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 - **周回**: supervisorの周回が間隔ごとに、drainとhandoffの間も、jobのthreadで動く（D7）。
   着地の処理の中では作らず、runtimeの制御（claim・slot・resume・着地）は台帳を読まない。
 - **置き場**: 係の状態（入力ごとのカーソル・印・猶予を待つ行）は観測と分析の状態、組み立ては`compose::observation`にあり、`Supervisor`の本体に状態を足さない。
-- **印**: EventStoreとNodeSampleStoreのカーソルの後に届いた入力だけを読み、そのrun・task・それが変えたsessionとqueueの行（記録でない終わりも）・nodeの時間に印を付ける（全行を走査しない）。
+- **印**: EventStore・NodeSampleStore・SessionStepStoreのカーソルの後に届いた入力だけを読み、そのrun・task・それが変えたsessionとqueueの行（記録でない終わりも）・nodeの時間に印を付ける（全行を走査しない）。
   畳むrun・taskのeventはその都度読み、queue全体の畳みは届いたeventを一度だけ読んで持ち越す（`builder::Kept`）。
   周回は新しいeventが変えうる行と印の付いた行だけを畳み、周回で作る領域は前からのeventの数に比例しない。
-  `push_finished`は`push_pending`で書いたrunにも付ける。
   processの始めはカーソルが0なので、切り替え前を含む全てに追いつく（backfill）。
 - **書く行**: 終わったrun・task（`push_pending`（他のpushが閉じたtaskも）と旧方式を含み途中は書かない）と、session・queue・nodeの行。
-  書くかは`builder::writes`が決め、同じ入力では書かない（冪等）。
-  1周回で書く数と見る数に上限があり、残りは次の周回。
+  書くかは`builder::writes`が決め、同じ入力では書かず、他のsupervisorが書いた行は読み直し、追いついてから畳む。
+- **step**: runの行はstepをstoreが持つ行の畳みの上に重ねて畳み、保持の後も内訳は減らない。
+  保持は書き待ちのrunのstepを消さない。
 - **確定**（`final`）: run・taskは終わりから猶予の後で、`push_pending`には付けない。
+  runは発行したtelemetryのtokenの失効の記録の後にだけ確定する。
   session・queue・nodeの行は`domain::ledger::settle`が決める（閉じた時刻か区間の終わりから猶予の後で、閉じていない行は確定しない）。
-  確定の後もdirtyなら畳み直す。
-  telemetryのtokenの失効と資源の最後の記録の条件は、それを記録するtaskが足す（予定）。
+  資源の最後の記録の条件は、それを記録するtaskが足す（予定）。
 - **旧方式**: 切り替え前のrun（`run_phase_changed`が無い）とそのtaskは区間に畳まず、`legacy`に今の`RunMeasures`から値を一度だけ書く。
   storeは値と版を上書きせず、後の入力では記録だけを追う。
 - **保持**: nodeの行はhostの負荷と同じ日数で消す。

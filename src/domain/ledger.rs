@@ -49,7 +49,7 @@ use super::{EventId, RunEvent, TaskId};
 /// The version of the fold: raised when what a row holds or how it is
 /// folded changes, so every row is built again (a legacy row's frozen
 /// values aside, which the store keeps).
-pub const LEDGER_V: u32 = 3;
+pub const LEDGER_V: u32 = 4;
 
 /// The kind of a row. The store keeps every kind in one table by this
 /// column, so a new kind is a new value.
@@ -108,8 +108,9 @@ pub struct Subject {
 }
 
 /// How far into its inputs a row was folded: the last EventStore event
-/// id, and the last NodeSampleStore id for a node row. The later kinds of
-/// input (steps, resources) add their own key beside them.
+/// id, the last NodeSampleStore id for a node row and the last
+/// SessionStepStore id for a run row with steps. The later kinds of input
+/// (resources) add their own key beside them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputsThrough {
     pub events: EventId,
@@ -124,6 +125,12 @@ pub struct InputsThrough {
     /// it dirty ([`settle::node_settlement`]). Its `events` is 0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_samples: Option<i64>,
+    /// For a run row, the largest SessionStepStore id of its steps it
+    /// folded (or that the fold it went on from had): a step of the run
+    /// with a larger one makes it dirty ([`builder::writes`]). It stays
+    /// once the retention removed those steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub steps: Option<i64>,
 }
 
 impl InputsThrough {
@@ -242,8 +249,9 @@ pub struct LedgerRow {
     /// A run's claim attributes, whatever their keys; empty for a task.
     pub attributes: Map<String, Value>,
     pub after_claim: Option<AfterClaim>,
-    /// What else the kind folds: a run's milestones and the run that
-    /// closed its pending push, a task's ready time, runs and overlays, a
+    /// What else the kind folds: a run's milestones, the run that closed
+    /// its pending push and its session steps ([`steps::DETAIL_KEY`]), a
+    /// task's ready time, runs and overlays, a
     /// node row's samples.
     pub detail: Value,
     /// A legacy row's frozen values (and its mark: `Some`): a run's
@@ -277,6 +285,7 @@ impl LedgerRow {
                 events: EventId::new(0),
                 supervisor: None,
                 node_samples: None,
+                steps: None,
             },
             is_final: false,
             started_at: None,

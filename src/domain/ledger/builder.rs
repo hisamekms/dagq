@@ -5,11 +5,12 @@
 //! that came in after its cursors, and writes what it says.
 //!
 //! - **Marks**: each input after a cursor (an EventStore event id, a
-//!   NodeSampleStore id) marks what it is an input of
-//!   ([`Builder::mark_events`], [`Builder::mark_samples`]): its run, its
-//!   task, the session and queue rows it changes (any event's: a claim
-//!   ends a deferral, a run's event moves the landing slot), its node and
-//!   hour. A `push_finished`
+//!   NodeSampleStore id, a SessionStepStore id) marks what it is an input
+//!   of ([`Builder::mark_events`], [`Builder::mark_samples`],
+//!   [`Builder::mark_steps`]): its run, its task, the session and queue
+//!   rows it changes (any event's: a claim ends a deferral, a run's event
+//!   moves the landing slot), its node and hour; a step its run only, and
+//!   a step of a target of no run nothing. A `push_finished`
 //!   marks the runs this builder left pending on their push and their tasks
 //!   (another run's push may close them). No row is scanned to find a dirty
 //!   one. A builder starts with its cursors at 0, so a new process marks
@@ -25,9 +26,25 @@
 //!   the store keeps as first written), when the new fold read an input
 //!   past the stored one's `inputs_through` (dirty), and when it is now
 //!   settled ([`writes`]). The same inputs fold to the same row, which is
-//!   not written again.
+//!   not written again. A fold that read less of some input than the
+//!   stored row (another supervisor's builder, its cursors ahead, wrote it)
+//!   is not written and stays marked until its cursors pass it
+//!   ([`behind`]).
+//! - **Steps**: a run's row folds the run's steps up to the step cursor
+//!   onto what its stored row folded of them ([`RunSteps`],
+//!   [`super::steps::StepFold::fold_onto`]), so the steps the retention
+//!   removed stay in it and a late one that fills a gap is added. A step
+//!   that came in after the row was written is an input past its
+//!   `inputs_through` (dirty); a step sent again adds nothing. The fold
+//!   keeps its sessions' starts, so a late step of a session whose owner
+//!   the retention removed is placed too, and the retention keeps a run's
+//!   steps while it is marked and no row the store holds of it holds them
+//!   ([`Builder::steps_held_since`]).
 //! - **Settled** (`final`): a run or task once it ended (a pending push
-//!   has not) and [`SETTLE_GRACE_MS`] passed ([`run_settles`]); a session,
+//!   has not) and [`SETTLE_GRACE_MS`] passed ([`run_settles`]), a run
+//!   only once its telemetry token's revocation is recorded too
+//!   ([`telemetry_revoked`]: while it is not, the run waits on the event
+//!   that records it, not on its grace); a session,
 //!   queue or node row by [`super::settle`]. A settled row an input reaches
 //!   later is folded and written again, and settled again after its grace.
 //!   A row ended and not settled yet is marked again when its grace is
@@ -53,6 +70,7 @@ use crate::domain::EventKind;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use super::steps::{self, StepFold};
 use super::{
     LEDGER_V, LedgerKind, LedgerRow, fold,
     node::{self, BUCKET_SECS},
@@ -63,6 +81,7 @@ use super::{
 };
 use crate::domain::host_metrics::NodeSample;
 use crate::domain::pre_claim::PreClaimBook;
+use crate::domain::session_step::SessionStep;
 use crate::domain::supervisor_life::{Lives, supervisor_of};
 use crate::domain::{EventId, RunEvent, TaskId};
 
@@ -81,6 +100,9 @@ pub const CHECKS_PER_PASS: usize = 2_000;
 /// How many events after the cursor a pass reads at a time: a new process
 /// reads every event once, a page at a time.
 pub const EVENTS_PER_READ: usize = 5_000;
+
+/// How many steps after the step cursor a pass reads at a time.
+pub const STEPS_PER_READ: usize = 5_000;
 
 /// What a mark is of.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -204,6 +226,8 @@ pub struct Builder {
     pub events: EventId,
     /// The last NodeSampleStore id read.
     pub samples: i64,
+    /// The last SessionStepStore id read (the order the steps came in).
+    pub steps: i64,
     marks: BTreeSet<Target>,
     /// Session and queue rows with an input after this event are to be
     /// looked at: set by an event of theirs, one that changed one of them
@@ -214,6 +238,11 @@ pub struct Builder {
     unsettled: BTreeMap<Target, i64>,
     /// The runs left pending on their push, each with its task.
     pending_pushes: BTreeMap<String, Option<TaskId>>,
+    /// The runs with steps read that no row the store holds of them holds
+    /// yet, each with when the earliest of those came in (unix ms): while
+    /// such a run is marked the retention keeps the steps from then on
+    /// ([`Self::steps_held_since`]).
+    unsaved_steps: BTreeMap<String, i64>,
     /// The session and queue rows an event read since the rows were last
     /// built may have changed ([`Kept::add`]).
     touched: BTreeSet<(LedgerKind, String)>,
@@ -227,10 +256,12 @@ impl Default for Builder {
         Self {
             events: EventId::new(0),
             samples: 0,
+            steps: 0,
             marks: BTreeSet::new(),
             rows_after: None,
             unsettled: BTreeMap::new(),
             pending_pushes: BTreeMap::new(),
+            unsaved_steps: BTreeMap::new(),
             touched: BTreeSet::new(),
             kept: Arc::default(),
         }
@@ -283,6 +314,24 @@ impl Builder {
                 node::bucket_of(sample.sample.unix),
             ));
             self.samples = self.samples.max(sample.id);
+        }
+    }
+
+    /// Mark the runs the steps `new` (after [`Self::steps`]) are of, and
+    /// move the cursor past them; the retention keeps them until the run's
+    /// row holds them ([`Self::steps_held_since`]). A step of a target of
+    /// no run marks nothing: no run's or task's row holds it.
+    pub fn mark_steps(&mut self, new: &[SessionStep]) {
+        for step in new {
+            if let Some(run) = step.target.run_id() {
+                self.marks.insert(Target::Run(run.to_string()));
+                let since = self
+                    .unsaved_steps
+                    .entry(run.to_string())
+                    .or_insert(step.received_at);
+                *since = (*since).min(step.received_at);
+            }
+            self.steps = self.steps.max(step.id);
         }
     }
 
@@ -373,9 +422,9 @@ impl Builder {
         self.marks.insert(target);
     }
 
-    /// Note what the store holds of `target` now, `row`: wait on its grace
-    /// while it ended and is not settled, and on a later push while it is
-    /// pending on its push.
+    /// Note what the store holds of `target` now, `row`, folded on every
+    /// input read (a run's steps too): wait on its grace while it ended and
+    /// is not settled, and on a later push while it is pending on its push.
     pub fn track(&mut self, target: &Target, row: &LedgerRow) {
         match settles_at(row) {
             Some(at) if !row.is_final => {
@@ -386,12 +435,27 @@ impl Builder {
             }
         }
         if let Target::Run(run) = target {
+            self.unsaved_steps.remove(run);
             if pending_push(row) {
                 self.pending_pushes.insert(run.clone(), row.task_id);
             } else {
                 self.pending_pushes.remove(run);
             }
         }
+    }
+
+    /// Since when (unix ms) the retention keeps the steps: the earliest
+    /// step read of a run still marked (past a pass's bound, or its write
+    /// failed) whose row the store does not hold them in yet. None when no
+    /// marked run waits on its steps. A run folded to no row (on its way)
+    /// holds nothing: its next input marks it, and steps it received more
+    /// than the retention before it ends are not in its row.
+    pub fn steps_held_since(&self) -> Option<i64> {
+        self.unsaved_steps
+            .iter()
+            .filter(|(run, _)| self.marks.contains(&Target::Run((*run).clone())))
+            .map(|(_, since)| *since)
+            .min()
     }
 
     /// How many marks wait.
@@ -407,9 +471,10 @@ impl Builder {
 
 /// When `row`, ended, settles once no later input reaches it: its end and
 /// its grace. None for a row not ended (or a legacy one, settled as it is
-/// written).
+/// written), and for a run whose telemetry token's revocation is not
+/// recorded: the event that records it marks the run.
 fn settles_at(row: &LedgerRow) -> Option<i64> {
-    if row.is_legacy() {
+    if row.is_legacy() || (row.kind == LedgerKind::Run && !telemetry_revoked(&row.records)) {
         return None;
     }
     let end = row.ended_at?;
@@ -442,6 +507,24 @@ fn run_waited_on_push(row: &LedgerRow) -> bool {
         .is_some_and(|last| last.phase == fold::PUSH_PENDING)
 }
 
+/// Whether the telemetry token of the run whose events are `events`
+/// (ascending id) is revoked, as the run's `final` waits on (ADR-t1662-1
+/// decision 17): none was issued, or the last issue or revocation recorded
+/// is a revocation. A revocation is recorded only once it succeeded, so
+/// one that failed leaves the run's last record an issue until a later
+/// sweep revokes it. A resume, an adoption or a handoff revokes the token
+/// before it issues another, recorded in that order.
+pub fn telemetry_revoked(events: &[RunEvent]) -> bool {
+    events
+        .iter()
+        .rev()
+        .find(|event| {
+            event.kind == EventKind::TelemetryTokenIssued
+                || event.kind == EventKind::TelemetryTokenRevoked
+        })
+        .is_none_or(|last| last.kind == EventKind::TelemetryTokenRevoked)
+}
+
 /// Whether the run or task row `row` is settled at `now_ms`: a legacy row
 /// is (a run from before the switch ended long ago); a pending push is
 /// not; else once it ended and [`SETTLE_GRACE_MS`] passed.
@@ -456,7 +539,8 @@ pub fn run_settles(row: &LedgerRow, now_ms: i64) -> bool {
 /// has none): a missing row, one of an older [`LEDGER_V`] (a newer binary's is left as it
 /// is; not a legacy one, whose version the store keeps), one that read fewer inputs than
 /// `built` (dirty: a later event, the push that closed its pending push, a
-/// later sample, a supervisor's later event), and one settled now. A
+/// later sample, a later step, a supervisor's later event), and one
+/// settled now. A
 /// stored row that holds the same inputs is not written again, so the same
 /// inputs read twice leave it as it is.
 pub fn writes(stored: Option<&LedgerRow>, built: &LedgerRow) -> bool {
@@ -466,7 +550,89 @@ pub fn writes(stored: Option<&LedgerRow>, built: &LedgerRow) -> bool {
     (!stored.is_legacy() && stored.ledger_v < LEDGER_V)
         || built.inputs_through.last() > stored.inputs_through.last()
         || built.inputs_through.node_samples > stored.inputs_through.node_samples
+        || built.inputs_through.steps > stored.inputs_through.steps
         || (built.is_final && !stored.is_final && !stored.is_legacy())
+}
+
+/// Whether the fold `built` read less of some input than `stored`, the row
+/// the store holds: another writer (another supervisor's builder, its
+/// cursors ahead) wrote it. Written over it, it would take back what that
+/// one read (a later event, its intervals and its `final`) though it read
+/// more of another input (a later step), so it is not written and folds
+/// again once its cursors passed the stored row's.
+pub fn behind(stored: &LedgerRow, built: &LedgerRow) -> bool {
+    let (held, read) = (&stored.inputs_through, &built.inputs_through);
+    read.events < held.events
+        || read.last() < held.last()
+        || read.node_samples < held.node_samples
+        || read.steps < held.steps
+}
+
+/// What the row of a run folds of its session steps: its steps up to the
+/// builder's step cursor, the starts of their sessions on the supervisor's
+/// clock (when the control side registered each to the run, unix ms; a
+/// session with none keeps its steps unplaced until a fold knows it), and
+/// what the row the store holds folded of them, which the new fold goes on
+/// from ([`StepFold::fold_onto`]): the steps the retention removed stay
+/// counted and placed, and the largest step id it counted stays its
+/// `inputs_through`. A step it counted before, sent again under a new id
+/// (once the retention removed its whole session), moves nothing.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RunSteps {
+    pub steps: Vec<SessionStep>,
+    pub starts: BTreeMap<String, i64>,
+    stored: StepFold,
+    stored_through: Option<i64>,
+}
+
+impl RunSteps {
+    /// The run's `steps` over what `stored`, the row the store holds of the
+    /// run, folded of them; no start known yet.
+    pub fn new(steps: Vec<SessionStep>, stored: Option<&LedgerRow>) -> Self {
+        Self {
+            steps,
+            starts: BTreeMap::new(),
+            stored: stored
+                .and_then(|row| StepFold::of_detail(&row.detail))
+                .unwrap_or_default(),
+            stored_through: stored.and_then(|row| row.inputs_through.steps),
+        }
+    }
+
+    /// The sessions whose start the fold places steps by: those of the
+    /// steps, and those of the steps the stored fold holds unplaced.
+    pub fn sessions(&self) -> BTreeSet<String> {
+        self.steps
+            .iter()
+            .map(|step| step.session_id.clone())
+            .chain(
+                self.stored
+                    .unplaced
+                    .iter()
+                    .map(|step| step.session_id.clone()),
+            )
+            .collect()
+    }
+
+    /// Fold them into the run's `row`: under [`steps::DETAIL_KEY`] of its
+    /// detail once any step is counted, and the largest id of a step
+    /// counted into its `inputs_through`.
+    fn fold_into(&self, row: &mut LedgerRow) {
+        let fold = self.stored.fold_onto(&self.starts, &self.steps);
+        row.inputs_through.steps = self
+            .steps
+            .iter()
+            .filter(|step| !self.stored.holds(&step.session_id, step.step.seq))
+            .map(|step| step.id)
+            .max()
+            .max(self.stored_through);
+        if fold.count() == 0 {
+            return;
+        }
+        if let serde_json::Value::Object(detail) = &mut row.detail {
+            detail.insert(steps::DETAIL_KEY.to_owned(), fold.detail(&row.intervals));
+        }
+    }
 }
 
 /// What a pass folds its marks of: the events of each run and task
@@ -479,6 +645,8 @@ pub struct Inputs {
     pub built_at: String,
     runs: BTreeMap<String, Vec<RunEvent>>,
     tasks: BTreeMap<TaskId, Vec<RunEvent>>,
+    /// The session steps of each run read ([`Self::read_steps`]).
+    steps: BTreeMap<String, RunSteps>,
     kept: Arc<Kept>,
     /// The session and queue rows built.
     pub rows: BTreeMap<(LedgerKind, String), LedgerRow>,
@@ -533,6 +701,7 @@ impl Inputs {
             built_at: built_at.to_owned(),
             runs: BTreeMap::new(),
             tasks: BTreeMap::new(),
+            steps: BTreeMap::new(),
             kept: Arc::clone(kept),
             rows: built,
         }
@@ -557,11 +726,19 @@ impl Inputs {
         }
     }
 
-    /// Drop the events [`Self::read`] gave `target`, once folded.
+    /// Give the run `run` its session steps, for [`build`] to fold into its
+    /// row.
+    pub fn read_steps(&mut self, run: &str, steps: RunSteps) {
+        self.steps.insert(run.to_owned(), steps);
+    }
+
+    /// Drop the events [`Self::read`] and the steps [`Self::read_steps`]
+    /// gave `target`, once folded.
     pub fn forget(&mut self, target: &Target) {
         match target {
             Target::Run(run) => {
                 self.runs.remove(run);
+                self.steps.remove(run);
             }
             Target::Task(task) => {
                 self.tasks.remove(task);
@@ -573,8 +750,9 @@ impl Inputs {
 
 /// The row of `target` as it is written now, settled or not: none for a
 /// run or task on its way (or with no events), a session or queue row not
-/// among `inputs.rows`, or a node hour with no sample left. `samples` are
-/// the NodeSampleStore's of a node target's hour.
+/// among `inputs.rows`, or a node hour with no sample left. A run's row
+/// holds its steps given ([`Inputs::read_steps`]), a legacy one none.
+/// `samples` are the NodeSampleStore's of a node target's hour.
 pub fn build(target: &Target, inputs: &Inputs, samples: &[NodeSample]) -> Option<LedgerRow> {
     let now = inputs.now_ms;
     let kept = &*inputs.kept;
@@ -585,7 +763,12 @@ pub fn build(target: &Target, inputs: &Inputs, samples: &[NodeSample]) -> Option
             if !(row.is_legacy() || row.ended_at.is_some() || pending_push(&row)) {
                 return None;
             }
-            row.is_final = run_settles(&row, now);
+            if !row.is_legacy()
+                && let Some(steps) = inputs.steps.get(run)
+            {
+                steps.fold_into(&mut row);
+            }
+            row.is_final = run_settles(&row, now) && telemetry_revoked(&row.records);
             Some(row)
         }
         Target::Task(task) => {

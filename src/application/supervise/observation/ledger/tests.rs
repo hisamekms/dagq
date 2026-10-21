@@ -1,13 +1,14 @@
 use std::cell::{Cell, RefCell};
 
 use super::*;
-use crate::application::{LedgerStore, NodeSampleStore, SessionStepStore};
+use crate::application::{LedgerStore, NodeSampleStore, SessionOwners, SessionStepStore};
 use crate::domain::host_metrics::{HOST_NODE, HostSample, NodeSample, SampleSource};
 use crate::domain::ledger::settle::SETTLE_GRACE_MS;
 use crate::domain::ledger::testkit::{Log, T0, ms, run_id};
 use crate::domain::ledger::{LEDGER_V, LedgerKind, LedgerRow, node};
 use crate::domain::session_step::{
-    RETENTION_MS, SeqRange, SessionStep, Step, StepKind, StepTarget, StepsRecorded,
+    RETENTION_MS, SeqRange, SessionOwner, SessionStep, Step, StepKind, StepTarget, StepsRecorded,
+    TargetKind,
 };
 use crate::domain::{RunEvent, RunId, TaskId};
 
@@ -22,13 +23,25 @@ struct Memory {
     events: RefCell<Vec<RunEvent>>,
     samples: RefCell<Vec<NodeSample>>,
     steps: RefCell<Vec<SessionStep>>,
+    /// The last step id given: ids go on past the steps removed.
+    step_id: Cell<i64>,
+    owners: RefCell<BTreeMap<String, SessionOwner>>,
     rows: RefCell<BTreeMap<(LedgerKind, String), LedgerRow>>,
     writes: Cell<usize>,
     read: Cell<usize>,
     read_all: Cell<usize>,
     /// Refuses every write of a row.
     refuses: Cell<bool>,
+    /// Runs once, as the next run's steps are read: another builder's pass
+    /// between a fold's read of the row and its write.
+    between: RefCell<Option<Between>>,
+    /// Runs once, as the steps after a cursor are next read: another
+    /// builder's pass between a pass's read of the events and of the steps.
+    before_steps: RefCell<Option<Between>>,
 }
+
+/// Another builder's pass, run on the store between a read and a write.
+type Between = Box<dyn FnOnce(&Memory)>;
 
 impl Memory {
     fn of(log: &Log) -> Self {
@@ -170,6 +183,17 @@ impl LedgerStore for Memory {
         rows.insert(key, written);
         Ok(fresh)
     }
+    fn write_ledger_row_over(
+        &self,
+        row: &LedgerRow,
+        read: Option<&LedgerRow>,
+    ) -> Result<Option<bool>> {
+        let held = self.ledger_row(row.kind, &row.key)?;
+        if held.as_ref() != read {
+            return Ok(None);
+        }
+        self.write_ledger_row(row).map(Some)
+    }
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
         Ok(self.rows.borrow().get(&(kind, key.to_owned())).cloned())
     }
@@ -259,7 +283,8 @@ impl SessionStepStore for Memory {
     ) -> Result<StepsRecorded> {
         let mut held = self.steps.borrow_mut();
         for step in steps {
-            let id = held.last().map_or(1, |last| last.id + 1);
+            let id = self.step_id.get() + 1;
+            self.step_id.set(id);
             held.push(SessionStep {
                 id,
                 target: target.clone(),
@@ -277,16 +302,64 @@ impl SessionStepStore for Memory {
         unreachable!()
     }
     fn steps_after(&self, after: i64, limit: usize) -> Result<Vec<SessionStep>> {
-        unreachable!()
+        let between = self.before_steps.borrow_mut().take();
+        if let Some(between) = between {
+            between(self);
+        }
+        Ok(self
+            .steps
+            .borrow()
+            .iter()
+            .filter(|step| step.id > after)
+            .take(limit)
+            .cloned()
+            .collect())
     }
     fn target_steps(&self, target: &StepTarget) -> Result<Vec<SessionStep>> {
-        unreachable!()
+        let between = self.between.borrow_mut().take();
+        if let Some(between) = between {
+            between(self);
+        }
+        Ok(self
+            .steps
+            .borrow()
+            .iter()
+            .filter(|step| step.target == *target)
+            .cloned()
+            .collect())
     }
     fn remove_steps(&self, before: i64) -> Result<usize> {
         let mut held = self.steps.borrow_mut();
         let count = held.len();
         held.retain(|step| step.received_at >= before);
+        // As the SQLite store: an owner registered before it whose session
+        // keeps no step goes too.
+        self.owners.borrow_mut().retain(|session, owner| {
+            owner.registered_at >= before || held.iter().any(|step| &step.session_id == session)
+        });
         Ok(count - held.len())
+    }
+}
+
+impl SessionOwners for Memory {
+    fn register_session(
+        &self,
+        target: &StepTarget,
+        session_id: &str,
+        registered_at: i64,
+    ) -> Result<()> {
+        self.owners.borrow_mut().insert(
+            session_id.to_owned(),
+            SessionOwner {
+                session_id: session_id.to_owned(),
+                target: target.clone(),
+                registered_at,
+            },
+        );
+        Ok(())
+    }
+    fn session_owner(&self, session_id: &str) -> Result<Option<SessionOwner>> {
+        Ok(self.owners.borrow().get(session_id).cloned())
     }
 }
 
@@ -1080,4 +1153,472 @@ fn passes_on_any_number_of_events_each_write_the_rows_of_the_fold_so_far() {
             }
         }
     }
+}
+
+/// The worker's session of `run`, registered to it at `secs` after [`T0`]:
+/// its steps lie on the supervisor's clock from then.
+fn session_of(memory: &Memory, run: &str, session: &str, secs: i64) -> StepTarget {
+    let target = StepTarget::run(&RunId::new(run).unwrap());
+    memory.register_session(&target, session, ms(secs)).unwrap();
+    target
+}
+
+/// `steps` of `session` of `target`, received at `received_at` (unix ms).
+fn steps_in(memory: &Memory, target: &StepTarget, session: &str, steps: &[Step], received_at: i64) {
+    memory
+        .record_steps(target, session, steps, received_at)
+        .unwrap();
+}
+
+/// What `row` holds of its steps under its detail.
+fn steps_of(row: &LedgerRow) -> &Value {
+    &row.detail[crate::domain::ledger::steps::DETAIL_KEY]
+}
+
+/// The worker interval's kinds and coverage of `row`'s steps.
+fn worker_parent(row: &LedgerRow) -> &Value {
+    steps_of(row)["parents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|parent| parent["phase"] == "worker")
+        .unwrap()
+}
+
+/// A run's row holds its steps folded per interval: in the worker's
+/// (10 s to 600 s after its claim) each kind's time, the share any step
+/// covers and the rest, the steps' sessions placed by when they were
+/// registered to the run; and how far into the steps it read.
+#[test]
+fn a_runs_row_holds_its_steps_by_kind_and_each_intervals_coverage() {
+    let a = run_id(1);
+    let mut log = Log::default();
+    log.landed(1, &a, 0);
+    let memory = Memory::of(&log);
+    let target = session_of(&memory, &a, "s-1", 10);
+    // From 10 s: a turn 10..30, a subagent 30..90 with a call 40..60 in it,
+    // a wait 100..130 (seconds after the claim).
+    steps_in(
+        &memory,
+        &target,
+        "s-1",
+        &[
+            Step::new(1, StepKind::ModelTurn, 0, 20_000),
+            Step::new(2, StepKind::Subagent, 20_000, 60_000),
+            Step::new(3, StepKind::ToolCall, 30_000, 20_000),
+            Step::new(4, StepKind::Wait, 90_000, 30_000),
+        ],
+        ms(200),
+    );
+    let mut builder = Builder::default();
+    pass(&memory, &mut builder, 1000);
+    let row = memory.row(LedgerKind::Run, &a);
+    assert_eq!(row.inputs_through.steps, Some(4));
+    let worker = worker_parent(&row);
+    assert_eq!(
+        worker["by_kind"],
+        json!({"model_turn": 20_000, "tool_call": 20_000, "subagent": 60_000, "wait": 30_000})
+    );
+    // 10..90 and 100..130 of the worker's 590 s.
+    assert_eq!(worker["covered_ms"], 110_000);
+    assert_eq!(worker["uncovered_ms"], 480_000);
+    let coverage = worker["coverage"].as_f64().unwrap();
+    assert!((coverage - 110.0 / 590.0).abs() < 1e-9, "{coverage}");
+    assert_eq!(steps_of(&row)["outside"], 0);
+    assert_eq!(steps_of(&row)["missing"], 0);
+    // A run with no step holds none.
+    let mut other = Log::default();
+    other.landed(2, &run_id(2), 0);
+    let none = Memory::of(&other);
+    pass(&none, &mut Builder::default(), 1000);
+    let row = none.row(LedgerKind::Run, &run_id(2));
+    assert!(
+        row.detail
+            .get(crate::domain::ledger::steps::DETAIL_KEY)
+            .is_none()
+    );
+    assert_eq!(row.inputs_through.steps, None);
+}
+
+/// A step that comes in after the run's row was written, before it is
+/// settled, makes it dirty: the next pass folds it again with the step.
+/// A step sent again (here under a new id, as once the retention removed
+/// its session) leaves the row as it is, and nothing marks it again.
+#[test]
+fn a_step_after_the_row_folds_it_again_and_one_sent_again_leaves_it() {
+    let a = run_id(1);
+    let mut log = Log::default();
+    log.landed(1, &a, 0);
+    let memory = Memory::of(&log);
+    let target = session_of(&memory, &a, "s-1", 10);
+    steps_in(
+        &memory,
+        &target,
+        "s-1",
+        &[Step::new(1, StepKind::ModelTurn, 0, 20_000)],
+        ms(100),
+    );
+    let mut builder = Builder::default();
+    pass(&memory, &mut builder, 1000);
+    let first = memory.row(LedgerKind::Run, &a);
+    assert!(!first.is_final);
+    assert_eq!(steps_of(&first)["fold"]["counts"], json!({"model_turn": 1}));
+    let writes = memory.writes.get();
+    steps_in(
+        &memory,
+        &target,
+        "s-1",
+        &[Step::new(2, StepKind::ToolCall, 20_000, 10_000)],
+        ms(1000),
+    );
+    pass(&memory, &mut builder, 1001);
+    assert_eq!(memory.writes.get(), writes + 1);
+    let second = memory.row(LedgerKind::Run, &a);
+    assert_eq!(second.inputs_through.steps, Some(2));
+    assert_eq!(
+        steps_of(&second)["fold"]["counts"],
+        json!({"model_turn": 1, "tool_call": 1})
+    );
+    assert_eq!(worker_parent(&second)["covered_ms"], 30_000);
+    // Both sent again: the row stays as it is.
+    steps_in(
+        &memory,
+        &target,
+        "s-1",
+        &[
+            Step::new(1, StepKind::Wait, 0, 99_000),
+            Step::new(2, StepKind::ToolCall, 20_000, 10_000),
+        ],
+        ms(1002),
+    );
+    pass(&memory, &mut builder, 1003);
+    assert_eq!(memory.writes.get(), writes + 1);
+    assert_eq!(memory.row(LedgerKind::Run, &a), second);
+    let read = memory.read.get();
+    pass(&memory, &mut builder, 1004);
+    assert_eq!(memory.read.get(), read, "nothing is marked again");
+}
+
+/// A run's row is settled only once its telemetry token's revocation is
+/// recorded after its last issue: past its grace with the token still
+/// held (its revocation failed, so none is recorded) it is not, and no
+/// pass reads it again until the revocation's event comes in. A resume's
+/// revocation before the next issue does not settle it.
+#[test]
+fn a_run_is_settled_only_after_its_telemetry_tokens_revocation_is_recorded() {
+    let a = run_id(1);
+    let mut log = Log::default();
+    log.worked(1, &a, 0)
+        .add(Some(1), Some(&a), "telemetry_token_issued", json!({}), 0)
+        .add(
+            Some(1),
+            Some(&a),
+            "telemetry_token_revoked",
+            json!({"reason": "reissued"}),
+            300,
+        )
+        .add(Some(1), Some(&a), "telemetry_token_issued", json!({}), 300)
+        .integrated(1, &a, 700)
+        .pushed(1, &a, 930);
+    let memory = Memory::of(&log);
+    let mut builder = Builder::default();
+    pass(&memory, &mut builder, LATER);
+    let held = memory.row(LedgerKind::Run, &a);
+    assert!(held.ended_at.is_some());
+    assert!(!held.is_final);
+    // Its task settles on its own grace.
+    assert!(memory.row(LedgerKind::Task, "1").is_final);
+    let read = memory.read.get();
+    assert_eq!(pass(&memory, &mut builder, LATER + 1).backlog, 0);
+    assert_eq!(memory.read.get(), read, "the held token waits on its event");
+    log.add(
+        Some(1),
+        Some(&a),
+        "telemetry_token_revoked",
+        json!({"reason": "run_ended"}),
+        LATER,
+    );
+    memory.events.replace(log.events.clone());
+    pass(&memory, &mut builder, LATER + 2);
+    assert!(memory.row(LedgerKind::Run, &a).is_final);
+}
+
+/// Once the retention removed a run's steps and its session's owner, a
+/// pass a later event or step marks folds the row again over what it
+/// held: the kinds and the coverage do not go down, and a late step that
+/// fills an earlier gap is added (the gap closes), placed by the session's
+/// start the row kept.
+#[test]
+fn a_fold_after_the_retention_keeps_the_steps_and_adds_a_late_one() {
+    let a = run_id(1);
+    let mut log = Log::default();
+    log.landed(1, &a, 0);
+    let memory = Memory::of(&log);
+    let target = session_of(&memory, &a, "s-1", 10);
+    steps_in(
+        &memory,
+        &target,
+        "s-1",
+        &[
+            Step::new(1, StepKind::ModelTurn, 0, 20_000),
+            Step::new(3, StepKind::ToolCall, 40_000, 20_000),
+        ],
+        1_000,
+    );
+    let mut builder = Builder::default();
+    pass(&memory, &mut builder, 1000);
+    let first = memory.row(LedgerKind::Run, &a);
+    assert_eq!(steps_of(&first)["missing"], 1);
+    assert_eq!(worker_parent(&first)["covered_ms"], 40_000);
+    let retain = Retain {
+        node_rows: None,
+        steps: Some(ms(500)),
+    };
+    let removed = build_pass(&memory, &mut builder, ms(1001), BUILT, retain);
+    assert_eq!(removed.steps_removed, 2);
+    assert!(memory.steps.borrow().is_empty());
+    assert_eq!(memory.session_owner("s-1").unwrap(), None);
+    // A later event of the run folds it again: what it held stays.
+    log.add(Some(1), Some(&a), "review_finished", json!({}), 1002);
+    memory.events.replace(log.events.clone());
+    pass(&memory, &mut builder, 1003);
+    let again = memory.row(LedgerKind::Run, &a);
+    assert!(again.inputs_through.events > first.inputs_through.events);
+    assert_eq!(steps_of(&again), steps_of(&first));
+    assert_eq!(again.inputs_through.steps, first.inputs_through.steps);
+    // Seq 2 comes in late, and seq 3 is sent again.
+    steps_in(
+        &memory,
+        &target,
+        "s-1",
+        &[
+            Step::new(2, StepKind::Wait, 20_000, 20_000),
+            Step::new(3, StepKind::ToolCall, 40_000, 20_000),
+        ],
+        ms(1004),
+    );
+    pass(&memory, &mut builder, 1005);
+    let late = memory.row(LedgerKind::Run, &a);
+    assert_eq!(steps_of(&late)["missing"], 0);
+    assert_eq!(
+        steps_of(&late)["fold"]["counts"],
+        json!({"model_turn": 1, "tool_call": 1, "wait": 1})
+    );
+    assert_eq!(worker_parent(&late)["covered_ms"], 60_000);
+    assert_eq!(
+        worker_parent(&late)["by_kind"],
+        json!({"model_turn": 20_000, "tool_call": 20_000, "subagent": 0, "wait": 20_000})
+    );
+    assert_eq!(steps_of(&late)["fold"]["unplaced"], json!([]));
+}
+
+/// A pass that writes up to its bound leaves the other runs marked, and
+/// the steps' retention of that pass keeps their steps: a later pass
+/// writes those runs with their steps, and only then are they removed.
+#[test]
+fn the_retention_keeps_the_steps_of_the_runs_a_pass_did_not_write_yet() {
+    let runs: Vec<String> = (1..=u8::try_from(WRITES_PER_PASS + 1).unwrap())
+        .map(run_id)
+        .collect();
+    let mut log = Log::default();
+    for (task, run) in (1..).zip(&runs) {
+        log.landed(task, run, 0);
+    }
+    let memory = Memory::of(&log);
+    for run in &runs {
+        let session = format!("s-{run}");
+        let target = session_of(&memory, run, &session, 10);
+        steps_in(
+            &memory,
+            &target,
+            &session,
+            &[Step::new(1, StepKind::ModelTurn, 0, 20_000)],
+            1_000,
+        );
+    }
+    let retain = Retain {
+        node_rows: None,
+        steps: Some(2_000),
+    };
+    let mut builder = Builder::default();
+    let first = build_pass(&memory, &mut builder, ms(LATER), BUILT, retain);
+    assert_eq!(first.failure, None);
+    assert_eq!(first.written, WRITES_PER_PASS);
+    assert!(first.backlog > 0);
+    assert_eq!(first.steps_removed, 0, "a run not written keeps its steps");
+    let unwritten = runs
+        .iter()
+        .filter(|run| {
+            memory
+                .rows
+                .borrow()
+                .get(&(LedgerKind::Run, (*run).clone()))
+                .is_none()
+        })
+        .count();
+    assert_eq!(unwritten, 1);
+    let mut built = build_pass(&memory, &mut builder, ms(LATER + 1), BUILT, retain);
+    while built.backlog > 0 {
+        built = build_pass(&memory, &mut builder, ms(LATER + 2), BUILT, retain);
+    }
+    for run in &runs {
+        let row = memory.row(LedgerKind::Run, run);
+        assert_eq!(
+            steps_of(&row)["fold"]["counts"],
+            json!({"model_turn": 1}),
+            "{run}"
+        );
+    }
+    assert!(memory.steps.borrow().is_empty());
+}
+
+/// Two builders on one queue (two supervisors): while one folds a run
+/// whose row it read as missing, the other writes the row with the run's
+/// steps and its retention removes them. The first one's write finds the
+/// row written since its read, folds again over it, and the row keeps the
+/// steps; a write over a row read before another write writes nothing.
+#[test]
+fn a_fold_over_a_row_another_builder_wrote_since_its_read_folds_again_and_keeps_the_steps() {
+    let a = run_id(1);
+    let mut log = Log::default();
+    log.landed(1, &a, 0);
+    let memory = Memory::of(&log);
+    let target = session_of(&memory, &a, "s-1", 10);
+    steps_in(
+        &memory,
+        &target,
+        "s-1",
+        &[
+            Step::new(1, StepKind::ModelTurn, 0, 20_000),
+            Step::new(2, StepKind::ToolCall, 20_000, 10_000),
+        ],
+        1_000,
+    );
+    memory.between.replace(Some(Box::new(|memory: &Memory| {
+        let retain = Retain {
+            node_rows: None,
+            steps: Some(ms(500)),
+        };
+        let other = build_pass(memory, &mut Builder::default(), ms(1000), BUILT, retain);
+        assert_eq!(other.failure, None);
+        assert_eq!(other.steps_removed, 2);
+    })));
+    let mut builder = Builder::default();
+    let built = pass(&memory, &mut builder, 1000);
+    assert_eq!(built.failure, None);
+    assert!(memory.between.borrow().is_none(), "the other pass ran");
+    assert!(memory.steps.borrow().is_empty());
+    let row = memory.row(LedgerKind::Run, &a);
+    assert_eq!(
+        steps_of(&row)["fold"]["counts"],
+        json!({"model_turn": 1, "tool_call": 1})
+    );
+    assert_eq!(worker_parent(&row)["covered_ms"], 30_000);
+    assert_eq!(row.inputs_through.steps, Some(2));
+    // A write over the row as it was before (none) writes nothing.
+    let mut stale = row.clone();
+    stale.detail = json!({});
+    assert_eq!(memory.write_ledger_row_over(&stale, None).unwrap(), None);
+    assert_eq!(memory.row(LedgerKind::Run, &a), row);
+}
+
+/// Two builders whose event cursors differ: one read the events before
+/// the other wrote a run's row with a later event and its first step, then
+/// reads the run's second step. Its fold, behind the stored row on the
+/// events though ahead on the steps, is not written (the later event stays
+/// the row's) and stays marked; its next pass, past that event, writes the
+/// row with both steps.
+#[test]
+fn a_fold_behind_the_stored_rows_events_is_not_written_and_folds_again_once_caught_up() {
+    let a = run_id(1);
+    let mut log = Log::default();
+    log.landed(1, &a, 0);
+    let memory = Memory::of(&log);
+    let target = session_of(&memory, &a, "s-1", 10);
+    steps_in(
+        &memory,
+        &target,
+        "s-1",
+        &[Step::new(1, StepKind::ModelTurn, 0, 20_000)],
+        ms(100),
+    );
+    log.add(Some(1), Some(&a), "review_finished", json!({}), 1001);
+    let later = log.events.clone();
+    let late_event = later.last().unwrap().id;
+    let second = target.clone();
+    memory
+        .before_steps
+        .replace(Some(Box::new(move |memory: &Memory| {
+            memory.events.replace(later);
+            let other = build_pass(
+                memory,
+                &mut Builder::default(),
+                ms(1002),
+                BUILT,
+                Retain::default(),
+            );
+            assert_eq!(other.failure, None);
+            steps_in(
+                memory,
+                &second,
+                "s-1",
+                &[Step::new(2, StepKind::ToolCall, 20_000, 10_000)],
+                ms(1002),
+            );
+        })));
+    let mut builder = Builder::default();
+    let behind = pass(&memory, &mut builder, 1003);
+    assert_eq!(behind.failure, None);
+    assert!(memory.before_steps.borrow().is_none(), "the other pass ran");
+    assert!(builder.events < late_event);
+    let held = memory.row(LedgerKind::Run, &a);
+    assert_eq!(held.inputs_through.events, late_event);
+    assert_eq!(held.records.last().map(|event| event.id), Some(late_event));
+    assert_eq!(held.inputs_through.steps, Some(1));
+    assert!(behind.backlog > 0, "the run stays marked");
+    pass(&memory, &mut builder, 1004);
+    let caught_up = memory.row(LedgerKind::Run, &a);
+    assert_eq!(caught_up.inputs_through.events, late_event);
+    assert_eq!(caught_up.records, held.records);
+    assert_eq!(caught_up.inputs_through.steps, Some(2));
+    assert_eq!(
+        steps_of(&caught_up)["fold"]["counts"],
+        json!({"model_turn": 1, "tool_call": 1})
+    );
+}
+
+/// The steps of a target of no run (a planner's session) move the step
+/// cursor and mark nothing: no run's or task's row is written or read for
+/// them.
+#[test]
+fn the_steps_of_a_target_of_no_run_mark_no_run_or_task() {
+    let a = run_id(1);
+    let mut log = Log::default();
+    log.landed(1, &a, 0);
+    let memory = Memory::of(&log);
+    let mut builder = Builder::default();
+    pass(&memory, &mut builder, LATER);
+    let (writes, read) = (memory.writes.get(), memory.read.get());
+    let planner = StepTarget {
+        kind: TargetKind::Planner,
+        id: "planner-1".to_owned(),
+    };
+    memory.register_session(&planner, "p-1", ms(10)).unwrap();
+    steps_in(
+        &memory,
+        &planner,
+        "p-1",
+        &[Step::new(1, StepKind::ModelTurn, 0, 20_000)],
+        ms(20),
+    );
+    let built = pass(&memory, &mut builder, LATER + 1);
+    assert_eq!(builder.steps, 1);
+    assert_eq!(built.backlog, 0);
+    assert_eq!((memory.writes.get(), memory.read.get()), (writes, read));
+    let row = memory.row(LedgerKind::Run, &a);
+    assert!(
+        row.detail
+            .get(crate::domain::ledger::steps::DETAIL_KEY)
+            .is_none()
+    );
 }
