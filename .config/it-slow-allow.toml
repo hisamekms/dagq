@@ -2178,3 +2178,9 @@ task = 2409
 name = "runtime_light_slots::a_supervisor_that_takes_over_a_light_room_deferral_shows_it_by_its_own_free_slot"
 reason = "B 境界（supervisor の配線・登録と生存・SQLite・CLI）: 居なくなった supervisor が残した light_room の記録と埋まった通常の枠の記録を、別の token の実際の supervisor が空いた通常の枠の pass で引き継ぎ、記録が 1 本のまま candidates がその supervisor の claim の順を出すことを確かめる。読む規則の判断は domain::claim_order::in_effect と domain::pre_claim::heavy_slots_free の unit test"
 task = 2409
+
+# 5.3s median in stress (task 2887): the worker's run, a supervisor handing off while the judgment job runs, then the next process under the same token
+[[test]]
+name = "runtime_already_satisfied::a_judgment_running_at_a_handoff_is_stopped_and_the_next_process_verifies_and_judges_again"
+reason = "B 境界（supervisor の配線・handoff・プロセス・SQLite）: already_satisfied の主張の判定 job の実行中に実際の supervisor を handoff させ、job が止められ結果が適用されず、同じ token の次の process が再 validation・verify・判定をやり直して人の ask を開き、headless_job_stopped が 1 回だけであることを確かめる。判定の分類は satisfied_review::claim_miss と satisfied_judgment::decide の unit test"
+task = 2887

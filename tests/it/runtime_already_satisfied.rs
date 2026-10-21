@@ -1446,3 +1446,383 @@ fn a_high_pass_a_stopped_supervisor_recorded_does_not_close_once_main_moved() {
         prompts[0]
     );
 }
+
+/// A supervisor of [`judged_on_a_thread`] on its thread, with what it
+/// runs on.
+struct OnAThread {
+    _fixture: Fixture,
+    repo: PathBuf,
+    db: PathBuf,
+    /// The `dagq` its supervisors start the service with, owned by the
+    /// test ([`common::service::owned_executable`]).
+    dagq: PathBuf,
+    backend: Arc<TestWorkspace>,
+    reviewer: Arc<TestReviewer>,
+    supervisor: thread::JoinHandle<Result<Value>>,
+}
+
+/// Task 1 of a fresh fixture verified by [`VERIFY`], its worker
+/// [`SATISFIED_AGENT`], and a supervisor on a thread whose review's jobs
+/// run `scripts` in order, under `options`.
+fn judged_on_a_thread(scripts: &[String], options: SuperviseOptions) -> OnAThread {
+    let (fixture, repo, db) = fixture();
+    rusqlite::Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET verification_commands=?1 WHERE id=1",
+            [VERIFY],
+        )
+        .unwrap();
+    let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+    backend.script_for(1, SATISFIED_AGENT);
+    let reviewer = Arc::new(TestReviewer::new(scripts));
+    // The service the supervisor starts takes the test as its owner.
+    let dagq = common::service::owned_executable(db.parent().unwrap());
+    let supervisor = {
+        let (db, repo, dagq) = (db.clone(), repo.clone(), dagq.clone());
+        let (backend, reviewer) = (backend.clone(), reviewer.clone());
+        thread::spawn(move || {
+            runtime::supervise_with_reviewer(
+                &db,
+                &repo,
+                &*backend,
+                &claude_stub(&db),
+                &*reviewer,
+                &dagq,
+                &options,
+            )
+        })
+    };
+    OnAThread {
+        _fixture: fixture,
+        repo,
+        db,
+        dagq,
+        backend,
+        reviewer,
+        supervisor,
+    }
+}
+
+fn low_pass() -> Value {
+    json!({"verdict": "pass", "reasons": ["seed.txt is there"], "summary": "main meets it",
+        "confidence": "low", "recommendation": "close"})
+}
+
+/// The `outcome` of each `run_satisfied_review_job_finished` of `detail`.
+fn job_outcomes(detail: &dagq::domain::TaskDetail) -> Vec<Value> {
+    payloads(detail, "run_satisfied_review_job_finished")
+        .into_iter()
+        .map(|p| p["outcome"].clone())
+        .collect()
+}
+
+/// Acceptance (review.md, the claim's judgment: a provider's failure): a
+/// judgment job that stops at Claude's login is no failed job and no run
+/// once more: its end is recorded `held`, it joins the authentication
+/// `queue_hold` ask as the run's review job, and no `approve_close` ask
+/// opens while the hold is open. Once a person answers `done`, the same
+/// judgment's job starts again on the same head and its judgment goes to
+/// the person as a judgment (reason `scope`), not as a failed job's.
+#[test]
+fn a_judgment_stopped_at_a_login_waits_for_the_hold_and_runs_again_on_its_head_after_done() {
+    let OnAThread {
+        _fixture,
+        repo,
+        db,
+        dagq: _,
+        backend,
+        reviewer,
+        supervisor,
+    } = judged_on_a_thread(
+        &[
+            "printf 'Invalid API key · Please run /login\\n'; exit 1".to_owned(),
+            format!("printf '%s\\n' '{}'", low_pass()),
+        ],
+        supervise_options(2, true),
+    );
+    let head = main_head(&repo);
+    let hold = |queue: &mut SqliteQueue| {
+        queue
+            .asks(AskQuery {
+                open: true,
+                ..Default::default()
+            })
+            .unwrap()
+            .into_iter()
+            .find(|ask| ask.kind == AskKind::QueueHold)
+    };
+    wait_until(&db, common::STEP_LIMIT, |queue| hold(queue).is_some());
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let ask = hold(&mut queue).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let run = detail.runs[0].clone();
+    assert_eq!(ask.reason_category, dagq::domain::AskReason::Authentication);
+    assert_eq!(
+        ask.affected,
+        [dagq::domain::queue_hold::HoldJob::Review(run.id().clone()).entry()]
+    );
+    // Held while the ask is open: no judgment and no ask of the claim.
+    // The job's finish is written after its `auth_required`.
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        !job_outcomes(&queue.show(TaskId::new(1)).unwrap()).is_empty()
+    });
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let required = payloads(&detail, "auth_required");
+    assert_eq!(required.len(), 1, "{required:?}");
+    assert_eq!(required[0]["job"], "review");
+    let held = payloads(&detail, "run_satisfied_review_job_finished");
+    assert_eq!(held.len(), 1, "{held:?}");
+    assert_eq!(held[0]["outcome"], "held");
+    assert!(held[0]["runs_again"].is_null(), "{}", held[0]);
+    assert!(payloads(&detail, "run_satisfied_judged").is_empty());
+    assert!(
+        queue
+            .asks(Default::default())
+            .unwrap()
+            .iter()
+            .all(|ask| ask.kind != AskKind::ApproveClose)
+    );
+
+    queue.answer(ask.id, "done").unwrap();
+    finished(&db, &backend, supervisor);
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(job_outcomes(&detail), [json!("held"), json!("answered")]);
+    // The same judgment on the same head: one start of the judgment, its
+    // job started twice, neither as its run once more.
+    let begun = payloads(&detail, "run_satisfied_review_started");
+    assert_eq!(begun.len(), 1, "{begun:?}");
+    assert_eq!(begun[0]["head"], json!(head));
+    let started: Vec<_> = payloads(&detail, "run_satisfied_review_job_started")
+        .into_iter()
+        .map(|p| (p["attempt"].clone(), p["again"].clone()))
+        .collect();
+    assert_eq!(
+        started,
+        [(json!(1), json!(false)), (json!(1), json!(false))]
+    );
+    let prompts = reviewer.prompts();
+    assert_eq!(prompts.len(), 2, "{prompts:?}");
+    for prompt in &prompts {
+        assert!(
+            prompt.contains(&format!("main at {head} (the snapshot)")),
+            "{prompt}"
+        );
+    }
+    // `done` was applied to the judgment's job, as a run review's.
+    let applied: Vec<_> = queue
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == EventKind::QueueHoldApplied)
+        .map(|e| e.payload)
+        .collect();
+    assert_eq!(applied.len(), 1, "{applied:?}");
+    assert_eq!(applied[0]["jobs"], json!(ask.affected), "{applied:?}");
+    assert_eq!(
+        judged_steps(&detail),
+        [(json!("ask"), json!(head))],
+        "{:?}",
+        event_kinds(&detail)
+    );
+    let close = close_ask(&mut queue);
+    assert_eq!(close.reason_category, dagq::domain::AskReason::Scope);
+    assert_eq!(close.recommendation.as_deref(), Some("close"));
+    assert!(queue.run_lease(run.id()).unwrap().is_none());
+    assert_eq!(satisfied_worktrees(&repo, &db), Vec::<String>::new());
+}
+
+/// Acceptance (review.md, the claim's judgment; `--no-claude`): with no
+/// provider left for the review (`ReviewRoute::Manual`), a claim whose
+/// verification passed starts no judgment job: the reviewer is never
+/// called, and the person gets the `approve_close` ask of a failed job
+/// (`recovery_failed`), still offering close; the run rests unleased.
+#[test]
+fn without_claude_a_passed_claim_starts_no_judgment_job_and_asks_as_a_failed_job() {
+    use crate::runtime_support::codex::{TASK, codex_fixture};
+    let (dir, repo, db, backend, codex) = codex_fixture();
+    // The Codex worker's turn: no commit, and an `already_satisfied`
+    // receipt naming the base with the check it ran there.
+    set_turns(
+        dir.path(),
+        r#"printf '{"run_id":"%s","result":"already_satisfied","commit":"%s","tests":{"status":"passed","evidence_or_reason":"test -f seed.txt on the base"},"e2e":{"status":"not_applicable","evidence_or_reason":"the runtime runs it"},"subagent_review":{"status":"not_applicable","evidence_or_reason":"no change to review"},"summary":"the base meets it","base_checks":[{"command":"test -f seed.txt","result":"passed"}]}' "$DAGQ_RUN_ID" "$(git rev-parse HEAD)" > "$RECEIPT.tmp"; mv "$RECEIPT.tmp" "$RECEIPT"; say finished"#,
+    );
+    let reviewer = TestReviewer::new(&[]);
+    let options = SuperviseOptions {
+        no_claude: true,
+        codex,
+        ..supervise_options(1, true)
+    };
+    let outcome = {
+        let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
+        runtime::supervise_with_reviewer(
+            &db,
+            &repo,
+            &backend,
+            &dir.path().join("missing-claude"),
+            &reviewer,
+            &common::service::owned_executable(db.parent().unwrap()),
+            &options,
+        )
+        .unwrap()
+    };
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let head = main_head(&repo);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TASK).unwrap();
+    let run = detail.runs[0].clone();
+    assert_eq!(detail.task.status(), TaskStatus::InProgress);
+    let verified = payloads(&detail, "run_satisfied_verified");
+    assert_eq!(verified.len(), 1, "{:?}", event_kinds(&detail));
+    assert_eq!(verified[0]["head"], json!(head));
+    // No job: neither started nor finished, and the reviewer never called.
+    assert!(reviewer.prompts().is_empty() && reviewer.launches().is_empty());
+    for none in [
+        "run_satisfied_review_job_started",
+        "run_satisfied_review_job_finished",
+        "review_started",
+    ] {
+        assert!(payloads(&detail, none).is_empty(), "{none}");
+    }
+    let judged = payloads(&detail, "run_satisfied_judged");
+    assert_eq!(judged.len(), 1, "{judged:?}");
+    assert!(
+        judged[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("disabled by --no-claude"),
+        "{}",
+        judged[0]
+    );
+    let ask = close_ask(&mut queue);
+    assert_eq!(ask.reason_category, dagq::domain::AskReason::RecoveryFailed);
+    assert_eq!(ask.options, ["close", "retry", "cancel"]);
+    assert!(
+        ask.question.contains("disabled by --no-claude"),
+        "{}",
+        ask.question
+    );
+    assert!(queue.run_lease(run.id()).unwrap().is_none());
+    assert_eq!(satisfied_worktrees(&repo, &db), Vec::<String>::new());
+}
+
+/// Acceptance (review.md, the claim's judgment: the handoff): a handoff
+/// while the claim's judgment job runs stops the job (one
+/// `headless_job_stopped`) and applies nothing of it. The process that
+/// continues under the same token validates the run again, verifies the
+/// claim on the snapshot's head and judges it there with a job of its own,
+/// whose judgment goes to the person; the stopped job's Execution is not
+/// counted again (no second `headless_job_stopped`, no finish of it).
+#[test]
+fn a_judgment_running_at_a_handoff_is_stopped_and_the_next_process_verifies_and_judges_again() {
+    let gate_dir = tempfile::tempdir().unwrap();
+    let gate = gate_dir.path().join("judgment-gate");
+    // What the gated job leaves once the gate lets it go, if it still runs.
+    let outlived = gate_dir.path().join("outlived");
+    let OnAThread {
+        _fixture,
+        repo,
+        db,
+        dagq,
+        backend,
+        reviewer,
+        supervisor,
+    } = judged_on_a_thread(
+        &[
+            format!(
+                "{}; : > {}; printf '%s\\n' '{}'",
+                common::await_path(&gate),
+                shell_path(&outlived),
+                high_pass()
+            ),
+            format!("printf '%s\\n' '{}'", low_pass()),
+        ],
+        supervise_options(2, true),
+    );
+    let head = main_head(&repo);
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        !payloads(
+            &queue.show(TaskId::new(1)).unwrap(),
+            "run_satisfied_review_job_started",
+        )
+        .is_empty()
+    });
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let token = queue.supervisors().unwrap().remove(0).token;
+    assert!(queue.request_handoff(&token, "/next/dagq").unwrap());
+    let outcome = joined(supervisor, "the supervisor handing off").unwrap();
+    assert_eq!(outcome["outcome"], "handoff", "{outcome}");
+    // Nothing of the stopped job is applied, and the run stays leased.
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let run = detail.runs[0].clone();
+    let stopped = payloads(&detail, "headless_job_stopped");
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    assert_eq!(
+        (
+            &stopped[0]["kind"],
+            &stopped[0]["label"],
+            &stopped[0]["attempt"]
+        ),
+        (&json!("review"), &json!("already_satisfied"), &json!(1)),
+        "{}",
+        stopped[0]
+    );
+    assert!(job_outcomes(&detail).is_empty());
+    assert!(payloads(&detail, "run_satisfied_judged").is_empty());
+    assert!(queue.asks(Default::default()).unwrap().is_empty());
+    assert!(queue.run_lease(run.id()).unwrap().is_some());
+    // A job that outlived its stop goes on from here.
+    fs::write(&gate, "").unwrap();
+
+    let next = SuperviseOptions {
+        handoff_token: Some(token),
+        ..supervise_options(2, true)
+    };
+    let outcome = {
+        let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
+        runtime::supervise_with_reviewer(
+            &db,
+            &repo,
+            &*backend,
+            &claude_stub(&db),
+            &*reviewer,
+            &dagq,
+            &next,
+        )
+        .unwrap()
+    };
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    // Validated, verified and judged again on the snapshot's head.
+    assert_eq!(payloads(&detail, "validation_finished").len(), 2);
+    let snapshots: Vec<_> = payloads(&detail, "run_satisfied_verified")
+        .into_iter()
+        .map(|p| p["head"].clone())
+        .collect();
+    assert_eq!(snapshots, [json!(head), json!(head)]);
+    let begun: Vec<_> = payloads(&detail, "run_satisfied_review_started")
+        .into_iter()
+        .map(|p| (p["attempt"].clone(), p["head"].clone()))
+        .collect();
+    assert_eq!(begun, [(json!(1), json!(head)), (json!(2), json!(head))]);
+    assert_eq!(reviewer.prompts().len(), 2);
+    assert!(!outlived.exists(), "the stopped judgment job still ran");
+    // The stopped job's Execution is counted once: by its stop alone.
+    assert_eq!(payloads(&detail, "headless_job_stopped").len(), 1);
+    assert_eq!(job_outcomes(&detail), [json!("answered")]);
+    assert_eq!(
+        payloads(&detail, "run_satisfied_review_job_finished")[0]["attempt"],
+        2
+    );
+    // The stopped job's high pass closed nothing: the new judgment asks.
+    assert_eq!(judged_steps(&detail), [(json!("ask"), json!(head))]);
+    assert_eq!(detail.task.status(), TaskStatus::InProgress);
+    assert!(payloads(&detail, "run_satisfied_closed").is_empty());
+    let ask = close_ask(&mut queue);
+    assert_eq!(ask.reason_category, dagq::domain::AskReason::Scope);
+    assert_eq!(ask.confidence, Some(dagq::domain::AskConfidence::Low));
+    assert!(queue.run_lease(run.id()).unwrap().is_none());
+    assert_eq!(satisfied_worktrees(&repo, &db), Vec::<String>::new());
+}
