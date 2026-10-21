@@ -3351,7 +3351,10 @@ fn client_request(command: &Command) -> Result<Option<(UseCase, Value)>> {
                 UseCase::AgentDecide,
                 json!({"set": set, "case": case, "verdict": verdict, "codes": codes, "reason": reason}),
             ),
-            AgentCommand::Sets { .. } | AgentCommand::Set { .. } => return Ok(None),
+            AgentCommand::Sets { agent, limit } => {
+                (UseCase::AgentSets, json!({"agent": agent, "limit": limit}))
+            }
+            AgentCommand::Set { id } => (UseCase::AgentSet, json!({"id": id})),
             AgentCommand::Results { agent, limit } => (
                 UseCase::AgentResults,
                 json!({"agent": agent, "limit": limit}),
@@ -5925,6 +5928,48 @@ mod tests {
                 ),
                 "{planner:?}"
             );
+        }
+    }
+
+    /// A client-mode `dagq agent ...` goes to the use case the service
+    /// names for its command line, with the params the command line gives.
+    #[test]
+    fn an_agent_command_goes_to_the_use_case_its_command_line_names() {
+        // Clap's parser needs a big stack; the join is bounded so that a
+        // stalled parse fails here by name.
+        let (done, finished) = std::sync::mpsc::channel();
+        let parsing = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                for (argv, params) in [
+                    (
+                        &["dagq", "agent", "sets", "--agent", "adr-rules"][..],
+                        json!({"agent": "adr-rules", "limit": 20}),
+                    ),
+                    (&["dagq", "agent", "set", "3"], json!({"id": 3})),
+                    (
+                        &["dagq", "agent", "results", "--limit", "5"],
+                        json!({"agent": null, "limit": 5}),
+                    ),
+                    (&["dagq", "agent", "result", "3"], json!({"id": 3})),
+                ] {
+                    let cli = Cli::try_parse_from(argv).unwrap();
+                    let (use_case, sent) = client_request(&cli.command).unwrap().unwrap();
+                    assert_eq!(Some(use_case), UseCase::of_command(&argv[1..]), "{argv:?}");
+                    assert_eq!(sent, params, "{argv:?}");
+                }
+                done.send(()).unwrap();
+            })
+            .unwrap();
+        match finished.recv_timeout(std::time::Duration::from_secs(60)) {
+            // A panic in the thread drops `done`: its join says why.
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                parsing.join().unwrap();
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => panic!(
+                "an_agent_command_goes_to_the_use_case_its_command_line_names: \
+                 the agent commands were not parsed and sent within 60s"
+            ),
         }
     }
 

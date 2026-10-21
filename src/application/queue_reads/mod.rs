@@ -578,6 +578,8 @@ impl QueueRead {
             | UseCase::ReplanPropose
             | UseCase::AgentCases
             | UseCase::AgentDecide
+            | UseCase::AgentSets
+            | UseCase::AgentSet
             | UseCase::TelemetryReport => return Ok(None),
         };
         read.check()?;

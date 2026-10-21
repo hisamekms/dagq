@@ -427,6 +427,23 @@ struct AgentDecideParams {
     reason: String,
 }
 
+/// `agent_sets`' params: those of `dagq agent sets`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentSetsParams {
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// `agent_set`'s params: those of `dagq agent set`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AgentSetParams {
+    id: i64,
+}
+
 /// `agent_results`' params: those of `dagq agent results`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -562,6 +579,15 @@ fn run(
             let p: AgentDecideParams = params(use_case, raw)?;
             super::agent_cases::AgentCaseSets::new(&*store.0, actor, &StaticPolicy)
                 .decide(p.set, &p.case, &p.verdict, p.codes, &p.reason)
+        }
+        UseCase::AgentSets => {
+            let p: AgentSetsParams = params(use_case, raw)?;
+            super::agent_cases::AgentCaseSets::new(&*store.0, actor, &StaticPolicy)
+                .list(p.agent.as_deref(), p.limit.unwrap_or(20))
+        }
+        UseCase::AgentSet => {
+            let p: AgentSetParams = params(use_case, raw)?;
+            super::agent_cases::AgentCaseSets::new(&*store.0, actor, &StaticPolicy).show(p.id)
         }
         UseCase::AgentResults => {
             let p: AgentResultsParams = params(use_case, raw)?;
@@ -1488,6 +1514,54 @@ mod tests {
         );
     }
 
+    /// The production sets read back through the service as `eval.read`
+    /// lets the command line read them: the observer reads them, a review
+    /// job and a worker off its own run are refused and recorded.
+    #[test]
+    fn the_production_sets_are_read_with_eval_read() {
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        let response = service.handle(&request(
+            Some("observer"),
+            UseCase::AgentSets,
+            json!({"agent": "adr-rules", "limit": 5}),
+        ));
+        assert_eq!(response.result, Some(json!({"sets": []})), "{response:?}");
+        let response = service.handle(&request(
+            Some("observer"),
+            UseCase::AgentSet,
+            json!({"id": 1}),
+        ));
+        assert_eq!(code(&response), Some(ServiceErrorCode::Failed));
+        for token in ["review", "worker"] {
+            for (use_case, params) in [
+                (UseCase::AgentSets, Value::Null),
+                (UseCase::AgentSet, json!({"id": 1})),
+            ] {
+                let response = service.handle(&request(Some(token), use_case, params));
+                assert_eq!(
+                    code(&response),
+                    Some(ServiceErrorCode::AuthorizationDenied),
+                    "{token} {use_case:?}"
+                );
+                let denial = backend.log.lock().unwrap().pop().unwrap();
+                assert_eq!(denial["capability"], "eval.read", "{token} {use_case:?}");
+            }
+        }
+        assert_eq!(
+            UseCase::of_command(&["agent", "sets"]),
+            Some(UseCase::AgentSets)
+        );
+        assert_eq!(
+            UseCase::of_command(&["agent", "set", "3"]),
+            Some(UseCase::AgentSet)
+        );
+    }
+
     #[test]
     fn the_policy_is_the_service_s_and_acts_as_the_principal() {
         let backend = backend(RunStatus::Running);
@@ -2018,6 +2092,8 @@ mod tests {
             "replan_propose",
             "agent_cases",
             "agent_decide",
+            "agent_sets",
+            "agent_set",
         ] {
             let use_case: UseCase = name.parse().unwrap();
             let response = service.handle(&request(Some("telemetry"), use_case, json!({})));

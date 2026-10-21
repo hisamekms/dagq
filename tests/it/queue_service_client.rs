@@ -606,3 +606,47 @@ fn a_plan_review_job_s_dagq_reads_through_the_service() {
         status(ok(&queue.db, &["status"]))
     );
 }
+
+/// The production sets read through the service as the command line
+/// prints them, by an actor with `eval.read` (the observer); one without
+/// it (the plan review job) is refused them as the command line refuses
+/// it, not told the service has no use case for them.
+#[test]
+fn the_observer_s_dagq_reads_the_production_sets_through_the_service() {
+    let (queue, socket) = served();
+    let requested = ok(&queue.db, &["agent", "cases", "adr-rules"]);
+    let set = requested["set_id"].to_string();
+    let observer = issued(
+        &queue,
+        &Principal::of(&ActorContext::new(
+            dagq::domain::ActorRole::Observer,
+            "observer:s1",
+        )),
+    );
+    let job = issued(&queue, &Principal::of(&ActorContext::plan_review_job(1, 1)));
+    let sets = ["agent", "sets", "--agent", "adr-rules"];
+    let one = ["agent", "set", set.as_str()];
+    for args in [&sets[..], &one[..]] {
+        let served = answered(&client(&queue, &socket, Some(&observer), "observer", args));
+        assert_eq!(served, ok(&queue.db, args), "{args:?}");
+        let refusal = client(&queue, &socket, Some(&job), "plan-review-job", args);
+        assert_eq!(refused(&refusal), "authorization_denied", "{args:?}");
+        let printed = denial(&refusal);
+        assert_eq!(
+            printed["denied"],
+            json!({"role": "plan-review-job", "capability": "eval.read", "reason": "not granted"}),
+            "{args:?}"
+        );
+        let local = invoke_with(
+            &[
+                ("DAGQ_ROLE", "plan-review-job"),
+                ("DAGQ_ACTOR_ID", "plan-review-job:1:1"),
+            ],
+            &queue.db,
+            args,
+        );
+        assert_eq!(printed, denial(&local), "{args:?}");
+    }
+    let listed = answered(&client(&queue, &socket, Some(&observer), "observer", &sets));
+    assert_eq!(listed["sets"].as_array().unwrap().len(), 1, "{listed}");
+}

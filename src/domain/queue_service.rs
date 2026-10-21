@@ -156,8 +156,12 @@ string_enum!(UseCase {
     // which the supervisor makes, and a decision on a case's label, as
     // `dagq agent cases` and `dagq agent decide` record them; a person's,
     // the inbox's or a planner's, so a worker's is refused and recorded.
+    // The sets and one set read back, as `dagq agent sets` and `dagq agent
+    // set` print them: an actor's with `eval.read`.
     AgentCases => "agent_cases",
     AgentDecide => "agent_decide",
+    AgentSets => "agent_sets",
+    AgentSet => "agent_set",
     // The steps of a session an executor sends of the one target its
     // telemetry principal was issued for (ADR-t1662-3 decisions 2 and 9),
     // with a version of its params of their own
@@ -219,6 +223,8 @@ impl UseCase {
             ("replan", Some("propose")) => Self::ReplanPropose,
             ("agent", Some("cases")) => Self::AgentCases,
             ("agent", Some("decide")) => Self::AgentDecide,
+            ("agent", Some("sets")) => Self::AgentSets,
+            ("agent", Some("set")) => Self::AgentSet,
             _ => return None,
         })
     }
@@ -855,6 +861,9 @@ mod tests {
             (&["ask", "--kind", "blocked"], "ask"),
             (&["graph", "--format", "d2"], "graph"),
             (&["stats"], "stats"),
+            (&["agent", "sets", "--agent", "adr-rules"], "agent_sets"),
+            (&["agent", "set", "3"], "agent_set"),
+            (&["agent", "eval", "adr-rules", "--set", "3"], "agent_eval"),
         ] {
             assert_eq!(
                 UseCase::of_command(words).map(UseCase::as_str),
