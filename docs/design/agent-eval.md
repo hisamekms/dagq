@@ -24,6 +24,7 @@ related:
   - design-supervisor-lifecycle-headless-job-processes
   - adr-t1869-1
   - adr-t2599-1
+  - adr-t2229-1
 ---
 
 # agentのeval
@@ -96,6 +97,8 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 - 依頼の認可と実行を分ける: devはworker（自分のrunの分）・人・inbox・planner、hold-outとproductionは人・inbox・planner、同じキーの再実行は人とinboxだけができる。
   読み取りはworkerには自分のrunの分だけを見せる。
   capabilityの表は[Authorization](authorization.md)が持ち、要るcapabilityは`domain::authorization::eval_request_needs`が決める。
+- hold-outとproductionの周は集合の全体だけを流し、`--cases`は人の再実行の指定のときだけ受ける（[ADR-t2229-1](../adr/2026-10-21-t2229-1-held-out-rounds-run-their-case-set-whole.md)）。
+  記録に残った依頼も周の開始で拒む。
 - queue側のproductionの集合を選ぶ周のケースの集合のdigestは、選んだ集合の全体のもの（作り直しで飛ばしたケースがあればその残り）になる。
   周は開始の時の集合（ラベルと人の決定）で採点し、引き取ったsupervisorも同じ時点までのeventで集合を読み直す（`record::Started::set_through`）ので、開始の後の人の決定は引き継ぎの有無に依らずその周を変えず、次の周から効く。
 - productionの集合の作成の依頼（`agent cases`）と人の決定（`agent decide`）は人・inbox・plannerの`eval.cases`で、workerとsupervisorは`authorization_denied`になる。

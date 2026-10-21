@@ -58,7 +58,7 @@ use crate::domain::agent_eval::record::{self, Round};
 use crate::domain::agent_eval::round::{
     ProviderCost, ProviderWait, Refusal, RefusalReason, RoundKey, case_set_digest,
     definition_digest, estimate, holdout_refusal, launchable, may_start_next, next_round,
-    provider_wait, run_cost,
+    provider_wait, run_cost, subset_refusal,
 };
 use crate::domain::agent_eval::{
     Case, EVALS_DIR, PATCH_DIR, PATCH_EXTENSION, Split, patch_hash, read_agent_cases,
@@ -649,13 +649,21 @@ impl Supervisor<'_> {
         }))
     }
 
-    /// Start the waiting `round` when its provider can be used: its
-    /// definition and cases read, the once rule of a hold-out, the
-    /// definition's limit and the estimate checked, each of which refuses
-    /// it, and `agent_eval_started` recorded with its estimate reserved.
-    /// Whether it moved (started or refused).
+    /// Start the waiting `round` when its provider can be used: a held-out
+    /// part of cases refused first, then its definition and cases read,
+    /// the once rule of a hold-out, the definition's limit and the
+    /// estimate checked, each of which refuses it, and
+    /// `agent_eval_started` recorded with its estimate reserved. Whether it
+    /// moved (started or refused).
     fn start_round(&mut self, round: &Round, rounds: &[Round]) -> Result<bool> {
         let request = &round.request;
+        // The use case refuses a held-out part of cases unrecorded; one in
+        // the record all the same is refused here alike (ADR-t2229-1).
+        if let Some(refusal) = subset_refusal(request.split, request.cases.is_some(), request.rerun)
+        {
+            self.refuse_round(round.id, &request.agent, &refusal, None)?;
+            return Ok(true);
+        }
         let launch = self.eval_launch(None);
         let provider = launch.provider;
         if let Some(wait) = self.eval_wait(provider) {

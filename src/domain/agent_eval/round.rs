@@ -218,7 +218,8 @@ impl Estimate {
 // Why a round was not started (`agent_eval_refused`'s `reason`): its runs
 // over `max_runs`, its estimate over `max_cost_usd`, dollars that could
 // not be known (`cost_unknown`), a hold-out already run with the same key
-// and no rerun asked, a definition past the agent job's limit
+// and no rerun asked, a held-out round asked for a part of its cases
+// (ADR-t2229-1), a definition past the agent job's limit
 // (ADR-t1869-1), no definition in the landing branch's commit, one whose
 // declared tools are a mistake (ADR-t1728-2), or case lists that do not
 // read or name no case to run.
@@ -227,6 +228,7 @@ string_enum!(RefusalReason {
     OverCostLimit => "over_cost_limit",
     CostUnknown => "cost_unknown",
     HoldoutUsed => "holdout_used",
+    HeldOutSubset => "held_out_subset",
     DefinitionOverLimit => "definition_over_limit",
     DefinitionMissing => "definition_missing",
     DefinitionInvalid => "definition_invalid",
@@ -439,6 +441,20 @@ pub fn holdout_refusal(
         ),
         None,
     ))
+}
+
+/// Why a held-out round is refused a part of its cases (ADR-t2229-1).
+pub const HELD_OUT_SUBSET: &str = "a holdout or production round runs its set of cases whole and takes no --cases (a part would be a key of its own); only a person's --rerun runs a part";
+
+/// Refuse a round of `split` that asks for a part of its cases (`subset`,
+/// `--cases`) when the split is held out and no rerun was asked
+/// (ADR-t2229-1): a part has a case set digest of its own, so the once
+/// rule of [`holdout_refusal`] would take each part for a first run. A
+/// whole set, the split's or a production set of the queue's side, is
+/// never refused here.
+pub fn subset_refusal(split: Split, subset: bool, rerun: bool) -> Option<Refusal> {
+    (held_out(split) && subset && !rerun)
+        .then(|| refuse(RefusalReason::HeldOutSubset, HELD_OUT_SUBSET.into(), None))
 }
 
 fn short(digest: &str) -> &str {
@@ -672,6 +688,18 @@ mod tests {
         assert!(holdout_refusal(Split::Holdout, &key("d2", "c1"), &started, false).is_none());
         assert!(holdout_refusal(Split::Production, &key("d1", "c1"), &started, false).is_some());
         assert!(holdout_refusal(Split::Dev, &key("d1", "c1"), &started, false).is_none());
+    }
+
+    #[test]
+    fn a_held_out_round_runs_its_cases_whole_unless_rerun() {
+        for split in [Split::Holdout, Split::Production] {
+            let refused = subset_refusal(split, true, false).unwrap();
+            assert_eq!(refused.reason, RefusalReason::HeldOutSubset);
+            assert!(refused.detail.contains("whole"), "{refused}");
+            assert!(subset_refusal(split, true, true).is_none());
+            assert!(subset_refusal(split, false, false).is_none());
+        }
+        assert!(subset_refusal(Split::Dev, true, false).is_none());
     }
 
     #[test]

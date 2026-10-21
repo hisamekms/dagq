@@ -15,7 +15,7 @@ use super::commands::{DenialLog, Gate};
 use crate::domain::agent_eval::programs;
 use crate::domain::agent_eval::record::{self, Request, Round};
 use crate::domain::agent_eval::review::{self, Metric, Metrics, ReviewOutcome, ReviewRun};
-use crate::domain::agent_eval::round::held_out;
+use crate::domain::agent_eval::round::{held_out, subset_refusal};
 use crate::domain::agent_eval::{Case, Split};
 use crate::domain::authorization::eval_request_needs;
 use crate::domain::review_subagents::valid_agent_name;
@@ -46,6 +46,7 @@ pub struct EvalRequest {
     /// `--k`: each case's runs, 1 or more.
     pub k: Option<u32>,
     /// `--cases`: the ids of the split's cases to run; none runs them all.
+    /// A held-out split takes them only with `rerun` (ADR-t2229-1).
     pub cases: Option<Vec<String>>,
     /// `--set`: a production set of the queue's side (the id of its
     /// request, `agent cases`), run whole as production; never with
@@ -102,9 +103,10 @@ impl<'a> AgentEvals<'a> {
     }
 
     /// `agent eval`: record the request as the actor, after the policy
-    /// allowed its split and its rerun. The round's own checks (its
-    /// definition and cases, the once rule, the limits) are the
-    /// supervisor's when it starts it.
+    /// allowed its split and its rerun; then a part of a held-out split's
+    /// cases without a rerun is refused unrecorded (ADR-t2229-1). The round's
+    /// own checks (its definition and cases, the once rule, the limits)
+    /// are the supervisor's when it starts it.
     pub fn request(&self, request: &EvalRequest) -> Result<Value> {
         if !valid_agent_name(&request.agent) {
             bail!(
@@ -128,6 +130,9 @@ impl<'a> AgentEvals<'a> {
         let resource = self.own();
         for need in eval_request_needs(held_out(split), request.rerun) {
             self.gate.authorize(self.store, need, &resource)?;
+        }
+        if let Some(refused) = subset_refusal(split, request.cases.is_some(), request.rerun) {
+            bail!(refused.detail);
         }
         let actor = self.actor();
         let recorded = Request {
@@ -554,7 +559,7 @@ mod tests {
         assert_eq!(recorded.split, Split::Production);
         // A part of a split is still `--cases`, without a set.
         evals
-            .request(&eval(Split::Holdout, Some(vec!["a".into()]), None))
+            .request(&eval(Split::Dev, Some(vec!["a".into()]), None))
             .unwrap();
         let recorded = Request::read(&store.events.lock().unwrap()[1]).unwrap();
         assert_eq!(recorded.set, None);
@@ -569,6 +574,56 @@ mod tests {
         assert!(
             error.to_string().contains("eval.request_held_out"),
             "{error:#}"
+        );
+    }
+
+    /// A held-out split's `--cases` without `--rerun` is refused unrecorded
+    /// with why (ADR-t2229-1); a rerun's (a person's) and dev's go on, and
+    /// so does a held-out split or a production set asked for whole.
+    #[test]
+    fn a_held_out_part_of_cases_is_refused_but_a_rerun_or_dev_goes_on() {
+        use crate::domain::StaticPolicy;
+        use crate::domain::actor::ActorRole;
+        use crate::domain::agent_eval::round::HELD_OUT_SUBSET;
+        let store = Store::default();
+        let user = ActorContext::instance(ActorRole::User, "1");
+        let evals = AgentEvals::new(&store, &user, &StaticPolicy);
+        for split in [Split::Holdout, Split::Production] {
+            let error = evals
+                .request(&eval(split, Some(vec!["a".into()]), None))
+                .unwrap_err();
+            assert_eq!(error.to_string(), HELD_OUT_SUBSET);
+        }
+        assert!(store.events.lock().unwrap().is_empty());
+        for split in [Split::Holdout, Split::Production] {
+            let rerun = EvalRequest {
+                rerun: true,
+                ..eval(split, Some(vec!["a".into()]), None)
+            };
+            evals.request(&rerun).unwrap();
+        }
+        evals
+            .request(&eval(Split::Dev, Some(vec!["a".into()]), None))
+            .unwrap();
+        evals.request(&eval(Split::Holdout, None, None)).unwrap();
+        evals.request(&eval(Split::Dev, None, Some(3))).unwrap();
+        let recorded: Vec<Request> = store
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|event| Request::read(event).unwrap())
+            .collect();
+        assert_eq!(recorded.len(), 5);
+        assert!(recorded[..2].iter().all(|r| r.rerun && r.cases.is_some()));
+        assert_eq!(recorded[2].split, Split::Dev);
+        assert_eq!(
+            (recorded[3].split, &recorded[3].cases),
+            (Split::Holdout, &None)
+        );
+        assert_eq!(
+            (recorded[4].split, recorded[4].set),
+            (Split::Production, Some(3))
         );
     }
 

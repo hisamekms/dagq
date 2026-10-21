@@ -1953,6 +1953,8 @@ enum AgentCommand {
         #[arg(long)]
         k: Option<u32>,
         /// Only these cases of the split, by id (comma-separated or repeated).
+        /// Holdout and production run their set whole and refuse a part of it unless with
+        /// --rerun (a person's). Not --set, which picks a whole set of the queue's side.
         #[arg(long, value_delimiter = ',')]
         cases: Vec<String>,
         /// A production set of the queue's side (`agent cases`), by its id: run whole as
