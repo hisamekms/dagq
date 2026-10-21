@@ -12,6 +12,7 @@ related:
   - design-persistence
   - adr-0062
   - design-supervisor-lifecycle-waiting
+  - adr-t3048-1
 ---
 
 # Handoff
@@ -25,6 +26,7 @@ use caseは`src/application/supervise/host_ops/handoff.rs`（登録と要求）�
   要求をDBに置くのは、signalはlaunchd modeと登録済みのin-cmuxのsupervisorで届け方が違い、区切りまで待たせる必要もあるため。
 - **区切り**: ループの各passの先頭で、停止要求（SIGINT/SIGTERM）が無ければ`handoff_request(token)`を読む。
   要求があれば新しいclaim・adopt・resume・triage・observer・plan review・goal reviewの起動を止め、DBとrunのファイルから組み立て直せないslot（検証と着地が進行中のもの。`Phase::rebuildable`）だけを進める（`tick(true)`）。
+  着地slotを待つrunはすぐ着地を始めるので待つが、execを決めるpassの読み取りで着地が保留なら着地が始まりかけていないので待たず、leaseを持ったまま引き継ぐ（`Slot::rebuildable`。その前のpassで保留でも、保留が解けていれば着地を待つ。[ADR-t3048-1](../../adr/2026-10-21-t3048-1-handoff-hands-over-held-landings-leased.md)）。
   待つあいだも各passで、走っているplan review / goal reviewのjobが終わっていれば回収してverdictを適用する（verdictでreadyになったtaskは待ちのあいだclaimせず、次のプロセスがclaimする）。
   全slotが組み立て直せる状態になったら、`prepare_handoff`はobserverを止めた後、plan review / goal reviewのjobを1回pollし、終わっていれば回収してverdictを適用する（終わったjobのverdictを捨てて次のプロセスで同じattemptをやり直さない）。
   そのうえでobserverの子プロセスと、まだ走っているheadlessのreview / triage / plan review / goal reviewのjobを（その子孫ごと）止める（`headless_jobs`の行は`stopped`で閉じ、execの前に書く。[Headless job processes](headless-job-processes.md)）。
@@ -61,6 +63,7 @@ use caseは`src/application/supervise/host_ops/handoff.rs`（登録と要求）�
   snapshot が無ければ生きている wrapper の run を adopt と同じ条件で復元する。
   復元した resume は resume_adopted を記録する。
   review 中（`awaiting_integration`）の run は adopt と同じ `adopt_review` で組み立て直すので、記録した revise・衝突の依頼が `turns/` に無ければ、その試行の依頼だけを照合して 1 回だけ書く（[Review](review.md) の 7）。
+  人の `land` の答えで着地の列に並んだ run は lease を返し、承認の着地（`start_approved_landings`）が拾う。
   既に他の supervisor が取った lease には触れない。
 - **resumeの依頼を送る前**: resumeを始めて（`resume_started`・`session_opened`）から`resume_request_sent`までの待ち（wrapperとagentの登録）は、queueのprocessの行をpassごとに読むだけで、passを塞がない（`ResumeWatch`）。
   依頼の送信（`submit`）はsessionの次のturnの依頼を書くだけで、画面を読まない。

@@ -1604,6 +1604,45 @@ mod tests {
         ));
     }
 
+    /// A run a handoff hands over while its landing is held (ADR-t3048-1)
+    /// had its pass, its precheck and its exit request recorded before it
+    /// was queued: the next process lands it without a review, whatever
+    /// its session (closed by then) and whatever was recorded after the
+    /// exit request (its queueing, its hold, its phases).
+    #[test]
+    fn a_held_run_handed_over_goes_back_to_the_landing_queue_unreviewed() {
+        let events = [
+            event(1, event_kind::REVIEW_STARTED, json!({"attempt": 1})),
+            pass(2),
+            event(3, event_kind::CONFLICT_PRECHECK, json!({})),
+            event(4, event_kind::EXIT_REQUESTED, json!({})),
+            event(5, event_kind::LANDING_QUEUED, json!({})),
+            event(
+                6,
+                crate::domain::claim_hold::LANDING_HELD,
+                json!({"reason": "disk"}),
+            ),
+            event(7, event_kind::RUN_PHASE_CHANGED, json!({})),
+        ];
+        for live in [false, true] {
+            assert!(matches!(
+                resumption(&events, live, false),
+                ReviewResumption::Exit(AfterExit::Land)
+            ));
+        }
+        // Without a recorded precheck, the pass itself is the anchor.
+        let unprechecked = [
+            events[0].clone(),
+            events[1].clone(),
+            events[3].clone(),
+            events[4].clone(),
+        ];
+        assert!(matches!(
+            resumption(&unprechecked, false, false),
+            ReviewResumption::Exit(AfterExit::Land)
+        ));
+    }
+
     /// Task 1558: a revise or conflict request with nothing after it waits
     /// for the live session again (its attempt 1 when it is not recorded,
     /// its reasons none when they are not texts), and is reviewed again

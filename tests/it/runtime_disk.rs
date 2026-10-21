@@ -604,3 +604,101 @@ fn a_persons_integrate_counts_the_scratchpads_in_a_runs_size() {
     assert_eq!(outcome["outcome"], "integrated", "{outcome}");
     assert_eq!(events_of(&db, run.id(), "integration_approved").len(), 1);
 }
+
+/// The queue the handoff test's supervisors read, and whether its disk
+/// was freed.
+static HANDOFF_DB: Mutex<Option<PathBuf>> = Mutex::new(None);
+static HANDOFF_FREED: AtomicBool = AtomicBool::new(false);
+
+/// Short once a run waits to land, until [`HANDOFF_FREED`].
+fn short_at_landing_until_freed(_: &Path) -> Option<u64> {
+    if HANDOFF_FREED.load(Ordering::SeqCst) {
+        return Some(4 * GIB);
+    }
+    let db = HANDOFF_DB
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()?;
+    let queued = SqliteQueue::open(&db)
+        .ok()?
+        .latest_event_of("landing_queued")
+        .ok()?
+        .is_some();
+    Some(if queued { GIB / 2 } else { 4 * GIB })
+}
+
+/// A handoff does not wait for a run whose landing waits for room, nor
+/// hands it back (ADR-t3048-1): the supervisor execs with the run's lease
+/// kept, and the process that continues under the same token takes it
+/// over, puts it back in the landing queue without reviewing it again and
+/// lands it once there is room.
+#[test]
+fn a_handoff_hands_over_a_landing_that_waits_for_room() {
+    let (_dir, repo, db) = fixture();
+    HANDOFF_FREED.store(false, Ordering::SeqCst);
+    *HANDOFF_DB.lock().unwrap() = Some(db.clone());
+    let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+    let reviewer = Arc::new(TestReviewer::new(&[verdict(
+        "pass",
+        &[],
+        "meets the acceptance",
+    )]));
+    let options = SuperviseOptions {
+        disk: gibibyte_needed(),
+        free_space: short_at_landing_until_freed,
+        ..supervise_options(1, true)
+    };
+    // What both supervisors start takes the test as its owner.
+    let dagq = crate::common::service::owned_executable(db.parent().unwrap());
+    let supervise = {
+        let (db, repo, backend, reviewer) =
+            (db.clone(), repo.clone(), backend.clone(), reviewer.clone());
+        move |options: SuperviseOptions| {
+            let _waiting = crate::common::within(crate::common::STEP_LIMIT, "supervise to return");
+            runtime::supervise_with_reviewer(
+                &db,
+                &repo,
+                &*backend,
+                &claude_stub(&db),
+                &*reviewer,
+                &dagq,
+                &options,
+            )
+        }
+    };
+    let first = {
+        let (supervise, options) = (supervise.clone(), options.clone());
+        thread::spawn(move || supervise(options))
+    };
+    wait_until(&db, Duration::from_secs(60), |_| {
+        !queue_events(&db, "landing_held").is_empty()
+    });
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let token = queue.supervisors().unwrap().remove(0).token;
+    assert!(queue.request_handoff(&token, "/next/dagq").unwrap());
+    let outcome = joined(first, "the supervisor asked to hand off").unwrap();
+    assert_eq!(outcome["outcome"], "handoff", "{outcome}");
+    assert_eq!(outcome["handed_over"], 1, "{outcome}");
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    assert_eq!(queue.runs_leased_by(&token).unwrap().len(), 1);
+    assert!(queue_events(&db, "integration_started").is_empty());
+
+    HANDOFF_FREED.store(true, Ordering::SeqCst);
+    let outcome = supervise(SuperviseOptions {
+        handoff_token: Some(token),
+        ..options
+    })
+    .unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(
+        SqliteQueue::open(&db)
+            .unwrap()
+            .run(run.id())
+            .unwrap()
+            .status(),
+        RunStatus::Integrated
+    );
+    assert_eq!(queue_events(&db, "review_started").len(), 1);
+}

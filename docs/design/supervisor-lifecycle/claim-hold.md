@@ -18,6 +18,7 @@ related:
   - adr-t1489-1
   - adr-t1591-1
   - adr-t1632-1
+  - adr-t3048-1
   - adr-t1634-1
   - adr-t1857-1
   - adr-t1879-1
@@ -111,7 +112,7 @@ supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイル�
 
 - 入口は`HostOpsState::check_disk`で、passの初め（drainやhandoffの途中も）に確かめる。
 - 空きがclaimか着地の閾値の大きい方を下回れば掃除を頼み、loopの外のjobが行う（[Run worktrees](run-worktrees.md#loopの外で掃除する)）。
-  消すのは終わったrunと誰も作業していないrunのビルド成果物・終わったtaskのworktreeとscratchpadと一時ファイルの消し残しで、leaseかslotか生きているsessionを持つrunには触れない（[Run worktrees](run-worktrees.md#終わっていないrunのビルド成果物)）。
+  消す範囲と消さないrunは[Run worktrees](run-worktrees.md#終わっていないrunのビルド成果物)が持つ。
 - 掃除のjobが終わるまでclaimと着地は控えるが、控えのeventもaskも記録しない。
   そのあいだもclaimはclaimの閾値を、着地は着地の閾値を下回るときだけ控え、満たす側は掃除を待たずに進む。
 - 走っている通常の掃除jobに乗ったときは、そのjobと続く残りのjobの両方を空き容量の掃除とし、残りのjobが終わるまで待つ（`CleanupWatch::for_disk`）。
@@ -121,11 +122,12 @@ supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイル�
 - 着地: 着地slotを待つrunは、空きが着地の閾値を下回る間integrationを始めず、leaseを持ったままrebaseも検証もしない。
   `approve_landing`の`land`のanswerは足りない間もその場で適用して列に並べ、列の着地の開始（`start_approved_landings`）だけが待つ（[Review](review.md#review-supervisor)）。
 - 落とし穴: 着地の控えはhostのものでなく記録したsupervisorのslotのものなので、別の生きているsupervisorはその控えを終えない（`domain::claim_hold::LANDINGS`）。
-- drainするsupervisorも、空き容量の掃除と残りのjobが終わるまでleaseを持って待ち、その後の容量で足りれば着地へ進み、足りなければleaseを返してrunを`awaiting_integration`のまま人に残す。
+- 止めるdrainも、空き容量の掃除と残りのjobが終わるまでleaseを持って待ち、その後の容量で足りれば着地へ進み、足りなければleaseを返してrunを`awaiting_integration`のまま人に残す。
   待ちの時間上限は設けず、既に選んだ有限の候補の処理を待つ。
-  handoffを初めて読んだ周回では、runを進める前に掃除をdrainの扱いにして読み直す（`end_cleanup_for_handoff`）。
   provisioningの失敗のdrainは掃除をdrainの扱いにしないが、同じく残りのjobが終わるまで待つ。
   `[run.env]`のprogramが無いときと着地のbranchが解決しないときは、掃除を待たずにleaseを返す。
+- handoffはどの保留でもleaseを返さず、runをleaseごと次のprocessに渡す（[Handoff](handoff.md)、[ADR-t3048-1](../../adr/2026-10-21-t3048-1-handoff-hands-over-held-landings-leased.md)）。
+  handoffを初めて読んだ周回では、runを進める前に掃除をdrainの扱いにして読み直す（`end_cleanup_for_handoff`）。
 - 人の答えを待つrunのうちturnが終わり何も動いていないものは、空き容量の掃除だけがビルド成果物を消す（[人の答えを待つrun](waiting.md)）。
 
 ### queueのdirのビルドのキャッシュ

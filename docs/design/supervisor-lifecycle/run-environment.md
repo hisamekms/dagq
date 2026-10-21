@@ -229,7 +229,7 @@ inboxのwatchのaskの通知は、queueが束縛されたcommon directoryの名�
 - **着地の保留**: 見つからない間、passしたrunは`awaiting_integration`のままleaseを持って着地slotを待ち（`Phase::AwaitingSlot`）、統合slotは取らない。
   見つかれば次のpassで着地に進む。
   検査はpassごとに（drain・handoff中も）行う。
-  drain・handoff・claimの停止の最中に見つからなければ、supervisorは待たずにそのrunのleaseを返し、runは`awaiting_integration`のまま人の`review and integrate`になる。
+  drain・claimの停止の最中に見つからなければ、supervisorは待たずにそのrunのleaseを返し（handoffは返さず次のprocessに渡す）、runは`awaiting_integration`のまま人の`review and integrate`になる。
   `approve_landing`の`land`の答えは見つからない間もその場で適用してaskを閉じ、runを着地の列に並べる。
   列のrunの着地の開始（`start_approved_landings`）だけが、見つかるまで待つ（[Review](review.md#review-supervisor)の6）。
 - **`integrate`の検証の前**: 検証コマンドを実行する前に同じ検査をrunの`run_dir`で行い、見つからなければ検証コマンドを実行せず、`dagq.toml`が読めないときと同じく着地処理のエラーにする（runは元の状態に戻り、`needs_session`にしないのでresumeを使わない。`last_error`に変数名と値とPATHが入る）。検証コマンドが無いtaskは検査しない。

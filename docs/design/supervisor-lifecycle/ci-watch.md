@@ -91,7 +91,7 @@ pass: [ci_watch]を読み直す → 終わった確かめの答え（読めな�
 
 - `up`のpreflightは`lifecycle::Ports::ci_watch_preflight`、実装は`infrastructure::ci_watch::preflight`で、理由と対処は`Access::message`が持つ。
 - supervisorの保留は`domain::ci_watch::hold_reason`と`CiWatchState::held`・`unreadable`、着地の保留は`domain::landing_hold::judge`が持つ。
-- drain・handoff・claimの停止の最中は、最後の答えがだめなときだけleaseを返し、最初の答えを待つ間は返さない。
+- drain・claimの停止の最中は、最後の答えがだめなときだけleaseを返し、最初の答えを待つ間は返さない（handoffはどちらでも返さない）。
 - attentionは`ci_watch_unavailable`だけで（`domain::event_attention`）、対処は`Unavailable::next`、`status`の行は`application::health::attention`が出す。
 - 保留の記録は`CI_WATCH_HOLD`（`domain::claim_hold::OwnHold`）と`ObservationState::record_ci_watch_hold`が持ち、`ci_watch_unavailable` / `ci_watch_available`はqueueの答えで、supervisorが保留していることは示さない。
 - `doctor`は`application::ci_watch::doctor`と`infrastructure::ci_watch::doctor_view`。

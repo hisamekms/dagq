@@ -2255,7 +2255,14 @@ impl Supervisor<'_> {
                     if !self.landing.rechecks.running()
                         && !self.host.handoff_waits()
                         && !self.observation.handoff_waits()
-                        && self.claim.slots.iter().all(|slot| slot.phase.rebuildable())
+                        && {
+                            // Judged on this pass's readings: a hold that
+                            // ended since the slot's last look lets its run
+                            // land before the exec.
+                            let held = self.landing_hold()
+                                == crate::domain::landing_hold::LandingHold::Wait;
+                            self.claim.slots.iter().all(|slot| slot.rebuildable(held))
+                        }
                     {
                         if self
                             .queue
@@ -3031,6 +3038,23 @@ impl Supervisor<'_> {
     }
     /// Record the landing branch's hold (`error` while it does not
     /// resolve) where it differs from the one this process last recorded.
+    /// What becomes of a run awaiting the landing slot now
+    /// ([`crate::domain::landing_hold::judge`]): the holds are this
+    /// supervisor's, not the run's.
+    fn landing_hold(&self) -> crate::domain::landing_hold::LandingHold {
+        crate::domain::landing_hold::judge(crate::domain::landing_hold::LandingHoldInputs {
+            run_env_missing: self.landing.run_env_missing,
+            container_held: self.verification_container_held(),
+            ci_held: self.observation.ci().held(),
+            ci_unreadable: self.observation.ci().unreadable(),
+            landing_unresolved: self.landing.unresolved,
+            landing_short: self.host.landing_short(),
+            disk_cleaning: self.host.disk_cleaning(),
+            draining: self.registration.draining(),
+            handing_off: self.registration.handing_off(),
+        })
+    }
+
     fn record_landing_hold(&mut self, error: Option<String>) {
         use crate::domain::landing_branch::{LANDING_BRANCH_HOLD, UNRESOLVED_REASON};
         let reason = error.is_some().then_some(UNRESOLVED_REASON);
@@ -3740,23 +3764,13 @@ impl Supervisor<'_> {
                 // Its verification would fail on the missing program, an
                 // unreadable CI, an unresolved landing branch or short disk:
                 // the run stays awaiting integration, leased, and the
-                // integration slot stays free. A supervisor that drains or
-                // hands off gives the lease back for a hold that does not
-                // end by itself, leaving the run awaiting integration for a
-                // person (`review and integrate`)
-                // ([`crate::domain::landing_hold::judge`]).
-                match crate::domain::landing_hold::judge(
-                    crate::domain::landing_hold::LandingHoldInputs {
-                        run_env_missing: self.landing.run_env_missing,
-                        container_held: self.verification_container_held(),
-                        ci_held: self.observation.ci().held(),
-                        ci_unreadable: self.observation.ci().unreadable(),
-                        landing_unresolved: self.landing.unresolved,
-                        landing_short: self.host.landing_short(),
-                        disk_cleaning: self.host.disk_cleaning(),
-                        draining: self.registration.draining(),
-                    },
-                ) {
+                // integration slot stays free. A supervisor that stops
+                // gives the lease back for a hold that does not end by
+                // itself, leaving the run awaiting integration for a person
+                // (`review and integrate`); one that hands off keeps it,
+                // and hands the run over leased (ADR-t3048-1,
+                // [`crate::domain::landing_hold::judge`]).
+                match self.landing_hold() {
                     crate::domain::landing_hold::LandingHold::Proceed => {}
                     crate::domain::landing_hold::LandingHold::Wait => return Ok(Step::Continue),
                     crate::domain::landing_hold::LandingHold::HandBack(why) => {

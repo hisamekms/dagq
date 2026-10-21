@@ -1,12 +1,14 @@
 //! Whether a run whose review passed starts its landing now, waits for it
-//! leased, or (in a supervisor that drains or hands off) goes back to a
-//! person awaiting integration: a missing program of `[run.env]` (ADR-0049
-//! decision 9), a container the verification is set to that cannot be used
-//! (goal 38, never the host instead), a CI that cannot be read (ADR-t1920-1 decision 2), an
+//! leased, or (in a supervisor that stops) goes back to a person awaiting
+//! integration: a missing program of `[run.env]` (ADR-0049 decision 9), a
+//! container the verification is set to that cannot be used (goal 38, never
+//! the host instead), a CI that cannot be read (ADR-t1920-1 decision 2), an
 //! unresolved landing branch (ADR-t615-1) or short free disk space (task
-//! 377) hold its landing. A drain hands a run back only for a hold that
-//! does not end by itself: not for a shortage a cleanup is still curing
-//! (task 648, task 1426), nor for a CI check that has not answered yet.
+//! 377) hold its landing. A drain that stops hands a run back only for a
+//! hold that does not end by itself: not for a shortage a cleanup is still
+//! curing (task 648, task 1426), nor for a CI check that has not answered
+//! yet. A handoff hands back none: the run waits leased, and the handoff
+//! hands it over to the next process, which judges it again (ADR-t3048-1).
 
 /// What holds landings now.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -25,6 +27,8 @@ pub struct LandingHoldInputs {
     pub disk_cleaning: bool,
     /// The supervisor drains or hands off.
     pub draining: bool,
+    /// The drain is a handoff's: the next process goes on with the run.
+    pub handing_off: bool,
 }
 
 /// What becomes of the run.
@@ -32,7 +36,8 @@ pub struct LandingHoldInputs {
 pub enum LandingHold {
     /// Nothing holds it.
     Proceed,
-    /// It waits leased for the hold to end.
+    /// It waits leased for the hold to end (in a handoff, handed over
+    /// leased to the next process).
     Wait,
     /// The lease goes back and a person takes it, for this reason.
     HandBack(&'static str),
@@ -48,7 +53,7 @@ pub const fn judge(inputs: LandingHoldInputs) -> LandingHold {
     if !held {
         return LandingHold::Proceed;
     }
-    if !inputs.draining {
+    if !inputs.draining || inputs.handing_off {
         return LandingHold::Wait;
     }
     if inputs.run_env_missing {
@@ -134,6 +139,63 @@ mod tests {
         for (inputs, why) in cases {
             assert_eq!(draining(inputs), LandingHold::HandBack(why), "{inputs:?}");
         }
+    }
+
+    /// A handoff hands back no hold, a shortage nobody cures and a first
+    /// CI answer included: the run waits leased for the next process.
+    #[test]
+    fn a_handoff_hands_back_no_hold() {
+        let holds = [
+            LandingHoldInputs {
+                landing_short: true,
+                ..Default::default()
+            },
+            LandingHoldInputs {
+                landing_short: true,
+                disk_cleaning: true,
+                ..Default::default()
+            },
+            LandingHoldInputs {
+                ci_held: true,
+                ..Default::default()
+            },
+            LandingHoldInputs {
+                ci_held: true,
+                landing_short: true,
+                ..Default::default()
+            },
+            LandingHoldInputs {
+                ci_held: true,
+                ci_unreadable: true,
+                ..Default::default()
+            },
+            LandingHoldInputs {
+                run_env_missing: true,
+                ..Default::default()
+            },
+            LandingHoldInputs {
+                container_held: true,
+                ..Default::default()
+            },
+            LandingHoldInputs {
+                landing_unresolved: true,
+                ..Default::default()
+            },
+        ];
+        for inputs in holds {
+            let handoff = LandingHoldInputs {
+                handing_off: true,
+                ..inputs
+            };
+            assert_eq!(draining(handoff), LandingHold::Wait, "{inputs:?}");
+        }
+        assert_eq!(
+            draining(LandingHoldInputs {
+                handing_off: true,
+                ..Default::default()
+            }),
+            LandingHold::Proceed
+        );
     }
 
     #[test]
