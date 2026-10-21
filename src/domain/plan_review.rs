@@ -232,6 +232,31 @@ impl PlanReviewVerdict {
         super::review_reason::recorded(&self.reason_codes, self.reasons.len())
     }
 
+    /// The reasons and their codes `plan_review_finished` records, given
+    /// the reopen past its limit `over_limit` when there is one: the
+    /// verdict's own, as printed, with the reason the limit added and its
+    /// [`REOPEN_OVER_LIMIT`](super::review_reason::REOPEN_OVER_LIMIT) code
+    /// after them; first instead on a `pass`, which the limit alone sent
+    /// back, so that the primary code is the limit's.
+    pub fn recorded_reasons(
+        &self,
+        over_limit: Option<&ReopenOverLimit>,
+    ) -> (Vec<String>, Vec<Vec<String>>) {
+        let mut reasons = self.reasons.clone();
+        let mut codes = self.recorded_codes();
+        if let Some(over) = over_limit {
+            let code = vec![super::review_reason::REOPEN_OVER_LIMIT.to_owned()];
+            let at = if self.verdict == PlanReviewDecision::Pass {
+                0
+            } else {
+                reasons.len()
+            };
+            reasons.insert(at, over.reason.clone());
+            codes.insert(at, code);
+        }
+        (reasons, codes)
+    }
+
     /// What the runtime makes of a `concern` after `revise_count` revises
     /// (ADR-t451-1 decision 4); `None` for any other verdict. A sure
     /// (`high`) `ready` or `send_back` with no reason a person is needed
@@ -1340,6 +1365,84 @@ mod tests {
                 reason: reason.into(),
                 skipped,
             })
+        );
+    }
+
+    /// A reopen past the limit records the reason it adds with the
+    /// runtime's code: the only one of a pass it sent back, so its primary
+    /// code, and after the job's own reasons and codes on a revise or a
+    /// concern; within the limit the verdict's are recorded as printed.
+    #[test]
+    fn a_reopen_past_the_limit_records_its_reason_with_the_runtimes_code() {
+        use super::super::review_reason::{REOPEN_OVER_LIMIT, UNLABELED, primary};
+        let reviewed = ProposalId::new(3);
+        let over: Vec<Reopen> = (1..=6)
+            .map(|id| Reopen {
+                task_id: TaskId::new(id),
+                reason: "it must use the new API".into(),
+            })
+            .collect();
+        let limit_reason = "plan review of proposal 3 would reopen 6 ready tasks, more than the limit of 5: keep the registered tasks working on this proposal's side (compatibility), or split the change so that only a few tasks are reopened";
+        let over_limit = |verdict: &PlanReviewVerdict| match decide_reopen(
+            reviewed,
+            decide_verdict(reviewed, verdict, 0).decision,
+            None,
+            &verdict.reopen,
+        ) {
+            ReopenDecision::OverLimit(over) => Some(over),
+            ReopenDecision::Apply => None,
+        };
+        let code = |codes: &[&str]| codes.iter().map(|&c| c.to_owned()).collect::<Vec<_>>();
+
+        let mut pass =
+            PlanReviewVerdict::parse(r#"{"verdict": "pass", "reasons": [], "summary": "ok"}"#)
+                .unwrap();
+        assert_eq!(pass.recorded_reasons(None), (vec![], vec![]));
+        pass.reopen = over.clone();
+        let (reasons, codes) = pass.recorded_reasons(over_limit(&pass).as_ref());
+        assert_eq!(reasons, [limit_reason]);
+        assert_eq!(codes, [code(&[REOPEN_OVER_LIMIT])]);
+        assert_eq!(primary(&codes), REOPEN_OVER_LIMIT);
+
+        for printed in [
+            r#"{"verdict": "revise", "reasons": [{"text": "dep", "codes": ["missing_dependency", "task_overlap"]}, "old"], "summary": "no"}"#,
+            r#"{"verdict": "concern", "reasons": [{"text": "dep", "codes": ["missing_dependency", "task_overlap"]}, "old"], "summary": "no"}"#,
+        ] {
+            let mut verdict = PlanReviewVerdict::parse(printed).unwrap();
+            let within = verdict.recorded_reasons(None);
+            assert_eq!(within.0, ["dep", "old"]);
+            assert_eq!(
+                within.1,
+                [
+                    code(&["missing_dependency", "task_overlap"]),
+                    code(&[UNLABELED])
+                ]
+            );
+            assert_eq!(within.1, verdict.recorded_codes());
+            assert_eq!(primary(&within.1), "missing_dependency");
+            verdict.reopen = over.clone();
+            let (reasons, codes) = verdict.recorded_reasons(over_limit(&verdict).as_ref());
+            assert_eq!(reasons, ["dep", "old", limit_reason]);
+            assert_eq!(
+                codes,
+                [
+                    code(&["missing_dependency", "task_overlap"]),
+                    code(&[UNLABELED]),
+                    code(&[REOPEN_OVER_LIMIT]),
+                ]
+            );
+            assert_eq!(primary(&codes), "missing_dependency");
+        }
+    }
+
+    /// The runtime's code is not one the plan review's prompt offers.
+    #[test]
+    fn the_reopen_limits_code_is_not_offered_to_the_job() {
+        use super::super::review_reason::{PLAN_REVIEW_CODES, REOPEN_OVER_LIMIT};
+        assert!(
+            PLAN_REVIEW_CODES
+                .iter()
+                .all(|(code, _)| *code != REOPEN_OVER_LIMIT)
         );
     }
 

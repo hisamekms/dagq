@@ -151,6 +151,8 @@ submit -> 候補の順序 -> job（読むだけ） -> verdict -+- pass -----> ta
 - runのreviewと共通のコードは[Review](review.md#差し戻しの分類コード)と同じ定義で使う（plan reviewで止められなかったものが後でreviewのconcernやworkerの問いになった割合を追うため）。
   `task_overlap`はworkerの問い（[ask](ask.md#worker_questionの分類コード)）と同じ定義。
 - 人の答えからの補い: storeの`record_plan_outcome`と`domain::review_reason::answer_outcome`。
+- `reopen`の上限を超えた差し戻しで足す理由には、jobでなくruntimeが`domain::review_reason::REOPEN_OVER_LIMIT`を付ける（promptの一覧に無い）。
+  記録の並び: `PlanReviewVerdict::recorded_reasons`。
 
 ## AIが決めるconcern<a id="aiが決めるconcern未実装"></a>
 

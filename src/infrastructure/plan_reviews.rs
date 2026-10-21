@@ -738,6 +738,7 @@ impl PlanReviewStore for SqliteQueue {
             }
         }
         finish_row(&tx, job.id, now, decision.into(), Some(&verdict_json), None)?;
+        let (reasons, reason_codes) = apply.verdict.recorded_reasons(over_limit.as_ref());
         let mut finished = json!({
                 "proposal_id": job.proposal_id,
                 "plan_review_id": job.id,
@@ -745,10 +746,10 @@ impl PlanReviewStore for SqliteQueue {
                 "verdict": apply.verdict.verdict,
                 "decision": decision,
                 "overridden": overridden,
-                "reasons": apply.verdict.reasons,
-                "reason_codes": apply.verdict.recorded_codes(),
+                "reasons": reasons,
+                "reason_codes": reason_codes,
                 "primary_code": (decision != PlanReviewDecision::Pass)
-                    .then(|| review_reason::primary(&apply.verdict.recorded_codes())),
+                    .then(|| review_reason::primary(&reason_codes)),
                 "summary": apply.verdict.summary,
                 "actions": apply.verdict.actions,
                 "actions_skipped": actions_skipped,

@@ -21,6 +21,12 @@ use super::RunEvent;
 /// only), an empty `codes`, and a sent-back verdict with no reasons.
 pub const UNLABELED: &str = "unlabeled";
 
+/// The code of the reason the runtime adds when a plan review's `reopen`
+/// is past its limit and sends the reviewed proposal back (ADR-t2751-1,
+/// `plan_review::decide_reopen`). The runtime gives it, never the job, so
+/// it is not in [`PLAN_REVIEW_CODES`], the list the prompt carries.
+pub const REOPEN_OVER_LIMIT: &str = "reopen_over_limit";
+
 /// The codes of a run's review with their definitions, heaviest first:
 /// the order the job picks the primary code of an item that fits two.
 /// `adr_conflict`, `acceptance_conflict` and `acceptance_infeasible` are

@@ -1437,6 +1437,11 @@ fn a_reopen_past_the_limit_reopens_nothing_and_sends_the_reviewed_proposal_back(
     let finished = events(&mut queue, breaking, "plan_review_finished");
     assert_eq!(finished[0]["decision"], "revise");
     assert_eq!(finished[0]["reopened"], json!([]));
+    // The send-back carries the runtime's code, not `unlabeled`.
+    let code = dagq::domain::review_reason::REOPEN_OVER_LIMIT;
+    assert_eq!(finished[0]["primary_code"], code);
+    assert_eq!(finished[0]["reason_codes"], json!([[code]]));
+    assert_eq!(finished[0]["reasons"].as_array().unwrap().len(), 1);
     let skipped = finished[0]["reopen_skipped"].as_array().unwrap();
     assert_eq!(skipped.len(), ready.len());
     assert!(
