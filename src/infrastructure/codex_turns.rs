@@ -696,16 +696,29 @@ impl TurnReader for CodexTurnReader {
             || self.authentication.is_some()
             || self.usage_limit.is_some()
             || !exited_well;
+        // What stdout's events said went wrong.
+        let said_on_stdout = self
+            .failed
+            .clone()
+            .or_else(|| self.authentication.clone())
+            .or_else(|| self.usage_limit.clone())
+            .or_else(|| self.last_error.clone());
         let message = if is_error {
-            self.failed
+            said_on_stdout
                 .clone()
-                .or_else(|| self.authentication.clone())
-                .or_else(|| self.usage_limit.clone())
-                .or_else(|| self.last_error.clone())
                 .or_else(|| Self::tail(stderr))
                 .or_else(|| self.last_text.clone())
         } else {
             self.last_text.clone()
+        };
+        // A turn that completed and did not fail is classified by its
+        // stdout's errors only: its stderr's tail and its answer are only
+        // said (a job read with no exit is an error even then, and its
+        // stderr may keep a stale login's lines).
+        let classified = if self.completed.is_some() && self.failed.is_none() {
+            said_on_stdout
+        } else {
+            message.clone()
         };
         // A login that ran out may be said only on stderr, by Codex's
         // login manager: read for a turn that did not complete or failed,
@@ -720,7 +733,7 @@ impl TurnReader for CodexTurnReader {
             } else if self.usage_limit.is_some() {
                 TurnFailure::UsageLimit
             } else {
-                message
+                classified
                     .as_deref()
                     .and_then(classify)
                     .unwrap_or(TurnFailure::Other)
@@ -1014,6 +1027,14 @@ mod tests {
         let result = reader.finish(Some(&exit(2)), "");
         assert!(result.is_error);
         assert_eq!(result.failure, Some(TurnFailure::Other));
+        // Its stderr's tail is said but names no kind.
+        let (mut reader, _) = read(&[json!({"type": "turn.completed", "usage": {}})]);
+        let result = reader.finish(
+            Some(&exit(2)),
+            "unexpected status 401 Unauthorized: You've hit your usage limit.\n",
+        );
+        assert_eq!(result.failure, Some(TurnFailure::Other));
+        assert!(result.message.unwrap().contains("401 Unauthorized"));
         // A usage without counts has no tokens.
         assert_eq!(result.tokens, None);
         // An item error that names no limit is only said.

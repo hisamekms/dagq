@@ -1334,6 +1334,36 @@ mod tests {
             codex.job_failure(&unnamed, LOGIN_RAN_OUT_STDERR),
             JobFailure::Authentication
         );
+        let started = line(serde_json::json!({"type": "thread.started", "thread_id": "t-4"}));
+        assert_eq!(
+            codex.job_failure(&started, LOGIN_RAN_OUT_STDERR),
+            JobFailure::Authentication
+        );
+    }
+
+    /// A job whose turn completed is no failure of its login or its
+    /// limit, whatever its stderr's tail says: a review that ended without
+    /// a verdict holds no provider back.
+    #[test]
+    fn a_completed_jobs_stderr_names_no_kind_of_failure() {
+        let codex = Codex::new("codex".into());
+        let line = |value: serde_json::Value| format!("{value}\n");
+        let completed = line(serde_json::json!({"type": "thread.started", "thread_id": "t-5"}))
+            + &line(
+                serde_json::json!({"type": "item.completed", "item": {"id": "i1", "type": "agent_message", "text": "no verdict"}}),
+            )
+            + &line(serde_json::json!({"type": "turn.completed", "usage": {}}));
+        for stderr in [
+            LOGIN_RAN_OUT_STDERR,
+            "error: 401 Unauthorized\n",
+            "unexpected status 429 Too Many Requests: You've hit your usage limit.\n",
+        ] {
+            assert_eq!(
+                codex.job_failure(&completed, stderr),
+                JobFailure::Other,
+                "{stderr}"
+            );
+        }
     }
 
     /// A job's tokens are its rollout's records, a child thread's
