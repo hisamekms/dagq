@@ -175,7 +175,8 @@ snapshotを保存した保留は、継続か案の撤回で操作が閉じると
 holdの開いたtaskの`needs_session`のrunはresumeせず、使い切ったresumeの後始末（`exhaust_resumes`）もしない。
 再開の候補の列から外して`hold_deferred`に残し、resumeの開始・skip・使い切りの確定の中でもholdを確かめ直す。
 slotで工程が走っていたrunは、その工程の終わりで再計画と同じ保留を通って`needs_session`（`hold_parked`）になり、sessionとworktreeを残す（[非対話のworker](headless-worker.md#再計画の保留)）。
-保留の時にturnが始まっていなかった回答は解除の後のresumeの依頼に載せ、保留より前の承認とreviewのpassは、そのresumeの後の着地に使わない。
+保留の時にturnが始まっていなかった回答は、同じrunをresumeする解除（`task_hold::release_decision`が`Resume`を返すもの）に限り解除の後のresumeの依頼に載せ、保留より前の承認とreviewのpassは、そのresumeの後の着地に使わない。
+runを終えて新しいrunを始める解除（`release_decision`が`RetryInherit`・`RetryFresh`を返すもの。分け方は下のrunを終える解除の段落）では、届いていない答えは終えたrunに残り、新しいrunの依頼には載らない。
 同じproviderで続く解除は印を外すだけで、次のpassが今のresumeの経路（`begin_resume`。大きなcontextからの新しいsessionの判定もそこで効く）で続ける。
 providerを変える解除、sessionの無いrun（providerが会話を見つけないと言った後に、答えたturnも名指したsessionも途中で切れたturnも無い。wrapperの起動だけでは無いまま）、残した結果の無い止まったrunの解除は、runを終えてtaskをreadyに戻し、次のrunが、runのbranchにあるworktree（containerのrunは最後のturnの終わりの記録）の今のheadを検証済みのcommitに依らずに（worktreeが無ければ検証済みのcommitを）、commitに保存した未commitの差分とともに引き継ぐ（`task_hold::release_decision`、記録は`task_released`の`decision`と手での`retry_inherit`）。
 引き継ぐものが無ければ次のrunは今のmainから始め、それより前のrunの引き継ぎも辿らない（`resume::inherited_from`）。
