@@ -535,13 +535,7 @@ task = 1718
 # 6.768s, class D
 [[test]]
 name = "runtime_stale_receipt::a_stale_receipt_left_during_a_wait_is_unchanged"
-reason = "B 境界（守る境界）: supervisor wiring of a stale request across a wait outside the slot and the return; the outcome judgement is in supervise::stale unit tests, the clock restart is resume.rs (goal 100 task 1557/1558)"
-task = 1718
-
-# 5.873s, class D
-[[test]]
-name = "runtime_stale_receipt::a_stale_receipt_rewritten_during_a_wait_is_rewritten"
-reason = "B 境界（守る境界）: supervisor wiring of the resume's clock restart on the return from a wait (resume.rs restart_clocks, goal 100 task 1557/1558 owns its move), which keeps when the request was typed; the outcome judgement is in supervise::stale unit tests"
+reason = "B 境界（守る境界）: supervisor wiring of a stale request across a wait outside the slot and the return; the outcome judgement is in supervise::stale unit tests, what the clock restart moves is in supervise::execution::resume unit tests"
 task = 1718
 
 # 5.627s, class B

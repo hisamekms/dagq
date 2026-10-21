@@ -1315,6 +1315,27 @@ pub(super) fn resume_deadline(
         .then_some("did not finish within the resume timeout")
 }
 
+/// [`ResumeWatch::restart_clocks`] on the request's send time `sent` and
+/// the stale-receipt request `stale`: `sent` restarts at `now`, a request
+/// not settled yet moves its `at` to `from`, and when it was typed
+/// (`typed_at`) never moves. Generic over the monotonic time so that its
+/// unit test passes values without reading a clock.
+fn restart_clocks<T>(
+    sent: &mut Option<(T, SystemTime)>,
+    stale: &mut Option<StaleNudge>,
+    from: SystemTime,
+    now: T,
+) {
+    if let Some((sent, _)) = sent {
+        *sent = now;
+    }
+    if let Some(nudge) = stale
+        && !nudge.settled
+    {
+        nudge.at = from;
+    }
+}
+
 impl ResumeWatch {
     /// Record the exit request before writing its file, and stop live recovery.
     fn request_exit(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<()> {
@@ -1372,14 +1393,7 @@ impl ResumeWatch {
     /// that idle unseen until the request's timeout (task 931). `now` is
     /// the supervisor's monotonic clock.
     pub(super) fn restart_clocks(&mut self, from: SystemTime, now: Instant) {
-        if let Some((sent, _)) = &mut self.message_sent {
-            *sent = now;
-        }
-        if let Some(nudge) = &mut self.stale
-            && !nudge.settled
-        {
-            nudge.at = from;
-        }
+        restart_clocks(&mut self.message_sent, &mut self.stale, from, now);
     }
 
     /// Record how the request to rewrite a stale receipt ended, once the
@@ -1727,6 +1741,40 @@ mod tests {
             resume_deadline(sent + timeout, restarted, timeout, false),
             None
         );
+    }
+
+    /// The return from a wait (ADR-0071 decision 15) restarts the resume
+    /// request's clock at `now` and moves a stale-receipt request not
+    /// settled yet to `from`, but never when it was typed, from which its
+    /// outcome is judged (`stale::tests`); a settled one stays where it was.
+    #[test]
+    fn restarting_the_clocks_moves_a_pending_stale_request_but_not_when_it_was_typed() {
+        let (sent, now) = (10_u64, 600_u64);
+        let sent_at = UNIX_EPOCH + Duration::from_secs(10);
+        let typed = UNIX_EPOCH + Duration::from_secs(100);
+        let from = UNIX_EPOCH + Duration::from_secs(700);
+        let nudge = |settled| StaleNudge {
+            at: typed,
+            typed_at: typed,
+            settled,
+        };
+
+        let (mut message_sent, mut pending) = (Some((sent, sent_at)), Some(nudge(false)));
+        restart_clocks(&mut message_sent, &mut pending, from, now);
+        let moved = pending.unwrap();
+        assert_eq!((moved.at, moved.typed_at), (from, typed));
+        assert!(!moved.settled);
+        assert_eq!(message_sent, Some((now, sent_at)));
+
+        let (mut message_sent, mut settled) = (Some((sent, sent_at)), Some(nudge(true)));
+        restart_clocks(&mut message_sent, &mut settled, from, now);
+        let kept = settled.unwrap();
+        assert_eq!((kept.at, kept.typed_at), (typed, typed));
+        assert_eq!(message_sent, Some((now, sent_at)));
+
+        let mut unsent: Option<(u64, SystemTime)> = None;
+        restart_clocks(&mut unsent, &mut None, from, now);
+        assert_eq!(unsent, None);
     }
 
     fn event(id: i64, kind: &str, payload: Value) -> RunEvent {

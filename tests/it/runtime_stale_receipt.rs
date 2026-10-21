@@ -164,19 +164,14 @@ const RESOLVES_ON_THE_SECOND_ATTEMPT: &str = "await_message; mark=\"$(dirname \"
     if [ -f \"$mark\" ]; then receipt \"$(git rev-parse HEAD)\"; else : > \"$mark\"; resolve; fi";
 
 /// A resumed session asked to rewrite its stale receipt that asks a
-/// `worker_question` right after the request and waits for the answer
-/// outside its slot. `rewrite` says whether it rewrites the receipt during
-/// that wait; left as it was, the attempt ends unresolved and the next one
-/// resolves the run. Returns the run's events once it landed.
-fn stale_request_across_a_wait(rewrite: bool) -> dagq::domain::TaskDetail {
+/// `worker_question` right after the request, waits for the answer outside
+/// its slot and leaves the receipt as it was: the attempt ends unresolved
+/// and the next one resolves the run. Returns the run's events once it
+/// landed.
+fn stale_request_across_a_wait() -> dagq::domain::TaskDetail {
     let (_dir, repo, db) = fixture();
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
     let (run, first_landed) = parked_conflict(&repo, &db, &backend);
-    let during_wait = if rewrite {
-        "receipt \"$(git rev-parse HEAD)\""
-    } else {
-        ":"
-    };
     // The turn of the request asks; the turn of the answer does nothing.
     backend.resume_script_for(
         2,
@@ -184,7 +179,7 @@ fn stale_request_across_a_wait(rewrite: bool) -> dagq::domain::TaskDetail {
             r#"case "$PROMPT" in
 {NUDGE})
 "$DAGQ" ask --run "$RUN_ID" --kind worker_question --because scope --topic acceptance_conflict --question 'Rewrite it?' --cmux /usr/bin/true > /dev/null || exit 70
-{during_wait}; : > "$(dirname "$RECEIPT")/waiting" ;;
+: > "$(dirname "$RECEIPT")/waiting" ;;
 "answer to ask "*) ;;
 *) {RESOLVES_ON_THE_SECOND_ATTEMPT} ;;
 esac"#
@@ -201,9 +196,9 @@ esac"#
     wait_until(&db, Duration::from_secs(60), |_| {
         !events_of(&db, run.id(), "run_waiting_started").is_empty()
     });
-    // Past the second of the request and of the rewrite: the return from
-    // the wait restarts the request's clock later than both. The session
-    // marks `waiting` after the rewrite (or not) and its idle.
+    // Past the second of the request: the return from the wait restarts
+    // the request's clock later than it. The session marks `waiting` after
+    // its idle.
     let waiting = Path::new(run.receipt_path().unwrap()).with_file_name("waiting");
     wait_until(&db, Duration::from_secs(60), |_| waiting.is_file());
     await_second_after(modified_second(&waiting));
@@ -250,26 +245,14 @@ esac"#
     detail
 }
 
-/// A receipt rewritten while the run waited for the answer to its
-/// question counts as `rewritten` once it is back in its slot: the return
-/// restarts the request's clock (ADR-0071 decision 15) but not when it was
-/// typed, from which the outcome is judged (`stale::tests`). This keeps the
-/// wiring of that restart in the resume.
-#[test]
-fn a_stale_receipt_rewritten_during_a_wait_is_rewritten() {
-    let detail = stale_request_across_a_wait(true);
-    assert_eq!(
-        payloads(&detail, "stale_receipt_resolved"),
-        [&json!({"phase": "resume", "attempt": 1, "outcome": "rewritten"})]
-    );
-}
-
 /// A receipt left as it was across the wait stays `unchanged`: the attempt
 /// ends unresolved without being asked again, and the next attempt
-/// resolves the run.
+/// resolves the run. This keeps the wiring of the restart of the
+/// request's clock on the return to the slot; what the restart moves is
+/// `resume::tests`, and the outcome's judgement `stale::tests`.
 #[test]
 fn a_stale_receipt_left_during_a_wait_is_unchanged() {
-    let detail = stale_request_across_a_wait(false);
+    let detail = stale_request_across_a_wait();
     assert_eq!(
         payloads(&detail, "stale_receipt_resolved"),
         [&json!({"phase": "resume", "attempt": 1, "outcome": "unchanged"})]
