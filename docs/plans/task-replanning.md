@@ -81,6 +81,7 @@ Claude/Codexで同じ状態機械を使う。
 ## 入口と診断
 
 フローは **候補検知 → 診断 → 継続か保留 → snapshot → plannerの置換proposal → plan review → trusted runtimeの適用**。手動の再計画依頼・workerの提案・runtimeの検知は同じ候補記録に合流する。人/inboxは対象runを参照した既存の永続requestを入口にできる。workerは自分のrunに提案と根拠を残すだけで、停止・実行中taskの編集・request登録・DB操作は行えない。権限上の問いだけは従来のworker_questionを使い、単なる分割の推奨をaskにしない。再計画を明示した手動requestは通常のplanner起動より先に候補へ結び、snapshot確定まで起動を待たせる。runtimeは採用した候補を一意の再計画操作に結び、同じrun・同じ診断窓の重複をまとめる。
+操作の一意性は実装済み（[SQLite persistence](../design/persistence.md#不変条件)）。
 
 診断は読み取りだけの復旧jobの契約を拡張し、根拠event ID・時刻の窓・task/goalの条件・paths/verify/evidence・receiptとHEAD・原因別のturn/review/resume・前回の診断と進捗を渡す。実行中turnを止めて診断する必要はない。診断結果の選択はcontinue / replan / askで、原因・比較した案・推奨・confidence・次に確かめる条件を持つ。runtimeは診断の対象versionを再確認する。
 

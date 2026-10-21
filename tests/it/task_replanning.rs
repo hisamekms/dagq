@@ -1,7 +1,9 @@
 //! The replanning operations of a run (ADR-t1521-1, ADR-t1521-2) through
 //! the CLI and the queue: a person's request and a worker's proposal on
-//! its own run open one operation per run with the task's and its goal's
-//! conditions as they were, which a reopened queue reads back unchanged;
+//! its own run open one operation per task (on its latest run until it
+//! guards the task, then on the run it fenced), with the task's and its
+//! goal's conditions as they were, which a reopened queue reads back
+//! unchanged;
 //! only the trusted runtime moves an operation on; and while one guards
 //! its task, `ready`, `edit`, `cancel`, a change of its dependencies, a
 //! resume, a landing and the claim are refused, as `status`, `doctor`,
@@ -922,4 +924,249 @@ fn a_request_whose_operation_ends_before_its_snapshot_is_declined_with_the_outco
         dagq::domain::plan_request::RequestStatus::Open
     );
     assert_eq!(event("request_declined").len(), 2);
+}
+
+/// A task has one open operation, on its latest run while it does not
+/// guard the task: when the run it was opened on ends and the task is
+/// claimed again before the operation moved on, the new run takes it over
+/// (with its planning request) at the claim,
+/// `replans`, `list`, `show`, `status` and `doctor` show it on the new run,
+/// a request on the new run joins it, and one on the ended run is refused.
+#[test]
+fn a_new_run_of_the_task_takes_over_its_open_operation() {
+    let (_dir, db) = queue();
+    let (mut queue, a, _, first) = claimed(&db);
+    let opened = ok(
+        &db,
+        &args(&request(&first, "the review keeps sending it back")),
+    );
+    let id = opened["operation"]["id"].as_i64().unwrap();
+    let request_id = opened["request"]["id"].clone();
+
+    // The run ends while the operation is a candidate, and the task is
+    // claimed again.
+    let conn = Connection::open(&db).unwrap();
+    conn.execute("DELETE FROM run_leases WHERE run_id=?1", [first.as_str()])
+        .unwrap();
+    conn.execute(
+        "UPDATE task_runs SET status='failed' WHERE id=?1",
+        [first.as_str()],
+    )
+    .unwrap();
+    conn.execute("UPDATE tasks SET status='ready' WHERE id=?1", [a.as_i64()])
+        .unwrap();
+    let ClaimOutcome::Claimed { run } = queue.claim(&base()).unwrap() else {
+        panic!("claim")
+    };
+    assert_eq!(run.task_id(), a);
+    let second = run.id().clone();
+    assert_ne!(second, first);
+
+    let carried = queue.replan_operation(ReplanId::new(id)).unwrap();
+    assert_eq!(carried.run_id, second);
+    assert_eq!(carried.status, ReplanStatus::Candidate);
+    assert_eq!(carried.generation, 2);
+    assert_eq!(json!(carried.request_id), request_id);
+    let refs: Value = conn
+        .query_row(
+            "SELECT refs FROM plan_requests WHERE id=?1",
+            [request_id.as_i64().unwrap()],
+            |r| Ok(serde_json::from_str(&r.get::<_, String>(0)?).unwrap()),
+        )
+        .unwrap();
+    for run in [&first, &second] {
+        assert!(
+            refs.as_array()
+                .unwrap()
+                .contains(&json!({"id": run.as_str(), "kind": "run"})),
+            "{refs}"
+        );
+    }
+    let moved: Value = conn
+        .query_row(
+            "SELECT payload FROM run_events WHERE kind=?1 AND run_id=?2",
+            [EventKind::ReplanCarried.as_str(), second.as_str()],
+            |r| Ok(serde_json::from_str(&r.get::<_, String>(0)?).unwrap()),
+        )
+        .unwrap();
+    assert_eq!(
+        moved,
+        json!({"operation_id": id, "from_run": first.as_str(), "to_run": second.as_str(),
+               "generation": 2})
+    );
+
+    // A request on the new run joins it; one on the ended run is refused.
+    let again = ok(&db, &args(&request(&second, "still long")));
+    assert_eq!(again["created"], false);
+    assert_eq!(again["operation"]["id"], id);
+    assert_eq!(again["request"]["id"], request_id);
+    let (refused, error) = as_role(&db, "user", None, &args(&request(&first, "late")));
+    assert!(!refused, "{error}");
+    let open: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM replan_operations WHERE task_id=?1 AND closed_at IS NULL",
+            [a.as_i64()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(open, 1);
+
+    // Every reading shows the task's one operation, on the new run.
+    let listed = ok(&db, &["replans"]);
+    assert_eq!(listed["replans"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["replans"][0]["id"], id);
+    assert_eq!(listed["replans"][0]["run_id"], second.as_str());
+    let task = ok(&db, &["list"])["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == a.as_i64())
+        .unwrap()["replan"]
+        .clone();
+    assert_eq!(task["operation"], id);
+    let shown = ok(&db, &["show", &a.to_string()]);
+    assert_eq!(shown["replans"].as_array().unwrap().len(), 1);
+    assert_eq!(shown["replans"][0]["run_id"], second.as_str());
+    for report in [ok(&db, &["status"]), ok(&db, &["doctor"])] {
+        let open = report["replans"]["open"].as_array().unwrap();
+        assert_eq!(open.len(), 1, "{report}");
+        assert_eq!(open[0]["id"], id);
+    }
+}
+
+/// Two operations open on one task, one per run as the rule before kept
+/// them, the earlier one `blocked` with its run's work: a request on the
+/// latest run closes the later candidate as superseded and joins the
+/// blocked one, which stays on the run it parked and is what the guard,
+/// `list` and `replans` name.
+#[test]
+fn a_request_closes_a_candidate_beside_a_blocked_operation_and_joins_it() {
+    let (_dir, db) = queue();
+    let (queue, a, _, first) = claimed(&db);
+    let blocked = ok(&db, &args(&request(&first, "split it")))["operation"]["id"]
+        .as_i64()
+        .unwrap();
+    // The state the rule of one per run could leave (by hand): the first
+    // run's operation blocked, the task claimed again, and a candidate on
+    // the second run.
+    let conn = Connection::open(&db).unwrap();
+    let second = RunId::new("00000000-0000-4000-8000-000000000002").unwrap();
+    conn.execute_batch(&format!(
+        "DELETE FROM run_leases WHERE run_id='{first}';
+         UPDATE task_runs SET status='failed' WHERE id='{first}';
+         INSERT INTO task_runs(id,task_id,status,requested_provider,actual_provider,base_commit)
+         VALUES ('{second}',{a},'running','claude','claude','{}');
+         UPDATE replan_operations SET status='blocked', generation=2 WHERE id={blocked};
+         INSERT INTO replan_operations(task_id, run_id, goal_id, origin, status, generation,
+           reason, conditions, task_version, goal_acceptance_version, diagnosis,
+           requested_by, requested_by_id, created_at, updated_at)
+         SELECT task_id, '{second}', goal_id, 'worker', 'candidate', 1, 'again', conditions,
+           task_version, goal_acceptance_version, diagnosis, requested_by, requested_by_id,
+           created_at, updated_at FROM replan_operations WHERE id={blocked};",
+        "a".repeat(40),
+    ))
+    .unwrap();
+    let candidate = conn.last_insert_rowid();
+
+    let joined = ok(&db, &args(&request(&second, "still long")));
+    assert_eq!(joined["created"], false);
+    assert_eq!(joined["operation"]["id"], blocked);
+    let closed = queue.replan_operation(ReplanId::new(candidate)).unwrap();
+    assert_eq!(closed.status, ReplanStatus::Continuing);
+    assert!(closed.closed_at.is_some());
+    let kept = queue.replan_operation(ReplanId::new(blocked)).unwrap();
+    assert_eq!(kept.status, ReplanStatus::Blocked);
+    assert_eq!(kept.run_id, first);
+    assert_eq!(kept.generation, 2);
+    assert_eq!(
+        queue.replan_guard(a).unwrap().unwrap().operation.as_i64(),
+        blocked
+    );
+    let listed = ok(&db, &["replans"]);
+    assert_eq!(listed["replans"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["replans"][0]["id"], blocked);
+    let task = ok(&db, &["list"])["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|task| task["id"] == a.as_i64())
+        .unwrap()["replan"]
+        .clone();
+    assert_eq!(task["operation"], blocked);
+}
+
+/// Two candidates open on one task, one per run as the rule before kept
+/// them: the runtime fences neither while the other is open, so two never
+/// guard one task; a request on the latest run closes the earlier one as
+/// superseded (its planning request declined), after which the task's one
+/// operation is fenced.
+#[test]
+fn no_second_operation_of_a_task_is_fenced_and_a_request_leaves_one() {
+    let (_dir, db) = queue();
+    let (mut queue, a, _, first) = claimed(&db);
+    let earlier = ok(&db, &args(&request(&first, "split it")))["operation"]["id"]
+        .as_i64()
+        .unwrap();
+    let conn = Connection::open(&db).unwrap();
+    let second = RunId::new("00000000-0000-4000-8000-000000000003").unwrap();
+    conn.execute_batch(&format!(
+        "DELETE FROM run_leases WHERE run_id='{first}';
+         UPDATE task_runs SET status='failed' WHERE id='{first}';
+         INSERT INTO task_runs(id,task_id,status,requested_provider,actual_provider,base_commit)
+         VALUES ('{second}',{a},'running','claude','claude','{}');
+         INSERT INTO replan_operations(task_id, run_id, goal_id, origin, status, generation,
+           reason, conditions, task_version, goal_acceptance_version, diagnosis,
+           requested_by, requested_by_id, created_at, updated_at)
+         SELECT task_id, '{second}', goal_id, 'worker', 'candidate', 1, 'again', conditions,
+           task_version, goal_acceptance_version, diagnosis, requested_by, requested_by_id,
+           created_at, updated_at FROM replan_operations WHERE id={earlier};",
+        "a".repeat(40),
+    ))
+    .unwrap();
+    let later = conn.last_insert_rowid();
+    let fence = ReplanMove {
+        to: ReplanStatus::PauseRequested,
+        reason: "split it".into(),
+        snapshot_id: None,
+        diagnosis: None,
+    };
+    for id in [earlier, later] {
+        let refused = queue
+            .move_replan(ReplanId::new(id), 1, &fence)
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("has operation"), "{refused}");
+        assert_eq!(
+            queue.replan_operation(ReplanId::new(id)).unwrap().status,
+            ReplanStatus::Candidate
+        );
+    }
+    assert_eq!(queue.replan_guard(a).unwrap(), None);
+
+    let joined = ok(&db, &args(&request(&second, "still long")));
+    assert_eq!(joined["created"], false);
+    assert_eq!(joined["operation"]["id"], later);
+    let closed = queue.replan_operation(ReplanId::new(earlier)).unwrap();
+    assert_eq!(closed.status, ReplanStatus::Continuing);
+    let request = closed.request_id.unwrap();
+    assert_eq!(
+        queue.plan_request(request).unwrap().status,
+        dagq::domain::plan_request::RequestStatus::Declined
+    );
+    assert_eq!(
+        ok(&db, &["replans"])["replans"].as_array().unwrap().len(),
+        1
+    );
+
+    let fenced = queue.move_replan(ReplanId::new(later), 1, &fence).unwrap();
+    assert_eq!(fenced.status, ReplanStatus::PauseRequested);
+    assert_eq!(
+        queue.replan_guard(a).unwrap().unwrap().operation.as_i64(),
+        later
+    );
+    for report in [ok(&db, &["status"]), ok(&db, &["doctor"])] {
+        let open = report["replans"]["open"].as_array().unwrap();
+        assert_eq!(open.len(), 1, "{report}");
+        assert_eq!(open[0]["id"], later);
+    }
 }

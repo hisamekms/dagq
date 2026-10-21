@@ -2721,6 +2721,8 @@ pub(super) fn claim_task(
             run.created_at()
         ],
     )?;
+    // The task's open replanning operation goes on with its new run.
+    super::replans::carry_open_to(tx, task.id(), run.id(), now_secs)?;
     if task.worker().mode == crate::domain::worker::WorkerMode::Interactive {
         event(
             tx,

@@ -2,10 +2,14 @@
 //! `replan_operations` with their condition mappings (`replan_mappings`)
 //! and replacements (`replan_replacements`), and the planning request a
 //! person's request on a run records (`plan_requests.replan_operation_id`).
-//! Opening one is one write transaction that inserts it only when its run
-//! has none open, so two requests on one run (two supervisors, a person
-//! and a worker at once) open one. The guard every ordinary step of a task
-//! asks ([`check_task_step`]) reads the same rows, and the task's hold,
+//! A task has at most one open operation, on its latest run unless it
+//! guards the task: opening one is one write transaction that inserts it
+//! only when the task has none open, so two requests on one run (two
+//! supervisors, a person and a worker at once) open one; a new run of the
+//! task takes over the open one of the run before it ([`carry_open_to`]);
+//! and [`move_in`] refuses to diagnose, fence or reopen one beside another
+//! ([`task_replan::needs_task_alone`]). The guard every ordinary step of a
+//! task asks ([`check_task_step`]) reads the same rows, and the task's hold,
 //! inside the step's own transaction. The condition mappings are written
 //! only through [`write_mappings`], which refuses a second deletion of one
 //! acceptance item inside the writing transaction: the table's key does
@@ -32,8 +36,13 @@ const OPEN: &str = "SELECT * FROM replan_operations WHERE closed_at IS NULL ORDE
 impl SqliteQueue {
     /// Record `new` from `origin` as `by_role` with actor id `by_id`: a new
     /// `candidate` operation on its run with the task's and its goal's
-    /// conditions as they are now, or the run's open one when it has one
-    /// (`created` false). A person's request (`manual`) also records the
+    /// conditions as they are now, or the task's open one (`created` false)
+    /// as [`task_replan::request_on`] says: the one on the same run, or one
+    /// that guards the task, which stays on the run it fenced, whatever run
+    /// the request names. A request on the task's latest run first keeps
+    /// one open operation on the task ([`carry_open_to`]); while one that
+    /// does not guard is open on another run, the request is refused.
+    /// A person's request (`manual`) also records the
     /// operation's planning request, once per operation, whose planner
     /// waits for the operation's snapshot. `replan_requested` on the run
     /// records each call.
@@ -63,17 +72,24 @@ impl SqliteQueue {
             |r| r.get(0),
         )?;
         let task = read_task(&tx, task_id)?;
-        let existing = tx
-            .query_row(
-                "SELECT * FROM replan_operations WHERE run_id=?1 AND closed_at IS NULL
-                 ORDER BY id LIMIT 1",
-                [&new.run],
-                operation_row,
-            )
-            .optional()?;
-        let (id, created) = match existing {
-            Some(op) => (op.id, false),
-            None => {
+        if latest == new.run {
+            carry_open_to(&tx, task_id, &new.run, now)?;
+        }
+        let open = open_operations(&tx, task_id)?;
+        let (id, created) = match task_replan::request_on(task_replan::current(&open), &new.run) {
+            task_replan::Request::Join(id) => (id, false),
+            task_replan::Request::Refuse(id) => {
+                let on = open
+                    .iter()
+                    .find(|op| op.id == id)
+                    .map(|op| op.run_id.to_string())
+                    .unwrap_or_default();
+                anyhow::bail!(
+                    "run {} cannot be replanned: replan operation {id} of task {task_id} is open on run {on}",
+                    new.run
+                );
+            }
+            task_replan::Request::Open => {
                 task_replan::check_replannable(
                     &new.run,
                     status.parse::<RunStatus>()?,
@@ -290,21 +306,22 @@ pub(crate) fn move_in(
 ) -> Result<ReplanOperation> {
     let op = read_operation(conn, id)?;
     task_replan::check_move(&op, generation, step)?;
-    // A closed operation reopened (a restore that failed) must stay the
-    // run's one open operation.
-    if op.status.is_closed() && !step.to.is_closed() {
+    // An operation diagnosed, fenced or reopened (a restore that failed)
+    // must be the task's one open operation.
+    if task_replan::needs_task_alone(op.status, step.to) {
         let other: Option<ReplanId> = conn
             .query_row(
-                "SELECT id FROM replan_operations WHERE run_id=?1 AND closed_at IS NULL AND id<>?2
+                "SELECT id FROM replan_operations WHERE task_id=?1 AND closed_at IS NULL AND id<>?2
                  LIMIT 1",
-                params![op.run_id, id],
+                params![op.task_id, id],
                 |r| r.get(0),
             )
             .optional()?;
         if let Some(other) = other {
             anyhow::bail!(
-                "replan operation {id} cannot be reopened: run {} has operation {other} open",
-                op.run_id
+                "replan operation {id} cannot move to {}: task {} has operation {other} open",
+                step.to.as_str(),
+                op.task_id
             );
         }
     }
@@ -450,19 +467,79 @@ pub(super) fn operations_of(conn: &Connection, task: TaskId) -> Result<Vec<Repla
     ops.into_iter().map(|op| with_outcome(conn, op)).collect()
 }
 
-/// The open operation on `task`, if any: what `list` marks it with.
+/// The open operations on `task`, oldest first.
+fn open_operations(conn: &Connection, task: TaskId) -> Result<Vec<ReplanOperation>> {
+    Ok(conn
+        .prepare(
+            "SELECT * FROM replan_operations WHERE task_id=?1 AND closed_at IS NULL ORDER BY id",
+        )?
+        .query_map([task], operation_row)?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// The task's open operation, if any ([`task_replan::current`]): what
+/// `list` marks it with. A task has at most one open operation that does
+/// not guard it, on its latest run ([`carry_open_to`]); one that guards
+/// stays on the run it parked, and is the one read.
 pub(super) fn open_operation_of(
     conn: &Connection,
     task: TaskId,
 ) -> Result<Option<ReplanOperation>> {
-    Ok(conn
-        .query_row(
-            "SELECT * FROM replan_operations WHERE task_id=?1 AND closed_at IS NULL
-             ORDER BY id LIMIT 1",
-            [task],
-            operation_row,
-        )
-        .optional()?)
+    Ok(task_replan::current(&open_operations(conn, task)?).cloned())
+}
+
+/// Keep one open operation on `task` now that `run` is its latest run, on
+/// `conn` inside the caller's transaction (the claim of `run`, or a request
+/// on it), as [`task_replan::carry`] decides and why: the others that do
+/// not guard close as `continuing` (`replan_status_changed`), and the kept
+/// one, unless it guards, moves to `run` under a raised generation with
+/// `replan_carried`, its planning request naming `run` beside the earlier
+/// run.
+pub(super) fn carry_open_to(conn: &Connection, task: TaskId, run: &RunId, now: i64) -> Result<()> {
+    let open = open_operations(conn, task)?;
+    let carry = task_replan::carry(&open, run);
+    let Some(kept) = carry.kept else {
+        return Ok(());
+    };
+    for older in open.iter().filter(|op| carry.superseded.contains(&op.id)) {
+        let step = ReplanMove {
+            to: ReplanStatus::Continuing,
+            reason: format!("superseded by replan operation {kept} of the task"),
+            snapshot_id: None,
+            diagnosis: None,
+        };
+        move_in(conn, older.id, older.generation, &step, now)?;
+    }
+    let Some((id, generation)) = carry.moved else {
+        return Ok(());
+    };
+    let Some(op) = open.iter().find(|op| op.id == id) else {
+        return Ok(());
+    };
+    conn.execute(
+        "UPDATE replan_operations SET run_id=?1, generation=?2, updated_at=?3 WHERE id=?4",
+        params![run, generation, now, id],
+    )?;
+    if let Some(request) = op.request_id {
+        let mut refs = read_request(conn, request)?.refs;
+        let to = RequestRef::Run(run.clone());
+        if !refs.contains(&to) {
+            refs.push(to);
+            conn.execute(
+                "UPDATE plan_requests SET refs=?1, updated_at=?2 WHERE id=?3",
+                params![serde_json::to_string(&refs)?, now, request],
+            )?;
+        }
+    }
+    event(
+        conn,
+        task,
+        Some(run),
+        EventKind::ReplanCarried,
+        json!({"operation_id": id, "from_run": op.run_id, "to_run": run,
+               "generation": generation}),
+    )?;
+    Ok(())
 }
 
 /// The task's and its goal's conditions as they are on `conn` now.

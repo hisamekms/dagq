@@ -1907,9 +1907,10 @@ enum RequestCommand {
 #[derive(Subcommand, Clone)]
 enum ReplanCommand {
     /// Ask the runtime to replan run RUN (only a person at a plain terminal and the inbox, at a
-    /// person's word): one operation per run, a request on a run that has one returns it. Its
-    /// planning request waits for the run's saved work. Prints {"operation", "created",
-    /// "request"}.
+    /// person's word): one open operation per task, which a request returns when it is on RUN or
+    /// guards the task (it stays on the run it fenced); one that does not guard moves to the
+    /// task's latest run, and a request on an earlier run is refused. Its planning request waits
+    /// for the run's saved work. Prints {"operation", "created", "request"}.
     Request {
         #[arg(long)]
         run: String,

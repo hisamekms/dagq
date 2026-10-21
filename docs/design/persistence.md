@@ -76,6 +76,9 @@ SqliteQueue（src/infrastructure/）── BEGIN IMMEDIATE ──► queue.db（
 
 - 状態を変える操作は`BEGIN IMMEDIATE`で直列化し、判定と書き込みとeventを1つのトランザクションに入れる。
 - taskごとに未完了のrunは1つ、`integrated`のrunは1つ、queue全体で`integrating`のrunは1つ（部分UNIQUE index）。
+- taskごとに開いた再計画の操作は高々1つで、保護しない操作はtaskの最新のrunにあり、保護する操作は保留したrunに残る（indexでなく書き込みのtransactionが守る）。
+  開く書き込みはtaskに開いた操作が無いときだけ足し、保護しない状態から開いたまま進める書き込み（診断・保留の柵・`blocked`への戻り）はtaskにほかの開いた操作があれば拒む。
+  claimと最新のrunへの依頼は前のrunに開いた保護しない操作を新しいrunへ引き継ぎ（`replan_carried`）、重なった保護しない操作だけを閉じ、保護する操作は閉じずに元のrunに残して、どのrunへの依頼もそれに合流させる（判断と理由は`domain::task_replan`の`carry`と`needs_task_alone`のdoc comment）。
 - `recover`を除き、runの状態を変える書き込みは、そのrunのlease行が自分のtokenのときだけ通る。
 - eventと所属の判断は追記だけで、eventは知らないkindも落とさずに読む。
 - DBにCHECK制約は無く、規則はdomainの型と書き込みのportが持つ（下の「CHECK制約を使わない」）。

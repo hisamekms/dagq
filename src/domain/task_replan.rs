@@ -1,5 +1,7 @@
 //! The replanning of a long-running task's run (ADR-t1521-1, ADR-t1521-2):
-//! one operation per run from a person's request (`replan request`), a
+//! at most one open operation per task ([`carry`], [`needs_task_alone`]),
+//! on its latest run while it does not guard the task and on the run it
+//! fenced once it does, from a person's request (`replan request`), a
 //! worker's proposal on its own run (`replan propose`) or the runtime's
 //! detection, which only the trusted runtime moves on (diagnosis, the
 //! park at a safe boundary, the snapshot, the planner's replacement
@@ -75,8 +77,8 @@ impl ReplanStatus {
         Self::Blocked,
     ];
 
-    /// Whether the operation has ended: a new request on the run opens a
-    /// new one. Only a continuation or a withdrawal whose run's work cannot
+    /// Whether the operation has ended: a new request on the task's run
+    /// opens a new one. Only a continuation or a withdrawal whose run's work cannot
     /// be restored is moved again, back to `blocked`
     /// ([`Self::reopens`]).
     pub const fn is_closed(self) -> bool {
@@ -582,6 +584,99 @@ pub const fn generation_after(from: ReplanStatus, to: ReplanStatus, generation: 
     }
 }
 
+/// Whether a move of an operation from `from` to `to` needs it to be its
+/// task's only open operation: one that leaves it open from a status that
+/// does not guard the task (`candidate` and `diagnosing` going on, a
+/// closed one reopened to `blocked`). With the opening of one only on a
+/// task that has none and [`carry`] at each new run, this keeps a task to
+/// at most one open operation: no second one is diagnosed, fenced or
+/// reopened beside another, so two never guard one task, and the work a
+/// guarding one saved is never what is given up to keep one.
+pub const fn needs_task_alone(from: ReplanStatus, to: ReplanStatus) -> bool {
+    !to.is_closed() && !from.guards()
+}
+
+/// What to do with the operations open on a task (`open`, oldest first)
+/// so that it keeps one, on its latest run `latest` when it does not guard
+/// the task ([`carry`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Carry {
+    /// The task's operation from here on ([`current`]).
+    pub kept: Option<ReplanId>,
+    /// The kept operation moved to `latest`, with the generation it takes.
+    pub moved: Option<(ReplanId, i64)>,
+    /// The others that do not guard the task (`candidate`, `diagnosing`),
+    /// closed as `continuing`: superseded by the kept one.
+    pub superseded: Vec<ReplanId>,
+}
+
+/// The one of `open` (a task's open operations, oldest first) that is the
+/// task's operation: the one that guards it, which is what the guard
+/// reads, else the newest. The rule of one per task leaves one, but the
+/// rule of one per run before it could leave one on each run, none of
+/// them guarding (nothing moved one into a guarding status beside
+/// another, [`needs_task_alone`]).
+pub fn current(open: &[ReplanOperation]) -> Option<&ReplanOperation> {
+    open.iter()
+        .find(|op| op.status.guards())
+        .or_else(|| open.last())
+}
+
+/// Keep one of a task's open operations `open` (oldest first) once its
+/// latest run is `latest` (the claim of a new run, or a request on it).
+/// The operation is the task's, as its guard and its replacement are, so
+/// a request made while an earlier run went on is taken over by the run
+/// that goes on rather than closed, under a raised generation so that a
+/// move decided on the earlier run is refused. One that guards stays on
+/// the run it fenced, with the work it is saving or saved, and is never
+/// closed here, whatever its step (the pause's fence, the wait for the
+/// writer and the snapshot included): only the others that do not guard
+/// (`candidate`, `diagnosing`, which leave their run going and hold no
+/// work) are superseded by the kept one.
+pub fn carry(open: &[ReplanOperation], latest: &RunId) -> Carry {
+    let Some(kept) = current(open) else {
+        return Carry {
+            kept: None,
+            moved: None,
+            superseded: Vec::new(),
+        };
+    };
+    let moved =
+        (!kept.status.guards() && kept.run_id != *latest).then_some((kept.id, kept.generation + 1));
+    let superseded = open
+        .iter()
+        .filter(|op| op.id != kept.id && !op.status.guards())
+        .map(|op| op.id)
+        .collect();
+    Carry {
+        kept: Some(kept.id),
+        moved,
+        superseded,
+    }
+}
+
+/// What a request on run `run` does with the task's operation `kept`
+/// (after [`carry`]): it joins one on the same run, or one that guards
+/// the task (the task is being replanned already, whichever run it
+/// parked), is refused while one that does not guard is open on another
+/// run (after the carry, `run` is not the task's latest), and opens one
+/// when there is none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Request {
+    Join(ReplanId),
+    Refuse(ReplanId),
+    Open,
+}
+
+/// [`Request`] for a request on `run` while `kept` is the task's operation.
+pub fn request_on(kept: Option<&ReplanOperation>, run: &RunId) -> Request {
+    match kept {
+        Some(op) if op.run_id == *run || op.status.guards() => Request::Join(op.id),
+        Some(op) => Request::Refuse(op.id),
+        None => Request::Open,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -961,5 +1056,169 @@ mod tests {
         let parked = op(ReplanStatus::Parked);
         assert_eq!(parked.guard().map(|guard| guard.operation), Some(parked.id));
         assert!(op(ReplanStatus::Candidate).guard().is_none());
+    }
+
+    fn on(id: i64, run: &str, status: ReplanStatus) -> ReplanOperation {
+        ReplanOperation {
+            id: ReplanId::new(id),
+            run_id: RunId::new(run).unwrap(),
+            ..op(status)
+        }
+    }
+
+    #[test]
+    fn a_candidate_of_an_earlier_run_moves_to_the_latest_under_a_new_generation() {
+        let latest = RunId::new("run-2").unwrap();
+        for status in [ReplanStatus::Candidate, ReplanStatus::Diagnosing] {
+            let open = [on(1, "run-1", status)];
+            assert_eq!(
+                carry(&open, &latest),
+                Carry {
+                    kept: Some(ReplanId::new(1)),
+                    moved: Some((ReplanId::new(1), 2)),
+                    superseded: Vec::new(),
+                }
+            );
+        }
+        // Already on the latest run, or none: nothing moves.
+        let open = [on(1, "run-2", ReplanStatus::Candidate)];
+        assert_eq!(carry(&open, &latest).moved, None);
+        assert_eq!(
+            carry(&[], &latest),
+            Carry {
+                kept: None,
+                moved: None,
+                superseded: Vec::new()
+            }
+        );
+    }
+
+    #[test]
+    fn of_two_open_the_newest_is_kept_unless_one_guards() {
+        let latest = RunId::new("run-3").unwrap();
+        let open = [
+            on(1, "run-1", ReplanStatus::Diagnosing),
+            on(2, "run-2", ReplanStatus::Candidate),
+        ];
+        assert_eq!(current(&open).unwrap().id, ReplanId::new(2));
+        assert_eq!(
+            carry(&open, &latest),
+            Carry {
+                kept: Some(ReplanId::new(2)),
+                moved: Some((ReplanId::new(2), 2)),
+                superseded: vec![ReplanId::new(1)],
+            }
+        );
+        // A blocked one keeps its run and its saved work, and the guard
+        // and the readings name it; the candidate is superseded.
+        let open = [
+            on(1, "run-1", ReplanStatus::Blocked),
+            on(2, "run-2", ReplanStatus::Candidate),
+        ];
+        assert_eq!(current(&open).unwrap().id, ReplanId::new(1));
+        assert_eq!(
+            carry(&open, &RunId::new("run-2").unwrap()),
+            Carry {
+                kept: Some(ReplanId::new(1)),
+                moved: None,
+                superseded: vec![ReplanId::new(2)],
+            }
+        );
+        // One that guards at any step is never closed to keep one; only
+        // the candidate or diagnosing one beside it is.
+        for guarding in ReplanStatus::ALL
+            .into_iter()
+            .filter(|status| status.guards())
+        {
+            for (older, newer) in [
+                (guarding, ReplanStatus::Candidate),
+                (ReplanStatus::Diagnosing, guarding),
+            ] {
+                let open = [on(1, "run-1", older), on(2, "run-2", newer)];
+                let kept = if older.guards() { 1 } else { 2 };
+                assert_eq!(
+                    carry(&open, &latest),
+                    Carry {
+                        kept: Some(ReplanId::new(kept)),
+                        moved: None,
+                        superseded: vec![ReplanId::new(3 - kept)],
+                    },
+                    "{older:?} then {newer:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_guarding_operation_is_not_closed_to_keep_one_while_its_run_is_parked() {
+        // A blocked one beside one still parking its run (a state no write
+        // makes, `needs_task_alone`): neither is closed, so the park still
+        // waits for the writer and confirms the snapshot.
+        let latest = RunId::new("run-3").unwrap();
+        for parking in [
+            ReplanStatus::PauseRequested,
+            ReplanStatus::Quiescing,
+            ReplanStatus::Snapshotting,
+        ] {
+            let open = [
+                on(1, "run-1", ReplanStatus::Blocked),
+                on(2, "run-2", parking),
+            ];
+            let carried = carry(&open, &latest);
+            assert_eq!(carried.superseded, Vec::<ReplanId>::new(), "{parking:?}");
+            assert_eq!(carried.moved, None, "{parking:?}");
+        }
+    }
+
+    #[test]
+    fn no_second_operation_of_a_task_goes_on_into_a_status_beside_another() {
+        use ReplanStatus as S;
+        // From a status that does not guard, a move that leaves it open
+        // (a diagnosis, the pause's fence, a reopen to blocked) needs the
+        // task to itself; a guarding one goes on, and any one may close.
+        for (from, to) in [
+            (S::Candidate, S::Diagnosing),
+            (S::Candidate, S::PauseRequested),
+            (S::Diagnosing, S::PauseRequested),
+            (S::Diagnosing, S::Blocked),
+            (S::Withdrawn, S::Blocked),
+            (S::ContinuingAfterPark, S::Blocked),
+        ] {
+            assert!(from.can_move_to(to), "{from:?} to {to:?}");
+            assert!(needs_task_alone(from, to), "{from:?} to {to:?}");
+        }
+        for (from, to) in [
+            (S::Candidate, S::Continuing),
+            (S::Diagnosing, S::Continuing),
+            (S::PauseRequested, S::Quiescing),
+            (S::Quiescing, S::Snapshotting),
+            (S::Snapshotting, S::Parked),
+            (S::Blocked, S::Parked),
+            (S::Parked, S::Planning),
+            (S::Snapshotting, S::Continuing),
+        ] {
+            assert!(from.can_move_to(to), "{from:?} to {to:?}");
+            assert!(!needs_task_alone(from, to), "{from:?} to {to:?}");
+        }
+    }
+
+    #[test]
+    fn a_request_joins_the_operation_on_its_run_and_is_refused_on_another() {
+        let one = on(4, "run-2", ReplanStatus::Candidate);
+        let run = |name: &str| RunId::new(name).unwrap();
+        assert_eq!(
+            request_on(Some(&one), &run("run-2")),
+            Request::Join(ReplanId::new(4))
+        );
+        assert_eq!(
+            request_on(Some(&one), &run("run-1")),
+            Request::Refuse(ReplanId::new(4))
+        );
+        assert_eq!(request_on(None, &run("run-1")), Request::Open);
+        let blocked = on(3, "run-1", ReplanStatus::Blocked);
+        assert_eq!(
+            request_on(Some(&blocked), &run("run-2")),
+            Request::Join(ReplanId::new(3))
+        );
     }
 }
