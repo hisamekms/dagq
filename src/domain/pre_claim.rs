@@ -81,45 +81,110 @@ pub fn slots_full_changes(
 }
 
 /// The payload of a `slots_full_*` of the supervisor `token`: the class,
-/// the slots in use and the slots it has.
+/// the classes whose intervals its records leave open once this one is
+/// recorded (`open`, read back by [`recorded_open`]), the slots in use and
+/// the slots it has.
 pub fn slots_full_payload(
     token: &LeaseToken,
     class: SlotClass,
+    open: &BTreeSet<SlotClass>,
     running: usize,
     slots: usize,
 ) -> Value {
     json!({
         "supervisor": token,
         "class": class.as_str(),
+        "open": open.iter().map(|class| class.as_str()).collect::<Vec<_>>(),
         "running": running,
         "slots": slots,
     })
 }
 
-/// The classes the supervisor `token` left open in `events` (any order):
-/// what a process that takes over its token goes on from.
-pub fn open_slots_full(events: &[RunEvent], token: &str) -> BTreeSet<SlotClass> {
-    let mut events: Vec<&RunEvent> = events
-        .iter()
-        .filter(|event| text(event, "supervisor") == Some(token))
-        .collect();
-    events.sort_by_key(|event| event.id);
-    let mut open = BTreeSet::new();
-    for event in events {
-        let Some(class) = text(event, "class").and_then(SlotClass::of) else {
-            continue;
-        };
-        match event.kind.known() {
-            Some(EventKind::SlotsFullStarted) => {
-                open.insert(class);
-            }
-            Some(EventKind::SlotsFullEnded) => {
-                open.remove(&class);
-            }
-            _ => {}
+/// Record the changes from `open` to `full` ([`slots_full_changes`]) by
+/// `record`, which takes each kind and class with the classes left open
+/// once it is recorded and says whether it was. `open` follows each record
+/// made and stays as it was for one that was not, which a later pass
+/// records again: the newest record carries what the supervisor's records
+/// leave open, whichever of them failed in between.
+pub fn record_slots_full(
+    open: &mut BTreeSet<SlotClass>,
+    full: &BTreeSet<SlotClass>,
+    mut record: impl FnMut(EventKind, SlotClass, &BTreeSet<SlotClass>) -> bool,
+) {
+    for (kind, class) in slots_full_changes(open, full) {
+        let mut after = open.clone();
+        if kind == EventKind::SlotsFullStarted {
+            after.insert(class);
+        } else {
+            after.remove(&class);
+        }
+        if record(kind, class, &after) {
+            *open = after;
         }
     }
-    open
+}
+
+/// The classes a `slots_full_*` says its supervisor's records leave open
+/// ([`slots_full_payload`]'s `open`); `None` for a record without them,
+/// of an earlier binary.
+pub fn recorded_open(event: &RunEvent) -> Option<BTreeSet<SlotClass>> {
+    event
+        .payload
+        .get("open")?
+        .as_array()?
+        .iter()
+        .map(|class| class.as_str().and_then(SlotClass::of))
+        .collect()
+}
+
+/// Whether the supervisor `token` has a heavy slot free (a slot with the
+/// landing queue in it, so its claim may take any task), from the newest
+/// `slots_full_*` of each supervisor (`newest`, however old): the heavy
+/// class is free unless that record leaves it open ([`recorded_open`]).
+/// A supervisor with no record never had its heavy slots full. A newest
+/// record without `open` is of a supervisor still running an earlier
+/// binary (a process of this one records every class at its start,
+/// [`open_at_start`]): a heavy one says it by its kind, a light start says
+/// the heavy slots full too, and a light end leaves them unknown, read as
+/// full so that what that supervisor recorded holds as recorded.
+pub fn heavy_slots_free(newest: &[RunEvent], token: &str) -> bool {
+    let Some(event) = newest
+        .iter()
+        .filter(|event| text(event, "supervisor") == Some(token))
+        .max_by_key(|event| event.id)
+    else {
+        return true;
+    };
+    match recorded_open(event) {
+        Some(open) => !open.contains(&SlotClass::Heavy),
+        None => {
+            text(event, "class").and_then(SlotClass::of) == Some(SlotClass::Heavy)
+                && event.kind == EventKind::SlotsFullEnded
+        }
+    }
+}
+
+/// What a process of a supervisor goes on from at its start, before its
+/// first pass records the classes of `full`: what its newest record
+/// (`newest`, however old) leaves open when it says so ([`recorded_open`]),
+/// and none when it has no record (its slots were never full). A record of
+/// an earlier binary says nothing of it, nor does a read that failed
+/// (`newest` `None`): then every class is taken as the opposite of `full`,
+/// so that pass records each class once, every record with what it leaves
+/// open, and the newest record tells the state again. A start already open
+/// goes on and an end with none open ends nothing ([`PreClaimBook::add`]).
+pub fn open_at_start(
+    newest: Option<Option<&RunEvent>>,
+    full: &BTreeSet<SlotClass>,
+) -> BTreeSet<SlotClass> {
+    match newest {
+        Some(None) => BTreeSet::new(),
+        Some(Some(event)) if let Some(open) = recorded_open(event) => open,
+        _ => [SlotClass::Heavy, SlotClass::Light]
+            .into_iter()
+            .filter(|class| !full.contains(class))
+            .collect(),
+    }
 }
 
 /// The kind of a wait before a claim.
@@ -700,30 +765,193 @@ mod tests {
             [(EventKind::SlotsFullEnded, Heavy)]
         );
         assert!(slots_full_changes(&open, &open).is_empty());
-        let payload = slots_full_payload(&LeaseToken::new("s"), Light, 3, 3);
+        let payload = slots_full_payload(
+            &LeaseToken::new("s"),
+            Light,
+            &BTreeSet::from([Heavy, Light]),
+            3,
+            3,
+        );
         assert_eq!(
             payload,
-            json!({"supervisor": "s", "class": "light", "running": 3, "slots": 3})
+            json!({"supervisor": "s", "class": "light", "open": ["heavy", "light"], "running": 3, "slots": 3})
         );
     }
 
-    /// A process that takes the token over goes on from the classes its
-    /// token left open; another supervisor's records are not its.
+    /// The supervisor `s`'s passes in `rooms`, recorded into `records` by
+    /// [`record_slots_full`] with the records `fails` names (by pass and
+    /// order within it) failing. After each pass the newest record carries
+    /// what `s`'s records leave open, so it tells the heavy slots free
+    /// exactly when they are free in the records, and as the room of the
+    /// pass whenever that pass's records were all made.
+    fn passes_through(
+        rooms: &[(ClaimRoom, bool)],
+        fails: &[(usize, usize)],
+        records: &mut Vec<RunEvent>,
+    ) {
+        let mut open = BTreeSet::new();
+        for (pass, &(room, light)) in rooms.iter().enumerate() {
+            let full = full_classes(room, light);
+            let mut index = 0;
+            let mut failed = false;
+            record_slots_full(&mut open, &full, |kind, class, after| {
+                let fails_now = fails.contains(&(pass, index));
+                index += 1;
+                if fails_now {
+                    failed = true;
+                    return false;
+                }
+                let id = i64::try_from(records.len()).unwrap() + 1;
+                records.push(event(
+                    id,
+                    None,
+                    kind.as_str(),
+                    slots_full_payload(&LeaseToken::new("s"), class, after, 1, 1),
+                    id,
+                ));
+                true
+            });
+            let newest = records
+                .iter()
+                .rev()
+                .find(|record| text(record, "supervisor") == Some("s"));
+            if let Some(newest) = newest {
+                assert_eq!(recorded_open(newest).as_ref(), Some(&open), "{pass}");
+            }
+            assert_eq!(
+                heavy_slots_free(records, "s"),
+                !open.contains(&SlotClass::Heavy),
+                "{pass} {fails:?}"
+            );
+            if !failed {
+                assert_eq!(open, full, "{pass} {fails:?}");
+                assert_eq!(heavy_slots_free(records, "s"), room == ClaimRoom::Any);
+            }
+        }
+    }
+
+    /// Through every turn of the rooms, with the light changes on, off or
+    /// turned off, and with any one or two of the records failing, the
+    /// newest record says whether the heavy slots are free; another
+    /// supervisor's records say nothing of it, and one with none has them
+    /// free. Among the failures: the light class's start recorded and the
+    /// heavy one's not, then a free slot before it is recorded again,
+    /// whose light end leaves the heavy slots free.
     #[test]
-    fn a_token_goes_on_from_the_classes_it_left_open() {
-        let events = [
-            full(1, SLOTS_FULL_STARTED, "s", "heavy", 0),
-            full(2, SLOTS_FULL_STARTED, "s", "light", 1),
-            full(3, SLOTS_FULL_ENDED, "s", "light", 2),
-            full(4, SLOTS_FULL_STARTED, "t", "light", 3),
+    fn the_newest_record_tells_whether_the_heavy_slots_are_free() {
+        use ClaimRoom::{Any, LightOnly, None as NoRoom};
+        let other = vec![full(1, "slots_full_started", "other", "heavy", 0)];
+        assert!(heavy_slots_free(&other, "s"));
+        assert!(!heavy_slots_free(&other, "other"));
+        // A supervisor still running an earlier binary, without `open`: a
+        // heavy end frees the heavy slots, a light start fills them, and a
+        // light end leaves them unknown, read as full.
+        let earlier = [
+            full(1, "slots_full_ended", "a", "heavy", 0),
+            full(2, "slots_full_started", "b", "light", 0),
+            full(3, "slots_full_ended", "c", "light", 0),
         ];
-        assert_eq!(
-            open_slots_full(&events, "s"),
-            BTreeSet::from([SlotClass::Heavy])
+        assert!(heavy_slots_free(&earlier, "a"));
+        assert!(!heavy_slots_free(&earlier, "b"));
+        assert!(!heavy_slots_free(&earlier, "c"));
+        let rooms = [
+            (Any, true),
+            (LightOnly, true),
+            (NoRoom, true),
+            (Any, true),
+            (NoRoom, true),
+            (LightOnly, true),
+            (Any, true),
+            (NoRoom, true),
+            // The light changes turned off while no room is left.
+            (NoRoom, false),
+            (Any, false),
+            (NoRoom, false),
+            (LightOnly, true),
+        ];
+        // The heavy start fails, the light one is recorded, and the slot
+        // frees before the heavy one is recorded again.
+        let mut records = other.clone();
+        passes_through(
+            &[(Any, true), (NoRoom, true), (Any, true)],
+            &[(1, 0)],
+            &mut records,
         );
+        assert!(heavy_slots_free(&records, "s"));
+        let kinds: Vec<(&str, &str)> = records[1..]
+            .iter()
+            .map(|record| (record.kind.as_str(), text(record, "class").unwrap()))
+            .collect();
         assert_eq!(
-            open_slots_full(&events, "t"),
-            BTreeSet::from([SlotClass::Light])
+            kinds,
+            [
+                ("slots_full_started", "light"),
+                ("slots_full_ended", "light")
+            ]
+        );
+        // Every one or two failures over the turns (a pass makes two
+        // records at most).
+        for first in 0..rooms.len() * 2 {
+            for second in first..rooms.len() * 2 {
+                let fails = [(first / 2, first % 2), (second / 2, second % 2)];
+                passes_through(&rooms, &fails, &mut other.clone());
+            }
+        }
+    }
+
+    /// A process that takes the token over goes on from what its newest
+    /// record leaves open; with none it has nothing open. After an earlier
+    /// binary's records, here a free slot that recorded the heavy end then
+    /// the light one, or a read that failed, its first pass records every
+    /// class, and its newest record tells the heavy slots free.
+    #[test]
+    fn a_token_goes_on_from_its_newest_record_or_records_every_class() {
+        use SlotClass::{Heavy, Light};
+        let mut records = Vec::new();
+        record_slots_full(
+            &mut BTreeSet::new(),
+            &BTreeSet::from([Heavy]),
+            |kind, class, after| {
+                let id = i64::try_from(records.len()).unwrap() + 1;
+                let payload = slots_full_payload(&LeaseToken::new("s"), class, after, 1, 1);
+                records.push(event(id, None, kind.as_str(), payload, id));
+                true
+            },
+        );
+        let any = BTreeSet::new();
+        assert_eq!(
+            open_at_start(Some(records.last()), &any),
+            BTreeSet::from([Heavy])
+        );
+        assert_eq!(open_at_start(Some(None), &any), BTreeSet::new());
+        let earlier = [
+            full(1, SLOTS_FULL_ENDED, "s", "heavy", 0),
+            full(2, SLOTS_FULL_ENDED, "s", "light", 0),
+        ];
+        assert!(!heavy_slots_free(&earlier, "s"));
+        for newest in [Some(earlier.last()), None] {
+            let mut open = open_at_start(newest, &any);
+            assert_eq!(open, BTreeSet::from([Heavy, Light]));
+            let mut records = earlier.to_vec();
+            record_slots_full(&mut open, &any, |kind, class, after| {
+                let id = i64::try_from(records.len()).unwrap() + 1;
+                let payload = slots_full_payload(&LeaseToken::new("s"), class, after, 0, 1);
+                records.push(event(id, None, kind.as_str(), payload, id));
+                true
+            });
+            assert!(open.is_empty());
+            assert_eq!(records.len(), 4);
+            assert!(heavy_slots_free(&records, "s"));
+        }
+        // In the light room the first pass starts the heavy class again,
+        // which goes on, and ends the light one.
+        let light = BTreeSet::from([Heavy]);
+        assert_eq!(
+            slots_full_changes(&open_at_start(None, &light), &light),
+            [
+                (EventKind::SlotsFullStarted, Heavy),
+                (EventKind::SlotsFullEnded, Light)
+            ]
         );
     }
 

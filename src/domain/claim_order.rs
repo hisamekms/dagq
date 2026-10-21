@@ -14,7 +14,9 @@ use serde_json::{Value, json};
 
 use super::{
     EventKind, ExecutionClass, LeaseToken, Priority, RunEvent, TaskId,
+    claim_defer::OpenDeferral,
     investigation::{INVESTIGATION_LIMIT, InvestigationLimit, investigation_message},
+    pre_claim::heavy_slots_free,
     stats::timestamp_millis,
 };
 
@@ -250,9 +252,20 @@ pub fn investigation_deferred(
     )
 }
 
+/// How long passes with a free normal slot keep a [`LIGHT_ROOM`]
+/// deferral open, in seconds, counted from the first of them after the
+/// last pass that was not one. The landing queue's room and a free slot
+/// take turns as runs land and claims fill the slots: a deferral ended at
+/// each turn would write an end and a new deferral for every heavy
+/// candidate each time. Longer than the default claim spacing, so a free
+/// slot that only waits for the spacing keeps it too.
+pub const LIGHT_ROOM_KEPT_SECS: i64 = 300;
+
 /// The `claim_deferred` of a candidate the room the landing queue leaves
-/// cannot take ([`LIGHT_ROOM`]). It lasts until a slot with the landing
-/// queue in it is free again or the task leaves the candidates.
+/// cannot take ([`LIGHT_ROOM`]). It lasts while the task stays a
+/// candidate that the light room's passes defer and no other deferral
+/// holds, through the passes with a free normal slot in between for
+/// [`LIGHT_ROOM_KEPT_SECS`] (see [`class_deferral_step`]).
 pub fn light_room_deferred(token: &LeaseToken) -> (EventKind, Value) {
     (
         EventKind::ClaimDeferred,
@@ -264,10 +277,33 @@ pub fn light_room_deferred(token: &LeaseToken) -> (EventKind, Value) {
     )
 }
 
+/// The deferrals of `open` that hold their task out of the claim now,
+/// with `live` the supervisors alive now and `slots_full` the newest
+/// `slots_full_*` of each of them: a [`LIGHT_ROOM`] one only while none of
+/// them has a heavy slot free ([`heavy_slots_free`]), every other one as
+/// recorded. Over a free normal slot the light room's record stays open
+/// ([`class_deferral_step`]), whichever supervisor recorded it, while the
+/// claim of the supervisor with that slot may take its task: `candidates`
+/// reads its order from these, so it shows the task where the claim takes
+/// it. With no supervisor alive the records hold as recorded, as no claim
+/// is made.
+pub fn in_effect(
+    open: Vec<OpenDeferral>,
+    live: &[String],
+    slots_full: &[RunEvent],
+) -> Vec<OpenDeferral> {
+    let free = live.iter().any(|token| heavy_slots_free(slots_full, token));
+    open.into_iter()
+        .filter(|deferral| !free || deferral.reason != LIGHT_ROOM)
+        .collect()
+}
+
 /// What a pass makes of an order's deferral in place of `why`, from the
 /// reason the order defers the task for this pass (`now`), whether it is
-/// still a candidate and whether it passed the deferrals before the
-/// order's (worker, build, hotspot).
+/// still a candidate, whether it passed the deferrals before the order's
+/// (worker, build, hotspot), and, in a pass with a free normal slot, for
+/// how long the passes have had one (`normal_secs`; `None` in a pass of
+/// the light room or with no free slot).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassDeferralStep {
     /// Deferred for the same reason: the record stays open.
@@ -280,14 +316,25 @@ pub enum ClassDeferralStep {
     Ended(&'static str),
 }
 
-/// [`ClassDeferralStep`] of a deferral of `why`.
+/// [`ClassDeferralStep`] of a deferral of `why`. A [`LIGHT_ROOM`]
+/// deferral stays open in a pass with a free normal slot that the order
+/// passes the task in (the claim may take it there), until such passes
+/// last [`LIGHT_ROOM_KEPT_SECS`]: it ends when the task is claimed or
+/// leaves the candidates (`not_candidate`), when another deferral holds it
+/// (superseded), when the order defers it for another reason or the light
+/// room takes it (`cleared`), or when the free slot lasted that long
+/// (`cleared`).
 pub fn class_deferral_step(
     why: &str,
     now: Option<&str>,
     candidate: bool,
     passed: bool,
+    normal_secs: Option<i64>,
 ) -> ClassDeferralStep {
-    if now == Some(why) {
+    let kept = why == LIGHT_ROOM
+        && now.is_none()
+        && normal_secs.is_some_and(|secs| secs < LIGHT_ROOM_KEPT_SECS);
+    if now == Some(why) || (candidate && passed && kept) {
         ClassDeferralStep::Open
     } else if candidate && !passed {
         ClassDeferralStep::Superseded
@@ -626,7 +673,8 @@ mod tests {
     #[test]
     fn an_order_s_deferral_superseded_by_another_ends_without_a_record_of_its_own() {
         use ClassDeferralStep::*;
-        let step = class_deferral_step;
+        let step =
+            |why, now, candidate, passed| class_deferral_step(why, now, candidate, passed, None);
         // Held by the same reason, whether or not it passed before.
         assert_eq!(step(SPIKE_LIMIT, Some(SPIKE_LIMIT), true, true), Open);
         // A worker, build or hotspot deferral held it before the order.
@@ -641,5 +689,123 @@ mod tests {
             step(SPIKE_LIMIT, None, false, false),
             Ended("not_candidate")
         );
+    }
+
+    /// The landing queue's room and a free normal slot taking turns: the
+    /// light room's deferral of a heavy candidate stays one record, however
+    /// many turns, until the free slot lasts [`LIGHT_ROOM_KEPT_SECS`].
+    #[test]
+    fn a_light_room_deferral_stays_open_across_brief_free_slots() {
+        use ClassDeferralStep::*;
+        let heavy = TaskId::new(1);
+        let mut open: HashMap<TaskId, &str> = [(heavy, LIGHT_ROOM)].into();
+        let mut records = 1;
+        // (the reason the pass defers it for, seconds of free normal slot)
+        let passes = [
+            (None, Some(0)),
+            (Some(LIGHT_ROOM), None),
+            (None, Some(0)),
+            (None, Some(LIGHT_ROOM_KEPT_SECS - 1)),
+            (Some(LIGHT_ROOM), None),
+            (None, Some(10)),
+            (Some(LIGHT_ROOM), None),
+        ];
+        for (now, normal_secs) in passes {
+            if let Some(why) = open.get(&heavy).copied() {
+                match class_deferral_step(why, now, true, true, normal_secs) {
+                    Open => continue,
+                    _ => {
+                        open.remove(&heavy);
+                    }
+                }
+            }
+            if let Some(now) = now {
+                open.insert(heavy, now);
+                records += 1;
+            }
+        }
+        assert_eq!((records, open.get(&heavy)), (1, Some(&LIGHT_ROOM)));
+        let step = class_deferral_step;
+        // A free slot that lasted: the task is in the order, so it ends.
+        assert_eq!(
+            step(LIGHT_ROOM, None, true, true, Some(LIGHT_ROOM_KEPT_SECS)),
+            Ended("cleared")
+        );
+        // Claimed, or no candidate any more.
+        assert_eq!(
+            step(LIGHT_ROOM, None, false, false, Some(0)),
+            Ended("not_candidate")
+        );
+        // Held by a worker, build or hotspot deferral.
+        assert_eq!(step(LIGHT_ROOM, None, true, false, Some(0)), Superseded);
+        // Deferred by the order for another reason.
+        assert_eq!(
+            step(LIGHT_ROOM, Some(SPIKE_LIMIT), true, true, Some(0)),
+            Ended("cleared")
+        );
+        // Taken by the light room (a light task now): no free slot to keep it.
+        assert_eq!(step(LIGHT_ROOM, None, true, true, None), Ended("cleared"));
+        // A class limit's deferral is not kept by a free slot.
+        assert_eq!(
+            step(SPIKE_LIMIT, None, true, true, Some(0)),
+            Ended("cleared")
+        );
+    }
+
+    /// A light room's record holds its task out of `candidates` only while
+    /// no live supervisor has a heavy slot free, whichever supervisor
+    /// recorded it: over a free slot the claim may take the task, and the
+    /// order shows it there.
+    #[test]
+    fn a_light_room_deferral_holds_only_while_no_live_supervisor_has_a_heavy_slot_free() {
+        let deferral = |task, reason: &str, supervisor: Option<&str>| OpenDeferral {
+            task_id: TaskId::new(task),
+            reason: reason.to_owned(),
+            since: "2026-10-21 10:00:00".to_owned(),
+            files: Value::Null,
+            runs: Value::Null,
+            supervisor: supervisor.map(str::to_owned),
+            build: None,
+            missing: None,
+        };
+        let slots = |id, kind: EventKind, token: &str, class: &str| RunEvent {
+            id: crate::domain::EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.as_str().into(),
+            payload: json!({"supervisor": token, "class": class}),
+            created_at: "2026-10-21 10:00:00".to_owned(),
+            actor: None,
+        };
+        let open = vec![
+            deferral(1, LIGHT_ROOM, Some("gone")),
+            deferral(2, SPIKE_LIMIT, Some("a")),
+            deferral(3, LIGHT_ROOM, None),
+        ];
+        let held = |live: &[&str], records: &[RunEvent]| -> Vec<i64> {
+            let live: Vec<String> = live.iter().map(|token| (*token).to_owned()).collect();
+            in_effect(open.clone(), &live, records)
+                .iter()
+                .map(|deferral| deferral.task_id.as_i64())
+                .collect()
+        };
+        // The supervisor that recorded task 1's deferral is gone, its heavy
+        // slots left full; `a` judges it now, in the light room.
+        let light_room = [
+            slots(10, EventKind::SlotsFullStarted, "gone", "heavy"),
+            slots(11, EventKind::SlotsFullStarted, "a", "heavy"),
+        ];
+        assert_eq!(held(&["a"], &light_room), [1, 2, 3]);
+        // `a` has a free slot: its claim may take tasks 1 and 3.
+        let free = [
+            slots(10, EventKind::SlotsFullStarted, "gone", "heavy"),
+            slots(12, EventKind::SlotsFullEnded, "a", "heavy"),
+        ];
+        assert_eq!(held(&["a"], &free), [2]);
+        // A supervisor that never recorded its slots full has them free.
+        assert_eq!(held(&["a", "b"], &light_room), [2]);
+        // With none alive, the records hold as recorded.
+        assert_eq!(held(&[], &free), [1, 2, 3]);
     }
 }

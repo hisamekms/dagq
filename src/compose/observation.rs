@@ -526,6 +526,9 @@ impl crate::application::queue_reads::PlanningSources<SqliteQueue> for HostReads
     fn claim_holds(&self, queue: &SqliteQueue) -> Result<Vec<Value>> {
         health::claim_holds(queue, &SystemProcesses, queue.generators().clock.as_ref())
     }
+    fn live_supervisors(&self, queue: &SqliteQueue) -> Result<Vec<String>> {
+        health::live_supervisors(queue, &SystemProcesses, queue.generators().clock.as_ref())
+    }
     fn class_aging(
         &self,
         queue: &SqliteQueue,

@@ -16,7 +16,10 @@
 //! as the supervisor's `claimable` last recorded it (the same record as
 //! `status`' `claim_deferrals`), a snapshot that the supervisor closes only
 //! when it judges again. The supervisor does not judge while its slots are
-//! full or its claims are held, so a deferral may stay open then; this
+//! full or its claims are held, so a deferral may stay open then. A
+//! `light_room` one stays open over a brief free slot in which the claim
+//! may take its task, and holds the task out of the order only while no
+//! live supervisor has a heavy slot free (`claim_order::in_effect`); this
 //! module neither closes nor adds one, and runs no `claim_defer::decide`,
 //! hotspot or provider route of its own. The supervisor's own reads of the
 //! candidates (`fill_slots`, the samples of `stats` and `kpi`, the
@@ -104,13 +107,36 @@ pub struct ClaimView<T> {
     pub deferred: Vec<OpenDeferral>,
 }
 
-/// Each task's open deferral as the supervisor last recorded it.
-pub fn open_deferrals(queue: &(impl RunLog + ?Sized)) -> Result<Vec<OpenDeferral>> {
-    Ok(queue
+/// Each task's open deferral as the supervisor last recorded it, of those
+/// that hold the task out of the claim now ([`claim_order::in_effect`]):
+/// `live` gives the tokens of the supervisors alive now, read only when a
+/// record is of the light room, and each one's newest `slots_full_*` is
+/// read however old it is.
+pub fn open_deferrals(
+    queue: &(impl RunLog + ?Sized),
+    live: impl FnOnce() -> Result<Vec<String>>,
+) -> Result<Vec<OpenDeferral>> {
+    let open: Vec<OpenDeferral> = queue
         .latest_task_events(&DEFERRAL_KINDS.map(EventKind::as_str))?
         .iter()
         .filter_map(OpenDeferral::of)
-        .collect())
+        .collect();
+    if !open
+        .iter()
+        .any(|deferral| deferral.reason == claim_order::LIGHT_ROOM)
+    {
+        return Ok(open);
+    }
+    let live = live()?;
+    let tokens: Vec<&str> = live.iter().map(String::as_str).collect();
+    let slots_full = queue.latest_events_by_supervisor(
+        &[
+            EventKind::SlotsFullStarted.as_str(),
+            EventKind::SlotsFullEnded.as_str(),
+        ],
+        &tokens,
+    )?;
+    Ok(claim_order::in_effect(open, &live, &slots_full))
 }
 
 /// `ordered` (the candidates in the rule's order, each `id`) as shown with

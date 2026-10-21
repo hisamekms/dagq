@@ -2583,6 +2583,8 @@ impl Supervisor<'_> {
         // that is down holds the new claims; the runs in flight go on
         // (ADR-t1233-4 decision 2).
         let mut claims = None;
+        // Whether this pass read the candidates with a free normal slot.
+        let mut free_slot = false;
         // Nor while the CI cannot be read (ADR-t1920-1 decision 2).
         if !(self.landing.run_env_missing
             || self.observation.ci().held()
@@ -2617,6 +2619,7 @@ impl Supervisor<'_> {
                     // A held task is no candidate (the ready query leaves
                     // it out); its record says why (ADR-t1879-1).
                     self.note_held_claims()?;
+                    free_slot = room == ClaimRoom::Any;
                     let light = self.light_tasks(room)?;
                     let claimable = self.claimable(&graph, light.as_ref())?;
                     // Each claim at its own effective priority: aging lends
@@ -2636,6 +2639,9 @@ impl Supervisor<'_> {
                     );
                 }
             }
+        }
+        if !free_slot {
+            self.claim.defer.no_free_slot();
         }
         let may_claim = claims.is_some();
         // The claims of one priority run together: the claim loop takes

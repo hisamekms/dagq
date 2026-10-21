@@ -434,12 +434,7 @@ pub fn claim_holds(
     let registrations = queue.supervisors()?;
     let live: Vec<&SupervisorRegistration> = registrations
         .iter()
-        .filter(|registration| {
-            !heartbeat_stale(
-                control.alive(registration.pid),
-                now - registration.heartbeat_at,
-            )
-        })
+        .filter(|registration| is_live(registration, control, now))
         .collect();
     let on = |kinds: &[&str], held: EventKind| -> Result<Option<RunEvent>> {
         Ok(queue
@@ -488,6 +483,31 @@ pub fn claim_holds(
         );
     }
     Ok(held(live.is_empty(), records, spacing))
+}
+
+/// Whether the supervisor of `registration` is alive at `now` with a
+/// fresh heartbeat.
+fn is_live(registration: &SupervisorRegistration, control: &dyn ProcessControl, now: i64) -> bool {
+    !heartbeat_stale(
+        control.alive(registration.pid),
+        now - registration.heartbeat_at,
+    )
+}
+
+/// The tokens of the supervisors alive now with a fresh heartbeat, as
+/// [`claim_holds`] counts them.
+pub fn live_supervisors(
+    queue: &(impl crate::application::SupervisorReads + ?Sized),
+    control: &dyn ProcessControl,
+    clock: &dyn Clock,
+) -> Result<Vec<String>> {
+    let now = clock.now();
+    Ok(queue
+        .supervisors()?
+        .into_iter()
+        .filter(|registration| is_live(registration, control, now))
+        .map(|registration| registration.token.as_str().to_owned())
+        .collect())
 }
 
 /// Each of `tokens`' latest record of either kind of its own hold

@@ -99,6 +99,12 @@ pub(in crate::application::supervise) struct DeferWatch {
     /// light room, ADR-t1591-1), with their reason and since when; `None`
     /// until read from the queue.
     class_deferrals: Option<HashMap<TaskId, (String, i64)>>,
+    /// Since when the passes have had a free normal slot, from the first
+    /// [`Supervisor::claimable`] of any candidate after a pass that had
+    /// none (the light room, no room or held claims); `None` until then.
+    /// It keeps the light room's deferrals open over a brief free slot
+    /// ([`claim_order::LIGHT_ROOM_KEPT_SECS`]).
+    normal_since: Option<i64>,
     /// Whether this process's build contains each landed commit, as read:
     /// the build is the process's own, so the answer holds until a handoff
     /// starts another process with another build.
@@ -136,6 +142,12 @@ impl DeferWatch {
     /// again, with the claimed one.
     pub(super) fn claimed(&mut self) {
         self.in_flight = None;
+    }
+
+    /// A pass with no free normal slot: the next one with a free slot
+    /// counts its time from itself.
+    pub(super) fn no_free_slot(&mut self) {
+        self.normal_since = None;
     }
 }
 
@@ -278,7 +290,10 @@ impl Supervisor<'_> {
     /// (the room the landing queue leaves, ADR-t1591-1), only those tasks
     /// are arranged and returned, and the others are deferred for the
     /// light room: they never hold the aging back, and `candidates` leaves
-    /// them out as the claim does.
+    /// them out as the claim does. Without `light` (a free normal slot)
+    /// those deferrals stay open while the free slot is brief, as
+    /// [`claim_order::class_deferral_step`] says, and the claim may take
+    /// their tasks all the same.
     pub(super) fn claimable(
         &mut self,
         graph: &DependencyGraph,
@@ -586,12 +601,20 @@ impl Supervisor<'_> {
             }
             (kind, payload)
         };
+        let normal_secs = match light {
+            Some(_) => {
+                self.claim.defer.normal_since = None;
+                None
+            }
+            None => Some(now - *self.claim.defer.normal_since.get_or_insert(now)),
+        };
         class_deferrals.retain(|id, (why, since)| {
             let ended = match claim_order::class_deferral_step(
                 why,
                 reasons.get(id).copied(),
                 candidates.contains(id),
                 passed.contains(id),
+                normal_secs,
             ) {
                 ClassDeferralStep::Open => return true,
                 // Deferred for another reason this pass: its record

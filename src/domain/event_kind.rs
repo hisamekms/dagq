@@ -1389,11 +1389,11 @@ pub const TASK_HOLD_REMINDED: &str = EventKind::TaskHoldReminded.as_str();
 pub const TASK_RELEASED: &str = EventKind::TaskReleased.as_str();
 pub const TASK_STATUS_CHANGED: &str = EventKind::TaskStatusChanged.as_str();
 /// A supervisor's slots of one class (`heavy` or `light`) all full
-/// (`supervisor`, `class`, `running`, `slots`), recorded by that supervisor
-/// when its pass first finds them so ([`super::pre_claim`]).
+/// (`supervisor`, `class`, `open`, `running`, `slots`), recorded by that
+/// supervisor when its pass first finds them so ([`super::pre_claim`]).
 pub const SLOTS_FULL_STARTED: &str = EventKind::SlotsFullStarted.as_str();
 /// The same supervisor's pass found a slot of the class free again
-/// (`supervisor`, `class`, `running`, `slots`).
+/// (`supervisor`, `class`, `open`, `running`, `slots`).
 pub const SLOTS_FULL_ENDED: &str = EventKind::SlotsFullEnded.as_str();
 /// A supervisor's evidence of life (`supervisor`), from its heartbeat at
 /// most every [`super::supervisor_life::SUPERVISOR_ALIVE_INTERVAL_SECS`].

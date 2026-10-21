@@ -44,6 +44,9 @@ pub trait PlanningSources<Q: ?Sized> {
     /// What holds the claims now as the supervisors recorded it
     /// (`candidates`' `held`, ADR-t1992-1).
     fn claim_holds(&self, queue: &Q) -> Result<Vec<Value>>;
+    /// The tokens of the supervisors alive now, with a fresh heartbeat:
+    /// those whose claims the shown order is the order of.
+    fn live_supervisors(&self, queue: &Q) -> Result<Vec<String>>;
     /// What the threshold of the aging across the execution classes is
     /// chosen from (`[supervisor] class_aging`, ADR-t1487-2).
     fn class_aging(&self, queue: &Q) -> Result<AgingInputs>;
@@ -90,7 +93,7 @@ pub fn candidates<Q: TaskStore + RunLog + ?Sized>(
     let view = claim_view(
         claim_candidates(queue.candidates()?, &graph),
         |candidate| candidate.task.id(),
-        open_deferrals(queue)?,
+        open_deferrals(queue, || sources.live_supervisors(queue))?,
         deferrals,
         &aging,
     );
@@ -157,7 +160,7 @@ pub fn graph<Q: TaskStore + RunLog + ?Sized>(
             let view = claim_view(
                 std::mem::take(&mut graph.candidates),
                 |id| *id,
-                open_deferrals(queue)?,
+                open_deferrals(queue, || sources.live_supervisors(queue))?,
                 Deferrals::Excluded,
                 &aging,
             );

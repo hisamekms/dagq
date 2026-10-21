@@ -2172,3 +2172,15 @@ task = 2936
 name = "runtime_replan_park::a_restore_of_the_old_layout_stopped_in_the_old_scratch_starts_again"
 reason = "B 境界（Git の worktree の作成・削除・移動と差分の適用・supervisor の配線）: 古い配置（<run dir>/worktree）の run の止まった復元が古い名前の scratch（worktree.restoring）に run の branch を checkout したまま残しても、それを消してから新しい名前の scratch に git worktree add -B し、照合して元の path へ移して着地することを、実際の git worktree と supervisor で確かめる。scratch の名前の判断は domain::replan_snapshot の unit test"
 task = 2936
+
+# 11s to 23s in stress under the host's load (task 2409): the fixture's landing queue, then the config read again on each turn
+[[test]]
+name = "runtime_light_slots::a_light_room_deferral_stays_one_record_while_a_free_slot_comes_and_goes"
+reason = "B 境界（supervisor の配線・dagq.toml の読み直し・SQLite・CLI）: 着地待ちが空けた軽い枠と空いた通常の枠を実際の supervisor の pass で行き来させ、light_room の記録が 1 本のまま続き stats と status の claim_deferrals が増えないこと、空いた枠の claim が記録を持つ task を取ることを確かめる。続ける判断は domain::claim_order::class_deferral_step の unit test"
+task = 2409
+
+# 3s to 8s in stress under the host's load (task 2409): the fixture's claimed run, then a supervisor's passes
+[[test]]
+name = "runtime_light_slots::a_supervisor_that_takes_over_a_light_room_deferral_shows_it_by_its_own_free_slot"
+reason = "B 境界（supervisor の配線・登録と生存・SQLite・CLI）: 居なくなった supervisor が残した light_room の記録と埋まった通常の枠の記録を、別の token の実際の supervisor が空いた通常の枠の pass で引き継ぎ、記録が 1 本のまま candidates がその supervisor の claim の順を出すことを確かめる。読む規則の判断は domain::claim_order::in_effect と domain::pre_claim::heavy_slots_free の unit test"
+task = 2409

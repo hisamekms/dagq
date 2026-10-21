@@ -187,6 +187,7 @@ supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイル�
 - queue全体の控えはloopの前に効くので軽い枠でもclaimせず、claimの間隔も同じに効く（`domain::light_slots::gated`）。
 - parkしたrunのresume・待ちからの戻り・triage・adoptは軽い枠を使わない。
 - 軽い枠の周で取れない候補は`light_room`の控えとして記録し、agingは軽いtaskだけに当てる（`claim_order::light_room_deferred`）。
+  控えは通常の枠の短い空きを挟んでも続け、`candidates`は生きたsupervisorの通常の枠が空けば順から外さない（`claim_order::in_effect`）。
 - `stats`の空きslotと`kpi`のslotの使用率は軽い枠を数えず、着地待ちを含めて数える。
 
 ## 調査中の計画の上限

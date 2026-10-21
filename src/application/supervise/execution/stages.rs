@@ -19,10 +19,6 @@ use crate::domain::pre_claim::{self, SlotClass};
 use crate::domain::run_phase::{self, Attempt, PhaseChange};
 use std::collections::BTreeSet;
 
-/// How many of the queue's latest records of each `slots_full_*` a process
-/// reads to find what its token left open.
-const SLOTS_FULL_READ: usize = 256;
-
 /// The slots, each holding one run and its phase. Which slots there are
 /// changes only through these operations: a stage admits a run, releases
 /// it or puts it back where it was; the loop takes every slot out for a
@@ -488,50 +484,44 @@ impl ClaimState {
 
     /// Record where the slots of a class fill up or free again, as the
     /// supervisor `token` with `parallel` slots finds them at the end of
-    /// its claim pass ([`pre_claim::slots_full_changes`]); the classes it
-    /// left open are read once from its records, which a process that took
-    /// its token over goes on from. A record that fails is warned of and
-    /// tried again on the next pass.
+    /// its claim pass ([`pre_claim::record_slots_full`]); the classes it
+    /// left open are read once from its newest record, which a process that
+    /// took its token over goes on from ([`pre_claim::open_at_start`]). A
+    /// record that fails is warned of and tried again on the next pass.
     pub(super) fn note_slots_full(
         &mut self,
         log: &dyn RunLog,
         token: &LeaseToken,
         parallel: usize,
     ) {
+        let full = pre_claim::full_classes(self.room(parallel), !self.light_changes.is_empty());
         let mut open = match self.slots_full.take() {
             Some(open) => open,
             None => {
-                let records = [
-                    crate::domain::event_kind::SLOTS_FULL_STARTED,
-                    crate::domain::event_kind::SLOTS_FULL_ENDED,
-                ]
-                .into_iter()
-                .map(|kind| log.latest_events_of(kind, SLOTS_FULL_READ))
-                .collect::<Result<Vec<_>>>();
-                match records {
-                    Ok(records) => pre_claim::open_slots_full(&records.concat(), token.as_str()),
-                    Err(error) => {
-                        warn!(error = %format_args!("{error:#}"), "the supervisor's slots-full records could not be read: {error:#}");
-                        BTreeSet::new()
-                    }
+                let newest = log.latest_events_by_supervisor(
+                    &[
+                        crate::domain::event_kind::SLOTS_FULL_STARTED,
+                        crate::domain::event_kind::SLOTS_FULL_ENDED,
+                    ],
+                    &[token.as_str()],
+                );
+                if let Err(error) = &newest {
+                    warn!(error = %format_args!("{error:#}"), "the supervisor's slots-full records could not be read: {error:#}; recording every class again");
                 }
+                pre_claim::open_at_start(newest.as_ref().ok().map(|newest| newest.first()), &full)
             }
         };
-        let full = pre_claim::full_classes(self.room(parallel), !self.light_changes.is_empty());
-        for (kind, class) in pre_claim::slots_full_changes(&open, &full) {
-            let payload = pre_claim::slots_full_payload(token, class, self.slots.used(), parallel);
+        let used = self.slots.used();
+        pre_claim::record_slots_full(&mut open, &full, |kind, class, after| {
+            let payload = pre_claim::slots_full_payload(token, class, after, used, parallel);
             match log.record_queue_event(kind, payload) {
-                Ok(_) if kind == EventKind::SlotsFullStarted => {
-                    open.insert(class);
-                }
-                Ok(_) => {
-                    open.remove(&class);
-                }
+                Ok(_) => true,
                 Err(error) => {
                     warn!(error = %format_args!("{error:#}"), "could not record {kind} for the {} slots: {error:#}", class.as_str());
+                    false
                 }
             }
-        }
+        });
         self.slots_full = Some(open);
     }
 
