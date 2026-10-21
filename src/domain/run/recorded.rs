@@ -748,6 +748,7 @@ mod tests {
             kill_only: 0,
             conflict_requests: 0,
             parked_for_conflict: true,
+            parked_for_send_back: false,
         };
         let (_, recorded) = record_exhausted_resumes(
             run(RunStatus::NeedsSession),

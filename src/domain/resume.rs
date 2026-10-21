@@ -1,7 +1,7 @@
 //! How the resumes of a `needs_session` run are counted, and when a run
 //! whose resumes are used up is retried with its branch carried over
-//! (ADR-0047 decision 24, amended by ADR-t946-1). Both are read from the
-//! run's events alone.
+//! (ADR-0047 decision 24, amended by ADR-t946-1 and ADR-t2946-1). Both are
+//! read from the run's events alone.
 
 use super::{
     CommitSha, MAX_RESUME_ATTEMPTS, ReasonCode, RunEvent,
@@ -79,8 +79,8 @@ const PARKING: [EventKind; 11] = [
 /// event is a landing deferred for a rebase conflict or a landing recheck
 /// that found one, and whether it is that recheck (ADR-0068 decision 5);
 /// whether the latest parking event is a `resume` decided for a session a
-/// signal killed (ADR-t946-1), and the code of the run's `last_error` so
-/// far.
+/// signal killed (ADR-t946-1), whether it is a person's `send_back` of the
+/// landing (ADR-t2946-1), and the code of the run's `last_error` so far.
 #[derive(Debug, Clone, Copy, Default)]
 struct History {
     approved: bool,
@@ -88,6 +88,7 @@ struct History {
     conflict: bool,
     rechecked: bool,
     killed: bool,
+    sent_back: bool,
     error: Option<ReasonCode>,
 }
 
@@ -111,10 +112,17 @@ impl History {
                 self.killed = matches!(kind, EventKind::TriageFinished | EventKind::TriageDecided)
                     && event_code(event) == Some(ReasonCode::TriageResume)
                     && self.error == Some(ReasonCode::SessionKilled);
+                self.sent_back = kind == EventKind::LandingDecided
+                    && event_code(event) == Some(ReasonCode::SentBack);
             }
-            // Only the resume right after the kill's `resume` is kill-only:
-            // a later one, with no kill in between, is judged as usual.
-            Some(EventKind::ResumeStarted) => self.killed = false,
+            // Only the resume right after the kill's `resume` is kill-only,
+            // and only that after a `send_back` passes the conflict-only
+            // limit: a later one, with no park in between, is judged as
+            // usual.
+            Some(EventKind::ResumeStarted) => {
+                self.killed = false;
+                self.sent_back = false;
+            }
             _ => {}
         }
         if explains_last_error(event) {
@@ -226,6 +234,11 @@ pub struct ResumeCount {
     /// ([`parked_for_conflict_only`]): its next resume would be a
     /// conflict-only one, which the precheck's requests fence too.
     pub parked_for_conflict: bool,
+    /// Whether the run, as its events end, is parked by a person's
+    /// `send_back` of its landing (`landing_decided` with `sent_back`):
+    /// its next resume starts while counted resumes are left, even past
+    /// the conflict-only limit (ADR-t2946-1).
+    pub parked_for_send_back: bool,
 }
 
 impl ResumeCount {
@@ -254,6 +267,7 @@ impl ResumeCount {
         }
         count.conflict_requests = count.conflict_requests.saturating_sub(withdrawn);
         count.parked_for_conflict = history.conflict_only();
+        count.parked_for_send_back = history.sent_back;
         count
     }
 
@@ -280,12 +294,15 @@ impl ResumeCount {
     /// conflict, the conflict-only attempts with the precheck's requests
     /// ([`Self::conflict_attempts`]) reached it. A run the requests brought
     /// to the limit that is parked for another reason (a failed
-    /// verification, missing evidence) keeps its counted resumes.
+    /// verification, missing evidence) keeps its counted resumes, and so
+    /// does one a person's `send_back` parked whose conflict-only resumes
+    /// reached it (ADR-t2946-1): the fence stops a conflict that never
+    /// resolves, not a person's explicit send-back.
     pub const fn exhausted(self, config: ResumeConfig) -> bool {
         let limit = config.conflict_only_limit;
         self.counted >= MAX_RESUME_ATTEMPTS
             || self.kill_only >= KILL_ONLY_RESUME_LIMIT
-            || self.conflict_only >= limit
+            || (self.conflict_only >= limit && !self.parked_for_send_back)
             || (self.parked_for_conflict && self.conflict_attempts() >= limit)
     }
 }
@@ -542,6 +559,7 @@ mod tests {
                 kill_only: 0,
                 conflict_requests: 0,
                 parked_for_conflict: true,
+                parked_for_send_back: false,
             }
         );
         assert_eq!(count.total(), 2);
@@ -624,6 +642,7 @@ mod tests {
                 kill_only: 0,
                 conflict_requests: 0,
                 parked_for_conflict: true,
+                parked_for_send_back: false,
             }
         );
     }
@@ -654,6 +673,65 @@ mod tests {
             }
             .exhausted(ResumeConfig::default())
         );
+    }
+
+    /// A person's `send_back` of a run whose conflict-only resumes reached
+    /// their limit resumes it while counted resumes are left, and that
+    /// resume is counted (ADR-t2946-1); the counted limit still ends it,
+    /// and a run parked by the conflict or killed is fenced as before.
+    #[test]
+    fn a_persons_send_back_resumes_past_the_conflict_only_limit() {
+        let sent_back = || {
+            event(
+                "landing_decided",
+                json!({"code": "sent_back", "answer": "send_back"}),
+            )
+        };
+        let mut events = vec![pass()];
+        for _ in 0..CONFLICT_ONLY_RESUME_LIMIT {
+            events.extend([conflict(), resume()]);
+        }
+        events.push(sent_back());
+        let count = ResumeCount::of(&events);
+        assert_eq!(count.conflict_only, CONFLICT_ONLY_RESUME_LIMIT);
+        assert!(count.parked_for_send_back);
+        assert!(!count.exhausted(ResumeConfig::default()));
+        let plan = resume_start_plan(&events, &main());
+        assert!(plan.counted && plan.repair.is_none());
+        events.push(resume());
+        let count = ResumeCount::of(&events);
+        assert_eq!(count.counted, 1);
+        assert_eq!(count.conflict_only, CONFLICT_ONLY_RESUME_LIMIT);
+        // Once resumed, a conflict that parks it again is fenced as before
+        // and retried with the branch carried over.
+        let mut conflicted = events.clone();
+        conflicted.push(conflict());
+        assert!(ResumeCount::of(&conflicted).exhausted(ResumeConfig::default()));
+        assert!(inherits_on_exhaustion(&conflicted, &conflicted));
+        // Parked for another reason, the conflict-only limit ends it as
+        // before.
+        let mut failed = events.clone();
+        failed.push(event(
+            "integration_deferred",
+            json!({"code": "verification_failed"}),
+        ));
+        assert!(ResumeCount::of(&failed).exhausted(ResumeConfig::default()));
+        // With its counted resumes used up, the send_back ends the run.
+        let mut used_up = events;
+        for _ in 1..MAX_RESUME_ATTEMPTS {
+            used_up.extend([event("evidence_missing", json!({})), resume()]);
+        }
+        used_up.push(sent_back());
+        let count = ResumeCount::of(&used_up);
+        assert_eq!(count.counted, MAX_RESUME_ATTEMPTS);
+        assert!(count.exhausted(ResumeConfig::default()));
+        // The kill-only limit is not the send_back's to pass.
+        let kills = ResumeCount {
+            kill_only: KILL_ONLY_RESUME_LIMIT,
+            parked_for_send_back: true,
+            ..Default::default()
+        };
+        assert!(kills.exhausted(ResumeConfig::default()));
     }
 
     #[test]
@@ -717,6 +795,7 @@ mod tests {
                 kill_only: 0,
                 conflict_requests: 1,
                 parked_for_conflict: true,
+                parked_for_send_back: false,
             }
         );
         assert_eq!(count.total(), 1);
@@ -920,6 +999,7 @@ mod tests {
                 kill_only: 1,
                 conflict_requests: 0,
                 parked_for_conflict: false,
+                parked_for_send_back: false,
             }
         );
         assert_eq!(count.total(), 1);
@@ -1048,6 +1128,7 @@ mod tests {
                 kill_only: 0,
                 conflict_requests: 0,
                 parked_for_conflict: true,
+                parked_for_send_back: false,
             }
         );
         // The retry that carries the branch over still needs a review that

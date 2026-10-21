@@ -1985,6 +1985,7 @@ mod tests {
                     kill_only,
                     conflict_requests,
                     parked_for_conflict: false,
+                    parked_for_send_back: false,
                 },
                 ResumeConfig::default(),
             )

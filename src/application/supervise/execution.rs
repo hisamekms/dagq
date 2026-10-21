@@ -4489,8 +4489,9 @@ fn wrapper_dead(sv: &Supervisor<'_>, wrapper: &RunProcess, now: i64) -> bool {
     now - wrapper.heartbeat_at > HEARTBEAT_TIMEOUT_SECS && !sv.wrapper_lives(wrapper)
 }
 
-/// The `reasons` of the run's latest review: those of a `review_finished`,
-/// or the error of a `review_failed` after it.
+/// The findings of the run's latest review a `send_back` answer names:
+/// those of a `review_finished` ([`review_findings`]), or the error of a
+/// `review_failed` after it.
 fn latest_review_reasons(queue: &dyn Queue, run_id: &RunId) -> Result<Vec<String>> {
     Ok(queue
         .run_events(run_id)?
@@ -4506,9 +4507,34 @@ fn latest_review_reasons(queue: &dyn Queue, run_id: &RunId) -> Result<Vec<String
             Some(EventKind::ReviewFailed) => e.payload["error"]
                 .as_str()
                 .map(|error| vec![format!("the headless review failed: {error}")]),
-            _ => serde_json::from_value(e.payload["reasons"].clone()).ok(),
+            _ => review_findings(&e.payload),
         })
         .unwrap_or_default())
+}
+
+/// The findings a `review_finished` (`payload`) sent the run back with, as
+/// its `approve_landing` ask showed them: when it recorded a route that its
+/// agents' judgments decide (ADR-t1453-1 decision 7), each deciding
+/// agent's under its name and the verdict's own only when its judgment
+/// went there too; else the verdict's reasons, or its summary when it gave
+/// none ([`crate::domain::ReviewVerdict::sent_back_findings`]). `None` when
+/// the payload is no verdict.
+fn review_findings(payload: &Value) -> Option<Vec<String>> {
+    let verdict = crate::domain::run::review_verdict(payload).ok()?;
+    // The route is recorded as `route(true)` gave it; a verdict recorded
+    // without one is judged by its own reasons.
+    let route = payload
+        .get("route")
+        .filter(|route| route.is_object())
+        .map(|_| verdict.route(true))
+        .filter(|route| !route.deciding().is_empty());
+    Some(
+        verdict
+            .sent_back_findings(route.as_ref())
+            .into_iter()
+            .map(|finding| finding.text)
+            .collect(),
+    )
 }
 
 /// Cross-check the agent's receipt against Git on a thread with its own

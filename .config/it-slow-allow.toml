@@ -2184,3 +2184,8 @@ task = 2409
 name = "runtime_already_satisfied::a_judgment_running_at_a_handoff_is_stopped_and_the_next_process_verifies_and_judges_again"
 reason = "B 境界（supervisor の配線・handoff・プロセス・SQLite）: already_satisfied の主張の判定 job の実行中に実際の supervisor を handoff させ、job が止められ結果が適用されず、同じ token の次の process が再 validation・verify・判定をやり直して人の ask を開き、headless_job_stopped が 1 回だけであることを確かめる。判定の分類は satisfied_review::claim_miss と satisfied_judgment::decide の unit test"
 task = 2887
+
+[[test]]
+name = "runtime_landing_answers::a_bare_send_back_of_a_subagents_send_back_carries_its_findings_with_or_without_a_recheck"
+reason = "B 境界（守る境界）: supervisor wiring of an approve_landing answer to a subagent's send-back, applied as the run waits and held through the landing recheck's park and resume, to landing_decided in SQLite and the resume prompt; which findings is a unit test"
+task = 2946

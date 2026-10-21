@@ -56,6 +56,8 @@ supervisorが承認済みのrunを着地させるときは、この`push`に従�
 使い切りの判定と、askやlast_error・復旧jobのpromptの文面は、supervisorが起動時に読んだ設定の値を使う。
 数える試行が上限に達したか、衝突だけのresumeが衝突だけの上限に達したrun、または衝突だけで`needs_session`になっている（次のresumeが衝突だけの試行になる）runで衝突だけの試行（precheckの依頼を含む）が衝突だけの上限に達したものは、試行を使い切っている。
 precheckの依頼で衝突だけの上限に達したrunでも、検証の失敗・`evidence_missing`・`scope_violation`など別の理由でparkしたなら、数える試行が残っていればresumeする。
+人の`send_back`（`approve_landing`の`send_back`）で`needs_session`になったrunは、衝突だけのresumeが衝突だけの上限に達していても、数える試行が残っていればresumeする（[ADR-t2946-1](../../adr/2026-10-22-t2946-1-a-persons-send-back-resumes-past-the-conflict-only-limit.md)。衝突だけの上限は同じ衝突を解けないまま回り続けないための柵で、人の差し戻しを止めない）。
+この例外はsend_backの直後の1回のresumeだけで、そのresumeは数える試行に数え、その後に衝突や別の理由でparkすれば衝突だけの上限で今どおり使い切りになる。
 triageのresumeの上限と`resumes_left`は数える試行だけを見る。
 precheckは、数える試行が上限に達していればaskにし、衝突だけの試行が上限に達していれば依頼を送らずに着地へ進め、着地のrebaseの衝突で`needs_session`になったrunは試行を使い切っているので下の「引き継ぐretry」に進む（引き継げなければprecheckがaskにする）。
 

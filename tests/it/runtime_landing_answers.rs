@@ -489,3 +489,144 @@ fn a_retried_review_waits_for_the_held_provider() {
     assert!(payloads(&detail, "resume_started").is_empty());
     assert_eq!(prompts, 3);
 }
+
+/// Commit on main `[review.subagents.design]`, which reviews
+/// `change.txt` (the stand-in worker's change), and its definition.
+fn design_reviews_the_change(repo: &Path) {
+    fs::write(
+        repo.join("dagq.toml"),
+        "[review.subagents.design]\npaths = [\"change.txt\"]\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join(".dagq/agents/design")).unwrap();
+    fs::write(
+        repo.join(".dagq/agents/design/AGENT.md"),
+        "---\ndescription: design checks\n---\nCheck the design.\n",
+    )
+    .unwrap();
+    git(repo, &["add", "dagq.toml", ".dagq/agents/design/AGENT.md"]);
+    git(repo, &["commit", "-q", "-m", "review subagents"]);
+}
+
+/// Every whole review passes with no reason of its own; `design` sends
+/// task 1's run back on its first four reviews with a finding without
+/// codes (past the run's revises, a code finding that asks a person), then
+/// passes, task 2's review and the last of task 1 alike.
+fn design_sends_back_under_a_pass() -> TestReviewer {
+    let back = agent_says("design", "revise", &["add a unit test"]);
+    let mut design = vec![back; 4];
+    design.push(agent_says("design", "pass", &[]));
+    TestReviewer::new(&[verdict("pass", &[], "looks fine")])
+        .with_review_agents(&[("design", design)])
+}
+
+/// The one open ask of the queue, an `approve_landing`.
+fn open_landing_ask(queue: &mut SqliteQueue) -> dagq::domain::Ask {
+    let open: Vec<dagq::domain::Ask> = queue
+        .asks(Default::default())
+        .unwrap()
+        .into_iter()
+        .filter(|ask| ask.closed_at.is_none())
+        .collect();
+    assert_eq!(open.len(), 1, "{open:?}");
+    assert_eq!(open[0].kind, dagq::domain::AskKind::ApproveLanding);
+    open[0].clone()
+}
+
+/// The reason a bare `send_back` to ask `ask` parks the run with: the
+/// subagent's finding the ask showed, under its name.
+fn design_sent_back(ask: dagq::domain::AskId) -> String {
+    format!("the review's findings were sent back by ask {ask}: design: add a unit test")
+}
+
+/// The resumed session of task 1's run: rebase onto the main the request
+/// names, resolving `change.txt` when it conflicts, then rewrite the
+/// receipt.
+const RESOLVING_RESUME: &str =
+    "await_message; resolve || exit 1; receipt \"$(git rev-parse HEAD)\"; idle; await_exit";
+
+/// A review whose subagent sends the run back under a pass with no reason
+/// of its own asks a person past the run's revises. A bare `send_back` to
+/// that ask, given while the run waits, names the subagent's finding the
+/// ask showed, under its name, as `landing_decided`'s reason and the
+/// prompt of the resume it starts. The review after that resume asks
+/// again; a bare `send_back` given while the landing recheck parks the
+/// waiting run for a conflict (the supervisor stands still where the
+/// recheck found it) applies once the rebased run waits again, the same
+/// way. Which findings a send_back names is `supervise::landing::tests::
+/// a_send_back_names_the_findings_its_ask_showed`.
+#[test]
+fn a_bare_send_back_of_a_subagents_send_back_carries_its_findings_with_or_without_a_recheck() {
+    let (_fixture, repo, db) = fixture();
+    design_reviews_the_change(&repo);
+    let backend = TestWorkspace::new(&db, false, &crate::runtime_review::revising_agent(2));
+    backend.resume_script_for(1, RESOLVING_RESUME);
+    let reviewer = design_sends_back_under_a_pass();
+    let outcome = supervise_parallel(&db, &repo, &backend, &reviewer, 1);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let reviewed = queue.show(TaskId::new(1)).unwrap();
+    let finished = payloads(&reviewed, "review_finished");
+    assert_eq!(finished.len(), 3, "{finished:?}");
+    assert_eq!(finished[2]["verdict"], "pass");
+    assert_eq!(finished[2]["reasons"], json!([]));
+    assert_eq!(finished[2]["route"]["destination"], "send_back");
+    let first = open_landing_ask(&mut queue);
+    assert!(
+        first.question.contains("\n- design: add a unit test"),
+        "{}",
+        first.question
+    );
+
+    // While the run waits.
+    queue.answer(first.id, "send_back").unwrap();
+    let outcome = supervise_parallel(&db, &repo, &backend, &reviewer, 1);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let decided = payloads(&detail, "landing_decided");
+    assert_eq!(decided.len(), 1, "{decided:?}");
+    let reason = design_sent_back(first.id);
+    assert_eq!(decided[0]["reason"], reason);
+    let texts = session_texts(&detail.runs[0]);
+    assert!(texts.iter().any(|text| text.contains(&reason)), "{texts:?}");
+    let second = open_landing_ask(&mut queue);
+    assert_ne!(second.id, first.id);
+
+    // While the landing recheck parks it: task 2 changes `change.txt` too
+    // and lands, so the recheck finds the waiting run conflicting.
+    add_ready_task(&mut queue, "second task", &[]);
+    let answered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let pauses = {
+        let (db, answered) = (db.clone(), answered.clone());
+        runtime::PausesPort(Arc::new(move |at, _run| {
+            if at == runtime::PausePoint::RecheckFailure
+                && !answered.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                SqliteQueue::open(&db)
+                    .unwrap()
+                    .answer(second.id, "send_back")
+                    .unwrap();
+            }
+        }))
+    };
+    let options = SuperviseOptions {
+        pauses: Some(pauses),
+        ..supervise_options(4, true)
+    };
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(answered.load(std::sync::atomic::Ordering::SeqCst));
+    // A later pass applies it if the first supervisor ended before it.
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(payloads(&detail, "landing_recheck_failed").len(), 1);
+    let decided = payloads(&detail, "landing_decided");
+    assert_eq!(decided.len(), 2, "{decided:?}");
+    let reason = design_sent_back(second.id);
+    assert_eq!(decided[1]["reason"], reason);
+    let texts = session_texts(&detail.runs[0]);
+    assert!(texts.iter().any(|text| text.contains(&reason)), "{texts:?}");
+    assert!(queue.read_ask(second.id).unwrap().closed_at.is_some());
+}

@@ -3676,6 +3676,66 @@ mod tests {
         assert_eq!(canceled_reason(AskId::new(7)), "canceled by ask 7");
     }
 
+    /// A `send_back` names the findings of a review whose subagents sent
+    /// the run back under a passing verdict with no reasons of its own as
+    /// its ask showed them, each under its agent's name; a verdict with no
+    /// agent deciding names its own reasons, or its summary without any.
+    #[test]
+    fn a_send_back_names_the_findings_its_ask_showed() {
+        let finished = json!({"verdict": "pass", "reasons": [], "summary": "fine",
+            "agents": [
+                {"agent": "test-rules", "status": "completed", "verdict": "revise",
+                    "reasons": ["add a unit test"], "summary": "s"},
+                {"agent": "receipt-evidence", "status": "completed", "verdict": "revise",
+                    "reasons": ["name the evidence", "map criterion b"], "summary": "s"},
+                {"agent": "design", "status": "completed", "verdict": "pass",
+                    "reasons": [], "summary": "ok"},
+            ],
+            "route": {"destination": "send_back", "parent": "land"}});
+        let findings = review_findings(&finished).unwrap();
+        assert_eq!(
+            findings,
+            [
+                "test-rules: add a unit test",
+                "receipt-evidence: name the evidence",
+                "receipt-evidence: map criterion b",
+            ]
+        );
+        // The ask's reasons are the same findings.
+        let recorded_payload = finished.clone();
+        let recorded = verdict(finished);
+        let route = recorded.route(true);
+        assert_eq!(combined_verdict(&recorded, &route, false).reasons, findings);
+        let bare = sent_back_reason(AskId::new(7), None, &findings);
+        assert_eq!(
+            bare,
+            "the review's findings were sent back by ask 7: test-rules: add a unit test; receipt-evidence: name the evidence; receipt-evidence: map criterion b"
+        );
+        assert_eq!(
+            sent_back_reason(AskId::new(7), Some("keep it short"), &findings),
+            format!(
+                "a person sent the run back in ask 7: keep it short; the review's findings: {}",
+                findings.join("; ")
+            )
+        );
+        // A verdict that recorded its agents but no route names its own
+        // reasons, or its summary without any.
+        let mut unrouted = recorded_payload.clone();
+        unrouted.as_object_mut().unwrap().remove("route");
+        assert_eq!(review_findings(&unrouted).unwrap(), ["fine"]);
+        unrouted["reasons"] = json!(["a finding of its own"]);
+        assert_eq!(
+            review_findings(&unrouted).unwrap(),
+            ["a finding of its own"]
+        );
+        // With no agent deciding, the verdict's own.
+        let concern = json!({"verdict": "concern", "reasons": ["a finding"], "summary": "judged"});
+        assert_eq!(review_findings(&concern).unwrap(), ["a finding"]);
+        let bare_concern = json!({"verdict": "concern", "reasons": [], "summary": "judged"});
+        assert_eq!(review_findings(&bare_concern).unwrap(), ["judged"]);
+        assert_eq!(review_findings(&json!({"verdict": 3})), None);
+    }
+
     /// The tail every landing ask of a review that did not pass ends with.
     const LANDING_TAIL: &str = "\nland: land it as it is. send_back: resume the session with these reasons (answer `send_back: <your reason>` to add yours). cancel: fail the run and cancel the task.";
 
