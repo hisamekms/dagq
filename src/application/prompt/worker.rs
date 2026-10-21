@@ -344,7 +344,7 @@ pub const ACCEPTANCE_MAP: &str = "Before the receipt, map each acceptance criter
 /// run on the base as its grounds. Those are only the checks a worker may
 /// run; the runtime runs the task's whole verification on main, so the
 /// worker runs no gate the repository leaves to the landing.
-pub const ALREADY_SATISFIED: &str = "When the base already meets every acceptance criterion and no change is needed, commit nothing and write the receipt with result already_satisfied, the base commit as commit, and base_checks: an array of {\"command\",\"result\"}, each a check you ran on the base that shows a criterion holds, with the mapping in summary. Run for it only the checks the repository's instructions let a worker run: the runtime runs the task's verification commands, a coverage gate and the whole test suite included, on main itself before the task can close.\n";
+pub const ALREADY_SATISFIED: &str = "When the base already meets every acceptance criterion and no change is needed, commit nothing and write the receipt with result already_satisfied, the base commit as commit, and base_checks: an array of {\"command\",\"result\"}, each a check you ran on the base that shows a criterion holds, with the mapping in summary. Run for it only the checks the repository's instructions let a worker run: the runtime runs the task's verification commands on main itself, as the landing runs them, before the task can close.\n";
 
 /// The worker's check of the documents (ADR-t1428-1), right after
 /// [`ACCEPTANCE_MAP`] and part of the same step: the documents that

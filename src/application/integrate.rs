@@ -299,28 +299,32 @@ fn unguarded_rejection(facts: ReceiptFacts<'_>, run: &TaskRun, error: &anyhow::E
     }
 }
 
-/// Run the task's verification commands, every one as registered (a
-/// coverage gate included, ADR-t1818-1 decision 2), on `head`, the snapshot
-/// of main an `already_satisfied` claim is verified on, with the run's
-/// `[run.env]`; nothing is rebased, committed or pushed, and the run's own
-/// worktree keeps the base its receipt names. On the host they run in the
-/// run's scratch worktree of `scratches`, the queue's `satisfied/`, made
-/// again with `head` checked out detached ([`fresh_satisfied_scratch`]). Set to the container (ADR-t2113-3 decision 1), they run as
-/// the landing's verification does: each in a container of its own on a
-/// clone of `head` made by `containers`, with a token of the snapshot's
-/// own and without the sccache wrapper, never on the host instead. The
-/// first command that fails ends it, its log kept in the run's directory.
-/// `Err` is a verification that could not run at all.
+/// Run the commands of `plan` on `head`, the snapshot of main an
+/// `already_satisfied` claim is verified on, with the run's `[run.env]`:
+/// the task's verification commands with `[landing_verification]`'s in
+/// place of those it names, as the landing runs them (ADR-t2740-1), the
+/// replacing one with the known failures of the landing's own command and
+/// `head` as its base. Nothing is rebased, committed or pushed, and the
+/// run's own worktree keeps the base its receipt names. On the host they
+/// run in the run's scratch worktree of `scratches`, the queue's
+/// `satisfied/`, made again with `head` checked out detached
+/// ([`fresh_satisfied_scratch`]). Set to the container (ADR-t2113-3
+/// decision 1), they run as the landing's verification does: each in a
+/// container of its own on a clone of `head` made by `containers`, with a
+/// token of the snapshot's own and without the sccache wrapper, never on
+/// the host instead. The first command that fails ends it, its log kept
+/// in the run's directory. `Err` is a verification that could not run at
+/// all.
 pub fn verify_snapshot(
     repository: &dyn Repository,
     verifier: &dyn Verifier,
     files: &dyn RunFiles,
-    task: &Task,
+    plan: &SnapshotPlan,
     run: &TaskRun,
     (head, scratches): (&CommitSha, &Path),
     containers: SnapshotContainers<'_>,
 ) -> Result<SnapshotVerification> {
-    let commands = task.verification_commands();
+    let commands = &plan.commands;
     let mut verification = SnapshotVerification {
         head: head.clone(),
         commands: commands.len(),
@@ -344,6 +348,13 @@ pub fn verify_snapshot(
         )?;
         let container =
             ContainerVerification::start(containers.containers, verifier, run, head, &token.file)?;
+        // Staged with the preparation's materials, as the landing's.
+        let landing_env = plan.landing_env(
+            files,
+            &container.prepared.staged,
+            &container.prepared.materials,
+            head,
+        )?;
         containers
             .containers
             .publish_materials(&container.prepared)
@@ -354,7 +365,14 @@ pub fn verify_snapshot(
             head,
             commands,
             &mut verification.commands,
-            |command, log| container.run_to_log(verifier, command, &env, log),
+            |planned, log| {
+                container.run_to_log(
+                    verifier,
+                    &planned.command,
+                    &with_landing_env(&env, planned, &landing_env),
+                    log,
+                )
+            },
         )?;
         return Ok(verification);
     }
@@ -362,6 +380,7 @@ pub fn verify_snapshot(
         bail!("{message}");
     }
     let env = verifier.run_env(run_dir)?;
+    let landing_env = plan.landing_env(files, run_dir, run_dir, head)?;
     // The scratch worktree goes whatever the commands did.
     let ran = fresh_satisfied_scratch(repository, scratches, run.id(), head).and_then(|scratch| {
         snapshot_commands(
@@ -370,7 +389,14 @@ pub fn verify_snapshot(
             head,
             commands,
             &mut verification.commands,
-            |command, log| verifier.run_to_log(command, &scratch, &env, log),
+            |planned, log| {
+                verifier.run_to_log(
+                    &planned.command,
+                    &scratch,
+                    &with_landing_env(&env, planned, &landing_env),
+                    log,
+                )
+            },
         )
     });
     let scratch = satisfied_scratch(scratches, run.id());
@@ -379,6 +405,63 @@ pub fn verify_snapshot(
     }
     verification.failure = ran?;
     Ok(verification)
+}
+
+/// What [`verify_snapshot`] runs for a task: its verification commands
+/// planned as the landing plans them, and, when `[landing_verification]`
+/// replaces some, the known failures its command is told, read from the
+/// queue before the verification leaves the loop.
+#[derive(Debug, Clone)]
+pub struct SnapshotPlan {
+    pub commands: Vec<landing_verification::Planned>,
+    pub known_failures: Option<KnownFailures>,
+}
+
+impl SnapshotPlan {
+    /// Plan `task`'s commands with the `dagq.toml` `verifier` reads.
+    pub fn of<Q: RunLog + QueueRecords + ?Sized>(
+        queue: &Q,
+        verifier: &dyn Verifier,
+        task: &Task,
+    ) -> Result<Self> {
+        let commands = landing_plan(verifier, task)?;
+        let known_failures = if commands.iter().any(landing_verification::Planned::replaced) {
+            Some(KnownFailures::read(queue, verifier, task)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            commands,
+            known_failures,
+        })
+    }
+
+    /// The variables of the replacing command on `head`, its known
+    /// failures written as [`KnownFailures::env`] does; none when nothing
+    /// is replaced.
+    fn landing_env(
+        &self,
+        files: &dyn RunFiles,
+        written: &Path,
+        named: &Path,
+        head: &CommitSha,
+    ) -> Result<Vec<(String, String)>> {
+        match &self.known_failures {
+            Some(known) => known.env(files, written, named, head),
+            None => Ok(Vec::new()),
+        }
+    }
+}
+
+/// `env` with `landing_env` on top when `planned` replaces a task's
+/// command, as the landing hands its own command.
+fn with_landing_env(
+    env: &[(String, String)],
+    planned: &landing_verification::Planned,
+    landing_env: &[(String, String)],
+) -> Vec<(String, String)> {
+    let extra: &[(String, String)] = if planned.replaced() { landing_env } else { &[] };
+    env.iter().chain(extra).cloned().collect()
 }
 
 /// What [`verify_snapshot`] runs a snapshot's commands with when
@@ -397,23 +480,23 @@ fn snapshot_commands(
     files: &dyn RunFiles,
     run_dir: &Path,
     head: &CommitSha,
-    commands: &[String],
+    commands: &[landing_verification::Planned],
     ran: &mut usize,
-    mut run_to_log: impl FnMut(&str, &Path) -> Result<super::Exit>,
+    mut run_to_log: impl FnMut(&landing_verification::Planned, &Path) -> Result<super::Exit>,
 ) -> Result<Option<SnapshotFailure>> {
-    for (index, command) in commands.iter().enumerate() {
+    for (index, planned) in commands.iter().enumerate() {
         let log = run_dir.join(format!(
             "satisfied-{}-{}.log",
             &head.as_str()[..12],
             index + 1
         ));
-        let exit = run_to_log(command, &log)?;
+        let exit = run_to_log(planned, &log)?;
         if !exit.success {
             // The commands after it do not run.
             *ran = index + 1;
             let output = files.read_to_string(&log).unwrap_or_default();
             return Ok(Some(SnapshotFailure {
-                command: command.clone(),
+                command: planned.command.clone(),
                 exit_code: exit.code.unwrap_or(128),
                 log_path: path_text(&log)?,
                 output_tail: tail(&output, 2000).to_owned(),
@@ -2053,13 +2136,7 @@ fn land(
     // the run's `result_commit`.
     // The repository's landing verification runs in place of those its
     // `dagq.toml` names; the registered commands stay (ADR-t1925-1).
-    // Read like `[run.env]`, only for a task that has commands to run.
-    let config = if task.verification_commands().is_empty() {
-        None
-    } else {
-        verifier.landing_verification()?
-    };
-    let commands = landing_verification::plan(config.as_ref(), task.verification_commands());
+    let commands = landing_plan(verifier, task)?;
     // The profiles that read the commands' output (ADR-t2268-1), read like
     // `[landing_verification]`: a declaration that cannot be resolved stops
     // before the commands, as an unreadable dagq.toml does.
@@ -2075,7 +2152,7 @@ fn land(
     // run directory, written before anything else runs.
     let replaced = commands.iter().any(landing_verification::Planned::replaced);
     let host_landing_env = if replaced && !verification_in_container(verifier, &commands)? {
-        landing_env(&*queue, verifier, files, task, run_dir, main)?
+        KnownFailures::read(&*queue, verifier, task)?.env(files, run_dir, run_dir, main)?
     } else {
         Vec::new()
     };
@@ -2146,11 +2223,8 @@ fn land(
     // from the materials it mounts: staged with the preparation command's,
     // then copied into the run directory with them.
     let landing_env = match &container_verification {
-        Some(verification) if replaced => landing_env_written(
-            &*queue,
-            verifier,
+        Some(verification) if replaced => KnownFailures::read(&*queue, verifier, task)?.env(
             files,
-            task,
             &verification.prepared.staged,
             &verification.prepared.materials,
             main,
@@ -2406,47 +2480,79 @@ fn unguarded(run: &TaskRun, error: &anyhow::Error) -> Verdict {
     }
 }
 
-/// The variables the landing's own command gets (ADR-t1925-1 decision
-/// 4): the main `main` the run was rebased onto, the tests that fail
-/// already on the watched branch, written to the run's directory as `dagq
-/// ci failures --task` shows them for `task` (the items of the CI
-/// failures it fixes kept apart), and whether `task` fixes one.
-fn landing_env<Q: RunLog + QueueRecords + ?Sized>(
-    queue: &Q,
+/// The commands the landing runs for `task`'s verification commands:
+/// those `[landing_verification]` of `dagq.toml` names replaced by its
+/// command, the others as registered (ADR-t1925-1 decision 4), and every
+/// one as registered without it. Read like `[run.env]`, only for a task
+/// that has commands to run. The snapshot of an `already_satisfied` claim
+/// runs them so too (ADR-t2740-1).
+fn landing_plan(
     verifier: &dyn Verifier,
-    files: &dyn RunFiles,
     task: &Task,
-    dir: &Path,
-    main: &CommitSha,
-) -> Result<Vec<(String, String)>> {
-    landing_env_written(queue, verifier, files, task, dir, dir, main)
+) -> Result<Vec<landing_verification::Planned>> {
+    let config = if task.verification_commands().is_empty() {
+        None
+    } else {
+        verifier.landing_verification()?
+    };
+    Ok(landing_verification::plan(
+        config.as_ref(),
+        task.verification_commands(),
+    ))
 }
 
-/// [`landing_env`] with the known failures' file written in `written` and
-/// named in the environment as it will be in `named` (its copy).
-fn landing_env_written<Q: RunLog + QueueRecords + ?Sized>(
-    queue: &Q,
-    verifier: &dyn Verifier,
-    files: &dyn RunFiles,
-    task: &Task,
-    written: &Path,
-    named: &Path,
-    main: &CommitSha,
-) -> Result<Vec<(String, String)>> {
-    let watch = verifier.ci_watch_config()?;
-    let branch = watch.as_ref().and_then(|watch| watch.branch.clone());
-    let failures =
-        super::ci_watch::known_failures(queue, watch.as_ref(), branch.as_deref(), Some(task.id()))?;
-    let fix_run = !queue.ci_failure_findings_of(task.id())?.is_empty();
-    let path = written.join(landing_verification::KNOWN_FAILURES_FILE);
-    files
-        .write(&path, serde_json::to_string_pretty(&failures)?.as_bytes())
-        .with_context(|| format!("write {}", path.display()))?;
-    Ok(landing_verification::env(
-        main.as_str(),
-        &path_text(&named.join(landing_verification::KNOWN_FAILURES_FILE))?,
-        fix_run,
-    ))
+/// What the landing's own command is told of CI (ADR-t1925-1 decision 4):
+/// the tests that fail already on the watched branch, as `dagq ci failures
+/// --task` shows them for the task (the items of the CI failures it fixes
+/// kept apart), and whether the task fixes one.
+#[derive(Debug, Clone)]
+pub struct KnownFailures {
+    failures: Value,
+    fix_run: bool,
+}
+
+impl KnownFailures {
+    /// Read `task`'s from the queue.
+    pub fn read<Q: RunLog + QueueRecords + ?Sized>(
+        queue: &Q,
+        verifier: &dyn Verifier,
+        task: &Task,
+    ) -> Result<Self> {
+        let watch = verifier.ci_watch_config()?;
+        let branch = watch.as_ref().and_then(|watch| watch.branch.clone());
+        let failures = super::ci_watch::known_failures(
+            queue,
+            watch.as_ref(),
+            branch.as_deref(),
+            Some(task.id()),
+        )?;
+        let fix_run = !queue.ci_failure_findings_of(task.id())?.is_empty();
+        Ok(Self { failures, fix_run })
+    }
+
+    /// The variables the landing's own command gets on `base`, the main
+    /// it runs on: the failures written in `written` and named as they
+    /// will be in `named` (its copy).
+    fn env(
+        &self,
+        files: &dyn RunFiles,
+        written: &Path,
+        named: &Path,
+        base: &CommitSha,
+    ) -> Result<Vec<(String, String)>> {
+        let path = written.join(landing_verification::KNOWN_FAILURES_FILE);
+        files
+            .write(
+                &path,
+                serde_json::to_string_pretty(&self.failures)?.as_bytes(),
+            )
+            .with_context(|| format!("write {}", path.display()))?;
+        Ok(landing_verification::env(
+            base.as_str(),
+            &path_text(&named.join(landing_verification::KNOWN_FAILURES_FILE))?,
+            self.fix_run,
+        ))
+    }
 }
 
 /// Where the verification commands run: the runtime `dagq.toml` sets the
@@ -2648,7 +2754,7 @@ struct VerifyStep<'a> {
     toolchains: &'a Toolchains,
     /// The command to run, and the task's it runs in place of.
     planned: &'a landing_verification::Planned,
-    /// What the command gets on top of `run_env`: [`landing_env`] for the
+    /// What the command gets on top of `run_env`: [`KnownFailures::env`] for the
     /// landing's own command, nothing for a task's.
     extra_env: &'a [(String, String)],
     attempt: u32,
@@ -4007,11 +4113,32 @@ mod tests {
     struct ScriptedVerifier {
         passes: Vec<bool>,
         ran: RefCell<Vec<String>>,
+        /// The environment of each command it ran, on top of `[run.env]`.
+        envs: RefCell<Vec<Vec<(String, String)>>>,
         /// `[roles.verification]` sets the container.
         container: bool,
+        /// `[landing_verification]`.
+        landing: Option<landing_verification::LandingVerification>,
+    }
+
+    impl ScriptedVerifier {
+        fn new(passes: Vec<bool>, container: bool) -> Self {
+            Self {
+                passes,
+                ran: RefCell::new(Vec::new()),
+                envs: RefCell::new(Vec::new()),
+                container,
+                landing: None,
+            }
+        }
     }
 
     impl Verifier for ScriptedVerifier {
+        fn landing_verification(
+            &self,
+        ) -> Result<Option<landing_verification::LandingVerification>> {
+            Ok(self.landing.clone())
+        }
         fn runtimes(&self) -> Result<crate::domain::container_runtime::RuntimeConfig> {
             use crate::domain::container_runtime::Runtime;
             Ok(crate::domain::container_runtime::RuntimeConfig {
@@ -4042,12 +4169,13 @@ mod tests {
             &self,
             command: &str,
             _: &Path,
-            _: &[(String, String)],
+            env: &[(String, String)],
             _: &Path,
         ) -> Result<super::super::Exit> {
             let mut ran = self.ran.borrow_mut();
             let success = self.passes[ran.len()];
             ran.push(command.to_owned());
+            self.envs.borrow_mut().push(env.to_vec());
             Ok(super::super::Exit {
                 success,
                 code: Some(if success { 0 } else { 1 }),
@@ -4070,16 +4198,12 @@ mod tests {
         let run = run(dir);
         let verify = |passes: Vec<bool>| {
             let repository = FakeRepository::sound();
-            let verifier = ScriptedVerifier {
-                passes,
-                ran: RefCell::new(Vec::new()),
-                container: false,
-            };
+            let verifier = ScriptedVerifier::new(passes, false);
             let verification = verify_snapshot(
                 &repository,
                 &verifier,
                 &files,
-                &task,
+                &as_registered(&task),
                 &run,
                 (&sha(HEAD), Path::new(SCRATCHES)),
                 NoContainers::parts(&NoContainers::default()),
@@ -4119,6 +4243,8 @@ mod tests {
     #[derive(Default)]
     struct NoContainers {
         calls: std::sync::Mutex<Vec<String>>,
+        /// The arguments of each container's command line, joined.
+        lines: std::sync::Mutex<Vec<String>>,
     }
 
     impl NoContainers {
@@ -4170,7 +4296,8 @@ mod tests {
             self.note("publish_materials".to_owned());
             Ok(())
         }
-        fn command_line(&self, _: &[String]) -> String {
+        fn command_line(&self, args: &[String]) -> String {
+            self.lines.lock().unwrap().push(args.join(" "));
             "in container".to_owned()
         }
         fn remove_container(
@@ -4202,17 +4329,13 @@ mod tests {
         let (files, dir) = (MemoryFiles::default(), Path::new(DIR));
         let verify = |passes: Vec<bool>| {
             let repository = FakeRepository::sound();
-            let verifier = ScriptedVerifier {
-                passes,
-                ran: RefCell::new(Vec::new()),
-                container: true,
-            };
+            let verifier = ScriptedVerifier::new(passes, true);
             let containers = NoContainers::default();
             let verification = verify_snapshot(
                 &repository,
                 &verifier,
                 &files,
-                &task,
+                &as_registered(&task),
                 &run(dir),
                 (&sha(HEAD), Path::new(SCRATCHES)),
                 containers.parts(),
@@ -4246,6 +4369,173 @@ mod tests {
             calls[calls.len() - 2..],
             ["finish".to_owned(), format!("revoke {RUN} Snapshot")]
         );
+    }
+
+    /// `task`'s verification commands planned without
+    /// `[landing_verification]`: every one as registered.
+    fn as_registered(task: &Task) -> SnapshotPlan {
+        SnapshotPlan {
+            commands: landing_verification::plan(None, task.verification_commands()),
+            known_failures: None,
+        }
+    }
+
+    /// The commands of a task with two coverage gates among checks no
+    /// landing replaces, and the `[landing_verification]` that replaces
+    /// the gates.
+    fn gated() -> (Task, landing_verification::LandingVerification) {
+        let mut record = task_record(&[], &[]);
+        record.verification_commands = vec![
+            "cargo fmt --all --check".into(),
+            "cargo llvm-cov nextest --locked --workspace --fail-under-lines 80".into(),
+            "sh scripts/check-doc-links.sh".into(),
+            "cargo llvm-cov --locked --fail-under-lines 80".into(),
+        ];
+        let config = landing_verification::LandingVerification {
+            replaces: vec![
+                "cargo llvm-cov nextest".into(),
+                "cargo llvm-cov --locked --fail-under-lines 80".into(),
+            ],
+            command: "sh scripts/landing-it.sh".into(),
+        };
+        (Task::restore(record).unwrap(), config)
+    }
+
+    /// The snapshot's commands are planned as the landing's: with
+    /// `[landing_verification]` its command runs once in place of every
+    /// coverage gate, the other checks as registered and in order; without
+    /// it every one as registered (ADR-t2740-1).
+    #[test]
+    fn a_snapshot_plans_its_commands_as_the_landing_does() {
+        let (task, config) = gated();
+        let mut verifier = ScriptedVerifier::new(Vec::new(), false);
+        let planned = |verifier: &ScriptedVerifier| -> Vec<(String, Vec<String>)> {
+            landing_plan(verifier, &task)
+                .unwrap()
+                .into_iter()
+                .map(|planned| (planned.command, planned.replaces))
+                .collect()
+        };
+        let registered: Vec<(String, Vec<String>)> = task
+            .verification_commands()
+            .iter()
+            .map(|command| (command.clone(), Vec::new()))
+            .collect();
+        assert_eq!(planned(&verifier), registered);
+        verifier.landing = Some(config);
+        let commands = task.verification_commands();
+        assert_eq!(
+            planned(&verifier),
+            [
+                (commands[0].clone(), Vec::new()),
+                (
+                    "sh scripts/landing-it.sh".to_owned(),
+                    vec![commands[1].clone(), commands[3].clone()]
+                ),
+                (commands[2].clone(), Vec::new()),
+            ]
+        );
+    }
+
+    /// The known failures of a snapshot's replacing command.
+    fn known_failures() -> KnownFailures {
+        KnownFailures {
+            failures: json!({"failures": [{"kind": "test", "name": "dagq::it m::broken"}], "kept_for_task": []}),
+            fix_run: false,
+        }
+    }
+
+    /// On the host the replacing command of a snapshot gets what the
+    /// landing's own command gets, with the snapshot's head as its base
+    /// and its known failures written to the run's directory; the checks
+    /// it does not replace run without them, and no coverage gate runs.
+    #[test]
+    fn a_snapshot_runs_the_landing_command_in_place_of_its_coverage_gates_with_the_landing_env() {
+        let (task, config) = gated();
+        let (files, dir) = (MemoryFiles::default(), Path::new(DIR));
+        let plan = SnapshotPlan {
+            commands: landing_verification::plan(Some(&config), task.verification_commands()),
+            known_failures: Some(known_failures()),
+        };
+        let verifier = ScriptedVerifier::new(vec![true; 3], false);
+        let verification = verify_snapshot(
+            &FakeRepository::sound(),
+            &verifier,
+            &files,
+            &plan,
+            &run(dir),
+            (&sha(HEAD), Path::new(SCRATCHES)),
+            NoContainers::parts(&NoContainers::default()),
+        )
+        .unwrap();
+        assert_eq!((verification.commands, verification.failure), (3, None));
+        assert_eq!(
+            verifier.ran.into_inner(),
+            [
+                "cargo fmt --all --check",
+                "sh scripts/landing-it.sh",
+                "sh scripts/check-doc-links.sh"
+            ]
+        );
+        let list = dir.join(landing_verification::KNOWN_FAILURES_FILE);
+        assert_eq!(
+            verifier.envs.into_inner(),
+            [
+                Vec::new(),
+                landing_verification::env(HEAD, list.to_str().unwrap(), false),
+                Vec::new(),
+            ]
+        );
+        let written: Value = serde_json::from_slice(&files.read(&list).unwrap()).unwrap();
+        assert_eq!(written, known_failures().failures);
+    }
+
+    /// In the container the replacing command of a snapshot gets its
+    /// known failures as the landing's container does: written with the
+    /// verification's staged materials and named in the copy it mounts.
+    #[test]
+    fn a_snapshot_in_the_container_hands_its_replacing_command_the_landing_env() {
+        let (task, config) = gated();
+        let files = MemoryFiles::default();
+        let plan = SnapshotPlan {
+            commands: landing_verification::plan(Some(&config), task.verification_commands()),
+            known_failures: Some(known_failures()),
+        };
+        let verifier = ScriptedVerifier::new(vec![true; 3], true);
+        let containers = NoContainers::default();
+        let verification = verify_snapshot(
+            &FakeRepository::sound(),
+            &verifier,
+            &files,
+            &plan,
+            &run(Path::new(DIR)),
+            (&sha(HEAD), Path::new(SCRATCHES)),
+            containers.parts(),
+        )
+        .unwrap();
+        assert_eq!((verification.commands, verification.failure), (3, None));
+        let lines = containers.lines.into_inner().unwrap();
+        assert_eq!(lines.len(), 3);
+        let named = format!(
+            "--env {}=/q/run/materials/{}",
+            landing_verification::KNOWN_FAILURES_ENV,
+            landing_verification::KNOWN_FAILURES_FILE
+        );
+        let base = format!("--env {}={HEAD}", landing_verification::BASE_ENV);
+        assert!(
+            lines[1].contains(&named) && lines[1].contains(&base),
+            "{}",
+            lines[1]
+        );
+        assert!(lines[1].contains("landing-it.sh"), "{}", lines[1]);
+        for line in [&lines[0], &lines[2]] {
+            assert!(!line.contains("DAGQ_LANDING_BASE"), "{line}");
+            assert!(!line.contains("DAGQ_CI_KNOWN_FAILURES"), "{line}");
+        }
+        let staged =
+            Path::new("/q/verification/v/staged").join(landing_verification::KNOWN_FAILURES_FILE);
+        let written: Value = serde_json::from_slice(&files.read(&staged).unwrap()).unwrap();
+        assert_eq!(written, known_failures().failures);
     }
 
     /// A receipt `integrate` reads lands only when it is `succeeded`: a

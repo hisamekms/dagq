@@ -14,6 +14,7 @@ related:
   - adr-t1233-2
   - adr-t2125-1
   - adr-t1925-1
+  - adr-t2740-1
   - adr-t1487-1
   - design-supervisor-lifecycle-review-programs
   - adr-t2268-1
@@ -85,8 +86,9 @@ verifyが通ればreview jobが同じheadで主張を判定し、`high`のpass�
 
 - **validating**: 受理してもrunは`awaiting_integration`にせず`validating`のまま残し、`result_commit`を持たない（`AfterValidation::Satisfied`）。
   sessionに終了を依頼してworkspaceを閉じる。
-- **snapshot**: 検証の時点のmainのheadを1つ決めて`run_satisfied_snapshot`に残し、そのheadでtaskの`verification_commands`を登録のまま全部流す（`integrate::verify_snapshot`）。
-  coverageの関門も流し、[着地の検証](#着地の検証)の置き換えはしない。
+- **snapshot**: 検証の時点のmainのheadを1つ決めて`run_satisfied_snapshot`に残し、そのheadでtaskの`verification_commands`を流す（`integrate::verify_snapshot`）。
+  [着地の検証](#着地の検証)と同じく`[landing_verification]`がcoverageの関門をその`command`に置き換え（[ADR-t2740-1](../../adr/2026-10-22-t2740-1-snapshot-verification-replaces-the-coverage-gate-as-the-landing-does.md)、`integrate::SnapshotPlan`）、置き換えたコマンドには着地の検証と同じ材料をsnapshotのheadをbaseにして渡し、`[landing_verification]`が無ければ登録のまま流す。
+  差分が無いので、絞るITは差分の無い着地と同じ選び方になり、行カバレッジと全部のtestはmainのCIが見る。
   hostでは流す場所はqueueの`satisfied/`のrunごとのscratch worktreeで、runのworktreeはreceiptの名指すbaseのままにする。
   その置き場はrun directoryの外のworkerが書けない場所で、検証のたびにそこにあるものを（`.git`もlinkも）worktreeとして信用せずに消し（linkは辿らずlinkだけを消す）、snapshotのheadで作り直す（`integrate::fresh_satisfied_scratch`）。
   verificationのruntimeがcontainerなら、着地の検証と同じ部品で、snapshotのheadのcloneを置いたverificationごとのcontainerで流す（[container runtime](../container-runtime.md#verificationの実行)、tokenはsnapshotの検証のもの）。
@@ -125,6 +127,7 @@ verifyが通ればreview jobが同じheadで主張を判定し、`high`のpass�
 [ADR-t1925-1](../../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)で、着地の検証を軽くし、最終関門をCIにする。
 置き換えと材料の受け渡しはruntimeにあり、repositoryの`dagq.toml`が設定を持つときだけ働く。
 validatingは今と同じく検証のコマンドを流さず、置き換えも`integrate`のrebase後の1回の検証の中で起きる（[`integrate`](integrate.md#検証のコマンド)）。
+着地しない`already_satisfied`のrunでは、同じ置き換えが上の「already_satisfiedの検証」のsnapshotの検証の中で起きる。
 
 - **置き換えの流れ**: 設定があるときだけ、runtimeはtaskの検証のコマンドのうち設定が名指すもの（coverageの関門）を、設定の着地の検証のコマンドに置き換えて流す。
   当たるコマンドがいくつあっても置き換えたコマンドは1回だけ流し、他のコマンドは登録の順のまま流す。

@@ -457,6 +457,49 @@ fn a_verification_set_to_a_held_container_runs_nothing_on_the_host() {
     );
 }
 
+/// `[landing_verification]` replacing [`VERIFY`]'s gate the worker does
+/// not run by a command that prints the landing's variables and then runs
+/// the gate's check.
+const LANDING: &str = r#"[landing_verification]
+replaces = ['test ! -f broken.txt']
+command = 'echo "base=$DAGQ_LANDING_BASE"; echo "list=$DAGQ_CI_KNOWN_FAILURES"; echo "fix=$DAGQ_CI_FIX_RUN"; test ! -f broken.txt'
+"#;
+
+/// With `[landing_verification]` the snapshot of a claim runs the
+/// repository's command in place of the task's command it names, as the
+/// landing does (ADR-t2740-1): the command gets the snapshot's head as its
+/// base, the known failures written to the run's directory and that the
+/// task fixes no CI failure; the other command runs as registered.
+#[test]
+fn a_snapshot_runs_the_landing_command_in_place_of_what_it_replaces() {
+    let (_fixture, repo, db, _backend, _reviewer) =
+        claimed_after(|repo| set_runtimes(repo, LANDING));
+    let head = main_head(&repo);
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    assert_eq!(
+        payloads(&detail, "run_satisfied_verified"),
+        [&json!({"head": head, "passed": true, "commands": 2})]
+    );
+    let run_dir = PathBuf::from(detail.runs[0].run_dir().unwrap());
+    let log = |index: usize| {
+        fs::read_to_string(run_dir.join(format!("satisfied-{}-{index}.log", &head[..12]))).unwrap()
+    };
+    assert!(!log(1).contains("base="), "{}", log(1));
+    let replaced = log(2);
+    let list = run_dir.join("ci-known-failures.json");
+    assert!(replaced.contains(&format!("base={head}\n")), "{replaced}");
+    assert!(
+        replaced.contains(&format!("list={}\n", list.display())),
+        "{replaced}"
+    );
+    assert!(replaced.contains("fix=0\n"), "{replaced}");
+    let failures: Value = serde_json::from_str(&fs::read_to_string(&list).unwrap()).unwrap();
+    assert_eq!(failures["failures"], json!([]), "{failures}");
+}
+
 /// A process an earlier verification left working in the run's scratch
 /// worktree (its supervisor died while it ran) is stopped before the
 /// worktree is checked out again, recorded as `auto_repaired`; the

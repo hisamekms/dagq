@@ -28,8 +28,8 @@ pub const ASK_SUMMARY_BYTES: usize = 1_000;
 /// 3, which leaves this small limit to the design). Past it the claim goes
 /// to a person instead of being closed.
 ///
-/// Two: each new judgment first runs the task's whole verification, the
-/// coverage gate included, on the new head, and main lands several runs an
+/// Two: each new judgment first runs the task's verification, as the
+/// landing runs it, on the new head, and main lands several runs an
 /// hour, so a single chance would often end in an ask only because main
 /// moved during one verification, while a third would mostly spend another
 /// full verification and review on a race the runtime keeps losing. A

@@ -205,7 +205,7 @@ impl Supervisor<'_> {
     }
 
     /// Take main's head as the snapshot, record it, and run the task's
-    /// verification commands on it off the loop (for the answer `ask` when
+    /// verification commands on it, planned as the landing's, off the loop (for the answer `ask` when
     /// it runs again for one): on the host or, set so by `dagq.toml`, in
     /// the container, where the commands run without the sccache wrapper,
     /// recorded as `sccache_wrapper_removed` (`job` `satisfied`).
@@ -254,6 +254,9 @@ impl Supervisor<'_> {
                 );
             });
         }
+        // Planned as the landing plans its commands (ADR-t2740-1), with the
+        // known failures read here, so the thread takes no connection.
+        let plan = integration::SnapshotPlan::of(&*self.queue, &*self.verifier, &task);
         let repository = self.repository.clone();
         let verifier = self.verifier.clone();
         let files = self.files.clone();
@@ -268,7 +271,7 @@ impl Supervisor<'_> {
                 &*repository,
                 &*verifier,
                 &*files,
-                &task,
+                &plan?,
                 &target,
                 (&snapshot, &scratches),
                 integration::SnapshotContainers {
