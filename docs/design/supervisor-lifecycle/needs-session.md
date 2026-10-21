@@ -152,7 +152,9 @@ worktreeは残る。
 ## 再計画で保留したrun
 
 保留したrunは`needs_session`（`replan_parked`）になり、保護のあいだ自動resume・`resolved_head`・使い切りの後始末の対象にならない。
-継続か案の撤回で操作が閉じると、resumeか使い切りの後始末の前にworktreeをsnapshotと照合するか作り直す（`replan_restored`）。
+snapshotを保存した保留は、継続か案の撤回で操作が閉じると、snapshotからworktreeを戻してから続ける（`restore_parked`）。
+保留を終えた柵（`blocked`などの保留の後の操作、落ち着いたhold）がslotに見つけたrunは、書き手の終わりを待ってから、snapshotを作らずworktreeを残して休む（`ParkFor::Rest`）。
+この休止は照合も作り直しもせず、操作の結末か解除の後のresumeが新しいvalidationとreviewから続ける。
 保留の時にturnが始まっていなかった回答は継続のresumeの依頼に載せ、柵に拒まれて配れなかった回答は継続のsessionが届ける。
 `replan_parked`はresumeの区分・統計・`resolved_head`で一つのparkで、resume/reviseの回数は引き継ぐ。
 保留より前の承認とreviewのpassは、継続の後の着地に使わない。
