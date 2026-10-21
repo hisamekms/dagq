@@ -156,12 +156,6 @@ name = "request_planner::a_planner_question_about_a_request_reaches_its_planner_
 reason = "B 境界（SQLite・supervisor の配線）: answer の行き先と planner を開く・使い切る SQLite の transaction と、answer を planner に渡す配線の代表。判断は domain::plan_request の unit test（task 1711）"
 task = 1711
 
-# 6.122s, class B
-[[test]]
-name = "review_subagents::the_worker_cannot_change_or_drop_its_required_review"
-reason = "B 境界（守る境界）: reads config from main commit via git, not worktree"
-task = 1707
-
 # 5.774s, class B
 [[test]]
 name = "runtime_adopt::a_supervisor_takes_back_a_run_it_lost_only_after_dropping_its_slot"

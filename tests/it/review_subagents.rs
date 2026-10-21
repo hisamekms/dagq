@@ -21,14 +21,6 @@ const CONFIG: &str = "[review.subagents.design]\npaths = [\"change.txt\", \"docs
 const DEFINITION: &str = ".dagq/agents/design/AGENT.md";
 const MAIN_DEFINITION: &str = "---\ndescription: main's design checks\n---\nCheck the design.\n";
 
-/// The whole review's pass, and `design`'s.
-fn design_passes() -> (String, Vec<(&'static str, Vec<String>)>) {
-    (
-        verdict("pass", &[], "meets the acceptance"),
-        vec![("design", vec![agent_says("design", "pass", &[])])],
-    )
-}
-
 /// Commit `config` as `dagq.toml` and, when given, the definition of
 /// `design` on main; main's new head.
 fn commit_on_main(repo: &Path, config: &str, definition: Option<&str>) -> String {
@@ -59,16 +51,6 @@ fn reviewed(
     (reviewer, detail)
 }
 
-/// [`reviewed`] with [`design_passes`].
-fn reviewed_passing(
-    repo: &Path,
-    db: &Path,
-    worker: &str,
-) -> (TestReviewer, dagq::domain::TaskDetail) {
-    let (whole, agents) = design_passes();
-    reviewed(repo, db, worker, (&[whole], &agents))
-}
-
 /// The snapshot `review_started` records for main's commit `main`: the
 /// run's range (its base, which is `main` here, to its head), and only
 /// `design`, selected by `change.txt`, with main's definition's digest.
@@ -94,13 +76,18 @@ fn reviewed_head(detail: &dagq::domain::TaskDetail) -> String {
     receipt["commit"].as_str().unwrap().to_owned()
 }
 
-/// What the agent job of `design` was given: one job, whose prompt
-/// carries main's definition as the snapshot returned it, whole, and no
-/// path of a definition, beside the material whose range selected it;
-/// the whole review's prompt says nothing of agents.
+/// What the agent job of `design` was given for the run of `detail`: one
+/// job, whose prompt carries main's definition as the snapshot returned
+/// it, whole, and no path of a definition, beside the material whose range
+/// selected it; no whole review's prompt says anything of agents.
 fn assert_job_input(reviewer: &TestReviewer, detail: &dagq::domain::TaskDetail, main: &str) {
     let run_dir = detail.runs[0].run_dir().unwrap();
-    let launches = reviewer.launches();
+    let material = PathBuf::from(format!("{run_dir}/review.md"));
+    let launches: Vec<_> = reviewer
+        .launches()
+        .into_iter()
+        .filter(|launch| launch.material == material)
+        .collect();
     assert_eq!(launches.len(), 1, "{launches:?}");
     let prompt = &launches[0].prompt;
     for part in [
@@ -116,17 +103,14 @@ fn assert_job_input(reviewer: &TestReviewer, detail: &dagq::domain::TaskDetail, 
         fs::read_to_string(format!("{run_dir}/review-1-agents/design/prompt.txt")).unwrap(),
         *prompt
     );
-    assert_eq!(
-        launches[0].material,
-        PathBuf::from(format!("{run_dir}/review.md"))
-    );
     // review.md shows the range the agents were selected from.
     let expected = expected_snapshot(main, detail);
-    let material = fs::read_to_string(format!("{run_dir}/review.md")).unwrap();
+    let material = fs::read_to_string(&material).unwrap();
     let base = format!("- base: {}", expected["base"].as_str().unwrap());
     assert!(material.contains(&base), "{base} in {material}");
-    let whole = &reviewer.prompts()[0];
-    assert!(!whole.contains("subagent"), "{whole}");
+    for whole in reviewer.prompts() {
+        assert!(!whole.contains("subagent"), "{whole}");
+    }
     assert!(!Path::new(&format!("{run_dir}/review-subagents-1.json")).exists());
 }
 
@@ -134,26 +118,59 @@ fn assert_job_input(reviewer: &TestReviewer, detail: &dagq::domain::TaskDetail, 
 /// on its branch neither drops nor changes its required review: main's
 /// commit decides, and the job reads main's definition (the Git boundary of ADR-t1453-1
 /// decision 4; what the commit's files select is
-/// `application::review::tests`).
+/// `application::review::tests`). The three ways, one task's run each, in
+/// one fixture and one supervisor's pass: the whole review's `concern`
+/// keeps each run from landing, so main's commit stays the one each
+/// review reads.
 #[test]
 fn the_worker_cannot_change_or_drop_its_required_review() {
-    for tamper in [
+    // Each tamper, and what the reviewed head keeps of `dagq.toml` and the
+    // definition.
+    let tampers = [
         // Narrow the agent's paths away and rewrite its definition.
-        "printf '[review.subagents.design]\\npaths = [\"nothing/**\"]\\n' > dagq.toml; \
-         printf 'the worker s checks\\n' > .dagq/agents/design/AGENT.md; \
-         git commit -q -am tamper",
+        (
+            "printf '[review.subagents.design]\\npaths = [\"nothing/**\"]\\n' > dagq.toml; \
+             printf 'the worker s checks\\n' > .dagq/agents/design/AGENT.md; \
+             git commit -q -am tamper",
+            format!("{DEFINITION}\ndagq.toml"),
+        ),
         // Delete the table and the definition.
-        "printf '[run.env]\\n' > dagq.toml; git rm -q .dagq/agents/design/AGENT.md; \
-         git commit -q -am tamper",
+        (
+            "printf '[run.env]\\n' > dagq.toml; git rm -q .dagq/agents/design/AGENT.md; \
+             git commit -q -am tamper",
+            "dagq.toml".to_owned(),
+        ),
         // Delete dagq.toml itself and the definition.
-        "git rm -q dagq.toml .dagq/agents/design/AGENT.md; git commit -q -m tamper",
-    ] {
-        let (_dir, repo, db) = fixture();
-        let main = commit_on_main(&repo, CONFIG, Some(MAIN_DEFINITION));
-        let worker =
-            format!("{tamper}; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit");
-        let (reviewer, detail) = reviewed_passing(&repo, &db, &worker);
-        assert_eq!(detail.runs[0].status(), RunStatus::Integrated, "{tamper}");
+        (
+            "git rm -q dagq.toml .dagq/agents/design/AGENT.md; git commit -q -m tamper",
+            String::new(),
+        ),
+    ];
+    let (_dir, repo, db) = fixture();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    for _ in 1..tampers.len() {
+        add_ready_task(&mut queue, "test task", &[]);
+    }
+    let main = commit_on_main(&repo, CONFIG, Some(MAIN_DEFINITION));
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    for (task, (tamper, _)) in (1..).zip(&tampers) {
+        backend.script_for(
+            task,
+            &format!("{tamper}; commit work; receipt \"$(git rev-parse HEAD)\"; idle; await_exit"),
+        );
+    }
+    let reviewer = TestReviewer::new(&[verdict("concern", &["a finding"], "look")])
+        .with_review_agents(&[("design", vec![agent_says("design", "pass", &[])])]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(reviewer.launches().len(), tampers.len());
+    for (task, (tamper, kept)) in (1..).zip(&tampers) {
+        let detail = queue.show(TaskId::new(task)).unwrap();
+        assert_eq!(
+            detail.runs[0].status(),
+            RunStatus::AwaitingIntegration,
+            "{tamper}"
+        );
         // The reviewed head has what the worker left of them, if anything.
         let head = reviewed_head(&detail);
         let left = git_out(
@@ -168,19 +185,16 @@ fn the_worker_cannot_change_or_drop_its_required_review() {
                 DEFINITION,
             ],
         );
-        if tamper.starts_with("git rm") {
-            assert_eq!(left.trim(), "", "{tamper}");
-        } else if tamper.starts_with("printf '[run.env]") {
-            assert_eq!(left.trim(), "dagq.toml", "{tamper}");
-        }
+        assert_eq!(left.trim(), kept, "{tamper}");
         let started = payloads(&detail, "review_started");
-        assert_eq!(started.len(), 1);
+        assert_eq!(started.len(), 1, "{tamper}");
         assert_eq!(
             started[0]["subagents"],
             expected_snapshot(&main, &detail),
             "{tamper}"
         );
         assert_job_input(&reviewer, &detail, &main);
+        assert!(payloads(&detail, "review_failed").is_empty(), "{tamper}");
     }
 }
 
