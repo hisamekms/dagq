@@ -15,6 +15,7 @@ A worker, a job and the observer get the queue service's address and a token, ne
 - `no_use_case`: the service does not serve the command; `control_side_command`: `doctor`, `service status` or `planners`, which a person or the inbox runs on the host; `queue_named`: it names a queue (`--db`). Never add `--db` to reach the queue; hand the step on.
 - `authorization_denied`: refused for your principal, as in "The check". The error also carries `denied` (role, capability, reason) and the message the command line prints for the same refusal; the client's own codes carry no `denied`.
 - `unreachable`, `unauthenticated`, `no_credential`, `client_misconfigured`: no service, token or usable address. Do not work around it (the client never opens the queue instead): try again later, or write it in the receipt.
+- `response_too_large`: the service got the command and answered, but the answer is longer than a client-mode `dagq` reads, so none of it is printed. This is not `unreachable`: do not wait and retry the same read. Narrow the read as the message says and run it again: for `events`, a smaller window with `--since` / `--until`, a smaller `--limit`, and the next page with `--after <cursor>`; for other reads, the options the message names.
 - `bad_request`, `failed`, `api_version_mismatch`: read the message.
 
 Reads print what the command line prints.
