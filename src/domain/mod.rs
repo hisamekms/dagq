@@ -1324,7 +1324,9 @@ pub use plan_review::{
     PlanReviewCandidate, PlanReviewDecision, PlanReviewVerdict, Reopen, next_to_review,
 };
 pub use planner::{IdleProbe, PlannerHandover, PlannerProbe, PlannerSession};
-pub use proposal::{PlannerOwner, Proposal, ProposalRecord, Submission};
+pub use proposal::{
+    GoalSubmitted, PlannerOwner, Proposal, ProposalRecord, Submission, canceled_proposal,
+};
 pub use reason::{Reason, ReasonCode};
 pub use receipt::{BaseCheck, Receipt, ReceiptCheck, evidence_missing_reason, required_of};
 pub use run::{

@@ -737,6 +737,99 @@ fn counts_the_improvement_proposals_running_at_each_periods_end() {
     }));
 }
 
+/// A proposal runs on its goals' tasks too (ADR-t2951-1): one holding only
+/// a goal counts while a task the goal holds now is still to be done, and
+/// no longer once they ended; one holding nothing never counts.
+#[test]
+fn a_proposal_of_a_goal_runs_until_the_goals_tasks_end() {
+    let mut queue = Queue::default();
+    let at = MONDAY + HOUR;
+    improvement(&mut queue, 1, 30, &[], Some("planner"), at);
+    queue.push(None, None, "goal_submitted", json!({"proposal_id": 30}), at);
+    queue.events.last_mut().unwrap().goal_id = Some(GoalId::new(5));
+    // The goal's task, submitted in another proposal, ready on Monday
+    // and completed on Tuesday.
+    improvement(&mut queue, 2, 31, &[301], Some("person"), at);
+    task_to(&mut queue, 301, "ready", at + HOUR);
+    task_to(&mut queue, 301, "completed", at + DAY);
+    queue.goals.insert(TaskId::new(301), Some(GoalId::new(5)));
+    // A task of the goal no event up to the window's end names yet.
+    queue.goals.insert(TaskId::new(302), Some(GoalId::new(5)));
+    // Accepted with nothing.
+    improvement(&mut queue, 3, 32, &[], Some("planner"), at);
+    let query = KpiQuery {
+        at: Some(Cursor::Time((MONDAY + DAY) * 1000)),
+        last: 2,
+        ..KpiQuery::default()
+    };
+    let result = queue.kpi(MONDAY + 2 * DAY, &KpiConfig::default(), &query);
+    let count = |index: usize| measure(&result.periods[index], "improvement_proposals", ALL).value;
+    assert_eq!((count(0), count(1)), (Some(1.0), Some(0.0)));
+}
+
+/// A proposal canceled by a person's `cancel` answer or by its settling
+/// does not count, though its goal still holds a task to be done; one the
+/// person accepted does (ADR-t2951-1, the same rule as the runtime's).
+#[test]
+fn a_canceled_proposal_does_not_count_on_its_goals_tasks() {
+    let mut queue = Queue::default();
+    let at = MONDAY + HOUR;
+    for (finding, proposal, goal, own, others, ended, status) in [
+        (1, 40, 6, 401, 402, "plan_decided", "canceled"),
+        (2, 42, 7, 421, 422, "plan_decided", "accepted"),
+        (3, 43, 8, 431, 432, "proposal_settled", "canceled"),
+    ] {
+        improvement(&mut queue, finding, proposal, &[own], Some("planner"), at);
+        queue.push(
+            None,
+            None,
+            "goal_submitted",
+            json!({"proposal_id": proposal}),
+            at,
+        );
+        queue.events.last_mut().unwrap().goal_id = Some(GoalId::new(goal));
+        // The goal's other task, of a person's proposal, still to be done.
+        improvement(
+            &mut queue,
+            10 + finding,
+            50 + proposal,
+            &[others],
+            Some("person"),
+            at,
+        );
+        task_to(&mut queue, others, "ready", at + HOUR);
+        queue
+            .goals
+            .insert(TaskId::new(own), Some(GoalId::new(goal)));
+        queue
+            .goals
+            .insert(TaskId::new(others), Some(GoalId::new(goal)));
+        let own_end = if status == "canceled" {
+            "canceled"
+        } else {
+            "ready"
+        };
+        task_to(&mut queue, own, own_end, at + 2 * HOUR);
+        queue.push(
+            Some(own),
+            None,
+            ended,
+            json!({"proposal_id": proposal, "status": status}),
+            at + 2 * HOUR,
+        );
+    }
+    let query = KpiQuery {
+        at: Some(Cursor::Time((MONDAY + DAY) * 1000)),
+        last: 1,
+        ..KpiQuery::default()
+    };
+    let result = queue.kpi(MONDAY + 2 * DAY, &KpiConfig::default(), &query);
+    assert_eq!(
+        measure(&result.periods[0], "improvement_proposals", ALL).value,
+        Some(1.0)
+    );
+}
+
 /// A proposal linked to a `ci_failure` finding of the supervisor's CI
 /// watch alone repairs the landing branch's CI and is no improvement
 /// (ADR-t2928-1); one that also remedies an improvement's finding counts,

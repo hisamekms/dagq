@@ -1790,26 +1790,43 @@ impl<'a> Context<'a> {
     ///   into another, and each task's latest `task_status_changed`
     ///   (`completed` or `canceled` ends one; a member with none since is
     ///   still to be done);
-    /// - its withdrawal: `proposal_withdrawn`, which cancels it. Plan
-    ///   review's cancel cancels its tasks, which ends it the same way.
+    /// - its goals' tasks (ADR-t2951-1): a goal's latest `goal_submitted`
+    ///   names the proposal holding it, and the tasks of the goal now (the
+    ///   tasks' goals as the input reads them) that an event up to `upto`
+    ///   names join the proposal's, each once;
+    /// - its cancellation ([`crate::domain::canceled_proposal`]): a
+    ///   `proposal_withdrawn`, or a `plan_decided` (a person's `cancel`) or
+    ///   `proposal_settled` with the status `canceled`. Its own tasks are
+    ///   canceled then, but its goals' may still run, so the cancellation
+    ///   itself ends it.
     ///
-    /// With `--goal`, a proposal counts when one of its tasks is of the
+    /// With `--goal`, a proposal counts when one of those tasks is of the
     /// goal. `None` (`unavailable`: `not_recorded`) when a proposal that
     /// would run has no record of its owner's origin.
     fn improvement_proposals(&self, upto: EventId) -> Option<usize> {
-        use crate::domain::{EventKind, ProposalStatus, TaskStatus};
+        use crate::domain::{
+            EventKind, GoalSubmitted, ProposalId, ProposalStatus, TaskStatus, canceled_proposal,
+        };
         let mut links: HashMap<i64, i64> = HashMap::new();
         let mut owners: HashMap<i64, Option<bool>> = HashMap::new();
         let mut members: HashMap<i64, Vec<TaskId>> = HashMap::new();
-        let mut withdrawn: HashSet<i64> = HashSet::new();
+        let mut canceled: HashSet<i64> = HashSet::new();
         let mut statuses: HashMap<TaskId, TaskStatus> = HashMap::new();
         let mut repairs: HashSet<i64> = HashSet::new();
+        let mut goal_proposals: HashMap<GoalId, i64> = HashMap::new();
+        let mut seen: HashSet<TaskId> = HashSet::new();
         let field = |event: &RunEvent, key: &str| event.payload.get(key).and_then(Value::as_i64);
         for event in self.events.iter().filter(|event| event.id <= upto) {
+            seen.extend(event.task_id);
             let Some(kind) = event.kind.known() else {
                 continue;
             };
             match kind {
+                EventKind::GoalSubmitted => {
+                    if let Some((goal, submitted)) = GoalSubmitted::of_event(event) {
+                        goal_proposals.insert(goal, submitted.proposal_id.as_i64());
+                    }
+                }
                 EventKind::FindingRecorded => {
                     let by = event.payload.get("by").and_then(Value::as_str);
                     if let (Some(finding), Some(kind)) = (
@@ -1869,20 +1886,35 @@ impl<'a> Context<'a> {
                         statuses.insert(task, to);
                     }
                 }
-                EventKind::ProposalWithdrawn => {
-                    withdrawn.extend(field(event, "proposal_id"));
+                EventKind::ProposalWithdrawn
+                | EventKind::PlanDecided
+                | EventKind::ProposalSettled => {
+                    canceled.extend(canceled_proposal(event).map(ProposalId::as_i64));
                 }
                 _ => {}
             }
         }
         let proposals: HashSet<i64> = links.into_values().collect();
+        let mut goal_tasks: HashMap<i64, Vec<TaskId>> = HashMap::new();
+        for (&task, goal) in self.goals {
+            if let Some(&proposal) = goal.as_ref().and_then(|goal| goal_proposals.get(goal))
+                && seen.contains(&task)
+            {
+                goal_tasks.entry(proposal).or_default().push(task);
+            }
+        }
         let mut running = 0;
         for proposal in proposals {
-            let tasks = members.get(&proposal).map_or(&[][..], Vec::as_slice);
+            let mut tasks = members.get(&proposal).cloned().unwrap_or_default();
+            for &task in goal_tasks.get(&proposal).map_or(&[][..], Vec::as_slice) {
+                if !tasks.contains(&task) {
+                    tasks.push(task);
+                }
+            }
             if self.goal_id.is_some() && !tasks.iter().any(|&task| self.counts(Some(task))) {
                 continue;
             }
-            let status = if withdrawn.contains(&proposal) {
+            let status = if canceled.contains(&proposal) {
                 ProposalStatus::Canceled
             } else {
                 ProposalStatus::Submitted

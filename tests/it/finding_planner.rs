@@ -386,6 +386,122 @@ fn improvement_planners_wait_at_the_limit_and_their_tasks_are_normal_at_most() {
     );
 }
 
+/// ADR-t2951-1: a proposal of the runtime's counts against the
+/// improvements' limit only while its tasks or its goals' tasks are still
+/// to be done. One holding only a goal whose task ended and one accepted
+/// with nothing (the rows written here directly, as a task moved into
+/// another proposal leaves them) no longer fill the limit: their findings
+/// go back to `open` without their marks, and the improvement waiting
+/// behind them gets its planner.
+#[test]
+fn proposals_with_no_task_to_do_leave_the_improvements_limit() {
+    let fx = fixture();
+    std::fs::write(
+        fx.repo.join("dagq.toml"),
+        "[kpi]\nmax_improvement_proposals = 2\n",
+    )
+    .unwrap();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let goal = open_goal(&mut queue);
+    let held = open_goal(&mut queue);
+    let first = record(&mut queue, FindingTarget::Queue, "src/a.rs", Some("a"));
+    let second = record(&mut queue, FindingTarget::Queue, "src/b.rs", Some("b"));
+    let third = record(&mut queue, FindingTarget::Queue, "src/c.rs", Some("c"));
+    let pass = json!({"verdict": "pass", "reasons": [], "summary": "ok"});
+    let reviewer = StubReviewer::new(&[pass.clone(), pass.clone(), pass]);
+    let backend = PlanWorkspace::default();
+    let three = options(3, Duration::from_secs(3600));
+
+    supervise_with(&fx, &backend, &reviewer, &three);
+    let planners = queue.planners(false).unwrap();
+    assert_eq!(planners.len(), 2, "{planners:?}");
+    let mut tasks = Vec::new();
+    for planner in &planners {
+        let of = if planner.finding_id == Some(first) {
+            held
+        } else {
+            goal
+        };
+        let mut submitter =
+            SqliteQueue::open(&fx.db)
+                .unwrap()
+                .with_actor(dagq::domain::ActorContext::instance(
+                    dagq::domain::ActorRole::Planner,
+                    planner.id,
+                ));
+        let task = draft(&mut submitter, of, "split");
+        submitter
+            .submit_linking(
+                Submission {
+                    tasks: vec![task],
+                    goals: Vec::new(),
+                    proposal: None,
+                    owner: runtime_owner(planner.workspace_id.as_deref().unwrap()),
+                },
+                &[],
+            )
+            .unwrap();
+        idle(&queue, &fx.db, planner.id);
+        tasks.push((planner.finding_id, task));
+    }
+    supervise_with(&fx, &backend, &reviewer, &three);
+    supervise_with(&fx, &backend, &reviewer, &three);
+    for planner in &planners {
+        queue
+            .planner_exited(planner.id, std::process::id(), 0)
+            .unwrap();
+    }
+    for &(_, task) in &tasks {
+        assert_eq!(status(&mut queue, task), TaskStatus::Ready);
+    }
+    assert!(finding_events(&fx.db, third, "finding_planner_opened").is_empty());
+
+    // The first proposal holds only its goal, whose task is canceled; the
+    // second holds nothing, its task still ready outside it.
+    let proposal_of = |id| finding(&queue, id).proposal_id.unwrap().as_i64();
+    let (holding, empty) = (proposal_of(first), proposal_of(second));
+    let connection = Connection::open(&fx.db).unwrap();
+    connection
+        .execute(
+            "UPDATE goals SET proposal_id=?1 WHERE id=?2",
+            rusqlite::params![holding, held.as_i64()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE tasks SET proposal_id=NULL WHERE proposal_id IN (?1, ?2)",
+            rusqlite::params![holding, empty],
+        )
+        .unwrap();
+    let held_task = tasks
+        .iter()
+        .find(|(finding, _)| *finding == Some(first))
+        .unwrap()
+        .1;
+    queue.transition(held_task, TaskAction::Cancel).unwrap();
+
+    supervise_with(&fx, &backend, &reviewer, &three);
+    supervise_with(&fx, &backend, &reviewer, &three);
+    for (id, reason) in [
+        (first, "every task of its proposal was canceled"),
+        (second, "its proposal was accepted with no task"),
+    ] {
+        let settled = finding(&queue, id);
+        assert_eq!(settled.status, FindingStatus::Open, "{id}");
+        assert_eq!((settled.proposal_id, settled.propose_reason), (None, None));
+        assert_eq!(
+            finding_events(&fx.db, id, "finding_status_changed")
+                .last()
+                .unwrap()["reason"],
+            reason
+        );
+    }
+    assert_eq!(
+        finding_events(&fx.db, third, "finding_planner_opened").len(),
+        1
+    );
+}
+
 /// ADR-t2893-1: the `ci_failure` finding the supervisor's CI watch
 /// records on a red run gets its planner in the same supervisor's pass
 /// that has a free place for one, though the improvements running are at

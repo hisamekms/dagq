@@ -455,10 +455,18 @@ pub fn check_recordable_kind(kind: &str) -> Result<(), DomainError> {
 }
 
 /// Whether a proposal linked to a finding still counts against the
-/// [`ImprovementLimit`]: not canceled and a task still to be done — the
-/// proposal [`settle`] leaves unsettled.
+/// [`ImprovementLimit`] (ADR-t2951-1): not canceled and a task still to be
+/// done among `tasks`, the statuses of the proposal's tasks and of the
+/// tasks its goals hold now. A proposal with none of them runs nothing.
 pub fn improvement_running(proposal: ProposalStatus, tasks: &[super::TaskStatus]) -> bool {
-    settle(proposal, tasks).is_none()
+    proposal != ProposalStatus::Canceled && tasks.iter().any(|s| !ended(*s))
+}
+
+fn ended(status: super::TaskStatus) -> bool {
+    matches!(
+        status,
+        super::TaskStatus::Completed | super::TaskStatus::Canceled
+    )
 }
 
 /// A person's answer the runtime applies to a finding.
@@ -547,12 +555,14 @@ pub fn check_link(finding: &Finding, proposal: ProposalId) -> Result<bool, Domai
     }
 }
 
-/// What the end of a `proposed` finding's proposal makes of it (ADR-0044
-/// decision 18): `resolved` once every task of the proposal ended and one
-/// completed; `open` again when the proposal was canceled or every task
-/// was, with its mark taken off (a new proposal needs a new mark). `None`
-/// while a task is still to be done. `tasks` are the statuses of the
-/// proposal's tasks.
+/// What the end of a `proposed` finding's proposal makes of it (ADR-0047
+/// decision 18, ADR-t2951-1): `resolved` once every task ended and one
+/// completed; `open` again when the proposal was canceled, every task was,
+/// or it was accepted with no task, with its mark taken off (a new
+/// proposal needs a new mark). `None` while a task is still to be done, or
+/// while plan review has not accepted a proposal with no task. `tasks` are
+/// the statuses of the proposal's tasks and of the tasks its goals hold
+/// now.
 pub fn settle(
     proposal: ProposalStatus,
     tasks: &[super::TaskStatus],
@@ -561,11 +571,15 @@ pub fn settle(
     if proposal == ProposalStatus::Canceled {
         return Some((FindingStatus::Open, "its proposal was canceled".into()));
     }
-    if tasks.is_empty()
-        || !tasks
-            .iter()
-            .all(|s| matches!(s, TaskStatus::Completed | TaskStatus::Canceled))
-    {
+    if tasks.is_empty() {
+        return (proposal == ProposalStatus::Accepted).then(|| {
+            (
+                FindingStatus::Open,
+                "its proposal was accepted with no task".into(),
+            )
+        });
+    }
+    if !tasks.iter().all(|s| ended(*s)) {
         return None;
     }
     let completed = tasks
@@ -651,6 +665,15 @@ mod tests {
         assert!(!improvement_running(
             ProposalStatus::Canceled,
             &[TaskStatus::Draft]
+        ));
+        // A proposal with no task to be done runs nothing, whatever it
+        // was accepted with: one holding only a goal whose tasks ended,
+        // or one holding nothing.
+        assert!(!improvement_running(ProposalStatus::Accepted, &[]));
+        assert!(!improvement_running(ProposalStatus::Submitted, &[]));
+        assert!(!improvement_running(
+            ProposalStatus::Accepted,
+            &[TaskStatus::Completed]
         ));
         let limit = |running| ImprovementLimit { running, limit: 2 };
         assert!(!limit(0).reached());
@@ -974,6 +997,14 @@ mod tests {
 
         assert_eq!(settle(ProposalStatus::Accepted, &[Completed, Ready]), None);
         assert_eq!(settle(ProposalStatus::Submitted, &[]), None);
+        assert_eq!(settle(ProposalStatus::Revising, &[]), None);
+        assert_eq!(
+            settle(ProposalStatus::Accepted, &[]),
+            Some((
+                FindingStatus::Open,
+                "its proposal was accepted with no task".into()
+            ))
+        );
         assert_eq!(
             settle(ProposalStatus::Accepted, &[Completed, Canceled]).map(|s| s.0),
             Some(FindingStatus::Resolved)

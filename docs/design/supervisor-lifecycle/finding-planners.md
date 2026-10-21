@@ -8,6 +8,7 @@ scope: runtime
 related:
   - adr-t1920-1
   - adr-t2928-1
+  - adr-t2951-1
   - adr-t1704-1
   - adr-t1394-1
   - adr-t1394-2
@@ -60,7 +61,9 @@ run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-sup
    改善のproposalのtaskは個別の優先度を持たずgoalから継ぐ（ADR-t1971-1決定4）。
    plannerの初期promptは`--priority`を付けず、受け入れ条件に要るときだけ`normal`以下の既存のgoalに入れ、ほかは新しいgoal（改善は`normal`以下）かgoalの無いtaskにするよう書き、上限はtaskの値でなくgoalと所属で守る（plan reviewが見て外れれば`revise`）。
    follow_upの自動採用の上限（決定16）はfindingのproposalには掛からない（draftの出どころが無いので`check_adoptions`の対象外）。
-7. **終わったproposal**（`settle_findings`、各passで立てる前）: `proposed`のfindingの紐づいたproposalが`canceled`になったか、そのtaskがすべて`completed` / `canceled`になったら、1つ以上`completed`なら`resolved`、1つも無ければ`open`に戻す。
+7. **終わったproposal**（`settle_findings`、各passで立てる前。[ADR-t2951-1](../../adr/2026-10-22-t2951-1-proposals-run-on-their-tasks-and-their-goals-tasks.md)）: proposalのtaskは、proposalのtaskとproposalが持つgoalの今のtaskの和（`proposal_state`）。
+   `proposed`のfindingの紐づいたproposalが`canceled`になったか、そのtaskがすべて`completed` / `canceled`になったら、1つ以上`completed`なら`resolved`、1つも無ければ`open`に戻す。
+   taskが1件も無いまま`accepted`になったproposalは直すtaskが無いので`open`に戻し、plan reviewが決める前（`submitted` / `revising`）は待つ。
    `open`に戻すときはproposalと印を外すので、もう一度proposalにするには新しい印が要る。
 8. **回数の上限**: plannerがfindingを決めずに終わった（sessionが終わった、idleで終了の依頼を受けて終わった）findingは次のpassで再び対象になる。
    今の印の後に立てたplannerのうち、人の答えだけを待って終わったもの（10）を除いた数が`MAX_FINDING_PLANNERS`に達したfindingは（人のanswerを運ぶとき以外は）立てずに`finding_planner_exhausted`を記録する。
@@ -81,7 +84,7 @@ run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-sup
     どちらも[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)の「状態」と「使えないとき」。
     未回答の`planner_question`のほかに待つものが無いidleのplannerは、人の答えだけを待つとして終了の依頼を受け、行は`runtime_answer_wait`で閉じ、askは開いたまま残る（[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定1。[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)の「人の答えだけを待つplannerの終わり」）。
     findingは2のとおりそのaskが閉じるまで対象にならず、answerで9の新しいplannerが続ける。
-11. **改善の上限**（ADR-0051の決定25）: 動いている改善（`SqliteQueue::improvements`）は、改善のfinding（`finding::counts_as_improvement`）が指す別々のproposalで持ち主がruntimeのplannerのもののうち`finding::improvement_running`のものと、閉じていないruntimeのplannerのうち改善のfindingが`open`のもの（submitすればfindingが`proposed`になり、そのproposalの方を数える）の合計。
+11. **改善の上限**（ADR-0051の決定25）: 動いている改善（`SqliteQueue::improvements`）は、改善のfinding（`finding::counts_as_improvement`）が指す別々のproposalで持ち主がruntimeのplannerのもののうち`finding::improvement_running`のもの（`canceled`でなく、7のtaskの和に終わっていないものがある。和が空なら数えない）と、閉じていないruntimeのplannerのうち改善のfindingが`open`のもの（submitすればfindingが`proposed`になり、そのproposalの方を数える）の合計。
     ADR-0051の決定25は数え方をproposalで書くが、runtimeのplannerも数えるのは、同時に立ったplannerがそれぞれsubmitして上限を超えないため（決定25の「plannerがすでに立った後に上限を超えることはない」）。
     上限は`dagq.toml`の`[kpi]`の`max_improvement_proposals`で、supervisorは毎回読み直す。
     合計が上限以上のあいだ、`open_finding_planner`は（人のanswerを運ぶときとCIの見張りの`ci_failure`のfinding以外は）plannerを立てず、findingは`open`のまま待つ。

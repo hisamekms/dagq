@@ -326,9 +326,146 @@ pub fn check_goal_joins(
     }
 }
 
+/// The proposal `event` ends as `canceled`: a withdrawal, or a person's
+/// `approve_plan` answer or the settling of a proposal none of whose tasks
+/// waits for plan review that records the status `canceled`. `None` for
+/// any other event, another status, or a payload that does not restore
+/// (an older one without the status cancels nothing).
+pub fn canceled_proposal(event: &super::RunEvent) -> Option<ProposalId> {
+    #[derive(Deserialize)]
+    struct Ended {
+        proposal_id: ProposalId,
+        #[serde(default)]
+        status: Option<ProposalStatus>,
+    }
+    let withdrawn = event.kind == super::EventKind::ProposalWithdrawn;
+    if !withdrawn
+        && event.kind != super::EventKind::PlanDecided
+        && event.kind != super::EventKind::ProposalSettled
+    {
+        return None;
+    }
+    let ended: Ended = serde_json::from_value(event.payload.clone()).ok()?;
+    (withdrawn || ended.status == Some(ProposalStatus::Canceled)).then_some(ended.proposal_id)
+}
+
+/// What `goal_submitted` records: the proposal the goal joined. A goal's
+/// latest one names the proposal holding it, as the event is recorded
+/// only when the goal's proposal changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalSubmitted {
+    pub proposal_id: ProposalId,
+}
+
+impl GoalSubmitted {
+    /// The goal and the proposal `event` records; `None` for another kind,
+    /// an event on no goal or a payload that does not restore.
+    pub fn of_event(event: &super::RunEvent) -> Option<(GoalId, Self)> {
+        if event.kind != super::EventKind::GoalSubmitted {
+            return None;
+        }
+        Some((
+            event.goal_id?,
+            serde_json::from_value(event.payload.clone()).ok()?,
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_withdrawal_and_a_canceled_decision_or_settling_cancel_the_proposal() {
+        use crate::domain::{EventId, RunEvent};
+        use serde_json::json;
+        let event = |kind: &str, payload| RunEvent {
+            id: EventId::new(1),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.into(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        };
+        let seven = Some(ProposalId::new(7));
+        let withdrawn = json!({"proposal_id": 7, "from": "submitted"});
+        assert_eq!(
+            canceled_proposal(&event("proposal_withdrawn", withdrawn)),
+            seven
+        );
+        for kind in ["plan_decided", "proposal_settled"] {
+            let ended = |status| json!({"proposal_id": 7, "status": status});
+            assert_eq!(
+                canceled_proposal(&event(kind, ended("canceled"))),
+                seven,
+                "{kind}"
+            );
+            assert_eq!(
+                canceled_proposal(&event(kind, ended("accepted"))),
+                None,
+                "{kind}"
+            );
+            assert_eq!(
+                canceled_proposal(&event(kind, ended("revising"))),
+                None,
+                "{kind}"
+            );
+            assert_eq!(
+                canceled_proposal(&event(kind, json!({"proposal_id": 7}))),
+                None,
+                "{kind}"
+            );
+        }
+        let canceled = json!({"proposal_id": 7, "status": "canceled"});
+        assert_eq!(canceled_proposal(&event("task_submitted", canceled)), None);
+        assert_eq!(
+            canceled_proposal(&event("proposal_withdrawn", json!({}))),
+            None
+        );
+    }
+
+    #[test]
+    fn a_goal_submitted_event_restores_its_goal_and_proposal() {
+        use crate::domain::{EventId, RunEvent};
+        let event = |kind: &str, goal: Option<i64>, payload| RunEvent {
+            id: EventId::new(1),
+            task_id: None,
+            goal_id: goal.map(GoalId::new),
+            run_id: None,
+            kind: kind.into(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        };
+        let written = serde_json::to_value(GoalSubmitted {
+            proposal_id: ProposalId::new(7),
+        })
+        .unwrap();
+        assert_eq!(written, serde_json::json!({"proposal_id": 7}));
+        assert_eq!(
+            GoalSubmitted::of_event(&event("goal_submitted", Some(3), written.clone())),
+            Some((
+                GoalId::new(3),
+                GoalSubmitted {
+                    proposal_id: ProposalId::new(7)
+                }
+            ))
+        );
+        assert_eq!(
+            GoalSubmitted::of_event(&event("goal_submitted", None, written.clone())),
+            None
+        );
+        assert_eq!(
+            GoalSubmitted::of_event(&event("task_submitted", Some(3), written)),
+            None
+        );
+        assert_eq!(
+            GoalSubmitted::of_event(&event("goal_submitted", Some(3), serde_json::json!({}))),
+            None
+        );
+    }
 
     fn owner(origin: PlannerOrigin) -> PlannerOwner {
         PlannerOwner {

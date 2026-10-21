@@ -14,9 +14,9 @@ use std::collections::BTreeMap;
 
 use super::sqlite::{enum_col, event, goal_event, read_goal, transition_task};
 use crate::domain::{
-    Ask, ChangeSet, DomainError, GoalId, GoalStatus, PlannerOrigin, PlannerOwner, Proposal,
-    ProposalId, ProposalRecord, ProposalStatus, Submission, TagSet, TaskAction, TaskId, TaskStatus,
-    TitlePrefixes, follow_up::reopened_material, goal, investigation, proposal,
+    Ask, ChangeSet, DomainError, GoalId, GoalStatus, GoalSubmitted, PlannerOrigin, PlannerOwner,
+    Proposal, ProposalId, ProposalRecord, ProposalStatus, Submission, TagSet, TaskAction, TaskId,
+    TaskStatus, TitlePrefixes, follow_up::reopened_material, goal, investigation, proposal,
 };
 
 /// When a submit happens: the timestamp of its records and the unix
@@ -247,7 +247,7 @@ pub(super) fn submit(
                 conn,
                 goal_id,
                 EventKind::GoalSubmitted,
-                json!({"proposal_id": id}),
+                serde_json::to_value(GoalSubmitted { proposal_id: id })?,
             )?;
         }
     }

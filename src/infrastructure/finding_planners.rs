@@ -21,7 +21,7 @@ use crate::application::{FindingPlannerStart, PlannerAnswerRoute};
 use crate::domain::{
     Ask, AskId, AskKind, Finding, FindingAnswer, FindingId, FindingStatus, FindingTarget,
     ImprovementLimit, MAX_FINDING_PLANNERS, NewFinding, PlannerId, PlannerOrigin, Proposal,
-    ProposalId, ProposalStatus, Submission, TaskStatus, counts_as_improvement, finding,
+    ProposalId, ProposalStatus, Submission, TaskId, TaskStatus, counts_as_improvement, finding,
 };
 
 /// The findings waiting for a planner of the runtime's: `open`, marked for
@@ -225,9 +225,10 @@ impl SqliteQueue {
     }
 
     /// End the `proposed` findings whose proposal ended
-    /// ([`finding::settle`]): `resolved` once its tasks ended with one
-    /// completed, `open` again (without its mark and proposal) when the
-    /// proposal or all its tasks were canceled. Records
+    /// ([`finding::settle`], over the proposal's tasks and its goals'):
+    /// `resolved` once they ended with one completed, `open` again (without
+    /// its mark and proposal) when the proposal or all of them were
+    /// canceled, or it was accepted with none. Records
     /// `finding_status_changed` with the proposal.
     pub fn settle_findings(&mut self) -> Result<Vec<(FindingId, FindingStatus)>> {
         // Most passes have nothing to settle: no write lock for them.
@@ -436,16 +437,22 @@ fn improvement_limit(conn: &Connection, limit: usize) -> Result<ImprovementLimit
     })
 }
 
-/// The proposal's status and the statuses of the tasks it holds.
+/// The proposal's status and the statuses of the tasks it holds and of the
+/// tasks its goals hold now (ADR-t2951-1), each task once.
 fn proposal_state(
     conn: &Connection,
     proposal: ProposalId,
 ) -> Result<(ProposalStatus, Vec<TaskStatus>)> {
     let record = super::proposals::read(conn, proposal)?;
-    let tasks = record
-        .task_ids()
-        .iter()
-        .map(|&id| Ok(super::sqlite::read_task(conn, id)?.status()))
+    let tasks = conn
+        .prepare(
+            "SELECT id FROM tasks WHERE proposal_id=?1
+             OR goal_id IN (SELECT id FROM goals WHERE proposal_id=?1) ORDER BY id",
+        )?
+        .query_map([proposal], |r| r.get::<_, TaskId>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .into_iter()
+        .map(|id| Ok(super::sqlite::read_task(conn, id)?.status()))
         .collect::<Result<Vec<_>>>()?;
     Ok((record.status(), tasks))
 }
