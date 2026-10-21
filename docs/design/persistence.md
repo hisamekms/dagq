@@ -230,6 +230,8 @@ follow-upの所属の判断・訂正とdraft / readyの所属の変更は同じ`
   遅延のtransactionがlockを得た時点の近似は`WriteTxTimes`のdoc commentが持つ。
 - claimは候補の選択・taskの更新・runの作成・event・lease行を1つのトランザクションにまとめ、同時のclaimは別々のtaskを取る。
   holdの行と`task_held` / `task_released`も1つのトランザクションで書き、claim・resume・復旧jobの開始と結果の適用はそれぞれのトランザクションでholdを読むので、先に確定した側だけが効く。
+  taskをcompletedかcanceledにするトランザクションは、開いたholdの行を閉じて`task_hold_ended`を書き、holdが残した結果を捨てる（`task_holds::end_with_task`）。
+  終わったtaskに開いたまま残った行は、supervisorのpassが同じ形で閉じ、taskは変えない。
 - 外部キーと依存の複合主キーはDBに置き、自己依存はdomainが拒み、循環はトランザクションの中の再帰CTEで見つける。
 - NULLになる列を含む主キーはSQLiteではその行の一意を保たないので、その一意は書く関数がトランザクションの中で読んでから検査する（再計画の条件の対応の削除の行は`replans.rs`の`write_mappings`）。
 - taskの詳細と一覧は1つのread transactionで読むので、task・run・eventのスナップショットが揃う。

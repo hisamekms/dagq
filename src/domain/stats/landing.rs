@@ -528,7 +528,7 @@ impl LandClock {
         if self.phase != HELD {
             return next;
         }
-        if event.kind == EventKind::TaskReleased || record.is_some() {
+        if crate::domain::task_hold::ends_hold(event) || record.is_some() {
             return next.or(self.before_held.take()).or(Some(EXIT));
         }
         if next.is_some() {

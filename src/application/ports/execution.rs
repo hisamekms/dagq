@@ -1449,6 +1449,10 @@ pub trait RunRecovery {
     /// instead of applying it while the run's task is held; `false` when
     /// the task is not held.
     fn keep_live_verdict(&mut self, id: &RunId, verdict: serde_json::Value) -> Result<bool>;
+    /// Close each hold still open on a task that ended, with the results
+    /// it kept, as the task's end closes one (`task_hold_ended`), the task
+    /// unchanged; the tasks whose hold was closed.
+    fn end_holds_of_ended_tasks(&mut self) -> Result<Vec<crate::domain::TaskId>>;
     /// The results a hold kept whose hold is released, not applied nor
     /// discarded yet, oldest first.
     fn released_kept_results(&self) -> Result<Vec<EventId>>;

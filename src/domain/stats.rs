@@ -2331,7 +2331,7 @@ impl Track {
                 self.held.push((start, at.max(start)));
                 self.held_since = None;
             }
-            (Some(start), None) if event.kind == EventKind::TaskReleased => {
+            (Some(start), None) if super::task_hold::ends_hold(event) => {
                 self.held.push((start, at.max(start)));
                 self.held_since = None;
             }

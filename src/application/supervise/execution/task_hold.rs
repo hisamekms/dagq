@@ -50,8 +50,12 @@ impl Supervisor<'_> {
         Ok(())
     }
 
-    /// Apply or discard each result a hold kept whose hold is released.
+    /// Apply or discard each result a hold kept whose hold is released,
+    /// after closing the holds still open on tasks that ended.
     pub(super) fn settle_kept_results(&mut self) -> Result<()> {
+        for task in self.queue.end_holds_of_ended_tasks()? {
+            info!(task_id = %task, "task {task} ended while held: its hold is closed and what it kept discarded");
+        }
         for kept in self.queue.released_kept_results()? {
             match self.queue.settle_kept_result(kept) {
                 Ok(KeptOutcome::Applied(run)) => {

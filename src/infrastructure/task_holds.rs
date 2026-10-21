@@ -498,6 +498,151 @@ impl SqliteQueue {
     }
 }
 
+/// Close, on `conn` inside the caller's transaction that moved `task` to
+/// `status`, the hold a task that ended takes with it
+/// ([`task_hold::HoldEnd`]): its open hold is released by the runtime and
+/// recorded as `task_hold_ended` with the end, and every result kept for
+/// the task that is not settled yet is discarded (`hold_result_discarded`,
+/// `task_ended`), a kept answer's ask closed. Nothing for a status that
+/// has not ended the task. Whether a hold was open.
+pub(super) fn end_with_task(
+    conn: &Connection,
+    task: TaskId,
+    status: TaskStatus,
+    now: i64,
+) -> Result<bool> {
+    let Some(end) = task_hold::HoldEnd::of(status) else {
+        return Ok(false);
+    };
+    let run = latest_run(conn, task)?.map(|(run, _)| run);
+    let open = open_hold_of(conn, task)?;
+    if let Some(hold) = &open {
+        conn.execute(
+            "UPDATE task_holds SET released_at=?2, released_by_role=?3, released_by_id=?3
+             WHERE id=?1 AND released_at IS NULL",
+            params![hold.id, now, HOLD_ENDER],
+        )?;
+        event(
+            conn,
+            task,
+            run.as_ref(),
+            EventKind::TaskHoldEnded,
+            json!({"hold_id": hold.id, "reason": end, "held_secs": now - hold.created_at,
+                   "settled_secs": hold.settled_at.map(|at| now - at)}),
+        )?;
+    }
+    discard_kept_of_ended(conn, task, end, now)?;
+    Ok(open.is_some())
+}
+
+/// Who `released_by_role` and `released_by_id` name for a hold its task's
+/// end closed.
+const HOLD_ENDER: &str = "runtime";
+
+/// Discard on `conn` every result kept for `task` that is neither applied
+/// nor discarded yet, its task having ended (`end`): `hold_result_discarded`
+/// with reason `task_ended`, superseded (it makes no round due: the run of
+/// an ended task is not recovered), and a kept answer's ask closed by the
+/// runtime, each read back as a [`task_hold::KeptResult`]. A result being
+/// applied now is settled already and stays.
+fn discard_kept_of_ended(
+    conn: &Connection,
+    task: TaskId,
+    end: task_hold::HoldEnd,
+    now: i64,
+) -> Result<()> {
+    let unsettled: Vec<crate::domain::RunEvent> = conn
+        .prepare(
+            "SELECT e.* FROM run_events e
+             WHERE e.task_id=?1 AND e.kind=?2 AND e.run_id IS NOT NULL
+               AND NOT EXISTS (SELECT 1 FROM run_events s WHERE s.run_id=e.run_id
+                 AND s.kind IN (?3,?4) AND json_extract(s.payload,'$.kept_id')=e.id)
+             ORDER BY e.id",
+        )?
+        .query_map(
+            params![
+                task,
+                EventKind::HoldResultKept.as_str(),
+                EventKind::HoldResultApplied.as_str(),
+                EventKind::HoldResultDiscarded.as_str()
+            ],
+            super::sqlite::event_row,
+        )?
+        .collect::<rusqlite::Result<_>>()?;
+    for kept in unsettled {
+        let (Some(result), Some(run)) = (task_hold::KeptResult::of_event(&kept), &kept.run_id)
+        else {
+            continue;
+        };
+        let task_hold::Disposition::Discard(reason) = end.kept_result() else {
+            unreachable!("a result kept for a task that ended is discarded");
+        };
+        if let Some(ask) = result.ask_to_close()
+            && let Some(ask) = conn
+                .query_row(
+                    "SELECT * FROM asks WHERE id=?1 AND closed_at IS NULL",
+                    [ask],
+                    super::asks::ask_row,
+                )
+                .optional()?
+        {
+            super::asks::discard_by_runtime(
+                conn,
+                &ask,
+                reason.as_str(),
+                &format!(
+                    "task {task} {}: the answer kept while it was held is discarded",
+                    end.as_str()
+                ),
+                now,
+            )?;
+        }
+        event(
+            conn,
+            task,
+            Some(run),
+            EventKind::HoldResultDiscarded,
+            json!({"kept_id": kept.id, "source": result.source, "reason": reason,
+                   "error": null, task_hold::SUPERSEDED: true}),
+        )?;
+    }
+    Ok(())
+}
+
+/// Close each hold left open on a task that ended before its end closed
+/// holds ([`end_with_task`]), as that end would have, the task unchanged:
+/// in one transaction, which a pass with none to close does not open. The
+/// tasks whose hold was closed.
+pub(super) fn end_holds_of_ended(conn: &mut Connection, now: i64) -> Result<Vec<TaskId>> {
+    if ended_with_open_hold(conn)?.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut closed = Vec::new();
+    for (task, status) in ended_with_open_hold(&tx)? {
+        if end_with_task(&tx, task, status, now)? {
+            closed.push(task);
+        }
+    }
+    tx.commit()?;
+    Ok(closed)
+}
+
+/// The tasks that ended with a hold still open, each with its status.
+fn ended_with_open_hold(conn: &Connection) -> Result<Vec<(TaskId, TaskStatus)>> {
+    let rows: Vec<(TaskId, String)> = conn
+        .prepare(
+            "SELECT DISTINCT h.task_id, t.status FROM task_holds h JOIN tasks t ON t.id = h.task_id
+             WHERE h.released_at IS NULL AND t.status IN ('completed','canceled')
+             ORDER BY h.task_id",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    rows.into_iter()
+        .map(|(task, status)| Ok((task, status.parse()?)))
+        .collect()
+}
+
 /// Record on `conn` that the open hold `hold` settled at `now`: whether it
 /// was still open and settling (a release or another settle that came
 /// first leaves it, and the caller writes nothing more).

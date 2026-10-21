@@ -15,6 +15,11 @@
 //! applied if neither the task nor the run moved meanwhile, and discarded
 //! as stale otherwise ([`disposition`]).
 //!
+//! A task that ends takes its hold with it ([`HoldEnd`]): the transaction
+//! that completes or cancels it closes the hold, and every result the hold
+//! kept is discarded, since nothing is left for it to apply to. A task
+//! reopened later is not held.
+//!
 //! A step of a run that is already going is not stopped by a hold
 //! (ADR-0049 decision 4): the hold is `settling` while it goes
 //! ([`run_wait`]), and the replanning's park takes the run at the step's
@@ -30,7 +35,7 @@ use crate::domain::EventKind;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CommitSha, DomainError, EventId, HoldId, Provider, RunEvent, RunId, RunStatus, TaskId,
+    AskId, CommitSha, DomainError, EventId, HoldId, Provider, RunEvent, RunId, RunStatus, TaskId,
     TaskStatus, error::require, task_replan::GuardedStep, turn::RecordedTurn,
 };
 
@@ -560,6 +565,41 @@ string_enum!(KeptSource {
     LiveVerdict => "live_verdict",
 });
 
+/// A result a hold kept, read back from its `hold_result_kept` of any
+/// version: where it came from (`None` for a source this binary does not
+/// know or a record without one) and the ask a person's answer answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeptResult {
+    pub source: Option<KeptSource>,
+    pub ask: Option<AskId>,
+}
+
+impl KeptResult {
+    /// The kept result `event` records; `None` for an event of another
+    /// kind. A field it cannot read is left out, not an error.
+    pub fn of_event(event: &RunEvent) -> Option<Self> {
+        if event.kind != EventKind::HoldResultKept {
+            return None;
+        }
+        let field = |key: &str| event.payload.get(key).cloned();
+        Some(Self {
+            source: field("source")
+                .and_then(|value| serde_json::from_value::<String>(value).ok())
+                .and_then(|source| source.parse().ok()),
+            ask: field("ask_id").and_then(|value| serde_json::from_value(value).ok()),
+        })
+    }
+
+    /// The ask a discard of the result closes: the one a person's answer
+    /// answered; none for a job's verdict.
+    pub const fn ask_to_close(self) -> Option<AskId> {
+        match self.source {
+            Some(KeptSource::TriageAnswer) => self.ask,
+            _ => None,
+        }
+    }
+}
+
 /// What says whether a task and its run moved while a result was kept:
 /// the task's status and last change, the run's status and the last event
 /// of the run that is not the hold's own nor a lease's.
@@ -574,10 +614,11 @@ pub struct ProgressVersion {
 /// The kinds a run's [`ProgressVersion`] does not count: the hold's own
 /// records, and the leases a recovery round takes and gives back and the
 /// session it closes at its end, which move nothing on.
-const NOT_PROGRESS: [EventKind; 10] = [
+const NOT_PROGRESS: [EventKind; 11] = [
     EventKind::TaskHeld,
     EventKind::TaskHoldReminded,
     EventKind::TaskReleased,
+    EventKind::TaskHoldEnded,
     EventKind::HoldDeferred,
     EventKind::HoldResultKept,
     EventKind::HoldResultApplied,
@@ -611,13 +652,46 @@ impl ProgressVersion {
 
 // Why a kept result was discarded at its hold's release: the task or the
 // run moved since it was kept, it was a verdict on a live session, which
-// only the session's own watch can check again, or the path that applies
-// it refused it now (a precondition no longer holds).
+// only the session's own watch can check again, the path that applies
+// it refused it now (a precondition no longer holds), or the task ended,
+// which leaves nothing for it to apply to ([`HoldEnd`]).
 string_enum!(DiscardReason {
     Changed => "changed",
     LiveSession => "live_session",
     Refused => "refused",
+    TaskEnded => "task_ended",
 });
+
+// Why a hold closed with its task (`task_hold_ended`'s `reason`): the task
+// completed or was canceled.
+string_enum!(HoldEnd {
+    Completed => "completed",
+    Canceled => "canceled",
+});
+
+impl HoldEnd {
+    /// The end a task moved to `status` puts to its open hold: `None` for
+    /// a status that has not ended the task, whose hold stays.
+    pub const fn of(status: TaskStatus) -> Option<Self> {
+        match status {
+            TaskStatus::Completed => Some(Self::Completed),
+            TaskStatus::Canceled => Some(Self::Canceled),
+            _ => None,
+        }
+    }
+
+    /// What becomes of a result the hold kept when its task ends: it is
+    /// discarded, whatever it was, as nothing is left for it to apply to.
+    pub const fn kept_result(self) -> Disposition {
+        Disposition::Discard(DiscardReason::TaskEnded)
+    }
+}
+
+/// Whether `event` closes a hold: its release (`task_released`) or the end
+/// of its task (`task_hold_ended`).
+pub fn ends_hold(event: &RunEvent) -> bool {
+    event.kind == EventKind::TaskReleased || event.kind == EventKind::TaskHoldEnded
+}
 
 /// What becomes of a result a hold kept, once the hold is released.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -630,13 +704,16 @@ pub enum Disposition {
 }
 
 /// What becomes of a result from `source` kept at `kept` now that the task
-/// and its run stand at `now`.
+/// and its run stand at `now`: discarded with a task that ended
+/// ([`HoldEnd::kept_result`]).
 pub fn disposition(
     source: KeptSource,
     kept: &ProgressVersion,
     now: &ProgressVersion,
 ) -> Disposition {
-    if source == KeptSource::LiveVerdict {
+    if let Some(end) = HoldEnd::of(now.task_status) {
+        end.kept_result()
+    } else if source == KeptSource::LiveVerdict {
         Disposition::Discard(DiscardReason::LiveSession)
     } else if kept == now {
         Disposition::Apply
@@ -694,8 +771,8 @@ impl TaskHold {
 /// The waits of a run for its task's hold in its `events` (ascending id),
 /// in unix milliseconds: from each `run_phase_changed` into
 /// [`Phase::Held`](super::run_phase::Phase::Held) to the next record of
-/// another phase (the release writes it) or a `task_released`, whichever
-/// comes first; `None` as the end of a wait not over. The time from
+/// another phase (the release writes it) or the hold's close
+/// ([`ends_hold`]), whichever comes first; `None` as the end of a wait not over. The time from
 /// `task_held` to that record is not among them: the run went on in the
 /// phases it was in.
 pub fn held_spans(events: &[RunEvent]) -> Vec<(i64, Option<i64>)> {
@@ -713,7 +790,7 @@ pub fn held_spans(events: &[RunEvent]) -> Vec<(i64, Option<i64>)> {
                 spans.push((start, Some(at.max(start))));
                 open = None;
             }
-            (Some(start), None) if event.kind == EventKind::TaskReleased => {
+            (Some(start), None) if ends_hold(event) => {
                 spans.push((start, Some(at.max(start))));
                 open = None;
             }
@@ -725,8 +802,8 @@ pub fn held_spans(events: &[RunEvent]) -> Vec<(i64, Option<i64>)> {
 }
 
 /// The holds of a task with no run going in its `events` (ascending id),
-/// in unix milliseconds: each `task_held` to the `task_released` of the
-/// same `hold_id`, `None` as the end of one still open. The fold lays
+/// in unix milliseconds: each `task_held` to the close ([`ends_hold`]) of
+/// the same `hold_id`, `None` as the end of one still open. The fold lays
 /// them over the task's time `ready` (its time before a claim).
 pub fn task_hold_spans(events: &[RunEvent]) -> Vec<(i64, Option<i64>)> {
     let hold_id = |event: &RunEvent| event.payload["hold_id"].as_i64();
@@ -737,7 +814,7 @@ pub fn task_hold_spans(events: &[RunEvent]) -> Vec<(i64, Option<i64>)> {
         };
         if event.kind == EventKind::TaskHeld {
             spans.push((hold_id(event), at, None));
-        } else if event.kind == EventKind::TaskReleased
+        } else if ends_hold(event)
             && let Some(span) = spans
                 .iter_mut()
                 .find(|(id, _, end)| end.is_none() && (id.is_none() || *id == hold_id(event)))
@@ -758,6 +835,7 @@ mod tests {
     use crate::domain::event_kind::HOLD_RESULT_KEPT;
     use crate::domain::event_kind::LEASE_RELEASED;
     use crate::domain::event_kind::TASK_HELD;
+    use crate::domain::event_kind::TASK_HOLD_ENDED;
     use crate::domain::event_kind::TASK_HOLD_REMINDED;
     use crate::domain::event_kind::TASK_RELEASED;
     use crate::domain::event_kind::WORKSPACE_CLOSED;
@@ -1389,6 +1467,116 @@ mod tests {
         assert_eq!(
             task_hold_spans(&events),
             [(10_000, Some(100_000)), (200_000, None)]
+        );
+    }
+
+    /// A task's end puts its own end to its hold: completed or canceled,
+    /// and nothing while it has not ended.
+    #[test]
+    fn only_a_task_that_ended_ends_its_hold_with_its_end() {
+        assert_eq!(HoldEnd::of(TaskStatus::Completed), Some(HoldEnd::Completed));
+        assert_eq!(HoldEnd::of(TaskStatus::Canceled), Some(HoldEnd::Canceled));
+        for status in [
+            TaskStatus::Draft,
+            TaskStatus::Submitted,
+            TaskStatus::Ready,
+            TaskStatus::InProgress,
+        ] {
+            assert_eq!(HoldEnd::of(status), None, "{status:?}");
+        }
+        assert_eq!(HoldEnd::Completed.as_str(), "completed");
+        assert_eq!(HoldEnd::Canceled.as_str(), "canceled");
+    }
+
+    /// A result kept for a task that ended is discarded as `task_ended`,
+    /// whatever its source and whether anything else moved.
+    #[test]
+    fn a_result_kept_for_a_task_that_ended_is_discarded() {
+        for end in [HoldEnd::Completed, HoldEnd::Canceled] {
+            assert_eq!(
+                end.kept_result(),
+                Disposition::Discard(DiscardReason::TaskEnded)
+            );
+        }
+        let events = vec![event(1, "run_claimed")];
+        let kept = ProgressVersion::of(TaskStatus::InProgress, "t1", RunStatus::Failed, &events);
+        for status in [TaskStatus::Completed, TaskStatus::Canceled] {
+            let ended = ProgressVersion::of(status, "t2", RunStatus::Failed, &events);
+            for source in [
+                KeptSource::RecoveryVerdict,
+                KeptSource::TriageAnswer,
+                KeptSource::LiveVerdict,
+            ] {
+                assert_eq!(
+                    disposition(source, &kept, &ended),
+                    Disposition::Discard(DiscardReason::TaskEnded)
+                );
+            }
+        }
+        assert_eq!(DiscardReason::TaskEnded.as_str(), "task_ended");
+    }
+
+    /// The end of a task closes its hold's spans as a release does: the
+    /// run's wait and the task's hold end at `task_hold_ended`, which is
+    /// none of the run's progress.
+    #[test]
+    fn a_task_hold_ended_closes_the_holds_spans_like_a_release() {
+        let phase =
+            |id, name: &str, secs| at(id, "run_phase_changed", json!({"phase": name}), secs);
+        let ended = at(3, TASK_HOLD_ENDED, json!({"hold_id": 1}), 90);
+        assert!(ends_hold(&ended));
+        assert!(ends_hold(&event(1, TASK_RELEASED)));
+        assert!(!ends_hold(&event(1, TASK_HELD)));
+        let events = [
+            at(1, TASK_HELD, json!({"hold_id": 1}), 10),
+            phase(2, "held", 40),
+            ended,
+        ];
+        assert_eq!(held_spans(&events), [(40_000, Some(90_000))]);
+        assert_eq!(task_hold_spans(&events), [(10_000, Some(90_000))]);
+        let before = vec![event(1, "run_claimed")];
+        let mut after = before.clone();
+        after.push(event(2, TASK_HOLD_ENDED));
+        assert_eq!(
+            ProgressVersion::of(TaskStatus::InProgress, "t", RunStatus::Failed, &before),
+            ProgressVersion::of(TaskStatus::InProgress, "t", RunStatus::Failed, &after)
+        );
+    }
+
+    /// A kept result is read back typed from its record of any version: a
+    /// person's answer names the ask a discard closes, a job's verdict
+    /// none; an unknown or missing source, or an ask that is not an id,
+    /// reads as none of them; another kind is no kept result.
+    #[test]
+    fn a_kept_result_is_read_back_typed_and_names_the_ask_of_an_answer() {
+        let kept = |value: serde_json::Value| {
+            KeptResult::of_event(&payload(1, HOLD_RESULT_KEPT, value)).unwrap()
+        };
+        let answer = kept(json!({"source": "triage_answer", "ask_id": 5, "answer": "retry"}));
+        assert_eq!(answer.source, Some(KeptSource::TriageAnswer));
+        assert_eq!(answer.ask_to_close(), Some(AskId::new(5)));
+        let verdict = kept(json!({"source": "recovery_verdict", "action": {"action": "retry"}}));
+        assert_eq!(verdict.source, Some(KeptSource::RecoveryVerdict));
+        assert_eq!(verdict.ask_to_close(), None);
+        assert_eq!(
+            kept(json!({"source": "live_verdict", "ask_id": 5})).ask_to_close(),
+            None
+        );
+        for unread in [
+            json!({"source": "someday_source", "ask_id": 5}),
+            json!({"ask_id": 5}),
+            json!({"source": 3, "ask_id": 5}),
+        ] {
+            let result = kept(unread.clone());
+            assert_eq!(result.source, None, "{unread}");
+            assert_eq!(result.ask_to_close(), None, "{unread}");
+        }
+        let odd = kept(json!({"source": "triage_answer", "ask_id": "five"}));
+        assert_eq!(odd.source, Some(KeptSource::TriageAnswer));
+        assert_eq!(odd.ask_to_close(), None);
+        assert_eq!(
+            KeptResult::of_event(&payload(1, HOLD_RESULT_DISCARDED, json!({"ask_id": 5}))),
+            None
         );
     }
 }

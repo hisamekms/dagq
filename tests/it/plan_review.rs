@@ -420,6 +420,23 @@ pub(crate) fn supervise_with(
     .unwrap()
 }
 
+/// [`supervise`] given the `dagq` the test owns
+/// ([`common::service::owned_executable`], in the queue's directory), so a
+/// service the supervisor starts stops once the test's process is gone.
+fn supervise_owned(fx: &Fixture, backend: &PlanWorkspace, reviewer: &StubReviewer) -> Value {
+    let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
+    runtime::supervise_with_reviewer(
+        &fx.db,
+        &fx.repo,
+        backend,
+        &fx.claude,
+        reviewer,
+        &common::service::owned_executable(fx.db.parent().unwrap()),
+        &options(1, Duration::from_secs(3600)),
+    )
+    .unwrap()
+}
+
 pub(crate) fn status(queue: &mut SqliteQueue, id: TaskId) -> TaskStatus {
     queue.show(id).unwrap().task.status()
 }
@@ -2342,4 +2359,79 @@ fn a_plan_review_verdict_is_applied_at_its_jobs_request_and_a_broken_one_fails_c
     let ask = asks.iter().find(|a| a.task_id == Some(task)).unwrap();
     assert_eq!(ask.kind, AskKind::ApprovePlan);
     assert_eq!(ask.asked_by, "plan_review");
+}
+
+/// Hold `task` as a person at a plain terminal.
+fn hold_task(db: &Path, task: TaskId) {
+    let output = common::cli::invoke_with(
+        &[],
+        db,
+        &["hold", &task.to_string(), "--reason", "the login expired"],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Whether `task`'s hold was closed by its cancel: none open, and
+/// `task_hold_ended` with reason `canceled` right after the cancel's
+/// `task_status_changed`, in the same transaction.
+fn assert_hold_ended_by_cancel(queue: &mut SqliteQueue, task: TaskId) {
+    assert!(queue.task_hold(task).unwrap().is_none());
+    let events = queue.show(task).unwrap().events;
+    let ended = events
+        .iter()
+        .position(|e| e.kind == dagq::domain::EventKind::TaskHoldEnded)
+        .unwrap_or_else(|| panic!("no task_hold_ended: {events:?}"));
+    assert_eq!(events[ended].payload["reason"], "canceled");
+    assert_eq!(
+        events[ended - 1].kind,
+        dagq::domain::EventKind::TaskStatusChanged
+    );
+    assert_eq!(events[ended - 1].payload["to"], "canceled");
+}
+
+/// A held submitted task that the plan review cancels as a duplicate,
+/// and one a person's `cancel` answer to the review's concern cancels:
+/// each cancel closes the task's hold (`task_hold_ended`, `canceled`).
+#[test]
+fn a_plan_reviews_cancel_and_a_cancel_answer_close_the_hold_of_the_task() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let blocker = TaskId::new(1);
+    let copy = add(&mut queue, "copy", &[blocker], Priority::Normal);
+    let other = add(&mut queue, "other", &[blocker], Priority::Normal);
+    submit(&mut queue, &[other, copy], None);
+    hold_task(&fx.db, copy);
+    let reviewer = StubReviewer::new(&[json!({
+        "verdict": "pass", "reasons": [], "summary": "sound",
+        "actions": [{"action": "cancel_duplicate", "task_id": copy, "duplicate_of": blocker}]
+    })]);
+    let backend = PlanWorkspace::default();
+    let outcome = supervise_owned(&fx, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(status(&mut queue, copy), TaskStatus::Canceled);
+    assert_hold_ended_by_cancel(&mut queue, copy);
+
+    let dropped = add(&mut queue, "dropped", &[blocker], Priority::Normal);
+    submit(&mut queue, &[dropped], None);
+    hold_task(&fx.db, dropped);
+    let reviewer = StubReviewer::new(&[json!({
+        "verdict": "concern",
+        "reasons": [{"text": "looks already implemented", "codes": ["task_overlap"]}],
+        "summary": "maybe done"
+    })]);
+    supervise_owned(&fx, &backend, &reviewer);
+    let ask = queue
+        .asks(Default::default())
+        .unwrap()
+        .into_iter()
+        .find(|ask| ask.task_id == Some(dropped))
+        .expect("no ask of the concern");
+    queue.answer(ask.id, "cancel").unwrap();
+    supervise_owned(&fx, &backend, &reviewer);
+    assert_eq!(status(&mut queue, dropped), TaskStatus::Canceled);
+    assert_hold_ended_by_cancel(&mut queue, dropped);
 }

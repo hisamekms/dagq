@@ -288,11 +288,11 @@ Spikeは実装とworkerの総枠を共有し、枠を予約しない（[ADR-t148
 ## taskのhold
 
 - taskを1つずつ待たせるhold（[ADR-t1879-1](../../adr/2026-10-07-t1879-1-hold-a-task-at-the-turn-boundary-and-release-it-explicitly.md)）は、fill passの列（resume・復旧job・claim）に入る前に外れ、外したことを工程ごとに1回残す（`supervise::execution::task_hold`）。
-- 列を作った後にかかったholdも、claim・resume・triageの開始がトランザクションの中で読み直すので、その開始は起きない。
 - queue全体の控えではないので`claim_held`を書かず、`stats`の控えにも数えない。
 - 走っているrunは工程の終わりで再計画と同じ保留を通って待ちに入り（[needs_session](needs-session.md#taskのhold)）、それまでの解除は拒んでholdの印を変えない。
 - hold中のtaskは`status`（`--role inbox`を含む）の`held`に理由とともに出る。
   期限を過ぎたか、期限が無く既定の時間を超えたholdはattentionになり、`watch`には同じholdにつき一定の間隔ごとに1回だけ知らせる。
   holdは自動では解かれない。
+  taskが終わればそのトランザクションでholdも閉じ（`task_hold_ended`）、持ち越さない。
   欄と判定の詳細は定義のそばのdoc commentと`--help`、[taskのhold](../../plans/task-hold.md)が持つ。
 - 解除の続け方の選択は[needs_session](needs-session.md#taskのhold)が持つ。

@@ -432,6 +432,7 @@ event_kinds! {
     TaskEdited => "task_edited",
     TaskGoalChanged => "task_goal_changed",
     TaskHeld => "task_held",
+    TaskHoldEnded => "task_hold_ended",
     TaskHoldReminded => "task_hold_reminded",
     TaskPathsChanged => "task_paths_changed",
     TaskPriorityChanged => "task_priority_changed",
@@ -907,7 +908,14 @@ impl<'de> serde::Deserialize<'de> for RecordedKind {
 
 pub const AGENT_STARTED: &str = EventKind::AgentStarted.as_str();
 pub const APPROVE_WITHHELD: &str = EventKind::ApproveWithheld.as_str();
+/// An ask answered. The runtime closing an open ask without applying an
+/// answer (as [`ASK_CLOSED`] drops one) answers it itself with
+/// `runtime_closed: true`, `discarded: true`, `reason` and `note`.
 pub const ASK_ANSWERED: &str = EventKind::AskAnswered.as_str();
+/// An answered ask closed: `ask_id` and `kind`. A close that drops the
+/// answer instead of applying it adds `discarded: true`, `reason` (a code,
+/// such as `task_ended` for an answer a hold kept for a task that ended)
+/// and `note`.
 pub const ASK_CLOSED: &str = EventKind::AskClosed.as_str();
 pub const ASK_DELIVERED: &str = EventKind::AskDelivered.as_str();
 pub const ASK_DELIVERY_FAILED: &str = EventKind::AskDeliveryFailed.as_str();
@@ -1375,6 +1383,15 @@ pub const TASK_REOPENED: &str = EventKind::TaskReopened.as_str();
 /// and `run_status` then, and `state` (`settling` or `held`). Written with
 /// the hold's row in one transaction.
 pub const TASK_HELD: &str = EventKind::TaskHeld.as_str();
+/// A task's open hold closed because the task ended (ADR-t1879-1):
+/// `hold_id`, `reason` (`completed` or `canceled`,
+/// [`super::task_hold::HoldEnd`]), `held_secs` and `settled_secs`. Written
+/// in the transaction that completes or cancels the task, with the
+/// `hold_result_discarded` (`task_ended`) of each result the hold kept;
+/// a supervisor's pass closes so a hold left open on a task that ended
+/// before, the task unchanged. Like `task_released`, it ends the hold's
+/// interval.
+pub const TASK_HOLD_ENDED: &str = EventKind::TaskHoldEnded.as_str();
 /// A person told of an open hold (ADR-t1879-1): `hold_id`, `task_id`, `reason`,
 /// `until`, `held_at` (unix seconds), `cause` (`until_passed` or
 /// `long_held`, [`super::task_hold::HoldReminder`]) and `at` (unix seconds,
@@ -1893,6 +1910,7 @@ mod tests {
             (EventKind::TaskCreated, "task_created"),
             (EventKind::TaskEdited, "task_edited"),
             (EventKind::TaskHeld, "task_held"),
+            (EventKind::TaskHoldEnded, "task_hold_ended"),
             (EventKind::TaskHoldReminded, "task_hold_reminded"),
             (EventKind::TaskGoalChanged, "task_goal_changed"),
             (EventKind::TaskPathsChanged, "task_paths_changed"),

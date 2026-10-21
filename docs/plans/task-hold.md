@@ -194,7 +194,7 @@ taskのevent（runを持てば`run_id`も付ける）。
   payloadは`continuation`（`claim` / `continue` / `resume` / `new_run`）・`provider`・`model`・かけてからの秒と待ちに入ってからの秒。
 - `hold_result_kept` / `hold_result_applied` / `hold_result_discarded`: 列の外の結果と回答を残した・適用した・捨てた。
 - 解除の拒否（`hold_not_settled`、開いたholdが無い）は状態を変えないのでeventを書かない。
-- 終端になったtaskのholdは`task_hold_ended`（理由`completed` / `canceled`）で閉じる。
+- 終端になったtaskのholdは`task_hold_ended`（理由`completed` / `canceled`）で閉じる（実装済み。payloadはeventのkindのdoc commentが持つ）。
 
 ## statusとattentionと知らせ
 
@@ -217,10 +217,10 @@ taskのevent（runを持てば`run_id`も付ける）。
 - holdをかけた時刻（`task_held`）と、走っていた工程が終わって実際に待ちへ入った時刻（工程`held`の`run_phase_changed`）を分ける。
   `settling`の間はrunの工程が今のとおり進むので、その区間は元の工程のタグのまま数える。
 - 計測の段1（`run_phase_changed`）より前に実装するなら、待ちに入った時刻は表と`task_hold_settled`のeventに書き、段1で工程`held`に移す。
-- 分析から除くのは、待ちに入った時刻から解除（`task_released`）までの区間（工程`held`、`blocker: human`、`holds: none`）。
+- 分析から除くのは、待ちに入った時刻から解除（`task_released`）かtaskの終了（`task_hold_ended`）までの区間（工程`held`、`blocker: human`、`holds: none`）。
   解除の後は、再開・claimの工程に移る。
-- readyのtask（claimの前）のholdは、`task_held`から`task_released`までをtaskの区間に重ねて読む（[計測](../design/measurement.md)の「claimの前」）。
-- timelineは、待ちに入ってから解除までの空白に理由`held`を付ける。
+- readyのtask（claimの前）のholdは、`task_held`からholdが閉じるまで（解除かtaskの終了）をtaskの区間に重ねて読む（[計測](../design/measurement.md)の「claimの前」）。
+- timelineは、待ちに入ってからholdが閉じるまでの空白に理由`held`を付ける。
   `no_supervisor`の次、`waiting_ask`より前に判定する。
 
 ## 実装の入口（予定）

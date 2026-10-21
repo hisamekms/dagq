@@ -336,12 +336,13 @@ impl Phase {
 }
 
 /// Whether the last `run_phase_changed` among `events` entered
-/// [`Phase::Held`] and no `task_released` came after it.
+/// [`Phase::Held`] and no close of the hold came after it
+/// ([`super::task_hold::ends_hold`]).
 fn held_unreleased(events: &[RunEvent]) -> bool {
     events
         .iter()
         .rev()
-        .take_while(|event| event.kind != EventKind::TaskReleased)
+        .take_while(|event| !super::task_hold::ends_hold(event))
         .find(|event| event.kind == EventKind::RunPhaseChanged)
         .is_some_and(|event| event.payload["phase"] == Phase::Held.name())
 }

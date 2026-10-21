@@ -969,6 +969,35 @@ fn refuse_bare_action(tx: &Connection, ask: &Ask, text: &str) -> Result<()> {
     }
 }
 
+/// Close the unclosed `ask` in the caller's write transaction at `now`
+/// without applying its answer, for `reason` (a code, recorded on the
+/// close) with the words `note`: an open one gets `note` from the runtime
+/// (`ask_answered` with `runtime_closed: true`), an answered one
+/// `ask_closed`; each with `reason`, `note` and `discarded: true`.
+pub(super) fn discard_by_runtime(
+    tx: &Connection,
+    ask: &Ask,
+    reason: &str,
+    note: &str,
+    now: i64,
+) -> Result<()> {
+    let mut payload = json!({"ask_id": ask.id, "kind": ask.kind, "reason": reason,
+                             "note": note, "discarded": true});
+    let kind = if ask.is_open() {
+        payload["runtime_closed"] = json!(true);
+        write_answer(tx, ask, note, Answerer::RUNTIME, now, &mut payload)?;
+        EventKind::AskAnswered
+    } else {
+        EventKind::AskClosed
+    };
+    ask_event(tx, ask.task_id, ask.run_id.as_ref(), kind, payload)?;
+    tx.execute(
+        "UPDATE asks SET closed_at=?2 WHERE id=?1",
+        params![ask.id, now],
+    )?;
+    Ok(())
+}
+
 /// Close the unclosed `ask` in the caller's write transaction at `now`: an
 /// open one gets `answer` from the runtime (`ask_answered` with
 /// `runtime_closed: true`), an answered one `ask_closed`.

@@ -191,7 +191,7 @@ impl State {
                 self.held = super::run_phase::Recorded::of_event(event)
                     .is_some_and(|record| record.is(super::run_phase::Phase::Held));
             }
-            Some(EventKind::TaskReleased) => self.held = false,
+            _ if super::task_hold::ends_hold(event) => self.held = false,
             _ => {}
         }
         if matches!(
@@ -552,44 +552,47 @@ mod tests {
     }
 
     /// A hold's wait is `held` from the run's `held` record to the
-    /// release, before an ask the run waits for; the gap from `task_held`
-    /// to that record keeps the reason of what the run still did.
+    /// release, or to the end its task's end puts to it, before an ask the
+    /// run waits for; the gap from `task_held` to that record keeps the
+    /// reason of what the run still did.
     #[test]
     fn a_holds_wait_is_held_from_its_record_to_its_release() {
-        let run = events(&[
-            ("agent_started", json!({}), "00:00:00"),
-            ("task_held", json!({"hold_id": 1}), "00:10:00"),
-            ("receipt_observed", json!({}), "00:30:00"),
-            (
-                "ask_opened",
-                json!({"ask_id": 3, "kind": "worker_question"}),
-                "00:30:01",
-            ),
-            ("run_phase_changed", json!({"phase": "held"}), "00:31:00"),
-            ("task_released", json!({"hold_id": 1}), "02:00:00"),
-            (
-                "run_phase_changed",
-                json!({"phase": "needs_session"}),
-                "02:00:00",
-            ),
-            ("run_phase_changed", json!({"phase": "held"}), "02:10:00"),
-        ]);
-        let found = gaps(
-            &run,
-            60,
-            Some(timestamp_millis("2026-09-24T03:10:00Z").unwrap()),
-        );
-        assert_eq!(
-            reasons(&found),
-            [
-                (1, "idle"),
-                (2, "idle"),
-                (5, "held"),
-                (7, "waiting_ask"),
-                (8, "held"),
-            ]
-        );
-        assert_eq!(found[2].secs, 5340);
+        for close in ["task_released", "task_hold_ended"] {
+            let run = events(&[
+                ("agent_started", json!({}), "00:00:00"),
+                ("task_held", json!({"hold_id": 1}), "00:10:00"),
+                ("receipt_observed", json!({}), "00:30:00"),
+                (
+                    "ask_opened",
+                    json!({"ask_id": 3, "kind": "worker_question"}),
+                    "00:30:01",
+                ),
+                ("run_phase_changed", json!({"phase": "held"}), "00:31:00"),
+                (close, json!({"hold_id": 1}), "02:00:00"),
+                (
+                    "run_phase_changed",
+                    json!({"phase": "needs_session"}),
+                    "02:00:00",
+                ),
+                ("run_phase_changed", json!({"phase": "held"}), "02:10:00"),
+            ]);
+            let found = gaps(
+                &run,
+                60,
+                Some(timestamp_millis("2026-09-24T03:10:00Z").unwrap()),
+            );
+            assert_eq!(
+                reasons(&found),
+                [
+                    (1, "idle"),
+                    (2, "idle"),
+                    (5, "held"),
+                    (7, "waiting_ask"),
+                    (8, "held"),
+                ]
+            );
+            assert_eq!(found[2].secs, 5340, "{close}");
+        }
     }
 
     /// The runtime's e2e after the review (ADR-t1233-2) and the wait for

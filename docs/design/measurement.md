@@ -78,7 +78,7 @@ runの一生を、重ならず隙間なく全体を覆う区間の列で表す�
   `held`に入り解除の前のrunがunfinishedのまま休むなら、回収・leaseの返却・`Integrator`のslotの返却はstatusの工程を書かず（終端のstatusなら書く）、解除の`task_released`が休む工程で閉じる。
 - **タグ**: `blocker`は何がrunを次へ移すか、`holds`はその間に握るslotで、値と意味は`Blocker`と`Holds`のdoc commentが持つ。
   `holds`はslotの数え方（着地の順番だけを待つrunと人の答えを待つrunはslotの外）に従い、slotに残る答え待ちの`waiting`はworker slotを握る。
-- **taskのhold**: `task_held`から待ちに入るまでは走る工程のまま、待ちに入った記録から解除の後の記録までを`held`にする。
+- **taskのhold**: `task_held`から待ちに入るまでは走る工程のまま、待ちに入った記録からholdが閉じるまでを`held`にする。
 - **`already_satisfied`の主張**: mainのsnapshotの検証は`validating`と別の工程でworker slotを持ち、検証を待つ間（slotやcontainerの空き）と答えを待つ間はslotの外の工程にする（[ADR-t1818-1](../adr/2026-10-05-t1818-1-worker-claims-already-satisfied-and-runtime-closes-on-a-verified-snapshot.md)）。
 - **`Phase::tags()`**: 記録の工程の定義（`domain::run_phase`）の隣で網羅的な`match`がタグを返す。
   supervisorの工程も網羅的な`match`で記録の工程に対応し、どちらも工程を足して書き忘れるとコンパイルが止まる。
@@ -113,7 +113,7 @@ claimの前の待ちの理由はsupervisor単位の区間をtaskの区間に重�
   控えはqueueの全てのsupervisorのclaimを止めるので、taskに重ねるときは区間のsupervisorに依らずqueueの待ちとして読む。
 - **`claim_deferral`**: 既存の`claim_deferred` / `claim_deferral_ended`（taskの控え）が区間の始まりと終わりを兼ねる。
   終わりは`stats`の`claim_deferrals`の`by_end`と同じ規則（`domain::claim_defer::deferral_spans`）。
-- **taskのhold**: readyの間の`task_held`から同じholdの`task_released`までは、readyに重ねず工程`held`（runの`held`と同じタグ）にする（`domain::task_hold::task_hold_spans`）。
+- **taskのhold**: readyの間の`task_held`から同じholdが閉じるまでは、readyに重ねず工程`held`（runの`held`と同じタグ）にする（`domain::task_hold::task_hold_spans`）。
 - **`run_claimed`の欄**: claimが書く欄と意味は`domain::claim_facts`のmodule docが持つ。
   supervisorは候補ごとの値をclaimに渡し、claimは取ったtaskの値だけを残す。
 - **`blocked_by`**: 着地の順番だけを待つ間の`run_phase_changed`（工程`landing_queue`）は、そのとき着地slotを握っていたrunを`blocked_by`に持ち、握るrunが変われば記録し直す。

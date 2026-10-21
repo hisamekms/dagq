@@ -22,6 +22,40 @@ fn supervise_reviewed(
     reviewer: &TestReviewer,
     parallel: usize,
 ) -> Value {
+    supervise_reviewed_by(
+        db,
+        repo,
+        backend,
+        reviewer,
+        parallel,
+        Path::new(env!("CARGO_BIN_EXE_dagq")),
+    )
+}
+
+/// [`supervise_reviewed`] given the `dagq` the test owns
+/// ([`common::service::owned_executable`], in the queue's directory), so a
+/// service the supervisor starts stops once the test's process is gone.
+fn supervise_owned(
+    db: &Path,
+    repo: &Path,
+    backend: &TestWorkspace,
+    reviewer: &TestReviewer,
+    parallel: usize,
+) -> Value {
+    let dagq = common::service::owned_executable(db.parent().unwrap());
+    supervise_reviewed_by(db, repo, backend, reviewer, parallel, &dagq)
+}
+
+/// [`supervise_reviewed`], the supervisor given `dagq` as the executable
+/// it starts.
+fn supervise_reviewed_by(
+    db: &Path,
+    repo: &Path,
+    backend: &TestWorkspace,
+    reviewer: &TestReviewer,
+    parallel: usize,
+    dagq: &Path,
+) -> Value {
     let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
     let outcome = runtime::supervise_with_reviewer(
         db,
@@ -29,7 +63,7 @@ fn supervise_reviewed(
         backend,
         &claude_stub(db),
         reviewer,
-        Path::new(env!("CARGO_BIN_EXE_dagq")),
+        dagq,
         &supervise_options(parallel, true),
     )
     .unwrap();
@@ -98,6 +132,21 @@ fn claimed_judged_by(
     dependent: bool,
     scripts: impl FnOnce(&Path) -> Vec<String>,
 ) -> (Fixture, PathBuf, PathBuf, TestWorkspace, TestReviewer) {
+    claimed_by(dependent, scripts, false)
+}
+
+/// [`claimed`] made by a supervisor given the `dagq` the test owns
+/// ([`supervise_owned`]).
+fn claimed_owned() -> (Fixture, PathBuf, PathBuf, TestWorkspace, TestReviewer) {
+    claimed_by(true, |_| vec![verdict("pass", &[], "fine")], true)
+}
+
+/// [`claimed_judged_by`], supervised by [`supervise_owned`] when `owned`.
+fn claimed_by(
+    dependent: bool,
+    scripts: impl FnOnce(&Path) -> Vec<String>,
+    owned: bool,
+) -> (Fixture, PathBuf, PathBuf, TestWorkspace, TestReviewer) {
     let (fixture, repo, db) = fixture();
     let scripts = scripts(&repo);
     // A ready task's verification is not editable through the CLI.
@@ -115,7 +164,11 @@ fn claimed_judged_by(
     let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
     backend.script_for(1, SATISFIED_AGENT);
     let reviewer = TestReviewer::new(&scripts);
-    supervise_reviewed(&db, &repo, &backend, &reviewer, 2);
+    if owned {
+        supervise_owned(&db, &repo, &backend, &reviewer, 2);
+    } else {
+        supervise_reviewed(&db, &repo, &backend, &reviewer, 2);
+    }
     (fixture, repo, db, backend, reviewer)
 }
 
@@ -1825,4 +1878,56 @@ fn a_judgment_running_at_a_handoff_is_stopped_and_the_next_process_verifies_and_
     assert_eq!(ask.confidence, Some(dagq::domain::AskConfidence::Low));
     assert!(queue.run_lease(run.id()).unwrap().is_none());
     assert_eq!(satisfied_worktrees(&repo, &db), Vec::<String>::new());
+}
+
+/// Acceptance (ADR-t1879-1, a task's end closes its hold): a held claim
+/// is not closed. Its `close` answer waits through the supervisor's pass,
+/// and the close's own transaction refuses it. A `cancel` decided on the
+/// claim cancels the task and closes its hold in the same transaction
+/// (`task_hold_ended`, `canceled`).
+#[test]
+fn a_held_claim_is_not_closed_and_its_cancel_closes_the_hold() {
+    let (_fixture, repo, db, backend, reviewer) = claimed_owned();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let ask = close_ask(&mut queue);
+    let output =
+        crate::common::cli::invoke_with(&[], &db, &["hold", "1", "--reason", "the login expired"]);
+    assert!(output.status.success());
+    queue.answer(ask.id, "close").unwrap();
+    supervise_owned(&db, &repo, &backend, &reviewer, 2);
+    assert_eq!(
+        queue.show(TaskId::new(1)).unwrap().task.status(),
+        TaskStatus::InProgress
+    );
+    let refused = queue
+        .close_satisfied(run.id(), None, json!({}))
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("held"), "{refused}");
+    assert!(queue.task_hold(TaskId::new(1)).unwrap().is_some());
+
+    queue
+        .decide_satisfied(
+            run.id(),
+            "a person canceled it",
+            json!({"ask_id": ask.id, "answer": "cancel"}),
+            &dagq::domain::satisfied::TaskMove::Cancel(
+                dagq::domain::cancel_reason::NewCancel::answered(
+                    dagq::domain::AskKind::ApproveClose,
+                    ask.id,
+                ),
+            ),
+        )
+        .unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.task.status(), TaskStatus::Canceled);
+    assert!(queue.task_hold(TaskId::new(1)).unwrap().is_none());
+    let ended = detail
+        .events
+        .iter()
+        .position(|e| e.kind == EventKind::TaskHoldEnded)
+        .expect("no task_hold_ended");
+    assert_eq!(detail.events[ended].payload["reason"], "canceled");
+    assert_eq!(detail.events[ended - 1].kind, EventKind::TaskStatusChanged);
 }

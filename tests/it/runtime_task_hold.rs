@@ -443,6 +443,11 @@ fn an_answer_kept_before_the_task_moved_is_discarded_and_the_next_round_is_due()
             .iter()
             .any(|a| a.id == ask && a.closed_at.is_some())
     );
+    // The ask closes with the discard's reason, its answer not applied.
+    let closed = last(&queue, &run, "ask_closed").payload;
+    assert_eq!(closed["ask_id"], json!(ask));
+    assert_eq!(closed["reason"], "changed");
+    assert_eq!(closed["discarded"], true);
     assert!(begin_round(&mut queue, &run).is_some());
 }
 

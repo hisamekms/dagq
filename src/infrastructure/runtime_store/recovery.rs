@@ -1168,21 +1168,7 @@ impl SqliteQueue {
         let Some(hold) = crate::infrastructure::task_holds::guard_of(&tx, task)? else {
             return Ok(false);
         };
-        let kept: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM run_events e WHERE e.run_id=?1 AND e.kind=?2
-               AND json_extract(e.payload,'$.ask_id')=?3
-               AND NOT EXISTS (SELECT 1 FROM run_events s WHERE s.run_id=e.run_id
-                 AND s.kind IN (?4,?5) AND json_extract(s.payload,'$.kept_id')=e.id))",
-            params![
-                id,
-                event_kind::HOLD_RESULT_KEPT,
-                ask_id,
-                event_kind::HOLD_RESULT_APPLIED,
-                event_kind::HOLD_RESULT_DISCARDED
-            ],
-            |r| r.get(0),
-        )?;
-        if !kept {
+        if unsettled_kept_answer(&tx, id, ask_id)?.is_none() {
             let version = crate::infrastructure::task_holds::progress_version(&tx, task, id)?;
             run_event(
                 &tx,
@@ -1219,6 +1205,14 @@ impl SqliteQueue {
         Ok(true)
     }
 
+    /// Close each hold left open on a task that ended, as its end would
+    /// have ([`crate::infrastructure::task_holds::end_with_task`]), the
+    /// task unchanged.
+    pub fn end_holds_of_ended_tasks(&mut self) -> Result<Vec<TaskId>> {
+        let now = self.generators.clock.now();
+        crate::infrastructure::task_holds::end_holds_of_ended(&mut self.conn, now)
+    }
+
     /// The kept results whose hold is released and that are not settled.
     pub fn released_kept_results(&self) -> Result<Vec<EventId>> {
         Ok(self
@@ -1248,7 +1242,8 @@ impl SqliteQueue {
     /// the path that would have applied it (its preconditions checked
     /// again) and recorded as `hold_result_applied`; otherwise, or when
     /// that path refuses it now, it is discarded as `hold_result_discarded`
-    /// with the reason, a kept answer's ask closed. A discarded result
+    /// with the reason, a kept answer's ask closed with that reason
+    /// ([`crate::infrastructure::asks::discard_by_runtime`]). A discarded result
     /// leaves the run as if none came: its next recovery round is due.
     pub fn settle_kept_result(&mut self, kept: EventId) -> Result<KeptOutcome> {
         let mut tx = self
@@ -1292,6 +1287,15 @@ impl SqliteQueue {
             Disposition::Discard(reason) => (KeptOutcome::Discarded(reason), None),
             Disposition::Apply => {
                 let savepoint = tx.savepoint()?;
+                // Recorded before the apply, so an apply that ends the task
+                // finds it settled and does not discard it with the task's
+                // end; a refusal rolls it back with the rest.
+                run_event(
+                    &savepoint,
+                    &run_id,
+                    EventKind::HoldResultApplied,
+                    json!({"kept_id": kept, "source": source}),
+                )?;
                 match apply_kept(&savepoint, refusals, &run_id, kept, source, &event.payload) {
                     Ok(run) => {
                         savepoint.commit()?;
@@ -1304,41 +1308,53 @@ impl SqliteQueue {
                 }
             }
         };
-        match &outcome {
-            KeptOutcome::Discarded(reason) => {
-                if source == KeptSource::TriageAnswer {
-                    tx.execute(
-                        "UPDATE asks SET closed_at=?2 WHERE id=?1 AND closed_at IS NULL",
-                        params![
-                            event.payload["ask_id"].as_i64(),
-                            self.generators.clock.now()
-                        ],
-                    )?;
-                }
-                // A round or a decision after the kept result (applied
-                // in the window before this pass read the release) stays
-                // the run's last word.
-                let superseded: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM run_events WHERE run_id=?1 AND id>?2
-                       AND kind IN ('triage_started','triage_finished','triage_decided',
-                                    'triage_failed','resume_started'))",
-                    params![run_id, kept],
-                    |r| r.get(0),
-                )?;
-                run_event(
+        if let KeptOutcome::Discarded(reason) = &outcome {
+            // A discarded answer's ask closes with the discard's reason.
+            if let Some(ask) = task_hold::KeptResult::of_event(&event)
+                .and_then(task_hold::KeptResult::ask_to_close)
+                && let Some(ask) = tx
+                    .query_row(
+                        "SELECT * FROM asks WHERE id=?1 AND closed_at IS NULL",
+                        params![ask],
+                        crate::infrastructure::asks::ask_row,
+                    )
+                    .optional()?
+            {
+                let note = match reason {
+                    DiscardReason::TaskEnded => format!(
+                        "task {task} {}: the answer kept while it was held is discarded",
+                        now.task_status.as_str()
+                    ),
+                    _ => format!(
+                        "the answer kept while task {task} was held is discarded: {}",
+                        reason.as_str()
+                    ),
+                };
+                crate::infrastructure::asks::discard_by_runtime(
                     &tx,
-                    &run_id,
-                    EventKind::HoldResultDiscarded,
-                    json!({"kept_id": kept, "source": source, "reason": reason, "error": error,
-                           task_hold::SUPERSEDED: superseded}),
+                    &ask,
+                    reason.as_str(),
+                    &note,
+                    self.generators.clock.now(),
                 )?;
             }
-            _ => run_event(
+            // A round or a decision after the kept result (applied
+            // in the window before this pass read the release) stays
+            // the run's last word.
+            let superseded: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM run_events WHERE run_id=?1 AND id>?2
+                       AND kind IN ('triage_started','triage_finished','triage_decided',
+                                    'triage_failed','resume_started'))",
+                params![run_id, kept],
+                |r| r.get(0),
+            )?;
+            run_event(
                 &tx,
                 &run_id,
-                EventKind::HoldResultApplied,
-                json!({"kept_id": kept, "source": source}),
-            )?,
+                EventKind::HoldResultDiscarded,
+                json!({"kept_id": kept, "source": source, "reason": reason, "error": error,
+                           task_hold::SUPERSEDED: superseded}),
+            )?;
         }
         tx.commit()?;
         Ok(outcome)
@@ -1641,6 +1657,9 @@ impl RunRecovery for SqliteQueue {
     fn keep_live_verdict(&mut self, id: &RunId, verdict: serde_json::Value) -> Result<bool> {
         SqliteQueue::keep_live_verdict(self, id, verdict)
     }
+    fn end_holds_of_ended_tasks(&mut self) -> Result<Vec<TaskId>> {
+        SqliteQueue::end_holds_of_ended_tasks(self)
+    }
     fn released_kept_results(&self) -> Result<Vec<EventId>> {
         SqliteQueue::released_kept_results(self)
     }
@@ -1868,7 +1887,8 @@ fn unleased_latest_triageable(conn: &Connection, now: i64, id: &RunId) -> Result
 /// and so is a run whose task is held, ADR-t1879-1): `retry` makes the
 /// task `ready`, `resume` the run `needs_session` with `reason` as
 /// `last_error`, `cancel` cancels the task. Recorded as `triage_decided`
-/// (`ask_id`, `answer`, `reason`, `status`).
+/// (`ask_id`, `answer`, `reason`, `status`), and an answer a hold kept as
+/// `hold_result_applied`.
 fn decide_triage_in(
     conn: &Connection,
     refusals: Refusals<'_>,
@@ -1890,6 +1910,17 @@ fn decide_triage_in(
         pending,
         "ask {ask_id} is not an answered, unclosed ask of run {id}"
     );
+    // The answer a hold kept, applied here after its release before a
+    // pass settled it, is settled as applied: neither the task's end
+    // below nor that pass discards it.
+    if let Some(kept) = unsettled_kept_answer(conn, id, ask_id)? {
+        run_event(
+            conn,
+            id,
+            EventKind::HoldResultApplied,
+            json!({"kept_id": kept, "source": KeptSource::TriageAnswer}),
+        )?;
+    }
     let timestamp = refusals.generators.clock.timestamp();
     match answer {
         "retry" => {
@@ -1951,6 +1982,28 @@ fn decide_triage_in(
     }
     run_event(conn, id, EventKind::TriageDecided, payload)?;
     Ok(result)
+}
+
+/// The result a hold kept of the answer to ask `ask_id` of run `id` that
+/// is neither applied nor discarded yet.
+fn unsettled_kept_answer(conn: &Connection, id: &RunId, ask_id: AskId) -> Result<Option<EventId>> {
+    Ok(conn
+        .query_row(
+            "SELECT e.id FROM run_events e WHERE e.run_id=?1 AND e.kind=?2
+               AND json_extract(e.payload,'$.ask_id')=?3
+               AND NOT EXISTS (SELECT 1 FROM run_events s WHERE s.run_id=e.run_id
+                 AND s.kind IN (?4,?5) AND json_extract(s.payload,'$.kept_id')=e.id)
+             ORDER BY e.id LIMIT 1",
+            params![
+                id,
+                event_kind::HOLD_RESULT_KEPT,
+                ask_id,
+                event_kind::HOLD_RESULT_APPLIED,
+                event_kind::HOLD_RESULT_DISCARDED
+            ],
+            |r| r.get(0),
+        )
+        .optional()?)
 }
 
 /// Lease run `id` to `token` inside the caller's transaction unless a lease

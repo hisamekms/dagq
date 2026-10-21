@@ -1201,16 +1201,28 @@ pub fn supervise_retrying_with(
     backend: &TestWorkspace,
     options: &SuperviseOptions,
 ) -> Result<Value> {
-    let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
-    let _diagnostics = supervise_diagnostics(db);
-    runtime::supervise(
+    supervise_retrying_by(
         db,
         repo,
         backend,
-        &claude_stub(db),
-        Path::new(env!("CARGO_BIN_EXE_dagq")),
         options,
+        Path::new(env!("CARGO_BIN_EXE_dagq")),
     )
+}
+
+/// [`supervise_retrying_with`], the supervisor given `dagq` as the
+/// executable it starts (the test's own one for a service it should own,
+/// [`common::service::owned_executable`]).
+pub fn supervise_retrying_by(
+    db: &Path,
+    repo: &Path,
+    backend: &TestWorkspace,
+    options: &SuperviseOptions,
+    dagq: &Path,
+) -> Result<Value> {
+    let _waiting = common::within(common::STEP_LIMIT, "supervise to return");
+    let _diagnostics = supervise_diagnostics(db);
+    runtime::supervise(db, repo, backend, &claude_stub(db), dagq, options)
 }
 
 /// Keep stacks in a separate hook: a stuck SQLite read or stub registry
@@ -1408,13 +1420,17 @@ pub fn run_agent_with(
     script: &str,
     close_fail: bool,
 ) -> (Fixture, PathBuf, dagq::domain::TaskDetail) {
-    run_agent_with_review_retry(script, close_fail, false)
+    run_agent_with_review_retry(script, close_fail, false, false)
 }
 
+/// [`run_agent_with`] with the production review retry when `retry`, the
+/// supervisor given the `dagq` the test owns
+/// ([`common::service::owned_executable`]) when `owned`.
 fn run_agent_with_review_retry(
     script: &str,
     close_fail: bool,
     retry: bool,
+    owned: bool,
 ) -> (Fixture, PathBuf, dagq::domain::TaskDetail) {
     warm_dagq();
     let (dir, repo, db) = fixture();
@@ -1422,7 +1438,12 @@ fn run_agent_with_review_retry(
     backend.close_fail = close_fail;
     let mut options = supervise_options(4, true);
     options.retry_unreadable_review = retry;
-    let outcome = supervise_retrying_with(&db, &repo, &backend, &options).unwrap();
+    let dagq = if owned {
+        common::service::owned_executable(db.parent().unwrap())
+    } else {
+        PathBuf::from(env!("CARGO_BIN_EXE_dagq"))
+    };
+    let outcome = supervise_retrying_by(&db, &repo, &backend, &options, &dagq).unwrap();
     backend.join();
     assert_eq!(outcome["outcome"], "finished");
     assert_eq!(outcome["runs"].as_array().unwrap().len(), 1);
@@ -1851,16 +1872,26 @@ pub fn warm_dagq() {
 
 /// A validated run plus a ready dependent task, before any landing.
 pub fn awaiting_run() -> (Fixture, PathBuf, PathBuf, TaskRun) {
-    awaiting_run_with_review_retry(false)
+    awaiting_run_with_review_retry(false, false)
 }
 
 /// An awaiting run made with the production unreadable-review retry.
 pub fn awaiting_run_retrying() -> (Fixture, PathBuf, PathBuf, TaskRun) {
-    awaiting_run_with_review_retry(true)
+    awaiting_run_with_review_retry(true, false)
 }
 
-fn awaiting_run_with_review_retry(retry: bool) -> (Fixture, PathBuf, PathBuf, TaskRun) {
-    let (dir, db, detail) = run_agent_with_review_retry(VALID_AGENT, false, retry);
+/// [`awaiting_run`] made by a supervisor given the `dagq` the test owns
+/// ([`common::service::owned_executable`]), so a service it starts stops
+/// once the test's process is gone.
+pub fn awaiting_run_owned() -> (Fixture, PathBuf, PathBuf, TaskRun) {
+    awaiting_run_with_review_retry(false, true)
+}
+
+fn awaiting_run_with_review_retry(
+    retry: bool,
+    owned: bool,
+) -> (Fixture, PathBuf, PathBuf, TaskRun) {
+    let (dir, db, detail) = run_agent_with_review_retry(VALID_AGENT, false, retry, owned);
     let run = detail.runs[0].clone();
     assert_eq!(run.status(), RunStatus::AwaitingIntegration);
     let mut queue = SqliteQueue::open(&db).unwrap();

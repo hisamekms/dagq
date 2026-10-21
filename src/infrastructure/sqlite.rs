@@ -2942,6 +2942,7 @@ pub(super) fn complete_task(
     // A Spike's completion leaves its replanning request in the same
     // transaction (ADR-t1487-1 decision 5).
     super::plan_requests::record_spike_request(conn, task_id, now_secs)?;
+    super::task_holds::end_with_task(conn, task_id, TaskStatus::Completed, now_secs)?;
     read_task(conn, task_id)
 }
 
@@ -3143,6 +3144,8 @@ fn apply_transition(
         object.extend(super::draft_planners::origin_fields(conn, task_id)?);
     }
     event(conn, task_id, None, EventKind::TaskStatusChanged, payload)?;
+    // A task that ends takes its hold with it (ADR-t1879-1).
+    super::task_holds::end_with_task(conn, task_id, task.status(), unix_secs(now))?;
     // A person skipped plan review (ADR-0041 decision 8).
     if action == TaskAction::BypassReview {
         event(
@@ -3154,6 +3157,19 @@ fn apply_transition(
         )?;
     }
     read_task(conn, task_id)
+}
+
+/// The unix seconds of `now`, a store timestamp the caller's clock made;
+/// the system clock's for one that does not parse.
+fn unix_secs(now: &str) -> i64 {
+    crate::domain::stats::timestamp_millis(now).map_or_else(
+        || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs() as i64)
+        },
+        |millis| millis.div_euclid(1000),
+    )
 }
 
 fn has_unfinished_run(conn: &Connection, task_id: TaskId) -> Result<bool> {

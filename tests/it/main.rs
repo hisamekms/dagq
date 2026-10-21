@@ -188,6 +188,7 @@ mod runtime_stale_receipt;
 mod runtime_stall_end;
 mod runtime_sweep;
 mod runtime_task_hold;
+mod runtime_task_hold_end;
 mod runtime_task_hold_park;
 mod runtime_task_release;
 mod runtime_telemetry_lease;
