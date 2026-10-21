@@ -120,12 +120,12 @@ impl Phase {
     /// time left before it is not carried over. `now` is the supervisor's
     /// monotonic clock.
     pub(super) fn restart_stage_clocks(&mut self, files: &dyn RunFiles, now: Instant) {
+        // The wait outside the slots took over the one in the slot.
+        if let Some(awaited) = self.awaits_answer_mut() {
+            *awaited = None;
+        }
         match self {
-            // The wait outside the slots took over the one in the slot.
-            Phase::Revise(watch) => {
-                watch.sent = now;
-                watch.awaits_answer = None;
-            }
+            Phase::Revise(watch) => watch.sent = now,
             Phase::Resume(watch) => watch.restart_clocks(files.now(), now),
             _ => {}
         }
@@ -782,6 +782,7 @@ mod tests {
                 settled,
             }),
             delivered_closed: None,
+            awaits_answer: None,
             recovery: RecoveryWatch::default(),
             live: Box::new(SessionWatch::fixing(&run, "ws", typed, sent).unwrap()),
         }

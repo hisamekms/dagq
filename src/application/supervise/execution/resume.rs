@@ -626,6 +626,7 @@ impl Supervisor<'_> {
             exit_for_silence: false,
             stale: None,
             delivered_closed: None,
+            awaits_answer: None,
             recovery: RecoveryWatch::default(),
             live: Box::new(SessionWatch::fixing(
                 run,
@@ -707,10 +708,17 @@ impl Supervisor<'_> {
             )
             .unwrap_or(now)
         });
+        // A session already asked for its request and not to exit waits
+        // for its open question, as its poll would judge it.
+        let awaits_answer = match (message_sent_at, exit_requested) {
+            (Some(_), None) => self.oldest_unclosed_question(run, 0)?,
+            _ => None,
+        };
         Ok(ResumeWatch {
             live,
             stale: adopted_stale_nudge(&*self.queue, run, RESUME_PHASE, Some(attempt))?,
             delivered_closed: None,
+            awaits_answer,
             workspace,
             attempt,
             run_dir,
@@ -1153,6 +1161,11 @@ pub(super) struct ResumeWatch {
     /// The session's worker questions and recovery, followed as a revise's
     /// are; `input_at` is the last queued request time.
     pub(super) live: Box<SessionWatch>,
+    /// The oldest of its own unclosed `worker_question`s whose answer the
+    /// resumed session waits for in its slot, as the last poll or the
+    /// takeover found it: the run is in the phase `waiting` meanwhile, not
+    /// `resume` ([`super::stages::question_moves`]).
+    pub(super) awaits_answer: Option<AskId>,
 }
 
 /// The resume a run is in, from its events: the last resume event is a
@@ -1475,6 +1488,7 @@ impl ResumeWatch {
         sv: &mut Supervisor<'_>,
         run: &TaskRun,
     ) -> Result<Option<ResumeVerdict>> {
+        self.awaits_answer = None;
         let processes = sv.queue.processes(run.id())?;
         let Some(wrapper) = processes.iter().find(|p| p.role == "wrapper") else {
             let timeout = sv.sessions.registration_timeout();
@@ -1571,7 +1585,8 @@ impl ResumeWatch {
         // however long a person takes: it neither went idle without a
         // resolving receipt nor ran out of time, and is not asked to
         // rewrite a stale receipt (ADR-0071 decision 16).
-        if sv.queue.has_unclosed_worker_question(run.id())? {
+        if let Some(question) = sv.oldest_unclosed_question(run, 0)? {
+            self.awaits_answer = Some(question);
             return Ok(None);
         }
         // A turn at its provider's wall (ADR-t813-2): the call went to the

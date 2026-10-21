@@ -330,6 +330,7 @@ impl Supervisor<'_> {
             input_at: None,
             answered_at: None,
             asks_from: 0,
+            awaits_answer: None,
         })
     }
 }
@@ -416,6 +417,13 @@ pub(super) struct SessionWatch {
     /// asks from before it are the inbox's to deliver by hand (task 582).
     /// 0 follows every ask of the run.
     pub(super) asks_from: i64,
+    /// The oldest of the first session's own `worker_question`s whose
+    /// answer it waits for in its slot, before its receipt and any
+    /// `/exit`, as the last poll or the adoption found it: the run is in
+    /// the phase `waiting` meanwhile, not `worker`
+    /// ([`super::stages::question_moves`]). A revise's or a resume's live
+    /// watch leaves it to its own watch.
+    pub(super) awaits_answer: Option<AskId>,
 }
 
 impl SessionWatch {
@@ -451,6 +459,7 @@ impl SessionWatch {
             input_at: Some(input_at),
             answered_at: None,
             asks_from: 0,
+            awaits_answer: None,
         })
     }
 
@@ -478,6 +487,7 @@ impl SessionWatch {
         sv: &mut Supervisor<'_>,
         run: &TaskRun,
     ) -> Result<Option<TaskRun>> {
+        self.awaits_answer = None;
         let processes = sv.queue.processes(run.id())?;
         self.watch_first_commit(sv, run)?;
         if !self.receipt_seen && sv.files.is_file(&self.receipt_path) {
@@ -654,7 +664,23 @@ impl SessionWatch {
                 timeout.as_secs()
             );
         }
+        self.awaits_answer = self.awaited_question(sv, run)?;
         Ok(None)
+    }
+
+    /// The question the first session waits for in its slot: the oldest
+    /// unclosed `worker_question` it follows, while it wrote no receipt
+    /// and was not asked to exit (a receipt moves it on past its
+    /// questions, as it ends a wait outside the slots).
+    pub(super) fn awaited_question(
+        &self,
+        sv: &Supervisor<'_>,
+        run: &TaskRun,
+    ) -> Result<Option<AskId>> {
+        if self.receipt_seen || self.exit_requested.is_some() {
+            return Ok(None);
+        }
+        sv.oldest_unclosed_question(run, self.asks_from)
     }
 
     fn end_exited(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun, _capture: bool) -> Result<()> {

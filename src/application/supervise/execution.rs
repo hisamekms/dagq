@@ -1391,21 +1391,19 @@ impl Phase {
     fn recorded(&self) -> crate::domain::run_phase::Phase {
         use crate::domain::run_phase::Phase as Recorded;
         match self {
-            Phase::Session(_) => Recorded::Worker,
+            // A first session, a revise or a resume stopped at its own
+            // question waits for a person in its slot when the waiting
+            // limit keeps it there.
+            Phase::Session(watch) => stages::in_slot_wait(Recorded::Worker, watch.awaits_answer),
             Phase::Validating(..) => Recorded::Validating,
             // The judgment is the claim's step after its verification,
             // not a run review's.
             Phase::Satisfied(_) | Phase::SatisfiedReview(_) => Recorded::Verifying,
             Phase::ReviewPrograms(_) | Phase::Review(_) => Recorded::Review,
             Phase::ReviewHeld { .. } => Recorded::ReviewHeld,
-            // A revise stopped at its own question waits for a person in
-            // its slot when the waiting limit keeps it there.
-            Phase::Revise(watch) if watch.awaits_answer.is_some() => {
-                Recorded::Waiting { in_slot: true }
-            }
-            Phase::Revise(_) => Recorded::Revise,
+            Phase::Revise(watch) => stages::in_slot_wait(Recorded::Revise, watch.awaits_answer),
             Phase::Exiting(_) => Recorded::Exiting,
-            Phase::Resume(_) => Recorded::Resume,
+            Phase::Resume(watch) => stages::in_slot_wait(Recorded::Resume, watch.awaits_answer),
             Phase::AwaitingSlot => Recorded::AwaitingSlot,
             Phase::AgentEval(_) => Recorded::AgentEval,
             Phase::AwaitingE2e => Recorded::AwaitingE2e,
@@ -3714,8 +3712,15 @@ impl Supervisor<'_> {
         }
         match &mut slot.phase {
             Phase::Resume(watch) => {
-                let Some(verdict) = watch.poll(self, &slot.run)? else {
+                let awaited = watch.awaits_answer;
+                let polled = watch.poll(self, &slot.run)?;
+                // As a revise's: its own questions stop it in its slot.
+                slot.note_questions(awaited, &*self.queue);
+                let Some(verdict) = polled else {
                     return Ok(Step::Continue);
+                };
+                let Phase::Resume(watch) = &slot.phase else {
+                    unreachable!("the resume's slot is still in it");
                 };
                 let attempt = watch.attempt;
                 let workspace = watch.workspace.clone();
@@ -3933,8 +3938,15 @@ impl Supervisor<'_> {
                 Ok(Step::Triaged(Box::new(self.queue.run(run.id())?)))
             }
             Phase::Session(watch) => {
-                let Some(run) = watch.poll(self, &slot.run)? else {
+                let awaited = watch.awaits_answer;
+                let polled = watch.poll(self, &slot.run)?;
+                // As a revise's: its own questions stop it in its slot.
+                slot.note_questions(awaited, &*self.queue);
+                let Some(run) = polled else {
                     return Ok(Step::Continue);
+                };
+                let Phase::Session(watch) = &slot.phase else {
+                    unreachable!("the session's slot is still in it");
                 };
                 // Parked by its recovery job's `resume` (task 442): the
                 // session is asked to exit and its workspace closed, as for

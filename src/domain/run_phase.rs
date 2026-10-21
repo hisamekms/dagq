@@ -110,8 +110,9 @@ pub enum Phase {
     /// The recovery job of a failed or interrupted run runs.
     Recovery,
     /// The run waits for a person's answer: outside the slots (ADR-0062),
-    /// a `worker_question` among them, or, `in_slot`, a revise stopped at
-    /// its own `worker_question` that the waiting limit keeps in its slot.
+    /// a `worker_question` among them, or, `in_slot`, a first session, a
+    /// revise or a resume stopped at its own `worker_question` that the
+    /// waiting limit keeps in its slot.
     Waiting { in_slot: bool },
     /// The task's verification runs on a snapshot of main for the run's
     /// `already_satisfied` claim (ADR-t1818-1), in its slot.

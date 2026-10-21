@@ -243,7 +243,7 @@ impl Supervisor<'_> {
                 let since = |event: &RunEvent| self.instant_of(event, now);
                 let exit_requested = self.exit_requested_at(&events, |_| true, now);
                 let first_commit_seen = history.has(EventKind::FirstCommitObserved);
-                Phase::Session(SessionWatch {
+                let mut watch = SessionWatch {
                     workspace: run
                         .workspace_id()
                         .map(str::to_owned)
@@ -271,7 +271,12 @@ impl Supervisor<'_> {
                     input_at: None,
                     answered_at: None,
                     asks_from: 0,
-                })
+                    awaits_answer: None,
+                };
+                // As its poll would judge it, so that the adoption records
+                // the wait the run is in.
+                watch.awaits_answer = watch.awaited_question(self, run)?;
+                Phase::Session(watch)
             }
         })
     }

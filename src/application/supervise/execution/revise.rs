@@ -35,7 +35,7 @@ pub(super) struct ReviseWatch {
     /// waits for in its slot, as the last poll or the adoption found it:
     /// the run is in the phase `waiting` meanwhile, not `revise`. Another
     /// question than the one before is an answer and the next question
-    /// ([`question_moves`]).
+    /// ([`super::stages::question_moves`]).
     pub(super) awaits_answer: Option<AskId>,
 }
 
@@ -350,49 +350,6 @@ pub(super) fn awaited_question(
     })
 }
 
-/// The phase moves of a revise between two polls, by the question it
-/// waited for in its slot before the poll (`before`) and after it
-/// (`after`): each move with its cause and the question it then waits
-/// for. A question answered and the next one asked within one poll are
-/// two moves, back to the revise and into the next wait, so the wait of
-/// each question starts at it.
-pub(super) fn question_moves(
-    before: Option<AskId>,
-    after: Option<AskId>,
-) -> Vec<(EventKind, Option<AskId>)> {
-    match (before, after) {
-        (None, None) => Vec::new(),
-        (None, Some(_)) => vec![(EventKind::AskOpened, after)],
-        (Some(_), None) => vec![(EventKind::AskAnswered, None)],
-        (Some(was), Some(now)) if was == now => Vec::new(),
-        (Some(_), Some(_)) => vec![
-            (EventKind::AskAnswered, None),
-            (EventKind::AskOpened, after),
-        ],
-    }
-}
-
-impl Slot {
-    /// Record the moves of its revise between the work and the wait in
-    /// the slot for an answer since its poll, which started waiting for
-    /// `before` ([`question_moves`]).
-    pub(super) fn note_questions<L: super::stages::PhaseLog + ?Sized>(
-        &mut self,
-        before: Option<AskId>,
-        log: &L,
-    ) {
-        let Phase::Revise(watch) = &self.phase else {
-            return;
-        };
-        for (cause, awaits) in question_moves(before, watch.awaits_answer) {
-            if let Phase::Revise(watch) = &mut self.phase {
-                watch.awaits_answer = awaits;
-            }
-            self.note_phase(cause.as_str(), log);
-        }
-    }
-}
-
 impl ReviseWatch {
     /// `now` is the supervisor's monotonic clock: the resume timeout runs
     /// from it.
@@ -461,13 +418,7 @@ impl ReviseWatch {
         sv: &Supervisor<'_>,
         run: &TaskRun,
     ) -> Result<Option<AskId>> {
-        let from = self.holds_questions_from();
-        Ok(sv
-            .queue
-            .unclosed_run_asks(run.id())?
-            .into_iter()
-            .find(|ask| ask.kind == AskKind::WorkerQuestion && ask.created_at >= from)
-            .map(|ask| ask.id))
+        sv.oldest_unclosed_question(run, self.holds_questions_from())
     }
 
     /// The question an adopted revise of `run` waits for in its slot, as
@@ -662,22 +613,6 @@ impl ReviseWatch {
 mod tests {
     use super::super::file_time::at_ns;
     use super::*;
-
-    /// The moves between a revise and the waits for its questions' answers
-    /// follow the question it waits for, not only whether it waits: the
-    /// answer and the next question within one poll are two moves.
-    #[test]
-    fn a_revises_question_moves_follow_the_question_it_waits_for() {
-        let (one, two) = (Some(AskId::new(1)), Some(AskId::new(2)));
-        assert_eq!(question_moves(None, None), []);
-        assert_eq!(question_moves(one, one), []);
-        assert_eq!(question_moves(None, one), [(EventKind::AskOpened, one)]);
-        assert_eq!(question_moves(one, None), [(EventKind::AskAnswered, None)]);
-        assert_eq!(
-            question_moves(one, two),
-            [(EventKind::AskAnswered, None), (EventKind::AskOpened, two)]
-        );
-    }
 
     /// An adopted revise waits in its slot for its question only while its
     /// receipt was not rewritten since the request: a receipt rewritten

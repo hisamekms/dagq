@@ -235,6 +235,87 @@ impl Slot {
     }
 }
 
+/// The phase moves of a first session, a revise or a resume between two
+/// polls, by the question it waited for in its slot before the poll
+/// (`before`) and after it (`after`): each move with its cause and the
+/// question it then waits for. A question answered and the next one asked
+/// within one poll are two moves, back to its work and into the next
+/// wait, so the wait of each question starts at it.
+pub(super) fn question_moves(
+    before: Option<AskId>,
+    after: Option<AskId>,
+) -> Vec<(EventKind, Option<AskId>)> {
+    match (before, after) {
+        (None, None) => Vec::new(),
+        (None, Some(_)) => vec![(EventKind::AskOpened, after)],
+        (Some(_), None) => vec![(EventKind::AskAnswered, None)],
+        (Some(was), Some(now)) if was == now => Vec::new(),
+        (Some(_), Some(_)) => vec![
+            (EventKind::AskAnswered, None),
+            (EventKind::AskOpened, after),
+        ],
+    }
+}
+
+/// The phase recorded for `stage` (a first session's `worker`, a
+/// `revise` or a `resume`) while it waits in its slot for the answer to
+/// `awaits`, its own question: a wait for a person that holds the slot,
+/// else the stage itself.
+pub(super) fn in_slot_wait(stage: run_phase::Phase, awaits: Option<AskId>) -> run_phase::Phase {
+    match awaits {
+        Some(_) => run_phase::Phase::Waiting { in_slot: true },
+        None => stage,
+    }
+}
+
+impl Phase {
+    /// The question a first session, a revise or a resume stopped at
+    /// waits for in its slot ([`question_moves`]); `None` for a phase that
+    /// asks no question of its own.
+    pub(super) fn awaits_answer_mut(&mut self) -> Option<&mut Option<AskId>> {
+        match self {
+            Phase::Session(watch) => Some(&mut watch.awaits_answer),
+            Phase::Revise(watch) => Some(&mut watch.awaits_answer),
+            Phase::Resume(watch) => Some(&mut watch.awaits_answer),
+            _ => None,
+        }
+    }
+}
+
+impl Slot {
+    /// Record the moves of its first session, revise or resume between
+    /// the work and the wait in the slot for an answer since its poll,
+    /// which started waiting for `before` ([`question_moves`]).
+    pub(super) fn note_questions<L: PhaseLog + ?Sized>(&mut self, before: Option<AskId>, log: &L) {
+        let Some(after) = self.phase.awaits_answer_mut().map(|awaits| *awaits) else {
+            return;
+        };
+        for (cause, awaits) in question_moves(before, after) {
+            if let Some(awaited) = self.phase.awaits_answer_mut() {
+                *awaited = awaits;
+            }
+            self.note_phase(cause.as_str(), log);
+        }
+    }
+}
+
+impl Supervisor<'_> {
+    /// The oldest unclosed `worker_question` of `run` created at or after
+    /// `from` (unix seconds): the one a session stopped at waits for.
+    pub(super) fn oldest_unclosed_question(
+        &self,
+        run: &TaskRun,
+        from: i64,
+    ) -> Result<Option<AskId>> {
+        Ok(self
+            .queue
+            .unclosed_run_asks(run.id())?
+            .into_iter()
+            .find(|ask| ask.kind == AskKind::WorkerQuestion && ask.created_at >= from)
+            .map(|ask| ask.id))
+    }
+}
+
 /// What a slot keeps of its run's records: the attempt its phases are
 /// recorded in, and the phase last recorded, read once from the run's
 /// events when this process first notes it (another process's records,
@@ -586,6 +667,22 @@ mod tests {
     use crate::domain::light_slots::{ClaimRoom, LightChanges};
     use crate::domain::slot_limits::SupervisorConfig;
     use crate::domain::waiting::WaitCause;
+
+    /// The moves between a revise and the waits for its questions' answers
+    /// follow the question it waits for, not only whether it waits: the
+    /// answer and the next question within one poll are two moves.
+    #[test]
+    fn a_revises_question_moves_follow_the_question_it_waits_for() {
+        let (one, two) = (Some(AskId::new(1)), Some(AskId::new(2)));
+        assert_eq!(question_moves(None, None), []);
+        assert_eq!(question_moves(one, one), []);
+        assert_eq!(question_moves(None, one), [(EventKind::AskOpened, one)]);
+        assert_eq!(question_moves(one, None), [(EventKind::AskAnswered, None)]);
+        assert_eq!(
+            question_moves(one, two),
+            [(EventKind::AskAnswered, None), (EventKind::AskOpened, two)]
+        );
+    }
 
     fn slot(id: &str) -> Slot {
         Slot::new(run_of(id, RunStatus::Running), Phase::AwaitingSlot)
@@ -1233,6 +1330,154 @@ mod tests {
                 pair("waiting", "ask_opened"),
                 pair("revise", "ask_answered"),
                 pair("validating", "revise_finished"),
+            ]
+        );
+    }
+
+    /// A first session, a revise and a resume whose questions the waits
+    /// leave in their slot are recorded alike, as their polls find them
+    /// ([`question_moves`], [`in_slot_wait`]): each question is a wait in
+    /// the slot from the poll that finds it, an answer and the next
+    /// question found by one poll are a move back to the stage and into
+    /// the next wait, and the last answer is the stage again, in its
+    /// attempt. A wait that then leaves the slot is a new record, and back
+    /// in the slot the run is in its stage.
+    #[test]
+    fn a_stages_questions_in_its_slot_are_waits_from_each_question() {
+        let ask = |id| Some(AskId::new(id));
+        for (stage, started, attempt) in [
+            (P::Worker, None, "first1"),
+            (
+                P::Revise,
+                Some(Attempt::of(AttemptKind::Revise, 1)),
+                "revise1",
+            ),
+            (
+                P::Resume,
+                Some(Attempt::of(AttemptKind::Resume, 1)),
+                "resume1",
+            ),
+        ] {
+            let mut flow = Flow::claimed();
+            let id = flow.slot.run.id().clone();
+            flow.slot
+                .track
+                .note(&id, stage, started, None, "stage_started", &flow.records);
+            for (before, after) in [
+                (None, None),
+                (None, ask(1)),
+                (ask(1), ask(1)),
+                (ask(1), ask(2)),
+                (ask(2), None),
+                (None, ask(3)),
+            ] {
+                for (cause, awaits) in question_moves(before, after) {
+                    let phase = in_slot_wait(stage, awaits);
+                    flow.slot
+                        .track
+                        .note(&id, phase, started, None, cause.as_str(), &flow.records);
+                }
+            }
+            flow.slot.waiting = Some(waiting(None));
+            let out = flow.slot.recorded_phase();
+            flow.slot.track.note(
+                &id,
+                out,
+                started,
+                None,
+                "run_waiting_started",
+                &flow.records,
+            );
+            flow.slot.track.note(
+                &id,
+                stage,
+                started,
+                None,
+                "run_slot_regained",
+                &flow.records,
+            );
+            let name = stage.name();
+            let row = |phase: &str, blocker: &str, holds: &str, cause: &str| {
+                [phase, blocker, holds, cause].map(str::to_owned)
+            };
+            // The first session goes on in the phase of its claim.
+            let skip = if started.is_some() { 2 } else { 1 };
+            let records = flow.records.events.borrow();
+            let changes: Vec<&RunEvent> = records
+                .iter()
+                .filter(|event| event.kind == EventKind::RunPhaseChanged)
+                .skip(skip)
+                .collect();
+            let recorded: Vec<[String; 4]> = changes
+                .iter()
+                .map(|event| {
+                    let p = &event.payload;
+                    ["phase", "blocker", "holds", "cause"]
+                        .map(|key| p[key].as_str().unwrap().to_owned())
+                })
+                .collect();
+            assert_eq!(
+                recorded[1..],
+                [
+                    row("waiting", "human", "worker_slot", "ask_opened"),
+                    row(name, "ai", "worker_slot", "ask_answered"),
+                    row("waiting", "human", "worker_slot", "ask_opened"),
+                    row(name, "ai", "worker_slot", "ask_answered"),
+                    row("waiting", "human", "worker_slot", "ask_opened"),
+                    row("waiting", "human", "none", "run_waiting_started"),
+                    row(name, "ai", "worker_slot", "run_slot_regained"),
+                ],
+                "{name}"
+            );
+            assert_eq!(recorded[0][0], name);
+            for event in changes {
+                let p = &event.payload["attempt"];
+                let kind = p["kind"].as_str().unwrap();
+                assert_eq!(format!("{kind}{}", p["n"]), attempt, "{name}");
+            }
+        }
+    }
+
+    /// A stage that waited in its slot for its answer and whose poll after
+    /// the answer already moves it on records its return to the stage
+    /// before the phase the outcome moves it to, as the step records it:
+    /// the moves of the questions first, then the outcome's.
+    #[test]
+    fn a_first_session_moved_on_by_the_poll_after_its_answer_returns_to_it_first() {
+        let mut flow = Flow::claimed();
+        let id = flow.slot.run.id().clone();
+        let one = Some(AskId::new(1));
+        for (before, after) in [(None, one), (one, None)] {
+            for (cause, awaits) in question_moves(before, after) {
+                let phase = in_slot_wait(P::Worker, awaits);
+                flow.slot
+                    .track
+                    .note(&id, phase, None, None, cause.as_str(), &flow.records);
+            }
+        }
+        flow.slot.track.note(
+            &id,
+            P::Validating,
+            None,
+            None,
+            "supervision_finished",
+            &flow.records,
+        );
+        let phases: Vec<(String, String)> = flow
+            .records
+            .phases()
+            .into_iter()
+            .skip(1)
+            .map(|(phase, _, cause)| (phase, cause))
+            .collect();
+        let pair = |phase: &str, cause: &str| (phase.to_owned(), cause.to_owned());
+        assert_eq!(
+            phases,
+            [
+                pair("worker", "test"),
+                pair("waiting", "ask_opened"),
+                pair("worker", "ask_answered"),
+                pair("validating", "supervision_finished"),
             ]
         );
     }

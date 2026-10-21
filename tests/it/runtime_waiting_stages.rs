@@ -485,9 +485,11 @@ fn run_the_stage_clock_out(ahead: &MonotonicAhead, passes: &AtomicU64) {
 /// either place gets it no `/exit`. Its answer is the runtime's to type
 /// once the run is back in a slot; the idle after that answer, with the
 /// conflict resolved, ends the resume with its `exit_requested`, and the
-/// run lands. When the return restarts the resume's clocks, and from
-/// which time, is the unit tests' (`waiting::tests`); where the waits'
-/// limit keeps a question in its slot is `domain::waiting`'s.
+/// run lands. Its phases record the wait in its slot from the pass that
+/// defers it, then the wait outside the slots. When the return restarts
+/// the resume's clocks, and from which time, is the unit tests'
+/// (`waiting::tests`); where the waits' limit keeps a question in its slot
+/// is `domain::waiting`'s.
 #[test]
 fn a_resume_question_waits_in_its_slot_then_outside_it_with_its_clock_stopped() {
     let (_dir, repo, db) = fixture();
@@ -610,4 +612,46 @@ fn a_resume_question_waits_in_its_slot_then_outside_it_with_its_clock_stopped() 
     );
     let stats = runtime::stats(&db, &Default::default()).unwrap();
     assert_eq!(stats["waiting"]["deferred"], 1, "{stats}");
+    // Kept in its slot, the question is a wait there from the pass that
+    // defers it; the wait outside the slots is a record of its own, and
+    // back in its slot the run resumes.
+    let events = SqliteQueue::open(&db)
+        .unwrap()
+        .run_events(run.id())
+        .unwrap();
+    let asked = events
+        .iter()
+        .position(|e| e.kind == EventKind::AskOpened && e.payload["ask_id"] == json!(ask))
+        .unwrap();
+    let in_slot = events[asked..]
+        .iter()
+        .find(|e| e.kind == EventKind::RunPhaseChanged)
+        .unwrap();
+    let millis = |e: &dagq::domain::RunEvent| timestamp_millis(&e.created_at).unwrap();
+    let since = millis(in_slot) - millis(&events[asked]);
+    assert!(since < 5_000, "waiting {since} ms after the question");
+    assert_eq!(in_slot.payload["blocker"], "human");
+    let phases: Vec<[String; 3]> = events_of(&db, run.id(), "run_phase_changed")
+        .iter()
+        .map(|p| ["phase", "holds", "cause"].map(|key| p[key].as_str().unwrap().to_owned()))
+        .skip_while(|[phase, _, _]| phase != "resume")
+        .take(5)
+        .collect();
+    let row = |phase: &str, holds: &str, cause: &str| [phase, holds, cause].map(str::to_owned);
+    assert_eq!(phases[0][0], "resume", "{phases:?}");
+    assert_eq!(
+        phases[1..],
+        [
+            row("waiting", "worker_slot", "ask_opened"),
+            row("waiting", "none", "run_waiting_started"),
+            row("returning", "none", "run_waiting_ended"),
+            row("resume", "worker_slot", "run_slot_regained"),
+        ],
+        "{phases:?}"
+    );
+    assert_eq!(in_slot.payload["phase"], "waiting");
+    assert_eq!(
+        in_slot.payload["attempt"],
+        json!({"kind": "resume", "n": 1})
+    );
 }

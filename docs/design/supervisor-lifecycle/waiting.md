@@ -84,7 +84,7 @@ ADR-0071の決定15〜18。
 - **計時の再開**: slot の外では timeout を止め、戻った時点で restart_clocks を呼ぶ。
   回答と続行の依頼を file に書いた時刻を新しい起点にする。
   stale receipt の書き直しは元の依頼の時刻で比較する。
-- **`worker_question`のidle**（決定16）: `ReviseWatch`と同じく、`ResumeWatch`もcloseされていない`worker_question`があるあいだは、idleでも段を終えず、`resume_timeout`も数えず、古いreceiptの書き直しも頼まない（`has_unclosed_worker_question`の判定がそれらより前にある）。
+- **`worker_question`のidle**（決定16）: `ReviseWatch`と同じく、`ResumeWatch`もcloseされていない`worker_question`があるあいだは、idleでも段を終えず、`resume_timeout`も数えず、古いreceiptの書き直しも頼まない（closeされていない`worker_question`の判定がそれらより前にある）。
   ただし`ReviseWatch`は、依頼より後に書き直したreceiptの後のidleだけは質問のcloseを待たずに判定する（ADR-t583-1）。
   上限でslotに居るとき（`run_waiting_deferred`）と上限が0のときも同じ。
   答えを送ったときはその時刻を、手で配送されてaskがcloseされたとき（closeの秒が最後の入力の秒より後）はcloseの時刻を最後の入力にし、段の計時をそこから数え直す。
