@@ -228,6 +228,7 @@ follow-upの所属の判断・訂正とdraft / readyの所属の変更は同じ`
 - claimは候補の選択・taskの更新・runの作成・event・lease行を1つのトランザクションにまとめ、同時のclaimは別々のtaskを取る。
   holdの行と`task_held` / `task_released`も1つのトランザクションで書き、claim・resume・復旧jobの開始と結果の適用はそれぞれのトランザクションでholdを読むので、先に確定した側だけが効く。
 - 外部キーと依存の複合主キーはDBに置き、自己依存はdomainが拒み、循環はトランザクションの中の再帰CTEで見つける。
+- NULLになる列を含む主キーはSQLiteではその行の一意を保たないので、その一意は書く関数がトランザクションの中で読んでから検査する（再計画の条件の対応の削除の行は`replans.rs`の`write_mappings`）。
 - taskの詳細と一覧は1つのread transactionで読むので、task・run・eventのスナップショットが揃う。
 - contextをまたぐトランザクションは`src/context_boundaries/ownership.rs`の所有の表のものだけ（[architecture](architecture.md)のX1）。
 

@@ -422,7 +422,8 @@ pub struct ReplanRecorded {
 
 /// How one item of the task's acceptance went to the replacement: the
 /// child task (and its item) that holds it, or none for a deletion, which
-/// carries the authority that decided it.
+/// carries the authority that decided it. An operation deletes an item at
+/// most once ([`check_mappings`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConditionMapping {
     pub ordinal: usize,
@@ -527,6 +528,30 @@ pub fn check_move(
     require(!step.reason.trim().is_empty(), || DomainError::Blank {
         field: "reason",
     })
+}
+
+/// Whether operation `operation`, whose condition mappings are
+/// `existing`, may add `added`: each acceptance item is deleted (a
+/// mapping without a child task) at most once. The key of the mappings
+/// holds the rows with a child task one per child; a deletion's NULL
+/// child is not one the key compares, so this check holds it.
+pub fn check_mappings(
+    operation: ReplanId,
+    existing: &[ConditionMapping],
+    added: &[ConditionMapping],
+) -> Result<(), DomainError> {
+    let mut deleted = std::collections::BTreeSet::new();
+    for mapping in existing.iter().chain(added) {
+        if mapping.child_task_id.is_none() {
+            require(deleted.insert(mapping.ordinal), || {
+                DomainError::ReplanDeletionRepeated {
+                    operation,
+                    ordinal: mapping.ordinal,
+                }
+            })?;
+        }
+    }
+    Ok(())
 }
 
 /// The generation an operation in `from` takes on moving to `to`: one
@@ -835,6 +860,30 @@ mod tests {
         assert!(!ReplanStatus::Applied.reopens());
         assert!(!ReplanStatus::Continuing.reopens());
         assert!(!ReplanStatus::Parked.can_move_to(ReplanStatus::Continuing));
+    }
+
+    #[test]
+    fn an_item_is_deleted_at_most_once() {
+        let mapping = |ordinal: usize, child: Option<i64>| ConditionMapping {
+            ordinal,
+            hash: format!("h{ordinal}"),
+            child_task_id: child.map(TaskId::new),
+            child_ordinal: child.map(|_| 0),
+            disposition: "d".into(),
+            authority: None,
+        };
+        let id = ReplanId::new(3);
+        let mapped = [mapping(0, Some(5)), mapping(0, Some(6)), mapping(1, None)];
+        assert!(check_mappings(id, &[], &mapped).is_ok());
+        assert!(check_mappings(id, &mapped[..2], &[mapping(0, None)]).is_ok());
+        assert!(matches!(
+            check_mappings(id, &mapped, &[mapping(1, None)]),
+            Err(DomainError::ReplanDeletionRepeated { ordinal: 1, .. })
+        ));
+        assert!(matches!(
+            check_mappings(id, &[], &[mapping(2, None), mapping(2, None)]),
+            Err(DomainError::ReplanDeletionRepeated { ordinal: 2, .. })
+        ));
     }
 
     #[test]

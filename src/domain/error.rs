@@ -393,6 +393,12 @@ pub enum DomainError {
     ReplanApplyUnavailable {
         operation: ReplanId,
     },
+    /// A second deletion of one acceptance item of a replanning
+    /// operation in its condition mappings.
+    ReplanDeletionRepeated {
+        operation: ReplanId,
+        ordinal: usize,
+    },
     /// A snapshot of a run's work could not save `path` whole
     /// ([`super::replan_snapshot`]): the save fails rather than leave it
     /// out.
@@ -1001,6 +1007,10 @@ impl fmt::Display for DomainError {
             Self::ReplanApplyUnavailable { operation } => write!(
                 f,
                 "replan operation {operation} cannot be applied: this binary has no atomic replacement yet"
+            ),
+            Self::ReplanDeletionRepeated { operation, ordinal } => write!(
+                f,
+                "replan operation {operation} already deletes acceptance item {ordinal}: an item is deleted once"
             ),
             Self::SnapshotRefused { path, why } => write!(
                 f,

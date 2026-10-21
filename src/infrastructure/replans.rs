@@ -6,7 +6,10 @@
 //! has none open, so two requests on one run (two supervisors, a person
 //! and a worker at once) open one. The guard every ordinary step of a task
 //! asks ([`check_task_step`]) reads the same rows, and the task's hold,
-//! inside the step's own transaction.
+//! inside the step's own transaction. The condition mappings are written
+//! only through [`write_mappings`], which refuses a second deletion of one
+//! acceptance item inside the writing transaction: the table's key does
+//! not compare a deletion's NULL child task.
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde_json::json;
@@ -190,6 +193,22 @@ impl SqliteQueue {
         Ok(moved)
     }
 
+    /// Add `mappings` to operation `id`'s condition mappings in one write
+    /// transaction ([`write_mappings`]), and the operation as it is then.
+    pub fn record_replan_mappings(
+        &mut self,
+        id: ReplanId,
+        mappings: &[task_replan::ConditionMapping],
+    ) -> Result<ReplanOperation> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        write_mappings(&tx, id, mappings)?;
+        let op = read_operation(&tx, id)?;
+        tx.commit()?;
+        Ok(op)
+    }
+
     /// The open operations whose run the trusted runtime parks now
     /// ([`ReplanStatus::parks`]), oldest first.
     pub fn parking_replans(&self) -> Result<Vec<ReplanOperation>> {
@@ -326,6 +345,40 @@ pub(crate) fn move_in(
                "snapshot_id": step.snapshot_id}),
     )?;
     read_operation(conn, id)
+}
+
+/// Add `mappings` to operation `id`'s condition mappings on `conn` inside
+/// the caller's transaction (the apply writes them with its replacement).
+/// The operation's mappings are read in the same transaction, and
+/// [`task_replan::check_mappings`] refuses a second deletion of one item
+/// before anything is written.
+pub(crate) fn write_mappings(
+    conn: &Connection,
+    id: ReplanId,
+    mappings: &[task_replan::ConditionMapping],
+) -> Result<()> {
+    let op = read_operation(conn, id)?;
+    task_replan::check_mappings(id, &op.mappings, mappings)?;
+    let mut insert = conn.prepare(
+        "INSERT INTO replan_mappings(operation_id, ordinal, hash, child_task_id, child_ordinal,
+           disposition, authority) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+    )?;
+    for mapping in mappings {
+        insert.execute(params![
+            id,
+            i64::try_from(mapping.ordinal)?,
+            mapping.hash,
+            mapping.child_task_id,
+            mapping.child_ordinal.map(i64::try_from).transpose()?,
+            mapping.disposition,
+            mapping
+                .authority
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+        ])?;
+    }
+    Ok(())
 }
 
 /// The operation that guards `task` now, read on `conn` (inside the

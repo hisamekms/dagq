@@ -72,6 +72,7 @@ Claude/Codexで同じ状態機械を使う。
   resumeは始まらず、`replans`の`problems`に出る。
   `replan_parked`はresumeの区分・統計・`resolved_head`で一つのparkとして読む。
   containerのcloneのrunは未対応で`blocked`になる。
+- 条件の対応表の書き手: 済み（`replans.rs`の`write_mappings`）。同じ操作で同じ項目の削除を2度記録しない。
 - 未実装: 診断（`pause_requested`へ進める判断）・plannerのprompt・置換の適用・goal closeの判定。
   適用（`applying`・`applied`）へはどの経路も動かせない。
 

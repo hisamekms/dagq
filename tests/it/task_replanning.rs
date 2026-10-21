@@ -5,7 +5,8 @@
 //! only the trusted runtime moves an operation on; and while one guards
 //! its task, `ready`, `edit`, `cancel`, a change of its dependencies, a
 //! resume, a landing and the claim are refused, as `status`, `doctor`,
-//! `list` and `show` say.
+//! `list` and `show` say. The condition mappings' writer deletes an
+//! acceptance item at most once per operation.
 
 use crate::common::cli::{invoke_with, ok, ok_as, queue};
 use crate::common::queue::{base, new_goal, new_task};
@@ -15,7 +16,7 @@ use dagq::{
     domain::{
         ActorContext, ActorRole, ClaimOutcome, GoalEdit, LeaseToken, ReplanId, RunId, StaticPolicy,
         TaskAction, TaskId,
-        task_replan::{ReplanMove, ReplanStatus},
+        task_replan::{ConditionMapping, NewReplan, ReplanMove, ReplanOrigin, ReplanStatus},
     },
     infrastructure::sqlite::SqliteQueue,
 };
@@ -267,6 +268,70 @@ fn one_operation_per_run_keeps_the_conditions_it_began_with_across_a_reopen() {
             (json!("worker"), json!(false)),
         ]
     );
+}
+
+/// The mappings' key does not compare a deletion's NULL child task, so
+/// the writer itself refuses a second deletion of one item: in the same
+/// write, and in a later one, which leaves the mappings as they were.
+#[test]
+fn an_operation_deletes_an_acceptance_item_at_most_once() {
+    let (_dir, db) = queue();
+    let (mut queue, a, _b, run) = claimed(&db);
+    let op = queue
+        .record_replan(
+            &NewReplan {
+                run,
+                reason: "two independent parts".into(),
+                evidence: Vec::new(),
+            },
+            ReplanOrigin::Runtime,
+            "supervisor",
+            "supervisor",
+        )
+        .unwrap()
+        .operation;
+    let mapping = |ordinal: usize, child: Option<TaskId>| ConditionMapping {
+        ordinal,
+        hash: op.conditions.acceptance[ordinal].hash.clone(),
+        child_task_id: child,
+        child_ordinal: child.map(|_| 0),
+        disposition: if child.is_some() { "moved" } else { "deleted" }.into(),
+        authority: child.is_none().then(|| json!({"answer": 1})),
+    };
+
+    let repeated = queue
+        .record_replan_mappings(op.id, &[mapping(1, None), mapping(1, None)])
+        .unwrap_err();
+    assert!(
+        repeated
+            .to_string()
+            .contains("already deletes acceptance item 1"),
+        "{repeated:#}"
+    );
+    assert!(queue.replan_operation(op.id).unwrap().mappings.is_empty());
+
+    let written = queue
+        .record_replan_mappings(op.id, &[mapping(0, Some(a)), mapping(1, None)])
+        .unwrap();
+    assert_eq!(written.mappings, [mapping(0, Some(a)), mapping(1, None)]);
+    let again = queue
+        .record_replan_mappings(op.id, &[mapping(1, None)])
+        .unwrap_err();
+    assert!(
+        again
+            .to_string()
+            .contains("already deletes acceptance item 1"),
+        "{again:#}"
+    );
+    let rows: i64 = Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM replan_mappings WHERE operation_id=?1 AND child_task_id IS NULL",
+            [op.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 1);
 }
 
 #[test]
