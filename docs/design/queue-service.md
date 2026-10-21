@@ -51,6 +51,7 @@ queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）�
 | `credentials/<actor idのsha256>` | tokenの値。呼び出し元にはこのfileのpathを渡し、値をenvにもargvにも置かない（ADR-t1233-4決定4）。worktreeとrun dirの外 |
 
 1つの接続に1つの要求で、要求は1行のJSON、答えも1行のJSONで、答えた後に閉じる。
+上限（`MAX_ANSWER_BYTES`）を超える答えは送らず`response_too_large`で断る（ADR-t1233-5）。
 transactionはserviceの中で完結し、クライアントとの往復で分けない（ADR-t1233-1決定3）。
 要求ごとにDBへの接続を開き、principalのactorで書く（eventの`actor`は呼び出し元のprincipal）。
 要求と答えの形は`domain::queue_service`の`ServiceRequest`と`ServiceResponse`が持つ。
@@ -193,7 +194,7 @@ jobのpromptに現れる`` `dagq …` ``が全てユースケースに行くこ�
   promptとskillはsvgを名指さない
 - `locate`（DBのpathを返す）・`doctor`（hostとDBのファイルの診断）・`service status`・`planners`: 制御側の状態を見るもので、jobのpromptは名指さない。
   dagq skillは`doctor`を名指すが、AGENTS.mdはworkerの実queueでの`doctor`の確認を人かinboxに任せる。
-  クライアントモードでは`locate`がDBのpathを出さずにsocketとserviceへの到達を答え、ほかは`control_side_command`で断る（[クライアントモード](#クライアントモード)）
+  クライアントモードでの扱いは[クライアントモード](#クライアントモード)
 
 ## クライアントモード
 
@@ -206,8 +207,9 @@ ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、ADR-t2114-3決定3。
 - コマンドを引数のとおりに読んで（clapの検査はそのまま）、ユースケースとparamsに写す（`client_request`）。
   読み取りはCLIの読み取りと同じ`QueueRead`をparamsにし、serviceがそれを同じ読み取りに読み戻す。
 - tokenはcredentialのfileから読み、要求ごとに送る。
-  答えの`result`をCLIと同じに出す（`graph --format d2`の本文もそのまま）。
-  答えを待つ時間と読む長さの上限はどちらの宛ても同じ
+  答えの`result`をCLIと同じに出す。
+  答えを待つ時間と読む長さの上限はどちらの宛ても同じ。
+  上限に達した答えも`response_too_large`
 - 断り: serviceとbrokerの断りもクライアントの断りも同じ形のerror（`queue_service`の`code`）で終了コード1になり、codeの意味は`ClientFailure`のdoc comment。
   serviceの`authorization_denied`は、codeに加えてローカルのCLIの断りと同じ`denied`（role・capability・reason）とerrorの文（observerとjobには各々の決まった文）を出す。
   クライアントで断るもの（`no_use_case`・`queue_named`など）は`denied`を持たない

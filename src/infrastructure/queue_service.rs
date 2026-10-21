@@ -733,9 +733,39 @@ impl Drop for Revoking {
 
 // --- The client --------------------------------------------------------------
 
+/// An answer longer than [`MAX_ANSWER_BYTES`], which a client stops
+/// reading at: the service answered, and [`Client::call`] refuses it as
+/// `response_too_large`, not `unreachable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnswerPastLimit;
+
+impl std::fmt::Display for AnswerPastLimit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the answer is longer than {MAX_ANSWER_BYTES} bytes")
+    }
+}
+
+impl std::error::Error for AnswerPastLimit {}
+
+/// The refusal of a client whose call to `use_case` got no answer it
+/// reads: `response_too_large` for an [`AnswerPastLimit`] (the service
+/// answered), `unreachable` with `said` (where to look) for any other.
+fn no_answer(error: &anyhow::Error, use_case: UseCase, said: &str) -> ClientFailure {
+    if error.downcast_ref::<AnswerPastLimit>().is_some() {
+        return ClientFailure::new(
+            ServiceErrorCode::ResponseTooLarge.as_str(),
+            crate::domain::queue_service::too_large_message(Some(use_case), None),
+        );
+    }
+    ClientFailure::new(
+        "unreachable",
+        format!("{error:#}; a client-mode dagq does not open the queue itself ({said})"),
+    )
+}
+
 /// Send `request` to the service at `socket` and read its answer; an error
 /// when nothing answers (the caller does not fall back to the DB,
-/// ADR-t1233-1 decision 7).
+/// ADR-t1233-1 decision 7), or [`AnswerPastLimit`].
 pub fn call(socket: &Path, request: &ServiceRequest, timeout: Duration) -> Result<ServiceResponse> {
     let mut stream = UnixStream::connect(socket)
         .with_context(|| format!("the queue service at {} is unreachable", socket.display()))?;
@@ -749,9 +779,12 @@ pub fn call(socket: &Path, request: &ServiceRequest, timeout: Duration) -> Resul
     stream.shutdown(std::net::Shutdown::Write).ok();
     let mut answer = Vec::new();
     stream
-        .take(MAX_ANSWER_BYTES as u64)
+        .take(MAX_ANSWER_BYTES as u64 + 1)
         .read_to_end(&mut answer)
         .context("read the queue service's answer")?;
+    if answer.len() > MAX_ANSWER_BYTES {
+        return Err(AnswerPastLimit.into());
+    }
     serde_json::from_slice(&answer).context("the queue service's answer does not read")
 }
 
@@ -785,8 +818,9 @@ pub const CLIENT_TIMEOUT: Duration = Duration::from_secs(300);
 /// `api_version_mismatch`), the queue broker's in front of it
 /// (`unauthenticated`, `forbidden_destination`, `bad_request`,
 /// `unreachable`), or the client's (`unreachable`: nothing answers on the
-/// socket or at the broker; `no_credential`: the token's file does not
-/// read; `control_side_command`: the command is one of the control
+/// socket or at the broker; `response_too_large`: the answer, which the
+/// service gave, is longer than [`MAX_ANSWER_BYTES`]; `no_credential`: the
+/// token's file does not read; `control_side_command`: the command is one of the control
 /// side's (`doctor`, `service status`, `planners`), which a person or the
 /// inbox runs on the host; `no_use_case`: any other command that is none
 /// of the service's;
@@ -908,12 +942,7 @@ impl Client {
             ),
             None => None,
         };
-        let unreachable = |error: anyhow::Error, said: &str| {
-            ClientFailure::new(
-                "unreachable",
-                format!("{error:#}; a client-mode dagq does not open the queue itself ({said})"),
-            )
-        };
+        let unreachable = |error: anyhow::Error, said: &str| no_answer(&error, use_case, said);
         let response = match &self.route {
             ClientRoute::Socket(socket) => {
                 let request = ServiceRequest {
@@ -1294,26 +1323,45 @@ fn answer(stream: UnixStream, backend: &dyn ServiceBackend, pid: u32) -> Result<
     BufReader::new(stream.try_clone()?)
         .take(MAX_REQUEST_BYTES as u64 + 1)
         .read_until(b'\n', &mut line)?;
+    let mut use_case = None;
     let response = if line.len() > MAX_REQUEST_BYTES {
         ServiceResponse::failure(ServiceErrorCode::BadRequest, "the request is too long")
     } else {
         match serde_json::from_slice::<ServiceRequest>(&line) {
-            Ok(request) => QueueService {
-                backend,
-                build: crate::VERSION,
-                pid,
+            Ok(request) => {
+                use_case = Some(request.use_case);
+                QueueService {
+                    backend,
+                    build: crate::VERSION,
+                    pid,
+                }
+                .handle(&request)
             }
-            .handle(&request),
             Err(error) => ServiceResponse::failure(
                 ServiceErrorCode::BadRequest,
                 format!("the request does not read: {error}"),
             ),
         }
     };
-    let mut out = serde_json::to_vec(&response)?;
-    out.push(b'\n');
-    (&stream).write_all(&out)?;
+    (&stream).write_all(&answer_line(&response, use_case)?)?;
     Ok(())
+}
+
+/// `response` to `use_case` as the line the service writes, or, when that
+/// is longer than [`MAX_ANSWER_BYTES`], its `response_too_large` (a client
+/// would read only a part of it).
+fn answer_line(response: &ServiceResponse, use_case: Option<UseCase>) -> Result<Vec<u8>> {
+    let mut out = serde_json::to_vec(response)?;
+    out.push(b'\n');
+    if out.len() > MAX_ANSWER_BYTES {
+        warn!(
+            bytes = out.len(),
+            "the queue service answered a request past its answer's limit"
+        );
+        out = serde_json::to_vec(&ServiceResponse::too_large(use_case, out.len()))?;
+        out.push(b'\n');
+    }
+    Ok(out)
 }
 
 /// The queue the service's use cases run on: a fresh connection to the
@@ -1881,6 +1929,49 @@ mod tests {
         assert_eq!(injected.code, "client_misconfigured");
     }
 
+    #[test]
+    fn an_answer_past_the_limit_is_written_and_read_as_response_too_large() {
+        // The service writes an answer within the limit as it is, and one
+        // past it as its refusal, with its size and how to narrow the read.
+        let small = ServiceResponse::success(json!({"events": []}));
+        let line = answer_line(&small, Some(UseCase::Events)).unwrap();
+        assert_eq!(
+            line,
+            [serde_json::to_vec(&small).unwrap(), b"\n".to_vec()].concat()
+        );
+        let large = ServiceResponse::success(json!("x".repeat(MAX_ANSWER_BYTES)));
+        let line = answer_line(&large, Some(UseCase::Events)).unwrap();
+        assert!(line.len() < MAX_ANSWER_BYTES);
+        let refusal: ServiceResponse = serde_json::from_slice(&line).unwrap();
+        let error = refusal.error.unwrap();
+        assert_eq!(error.code, ServiceErrorCode::ResponseTooLarge);
+        let size = serde_json::to_vec(&large).unwrap().len() + 1;
+        assert!(
+            error.message.contains(&format!("is {size} bytes")),
+            "{}",
+            error.message
+        );
+        assert!(
+            error.message.contains("--since / --until"),
+            "{}",
+            error.message
+        );
+
+        // A client that read past the limit refuses it so too, and one that
+        // got no answer is `unreachable`.
+        let past = no_answer(&AnswerPastLimit.into(), UseCase::Notes, "look");
+        assert_eq!(past.code, "response_too_large", "{past}");
+        assert!(past.message.contains("--limit"), "{past}");
+        let gone = no_answer(
+            &anyhow::anyhow!("connection refused"),
+            UseCase::Notes,
+            "look",
+        );
+        assert_eq!(gone.code, "unreachable", "{gone}");
+        assert!(gone.message.contains("connection refused"), "{gone}");
+        assert!(gone.message.contains("(look)"), "{gone}");
+    }
+
     /// A broker on a port of this process that answers one request with
     /// `status` and `body`, and hands back what it read.
     fn one_shot_broker(status: u16, body: Vec<u8>) -> (String, thread::JoinHandle<String>) {
@@ -1958,15 +2049,17 @@ mod tests {
         let failure = error.downcast_ref::<ClientFailure>().unwrap();
         assert_eq!(failure.code, "unauthenticated");
 
-        // An answer past the limit, and no broker, are `unreachable`.
+        // An answer past the limit is `response_too_large`, with how to
+        // narrow the read; no broker is `unreachable`.
         let (address, broker) = one_shot_broker(200, vec![b' '; MAX_ANSWER_BYTES + 1]);
         let error = client(&address)
-            .call(UseCase::Show, json!({"id": 3}))
+            .call(UseCase::Events, json!({}))
             .unwrap_err();
         broker.join().unwrap();
         let failure = error.downcast_ref::<ClientFailure>().unwrap();
-        assert_eq!(failure.code, "unreachable", "{failure}");
+        assert_eq!(failure.code, "response_too_large", "{failure}");
         assert!(failure.message.contains("longer than"), "{failure}");
+        assert!(failure.message.contains("--after <cursor>"), "{failure}");
         let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = closed.local_addr().unwrap().to_string();
         drop(closed);

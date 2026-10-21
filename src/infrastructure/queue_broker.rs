@@ -41,8 +41,8 @@ use serde_json::{Value, json};
 use tracing::{info, warn};
 
 use super::queue_service::{
-    Lock, lock_file_held, lookup, owner_gone, private_dir, queue_dir_of, runs_for, sha256_hex,
-    signal, socket_path, spawn_detached, unix_now, write_private,
+    AnswerPastLimit, Lock, lock_file_held, lookup, owner_gone, private_dir, queue_dir_of, runs_for,
+    sha256_hex, signal, socket_path, spawn_detached, unix_now, write_private,
 };
 use super::sqlite::SqliteQueue;
 use crate::application::queue_broker::ClaudeForward;
@@ -429,18 +429,16 @@ pub fn exchange_on(
     }
     // A client reads no more than a client of the service's socket does.
     let limit = MAX_ANSWER_BYTES as u64;
-    ensure!(
-        length.is_none_or(|length| length <= limit),
-        "the queue broker's answer is longer than {limit} bytes"
-    );
+    if length.is_some_and(|length| length > limit) {
+        return Err(AnswerPastLimit.into());
+    }
     let mut answer = Vec::new();
     reader
         .take(length.unwrap_or(limit + 1))
         .read_to_end(&mut answer)?;
-    ensure!(
-        answer.len() as u64 <= limit,
-        "the queue broker's answer is longer than {limit} bytes"
-    );
+    if answer.len() as u64 > limit {
+        return Err(AnswerPastLimit.into());
+    }
     Ok((status, answer))
 }
 

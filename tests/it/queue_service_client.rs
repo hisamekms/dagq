@@ -650,3 +650,89 @@ fn the_observer_s_dagq_reads_the_production_sets_through_the_service() {
     let listed = answered(&client(&queue, &socket, Some(&observer), "observer", &sets));
     assert_eq!(listed["sets"].as_array().unwrap().len(), 1, "{listed}");
 }
+
+/// Acceptance (task 1464): a read whose answer is past the service's limit
+/// is refused as `response_too_large`, with the limit and how to narrow
+/// that read, not as `unreachable`; the same read narrowed under the limit
+/// answers as the command line prints it.
+#[test]
+fn a_read_past_the_answer_s_limit_is_refused_with_how_to_narrow_it() {
+    use dagq::domain::queue_service::MAX_ANSWER_BYTES;
+    let (queue, socket) = served();
+    let worker = issued(
+        &queue,
+        &Principal::worker(queue.run.id(), queue.run.task_id()),
+    );
+    // One event longer than the limit, written as it is: a note as long goes
+    // through the search index and takes seconds.
+    rusqlite::Connection::open(&queue.db)
+        .unwrap()
+        .execute(
+            "INSERT INTO run_events(task_id,kind,payload) VALUES (?1,'session_opened',?2)",
+            rusqlite::params![
+                queue.run.task_id().as_i64(),
+                json!({"text": "x".repeat(MAX_ANSWER_BYTES)}).to_string()
+            ],
+        )
+        .unwrap();
+    let read = |args: &[&str]| client(&queue, &socket, Some(&worker), "worker", args);
+
+    let past = read(&["events", "--full", "--all"]);
+    assert_eq!(refused(&past), "response_too_large");
+    assert_eq!(past.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&past.stderr).unwrap();
+    let message = error["error"].as_str().unwrap();
+    assert!(message.contains(&MAX_ANSWER_BYTES.to_string()), "{message}");
+    for option in ["--since / --until", "--limit", "--after <cursor>"] {
+        assert!(message.contains(option), "{message}");
+    }
+
+    let within = ["events", "--full", "--all", "--limit", "2"];
+    assert_eq!(answered(&read(&within)), ok(&queue.db, &within));
+}
+
+/// Acceptance (task 1464): a client-mode `dagq` that reads past the limit
+/// on the socket (a service of another limit) refuses it as
+/// `response_too_large` with how to narrow the read, not as `unreachable`:
+/// the service answered.
+#[test]
+fn an_answer_past_the_client_s_limit_on_the_socket_is_refused_as_too_large() {
+    use crate::common::{STEP_LIMIT, within};
+    use dagq::domain::queue_service::MAX_ANSWER_BYTES;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    let _test = crate::common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("s.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    // A service that answers one request with a line past the limit.
+    let service = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(STEP_LIMIT)).unwrap();
+        stream.set_write_timeout(Some(STEP_LIMIT)).unwrap();
+        let mut request = Vec::new();
+        let _ = BufReader::new(&stream).read_until(b'\n', &mut request);
+        let _ = stream.write_all(&vec![b' '; MAX_ANSWER_BYTES + 1]);
+    });
+
+    let past = Command::new(env!("CARGO_BIN_EXE_dagq"))
+        .without_actor_env()
+        .current_dir(dir.path())
+        .env(SOCKET_ENV, &socket)
+        .env("DAGQ_ROLE", "worker")
+        .args(["notes"])
+        .bounded_output()
+        .unwrap();
+    // A client that never connected leaves the service waiting: this ends it.
+    let _ = UnixStream::connect(&socket);
+    {
+        let _waiting = within(STEP_LIMIT, "the stub service to end");
+        service.join().unwrap();
+    }
+    assert_eq!(refused(&past), "response_too_large");
+    assert_eq!(past.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&past.stderr).unwrap();
+    let message = error["error"].as_str().unwrap();
+    assert!(message.contains(&MAX_ANSWER_BYTES.to_string()), "{message}");
+    assert!(message.contains("--limit"), "{message}");
+}

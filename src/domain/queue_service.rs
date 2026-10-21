@@ -66,10 +66,104 @@ pub const URL_ENV: &str = "DAGQ_SERVICE_URL";
 pub const CLIENT_ENV: [&str; 3] = [SOCKET_ENV, URL_ENV, CREDENTIAL_FILE_ENV];
 /// The longest request line the service reads.
 pub const MAX_REQUEST_BYTES: usize = 1 << 20;
-/// The longest answer a client-mode `dagq` reads, by the socket or through
-/// the broker: a longer one does not read, and is refused as one the
-/// service did not give.
+/// The longest answer line, its newline included, the service writes and a
+/// client-mode `dagq` reads, by the socket or through the broker: the
+/// service answers a longer one's use case with
+/// [`ServiceErrorCode::ResponseTooLarge`] instead, and a client that reads
+/// past it (a service of another limit) refuses it with the same code.
 pub const MAX_ANSWER_BYTES: usize = MAX_REQUEST_BYTES * 16;
+
+/// The message of a [`ServiceErrorCode::ResponseTooLarge`] of `use_case`
+/// (`None`: a request that did not read): the answer's `size` (`None`: a
+/// client that stopped reading at the limit), [`MAX_ANSWER_BYTES`], and how
+/// to narrow that read.
+pub fn too_large_message(use_case: Option<UseCase>, size: Option<usize>) -> String {
+    let what = use_case.map_or("the request", UseCase::as_str);
+    let size = size.map_or_else(
+        || "is longer than".to_owned(),
+        |size| format!("is {size} bytes, past"),
+    );
+    format!(
+        "the queue service's answer to {what} {size} the {MAX_ANSWER_BYTES} bytes a client-mode \
+         dagq reads, and is not sent in part: {}",
+        narrowing(use_case)
+    )
+}
+
+/// How to narrow a read of `use_case` to an answer within
+/// [`MAX_ANSWER_BYTES`]: the options of its command that take less. Every
+/// use case is named, so a new one decides its own.
+fn narrowing(use_case: Option<UseCase>) -> &'static str {
+    let Some(use_case) = use_case else {
+        return "narrow the read with the options of its command (dagq <command> --help)";
+    };
+    match use_case {
+        UseCase::Events => {
+            "narrow the window with --since / --until, take fewer with a smaller --limit, read \
+             the next page with --after <cursor> (the cursor of the last answer), narrow with \
+             --run / --task / --goal / --kind, or leave out --full"
+        }
+        UseCase::Notes => {
+            "take fewer with a smaller --limit and read on with --since <cursor>, or narrow with \
+             --task / --goal"
+        }
+        UseCase::List => {
+            "take a smaller page with --limit and go on with --before <next>, narrow with \
+             --status / --goal, or leave out --full / --all"
+        }
+        UseCase::Search => {
+            "take fewer with a smaller --limit, narrow with --kind / --status / --goal, or leave \
+             out --full"
+        }
+        UseCase::Related => "take fewer with a smaller --limit, or narrow with --status",
+        UseCase::Stats => {
+            "narrow the window with --since / --until or the runs with --goal, or leave out --full"
+        }
+        UseCase::Kpi => {
+            "narrow the window with --since / --until, list fewer periods with a smaller --last, \
+             or narrow the runs with --goal / --change / --area"
+        }
+        UseCase::Marks => "narrow the window with --since / --until",
+        UseCase::Findings => {
+            "narrow with --status / --kind / --task / --run / --goal, or leave out --full / --all"
+        }
+        UseCase::Graph => "narrow to one goal with --goal",
+        UseCase::Forecast => "narrow with --task / --goal",
+        UseCase::Status => "narrow the attention to one role's with --role",
+        UseCase::Asks => "leave out --all, or narrow with --open / --role",
+        UseCase::Show => "leave out --full, or show fewer events with a smaller --events",
+        UseCase::Timeline => "leave out --full, or report fewer gaps with a larger --gap",
+        UseCase::GoalShow => "leave out --full",
+        UseCase::GoalList => "narrow with --tag",
+        UseCase::ProposalList => "leave out --all",
+        UseCase::Candidates => "leave out --ignore-deferrals",
+        UseCase::Lint => "check fewer proposals at a time (fewer --proposal)",
+        UseCase::ObserveHistory => "list fewer with a smaller --limit",
+        UseCase::ObserveInput => {
+            "read one section with --section, and fewer of its items with --offset and a smaller \
+             --limit"
+        }
+        UseCase::AgentResults | UseCase::AgentSets => {
+            "take fewer with a smaller --limit, or narrow with --agent"
+        }
+        UseCase::ProposalShow | UseCase::AgentResult | UseCase::AgentSet => {
+            "its command has no option that narrows the answer"
+        }
+        UseCase::Hello
+        | UseCase::Ask
+        | UseCase::Note
+        | UseCase::FindingRecord
+        | UseCase::FindingResolve
+        | UseCase::FindingDismiss
+        | UseCase::AgentEval
+        | UseCase::ReplanPropose
+        | UseCase::AgentCases
+        | UseCase::AgentDecide
+        | UseCase::TelemetryReport => {
+            "narrow the read with the options of its command (dagq <command> --help)"
+        }
+    }
+}
 
 /// The `<host>:<port>` the broker's URL `url` ([`URL_ENV`]) names, or why
 /// it names none: only `http://`, a host and a port, and no path but `/`
@@ -264,6 +358,10 @@ string_enum!(
     /// answer the request the broker passed on. The broker never opens the
     /// queue instead.
     Unreachable => "unreachable",
+    /// `response_too_large`: the answer is longer than
+    /// [`MAX_ANSWER_BYTES`], so the service sends this instead of a part of
+    /// it, with how to narrow the read ([`too_large_message`]).
+    ResponseTooLarge => "response_too_large",
 });
 
 // The state of a queue's service as a look at it finds it: `running` (it
@@ -358,6 +456,14 @@ impl ServiceResponse {
                 denied: None,
             }),
         }
+    }
+
+    /// `response_too_large` for an answer of `size` bytes to `use_case`.
+    pub fn too_large(use_case: Option<UseCase>, size: usize) -> Self {
+        Self::failure(
+            ServiceErrorCode::ResponseTooLarge,
+            too_large_message(use_case, Some(size)),
+        )
     }
 
     /// `authorization_denied` for `refused`, with its message and what it
@@ -554,6 +660,80 @@ pub fn attention_stands(latest: Option<&RecordedKind>) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_too_large_answer_says_its_size_the_limit_and_how_to_narrow_its_read() {
+        let events = too_large_message(Some(UseCase::Events), Some(20_000_000));
+        assert!(events.contains("events is 20000000 bytes"), "{events}");
+        assert!(events.contains(&MAX_ANSWER_BYTES.to_string()), "{events}");
+        for option in ["--since / --until", "--limit", "--after <cursor>"] {
+            assert!(events.contains(option), "{events}");
+        }
+        let read = too_large_message(Some(UseCase::Show), None);
+        assert!(read.contains("show is longer than"), "{read}");
+        assert!(read.contains("--full"), "{read}");
+        let other = too_large_message(None, Some(1));
+        assert!(other.contains("--help"), "{other}");
+        let response = ServiceResponse::too_large(Some(UseCase::List), 1);
+        assert_eq!(
+            response.error.map(|error| error.code),
+            Some(ServiceErrorCode::ResponseTooLarge)
+        );
+    }
+
+    #[test]
+    fn each_read_that_its_options_narrow_names_them_not_the_help() {
+        let reads: [(UseCase, &[&str]); 26] = [
+            (
+                UseCase::Events,
+                &["--run", "--task", "--goal", "--kind", "--full"],
+            ),
+            (
+                UseCase::Notes,
+                &["--limit", "--since <cursor>", "--task", "--goal"],
+            ),
+            (
+                UseCase::List,
+                &["--limit", "--before <next>", "--status", "--all"],
+            ),
+            (
+                UseCase::Search,
+                &["--limit", "--kind", "--status", "--goal"],
+            ),
+            (UseCase::Related, &["--limit", "--status"]),
+            (UseCase::Stats, &["--since / --until", "--goal", "--full"]),
+            (
+                UseCase::Kpi,
+                &["--since / --until", "--last", "--change", "--area"],
+            ),
+            (UseCase::Marks, &["--since / --until"]),
+            (UseCase::Findings, &["--status", "--run", "--full / --all"]),
+            (UseCase::Graph, &["--goal"]),
+            (UseCase::Forecast, &["--task / --goal"]),
+            (UseCase::Status, &["--role"]),
+            (UseCase::Asks, &["--all", "--open / --role"]),
+            (UseCase::Show, &["--full", "--events"]),
+            (UseCase::Timeline, &["--full", "--gap"]),
+            (UseCase::GoalShow, &["--full"]),
+            (UseCase::GoalList, &["--tag"]),
+            (UseCase::ProposalList, &["--all"]),
+            (UseCase::Candidates, &["--ignore-deferrals"]),
+            (UseCase::Lint, &["--proposal"]),
+            (UseCase::ObserveHistory, &["--limit"]),
+            (UseCase::ObserveInput, &["--section", "--offset", "--limit"]),
+            (UseCase::AgentResults, &["--limit", "--agent"]),
+            (UseCase::AgentResult, &["no option"]),
+            (UseCase::AgentSets, &["--limit", "--agent"]),
+            (UseCase::AgentSet, &["no option"]),
+        ];
+        for (use_case, options) in reads {
+            let message = too_large_message(Some(use_case), None);
+            assert!(!message.contains("--help"), "{message}");
+            for option in options {
+                assert!(message.contains(option), "{use_case:?}: {message}");
+            }
+        }
+    }
 
     #[test]
     fn a_request_and_a_response_read_back_as_written() {
