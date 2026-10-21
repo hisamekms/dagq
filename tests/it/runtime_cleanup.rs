@@ -481,6 +481,125 @@ fn a_worktree_with_a_broken_git_goes_as_a_directory_once_its_task_is_over() {
     assert!(payloads_of(&queue, &run, "cleanup_failed").is_empty());
 }
 
+/// A worktree whose admin dir went while its `.git` still names it (a
+/// landing's `git worktree remove` that failed on the directory), the name
+/// taken since by another worktree at a path of the same basename: its
+/// cleanup neither repairs it onto the other's admin dir nor removes that
+/// one. Only its directory and branch go, recorded with `no_admin`; the
+/// other worktree keeps its admin dir, `HEAD` and branch, and Git still
+/// reads it.
+#[test]
+fn a_worktree_whose_admin_dir_name_another_took_goes_and_leaves_the_others() {
+    let (dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, BUILDING_AGENT);
+    supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let run = queue.show(TaskId::new(1)).unwrap().runs[0].clone();
+    let worktree = Path::new(run.worktree_path().unwrap());
+    let gitfile = fs::read_to_string(worktree.join(".git")).unwrap();
+    let admin = PathBuf::from(gitfile.trim().strip_prefix("gitdir: ").unwrap());
+    fs::remove_dir_all(&admin).unwrap();
+    let other = dir.path().join("other").join("worktree");
+    fs::create_dir_all(other.parent().unwrap()).unwrap();
+    git(
+        &repo,
+        &["worktree", "add", "-b", "other", other.to_str().unwrap()],
+    );
+    let taken = fs::read_to_string(other.join(".git")).unwrap();
+    let taken = Path::new(taken.trim().strip_prefix("gitdir: ").unwrap()).to_path_buf();
+    assert_eq!(
+        taken.canonicalize().unwrap(),
+        admin.canonicalize().unwrap(),
+        "the other worktree took the name"
+    );
+    let branch = run.branch().unwrap();
+    queue
+        .transition(TaskId::new(1), TaskAction::Cancel)
+        .unwrap();
+
+    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
+    assert!(!worktree.exists());
+    assert!(!branch_exists(&repo, branch));
+    assert!(branch_exists(&repo, "other"));
+    assert!(admin.is_dir());
+    assert_eq!(
+        fs::read_to_string(admin.join("HEAD")).unwrap().trim(),
+        "ref: refs/heads/other"
+    );
+    assert_eq!(
+        Path::new(fs::read_to_string(admin.join("gitdir")).unwrap().trim())
+            .canonicalize()
+            .unwrap(),
+        other.join(".git").canonicalize().unwrap()
+    );
+    git_out(&other, &["status", "--porcelain"]);
+    assert_eq!(
+        git_out(&other, &["symbolic-ref", "HEAD"]),
+        "refs/heads/other"
+    );
+    let removed = payloads_of(&queue, &run, "worktree_removed");
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    assert_eq!(removed[0]["reason"], "task_canceled");
+    assert_eq!(removed[0]["no_admin"], true);
+    assert_eq!(removed[0].get("repaired"), None);
+    assert!(payloads_of(&queue, &run, "cleanup_failed").is_empty());
+}
+
+/// A landing stops what runs from under the run's worktree before it
+/// removes it, and when `git worktree remove` fails (here on a locked
+/// worktree), the directory goes with its `.git` all the same: no `.git`
+/// is left to name an admin dir another worktree may take. The failure is
+/// still recorded as `cleanup_failed`.
+#[test]
+fn a_landing_whose_worktree_removal_fails_stops_its_processes_and_leaves_no_git() {
+    let (dir, repo, db, run) = awaiting_run();
+    let worktree = Path::new(run.worktree_path().unwrap()).to_path_buf();
+    git(&repo, &["worktree", "lock", worktree.to_str().unwrap()]);
+    // A copy of dagq in the worktree, kept out of its status, waiting from
+    // elsewhere on a queue of its own (as in the cleanup's test above).
+    let common_dir = PathBuf::from(git_out(
+        &repo,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ));
+    fs::create_dir_all(common_dir.join("info")).unwrap();
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(common_dir.join("info").join("exclude"))
+        .and_then(|mut exclude| io::Write::write_all(&mut exclude, b"\ntools/\n"))
+        .unwrap();
+    let idle = dir.path().join("idle.db");
+    drop(common::template::queue(&idle));
+    let executable = worktree.join("tools").join("dagq");
+    fs::create_dir_all(executable.parent().unwrap()).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_dagq"), &executable).unwrap();
+    let mut started = Detached::default();
+    let left = started.hold(detached(
+        &format!(
+            "{} --db {} watch --timeout 30 --interval 1",
+            shell_path(&executable),
+            shell_path(&idle)
+        ),
+        dir.path(),
+        &dir.path().join("left.pid"),
+    ));
+
+    let outcome = integrate(&db, 1, &repo).unwrap();
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    assert!(!pid_alive(left));
+    assert!(!worktree.join(".git").exists());
+    assert!(!worktree.exists());
+    let queue = SqliteQueue::open(&db).unwrap();
+    let failed = payloads_of(&queue, &run, "cleanup_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(
+        failed[0].to_string().contains("its directory was removed"),
+        "{failed:?}"
+    );
+    assert!(payloads_of(&queue, &run, "worktree_removed").is_empty());
+}
+
 /// The system's processes, counting the listings of their executables
 /// (task 1590).
 struct ListingsCounted(Arc<AtomicUsize>);

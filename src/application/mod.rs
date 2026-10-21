@@ -71,6 +71,7 @@ pub mod telemetry_tokens;
 pub mod throughput_review;
 pub mod update;
 pub mod watch;
+pub mod worktree_processes;
 
 pub use crate::domain::ClaimRank;
 pub use ports::*;

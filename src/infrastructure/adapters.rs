@@ -5,7 +5,7 @@ use crate::{
     application::{
         AgentJobLaunch, AgentProvider, CommandSpec, FileStamp, LandingBranchStamp, MainRemote,
         PlannerCommand, PluginState, ProcessControl, Repository, SessionWrappers, TurnReader,
-        TurnTarget, execution::permission_deny,
+        TurnTarget, WorktreeAdmin, execution::permission_deny,
     },
     domain::{
         ActorRole, CommitSha, TaskId, TaskRun,
@@ -2903,6 +2903,52 @@ impl GitRepository {
         self.delete_branch_from(&primary, branch)
     }
 
+    /// The admin dir of this repository that `worktree`'s `.git` names by
+    /// its name (as `git worktree repair` finds it): whether its `gitdir`
+    /// points back at `worktree/.git`, and its `HEAD`. A relative path in
+    /// either file is read from the file's directory.
+    pub fn worktree_admin(&self, worktree: &Path) -> Result<WorktreeAdmin> {
+        run_clones::refuse_clone(worktree)?;
+        let dotgit = worktree.join(".git");
+        let Some(named) = fs::read_to_string(&dotgit)
+            .ok()
+            .and_then(|text| Some(worktree.join(text.trim().strip_prefix("gitdir:")?.trim())))
+        else {
+            return Ok(WorktreeAdmin::Unreadable);
+        };
+        let (Some(name), Some("worktrees")) = (
+            named.file_name(),
+            named
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|parent| parent.to_str()),
+        ) else {
+            return Ok(WorktreeAdmin::Unreadable);
+        };
+        let admin = git_common_dir(&self.primary_worktree()?)?
+            .join("worktrees")
+            .join(name);
+        if !admin.is_dir() {
+            return Ok(WorktreeAdmin::Missing);
+        }
+        // A file missing or unreadable says nothing of the worktree: no
+        // `gitdir` points nowhere, no `HEAD` names no branch.
+        let read = |file: &str| fs::read_to_string(admin.join(file)).unwrap_or_default();
+        let back = read("gitdir");
+        let points_back = !back.trim().is_empty()
+            && match (
+                admin.join(back.trim()).canonicalize(),
+                dotgit.canonicalize(),
+            ) {
+                (Ok(back), Ok(dotgit)) => back == dotgit,
+                _ => false,
+            };
+        Ok(WorktreeAdmin::Found {
+            points_back,
+            head: read("HEAD").trim().to_owned(),
+        })
+    }
+
     /// The local branches, by their short name.
     pub fn branches(&self) -> Result<Vec<String>> {
         let listed = output(self.command().arg("-C").arg(&self.root).args([
@@ -3233,6 +3279,9 @@ impl Repository for GitRepository {
     }
     fn remove_worktree_and_branch(&self, worktree: &Path, branch: &str) -> Result<()> {
         GitRepository::remove_worktree_and_branch(self, worktree, branch)
+    }
+    fn worktree_admin(&self, worktree: &Path) -> Result<WorktreeAdmin> {
+        GitRepository::worktree_admin(self, worktree)
     }
     fn add_case_tree(
         &self,

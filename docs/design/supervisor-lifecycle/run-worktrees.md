@@ -21,7 +21,16 @@ worktreeのpathはrun_dirの下の`<runs>/<run-id>/worktree`で、`--repo`のche
   前のrunのworktreeも、着地した（`integrate`がworktreeを消せなかった）runのものも同じ。
   - 消す前に（下の`.git`の壊れたdirを消す前とも）、worktreeがそのrun自身の`<runs>/<run-id>/worktree`（`--repo`のcheckoutとその祖先でない）なら、実行ファイルのpathがその下にあるプロセスを止める（止めるものは`domain::disk::worktree_executables`）。
     一覧を取れなければ止めずに消す。
+    着地の削除（`integrate`の`remove_landed_worktree`）も、hostのrunのworktreeがそのrun自身のもの（linkを解決してもそのrunのdirの下の`worktree`のまま）なら、消す前に同じようにプロセスを止める（判断は`own_worktree`）。
+    着地の削除の`git worktree remove`が失敗したら（Gitはworktreeのdirを消し切れなくてもadmin dirを消すことがあり、空いた名前を次のworktreeが使う）、そのrun自身の`<runs>/<run-id>/worktree`から`.git`を先に消してからdirを消し、`.git`が他のworktreeのadmin dirを指しうる形で残らないようにする。
+    失敗は今までどおり`cleanup_failed`に残す。
   - `git worktree remove`が失敗したら（queueの`rebind`の後などで、worktreeの`.git`が古いcommon dirを指している）、`git worktree repair <worktree>`で直してからもう一度removeし、repairか2回目のremoveも失敗すれば、最初の失敗と合わせて`cleanup_failed`にする。
+    repairは`.git`が名指すadmin dirを名前（`worktrees/<name>`）だけで探すので、repairの前に、repositoryのその名前のadmin dirがそのworktreeのものかを確かめる（判断は`owns_admin`）。
+    admin dirの`gitdir`がそのworktreeの`.git`を指すか、`HEAD`が消すrunのbranchならそのworktreeのもので、上のとおりrepairする。
+    admin dirが無いか、`gitdir`が別のpathを指し`HEAD`も別のbranchなら、名前を使い回した他のworktreeのものなので、repairも2回目の`git worktree remove`もせず、そのrun自身のworktreeならadminを持たないdirとしてdirだけを消し、消すrunのbranchを消す（`worktree_removed`に`no_admin: true`）。
+    そのrun自身のworktreeでなければ消さずに`cleanup_failed`にする。
+    他のworktreeのadmin dirとbranchには触れない。
+    `.git`がadmin dirを名指すgitfileでなければ、上のとおりrepairに任せる。
   - repairも失敗し、その理由が`.git`の壊れ（Gitがそのdirをworktreeとして扱えない）で、worktreeがそのrun自身のものなら、dirをfilesystemで消し、`git worktree prune`の後にbranchを消す（判断は`may_remove_broken`）。
     別の理由の失敗と、dirかbranchを消せなかったときは上と同じく`cleanup_failed`にする（taskが終わっていないrunはworktreeを消さないので、この経路に来ない）。
   - worktreeのディレクトリがもう無いのにbranch `dagq/<run-id>`が残っていれば、`git worktree prune`（Gitはpruneするまで消えたworktreeを覚えていて、そこにcheckoutされたbranchを消させない）の後にbranchを消す。

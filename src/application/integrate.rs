@@ -1085,7 +1085,14 @@ fn land_integrating(
                 run.id()
             );
             close_landing_asks(queue, &run);
-            remove_landed_worktree(queue, repository, &run);
+            remove_landed_worktree(
+                queue,
+                repository,
+                ctx.files,
+                ctx.processes,
+                ctx.common_dir,
+                &run,
+            );
             let push = push_main(
                 queue,
                 repository,
@@ -3358,18 +3365,67 @@ fn close_landing_asks(queue: &mut dyn AskStore, run: &TaskRun) {
 
 /// Drop the landed run's worktree and branch. The result is already on
 /// `main` and under the history ref, so a failure here is only recorded.
-fn remove_landed_worktree(queue: &mut dyn Queue, repository: &dyn Repository, run: &TaskRun) {
+/// What runs from under a worktree on the host is stopped first, as the
+/// supervisor's cleanup does, so none writes into it while Git removes it.
+/// When Git fails anyway (it may have removed the worktree's admin dir and
+/// left the directory, `Directory not empty`), [`clear_left_worktree`]
+/// takes the directory, or at least its `.git`, and the failure is still
+/// recorded.
+fn remove_landed_worktree(
+    queue: &mut dyn Queue,
+    repository: &dyn Repository,
+    files: &dyn RunFiles,
+    processes: &dyn ProcessControl,
+    common_dir: &str,
+    run: &TaskRun,
+) {
     let (Some(worktree), Some(branch)) = (&run.worktree_path(), &run.branch()) else {
         return;
     };
+    let path = Path::new(worktree);
+    // The executables' paths are read resolved: so is the worktree's, and
+    // the run directory's to tell that it resolves inside it.
+    let resolved = run.run_dir().and_then(|dir| {
+        Some((
+            files.canonicalize(path).ok()?,
+            files.canonicalize(Path::new(dir)).ok()?,
+        ))
+    });
+    let own = if run.in_container() {
+        None
+    } else {
+        own_worktree(run.run_dir(), path, common_dir, resolved)
+    };
+    let mut stopped = Vec::new();
+    if let Some(resolved) = &own {
+        match super::worktree_processes::stop_worktree_processes(
+            processes,
+            resolved,
+            super::worktree_processes::WORKTREE_STOP_POLLS,
+        ) {
+            Ok(listed) => stopped = listed,
+            Err(error) => warn!(
+                op = "cleanup",
+                run_id = %run.id(),
+                error = %format_args!("{error:#}"),
+                "run {}: the processes running from its worktree could not be listed: {error:#}",
+                run.id()
+            ),
+        }
+    }
     let recorded = match super::run_git::remove(repository, run, branch) {
-        Ok(()) => queue.record_runtime_event(
-            run.id(),
-            EventKind::WorktreeRemoved,
-            json!({"path": worktree, "branch": branch}),
-        ),
+        Ok(()) => {
+            let mut payload = json!({"path": worktree, "branch": branch});
+            if !stopped.is_empty() {
+                payload["stopped_processes"] = json!(stopped);
+            }
+            queue.record_runtime_event(run.id(), EventKind::WorktreeRemoved, payload)
+        }
         Err(error) => {
-            let message = format!("landed worktree {worktree} could not be removed: {error:#}");
+            let mut message = format!("landed worktree {worktree} could not be removed: {error:#}");
+            if own.is_some() {
+                message.push_str(&clear_left_worktree(files, path));
+            }
             warn!(op = "cleanup", run_id = %run.id(), "run {}: {message}", run.id());
             queue.record_cleanup_failure(run.id(), &message, &ReasonCode::GitFailed.into())
         }
@@ -3382,6 +3438,50 @@ fn remove_landed_worktree(queue: &mut dyn Queue, repository: &dyn Repository, ru
             "run {}: could not record the cleanup: {error:#}",
             run.id()
         );
+    }
+}
+
+/// The resolved path of `worktree` when it is the run's own `<run
+/// dir>/worktree` holding no part of the repository (`common_dir`), both as
+/// recorded and as `resolved` (the worktree's and the run directory's paths
+/// with their links resolved): the only worktree the landing stops
+/// processes under and removes by itself. A worktree a link replaced, to
+/// another worktree or the checkout, resolves outside the run directory and
+/// is none; so is one that could not be resolved.
+fn own_worktree(
+    run_dir: Option<&str>,
+    worktree: &Path,
+    common_dir: &str,
+    resolved: Option<(PathBuf, PathBuf)>,
+) -> Option<PathBuf> {
+    let common = Path::new(common_dir);
+    let (resolved, resolved_dir) = resolved?;
+    (run_dir.is_some_and(|dir| Path::new(dir).join("worktree") == worktree)
+        && !common.starts_with(worktree)
+        && resolved == resolved_dir.join("worktree")
+        && !common.starts_with(&resolved))
+    .then_some(resolved)
+}
+
+/// What is left of a landed run's own worktree ([`own_worktree`]) once `git
+/// worktree remove` failed goes: its `.git` first, then the directory. A
+/// `.git` left would name an admin dir by a name the next worktree may
+/// take, and the supervisor's cleanup would find that one by it. What was
+/// done, for the failure's message.
+fn clear_left_worktree(files: &dyn RunFiles, worktree: &Path) -> String {
+    let gone = |result: std::io::Result<()>| match result {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    };
+    let dotgit = gone(files.remove_file(&worktree.join(".git")));
+    match (dotgit, gone(files.remove_dir_all(worktree))) {
+        (_, Ok(())) => "; its directory was removed".to_owned(),
+        (Ok(()), Err(dir)) => {
+            format!("; its .git was removed, and removing its directory failed: {dir}")
+        }
+        (Err(dotgit), Err(dir)) => {
+            format!("; and removing its .git ({dotgit}) and its directory ({dir}) failed")
+        }
     }
 }
 
@@ -3407,6 +3507,78 @@ mod tests {
     const BASE: &str = "1111111111111111111111111111111111111111";
     const HEAD: &str = "2222222222222222222222222222222222222222";
     const RUN: &str = "00000000-0000-4000-8000-000000000001";
+
+    /// The landing stops processes under and removes only the run's own
+    /// `<run dir>/worktree`, as recorded and as resolved: not one with no
+    /// run directory, elsewhere, holding the repository, replaced by a link
+    /// that resolves outside the run directory, or not resolved at all.
+    #[test]
+    fn only_the_runs_own_worktree_resolved_inside_its_run_dir_is_the_landings_to_clear() {
+        let dir = Some("/q/runs/r1");
+        let worktree = Path::new("/q/runs/r1/worktree");
+        let common = "/repo/.git";
+        let resolved =
+            |worktree: &str, dir: &str| Some((PathBuf::from(worktree), PathBuf::from(dir)));
+        // Its ancestors may resolve elsewhere (`/var` to `/private/var`).
+        assert_eq!(
+            own_worktree(
+                dir,
+                worktree,
+                common,
+                resolved("/private/q/runs/r1/worktree", "/private/q/runs/r1")
+            ),
+            Some(PathBuf::from("/private/q/runs/r1/worktree"))
+        );
+        assert_eq!(
+            own_worktree(
+                None,
+                worktree,
+                common,
+                resolved("/q/runs/r1/worktree", "/q/runs/r1")
+            ),
+            None
+        );
+        for elsewhere in [
+            "/q/runs/r2/worktree",
+            "/q/runs/r1",
+            "/q/runs/r1/worktree/sub",
+        ] {
+            assert_eq!(
+                own_worktree(
+                    dir,
+                    Path::new(elsewhere),
+                    common,
+                    resolved(elsewhere, "/q/runs/r1")
+                ),
+                None,
+                "{elsewhere}"
+            );
+        }
+        assert_eq!(
+            own_worktree(
+                dir,
+                worktree,
+                "/q/runs/r1/worktree/.git",
+                resolved("/q/runs/r1/worktree", "/q/runs/r1")
+            ),
+            None
+        );
+        // A link in its place, to the checkout or another run's worktree.
+        assert_eq!(
+            own_worktree(dir, worktree, common, resolved("/repo", "/q/runs/r1")),
+            None
+        );
+        assert_eq!(
+            own_worktree(
+                dir,
+                worktree,
+                common,
+                resolved("/q/runs/r2/worktree", "/q/runs/r1")
+            ),
+            None
+        );
+        assert_eq!(own_worktree(dir, worktree, common, None), None);
+    }
 
     #[test]
     fn a_command_timeout_can_be_identified_through_verification_context() {

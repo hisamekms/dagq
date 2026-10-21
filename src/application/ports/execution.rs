@@ -1947,6 +1947,13 @@ pub trait Repository: RepositoryReads {
     /// Remove the worktree and its branch; a branch already gone is not
     /// an error.
     fn remove_worktree_and_branch(&self, worktree: &Path, branch: &str) -> Result<()>;
+    /// The admin dir of this repository that `worktree`'s `.git` names by
+    /// its name, the one `git worktree repair` would point it at
+    /// ([`WorktreeAdmin`]); a repository that cannot tell reads it as
+    /// [`WorktreeAdmin::Unreadable`].
+    fn worktree_admin(&self, _worktree: &Path) -> Result<WorktreeAdmin> {
+        Ok(WorktreeAdmin::Unreadable)
+    }
     /// The local branches, by their short name (`dagq/<run-id>`).
     fn branches(&self) -> Result<Vec<String>>;
     /// Delete the local branch (`git branch -D`); one already gone is not
@@ -2145,6 +2152,21 @@ pub trait Repository: RepositoryReads {
 pub struct CloneFacts {
     pub head: CommitSha,
     pub state: crate::domain::run_clone::RunState,
+}
+
+/// The admin dir (`<common dir>/worktrees/<name>`) a worktree's `.git`
+/// names ([`Repository::worktree_admin`]). Git finds it by the name alone,
+/// so when the worktree lost its own and another worktree took the name,
+/// the one found is the other's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeAdmin {
+    /// The `.git` is no gitfile naming a `worktrees/<name>`.
+    Unreadable,
+    /// The repository has no admin dir by that name.
+    Missing,
+    /// The admin dir by that name: whether its `gitdir` points back at
+    /// this worktree's `.git`, and its `HEAD` as written.
+    Found { points_back: bool, head: String },
 }
 
 /// The size of a diff, as `git diff --numstat` counts it.

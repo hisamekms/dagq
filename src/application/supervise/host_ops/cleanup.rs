@@ -57,7 +57,10 @@
 
 use super::*;
 use crate::application::update::{self, UpdatePaths};
-use crate::application::{EndedRunWorktree, HostOpsQueue, RUN_TMP_DIR, WorktreeCleanup};
+use crate::application::worktree_processes::{WORKTREE_STOP_POLLS, stop_worktree_processes};
+use crate::application::{
+    EndedRunWorktree, HostOpsQueue, RUN_TMP_DIR, WorktreeAdmin, WorktreeCleanup,
+};
 use crate::domain::EventKind;
 use crate::domain::disk::{ProcessExecutable, worktree_executables};
 use crate::domain::recovery::{ProcessInfo, run_processes};
@@ -388,6 +391,7 @@ struct Removed {
     missing: bool,
     repaired: bool,
     broken_git: bool,
+    no_admin: bool,
 }
 
 /// The payload of `worktree_removed`: the reason is the task's status, and
@@ -412,6 +416,9 @@ fn worktree_record(
     }
     if removed.broken_git {
         payload["broken_git"] = json!(true);
+    }
+    if removed.no_admin {
+        payload["no_admin"] = json!(true);
     }
     if !stopped.is_empty() {
         payload["stopped_processes"] = json!(stopped);
@@ -699,7 +706,8 @@ enum Outcome {
     /// when `git worktree repair` had to point the worktree at the
     /// repository again first, `broken_git` when Git could not take it
     /// for a worktree and its directory was removed instead (task 1587,
-    /// [`may_remove_broken`]).
+    /// [`may_remove_broken`]), `no_admin` when its `.git` named an admin
+    /// dir not its own and only its directory was removed ([`owns_admin`]).
     Worktree {
         run_id: RunId,
         task_id: TaskId,
@@ -710,6 +718,7 @@ enum Outcome {
         missing: bool,
         repaired: bool,
         broken_git: bool,
+        no_admin: bool,
         /// What ran from under the worktree and was stopped before its
         /// removal (task 1590, [`stop_worktree_processes`]).
         stopped: Vec<Value>,
@@ -822,7 +831,9 @@ impl HostOpsState {
     ///   the queue's rebind, and `broken_git: true` when Git took it for
     ///   no worktree, its `.git` broken, so the run's own
     ///   `<runs>/<run-id>/worktree` directory was removed instead, task
-    ///   1587, and `stopped_processes` (`pid`, `executable`, `killed`)
+    ///   1587, `no_admin: true` when its `.git` named an admin dir that is
+    ///   another worktree's or none, so only that directory was removed
+    ///   and the other's admin dir and branch left, and `stopped_processes` (`pid`, `executable`, `killed`)
     ///   for what ran from under the run's own worktree and was stopped
     ///   before its removal, or `processes_unlisted` when the processes
     ///   could not be listed, task 1590). A worktree whose directory is already gone
@@ -1058,6 +1069,7 @@ impl HostOpsState {
                     missing,
                     repaired,
                     broken_git,
+                    no_admin,
                     stopped,
                     unlisted,
                 } => {
@@ -1070,6 +1082,7 @@ impl HostOpsState {
                             missing,
                             repaired,
                             broken_git,
+                            no_admin,
                         },
                         &stopped,
                         unlisted.as_deref(),
@@ -1081,6 +1094,9 @@ impl HostOpsState {
                     }
                     if broken_git {
                         info!(run_id = %run_id, "the worktree {path} of run {run_id} had a broken .git: removed its directory");
+                    }
+                    if no_admin {
+                        info!(run_id = %run_id, "the .git of the worktree {path} of run {run_id} named an admin dir not its own: removed its directory only");
                     }
                     if !stopped.is_empty() {
                         info!(run_id = %run_id, "stopped {} process(es) running from the worktree {path} of run {run_id} before its removal", stopped.len());
@@ -1586,6 +1602,7 @@ fn clean_worktree(
         missing,
         repaired: removal == Removal::Repaired,
         broken_git: removal == Removal::BrokenGit,
+        no_admin: removal == Removal::NoAdmin,
         stopped,
         unlisted,
     };
@@ -1711,58 +1728,6 @@ fn own_ended_worktree(candidate: &EndedRunWorktree, runs_dir: &Path, repo_root: 
         && !repo_root.starts_with(worktree)
 }
 
-/// How often [`stop_worktree_processes`] looks whether what it sent a
-/// SIGTERM ended, every [`WORKTREE_STOP_POLL`]: 3 seconds in all, the
-/// grace the recovery job's `stop_processes` gives. Counted rather than
-/// timed, so the wait reads no clock (L5).
-const WORKTREE_STOP_POLLS: u32 = 60;
-const WORKTREE_STOP_POLL: Duration = Duration::from_millis(50);
-
-/// Stop the processes whose executable is under `worktree`
-/// ([`worktree_executables`]: a test's child `dagq` left running, or what
-/// a worker's turn left with `&`), SIGTERM and then SIGKILL once `polls`
-/// looks ([`WORKTREE_STOP_POLLS`]) found one still running, so none writes
-/// into the worktree again once it is removed (task 1590). The processes are listed only here, once a
-/// worktree is about to go. Returns what was stopped: the pid, the
-/// executable, and whether it took a SIGKILL.
-fn stop_worktree_processes(
-    processes: &dyn ProcessControl,
-    worktree: &Path,
-    polls: u32,
-) -> Result<Vec<Value>> {
-    let all = processes.executables()?;
-    let targets = worktree_executables(&all, worktree, std::process::id());
-    if targets.is_empty() {
-        return Ok(Vec::new());
-    }
-    for process in &targets {
-        if let Err(error) = processes.terminate(process.pid)
-            && processes.alive(process.pid)
-        {
-            warn!(error = %format_args!("{error:#}"), "pid {} running from {} could not be stopped: {error:#}", process.pid, worktree.display());
-        }
-    }
-    for _ in 0..polls {
-        if !targets.iter().any(|p| processes.alive(p.pid)) {
-            break;
-        }
-        thread::sleep(WORKTREE_STOP_POLL);
-    }
-    Ok(targets
-        .into_iter()
-        .map(|process| {
-            let killed = processes.alive(process.pid);
-            if killed
-                && let Err(error) = processes.kill(process.pid)
-                && processes.alive(process.pid)
-            {
-                warn!(error = %format_args!("{error:#}"), "pid {} running from {} could not be killed: {error:#}", process.pid, worktree.display());
-            }
-            json!({"pid": process.pid, "executable": process.executable, "killed": killed})
-        })
-        .collect())
-}
-
 /// Clean one ended container run's clone (ADR-t2179-1 decision 7): once
 /// its task is over, the clone (removed as files, with no git run in it
 /// and no symlink followed), its landing worktree, the control side's run
@@ -1809,6 +1774,7 @@ fn clean_clone(
         missing,
         repaired: false,
         broken_git: false,
+        no_admin: false,
         stopped: Vec::new(),
         unlisted: None,
     }))
@@ -1824,15 +1790,24 @@ enum Removal {
     /// Git took it for no worktree, so its directory was removed
     /// ([`may_remove_broken`]).
     BrokenGit,
+    /// Its `.git` named an admin dir that is not its own ([`owns_admin`]),
+    /// so only its directory was removed.
+    NoAdmin,
 }
 
 /// Remove the worktree and its branch. When Git refuses (the worktree's
 /// `.git` points at a common directory the queue's rebind left behind),
 /// `git worktree repair` points it at the repository again and the removal
-/// is tried once more. When the repair finds the `.git` broken and
-/// [`may_remove_broken`] allows it (task 1587), the directory is removed,
-/// the worktrees whose directory is gone are pruned and the branch is
-/// deleted.
+/// is tried once more. The repair finds the admin dir by the name the
+/// `.git` gives, so first [`owns_admin`] tells whether that one is the
+/// worktree's own: when it is not (the worktree lost its own and another
+/// worktree took the name), neither the repair nor a removal by Git runs,
+/// which would move the other's admin dir here and remove it; the run's own
+/// directory is removed as one with no admin dir and the branch deleted,
+/// the other's admin dir and branch left as they are. When the repair finds
+/// the `.git` broken and [`may_remove_broken`] allows it (task 1587), the
+/// directory is removed, the worktrees whose directory is gone are pruned
+/// and the branch is deleted.
 fn remove_worktree(
     ports: &JobPorts,
     candidate: &EndedRunWorktree,
@@ -1844,6 +1819,31 @@ fn remove_worktree(
     let Err(error) = repository.remove_worktree_and_branch(worktree, branch) else {
         return Ok(Removal::Removed);
     };
+    let admin = repository
+        .worktree_admin(worktree)
+        .with_context(|| format!("{error:#}; and reading the admin dir its .git names failed"))?;
+    if !owns_admin(&admin, branch) {
+        if !own_ended_worktree(candidate, &ports.runs_dir, &ports.repo_root) {
+            bail!("{error:#}; its .git names an admin dir not its own ({admin:?}), so it is left");
+        }
+        match ports.files.remove_dir_all(worktree) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(failed) => {
+                return Err(anyhow::Error::new(failed).context(format!(
+                    "{error:#}; its .git names an admin dir not its own ({admin:?}), and removing {} failed",
+                    worktree.display()
+                )));
+            }
+        }
+        repository.delete_branch(branch).with_context(|| {
+            format!(
+                "removed {} as its .git names an admin dir not its own",
+                worktree.display()
+            )
+        })?;
+        return Ok(Removal::NoAdmin);
+    }
     if let Err(failed) = repository.repair_worktree(worktree) {
         let (removal, repair) = (format!("{error:#}"), format!("{failed:#}"));
         if !may_remove_broken(
@@ -1875,6 +1875,24 @@ fn remove_worktree(
         .remove_worktree_and_branch(worktree, branch)
         .with_context(|| format!("{error:#}; repaired, and removing it again failed"))?;
     Ok(Removal::Repaired)
+}
+
+/// Whether `admin`, the admin dir a worktree's `.git` names, is the
+/// worktree's own, which `git worktree repair` may point it at again: its
+/// `gitdir` points back at the worktree, or its `HEAD` is `branch`, the
+/// run's (a worktree the queue's rebind moved, its record still at the old
+/// path). One that is missing, points elsewhere and has another `HEAD` is
+/// another worktree's that took the name. A `.git` naming none is left to
+/// the repair, which cannot follow it to another's.
+fn owns_admin(admin: &WorktreeAdmin, branch: &str) -> bool {
+    match admin {
+        WorktreeAdmin::Unreadable => true,
+        WorktreeAdmin::Missing => false,
+        WorktreeAdmin::Found { points_back, head } => {
+            let own = format!("refs/heads/{}", branch.trim_start_matches("refs/heads/"));
+            *points_back || head.strip_prefix("ref: ").map(str::trim) == Some(own.as_str())
+        }
+    }
 }
 
 /// What `git worktree remove` says of a directory it takes for no
@@ -2735,6 +2753,7 @@ mod tests {
                 missing: true,
                 repaired: true,
                 broken_git: true,
+                no_admin: true,
             },
             &stopped,
             Some("ps failed"),
@@ -2743,6 +2762,7 @@ mod tests {
         assert_eq!(marked["worktree_missing"], true);
         assert_eq!(marked["repaired"], true);
         assert_eq!(marked["broken_git"], true);
+        assert_eq!(marked["no_admin"], true);
         assert_eq!(marked["stopped_processes"], json!(stopped));
         assert_eq!(marked["processes_unlisted"], "ps failed");
         for (removed, key) in [
@@ -2767,12 +2787,20 @@ mod tests {
                 },
                 "broken_git",
             ),
+            (
+                Removed {
+                    no_admin: true,
+                    ..Removed::default()
+                },
+                "no_admin",
+            ),
         ] {
             let payload = worktree_record(TaskStatus::Completed, "p", "b", 0, removed, &[], None);
             let marks: Vec<&str> = [
                 "worktree_missing",
                 "repaired",
                 "broken_git",
+                "no_admin",
                 "stopped_processes",
                 "processes_unlisted",
             ]
@@ -3509,6 +3537,34 @@ mod tests {
         assert!(!may_remove_broken(&over, runs, repo, unregistered, ""));
     }
 
+    /// The admin dir a worktree's `.git` names is its own, so the repair may
+    /// point it there again, when it points back at the worktree or holds
+    /// the run's branch (a rebind moved the worktree); missing, or another
+    /// worktree's that took the name, it is not. A `.git` naming none is
+    /// left to the repair.
+    #[test]
+    fn only_an_admin_dir_pointing_back_or_on_the_runs_branch_is_the_worktrees_own() {
+        let found = |points_back, head: &str| WorktreeAdmin::Found {
+            points_back,
+            head: head.to_owned(),
+        };
+        let branch = "dagq/r";
+        assert!(owns_admin(&found(true, "ref: refs/heads/other"), branch));
+        assert!(owns_admin(&found(false, "ref: refs/heads/dagq/r"), branch));
+        assert!(owns_admin(
+            &found(false, "ref: refs/heads/dagq/r"),
+            "refs/heads/dagq/r"
+        ));
+        assert!(owns_admin(&WorktreeAdmin::Unreadable, branch));
+        assert!(!owns_admin(&WorktreeAdmin::Missing, branch));
+        assert!(!owns_admin(&found(false, "ref: refs/heads/other"), branch));
+        assert!(!owns_admin(
+            &found(false, "ref: refs/heads/dagq/r2"),
+            branch
+        ));
+        assert!(!owns_admin(&found(false, &"a".repeat(40)), branch));
+    }
+
     /// Task 1590: only the run's own worktree of a task that is over has
     /// what runs from under it stopped; not a task that goes on, nor a
     /// worktree outside the runs directory, another run's, or one holding
@@ -3549,99 +3605,5 @@ mod tests {
             runs,
             Path::new("/runs/r/worktree/repo")
         ));
-    }
-
-    /// Processes listed with their executables, of which `stubborn` live
-    /// on through a SIGTERM; what was signalled is recorded.
-    #[derive(Default)]
-    struct Signalled {
-        listed: Vec<crate::domain::disk::ProcessExecutable>,
-        stubborn: Vec<u32>,
-        unlisted: bool,
-        alive: Mutex<Vec<u32>>,
-        calls: Mutex<Vec<String>>,
-    }
-
-    impl ProcessControl for Signalled {
-        fn alive(&self, pid: u32) -> bool {
-            self.alive.lock().unwrap().contains(&pid)
-        }
-        fn terminate(&self, pid: u32) -> Result<()> {
-            self.calls.lock().unwrap().push(format!("term {pid}"));
-            if !self.stubborn.contains(&pid) {
-                self.alive.lock().unwrap().retain(|alive| *alive != pid);
-            }
-            Ok(())
-        }
-        fn interrupt(&self, pid: u32) -> Result<()> {
-            self.calls.lock().unwrap().push(format!("int {pid}"));
-            Ok(())
-        }
-        fn kill(&self, pid: u32) -> Result<()> {
-            self.calls.lock().unwrap().push(format!("kill {pid}"));
-            self.alive.lock().unwrap().retain(|alive| *alive != pid);
-            Ok(())
-        }
-        fn executables(&self) -> Result<Vec<crate::domain::disk::ProcessExecutable>> {
-            self.calls.lock().unwrap().push("list".to_owned());
-            anyhow::ensure!(!self.unlisted, "ps failed");
-            Ok(self.listed.clone())
-        }
-    }
-
-    /// Task 1590: what runs from under the worktree gets a SIGTERM, and a
-    /// SIGKILL once the grace is over if it still runs; what runs from
-    /// elsewhere is not signalled, and each stopped one is recorded with
-    /// its executable. A listing that fails stops nothing.
-    #[test]
-    fn processes_running_from_the_worktree_are_terminated_then_killed() {
-        let process = |pid, executable: &str| crate::domain::disk::ProcessExecutable {
-            pid,
-            ppid: 1,
-            executable: Some(executable.to_owned()),
-        };
-        let control = Signalled {
-            listed: vec![
-                process(60, "/runs/r/worktree/target/llvm-cov-target/debug/dagq"),
-                process(61, "/runs/r/worktree/target/debug/dagq"),
-                // Started in the worktree, from elsewhere.
-                process(72, "/bin/sleep"),
-            ],
-            stubborn: vec![61],
-            alive: Mutex::new(vec![60, 61, 72]),
-            ..Signalled::default()
-        };
-        let stopped = stop_worktree_processes(&control, Path::new("/runs/r/worktree"), 0).unwrap();
-        assert_eq!(
-            stopped,
-            [
-                json!({"pid": 60, "executable": "/runs/r/worktree/target/llvm-cov-target/debug/dagq", "killed": false}),
-                json!({"pid": 61, "executable": "/runs/r/worktree/target/debug/dagq", "killed": true}),
-            ]
-        );
-        assert_eq!(
-            *control.calls.lock().unwrap(),
-            ["list", "term 60", "term 61", "kill 61"]
-        );
-        assert_eq!(*control.alive.lock().unwrap(), [72]);
-
-        // Nothing from under the worktree: nothing signalled.
-        let idle = Signalled {
-            listed: vec![process(72, "/bin/sleep")],
-            alive: Mutex::new(vec![72]),
-            ..Signalled::default()
-        };
-        assert!(
-            stop_worktree_processes(&idle, Path::new("/runs/r/worktree"), 0)
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(*idle.calls.lock().unwrap(), ["list"]);
-
-        let unlisted = Signalled {
-            unlisted: true,
-            ..Signalled::default()
-        };
-        assert!(stop_worktree_processes(&unlisted, Path::new("/runs/r/worktree"), 0).is_err());
     }
 }

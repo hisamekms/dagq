@@ -294,6 +294,16 @@ name = "runtime_cleanup::a_run_waiting_for_an_answer_is_a_candidate_unless_a_lea
 reason = "B 境界（守る境界）: SQLite, which runs a lease or a live session keeps out of the cleanup's candidates; its time is the review that leaves the run waiting for an answer"
 task = 1715
 
+[[test]]
+name = "runtime_cleanup::a_worktree_whose_admin_dir_name_another_took_goes_and_leaves_the_others"
+reason = "B 境界（守る境界）: Git's worktree admin dirs, one case: an ended run's worktree whose admin dir name another worktree took is removed without repairing onto or removing the other's; the ownership decision is a supervise::cleanup unit test, and the time is the run the fixture supervises"
+task = 2935
+
+[[test]]
+name = "runtime_cleanup::a_landing_whose_worktree_removal_fails_stops_its_processes_and_leaves_no_git"
+reason = "B 境界（守る境界）: processes and Git, one case: a landing stops what runs from under the run's worktree and leaves no .git when git worktree remove fails; the own-worktree decision is an application::integrate unit test, and the time is the awaiting run and its landing"
+task = 2935
+
 # 5.450s, class B
 [[test]]
 name = "runtime_client_mode::the_worker_and_its_resume_reach_the_queue_only_through_the_service"
