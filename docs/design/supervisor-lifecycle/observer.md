@@ -194,12 +194,11 @@ promptと打たせるコマンドと出力の形は変えず、Claudeのplugin�
 [ADR-0051](../../adr/0051-kpi-time-series-report-and-push.md)の決定24〜26（決定26はADR-t1971-1がamends）。
 observerはKPIの目標割れの継続を種類`kpi`のfindingにし、そこから作る改善のproposalは同時の数に上限がある。
 
-- **入力の`kpi`**（`OneShot::observer_kpi`、純粋関数と載せるものは`domain::kpi::observe`）: [`kpi`](commands.md)を直近の日と週の期間で`dagq kpi`と同じ設定とhostの負荷の記録で計算し（hostの負荷のKPIの目標も判定）、目標ごとの判定、目標割れごとのfindingの種類・subject・根拠のevent・印、期間ごとの傾向と見込みの答え合わせを載せる。
+- **入力の`kpi`**（`OneShot::observer_kpi`）: [`kpi`](commands.md)を直近の日と週の期間で`dagq kpi`と同じ設定とhostの負荷の記録で計算し（hostの負荷のKPIの目標も判定）、目標ごとの判定、目標割れごとのfindingの種類・subject・根拠のevent・印、期間ごとの傾向と見込みの答え合わせを載せる。
   数字は`kpi`の出力をそのまま引き、observerは作らない。
   読めなければ`{"error": ...}`にして他の入力で観察を続ける。
   目標割れの根拠は同じ期間・KPI・層の閉じていない`kpi_breach_started`のevent ID（`SqliteQueue::kpi_breach_events_open`）。
-- **入力の`improvements`**（`application::kpi::improvements`）: 動いている改善の数と上限、上限に達しているときにplannerを待つfinding。
-  `dagq findings`も同じものを`improvements`として返す。
+- **入力の`improvements`**（`application::kpi::improvements`）: 動いている改善の数と上限、上限に達しているときにplannerを待つfinding（`dagq findings`も同じ）。
 - **promptの読み方**（`observer::observer_prompt`）: `breaches`の各項を、その種類・subject・根拠のeventでqueueのfindingに記録し、目標割れの値は`kpi`の出力をそのまま写す。
   根拠が無い（まだ記録されていない）目標割れは次のobservationに回す。
   日と週の同じKPIと層、続いている目標割れは`subject`が同じなので1件のfindingにまとまり（ADR-0044の決定18）、新しいeventがあるときだけ記録し直す（決定21）。
@@ -207,7 +206,7 @@ observerはKPIの目標割れの継続を種類`kpi`のfindingにし、そこか
   `kpi`か`forecast`のfindingの目標が`ok`に戻ったら、戻った期間を理由に`finding resolve`する。
   影響と続いた期間から改善が要ると読めば`--propose`を付け、目標割れを`blocked`のaskにはしない。
   `trend`は印と並べて読み、入力に無い数字を計算しない。
-- **改善の上限**（数え方は[Finding planners](finding-planners.md)の3と11）: 動いている改善の数（人のproposalと`ci_failure`のものを除く）が`dagq.toml`の`[kpi]`の`max_improvement_proposals`に達しているあいだ、supervisorは印の付いた改善のfindingにplannerを立てない。
+- **改善の上限**（数え方は[Finding planners](finding-planners.md)の3・11と「CIの見張りの`ci_failure`のfinding」）: 動いている改善の数（人のproposalと、supervisorのCIの見張りが記録した`ci_failure`のものを除く）が`dagq.toml`の`[kpi]`の`max_improvement_proposals`に達しているあいだ、supervisorは印の付いた改善のfindingにplannerを立てない。
   findingは`open`のまま待ち、1つ終われば印の古い順に立つ。
 - **優先度**: 改善のproposalのtaskは個別の優先度を持たずgoalから継ぎ、`normal`以下はgoalと所属で守る（[Finding planners](finding-planners.md)の6）。
 
