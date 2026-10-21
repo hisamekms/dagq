@@ -176,9 +176,12 @@ holdの開いたtaskの`needs_session`のrunはresumeせず、使い切ったres
 再開の候補の列から外して`hold_deferred`に残し、resumeの開始・skip・使い切りの確定の中でもholdを確かめ直す。
 slotで工程が走っていたrunは、その工程の終わりで再計画と同じ保留を通って`needs_session`（`hold_parked`）になり、sessionとworktreeを残す（[非対話のworker](headless-worker.md#再計画の保留)）。
 保留の時にturnが始まっていなかった回答は、同じrunをresumeする解除（`task_hold::release_decision`が`Resume`を返すもの）に限り解除の後のresumeの依頼に載せ、保留より前の承認とreviewのpassは、そのresumeの後の着地に使わない。
-runを終えて新しいrunを始める解除（`release_decision`が`RetryInherit`・`RetryFresh`を返すもの。分け方は下のrunを終える解除の段落）では、届いていない答えは終えたrunに残り、新しいrunの依頼には載らない。
+runを終えて新しいrunを始める解除（`release_decision`が`RetryInherit`・`RetryFresh`を返すもの。分け方は下の`task_hold::ends_run`の段落）では、届いていない答えは終えたrunに残り、新しいrunの依頼には載らない。
 同じproviderで続く解除は印を外すだけで、次のpassが今のresumeの経路（`begin_resume`。大きなcontextからの新しいsessionの判定もそこで効く）で続ける。
-providerを変える解除、sessionの無いrun（providerが会話を見つけないと言った後に、答えたturnも名指したsessionも途中で切れたturnも無い。wrapperの起動だけでは無いまま）、残した結果の無い止まったrunの解除は、runを終えてtaskをreadyに戻し、次のrunが、runのbranchにあるworktree（containerのrunは最後のturnの終わりの記録）の今のheadを検証済みのcommitに依らずに（worktreeが無ければ検証済みのcommitを）、commitに保存した未commitの差分とともに引き継ぐ（`task_hold::release_decision`、記録は`task_released`の`decision`と手での`retry_inherit`）。
+runを終える解除は2つに分かれる（`task_hold::ends_run`）。
+止まっていない待ちのrun（`needs_session`など）は、別のproviderを指定した解除か、sessionの無いrun（providerが会話を見つけないと言った後に、答えたturnも名指したsessionも途中で切れたturnも無い。wrapperの起動だけでは無いまま）の解除で終わり、sessionの無いことでrunを終えるのはこの場合に限る。
+止まった（`failed`・`interrupted`）runは、providerかmodelを指定した解除（modelだけでも）か、残した結果の無いrunの解除で終わり、残した結果がありproviderもmodelも指定しない解除はsessionの有無にかかわらずrunを終えずに残した結果を適用して進む。
+runを終える解除は、runを終えてtaskをreadyに戻し、次のrunが、runのbranchにあるworktree（containerのrunは最後のturnの終わりの記録）の今のheadを検証済みのcommitに依らずに（worktreeが無ければ検証済みのcommitを）、commitに保存した未commitの差分とともに引き継ぐ（`task_hold::release_decision`、記録は`task_released`の`decision`と手での`retry_inherit`）。
 引き継ぐものが無ければ次のrunは今のmainから始め、それより前のrunの引き継ぎも辿らない（`resume::inherited_from`）。
 未commitの差分を保存できないとき（containerのrunはcloneでgitを走らせないので、executorの記録が最後に始めたturnの終わりのものでないか、未commitの差分・途中のrebase・bundleと食い違うheadを示すとき）と、worktreeのHEADがrunのbranchに無いときと、引き継ぐheadを`refs/dagq/runs/<run-id>`に残せないときは、解除を拒んでhold・run・taskを変えない（refは確定の直前に書く）。
 成果は確定の外で読むので、確定の中で読んだ時の開いたholdとrunの進行の版（`task_hold::ProgressVersion`）を照らし、食い違えば（間に別の解除・resume・holdが入った）同じく拒む（`release_read_moved`）。
