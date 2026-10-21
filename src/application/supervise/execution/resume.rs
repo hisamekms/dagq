@@ -105,7 +105,7 @@ impl Supervisor<'_> {
                     }
                 }
                 if let Err(error) = self.exhaust_resumes(run, candidate.resumes) {
-                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: its used-up resumes could not be handed to a person: {error:#}", run.id());
+                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: its used-up resumes could not be handed on to a retry with its branch carried over or to its recovery job (resume_exhausted): {error:#}", run.id());
                 }
                 continue;
             }
