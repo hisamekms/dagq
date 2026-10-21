@@ -29,7 +29,7 @@ The output's `state` is `settling` while what was going still goes, and `held` o
 | --- | --- | --- |
 | `ready` or `submitted` | Not claimed | At once |
 | A run's turn, validation, review or e2e goes | Let it finish (never cut short), then start no next step; the run waits with its session and worktree kept, out of its slot | When that step ended |
-| A run waits for a person's answer | The answer is kept, not delivered; after the release it goes with the resume | When its session process ended |
+| A run waits for a person's answer | The answer is kept, not delivered; it goes with the resume only when the release resumes the same run (`continue` (`resume`), below). A release that ends the run and starts a new one (`new_run`) leaves the answer with the ended run, and the next run does not get it | When its session process ended |
 | A run waits to land (`awaiting_integration`) | Not landed | At once |
 | A run is landing (`integrating`) | The landing goes on; if it lands, the task completes | When the landing parks or waits again |
 | A run stopped (`failed`, `interrupted`) | No recovery job starts; a job already going finishes, and its verdict or answer is kept, not applied | When no job goes |
