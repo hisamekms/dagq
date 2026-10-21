@@ -1,13 +1,31 @@
 //! The reason a task's cancel records (ADR-t947-4): the code the actor who
 //! cancels gives, the one the runtime gives on its own paths, and the one
-//! read off a cancel recorded before reasons were kept. The codes and what
-//! each means are docs/design/domain-model.md's "cancelの理由の分類コード"; a
-//! code not among them is recorded and read as it is (ADR-t876-1 decision 3).
+//! read off a cancel recorded before reasons were kept. A code not among
+//! the ones below is recorded and read as it is (ADR-t876-1 decision 3),
+//! and adding or removing one needs no ADR. The codes, chosen by where the
+//! task's content is now:
+//!
+//! - `duplicate`, `already_done`, `absorbed`, `re_registered`: another task
+//!   holds it, and `--duplicate-of` names that task (the constants below).
+//! - `superseded`: a decision or policy it rested on changed and it is no
+//!   longer needed; `--note` names the decision, and `--duplicate-of` the
+//!   successor if any.
+//! - `not_worth`: its content is right but not worth its change and checks.
+//! - `decision_moot`: a task that asks for a decision whose answer is
+//!   already out, or that is no longer to be decided.
+//! - `not_repo_work`: not a change to the repository, but work a person or
+//!   the inbox does on the host or outside, or only an observation.
+//! - `stale`: its premise (a role, file or command) is gone, with no
+//!   successor.
+//! - `other`: none of these; `--note` says why.
+//! - `answered_cancel`: the runtime applied an ask's `cancel` answer; no
+//!   actor gives it.
 //!
 //! A cancel's `task_status_changed` carries `reason`, and `duplicate_of`
 //! (the task that holds its content), `note`, and on the runtime's paths
 //! `by` with the `proposal_id` or `ask_id` it applied, when it has them. Who
-//! canceled is the event's actor.
+//! canceled is the event's actor. A goal's `abandoned` close cancels none of
+//! its tasks, so it gives no reason.
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -37,9 +55,12 @@ const NEEDS_TARGET: [&str; 4] = [DUPLICATE, ALREADY_DONE, ABSORBED, RE_REGISTERE
 /// The runtime's path that applies a cancel itself (ADR-t947-4 decision 3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CancelPath {
-    /// A plan review's `cancel_duplicate` action on this proposal.
+    /// A plan review's `cancel_duplicate` action on this proposal: the
+    /// reason comes from the named task's status, as for `--duplicate-of`.
     PlanReview(ProposalId),
-    /// The `cancel` answer to `ask`, an ask of kind `by`.
+    /// The `cancel` answer to `ask`, an ask of kind `by` (`approve_plan`,
+    /// `approve_landing`, `decide` or `approve_close`): it records
+    /// [`ANSWERED_CANCEL`] with the ask.
     Answer { by: AskKind, ask: AskId },
 }
 
@@ -214,8 +235,9 @@ impl Recorded {
 
 /// Whether a cancel of recorded `reason` (none for one recorded before
 /// reasons) that names a task pairs it as a duplicate (ADR-t947-4
-/// decision 2): what `related`, `search` and `stats`' `duplicate_cancels`
-/// read. `absorbed`, `re_registered` and the other codes do not.
+/// decision 2): what `related`, `search`, `stats`' `duplicate_cancels`,
+/// `kpi` and a runtime planner's bundle outcome read. `absorbed`,
+/// `re_registered` and the other codes do not.
 pub fn pairs_as_duplicate(reason: Option<&str>) -> bool {
     matches!(reason, None | Some(DUPLICATE | ALREADY_DONE))
 }

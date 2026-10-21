@@ -357,15 +357,17 @@ enum Command {
         /// Why it is dropped, chosen by where its content is now: duplicate, already_done,
         /// absorbed or re_registered (each with --duplicate-of), superseded, not_worth,
         /// decision_moot, not_repo_work, stale, or other (with --note). Needed unless
-        /// --duplicate-of alone says it; a code not listed is recorded as it is, but answered_cancel
-        /// and unrecorded are the runtime's.
+        /// --duplicate-of alone says it; a code not listed is recorded as it is. answered_cancel is
+        /// the runtime's, and unrecorded (how statistics count a cancel without a reason) is never
+        /// recorded.
         #[arg(long)]
         reason: Option<String>,
         // ADR-0046.
         /// The task that holds its content: another task that exists and is not canceled.
         /// Alone, it records `duplicate`, or `already_done` when that task is completed; only
-        /// those two make the pair a duplicate for `related`, `search` and `stats`. `show` and
-        /// `list` report it with the reason.
+        /// those two make the pair a duplicate for `related`, `search`, `stats` and `kpi`. `show` and
+        /// `list` report it with the reason, and `show` of that task lists the tasks naming it
+        /// with their reasons.
         #[arg(long = "duplicate-of")]
         duplicate_of: Option<i64>,
         /// A few words on why, recorded with the reason; needed with --reason other.

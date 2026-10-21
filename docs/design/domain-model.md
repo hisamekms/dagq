@@ -124,6 +124,7 @@ pathは`src/domain/`から。
 | claimと候補 | `task::claim`、`infrastructure::sqlite`の`READY_QUERY`、buildを待つclaimは`domain::build_wait`、読む口は`application::claim_view`（ADR-t1992-1） |
 | goalのclose・開き直し・依存 | `goal::close`、`goal::check_follow_ups`、`goal::reopen`、`goal::check_accepts_dependents`、acceptanceの版は`GoalDetail` |
 | goal review | [Goal review](supervisor-lifecycle/goal-review.md) |
+| cancelの理由の分類コード | `domain::cancel_reason`、`dagq cancel --help`（[ADR-t947-4](../adr/2026-09-28-t947-4-cancel-carries-a-reason-code.md)） |
 | 取り残された依存 | `goal::StrandedDependency`、`infrastructure::stranded` |
 | taskのhold | `domain::task_hold`（予定は[taskのhold](../plans/task-hold.md)） |
 | attentionと表示 | `domain::AttentionNext`、`src/view.rs` |
@@ -133,34 +134,6 @@ pathは`src/domain/`から。
 ## 集約: TaskとGoal
 
 follow_upの深さは集約でなくstoreの列（`DraftPlannerStore::follow_up_depth`）。
-
-## cancelの理由の分類コード<a id="cancelの理由の分類コード未実装"></a>
-
-[ADR-t947-4](../adr/2026-09-28-t947-4-cancel-carries-a-reason-code.md)の決定。
-cancelは理由を`task_status_changed`に記録し、誰がcancelしたかはそのeventのactorが持つ。
-一覧と定義はこの節が持ち（ADR-t947-4決定5、分析は[cancel-reasons](../plans/cancel-reasons.md#ラベルの定義案)）、判断の入口は`domain::cancel_reason`。
-
-- `dagq cancel TASK --reason <code> [--duplicate-of X] [--note <text>]`で、`--reason`か`--duplicate-of`のどちらかを必須にし、表で「X必須」のコードは`--duplicate-of`を、`other`は`--note`を必須にする。
-- `--duplicate-of`だけのcancelは、runtimeがXの状態から`duplicate`（開いている）か`already_done`（`completed`）を補う。
-- 一覧に無い値は拒まずに記録し（集計が理由の無いcancelを数える`unrecorded`だけは記録しない）、重複の組として読む（`related`・`search`・`stats`・`kpi`、runtimeのplannerの束の結末）のは`duplicate`と`already_done`だけ。
-- `show`と`list`は理由とともにXを出し、`show X`はXを指すcanceledのtaskにそれぞれの理由を添える。
-- runtimeが適用するcancelは経路から理由を付ける: plan reviewの`cancel_duplicate`はXの状態から補ってproposalのIDを、askの`cancel`の答え（`approve_plan`・`approve_landing`・`decide`・`approve_close`）は`answered_cancel`とaskのIDを記録する。
-- goalの`abandoned`のcloseは所属のtaskをcancelしないので、理由は生じない。
-- 理由の無い過去のcancelは書き換えず、`duplicate_of`があればcancelの時点のXの状態で上の規則で補い、無ければ集計は`unrecorded`と数える。
-
-| コード | 定義（Xは`--duplicate-of`の相手） |
-| --- | --- |
-| `duplicate` | 同じ中身の開いたtaskがある（X必須: そのtask） |
-| `already_done` | 中身は着地したtaskかmainで既に満たされている（X必須: 着地したtask） |
-| `absorbed` | 中身を別のtaskに移して閉じる（X必須: 移した先） |
-| `re_registered` | 同じ意図を新しいIDで登録し直した（X必須: 新しいtask） |
-| `superseded` | 前提の決定や方針が変わり要らなくなった（決定を`--note`に書き、後継があればX） |
-| `not_worth` | 中身は正しいが、変更と検証の費用に見合わない |
-| `decision_moot` | 判断を求めるtaskで、答えが既に出たか、判断しないことにした |
-| `not_repo_work` | repositoryの変更でなく、人かinboxがhostや外で行う作業か観察だけ |
-| `stale` | 前提（役割・ファイル・コマンド）が消え、後継の決定も無い |
-| `answered_cancel` | runtimeがaskの`cancel`の答えを適用した（人とplannerは選ばない） |
-| `other` | どれにも当たらない（`--note`で説明する） |
 
 ## 集約: TaskRun
 

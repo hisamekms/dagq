@@ -159,7 +159,7 @@ draftに再検討の時刻を1つ持たせ、時刻が来たらruntimeのplanner
 
 - **plannerへの材料**: 2の対象のdraftをplannerに渡すとき、出どころの材料の種類（[follow_upsの分類コード](headless-worker.md#follow_upsの分類コード)）とその定義を、promptのdraftごとの節に載せる（一覧に無い値と`unlabeled`はその旨を添える。`follow_up_category_line`）。
 - **判断との突き合わせ**: 8の束のdraftごとの結末と、plannerがそのdraftについて開いた`planner_question`とその答えを、draftの種類で並べる。
-  不採用（`canceled`）の理由は[cancelの理由の分類コード](../domain-model.md#cancelの理由の分類コード未実装)（ADR-t947-4）で読む。
+  不採用（`canceled`）の理由はcancelの理由の分類コード（`domain::cancel_reason`、ADR-t947-4）で読む。
 - **集計**: [Stats](commands.md)の`follow_up_categories`。
 
 ## 推奨が出せればplannerが決める（ADR-t451-1）<a id="推奨が出せればplannerが決める未実装"></a>
