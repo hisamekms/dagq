@@ -1,0 +1,52 @@
+{
+ "u20": {
+  "rounds": 3,
+  "wall_secs": [
+   42.635,
+   43.968,
+   47.205
+  ],
+  "tests": 177,
+  "secs_per_test_median": 4.31,
+  "secs_per_test_p90": 6.496,
+  "modules": {
+   "runtime_handoff": {
+    "median": 3.767,
+    "p90": 5.562
+   },
+   "runtime_recheck": {
+    "median": 4.141,
+    "p90": 6.506
+   },
+   "runtime_resume": {
+    "median": 4.703,
+    "p90": 7.198
+   }
+  }
+ },
+ "bg4": {
+  "rounds": 3,
+  "wall_secs": [
+   156.718,
+   158.008,
+   156.72
+  ],
+  "tests": 177,
+  "secs_per_test_median": 15.484,
+  "secs_per_test_p90": 21.678,
+  "modules": {
+   "runtime_handoff": {
+    "median": 11.195,
+    "p90": 20.207
+   },
+   "runtime_recheck": {
+    "median": 15.53,
+    "p90": 23.217
+   },
+   "runtime_resume": {
+    "median": 16.57,
+    "p90": 22.854
+   }
+  }
+ }
+}
