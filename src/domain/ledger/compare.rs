@@ -5,7 +5,8 @@
 //! reasons it falls under ([`run`], [`fields`], [`host`]), and the ledger
 //! against its inputs: what ended in a window, the rows it has of it, and
 //! whether each row is folded up to what its inputs reach now
-//! ([`reconcile`]). Stage 3 makes today's values of the ledger and drops
+//! ([`reconcile`]), and the sums of the run and task rows it takes values
+//! of ([`totals`]). Stage 3 makes today's values of the ledger and drops
 //! this read.
 //!
 //! The ledger's values are those of [`read`]: `wait_to_land` up to
@@ -770,6 +771,8 @@ pub fn reconcile(
         rows,
     }
 }
+
+pub mod totals;
 
 #[cfg(test)]
 mod tests;

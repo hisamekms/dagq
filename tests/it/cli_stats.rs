@@ -173,6 +173,15 @@ mod stats {
         assert_eq!(ledger["host"].as_array().unwrap().len(), 8);
         assert_eq!(ledger["runs"], json!([]));
         assert_eq!(ledger["reconcile"]["kinds"].as_array().unwrap().len(), 5);
+        // No run or task row to sum: every tag listed at zero.
+        let runs = &ledger["totals"]["run"];
+        assert_eq!(runs["rows"], 0, "{ledger}");
+        assert_eq!(runs["unattributed_ratio"], json!(null));
+        assert_eq!(runs["by_blocker"].as_object().unwrap().len(), 7);
+        assert_eq!(
+            ledger["totals"]["task"]["by_holds"]["none"]["duration_secs"],
+            0.0
+        );
         assert!(
             ledger["fields"]
                 .as_array()

@@ -19,6 +19,7 @@ use crate::domain::host_metrics::{
 use crate::domain::kpi::{DAY_MS, Period, cursor_ms};
 use crate::domain::ledger::compare::{
     self, FieldComparison, HostComparison, RUNLESS_FIELDS, Reconciliation, RunComparison,
+    totals::LedgerTotals,
 };
 use crate::domain::ledger::window::{WindowQuery, select};
 use crate::domain::ledger::{LedgerKind, LedgerRow, build, node};
@@ -40,6 +41,9 @@ pub struct LedgerCheck {
     /// The host's load over `stats`' window and over each of `kpi`'s days.
     pub host: Vec<HostComparison>,
     pub reconcile: Reconciliation,
+    /// The sums of the run and task rows `reconcile` finds settled and up
+    /// to date ([`compare::totals::totals`]).
+    pub totals: LedgerTotals,
 }
 
 /// `stats --ledger` of `queue` at `now` (unix seconds) for `query`, the
@@ -152,6 +156,7 @@ pub fn ledger_check(
         runs,
         fields,
         host,
+        totals: compare::totals::totals(&reconcile, &rows),
         reconcile,
     })
 }
