@@ -17,7 +17,8 @@ Read this to make a task wait while something in the way of its run is removed (
 
 - `--reason` is required and is what `status` and the reminder show: write why the task waits and what ends the wait.
 - `--until` only reminds: nothing releases a hold by itself. Without it the person is reminded a day after the hold.
-- The task keeps its status (`ready` stays `ready`, `in_progress` stays `in_progress`) and plan review's pass. `edit`, `set-priority`, `draft` and `cancel` keep their own rules and do not lift the hold; a task that ends (`completed`, `canceled`) leaves its hold without effect.
+- The task keeps its status (`ready` stays `ready`, `in_progress` stays `in_progress`) and plan review's pass. `edit`, `set-priority` and `draft` keep their own rules and do not lift the hold.
+- A task that ends (`completed`, or `canceled` by `cancel`, plan review or a `cancel` answer to an ask) closes its hold in the same transaction (`task_hold_ended`, reason `completed` or `canceled`). Every recovery job's verdict, and every answer to a recovery job's ask, that the hold kept is discarded (`hold_result_discarded`), the answered ask closed with it, and a task opened again later does not carry the old hold.
 - One open hold per task: a second `hold` is refused. To change the reason or `--until`, release it and hold it again; between the two the task may go on (a claim, a resume or a new run), so only do it on the person's word.
 - A `ready`, `submitted` or `in_progress` task can be held; a `draft` or finished one is refused.
 
