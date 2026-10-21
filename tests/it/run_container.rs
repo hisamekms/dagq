@@ -38,12 +38,18 @@ const QUEUE: &str = "bbbbbbbbbbbbbbbb";
 /// `--rm`), and runs the container's command on the host as the container
 /// would: in `--workdir`, with the `--env` variables, and `dagq` and
 /// `claude` found in `state/bin`. Its `rm` removes the container named
-/// last; its volumes are files of `state/volumes`.
+/// last; its volumes are files of `state/volumes`. Under coverage it also
+/// gives the command the test's `LLVM_PROFILE_FILE`, which the runtime
+/// keeps out of the container's env: else the instrumented `dagq` writes
+/// its profile into the run's clone and the clone is not clean to land.
 fn fake_podman(state: &Path) -> PathBuf {
     for dir in ["containers", "volumes", "bin"] {
         fs::create_dir_all(state.join(dir)).unwrap();
     }
     let s = shell_path(state);
+    let profile = std::env::var("LLVM_PROFILE_FILE")
+        .map(|file| format!("export LLVM_PROFILE_FILE={}", shell_path(file)))
+        .unwrap_or_default();
     let script = format!(
         r#"#!/bin/sh
 S={s}
@@ -76,6 +82,7 @@ run)
   shift
   touch "$S/containers/$name"
   cd "$workdir" || exit 125
+  {profile}
   PATH="$S/bin:$PATH" "$@"
   code=$?
   [ -n "$keep" ] || rm -f "$S/containers/$name"
