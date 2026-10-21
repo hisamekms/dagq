@@ -19,6 +19,9 @@ related:
 **全体のreviewの`builtin:acceptance`とbuilt-inのagent（security・tests）は実装済みで[Review](review.md)の今の節が、built-inのprogram（secrets）は実装済みで[プログラムのreview](review-programs.md)の今の節が持つ。**
 **pjの規則のfileと設定の生成は実装済みで[setup-review](setup-review.md)が持つ。**
 **built-inのagent（security・tests）のevalは実装済みで[Agent eval](../agent-eval.md)が持つ。**
+**文書の照合は実装済みで[Review](review.md#文書の照合)の今の節が持つ。**
+変えた挙動に対する文書の古さ・欠けの照合は全体のreview（`builtin:acceptance`）だけが持ち、`builtin:docs`は同梱しない。
+コードの書き写しと経緯の指摘はruntimeに置かず、pjの規則のfile（このrepositoryでは`.dagq/review/builtin-acceptance.md`）が持つ。
 残りは決定済みの予定で、まだ実装していない。
 決定は[ADR-t2259-1](../../adr/2026-10-12-t2259-1-builtin-review-agents-and-programs-configured-by-builtin-names.md)と、それを直した[ADR-t2389-1](../../adr/2026-10-12-t2389-1-docs-check-only-in-the-overall-review.md)が持つ。
 未実装の部分の今の挙動は[Review](review.md)と[プログラムのreview](review-programs.md)の今の節のとおりである。
@@ -31,11 +34,3 @@ related:
 - 全体のreviewのjobはbuilt-inのacceptanceになり、常に走る（実装済み）。
   無効にできず、範囲とproviderも設定できない（全ての差分で走り、providerは`[roles.review]`が決める）。
 - pjが中身を変えたいときはbuilt-inを無効にして自分のagentかprogramを作り、同じ名前で上書きしない。
-
-## 今の節と食い違う境界
-
-決定済みで、実装の着地まで今の節が正しい境界。
-
-- **文書の照合**: 今は全体のreviewのpromptの`REVIEW_DOCS_CHECK`が、変えた挙動に対する文書の照合と、差し戻す指摘と`follow_ups`への振り分けを持つ（[Review](review.md#文書の照合)）。
-  決定後も変えた挙動に対する文書の古さ・欠けの照合は全体のreview（`builtin:acceptance`）だけが持ち、`builtin:docs`は同梱しない（[ADR-t2389-1](../../adr/2026-10-12-t2389-1-docs-check-only-in-the-overall-review.md)）。
-  コードの書き写しと経緯の指摘はruntimeに置かず、pjの規則（このrepositoryでは`.dagq/review/builtin-acceptance.md`）が持つ。
