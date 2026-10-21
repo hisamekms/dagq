@@ -273,7 +273,14 @@ impl crate::application::commands::replans::ReplanStore for SqliteQueue {
 
 /// Move operation `id`, read under `generation`, as `step` says, on
 /// `conn` inside the caller's transaction ([`SqliteQueue::move_replan`]):
-/// `replan_status_changed` is written with it.
+/// `replan_status_changed` is written with it. A move that closes the
+/// operation before it holds a snapshot (`continuing`, or `withdrawn` and
+/// `continuing_after_park` out of a `blocked` one that never parked)
+/// declines its still `open` planning request with the outcome as the
+/// reason ([`super::plan_requests::decline_unplanned`]), and the event
+/// names it (`request_declined`). `blocked` is not an end: one that goes
+/// back to the snapshot keeps its request for the planner. A move of an
+/// operation that holds a snapshot leaves its request as it is.
 pub(crate) fn move_in(
     conn: &Connection,
     id: ReplanId,
@@ -335,14 +342,29 @@ pub(crate) fn move_in(
             generation,
         ],
     )?;
+    let declined = match op.request_id {
+        Some(request)
+            if step
+                .to
+                .ends_request_unplanned(op.snapshot_id.is_some() || step.snapshot_id.is_some()) =>
+        {
+            super::plan_requests::decline_unplanned(conn, request, id, step.to, &step.reason, now)?
+                .then_some(request)
+        }
+        _ => None,
+    };
+    let mut payload = json!({"operation_id": id, "from": op.status, "to": step.to,
+                             "reason": step.reason, "generation": next,
+                             "snapshot_id": step.snapshot_id});
+    if let Some(request) = declined {
+        payload["request_declined"] = json!(request);
+    }
     event(
         conn,
         op.task_id,
         Some(&op.run_id),
         EventKind::ReplanStatusChanged,
-        json!({"operation_id": id, "from": op.status, "to": step.to,
-               "reason": step.reason, "generation": next,
-               "snapshot_id": step.snapshot_id}),
+        payload,
     )?;
     read_operation(conn, id)
 }
@@ -565,6 +587,18 @@ fn with_outcome(conn: &Connection, mut op: ReplanOperation) -> Result<ReplanOper
         )?
         .query_map([op.id], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
+    op.request_status = op
+        .request_id
+        .map(|request| {
+            conn.query_row(
+                "SELECT status FROM plan_requests WHERE id=?1",
+                [request],
+                |r| enum_col(r, "status"),
+            )
+            .optional()
+        })
+        .transpose()?
+        .flatten();
     ensure!(
         op.replaced_by.is_empty() || op.status == ReplanStatus::Applied,
         "replan operation {} names replacements but is {}",
@@ -603,6 +637,7 @@ fn operation_row(r: &Row<'_>) -> rusqlite::Result<ReplanOperation> {
         diagnosis: json_col(r, "diagnosis")?,
         snapshot_id: r.get("snapshot_id")?,
         request_id: r.get("request_id")?,
+        request_status: None,
         proposal_id: r.get("proposal_id")?,
         requested_by: r.get("requested_by")?,
         requested_by_id: r.get("requested_by_id")?,

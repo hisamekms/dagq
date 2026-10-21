@@ -22,6 +22,7 @@ use super::{
     DomainError, EventId, GoalId, ProposalId, ReplanId, RequestId, RunId, RunStatus, TaskId,
     TaskStatus,
     error::require,
+    plan_request::RequestStatus,
     task_hold::{self, HoldGuard},
 };
 
@@ -114,6 +115,17 @@ impl ReplanStatus {
                 | Self::Applying
                 | Self::Applied
         )
+    }
+
+    /// Whether a move to this status of an operation that holds no
+    /// snapshot (`snapshot` false, nor gets one with the move) ends its
+    /// planning request unplanned, to be declined in the same transaction:
+    /// its planner is opened only once the snapshot is held, so the
+    /// request of an operation closed before then would stay `open` with
+    /// nobody to open a planner for it or end it. `blocked` is not an end:
+    /// it may still go on to the snapshot, and the request waits for it.
+    pub const fn ends_request_unplanned(self, snapshot: bool) -> bool {
+        self.is_closed() && !snapshot
     }
 
     /// Whether an operation in this status, closed, is moved again: a
@@ -458,6 +470,11 @@ pub struct ReplanOperation {
     pub diagnosis: Diagnosis,
     pub snapshot_id: Option<String>,
     pub request_id: Option<RequestId>,
+    /// Where `request_id` is now, read with the operation: `declined`, with
+    /// the operation's outcome as its reason, when the operation ended
+    /// before its snapshot ([`ReplanStatus::ends_request_unplanned`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_status: Option<RequestStatus>,
     pub proposal_id: Option<ProposalId>,
     pub requested_by: String,
     pub requested_by_id: String,
@@ -597,6 +614,7 @@ mod tests {
             diagnosis: Diagnosis::default(),
             snapshot_id: None,
             request_id: None,
+            request_status: None,
             proposal_id: None,
             requested_by: "user".into(),
             requested_by_id: "user".into(),
@@ -650,6 +668,46 @@ mod tests {
                 assert_eq!(status.next(), [ReplanStatus::Blocked]);
             }
         }
+    }
+
+    #[test]
+    fn only_an_end_before_the_snapshot_leaves_the_request_unplanned() {
+        let unplanned: Vec<_> = ReplanStatus::ALL
+            .into_iter()
+            .filter(|status| status.ends_request_unplanned(false))
+            .map(ReplanStatus::as_str)
+            .collect();
+        assert_eq!(
+            unplanned,
+            [
+                "continuing",
+                "applied",
+                "continuing_after_park",
+                "withdrawn"
+            ]
+        );
+        // Every status before the snapshot the operation may end from
+        // reaches one of them, `blocked` included, which is no end itself.
+        for from in [
+            ReplanStatus::Candidate,
+            ReplanStatus::Diagnosing,
+            ReplanStatus::PauseRequested,
+            ReplanStatus::Quiescing,
+            ReplanStatus::Snapshotting,
+            ReplanStatus::Blocked,
+        ] {
+            assert!(
+                from.next()
+                    .iter()
+                    .any(|to| to.ends_request_unplanned(false)),
+                "{from:?}"
+            );
+        }
+        assert!(
+            ReplanStatus::ALL
+                .into_iter()
+                .all(|status| !status.ends_request_unplanned(true))
+        );
     }
 
     #[test]

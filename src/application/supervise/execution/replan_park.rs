@@ -1971,6 +1971,7 @@ mod tests {
             diagnosis: Default::default(),
             snapshot_id: None,
             request_id: None,
+            request_status: None,
             proposal_id: None,
             requested_by: "supervisor".into(),
             requested_by_id: "supervisor".into(),

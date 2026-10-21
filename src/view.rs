@@ -177,6 +177,7 @@ fn replans(detail: &TaskDetail) -> Vec<Value> {
                     "diagnosis",
                     "snapshot_id",
                     "request_id",
+                    "request_status",
                     "proposal_id",
                     "replaced_by",
                     "closed_at",

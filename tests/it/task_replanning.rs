@@ -763,3 +763,163 @@ fn two_supervisors_restore_a_parked_run_one_at_a_time_and_a_loser_writes_nothing
     assert_eq!(begin(&mut queue, &first, generation), RestoreStart::Done);
     assert_eq!(holder(&queue), None);
 }
+
+/// A replanning operation that ends before its snapshot (`continuing`, or
+/// `withdrawn` out of a `blocked` one) declines its planning request in the
+/// same move, with the outcome as the reason, as `requests`, `replans` and
+/// `show` say: no planner is opened for it and it is not left `open`. One
+/// `blocked` before its snapshot that goes on to it keeps its request for
+/// the planner, and one closed after its snapshot leaves the request as
+/// it was.
+#[test]
+fn a_request_whose_operation_ends_before_its_snapshot_is_declined_with_the_outcome() {
+    let (_dir, db) = queue();
+    let (mut queue, a, _, run) = claimed(&db);
+    let open = |queue: &SqliteQueue, request: i64| {
+        queue
+            .planner_requests()
+            .unwrap()
+            .iter()
+            .any(|r| r.id.as_i64() == request)
+    };
+    let recorded = |words: &str| {
+        let recorded = ok_as("inbox", &db, &args(&request(&run, words)));
+        assert_eq!(recorded["created"], true);
+        (
+            ReplanId::new(recorded["operation"]["id"].as_i64().unwrap()),
+            recorded["request"]["id"].as_i64().unwrap(),
+        )
+    };
+    let moved = |queue: &mut SqliteQueue,
+                 id: ReplanId,
+                 from: i64,
+                 to: ReplanStatus,
+                 snapshot: Option<String>| {
+        queue
+            .move_replan(
+                id,
+                from,
+                &ReplanMove {
+                    to,
+                    reason: format!("the test moves it to {}", to.as_str()),
+                    snapshot_id: snapshot,
+                    diagnosis: None,
+                },
+            )
+            .unwrap()
+            .generation
+    };
+
+    // The run lands first, before the park: the operation continues and
+    // its request is declined with that outcome.
+    let (first, first_request) = recorded("the review keeps sending it back");
+    let generation = moved(&mut queue, first, 1, ReplanStatus::PauseRequested, None);
+    moved(
+        &mut queue,
+        first,
+        generation,
+        ReplanStatus::Continuing,
+        None,
+    );
+    let requests = ok_as("observer", &db, &["requests", &first_request.to_string()]);
+    let declined = &requests["requests"][0];
+    assert_eq!(declined["status"], "declined");
+    assert_eq!(
+        declined["status_reason"],
+        format!(
+            "replan operation {first} ended continuing before its snapshot: \
+             the test moves it to continuing"
+        )
+    );
+    assert!(!open(&queue, first_request));
+    let replans = ok_as("observer", &db, &["replans", &first.to_string()]);
+    assert_eq!(replans["replans"][0]["request_status"], "declined");
+    let shown = ok(&db, &["show", &a.to_string()]);
+    assert_eq!(shown["replans"][0]["request_status"], "declined");
+    let conn = Connection::open(&db).unwrap();
+    let event = |kind: &str| -> Vec<Value> {
+        conn.prepare("SELECT payload FROM run_events WHERE kind=?1 ORDER BY id")
+            .unwrap()
+            .query_map([kind], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|payload| serde_json::from_str(&payload.unwrap()).unwrap())
+            .collect()
+    };
+    let told = event("request_declined");
+    assert_eq!(told.len(), 1);
+    assert_eq!(told[0]["request_id"], first_request);
+    assert_eq!(told[0]["replan_operation_id"], first.as_i64());
+    assert_eq!(told[0]["replan_status"], "continuing");
+    assert_eq!(told[0]["by"], "runtime");
+    assert!(event("replan_status_changed").iter().any(
+        |changed| changed["to"] == "continuing" && changed["request_declined"] == first_request
+    ));
+
+    // Blocked before the park, then withdrawn: declined as well.
+    let (second, second_request) = recorded("split it");
+    let generation = moved(&mut queue, second, 1, ReplanStatus::Diagnosing, None);
+    let generation = moved(&mut queue, second, generation, ReplanStatus::Blocked, None);
+    assert!(!open(&queue, second_request));
+    assert_eq!(
+        queue.replan_operation(second).unwrap().request_status,
+        Some(dagq::domain::plan_request::RequestStatus::Open)
+    );
+    moved(
+        &mut queue,
+        second,
+        generation,
+        ReplanStatus::Withdrawn,
+        None,
+    );
+    let withdrawn = queue
+        .plan_request(dagq::domain::RequestId::new(second_request))
+        .unwrap();
+    assert_eq!(
+        withdrawn.status,
+        dagq::domain::plan_request::RequestStatus::Declined
+    );
+    assert!(
+        withdrawn
+            .status_reason
+            .unwrap()
+            .contains("ended withdrawn before its snapshot")
+    );
+    assert!(!open(&queue, second_request));
+
+    // Blocked before its snapshot, then on to it: the request waits for the
+    // planner, and closing after the snapshot leaves it as it was.
+    let (third, third_request) = recorded("split it again");
+    let generation = moved(&mut queue, third, 1, ReplanStatus::PauseRequested, None);
+    let generation = moved(&mut queue, third, generation, ReplanStatus::Blocked, None);
+    let generation = moved(
+        &mut queue,
+        third,
+        generation,
+        ReplanStatus::Snapshotting,
+        None,
+    );
+    let snapshot = format!("replan-{third}-g{generation}");
+    let generation = moved(
+        &mut queue,
+        third,
+        generation,
+        ReplanStatus::Parked,
+        Some(snapshot),
+    );
+    assert!(open(&queue, third_request));
+    moved(
+        &mut queue,
+        third,
+        generation,
+        ReplanStatus::ContinuingAfterPark,
+        None,
+    );
+    assert_eq!(
+        queue
+            .plan_request(dagq::domain::RequestId::new(third_request))
+            .unwrap()
+            .status,
+        dagq::domain::plan_request::RequestStatus::Open
+    );
+    assert_eq!(event("request_declined").len(), 2);
+}

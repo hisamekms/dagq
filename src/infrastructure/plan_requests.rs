@@ -35,7 +35,10 @@ use crate::domain::{
 /// is open: one replans the goal at a time, and the later reads how the
 /// earlier ended (ADR-t1487-1 decision 5). A request recorded for a
 /// replanning operation waits until the operation holds a complete
-/// snapshot and is with the planner (ADR-t1521-2 decision 2).
+/// snapshot and is with the planner (ADR-t1521-2 decision 2); one whose
+/// operation ends before its snapshot is declined by that move
+/// ([`decline_unplanned`]), so none is left `open` for an operation that
+/// ends without a snapshot.
 const TARGETS: &str = "SELECT r.id FROM plan_requests r WHERE r.status='open'
     AND (r.replan_operation_id IS NULL OR EXISTS(SELECT 1 FROM replan_operations o
         WHERE o.id=r.replan_operation_id AND o.snapshot_id IS NOT NULL
@@ -344,6 +347,43 @@ pub(super) fn record_missing_spike_requests(conn: &Connection, now: i64) -> Resu
         recorded.extend(record_spike_request(conn, task, now)?);
     }
     Ok(recorded)
+}
+
+/// Decline the `open` request of replanning operation `op` that `outcome`
+/// ends before it holds a snapshot, on `conn` inside the move's own
+/// transaction: no planner was opened for it nor will be, and `declined`
+/// with the operation's outcome as the reason tells the person who asked
+/// (`request_declined` by the runtime, naming the operation). Whether it
+/// declined it: a request already ended is left as it is.
+pub(super) fn decline_unplanned(
+    conn: &Connection,
+    request: RequestId,
+    op: crate::domain::ReplanId,
+    outcome: crate::domain::task_replan::ReplanStatus,
+    why: &str,
+    now: i64,
+) -> Result<bool> {
+    if read_request(conn, request)?.status != RequestStatus::Open {
+        return Ok(false);
+    }
+    let reason = format!(
+        "replan operation {op} ended {} before its snapshot: {why}",
+        outcome.as_str()
+    );
+    set_status(conn, request, RequestStatus::Declined, &reason, now)?;
+    record_queue_event_in(
+        conn,
+        EventKind::RequestDeclined,
+        &json!({
+            "request_id": request,
+            "planner_id": null,
+            "reason": reason,
+            "by": "runtime",
+            "replan_operation_id": op,
+            "replan_status": outcome,
+        }),
+    )?;
+    Ok(true)
 }
 
 /// The request `id` with its proposals and the number of its planners; a
