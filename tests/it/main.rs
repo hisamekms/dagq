@@ -17,6 +17,7 @@ mod agent_eval_rounds;
 mod attribute_records;
 mod background_logs;
 mod broker_relay;
+mod build_id_watch;
 mod cli_actor;
 mod cli_areas;
 mod cli_authorization;

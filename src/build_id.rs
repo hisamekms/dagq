@@ -9,7 +9,7 @@
 //! uncommitted changes, and `+unknown` when it was built outside a Git
 //! repository (from the crates.io source, say, or without `git`).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The metadata of a build that could not name its commit.
@@ -56,7 +56,7 @@ pub fn is_prerelease(version: &str) -> bool {
 /// package's manifest directory is the repository root.
 pub fn emit() {
     let var = |name: &str| std::env::var(name).unwrap_or_else(|_| panic!("cargo sets {name}"));
-    let root = std::path::PathBuf::from(var("CARGO_MANIFEST_DIR"));
+    let root = PathBuf::from(var("CARGO_MANIFEST_DIR"));
     let build = compute(&var("CARGO_PKG_NAME"), &var("CARGO_PKG_VERSION"), &root);
     for directive in build.directives {
         println!("{directive}");
@@ -123,34 +123,67 @@ fn rerun(path: &Path) -> String {
 /// The commit `HEAD` names and whether the worktree has uncommitted changes,
 /// or `None` when `root` is not the root of a Git worktree (a crates.io
 /// source unpacked somewhere, possibly inside another repository) or `git`
-/// cannot answer.
-///
-/// It reruns the script when this worktree moves to another commit (`HEAD`,
-/// `packed-refs` and the ref of the branch it is on) or its index changes,
-/// so the identifier follows commits, checkouts and staging. Only this
-/// branch's ref is watched, not all of `refs`: the refs directory is shared
-/// by every worktree, and a commit in another one must not rebuild this one.
-/// A worktree where only other files changed (docs, say) is not `.dirty`
-/// until something else reruns this script.
+/// cannot answer. It watches the files [`git_watched`] picks, so the
+/// identifier follows commits, checkouts and staging.
 fn git_state(root: &Path, directives: &mut Vec<String>) -> Option<(String, bool)> {
     let toplevel = git(root, &["rev-parse", "--show-toplevel"])?;
     if !same_path(Path::new(&toplevel), root) {
         return None;
     }
-    let mut watched = vec![
-        "HEAD".to_owned(),
-        "index".to_owned(),
-        "packed-refs".to_owned(),
-    ];
-    watched.extend(git(root, &["symbolic-ref", "-q", "HEAD"]));
-    for name in watched {
-        if let Some(path) = git(root, &["rev-parse", "--git-path", &name]) {
-            directives.push(rerun(&root.join(path)));
-        }
+    let branch = git(root, &["symbolic-ref", "-q", "HEAD"]);
+    let candidates: Vec<(PathBuf, bool)> = git_candidates(branch.as_deref())
+        .into_iter()
+        .filter_map(|name| git(root, &["rev-parse", "--git-path", &name]))
+        .map(|path| {
+            let path = root.join(path);
+            let exists = path.is_file();
+            (path, exists)
+        })
+        .collect();
+    for path in git_watched(candidates) {
+        directives.push(rerun(&path));
     }
     let commit = git(root, &["rev-parse", "--verify", "HEAD"])?;
     let status = git(root, &["status", "--porcelain"])?;
     Some((commit, !status.is_empty()))
+}
+
+/// The Git paths (names for `git rev-parse --git-path`) that may tell this
+/// worktree moved to another commit or staged something, when `branch` is
+/// the ref `HEAD` is on (`None` when detached).
+///
+/// `HEAD` changes on a checkout to another branch or commit, and the index
+/// on staging. `logs/HEAD`, this worktree's reflog, gains a line on every
+/// commit and checkout, also when the branch's ref is only in
+/// `packed-refs` and the commit writes a loose ref that was not there to be
+/// watched. `packed-refs` and the branch's loose ref name the commit
+/// directly. Only this branch's ref is a candidate, not all of `refs`: the
+/// refs directory is shared by every worktree, and a commit in another one
+/// must not rebuild this one.
+fn git_candidates(branch: Option<&str>) -> Vec<String> {
+    let mut names: Vec<String> = ["HEAD", "logs/HEAD", "index", "packed-refs"]
+        .map(str::to_owned)
+        .into();
+    names.extend(branch.map(str::to_owned));
+    names
+}
+
+/// The paths to watch of `candidates`, each a path [`git_candidates`] names
+/// and whether it is a file now. A missing one is left out: cargo takes a
+/// watched path that is missing as changed every time, so it would rerun
+/// the script and rebuild the crate on every cargo command (a fresh
+/// repository has no `packed-refs`, and a packed branch has no loose ref).
+/// With the reflog Git keeps by default (`core.logAllRefUpdates`) and refs
+/// in files, the reflog, `HEAD` and the index are there in a worktree whose
+/// commit was made by `git add` and `git commit`, so the identifier still
+/// follows commits, checkouts and staging; without the reflog, a commit
+/// that leaves the index alone on a branch only in `packed-refs` does not
+/// rerun the script until something else does.
+fn git_watched(candidates: Vec<(PathBuf, bool)>) -> Vec<PathBuf> {
+    candidates
+        .into_iter()
+        .filter_map(|(path, exists)| exists.then_some(path))
+        .collect()
 }
 
 /// Whether `a` and `b` are the same existing directory.
@@ -227,6 +260,89 @@ mod tests {
         assert!(is_prerelease("1.0.0-rc.1+abc"));
         assert!(!is_prerelease("0.4.0"));
         assert!(!is_prerelease("0.4.0+abc-def"));
+    }
+
+    #[test]
+    fn the_candidates_are_this_worktrees_files_and_its_branchs_ref_not_all_refs() {
+        let on_branch = git_candidates(Some("refs/heads/dagq/run"));
+        assert_eq!(
+            on_branch,
+            [
+                "HEAD",
+                "logs/HEAD",
+                "index",
+                "packed-refs",
+                "refs/heads/dagq/run"
+            ]
+        );
+        assert_eq!(
+            git_candidates(None),
+            ["HEAD", "logs/HEAD", "index", "packed-refs"]
+        );
+        for name in on_branch {
+            assert!(!["refs", "refs/heads", "refs/heads/dagq"].contains(&name.as_str()));
+        }
+    }
+
+    fn candidates(missing: &[&str]) -> Vec<(PathBuf, bool)> {
+        git_candidates(Some("refs/heads/main"))
+            .into_iter()
+            .map(|name| {
+                let exists = !missing.contains(&name.as_str());
+                (PathBuf::from(".git").join(name), exists)
+            })
+            .collect()
+    }
+
+    fn watched(missing: &[&str]) -> Vec<String> {
+        git_watched(candidates(missing))
+            .into_iter()
+            .map(|path| path.display().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn a_missing_file_is_not_watched_and_the_reflog_head_and_index_still_are() {
+        assert_eq!(
+            watched(&[]),
+            [
+                ".git/HEAD",
+                ".git/logs/HEAD",
+                ".git/index",
+                ".git/packed-refs",
+                ".git/refs/heads/main"
+            ]
+        );
+        // The branch's ref only in packed-refs.
+        assert_eq!(
+            watched(&["refs/heads/main"]),
+            [
+                ".git/HEAD",
+                ".git/logs/HEAD",
+                ".git/index",
+                ".git/packed-refs"
+            ]
+        );
+        // A repository without packed-refs.
+        assert_eq!(
+            watched(&["packed-refs"]),
+            [
+                ".git/HEAD",
+                ".git/logs/HEAD",
+                ".git/index",
+                ".git/refs/heads/main"
+            ]
+        );
+        assert_eq!(
+            watched(&[
+                "HEAD",
+                "logs/HEAD",
+                "index",
+                "packed-refs",
+                "refs/heads/main"
+            ]),
+            Vec::<String>::new()
+        );
     }
 
     fn run_git(dir: &Path, args: &[&str]) {
