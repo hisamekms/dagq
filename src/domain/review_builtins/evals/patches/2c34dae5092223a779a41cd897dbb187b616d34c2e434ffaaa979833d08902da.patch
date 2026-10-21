@@ -1,0 +1,22 @@
+diff --git a/notes/store.py b/notes/store.py
+index 5bb044b..8625f16 100644
+--- a/notes/store.py
++++ b/notes/store.py
+@@ -3,13 +3,13 @@
+ 
+ class NoteStore:
+     def __init__(self):
+-        self._notes = {}
++        self._by_user = {}
+ 
+     def add(self, user, text):
+         if not text.strip():
+             raise ValueError("a note needs text")
+-        self._notes.setdefault(user, []).append(text)
+-        return len(self._notes[user])
++        self._by_user.setdefault(user, []).append(text)
++        return len(self._by_user[user])
+ 
+     def list(self, user):
+-        return list(self._notes.get(user, []))
++        return list(self._by_user.get(user, []))

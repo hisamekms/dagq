@@ -1994,6 +1994,33 @@ pub trait Repository: RepositoryReads {
         let _ = (path, base, hidden);
         anyhow::bail!("this repository cannot make an eval case's base tree")
     }
+    /// The tree of a built-in agent's eval case (ADR-t2259-1 decision
+    /// 10) at `path`, made from its baseline `files` (each a path relative
+    /// to the tree and its text) and its patch file `patch`: a repository
+    /// of its own, made there by `git init`, whose base commit holds the
+    /// files (on `main`, with no parent) and whose head commit, on top of
+    /// it at a detached `HEAD`, has the patch applied. Both are committed
+    /// with a fixed author, committer, date and message, so the same files
+    /// and patch make the same two commits every time. `diff` gets the
+    /// full diff `<base>...<head>`. Git runs in the tree only, with no hook
+    /// and without the global and system configuration: this repository's
+    /// history, refs, worktrees and objects are neither read nor changed,
+    /// so a repository with none of dagq's history runs the cases. It is a
+    /// method of this port, not a port of its own, because the supervisor
+    /// that makes the cases' trees holds this one and its Git. Such a tree
+    /// is removed as a directory alone, never by
+    /// [`Self::remove_case_tree`], which runs Git here. A tree left at
+    /// `path` is removed first.
+    fn add_baseline_case_tree(
+        &self,
+        path: &Path,
+        files: &[(&str, &str)],
+        patch: &Path,
+        diff: &Path,
+    ) -> Result<BaselineCaseTree> {
+        let _ = (path, files, patch, diff);
+        anyhow::bail!("this repository cannot make a built-in's eval case's tree")
+    }
     /// Remove the case's tree at `path` ([`Self::add_case_tree`]); one
     /// already gone is not an error.
     fn remove_case_tree(&self, path: &Path) -> Result<()> {
@@ -2167,6 +2194,16 @@ pub enum WorktreeAdmin {
     /// The admin dir by that name: whether its `gitdir` points back at
     /// this worktree's `.git`, and its `HEAD` as written.
     Found { points_back: bool, head: String },
+}
+
+/// A built-in agent's eval case's tree
+/// ([`Repository::add_baseline_case_tree`]): its base and head commits and
+/// `git log --oneline <base>..<head>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaselineCaseTree {
+    pub base: CommitSha,
+    pub head: CommitSha,
+    pub commits: String,
 }
 
 /// The size of a diff, as `git diff --numstat` counts it.

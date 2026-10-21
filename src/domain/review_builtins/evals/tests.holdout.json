@@ -1,0 +1,95 @@
+{
+  "agent": "builtin:tests",
+  "role": "review",
+  "codes": [
+    "untested-decision",
+    "boundary-untested",
+    "checks-nothing",
+    "unstable-test"
+  ],
+  "rules": {
+    "untested-decision": "the definition's item Decisions",
+    "boundary-untested": "the definition's item Boundaries",
+    "checks-nothing": "the definition's item What a test checks",
+    "unstable-test": "the definition's item Stability"
+  },
+  "k": 2,
+  "cases": [
+    {
+      "id": "tests-ledger-quantity-untested",
+      "source": "generated",
+      "made_by": "claude-opus-5-5 (written for the built-in)",
+      "baseline": "stock-ledger",
+      "patch": "4852c02f1a71baea7648494ef41393575d6f90dd4512c0b48d3c46454c17d320",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "untested-decision"
+          ],
+          "note": "the refused quantities have no test"
+        }
+      }
+    },
+    {
+      "id": "tests-shared-ledger",
+      "source": "generated",
+      "made_by": "claude-opus-5-5 (written for the built-in)",
+      "baseline": "stock-ledger",
+      "patch": "3655f2d9f377275a45ddf299422d94a4bc15dc225b5b03567b309b60e6477a41",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "unstable-test"
+          ],
+          "note": "a test reads the state another test leaves",
+          "acceptable_codes": [
+            "untested-decision"
+          ]
+        }
+      }
+    },
+    {
+      "id": "tests-ledger-quantity-tested",
+      "source": "generated",
+      "made_by": "claude-opus-5-5 (written for the built-in)",
+      "baseline": "stock-ledger",
+      "patch": "7b84feaa00d3e16cae5215a9ebe0fd4a97fbd6a23fc0d9fccab76243f80527fd",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "the refused quantities and the least one are tested"
+        }
+      }
+    },
+    {
+      "id": "tests-store-rename",
+      "source": "generated",
+      "made_by": "claude-opus-5-5 (written for the built-in)",
+      "baseline": "notes-service",
+      "patch": "2c34dae5092223a779a41cd897dbb187b616d34c2e434ffaaa979833d08902da",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "a rename that decides nothing new",
+          "near_miss": true
+        }
+      }
+    }
+  ]
+}

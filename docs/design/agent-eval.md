@@ -46,15 +46,18 @@ workerもjobもLLMのCLIを直接打たない。
 - patchの共有の置き場: `.dagq/agent-cases/patches/<sha256>.patch`（patchの内容のSHA-256。agentの名前と衝突しないよう`.dagq/agents/`の外に置く）。同じ内容のpatchは1つだけ置き、ケースはhashで参照する。どのケースからも参照されないpatchと、ケースが参照するhashのpatchが無いことは、下の設定の検査が誤りにする。
 - どこで走るか: `dagq.toml`の`[review.subagents.<name>] paths`のまま（形は変えない）。定義は`.dagq/agents/<name>/AGENT.md`だけから読み、そこに無ければ定義が無い扱いで、reviewはpassにしない（[Review](supervisor-lifecycle/review.md#reviewのsubagent)の「設定」）。
 - 設定の検査（`dagq.toml`を読むとき）: `[review.subagents.<name>]`が名指す`<name>`に`.dagq/agents/<name>/AGENT.md`が無いこと、同じ`<name>`を複数の役割の表が名指すこと（今の役割の表は`[review.subagents]`だけ。役割の表が増えたら同じ検査に足す）を誤りにする。
-  この2つは実装済みで、`dagq doctor`の`agents`の`errors`が出す（役割の表の集合は`domain::review_subagents::ROLE_SECTIONS`。[Review](supervisor-lifecycle/review.md#reviewのsubagent)の「設定」）。
+  この2つは実装済みで、`dagq doctor`の`agents`の`errors`が出す（[Review](supervisor-lifecycle/review.md#reviewのsubagent)の「設定」）。
 - ケースのファイルの形とpatchの置き場の参照の過不足（上）は、ケースの一覧の読み手と、このrepositoryの全ての一覧をそれで読むtestが検査する。
   `dagq doctor`と設定の読み込みにはまだ足していない。
+- built-in（security・tests）の定義とケースはバイナリが持つ（`domain::review_builtins::evals`のmodule doc）。
+  `builtin:acceptance`はverdictがagentのjobの形と違うので対象にしない。
 
 ## ケースの欄
 
 ファイルの形と欄の意味は`domain::agent_eval`の`CaseFile`と`Case`のdoc commentが持つ。
 
 - `handmade`はdevだけに置く。改善するsessionが中身を読んだケースはholdoutに置かない。
+- baseは`base_commit`か、built-inの同梱のケースだけの`baseline`の一方。
 - 読み手は形の誤りを、最初の1つでなく全て返す。
 - 起動・形の検査・採点・productionのケースの作り方は役割ごとのharnessが持つ。今作るのはreviewのharnessだけ。
   役割が増えたら、その役割のharnessを足す。
@@ -74,7 +77,7 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 - `disputed`のケースとその実行は主の指標から外し、含めた値は別に返す。
 - 閾値: 判定と規則コードのrecall・precisionの4つがすべて閾値以上で、errorが無いときだけ通る。
   値なしは下回ったと数える。
-  閾値の値は`[eval]`の設定（`EvalConfig`のdoc comment）。
+  閾値の値は、pjのagentは`[eval]`の設定（`EvalConfig`のdoc comment）、built-inは同梱の値（`review_builtins::evals::THRESHOLD`のdoc comment）。
   規則コードごとの値も返すが、採用の判断はagentの値で行う。
 
 ## 漏れの検査
@@ -91,7 +94,7 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 
 - 入口: `dagq agent eval <agent>`が依頼を記録し、`dagq agent results`と`dagq agent result <id>`が周を読む。
   どれもqueue serviceのユースケースで（[Queue service](queue-service.md)）、client modeのworkerも使える。
-  use caseは`application::agent_eval`の`AgentEvals`、flagの意味はCLIの定義（`AgentCommand`）が持つ。
+  use caseは`application::agent_eval`の`AgentEvals`。
 - 依頼は記録するだけで、実行はsupervisorが行う。
   supervisorは依頼を実行するだけで、自分では依頼しない（見張りは時期をfindingにするだけ。下の「採用した定義の見張り」）。
 - 依頼の認可と実行を分ける: devはworker（自分のrunの分）・人・inbox・planner、hold-outとproductionは人・inbox・planner、同じキーの再実行は人とinboxだけができる。
@@ -104,12 +107,12 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 - productionの集合の作成の依頼（`agent cases`）と人の決定（`agent decide`）は人・inbox・plannerの`eval.cases`で、workerとsupervisorは`authorization_denied`になる。
   supervisorは依頼された集合を作るだけで、自分では依頼しない。
 - repositoryの一覧のケースのラベルの変更と`disputed`の解除はコマンドを持たず、人とinbox・plannerがtaskで行う。
+- `builtin:<名前>`の認可はpjのagentと同じで、周は汎用の品質を測るためpjの規則のfileとprogramを当てない。
 
 ## 記録と成績の作り直し
 
 - 依頼・周の開始と拒否・providerを待つこと・実行ごとの開始と終わり・成績は、全てqueueのeventで、周の状態はeventだけから作り直す（`domain::agent_eval::record`）。
   別の表を持たず、supervisorが入れ替わっても同じ状態を読む。
-- 欄の意味はそのmoduleのdoc commentと、成績を作る`application::agent_eval::finished`のdoc commentが持つ。
 - incompleteの周は閾値を超えてもpassに数えない。
 - 版ごとの成績はeventだけが持ち、repositoryに置かない。
 
@@ -125,7 +128,7 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 
 ## hold-outの1回の制限
 
-- キーはagent・定義のdigest・ケースの集合のdigest（流すケースのidと参照するpatchの内容から作る）で、hold-outとproductionの周に当てる（`holdout_refusal`）。
+- キーはagent・定義のdigest・ケースの集合のdigest（`round::case_set_digest`）で、hold-outとproductionの周に当てる（`holdout_refusal`）。
 - 判定はeventに記録した開始した周のキーから読み、別の状態を持たない。
 
 ## evalの枠
@@ -142,6 +145,7 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 ## 採用の判定（着地の前のdev）
 
 入口は`application::supervise::execution::eval_gate`、対象と行き先の判定は`domain::agent_eval::before_landing`。
+built-inの定義の変更には広げない（定義がdagqのsourceにあり、見るpathがdagqの開発の事情になるため）。
 
 - 対象: runの差分が`.dagq/agents/<name>/AGENT.md`を変えるrun（差分の取り方はreviewのagentの選び方と同じ`<base>...<head>`）。変えたagentごとに1周。
   landing branchのcommitに`evals/dev.json`が無いagent（ケースがまだ無い）と、runが定義を消したagentは流さず、理由を`run_agent_eval_requested`の`skipped`に残す。
@@ -174,12 +178,10 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
 - ラベル: ケースごとに、`[roles.review]`と別のprovider（reviewがClaudeならCodex）のagentのjobを1本起動する。
   起動経路はevalのagentのjobと同じ（下の「evalが本番と共有する起動経路」）で、ケースのtreeからは全てのagentの定義とevalのケースを消す。
   jobの「定義」は規則の文書のpathと、規則コードごとの規則の場所だけ（`production::label_definition`）で、定義の検査項目の文は渡さない。
-  規則の文書の本文は規則コードを持たないことがあるので、コードと場所の対応が無いとjobはどの違反にどのコードを付けるか決められない。
   コードと場所の対応はケースを作る側がケースの一覧に書き（`CaseFile::rules`）、一覧の対応は改善する定義から作らない。
   一覧に無いコードだけ、定義の行のうちそのコードを名指す行のlinkの先（文書と節）を使い、定義の検査項目の文は使わない。
   対応はlanding branchのcommitから読むが、jobが読む規則の本文はケースのtree（reviewのbaseにその差分を当てたもの）の文書で、landing branchの文書ではない。
   このため本文はそのreviewの時の規則で、差分が規則の文書を変えていれば変えた後の本文になる。
-  本番の判定はラベルにしない（その日の定義が出したもの）。
   providerが使えない間はjobを起動せず待ち、壁で止まったjobはproviderを控えてそのケースをやり直す。
 - 組み立て: 全てのケースのラベルのjobが終わったら（判定の無いjobと起動できなかったjobはラベルの無いケースとして理由を記録する）、ラベルの付いたケースだけで集合のファイルを作り、digestを`agent_cases_built`に記録する。
   ラベルの無いケースと作り直せないケースは集合に入れず、`agent_cases_built`に理由を残す。
@@ -189,6 +191,7 @@ reviewのharnessは、1周の実行（ケース × kの1回）を単位に数え
   作り直しは、まずbaseかheadがrefから辿れないケースを、patchのファイルが残っていても理由つきで飛ばす（ケースのtreeはbaseから作り、ビューはファイルの有無で変わらない）。
   残りのケースは内容のhashが合うpatchのファイルを使い、無ければ差分から書き直し、読めない・内容が変わった・UTF-8の文でない差分のケースは理由つきで飛ばす。
 - 集合をhold-outとして1回流した後、repositoryの`production.json`に足すのはtaskで行う。
+- built-inの集合はそれを選んだreviewから作り、ラベルのjobには同梱の定義の本文を規則として渡す。
 
 ### 採用した定義の見張り
 
@@ -219,22 +222,23 @@ landing branchの定義を新しい本番のreviewで測り直す時期をsuperv
   `tools: []`は道具を持たない宣言。
 - runtimeの道具の一覧は`domain::review_subagents::AgentTool::ALL`で、役割が許さない道具と一覧に無い名前とリストでない`tools`は定義の誤りにする（`AgentTools::declared`）。
   誤りの定義を選んだreviewはsnapshotが誤りにしてADR-t1453-1決定6の経路でpassにせず、`dagq doctor`の`agents`の`errors`にも出す。
-- providerごとの変換（ADR-t1895-1の独立のagentのjobの起動の設定を作る関数。agentのjobの起動、`AgentProvider::agent_job_command`が使う）:
-  - Claude（`infrastructure::adapters::claude_agent_job_tool_args`）: jobの起動の引数で宣言した道具を許し、一覧の残りを拒む。
-  - Codex（`infrastructure::codex::agent_job_tools_config`）: read-onlyのsandbox・jobのpermission profile・worktreeのprojectの`untrusted`（ADR-t1570-1）は変えず、狭めるだけ。
+- providerごとの変換（ADR-t1895-1、`AgentProvider::agent_job_command`が使う）:
+  - Claude: jobの起動の引数で宣言した道具を許し、一覧の残りを拒む。
+  - Codex: read-onlyのsandbox・jobのpermission profile・worktreeのprojectの`untrusted`（ADR-t1570-1）は変えず、狭めるだけ。
 - 当てないもの: 全体のreviewのjobは定義を持たないので対象にしない。
 
 ## evalが本番と共有する起動経路
 
 - ケースごとの1回は、本番のrunのreviewのagentのjobと同じ経路で、測るagentの1本のjobだけを起動する。
-  経路はheadlessのjobの共通の経路（起動・時間の上限・やり直し・記録・引き継ぎ。[Headless job processes](supervisor-lifecycle/headless-job-processes.md)）、1本のagentのjobの組み立て（`application::agent_job::build`、[Prompt](supervisor-lifecycle/prompt.md#agentのjobの上限)）、上の「道具の宣言」の変換、行き先のproviderは`[roles.review]`。
+  経路はheadlessのjobの共通の経路（[Headless job processes](supervisor-lifecycle/headless-job-processes.md)）、1本のagentのjobの組み立て（`application::agent_job::build`、[Prompt](supervisor-lifecycle/prompt.md#agentのjobの上限)）、上の「道具の宣言」の変換、行き先のproviderは`[roles.review]`。
   eval専用の起動の組み立ては作らない。
 - 本番のrunのreviewのagentのjobも同じ組み立て・起動のコマンド・1つのverdictの読み取りを使う。
   ケースのjobは組み立ての入力の読める場所の欄（`AgentReads`）を持ち、本番のrunのreviewのagentのjobはその欄を空にする。
   同じ定義・provider・道具の宣言なら、argvの差はその欄からproviderが作る読み取りの制限の引数だけで、stdinのpromptの差は材料の行だけである。
 - 実行の入口は`application::supervise::execution::agent_eval`。
 - ケースのtreeは、queueのdata dirの`agent-evals/`の下に周ごとに置く、tree自身のGitのrepositoryである。
-  supervisorは`base_commit`にpatchを当てたcommitをrepositoryの中に作り、材料のファイル（commitの一覧と全文の差分`<base_commit>...<patchを当てたcommit>`）をそこから作って、ケースのdirの材料だけのdirに書く。
+  `base_commit`のケースは、supervisorが`base_commit`にpatchを当てたcommitをrepositoryの中に作り、材料のファイル（commitの一覧と全文の差分`<base_commit>...<patchを当てたcommit>`）をそこから作って、ケースのdirの材料だけのdirに書く。
+  `baseline`のケースは、treeの場所に独立のrepositoryをbaselineとpatchから作り、対象のrepositoryを読まず変えない。
   treeはbaseとそのcommitのファイルからevalのケースの一覧とpatchの置き場を除いたもので、それぞれを1つのcommitにし、baseのcommitをlanding branchの名前に、そのcommitをdetachedの`HEAD`に置く（ほかのrefは無い）。
   landing branchと比べるprogramのreviewには、runのworktreeと同じくケースの差分が見える。
   treeのGitはrepositoryとobject・ref・Git directoryを共有しないので、treeの中から辿れるどのcommitにもケースの一覧・patchの置き場・期待は無い。
@@ -254,8 +258,6 @@ landing branchの定義を新しい本番のreviewで測り直す時期をsuperv
 - 使わないもの: 全体のreviewのjob。
 
 ## programのreviewの当て方
-
-built-inのagentのevalはpjのprogramを当てない（決定済み・未実装、[built-inのreview](supervisor-lifecycle/review-builtin.md)）。
 
 - evalは各ケースに本番のreviewと同じ段を当てる（判断は`domain::agent_eval::programs`）。
   周の定義とケースを読むlanding branchのcommitから、programの一覧とscriptを読み（[ADR-t1895-2](../adr/2026-10-06-t1895-2-program-reviews-are-fast-format-checks-read-from-the-landing-branch.md)。一覧の設定・実行・envとbackendは[プログラムのreview](supervisor-lifecycle/review-programs.md)と[Run environment](supervisor-lifecycle/run-environment.md)が持ち、ここに写さない）、pathがケースの差分に当たるものを、ケースのtreeをcwdに設定の順に流す。

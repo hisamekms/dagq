@@ -1,0 +1,39 @@
+diff --git a/src/ledger.js b/src/ledger.js
+index 65d5cd8..c75c9e5 100644
+--- a/src/ledger.js
++++ b/src/ledger.js
+@@ -5,6 +5,9 @@ export class Ledger {
+   }
+ 
+   add(item, quantity) {
++    if (!Number.isInteger(quantity) || quantity <= 0) {
++      throw new Error(`a quantity added is a whole number above 0, not ${quantity}`);
++    }
+     this.items.set(item, (this.items.get(item) ?? 0) + quantity);
+   }
+ 
+diff --git a/test/ledger.test.js b/test/ledger.test.js
+index 9d6d0e9..be2ce0f 100644
+--- a/test/ledger.test.js
++++ b/test/ledger.test.js
+@@ -8,6 +8,20 @@ test("an item added is counted", () => {
+   assert.equal(ledger.count("pen"), 3);
+ });
+ 
++test("a quantity of 1 is the least added", () => {
++  const ledger = new Ledger();
++  ledger.add("pen", 1);
++  assert.equal(ledger.count("pen"), 1);
++});
++
++test("a quantity of 0, below 0 or not whole is refused and counts nothing", () => {
++  const ledger = new Ledger();
++  for (const quantity of [0, -2, 1.5]) {
++    assert.throws(() => ledger.add("pen", quantity));
++  }
++  assert.equal(ledger.count("pen"), 0);
++});
++
+ test("taking more than is in stock is refused", () => {
+   const ledger = new Ledger();
+   ledger.add("pen", 1);

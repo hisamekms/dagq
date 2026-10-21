@@ -80,7 +80,7 @@ fn commit_linked_definition(repo: &Path) {
 }
 
 /// Record run `run` of a completed task `task`, landed, with a review of
-/// `base...head` that selected `agents`, and `verdict` as `demo`'s
+/// `base...head` that selected `agents`, and `verdict` as each one's
 /// judgment, at `at`.
 fn reviewed(
     db: &Path,
@@ -105,9 +105,9 @@ fn reviewed(
     .unwrap();
     let started = json!({"attempt": 1, "subagents": {"commit": base, "base": base, "head": head,
         "agents": agents.iter().map(|agent| json!({"agent": agent})).collect::<Vec<_>>()}});
-    let finished = json!({"attempt": 1, "verdict": verdict, "agents": [
-        {"agent": "demo", "status": "completed", "verdict": verdict,
-         "reasons": ["what production said"], "summary": "s"}]});
+    let finished = json!({"attempt": 1, "verdict": verdict, "agents": agents.iter().map(|agent| json!(
+        {"agent": agent, "status": "completed", "verdict": verdict,
+         "reasons": ["what production said"], "summary": "s"})).collect::<Vec<_>>()});
     for (kind, payload) in [("review_started", started), ("review_finished", finished)] {
         conn.execute(
             "INSERT INTO run_events(task_id,run_id,kind,payload,created_at) VALUES (?1,?2,?3,?4,?5)",
@@ -248,6 +248,106 @@ fn a_set_is_made_of_the_agents_reviews_and_labeled_by_another_provider() {
     assert_eq!(shown["disputed"], json!([]), "{shown}");
     let decided = &events(&fx.db, EventKind::AgentCasesDecided)[0];
     assert_eq!(decided["decided_by"], "user");
+}
+
+/// A set of a built-in agent is made of the production reviews that
+/// selected that built-in only (not a project's agent's, nor another
+/// built-in's), on the reviews' commits in the repository; its codes are
+/// the carried lists', and its labeling job is given the binary's
+/// definition as the rules. The set's hold-out round measures the binary's
+/// definition and records it (acceptance 6).
+#[test]
+fn a_builtins_set_is_made_of_its_reviews_and_labeled_by_its_definition() {
+    let fx = fixture();
+    commit_agents(&fx.repo);
+    commit_config(&fx.repo, "[roles.review]\nprovider = 'codex'\n");
+    let (base, head) = reviewed_change(&fx.repo);
+    let at = "2026-10-06T00:00:00.000Z";
+    reviewed(
+        &fx.db,
+        (11, "r1"),
+        (&base, &head),
+        &["builtin:security"],
+        "pass",
+        at,
+    );
+    reviewed(&fx.db, (12, "r2"), (&base, &head), &["demo"], "revise", at);
+    reviewed(
+        &fx.db,
+        (13, "r3"),
+        (&base, &head),
+        &["builtin:tests"],
+        "revise",
+        at,
+    );
+    let asked = common::cli::ok(
+        &fx.db,
+        &[
+            "agent",
+            "cases",
+            "builtin:security",
+            "--since",
+            "2026-10-01",
+        ],
+    );
+    let set = asked["set_id"].as_i64().unwrap();
+    let out = tempfile::tempdir().unwrap();
+    let agent = EvalAgent::new(out.path(), &[violation()]);
+    let outcome = supervise(&fx, &agent);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+
+    assert_eq!(
+        events(&fx.db, EventKind::AgentCasesRefused),
+        Vec::<Value>::new()
+    );
+    let prepared = &events(&fx.db, EventKind::AgentCasesPrepared)[0];
+    let cases = prepared["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 1, "{prepared}");
+    assert_eq!(cases[0]["id"], "prod-r1-a1");
+    assert_eq!(cases[0]["base"], base.as_str());
+    assert_eq!(
+        prepared["frame"]["codes"],
+        json!(["check-removed", "credential", "run-command", "send-out"])
+    );
+    let launches = agent.launches();
+    assert_eq!(launches.len(), 1);
+    let stdin = agent.stdin(0);
+    assert!(stdin.contains("Sending out (`send-out`)"), "{stdin}");
+    assert!(
+        stdin.contains("- send-out: the definition's item Sending out"),
+        "{stdin}"
+    );
+    let built = &events(&fx.db, EventKind::AgentCasesBuilt)[0];
+    assert_eq!(built["cases"], json!(["prod-r1-a1"]), "{built}");
+
+    // The round runs on the review's provider, the stub's.
+    commit_config(&fx.repo, "");
+    common::cli::ok(
+        &fx.db,
+        &[
+            "agent",
+            "eval",
+            "builtin:security",
+            "--set",
+            &set.to_string(),
+        ],
+    );
+    let out = tempfile::tempdir().unwrap();
+    let agent = EvalAgent::new(out.path(), &[violation()]);
+    let outcome = supervise(&fx, &agent);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let started = &events(&fx.db, EventKind::AgentEvalStarted)[0];
+    assert_eq!(started["set"], set);
+    assert_eq!(
+        started["builtin"]["builtin"], "builtin:security",
+        "{started}"
+    );
+    assert_eq!(agent.launches().len(), 1);
+    let stdin = agent.stdin(0);
+    assert!(stdin.contains("Sending out (`send-out`)"), "{stdin}");
+    assert!(stdin.contains(&base), "on the review's base: {stdin}");
+    let scores = &events(&fx.db, EventKind::AgentEvalFinished)[0];
+    assert_eq!(scores["outcome"], "complete", "{scores}");
 }
 
 /// A set of `demo` asked for, prepared and labeled, as a supervisor that

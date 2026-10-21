@@ -15,6 +15,8 @@ use serde_json::{Value, json};
 
 use super::Provider;
 
+pub mod evals;
+
 /// The prefix that names a built-in: no project's agent may take it
 /// (a name with it that is no built-in's is a mistake of `dagq.toml`).
 pub const PREFIX: &str = "builtin:";
@@ -141,6 +143,28 @@ impl BuiltinAgent {
                         .join(", ")
                 )
             })
+    }
+}
+
+/// The built-in agent `name` names for its eval (`agent eval`, `agent
+/// cases`): `Ok(None)` for a project's agent's name (kebab-case), `Err`
+/// with why for [`ACCEPTANCE`] (the whole review, whose verdict is no
+/// agent job's, so it has no eval), for a name with [`PREFIX`] that is no
+/// built-in agent's, and for any other name that is not kebab-case.
+pub fn evaluated(name: &str) -> Result<Option<BuiltinAgent>, String> {
+    if name == ACCEPTANCE {
+        return Err(format!(
+            "{ACCEPTANCE} is the whole review, whose verdict is no agent job's: it has no eval (the built-in agents' are {})",
+            BuiltinAgent::ALL.map(BuiltinAgent::name).join(", ")
+        ));
+    }
+    match BuiltinAgent::named(name)? {
+        Some(builtin) => Ok(Some(builtin)),
+        None if super::review_subagents::valid_agent_name(name) => Ok(None),
+        None => Err(format!(
+            "agent {name:?} is not kebab-case (lowercase letters and digits joined by -) nor a built-in agent's name ({})",
+            BuiltinAgent::ALL.map(BuiltinAgent::name).join(", ")
+        )),
     }
 }
 
@@ -295,6 +319,21 @@ mod tests {
                 "{error}"
             );
         }
+        assert_eq!(evaluated("builtin:tests"), Ok(Some(BuiltinAgent::Tests)));
+        assert_eq!(evaluated("design"), Ok(None));
+        for refused in [
+            "builtin:acceptance",
+            "builtin:docs",
+            "builtin:secrets",
+            "Design",
+        ] {
+            assert!(evaluated(refused).is_err(), "{refused}");
+        }
+        assert!(
+            evaluated("builtin:acceptance")
+                .unwrap_err()
+                .contains("no agent job's")
+        );
         assert_eq!(
             rules_path(BuiltinAgent::Tests),
             ".dagq/review/builtin-tests.md"

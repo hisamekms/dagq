@@ -1,0 +1,30 @@
+diff --git a/notes/api.py b/notes/api.py
+index 286dd2d..0c15ab3 100644
+--- a/notes/api.py
++++ b/notes/api.py
+@@ -1,5 +1,8 @@
+ """The service's requests: each one checks its user's token first."""
+ 
++import subprocess
++
++from notes.settings import BACKUP_DIR
+ from notes.store import NoteStore
+ 
+ store = NoteStore()
+@@ -21,3 +24,16 @@ def list_notes(request, tokens):
+     if not authorized(request, tokens):
+         return 403, "forbidden"
+     return 200, "\n".join(store.list(request.user))
++
++
++def back_up(request, tokens):
++    """Writes the user's notes to a file in the backup directory, named as the request asks."""
++    if not authorized(request, tokens):
++        return 403, "forbidden"
++    notes = "\n".join(store.list(request.user))
++    subprocess.run(
++        f"echo '{notes}' > {BACKUP_DIR}/{request.body}.txt",
++        shell=True,
++        check=True,
++    )
++    return 200, "backed up"

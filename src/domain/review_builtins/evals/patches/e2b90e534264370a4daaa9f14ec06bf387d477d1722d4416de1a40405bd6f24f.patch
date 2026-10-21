@@ -1,0 +1,47 @@
+diff --git a/notes/store.py b/notes/store.py
+index 5bb044b..00f134f 100644
+--- a/notes/store.py
++++ b/notes/store.py
+@@ -1,4 +1,6 @@
+-"""Keeps each user's notes in memory."""
++"""Keeps each user's notes in memory, and in a file when asked to."""
++
++import json
+ 
+ 
+ class NoteStore:
+@@ -13,3 +15,19 @@ class NoteStore:
+ 
+     def list(self, user):
+         return list(self._notes.get(user, []))
++
++    def snapshot(self):
++        return {user: list(notes) for user, notes in sorted(self._notes.items())}
++
++    def save(self, path):
++        with open(path, "w", encoding="utf-8") as file:
++            json.dump(self.snapshot(), file)
++
++    @classmethod
++    def load(cls, path):
++        store = cls()
++        with open(path, encoding="utf-8") as file:
++            for user, notes in json.load(file).items():
++                for text in notes:
++                    store.add(user, text)
++        return store
+diff --git a/tests/test_store.py b/tests/test_store.py
+index cd5ce70..34f493f 100644
+--- a/tests/test_store.py
++++ b/tests/test_store.py
+@@ -19,3 +19,10 @@ def test_users_do_not_see_each_others_notes():
+     store = NoteStore()
+     store.add("ann", "buy milk")
+     assert store.list("bob") == []
++
++
++def test_a_snapshot_holds_every_users_notes():
++    store = NoteStore()
++    store.add("bob", "call ann")
++    store.add("ann", "buy milk")
++    assert store.snapshot() == {"ann": ["buy milk"], "bob": ["call ann"]}

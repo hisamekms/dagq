@@ -26,7 +26,7 @@ use crate::domain::agent_eval::production::{
 };
 use crate::domain::agent_eval::review::Judgement;
 use crate::domain::agent_eval::round::case_set_digest;
-use crate::domain::review_subagents::valid_agent_name;
+use crate::domain::review_builtins;
 use crate::domain::{ActorContext, Authorizer, Capability, EventId, EventKind, Resource, RunEvent};
 
 /// Where the production sets' events are written and read.
@@ -88,8 +88,9 @@ impl<'a> AgentCaseSets<'a> {
         since: Option<String>,
         until: Option<String>,
     ) -> Result<Value> {
-        if !valid_agent_name(agent) {
-            bail!("agent {agent:?} is not kebab-case (lowercase letters and digits joined by -)");
+        // A project's agent or a built-in agent; never the whole review.
+        if let Err(why) = review_builtins::evaluated(agent) {
+            bail!(why);
         }
         // Compared as instants, and recorded so: a date or another offset
         // names the same instant as the queue's times.

@@ -1,0 +1,14 @@
+diff --git a/src/ledger.js b/src/ledger.js
+index 65d5cd8..c75c9e5 100644
+--- a/src/ledger.js
++++ b/src/ledger.js
+@@ -5,6 +5,9 @@ export class Ledger {
+   }
+ 
+   add(item, quantity) {
++    if (!Number.isInteger(quantity) || quantity <= 0) {
++      throw new Error(`a quantity added is a whole number above 0, not ${quantity}`);
++    }
+     this.items.set(item, (this.items.get(item) ?? 0) + quantity);
+   }
+ 

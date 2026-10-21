@@ -64,6 +64,18 @@ fn expand_one_star(root: &Path, pattern: &str) -> Vec<PathBuf> {
     found
 }
 
+/// The author, committer and date of a built-in's eval case's two
+/// commits ([`GitRepository::add_baseline_case_tree`]): fixed, so the same
+/// baseline and patch make the same commits.
+const BASELINE_COMMIT_ENV: [(&str, &str); 6] = [
+    ("GIT_AUTHOR_NAME", "dagq"),
+    ("GIT_AUTHOR_EMAIL", "dagq@localhost"),
+    ("GIT_AUTHOR_DATE", "946684800 +0000"),
+    ("GIT_COMMITTER_NAME", "dagq"),
+    ("GIT_COMMITTER_EMAIL", "dagq@localhost"),
+    ("GIT_COMMITTER_DATE", "946684800 +0000"),
+];
+
 /// The temporary index of the case's tree at `path`, beside it.
 fn case_index(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
@@ -1283,6 +1295,7 @@ fn object_id(text: &str, field: &'static str) -> Result<CommitSha> {
     Ok(CommitSha::parse(text.trim(), field)?)
 }
 
+use crate::application::BaselineCaseTree;
 pub use crate::application::DiffNumbers;
 
 /// Whether the checkout at `dir` is dagq's source (ADR-t614-1), from its
@@ -2876,6 +2889,113 @@ impl GitRepository {
         Ok(())
     }
 
+    /// A built-in agent's eval case's tree at `path`
+    /// ([`Repository::add_baseline_case_tree`]): a repository of its own
+    /// made by `git init`, `files` committed as the base and `patch`
+    /// applied on them as the head, both by [`BASELINE_COMMIT_ENV`]'s fixed
+    /// author, committer and date; `diff` gets `<base>...<head>`. Every
+    /// git runs with `-C path`, no hook, no global or system configuration
+    /// and none of the Git variables that would point it elsewhere: this
+    /// repository is never read nor changed.
+    pub fn add_baseline_case_tree(
+        &self,
+        path: &Path,
+        files: &[(&str, &str)],
+        patch: &Path,
+        diff: &Path,
+    ) -> Result<BaselineCaseTree> {
+        if path.exists() {
+            fs::remove_dir_all(path).with_context(|| format!("remove {}", path.display()))?;
+        }
+        fs::create_dir_all(path).with_context(|| format!("create {}", path.display()))?;
+        let git = || {
+            let mut command = Command::new(&self.git);
+            for name in [
+                "GIT_DIR",
+                "GIT_WORK_TREE",
+                "GIT_INDEX_FILE",
+                "GIT_OBJECT_DIRECTORY",
+                "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                "GIT_COMMON_DIR",
+                "GIT_CONFIG_PARAMETERS",
+                "GIT_CONFIG_COUNT",
+                "GIT_CONFIG",
+            ] {
+                command.env_remove(name);
+            }
+            command
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .envs(BASELINE_COMMIT_ENV)
+                .arg("-C")
+                .arg(path)
+                .args([
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.autocrlf=false",
+                ]);
+            command
+        };
+        let commit = |message: &str| -> Result<CommitSha> {
+            output(git().args(["add", "--all", "--force"]))?;
+            output(git().args([
+                "commit",
+                "--quiet",
+                "--no-verify",
+                "--allow-empty",
+                "--message",
+                message,
+            ]))?;
+            object_id(
+                &output(git().args(["rev-parse", "HEAD"]))?,
+                "the case's commit",
+            )
+        };
+        output(git().args(["init", "--quiet", "--template=", "--initial-branch=main"]))?;
+        for (relative, text) in files {
+            let file = path.join(relative);
+            ensure!(
+                file.starts_with(path)
+                    && !relative
+                        .split('/')
+                        .any(|part| part == ".." || part == ".git"),
+                "the baseline's file {relative} is out of its tree"
+            );
+            if let Some(dir) = file.parent() {
+                fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+            }
+            fs::write(&file, text).with_context(|| format!("write {}", file.display()))?;
+        }
+        let base = commit("chore: the eval case's base")?;
+        output(git().args(["switch", "--quiet", "--detach"]))?;
+        output(git().args(["apply", "--whitespace=nowarn"]).arg(patch))?;
+        let head = commit("chore: the eval case's change")?;
+        let commits = review_output(git().args([
+            "log",
+            "--oneline",
+            "--no-decorate",
+            "--no-color",
+            &format!("{base}..{head}"),
+        ]))?;
+        let file = super::agent_dir::create_file(diff)
+            .with_context(|| format!("create {}", diff.display()))?;
+        review_output_to(
+            git()
+                .args(["diff", "--no-color", "--no-ext-diff", "--no-textconv"])
+                .arg(format!("{base}...{head}"))
+                .arg("--"),
+            &file,
+        )?;
+        Ok(BaselineCaseTree {
+            base,
+            head,
+            commits,
+        })
+    }
+
     /// Remove the case's tree at `path` ([`Self::add_case_tree`]), one
     /// already gone left at that. A tree an older runtime made as a linked
     /// worktree is forgotten too (`git worktree prune`).
@@ -3294,6 +3414,15 @@ impl Repository for GitRepository {
     }
     fn add_case_base_tree(&self, path: &Path, base: &str, hidden: &[&str]) -> Result<()> {
         GitRepository::add_case_base_tree(self, path, base, hidden)
+    }
+    fn add_baseline_case_tree(
+        &self,
+        path: &Path,
+        files: &[(&str, &str)],
+        patch: &Path,
+        diff: &Path,
+    ) -> Result<BaselineCaseTree> {
+        GitRepository::add_baseline_case_tree(self, path, files, patch, diff)
     }
     fn remove_case_tree(&self, path: &Path) -> Result<()> {
         GitRepository::remove_case_tree(self, path)

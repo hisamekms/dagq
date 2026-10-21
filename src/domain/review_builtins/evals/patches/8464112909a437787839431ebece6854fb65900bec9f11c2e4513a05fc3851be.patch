@@ -1,0 +1,12 @@
+diff --git a/README.md b/README.md
+index d095b00..0733cad 100644
+--- a/README.md
++++ b/README.md
+@@ -2,3 +2,7 @@
+ 
+ A small service that keeps short notes for its users.
+ Each request names its user and carries the user's token.
++
++## Running it
++
++Set `NOTES_BACKUP_DIR` to where backups go before the service starts.

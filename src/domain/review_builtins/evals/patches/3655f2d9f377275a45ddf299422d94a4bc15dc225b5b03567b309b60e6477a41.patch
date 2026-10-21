@@ -1,0 +1,42 @@
+diff --git a/src/ledger.js b/src/ledger.js
+index 65d5cd8..eaabcdf 100644
+--- a/src/ledger.js
++++ b/src/ledger.js
+@@ -19,4 +19,9 @@ export class Ledger {
+   count(item) {
+     return this.items.get(item) ?? 0;
+   }
++
++  // Empties the item's stock, as when it is no longer sold.
++  clear(item) {
++    this.items.delete(item);
++  }
+ }
+diff --git a/test/ledger.test.js b/test/ledger.test.js
+index 9d6d0e9..f424a15 100644
+--- a/test/ledger.test.js
++++ b/test/ledger.test.js
+@@ -2,6 +2,8 @@ import { test } from "node:test";
+ import assert from "node:assert/strict";
+ import { Ledger } from "../src/ledger.js";
+ 
++const shared = new Ledger();
++
+ test("an item added is counted", () => {
+   const ledger = new Ledger();
+   ledger.add("pen", 3);
+@@ -14,3 +16,14 @@ test("taking more than is in stock is refused", () => {
+   assert.throws(() => ledger.take("pen", 2));
+   assert.equal(ledger.count("pen"), 1);
+ });
++
++test("stock is added to the shared ledger", () => {
++  shared.add("ink", 2);
++  assert.equal(shared.count("ink"), 2);
++});
++
++test("a cleared item counts 0", () => {
++  assert.equal(shared.count("ink"), 2);
++  shared.clear("ink");
++  assert.equal(shared.count("ink"), 0);
++});

@@ -1,0 +1,132 @@
+{
+  "agent": "builtin:tests",
+  "role": "review",
+  "codes": [
+    "untested-decision",
+    "boundary-untested",
+    "checks-nothing",
+    "unstable-test"
+  ],
+  "rules": {
+    "untested-decision": "the definition's item Decisions",
+    "boundary-untested": "the definition's item Boundaries",
+    "checks-nothing": "the definition's item What a test checks",
+    "unstable-test": "the definition's item Stability"
+  },
+  "k": 1,
+  "cases": [
+    {
+      "id": "tests-note-limit-untested",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (written for the built-in)",
+      "baseline": "notes-service",
+      "patch": "4ea3c79e4e7e2a607a111b8cf7677df6cab5c9d4390ec27ed2e391d2ecd62e4a",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "untested-decision"
+          ],
+          "note": "the new limit of notes has no test"
+        }
+      }
+    },
+    {
+      "id": "tests-save-without-file",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (written for the built-in)",
+      "baseline": "notes-service",
+      "patch": "e2b90e534264370a4daaa9f14ec06bf387d477d1722d4416de1a40405bd6f24f",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "boundary-untested"
+          ],
+          "note": "saving and loading a file is never tested through the file",
+          "acceptable_codes": [
+            "untested-decision"
+          ]
+        }
+      }
+    },
+    {
+      "id": "tests-total-asserts-nothing",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (written for the built-in)",
+      "baseline": "stock-ledger",
+      "patch": "7e42097fb014ff781440003f99f95db404e45a6ce75a2919c528032f3be45778",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "checks-nothing"
+          ],
+          "note": "the total's test asserts nothing"
+        }
+      }
+    },
+    {
+      "id": "tests-waits-a-fixed-time",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (written for the built-in)",
+      "baseline": "stock-ledger",
+      "patch": "6cdb7d920c989518ae159323912585c956820d5a650d9f808dc0978f98044822",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "violation",
+          "codes": [
+            "unstable-test"
+          ],
+          "note": "the test waits a fixed time for the delivery"
+        }
+      }
+    },
+    {
+      "id": "tests-note-limit-tested",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (written for the built-in)",
+      "baseline": "notes-service",
+      "patch": "7721f0a3d727b6ffdbcd5e4e2f5bf92537fc8ff46ca516d1190551cdf87c6ac3",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "the limit is tested at its edge and per user"
+        }
+      }
+    },
+    {
+      "id": "tests-readme-only",
+      "source": "handmade",
+      "made_by": "claude-opus-5-5 (written for the built-in)",
+      "baseline": "notes-service",
+      "patch": "8464112909a437787839431ebece6854fb65900bec9f11c2e4513a05fc3851be",
+      "adjudicated": null,
+      "disputed": null,
+      "review": {
+        "input": {},
+        "expected": {
+          "verdict": "clean",
+          "codes": [],
+          "note": "a document only"
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,48 @@
+diff --git a/notes/store.py b/notes/store.py
+index 5bb044b..6b8ff9c 100644
+--- a/notes/store.py
++++ b/notes/store.py
+@@ -1,5 +1,7 @@
+ """Keeps each user's notes in memory."""
+ 
++MAX_LENGTH = 1000
++
+ 
+ class NoteStore:
+     def __init__(self):
+@@ -8,6 +10,8 @@ class NoteStore:
+     def add(self, user, text):
+         if not text.strip():
+             raise ValueError("a note needs text")
++        if len(text) > MAX_LENGTH:
++            raise ValueError(f"a note is at most {MAX_LENGTH} characters")
+         self._notes.setdefault(user, []).append(text)
+         return len(self._notes[user])
+ 
+diff --git a/tests/test_store.py b/tests/test_store.py
+index cd5ce70..1ad034f 100644
+--- a/tests/test_store.py
++++ b/tests/test_store.py
+@@ -1,6 +1,6 @@
+ import pytest
+ 
+-from notes.store import NoteStore
++from notes.store import MAX_LENGTH, NoteStore
+ 
+ 
+ def test_a_note_is_listed_after_it_is_added():
+@@ -15,6 +15,14 @@ def test_an_empty_note_is_refused():
+         store.add("ann", "  ")
+ 
+ 
++def test_a_note_of_the_longest_length_is_kept_and_a_longer_one_refused():
++    store = NoteStore()
++    store.add("ann", "x" * MAX_LENGTH)
++    with pytest.raises(ValueError):
++        store.add("ann", "x" * (MAX_LENGTH + 1))
++    assert store.list("ann") == ["x" * MAX_LENGTH]
++
++
+ def test_users_do_not_see_each_others_notes():
+     store = NoteStore()
+     store.add("ann", "buy milk")

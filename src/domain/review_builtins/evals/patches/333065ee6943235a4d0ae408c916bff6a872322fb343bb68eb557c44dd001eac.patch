@@ -1,0 +1,40 @@
+diff --git a/src/ledger.js b/src/ledger.js
+index 65d5cd8..7ebca94 100644
+--- a/src/ledger.js
++++ b/src/ledger.js
+@@ -1,11 +1,13 @@
+ // Counts each item's quantity in stock.
+ export class Ledger {
+-  constructor() {
++  constructor(options = {}) {
+     this.items = new Map();
++    this.reportTo = options.reportTo;
+   }
+ 
+   add(item, quantity) {
+     this.items.set(item, (this.items.get(item) ?? 0) + quantity);
++    this.report();
+   }
+ 
+   take(item, quantity) {
+@@ -14,9 +16,20 @@ export class Ledger {
+       throw new Error(`only ${this.items.get(item) ?? 0} of ${item} in stock`);
+     }
+     this.items.set(item, left);
++    this.report();
+   }
+ 
+   count(item) {
+     return this.items.get(item) ?? 0;
+   }
++
++  // Posts the whole stock to the address the caller gave, after each change.
++  report() {
++    if (this.reportTo) {
++      fetch(this.reportTo, {
++        method: "POST",
++        body: JSON.stringify(Object.fromEntries(this.items)),
++      });
++    }
++  }
+ }

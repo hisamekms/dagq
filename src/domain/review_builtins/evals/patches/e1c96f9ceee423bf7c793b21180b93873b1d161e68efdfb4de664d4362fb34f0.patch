@@ -1,0 +1,25 @@
+diff --git a/notes/api.py b/notes/api.py
+index 286dd2d..e287308 100644
+--- a/notes/api.py
++++ b/notes/api.py
+@@ -1,13 +1,19 @@
+ """The service's requests: each one checks its user's token first."""
+ 
++import logging
++
+ from notes.store import NoteStore
+ 
+ store = NoteStore()
++log = logging.getLogger("notes")
+ 
+ 
+ def authorized(request, tokens):
+     token = request.headers.get("Authorization", "")
+-    return token != "" and tokens.get(token) == request.user
++    allowed = token != "" and tokens.get(token) == request.user
++    if not allowed:
++        log.warning("refused %s with the token %r", request.user, token)
++    return allowed
+ 
+ 
+ def add_note(request, tokens):

@@ -32,6 +32,12 @@
 //!   asks a person to decide them (`agent decide`), about the task of
 //!   the first disputed case's review.
 //!
+//! A built-in agent's set (`builtin:<name>`, ADR-t2259-1 decision 10) is
+//! made the same way from the production reviews whose `review_started`
+//! selected the built-in, each case on the review's commits in the
+//! repository: its codes and `k` come from the lists the binary carries,
+//! and its labeling job is given the binary's definition as the rules.
+//!
 //! A job a gone owner left is stopped by the headless jobs' takeover, and
 //! its case, unlabeled in the events, is labeled again by the new owner.
 
@@ -44,11 +50,12 @@ use crate::application::agent_cases::{set_dir, sets_of, view, write_patch};
 use crate::application::agent_job::{self, AgentJob};
 use crate::domain::actor_model::{ActorLaunch, ModelRole};
 use crate::domain::agent_eval::production::{
-    self, CaseSet, Frame, PreparedCase, ReviewEvent, candidates, label_definition, label_of,
-    unreachable,
+    self, CaseSet, Frame, PreparedCase, ReviewEvent, builtin_label_definition, candidates,
+    label_definition, label_of, unreachable,
 };
 use crate::domain::agent_eval::{EVALS_DIR, Split};
 use crate::domain::headless_job::JobKind;
+use crate::domain::review_builtins::{self, evals as builtin_evals};
 use crate::domain::review_subagents::{
     AgentRole as ToolRole, AgentTools, DEFINITION_DIR, find_definition,
 };
@@ -218,8 +225,27 @@ impl Supervisor<'_> {
 
     /// What the cases of `agent` are judged in, read from `commit`
     /// ([`production::frame`] of its definition and case lists); `Err` with
-    /// why when there is no definition or no code.
+    /// why when there is no definition or no code. A built-in's are the
+    /// binary's definition and carried lists.
     fn frame(&self, agent: &str, commit: &str) -> Result<std::result::Result<Frame, String>> {
+        match review_builtins::evaluated(agent) {
+            Err(why) => return Ok(Err(why)),
+            Ok(Some(builtin)) => {
+                let lists: Vec<(&str, &str)> = builtin_evals::SPLITS
+                    .into_iter()
+                    .filter_map(|split| {
+                        Some((split.file_name(), builtin_evals::list_text(builtin, split)?))
+                    })
+                    .collect();
+                return Ok(production::frame(
+                    agent,
+                    builtin.definition(),
+                    &lists,
+                    commit,
+                ));
+            }
+            Ok(None) => {}
+        }
         let repository = &*self.repository;
         let Some((_, definition)) =
             find_definition(agent, |path| repository.file_in(commit, path))?
@@ -363,7 +389,13 @@ impl Supervisor<'_> {
             return Ok(None);
         }
         let frame = set.frame.clone().context("a prepared set has its frame")?;
-        let definition = label_definition(&set.request.agent, &frame);
+        // A built-in's rules are its definition, which the binary carries.
+        let definition = match review_builtins::evaluated(&set.request.agent) {
+            Ok(Some(builtin)) => {
+                builtin_label_definition(&set.request.agent, &frame, builtin.definition())
+            }
+            _ => label_definition(&set.request.agent, &frame),
+        };
         let tools = AgentTools::declared(ToolRole::Review, &definition)
             .map_err(|why| anyhow::anyhow!("the label's tools: {why}"))?;
         Ok(Some(CaseLabeling {

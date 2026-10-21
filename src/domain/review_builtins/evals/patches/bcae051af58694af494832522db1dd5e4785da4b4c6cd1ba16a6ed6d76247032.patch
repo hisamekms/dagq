@@ -1,0 +1,12 @@
+diff --git a/package.json b/package.json
+index e5a2cd6..d6597fd 100644
+--- a/package.json
++++ b/package.json
+@@ -3,6 +3,7 @@
+   "version": "1.0.0",
+   "type": "module",
+   "scripts": {
++    "check": "node --check src/ledger.js",
+     "test": "node --test"
+   }
+ }

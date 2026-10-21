@@ -172,8 +172,9 @@ pub struct Case {
     /// The tool and its version that made the case; for a production case,
     /// the provider and version that labelled it.
     pub made_by: String,
-    /// The commit the case's patch applies to.
-    pub base_commit: String,
+    /// What the case's patch applies to: `base_commit` or `baseline`, one
+    /// of the two.
+    pub base: CaseBase,
     /// The SHA-256 of the patch in [`PATCH_DIR`].
     pub patch: String,
     /// A person's decision on the label, `None` when there is none.
@@ -186,6 +187,19 @@ pub struct Case {
     /// `k`.
     pub k: Option<u32>,
     pub role: RoleCase,
+}
+
+/// What a case's patch applies to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CaseBase {
+    /// `base_commit`: a commit of the repository whose eval it is (a
+    /// project's agent's cases and every production case).
+    Commit(String),
+    /// `baseline`: the name of a small set of files the binary carries
+    /// beside a built-in agent's cases
+    /// ([`crate::domain::review_builtins::evals`]), which no repository's
+    /// history holds; the cases of a project's list may not name one.
+    Baseline(String),
 }
 
 impl Case {
@@ -266,6 +280,10 @@ pub enum ProblemKind {
     DuplicateId,
     /// `patch` is not a SHA-256 in lowercase hex.
     NotAPatchHash(String),
+    /// Both `base_commit` and `baseline`.
+    TwoBases,
+    /// No baseline the reader knows has the name.
+    UnknownBaseline(String),
     /// No patch in [`PATCH_DIR`] has the hash.
     MissingPatch(String),
     UnknownVerdict(String),
@@ -302,6 +320,13 @@ impl fmt::Display for ProblemKind {
             ProblemKind::NotAPatchHash(patch) => {
                 write!(f, "`patch` {patch:?} is not a lowercase SHA-256")
             }
+            ProblemKind::TwoBases => {
+                write!(f, "a case has `base_commit` or `baseline`, not both")
+            }
+            ProblemKind::UnknownBaseline(name) => write!(
+                f,
+                "no baseline {name:?}: only a built-in agent's cases have one"
+            ),
             ProblemKind::MissingPatch(patch) => {
                 write!(f, "no {PATCH_DIR}/{patch}.{PATCH_EXTENSION}")
             }
@@ -351,14 +376,41 @@ fn is_sha256(text: &str) -> bool {
     text.len() == 64 && text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
+/// What a case list's cases may refer to: the hashes of the patches there
+/// are, and the names of the baselines (none for a repository's lists).
+#[derive(Debug, Clone, Copy)]
+pub struct Known<'a> {
+    pub patches: &'a BTreeSet<String>,
+    pub baselines: &'a BTreeSet<String>,
+}
+
 /// Read the file `file_name` of `agent`'s `evals/`, whose text is `text`.
-/// `patches` is the hashes of [`PATCH_DIR`]'s patches. Every problem is
-/// returned, not only the first.
+/// `patches` is the hashes of [`PATCH_DIR`]'s patches; no case may name a
+/// baseline. Every problem is returned, not only the first.
 pub fn read_case_file(
     agent: &str,
     file_name: &str,
     text: &str,
     patches: &BTreeSet<String>,
+) -> Result<CaseFile, Vec<CaseProblem>> {
+    let baselines = BTreeSet::new();
+    read_case_file_in(
+        agent,
+        file_name,
+        text,
+        Known {
+            patches,
+            baselines: &baselines,
+        },
+    )
+}
+
+/// [`read_case_file`] whose cases may refer to what `known` has.
+pub fn read_case_file_in(
+    agent: &str,
+    file_name: &str,
+    text: &str,
+    known: Known<'_>,
 ) -> Result<CaseFile, Vec<CaseProblem>> {
     let file_problem = |kind| CaseProblem {
         file: file_name.to_owned(),
@@ -441,7 +493,7 @@ pub fn read_case_file(
         if !seen.insert(id.clone()) {
             problems.push(case_problem(ProblemKind::DuplicateId));
         }
-        match read_case(value, role, split, &code_set, patches) {
+        match read_case(value, role, split, &code_set, known) {
             Ok(case) => read.push(case),
             Err(kinds) => problems.extend(kinds.into_iter().map(case_problem)),
         }
@@ -466,7 +518,7 @@ fn read_case(
     role: AgentRole,
     split: Split,
     codes: &BTreeSet<String>,
-    patches: &BTreeSet<String>,
+    known: Known<'_>,
 ) -> Result<Case, Vec<ProblemKind>> {
     let Some(object) = value.as_object() else {
         return Err(vec![ProblemKind::WrongType {
@@ -478,7 +530,7 @@ fn read_case(
     let id = fields.string("id");
     let source = fields.string("source");
     let made_by = fields.string("made_by");
-    let base_commit = fields.string("base_commit");
+    let base = read_base(&mut fields, known.baselines);
     let patch = fields.string("patch");
     let adjudicated = fields.nullable("adjudicated");
     // An empty or false mark is no dispute, as in the Spike.
@@ -499,7 +551,7 @@ fn read_case(
     if let Some(patch) = &patch {
         if !is_sha256(patch) {
             problems.push(ProblemKind::NotAPatchHash(patch.clone()));
-        } else if !patches.contains(patch) {
+        } else if !known.patches.contains(patch) {
             problems.push(ProblemKind::MissingPatch(patch.clone()));
         }
     }
@@ -510,15 +562,15 @@ fn read_case(
             None
         }
     });
-    match (id, source, made_by, base_commit, patch, role_case) {
-        (Some(id), Some(source), Some(made_by), Some(base_commit), Some(patch), Some(role))
+    match (id, source, made_by, base, patch, role_case) {
+        (Some(id), Some(source), Some(made_by), Some(base), Some(patch), Some(role))
             if problems.is_empty() =>
         {
             Ok(Case {
                 id,
                 source,
                 made_by,
-                base_commit,
+                base,
                 patch,
                 adjudicated,
                 disputed,
@@ -527,6 +579,28 @@ fn read_case(
             })
         }
         _ => Err(problems),
+    }
+}
+
+/// A case's `base_commit` or `baseline` (one of `baselines`): a missing
+/// `base_commit` is the problem when it has neither.
+fn read_base(fields: &mut Fields<'_>, baselines: &BTreeSet<String>) -> Option<CaseBase> {
+    let has = |key: &str| fields.object.get(key).is_some_and(|value| !value.is_null());
+    match (has("base_commit"), has("baseline")) {
+        (true, true) => {
+            fields.problems.push(ProblemKind::TwoBases);
+            None
+        }
+        (false, true) => {
+            let name = fields.string("baseline")?;
+            if baselines.contains(&name) {
+                Some(CaseBase::Baseline(name))
+            } else {
+                fields.problems.push(ProblemKind::UnknownBaseline(name));
+                None
+            }
+        }
+        _ => fields.string("base_commit").map(CaseBase::Commit),
     }
 }
 
@@ -1014,6 +1088,79 @@ mod tests {
         assert_eq!(
             unreferenced_patches([&file], &patches()),
             [OTHER_PATCH.to_owned()]
+        );
+    }
+
+    /// A case is on a `base_commit` or a known `baseline`, never both; a
+    /// repository's list knows no baseline.
+    #[test]
+    fn a_case_is_on_a_commit_or_a_known_baseline() {
+        let on_baseline = |name: &str| {
+            let mut case = case("gen-a", "generated", PATCH, violation());
+            case.as_object_mut().unwrap().remove("base_commit");
+            case["baseline"] = serde_json::json!(name);
+            case
+        };
+        let baselines = BTreeSet::from(["shop".to_owned()]);
+        let known = Known {
+            patches: &patches(),
+            baselines: &baselines,
+        };
+        let file = read_case_file_in(
+            "adr-rules",
+            "dev.json",
+            &list(vec![on_baseline("shop")]),
+            known,
+        )
+        .unwrap();
+        assert_eq!(file.cases[0].base, CaseBase::Baseline("shop".to_owned()));
+        assert_eq!(
+            kinds(read_case_file(
+                "adr-rules",
+                "dev.json",
+                &list(vec![on_baseline("shop")]),
+                &patches()
+            )),
+            [(
+                Some("gen-a".to_owned()),
+                ProblemKind::UnknownBaseline("shop".to_owned())
+            )]
+        );
+        let mut both = on_baseline("shop");
+        both["base_commit"] = serde_json::json!("f46a7963cf708d621bf529eb855ecfb552f78b33");
+        assert_eq!(
+            kinds(read_case_file_in(
+                "adr-rules",
+                "dev.json",
+                &list(vec![both]),
+                known
+            )),
+            [(Some("gen-a".to_owned()), ProblemKind::TwoBases)]
+        );
+        let mut neither = on_baseline("shop");
+        neither.as_object_mut().unwrap().remove("baseline");
+        assert_eq!(
+            kinds(read_case_file_in(
+                "adr-rules",
+                "dev.json",
+                &list(vec![neither]),
+                known
+            )),
+            [(
+                Some("gen-a".to_owned()),
+                ProblemKind::MissingField("base_commit".to_owned())
+            )]
+        );
+        let file = read_case_file(
+            "adr-rules",
+            "dev.json",
+            &list(vec![case("gen-b", "generated", PATCH, clean())]),
+            &patches(),
+        )
+        .unwrap();
+        assert_eq!(
+            file.cases[0].base,
+            CaseBase::Commit("f46a7963cf708d621bf529eb855ecfb552f78b33".to_owned())
         );
     }
 

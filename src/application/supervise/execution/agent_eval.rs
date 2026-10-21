@@ -42,6 +42,18 @@
 //! never reaches the agent and is out of its scores; one that could not
 //! start or ran past its time on either tree closes the round incomplete,
 //! and no run starts after it.
+//!
+//! A built-in agent's round (`builtin:<name>`, ADR-t2259-1 decision 10)
+//! measures the binary's definition: on the cases the binary carries
+//! ([`crate::domain::review_builtins::evals`]), each case's tree a
+//! repository of its own made from its baseline and patch
+//! ([`Repository::add_baseline_case_tree`]), never a commit of the
+//! repository the eval runs in; on a production set of the queue's side
+//! (`--set`), whose cases are the production reviews' commits, as a
+//! project's agent's. It gets neither the project's rules for the
+//! built-in nor the project's program reviews: it measures the built-in's
+//! generic quality, the same in every project. Its start and its scores
+//! record the build and the definition's digest it was measured with.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -61,9 +73,10 @@ use crate::domain::agent_eval::round::{
     provider_wait, run_cost, subset_refusal,
 };
 use crate::domain::agent_eval::{
-    Case, EVALS_DIR, PATCH_DIR, PATCH_EXTENSION, Split, patch_hash, read_agent_cases,
+    Case, CaseBase, EVALS_DIR, PATCH_DIR, PATCH_EXTENSION, Split, patch_hash, read_agent_cases,
 };
 use crate::domain::headless_job::JobKind;
+use crate::domain::review_builtins::{self, BuiltinAgent, evals as builtin_evals};
 use crate::domain::review_programs::ReviewProgram;
 use crate::domain::review_subagents::{
     AgentRole as ToolRole, AgentTools, DEFINITION_DIR, find_definition,
@@ -285,6 +298,8 @@ struct Snapshot {
     /// For a production set of the queue's side, the id of the queue's
     /// event its set was read up to (`agent_eval_started`'s `set_through`).
     set_through: Option<i64>,
+    /// The built-in it measures, `None` for a project's agent.
+    builtin: Option<BuiltinAgent>,
 }
 
 fn refusal(reason: RefusalReason, detail: String) -> Refusal {
@@ -320,13 +335,27 @@ impl Supervisor<'_> {
     }
 
     /// Remove the trees of every case of round `id`'s first `cases`
-    /// directories (made by this process or a gone one).
-    fn remove_case_trees(&self, id: i64, cases: usize) {
+    /// directories (made by this process or a gone one). The trees of a
+    /// built-in's carried cases (`carried`) are repositories of their own
+    /// and are removed as directories alone: no Git runs in the
+    /// repository the eval runs in (not even `git worktree prune`, which
+    /// would drop its stale worktrees).
+    fn remove_case_trees(&self, id: i64, cases: usize, carried: bool) {
         let dir = self.layout.agent_evals_dir.join(id.to_string());
         for index in 0..cases {
             for name in ["tree", "base"] {
                 let tree = dir.join(index.to_string()).join(name);
-                if let Err(error) = self.repository.remove_case_tree(&tree) {
+                let removed = if carried {
+                    match self.files.remove_dir_all(&tree) {
+                        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                            Err(anyhow::Error::from(error))
+                        }
+                        _ => Ok(()),
+                    }
+                } else {
+                    self.repository.remove_case_tree(&tree)
+                };
+                if let Err(error) = removed {
                     warn!(error = %format_args!("{error:#}"), "agent eval {id}: the case tree {} could not be removed: {error:#}", tree.display());
                 }
             }
@@ -484,7 +513,8 @@ impl Supervisor<'_> {
     /// or, for a production set of the queue's side (`set`), its cases and
     /// patches from the set's view
     /// ([`crate::application::agent_cases::view`]); a refusal when they
-    /// are not there or do not read.
+    /// are not there or do not read. A built-in's definition is the
+    /// binary's, and its split's cases are those the binary carries.
     fn eval_snapshot(
         &self,
         (agent, split, set, set_through): (&str, Split, Option<i64>, Option<i64>),
@@ -492,9 +522,15 @@ impl Supervisor<'_> {
         selected: Option<&[String]>,
     ) -> Result<std::result::Result<Snapshot, Refusal>> {
         let repository = &*self.repository;
-        let Some((path, definition)) =
-            find_definition(agent, |path| repository.file_in(definition_commit, path))?
-        else {
+        let builtin = match review_builtins::evaluated(agent) {
+            Ok(builtin) => builtin,
+            Err(why) => return Ok(Err(refusal(RefusalReason::DefinitionMissing, why))),
+        };
+        let found = match builtin {
+            Some(builtin) => Some((builtin.name(), builtin.definition().to_owned())),
+            None => find_definition(agent, |path| repository.file_in(definition_commit, path))?,
+        };
+        let Some((path, definition)) = found else {
             return Ok(Err(refusal(
                 RefusalReason::DefinitionMissing,
                 format!("no definition of {agent} in the commit {definition_commit}"),
@@ -510,7 +546,22 @@ impl Supervisor<'_> {
             }
         };
         if let Some(set) = set {
-            return self.set_snapshot(agent, (set, set_through), (definition, tools), selected);
+            return self
+                .set_snapshot(agent, (set, set_through), (definition, tools), selected)
+                .map(|snapshot| {
+                    snapshot.map(|snapshot| Snapshot {
+                        builtin,
+                        ..snapshot
+                    })
+                });
+        }
+        if let Some(builtin) = builtin {
+            return Ok(carried_snapshot(
+                builtin,
+                split,
+                (definition, tools),
+                selected,
+            ));
         }
         let evals = format!("{DEFINITION_DIR}/{agent}/{EVALS_DIR}");
         let mut files = Vec::new();
@@ -573,6 +624,7 @@ impl Supervisor<'_> {
             cases,
             patches: texts,
             set_through: None,
+            builtin: None,
         }))
     }
 
@@ -646,6 +698,7 @@ impl Supervisor<'_> {
             cases,
             patches: made.patches,
             set_through: Some(set_through),
+            builtin: None,
         }))
     }
 
@@ -703,12 +756,7 @@ impl Supervisor<'_> {
         let key = RoundKey {
             agent: request.agent.clone(),
             definition_digest: definition_digest(&snapshot.definition),
-            case_set_digest: case_set_digest(
-                snapshot
-                    .cases
-                    .iter()
-                    .map(|case| (case.id.as_str(), snapshot.patches[&case.patch].as_bytes())),
-            ),
+            case_set_digest: round_digest(&snapshot.cases, &snapshot.patches),
         };
         let over = agent_job::check_definition(&snapshot.definition).err();
         let refused = holdout_refusal(
@@ -729,7 +777,13 @@ impl Supervisor<'_> {
                 return Ok(true);
             }
         };
-        let programs = self.eval_programs(&commit);
+        let programs = self.round_programs(snapshot.builtin, &commit);
+        // A built-in is judged the same in every project.
+        let threshold = if snapshot.builtin.is_some() {
+            builtin_evals::THRESHOLD
+        } else {
+            config.threshold
+        };
         let started = self.queue.settle_eval_round(
             round.id,
             EventKind::AgentEvalStarted,
@@ -752,7 +806,8 @@ impl Supervisor<'_> {
                 "max_runs": config.max_runs,
                 "max_cost_usd": config.max_cost_usd,
                 "concurrency": config.concurrency,
-                "threshold": config.threshold,
+                "threshold": threshold,
+                "builtin": builtin_record(snapshot.builtin, &key.definition_digest),
                 "requested_by": request.requested_by,
                 "set": request.set,
                 "set_through": snapshot.set_through,
@@ -803,6 +858,20 @@ impl Supervisor<'_> {
             base_ends: BTreeMap::new(),
         });
         Ok(true)
+    }
+
+    /// The program reviews a round of `builtin` (`None` for a project's
+    /// agent) runs over its cases: none for a built-in, which is measured
+    /// apart from the project, else [`Self::eval_programs`].
+    fn round_programs(
+        &self,
+        builtin: Option<BuiltinAgent>,
+        commit: &str,
+    ) -> std::result::Result<Vec<ReviewProgram>, String> {
+        match builtin {
+            Some(_) => Ok(Vec::new()),
+            None => self.eval_programs(commit),
+        }
     }
 
     /// The project's program reviews `commit` configures, or why they do
@@ -861,6 +930,23 @@ impl Supervisor<'_> {
             ),
         )?;
         let config = self.verifier.eval_config()?;
+        // A built-in's definition and carried cases are the binary's: ones
+        // that changed since the start (another build took the round up)
+        // are not those the round measures.
+        let snapshot = snapshot.and_then(|snapshot| {
+            if snapshot.builtin.is_none()
+                || (definition_digest(&snapshot.definition) == started.definition_digest
+                    && round_digest(&snapshot.cases, &snapshot.patches) == started.case_set_digest)
+            {
+                Ok(snapshot)
+            } else {
+                Err(refusal(
+                    RefusalReason::DefinitionInvalid,
+                    "the definition or the cases are no longer those the round started with"
+                        .to_owned(),
+                ))
+            }
+        });
         let snapshot = match snapshot {
             Ok(snapshot) => snapshot,
             Err(refusal) => {
@@ -869,7 +955,14 @@ impl Supervisor<'_> {
                 warn!("agent eval {} cannot go on: {refusal}", round.id);
                 let payload = finished_payload(round, &[], Some(Incomplete::CasesUnreadable));
                 self.record_eval(EventKind::AgentEvalFinished, payload)?;
-                self.remove_case_trees(round.id, started.planned.len());
+                // Its trees are carried cases' when it is a built-in's
+                // round of its carried lists (not of a production set).
+                let carried = request.set.is_none()
+                    && review_builtins::evaluated(&request.agent)
+                        .ok()
+                        .flatten()
+                        .is_some();
+                self.remove_case_trees(round.id, started.planned.len(), carried);
                 return Ok(());
             }
         };
@@ -900,7 +993,7 @@ impl Supervisor<'_> {
             cost_limited: false,
             waiting: None,
             dir: self.layout.agent_evals_dir.join(round.id.to_string()),
-            programs: self.eval_programs(started.cases_commit()),
+            programs: self.round_programs(snapshot.builtin, started.cases_commit()),
             commit: started.cases_commit().to_owned(),
             checks: round.checks.clone(),
             base_ends: BTreeMap::new(),
@@ -1217,7 +1310,11 @@ impl Supervisor<'_> {
         Ok(())
     }
 
-    /// Make the case's tree, material and directory once.
+    /// Make the case's tree, material and directory once: on its
+    /// `base_commit` in the repository ([`Repository::add_case_tree`]), or,
+    /// for a carried case of a built-in, in a repository of its own made
+    /// from its baseline ([`Repository::add_baseline_case_tree`]), from
+    /// which its material is read too.
     fn case_tree(&self, round: &mut EvalRound, index: usize) -> Result<()> {
         let case = &round.cases[index];
         if round.trees.contains_key(&case.id) {
@@ -1232,12 +1329,6 @@ impl Supervisor<'_> {
             .write(&patch, round.patches[&case.patch].as_bytes())
             .with_context(|| format!("write {}", patch.display()))?;
         let tree = dir.join("tree");
-        let head = self
-            .repository
-            .add_case_tree(&tree, &case.base_commit, &patch, &HIDDEN)?
-            .into_string();
-        let base = case.base_commit.clone();
-        let commits = self.repository.log_oneline(&base, &head)?;
         // In a directory of its own, the only one beside the tree the job
         // is given: not the runs' directories, so a run reads no other's
         // output.
@@ -1246,7 +1337,29 @@ impl Supervisor<'_> {
             .create_dir_all(&material_dir)
             .with_context(|| format!("create {}", material_dir.display()))?;
         let diff = material_dir.join("change.diff");
-        self.repository.diff_to_file(&base, &head, &diff)?;
+        let (base, head, commits) = match &case.base {
+            CaseBase::Commit(base) => {
+                let head = self
+                    .repository
+                    .add_case_tree(&tree, base, &patch, &HIDDEN)?
+                    .into_string();
+                let commits = self.repository.log_oneline(base, &head)?;
+                self.repository.diff_to_file(base, &head, &diff)?;
+                (base.clone(), head, commits)
+            }
+            CaseBase::Baseline(name) => {
+                let files = builtin_evals::baseline(name)
+                    .with_context(|| format!("no carried baseline {name}"))?;
+                let made = self
+                    .repository
+                    .add_baseline_case_tree(&tree, files, &patch, &diff)?;
+                (
+                    made.base.into_string(),
+                    made.head.into_string(),
+                    made.commits,
+                )
+            }
+        };
         let material = material_dir.join("material.md");
         self.files.write_fenced(
             &material,
@@ -1560,9 +1673,109 @@ impl Supervisor<'_> {
             round.id, round.agent, payload["outcome"], payload["passed"]
         );
         self.record_eval(EventKind::AgentEvalFinished, payload)?;
-        self.remove_case_trees(round.id, round.cases.len());
+        let carried = round
+            .cases
+            .iter()
+            .any(|case| matches!(case.base, CaseBase::Baseline(_)));
+        self.remove_case_trees(round.id, round.cases.len(), carried);
         Ok(true)
     }
+}
+
+/// The snapshot of `builtin`'s cases of `split` the binary carries (those
+/// of `selected`, when given), its definition and tools read already; a
+/// refusal for a split it does not carry (production: a built-in's
+/// production cases are a set of the queue's side).
+fn carried_snapshot(
+    builtin: BuiltinAgent,
+    split: Split,
+    (definition, tools): (String, AgentTools),
+    selected: Option<&[String]>,
+) -> std::result::Result<Snapshot, Refusal> {
+    let name = builtin.name();
+    let lists = builtin_evals::cases(builtin).map_err(|problems| {
+        let said: Vec<String> = problems.iter().take(5).map(ToString::to_string).collect();
+        refusal(
+            RefusalReason::CasesInvalid,
+            format!("{name}'s carried cases: {}", said.join("; ")),
+        )
+    })?;
+    let Some(list) = lists.split(split) else {
+        return Err(refusal(
+            RefusalReason::CasesInvalid,
+            format!(
+                "{name} carries no {} cases: its production cases are a set (agent cases, then agent eval --set)",
+                split.as_str()
+            ),
+        ));
+    };
+    let cases = selected_cases(
+        &list.cases,
+        selected,
+        &format!("{name}'s carried {}", split.file_name()),
+    )?;
+    let patches = cases
+        .iter()
+        .filter_map(|case| {
+            Some((
+                case.patch.clone(),
+                builtin_evals::patch(&case.patch)?.to_owned(),
+            ))
+        })
+        .collect();
+    Ok(Snapshot {
+        definition,
+        tools,
+        list_k: list.k,
+        cases,
+        patches,
+        set_through: None,
+        builtin: Some(builtin),
+    })
+}
+
+/// The digest of the cases a round runs ([`case_set_digest`]): each
+/// case's patch, and for a carried case of a built-in its baseline's files
+/// with it ([`builtin_evals::case_bytes`]).
+fn round_digest(cases: &[Case], patches: &BTreeMap<String, String>) -> String {
+    digest_with(cases, patches, builtin_evals::baseline)
+}
+
+/// [`round_digest`] with the baselines `baseline` finds by name.
+fn digest_with<'a>(
+    cases: &[Case],
+    patches: &BTreeMap<String, String>,
+    baseline: impl Fn(&str) -> Option<&'a [(&'a str, &'a str)]>,
+) -> String {
+    let weighed: Vec<(&str, Vec<u8>)> = cases
+        .iter()
+        .map(|case| {
+            let patch = &patches[&case.patch];
+            let bytes = match &case.base {
+                CaseBase::Commit(_) => patch.as_bytes().to_vec(),
+                CaseBase::Baseline(name) => {
+                    builtin_evals::case_bytes(baseline(name).unwrap_or_default(), patch)
+                }
+            };
+            (case.id.as_str(), bytes)
+        })
+        .collect();
+    case_set_digest(weighed.iter().map(|(id, bytes)| (*id, bytes.as_slice())))
+}
+
+/// What a round of `builtin` records of the built-in it measured (as a
+/// review's built-in job records it, ADR-t2259-1 decision 9): its name,
+/// the build identifier of this dagq and the definition's SHA-256;
+/// `None` for a project's agent, whose definition's commit and digest the
+/// round records.
+fn builtin_record(builtin: Option<BuiltinAgent>, digest: &str) -> Option<Value> {
+    builtin.map(|builtin| {
+        json!({
+            "builtin": builtin.name(),
+            "build": crate::VERSION,
+            "digest": digest,
+        })
+    })
 }
 
 /// The cases of `all` a round runs: those of `selected` when given (each
@@ -1603,6 +1816,69 @@ fn selected_cases(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The digest of a built-in's carried cases changes with the content
+    /// of a case's baseline, the patch and the ids the same; a project's
+    /// cases' digest is their patches' as before (acceptance 3).
+    #[test]
+    fn a_carried_case_sets_digest_changes_with_its_baselines_content() {
+        let snapshot = carried_snapshot(
+            BuiltinAgent::Security,
+            Split::Dev,
+            (
+                String::new(),
+                AgentTools::declared(ToolRole::Review, "").unwrap(),
+            ),
+            None,
+        )
+        .unwrap();
+        let carried = |name: &str| builtin_evals::baseline(name);
+        let digest = digest_with(&snapshot.cases, &snapshot.patches, carried);
+        assert_eq!(digest, round_digest(&snapshot.cases, &snapshot.patches));
+        let changed: Vec<(&str, &str)> = builtin_evals::baseline("notes-service")
+            .unwrap()
+            .iter()
+            .map(|(path, text)| {
+                (
+                    *path,
+                    if *path == "README.md" {
+                        "another\n"
+                    } else {
+                        *text
+                    },
+                )
+            })
+            .collect();
+        let other = digest_with(&snapshot.cases, &snapshot.patches, |name: &str| {
+            if name == "notes-service" {
+                Some(changed.as_slice())
+            } else {
+                carried(name)
+            }
+        });
+        assert_ne!(digest, other);
+        // A case on a commit weighs its patch alone.
+        let mut on_commit = snapshot.cases[..1].to_vec();
+        on_commit[0].base = CaseBase::Commit("0".repeat(40));
+        let patch = &snapshot.patches[&on_commit[0].patch];
+        assert_eq!(
+            round_digest(&on_commit, &snapshot.patches),
+            case_set_digest([(on_commit[0].id.as_str(), patch.as_bytes())])
+        );
+        // A built-in carries no production cases.
+        let refused = carried_snapshot(
+            BuiltinAgent::Tests,
+            Split::Production,
+            (
+                String::new(),
+                AgentTools::declared(ToolRole::Review, "").unwrap(),
+            ),
+            None,
+        )
+        .err()
+        .unwrap();
+        assert!(refused.detail.contains("--set"), "{}", refused.detail);
+    }
 
     /// A case's job reads its tree and its material's directory, and
     /// never the repository's checkout, its Git directory or the queue's

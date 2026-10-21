@@ -1941,10 +1941,12 @@ const SPLITS: [&str; 3] = ["dev", "holdout", "production"];
 enum AgentCommand {
     /// Ask for one round of the agent's eval: the supervisor runs it on the landing branch's
     /// definition and cases, one job of the agent per run of a case, and records its scores.
-    /// A worker asks for dev of its own run only; holdout and production are a person's, the
-    /// inbox's or a planner's. Prints the eval's id.
+    /// A built-in agent (`builtin:<name>`) is measured on the binary's definition and the cases
+    /// it carries, without the project's rules or programs. A worker asks for dev of its own
+    /// run only; holdout and production are a person's, the inbox's or a planner's. Prints the
+    /// eval's id.
     Eval {
-        /// The agent: `.dagq/agents/<agent>/`.
+        /// The agent: `.dagq/agents/<agent>/`, or a built-in agent `builtin:<name>`.
         agent: String,
         /// The cases' split.
         #[arg(long, default_value = "dev", value_parser = SPLITS)]
@@ -1973,7 +1975,7 @@ enum AgentCommand {
     /// production verdict, and keeps the set on the queue's side for `agent eval --set`. A
     /// person's, the inbox's or a planner's. Prints the set's id.
     Cases {
-        /// The agent: `.dagq/agents/<agent>/`.
+        /// The agent: `.dagq/agents/<agent>/`, or a built-in agent `builtin:<name>`.
         agent: String,
         /// The reviews started at or after this instant: a UTC date (`2026-10-05`, its
         /// midnight) or an RFC 3339 time (`2026-10-05T12:00:00Z`, `...+09:00`).

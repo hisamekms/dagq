@@ -390,8 +390,10 @@ pub fn definition_digest(definition: &str) -> String {
 }
 
 /// The digest of the cases a round runs (ADR-t1728-1 decision 7): each
-/// case's id and the SHA-256 of its patch's content, one line each in the
-/// ids' order, hashed. The same for the repository's `holdout.json` and
+/// case's id and the SHA-256 of its patch's content (for a built-in's
+/// carried case, of its baseline's files with its patch,
+/// `review_builtins::evals::case_bytes`), one line each in the ids' order,
+/// hashed. The same for the repository's `holdout.json` and
 /// for a production set kept in the queue.
 pub fn case_set_digest<'a>(cases: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> String {
     let mut lines: Vec<String> = cases

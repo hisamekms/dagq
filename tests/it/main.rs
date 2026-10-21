@@ -12,6 +12,7 @@ mod runtime_support;
 mod actor_model;
 mod agent_cases;
 mod agent_eval;
+mod agent_eval_builtins;
 mod agent_eval_rounds;
 mod attribute_records;
 mod background_logs;

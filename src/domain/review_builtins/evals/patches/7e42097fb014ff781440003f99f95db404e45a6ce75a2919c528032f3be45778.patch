@@ -1,0 +1,32 @@
+diff --git a/src/ledger.js b/src/ledger.js
+index 65d5cd8..e34cc32 100644
+--- a/src/ledger.js
++++ b/src/ledger.js
+@@ -19,4 +19,12 @@ export class Ledger {
+   count(item) {
+     return this.items.get(item) ?? 0;
+   }
++
++  total() {
++    let sum = 0;
++    for (const quantity of this.items.values()) {
++      sum += quantity;
++    }
++    return sum;
++  }
+ }
+diff --git a/test/ledger.test.js b/test/ledger.test.js
+index 9d6d0e9..03d09b3 100644
+--- a/test/ledger.test.js
++++ b/test/ledger.test.js
+@@ -14,3 +14,10 @@ test("taking more than is in stock is refused", () => {
+   assert.throws(() => ledger.take("pen", 2));
+   assert.equal(ledger.count("pen"), 1);
+ });
++
++test("the total adds every item", () => {
++  const ledger = new Ledger();
++  ledger.add("pen", 3);
++  ledger.add("ink", 2);
++  ledger.total();
++});

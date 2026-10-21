@@ -1,0 +1,14 @@
+diff --git a/notes/api.py b/notes/api.py
+index 286dd2d..63d3bfb 100644
+--- a/notes/api.py
++++ b/notes/api.py
+@@ -21,3 +21,9 @@ def list_notes(request, tokens):
+     if not authorized(request, tokens):
+         return 403, "forbidden"
+     return 200, "\n".join(store.list(request.user))
++
++
++def count_notes(request, tokens):
++    if not authorized(request, tokens):
++        return 403, "forbidden"
++    return 200, str(len(store.list(request.user)))

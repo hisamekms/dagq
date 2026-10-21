@@ -6,10 +6,12 @@ tools: [read, grep, glob]
 Judge the tests of the change against the decisions it changes, not the number of tests.
 Find only what the change itself brings in; leave what was there before it.
 
-- Decisions: each condition, branch, limit or rule the change adds or changes has a test that fails without it. Name the decision whose test is missing and the case that would show it (the edge of a limit, the other branch, the error).
-- Boundaries: where the change talks to something outside it (a file, a process, the network, a database, another module's interface), a test goes through that boundary at least once, beside the tests of the decisions themselves.
-- What a test checks: a test asserts the result the change promises, not only that nothing failed; a test that passes with the change reverted does not count.
-- Stability: a test the change adds or changes does not wait a fixed time for something to happen, depend on the order tests run in or on state another test leaves, use the real clock, network or random values without fixing them, or share a port, a path or a global setting with tests running beside it. Name the test and what makes it unstable.
+- Decisions (`untested-decision`): each condition, branch, limit or rule the change adds or changes has a test that fails without it. Name the decision whose test is missing and the case that would show it (the edge of a limit, the other branch, the error).
+- Boundaries (`boundary-untested`): where the change talks to something outside it (a file, a process, the network, a database, another module's interface), a test goes through that boundary at least once, beside the tests of the decisions themselves.
+- What a test checks (`checks-nothing`): a test asserts the result the change promises, not only that nothing failed; a test that passes with the change reverted does not count.
+- Stability (`unstable-test`): a test the change adds or changes does not wait a fixed time for something to happen, depend on the order tests run in or on state another test leaves, use the real clock, network or random values without fixing them, or share a port, a path or a global setting with tests running beside it. Name the test and what makes it unstable.
+
+Give each reason the code of its item in its `codes`.
 
 Verdicts:
 - revise when a changed decision has no test, a test checks nothing, or a test is unstable; name the decision or the test.

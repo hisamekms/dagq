@@ -1,0 +1,26 @@
+diff --git a/notes/api.py b/notes/api.py
+index 286dd2d..b8f7255 100644
+--- a/notes/api.py
++++ b/notes/api.py
+@@ -1,5 +1,8 @@
+ """The service's requests: each one checks its user's token first."""
+ 
++import json
++import urllib.request
++
+ from notes.store import NoteStore
+ 
+ store = NoteStore()
+@@ -21,3 +24,12 @@ def list_notes(request, tokens):
+     if not authorized(request, tokens):
+         return 403, "forbidden"
+     return 200, "\n".join(store.list(request.user))
++
++
++def share_notes(request, tokens):
++    """Sends the user's notes to the address the request gives."""
++    if not authorized(request, tokens):
++        return 403, "forbidden"
++    body = json.dumps({"user": request.user, "notes": store.list(request.user)})
++    urllib.request.urlopen(request.body, data=body.encode())
++    return 200, "shared"

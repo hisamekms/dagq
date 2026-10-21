@@ -731,27 +731,60 @@ pub fn frame(
 /// text is the rules of the review's time, as its change left them.
 pub fn label_definition(agent: &str, frame: &Frame) -> String {
     let rules: Vec<String> = frame.rules.iter().map(|path| format!("- {path}")).collect();
+    label_text(
+        agent,
+        frame,
+        &format!(
+            "Judge the change by these rules only, as they are written in this tree (not by any other rule of the repository, nor by whether the change is good otherwise).\n\
+The rules are in:\n{}\n",
+            if rules.is_empty() {
+                "- (the definition links no document)".to_owned()
+            } else {
+                rules.join("\n")
+            }
+        ),
+    )
+}
+
+/// The definition of the job that labels a case of a built-in agent
+/// (ADR-t2259-1 decision 10): the built-in's rules are its definition's
+/// body (`definition` without its frontmatter), which the binary carries
+/// and no tree holds, so the job is given that text as the rules, with the
+/// codes and where each one's rule is.
+pub fn builtin_label_definition(agent: &str, frame: &Frame, definition: &str) -> String {
+    let body = definition
+        .strip_prefix("---\n")
+        .and_then(|rest| rest.split_once("\n---\n"))
+        .map_or(definition, |(_, body)| body);
+    label_text(
+        agent,
+        frame,
+        &format!(
+            "Judge the change by these rules only (not by any other rule of the repository, nor by whether the change is good otherwise).\n\
+The rules:\n\n{}\n",
+            body.trim()
+        ),
+    )
+}
+
+/// A labeling job's definition with `rules`, the text that says what the
+/// rules are.
+fn label_text(agent: &str, frame: &Frame, rules: &str) -> String {
     let codes: Vec<String> = frame
         .codes
         .iter()
         .map(|code| match frame.sections.get(code) {
             Some(sections) => format!("- {code}: {}", sections.join("; ")),
-            None => format!("- {code}: (no place given; judge it by the documents above)"),
+            None => format!("- {code}: (no place given; judge it by the rules above)"),
         })
         .collect();
     format!(
         "---\ndescription: labels a change by the rules of {agent} alone\n---\n\
 You label one change for a reviewer that checks a repository's changes against some of its rules.\n\
-Judge the change by these rules only, as they are written in this tree (not by any other rule of the repository, nor by whether the change is good otherwise).\n\
-The rules are in:\n{}\n\
-The rule codes and where each one's rule is in the documents:\n{}\n\
+{rules}\
+The rule codes and where each one's rule is:\n{}\n\
 Answer `revise` with every rule code above that the change breaks in its reasons' `codes`, or `pass` with no reason when it breaks none.\n\
 Each reason names the file and what breaks, in one to three sentences.\n",
-        if rules.is_empty() {
-            "- (the definition links no document)".to_owned()
-        } else {
-            rules.join("\n")
-        },
         codes.join("\n")
     )
 }

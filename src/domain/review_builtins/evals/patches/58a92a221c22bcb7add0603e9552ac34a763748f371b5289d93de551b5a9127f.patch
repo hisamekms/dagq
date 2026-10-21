@@ -1,0 +1,24 @@
+diff --git a/src/ledger.js b/src/ledger.js
+index 65d5cd8..2916325 100644
+--- a/src/ledger.js
++++ b/src/ledger.js
+@@ -1,3 +1,5 @@
++import { execSync } from "node:child_process";
++
+ // Counts each item's quantity in stock.
+ export class Ledger {
+   constructor() {
+@@ -19,4 +21,13 @@ export class Ledger {
+   count(item) {
+     return this.items.get(item) ?? 0;
+   }
++
++  // Adds the "item,quantity" lines of the file the user uploaded under `name`.
++  load(name) {
++    const text = execSync(`cat uploads/${name}`).toString();
++    for (const line of text.split("\n").filter(Boolean)) {
++      const [item, quantity] = line.split(",");
++      this.add(item, Number(quantity));
++    }
++  }
+ }

@@ -18,7 +18,7 @@ use crate::domain::agent_eval::review::{self, Metric, Metrics, ReviewOutcome, Re
 use crate::domain::agent_eval::round::{held_out, subset_refusal};
 use crate::domain::agent_eval::{Case, Split};
 use crate::domain::authorization::eval_request_needs;
-use crate::domain::review_subagents::valid_agent_name;
+use crate::domain::review_builtins;
 use crate::domain::{ActorContext, Authorizer, Capability, EventId, EventKind, Resource, RunEvent};
 
 /// Where the eval's events are written and read.
@@ -108,11 +108,9 @@ impl<'a> AgentEvals<'a> {
     /// own checks (its definition and cases, the once rule, the limits)
     /// are the supervisor's when it starts it.
     pub fn request(&self, request: &EvalRequest) -> Result<Value> {
-        if !valid_agent_name(&request.agent) {
-            bail!(
-                "agent {:?} is not kebab-case (lowercase letters and digits joined by -)",
-                request.agent
-            );
+        // A project's agent or a built-in agent; never the whole review.
+        if let Err(why) = review_builtins::evaluated(&request.agent) {
+            bail!(why);
         }
         if request.k == Some(0) {
             bail!("--k must be 1 or more");
@@ -318,7 +316,9 @@ fn metrics(metrics: &Metrics) -> Value {
 /// code's in `per_code`); `passed` only for a complete round all four of
 /// whose values reach it; the failed cases with the agent's reasons; the
 /// dollars spent by where they came from; and the definition's and the
-/// cases' digests. `incomplete` says why it ended before every run. The
+/// cases' digests, and, for a built-in, its name, build and definition's
+/// digest as the start recorded them (`builtin`, `null` for a project's
+/// agent). `incomplete` says why it ended before every run. The
 /// cases a program review stopped are out of the agent's scores and
 /// counted in `program_stopped` with each one's id and program
 /// ([`programs::stopped_record`]); those with a program not run for them
@@ -401,6 +401,7 @@ pub fn finished(round: &Round, all_cases: &[Case], incomplete: Option<Incomplete
         "runs": runs.len(),
         "cost": {"spent_usd": round.spent_usd(), "by_source": by_source},
         "definition_digest": started.map(|s| &s.definition_digest),
+        "builtin": round.started_payload.as_ref().and_then(|payload| payload.get("builtin")).filter(|builtin| !builtin.is_null()),
         "case_set_digest": started.map(|s| &s.case_set_digest),
     })
 }
@@ -625,6 +626,38 @@ mod tests {
             (recorded[4].split, recorded[4].set),
             (Split::Production, Some(3))
         );
+    }
+
+    /// A built-in agent's eval is asked for by its name; the whole review
+    /// (`builtin:acceptance`), a built-in that is not carried
+    /// (`builtin:docs`) and another unknown name are refused before
+    /// anything is recorded (acceptance 5).
+    #[test]
+    fn a_builtin_is_measured_by_its_name_and_the_whole_review_never() {
+        use crate::domain::StaticPolicy;
+        use crate::domain::actor::ActorRole;
+        let store = Store::default();
+        let user = ActorContext::instance(ActorRole::User, "1");
+        let evals = AgentEvals::new(&store, &user, &StaticPolicy);
+        let named = |agent: &str, split: Split| EvalRequest {
+            agent: agent.into(),
+            ..eval(split, None, None)
+        };
+        for refused in [
+            "builtin:acceptance",
+            "builtin:docs",
+            "builtin:nope",
+            "Not-Kebab",
+        ] {
+            let error = evals.request(&named(refused, Split::Dev)).unwrap_err();
+            assert!(error.to_string().contains(refused), "{error:#}");
+        }
+        assert!(store.events.lock().unwrap().is_empty());
+        for split in [Split::Dev, Split::Holdout] {
+            let asked = evals.request(&named("builtin:tests", split)).unwrap();
+            assert_eq!(asked["agent"], "builtin:tests");
+            assert_eq!(asked["split"], split.as_str());
+        }
     }
 
     /// The scores of a complete round: the four values against the

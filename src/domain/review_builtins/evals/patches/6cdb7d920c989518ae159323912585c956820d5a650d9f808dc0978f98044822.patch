@@ -1,0 +1,35 @@
+diff --git a/src/ledger.js b/src/ledger.js
+index 65d5cd8..64c12df 100644
+--- a/src/ledger.js
++++ b/src/ledger.js
+@@ -8,6 +8,15 @@ export class Ledger {
+     this.items.set(item, (this.items.get(item) ?? 0) + quantity);
+   }
+ 
++  // Adds the delivery once the supplier's note is read, which takes a while.
++  receive(delivery) {
++    setTimeout(() => {
++      for (const [item, quantity] of Object.entries(delivery)) {
++        this.add(item, quantity);
++      }
++    }, 20);
++  }
++
+   take(item, quantity) {
+     const left = (this.items.get(item) ?? 0) - quantity;
+     if (left < 0) {
+diff --git a/test/ledger.test.js b/test/ledger.test.js
+index 9d6d0e9..492baaa 100644
+--- a/test/ledger.test.js
++++ b/test/ledger.test.js
+@@ -14,3 +14,10 @@ test("taking more than is in stock is refused", () => {
+   assert.throws(() => ledger.take("pen", 2));
+   assert.equal(ledger.count("pen"), 1);
+ });
++
++test("a delivery received is counted", async () => {
++  const ledger = new Ledger();
++  ledger.receive({ pen: 4 });
++  await new Promise((resolve) => setTimeout(resolve, 50));
++  assert.equal(ledger.count("pen"), 4);
++});

@@ -548,7 +548,7 @@ mod tests {
             id: id.to_owned(),
             source: Source::Generated,
             made_by: "test".to_owned(),
-            base_commit: "0".repeat(40),
+            base: crate::domain::agent_eval::CaseBase::Commit("0".repeat(40)),
             patch: "a".repeat(64),
             adjudicated: None,
             disputed: None,
