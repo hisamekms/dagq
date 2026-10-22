@@ -93,12 +93,13 @@
 //! | --- | --- | --- |
 //! | `runs`, `goals`, `changes`, `areas`, `e2e`, `overall`, `versions`, `load_bands`, `trial_groups`, `escalations` | run rows: intervals and totals, `legacy`, attributes and `after_claim` ([`super::read::read`]), its sessions, jobs and Executions, and records; task rows' attributes; areas by main's history | the run's finish in the cursors' window |
 //! | `alerts` (slots), `running_alerts`, `workspace_check` | queue `live_alert_stream` rows ([`LedgerWindow::judgments`]) and the run rows' records (nudges, asks) | the window's end |
-//! | `alerts` (others), `backend_failures`, `reason_codes`, `duplicate_cancels`, `cancel_reasons`, `review_reasons`, `stall_thresholds`, `landing_rechecks`, `landing_waits`, `claim_waits`, `verification_commands`, `verification_failures`, `failed_tests`, `waiting`, `worker_routes`, `asks`, `auto_repairs`, `provider_switches`, `draft_flow`, `follow_up_categories`, `worker_question_topics`, `recommendations` | run rows' and task rows' records; queue event rows (an ask or a repair of no run, a backend's failure) | the cursors' window |
+//! | `alerts` (others), `backend_failures`, `reason_codes`, `duplicate_cancels`, `cancel_reasons`, `review_reasons`, `stall_thresholds`, `landing_rechecks`, `landing_waits`, `claim_waits`, `verification_commands`, `verification_failures`, `failed_tests`, `waiting`, `worker_routes`, `asks`, `provider_switches`, `follow_up_categories`, `worker_question_topics`, `recommendations` | run rows' and task rows' records; queue event rows (an ask or a repair of no run, a backend's failure) | the cursors' window |
+//! | `draft_flow`, `auto_repairs` | task rows' records, a task's not ended among them (a draft's `task_created` and its leaving `draft`, an ask of no run); run rows' records (`follow_up_registered`, the landings, an ask or a repair of a run); queue event rows (a repair of no task) | the cursors' window |
 //! | `stall_config` | queue event rows of `stall_config_loaded`, else the settings | the window's end |
 //! | `conflict_hotspots` | run rows' records (the conflicts) and queue rows of `main_*` ([`LedgerWindow::main_history`]) | the cursors' window; `記録が無い` with its reason |
 //! | `sessions` (`by_kind`, `by_route`, per run and goal) | session rows (the spans of no run) and run rows' `sessions`; their tokens and `context` from the rows' `executions` ([`LedgerWindow::executions`]) | the spans overlapping the window, the Executions that ended in it |
 //! | `execution_tokens` | every run and session row's Executions, whatever rows the window chose, so that `recorded_from` and `coverage` are the queue's ([`LedgerWindow::execution_tokens`]; each one's end, a cut's time; actor × provider × model as `stats` sums them) | ended in the window's times and of its filters |
-//! | `planner_routes` | session rows of `runtime_planner` (and their records), with their `executions` | the cursors' window |
+//! | `planner_routes` | session rows of `runtime_planner` (and their records), with their `executions`; the `planner_question` asks of a task from its task row's records, a task not ended too | the cursors' window |
 //! | `jobs` | session rows of the jobs of no run and run rows' `jobs` (kind, provider, model, mode, verdict, time) | ended in the window |
 //! | `claim_holds`, `landing_holds`, `claim_deferrals` | queue `claim_hold`, `landing_hold`, `claim_deferral` rows | started in the window; the one open at its end |
 //! | `updates` | queue event rows of `update_*` | the cursors' window |
@@ -118,7 +119,7 @@
 //! | `candidates` | queue `live_alert_stream` rows (the slots' inputs) |
 //! | `findings_open`, `finding_resolve_time` | queue `finding` rows |
 //! | `improvement_proposals` | queue `finding` rows' records (the links to a proposal and their `by`) and task rows' records (`task_submitted` with its `owner_origin`, `task_reopened`, `task_status_changed`, `proposal_withdrawn`) up to the period's end |
-//! | `drafts_per_landing`, `draft_backlog` | task rows' records, task attributes |
+//! | `drafts_per_landing`, `draft_backlog` | task rows' records (a task not ended too), task attributes |
 //! | `session_open.*`, `session_active.*`, `session_active_ratio.*` | session rows and run rows' `sessions` |
 //! | `job.count.*`, `job.failed_rate.*`, `job.secs.*`, `job.verdict.*` | session rows of jobs and run rows' `jobs` |
 //! | `tokens`, `tokens_per_landing` (their `details.tokens`, `token_coverage`) | each period's [`LedgerWindow::execution_tokens`]: every run and session row's Executions, summed by the rule of the tokens' aggregation (each one's end, actor × provider × model), the records' start the queue's |

@@ -161,12 +161,12 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 - **作り直し**: 版が上がった行と、到達点より後に入力が届いた行は畳み直す（`ledger::rebuilds`、確定の印の後と旧方式の行も同じ）。
 - **記録**: どのeventも、どれか1つの行の記録になる（`domain::ledger::owner`）。
   行は自分の記録とその入力のevent idの範囲を持ち、行だけから今の統計の関数の入力が戻る。
-- **run**（実装済み）: 区間の列・タグごとの合計・claimの属性の組（キーを知らずにそのまま）・claimの後の事実と、そのrunの上のsessionとjob・Executionの列・stepの畳み（`steps`）。
+- **run**: 区間の列・タグごとの合計・claimの属性の組（キーを知らずにそのまま）・claimの後の事実と、そのrunの上のsessionとjob・Executionの列・stepの畳み（`steps`）。
   予定: `change`・`area`・`nature`。
-- **task**（実装済み）: 区間の列と重ねたsupervisor単位の区間。
-- **session**（実装済み）: runを持たない対象のsessionとjobの1回（`domain::ledger::session`）。
-- **queue**（実装済み）: run・task・sessionに属さないqueue全体の区間か出来事の1つ（`domain::ledger::queue`）。
-- **node**（実装済み）: hostの欄の置き場で、NodeSampleStoreだけを読みnodeと時間の区切りごとにsampleのまま持ち、係が同じ保持で消す（`domain::ledger::node`）。
+- **task**: 区間の列と重ねたsupervisor単位の区間で、終わる前も確定しない行を持つ（draftの移りとrunの無いaskも記録）。
+- **session**: runを持たない対象のsessionとjobの1回（`domain::ledger::session`）。
+- **queue**: run・task・sessionに属さないqueue全体の区間か出来事の1つ（`domain::ledger::queue`）。
+- **node**: hostの欄の置き場で、NodeSampleStoreだけを読みnodeと時間の区切りごとにsampleのまま持ち、係が同じ保持で消す（`domain::ledger::node`）。
 
 ## 畳む関数
 
@@ -188,13 +188,13 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 - **周回**: supervisorの周回が間隔ごとに、drainとhandoffの間も、jobのthreadで動く（D7）。
   着地の処理の中では作らず、runtimeの制御（claim・slot・resume・着地）は台帳を読まない。
 - **置き場**: 係の状態（入力ごとのカーソル・印・猶予を待つ行）は観測と分析の状態、組み立ては`compose::observation`にあり、`Supervisor`の本体に状態を足さない。
-- **印**: EventStore・NodeSampleStore・SessionStepStoreのカーソルの後に届いた入力だけを読み、そのrun・task・それが変えたsessionとqueueの行（記録でない終わりも）・nodeの時間に印を付ける（全行を走査しない）。
+- **印**: EventStore・NodeSampleStore・SessionStepStoreのカーソルの後に届いた入力だけを読み、そのrun・task・それが変えたsession・queue・readyだったtaskの行（記録でない終わりも）・nodeの時間に印を付ける（全行を走査しない）。
   畳むrun・taskのeventはその都度読み、queue全体の畳みは届いたeventを一度だけ読んで持ち越す（`builder::Kept`）。
   持ち越すのは本（一生・待ち・各eventがどの行の記録か・pushに失敗したrunの宛先と閉じたpushのid）と、確定していないsession・queue・run・taskの行が読むeventだけ（`Kept`のdoc comment）。
   確定した行に後のeventが届けば、記録はstoreの行から、pushはidで読み戻す。
   持つ件数と概算のbyte数は、定期的と大きく変わった時にlogへ出す（`logs_kept`）。
   周回は新しいeventが変えうる行と印の付いた行だけを畳み、周回で作る領域は前からのeventの数に比例しない。
-- **書く行**: 終わったrun・task（`push_pending`（他のpushが閉じたtaskも）と旧方式を含み途中は書かない）と、session・queue・nodeの行。
+- **書く行**: 終わったrun（`push_pending`と旧方式を含み途中は書かない）と、全てのtask・session・queue・nodeの行。
 - **確定**（`final`）: run・taskは終わりから猶予の後で、`push_pending`には付けない。
   runは発行したtelemetryのtokenの失効の記録の後にだけ確定する。
   session・queue・nodeの行は`domain::ledger::settle`が決める（閉じた時刻か区間の終わりから猶予の後で、閉じていない行は確定しない）。

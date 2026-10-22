@@ -64,9 +64,30 @@ fn an_event_marks_what_it_is_an_input_of() {
     }
 }
 
+/// The takes go round the marks: one starts at the first mark the last
+/// did not take, or at the first one put back, and goes on to those
+/// before it, marked again meanwhile.
+#[test]
+fn a_take_starts_where_the_last_pass_left_off_and_goes_round() {
+    let task = |id| Target::Task(TaskId::new(id));
+    let mut builder = Builder::default();
+    builder.marks.extend((1..=5).map(task));
+    assert_eq!(builder.take(2), [task(1), task(2)]);
+    builder.keep(task(1));
+    assert_eq!(builder.take(2), [task(3), task(4)]);
+    builder.put_back(task(4), []);
+    builder.keep(task(3));
+    assert_eq!(builder.take(3), [task(4), task(5), task(1)]);
+    builder.keep(task(5));
+    assert_eq!(builder.take(10), [task(3), task(5)]);
+    assert_eq!(builder.backlog(), 0);
+    builder.keep(task(2));
+    assert_eq!(builder.take(10), [task(2)]);
+}
+
 /// A run on its way is not written; one ended, one pending on its push and
 /// a legacy one are, and only a legacy one or one ended past its grace is
-/// settled.
+/// settled. A task on its way is written, not settled.
 #[test]
 fn only_an_ended_run_is_written_and_settled_after_its_grace() {
     let (a, b, c, d) = (run_id(1), run_id(2), run_id(3), run_id(4));
@@ -79,10 +100,8 @@ fn only_an_ended_run_is_written_and_settled_after_its_grace() {
         .legacy(4, &d, 0);
     let now = 930 + SETTLE_GRACE_MS / 1000;
     assert_eq!(build(&Target::Run(a), &inputs(&log, now), &[]), None);
-    assert_eq!(
-        build(&Target::Task(TaskId::new(1)), &inputs(&log, now), &[]),
-        None
-    );
+    let on_its_way = build(&Target::Task(TaskId::new(1)), &inputs(&log, now), &[]).unwrap();
+    assert!(on_its_way.ended_at.is_none() && !on_its_way.is_final);
 
     let early = build(&Target::Run(b.clone()), &inputs(&log, now - 1), &[]).unwrap();
     assert_eq!(early.ended_at, Some(ms(930)));
@@ -473,8 +492,9 @@ fn one_pass(mut log: Log) -> (Made, usize, usize) {
         .filter(|event| event.task_id == Some(TaskId::new(1)))
         .cloned()
         .collect();
-    // A task on its way is not written, but its fold reads the waits:
-    // count those it is given made for it, not read where they are kept.
+    // A task on its way is written, not settled, and its fold reads the
+    // waits: count those it is given made for it, not read where they are
+    // kept.
     let (mut made_waits, mut read_waits) = (0, 0);
     let row = super::super::task_row(
         TaskId::new(1),
@@ -493,7 +513,8 @@ fn one_pass(mut log: Log) -> (Made, usize, usize) {
     );
     assert_eq!(row.task_id, Some(TaskId::new(1)));
     inputs.read(&task, events);
-    assert_eq!(build(&task, &inputs, &[]), None);
+    let built = build(&task, &inputs, &[]).unwrap();
+    assert!(built.ended_at.is_none() && !built.is_final);
     let copied = inputs.rows.values().map(|row| row.records.len()).sum();
     let attempts = inputs
         .rows
@@ -663,6 +684,62 @@ fn a_runs_token_is_revoked_after_its_last_issue_and_a_later_step_writes_its_row(
     );
     inputs.forget(&target);
     assert_eq!(build(&target, &inputs, &[]), None);
+}
+
+/// A task's fold over the events the stored row read that lacks a wait
+/// the stored row read ended by its supervisor's silence was folded at an
+/// earlier time: it would write (its waits differ) but is behind, and the
+/// fold past the silence is not behind the earlier one. A fold that read a
+/// later event of the task is not behind either.
+#[test]
+fn a_task_fold_before_a_silence_over_the_same_events_is_behind_the_one_past_it() {
+    use crate::domain::supervisor_life::SILENT_AFTER_MS;
+    let task_row = |log: &Log, secs: i64| {
+        super::super::build(&log.events, ms(secs), BUILT)
+            .into_iter()
+            .find(|row| row.kind == LedgerKind::Task)
+            .unwrap()
+    };
+    let mut log = Log::default();
+    log.add(Some(1), None, "task_created", json!({"status": "draft"}), 0)
+        .add(
+            Some(1),
+            None,
+            "task_status_changed",
+            json!({"from": "draft", "to": "ready"}),
+            5,
+        )
+        .add(
+            None,
+            None,
+            "slots_full_started",
+            json!({"supervisor": "s", "class": "heavy"}),
+            10,
+        )
+        .add(
+            None,
+            None,
+            "supervisor_alive",
+            json!({"supervisor": "s"}),
+            20,
+        );
+    let bound = 20 + SILENT_AFTER_MS / 1000;
+    let (before, past) = (task_row(&log, bound), task_row(&log, bound + 1));
+    assert_eq!(before.inputs_through.events, past.inputs_through.events);
+    assert!(before.inputs_through.life_ended.is_empty());
+    assert!(!past.inputs_through.life_ended.is_empty());
+    assert!(writes(Some(&past), &before) && behind(&past, &before));
+    assert!(writes(Some(&before), &past) && !behind(&before, &past));
+    log.add(
+        Some(1),
+        None,
+        "task_status_changed",
+        json!({"from": "ready", "to": "draft"}),
+        bound,
+    );
+    let later = task_row(&log, bound);
+    assert!(later.inputs_through.events > past.inputs_through.events);
+    assert!(writes(Some(&past), &later) && !behind(&past, &later));
 }
 
 /// Passes at `now_ms` on `builder` after the events `new` came in, as the

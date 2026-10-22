@@ -17,19 +17,37 @@
 //!   every run and task, those before the switch too, and catches up.
 //! - **Which are written**: a run whose life ended (its push finished or
 //!   was skipped, it ended without a landing, it was canceled), one pending
-//!   on its push, and a legacy run; a task that ended, or whose last run is
-//!   pending on its push or was until another run's push closed it, and a
-//!   legacy task; every session, queue and node
-//!   row ([`build`]). A run or task on its way is not written: its next
-//!   event marks it again. A row is written when the store has none, when
+//!   on its push, and a legacy run; every task from its `task_created`
+//!   (or its first record), ended or not, so that what a task not ended
+//!   records (a draft's registration and settling, an ask of no run) is
+//!   some row's; every session, queue and node row ([`build`]). A run on
+//!   its way is not written: its next event marks it again. A task not
+//!   ended is written not settled, its intervals up to the pass's time,
+//!   and each event of it (or of its runs) marks it again, until it ends
+//!   and settles. The waits before a claim that bear on its time ready are
+//!   inputs of it (their last event,
+//!   [`crate::domain::pre_claim::PreClaimInterval::reach`], and the starts
+//!   of those a supervisor's life ended, [`fold::fold_task`]), so that a
+//!   fold over fewer events (their times in their order) is [`behind`] one
+//!   over more, and while its row
+//!   is not settled and has time ready the waits that move mark it, so
+//!   that its overlays follow: a pass that finds the life of the supervisor
+//!   of a slots full not freed ended (its silence or stop,
+//!   [`Builder::due`]) and an event naming it after that end mark it;
+//!   while it is ready now or a wait still open bears on its time ready
+//!   that ended, so does an event that moves a wait (starts or ends one,
+//!   names such a supervisor). A time ready that ended with no wait open on
+//!   it reads no other move.
+//!   A row is written when the store has none, when
 //!   its fold is older than [`LEDGER_V`] (a legacy row aside, whose version
 //!   the store keeps as first written), when the new fold read an input
 //!   past the stored one's `inputs_through` (dirty), and when it is now
 //!   settled ([`writes`]). The same inputs fold to the same row, which is
 //!   not written again. A fold that read less of some input than the
-//!   stored row (another supervisor's builder, its cursors ahead, wrote it)
-//!   is not written and stays marked until its cursors pass it
-//!   ([`behind`]).
+//!   stored row (another supervisor's builder, its cursors ahead or its
+//!   pass at a later time, wrote it: a task's time is an input, past a
+//!   silence that ends its waits) is not written and stays marked until
+//!   its cursors and its time pass it ([`behind`]).
 //! - **Steps**: a run's row folds the run's steps up to the step cursor
 //!   onto what its stored row folded of them ([`RunSteps`],
 //!   [`super::steps::StepFold::fold_onto`]), so the steps the retention
@@ -51,9 +69,14 @@
 //!   over ([`Builder::due`]).
 //! - **Bounds**: at most [`WRITES_PER_PASS`] rows written and
 //!   [`CHECKS_PER_PASS`] marks looked at per pass; the rest stay marked for
-//!   the next pass.
+//!   the next pass, which starts at them and goes round ([`Builder::take`]),
+//!   so that no mark waits behind those marked again each pass (more tasks
+//!   ready under a slots full than a pass writes, which each event of its
+//!   supervisor marks and makes dirty).
 //! - **What a pass reads**: the events after its cursor, [`EVENTS_PER_READ`]
-//!   at a time, and the events of each run and task it folds. What the
+//!   at a time, and the events of each run and task it folds. It folds at
+//!   its clock's time, or at the latest event's it read when that is later
+//!   ([`Builder::folds_at`]). What the
 //!   folds of the queue as a whole read of the rest is [`Kept`] between
 //!   passes, so no pass reads the whole EventStore again
 //!   ([`Inputs::of`]). It drops the records of the session and queue rows
@@ -74,6 +97,7 @@
 
 use crate::domain::EventKind;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Bound;
 use std::sync::Arc;
 
 use super::fold::PushedTo;
@@ -90,6 +114,7 @@ use crate::domain::host_metrics::NodeSample;
 use crate::domain::pre_claim::PreClaimBook;
 use crate::domain::run_phase::{Phase, Recorded};
 use crate::domain::session_step::SessionStep;
+use crate::domain::stats::timestamp_millis;
 use crate::domain::supervisor_life::{Lives, supervisor_of};
 use crate::domain::{EventId, RunEvent, TaskId};
 
@@ -133,6 +158,16 @@ impl Target {
             Self::Node(node, start) => (LedgerKind::Node, node::key(node, *start)),
         }
     }
+}
+
+/// What the events read moved of the waits before a claim
+/// ([`crate::domain::pre_claim::Moved`]), which the tasks with time ready
+/// read ([`Builder::mark_ready`]): a wait's reach, and a slots full its
+/// supervisor's life had ended opened again.
+#[derive(Debug, Clone, Copy, Default)]
+struct WaitsMoved {
+    reached: bool,
+    reopened: bool,
 }
 
 /// What the folds of the queue as a whole (the session and queue rows,
@@ -287,8 +322,13 @@ impl Kept {
     /// Keep what the folds of the queue as a whole read of `new`
     /// (ascending id), and add to `touched` the session and queue rows
     /// whose fold it changes; one at or before the last kept is kept
-    /// already.
-    fn add(&mut self, new: &[RunEvent], touched: &mut BTreeSet<(LedgerKind, String)>) {
+    /// already. What they moved of the waits before a claim.
+    fn add(
+        &mut self,
+        new: &[RunEvent],
+        touched: &mut BTreeSet<(LedgerKind, String)>,
+    ) -> WaitsMoved {
+        let mut waits = WaitsMoved::default();
         for event in new {
             if event.id <= self.last {
                 continue;
@@ -296,6 +336,8 @@ impl Kept {
             self.last = event.id;
             self.lives.add(event);
             let moved = self.pre_claim.add(event);
+            waits.reached |= moved.reached;
+            waits.reopened |= moved.reopened;
             let owned = owner::owner(event);
             self.queue_rows
                 .add(event, owned == Owner::Queue, moved, touched);
@@ -313,6 +355,7 @@ impl Kept {
             }
             self.wait_on_push(event);
         }
+        waits
     }
 
     /// Follow the runs waiting on a push, and keep `event` when it is a
@@ -581,11 +624,18 @@ impl Kept {
 pub struct Builder {
     /// The last EventStore event read.
     pub events: EventId,
+    /// The latest time (unix ms) of an event read: a pass folds at no
+    /// earlier time ([`Self::folds_at`]).
+    read_ms: i64,
     /// The last NodeSampleStore id read.
     pub samples: i64,
     /// The last SessionStepStore id read (the order the steps came in).
     pub steps: i64,
     marks: BTreeSet<Target>,
+    /// Where the next [`Self::take`] starts: the first mark the last pass
+    /// left past its bounds (not taken, or put back, [`Self::put_back`]).
+    /// None: at the first.
+    next: Option<Target>,
     /// Session and queue rows with an input after this event are to be
     /// looked at: set by an event of theirs, one that changed one of them
     /// or one naming a supervisor (whose life may end their intervals),
@@ -595,6 +645,11 @@ pub struct Builder {
     unsettled: BTreeMap<Target, i64>,
     /// The runs left pending on their push, each with its task.
     pending_pushes: BTreeMap<String, Option<TaskId>>,
+    /// The tasks whose row the store holds not settled and with time ready,
+    /// each with whether every move of a wait may change it
+    /// ([`waits_on_ready`]): the waits that move mark them
+    /// ([`Self::mark_ready`]).
+    ready_tasks: BTreeMap<TaskId, bool>,
     /// The runs with steps read that no row the store holds of them holds
     /// yet, each with when the earliest of those came in (unix ms): while
     /// such a run is marked the retention keeps the steps from then on
@@ -618,12 +673,15 @@ impl Default for Builder {
     fn default() -> Self {
         Self {
             events: EventId::new(0),
+            read_ms: i64::MIN,
             samples: 0,
             steps: 0,
             marks: BTreeSet::new(),
+            next: None,
             rows_after: None,
             unsettled: BTreeMap::new(),
             pending_pushes: BTreeMap::new(),
+            ready_tasks: BTreeMap::new(),
             unsaved_steps: BTreeMap::new(),
             touched: BTreeSet::new(),
             settled: BTreeSet::new(),
@@ -639,9 +697,12 @@ impl Builder {
     /// them, and move the cursor past them.
     pub fn mark_events(&mut self, new: &[RunEvent]) {
         let kept = Arc::make_mut(&mut self.kept);
+        let mut waits = WaitsMoved::default();
         for event in new {
             let mut touched = BTreeSet::new();
-            kept.add(std::slice::from_ref(event), &mut touched);
+            let moved = kept.add(std::slice::from_ref(event), &mut touched);
+            waits.reached |= moved.reached;
+            waits.reopened |= moved.reopened;
             if let Some(run) = &event.run_id {
                 self.marks.insert(Target::Run(run.to_string()));
             }
@@ -667,7 +728,41 @@ impl Builder {
                 }
             }
             self.events = self.events.max(event.id);
+            if let Some(at) = timestamp_millis(&event.created_at) {
+                self.read_ms = self.read_ms.max(at);
+            }
         }
+        if waits.reopened {
+            self.mark_ready(true);
+        } else if waits.reached {
+            self.mark_ready(false);
+        }
+    }
+
+    /// The time a pass whose clock reads `now_ms` folds at, and is due at
+    /// ([`Self::due`]): no earlier than the latest event read, which came
+    /// by then though the pass took its time before it read it (a second's
+    /// clock, the time a read takes). A fold at a time before an event it
+    /// reads would cut what that event starts (its time ready) to the time
+    /// folded at, and a fold at a later time over the same events would
+    /// read less of the waits than it ([`behind`]).
+    pub fn folds_at(&self, now_ms: i64) -> i64 {
+        now_ms.max(self.read_ms)
+    }
+
+    /// Mark the tasks with time ready whose overlays or inputs a wait that
+    /// moved may change ([`fold::fold_task`]): those any move may (ready
+    /// now, or a wait still open bears on their time ready that ended), and
+    /// with `all` the others too. Those read only the waits a supervisor's
+    /// life ended: one ended as it passed a silence or after a stop
+    /// ([`Self::due`]), or opened again by an event naming the supervisor.
+    fn mark_ready(&mut self, all: bool) {
+        self.marks.extend(
+            self.ready_tasks
+                .iter()
+                .filter(|(_, every_move)| all || **every_move)
+                .map(|(task, _)| Target::Task(*task)),
+        );
     }
 
     /// Mark the node hours the samples `new` (after [`Self::samples`]) are
@@ -753,10 +848,16 @@ impl Builder {
     /// so that no read of them this pass makes them again: of the kept
     /// ends, only those that came by then ([`PreClaimBook::close_lives`]);
     /// and drop the records of the rows the store holds settled that no
-    /// event read since reached ([`Kept`]).
+    /// event read since reached ([`Kept`]). When it closed any, mark the
+    /// tasks with time ready ([`Self::mark_ready`]), whose overlays read
+    /// that end.
     pub fn due(&mut self, now_ms: i64) {
         let kept = Arc::make_mut(&mut self.kept);
-        kept.pre_claim.close_lives(&kept.lives, now_ms);
+        // A silence ends a wait with no event: the tasks ready may read it.
+        if kept.pre_claim.close_lives(&kept.lives, now_ms) {
+            self.mark_ready(true);
+        }
+        let kept = Arc::make_mut(&mut self.kept);
         // One an event reached since stays noted until its fold is tracked.
         let (reached, settled): (BTreeSet<_>, BTreeSet<_>) = std::mem::take(&mut self.settled)
             .into_iter()
@@ -788,17 +889,47 @@ impl Builder {
         !self.marks.is_empty() || self.rows_after.is_some()
     }
 
-    /// Take up to `limit` marks, runs first.
+    /// Take up to `limit` marks in their order (runs first), from where the
+    /// last pass left off and round: the marks a pass left past its bounds
+    /// are taken before those it looked at, which may be marked again
+    /// before the next pass.
     pub fn take(&mut self, limit: usize) -> Vec<Target> {
-        let taken: Vec<Target> = self.marks.iter().take(limit).cloned().collect();
+        let taken: Vec<Target> = match self.next.take() {
+            Some(from) => self
+                .marks
+                .range(&from..)
+                .chain(self.marks.range(..&from))
+                .take(limit)
+                .cloned()
+                .collect(),
+            None => self.marks.iter().take(limit).cloned().collect(),
+        };
         for target in &taken {
             self.marks.remove(target);
         }
+        // Those not taken go on after the last taken (none after it: at
+        // the first).
+        self.next = taken.last().and_then(|last| {
+            self.marks
+                .range((Bound::Excluded(last), Bound::Unbounded))
+                .next()
+                .cloned()
+        });
         taken
     }
 
-    /// Put `target` back to be looked at next pass (its write failed, or
-    /// the pass ran out of its bound).
+    /// Put back the marks a pass took and did not look at (past its bound
+    /// of writes, or after the write before them failed), `first` and then
+    /// `rest` in the order taken: the next pass starts at `first`.
+    pub fn put_back(&mut self, first: Target, rest: impl IntoIterator<Item = Target>) {
+        self.marks.insert(first.clone());
+        self.marks.extend(rest);
+        self.next = Some(first);
+    }
+
+    /// Put `target` back to be looked at next pass in its turn (another
+    /// writer kept writing its row, or its cursors are behind the stored
+    /// row's).
     pub fn keep(&mut self, target: Target) {
         self.marks.insert(target);
     }
@@ -829,6 +960,12 @@ impl Builder {
             _ => {
                 self.unsettled.remove(target);
             }
+        }
+        if let Target::Task(task) = target {
+            match waits_on_ready(row) {
+                Some(now) => self.ready_tasks.insert(*task, now),
+                None => self.ready_tasks.remove(task),
+            };
         }
         if let Target::Run(run) = target {
             self.unsaved_steps.remove(run);
@@ -915,16 +1052,35 @@ pub fn pending_push(row: &LedgerRow) -> bool {
             .is_some_and(|last| last.phase == fold::PUSH_PENDING)
 }
 
-/// Whether the task row `row`'s last run waits on a push or waited on one
-/// another run's push closed (the task not ended after it): its last
-/// interval of a run is `push_pending`. The row it was written as while
-/// pending is folded again once the push closes it.
-fn run_waited_on_push(row: &LedgerRow) -> bool {
-    row.intervals
-        .iter()
-        .rev()
-        .find(|interval| interval.run_id.is_some())
-        .is_some_and(|last| last.phase == fold::PUSH_PENDING)
+/// Whether the task row `row`, not settled, has time ready, and whether
+/// every move of a wait may change it: it is ready up to the time it was
+/// folded at (its status `ready` then, [`fold::READY_SINCE`], though it
+/// became ready at that very time and has no time ready yet), or a wait
+/// still open bears on its time ready that ended ([`fold::WAITS_OPEN`]),
+/// whose last event is its input. The waits before a claim on that time
+/// may move (end, or their supervisor's life end, before the end of a time
+/// ready past too) and others start on the time ready up to now, which its
+/// overlays read ([`fold::fold_task`]) though no event of the task marks
+/// it. None for a settled row or one never ready.
+fn waits_on_ready(row: &LedgerRow) -> Option<bool> {
+    if row.is_final {
+        return None;
+    }
+    let every_move = row
+        .detail
+        .get(fold::READY_SINCE)
+        .is_some_and(serde_json::Value::is_i64)
+        || row
+            .detail
+            .get(fold::WAITS_OPEN)
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+    (every_move
+        || row
+            .intervals
+            .iter()
+            .any(|interval| interval.phase == fold::READY))
+    .then_some(every_move)
 }
 
 /// Whether the telemetry token of the run whose events are `events`
@@ -959,8 +1115,9 @@ pub fn run_settles(row: &LedgerRow, now_ms: i64) -> bool {
 /// has none): a missing row, one of an older [`LEDGER_V`] (a newer binary's is left as it
 /// is; not a legacy one, whose version the store keeps), one that read fewer inputs than
 /// `built` (dirty: a later event, the push that closed its pending push, a
-/// later sample, a later step, a supervisor's later event), and one
-/// settled now. A
+/// later sample, a later step, a supervisor's later event), a task's whose
+/// waits a supervisor's life ended are others (the time passed a silence;
+/// one folded at an earlier time is [`behind`]), and one settled now. A
 /// stored row that holds the same inputs is not written again, so the same
 /// inputs read twice leave it as it is.
 pub fn writes(stored: Option<&LedgerRow>, built: &LedgerRow) -> bool {
@@ -969,6 +1126,7 @@ pub fn writes(stored: Option<&LedgerRow>, built: &LedgerRow) -> bool {
     };
     (!stored.is_legacy() && stored.ledger_v < LEDGER_V)
         || built.inputs_through.last() > stored.inputs_through.last()
+        || built.inputs_through.life_ended != stored.inputs_through.life_ended
         || built.inputs_through.node_samples > stored.inputs_through.node_samples
         || built.inputs_through.steps > stored.inputs_through.steps
         || (built.is_final && !stored.is_final && !stored.is_legacy())
@@ -976,16 +1134,33 @@ pub fn writes(stored: Option<&LedgerRow>, built: &LedgerRow) -> bool {
 
 /// Whether the fold `built` read less of some input than `stored`, the row
 /// the store holds: another writer (another supervisor's builder, its
-/// cursors ahead) wrote it. Written over it, it would take back what that
-/// one read (a later event, its intervals and its `final`) though it read
-/// more of another input (a later step), so it is not written and folds
-/// again once its cursors passed the stored row's.
+/// cursors ahead, or its pass at a later time) wrote it. Written over it,
+/// it would take back what that one read (a later event, its intervals and
+/// its `final`, a wait a silence ended) though it read more of another
+/// input (a later step), so it is not written and folds again once its
+/// cursors and its time passed the stored row's.
+///
+/// The time is an input of a task's row with no mark of its own: over the
+/// same events, folded at no earlier time than any of them
+/// ([`Builder::folds_at`]), the waits a supervisor's life ended it reads
+/// (`life_ended`) only grow with the time folded at, as a silence passes.
+/// So a fold of a task that read the events the stored row read and lacks
+/// one of those its waits was folded at an earlier time (a pass that began
+/// before the silence and writes after the one past it, whose builder
+/// closed that wait and marks the task no more, or a clock set back). One
+/// that read a later event is written: the builder ahead in time reads that
+/// event too, which marks the task, and folds it again.
 pub fn behind(stored: &LedgerRow, built: &LedgerRow) -> bool {
     let (held, read) = (&stored.inputs_through, &built.inputs_through);
     read.events < held.events
         || read.last() < held.last()
         || read.node_samples < held.node_samples
         || read.steps < held.steps
+        || (read.events == held.events
+            && held
+                .life_ended
+                .iter()
+                .any(|wait| !read.life_ended.contains(wait)))
 }
 
 /// What the row of a run folds of its session steps: its steps up to the
@@ -1196,7 +1371,8 @@ impl Inputs {
 }
 
 /// The row of `target` as it is written now, settled or not: none for a
-/// run or task on its way (or with no events), a session or queue row not
+/// run on its way, a run or task with no events (or a task with no record
+/// of its own and no run), a session or queue row not
 /// among `inputs.rows`, or a node hour with no sample left. A run's row
 /// holds its steps given ([`Inputs::read_steps`]), a legacy one none.
 /// `samples` are the NodeSampleStore's of a node target's hour.
@@ -1236,9 +1412,6 @@ pub fn build(target: &Target, inputs: &Inputs, samples: &[NodeSample]) -> Option
                 now,
                 &inputs.built_at,
             );
-            if !(row.is_legacy() || row.ended_at.is_some() || run_waited_on_push(&row)) {
-                return None;
-            }
             row.is_final = run_settles(&row, now);
             Some(row)
         }

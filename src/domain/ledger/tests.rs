@@ -494,6 +494,7 @@ fn wait(kind: IntervalKind, task: Option<i64>, from: i64, to: i64) -> PreClaimIn
         ended_at: Some(utc_text(ms(to))),
         end: None,
         ended_by: None,
+        reach: EventId::new(1000 + from),
     }
 }
 

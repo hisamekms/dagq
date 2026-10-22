@@ -32,6 +32,8 @@ struct Memory {
     read_all: Cell<usize>,
     /// Refuses every write of a row.
     refuses: Cell<bool>,
+    /// The row whose read fails, as a stored row that does not parse.
+    broken: RefCell<Option<(LedgerKind, String)>>,
     /// Runs once, as the next run's steps are read: another builder's pass
     /// between a fold's read of the row and its write.
     between: RefCell<Option<Between>>,
@@ -195,7 +197,12 @@ impl LedgerStore for Memory {
         self.write_ledger_row(row).map(Some)
     }
     fn ledger_row(&self, kind: LedgerKind, key: &str) -> Result<Option<LedgerRow>> {
-        Ok(self.rows.borrow().get(&(kind, key.to_owned())).cloned())
+        let row = (kind, key.to_owned());
+        ensure!(
+            self.broken.borrow().as_ref() != Some(&row),
+            "the stored row does not parse"
+        );
+        Ok(self.rows.borrow().get(&row).cloned())
     }
     fn ledger_rows(&self, kind: LedgerKind) -> Result<Vec<LedgerRow>> {
         Ok(self
@@ -366,6 +373,36 @@ impl SessionOwners for Memory {
 /// One pass at `secs` after [`T0`].
 fn pass(memory: &Memory, builder: &mut Builder, secs: i64) -> Built {
     build_pass(memory, builder, ms(secs), BUILT, Retain::default())
+}
+
+/// How many passes [`drain`] runs at most.
+const DRAIN_PASSES: usize = 10;
+
+/// Passes at `secs` until one fails or leaves no mark, at most
+/// [`DRAIN_PASSES`]: the last pass.
+fn passes_to_drain(memory: &Memory, builder: &mut Builder, secs: i64) -> Built {
+    let mut built = pass(memory, builder, secs);
+    for _ in 1..DRAIN_PASSES {
+        if built.backlog == 0 || built.failure.is_some() {
+            break;
+        }
+        built = pass(memory, builder, secs);
+    }
+    built
+}
+
+/// [`passes_to_drain`], whose last pass neither failed nor left a mark: a
+/// mark left after them (a fold kept behind, a write that fails) fails the
+/// test rather than keeping it running.
+#[track_caller]
+fn drain(memory: &Memory, builder: &mut Builder, secs: i64) -> Built {
+    let built = passes_to_drain(memory, builder, secs);
+    assert_eq!(
+        (built.backlog, &built.failure),
+        (0, &None),
+        "marks left after at most {DRAIN_PASSES} passes at {secs}"
+    );
+    built
 }
 
 /// The retention runs once a local day: the steps past
@@ -1088,11 +1125,11 @@ fn passes_on_a_few_events_each_write_the_rows_of_the_fold_of_every_event() {
 /// ([`crate::domain::ledger::build`]), settled as the builder says: a
 /// row ended by an event it does not record (a deferral a claim ends), the
 /// landing slot of a run with no supervisor's event, a task left pending
-/// on its push that a later push closes among them. A run or task on its
-/// way is not written; one a later input put on its way again is left as
-/// it was; a legacy row keeps the values first written. The node samples
-/// come in one more a pass, and the node rows are those of the samples so
-/// far ([`node::node_rows`]).
+/// on its push that a later push closes among them. A run on its way is
+/// not written, and one a later input put on its way again is left as it
+/// was; a task on its way is written, not settled; a legacy row keeps the
+/// values first written. The node samples come in one more a pass, and the
+/// node rows are those of the samples so far ([`node::node_rows`]).
 #[test]
 fn passes_on_any_number_of_events_each_write_the_rows_of_the_fold_so_far() {
     let (every_kind, samples) = every_kind_of_row();
@@ -1738,3 +1775,259 @@ fn a_pass_reads_back_a_dropped_closing_push_for_a_settled_run_folded_again() {
         );
     }
 }
+
+/// A task not ended has a row from its `task_created`, not settled: the
+/// passes write the rows of the open follow-up drafts and of the task
+/// whose planner asked with no run, and the window of the stored rows
+/// gives `draft_flow`, `auto_repairs` and `planner_routes` as `stats`
+/// makes them of every event. Once the task ends, a pass folds its row
+/// again and settles it after the grace.
+#[test]
+fn a_task_not_ended_has_a_row_whose_records_give_the_drafts_and_its_asks() {
+    use crate::domain::EventId;
+    use crate::domain::ledger::window::{WindowQuery, select};
+    use crate::domain::stats::{auto_repairs, drafts, planner_routes};
+    use std::collections::HashMap;
+
+    let a = run_id(1);
+    let mut log = Log::default();
+    log.add(
+        None,
+        None,
+        "session_opened",
+        json!({"kind": "runtime_planner", "planner_id": 5, "route": "headless"}),
+        0,
+    )
+    .landed(1, &a, 0)
+    .add(
+        Some(1),
+        Some(&a),
+        "follow_up_registered",
+        json!({"task_id": 7}),
+        940,
+    )
+    .add(
+        Some(1),
+        Some(&a),
+        "follow_up_registered",
+        json!({"task_id": 8}),
+        940,
+    )
+    .add(
+        Some(7),
+        None,
+        "task_created",
+        json!({"status": "draft"}),
+        940,
+    )
+    .add(
+        Some(8),
+        None,
+        "task_created",
+        json!({"status": "draft"}),
+        940,
+    )
+    .add(
+        Some(8),
+        None,
+        "task_status_changed",
+        json!({"from": "draft", "to": "ready"}),
+        950,
+    )
+    .add(
+        Some(8),
+        None,
+        "ask_opened",
+        json!({
+            "kind": "planner_question",
+            "asked_by": "planner:5",
+            "reason_category": "scope",
+            "ask_id": 1,
+        }),
+        960,
+    );
+    let memory = Memory::of(&log);
+    let mut builder = Builder::default();
+    drain(&memory, &mut builder, 1000);
+    for task in ["7", "8"] {
+        let row = memory.row(LedgerKind::Task, task);
+        assert!(!row.is_final && row.ended_at.is_none(), "{task}: {row:?}");
+    }
+
+    let now = ms(1000);
+    let rows: Vec<LedgerRow> = memory.rows.borrow().values().cloned().collect();
+    let window = select(
+        rows,
+        &WindowQuery {
+            now_ms: now,
+            ..WindowQuery::default()
+        },
+    );
+    let from_rows = window.events();
+    let all = &log.events;
+    let (after, upto) = (EventId::new(0), log.last());
+    let flow = |events: &[RunEvent]| {
+        drafts::draft_flow(events, &HashMap::new(), after, upto, now, |_| true)
+    };
+    let repairs = |events: &[RunEvent]| auto_repairs::auto_repairs(events, after, upto, |_| true);
+    let routes =
+        |events: &[RunEvent]| planner_routes::planner_routes(events, after, upto, |_| true, None);
+    assert_eq!(flow(&from_rows), flow(all));
+    assert_eq!(repairs(&from_rows), repairs(all));
+    assert_eq!(routes(&from_rows), routes(all));
+    let flow = flow(all);
+    assert_eq!(
+        (flow.all.registered, flow.all.adopted, flow.all.backlog),
+        (2, 1, 1)
+    );
+    assert_eq!(routes(all)["headless"].planner_questions, 1);
+    assert_eq!(
+        repairs(all)
+            .by_day
+            .values()
+            .map(|day| day.asks_opened)
+            .sum::<i64>(),
+        1
+    );
+
+    log.add(
+        Some(8),
+        None,
+        "task_status_changed",
+        json!({"from": "ready", "to": "canceled"}),
+        1100,
+    );
+    memory.events.replace(log.events.clone());
+    pass(&memory, &mut builder, 1200);
+    let ended = memory.row(LedgerKind::Task, "8");
+    assert_eq!(ended.ended_at, Some(ms(1100)));
+    assert!(!ended.is_final);
+    pass(&memory, &mut builder, 1100 + SETTLE_GRACE_MS / 1000);
+    assert!(memory.row(LedgerKind::Task, "8").is_final);
+    assert!(!memory.row(LedgerKind::Task, "7").is_final);
+}
+
+/// More tasks ready under a slots full than a pass writes, each made
+/// dirty again by an event of its supervisor before every pass, leave no
+/// other mark waiting: every pass writes up to its bound, and the passes
+/// go round the marks, so the rows past those tasks (a draft, a task whose
+/// planner asked with no run, the planner's session) are written too.
+#[test]
+fn tasks_ready_marked_again_past_the_bound_each_pass_leave_no_other_row_unwritten() {
+    let ready = i64::try_from(WRITES_PER_PASS).unwrap() + 50;
+    let (draft, asked) = (ready + 1, ready + 2);
+    let mut log = Log::default();
+    log.add(
+        None,
+        None,
+        "slots_full_started",
+        json!({"supervisor": "s", "class": "heavy"}),
+        0,
+    );
+    for task in (1..=ready).chain([asked]) {
+        log.add(
+            Some(task),
+            None,
+            "task_created",
+            json!({"status": "draft"}),
+            1,
+        )
+        .add(
+            Some(task),
+            None,
+            "task_status_changed",
+            json!({"from": "draft", "to": "ready"}),
+            2,
+        );
+    }
+    log.add(
+        Some(draft),
+        None,
+        "task_created",
+        json!({"status": "draft"}),
+        3,
+    )
+    .add(
+        None,
+        None,
+        "session_opened",
+        json!({"kind": "runtime_planner", "planner_id": 5, "route": "headless"}),
+        3,
+    )
+    .add(
+        Some(asked),
+        None,
+        "ask_opened",
+        json!({
+            "kind": "planner_question",
+            "asked_by": "planner:5",
+            "reason_category": "scope",
+            "ask_id": 1,
+        }),
+        4,
+    );
+    let memory = Memory::default();
+    let mut builder = Builder::default();
+    for secs in 10..14 {
+        log.add(
+            None,
+            None,
+            "supervisor_alive",
+            json!({"supervisor": "s"}),
+            secs,
+        );
+        memory.events.replace(log.events.clone());
+        let built = pass(&memory, &mut builder, secs);
+        assert_eq!(built.written, WRITES_PER_PASS, "{secs}: {built:?}");
+    }
+    for task in 1..=asked {
+        let rows = memory.rows.borrow();
+        let row = rows.get(&(LedgerKind::Task, task.to_string()));
+        assert!(row.is_some_and(|row| !row.is_final), "{task}");
+    }
+    let asks = memory.row(LedgerKind::Task, &asked.to_string());
+    assert!(
+        asks.records
+            .iter()
+            .any(|record| record.kind == EventKind::AskOpened),
+        "{asks:?}"
+    );
+    assert_eq!(memory.count(LedgerKind::Session), 1);
+}
+
+/// A target whose write fails each pass (its stored row does not read)
+/// stops no other: the pass that fails keeps it in its turn and the next
+/// pass starts at the targets after it, so those are written while it
+/// stays marked.
+#[test]
+fn a_target_that_fails_each_pass_leaves_the_others_written() {
+    let mut log = Log::default();
+    for task in 1..=3 {
+        log.add(
+            Some(task),
+            None,
+            "task_created",
+            json!({"status": "draft"}),
+            task,
+        );
+    }
+    let memory = Memory::of(&log);
+    memory
+        .broken
+        .replace(Some((LedgerKind::Task, "1".to_owned())));
+    let mut builder = Builder::default();
+    for secs in 10..13 {
+        let built = pass(&memory, &mut builder, secs);
+        assert!(built.failure.is_some(), "{secs}: {built:?}");
+        assert_eq!(built.backlog, if secs == 10 { 3 } else { 1 }, "{secs}");
+    }
+    assert_eq!(memory.count(LedgerKind::Task), 2);
+    assert!(
+        !memory
+            .rows
+            .borrow()
+            .contains_key(&(LedgerKind::Task, "1".to_owned()))
+    );
+}
+
+mod waits;

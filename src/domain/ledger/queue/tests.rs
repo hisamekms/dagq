@@ -405,6 +405,7 @@ fn gone_interval(
         ended_at: Some(crate::domain::marks::utc_text(ms(end_secs))),
         end: Some(claim_hold::ENDED_SUPERVISOR_GONE.into()),
         ended_by: ended_by.map(str::to_owned),
+        reach: EventId::new(start),
     }
 }
 

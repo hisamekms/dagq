@@ -126,7 +126,8 @@ impl Retain {
 }
 
 /// One pass on `store` at `now_ms`, the rows built at `built_at`: read the
-/// inputs after `builder`'s cursors, mark, fold and write what changed,
+/// inputs after `builder`'s cursors, mark, fold and write what changed (at
+/// no earlier time than an event read, [`Builder::folds_at`]),
 /// and drop what `retain` says, the steps only up to those a run's row
 /// does not hold yet ([`Builder::steps_held_since`]). A failure stops the pass and keeps every
 /// mark not written.
@@ -195,6 +196,8 @@ fn pass(
             break;
         }
     }
+    // What it read came by then.
+    let now_ms = builder.folds_at(now_ms);
     builder.due(now_ms);
     if !builder.marked() {
         return Ok(());
@@ -205,14 +208,17 @@ fn pass(
     builder.mark_rows(&inputs.rows);
     let mut targets = builder.take(CHECKS_PER_PASS).into_iter();
     while let Some(target) = targets.next() {
+        // The next pass starts at what this one did not look at.
         if built.written >= WRITES_PER_PASS {
-            builder.keep(target);
-            continue;
+            builder.put_back(target, targets);
+            break;
         }
         if let Err(error) = write(store, builder, &target, &mut inputs, built) {
+            // Its turn comes again after the rest: one failing each pass
+            // stops no other.
             builder.keep(target);
-            for target in targets {
-                builder.keep(target);
+            if let Some(next) = targets.next() {
+                builder.put_back(next, targets);
             }
             return Err(error);
         }
@@ -336,7 +342,8 @@ fn fold_and_write(
         return Ok(true);
     };
     if writes(stored.as_ref(), &row) {
-        // Its cursors are behind the stored row's: they pass it next pass.
+        // Its cursors or its time are behind the stored row's: they pass
+        // it in a later pass.
         if stored.as_ref().is_some_and(|stored| behind(stored, &row)) {
             builder.keep(target.clone());
             return Ok(true);

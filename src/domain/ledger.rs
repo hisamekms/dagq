@@ -49,7 +49,7 @@ use super::{EventId, RunEvent, TaskId};
 /// The version of the fold: raised when what a row holds or how it is
 /// folded changes, so every row is built again (a legacy row's frozen
 /// values aside, which the store keeps).
-pub const LEDGER_V: u32 = 4;
+pub const LEDGER_V: u32 = 5;
 
 /// The kind of a row. The store keeps every kind in one table by this
 /// column, so a new kind is a new value.
@@ -120,6 +120,17 @@ pub struct InputsThrough {
     /// ([`settle::life_input`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supervisor: Option<EventId>,
+    /// For a task with time ready, the start and the last event (its
+    /// [`crate::domain::pre_claim::PreClaimInterval::reach`]) of each wait
+    /// before a claim its supervisor's life ended that its overlays read
+    /// ([`fold::TaskLife::life_ended`]; one a silence ended that starts by
+    /// the end of that time, whenever it ended): a time past a silence ends
+    /// one with no event, and a row whose waits differ is written again
+    /// ([`builder::writes`]), though not by a fold over the same events
+    /// that lacks one of them, folded at an earlier time
+    /// ([`builder::behind`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub life_ended: Vec<(EventId, EventId)>,
     /// For a node row, the largest NodeSampleStore id it folded: a sample
     /// of its bucket with a larger one (a late one, an imported one) makes
     /// it dirty ([`settle::node_settlement`]). Its `events` is 0.
@@ -251,7 +262,8 @@ pub struct LedgerRow {
     pub after_claim: Option<AfterClaim>,
     /// What else the kind folds: a run's milestones, the run that closed
     /// its pending push and its session steps ([`steps::DETAIL_KEY`]), a
-    /// task's ready time, runs and overlays, a
+    /// task's ready time (and while ready now, since when:
+    /// [`fold::READY_SINCE`]), runs and overlays, a
     /// node row's samples.
     pub detail: Value,
     /// A legacy row's frozen values (and its mark: `Some`): a run's
@@ -284,6 +296,7 @@ impl LedgerRow {
             inputs_through: InputsThrough {
                 events: EventId::new(0),
                 supervisor: None,
+                life_ended: Vec::new(),
                 node_samples: None,
                 steps: None,
             },
@@ -479,7 +492,7 @@ pub fn task_row(
 ) -> LedgerRow {
     let mut row = LedgerRow::new(LedgerKind::Task, task.to_string(), Some(task), built_at);
     match fold::fold_task(task, events, pushes, pre_claim, now_ms) {
-        TaskFold::Life(life) => fill_task(&mut row, life),
+        TaskFold::Life(life) => fill_task(&mut row, *life),
         TaskFold::Legacy { runs } => {
             row.inputs_through.events = events
                 .iter()
@@ -555,6 +568,7 @@ pub fn build(events: &[RunEvent], now_ms: i64, built_at: &str) -> Vec<LedgerRow>
 
 fn fill_task(row: &mut LedgerRow, life: TaskLife) {
     row.inputs_through.events = life.inputs_through;
+    row.inputs_through.life_ended = life.life_ended;
     row.started_at = Some(life.start);
     row.ended_at = life.end;
     row.outcome = life.outcome;
@@ -567,6 +581,12 @@ fn fill_task(row: &mut LedgerRow, life: TaskLife) {
         "overlays": life.overlays,
         "overlay_ms": life.overlay_millis,
     });
+    if let Some(since) = life.ready_since {
+        row.detail[fold::READY_SINCE] = json!(since);
+    }
+    if life.waits_open {
+        row.detail[fold::WAITS_OPEN] = json!(true);
+    }
 }
 
 #[cfg(test)]

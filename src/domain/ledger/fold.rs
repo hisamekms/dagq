@@ -19,6 +19,7 @@ use serde_json::{Map, Value};
 
 use crate::domain::after_claim::{AfterClaim, AfterClaimTrack};
 use crate::domain::claim_facts::ATTRIBUTES;
+use crate::domain::claim_hold;
 use crate::domain::pre_claim::{IntervalKind, PreClaimInterval};
 use crate::domain::run::payload::typed;
 use crate::domain::run_phase::{Attempt, Blocker, Holds, PUSHED, Phase};
@@ -36,6 +37,14 @@ pub const DEPENDENCY_WAIT: &str = "dependency_wait";
 pub const PLAN_REVIEW: &str = "plan_review";
 /// A task's time as a draft.
 pub const DRAFT: &str = "draft";
+/// The key of a task row's detail that holds when its status `ready`
+/// began, while that is its status now and it has not ended
+/// ([`TaskLife::ready_since`]).
+pub const READY_SINCE: &str = "ready_since";
+/// The key of a task row's detail that holds `true` while, not ready now,
+/// a wait still open bears on its time ready that ended
+/// ([`TaskLife::waits_open`]).
+pub const WAITS_OPEN: &str = "waits_open";
 /// A task's time ready under its hold (`task_held` to `task_released`,
 /// ADR-t1879-1): the run's own phase of the hold's wait, laid over the
 /// task's time before a claim with the same tags.
@@ -397,12 +406,39 @@ pub struct TaskLife {
     pub overlays: Vec<Overlay>,
     pub overlay_millis: BTreeMap<String, i64>,
     pub inputs_through: EventId,
+    /// Of the waits that bear on its time ready ([`overlays`]: one a
+    /// silence ended that starts by the end of that time, whenever it
+    /// ended), those their supervisor's life ended, by their start, each
+    /// with its [`PreClaimInterval::reach`]: a time past a silence ends one
+    /// with no event, which changes them, and so does a later event naming
+    /// its supervisor that opens it again, though a silence ends it again.
+    pub life_ended: Vec<(EventId, EventId)>,
+    /// While it has not ended and its status now is `ready`, when that
+    /// status began (at most the time folded to, so a fold at the time it
+    /// became ready has it too, though it has no time ready yet).
+    pub ready_since: Option<i64>,
+    /// While its status now is not `ready`, whether a wait still open at
+    /// the time folded to bears on a time ready that ended: its last event,
+    /// which moves while it is open (each event naming a slots full's
+    /// supervisor), is an input of the row ([`overlays`]).
+    pub waits_open: bool,
+}
+
+/// Of the waits that bear on a task's time ready ([`overlays`]), the
+/// greatest [`PreClaimInterval::reach`] (`waits`), whether one is open on
+/// a time ready that ended while not ready now (`open`), and the start and
+/// reach of those their supervisor's life ended (`life_ended`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Reach {
+    waits: Option<EventId>,
+    open: bool,
+    life_ended: Vec<(EventId, EventId)>,
 }
 
 /// What [`fold_task`] makes of a task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskFold {
-    Life(TaskLife),
+    Life(Box<TaskLife>),
     /// A run of it is from before the switch ([`fold_run`] gives none):
     /// the task is not folded either.
     Legacy {
@@ -501,7 +537,14 @@ pub fn fold_task(
     }
     fold.statuses_between(cursor, horizon);
     let intervals = fold.intervals;
-    let overlays = overlays(task, &intervals, pre_claim, now_ms);
+    // Ready now: its last status, not ended, read from the statuses and
+    // not the intervals, which have none of no length.
+    let ready_since = statuses
+        .last()
+        .filter(|(_, status)| end.is_none() && status == "ready")
+        .map(|(at, _)| (*at).clamp(start, horizon));
+    let open_ready = ready_since.map(|since| (since, horizon));
+    let (overlays, reach) = overlays(task, &intervals, pre_claim, now_ms, open_ready);
     let mut overlay_millis = BTreeMap::new();
     for kind in ["slots_full", "claim_hold", "claim_deferral"] {
         let covered = merged_millis(overlays.iter().filter(|overlay| overlay.kind == kind));
@@ -509,7 +552,7 @@ pub fn fold_task(
             overlay_millis.insert(kind.to_owned(), covered);
         }
     }
-    TaskFold::Life(TaskLife {
+    TaskFold::Life(Box::new(TaskLife {
         start,
         intervals,
         end,
@@ -523,9 +566,13 @@ pub fn fold_task(
             .iter()
             .map(|event| event.id)
             .chain(runs.iter().map(|(_, _, life)| life.inputs_through))
+            .chain(reach.waits)
             .max()
             .unwrap_or(EventId::new(0)),
-    })
+        life_ended: reach.life_ended,
+        ready_since,
+        waits_open: reach.open,
+    }))
 }
 
 /// The task's statuses from `start`, each with when it began: the `from`
@@ -654,14 +701,41 @@ impl Composer<'_> {
 }
 
 /// The waits of `pre_claim` that fall on `task`'s time [`READY`], cut to
-/// it: slots full and holds of any supervisor, deferrals of `task` only.
+/// it: slots full and holds of any supervisor, deferrals of `task` only;
+/// and the [`Reach`] of those that bear on its time ready, which a later
+/// event that moves one of them (its end, its supervisor's life) or starts
+/// another, and a time past its supervisor's silence, change:
+///
+/// - its reach, for a wait that starts by the end of `open_ready`, its time
+///   ready up to now while it has not ended (from when its status became
+///   `ready` to the time folded to, both included, so of no length at the
+///   time it became ready), and ends at or after its start (an open one at
+///   the time folded to, so one starting then too) or was ended by its
+///   supervisor's life; and for one that overlaps a time [`READY`], or
+///   starts before its end and was ended by its supervisor's life. Once a
+///   wait bore on a time, it does while the inputs grow (their times in the
+///   order of their events), so the reach read never goes back, and a fold
+///   over fewer events reads less ([`super::builder::behind`]). While not
+///   ready now, also whether one on a time [`READY`] is open, whose reach
+///   moves with it (each event naming a slots full's supervisor);
+/// - its start and reach, for a wait its supervisor's life ended that
+///   starts before the end of a time [`READY`] (or by that of
+///   `open_ready`), as those its reach is read of: one its supervisor's
+///   silence ended, whenever that was, as a later event naming the
+///   supervisor opens it again over every time since; one its stop ended,
+///   when that end falls on that time (on `open_ready`, any end by now,
+///   so that the time folded to does not change them). An open wait is cut
+///   to the end of a time ready past, so of the ends only these move its
+///   overlay there.
 fn overlays(
     task: TaskId,
     intervals: &[Interval],
     pre_claim: impl IntoIterator<Item = impl Borrow<PreClaimInterval>>,
     now_ms: i64,
-) -> Vec<Overlay> {
+    open_ready: Option<(i64, i64)>,
+) -> (Vec<Overlay>, Reach) {
     let mut out = Vec::new();
+    let mut reach = Reach::default();
     for wait in pre_claim {
         let wait = wait.borrow();
         let kind = match wait.kind {
@@ -678,6 +752,36 @@ fn overlays(
             .as_deref()
             .and_then(timestamp_millis)
             .unwrap_or(now_ms);
+        let life_ended = wait.end.as_deref() == Some(claim_hold::ENDED_SUPERVISOR_GONE);
+        // A silence's end names no supervisor; a stop's names it.
+        let silent = life_ended && wait.ended_by.is_none();
+        let on_ready = intervals
+            .iter()
+            .filter(|interval| interval.phase == READY)
+            .any(|ready| start < ready.end && (end > ready.start || life_ended));
+        if on_ready
+            || open_ready.is_some_and(|(from, to)| start <= to && (end >= from || life_ended))
+        {
+            reach.waits = reach.waits.max(Some(wait.reach));
+        }
+        // Ready now, every move marks it: the flag would only grow with the
+        // time folded to.
+        reach.open |= open_ready.is_none() && on_ready && wait.ended_at.is_none();
+        // Up to now, any end by then falls on it, whatever the time folded
+        // to; on a time past, one before its end.
+        let up_to_now = |(from, to): (i64, i64)| start <= to && (silent || end >= from);
+        let past = |ready: &Interval| {
+            start < ready.end && (silent || (end >= ready.start && end < ready.end))
+        };
+        let moves = life_ended
+            && (open_ready.is_some_and(up_to_now)
+                || intervals
+                    .iter()
+                    .filter(|interval| interval.phase == READY)
+                    .any(past));
+        if moves {
+            reach.life_ended.push((wait.id, wait.reach));
+        }
         for ready in intervals.iter().filter(|interval| interval.phase == READY) {
             let (from, to) = (start.max(ready.start), end.min(ready.end));
             if to > from {
@@ -692,7 +796,7 @@ fn overlays(
             }
         }
     }
-    out
+    (out, reach)
 }
 
 /// The time `overlays` cover together.

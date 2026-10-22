@@ -219,6 +219,11 @@ pub struct PreClaimInterval {
     pub ended_at: Option<String>,
     pub end: Option<String>,
     pub ended_by: Option<String>,
+    /// The last event that is an input of it: its start, the end it
+    /// recorded, or for slots full not freed the last event naming its
+    /// supervisor (whose life may end it). What reads it reads up to there.
+    #[serde(skip)]
+    pub reach: EventId,
 }
 
 /// The waits before a claim in `events` (ascending id) at `now_ms`, by the
@@ -269,11 +274,16 @@ pub enum Started {
 
 /// What one event did to the intervals ([`PreClaimBook::add`]): the one it
 /// started (by its own id), and the starts of those its own record ended:
-/// a wait before a claim's, then a hold on the landings'.
+/// a wait before a claim's, then a hold on the landings'; whether it
+/// moved the [`PreClaimInterval::reach`] of a wait before a claim, and
+/// whether it opened again a slots full its supervisor's life had ended
+/// ([`PreClaimBook::close_lives`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Moved {
     pub started: Option<Started>,
     pub ended: [Option<EventId>; 2],
+    pub reached: bool,
+    pub reopened: bool,
 }
 
 /// The waits before a claim ([`pre_claim_intervals`]) and the holds on the
@@ -364,7 +374,8 @@ impl PreClaimBook {
     pub fn add(&mut self, event: &RunEvent) -> Moved {
         let mut moved = Moved::default();
         if let Some(supervisor) = text(event, "supervisor") {
-            self.reopen(supervisor);
+            moved.reopened = self.reopen(supervisor);
+            moved.reached = self.reach_slots_full(supervisor, event.id);
         }
         let mut ended: Option<EventId> = None;
         if let Some(key) = slots_full_of(event) {
@@ -387,6 +398,7 @@ impl PreClaimBook {
                             ended_at: None,
                             end: None,
                             ended_by: None,
+                            reach: event.id,
                         },
                     );
                     moved.started = Some(Started::PreClaim(IntervalKind::SlotsFull));
@@ -426,6 +438,8 @@ impl PreClaimBook {
             }
         }
         moved.ended[0] = ended;
+        moved.reached |=
+            moved.ended[0].is_some() || matches!(moved.started, Some(Started::PreClaim(_)));
         if let Some(supervisor) = text(event, "supervisor")
             && !self.named.contains(supervisor)
             && (self.life_end_of.contains_key(supervisor) || self.has_slots_full(supervisor))
@@ -468,9 +482,10 @@ impl PreClaimBook {
     }
 
     /// Open again the slots full of `supervisor` its life closed: an event
-    /// naming it may move or undo that end.
-    fn reopen(&mut self, supervisor: &str) {
+    /// naming it may move or undo that end. Whether it opened any.
+    fn reopen(&mut self, supervisor: &str) -> bool {
         let mut key = (supervisor.to_owned(), SlotClass::Heavy);
+        let mut reopened = false;
         for class in [SlotClass::Heavy, SlotClass::Light] {
             key.1 = class;
             let Some(&start) = self.slots.get(&key) else {
@@ -481,8 +496,27 @@ impl PreClaimBook {
             {
                 unend(&mut interval);
                 self.open.insert(start, interval);
+                reopened = true;
             }
         }
+        reopened
+    }
+
+    /// Let `id`, an event naming `supervisor`, reach its slots full not
+    /// freed (open again by [`Self::reopen`]); whether it has one.
+    fn reach_slots_full(&mut self, supervisor: &str, id: EventId) -> bool {
+        let mut key = (supervisor.to_owned(), SlotClass::Heavy);
+        let mut reached = false;
+        for class in [SlotClass::Heavy, SlotClass::Light] {
+            key.1 = class;
+            if let Some(start) = self.slots.get(&key)
+                && let Some(interval) = self.open.get_mut(start)
+            {
+                interval.reach = id;
+                reached = true;
+            }
+        }
+        reached
     }
 
     /// Whether `supervisor` has a slots full not freed.
@@ -503,8 +537,10 @@ impl PreClaimBook {
     /// event names the supervisor again, and an earlier one reads them
     /// open while their lives had not ended then. It reads the ends of the
     /// supervisors named since the last close, and closes those of the
-    /// supervisors whose end came by `now_ms`: none of the rest.
-    pub fn close_lives(&mut self, lives: &supervisor_life::Lives, now_ms: i64) {
+    /// supervisors whose end came by `now_ms`: none of the rest. Whether it
+    /// closed any.
+    pub fn close_lives(&mut self, lives: &supervisor_life::Lives, now_ms: i64) -> bool {
+        let mut closed = false;
         self.closed_to = self.closed_to.max(now_ms);
         for supervisor in std::mem::take(&mut self.named) {
             let supervisor = match self.life_end_of.remove(&supervisor) {
@@ -538,9 +574,11 @@ impl PreClaimBook {
                 {
                     end_with_life(&mut interval, life);
                     self.closed.insert(start, (interval, None));
+                    closed = true;
                 }
             }
         }
+        closed
     }
 
     /// Every wait before a claim at `now_ms`, by the id of its start: a
@@ -641,6 +679,7 @@ fn opened(kind: IntervalKind, start: &RunEvent) -> PreClaimInterval {
         ended_at: None,
         end: None,
         ended_by: None,
+        reach: start.id,
     }
 }
 
@@ -655,6 +694,7 @@ fn ended_by(interval: &mut PreClaimInterval, event: &RunEvent, why: &str, by: Op
     interval.ended_at = Some(event.created_at.clone());
     interval.end = Some(why.to_owned());
     interval.ended_by = by;
+    interval.reach = event.id;
 }
 
 /// `interval`, open, at `now_ms`: a slots-full one ended at the end of its

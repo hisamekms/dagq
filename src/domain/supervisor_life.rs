@@ -20,6 +20,10 @@ use super::{EventId, HEARTBEAT_TIMEOUT_SECS, RunEvent, stats::timestamp_millis};
 /// prune's `supervisor_stopped` brings its last heartbeat.
 pub const SUPERVISOR_ALIVE_INTERVAL_SECS: i64 = 300;
 
+/// How long after its last event a supervisor with no stop is read as
+/// silent: its life ends at that event once this much more has passed.
+pub const SILENT_AFTER_MS: i64 = (SUPERVISOR_ALIVE_INTERVAL_SECS + HEARTBEAT_TIMEOUT_SECS) * 1000;
+
 /// Whether a supervisor whose last `supervisor_alive` (or its start) was
 /// `since_secs` ago records another now.
 pub fn alive_due(since_secs: i64) -> bool {
@@ -177,8 +181,7 @@ impl Life {
         if self.stopped.is_some() {
             return Some(i64::MIN);
         }
-        let silent_after = (SUPERVISOR_ALIVE_INTERVAL_SECS + HEARTBEAT_TIMEOUT_SECS) * 1000;
-        Some(self.last?.saturating_add(silent_after + 1))
+        Some(self.last?.saturating_add(SILENT_AFTER_MS + 1))
     }
 }
 
@@ -250,8 +253,7 @@ mod tests {
             last = Some(last.map_or(at, |last: i64| last.max(at)));
         }
         let last = last?;
-        let silent_after = (SUPERVISOR_ALIVE_INTERVAL_SECS + HEARTBEAT_TIMEOUT_SECS) * 1000;
-        (now_ms > last + silent_after).then_some(LifeEnd::Silent { at_ms: last })
+        (now_ms > last + SILENT_AFTER_MS).then_some(LifeEnd::Silent { at_ms: last })
     }
 
     /// Every supervisor's end read in one pass ([`Lives`]) and by
