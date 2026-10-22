@@ -1731,7 +1731,10 @@ impl Supervisor<'_> {
     /// (counted toward the revise limit, and judged by its reasons past it,
     /// ADR-t2599-1); anything else exits the session and asks a person
     /// with the job's recommendation. `concern_decided` records which: a
-    /// `send_back` past the limit as `revise_limit`, not applied.
+    /// `send_back` past the limit as `revise_limit`, not applied. It is
+    /// decided by `concern_decision(true)`, the limit judged after it in
+    /// [`Self::send_revise`]; an adopter decides a concern it takes over
+    /// the same way (`adopted_concern`).
     fn act_on_concern(
         &mut self,
         run: &TaskRun,
@@ -1980,24 +1983,45 @@ impl Supervisor<'_> {
         verdict: ReviewVerdict,
         job: &ActorContext,
         sent_back: SentBack,
-        (revises, limit): (usize, ReviseLimit),
+        revises: (usize, ReviseLimit),
     ) -> Result<Phase> {
+        match self.judge_past_revise_limit(run, &verdict, sent_back, revises)? {
+            None => self.precheck(run, session, verdict, Some(job.clone())),
+            Some(why) => {
+                let carries = verdict.verdict == ReviewDecision::Concern;
+                Ok(landing_ask(Some(why), verdict, session, job, carries))
+            }
+        }
+    }
+    /// The judgment of [`Self::past_revise_limit`]: `None` when the
+    /// reasons converged and the run lands the way of a pass, otherwise
+    /// why a person is asked. The drafts and `revise_limit_judged` are
+    /// recorded once per review: an adopter that judges the review again
+    /// (the supervisor it replaced may have judged it) records nothing
+    /// more.
+    pub(super) fn judge_past_revise_limit(
+        &mut self,
+        run: &TaskRun,
+        verdict: &ReviewVerdict,
+        sent_back: SentBack,
+        (revises, limit): (usize, ReviseLimit),
+    ) -> Result<Option<String>> {
         let SentBack { attempt, findings } = sent_back;
+        let events = self.queue.run_events(run.id())?;
+        let of_attempt = |event: &&crate::domain::RunEvent| {
+            restore_payload::<AttemptOf>(&event.payload).attempt == u64::try_from(attempt).ok()
+        };
+        let judged = judged_since_start(&events, attempt);
         // The code paths the attempt read when it started.
-        let code = self
-            .queue
-            .run_events(run.id())?
+        let code = events
             .iter()
             .rev()
-            .find(|event| {
-                event.kind == EventKind::ReviewStarted
-                    && restore_payload::<AttemptOf>(&event.payload).attempt
-                        == u64::try_from(attempt).ok()
-            })
+            .filter(of_attempt)
+            .find(|event| event.kind == EventKind::ReviewStarted)
             .and_then(|event| review_reason::CodePaths::recorded(&event.payload));
         let code = code.as_ref();
         let converged = review_reason::converged(&findings, code);
-        if converged {
+        if converged && !judged {
             match self.queue.show(run.task_id()) {
                 Ok(detail) => {
                     crate::application::integrate::register_converged_follow_ups(
@@ -2018,27 +2042,31 @@ impl Supervisor<'_> {
             .iter()
             .filter(|f| f.is_code_finding(code))
             .collect();
-        self.queue.record_runtime_event(
-            run.id(),
-            EventKind::ReviseLimitJudged,
-            json!({
-                "attempt": attempt,
-                "revises": revises,
-                ReviseLimit::RECORDED: limit.get(),
-                "converged": converged,
-                "code_paths": code.map(|code| &code.globs),
-                "code_findings": code_findings.iter().map(|f| json!({
-                    "text": f.text, "codes": f.codes, "paths": f.paths, "security": f.security,
-                })).collect::<Vec<_>>(),
-            }),
-        )?;
+        if !judged {
+            self.queue.record_runtime_event(
+                run.id(),
+                EventKind::ReviseLimitJudged,
+                json!({
+                    "attempt": attempt,
+                    "revises": revises,
+                    ReviseLimit::RECORDED: limit.get(),
+                    "converged": converged,
+                    "code_paths": code.map(|code| &code.globs),
+                    "code_findings": code_findings.iter().map(|f| json!({
+                        "text": f.text, "codes": f.codes, "paths": f.paths, "security": f.security,
+                    })).collect::<Vec<_>>(),
+                }),
+            )?;
+        }
         if converged {
             info!(run_id = %run.id(), "run {} review {attempt}: past {} with no code finding; it lands and its reasons become follow_up drafts", run.id(), revises_sent(revises, limit));
-            return self.precheck(run, session, verdict, Some(job.clone()));
+            return Ok(None);
         }
-        let why = revise_limit_why(&verdict, (revises, limit), &code_findings);
-        let carries = verdict.verdict == ReviewDecision::Concern;
-        Ok(landing_ask(Some(why), verdict, session, job, carries))
+        Ok(Some(revise_limit_why(
+            verdict,
+            (revises, limit),
+            &code_findings,
+        )))
     }
 
     /// Before a passed run's session is asked to exit, judge with `git
@@ -2871,7 +2899,7 @@ fn canceled_reason(ask_id: AskId) -> String {
 /// its reasons (ADR-t2599-1), each by its codes, a security agent's
 /// marked. The limit is named beside the revises when a lowered one left
 /// them apart.
-fn revise_limit_why(
+pub(super) fn revise_limit_why(
     verdict: &ReviewVerdict,
     (revises, limit): (usize, ReviseLimit),
     code_findings: &[&review_reason::Finding],
@@ -2910,10 +2938,29 @@ fn revises_sent(revises: usize, limit: ReviseLimit) -> String {
     }
 }
 
+/// Whether review `attempt` was judged past the revise limit
+/// (`revise_limit_judged`) since the latest review or program review
+/// started: only that judgment is this review's, since an attempt's
+/// number comes again for the agent review after its programs and for a
+/// review after a resume.
+fn judged_since_start(events: &[crate::domain::RunEvent], attempt: usize) -> bool {
+    events
+        .iter()
+        .rev()
+        .take_while(|event| {
+            event.kind != EventKind::ReviewStarted && event.kind != EventKind::ReviewProgramsStarted
+        })
+        .any(|event| {
+            event.kind == EventKind::ReviseLimitJudged
+                && restore_payload::<AttemptOf>(&event.payload).attempt
+                    == u64::try_from(attempt).ok()
+        })
+}
+
 /// What `concern_decided` records of a `send_back` the runtime took up:
 /// not applied past the run's revises (`revise_limit`, `used_up`), nor when
 /// it did not reach the session as a revise (`unsent`).
-fn not_applied(used_up: bool, phase: &Phase) -> Option<EscalatedBecause> {
+pub(super) fn not_applied(used_up: bool, phase: &Phase) -> Option<EscalatedBecause> {
     if used_up {
         Some(EscalatedBecause::ReviseLimit)
     } else {
@@ -3358,6 +3405,36 @@ mod tests {
                        "recommendation": recommendation, "confidence": confidence,
                        "reason_category": null}),
         )
+    }
+
+    /// A review is judged past the revise limit once, and a judgment of
+    /// the same attempt number before the latest review started (its
+    /// program review's, or a review's before a resume) is not its own.
+    #[test]
+    fn only_a_judgment_since_the_review_started_is_its_own() {
+        let event = |id: i64, kind: &str| RunEvent {
+            id: EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.into(),
+            payload: json!({"attempt": 2}),
+            created_at: String::new(),
+            actor: None,
+        };
+        let programs = [
+            event(1, event_kind::REVIEW_PROGRAMS_STARTED),
+            event(2, event_kind::REVISE_LIMIT_JUDGED),
+        ];
+        assert!(judged_since_start(&programs, 2));
+        assert!(!judged_since_start(&programs, 3));
+        let mut agents = programs.to_vec();
+        agents.push(event(3, event_kind::REVIEW_PROGRAMS_STARTED));
+        agents.push(event(4, event_kind::REVIEW_STARTED));
+        agents.push(event(5, event_kind::REVIEW_FINISHED));
+        assert!(!judged_since_start(&agents, 2));
+        agents.push(event(6, event_kind::REVISE_LIMIT_JUDGED));
+        assert!(judged_since_start(&agents, 2));
     }
 
     fn events(kinds: &[&str]) -> Vec<RunEvent> {

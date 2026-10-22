@@ -193,6 +193,8 @@ e2eが要るpassしたrunは、着地スロットを待つ段でhostでe2eを流
   この判断（`satisfied_judgment::decide`）の当てはめは下の「already_satisfiedの主張の判定」の「適用」。
 - 推奨が無い・人が要る理由がある・確信度が`high`でないconcernはaskにし、知らない理由は人が決める側に倒す（`domain::concern::decide`）。
 - 着地を許す判定は、適用される`land`のconcernを「passした」と読む（`concern::lets_land`）。
+- 引き継いだsupervisorは記録されたconcernを生きたsupervisorと同じに決め、上限の後の`send_back`も4aで判定して同じ`concern_decided`を記録する（`adopt.rs`の`adopted_concern`）。
+  上限の前の`send_back`は依頼が記録されていないので、送れなかったものとして人に聞く。
 - セキュリティのagentは[ADR-t1906-1](../../adr/2026-10-14-t1906-1-security-review-agent-findings-follow-the-concern-rules.md)。
 
 ## already_satisfiedの主張の判定

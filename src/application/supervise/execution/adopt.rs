@@ -646,18 +646,6 @@ impl Supervisor<'_> {
 }
 
 impl Supervisor<'_> {
-    /// [`Supervisor::precheck`] of a passed run an adopter takes over, at
-    /// the request of the review job that passed it (`job`) as the
-    /// supervisor it replaced ran it; without a job, as the supervisor's
-    /// own step.
-    /// Go on from a `concern` recorded with nothing after it but its
-    /// `concern_decided` and an `/exit` (ADR-t451-1 decision 3): decided
-    /// as the supervisor it replaced did, from the verdict. A `land` goes
-    /// on to land, prechecked again before its `/exit`; a `send_back`,
-    /// whose request was not recorded, asks a person as a `revise` does
-    /// when the supervisor was replaced, and so does a concern the job
-    /// did not decide. `concern_decided` is recorded unless it was. `Ok`
-    /// is the phase of a precheck, `Err` what follows the session's `/exit`.
     /// Record the `concern_decided` of a concern sent back on the job's
     /// recommendation when the supervisor died after the request
     /// (`revise_requested`) and before the record (ADR-t451-1 decision 3):
@@ -695,6 +683,21 @@ impl Supervisor<'_> {
         })?;
         Ok(true)
     }
+    /// Go on from a `concern` recorded with nothing after it but its
+    /// `concern_decided` and an `/exit` (ADR-t451-1 decision 3), decided
+    /// from the verdict as [`Supervisor::act_on_concern`] decides it. A
+    /// `land` goes on to land, prechecked again before its `/exit`. A
+    /// `send_back` with a revise left, whose request was not recorded,
+    /// asks a person as a `revise` does when the supervisor was replaced;
+    /// one past the run's revises is judged by its reasons as the live
+    /// supervisor judges it ([`Supervisor::judge_past_revise_limit`],
+    /// ADR-t2599-1), and lands as a pass when they converged; one whose
+    /// task a replanning or a hold fences, or whose attempt is unknown, is
+    /// not judged and asks a person. A concern the job did not decide asks
+    /// a person. `concern_decided` is recorded
+    /// unless it was, as the live supervisor records it
+    /// ([`adopted_escalation`]). `Ok` is the phase of a precheck, `Err`
+    /// what follows the session's `/exit`.
     fn adopted_concern(
         &mut self,
         run: &TaskRun,
@@ -704,12 +707,28 @@ impl Supervisor<'_> {
         verdict: ReviewVerdict,
     ) -> Result<std::result::Result<Phase, AfterExit>> {
         let job = review_job(run, anchor);
-        let revise_left = decide_revise(history) != ReviseDecision::Ask;
-        let decision = verdict.concern_decision(revise_left);
-        let escalated = match decision {
-            ConcernDecision::Land => None,
-            ConcernDecision::SendBack => Some(EscalatedBecause::Unsent),
-            ConcernDecision::Ask(why) => Some(why),
+        let used_up = decide_revise(history) == ReviseDecision::Ask;
+        let decision = verdict.concern_decision(true);
+        let escalated = adopted_escalation(decision, used_up);
+        // Judged before its `concern_decided`, as the live supervisor
+        // does, at the review job's request; a review whose attempt is
+        // unknown has no reasons to judge, and one whose task a replanning
+        // or a hold fences is not judged (`send_revise`): both ask a person.
+        let judges = used_up
+            && decision == ConcernDecision::SendBack
+            && self.queue.turn_fence(run.task_id())?.is_none();
+        let judged = match (&job, restore::<AttemptOf>(&anchor.payload).attempt) {
+            (Some(review), Some(attempt)) if judges => {
+                let sent_back = SentBack {
+                    attempt: attempt as usize,
+                    findings: verdict.sent_back_findings(None),
+                };
+                let revises = (history.revise_attempts(), history.revise_limit());
+                Some(self.for_job(review, |sv| {
+                    sv.judge_past_revise_limit(run, &verdict, sent_back, revises)
+                })?)
+            }
+            _ => None,
         };
         if !history.has_after(anchor.id, EventKind::ConcernDecided)
             && let Some(attempt) = restore::<AttemptOf>(&anchor.payload).attempt
@@ -720,28 +739,22 @@ impl Supervisor<'_> {
             })?;
         }
         let exited = history.has_after(anchor.id, EventKind::ExitRequested);
-        let then = match escalated {
-            None if !exited => return Ok(Ok(self.adopted_precheck(run, session, verdict, job)?)),
-            None => AfterExit::Land,
-            Some(escalated) => AfterExit::Ask {
-                why: match escalated {
-                    EscalatedBecause::Unsent => Some(
-                        "the send_back could not go on when the supervisor was replaced".to_owned(),
-                    ),
-                    _ => landing::concern_escalation(&verdict, escalated, history),
-                },
-                decision: verdict.verdict,
-                recommendation: verdict.recommendation,
-                confidence: verdict.confidence,
-                reason_category: verdict.reason_category,
-                reasons: verdict.reasons,
-                summary: verdict.summary,
-                requested_by: job,
-                sent_back: None,
-            },
-        };
-        Ok(Err(then))
+        match adopted_concern_then(
+            verdict.clone(),
+            escalated,
+            judged,
+            exited,
+            history,
+            job.clone(),
+        ) {
+            None => Ok(Ok(self.adopted_precheck(run, session, verdict, job)?)),
+            Some(then) => Ok(Err(then)),
+        }
     }
+    /// [`Supervisor::precheck`] of a passed run an adopter takes over, at
+    /// the request of the review job that passed it (`job`) as the
+    /// supervisor it replaced ran it; without a job, as the supervisor's
+    /// own step.
     fn adopted_precheck(
         &mut self,
         run: &TaskRun,
@@ -756,6 +769,58 @@ impl Supervisor<'_> {
             None => self.precheck(run, session, verdict, None),
         }
     }
+}
+
+/// The `escalated_because` of a parent concern's `concern_decided` as the
+/// live supervisor records it ([`Supervisor::act_on_concern`]), for an
+/// adopter that decides it (`decision`, `concern_decision(true)`): a
+/// `send_back` it never applied, past the run's revises (`used_up`) as
+/// `revise_limit` ([`landing::not_applied`]) and otherwise as `unsent`,
+/// its request not recorded.
+fn adopted_escalation(decision: ConcernDecision, used_up: bool) -> Option<EscalatedBecause> {
+    match decision {
+        ConcernDecision::Land => None,
+        ConcernDecision::SendBack if used_up => Some(EscalatedBecause::ReviseLimit),
+        ConcernDecision::SendBack => Some(EscalatedBecause::Unsent),
+        ConcernDecision::Ask(why) => Some(why),
+    }
+}
+
+/// What follows an adopted parent `concern` (`verdict`) once its
+/// `concern_decided` (`escalated`) is recorded, with the judgment of a
+/// `send_back` past the run's revises (`judged`,
+/// [`Supervisor::judge_past_revise_limit`]): `None` to precheck it before
+/// its `/exit` (a `land`, or reasons that converged), the landing after
+/// it (`exited`), and otherwise the `approve_landing` ask the live
+/// supervisor opens, why from the judgment, at the review job's request
+/// (`job`).
+fn adopted_concern_then(
+    verdict: ReviewVerdict,
+    escalated: Option<EscalatedBecause>,
+    judged: Option<Option<String>>,
+    exited: bool,
+    history: &RunHistory<'_>,
+    job: Option<ActorContext>,
+) -> Option<AfterExit> {
+    let why = match (escalated, judged) {
+        (None, _) | (_, Some(None)) => return exited.then_some(AfterExit::Land),
+        (_, Some(Some(why))) => Some(why),
+        (Some(EscalatedBecause::Unsent), None) => {
+            Some("the send_back could not go on when the supervisor was replaced".to_owned())
+        }
+        (Some(escalated), None) => landing::concern_escalation(&verdict, escalated, history),
+    };
+    Some(AfterExit::Ask {
+        why,
+        decision: verdict.verdict,
+        recommendation: verdict.recommendation,
+        confidence: verdict.confidence,
+        reason_category: verdict.reason_category,
+        reasons: verdict.reasons,
+        summary: verdict.summary,
+        requested_by: job,
+        sent_back: None,
+    })
 }
 
 /// The review job that recorded `review_finished` (`event`), from the
@@ -1380,6 +1445,134 @@ mod tests {
                 asked_reasons
             );
         }
+    }
+
+    /// An adopter decides a parent `concern` as the live supervisor does
+    /// (`concern_decision(true)`, the revise limit judged after it): a
+    /// high `send_back` past the run's revises records `revise_limit` as
+    /// `not_applied` does and asks with the judgment's why and the
+    /// verdict's reasons, as `past_revise_limit`'s ask; reasons that
+    /// converged go on as a pass; with a revise left it asks as an unsent
+    /// `send_back`, as before.
+    #[test]
+    fn an_adopted_concern_past_the_revise_limit_is_judged_as_the_live_supervisor() {
+        let event = |id: i64, kind: &str, payload: Value| RunEvent {
+            id: EventId::new(id),
+            task_id: None,
+            goal_id: None,
+            run_id: None,
+            kind: kind.into(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        };
+        let payload = json!({"verdict": "concern", "reasons": ["fix the doc"], "summary": "s",
+            "recommendation": "send_back", "confidence": "high", "reason_category": null, "attempt": 3});
+        let verdict = crate::domain::run::review_verdict(&payload).unwrap();
+        let mut events: Vec<RunEvent> = (1..=crate::domain::MAX_REVISE_ATTEMPTS as i64)
+            .map(|id| event(id, event_kind::REVISE_REQUESTED, json!({"attempt": id})))
+            .collect();
+        events.push(event(10, event_kind::REVIEW_STARTED, json!({"attempt": 3})));
+        let history = RunHistory::from_events(&events);
+        let used_up = decide_revise(&history) == ReviseDecision::Ask;
+        assert!(used_up);
+        // The old decision asked past the limit with no judgment.
+        assert_eq!(
+            verdict.concern_decision(false),
+            ConcernDecision::Ask(EscalatedBecause::ReviseLimit)
+        );
+        let decision = verdict.concern_decision(true);
+        assert_eq!(decision, ConcernDecision::SendBack);
+        let run = super::super::recovery::test_run(RunStatus::AwaitingIntegration, None);
+        let job = ActorContext::review_job(run.id(), 3);
+        // The live judgment of the reasons, and the ask it opens.
+        let findings = verdict.sent_back_findings(None);
+        let code_findings: Vec<_> = findings
+            .iter()
+            .filter(|f| f.is_code_finding(None))
+            .collect();
+        assert!(!code_findings.is_empty());
+        let revises = (history.revise_attempts(), history.revise_limit());
+        let why = landing::revise_limit_why(&verdict, revises, &code_findings);
+        let live = landing::landing_ask(Some(why.clone()), verdict.clone(), None, &job, true);
+        let escalated = adopted_escalation(decision, used_up);
+        assert_eq!(escalated, landing::not_applied(used_up, &live));
+        assert_eq!(escalated, Some(EscalatedBecause::ReviseLimit));
+        let Phase::Exiting(ExitWatch {
+            then:
+                AfterExit::Ask {
+                    why: live_why,
+                    decision: live_decision,
+                    reasons: live_reasons,
+                    recommendation: live_recommendation,
+                    confidence: live_confidence,
+                    requested_by: live_job,
+                    ..
+                },
+            ..
+        }) = live
+        else {
+            panic!("the live supervisor asks a person");
+        };
+        for exited in [false, true] {
+            let Some(AfterExit::Ask {
+                why: asked_why,
+                decision: asked_decision,
+                reasons,
+                recommendation,
+                confidence,
+                requested_by,
+                ..
+            }) = adopted_concern_then(
+                verdict.clone(),
+                escalated,
+                Some(Some(why.clone())),
+                exited,
+                &history,
+                Some(job.clone()),
+            )
+            else {
+                panic!("an adopter asks a person");
+            };
+            assert_eq!(asked_why, live_why);
+            assert_ne!(
+                asked_why,
+                landing::concern_escalation(&verdict, EscalatedBecause::ReviseLimit, &history)
+            );
+            assert_eq!(asked_decision, live_decision);
+            assert_eq!(reasons, live_reasons);
+            assert_eq!(reasons, ["fix the doc"]);
+            assert_eq!(recommendation, live_recommendation);
+            assert_eq!(confidence, live_confidence);
+            assert_eq!(requested_by, live_job);
+        }
+        // Converged reasons go on as a pass: prechecked before the exit,
+        // landed after it.
+        let converged = |exited| {
+            adopted_concern_then(
+                verdict.clone(),
+                escalated,
+                Some(None),
+                exited,
+                &history,
+                Some(job.clone()),
+            )
+        };
+        assert!(converged(false).is_none());
+        assert!(matches!(converged(true), Some(AfterExit::Land)));
+        // With a revise left, the send_back whose request was not
+        // recorded asks a person, as an unsent one.
+        let escalated = adopted_escalation(decision, false);
+        assert_eq!(escalated, Some(EscalatedBecause::Unsent));
+        let Some(AfterExit::Ask { why, .. }) =
+            adopted_concern_then(verdict, escalated, None, false, &history, Some(job))
+        else {
+            panic!("an adopter asks a person");
+        };
+        assert_eq!(
+            why.as_deref(),
+            Some("the send_back could not go on when the supervisor was replaced")
+        );
     }
 
     /// The adopter's `review_failed` carries the Execution of the review's
