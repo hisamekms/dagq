@@ -9,10 +9,13 @@
 //! without registering. What a registration row says of its process
 //! (`mode`, `binary_version`, the handoff marks) lives and dies with the row,
 //! not in a file next to the queue that would outlive the process and need
-//! its own staleness rules. Only `supervise` itself, `up` and `down`
-//! remove registrations; `status`, `doctor`, `recover` and
+//! its own staleness rules. Only `supervise` itself, `up`, `down` and a live
+//! supervisor of the same queue pruning a registration a dead one left
+//! behind remove registrations, each writing `supervisor_stopped` in the
+//! same transaction (the prune's conditions are in
+//! `docs/design/persistence.md`); `status`, `doctor`, `recover` and
 //! `integrate` never do, and a supervisor that ends on a failed heartbeat
-//! leaves its row to show as stale.
+//! leaves its row to show as stale until one of those prunes it.
 
 use super::*;
 use crate::domain::worker::ProviderCheck;

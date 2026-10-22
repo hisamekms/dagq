@@ -121,7 +121,7 @@ claimの前の待ちの理由はsupervisor単位の区間をtaskの区間に重�
 
 supervisorの生存と停止の証拠はEventStoreに残し、一生の終わりはeventだけから決める（`domain::supervisor_life::supervisor_life_end`）。
 
-- **停止**: 登録の行が消える全ての経路（自分の停止と`up`・`down`の掃除）は、同じtransactionで同じtokenの`supervisor_stopped`を書く。
+- **停止**: 登録の行が消える全ての経路（自分の停止と、`up`・`down`・生きているsupervisorの掃除）は、同じtransactionで同じtokenの`supervisor_stopped`を書く。
   記録に失敗すれば行は残り、次の掃除に任せる（[persistence](persistence.md#runtime-ownership)）。
 - **生存**: heartbeatを書くsupervisorは、`SUPERVISOR_ALIVE_INTERVAL_SECS`ごとに`supervisor_alive`を1つ書く。
   記録の失敗はwarnにしてheartbeatを止めない。

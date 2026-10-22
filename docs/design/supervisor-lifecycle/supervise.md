@@ -136,7 +136,8 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 - ループがいつ終わるかは`supervise`、ownerが居なくなったときの止まり方は`LoopSettings::owner`、結果の欄と登録の削除は`Supervisor::run_loop`のdoc comment。
 - SIGINT/SIGTERMの1回目はclaimを止めてactive runを待ち（graceful drain）、2回目で即終了する（`install_stop_signal`）。
 - 即終了したsupervisorのleaseはstaleになり、wrapperが生きているrunは次のpassで別のsupervisorが引き継ぐ（上の「adopt」）。
-- 登録を消すのは自分のループの終わりと次の`up`・`down`の掃除だけで、`status` / `doctor` / `recover` / `integrate`は消さない（[`up` / `down`](up-down.md#up--down)）。
+- 登録を消すのは自分のループの終わり、次の`up`・`down`の掃除と、同じqueueの生きているsupervisorによる死んだ登録の片付けだけで、どれも同じtransactionで`supervisor_stopped`を書く。
+  `status` / `doctor` / `recover` / `integrate`は消さない（片付けの条件は[Persistence](../persistence.md#runtime-ownership)、`up` / `down`の掃除は[`up` / `down`](up-down.md#up--down)）。
 
 ## CIの見張り（ADR-t1920-1）
 
