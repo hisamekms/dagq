@@ -21,8 +21,12 @@ pub const MAX_REQUEST_PLANNERS: usize = 3;
 
 string_enum!(
     /// Where a request is (ADR-t1394-1 decision 2): waiting for a planner or
-    /// with one at work, a proposal submitted from it, declined by its planner,
-    /// or left undecided by its planners up to the limit. Only `open` moves on;
+    /// with one at work, a proposal submitted from it, declined, or left
+    /// undecided by its planners up to the limit. `declined` is by its
+    /// planner, or by the runtime when the replanning operation the request
+    /// was recorded for closes before the operation holds a snapshot: no
+    /// planner is ever opened for it, and the reason names the operation's
+    /// outcome. Only `open` moves on;
     /// an ended status never goes back, and `proposed` stays whatever the
     /// proposal comes to.
     RequestStatus {
