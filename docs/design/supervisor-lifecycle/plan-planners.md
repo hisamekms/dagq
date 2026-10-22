@@ -85,7 +85,8 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
 - **turnの依頼**: supervisorが置く依頼（revise・answer・`provider retry`・終了）は全て`send_to_planner`を通り、番号の順に取られる（`write_request`）。
   依頼の前に入力の印を書き、前のturnのidle markerでidleに見えないようにする（`stamp_planner_input`）。
 - **状態**: idle markerが最後の入力より新しく、待つ依頼が無ければ`idle`である（`planner_view`、`turn::idle_after_turn`）。
-  届けたanswerを読み終えたかはそのanswerの依頼を取ったturnで判じ、読み終えるまで終了の依頼を置かない（`headless_answer_taken`、`turn::request_read`）。
+  届けたanswerを読み終えるまで終了の依頼を置かない。
+  読み終えたかは、turnで配送したanswerはその依頼を取ったturnで、初期promptで運んだanswerは開いた後のidleで判じる（[Draft planners](draft-planners.md#予定-人のplannerの廃止と非対話の経路)）。
   壁で失敗したturnの後に終わらせると、answerが読まれずに失われる。
 - **時間切れ**: plannerの時間はturnの`[stall]`の上限だけで切られ、止めたturnをinboxにplannerごとに1回知らせる（`tell_of_stopped_planner_turns`）。
   idleのまま仕事が終わらないものは、reviseの時間切れが見る（[Plan review](plan-review.md#reviseの配送)）。

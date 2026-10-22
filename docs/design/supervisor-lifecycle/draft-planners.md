@@ -91,8 +91,8 @@ run slotは使わず、[Plan review](plan-review.md#reviseの配送)の`tend_pla
    - (d) それ以外（依頼のplanner以外が作った出どころの無いtask、使い切ったdraft）: inboxが受け、workerには送らない。
      draftなら人の答えを計画の依頼（taskとaskの参照付き）にしてaskを閉じ、他はanswerを読んで閉じる。
    送ったanswerをまだturnで読み終えていないplannerと、answerを届ける前のplannerには終了の依頼を送らない（送らずに閉じたaskは引き止めない。`question_wait`）。
-   読み終えたかはturnの記録で決める（`headless_answer_taken`、[下](#予定-人のplannerの廃止と非対話の経路)）。
-   idle markerの時刻やaskの`closed_at`（送った後に`ask_delivered`が書く）とは比べない: answerを読んで仕事を終えたplannerはaskのcloseより前にidleになりうるので、比べると答えの処理中とみて終わらせず、plannerの枠をふさぐ。
+   読み終えたかは[下](#予定-人のplannerの廃止と非対話の経路)で判じる。
+   askの`closed_at`とは比べず、依頼を記録したturnで配送したanswerはidle markerの時刻とも比べない: answerを読んで仕事を終えたplannerはaskのcloseより前にidleになりうるので、比べると終わらせず、plannerの枠をふさぐ。
    plannerが自分で作ったaskはplannerがaskの後に止まってから、他の人が作ったaskはplannerがidleなら送る。
    未回答の`planner_question`だけを待つplannerは終了の依頼を受け（[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)の「人の答えだけを待つplannerの終わり」）、その後のanswerは行が閉じて束の鍵が空いてから(b)が前のplannerのnote・draftと運ぶ。
    質問したdraftは結末`answer_wait`（8）、質問していないものは先に決めさせ、残れば`undecided`。
@@ -182,8 +182,9 @@ draftに再検討の時刻を1つ持たせ、時刻が来たらruntimeのplanner
 人が開くplannerは無い（ADR-t1394-1）: `dagq plan`は何も開かず、inboxへの計画の依頼の案内を付けて拒む。
 人のplannerの行が開いたまま残っていれば、supervisorが閉じた行として扱い（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)決定5。[`plan` / `planners`](plan-planners.md)の「人のplannerの終わり」）、その持ち主のdraftへのanswerは新しいruntimeのplannerが受ける。
 非対話の経路（ADR-t1394-2の決定1・2・3・5）では、answerは次のturnの依頼として届く。
-読み終えたかは、そのanswerの依頼を取ったturnが終わり、そのturnがClaudeのログイン切れ・利用上限・起動の失敗で失敗していなければ読み終えたとする（`headless_answer_taken`、判断は`src/domain/turn.rs`の`request_read`）。
-壁で失敗したturnだけでは読み終えたとせず、wrapperが次に取る`provider retry`のturn（そのanswerを載せる）が壁で失敗せずに終わるまで追う（壁で失敗したturnの後にplannerを終わらせると、answerが読まれずに失われるため）。
+読み終えたかは、そのanswerの依頼を取ったturnが終わり、そのturnがClaudeのログイン切れ・利用上限・起動の失敗で失敗していなければ読み終えたとする（`headless_answer_taken`、`turn::request_read`）。
+壁で失敗したturnだけでは読み終えたとせず、wrapperが次に取る`provider retry`のturn（そのanswerを載せる）が壁で失敗せずに終わるまで追う。
+依頼の記録が無いanswerは、claimしたものはclaimの秒より後の、初期promptで運んだものは開いた時刻より古くないidle markerで読み終えたとする（`answer_taken`）。
 また、最後のturnがClaudeのログイン切れ・利用上限・起動の失敗で終わってClaudeを待つplanner（`busy`の`provider_wall`）は終わらせず、控えが解けて続きの`provider retry`のturnが終わるまでanswerを置かない（[runtimeのplannerの経路](plan-planners.md#runtimeのplannerの経路)）。
 残りの予定は[予定: inboxからの依頼と非対話のplanner](plan-planners.md#予定-inboxからの依頼と非対話のplanner)にある。
 
