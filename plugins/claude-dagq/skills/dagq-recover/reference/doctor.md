@@ -25,7 +25,7 @@ Leave to the supervisor:
 - An `awaiting_integration` run under a stale lease, and a run whose supervisor and wrapper both died: the next supervisor takes it.
 - A leaseless `validating` run whose `already_satisfied` claim rests: answer its `approve_close` ask instead.
 
-`recover` is only for a run whose wrapper is dead or silent, a `claimed` / `starting` run, an `integrating` run (an `integrate` that died), or a run without a lease, and only while no supervisor runs. A supervisor alive without a heartbeat is stopped by the person with `down --force`.
+`recover` is only for a run whose wrapper is dead or silent, a `claimed` / `starting` run, an `integrating` run (an `integrate` that died), or a run without a lease, and only while no supervisor runs. A supervisor alive without a heartbeat is stopped by the person with `down --force` only when no other live supervisor runs the queue; beside a live one, they check its pid and stop only that process, never `down`; a row under the live supervisor's own pid needs nothing (`reference/up-down.md`, "Two supervisors of one queue").
 
 ## recover
 
