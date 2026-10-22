@@ -159,6 +159,7 @@ impl SupervisorRegistry for SupervisorsAndEvents {
         token: &LeaseToken,
         pid: u32,
         limits: crate::domain::slot_limits::SlotLimits,
+        providers: &[crate::domain::worker::ProviderCheck],
         binary_version: &str,
     ) -> Result<SupervisorRegistration> {
         unreachable!("register_supervisor is not what the test reaches")
@@ -187,6 +188,8 @@ impl SupervisorRegistry for SupervisorsAndEvents {
         &mut self,
         token: &LeaseToken,
         pid: u32,
+        limits: crate::domain::slot_limits::SlotLimits,
+        providers: &[crate::domain::worker::ProviderCheck],
         binary_version: &str,
     ) -> Result<SupervisorRegistration> {
         unreachable!("resume_registration is not what the test reaches")
@@ -203,13 +206,6 @@ impl SupervisorRegistry for SupervisorsAndEvents {
     }
     fn set_max_load(&self, token: &LeaseToken, max_load: Option<f64>) -> Result<()> {
         unreachable!("set_max_load is not what the test reaches")
-    }
-    fn set_supervisor_providers(
-        &self,
-        token: &LeaseToken,
-        providers: &[crate::domain::worker::ProviderCheck],
-    ) -> Result<()> {
-        unreachable!("set_supervisor_providers is not what the test reaches")
     }
     fn rebind_repository(&mut self, common_dir: &str) -> Result<Option<String>> {
         unreachable!("rebind_repository is not what the test reaches")

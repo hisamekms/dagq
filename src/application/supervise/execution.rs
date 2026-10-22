@@ -936,10 +936,15 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
                 .into_iter()
                 .find(|registration| &registration.token == token)
                 .and_then(|registration| registration.binary_version);
-            queue.resume_registration(token, pid, &layout.version)?;
-            // The limits this process resolved, over the ones the
-            // registration had before the exec.
-            queue.set_slot_limits(token, settings.limits)?;
+            // The limits and providers this process resolved, over the ones
+            // the registration had before the exec, in the same write.
+            queue.resume_registration(
+                token,
+                pid,
+                settings.limits,
+                &layout.providers,
+                &layout.version,
+            )?;
             let previous = &previous_version;
             info!(
                 "supervisor {token} handed off: version {} (was {}), pid {pid}, parallel {parallel}, db {}, repository {}",
@@ -955,8 +960,15 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
             // Registered before the first heartbeat so the loop is visible
             // to `status` from its first second, runs or not, with the
             // limits in use and where each comes from (ADR-0062 decision 7,
-            // task 698) in the same write.
-            queue.register_supervisor(&token, pid, settings.limits, &layout.version)?;
+            // task 698) and the providers' executables (ADR-t813-2) in the
+            // same write.
+            queue.register_supervisor(
+                &token,
+                pid,
+                settings.limits,
+                &layout.providers,
+                &layout.version,
+            )?;
             queue.accept_handoff(&token)?;
             if settings.update.register {
                 queue.set_auto_update(&token, true)?;
@@ -972,7 +984,6 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
     };
     // For the time of the next claim `status` shows (ADR-t1479-1).
     queue.set_max_load(&token, settings.max_load)?;
-    queue.set_supervisor_providers(&token, &layout.providers)?;
     let mut config = serde_json::to_value(settings.stall)?;
     config["supervisor"] = json!(token);
     queue.record_queue_event(EventKind::StallConfigLoaded, config)?;

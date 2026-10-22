@@ -449,14 +449,16 @@ pub trait SupervisorReads {
 /// is published to 実行と着地's loop (the `METHODS` rows of
 /// src/context_boundaries/ownership.rs).
 pub trait SupervisorRegistry: SupervisorReads {
-    /// Register a supervisor with its slot limits and their sources in one
-    /// write, so `status` and a reader of the registration never see it
-    /// without them.
+    /// Register a supervisor with its slot limits and their sources, and
+    /// the executables of its providers as it resolved them at its start
+    /// (ADR-t813-2), in one write, so `status` and a reader of the
+    /// registration never see it without them.
     fn register_supervisor(
         &mut self,
         token: &LeaseToken,
         pid: u32,
         limits: crate::domain::slot_limits::SlotLimits,
+        providers: &[crate::domain::worker::ProviderCheck],
         binary_version: &str,
     ) -> Result<SupervisorRegistration>;
     /// Remove the registration under `token` and record the queue event of
@@ -479,11 +481,15 @@ pub trait SupervisorRegistry: SupervisorReads {
     /// Withdraw a request to exec `binary` not taken yet.
     fn cancel_handoff(&self, token: &LeaseToken, binary: &str) -> Result<bool>;
     /// Take `token`'s registration back under `binary_version` after an
-    /// exec, clearing the request.
+    /// exec, clearing the request, with the slot limits and the providers'
+    /// executables this process resolved in the same write, so no reader
+    /// sees the new version with the previous binary's.
     fn resume_registration(
         &mut self,
         token: &LeaseToken,
         pid: u32,
+        limits: crate::domain::slot_limits::SlotLimits,
+        providers: &[crate::domain::worker::ProviderCheck],
         binary_version: &str,
     ) -> Result<SupervisorRegistration>;
     /// Turn the automatic update of the supervisor `token` on or off
@@ -500,13 +506,6 @@ pub trait SupervisorRegistry: SupervisorReads {
     /// Record the supervisor `token`'s `--max-load`, `None` when its load
     /// hold is off (ADR-t1479-1: `status` reads it for the claim spacing).
     fn set_max_load(&self, token: &LeaseToken, max_load: Option<f64>) -> Result<()>;
-    /// Record the executables of the supervisor `token`'s providers as it
-    /// resolved them at its start (ADR-t813-2).
-    fn set_supervisor_providers(
-        &self,
-        token: &LeaseToken,
-        providers: &[crate::domain::worker::ProviderCheck],
-    ) -> Result<()>;
     /// Point the queue at `common_dir` whatever it was bound to, and return
     /// the previous binding (`rebind`, ADR-0020).
     fn rebind_repository(&mut self, common_dir: &str) -> Result<Option<String>>;

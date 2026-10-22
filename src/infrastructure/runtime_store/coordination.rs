@@ -15,6 +15,7 @@
 //! leaves its row to show as stale.
 
 use super::*;
+use crate::domain::worker::ProviderCheck;
 
 impl SqliteQueue {
     /// Refresh every lease this supervisor holds. Zero rows is not an error:
@@ -65,17 +66,24 @@ impl SqliteQueue {
     }
 
     /// [`Self::register_supervisor`] with the slot limits in use and their
-    /// sources written in the same transaction, so no reader sees the row
-    /// without them.
+    /// sources, and the executables of the providers, written in the same
+    /// transaction, so no reader sees the row without them.
     pub fn register_supervisor_with_limits(
         &mut self,
         token: &LeaseToken,
         pid: u32,
         limits: SlotLimits,
+        providers: &[ProviderCheck],
         binary_version: &str,
     ) -> Result<SupervisorRegistration> {
         let parallel = u32::try_from(limits.parallel.value)?;
-        self.register(token, pid, parallel, Some(limits), binary_version)
+        self.register(
+            token,
+            pid,
+            parallel,
+            Some((limits, providers)),
+            binary_version,
+        )
     }
 
     fn register(
@@ -83,7 +91,7 @@ impl SqliteQueue {
         token: &LeaseToken,
         pid: u32,
         parallel: u32,
-        limits: Option<SlotLimits>,
+        setup: Option<(SlotLimits, &[ProviderCheck])>,
         binary_version: &str,
     ) -> Result<SupervisorRegistration> {
         ensure!(parallel >= 1, "parallel must be at least 1");
@@ -97,8 +105,9 @@ impl SqliteQueue {
             params![token, pid, parallel, binary_version, now],
         )
         .context("supervisor token is already registered")?;
-        if let Some(limits) = limits {
+        if let Some((limits, providers)) = setup {
             write_slot_limits(&tx, token, limits)?;
+            write_providers(&tx, token, providers)?;
         }
         let result = tx.query_row(
             "SELECT * FROM supervisors WHERE token=?1",
@@ -245,6 +254,31 @@ impl SqliteQueue {
         pid: u32,
         binary_version: &str,
     ) -> Result<SupervisorRegistration> {
+        self.resume(token, pid, None, binary_version)
+    }
+
+    /// [`Self::resume_registration`] with the slot limits and the
+    /// executables of the providers the new binary resolved written in the
+    /// same transaction, so no reader sees the new version with the old
+    /// binary's.
+    pub fn resume_registration_with_limits(
+        &mut self,
+        token: &LeaseToken,
+        pid: u32,
+        limits: SlotLimits,
+        providers: &[ProviderCheck],
+        binary_version: &str,
+    ) -> Result<SupervisorRegistration> {
+        self.resume(token, pid, Some((limits, providers)), binary_version)
+    }
+
+    fn resume(
+        &mut self,
+        token: &LeaseToken,
+        pid: u32,
+        setup: Option<(SlotLimits, &[ProviderCheck])>,
+        binary_version: &str,
+    ) -> Result<SupervisorRegistration> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -257,6 +291,10 @@ impl SqliteQueue {
             )? == 1,
             "supervisor {token} (pid {pid}) is no longer registered; nothing to hand off to"
         );
+        if let Some((limits, providers)) = setup {
+            write_slot_limits(&tx, token, limits)?;
+            write_providers(&tx, token, providers)?;
+        }
         let result = tx.query_row(
             "SELECT * FROM supervisors WHERE token=?1",
             [token],
@@ -297,16 +335,9 @@ impl SqliteQueue {
     pub fn set_supervisor_providers(
         &self,
         token: &LeaseToken,
-        providers: &[crate::domain::worker::ProviderCheck],
+        providers: &[ProviderCheck],
     ) -> Result<()> {
-        ensure!(
-            self.conn.execute(
-                "UPDATE supervisors SET providers=?2 WHERE token=?1",
-                params![token, serde_json::to_string(providers)?],
-            )? == 1,
-            "supervisor {token} is no longer registered"
-        );
-        Ok(())
+        write_providers(&self.conn, token, providers)
     }
 
     /// Record the supervisor `token`'s `parallel`, `max_waiting`,
@@ -720,6 +751,22 @@ fn refresh_registration(conn: &rusqlite::Connection, token: &LeaseToken, now: i6
     )? > 0)
 }
 
+/// The executables of the providers on `token`'s registration (ADR-t813-2).
+fn write_providers(
+    conn: &rusqlite::Connection,
+    token: &LeaseToken,
+    providers: &[ProviderCheck],
+) -> Result<()> {
+    ensure!(
+        conn.execute(
+            "UPDATE supervisors SET providers=?2 WHERE token=?1",
+            params![token, serde_json::to_string(providers)?],
+        )? == 1,
+        "supervisor {token} is no longer registered"
+    );
+    Ok(())
+}
+
 /// The slot limits and their sources on `token`'s registration.
 fn write_slot_limits(
     conn: &rusqlite::Connection,
@@ -842,9 +889,17 @@ impl SupervisorRegistry for SqliteQueue {
         token: &LeaseToken,
         pid: u32,
         limits: SlotLimits,
+        providers: &[ProviderCheck],
         binary_version: &str,
     ) -> Result<SupervisorRegistration> {
-        SqliteQueue::register_supervisor_with_limits(self, token, pid, limits, binary_version)
+        SqliteQueue::register_supervisor_with_limits(
+            self,
+            token,
+            pid,
+            limits,
+            providers,
+            binary_version,
+        )
     }
     fn prune_supervisor(
         &self,
@@ -870,9 +925,18 @@ impl SupervisorRegistry for SqliteQueue {
         &mut self,
         token: &LeaseToken,
         pid: u32,
+        limits: SlotLimits,
+        providers: &[ProviderCheck],
         binary_version: &str,
     ) -> Result<SupervisorRegistration> {
-        SqliteQueue::resume_registration(self, token, pid, binary_version)
+        SqliteQueue::resume_registration_with_limits(
+            self,
+            token,
+            pid,
+            limits,
+            providers,
+            binary_version,
+        )
     }
     fn set_auto_update(&self, token: &LeaseToken, enabled: bool) -> Result<()> {
         SqliteQueue::set_auto_update(self, token, enabled)
@@ -882,13 +946,6 @@ impl SupervisorRegistry for SqliteQueue {
     }
     fn set_slot_limits(&self, token: &LeaseToken, limits: SlotLimits) -> Result<()> {
         SqliteQueue::set_slot_limits(self, token, limits)
-    }
-    fn set_supervisor_providers(
-        &self,
-        token: &LeaseToken,
-        providers: &[crate::domain::worker::ProviderCheck],
-    ) -> Result<()> {
-        SqliteQueue::set_supervisor_providers(self, token, providers)
     }
     fn rebind_repository(&mut self, common_dir: &str) -> Result<Option<String>> {
         SqliteQueue::rebind_repository(self, common_dir)
@@ -989,9 +1046,21 @@ mod tests {
         assert_eq!(parallel, 3);
     }
 
-    /// A registration with its limits carries them and their sources from
-    /// the write that makes it visible: a reader that sees the row never
-    /// sees it without them.
+    /// The executables of a supervisor's providers, as `supervise` resolves
+    /// them at its start.
+    fn providers(executable: &str) -> Vec<ProviderCheck> {
+        vec![ProviderCheck {
+            provider: crate::domain::Provider::Claude,
+            executable: executable.into(),
+            found: true,
+            error: None,
+            modes: Vec::new(),
+        }]
+    }
+
+    /// A registration with its limits carries them and their sources, and
+    /// the providers' executables, from the write that makes it visible: a
+    /// reader that sees the row never sees it without them.
     #[test]
     fn a_registration_with_limits_has_them_from_its_first_read() {
         use crate::domain::slot_limits::{OptionalSetting, Setting, SettingSource, SlotLimits};
@@ -1008,9 +1077,16 @@ mod tests {
             max_investigations: OptionalSetting::from_file(None),
         };
         let returned = queue
-            .register_supervisor_with_limits(&LeaseToken::new("me"), 1, limits, "0.0.1")
+            .register_supervisor_with_limits(
+                &LeaseToken::new("me"),
+                1,
+                limits,
+                &providers("/bin/claude"),
+                "0.0.1",
+            )
             .unwrap();
         for registration in [returned, queue.supervisors().unwrap().remove(0)] {
+            assert_eq!(registration.providers, Some(providers("/bin/claude")));
             assert_eq!(registration.parallel, 3);
             assert_eq!(registration.parallel_source, Some(SettingSource::Flag));
             assert_eq!(registration.max_waiting, Some(2));
@@ -1028,10 +1104,56 @@ mod tests {
         };
         assert!(
             queue
-                .register_supervisor_with_limits(&LeaseToken::new("zero"), 1, zero, "0.0.1")
+                .register_supervisor_with_limits(
+                    &LeaseToken::new("zero"),
+                    1,
+                    zero,
+                    &providers("/bin/claude"),
+                    "0.0.1"
+                )
                 .is_err()
         );
         assert_eq!(queue.supervisors().unwrap().len(), 1);
+    }
+
+    /// A handoff takes the registration back with the limits and the
+    /// providers' executables the new binary resolved in the write that
+    /// shows its version, and a resume that fails (another pid) writes none.
+    #[test]
+    fn a_resumed_registration_has_the_new_limits_and_providers_with_its_version() {
+        use crate::domain::slot_limits::{OptionalSetting, Setting, SettingSource, SlotLimits};
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let setting = |value, source| Setting { value, source };
+        let limits = |parallel| SlotLimits {
+            parallel: setting(parallel, SettingSource::Flag),
+            max_waiting: setting(2, SettingSource::Default),
+            runtime_planners: setting(1, SettingSource::Default),
+            claim_spacing: setting(180, SettingSource::Default),
+            max_spikes: OptionalSetting::from_file(None),
+            class_aging: setting(3600, SettingSource::Default),
+            max_investigations: OptionalSetting::from_file(None),
+        };
+        let token = LeaseToken::new("me");
+        queue
+            .register_supervisor_with_limits(&token, 7, limits(2), &providers("/old"), "old")
+            .unwrap();
+        let returned = queue
+            .resume_registration_with_limits(&token, 7, limits(4), &providers("/new"), "new")
+            .unwrap();
+        for registration in [returned, queue.supervisors().unwrap().remove(0)] {
+            assert_eq!(registration.binary_version.as_deref(), Some("new"));
+            assert_eq!(registration.parallel, 4);
+            assert_eq!(registration.providers, Some(providers("/new")));
+        }
+        assert!(
+            queue
+                .resume_registration_with_limits(&token, 8, limits(5), &providers("/x"), "x")
+                .is_err()
+        );
+        let kept = queue.supervisors().unwrap().remove(0);
+        assert_eq!(kept.parallel, 4);
+        assert_eq!(kept.providers, Some(providers("/new")));
     }
 
     /// `claim_spacing` and its source are written with the slot limits, and
