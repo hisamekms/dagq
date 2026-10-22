@@ -927,6 +927,7 @@ mod tests {
             run_id: None,
             task_id: None,
             target: None,
+            registration: None,
         };
         // Nor is an executor's telemetry token of the run.
         let telemetry = Principal::telemetry(

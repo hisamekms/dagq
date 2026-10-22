@@ -93,6 +93,22 @@ macro_rules! event_kinds {
     };
 }
 
+/// A kind as its text ([`EventKind::as_str`]); one this binary does not
+/// know does not read.
+impl serde::Serialize for EventKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for EventKind {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = <std::borrow::Cow<'de, str>>::deserialize(deserializer)?;
+        EventKind::from_name(&name)
+            .ok_or_else(|| serde::de::Error::custom(format!("unknown event kind {name}")))
+    }
+}
+
 event_kinds! {
     AgentCasesBuilt => "agent_cases_built",
     AgentCasesDecided => "agent_cases_decided",

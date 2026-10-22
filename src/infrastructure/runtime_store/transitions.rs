@@ -90,13 +90,13 @@ impl SqliteQueue {
             )?;
             tx.execute(
                 "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,?2,?3,?4)",
-                params![run.id(), token, std::process::id(), unix_seconds(at)],
+                params![run.id(), token, holder_pid(&tx, token)?, unix_seconds(at)],
             )?;
             run_event(
                 &tx,
                 run.id(),
                 EventKind::LeaseAcquired,
-                json!({"pid": std::process::id()}),
+                json!({"pid": holder_pid(&tx, token)?}),
             )?;
         }
         tx.commit()?;
@@ -993,7 +993,7 @@ impl SqliteQueue {
                 "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,?2,?3,?4)
                  ON CONFLICT(run_id) DO UPDATE SET pid=excluded.pid,heartbeat_at=excluded.heartbeat_at
                  WHERE run_leases.token=excluded.token",
-                params![id, token, std::process::id(), self.generators.clock.now()],
+                params![id, token, holder_pid(&tx, token)?, self.generators.clock.now()],
             )? == 1,
             "run is still leased"
         );
@@ -1001,7 +1001,7 @@ impl SqliteQueue {
             &tx,
             id,
             EventKind::IntegrationStarted,
-            json!({"main": main, "previous_status": previous, "pid": std::process::id()}),
+            json!({"main": main, "previous_status": previous, "pid": holder_pid(&tx, token)?}),
         )?;
         tx.commit()?;
         Ok(run.relocated(&self.runs_dir))

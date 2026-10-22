@@ -13,13 +13,16 @@
 //! supervisor`, `restart`, `replaced`).
 //!
 //! While the service is down the supervisor claims no new run and starts
-//! no plan review, goal review, observer or throughput review: those would
-//! reach the queue through it once they are clients (goal 82's stage
-//! (3)). The runs in flight go on. A start that fails, or the limit
-//! reached, is the queue's attention `queue_service_down`, written on the
-//! DB directly (not through the service) once per failure until the
-//! service runs again (`queue_service_started` or
-//! `queue_service_running`).
+//! no plan review, goal review, observer or throughput review: its own
+//! operations on the queue go through the service (ADR-t3102-3 decision
+//! 5). The runs in flight go on. A start that fails, the limit reached, or
+//! a service found out of reach at the start, is an outage, recorded in
+//! the queue's directory outside the DB ([`OUTAGE_FILE`]) once, and sent
+//! once through `host.toml`'s `[push]` when it has one (decision 1). When
+//! the service answers again the supervisor closes the record into the
+//! queue's attention `queue_service_down` (with when it began and ended),
+//! followed by `queue_service_started` or `queue_service_running`, so the
+//! attention ends with it.
 //!
 //! A draining or handing-off supervisor does not look: an exec leaves the
 //! service to the next process, which replaces it when its build changed.
@@ -29,10 +32,12 @@
 //!
 //! [Queue service]: ../../../docs/design/queue-service.md
 
+use super::inbox_nudge::NudgePush;
 use super::*;
 use crate::application::queue_service::{QueueServiceControl, ServiceProbe};
 use crate::domain::queue_service::{
-    QUEUE_SERVICE_ATTENTION_KINDS, QUEUE_SERVICE_STOP_REQUESTED, ServiceState,
+    OUTAGE_FILE, QUEUE_SERVICE_ATTENTION_KINDS, QUEUE_SERVICE_STOP_REQUESTED, ServiceOutage,
+    ServiceState, UseCase,
 };
 
 /// How often a supervisor at work looks at the service.
@@ -68,6 +73,11 @@ pub(in crate::application::supervise) struct QueueServiceWatch {
     /// replaced, at the next looks. With a control whose start succeeds
     /// only for this supervisor's own build it is that build.
     accepted: Option<String>,
+    /// The service this supervisor started before it registered
+    /// ([`reach_at_start`]), recorded at its first look.
+    started_at_start: Option<Value>,
+    /// The `[push]` of an outage this look found, for the loop to send.
+    push: Option<NudgePush>,
 }
 
 impl HostOpsState {
@@ -77,18 +87,45 @@ impl HostOpsState {
         &mut self,
         env: &mut HostEnv<'_>,
         working: bool,
-    ) {
-        self.service_up = self.look_at_queue_service(env, working);
+        reports: Option<&ReportPort>,
+    ) -> Option<NudgePush> {
+        self.service_up = self.look_at_queue_service(env, working, reports);
+        self.queue_service.push.take()
+    }
+
+    /// The service this process started before it registered, recorded at
+    /// its first look ([`reach_at_start`]).
+    pub(in crate::application::supervise) fn started_queue_service(&mut self, started: Value) {
+        self.queue_service.started_at_start = Some(started);
+    }
+
+    /// The service did not answer one of the supervisor's operations: look
+    /// at it at the next pass, whenever the last look was.
+    pub(in crate::application::supervise) fn queue_service_unreached(&mut self) {
+        self.queue_service.last = None;
+        self.queue_service.up = false;
+        self.service_up = false;
     }
 
     /// Look at the service when due, start it again or replace it as
     /// needed, and say whether new claims and jobs may start: always
     /// without a port, else whether the service runs. `working` is false
     /// while the supervisor drains or hands off: it only answers.
-    fn look_at_queue_service(&mut self, env: &mut HostEnv<'_>, working: bool) -> bool {
+    fn look_at_queue_service(
+        &mut self,
+        env: &mut HostEnv<'_>,
+        working: bool,
+        reports: Option<&ReportPort>,
+    ) -> bool {
         let Some(port) = self.queue_service_port.clone() else {
             return true;
         };
+        if let Some(started) = self.queue_service.started_at_start.take() {
+            self.close_outage(env);
+            self.record_queue_service(env, EventKind::QueueServiceStarted, started);
+            self.queue_service.up = true;
+            self.queue_service.seen = true;
+        }
         if !working {
             return self.queue_service.up;
         }
@@ -105,7 +142,8 @@ impl HostOpsState {
             && found.build.is_some()
             && found.build == self.queue_service.accepted;
         if found.current() || accepted {
-            if !self.queue_service.up && self.queue_service_attention_stands(env) {
+            let closed = self.close_outage(env);
+            if closed || (!self.queue_service.up && self.queue_service_attention_stands(env)) {
                 info!("the queue service answers again");
                 self.record_queue_service(
                     env,
@@ -137,6 +175,7 @@ impl HostOpsState {
             );
             self.queue_service_down(
                 env,
+                reports,
                 "restart_limit",
                 &format!(
                     "started {} times in {}s; {}",
@@ -160,6 +199,7 @@ impl HostOpsState {
                     "the queue service runs at {}",
                     started.socket.display()
                 );
+                self.close_outage(env);
                 self.record_queue_service(
                     env,
                     EventKind::QueueServiceStarted,
@@ -181,7 +221,7 @@ impl HostOpsState {
             Err(error) => {
                 self.queue_service.up = false;
                 warn!(error = %format_args!("{error:#}"), "the queue service could not be started: {error:#}; no new run is claimed meanwhile");
-                self.queue_service_down(env, "start_failed", &format!("{error:#}"));
+                self.queue_service_down(env, reports, "start_failed", &format!("{error:#}"));
                 false
             }
         }
@@ -281,16 +321,55 @@ impl HostOpsState {
         }
     }
 
-    /// The attention `queue_service_down`, unless it already stands.
-    fn queue_service_down(&mut self, env: &mut HostEnv<'_>, reason: &str, message: &str) {
-        if self.queue_service_attention_stands(env) {
-            return;
+    /// An outage: its record and its `[push]` ([`note_outage`]), unless
+    /// one stands already.
+    fn queue_service_down(
+        &mut self,
+        env: &mut HostEnv<'_>,
+        reports: Option<&ReportPort>,
+        reason: &str,
+        message: &str,
+    ) {
+        let now = env.generators.clock.now();
+        if let Some(push) = note_outage(
+            &**env.files,
+            &env.layout.db,
+            now,
+            reason,
+            message,
+            Some(env.token),
+            reports,
+        ) {
+            self.queue_service.push = Some(push);
         }
-        self.record_queue_service(
-            env,
-            EventKind::QueueServiceDown,
-            json!({"reason": reason, "message": message}),
-        );
+    }
+
+    /// Close the outage's record, if one stands, into `queue_service_down`
+    /// through the service, which answers again; whether there was one. A
+    /// record the service does not take is left for the next look.
+    fn close_outage(&mut self, env: &mut HostEnv<'_>) -> bool {
+        let file = outage_file(&env.layout.db);
+        let Some(outage) = read_outage(&**env.files, &file) else {
+            return false;
+        };
+        let now = env.generators.clock.now();
+        let mut payload = outage.down_payload(now);
+        payload["supervisor"] = json!(outage.supervisor.as_deref().unwrap_or(env.token.as_str()));
+        match env
+            .queue
+            .record_queue_event(EventKind::QueueServiceDown, payload)
+        {
+            Ok(_) => {
+                if let Err(error) = env.files.remove_file(&file) {
+                    warn!(error = %format_args!("{error:#}"), "the queue service's outage record could not be removed: {error:#}");
+                }
+                true
+            }
+            Err(error) => {
+                warn!(error = %format_args!("{error:#}"), "the queue service's outage could not be recorded yet: {error:#}");
+                false
+            }
+        }
     }
 
     fn record_queue_service(&mut self, env: &mut HostEnv<'_>, kind: EventKind, mut payload: Value) {
@@ -299,6 +378,165 @@ impl HostOpsState {
             warn!(error = %format_args!("{error:#}"), "the queue service's {kind} could not be recorded: {error:#}");
         }
     }
+}
+
+/// The record of an outage of the service of the queue at `db`, beside
+/// it ([`OUTAGE_FILE`]).
+pub(in crate::application::supervise) fn outage_file(db: &Path) -> PathBuf {
+    db.parent().unwrap_or(Path::new(".")).join(OUTAGE_FILE)
+}
+
+/// The outage `file` records, if one stands and reads.
+fn read_outage(files: &dyn RunFiles, file: &Path) -> Option<ServiceOutage> {
+    let text = files.read_to_string(file).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+/// Record an outage of the service of the queue at `db` found at `now`
+/// (`reason`, `message`, by `supervisor`), unless one stands already, and
+/// the `[push]` to send for it when `reports` has one: once per outage
+/// (ADR-t3102-3 decision 1). A record that cannot be written is logged and
+/// pushes nothing, so the next look tries again.
+pub(in crate::application::supervise) fn note_outage(
+    files: &dyn RunFiles,
+    db: &Path,
+    now: i64,
+    reason: &str,
+    message: &str,
+    supervisor: Option<&LeaseToken>,
+    reports: Option<&ReportPort>,
+) -> Option<NudgePush> {
+    let file = outage_file(db);
+    if read_outage(files, &file).is_some() {
+        return None;
+    }
+    let push = reports.and_then(|port| match (port.push_config)() {
+        Ok(Some(config)) => Some((
+            config,
+            crate::domain::kpi::push::queue_service_down_message(
+                &port.push_target.name,
+                &port.push_target.queue,
+                now,
+                reason,
+                message,
+            ),
+        )),
+        Ok(None) => None,
+        Err(error) => {
+            warn!(error = %format_args!("{error:#}"), "[push] could not be read to tell of the queue service's outage: {error:#}");
+            None
+        }
+    });
+    let outage = ServiceOutage {
+        since: now,
+        reason: reason.to_owned(),
+        message: message.to_owned(),
+        supervisor: supervisor.map(|token| token.as_str().to_owned()),
+        pushed: push.is_some(),
+    };
+    let written = serde_json::to_vec_pretty(&outage)
+        .map_err(anyhow::Error::from)
+        .and_then(|bytes| Ok(files.write(&file, &bytes)?));
+    if let Err(error) = written {
+        warn!(error = %format_args!("{error:#}"), "the queue service's outage could not be recorded at {}: {error:#}", file.display());
+        return None;
+    }
+    warn!(
+        "the queue service is down ({reason}: {message}); recorded at {}",
+        file.display()
+    );
+    push
+}
+
+/// Before the supervisor registers: whether its queue's service answers,
+/// started when this supervisor keeps it and it does not, and replaced
+/// when it is of another build. `None` once it
+/// answers (with the start, if any, handed to host運用 to record at its
+/// first look); else the outcome of a supervisor that starts nothing, the
+/// outage recorded and its `[push]` sent now (no loop runs to send it).
+pub(in crate::application::supervise) fn reach_at_start(
+    ports: &Ports<'_>,
+    started: &mut Option<Value>,
+) -> Result<Option<Value>> {
+    let hello = |service: &dyn crate::application::supervisor_service::ServiceCaller| {
+        service.call(UseCase::Hello, Value::Null)
+    };
+    let error = match hello(&*ports.service) {
+        // A service of this build, or one this supervisor keeps none of.
+        Ok(answer)
+            if ports.queue_service.is_none()
+                || answer["build"].as_str() == Some(crate::VERSION) =>
+        {
+            return Ok(None);
+        }
+        // Another build's (the binary before an `install` or an automatic
+        // update handed this process over) is replaced before anything is
+        // sent to it: it may not answer this build's operations.
+        Ok(answer) => {
+            anyhow::Error::new(crate::application::supervisor_service::ServiceUnreachable(
+                format!("the queue service runs build {}", answer["build"]),
+            ))
+        }
+        Err(error) if !crate::application::supervisor_service::unreachable(&error) => {
+            return Err(error);
+        }
+        Err(error) => error,
+    };
+    let (reason, message) = match &ports.queue_service {
+        None => ("unreachable", format!("{error:#}")),
+        Some(port) => {
+            match crate::application::queue_service::ensure(&*port.control, port.start_timeout) {
+                Ok(outcome) => match hello(&*ports.service) {
+                    Ok(_) => {
+                        if outcome["outcome"] != "reused" {
+                            *started = Some(json!({
+                                "by": "supervisor",
+                                "pid": outcome["service"]["pid"],
+                                "build": outcome["service"]["build"],
+                                "api_version": outcome["service"]["api_version"],
+                                "socket": outcome["service"]["socket"],
+                                "restart": false,
+                                "replaced": outcome["replaced"],
+                            }));
+                        }
+                        return Ok(None);
+                    }
+                    Err(error) => ("start_failed", format!("{error:#}")),
+                },
+                Err(error) => ("start_failed", format!("{error:#}")),
+            }
+        }
+    };
+    warn!("the queue service does not answer ({reason}: {message}); the supervisor claims nothing");
+    let now = ports.generators.clock.now();
+    if let Some((config, message)) = note_outage(
+        &*ports.files,
+        &ports.layout.db,
+        now,
+        reason,
+        &message,
+        None,
+        ports.reports.as_ref(),
+    ) && let Some(port) = &ports.reports
+    {
+        let outcome = (port.run_push)(&crate::application::push::request(
+            &config,
+            &port.push_target,
+            &message,
+        ));
+        if !outcome.success {
+            warn!(
+                "the queue service's outage could not be sent through [push]: {}",
+                crate::application::push::failure_reason(&config, &outcome)
+            );
+        }
+    }
+    Ok(Some(json!({
+        "outcome": "queue_service_unreachable",
+        "reason": reason,
+        "message": message,
+        "outage": outage_file(&ports.layout.db),
+    })))
 }
 
 /// What a look found, for the attention's message.

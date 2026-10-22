@@ -33,12 +33,12 @@ hostで動き、queue DBを開いてユースケース単位のAPIを、service�
 
 今の段（段(2)・(3)）: serviceは下の[ユースケース](#ユースケース)（findingの書き込みはCodexのobserverの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）と、読み取りのroleのjobとworkerが打つqueue全体の読み取り（[読み取りのユースケース](#読み取りのユースケース)）を答える。
 **worker（resumeを含む）・headlessのjob・observerのdagqはクライアントモードで動き、そのプロセスにはqueue DBのpathを渡さない**（[クライアントモード](#クライアントモード)）。
-supervisor・session wrapperとhook・inbox・planner・人のCLIはDBを直接開く（段(5)まで。ADR-t1233-4決定6）。
+session wrapperとhook・inbox・planner・人のCLIはDBを直接開く（段(5)まで。ADR-t1233-4決定6）。
+supervisorはclaim・lease・runの状態とevent・tokenをserviceで行い、着地とjobの結果はDBを開く（[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）。
 例外はexecutorのsessionのstepだけで、制御側が対象ごとに発行するtelemetry専用のprincipalで[`telemetry_report`](#telemetry_report)を通る（[ADR-t1662-3](../adr/2026-10-04-t1662-3-executors-send-telemetry-and-commands-are-classified-by-shape.md)決定13）。
 
 名前: この文書の「broker」はqueueのbroker（[Queue broker](queue-broker.md)）のこと。
 brokerはrun tokenを検証した要求をそのtokenのままserviceのsocketへ転送するので、serviceの認証と認可は変わらない。
-fs・process・git・packageを仲介するresource brokerは置かない（[ADR-t2113-1](../adr/2026-10-08-t2113-1-remove-the-resource-broker.md)）。
 
 ## 置き場所と形
 
@@ -51,7 +51,7 @@ queueのディレクトリ（`dagq locate`の`db`のあるディレクトリ）�
 | `state.json` | 動いているserviceの記録。止まるときに消す |
 | `service.log` | `up`・supervisor・`service start`が起動したserviceのstdoutとstderr |
 | `tokens/<値のsha256>.json` | tokenのprincipalと発行の時刻 |
-| `credentials/<actor idのsha256>` | tokenの値。呼び出し元にはこのfileのpathを渡し、値をenvにもargvにも置かない（ADR-t1233-4決定4）。worktreeとrun dirの外 |
+| `credentials/<actor id（supervisorは登録も）のsha256>` | tokenの値。呼び出し元にはこのfileのpathを渡し、値をenvにもargvにも置かない（ADR-t1233-4決定4）。worktreeとrun dirの外 |
 
 1つの接続に1つの要求で、要求は1行のJSON、答えも1行のJSONで、答えた後に閉じる。
 上限（`MAX_ANSWER_BYTES`）を超える答えは送らず`response_too_large`で断る（ADR-t1233-5）。
@@ -74,10 +74,10 @@ serviceは呼び出しのprincipal（`Principal`）をtokenから決め、クラ
 
 - 発行: 制御側だけが`queue_service::issue`で発行する。
   AI actorにtokenを作るコマンドは無い。
-  発行できるprincipalはAI actorと、executorのtelemetry専用のprincipal（下の「executorのtelemetryのprincipal」）だけで、人と制御側（user・supervisor・wrapper・integrator）は段(5)まで今のままDBを直接開く（`Principal::check`）。
+  発行できるprincipalはAI actorと、executorのtelemetry専用のprincipal（下の「executorのtelemetryのprincipal」）と、登録を対象に持つsupervisorだけで、人と残りの制御側（user・wrapper・integrator）は段(5)まで今のままDBを直接開く（`Principal::check`）。
   同じactor idに発行し直すと前のtokenは失効する（resumeの発行し直し）。
   発行するのはactorの起動の1か所（applicationのport `ServiceAccess`）:
-  - workerのtoken: supervisorがclaimとresumeでrunのsession wrapperをbackgroundで起動するときに発行する。
+  - workerのtoken: supervisorがclaimとresumeでrunのsession wrapperをbackgroundで起動するときに、serviceにrunのleaseを確かめさせて発行する。
     wrapperの環境には入れず、session wrapperがagent（非対話のturn。最初のsessionもresumeもturnで動き、対話のsessionは起動しない）を起動するときにそのfileのpathを渡す。
     fileが無いとき（claimの発行を経ずに起動したwrapper）だけwrapperが発行する（wrapperも制御側）
   - jobのtoken: jobを起動するプロセス（supervisor、`observe`・`throughput-review`・`setup-review`のコマンド）が起動のときに発行し、jobのプロセスが終わったとき（それを見たwaitか、handleを捨てたとき）に失効させる（`ServiceAccess::revoke_on_exit`）
@@ -250,10 +250,8 @@ queueのDBが消えれば（使い捨てのqueueの片付け）自分で終わ�
 - `up`: preflightの後、supervisorより先に`application::queue_service::ensure`を打つ。
   起動できなければ`up`はsupervisorを起動せずに止まる。
   結果は`up`の出力の`queue_service`で、起動か入れ替えはevent `queue_service_started`に残す
-- supervisor: `up`が起動したsupervisor（`--once`でないもの）は一定の間隔でserviceを見て、居ない・答えないものは起動し直し、別のbuildのもの（`install`や自動更新の引き継ぎの前のバイナリが残したもの）は入れ替える（`queue_service_started`）。
-  起動し直しは窓の中で回数に上限がある（`application::supervise::host_ops::queue_service`の定数）。
-  別のbuildの入れ替えは数えない。
-  制限: 起動の成功は自分のbuildの答えだけなので（`SystemQueueService::start`）、`install`が新しいバイナリを置いた後でexecの前のsupervisorの起動は失敗して`queue_service_down`を書き、次の見張りでまた入れ替える。
+- supervisor: CLIのsupervisor（`--once`も）は一定の間隔でserviceを見て、居ない・答えないものは起動し直し、別のbuildのもの（`install`や自動更新の引き継ぎの前のバイナリが残したもの）は入れ替える（`queue_service_started`）。
+  起動し直しの上限と、別のbuildの入れ替えとexecの前の起動の失敗の扱いは`application::supervise::host_ops::queue_service`のmodule doc。
   drainと引き継ぎの間は見ない（execはserviceを次のプロセスに残し、次のプロセスがbuildの違いで入れ替える）
 - serviceが居ない間、supervisorは新しいclaimと、queueのjob（plan review・goal review・observer・スループットの見直し）の起動を控える。
   走っているrunとそのreview・復旧は止めない（ADR-t1233-4決定2）
@@ -263,11 +261,10 @@ queueのDBが消えれば（使い捨てのqueueの片付け）自分で終わ�
   drainしない引き継ぎでは、新しいバイナリのsupervisorの最初の見張りが入れ替える
 - 人の手: `dagq service start`（`service.lifecycle`。`ensure`と同じ）・`dagq service stop`（supervisorが動いていれば次の見張りで起動し直す）・`dagq service status`（`queue.read`）
 
-## 落ちたときの知らせ（ADR-t1233-4決定3）
+## 落ちたときの知らせ（ADR-t3102-3決定1）
 
-supervisorが起動し直せなかったか、上限に達したときは、queueのattention `queue_service_down`をDBに直接書く（serviceを通らない）。
-inboxの`watch`と`status`はDBを直接読むので、serviceが落ちても届く。
-1つの失敗につき1回で、serviceがまた動けば（`queue_service_started`・`queue_service_running`）消える。
+supervisorが起動し直せないか、上限に達したか、届かないときは、不在をqueueのディレクトリのDBの外に1回記録して`[push]`で1回送り、serviceが戻ったらserviceを通してattention `queue_service_down`に残し、続く`queue_service_started`か`queue_service_running`で閉じる（[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）。
+不在の間はqueueにattentionが無い。
 attentionの次の手は`dagq service status`。
 人は`dagq service status`と`service.log`を見て、`up`か`service start`を打ち直す。
 生きているsupervisorも居ないときは`restart supervisor`が出る。
@@ -296,7 +293,7 @@ workerとjobのClaudeの`permissions.deny`には`dagq service`の制御のコマ
 - executorからのtelemetryの送信
 - queueのbrokerはrun tokenのほかを通さないので、containerのrunのexecutorの`telemetry_report`の経路は無い（[Queue broker](queue-broker.md)の`TokenRefusal`）
 - 段(4)〜(6)の残り: brokerの残りの宛て（[Queue broker](queue-broker.md#まだ無いもの)）、integrateのverificationの隔離
-- 段(5)のsupervisor・wrapper・hook・CLIのservice経由化（決定はADR-t3102-1〜3。分け方は[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)のContext）
+- 段(5)の残り: supervisorの着地とjobの結果・wrapper・hook・CLIのservice経由化、userのprincipalと親の依頼によるtokenの発行（決定はADR-t3102-1〜3。分け方は[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)のContext）
 
 ## CIの見張り（ADR-t1920-1）
 

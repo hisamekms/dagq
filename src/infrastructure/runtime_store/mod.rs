@@ -340,6 +340,18 @@ fn renew_lease(conn: &Connection, id: &RunId, token: &LeaseToken, now: i64) -> R
     Ok(())
 }
 
+/// The pid a lease of `token` records: that of the supervisor registered
+/// under `token`, as the queue service writes for a supervisor in another
+/// process, or this process's when `token` has no registration.
+pub(super) fn holder_pid(conn: &Connection, token: &LeaseToken) -> Result<u32> {
+    Ok(conn
+        .query_row("SELECT pid FROM supervisors WHERE token=?1", [token], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .unwrap_or_else(std::process::id))
+}
+
 fn lease_row(r: &Row<'_>) -> rusqlite::Result<RunLease> {
     Ok(RunLease {
         run_id: r.get(0)?,
@@ -563,7 +575,7 @@ fn lease_parked_run(
     }
     tx.execute(
         "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,?2,?3,?4)",
-        params![id, token, std::process::id(), now],
+        params![id, token, holder_pid(tx, token)?, now],
     )?;
     tx.execute(
         "UPDATE task_runs SET supervisor_token=?2 WHERE id=?1",
@@ -684,5 +696,21 @@ mod tests {
         assert!(!lease_is_stale(&live, T + HEARTBEAT_TIMEOUT_SECS));
         assert!(lease_is_stale(&live, T + HEARTBEAT_TIMEOUT_SECS + 1));
         assert!(lease_is_stale(&lease(u32::MAX, T), T));
+    }
+
+    /// A lease written for a registered supervisor records the
+    /// registration's pid, not that of the process writing it (the queue
+    /// service); a token with no registration records the writer's own.
+    #[test]
+    fn a_lease_records_the_pid_its_token_registered() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+        let token = LeaseToken::new("registered");
+        queue.register_supervisor(&token, 4242, 1, "0.0.1").unwrap();
+        assert_eq!(holder_pid(&queue.conn, &token).unwrap(), 4242);
+        assert_eq!(
+            holder_pid(&queue.conn, &LeaseToken::new("unregistered")).unwrap(),
+            std::process::id()
+        );
     }
 }

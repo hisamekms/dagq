@@ -67,7 +67,7 @@ pub use planning::{
     PLANNER_TIMEOUT, PlannerEntry, planner_session, planner_session_with_provider, planners,
 };
 pub use supervisor::{
-    ContainerRuntimePort, PausesPort, ProcessesPort, RunContainersPort, RunFilesPort,
+    ContainerRuntimePort, PausesPort, ProcessesPort, RunContainersPort, RunFilesPort, ServiceRoute,
     SuperviseOptions, VerificationContainersPort, review_program_host, supervise,
     supervise_with_reviewer,
 };

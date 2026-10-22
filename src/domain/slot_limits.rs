@@ -134,7 +134,7 @@ impl SlotFlags {
 }
 
 /// One value in use and where it comes from.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct Setting {
     pub value: usize,
     pub source: SettingSource,
@@ -162,7 +162,7 @@ impl Setting {
 
 /// A value in use that may be unset, and where it comes from: `None`
 /// from the default is no limit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct OptionalSetting {
     pub value: Option<usize>,
     pub source: SettingSource,
@@ -184,7 +184,7 @@ impl OptionalSetting {
 
 /// `parallel`, `max_waiting`, `runtime_planners`, `claim_spacing` (in
 /// seconds), `max_spikes` and `class_aging` (in seconds) in use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct SlotLimits {
     pub parallel: Setting,
     pub max_waiting: Setting,

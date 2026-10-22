@@ -33,6 +33,7 @@ use crate::{
         RunFiles, SessionWrappers,
         review::{self as reviewing},
         supervise::{self as supervisor, Layout, LoopSettings, Ports, UpdateSettings},
+        supervisor_service::{ServiceCaller, ServiceTokens, SupervisorQueues},
     },
     domain::{
         Provider, SupervisorMode, TaskId,
@@ -52,6 +53,7 @@ use crate::{
             planners_dir, replans_dir, review_programs_dir, runs_dir, satisfied_dir,
         },
         process::LocalSpawner,
+        queue_service::{InProcessCaller, SocketCaller},
         run_env::{
             ShellVerifier, load_conflict_config, load_disk_config, load_fresh_session,
             load_provider_fallback, load_resume_config, load_review_jobs, load_stall_config,
@@ -69,6 +71,18 @@ const TICK: Duration = Duration::from_secs(1);
 
 /// How often the supervisor sweeps the workspaces of ended runs.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Where the supervisor's queue operations are answered
+/// ([`SuperviseOptions::service_route`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceRoute {
+    /// The queue service's process, on its socket: the supervisor opens no
+    /// DB for them, and one that does not answer is waited for.
+    Socket,
+    /// The service's use cases run in this process, each request and
+    /// answer as on the socket: a supervisor that keeps no service.
+    InProcess,
+}
 
 /// How the supervisor loop is driven. `stop` is the graceful drain switch
 /// (SIGINT in the CLI): no more claims, exit once every active run rests.
@@ -276,9 +290,17 @@ pub struct SuperviseOptions {
     /// beside them.
     pub profiles: &'static crate::domain::toolchain::ProfileRegistry,
     /// Keep the queue's service running (ADR-t1233-4 decision 2): the
-    /// supervisor `up` starts gets it; `None` (a `--once` pass, the tests)
-    /// keeps none and holds nothing for it.
+    /// CLI's supervisor gets it, a `--once` pass too, and starts the service
+    /// before it registers when it does not answer; `None` (the tests) keeps
+    /// none and holds nothing for it.
     pub queue_service: Option<QueueServiceOptions>,
+    /// How the supervisor reaches its queue's service for its claims,
+    /// leases, runs' transitions and events and the tokens it issues
+    /// (ADR-t3102-3 decisions 3 to 5): the CLI's supervisor goes to the
+    /// service's socket; a caller of the library (the tests) runs the
+    /// service's use cases in its own process unless it asks for the
+    /// socket.
+    pub service_route: ServiceRoute,
     /// Keep the queue's broker running (ADR-t2114-1 decision 1): the
     /// supervisor `up` starts gets it; `None` (a `--once` pass, the tests)
     /// keeps none. The container runtime is looked at through the broker
@@ -445,6 +467,7 @@ impl SuperviseOptions {
             host_metrics: None,
             profiles: &crate::domain::toolchain::BUILTIN,
             queue_service: None,
+            service_route: ServiceRoute::InProcess,
             queue_broker: None,
             broker_relay: None,
             run_containers: None,
@@ -781,6 +804,31 @@ pub fn supervise_with_reviewer(
             pid,
         )),
     };
+    // The claim, the leases, the runs and their events, and the tokens
+    // through the queue service (ADR-t3102-3 decisions 3 to 5); what it
+    // does not answer yet on the DB's own connection.
+    let service: Arc<dyn ServiceCaller> = match options.service_route {
+        ServiceRoute::Socket => Arc::new(SocketCaller::new(&db)),
+        ServiceRoute::InProcess => Arc::new(InProcessCaller::new(
+            &db,
+            generators.clone(),
+            super::service_reads(),
+            super::service_detail(),
+        )),
+    };
+    let supervisor_queues = || SupervisorQueues {
+        service: service.clone(),
+        local: Arc::new(opener()),
+        actor: crate::domain::actor::ActorContext::instance(
+            crate::domain::actor::ActorRole::Supervisor,
+            pid,
+        ),
+    };
+    let service_tokens = ServiceTokens {
+        queues: supervisor_queues(),
+        files: Arc::new(crate::infrastructure::queue_service::SystemServiceAccess),
+        telemetry_files: Arc::new(crate::infrastructure::queue_service::SystemServiceAccess),
+    };
     let host_metrics = options.host_metrics.clone().map(|settings| {
         host::host_metrics_port(
             &db,
@@ -812,7 +860,8 @@ pub fn supervise_with_reviewer(
     });
     let host_programs = review_program_host(&repository, runner, std::env::vars_os())?;
     let ports = Ports {
-        queues: Arc::new(opener()),
+        queues: Arc::new(supervisor_queues()),
+        service: service.clone(),
         observation_queues: Arc::new(SqlitePorts {
             opener: opener(),
             keep: |queue| -> Box<dyn ObservationQueue + Send> { Box::new(queue) },
@@ -889,8 +938,8 @@ pub fn supervise_with_reviewer(
             &host_programs,
             crate::application::execution::ExecutionConfig::default(),
         ),
-        service_access: &crate::infrastructure::queue_service::SystemServiceAccess,
-        telemetry_tokens: &crate::infrastructure::queue_service::SystemServiceAccess,
+        service_access: &service_tokens,
+        telemetry_tokens: &service_tokens,
         files: options.files.as_ref().map_or_else(
             || Arc::new(LocalRunFiles) as Arc<dyn RunFiles>,
             |port| port.0.clone(),

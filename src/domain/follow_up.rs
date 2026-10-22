@@ -372,7 +372,7 @@ impl DraftTarget {
 /// planner of its own for the draft again, past a `keep_draft` answer and
 /// for a draft without an origin. Set, changed and cleared by a planner of
 /// the runtime's, a person or the inbox; used once, as the planner opens.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct DraftRevisit {
     pub task_id: super::TaskId,
     /// Unix seconds.

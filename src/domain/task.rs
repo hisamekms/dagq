@@ -776,6 +776,157 @@ pub fn check_membership_acyclic(
     })
 }
 
+/// A task whole, every field it holds as it holds it, as one process hands
+/// it to another (the queue service to a supervisor): unlike `Serialize`,
+/// the CLI's JSON, it leaves nothing out, so the task it is made back into
+/// is the same task.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct TaskWire {
+    pub id: TaskId,
+    pub title: String,
+    pub description: String,
+    pub acceptance: String,
+    pub verification_commands: Vec<String>,
+    pub required_evidence: Vec<EvidenceCheck>,
+    pub paths: Vec<String>,
+    pub priority: Priority,
+    pub priority_source: PrioritySource,
+    pub priority_by: PriorityBy,
+    pub own_priority: Option<Priority>,
+    pub own_priority_by: Option<PriorityBy>,
+    pub goal_priority: Option<Priority>,
+    pub goal_priority_by: Option<PriorityBy>,
+    pub origin: RecordedOrigin,
+    pub change: Option<TaskChange>,
+    pub wait_for_build: bool,
+    pub execution_class: ExecutionClass,
+    pub worker: Worker,
+    pub named_mode: Option<WorkerMode>,
+    pub status: TaskStatus,
+    pub goal_id: Option<GoalId>,
+    pub context: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<Task> for TaskWire {
+    fn from(task: Task) -> Self {
+        let Task {
+            id,
+            title,
+            description,
+            acceptance,
+            verification_commands,
+            required_evidence,
+            paths,
+            priority,
+            priority_source,
+            priority_by,
+            own_priority,
+            own_priority_by,
+            goal_priority,
+            goal_priority_by,
+            origin,
+            change,
+            wait_for_build,
+            execution_class,
+            worker,
+            named_mode,
+            status,
+            goal_id,
+            context,
+            created_at,
+            updated_at,
+        } = task;
+        Self {
+            id,
+            title,
+            description,
+            acceptance,
+            verification_commands,
+            required_evidence,
+            paths,
+            priority,
+            priority_source,
+            priority_by,
+            own_priority,
+            own_priority_by,
+            goal_priority,
+            goal_priority_by,
+            origin,
+            change,
+            wait_for_build,
+            execution_class,
+            worker,
+            named_mode,
+            status,
+            goal_id,
+            context,
+            created_at,
+            updated_at,
+        }
+    }
+}
+
+impl From<TaskWire> for Task {
+    fn from(wire: TaskWire) -> Self {
+        let TaskWire {
+            id,
+            title,
+            description,
+            acceptance,
+            verification_commands,
+            required_evidence,
+            paths,
+            priority,
+            priority_source,
+            priority_by,
+            own_priority,
+            own_priority_by,
+            goal_priority,
+            goal_priority_by,
+            origin,
+            change,
+            wait_for_build,
+            execution_class,
+            worker,
+            named_mode,
+            status,
+            goal_id,
+            context,
+            created_at,
+            updated_at,
+        } = wire;
+        Self {
+            id,
+            title,
+            description,
+            acceptance,
+            verification_commands,
+            required_evidence,
+            paths,
+            priority,
+            priority_source,
+            priority_by,
+            own_priority,
+            own_priority_by,
+            goal_priority,
+            goal_priority_by,
+            origin,
+            change,
+            wait_for_build,
+            execution_class,
+            worker,
+            named_mode,
+            status,
+            goal_id,
+            context,
+            created_at,
+            updated_at,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

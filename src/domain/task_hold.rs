@@ -352,7 +352,7 @@ string_enum!(RunHoldWait {
 });
 
 /// The open hold of a task as the guard of its steps reads it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct HoldGuard {
     pub task: TaskId,
     pub hold: HoldId,

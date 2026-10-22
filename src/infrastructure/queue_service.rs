@@ -278,7 +278,8 @@ fn write_token(
     now: i64,
 ) -> Result<IssuedToken> {
     principal.check().map_err(anyhow::Error::msg)?;
-    revoke(queue_dir, &principal.actor_id)?;
+    let key = principal.credential_key();
+    revoke(queue_dir, &key)?;
     let mut bytes = [0u8; 32];
     getrandom::fill(&mut bytes)
         .map_err(|error| anyhow::anyhow!("draw a token's random bytes: {error}"))?;
@@ -293,7 +294,7 @@ fn write_token(
     };
     // The value first: a token whose record is not written yet is no
     // token, and one whose value is written can always be revoked.
-    let file = credential_path(queue_dir, &principal.actor_id);
+    let file = credential_path(queue_dir, &key);
     write_private(&file, token.as_bytes())?;
     // A record that cannot be written leaves no file of a value that
     // authenticates nothing.
@@ -1303,7 +1304,9 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
                     }
                 });
             }
-            Err(error) if error.kind() == ErrorKind::WouldBlock => thread::sleep(options.poll),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                wait_for_connection(&listener, options.poll);
+            }
             Err(error) if error.kind() == ErrorKind::Interrupted => {}
             Err(error) => {
                 warn!("the queue service could not accept: {error}");
@@ -1322,6 +1325,21 @@ pub fn serve(options: &ServeOptions) -> Result<Value> {
     info!(pid, outcome, "the queue service stopped: {outcome}");
     drop(lock);
     Ok(json!({"outcome": outcome, "pid": pid, "served": served}))
+}
+
+/// Wait up to `poll` for a connection to `listener`, returning as soon as
+/// one comes: a supervisor sends many requests a pass, each on a
+/// connection of its own, which a fixed sleep between looks would each
+/// hold back.
+fn wait_for_connection(listener: &UnixListener, poll: Duration) {
+    let mut fd = libc::pollfd {
+        fd: listener.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let millis = libc::c_int::try_from(poll.as_millis()).unwrap_or(libc::c_int::MAX);
+    // SAFETY: poll(2) on one pollfd that lives through the call.
+    unsafe { libc::poll(&raw mut fd, 1, millis) };
 }
 
 /// Read one request from `stream`, answer it, and close.
@@ -1429,6 +1447,194 @@ impl ServiceBackend for SqliteServiceBackend {
             .ok()
             .and_then(|since| i64::try_from(since.as_millis()).ok())
             .unwrap_or_default()
+    }
+
+    fn db(&self) -> &Path {
+        &self.db
+    }
+
+    fn access(&self) -> &dyn ServiceAccess {
+        &SystemServiceAccess
+    }
+
+    fn telemetry(&self) -> &dyn TelemetryTokens {
+        &SystemServiceAccess
+    }
+
+    fn principals(&self) -> Result<Vec<Principal>> {
+        principals(&self.queue_dir)
+    }
+}
+
+// --- The supervisor's calls (goal 182's stage (5)) ---------------------------
+
+/// How long the supervisor waits for the service's answer to one of its
+/// operations: a write may wait for the queue's lock first.
+pub const SUPERVISOR_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The supervisor principal's token, once it signed in: its value, read
+/// from the file the issue wrote, and the key it is kept under
+/// ([`Principal::credential_key`]), for the revocation.
+#[derive(Default)]
+struct SignedIn(std::sync::Mutex<Option<(String, String)>>);
+
+impl SignedIn {
+    fn sign_in(&self, queue_dir: &Path, registration: &LeaseToken, pid: u32) -> Result<()> {
+        let principal = Principal::supervisor(registration, pid);
+        let issued = issue(queue_dir, &principal, unix_now())?;
+        let value = read_token(&issued.file)?;
+        *self.0.lock().expect("the sign-in lock") = Some((value, principal.credential_key()));
+        Ok(())
+    }
+
+    fn sign_out(&self, queue_dir: &Path) {
+        if let Some((_, key)) = self.0.lock().expect("the sign-in lock").take()
+            && let Err(error) = revoke(queue_dir, &key)
+        {
+            warn!("the supervisor's queue service token could not be revoked: {error:#}");
+        }
+    }
+
+    /// The token's value; `None` before the sign-in, when only `hello` is
+    /// answered.
+    fn token(&self) -> Option<String> {
+        self.0
+            .lock()
+            .expect("the sign-in lock")
+            .as_ref()
+            .map(|(value, _)| value.clone())
+    }
+}
+
+/// The supervisor's calls on its queue service's socket
+/// (ADR-t1233-1 decision 5): nothing answering is
+/// [`crate::application::supervisor_service::ServiceUnreachable`], and the
+/// queue is never opened instead.
+pub struct SocketCaller {
+    queue_dir: PathBuf,
+    socket: PathBuf,
+    timeout: Duration,
+    signed_in: SignedIn,
+}
+
+impl SocketCaller {
+    /// The caller of the service of the queue at `db`.
+    pub fn new(db: &Path) -> Self {
+        let queue_dir = queue_dir_of(db);
+        Self {
+            socket: socket_path(&queue_dir),
+            queue_dir,
+            timeout: SUPERVISOR_TIMEOUT,
+            signed_in: SignedIn::default(),
+        }
+    }
+}
+
+/// The answer `response` of a supervisor's request as its result.
+fn supervisor_answer(response: ServiceResponse) -> Result<Value> {
+    if !crate::domain::queue_service::understands(&response) {
+        bail!(
+            "the queue service answers API versions {} to {}, not {API_VERSION}",
+            response.min_api_version,
+            response.api_version
+        );
+    }
+    match (response.ok, response.result, response.error) {
+        (true, result, _) => Ok(result.unwrap_or(Value::Null)),
+        (_, _, Some(error)) => Err(crate::application::supervisor_service::service_error(
+            &error,
+        )),
+        _ => bail!("the queue service answered with neither a result nor an error"),
+    }
+}
+
+impl crate::application::supervisor_service::ServiceCaller for SocketCaller {
+    fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
+        let request = ServiceRequest {
+            api_version: API_VERSION,
+            token: self.signed_in.token(),
+            use_case,
+            params,
+        };
+        let response = call(&self.socket, &request, self.timeout).map_err(|error| {
+            if error.downcast_ref::<AnswerPastLimit>().is_some() {
+                error
+            } else {
+                anyhow::Error::new(crate::application::supervisor_service::ServiceUnreachable(
+                    format!("{error:#}"),
+                ))
+            }
+        })?;
+        supervisor_answer(response)
+    }
+
+    fn sign_in(&self, registration: &LeaseToken, pid: u32) -> Result<()> {
+        self.signed_in.sign_in(&self.queue_dir, registration, pid)
+    }
+
+    fn sign_out(&self) {
+        self.signed_in.sign_out(&self.queue_dir);
+    }
+}
+
+/// The supervisor's calls answered in this process by the service's use
+/// cases on a backend of its own (a test's supervisor, which keeps no
+/// service): every request is made and read back as the socket's would
+/// be, token and all.
+pub struct InProcessCaller {
+    queue_dir: PathBuf,
+    backend: SqliteServiceBackend,
+    signed_in: SignedIn,
+}
+
+impl InProcessCaller {
+    /// The caller of the queue at `db`, its records made with `generators`.
+    pub fn new(
+        db: &Path,
+        generators: Generators,
+        reads: ServiceReads,
+        detail: ServiceDetail,
+    ) -> Self {
+        let queue_dir = queue_dir_of(db);
+        Self {
+            backend: SqliteServiceBackend {
+                db: db.to_path_buf(),
+                queue_dir: queue_dir.clone(),
+                generators,
+                reads,
+                detail,
+            },
+            queue_dir,
+            signed_in: SignedIn::default(),
+        }
+    }
+}
+
+impl crate::application::supervisor_service::ServiceCaller for InProcessCaller {
+    fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
+        let request = ServiceRequest {
+            api_version: API_VERSION,
+            token: self.signed_in.token(),
+            use_case,
+            params,
+        };
+        // Through the request's text and the answer's, as on the socket.
+        let request: ServiceRequest = serde_json::from_slice(&serde_json::to_vec(&request)?)?;
+        let response = QueueService {
+            backend: &self.backend,
+            build: crate::VERSION,
+            pid: std::process::id(),
+        }
+        .handle(&request);
+        supervisor_answer(serde_json::from_slice(&serde_json::to_vec(&response)?)?)
+    }
+
+    fn sign_in(&self, registration: &LeaseToken, pid: u32) -> Result<()> {
+        self.signed_in.sign_in(&self.queue_dir, registration, pid)
+    }
+
+    fn sign_out(&self) {
+        self.signed_in.sign_out(&self.queue_dir);
     }
 }
 
@@ -1610,6 +1816,50 @@ impl ServiceQueue for ServiceSqlite {
 
     fn telemetry_target(&self, target: &StepTarget) -> Result<TargetFacts> {
         self.queue.telemetry_target(target)
+    }
+
+    fn register_session(
+        &mut self,
+        target: &StepTarget,
+        session_id: &str,
+        at_ms: i64,
+    ) -> Result<()> {
+        SessionOwners::register_session(&self.queue, target, session_id, at_ms)
+    }
+
+    fn supervisor_store(
+        &mut self,
+    ) -> &mut dyn crate::application::supervisor_service::SupervisorStore {
+        &mut self.queue
+    }
+
+    fn under_lease(
+        &mut self,
+        run: &RunId,
+        token: &LeaseToken,
+        then: &mut dyn FnMut() -> Result<Value>,
+    ) -> Result<Value> {
+        let conn = &self.queue.conn;
+        conn.execute_batch("BEGIN IMMEDIATE")
+            .map_err(anyhow::Error::from)
+            .map_err(super::sqlite::tag_busy)?;
+        let result = match self.queue.holds_lease(run, token) {
+            Ok(true) => then(),
+            Ok(false) => Err(anyhow::anyhow!(
+                "run {run} is not leased to the supervisor that asked: nothing is issued under its lease"
+            )),
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(value) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(value)
+            }
+            Err(error) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
     }
 }
 
@@ -1868,6 +2118,9 @@ impl QueueServiceControl for SystemQueueService {
         Ok(Some(pid))
     }
 }
+
+#[cfg(test)]
+mod supervisor_tests;
 
 #[cfg(test)]
 mod tests {

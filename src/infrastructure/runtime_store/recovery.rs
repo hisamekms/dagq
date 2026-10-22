@@ -773,7 +773,7 @@ impl SqliteQueue {
             &tx,
             id,
             EventKind::LeaseAcquired,
-            json!({"pid": std::process::id(), "reason": "resume", "previous_token": previous}),
+            json!({"pid": holder_pid(&tx, token)?, "reason": "resume", "previous_token": previous}),
         )?;
         // The resumed session keeps the model and effort of the last one,
         // raised a step after a failure the task caused (ADR-0079 decisions
@@ -836,7 +836,7 @@ impl SqliteQueue {
             &tx,
             id,
             EventKind::LeaseAcquired,
-            json!({"pid": std::process::id(), "reason": "resume_skipped", "previous_token": previous}),
+            json!({"pid": holder_pid(&tx, token)?, "reason": "resume_skipped", "previous_token": previous}),
         )?;
         run_event(
             &tx,
@@ -1027,14 +1027,14 @@ impl SqliteQueue {
         }
         tx.execute(
             "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,?2,?3,?4)",
-            params![id, token, std::process::id(), now],
+            params![id, token, holder_pid(&tx, token)?, now],
         )?;
         let attempt = RunHistory::from_events(&events).triage_attempts() + 1;
         run_event(
             &tx,
             id,
             EventKind::LeaseAcquired,
-            json!({"pid": std::process::id(), "reason": "triage", "previous_token": lease.map(|l| l.token)}),
+            json!({"pid": holder_pid(&tx, token)?, "reason": "triage", "previous_token": lease.map(|l| l.token)}),
         )?;
         if let Some(request) = request {
             run_event(&tx, id, EventKind::RecoveryRequested, request)?;
@@ -2196,13 +2196,13 @@ fn lease_in(
     }
     conn.execute(
         "INSERT INTO run_leases(run_id,token,pid,heartbeat_at) VALUES (?1,?2,?3,?4)",
-        params![id, token, std::process::id(), now],
+        params![id, token, holder_pid(conn, token)?, now],
     )?;
     conn.execute(
         "UPDATE task_runs SET supervisor_token=?2 WHERE id=?1",
         params![id, token],
     )?;
-    payload["pid"] = json!(std::process::id());
+    payload["pid"] = json!(holder_pid(conn, token)?);
     payload["previous_token"] = json!(lease.map(|l| l.token));
     run_event(conn, id, EventKind::LeaseAcquired, payload)?;
     Ok(true)

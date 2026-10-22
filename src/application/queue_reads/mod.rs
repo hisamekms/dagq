@@ -580,7 +580,8 @@ impl QueueRead {
             | UseCase::AgentDecide
             | UseCase::AgentSets
             | UseCase::AgentSet
-            | UseCase::TelemetryReport => return Ok(None),
+            | UseCase::TelemetryReport
+            | UseCase::Supervisor => return Ok(None),
         };
         read.check()?;
         Ok(Some(read))

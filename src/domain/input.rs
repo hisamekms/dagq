@@ -297,7 +297,7 @@ pub struct GoalRecord {
 }
 
 /// A run as the store saved it, for [`super::TaskRun::restore`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize)]
 pub struct RunRecord {
     pub id: RunId,
     pub task_id: TaskId,
@@ -322,7 +322,7 @@ pub struct RunRecord {
 /// Where a claimed run is provisioned: the repository, its run directory,
 /// branch and worktree, and the files its session writes. `run_planned`
 /// records it as is.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct RunPlan {
     pub repo_path: String,
     pub run_dir: String,

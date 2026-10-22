@@ -355,7 +355,7 @@ impl OriginKind {
 /// shown under those names. The kind is none only for `unknown`; the
 /// request only for a `request` kind. It is written once, when the goal or
 /// task is created.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct RecordedOrigin {
     pub origin: Origin,
     #[serde(rename = "origin_kind")]

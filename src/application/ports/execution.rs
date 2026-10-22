@@ -183,7 +183,7 @@ impl EntryKind {
 
 /// What one heartbeat wrote: whether the process's supervisor registration
 /// was there to refresh, and how many run leases it refreshed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct HeartbeatWrite {
     pub registered: bool,
     pub leases: usize,
@@ -759,7 +759,7 @@ pub trait MainRemote {
 
 /// A run some other process leases, with its wrapper registration: what a
 /// supervisor with a free slot judges for adoption (ADR-0012).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LeasedRun {
     pub run: TaskRun,
     pub lease: RunLease,
@@ -786,7 +786,7 @@ pub use crate::domain::validation::Validation;
 /// A session an ended run opened (the worker's or a resume's), whose
 /// background wrapper the supervisor's sweep stops while it still runs; a
 /// workspace from before ADR-t1433-3 is left to a person.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EndedRunWorkspace {
     pub run_id: RunId,
     pub status: RunStatus,
@@ -797,7 +797,7 @@ pub struct EndedRunWorkspace {
 /// belongs to a task that is over, for the supervisor's clean-up of the
 /// disk (task 376), or of a run left in the middle that nobody works on
 /// (task 1289, [`WorktreeCleanup`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EndedRunWorktree {
     pub run_id: RunId,
     pub task_id: TaskId,
@@ -809,7 +809,7 @@ pub struct EndedRunWorktree {
 }
 
 /// Why a run's worktree is a candidate for the cleanup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum WorktreeCleanup {
     /// The run ended (`integrated`, `succeeded`, `failed`, `interrupted`)
     /// or its task is over (task 376).
@@ -832,7 +832,7 @@ pub enum WorktreeCleanup {
 }
 
 /// A `needs_session` run as the supervisor judges it for a resume.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ResumeCandidate {
     pub run: TaskRun,
     pub lease: Option<RunLease>,

@@ -16,7 +16,7 @@ use super::{
 
 /// Why a run needs the runtime's e2e (ADR-t963-1 decision 2, ADR-t1233-2
 /// decision 1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum E2eSource {
     /// The task's `required_evidence` (`add --evidence e2e`).
@@ -38,14 +38,14 @@ impl E2eSource {
 /// `validation_finished` (as `e2e_requirement`), read by the runtime's e2e
 /// after the review (ADR-t1233-2) and by `stats`. The worker's receipt
 /// never backs it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct E2eRequirement {
     pub required: bool,
     /// `None` when it is not required.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source: Option<E2eSource>,
     /// The changed paths `[e2e] paths` matched, for [`E2eSource::Paths`].
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub paths: Vec<String>,
 }
 
@@ -81,7 +81,7 @@ impl E2eRequirement {
 /// `needs_session` instead of failing it, and so does one for a diff that
 /// changes `scope_violation`, paths none of the task's `allowed_paths`
 /// match (ADR-0029).
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, serde::Deserialize)]
 pub struct Validation {
     pub accepted: bool,
     pub result_commit: Option<CommitSha>,
@@ -90,15 +90,15 @@ pub struct Validation {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<ReasonCode>,
     pub receipt: serde_json::Value,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_missing: Vec<EvidenceCheck>,
     /// The fields of a Spike's result its receipt lacks (ADR-t1487-1
     /// decision 3); never set for an implementation's run.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spike_result_missing: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub scope_violation: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_paths: Vec<String>,
     /// Whether `e2e` was required and why (ADR-t963-1 decision 2); `None`
     /// when validation stopped before it could tell.
@@ -109,7 +109,7 @@ pub struct Validation {
     /// no landing; the runtime verifies the claim on main.
     /// Recorded with `accepted: true`, `status: validating` and no
     /// `result_commit`.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub already_satisfied: bool,
     /// The load average from `receipt_observed` to this validation (task
     /// 197): the supervisor's samples, filled in when it records the result.

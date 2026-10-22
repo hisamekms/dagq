@@ -34,9 +34,11 @@ pub use recorded::{
     resume_finished, unfinished_change,
 };
 
-/// A run of a task. `Serialize` is the JSON the CLI prints; there is no
-/// `Deserialize`: a run is built by [`TaskRun::new`] or [`TaskRun::restore`] only.
-#[derive(Debug, Clone, Serialize)]
+/// A run of a task. `Serialize` is the JSON the CLI prints, every field of
+/// it; `Deserialize` reads that JSON back through [`TaskRun::restore`], so
+/// a run is built by [`TaskRun::new`] or [`TaskRun::restore`] only.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(try_from = "RunRecord")]
 pub struct TaskRun {
     id: RunId,
     task_id: TaskId,
@@ -92,6 +94,13 @@ pub struct TaskRun {
     /// workspace's close); null keeps the run out of any cleaned state.
     workspace_closed_at: Option<i64>,
     created_at: String,
+}
+
+impl TryFrom<RunRecord> for TaskRun {
+    type Error = DomainError;
+    fn try_from(record: RunRecord) -> Result<Self, DomainError> {
+        Self::restore(record)
+    }
 }
 
 impl TaskRun {

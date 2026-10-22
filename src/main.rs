@@ -4709,14 +4709,17 @@ fn execute(cli: Cli) -> Result<Value> {
                 // The watch of the adopted agent definitions (ADR-t1728-1
                 // (g)); a one-shot pass does not watch them.
                 agent_watch: (!once).then_some(dagq::application::supervise::AGENT_WATCH_CHECK),
-                // A supervisor at work keeps the queue's service (ADR-t1233-4
-                // decision 2); a one-shot pass does not.
-                queue_service: (!once).then(|| dagq::compose::QueueServiceOptions {
+                // A supervisor keeps the queue's service (ADR-t1233-4
+                // decision 2), a one-shot pass too: it reaches the queue
+                // through it (ADR-t3102-3 decision 5), and starts it when
+                // it does not run.
+                queue_service: Some(dagq::compose::QueueServiceOptions {
                     executable: env::current_exe().unwrap_or_else(|_| PathBuf::from("dagq")),
                     interval: dagq::application::supervise::QUEUE_SERVICE_INTERVAL,
                     start_timeout: dagq::application::supervise::QUEUE_SERVICE_START_TIMEOUT,
                     control: None,
                 }),
+                service_route: dagq::compose::ServiceRoute::Socket,
                 // And the queue broker (ADR-t2114-1 decision 1), from the same
                 // binary.
                 queue_broker: (!once).then(|| dagq::compose::QueueBrokerOptions {

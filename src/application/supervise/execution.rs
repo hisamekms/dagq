@@ -419,7 +419,13 @@ pub type Pauses = Arc<dyn Fn(PausePoint, &RunId) + Send + Sync>;
 
 /// The ports the supervisor works through, and where it works.
 pub struct Ports<'a> {
+    /// The supervisor's queue: the claim, the leases, the runs' transitions
+    /// and events and the reads it decides on through the queue service
+    /// ([`crate::application::supervisor_service::SupervisorQueues`]).
     pub queues: Arc<dyn QueueOpener>,
+    /// How `queues` reaches the service, which the supervisor signs in to
+    /// as its registration before anything else.
+    pub service: Arc<dyn crate::application::supervisor_service::ServiceCaller>,
     /// The connections of 観測と分析's jobs off the loop, as its ports.
     pub observation_queues: Arc<dyn QueueOpener<dyn crate::application::ObservationQueue + Send>>,
     /// The connections of host運用's jobs off the loop, as its ports.
@@ -528,8 +534,9 @@ pub struct Ports<'a> {
     /// Records the host's load under `<queue dir>/host/` (task 516);
     /// `None` records none.
     pub host_metrics: Option<HostMetricsPort>,
-    /// Keeps the queue's service running (ADR-t1233-4 decision 2); `None`
-    /// keeps none and holds nothing for it (a `--once` pass, the tests).
+    /// Keeps the queue's service running (ADR-t1233-4 decision 2), started
+    /// before the registration when it does not answer; `None` keeps none
+    /// and holds nothing for it (the tests).
     pub queue_service: Option<QueueServicePort>,
     /// Keeps the queue's broker running (ADR-t2114-1 decision 1); `None`
     /// keeps none (a `--once` pass, the tests).
@@ -645,7 +652,8 @@ impl HeartbeatPolicy {
         }
     }
 
-    /// Whether a write that failed as busy, `since` the last one written
+    /// Whether a write that failed as busy (or met no queue service),
+    /// `since` the last one written
     /// (the failed write's wait included), is tried again: only while the
     /// next write, waiting out the interval and the lock, still lands before
     /// the leases go stale.
@@ -805,7 +813,12 @@ fn beat(
                 });
                 streak.failures += 1;
                 streak.error = format!("{error:#}");
-                if !policy.retries(crate::application::QueueBusy::is(&error), since) {
+                // A queue service that does not answer (being replaced, or
+                // started again) passes as a busy queue does: tried again
+                // while the leases hold (ADR-t3102-3 decision 5).
+                let passing = crate::application::QueueBusy::is(&error)
+                    || crate::application::supervisor_service::unreachable(&error);
+                if !policy.retries(passing, since) {
                     return Err(error.context(format!(
                         "{} heartbeat writes failed over {:.1}s since the last one written",
                         streak.failures,
@@ -863,6 +876,15 @@ pub struct RunError {
 /// the heartbeat. Its runs' worktrees are made from the checkout it was
 /// given, recorded as each run's `repo_path`.
 pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
+    // A supervisor that ends gives its principal's token back, whatever
+    // ended it; an exec keeps the process, whose next start signs in again.
+    struct SignedIn(Arc<dyn crate::application::supervisor_service::ServiceCaller>);
+    impl Drop for SignedIn {
+        fn drop(&mut self) {
+            self.0.sign_out();
+        }
+    }
+
     ensure!(
         settings.limits.parallel.value >= 1,
         "parallel must be at least 1"
@@ -900,6 +922,22 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
             adapter.agent.preflight()?;
         }
     }
+    let pid = layout.pid;
+    // The registration this process runs under: the one it had before the
+    // exec of a handoff, else a new one. The queue service answers it as
+    // that registration's supervisor only (ADR-t3102-1 decisions 2 and 3),
+    // so it signs in before it reads or writes anything of the queue, once
+    // the service answers (ADR-t3102-3 decision 5).
+    let token = settings
+        .handoff_token
+        .clone()
+        .unwrap_or_else(|| ports.generators.ids.lease_token());
+    let mut started = None;
+    if let Some(unreached) = super::host_ops::queue_service::reach_at_start(ports, &mut started)? {
+        return Ok(unreached);
+    }
+    ports.service.sign_in(&token, pid)?;
+    let _signed_in = SignedIn(ports.service.clone());
     let mut queue = ports.queues.open()?;
     // A live supervisor of the other `--no-claude` policy is neither
     // reused nor taken over: this one refuses to start until a person
@@ -930,7 +968,6 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
     queue.bind_repository(&path_text(&layout.common_dir)?)?;
     let parallel = u32::try_from(settings.limits.parallel.value)
         .context("parallel does not fit a registration")?;
-    let pid = layout.pid;
     let mut previous_version = None;
     let token = match &settings.handoff_token {
         // This process exec'd this binary under the registration it had
@@ -961,7 +998,6 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
             token.clone()
         }
         None => {
-            let token = ports.generators.ids.lease_token();
             // Registered before the first heartbeat so the loop is visible
             // to `status` from its first second, runs or not, with the
             // limits in use and where each comes from (ADR-0062 decision 7,
@@ -1124,6 +1160,9 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         observation: ObservationState::new(ports),
         host: HostOpsState::new(ports, settings),
     };
+    if let Some(started) = started {
+        supervisor.host.started_queue_service(started);
+    }
     // Before any job starts again: the jobs a gone supervisor left, and
     // after an exec those the previous binary of this process started.
     supervisor.tend_headless_jobs();
@@ -1134,6 +1173,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         supervisor.take_telemetry_retries();
         supervisor.rebuild_own_runs(previous_version.as_deref())?;
     }
+    // `_signed_in` goes after `supervisor`, so the tokens its jobs' handles
+    // revoke as they go are revoked while it is still signed in.
     let result = supervisor.run_loop(settings);
     match &result {
         Ok(value) => info!(
@@ -1994,7 +2035,34 @@ impl Supervisor<'_> {
     /// on ([`RunError`]), and `triaged` each run this process triaged with
     /// the status it went to.
     fn run_loop(&mut self, options: &LoopSettings) -> Result<Value> {
-        let result = self.drive(options);
+        let result = loop {
+            match self.drive(options) {
+                // The service did not answer one of the supervisor's
+                // operations (ADR-t3102-3 decision 5): nothing new starts,
+                // the queue is not opened instead, and the pass is made
+                // again once host運用 looked at the service, which it
+                // starts again when it keeps it. A supervisor that stops
+                // ends here.
+                Err(error)
+                    if crate::application::supervisor_service::unreachable(&error)
+                        && !options.stop.load(Ordering::SeqCst)
+                        && !options.once =>
+                {
+                    warn!(error = %format_args!("{error:#}"), "the queue service did not answer: no new run starts until it does: {error:#}");
+                    self.host.queue_service_unreached();
+                    let reports = self.observation.reports();
+                    if let Some((config, message)) = self
+                        .on_host(|host, env| host.queue_service_pass(env, true, reports.as_ref()))
+                    {
+                        let now = self.generators.clock.monotonic();
+                        self.observation.queue_pushes(config, vec![message], now);
+                        self.on_observation(|observation, env| observation.push_pass(env, true));
+                    }
+                    thread::sleep(options.idle_poll);
+                }
+                result => break result,
+            }
+        };
         // The runs that ended on the last pass end their telemetry tokens
         // before the process goes; the process an exec hands the
         // registration to makes the revocations still held.
@@ -2357,7 +2425,13 @@ impl Supervisor<'_> {
             // (ADR-t1233-4 decision 2); while it is down no new run and no
             // queue's job starts.
             let working = !stopping && self.claim.claiming;
-            self.on_host(|host, env| host.queue_service_pass(env, working));
+            let reports = self.observation.reports();
+            if let Some((config, message)) =
+                self.on_host(|host, env| host.queue_service_pass(env, working, reports.as_ref()))
+            {
+                let now = self.generators.clock.monotonic();
+                self.observation.queue_pushes(config, vec![message], now);
+            }
             // The queue broker likewise (ADR-t2114-1 decision 1); while it is
             // down the container runtime cannot be used.
             self.on_host(|host, env| host.queue_broker_pass(env, working));

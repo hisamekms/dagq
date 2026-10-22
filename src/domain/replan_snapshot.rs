@@ -328,7 +328,7 @@ pub fn check_saved(
 /// Where a supervisor's start of the restore of a parked run stands: the
 /// restore is one owner's from its start to its recorded result, the
 /// run's lease being that ownership.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum RestoreStart {
     /// The run is leased to this supervisor for the restore: only it
     /// touches the scratch worktree and records the result, while it still

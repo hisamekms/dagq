@@ -18,7 +18,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::session_step::StepTarget;
-use super::{ActorContext, ActorRole, AuthorizationError, DomainError, RunId, RunStatus, TaskId};
+use super::{
+    ActorContext, ActorRole, AuthorizationError, DomainError, LeaseToken, RunId, RunStatus, TaskId,
+};
 
 /// The API version this binary speaks. A change a caller of the version
 /// before cannot read raises it.
@@ -159,7 +161,8 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         | UseCase::ReplanPropose
         | UseCase::AgentCases
         | UseCase::AgentDecide
-        | UseCase::TelemetryReport => {
+        | UseCase::TelemetryReport
+        | UseCase::Supervisor => {
             "narrow the read with the options of its command (dagq <command> --help)"
         }
     }
@@ -263,6 +266,15 @@ string_enum!(UseCase {
     // reaches, and one no agent's token reaches. No command line goes to
     // it.
     TelemetryReport => "telemetry_report",
+    // An operation of a supervisor on the queue (ADR-t3102-3 decisions 3
+    // and 4): one of the queue's operations that each run in one
+    // transaction (a claim, a lease's heartbeat, a run's transition with
+    // its event, a read the supervisor decides on, the issue of a worker's
+    // or an executor's token), named by its `op`
+    // ([`SupervisorParams`]). Only the supervisor principal reaches it
+    // (`scheduler.supervise`), and every lease it names is the one the
+    // principal was issued for. No command line goes to it.
+    Supervisor => "supervisor",
 });
 
 impl UseCase {
@@ -396,6 +408,40 @@ pub struct ServiceError {
     /// ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub denied: Option<Box<ServiceDenial>>,
+    /// What kind of failure a `failed` is, when a caller decides on it
+    /// ([`FailureKind`]): a client that does not know the field ignores
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<FailureKind>,
+}
+
+/// A failure of a use case the caller tells apart from the others, as the
+/// queue's own error would be told apart: the supervisor reads them as it
+/// read the queue's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailureKind {
+    /// The run named does not exist.
+    RunNotFound(RunId),
+    /// Another writer held the queue's lock past its wait: a passing
+    /// condition the same write may try again.
+    QueueBusy,
+}
+
+/// A supervisor's request ([`UseCase::Supervisor`]): the operation, its
+/// arguments in the order the queue's operation takes them, and the actor
+/// and the requester its events record when they are not the principal's
+/// own (the landing's integrator, a job whose verdict it applies).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupervisorParams {
+    pub op: String,
+    #[serde(default)]
+    pub args: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acting: Option<Principal>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_by: Option<String>,
 }
 
 /// A refusal of the policy as the service answers it: the role, the
@@ -454,6 +500,7 @@ impl ServiceResponse {
                 code,
                 message: message.into(),
                 denied: None,
+                kind: None,
             }),
         }
     }
@@ -507,6 +554,11 @@ pub struct Principal {
     /// every other principal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<StepTarget>,
+    /// The registration of a supervisor principal (ADR-t3102-1 decisions 2
+    /// and 3): the lease token every run lease it takes, renews or gives
+    /// back carries. `None` for every other principal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub registration: Option<LeaseToken>,
 }
 
 impl Principal {
@@ -523,6 +575,16 @@ impl Principal {
             run_id: actor.run_id().cloned(),
             task_id: actor.task_id(),
             target: None,
+            registration: None,
+        }
+    }
+
+    /// The supervisor of `registration`, process `pid`: its actor is the
+    /// one the supervisor's own events record (`supervisor:<pid>`).
+    pub fn supervisor(registration: &LeaseToken, pid: u32) -> Self {
+        Self {
+            registration: Some(registration.clone()),
+            ..Self::of(&ActorContext::instance(ActorRole::Supervisor, pid))
         }
     }
 
@@ -538,15 +600,18 @@ impl Principal {
             task_id: run_id.as_ref().and(task),
             run_id,
             target: Some(target.clone()),
+            registration: None,
         }
     }
 
     /// The principals the control side issues tokens for: the AI actors
     /// (ADR-t1233-4 decision 4), and an executor's telemetry principal
     /// whose actor id and run are its one target's (ADR-t1662-3 decisions
-    /// 9 and 13). No other principal has a target. A person and the rest
-    /// of the control side (the wrapper, the integrator, the supervisor)
-    /// open the DB themselves until stage (5) (decision 6).
+    /// 9 and 13), and a supervisor, whose one target is its registration
+    /// (ADR-t3102-1 decision 3). No other principal has a target or a
+    /// registration. A person and the rest of the control side (the
+    /// wrapper, the integrator) open the DB themselves until stage (5)
+    /// (ADR-t1233-4 decision 6).
     pub fn check(&self) -> Result<(), DomainError> {
         let refuse = |value: String| {
             Err(DomainError::UnknownValue {
@@ -554,6 +619,18 @@ impl Principal {
                 value,
             })
         };
+        if let Some(registration) = &self.registration {
+            return if self.role == ActorRole::Supervisor
+                && self.target.is_none()
+                && self.run_id.is_none()
+                && self.task_id.is_none()
+                && !registration.as_str().is_empty()
+            {
+                Ok(())
+            } else {
+                refuse(format!("{} of a registration", self.role.as_str()))
+            };
+        }
         match (&self.target, self.role) {
             (None, role) if role.trust() == super::TrustLevel::UntrustedAgent => Ok(()),
             (Some(target), ActorRole::ExecutorTelemetry)
@@ -575,6 +652,17 @@ impl Principal {
         }
     }
 
+    /// The name its token is kept under, which a new issue for it
+    /// replaces: its actor id, and a supervisor's registration with it, as
+    /// one process may run more than one supervisor (a test's does) under
+    /// the one actor id its events record.
+    pub fn credential_key(&self) -> String {
+        match &self.registration {
+            Some(registration) => format!("{}@{}", self.actor_id, registration.as_str()),
+            None => self.actor_id.clone(),
+        }
+    }
+
     /// The actor the service acts as.
     pub fn actor(&self) -> ActorContext {
         let actor = ActorContext::new(self.role, self.actor_id.clone());
@@ -589,7 +677,8 @@ impl Principal {
 /// stage (3)): the worker (and its resume) and the headless jobs with the
 /// observer get the service's socket and a token instead of the queue's
 /// path. The inbox and the planners open the queue themselves until stage
-/// (5) (ADR-t1233-4 decision 6), as the control side does.
+/// (5) (ADR-t1233-4 decision 6), as the control side but the supervisor
+/// does ([`UseCase::Supervisor`]).
 pub const fn client_role(role: ActorRole) -> bool {
     matches!(role, ActorRole::Worker | ActorRole::Observer) || role.is_headless_job()
 }
@@ -617,8 +706,11 @@ pub fn worker_token_ended(principal: &Principal, status: Option<RunStatus>) -> b
 }
 
 /// The supervisor could not keep the service running: the inbox's
-/// attention (`reason`, `message`), next `dagq service status`, until the
-/// service runs again (ADR-t1233-4 decision 3).
+/// attention (`reason`, `message`), next `dagq service status`. The
+/// supervisor writes it from the outage's record ([`ServiceOutage`]) once
+/// the service answers again, with the event that says so after it
+/// (ADR-t3102-3 decision 1); one an older binary wrote while the service
+/// was down stands until the service runs again (ADR-t1233-4 decision 3).
 pub const QUEUE_SERVICE_DOWN: &str =
     crate::domain::event_kind::EventKind::QueueServiceDown.as_str();
 /// The service answers again after a [`QUEUE_SERVICE_DOWN`].
@@ -642,6 +734,43 @@ pub const QUEUE_SERVICE_STOP_REQUESTED: &str =
 /// A request the service could not authenticate (`use_case`, `reason`).
 pub const QUEUE_SERVICE_UNAUTHENTICATED: &str =
     crate::domain::event_kind::EventKind::QueueServiceUnauthenticated.as_str();
+/// The record of an outage of the queue's service, beside the queue's DB
+/// and outside it (ADR-t3102-3 decision 1): what the supervisor knows
+/// while it reaches no service, and so writes nothing to the queue.
+pub const OUTAGE_FILE: &str = "queue-service-outage.json";
+
+/// What [`OUTAGE_FILE`] holds: since when (unix seconds) the supervisor
+/// found the service down, why (`reason`: `unreachable`, `start_failed`
+/// or `restart_limit`, and the `message`), the supervisor that found it,
+/// and whether `[push]` was sent for it. One outage has one record: a
+/// later look while it stands leaves it, and the service's return closes
+/// it into a [`QUEUE_SERVICE_DOWN`] event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceOutage {
+    pub since: i64,
+    pub reason: String,
+    pub message: String,
+    #[serde(default)]
+    pub supervisor: Option<String>,
+    #[serde(default)]
+    pub pushed: bool,
+}
+
+impl ServiceOutage {
+    /// The payload of the `queue_service_down` the service's return
+    /// records of it at `now`: its fields, and when it was closed.
+    pub fn down_payload(&self, now: i64) -> Value {
+        serde_json::json!({
+            "reason": self.reason,
+            "message": self.message,
+            "since": self.since,
+            "until": now,
+            "supervisor": self.supervisor,
+            "pushed": self.pushed,
+        })
+    }
+}
+
 /// The kinds whose latest says whether the attention stands.
 pub const QUEUE_SERVICE_ATTENTION_KINDS: [&str; 4] = [
     QUEUE_SERVICE_DOWN,

@@ -18,8 +18,10 @@
 //! (ADR-t1222-1 decisions 1, 2 and 4), and the reads of the whole queue a
 //! read role's job or a worker runs (`events`, `timeline`, `stats`, `kpi`,
 //! `search`, `goal_show`, ...: [`QueueRead`], answered as the command line
-//! answers them). The supervisor and the command line still open the DB
-//! themselves.
+//! answers them). The supervisor's claims, leases, runs and their events
+//! and the tokens it issues are the `supervisor` use case
+//! ([`super::supervisor_service`]); the command line still opens the DB
+//! itself.
 //!
 //! [Queue service]: ../../docs/design/queue-service.md
 
@@ -81,6 +83,24 @@ pub trait ServiceQueue:
     /// its telemetry token still holds
     /// ([`crate::domain::telemetry::target_token_due`]).
     fn telemetry_target(&self, target: &StepTarget) -> Result<TargetFacts>;
+    /// Register `session_id` as `target`'s
+    /// ([`crate::application::SessionOwners::register_session`]), at a
+    /// supervisor's request.
+    fn register_session(&mut self, target: &StepTarget, session_id: &str, at_ms: i64)
+    -> Result<()>;
+    /// The queue's operations a supervisor's request runs
+    /// ([`super::supervisor_service::answer`]).
+    fn supervisor_store(&mut self) -> &mut dyn super::supervisor_service::SupervisorStore;
+    /// Run `then` in one write transaction that finds `run` leased to
+    /// `token` first, and refuses (running nothing) when it is not: a
+    /// token issued under a run's lease is issued only while the lease is
+    /// held.
+    fn under_lease(
+        &mut self,
+        run: &RunId,
+        token: &crate::domain::LeaseToken,
+        then: &mut dyn FnMut() -> Result<Value>,
+    ) -> Result<Value>;
 }
 
 /// What the service runs its use cases on.
@@ -96,6 +116,16 @@ pub trait ServiceBackend: Send + Sync {
     /// The unix milliseconds now, by the service's clock: what a target's
     /// command is read against, past the time it ends by or not.
     fn now_ms(&self) -> i64;
+    /// The queue's DB, which names the queue to [`Self::access`] and
+    /// [`Self::telemetry`].
+    fn db(&self) -> &std::path::Path;
+    /// The tokens' files of the principals the control side starts, which
+    /// the service issues and revokes at a supervisor's request.
+    fn access(&self) -> &dyn ServiceAccess;
+    /// The tokens' files of the executors' telemetry principals, likewise.
+    fn telemetry(&self) -> &dyn TelemetryTokens;
+    /// Every principal a token is held for.
+    fn principals(&self) -> Result<Vec<Principal>>;
 }
 
 /// The service's use cases on a backend.
@@ -135,22 +165,14 @@ impl QueueService<'_> {
             Err(response) => return response,
         };
         let actor = principal.actor();
-        let result = self
-            .backend
-            .open(&actor)
-            .and_then(|mut queue| run(&mut *queue, &actor, request.use_case, &request.params));
-        match result {
-            Ok(value) => ServiceResponse::success(value),
-            Err(error) => match error.downcast_ref::<AuthorizationError>() {
-                Some(refused) => ServiceResponse::denied(refused),
-                None if error.downcast_ref::<BadParams>().is_some()
-                    || error.downcast_ref::<BadRead>().is_some() =>
-                {
-                    ServiceResponse::failure(ServiceErrorCode::BadRequest, format!("{error:#}"))
-                }
-                None => ServiceResponse::failure(ServiceErrorCode::Failed, format!("{error:#}")),
-            },
-        }
+        let result = if request.use_case == UseCase::Supervisor {
+            super::supervisor_service::answer(self.backend, &principal, &request.params)
+        } else {
+            self.backend
+                .open(&actor)
+                .and_then(|mut queue| run(&mut *queue, &actor, request.use_case, &request.params))
+        };
+        respond(result)
     }
 
     /// The principal of the request's token, whose run, when it names
@@ -240,6 +262,66 @@ impl QueueService<'_> {
             }
         }
         Ok(principal)
+    }
+}
+
+/// The answer of a use case's `result`: a refusal of the policy as
+/// `authorization_denied`, params that do not read as `bad_request`, and
+/// any other failure as `failed`, with its
+/// [`crate::domain::queue_service::FailureKind`] when the caller
+/// tells it apart.
+fn respond(result: Result<Value>) -> ServiceResponse {
+    match result {
+        Ok(value) => ServiceResponse::success(value),
+        Err(error) => match error.downcast_ref::<AuthorizationError>() {
+            Some(refused) => ServiceResponse::denied(refused),
+            None if error.downcast_ref::<BadParams>().is_some()
+                || error.downcast_ref::<BadRead>().is_some()
+                || error
+                    .downcast_ref::<super::supervisor_service::BadOperation>()
+                    .is_some() =>
+            {
+                ServiceResponse::failure(ServiceErrorCode::BadRequest, format!("{error:#}"))
+            }
+            None => {
+                let mut response =
+                    ServiceResponse::failure(ServiceErrorCode::Failed, format!("{error:#}"));
+                if let Some(failure) = &mut response.error {
+                    failure.kind = super::supervisor_service::failure_kind(&error);
+                }
+                response
+            }
+        },
+    }
+}
+
+/// Authorize a supervisor's request (`scheduler.supervise`, recorded as
+/// `authorization_denied` when refused): `registered` says the principal
+/// is a supervisor's with its registration, which a principal of any other
+/// role, or a supervisor's without one, is not.
+pub(super) fn authorize_supervisor(
+    queue: &mut dyn ServiceQueue,
+    actor: &ActorContext,
+    registered: bool,
+) -> Result<()> {
+    let store = Store(queue);
+    let gate = Gate {
+        actor,
+        authorizer: &StaticPolicy,
+    };
+    if registered {
+        gate.authorize(&store, Capability::Supervise, &Resource::Queue)?;
+        Ok(())
+    } else {
+        gate.authorize(&store, Capability::Supervise, &Resource::Unresolved)?;
+        // The policy grants a supervisor `scheduler.supervise` on every
+        // resource: one with no registration is refused all the same.
+        Err(AuthorizationError {
+            role: actor.role(),
+            capability: Capability::Supervise,
+            reason: crate::domain::authorization::DenyReason::NotGranted,
+        }
+        .into())
     }
 }
 
@@ -507,6 +589,7 @@ fn run(
     }
     match use_case {
         UseCase::Hello => unreachable!("hello is answered before a principal"),
+        UseCase::Supervisor => unreachable!("a supervisor's request is answered apart"),
         UseCase::List
         | UseCase::Candidates
         | UseCase::Graph
@@ -1196,6 +1279,22 @@ mod tests {
                 TargetFacts::OpenPlanner
             })
         }
+        fn register_session(&mut self, _: &StepTarget, _: &str, _: i64) -> Result<()> {
+            Ok(())
+        }
+        fn supervisor_store(
+            &mut self,
+        ) -> &mut dyn crate::application::supervisor_service::SupervisorStore {
+            unimplemented!("these tests send no supervisor's operation")
+        }
+        fn under_lease(
+            &mut self,
+            _: &RunId,
+            _: &crate::domain::LeaseToken,
+            _: &mut dyn FnMut() -> Result<Value>,
+        ) -> Result<Value> {
+            unimplemented!("these tests send no supervisor's operation")
+        }
     }
 
     struct Backend {
@@ -1258,6 +1357,18 @@ mod tests {
         }
         fn now_ms(&self) -> i64 {
             0
+        }
+        fn db(&self) -> &std::path::Path {
+            std::path::Path::new("queue.db")
+        }
+        fn access(&self) -> &dyn ServiceAccess {
+            unimplemented!("these tests issue no token")
+        }
+        fn telemetry(&self) -> &dyn TelemetryTokens {
+            unimplemented!("these tests issue no token")
+        }
+        fn principals(&self) -> Result<Vec<Principal>> {
+            Ok(Vec::new())
         }
     }
 

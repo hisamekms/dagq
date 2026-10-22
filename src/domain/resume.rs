@@ -34,7 +34,7 @@ pub const KILL_ONLY_RESUME_LIMIT: usize = 3;
 /// conflict-only attempts of one run. The counted resumes'
 /// [`MAX_RESUME_ATTEMPTS`] and the kill-only ones'
 /// [`KILL_ONLY_RESUME_LIMIT`] are not configurable.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResumeConfig {
     /// The conflict-only attempts one run makes at most.
     pub conflict_only_limit: usize,
@@ -233,7 +233,7 @@ pub fn parked_for_hold(events: &[RunEvent]) -> bool {
 /// The resumes of one run (`resume_started` events), split by whether
 /// each counts toward [`MAX_RESUME_ATTEMPTS`], and the conflict precheck's
 /// requests to its live session, which share the conflict-only limit.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResumeCount {
     /// Resumes that count toward [`MAX_RESUME_ATTEMPTS`].
     pub counted: usize,
@@ -421,7 +421,7 @@ pub fn resume_start_plan(events: &[RunEvent], main: &CommitSha) -> ResumeStart {
 }
 
 /// How a run whose resumes are used up ends (ADR-0047 decision 24).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Exhaustion {
     /// The run becomes `failed` and its `resume_exhausted` alert goes to
     /// the recovery job (ADR-0047 decision 39).

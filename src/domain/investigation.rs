@@ -44,7 +44,9 @@ use super::{DomainError, ExecutionClass, GoalId, TaskId};
 pub const INVESTIGATION_LIMIT: &str = "investigation_limit";
 
 /// What an investigation is of: a goal, or a Spike without one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum InvestigationKey {
     Goal(GoalId),
     Spike(TaskId),
@@ -58,7 +60,7 @@ impl InvestigationKey {
 }
 
 /// An open investigation as the limit counts it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Investigation {
     pub key: InvestigationKey,
     /// For each of its remaining items (an unfinished Spike, an `open`
@@ -89,7 +91,7 @@ impl Investigation {
 
 /// The limit in force for a claim: `max` (`None` limits nothing) and the
 /// grace of a wait for a person.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct InvestigationLimit {
     pub max: Option<usize>,
     pub grace_secs: i64,
@@ -97,7 +99,7 @@ pub struct InvestigationLimit {
 
 /// The open investigations, and the Spikes their unfinished Spikes wait
 /// for over task and goal dependencies, transitively ([`awaited_spikes`]).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Investigations {
     pub open: Vec<Investigation>,
     pub awaited: HashSet<TaskId>,

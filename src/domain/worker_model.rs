@@ -109,7 +109,7 @@ impl TrialGroup {
 
 /// `[worker.trial]` of `dagq.toml`: off unless a person turns it on, and
 /// how many of the latest predictions a task is ranked among.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkerTrial {
     pub enabled: bool,
     pub window: usize,

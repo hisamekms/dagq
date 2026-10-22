@@ -19,6 +19,9 @@ related:
   - design-persistence
   - adr-0071
   - design-supervisor-lifecycle-waiting
+  - design-queue-service
+  - adr-t3102-1
+  - adr-t3102-3
 ---
 
 # `supervise`
@@ -43,6 +46,7 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 
 - ユースケースの本体はapplication層の`src/application/supervise/`で、contextごとのmoduleは`supervise.rs`、ループとsubmoduleの分担は`execution.rs`のmodule docが持つ（[ADR-0013](../../adr/0013-layered-architecture-and-type-function-style.md)の方針1と8）。
 - `supervise(&Ports, &LoopSettings)`が起動とループを行い、外のものには`Ports`のport越しにだけ触れ、pathと子プロセスの環境は`Layout`として値で受ける。
+- queueの操作はqueue serviceを通り、serviceがまだ答えない操作だけがDBを開く（下の「queue serviceの経路」）。
 - `runtime::supervise`はadapterを組み立てて呼ぶ入口だけ。
 - promptと依頼文は`src/application/prompt/`、askの登録は`application::ask`（通知はせずinboxのwatchが知らせる）。
 - watcherの居ないinboxへの知らせは`inbox_nudge.rs`（[inboxへの知らせ](ask-push.md#supervisorによるinboxへの知らせ)）。
@@ -61,6 +65,7 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 ## 起動とheartbeat
 
 - 起動の順（登録の後に変更の印を記録することを含む）は`supervise`のdoc commentが持つ。
+- 登録の前に、queue serviceに届くことを確かめ（届かなければ起動し）、登録のtokenのsupervisorとしてsign inする（下の「queue serviceの経路」）。
 - 引き継ぎのexecで起動したときは新しく登録せず、同じtokenとPIDで登録を取り戻し、slotを組み立て直す（[Handoff](handoff.md#handoff)、`handoff.rs`のmodule doc）。
 - heartbeatは`Heartbeat`と`HeartbeatPolicy`が持ち、登録と全leaseを1つの書き込みで更新する。
   busyで書けないときに止めずに書き直す範囲と、leaseがstaleになる前に自分から退く理由は`Heartbeat`と`HeartbeatPolicy`のdoc commentにある。
@@ -138,6 +143,40 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 - 即終了したsupervisorのleaseはstaleになり、wrapperが生きているrunは次のpassで別のsupervisorが引き継ぐ（上の「adopt」）。
 - 登録を消すのは自分のループの終わり、次の`up`・`down`の掃除と、同じqueueの生きているsupervisorによる死んだ登録の片付けだけで、どれも同じtransactionで`supervisor_stopped`を書く。
   `status` / `doctor` / `recover` / `integrate`は消さない（片付けの条件は[Persistence](../persistence.md#runtime-ownership)、`up` / `down`の掃除は[`up` / `down`](up-down.md#up--down)）。
+
+## queue serviceの経路
+
+supervisorはqueue DBを開かずに、claim・lease・runの状態とevent・登録・判断に使う読み取り（候補・依存・goal）・workerとexecutorのtelemetryのtoken・landing recheckとresumeの記録をqueue serviceのユースケースとして行う（[ADR-t3102-3](../../adr/2026-10-22-t3102-3-stage-5-outage-notice-and-use-cases-for-multi-step-control-operations.md)決定3〜5、principalは[ADR-t3102-1](../../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)）。
+入口は`application::supervisor_service`のmodule docで、ループと各threadの`Queue`は`SupervisorQueue`、serviceの側はuse case `supervisor`の`answer`。
+
+```text
+pass の queue の操作 ── SupervisorQueue ─┬─ serviceが答える操作 ──► socket ──► QueueService::handle ──► queueの同じ操作（1つのtransaction）
+                                         └─ まだ答えない操作（着地・jobの結果・計画・観測・hostの記録）──► その時に開くDBの接続
+```
+
+- 1つの要求は1つのqueueの操作で、`op`でその名を名指し、引数はその操作の順に並べる。
+  serviceの側は同じ操作を同じtransactionで行うので、leaseの検査と前提の再検査はその操作のまま（[SQLite persistence](../persistence.md#runtime-ownership)）。
+  transactionを開く・閉じる操作や行を読み書きする操作は無い。
+- serviceが答える操作は`dispatch`の一覧で、着地とjobのverdictの適用をserviceへ移すのは移行の順の残り（[ADR-t3102-2](../../adr/2026-10-22-t3102-2-only-the-queue-service-opens-the-db-schema-by-the-service-build-and-migration-order.md)決定6）。
+- 結果は`Wire`の形で渡り、taskとgoalは`Serialize`（CLIのJSON）ではなく欄を落とさない形で渡る。
+- principalは`Principal::supervisor`で、actor idは自分のeventのactorと同じ`supervisor:<pid>`、対象は登録のtoken。
+  serviceは要求が名指すleaseのtokenが全てその登録のtokenであることを操作の前に確かめ、違えば何もせずに断るので、他のsupervisorのleaseでは書けない。
+  `scheduler.supervise`の無いprincipalは`authorization_denied`で断られ、記録される。
+- eventのactorを名指すのは着地のintegratorとして書くときと、jobのverdictを適用するとき（`requested_by`）だけで、名指せるactorは制御側だけ。
+- tokenはhelloの後、登録の前に発行し（`ServiceCaller::sign_in`）、終わりで失効させる。
+  1つのプロセスが複数のsupervisorを動かすときも別のtokenになるよう、tokenのfileは登録ごとに分ける（`Principal::credential_key`）。
+  親のprincipalの依頼でserviceが発行する形（ADR-t3102-1決定2）はuserのprincipalが入るまで無く、今はsupervisorがserviceのdirに自分で書く。
+- workerのtokenとrunの対象のtelemetryのtokenの発行と失効は`ServiceTokens`がserviceに頼み、serviceはrunのleaseを確かめた同じtransactionの中で発行する。
+  tokenのfileの置き場とsocketのpathは、DBを読まずにfileから求める。
+- 届かない呼び出しは`ServiceUnreachable`で、DBを開いて代わりに行わない（fail closed）。
+  起動のときに届かないか別のbuildのものが答えれば、serviceを持つsupervisor（CLIの`supervise`は`--once`でも持つ）は起動か入れ替えをし、それでも届かなければ何もclaimせずに終わる（`reach_at_start`）。
+  passの途中で届かなければ、そのpassを捨ててhost運用にserviceを見直させ、届くまでやり直し、その間は新しいclaimとjobを始めない（`Supervisor::run_loop`）。
+  heartbeatは届かない間もbusyと同じくleaseがstaleになる前まで書き直し、それを過ぎれば自分から退く（`HeartbeatPolicy::retries`）。
+- serviceの不在はqueueのディレクトリのDBの外のファイル（`domain::queue_service::OUTAGE_FILE`、形は`ServiceOutage`）に1つの不在につき1回書き、`host.toml`の`[push]`があれば1回送る（ADR-t3102-3決定1、`host_ops::queue_service`のmodule doc）。
+  serviceが答えたら、その記録をserviceを通して`queue_service_down`（始まりと終わりの時刻を持つ）に残してファイルを消し、続く起動か再開のeventでattentionが閉じる。
+  eventの時刻は戻った時刻で、不在の時刻はpayloadが持つ。
+- libraryとして呼ぶsupervisor（testの）は`SuperviseOptions::service_route`の`InProcess`で、serviceのユースケースを同じプロセスで、要求と答えをsocketと同じ形にして通す。
+  CLIの`supervise`は常にsocketを通る。
 
 ## CIの見張り（ADR-t1920-1）
 

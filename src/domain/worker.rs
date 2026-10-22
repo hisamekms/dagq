@@ -32,7 +32,7 @@ pub fn refuse_interactive(mode: Option<WorkerMode>) -> Result<(), DomainError> {
 }
 
 /// A worker's provider and mode, a pair the runtime can run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct Worker {
     pub provider: Provider,
     #[serde(rename = "worker_mode")]

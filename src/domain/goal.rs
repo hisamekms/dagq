@@ -401,6 +401,105 @@ impl StrandedDependency {
     }
 }
 
+/// A goal whole, as one process hands it to another (the queue service to
+/// a supervisor), as [`super::task::TaskWire`] is a task.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+pub struct GoalWire {
+    pub id: GoalId,
+    pub title: String,
+    pub description: String,
+    pub acceptance: String,
+    pub constraints: String,
+    pub doc: Option<String>,
+    pub priority: Priority,
+    pub priority_by: PriorityBy,
+    pub origin: RecordedOrigin,
+    pub tags: Vec<GoalTag>,
+    pub status: GoalStatus,
+    pub closed_at: Option<String>,
+    pub verdict: Option<GoalVerdict>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<Goal> for GoalWire {
+    fn from(goal: Goal) -> Self {
+        let Goal {
+            id,
+            title,
+            description,
+            acceptance,
+            constraints,
+            doc,
+            priority,
+            priority_by,
+            origin,
+            tags,
+            status,
+            closed_at,
+            verdict,
+            created_at,
+            updated_at,
+        } = goal;
+        Self {
+            id,
+            title,
+            description,
+            acceptance,
+            constraints,
+            doc,
+            priority,
+            priority_by,
+            origin,
+            tags,
+            status,
+            closed_at,
+            verdict,
+            created_at,
+            updated_at,
+        }
+    }
+}
+
+impl From<GoalWire> for Goal {
+    fn from(wire: GoalWire) -> Self {
+        let GoalWire {
+            id,
+            title,
+            description,
+            acceptance,
+            constraints,
+            doc,
+            priority,
+            priority_by,
+            origin,
+            tags,
+            status,
+            closed_at,
+            verdict,
+            created_at,
+            updated_at,
+        } = wire;
+        Self {
+            id,
+            title,
+            description,
+            acceptance,
+            constraints,
+            doc,
+            priority,
+            priority_by,
+            origin,
+            tags,
+            status,
+            closed_at,
+            verdict,
+            created_at,
+            updated_at,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

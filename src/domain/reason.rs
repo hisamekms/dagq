@@ -132,7 +132,7 @@ impl ReasonCode {
 }
 
 /// A reason code with the values that belong to it, for an event payload.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Reason {
     pub code: ReasonCode,
     pub detail: Map<String, Value>,

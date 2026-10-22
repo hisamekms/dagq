@@ -288,7 +288,7 @@ pub const COMMAND_MARGIN_MS: i64 = 5 * 60 * 1000;
 /// for whether its telemetry token still holds ([`target_token_due`]):
 /// the queue service reads it at each request, and the supervisor's sweep
 /// at each pass.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TargetFacts {
     /// The queue has no such target, or records its end: the planner was
     /// closed, the job's row finished, the command's finish was recorded.
@@ -308,7 +308,7 @@ pub enum TargetFacts {
 
 /// A supervisor's registration as the end of its job is read: its process
 /// and how long ago (seconds) it last beat.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Beat {
     pub pid: u32,
     pub age_secs: i64,

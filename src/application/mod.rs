@@ -67,6 +67,7 @@ pub mod session_log;
 pub mod setup_review;
 pub mod stats;
 pub mod supervise;
+pub mod supervisor_service;
 pub mod telemetry_tokens;
 pub mod throughput_review;
 pub mod update;
@@ -315,7 +316,7 @@ impl TaskListItem {
 
 /// An unfinished task (draft, ready or in progress) with every direct
 /// predecessor, finished or not: the input of [`dependency_graph`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GraphTask {
     pub id: TaskId,
     pub status: TaskStatus,
@@ -338,7 +339,7 @@ pub struct GraphTask {
 
 /// A goal a task depends on, as `graph` reads it: the goal and its verdict,
 /// absent while the goal is not closed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GraphGoalDependency {
     pub goal_id: GoalId,
     pub verdict: Option<GoalVerdict>,
@@ -363,7 +364,7 @@ pub enum WaitFor {
 
 /// One read of the queue for `graph`: the unfinished tasks in ID order and
 /// the IDs of the claimable ones (`candidates`).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct GraphInput {
     pub tasks: Vec<GraphTask>,
     pub candidates: Vec<TaskId>,

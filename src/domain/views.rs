@@ -89,7 +89,7 @@ pub struct GoalDetail {
 /// A task's landed commit (its `run_integrated`'s `result_commit`, the
 /// `landed_commits` row): what `TaskReads::build_waits` gives the claim's
 /// wait for a build that contains the dependencies' landings (ADR-t1632-1).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct Landing {
     pub task_id: TaskId,
     pub commit: String,
@@ -149,7 +149,7 @@ pub struct EventActor {
 /// (`since <= created_at < until`). Without `kinds` and without `--all`,
 /// `events` sets `kinds` to the attention kinds, so the other fields narrow
 /// the attention events only.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EventFilter {
     /// These kinds, attention or not.
     pub kinds: Option<Vec<String>>,
@@ -217,7 +217,7 @@ pub struct TaskDetail {
 /// origin and material, for a follow_up the task and run whose receipt
 /// proposed it and which of its follow_ups it was, the key of the bundle it
 /// is planned in and the bundles (planners of the runtime's) that took it.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 pub struct TaskOrigin {
     pub origin: crate::domain::DraftOrigin,
     pub material: serde_json::Value,
@@ -230,7 +230,7 @@ pub struct TaskOrigin {
 
 /// A bundle of drafts one planner of the runtime's was opened for
 /// (ADR-t807-1), with its drafts and what became of each.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 pub struct DraftBundleView {
     pub planner_id: crate::domain::PlannerId,
     pub origin: String,
@@ -243,7 +243,7 @@ pub struct DraftBundleView {
 /// One draft of a bundle: which planner of the runtime's the bundle's is
 /// for it, what became of it when the planner ended (null while it works)
 /// and its status now.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 pub struct DraftBundleMember {
     pub task_id: TaskId,
     pub attempt: i64,
@@ -255,7 +255,7 @@ pub struct DraftBundleMember {
 
 /// A follow_up draft a receipt or a review of the task's runs proposed
 /// (ADR-t807-1, ADR-t2352-1).
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
 pub struct FollowUpDraft {
     pub run_id: Option<String>,
     /// Its entry's position in the receipt's `follow_ups`; `None` for a
@@ -465,7 +465,7 @@ impl SupervisorRegistration {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(tag = "outcome", rename_all = "snake_case")]
 pub enum ClaimOutcome {
     Claimed { run: Box<TaskRun> },

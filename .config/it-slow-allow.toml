@@ -2288,3 +2288,9 @@ task = 3113
 name = "queue_binary::install_lets_its_new_build_migrate_and_names_it_the_queues_binary"
 reason = "B 境界（守る境界）: a real install runs the new build as child processes (probe, --version, migrate --check, migrate under the grant), the only path that shows the grant reaches the child"
 task = 3104
+
+# 10.7s alone (task 3108)
+[[test]]
+name = "queue_service::the_supervisor_records_the_outage_outside_the_queue_and_holds_its_claims"
+reason = "B 境界（守る境界）: the CLI's route of the supervisor through the queue service's process on its socket: a start that fails records the outage outside the SQLite queue and pushes it once, and the service started by the supervisor takes its claim and run to the end and records the outage; the outage's record and its closing are unit-sized in host_ops::queue_service, the lease checks in infrastructure::queue_service::supervisor_tests"
+task = 3108

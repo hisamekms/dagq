@@ -5,7 +5,8 @@
 //! refuses a caller without a principal and one of another API version;
 //! `service start|stop|status`, `status` and `doctor` report it; `up` and
 //! `down` start and stop it, and a supervisor starts it again and holds
-//! its claims while it cannot.
+//! its claims while it cannot, its outage recorded beside the queue
+//! (ADR-t3102-3).
 
 use crate::common;
 use crate::runtime_support::service::{Running, idle_queue, supervisor_token};
@@ -279,23 +280,60 @@ fn status_doctor_and_service_status_report_the_service() {
     }
 }
 
-/// A supervisor at work starts the service; one that cannot start it
-/// claims nothing, and the inbox gets `queue_service_down` until the
-/// service runs again.
+/// A supervisor that reaches its queue through the service's socket
+/// (ADR-t3102-3): one that cannot start the service claims nothing and
+/// writes nothing to the queue, records the outage beside the queue,
+/// outside the DB, and sends it through `[push]` once, however many passes
+/// fail. Once the service runs, the outage becomes the queue's
+/// `queue_service_down` (when it began and ended) with the start after it,
+/// so the attention ends with it, and the claim is the supervisor's, as its
+/// own actor, through the service.
 #[test]
-fn the_supervisor_starts_the_service_and_holds_its_claims_while_it_is_down() {
+fn the_supervisor_records_the_outage_outside_the_queue_and_holds_its_claims() {
     use crate::runtime_support::{
         TestWorkspace, VALID_AGENT, fixture, supervise_options, supervise_with,
     };
     let (_fixture, repo, db) = fixture();
+    let queue_dir = db.canonicalize().unwrap().parent().unwrap().to_path_buf();
+    let inbox = queue_dir.join("pushed");
+    fs::create_dir(&inbox).unwrap();
+    let script = queue_dir.join("push.sh");
+    common::template::script_env(
+        &script,
+        "#!/bin/sh\ncat > \"$STUB_INBOX/$DAGQ_PUSH_KIND-$(ls \"$STUB_INBOX\" | wc -l | tr -d ' ').json\"\n",
+        &[("STUB_INBOX", inbox.to_str().unwrap())],
+    );
+    fs::write(
+        queue_dir.join("host.toml"),
+        format!(
+            "[push]\ncommand = [\"{}\"]\ntimeout_secs = 10\n",
+            script.display()
+        ),
+    )
+    .unwrap();
+    let pushed_down = || {
+        fs::read_dir(&inbox)
+            .unwrap()
+            .filter(|entry| {
+                let name = entry.as_ref().unwrap().file_name();
+                name.to_str().unwrap().starts_with("queue_service_down-")
+            })
+            .count()
+    };
     let backend = TestWorkspace::new(&db, false, VALID_AGENT);
-    let options = |executable: &Path| dagq::compose::SuperviseOptions {
+    // `[push]` reaches the supervisor through its daily reports' port, given
+    // only while the service is out of reach: a report job would hold a
+    // `--once` pass that claims.
+    let options = |executable: &Path, push: bool| dagq::compose::SuperviseOptions {
         queue_service: Some(dagq::compose::QueueServiceOptions {
             executable: executable.to_path_buf(),
             interval: Duration::ZERO,
             start_timeout: TIMEOUT,
             control: None,
         }),
+        service_route: dagq::compose::ServiceRoute::Socket,
+        report_daily: push,
+        host_config: Some(queue_dir.join("no host-wide file.toml")),
         ..supervise_options(1, true)
     };
     let control = SystemQueueService::new(&db, Path::new("dagq"));
@@ -307,41 +345,49 @@ fn the_supervisor_starts_the_service_and_holds_its_claims_while_it_is_down() {
         }
     }
     let _stop = Stop(control.clone());
-    let runs = || {
-        RunReads::all_runs(&SqliteQueue::open(&db).unwrap())
-            .unwrap()
-            .len()
-    };
+    let read = || SqliteQueue::open(&db).unwrap();
+    let outage = queue_dir.join(dagq::domain::queue_service::OUTAGE_FILE);
 
-    // A binary that is not there: no service, no claim, the attention.
+    // A binary that is not there: no service, nothing claimed, nothing
+    // written to the queue, the outage beside it and sent once.
     let missing = repo.join("no-dagq");
-    supervise_with(&db, &repo, &backend, &options(&missing)).unwrap();
-    assert_eq!(runs(), 0);
-    let down = events(&db, "queue_service_down");
-    assert_eq!(down.len(), 1);
-    assert_eq!(down[0]["payload"]["reason"], "start_failed");
-    let attention = ok(&db, &["status"])["attention"].clone();
-    let entry = attention
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entry| entry["kind"] == "queue_service_down")
-        .unwrap_or_else(|| panic!("{attention}"));
-    assert_eq!(entry["next"], "dagq service status");
+    let unreached = supervise_with(&db, &repo, &backend, &options(&missing, true)).unwrap();
+    assert_eq!(
+        unreached["outcome"], "queue_service_unreachable",
+        "{unreached}"
+    );
+    assert_eq!(unreached["reason"], "start_failed", "{unreached}");
+    assert!(RunReads::all_runs(&read()).unwrap().is_empty());
+    assert!(read().supervisors().unwrap().is_empty());
+    assert!(events(&db, "queue_service_down").is_empty());
+    let recorded: Value = serde_json::from_slice(&fs::read(&outage).unwrap()).unwrap();
+    assert_eq!(recorded["reason"], "start_failed", "{recorded}");
+    assert_eq!(recorded["pushed"], true, "{recorded}");
+    assert_eq!(pushed_down(), 1);
     // Told once, however many passes fail.
-    supervise_with(&db, &repo, &backend, &options(&missing)).unwrap();
-    assert_eq!(events(&db, "queue_service_down").len(), 1);
-    assert_eq!(runs(), 0);
+    supervise_with(&db, &repo, &backend, &options(&missing, true)).unwrap();
+    assert_eq!(pushed_down(), 1);
+    let again: Value = serde_json::from_slice(&fs::read(&outage).unwrap()).unwrap();
+    assert_eq!(again["since"], recorded["since"]);
 
-    // The binary: the service runs, the attention ends, the task is claimed.
+    // The binary: the service runs, the outage is recorded and ends, the
+    // task is claimed through the service as the supervisor's own actor.
     // The tests' binary, with the service it starts stopping once this test
     // process is gone (task 1352).
     let dagq = common::service::owned_executable(db.parent().unwrap());
-    supervise_with(&db, &repo, &backend, &options(&dagq)).unwrap();
+    let finished = supervise_with(&db, &repo, &backend, &options(&dagq, false)).unwrap();
+    assert_eq!(finished["outcome"], "finished", "{finished}");
+    assert!(!outage.exists());
+    let down = events(&db, "queue_service_down");
+    assert_eq!(down.len(), 1, "{down:?}");
+    assert_eq!(down[0]["payload"]["reason"], "start_failed");
+    assert_eq!(down[0]["payload"]["since"], recorded["since"]);
+    assert!(down[0]["payload"]["until"].as_i64() >= recorded["since"].as_i64());
     let started = events(&db, "queue_service_started");
     assert_eq!(started.len(), 1);
     assert_eq!(started[0]["payload"]["by"], "supervisor");
     assert_eq!(started[0]["payload"]["build"], dagq::VERSION);
+    assert!(started[0]["id"].as_i64() > down[0]["id"].as_i64());
     let status = ok(&db, &["status"]);
     assert!(
         !status["attention"]
@@ -352,13 +398,19 @@ fn the_supervisor_starts_the_service_and_holds_its_claims_while_it_is_down() {
         "{status}"
     );
     assert_eq!(status["queue_service"]["state"], "running");
-    assert_eq!(runs(), 1);
+    assert_eq!(RunReads::all_runs(&read()).unwrap().len(), 1);
+    let claimed = events(&db, "run_claimed");
+    assert_eq!(
+        claimed[0]["actor"]["id"],
+        format!("supervisor:{}", std::process::id()),
+        "{claimed:?}"
+    );
     // Stopped by a person, started again at the next look.
     {
         use dagq::application::queue_service::QueueServiceControl;
         assert!(control.stop(TIMEOUT).unwrap().is_some());
     }
-    supervise_with(&db, &repo, &backend, &options(&dagq)).unwrap();
+    supervise_with(&db, &repo, &backend, &options(&dagq, false)).unwrap();
     assert_eq!(events(&db, "queue_service_started").len(), 2);
 }
 
@@ -526,14 +578,19 @@ impl dagq::application::queue_service::QueueServiceControl for FakeService {
 }
 
 /// A service that dies after each start is started 3 times in the window,
-/// then left to a person: `queue_service_down` with `restart_limit`, once.
+/// then left to a person: the outage recorded beside the queue with
+/// `restart_limit`, once, and nothing of it in the queue while it lasts.
 #[test]
 fn a_service_that_keeps_dying_is_left_to_a_person_after_three_starts() {
     let (_fixture, repo, db) = idle_queue();
     let fake = std::sync::Arc::new(FakeService::default());
     let supervisor = Running::start(&db, &repo, Path::new("/unused"), Some(fake.clone()));
-    let _waiting = common::within(TIMEOUT * 3, "queue_service_down");
-    while events(&db, "queue_service_down").is_empty() {
+    let outage = db
+        .parent()
+        .unwrap()
+        .join(dagq::domain::queue_service::OUTAGE_FILE);
+    let _waiting = common::within(TIMEOUT * 3, "the outage's record");
+    while !outage.exists() {
         std::thread::sleep(Duration::from_millis(20));
     }
     supervisor.passes(5);
@@ -545,16 +602,16 @@ fn a_service_that_keeps_dying_is_left_to_a_person_after_three_starts() {
         .map(|event| &event["payload"]["restart"])
         .collect();
     assert_eq!(restarts, [&json!(false), &json!(true), &json!(true)]);
-    let down = events(&db, "queue_service_down");
-    assert_eq!(down.len(), 1, "{down:?}");
-    assert_eq!(down[0]["payload"]["reason"], "restart_limit");
-    let attention = ok(&db, &["status"])["attention"].clone();
+    let recorded: Value = serde_json::from_slice(&fs::read(&outage).unwrap()).unwrap();
+    assert_eq!(recorded["reason"], "restart_limit", "{recorded}");
     assert!(
-        attention.as_array().unwrap().iter().any(
-            |entry| entry["kind"] == "queue_service_down" && entry["status"] == "restart_limit"
-        ),
-        "{attention}"
+        recorded["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("started 3 times"),
+        "{recorded}"
     );
+    assert!(events(&db, "queue_service_down").is_empty());
 }
 
 /// A service of another build is replaced once, without counting it, and

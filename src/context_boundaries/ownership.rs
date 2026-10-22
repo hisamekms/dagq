@@ -648,6 +648,7 @@ pub(super) const OUTER_PORTS: &[OuterPort] = &[
     outer_port("src/application/run_container.rs", "VerificationContainers", Some(Execution), Internal), // the containers the commands of integrate's verification run in, on a clone of the commit that lands; integrate removes what each verification left
     outer_port("src/application/queue_service.rs", "ServiceAccess", Some(Host), Public(Only(&[Execution]))), // not classified by architecture.md; the supervisor issues a token at the claim and the resume
     outer_port("src/application/queue_service.rs", "TelemetryTokens", Some(Host), Public(Only(&[Execution]))), // not classified by architecture.md; the supervisor issues and revokes an executor's telemetry token per target
+    outer_port("src/application/supervisor_service.rs", "ServiceCaller", Some(Host), Public(Only(&[Execution]))), // how the supervisor reaches its queue's service; it signs in before it registers (ADR-t3102-3)
     outer_port("src/application/setup_review.rs", "SetupReviewHost", Some(Execution), Internal), // the main checkout, the temporary place and the job of setup-review
     outer_port("src/application/setup_review.rs", "InitRepository", Some(Execution), Internal), // the main checkout, its dagq.toml and its files init proposes the toolchain profiles from
     outer_port("src/application/ci_watch.rs", "CiSource", Some(Observation), Internal),
@@ -664,6 +665,8 @@ pub(super) const NOT_PORTS: &[NotPort] = &[
     not_port("src/application/telemetry_tokens.rs", "TokenLog", "a narrowing of EventStore to the record of a run's events, implemented for every EventStore"),
     not_port("src/application/main_log.rs", "MainReader", "a narrowing of RepositoryReads to its reads of main, implemented for every RepositoryReads"),
     not_port("src/application/queue_reads/mod.rs", "QueueReadSources", "a bound that joins PlanningSources and ObservationSources"),
+    not_port("src/application/supervisor_service.rs", "SupervisorStore", "a bound that joins the run's ports the service runs a supervisor's operations on"),
+    not_port("src/application/supervisor_service/wire.rs", "Wire", "how an operation's result crosses between the service and the supervisor, implemented for the values"),
 ];
 
 #[rustfmt::skip]

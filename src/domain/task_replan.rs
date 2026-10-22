@@ -240,7 +240,7 @@ string_enum!(GuardedStep {
 });
 
 /// The operation that guards a task now, as the guard reads it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct ReplanGuard {
     pub task: TaskId,
     pub operation: ReplanId,
@@ -278,7 +278,7 @@ impl TaskGuards {
 }
 
 /// Why a task's run is fenced at its turn's boundary ([`TaskGuards::fence`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(tag = "by", rename_all = "snake_case")]
 pub enum Fence {
     Replan(ReplanGuard),
@@ -486,7 +486,7 @@ pub struct ConditionMapping {
 }
 
 /// An operation as the queue records it. Times are Unix seconds.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct ReplanOperation {
     pub id: ReplanId,
     pub task_id: TaskId,
@@ -539,7 +539,7 @@ impl ReplanOperation {
 
 /// A move of an operation by the trusted runtime: to `to` for `reason`,
 /// with the snapshot it saved and the diagnosis it made.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ReplanMove {
     pub to: ReplanStatus,
     pub reason: String,

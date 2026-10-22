@@ -464,16 +464,20 @@ fn install_hands_a_running_supervisor_over_under_its_pid_and_rolls_back() {
     );
     let registered = || SqliteQueue::open(&db).unwrap().supervisors().unwrap();
     let started = std::time::Instant::now();
-    while registered().is_empty() {
+    // The registration and its acceptance of handoffs are two of the
+    // supervisor's requests to the queue service (ADR-t3102-3 decision 3).
+    while !registered()
+        .first()
+        .is_some_and(|registration| registration.handoff_accepted)
+    {
         assert!(
             started.elapsed().as_secs() < 30,
-            "the supervisor never registered"
+            "the supervisor never registered to accept a handoff"
         );
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     let token = registered()[0].token.clone();
     assert_eq!(registered()[0].pid, supervisor.child().id());
-    assert!(registered()[0].handoff_accepted);
 
     for args in [&["--from", env!("CARGO_BIN_EXE_dagq")][..], &["--rollback"]] {
         let mut full = vec![
@@ -788,9 +792,14 @@ exec {quoted_bin} \"$@\"\n"
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
     };
-    wait("the registration", &mut || !registered().is_empty());
+    // The registration and its automatic update are two of the
+    // supervisor's requests to the queue service (ADR-t3102-3 decision 3).
+    wait("the registration with its automatic update", &mut || {
+        registered()
+            .first()
+            .is_some_and(|registration| registration.auto_update)
+    });
     let token = registered()[0].token.clone();
-    assert!(registered()[0].auto_update);
     let updates = || SqliteQueue::open(&db).unwrap().update_events(100).unwrap();
     let installed = |sha: &str| {
         updates()
@@ -1018,6 +1027,10 @@ struct Supervised {
     db: std::path::PathBuf,
     repo: std::path::PathBuf,
     claude: std::path::PathBuf,
+    /// The queue's service, this test's: a supervisor reaches the queue
+    /// through it (ADR-t3102-3), and one the supervisor started would end
+    /// with the stand-in owner, before the supervisor's own last writes.
+    _service: common::service::Served,
 }
 
 fn supervised() -> Supervised {
@@ -1057,6 +1070,7 @@ fn supervised() -> Supervised {
     };
     let claude = stub("claude", "stub 1.0");
     Supervised {
+        _service: common::service::Served::start(&db),
         db,
         repo,
         claude,

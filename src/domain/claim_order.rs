@@ -50,7 +50,7 @@ pub const ORDER_DEFERRALS: [&str; 3] = [SPIKE_LIMIT, INVESTIGATION_LIMIT, LIGHT_
 /// the classes a class limit holds, and the Spikes that would open an
 /// investigation past `[supervisor] max_investigations` (ADR-t1487-1
 /// decision 7), judged again in the transaction from the queue as it is.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ClaimHolds {
     pub classes: Vec<ExecutionClass>,
     pub investigations: InvestigationLimit,

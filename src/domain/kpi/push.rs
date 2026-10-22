@@ -99,6 +99,9 @@ pub enum PushKind {
     /// New asks the inbox's `watch --role inbox` returned (ADR-t2159-1
     /// decision 4): sent once per watch that returned them.
     AskOpened,
+    /// The supervisor could not reach or start the queue's service
+    /// (ADR-t3102-3 decision 1): sent once per outage.
+    QueueServiceDown,
 }
 
 impl PushKind {
@@ -109,6 +112,7 @@ impl PushKind {
             Self::Breach => "breach",
             Self::InboxWatch => "inbox_watch",
             Self::AskOpened => "ask_opened",
+            Self::QueueServiceDown => "queue_service_down",
         }
     }
 }
@@ -278,6 +282,38 @@ pub fn breach_message(name: &str, queue: &str, started: &Value) -> PushMessage {
             "text": breach_text(started),
             "breaches": [breach_line(started)],
             "resolved": [],
+            "report_html": Value::Null,
+            "report_json": Value::Null,
+        }),
+        report_html: None,
+        report_json: None,
+    }
+}
+
+/// The message of an outage of the queue's service (ADR-t3102-3 decision
+/// 1): that it is down since `since` (unix seconds), why (`reason`,
+/// `detail`), and the next step; nothing of the queue's content.
+pub fn queue_service_down_message(
+    name: &str,
+    queue: &str,
+    since: i64,
+    reason: &str,
+    detail: &str,
+) -> PushMessage {
+    let period = format!("down since {since}");
+    PushMessage {
+        kind: PushKind::QueueServiceDown,
+        period: period.clone(),
+        body: json!({
+            "kind": PushKind::QueueServiceDown,
+            "queue": queue,
+            "period": period,
+            "title": format!("{name}: the queue service is down"),
+            "text": format!(
+                "The supervisor could not reach the queue service ({reason}: {detail}); no new run is claimed until it runs again. Next: `dagq service status`, then `dagq up` or `dagq service start`."
+            ),
+            "reason": reason,
+            "since": since,
             "report_html": Value::Null,
             "report_json": Value::Null,
         }),

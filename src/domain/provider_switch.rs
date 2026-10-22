@@ -289,7 +289,7 @@ pub fn switched_payload(
 /// How a claim runs a task that asks for `requested`: on `actual`, which
 /// differs when the requested provider cannot be used, and why
 /// (`switch`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct WorkerRoute {
     pub requested: Worker,
     pub actual: Worker,
