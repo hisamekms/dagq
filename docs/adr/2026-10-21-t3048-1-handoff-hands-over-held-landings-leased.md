@@ -6,6 +6,8 @@ status: accepted
 created: 2026-10-21
 updated: 2026-10-21
 accepted_on: 2026-10-21
+amended_by:
+  - adr-t3077-1
 owners:
   - hisamekms
 tags:

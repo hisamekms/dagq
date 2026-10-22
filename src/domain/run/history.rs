@@ -294,6 +294,16 @@ impl<'a> RunHistory<'a> {
             })
     }
 
+    /// The `landing_queued` of an approved run whose resume resolved or
+    /// was skipped (`via: resume`): the latest one, when nothing after it
+    /// started a landing, a review or a resume, decided the landing, or
+    /// opened an `approve_landing` ask. Such a run waits for the landing
+    /// slot `needs_session`, its resume done.
+    pub fn queued_after_resume(&self) -> Option<EventId> {
+        let queued = self.last(EventKind::LandingQueued)?;
+        (queued.payload["via"] == "resume" && !self.moved_on_after(queued.id)).then_some(queued.id)
+    }
+
     /// Whether `head` is what earlier landings of the run made of the
     /// receipt's `commit` (task 1118): the chain of their rebases
     /// (`integration_rebased`) and migration renumberings
@@ -970,6 +980,37 @@ mod tests {
             queued(&[retry(1), event(2, "ask_opened", json!({"kind": "blocked"}))]),
             Some(EventId::new(1))
         );
+    }
+
+    /// A run queued to land after its resume stays queued until a landing,
+    /// a review or a resume starts; one queued another way, or queued
+    /// again since by its `/exit`, is not.
+    #[test]
+    fn queued_after_resume_is_the_latest_resume_queue_nothing_moved_on_from() {
+        let queued = |events: &[RunEvent]| RunHistory::from_events(events).queued_after_resume();
+        let events = [
+            event(1, "resume_finished", json!({"outcome": "resolved"})),
+            event(2, "landing_queued", json!({"via": "resume"})),
+            event(3, "run_phase", json!({})),
+        ];
+        assert_eq!(queued(&events), Some(EventId::new(2)));
+        for kind in ["integration_started", "resume_started", "review_started"] {
+            let events = [
+                event(1, "landing_queued", json!({"via": "resume"})),
+                event(2, kind, json!({})),
+            ];
+            assert_eq!(queued(&events), None, "{kind}");
+        }
+        assert_eq!(
+            queued(&[event(1, "landing_queued", json!({"via": "exit"}))]),
+            None
+        );
+        let events = [
+            event(1, "landing_queued", json!({"via": "resume"})),
+            event(2, "landing_queued", json!({"via": "exit"})),
+        ];
+        assert_eq!(queued(&events), None);
+        assert_eq!(queued(&[]), None);
     }
 
     #[test]

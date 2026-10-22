@@ -1312,8 +1312,11 @@ fn drain_free_space(_: &Path) -> Option<u64> {
     )
 }
 
-/// Task 648: stop and handoff both finish a disk cleanup, retain a landing
-/// lease until the fresh reading, then either land or return it. That an
+/// Task 648: stop and handoff both finish a disk cleanup before the
+/// landing is decided: a stop keeps the landing's lease until the fresh
+/// reading, then returns it while still short; a handoff starts no landing
+/// and hands the run over leased once the cleanup is done (ADR-t3077-1).
+/// That an
 /// ordinary job stops at its current worktree on a stop or a handoff is
 /// `supervise::cleanup`'s unit tests (`only_a_stop_or_a_handoff_ends_the_cleanup`,
 /// `ending_keeps_only_the_rest_of_a_cleanup_for_room`) and, through the
@@ -1322,8 +1325,9 @@ fn drain_free_space(_: &Path) -> Option<u64> {
 fn draining_finishes_disk_cleanup_before_deciding_a_landing() {
     // A stop and a handoff, each with a disk cleanup: the matrix's
     // decisions (which job ends after its current worktree, and whether the
-    // drained landing lands or gives its lease back) are the unit tests' of
-    // `supervise::cleanup` and `domain::landing_hold`.
+    // drained landing gives its lease back or is handed over) are the unit
+    // tests' of `supervise::cleanup`, `domain::landing_hold` and
+    // `supervise::execution::handoff_slots`.
     for (handoff, disk) in [(false, Some(false)), (true, Some(true))] {
         let (_dir, repo, db) = fixture();
         declare_rust_profile(&repo);
@@ -1450,15 +1454,18 @@ fn draining_finishes_disk_cleanup_before_deciding_a_landing() {
             }
         }
         if let Some(run) = &landing {
-            assert!(queue.run_lease(run.id()).unwrap().is_none());
+            // A stop gives the lease back; a handoff keeps it for the next
+            // process, the landing not started.
+            assert_eq!(
+                queue.run_lease(run.id()).unwrap().is_some(),
+                handoff,
+                "handoff={handoff}"
+            );
             assert_eq!(
                 queue.run(run.id()).unwrap().status(),
-                if disk == Some(true) {
-                    RunStatus::Integrated
-                } else {
-                    RunStatus::AwaitingIntegration
-                }
+                RunStatus::AwaitingIntegration
             );
+            assert!(payloads_of(&queue, run, "integration_started").is_empty());
             let repair = queue.latest_event_of("auto_repaired").unwrap().unwrap();
             assert_eq!(repair.payload["repair"], "disk_cleanup");
             assert_eq!(
@@ -1554,11 +1561,11 @@ fn rest_passes(db: &Path, count: usize) {
 /// dropped by a handoff: it runs after the job, to its last candidate,
 /// removing the build outputs of a run nobody works on that waits for no
 /// answer (`build_outputs_removed`, `disk_space`), counted in
-/// `auto_repaired` (`disk_cleanup`). The run short of room to land keeps
-/// its lease until that rest is done, then lands on the reading after it;
-/// so too when the handoff is read first on the pass the rest starts, and
-/// when the rest finished between that pass's reading and the handoff:
-/// the landing is decided on the next pass's reading, not the one before.
+/// `auto_repaired` (`disk_cleanup`). The handoff waits for that rest, and
+/// the run short of room to land keeps its lease and starts no landing: it
+/// is handed over leased once the rest is done (ADR-t3077-1), so too when
+/// the handoff is read first on the pass the rest starts, and when the
+/// rest finished between that pass's reading and the handoff.
 /// The other cases (a stop, still short) differ only in the decisions of
 /// `supervise::cleanup::tests::ending_keeps_only_the_rest_of_a_cleanup_for_room`
 /// and `domain::landing_hold`'s unit tests.
@@ -1740,13 +1747,19 @@ fn draining_runs_the_rest_of_a_cleanup_for_room_before_deciding_a_landing() {
         assert_eq!(repaired[1]["repair"], "disk_cleanup");
         assert_eq!(repaired[1]["bytes"], removed[0]["bytes"]);
         assert_eq!(repaired[1]["detail"]["runs"], json!([idle.id().as_str()]));
-        assert!(queue.run_lease(landing.id()).unwrap().is_none());
-        assert_eq!(
-            queue.run(landing.id()).unwrap().status(),
-            RunStatus::Integrated,
+        // Handed over leased, its landing not started: the next process
+        // lands it.
+        assert_eq!(outcome["outcome"], "handoff", "{outcome}");
+        assert!(
+            queue.run_lease(landing.id()).unwrap().is_some(),
             "{drain:?}"
         );
-        assert_eq!(outcome["outcome"], "handoff", "{outcome}");
+        assert_eq!(
+            queue.run(landing.id()).unwrap().status(),
+            RunStatus::AwaitingIntegration,
+            "{drain:?}"
+        );
+        assert!(payloads_of(&queue, &landing, "integration_started").is_empty());
     }
 }
 

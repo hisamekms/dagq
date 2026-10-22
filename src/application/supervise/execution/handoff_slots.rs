@@ -14,33 +14,41 @@ impl Phase {
     /// Whether the next process can rebuild this phase from the queue and
     /// the run files: everything but a validation, the verification of an
     /// `already_satisfied` claim (ADR-t1818-1), an e2e (ADR-t1233-2) or a
-    /// landing in progress (and a run waiting for the landing slot, which
-    /// starts one unless its landing is held, [`Slot::rebuildable`]),
-    /// which a handoff waits for. A headless review or triage is
-    /// rebuildable because it is stopped and started again.
+    /// landing in progress, which a handoff waits for. A run waiting for
+    /// the landing slot is rebuildable whether its landing is held or not:
+    /// a handoff starts no landing and hands it over ([`Slot::rebuildable`],
+    /// ADR-t3077-1). A headless review or triage is rebuildable because it
+    /// is stopped and started again.
     pub(super) fn rebuildable(&self) -> bool {
         !matches!(
             self,
-            Phase::Validating(..)
-                | Phase::Satisfied(_)
-                | Phase::AwaitingSlot
-                | Phase::E2e(_)
-                | Phase::Landing(_)
+            Phase::Validating(..) | Phase::Satisfied(_) | Phase::E2e(_) | Phase::Landing(_)
         )
     }
 }
 
 impl Slot {
     /// Whether a handoff hands this slot's run over instead of waiting for
-    /// it: a rebuildable phase, or a run awaiting the landing slot while
-    /// landings are `held` (judged on the pass that decides the exec), for
-    /// which no landing is about to start (ADR-t3048-1). It keeps its
-    /// lease, and the next process adopts its review
-    /// ([`Takeover::Review`]): a recorded pass goes back to the landing
-    /// queue without a review, and a run a person's `land` queued goes
-    /// back to the approved landings ([`takeover`]).
-    pub(super) fn rebuildable(&self, held: bool) -> bool {
-        self.phase.rebuildable() || (held && matches!(self.phase, Phase::AwaitingSlot))
+    /// it, and so does not step it while it drains: a rebuildable phase.
+    /// A run awaiting the landing slot is one, held or not: the drain
+    /// starts neither its landing nor its e2e (ADR-t3077-1), it keeps its
+    /// lease, and the next process puts it back in the landing queue
+    /// ([`takeover`]): an `awaiting_integration` run has its review
+    /// adopted ([`Takeover::Review`]), a recorded pass going back to the
+    /// landing queue after its `/exit` without a review, and a run a
+    /// person's `land` queued goes back to the approved landings; an
+    /// approved `needs_session` run queued after its resume waits for the
+    /// slot again without a resume ([`Takeover::Land`]).
+    pub(super) fn rebuildable(&self) -> bool {
+        self.phase.rebuildable()
+    }
+
+    /// Whether a pass steps this slot, `handing_off` whether the
+    /// supervisor drains for a handoff: one that does steps only what it
+    /// waits for, so a run awaiting the landing slot starts no landing;
+    /// any other pass, a stop's drain too, steps every slot.
+    pub(super) fn stepped(&self, handing_off: bool) -> bool {
+        !handing_off || !self.rebuildable()
     }
 }
 
@@ -59,6 +67,10 @@ pub(super) enum Takeover {
     Session,
     /// A run waiting for its review, which runs again.
     Review,
+    /// An approved `needs_session` run queued to land after its resume
+    /// resolved or was skipped ([`Queued::AfterResume`]): it waits for the
+    /// landing slot again, its resume not run again.
+    Land,
     /// Nothing to take over: its lease is given back, so the supervisor's
     /// resume or triage (or `recover`) picks it up, or, for a run queued to
     /// land, its start of the approved landings.
@@ -86,28 +98,45 @@ pub(super) fn reads_resumed_session(
     snapshot.is_none() && status == RunStatus::NeedsSession
 }
 
+/// How the events of a run without `handoff.json` queue it to land.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Queued {
+    /// Not queued, or not read.
+    No,
+    /// A person's `land` or a recovered landing
+    /// ([`crate::domain::RunHistory::queued_to_land`]).
+    ToLand,
+    /// Its resume resolved or was skipped and the approved run was queued
+    /// ([`crate::domain::RunHistory::queued_after_resume`]).
+    AfterResume,
+}
+
 /// [`Takeover`] of a run in `status` with `snapshot`, `resume_lives`
 /// whether its resumed session lives on (read only when
-/// [`reads_resumed_session`]) and `queued_to_land` whether a person's
-/// `land` or a recovered landing queued it
-/// ([`crate::domain::RunHistory::queued_to_land`]): such a run (one
-/// handed over while its landing was held, ADR-t3048-1) gives its lease
-/// back to the approved landings rather than having its review adopted,
-/// which would ask or review it again over the answer.
+/// [`reads_resumed_session`]) and `queued` how it was queued to land
+/// (read only for an `awaiting_integration` or `needs_session` run
+/// without `handoff.json`). An `awaiting_integration` run a person's
+/// `land` or a recovered landing queued (one handed over while it awaited
+/// the landing slot, ADR-t3077-1) gives its lease back to the approved
+/// landings rather than having its review adopted, which would ask or
+/// review it again over the answer. A `needs_session` run queued after
+/// its resume waits for the landing slot again rather than giving its
+/// lease back, for the resume would run again.
 pub(super) fn takeover(
     status: RunStatus,
     snapshot: Option<handoff::SnapshotKind>,
     resume_lives: bool,
-    queued_to_land: bool,
+    queued: Queued,
 ) -> Takeover {
     match (status, snapshot) {
         (_, Some(kind)) => Takeover::Snapshot(kind),
+        (RunStatus::NeedsSession, None) if queued == Queued::AfterResume => Takeover::Land,
         (RunStatus::NeedsSession, None) if resume_lives => Takeover::AdoptResume,
         (
             RunStatus::Claimed | RunStatus::Starting | RunStatus::Running | RunStatus::Validating,
             None,
         ) => Takeover::Session,
-        (RunStatus::AwaitingIntegration, None) if !queued_to_land => Takeover::Review,
+        (RunStatus::AwaitingIntegration, None) if queued != Queued::ToLand => Takeover::Review,
         _ => Takeover::GiveBack,
     }
 }
@@ -247,7 +276,7 @@ impl Supervisor<'_> {
     /// ([`handoff::owner_gone_ends`]).
     pub(super) fn let_go_for_owner(&mut self) {
         for mut slot in self.claim.slots.take_all() {
-            if !slot.phase.rebuildable() && !matches!(slot.phase, Phase::AwaitingSlot) {
+            if !slot.rebuildable() {
                 self.claim.slots.admit(slot);
                 continue;
             }
@@ -300,23 +329,41 @@ impl Supervisor<'_> {
                     false
                 })
                 };
-            // Likewise a lookup that fails adopts its review, as before.
-            let queued_to_land = kind.is_none()
-                && run.status() == RunStatus::AwaitingIntegration
-                && self
-                    .queue
+            // Likewise a lookup that fails adopts its review, as before, or
+            // gives a `needs_session` run's lease back.
+            let queued = if kind.is_none()
+                && matches!(
+                    run.status(),
+                    RunStatus::AwaitingIntegration | RunStatus::NeedsSession
+                ) {
+                self.queue
                     .run_events(run.id())
-                    .map(|events| RunHistory::from_events(&events).queued_to_land().is_some())
+                    .map(|events| {
+                        let history = RunHistory::from_events(&events);
+                        match run.status() {
+                            RunStatus::NeedsSession if history.queued_after_resume().is_some() => {
+                                Queued::AfterResume
+                            }
+                            RunStatus::AwaitingIntegration if history.queued_to_land().is_some() => {
+                                Queued::ToLand
+                            }
+                            _ => Queued::No,
+                        }
+                    })
                     .unwrap_or_else(|error| {
-                        warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: whether it is queued to land could not be read; its review is adopted: {error:#}", run.id());
-                        false
-                    });
-            let takeover = takeover(run.status(), kind, resume_lives, queued_to_land);
+                        warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: whether it is queued to land could not be read: {error:#}", run.id());
+                        Queued::No
+                    })
+            } else {
+                Queued::No
+            };
+            let takeover = takeover(run.status(), kind, resume_lives, queued);
             let phase = match (takeover, snapshot) {
                 (_, Some(snapshot)) => self.rebuild_from(&run, snapshot),
                 (Takeover::AdoptResume, None) => self.adopt_resume(&run).map(Phase::Resume),
                 (Takeover::Session, None) => self.resume(&run),
                 (Takeover::Review, None) => self.adopt_review(&run),
+                (Takeover::Land, None) => Ok(Phase::AwaitingSlot),
                 (Takeover::Snapshot(_) | Takeover::GiveBack, None) => {
                     info!(run_id = %run.id(), "run {} ({}) has nothing to take over after the handoff; its lease is given back", run.id(), run.status().as_str());
                     self.queue
@@ -420,7 +467,7 @@ mod tests {
             for kind in [SnapshotKind::Resume, SnapshotKind::Exit] {
                 assert!(!reads_resumed_session(status, Some(kind)));
                 assert_eq!(
-                    takeover(status, Some(kind), false, false),
+                    takeover(status, Some(kind), false, Queued::No),
                     Takeover::Snapshot(kind)
                 );
             }
@@ -428,11 +475,11 @@ mod tests {
         assert!(reads_resumed_session(RunStatus::NeedsSession, None));
         assert!(!reads_resumed_session(RunStatus::Running, None));
         assert_eq!(
-            takeover(RunStatus::NeedsSession, None, true, false),
+            takeover(RunStatus::NeedsSession, None, true, Queued::No),
             Takeover::AdoptResume
         );
         assert_eq!(
-            takeover(RunStatus::NeedsSession, None, false, false),
+            takeover(RunStatus::NeedsSession, None, false, Queued::No),
             Takeover::GiveBack
         );
         for status in [
@@ -441,15 +488,15 @@ mod tests {
             RunStatus::Running,
             RunStatus::Validating,
         ] {
-            assert_eq!(takeover(status, None, false, false), Takeover::Session);
+            assert_eq!(takeover(status, None, false, Queued::No), Takeover::Session);
         }
         assert_eq!(
-            takeover(RunStatus::AwaitingIntegration, None, false, false),
+            takeover(RunStatus::AwaitingIntegration, None, false, Queued::No),
             Takeover::Review
         );
         // A person's `land` queued it: the approved landings take it.
         assert_eq!(
-            takeover(RunStatus::AwaitingIntegration, None, false, true),
+            takeover(RunStatus::AwaitingIntegration, None, false, Queued::ToLand),
             Takeover::GiveBack
         );
         for status in [
@@ -458,7 +505,10 @@ mod tests {
             RunStatus::Interrupted,
             RunStatus::Integrated,
         ] {
-            assert_eq!(takeover(status, None, false, false), Takeover::GiveBack);
+            assert_eq!(
+                takeover(status, None, false, Queued::No),
+                Takeover::GiveBack
+            );
         }
         assert!(Takeover::AdoptResume.resume_adopted());
         assert!(Takeover::Snapshot(SnapshotKind::Resume).resume_adopted());
@@ -466,30 +516,52 @@ mod tests {
             Takeover::Snapshot(SnapshotKind::Exit),
             Takeover::Session,
             Takeover::Review,
+            Takeover::Land,
             Takeover::GiveBack,
         ] {
             assert!(!other.resume_adopted());
         }
     }
 
-    /// A run awaiting the landing slot is handed over leased while
-    /// landings are held, and waited for otherwise (it is about to land);
-    /// a landing in progress is waited for whatever the hold. A held run is
-    /// `awaiting_integration`, whose takeover adopts its review.
+    /// A run awaiting the landing slot is handed over leased, its landing
+    /// held or not, and a handoff's drain does not step it (a stop's does);
+    /// a landing in progress is waited for, and an e2e waiting to start is
+    /// handed over. The next process puts an `awaiting_integration` run
+    /// back through its adopted review, and an approved `needs_session` one
+    /// queued after its resume back in the landing slot, its resume not run
+    /// again, whether its resumed session's wrapper looks alive or not.
     #[test]
-    fn a_handoff_hands_over_a_run_whose_landing_is_held() {
-        let run = || super::super::recovery::test_run(RunStatus::AwaitingIntegration, None);
-        let awaiting = Slot::new(run(), Phase::AwaitingSlot);
-        assert!(!awaiting.rebuildable(false));
-        assert!(awaiting.rebuildable(true));
+    fn a_handoff_hands_over_a_run_awaiting_the_landing_slot() {
+        let run = |status| super::super::recovery::test_run(status, None);
+        let awaiting = Slot::new(run(RunStatus::AwaitingIntegration), Phase::AwaitingSlot);
+        assert!(awaiting.rebuildable());
+        assert!(!awaiting.stepped(true));
+        assert!(awaiting.stepped(false));
         assert_eq!(
-            takeover(awaiting.run.status(), None, false, false),
+            takeover(awaiting.run.status(), None, false, Queued::No),
             Takeover::Review
         );
-        let landing = Slot::new(run(), Phase::Landing(None));
-        assert!(!landing.rebuildable(true));
-        let e2e_waits = Slot::new(run(), Phase::AwaitingE2e);
-        assert!(e2e_waits.rebuildable(false));
+        let resolved = Slot::new(run(RunStatus::NeedsSession), Phase::AwaitingSlot);
+        assert!(resolved.rebuildable());
+        assert!(!resolved.stepped(true));
+        for resume_lives in [false, true] {
+            assert_eq!(
+                takeover(
+                    resolved.run.status(),
+                    None,
+                    resume_lives,
+                    Queued::AfterResume
+                ),
+                Takeover::Land
+            );
+        }
+        let landing = Slot::new(run(RunStatus::Integrating), Phase::Landing(None));
+        assert!(!landing.rebuildable());
+        assert!(landing.stepped(true));
+        assert!(landing.stepped(false));
+        let e2e_waits = Slot::new(run(RunStatus::AwaitingIntegration), Phase::AwaitingE2e);
+        assert!(e2e_waits.rebuildable());
+        assert!(!e2e_waits.stepped(true));
     }
 
     /// `supervisor_handed_off` names the run's status and the state its

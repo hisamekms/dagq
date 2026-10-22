@@ -13,6 +13,7 @@ related:
   - adr-0062
   - design-supervisor-lifecycle-waiting
   - adr-t3048-1
+  - adr-t3077-1
 ---
 
 # Handoff
@@ -25,8 +26,10 @@ use caseは`src/application/supervise/host_ops/handoff.rs`（登録と要求）�
   受けられない登録（引き継ぎを知らない前のbinary）には書かず（`false`）、`up`はdrainに、`install`は`not_handed_off`に回す。
   要求をDBに置くのは、signalはlaunchd modeと登録済みのin-cmuxのsupervisorで届け方が違い、区切りまで待たせる必要もあるため。
 - **区切り**: ループの各passの先頭で、停止要求（SIGINT/SIGTERM）が無ければ`handoff_request(token)`を読む。
-  要求があれば新しいclaim・adopt・resume・triage・observer・plan review・goal reviewの起動を止め、DBとrunのファイルから組み立て直せないslot（検証と着地が進行中のもの。`Phase::rebuildable`）だけを進める（`tick(true)`）。
-  着地slotを待つrunはすぐ着地を始めるので待つが、execを決めるpassの読み取りで着地が保留なら着地が始まりかけていないので待たず、leaseを持ったまま引き継ぐ（`Slot::rebuildable`。その前のpassで保留でも、保留が解けていれば着地を待つ。[ADR-t3048-1](../../adr/2026-10-21-t3048-1-handoff-hands-over-held-landings-leased.md)）。
+  要求があれば新しいclaim・adopt・resume・triage・observer・plan review・goal reviewの起動を止め、DBとrunのファイルから組み立て直せないslot（検証・e2e・着地が進行中のもの。`Phase::rebuildable`）だけを進める（`tick(true)`）。
+  着地slotを待つrunは、着地の保留の有無に依らず着地（とその前のe2e）を始めず、leaseを持ったまま引き継ぐ（`Slot::rebuildable`。待つのは要求の時点で既に始まっていた検証・e2e・着地だけ。[ADR-t3077-1](../../adr/2026-10-22-t3077-1-handoff-drain-starts-no-landing-and-hands-over-runs-awaiting-the-slot.md)）。
+  次のプロセスは、`awaiting_integration`のrunをreviewのadoptで着地の列に戻し（人の`land`で並んだrunはleaseを返して承認の着地へ）、resumeの後に着地の列に並んだ承認済みの`needs_session`のrunをresumeし直さずに着地slotの待ちに戻す（`Takeover::Land`）。
+  止めるdrainは今どおり着地slotを待つrunを進める。
   待つあいだも各passで、走っているplan review / goal reviewのjobが終わっていれば回収してverdictを適用する（verdictでreadyになったtaskは待ちのあいだclaimせず、次のプロセスがclaimする）。
   全slotが組み立て直せる状態になったら、`prepare_handoff`はobserverを止めた後、plan review / goal reviewのjobを1回pollし、終わっていれば回収してverdictを適用する（終わったjobのverdictを捨てて次のプロセスで同じattemptをやり直さない）。
   そのうえでobserverの子プロセスと、まだ走っているheadlessのreview / triage / plan review / goal reviewのjobを（その子孫ごと）止める（`headless_jobs`の行は`stopped`で閉じ、execの前に書く。[Headless job processes](headless-job-processes.md)）。

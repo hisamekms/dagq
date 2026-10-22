@@ -290,6 +290,104 @@ was not handed off to /next/dagq",
     );
 }
 
+/// ADR-t3077-1: a handoff's drain waits for the landing that had started
+/// before it was asked, but starts no other: a run whose review passed
+/// meanwhile and that waits for the landing slot, with no hold on
+/// landings, is handed over with its lease and no landing, and the
+/// process that continues under the same token puts it back in the
+/// landing queue without reviewing it again and lands it.
+#[test]
+fn a_handoff_starts_no_landing_and_hands_over_a_run_awaiting_the_slot() {
+    let (_dir, repo, db) = fixture();
+    let release = db.with_extension("release");
+    let verification = json!([crate::common::await_path(&release)]);
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET verification_commands=?1 WHERE id=1",
+            [verification.to_string()],
+        )
+        .unwrap();
+    // Each run writes a file of its own, so the second lands on the first.
+    let backend = Arc::new(TestWorkspace::new(
+        &db,
+        false,
+        "printf 'work\\n' > \"$RUN_ID.txt\" && git add \"$RUN_ID.txt\" && git commit -q -m work; \
+receipt \"$(git rev-parse HEAD)\"",
+    ));
+    let reviewer = Arc::new(TestReviewer::new(&[verdict("pass", &[], "ready to land")]));
+    let options = supervise_options(2, false);
+    let passes = options.passes.clone();
+    let supervisor = {
+        let (db, repo, backend, reviewer, options) = (
+            db.clone(),
+            repo.clone(),
+            backend.clone(),
+            reviewer.clone(),
+            options.clone(),
+        );
+        thread::spawn(move || supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options))
+    };
+    wait_until(&db, crate::common::STEP_LIMIT, |queue| {
+        event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"integration_started")
+    });
+    // Task 1 lands, held by its verification; task 2 passes its review
+    // meanwhile and waits for the landing slot.
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let second = add_ready_task(&mut queue, "lands after the handoff", &[]);
+    wait_until(&db, crate::common::STEP_LIMIT, |queue| {
+        event_kinds(&queue.show(second).unwrap()).contains(&"landing_queued")
+    });
+    let token = only_registration(&db).token;
+    assert!(queue.request_handoff(&token, "/next/dagq").unwrap());
+    await_passes(&passes, SOME_PASSES);
+    std::fs::write(&release, "go").unwrap();
+    let outcome = joined(supervisor, "the supervisor asked to hand off");
+    assert_eq!(outcome["outcome"], "handoff", "{outcome}");
+    assert_eq!(outcome["handed_over"], 1, "{outcome}");
+    // The landing in progress was waited for; task 2's was not started.
+    assert_eq!(
+        queue.show(TaskId::new(1)).unwrap().task.status(),
+        TaskStatus::Completed
+    );
+    let run = queue.show(second).unwrap().runs[0].clone();
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    assert!(!event_kinds(&queue.show(second).unwrap()).contains(&"integration_started"));
+    assert_eq!(
+        queue
+            .runs_leased_by(&token)
+            .unwrap()
+            .iter()
+            .map(|run| run.id().clone())
+            .collect::<Vec<_>>(),
+        vec![run.id().clone()]
+    );
+
+    let outcome = supervise_reviewed_with(
+        &db,
+        &repo,
+        &backend,
+        &reviewer,
+        &SuperviseOptions {
+            handoff_token: Some(token),
+            ..supervise_options(2, true)
+        },
+    );
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let shown = queue.show(second).unwrap();
+    assert_eq!(shown.runs[0].status(), RunStatus::Integrated);
+    assert_eq!(shown.task.status(), TaskStatus::Completed);
+    let kinds = event_kinds(&shown);
+    assert_eq!(
+        kinds
+            .iter()
+            .filter(|kind| **kind == "review_started")
+            .count(),
+        1,
+        "{kinds:?}"
+    );
+}
+
 /// The supervisor the exec'd binary runs: the same token, continued.
 fn supervise_after_handoff(
     db: &Path,
@@ -654,6 +752,69 @@ fn after_a_handoff_a_run_without_state_gives_its_lease_back() {
         format!("{error:#}").contains("is no longer registered"),
         "{error:#}"
     );
+}
+
+/// ADR-t3077-1: an approved run whose resume resolved waits for the
+/// landing slot `needs_session`, queued after its resume; handed over with
+/// its lease and no `handoff.json`, the process that continues under the
+/// same token puts it back in the landing slot and lands it, its resume
+/// not run again.
+#[test]
+fn after_a_handoff_a_run_queued_after_its_resume_lands_without_a_resume() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let token = LeaseToken::new("handed-over");
+    queue
+        .register_supervisor(&token, std::process::id(), 1, "0.0.1")
+        .unwrap();
+    queue.accept_handoff(&token).unwrap();
+    let run = start_run_under_dead_supervisor(&repo, &db, &backend, "handed-over");
+    // Its turn commits and writes its receipt before its session is asked
+    // to exit.
+    let receipt = PathBuf::from(run.receipt_path().unwrap());
+    let started = Instant::now();
+    while !receipt.exists() {
+        assert!(started.elapsed() < crate::common::STEP_LIMIT, "no receipt");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let exit = dagq::domain::turn::exit_path(Path::new(run.run_dir().unwrap()));
+    fs::create_dir_all(exit.parent().unwrap()).unwrap();
+    fs::write(&exit, "").unwrap();
+    backend.join();
+    let head = git_out(
+        Path::new(run.worktree_path().unwrap()),
+        &["rev-parse", "HEAD"],
+    );
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE task_runs SET status='needs_session', result_commit=?2 WHERE id=?1",
+            rusqlite::params![run.id(), head],
+        )
+        .unwrap();
+    // A person's `land` approved it, its landing parked it and its
+    // resume resolved what the landing found.
+    for (kind, payload) in [
+        (EventKind::IntegrationApproved, json!({"ask_id": 1})),
+        (EventKind::IntegrationStarted, json!({})),
+        (EventKind::ResumeStarted, json!({"attempt": 1})),
+        (EventKind::ResumeFinished, json!({"outcome": "resolved"})),
+        (EventKind::LandingQueued, json!({"via": "resume"})),
+    ] {
+        queue.record_runtime_event(run.id(), kind, payload).unwrap();
+    }
+    assert_eq!(queue.runs_leased_by(&token).unwrap().len(), 1);
+
+    let outcome = supervise_after_handoff(&db, &repo, &backend, token.as_str()).unwrap();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(queue.run(run.id()).unwrap().status(), RunStatus::Integrated);
+    let detail = queue.show(run.task_id()).unwrap();
+    let kinds = event_kinds(&detail);
+    // Only the resume before the handoff.
+    let count = |kind: &str| kinds.iter().filter(|k| **k == kind).count();
+    assert_eq!(count("resume_started"), 1, "{kinds:?}");
+    assert_eq!(count("integration_started"), 2, "{kinds:?}");
 }
 
 /// The supervisor's look at main for the automatic update (ADR-0045

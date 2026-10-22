@@ -2237,3 +2237,9 @@ task = 2474
 name = "runtime_claim::a_supervisor_started_again_goes_on_from_its_newest_slots_full_record"
 reason = "B 境界（supervisor の配線・SQLite・handoff）: 同じ token の 3 つの process を handoff で順に起動し、起動時の slots_full の読み戻し（event の種類・token の絞り込み・最新の 1 件）を実の queue で通して、open の無い記録では全 class を 1 回記録し直し、次の process は重ねず、枠が空いたら終わりを 1 本だけ記録することを確かめる。続けるか記録し直すかの判断は domain::pre_claim の unit test、読めないときは supervise::execution::stages の unit test"
 task = 3047
+
+# 6.5s
+[[test]]
+name = "runtime_handoff::a_handoff_starts_no_landing_and_hands_over_a_run_awaiting_the_slot"
+reason = "境界（supervisorの配線・adopt）: handoffのdrainが走る着地だけを待ち、着地slot待ちのrunをleaseごとexecの後のprocessに渡し、そのprocessがadoptでreviewなしに着地させる"
+task = 3077

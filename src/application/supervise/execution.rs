@@ -1376,9 +1376,9 @@ enum Phase {
     AgentEval(eval_gate::EvalGateWatch),
     /// A passed run waits for its e2e to start (ADR-t1233-2): another
     /// run's e2e runs, one that could not run waits to be tried again, or a
-    /// handoff starts none. Unlike `AwaitingSlot` nothing is about to start,
-    /// so a handoff need not wait for it: the next process rebuilds the run
-    /// as an adopted one, which waits for the slot again.
+    /// handoff starts none. Like `AwaitingSlot`, a handoff need not wait
+    /// for it: the next process rebuilds the run as an adopted one, which
+    /// waits for the slot again.
     AwaitingE2e,
     /// The e2e of a passed run runs on the host off the loop before it
     /// lands (ADR-t1233-2); the run keeps its lease and slot.
@@ -2271,14 +2271,9 @@ impl Supervisor<'_> {
                     if !self.landing.rechecks.running()
                         && !self.host.handoff_waits()
                         && !self.observation.handoff_waits()
-                        && {
-                            // Judged on this pass's readings: a hold that
-                            // ended since the slot's last look lets its run
-                            // land before the exec.
-                            let held = self.landing_hold()
-                                == crate::domain::landing_hold::LandingHold::Wait;
-                            self.claim.slots.iter().all(|slot| slot.rebuildable(held))
-                        }
+                        // A run awaiting the landing slot is handed over,
+                        // its landing not started (ADR-t3077-1).
+                        && self.claim.slots.iter().all(Slot::rebuildable)
                     {
                         if self
                             .queue
@@ -3172,7 +3167,8 @@ impl Supervisor<'_> {
         self.claim.take_load(id)
     }
     /// One pass over the slots; with `unsettled_only`, over the slots a
-    /// handoff waits for (their validation or landing in progress) only.
+    /// handoff waits for (their validation, e2e or landing in progress)
+    /// only ([`Slot::stepped`]).
     fn tick(&mut self, unsettled_only: bool) {
         self.sample_load();
         if !unsettled_only {
@@ -3180,7 +3176,7 @@ impl Supervisor<'_> {
         }
         let mut index = 0;
         while index < self.claim.slots.len() {
-            if unsettled_only && self.claim.slots[index].phase.rebuildable() {
+            if !self.claim.slots[index].stepped(unsettled_only) {
                 index += 1;
                 continue;
             }
