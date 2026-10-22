@@ -1,9 +1,16 @@
 //! The templates of `tests/common/template.rs` made again after a cache's
-//! cleanup emptied them, and the check that a directory is a repository.
+//! cleanup emptied them, pruned so they do not pile up, and the check that
+//! a directory is a repository.
 use crate::common::{Bounded, template};
 use dagq::infrastructure::git_binary::git_executable;
 use rusqlite::Connection;
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs,
+    os::unix::io::AsRawFd,
+    path::Path,
+    process::Command,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 /// What rust-cache's cleanTargetDir leaves: every directory, no file.
 fn delete_files(dir: &Path) {
@@ -108,4 +115,129 @@ fn the_repository_check_names_the_dir_the_git_and_its_stderr() {
     let repo = tempfile::tempdir().unwrap();
     template::repository(repo.path(), "seed of the check test\n");
     template::git_repository(repo.path()).unwrap();
+}
+
+/// A complete template `name` under `root` that nothing made, its lock last
+/// used at `used`.
+fn fake(root: &Path, name: &str, used: SystemTime) {
+    fs::create_dir_all(root.join(name)).unwrap();
+    fs::write(root.join(name).join(".complete"), "").unwrap();
+    let lock = fs::File::create(root.join(format!("{name}.lock"))).unwrap();
+    lock.set_modified(used).unwrap();
+}
+
+/// The lock of the template `name` under `root`, held as a process that
+/// reads (`LOCK_SH`) or makes (`LOCK_EX`) it does, until dropped.
+fn hold(root: &Path, name: &str, operation: libc::c_int) -> fs::File {
+    let lock = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join(format!("{name}.lock")))
+        .unwrap();
+    // SAFETY: the descriptor of a file held open here.
+    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), operation) }, 0);
+    lock
+}
+
+fn entries(root: &Path) -> Vec<String> {
+    let mut names: Vec<_> = fs::read_dir(root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn making_a_template_prunes_old_versions_and_leftovers_but_not_one_being_made() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    let format = template::FORMAT;
+    let now = SystemTime::now();
+    // Another schema, another format, and what a cache's cleanup or a
+    // process that died making one left.
+    fake(
+        root,
+        &format!("queue-f{format}-v1-0123456789abcdef.db"),
+        now,
+    );
+    fake(root, &format!("script-f{}-{:064x}", format - 1, 1), now);
+    fs::create_dir(root.join(format!("repo-f{format}-0000000000000001"))).unwrap();
+    fs::create_dir(root.join(format!("repo-f{format}-0000000000000002.building"))).unwrap();
+    fs::write(
+        root.join(format!("repo-f{format}-0000000000000002.lock")),
+        "",
+    )
+    .unwrap();
+    // One a process is making now, and one another process reads.
+    let making = format!("repo-f{format}-0000000000000003");
+    fs::create_dir(root.join(format!("{making}.building"))).unwrap();
+    let _making = hold(root, &making, libc::LOCK_EX);
+    let reading = format!("queue-f{format}-v2-0123456789abcdef.db");
+    fake(root, &reading, now);
+    let _reading = hold(root, &reading, libc::LOCK_SH);
+
+    let fixtures = tempfile::tempdir().unwrap();
+    use_each(root, fixtures.path());
+
+    let made: Vec<_> = templates(root)
+        .into_iter()
+        .filter(|name| !name.ends_with(".building") && *name != reading)
+        .collect();
+    assert_eq!(made.len(), 3, "{made:?}");
+    let mut kept: Vec<_> = made
+        .iter()
+        .flat_map(|name| [name.clone(), format!("{name}.lock")])
+        .chain([
+            format!("{making}.building"),
+            format!("{making}.lock"),
+            reading.clone(),
+            format!("{reading}.lock"),
+        ])
+        .collect();
+    kept.sort();
+    assert_eq!(entries(root), kept);
+}
+
+#[test]
+fn templates_beyond_the_kept_are_pruned_least_recently_used_first_but_not_one_in_use() {
+    let root = tempfile::tempdir().unwrap();
+    let root = root.path();
+    let format = template::FORMAT;
+    let names: Vec<_> = (0..template::KEPT + 5)
+        .map(|i| format!("script-f{format}-{i:064x}"))
+        .collect();
+    for (i, name) in names.iter().enumerate() {
+        fake(
+            root,
+            name,
+            UNIX_EPOCH + Duration::from_secs(1_000_000 + i as u64),
+        );
+    }
+    // The least recently used, read by another process now.
+    let _reading = hold(root, &names[0], libc::LOCK_SH);
+    let fixture = tempfile::tempdir().unwrap();
+    template::with_root(root, || {
+        template::script(&fixture.path().join("stub"), "#!/bin/sh\necho newest\n");
+    });
+    let stub = Command::new(fixture.path().join("stub"))
+        .bounded_output()
+        .unwrap();
+    assert_eq!(String::from_utf8(stub.stdout).unwrap(), "newest\n");
+
+    let left = templates(root);
+    assert_eq!(left.len(), template::KEPT + 1, "{left:?}");
+    assert!(left.contains(&names[0]), "the one in use was deleted");
+    for name in &names[1..6] {
+        assert!(!left.contains(name), "{name} kept");
+        assert!(
+            !root.join(format!("{name}.lock")).exists(),
+            "{name}'s lock kept"
+        );
+    }
+    for name in &names[6..] {
+        assert!(left.contains(name), "{name} deleted");
+    }
+    assert_eq!(entries(root).len(), 2 * left.len());
 }

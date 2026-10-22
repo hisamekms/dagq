@@ -7,12 +7,17 @@ fn concurrent_processes_share_a_warmed_inode_but_keep_paths_and_values_private()
     const CHILD: &str = "DAGQ_TEST_TEMPLATE_CHILD";
     if let Some(dir) = std::env::var_os(CHILD) {
         let dir = Path::new(&dir);
-        // A new content key per parent run exercises the cold publication race.
-        let body = fs::read_to_string(dir.parent().unwrap().join("body")).unwrap();
-        template::script_env(&dir.join("stub"), body, &[("VALUE", dir.to_str().unwrap())]);
+        let root = dir.parent().unwrap();
+        let body = fs::read_to_string(root.join("body")).unwrap();
+        template::with_root(&root.join("templates"), || {
+            template::script_env(&dir.join("stub"), body, &[("VALUE", dir.to_str().unwrap())]);
+        });
         return;
     }
+    // The templates of the parent's own root: every run races to publish
+    // a template none has made, and leaves none behind with the shared ones.
     let root = tempfile::tempdir().unwrap();
+    let templates = root.path().join("templates");
     let body = format!(
         "#!/bin/sh\n# {}\nprintf '%s\\n' \"$0\" \"$VALUE\" \"$@\"\nprintf touched > \"$0.called\"\n",
         root.path().display()
@@ -60,7 +65,9 @@ fn concurrent_processes_share_a_warmed_inode_but_keep_paths_and_values_private()
             "touched"
         );
     }
-    template::script(&dirs[0].join("stub"), "#!/bin/sh\n");
+    template::with_root(&templates, || {
+        template::script(&dirs[0].join("stub"), "#!/bin/sh\n");
+    });
     assert!(
         Command::new(dirs[0].join("stub"))
             .bounded_status()

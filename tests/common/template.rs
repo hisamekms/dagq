@@ -35,14 +35,26 @@
 //!   ([`with_root`]), never the shared one other processes are reading.
 //! - A change of how a template is made, other than the migrations and the
 //!   seed, raises [`FORMAT`], so an old template is not taken by its name.
+//!
+//! Templates do not pile up (a run's worktree once held 1720, too many for
+//! the cleanup's measure): each one made prunes the others of an old
+//! [`FORMAT`] or schema, the incomplete ones and those left by a process
+//! that died making them, and beyond [`KEPT`] the least recently used. A
+//! stub whose content holds a fixture's temporary path names a template of
+//! its own on every run, so the bound is a count, not a list of keys. A
+//! process reads a template only under its lock, shared, until its copy is
+//! taken, and prunes one only under the same lock, exclusive and without
+//! waiting, so it never deletes a template in use or being made.
 
 use dagq::infrastructure::git_binary::git_executable;
 use std::{
     cell::RefCell,
+    collections::BTreeSet,
     fs,
-    os::unix::io::AsRawFd,
+    os::unix::{fs::MetadataExt, io::AsRawFd},
     path::{Path, PathBuf},
     process::Command,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use dagq::infrastructure::{schema::MIGRATIONS, sqlite::SqliteQueue};
@@ -53,7 +65,14 @@ use super::Bounded;
 
 /// Raised when what makes a template changes other than the migrations and
 /// the seed (the steps below, `init` itself), so no old template is used.
-const FORMAT: u32 = 2;
+pub const FORMAT: u32 = 2;
+
+/// The most complete templates of the current [`FORMAT`] kept under a root
+/// when one is made: a full run of the tests uses a few dozen.
+pub const KEPT: usize = 128;
+
+/// The kinds of template, the first part of their names.
+const KINDS: [&str; 3] = ["script", "repo", "queue"];
 
 /// The file `made` writes last in a template, after `make`: a template
 /// without it is incomplete, whatever else it holds.
@@ -81,17 +100,7 @@ pub fn with_root<T>(root: &Path, body: impl FnOnce() -> T) -> T {
 /// A migrated queue at `db`, copied from the template and opened as
 /// `SqliteQueue::init` opens an existing queue.
 pub fn queue(db: &Path) -> SqliteQueue {
-    let mut migrations = Sha256::new();
-    for migration in MIGRATIONS {
-        migrations.update(migration.as_bytes());
-        migrations.update([0]);
-    }
-    let name = format!(
-        "queue-f{FORMAT}-v{}-{}.db",
-        SqliteQueue::SCHEMA_VERSION,
-        short(&migrations.finalize())
-    );
-    let template = made(&name, |building| {
+    let template = made(&queue_name(), |building| {
         let db = building.join("queue.db");
         drop(SqliteQueue::init(&db).unwrap());
         let conn = Connection::open(&db).unwrap();
@@ -102,8 +111,24 @@ pub fn queue(db: &Path) -> SqliteQueue {
             assert!(!building.join(side).exists(), "{side} left after close");
         }
     });
-    fs::copy(template.join("queue.db"), db).unwrap();
+    fs::copy(template.dir.join("queue.db"), db).unwrap();
+    drop(template);
     SqliteQueue::init(db).unwrap()
+}
+
+/// The name of the queue template of these migrations: any other queue
+/// template is of another schema.
+fn queue_name() -> String {
+    let mut migrations = Sha256::new();
+    for migration in MIGRATIONS {
+        migrations.update(migration.as_bytes());
+        migrations.update([0]);
+    }
+    format!(
+        "queue-f{FORMAT}-v{}-{}.db",
+        SqliteQueue::SCHEMA_VERSION,
+        short(&migrations.finalize())
+    )
 }
 
 /// Fills the empty directory `repo` with a repository on `main` whose one
@@ -127,7 +152,8 @@ pub fn repository(repo: &Path, seed: &str) {
             panic!("the repository template: {message}");
         }
     });
-    copy_tree(&template.join("repo"), repo);
+    copy_tree(&template.dir.join("repo"), repo);
+    drop(template);
     if let Err(message) = git_repository(repo) {
         panic!("the copy of the repository template: {message}");
     }
@@ -195,7 +221,8 @@ pub fn script(path: &Path, script: impl AsRef<str>) {
     let link = tempfile::NamedTempFile::new_in(path.parent().unwrap()).unwrap();
     let link = link.into_temp_path();
     fs::remove_file(&link).unwrap();
-    fs::hard_link(template.join("stub"), &link).unwrap();
+    fs::hard_link(template.dir.join("stub"), &link).unwrap();
+    drop(template);
     fs::rename(&link, path).unwrap();
 }
 
@@ -220,25 +247,31 @@ fn short(digest: &[u8]) -> String {
     digest[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The directory of the template `name`, made by `make` in an empty
-/// directory by the one process that holds the template's lock, marked
-/// complete last, and renamed into place whole, so no process sees a
-/// template half made. A template without the mark (its files deleted by a
-/// cache's cleanup) is deleted and made again.
-fn made(name: &str, make: impl FnOnce(&Path)) -> PathBuf {
+/// A complete template, its lock held (shared, or exclusive by the process
+/// that made it) until the copy is taken from it and this is dropped.
+struct Template {
+    dir: PathBuf,
+    _lock: fs::File,
+}
+
+/// The template `name`, made by `make` in an empty directory by the one
+/// process that holds the template's lock, marked complete last, and
+/// renamed into place whole, so no process sees a template half made. A
+/// template without the mark (its files deleted by a cache's cleanup) is
+/// deleted and made again. Making one prunes the others ([`prune`]).
+fn made(name: &str, make: impl FnOnce(&Path)) -> Template {
     let root = ROOT
         .with(|cell| cell.borrow().clone())
         .unwrap_or_else(|| Path::new(env!("CARGO_TARGET_TMPDIR")).join("fixture-templates"));
     let template = root.join(name);
-    if template.join(COMPLETE).exists() {
-        return template;
-    }
     fs::create_dir_all(&root).unwrap();
-    let lock = fs::File::create(root.join(format!("{name}.lock"))).unwrap();
     let _waiting = super::within(super::STEP_LIMIT, "the lock of a fixture template");
-    // SAFETY: flock(2) takes the descriptor of a file this function holds
-    // open; closing it at return releases the lock.
-    assert_eq!(unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) }, 0);
+    let shared = lock(&root, name, libc::LOCK_SH).unwrap();
+    if template.join(COMPLETE).exists() {
+        return used(template, shared);
+    }
+    drop(shared);
+    let lock = lock(&root, name, libc::LOCK_EX).unwrap();
     if !template.join(COMPLETE).exists() {
         // No process reads a template without the mark: it is safe to drop.
         if template.exists() {
@@ -253,8 +286,113 @@ fn made(name: &str, make: impl FnOnce(&Path)) -> PathBuf {
         make(&building);
         fs::write(building.join(COMPLETE), "").unwrap();
         fs::rename(&building, &template).unwrap();
+        prune(&root, name);
     }
-    template
+    used(template, lock)
+}
+
+/// Marks the template used now (its lock's mtime, which [`prune`] orders
+/// by) and hands it out with its lock.
+fn used(dir: PathBuf, lock: fs::File) -> Template {
+    lock.set_modified(SystemTime::now()).unwrap();
+    Template { dir, _lock: lock }
+}
+
+/// The lock of the template `name` under `root`, taken by `flock(2)` with
+/// `operation`; `None` when it has `LOCK_NB` and another process holds the
+/// lock. [`prune`] deletes the lock file it holds, so a lock taken on a
+/// file no longer at the path is let go and taken again on the new one.
+fn lock(root: &Path, name: &str, operation: libc::c_int) -> Option<fs::File> {
+    let path = root.join(format!("{name}.lock"));
+    loop {
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .unwrap();
+        // SAFETY: flock(2) takes the descriptor of a file this function
+        // holds open; closing it releases the lock.
+        if unsafe { libc::flock(file.as_raw_fd(), operation) } != 0 {
+            let error = std::io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::EINTR) => continue,
+                Some(libc::EWOULDBLOCK) if operation & libc::LOCK_NB != 0 => return None,
+                _ => panic!("the lock {}: {error}", path.display()),
+            }
+        }
+        let held = file.metadata().unwrap();
+        if let Ok(at_path) = fs::metadata(&path)
+            && (at_path.dev(), at_path.ino()) == (held.dev(), held.ino())
+        {
+            return Some(file);
+        }
+    }
+}
+
+/// Deletes, besides `made`, every template under `root` that is of another
+/// [`FORMAT`] or (a queue) of other migrations, that is not complete, or
+/// that is beyond the [`KEPT`] most recently used, with what it left (its
+/// `.building` and its lock). One whose lock another process holds is in
+/// use or being made, and stays.
+fn prune(root: &Path, made: &str) {
+    let queue = queue_name();
+    let mut names = BTreeSet::new();
+    for entry in fs::read_dir(root).unwrap() {
+        let entry = entry.unwrap().file_name();
+        let Some(entry) = entry.to_str() else {
+            continue;
+        };
+        let name = entry
+            .strip_suffix(".lock")
+            .or_else(|| entry.strip_suffix(".building"))
+            .unwrap_or(entry);
+        if name != made
+            && KINDS
+                .iter()
+                .any(|kind| name.starts_with(&format!("{kind}-")))
+        {
+            names.insert(name.to_owned());
+        }
+    }
+    let mut current = Vec::new();
+    for name in names {
+        let of_this_format = KINDS
+            .iter()
+            .any(|kind| name.starts_with(&format!("{kind}-f{FORMAT}-")));
+        let stale = !of_this_format
+            || (name.starts_with("queue-") && name != queue)
+            || !root.join(&name).join(COMPLETE).exists();
+        if stale {
+            delete(root, &name);
+        } else {
+            let used = fs::metadata(root.join(format!("{name}.lock")))
+                .and_then(|lock| lock.modified())
+                .unwrap_or(UNIX_EPOCH);
+            current.push((used, name));
+        }
+    }
+    current.sort_by(|a, b| b.cmp(a));
+    for (_, name) in current.iter().skip(KEPT.saturating_sub(1)) {
+        delete(root, name);
+    }
+}
+
+/// Deletes the template `name` and what it left, unless another process
+/// holds its lock.
+fn delete(root: &Path, name: &str) {
+    let Some(lock) = lock(root, name, libc::LOCK_EX | libc::LOCK_NB) else {
+        return;
+    };
+    for dir in [root.join(name), root.join(format!("{name}.building"))] {
+        if dir.exists() {
+            fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+    // Last, while held: a process waiting on this file takes it again anew.
+    fs::remove_file(root.join(format!("{name}.lock"))).unwrap();
+    drop(lock);
 }
 
 fn copy_tree(from: &Path, to: &Path) {
