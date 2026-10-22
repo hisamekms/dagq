@@ -200,3 +200,100 @@ fn a_fifo_request_does_not_hold_the_wrapper() {
     assert!(payloads(&detail, "provider_switched").is_empty());
     assert!(!payloads(&detail, "recovery_requested").is_empty());
 }
+
+/// The bytes of a tree as `tree_size` counts them, walked with `std::fs`:
+/// each directory and file once by `(dev, ino)`, links themselves but not
+/// what they point to.
+fn counted_bytes(dir: &Path, seen: &mut std::collections::HashSet<(u64, u64)>) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = fs::symlink_metadata(dir).unwrap();
+    let mut bytes = 0;
+    if seen.insert((metadata.dev(), metadata.ino())) {
+        bytes += metadata.blocks() * 512;
+    }
+    for entry in fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        if metadata.is_dir() {
+            bytes += counted_bytes(&path, seen);
+        } else if seen.insert((metadata.dev(), metadata.ino())) {
+            bytes += metadata.blocks() * 512;
+        }
+    }
+    bytes
+}
+
+const TREE_SIZE_CHILD: &str = "DAGQ_TEST_TREE_SIZE_UNDER_LOW_FD_LIMIT";
+
+/// A directory with more child directories than the open files a process
+/// may hold is measured whole: `tree_size` holds open about the tree's
+/// depth, not its children. It is measured in a copy of this test binary
+/// whose soft limit is lowered, so the tests running beside it keep theirs.
+#[test]
+fn a_tree_wider_than_the_open_file_limit_is_measured_whole() {
+    use dagq::application::RunFiles;
+    use std::collections::HashSet;
+    if let Some(dir) = std::env::var_os(TREE_SIZE_CHILD) {
+        let bytes = LocalRunFiles.tree_size(Path::new(&dir)).unwrap().unwrap();
+        println!("\ntree_size={bytes}");
+        return;
+    }
+    const LIMIT: libc::rlim_t = 64;
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("runs/a/worktree");
+    let outside = dir.path().join("outside");
+    fs::create_dir_all(outside.join("deep")).unwrap();
+    fs::write(outside.join("deep/big"), vec![1u8; 64 * 1024]).unwrap();
+    for i in 0..4 * LIMIT {
+        let child = root.join(format!("fixture-{i}/src"));
+        fs::create_dir_all(&child).unwrap();
+        fs::write(child.join("lib.rs"), format!("// {i}")).unwrap();
+    }
+    let mut deep = root.join("fixture-0");
+    for level in 0..8 {
+        deep = deep.join(format!("level-{level}"));
+    }
+    fs::create_dir_all(&deep).unwrap();
+    fs::write(deep.join("file"), vec![2u8; 8192]).unwrap();
+    fs::hard_link(deep.join("file"), root.join("fixture-1/hardlink")).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("fixture-2/linked")).unwrap();
+    let expected = counted_bytes(&root, &mut HashSet::new());
+
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args([
+            "runtime_run_files::a_tree_wider_than_the_open_file_limit_is_measured_whole",
+            "--exact",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(TREE_SIZE_CHILD, &root);
+    // SAFETY: getrlimit and setrlimit are async-signal-safe and touch no
+    // memory of the parent.
+    unsafe {
+        command.pre_exec(|| {
+            let mut limit: libc::rlimit = std::mem::zeroed();
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            limit.rlim_cur = LIMIT.min(limit.rlim_max);
+            if libc::setrlimit(libc::RLIMIT_NOFILE, &limit) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let output = command.bounded_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let measured = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("tree_size="))
+        .unwrap_or_else(|| panic!("no measure in {stdout}"));
+    assert_eq!(measured.parse::<u64>().unwrap(), expected);
+    assert_eq!(LocalRunFiles.tree_size(&root).unwrap(), Some(expected));
+}

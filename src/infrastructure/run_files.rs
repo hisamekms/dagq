@@ -2,9 +2,11 @@
 
 use std::{
     collections::HashSet,
+    ffi::OsString,
     fs,
     io::{self, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    rc::Rc,
     time::SystemTime,
 };
 
@@ -345,14 +347,34 @@ impl RunFiles for LocalRunFiles {
             }
             Err(error) => return Err(error),
         };
+        let skipped = |error: &io::Error| {
+            error.kind() == io::ErrorKind::NotFound
+                || matches!(error.raw_os_error(), Some(libc::ELOOP | libc::ENOTDIR))
+        };
         let mut seen = HashSet::new();
-        let mut bytes = 0;
-        let mut pending = vec![root];
-        while let Some(dir) = pending.pop() {
-            let stat = dir.stat(None)?;
-            if seen.insert((stat.st_dev, stat.st_ino)) {
-                bytes += stat.st_blocks as u64 * 512;
-            }
+        let stat = root.stat(None)?;
+        seen.insert((stat.st_dev, stat.st_ino));
+        let mut bytes = stat.st_blocks as u64 * 512;
+        // A directory is held open only while a child of it waits, by the
+        // name it is opened with once taken: depth first, the open ones are
+        // the path down to the deepest, whatever the number of children.
+        let mut pending = vec![(Rc::new(root), None::<OsString>)];
+        while let Some((parent, name)) = pending.pop() {
+            let dir = match name {
+                None => parent,
+                Some(name) => match parent.child(&name) {
+                    Ok(child) => {
+                        drop(parent);
+                        let stat = child.stat(None)?;
+                        if seen.insert((stat.st_dev, stat.st_ino)) {
+                            bytes += stat.st_blocks as u64 * 512;
+                        }
+                        Rc::new(child)
+                    }
+                    Err(error) if skipped(&error) => continue,
+                    Err(error) => return Err(error),
+                },
+            };
             for name in dir.names()? {
                 let stat = match dir.stat(Some(&name)) {
                     Ok(stat) => stat,
@@ -360,16 +382,7 @@ impl RunFiles for LocalRunFiles {
                     Err(error) => return Err(error),
                 };
                 if stat.st_mode & libc::S_IFMT == libc::S_IFDIR {
-                    match dir.child(&name) {
-                        Ok(child) => pending.push(child),
-                        Err(error)
-                            if error.kind() == io::ErrorKind::NotFound
-                                || matches!(
-                                    error.raw_os_error(),
-                                    Some(libc::ELOOP | libc::ENOTDIR)
-                                ) => {}
-                        Err(error) => return Err(error),
-                    }
+                    pending.push((Rc::clone(&dir), Some(name)));
                 } else if seen.insert((stat.st_dev, stat.st_ino)) {
                     bytes += stat.st_blocks as u64 * 512;
                 }
@@ -502,6 +515,25 @@ fn backtick_run_and_last_byte(mut source: impl Read) -> io::Result<(usize, Optio
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// A root that is missing, a file or a link is not measured.
+    #[test]
+    fn a_missing_file_or_linked_root_is_not_measured() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("runs/a");
+        fs::create_dir_all(run.join("target")).unwrap();
+        fs::write(run.join("file"), "x").unwrap();
+        std::os::unix::fs::symlink(run.join("target"), run.join("linked")).unwrap();
+        for path in ["none", "file", "linked"] {
+            assert_eq!(LocalRunFiles.tree_size(&run.join(path)).unwrap(), None);
+        }
+        assert!(
+            LocalRunFiles
+                .tree_size(&run.join("target"))
+                .unwrap()
+                .is_some()
+        );
+    }
 
     #[test]
     fn the_scratchpad_roots_are_existing_claude_directories_without_repeats() {
