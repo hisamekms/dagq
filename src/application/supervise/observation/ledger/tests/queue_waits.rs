@@ -9,7 +9,7 @@ use super::*;
 
 /// The queue rows [`crate::domain::ledger::build`] folds of `log` at
 /// `secs` after [`T0`], by key.
-fn whole_queue(log: &Log, secs: i64) -> BTreeMap<String, LedgerRow> {
+pub(super) fn whole_queue(log: &Log, secs: i64) -> BTreeMap<String, LedgerRow> {
     crate::domain::ledger::build(&log.events, ms(secs), BUILT)
         .into_iter()
         .filter(|row| row.kind == LedgerKind::Queue)
@@ -18,7 +18,7 @@ fn whole_queue(log: &Log, secs: i64) -> BTreeMap<String, LedgerRow> {
 }
 
 /// The queue rows the store holds, by key.
-fn stored_queue(memory: &Memory) -> BTreeMap<String, LedgerRow> {
+pub(super) fn stored_queue(memory: &Memory) -> BTreeMap<String, LedgerRow> {
     memory
         .rows
         .borrow()

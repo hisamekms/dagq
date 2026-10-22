@@ -298,6 +298,13 @@ pub struct QueueBook {
     /// reached: its open stream and slots full, and its holds its stop
     /// ended.
     lives_of: HashMap<String, BTreeSet<EventId>>,
+    /// The supervisors with an open stream an event named since the last
+    /// [`Self::close_lives`], and the ends it keeps of the rest: the time
+    /// from which each one's life ends ([`Lives::ends_from`]), earliest
+    /// first.
+    stream_named: BTreeSet<String>,
+    stream_ends: BTreeSet<(i64, String)>,
+    stream_end_of: HashMap<String, i64>,
     attempts: Attempts,
     slots: Vec<Slot>,
     throughs: Throughs,
@@ -321,10 +328,13 @@ impl QueueBook {
     ) {
         self.last = self.last.max(event.id);
         self.attempt(event, touched);
-        if let Some(supervisor) = supervisor_of(event)
-            && let Some(rows) = self.lives_of.get(supervisor)
-        {
-            touched.extend(rows.iter().map(|row| (LedgerKind::Queue, row.to_string())));
+        if let Some(supervisor) = supervisor_of(event) {
+            if let Some(rows) = self.lives_of.get(supervisor) {
+                touched.extend(rows.iter().map(|row| (LedgerKind::Queue, row.to_string())));
+            }
+            if self.streams.contains_key(supervisor) && !self.stream_named.contains(supervisor) {
+                self.stream_named.insert(supervisor.to_owned());
+            }
         }
         // An end is an input of its interval whoever's event it is.
         for start in moved.ended.into_iter().flatten() {
@@ -478,6 +488,7 @@ impl QueueBook {
                     .entry(supervisor.clone())
                     .or_default()
                     .insert(event.id);
+                self.stream_named.insert(supervisor.clone());
                 self.streams.insert(supervisor, event.id);
                 event.id
             }
@@ -555,6 +566,43 @@ impl QueueBook {
         true
     }
 
+    /// The starts of the open streams whose supervisor's life ended by
+    /// `now_ms` (`lives`, of the same events) with no event of it since the
+    /// last close that found it ended, ascending: a silence ends a stream
+    /// with no event, so its row is folded again though nothing touched
+    /// it. It reads the ends of the supervisors named since the last close
+    /// and keeps those not come yet; an event naming the supervisor later
+    /// (one that opens the stream again) has it read again.
+    pub fn close_lives(&mut self, lives: &Lives, now_ms: i64) -> Vec<EventId> {
+        for supervisor in std::mem::take(&mut self.stream_named) {
+            if let Some(at) = self.stream_end_of.remove(&supervisor) {
+                self.stream_ends.remove(&(at, supervisor.clone()));
+            }
+            if let Some(at) = lives.ends_from(&supervisor) {
+                self.stream_end_of.insert(supervisor.clone(), at);
+                self.stream_ends.insert((at, supervisor));
+            }
+        }
+        let mut closed = Vec::new();
+        while self
+            .stream_ends
+            .first()
+            .is_some_and(|(at, _)| *at <= now_ms)
+        {
+            let Some((_, supervisor)) = self.stream_ends.pop_first() else {
+                break;
+            };
+            self.stream_end_of.remove(&supervisor);
+            if lives.end(&supervisor, now_ms).is_some()
+                && let Some(&start) = self.streams.get(&supervisor)
+            {
+                closed.push(start);
+            }
+        }
+        closed.sort_unstable();
+        closed
+    }
+
     /// How many rows it assigns: the queue's events' and the landing
     /// slot's.
     pub fn row_count(&self) -> usize {
@@ -588,6 +636,8 @@ impl QueueBook {
             .map(|slot| 2 * size_of::<Slot>() + slot.run.len())
             .sum();
         let finders = self.streams.len()
+            + self.stream_named.len()
+            + 2 * self.stream_ends.len()
             + self.alerts.len()
             + self.findings.len()
             + self.lives_of.values().map(BTreeSet::len).sum::<usize>()
@@ -613,9 +663,13 @@ impl QueueBook {
         }
         let assigned = self.rows.get(&id)?;
         // A slots full reads up to the last event naming its supervisor
-        // ([`PreClaimInterval::reach`]): one that opens it again after its
-        // supervisor's silence ended it is an input past that end.
-        let mut reach = None;
+        // ([`PreClaimInterval::reach`]), and so does the open stream of a
+        // supervisor: one that opens it again after its supervisor's
+        // silence ended it is an input past that end.
+        let mut reach = (assigned.of == Of::Stream
+            && self.streams.get(&assigned.about) == Some(&id))
+        .then(|| at.lives.last_of(&assigned.about))
+        .flatten();
         let mut row = match assigned.of {
             Of::Interval(Started::PreClaim(kind)) => {
                 let (interval, _) = at.pre_claim.interval(id, at.lives, at.now_ms)?;

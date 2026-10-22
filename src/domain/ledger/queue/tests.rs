@@ -412,7 +412,8 @@ fn gone_interval(
 /// The streams and slots-full intervals a supervisor's life ended are the
 /// rows each supervisor's own scan of every event gave, written out whole:
 /// ended at its stop (its heartbeat) or its last event, read up to the
-/// last event naming it; a supervisor that lives keeps its stream open.
+/// last event naming it; a supervisor that lives keeps its stream open,
+/// read up to the last event naming it too.
 #[test]
 fn the_rows_a_supervisors_end_ends_are_the_rows_a_scan_per_supervisor_gives() {
     let log = gone_log();
@@ -426,26 +427,33 @@ fn the_rows_a_supervisors_end_ends_are_the_rows_a_scan_per_supervisor_gives() {
         row.inputs_through.supervisor = Some(EventId::new(through));
         row
     };
+    // An open slots full or stream reads up to the last event naming its
+    // supervisor, its life after its stop too.
+    let reach = |mut row: LedgerRow, through: i64| {
+        row.inputs_through.events = EventId::new(through);
+        row
+    };
     let s3_interval = gone_interval(&log, 3, "s3", SlotClass::Heavy, 7, Some("s3"));
     let s4_interval = gone_interval(&log, 7, "s4", SlotClass::Light, 11, None);
     let expected = vec![
         plain(1, "supervisor_started", "s3"),
-        life(
-            expected_row(
-                &log,
-                2,
-                &[2, 4],
-                ("live_alert_stream", "s3"),
-                Some(ms(7)),
-                gone,
-                json!({"baseline": true, "version": 2}),
+        reach(
+            life(
+                expected_row(
+                    &log,
+                    2,
+                    &[2, 4],
+                    ("live_alert_stream", "s3"),
+                    Some(ms(7)),
+                    gone,
+                    json!({"baseline": true, "version": 2}),
+                ),
+                9,
             ),
             9,
         ),
-        {
-            // A slots full reads up to the last event naming its
-            // supervisor, its life after its stop too.
-            let mut row = life(
+        reach(
+            life(
                 expected_row(
                     &log,
                     3,
@@ -456,20 +464,22 @@ fn the_rows_a_supervisors_end_ends_are_the_rows_a_scan_per_supervisor_gives() {
                     json!({"interval": s3_interval}),
                 ),
                 9,
-            );
-            row.inputs_through.events = EventId::new(9);
-            row
-        },
+            ),
+            9,
+        ),
         plain(5, "supervisor_alive", "s4"),
-        life(
-            expected_row(
-                &log,
-                6,
-                &[6],
-                ("live_alert_stream", "s4"),
-                Some(ms(11)),
-                gone,
-                json!({"baseline": true}),
+        reach(
+            life(
+                expected_row(
+                    &log,
+                    6,
+                    &[6],
+                    ("live_alert_stream", "s4"),
+                    Some(ms(11)),
+                    gone,
+                    json!({"baseline": true}),
+                ),
+                7,
             ),
             7,
         ),
@@ -487,14 +497,17 @@ fn the_rows_a_supervisors_end_ends_are_the_rows_a_scan_per_supervisor_gives() {
         ),
         plain(8, "supervisor_stopped", "s3"),
         plain(9, "supervisor_alive", "s3"),
-        expected_row(
-            &log,
-            10,
-            &[10],
-            ("live_alert_stream", "s5"),
-            None,
-            None,
-            json!({"baseline": true}),
+        reach(
+            expected_row(
+                &log,
+                10,
+                &[10],
+                ("live_alert_stream", "s5"),
+                None,
+                None,
+                json!({"baseline": true}),
+            ),
+            11,
         ),
         plain(11, "supervisor_alive", "s5"),
     ];

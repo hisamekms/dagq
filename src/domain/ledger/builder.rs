@@ -863,7 +863,9 @@ impl Builder {
     /// and drop the records of the rows the store holds settled that no
     /// event read since reached ([`Kept`]). When it closed any, mark their
     /// queue rows, whose end it is, and the tasks with time ready
-    /// ([`Self::mark_ready`]), whose overlays read that end.
+    /// ([`Self::mark_ready`]), whose overlays read that end. Mark too the
+    /// open streams whose supervisor's life ended by then
+    /// ([`QueueBook::close_lives`]), slots full or not.
     pub fn due(&mut self, now_ms: i64) {
         let kept = Arc::make_mut(&mut self.kept);
         // A silence ends a wait with no event: its row and the tasks ready
@@ -878,6 +880,13 @@ impl Builder {
             self.mark_ready(true);
         }
         let kept = Arc::make_mut(&mut self.kept);
+        // So does a stream, whether or not its supervisor had a slots full.
+        let streams = kept.queue_rows.close_lives(&kept.lives, now_ms);
+        self.marks.extend(
+            streams
+                .iter()
+                .map(|start| Target::Row(LedgerKind::Queue, start.to_string())),
+        );
         // One an event reached since stays noted until its fold is tracked.
         let (reached, settled): (BTreeSet<_>, BTreeSet<_>) = std::mem::take(&mut self.settled)
             .into_iter()
