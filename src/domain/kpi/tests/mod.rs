@@ -23,6 +23,7 @@ mod periods_and_targets;
 mod plan_kpis;
 mod queue_kpis;
 mod review_kpis;
+mod slot_check;
 mod strata;
 mod tokens;
 mod trial_strata;

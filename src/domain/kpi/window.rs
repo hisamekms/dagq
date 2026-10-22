@@ -54,6 +54,11 @@ const NO_SAMPLES: &str = "no_samples";
 const NO_HOST_RECORDS: &str = "no_host_records";
 const NO_CORES: &str = "no_cores";
 const NO_LANDINGS: &str = "no_landings";
+/// No supervisor was alive in the window, so no slot was held.
+const NO_SUPERVISOR: &str = "no_supervisor";
+/// No landed run of the window recorded all of `work`, `validate` and
+/// `wait_to_land`.
+const NO_PHASES: &str = "no_phases";
 /// The records began in the window: what ended before them is not in it.
 const PARTLY_RECORDED: &str = "partly_recorded";
 
@@ -98,6 +103,38 @@ struct Occupancy {
     spans: Vec<(i64, i64)>,
 }
 
+/// The weekly review's check of the slots' arithmetic (Little's law: the
+/// runs held at once ≈ the landings per hour × the slot time of a
+/// landing), `details.slot_check`. `occupied` is the slots' hold in the
+/// window over its seconds (up to now), the mean number of runs held at
+/// once, from the same [`Occupancy`] spans as `slot_usage`'s numerator
+/// (so it passes `parallel` as `slot_usage` passes 1); `expected` is
+/// `landings_per_hour` × `slot_secs_per_landing` ÷ 3600, from the landed
+/// runs' phases instead, and `ratio` is `occupied` ÷ `expected`. The two
+/// sides come from different records, so a `ratio` far from 1 is a sign
+/// of a record or a reading gone wrong: a run whose end was never
+/// recorded holds its slot up to now on the left only, and a run that
+/// failed and was recovered to land holds none after its first failure on
+/// the left but counts claim to landing on the right. Runs that cross
+/// the window's ends count on the left only for their part in it and on
+/// the right whole, in the window they landed in, so a day's `ratio` can
+/// stray where a week's holds. The reason a `ratio` is null is in
+/// `reason`: `no_supervisor`, `no_landings` or `no_phases`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+struct SlotCheck {
+    occupied: Option<f64>,
+    landings_per_hour: Option<f64>,
+    /// The mean over the landed runs of `work` + `validate` +
+    /// `wait_to_land` (not `startup`, which lies inside `work`), less the
+    /// time each left its slot to wait for a person (`run_waiting_started`
+    /// to `run_slot_regained`); over the runs that recorded all three.
+    slot_secs_per_landing: Option<f64>,
+    expected: Option<f64>,
+    ratio: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+}
+
 /// One supervisor process's recorded lifetime, in unix milliseconds.
 struct SupervisorLife {
     token: Option<String>,
@@ -136,6 +173,10 @@ pub(super) struct Context<'a> {
     /// The supervisors' lives: start, end and `parallel`.
     supervisors: Vec<SupervisorLife>,
     occupancy: Vec<Occupancy>,
+    /// Each run's waits for a person out of its slot (`run_waiting_started`
+    /// to `run_slot_regained`, open while it still waits), for
+    /// [`SlotCheck`]'s `slot_secs_per_landing`.
+    person_waits: HashMap<RunId, Vec<(i64, Option<i64>)>>,
     pub marks: Vec<Mark>,
     pub min_samples: usize,
     /// The forecast snapshots scored against the finishes (ADR-0070
@@ -279,6 +320,7 @@ impl<'a> Context<'a> {
         let mut claims: Vec<(RunId, TaskId, i64)> = Vec::new();
         let mut ends: HashMap<RunId, i64> = HashMap::new();
         let mut waits: HashMap<RunId, Vec<(i64, Option<i64>)>> = HashMap::new();
+        let mut person_waits: HashMap<RunId, Vec<(i64, Option<i64>)>> = HashMap::new();
         for event in events {
             let at = event_ms(event);
             if event.kind == EventKind::TaskStatusChanged
@@ -313,9 +355,16 @@ impl<'a> Context<'a> {
                 Some(EventKind::RunWaitingStarted) => {
                     if let Some(at) = at {
                         waits.entry(run_id.clone()).or_default().push((at, None));
+                        let person = person_waits.entry(run_id.clone()).or_default();
+                        if person.last().is_none_or(|wait| wait.1.is_some()) {
+                            person.push((at, None));
+                        }
                     }
                 }
-                Some(EventKind::RunSlotRegained) => end_wait(&mut waits, run_id, at),
+                Some(EventKind::RunSlotRegained) => {
+                    end_wait(&mut waits, run_id, at);
+                    end_wait(&mut person_waits, run_id, at);
+                }
                 _ => {}
             }
             // A claim of `already_satisfied` rests out of the slots, as a
@@ -383,6 +432,7 @@ impl<'a> Context<'a> {
             finishes: Vec::new(),
             supervisors,
             occupancy,
+            person_waits,
             marks: marks::marks(events, None, None),
             min_samples: input.config.min_samples,
             forecast: Scoring::default(),
@@ -766,6 +816,10 @@ impl<'a> Context<'a> {
         put("slot_usage", ALL, Measure::total(slot_usage, runs_holding));
         let mut unavailable = BTreeMap::new();
         let mut details: BTreeMap<&'static str, Value> = BTreeMap::new();
+        details.insert(
+            "slot_check",
+            json(&self.slot_check(start, end, groups.get(ALL).map_or(&[], Vec::as_slice))),
+        );
 
         // The single integration slot (goal 72): the share of the window
         // the `integrate` attempts held it, landed or not, its busiest
@@ -1618,6 +1672,14 @@ impl<'a> Context<'a> {
     /// share can pass 1. With supervisors side by side, each start ends the
     /// life before it, so the capacity reads too small.
     fn slot_usage(&self, start: i64, end: i64) -> (Option<f64>, usize) {
+        let (capacity, held, runs) = self.slots_held(start, end);
+        ((capacity > 0).then(|| float(held) / float(capacity)), runs)
+    }
+
+    /// The live supervisors' slot time in the window, the runs' hold on
+    /// them while a supervisor was alive and how many runs held one, in
+    /// unix ms: `slot_usage`'s denominator and numerator.
+    fn slots_held(&self, start: i64, end: i64) -> (i64, i64, usize) {
         let capacity: i64 = self
             .supervisors
             .iter()
@@ -1659,7 +1721,71 @@ impl<'a> Context<'a> {
                 runs += 1;
             }
         }
-        ((capacity > 0).then(|| float(held) / float(capacity)), runs)
+        (capacity, held, runs)
+    }
+
+    /// [`SlotCheck`] of the window from its finished `runs`.
+    fn slot_check(&self, start: i64, end: i64, runs: &[&RunStats]) -> SlotCheck {
+        let (capacity, held, _) = self.slots_held(start, end);
+        let window_ms = end.min(self.now * 1000) - start;
+        let occupied = (capacity > 0 && window_ms > 0).then(|| float(held) / float(window_ms));
+        let landed: Vec<&RunStats> = runs
+            .iter()
+            .copied()
+            .filter(|run| run.status.as_deref() == Some("integrated"))
+            .collect();
+        let landings_per_hour =
+            (window_ms > 0).then(|| landed.len() as f64 * 3_600_000.0 / float(window_ms));
+        let slot_secs: Vec<i64> = landed
+            .iter()
+            .filter_map(|run| {
+                let phases = run.work? + run.validate? + run.wait_to_land?;
+                Some(phases - self.person_wait_secs(run))
+            })
+            .collect();
+        let slot_secs_per_landing = (!slot_secs.is_empty())
+            .then(|| float(slot_secs.iter().sum::<i64>()) / slot_secs.len() as f64);
+        let expected = landings_per_hour
+            .zip(slot_secs_per_landing)
+            .map(|(rate, secs)| rate * secs / 3600.0);
+        let reason = if occupied.is_none() {
+            Some(NO_SUPERVISOR)
+        } else if landed.is_empty() {
+            Some(NO_LANDINGS)
+        } else if expected.is_none_or(|expected| expected <= 0.0) {
+            Some(NO_PHASES)
+        } else {
+            None
+        };
+        let ratio = reason
+            .is_none()
+            .then(|| occupied.zip(expected).map(|(o, e)| o / e))
+            .flatten();
+        let round = |value: Option<f64>| value.map(round3);
+        SlotCheck {
+            occupied: round(occupied),
+            landings_per_hour: round(landings_per_hour),
+            slot_secs_per_landing: round(slot_secs_per_landing),
+            expected: round(expected),
+            ratio: round(ratio),
+            reason,
+        }
+    }
+
+    /// The seconds `run` left its slot to wait for a person between its
+    /// claim and its landing; a wait still open at the landing ends there.
+    fn person_wait_secs(&self, run: &RunStats) -> i64 {
+        let at = |time: &Option<String>| timestamp_millis(time.as_deref()?);
+        let (Some(claimed), Some(landed)) = (at(&run.claimed_at), at(&run.landed_at)) else {
+            return 0;
+        };
+        self.person_waits
+            .get(&run.run_id)
+            .into_iter()
+            .flatten()
+            .map(|&(left, back)| overlap((left, back.unwrap_or(landed)), claimed, landed))
+            .sum::<i64>()
+            / 1000
     }
 
     /// The time-weighted mean and the maximum of `candidates` in the
