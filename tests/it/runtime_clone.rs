@@ -1275,6 +1275,79 @@ fn a_container_turn_marks_its_last_state_before_its_agent_runs_and_writes_it_ane
     assert!(state.is_dir());
 }
 
+/// The executor's turn writes the clone's uncommitted work (the staged
+/// and unstaged diffs, the untracked files with their execute bits) of
+/// the generation of the state it writes after it, one past the last; and
+/// a restore handed for a clone that changed since its snapshot (here an
+/// untracked file the snapshot does not hold) is answered as failed, runs
+/// no agent and leaves the clone as it was, also on the next turn.
+#[test]
+fn a_container_turn_writes_its_work_and_refuses_to_restore_over_a_clone_that_changed() {
+    use dagq::domain::clone_work::{
+        self, CloneWork, RESTORE_RESULT_FILE, RUN_RESTORE_FILE, RUN_WORK_FILE, RestoreRequest,
+    };
+    let (_fixture, repo, db) = fixture();
+    let run = claim_in_container(&db, &repo, TaskId::new(1));
+    assert_eq!(relay_turn(&run, "true"), Some(0));
+    assert_eq!(run_state(&run).generation, Some(1));
+    let work = "echo staged > staged.txt && git add staged.txt && echo more >> seed.txt && printf '#!/bin/sh\\n' > run.sh && chmod +x run.sh";
+    assert_eq!(relay_turn(&run, work), Some(0));
+    let state = run_state(&run);
+    assert_eq!(state.generation, Some(2));
+    let (written, contents): (CloneWork, _) =
+        clone_work::unpack(&fs::read(run.run_dir.join(RUN_WORK_FILE)).unwrap()).unwrap();
+    assert_eq!(written.generation, 2);
+    assert_eq!(written.head, state.head);
+    let index = String::from_utf8_lossy(&contents[0]).into_owned();
+    let unstaged = String::from_utf8_lossy(&contents[1]).into_owned();
+    assert!(index.contains("staged.txt"), "{index}");
+    assert!(unstaged.contains("+more"), "{unstaged}");
+    let script = written
+        .parts
+        .iter()
+        .find(|part| part.path.as_deref() == Some("run.sh"));
+    assert!(script.is_some_and(|part| part.executable), "{written:?}");
+
+    // A restore of the work as the turn left it, before the worker added
+    // a file of its own: refused, the clone untouched, no agent.
+    let request = RestoreRequest {
+        snapshot_id: "replan-1-g2".into(),
+        attempt: 1,
+        base: run.base.clone(),
+        branch: run.branch(),
+        head: written.head.clone(),
+        remade: false,
+        parts: written.parts.clone(),
+    };
+    fs::write(
+        run.run_dir.join(RUN_RESTORE_FILE),
+        clone_work::pack(&request, &contents),
+    )
+    .unwrap();
+    fs::write(run.clone.join("stray.txt"), "stray\n").unwrap();
+    let ran = run.run_dir.join("agent-ran");
+    let agent = format!(": > {}", shell_path(&ran));
+    for _ in 0..2 {
+        assert_ne!(relay_turn(&run, &agent), Some(0));
+        assert!(!ran.exists());
+        let answered: Value =
+            serde_json::from_slice(&fs::read(run.run_dir.join(RESTORE_RESULT_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(answered["snapshot_id"], "replan-1-g2");
+        assert!(
+            answered["failed"]
+                .as_str()
+                .is_some_and(|why| why.contains("changed since the park")),
+            "{answered}"
+        );
+        assert_eq!(
+            fs::read_to_string(run.clone.join("stray.txt")).unwrap(),
+            "stray\n"
+        );
+        assert!(in_clone(&run.clone, &["diff", "--cached", "--name-only"]).contains("staged.txt"));
+    }
+}
+
 /// A held container run whose last turn was cut off with its container is
 /// not released to a new run from the facts an earlier turn's end left: the
 /// executor marks them at the cut-off turn's start, before its agent ran,

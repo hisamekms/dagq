@@ -455,6 +455,39 @@ impl SqliteQueue {
         recorded
     }
 
+    /// Record the answer a container's executor gave to the restore of
+    /// operation `op` (read under `generation`) handed for run `id`, which
+    /// `token` holds in a slot for the resume the restore came before
+    /// ([`Self::finish_restore`]'s records, the lease kept): only once, while
+    /// `token` holds the run and `op` is still at `generation` and closed;
+    /// whether it was recorded.
+    pub fn record_clone_restore(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        op: crate::domain::ReplanId,
+        generation: i64,
+        restored: std::result::Result<serde_json::Value, String>,
+    ) -> Result<bool> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = self.generators.clock.now();
+        if renew_lease(&tx, id, token, now).is_err() || restored_by(&tx, id, op)? {
+            return Ok(false);
+        }
+        let operation = crate::infrastructure::replans::read_operation(&tx, op)?;
+        if operation.run_id != *id
+            || operation.generation != generation
+            || !operation.status.reopens()
+        {
+            return Ok(false);
+        }
+        record_restore_in(&tx, id, op, generation, &operation, restored, now)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     fn record_restore(
         &mut self,
         id: &RunId,
@@ -474,29 +507,7 @@ impl SqliteQueue {
         if operation.generation != generation || !operation.status.reopens() {
             return Ok(false);
         }
-        match restored {
-            Ok(payload) => run_event(&tx, id, EventKind::ReplanRestored, payload)?,
-            Err(why) => {
-                run_event(
-                    &tx,
-                    id,
-                    EventKind::ReplanRestoreFailed,
-                    json!({"operation_id": op, "snapshot_id": operation.snapshot_id, "reason": why}),
-                )?;
-                crate::infrastructure::replans::move_in(
-                    &tx,
-                    op,
-                    generation,
-                    &crate::domain::task_replan::ReplanMove {
-                        to: crate::domain::task_replan::ReplanStatus::Blocked,
-                        reason: why,
-                        snapshot_id: None,
-                        diagnosis: None,
-                    },
-                    now,
-                )?;
-            }
-        }
+        record_restore_in(&tx, id, op, generation, &operation, restored, now)?;
         tx.execute(
             "DELETE FROM run_leases WHERE run_id=?1 AND token=?2",
             params![id, token],
@@ -510,7 +521,47 @@ impl SqliteQueue {
         tx.commit()?;
         Ok(true)
     }
+}
 
+/// Record in `tx` the result of the restore of operation `op` for run
+/// `id`: `replan_restored` with its payload, or `replan_restore_failed`
+/// with why and the operation back to `blocked`.
+fn record_restore_in(
+    tx: &rusqlite::Transaction<'_>,
+    id: &RunId,
+    op: crate::domain::ReplanId,
+    generation: i64,
+    operation: &crate::domain::task_replan::ReplanOperation,
+    restored: std::result::Result<serde_json::Value, String>,
+    now: i64,
+) -> Result<()> {
+    match restored {
+        Ok(payload) => run_event(tx, id, EventKind::ReplanRestored, payload)?,
+        Err(why) => {
+            run_event(
+                tx,
+                id,
+                EventKind::ReplanRestoreFailed,
+                json!({"operation_id": op, "snapshot_id": operation.snapshot_id, "reason": why}),
+            )?;
+            crate::infrastructure::replans::move_in(
+                tx,
+                op,
+                generation,
+                &crate::domain::task_replan::ReplanMove {
+                    to: crate::domain::task_replan::ReplanStatus::Blocked,
+                    reason: why,
+                    snapshot_id: None,
+                    diagnosis: None,
+                },
+                now,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+impl SqliteQueue {
     fn lease_awaiting(
         &mut self,
         id: &RunId,

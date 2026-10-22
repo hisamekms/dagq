@@ -40,8 +40,9 @@ pub const RUN_BUNDLE_FILE: &str = "run-branch.bundle";
 
 /// The run's state in the run directory ([`RunState`]), written by the
 /// container's executor with the bundle, at the end of each turn, after the
-/// bundle and by a rename like it; marked by a rename at the start of each
-/// turn, before its agent runs ([`RunState::turn_ended`]).
+/// bundle and the work ([`super::clone_work::RUN_WORK_FILE`]) and by a
+/// rename like them; marked by a rename at the start of each turn, before
+/// its agent runs ([`RunState::turn_ended`]).
 pub const RUN_STATE_FILE: &str = "run-state.json";
 
 /// Main's bundle in the run directory: a `git bundle` whose one ref is the
@@ -120,7 +121,7 @@ fn queue_dir(runs_dir: &Path) -> &Path {
 /// ```json
 /// {"branch": "refs/heads/dagq/<run id>", "head": "<full commit id>",
 ///  "status": "<git status --porcelain --untracked-files=all>",
-///  "rebase_in_progress": false, "turn_ended": true}
+///  "rebase_in_progress": false, "turn_ended": true, "generation": 3}
 /// ```
 ///
 /// `branch` is the ref `HEAD` points at (`null` when detached), `head` the
@@ -145,6 +146,13 @@ pub struct RunState {
     /// cannot tell.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_ended: Option<bool>,
+    /// Which turn's end wrote it, counted up from 1 by each end
+    /// ([`next_generation`]) and kept by the mark of a turn's start: the
+    /// work written before it ([`super::clone_work::CloneWork::generation`])
+    /// is of that end only when it names the same; absent from an executor
+    /// that writes no work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
 }
 
 impl RunState {
@@ -172,6 +180,13 @@ impl RunState {
     pub fn of_the_last_turn(&self) -> bool {
         self.turn_ended == Some(true)
     }
+}
+
+/// The generation of the state a turn's end writes, after the state
+/// `last` found at its start (`None` when none could be read): one past
+/// its generation, 1 for the first.
+pub fn next_generation(last: Option<&RunState>) -> u64 {
+    last.and_then(|state| state.generation).unwrap_or(0) + 1
 }
 
 /// What a container's executor finds where the run's state goes when a
@@ -437,6 +452,23 @@ mod tests {
         assert_eq!(
             RunState::parse(&serde_json::to_string(&ended).unwrap()).unwrap(),
             ended
+        );
+    }
+
+    /// Each turn's end counts the generation up from the state it found,
+    /// one with none (or none found) being of no generation yet.
+    #[test]
+    fn each_turns_end_writes_the_next_generation() {
+        let read = |mark: &str| RunState::parse(&format!(r#"{{"head":"{HEAD}"{mark}}}"#)).unwrap();
+        assert_eq!(next_generation(None), 1);
+        assert_eq!(next_generation(Some(&read(""))), 1);
+        let third = read(r#","turn_ended":false,"generation":3"#);
+        assert_eq!(third.generation, Some(3));
+        assert_eq!(next_generation(Some(&third)), 4);
+        // The mark of a turn's start keeps it.
+        assert_eq!(
+            turn_start(StateFound::State(third.clone())),
+            TurnStart::Mark(third)
         );
     }
 

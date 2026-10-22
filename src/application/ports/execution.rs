@@ -1165,6 +1165,18 @@ pub trait RunTransitions {
         generation: i64,
         restored: std::result::Result<serde_json::Value, String>,
     ) -> Result<bool>;
+    /// Record the answer of a container's executor to the restore of `op`
+    /// handed before run `id`'s resume, while `token` holds the run in its
+    /// slot: as [`Self::finish_restore`] records it, the lease kept, and
+    /// only once; whether it was recorded.
+    fn record_clone_restore(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        op: crate::domain::ReplanId,
+        generation: i64,
+        restored: std::result::Result<serde_json::Value, String>,
+    ) -> Result<bool>;
     fn workspace_closed(&mut self, id: &RunId, token: &LeaseToken) -> Result<TaskRun>;
     fn cleanup_failed(
         &mut self,
@@ -2131,10 +2143,34 @@ pub trait Repository: RepositoryReads {
         let _ = (run, main);
         anyhow::bail!("this repository cannot hand main to a run's clone")
     }
+    /// The file `name` of the directory of a run in a container, read as
+    /// its bundle and state are, without following a symlink and within
+    /// their limit (ADR-t2179-1 decision 9): `Ok(Ok(None))` when nothing is
+    /// there, `Ok(Err(why))` when it is no regular file or too large.
+    fn read_run_dir_file(
+        &self,
+        run: &TaskRun,
+        name: &str,
+    ) -> Result<std::result::Result<Option<Vec<u8>>, String>> {
+        let _ = (run, name);
+        anyhow::bail!("this repository cannot read a run's directory")
+    }
+    /// Write `bytes` as the file `name` of the directory of a run in a
+    /// container, replacing whatever is at that path without following it.
+    fn write_run_dir_file(&self, run: &TaskRun, name: &str, bytes: &[u8]) -> Result<()> {
+        let _ = (run, name, bytes);
+        anyhow::bail!("this repository cannot write a run's directory")
+    }
+    /// A bundle of the ref `reference` on top of the commit `base`, from
+    /// this repository with its git guarded ([`Repository::guarded`]).
+    fn bundle_of(&self, reference: &str, base: &str) -> Result<Vec<u8>> {
+        let _ = (reference, base);
+        anyhow::bail!("this repository makes no bundle")
+    }
     /// Remove what a run in a container left (ADR-t2179-1 decision 7): its
     /// clone `clone`, without git and without following a symlink, its
     /// landing worktree, the control side's run branch `branch` and the
-    /// bundles and state file in its directory. What is already gone is
+    /// bundles, state, work and restore files in its directory. What is already gone is
     /// not an error. The files go whether or not the guard holds
     /// ([`Repository::guarded`]); the run branch and the landing
     /// worktree's registration go only with the guarded git, and `Err`

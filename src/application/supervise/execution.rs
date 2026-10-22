@@ -403,6 +403,10 @@ pub enum PausePoint {
     /// A landing recheck that found a run no longer landing, before the
     /// supervisor records the finding and parks the run.
     RecheckFailure,
+    /// The restore of a container run's work handed to its executor (the
+    /// request written, the clone made again), before the restore's lease
+    /// is given back for the resume.
+    RestoreHanded,
 }
 
 /// What a supervisor calls at each [`PausePoint`] with the run's ID.

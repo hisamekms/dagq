@@ -185,6 +185,7 @@ adapterもcloneのpathでのgitを拒む。
 - 事実: containerの中のexecutorがturnの終わりにrun dirへ書くrun branchのbundleと状態のファイルから読む（綴りと形は`domain::run_clone`）。
   headが要るたびに、bundleを制御側だけの写しにして`bundle list-heads`で1本のrun branchを確かめ、制御側のrun branchだけへ取り込む。
   読めない・食い違うものはsessionに返す。
+- 再計画の保留と復元: 書き出した作業と渡す材料による（[再計画](../plans/task-replanning.md)）。
 - 着地・review・e2e: 制御側だけの`<queue dir>/landing/<run>`の着地用のworktree（検証が受け入れたcommitをdetachedで置く）で動く。
   どのmachineとcontainerのmountにも入らず、作れないときは着地せず人を待つ。
 - main: rebaseを求めうる要求をsessionに渡す前に、制御側がmainのbundleをrun dirに書き、executorがcloneの`refs/remotes/dagq/main`へ取り込む。
@@ -192,7 +193,7 @@ adapterもcloneのpathでのgitを拒む。
 - hookとdriver: containerのrunのcommitを扱う制御側のgitは、hookを無いpathに向け、制御側のconfigの全scopeが定義するfilter・diff・mergeのdriverをプログラムを走らせないものに上書きして走る。
   着地用のworktreeで起こすプロセスにも同じ上書きをenvで渡し、上書きが効くと確かめられなければ着地しない。
 - run dirのファイル: symlinkを辿らずに読み書きする。
-- 片付け: worktreeと同じ契機で、clone・着地用のworktree・制御側のrun branch・run dirのbundleと状態のファイルを、gitを使わずsymlinkを辿らずに消す。
+- 片付け: worktreeと同じ契機で、clone・着地用のworktree・制御側のrun branch・run dirの事実と復元のファイルを、gitを使わずsymlinkを辿らずに消す。
 
 ## workerの実行
 
@@ -210,8 +211,7 @@ executorは`application::run_container::PodmanActorExecutor`、設定の読み�
   podmanのcwdはrun dirで、制御側はcloneでプログラムを起動しない（上の「git」）。
 - buildの出力: `dagq.toml`の`[container.build_output]`が名指すcontainerの中のdirに、runごとのvolumeをmountする（綴りと意味と既定の無しは`run_env::CONTAINER_BUILD_OUTPUT_TABLE`のdoc comment）。
   runtimeは言語の道具を知らず、projectが`[run.env]`で道具をそこに向ける。
-- containerの中: `dagq relay turn`がturnの始めに状態のファイルへ終わっていない印を付け、mainのbundleをcloneに取り込み、転送を起動し、tokenからagentのenvを作り、agentをcloneで動かす。
-  agentが終われば結果に依らず、run branchのbundleと状態のファイルを上の「git」の形で書く。
+- containerの中: `dagq relay turn`がagentの前後の手順を持ち（順は`infrastructure::container_turn`のdoc comment）、agentが終われば結果に依らず、run dirの事実のファイルを上の「git」の形で書く。
   agentのhomeはrun dirの下に置き、次のturnがsessionをresumeできる。
 - transcript: agentのhomeの`.claude`の下に、containerの中のcwd（clone）を名にしたprojectのdirでできる。
   sessionの有無の判断とmodel・コマンドの計測は、cloneのrunのworkerのsessionをhostに無ければそこで探す。

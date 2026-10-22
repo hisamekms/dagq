@@ -3551,6 +3551,19 @@ impl Repository for GitRepository {
     fn hand_main(&self, run: &TaskRun, main: &CommitSha) -> Result<()> {
         GitRepository::hand_main(self, run, main)
     }
+    fn read_run_dir_file(
+        &self,
+        run: &TaskRun,
+        name: &str,
+    ) -> Result<std::result::Result<Option<Vec<u8>>, String>> {
+        GitRepository::read_run_dir_file(run, name)
+    }
+    fn write_run_dir_file(&self, run: &TaskRun, name: &str, bytes: &[u8]) -> Result<()> {
+        GitRepository::write_run_dir_file(run, name, bytes)
+    }
+    fn bundle_of(&self, reference: &str, base: &str) -> Result<Vec<u8>> {
+        GitRepository::bundle_of(self, reference, base)
+    }
     fn remove_clone(&self, clone: &Path, branch: &str) -> Result<()> {
         GitRepository::remove_clone(self, clone, branch)
     }

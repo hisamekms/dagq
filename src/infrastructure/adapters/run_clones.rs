@@ -22,6 +22,7 @@ use std::{
 
 use super::*;
 use crate::application::CloneFacts;
+use crate::domain::clone_work::{RESTORE_RESULT_FILE, RUN_RESTORE_FILE, RUN_WORK_FILE};
 use crate::domain::run_clone::{
     CLONE_MAIN_REF, GuardDoesNotHold, MAIN_BUNDLE_FILE, RUN_BUNDLE_FILE, RUN_FILE_LIMIT,
     RUN_STATE_FILE, RunState, bundle_head, guard_env, guard_holds, guard_overrides, is_clone_path,
@@ -252,26 +253,45 @@ fn read_run_file(path: &Path) -> std::result::Result<Option<Vec<u8>>, String> {
     Ok(Some(bytes))
 }
 
-/// Write `bytes` as the run directory's file at `path`: whatever is there
-/// is removed first without following it, and the file is made new
-/// without following a symlink (ADR-t2179-1 decision 9), so a symlink the
-/// worker puts there never has the control side write elsewhere.
+/// Write `bytes` as the run directory's file at `path`: made new beside it
+/// without following a symlink (ADR-t2179-1 decision 9) and renamed over
+/// whatever is there (a symlink the worker put there is replaced, never
+/// followed), so the control side never writes elsewhere and no reader
+/// finds a part of the file or none at all.
 fn write_run_file(path: &Path, bytes: &[u8]) -> Result<()> {
+    let name = path.file_name().context("a run file has no name")?;
+    let tmp = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        name.to_string_lossy(),
+        uuid::Uuid::new_v4()
+    ));
     let mut last = None;
     for _ in 0..3 {
-        remove_entry(path)?;
+        remove_entry(&tmp)?;
         match OpenOptions::new()
             .write(true)
             .create_new(true)
             .mode(0o644)
             .custom_flags(libc::O_NOFOLLOW)
-            .open(path)
+            .open(&tmp)
         {
             Ok(mut file) => {
-                file.write_all(bytes)
+                let written = file
+                    .write_all(bytes)
                     .and_then(|()| file.sync_all())
-                    .with_context(|| format!("write {}", path.display()))?;
-                return Ok(());
+                    .with_context(|| format!("write {}", tmp.display()))
+                    .and_then(|()| {
+                        // A rename does not replace a directory.
+                        if entry(path)?.is_some_and(|meta| meta.is_dir()) {
+                            remove_entry(path)?;
+                        }
+                        fs::rename(&tmp, path)
+                            .with_context(|| format!("rename {} into place", tmp.display()))
+                    });
+                if written.is_err() {
+                    let _ = remove_entry(&tmp);
+                }
+                return written;
             }
             // Something came back meanwhile: remove it again.
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => last = Some(error),
@@ -842,6 +862,42 @@ impl GitRepository {
         write_run_file(&file, &bytes)
     }
 
+    /// See [`Repository::read_run_dir_file`].
+    pub fn read_run_dir_file(
+        run: &TaskRun,
+        name: &str,
+    ) -> Result<std::result::Result<Option<Vec<u8>>, String>> {
+        let run_dir = Path::new(run.run_dir().context("missing run directory")?);
+        Ok(read_run_file(&run_dir.join(name)))
+    }
+
+    /// See [`Repository::write_run_dir_file`].
+    pub fn write_run_dir_file(run: &TaskRun, name: &str, bytes: &[u8]) -> Result<()> {
+        let run_dir = Path::new(run.run_dir().context("missing run directory")?);
+        write_run_file(&run_dir.join(name), bytes)
+    }
+
+    /// See [`Repository::bundle_of`].
+    pub fn bundle_of(&self, reference: &str, base: &str) -> Result<Vec<u8>> {
+        let guarded = self.guarded_repository()?;
+        let (status, bytes, stderr) = capture_bytes(
+            guarded.git_root().args([
+                "bundle",
+                "create",
+                "--quiet",
+                "-",
+                reference,
+                &format!("^{base}"),
+            ]),
+            BUNDLE_TIMEOUT,
+        )?;
+        ensure!(
+            status.success(),
+            "git bundle create of {reference} failed ({status}): {stderr}"
+        );
+        Ok(bytes)
+    }
+
     /// See [`Repository::remove_clone`].
     pub fn remove_clone(&self, clone: &Path, branch: &str) -> Result<()> {
         let (Some(landing), Some(run_dir)) = (landing_of(clone), run_dir_of(clone)) else {
@@ -850,7 +906,14 @@ impl GitRepository {
         let guarded = self.guarded_repository();
         self.remove_landing_at(guarded.as_ref().ok(), &landing)?;
         remove_entry(clone)?;
-        for name in [RUN_BUNDLE_FILE, RUN_STATE_FILE, MAIN_BUNDLE_FILE] {
+        for name in [
+            RUN_BUNDLE_FILE,
+            RUN_STATE_FILE,
+            MAIN_BUNDLE_FILE,
+            RUN_WORK_FILE,
+            RUN_RESTORE_FILE,
+            RESTORE_RESULT_FILE,
+        ] {
             remove_entry(&run_dir.join(name))?;
         }
         let guarded = unguarded_left(

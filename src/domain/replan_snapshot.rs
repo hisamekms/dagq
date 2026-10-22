@@ -359,7 +359,14 @@ pub fn check_restore(manifest: &SnapshotManifest, current: Option<&WorktreeState
     let Some(current) = current else {
         return RestoreCheck::Missing;
     };
-    let saved = manifest.state();
+    compare(&manifest.state(), current)
+}
+
+/// Compare a worktree as it is now with `saved`: [`RestoreCheck::Intact`]
+/// when its head, its staged and unstaged diffs and its untracked files
+/// (their execute bits included) are the same, else
+/// [`RestoreCheck::Diverged`] with what differs.
+pub fn compare(saved: &WorktreeState, current: &WorktreeState) -> RestoreCheck {
     if current.head != saved.head {
         return RestoreCheck::Diverged(format!(
             "its head is {}, the snapshot's {}",

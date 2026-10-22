@@ -11,7 +11,10 @@
 //! that restarts, adopts the run or takes it over after an exec goes on
 //! from the step the queue records. A continuation or a withdrawal finds
 //! the run's work as it was saved before the run resumes
-//! ([`Supervisor::restore_parked`]).
+//! ([`Supervisor::restore_parked`]). A run in a container is saved and
+//! restored without any git in its clone: from the work its executor wrote
+//! at its last turn's end, and through the restore its executor applies
+//! before the next turn's agent runs ([`crate::domain::clone_work`]).
 //!
 //! The same park takes the run of a held task (ADR-t1879-1 decision 7),
 //! the hold as its other reason ([`ParkFor`]): the same fence, the same
@@ -41,6 +44,10 @@
 
 use super::*;
 use crate::domain::background_wrapper::{BackgroundHandle, is_background};
+use crate::domain::clone_work::{
+    self, CloneRestore, CloneWork, Part, PartKind, RESTORE_RESULT_FILE, RUN_RESTORE_FILE,
+    RUN_WORK_FILE, RestoreRequest, RestoreResult,
+};
 use crate::domain::recovery::run_processes;
 use crate::domain::replan_snapshot::{
     self, MANIFEST, RestoreCheck, RestoreStart, SavedFile, SavedKind, SnapshotManifest,
@@ -1301,8 +1308,15 @@ impl Supervisor<'_> {
             worktree.display()
         );
         let repository = crate::application::run_git::for_run(&*self.repository, run)?;
-        replan_snapshot::check_git_operation(repository.git_operation(&worktree)?)?;
-        let head = repository.head(&worktree)?;
+        // A run in a container: its head and work as its executor wrote them
+        // at its last turn's end, no git run in its clone (ADR-t2179-1).
+        let (head, clone_work) = if run.in_container() {
+            let (head, work) = clone_work_of(&*repository, run)?;
+            (head, Some(work))
+        } else {
+            replan_snapshot::check_git_operation(repository.git_operation(&worktree)?)?;
+            (repository.head(&worktree)?, None)
+        };
         let pinned = replan_snapshot::pinned_ref(op.id);
         // Only the park's owner pins the head: a supervisor that lost the
         // park, or found it settled by another, moves no ref.
@@ -1314,25 +1328,30 @@ impl Supervisor<'_> {
             saved: Vec::new(),
             total: 0,
         };
-        let index = repository.worktree_diff(&worktree, true)?;
-        saving.save(
-            "index.patch",
-            SavedKind::Index,
-            "git diff --cached --binary",
-            &index,
-        )?;
-        let unstaged = repository.worktree_diff(&worktree, false)?;
-        saving.save(
-            "worktree.patch",
-            SavedKind::Worktree,
-            "git diff --binary",
-            &unstaged,
-        )?;
-        for (at, path) in repository
-            .untracked_paths(&worktree)?
-            .into_iter()
-            .enumerate()
-        {
+        if let Some((work, contents)) = &clone_work {
+            save_clone_work(&mut saving, work, contents)?;
+        } else {
+            let index = repository.worktree_diff(&worktree, true)?;
+            saving.save(
+                "index.patch",
+                SavedKind::Index,
+                "git diff --cached --binary",
+                &index,
+            )?;
+            let unstaged = repository.worktree_diff(&worktree, false)?;
+            saving.save(
+                "worktree.patch",
+                SavedKind::Worktree,
+                "git diff --binary",
+                &unstaged,
+            )?;
+        }
+        let untracked = if clone_work.is_some() {
+            Vec::new()
+        } else {
+            repository.untracked_paths(&worktree)?
+        };
+        for (at, path) in untracked.into_iter().enumerate() {
             let source = worktree.join(&path);
             let contents = read_regular(&*self.files, &source, &path, saving.total)?;
             saving.save(
@@ -1520,8 +1539,13 @@ impl Supervisor<'_> {
     /// `replan_restore_failed` and moves the operation back to `blocked`
     /// with why: it guards the task again, the run does not resume, and
     /// `status` and `doctor` list it among the replans' problems. Nothing
-    /// for a run no replanning parked, or one restored already.
-    pub(super) fn restore_parked(&mut self, run: &TaskRun) -> Result<bool> {
+    /// for a run no replanning parked, or one restored already. The restore
+    /// of a run in a container is handed to its executor, which checks the
+    /// clone and fills one made again before the turn that resumes the run
+    /// (`resuming`): for a run handed on otherwise (its resumes used up) the
+    /// restore fails, its clone there or not, unless the executor answered
+    /// it already.
+    pub(super) fn restore_parked(&mut self, run: &TaskRun, resuming: bool) -> Result<bool> {
         let ops = self.queue.replans_of_run(run.id())?;
         let Some(op) = ops.iter().rev().find(|op| op.snapshot_id.is_some()) else {
             return Ok(true);
@@ -1542,7 +1566,24 @@ impl Supervisor<'_> {
             RestoreStart::Owned => {}
         }
         let snapshot = op.snapshot_id.clone().unwrap_or_default();
-        let restored = self.restore_from(run, &snapshot, &token);
+        let restored = self.restore_from(run, op.id, &snapshot, &token, resuming);
+        // Handed to a container's executor, which answers before the
+        // resumed turn's agent runs: the answer is recorded at a later look.
+        let restored = match restored {
+            Ok(Restored::Done(action, manifest)) => Ok((action, manifest)),
+            Ok(Restored::Handed) => {
+                self.pause_at(PausePoint::RestoreHanded, run.id());
+                // A lease another supervisor took over meanwhile: the run
+                // is its own to resume, from what the restore left.
+                if let Err(release) = self.queue.release_lease(run.id(), &token) {
+                    info!(run_id = %run.id(), "run {}: the restore's lease was not given back, and it is not resumed here: {release:#}", run.id());
+                    return Ok(false);
+                }
+                info!(run_id = %run.id(), "run {}: the restore of snapshot {snapshot} is handed to its container's executor, which applies it before the resumed turn's agent runs", run.id());
+                return Ok(true);
+            }
+            Err(error) => Err(error),
+        };
         // A restore whose hold is gone is no failure of its work: nothing is
         // recorded, and the lease is given back if it still is this one's.
         if let Err(error) = &restored
@@ -1714,13 +1755,17 @@ impl Supervisor<'_> {
     /// Bring `run`'s worktree to the work snapshot `snapshot` saved, as the
     /// restore `token` owns: as it is when it matches, made again when it
     /// is gone; what was done and the snapshot's manifest. A worktree that
-    /// changed since is an error, and nothing in it is touched.
+    /// changed since is an error, and nothing in it is touched. A run in a
+    /// container is restored in its clone by its executor
+    /// ([`Self::restore_clone`]).
     fn restore_from(
         &mut self,
         run: &TaskRun,
+        op: crate::domain::ReplanId,
         snapshot: &str,
         token: &LeaseToken,
-    ) -> Result<(&'static str, SnapshotManifest)> {
+        resuming: bool,
+    ) -> Result<Restored> {
         let dir = replan_snapshot::snapshot_dir(&self.layout.replans_dir, snapshot);
         let manifest: SnapshotManifest =
             serde_json::from_slice(&self.files.read(&dir.join(MANIFEST))?)
@@ -1728,6 +1773,9 @@ impl Supervisor<'_> {
         // Before its files are read back by their names.
         manifest.check_paths()?;
         self.check_snapshot(&dir, &manifest)?;
+        if run.in_container() {
+            return self.restore_clone(run, op, &dir, manifest, token, resuming);
+        }
         // The run's path as the queue finds it now (a moved queue), not
         // the one the snapshot was saved from.
         let worktree = PathBuf::from(run.worktree_path().context("the run has no worktree")?);
@@ -1750,7 +1798,206 @@ impl Supervisor<'_> {
             }
             RestoreCheck::Diverged(why) => bail!("the worktree changed since ({why})"),
         };
-        Ok((action, manifest))
+        Ok(Restored::Done(action.to_owned(), Box::new(manifest)))
+    }
+
+    /// The restore of a run in a container, whose clone the control side
+    /// runs no git in (ADR-t2179-1), as [`clone_work::clone_restore`]
+    /// decides from what the run directory holds: the executor's answer to
+    /// this snapshot's restore is recorded; before a resume the restore is
+    /// handed to the executor ([`RestoreRequest`], [`Restored::Handed`]),
+    /// which compares the clone as it is with the snapshot before the
+    /// resumed turn's agent runs and fills only a clone the control side
+    /// made again: a clone gone is made again at the base after the request
+    /// is written. The answer is recorded from the resume's slot
+    /// ([`Supervisor::collect_clone_restore`]). A run handed on without a
+    /// resume fails the restore: no turn of its clone follows, in which
+    /// alone the clone as it is now is seen. Each continuation after a
+    /// recorded failure is a new attempt ([`clone_work::restore_attempt`]),
+    /// handed again whatever the earlier one handed or was answered.
+    fn restore_clone(
+        &mut self,
+        run: &TaskRun,
+        op: crate::domain::ReplanId,
+        dir: &Path,
+        manifest: SnapshotManifest,
+        token: &LeaseToken,
+        resuming: bool,
+    ) -> Result<Restored> {
+        let repository = crate::application::run_git::for_run(&*self.repository, run)?;
+        let clone = PathBuf::from(run.worktree_path().context("the run has no clone")?);
+        let attempt = self.restore_attempt(run, op, &manifest.id)?;
+        let handed = match clone_work::read_packed::<RestoreRequest>(
+            repository.read_run_dir_file(run, RUN_RESTORE_FILE)?,
+        ) {
+            Ok(Some((request, _))) => {
+                Some(Some((request.snapshot_id, request.attempt, request.remade)))
+            }
+            Ok(None) => None,
+            Err(_) => Some(None),
+        };
+        let answered = restore_answer(&*repository, run)?;
+        let present = match self.files.entry_kind(&clone) {
+            Ok(kind) => kind == crate::application::EntryKind::Dir,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.into()),
+        };
+        match clone_work::clone_restore(
+            &manifest.id,
+            attempt,
+            present,
+            handed,
+            answered.as_ref(),
+            resuming,
+        ) {
+            CloneRestore::Record(Ok(action)) => Ok(Restored::Done(action, Box::new(manifest))),
+            CloneRestore::Record(Err(why)) => {
+                bail!("the executor did not restore the clone: {why}")
+            }
+            CloneRestore::Fail(why) => bail!("{why}"),
+            CloneRestore::Hand { remake, remade } => {
+                let request =
+                    self.restore_request(&*repository, run, dir, &manifest, attempt, remade)?;
+                self.still_restoring(run, token)?;
+                repository.write_run_dir_file(run, RUN_RESTORE_FILE, &request)?;
+                if remake {
+                    self.still_restoring(run, token)?;
+                    repository.create_clone(run, None)?;
+                }
+                // A clone made again is at the base, and so is the control
+                // side's run branch: it names the saved head again, also
+                // after a restart between the two.
+                if remade && let Some(branch) = run.branch() {
+                    repository.update_ref(&format!("refs/heads/{branch}"), &manifest.head)?;
+                }
+                Ok(Restored::Handed)
+            }
+        }
+    }
+
+    /// Record from the resume's slot the answer the executor of `run`'s
+    /// container gave to the restore handed before the resume
+    /// ([`RunTransitions::record_clone_restore`]): `replan_restored`, or
+    /// `replan_restore_failed` with the operation back to `blocked`, which
+    /// fences the task, so the run rests out of its slot at its turn's end
+    /// rather than going on (a refused restore runs no agent, whose turn the
+    /// session would otherwise take for a provider's wall). Whether a
+    /// failure was recorded. Nothing for a run on the host, one no
+    /// replanning parked, or a restore recorded already or not answered.
+    pub(super) fn collect_clone_restore(&mut self, run: &TaskRun) -> Result<bool> {
+        if !run.in_container() {
+            return Ok(false);
+        }
+        let ops = self.queue.replans_of_run(run.id())?;
+        let Some(op) = ops.iter().rev().find(|op| op.snapshot_id.is_some()) else {
+            return Ok(false);
+        };
+        if !op.status.reopens() {
+            return Ok(false);
+        }
+        let snapshot = op.snapshot_id.clone().unwrap_or_default();
+        let attempt = self.restore_attempt(run, op.id, &snapshot)?;
+        let Some(answered) = restore_answer(&*self.repository, run)?
+            .filter(|answered| answered.answers(&snapshot, attempt))
+        else {
+            return Ok(false);
+        };
+        let outcome = answered.outcome();
+        let restored = match &outcome {
+            Ok(action) => Ok(json!({"operation_id": op.id, "snapshot_id": snapshot,
+                                    "action": action, "by": "executor"})),
+            Err(why) => Err(format!(
+                "the work of run {} could not be restored from snapshot {snapshot}: the executor did not restore its clone: {why}; the snapshot and the clone are kept and the run does not go on",
+                run.id()
+            )),
+        };
+        let recorded = self.queue.record_clone_restore(
+            run.id(),
+            self.registration.token(),
+            op.id,
+            op.generation,
+            restored,
+        )?;
+        if recorded {
+            match &outcome {
+                Ok(action) => {
+                    info!(run_id = %run.id(), "run {}: its executor restored snapshot {snapshot} in its clone ({action})", run.id());
+                }
+                Err(why) => {
+                    warn!(run_id = %run.id(), "run {}: its executor did not restore snapshot {snapshot}: {why}; replan operation {} is blocked", run.id(), op.id);
+                }
+            }
+        }
+        Ok(recorded && outcome.is_err())
+    }
+
+    /// The attempt at the restore of `snapshot` for operation `op` of `run`
+    /// ([`clone_work::restore_attempt`]), from the failures its events
+    /// record.
+    fn restore_attempt(
+        &self,
+        run: &TaskRun,
+        op: crate::domain::ReplanId,
+        snapshot: &str,
+    ) -> Result<u32> {
+        let events = self.queue.run_events(run.id())?;
+        Ok(clone_work::restore_attempt(
+            events
+                .iter()
+                .filter(|event| event.kind == EventKind::ReplanRestoreFailed)
+                .map(|event| &event.payload),
+            op.as_i64(),
+            snapshot,
+        ))
+    }
+
+    /// Attempt `attempt` at the restore of the snapshot in `dir` handed to
+    /// the executor of `run`'s container ([`RestoreRequest`]), packed: for
+    /// a clone made
+    /// again (`remade`), the pinned head's bundle on top of the base (none
+    /// when the head is the base); the staged and the unstaged diff and the
+    /// untracked files, each read back from the snapshot.
+    fn restore_request(
+        &self,
+        repository: &dyn Repository,
+        run: &TaskRun,
+        dir: &Path,
+        manifest: &SnapshotManifest,
+        attempt: u32,
+        remade: bool,
+    ) -> Result<Vec<u8>> {
+        let base = run.base_commit().to_string();
+        let mut parts = Vec::new();
+        let mut contents = Vec::new();
+        if remade && manifest.head != base {
+            let bundle = repository.bundle_of(&manifest.pinned_ref, &base)?;
+            parts.push(Part::of(PartKind::Bundle, None, false, &bundle));
+            contents.push(bundle);
+        }
+        for file in &manifest.files {
+            let (kind, path) = match file.kind {
+                SavedKind::Index => (PartKind::Index, None),
+                SavedKind::Worktree => (PartKind::Worktree, None),
+                SavedKind::Untracked => (PartKind::Untracked, Some(file.source.clone())),
+                _ => continue,
+            };
+            let bytes = self.files.read(&dir.join(&file.name))?;
+            parts.push(Part::of(kind, path, file.executable, &bytes));
+            contents.push(bytes);
+        }
+        let request = RestoreRequest {
+            snapshot_id: manifest.id.clone(),
+            attempt,
+            base,
+            branch: manifest
+                .branch
+                .clone()
+                .context("the snapshot names no branch")?,
+            head: manifest.head.clone(),
+            remade,
+            parts,
+        };
+        Ok(clone_work::pack(&request, &contents))
     }
 
     /// The worktree `worktree` of `run` as a snapshot compares it.
@@ -1858,6 +2105,96 @@ impl Supervisor<'_> {
         self.still_restoring(run, token)?;
         repository.move_worktree(&scratch, worktree)
     }
+}
+
+/// What [`Supervisor::restore_from`] made of a parked run's work.
+enum Restored {
+    /// The worktree is as the snapshot saved it: what was done, and the
+    /// snapshot's manifest.
+    Done(String, Box<SnapshotManifest>),
+    /// The restore is handed to the executor of the run's container, which
+    /// answers before the resumed turn's agent runs.
+    Handed,
+}
+
+/// The head of a run in a container and the work its executor wrote at its
+/// last turn's end ([`CloneWork`], with its parts' bytes), read from the
+/// run's bundle, state and work files without any git in its clone, and
+/// checked to be of that turn's end ([`clone_work::check_work`]). `Err`
+/// says why the work cannot be taken: a file missing or not as written,
+/// an older turn's, a Git operation half done.
+fn clone_work_of(
+    repository: &dyn Repository,
+    run: &TaskRun,
+) -> Result<(CommitSha, clone_work::Unpacked<CloneWork>)> {
+    let crate::application::CloneFacts { head, state } = match repository.clone_facts(run)? {
+        Ok(facts) => facts,
+        Err(why) => bail!("{why}"),
+    };
+    let work =
+        clone_work::read_packed::<CloneWork>(repository.read_run_dir_file(run, RUN_WORK_FILE)?)
+            .map_err(|why| anyhow!("the clone's work ({RUN_WORK_FILE}) cannot be read: {why}"))?
+            .with_context(|| {
+                format!("the executor wrote no work ({RUN_WORK_FILE}) at the last turn's end")
+            })?;
+    clone_work::check_work(&state, &head, &work.0).map_err(|why| anyhow!("{why}"))?;
+    Ok((head, work))
+}
+
+/// The executor's answer in the run directory of `run`, if one reads.
+fn restore_answer(repository: &dyn Repository, run: &TaskRun) -> Result<Option<RestoreResult>> {
+    Ok(
+        match repository.read_run_dir_file(run, RESTORE_RESULT_FILE)? {
+            Ok(Some(bytes)) => serde_json::from_slice::<RestoreResult>(&bytes).ok(),
+            _ => None,
+        },
+    )
+}
+
+/// Save the work a container's executor wrote as the snapshot's files, as
+/// the save of a worktree names them: the staged and the unstaged diff and
+/// each untracked file with its execute bit.
+fn save_clone_work(saving: &mut Saving<'_>, work: &CloneWork, contents: &[Vec<u8>]) -> Result<()> {
+    let mut untracked = 0;
+    for (part, bytes) in work.parts.iter().zip(contents) {
+        match part.kind {
+            PartKind::Index => {
+                saving.save(
+                    "index.patch",
+                    SavedKind::Index,
+                    "git diff --cached --binary",
+                    bytes,
+                )?;
+            }
+            PartKind::Worktree => {
+                saving.save(
+                    "worktree.patch",
+                    SavedKind::Worktree,
+                    "git diff --binary",
+                    bytes,
+                )?;
+            }
+            PartKind::Untracked => {
+                let path = part
+                    .path
+                    .as_deref()
+                    .context("an untracked part names no path")?;
+                replan_snapshot::check_relative(path)?;
+                saving.save(
+                    &format!("untracked/{untracked}"),
+                    SavedKind::Untracked,
+                    path,
+                    bytes,
+                )?;
+                untracked += 1;
+                if let Some(saved) = saving.saved.last_mut() {
+                    saved.executable = part.executable;
+                }
+            }
+            PartKind::Bundle => bail!("the clone's work holds a bundle"),
+        }
+    }
+    Ok(())
 }
 
 /// The bytes of `path` (named `source`) in `files`, which must be a

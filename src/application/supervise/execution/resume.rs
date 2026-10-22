@@ -96,7 +96,7 @@ impl Supervisor<'_> {
             // free; the work a replanning saved comes back first, as before
             // a resume.
             if candidate.resumes.exhausted(self.resume.config) {
-                match self.restore_parked(run) {
+                match self.restore_parked(run, false) {
                     Ok(true) => {}
                     Ok(false) => continue,
                     Err(error) => {
@@ -141,7 +141,7 @@ impl Supervisor<'_> {
         // that cannot blocks the operation again, which keeps the run from
         // resuming (its resumes not spent) and shows in `replans`; one
         // another supervisor restores is its to resume.
-        match self.restore_parked(&run) {
+        match self.restore_parked(&run, true) {
             Ok(true) => {}
             Ok(false) => return Ok(()),
             Err(error) => {
@@ -1496,6 +1496,19 @@ impl ResumeWatch {
         run: &TaskRun,
     ) -> Result<Option<ResumeVerdict>> {
         self.awaits_answer = None;
+        // The answer of a container's executor to the restore of a parked
+        // run's work, handed before this resume, is recorded first: a
+        // refusal (whose turn ran no agent and would read as a provider's
+        // wall) blocks the operation, and the park rests the run.
+        match sv.collect_clone_restore(run) {
+            Ok(true) => return Ok(None),
+            Ok(false) => {}
+            // Looked at again on the next look, before anything else.
+            Err(error) => {
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: the restore's answer could not be recorded: {error:#}", run.id());
+                return Ok(None);
+            }
+        }
         let processes = sv.queue.processes(run.id())?;
         let Some(wrapper) = processes.iter().find(|p| p.role == "wrapper") else {
             let timeout = sv.sessions.registration_timeout();

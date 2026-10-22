@@ -2195,3 +2195,39 @@ task = 2946
 name = "runtime_stranded_landing::a_run_left_awaiting_integration_is_taken_up_by_one_supervisor_and_lands"
 reason = "B 境界（SQLite のトランザクション・supervisor の配線・Git の着地）: lease も開いた ask も無い awaiting_integration の run の lease を 1 つの BEGIN IMMEDIATE で取り、開いた ask で拒み、2 つの thread の競合で 1 つだけが取り、判定の後に integration_held を記録された run を拒むことと、拾い直した run を実際の supervisor の pass が review をやり直さずに着地させ、保留された run は残すことを確かめる。拾うかの判断は domain::stranded_landing の unit test"
 task = 3049
+
+# 15.2s to 16.8s (stress 60s under the host's load of other runs, task 2474)
+[[test]]
+name = "runtime_replan_park::a_container_runs_dirty_work_is_saved_from_its_executor_and_restored_into_a_clone_made_again"
+reason = "B 境界（container の executor・Git・supervisor の配線）: container の run の dirty な成果を、制御側が clone で git を走らせずに executor の書き出しから snapshot に保存して head を ref で固定し、消えた clone を作り直して executor が次の turn の前に head・index・worktree・untracked と実行権限を当て、着地まで通すことを、fake の podman で動く実際の dagq relay turn と Git で確かめる。照合と段の判断は domain::clone_work の unit test"
+task = 2474
+
+# 12.5s to 13.5s (stress 60s under the host's load of other runs, task 2474)
+[[test]]
+name = "runtime_replan_park::a_withdrawn_container_runs_clone_left_in_place_is_checked_by_its_executor_and_lands"
+reason = "B 境界（container の executor・supervisor の配線・SQLite）: 撤回で閉じた操作の container の run について、残った clone を executor が resume の turn の agent の前に snapshot と照合して答え、制御側が resume の slot で replan_restored を記録して着地まで通すことを、fake の podman で動く実際の dagq relay turn と Git で確かめる。段の判断は domain::clone_work の unit test"
+task = 2474
+
+# 17.1s to 19.2s (stress 60s under the host's load of other runs, task 2474)
+[[test]]
+name = "runtime_replan_park::a_container_runs_clone_changed_since_its_clean_snapshot_blocks_the_continuation_until_mended"
+reason = "B 境界（container の executor・supervisor の配線・SQLite）: clean に保存した container の run の clone が保留の後に変わったとき、executor が agent を動かさずに拒否し、制御側が resume の slot で replan_restore_failed を記録して操作を blocked に戻し、provider の壁にせず run を slot から休ませること、clone を直して継続に戻すと新しい試行として executor が照合し直し着地することを、実際の dagq relay turn と wrapper で確かめる。拒否と試行の判断は domain::clone_work の unit test"
+task = 2474
+
+# 13.3s to 15.6s (stress 60s under the host's load of other runs, task 2474)
+[[test]]
+name = "runtime_replan_park::a_container_restore_handed_before_a_supervisor_stood_still_is_taken_over_and_done_once"
+reason = "B 境界（二つの supervisor・lease の adopt・container の executor）: 復元を渡して止まった supervisor の run を別の supervisor が古い lease の adopt で引き継ぎ、run dir と queue の記録から続けて snapshot を作り直さず clone を二度作らず、executor が一度だけ埋めて復元を一度だけ記録し着地することを、実際の supervisor の二度の起動と dagq relay turn で確かめる。段の判断は domain::clone_work の unit test"
+task = 2474
+
+# 5.2s to 7.8s (stress 60s under the host's load of other runs, task 2474)
+[[test]]
+name = "runtime_replan_park::a_container_run_out_of_resumes_is_not_handed_on_over_a_clone_no_turn_checks"
+reason = "B 境界（container の executor・supervisor の配線・SQLite）: 実際の dagq relay turn の書き出しから保存した container の run の resume を使い切らせ、保留の後に clone を変えて継続で閉じたとき、supervisor が使い切った run の経路で clone を照合済みとせず replan_restore_failed を記録して操作を blocked に戻し、復旧 job に渡さず agent も動かさないことを確かめる。使い切った run を復元の失敗とする判断は domain::clone_work の unit test"
+task = 2474
+
+# 1.8s to 6.2s (stress 60s under the host's load of other runs, task 2474)
+[[test]]
+name = "runtime_clone::a_container_turn_writes_its_work_and_refuses_to_restore_over_a_clone_that_changed"
+reason = "B 境界（Git・プロセス）: 実際の dagq relay turn を 4 回起動し、executor が実の git で clone の staged・unstaged の差分と untracked（実行権限）を状態の世代と合わせて run dir に書き出すこと、保留の後に変わった clone への復元を agent を動かさず拒み clone に触れないこと、次の turn でも同じであることを確かめる。照合と拒否の判断は domain::clone_work の unit test"
+task = 2474

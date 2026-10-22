@@ -16,6 +16,7 @@ use dagq::domain::task_replan::{
 };
 use dagq::domain::{ReplanId, worker::WorkerMode};
 use dagq::infrastructure::location::replans_dir;
+use runtime_support::containers::ContainerQueue;
 use runtime_support::headless::*;
 use runtime_support::*;
 
@@ -1900,4 +1901,363 @@ fn an_adopted_review_past_the_fence_starts_no_job_and_the_run_is_parked() {
 #[test]
 fn a_review_handed_off_past_the_fence_starts_no_job_and_the_run_is_parked() {
     a_review_taken_over_past_the_fence_starts_nothing(true);
+}
+
+/// The turns of task 1 in its container (`turn.sh` of
+/// [`ContainerQueue`]): the first waits for the test's `go` in the run
+/// directory, then commits, and leaves, unless `clean`, a staged file, an
+/// unstaged change, an untracked file and an untracked executable script,
+/// and a receipt for its head. The next turn (the continuation's resume)
+/// checks that the work it left is in the clone, commits all of it and
+/// writes a receipt, or says what is missing.
+fn container_turns(clean: bool) -> String {
+    let dirty = if clean {
+        ""
+    } else {
+        "printf 'half\\n' >> tracked.txt; printf 'staged\\n' > staged.txt; git add staged.txt; printf 'notes\\n' > notes.txt; printf '#!/bin/sh\\necho ran\\n' > run.sh; chmod +x run.sh;"
+    };
+    let check = if clean {
+        "grep -q one tracked.txt"
+    } else {
+        "test -f notes.txt && test -x run.sh && grep -q half tracked.txt && git diff --cached --name-only | grep -q staged.txt"
+    };
+    let go = common::await_file("\"$RUN_DIR/go\"");
+    format!(
+        r#"commit_all() {{ git add -A; git diff --cached --quiet || git -c user.name=worker -c user.email=worker@example.invalid commit -q -m "$1"; }}
+receipt() {{ printf '{{"run_id":"%s","result":"succeeded","commit":"%s","tests":{{"status":"passed","evidence_or_reason":"ran"}},"e2e":{{"status":"not_applicable","evidence_or_reason":"stub"}},"subagent_review":{{"status":"not_applicable","evidence_or_reason":"stub"}},"summary":"in the container"}}' "$DAGQ_RUN_ID" "$(git rev-parse HEAD)" > "$RUN_DIR/receipt.json"; }}
+echo turn >> "$RUN_DIR/agent-turns"
+if [ ! -f "$RUN_DIR/worked" ]; then
+  : > "$RUN_DIR/worked"
+  {go}
+  printf 'one\n' > tracked.txt; commit_all first
+  {dirty}
+  receipt; say paused
+elif {check}; then
+  commit_all "the rest"; receipt; say finished
+else
+  say "the saved work is not here"; : > "$RUN_DIR/work-missing"
+fi
+"#
+    )
+}
+
+/// Park task 1's run of `queue` while its first turn runs in its container,
+/// as [`park_during_a_turn`] parks a run on the host: the turn ends, its
+/// executor writes the run's bundle, work and state, and the supervisor
+/// saves the snapshot from them and parks the run. The operation as parked,
+/// and the run's clone.
+fn park_in_a_container(queue: &ContainerQueue) -> (ReplanOperation, PathBuf) {
+    let supervisor = queue.supervise(TestReviewer::new(&[]));
+    wait_until(&queue.db, common::STEP_LIMIT, |q| {
+        !payloads(&q.show(TaskId::new(1)).unwrap(), "turn_started").is_empty()
+    });
+    let run = queue.detail().runs[0].clone();
+    assert!(run.in_container());
+    let op = pause(&queue.db, run.id());
+    wait_for_status(&queue.db, op.id, ReplanStatus::Quiescing);
+    fs::write(Path::new(run.run_dir().unwrap()).join("go"), "").unwrap();
+    finished(&queue.db, &queue.backend, supervisor);
+    let op = operation(&queue.db, op.id);
+    assert_eq!(op.status, ReplanStatus::Parked, "{op:?}");
+    (op, PathBuf::from(run.worktree_path().unwrap()))
+}
+
+/// The dirty work [`container_turns`] leaves is in the snapshot of `op`,
+/// saved from what the executor wrote: the head the clone's (pinned by the
+/// operation's ref in the repository), the diffs and the untracked files
+/// with their execute bits.
+fn assert_dirty_work_saved(queue: &ContainerQueue, op: &ReplanOperation, clone: &Path) {
+    let manifest = manifest(&queue.db, op);
+    assert!(manifest.dirty);
+    assert_eq!(manifest.worktree, clone.to_string_lossy());
+    assert_eq!(manifest.head, git_out(clone, &["rev-parse", "HEAD"]));
+    assert_eq!(
+        git_out(
+            &queue.repo,
+            &["rev-parse", &format!("refs/dagq/replans/{}", op.id)]
+        ),
+        manifest.head
+    );
+    assert!(saved(&queue.db, op, "index", None).contains("staged"));
+    assert!(saved(&queue.db, op, "worktree", None).contains("half"));
+    assert_eq!(
+        saved(&queue.db, op, "untracked", Some("notes.txt")),
+        "notes\n"
+    );
+    let script = manifest
+        .files
+        .iter()
+        .find(|file| file.source == "run.sh")
+        .unwrap();
+    assert!(script.executable, "{script:?}");
+    // The clone keeps its work.
+    assert!(clone.join("notes.txt").exists());
+}
+
+/// The run of `queue` landed the dirty work [`container_turns`] left, the
+/// script's execute bit included, the resumed turn's agent having found it
+/// in the clone; the executor's answer is recorded once as `action`.
+fn assert_landed_restored(queue: &ContainerQueue, action: &str) {
+    let detail = queue.detail();
+    let run_dir = PathBuf::from(detail.runs[0].run_dir().unwrap());
+    assert!(!run_dir.join("work-missing").exists());
+    assert_eq!(detail.task.status(), TaskStatus::Completed);
+    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+    let restored = payloads(&detail, "replan_restored");
+    assert_eq!(restored.len(), 1, "{restored:?}");
+    assert_eq!(restored[0]["action"], action, "{restored:?}");
+    assert_eq!(restored[0]["by"], "executor", "{restored:?}");
+    assert!(payloads(&detail, "replan_restore_failed").is_empty());
+    let tree = git_out(&queue.repo, &["ls-tree", "-r", "main"]);
+    for (mode, path) in [
+        ("100644", "notes.txt"),
+        ("100755", "run.sh"),
+        ("100644", "staged.txt"),
+    ] {
+        assert!(
+            tree.lines()
+                .any(|line| line.starts_with(mode) && line.ends_with(path)),
+            "{mode} {path} in {tree}"
+        );
+    }
+    assert_eq!(
+        git_out(&queue.repo, &["show", "main:tracked.txt"]),
+        "one\nhalf"
+    );
+}
+
+/// Acceptance (b) of the container's clone: a run in a container parked
+/// with dirty work (a commit, a staged file, an unstaged change, an
+/// untracked file and an untracked executable script) is saved from what
+/// its executor wrote at the turn's end, with no git of the control side in
+/// its clone (whose every git refuses a clone's path). Once the clone is
+/// gone and the operation ends in a continuation, the control side hands
+/// the restore to the executor and makes the clone again at the base; the
+/// executor puts the head, the index, the worktree and the untracked files
+/// back before the resumed turn's agent runs, which finds them and lands
+/// its work, and its answer is recorded from the resume's slot.
+#[test]
+fn a_container_runs_dirty_work_is_saved_from_its_executor_and_restored_into_a_clone_made_again() {
+    let _test = crate::common::test();
+    let queue = ContainerQueue::new(Some(&container_turns(false)));
+    let (op, clone) = park_in_a_container(&queue);
+    assert_dirty_work_saved(&queue, &op, &clone);
+    fs::remove_dir_all(&clone).unwrap();
+    advance(&queue.db, &op, ReplanStatus::ContinuingAfterPark);
+    let supervisor = queue.supervise(TestReviewer::new(&[verdict("pass", &[], "fine")]));
+    finished(&queue.db, &queue.backend, supervisor);
+    assert_landed_restored(&queue, "recreated");
+}
+
+/// Acceptance (b), a withdrawal: a run in a container parked with dirty
+/// work whose clone is left in place, once the operation is withdrawn, has
+/// its clone compared as it is with the snapshot by its executor before
+/// the resumed turn's agent runs: found intact and recorded so, it resumes
+/// there and lands the work.
+#[test]
+fn a_withdrawn_container_runs_clone_left_in_place_is_checked_by_its_executor_and_lands() {
+    let _test = crate::common::test();
+    let queue = ContainerQueue::new(Some(&container_turns(false)));
+    let (op, clone) = park_in_a_container(&queue);
+    assert_dirty_work_saved(&queue, &op, &clone);
+    let planning = advance(&queue.db, &op, ReplanStatus::Planning);
+    advance(&queue.db, &planning, ReplanStatus::Withdrawn);
+    let supervisor = queue.supervise(TestReviewer::new(&[verdict("pass", &[], "fine")]));
+    finished(&queue.db, &queue.backend, supervisor);
+    assert_landed_restored(&queue, "intact");
+}
+
+/// Acceptance (b), a clean save, and the clone that changed since: a run
+/// in a container whose work is all committed is saved clean from its
+/// executor's files. A file put in its clone after the park, which the
+/// executor's last written work does not show, is found by the executor
+/// before the continuation's agent runs: the clone is not touched, no
+/// agent runs, and the refusal is recorded from the resume's slot as
+/// `replan_restore_failed` with the operation back to `blocked`, not as the
+/// provider's wall; the run rests out of its slot and does not land. Once
+/// the file is taken out and the operation continues again, the restore is
+/// a new attempt the earlier refusal does not end: the executor compares
+/// the clone again, finds it intact, and the run lands.
+#[test]
+fn a_container_runs_clone_changed_since_its_clean_snapshot_blocks_the_continuation_until_mended() {
+    let _test = crate::common::test();
+    let queue = ContainerQueue::new(Some(&container_turns(true)));
+    let (op, clone) = park_in_a_container(&queue);
+    assert!(!manifest(&queue.db, &op).dirty);
+    fs::write(clone.join("stray.txt"), "stray\n").unwrap();
+    advance(&queue.db, &op, ReplanStatus::ContinuingAfterPark);
+    let supervisor = queue.supervise(TestReviewer::new(&[]));
+    finished(&queue.db, &queue.backend, supervisor);
+    let blocked = operation(&queue.db, op.id);
+    assert_eq!(blocked.status, ReplanStatus::Blocked, "{blocked:?}");
+    let detail = queue.detail();
+    let failed = payloads(&detail, "replan_restore_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(
+        failed[0]["reason"]
+            .as_str()
+            .is_some_and(|why| why.contains("changed since the park")),
+        "{failed:?}"
+    );
+    assert!(payloads(&detail, "replan_restored").is_empty());
+    assert_ne!(detail.task.status(), TaskStatus::Completed);
+    assert_ne!(detail.runs[0].status(), RunStatus::Integrated);
+    // Only the first turn's agent ran, and the clone is as it was left.
+    let run_dir = PathBuf::from(detail.runs[0].run_dir().unwrap());
+    assert_eq!(
+        fs::read_to_string(run_dir.join("agent-turns")).unwrap(),
+        "turn\n"
+    );
+    assert_eq!(
+        fs::read_to_string(clone.join("stray.txt")).unwrap(),
+        "stray\n"
+    );
+    // No provider's wall: no ask, no move to another provider.
+    let kinds = event_kinds(&detail);
+    assert!(
+        !kinds.iter().any(|kind| kind.starts_with("provider")),
+        "{kinds:?}"
+    );
+    assert!(
+        SqliteQueue::open(&queue.db)
+            .unwrap()
+            .asks(AskQuery::default())
+            .unwrap()
+            .is_empty()
+    );
+    // Mended, and continued again: a new attempt.
+    fs::remove_file(clone.join("stray.txt")).unwrap();
+    advance(&queue.db, &blocked, ReplanStatus::ContinuingAfterPark);
+    let supervisor = queue.supervise(TestReviewer::new(&[verdict("pass", &[], "fine")]));
+    finished(&queue.db, &queue.backend, supervisor);
+    let detail = queue.detail();
+    assert_eq!(detail.task.status(), TaskStatus::Completed);
+    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+    assert_eq!(payloads(&detail, "replan_restore_failed").len(), 1);
+    let restored = payloads(&detail, "replan_restored");
+    assert_eq!(restored.len(), 1, "{restored:?}");
+    assert_eq!(restored[0]["action"], "intact", "{restored:?}");
+    assert_eq!(restored[0]["by"], "executor", "{restored:?}");
+    assert_eq!(
+        fs::read_to_string(run_dir.join("agent-turns")).unwrap(),
+        "turn\nturn\n"
+    );
+}
+
+/// A run in a container out of resumes whose clone changed since its park:
+/// no turn of its clone follows, in which alone its executor sees the clone
+/// as it is now, while the work it wrote before the park shows nothing
+/// changed since. Once the operation ends in a continuation the restore
+/// fails (`replan_restore_failed`, the operation back to `blocked`) rather
+/// than taking the clone for intact: the run is not handed on to the
+/// recovery job, no agent runs, and the clone is left as it is.
+#[test]
+fn a_container_run_out_of_resumes_is_not_handed_on_over_a_clone_no_turn_checks() {
+    let _test = crate::common::test();
+    let queue = ContainerQueue::new(Some(&container_turns(true)));
+    let (op, clone) = park_in_a_container(&queue);
+    let run = queue.detail().runs[0].clone();
+    assert_eq!(run.status(), RunStatus::NeedsSession);
+    let store = SqliteQueue::open(&queue.db).unwrap();
+    for attempt in 1..=dagq::domain::MAX_RESUME_ATTEMPTS {
+        for (kind, payload) in [
+            (EventKind::ResumeStarted, json!({"attempt": attempt})),
+            (
+                EventKind::ResumeFinished,
+                json!({"attempt": attempt, "outcome": "unresolved"}),
+            ),
+        ] {
+            store.record_runtime_event(run.id(), kind, payload).unwrap();
+        }
+    }
+    fs::write(clone.join("stray.txt"), "stray\n").unwrap();
+    advance(&queue.db, &op, ReplanStatus::ContinuingAfterPark);
+    let supervisor = queue.supervise(TestReviewer::new(&[]));
+    finished(&queue.db, &queue.backend, supervisor);
+    let blocked = operation(&queue.db, op.id);
+    assert_eq!(blocked.status, ReplanStatus::Blocked, "{blocked:?}");
+    let detail = queue.detail();
+    let failed = payloads(&detail, "replan_restore_failed");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(
+        failed[0]["reason"]
+            .as_str()
+            .is_some_and(|why| why.contains("resumes are used up")),
+        "{failed:?}"
+    );
+    assert!(payloads(&detail, "replan_restored").is_empty());
+    assert!(payloads(&detail, "recovery_requested").is_empty());
+    assert_eq!(detail.runs[0].status(), RunStatus::NeedsSession);
+    let run_dir = PathBuf::from(detail.runs[0].run_dir().unwrap());
+    assert_eq!(
+        fs::read_to_string(run_dir.join("agent-turns")).unwrap(),
+        "turn\n"
+    );
+    assert_eq!(
+        fs::read_to_string(clone.join("stray.txt")).unwrap(),
+        "stray\n"
+    );
+}
+
+/// Restart and adopt: a supervisor that handed the restore of a container
+/// run whose clone was gone (the request written, the clone made again)
+/// and stood still before it gave the restore's lease back is taken over
+/// by another, which adopts the run's stale lease and goes on from what the
+/// run directory and the queue hold: the snapshot is not saved again, the
+/// clone not made again over the one made, and the executor fills it once;
+/// the restore is recorded once and the run lands once. The first
+/// supervisor, back, finds the run no longer its own.
+#[test]
+fn a_container_restore_handed_before_a_supervisor_stood_still_is_taken_over_and_done_once() {
+    let _test = crate::common::test();
+    let queue = ContainerQueue::new(Some(&container_turns(false)));
+    let (op, clone) = park_in_a_container(&queue);
+    fs::remove_dir_all(&clone).unwrap();
+    advance(&queue.db, &op, ReplanStatus::ContinuingAfterPark);
+    let run_dir = PathBuf::from(queue.detail().runs[0].run_dir().unwrap());
+    let (paused, go) = (run_dir.join("resume-paused"), run_dir.join("resume-go"));
+    let pauses = pause_once(
+        runtime::PausePoint::RestoreHanded,
+        paused.clone(),
+        go.clone(),
+    );
+    let first = queue.supervise_with(
+        TestReviewer::new(&[verdict("pass", &[], "fine")]),
+        |options| {
+            options.pauses = Some(pauses);
+            options.heartbeat_interval = Duration::from_secs(3600);
+        },
+    );
+    wait_for_file(&paused);
+    // Handed: the request is in the run directory and the clone made again
+    // at the base, and nothing is recorded yet.
+    assert!(
+        run_dir
+            .join(dagq::domain::clone_work::RUN_RESTORE_FILE)
+            .is_file()
+    );
+    assert_eq!(
+        git_out(&clone, &["rev-parse", "HEAD"]),
+        queue.detail().runs[0].base_commit().as_str()
+    );
+    assert!(payloads(&queue.detail(), "replan_restored").is_empty());
+    // It stood still past its lease: another supervisor takes the run over.
+    Connection::open(&queue.db)
+        .unwrap()
+        .execute(
+            "UPDATE run_leases SET heartbeat_at=0 WHERE run_id=?1",
+            [queue.detail().runs[0].id().as_str()],
+        )
+        .unwrap();
+    let second = queue.supervise(TestReviewer::new(&[verdict("pass", &[], "fine")]));
+    finished(&queue.db, &queue.backend, second);
+    fs::write(&go, "").unwrap();
+    let _ = joined(first, "the supervisor that stood still to return");
+    assert_landed_restored(&queue, "recreated");
+    let snapshots: Vec<_> = fs::read_dir(replans_dir(&queue.db))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(snapshots.len(), 1, "{snapshots:?}");
+    assert_eq!(payloads(&queue.detail(), "replan_parked").len(), 1);
 }

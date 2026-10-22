@@ -72,7 +72,13 @@ Claude/Codexで同じ状態機械を使う。
   照合か復元の失敗（食い違うworktreeは上書きしない）は`replan_restore_failed`を記録し、操作を`blocked`に戻す（下の「復元や起動の失敗はblockedのまま」）。
   resumeは始まらず、`replans`の`problems`に出る。
   `replan_parked`はresumeの区分・統計・`resolved_head`で一つのparkとして読む。
-  containerのcloneのrunは未対応で`blocked`になる。
+  containerのcloneのrunは、制御側がcloneでgitを走らせず、executorがturnの終わりに書き出した差分・index・untracked（実行権限を含む）を状態の世代とheadと照合してsnapshotに写す。
+  書き出しが無い・古い・照合が合わなければ保存せず`blocked`にし、cloneに手を付けない。
+  継続・撤回では、制御側が復元の材料（消えたcloneには作り直したことと、headのbundle）をrun dirに置き、消えたcloneはbaseで作り直す。
+  executorはresumeのturnのagentの前に今のcloneをsnapshotと照合し、作り直したcloneにだけ当て、答えをrun dirに書く。
+  制御側はresumeのslotで答えを記録し、食い違うcloneは上書きせずagentも動かさず、`replan_restore_failed`で`blocked`に戻してrunをslotから休ませる（providerの壁としては扱わない）。
+  失敗を記録した後にcloneを直して操作を継続に戻すと、記録した失敗の数で数える新しい試行になり、前の試行の答えや作り直しを使わずexecutorがcloneを照合し直す。再起動・adoptは同じ試行を続ける。
+  resumeを使い切ったrunはturnが続かず、今のcloneを見るexecutorが動かない（保留の前の書き出しは後の変更を映さない）ので、cloneの有無によらず復元の失敗とし、復旧jobにも継承retryにも渡さない。
 - 条件の対応表の書き手: 済み（`replans.rs`の`write_mappings`）。同じ操作で同じ項目の削除を2度記録しない。
 - snapshotの前に閉じた操作の依頼を閉じること: 済み（`replans.rs`の`move_in`）。
 - 未実装: 診断（`pause_requested`へ進める判断）・plannerのprompt・置換の適用・goal closeの判定。

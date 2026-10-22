@@ -1447,6 +1447,16 @@ impl RunTransitions for SqliteQueue {
     ) -> Result<bool> {
         SqliteQueue::finish_restore(self, id, token, op, generation, restored)
     }
+    fn record_clone_restore(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        op: crate::domain::ReplanId,
+        generation: i64,
+        restored: std::result::Result<serde_json::Value, String>,
+    ) -> Result<bool> {
+        SqliteQueue::record_clone_restore(self, id, token, op, generation, restored)
+    }
     fn claim_for_supervisor(
         &mut self,
         base_commit: &CommitSha,
