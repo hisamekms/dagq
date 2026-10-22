@@ -640,10 +640,12 @@ enum Command {
         until: Option<dagq::domain::stats::Cursor>,
     },
     /// Release the hold of a task (TARGET: a task ID, or a run ID for its task), refused while
-    /// the step that went when it was held still goes (hold_not_settled). A held run with a
-    /// session goes on in it; a run that stopped, has no session, or is given another
-    /// --provider ends, and the next run carries its branch (and its uncommitted work, saved
-    /// as a commit) over. Prints {"hold", "continuation", "decision", ...}.
+    /// the step that went when it was held still goes (hold_not_settled). A run that stopped
+    /// (failed or interrupted) goes on by the recovery result the hold kept when there is one
+    /// and neither --provider nor --model is given, and ends otherwise. A waiting run goes on
+    /// in its session, and ends when it has no session or is given another --provider. When
+    /// the run ends, the next run carries its branch (and its uncommitted work, saved as a
+    /// commit) over. Prints {"hold", "continuation", "decision", ...}.
     Release {
         target: String,
         /// The provider of the task's later turns and runs.
