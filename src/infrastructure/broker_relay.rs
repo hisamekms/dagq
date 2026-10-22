@@ -34,7 +34,7 @@ use tracing::{info, warn};
 use super::podman_machine::{MACHINE_TIMEOUT, PodmanCli, PodmanCliWithin, QueueMachine};
 use super::queue_service::{private_dir, queue_dir_of, write_private};
 use super::sqlite::SqliteQueue;
-use crate::application::broker_relay::{RelayControl, RelayRecords, down_message};
+use crate::application::broker_relay::{RelayControl, RelayRecords, RelayTimedOut, down_message};
 use crate::application::podman_machine::Machine;
 use crate::domain::broker_relay::{
     RelaySeen, RelaySpec, RelayState, SOCKET_MODE, TARGET_LABEL, relay_run_args, socket_path,
@@ -343,16 +343,17 @@ impl PodmanRelays {
     }
 
     /// `podman --connection dagq <args>` within [`Self::relay_timeout`],
-    /// whatever its exit: an error when it did not end in time and was
-    /// killed.
+    /// whatever its exit: a [`RelayTimedOut`] when it did not end in time
+    /// and was killed.
     fn within(&self, args: &[String]) -> Result<std::process::Output> {
         match self.podman.inside_within(args, self.relay_timeout)? {
             Some(output) => Ok(output),
-            None => bail!(
+            None => Err(RelayTimedOut(format!(
                 "podman --connection dagq {} did not end within {:?}: it was stopped",
                 args.join(" "),
                 self.relay_timeout
-            ),
+            ))
+            .into()),
         }
     }
 

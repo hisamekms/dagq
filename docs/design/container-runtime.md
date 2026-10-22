@@ -155,19 +155,19 @@ runのcontainerは`--network none`で、外への経路はhostのqueueのbroker�
   hostへはmachineのgvproxy（`host.containers.internal`）を通る。
   tokenを持たず、認証も宛ての判定もしない（brokerが行う）。
 - 転送（`dagq relay forward`）: runのcontainerの中で`127.0.0.1`の決まったportを受け、socketへ流す。
-  containerのenv（`container_env`）がdagqのクライアントモードの宛て・Claude Codeの`ANTHROPIC_BASE_URL`（brokerの`/anthropic`）・標準のproxyのenvをこのportに向け、道具に固有の設定を持たない（[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定3）。
+  containerのenvがdagqのクライアントモードの宛て・Claude Codeの`ANTHROPIC_BASE_URL`（brokerの`/anthropic`）・標準のproxyのenvをこのportに向け、道具に固有の設定を持たない（[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定3）。
   run tokenをClaude Codeとproxyのenvに入れるのは、containerの中の`dagq relay turn`である（下の「workerの実行」）。
   クライアントモードの宛ては[Queue service](queue-service.md#クライアントモード)。
 - DNSが無い: proxyのenvを見ない道具は名前を引けず外へ出られない。
   これは隔離の結果として扱い、要るものはhostのrunかqueue serviceのユースケースに回す。
 - 見張り: supervisor（`--once`でないもの）は、brokerが答える間、各relayのcontainerが動くか・brokerの今のportへ向くか・socket越しにbrokerのhealthに届くかを見る。
-  先に、記録のrunがqueueの上でもう生きていない（taskが進行中でない・後のrunに代わった・着地した・runが無い）relayは起動し直さず`close`で片付け、起動し直しの回数にもattentionの判定にも数えない（判断は`relay_fate`）。
+  先に、記録のrunがqueueの上でもう生きていない（taskが進行中でない・後のrunに代わった・着地した・runが無い）relayは起動し直さず`close`で片付け、起動し直しの回数にもattentionの判定にも数えない。
   `close`が失敗した記録は次の回にやり直す。
   落ちたかportの古いrelayは起動し直す。
   動くのに届かないrelayがあるか、podmanがmachineに繋がらない（`--connection dagq`もgvproxyを通る）ときはgvproxyが落ちたとみて、machineをhost全体のlockの中で起動し直してから全てのrelayを起動し直す。
   relayを見るpodmanの呼び出しには時間の上限があり、超えたものは止めて繋がらないとして扱う。
   relayの起動（`open`と起動し直し）と`close`のpodmanの呼び出しにも時間の上限があり、見張りからのmachineの起動し直しのpodmanの呼び出しにはそれより長い別の上限がある。
-  超えたものは止めて起動し直しか`close`の失敗として扱う。
+  超えたものは止めて起動し直しか`close`の失敗として扱い、`close`が超えた回は残りの`close`を次の回に回す。
   回数の上限と窓はqueue serviceと同じ。
   起動し直せない・上限に達した・見られないときはinbox宛てのattention `queue_relay_down`を書き、全てのrelayが動けば消える。
   attentionが立つ間は`RelayGate`がcontainerを使えないと答え、新しいrunを控える（上の「fail closedの境界」）。

@@ -11,6 +11,7 @@
 //!
 //! [Container runtime]: ../../docs/design/container-runtime.md
 
+use std::fmt;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
@@ -30,7 +31,9 @@ pub trait RelayControl: Send + Sync {
     fn open(&self, spec: &RelaySpec, port: u16) -> Result<()>;
     /// The run's end in the machine: stop and remove its turn's container
     /// and its relay, remove its socket and build output volumes, and
-    /// forget the relay; what is not there is no error.
+    /// forget the relay; what is not there is no error. A podman command
+    /// that did not end within its limit fails with [`RelayTimedOut`] in
+    /// the error's chain.
     fn close(&self, run: &str) -> Result<()>;
     /// Each relay the queue keeps open, as a look finds it: a relay whose
     /// container went (the machine stopped) is one that does not run.
@@ -42,6 +45,20 @@ pub trait RelayControl: Send + Sync {
     /// mends its gvproxy (ADR-t2114-3 decision 4).
     fn restart_machine(&self) -> Result<()>;
 }
+
+/// A podman command of a relay's start or close that did not end within
+/// its limit and was stopped: the machine does not answer, so another
+/// command now would wait as long.
+#[derive(Debug)]
+pub struct RelayTimedOut(pub String);
+
+impl fmt::Display for RelayTimedOut {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RelayTimedOut {}
 
 /// What the gate reads of the supervisor's watch: the message of the
 /// relays' attention while it stands.

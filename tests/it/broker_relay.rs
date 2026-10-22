@@ -25,7 +25,7 @@ use std::thread;
 use std::time::Duration;
 
 use dagq::application::ContainerRuntime;
-use dagq::application::broker_relay::{RelayControl, RelayGate};
+use dagq::application::broker_relay::{RelayControl, RelayGate, RelayTimedOut, close};
 use dagq::application::queue_broker::{BrokerProbe, QueueBrokerControl};
 use dagq::domain::broker_relay::{RelaySeen, RelaySpec, RelayState, forward_command};
 use dagq::domain::container_runtime::{Availability, RuntimeTarget};
@@ -251,6 +251,7 @@ struct FakeRelays {
     seen: Mutex<Vec<RelaySeen>>,
     starts_fail: bool,
     closes_fail: AtomicBool,
+    closes_time_out: AtomicBool,
     restarts: Mutex<Vec<(String, u16)>>,
     closes: Mutex<Vec<String>>,
     machine_restarts: AtomicU32,
@@ -264,6 +265,9 @@ impl RelayControl for FakeRelays {
         self.closes.lock().unwrap().push(run.to_owned());
         if self.closes_fail.load(Ordering::SeqCst) {
             anyhow::bail!("podman cannot remove the relay");
+        }
+        if self.closes_time_out.load(Ordering::SeqCst) {
+            return Err(RelayTimedOut("podman rm did not end in time".to_owned()).into());
         }
         self.seen.lock().unwrap().retain(|relay| relay.run != run);
         Ok(())
@@ -501,7 +505,8 @@ fn the_supervisor_starts_a_relay_again_and_tells_the_inbox_when_it_cannot() {
 /// `queue_relay_started` or `queue_relay_down` and count for no start, an
 /// attention left standing ends, and the container runtime is not held
 /// for the relays. A close that fails is tried again at the next look,
-/// while a living run's relay is still started again.
+/// while a living run's relay is still started again; once one is out of
+/// time, the others are left to the next look.
 #[test]
 fn the_supervisor_closes_the_relays_of_runs_that_are_over() {
     use crate::runtime_support::supervise_with;
@@ -550,6 +555,27 @@ fn the_supervisor_closes_the_relays_of_runs_that_are_over() {
     // Closed, they are not looked at again.
     supervise_with(&db, &repo, &backend, &relay_options(relays.clone())).unwrap();
     assert_eq!(relays.closes.lock().unwrap().len(), tried.len() + 4);
+
+    // A close out of time: the rest are not tried in that pass, and their
+    // records stay for the next.
+    relays
+        .seen
+        .lock()
+        .unwrap()
+        .extend(over.iter().map(|run| relay(run, false, None, None)));
+    relays.closes.lock().unwrap().clear();
+    relays.closes_time_out.store(true, Ordering::SeqCst);
+    supervise_with(&db, &repo, &backend, &relay_options(relays.clone())).unwrap();
+    let tried = relays.closes.lock().unwrap().clone();
+    assert!(
+        !tried.is_empty() && tried.iter().all(|run| run == over[0]),
+        "{tried:?}"
+    );
+    assert_eq!(relays.seen.lock().unwrap().len(), 4);
+    relays.closes_time_out.store(false, Ordering::SeqCst);
+    supervise_with(&db, &repo, &backend, &relay_options(relays.clone())).unwrap();
+    assert_eq!(relays.closes.lock().unwrap()[tried.len()..], over);
+    assert!(relays.seen.lock().unwrap().is_empty());
 
     assert!(relays.restarts.lock().unwrap().is_empty());
     assert_eq!(relays.machine_restarts.load(Ordering::SeqCst), 0);
@@ -820,8 +846,10 @@ fn a_hung_podman_of_a_relay_s_start_is_killed_and_the_start_fails() {
 }
 
 /// A podman of the close of a relay (`rm`, `volume exists`) that hangs is
-/// killed at the relay's limit and the close fails, which the supervisor
-/// tries again at the next look; the record stays until a close succeeds.
+/// killed at the relay's limit and the close fails as out of time, which
+/// the supervisor tries again at the next look; the record stays until a
+/// close succeeds. A podman that answers with a failure is not out of
+/// time.
 #[test]
 fn a_hung_podman_of_a_relay_s_close_is_killed_and_the_close_fails() {
     let _test = common::test();
@@ -833,7 +861,15 @@ fn a_hung_podman_of_a_relay_s_close_is_killed_and_the_close_fails() {
         relay_timeout: HUNG_LIMIT,
         ..relays.clone()
     };
-    each_hung(&state, &["rm", "volume"], || limited.close("r1"));
+    each_hung(&state, &["rm", "volume"], || {
+        let error = close(&limited, "r1").unwrap_err();
+        assert!(error.downcast_ref::<RelayTimedOut>().is_some(), "{error:#}");
+        Err(error)
+    });
+    fs::write(state.join("no-connection"), "").unwrap();
+    let error = close(&relays, "r1").unwrap_err();
+    assert!(error.downcast_ref::<RelayTimedOut>().is_none(), "{error:#}");
+    fs::remove_file(state.join("no-connection")).unwrap();
     assert_eq!(relays.relays().unwrap().len(), 1);
     relays.close("r1").unwrap();
     assert!(relays.relays().unwrap().is_empty());

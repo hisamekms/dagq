@@ -22,7 +22,9 @@
 //! its record until a close succeeds, so a supervisor that went down or a
 //! close that failed at the run's end leaves it. It is not started again
 //! and counts for no start and no attention; a close that fails is tried
-//! again at the next look.
+//! again at the next look. Once a close is out of its time
+//! ([`RelayTimedOut`]), the other relays of runs that are over are not
+//! closed in that pass but at the next look.
 //!
 //! A broker that does not answer is the broker's watch's
 //! ([`super::queue_broker`]): the relays are not looked at meanwhile. A
@@ -37,7 +39,7 @@
 
 use super::*;
 use crate::application::RunNotFound;
-use crate::application::broker_relay::{RelayControl, close};
+use crate::application::broker_relay::{RelayControl, RelayTimedOut, close};
 use crate::application::queue_broker::QueueBrokerControl;
 use crate::domain::broker_relay::{
     QUEUE_RELAY_ATTENTION_KINDS, RelayAction, RelayFate, RelayRun, RelaySeen, address_port,
@@ -194,15 +196,22 @@ impl HostOpsState {
                 None
             }
         };
+        // Once a close is out of time, the rest are not tried in this pass:
+        // each would wait as long again before the machine is started again.
+        let mut timed_out = false;
         seen.into_iter()
             .filter(|relay| {
                 let run = relay_run(env, in_progress.as_deref(), &relay.run);
                 if relay_fate(run) == RelayFate::Look {
                     return true;
                 }
+                if timed_out {
+                    return false;
+                }
                 match close(relays, &relay.run) {
                     Ok(()) => info!(run = relay.run, "the relay of a run that is over is closed"),
                     Err(error) => {
+                        timed_out = error.downcast_ref::<RelayTimedOut>().is_some();
                         warn!(run = relay.run, error = %format_args!("{error:#}"), "the relay of a run that is over could not be closed: {error:#}; tried again at the next look");
                     }
                 }
