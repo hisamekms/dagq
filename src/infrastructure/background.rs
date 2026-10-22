@@ -395,7 +395,59 @@ mod tests {
         wait_for("the turn to be killed", || !running(turn));
     }
 
-    /// A command that exits at once leaves no wrapper to record.
+    /// A process control that reads the start `start` gives for every pid.
+    struct Starts {
+        start: Option<&'static str>,
+    }
+
+    impl ProcessControl for Starts {
+        fn alive(&self, _pid: u32) -> bool {
+            self.start.is_some()
+        }
+        fn terminate(&self, _pid: u32) -> Result<()> {
+            Ok(())
+        }
+        fn interrupt(&self, _pid: u32) -> Result<()> {
+            Ok(())
+        }
+        fn kill(&self, _pid: u32) -> Result<()> {
+            Ok(())
+        }
+        fn start_identity(&self, _pid: u32) -> Option<String> {
+            self.start.map(str::to_owned)
+        }
+    }
+
+    /// A wrapper whose start cannot be read once the shell printed its pid
+    /// is not recorded: the launch says it exited as soon as it started.
+    /// One whose start is read is recorded with it.
+    #[test]
+    fn a_wrapper_whose_start_cannot_be_read_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("session.log");
+        let gone = BackgroundWrappers {
+            processes: &Starts { start: None },
+        };
+        let error = format!(
+            "{:#}",
+            gone.launch(dir.path(), "true", &[], &log).unwrap_err()
+        );
+        assert!(error.contains("exited as soon as it started"), "{error}");
+
+        let read = BackgroundWrappers {
+            processes: &Starts {
+                start: Some("Thu Jan  1 00:00:00 1970"),
+            },
+        };
+        let handle =
+            BackgroundHandle::parse(&read.launch(dir.path(), "true", &[], &log).unwrap()).unwrap();
+        assert!(read.alive(&handle));
+    }
+
+    /// A command that exits at once leaves no wrapper that runs: the launch
+    /// either finds it gone, or, while the system still shows the ended
+    /// process, records one that is soon no longer alive. A directory that
+    /// is missing is an error.
     #[test]
     fn a_wrapper_that_exits_at_once_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -403,22 +455,16 @@ mod tests {
         let wrappers = BackgroundWrappers {
             processes: &SystemProcesses,
         };
-        let mut error = None;
-        // The shell may still see the process for a moment after its exit.
-        for _ in 0..20 {
-            match wrappers.launch(dir.path(), &sh("exit 3"), &[], &log) {
-                Err(e) => {
-                    error = Some(format!("{e:#}"));
-                    break;
-                }
-                Ok(handle) => {
-                    let handle = BackgroundHandle::parse(&handle).unwrap();
-                    wait_for("the process to end", || !wrappers.alive(&handle));
-                }
+        match wrappers.launch(dir.path(), &sh("exit 3"), &[], &log) {
+            Err(e) => {
+                let error = format!("{e:#}");
+                assert!(error.contains("exited as soon as it started"), "{error}");
+            }
+            Ok(handle) => {
+                let handle = BackgroundHandle::parse(&handle).unwrap();
+                wait_for("the process to end", || !wrappers.alive(&handle));
             }
         }
-        let error = error.expect("a launch saw the process gone");
-        assert!(error.contains("exited as soon as it started"), "{error}");
         assert!(
             wrappers
                 .launch(&dir.path().join("missing"), "true", &[], &log)
