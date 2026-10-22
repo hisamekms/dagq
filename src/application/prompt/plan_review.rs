@@ -353,7 +353,13 @@ pub(super) fn follow_up_membership(detail: &TaskDetail) -> Option<Value> {
 /// submitted earlier (one submitted later passes); a ready task to
 /// `reopen`, or a task fixing an in-progress one after it lands; a
 /// follow_up's membership, checked from its planner's mapping against the
-/// source goal's acceptance, not passed on its form alone; and `lint`.
+/// source goal's acceptance, not passed on its form alone; a premise the
+/// plan takes as a fact unchecked (one a short read settles is the
+/// planner's, one that needs an experiment a Spike's) and an
+/// implementation resting on an unresolved premise made ready with the
+/// proposal, a Spike's completion its only gate, whatever the classes of
+/// the proposal's tasks; [`SPIKE_CHECKS`] only for a proposal with a
+/// Spike (ADR-t1487-1); and `lint`.
 /// Where a person answered the same kind of finding, the ask goes in
 /// `precedents` and the answer in the reason. The origin of each task and
 /// goal decides: a person's task or goal and a priority a person set keep
@@ -986,6 +992,9 @@ pub(super) fn plan_review_text(
          - a contradiction with another proposal: with one submitted before this one, send this one back; with one submitted after, pass this one (the later one is checked against it);\n\
          - a ready task that has to change for this proposal to hold: name it in reopen, and the runtime takes it out of the claim for a planner to fix. Reopen only the few tasks that have to change, at most {reopen_limit}: when many registered tasks would break, reopen none and send this proposal back (revise) asking it to keep them working on its own side (compatibility) or to split its change, since past the limit the runtime reopens none of them and sends this proposal back itself; an in-progress task is never changed: send this proposal back asking for a task that fixes it after it lands and depends on it;\n\
          - a follow_up's membership (its follow_up_membership: the planner's judgements of whether its source goal's acceptance needs it, each with the acceptance items, reason, evidence, destination goal and the acceptance version it was judged at against the source goal's current one): start from the planner's mapping and check that it holds against the source goal's acceptance; you need not repeat the whole investigation, but never pass a judgement on its form alone. When it looks doubtful (the reason names no item of the acceptance, the evidence disagrees with the receipt or the diff it cites, the destination is an unrelated catch-all goal, the acceptance was weakened so that the follow-up falls out of scope, the version does not match), read the evidence around it (the source run's receipt and commits, `dagq goal show ID --full` for the goal's acceptance and its history) before you decide. A wrong mapping the planner can fix is a revise; an acceptance weakened to drop a follow-up needs a person's intent, a concern;\n\
+         - a premise the plan rests on, not yet checked and taken as a fact (how a tool, an API, a permission, a headless run or a provider behaves; a value the tasks assume without a measurement): one a short read of the code, the records or the official documents settles is the planner's to settle, with what it found in the tasks' context or notes; one that needs an experiment, a prototype, a build or a measurement belongs in a Spike task (execution_class spike) submitted first. A plan whose implementation stands on such a premise left unchecked, with no Spike for it, is a revise;\n\
+         - an implementation task that rests on a premise not yet resolved and would become ready with this proposal: it waits for the Spike's result and is submitted again by the replanning that reads it (a draft may hold it meanwhile). A dependency on a Spike as the only thing that holds such an implementation back starts it without anyone reading the result: a revise;\n\
+         {spikes}\
          - every finding of `dagq lint` is one to fix.\n\n\
          Decide one verdict:\n\
          - pass: the tasks may run as written, after the actions below.\n\
@@ -1023,8 +1032,31 @@ pub(super) fn plan_review_text(
         reopen_limit = crate::domain::plan_review::REOPEN_LIMIT,
         most = DUPLICATE_CANDIDATES,
         codes = reason_codes_section(review_reason::PLAN_REVIEW_CODES, PLAN_REVIEW_CODES_USE),
+        spikes = if material
+            .tasks
+            .iter()
+            .any(|detail| detail.task.execution_class().is_spike())
+        {
+            SPIKE_CHECKS
+        } else {
+            ""
+        },
     )
 }
+
+/// The checks the plan review prompt adds when the proposal has a Spike
+/// task (ADR-t1487-1 decisions 2, 3 and 8): the Spike's form and a verdict
+/// with its grounds, a run a worker can do with its own permissions, and
+/// a further Spike against the goal's limit of Spike cycles: kept in the
+/// goal it follows so the limit counts it, settling what the earlier ones
+/// could not, and past the limit a person's own submit, not asked again
+/// (the runtime refuses a runtime planner's there). They name no value of a repository's:
+/// its criteria come from its instructions, which the prompt has the job
+/// read first.
+pub(super) const SPIKE_CHECKS: &str = "\
+- a Spike task (execution_class spike) of the proposal: its description or acceptance holds its question, what its answer changes in the plan, how to investigate, its limit (time, attempts) as an instruction to the worker, where the evidence goes and what each verdict leads to; its acceptance is a verdict with its grounds (holds, does_not_hold or unresolved), a negative result counting as a success, never only that the wanted technology worked. A missing part is a revise;\n\
+- that a worker can run the Spike with its own permissions: its acceptance asks for no manual work on a disposable queue, no setting applied by hand to production and no tool installed on the host, and a premise about permissions, a headless run or a provider is checked on the worker's own route, not in a planner, a subagent or a person's terminal. One that asks otherwise is a revise;\n\
+- a further Spike (one that follows earlier Spikes whose results were replanned; read the goal and its tasks with `dagq goal show ID --full`) and the goal's limit of Spike cycles (the repository's setting `[goals] max_spike_cycles`; a cycle is a round of a goal's Spikes and the replanning that reads them). It belongs to the goal of the Spikes it follows (after a Spike with no goal, to a goal made or named for it): one with no goal, or put in another goal, escapes the limit, a revise. It says what it settles that the earlier ones could not and is not an extension only because a verdict was unresolved; a revise otherwise. The runtime refuses a runtime planner's submit of a further Spike in a goal past the limit, so one past it here was a person's own submit, the person's decision on the limit: pass it on that point and do not ask again;\n";
 
 /// What the goal review job is shown about one goal (ADR-0047 decision
 /// 43): the goal, each of its tasks with what landed for it, the

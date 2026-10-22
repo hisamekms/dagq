@@ -23,8 +23,9 @@ use dagq::{
         AgentProvider, CommandSpec, SessionWrappers, TaskReads, TaskStore, planner_idle_marker,
     },
     domain::{
-        AskKind, DraftOrigin, NewAsk, NewGoal, NewTask, PlannerOrigin, PlannerOwner, Priority,
-        ProposalId, ProposalStatus, Submission, TaskAction, TaskEdit, TaskId, TaskRun, TaskStatus,
+        AskKind, DraftOrigin, ExecutionClass, NewAsk, NewGoal, NewTask, PlannerOrigin,
+        PlannerOwner, Priority, ProposalId, ProposalStatus, Submission, TaskAction, TaskEdit,
+        TaskId, TaskRun, TaskStatus,
     },
     infrastructure::{
         clock,
@@ -97,6 +98,17 @@ pub(crate) fn add(
     deps: &[TaskId],
     priority: Priority,
 ) -> TaskId {
+    add_classed(queue, title, deps, priority, ExecutionClass::Implementation)
+}
+
+/// [`add`] with the task's execution class.
+fn add_classed(
+    queue: &mut SqliteQueue,
+    title: &str,
+    deps: &[TaskId],
+    priority: Priority,
+    execution_class: ExecutionClass,
+) -> TaskId {
     queue
         .add(NewTask {
             change: None,
@@ -115,7 +127,7 @@ pub(crate) fn add(
             // Headless: the fixture has no interactive workers (task 1437).
             worker_mode: Some(dagq::domain::worker::WorkerMode::Headless),
             wait_for_build: false,
-            execution_class: Default::default(),
+            execution_class,
         })
         .unwrap()
         .id()
@@ -2434,4 +2446,37 @@ fn a_plan_reviews_cancel_and_a_cancel_answer_close_the_hold_of_the_task() {
     supervise_owned(&fx, &backend, &reviewer);
     assert_eq!(status(&mut queue, dropped), TaskStatus::Canceled);
     assert_hold_ended_by_cancel(&mut queue, dropped);
+}
+
+/// ADR-t1487-1, the boundary: a Spike's execution class, stored in the
+/// queue, reaches the plan review job, whose prompt shows the task's class
+/// and asks the Spike checks. Which checks a proposal is asked, with a
+/// Spike or without one, is the unit tests' (`prompt::tests`).
+#[test]
+fn a_spike_of_the_proposal_reaches_the_plan_review_with_its_checks() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let spike = add_classed(
+        &mut queue,
+        "probe",
+        &[TaskId::new(1)],
+        Priority::Normal,
+        ExecutionClass::Spike,
+    );
+    submit(&mut queue, &[spike], None);
+    let reviewer = StubReviewer::new(&[json!({"verdict": "pass", "reasons": [], "summary": "ok"})]);
+    supervise(&fx, &PlanWorkspace::default(), &reviewer);
+    let prompts = reviewer.prompts();
+    assert_eq!(prompts.len(), 1);
+    for expected in [
+        "\"execution_class\":\"spike\"",
+        "- that a worker can run the Spike with its own permissions",
+        "- a premise the plan rests on, not yet checked and taken as a fact",
+    ] {
+        assert!(
+            prompts[0].contains(expected),
+            "{expected:?} not in {}",
+            prompts[0]
+        );
+    }
 }

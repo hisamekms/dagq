@@ -626,6 +626,16 @@ fn sessions_run_the_repository_checks_and_leave_the_verification_to_integrate() 
 /// A task as plan review reads it, with long fields of the size of this
 /// queue's (about 3 KB, task 591's measure of prompt 157).
 fn long_task(id: i64, status: TaskStatus, paths: &[&str]) -> Task {
+    classed_task(id, status, paths, Default::default())
+}
+
+/// [`long_task`] of the execution class `execution_class`.
+fn classed_task(
+    id: i64,
+    status: TaskStatus,
+    paths: &[&str],
+    execution_class: crate::domain::ExecutionClass,
+) -> Task {
     Task::restore(TaskRecord {
         goal_priority: None,
         id: TaskId::new(id),
@@ -645,7 +655,7 @@ fn long_task(id: i64, status: TaskStatus, paths: &[&str]) -> Task {
         worker: crate::domain::worker::Worker::CLAUDE_HEADLESS,
         named_mode: None,
         wait_for_build: false,
-        execution_class: Default::default(),
+        execution_class,
     })
     .unwrap()
 }
@@ -823,6 +833,75 @@ fn plan_review_reopens_a_few_tasks_and_sends_back_a_change_that_breaks_many() {
         "past the limit the runtime reopens none of them and sends this proposal back itself",
     ] {
         assert!(line.contains(part), "{part} in {line}");
+    }
+}
+
+/// ADR-t1487-1: the checks of an unchecked premise taken as a fact (a
+/// Spike missing included) and of an implementation made ready on an
+/// unresolved premise are in every plan review prompt, an implementation
+/// alone included; the checks of a Spike's form, of a run a worker can do
+/// and of a further Spike against the goal's limit of Spike cycles only in
+/// that of a proposal with a Spike. None names a value of a repository's
+/// (no limit, no build tool).
+#[test]
+fn plan_review_asks_of_premises_always_and_of_spikes_only_with_one() {
+    use crate::domain::ExecutionClass;
+    let always = [
+        "- a premise the plan rests on, not yet checked and taken as a fact",
+        "belongs in a Spike task (execution_class spike) submitted first",
+        "with no Spike for it, is a revise",
+        "- an implementation task that rests on a premise not yet resolved and would become ready with this proposal",
+        "A dependency on a Spike as the only thing that holds such an implementation back",
+    ];
+    let spike_only = [
+        "- a Spike task (execution_class spike) of the proposal: its description or acceptance holds its question",
+        "a negative result counting as a success",
+        "- that a worker can run the Spike with its own permissions",
+        "no manual work on a disposable queue, no setting applied by hand to production and no tool installed on the host",
+        "- a further Spike (one that follows earlier Spikes whose results were replanned",
+        "the goal's limit of Spike cycles",
+        "one with no goal, or put in another goal, escapes the limit, a revise",
+        "one past it here was a person's own submit, the person's decision on the limit: pass it on that point and do not ask again",
+    ];
+    for part in spike_only {
+        assert!(SPIKE_CHECKS.contains(part), "{part} not in {SPIKE_CHECKS}");
+    }
+    assert!(
+        !SPIKE_CHECKS.chars().any(|c| c.is_ascii_digit()),
+        "{SPIKE_CHECKS}"
+    );
+    for word in ["cargo", "Rust", "clippy", "nextest"] {
+        assert!(!SPIKE_CHECKS.contains(word), "{word} in {SPIKE_CHECKS}");
+    }
+    // An implementation alone, with no Spike for what it rests on.
+    let alone = plan_case(1, 0).prompt().text;
+    // A Spike with an implementation beside it.
+    let mut case = plan_case(1, 0);
+    case.tasks = vec![
+        proposal_task(
+            classed_task(1000, TaskStatus::Submitted, &[], ExecutionClass::Spike),
+            Vec::new(),
+        ),
+        proposal_task(long_task(1001, TaskStatus::Submitted, &[]), Vec::new()),
+    ];
+    let with_spike = case.prompt().text;
+    for part in always {
+        assert!(alone.contains(part), "{part} not in {alone}");
+        assert!(with_spike.contains(part), "{part} not in {with_spike}");
+    }
+    assert!(with_spike.contains(SPIKE_CHECKS), "{with_spike}");
+    for part in spike_only {
+        assert!(!alone.contains(part), "{part} in {alone}");
+    }
+    // Among the meaning checks, before the lint.
+    assert!(
+        with_spike.find(SPIKE_CHECKS)
+            < with_spike.find("- every finding of `dagq lint` is one to fix")
+    );
+    // The checks asked of every proposal name no value either.
+    for start in [always[0], always[3]] {
+        let line = alone.lines().find(|line| line.starts_with(start)).unwrap();
+        assert!(!line.chars().any(|c| c.is_ascii_digit()), "{line}");
     }
 }
 
@@ -1434,7 +1513,7 @@ fn the_optional_sections_share_the_room_the_required_ones_leave() {
     use crate::domain::related::RelatedTask;
     let mut case = plan_case(0, 0);
     case.tasks = vec![proposal_task(
-        sized_task(1000, TaskStatus::Submitted, 184_000),
+        sized_task(1000, TaskStatus::Submitted, 182_000),
         Vec::new(),
     )];
     case.queued = (1..=600)
@@ -1470,7 +1549,7 @@ fn the_optional_sections_share_the_room_the_required_ones_leave() {
     let prompt = case.prompt();
     assert_within_limit(&prompt);
     assert_eq!(prompt.bytes.over_limit, None);
-    assert!(prompt.bytes.sections["tasks"] > 184_000);
+    assert!(prompt.bytes.sections["tasks"] > 182_000);
     assert!(
         prompt.bytes.sections["full_text"] > 90_000,
         "{:?}",

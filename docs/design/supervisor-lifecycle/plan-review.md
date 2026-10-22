@@ -22,6 +22,7 @@ related:
   - adr-t1971-1
   - adr-t1975-1
   - adr-t2751-1
+  - adr-t1487-1
 ---
 
 # Plan review (supervisor)
@@ -78,6 +79,13 @@ submit -> 候補の順序 -> job（読むだけ） -> verdict -+- pass -----> ta
 - 予想するファイルは[claimを控える](claim-hold.md#判定の入力)と同じ規則で求める（[ADR-t1981-1](../../adr/2026-10-07-t1981-1-expected-files-leave-out-path-globs.md)）。
 - 依存は中身の前提のときだけで、同じファイルを触ることはclaimの控えに任せる（[ADR-t1985-1](../../adr/2026-10-07-t1985-1-dependencies-only-for-content-prerequisites-and-conflicts-left-to-claim-deferral.md)）。
 - 落とし穴: run_eventsはtaskかgoalを要るので、proposalのeventはproposalの最初のtaskに付く。
+
+## 前提とSpikeの確認
+
+- 決定は[ADR-t1487-1](../../adr/2026-10-04-t1487-1-spike-is-an-execution-class-with-a-judged-result-and-a-durable-replanning-request.md)の決定2・3・6・8。
+  promptが持つのはrepositoryに依らない確認だけで、重要性と証拠の基準・verifyはjobが読むrepositoryの指示と文書に任せる。
+- どのproposalにも: 計画を左右する未確認の前提を事実として扱っていないか（短い読み取りで解けるものはplannerが解き、実験が要るものはSpikeが先にある）と、未解決の前提に依る本実装がSpikeの完了依存だけでreadyにならないか。
+- Spikeの区分のtaskを含むproposalにだけ（`SPIKE_CHECKS`）: Spikeの形と根拠付きの判定、workerの権限で実行できるか、追加のSpikeとgoalのSpikeの周期の上限の関係（追うSpikeのgoalに属して上限に数えられるか、前のSpikeで解けなかったものを解くか、上限を超えて届いたものはruntimeのplannerのsubmitをruntimeが拒むので人のsubmitで、人の判断として重ねて問わない）。
 
 ## verdictと適用
 
