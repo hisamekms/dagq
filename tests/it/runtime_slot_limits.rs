@@ -138,6 +138,26 @@ fn the_supervisor_table_sets_parallel_and_max_waiting_and_is_read_again() {
     assert_eq!(changed["to"]["max_waiting"], 3, "{changed}");
     assert!(changed["supervisor"].is_string(), "{changed}");
 
+    // A run's wrapper reads `dagq.toml` before a turn and refuses to
+    // start one it cannot read: the one turn (the stub writes its receipt
+    // in it) of `first`'s run and of every other claimed run, as the
+    // fixture's, starts before the invalid table.
+    let first = SqliteQueue::open(&db).unwrap().show(task).unwrap().runs[0]
+        .id()
+        .clone();
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        let events = queue.all_events().unwrap();
+        let runs = |kind: &str| {
+            events
+                .iter()
+                .filter(|event| event.kind.as_str() == kind)
+                .filter_map(|event| event.run_id.clone())
+                .collect::<Vec<_>>()
+        };
+        let started = runs("turn_started");
+        started.contains(&first) && runs("run_claimed").iter().all(|run| started.contains(run))
+    });
+
     // Invalid: the values in use stay, nothing is recorded.
     write_config(&repo, "[supervisor]\nparallel = 0\n");
     await_passes(&passes, SOME_PASSES);
