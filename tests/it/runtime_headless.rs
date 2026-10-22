@@ -865,13 +865,22 @@ esac"#
             .unwrap()
     };
     let (first, second) = (pid("agent-1.pid"), pid("agent-2.pid"));
-    let agents: Vec<_> = SqliteQueue::open(&db)
-        .unwrap()
-        .processes(run.id())
-        .unwrap()
-        .into_iter()
-        .filter(|p| p.role == "agent" && p.exited_at.is_none())
-        .collect();
+    let live_agents = |queue: &mut SqliteQueue| -> Vec<_> {
+        queue
+            .processes(run.id())
+            .unwrap()
+            .into_iter()
+            .filter(|p| p.role == "agent" && p.exited_at.is_none())
+            .collect()
+    };
+    // The runtime registers turn 2 as the run's agent after spawning it,
+    // not in step with the turn writing helper.pid: until then the live
+    // agent row still holds turn 1's pid.
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        let agents = live_agents(queue);
+        agents.len() == 1 && agents[0].pid == second
+    });
+    let agents = live_agents(&mut SqliteQueue::open(&db).unwrap());
     assert_eq!(agents.len(), 1, "{agents:?}");
     assert_eq!(agents[0].pid, second, "turn 1 was {first}");
     assert_ne!(first, second);
