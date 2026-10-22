@@ -710,7 +710,7 @@ fn up_reports_a_handoff_that_did_not_happen() {
     fs::create_dir_all(fixture.location.launch_agent.parent().unwrap()).unwrap();
     fs::write(
         &fixture.location.launch_agent,
-        "<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/bin/dagq</string>\n",
+        "<key>ProgramArguments</key>\n\t<array>\n\t\t<string>/opt/bin/dagq</string>\n\t</array>\n\t<key>ProcessType</key>\n\t<string>Interactive</string>\n",
     )
     .unwrap();
     let processes = FakeProcesses::default();
@@ -1137,6 +1137,59 @@ fn up_drains_a_supervisor_whose_agent_starts_another_binary() {
     assert_eq!(
         queue.handoff_request(&LeaseToken::new("old")).unwrap(),
         None
+    );
+}
+
+/// A launchd supervisor of this very build under an agent written before
+/// `ProcessType` (which the automatic update's handoff does not reload) is
+/// not reused: `up` unloads the agent, waits for the drain and starts it
+/// again under a plist written anew.
+#[test]
+fn up_replaces_a_supervisor_of_this_build_whose_agent_lacks_the_process_type() {
+    let fixture = fixture();
+    let mut queue = SqliteQueue::open(&fixture.location.db).unwrap();
+    let pid = std::process::id();
+    queue
+        .register_supervisor(&LeaseToken::new("old"), pid, 4, VERSION)
+        .unwrap();
+    queue
+        .set_supervisor_mode(&LeaseToken::new("old"), SupervisorMode::Launchd, None)
+        .unwrap();
+    fs::create_dir_all(fixture.location.launch_agent.parent().unwrap()).unwrap();
+    fs::write(
+        &fixture.location.launch_agent,
+        "\t<key>RunAtLoad</key>\n\t<true/>\n",
+    )
+    .unwrap();
+    let launchd = FakeLaunchd::new(&fixture.location.db);
+    launchd.load(Some(pid));
+    let processes = FakeProcesses::default();
+    let report = thread::scope(|scope| {
+        scope.spawn(|| {
+            wait_until(&processes, pid, || {
+                !launchd.uninstalls.lock().unwrap().is_empty()
+            });
+            SqliteQueue::open(&fixture.location.db)
+                .unwrap()
+                .deregister_supervisor(&LeaseToken::new("old"))
+                .unwrap();
+        });
+        up(&fixture, &launchd, &processes)
+    });
+    let supervisor = &report["supervisor"];
+    assert_eq!(supervisor["outcome"], "restarted", "{report}");
+    assert_eq!(supervisor.get("handoff"), None, "{report}");
+    assert_eq!(supervisor["previous_version"], VERSION, "{report}");
+    assert_ne!(supervisor["token"], "old", "{report}");
+    assert_eq!(launchd.uninstalls.lock().unwrap().len(), 1);
+    let installs = launchd.installs.lock().unwrap();
+    assert_eq!(installs.len(), 1);
+    assert!(
+        installs[0]
+            .2
+            .contains("<key>ProcessType</key>\n\t<string>Interactive</string>"),
+        "{}",
+        installs[0].2
     );
 }
 

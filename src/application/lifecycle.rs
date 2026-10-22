@@ -581,9 +581,8 @@ pub fn up(
     // A supervisor of another build is not ours to reuse: it would keep
     // serving this queue with the code the operator has just replaced, and
     // it would migrate the schema of a queue the new binary owns (ADR-0014).
-    let outdated = live
-        .iter()
-        .any(|registration| registration.binary_version.as_deref() != Some(VERSION));
+    // Nor is one launchd runs under an agent without this `ProcessType`.
+    let outdated = outdated(&up, &live);
     // A handoff some supervisors failed does not stop `up` short: the
     // others serve under this build, and they get `--auto-update` all the
     // same before `up` fails naming the ones that did not.
@@ -1157,17 +1156,50 @@ fn remove_stray_agents_for_up(
 /// Whether `up` drains `live` and starts one in their place
 /// ([`replace_supervisors`]) rather than reusing them or handing them over.
 fn replaces(up: &Up<impl LifecycleQueue + ?Sized>, live: &[SupervisorRegistration]) -> bool {
+    outdated(up, live) && !takes_handoff(up, up.files, live)
+}
+
+/// Whether `up` replaces `live` rather than reusing them: one of them runs
+/// another build, or a launchd one runs under an agent whose plist lacks
+/// this binary's [`PROCESS_TYPE`] ([`agent_lacks_process_type`]).
+fn outdated(up: &Up<impl LifecycleQueue + ?Sized>, live: &[SupervisorRegistration]) -> bool {
+    let plist = live
+        .iter()
+        .any(|registration| registration.mode == Some(SupervisorMode::Launchd))
+        .then(|| up.files.read_to_string(&up.location.launch_agent).ok())
+        .flatten();
+    live_outdated(live, plist.as_deref())
+}
+
+/// [`outdated`] on what it read: `plist` is the queue's agent as read, or
+/// `None` when it could not be read (an agent `up` cannot read is not
+/// rewritten for its `ProcessType`).
+fn live_outdated(live: &[SupervisorRegistration], plist: Option<&str>) -> bool {
     live.iter()
         .any(|registration| registration.binary_version.as_deref() != Some(VERSION))
-        && !takes_handoff(up, up.files, live)
+        || (live
+            .iter()
+            .any(|registration| registration.mode == Some(SupervisorMode::Launchd))
+            && plist.is_some_and(agent_lacks_process_type))
+}
+
+/// Whether an agent's `plist` lacks the `ProcessType` this binary writes.
+/// launchd applies it only when it loads the agent, and neither a handoff
+/// nor the automatic update (which hands over without a drain) loads it, so
+/// a supervisor of this build under such an agent is drained and started
+/// again by `up`, which writes the plist anew.
+fn agent_lacks_process_type(plist: &str) -> bool {
+    !plist.contains(&process_type_entry())
 }
 
 /// The version reported as replaced: an outdated one, not merely the
 /// first, since a mixed set is drained whole, but naming a version that
-/// matched would read as if nothing had been out of date.
+/// matched would read as if nothing had been out of date. When every one
+/// is of this build (its agent was out of date), the first one's.
 fn previous_version(live: &[SupervisorRegistration]) -> Option<String> {
     live.iter()
         .find(|registration| registration.binary_version.as_deref() != Some(VERSION))
+        .or_else(|| live.first())
         .and_then(|registration| registration.binary_version.clone())
 }
 
@@ -1219,11 +1251,11 @@ to drain them, or wait for them to finish",
 
 /// Whether every live supervisor can be handed over to this binary rather
 /// than drained: each one takes a handoff (a supervisor of a binary before
-/// ADR-0045 does not), and a launchd one would keep running this binary
-/// after its next restart too — its agent starts this very path. An exec
-/// does not change the agent's `ProgramArguments`, so a supervisor whose
-/// agent names another binary is drained and started again by `up`, which
-/// rewrites the agent (ADR-0045 decision 12).
+/// ADR-0045 does not), and a launchd one runs under the agent this binary
+/// would write ([`agent_takes_handoff`]). An exec changes neither the
+/// agent's plist nor how launchd runs the process, so a supervisor whose
+/// agent differs is drained and started again by `up`, which rewrites the
+/// agent (ADR-0045 decision 12).
 fn takes_handoff(
     up: &Up<impl LifecycleQueue + ?Sized>,
     files: &dyn RunFiles,
@@ -1246,12 +1278,20 @@ fn takes_handoff(
     };
     files
         .read_to_string(&up.location.launch_agent)
-        .is_ok_and(|plist| {
-            plist.contains(&format!(
-                "<key>ProgramArguments</key>\n\t<array>\n\t\t<string>{}</string>",
-                escape(&current)
-            ))
-        })
+        .is_ok_and(|plist| agent_takes_handoff(&plist, &current))
+}
+
+/// Whether the agent `plist` keeps a supervisor handed over to the binary
+/// at `current` as this binary would start it: the agent starts this very
+/// path, so the supervisor runs this binary after its next restart too,
+/// and it has this binary's [`PROCESS_TYPE`], which launchd applies only
+/// when it loads the agent. An agent that lacks either is rewritten by the
+/// drain `up` does instead, and launchd loads it again from the new plist.
+fn agent_takes_handoff(plist: &str, current: &str) -> bool {
+    plist.contains(&format!(
+        "<key>ProgramArguments</key>\n\t<array>\n\t\t<string>{}</string>",
+        escape(current)
+    )) && !agent_lacks_process_type(plist)
 }
 
 /// `up`'s replacement without a drain (ADR-0045 decision 15): every live
@@ -2541,6 +2581,14 @@ fn forget_supervisor_workspaces(
 /// sessions, so the default (20 s) is far too short.
 pub const EXIT_TIMEOUT_SECS: u32 = 86_400;
 
+/// The agent's `ProcessType`: why this value is in [`LaunchAgentSpec::xml`].
+pub const PROCESS_TYPE: &str = "Interactive";
+
+/// The `ProcessType` entry as [`LaunchAgentSpec::xml`] writes it.
+fn process_type_entry() -> String {
+    format!("\t<key>ProcessType</key>\n\t<string>{PROCESS_TYPE}</string>\n")
+}
+
 /// Everything that goes into the plist, kept as data so tests can check it
 /// without parsing XML.
 #[derive(Debug, Clone, Serialize)]
@@ -2564,6 +2612,19 @@ impl LaunchAgentSpec {
     /// `KeepAlive` restarts only an exit that failed: a supervisor that
     /// stopped because its owner is gone exits with success and stays
     /// stopped.
+    ///
+    /// `ProcessType` is [`PROCESS_TYPE`] (`Interactive`) because the
+    /// supervisor's children are the landing's verification, the workers
+    /// and the reviews, whose speed is the landing's. In man launchd.plist,
+    /// a job without `ProcessType` gets light resource limits that throttle
+    /// its CPU and I/O, and `Standard` is the same as none; `Adaptive`
+    /// moves between `Background` and `Interactive` on activity over XPC
+    /// connections, which the supervisor has none of, so it would stay
+    /// limited; `Interactive` runs with the limits of an app, none.
+    /// docs/plans/it-slowdown-2026-10-08.md measured the landing's IT under
+    /// the agent without it at about 1.6 to 2.0 times the seconds per test
+    /// of the same load in a person's terminal (children at priority 20
+    /// beside 31).
     pub fn xml(&self) -> String {
         let mut xml = String::from(
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -2607,6 +2668,7 @@ impl LaunchAgentSpec {
             xml.push_str("\t<key>KeepAlive</key>\n\t<true/>\n");
         }
         xml.push_str("\t<key>RunAtLoad</key>\n\t<true/>\n");
+        xml.push_str(&process_type_entry());
         xml.push_str(&format!(
             "\t<key>ExitTimeOut</key>\n\t<integer>{EXIT_TIMEOUT_SECS}</integer>\n"
         ));
@@ -2630,6 +2692,79 @@ fn escape(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::application::EventStore;
+
+    /// A launchd supervisor is handed over only when its agent is the one
+    /// this binary writes in what an exec cannot change: the path it
+    /// starts and the `ProcessType`. An agent written before `ProcessType`
+    /// is drained, so `up` writes it again and launchd loads it anew.
+    #[test]
+    fn an_agent_takes_a_handoff_only_with_this_path_and_process_type() {
+        let spec = |program: &str| LaunchAgentSpec {
+            label: "com.dagq.abc".into(),
+            plist: "/home/u/Library/LaunchAgents/com.dagq.abc.plist".into(),
+            program_arguments: vec![program.into(), "supervise".into()],
+            working_directory: "/repo".into(),
+            environment: SupervisorEnvironment {
+                path: "/usr/bin".into(),
+                config_home: None,
+                owner: None,
+            },
+            log: "/data/q/logs/launchd.log".into(),
+        };
+        let written = spec("/opt/bin/dagq").xml();
+        assert!(agent_takes_handoff(&written, "/opt/bin/dagq"));
+        assert!(!agent_takes_handoff(&written, "/elsewhere/dagq"));
+        let without = written.replace(&process_type_entry(), "");
+        assert_ne!(without, written);
+        assert!(!agent_takes_handoff(&without, "/opt/bin/dagq"));
+        let adaptive = written.replace("<string>Interactive</string>", "<string>Adaptive</string>");
+        assert!(!agent_takes_handoff(&adaptive, "/opt/bin/dagq"));
+        assert!(!agent_lacks_process_type(&written));
+        assert!(agent_lacks_process_type(&without));
+        assert!(agent_lacks_process_type(&adaptive));
+    }
+
+    /// `up` replaces the live supervisors when one runs another build, or
+    /// when a launchd one runs under a readable agent without this
+    /// `ProcessType`; otherwise it reuses them. The version it reports as
+    /// replaced is an outdated one, or the first one's when only the agent
+    /// was out of date.
+    #[test]
+    fn up_replaces_another_build_or_a_launchd_agent_without_the_process_type() {
+        let launchd = SupervisorRegistration {
+            mode: Some(SupervisorMode::Launchd),
+            ..registration("own", 10, 0)
+        };
+        let by_hand = registration("by-hand", 20, 0);
+        let other_build = SupervisorRegistration {
+            binary_version: Some("0.0.1".into()),
+            ..registration("old", 30, 0)
+        };
+        let with = format!("<dict>\n{}</dict>", process_type_entry());
+        let without = "<dict>\n</dict>";
+
+        assert!(!live_outdated(std::slice::from_ref(&launchd), Some(&with)));
+        assert!(live_outdated(std::slice::from_ref(&launchd), Some(without)));
+        // An agent that could not be read is left as it is.
+        assert!(!live_outdated(std::slice::from_ref(&launchd), None));
+        // The agent of a supervisor not under launchd is not looked at.
+        assert!(!live_outdated(
+            std::slice::from_ref(&by_hand),
+            Some(without)
+        ));
+        // Another build is replaced whatever the agent.
+        assert!(live_outdated(
+            &[launchd.clone(), other_build.clone()],
+            Some(&with)
+        ));
+
+        assert_eq!(
+            previous_version(&[launchd.clone(), other_build]).as_deref(),
+            Some("0.0.1")
+        );
+        assert_eq!(previous_version(&[launchd]).as_deref(), Some(VERSION));
+        assert_eq!(previous_version(&[]), None);
+    }
 
     #[test]
     fn no_wait_refuses_only_while_a_replaced_supervisor_leases_a_run() {

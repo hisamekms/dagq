@@ -51,8 +51,9 @@ in-cmux modeの起動の指定は何にも触る前に拒み、廃止と次の�
    PIDが生きていてもheartbeatの古い行は、そのPIDを登録したプロセスでないと分かれば同じく消す（判定は`pid_taken_over`のdoc comment）。
    `run_leases`は触らない（そのrunの復旧は`doctor` / `recover`の仕事）。
    登録より前に始まったプロセスがPIDにいてheartbeatの古い登録（hang）は消さず、reuseもしない。
-3. **supervisor**: 生きていてheartbeatが新しい登録があり、その`binary_version`が全部`up`自身のbuild識別子（[Build identifier](build-identifier.md#build-identifier)）と文字列として同じならreuseし、plistにもlaunchctlにも触らない。
-   1つでもversionが違えば**入れ替える**（下記）。
+3. **supervisor**: 生きていてheartbeatが新しい登録があり、その`binary_version`が全部`up`自身のbuild識別子（[Build identifier](build-identifier.md#build-identifier)）と文字列として同じで、launchd modeの登録があれば読めるplistに`up`の書く`ProcessType`があるならreuseし、plistにもlaunchctlにも触らない。
+   1つでもversionが違うか、launchd modeの登録の読めるplistに`ProcessType`が無ければ**入れ替える**（下記）。
+   `ProcessType`はlaunchdがagentを読むときだけ効き、`install`と自動更新は引き継ぎだけでplistを読み直させないので、前のbinaryが書いたplistのsupervisorは、自動更新の後も人かinboxが一度`up --auto-update`を打ってdrainと書き直しをさせるまで制限の下で流れる（判定は`agent_lacks_process_type`のdoc comment）。
    liveな登録が無ければlaunchd modeで起動する。
    - **同じqueueの別のlabelのagent**: reuse・引き継ぎ・入れ替え・起動を決める前に、このqueueのDBを指す別のlabelのLaunchAgentを探し（`lifecycle::stray_agents`）、`down`と同じく外して、そのsupervisorはreuseせずにdrainを待つ（`remove_stray_agents_for_up`）。
      別のqueueのDBを指すagentには触れない。
@@ -73,7 +74,7 @@ in-cmux modeの起動の指定は何にも触る前に拒み、廃止と次の�
    - **自動更新**（[ADR-0045](../../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定17）: 自動更新は`up`の指定（`--auto-update`）のときだけ有効で、指定した`up`が起動するsupervisorは自動更新付きで起動し、reuseや引き継ぎで残す登録にも`up`の指定をそろえて書く（書く先は`set_auto_update`のdoc comment、[Auto-update](auto-update.md#auto-update)）。
    - **buildの違うsupervisorの入れ替え**（[ADR-0045](../../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定10・12・15・16）: 登録の`binary_version`は`supervise`プロセス自身が書いた自分のbuild識別子で、`up`はliveな登録のどれか1つでも自分のbuild識別子と違えば（nullを含む。package versionが同じでもcommitやdirtyが違えば違う）入れ替える。
      liveな登録が全部引き継ぎを受けられるなら**引き継ぎ**、そうでなければ**drain**で入れ替える。
-     launchd modeの登録は、LaunchAgentの`ProgramArguments`の先頭が`up`自身の絶対pathのときだけ引き継ぐ（execはplistを変えないので、pathの違うagentはlaunchdの次の再起動で前のbinaryに戻る。そのときはdrainし、`up`がplistを書き直す）。
+     launchd modeの登録は、LaunchAgentの`ProgramArguments`の先頭が`up`自身の絶対pathで、`ProcessType`が`up`の書く値のときだけ引き継ぐ（execはplistもlaunchdがprocessに当てる制限も変えないので、pathの違うagentはlaunchdの次の再起動で前のbinaryに戻り、`ProcessType`の無いagentは制限の下で流れ続ける。そのときはdrainし、`up`がplistを書き直してlaunchdが読み直す。判定は`agent_takes_handoff`のdoc comment）。
      - **migrate**: `up`はまずqueueの未適用のmigrationを数え、全部が互換なら適用して結果に載せる。
        非互換が1つでもあれば、何も起動もsignalもせず、`down --wait` → `dagq migrate` → `up`、または`dagq install --allow-breaking`を案内するerrorで止まる。
        互換のmigrationの後も、古いbinaryのsupervisorとrunのwrapperはfloor以上なのでそのまま動く（[persistence](../persistence.md#database-setup-and-migrations)）。
@@ -98,6 +99,7 @@ in-cmux modeの起動の指定は何にも触る前に拒み、廃止と次の�
    - **二重のsupervisorの警告**: 同じqueueに引き継ぎの組でないliveな登録が2つ以上あるか、queueのLaunchAgent（自分のlabelと、同じDBの別のlabel）が2つ以上loadされていれば、`doctor`と`status`が同じ判定（`health::duplicate_supervisors`）でwarningを出し、`status`はinboxのattentionにも載せる。
      引き継ぎの元の登録とexecが同じpidで作り直した後継の登録は1つのsupervisorと数えて知らせない（意味と直し方は判定のdoc comment）。
    - plist: `~/Library/LaunchAgents/com.dagq.<queue hash>.plist`で、queue hashの決め方は`QueueLocation::hash`のdoc comment、中身は`src/application/lifecycle.rs`の`LaunchAgentSpec::xml`と`supervise_arguments`と`SupervisorEnvironment`のdoc commentにある。
+     `ProcessType`を書くのは、無いとlaunchdがsupervisorとその子（着地の検証・worker・review）のCPUとI/Oを絞り、着地の検証が遅くなるからである。
      `up`が書くplistに`--cmux`は無く、前のbinaryが書いたplistと引き継ぎのexecのargvにある`--cmux`は新しいbinaryが受け付けて無視する（[ADR-t2159-1](../../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定6、`src/main.rs`の`RetiredCmux`）。
      `up`のenvがtestのownerを名指していれば、それもsupervisorに渡し、`KeepAlive`は失敗で終わったときだけ立て直す形にして、ownerが居なくなって止まったsupervisorを立て直し続けない（[Queue service](../queue-service.md)の起動と停止）。
    - 起動: agentをbootoutしてからbootstrapし直し、既にbootstrap済みでも定義を差し替える。

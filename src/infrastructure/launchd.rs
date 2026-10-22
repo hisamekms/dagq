@@ -313,6 +313,7 @@ mod tests {
         ));
         assert!(xml.contains("<key>KeepAlive</key>\n\t<true/>"));
         assert!(xml.contains("<key>RunAtLoad</key>\n\t<true/>"));
+        assert!(xml.contains("<key>ProcessType</key>\n\t<string>Interactive</string>"));
         assert!(xml.contains("<key>ExitTimeOut</key>\n\t<integer>86400</integer>"));
         assert!(
             xml.contains("<key>StandardOutPath</key>\n\t<string>/data/q/logs/launchd.log</string>")
@@ -382,6 +383,7 @@ mod tests {
             "{owned}"
         );
         assert!(owned.contains("<key>RunAtLoad</key>\n\t<true/>"));
+        assert!(owned.contains("<key>ProcessType</key>\n\t<string>Interactive</string>"));
 
         let production = spec(None).xml();
         assert!(production.contains("<key>KeepAlive</key>\n\t<true/>"));
