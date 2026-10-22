@@ -1751,8 +1751,13 @@ fn without_claude_a_passed_claim_starts_no_judgment_job_and_asks_as_a_failed_job
     let ask = close_ask(&mut queue);
     assert_eq!(ask.reason_category, dagq::domain::AskReason::RecoveryFailed);
     assert_eq!(ask.options, ["close", "retry", "cancel"]);
+    // It says no provider judged the claim, not that a job and its run
+    // once more gave no judgment.
     assert!(
-        ask.question.contains("disabled by --no-claude"),
+        ask.question.contains("disabled by --no-claude")
+            && ask.question.contains("did not judge the claim")
+            && !ask.question.contains("gave no judgment")
+            && !ask.question.contains("once more included"),
         "{}",
         ask.question
     );

@@ -63,6 +63,9 @@ enum ClaimJob {
     Judged(ClaimJudgment),
     /// It gave none and does not run again: why.
     Failed(String),
+    /// No provider of the reviews can run it (`--no-claude`), so it never
+    /// started: why.
+    Unstartable(String),
 }
 
 impl ClaimReviewWatch {
@@ -121,7 +124,9 @@ impl replan_park::ParkedReviewJobs for ClaimReviewWatch {
                 withheld["result"] = json!({"verdict": judgment.verdict.as_str(),
                     "confidence": judgment.confidence.map(|c| c.as_str().to_owned())});
             }
-            ClaimJob::Failed(why) => withheld["result"] = json!({"error": why}),
+            ClaimJob::Failed(why) | ClaimJob::Unstartable(why) => {
+                withheld["result"] = json!({"error": why});
+            }
             ClaimJob::Waiting(_) | ClaimJob::Running { .. } => {}
         }
         withheld
@@ -273,7 +278,10 @@ impl Supervisor<'_> {
                 Ok(after)
             }
             ClaimJob::Failed(why) => self
-                .claim_unjudged(run, watch, &why)
+                .claim_unjudged(run, watch, &why, true)
+                .map(|run| Some(AfterJudged::Rested(Box::new(run)))),
+            ClaimJob::Unstartable(why) => self
+                .claim_unjudged(run, watch, &why, false)
                 .map(|run| Some(AfterJudged::Rested(Box::new(run)))),
             state => {
                 watch.state = state;
@@ -442,7 +450,7 @@ impl Supervisor<'_> {
             }
             ReviewRoute::Manual(error) => {
                 warn!(run_id = %run.id(), "run {} judgment {}: it cannot run: {error}", run.id(), watch.attempt);
-                watch.state = ClaimJob::Failed(error);
+                watch.state = ClaimJob::Unstartable(error);
                 return Ok(());
             }
             ReviewRoute::Start(launch, switchable) => (launch, switchable),
@@ -769,8 +777,9 @@ impl Supervisor<'_> {
         }
     }
 
-    /// The job of `run`'s claim judgment gave no judgment (`why`): recorded
-    /// as `run_satisfied_judged` with the error and the `approve_close` ask
+    /// The job of `run`'s claim judgment gave no judgment (`why`), or never
+    /// `started` since no provider can run it: recorded as
+    /// `run_satisfied_judged` with the error and the `approve_close` ask
     /// opened as a failed job's (`recovery_failed`), at nobody's request;
     /// then the run rests as after a judgment.
     fn claim_unjudged(
@@ -778,13 +787,19 @@ impl Supervisor<'_> {
         run: &TaskRun,
         watch: &ClaimReviewWatch,
         why: &str,
+        started: bool,
     ) -> Result<TaskRun> {
         let (task, summary) = self.claim_of(run)?;
         let verification = &watch.verification;
+        let question = if started {
+            satisfied_judgment::unjudged_question
+        } else {
+            satisfied_judgment::unstarted_question
+        };
         let ask = self.open_close_ask(
             run,
             (
-                satisfied_judgment::unjudged_question(&task, &summary, verification, why),
+                question(&task, &summary, verification, why),
                 &satisfied::CLOSE_OPTIONS,
             ),
             (AskReason::RecoveryFailed, None, None),

@@ -213,6 +213,7 @@ e2eが要るpassしたrunは、着地スロットを待つ段でhostでe2eを流
   やり直しには上限があり（値は`satisfied_judgment::MAX_JUDGMENT_RETRIES`）、超えた`high`のpassは閉じずに人のaskにする。
 - **ask**: `high`のpassでないもの（`low`・確信度の欠落か未知の値・revise・concern）と上限を超えたものは`approve_close`のask（理由は`scope`）を開き、headとreviewのverdict・確信度・推奨・理由と閉じなかった訳を載せ、leaseを外してrunを休ませる。
   やり直しても答えが無ければjobの失敗として`approve_close`のask（理由は`recovery_failed`）を開く。
+  reviewのproviderが無い（`--no-claude`）ときはjobを起動せずに同じaskを開き、本文はやり直しに触れず、判定していないこととその理由を書く（`satisfied_judgment::unstarted_question`）。
   verifyは通っているので、どちらのaskも`close`を選べる。
 - **記録**: 判定の`run_satisfied_judged`（適用の`step`つき）と、判定による閉じ・verifyの流し直しの`run_satisfied_snapshot`・判定から開くaskの`ask_opened`は`Supervisor::for_job`の中で書き、`requested_by`に判定元のjob（`review-job:<run>:satisfied-<n>`）を持つ（[roles](roles.md#eventのactor)）。
   判定で閉じた`run_satisfied_closed`は判定・確信度・head・receiptの根拠を持ち、人の答えで閉じたもの（`closed_by`は`answer`）と分かれる。

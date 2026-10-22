@@ -305,6 +305,24 @@ pub fn unjudged_question(
     )
 }
 
+/// The question of the `approve_close` ask of a claim whose judgment's
+/// job never started because no provider of the reviews can run it
+/// (`error`, why, cut to [`ASK_SUMMARY_BYTES`]): nothing judged the claim,
+/// and the verification passed, so `close` is still offered.
+pub fn unstarted_question(
+    task: &str,
+    summary: &str,
+    verification: &SnapshotVerification,
+    error: &str,
+) -> String {
+    format!(
+        "{}\nThe review did not judge the claim on the same head {}: no provider of the reviews can run its job: {}",
+        satisfied::question(task, summary, verification, None),
+        verification.head,
+        clip(error.trim(), ASK_SUMMARY_BYTES),
+    )
+}
+
 /// `text` within `max` bytes, cut at a character's boundary with `…`.
 fn clip(text: &str, max: usize) -> String {
     if text.len() <= max {
@@ -478,7 +496,21 @@ mod tests {
         );
         let question = unjudged_question("7", "", &verification(), "no JSON");
         assert!(
-            question.contains("gave no judgment") && question.contains("no JSON"),
+            question.contains("gave no judgment")
+                && question.contains("once more included")
+                && question.contains("no JSON"),
+            "{question}"
+        );
+        // A job that never started: no judgment given, nothing run again.
+        let question = unstarted_question("7", "", &verification(), "disabled by --no-claude");
+        assert!(
+            question.contains("did not judge the claim")
+                && question.contains("no provider of the reviews")
+                && question.contains("disabled by --no-claude"),
+            "{question}"
+        );
+        assert!(
+            !question.contains("gave no judgment") && !question.contains("once more included"),
             "{question}"
         );
     }
