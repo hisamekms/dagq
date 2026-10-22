@@ -516,7 +516,10 @@ impl TargetCheck {
 /// directory), `failed_runs` (how many runs it kept from a resume) and
 /// `supervisor`. An attention (`fix main or the recheck environment`)
 /// for the inbox: the runs' failures are main's or the recheck
-/// environment's, and resuming the runs would not fix them.
+/// environment's, and resuming the runs would not fix them. Its log is
+/// kept while it is the latest of the two, and the log an open ask
+/// points at while it does, which may be a later main's: each check of
+/// main removes the other logs of main's checks ([`stale_main_logs`]).
 pub const LANDING_RECHECK_MAIN_FAILED: &str =
     crate::domain::event_kind::EventKind::LandingRecheckMainFailed.as_str();
 
@@ -637,9 +640,91 @@ pub fn kept_by_main(failure: &RecheckFailure, on_host: bool, main: Option<&MainC
 /// puts in the run's open asks: what the run met, that main fails alone,
 /// and that the run keeps waiting to land.
 pub fn main_failed_ask_note(reason: &str, main_log: &str) -> String {
-    format!(
-        "{ASK_NOTE_PREFIX}{reason}. The command fails on main alone too (see {main_log}): the run is not resumed and keeps waiting to land."
-    )
+    format!("{ASK_NOTE_PREFIX}{reason}.{MAIN_FAILED_SEE}{main_log}{MAIN_FAILED_END}")
+}
+
+/// What precedes main's log in [`main_failed_ask_note`], by which
+/// [`asked_main_log`] finds it again.
+const MAIN_FAILED_SEE: &str = " The command fails on main alone too (see ";
+
+/// What ends [`main_failed_ask_note`] after main's log: the log ends
+/// where it starts, whatever the log's path holds.
+const MAIN_FAILED_END: &str = "): the run is not resumed and keeps waiting to land.";
+
+/// The name of the log of main's check of `main` in the recheck's
+/// directory: `main-<main's first 12>.log`.
+pub fn main_log_name(main: &CommitSha) -> String {
+    format!("main-{}.log", &main.as_str()[..main.as_str().len().min(12)])
+}
+
+/// Whether `name`, an entry of the recheck's directory, is the log of a
+/// check of main ([`main_log_name`]): only these are ever removed
+/// ([`stale_main_logs`]), never the scratch worktree, a build output or
+/// the lock.
+pub fn is_main_log(name: &str) -> bool {
+    name.len() > "main-.log".len() && name.starts_with("main-") && name.ends_with(".log")
+}
+
+/// The log of main's check an ask's `question` points at: the one its
+/// recheck paragraph names when it is [`main_failed_ask_note`]'s.
+pub fn asked_main_log(question: &str) -> Option<&str> {
+    let paragraph = question
+        .rsplit("\n\n")
+        .find(|paragraph| paragraph.trim_start().starts_with(ASK_NOTE_PREFIX))?;
+    let (_, log) = paragraph
+        .trim_end()
+        .strip_suffix(MAIN_FAILED_END)?
+        .rsplit_once(MAIN_FAILED_SEE)?;
+    Some(log)
+}
+
+/// The log [`LANDING_RECHECK_MAIN_FAILED`] points at when it is the
+/// latest of [`LANDING_RECHECK_MAIN_KINDS`] (`latest`): the inbox's
+/// attention shows it.
+pub fn attention_main_log(latest: Option<&RunEvent>) -> Option<&str> {
+    latest
+        .filter(|event| event.kind == EventKind::LandingRecheckMainFailed)
+        .and_then(|event| event.payload["log_path"].as_str())
+}
+
+/// The logs of main's checks to remove from the recheck's directory once
+/// a check of main wrote `written` there: of its entries `names`, each
+/// log of a check of main ([`is_main_log`]) that is none of these, which
+/// are kept, compared by file name (the queue's directory may have moved
+/// since a path was recorded):
+/// (a) `written`, the log just written;
+/// (b) `attention`, the log of [`LANDING_RECHECK_MAIN_FAILED`] while it
+///     is the latest of [`LANDING_RECHECK_MAIN_KINDS`]
+///     ([`attention_main_log`]), which the inbox's attention points at;
+/// (c) `asked`, the logs the recheck paragraph of an ask nobody closed
+///     (answered or not) points at ([`asked_main_log`]).
+/// (b) alone is not enough: [`MainCheck::transition`] records no event
+/// on a failure after a failure, so with main A, B and C failing one
+/// after another the event still points at A while a run's asks, noted
+/// on each pass, point at B; when C's check then passes and that run is
+/// not recorded again (it moved on, or Git could not judge it), its asks
+/// still point at B. So each check of main leaves at most the logs
+/// somebody is pointed at, and they do not pile up as main moves.
+pub fn stale_main_logs<'a>(
+    names: &'a [String],
+    written: &str,
+    attention: Option<&str>,
+    asked: &[&str],
+) -> Vec<&'a str> {
+    fn file_name(path: &str) -> &str {
+        std::path::Path::new(path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(path)
+    }
+    let mut kept: Vec<&str> = vec![file_name(written)];
+    kept.extend(attention.map(file_name));
+    kept.extend(asked.iter().map(|log| file_name(log)));
+    names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| is_main_log(name) && !kept.contains(name))
+        .collect()
 }
 
 #[cfg(test)]
@@ -785,6 +870,104 @@ mod tests {
         let note = main_failed_ask_note("it failed", "/q/recheck/main-m.log");
         assert!(note.starts_with(ASK_NOTE_PREFIX), "{note}");
         assert!(note.contains("fails on main alone too"), "{note}");
+    }
+
+    /// Each check of main keeps the log it wrote, the attention's while
+    /// main's failure is the latest record, and those the open asks point
+    /// at; it removes the other logs of main's checks and nothing else.
+    #[test]
+    fn a_check_of_main_keeps_only_the_logs_somebody_is_pointed_at() {
+        let names = |list: &[&str]| list.iter().map(|n| (*n).to_owned()).collect::<Vec<_>>();
+        let a = "/q/recheck/main-aaaaaaaaaaaa.log";
+        let b = "/q/recheck/main-bbbbbbbbbbbb.log";
+        let c = "/q/recheck/main-cccccccccccc.log";
+        let entries = names(&[
+            "main-aaaaaaaaaaaa.log",
+            "main-bbbbbbbbbbbb.log",
+            "main-cccccccccccc.log",
+            "main-dddddddddddd.log",
+            "lock",
+            "target",
+            "dagq-recheck-q",
+            "main-.log",
+            "main-notes.txt",
+        ]);
+        // Nobody points at an older log: only the one written is kept.
+        assert_eq!(
+            stale_main_logs(&entries, c, None, &[]),
+            [
+                "main-aaaaaaaaaaaa.log",
+                "main-bbbbbbbbbbbb.log",
+                "main-dddddddddddd.log"
+            ]
+        );
+        // Main A, B and C fail one after another: the event points at A,
+        // an open ask at B, and C was just written. A, B and C are kept.
+        assert_eq!(
+            stale_main_logs(&entries, c, Some(a), &[b]),
+            ["main-dddddddddddd.log"]
+        );
+        // Once the ask closed, the next write lets B go.
+        assert_eq!(
+            stale_main_logs(&entries, c, Some(a), &[]),
+            ["main-bbbbbbbbbbbb.log", "main-dddddddddddd.log"]
+        );
+        // Compared by name: a queue directory that moved keeps them too.
+        assert_eq!(
+            stale_main_logs(
+                &entries,
+                "/new/recheck/main-cccccccccccc.log",
+                Some("/old/recheck/main-aaaaaaaaaaaa.log"),
+                &[]
+            ),
+            ["main-bbbbbbbbbbbb.log", "main-dddddddddddd.log"]
+        );
+        assert!(stale_main_logs(&[], c, None, &[]).is_empty());
+        assert!(is_main_log("main-aaaaaaaaaaaa.log"));
+        assert!(!is_main_log("main-.log"));
+        assert!(!is_main_log("lock"));
+        let main = CommitSha::parse("c".repeat(40), "commit").unwrap();
+        assert_eq!(main_log_name(&main), "main-cccccccccccc.log");
+
+        // Only the latest record of main's failure points at a log.
+        let failed = RunEvent {
+            kind: LANDING_RECHECK_MAIN_FAILED.into(),
+            ..event(json!({"log_path": a}))
+        };
+        let passed = RunEvent {
+            kind: LANDING_RECHECK_MAIN_PASSED.into(),
+            ..event(json!({"log_path": c}))
+        };
+        assert_eq!(attention_main_log(Some(&failed)), Some(a));
+        assert_eq!(attention_main_log(Some(&passed)), None);
+        assert_eq!(attention_main_log(None), None);
+
+        // An ask points at the log its recheck paragraph names when main
+        // failed alone too, not at a clean or another failure's paragraph.
+        let question = noted_question(
+            "Should it land?",
+            &main_failed_ask_note("it failed (see /r/recheck-x.log)", b),
+        );
+        assert_eq!(asked_main_log(&question), Some(b));
+        // A queue's path that holds the note's own punctuation is read
+        // whole, so its log is kept.
+        let odd = "/tmp/queue): data/recheck/main-bbbbbbbbbbbb.log";
+        let question = noted_question(
+            "Should it land?",
+            &main_failed_ask_note("it failed (see /tmp/queue): data/r.log)", odd),
+        );
+        assert_eq!(asked_main_log(&question), Some(odd));
+        assert_eq!(
+            stale_main_logs(&entries, c, Some(a), &[asked_main_log(&question).unwrap()]),
+            ["main-dddddddddddd.log"]
+        );
+        let cleaned = noted_question(&question, &clean_ask_note(None, &main, Some("c")));
+        assert_eq!(asked_main_log(&cleaned), None);
+        assert_eq!(
+            asked_main_log(&noted_question("q", &ask_note("it failed", true))),
+            None
+        );
+        assert_eq!(asked_main_log("Should it land?"), None);
     }
 
     /// Main's failure is recorded unless the latest record is a failure;

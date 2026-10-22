@@ -1638,6 +1638,26 @@ fn main_checks(db: &Path) -> Vec<(String, Value)> {
         .unwrap()
 }
 
+/// The logs of main's checks in the recheck's directory `recheck_dir`,
+/// by name.
+fn main_logs(recheck_dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(recheck_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.starts_with("main-") && name.ends_with(".log"))
+        .collect();
+    names.sort();
+    names
+}
+
+/// The path of the log of the check of `main` in `recheck_dir`.
+fn kept_log(recheck_dir: &Path, main: &str) -> String {
+    recheck_dir
+        .join(format!("main-{}.log", &main[..12]))
+        .display()
+        .to_string()
+}
+
 /// A recheck command that fails on a tree with `broken.txt` (main broken
 /// for every run) or with a `change.txt` a run wrote (the run's code).
 const MAIN_OR_RUN_FAILS: &str = "[recheck]\ncommand = 'if [ -f broken.txt ] || grep -q \"change by\" change.txt; then echo \"error[E0063]: broken\"; exit 1; fi'\n";
@@ -1684,8 +1704,26 @@ fn a_recheck_whose_command_fails_on_main_alone_too_resumes_no_run_and_tells_the_
             ("broken.txt", Some("broken\n")),
         ],
     );
+    // An earlier check's log nobody points at goes; one that cannot be
+    // removed (a directory) is warned of and judges nothing; what is not
+    // a log of main's check stays.
+    let recheck_dir = fs::canonicalize(dir.path()).unwrap().join("recheck");
+    fs::create_dir_all(recheck_dir.join("main-feedfacecafe.log")).unwrap();
+    fs::write(recheck_dir.join("main-0123456789ab.log"), "old\n").unwrap();
+    fs::write(recheck_dir.join("notes.txt"), "kept\n").unwrap();
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(
+        main_logs(&recheck_dir),
+        [
+            format!("main-{}.log", &main[..12]),
+            "main-feedfacecafe.log".to_owned()
+        ]
+    );
+    assert!(recheck_dir.join("notes.txt").is_file());
+    assert!(recheck_dir.join("lock").exists());
+    assert!(recheck_scratch(&recheck_dir).is_dir());
+    fs::remove_dir(recheck_dir.join("main-feedfacecafe.log")).unwrap();
     let run = run_of(&db, 1).unwrap();
     assert_eq!(run.status(), RunStatus::AwaitingIntegration);
     assert_eq!(run.result_commit(), waiting.result_commit());
@@ -1730,10 +1768,26 @@ fn a_recheck_whose_command_fails_on_main_alone_too_resumes_no_run_and_tells_the_
     assert_eq!(counts["held"], 0);
 
     // Main moves and is still broken: the run is skipped again, and the
-    // inbox is not told again.
-    move_main_with(&repo, &[("other.txt", Some("other\n"))]);
+    // inbox is not told again. The attention's log and the new one, which
+    // the ask points at, are kept.
+    let still = move_main_with(&repo, &[("other.txt", Some("other\n"))]);
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut kept = vec![
+        format!("main-{}.log", &main[..12]),
+        format!("main-{}.log", &still[..12]),
+    ];
+    kept.sort();
+    assert_eq!(main_logs(&recheck_dir), kept);
+    let question = &SqliteQueue::open(&db)
+        .unwrap()
+        .asks(Default::default())
+        .unwrap()[0]
+        .question;
+    assert!(
+        question.contains(&kept_log(&recheck_dir, &still)),
+        "{question}"
+    );
     let run = run_of(&db, 1).unwrap();
     assert_eq!(run.status(), RunStatus::AwaitingIntegration);
     assert!(events_of(&db, run.id(), "resume_started").is_empty());
@@ -1744,12 +1798,17 @@ fn a_recheck_whose_command_fails_on_main_alone_too_resumes_no_run_and_tells_the_
 
     // Main is fixed and the run passes the command: no run failed it, but
     // with the attention open main is checked too, and its pass recorded.
-    move_main_with(
+    // Nobody points at the failures' logs any more.
+    let fixed = move_main_with(
         &repo,
         &[("dagq.toml", Some(MAIN_BROKEN_FAILS)), ("broken.txt", None)],
     );
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(
+        main_logs(&recheck_dir),
+        [format!("main-{}.log", &fixed[..12])]
+    );
     let run = run_of(&db, 1).unwrap();
     assert_eq!(events_of(&db, run.id(), "landing_recheck_failed").len(), 2);
     assert_eq!(events_of(&db, run.id(), "landing_recheck_clean").len(), 1);
@@ -1768,9 +1827,13 @@ fn a_recheck_whose_command_fails_on_main_alone_too_resumes_no_run_and_tells_the_
     );
 
     // Main breaks again: the inbox is told again.
-    move_main_with(&repo, &[("broken.txt", Some("broken\n"))]);
+    let again = move_main_with(&repo, &[("broken.txt", Some("broken\n"))]);
     let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(
+        main_logs(&recheck_dir),
+        [format!("main-{}.log", &again[..12])]
+    );
     let run = run_of(&db, 1).unwrap();
     assert_eq!(run.status(), RunStatus::AwaitingIntegration);
     assert!(events_of(&db, run.id(), "resume_started").is_empty());

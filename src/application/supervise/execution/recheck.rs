@@ -895,7 +895,52 @@ impl Supervisor<'_> {
         {
             warn!(error = %format_args!("{error:#}"), "the landing recheck's command on main {} alone could not be recorded: {error:#}", watch.main);
         }
+        if main.is_some() {
+            self.remove_stale_main_logs(&watch.main);
+        }
         Ok(())
+    }
+
+    /// Remove the logs of earlier checks of main from the recheck's
+    /// directory once the check of `main` wrote its own ([`check_main`]),
+    /// as [`recheck::stale_main_logs`] says from what the queue points at
+    /// now: kept are that log, the attention's while main's failure is
+    /// the latest record of it, and those the open asks point at. Under
+    /// the recheck lock the watch holds, and only warned of when it
+    /// fails: the pass is judged and recorded already.
+    fn remove_stale_main_logs(&self, main: &CommitSha) {
+        let removed = || -> Result<()> {
+            let dir = self.recheck_dir()?;
+            let names: Vec<String> = self
+                .files
+                .read_dir(&dir)
+                .with_context(|| format!("read {}", dir.display()))?
+                .iter()
+                .filter_map(|entry| entry.file_name()?.to_str().map(str::to_owned))
+                .collect();
+            let latest = self.queue.latest_queue_event(&LANDING_RECHECK_MAIN_KINDS)?;
+            let asks = self.queue.asks(AskQuery::default())?;
+            let asked: Vec<&str> = asks
+                .iter()
+                .filter_map(|ask| recheck::asked_main_log(&ask.question))
+                .collect();
+            let written = recheck::main_log_name(main);
+            for name in recheck::stale_main_logs(
+                &names,
+                &written,
+                recheck::attention_main_log(latest.as_ref()),
+                &asked,
+            ) {
+                let log = dir.join(name);
+                if let Err(error) = self.files.remove_file(&log) {
+                    warn!(error = %error, "the landing recheck could not remove the log {} of an earlier check of main: {error}", log.display());
+                }
+            }
+            Ok(())
+        };
+        if let Err(error) = removed() {
+            warn!(error = %format_args!("{error:#}"), "the landing recheck could not remove the logs of earlier checks of main: {error:#}");
+        }
     }
 
     /// Record on the queue what the command found on main alone
@@ -1378,6 +1423,15 @@ fn recheck_runs(recheck: &Recheck<'_>, targets: Vec<Target>) -> Found {
 /// inbox's attention), its output in `main-<main's first 12>.log` of the
 /// recheck's directory. Git or the command not run, its time limit or a
 /// failure on the host judge nothing ([`MainCheck::Unjudged`]).
+/// One log per main would pile up as main moves, so once the pass is
+/// recorded the logs of earlier checks are removed
+/// ([`Supervisor::remove_stale_main_logs`]), but for those somebody is
+/// pointed at ([`recheck::stale_main_logs`]): the one written, the
+/// attention's while main's failure is the latest record of it, and
+/// those the open asks point at. The asks are needed apart from the
+/// attention: a failure after a failure records no event, so the event
+/// may point at an older main than a run's asks do, and those asks keep
+/// pointing there when the run is not recorded on a later pass.
 fn check_main(recheck: &Recheck<'_>, first: &Target) -> MainCheck {
     let checked = || -> Result<MainCheck> {
         let command = recheck
@@ -1388,9 +1442,7 @@ fn check_main(recheck: &Recheck<'_>, first: &Target) -> MainCheck {
         let main = recheck.main;
         let toolchains = recheck.verifier.toolchains()?;
         let runs = toolchains.build_runs(|| recheck.repository.tree_paths(main.as_str()))?;
-        let log = recheck
-            .dir
-            .join(format!("main-{}.log", &main.as_str()[..12]));
+        let log = recheck.dir.join(recheck::main_log_name(main));
         let log_path = path_text(&log)?;
         let exit = match run_on_host(recheck, &runs, main, &first.run_dir, command, &log)? {
             Ok(exit) if exit.success => return Ok(MainCheck::Passed { log_path }),
