@@ -52,6 +52,8 @@
 //! decision 2).
 //! `[container.build_output]` names the directory of a run's container its
 //! build output volume is mounted at ([`CONTAINER_BUILD_OUTPUT_TABLE`]).
+//! `[container.worker_cache]` names the directories of a worker's container
+//! its queue's worker cache is mounted at ([`CONTAINER_WORKER_CACHE_TABLE`]).
 //! `[toolchains.<name>]` declares a toolchain profile the repository uses
 //! and the paths it applies to (ADR-t2268-1, [`TOOLCHAINS_PREFIX`]).
 //! `[verify_marks.<name>]` declares a mark of the project's own on its
@@ -291,6 +293,26 @@ const CONTAINER_IMAGE_TABLE: &str = "container.image";
 pub const CONTAINER_BUILD_OUTPUT_TABLE: &str = "container.build_output";
 /// The key of [`CONTAINER_BUILD_OUTPUT_TABLE`].
 const CONTAINER_BUILD_OUTPUT_DIR: &str = "dir";
+/// `[container.worker_cache]`: the directories of a worker's container
+/// (resumes included) its queue's worker cache is mounted at (ADR-t2257-1
+/// decision 5, ADR-t2173-1 decision 3). Its one key, `dirs` (an array of
+/// strings), lists directories in the container: each absolute, not `/`,
+/// without `,`, `:` or `..`, none twice. Each is mounted from a named
+/// volume of the dagq machine that the queue's workers and resumes share
+/// and no other queue's container nor any verification's mounts
+/// ([`QueueKey::worker_cache_volume_of`]); the host never reads it, so it
+/// holds a cache no one trusts but the workers. Without the table, or with
+/// an empty list, nothing is mounted, which is the default: the runtime
+/// knows no tool's cache, so the project names the directories (a package
+/// manager's cache, a compiler cache's directory) and points its tools
+/// there through `[run.env]` or the image. A binary older than this table
+/// refuses it, so a repository adds it only once the binary that runs its
+/// queue reads it.
+///
+/// [`QueueKey::worker_cache_volume_of`]: crate::domain::podman_machine::QueueKey::worker_cache_volume_of
+pub const CONTAINER_WORKER_CACHE_TABLE: &str = "container.worker_cache";
+/// The key of [`CONTAINER_WORKER_CACHE_TABLE`].
+const CONTAINER_WORKER_CACHE_DIRS: &str = "dirs";
 /// `[container.verification]`: what the verification of `integrate` set to
 /// the container is given beside its clone (ADR-t2257-1 decision 4 (b)).
 /// Its one key, `prepare` (a non-blank string), is a shell command the
@@ -430,7 +452,7 @@ const LOCAL_GATE_PATHS: &str = "paths";
 const LOCAL_GATE_KIND: &str = "kind";
 const CONTAINER_IMAGE_CONTAINERFILE: &str = "containerfile";
 const CONTAINER_IMAGE_INPUTS: &str = "inputs";
-const TABLES: [&str; 28] = [
+const TABLES: [&str; 29] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -457,6 +479,7 @@ const TABLES: [&str; 28] = [
     EGRESS_TABLE,
     CONTAINER_IMAGE_TABLE,
     CONTAINER_BUILD_OUTPUT_TABLE,
+    CONTAINER_WORKER_CACHE_TABLE,
     CONTAINER_VERIFICATION_TABLE,
     LOCAL_CHECKS_TABLE,
 ];
@@ -594,6 +617,9 @@ pub struct Config {
     /// `[container.build_output] dir` ([`CONTAINER_BUILD_OUTPUT_TABLE`]);
     /// `None` without the table.
     pub container_build_output: Option<String>,
+    /// `[container.worker_cache] dirs` ([`CONTAINER_WORKER_CACHE_TABLE`]);
+    /// empty without the table.
+    pub container_worker_cache: Vec<String>,
     /// `[container.verification] prepare`
     /// ([`CONTAINER_VERIFICATION_TABLE`]); `None` without the table.
     pub container_verification_prepare: Option<String>,
@@ -671,6 +697,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut container_image_keys: Vec<String> = Vec::new();
     // `[container.build_output]`'s header line; its `dir` is required.
     let mut build_output: Option<usize> = None;
+    // `[container.worker_cache]`'s header line and whether its `dirs` was
+    // read; `dirs` is required.
+    let mut worker_cache: Option<(usize, bool)> = None;
     // `[container.verification]`'s header line; its `prepare` is required.
     let mut verification_prepare: Option<usize> = None;
     let mut role: Option<ModelRole> = None;
@@ -997,7 +1026,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}], [{CONTAINER_VERIFICATION_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}], [{CONTAINER_WORKER_CACHE_TABLE}], [{CONTAINER_VERIFICATION_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -1029,6 +1058,9 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             if *known == CONTAINER_BUILD_OUTPUT_TABLE {
                 build_output = Some(number);
+            }
+            if *known == CONTAINER_WORKER_CACHE_TABLE {
+                worker_cache = Some((number, false));
             }
             if *known == CONTAINER_VERIFICATION_TABLE {
                 verification_prepare = Some(number);
@@ -1370,14 +1402,42 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
                 let dir = parse_string(rest.trim()).with_context(with)?;
                 ensure!(
-                    dir.starts_with('/')
-                        && dir != "/"
-                        && !dir.contains([',', ':'])
-                        && !dir.split('/').any(|part| part == ".."),
+                    is_container_dir(&dir),
                     "{}: {dir:?} is not a directory of the container (absolute, not /, without , : or ..)",
                     with()
                 );
                 config.container_build_output = Some(dir);
+            }
+            Some(CONTAINER_WORKER_CACHE_TABLE) => {
+                ensure!(
+                    key == CONTAINER_WORKER_CACHE_DIRS,
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{CONTAINER_WORKER_CACHE_TABLE}]; the key is {CONTAINER_WORKER_CACHE_DIRS}"
+                );
+                let (_, read) = worker_cache
+                    .as_mut()
+                    .expect("[container.worker_cache] was opened");
+                ensure!(
+                    !*read,
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                *read = true;
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let dirs = parse_string_array(rest.trim()).with_context(with)?;
+                for (index, dir) in dirs.iter().enumerate() {
+                    ensure!(
+                        is_container_dir(dir),
+                        "{}: {dir:?} is not a directory of the container (absolute, not /, without , : or ..)",
+                        with()
+                    );
+                    let same =
+                        |other: &String| other.trim_end_matches('/') == dir.trim_end_matches('/');
+                    ensure!(
+                        !dirs[..index].iter().any(same),
+                        "{}: {dir:?} is listed twice",
+                        with()
+                    );
+                }
+                config.container_worker_cache = dirs;
             }
             Some(CONTAINER_VERIFICATION_TABLE) => {
                 ensure!(
@@ -2065,6 +2125,21 @@ pub fn parse_config(text: &str) -> Result<Config> {
             "{CONFIG_FILE_NAME}:{line}: [{CONTAINER_BUILD_OUTPUT_TABLE}] has no {CONTAINER_BUILD_OUTPUT_DIR}"
         );
     }
+    if let Some((line, read)) = worker_cache {
+        ensure!(
+            read,
+            "{CONFIG_FILE_NAME}:{line}: [{CONTAINER_WORKER_CACHE_TABLE}] has no {CONTAINER_WORKER_CACHE_DIRS}"
+        );
+        if let Some(output) = &config.container_build_output {
+            ensure!(
+                !config
+                    .container_worker_cache
+                    .iter()
+                    .any(|dir| dir.trim_end_matches('/') == output.trim_end_matches('/')),
+                "{CONFIG_FILE_NAME}:{line}: [{CONTAINER_WORKER_CACHE_TABLE}] lists {output:?}, the directory of [{CONTAINER_BUILD_OUTPUT_TABLE}]"
+            );
+        }
+    }
     if let Some(line) = verification_prepare {
         ensure!(
             config.container_verification_prepare.is_some(),
@@ -2363,6 +2438,15 @@ fn parse_key(key: &str) -> Result<String> {
     } else {
         Ok(key.to_owned())
     }
+}
+
+/// Whether `dir` may be a directory of a container a volume is mounted at:
+/// absolute, not `/`, without the characters that separate a mount's parts
+/// and without `..`, as the mount itself checks it
+/// ([`crate::domain::run_container::worker_run_args`]), so a directory
+/// read is never refused only when the container is made.
+fn is_container_dir(dir: &str) -> bool {
+    dir.starts_with('/') && dir != "/" && !dir.contains([',', ':']) && !dir.contains("..")
 }
 
 /// A one-line array of TOML strings (`["src/**", 'docs/**']`), followed by
@@ -2912,13 +2996,27 @@ pub fn load_verification_prepare(root: &Path) -> Result<Option<String>> {
 /// checkout ([`CONTAINER_BUILD_OUTPUT_TABLE`]); no file or no table is
 /// `None`, no build output volume.
 pub fn load_build_output_dir(root: &Path) -> Result<Option<String>> {
+    Ok(load_container_config(root)?.and_then(|config| config.container_build_output))
+}
+
+/// `[container.worker_cache] dirs` of the `dagq.toml` in `root`, the main
+/// checkout ([`CONTAINER_WORKER_CACHE_TABLE`]); no file or no table is
+/// empty, which mounts no worker cache.
+pub fn load_worker_cache_dirs(root: &Path) -> Result<Vec<String>> {
+    Ok(load_container_config(root)?
+        .map(|config| config.container_worker_cache)
+        .unwrap_or_default())
+}
+
+/// The whole `dagq.toml` in `root`, `None` without the file.
+fn load_container_config(root: &Path) -> Result<Option<Config>> {
     let path = root.join(CONFIG_FILE_NAME);
     let Some(text) = read_config(&path)? else {
         return Ok(None);
     };
-    Ok(parse_config(&text)
-        .with_context(|| format!("parse {}", path.display()))?
-        .container_build_output)
+    parse_config(&text)
+        .with_context(|| format!("parse {}", path.display()))
+        .map(Some)
 }
 
 /// The runtimes of the main checkout a queue is bound to (goal 38), read
@@ -4679,6 +4777,72 @@ LITERAL = 'no \n escapes # here'
         }
     }
 
+    /// `[container.worker_cache]` lists the container's directories the
+    /// queue's worker cache is mounted at; without it, or empty, none is,
+    /// and a directory that could not be mounted as written is refused as
+    /// an error of `dagq.toml`'s line.
+    #[test]
+    fn the_worker_cache_table_lists_directories_of_the_container() {
+        let config = parse_config(
+            "[container.worker_cache]\ndirs = [\"/cache/registry\", \"/cache/compiler\"]\n",
+        )
+        .unwrap();
+        assert_eq!(
+            config.container_worker_cache,
+            ["/cache/registry", "/cache/compiler"]
+        );
+        assert!(parse_config("").unwrap().container_worker_cache.is_empty());
+        assert!(
+            parse_config("[container.worker_cache]\ndirs = []\n")
+                .unwrap()
+                .container_worker_cache
+                .is_empty()
+        );
+        for (text, error) in [
+            ("[container.worker_cache]\n", "has no dirs"),
+            (
+                "[container.worker_cache]\ndirs = ['cache']\n",
+                "dagq.toml:2: value of dirs: \"cache\" is not a directory of the container",
+            ),
+            (
+                "[container.worker_cache]\ndirs = ['/']\n",
+                "not a directory of the container",
+            ),
+            (
+                "[container.worker_cache]\ndirs = ['/a,ro']\n",
+                "not a directory of the container",
+            ),
+            (
+                "[container.worker_cache]\ndirs = ['/a:/b']\n",
+                "not a directory of the container",
+            ),
+            (
+                "[container.worker_cache]\ndirs = ['/a/../b']\n",
+                "not a directory of the container",
+            ),
+            (
+                "[container.worker_cache]\ndirs = ['/a', '/a/']\n",
+                "listed twice",
+            ),
+            (
+                "[container.worker_cache]\ndirs = ['/cache/a..b']\n",
+                "not a directory of the container",
+            ),
+            (
+                "[container.worker_cache]\ndirs = ['/build']\n[container.build_output]\ndir = '/build'\n",
+                "the directory of [container.build_output]",
+            ),
+            (
+                "[container.worker_cache]\ndirs = ['/a']\ndirs = ['/b']\n",
+                "defined twice",
+            ),
+            ("[container.worker_cache]\ndir = '/a'\n", "unknown key dir"),
+        ] {
+            let message = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(message.contains(error), "{text}: {message}");
+        }
+    }
+
     /// `[container.image]` names the project's Containerfile and its
     /// inputs, repository paths only; without it the base runs alone.
     #[test]
@@ -6035,7 +6199,7 @@ LITERAL = 'no \n escapes # here'
         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
         assert!(
             error.contains(
-                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [review.jobs], [review.code], [ci_watch], [landing_verification], [eval], [eval.providers.<provider>], [egress], [container.image], [container.build_output], [container.verification] and [kpi]"
+                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [review.jobs], [review.code], [ci_watch], [landing_verification], [eval], [eval.providers.<provider>], [egress], [container.image], [container.build_output], [container.worker_cache], [container.verification] and [kpi]"
             ),
             "{error}"
         );

@@ -7,8 +7,8 @@
 //! What is decided here: the arguments of `podman run` ([`worker_run_args`]:
 //! a non-root user, a read-only root filesystem, no capability, no
 //! privilege escalation, the limits of [`ContainerLimits`], no network, and
-//! as mounts only the run's clone, its directory, its socket and its build
-//! output), the command the container runs ([`launcher_command`], the
+//! as mounts only the run's clone, its directory, its socket, its build
+//! output and its queue's worker cache), the command the container runs ([`launcher_command`], the
 //! `dagq relay turn` of the image's client), and the environment that
 //! command gives the agent from the run token's file ([`turn_env`]). The
 //! token's value is never in the arguments: the container reads it from
@@ -19,7 +19,8 @@
 //! commands in a container of its own, hardened alike
 //! ([`verification_run_args`]): it mounts the verification's directory
 //! (its clone and its token's copy), the materials read-only, the run's
-//! socket and its own build output, and runs [`verification_command`].
+//! socket and its own build output, never a worker cache, and runs
+//! [`verification_command`].
 //!
 //! [Container runtime]: ../../docs/design/container-runtime.md
 
@@ -194,6 +195,11 @@ pub struct WorkerContainer<'a> {
     /// mounted at (`[container.build_output]` of `dagq.toml`); `None`
     /// mounts no such volume.
     pub build_output: Option<&'a str>,
+    /// The directories in the container the queue's worker cache is
+    /// mounted at (`[container.worker_cache]` of `dagq.toml`), each from
+    /// its volume of [`QueueKey::worker_cache_volume_of`]; empty mounts
+    /// none.
+    pub worker_cache: &'a [String],
     pub limits: ContainerLimits,
     /// The variables of the agent: none holds a secret.
     pub env: &'a [(String, String)],
@@ -210,10 +216,12 @@ pub struct WorkerContainer<'a> {
 /// scripts from; every capability is dropped and no privilege can be
 /// gained; memory, CPUs and processes are limited; there is no network
 /// (the forwarder reaches the broker through the run's socket). The mounts
-/// are the clone, the run directory, the run's socket and the build
-/// output: no Podman or Docker socket, no `$HOME` of the host, no landing
-/// worktree and no verification's clone. Every path is checked to be
-/// absolute and free of `,` and `:` so no mount option can be smuggled in.
+/// are the clone, the run directory, the run's socket, the build output
+/// and the queue's worker cache: no Podman or Docker socket, no `$HOME` of
+/// the host, no cache of the host's, no landing worktree and no
+/// verification's clone. Every path is checked to be absolute and free of
+/// `,` and `:` so no mount option can be smuggled in; a worker cache's
+/// directory that is not is refused as an error of `dagq.toml`.
 pub fn worker_run_args(container: &WorkerContainer<'_>) -> Result<Vec<String>, String> {
     let name = container.queue.run_container(container.run)?;
     let clone = mount_path(container.clone)?;
@@ -230,6 +238,12 @@ pub fn worker_run_args(container: &WorkerContainer<'_>) -> Result<Vec<String>, S
     if let Some(dir) = container.build_output {
         let dir = mount_path(Path::new(dir))?;
         let volume = container.queue.build_output_volume(container.run)?;
+        args.extend(["--volume".to_owned(), format!("{volume}:{dir}")]);
+    }
+    for dir in container.worker_cache {
+        let dir = mount_path(Path::new(dir))
+            .map_err(|why| format!("[container.worker_cache] of dagq.toml: {why}"))?;
+        let volume = container.queue.worker_cache_volume_of(&dir);
         args.extend(["--volume".to_owned(), format!("{volume}:{dir}")]);
     }
     args.extend(["--workdir".to_owned(), clone]);
@@ -554,6 +568,7 @@ mod tests {
             clone: &clone,
             run_dir: &run_dir,
             build_output: Some("/build"),
+            worker_cache: &[],
             limits: ContainerLimits::default(),
             env: &env,
             command: &command,
@@ -620,6 +635,70 @@ mod tests {
         );
     }
 
+    /// The directories `[container.worker_cache]` lists are mounted in a
+    /// turn's container from the queue's own volumes, one for each; a
+    /// directory that would smuggle in a mount option is refused as an
+    /// error of the setting, and no container is made.
+    #[test]
+    fn a_turn_s_container_mounts_the_queue_s_worker_cache_at_the_listed_directories() {
+        let (a, b) = (key(), QueueKey::new("0123456789abcdef").unwrap());
+        let clone = PathBuf::from("/q/clones/r1");
+        let run_dir = PathBuf::from("/q/runs/r1");
+        let command = vec!["claude".to_owned()];
+        let dirs = vec!["/cache/registry".to_owned(), "/cache/compiler".to_owned()];
+        let container = WorkerContainer {
+            queue: &a,
+            run: "r1",
+            image: "localhost/dagq-q-image:t",
+            clone: &clone,
+            run_dir: &run_dir,
+            build_output: None,
+            worker_cache: &dirs,
+            limits: ContainerLimits::default(),
+            env: &[],
+            command: &command,
+        };
+        let args = worker_run_args(&container).unwrap();
+        let volumes = values(&args, "--volume");
+        assert_eq!(
+            volumes[3..],
+            [
+                format!(
+                    "{}:/cache/registry",
+                    a.worker_cache_volume_of("/cache/registry")
+                ),
+                format!(
+                    "{}:/cache/compiler",
+                    a.worker_cache_volume_of("/cache/compiler")
+                ),
+            ]
+        );
+        // Another queue's turn mounts its own volumes, never these.
+        let other = worker_run_args(&WorkerContainer {
+            queue: &b,
+            ..container.clone()
+        })
+        .unwrap();
+        for volume in values(&other, "--volume") {
+            assert!(!volume.starts_with(&a.worker_cache_volume()), "{volume}");
+        }
+        assert!(
+            values(&other, "--volume")[3].starts_with(&format!("{}-", b.worker_cache_volume()))
+        );
+        for bad in ["relative", "/a,ro", "/a:/b", "/q/../etc"] {
+            let dirs = vec![bad.to_owned()];
+            let why = worker_run_args(&WorkerContainer {
+                worker_cache: &dirs,
+                ..container.clone()
+            })
+            .unwrap_err();
+            assert!(
+                why.starts_with("[container.worker_cache] of dagq.toml:"),
+                "{bad}: {why}"
+            );
+        }
+    }
+
     #[test]
     fn a_verification_s_container_is_hardened_and_mounts_only_its_dir_materials_socket_and_output()
     {
@@ -665,6 +744,8 @@ mod tests {
                 "dagq-77067154921b9014-build-r1-v1:/build",
             ]
         );
+        // No worker cache of any queue, nor any cache of the host's.
+        assert!(!text.contains("-cache"), "{text}");
         container.build_output = None;
         assert_eq!(
             values(&verification_run_args(&container).unwrap(), "--volume").len(),

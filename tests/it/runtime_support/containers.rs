@@ -167,6 +167,10 @@ impl RunMachine for FakeMachine {
     fn remove_build_output(&self, _: &str) -> Result<()> {
         Ok(())
     }
+
+    fn create_worker_cache(&self, _: &[String]) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub fn containers(state: &Path, db: &Path, repo: &Path) -> PodmanRunContainers {

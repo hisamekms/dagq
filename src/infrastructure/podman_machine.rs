@@ -712,16 +712,16 @@ impl MachineVolumes for QueueVolumes {
         self.exists(&self.build_output(run)?)
     }
 
-    fn create_worker_cache(&self) -> Result<()> {
-        self.create(&self.queue.worker_cache_volume())
+    fn create_worker_cache(&self, dir: &str) -> Result<()> {
+        self.create(&self.queue.worker_cache_volume_of(dir))
     }
 
-    fn remove_worker_cache(&self) -> Result<()> {
-        self.remove(&self.queue.worker_cache_volume())
+    fn remove_worker_cache(&self, dir: &str) -> Result<()> {
+        self.remove(&self.queue.worker_cache_volume_of(dir))
     }
 
-    fn worker_cache_exists(&self) -> Result<bool> {
-        self.exists(&self.queue.worker_cache_volume())
+    fn worker_cache_exists(&self, dir: &str) -> Result<bool> {
+        self.exists(&self.queue.worker_cache_volume_of(dir))
     }
 }
 
@@ -1051,7 +1051,8 @@ mod tests {
 /// A queue's runs' parts in the dagq machine ([`RunMachine`]): the
 /// machine of [`QueueMachine`], the image of the main checkout
 /// (`CheckoutImages`), the run's relay towards the queue's broker
-/// (`PodmanRelays`) and the run's build output volume ([`QueueVolumes`]).
+/// (`PodmanRelays`), the run's build output volume and the queue's worker
+/// cache volumes ([`QueueVolumes`]).
 #[derive(Debug, Clone)]
 pub struct QueueRunMachine {
     pub podman: PodmanCli,
@@ -1127,5 +1128,15 @@ impl crate::application::podman_machine::RunMachine for QueueRunMachine {
     fn remove_build_output(&self, build_output: &str) -> Result<()> {
         let queue_dir = super::queue_service::queue_dir_of(&self.db);
         QueueVolumes::of_queue(self.podman.clone(), &queue_dir)?.remove_build_output(build_output)
+    }
+
+    fn create_worker_cache(&self, dirs: &[String]) -> Result<()> {
+        if dirs.is_empty() {
+            return Ok(());
+        }
+        let queue_dir = super::queue_service::queue_dir_of(&self.db);
+        let volumes = QueueVolumes::of_queue(self.podman.clone(), &queue_dir)?;
+        dirs.iter()
+            .try_for_each(|dir| volumes.create_worker_cache(dir))
     }
 }

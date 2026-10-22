@@ -97,6 +97,7 @@ fn a_worker_s_turn_runs_in_its_hardened_container_and_leaves_its_bundle_and_stat
     fs::write(
         repo.join("dagq.toml"),
         "[roles.worker]\nruntime = \"container\"\n[container.build_output]\ndir = \"/build\"\n\
+         [container.worker_cache]\ndirs = [\"/cache/registry\", \"/cache/compiler\"]\n\
          [run.env]\nCARGO_TARGET_DIR = '/build/target'\nRUSTC_WRAPPER = 'sccache'\n",
     )
     .unwrap();
@@ -208,6 +209,7 @@ fn a_worker_s_turn_runs_in_its_hardened_container_and_leaves_its_bundle_and_stat
         .filter(|(flag, _)| *flag == "--volume")
         .map(|(_, value)| value.as_str())
         .collect();
+    let queue_key = QueueKey::new(QUEUE).unwrap();
     assert_eq!(
         volumes,
         [
@@ -215,6 +217,14 @@ fn a_worker_s_turn_runs_in_its_hardened_container_and_leaves_its_bundle_and_stat
             format!("{0}:{0}", run_dir.display()),
             format!("dagq-{QUEUE}-socket-{}:/run/dagq-broker:z", run.id()),
             format!("dagq-{QUEUE}-build-{}:/build", run.id()),
+            format!(
+                "{}:/cache/registry",
+                queue_key.worker_cache_volume_of("/cache/registry")
+            ),
+            format!(
+                "{}:/cache/compiler",
+                queue_key.worker_cache_volume_of("/cache/compiler")
+            ),
         ]
     );
     let queue_dir = db.parent().unwrap();
@@ -884,8 +894,8 @@ fn an_adopted_run_s_container_is_removed_by_its_stop() {
 
 /// Acceptance (1) on the real machine: the arguments of a turn's container
 /// run there as a non-root user mapped to the owner of the mounted
-/// directories, which writes the clone and the run directory and nothing
-/// else, with no network. Needs podman, the dagq machine, a queue
+/// directories, which writes the clone, the run directory and the queue's
+/// worker cache and nothing else, with no network. Needs podman, the dagq machine, a queue
 /// directory it mounts (`DAGQ_WORKER_QUEUE_DIR`, under the data home) and
 /// the queue's image there (`DAGQ_WORKER_IMAGE`).
 #[test]
@@ -901,8 +911,10 @@ fn a_turn_s_container_runs_hardened_in_the_real_machine() {
     for dir in [&clone, &run_dir] {
         fs::create_dir_all(dir).unwrap();
     }
+    let cache = vec!["/dagq-test-cache".to_owned()];
     let script = format!(
         "test \"$(id -u)\" = 10001 && ! touch /probe 2>/dev/null && touch {clone} {run} \
+         && touch /dagq-test-cache/probe \
          && ! dagq relay probe --socket /nonexistent 2>/dev/null && touch /tmp/probe",
         clone = shell_path(clone.join("probe")),
         run = shell_path(run_dir.join("probe")),
@@ -917,6 +929,7 @@ fn a_turn_s_container_runs_hardened_in_the_real_machine() {
             clone: &clone,
             run_dir: &run_dir,
             build_output: None,
+            worker_cache: &cache,
             limits: ContainerLimits::default(),
             env: &env,
             command: &command,
@@ -940,6 +953,12 @@ fn a_turn_s_container_runs_hardened_in_the_real_machine() {
         .bounded_status()
         .unwrap();
     let _ = podman(&["volume", "rm", "--force", &socket]);
+    let _ = podman(&[
+        "volume",
+        "rm",
+        "--force",
+        &queue.worker_cache_volume_of(&cache[0]),
+    ]);
     let wrote = clone.join("probe").is_file() && run_dir.join("probe").is_file();
     let _ = fs::remove_dir_all(&clone);
     let _ = fs::remove_dir_all(&run_dir);

@@ -30,6 +30,7 @@ related:
 信頼しないコードを走らせる実行側を、hostのプロセスの代わりにrunごとのcontainerで動かす仕組みの地図。
 containerに移すのはworker（resumeを含む）とintegrateのverificationの2つの適用先だけで、読むだけのheadlessのjob・planner・inbox・制御側はhostに置く（[ADR-t2113-3](../adr/2026-10-08-t2113-3-only-workers-resume-and-integrate-verification-run-in-containers.md)決定1〜3）。
 containerを選ばない限りhostのrunの振る舞いは変わらない。
+実物のpodmanとmachineで流すtestは`#[ignore]`で、関門に数えない。
 
 ## 適用先と設定の読み込み
 
@@ -139,7 +140,6 @@ containerのimageは、runtimeが持つbaseと、`dagq.toml`が名指すproject�
 - 失敗: clientを入手できない、名指したファイルがmainのcheckoutに無い、buildが落ちたときは`container_image_failed`をqueueに記録する。
   `ImageGate`はそのimageの失敗から`FAILURE_HOLD_SECS`の間、理由つきで使えないと答え、時間が過ぎるか入力が変われば試し直させる。
   作ったときは`container_image_built`を記録する。
-- 実物のpodmanで流すtestは`#[ignore]`で、関門に数えない。
 
 ## brokerへの経路
 
@@ -171,7 +171,6 @@ runのcontainerは`--network none`で、外への経路はhostのqueueのbroker�
   回数の上限と窓はqueue serviceと同じ。
   起動し直せない・上限に達した・見られないときはinbox宛てのattention `queue_relay_down`を書き、全てのrelayが動けば消える。
   attentionが立つ間は`RelayGate`がcontainerを使えないと答え、新しいrunを控える（上の「fail closedの境界」）。
-- 実物のmachineで流すtestは`#[ignore]`で、関門に数えない。
 
 ## git
 
@@ -201,16 +200,17 @@ cloneで働くrunの各turn（最初のturn・revise・答え・resume）は、h
 session wrapperはhostの制御側に残り、turnの出力・receipt・askをrun dirから今と同じく読み、`run log`で追える。
 executorは`application::run_container::PodmanActorExecutor`、設定の読み取り・tokenの受け渡し・podmanは`RunContainers`のport、machine・image・relay・buildの出力の準備はhost運用が実行と着地に貸す`application::podman_machine::RunMachine`のport、`podman run`の引数・token・env・transcriptの置き場の判断は`domain::run_container`、containerの中の処理は`infrastructure::container_turn`（`dagq relay turn`）が持つ。
 
-- 準備: 各turnの前に、machineを動かしてrunを使う者にし（`release`は呼ばない）、imageをbuildし、runのrelayを開き、`dagq.toml`が名指せばbuildの出力のvolumeを作り、`[run.env]`と`host.toml`のcontainerの上限を読む。
+- 準備: 各turnの前に、machineを動かしてrunを使う者にし（`release`は呼ばない）、imageをbuildし、runのrelayを開き、`dagq.toml`が名指すvolumeを作り、`[run.env]`と`host.toml`のcontainerの上限を読む。
   どれかが失敗すればturnを起動せず、hostにも戻さない。
 - token: supervisorが発行したworkerのtokenを、run dirのファイル（mode 0600、renameで置くのでworkerが置いたsymlinkを辿らない）にして、その場所をenvで渡す。
   podmanの引数とcontainerの設定にtokenの値は無く、ファイルはcontainerを消すときに消す。
 - container: 非root（machineの中でmountの持ち主と同じuidの対応）・読み取り専用のroot filesystem（書けるのはmountと一時の`/tmp`だけ）・capabilityの削除・特権の昇格の禁止・memory/cpu/pidsの上限・`--network none`で、Podman / Dockerのsocketを渡さない。
   上限の既定と`host.toml`の`[container]`での上書きは`ContainerLimits`のdoc commentが持つ。
-  mountはrunのclone・run dir・runのsocket・buildの出力のvolumeだけで、着地用のworktreeとverificationのcloneはmountしない（reviewの間も残るworkerのcontainerに、制御側が着地と検証に使う物を見せない）。
+  mountはrunのclone・run dir・runのsocket・`dagq.toml`が名指すvolumeだけで、着地用のworktreeとverificationのcloneはmountしない（reviewの間も残るworkerのcontainerに、制御側が着地と検証に使う物を見せない）。
   podmanのcwdはrun dirで、制御側はcloneでプログラムを起動しない（上の「git」）。
-- buildの出力: `dagq.toml`の`[container.build_output]`が名指すcontainerの中のdirに、runごとのvolumeをmountする（綴りと意味と既定の無しは`run_env::CONTAINER_BUILD_OUTPUT_TABLE`のdoc comment）。
+- buildの出力とworkerのcache: `dagq.toml`の`[container.build_output]`が名指すdirにrunごとのvolumeを、`[container.worker_cache]`が挙げるdirごとにqueueのvolumeをmountする（綴りと意味と既定の無しは`run_env`の各表のdoc comment）。
   runtimeは言語の道具を知らず、projectが`[run.env]`で道具をそこに向ける。
+  workerのcacheは信頼せず、同じqueueのworker・resumeだけが共有する（ADR-t2257-1決定5）。
 - containerの中: `dagq relay turn`がagentの前後の手順を持ち（順は`infrastructure::container_turn`のdoc comment）、agentが終われば結果に依らず、run dirの事実のファイルを上の「git」の形で書く。
   agentのhomeはrun dirの下に置き、次のturnがsessionをresumeできる。
 - transcript: agentのhomeの`.claude`の下に、containerの中のcwd（clone）を名にしたprojectのdirでできる。
@@ -222,7 +222,6 @@ executorは`application::run_container::PodmanActorExecutor`、設定の読み�
   supervisorの再起動の後にadoptしたrunも、名前がrunから決まるので同じ経路で消える。
   runの終わりと着地では、relayの見張りがrelayを閉じるときにcontainerとbuildの出力も消す。
 - Codexに経路が向くrunは起動しない（上の「fail closedの境界」）。
-- 実物のpodmanで流すtestは`#[ignore]`で、関門に数えない。
 
 ## verificationの実行
 

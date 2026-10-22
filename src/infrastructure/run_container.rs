@@ -3,7 +3,8 @@
 //! [`RunContainers`] port. Before a turn it reads where `dagq.toml` puts
 //! the build output, has the machine's parts made ready through the
 //! [`RunMachine`] port the host's context lends (the machine, the image,
-//! the run's relay and its build output volume), and reads `[run.env]`
+//! the run's relay, its build output volume and the queue's worker cache
+//! volumes of the directories `dagq.toml` lists), and reads `[run.env]`
 //! and the containers' limits; it hands
 //! the run token over as a 0600 file of the run directory; it starts
 //! `podman --connection dagq run`; it removes a run's container by its
@@ -30,7 +31,9 @@ use super::adapters::GitRepository;
 use super::agent_dir::Directory;
 use super::podman_machine::PodmanCli;
 use super::queue_service::{queue_dir_of, write_private};
-use super::run_env::{load_build_output_dir, load_run_env, parse_positive, strip_comment};
+use super::run_env::{
+    load_build_output_dir, load_run_env, load_worker_cache_dirs, parse_positive, strip_comment,
+};
 use crate::application::CommandSpec;
 use crate::application::podman_machine::RunMachine;
 use crate::application::run_container::{
@@ -100,14 +103,17 @@ impl RunContainers for PodmanRunContainers {
             .context("the queue is bound to no checkout, whose dagq.toml decides the container")?;
         let run_dir = Path::new(run.run_dir().context("missing run directory")?);
         let build_output = load_build_output_dir(checkout)?;
+        let worker_cache = load_worker_cache_dirs(checkout)?;
         let image = self.machine.ready(
             run.id().as_str(),
             build_output.is_some().then_some(run.id().as_str()),
         )?;
+        self.machine.create_worker_cache(&worker_cache)?;
         Ok(PreparedRun {
             queue: self.key()?,
             image,
             build_output,
+            worker_cache,
             run_env: load_run_env(checkout, &queue_dir, run_dir)?,
             limits: load_container_limits(self.host_wide.as_deref()).0,
         })
@@ -554,6 +560,9 @@ mod tests {
                 bail!("no machine in this test")
             }
             fn remove_build_output(&self, _: &str) -> Result<()> {
+                bail!("no machine in this test")
+            }
+            fn create_worker_cache(&self, _: &[String]) -> Result<()> {
                 bail!("no machine in this test")
             }
         }

@@ -122,6 +122,10 @@ impl RunMachine for FakeMachine {
         self.removed.lock().unwrap().push(build_output.to_owned());
         Ok(())
     }
+
+    fn create_worker_cache(&self, dirs: &[String]) -> Result<()> {
+        panic!("a verification made the worker cache {dirs:?} ready")
+    }
 }
 
 /// A container runtime whose every part answers.
@@ -311,6 +315,7 @@ fn a_verification_set_to_the_container_runs_its_commands_there_and_leaves_nothin
     queue.set_config(&format!(
         "[roles.verification]\nruntime = \"container\"\n\
          [container.build_output]\ndir = \"/build\"\n\
+         [container.worker_cache]\ndirs = [\"/cache/registry\"]\n\
          [container.verification]\nprepare = {}\n\
          [run.env]\nRUSTC_WRAPPER = {}\nCARGO_BUILD_JOBS = '2'\n",
         toml_string(&format!("sh {}", shell_path(&prepare))),
@@ -1249,6 +1254,7 @@ fn an_already_satisfied_claim_is_verified_in_the_container_and_closes() {
     queue.set_config(&format!(
         "[roles.verification]\nruntime = \"container\"\n\
          [container.build_output]\ndir = \"/build\"\n\
+         [container.worker_cache]\ndirs = [\"/cache/registry\"]\n\
          [container.verification]\nprepare = {}\n\
          [run.env]\nRUSTC_WRAPPER = {}\n",
         toml_string(&format!("sh {}", shell_path(&prepare))),

@@ -297,10 +297,29 @@ impl QueueKey {
         volume_part(run).map(|run| format!("dagq-{}-build-{run}", self.0))
     }
 
-    /// The named volume of the queue's worker cache (ADR-t2173-1 decision
-    /// 3): the workers and resumes of this queue share it, nothing else.
+    /// The name the queue's worker cache volumes start with (ADR-t2173-1
+    /// decision 3): the workers and resumes of this queue share them,
+    /// nothing else.
     pub fn worker_cache_volume(&self) -> String {
         format!("dagq-{}-cache", self.0)
+    }
+
+    /// The named volume of the queue's worker cache mounted at the
+    /// container's directory `dir` (`[container.worker_cache]` of
+    /// `dagq.toml`): [`Self::worker_cache_volume`] and the first 16 hex
+    /// digits of the SHA-256 of `dir`. A volume of its own for each
+    /// directory, so that each is new and empty when first mounted, and
+    /// Podman gives it to the container's user (`keep-id`) who writes it;
+    /// a directory named again later finds its volume, and the queue's
+    /// name keeps it from every other queue's workers.
+    pub fn worker_cache_volume_of(&self, dir: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(dir.as_bytes());
+        let hex: String = digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        format!("{}-{hex}", self.worker_cache_volume())
     }
 
     /// The named volume that holds the unix socket of the run `run`
@@ -481,6 +500,14 @@ mod tests {
         assert!(a.build_output_volume("../x").is_err());
         assert_eq!(a.worker_cache_volume(), "dagq-77067154921b9014-cache");
         assert_ne!(a.worker_cache_volume(), b.worker_cache_volume());
+        let cache = a.worker_cache_volume_of("/cache/registry");
+        assert!(
+            cache.starts_with("dagq-77067154921b9014-cache-") && cache.len() == 28 + 16,
+            "{cache}"
+        );
+        assert_eq!(cache, a.worker_cache_volume_of("/cache/registry"));
+        assert_ne!(cache, a.worker_cache_volume_of("/cache/compiler"));
+        assert_ne!(cache, b.worker_cache_volume_of("/cache/registry"));
         for bad in ["", "-a", "a/b", "a b", "ä"] {
             assert!(QueueKey::new(bad).is_err(), "{bad:?}");
         }

@@ -55,7 +55,8 @@ pub trait MachineUsers {
 
 /// The named volumes of one queue inside the dagq machine (ADR-t2173-1
 /// decisions 2 and 3): a run's (or a verification's) build output, and
-/// the queue's worker cache. Their names carry the queue, so no call
+/// the queue's worker cache, a volume for each directory of the container
+/// it is mounted at. Their names carry the queue, so no call
 /// reaches another queue's volume. The machine must run: the run's end
 /// and the landing remove a run's build output before its user leaves.
 pub trait MachineVolumes {
@@ -64,10 +65,11 @@ pub trait MachineVolumes {
     /// Remove the build output volume of `run`, if it is there.
     fn remove_build_output(&self, run: &str) -> Result<()>;
     fn build_output_exists(&self, run: &str) -> Result<bool>;
-    /// Create the queue's worker cache volume unless it is there.
-    fn create_worker_cache(&self) -> Result<()>;
-    fn remove_worker_cache(&self) -> Result<()>;
-    fn worker_cache_exists(&self) -> Result<bool>;
+    /// Create the queue's worker cache volume of the container's
+    /// directory `dir` unless it is there.
+    fn create_worker_cache(&self, dir: &str) -> Result<()>;
+    fn remove_worker_cache(&self, dir: &str) -> Result<()>;
+    fn worker_cache_exists(&self, dir: &str) -> Result<bool>;
 }
 
 /// A run's parts in the dagq machine, made ready before each turn of a
@@ -77,7 +79,9 @@ pub trait MachineVolumes {
 /// ([`super::container_image::prepare`]), the run's relay open
 /// ([`super::broker_relay::open`]) and, when asked, a build output volume
 /// ([`MachineVolumes`]): the run's for a worker, the verification's own
-/// for a verification (ADR-t2173-1 decision 4). This context does it; the
+/// for a verification (ADR-t2173-1 decision 4). A worker's turn also has
+/// the queue's worker cache volumes made ([`Self::create_worker_cache`]);
+/// a verification never mounts them (ADR-t2114-4 decision 4). This context does it; the
 /// executors of the worker and of the verification are given it as this
 /// port.
 pub trait RunMachine: Send + Sync {
@@ -90,6 +94,10 @@ pub trait RunMachine: Send + Sync {
     /// Remove the build output volume named after `build_output`, if it is
     /// there: a verification's, at its end.
     fn remove_build_output(&self, build_output: &str) -> Result<()>;
+    /// Create the queue's worker cache volume of each of `dirs`, the
+    /// container's directories a worker's turn mounts them at, unless it
+    /// is there. The machine must run ([`Self::ready`] first).
+    fn create_worker_cache(&self, dirs: &[String]) -> Result<()>;
 }
 
 /// What [`ensure`] and [`release`] act with.

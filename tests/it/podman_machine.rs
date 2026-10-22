@@ -301,7 +301,7 @@ fn volumes_are_named_per_queue_and_run_and_one_queue_never_removes_another_s() {
     for volumes in [&a, &b] {
         volumes.create_build_output("r1").unwrap();
         volumes.create_build_output("r1").unwrap();
-        volumes.create_worker_cache().unwrap();
+        volumes.create_worker_cache("/cache").unwrap();
     }
     assert!(a.build_output_exists("r1").unwrap());
     assert!(!a.build_output_exists("r2").unwrap());
@@ -310,10 +310,11 @@ fn volumes_are_named_per_queue_and_run_and_one_queue_never_removes_another_s() {
     a.remove_build_output("r1").unwrap();
     assert!(!a.build_output_exists("r1").unwrap());
     assert!(b.build_output_exists("r1").unwrap());
-    assert!(a.worker_cache_exists().unwrap() && b.worker_cache_exists().unwrap());
-    a.remove_worker_cache().unwrap();
-    assert!(!a.worker_cache_exists().unwrap());
-    assert!(b.worker_cache_exists().unwrap());
+    assert!(a.worker_cache_exists("/cache").unwrap() && b.worker_cache_exists("/cache").unwrap());
+    assert!(!a.worker_cache_exists("/elsewhere").unwrap());
+    a.remove_worker_cache("/cache").unwrap();
+    assert!(!a.worker_cache_exists("/cache").unwrap());
+    assert!(b.worker_cache_exists("/cache").unwrap());
 
     let mut left: Vec<String> = fs::read_dir(host.state.join("volumes"))
         .unwrap()
@@ -324,7 +325,9 @@ fn volumes_are_named_per_queue_and_run_and_one_queue_never_removes_another_s() {
         left,
         [
             format!("dagq-{QUEUE_B}-build-r1"),
-            format!("dagq-{QUEUE_B}-cache")
+            dagq::domain::podman_machine::QueueKey::new(QUEUE_B)
+                .unwrap()
+                .worker_cache_volume_of("/cache")
         ]
     );
     // Every removal named a volume of queue A.

@@ -3,7 +3,7 @@
 //! whose worker works in a clone runs in a container of the dagq machine
 //! instead of a process of the host ([`PodmanActorExecutor`]), through the
 //! [`RunContainers`] port, which makes the machine, the image, the run's
-//! relay and its build output ready, hands the run token over as a file
+//! relay, its build output and its queue's worker cache ready, hands the run token over as a file
 //! of the run directory, starts `podman` and removes a run's container.
 //!
 //! The session wrapper stays on the host (the control side): it reads the
@@ -49,6 +49,10 @@ pub struct PreparedRun {
     /// mounted at (`[container.build_output]` of `dagq.toml`); `None`
     /// mounts none.
     pub build_output: Option<String>,
+    /// The directories in the container the queue's worker cache is
+    /// mounted at (`[container.worker_cache]` of `dagq.toml`); empty
+    /// mounts none.
+    pub worker_cache: Vec<String>,
     /// `[run.env]` of the main checkout's `dagq.toml`, for the run.
     pub run_env: Vec<(String, String)>,
     /// The limits of the container (`host.toml`).
@@ -58,8 +62,10 @@ pub struct PreparedRun {
 /// The containers of the runs of one queue in the dagq machine.
 pub trait RunContainers: Send + Sync {
     /// Make what a turn of `run` needs ready: the dagq machine running
-    /// with the run as a user, the image built, the run's relay open and
-    /// its build output volume made (when `dagq.toml` names its directory).
+    /// with the run as a user, the image built, the run's relay open, its
+    /// build output volume made (when `dagq.toml` names its directory) and
+    /// the queue's worker cache volumes made (one for each directory
+    /// `dagq.toml` lists).
     /// `Err` says why the turn cannot run in the container; it is not run
     /// anywhere else (fail closed).
     fn prepare(&self, run: &TaskRun) -> Result<PreparedRun>;
@@ -368,6 +374,7 @@ impl ActorExecutor for PodmanActorExecutor<'_> {
             clone,
             run_dir,
             build_output: prepared.build_output.as_deref(),
+            worker_cache: &prepared.worker_cache,
             limits: prepared.limits,
             env: &env,
             command: &command,
