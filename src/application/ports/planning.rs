@@ -49,6 +49,9 @@ pub trait TaskReads {
     fn goal_predecessors(&self, task_id: TaskId) -> Result<Vec<GoalPredecessor>>;
     /// Tasks that are `in_progress` right now, in ID order.
     fn tasks_in_progress(&self) -> Result<Vec<Task>>;
+    /// Whether a replanning past its pause's fence or an open hold guards
+    /// `task` now, so that no next step of its run starts.
+    fn task_fenced(&self, task: TaskId) -> Result<bool>;
     /// Every goal in ID order with its task counts by status.
     fn list_goals(&self) -> Result<Vec<GoalSummary>>;
     fn show_goal(&mut self, goal_id: GoalId) -> Result<GoalDetail>;

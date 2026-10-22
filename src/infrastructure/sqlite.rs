@@ -1883,6 +1883,9 @@ impl TaskReads for SqliteQueue {
             .collect()
     }
 
+    fn task_fenced(&self, task: TaskId) -> Result<bool> {
+        Ok(SqliteQueue::turn_fence(self, task)?.is_some())
+    }
     fn tasks_in_progress(&self) -> Result<Vec<Task>> {
         Ok(self
             .conn

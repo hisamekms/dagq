@@ -239,18 +239,19 @@ pub fn attention(
         // and 1118), not for a person's `integrate`; one recovered from a
         // landing it may not land again, or whose failed review a person
         // answered `retry_review` (ADR-t2521-1), waits for the supervisor's
-        // review.
+        // review; one whose lease was given back after its review passed,
+        // with nobody asked, waits for a supervisor to take it up.
         if run.status() == RunStatus::AwaitingIntegration && !leased {
-            let history = RunHistory::from_events(&events);
-            let waits = if history.queued_to_land().is_some() {
-                Some((event_kind::LANDING_QUEUED, AttentionNext::QueuedToLand))
-            } else if history.recovered_landing().is_some() {
-                Some((event_kind::RUN_RECOVERED, AttentionNext::Reviewing))
-            } else if history.queued_review_retry().is_some() {
-                Some((event_kind::REVIEW_RETRY_QUEUED, AttentionNext::Reviewing))
-            } else {
-                None
+            let seen = crate::domain::stranded_landing::Seen {
+                status: run.status(),
+                leased,
+                ask_open: asks
+                    .iter()
+                    .any(|ask| ask.run_id.as_ref() == Some(run.id()) && ask.closed_at.is_none()),
+                fenced: queue.task_fenced(run.task_id())?,
+                task: TaskStatus::InProgress,
             };
+            let waits = runtime_wait(&events, seen);
             if let Some((kind, next)) = waits {
                 attention.push(Attention {
                     run_id: Some(run.id().clone()),
@@ -1001,4 +1002,114 @@ pub(super) fn is_draft(queue: &(impl TaskReads + ?Sized), task: TaskId) -> Resul
         full: false,
     })?;
     Ok(page.tasks.first().is_some_and(|item| item.id == task))
+}
+
+/// What a run awaiting integration that nobody leases (`seen`, with its
+/// `events`) waits for when the runtime, not a person, moves it on: the
+/// event that set it waiting and its attention's next. A `land` answer or
+/// a landing recovered to land again queues it to land; a landing
+/// recovered to be reviewed, or a `retry_review` answer, queues its
+/// review; and one the supervisor takes up again
+/// ([`crate::domain::stranded_landing::judge`], ADR-t3049-1) is queued to
+/// land as well. `None` when it waits for a person.
+fn runtime_wait(
+    events: &[RunEvent],
+    seen: crate::domain::stranded_landing::Seen,
+) -> Option<(&'static str, AttentionNext)> {
+    use crate::domain::stranded_landing::{Stranded, judge};
+    let history = RunHistory::from_events(events);
+    if history.queued_to_land().is_some() {
+        Some((event_kind::LANDING_QUEUED, AttentionNext::QueuedToLand))
+    } else if history.recovered_landing().is_some() {
+        Some((event_kind::RUN_RECOVERED, AttentionNext::Reviewing))
+    } else if history.queued_review_retry().is_some() {
+        Some((event_kind::REVIEW_RETRY_QUEUED, AttentionNext::Reviewing))
+    } else if judge(seen, events) == Stranded::TakeUp {
+        Some((event_kind::LEASE_RELEASED, AttentionNext::QueuedToLand))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::stranded_landing::Seen;
+    use crate::domain::{EventId, TaskId};
+
+    fn event(id: i64, kind: EventKind, payload: Value) -> RunEvent {
+        RunEvent {
+            id: EventId::new(id),
+            task_id: Some(TaskId::new(1)),
+            goal_id: None,
+            run_id: None,
+            kind: kind.as_str().into(),
+            payload,
+            created_at: String::new(),
+            actor: None,
+        }
+    }
+
+    /// A passed run whose lease was given back is queued to land in the
+    /// attention only while the supervisor would take it up: not while its
+    /// task is held or replanned, nor with an ask of it open, nor once a
+    /// take-up of it failed, when it is a person's (`review and integrate`,
+    /// or the ask) as the take-up judges.
+    #[test]
+    fn a_given_back_run_is_queued_to_land_only_while_the_supervisor_takes_it_up() {
+        let events = [
+            event(1, EventKind::ReviewFinished, json!({"verdict": "pass"})),
+            event(2, EventKind::ExitRequested, json!({})),
+            event(3, EventKind::LandingQueued, json!({"via": "exit"})),
+            event(4, EventKind::LeaseReleased, json!({"reason": "finished"})),
+        ];
+        let seen = Seen {
+            status: RunStatus::AwaitingIntegration,
+            leased: false,
+            ask_open: false,
+            fenced: false,
+            task: TaskStatus::InProgress,
+        };
+        assert_eq!(
+            runtime_wait(&events, seen),
+            Some((event_kind::LEASE_RELEASED, AttentionNext::QueuedToLand))
+        );
+        let fenced = Seen {
+            fenced: true,
+            ..seen
+        };
+        assert_eq!(runtime_wait(&events, fenced), None);
+        let asked = Seen {
+            ask_open: true,
+            ..seen
+        };
+        assert_eq!(runtime_wait(&events, asked), None);
+        // A take-up that failed let go of it with a runtime error: it is a
+        // person's (`review and integrate`) and not queued to land again.
+        let mut given_up = events.to_vec();
+        given_up.push(event(
+            5,
+            EventKind::RuntimeError,
+            json!({"message": "run r could not be taken up: x", "lease_released": true}),
+        ));
+        assert_eq!(runtime_wait(&given_up, seen), None);
+        // A `land` answer queues it whatever else the take-up judges.
+        let approved = [
+            events[0].clone(),
+            event(
+                5,
+                EventKind::IntegrationApproved,
+                json!({"ask_id": 9, "push": true}),
+            ),
+            event(
+                6,
+                EventKind::LandingQueued,
+                json!({"via": "approve", "ask_id": 9}),
+            ),
+        ];
+        assert_eq!(
+            runtime_wait(&approved, seen),
+            Some((event_kind::LANDING_QUEUED, AttentionNext::QueuedToLand))
+        );
+    }
 }

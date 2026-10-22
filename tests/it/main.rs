@@ -186,6 +186,7 @@ mod runtime_spike;
 mod runtime_spike_replan;
 mod runtime_stale_receipt;
 mod runtime_stall_end;
+mod runtime_stranded_landing;
 mod runtime_sweep;
 mod runtime_task_hold;
 mod runtime_task_hold_end;

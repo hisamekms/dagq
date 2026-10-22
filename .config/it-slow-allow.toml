@@ -2189,3 +2189,9 @@ task = 2887
 name = "runtime_landing_answers::a_bare_send_back_of_a_subagents_send_back_carries_its_findings_with_or_without_a_recheck"
 reason = "B 境界（守る境界）: supervisor wiring of an approve_landing answer to a subagent's send-back, applied as the run waits and held through the landing recheck's park and resume, to landing_decided in SQLite and the resume prompt; which findings is a unit test"
 task = 2946
+
+# 4s to 10s in stress under the host's load (task 3049): the fixture's two runs and their reviews, then a supervisor's pass that lands one
+[[test]]
+name = "runtime_stranded_landing::a_run_left_awaiting_integration_is_taken_up_by_one_supervisor_and_lands"
+reason = "B 境界（SQLite のトランザクション・supervisor の配線・Git の着地）: lease も開いた ask も無い awaiting_integration の run の lease を 1 つの BEGIN IMMEDIATE で取り、開いた ask で拒み、2 つの thread の競合で 1 つだけが取り、判定の後に integration_held を記録された run を拒むことと、拾い直した run を実際の supervisor の pass が review をやり直さずに着地させ、保留された run は残すことを確かめる。拾うかの判断は domain::stranded_landing の unit test"
+task = 3049

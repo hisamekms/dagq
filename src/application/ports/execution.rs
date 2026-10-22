@@ -1335,6 +1335,11 @@ pub trait RunRecovery {
     /// [`Self::lease_for_review`] for the e2e a run queued to land runs
     /// first (ADR-t1233-2).
     fn lease_for_e2e(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>>;
+    /// Lease an `awaiting_integration` run with no lease row and no open
+    /// ask to `token`, to put it back in its landing's line (ADR-t3049-1);
+    /// `None` when another process leased it or it changed meanwhile.
+    fn lease_stranded_landing(&mut self, id: &RunId, token: &LeaseToken)
+    -> Result<Option<TaskRun>>;
     /// Lease a `validating` run nobody holds to `token` to verify its
     /// `already_satisfied` claim again for an answer to close it
     /// (ADR-t1818-1 decision 3); `None` when another process took it or it

@@ -10,6 +10,7 @@ amended_by:
   - adr-t615-1
   - adr-t1404-1
   - adr-t1433-3
+  - adr-t3049-1
 supersedes:
   - adr-0003
   - adr-0007

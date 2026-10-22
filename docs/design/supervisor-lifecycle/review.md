@@ -122,6 +122,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
    `retry_review`はresumeせず同じreceiptを再reviewする（[ADR-t2521-1](../../adr/2026-10-17-t2521-1-retry-review-answer-reviews-a-failed-review-again-on-the-same-run.md)）。
    runが着地せずに終われば、runtimeがそのrunの閉じていない`approve_landing`を閉じる。
 7. **引き継ぎ**: 他のsupervisorがadoptして最後の段のeventから続きを決め、途中のerrorはrunをabandonして`review and integrate`のattentionにする。
+   passの後にleaseを返されlease行も開いたaskも無いrunは、adoptでなくfill passが拾い直して同じく続ける（[Supervise](supervise.md#leaseの解放)）。
 8. **reviseの間のask**: `worker_question`の答えを次のturnに届け、待つrunはslotから外れる（[人の答えを待つrun](waiting.md)の「差し戻しと解消依頼の段」）。
 
 ## reviewのprovider

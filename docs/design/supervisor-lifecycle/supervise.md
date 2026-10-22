@@ -116,6 +116,11 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 
 - leaseとslotは`awaiting_integration`や`failed`になった時点でなく、runがsupervisorの手を離れて次の担い手を待つ時点で返す（ADR-0054の決定6）。
 - 返す時点の一覧は`release_lease`（`src/infrastructure/runtime_store/coordination.rs`）のdoc commentが持つ。
+- drainするsupervisorが着地の保留でleaseを返したrunのように、lease行も閉じていないaskも無い`awaiting_integration`のrunで最後のreviewが着地を許すものは、fill passが拾い直してreviewをやり直さずに着地の列に戻す（`take_up_stranded_landings`、[ADR-t3049-1](../../adr/2026-10-21-t3049-1-supervisor-takes-up-a-passed-run-left-awaiting-integration-without-lease-or-ask.md））。
+  拾うか人に残すかの判定は`domain::stranded_landing`で、人の判断を待つ理由（review以降のask・`integration_held`・runtimeのerrorでleaseを手放したこと・holdや再計画・cancelなど）のあるrunは今までどおり人の着地を待つrunとして出る。
+  拾い直しの続きが失敗したrunもそのerrorで人に移り、次のpassは拾わない。
+  leaseは`lease_stranded_landing`の1つのトランザクションがlease行の無いことと判定をその時点のeventで検査し直して作るので、adopt（staleなlease行の引き継ぎ）とは別の経路で、2つのsupervisorが同じrunを取らず、判定の後に人に保留されたrunも取らない。
+  落とし穴: 人を待たせるために新しくleaseを返す経路は、その理由をreview以降のeventかqueueの状態に残さないと拾い直される。
 
 ## recoverとtriage
 

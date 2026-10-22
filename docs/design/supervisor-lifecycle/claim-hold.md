@@ -122,7 +122,7 @@ supervisorはqueueのdirectory（run worktreeを置く`runs/`）のファイル�
 - 着地: 着地slotを待つrunは、空きが着地の閾値を下回る間integrationを始めず、leaseを持ったままrebaseも検証もしない。
   `approve_landing`の`land`のanswerは足りない間もその場で適用して列に並べ、列の着地の開始（`start_approved_landings`）だけが待つ（[Review](review.md#review-supervisor)）。
 - 落とし穴: 着地の控えはhostのものでなく記録したsupervisorのslotのものなので、別の生きているsupervisorはその控えを終えない（`domain::claim_hold::LANDINGS`）。
-- 止めるdrainも、空き容量の掃除と残りのjobが終わるまでleaseを持って待ち、その後の容量で足りれば着地へ進み、足りなければleaseを返してrunを`awaiting_integration`のまま人に残す。
+- 止めるdrainも、空き容量の掃除と残りのjobが終わるまでleaseを持って待ち、その後の容量で足りれば着地へ進み、足りなければleaseを返し[拾い直し](supervise.md#leaseの解放)に任せる。
   待ちの時間上限は設けず、既に選んだ有限の候補の処理を待つ。
   provisioningの失敗のdrainは掃除をdrainの扱いにしないが、同じく残りのjobが終わるまで待つ。
   `[run.env]`のprogramが無いときと着地のbranchが解決しないときは、掃除を待たずにleaseを返す。

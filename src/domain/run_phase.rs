@@ -261,7 +261,9 @@ impl Phase {
     /// for the answer to its ask ([`super::satisfied::answer_awaited`]), or
     /// else for a slot or the container its verification is set to; and
     /// that a run whose hold's wait was recorded ([`Self::Held`]) and not
-    /// released since is still in it.
+    /// released since is still in it; and that a run awaiting integration
+    /// a supervisor takes up again waits to go back to a slot
+    /// ([`Self::awaiting_at_rest`]).
     pub fn resting(status: RunStatus, events: &[RunEvent]) -> Option<Self> {
         if status.is_unfinished() && held_unreleased(events) {
             return Some(Self::Held);
@@ -273,10 +275,23 @@ impl Phase {
                 Self::ClaimHeld
             });
         }
-        Self::at_rest(
-            status,
-            RunHistory::from_events(events).queued_approval().is_some(),
-        )
+        Self::awaiting_at_rest(status, events).or_else(|| {
+            Self::at_rest(
+                status,
+                RunHistory::from_events(events).queued_approval().is_some(),
+            )
+        })
+    }
+
+    /// The phase of a run awaiting integration that no lease holds and no
+    /// `land` answer queued, when its events leave it to a supervisor to
+    /// take up again ([`super::stranded_landing::kept`], ADR-t3049-1): it
+    /// waits to go back to a slot, not for a person.
+    fn awaiting_at_rest(status: RunStatus, events: &[RunEvent]) -> Option<Self> {
+        (status == RunStatus::AwaitingIntegration
+            && RunHistory::from_events(events).queued_approval().is_none()
+            && super::stranded_landing::kept(events).is_none())
+        .then_some(Self::Returning)
     }
 }
 
@@ -306,7 +321,7 @@ impl Phase {
             return Some(Self::Held);
         }
         let queued = RunHistory::from_events(events).queued_approval().is_some();
-        Self::at_rest(status, queued)
+        Self::awaiting_at_rest(status, events).or_else(|| Self::at_rest(status, queued))
     }
 
     /// The phase a recovery (`run_recovered`, already among the run's
@@ -330,7 +345,8 @@ impl Phase {
             Some(RecoveredLanding::Review(_)) if status == RunStatus::AwaitingIntegration => {
                 Some(Self::Returning)
             }
-            _ => Self::at_rest(status, history.queued_approval().is_some()),
+            _ => Self::awaiting_at_rest(status, events)
+                .or_else(|| Self::at_rest(status, history.queued_approval().is_some())),
         }
     }
 }
@@ -669,6 +685,55 @@ mod tests {
         assert_eq!(after(RunStatus::NeedsSession), Some(Phase::NeedsSession));
         assert_eq!(after(RunStatus::Failed), Some(Phase::Ended));
         assert_eq!(after(RunStatus::Integrated), None);
+    }
+
+    /// A passed run whose supervisor stopped and gave its lease back as it
+    /// waited for its landing (ADR-t3049-1) waits to go back to a slot,
+    /// for the supervisor that takes it up, not for a person; one an ask
+    /// was opened for after its review waits for a person's answer.
+    #[test]
+    fn a_passed_run_given_back_waits_to_go_back_unless_a_person_was_asked() {
+        let given_back = vec![
+            event(1, event_kind::REVIEW_FINISHED, json!({"verdict": "pass"})),
+            event(2, event_kind::EXIT_REQUESTED, json!({})),
+            event(3, event_kind::LANDING_QUEUED, json!({"via": "exit"})),
+            event(4, event_kind::LEASE_RELEASED, json!({"reason": "finished"})),
+        ];
+        let awaiting = RunStatus::AwaitingIntegration;
+        assert_eq!(
+            Phase::resting(awaiting, &given_back),
+            Some(Phase::Returning)
+        );
+        assert_eq!(
+            Phase::after_landing(awaiting, &given_back),
+            Some(Phase::Returning)
+        );
+        assert_eq!(
+            Phase::after_recovery(awaiting, &given_back),
+            Some(Phase::Returning)
+        );
+        assert_eq!(Phase::Returning.tags(), tags(Blocker::Queue, Holds::None));
+        let mut asked = given_back.clone();
+        asked.push(event(
+            5,
+            event_kind::ASK_OPENED,
+            json!({"kind": "approve_landing", "asked_by": "supervisor", "ask_id": 9}),
+        ));
+        assert_eq!(Phase::resting(awaiting, &asked), Some(Phase::LandingAnswer));
+        let mut held = given_back.clone();
+        held.push(event(5, event_kind::INTEGRATION_HELD, json!({})));
+        assert_eq!(Phase::resting(awaiting, &held), Some(Phase::LandingAnswer));
+        // A take-up that failed let go of it: it waits for a person.
+        let mut given_up = given_back;
+        given_up.push(event(
+            5,
+            event_kind::RUNTIME_ERROR,
+            json!({"message": "x", "lease_released": true}),
+        ));
+        assert_eq!(
+            Phase::resting(awaiting, &given_up),
+            Some(Phase::LandingAnswer)
+        );
     }
 
     /// A run whose hold's wait was recorded rests in it until the release,

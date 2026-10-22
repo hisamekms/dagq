@@ -174,6 +174,63 @@ impl SqliteQueue {
         self.lease_awaiting(id, token, "e2e")
     }
 
+    /// Take up an `awaiting_integration` run left with no lease row and no
+    /// open ask (ADR-t3049-1), leasing it to `token`, recorded as
+    /// `lease_acquired` with `reason: stranded_landing`. Unlike an adoption
+    /// (ADR-0039 decision 1) no lease is taken over: the transaction judges
+    /// the run again as [`crate::domain::stranded_landing::judge`] does, on
+    /// its lease row, its unclosed asks, its task's status, replanning and
+    /// hold, and its events as they stand now, and inserts the lease only
+    /// for a run it takes up. `Ok(None)` otherwise: a second supervisor
+    /// that judged the same run finds the first one's lease, and one that
+    /// judged it before another's landing held it for a person
+    /// (`integration_held`) and gave it back finds that event, and each
+    /// takes nothing.
+    pub fn lease_stranded_landing(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+    ) -> Result<Option<TaskRun>> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = self.generators.clock.now();
+        let Some(run) =
+            stored_run(&tx, id)?.filter(|run| run.status() == RunStatus::AwaitingIntegration)
+        else {
+            return Ok(None);
+        };
+        let (leased, ask_open, task): (bool, bool, Option<String>) = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM run_leases WHERE run_id=?1),
+                    EXISTS(SELECT 1 FROM asks WHERE run_id=?1 AND closed_at IS NULL),
+                    (SELECT t.status FROM tasks t JOIN task_runs r ON r.task_id=t.id WHERE r.id=?1)",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
+        let Some(task) = task else {
+            return Ok(None);
+        };
+        let seen = crate::domain::stranded_landing::Seen {
+            status: run.status(),
+            leased,
+            ask_open,
+            fenced: replanning(&tx, id, GuardedStep::Integrate)?,
+            task: task.parse()?,
+        };
+        let events = run_events_of(&tx, id)?;
+        if crate::domain::stranded_landing::judge(seen, &events)
+            != crate::domain::stranded_landing::Stranded::TakeUp
+        {
+            return Ok(None);
+        }
+        if !lease_in(&tx, id, token, now, json!({"reason": "stranded_landing"}))? {
+            return Ok(None);
+        }
+        let run = stored_run(&tx, id)?.unwrap_or(run);
+        tx.commit()?;
+        Ok(Some(run.relocated(&self.runs_dir)))
+    }
+
     /// Lease a `validating` run nobody holds to `token` to verify its
     /// `already_satisfied` claim again (ADR-t1818-1 decision 3), recorded
     /// with `reason: already_satisfied`; refused while a replanning guards
@@ -1552,6 +1609,13 @@ impl RunRecovery for SqliteQueue {
     }
     fn lease_for_e2e(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>> {
         SqliteQueue::lease_for_e2e(self, id, token)
+    }
+    fn lease_stranded_landing(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+    ) -> Result<Option<TaskRun>> {
+        SqliteQueue::lease_stranded_landing(self, id, token)
     }
     fn lease_satisfied(&mut self, id: &RunId, token: &LeaseToken) -> Result<Option<TaskRun>> {
         SqliteQueue::lease_satisfied(self, id, token)

@@ -9,7 +9,8 @@
 //! not show (a step ended with no next one recorded yet, or events this
 //! binary does not know), is `None` rather than a guess. A run nobody
 //! leases, or whose lease no working process holds (stale), has no step
-//! going on, except a landing it waits for in the queue.
+//! going on, except a landing it waits for in the queue: one nobody leases
+//! only when its events queue it to land.
 //! This is not `stats`' `watched_phase`, which only times the sessions the
 //! supervisor watches.
 
@@ -18,7 +19,9 @@ use crate::domain::run::{ConflictPrecheck, restore_payload};
 use serde::Serialize;
 
 use super::agent_eval::before_landing::WaitReason;
-use super::{RunEvent, RunStatus, run_e2e, stats::timestamp_millis, waiting::WaitState};
+use super::{
+    RunEvent, RunHistory, RunStatus, run_e2e, stats::timestamp_millis, waiting::WaitState,
+};
 
 /// The step a listed run is in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -145,13 +148,18 @@ impl Phase {
         })
     }
 
-    /// Whether a run in `status` can be in this phase, and with `held`
-    /// whether a working process holds its lease: without one only a
-    /// landing it waits for in the queue goes on.
-    fn fits(self, status: RunStatus, held: bool) -> bool {
+    /// Whether a run in `status` with `lease` can be in this phase, and
+    /// with `queued` whether its events queue it to land with no lease
+    /// ([`RunHistory::queued_to_land`]): without a working process holding
+    /// its lease only a landing it waits for in the queue goes on, and with
+    /// no lease at all only one the supervisor lands from its events (a run
+    /// whose lease was given back is in no queue, ADR-t3049-1).
+    fn fits(self, status: RunStatus, lease: Lease, queued: bool) -> bool {
         use RunStatus as S;
-        if !held {
-            return self == Self::LandingQueue && status == S::AwaitingIntegration;
+        if lease != Lease::Live {
+            return self == Self::LandingQueue
+                && status == S::AwaitingIntegration
+                && (lease == Lease::Stale || queued);
         }
         match status {
             S::Claimed | S::Starting => self == Self::Claim,
@@ -267,7 +275,9 @@ impl Progress {
                 current = started.map(|phase| (phase, event));
             }
         }
-        let current = current.filter(|(phase, _)| phase.fits(status, lease == Lease::Live));
+        let queued =
+            lease == Lease::None && RunHistory::from_events(events).queued_to_land().is_some();
+        let current = current.filter(|(phase, _)| phase.fits(status, lease, queued));
         let since = current
             .and_then(|(_, event)| timestamp_millis(&event.created_at))
             .map(|ms| ms.div_euclid(1000));
@@ -622,8 +632,16 @@ mod tests {
         // Nobody leases it: no review goes on, and it holds no slot.
         let unleased = Progress::of(RunStatus::AwaitingIntegration, Lease::None, &events, 0);
         assert_eq!((unleased.phase, unleased.slot), (None, None));
-        // A landing it waits for in the queue does without a lease.
-        let queued = [event(1, "landing_queued", json!({"via": "approve"}))];
+        // A landing it waits for in the queue does without a lease, when
+        // a `land` answer queued it.
+        let queued = [
+            event(
+                1,
+                "integration_approved",
+                json!({"ask_id": 9, "push": true}),
+            ),
+            event(2, "landing_queued", json!({"via": "approve", "ask_id": 9})),
+        ];
         assert_eq!(
             Progress::of(RunStatus::AwaitingIntegration, Lease::None, &queued, 0).phase,
             Some(Phase::LandingQueue)
@@ -631,6 +649,30 @@ mod tests {
         assert_eq!(
             Progress::of(RunStatus::NeedsSession, Lease::None, &queued, 0).phase,
             None
+        );
+    }
+
+    /// A passed run whose supervisor gave its lease back as it waited for
+    /// its landing (ADR-t3049-1) is in no queue while nobody leases it,
+    /// though its last step was `landing_queued`; with a stale lease, its
+    /// supervisor's landing queue is what an adopter goes on with.
+    #[test]
+    fn a_run_whose_lease_was_given_back_is_not_shown_in_the_landing_queue() {
+        let given_back = [
+            event(1, "review_finished", json!({"verdict": "pass"})),
+            event(2, "exit_requested", json!({})),
+            event(3, "landing_queued", json!({"via": "exit"})),
+            event(4, "lease_released", json!({"reason": "finished"})),
+        ];
+        let progress = Progress::of(RunStatus::AwaitingIntegration, Lease::None, &given_back, 0);
+        assert_eq!((progress.phase, progress.slot), (None, None));
+        let stale = Progress::of(RunStatus::AwaitingIntegration, Lease::Stale, &given_back, 0);
+        assert_eq!(stale.phase, Some(Phase::LandingQueue));
+        // Taken up again, its lease live, it waits for its landing turn.
+        let live = Progress::of(RunStatus::AwaitingIntegration, Lease::Live, &given_back, 0);
+        assert_eq!(
+            (live.phase, live.slot),
+            (Some(Phase::LandingQueue), Some(SlotUse::LandingQueue))
         );
     }
 

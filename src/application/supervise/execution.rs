@@ -62,6 +62,7 @@ mod stages;
 mod stale;
 mod stall;
 mod stall_recovery;
+mod stranded;
 mod task_hold;
 mod triage;
 mod waiting;
@@ -2522,6 +2523,12 @@ impl Supervisor<'_> {
         if let Err(error) = self.review_recovered_runs(parallel) {
             warn!(error = %format_args!("{error:#}"), "a run to be reviewed again could not start its review: {error:#}");
         }
+        // A run a supervisor that stopped left awaiting integration, its
+        // review passed and nobody asked, goes back to its landing's line
+        // (ADR-t3049-1).
+        if let Err(error) = self.take_up_stranded_landings(parallel) {
+            warn!(error = %format_args!("{error:#}"), "a run left awaiting integration could not be taken up: {error:#}");
+        }
         // Before the answers and the recovery jobs: a result a hold kept
         // is applied or discarded once the hold is released (ADR-t1879-1).
         self.settle_kept_results()?;
@@ -3766,9 +3773,10 @@ impl Supervisor<'_> {
                 // the run stays awaiting integration, leased, and the
                 // integration slot stays free. A supervisor that stops
                 // gives the lease back for a hold that does not end by
-                // itself, leaving the run awaiting integration for a person
-                // (`review and integrate`); one that hands off keeps it,
-                // and hands the run over leased (ADR-t3048-1,
+                // itself, leaving the run awaiting integration for a
+                // supervisor that does not drain to take up again
+                // (ADR-t3049-1); one that hands off keeps it, and hands the
+                // run over leased (ADR-t3048-1,
                 // [`crate::domain::landing_hold::judge`]).
                 match self.landing_hold() {
                     crate::domain::landing_hold::LandingHold::Proceed => {}
