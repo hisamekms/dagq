@@ -1657,7 +1657,10 @@ pub fn orphan_run(repo: &Path, db: &Path, token: &str, wrapper: u32, agent: u32)
                 repo_path: path_text(&repository.root).unwrap(),
                 run_dir: path_text(&run_dir).unwrap(),
                 branch: format!("dagq/{}", run.id()),
-                worktree_path: path_text(&run_dir.join("worktree")).unwrap(),
+                worktree_path: path_text(
+                    &run_dir.join(dagq::domain::worktree_name(run.id().as_str())),
+                )
+                .unwrap(),
                 receipt_path: path_text(&run_dir.join("receipt.json")).unwrap(),
                 log_path: path_text(&run_dir.join("claude.debug.log")).unwrap(),
             },
@@ -2136,7 +2139,10 @@ pub fn provision_under(repo: &Path, db: &Path, token: &str) -> TaskRun {
                 repo_path: path_text(&repository.root).unwrap(),
                 run_dir: path_text(&run_dir).unwrap(),
                 branch: format!("dagq/{}", run.id()),
-                worktree_path: path_text(&run_dir.join("worktree")).unwrap(),
+                worktree_path: path_text(
+                    &run_dir.join(dagq::domain::worktree_name(run.id().as_str())),
+                )
+                .unwrap(),
                 receipt_path: path_text(&run_dir.join("receipt.json")).unwrap(),
                 log_path: path_text(&run_dir.join("claude.debug.log")).unwrap(),
             },
