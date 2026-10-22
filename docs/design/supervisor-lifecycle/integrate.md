@@ -150,6 +150,7 @@ mainが動く → landing recheck → 着地しなくなった待ちのrunをres
 - recheckを始められないか記録できないerrorはwarnだけで、runに何も記録せず着地を止めない（着地が改めて確かめる）。
 - mainの動きを見るsupervisorは選ばず、drainやhandoffの間は生きているほかのsupervisorが確かめる。
 - recheckも同じ番を取り、関門の間は始めずに次のpassで見直す。
+- 着地待ちのrunが無ければ確かめるものが無いので、番もrecheckのlockも取らず、そのlockの下でだけbuild outputを消す空き容量の掃除（[queueのdirのビルドのキャッシュ](claim-hold.md#queueのdirのビルドのキャッシュ)）を妨げない（`look_before_lock`）。
 
 ## errorと復旧
 

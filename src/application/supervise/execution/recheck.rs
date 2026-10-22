@@ -159,6 +159,9 @@ fn unmoved(due: bool, rechecks: &Rechecks, main: &CommitSha) -> bool {
 /// supervisor checked is settled, and one another supervisor checked is
 /// settled unless this one holds runs to land, which that one could not
 /// see. No other supervisor's registration counts: none is elected.
+/// With no run waiting, nothing is checked, so neither the check turn nor
+/// the recheck lock is taken: the cleanup for room, which clears the
+/// recheck's build outputs only under that lock, is not kept from them.
 fn look_before_lock(
     due: bool,
     rechecks: &Rechecks,
@@ -167,6 +170,9 @@ fn look_before_lock(
     finished: impl FnOnce() -> Result<Option<RunEvent>>,
     token: &str,
 ) -> Result<Look> {
+    if targets.is_empty() {
+        return Ok(Look::Idle);
+    }
     if let Some((idle, before)) = &rechecks.idle
         && idle == main
     {
@@ -2176,6 +2182,20 @@ mod tests {
             checks(look_before_lock(true, &none, &main, waiting, unread, "me").unwrap()),
             ["r1"]
         );
+    }
+
+    /// With no run waiting to land, main is not checked, due or not, and
+    /// the finished recheck is not read: the recheck lock is left free.
+    #[test]
+    fn a_main_with_no_run_waiting_is_not_checked() {
+        let main = sha('a');
+        let none = Rechecks::default();
+        for due in [false, true] {
+            assert!(matches!(
+                look_before_lock(due, &none, &main, Vec::new(), unread, "me").unwrap(),
+                Look::Idle
+            ));
+        }
     }
 
     /// A main looked at with nothing to check settles only the runs that
