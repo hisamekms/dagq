@@ -27,8 +27,8 @@ use tracing::{info, warn};
 
 use super::{
     AskStore, Clock, CloneFacts, EventStore, FollowUpRegistration, IdGenerator, Landing,
-    MainRemote, ProcessControl, Queue, QueueRecords, Repository, RunFiles, RunLog, Verifier,
-    path_text, reason_of_error, tail,
+    MainRemote, ProcessControl, Queue, QueueRecords, Repository, RunFiles, RunLog, RunTransitions,
+    Verifier, path_text, reason_of_error, tail,
 };
 use crate::domain::{
     ActorContext, ActorRole, AuthorizationError, Authorizer, Capability, Resource, StaticPolicy,
@@ -3477,8 +3477,8 @@ fn close_landing_asks(queue: &mut dyn AskStore, run: &TaskRun) {
 /// left the directory, `Directory not empty`), [`clear_left_worktree`]
 /// takes the directory, or at least its `.git`, and the failure is still
 /// recorded.
-fn remove_landed_worktree(
-    queue: &mut dyn Queue,
+fn remove_landed_worktree<Q: EventStore + RunTransitions + ?Sized>(
+    queue: &mut Q,
     repository: &dyn Repository,
     files: &dyn RunFiles,
     processes: &dyn ProcessControl,
