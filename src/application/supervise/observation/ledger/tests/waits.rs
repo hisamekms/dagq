@@ -290,13 +290,16 @@ fn a_task_folded_as_it_became_ready_follows_the_waits_after() {
     }
 }
 
-/// The row of task 8 that [`crate::domain::ledger::build`] folds of `log`
-/// at `secs` after [`T0`].
+/// The row of `task` that [`crate::domain::ledger::build`] folds of `log`
+/// at `secs` after [`T0`], settled as a pass then settles it
+/// ([`crate::domain::ledger::builder::run_settles`]).
 fn whole(log: &Log, task: i64, secs: i64) -> LedgerRow {
-    crate::domain::ledger::build(&log.events, ms(secs), BUILT)
+    let mut row = crate::domain::ledger::build(&log.events, ms(secs), BUILT)
         .into_iter()
         .find(|row| row.kind == LedgerKind::Task && row.key == task.to_string())
-        .unwrap()
+        .unwrap();
+    row.is_final = crate::domain::ledger::builder::run_settles(&row, ms(secs));
+    row
 }
 
 /// A task that left its time ready (back to a draft) while a supervisor's
@@ -579,6 +582,170 @@ fn a_pass_whose_clock_is_before_the_events_it_reads_folds_at_the_last() {
     assert_eq!(memory.row(LedgerKind::Task, "8"), held);
 }
 
+/// A task ended (`completed`) whose time ready a supervisor's slots full
+/// lay on, ended by that supervisor's silence, and settled by a pass past
+/// its grace. The supervisor records again after its silence, which opens
+/// that slots full again over the whole time ready in the fold of every
+/// event. A builder that reads the task's end only then (one that starts
+/// again) leaves the settled row as it was settled, and keeps no mark.
+#[test]
+fn a_settled_tasks_row_stays_as_settled_though_a_wait_opens_again_over_its_time_ready() {
+    use crate::domain::supervisor_life::SILENT_AFTER_MS;
+    let mut log = Log::default();
+    log.add(Some(8), None, "task_created", json!({"status": "draft"}), 0)
+        .add(
+            Some(8),
+            None,
+            "task_status_changed",
+            json!({"from": "draft", "to": "ready"}),
+            5,
+        )
+        .add(
+            None,
+            None,
+            "slots_full_started",
+            json!({"supervisor": "s", "class": "heavy"}),
+            10,
+        )
+        .add(
+            None,
+            None,
+            "supervisor_alive",
+            json!({"supervisor": "s"}),
+            20,
+        )
+        .add(
+            Some(8),
+            None,
+            "task_status_changed",
+            json!({"from": "ready", "to": "completed"}),
+            30,
+        );
+    let settled_at = (30 + SETTLE_GRACE_MS / 1000).max(20 + SILENT_AFTER_MS / 1000 + 1);
+    let overlay = |row: &LedgerRow| {
+        row.detail["overlays"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|overlay| (overlay["start"].as_i64(), overlay["end"].as_i64()))
+            .collect::<Vec<_>>()
+    };
+    let memory = Memory::of(&log);
+    drain(&memory, &mut Builder::default(), settled_at);
+    let settled = memory.row(LedgerKind::Task, "8");
+    assert!(settled.is_final);
+    assert_eq!(overlay(&settled), [(Some(ms(10)), Some(ms(20)))]);
+    log.add(
+        None,
+        None,
+        "supervisor_alive",
+        json!({"supervisor": "s"}),
+        settled_at + 1,
+    );
+    memory.events.replace(log.events.clone());
+    let opened = whole(&log, 8, settled_at + 1);
+    assert_eq!(overlay(&opened), [(Some(ms(10)), Some(ms(30)))]);
+    let writes = memory.writes.get();
+    let built = pass(&memory, &mut Builder::default(), settled_at + 1);
+    assert_eq!((built.backlog, built.failure), (0, None));
+    assert_eq!(memory.row(LedgerKind::Task, "8"), settled);
+    assert_eq!(memory.writes.get() - writes, built.written);
+}
+
+/// A task ready under a supervisor's slots full, whose row a pass wrote
+/// with that wait open on its time ready. The slots full's end comes in
+/// after the move to `ready` but timed before it (a clock set back where
+/// it was written, or a write late by more than that), so the wait bears
+/// on no time ready in the fold of every event. The next pass writes the
+/// row as that fold, with no overlay, though no event of the task came:
+/// the end's reach stays among the inputs, so the fold is not behind the
+/// stored one.
+#[test]
+fn a_ready_tasks_row_follows_a_waits_end_timed_before_its_time_ready() {
+    let mut log = Log::default();
+    log.add(Some(8), None, "task_created", json!({"status": "draft"}), 0)
+        .add(
+            None,
+            None,
+            "slots_full_started",
+            json!({"supervisor": "s", "class": "heavy"}),
+            10,
+        )
+        .add(
+            Some(8),
+            None,
+            "task_status_changed",
+            json!({"from": "draft", "to": "ready"}),
+            20,
+        );
+    let memory = Memory::of(&log);
+    let mut builder = Builder::default();
+    drain(&memory, &mut builder, 25);
+    let open = memory.row(LedgerKind::Task, "8");
+    assert_eq!(open, whole(&log, 8, 25));
+    assert_eq!(open.detail["overlays"][0]["start"], json!(ms(20)));
+    log.add(
+        None,
+        None,
+        "slots_full_ended",
+        json!({"supervisor": "s", "class": "heavy"}),
+        15,
+    );
+    memory.events.replace(log.events.clone());
+    drain(&memory, &mut builder, 30);
+    let ended = memory.row(LedgerKind::Task, "8");
+    assert_eq!(ended, whole(&log, 8, 30));
+    assert_eq!(ended.detail["overlays"], json!([]));
+    assert_eq!(ended.inputs_through.events, log.last());
+}
+
+/// A task back to a draft, its time ready past with no wait on it, whose
+/// row a pass wrote. A supervisor's slots full starts after that, timed on
+/// that time ready (a clock set back where it was written, or a write late
+/// by more than that), so it bears on it in the fold of every event. The
+/// next pass writes the row as that fold, though no event of the task came
+/// and no wait was open on its time ready: a move of a wait timed before an
+/// event read before it marks every task with time ready.
+#[test]
+fn a_task_ready_past_follows_a_wait_start_timed_on_its_time_ready() {
+    let mut log = Log::default();
+    log.add(Some(8), None, "task_created", json!({"status": "draft"}), 0)
+        .add(
+            Some(8),
+            None,
+            "task_status_changed",
+            json!({"from": "draft", "to": "ready"}),
+            5,
+        )
+        .add(
+            Some(8),
+            None,
+            "task_status_changed",
+            json!({"from": "ready", "to": "draft"}),
+            30,
+        );
+    let memory = Memory::of(&log);
+    let mut builder = Builder::default();
+    drain(&memory, &mut builder, 40);
+    assert_eq!(
+        memory.row(LedgerKind::Task, "8").detail["overlays"],
+        json!([])
+    );
+    log.add(
+        None,
+        None,
+        "slots_full_started",
+        json!({"supervisor": "s", "class": "heavy"}),
+        20,
+    );
+    memory.events.replace(log.events.clone());
+    drain(&memory, &mut builder, 45);
+    let row = memory.row(LedgerKind::Task, "8");
+    assert_eq!(row, whole(&log, 8, 45));
+    assert_eq!(row.detail["overlays"][0]["start"], json!(ms(20)));
+    assert_eq!(row.detail["overlays"][0]["end"], json!(ms(30)));
+}
+
 /// A deterministic generator: a linear congruential one from a fixed seed.
 pub(super) struct Lcg(pub(super) u64);
 
@@ -655,8 +822,41 @@ fn as_of(row: &LedgerRow, cut: i64) -> LedgerRow {
 struct Supervisor {
     stopped: bool,
     slots_full: bool,
-    /// Its last event, in seconds after [`T0`].
+    /// The latest time of its events, in seconds after [`T0`].
     last: Option<i64>,
+}
+
+/// What the checks of the generated histories found, counted so that the
+/// test shows they reach each case: the passes that found a row written
+/// as of an earlier pass; those at an earlier time that found one folded
+/// at a later time and kept its task marked; the checks of a settled row
+/// whose overlays the fold of every event no longer gives (a wait opened
+/// again over its time ready after it settled); the passes of a builder
+/// whose clock was set back; the rows a pass at a time before the latest
+/// wrote with a wait open that a silence ended by the latest time; and the
+/// ends of a wait recorded after a task's move to `ready` but timed at or
+/// before it.
+#[derive(Debug, Default, Clone, Copy)]
+struct Seen {
+    as_of_earlier: usize,
+    behind_in_time: usize,
+    settled_kept: usize,
+    set_back: usize,
+    open_before_latest: usize,
+    end_timed_before_ready: usize,
+}
+
+impl Seen {
+    fn add(self, other: Self) -> Self {
+        Self {
+            as_of_earlier: self.as_of_earlier + other.as_of_earlier,
+            behind_in_time: self.behind_in_time + other.behind_in_time,
+            settled_kept: self.settled_kept + other.settled_kept,
+            set_back: self.set_back + other.set_back,
+            open_before_latest: self.open_before_latest + other.open_before_latest,
+            end_timed_before_ready: self.end_timed_before_ready + other.end_timed_before_ready,
+        }
+    }
 }
 
 /// The passes of a generated history: two builders over one store, each
@@ -672,28 +872,29 @@ struct Passes {
     /// Each task's stored row as last checked, and the time (unix ms) of
     /// the pass that wrote it.
     written: BTreeMap<i64, (LedgerRow, i64)>,
-    /// The passes that found a row written as of an earlier pass.
-    as_of_earlier: usize,
-    /// The passes at an earlier time that found a row folded at a later
-    /// one and kept its task marked.
-    behind_in_time: usize,
+    /// Each task's row as the store first held it settled (`final`).
+    settled: BTreeMap<i64, LedgerRow>,
+    seen: Seen,
 }
 
 impl Passes {
-    /// A pass of builder `b` at `secs` (not before its last one) over
-    /// every event of `log`, the last at `last_event`, and the checks of
-    /// each task's stored row. It folds at no earlier time than that event
-    /// ([`Builder::folds_at`]). At the latest time, its passes leave no
-    /// mark ([`passes_to_drain`]), and the row is the fold of every event
-    /// as of the pass that last wrote it ([`as_of`]): one at the pass's
-    /// time when it wrote it, and one no
-    /// input since it was written moved (the events, the waits' ends, a
-    /// supervisor's silence) otherwise. At a time before the latest pass's
-    /// (one that began before it and writes after it), the pass leaves the
-    /// row as it was or writes the fold of every event at its time, and
-    /// takes back none of the waits a silence ended over the same events.
+    /// A pass of builder `b` at `secs` over every event of `log`, the
+    /// latest at `last_event`, and the checks of each task's stored row.
+    /// It folds at no earlier time than that event ([`Builder::folds_at`]).
+    /// At the latest time, its passes leave no mark ([`passes_to_drain`]),
+    /// and the row is the fold of every event as of the pass that last
+    /// wrote it ([`as_of`]): one at the pass's time when it wrote it, and
+    /// one no input since it was written moved (the events, the waits'
+    /// ends, a supervisor's silence) otherwise. At a time before the latest
+    /// pass's (one that began before it and writes after it, or a clock set
+    /// back), the pass leaves the row as it was or writes the fold of every
+    /// event at its time, and takes back none of the waits a silence ended
+    /// over the same events. A row once settled stays as it was settled
+    /// ([`Self::kept_settled`]).
     fn at(&mut self, log: &Log, b: usize, secs: i64, last_event: i64, seed: u64) {
-        assert!(secs >= self.clocks[b]);
+        if secs < self.clocks[b] {
+            self.seen.set_back += 1;
+        }
         self.clocks[b] = secs;
         self.memory.events.replace(log.events.clone());
         let tasks = [8, 9];
@@ -709,15 +910,21 @@ impl Passes {
             let secs = folds_at;
             for task in tasks {
                 let stored = self.memory.row(LedgerKind::Task, &task.to_string());
+                if self.kept_settled(log, task, &stored, secs, seed) {
+                    continue;
+                }
                 let cut = match self.written.get(&task) {
                     Some((before, at)) if *before == stored => *at,
                     _ => ms(secs),
                 };
                 if cut < ms(secs) {
-                    self.as_of_earlier += 1;
+                    self.seen.as_of_earlier += 1;
                 }
                 let expected = as_of(&whole(log, task, secs), cut);
                 assert_eq!(stored, expected, "seed {seed}: task {task} at {secs}");
+                if stored.is_final {
+                    self.settled.insert(task, stored.clone());
+                }
                 self.written.insert(task, (stored, cut));
             }
             return;
@@ -734,11 +941,14 @@ impl Passes {
         let secs = folds_at;
         for (task, before) in tasks.into_iter().zip(before) {
             let stored = self.memory.row(LedgerKind::Task, &task.to_string());
+            if self.kept_settled(log, task, &stored, secs, seed) {
+                continue;
+            }
             let (held, read) = (&before.inputs_through, &stored.inputs_through);
             if stored == before {
                 let later = whole(log, task, secs).inputs_through;
                 if backlog > 0 && later != *held && later.events == held.events {
-                    self.behind_in_time += 1;
+                    self.seen.behind_in_time += 1;
                 }
                 continue;
             }
@@ -752,30 +962,76 @@ impl Passes {
                         .all(|wait| read.life_ended.contains(wait)),
                 "{at}: {held:?} taken back to {read:?}"
             );
+            // Folded before a silence the latest time is past: a row it
+            // reads open a later pass at the latest time ends.
+            let latest = whole(log, task, self.latest).inputs_through.life_ended;
+            if latest.iter().any(|wait| !read.life_ended.contains(wait)) {
+                self.seen.open_before_latest += 1;
+            }
+            if stored.is_final {
+                self.settled.insert(task, stored.clone());
+            }
             self.written.insert(task, (stored, ms(secs)));
         }
     }
+
+    /// Whether the store held `task`'s row settled at an earlier check.
+    /// Then `stored`, its row now, is the row as it was settled
+    /// (ADR-t1662-1 decision 17: no event of the task came since, so
+    /// nothing made it dirty), whatever the fold of every event at `secs`
+    /// makes of the waits over its time ready now (one a silence ended
+    /// that its supervisor opened again, recording after the silence).
+    fn kept_settled(
+        &mut self,
+        log: &Log,
+        task: i64,
+        stored: &LedgerRow,
+        secs: i64,
+        seed: u64,
+    ) -> bool {
+        let Some(settled) = self.settled.get(&task) else {
+            return false;
+        };
+        assert_eq!(
+            stored, settled,
+            "seed {seed}: task {task}'s settled row written again at {secs}"
+        );
+        if whole(log, task, secs).detail["overlays"] != settled.detail["overlays"] {
+            self.seen.settled_kept += 1;
+        }
+        true
+    }
 }
 
-/// One history from `seed`: two tasks (8 and 9) made drafts at 0 and
-/// moved between `draft` and `ready`, two supervisors (`s1`, `s2`) whose
-/// slots full start and end, that record their life and stop, holds on
-/// the claims by either, and the passes of two builders over one store
-/// ([`Passes::at`]): at the time of the last event, a few seconds later,
-/// or exactly at and one second past a supervisor's silence, and those of
-/// the builder behind in time at a time before the latest pass's, up to a
-/// silence before (before the last event too, as a pass that took its time
-/// before it read it). Returns how many passes found a
-/// row written as of an earlier pass, and how many at an earlier time found
-/// one folded at a later time.
-fn a_history_of(seed: u64) -> (usize, usize) {
+/// One history from `seed`: two tasks (8 and 9) made drafts at 0, moved
+/// between `draft` and `ready` and ended (`completed` or `canceled`), two
+/// supervisors (`s1`, `s2`) whose slots full start and end, that record
+/// their life and stop, holds on the claims by either, and the passes of
+/// two builders over one store ([`Passes::at`]): at the time of the last
+/// event, a few seconds later, exactly at and one second past a
+/// supervisor's silence, past the grace that settles a task ended, and
+/// those of the builder behind in time at a time before the latest pass's,
+/// up to a silence before (before the last event too, as a pass that took
+/// its time before it read it), of a builder whose clock is set back, and
+/// ahead of the events' clock (so that the events after it are timed
+/// before it). Some events are timed before the latest ones (a clock set
+/// back where they were written, or a write late by more than that): a
+/// start or an end of a wait among them may come after a task's move to
+/// `ready` or out of it and be timed before it.
+fn a_history_of(seed: u64) -> Seen {
+    use crate::domain::ledger::settle::SETTLE_GRACE_MS;
     use crate::domain::supervisor_life::SILENT_AFTER_MS;
     let silence = SILENT_AFTER_MS / 1000;
+    let grace = SETTLE_GRACE_MS / 1000;
     let mut rng = Lcg(seed);
     let mut log = Log::default();
     log.add(Some(8), None, "task_created", json!({"status": "draft"}), 0)
         .add(Some(9), None, "task_created", json!({"status": "draft"}), 0);
     let mut ready = [false, false];
+    let mut ended = [false, false];
+    // When each task last moved to `ready`, as its fold reads that move.
+    let mut moved = [0, 0];
+    let mut ready_from: [Option<i64>; 2] = [None, None];
     let names = ["s1", "s2"];
     let mut supervisors = [Supervisor::default(), Supervisor::default()];
     let mut held = false;
@@ -786,23 +1042,34 @@ fn a_history_of(seed: u64) -> (usize, usize) {
         let s = usize::try_from(rng.below(2)).unwrap();
         let name = names[s];
         let b = usize::try_from(rng.below(2)).unwrap();
+        let task = usize::try_from(rng.below(2)).unwrap();
+        let id = i64::try_from(8 + task).unwrap();
+        let at = if rng.below(5) == 0 {
+            (t - i64::try_from(1 + rng.below(15)).unwrap()).max(0)
+        } else {
+            t
+        };
+        // An end of a wait timed at or before a task's move to `ready`.
+        let before_ready = |at: i64| ready_from.iter().flatten().any(|from| at <= *from);
         let events = log.events.len();
-        match rng.below(9) {
-            0 => {
-                let task = usize::try_from(rng.below(2)).unwrap();
+        match rng.below(13) {
+            0 if !ended[task] => {
                 let (from, to) = if ready[task] {
                     ("ready", "draft")
                 } else {
                     ("draft", "ready")
                 };
                 ready[task] = !ready[task];
-                let id = i64::try_from(8 + task).unwrap();
+                moved[task] = moved[task].max(at);
+                if ready[task] {
+                    ready_from[task] = Some(moved[task]);
+                }
                 log.add(
                     Some(id),
                     None,
                     "task_status_changed",
                     json!({"from": from, "to": to}),
-                    t,
+                    at,
                 );
             }
             1 if !supervisors[s].stopped => {
@@ -811,42 +1078,51 @@ fn a_history_of(seed: u64) -> (usize, usize) {
                 } else {
                     "slots_full_started"
                 };
+                if supervisors[s].slots_full && before_ready(at) {
+                    passes.seen.end_timed_before_ready += 1;
+                }
                 supervisors[s].slots_full = !supervisors[s].slots_full;
-                supervisors[s].last = Some(t);
+                supervisors[s].last = supervisors[s].last.max(Some(at));
                 log.add(
                     None,
                     None,
                     kind,
                     json!({"supervisor": name, "class": "heavy"}),
-                    t,
+                    at,
                 );
             }
             2 if !supervisors[s].stopped => {
-                supervisors[s].last = Some(t);
+                supervisors[s].last = supervisors[s].last.max(Some(at));
                 log.add(
                     None,
                     None,
                     "supervisor_alive",
                     json!({"supervisor": name}),
-                    t,
+                    at,
                 );
             }
             3 if !supervisors[s].stopped => {
+                if supervisors[s].slots_full && before_ready(at) {
+                    passes.seen.end_timed_before_ready += 1;
+                }
                 supervisors[s].stopped = true;
-                supervisors[s].last = Some(t);
+                supervisors[s].last = supervisors[s].last.max(Some(at));
                 log.add(
                     None,
                     None,
                     "supervisor_stopped",
                     json!({"supervisor": name}),
-                    t,
+                    at,
                 );
             }
             4 if !supervisors[s].stopped => {
                 let kind = if held { "claim_resumed" } else { "claim_held" };
+                if held && before_ready(at) {
+                    passes.seen.end_timed_before_ready += 1;
+                }
                 held = !held;
-                supervisors[s].last = Some(t);
-                log.add(None, None, kind, json!({"supervisor": name}), t);
+                supervisors[s].last = supervisors[s].last.max(Some(at));
+                log.add(None, None, kind, json!({"supervisor": name}), at);
             }
             5 => passes.at(&log, b, t, last_event, seed),
             6 => t += i64::try_from(1 + rng.below(12)).unwrap(),
@@ -865,10 +1141,45 @@ fn a_history_of(seed: u64) -> (usize, usize) {
                 let secs = (passes.latest - back).max(passes.clocks[b]);
                 passes.at(&log, b, secs, last_event, seed);
             }
+            9 if !ended[task] => {
+                let to = if rng.below(2) == 0 {
+                    "completed"
+                } else {
+                    "canceled"
+                };
+                let from = if ready[task] { "ready" } else { "draft" };
+                ended[task] = true;
+                ready[task] = false;
+                log.add(
+                    Some(id),
+                    None,
+                    "task_status_changed",
+                    json!({"from": from, "to": to}),
+                    at,
+                );
+            }
+            // Past the grace that settles a task ended (and every silence).
+            10 => {
+                t += grace + i64::try_from(rng.below(60)).unwrap();
+                passes.at(&log, b, t, last_event, seed);
+            }
+            11 => {
+                // A builder's clock set back, up to a silence and more.
+                let back =
+                    i64::try_from(1 + rng.below(u64::try_from(silence + 30).unwrap())).unwrap();
+                let secs = (passes.clocks[b] - back).max(0);
+                passes.at(&log, b, secs, last_event, seed);
+            }
+            12 => {
+                // A pass ahead of the events' clock: those after it are
+                // timed before it.
+                let ahead = i64::try_from(rng.below(u64::try_from(silence + 30).unwrap())).unwrap();
+                passes.at(&log, b, t + ahead, last_event, seed);
+            }
             _ => {}
         }
         if log.events.len() > events {
-            last_event = t;
+            last_event = last_event.max(at);
         }
     }
     for b in [0, 1] {
@@ -877,23 +1188,33 @@ fn a_history_of(seed: u64) -> (usize, usize) {
     for b in [0, 1] {
         passes.at(&log, b, t + silence + 1, last_event, seed);
     }
-    (passes.as_of_earlier, passes.behind_in_time)
+    for b in [0, 1] {
+        passes.at(&log, b, t + silence + grace + 1, last_event, seed);
+    }
+    passes.seen
 }
 
 /// The histories of many fixed seeds ([`a_history_of`]): tasks moving
-/// between `draft` and `ready` under two supervisors' slots full (started
-/// and ended), life, stops and holds, and two builders' passes at the time
-/// of an event and at a supervisor's silence, its bound included, and at a
-/// time before the latest pass's. Every pass at the latest time leaves each
-/// task's row the fold of every event read so far, as of the pass that
-/// last wrote it, and none at an earlier time takes a row back; some passes
-/// find a row as of an earlier one, which the check reads through, and
-/// some at an earlier time find one folded at a later time.
+/// between `draft` and `ready` and ended under two supervisors' slots full
+/// (started and ended), life, stops and holds, some events timed before
+/// the latest, and two builders' passes at the time of an event, at a
+/// supervisor's silence (its bound included), past the grace that settles
+/// a task, at a time before the latest pass's, on a clock set back and
+/// ahead of the events' clock.
+/// Every pass at the latest time leaves each task's row not settled the
+/// fold of every event read so far, as of the pass that last wrote it, so
+/// that a row a pass on a clock set back folded with a wait open is the
+/// fold of every event again once a pass is at the latest time; none at
+/// an earlier time takes a row back; and a row once settled stays as it
+/// was settled, though a supervisor recording after its silence opened a
+/// wait over its time ready again. Each case comes in some history.
 #[test]
 fn every_history_leaves_the_tasks_rows_the_fold_of_every_event() {
-    let (as_of_earlier, behind_in_time) = (0..400)
-        .map(a_history_of)
-        .fold((0, 0), |(a, b), (c, d)| (a + c, b + d));
-    assert!(as_of_earlier > 0);
-    assert!(behind_in_time > 0);
+    let seen = (0..400).map(a_history_of).fold(Seen::default(), Seen::add);
+    assert!(seen.as_of_earlier > 0, "{seen:?}");
+    assert!(seen.behind_in_time > 0, "{seen:?}");
+    assert!(seen.settled_kept > 0, "{seen:?}");
+    assert!(seen.set_back > 0, "{seen:?}");
+    assert!(seen.open_before_latest > 0, "{seen:?}");
+    assert!(seen.end_timed_before_ready > 0, "{seen:?}");
 }

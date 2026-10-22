@@ -37,7 +37,7 @@
 //!   while it is ready now or a wait still open bears on its time ready
 //!   that ended, so does an event that moves a wait (starts or ends one,
 //!   names such a supervisor). A time ready that ended with no wait open on
-//!   it reads no other move.
+//!   it reads no other move but one timed before an event read before it.
 //!   A row is written when the store has none, when
 //!   its fold is older than [`LEDGER_V`] (a legacy row aside, whose version
 //!   the store keeps as first written), when the new fold read an input
@@ -64,9 +64,11 @@
 //!   ([`telemetry_revoked`]: while it is not, the run waits on the event
 //!   that records it, not on its grace); a session,
 //!   queue or node row by [`super::settle`]. A settled row an input reaches
-//!   later is folded and written again, and settled again after its grace.
-//!   A row ended and not settled yet is marked again when its grace is
-//!   over ([`Builder::due`]).
+//!   later is folded and written again, and settled again after its grace;
+//!   for a task, that input is a later event of the task or of its runs,
+//!   and the waits that move over its time ready after it settled leave it
+//!   as it was ([`keeps_settled`]). A row ended and not settled yet is
+//!   marked again when its grace is over ([`Builder::due`]).
 //! - **Bounds**: at most [`WRITES_PER_PASS`] rows written and
 //!   [`CHECKS_PER_PASS`] marks looked at per pass; the rest stay marked for
 //!   the next pass, which starts at them and goes round ([`Builder::take`]),
@@ -111,7 +113,7 @@ use super::{
     settle::{self, SETTLE_GRACE_MS},
 };
 use crate::domain::host_metrics::NodeSample;
-use crate::domain::pre_claim::PreClaimBook;
+use crate::domain::pre_claim::{PreClaimBook, Started};
 use crate::domain::run_phase::{Phase, Recorded};
 use crate::domain::session_step::SessionStep;
 use crate::domain::stats::timestamp_millis;
@@ -162,12 +164,13 @@ impl Target {
 
 /// What the events read moved of the waits before a claim
 /// ([`crate::domain::pre_claim::Moved`]), which the tasks with time ready
-/// read ([`Builder::mark_ready`]): a wait's reach, and a slots full its
-/// supervisor's life had ended opened again.
+/// read ([`Builder::mark_ready`]): a wait's reach, a slots full its
+/// supervisor's life had ended opened again, and a wait started or ended.
 #[derive(Debug, Clone, Copy, Default)]
 struct WaitsMoved {
     reached: bool,
     reopened: bool,
+    started_or_ended: bool,
 }
 
 /// What the folds of the queue as a whole (the session and queue rows,
@@ -338,6 +341,8 @@ impl Kept {
             let moved = self.pre_claim.add(event);
             waits.reached |= moved.reached;
             waits.reopened |= moved.reopened;
+            waits.started_or_ended |=
+                matches!(moved.started, Some(Started::PreClaim(_))) || moved.ended[0].is_some();
             let owned = owner::owner(event);
             self.queue_rows
                 .add(event, owned == Owner::Queue, moved, touched);
@@ -694,15 +699,23 @@ impl Default for Builder {
 impl Builder {
     /// Mark what the events `new` (ascending id, after [`Self::events`])
     /// are inputs of, keep what the folds of the queue as a whole read of
-    /// them, and move the cursor past them.
+    /// them, and move the cursor past them. One that starts or ends a wait
+    /// before a claim, timed before an event read before it (a clock set back where
+    /// it was written, or a write late by more than that) marks every task
+    /// with time ready ([`Self::mark_ready`]): the wait it starts or ends
+    /// may fall on a time ready that ended, which reads no other move.
     pub fn mark_events(&mut self, new: &[RunEvent]) {
         let kept = Arc::make_mut(&mut self.kept);
         let mut waits = WaitsMoved::default();
+        // A move of a wait timed before an event read before it.
+        let mut out_of_order = false;
         for event in new {
             let mut touched = BTreeSet::new();
             let moved = kept.add(std::slice::from_ref(event), &mut touched);
             waits.reached |= moved.reached;
             waits.reopened |= moved.reopened;
+            out_of_order |= moved.started_or_ended
+                && timestamp_millis(&event.created_at).is_some_and(|at| at < self.read_ms);
             if let Some(run) = &event.run_id {
                 self.marks.insert(Target::Run(run.to_string()));
             }
@@ -732,7 +745,7 @@ impl Builder {
                 self.read_ms = self.read_ms.max(at);
             }
         }
-        if waits.reopened {
+        if waits.reopened || out_of_order {
             self.mark_ready(true);
         } else if waits.reached {
             self.mark_ready(false);
@@ -1141,6 +1154,27 @@ pub fn writes(stored: Option<&LedgerRow>, built: &LedgerRow) -> bool {
         || built.inputs_through.node_samples > stored.inputs_through.node_samples
         || built.inputs_through.steps > stored.inputs_through.steps
         || (built.is_final && !stored.is_final && !stored.is_legacy())
+}
+
+/// Whether `stored`, a task's row the store holds settled (of this
+/// [`LEDGER_V`] or a newer one, not a legacy one), stays as it was settled
+/// over a fold whose events of the task (its own and its runs', up to the
+/// builder's cursor) are `events`: none is past the events the stored fold
+/// read. Each event of the task up to there was read by it, so no event of
+/// the task came since it settled, and the rest of what a task's fold
+/// reads moves after its end only by the waits before a claim over its
+/// time ready (a supervisor that records again after its silence opens a
+/// slots full its silence ended), which a settled row does not follow
+/// (ADR-t1662-1 decision 17). A builder that reads the task's end after
+/// such a move, or one that starts again, leaves it as it was.
+pub fn keeps_settled(stored: &LedgerRow, events: &[RunEvent]) -> bool {
+    stored.kind == LedgerKind::Task
+        && stored.is_final
+        && !stored.is_legacy()
+        && stored.ledger_v >= LEDGER_V
+        && events
+            .iter()
+            .all(|event| event.id <= stored.inputs_through.events)
 }
 
 /// Whether the fold `built` read less of some input than `stored`, the row

@@ -34,7 +34,7 @@ use crate::domain::host_metrics::{local_day, oldest_kept_day};
 use crate::domain::ledger::LedgerKind;
 use crate::domain::ledger::builder::{
     Builder, CHECKS_PER_PASS, EVENTS_PER_READ, Inputs, KeptSize, RunSteps, STEPS_PER_READ, Target,
-    WRITES_PER_PASS, behind, build, hour, writes,
+    WRITES_PER_PASS, behind, build, hour, keeps_settled, writes,
 };
 use crate::domain::session_step::{self, StepTarget};
 
@@ -332,6 +332,13 @@ fn fold_and_write(
         .into_iter()
         .filter(|event| event.id <= through)
         .collect();
+    // A task's settled row no event of it reached since stays as it is.
+    if let (Target::Task(_), Some(stored)) = (target, &stored)
+        && keeps_settled(stored, &events)
+    {
+        builder.track(target, stored);
+        return Ok(true);
+    }
     // The pushes it reads that the builder dropped once its runs settled.
     let pushes = read_by_id(store, &builder.pushes_to_read(&events))?;
     inputs.read_pushes(target, pushes);
