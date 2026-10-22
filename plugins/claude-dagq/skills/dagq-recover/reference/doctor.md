@@ -6,7 +6,7 @@ Read this when diagnosing a run by hand (the `dagq-recover` skill, sections 1–
 
 Plain `doctor` is the compact form; diagnosing needs `--full`.
 
-- `supervisors`: a `stale` registration is left by a killed or hung supervisor. The runtime never deletes it: report it to the person rather than removing it; `recover` works regardless of it. Empty `supervisors` means nobody owns any run.
+- `supervisors`: a `stale` registration is left by a killed or hung supervisor. A live supervisor of the queue removes one whose pid is gone (or taken by another process) on its first sweep after the heartbeat expired, recording `supervisor_stopped` `pruned`; one whose process lives (hung) stays. Do not remove a registration yourself: report one that stays to the person; `recover` works regardless of it. Empty `supervisors` means nobody owns any run.
 - `runs`: each run's `blockers` say what still prevents its recovery; none means it is recoverable.
 - `inbox_guardrail` `false`: `reference/up-down.md`, "Open the inbox again".
 - `agents` `errors`: a review needing such an agent does not pass; the configuration is fixed on the landing branch.

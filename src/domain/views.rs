@@ -291,8 +291,9 @@ pub struct RunLease {
 
 /// A resident `supervise` process as it registered itself, whether or not it
 /// holds any lease. The row is heartbeated with the leases and deleted on a
-/// graceful exit; a row left by a killed supervisor stays until `up` prunes
-/// it or a person deals with it (`down --force`). `mode`, `workspace_id` and
+/// graceful exit; a row left by a killed supervisor stays until `up`,
+/// `down` or a live supervisor of the queue prunes it
+/// ([`super::supervisor_prune`]), or a person deals with it (`down --force`). `mode`, `workspace_id` and
 /// `binary_version` describe the process itself, so they share the row's
 /// lifetime.
 #[derive(Debug, Clone, Serialize, Deserialize)]

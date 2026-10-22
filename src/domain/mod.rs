@@ -1324,6 +1324,7 @@ pub mod stall;
 pub mod stats;
 pub mod stranded_landing;
 pub mod supervisor_life;
+pub mod supervisor_prune;
 pub mod task;
 pub mod task_hold;
 pub mod task_replan;

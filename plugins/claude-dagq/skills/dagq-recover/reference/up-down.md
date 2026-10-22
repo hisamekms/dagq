@@ -23,7 +23,7 @@ Replace the binary with `install` (`reference/update.md`), never `cp`. A supervi
 
 A command that stops with "run `dagq migrate`": `dagq migrate --check` lists the migrations; `up` and `install` apply the compatible ones, a breaking one needs `install --allow-breaking` (`reference/update.md`); tell the person first. `unsupported queue schema version`: use the newer binary.
 
-A supervisor alive but no longer heartbeating is not replaced (`status` shows it `stale`): with no other live supervisor, the person stops it with `down --force`; beside a live one, see "Two supervisors of one queue".
+A supervisor alive but no longer heartbeating is not replaced (`status` shows it `stale`): with no other live supervisor, the person stops it with `down --force`; beside a live one, see "Two supervisors of one queue". A registration whose supervisor died is pruned by `up` or `down` (`pruned_supervisors`), or earlier by a live supervisor of the queue (`supervisor_stopped` `pruned`, no attention).
 
 ### Runs waiting for a person
 

@@ -176,7 +176,9 @@ runの所有・supervisorの登録・runのファイルの約束（[ADR-0007](..
 - `integrate`は登録せずにleaseだけを持つので、`run_leases.token`から`supervisors`へ外部キーを張らない。
 - `supervisors`の行はそのプロセスの性質を持ち、行と寿命を共にする。
   `binary_version`は登録するプロセス自身だけが書き、`mode`は`up`が`launchd`を書く。
-- 登録の行を消すのは`supervise`自身の終了と`up`・`down`の掃除（`prune_supervisor`）だけで、どちらも同じトランザクションで`supervisor_stopped`を書く。
+- 登録の行を消すのは`supervise`自身の終了と、`up`・`down`と生きているsupervisorの掃除（`prune_supervisor`）だけで、どれも同じトランザクションで`supervisor_stopped`を書く。
+  生きているsupervisorはsweepの間隔ごとに、自分以外でheartbeatが`HEARTBEAT_TIMEOUT_SECS`を過ぎ、PIDが死んだか別プロセスに取られた登録だけを消す（判定は`supervisor_prune::left_behind`のdoc comment）。
+  heartbeatが新しい登録はPIDの判定に依らず消さない（drain中とhandoffの途中の登録を残すため）。
   heartbeatか停止の記録に失敗したときは消さず、staleとして次の掃除に任せる。
   `status`・`doctor`・`recover`は消さない。
 - 生存の証拠は`SUPERVISOR_ALIVE_INTERVAL_SECS`ごとの`supervisor_alive`に残り、その記録の失敗はheartbeatを止めない。

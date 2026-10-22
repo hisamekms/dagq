@@ -154,6 +154,17 @@ impl HostOpsState {
         self.sweep.sweep_ended_sessions(env, held)
     }
 
+    /// Prune the registrations other supervisors of the queue left behind
+    /// ([`sweep::prune_left_supervisors`]).
+    pub(super) fn prune_left_supervisors(&self, env: &PassEnv<'_>) -> Result<()> {
+        sweep::prune_left_supervisors(
+            &*env.queue,
+            &**env.processes,
+            env.token,
+            env.generators.clock.now(),
+        )
+    }
+
     /// Sample the host's load ([`host_metrics::HostMetricsWatch::pass`]).
     pub(super) fn host_metrics_pass(
         &mut self,

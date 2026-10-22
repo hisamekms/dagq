@@ -946,3 +946,90 @@ fn a_task_over_loses_the_claude_scratchpads_of_its_runs() {
     assert!(payloads_of(&queue, &canceled, "cleanup_failed").is_empty());
     assert!(payloads_of(&queue, &going_on, "cleanup_failed").is_empty());
 }
+
+/// A live supervisor's sweep prunes the registrations other supervisors
+/// of the queue left behind (the heartbeat expired, and the pid runs
+/// nothing or a process of this user that started after the registration
+/// took it), recording one `supervisor_stopped` `pruned` each with the
+/// row's last heartbeat, as `up` and `down` do, without waiting for
+/// either. A registration whose heartbeat is fresh is kept though its pid
+/// is dead (a drain, a handoff), and a silent one whose process lives and
+/// started before it (a hung supervisor) is kept too.
+#[test]
+fn a_live_supervisor_prunes_the_registration_a_dead_one_left_behind() {
+    use dagq::domain::{HEARTBEAT_TIMEOUT_SECS, LeaseToken};
+
+    let (_dir, repo, db) = fixture();
+    // The hung supervisor's process started before its registration; the
+    // one that took the pid of "taken" started after that registration.
+    // Killed on drop, or on a timeout, however the test ends.
+    let mut hung = crate::common::KillOnDrop::new(sleeper(), "the hung supervisor's stand-in");
+    let mut taken = crate::common::KillOnDrop::new(sleeper(), "the process that took the pid");
+    let silent_at = {
+        let mut queue = SqliteQueue::open(&db).unwrap();
+        for (token, pid) in [
+            ("left", dead_pid()),
+            ("fresh", dead_pid()),
+            ("hung", hung.child().id()),
+            ("taken", taken.child().id()),
+        ] {
+            queue
+                .register_supervisor(&LeaseToken::new(token), pid, 1, VERSION)
+                .unwrap();
+        }
+        let now = SystemClock.now();
+        let silent_at = now - HEARTBEAT_TIMEOUT_SECS - 60;
+        let connection = Connection::open(&db).unwrap();
+        connection
+            .execute(
+                "UPDATE supervisors SET heartbeat_at=?1 WHERE token IN ('left', 'hung', 'taken')",
+                [silent_at],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE supervisors SET started_at=?1 WHERE token='taken'",
+                [now - 3_600],
+            )
+            .unwrap();
+        // Fresh for as long as the test may take, however slow the host.
+        connection
+            .execute(
+                "UPDATE supervisors SET heartbeat_at=?1 WHERE token='fresh'",
+                [now + 3_600],
+            )
+            .unwrap();
+        silent_at
+    };
+    let backend = TestWorkspace::new(&db, false, "commit work; exit 7");
+    supervise_with(&db, &repo, &backend, &sweeping_options()).unwrap();
+    backend.join();
+    drop((hung, taken));
+
+    let queue = SqliteQueue::open(&db).unwrap();
+    let mut tokens: Vec<String> = queue
+        .supervisors()
+        .unwrap()
+        .into_iter()
+        .map(|r| r.token.to_string())
+        .collect();
+    tokens.sort();
+    assert_eq!(tokens, ["fresh", "hung"]);
+    let mut pruned: Vec<Value> = queue
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == EventKind::SupervisorStopped && e.payload["outcome"] == "pruned")
+        .map(|e| e.payload)
+        .collect();
+    pruned.sort_by_key(|p| p["supervisor"].as_str().unwrap().to_owned());
+    let stop = |token: &str| {
+        json!({
+            "supervisor": token,
+            "dagq_version": VERSION,
+            "outcome": "pruned",
+            "last_heartbeat_at": silent_at,
+        })
+    };
+    assert_eq!(pruned, [stop("left"), stop("taken")]);
+}

@@ -44,7 +44,7 @@ use crate::{
     VERSION,
     domain::{
         ActorContext, ActorRole, HEARTBEAT_TIMEOUT_SECS, RunStatus, SessionRole, SupervisorMode,
-        SupervisorRegistration, recovery::ProcessInfo, run_env::RunEnvCheck,
+        SupervisorRegistration, recovery::ProcessInfo, run_env::RunEnvCheck, supervisor_prune,
     },
 };
 use anyhow::{Context, Result, bail, ensure};
@@ -1952,8 +1952,9 @@ pub fn auto_update_refused(checkout: &Path) -> String {
 /// the row for the next `up` or `down` to prune again. A row the process
 /// removed meanwhile (it recorded its own stop) is not recorded again. The
 /// heartbeat is read from the row as it is removed, as `registration` may
-/// be from before a drain.
-fn prune_supervisor(
+/// be from before a drain. A live supervisor prunes the registrations left
+/// behind the same way (`prune_left_supervisors` of its sweep).
+pub(crate) fn prune_supervisor(
     queue: &(impl SupervisorRegistry + ?Sized),
     registration: &SupervisorRegistration,
 ) -> Result<()> {
@@ -1972,18 +1973,8 @@ fn prune_supervisor(
     Ok(())
 }
 
-/// How much later than its registration's `started_at` a process at the
-/// registered pid may seem to have started and still be the one that
-/// registered: `ps` prints the age to the second.
-const PID_START_SLACK_SECS: i64 = 5;
-
 /// Whether the pid of a registration that stopped heartbeating now belongs
-/// to another process (task 330): the supervisor died without removing its
-/// row and the system gave its pid to a process of another user, or to one
-/// of this user's that started after the registration, which the process
-/// that registered cannot be (an exec keeps the start). Such a row is as
-/// dead as one whose pid runs nothing, while an alive-but-silent
-/// supervisor, which started before its registration, is kept. `listing`
+/// to another process ([`supervisor_prune::pid_taken_over`]). `listing`
 /// caches this user's processes across registrations; when they cannot be
 /// listed, nothing is taken over.
 fn pid_taken_over(
@@ -1992,24 +1983,11 @@ fn pid_taken_over(
     now: i64,
     listing: &mut Option<Option<Vec<ProcessInfo>>>,
 ) -> bool {
-    if now - registration.heartbeat_at <= HEARTBEAT_TIMEOUT_SECS {
+    if !supervisor_prune::heartbeat_expired(registration, now) {
         return false;
     }
-    let Some(listed) = listing.get_or_insert_with(|| processes.list().ok()) else {
-        return false;
-    };
-    match listed
-        .iter()
-        .find(|process| process.pid == registration.pid)
-    {
-        // Alive, yet not among this user's processes, which every
-        // supervisor of this queue is.
-        None => true,
-        Some(process) => {
-            let started = now - i64::try_from(process.elapsed_secs).unwrap_or(i64::MAX);
-            started > registration.started_at + PID_START_SLACK_SECS
-        }
-    }
+    let listed = listing.get_or_insert_with(|| processes.list().ok());
+    supervisor_prune::pid_taken_over(registration, now, listed.as_deref())
 }
 
 fn fresh(registration: &SupervisorRegistration, processes: &dyn ProcessControl, now: i64) -> bool {

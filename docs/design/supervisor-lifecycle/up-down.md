@@ -51,6 +51,7 @@ in-cmux modeの起動の指定は何にも触る前に拒み、廃止と次の�
    PIDが生きていてもheartbeatの古い行は、そのPIDを登録したプロセスでないと分かれば同じく消す（判定は`pid_taken_over`のdoc comment）。
    `run_leases`は触らない（そのrunの復旧は`doctor` / `recover`の仕事）。
    登録より前に始まったプロセスがPIDにいてheartbeatの古い登録（hang）は消さず、reuseもしない。
+   生きているsupervisorもsweepの中で同じ`prune_supervisor`で消すので、`up` / `down`を待たずに消えている登録もある（その条件はheartbeatの期限切れを足したもので、[Persistence](../persistence.md)が持つ）。
 3. **supervisor**: 生きていてheartbeatが新しい登録があり、その`binary_version`が全部`up`自身のbuild識別子（[Build identifier](build-identifier.md#build-identifier)）と文字列として同じで、launchd modeの登録があれば読めるplistに`up`の書く`ProcessType`があるならreuseし、plistにもlaunchctlにも触らない。
    1つでもversionが違うか、launchd modeの登録の読めるplistに`ProcessType`が無ければ**入れ替える**（下記）。
    `ProcessType`はlaunchdがagentを読むときだけ効き、`install`と自動更新は引き継ぎだけでplistを読み直させないので、前のbinaryが書いたplistのsupervisorは、自動更新の後も人かinboxが一度`up --auto-update`を打ってdrainと書き直しをさせるまで制限の下で流れる（判定は`agent_lacks_process_type`のdoc comment）。

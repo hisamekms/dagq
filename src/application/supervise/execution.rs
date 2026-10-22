@@ -1862,8 +1862,10 @@ impl Supervisor<'_> {
     /// `approve_landing` asks the paths that ended their runs left open are
     /// closed ([`sweep::close_ended_landing_asks`]), the disk of the ended
     /// runs is asked to be freed ([`Self::request_cleanup`]), 計画管理
-    /// sweeps its planners ([`PlanningState::sweep_planners`]),
-    /// and the background wrappers of ended runs still running are stopped
+    /// sweeps its planners ([`PlanningState::sweep_planners`]), the
+    /// registrations other supervisors left behind are pruned
+    /// ([`sweep::prune_left_supervisors`]), and the background wrappers of
+    /// ended runs still running are stopped
     /// ([`sweep::SweepWatch::sweep_ended_sessions`]).
     fn sweep_ended_runs(&mut self, interval: Duration) -> Result<()> {
         if !self
@@ -1880,6 +1882,9 @@ impl Supervisor<'_> {
         // The sweep closes 実行と着地's asks and stalled detections of the
         // runs it stops, so it takes the loop's whole queue.
         let (mut env, _, host) = self.split();
+        if let Err(error) = host.prune_left_supervisors(&env) {
+            warn!(error = %format_args!("{error:#}"), "the registrations other supervisors left behind could not be read: {error:#}");
+        }
         host.sweep_ended_sessions(&mut env, &held)
     }
 
