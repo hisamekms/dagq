@@ -85,6 +85,61 @@ fn fence_read(
     }
 }
 
+/// What [`take_waiting`] did with the requests waiting in a run's
+/// `turns/`.
+#[derive(Debug, PartialEq, Eq)]
+enum Waiting {
+    /// None waits that the wrapper takes now ([`request_to_take`]).
+    None,
+    /// One waits, and the check before it is taken left it there: the
+    /// session ends.
+    Left,
+    /// It was taken.
+    Taken(TurnRequest),
+}
+
+/// Take the request the wrapper runs next of those waiting in `run_dir`'s
+/// `turns/` ([`request_to_take`]; `after_wall` as there), once `may_take`
+/// lets it: called with the request after it was found and before it is
+/// taken, so that a fence the supervisor set before it wrote the request
+/// is read there, however late the request came after the wrapper's last
+/// look (ADR-t1521-2 decision 1, ADR-t1879-1 decision 7). A request it
+/// does not let is left untaken.
+fn take_waiting(
+    files: &dyn RunFiles,
+    run_dir: &Path,
+    after_wall: bool,
+    may_take: &mut dyn FnMut(&TurnRequest) -> bool,
+) -> Result<Waiting> {
+    let names: Vec<String> = files
+        .read_dir(&turns_dir(run_dir))?
+        .iter()
+        .filter_map(|path| path.file_name()?.to_str().map(str::to_owned))
+        .collect();
+    let mut waiting = Vec::new();
+    for seq in pending(names.iter().map(String::as_str)) {
+        let path = request_path(run_dir, seq);
+        let request: TurnRequest = serde_json::from_str(&files.read_to_string(&path)?)
+            .with_context(|| format!("read request {}", path.display()))?;
+        waiting.push(request);
+        if !after_wall {
+            break;
+        }
+    }
+    let next = request_to_take(waiting.iter().map(|r| (r.seq, r.what.as_str())), after_wall);
+    let Some(request) = next.and_then(|seq| waiting.into_iter().find(|r| r.seq == seq)) else {
+        return Ok(Waiting::None);
+    };
+    if !may_take(&request) {
+        return Ok(Waiting::Left);
+    }
+    files.rename(
+        &request_path(run_dir, request.seq),
+        &taken_path(run_dir, request.seq),
+    )?;
+    Ok(Waiting::Taken(request))
+}
+
 /// Unix milliseconds on `clock`: when the wrapper read the lines of a
 /// turn's output it reads next ([`TurnReader::stamp`]).
 fn now_millis(clock: &dyn Clock) -> i64 {
@@ -680,45 +735,35 @@ impl<'a> Turns<'a> {
             if self.fenced(run_dir) {
                 return Ok(None);
             }
-            let names: Vec<String> = self
-                .files
-                .read_dir(&turns_dir(run_dir))?
-                .iter()
-                .filter_map(|path| path.file_name()?.to_str().map(str::to_owned))
-                .collect();
-            let mut waiting = Vec::new();
-            for seq in pending(names.iter().map(String::as_str)) {
-                let path = request_path(run_dir, seq);
-                let request: TurnRequest = serde_json::from_str(&self.files.read_to_string(&path)?)
-                    .with_context(|| format!("read request {}", path.display()))?;
-                waiting.push(request);
-                if !after_wall {
-                    break;
+            let files = self.files;
+            // The fence is read again after the request is found and before
+            // it is taken: one the supervisor wrote after the check above,
+            // and after a fence it could not see then, is left untaken.
+            let waiting = take_waiting(files, run_dir, after_wall, &mut |request| {
+                if self.fenced(run_dir) {
+                    return false;
                 }
-            }
-            let next =
-                request_to_take(waiting.iter().map(|r| (r.seq, r.what.as_str())), after_wall);
-            if after_wall && next.is_none() {
-                self.renew_wall_marker(run_dir);
-            }
-            if let Some(request) = next.and_then(|seq| waiting.into_iter().find(|r| r.seq == seq)) {
-                let seq = request.seq;
-                let path = request_path(run_dir, seq);
                 // Stamped before it is taken: a planner's idle marker of the
                 // turn before is no idle with this one (a request written
                 // while that turn ran), not even between the two.
                 if matches!(self.owner, TurnOwner::Planner { .. })
                     && let Err(error) = super::screen_idle::record_supervisor_input(
-                        self.files,
+                        files,
                         &super::planner_idle_marker(run_dir),
                     )
                 {
                     tracing::warn!(
-                        "the input stamp of request {seq} could not be written: {error}"
+                        "the input stamp of request {} could not be written: {error}",
+                        request.seq
                     );
                 }
-                self.files.rename(&path, &taken_path(run_dir, seq))?;
-                return Ok(Some(request));
+                true
+            })?;
+            match waiting {
+                Waiting::Taken(request) => return Ok(Some(request)),
+                Waiting::Left => return Ok(None),
+                Waiting::None if after_wall => self.renew_wall_marker(run_dir),
+                Waiting::None => {}
             }
             self.heartbeat();
             thread::sleep(self.provider.wait_interval());
@@ -1626,6 +1671,44 @@ mod tests {
             fence_read(Err("database is locked".into())),
             FenceRead::Unknown("database is locked".into())
         );
+    }
+
+    /// A request waiting in `turns/` is taken only once the fence read
+    /// after it was found lets it: one written after the wrapper's last
+    /// look and after a fence it could not see then is left there, for
+    /// the session to end with it untaken, while it cannot be read or
+    /// fences the task.
+    #[test]
+    fn a_request_is_left_untaken_unless_the_fence_read_after_it_lets_it() {
+        let files = MemoryFiles::default();
+        let run_dir = Path::new("/run");
+        let request = TurnRequest {
+            seq: 2,
+            what: "revise request".into(),
+            prompt: "go on".into(),
+        };
+        files.put(
+            &request_path(run_dir, 2),
+            std::time::UNIX_EPOCH,
+            &serde_json::to_string(&request).unwrap(),
+        );
+        let mut read = Vec::new();
+        let waiting = take_waiting(&files, run_dir, false, &mut |found| {
+            read.push(found.seq);
+            false
+        })
+        .unwrap();
+        assert_eq!(waiting, Waiting::Left);
+        assert_eq!(read, [2], "the fence is read with the request found");
+        assert!(files.exists(&request_path(run_dir, 2)));
+        assert!(!files.exists(&taken_path(run_dir, 2)));
+        let waiting = take_waiting(&files, run_dir, false, &mut |_| true).unwrap();
+        assert_eq!(waiting, Waiting::Taken(request));
+        assert!(!files.exists(&request_path(run_dir, 2)));
+        assert!(files.exists(&taken_path(run_dir, 2)));
+        // With none waiting, the fence is not read here.
+        let waiting = take_waiting(&files, run_dir, false, &mut |_| unreachable!()).unwrap();
+        assert_eq!(waiting, Waiting::None);
     }
 
     /// A `session_renewed` (ADR-t2080-1) starts the next turn in a new

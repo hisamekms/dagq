@@ -126,8 +126,11 @@ impl RunFiles for MemoryFiles {
             .cloned()
             .collect())
     }
-    fn rename(&self, _: &Path, _: &Path) -> io::Result<()> {
-        unimplemented!("no test renames a run file")
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        let mut files = self.files.lock().unwrap();
+        let file = files.remove(from).ok_or_else(missing)?;
+        files.insert(to.to_owned(), file);
+        Ok(())
     }
     fn remove_file(&self, path: &Path) -> io::Result<()> {
         self.files
