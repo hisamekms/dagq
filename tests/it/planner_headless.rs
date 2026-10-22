@@ -77,19 +77,34 @@ fn diagnose(db: &Path, proposal: dagq::domain::ProposalId) -> String {
     )
 }
 
-/// What planner 1 of a headless test that did not end left.
+/// What the planners of a headless test that did not end left, each
+/// planner's logs under its ID.
 pub(crate) fn diagnose_planner(db: &Path) -> String {
-    let dir = planners_dir(db).join("1");
-    let read = |name: &str| fs::read_to_string(dir.join(name)).unwrap_or_default();
-    format!(
-        "{:?}\nask.log {}\ncancel.log {}\ncalls {}\nsession.log {}\nturns {:?}",
-        SqliteQueue::open(db).unwrap().planners(true).unwrap(),
-        read("ask.log"),
-        read("cancel.log"),
-        read("stub-calls.log"),
-        read("session.log"),
+    let queue = SqliteQueue::open(db).unwrap();
+    let planners = queue.planners(true).unwrap();
+    let mut text = format!("{planners:?}");
+    for planner in &planners {
+        let dir = planners_dir(db).join(planner.id.to_string());
+        let read = |name: &str| fs::read_to_string(dir.join(name)).unwrap_or_default();
+        text.push_str(&format!(
+            "\nplanner {}:\nask.log {}\ncancel.log {}\ndecline.log {}\ncalls {}\nsession.log {}",
+            planner.id,
+            read("ask.log"),
+            read("cancel.log"),
+            read("decline.log"),
+            read("stub-calls.log"),
+            read("session.log"),
+        ));
+    }
+    text.push_str(&format!(
+        "\nturns {:?}\nasks {:?}",
         queue_events(db, "turn_finished"),
-    )
+        queue.asks(dagq::application::AskQuery {
+            all: true,
+            ..Default::default()
+        }),
+    ));
+    text
 }
 
 /// A plan review that sends the proposal back with `reasons`.

@@ -90,11 +90,11 @@ name = "plan_review::a_planner_question_answer_goes_to_its_planner_as_a_turn_or_
 reason = "B 境界（守る境界）: supervisor passes deliver the answer as a background planner's next turn or carry it in a new planner's prompt (task 1441 moved it off cmux)"
 task = 1441
 
-# 9-11s under stress (task 1863), class B
+# 10.8-11.8s under stress (task 2966), class B
 [[test]]
 name = "planner_headless::a_headless_draft_planner_ends_while_its_question_waits_and_a_new_one_goes_on_from_the_answer"
-reason = "B 境界（守る境界）: a real background wrapper ends on the answer-wait exit request and the answer's new planner runs its prompt as its first turn (ADR-t1704-1); the decisions are unit tests"
-task = 1863
+reason = "B 境界（守る境界）: a real background wrapper ends on the answer-wait exit request and the answer's new planner runs its prompt as its first turn and is asked to exit after it (ADR-t1704-1); the decisions, the answer taken by that turn included, are unit tests"
+task = 2966
 
 # 6.888s, class B
 [[test]]

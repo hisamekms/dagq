@@ -1884,6 +1884,25 @@ fn answer_wait_only(busy: &[PlannerBusy]) -> bool {
             .all(|reason| matches!(reason, PlannerBusy::QuestionOpen | PlannerBusy::Revise))
 }
 
+/// Whether a planner idle since `idle_since` (Unix seconds, `None` while
+/// it is not idle) took up an answer delivered to it without a record of
+/// the request that carried it ([`PlanningState::question_wait`]). One
+/// typed to it (`claimed`, the claim's second) is taken once it stopped
+/// after that second: its second counts as before, since the views of a
+/// pass are taken before the pass types, and an agent does not take an
+/// answer up within the second it was typed. One a new planner carried in
+/// its prompt (no claim) is taken once the planner is idle at all: its
+/// idle marker counts only when it is no older than the opening, so it is
+/// the end of the turn that carried the answer, which may end within the
+/// second the planner opened.
+fn answer_taken(claimed: Option<i64>, idle_since: Option<i64>) -> bool {
+    match (claimed, idle_since) {
+        (_, None) => false,
+        (Some(typed), Some(since)) => since > typed,
+        (None, Some(_)) => true,
+    }
+}
+
 /// What the planners that stopped at the answered questions a revise
 /// carries left (ADR-t1704-1 decision 3), each planner's once, in the
 /// order of their first question.
@@ -2036,7 +2055,7 @@ impl PlanningState {
     /// (`planner_answer_claimed`), taken before it, not by the ask's close
     /// after it, so an agent that took the answer up and stopped before the
     /// close is done; an answer a new planner carried in its prompt is
-    /// timed by the planner's opening. An ask closed without a delivery
+    /// taken once the planner is idle after its opening ([`answer_taken`]). An ask closed without a delivery
     /// holds nothing.
     fn question_wait(
         &mut self,
@@ -2089,15 +2108,8 @@ impl PlanningState {
                 }
                 continue;
             }
-            // An agent idle since before the typing has not taken the
-            // answer up yet. Its second counts as before: the views of a
-            // pass are taken before the pass types, and an agent does not
-            // take an answer up within the second it was typed.
-            let typed = env
-                .queue
-                .answer_claimed_at(ask.id, workspace)?
-                .unwrap_or(view.planner.created_at);
-            if view.idle_since.is_none_or(|since| since <= typed) {
+            let claimed = env.queue.answer_claimed_at(ask.id, workspace)?;
+            if !answer_taken(claimed, view.idle_since) {
                 return Ok(true);
             }
         }
@@ -2278,6 +2290,21 @@ mod tests {
         ] {
             assert!(!answer_wait_only(busy), "{busy:?}");
         }
+    }
+
+    /// An answer typed to a planner is taken only once it stopped after
+    /// the second of the claim; one a new planner carried in its prompt
+    /// once it is idle at all, also within the second it opened, so that
+    /// a first turn that ends in that second does not hold the planner
+    /// forever.
+    #[test]
+    fn a_typed_answer_is_taken_after_its_second_and_one_carried_in_the_prompt_once_idle() {
+        assert!(!answer_taken(Some(100), None));
+        assert!(!answer_taken(Some(100), Some(99)));
+        assert!(!answer_taken(Some(100), Some(100)));
+        assert!(answer_taken(Some(100), Some(101)));
+        assert!(!answer_taken(None, None));
+        assert!(answer_taken(None, Some(100)));
     }
 
     /// ADR-t1704-1 decision 3: a revise carrying the answers of several
