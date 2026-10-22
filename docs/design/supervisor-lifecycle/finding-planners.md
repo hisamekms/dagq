@@ -78,7 +78,7 @@ run slotは使わず、[Plan review (supervisor)](plan-review.md#plan-review-sup
    無ければ、findingがまだ対象（`open`、印あり、使い切っていない）なら上限の中で新しいplannerがanswerを持って立ち、そうでなければsupervisorが`planner_answer_closed`で閉じる。
    送れなかったときは`ask_delivery_failed`を残し、plannerは人の答え待ちと同じく終わり、answerは新しいplannerが運ぶ（[Draft planners](draft-planners.md)の5）。
    配送のeventはfindingの対象に付き、queueが対象のfindingではqueueのeventになる（`EventKind::is_queue`）。
-10. **終わり**: runtimeのplannerは、自分のfindingの`planner_question`のanswerを届ける前と、送ったanswerをまだturnで読み終えていないあいだ（`headless_answer_taken`。[Draft planners](draft-planners.md)の5と同じ）は終了の依頼を受けない。
+10. **終わり**: runtimeのplannerは、自分のfindingの`planner_question`のanswerを届ける前と、送ったanswerをまだ読み終えていないあいだ（turnで配送したものも、依頼の記録が無いもの・初期promptで運んだものも。判じ方は[Draft planners](draft-planners.md#予定-人のplannerの廃止と非対話の経路)）は終了の依頼を受けない。
     それ以外でidleになれば終了の依頼を受けてwrapperがsessionを終え、行は閉じられ、まだ動いているbackgroundのwrapperは止められる（`end_runtime_planners`）。
     idleはwrapperがturnの終わりに書くidle markerで判じ、時間は`--planner-timeout`でなくturnの`[stall]`の上限で見る。
     wrapperがturnを`[stall]`の上限で止めたときは、plannerごとに1回`planner_unresponsive`がinboxに届き、止めたturnでsessionが終わるので、決めずに終わったplannerに数える（`tell_of_stopped_planner_turns`）。

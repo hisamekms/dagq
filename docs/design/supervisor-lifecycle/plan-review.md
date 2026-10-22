@@ -130,7 +130,7 @@ submit -> 候補の順序 -> job（読むだけ） -> verdict -+- pass -----> ta
 
 - 終わったplannerの片付けと終了の依頼: `PlanningState::end_runtime_planners`。
 - 人の答えだけを待つplannerの終わり: `PlanningState::end_for_answer_wait`（[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)）。
-- 届けた答えを読み終えたかの判定: `PlanningState::question_wait`と`domain::turn::request_read`。
+- 届けた答えを読み終えたかの判定: `PlanningState::question_wait`と`domain::turn::request_read`、turnの依頼の記録が無いanswerは`answer_taken`（claimしたものはclaimの秒より後の、初期promptで運んだものは開いた時刻より古くないidle markerで読み終えたとする。[Draft planners](draft-planners.md#予定-人のplannerの廃止と非対話の経路)）。
 - 落とし穴: 壁（ログイン切れ・利用上限・起動の失敗）で失敗したturnを読み終えたとすると、answerが読まれずに失われる。
 - 人が開いたplannerの行: `PlanningState::close_person_planners`（[`plan` / `planners`](plan-planners.md)の「人のplannerの終わり」）。
 - 終わりの記録: [`plan` / `planners`](plan-planners.md)の「plannerの終わりの記録」（[ADR-t1300-1](../../adr/2026-10-02-t1300-1-runtime-closes-exited-person-planners-after-a-grace.md)）。
