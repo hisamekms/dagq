@@ -2481,9 +2481,9 @@ pub enum AttentionNext {
     /// `recheck/target`, the supervisor's environment), so the runs that
     /// failed keep waiting to land instead of being resumed. A person
     /// reads the log the event names, then has a task fix main or fixes
-    /// the environment. `landing_recheck_main_passed` records its end once
-    /// a recheck passes on main alone; `status` shows no standing row for
-    /// it, so `watch` tells it once.
+    /// the environment. `watch` tells it once; `status` keeps a row of it
+    /// (the log and main) until `landing_recheck_main_passed` records its
+    /// end once a recheck passes on main alone.
     FixMainOrRecheck,
     /// A task's hold passed its `until`, or has been on for a day with
     /// none (`task_hold_reminded`, ADR-t1879-1): a person releases it, or

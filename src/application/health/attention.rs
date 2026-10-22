@@ -442,6 +442,11 @@ pub fn attention(
             next: AttentionNext::FixRecheckTarget,
         });
     }
+    attention.extend(landing_recheck_main_attention(
+        queue
+            .latest_queue_event(&crate::domain::recheck::LANDING_RECHECK_MAIN_KINDS)?
+            .as_ref(),
+    ));
     // A target dagq.toml sets to the container cannot be used: its claims,
     // resumes or landings wait, never on the host, until the container can
     // be used or a task sets it back to the host (goal 38).
@@ -992,6 +997,34 @@ pub fn attention(
     Ok(attention)
 }
 
+/// The standing row of the landing recheck's command failing on main's
+/// tree alone (ADR-t2141-1), given the latest of
+/// [`crate::domain::recheck::LANDING_RECHECK_MAIN_KINDS`] on the queue
+/// (`latest`): while it is `landing_recheck_main_failed`, the runs that
+/// failed wait to land instead of being resumed, so `status` keeps the
+/// row (its `last_error` the log and main) even after `watch` told the
+/// event once; `landing_recheck_main_passed`, or neither, has
+/// none.
+fn landing_recheck_main_attention(latest: Option<&RunEvent>) -> Option<Attention> {
+    let event = latest.filter(|event| event.kind == EventKind::LandingRecheckMainFailed)?;
+    Some(Attention {
+        run_id: None,
+        task_id: None,
+        pid: None,
+        ask_id: None,
+        reason_category: None,
+        status: "failed".into(),
+        kind: event.kind.to_string(),
+        last_error: Some(truncate_reason(&format!(
+            "{} (main {})",
+            event.payload["log_path"].as_str().unwrap_or_default(),
+            event.payload["main"].as_str().unwrap_or_default()
+        ))),
+        last_error_code: None,
+        next: AttentionNext::FixMainOrRecheck,
+    })
+}
+
 /// Whether `task` is a draft, read from the task store every context reads.
 pub(super) fn is_draft(queue: &(impl TaskReads + ?Sized), task: TaskId) -> Result<bool> {
     let page = queue.list(&crate::application::TaskQuery {
@@ -1048,6 +1081,37 @@ mod tests {
             created_at: String::new(),
             actor: None,
         }
+    }
+
+    /// The latest of the recheck's main kinds being a failure keeps one
+    /// row whose `last_error` names the log and main; a pass after it, or
+    /// neither event, keeps none.
+    #[test]
+    fn a_failure_on_main_alone_stands_until_main_passes() {
+        let failed = event(
+            1,
+            EventKind::LandingRecheckMainFailed,
+            json!({"main": "abc", "command": "cargo test", "exit_code": 101,
+                   "class": "test_failure", "log_path": "/q/recheck/main-abc.log",
+                   "failed_runs": 2}),
+        );
+        let row = landing_recheck_main_attention(Some(&failed)).unwrap();
+        assert_eq!(row.kind, "landing_recheck_main_failed");
+        assert_eq!(row.next, AttentionNext::FixMainOrRecheck);
+        assert_eq!(row.next.to_string(), "fix main or the recheck environment");
+        let last_error = row.last_error.unwrap();
+        assert!(
+            last_error.contains("/q/recheck/main-abc.log"),
+            "{last_error}"
+        );
+        assert!(last_error.contains("abc"), "{last_error}");
+        let passed = event(
+            2,
+            EventKind::LandingRecheckMainPassed,
+            json!({"main": "def", "command": "cargo test", "log_path": "/q/recheck/main-def.log"}),
+        );
+        assert_eq!(landing_recheck_main_attention(Some(&passed)), None);
+        assert_eq!(landing_recheck_main_attention(None), None);
     }
 
     /// A passed run whose lease was given back is queued to land in the
