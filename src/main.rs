@@ -913,8 +913,9 @@ enum Command {
         #[arg(long, hide = true)]
         handoff_token: Option<String>,
         // ADR-0051 decision 10.
-        /// How `up` started this process, for its start mark; set by `up`, which gives
-        /// `launchd`. `in_cmux` comes only from the argv of a supervisor an earlier binary
+        /// How this process was started, for its registration's mode and its start mark;
+        /// the LaunchAgent `up` writes gives `launchd`, whether `up` or launchd starts it.
+        /// `in_cmux` comes only from the argv of a supervisor an earlier binary
         /// started in the retired in-cmux mode.
         #[arg(long, hide = true)]
         mode: Option<String>,
@@ -5315,7 +5316,7 @@ fn install_stop_signal() -> Result<Arc<AtomicBool>> {
 /// The options a handoff drops from this process's arguments: its own
 /// token, and `--mode`, which the handed-off binary may predate (the
 /// handoff probe asks only for `--handoff-token`) and does not need, since
-/// the registration it takes over already has `up`'s mode.
+/// the registration it takes over already has its mode.
 const HANDOFF_DROPPED: [&str; 2] = ["--handoff-token", "--mode"];
 
 /// The options of `supervise` a handed-off binary may predate (`--codex`,

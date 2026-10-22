@@ -133,9 +133,9 @@ supervisor側は`src/application/supervise/host_ops/update.rs`、ビルドから
      戻すのは見張りが追った今の登録（同じpidが登録し直した新しいtokenの登録なら、modeとworkspaceは入れ替え前の登録のもの）で行う。
      その登録が前のbuild識別子のままheartbeatしていれば（execが失敗して前のbinaryが続けた）何もしない。
      PIDが生きていてheartbeatしていなければSIGTERM（止まらなければSIGKILL）で止め、止めたか死んでいた登録を起動し直す（`application::update::restart`、source buildのjobもリリースのjobも同じ）。
-     launchd modeの登録は`KeepAlive`が戻したbinaryで起動し直すので任せ、登録済みのin-cmuxのsupervisorは記録したworkspaceを閉じず（人が閉じる）、戻したbinaryの`up`でlaunchd modeとして起動する（`--auto-update`はその登録が`auto_update`を持つときだけ付ける）。
+     launchd modeの登録（`up`を通さずlaunchdが起動したものも含む）は`KeepAlive`が戻したbinaryで起動し直すので任せ、登録済みのin-cmuxのsupervisorは記録したworkspaceを閉じず（人が閉じる）、戻したbinaryの`up`でlaunchd modeとして起動する（`--auto-update`はその登録が`auto_update`を持つときだけ付ける）。
      この`up`が失敗したときは`update_failed`のaskと`supervisor_stopped`で人に知らせ、人かinboxが`down --wait`の後に`up`を打つ。
-     手で起動した（modeの無い）supervisorは起動し直さない。
+     手で起動した（`--mode`の無い`supervise`の、modeの無い登録の）supervisorは起動し直さない。
   6. 成功すれば`update_installed`を書く。
      失敗すれば、失敗した段と理由、binaryを戻したか残したか、supervisorごとの引き継ぎと戻した結果を載せた`update_failed`を書き、`update_failed`のaskを開く。
      欄の意味は`application::update`の`put_in_place`と`failed`のdoc commentが持つ。

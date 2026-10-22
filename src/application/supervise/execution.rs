@@ -240,9 +240,13 @@ pub struct LoopSettings {
     /// The token of the supervisor this process continues after an exec
     /// (ADR-0045 decision 10); `None` registers a new one.
     pub handoff_token: Option<LeaseToken>,
-    /// How `up` started this process (`supervise --mode`): what its start
-    /// mark records, since `up` writes the registration's mode only after
-    /// it sees the registration (ADR-0051 decision 10).
+    /// How this process was started (`supervise --mode`): the mode of the
+    /// registration it makes and what its start mark records (ADR-0051
+    /// decision 10). launchd passes it from the agent's arguments whether
+    /// `up` loaded the agent or launchd started it on its own (at login,
+    /// after a restart, by `KeepAlive`); `None` leaves a new registration
+    /// without a mode, as one started by hand, and a handoff keeps the
+    /// registration's.
     pub mode: Option<crate::domain::SupervisorMode>,
     /// The automatic update of this supervisor's binary (ADR-0045
     /// decision 17).
@@ -969,6 +973,9 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
                 &layout.providers,
                 &layout.version,
             )?;
+            if let Some(mode) = settings.mode {
+                queue.set_supervisor_mode(&token, mode, None)?;
+            }
             queue.accept_handoff(&token)?;
             if settings.update.register {
                 queue.set_auto_update(&token, true)?;

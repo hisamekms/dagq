@@ -511,7 +511,7 @@ pub trait SupervisorRegistry: SupervisorReads {
     fn rebind_repository(&mut self, common_dir: &str) -> Result<Option<String>>;
     fn bind_repository(&mut self, common_dir: &str) -> Result<()>;
     fn assert_repository(&self, common_dir: &str) -> Result<()>;
-    /// Record how `up` started the supervisor `token`.
+    /// Record how the supervisor `token` was started (`supervise --mode`).
     fn set_supervisor_mode(
         &self,
         token: &LeaseToken,

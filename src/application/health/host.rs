@@ -10,7 +10,7 @@ use super::*;
 /// (`registered: false`). `run_ids` are the leases carrying its token, and
 /// they share its heartbeat. `stale` is a registration or lease that no
 /// working process stands behind: a dead pid or a heartbeat older than
-/// `HEARTBEAT_TIMEOUT_SECS`. `mode` is how `up` started it (`launchd`, or
+/// `HEARTBEAT_TIMEOUT_SECS`. `mode` is how it was started (`supervise --mode`: `launchd`, or
 /// `in_cmux` with the `workspace_id` it runs in, which only an earlier
 /// binary started, ADR-t1433-4); a supervisor started by
 /// hand and an `integrate` process have none. Nothing here is deleted

@@ -65,8 +65,10 @@ in-cmux modeの起動の指定は何にも触る前に拒み、廃止と次の�
      launchdに移すのは人かinboxの一度の`down --wait`と、in-cmuxの指定を外した`up`。
      起動するsupervisorのmodeは常に`launchd`で、supervisorの起動の印の`mode`になる（[変更の印](commands.md)）。
    - **待つ相手**: `up`が起動したsupervisorの登録だけを受け取り、既に表にあった登録を取り違えない（`started_registration`のdoc comment）。
-   - **modeの記録**: 起動したsupervisorが登録に現れた直後に、`up`が`supervisors`の行へ`mode`を書く。
-     書くのは`up`だけで、`supervise`自身は書かない。
+   - **modeの記録**: `supervise`は受けた`--mode`を、登録を作った直後に自分の`supervisors`の行の`mode`へ書く。
+     LaunchAgentの引数が`--mode launchd`を持つので、`up`を通さずlaunchdが起動したsupervisor（ログイン時・再起動後・`KeepAlive`の起動し直し）もlaunchd modeの登録になる。
+     `up`も起動したsupervisorが登録に現れた直後に同じ`mode`を書く。
+     `--mode`の無い`supervise`（手起動）の登録は`mode`を持たず、handoffで引き継いだ登録は前の`mode`を保つ。
      modeはプロセスの性質なので登録行と寿命を共にし、supervisorがgracefulに終われば行ごと消える（queue dirのsidecar fileにしなかった理由は[persistence](../persistence.md)のRuntime ownership）。
      `down`はこれを見てSIGTERM（launchd mode / 手起動）とSIGINT（登録済みのin-cmux）を使い分ける。
    - **並列数・待ちの上限・runtimeのplannerの上限・claimを控えるload**（[ADR-0062](../../adr/0062-runs-waiting-for-a-person-leave-the-slot.md)の決定7、ADR-0041の決定12、[claimを控える](claim-hold.md)）: 明示されたときだけsupervisorの引数に足し、無ければsupervisorがmain checkoutの`dagq.toml`の`[supervisor]`かhostから決める（`up`のhelpと`supervise_arguments`のdoc comment）。

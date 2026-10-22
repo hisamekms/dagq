@@ -164,8 +164,9 @@ pub struct SuperviseOptions {
     /// this binary (ADR-0045 decision 10): its registration and leases are
     /// kept, not registered anew. `None` registers a new supervisor.
     pub handoff_token: Option<LeaseToken>,
-    /// How `up` started this process (`supervise --mode`), for its start
-    /// mark; `None` for a supervisor started by hand.
+    /// How this process was started (`supervise --mode`), for its
+    /// registration's mode and its start mark; `None` for a supervisor
+    /// started by hand.
     pub mode: Option<SupervisorMode>,
     /// The automatic update of the supervisor's binary (ADR-0045 decision
     /// 17): off unless `supervise --auto-update`.

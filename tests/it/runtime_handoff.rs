@@ -2,6 +2,7 @@
 use crate::runtime_support;
 use dagq::domain::EventKind;
 use dagq::domain::LeaseToken;
+use dagq::domain::SupervisorMode;
 use dagq::infrastructure::git_binary::git_executable;
 
 use runtime_support::*;
@@ -21,9 +22,20 @@ pub(crate) fn hand_off_when(
     backend: &Arc<TestWorkspace>,
     condition: impl FnMut(&mut SqliteQueue) -> bool,
 ) -> (Value, String) {
+    hand_off_with_when(db, repo, backend, supervise_options(4, true), condition)
+}
+
+/// [`hand_off_when`] for a supervisor started with `options`.
+fn hand_off_with_when(
+    db: &Path,
+    repo: &Path,
+    backend: &Arc<TestWorkspace>,
+    options: SuperviseOptions,
+    condition: impl FnMut(&mut SqliteQueue) -> bool,
+) -> (Value, String) {
     let supervisor = {
         let (db, repo, backend) = (db.to_owned(), repo.to_owned(), backend.clone());
-        thread::spawn(move || supervise(&db, &repo, &backend))
+        thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
     // The first supervisor may be slow to reach the condition under load;
     // it moves on as soon as the condition holds.
@@ -519,6 +531,95 @@ fn a_handoff_leaves_the_session_running_and_the_next_process_drives_it_on() {
             .iter()
             .all(|(_, payload)| payload["supervisor"] == json!(token))
     );
+}
+
+/// launchd starts a supervisor with `supervise --mode launchd` whether `up`
+/// loaded its agent or launchd started it on its own (at login, after a
+/// restart, by `KeepAlive`): the supervisor writes that mode into its
+/// registration without `up`, so `status` shows it and the automatic
+/// update leaves a gone one to its agent. One started without `--mode` is
+/// one started by hand: no mode, and the update does not start it again.
+/// The process a handoff continues it in gets no `--mode` and keeps the
+/// registration's.
+fn the_registration_has_the_mode_supervise_was_given(mode: Option<SupervisorMode>) {
+    use dagq::application::update::{Restart, restart_of};
+    let (_dir, repo, db) = fixture();
+    let backend = Arc::new(TestWorkspace::new(&db, false, GATED_AGENT));
+    let (_, token) = hand_off_with_when(
+        &db,
+        &repo,
+        &backend,
+        SuperviseOptions {
+            mode,
+            ..supervise_options(4, true)
+        },
+        |queue| {
+            queue
+                .show(TaskId::new(1))
+                .unwrap()
+                .runs
+                .first()
+                .is_some_and(|run| run.status() == RunStatus::Running)
+        },
+    );
+    let registration = only_registration(&db);
+    assert_eq!(registration.mode, mode);
+    let restart = restart_of(&registration, &db.to_string_lossy(), &[]);
+    match mode {
+        Some(_) => assert_eq!(restart.unwrap(), Restart::Launchd),
+        None => {
+            let error = format!("{:#}", restart.unwrap_err());
+            assert!(error.contains("started by hand"), "{error}");
+        }
+    }
+    let status = runtime::status(&db).unwrap();
+    assert_eq!(
+        status["supervisors"][0]["mode"],
+        json!(mode.map(SupervisorMode::as_str)),
+        "{status}"
+    );
+
+    let next = {
+        let (db, repo, backend, token) = (db.clone(), repo.clone(), backend.clone(), token.clone());
+        thread::spawn(move || supervise_after_handoff(&db, &repo, &backend, &token))
+    };
+    // Taking the handoff clears `handoff_accepted`; the next process's
+    // resume sets it again.
+    wait_until(&db, Duration::from_secs(30), |queue| {
+        queue
+            .supervisors()
+            .unwrap()
+            .first()
+            .is_some_and(|r| r.handoff_accepted)
+    });
+    let taken = only_registration(&db);
+    assert_eq!(taken.token, token);
+    assert_eq!(taken.pid, std::process::id());
+    assert_eq!(taken.mode, mode);
+    let run = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap()
+        .runs[0]
+        .clone();
+    fs::write(
+        exit_request_path(run.run_dir().unwrap()).with_extension("go"),
+        "",
+    )
+    .unwrap();
+    let outcome = joined(next, "the supervisor after the handoff").unwrap();
+    backend.join();
+    assert_eq!(outcome["outcome"], "finished", "{outcome}");
+}
+
+#[test]
+fn a_supervisor_launchd_started_registers_its_mode_without_up() {
+    the_registration_has_the_mode_supervise_was_given(Some(SupervisorMode::Launchd));
+}
+
+#[test]
+fn a_supervisor_started_without_a_mode_registers_none() {
+    the_registration_has_the_mode_supervise_was_given(None);
 }
 
 /// Task 640: a handoff during a resume whose `handoff.json` could not be
