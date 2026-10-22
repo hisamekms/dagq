@@ -188,7 +188,7 @@ impl Supervisor<'_> {
         };
         match self.start_resume(&run, attempt, &request, run_env) {
             Ok(watch) => {
-                info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} resumed (attempt {attempt}; {} of at most {MAX_RESUME_ATTEMPTS} counted before it) in workspace {}", run.id(), run.task_id(), resumes.counted, watch.workspace);
+                info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} resumed (attempt {attempt}; {} of at most {MAX_RESUME_ATTEMPTS} counted before it{}) in workspace {}", run.id(), run.task_id(), resumes.counted, if resumes.parked_for_hold { "; this one, after a hold was released, not counted" } else { "" }, watch.workspace);
                 self.claim.slots.admit_noting(
                     Slot::new(run, Phase::Resume(watch)),
                     EventKind::ResumeStarted.as_str(),
@@ -962,10 +962,11 @@ pub(super) fn skips_resume(facts: &SkipFacts<'_>) -> bool {
 /// counted resumes against [`MAX_RESUME_ATTEMPTS`], and the conflict-only
 /// ones against `config`'s limit (ADR-0047 decision 24) when there were any, with the conflict
 /// precheck's requests that shared their limit, and the kill-only ones
-/// against [`KILL_ONLY_RESUME_LIMIT`] (ADR-t946-1).
+/// against [`KILL_ONLY_RESUME_LIMIT`] (ADR-t946-1), and the ones after a
+/// hold's release, which no limit fences (ADR-t2664-1).
 fn resumed_text(resumes: ResumeCount, config: ResumeConfig) -> String {
     let limit = config.conflict_only_limit;
-    let killed = if resumes.kill_only == 0 {
+    let mut killed = if resumes.kill_only == 0 {
         String::new()
     } else {
         format!(
@@ -973,7 +974,13 @@ fn resumed_text(resumes: ResumeCount, config: ResumeConfig) -> String {
             resumes.kill_only
         )
     };
-    if resumes.conflict_attempts() == 0 && resumes.kill_only == 0 {
+    if resumes.held > 0 {
+        killed.push_str(&format!(
+            ", {} not counted after a hold of its task was released",
+            resumes.held
+        ));
+    }
+    if resumes.conflict_attempts() == 0 && resumes.kill_only == 0 && resumes.held == 0 {
         format!(
             "resumed {} times (at most {MAX_RESUME_ATTEMPTS})",
             resumes.counted
@@ -1983,14 +1990,25 @@ mod tests {
                     counted,
                     conflict_only,
                     kill_only,
+                    held: 0,
                     conflict_requests,
                     parked_for_conflict: false,
                     parked_for_send_back: false,
+                    parked_for_hold: false,
                 },
                 ResumeConfig::default(),
             )
         };
         assert_eq!(text(3, 0, 0, 0), "resumed 3 times (at most 3)");
+        let held = ResumeCount {
+            counted: 3,
+            held: 1,
+            ..ResumeCount::default()
+        };
+        assert_eq!(
+            resumed_text(held, ResumeConfig::default()),
+            "resumed 4 times (3 of at most 3 counted, 1 not counted after a hold of its task was released)"
+        );
         assert_eq!(
             text(1, 0, 3, 0),
             "resumed 4 times (1 of at most 3 counted, 3 of at most 3 after a signal from outside killed its session)"

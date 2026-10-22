@@ -911,10 +911,11 @@ impl Supervisor<'_> {
                     ResumeCount::of(&self.queue.run_events(run.id()).map_err(unreadable)?);
                 if resumes.exhausted(self.resume.config) {
                     return Err(format!(
-                        "its resumes are used up ({} counted of at most {MAX_RESUME_ATTEMPTS}, {} after conflicts only, {} of at most {KILL_ONLY_RESUME_LIMIT} after its session was killed)",
+                        "its resumes are used up ({} counted of at most {MAX_RESUME_ATTEMPTS}, {} after conflicts only, {} of at most {KILL_ONLY_RESUME_LIMIT} after its session was killed, {} not counted after a hold of its task was released)",
                         resumes.counted,
                         resumes.conflict_attempts(),
-                        resumes.kill_only
+                        resumes.kill_only,
+                        resumes.held
                     ));
                 }
                 let worktree = run

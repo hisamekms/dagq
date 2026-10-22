@@ -1518,6 +1518,12 @@ name = "runtime_task_hold_park::a_replanning_and_a_hold_each_keep_the_run_waitin
 reason = "B 境界（再計画の park・snapshot・SQLite・supervisor の起動）: 再計画の保留と hold が重なった run が再計画の park で snapshot を取り、hold が休んだ run で settle し、継続だけでは resume せず release の後に restore と resume で着地することを、実際の Git と三度の supervisor の起動で確かめる。重なりの判断は domain::task_replan の unit test"
 task = 1881
 
+# 5.5s to 7.6s (stress 5 under the host's load of other runs, task 2664)
+[[test]]
+name = "runtime_task_hold_park::a_used_up_run_held_and_released_resumes_its_session_uncounted"
+reason = "B 境界（supervisor の配線・wrapper・SQLite・CLI）: 数える resume を使い切った run が turn の途中の hold で待ちへ入り、release の後に begin_resume が同じ session の resume を数えずに始めて auto_repaired を記録し、着地することを、実際の wrapper と二度の supervisor の起動で確かめる。数え方の判断は domain::resume の unit test"
+task = 2664
+
 # 5.1s to 9.0s (stress 60s under the host's load of other runs, task 1881)
 [[test]]
 name = "runtime_task_hold_park::a_helper_left_running_in_the_worktree_keeps_the_hold_settling"

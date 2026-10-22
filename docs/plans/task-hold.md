@@ -159,6 +159,7 @@ holdは2段で進む: holdを確定した後、走っている工程が終わる
 - `--model`で選んだmodelは`task_released`の`model`と、その後にsessionを開くevent（`run_claimed` / `resume_started`と次のturn）の`model`に記録し、段上げの起点として読む。
   選んだmodelとeffortが段（`LADDER`）の値の1つならそこから段上げを続け、段に無い値なら今の段の外の値と同じく上げない。
 - Codexのworkerは今modelを渡さない（Codexの既定のmodelで動く）ので、`--provider codex`か、Codexで続くrunへの`--model`は理由を付けて拒み、holdも選んだ値も変えない。
+- holdの待ち（`hold_parked`）から同じsessionで続けるresumeは、resumeの試行の上限に数えず、数える試行を使い切ったrunでもresumeする（[ADR-t2664-1](../adr/2026-10-22-t2664-1-resumes-after-a-hold-release-are-not-counted.md)、数え方は[needs_session](../design/supervisor-lifecycle/needs-session.md)の「holdの後の試行」）。
 - 解除は優先度とclaimの順を変えず、再開・claimは今のとおり効く優先度の列でslotを待つ。
 
 ## 再計画の保留との共通の柵

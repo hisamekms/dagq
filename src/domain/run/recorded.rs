@@ -746,8 +746,10 @@ mod tests {
             counted: 0,
             conflict_only: 5,
             kill_only: 0,
+            held: 0,
             conflict_requests: 0,
             parked_for_conflict: true,
+            parked_for_hold: false,
             parked_for_send_back: false,
         };
         let (_, recorded) = record_exhausted_resumes(

@@ -68,6 +68,10 @@ killだけの試行はkillの後の`resume`の直後の1回だけで、そのres
 また数えるかどうかは衝突だけの試行と同じくresumeの直前の`needs_session`の理由で決まるので、killの後のresumeが検証の失敗などでparkすれば次のresumeは数える試行、reviewがpass済みの衝突なら衝突だけの試行になる。
 使い切ったrunの`recovery_requested`・`last_error`・復旧jobのpromptの文面はkillだけの試行の数も書く。
 
+**holdの後の試行**（[ADR-t2664-1](../../adr/2026-10-22-t2664-1-resumes-after-a-hold-release-are-not-counted.md)）: runを`needs_session`にした最新のparkがholdの待ち（`hold_parked`）なら、解除の後の次の`resume_started`は上限に数えず、killだけの試行と同じく`auto_repaired`で記録する。
+holdの待ちにあるrunは、数える試行が上限に達していても試行を使い切ったものとして扱わず、解除の後にresumeする（holdの試行には上限を設けない。解除は人の操作でしか起きない）。
+holdの試行は`hold_parked`の後の最初のresumeだけで、その後か、resumeの前に別の理由でparkし直したrunは、その理由で数える。
+
 supervisorは`needs_session`のrunを自分でresumeする（ADR-0019の決定1。`resume_candidates`）。
 ループの各回で、adoptの後、`needs_session`のrunを古い順に見て再開の候補を集める。
 候補は復旧job・claimと1つの列で、taskの効く優先度の降順（同じ優先度では再開が先、再開の中は古い順）に空きslotを受ける（[supervise](supervise.md#slotを渡す順とclaim)、[ADR-t1850-1](../../adr/2026-10-06-t1850-1-resumes-recovery-jobs-and-claims-share-one-line-by-effective-priority.md)）。

@@ -1,7 +1,7 @@
 //! How the resumes of a `needs_session` run are counted, and when a run
 //! whose resumes are used up is retried with its branch carried over
-//! (ADR-0047 decision 24, amended by ADR-t946-1 and ADR-t2946-1). Both are
-//! read from the run's events alone.
+//! (ADR-0047 decision 24, amended by ADR-t946-1, ADR-t2946-1 and
+//! ADR-t2664-1). Both are read from the run's events alone.
 
 use super::{
     CommitSha, MAX_RESUME_ATTEMPTS, ReasonCode, RunEvent,
@@ -80,7 +80,9 @@ const PARKING: [EventKind; 11] = [
 /// that found one, and whether it is that recheck (ADR-0068 decision 5);
 /// whether the latest parking event is a `resume` decided for a session a
 /// signal killed (ADR-t946-1), whether it is a person's `send_back` of the
-/// landing (ADR-t2946-1), and the code of the run's `last_error` so far.
+/// landing (ADR-t2946-1), whether it is the park of a task's hold
+/// (`hold_parked`, ADR-t2664-1), and the code of the run's `last_error` so
+/// far.
 #[derive(Debug, Clone, Copy, Default)]
 struct History {
     approved: bool,
@@ -89,6 +91,7 @@ struct History {
     rechecked: bool,
     killed: bool,
     sent_back: bool,
+    held: bool,
     error: Option<ReasonCode>,
 }
 
@@ -114,14 +117,16 @@ impl History {
                     && self.error == Some(ReasonCode::SessionKilled);
                 self.sent_back = kind == EventKind::LandingDecided
                     && event_code(event) == Some(ReasonCode::SentBack);
+                self.held = kind == EventKind::HoldParked;
             }
             // Only the resume right after the kill's `resume` is kill-only,
-            // and only that after a `send_back` passes the conflict-only
-            // limit: a later one, with no park in between, is judged as
-            // usual.
+            // only that after a `send_back` passes the conflict-only limit,
+            // and only that after the hold's park is the hold's: a later
+            // one, with no park in between, is judged as usual.
             Some(EventKind::ResumeStarted) => {
                 self.killed = false;
                 self.sent_back = false;
+                self.held = false;
             }
             _ => {}
         }
@@ -135,6 +140,13 @@ impl History {
     /// (ADR-t946-1): not a failure the run caused.
     const fn kill_only(self) -> bool {
         self.killed
+    }
+
+    /// The run waits for a session only because a person's hold of its
+    /// task parked it at a turn's end (ADR-t2664-1): not a failure the run
+    /// caused, and once per release.
+    const fn hold_only(self) -> bool {
+        self.held
     }
 
     /// The run waits for a session only because it conflicts with main,
@@ -211,6 +223,13 @@ pub fn parked_for_kill_only(events: &[RunEvent]) -> bool {
     history(events).kill_only()
 }
 
+/// Whether the run, as its events stand, waits for a session only because
+/// a hold of its task parked it (`hold_parked`, ADR-t2664-1): its next
+/// resume, after the hold's release, is counted toward no limit.
+pub fn parked_for_hold(events: &[RunEvent]) -> bool {
+    history(events).hold_only()
+}
+
 /// The resumes of one run (`resume_started` events), split by whether
 /// each counts toward [`MAX_RESUME_ATTEMPTS`], and the conflict precheck's
 /// requests to its live session, which share the conflict-only limit.
@@ -224,6 +243,10 @@ pub struct ResumeCount {
     /// Resumes of a run parked only because a signal from outside killed
     /// its session (ADR-t946-1), fenced by [`KILL_ONLY_RESUME_LIMIT`].
     pub kill_only: usize,
+    /// Resumes after the release of a hold that parked the run
+    /// (`hold_parked`, ADR-t2664-1): no limit fences them, since each
+    /// follows a person's release.
+    pub held: usize,
     /// The conflict precheck's resolution requests sent to the live
     /// session of a passed run (`conflict_precheck` with `requested: true`,
     /// but those a later one with `unsent: true` withdrew): conflicts only
@@ -239,6 +262,10 @@ pub struct ResumeCount {
     /// its next resume starts while counted resumes are left, even past
     /// the conflict-only limit (ADR-t2946-1).
     pub parked_for_send_back: bool,
+    /// Whether the run, as its events end, is parked by a hold of its task
+    /// ([`parked_for_hold`]): its next resume is a hold's, which no used-up
+    /// limit stops.
+    pub parked_for_hold: bool,
 }
 
 impl ResumeCount {
@@ -250,6 +277,8 @@ impl ResumeCount {
             if event.kind == EventKind::ResumeStarted {
                 if history.conflict_only() {
                     count.conflict_only += 1;
+                } else if history.hold_only() {
+                    count.held += 1;
                 } else if history.kill_only() {
                     count.kill_only += 1;
                 } else {
@@ -268,6 +297,7 @@ impl ResumeCount {
         count.conflict_requests = count.conflict_requests.saturating_sub(withdrawn);
         count.parked_for_conflict = history.conflict_only();
         count.parked_for_send_back = history.sent_back;
+        count.parked_for_hold = history.hold_only();
         count
     }
 
@@ -279,7 +309,7 @@ impl ResumeCount {
 
     /// Every resume started, counted or not: the number of the last one.
     pub const fn total(self) -> usize {
-        self.counted + self.conflict_only + self.kill_only
+        self.counted + self.conflict_only + self.kill_only + self.held
     }
 
     /// How many counted resumes are left.
@@ -297,13 +327,16 @@ impl ResumeCount {
     /// verification, missing evidence) keeps its counted resumes, and so
     /// does one a person's `send_back` parked whose conflict-only resumes
     /// reached it (ADR-t2946-1): the fence stops a conflict that never
-    /// resolves, not a person's explicit send-back.
+    /// resolves, not a person's explicit send-back. A run parked by a hold
+    /// of its task ([`Self::parked_for_hold`]) is never used up: its next
+    /// resume follows the hold's release (ADR-t2664-1).
     pub const fn exhausted(self, config: ResumeConfig) -> bool {
         let limit = config.conflict_only_limit;
-        self.counted >= MAX_RESUME_ATTEMPTS
-            || self.kill_only >= KILL_ONLY_RESUME_LIMIT
-            || (self.conflict_only >= limit && !self.parked_for_send_back)
-            || (self.parked_for_conflict && self.conflict_attempts() >= limit)
+        !self.parked_for_hold
+            && (self.counted >= MAX_RESUME_ATTEMPTS
+                || self.kill_only >= KILL_ONLY_RESUME_LIMIT
+                || (self.conflict_only >= limit && !self.parked_for_send_back)
+                || (self.parked_for_conflict && self.conflict_attempts() >= limit))
     }
 }
 
@@ -318,20 +351,23 @@ pub struct ResumeStart {
     pub counted: bool,
     /// The payload of the `auto_repaired` that records an uncounted resume:
     /// `conflict_resume_uncounted` for a run parked only by a conflict
-    /// after its review passed (ADR-0047 decision 24), or
+    /// after its review passed (ADR-0047 decision 24),
     /// `kill_resume_uncounted` for one a signal from outside killed
-    /// (ADR-t946-1). `None` for a counted resume.
+    /// (ADR-t946-1), or `hold_resume_uncounted` for one a hold of its task
+    /// parked (ADR-t2664-1). `None` for a counted resume.
     pub repair: Option<Value>,
 }
 
 /// How the next resume of a run with `events` starts on `main`: its
 /// attempt, whether it is counted, and the repair that records it when it
-/// is not. A conflict-only park wins over a kill-only one.
+/// is not. A conflict-only park wins over a hold's, and a hold's over a
+/// kill-only one.
 pub fn resume_start_plan(events: &[RunEvent], main: &CommitSha) -> ResumeStart {
     let resumes = ResumeCount::of(events);
     let attempt = resumes.total() + 1;
     let basis = conflict_only_basis(events);
-    let killed = basis.is_none() && parked_for_kill_only(events);
+    let held = basis.is_none() && resumes.parked_for_hold;
+    let killed = basis.is_none() && !held && parked_for_kill_only(events);
     let repair = if let Some(basis) = basis {
         Some(json!({
             "layer": "runtime",
@@ -343,6 +379,23 @@ pub fn resume_start_plan(events: &[RunEvent], main: &CommitSha) -> ResumeStart {
                 "parked": ReasonCode::RebaseConflict,
                 "counted_resumes": resumes.counted,
                 "conflict_only_resumes": resumes.conflict_only + 1,
+            },
+            "detail": {"attempt": attempt, "main": main},
+        }))
+    } else if held {
+        let hold = events
+            .iter()
+            .rev()
+            .find(|event| event.kind == EventKind::HoldParked)
+            .map_or(Value::Null, |event| event.payload["hold_id"].clone());
+        Some(json!({
+            "layer": "runtime",
+            "repair": "hold_resume_uncounted",
+            "conditions": {
+                "parked": EventKind::HoldParked.as_str(),
+                "hold_id": hold,
+                "counted_resumes": resumes.counted,
+                "hold_resumes": resumes.held + 1,
             },
             "detail": {"attempt": attempt, "main": main},
         }))
@@ -557,8 +610,10 @@ mod tests {
                 counted: 0,
                 conflict_only: 2,
                 kill_only: 0,
+                held: 0,
                 conflict_requests: 0,
                 parked_for_conflict: true,
+                parked_for_hold: false,
                 parked_for_send_back: false,
             }
         );
@@ -640,8 +695,10 @@ mod tests {
                 counted: 1,
                 conflict_only: 1,
                 kill_only: 0,
+                held: 0,
                 conflict_requests: 0,
                 parked_for_conflict: true,
+                parked_for_hold: false,
                 parked_for_send_back: false,
             }
         );
@@ -755,8 +812,10 @@ mod tests {
         let requests = ResumeCount {
             conflict_only: 1,
             kill_only: 0,
+            held: 0,
             conflict_requests: 1,
             parked_for_conflict: true,
+            parked_for_hold: false,
             ..Default::default()
         };
         assert!(requests.exhausted(two));
@@ -793,8 +852,10 @@ mod tests {
                 counted: 0,
                 conflict_only: 1,
                 kill_only: 0,
+                held: 0,
                 conflict_requests: 1,
                 parked_for_conflict: true,
+                parked_for_hold: false,
                 parked_for_send_back: false,
             }
         );
@@ -997,8 +1058,10 @@ mod tests {
                 counted: 0,
                 conflict_only: 0,
                 kill_only: 1,
+                held: 0,
                 conflict_requests: 0,
                 parked_for_conflict: false,
+                parked_for_hold: false,
                 parked_for_send_back: false,
             }
         );
@@ -1126,8 +1189,10 @@ mod tests {
                 counted: 0,
                 conflict_only: 1,
                 kill_only: 0,
+                held: 0,
                 conflict_requests: 0,
                 parked_for_conflict: true,
+                parked_for_hold: false,
                 parked_for_send_back: false,
             }
         );
@@ -1148,5 +1213,113 @@ mod tests {
         assert_eq!(ResumeCount::of(&failed).counted, 1);
         let held = [concern, recheck("rebase_conflict", recheck::HELD), resume()];
         assert_eq!(ResumeCount::of(&held).counted, 1);
+    }
+
+    fn hold_parked() -> RunEvent {
+        event(
+            "hold_parked",
+            json!({"reason": "hold_parked", "hold_id": 7}),
+        )
+    }
+
+    fn released() -> RunEvent {
+        event("task_released", json!({"hold_id": 7, "decision": "resume"}))
+    }
+
+    fn verification_failed() -> RunEvent {
+        event(
+            "integration_deferred",
+            json!({"code": "verification_failed"}),
+        )
+    }
+
+    /// ADR-t2664-1: the resume after a hold's release is not counted but
+    /// held apart, and a run whose counted resumes are used up still
+    /// resumes after the release.
+    #[test]
+    fn a_resume_after_a_hold_is_not_counted_and_not_used_up() {
+        let used_up = [
+            verification_failed(),
+            resume(),
+            verification_failed(),
+            resume(),
+            verification_failed(),
+            resume(),
+        ];
+        assert!(ResumeCount::of(&used_up).exhausted(ResumeConfig::default()));
+        let parked: Vec<RunEvent> = used_up
+            .iter()
+            .cloned()
+            .chain([hold_parked(), released()])
+            .collect();
+        assert!(parked_for_hold(&parked));
+        let before = ResumeCount::of(&parked);
+        assert!(before.parked_for_hold);
+        assert!(!before.exhausted(ResumeConfig::default()));
+        let resumed: Vec<RunEvent> = parked.iter().cloned().chain([resume()]).collect();
+        let after = ResumeCount::of(&resumed);
+        assert_eq!((after.counted, after.held, after.total()), (3, 1, 4));
+        assert!(!after.parked_for_hold);
+        // Its session parked once more for its own reason: counted, and
+        // used up again.
+        let failed: Vec<RunEvent> = resumed
+            .iter()
+            .cloned()
+            .chain([verification_failed()])
+            .collect();
+        assert!(ResumeCount::of(&failed).exhausted(ResumeConfig::default()));
+        let again: Vec<RunEvent> = failed.iter().cloned().chain([resume()]).collect();
+        assert_eq!(
+            (
+                ResumeCount::of(&again).counted,
+                ResumeCount::of(&again).held
+            ),
+            (4, 1)
+        );
+    }
+
+    /// A run parked by a hold and then for another reason (a failed
+    /// verification) before it resumed is counted by that reason; and a
+    /// resume that ended with no park after it does not stay the hold's.
+    #[test]
+    fn a_park_after_the_hold_is_judged_by_its_own_reason() {
+        let events = [hold_parked(), released(), verification_failed(), resume()];
+        let count = ResumeCount::of(&events);
+        assert_eq!((count.counted, count.held), (1, 0));
+        let errored = [hold_parked(), released(), resume(), resume()];
+        let count = ResumeCount::of(&errored);
+        assert_eq!((count.counted, count.held), (1, 1));
+        // The kill-only and conflict-only resumes are judged as before.
+        let killed = [killed(), triage_resume(), resume()];
+        assert_eq!(ResumeCount::of(&killed).kill_only, 1);
+        let conflicted = [pass(), conflict(), resume()];
+        assert_eq!(ResumeCount::of(&conflicted).conflict_only, 1);
+        assert_eq!(ResumeCount::of(&conflicted).held, 0);
+    }
+
+    /// The hold's resume is recorded as the repair
+    /// `hold_resume_uncounted` with the hold and the counted resumes so far.
+    #[test]
+    fn a_hold_resume_is_an_uncounted_repair() {
+        let events = [verification_failed(), resume(), hold_parked(), released()];
+        let plan = resume_start_plan(&events, &main());
+        assert_eq!(
+            plan,
+            ResumeStart {
+                attempt: 2,
+                counted: false,
+                repair: Some(json!({
+                    "layer": "runtime",
+                    "repair": "hold_resume_uncounted",
+                    "conditions": {
+                        "parked": "hold_parked",
+                        "hold_id": 7,
+                        "counted_resumes": 1,
+                        "hold_resumes": 1,
+                    },
+                    "detail": {"attempt": 2, "main": main()},
+                })),
+            }
+        );
     }
 }

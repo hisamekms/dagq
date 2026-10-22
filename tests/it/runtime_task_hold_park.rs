@@ -377,6 +377,121 @@ fn a_hold_during_a_turn_lets_it_end_and_the_run_waits_with_its_session_until_the
     assert_resumed_once_and_landed(&db, &repo, "notes.txt", "half");
 }
 
+/// Record on task 2's run, as its first turn goes, `n` counted resumes
+/// that used up its tries: what a run that waited for sessions before
+/// shows.
+fn record_counted_resumes(db: &Path, run: &TaskRun, n: usize) {
+    let connection = Connection::open(db).unwrap();
+    connection
+        .busy_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    for attempt in 1..=n {
+        connection
+            .execute(
+                "INSERT INTO run_events(task_id,run_id,kind,payload,created_at)
+                 SELECT task_id,id,'resume_started',?2,strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                 FROM task_runs WHERE id=?1",
+                rusqlite::params![
+                    run.id().as_str(),
+                    json!({"attempt": attempt, "counted": true}).to_string()
+                ],
+            )
+            .unwrap();
+    }
+}
+
+/// Supervise on a thread with one slot, a reviewer that passes and the
+/// `dagq` the test owns ([`common::service::owned_executable`]), so the
+/// service it starts ends with the test's process.
+fn supervise_owned(
+    db: &Path,
+    repo: &Path,
+    backend: Arc<TestWorkspace>,
+) -> (Arc<TestReviewer>, thread::JoinHandle<Result<Value>>) {
+    let reviewer = Arc::new(TestReviewer::new(&[verdict("pass", &[], "fine")]));
+    let options = SuperviseOptions {
+        stall: Some(Default::default()),
+        ..supervise_options(1, true)
+    };
+    let dagq = common::service::owned_executable(db.parent().unwrap());
+    let supervisor = {
+        let (db, repo, reviewer) = (db.to_owned(), repo.to_owned(), reviewer.clone());
+        thread::spawn(move || {
+            runtime::supervise_with_reviewer(
+                &db,
+                &repo,
+                &*backend,
+                &claude_stub(&db),
+                &*reviewer,
+                &dagq,
+                &options,
+            )
+        })
+    };
+    (reviewer, supervisor)
+}
+
+/// ADR-t2664-1: the resume after a hold's release is not one of the
+/// counted tries. A run whose counted resumes are used up, held while its
+/// turn runs, waits for the release and then resumes the same session:
+/// its `resume_started` is not counted, an `auto_repaired`
+/// (`hold_resume_uncounted`) records why, and its counted resumes stay
+/// what they were before the hold.
+#[test]
+fn a_used_up_run_held_and_released_resumes_its_session_uncounted() {
+    use dagq::domain::resume::{ResumeConfig, ResumeCount};
+    let (dir, repo, db, backend) = headless_fixture(&[]);
+    turns(dir.path(), "");
+    let backend = Arc::new(backend);
+    let (_reviewer, supervisor) = supervise_owned(&db, &repo, backend.clone());
+    wait_for_kind(&db, "turn_started");
+    let run = detail(&db).runs[0].clone();
+    record_counted_resumes(&db, &run, MAX_RESUME_ATTEMPTS);
+    let before = ResumeCount::of(&detail(&db).events);
+    assert!(before.exhausted(ResumeConfig::default()), "{before:?}");
+    hold(&db);
+    fs::write(Path::new(run.run_dir().unwrap()).join("go"), "").unwrap();
+    finished(&db, &backend, supervisor);
+    let detail = detail(&db);
+    assert_eq!(detail.runs[0].status(), RunStatus::NeedsSession);
+    assert_eq!(payloads(&detail, "hold_parked").len(), 1);
+    let parked = ResumeCount::of(&detail.events);
+    assert!(parked.parked_for_hold, "{parked:?}");
+    assert!(!parked.exhausted(ResumeConfig::default()), "{parked:?}");
+
+    release(&db);
+    let (_reviewer, supervisor) = supervise_owned(&db, &repo, backend.clone());
+    finished(&db, &backend, supervisor);
+    let detail = runtime_support::headless::detail(&db);
+    assert_eq!(detail.task.status(), TaskStatus::Completed);
+    assert_eq!(detail.runs.len(), 1, "no new run");
+    let started = payloads(&detail, "resume_started");
+    assert_eq!(started.len(), MAX_RESUME_ATTEMPTS + 1, "{started:?}");
+    let resumed = started.last().unwrap();
+    assert_eq!(resumed["counted"], false, "{resumed}");
+    assert_eq!(resumed["attempt"], MAX_RESUME_ATTEMPTS + 1, "{resumed}");
+    let repairs: Vec<&Value> = payloads(&detail, "auto_repaired")
+        .into_iter()
+        .filter(|repair| repair["repair"] == "hold_resume_uncounted")
+        .collect();
+    assert_eq!(repairs.len(), 1, "{repairs:?}");
+    assert_eq!(repairs[0]["conditions"]["parked"], "hold_parked");
+    assert_eq!(
+        repairs[0]["conditions"]["counted_resumes"],
+        MAX_RESUME_ATTEMPTS
+    );
+    let after = ResumeCount::of(&detail.events);
+    assert_eq!((after.counted, after.held), (before.counted, 1));
+    assert_eq!(after.left(), before.left());
+    // The same session went on, and its work landed.
+    let calls = stub_calls(&detail.runs[0]);
+    let session = |call: &str| call.split(' ').nth(1).unwrap().to_owned();
+    let first = calls.iter().find(|c| c.starts_with("start ")).unwrap();
+    let last = calls.iter().rfind(|c| c.starts_with("resume ")).unwrap();
+    assert_eq!(session(first), session(last), "{calls:?}");
+    assert!(git_out(&repo, &["ls-tree", "--name-only", "main"]).contains("notes.txt"));
+}
+
 /// Boundary: a hold while a review runs lets the review end (its verdict
 /// recorded) and lands nothing; a release while it runs is refused, and
 /// once the run waits, its session, branch and uncommitted changes kept,
