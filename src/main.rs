@@ -777,7 +777,8 @@ enum Command {
     /// investigation limits' among them: a Spike held while Spikes fill `[supervisor]
     /// max_spikes` shows `spike_limit`, and one that would open an investigation past
     /// `max_investigations` shows `investigation_limit` once the Spike limit lets Spikes go.
-    /// Does not claim.
+    /// The ready tasks that never enter the order are counted by why, with their lowest IDs
+    /// (`excluded`: `draft_goal`, `dependencies`, `goal_dependencies`). Does not claim.
     Candidates {
         /// Keep the deferred tasks in `candidates`: the claim rule's order alone, with no class
         /// aging applied.

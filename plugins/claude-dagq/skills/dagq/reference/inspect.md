@@ -9,7 +9,7 @@ Each command's flags and the fields it prints are in `"$DAGQ" <command> --help` 
 | `goal list` / `goal show ID` | Which goals there are and how far each is / one goal, and the unfinished tasks of any goal waiting on it |
 | `list` / `show ID` | Unfinished tasks, a page at a time / one task |
 | `search QUERY` / `related TASK` | Tasks, goals, notes and landed commits matching words / the tasks most related to one by fixed clues (below) |
-| `graph` / `candidates` | Dependencies, what each task still waits for and the critical chain / which ready tasks the supervisor claims next, which it deferred and why, and what holds every claim (below) |
+| `graph` / `candidates` | Dependencies, what each task still waits for and the critical chain / which ready tasks the supervisor claims next, which it deferred and why, what holds every claim, and how many ready tasks never enter the order and why (below) |
 | `events` / `timeline RUN` | What happened, by kind, task, run or goal / where one run's time went between its steps |
 | `notes` / `note` | Notes on a goal, task or run / record one (changes the queue: an `observation` event) |
 | `findings` / `finding dismiss` / `finding resolve` | The observer's findings and how to decide them: `reference/observer.md`. `--covered-by TASK` only for a `ci_failure` finding and an open task that already fixes its tests (`reference/register.md`). `finding record` refuses the `ci_failure` kind: only the supervisor's CI watch records it |
@@ -74,7 +74,7 @@ A task can depend on a goal as well as on tasks. It is not claimed until that go
 When planning a goal or deciding what to submit next, read `"$DAGQ" graph --goal ID` (or `graph`) instead of each task's dependencies:
 
 1. `critical` is the chain that holds back the most work. Its first task should be `ready` and running; if it is `draft`, complete it and `submit` it before tasks with small `unblocks`.
-2. A task with a large `unblocks` missing from `candidates` waits on its `ready_after`: finish (or review and land) those first. A ready task with an empty `ready_after` missing from `candidates` is in `deferred`, with the supervisor's reason.
+2. A task with a large `unblocks` missing from `candidates` waits on its `ready_after`: finish (or review and land) those first. For a ready task missing from `candidates`, look first in `excluded` (`status`' `claim_excluded`): it counts the ready tasks that never enter the order, by why (`draft_goal`; `dependencies`, a predecessor unfinished or canceled, even with an empty `ready_after`; `goal_dependencies`), with the lowest IDs of each. No supervisor defers those, and a draft goal's task waits for the goal to open. A ready task not in `excluded` is in `deferred` with the supervisor's reason, or held (`held`).
 3. When one task blocks many, split it or remove a dependency that is not real (`dependency remove`) so more run in parallel.
 4. `candidates` is the order the supervisor claims in, as of its last judgment of the deferrals; what holds every claim is in `held`. There is no need to register or submit in a particular order: to put a task ahead, give it a priority (below).
 

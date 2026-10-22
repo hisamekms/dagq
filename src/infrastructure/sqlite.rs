@@ -2508,7 +2508,22 @@ fn read_graph_input(conn: &Connection) -> Result<GraphInput> {
         .prepare(READY_QUERY)?
         .query_map([], |r| r.get("id"))?
         .collect::<rusqlite::Result<_>>()?;
-    Ok(GraphInput { tasks, candidates })
+    let canceled = conn
+        .prepare(
+            "SELECT DISTINCT d.predecessor_id FROM task_dependencies d
+             JOIN tasks t ON t.id = d.task_id
+             JOIN tasks p ON p.id = d.predecessor_id
+             WHERE p.status = 'canceled'
+               AND t.status IN ('draft','submitted','ready','in_progress')
+             ORDER BY d.predecessor_id",
+        )?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(GraphInput {
+        tasks,
+        candidates,
+        canceled,
+    })
 }
 
 /// The queue as `lint` reads it: `targets` in the order given and every

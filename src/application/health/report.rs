@@ -106,6 +106,9 @@ pub fn status(
             .iter()
             .filter_map(crate::domain::claim_defer::OpenDeferral::of)
             .collect::<Vec<_>>(),
+        // The ready tasks the claim order never takes, by why: they are
+        // out before any deferral, so `claim_deferrals` misses them.
+        "claim_excluded": crate::application::claim_view::ClaimExclusions::of(&queue.graph_input()?),
         "proposals": queue.proposals(false)?,
         // The latest landing recheck of the waiting runs (ADR-0068
         // decision 6), with when it finished.

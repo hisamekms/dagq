@@ -1872,6 +1872,7 @@ fn migration_to_goal_priority_keeps_every_tasks_priority_and_the_claim_order() {
                 })
                 .collect(),
             candidates: [1, 2, 3, 4].map(TaskId::new).to_vec(),
+            ..Default::default()
         },
         None,
     );

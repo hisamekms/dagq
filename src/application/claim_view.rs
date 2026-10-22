@@ -31,11 +31,11 @@ use serde::Serialize;
 
 use std::collections::HashSet;
 
-use crate::application::RunLog;
-use crate::domain::TaskId;
+use crate::application::{GraphInput, RunLog};
 use crate::domain::claim_defer::{DEFERRAL_KINDS, OpenDeferral};
 use crate::domain::claim_order::{self, ClassLimits};
 use crate::domain::slot_limits::SupervisorConfig;
+use crate::domain::{GoalStatus, TaskId, TaskStatus};
 
 /// Whether the shown order leaves out the deferred tasks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -195,6 +195,74 @@ pub fn claim_view<T>(
         candidates,
         aged,
         deferred,
+    }
+}
+
+/// How many task IDs each reason of [`ClaimExclusions`] lists, lowest
+/// first.
+pub const EXCLUDED_TASK_IDS: usize = 5;
+
+/// The ready tasks of one reason of [`ClaimExclusions`]: how many, and the
+/// lowest [`EXCLUDED_TASK_IDS`] of their IDs.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ExcludedTasks {
+    pub count: usize,
+    pub task_ids: Vec<TaskId>,
+}
+
+impl ExcludedTasks {
+    fn push(&mut self, id: TaskId) {
+        self.count += 1;
+        if self.task_ids.len() < EXCLUDED_TASK_IDS {
+            self.task_ids.push(id);
+        }
+    }
+}
+
+/// The ready tasks the claim order never takes, by why: `candidates`'
+/// `excluded` and `status`' `claim_excluded`. They fall out before the
+/// order, so no supervisor judges them and none has a deferral. Each task
+/// counts under its first reason in this order: its goal is a draft
+/// (`draft_goal`), a direct predecessor is not completed (`dependencies`:
+/// unfinished, or canceled, which never releases the task), a goal it
+/// depends on is not closed as achieved (`goal_dependencies`, an abandoned
+/// one included). A ready task without any of these that is no candidate
+/// (an unfinished run, a hold) is not counted. The claim reads none of
+/// this.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ClaimExclusions {
+    pub draft_goal: ExcludedTasks,
+    pub dependencies: ExcludedTasks,
+    pub goal_dependencies: ExcludedTasks,
+}
+
+impl ClaimExclusions {
+    /// The ready tasks of `input` (every unfinished task of the queue) out
+    /// of the claim order, by their first reason.
+    pub fn of(input: &GraphInput) -> Self {
+        let open: HashSet<TaskId> = input.tasks.iter().map(|task| task.id).collect();
+        let canceled: HashSet<TaskId> = input.canceled.iter().copied().collect();
+        let mut tasks: Vec<_> = input
+            .tasks
+            .iter()
+            .filter(|task| task.status == TaskStatus::Ready)
+            .collect();
+        tasks.sort_by_key(|task| task.id);
+        let mut exclusions = Self::default();
+        for task in tasks {
+            if task.goal_status == Some(GoalStatus::Draft) {
+                exclusions.draft_goal.push(task.id);
+            } else if task
+                .depends_on
+                .iter()
+                .any(|id| open.contains(id) || canceled.contains(id))
+            {
+                exclusions.dependencies.push(task.id);
+            } else if task.goal_dependencies.iter().any(|d| !d.is_met()) {
+                exclusions.goal_dependencies.push(task.id);
+            }
+        }
+        exclusions
     }
 }
 
@@ -422,5 +490,88 @@ mod tests {
                 }],
             })
         );
+    }
+
+    fn ready(
+        id: i64,
+        goal: Option<GoalStatus>,
+        depends_on: &[i64],
+    ) -> crate::application::GraphTask {
+        crate::application::GraphTask {
+            id: TaskId::new(id),
+            status: TaskStatus::Ready,
+            priority: crate::domain::Priority::Normal,
+            priority_source: crate::domain::PrioritySource::Default,
+            priority_by: crate::domain::plan_request::PriorityBy::Ai,
+            execution_class: crate::domain::ExecutionClass::Implementation,
+            title: format!("task {id}"),
+            goal_id: goal.map(|_| crate::domain::GoalId::new(1)),
+            goal_status: goal,
+            depends_on: ids(depends_on),
+            goal_dependencies: Vec::new(),
+        }
+    }
+
+    fn waits_for_goal(
+        mut task: crate::application::GraphTask,
+        verdict: Option<crate::domain::GoalVerdict>,
+    ) -> crate::application::GraphTask {
+        task.goal_dependencies
+            .push(crate::application::GraphGoalDependency {
+                goal_id: crate::domain::GoalId::new(7),
+                verdict,
+            });
+        task
+    }
+
+    /// 1 is in a draft goal and waits for 9 too: it counts once, under the
+    /// draft goal. 2 waits for the unfinished 9, 6 for the canceled 10, 3
+    /// for an open goal, 4 for an abandoned one; 5 only for the finished 8 and an achieved goal, so
+    /// it is a candidate. 9 is in progress, so it is not counted.
+    #[test]
+    fn the_ready_tasks_out_of_the_order_count_under_their_first_reason() {
+        use crate::domain::GoalVerdict;
+        let mut running = ready(9, None, &[]);
+        running.status = TaskStatus::InProgress;
+        let input = GraphInput {
+            tasks: vec![
+                waits_for_goal(
+                    ready(5, Some(GoalStatus::Open), &[8]),
+                    Some(GoalVerdict::Achieved),
+                ),
+                ready(1, Some(GoalStatus::Draft), &[9]),
+                ready(2, Some(GoalStatus::Open), &[9]),
+                waits_for_goal(ready(3, None, &[]), None),
+                waits_for_goal(ready(4, None, &[8]), Some(GoalVerdict::Abandoned)),
+                running,
+                ready(6, None, &[8, 10]),
+            ],
+            candidates: ids(&[5]),
+            canceled: ids(&[10]),
+        };
+        assert_eq!(
+            serde_json::to_value(ClaimExclusions::of(&input)).unwrap(),
+            json!({
+                "draft_goal": {"count": 1, "task_ids": [1]},
+                "dependencies": {"count": 2, "task_ids": [2, 6]},
+                "goal_dependencies": {"count": 2, "task_ids": [3, 4]},
+            })
+        );
+    }
+
+    #[test]
+    fn a_reason_lists_only_its_lowest_task_ids_and_counts_them_all() {
+        let input = GraphInput {
+            tasks: (1..=7)
+                .rev()
+                .map(|id| ready(id, Some(GoalStatus::Draft), &[]))
+                .collect(),
+            candidates: Vec::new(),
+            ..Default::default()
+        };
+        let exclusions = ClaimExclusions::of(&input);
+        assert_eq!(exclusions.draft_goal.count, 7);
+        assert_eq!(exclusions.draft_goal.task_ids, ids(&[1, 2, 3, 4, 5]));
+        assert_eq!(exclusions.dependencies, ExcludedTasks::default());
     }
 }

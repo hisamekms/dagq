@@ -59,6 +59,54 @@ fn cli_persists_across_processes_and_reports_dependency_errors_as_json() {
     );
 }
 
+/// A ready task the claim order never takes is in `candidates`' `excluded`
+/// and `status`' `claim_excluded` under why: its goal is a draft, a
+/// predecessor is unfinished or canceled, or a goal it depends on is not
+/// closed.
+#[test]
+fn candidates_and_status_count_the_ready_tasks_out_of_the_order_by_why() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("queue.db");
+    ok(&db, &["init"]);
+    let id = |value: Value| value["id"].to_string();
+    let draft = id(ok(&db, &["goal", "add", "drafted", "--draft"]));
+    let open = id(ok(&db, &["goal", "add", "open"]));
+    let claimable = id(ok(&db, &["add", "claimable"]));
+    let in_draft = id(ok(&db, &["add", "in a draft goal", "--goal", &draft]));
+    let waiting = id(ok(&db, &["add", "waiting", "--depends-on", &claimable]));
+    let gated = id(ok(&db, &["add", "gated", "--depends-on-goal", &open]));
+    ok(&db, &["add", "member", "--goal", &open]);
+    let dropped = id(ok(&db, &["add", "dropped"]));
+    let orphaned = id(ok(&db, &["add", "orphaned", "--depends-on", &dropped]));
+    for task in [&claimable, &in_draft, &waiting, &gated, &orphaned] {
+        ok(&db, &["ready", task, "--bypass-review"]);
+    }
+    ok(&db, &["cancel", &dropped, "--reason", "stale"]);
+    let number = |task: &str| task.parse::<i64>().unwrap();
+    let ids = |task: &str| json!({"count": 1, "task_ids": [number(task)]});
+    let expected = json!({
+        "draft_goal": ids(&in_draft),
+        "dependencies": {"count": 2, "task_ids": [number(&waiting), number(&orphaned)]},
+        "goal_dependencies": ids(&gated),
+    });
+    let candidates = ok(&db, &["candidates"]);
+    assert_eq!(candidates["excluded"], expected, "{candidates}");
+    assert_eq!(
+        candidates["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|task| task["id"].to_string())
+            .collect::<Vec<_>>(),
+        [claimable]
+    );
+    assert_eq!(
+        ok(&db, &["candidates", "--ignore-deferrals"])["excluded"],
+        expected
+    );
+    assert_eq!(ok(&db, &["status"])["claim_excluded"], expected);
+}
+
 #[test]
 fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
     let dir = tempfile::tempdir().unwrap();
@@ -151,6 +199,11 @@ fn reads_do_not_create_a_queue_and_unknown_tasks_fail() {
             expected["waiting"] = serde_json::json!([]);
             // No claim is deferred on a conflict hotspot (ADR-0069).
             expected["claim_deferrals"] = serde_json::json!([]);
+            // No ready task is out of the claim order.
+            let none = serde_json::json!({"count": 0, "task_ids": []});
+            expected["claim_excluded"] = serde_json::json!({
+                "draft_goal": none, "dependencies": none, "goal_dependencies": none,
+            });
         } else {
             // Every role on Claude with nothing given (ADR-t1063-1), the
             // runtime's planners on their one route, headless (ADR-t1433-2

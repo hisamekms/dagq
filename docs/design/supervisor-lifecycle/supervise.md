@@ -90,6 +90,8 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 - 人とinboxは`set-priority`で`in_progress`のtaskの順も変えられる（[Authorization](../authorization.md)）。
 - claimの規則の順は`domain::ClaimRank`（[ADR-0049](../../adr/0049-share-compile-cache-across-runs-and-break-down-wait-to-land.md)の決定4）、区分の上限とagingは[claimを控える](claim-hold.md#実行区分の上限とaging)。
 - claimの順は控えの記録から`candidates`・`graph`で再現できるので、順の入れ替えは記録しない。
+- readyでも順の手前で落ちるtask（goalがdraft・依存がcompletedでない・goal依存がachievedで閉じていない）は控えの記録を持たないので、`candidates`の`excluded`と`status`の`claim_excluded`が理由ごとの件数と先頭のIDで出す（`application::claim_view::ClaimExclusions`）。
+  claimはこの数を読まない。
 - 候補を控える理由（衝突の多いファイル・動かせないworker・依存先を含むbuildの待ち）とclaimの間隔と着地待ちが空けた軽い枠は[claimを控える](claim-hold.md)。
 - claimはbase commitに着地のbranchをclaimごとに読み直すので、`integrate`で依存が解けたtaskは先行taskを含むmainから始まる。
 - claimの時点の属性は`domain::measure::ClaimAttributes`、claimできる候補の標本は`domain::kpi::CandidatesSample`のdoc comment。

@@ -369,6 +369,33 @@ impl Attributes {
         (priority, source, by)
     }
 
+    /// The canceled tasks an unfinished task depends on directly, in ID
+    /// order, as `TaskReads::graph_input` gives them.
+    pub fn canceled_predecessors(&self) -> Vec<TaskId> {
+        let mut canceled: Vec<TaskId> = self
+            .tasks
+            .values()
+            .filter(|task| {
+                matches!(
+                    task.status,
+                    TaskStatus::Draft
+                        | TaskStatus::Submitted
+                        | TaskStatus::Ready
+                        | TaskStatus::InProgress
+                )
+            })
+            .flat_map(|task| task.depends_on.iter().copied())
+            .filter(|id| {
+                self.tasks
+                    .get(id)
+                    .is_some_and(|task| task.status == TaskStatus::Canceled)
+            })
+            .collect();
+        canceled.sort_unstable();
+        canceled.dedup();
+        canceled
+    }
+
     /// The claimable tasks in ID order, by the store's ready query: ready,
     /// not in a draft goal, every predecessor completed, every goal
     /// depended on closed as achieved, and no unfinished run.

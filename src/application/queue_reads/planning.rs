@@ -15,7 +15,8 @@ use super::{
     SearchRead,
 };
 use crate::application::claim_view::{
-    AgingInputs, ClaimAging, Deferrals, claim_view, class_aging_secs, open_deferrals,
+    AgingInputs, ClaimAging, ClaimExclusions, Deferrals, claim_view, class_aging_secs,
+    open_deferrals,
 };
 use crate::application::{
     Clock, DependencyGraph, PlanningRecords, RunLog, StatusFilter, TaskQuery, TaskStore,
@@ -72,14 +73,17 @@ pub fn list(queue: &(impl TaskStore + ?Sized), read: &ListRead) -> Result<Value>
 }
 
 /// `candidates`: the order a claim takes them with the deferred tasks
-/// apart (the rule's order with them kept, `ignore_deferrals`) and what
-/// holds the claims.
+/// apart (the rule's order with them kept, `ignore_deferrals`), what
+/// holds the claims and the ready tasks out of the order by why
+/// (`excluded`).
 pub fn candidates<Q: TaskStore + RunLog + ?Sized>(
     queue: &Q,
     sources: &(impl PlanningSources<Q> + ?Sized),
     read: &CandidatesRead,
 ) -> Result<Value> {
-    let graph = dependency_graph(queue.graph_input()?, None);
+    let input = queue.graph_input()?;
+    let excluded = ClaimExclusions::of(&input);
+    let graph = dependency_graph(input, None);
     let deferrals = if read.ignore_deferrals {
         Deferrals::Ignored
     } else {
@@ -101,6 +105,7 @@ pub fn candidates<Q: TaskStore + RunLog + ?Sized>(
         "candidates": view.candidates,
         "deferred": view.deferred,
         "held": sources.claim_holds(queue)?,
+        "excluded": excluded,
     });
     if !view.aged.is_empty() {
         value["aged"] = serde_json::to_value(view.aged)?;

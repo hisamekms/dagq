@@ -367,6 +367,10 @@ pub enum WaitFor {
 pub struct GraphInput {
     pub tasks: Vec<GraphTask>,
     pub candidates: Vec<TaskId>,
+    /// The canceled tasks an unfinished task depends on directly,
+    /// ascending: a ready task waiting for one is never claimable, as the
+    /// claim needs every predecessor completed.
+    pub canceled: Vec<TaskId>,
 }
 
 impl GraphInput {
@@ -416,6 +420,7 @@ impl GraphInput {
         Self {
             tasks,
             candidates: attributes.candidates(),
+            canceled: attributes.canceled_predecessors(),
         }
     }
 }
@@ -710,6 +715,7 @@ mod tests {
                 task(7, None, &[9]),
             ],
             candidates: ids(&[1, 2, 7]),
+            ..Default::default()
         }
     }
 
@@ -792,6 +798,7 @@ mod tests {
             GraphInput {
                 tasks: vec![task(1, Some(1), &[]), depend(8, 1, None)],
                 candidates: ids(&[1]),
+                ..Default::default()
             },
             Some(GoalId::new(1)),
         );
@@ -846,6 +853,7 @@ mod tests {
                         member(5, None, &[2]),
                     ],
                     candidates: ids(&[1, 2, 3, 4]),
+                    ..Default::default()
                 },
                 None,
             )
@@ -1023,6 +1031,7 @@ mod tests {
             GraphInput {
                 tasks: vec![task(2, None, &[]), task(1, None, &[])],
                 candidates: ids(&[2, 1]),
+                ..Default::default()
             },
             None,
         );
