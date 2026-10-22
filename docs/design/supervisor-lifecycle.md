@@ -75,7 +75,8 @@ ready task (dependencies completed)
     [review.subagents.<agent>] provider when set) → verdict
       pass    → exit request → close workspace → land (single slot, push)
       revise  → fixed request to the live session → rewritten receipt
-                → validate → review again (at most MAX_REVISE_ATTEMPTS revises a run)
+                → validate → review again (at most [review] revise_limit revises a run,
+                  read per attempt from the landing branch; MAX_REVISE_ATTEMPTS by default)
       concern → the job's sure land / send_back applied, else exit request → close → approve_landing ask
       revise or send_back past them → no code finding: follow_up drafts → land like a pass
                                     → a code finding: exit request → close → approve_landing ask

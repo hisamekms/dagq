@@ -34,6 +34,7 @@ use super::revise::SentBack;
 use super::*;
 use crate::domain::ActorContext;
 use crate::domain::EventKind;
+use crate::domain::ReviseLimit;
 use crate::domain::agent_eval::before_landing::{self, Verdict, WaitReason};
 use crate::domain::agent_eval::record::{Request, Round};
 use crate::domain::agent_eval::{EVALS_DIR, Split};
@@ -93,10 +94,11 @@ fn passed_at(events: &[RunEvent], commit: &str) -> bool {
 /// Why a run whose rounds a stopping supervisor cannot run asks a person.
 const STOPPED: &str = "the supervisor stopped before the agent eval of the definitions the run changed ended, so whether they reach the threshold is not known";
 
-/// The question's reason of a send-back the run has no revise left for.
-fn used_up_why(reasons: &[String]) -> String {
+/// The question's reason of a send-back the run has no revise left for,
+/// its `limit` used up.
+fn used_up_why(limit: ReviseLimit, reasons: &[String]) -> String {
     format!(
-        "the agent eval of the definitions the run changed fell under the threshold and the run's {MAX_REVISE_ATTEMPTS} revises are used up: {}",
+        "the agent eval of the definitions the run changed fell under the threshold and the run's {limit} revises are used up: {}",
         reasons.join("; ")
     )
 }
@@ -316,9 +318,10 @@ impl Supervisor<'_> {
         // A send-back with no revise left asks a person instead: the
         // eval's reasons carry no code (ADR-t2599-1), so they never land.
         let verdict = match verdict {
-            Verdict::SendBack(reasons) if self.revises_used_up(run.id())? => {
-                Verdict::Ask(used_up_why(&reasons))
-            }
+            Verdict::SendBack(reasons) => match self.revises_used_up(run.id())? {
+                Some(limit) => Verdict::Ask(used_up_why(limit, &reasons)),
+                None => Verdict::SendBack(reasons),
+            },
             verdict => verdict,
         };
         let mut payload = json!({
@@ -386,7 +389,7 @@ impl Supervisor<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{EventId, TaskId};
+    use crate::domain::{EventId, MAX_REVISE_ATTEMPTS, TaskId};
 
     fn event(id: i64, kind: EventKind, payload: Value) -> RunEvent {
         RunEvent {
@@ -437,8 +440,10 @@ mod tests {
 
     #[test]
     fn a_send_back_past_the_revises_says_so_with_its_reasons() {
-        let why = used_up_why(&["case x failed".to_owned()]);
+        let why = used_up_why(ReviseLimit::default(), &["case x failed".to_owned()]);
         assert!(why.contains(&format!("{MAX_REVISE_ATTEMPTS} revises are used up")));
+        let why = used_up_why(ReviseLimit::new(5).unwrap(), &["case x failed".to_owned()]);
+        assert!(why.contains("the run's 5 revises are used up"), "{why}");
         assert!(why.ends_with("case x failed"));
     }
 }

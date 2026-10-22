@@ -2243,3 +2243,15 @@ task = 3047
 name = "runtime_handoff::a_handoff_starts_no_landing_and_hands_over_a_run_awaiting_the_slot"
 reason = "境界（supervisorの配線・adopt）: handoffのdrainが走る着地だけを待ち、着地slot待ちのrunをleaseごとexecの後のprocessに渡し、そのprocessがadoptでreviewなしに着地させる"
 task = 3077
+
+# 13.4〜16.5s (stress 5 under the host's load of other runs, task 3033)
+[[test]]
+name = "runtime_review_revise_limit::the_landing_branchs_revise_limit_bounds_the_runs_revises_across_resumes"
+reason = "B 境界（SQLite・Git・プロセス・supervisor の配線）: landing branch の commit の dagq.toml の revise_limit が review の試行ごとに読まれて記録され、run branch の値は効かず、人の send_back の resume を挟んで run を通したその回数の revise が session に届き、上限の後の review が ask と着地・follow_up の draft になることを実際の supervisor・worker の session・queue で確かめる。数え方と上限の判断は domain::run::history の unit test"
+task = 3033
+
+# 6.6〜7.7s (stress 5 under the host's load of other runs, task 3033)
+[[test]]
+name = "runtime_review_revise_limit::the_revise_limit_is_read_from_the_landing_branchs_commit_at_each_attempt"
+reason = "B 境界（Git・supervisor の配線）: supervisor の起動の後に main checkout で landing branch に commit した revise_limit が次の review の試行から効き、main checkout の未 commit の値は効かないことを実際の supervisor と Git で確かめる。下げた上限の判断は domain::run::history の unit test"
+task = 3033

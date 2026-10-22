@@ -74,7 +74,7 @@ fn a_passing_review_exits_the_live_session_and_lands_it() {
         [
             &json!({"attempt": 1, "workspace_id": session, "session_live": true, "session_id": session_id,
                     "launch": {"role": "review", "provider": "claude", "model": null, "effort": null, "source": "default"},
-                    "prompt_bytes": started[0]["prompt_bytes"]})
+                    "revise_limit": 2, "prompt_bytes": started[0]["prompt_bytes"]})
         ]
     );
     // The worker's session and the review's are spans, each closed once

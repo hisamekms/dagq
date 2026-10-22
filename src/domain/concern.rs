@@ -34,8 +34,8 @@ string_enum!(EscalatedBecause {
     LowConfidence => "low_confidence",
     Scope => "scope",
     Discard => "discard",
-    // A `send_back` past the run's revises (`MAX_REVISE_ATTEMPTS`), which
-    // the judgment of its reasons lands or asks a person of (ADR-t2599-1).
+    // A `send_back` past the run's revises (its `ReviseLimit`), which the
+    // judgment of its reasons lands or asks a person of (ADR-t2599-1).
     ReviseLimit => "revise_limit",
     // A `send_back` the live session could not be sent: it had ended, the
     // request could not be typed, or its model switch was left unsettled.

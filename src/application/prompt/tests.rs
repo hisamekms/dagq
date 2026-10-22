@@ -610,9 +610,15 @@ fn sessions_run_the_repository_checks_and_leave_the_verification_to_integrate() 
         );
     }
 
-    let revise = revise_request(&verified, &own_run, 1, &["fix it".into()], None)
-        .unwrap()
-        .text;
+    let revise = revise_request(
+        &verified,
+        &own_run,
+        (1, ReviseLimit::default()),
+        &["fix it".into()],
+        None,
+    )
+    .unwrap()
+    .text;
     assert!(revise.contains(&format!("2. {}", local_checks(r#"["make gate"]"#))));
     assert!(revise.contains(default), "{revise}");
 }
@@ -1672,9 +1678,15 @@ fn session_texts(task: &Task, run: &TaskRun) -> Vec<String> {
         texts.push(resume_request(task, run, &request, &[]).unwrap().text);
     }
     texts.push(
-        revise_request(task, run, 1, &["fix it".into()], None)
-            .unwrap()
-            .text,
+        revise_request(
+            task,
+            run,
+            (1, ReviseLimit::default()),
+            &["fix it".into()],
+            None,
+        )
+        .unwrap()
+        .text,
     );
     texts.push(
         revise_mismatch_request(run, "the revise", "stale")
@@ -6045,6 +6057,27 @@ fn the_other_next_turn_messages_stay_within_their_limit_with_the_largest_input()
     }
 }
 
+/// A revise request names its number of the run's revise limit the latest
+/// review attempt read, the default or a `dagq.toml`'s (ADR-t3033-1).
+#[test]
+fn a_revise_request_names_its_number_of_the_runs_limit() {
+    let run = run_on(Provider::Claude, WorkerMode::Headless);
+    let task = task_with_lists(vec!["src/".into()], vec!["make gate".into()]);
+    for (number, limit, says) in [
+        (1, ReviseLimit::default(), "(revise 1 of 2 of the run)."),
+        (
+            3,
+            ReviseLimit::new(4).unwrap(),
+            "(revise 3 of 4 of the run).",
+        ),
+    ] {
+        let text = revise_request(&task, &run, (number, limit), &["fix it".into()], None)
+            .unwrap()
+            .text;
+        assert!(text.contains(says), "{text}");
+    }
+}
+
 /// ADR-t2072-1: within its limits (no findings, a few, or all of them
 /// at the section's limit) a revise request carries its findings, one
 /// line each, and its steps as before, with no note of what was left
@@ -6057,7 +6090,14 @@ fn within_its_limits_a_revise_request_carries_its_findings_whole() {
     let at_limit = vec!["f".repeat(REVISE_FINDINGS_BYTES - 2)];
     let few = vec!["name the file".to_owned(), "add a test".to_owned()];
     for reasons in [vec![], few, at_limit] {
-        let fitted = revise_request(&task, &run, 1, &reasons, Some("/runs/run/f.txt")).unwrap();
+        let fitted = revise_request(
+            &task,
+            &run,
+            (1, ReviseLimit::default()),
+            &reasons,
+            Some("/runs/run/f.txt"),
+        )
+        .unwrap();
         let findings = reasons
             .iter()
             .map(|reason| format!("- {reason}\n"))
@@ -6102,7 +6142,14 @@ fn a_revise_request_stays_within_its_limit_with_the_largest_input() {
     for provider in [Provider::Claude, Provider::Codex] {
         let run = run_on(provider, WorkerMode::Headless);
         for reasons in [&huge, &many] {
-            let fitted = revise_request(&task, &run, 2, reasons, Some(file)).unwrap();
+            let fitted = revise_request(
+                &task,
+                &run,
+                (2, ReviseLimit::default()),
+                reasons,
+                Some(file),
+            )
+            .unwrap();
             let text = &fitted.text;
             assert!(text.len() <= room(REVISE_REQUEST_LIMIT), "{}", text.len());
             assert_eq!(fitted.bytes.total, text.len());
@@ -6133,7 +6180,9 @@ fn a_revise_request_stays_within_its_limit_with_the_largest_input() {
     }
     // Without a file to point at, the cut findings are in no file.
     let run = run_on(Provider::Claude, WorkerMode::Headless);
-    let text = revise_request(&task, &run, 1, &huge, None).unwrap().text;
+    let text = revise_request(&task, &run, (1, ReviseLimit::default()), &huge, None)
+        .unwrap()
+        .text;
     assert!(
         text.contains(&format!("by the prompt's limit; {NOT_READABLE}]")),
         "{text}"
@@ -6178,9 +6227,15 @@ fn a_restored_request_is_measured_anew_and_cut_to_its_limit() {
 fn prompt_bytes_are_read_back_as_written() {
     let task = task_with_lists(vec!["src/".into()], vec!["c".repeat(100_000)]);
     let run = run_on(Provider::Claude, WorkerMode::Headless);
-    let bytes = revise_request(&task, &run, 1, &["x".repeat(50_000)], None)
-        .unwrap()
-        .bytes;
+    let bytes = revise_request(
+        &task,
+        &run,
+        (1, ReviseLimit::default()),
+        &["x".repeat(50_000)],
+        None,
+    )
+    .unwrap()
+    .bytes;
     let read: PromptBytes = serde_json::from_value(json!(bytes)).unwrap();
     assert_eq!(read, bytes);
 }
@@ -6408,7 +6463,14 @@ fn a_revises_handoff_carries_the_findings_once() {
     let run = run_on(Provider::Claude, WorkerMode::Headless);
     let task = task_with_lists(vec!["src/".into()], vec!["cargo test".into()]);
     let finding = "the boundary test misses the empty list";
-    let request = revise_request(&task, &run, 1, &[format!("- {finding}")], None).unwrap();
+    let request = revise_request(
+        &task,
+        &run,
+        (1, ReviseLimit::default()),
+        &[format!("- {finding}")],
+        None,
+    )
+    .unwrap();
     let text = handoff_text(&run, &bare_handoff(&request.text)).text;
     assert_eq!(text.matches(finding).count(), 1, "{text}");
 }

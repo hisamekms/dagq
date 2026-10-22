@@ -12,9 +12,9 @@ use super::payload::{
 use crate::domain::EventKind;
 use crate::domain::resume::{ResumeConfig, ResumeCount};
 use crate::domain::{
-    ASK_EVENT_KINDS, AskId, AttentionNext, EventId, MAX_RESUME_ATTEMPTS, MAX_REVISE_ATTEMPTS,
-    RunEvent, RunStatus, TriageState, abandon_left_session_open, event_attention, recheck,
-    run_attention, triage_state,
+    ASK_EVENT_KINDS, AskId, AttentionNext, EventId, MAX_RESUME_ATTEMPTS, ReviseLimit, RunEvent,
+    RunStatus, TriageState, abandon_left_session_open, event_attention, recheck, run_attention,
+    triage_state,
 };
 
 /// The events of one run, oldest first, borrowed from whoever read them.
@@ -388,6 +388,21 @@ impl<'a> RunHistory<'a> {
             .saturating_sub(self.count(EventKind::ReviseUnsent))
     }
 
+    /// The revise limit the latest review attempt read: what its
+    /// `review_started`, or its `review_programs_started` before that,
+    /// recorded ([`ReviseLimit::recorded`]); [`MAX_REVISE_ATTEMPTS`]
+    /// without an attempt or with a start that recorded none.
+    pub fn revise_limit(&self) -> ReviseLimit {
+        self.events
+            .iter()
+            .rev()
+            .find(|e| {
+                e.kind == EventKind::ReviewStarted || e.kind == EventKind::ReviewProgramsStarted
+            })
+            .and_then(|e| ReviseLimit::recorded(&e.payload))
+            .unwrap_or_default()
+    }
+
     /// How many headless reviews were started.
     pub fn review_attempts(&self) -> usize {
         self.count(EventKind::ReviewStarted)
@@ -733,25 +748,32 @@ pub fn decide_conflict(
 /// (ADR-0027 decision 2, counted across the run by ADR-t2599-1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviseDecision {
-    /// Send revise `number` of the run to the live session; `attempt`
-    /// numbers its request (`revise_requested` and `revise-<attempt>.txt`),
-    /// which counts the requests withdrawn too, so it never reuses an
-    /// earlier request's number.
-    Request { attempt: usize, number: usize },
-    /// [`MAX_REVISE_ATTEMPTS`] revises of the run were sent already: the
-    /// review's reasons decide whether the run lands or a person is asked
+    /// Send revise `number` of the run's `limit` to the live session;
+    /// `attempt` numbers its request (`revise_requested` and
+    /// `revise-<attempt>.txt`), which counts the requests withdrawn too, so
+    /// it never reuses an earlier request's number.
+    Request {
+        attempt: usize,
+        number: usize,
+        limit: ReviseLimit,
+    },
+    /// The run's revise limit (the latest attempt's,
+    /// [`RunHistory::revise_limit`]) was reached already: the review's
+    /// reasons decide whether the run lands or a person is asked
     /// ([`crate::domain::review_reason::converged`]).
     Ask,
 }
 
 pub fn decide_revise(history: &RunHistory<'_>) -> ReviseDecision {
     let revises = history.revise_attempts();
-    if revises >= MAX_REVISE_ATTEMPTS {
+    let limit = history.revise_limit();
+    if revises >= limit.get() {
         ReviseDecision::Ask
     } else {
         ReviseDecision::Request {
             attempt: history.count(EventKind::ReviseRequested) + 1,
             number: revises + 1,
+            limit,
         }
     }
 }
@@ -797,6 +819,7 @@ pub fn after_validation(
 
 #[cfg(test)]
 mod tests {
+    use crate::domain::MAX_REVISE_ATTEMPTS;
     use crate::domain::event_kind;
     use serde_json::{Value, json};
 
@@ -1169,7 +1192,11 @@ mod tests {
     #[test]
     fn revises_stop_at_the_limit() {
         let decide = |k: &[&str]| decide_revise(&RunHistory::from_events(&kinds(k)));
-        let request = |attempt, number| ReviseDecision::Request { attempt, number };
+        let request = |attempt, number| ReviseDecision::Request {
+            attempt,
+            number,
+            limit: ReviseLimit::default(),
+        };
         let sent = |n: usize| vec!["revise_requested"; n];
         for n in 0..MAX_REVISE_ATTEMPTS {
             assert_eq!(decide(&sent(n)), request(n + 1, n + 1));
@@ -1209,7 +1236,8 @@ mod tests {
                 decide(&events),
                 ReviseDecision::Request {
                     attempt: 2,
-                    number: 2
+                    number: 2,
+                    limit: ReviseLimit::default(),
                 },
                 "{kind}"
             );
@@ -1221,6 +1249,74 @@ mod tests {
                 MAX_REVISE_ATTEMPTS
             );
         }
+    }
+
+    /// The limit is the one the latest attempt read and recorded
+    /// (ADR-t3033-1): its `review_started`, or its
+    /// `review_programs_started` before that; a start that recorded none
+    /// (or one that is not at least 1) keeps [`MAX_REVISE_ATTEMPTS`].
+    #[test]
+    fn the_revise_limit_is_the_latest_attempts() {
+        let started = |id, kind, limit: Value| event(id, kind, json!({"revise_limit": limit}));
+        let limit = |events: &[RunEvent]| RunHistory::from_events(events).revise_limit().get();
+        assert_eq!(limit(&[]), MAX_REVISE_ATTEMPTS);
+        assert_eq!(limit(&kinds(&["review_started"])), MAX_REVISE_ATTEMPTS);
+        let mut events = vec![started(1, "review_started", json!(4))];
+        assert_eq!(limit(&events), 4);
+        events.push(started(2, "review_programs_started", json!(3)));
+        assert_eq!(limit(&events), 3);
+        events.push(started(3, "review_started", json!(1)));
+        assert_eq!(limit(&events), 1);
+        for unreadable in [json!(0), json!(-1), json!("3"), Value::Null] {
+            assert_eq!(
+                limit(&[started(1, "review_started", unreadable.clone())]),
+                MAX_REVISE_ATTEMPTS,
+                "{unreadable}"
+            );
+        }
+    }
+
+    /// A raised limit sends more revises of the same count, and a lowered
+    /// one below the revises the run was sent judges its next send-back
+    /// past the limit (ADR-t3033-1).
+    #[test]
+    fn revises_stop_at_the_limit_the_latest_attempt_read() {
+        let decide = |events: &[RunEvent]| decide_revise(&RunHistory::from_events(events));
+        let started =
+            |id, limit: usize| event(id, "review_started", json!({"revise_limit": limit}));
+        let revised =
+            |id, attempt: usize| event(id, "revise_requested", json!({"attempt": attempt}));
+        let mut events = vec![started(1, 3)];
+        for n in 1..=3 {
+            assert_eq!(
+                decide(&events),
+                ReviseDecision::Request {
+                    attempt: n,
+                    number: n,
+                    limit: ReviseLimit::new(3).unwrap(),
+                }
+            );
+            events.push(revised(events.len() as i64 + 1, n));
+            events.push(started(events.len() as i64 + 1, 3));
+        }
+        assert_eq!(decide(&events), ReviseDecision::Ask);
+        // Lowered to 1 after two revises: the next attempt is judged.
+        let lowered = [
+            started(1, 3),
+            revised(2, 1),
+            started(3, 3),
+            revised(4, 2),
+            started(5, 1),
+        ];
+        assert_eq!(decide(&lowered), ReviseDecision::Ask);
+        assert_eq!(
+            decide(&lowered[..4]),
+            ReviseDecision::Request {
+                attempt: 3,
+                number: 3,
+                limit: ReviseLimit::new(3).unwrap(),
+            }
+        );
     }
 
     #[test]

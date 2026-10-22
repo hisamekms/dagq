@@ -76,7 +76,7 @@ use std::{
 use crate::{
     application::{Exit, Verifier},
     domain::{
-        ChangeSet, GoalTag, TagSet, TaskChange, TitlePrefixes,
+        ChangeSet, GoalTag, ReviseLimit, TagSet, TaskChange, TitlePrefixes,
         actor_model::{ModelRole, RoleModel, RoleModels, check_effort},
         agent_eval::round::{EvalConfig, ProviderCost},
         areas::AreaMap,
@@ -236,6 +236,12 @@ const REVIEW_JOBS_TABLE: &str = "review.jobs";
 const REVIEW_CODE_TABLE: &str = "review.code";
 /// The one key of `[review.code]`.
 const REVIEW_CODE_PATHS: &str = "paths";
+/// `[review]`: `revise_limit`, the run's revise limit, a whole number of
+/// at least 1 that each review attempt reads from the landing branch's
+/// commit; its default and meaning are on [`ReviseLimit`].
+const REVIEW_TABLE: &str = "review";
+/// The one key of `[review]`.
+const REVIEW_REVISE_LIMIT: &str = "revise_limit";
 /// `[ci_watch]`: the landing branch's CI the supervisor watches
 /// (ADR-t1920-1). `workflow` (a non-blank string) is required; `branch`
 /// (a branch name without `refs/heads/`), `interval_secs` (at least
@@ -452,7 +458,7 @@ const LOCAL_GATE_PATHS: &str = "paths";
 const LOCAL_GATE_KIND: &str = "kind";
 const CONTAINER_IMAGE_CONTAINERFILE: &str = "containerfile";
 const CONTAINER_IMAGE_INPUTS: &str = "inputs";
-const TABLES: [&str; 29] = [
+const TABLES: [&str; 30] = [
     RUN_ENV_TABLE,
     STALL_TABLE,
     CONFLICTS_TABLE,
@@ -472,6 +478,7 @@ const TABLES: [&str; 29] = [
     PROVIDER_FALLBACK_TABLE,
     FRESH_SESSION_TABLE,
     REVIEW_JOBS_TABLE,
+    REVIEW_TABLE,
     REVIEW_CODE_TABLE,
     CI_WATCH_TABLE,
     LANDING_VERIFICATION_TABLE,
@@ -600,6 +607,9 @@ pub struct Config {
     /// `[review.code] paths` ([`REVIEW_CODE_TABLE`]); `None` without the
     /// table or with no glob.
     pub review_code: Option<CodePaths>,
+    /// `[review] revise_limit` ([`REVIEW_TABLE`]); `None` without it,
+    /// which keeps the default limit.
+    pub review_revise_limit: Option<ReviseLimit>,
     /// `[ci_watch]` (ADR-t1920-1); `None` without the table, which watches
     /// nothing.
     pub ci_watch: Option<CiWatchConfig>,
@@ -1026,7 +1036,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}], [{CONTAINER_WORKER_CACHE_TABLE}], [{CONTAINER_VERIFICATION_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}], [{CONTAINER_WORKER_CACHE_TABLE}], [{CONTAINER_VERIFICATION_TABLE}] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -1359,6 +1369,24 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     }
                 }
                 config.egress_registries = registries;
+            }
+            Some(REVIEW_TABLE) => {
+                ensure!(
+                    key == REVIEW_REVISE_LIMIT,
+                    "{CONFIG_FILE_NAME}:{number}: unknown key {key} in [{REVIEW_TABLE}]; the key is {REVIEW_REVISE_LIMIT}"
+                );
+                ensure!(
+                    config.review_revise_limit.is_none(),
+                    "{CONFIG_FILE_NAME}:{number}: {key} is defined twice"
+                );
+                let with = || format!("{CONFIG_FILE_NAME}:{number}: value of {key}");
+                let limit = parse_positive(rest.trim(), "number").with_context(with)?;
+                let limit = usize::try_from(limit).with_context(with)?;
+                config.review_revise_limit = Some(
+                    ReviseLimit::new(limit)
+                        .context("must be at least 1")
+                        .with_context(with)?,
+                );
             }
             Some(REVIEW_CODE_TABLE) => {
                 ensure!(
@@ -2081,7 +2109,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{CONTAINER_IMAGE_TABLE}] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{CONTAINER_IMAGE_TABLE}] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -3381,6 +3409,9 @@ impl Verifier for ShellVerifier {
     fn review_code_paths_in(&self, text: &str) -> Result<Option<CodePaths>> {
         Ok(parse_config(text)?.review_code)
     }
+    fn review_revise_limit_in(&self, text: &str) -> Result<Option<ReviseLimit>> {
+        Ok(parse_config(text)?.review_revise_limit)
+    }
     fn review_programs_in(&self, text: &str) -> Result<ReviewPrograms> {
         Ok(parse_config(text)?.review_programs())
     }
@@ -3982,7 +4013,7 @@ mod tests {
                 "[review.subagents.a]\n[kpi]\nnot_a_key = 1\n",
                 "dagq.toml:1: [review.subagents.a] has no paths",
             ),
-            ("[review]\n", "dagq.toml:1: unknown table [review]"),
+            ("[reviews]\n", "dagq.toml:1: unknown table [reviews]"),
         ] {
             let error = format!("{:#}", parse_config(text).unwrap_err());
             assert!(error.contains(expected), "{text:?}: {error}");
@@ -4374,6 +4405,92 @@ mod tests {
             CodePaths::of(vec!["lib/**".to_owned()])
         );
         assert!(verifier.review_code_paths_in("[nope]\n").is_err());
+    }
+
+    /// `[review] revise_limit` is the run's revise limit (ADR-t3033-1): a
+    /// whole number of at least 1, none without it (the default); 0, a
+    /// negative value and a value that is not a whole number are mistakes
+    /// refused with their line, never the default.
+    #[test]
+    fn parses_the_revise_limit_of_the_review_table() {
+        let config = parse_config(
+            "[review]\nrevise_limit = 4 # more\n[review.code]\npaths = [\"src/**\"]\n",
+        )
+        .unwrap();
+        assert_eq!(config.review_revise_limit, ReviseLimit::new(4));
+        assert_eq!(parse_config("").unwrap().review_revise_limit, None);
+        assert_eq!(
+            parse_config("[review]\n").unwrap().review_revise_limit,
+            None
+        );
+        for (text, expected) in [
+            (
+                "[review]\nrevise_limit = 0\n",
+                "dagq.toml:2: value of revise_limit",
+            ),
+            ("[review]\nrevise_limit = 0\n", "positive number, not 0"),
+            ("[review]\nrevise_limit = -1\n", "positive number, not -1"),
+            ("[review]\nrevise_limit = 1.5\n", "whole number"),
+            ("[review]\nrevise_limit = \"3\"\n", "whole number"),
+            ("[review]\nrevise_limit = \n", "missing value"),
+            (
+                "[review]\nrevise_limit = 1\nrevise_limit = 2\n",
+                "dagq.toml:3: revise_limit is defined twice",
+            ),
+            (
+                "[review]\nlimit = 1\n",
+                "dagq.toml:2: unknown key limit in [review]; the key is revise_limit",
+            ),
+            (
+                "[review]\n[review]\n",
+                "dagq.toml:2: [review] is defined twice",
+            ),
+        ] {
+            let error = format!("{:#}", parse_config(text).unwrap_err());
+            assert!(error.contains(expected), "{text:?}: {error}");
+        }
+        let verifier = ShellVerifier {
+            checkout: PathBuf::from("/nonexistent"),
+            db: PathBuf::from("/nonexistent/queue.db"),
+            user_config: None,
+            verification_timeout: Duration::from_secs(1),
+            profiles: &crate::domain::toolchain::BUILTIN,
+        };
+        assert_eq!(
+            verifier
+                .review_revise_limit_in("[review]\nrevise_limit = 5\n")
+                .unwrap(),
+            ReviseLimit::new(5)
+        );
+        assert_eq!(verifier.review_revise_limit_in("").unwrap(), None);
+        assert!(
+            verifier
+                .review_revise_limit_in("[review]\nrevise_limit = 0\n")
+                .is_err()
+        );
+    }
+
+    /// The plan review's limit does not follow the run's revise limit a
+    /// `dagq.toml` writes (ADR-t3033-1 decision 2, ADR-t2599-1 decision
+    /// 9): a proposal sent back [`crate::domain::MAX_PLAN_REVISES`] times
+    /// is a concern however high or low `[review] revise_limit` is.
+    #[test]
+    fn the_plan_reviews_limit_does_not_follow_the_revise_limit() {
+        use crate::domain::plan_review::{PlanReviewDecision, PlanReviewVerdict, decide_verdict};
+        use crate::domain::{MAX_PLAN_REVISES, ProposalId};
+        let revise = PlanReviewVerdict::parse(
+            r#"{"verdict":"revise","reasons":["still vague"],"summary":"vague"}"#,
+        )
+        .unwrap();
+        for limit in [1, 5] {
+            let config = parse_config(&format!("[review]\nrevise_limit = {limit}\n")).unwrap();
+            assert_eq!(config.review_revise_limit, ReviseLimit::new(limit));
+            let before = decide_verdict(ProposalId::new(1), &revise, MAX_PLAN_REVISES - 1);
+            assert_eq!(before.decision, PlanReviewDecision::Revise, "{limit}");
+            let past = decide_verdict(ProposalId::new(1), &revise, MAX_PLAN_REVISES);
+            assert_eq!(past.decision, PlanReviewDecision::Concern, "{limit}");
+        }
+        assert_eq!(MAX_PLAN_REVISES, 2);
     }
 
     /// `[e2e] paths` names the globs whose change requires e2e
@@ -6199,7 +6316,7 @@ LITERAL = 'no \n escapes # here'
         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
         assert!(
             error.contains(
-                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [review.jobs], [review.code], [ci_watch], [landing_verification], [eval], [eval.providers.<provider>], [egress], [container.image], [container.build_output], [container.worker_cache], [container.verification] and [kpi]"
+                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [review.jobs], [review], [review.code], [ci_watch], [landing_verification], [eval], [eval.providers.<provider>], [egress], [container.image], [container.build_output], [container.worker_cache], [container.verification] and [kpi]"
             ),
             "{error}"
         );

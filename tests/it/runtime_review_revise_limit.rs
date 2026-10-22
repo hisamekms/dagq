@@ -121,7 +121,7 @@ fn revises_are_counted_across_resumes_and_each_review_past_them_is_judged_by_its
     assert_eq!(
         payloads(&detail, "revise_limit_judged"),
         [
-            &json!({"attempt": 4, "revises": 2, "converged": false, "code_paths": null,
+            &json!({"attempt": 4, "revises": 2, "revise_limit": 2, "converged": false, "code_paths": null,
                  "code_findings": [{"text": "the loop never ends",
                                     "codes": ["local_slip", "code_defect"], "paths": [],
                                     "security": false}]})
@@ -195,7 +195,7 @@ fn a_review_past_the_limit_with_no_code_finding_lands_and_follows_up_its_reasons
     assert_eq!(
         payloads(&detail, "revise_limit_judged"),
         [
-            &json!({"attempt": 3, "revises": 2, "converged": true, "code_paths": null,
+            &json!({"attempt": 3, "revises": 2, "revise_limit": 2, "converged": true, "code_paths": null,
                  "code_findings": []})
         ]
     );
@@ -446,7 +446,7 @@ fn an_acceptance_unmet_off_the_code_paths_lands_whatever_the_runs_branch_says() 
     assert_eq!(
         payloads(&detail, "revise_limit_judged"),
         [
-            &json!({"attempt": 3, "revises": 2, "converged": true, "code_paths": code,
+            &json!({"attempt": 3, "revises": 2, "revise_limit": 2, "converged": true, "code_paths": code,
                  "code_findings": []})
         ]
     );
@@ -497,7 +497,7 @@ fn an_acceptance_unmet_on_the_code_paths_asks_whatever_the_main_checkouts_files_
     assert_eq!(
         payloads(&detail, "revise_limit_judged"),
         [
-            &json!({"attempt": 3, "revises": 2, "converged": false, "code_paths": ["src/**"],
+            &json!({"attempt": 3, "revises": 2, "revise_limit": 2, "converged": false, "code_paths": ["src/**"],
                  "code_findings": [{"text": "the flag is not wired",
                                     "codes": ["acceptance_unmet"],
                                     "paths": ["docs/a.md", "src/flag.rs"],
@@ -545,5 +545,197 @@ fn code_paths_of_the_landing_branch_that_do_not_parse_fail_the_review() {
         error.contains("parse dagq.toml in the landing branch's commit")
             && error.contains("dagq.toml:2: value of paths"),
         "{error}"
+    );
+}
+
+/// The revise limit each `review_started` recorded, in order.
+fn started_limits(detail: &dagq::domain::TaskDetail) -> Vec<Value> {
+    payloads(detail, "review_started")
+        .iter()
+        .map(|p| p["revise_limit"].clone())
+        .collect()
+}
+
+/// (ADR-t3033-1) A `[review] revise_limit` the landing branch's commit
+/// writes bounds the run's revises in place of the default: three here,
+/// counted across a person's `send_back`, the third named `revise 3 of 3
+/// of the run`. The run's own branch writes 1, which no review reads. The review past them is judged as past the default limit:
+/// a code finding asks a person, naming the three revises, and after the
+/// next `send_back` a review with no code finding lands the run and
+/// follows up its reason.
+#[test]
+fn the_landing_branchs_revise_limit_bounds_the_runs_revises_across_resumes() {
+    let (_dir, repo, db) = fixture();
+    let base = commit_config_on_main(&repo, "[review]\nrevise_limit = 3\n");
+    let worker = "if [ \"$TURN\" -eq 1 ]; then \
+                    printf '[review]\\nrevise_limit = 1\\n' > dagq.toml; \
+                    git add dagq.toml; commit work; \
+                  elif [ \"$TURN\" -eq 2 ]; then \
+                    printf 'fix 1\\n' >> change.txt; git commit -q -am 'fix 1'; \
+                  fi; receipt \"$(git rev-parse HEAD)\"";
+    let backend = TestWorkspace::new(&db, false, worker);
+    backend.resume_script_for(1, RESUMED_FIXES);
+    let reviewer = TestReviewer::new(&[
+        verdict("revise", &["still short"], "not yet"),
+        verdict("concern", &["is the flag wanted"], "unsure"),
+        verdict("revise", &["still short"], "not yet"),
+        verdict("revise", &["still short"], "not yet"),
+        coded_revise(&[("the loop never ends", &["code_defect"])]),
+        coded_revise(&[("a typo", &["local_slip"])]),
+    ]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let ask = open_landing_ask(&mut queue);
+    assert!(
+        ask.question.contains("returned concern"),
+        "{}",
+        ask.question
+    );
+    queue.answer(ask.id, "send_back").unwrap();
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let run = detail.runs[0].clone();
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    assert_eq!(payloads(&detail, "resume_started").len(), 1);
+    let requested: Vec<&Value> = payloads(&detail, "revise_requested")
+        .iter()
+        .map(|p| &p["attempt"])
+        .collect();
+    assert_eq!(requested, [&json!(1), &json!(2), &json!(3)]);
+    assert_eq!(started_limits(&detail), vec![json!(3); 5]);
+    let texts = session_texts(&run);
+    for number in 1..=3 {
+        let says = format!("(revise {number} of 3 of the run)");
+        assert!(
+            texts.iter().any(|text| text.contains(&says)),
+            "{says}: {texts:?}"
+        );
+    }
+    assert_eq!(
+        payloads(&detail, "revise_limit_judged"),
+        [
+            &json!({"attempt": 5, "revises": 3, "revise_limit": 3, "converged": false, "code_paths": null,
+                 "code_findings": [{"text": "the loop never ends", "codes": ["code_defect"],
+                                    "paths": [], "security": false}]})
+        ]
+    );
+    let why = "the review still asks for changes after the run's 3 revises, and code findings are left (code_defect)";
+    let ask = open_landing_ask(&mut queue);
+    assert!(ask.question.contains(why), "{}", ask.question);
+
+    queue.answer(ask.id, "send_back").unwrap();
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_landed(&repo, &detail.runs[0], "test task", &base);
+    assert_eq!(payloads(&detail, "resume_started").len(), 2);
+    assert_eq!(payloads(&detail, "revise_requested").len(), 3);
+    let judged: Vec<Value> = payloads(&detail, "revise_limit_judged")
+        .iter()
+        .map(|p| json!([p["revises"], p["revise_limit"], p["converged"]]))
+        .collect();
+    assert_eq!(judged, [json!([3, 3, false]), json!([3, 3, true])]);
+    let registered = payloads(&detail, "follow_up_registered");
+    assert_eq!(registered.len(), 1, "{registered:?}");
+    assert_eq!(registered[0]["review_attempt"], 6);
+}
+
+/// (ADR-t3033-1) A `[review] revise_limit` the landing branch's commit
+/// writes but that is not a whole number of at least 1 (here 0) leaves the
+/// attempt unpassed: the review fails to a person with why and no job
+/// runs. The main checkout's uncommitted `dagq.toml`, which would parse,
+/// is not read, and nothing falls back to the default. The other values
+/// refused are `infrastructure::run_env`'s unit test.
+#[test]
+fn a_revise_limit_of_the_landing_branch_that_does_not_parse_fails_the_review() {
+    let (_dir, repo, db) = fixture();
+    commit_config_on_main(&repo, "[review]\nrevise_limit = 0\n");
+    fs::write(repo.join("dagq.toml"), "[review]\nrevise_limit = 2\n").unwrap();
+    let backend = TestWorkspace::new(&db, false, IDLE_AGENT);
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "would pass")]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert!(reviewer.prompts().is_empty());
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    assert_eq!(detail.runs[0].status(), RunStatus::AwaitingIntegration);
+    assert!(payloads(&detail, "review_started").is_empty());
+    assert!(payloads(&detail, "review_finished").is_empty());
+    let failed = payloads(&detail, "review_failed");
+    assert_eq!(failed.len(), 1);
+    let error = failed[0]["error"].as_str().unwrap();
+    assert!(
+        error.contains("parse dagq.toml in the landing branch's commit")
+            && error.contains("dagq.toml:2: value of revise_limit")
+            && error.contains("positive number, not 0"),
+        "{error}"
+    );
+}
+
+/// (ADR-t3033-1) The revise limit is read by each review attempt from the
+/// landing branch's commit as it starts, not once when the supervisor
+/// starts, nor from the main checkout's files. Main's commit says 3, the
+/// main checkout's uncommitted file 5. The first attempt reads 3 (`revise 1 of 3`). During the
+/// second attempt main's commit lowers it to 1: that attempt still sends
+/// `revise 2 of 3`, and the third reads 1 and, with two revises sent, is
+/// judged past the limit at once, asking a person and naming both.
+#[test]
+fn the_revise_limit_is_read_from_the_landing_branchs_commit_at_each_attempt() {
+    let (_dir, repo, db) = fixture();
+    commit_config_on_main(&repo, "[review]\nrevise_limit = 3\n");
+    let backend = TestWorkspace::new(&db, false, &revising_agent(2));
+    // Run in the run's worktree, the second review commits on main in the
+    // main checkout before its verdict, which leaves the checkout clean;
+    // then the checkout's file is rewritten without a commit.
+    let lower = format!(
+        "git -C \"{repo}\" checkout -q main -- . && printf '[review]\\nrevise_limit = 1\\n' > \"{repo}/dagq.toml\" && git -C \"{repo}\" commit -q -am 'lower the revise limit' && printf '[review]\\nrevise_limit = 5\\n' > \"{repo}/dagq.toml\"; {}",
+        verdict("revise", &["still short"], "not yet"),
+        repo = repo.display()
+    );
+    fs::write(repo.join("dagq.toml"), "[review]\nrevise_limit = 5\n").unwrap();
+    let reviewer = TestReviewer::new(&[
+        verdict("revise", &["still short"], "not yet"),
+        lower,
+        coded_revise(&[("the loop never ends", &["code_defect"])]),
+    ]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    let run = detail.runs[0].clone();
+    assert_eq!(run.status(), RunStatus::AwaitingIntegration);
+    assert_eq!(
+        git_out(&repo, &["show", "main:dagq.toml"]),
+        "[review]\nrevise_limit = 1"
+    );
+    assert_eq!(started_limits(&detail), [json!(3), json!(3), json!(1)]);
+    assert_eq!(payloads(&detail, "revise_requested").len(), 2);
+    let texts = session_texts(&run);
+    for says in ["(revise 1 of 3 of the run)", "(revise 2 of 3 of the run)"] {
+        assert!(
+            texts.iter().any(|text| text.contains(says)),
+            "{says}: {texts:?}"
+        );
+    }
+    assert_eq!(
+        payloads(&detail, "revise_limit_judged"),
+        [
+            &json!({"attempt": 3, "revises": 2, "revise_limit": 1, "converged": false, "code_paths": null,
+                 "code_findings": [{"text": "the loop never ends", "codes": ["code_defect"],
+                                    "paths": [], "security": false}]})
+        ]
+    );
+    let ask = open_landing_ask(&mut queue);
+    assert!(
+        ask.question.contains(
+            "after the run's 2 revises (its limit is 1), and code findings are left (code_defect)"
+        ),
+        "{}",
+        ask.question
     );
 }

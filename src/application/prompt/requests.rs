@@ -569,7 +569,8 @@ pub(crate) fn closed_question_notice(
 
 /// The fixed request the supervisor types into the live session for a
 /// `revise` verdict (ADR-0027 decision 2), one instruction per line; the
-/// backend sends it as one line.
+/// backend sends it as one line. It names the revise `number` of the run's
+/// `limit` (the latest review attempt's, ADR-t3033-1).
 ///
 /// Held to [`REVISE_REQUEST_LIMIT`] (ADR-t2072-1): the findings, as one
 /// section, are cut to [`REVISE_FINDINGS_BYTES`] and point at
@@ -579,7 +580,7 @@ pub(crate) fn closed_question_notice(
 pub(crate) fn revise_request(
     task: &Task,
     run: &TaskRun,
-    number: usize,
+    (number, limit): (usize, ReviseLimit),
     reasons: &[String],
     findings_file: Option<&str>,
 ) -> Result<FittedPrompt> {
@@ -607,7 +608,7 @@ pub(crate) fn revise_request(
     let checks = local_checks(&verify);
     let route = Route::of(run);
     let mut lines = route.opening(format!(
-        "dagq: the supervisor's review of run {} (task {}) asks for changes (revise {number} of {MAX_REVISE_ATTEMPTS} of the run).",
+        "dagq: the supervisor's review of run {} (task {}) asks for changes (revise {number} of {limit} of the run).",
         run.id(),
         task.id()
     ));

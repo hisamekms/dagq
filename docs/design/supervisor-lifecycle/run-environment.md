@@ -56,7 +56,7 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - cargo-nextestは`[run.env]`が名指すプログラムではないので下の検査の対象ではなく、無いhostでは着地の検証の失敗になる（[ADR-t1925-1](../../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)の決定8がADR-0076から引き継ぐ）。
 - `[recheck]`は着地のたびにsupervisorが着地待ちのrunをmainに載せた木で実行する軽い検査で、keyの意味は`domain::recheck::RecheckConfig`、流れとcommandに渡るenvは`supervise::execution::recheck`が持つ（[ADR-0068](../../adr/0068-recheck-waiting-runs-after-each-landing.md)の決定2、[ADR-t2032-1](../../adr/2026-10-07-t2032-1-run-the-recheck-command-only-on-runs-touching-recheck-paths.md)）。
 
-- `[review.subagents.<agent>]`はreviewのsubagentを必須にするglobで、`paths`（`--paths`・`[e2e] paths`と同じglobの規則の、1つ以上の文字列の配列）と任意の`provider`（[Review](review.md#agentのjobのprovider)）を持つ（[ADR-t1453-1](../../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md)の決定1）。
+- `[review.subagents.<agent>]`はreviewのsubagentを必須にするglobで、`paths`（`--paths`と同じglobの配列）と任意の`provider`（[Review](review.md#agentのjobのprovider)）を持つ（[ADR-t1453-1](../../adr/2026-10-03-t1453-1-review-subagents-named-by-path-run-inside-the-review-job.md)の決定1）。
   - `<agent>`はkebab-caseで、定義のファイル`.dagq/agents/<agent>/AGENT.md`のdirectoryの名前になる（[ADR-t1728-1](../../adr/2026-10-06-t1728-1-agent-definitions-cases-and-eval-as-a-queue-service-use-case.md)）。
   - `builtin:`で始まる名前はbuilt-inのagentの表で、任意の`enabled`・`paths`・`provider`を持ち、書いた`paths`は既定を置き換え、書かないものは既定に従う（意味と既定は`domain::review_builtins`、[ADR-t2259-1](../../adr/2026-10-12-t2259-1-builtin-review-agents-and-programs-configured-by-builtin-names.md)）。
   - 書き方の誤り（知らないbuilt-inの名前・真偽でない`enabled`・`builtin:acceptance`の`enabled = false`と`paths`・`provider`）は`dagq.toml`全体の誤り。
@@ -97,8 +97,8 @@ repository rootの`dagq.toml`の`[run.env]`（[ADR-0049](../../adr/0049-share-co
 - `[review.programs.<name>]`はreviewのprogramのjobで（[プログラムのreview](review-programs.md)）、keyと意味は`ReviewProgram`が持つ。
   `[review.programs."builtin:<名前>"]`はbuilt-inの`enabled`と`paths`（既定を置き換える）だけを持ち（`BuiltinProgramSetting`）、`script`・`args`・知らない名前・pjのprogramの`builtin:`の名前は誤り。
   読むのは作業ファイルでなく、reviewの試行ごとのlanding branchのcommitの`dagq.toml`と`script`（`Verifier::review_programs_in`）。
-- `[review.code]`は上限の後の判定（[Review](review.md)の4a）のコードのpathで、key・書式・既定・意味は`review_reason::CodePaths`のdoc commentが持つ。
-  読むのはreviewの試行の始めのlanding branchのcommitの`dagq.toml`（`Verifier::review_code_paths_in`）で、作業ファイルとrunのbranchは読まず、読めなければ試行をreviewの失敗にする。
+- `[review.code]`は上限の後の判定（[Review](review.md)の4a）のコードのpath、`[review] revise_limit`はrunを通した手直しの上限（ADR-t3033-1）で、意味と既定は`review_reason::CodePaths`・`ReviseLimit`が持つ。
+  どちらも読むのはreviewの試行の始めのlanding branchのcommitの`dagq.toml`で、作業ファイルとrunのbranchは読まず、読めなければ既定に戻さず試行をreviewの失敗にする。
 - `[tasks]`は`changes`と`title_prefixes`を持つ（値と形は`domain::ChangeSet`・`domain::TitlePrefixes`）。
   `changes`はtaskが宣言するchangeの値の集合で（[ADR-t980-1](../../adr/2026-09-29-t980-1-classify-runs-by-declared-change-and-diff-derived-area.md)）、書いてあれば`add`と`edit`は集合の外の`--change`を拒み、`lint`は指摘し`submit`はchangeの無いtaskと集合の外のchangeを拒む（`submit`は何も動かさない）。
   `title_prefixes`はtitle（mainのsquash commitの件名）の接頭辞の一覧で、書いてあれば`lint`は指摘し`submit`はそれで始まらないtitleを拒むが、`add`と`edit`は拒まない。

@@ -2358,6 +2358,14 @@ pub trait Verifier {
         let _ = text;
         Ok(None)
     }
+    /// The run's revise limit (`[review] revise_limit`,
+    /// [`crate::domain::ReviseLimit`]) of `text`, a whole `dagq.toml` as
+    /// committed; `Err` when it cannot be parsed. None by default, which
+    /// keeps [`crate::domain::MAX_REVISE_ATTEMPTS`].
+    fn review_revise_limit_in(&self, text: &str) -> Result<Option<crate::domain::ReviseLimit>> {
+        let _ = text;
+        Ok(None)
+    }
     /// The program reviews (`[review.programs.<name>]`, ADR-t1895-2, and
     /// `[review.programs."builtin:<name>"]`, ADR-t2259-1) of `text`, a
     /// whole `dagq.toml` as committed; `Err` when it cannot be parsed.

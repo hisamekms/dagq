@@ -79,6 +79,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
 - AIのjobが他のjobの判定をまとめることはない。
 - verdictの`follow_ups`は判定と行き先を変えず、それだけでrunを差し戻さない。
 - reviseはrunを通した上限まで返し、resumeで数え直さず、上限の後は4aで決める（[ADR-t2599-1](../../adr/2026-10-17-t2599-1-run-review-revises-counted-across-the-run-and-judged-by-code-findings-past-the-limit.md)）。
+  上限は試行ごとにlanding branchのcommitの`dagq.toml`から読む値で、書かなければ既定（[Run environment](run-environment.md)、[ADR-t3033-1](../../adr/2026-10-22-t3033-1-run-review-revise-limit-from-the-landing-branchs-dagq-toml.md)）。
 - 依頼（revise・衝突の解消）はeventを記録してから`turns/`に書くので、二重には書かない。
 - 1つのrunに開いた`approve_landing`のaskは1つ。
 - e2eはhostで同時に1本だけ流れる。
@@ -111,6 +112,7 @@ validationを通ったrun（awaiting_integration。supervisorがleaseとslotを�
    落とし穴: HEADと一致しないreceiptを渡すと`failed`になって作業を失うので、HEADで書き直す依頼を送って待ち直す。
    書き直さずに終われば`approve_landing`のaskで人に聞く。
 4a. **上限の後の判定**: 理由にコードの指摘が無ければ理由をfollow_upのdraftにしてpassの道で着地し、あれば`approve_landing`のaskで示す。
+   上限は試行が始めに読んで記録した値で、下げた上限に既に送った手直しの数が届いたrunは次の差し戻しから4aに入る（`RunHistory::revise_limit`）。
    `acceptance_unmet`は`paths`が全部試行の始めに読んだコードのpath（[`[review.code]`](run-environment.md)）の外のときだけコードの指摘でない（`review_reason::Finding::is_code_finding`）。
 5a. **着地の前のagentのeval**: passの後、衝突の事前判定の前に、定義を変えるrunはsessionとslotとleaseを持ったままlanding branchのケースでdevを待つ（下の「着地の前のagentのeval」）。
 5. **終了の依頼とclose**: 着地かaskの前にworkerのsessionの終了を依頼する（[非対話のworker](headless-worker.md#wrapperがturnを止めるとき)）。

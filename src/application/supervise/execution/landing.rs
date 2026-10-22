@@ -10,7 +10,7 @@ use crate::application::job_start_failure;
 use crate::application::prompt::{AcceptanceRules, PromptBytes, REVIEW_ACCESS};
 use crate::application::review::{
     ReviewRange, SnapshotAgent, SubagentSnapshot, acceptance_record, acceptance_rules,
-    review_code_paths, review_range_at, snapshot_subagents,
+    review_code_paths, review_range_at, review_revise_limit, snapshot_subagents,
 };
 use crate::application::review_programs::{self, ProgramSnapshot, snapshot_programs};
 use crate::application::run_git;
@@ -21,6 +21,7 @@ use crate::domain::EventKind;
 use crate::domain::FAILED_REVIEW_LANDING_OPTIONS;
 use crate::domain::LandingAnswer;
 use crate::domain::RecoveredLanding;
+use crate::domain::ReviseLimit;
 use crate::domain::actor_model::{ActorLaunch, ModelRole};
 use crate::domain::cancel_reason::NewCancel;
 use crate::domain::concern::{
@@ -214,6 +215,15 @@ impl Supervisor<'_> {
                 return self.review_programs_failed(run, (session, attempt, retried), None, error);
             }
         };
+        // The revise limit a program's rejection is judged by, from the
+        // commit the programs were read from (ADR-t3033-1).
+        let revise_limit = match self.review_revise_limit(&snapshot.commit) {
+            Ok(limit) => limit,
+            Err(error) => {
+                let error = format!("the review's revise limit could not be read: {error:#}");
+                return self.review_programs_failed(run, (session, attempt, retried), None, error);
+            }
+        };
         let selected: Vec<Value> = snapshot
             .programs
             .iter()
@@ -237,6 +247,7 @@ impl Supervisor<'_> {
                 "base": snapshot.range.base,
                 "head": snapshot.range.head,
                 "programs": selected,
+                ReviseLimit::RECORDED: revise_limit.get(),
             }),
         )?;
         info!(run_id = %run.id(), "run {}: {} program review(s) before review {attempt}", run.id(), snapshot.programs.len());
@@ -646,15 +657,24 @@ impl Supervisor<'_> {
                 return self.unstarted_review_failed(run, session, attempt, error);
             }
         };
-        // The code paths the judgment past the revise limit reads, from the
-        // commit the agents were read from or else the landing branch's
-        // head as the attempt starts (ADR-t2599-1, as ADR-t1453-1
-        // decisions 4 and 6): a
-        // `dagq.toml` that cannot be read leaves the attempt unpassed.
-        let code_paths = match self.review_code_paths(subagents.as_ref()) {
-            Ok(code_paths) => code_paths,
+        // The code paths the judgment past the revise limit reads and the
+        // revise limit, from the commit the agents were read from or else
+        // the landing branch's head as the attempt starts (ADR-t2599-1,
+        // ADR-t3033-1, as ADR-t1453-1 decisions 4 and 6): a `dagq.toml`
+        // that cannot be read leaves the attempt unpassed.
+        let read = self.review_commit(subagents.as_ref()).and_then(|commit| {
+            let code_paths = self
+                .review_code_paths(&commit)
+                .context("the review's code paths could not be read")?;
+            let revise_limit = self
+                .review_revise_limit(&commit)
+                .context("the review's revise limit could not be read")?;
+            Ok((code_paths, revise_limit))
+        });
+        let (code_paths, revise_limit) = match read {
+            Ok(read) => read,
             Err(read) => {
-                let error = format!("the review's code paths could not be read: {read:#}");
+                let error = format!("{read:#}");
                 return self.unstarted_review_failed(run, session, attempt, error);
             }
         };
@@ -700,6 +720,7 @@ impl Supervisor<'_> {
         if let Some(code_paths) = &code_paths {
             started["code_paths"] = json!(code_paths.globs);
         }
+        started[ReviseLimit::RECORDED] = json!(revise_limit.get());
         // What the whole review's prompt takes (task 1571, ADR-t1566-1
         // decision 6); each agent job's start records its own.
         let prepared = self.prepare_review(run, attempt, subagents.as_ref());
@@ -1378,19 +1399,29 @@ impl Supervisor<'_> {
             &|main| self.receipt_range(run, main),
         )
     }
-    /// The code paths of the landing branch's commit the agents were read
-    /// from, or of its head without agents ([`review_code_paths`]).
-    fn review_code_paths(
-        &self,
-        subagents: Option<&SubagentSnapshot>,
-    ) -> Result<Option<review_reason::CodePaths>> {
-        let commit = match subagents {
+    /// The landing branch's commit a review attempt reads its settings
+    /// from: the one its agents were read from, or its head without
+    /// agents.
+    fn review_commit(&self, subagents: Option<&SubagentSnapshot>) -> Result<String> {
+        Ok(match subagents {
             Some(snapshot) => snapshot.commit.clone(),
             None => self.repository.main_head()?.into_string(),
-        };
-        review_code_paths(&*self.repository, &commit, &|text| {
+        })
+    }
+    /// The code paths of the landing branch's commit `commit`
+    /// ([`review_code_paths`]).
+    fn review_code_paths(&self, commit: &str) -> Result<Option<review_reason::CodePaths>> {
+        review_code_paths(&*self.repository, commit, &|text| {
             self.verifier.review_code_paths_in(text)
         })
+    }
+    /// The run's revise limit of the landing branch's commit `commit`
+    /// ([`review_revise_limit`]), the default where it writes none.
+    fn review_revise_limit(&self, commit: &str) -> Result<ReviseLimit> {
+        let limit = review_revise_limit(&*self.repository, commit, &|text| {
+            self.verifier.review_revise_limit_in(text)
+        })?;
+        Ok(limit.unwrap_or_default())
     }
     /// The range `run`'s review reads with the landing branch at `main`:
     /// from its receipt's commit ([`review_range_at`]).
@@ -1635,10 +1666,13 @@ impl Supervisor<'_> {
             }
         }
     }
-    /// Whether the run has used up its revises ([`MAX_REVISE_ATTEMPTS`]).
-    pub(super) fn revises_used_up(&self, run: &RunId) -> Result<bool> {
+    /// The run's revise limit, the latest review attempt's
+    /// ([`RunHistory::revise_limit`]), when the run has used up its
+    /// revises; `None` while it has one left.
+    pub(super) fn revises_used_up(&self, run: &RunId) -> Result<Option<ReviseLimit>> {
         let events = self.queue.run_events(run)?;
-        Ok(decide_revise(&RunHistory::from_events(&events)) == ReviseDecision::Ask)
+        let history = RunHistory::from_events(&events);
+        Ok((decide_revise(&history) == ReviseDecision::Ask).then(|| history.revise_limit()))
     }
     /// Go where `route` sends a verdict one of whose agents' judgments
     /// decides it (ADR-t1453-1 decision 7): back to the session with the
@@ -1662,7 +1696,7 @@ impl Supervisor<'_> {
                 let concern = parent_concern
                     .then(|| SentBackConcern::of(&verdict, attempt))
                     .flatten();
-                let used_up = self.revises_used_up(run.id())?;
+                let used_up = self.revises_used_up(run.id())?.is_some();
                 let sent_back = SentBack {
                     attempt,
                     findings: verdict.sent_back_findings(Some(route)),
@@ -1805,8 +1839,13 @@ impl Supervisor<'_> {
         }
         let events = self.queue.run_events(run.id())?;
         let history = RunHistory::from_events(&events);
-        let ReviseDecision::Request { attempt, number } = decide_revise(&history) else {
-            let revises = history.revise_attempts();
+        let ReviseDecision::Request {
+            attempt,
+            number,
+            limit,
+        } = decide_revise(&history)
+        else {
+            let revises = (history.revise_attempts(), history.revise_limit());
             return self.past_revise_limit(run, session, verdict, job, sent_back, revises);
         };
         let Some(live) = session
@@ -1831,7 +1870,7 @@ impl Supervisor<'_> {
         let request = revise_request(
             &task,
             run,
-            number,
+            (number, limit),
             &verdict.reasons,
             Some(&findings_file.to_string_lossy()),
         )?;
@@ -1909,7 +1948,7 @@ impl Supervisor<'_> {
                 return Ok(ask(why, verdict, session));
             }
         };
-        info!(run_id = %run.id(), "revise {number} of {MAX_REVISE_ATTEMPTS} of the run (revise-{attempt}) sent to run {} in workspace {}", run.id(), live.workspace);
+        info!(run_id = %run.id(), "revise {number} of {limit} of the run (revise-{attempt}) sent to run {} in workspace {}", run.id(), live.workspace);
         Ok(Phase::Revise(ReviseWatch::new(
             run,
             live,
@@ -1924,7 +1963,8 @@ impl Supervisor<'_> {
         )?))
     }
     /// A review that sends the run back once the run's `revises` are used
-    /// up (ADR-t2599-1): with no code finding among the reasons of
+    /// up, the limit the latest attempt read beside them (ADR-t2599-1,
+    /// ADR-t3033-1): with no code finding among the reasons of
     /// `sent_back` ([`review_reason::converged`]) the run lands the way of
     /// a `pass` (the conflict precheck, the e2e when it needs it, the
     /// landing's verification) and the reasons become follow_up drafts of
@@ -1940,7 +1980,7 @@ impl Supervisor<'_> {
         verdict: ReviewVerdict,
         job: &ActorContext,
         sent_back: SentBack,
-        revises: usize,
+        (revises, limit): (usize, ReviseLimit),
     ) -> Result<Phase> {
         let SentBack { attempt, findings } = sent_back;
         // The code paths the attempt read when it started.
@@ -1984,6 +2024,7 @@ impl Supervisor<'_> {
             json!({
                 "attempt": attempt,
                 "revises": revises,
+                ReviseLimit::RECORDED: limit.get(),
                 "converged": converged,
                 "code_paths": code.map(|code| &code.globs),
                 "code_findings": code_findings.iter().map(|f| json!({
@@ -1992,10 +2033,10 @@ impl Supervisor<'_> {
             }),
         )?;
         if converged {
-            info!(run_id = %run.id(), "run {} review {attempt}: past the run's {revises} revises with no code finding; it lands and its reasons become follow_up drafts", run.id());
+            info!(run_id = %run.id(), "run {} review {attempt}: past {} with no code finding; it lands and its reasons become follow_up drafts", run.id(), revises_sent(revises, limit));
             return self.precheck(run, session, verdict, Some(job.clone()));
         }
-        let why = revise_limit_why(&verdict, revises, &code_findings);
+        let why = revise_limit_why(&verdict, (revises, limit), &code_findings);
         let carries = verdict.verdict == ReviewDecision::Concern;
         Ok(landing_ask(Some(why), verdict, session, job, carries))
     }
@@ -2825,13 +2866,14 @@ fn canceled_reason(ask_id: AskId) -> String {
     format!("canceled by ask {ask_id}")
 }
 
-/// Why a verdict that sends the run back past the run's `revises`
-/// ([`MAX_REVISE_ATTEMPTS`]) asks a person: the code findings left among
+/// Why a verdict that sends the run back past the run's `revises` (its
+/// `limit`, [`ReviseLimit`]) asks a person: the code findings left among
 /// its reasons (ADR-t2599-1), each by its codes, a security agent's
-/// marked.
+/// marked. The limit is named beside the revises when a lowered one left
+/// them apart.
 fn revise_limit_why(
     verdict: &ReviewVerdict,
-    revises: usize,
+    (revises, limit): (usize, ReviseLimit),
     code_findings: &[&review_reason::Finding],
 ) -> String {
     let asks = if verdict.verdict == ReviewDecision::Concern {
@@ -2851,10 +2893,21 @@ fn revise_limit_why(
         })
         .collect::<Vec<_>>()
         .join("; ");
+    let sent = revises_sent(revises, limit);
     if code_findings.is_empty() {
-        return format!("{asks} after the run's {revises} revises, with no reason to judge");
+        return format!("{asks} after {sent}, with no reason to judge");
     }
-    format!("{asks} after the run's {revises} revises, and code findings are left ({left})")
+    format!("{asks} after {sent}, and code findings are left ({left})")
+}
+
+/// The run's `revises` sent, with its `limit` when a lowered one left them
+/// apart.
+fn revises_sent(revises: usize, limit: ReviseLimit) -> String {
+    if revises == limit.get() {
+        format!("the run's {revises} revises")
+    } else {
+        format!("the run's {revises} revises (its limit is {limit})")
+    }
 }
 
 /// What `concern_decided` records of a `send_back` the runtime took up:
@@ -3252,8 +3305,8 @@ pub(super) fn concern_escalation(
             "the review recommends {recommends}, but the judgement is whether to throw the work away (discard)"
         )),
         EscalatedBecause::ReviseLimit => Some(format!(
-            "the review recommends send_back after the run's {} revises",
-            history.revise_attempts()
+            "the review recommends send_back after {}",
+            revises_sent(history.revise_attempts(), history.revise_limit())
         )),
         EscalatedBecause::Unsent => Some(format!(
             "the review recommends {recommends}, but it could not be applied"
@@ -3760,7 +3813,7 @@ mod tests {
             .iter()
             .filter(|f| f.is_code_finding(None))
             .collect();
-        let why = revise_limit_why(&revise, MAX_REVISE_ATTEMPTS, &left);
+        let why = revise_limit_why(&revise, (2, ReviseLimit::default()), &left);
         assert_eq!(
             why,
             "the review still asks for changes after the run's 2 revises, and code findings are left (code_defect, local_slip; local_slip from a security agent)"
@@ -3783,12 +3836,18 @@ mod tests {
         let unlabeled = concern.sent_back_findings(None);
         let left: Vec<&review_reason::Finding> = unlabeled.iter().collect();
         assert_eq!(
-            revise_limit_why(&concern, MAX_REVISE_ATTEMPTS, &left),
+            revise_limit_why(&concern, (2, ReviseLimit::default()), &left),
             "the review recommends send_back after the run's 2 revises, and code findings are left (unlabeled)"
         );
         assert_eq!(
-            revise_limit_why(&concern, MAX_REVISE_ATTEMPTS, &[]),
+            revise_limit_why(&concern, (2, ReviseLimit::default()), &[]),
             "the review recommends send_back after the run's 2 revises, with no reason to judge"
+        );
+        // A limit lowered below the revises sent is named beside them
+        // (ADR-t3033-1).
+        assert_eq!(
+            revise_limit_why(&concern, (2, ReviseLimit::new(1).unwrap()), &[]),
+            "the review recommends send_back after the run's 2 revises (its limit is 1), with no reason to judge"
         );
     }
 
@@ -3874,7 +3933,8 @@ mod tests {
             decide_revise(&RunHistory::from_events(&one)),
             ReviseDecision::Request {
                 attempt: 2,
-                number: 2
+                number: 2,
+                limit: ReviseLimit::default(),
             }
         );
         kinds.extend([

@@ -27,8 +27,8 @@ use super::{
 use crate::domain::{
     Ask, BundleKey, CommitSha, DraftOrigin, DraftTarget, EvidenceCheck, FindingView, Goal, GoalId,
     GoalPredecessor, GoalTask, LintViolation, MAX_DRAFT_PLANNERS, MAX_FINDING_PLANNERS,
-    MAX_PLAN_REVISES, MAX_RESUME_ATTEMPTS, MAX_REVISE_ATTEMPTS, Predecessor, Proposal, ProposalId,
-    Provider, Receipt, RunEvent, RunId, RunStatus, TRIAGE_RETRY_FAILURES, Task, TaskDetail, TaskId,
+    MAX_PLAN_REVISES, MAX_RESUME_ATTEMPTS, Predecessor, Proposal, ProposalId, Provider, Receipt,
+    ReviseLimit, RunEvent, RunId, RunStatus, TRIAGE_RETRY_FAILURES, Task, TaskDetail, TaskId,
     TaskRun,
     recovery::{ProcessInfo, RecoveryAlert},
     related::RelatedTask,

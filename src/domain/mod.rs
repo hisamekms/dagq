@@ -714,7 +714,59 @@ impl ReviewVerdict {
 /// in `approve_landing`. A `concern`'s other decisions do not depend on it
 /// (ADR-t451-1 decision 3), and the plan review's limit
 /// ([`MAX_PLAN_REVISES`]) is not tied to it.
+///
+/// It is the default: a repository changes it with `[review]
+/// revise_limit` of its `dagq.toml`, which each review attempt reads from
+/// the landing branch's commit ([`ReviseLimit`], ADR-t3033-1).
 pub const MAX_REVISE_ATTEMPTS: usize = 2;
+
+/// The run's revise limit a review attempt reads: `[review] revise_limit`
+/// of the `dagq.toml` in the landing branch's commit the attempt reads
+/// (ADR-t3033-1), a whole number of at least 1, or [`MAX_REVISE_ATTEMPTS`]
+/// where it is not written. What it counts and the judgment past it are
+/// [`MAX_REVISE_ATTEMPTS`]'s. An attempt records the limit it read as
+/// `revise_limit` of its `review_programs_started` and `review_started`,
+/// and whether its send-back is a revise or is judged past the limit
+/// follows that record ([`RunHistory::revise_limit`]): a limit lowered
+/// below the revises a run was sent judges its next send-back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReviseLimit(usize);
+
+impl ReviseLimit {
+    /// The key a review attempt's start records the limit under.
+    pub const RECORDED: &'static str = "revise_limit";
+
+    /// `limit` as a revise limit, `None` for 0.
+    pub fn new(limit: usize) -> Option<Self> {
+        (limit >= 1).then_some(Self(limit))
+    }
+
+    pub fn get(self) -> usize {
+        self.0
+    }
+
+    /// The limit an attempt's start recorded in `payload`, `None` without
+    /// one (a start recorded before the setting) or with one that is not a
+    /// whole number of at least 1.
+    pub fn recorded(payload: &serde_json::Value) -> Option<Self> {
+        payload[Self::RECORDED]
+            .as_u64()
+            .and_then(|limit| usize::try_from(limit).ok())
+            .and_then(Self::new)
+    }
+}
+
+impl Default for ReviseLimit {
+    fn default() -> Self {
+        Self(MAX_REVISE_ATTEMPTS)
+    }
+}
+
+impl fmt::Display for ReviseLimit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(f)
+    }
+}
 
 /// The options of the `approve_landing` ask a `concern` opens, which the
 /// supervisor acts on once answered (ADR-0027, ADR-0022 decision 3).

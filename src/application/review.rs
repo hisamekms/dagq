@@ -16,7 +16,9 @@ use crate::domain::review_builtins::{self, BuiltinAgent, EffectiveBuiltin};
 use crate::domain::review_reason::CodePaths;
 use crate::domain::review_subagents::{self, AgentRole, AgentTools, ReviewAgents};
 use crate::domain::setup_review::SETUP_COMMAND;
-use crate::domain::{CommitSha, Goal, Provider, Receipt, RunStatus, Task, TaskId, TaskRun};
+use crate::domain::{
+    CommitSha, Goal, Provider, Receipt, ReviseLimit, RunStatus, Task, TaskId, TaskRun,
+};
 use sha2::{Digest, Sha256};
 
 /// What `review` reads and writes through.
@@ -420,6 +422,32 @@ pub fn review_code_paths(
     commit: &str,
     parse: &dyn Fn(&str) -> Result<Option<CodePaths>>,
 ) -> Result<Option<CodePaths>> {
+    committed_setting(repository, commit, parse)
+}
+
+/// The run's revise limit (`[review] revise_limit`, [`ReviseLimit`]) the
+/// landing branch's commit `commit` writes in its `dagq.toml`, read by
+/// `parse` from the committed tree as the code paths are
+/// ([`review_code_paths`], ADR-t3033-1); `None` without the file or the
+/// key, which keeps the default. `Err` when the file cannot be read or
+/// parsed, a value that is not a whole number of at least 1 among them:
+/// the attempt fails rather than falling back to the default (ADR-t1453-1
+/// decision 6).
+pub fn review_revise_limit(
+    repository: &dyn Repository,
+    commit: &str,
+    parse: &dyn Fn(&str) -> Result<Option<ReviseLimit>>,
+) -> Result<Option<ReviseLimit>> {
+    committed_setting(repository, commit, parse)
+}
+
+/// What `parse` reads of the `dagq.toml` in the landing branch's commit
+/// `commit`, `None` without the file.
+fn committed_setting<T>(
+    repository: &dyn Repository,
+    commit: &str,
+    parse: &dyn Fn(&str) -> Result<Option<T>>,
+) -> Result<Option<T>> {
     let Some(text) = repository
         .file_in(commit, CONFIG_FILE)
         .with_context(|| format!("read {CONFIG_FILE} in the landing branch's commit {commit}"))?
@@ -1322,6 +1350,49 @@ mod tests {
             error.contains(&format!(
                 "parse dagq.toml in the landing branch's commit {SHA}"
             )),
+            "{error}"
+        );
+    }
+
+    /// The revise limit is read from the landing branch's commit only
+    /// (ADR-t3033-1): none without `dagq.toml` or the key, the parser's
+    /// when it writes one, and a value the parser refuses fails the read
+    /// rather than keeping the default.
+    #[test]
+    fn the_revise_limit_is_read_from_the_landing_branchs_commit() {
+        let parse = |text: &str| -> Result<Option<ReviseLimit>> {
+            match text {
+                "[review]\nrevise_limit = 4\n" => Ok(ReviseLimit::new(4)),
+                "" => Ok(None),
+                _ => anyhow::bail!(
+                    "dagq.toml:2: value of revise_limit: must be a positive number, not 0"
+                ),
+            }
+        };
+        let read = |files: Vec<(&'static str, &'static str)>| {
+            review_revise_limit(
+                &Committed {
+                    files,
+                    ..Committed::default()
+                },
+                SHA,
+                &parse,
+            )
+        };
+        assert_eq!(read(Vec::new()).unwrap(), None);
+        assert_eq!(read(vec![(CONFIG_FILE, "")]).unwrap(), None);
+        assert_eq!(
+            read(vec![(CONFIG_FILE, "[review]\nrevise_limit = 4\n")]).unwrap(),
+            ReviseLimit::new(4)
+        );
+        let error = format!(
+            "{:#}",
+            read(vec![(CONFIG_FILE, "[review]\nrevise_limit = 0\n")]).unwrap_err()
+        );
+        assert!(
+            error.contains(&format!(
+                "parse dagq.toml in the landing branch's commit {SHA}"
+            )) && error.contains("value of revise_limit"),
             "{error}"
         );
     }
