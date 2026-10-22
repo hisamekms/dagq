@@ -69,7 +69,7 @@ runの一生を、重ならず隙間なく全体を覆う区間の列で表す�
   payloadの欄と`attempt`の数え方は`PhaseChange::payload`と`Attempt`のdoc commentが持つ。
   後の工程は、次のrevise・resumeまで前のattemptのまま。
 - **書く所**: supervisorの中の移りは工程ごとの状態のmoduleの移す操作を通り、外では下の`Integrator`とstoreが書く。
-  slotのrunはslotの工程・slotの外の待ち・着地の順番待ちから、slotを離れたrunはstatus（`validating`に休む主張はそのevent）から工程を読む。
+  slotのrunはslotの工程・slotの外の待ち・着地の順番待ちから、slotを離れたrunはstatusから工程を読み、`validating`に休む主張と着地の列か拾い直しか人待ちかで分かれる`awaiting_integration`はeventでも読む（`Phase::resting`）。
   前と同じ工程とattemptは書かず、プロセスが初めて見るrunは記録を読み直してattemptを引き継ぐ。
   人の`integrate`の着地は`Integrator`が書く: integration slotを取った所で`landing`を、mainが動く前にslotを返した所でrunが戻ったstatusの工程を書く。
   supervisorの着地はslotが書く。
@@ -85,8 +85,6 @@ runの一生を、重ならず隙間なく全体を覆う区間の列で表す�
 - **unattributed**: 区間の列に当たらない時間（記録の抜け）はunattributedの区間として出す。
   KPIは所要時間に対する割合を見張り、閾値以上を目標割れにする（予定）。
 - **物差し**: 所要時間（区間の和）と、slotを握った時間（`holds`が`none`でない区間の和）。
-
-工程ごとの中身とタグは`domain::run_phase::Phase`の定義と`Phase::tags()`が持つ。
 
 ### 終端
 
