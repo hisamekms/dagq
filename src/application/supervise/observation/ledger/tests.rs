@@ -2030,4 +2030,5 @@ fn a_target_that_fails_each_pass_leaves_the_others_written() {
     );
 }
 
+mod queue_waits;
 mod waits;

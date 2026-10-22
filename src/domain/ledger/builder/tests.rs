@@ -604,6 +604,8 @@ fn a_pass_at_a_clock_set_back_folds_the_waits_as_every_event_then() {
 /// silent since the last pass and makes none for a task's fold (slots
 /// full its supervisor's stop or silence ended among them), however long
 /// the history before them: nothing it makes grows with the events kept.
+/// Besides, it marks and folds the queue row of each wait its due closes,
+/// whose end that is (one record each).
 #[test]
 fn a_pass_makes_as_much_of_the_same_new_inputs_whatever_the_history() {
     let (few, kept_few, closed_few) = one_pass(history(3));
@@ -611,7 +613,19 @@ fn a_pass_makes_as_much_of_the_same_new_inputs_whatever_the_history() {
     assert!(kept_many > kept_few * 50, "{kept_few} {kept_many}");
     // The history's, and the new inputs' own.
     assert_eq!((closed_few, closed_many), (3 + 1, 300 + 1));
-    assert_eq!(few, many);
+    let but_closed = |made: Made, closed: usize| {
+        let (rows, built, copied, attempts, marked, copied_by_due, made_waits) = made;
+        (
+            rows - closed,
+            built - closed,
+            copied - closed,
+            attempts,
+            marked - closed,
+            copied_by_due,
+            made_waits,
+        )
+    };
+    assert_eq!(but_closed(few, closed_few), but_closed(many, closed_many));
     let (rows, built, copied, attempts, _, copied_by_due, made_waits) = few;
     assert_eq!((copied_by_due, made_waits), (0, 0));
     assert_eq!(rows, built);

@@ -537,10 +537,10 @@ impl PreClaimBook {
     /// event names the supervisor again, and an earlier one reads them
     /// open while their lives had not ended then. It reads the ends of the
     /// supervisors named since the last close, and closes those of the
-    /// supervisors whose end came by `now_ms`: none of the rest. Whether it
-    /// closed any.
-    pub fn close_lives(&mut self, lives: &supervisor_life::Lives, now_ms: i64) -> bool {
-        let mut closed = false;
+    /// supervisors whose end came by `now_ms`: none of the rest. The
+    /// starts of those it closed, ascending.
+    pub fn close_lives(&mut self, lives: &supervisor_life::Lives, now_ms: i64) -> Vec<EventId> {
+        let mut closed = Vec::new();
         self.closed_to = self.closed_to.max(now_ms);
         for supervisor in std::mem::take(&mut self.named) {
             let supervisor = match self.life_end_of.remove(&supervisor) {
@@ -574,10 +574,11 @@ impl PreClaimBook {
                 {
                     end_with_life(&mut interval, life);
                     self.closed.insert(start, (interval, None));
-                    closed = true;
+                    closed.push(start);
                 }
             }
         }
+        closed.sort_unstable();
         closed
     }
 

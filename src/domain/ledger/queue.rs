@@ -612,9 +612,14 @@ impl QueueBook {
             return self.landing_slot(slot, at);
         }
         let assigned = self.rows.get(&id)?;
+        // A slots full reads up to the last event naming its supervisor
+        // ([`PreClaimInterval::reach`]): one that opens it again after its
+        // supervisor's silence ended it is an input past that end.
+        let mut reach = None;
         let mut row = match assigned.of {
             Of::Interval(Started::PreClaim(kind)) => {
                 let (interval, _) = at.pre_claim.interval(id, at.lives, at.now_ms)?;
+                reach = Some(interval.reach);
                 interval_row(assigned, id, interval_kind(kind), &interval)
             }
             Of::Interval(Started::LandingHold) => {
@@ -642,8 +647,8 @@ impl QueueBook {
         }
         let life = row.life.as_deref().and_then(|s| at.lives.last_of(s));
         let mut ledger = finish(row, at.owned, at.built_at);
-        if let Some(end) = assigned.ended_by {
-            ledger.inputs_through.events = ledger.inputs_through.events.max(end);
+        for input in [assigned.ended_by, reach].into_iter().flatten() {
+            ledger.inputs_through.events = ledger.inputs_through.events.max(input);
         }
         ledger.inputs_through.supervisor = life;
         Some(ledger)

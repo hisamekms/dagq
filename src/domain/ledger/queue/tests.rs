@@ -442,18 +442,24 @@ fn the_rows_a_supervisors_end_ends_are_the_rows_a_scan_per_supervisor_gives() {
             ),
             9,
         ),
-        life(
-            expected_row(
-                &log,
-                3,
-                &[3],
-                ("slots_full", "s3"),
-                Some(ms(7)),
-                gone,
-                json!({"interval": s3_interval}),
-            ),
-            9,
-        ),
+        {
+            // A slots full reads up to the last event naming its
+            // supervisor, its life after its stop too.
+            let mut row = life(
+                expected_row(
+                    &log,
+                    3,
+                    &[3],
+                    ("slots_full", "s3"),
+                    Some(ms(7)),
+                    gone,
+                    json!({"interval": s3_interval}),
+                ),
+                9,
+            );
+            row.inputs_through.events = EventId::new(9);
+            row
+        },
         plain(5, "supervisor_alive", "s4"),
         life(
             expected_row(

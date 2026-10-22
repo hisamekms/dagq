@@ -580,11 +580,11 @@ fn a_pass_whose_clock_is_before_the_events_it_reads_folds_at_the_last() {
 }
 
 /// A deterministic generator: a linear congruential one from a fixed seed.
-struct Lcg(u64);
+pub(super) struct Lcg(pub(super) u64);
 
 impl Lcg {
     /// The next of `0..n`.
-    fn below(&mut self, n: u64) -> u64 {
+    pub(super) fn below(&mut self, n: u64) -> u64 {
         self.0 = self
             .0
             .wrapping_mul(6_364_136_223_846_793_005)

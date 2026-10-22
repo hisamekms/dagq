@@ -848,13 +848,20 @@ impl Builder {
     /// so that no read of them this pass makes them again: of the kept
     /// ends, only those that came by then ([`PreClaimBook::close_lives`]);
     /// and drop the records of the rows the store holds settled that no
-    /// event read since reached ([`Kept`]). When it closed any, mark the
-    /// tasks with time ready ([`Self::mark_ready`]), whose overlays read
-    /// that end.
+    /// event read since reached ([`Kept`]). When it closed any, mark their
+    /// queue rows, whose end it is, and the tasks with time ready
+    /// ([`Self::mark_ready`]), whose overlays read that end.
     pub fn due(&mut self, now_ms: i64) {
         let kept = Arc::make_mut(&mut self.kept);
-        // A silence ends a wait with no event: the tasks ready may read it.
-        if kept.pre_claim.close_lives(&kept.lives, now_ms) {
+        // A silence ends a wait with no event: its row and the tasks ready
+        // may read it.
+        let closed = kept.pre_claim.close_lives(&kept.lives, now_ms);
+        if !closed.is_empty() {
+            self.marks.extend(
+                closed
+                    .iter()
+                    .map(|start| Target::Row(LedgerKind::Queue, start.to_string())),
+            );
             self.mark_ready(true);
         }
         let kept = Arc::make_mut(&mut self.kept);
@@ -1117,7 +1124,10 @@ pub fn run_settles(row: &LedgerRow, now_ms: i64) -> bool {
 /// `built` (dirty: a later event, the push that closed its pending push, a
 /// later sample, a later step, a supervisor's later event), a task's whose
 /// waits a supervisor's life ended are others (the time passed a silence;
-/// one folded at an earlier time is [`behind`]), and one settled now. A
+/// one folded at an earlier time is [`behind`]), a queue row's that its
+/// supervisor's life ended over the events the stored one read open (the
+/// time passed a silence; one that read a later event of the supervisor
+/// that opens it again reads past it, [`queue`]), and one settled now. A
 /// stored row that holds the same inputs is not written again, so the same
 /// inputs read twice leave it as it is.
 pub fn writes(stored: Option<&LedgerRow>, built: &LedgerRow) -> bool {
@@ -1127,6 +1137,7 @@ pub fn writes(stored: Option<&LedgerRow>, built: &LedgerRow) -> bool {
     (!stored.is_legacy() && stored.ledger_v < LEDGER_V)
         || built.inputs_through.last() > stored.inputs_through.last()
         || built.inputs_through.life_ended != stored.inputs_through.life_ended
+        || built.inputs_through.supervisor > stored.inputs_through.supervisor
         || built.inputs_through.node_samples > stored.inputs_through.node_samples
         || built.inputs_through.steps > stored.inputs_through.steps
         || (built.is_final && !stored.is_final && !stored.is_legacy())
