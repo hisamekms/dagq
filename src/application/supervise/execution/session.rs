@@ -502,78 +502,13 @@ impl SessionWatch {
         self.awaits_answer = None;
         let processes = sv.queue.processes(run.id())?;
         self.watch_first_commit(sv, run)?;
-        if !self.receipt_seen && sv.files.is_file(&self.receipt_path) {
-            self.receipt_seen = true;
-            self.receipt_seen_at = Some(sv.generators.clock.monotonic());
-            // The work interval ends here (`stats`' `work`); its load goes
-            // with it (task 197).
-            let mut payload = json!({"path": path_text(&self.receipt_path)?, "validated": false});
-            if let Value::Object(load) = serde_json::to_value(sv.take_load(run.id()))? {
-                payload.as_object_mut().expect("an object").extend(load);
-            }
-            sv.queue
-                .record_runtime_event(run.id(), EventKind::ReceiptObserved, payload)?;
-            info!(run_id = %run.id(), "receipt received for {}; waiting for the session to go idle (or a person's /exit)", run.id());
-            // A send it had not taken ends with the receipt.
-        }
+        self.observe_receipt(sv, run)?;
         self.stall.settle(sv, run, self.receipt_seen)?;
         self.stop_idle_job(sv, run, true);
-        let wrapper = processes.iter().find(|p| p.role == "wrapper");
-        // A session that already ended (on its own, by a person's /exit,
-        // or before this supervisor adopted the run) is not asked to exit.
-        let session_ended = wrapper.is_some_and(|w| w.exited_at.is_some());
-        // A fast session, or a wrapper slowed by load, can see the receipt and
-        // the idle before the wrapper registers its agent: the run is still
-        // `starting`, and taking it to validation would refuse that
-        // registration and end the session (task 1274).
-        let agent_registered = processes.iter().any(|p| p.role == "agent");
-        // Background work the session left running after its receipt is
-        // waited for up to the resume timeout, like a resumed session's:
-        // work that never ends must not hold the run without an attention.
-        // Past it validation can proceed; any later shutdown uses the
-        // wrapper exit request file.
-        let waited_out = waited_out_after_receipt(
-            sv.generators.clock.monotonic(),
-            self.receipt_seen_at,
-            sv.sessions.resume_timeout(),
-        );
-        if self.receipt_seen
-            && self.exit_requested.is_none()
-            && !session_ended
-            && agent_registered
-            && let Some(evidence) = match self.idle_after_receipt(sv)? {
-                // The session has not answered the request to rewrite
-                // its receipt yet: waited for up to the resume timeout,
-                // like background work after the receipt.
-                Some(idle)
-                    if self.stale.is_some_and(|n| {
-                        !n.answered_by(idle.modified()) && !n.waited_out(&*sv.files, sv.sessions)
-                    }) =>
-                {
-                    None
-                }
-                Some(idle) if waited_out => {
-                    idle.stopped_after_receipt(&*sv.files, &self.receipt_path)?
-                }
-                Some(idle) => idle.idle_after_receipt(&*sv.files, &self.receipt_path)?,
-                None => None,
-            }
-        {
-            if self.stale_receipt(sv, run)? {
-                return Ok(None);
-            }
-            sv.queue
-                .record_runtime_event(run.id(), EventKind::SessionIdleObserved, evidence)?;
-            // The session stays open through validation and review, and
-            // is asked to exit only once the verdict is known (ADR-0027
-            // decision 1).
-            info!(run_id = %run.id(), "session of {} is idle after its receipt; validating with the session open", run.id());
-            self.recovery.stop(sv, run);
-            return sv
-                .queue
-                .finish_supervision_live(run.id(), sv.registration.token())
-                .map(Some);
+        if let Some(moved) = self.validate_when_idle(sv, run, &processes)? {
+            return Ok(moved);
         }
+        let wrapper = processes.iter().find(|p| p.role == "wrapper");
         // A lost session no attempt could open again (task 1372) ends as
         // one that exited, with its lost wrapper's code: the attempts
         // forgot its processes.
@@ -595,13 +530,7 @@ impl SessionWatch {
         }
         if let Some(wrapper) = wrapper {
             if wrapper.exited_at.is_some() {
-                sv.resume.forget_reopen(run.id());
-                self.end_exited(sv, run, true)?;
-                let receipt = sv.files.is_file(&self.receipt_path);
-                return sv
-                    .queue
-                    .finish_supervision(run.id(), sv.registration.token(), receipt)
-                    .map(Some);
+                return self.finish_exited(sv, run).map(Some);
             }
             let pulse = wrapper_pulse(
                 sv,
@@ -677,6 +606,140 @@ impl SessionWatch {
             );
         }
         self.awaits_answer = self.awaited_question(sv, run)?;
+        Ok(None)
+    }
+
+    /// The receipt, recorded as `receipt_observed` the first time it is
+    /// seen.
+    fn observe_receipt(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<()> {
+        if self.receipt_seen || !sv.files.is_file(&self.receipt_path) {
+            return Ok(());
+        }
+        self.receipt_seen = true;
+        self.receipt_seen_at = Some(sv.generators.clock.monotonic());
+        // The work interval ends here (`stats`' `work`); its load goes
+        // with it (task 197).
+        let mut payload = json!({"path": path_text(&self.receipt_path)?, "validated": false});
+        if let Value::Object(load) = serde_json::to_value(sv.take_load(run.id()))? {
+            payload.as_object_mut().expect("an object").extend(load);
+        }
+        sv.queue
+            .record_runtime_event(run.id(), EventKind::ReceiptObserved, payload)?;
+        info!(run_id = %run.id(), "receipt received for {}; waiting for the session to go idle (or a person's /exit)", run.id());
+        // A send it had not taken ends with the receipt.
+        Ok(())
+    }
+
+    /// The session idle after its receipt goes to validation with the
+    /// session open: `Some(Some(run))` once supervision finished,
+    /// `Some(None)` when the poll ends here (its stale receipt was asked to
+    /// be rewritten), `None` when the session is not idle after its receipt
+    /// and the poll goes on.
+    fn validate_when_idle(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        processes: &[RunProcess],
+    ) -> Result<Option<Option<TaskRun>>> {
+        let wrapper = processes.iter().find(|p| p.role == "wrapper");
+        // A session that already ended (on its own, by a person's /exit,
+        // or before this supervisor adopted the run) is not asked to exit.
+        let session_ended = wrapper.is_some_and(|w| w.exited_at.is_some());
+        // A fast session, or a wrapper slowed by load, can see the receipt and
+        // the idle before the wrapper registers its agent: the run is still
+        // `starting`, and taking it to validation would refuse that
+        // registration and end the session (task 1274).
+        let agent_registered = processes.iter().any(|p| p.role == "agent");
+        // Background work the session left running after its receipt is
+        // waited for up to the resume timeout, like a resumed session's:
+        // work that never ends must not hold the run without an attention.
+        // Past it validation can proceed; any later shutdown uses the
+        // wrapper exit request file.
+        let waited_out = waited_out_after_receipt(
+            sv.generators.clock.monotonic(),
+            self.receipt_seen_at,
+            sv.sessions.resume_timeout(),
+        );
+        if self.receipt_seen
+            && self.exit_requested.is_none()
+            && !session_ended
+            && agent_registered
+            && let Some(evidence) = match self.idle_after_receipt(sv)? {
+                // The session has not answered the request to rewrite
+                // its receipt yet: waited for up to the resume timeout,
+                // like background work after the receipt.
+                Some(idle)
+                    if self.stale.is_some_and(|n| {
+                        !n.answered_by(idle.modified()) && !n.waited_out(&*sv.files, sv.sessions)
+                    }) =>
+                {
+                    None
+                }
+                Some(idle) if waited_out => {
+                    idle.stopped_after_receipt(&*sv.files, &self.receipt_path)?
+                }
+                Some(idle) => idle.idle_after_receipt(&*sv.files, &self.receipt_path)?,
+                None => None,
+            }
+        {
+            if self.stale_receipt(sv, run)? {
+                return Ok(Some(None));
+            }
+            sv.queue
+                .record_runtime_event(run.id(), EventKind::SessionIdleObserved, evidence)?;
+            // The session stays open through validation and review, and
+            // is asked to exit only once the verdict is known (ADR-0027
+            // decision 1).
+            info!(run_id = %run.id(), "session of {} is idle after its receipt; validating with the session open", run.id());
+            self.recovery.stop(sv, run);
+            return sv
+                .queue
+                .finish_supervision_live(run.id(), sv.registration.token())
+                .map(|run| Some(Some(run)));
+        }
+        Ok(None)
+    }
+
+    /// The session whose wrapper exited ends its supervision: with its
+    /// receipt it goes to validation whatever its exit code, without one
+    /// it fails (ADR-t1594-1).
+    fn finish_exited(&mut self, sv: &mut Supervisor<'_>, run: &TaskRun) -> Result<TaskRun> {
+        sv.resume.forget_reopen(run.id());
+        self.end_exited(sv, run, true)?;
+        let receipt = sv.files.is_file(&self.receipt_path);
+        sv.queue
+            .finish_supervision(run.id(), sv.registration.token(), receipt)
+    }
+
+    /// One observation while the supervisor drains for a handoff
+    /// (ADR-t3077-1 decision 2): the receipt is observed as [`Self::poll`]
+    /// does, and, with `validate`, a session idle after it or whose wrapper
+    /// exited after it goes to validation; nothing else of the session is
+    /// followed, and no input but a stale receipt's request is typed into
+    /// it. `Some` once supervision finished.
+    pub(super) fn poll_handing_off(
+        &mut self,
+        sv: &mut Supervisor<'_>,
+        run: &TaskRun,
+        validate: bool,
+    ) -> Result<Option<TaskRun>> {
+        self.observe_receipt(sv, run)?;
+        if !validate || !self.receipt_seen {
+            return Ok(None);
+        }
+        self.stall.settle(sv, run, self.receipt_seen)?;
+        self.stop_idle_job(sv, run, true);
+        let processes = sv.queue.processes(run.id())?;
+        if let Some(moved) = self.validate_when_idle(sv, run, &processes)? {
+            return Ok(moved);
+        }
+        let exited = processes
+            .iter()
+            .find(|p| p.role == "wrapper")
+            .is_some_and(|w| w.exited_at.is_some());
+        if exited {
+            return self.finish_exited(sv, run).map(Some);
+        }
         Ok(None)
     }
 

@@ -77,6 +77,7 @@ pub(crate) use self::background::{
 pub use self::claim_defer::read_conflicts_at_start;
 pub(crate) use self::deliver::{Input, Submission};
 pub use self::e2e::RunE2ePort;
+use self::handoff_slots::Pass;
 pub(super) use self::headless::send_to_planner;
 pub(crate) use self::headless::{lock_waiting, provider_failure, write_request};
 pub use self::jobs::{
@@ -3180,7 +3181,7 @@ impl Supervisor<'_> {
     }
     /// One pass over the slots; with `unsettled_only`, over the slots a
     /// handoff waits for (their validation, e2e or landing in progress)
-    /// only ([`Slot::stepped`]).
+    /// and its workers' receipts only ([`Slot::pass`]).
     fn tick(&mut self, unsettled_only: bool) {
         self.sample_load();
         if !unsettled_only {
@@ -3188,12 +3189,16 @@ impl Supervisor<'_> {
         }
         let mut index = 0;
         while index < self.claim.slots.len() {
-            if !self.claim.slots[index].stepped(unsettled_only) {
+            let landing_waited = self.claim.slots.iter().any(Slot::landing_runs);
+            let pass = self.claim.slots[index].pass(unsettled_only, landing_waited);
+            if pass == Pass::Skip {
                 index += 1;
                 continue;
             }
             let mut slot = self.claim.slots.release(index);
-            let stepped = if slot.out_of_slot() {
+            let stepped = if let Pass::Receipt { validate } = pass {
+                self.observe_receipt_handing_off(&mut slot, validate)
+            } else if slot.out_of_slot() {
                 self.watch_waiting(&mut slot)
             } else {
                 self.step(&mut slot)
@@ -3728,6 +3733,50 @@ impl Supervisor<'_> {
             message,
         });
     }
+    /// The first session's supervision finished as `run`: its worker's
+    /// run goes to validation with the session open, a run its recovery
+    /// job parked to `/exit`, any other to rest.
+    fn supervision_finished(&mut self, slot: &mut Slot, run: TaskRun) -> Result<Step> {
+        let Phase::Session(watch) = &slot.phase else {
+            unreachable!("the session's slot is still in it");
+        };
+        // Parked by its recovery job's `resume` (task 442): the
+        // session is asked to exit and its workspace closed, as for
+        // a run parked by validation, and the lease goes.
+        if run.status() == RunStatus::NeedsSession {
+            let session = SessionRef {
+                workspace: watch.workspace.clone(),
+                resume: None,
+            };
+            slot.run = run;
+            slot.transition(
+                Phase::Exiting(ExitWatch::new(
+                    Some(session),
+                    AfterExit::Rest { close: true },
+                )),
+                EventKind::SupervisionFinished.as_str(),
+                &*self.queue,
+            );
+            return Ok(Step::Continue);
+        }
+        if run.status() != RunStatus::Validating {
+            self.queue
+                .release_lease(run.id(), self.registration.token())?;
+            return Ok(Step::Done(Box::new(run)));
+        }
+        let session = SessionRef {
+            workspace: watch.workspace.clone(),
+            resume: None,
+        };
+        let handle = self.validate(run.clone());
+        slot.run = run;
+        slot.transition(
+            Phase::Validating(Some(handle), Some(session)),
+            EventKind::SupervisionFinished.as_str(),
+            &*self.queue,
+        );
+        Ok(Step::Continue)
+    }
     fn step(&mut self, slot: &mut Slot) -> Result<Step> {
         // A landing releases the lease itself when it ends, so it is joined
         // before the lease is checked.
@@ -3996,45 +4045,7 @@ impl Supervisor<'_> {
                 let Some(run) = polled else {
                     return Ok(Step::Continue);
                 };
-                let Phase::Session(watch) = &slot.phase else {
-                    unreachable!("the session's slot is still in it");
-                };
-                // Parked by its recovery job's `resume` (task 442): the
-                // session is asked to exit and its workspace closed, as for
-                // a run parked by validation, and the lease goes.
-                if run.status() == RunStatus::NeedsSession {
-                    let session = SessionRef {
-                        workspace: watch.workspace.clone(),
-                        resume: None,
-                    };
-                    slot.run = run;
-                    slot.transition(
-                        Phase::Exiting(ExitWatch::new(
-                            Some(session),
-                            AfterExit::Rest { close: true },
-                        )),
-                        EventKind::SupervisionFinished.as_str(),
-                        &*self.queue,
-                    );
-                    return Ok(Step::Continue);
-                }
-                if run.status() != RunStatus::Validating {
-                    self.queue
-                        .release_lease(run.id(), self.registration.token())?;
-                    return Ok(Step::Done(Box::new(run)));
-                }
-                let session = SessionRef {
-                    workspace: watch.workspace.clone(),
-                    resume: None,
-                };
-                let handle = self.validate(run.clone());
-                slot.run = run;
-                slot.transition(
-                    Phase::Validating(Some(handle), Some(session)),
-                    EventKind::SupervisionFinished.as_str(),
-                    &*self.queue,
-                );
-                Ok(Step::Continue)
+                self.supervision_finished(slot, run)
             }
             Phase::Validating(handle, session) => {
                 // A validation a park joined and set aside, whose park

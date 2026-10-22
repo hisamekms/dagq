@@ -2244,6 +2244,24 @@ name = "runtime_handoff::a_handoff_starts_no_landing_and_hands_over_a_run_awaiti
 reason = "境界（supervisorの配線・adopt）: handoffのdrainが走る着地だけを待ち、着地slot待ちのrunをleaseごとexecの後のprocessに渡し、そのprocessがadoptでreviewなしに着地させる"
 task = 3077
 
+# 15.6s
+[[test]]
+name = "runtime_handoff::a_handoff_draining_for_a_landing_observes_a_receipt_and_validates_it"
+reason = "B 境界（supervisor の配線・handoff・プロセス）: 着地の検証を待つ handoff の drain のあいだに実の worker の session が書いた receipt を drain の pass が観測して validation まで進め、exec の後の同じ token の process が receipt と validation を記録し直さずに review して着地させる。観測するか validation を始めるかの判断は supervise::execution::handoff_slots の unit test"
+task = 3078
+
+# about 16s
+[[test]]
+name = "runtime_handoff::a_handoff_draining_for_a_landing_validates_a_receipt_whose_session_ended"
+reason = "B 境界（supervisor の配線・handoff・プロセス）: 着地の検証を待つ handoff の drain のあいだに receipt を書いて turn が失敗し wrapper が終わった実の session を、drain の pass が終了コードによらず validation まで進め、exec の後の同じ token の process が記録し直さずに着地させる。観測するか validation を始めるかの判断は supervise::execution::handoff_slots の unit test"
+task = 3078
+
+# 16.0s
+[[test]]
+name = "runtime_handoff::after_a_handoff_a_receipt_observed_while_draining_is_validated_by_the_next_process"
+reason = "B 境界（supervisor の配線・handoff・プロセス）: drain が観測した receipt の session が idle にならないまま着地が終わると validation を待たずに exec し、次の process が receipt_observed の記録から session を組み立て直して receipt を記録し直さずに validation・着地まで進める。判断は supervise::execution::handoff_slots の unit test"
+task = 3078
+
 # 13.4〜16.5s (stress 5 under the host's load of other runs, task 3033)
 [[test]]
 name = "runtime_review_revise_limit::the_landing_branchs_revise_limit_bounds_the_runs_revises_across_resumes"

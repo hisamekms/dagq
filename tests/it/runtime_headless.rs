@@ -1115,12 +1115,20 @@ fn a_turn_that_ends_by_itself_leaves_what_runs_outside_its_group() {
 /// idle marker: the supervisor sees the session's end only as its
 /// wrapper's exit.
 #[derive(Default)]
-struct ReceiptSeenLate {
+pub(crate) struct ReceiptSeenLate {
     hidden: Mutex<bool>,
     idle_unseen: bool,
 }
 
 impl ReceiptSeenLate {
+    /// Run files that never show the idle marker (`idle_unseen`).
+    pub(crate) fn idle_unseen() -> Self {
+        Self {
+            idle_unseen: true,
+            ..Self::default()
+        }
+    }
+
     /// Whether `path` is the idle marker while it is hidden.
     fn idle_hidden(&self, path: &Path) -> bool {
         path.file_name().is_some_and(|name| name == "idle.json")
@@ -1272,10 +1280,7 @@ fn a_receipt_written_before_its_turn_failed_goes_to_validation() {
     let base = git_out(&repo, &["rev-parse", "main"]);
     let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
     let options = SuperviseOptions {
-        files: Some(RunFilesPort(Arc::new(ReceiptSeenLate {
-            idle_unseen: true,
-            ..ReceiptSeenLate::default()
-        }))),
+        files: Some(RunFilesPort(Arc::new(ReceiptSeenLate::idle_unseen()))),
         ..supervise_options(4, true)
     };
     let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);

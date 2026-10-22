@@ -30,6 +30,11 @@ use caseは`src/application/supervise/host_ops/handoff.rs`（登録と要求）�
   着地slotを待つrunは、着地の保留の有無に依らず着地（とその前のe2e）を始めず、leaseを持ったまま引き継ぐ（`Slot::rebuildable`。待つのは要求の時点で既に始まっていた検証・e2e・着地だけ。[ADR-t3077-1](../../adr/2026-10-22-t3077-1-handoff-drain-starts-no-landing-and-hands-over-runs-awaiting-the-slot.md)）。
   次のプロセスは、`awaiting_integration`のrunをreviewのadoptで着地の列に戻し（人の`land`で並んだrunはleaseを返して承認の着地へ）、resumeの後に着地の列に並んだ承認済みの`needs_session`のrunをresumeし直さずに着地slotの待ちに戻す（`Takeover::Land`）。
   止めるdrainは今どおり着地slotを待つrunを進める。
+  handoffのdrainは各passで、走るworkerのslot（人の答えを待ってslotの外にいるものを除く）のreceiptを通常のpassと同じく観測して`receipt_observed`を記録する（`Slot::pass`。[ADR-t3077-1](../../adr/2026-10-22-t3077-1-handoff-drain-starts-no-landing-and-hands-over-runs-awaiting-the-slot.md)の決定2）。
+  そのpassで、要求の前に始まっていた着地がまだ走っていれば、receiptの後にidleになったsessionと、receiptを残してwrapperが終わったsessionをvalidationまで進める（validationは組み立て直せないので、execはその終わりを待つ。taskのreplan・hold・fenceで停めるrunは進めず、次のプロセスに渡す）。
+  走る着地がもう無ければ新しいvalidationを始めず、execに進む。
+  次のプロセスは、receiptのfileと`receipt_observed`の記録からreceiptを見たものとしてsessionを組み立て直し（記録し直さない）、idleを見てvalidationを始める。
+  sessionのそのほかの見張り（答えの配達・stall・`/exit`）はdrainのあいだ進めない。
   待つあいだも各passで、走っているplan review / goal reviewのjobが終わっていれば回収してverdictを適用する（verdictでreadyになったtaskは待ちのあいだclaimせず、次のプロセスがclaimする）。
   全slotが組み立て直せる状態になったら、`prepare_handoff`はobserverを止めた後、plan review / goal reviewのjobを1回pollし、終わっていれば回収してverdictを適用する（終わったjobのverdictを捨てて次のプロセスで同じattemptをやり直さない）。
   そのうえでobserverの子プロセスと、まだ走っているheadlessのreview / triage / plan review / goal reviewのjobを（その子孫ごと）止める（`headless_jobs`の行は`stopped`で閉じ、execの前に書く。[Headless job processes](headless-job-processes.md)）。

@@ -400,6 +400,283 @@ receipt \"$(git rev-parse HEAD)\"",
     );
 }
 
+/// A supervisor of the handoff's tests, given the `dagq` the test owns
+/// ([`crate::common::service::owned_executable`], in the queue's
+/// directory), so a service it starts ends with the test's process. It
+/// returns without joining the sessions it started: a worker's session
+/// outlives the exec.
+fn supervise_owned(
+    db: &Path,
+    repo: &Path,
+    backend: &TestWorkspace,
+    reviewer: &TestReviewer,
+    options: &SuperviseOptions,
+) -> Value {
+    let _waiting = crate::common::within(crate::common::STEP_LIMIT, "supervise to return");
+    let dagq = crate::common::service::owned_executable(db.parent().unwrap());
+    runtime::supervise_with_reviewer(
+        db,
+        repo,
+        backend,
+        &claude_stub(db),
+        reviewer,
+        &dagq,
+        options,
+    )
+    .unwrap()
+}
+
+/// How the sessions of [`draining_while_a_worker_writes_its_receipt`]
+/// end their turns.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TurnEnd {
+    /// As the fixture's do: the idle marker shows it.
+    Idle,
+    /// The first supervisor never sees an idle marker
+    /// ([`crate::runtime_headless::ReceiptSeenLate::idle_unseen`]): task
+    /// 1's turn fails after its receipt and its wrapper ends with it, as a
+    /// script of task 2 that ends the same way does.
+    Exit,
+}
+
+/// A handoff's drain waiting for the landing of task 1, held by its
+/// verification, while the worker of task 2 runs `script`, which waits for
+/// `$EXIT.go` before its receipt. Returns the thread, the release file, the
+/// token, task 2's run and the backend and reviewer, once the drain has
+/// read the request and `$EXIT.go` is written.
+#[allow(clippy::type_complexity)]
+fn draining_while_a_worker_writes_its_receipt(
+    db: &Path,
+    repo: &Path,
+    script: &str,
+    end: TurnEnd,
+) -> (
+    thread::JoinHandle<Value>,
+    PathBuf,
+    LeaseToken,
+    TaskRun,
+    Arc<TestWorkspace>,
+    Arc<TestReviewer>,
+) {
+    let release = db.with_extension("release");
+    let verification = json!([crate::common::await_path(&release)]);
+    Connection::open(db)
+        .unwrap()
+        .execute(
+            "UPDATE tasks SET verification_commands=?1 WHERE id=1",
+            [verification.to_string()],
+        )
+        .unwrap();
+    // Each run writes a file of its own, so the second lands on the first.
+    let first = "printf 'work\\n' > \"$RUN_ID.txt\" && git add \"$RUN_ID.txt\" && git commit -q -m work; \
+receipt \"$(git rev-parse HEAD)\"";
+    let backend = Arc::new(TestWorkspace::new(
+        db,
+        false,
+        &match end {
+            TurnEnd::Idle => first.to_owned(),
+            TurnEnd::Exit => format!("{first}; exit 1"),
+        },
+    ));
+    backend.script_for(2, script);
+    let reviewer = Arc::new(TestReviewer::new(&[verdict("pass", &[], "ready to land")]));
+    let options = SuperviseOptions {
+        files: (end == TurnEnd::Exit).then(|| {
+            dagq::runtime::RunFilesPort(Arc::new(
+                crate::runtime_headless::ReceiptSeenLate::idle_unseen(),
+            ))
+        }),
+        ..supervise_options(2, false)
+    };
+    let passes = options.passes.clone();
+    let supervisor = {
+        let (db, repo, backend, reviewer, options) = (
+            db.to_owned(),
+            repo.to_owned(),
+            backend.clone(),
+            reviewer.clone(),
+            options.clone(),
+        );
+        thread::spawn(move || supervise_owned(&db, &repo, &backend, &reviewer, &options))
+    };
+    wait_until(db, crate::common::STEP_LIMIT, |queue| {
+        event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"integration_started")
+    });
+    let mut queue = SqliteQueue::open(db).unwrap();
+    let second = add_ready_task(&mut queue, "writes its receipt while draining", &[]);
+    assert_eq!(second, TaskId::new(2));
+    wait_until(db, crate::common::STEP_LIMIT, |queue| {
+        queue
+            .show(second)
+            .unwrap()
+            .runs
+            .first()
+            .is_some_and(|run| run.status() == RunStatus::Running)
+    });
+    let token = only_registration(db).token;
+    assert!(queue.request_handoff(&token, "/next/dagq").unwrap());
+    await_passes(&passes, SOME_PASSES);
+    let run = queue.show(second).unwrap().runs[0].clone();
+    fs::write(
+        exit_request_path(run.run_dir().unwrap()).with_extension("go"),
+        "",
+    )
+    .unwrap();
+    (supervisor, release, token, run, backend, reviewer)
+}
+
+/// The process the exec'd binary runs: the same token, continued with the
+/// `dagq` the test owns, until its runs are done.
+fn supervise_after_the_exec(
+    db: &Path,
+    repo: &Path,
+    backend: &TestWorkspace,
+    reviewer: &TestReviewer,
+    token: LeaseToken,
+) -> Value {
+    let outcome = supervise_owned(
+        db,
+        repo,
+        backend,
+        reviewer,
+        &SuperviseOptions {
+            handoff_token: Some(token),
+            ..supervise_options(2, true)
+        },
+    );
+    backend.join();
+    outcome
+}
+
+/// A worker running `script` writes its receipt while a handoff's drain
+/// waits for the landing that had started before it was asked: the
+/// drain's pass observes it and takes the run on to validation; the exec
+/// comes once the landing ended, and the next process reviews and lands
+/// the run without observing the receipt or validating it again.
+fn a_receipt_while_draining_is_validated_before_the_exec(script: &str, end: TurnEnd) {
+    let (_dir, repo, db) = fixture();
+    let (supervisor, release, token, run, backend, reviewer) =
+        draining_while_a_worker_writes_its_receipt(&db, &repo, script, end);
+    wait_until(&db, crate::common::STEP_LIMIT, |queue| {
+        event_kinds(&queue.show(TaskId::new(2)).unwrap()).contains(&"validation_finished")
+    });
+    // Observed and validated while the drain still waits for the landing.
+    assert!(!supervisor.is_finished());
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    assert!(
+        !event_kinds(&queue.show(TaskId::new(1)).unwrap()).contains(&"run_integrated"),
+        "task 1 has not landed yet"
+    );
+    assert_eq!(events_of(&db, run.id(), "receipt_observed").len(), 1);
+    // A session that ended went to validation by its wrapper's exit.
+    let ended = events_of(&db, run.id(), "supervision_finished");
+    match end {
+        TurnEnd::Idle => assert_eq!(
+            ended,
+            [json!({"status": "validating", "exit_code": null, "session_live": true})]
+        ),
+        TurnEnd::Exit => {
+            assert!(events_of(&db, run.id(), "session_idle_observed").is_empty());
+            assert_eq!(
+                ended,
+                [json!({"status": "validating", "exit_code": 1, "receipt": true})]
+            );
+        }
+    }
+    std::fs::write(&release, "go").unwrap();
+    let outcome = joined(supervisor, "the supervisor asked to hand off");
+    assert_eq!(outcome["outcome"], "handoff", "{outcome}");
+    assert_eq!(outcome["handed_over"], 1, "{outcome}");
+    assert_eq!(
+        queue.show(TaskId::new(1)).unwrap().task.status(),
+        TaskStatus::Completed
+    );
+
+    let outcome = supervise_after_the_exec(&db, &repo, &backend, &reviewer, token);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let shown = queue.show(TaskId::new(2)).unwrap();
+    assert_eq!(shown.runs[0].status(), RunStatus::Integrated);
+    assert_eq!(events_of(&db, run.id(), "receipt_observed").len(), 1);
+    assert_eq!(events_of(&db, run.id(), "validation_finished").len(), 1);
+}
+
+/// ADR-t3077-1 decision 2: a session idle after its receipt.
+#[test]
+fn a_handoff_draining_for_a_landing_observes_a_receipt_and_validates_it() {
+    a_receipt_while_draining_is_validated_before_the_exec(GATED_AGENT, TurnEnd::Idle);
+}
+
+/// ADR-t3077-1 decision 2: a turn that wrote its receipt and failed, its
+/// wrapper ending with it before any idle marker is seen, goes to
+/// validation whatever its exit code (ADR-t1594-1), as a session idle
+/// after its receipt does.
+#[test]
+fn a_handoff_draining_for_a_landing_validates_a_receipt_whose_session_ended() {
+    a_receipt_while_draining_is_validated_before_the_exec(
+        "await_file \"$EXIT.go\"; commit work; receipt \"$(git rev-parse HEAD)\"; exit 1",
+        TurnEnd::Exit,
+    );
+}
+
+/// ADR-t3077-1 decision 2: a receipt the drain observed while it waited for
+/// a landing, of a session not idle after it when the landing ended, does
+/// not hold the exec for its validation; the next process goes on from
+/// the recorded `receipt_observed`, without recording it again, and
+/// validates, reviews and lands the run.
+#[test]
+fn after_a_handoff_a_receipt_observed_while_draining_is_validated_by_the_next_process() {
+    let (_dir, repo, db) = fixture();
+    let (supervisor, release, token, run, backend, reviewer) =
+        draining_while_a_worker_writes_its_receipt(
+            &db,
+            &repo,
+            "await_file \"$EXIT.go\"; commit work; receipt \"$(git rev-parse HEAD)\"; \
+await_file \"$EXIT.idle\"",
+            TurnEnd::Idle,
+        );
+    wait_until(&db, crate::common::STEP_LIMIT, |queue| {
+        event_kinds(&queue.show(TaskId::new(2)).unwrap()).contains(&"receipt_observed")
+    });
+    assert!(!supervisor.is_finished());
+    std::fs::write(&release, "go").unwrap();
+    let outcome = joined(supervisor, "the supervisor asked to hand off");
+    assert_eq!(outcome["outcome"], "handoff", "{outcome}");
+    assert_eq!(outcome["handed_over"], 1, "{outcome}");
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let kinds = event_kinds(&queue.show(TaskId::new(2)).unwrap())
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    assert!(
+        !kinds.iter().any(|k| k == "validation_finished"),
+        "{kinds:?}"
+    );
+    assert_eq!(
+        queue.show(TaskId::new(2)).unwrap().runs[0].status(),
+        RunStatus::Running
+    );
+
+    let next = {
+        let (db, repo, backend, reviewer) =
+            (db.clone(), repo.clone(), backend.clone(), reviewer.clone());
+        thread::spawn(move || supervise_after_the_exec(&db, &repo, &backend, &reviewer, token))
+    };
+    wait_until(&db, crate::common::STEP_LIMIT, |queue| {
+        event_kinds(&queue.show(TaskId::new(2)).unwrap()).contains(&"supervisor_handed_off")
+    });
+    fs::write(
+        exit_request_path(run.run_dir().unwrap()).with_extension("idle"),
+        "",
+    )
+    .unwrap();
+    let outcome = joined(next, "the supervisor after the handoff");
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let shown = queue.show(TaskId::new(2)).unwrap();
+    assert_eq!(shown.runs[0].status(), RunStatus::Integrated);
+    assert_eq!(events_of(&db, run.id(), "receipt_observed").len(), 1);
+    assert_eq!(events_of(&db, run.id(), "validation_finished").len(), 1);
+}
+
 /// The supervisor the exec'd binary runs: the same token, continued.
 fn supervise_after_handoff(
     db: &Path,

@@ -50,6 +50,54 @@ impl Slot {
     pub(super) fn stepped(&self, handing_off: bool) -> bool {
         !handing_off || !self.rebuildable()
     }
+
+    /// What a pass does with this slot ([`Self::stepped`]), `landing_waited`
+    /// whether a landing the handoff's drain waits for still runs: the
+    /// drain observes a worker's receipt in its slot on each pass, and
+    /// takes it on to validation only while that landing runs, so that the
+    /// validation ends within the wait (ADR-t3077-1 decision 2). Once no
+    /// landing runs, the next process validates it from the recorded
+    /// `receipt_observed`, and the exec waits for no new validation.
+    pub(super) fn pass(&self, handing_off: bool, landing_waited: bool) -> Pass {
+        pass_of(
+            self.stepped(handing_off),
+            matches!(self.phase, Phase::Session(_)) && !self.out_of_slot(),
+            landing_waited,
+        )
+    }
+
+    /// Whether this slot's landing runs on: one that ended and is not
+    /// joined yet runs no more.
+    pub(super) fn landing_runs(&self) -> bool {
+        matches!(&self.phase, Phase::Landing(Some(handle)) if !handle.is_finished())
+    }
+}
+
+/// [`Slot::pass`] of a slot a pass steps when `stepped`, whose worker is
+/// at work in its slot when `worker`, with `landing_waited` whether a
+/// landing the drain waits for still runs.
+fn pass_of(stepped: bool, worker: bool, landing_waited: bool) -> Pass {
+    if stepped {
+        Pass::Step
+    } else if worker {
+        Pass::Receipt {
+            validate: landing_waited,
+        }
+    } else {
+        Pass::Skip
+    }
+}
+
+/// What a pass does with a slot ([`Slot::pass`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Pass {
+    /// Stepped as any pass steps it.
+    Step,
+    /// A handoff's drain observes its worker's receipt, and with
+    /// `validate` takes a session idle after it on to validation.
+    Receipt { validate: bool },
+    /// Left as it is: handed over.
+    Skip,
 }
 
 /// What the process that took a registration over after an exec does
@@ -259,6 +307,32 @@ impl Supervisor<'_> {
             kept += 1;
         }
         kept
+    }
+
+    /// A handoff's drain's look at a worker's slot ([`Pass::Receipt`]):
+    /// its receipt is observed, and with `validate` a session idle after
+    /// it goes to validation as a pass's step takes it. A run whose task is
+    /// being replanned, held or fenced is not validated: its park is the
+    /// next process's, as the drain parks nothing it hands over.
+    pub(super) fn observe_receipt_handing_off(
+        &mut self,
+        slot: &mut Slot,
+        validate: bool,
+    ) -> Result<Step> {
+        if !self
+            .queue
+            .holds_lease(slot.run.id(), self.registration.token())?
+        {
+            return Ok(Step::Disowned);
+        }
+        let validate = validate && self.park_for(&slot.run)?.is_none();
+        let Phase::Session(watch) = &mut slot.phase else {
+            return Ok(Step::Continue);
+        };
+        match watch.poll_handing_off(self, &slot.run, validate)? {
+            Some(run) => self.supervision_finished(slot, run),
+            None => Ok(Step::Continue),
+        }
     }
 
     /// A pass of a supervisor whose owner is gone (a test's process,
@@ -562,6 +636,41 @@ mod tests {
         let e2e_waits = Slot::new(run(RunStatus::AwaitingIntegration), Phase::AwaitingE2e);
         assert!(e2e_waits.rebuildable());
         assert!(!e2e_waits.stepped(true));
+    }
+
+    /// ADR-t3077-1 decision 2: a handoff's drain observes the receipt of a
+    /// worker in its slot, and takes it on to validation only while a
+    /// landing it waits for runs; a worker waiting for a person outside
+    /// the slots and the other rebuildable phases are left as they are,
+    /// and any other pass, a stop's drain too, steps every slot. Whether
+    /// a landing's thread still runs is the integration tests' boundary
+    /// (`runtime_handoff`).
+    #[test]
+    fn a_handoff_observes_a_workers_receipt_and_validates_it_only_while_a_landing_runs() {
+        for landing_waited in [false, true] {
+            assert_eq!(
+                pass_of(false, true, landing_waited),
+                Pass::Receipt {
+                    validate: landing_waited
+                }
+            );
+            // A worker out of the slots, or a run handed over.
+            assert_eq!(pass_of(false, false, landing_waited), Pass::Skip);
+            for worker in [false, true] {
+                assert_eq!(pass_of(true, worker, landing_waited), Pass::Step);
+            }
+        }
+        let run = |status| super::super::recovery::test_run(status, None);
+        let awaiting = Slot::new(run(RunStatus::AwaitingIntegration), Phase::AwaitingSlot);
+        for landing_waited in [false, true] {
+            assert_eq!(awaiting.pass(true, landing_waited), Pass::Skip);
+            assert_eq!(awaiting.pass(false, landing_waited), Pass::Step);
+        }
+        assert!(!awaiting.landing_runs());
+        // A landing is waited for, and stepped; one joined runs no more.
+        let landing = Slot::new(run(RunStatus::Integrating), Phase::Landing(None));
+        assert_eq!(landing.pass(true, true), Pass::Step);
+        assert!(!landing.landing_runs());
     }
 
     /// `supervisor_handed_off` names the run's status and the state its

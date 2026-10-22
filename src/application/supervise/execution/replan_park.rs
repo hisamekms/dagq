@@ -445,7 +445,7 @@ impl Supervisor<'_> {
     /// What parks `run` in its slot now ([`choose_park`] on what the queue
     /// says): the run's operations, its task's fence and, under a hold's
     /// fence, its task's open hold.
-    fn park_for(&self, run: &TaskRun) -> Result<Option<ParkFor>> {
+    pub(super) fn park_for(&self, run: &TaskRun) -> Result<Option<ParkFor>> {
         let fence = self.queue.turn_fence(run.task_id())?;
         let hold = match fence {
             Some(Fence::Hold(_)) => self.queue.open_hold(run.task_id())?,
