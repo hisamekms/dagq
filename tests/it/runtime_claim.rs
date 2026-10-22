@@ -1773,6 +1773,132 @@ fn the_claim_records_its_slots_its_line_and_its_attributes() {
     assert_eq!(started.payload["slots"], 1);
 }
 
+/// The slots-full records of the queue `db`, oldest first: each one's kind,
+/// supervisor, class and the classes it leaves open.
+fn slots_full_records(db: &Path) -> Vec<(String, Value, Value, Value)> {
+    SqliteQueue::open(db)
+        .unwrap()
+        .all_events()
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind.as_str().starts_with("slots_full_"))
+        .map(|event| {
+            let payload = &event.payload;
+            (
+                event.kind.to_string(),
+                payload["supervisor"].clone(),
+                payload["class"].clone(),
+                payload["open"].clone(),
+            )
+        })
+        .collect()
+}
+
+/// A process that goes on under a supervisor's token reads the classes it
+/// left open from its newest slots-full record (ADR-t1662-1 decision 6).
+/// When the token's records do not say what they leave open (an earlier
+/// binary's), the process's first pass records every class once, the heavy
+/// class full and the light one free; the process after it starts nothing
+/// again, and the slot freed ends the interval once. Neither another
+/// supervisor's newer record nor the newer start marks of the token's
+/// processes are read as its newest record.
+#[test]
+fn a_supervisor_started_again_goes_on_from_its_newest_slots_full_record() {
+    let (_dir, repo, db) = fixture();
+    let backend = Arc::new(TestWorkspace::new(&db, false, GATED_AGENT));
+    // Start a process under `token` (a new one for `None`), wait for its
+    // first pass or for `records` slots-full records, and return it.
+    let start = |token: Option<&LeaseToken>, records: usize| {
+        let options = SuperviseOptions {
+            handoff_token: token.cloned(),
+            ..supervise_options(1, true)
+        };
+        let passes = options.passes.clone();
+        let supervisor = {
+            let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
+            thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
+        };
+        wait_until(&db, crate::common::STEP_LIMIT, |_| {
+            slots_full_records(&db).len() >= records
+        });
+        await_passes(&passes, 2);
+        supervisor
+    };
+    let hand_off = |supervisor: thread::JoinHandle<Result<Value>>| {
+        let token = SqliteQueue::open(&db).unwrap().supervisors().unwrap()[0]
+            .token
+            .clone();
+        let queue = SqliteQueue::open(&db).unwrap();
+        assert!(queue.request_handoff(&token, "/next/dagq").unwrap());
+        let outcome = joined(supervisor, "the supervisor asked to hand off").unwrap();
+        assert_eq!(outcome["outcome"], "handoff", "{outcome}");
+        token
+    };
+    let first = start(None, 1);
+    let token = hand_off(first);
+    let full =
+        |kind: &str, class: &str, open: Value| (kind.to_owned(), json!(token), json!(class), open);
+    assert_eq!(
+        slots_full_records(&db),
+        [full("slots_full_started", "heavy", json!(["heavy"]))]
+    );
+
+    // The token's record as an earlier binary wrote it, and a newer one of
+    // another supervisor that leaves nothing open.
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE run_events SET payload=json_remove(payload,'$.open')
+             WHERE kind LIKE 'slots_full_%'",
+            [],
+        )
+        .unwrap();
+    SqliteQueue::open(&db)
+        .unwrap()
+        .record_queue_event(
+            EventKind::SlotsFullEnded,
+            json!({"supervisor": "another", "class": "heavy", "open": [], "running": 0, "slots": 1}),
+        )
+        .unwrap();
+    let earlier = slots_full_records(&db).len();
+    let second = start(Some(&token), earlier + 2);
+    assert_eq!(hand_off(second), token);
+    let records = slots_full_records(&db);
+    assert_eq!(
+        records[earlier..],
+        [
+            full("slots_full_started", "heavy", json!(["heavy", "light"])),
+            full("slots_full_ended", "light", json!(["heavy"])),
+        ]
+    );
+
+    // The next process goes on from that record, and the slot freed ends
+    // the interval once.
+    let third = start(Some(&token), 0);
+    assert_eq!(slots_full_records(&db), records);
+    let run = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap()
+        .runs[0]
+        .clone();
+    fs::write(
+        exit_request_path(run.run_dir().unwrap()).with_extension("go"),
+        "",
+    )
+    .unwrap();
+    let outcome = joined(third, "the supervisor after the handoffs").unwrap();
+    backend.join();
+    assert_eq!(
+        outcome["runs"][0]["status"], "awaiting_integration",
+        "{outcome}"
+    );
+    assert_eq!(
+        slots_full_records(&db)[records.len()..],
+        [full("slots_full_ended", "heavy", json!([]))]
+    );
+}
+
 /// The supervisor records main's history as it moves
 /// (docs/design/main-history.md): the commit a person's
 /// `integrate` put on main is recorded once by the pass after the landing,

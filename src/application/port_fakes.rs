@@ -10,12 +10,16 @@ use std::cell::RefCell;
 
 /// The supervisors' registrations ([`SupervisorReads::supervisors`]) and
 /// the queue's events ([`EventStore::latest_events_of`],
+/// [`EventStore::latest_events_by_supervisor`],
 /// [`EventStore::record_queue_event`], [`EventStore::all_events`]), newest
 /// last.
 #[derive(Default)]
 pub(crate) struct SupervisorsAndEvents {
     pub(crate) registrations: Vec<SupervisorRegistration>,
     pub(crate) events: RefCell<Vec<RunEvent>>,
+    /// Whether [`EventStore::latest_events_by_supervisor`] fails, as a read
+    /// of a queue that is busy or broken does.
+    pub(crate) by_supervisor_fails: bool,
 }
 
 #[allow(unused_variables)]
@@ -130,7 +134,23 @@ impl EventStore for SupervisorsAndEvents {
         kinds: &[&str],
         supervisors: &[&str],
     ) -> Result<Vec<RunEvent>> {
-        unreachable!("latest_events_by_supervisor is not what the test reaches")
+        anyhow::ensure!(!self.by_supervisor_fails, "the events could not be read");
+        let events = self.events.borrow();
+        let mut newest: Vec<RunEvent> = supervisors
+            .iter()
+            .filter_map(|supervisor| {
+                events
+                    .iter()
+                    .rev()
+                    .find(|event| {
+                        kinds.contains(&event.kind.as_str())
+                            && event.payload["supervisor"].as_str() == Some(*supervisor)
+                    })
+                    .cloned()
+            })
+            .collect();
+        newest.sort_by_key(|event| event.id);
+        Ok(newest)
     }
     fn events_of_between(
         &self,

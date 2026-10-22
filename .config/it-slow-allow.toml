@@ -2231,3 +2231,9 @@ task = 2474
 name = "runtime_clone::a_container_turn_writes_its_work_and_refuses_to_restore_over_a_clone_that_changed"
 reason = "B 境界（Git・プロセス）: 実際の dagq relay turn を 4 回起動し、executor が実の git で clone の staged・unstaged の差分と untracked（実行権限）を状態の世代と合わせて run dir に書き出すこと、保留の後に変わった clone への復元を agent を動かさず拒み clone に触れないこと、次の turn でも同じであることを確かめる。照合と拒否の判断は domain::clone_work の unit test"
 task = 2474
+
+# 5.3s to 6.9s (stress 5 under the host's load of other runs, task 3047)
+[[test]]
+name = "runtime_claim::a_supervisor_started_again_goes_on_from_its_newest_slots_full_record"
+reason = "B 境界（supervisor の配線・SQLite・handoff）: 同じ token の 3 つの process を handoff で順に起動し、起動時の slots_full の読み戻し（event の種類・token の絞り込み・最新の 1 件）を実の queue で通して、open の無い記録では全 class を 1 回記録し直し、次の process は重ねず、枠が空いたら終わりを 1 本だけ記録することを確かめる。続けるか記録し直すかの判断は domain::pre_claim の unit test、読めないときは supervise::execution::stages の unit test"
+task = 3047

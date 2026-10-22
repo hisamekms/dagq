@@ -862,6 +862,68 @@ mod tests {
         );
     }
 
+    /// A supervisor that cannot read its slots-full records at its first
+    /// pass records every class again, each once, and goes on from what it
+    /// recorded; one that reads them goes on from its newest record.
+    #[test]
+    fn an_unreadable_slots_full_record_records_every_class_once() {
+        use crate::application::port_fakes::SupervisorsAndEvents;
+        let token = LeaseToken::new("s");
+        let records = |log: &SupervisorsAndEvents| -> Vec<(String, Value, Value)> {
+            log.events
+                .borrow()
+                .iter()
+                .map(|e| {
+                    let p = &e.payload;
+                    (
+                        e.kind.as_str().to_owned(),
+                        p["class"].clone(),
+                        p["open"].clone(),
+                    )
+                })
+                .collect()
+        };
+        for fails in [false, true] {
+            let log = SupervisorsAndEvents {
+                by_supervisor_fails: fails,
+                ..SupervisorsAndEvents::default()
+            };
+            let heavy = BTreeSet::from([SlotClass::Heavy]);
+            log.record_queue_event(
+                EventKind::SlotsFullStarted,
+                pre_claim::slots_full_payload(&token, SlotClass::Heavy, &heavy, 1, 1),
+            )
+            .unwrap();
+            let mut claim = claim_state(LightChanges::default());
+            claim.slots.admit(slot("r1"));
+            claim.note_slots_full(&log, &token, 1);
+            claim.note_slots_full(&log, &token, 1);
+            let recorded = records(&log);
+            if fails {
+                assert_eq!(
+                    recorded[1..],
+                    [
+                        (
+                            "slots_full_started".into(),
+                            json!("heavy"),
+                            json!(["heavy", "light"])
+                        ),
+                        ("slots_full_ended".into(), json!("light"), json!(["heavy"])),
+                    ]
+                );
+            } else {
+                assert_eq!(recorded.len(), 1, "{recorded:?}");
+            }
+            let before = recorded.len();
+            claim.slots.release(0);
+            claim.note_slots_full(&log, &token, 1);
+            assert_eq!(
+                records(&log)[before..],
+                [("slots_full_ended".into(), json!("heavy"), json!([]))]
+            );
+        }
+    }
+
     /// The phases a fake log records, and the run's other events that
     /// [`record_rest`] reads.
     #[derive(Default)]
