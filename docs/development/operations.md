@@ -1,7 +1,7 @@
 ---
 id: development-operations
 type: development
-title: このrepositoryの本番queueの運用（固定バイナリ・使い捨てのqueue・hostのツール・hostのswapとメモリ・dagq.toml・upのコマンド・KPIの印・secret・人への報告）
+title: このrepositoryの本番queueの運用（固定バイナリ・使い捨てのqueue・hostのツール・hostのswapとメモリ・containerのmachineの資源・dagq.toml・upのコマンド・KPIの印・secret・人への報告）
 status: current
 created: 2026-10-03
 owners:
@@ -17,7 +17,7 @@ related:
 
 # このrepositoryの本番queueの運用
 
-このrepository（dagq自身）の本番queueを動かし、固定バイナリ・`dagq.toml`・hostのツールに触るときの今の規則。読むのは、人・inboxが`up` / `down` / `install`、hostのツール、pushに触る前とhostのswapが満ちたのを見たとき、人・inbox・plannerが`dagq.toml`、KPIの印に触る前と、workerが実バイナリや実queueでの確認が要ると思ったとき（[workerがhostと実queueでできないこと](#workerがhostと実queueでできないこと)だけ）。
+このrepository（dagq自身）の本番queueを動かし、固定バイナリ・`dagq.toml`・hostのツールに触るときの今の規則。読むのは、人・inboxが`up` / `down` / `install`、hostのツール、`host.toml`、pushに触る前とhostのswapが満ちたのを見たとき、人・inbox・plannerが`dagq.toml`、KPIの印に触る前と、workerが実バイナリや実queueでの確認が要ると思ったとき（[workerがhostと実queueでできないこと](#workerがhostと実queueでできないこと)だけ）。
 
 本番queueと開発環境の境界の短い規則はAGENTS.mdの「本番 queue と開発環境の境界」だけが持ち、この文書は繰り返さない。この文書が持つのは、その規則が当たるsession・理由・実装への参照と、AGENTS.mdに無いこのrepositoryの運用の規則。dagqの汎用の操作（どのrepositoryにも当たる手順と、その理由）はpluginのskillとreference、実装の姿は`docs/design/`、経緯は[運用の規則の経緯](../plans/operation-rules-history.md)とADR、今の設定値は`dagq.toml`（値の理由はそのコメント）が持ち、ここではそれを指すだけにする。
 
@@ -70,6 +70,17 @@ hostのswapがほぼ満ちたのを見たら、人かinboxがhostで原因の候
 - 対処:
   - OSのprocess（fseventsdなど）が候補のときは、人がhostでそのprocessを再起動する。fseventsdはlaunchdが起こし直すので`sudo killall fseventsd`で、それで直らなければOSを再起動する。再起動の前と後の`host/metrics`の`swap_used_mb`（と`vm.swapusage`）を比べ、下がればそれが原因と確かめ、下がらなければ次の候補を見る。
   - `dagq supervise`が大きいときは、数時間の`footprint`の推移を取り、増え続けるならinboxがrequestで修正を頼む。
+
+## containerのmachineの資源（`host.toml`）
+
+このrepositoryのworker・verificationをcontainerで動かすhostでは、dagq専用のmachineのCPUとメモリを`host.toml`で暫定の推奨の4 CPU / 8 GiBにする。
+
+- 値を入れるのは人かinboxで、このrepositoryの`dagq.toml`でworker・verificationのruntimeをcontainerに切り替える前に入れる。workerはhostの設定を変えない（[workerがhostと実queueでできないこと](#workerがhostと実queueでできないこと)）。
+- keyと単位、値が効く時点は`domain::podman_machine::MachineResources`のdoc comment、既に作ったmachineに変えた値を効かせる作り直しは[Container runtime](../design/container-runtime.md)の「dagq専用のmachine」の「食い違いと作り直し」が持つ。
+- runtimeの既定は変えない。既定はどのprojectにも通じる控えめな値で、dagqのbuildが通る保証が無いので、このrepositoryの値は`host.toml`で与える（[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定6）。
+- 根拠は[Spike](../plans/container-runtime-spike.md)の「(c) dagq 専用の machine の最小の資源」の1回目で、buildの出力をmachineの中のnamed volumeに置くと4 CPU / 8 GiBでbuildが343秒で通った。testは流しておらず、通るかは確かめていない。
+- これは通る最小の値ではない。(c)の測り直しは行わず、最小の資源は測っていない。
+- testまで通るかは、人かinboxが流すcontainerのruntimeのスモーク（[手動スモーク](manual-smoke.md)に足す手順）で確かめ、通らなければ値を見直してこの節を直す。
 
 ## `[run.env]`とtestの並列度の置き場
 

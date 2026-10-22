@@ -389,7 +389,8 @@ test が落ちたら `$SPIKE/m/logs/<label>-test.log` から落ちた test の�
   4 / 8 GiB で build の出力を machine の中の podman の named volume に置くと、build は 343 秒で通った（test は流していない）。
 
 2 つはこの文書の手順と script で直した（rustup の複写と、build の出力の named volume）。
-測り直しはこの手順で人か inbox が流し、結果の取り込み（通る最小の資源）は task 2280 が持つ。
+測り直しは行わず、通る最小の資源は確かめていない。
+この repository の host の `host.toml` には、1 回目で build が通った 4 / 8 GiB を暫定の推奨として [運用](../development/operations.md) の「containerのmachineの資源（`host.toml`）」に書いた（test まで通るかは container の runtime のスモークで確かめる）。
 
 ### 満たさないときに人が決めること
 
