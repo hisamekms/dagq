@@ -136,6 +136,9 @@ landing recheckは、hostで流すたびにscratchを作る前に、`recheck/`�
 消す契機は、supervisorのslotが終わったとき（`integrated`・`failed`・`interrupted`）、triageが終わったとき、triageの`decide` askとlandingの`approve_landing` askのanswer（`cancel`を含む）を適用したとき（そのtaskのrunだけ）と、上の掃除と同じ回（`sweep_ended_runs`。終わったrunに残ったbackgroundのwrapperを止めるのと同じ回で、全runを見直す）。
 手での`integrate`は着地したrunのworktreeを自分で消し、手での`recover`・人の`ready` / `cancel`・supervisorの外で終わったrunは次の掃除が拾う。
 失敗は`cleanup_failed`にして残りを続け、次の掃除で再び試す（supervisorのプロセスごとにworktreeあたり1回だけ記録する）。
+大きさ（`tree_size`）は消した`bytes`を記録するためだけに測り、消すかどうかは測る前の条件で決まっているので、測れなくても消し、消せればその`bytes`に数えず測れなかった理由を添えて今の`*_removed`を記録する（`Size`）。
+ただしworktree・clone以外のdirは、測れずに何であるか（linkでないdir）も読めなければ消さずに失敗にする。
+`cleanup_failed`になるのは消すこと自体の失敗で、計測の失敗が掃除を毎周回止めることはない。
 
 runのsessionの停止（backgroundのwrapperのhandleの`stop_background`。停止ごとに`wrapper_stopped`も記録する。[後始末](background-recovery-job.md#後片付け)）の成否は`task_runs.workspace_closed_at`で表す。
 nullは「止めたことを確かめていない」で、停止の失敗だけでなく、wrapperを止めた後にDBへ書けなかった場合も含む。

@@ -365,7 +365,11 @@ fn safe_worktree(worktree: &Path, runs_dir: &Path, repo_root: &Path) -> bool {
 
 /// The build-output event and the suffix of its log message. Ordinary cleanup
 /// records the event too; only its job's disk/counting request makes a repair.
-fn build_outputs_record(cleanup: WorktreeCleanup, paths: &[String], bytes: u64) -> (String, Value) {
+fn build_outputs_record(
+    cleanup: WorktreeCleanup,
+    paths: &[String],
+    size: &Size,
+) -> (String, Value) {
     let (reason, why) = match cleanup {
         WorktreeCleanup::Ended => (BUILD_OUTPUTS_RUN_ENDED, String::new()),
         WorktreeCleanup::AwaitingAnswer(ask) => (
@@ -378,10 +382,12 @@ fn build_outputs_record(cleanup: WorktreeCleanup, paths: &[String], bytes: u64) 
             format!(", waiting outside its slot for the answer to ask {ask}, for disk space"),
         ),
     };
-    let mut payload = json!({"paths": paths, "bytes": bytes, "by": "supervisor", "reason": reason});
+    let mut payload =
+        json!({"paths": paths, "bytes": size.bytes, "by": "supervisor", "reason": reason});
     if let WorktreeCleanup::AwaitingAnswer(ask) | WorktreeCleanup::Waiting(ask) = cleanup {
         payload["ask_id"] = json!(ask);
     }
+    size.mark(&mut payload);
     (why, payload)
 }
 
@@ -401,13 +407,14 @@ fn worktree_record(
     task_status: TaskStatus,
     path: &str,
     branch: &str,
-    bytes: u64,
+    size: &Size,
     removed: Removed,
     stopped: &[Value],
     unlisted: Option<&str>,
 ) -> Value {
     let reason = format!("task_{}", task_status.as_str());
-    let mut payload = json!({"path": path, "branch": branch, "bytes": bytes, "by": "supervisor", "reason": reason});
+    let mut payload = json!({"path": path, "branch": branch, "bytes": size.bytes, "by": "supervisor", "reason": reason});
+    size.mark(&mut payload);
     if removed.missing {
         payload["worktree_missing"] = json!(true);
     }
@@ -432,8 +439,10 @@ fn worktree_record(
 /// The payload of what goes once a run's task is over beside its worktree
 /// (`scratchpad_removed`, `run_tmp_removed`): the reason is the task's
 /// status.
-fn task_over_record(task_status: TaskStatus, paths: &[String], bytes: u64) -> Value {
-    json!({"paths": paths, "bytes": bytes, "by": "supervisor", "reason": format!("task_{}", task_status.as_str())})
+fn task_over_record(task_status: TaskStatus, paths: &[String], size: &Size) -> Value {
+    let mut payload = json!({"paths": paths, "bytes": size.bytes, "by": "supervisor", "reason": format!("task_{}", task_status.as_str())});
+    size.mark(&mut payload);
+    payload
 }
 
 /// The message and the payload of `cleanup_failed` for `what` (`worktree`,
@@ -669,10 +678,10 @@ fn clear_build_cache(files: &dyn RunFiles, queue_dir: &Path, cache: &BuildCache)
             .into_iter()
             .filter_map(|(path, removed)| match removed {
                 Ok(None) => None,
-                Ok(Some(bytes)) => Some(Outcome::BuildCache {
+                Ok(Some(size)) => Some(Outcome::BuildCache {
                     name: cache.name(),
                     path,
-                    bytes,
+                    size,
                 }),
                 Err(error) => Some(Outcome::CacheFailed { path, error }),
             })
@@ -686,8 +695,59 @@ fn clear_build_cache(files: &dyn RunFiles, queue_dir: &Path, cache: &BuildCache)
 
 /// The payload of `build_cache_removed`: which cache, its target and the
 /// bytes it took.
-fn build_cache_record(name: &str, path: &str, bytes: u64) -> Value {
-    json!({"cache": name, "paths": [path], "bytes": bytes, "by": "supervisor", "reason": BUILD_OUTPUTS_DISK_SPACE})
+fn build_cache_record(name: &str, path: &str, size: &Size) -> Value {
+    let mut payload = json!({"cache": name, "paths": [path], "bytes": size.bytes, "by": "supervisor", "reason": BUILD_OUTPUTS_DISK_SPACE});
+    size.mark(&mut payload);
+    payload
+}
+
+/// What the directories a cleanup removed took on disk. A directory is
+/// measured only for the record: whether it goes is decided before, so one
+/// that cannot be measured goes all the same, its size unknown.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct Size {
+    /// The bytes of the directories measured.
+    bytes: u64,
+    /// Why each directory that was removed unmeasured could not be
+    /// measured; its bytes count in no `bytes`.
+    unmeasured: Vec<String>,
+}
+
+impl Size {
+    fn of(bytes: u64) -> Self {
+        Self {
+            bytes,
+            unmeasured: Vec::new(),
+        }
+    }
+    fn unmeasured(why: String) -> Self {
+        Self {
+            bytes: 0,
+            unmeasured: vec![why],
+        }
+    }
+    fn add(&mut self, other: Self) {
+        self.bytes += other.bytes;
+        self.unmeasured.extend(other.unmeasured);
+    }
+    /// Name in a removal's `payload`, beside its `bytes`, why the
+    /// directories removed unmeasured could not be measured (`unmeasured`),
+    /// when there is one.
+    fn mark(&self, payload: &mut Value) {
+        if !self.unmeasured.is_empty() {
+            payload["unmeasured"] = json!(self.unmeasured);
+        }
+    }
+}
+
+impl std::fmt::Display for Size {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} bytes", self.bytes)?;
+        if !self.unmeasured.is_empty() {
+            write!(f, ", and unmeasured: {}", self.unmeasured.join("; "))?;
+        }
+        Ok(())
+    }
 }
 
 /// What the job did to one worktree.
@@ -699,7 +759,7 @@ enum Outcome {
         status: RunStatus,
         cleanup: WorktreeCleanup,
         paths: Vec<String>,
-        bytes: u64,
+        size: Size,
     },
     /// The worktree and branch of a run whose task is over; `missing` when
     /// the directory was already gone and only the branch went, `repaired`
@@ -714,7 +774,7 @@ enum Outcome {
         task_status: TaskStatus,
         path: String,
         branch: String,
-        bytes: u64,
+        size: Size,
         missing: bool,
         repaired: bool,
         broken_git: bool,
@@ -730,7 +790,7 @@ enum Outcome {
         run_id: RunId,
         task_status: TaskStatus,
         paths: Vec<String>,
-        bytes: u64,
+        size: Size,
     },
     /// The temporary files directory of a run whose task is over (task
     /// 1290).
@@ -738,7 +798,7 @@ enum Outcome {
         run_id: RunId,
         task_status: TaskStatus,
         path: String,
-        bytes: u64,
+        size: Size,
     },
     Failed {
         run_id: RunId,
@@ -751,7 +811,7 @@ enum Outcome {
     BuildCache {
         name: &'static str,
         path: String,
-        bytes: u64,
+        size: Size,
     },
     /// A build cache that could not be cleared.
     CacheFailed { path: String, error: anyhow::Error },
@@ -857,7 +917,10 @@ impl HostOpsState {
     /// space takes the build outputs of the waiting runs `held` offers too
     /// (`reason: disk_space`, with the `ask_id` the wait holds).
     ///
-    /// `bytes` is what the removed files took on disk. Only a worktree
+    /// `bytes` is what the removed files took on disk. A directory that
+    /// cannot be measured goes all the same: its bytes are not counted,
+    /// and why it could not be measured is named in `unmeasured`
+    /// ([`Size`]). Only a worktree
     /// under the run directory is touched, never the checkout the
     /// supervisor was given. A failure records `cleanup_failed` (`path`,
     /// `message`, `by: supervisor`) once per worktree and process, is
@@ -1051,11 +1114,11 @@ impl HostOpsState {
                     status,
                     cleanup,
                     paths,
-                    bytes,
+                    size,
                 } => {
-                    let (why, payload) = build_outputs_record(cleanup, &paths, bytes);
-                    info!(run_id = %run_id, "run {run_id} is {}{why}; removed the build outputs of its worktree ({bytes} bytes)", status.as_str());
-                    cleaned.add(&run_id, bytes);
+                    let (why, payload) = build_outputs_record(cleanup, &paths, &size);
+                    info!(run_id = %run_id, "run {run_id} is {}{why}; removed the build outputs of its worktree ({size})", status.as_str());
+                    cleaned.add(&run_id, size.bytes);
                     env.queue
                         .record_runtime_event(&run_id, EventKind::BuildOutputsRemoved, payload)
                 }
@@ -1065,7 +1128,7 @@ impl HostOpsState {
                     task_status,
                     path,
                     branch,
-                    bytes,
+                    size,
                     missing,
                     repaired,
                     broken_git,
@@ -1077,7 +1140,7 @@ impl HostOpsState {
                         task_status,
                         &path,
                         &branch,
-                        bytes,
+                        &size,
                         Removed {
                             missing,
                             repaired,
@@ -1090,7 +1153,7 @@ impl HostOpsState {
                     if missing {
                         info!(run_id = %run_id, task_id = %task_id, "task {task_id} is {}; the worktree {path} of run {run_id} was already gone: removed its branch {branch}", task_status.as_str());
                     } else {
-                        info!(run_id = %run_id, task_id = %task_id, "task {task_id} is {}; removed worktree {path} and branch {branch} of run {run_id} ({bytes} bytes)", task_status.as_str());
+                        info!(run_id = %run_id, task_id = %task_id, "task {task_id} is {}; removed worktree {path} and branch {branch} of run {run_id} ({size})", task_status.as_str());
                     }
                     if broken_git {
                         info!(run_id = %run_id, "the worktree {path} of run {run_id} had a broken .git: removed its directory");
@@ -1104,7 +1167,7 @@ impl HostOpsState {
                     if let Some(unlisted) = unlisted {
                         warn!(run_id = %run_id, "the processes running from the worktree {path} of run {run_id} could not be listed before its removal: {unlisted}");
                     }
-                    cleaned.add(&run_id, bytes);
+                    cleaned.add(&run_id, size.bytes);
                     env.queue
                         .record_runtime_event(&run_id, EventKind::WorktreeRemoved, payload)
                 }
@@ -1112,28 +1175,28 @@ impl HostOpsState {
                     run_id,
                     task_status,
                     paths,
-                    bytes,
+                    size,
                 } => {
-                    info!(run_id = %run_id, "run {run_id}'s task is {}; removed its Claude Code scratchpad(s) {} ({bytes} bytes)", task_status.as_str(), paths.join(", "));
-                    cleaned.add(&run_id, bytes);
+                    info!(run_id = %run_id, "run {run_id}'s task is {}; removed its Claude Code scratchpad(s) {} ({size})", task_status.as_str(), paths.join(", "));
+                    cleaned.add(&run_id, size.bytes);
                     env.queue.record_runtime_event(
                         &run_id,
                         EventKind::ScratchpadRemoved,
-                        task_over_record(task_status, &paths, bytes),
+                        task_over_record(task_status, &paths, &size),
                     )
                 }
                 Outcome::RunTmp {
                     run_id,
                     task_status,
                     path,
-                    bytes,
+                    size,
                 } => {
-                    info!(run_id = %run_id, "run {run_id}'s task is {}; removed its temporary files {path} ({bytes} bytes)", task_status.as_str());
-                    cleaned.add(&run_id, bytes);
+                    info!(run_id = %run_id, "run {run_id}'s task is {}; removed its temporary files {path} ({size})", task_status.as_str());
+                    cleaned.add(&run_id, size.bytes);
                     env.queue.record_runtime_event(
                         &run_id,
                         EventKind::RunTmpRemoved,
-                        task_over_record(task_status, std::slice::from_ref(&path), bytes),
+                        task_over_record(task_status, std::slice::from_ref(&path), &size),
                     )
                 }
                 Outcome::Failed {
@@ -1151,15 +1214,15 @@ impl HostOpsState {
                     env.queue
                         .record_runtime_event(&run_id, EventKind::CleanupFailed, payload)
                 }
-                Outcome::BuildCache { name, path, bytes } => {
+                Outcome::BuildCache { name, path, size } => {
                     info!(
-                        "the free disk space was short: cleared the {name} build cache {path} ({bytes} bytes)"
+                        "the free disk space was short: cleared the {name} build cache {path} ({size})"
                     );
-                    cleaned.add_cache(&path, bytes);
+                    cleaned.add_cache(&path, size.bytes);
                     env.queue
                         .record_queue_event(
                             EventKind::BuildCacheRemoved,
-                            build_cache_record(name, &path, bytes),
+                            build_cache_record(name, &path, &size),
                         )
                         .map(drop)
                 }
@@ -1470,15 +1533,42 @@ fn run_tmp_dir(candidate: &EndedRunWorktree, runs_dir: &Path) -> Option<PathBuf>
         .then(|| runs_dir.join(candidate.run_id.as_str()).join(RUN_TMP_DIR))
 }
 
-/// Measure and remove the directory `dir`; its bytes, or `None` for no
-/// directory there, a link (left alone, nothing outside it is followed),
-/// or one gone before its removal (another supervisor's cleanup, or
-/// Claude Code's), which is no failure.
-fn remove_tree(files: &dyn RunFiles, dir: &Path) -> Result<Option<u64>> {
-    let Some(size) = files
-        .tree_size(dir)
-        .with_context(|| format!("measure {}", dir.display()))?
-    else {
+/// Measure the directory `dir` before it goes: `None` for no directory
+/// there, or a link (left alone, nothing outside it is followed). One
+/// that cannot be measured is still a directory to remove, its size
+/// unknown ([`Size::unmeasured`]), unless what it is cannot be read either.
+fn measure(files: &dyn RunFiles, dir: &Path) -> Result<Option<Size>> {
+    let error = match files.tree_size(dir) {
+        Ok(size) => return Ok(size.map(Size::of)),
+        Err(error) => error,
+    };
+    let why = format!("measure {}: {error}", dir.display());
+    match files.entry_kind(dir) {
+        Ok(crate::application::EntryKind::Dir) => Ok(Some(Size::unmeasured(why))),
+        Ok(_) => Ok(None),
+        Err(kind) if kind.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(kind) => Err(anyhow::Error::new(kind).context(format!(
+            "{why}; and reading what {} is failed",
+            dir.display()
+        ))),
+    }
+}
+
+/// The size of the worktree or clone `dir` of a run whose task is over,
+/// which goes whatever it is: none for none there, and unknown for one
+/// that cannot be measured.
+fn worktree_size(files: &dyn RunFiles, dir: &Path) -> Size {
+    match files.tree_size(dir) {
+        Ok(size) => Size::of(size.unwrap_or(0)),
+        Err(error) => Size::unmeasured(format!("measure {}: {error}", dir.display())),
+    }
+}
+
+/// Measure ([`measure`]) and remove the directory `dir`; its size, or
+/// `None` for no directory there, a link, or one gone before its removal
+/// (another supervisor's cleanup, or Claude Code's), which is no failure.
+fn remove_tree(files: &dyn RunFiles, dir: &Path) -> Result<Option<Size>> {
+    let Some(size) = measure(files, dir)? else {
         return Ok(None);
     };
     match files.remove_dir_all(dir) {
@@ -1492,12 +1582,12 @@ fn remove_tree(files: &dyn RunFiles, dir: &Path) -> Result<Option<u64>> {
 /// pushed to `outcomes` with a failure under another root.
 fn remove_scratchpads(ports: &JobPorts, candidate: &EndedRunWorktree, outcomes: &mut Vec<Outcome>) {
     let mut paths = Vec::new();
-    let mut bytes = 0;
+    let mut size = Size::default();
     for dir in scratchpad_dirs(candidate, &ports.runs_dir, &ports.scratchpad_roots) {
         match remove_tree(&*ports.files, &dir) {
-            Ok(Some(size)) => {
+            Ok(Some(removed)) => {
                 paths.push(dir.to_string_lossy().into_owned());
-                bytes += size;
+                size.add(removed);
             }
             Ok(None) => {}
             Err(error) => outcomes.push(Outcome::Failed {
@@ -1513,7 +1603,7 @@ fn remove_scratchpads(ports: &JobPorts, candidate: &EndedRunWorktree, outcomes: 
             run_id: candidate.run_id.clone(),
             task_status: candidate.task_status,
             paths,
-            bytes,
+            size,
         });
     }
 }
@@ -1561,11 +1651,11 @@ fn remove_run_tmp(ports: &JobPorts, candidate: &EndedRunWorktree, outcomes: &mut
     };
     let path = dir.to_string_lossy().into_owned();
     match remove_tree(&*ports.files, &dir) {
-        Ok(Some(bytes)) => outcomes.push(Outcome::RunTmp {
+        Ok(Some(size)) => outcomes.push(Outcome::RunTmp {
             run_id: candidate.run_id.clone(),
             task_status: candidate.task_status,
             path,
-            bytes,
+            size,
         }),
         Ok(None) => {}
         Err(error) => outcomes.push(Outcome::Failed {
@@ -1592,13 +1682,13 @@ fn clean_worktree(
         return Ok(None);
     }
     let over = task_over(candidate.task_status);
-    let removed = |bytes, missing, removal, branch: &str, stopped, unlisted| Outcome::Worktree {
+    let removed = |size, missing, removal, branch: &str, stopped, unlisted| Outcome::Worktree {
         run_id: candidate.run_id.clone(),
         task_id: candidate.task_id,
         task_status: candidate.task_status,
         path: candidate.worktree.clone(),
         branch: branch.to_owned(),
-        bytes,
+        size,
         missing,
         repaired: removal == Removal::Repaired,
         broken_git: removal == Removal::BrokenGit,
@@ -1628,7 +1718,7 @@ fn clean_worktree(
         ports.repository.delete_branch(branch)?;
         listed.retain(|listed| listed != short);
         return Ok(Some(removed(
-            0,
+            Size::default(),
             true,
             Removal::Removed,
             branch,
@@ -1640,11 +1730,7 @@ fn clean_worktree(
         let Some(branch) = candidate.branch.as_deref() else {
             return Ok(None);
         };
-        let bytes = ports
-            .files
-            .tree_size(worktree)
-            .with_context(|| format!("measure {}", worktree.display()))?
-            .unwrap_or(0);
+        let size = worktree_size(&*ports.files, worktree);
         let (stopped, unlisted) =
             if own_ended_worktree(candidate, &ports.runs_dir, &ports.repo_root) {
                 // The executables' paths are read resolved: so is the
@@ -1662,10 +1748,10 @@ fn clean_worktree(
             };
         let removal = remove_worktree(ports, candidate, branch, pruned)?;
         return Ok(Some(removed(
-            bytes, false, removal, branch, stopped, unlisted,
+            size, false, removal, branch, stopped, unlisted,
         )));
     }
-    let (paths, bytes) =
+    let (paths, size) =
         remove_build_outputs(&*ports.files, worktree, &ports.toolchains, &|name| {
             ports.repository.tracks(worktree, name)
         })?;
@@ -1677,29 +1763,26 @@ fn clean_worktree(
         status: candidate.status,
         cleanup: candidate.cleanup,
         paths,
-        bytes,
+        size,
     }))
 }
 
 /// Remove the build outputs of `worktree`: the directories directly under
 /// it the declared profiles name ([`Toolchains::worktree_build_dirs`]),
 /// none while none is declared, unless `tracks` says Git tracks a file in
-/// one. A link in their place measures as none and stays. The paths
-/// removed, and the bytes they took.
+/// one. A link in their place measures as none and stays ([`measure`]).
+/// The paths removed, and what they took.
 fn remove_build_outputs(
     files: &dyn RunFiles,
     worktree: &Path,
     toolchains: &Toolchains,
     tracks: &dyn Fn(&str) -> Result<bool>,
-) -> Result<(Vec<String>, u64)> {
+) -> Result<(Vec<String>, Size)> {
     let mut paths = Vec::new();
-    let mut bytes = 0;
+    let mut size = Size::default();
     for name in toolchains.worktree_build_dirs() {
         let dir = worktree.join(name);
-        let Some(size) = files
-            .tree_size(&dir)
-            .with_context(|| format!("measure {}", dir.display()))?
-        else {
+        let Some(measured) = measure(files, &dir)? else {
             continue;
         };
         if tracks(name)? {
@@ -1709,9 +1792,9 @@ fn remove_build_outputs(
             .remove_dir_all(&dir)
             .with_context(|| format!("remove {}", dir.display()))?;
         paths.push(dir.to_string_lossy().into_owned());
-        bytes += size;
+        size.add(measured);
     }
-    Ok((paths, bytes))
+    Ok((paths, size))
 }
 
 /// Whether the run's task is over and its worktree is the run's own under
@@ -1759,11 +1842,7 @@ fn clean_clone(
         }
         listed.retain(|listed| listed != short);
     }
-    let bytes = ports
-        .files
-        .tree_size(clone)
-        .with_context(|| format!("measure {}", clone.display()))?
-        .unwrap_or(0);
+    let size = worktree_size(&*ports.files, clone);
     ports.repository.remove_clone(clone, branch)?;
     Ok(Some(Outcome::Worktree {
         run_id: candidate.run_id.clone(),
@@ -1771,7 +1850,7 @@ fn clean_clone(
         task_status: candidate.task_status,
         path: candidate.worktree.clone(),
         branch: branch.to_owned(),
-        bytes,
+        size,
         missing,
         repaired: false,
         broken_git: false,
@@ -1931,6 +2010,7 @@ fn may_remove_broken(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::{DiffNumbers, EntryKind, RepositoryReads};
     use crate::domain::toolchain::fake;
 
     const DISK: DiskRequest = DiskRequest {
@@ -1969,6 +2049,13 @@ mod tests {
         dir: bool,
         busy: bool,
         size: Option<u64>,
+        /// Measuring fails with too many open files, as a tree with more
+        /// children than the file descriptors did.
+        unmeasurable: bool,
+        /// Not a directory, but `kind` (a link), or what it is cannot be
+        /// read (`None` with `dir` false and `kind_fails`).
+        kind: Option<EntryKind>,
+        kind_fails: bool,
         fails: bool,
         lock_fails: bool,
         /// What `read_dir` lists; `None` is no directory.
@@ -2044,7 +2131,20 @@ mod tests {
         }
         fn tree_size(&self, dir: &Path) -> std::io::Result<Option<u64>> {
             self.did("measure", dir);
+            if self.unmeasurable {
+                return Err(std::io::Error::from_raw_os_error(libc::EMFILE));
+            }
             Ok(self.size)
+        }
+        fn entry_kind(&self, _: &Path) -> std::io::Result<EntryKind> {
+            if self.dir {
+                return Ok(EntryKind::Dir);
+            }
+            if self.kind_fails {
+                return Err(std::io::Error::from_raw_os_error(libc::EMFILE));
+            }
+            self.kind
+                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
         }
         fn remove_dir_all(&self, dir: &Path) -> std::io::Result<()> {
             self.did("remove", dir);
@@ -2056,8 +2156,8 @@ mod tests {
         fn append_line(&self, _: &Path, _: &str) -> std::io::Result<()> {
             unimplemented!()
         }
-        fn canonicalize(&self, _: &Path) -> std::io::Result<PathBuf> {
-            unimplemented!()
+        fn canonicalize(&self, path: &Path) -> std::io::Result<PathBuf> {
+            Ok(path.to_path_buf())
         }
         fn write_fenced(&self, _: &Path, _: &str, _: &str, _: &Path) -> Result<()> {
             unimplemented!()
@@ -2065,6 +2165,462 @@ mod tests {
         fn now(&self) -> std::time::SystemTime {
             unimplemented!()
         }
+    }
+
+    /// What too many open files reads as in `unmeasured`.
+    fn emfile() -> String {
+        std::io::Error::from_raw_os_error(libc::EMFILE).to_string()
+    }
+
+    /// A directory that cannot be measured still goes, removed as one that
+    /// can, its size unknown and the failure named; a link there and none
+    /// there stay unmeasured and untouched, and so does one whose kind
+    /// cannot be read either, which fails. One measured goes with its
+    /// bytes, and one that cannot be removed fails however it measured.
+    #[test]
+    fn a_directory_that_cannot_be_measured_is_removed_with_its_size_unknown() {
+        let dir = Path::new("/claude/projects/x");
+        let unmeasurable = CacheFiles {
+            dir: true,
+            unmeasurable: true,
+            ..CacheFiles::default()
+        };
+        let size = remove_tree(&unmeasurable, dir).unwrap().unwrap();
+        assert_eq!(
+            size,
+            Size::unmeasured(format!("measure /claude/projects/x: {}", emfile()))
+        );
+        assert_eq!(
+            unmeasurable.done(),
+            ["measure /claude/projects/x", "remove /claude/projects/x"]
+        );
+        let payload = task_over_record(TaskStatus::Completed, &[dir.display().to_string()], &size);
+        assert_eq!(payload["bytes"], 0);
+        assert_eq!(
+            payload["unmeasured"],
+            json!([format!("measure /claude/projects/x: {}", emfile())])
+        );
+        for left in [
+            CacheFiles {
+                unmeasurable: true,
+                kind: Some(EntryKind::Link),
+                ..CacheFiles::default()
+            },
+            CacheFiles {
+                unmeasurable: true,
+                ..CacheFiles::default()
+            },
+        ] {
+            assert_eq!(remove_tree(&left, dir).unwrap(), None);
+            assert_eq!(left.done(), ["measure /claude/projects/x"]);
+        }
+        let unknown = CacheFiles {
+            unmeasurable: true,
+            kind_fails: true,
+            ..CacheFiles::default()
+        };
+        let error = remove_tree(&unknown, dir).unwrap_err();
+        assert!(format!("{error:#}").contains("reading what /claude/projects/x is failed"));
+        assert_eq!(unknown.done(), ["measure /claude/projects/x"]);
+        let measured = CacheFiles {
+            dir: true,
+            size: Some(4096),
+            ..CacheFiles::default()
+        };
+        assert_eq!(remove_tree(&measured, dir).unwrap(), Some(Size::of(4096)));
+        let measured_payload = task_over_record(TaskStatus::Completed, &[], &Size::of(4096));
+        assert_eq!(measured_payload["bytes"], 4096);
+        assert!(measured_payload.get("unmeasured").is_none());
+        for (unmeasurable, size) in [(true, None), (false, Some(4096))] {
+            let failing = CacheFiles {
+                dir: true,
+                size,
+                unmeasurable,
+                fails: true,
+                ..CacheFiles::default()
+            };
+            let error = remove_tree(&failing, dir).unwrap_err();
+            assert_eq!(format!("{error}"), "remove /claude/projects/x");
+        }
+    }
+
+    /// The build outputs of a worktree that cannot be measured go, each
+    /// named unmeasured with no bytes counted, and a directory Git tracks
+    /// a file in still stays; one that cannot be removed still fails.
+    #[test]
+    fn build_outputs_that_cannot_be_measured_still_go() {
+        let worktree = Path::new("/runs/r/worktree");
+        let files = CacheFiles {
+            dir: true,
+            unmeasurable: true,
+            ..CacheFiles::default()
+        };
+        let (paths, size) =
+            remove_build_outputs(&files, worktree, &Toolchains::this_repository(), &|name| {
+                Ok(name == "target")
+            })
+            .unwrap();
+        assert_eq!(paths, ["/runs/r/worktree/llvm-cov-target"]);
+        assert_eq!(
+            size,
+            Size::unmeasured(format!(
+                "measure /runs/r/worktree/llvm-cov-target: {}",
+                emfile()
+            ))
+        );
+        let (_, payload) = build_outputs_record(WorktreeCleanup::Ended, &paths, &size);
+        assert_eq!(payload["bytes"], 0);
+        assert_eq!(payload["unmeasured"], json!(size.unmeasured));
+        let failing = CacheFiles {
+            dir: true,
+            unmeasurable: true,
+            fails: true,
+            ..CacheFiles::default()
+        };
+        assert!(
+            remove_build_outputs(&failing, worktree, &Toolchains::this_repository(), &|_| {
+                Ok(false)
+            })
+            .is_err()
+        );
+    }
+
+    /// A build cache that cannot be measured is cleared and made again,
+    /// its size unknown in `build_cache_removed`.
+    #[test]
+    fn a_build_cache_that_cannot_be_measured_is_still_cleared() {
+        let files = CacheFiles {
+            dir: true,
+            unmeasurable: true,
+            ..CacheFiles::default()
+        };
+        let cleared = clear_build_cache(&files, Path::new("/q"), &BuildCache::Update);
+        let [Outcome::BuildCache { path, size, .. }] = cleared.as_slice() else {
+            panic!("not cleared");
+        };
+        assert_eq!(path, "/q/update/target");
+        assert_eq!(
+            size,
+            &Size::unmeasured(format!("measure /q/update/target: {}", emfile()))
+        );
+        assert!(files.done().contains(&"create /q/update/target".to_owned()));
+        let payload = build_cache_record("update", path, size);
+        assert_eq!(payload["bytes"], 0);
+        assert_eq!(payload["unmeasured"], json!(size.unmeasured));
+    }
+
+    /// The repository of an ended run whose worktree or clone goes: what
+    /// was removed, and whether the removal fails.
+    #[derive(Default)]
+    struct Removing {
+        fails: bool,
+        removed: Mutex<Vec<String>>,
+    }
+
+    impl Removing {
+        fn removal(&self, what: &str, path: &Path) -> Result<()> {
+            if self.fails {
+                bail!("git refused to remove {}", path.display());
+            }
+            self.removed
+                .lock()
+                .unwrap()
+                .push(format!("{what} {}", path.display()));
+            Ok(())
+        }
+    }
+
+    impl RepositoryReads for Removing {
+        fn main_head(&self) -> Result<CommitSha> {
+            unimplemented!()
+        }
+        fn merge_base(&self, _: &str, _: &str) -> Result<Option<CommitSha>> {
+            unimplemented!()
+        }
+    }
+
+    impl Repository for Removing {
+        fn is_dagq_source(&self) -> bool {
+            unimplemented!()
+        }
+        fn current_branch(&self, _: &Path) -> Result<Option<String>> {
+            unimplemented!()
+        }
+        fn head(&self, _: &Path) -> Result<CommitSha> {
+            unimplemented!()
+        }
+        fn is_ancestor(&self, _: &str, _: &str) -> Result<bool> {
+            unimplemented!()
+        }
+        fn status(&self, _: &Path) -> Result<String> {
+            unimplemented!()
+        }
+        fn rebase_in_progress(&self, _: &Path) -> Result<bool> {
+            unimplemented!()
+        }
+        fn rebase_abort(&self, _: &Path) -> Result<()> {
+            unimplemented!()
+        }
+        fn rebase(&self, _: &Path, _: &str) -> Result<std::result::Result<(), String>> {
+            unimplemented!()
+        }
+        fn conflicted_files(&self, _: &Path) -> Result<Vec<String>> {
+            unimplemented!()
+        }
+        fn changed_paths(&self, _: &str, _: &str) -> Result<Vec<String>> {
+            unimplemented!()
+        }
+        fn added_paths(&self, _: &str, _: &str) -> Result<Vec<String>> {
+            unimplemented!()
+        }
+        fn paths_in(&self, _: &str, _: &str) -> Result<Vec<String>> {
+            unimplemented!()
+        }
+        fn paths_containing(&self, _: &str, _: &str, _: &[String]) -> Result<Vec<String>> {
+            unimplemented!()
+        }
+        fn rename_and_commit(
+            &self,
+            _: &Path,
+            _: &str,
+            _: &str,
+            _: &[String],
+        ) -> Result<std::result::Result<CommitSha, String>> {
+            unimplemented!()
+        }
+        fn tree_of(&self, _: &str) -> Result<String> {
+            unimplemented!()
+        }
+        fn commit_tree(&self, _: &str, _: &str, _: &[String]) -> Result<CommitSha> {
+            unimplemented!()
+        }
+        fn update_ref(&self, _: &str, _: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn advance_main(
+            &self,
+            _: &crate::domain::landing_branch::LandingBranch,
+            _: &str,
+            _: &str,
+        ) -> Result<()> {
+            unimplemented!()
+        }
+        fn repair_worktree(&self, _: &Path) -> Result<()> {
+            bail!("no repair")
+        }
+        fn remove_worktree_and_branch(&self, worktree: &Path, _: &str) -> Result<()> {
+            self.removal("worktree", worktree)
+        }
+        fn worktree_admin(&self, _: &Path) -> Result<WorktreeAdmin> {
+            Ok(WorktreeAdmin::Unreadable)
+        }
+        fn branches(&self) -> Result<Vec<String>> {
+            unimplemented!()
+        }
+        fn delete_branch(&self, _: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn tracks(&self, _: &Path, _: &str) -> Result<bool> {
+            Ok(false)
+        }
+        fn main_checkout(&self) -> Result<Option<PathBuf>> {
+            unimplemented!()
+        }
+        fn create_worktree(&self, _: &TaskRun) -> Result<String> {
+            unimplemented!()
+        }
+        fn merge_conflicts(&self, _: &str, _: &str) -> Result<Vec<String>> {
+            unimplemented!()
+        }
+        fn landed_task_ids(&self, _: &str, _: &str) -> Result<Vec<TaskId>> {
+            unimplemented!()
+        }
+        fn log_oneline(&self, _: &str, _: &str) -> Result<String> {
+            unimplemented!()
+        }
+        fn diff_stat(&self, _: &str, _: &str) -> Result<String> {
+            unimplemented!()
+        }
+        fn diff_numbers(&self, _: &str, _: &str) -> Result<DiffNumbers> {
+            unimplemented!()
+        }
+        fn diff_to_file(&self, _: &str, _: &str, _: &Path) -> Result<()> {
+            unimplemented!()
+        }
+        fn remove_clone(&self, clone: &Path, _: &str) -> Result<()> {
+            self.removal("clone", clone)
+        }
+    }
+
+    /// Nothing runs from under a worktree.
+    struct NoProcesses;
+
+    impl ProcessControl for NoProcesses {
+        fn alive(&self, _: u32) -> bool {
+            false
+        }
+        fn terminate(&self, _: u32) -> Result<()> {
+            Ok(())
+        }
+        fn interrupt(&self, _: u32) -> Result<()> {
+            Ok(())
+        }
+        fn kill(&self, _: u32) -> Result<()> {
+            Ok(())
+        }
+        fn executables(&self) -> Result<Vec<ProcessExecutable>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// No queue: cleaning one worktree opens none.
+    struct NoQueue;
+
+    impl QueueOpener<dyn HostOpsQueue + Send> for NoQueue {
+        fn open(&self) -> Result<Box<dyn HostOpsQueue + Send>> {
+            bail!("no queue")
+        }
+    }
+
+    fn job_ports(files: CacheFiles, repository: &Arc<Removing>) -> JobPorts {
+        JobPorts {
+            files: Arc::new(files),
+            processes: Arc::new(NoProcesses),
+            repository: repository.clone(),
+            queues: Arc::new(NoQueue),
+            runs_dir: PathBuf::from("/runs"),
+            repo_root: PathBuf::from("/repo"),
+            cleaning: Arc::default(),
+            waiting: HashMap::new(),
+            stop: Arc::default(),
+            prune: false,
+            scratchpad_roots: vec![PathBuf::from("/claude/projects")],
+            satisfied_dir: PathBuf::from("/q/satisfied"),
+            caches: None,
+            toolchains: Toolchains::this_repository(),
+        }
+    }
+
+    /// The worktree, and the clone, of a run whose task is over go though
+    /// they cannot be measured: the removal is recorded with its size
+    /// unknown and the failure named, and is no `cleanup_failed`. One
+    /// measured is recorded with its bytes, and a removal that fails is
+    /// still a failure.
+    #[test]
+    fn an_ended_worktree_or_clone_that_cannot_be_measured_still_goes() {
+        let worktree = candidate("r", TaskStatus::Completed);
+        let clone = EndedRunWorktree {
+            worktree: "/runs/r/clones/worktree-r".to_owned(),
+            ..candidate("r", TaskStatus::Completed)
+        };
+        for (candidate, removed) in [
+            (&worktree, "worktree /runs/r/worktree"),
+            (&clone, "clone /runs/r/clones/worktree-r"),
+        ] {
+            let path = candidate.worktree.as_str();
+            let repository = Arc::new(Removing::default());
+            let ports = job_ports(
+                CacheFiles {
+                    dir: true,
+                    unmeasurable: true,
+                    ..CacheFiles::default()
+                },
+                &repository,
+            );
+            let outcome = clean_worktree(&ports, candidate, &mut None, &mut false)
+                .unwrap()
+                .unwrap();
+            let Outcome::Worktree {
+                size,
+                missing: false,
+                ..
+            } = outcome
+            else {
+                panic!("not a removed worktree");
+            };
+            let why = format!("measure {path}: {}", emfile());
+            assert_eq!(size, Size::unmeasured(why.clone()));
+            let payload = worktree_record(
+                TaskStatus::Completed,
+                path,
+                "refs/heads/dagq/r",
+                &size,
+                Removed::default(),
+                &[],
+                None,
+            );
+            assert_eq!(payload["bytes"], 0);
+            assert_eq!(payload["unmeasured"], json!([why]));
+            assert_eq!(*repository.removed.lock().unwrap(), [removed]);
+            let measured = job_ports(
+                CacheFiles {
+                    dir: true,
+                    size: Some(42),
+                    ..CacheFiles::default()
+                },
+                &Arc::default(),
+            );
+            let Some(Outcome::Worktree { size, .. }) =
+                clean_worktree(&measured, candidate, &mut None, &mut false).unwrap()
+            else {
+                panic!("not a removed worktree");
+            };
+            assert_eq!(size, Size::of(42));
+            let failing = job_ports(
+                CacheFiles {
+                    dir: true,
+                    unmeasurable: true,
+                    ..CacheFiles::default()
+                },
+                &Arc::new(Removing {
+                    fails: true,
+                    ..Removing::default()
+                }),
+            );
+            assert!(clean_worktree(&failing, candidate, &mut None, &mut false).is_err());
+        }
+    }
+
+    /// The scratchpad of a run whose task is over goes though it cannot
+    /// be measured, recorded as removed with its size unknown, not as a
+    /// failure; one that cannot be removed is still a failure.
+    #[test]
+    fn a_scratchpad_that_cannot_be_measured_still_goes() {
+        let candidate = candidate("r", TaskStatus::Canceled);
+        let ports = job_ports(
+            CacheFiles {
+                dir: true,
+                unmeasurable: true,
+                ..CacheFiles::default()
+            },
+            &Arc::default(),
+        );
+        let mut outcomes = Vec::new();
+        remove_scratchpads(&ports, &candidate, &mut outcomes);
+        let [Outcome::Scratchpads { paths, size, .. }] = outcomes.as_slice() else {
+            panic!("not a removed scratchpad");
+        };
+        assert_eq!(*paths, ["/claude/projects/-runs-r-worktree"]);
+        assert_eq!(size.bytes, 0);
+        assert_eq!(size.unmeasured.len(), 1);
+        let failing = job_ports(
+            CacheFiles {
+                dir: true,
+                unmeasurable: true,
+                fails: true,
+                ..CacheFiles::default()
+            },
+            &Arc::default(),
+        );
+        let mut outcomes = Vec::new();
+        remove_scratchpads(&failing, &candidate, &mut outcomes);
+        assert!(matches!(
+            outcomes.as_slice(),
+            [Outcome::Failed {
+                what: "scratchpad",
+                ..
+            }]
+        ));
     }
 
     /// A build cache is cleared only when there is a directory and its
@@ -2098,7 +2654,7 @@ mod tests {
             };
             assert!(matches!(
                 clear_build_cache(&free, q, &cache).as_slice(),
-                [Outcome::BuildCache { name: n, path, bytes: 7 }] if *n == name && path == target
+                [Outcome::BuildCache { name: n, path, size }] if *n == name && path == target && *size == Size::of(7)
             ));
             assert_eq!(
                 free.done(),
@@ -2166,9 +2722,9 @@ mod tests {
                 ..CacheFiles::default()
             };
             let tracks = |name: &str| Ok(tracked.contains(&name));
-            let (paths, bytes) =
+            let (paths, size) =
                 remove_build_outputs(&files, worktree, toolchains, &tracks).unwrap();
-            assert_eq!(bytes, 3 * paths.len() as u64);
+            assert_eq!(size, Size::of(3 * paths.len() as u64));
             let removes: Vec<String> = files
                 .done()
                 .into_iter()
@@ -2225,8 +2781,8 @@ mod tests {
                 Outcome::BuildCache {
                     name: "recheck",
                     path,
-                    bytes: 7,
-                } => path,
+                    size,
+                } if size == Size::of(7) => path,
                 _ => panic!("not a cleared recheck cache"),
             })
             .collect();
@@ -2301,7 +2857,7 @@ mod tests {
     #[test]
     fn a_cleared_build_cache_is_recorded_for_disk_space() {
         assert_eq!(
-            build_cache_record("recheck", "/q/recheck/target", 9),
+            build_cache_record("recheck", "/q/recheck/target", &Size::of(9)),
             json!({"cache": "recheck", "paths": ["/q/recheck/target"], "bytes": 9, "by": "supervisor", "reason": "disk_space"})
         );
     }
@@ -2736,7 +3292,7 @@ mod tests {
             TaskStatus::Canceled,
             "/runs/r/worktree",
             "refs/heads/dagq/r",
-            42,
+            &Size::of(42),
             Removed::default(),
             &[],
             None,
@@ -2750,7 +3306,7 @@ mod tests {
             TaskStatus::Completed,
             "/runs/r/worktree",
             "refs/heads/dagq/r",
-            0,
+            &Size::default(),
             Removed {
                 missing: true,
                 repaired: true,
@@ -2797,7 +3353,15 @@ mod tests {
                 "no_admin",
             ),
         ] {
-            let payload = worktree_record(TaskStatus::Completed, "p", "b", 0, removed, &[], None);
+            let payload = worktree_record(
+                TaskStatus::Completed,
+                "p",
+                "b",
+                &Size::default(),
+                removed,
+                &[],
+                None,
+            );
             let marks: Vec<&str> = [
                 "worktree_missing",
                 "repaired",
@@ -2812,13 +3376,17 @@ mod tests {
             assert_eq!(marks, [key]);
         }
 
-        let tmp = task_over_record(TaskStatus::Canceled, &["/runs/r/tmp".to_owned()], 32_768);
+        let tmp = task_over_record(
+            TaskStatus::Canceled,
+            &["/runs/r/tmp".to_owned()],
+            &Size::of(32_768),
+        );
         assert_eq!(
             tmp,
             json!({"paths": ["/runs/r/tmp"], "bytes": 32_768, "by": "supervisor", "reason": "task_canceled"})
         );
         assert_eq!(
-            task_over_record(TaskStatus::Completed, &[], 0)["reason"],
+            task_over_record(TaskStatus::Completed, &[], &Size::default())["reason"],
             "task_completed"
         );
 
@@ -2933,7 +3501,7 @@ mod tests {
                 ", waiting outside its slot for the answer to ask 7, for disk space",
             ),
         ] {
-            let (suffix, payload) = build_outputs_record(cleanup, &paths, 42);
+            let (suffix, payload) = build_outputs_record(cleanup, &paths, &Size::of(42));
             assert_eq!(suffix, why);
             let mut expected =
                 json!({"paths": paths, "bytes": 42, "by": "supervisor", "reason": reason});
@@ -2994,7 +3562,7 @@ mod tests {
             WorktreeCleanup::AwaitingAnswer(AskId::new(7)),
             WorktreeCleanup::Idle,
         ] {
-            let (_, payload) = build_outputs_record(cleanup, &[], 42);
+            let (_, payload) = build_outputs_record(cleanup, &[], &Size::of(42));
             cleaned.add(&run, payload["bytes"].as_u64().unwrap());
         }
         cleaned.add(&other, 1);
