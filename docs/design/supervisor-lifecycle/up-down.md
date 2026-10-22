@@ -95,7 +95,9 @@ in-cmux modeの起動の指定は何にも触る前に拒み、廃止と次の�
        判定はsignalもuninstallも何もする前に行うので、止まったときの状態は`up`を打つ前と同じ（PIDの死んだ登録のprune（2）だけは済んでいる）。
        leaseを持つrunが無ければそのまま入れ替えるが、待たない指定ではdrainの待ちにも上限が付き、超えたら残っているtokenとpidを挙げたerrorで止める（停止は既に頼んであり、agentも外れているので、`status`から消えたら`up`を打ち直す）。
    - **入れ替えの対象はliveな登録だけ**: 「生きているが黙っている」古いbinaryのsupervisorは入れ替えられず、`up`はその隣に新しいversionのsupervisorを立てる。
-     `status`がstaleとして報告するので、人が`down --force`で止めてから`up`をやり直す（[ADR-0014](../../adr/0014-up-replaces-a-supervisor-of-another-binary-version.md)のConsequences。[ADR-0045](../../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)の決定16が引き継ぐ）。
+     `status`がstaleとして報告し、同じqueueに生きているsupervisorが他に居ないときだけ、人が`down --force`で止めてから`up`をやり直す。
+     生きているsupervisorが居るときは、`down`がその生きている方も止めるので使わず、人がstaleなsupervisorのプロセスだけを止め、残った登録は生きているsupervisorが片付ける（案内は`status`のattentionの`supervisor_stale`の次の手）。
+     （[ADR-0014](../../adr/0014-up-replaces-a-supervisor-of-another-binary-version.md)のConsequences、[ADR-0073](../../adr/0073-kind-additions-are-compatible.md)の決定16と[ADR-t3134-1](../../adr/2026-10-23-t3134-1-stop-a-hung-supervisor-beside-a-live-one-without-down.md)）
    - **二重のsupervisorの警告**: 同じqueueに引き継ぎの組でないliveな登録が2つ以上あるか、queueのLaunchAgent（自分のlabelと、同じDBの別のlabel）が2つ以上loadされていれば、`doctor`と`status`が同じ判定（`health::duplicate_supervisors`）でwarningを出し、`status`はinboxのattentionにも載せる。
      引き継ぎの元の登録とexecが同じpidで作り直した後継の登録は1つのsupervisorと数えて知らせない（意味と直し方は判定のdoc comment）。
    - plist: `~/Library/LaunchAgents/com.dagq.<queue hash>.plist`で、queue hashの決め方は`QueueLocation::hash`のdoc comment、中身は`src/application/lifecycle.rs`の`LaunchAgentSpec::xml`と`supervise_arguments`と`SupervisorEnvironment`のdoc commentにある。
