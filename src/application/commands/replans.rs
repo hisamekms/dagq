@@ -20,7 +20,12 @@ pub trait ReplanStore: DenialLog {
     /// The task of run `run`; `None` for a run the queue does not know.
     fn run_task(&self, run: &RunId) -> Result<Option<TaskId>>;
     /// Record `new` from `origin` as `by_role` with actor id `by_id`: a new
-    /// operation on its run, or the run's open one.
+    /// operation on its run, or the task's open one, so that a task keeps
+    /// at most one open operation. One that guards the task stays on the
+    /// run it fenced, and a request on any run of the task joins it; one
+    /// that does not guard is carried to the task's latest run (by a
+    /// request on that run too), and a request on another run is refused
+    /// while it is open there.
     fn record_replan(
         &mut self,
         new: &NewReplan,
