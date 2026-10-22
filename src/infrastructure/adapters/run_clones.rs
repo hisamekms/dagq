@@ -760,8 +760,16 @@ impl GitRepository {
             .iter()
             .any(|(listed, _)| same_path(listed, &path));
         match entry(&path)? {
+            // One made at another commit (the one its review passed, before
+            // an approved resume resolved the run at a new head) is made
+            // again at `commit`: reused, the e2e and the landing would take
+            // its old tree for the new commit.
             Some(meta) if registered && meta.is_dir() && !meta.file_type().is_symlink() => {
-                return Ok(Ok(path));
+                if guarded.head(&path).ok().as_ref() == Some(commit) {
+                    return Ok(Ok(path));
+                }
+                self.remove_landing_at(Some(&guarded), &path)?;
+                guarded.prune_worktrees()?;
             }
             Some(_) => {
                 return Ok(Err(format!(

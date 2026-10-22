@@ -1128,6 +1128,139 @@ fn a_run_whose_conflict_only_resumes_are_used_up_is_retried_with_its_branch() {
     assert_eq!(next.base_commit().as_str(), first_landed);
 }
 
+/// An approved run whose conflict-only resume resolved it lands the head
+/// the session's receipt names: that head becomes its `result_commit`, so
+/// the e2e its validation required runs at it before the landing, and a
+/// landing recheck that held the reviewed commit against this main (it
+/// would not land there) does not park the resolved head again.
+#[test]
+fn an_approved_run_resolved_by_its_resume_lands_the_resolved_head() {
+    let (dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let (run, first_landed) = parked_conflict(&repo, &db, &backend);
+    let source = run.result_commit().cloned().unwrap();
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE run_events SET payload=json_set(payload,'$.e2e_requirement',
+             json('{\"required\":true,\"source\":\"paths\",\"paths\":[\"change.txt\"]}'))
+             WHERE kind='validation_finished'",
+            [],
+        )
+        .unwrap();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::LandingRecheckFailed,
+            json!({"action": "held", "code": "rebase_conflict", "main": first_landed,
+                   "head": source, "conflicts": ["change.txt"],
+                   "reason": "rebase onto main conflicted in change.txt"}),
+        )
+        .unwrap();
+    backend.resume_script_for(
+        2,
+        "await_message; resolve || exit 1; receipt \"$(git rev-parse HEAD)\"; idle; await_exit",
+    );
+    let ran = dir.path().join("ran");
+    let options = crate::runtime_e2e::e2e_options(format!(
+        "git rev-parse HEAD >> {}; echo 'test result: ok. 1 passed; 0 failed'",
+        shell_join(&[ran.display().to_string()])
+    ));
+    let outcome = supervise_with(&db, &repo, &backend, &options).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+
+    let detail = queue.show(TaskId::new(2)).unwrap();
+    let finished = payloads(&detail, "resume_finished");
+    assert_eq!(finished.len(), 1, "{:?}", event_kinds(&detail));
+    assert_eq!(finished[0]["outcome"], "resolved");
+    assert_eq!(finished[0]["approved"], true);
+    let resolved = finished[0]["head"].as_str().unwrap().to_owned();
+    assert_ne!(resolved, source.as_str());
+    // Not parked again by the recheck that held the reviewed commit.
+    assert_eq!(payloads(&detail, "landing_recheck_failed").len(), 1);
+    let started = payloads(&detail, "run_e2e_started");
+    assert_eq!(started.len(), 1, "{:?}", event_kinds(&detail));
+    assert_eq!(started[0]["commit"], resolved);
+    assert_eq!(
+        fs::read_to_string(&ran)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        [resolved.as_str()]
+    );
+    assert_eq!(detail.task.status(), TaskStatus::Completed);
+    assert_eq!(detail.runs[0].status(), RunStatus::Integrated);
+    assert_eq!(
+        fs::read_to_string(repo.join("change.txt")).unwrap(),
+        "resolved by the resumed session\n"
+    );
+}
+
+/// The retry after the conflict-only resumes are used up carries over the
+/// head the last resolved resume recorded as the run's `result_commit`, not
+/// the commit its review passed. That resume is recorded as the supervisor
+/// records it ([`SqliteQueue::finish_approved_resume`]) after the session
+/// rebased the worktree onto main, and the earlier ones without their
+/// sessions.
+#[test]
+fn the_retry_after_used_up_resumes_carries_the_last_resolved_head_over() {
+    let (_dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, VALID_AGENT);
+    let (run, first_landed) = parked_conflict(&repo, &db, &backend);
+    let source = run.result_commit().cloned().unwrap();
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    earlier_resumes(&mut queue, &run, CONFLICT_ONLY_RESUME_LIMIT - 1);
+    let token = LeaseToken::new("earlier");
+    let (_, attempt) = queue
+        .begin_resume(
+            run.id(),
+            &token,
+            &sha(&first_landed),
+            None,
+            Default::default(),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(attempt, CONFLICT_ONLY_RESUME_LIMIT);
+    let resolved = resolve_in_worktree(&run, &first_landed);
+    let resumed = queue
+        .finish_approved_resume(
+            run.id(),
+            &token,
+            &sha(&resolved),
+            json!({"attempt": attempt, "outcome": "resolved", "head": resolved, "approved": true}),
+        )
+        .unwrap();
+    assert_eq!(resumed.status(), RunStatus::NeedsSession);
+    assert_eq!(resumed.result_commit().unwrap().as_str(), resolved);
+    queue.release_lease(run.id(), &token).unwrap();
+    let outcome = supervise(&db, &repo, &backend).unwrap();
+    backend.join();
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+
+    let detail = queue.show(TaskId::new(2)).unwrap();
+    let finished = payloads(&detail, "triage_finished");
+    assert_eq!(finished.len(), 1, "{:?}", event_kinds(&detail));
+    assert_eq!(finished[0]["action"], "retry_inherit");
+    assert_eq!(finished[0]["inherit"]["head"], resolved);
+    let repaired: Vec<&Value> = payloads(&detail, "auto_repaired")
+        .into_iter()
+        .filter(|p| p["repair"] == "inherit_retry")
+        .collect();
+    assert_eq!(repaired.len(), 1, "{:?}", event_kinds(&detail));
+    assert_eq!(repaired[0]["conditions"]["head"], resolved);
+    assert_eq!(
+        git_out(
+            &repo,
+            &["rev-parse", &format!("refs/dagq/runs/{}", run.id())]
+        ),
+        resolved
+    );
+    assert_ne!(resolved, source.as_str());
+}
+
 /// A session that cannot resolve the run uses up an attempt; after the
 /// third the supervisor stops resuming it: the run becomes `failed` with
 /// its `resume_exhausted` alert recorded (`recovery_requested`, ADR-0047

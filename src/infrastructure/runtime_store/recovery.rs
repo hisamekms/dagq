@@ -797,9 +797,11 @@ impl SqliteQueue {
     /// [`Self::begin_resume`] but whatever the attempts so far, lease it to
     /// `token` (`lease_acquired` with `reason: resume_skipped`), make
     /// `token` its supervisor and record `resume_skipped` (`head`, `main`,
-    /// `approved`, `status`). An approved run stays `needs_session` for the
-    /// caller to land under the lease; an unapproved one becomes
-    /// `validating`. No `resume_started` is recorded, so no attempt is used.
+    /// `approved`, `status`). An approved run stays `needs_session` with
+    /// `head` as the commit it lands, for the caller to land under the
+    /// lease; an unapproved one becomes `validating`. No `resume_started` is
+    /// recorded, so no attempt is used, and with no session started the
+    /// earlier session's `run_processes` rows are kept.
     /// `Ok(None)` means another process took it, it changed meanwhile, or
     /// a replanning operation guards its task.
     pub fn skip_resume(
@@ -827,7 +829,7 @@ impl SqliteQueue {
             id,
             None,
             || format!("run {id} is not needs_session"),
-            |run| run::skip_resume(run, approved),
+            |run| run::skip_resume(run, head.clone(), approved),
         )?;
         let status = run.status();
         run_event(
@@ -861,10 +863,48 @@ impl SqliteQueue {
         keep_lease: bool,
         payload: serde_json::Value,
     ) -> Result<TaskRun> {
+        self.end_resume(id, token, status, reason, None, keep_lease, payload)
+    }
+
+    /// [`Self::finish_resume`] of an approved run its session resolved at
+    /// `head`, the head of its branch: in the same transaction `head`
+    /// becomes the commit it lands ([`run::resolve_approved_resume`]); the
+    /// run stays `needs_session` and keeps its lease for the landing.
+    pub fn finish_approved_resume(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        head: &CommitSha,
+        payload: serde_json::Value,
+    ) -> Result<TaskRun> {
+        self.end_resume(id, token, None, None, Some(head), true, payload)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn end_resume(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        status: Option<crate::domain::RunStatus>,
+        reason: Option<&str>,
+        landing: Option<&CommitSha>,
+        keep_lease: bool,
+        payload: serde_json::Value,
+    ) -> Result<TaskRun> {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         renew_lease(&tx, id, token, self.generators.clock.now())?;
+        if let Some(head) = landing {
+            apply(
+                &tx,
+                refusals(&self.runs_dir, &self.generators),
+                id,
+                None,
+                || format!("run {id} is not needs_session"),
+                |run| run::resolve_approved_resume(run, head.clone()),
+            )?;
+        }
         if let Some(status) = status {
             apply(
                 &tx,
@@ -1725,6 +1765,15 @@ impl RunRecovery for SqliteQueue {
         payload: serde_json::Value,
     ) -> Result<TaskRun> {
         SqliteQueue::finish_resume(self, id, token, status, reason, keep_lease, payload)
+    }
+    fn finish_approved_resume(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        head: &CommitSha,
+        payload: serde_json::Value,
+    ) -> Result<TaskRun> {
+        SqliteQueue::finish_approved_resume(self, id, token, head, payload)
     }
     fn skip_resume(
         &mut self,

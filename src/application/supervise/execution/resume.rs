@@ -804,8 +804,11 @@ impl Supervisor<'_> {
     }
     /// The resumed session ended, or resolved the run: record
     /// `resume_finished` and move the run on. A resolved run whose
-    /// integrate was approved has exited; its workspace is closed and it
-    /// keeps its lease and waits for the landing slot. An unapproved
+    /// integrate was approved has exited; its workspace is closed, the
+    /// resolved head becomes the commit it lands ([`landing_head`]), and it
+    /// keeps its lease and waits for the landing slot; when that head
+    /// cannot be confirmed as its branch's, the resume ends unresolved
+    /// with the reason recorded. An unapproved
     /// resolved run keeps its session and lease and goes through
     /// validation and review like the worker's (ADR-0027 decision 3); a
     /// `failed` receipt ends the run; anything else leaves it
@@ -816,9 +819,25 @@ impl Supervisor<'_> {
         slot: &mut Slot,
         attempt: usize,
         workspace: &str,
-        verdict: ResumeVerdict,
+        mut verdict: ResumeVerdict,
     ) -> Result<Step> {
         let approved = RunHistory::from_events(&self.queue.run_events(slot.run.id())?).approved();
+        // The commit an approved resolved run lands, read before anything
+        // is recorded; one that cannot be confirmed leaves it unresolved
+        // rather than landing the commit its review passed.
+        let branch = (approved && matches!(verdict.kind, ResumeOutcome::Resolved))
+            .then(|| run_git::head(&*self.repository, &slot.run).ok())
+            .flatten();
+        let (kind, landing, unresolved_because) = landing_of(
+            verdict.kind,
+            approved,
+            verdict.head.as_ref(),
+            branch.as_ref(),
+        );
+        verdict.kind = kind;
+        if let Some(why) = &unresolved_because {
+            warn!(run_id = %slot.run.id(), "run {}: the resumed session resolved it, but {why}; it stays needs_session", slot.run.id());
+        }
         let reviewed = matches!(verdict.kind, ResumeOutcome::Resolved) && !approved;
         // A session let go after the exit timeout still runs: its
         // wrapper stays, and blocks the next attempt until it ends. A
@@ -850,15 +869,16 @@ impl Supervisor<'_> {
         if reviewed {
             payload["session_live"] = json!(verdict.live);
         }
+        if let Some(why) = unresolved_because {
+            payload["unresolved_because"] = json!(why);
+        }
         let id = slot.run.id().clone();
-        let run = match verdict.kind {
-            ResumeOutcome::Resolved if approved => {
-                let run = self.queue.finish_resume(
+        let run = match (verdict.kind, landing) {
+            (ResumeOutcome::Resolved, Some(head)) => {
+                let run = self.queue.finish_approved_resume(
                     &id,
                     self.registration.token(),
-                    None,
-                    None,
-                    true,
+                    &head,
                     payload,
                 )?;
                 self.queue_landing(&run, "resume");
@@ -870,7 +890,7 @@ impl Supervisor<'_> {
                 );
                 return Ok(Step::Continue);
             }
-            ResumeOutcome::Resolved => {
+            (ResumeOutcome::Resolved, None) => {
                 let run = self.queue.finish_resume(
                     &id,
                     self.registration.token(),
@@ -893,7 +913,7 @@ impl Supervisor<'_> {
                 );
                 return Ok(Step::Continue);
             }
-            ResumeOutcome::Failed(reason) => self.queue.finish_resume(
+            (ResumeOutcome::Failed(reason), _) => self.queue.finish_resume(
                 &id,
                 self.registration.token(),
                 Some(RunStatus::Failed),
@@ -901,7 +921,7 @@ impl Supervisor<'_> {
                 false,
                 Reason::new(ReasonCode::WorkerFailed).on(payload),
             )?,
-            ResumeOutcome::Unresolved => {
+            (ResumeOutcome::Unresolved, _) => {
                 payload["exhausted"] =
                     json!(resumes_exhausted(&*self.queue, &id, self.resume.config));
                 self.queue.finish_resume(
@@ -915,6 +935,46 @@ impl Supervisor<'_> {
             }
         };
         Ok(Step::Done(Box::new(run)))
+    }
+}
+
+/// The commit an approved run its resumed session resolved lands: `resolved`,
+/// the head the session's receipt names, when `branch`, the head of the
+/// run's branch read as the resume ends, is that same commit. `Err` with
+/// why when either is missing or they differ: the run is then left
+/// unresolved, not landed at the commit its review passed.
+pub(super) fn landing_head(
+    resolved: Option<&CommitSha>,
+    branch: Option<&CommitSha>,
+) -> std::result::Result<CommitSha, String> {
+    match (resolved, branch) {
+        (None, _) => Err("the head its receipt resolved was not read".to_owned()),
+        (Some(_), None) => Err("the head of its branch could not be read".to_owned()),
+        (Some(resolved), Some(branch)) if resolved != branch => Err(format!(
+            "the head of its branch {branch} is not the head {resolved} its receipt resolved"
+        )),
+        (Some(resolved), Some(_)) => Ok(resolved.clone()),
+    }
+}
+
+/// How a resume that ended as `kind` is recorded: an approved resolved
+/// one lands [`landing_head`] of `resolved` (the head its receipt names)
+/// and `branch` (the head of the run's branch read as it ends), or is
+/// recorded unresolved with why when that head is not confirmed, so the
+/// run keeps its `result_commit` and stays `needs_session` for the next
+/// attempt. Any other outcome is kept, with nothing to land.
+pub(super) fn landing_of(
+    kind: ResumeOutcome,
+    approved: bool,
+    resolved: Option<&CommitSha>,
+    branch: Option<&CommitSha>,
+) -> (ResumeOutcome, Option<CommitSha>, Option<String>) {
+    match kind {
+        ResumeOutcome::Resolved if approved => match landing_head(resolved, branch) {
+            Ok(head) => (ResumeOutcome::Resolved, Some(head), None),
+            Err(why) => (ResumeOutcome::Unresolved, None, Some(why)),
+        },
+        kind => (kind, None, None),
     }
 }
 
@@ -1222,7 +1282,7 @@ pub(super) struct ResumeState {
 }
 
 /// What a resumed session left behind when it exited.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ResumeOutcome {
     /// A rewritten `succeeded` receipt names the worktree head.
     Resolved,
@@ -1810,6 +1870,59 @@ mod tests {
         let mut unsent: Option<(u64, SystemTime)> = None;
         restart_clocks(&mut unsent, &mut None, from, now);
         assert_eq!(unsent, None);
+    }
+
+    /// An approved resolved resume lands the head its receipt names only
+    /// when the run's branch is at that head; otherwise, or when either
+    /// head is not read, it is recorded unresolved with why and lands
+    /// nothing, so the run's `result_commit` stays. Other outcomes, and
+    /// an unapproved resolved one (validated next), are kept as they are.
+    #[test]
+    fn an_approved_resolved_resume_lands_its_head_only_when_the_branch_is_there() {
+        let (resolved, other) = (sha('a'), sha('b'));
+        assert_eq!(
+            landing_of(
+                ResumeOutcome::Resolved,
+                true,
+                Some(&resolved),
+                Some(&resolved)
+            ),
+            (ResumeOutcome::Resolved, Some(resolved.clone()), None)
+        );
+        for (receipt, branch, why) in [
+            (
+                Some(&resolved),
+                Some(&other),
+                format!(
+                    "the head of its branch {other} is not the head {resolved} its receipt resolved"
+                ),
+            ),
+            (
+                Some(&resolved),
+                None,
+                "the head of its branch could not be read".to_owned(),
+            ),
+            (
+                None,
+                Some(&resolved),
+                "the head its receipt resolved was not read".to_owned(),
+            ),
+        ] {
+            assert_eq!(
+                landing_of(ResumeOutcome::Resolved, true, receipt, branch),
+                (ResumeOutcome::Unresolved, None, Some(why))
+            );
+        }
+        assert_eq!(
+            landing_of(ResumeOutcome::Resolved, false, Some(&resolved), None),
+            (ResumeOutcome::Resolved, None, None)
+        );
+        for kind in [ResumeOutcome::Unresolved, ResumeOutcome::Failed("f".into())] {
+            assert_eq!(
+                landing_of(kind.clone(), true, Some(&resolved), Some(&resolved)),
+                (kind, None, None)
+            );
+        }
     }
 
     fn event(id: i64, kind: &str, payload: Value) -> RunEvent {

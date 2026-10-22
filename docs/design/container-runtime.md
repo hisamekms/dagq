@@ -185,7 +185,7 @@ adapterもcloneのpathでのgitを拒む。
   headが要るたびに、bundleを制御側だけの写しにして`bundle list-heads`で1本のrun branchを確かめ、制御側のrun branchだけへ取り込む。
   読めない・食い違うものはsessionに返す。
 - 再計画の保留と復元: 書き出した作業と渡す材料による（[再計画](../plans/task-replanning.md)）。
-- 着地・review・e2e: 制御側だけの`<queue dir>/landing/<run>`の着地用のworktree（検証が受け入れたcommitをdetachedで置く）で動く。
+- 着地・review・e2e: 制御側だけの`<queue dir>/landing/<run>`の着地用のworktree（着地する`result_commit`をdetachedで置く）で動く。
   どのmachineとcontainerのmountにも入らず、作れないときは着地せず人を待つ。
 - main: rebaseを求めうる要求をsessionに渡す前に、制御側がmainのbundleをrun dirに書き、executorがcloneの`refs/remotes/dagq/main`へ取り込む。
   要求と差し戻しの理由はそのrefを名指す。

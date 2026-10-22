@@ -2255,3 +2255,13 @@ task = 3033
 name = "runtime_review_revise_limit::the_revise_limit_is_read_from_the_landing_branchs_commit_at_each_attempt"
 reason = "B 境界（Git・supervisor の配線）: supervisor の起動の後に main checkout で landing branch に commit した revise_limit が次の review の試行から効き、main checkout の未 commit の値は効かないことを実際の supervisor と Git で確かめる。下げた上限の判断は domain::run::history の unit test"
 task = 3033
+
+[[test]]
+name = "runtime_resume::an_approved_run_resolved_by_its_resume_lands_the_resolved_head"
+reason = "B 境界（守る境界）: supervisor の配線と Git — resolved の resume の head が SQLite の result_commit になり、着地の前の e2e と landing recheck の park がそれを読む（判断は unit test の landing_of）"
+task = 3113
+
+[[test]]
+name = "runtime_resume::the_retry_after_used_up_resumes_carries_the_last_resolved_head_over"
+reason = "B 境界（守る境界）: SQLite と Git — store が記録した resolved の head を supervisor の retry_inherit が refs/dagq/runs に残して引き継ぐ"
+task = 3113

@@ -1416,6 +1416,16 @@ pub trait RunRecovery {
         keep_lease: bool,
         payload: serde_json::Value,
     ) -> Result<TaskRun>;
+    /// End the resume of an approved run its session resolved at `head`,
+    /// the head of its branch, which becomes the commit the run lands; it
+    /// stays `needs_session` and keeps its lease for the landing.
+    fn finish_approved_resume(
+        &mut self,
+        id: &RunId,
+        token: &LeaseToken,
+        head: &CommitSha,
+        payload: serde_json::Value,
+    ) -> Result<TaskRun>;
     /// Move a run an earlier resume resolved on without a session.
     fn skip_resume(
         &mut self,
@@ -2113,8 +2123,10 @@ pub trait Repository: RepositoryReads {
         anyhow::bail!("this repository cannot read a run's clone")
     }
     /// The landing worktree of a run in a container (ADR-t2179-1 decision
-    /// 5): the one already registered at its path, or a new one made there
-    /// with `commit` checked out detached. `Ok(Err(why))` refuses to make
+    /// 5): the one already registered at its path when its `HEAD` is
+    /// `commit`, or a new one made there with `commit` checked out detached
+    /// (one registered at another commit is removed first). Only the
+    /// holder of the run's lease calls it. `Ok(Err(why))` refuses to make
     /// it: something is at its path already, a directory between the
     /// queue's directory and it is a symlink or no directory, or the
     /// landing directory is not the control side's alone.

@@ -709,6 +709,97 @@ fn landing_paths(db: &Path, run: &ContainerRun) -> (PathBuf, PathBuf, PathBuf) {
     (runs_dir(db).parent().unwrap().to_path_buf(), landing, tree)
 }
 
+/// An approved container run whose resume resolved it at a new head after
+/// its landing worktree was made at the reviewed commit: the resume's end
+/// as the supervisor records it ([`SqliteQueue::finish_approved_resume`])
+/// makes that head the run's `result_commit`, the commit the e2e before
+/// its landing records, and the landing worktree the e2e and the landing
+/// run in is made again at it rather than reused at the reviewed commit.
+/// The run lands that head.
+#[test]
+fn an_approved_container_runs_resolved_head_lands_from_a_new_landing_worktree() {
+    let (_fixture, repo, db) = fixture();
+    let mut run = claim_in_container(&db, &repo, TaskId::new(1));
+    let reviewed = commit(&run, &[("shared.txt", "the run's\n")], "run");
+    turn_end(&run);
+    write_receipt(&run, &reviewed);
+    validate(&db, &repo, &mut run);
+    let tree = start_in_tree(&repo, &run, None);
+    assert_eq!(git_out(&tree, &["rev-parse", "HEAD"]), reviewed);
+    fs::write(repo.join("shared.txt"), "main's\n").unwrap();
+    git(&repo, &["add", "shared.txt"]);
+    git(&repo, &["commit", "-q", "-m", "main's"]);
+    let main = git_out(&repo, &["rev-parse", "main"]);
+    let outcome = integrate(&db, run.task.as_i64(), &repo).unwrap();
+    assert_eq!(outcome["outcome"], "needs_session", "{outcome}");
+    // The landing worktree is still there, at the reviewed commit.
+    assert_eq!(git_out(&tree, &["rev-parse", "HEAD"]), reviewed);
+    let repository = GitRepository::inspect(&repo).unwrap();
+    run.reload(&db);
+    run_git::hand_main(&repository, &run.run, &sha(&main)).unwrap();
+    let bundle = run.run_dir.join(run_clone::MAIN_BUNDLE_FILE);
+    in_clone(
+        &run.clone,
+        &[
+            "fetch",
+            "-q",
+            bundle.to_str().unwrap(),
+            &format!("+refs/heads/main:{}", run_clone::CLONE_MAIN_REF),
+        ],
+    );
+    // The resumed session rebases onto main in the clone, resolving the
+    // conflict, and the turn's end hands the new head over.
+    in_clone(
+        &run.clone,
+        &["reset", "-q", "--hard", run_clone::CLONE_MAIN_REF],
+    );
+    let resolved = commit(&run, &[("shared.txt", "both\n")], "run, on main");
+    turn_end(&run);
+    write_receipt(&run, &resolved);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let (_, attempt) = queue
+        .begin_resume(
+            run.run.id(),
+            &run.token,
+            &sha(&main),
+            None,
+            Default::default(),
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        run_git::head(&repository, &run.run).unwrap().as_str(),
+        resolved
+    );
+    let resumed = queue
+        .finish_approved_resume(
+            run.run.id(),
+            &run.token,
+            &sha(&resolved),
+            json!({"attempt": attempt, "outcome": "resolved", "head": resolved, "approved": true}),
+        )
+        .unwrap();
+    assert_eq!(resumed.result_commit().unwrap().as_str(), resolved);
+    run.reload(&db);
+    // The e2e's tree (`review_tree`, as e2e.rs takes it for the commit it
+    // records, the run's `result_commit`) is at the resolved head.
+    let anew = start_in_tree(&repo, &run, None);
+    assert_eq!(Some(anew.clone()), run.run.landing_path());
+    assert_eq!(git_out(&anew, &["rev-parse", "HEAD"]), resolved);
+    assert_eq!(git_out(&anew, &["status", "--porcelain"]), "");
+    // Asked again at that commit, it is reused as it is.
+    let marker = anew.join("untracked-marker");
+    fs::write(&marker, "").unwrap();
+    let again = run_git::review_tree(&repository, &run.run).unwrap();
+    assert_eq!(again, anew);
+    assert!(marker.exists());
+    fs::remove_file(&marker).unwrap();
+    queue.release_lease(run.run.id(), &run.token).unwrap();
+    let outcome = integrate(&db, run.task.as_i64(), &repo).unwrap();
+    assert_eq!(outcome["outcome"], "integrated", "{outcome}");
+    assert_eq!(git_out(&repo, &["show", "main:shared.txt"]), "both");
+}
+
 /// AC 5: the landing worktree is the control side's alone, outside every
 /// directory the machine mounts; something at its path, a symlink or a file
 /// on the way to it or a landing directory others may write keeps the run

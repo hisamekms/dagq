@@ -738,14 +738,28 @@ pub fn check_resumable(run: &TaskRun) -> Result<(), DomainError> {
     require_status(run, &[RunStatus::NeedsSession], "resume")
 }
 
-/// A resume is skipped because an earlier attempt already resolved the run:
-/// an `approved` one stays `needs_session` for its landing, any other is
-/// validated again.
-pub fn skip_resume(mut run: TaskRun, approved: bool) -> Result<TaskRun, DomainError> {
+/// A resume is skipped because an earlier attempt already resolved the run
+/// at `head`: an `approved` one stays `needs_session` for its landing, which
+/// lands `head` ([`resolve_approved_resume`]), any other is validated again
+/// (whose acceptance names the commit).
+pub fn skip_resume(run: TaskRun, head: CommitSha, approved: bool) -> Result<TaskRun, DomainError> {
     check_resumable(&run)?;
-    if !approved {
-        run.status = RunStatus::Validating;
+    if approved {
+        return resolve_approved_resume(run, head);
     }
+    let mut run = run;
+    run.status = RunStatus::Validating;
+    Ok(run)
+}
+
+/// A resumed session resolved an approved run at `head`, the head of its
+/// branch: the run stays `needs_session` for its landing, and `head`
+/// becomes the commit it lands (`result_commit`), which the e2e before its
+/// landing, the landing recheck's park and a retry carrying it over read
+/// in place of the one its review passed.
+pub fn resolve_approved_resume(mut run: TaskRun, head: CommitSha) -> Result<TaskRun, DomainError> {
+    require_status(&run, &[RunStatus::NeedsSession], "resolve the resume of")?;
+    run.result_commit = Some(head);
     Ok(run)
 }
 
@@ -1224,7 +1238,14 @@ mod tests {
             finish_integration(run(RunStatus::NeedsSession), sha()),
             RunStatus::NeedsSession,
         );
-        refused(skip_resume(run(RunStatus::Failed), true), RunStatus::Failed);
+        refused(
+            skip_resume(run(RunStatus::Failed), sha(), true),
+            RunStatus::Failed,
+        );
+        refused(
+            resolve_approved_resume(run(RunStatus::AwaitingIntegration), sha()),
+            RunStatus::AwaitingIntegration,
+        );
         refused(
             finish_resume(run(RunStatus::NeedsSession), RunStatus::Integrated, None),
             RunStatus::NeedsSession,
@@ -1331,18 +1352,15 @@ mod tests {
         assert_eq!(back.status(), RunStatus::Integrating);
 
         check_resumable(&run(RunStatus::NeedsSession)).unwrap();
-        assert_eq!(
-            skip_resume(run(RunStatus::NeedsSession), true)
-                .unwrap()
-                .status(),
-            RunStatus::NeedsSession
-        );
-        assert_eq!(
-            skip_resume(run(RunStatus::NeedsSession), false)
-                .unwrap()
-                .status(),
-            RunStatus::Validating
-        );
+        let landing = skip_resume(run(RunStatus::NeedsSession), sha(), true).unwrap();
+        assert_eq!(landing.status(), RunStatus::NeedsSession);
+        assert_eq!(landing.result_commit(), Some(&sha()));
+        let validated = skip_resume(run(RunStatus::NeedsSession), sha(), false).unwrap();
+        assert_eq!(validated.status(), RunStatus::Validating);
+        assert_eq!(validated.result_commit(), None);
+        let resolved = resolve_approved_resume(run(RunStatus::NeedsSession), sha()).unwrap();
+        assert_eq!(resolved.status(), RunStatus::NeedsSession);
+        assert_eq!(resolved.result_commit(), Some(&sha()));
         let resolved = finish_resume(
             abandon(run(RunStatus::NeedsSession), "old".into()).unwrap(),
             RunStatus::AwaitingIntegration,

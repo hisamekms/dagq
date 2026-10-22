@@ -88,10 +88,10 @@ resume中に死んだsupervisorが起動したwrapper（handleの記録が無い
 
 0. **解消済みの確認**（`resolved_head`）: resumeを始める前に、前の試行で解消済みかを確かめる。
    前の試行のsessionがreceiptを書き直した後に判定された（rebaseもreceiptも済んでいて、次の試行のsessionが何もせずにidleになる）runは、`rewritten_receipt`がresume開始より新しいreceiptを要求するので`unresolved`になり、試行を空費する。
-   次をすべて満たせばsessionを開かない: (a) runを`needs_session`にした最後のイベントが`landing_decided`（人の`send_back`。指摘への対応はsessionが要る）ではなく、parkのイベントと`resume_finished` / `resume_skipped`のうち最後が`outcome: unresolved`の`resume_finished`（parkの後にsessionの走ったresumeが終わっている。開けなかったresume（`outcome: error`）は何も変えていないので数えない）、(b) receiptがparseでき、`run_id`がこのrunで`succeeded`、taskの`required_evidence`とSpikeの結果を満たす、(c) receiptの`commit`がworktreeのHEADに一致し、worktreeがclean、(d) HEADが今の`main`ではなく、`main`を祖先に持つ。
+   次をすべて満たせばsessionを開かない: (a) runを`needs_session`にした最後のイベントが`landing_decided`（人の`send_back`。指摘への対応はsessionが要る）ではなく、parkのイベントと`resume_finished` / `resume_skipped`のうち最後が`outcome: unresolved`の`resume_finished`、(b) receiptがparseでき、`run_id`がこのrunで`succeeded`、taskの`required_evidence`とSpikeの結果を満たす、(c) receiptの`commit`がworktreeのHEADに一致し、worktreeがclean、(d) HEADが今の`main`ではなく、`main`を祖先に持つ。
    どれかが読めない・満たさないときは1に進む。
    宣言外のパスはここでは見ず、skipの後の[Validation](validation.md#validation)か着地が検査する。
-   満たせば1トランザクションで`begin_resume`と同じ確認（`needs_session`、leaseが無いかstale、heartbeatしている未終了のprocessが無い）をしてleaseし（sessionを始めないので前のsessionの`run_processes`の行は消さない）、`resume_skipped`を記録する。
+   満たせば1トランザクションで`begin_resume`と同じ確認（`needs_session`、leaseが無いかstale、heartbeatしている未終了のprocessが無い）をしてleaseし、`resume_skipped`を記録する。
    `resume_started`は記録しないので試行回数は増えず、試行が上限に達したrunには行わない（最初の除外条件のまま）。
    `integration_approved`があればrunは`needs_session`のまま着地スロットを待ち、下の5と同じく着地させる。
    無ければrunを`validating`にし、sessionの無いまま[Validation](validation.md#validation)→[Review](review.md#review-supervisor)に進める。
@@ -122,6 +122,7 @@ resume中に死んだsupervisorが起動したwrapper（handleの記録が無い
    ちょうど上限で過ぎたとみなす。
 
 5. **その後**: `resolved`で`integration_approved`があれば（0の解消済みの確認で`resume_skipped`になった承認済みのrunも）、`landing_queued`を記録し、leaseを持ったまま着地スロットが空くのを待ち（他のrunが`integrating`なら次の回に回す）、`begin_integration`（同じtokenのleaseはそのまま使う）から`integrate`と同じ関数を別threadで走らせる。
+   承認済みのrunは、receiptのheadがbranchのheadと一致すれば同じトランザクションでそれを着地するcommit（`result_commit`）にし、一致しなければ理由を残して`unresolved`として扱う。
    着地がまた`needs_session`になればleaseは外れ、次の回に1に戻る。
    `integration_approved`が無ければ、上の4のとおりsessionを開いたままrunを`validating`にしてreviewに進む（resumeしたsessionが自分で終わっていた場合も同じ経路で、wrapperはreviewの後に止める）。
    `failed`ならrunを`failed`にする。
@@ -129,7 +130,7 @@ resume中に死んだsupervisorが起動したwrapper（handleの記録が無い
 6. **打ち切りとerror**: 試行を使い切った後の`resume_finished`が未解消で、次の`resume_candidates`でそのrunにstaleでないleaseも生きているwrapperも無ければ（slotの空きに関わらず）、supervisorは次の**引き継ぐretry**か、復旧jobに渡すかを決める。
 
    **引き継ぐretry**（ADR-0047の決定24）: runが今も衝突だけで`needs_session`（上の(a)(b)がすべてのイベントについて成り立つ）で、同じtaskのどのrunもこのretryをしていなければ（taskごとに1回まで。人の手での引き継ぎ（[Triage](triage.md#人の手での引き継ぎ)）は数えない。`inherits_on_exhaustion`）、人に聞かずにretryする。
-   runの`result_commit`（reviewがpassした検証済みのcommit。無ければ、rebaseの途中でないworktreeのHEAD）がbaseと違えば、それを`refs/dagq/runs/<run-id>`に向け（branchを消されても残るように）、1トランザクションで下と同じ確認と、衝突だけで止まっていることとtaskごとに1回までであることの再確認をしてrunを`failed`にし、taskを`in_progress`から`ready`に戻し（中身は変えないのでplan reviewにはかけない。triageの`retry`と同じ例外）、`auto_repaired`と`triage_finished`を記録する。
+   runの`result_commit`（着地するcommit（5）。無ければ、rebaseの途中でないworktreeのHEAD）がbaseと違えば、それを`refs/dagq/runs/<run-id>`に向け（branchを消されても残るように）、1トランザクションで下と同じ確認と、衝突だけで止まっていることとtaskごとに1回までであることの再確認をしてrunを`failed`にし、taskを`in_progress`から`ready`に戻し（中身は変えないのでplan reviewにはかけない。triageの`retry`と同じ例外）、`auto_repaired`と`triage_finished`を記録する。
    askは開かない。
    残したresumeのwrapperはtriageと同じく止め、worktreeとbranchはtaskが`ready`なので残る。
    次のrunのclaimでsupervisorは、前のrunのうち最も新しい引き継ぐretryで終わったrunがあれば（直前のrunが早くに失敗してtriageでretryされても引き継ぐ）、worker promptに引き継ぎの節（前のrunのreviewはpassしたが衝突で試行を使い切ったこと、commit（`refs/dagq/runs/<id>`とbranch）と、そのrun自身のcommitの範囲（headと新しいrunのbaseのmerge-baseから。途中までrebaseしたresumeがmainのcommitを下に積んでいても、それを含めない）、今のmain（新しいrunのbase）に載せ直して衝突を解き、検証を再実行して自分のheadでreceiptを書くこと、前のreceiptのpathとsummary）を足し、新しいrunに`run_inherited`を記録する。
