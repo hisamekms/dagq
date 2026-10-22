@@ -10,10 +10,11 @@
 //! to a new planner when that one is gone). A planner that ends with the finding
 //! undecided is followed by another, at most
 //! [`crate::domain::MAX_FINDING_PLANNERS`] per mark. The end of a linked
-//! proposal resolves the finding, or opens it again. A `ci_failure`
-//! finding the supervisor's CI watch recorded, the repair of the landing
-//! branch's CI, gets its planner before the drafts' and past the
-//! improvements' limit (ADR-t2928-1).
+//! proposal resolves the finding, or opens it again. A finding of the
+//! supervisor's that is no improvement ([`counts_as_improvement`](crate::domain::counts_as_improvement)) — a
+//! `ci_failure` one of its CI watch (ADR-t2928-1) or an
+//! `agent_eval_watch_due` one of its agent watch (ADR-t2971-1) — gets its
+//! planner before the drafts' and past the improvements' limit.
 
 use super::*;
 use crate::domain::EventKind;
@@ -24,8 +25,8 @@ use crate::{
         prompt::{FindingPlannerMaterial, FittedPrompt, finding_planner_prompt},
     },
     domain::{
-        Ask, FindingId, GoalId, ImprovementLimit, counts_as_improvement,
-        kpi::config::DEFAULT_MAX_IMPROVEMENT_PROPOSALS, planner::answer_waits,
+        Ask, FindingId, GoalId, ImprovementLimit, kpi::config::DEFAULT_MAX_IMPROVEMENT_PROPOSALS,
+        planner::answer_waits, planner_turns,
     },
 };
 
@@ -172,14 +173,16 @@ impl PlanningState {
         Ok(())
     }
 
-    /// Open a planner for each `ci_failure` finding of the supervisor's CI
-    /// watch waiting for one, the oldest mark first, while the runtime's
-    /// planners are below the limit; the improvements' limit does not hold
-    /// them (ADR-t2928-1). It runs in
-    /// `tend_planners` after the revises, the answers and the planning
-    /// requests' planners, before the draft planners, so neither the drafts
-    /// nor the improvements marked before take the place of the repair of
-    /// the landing branch's CI.
+    /// Open a planner for each finding waiting for one that is no
+    /// improvement ([`counts_as_improvement`](crate::domain::counts_as_improvement): a `ci_failure` one of the
+    /// supervisor's CI watch, ADR-t2928-1, or an `agent_eval_watch_due` one
+    /// of its agent watch, ADR-t2971-1), the oldest mark first, while the
+    /// runtime's planners are below the limit; the improvements' limit does
+    /// not hold them. It runs in `tend_planners` after the revises, the
+    /// answers and the planning requests' planners, before the draft
+    /// planners, so neither the drafts nor the improvements marked before
+    /// take the place of the repair of the landing branch's CI or of a step
+    /// of the watch.
     pub(in crate::application::supervise) fn open_repair_planners(
         &mut self,
         env: &mut PlanningEnv<'_>,
@@ -202,23 +205,21 @@ impl PlanningState {
         self.open_planners_of(env, runtime_open, true)
     }
 
-    /// Open the planners of the findings waiting for one that are
-    /// improvements ([`counts_as_improvement`]) or are not, the oldest mark
-    /// first.
+    /// Open the planners of the findings waiting for one of the turn
+    /// [`planner_turns`] gives them, the improvements' or the one before
+    /// the drafts', the oldest mark first.
     fn open_planners_of(
         &mut self,
         env: &mut PlanningEnv<'_>,
         runtime_open: &mut usize,
         improvements: bool,
     ) -> Result<()> {
-        let findings: Vec<_> = env
-            .queue
-            .planner_findings()?
-            .into_iter()
-            .filter(|finding| {
-                counts_as_improvement(&finding.kind, &finding.recorded_by) == improvements
-            })
-            .collect();
+        let turns = planner_turns(env.queue.planner_findings()?);
+        let findings = if improvements {
+            turns.improvements
+        } else {
+            turns.before_drafts
+        };
         if findings.is_empty() {
             return Ok(());
         }

@@ -1090,6 +1090,50 @@ fn finding_record_refuses_a_ci_failure_finding_to_the_observer_and_a_person() {
     );
 }
 
+/// ADR-t2971-1: only the supervisor's watch of the adopted agent
+/// definitions records its findings, so `finding record` refuses both its
+/// kinds to the observer and to a person, says why, and records nothing.
+#[test]
+fn finding_record_refuses_the_agent_watchs_findings_to_the_observer_and_a_person() {
+    let (_dir, db) = queue();
+    for kind in ["agent_eval_watch_due", "agent_eval_below_threshold"] {
+        let record = [
+            "finding",
+            "record",
+            "--kind",
+            kind,
+            "--queue",
+            "--subject",
+            "agent_eval_watch:adr-rules",
+            "--summary",
+            "the watch is due",
+            "--propose",
+            "watch it",
+        ];
+        for role in [Some("observer"), None] {
+            let output = invoke_as(role, &db, &record);
+            assert!(!output.status.success(), "{role:?} recorded {kind}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains(
+                    "recorded only by the supervisor's watch of the adopted agent definitions"
+                ),
+                "{role:?}: {stderr}"
+            );
+        }
+    }
+    assert_eq!(
+        ok(&db, &["findings", "--all"])["findings"],
+        serde_json::json!([])
+    );
+    assert!(
+        ok(&db, &["events", "--all", "--kind", "finding_recorded"])["events"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
 /// The supervisor's headless review runs under `DAGQ_ROLE=reviewer`
 /// (ADR-0027): it may read the queue and nothing else.
 #[test]

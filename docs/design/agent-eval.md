@@ -6,6 +6,7 @@ status: current
 created: 2026-10-06
 scope: runtime
 related:
+  - adr-t2971-1
   - adr-t1728-1
   - adr-t2259-1
   - design-supervisor-lifecycle-review-builtin
@@ -196,20 +197,22 @@ built-inの定義の変更には広げない（定義がdagqのsourceにあり�
 ### 採用した定義の見張り
 
 landing branchの定義を新しい本番のreviewで測り直す時期をsupervisorが判断し、findingにする。
-判断は`domain::agent_eval::watch`、記録は`application::supervise::observation::agent_watch`（間隔と値は`[eval]`の`watch_new_reviews`・`watch_interval_days`、`EvalConfig`のdoc comment）。
+判断は`domain::agent_eval::watch`、記録は`application::supervise::observation::agent_watch`（間隔と値は`[eval]`、`EvalConfig`のdoc comment）。
 
-- supervisorは依頼しない: 集合の作成もhold-outも、findingで開かれたruntimeのplannerが依頼者として依頼し（[Finding planners](supervisor-lifecycle/finding-planners.md)）、実行は今までどおりsupervisorが行う。
-  plannerの手順は見張りのfindingのplannerの初期prompt（[Finding planners](supervisor-lifecycle/finding-planners.md)の4）とpluginの`dagq` skillの`reference/observer.md`が持つ。
+- supervisorは依頼しない: 集合の作成もhold-outも、findingで開かれたruntimeのplannerが依頼し、実行はsupervisorが行う。
+  plannerの手順はその初期prompt（[Finding planners](supervisor-lifecycle/finding-planners.md)の4）とpluginの`dagq` skillの`reference/observer.md`が持つ。
 - 対象と時期: 働いているsupervisorが一定の間隔で、landing branchのcommitに`evals/`のファイルを持つagentごとに、新しい期間にそのagentを選んで判定の付いた本番のreview（`production::candidates`と同じく開始の時刻で数える）を数える。
   間隔は最後の見張り（`due`のfinding・productionの周の開始・新しいreviewの無かった周の記録）から数え、期間は前の期間の終わり（`due`の`until`、集合の周はその集合の`--until`、周の無かった記録の`through`）から始まる。
   期間の終わりは今か、まだ終わっていないそのagentのreviewのうち最も早い開始の前（上限の時間を過ぎたものは数えない）で、見張りの間に走っていたreviewは終わった後に次の期間で数える（`watch::period_end`）。
   件数が設定に達したか、間隔が過ぎて1件以上あれば`due`のfindingを記録する。
   間隔が過ぎて1件も無ければfindingを作らず`agent_eval_watch_skipped`に理由と期間の終わりを記録する。
   同じagentの見張りのfindingが開いている間は何も記録しない。
-- findingの段: どれも種類`agent_eval_watch_due`・対象queue・`--propose`付きで、subjectが段と対象を名指し、同じsubjectは状態に依らず1回だけ記録する（`record_finding_once`。2つのsupervisorでも1つ）。
+- findingの段: どれも種類`agent_eval_watch_due`・対象queue・`--propose`付きで、subjectが段と対象を名指し、同じsubjectは状態に依らず1回だけ記録する（2つのsupervisorでも1つ、`record_finding_once`）。
   `due`は期間と依頼する`agent cases`を、`holdout`はplannerが依頼した集合が作られて周が無いことと依頼する`agent eval --set`を、`refused`はplannerの集合の周が始まらなかった理由を持つ。
-  `refused`はplannerが理由を書いてdismissする（再実行はplannerの権限に無い）。
-- 成績のfinding: hold-outかproductionの周（着地の前のdevでなく、定義はlanding branchのもの）が全ての実行を終えて閾値を下回れば、依頼者に依らず種類`agent_eval_below_threshold`のfindingを記録し、成績・下回った値・失敗したケースのidとagentの理由を持たせる。
+  `refused`はplannerが理由を書いてdismissする（再実行は権限に無い）。
+  段のplannerはproposalを出さず改善の上限の外（同じく3）。
+- 2つの種類は見張りだけが記録する（`finding record`は拒む）。
+- 成績のfinding（改善で上限に従う）: hold-outかproductionの周（着地の前のdevでなく、定義はlanding branchのもの）が全ての実行を終えて閾値を下回れば、依頼者に依らず種類`agent_eval_below_threshold`のfindingを記録し、成績・下回った値・失敗したケースのidとagentの理由を持たせる。
   findingにするのは周の定義のdigestがlanding branchのheadの`.dagq/agents/<name>/AGENT.md`の今のdigestと等しい周だけで、定義が変わった後の周や定義の無いagentの周は記録しない（採用していない定義の改善をplannerに頼まない）。
   `AGENT.md`が読めなければfindingを作らず、理由をsupervisorのlogに残して次の見張りで判定し直す。
   runtimeのplannerが定義の改善のtaskにし、ラベルの食い違いは集合の`disputed`と同じく人に回る。

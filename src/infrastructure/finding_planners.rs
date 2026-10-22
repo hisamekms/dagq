@@ -114,9 +114,9 @@ impl SqliteQueue {
     /// records `finding_planner_exhausted` (the inbox's attention) instead.
     /// Without `answer`, no planner is opened for an improvement while the
     /// improvements running reach `limit` (ADR-0051 decision 25), counted
-    /// in the same transaction; a `ci_failure` finding the supervisor's CI
-    /// watch recorded, no improvement ([`counts_as_improvement`]), does not
-    /// wait for it. A planner carrying a person's answer is opened past
+    /// in the same transaction; a finding the supervisor recorded that is no
+    /// improvement ([`counts_as_improvement`]: a `ci_failure` or an
+    /// `agent_eval_watch_due` one) does not wait for it. A planner carrying a person's answer is opened past
     /// that limit and past [`MAX_FINDING_PLANNERS`]: the planner that asked
     /// was counted already, and the answer is a person's decision. While a
     /// planner of the finding asked to exit because only a person's answer

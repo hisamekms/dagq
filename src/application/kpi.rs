@@ -66,9 +66,10 @@ pub fn kpi(
 
 /// The improvement proposals running against `limit`, `[kpi]`'s
 /// `max_improvement_proposals` (ADR-0051 decision 25), and when they
-/// reached it, the findings waiting for a planner because of it (no
-/// `ci_failure` one of the supervisor's CI watch, which does not wait for
-/// it, ADR-t2928-1).
+/// reached it, the findings waiting for a planner because of it (none
+/// that is no improvement, [`crate::domain::counts_as_improvement`]: a
+/// `ci_failure` or `agent_eval_watch_due` one the supervisor recorded does
+/// not wait for it, ADR-t2928-1 and ADR-t2971-1).
 pub fn improvements(
     store: &dyn super::DraftPlannerReads,
     limit: usize,

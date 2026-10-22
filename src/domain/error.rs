@@ -221,10 +221,13 @@ pub enum DomainError {
     InvalidFindingKind {
         kind: String,
     },
-    /// `finding record` names a kind only the supervisor's CI watch
-    /// records (`ci_failure`, ADR-t2928-1).
+    /// `finding record` names a kind only a watch of the supervisor's
+    /// records: `ci_failure` its CI watch (ADR-t2928-1), the agent eval
+    /// findings its watch of the adopted definitions (ADR-t2971-1).
+    /// `watch` names that watch.
     ReservedFindingKind {
         kind: String,
+        watch: &'static str,
     },
     /// A task's change is not a lowercase slug, or is `unknown` or `all`
     /// (ADR-t980-1).
@@ -782,9 +785,9 @@ impl fmt::Display for DomainError {
                 f,
                 "finding kind {kind:?} must be a slug of lowercase letters, digits, '-' and '_'"
             ),
-            Self::ReservedFindingKind { kind } => write!(
+            Self::ReservedFindingKind { kind, watch } => write!(
                 f,
-                "finding kind {kind:?} is recorded only by the supervisor's CI watch, not by finding record"
+                "finding kind {kind:?} is recorded only by the supervisor's {watch}, not by finding record"
             ),
             Self::InvalidTaskChange { change } => write!(
                 f,

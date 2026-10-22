@@ -115,7 +115,7 @@ supervisorはserviceが居ない間observerを起動しない（ADR-t1233-4決�
   起動するのはqueue serviceが居るときだけ。
 - **出力の扱い**: findingは人とplannerが`findings`で影響の大きい順に読み、手当てしないと決めたものを`finding dismiss`する。
   proposalを求める印の付いたfindingには、supervisorがruntimeのplannerを立ててproposalを作らせる（[Finding planners (supervisor)](finding-planners.md)）。
-  種類`agent_eval_watch_due`・`agent_eval_below_threshold`はsupervisorが印付きで記録する（[agentのeval](../agent-eval.md#採用した定義の見張り)）。
+  種類`agent_eval_watch_due`・`agent_eval_below_threshold`はsupervisorだけが印付きで記録し、`finding record`は拒む（[agentのeval](../agent-eval.md#採用した定義の見張り)）。
   findingに紐づけた`blocked`のaskには、runtimeが`propose`と`dismiss`のoptionを足し、人のその答えをfindingに適用する。
   `blocked`のaskは`status --role inbox`に`ask_opened`として出る。
 

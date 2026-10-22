@@ -866,6 +866,40 @@ fn a_proposal_of_the_ci_watchs_ci_failure_finding_alone_is_no_improvement() {
     );
 }
 
+/// A proposal linked to an `agent_eval_watch_due` finding the supervisor
+/// recorded is no improvement (ADR-t2971-1); one of such a finding another
+/// role recorded counts, and so does one of an `agent_eval_below_threshold`
+/// finding, whoever recorded it.
+#[test]
+fn a_proposal_of_the_agent_watchs_watch_due_finding_alone_is_no_improvement() {
+    let mut queue = Queue::default();
+    let at = MONDAY + HOUR;
+    for (finding, kind, by) in [
+        (1, "agent_eval_watch_due", "supervisor"),
+        (2, "agent_eval_watch_due", "observer"),
+        (3, "agent_eval_below_threshold", "supervisor"),
+    ] {
+        queue.queue_event(
+            "finding_recorded",
+            json!({"finding_id": finding, "kind": kind, "propose": true, "by": by}),
+            at - 60,
+        );
+    }
+    improvement(&mut queue, 1, 10, &[101], Some("planner"), at);
+    improvement(&mut queue, 2, 11, &[111], Some("planner"), at);
+    improvement(&mut queue, 3, 12, &[121], Some("planner"), at);
+    let query = KpiQuery {
+        at: Some(Cursor::Time((MONDAY + DAY) * 1000)),
+        last: 1,
+        ..KpiQuery::default()
+    };
+    let result = queue.kpi(MONDAY + 2 * DAY, &KpiConfig::default(), &query);
+    assert_eq!(
+        measure(&result.periods[0], "improvement_proposals", ALL).value,
+        Some(2.0)
+    );
+}
+
 /// A running improvement whose link does not record who submitted it
 /// cannot be told from a person's: the KPI has no value then and says
 /// why, while one of the same kind that ended does not stop the count.

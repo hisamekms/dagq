@@ -435,22 +435,61 @@ impl ImprovementLimit {
 /// Whether a finding of `kind` recorded by `recorded_by` is an
 /// improvement: its planners and the proposals linked to it count against
 /// the [`ImprovementLimit`], and its planner waits at it (ADR-0051
-/// decision 25). A `ci_failure` finding the supervisor's CI watch recorded
-/// is not: it repairs the landing branch's CI, and its planner is opened
-/// whatever the improvements running, before the drafts' (ADR-t2928-1).
-/// A `ci_failure` finding recorded by anyone else is an improvement.
+/// decision 25). Two findings the supervisor recorded are not, and their
+/// planners are opened whatever the improvements running, before the
+/// drafts': a `ci_failure` one of its CI watch, the repair of the landing
+/// branch's CI (ADR-t2928-1), and an `agent_eval_watch_due` one of its
+/// watch of the adopted definitions, whose planner asks for cases or a
+/// hold-out and submits no proposal (ADR-t2971-1). Either kind recorded by
+/// anyone else, and an `agent_eval_below_threshold` finding, is an
+/// improvement.
 pub fn counts_as_improvement(kind: &str, recorded_by: &str) -> bool {
-    kind != super::ci_watch::FINDING_KIND || recorded_by != super::ActorRole::Supervisor.as_str()
+    !(recorded_by == super::ActorRole::Supervisor.as_str()
+        && (kind == super::ci_watch::FINDING_KIND
+            || kind == super::agent_eval::watch::WATCH_FINDING_KIND))
 }
 
-/// Whether `finding record` may record a finding of `kind`: not a
-/// `ci_failure` one, whoever records it, as only the supervisor's CI watch
-/// records that kind (ADR-t2928-1).
+/// The findings waiting for a planner of the runtime's, kept in their
+/// order (the oldest mark first), split by the turn of the supervisor's
+/// planners that opens theirs: those that are no improvement
+/// ([`counts_as_improvement`]: the supervisor's `ci_failure`, ADR-t2928-1,
+/// and its `agent_eval_watch_due`, ADR-t2971-1) before the drafts' and past
+/// the [`ImprovementLimit`], the improvements after the drafts' and within
+/// it.
+#[derive(Debug, Default)]
+pub struct PlannerTurns {
+    pub before_drafts: Vec<Finding>,
+    pub improvements: Vec<Finding>,
+}
+
+pub fn planner_turns(findings: Vec<Finding>) -> PlannerTurns {
+    let (improvements, before_drafts) = findings
+        .into_iter()
+        .partition(|finding| counts_as_improvement(&finding.kind, &finding.recorded_by));
+    PlannerTurns {
+        before_drafts,
+        improvements,
+    }
+}
+
+/// Whether `finding record` may record a finding of `kind`: not one only
+/// a watch of the supervisor's records, whoever records it: `ci_failure`
+/// of its CI watch (ADR-t2928-1), nor `agent_eval_watch_due` or
+/// `agent_eval_below_threshold` of its watch of the adopted definitions
+/// (ADR-t2971-1).
 pub fn check_recordable_kind(kind: &str) -> Result<(), DomainError> {
-    require(kind != super::ci_watch::FINDING_KIND, || {
-        DomainError::ReservedFindingKind {
-            kind: kind.to_owned(),
-        }
+    let watch = if kind == super::ci_watch::FINDING_KIND {
+        "CI watch"
+    } else if kind == super::agent_eval::watch::WATCH_FINDING_KIND
+        || kind == super::agent_eval::watch::SCORE_FINDING_KIND
+    {
+        "watch of the adopted agent definitions"
+    } else {
+        return Ok(());
+    };
+    Err(DomainError::ReservedFindingKind {
+        kind: kind.to_owned(),
+        watch,
     })
 }
 
@@ -1020,20 +1059,55 @@ mod tests {
     }
 
     #[test]
-    fn every_finding_but_the_ci_watchs_ci_failure_counts_as_an_improvement() {
+    fn every_finding_but_the_supervisors_ci_failure_and_watch_due_counts_as_an_improvement() {
         let ci_failure = super::super::ci_watch::FINDING_KIND;
-        for kind in ["kpi", "conflict_hotspot", "failure", "wait", "stall"] {
+        let watch_due = super::super::agent_eval::watch::WATCH_FINDING_KIND;
+        let below = super::super::agent_eval::watch::SCORE_FINDING_KIND;
+        for kind in ["kpi", "conflict_hotspot", "failure", "wait", "stall", below] {
             assert!(counts_as_improvement(kind, "observer"), "{kind}");
             assert!(counts_as_improvement(kind, "supervisor"), "{kind}");
         }
-        assert!(!counts_as_improvement(ci_failure, "supervisor"));
-        for by in ["observer", "human", "planner", "inbox", ""] {
-            assert!(counts_as_improvement(ci_failure, by), "{by}");
+        for kind in [ci_failure, watch_due] {
+            assert!(!counts_as_improvement(kind, "supervisor"), "{kind}");
+            for by in ["observer", "human", "planner", "inbox", ""] {
+                assert!(counts_as_improvement(kind, by), "{kind} {by}");
+            }
         }
     }
 
+    /// ADR-t2971-1: the supervisor's `agent_eval_watch_due` finding, like
+    /// its `ci_failure` one, takes the turn before the drafts, while an
+    /// `agent_eval_watch_due` row another role recorded and an
+    /// `agent_eval_below_threshold` one stay with the improvements; each
+    /// turn keeps the oldest mark first.
     #[test]
-    fn finding_record_refuses_a_ci_failure_and_takes_any_other_kind() {
+    fn the_supervisors_watch_due_and_ci_failure_findings_open_before_the_improvements() {
+        let watch_due = super::super::agent_eval::watch::WATCH_FINDING_KIND;
+        let below = super::super::agent_eval::watch::SCORE_FINDING_KIND;
+        let ci_failure = super::super::ci_watch::FINDING_KIND;
+        let findings = [
+            (1, "kpi", "observer"),
+            (2, watch_due, "observer"),
+            (3, watch_due, "supervisor"),
+            (4, below, "supervisor"),
+            (5, ci_failure, "supervisor"),
+            (6, below, "observer"),
+            (7, watch_due, "supervisor"),
+        ]
+        .map(|(id, kind, by)| Finding {
+            id: FindingId::new(id),
+            kind: kind.into(),
+            recorded_by: by.into(),
+            ..stored(FindingStatus::Open)
+        });
+        let turns = planner_turns(findings.into());
+        let ids = |findings: &[Finding]| findings.iter().map(|f| f.id).collect::<Vec<_>>();
+        assert_eq!(ids(&turns.before_drafts), [3, 5, 7].map(FindingId::new));
+        assert_eq!(ids(&turns.improvements), [1, 2, 4, 6].map(FindingId::new));
+    }
+
+    #[test]
+    fn finding_record_refuses_the_supervisors_watch_kinds_and_takes_any_other() {
         let error = check_recordable_kind(super::super::ci_watch::FINDING_KIND)
             .unwrap_err()
             .to_string();
@@ -1041,7 +1115,25 @@ mod tests {
             error.contains("recorded only by the supervisor's CI watch"),
             "{error}"
         );
-        for kind in ["kpi", "failure", "ci_failure_like", "ci-failure"] {
+        for kind in [
+            super::super::agent_eval::watch::WATCH_FINDING_KIND,
+            super::super::agent_eval::watch::SCORE_FINDING_KIND,
+        ] {
+            let error = check_recordable_kind(kind).unwrap_err().to_string();
+            assert!(
+                error.contains(
+                    "recorded only by the supervisor's watch of the adopted agent definitions"
+                ),
+                "{error}"
+            );
+        }
+        for kind in [
+            "kpi",
+            "failure",
+            "ci_failure_like",
+            "ci-failure",
+            "agent_eval",
+        ] {
             check_recordable_kind(kind).unwrap();
         }
     }

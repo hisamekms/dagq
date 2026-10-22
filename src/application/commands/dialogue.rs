@@ -155,9 +155,10 @@ impl<'a, S: DialogueStore> Dialogue<'a, S> {
         self.store.mark(change, by)
     }
 
-    /// `finding record` on its target; `by` is the actor's. A `ci_failure`
-    /// finding is refused to every role that may record: only the supervisor's CI watch
-    /// records that kind (ADR-t2928-1).
+    /// `finding record` on its target; `by` is the actor's. A finding of a
+    /// kind only a watch of the supervisor's records is refused to every
+    /// role that may record: `ci_failure` (ADR-t2928-1) and the agent eval
+    /// watch's kinds (ADR-t2971-1).
     pub fn record_finding(&mut self, mut finding: NewFinding) -> Result<FindingOutcome> {
         let resource = match &finding.target {
             FindingTarget::Queue => Resource::Queue,
@@ -602,37 +603,47 @@ mod tests {
         );
     }
 
-    /// ADR-t2928-1: `finding record` refuses a `ci_failure` finding to
-    /// every role that holds `finding.record`, with a reason that names the
-    /// CI watch, and nothing reaches the store (a role without it is denied
-    /// first, as for any kind).
+    /// ADR-t2928-1 and ADR-t2971-1: `finding record` refuses a finding of
+    /// a kind only a watch of the supervisor's records to every role that
+    /// holds `finding.record`, with a reason that names the watch, and
+    /// nothing reaches the store (a role without it is denied first, as
+    /// for any kind).
     #[test]
-    fn no_role_records_a_ci_failure_finding() {
-        for actor in [
-            ActorContext::user(),
-            ActorContext::instance(ActorRole::Inbox, 1),
-            ActorContext::instance(ActorRole::Observer, 1),
-            ActorContext::instance(ActorRole::Supervisor, 1),
+    fn no_role_records_a_finding_of_the_supervisors_watches() {
+        use crate::domain::agent_eval::watch::{SCORE_FINDING_KIND, WATCH_FINDING_KIND};
+        for (kind, watch) in [
+            (crate::domain::ci_watch::FINDING_KIND, "CI watch"),
+            (WATCH_FINDING_KIND, "watch of the adopted agent definitions"),
+            (SCORE_FINDING_KIND, "watch of the adopted agent definitions"),
         ] {
-            let mut store = Store::default();
-            let mut finding = new_finding();
-            finding.kind = crate::domain::ci_watch::FINDING_KIND.into();
-            finding.propose = Some("red".into());
-            let error = Dialogue::new(&mut store, &actor, &StaticPolicy)
-                .record_finding(finding)
-                .unwrap_err();
-            let Some(DomainError::ReservedFindingKind { kind }) = error.downcast_ref() else {
-                panic!("{actor:?}: {error:#}");
-            };
-            assert_eq!(kind, "ci_failure");
-            assert!(
-                error
-                    .to_string()
-                    .contains("only by the supervisor's CI watch"),
-                "{error}"
-            );
-            assert!(store.writer.is_none(), "{actor:?}");
-            assert!(store.denials.into_inner().is_empty(), "{actor:?}");
+            for actor in [
+                ActorContext::user(),
+                ActorContext::instance(ActorRole::Inbox, 1),
+                ActorContext::instance(ActorRole::Observer, 1),
+                ActorContext::instance(ActorRole::Supervisor, 1),
+            ] {
+                let mut store = Store::default();
+                let mut finding = new_finding();
+                finding.kind = kind.into();
+                finding.propose = Some("red".into());
+                let error = Dialogue::new(&mut store, &actor, &StaticPolicy)
+                    .record_finding(finding)
+                    .unwrap_err();
+                let Some(DomainError::ReservedFindingKind { kind: refused, .. }) =
+                    error.downcast_ref()
+                else {
+                    panic!("{actor:?}: {error:#}");
+                };
+                assert_eq!(refused, kind);
+                assert!(
+                    error
+                        .to_string()
+                        .contains(&format!("only by the supervisor's {watch}")),
+                    "{error}"
+                );
+                assert!(store.writer.is_none(), "{actor:?}");
+                assert!(store.denials.into_inner().is_empty(), "{actor:?}");
+            }
         }
     }
 

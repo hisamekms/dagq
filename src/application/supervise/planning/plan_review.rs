@@ -1075,8 +1075,10 @@ impl PlanningState {
         // a person waits on them.
         self.open_request_planners(env, &mut runtime_open)?;
         // Then, once the findings whose proposal ended are settled, the
-        // repairs of the landing branch's CI (ADR-t2928-1), before the
-        // drafts and the improvements, within the same limit.
+        // findings of the supervisor's that are no improvement — the
+        // repairs of the landing branch's CI (ADR-t2928-1) and the agent
+        // watch's steps (ADR-t2971-1) — before the drafts and the
+        // improvements, within the same limit.
         self.settle_findings(env)?;
         self.open_repair_planners(env, &mut runtime_open)?;
         self.open_draft_planners(env, &mut runtime_open)?;

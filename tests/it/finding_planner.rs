@@ -635,6 +635,87 @@ fn a_ci_failure_finding_the_ci_watch_did_not_record_waits_at_the_improvements_li
     );
 }
 
+/// ADR-t2971-1: at the improvements' limit, the planner of an
+/// `agent_eval_watch_due` finding the supervisor recorded is opened and
+/// does not count, while one the observer recorded (a row of before
+/// `finding record` refused the kind) and an `agent_eval_below_threshold`
+/// finding the supervisor recorded wait at the limit, listed as waiting.
+#[test]
+fn only_the_supervisors_watch_due_finding_opens_past_the_improvements_limit() {
+    use dagq::domain::agent_eval::watch::{SCORE_FINDING_KIND, WATCH_FINDING_KIND};
+    let fx = fixture();
+    std::fs::write(
+        fx.repo.join("dagq.toml"),
+        "[kpi]\nmax_improvement_proposals = 1\n",
+    )
+    .unwrap();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let first = record(&mut queue, FindingTarget::Queue, "src/a.rs", Some("a"));
+    let mut watch = |kind: &str, subject: &str, by: &str| {
+        queue
+            .record_finding(NewFinding {
+                kind: kind.into(),
+                target: FindingTarget::Queue,
+                subject: subject.into(),
+                summary: format!("{subject} is due"),
+                detail: None,
+                impact: None,
+                evidence: Vec::new(),
+                propose: Some("watch it".into()),
+                by: by.into(),
+            })
+            .unwrap()
+            .finding
+            .id
+    };
+    let posing = watch(
+        WATCH_FINDING_KIND,
+        "agent_eval_watch:adr-rules:1",
+        "observer",
+    );
+    let below = watch(
+        SCORE_FINDING_KIND,
+        "agent_eval_below:adr-rules:1",
+        "supervisor",
+    );
+    let due = watch(
+        WATCH_FINDING_KIND,
+        "agent_eval_watch:adr-rules:2",
+        "supervisor",
+    );
+    let reviewer = StubReviewer::new(&[]);
+    let backend = PlanWorkspace::default();
+    supervise_with(
+        &fx,
+        &backend,
+        &reviewer,
+        &options(3, Duration::from_secs(3600)),
+    );
+    // The step's planner is opened first, before the improvement marked
+    // before it (the planners in the order they were opened).
+    let opened: Vec<_> = queue
+        .planners(false)
+        .unwrap()
+        .iter()
+        .map(|planner| planner.finding_id)
+        .collect();
+    assert_eq!(opened, [Some(due), Some(first)]);
+    for waiting in [posing, below] {
+        assert!(finding_events(&fx.db, waiting, "finding_planner_opened").is_empty());
+    }
+    let one_shot = dagq::compose::OneShot::new(dagq::infrastructure::clock::system());
+    assert_eq!(
+        one_shot.improvements_of(&queue).unwrap(),
+        json!({"running": 1, "limit": 1, "reached": true,
+               "waiting": [{"finding_id": posing, "reason": "improvement_limit"},
+                           {"finding_id": below, "reason": "improvement_limit"}]})
+    );
+    assert!(matches!(
+        queue.open_finding_planner(below, None, 1).unwrap(),
+        dagq::application::FindingPlannerStart::AtLimit(_)
+    ));
+}
+
 #[test]
 fn a_propose_answer_marks_the_finding_and_a_planner_takes_it() {
     let fx = fixture();

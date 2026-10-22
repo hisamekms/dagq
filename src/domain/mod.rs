@@ -1303,8 +1303,8 @@ pub use execution_class::ExecutionClass;
 pub use finding::{
     DISMISS_OPTION, Finding, FindingAnswer, FindingAttributes, FindingOutcome, FindingQuery,
     FindingStatus, FindingTarget, FindingUpdate, FindingView, Impact, ImprovementLimit,
-    MAX_FINDING_PLANNERS, NewFinding, PROPOSE_OPTION, check_recordable_kind, counts_as_improvement,
-    improvement_running,
+    MAX_FINDING_PLANNERS, NewFinding, PROPOSE_OPTION, PlannerTurns, check_recordable_kind,
+    counts_as_improvement, improvement_running, planner_turns,
 };
 pub use follow_up::{
     BundleKey, BundleKeyKind, DraftOrigin, DraftOutcome, DraftRevisit, DraftTarget,
