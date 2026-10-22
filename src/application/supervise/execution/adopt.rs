@@ -814,15 +814,12 @@ fn agents_decided(payload: &Value) -> bool {
 /// `review_finished` whose route one of its subagents decided: the reasons
 /// of every judgment that went there, an agent's under its name, the
 /// `discard` or `scope` they give, and why (`why` after what each of them
-/// returned), at the review job's request.
-fn agents_ask(
-    run: &TaskRun,
-    review: &RunEvent,
-    verdict: ReviewVerdict,
-    revise_left: bool,
-    why: String,
-) -> AfterExit {
-    let route = verdict.route(revise_left);
+/// returned), at the review job's request. The route is `route(true)`, as
+/// the live supervisor acts on and `review_finished` records it, so the
+/// ask shows what the live one would have and what a bare `send_back`
+/// hands the session ([`super::review_findings`]).
+fn agents_ask(run: &TaskRun, review: &RunEvent, verdict: ReviewVerdict, why: String) -> AfterExit {
+    let route = verdict.route(true);
     let parent_decides = route.parent == route.destination;
     let combined = landing::combined_verdict(&verdict, &route, parent_decides);
     let judged = landing::agents_escalation(&verdict, &route, parent_decides);
@@ -1026,9 +1023,7 @@ fn review_resumption(
                 let why = unsent
                     .error
                     .unwrap_or("the revise request could not be sent");
-                // The request was recorded, so the round had a revise
-                // left when the review was decided.
-                Some(agents_ask(run, review, verdict, true, why.to_owned()))
+                Some(agents_ask(run, review, verdict, why.to_owned()))
             } else {
                 passed_before(history, anchor.id).map(|verdict| AfterExit::Ask {
                     why: unsent.error.map(str::to_owned),
@@ -1065,12 +1060,11 @@ fn review_resumption(
                 // (ADR-t1453-1 decision 7), asks a person: an adopter
                 // does not apply the verdict alone.
                 Ok(verdict) if finished.agents_decided() => {
-                    let revise_left = decide_revise(history) != ReviseDecision::Ask;
                     let why = format!(
                         "the review's subagents sent the run to {} and the supervisor was replaced before it was applied",
                         finished.destination().unwrap_or("a person")
                     );
-                    Some(agents_ask(run, anchor, verdict, revise_left, why))
+                    Some(agents_ask(run, anchor, verdict, why))
                 }
                 Ok(verdict) if verdict.verdict == ReviewDecision::Concern => {
                     return ReviewResumption::Concern(verdict);
@@ -1305,6 +1299,87 @@ mod tests {
         let route = with.route(true);
         let combined = landing::combined_verdict(&with, &route, false);
         assert_eq!(combined.reasons, ["tests: add a test"]);
+    }
+
+    /// An adopter's ask for a review its subagents decided routes the
+    /// verdict as the live supervisor acts on it and `review_finished`
+    /// records it (`route(true)`), with a revise left or none: a
+    /// subagent's high `send_back` concern goes back rather than to a
+    /// person, so the ask's reasons, decision and why are those of the
+    /// live ask, and a bare `send_back` answer hands the session the
+    /// findings the ask showed.
+    #[test]
+    fn an_adopters_agents_ask_routes_as_the_live_supervisor() {
+        let back = json!({"agent": "design", "status": "completed", "verdict": "concern",
+            "reasons": ["fix the doc"], "summary": "s", "recommendation": "send_back", "confidence": "high"});
+        let asks = json!({"agent": "tests", "status": "completed", "verdict": "concern",
+            "reasons": ["unsure"], "summary": "s", "recommendation": "land", "confidence": "low"});
+        let cases = [
+            (
+                vec![back.clone(), asks],
+                ReviewDecision::Concern,
+                vec!["tests: unsure"],
+            ),
+            (
+                vec![back],
+                ReviewDecision::Revise,
+                vec!["design: fix the doc"],
+            ),
+        ];
+        for (agents, decision, reasons) in cases {
+            let mut payload = json!({"verdict": "pass", "reasons": [], "summary": "ok",
+                "attempt": 4, "agents": agents});
+            let verdict = crate::domain::run::review_verdict(&payload).unwrap();
+            // Past the revise limit the old route sent the high send_back
+            // to a person too, and named it.
+            let used_up = verdict.route(false);
+            assert_eq!(
+                used_up.destination,
+                crate::domain::review_subagents::Destination::Ask
+            );
+            assert!(used_up.deciding().iter().any(|a| a.agent == "design"));
+            let route = verdict.route(true);
+            payload["route"] = route.event_value();
+            let review = RunEvent {
+                id: EventId::new(1),
+                task_id: None,
+                goal_id: None,
+                run_id: None,
+                kind: event_kind::REVIEW_FINISHED.into(),
+                payload: payload.clone(),
+                created_at: String::new(),
+                actor: None,
+            };
+            let run = super::super::recovery::test_run(RunStatus::AwaitingIntegration, None);
+            let AfterExit::Ask {
+                why,
+                decision: asked,
+                reasons: asked_reasons,
+                reason_category,
+                ..
+            } = agents_ask(&run, &review, verdict.clone(), "replaced".to_owned())
+            else {
+                panic!("an adopter asks a person");
+            };
+            let parent_decides = route.parent == route.destination;
+            let live = landing::combined_verdict(&verdict, &route, parent_decides);
+            assert_eq!(asked, live.verdict);
+            assert_eq!(asked, decision);
+            assert_eq!(asked_reasons, live.reasons);
+            assert_eq!(asked_reasons, reasons);
+            assert_eq!(reason_category, live.reason_category);
+            assert_eq!(
+                why.unwrap(),
+                format!(
+                    "replaced; {}",
+                    landing::agents_escalation(&verdict, &route, parent_decides)
+                )
+            );
+            assert_eq!(
+                super::super::review_findings(&payload).unwrap(),
+                asked_reasons
+            );
+        }
     }
 
     /// The adopter's `review_failed` carries the Execution of the review's
