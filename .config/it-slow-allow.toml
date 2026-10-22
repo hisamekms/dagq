@@ -1464,12 +1464,6 @@ name = "runtime_review::a_passing_review_exits_the_live_session_and_lands_it"
 reason = "B 境界（プロセス・supervisor の配線）: pass の review が生きている session を終わらせて着地するまでの event の順と、review の prompt に載る verdict の形を実際の supervisor で確かめる"
 task = 2352
 
-# 9.9s (stress 5 under the host's load of other runs, task 2424)
-[[test]]
-name = "verification_container::a_waiting_run_in_a_container_has_its_recheck_command_run_in_a_verification_s_container"
-reason = "B 境界（supervisor の配線・Git・プロセス）: 着地待ちの container の run の landing recheck が supervisor の 2 回の pass を通して fake の podman と実の dagq relay verify で command を merge した commit の clone で流し、引数・token・RUSTC_WRAPPER の外しと event・片付けを確かめる。拒む判断は domain::recheck の unit test"
-task = 2424
-
 # about 10s (stress 5 under the host's load of other runs, task 2424)
 [[test]]
 name = "verification_container::a_waiting_run_in_a_container_whose_recheck_container_does_not_start_is_not_judged"

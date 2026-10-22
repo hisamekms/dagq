@@ -1014,12 +1014,19 @@ fn a_waiting_run_in_a_container_has_its_recheck_command_run_in_a_verification_s_
         "pwd > {m}/recheck-pwd; git log --format=%s -1 > {m}/recheck-head; \
          ls -A \"$DAGQ_VERIFICATION_MATERIALS\" > {m}/recheck-materials; env > {m}/env"
     );
+    // An sccache of the test's own, named by its path: the supervisor
+    // claims nothing while `[run.env]` names a program its PATH does not
+    // have, and the host need not have sccache.
+    let sccache = queue.dir.path().join("bin").join("sccache");
+    fs::create_dir(sccache.parent().unwrap()).unwrap();
+    crate::common::template::script(&sccache, "#!/bin/sh\nexit 0\n");
     let (waiting, before) = rechecked_in_a_container(
         &queue,
         &format!(
             "[roles.verification]\nruntime = \"container\"\n[recheck]\ncommand = {}\n\
-             [run.env]\nRUSTC_WRAPPER = 'sccache'\n",
-            toml_string(&command)
+             [run.env]\nRUSTC_WRAPPER = {}\n",
+            toml_string(&command),
+            toml_string(&sccache.display().to_string())
         ),
         Arc::new(Usable),
     );
