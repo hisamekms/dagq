@@ -79,7 +79,7 @@ Claude/Codexで同じ状態機械を使う。
   制御側はresumeのslotで答えを記録し、食い違うcloneは上書きせずagentも動かさず、`replan_restore_failed`で`blocked`に戻してrunをslotから休ませる（providerの壁としては扱わない）。
   失敗を記録した後にcloneを直して操作を継続に戻すと、記録した失敗の数で数える新しい試行になり、前の試行の答えや作り直しを使わずexecutorがcloneを照合し直す。再起動・adoptは同じ試行を続ける。
   resumeを使い切ったrunはturnが続かず、今のcloneを見るexecutorが動かない（保留の前の書き出しは後の変更を映さない）ので、cloneの有無によらず復元の失敗とし、復旧jobにも継承retryにも渡さない。
-- 条件の対応表の書き手: 済み（`replans.rs`の`write_mappings`）。同じ操作で同じ項目の削除を2度記録しない。
+- 条件の対応表の書き手: 済み（`replans.rs`の`write_mappings`）。同じ操作で同じ項目の削除を2度記録せず、削除した項目を子に割り当てない（複数の子への割り当ては許す）。
 - snapshotの前に閉じた操作の依頼を閉じること: 済み（`replans.rs`の`move_in`）。
 - 未実装: 診断（`pause_requested`へ進める判断）・plannerのprompt・置換の適用・goal closeの判定。
   適用（`applying`・`applied`）へはどの経路も動かせない。

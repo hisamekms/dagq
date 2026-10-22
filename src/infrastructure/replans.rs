@@ -12,8 +12,9 @@
 //! task asks ([`check_task_step`]) reads the same rows, and the task's hold,
 //! inside the step's own transaction. The condition mappings are written
 //! only through [`write_mappings`], which refuses a second deletion of one
-//! acceptance item inside the writing transaction: the table's key does
-//! not compare a deletion's NULL child task.
+//! acceptance item, and a deletion of an item a child task holds, inside
+//! the writing transaction: the table's key does not compare a deletion's
+//! NULL child task.
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use serde_json::json;
@@ -389,8 +390,9 @@ pub(crate) fn move_in(
 /// Add `mappings` to operation `id`'s condition mappings on `conn` inside
 /// the caller's transaction (the apply writes them with its replacement).
 /// The operation's mappings are read in the same transaction, and
-/// [`task_replan::check_mappings`] refuses a second deletion of one item
-/// before anything is written.
+/// [`task_replan::check_mappings`] refuses a second deletion of one item,
+/// and a deletion of an item a child task holds (or the reverse), before
+/// anything is written.
 pub(crate) fn write_mappings(
     conn: &Connection,
     id: ReplanId,

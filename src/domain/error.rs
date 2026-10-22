@@ -402,6 +402,13 @@ pub enum DomainError {
         operation: ReplanId,
         ordinal: usize,
     },
+    /// Both a deletion of one acceptance item of a replanning operation
+    /// and a mapping of it to a child task in its condition mappings: a
+    /// deleted item goes to no child.
+    ReplanDeletionMapped {
+        operation: ReplanId,
+        ordinal: usize,
+    },
     /// A snapshot of a run's work could not save `path` whole
     /// ([`super::replan_snapshot`]): the save fails rather than leave it
     /// out.
@@ -1014,6 +1021,10 @@ impl fmt::Display for DomainError {
             Self::ReplanDeletionRepeated { operation, ordinal } => write!(
                 f,
                 "replan operation {operation} already deletes acceptance item {ordinal}: an item is deleted once"
+            ),
+            Self::ReplanDeletionMapped { operation, ordinal } => write!(
+                f,
+                "replan operation {operation} both deletes acceptance item {ordinal} and maps it to a child task: a deleted item goes to no child"
             ),
             Self::SnapshotRefused { path, why } => write!(
                 f,

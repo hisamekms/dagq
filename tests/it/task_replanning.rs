@@ -337,6 +337,102 @@ fn an_operation_deletes_an_acceptance_item_at_most_once() {
 }
 
 #[test]
+fn an_operation_does_not_both_delete_an_item_and_map_it_to_a_child() {
+    let (_dir, db) = queue();
+    let (mut queue, a, b, run) = claimed(&db);
+    let op = queue
+        .record_replan(
+            &NewReplan {
+                run,
+                reason: "two independent parts".into(),
+                evidence: Vec::new(),
+            },
+            ReplanOrigin::Runtime,
+            "supervisor",
+            "supervisor",
+        )
+        .unwrap()
+        .operation;
+    let mapping = |ordinal: usize, child: Option<TaskId>| ConditionMapping {
+        ordinal,
+        hash: op.conditions.acceptance[ordinal].hash.clone(),
+        child_task_id: child,
+        child_ordinal: child.map(|_| 0),
+        disposition: if child.is_some() { "moved" } else { "deleted" }.into(),
+        authority: child.is_none().then(|| json!({"answer": 1})),
+    };
+    let refused = |err: anyhow::Error| {
+        assert!(
+            err.to_string()
+                .contains("both deletes acceptance item 0 and maps it to a child task"),
+            "{err:#}"
+        );
+    };
+
+    refused(
+        queue
+            .record_replan_mappings(op.id, &[mapping(0, Some(a)), mapping(0, None)])
+            .unwrap_err(),
+    );
+    assert!(queue.replan_operation(op.id).unwrap().mappings.is_empty());
+
+    // Two children holding the item together pass; a later deletion of it
+    // is refused and leaves the rows as they were.
+    let shared = [mapping(0, Some(a)), mapping(0, Some(b))];
+    queue.record_replan_mappings(op.id, &shared).unwrap();
+    refused(
+        queue
+            .record_replan_mappings(op.id, &[mapping(0, None), mapping(1, None)])
+            .unwrap_err(),
+    );
+    assert_eq!(queue.replan_operation(op.id).unwrap().mappings, shared);
+}
+
+#[test]
+fn a_deleted_item_is_not_mapped_to_a_child_afterwards() {
+    let (_dir, db) = queue();
+    let (mut queue, a, _b, run) = claimed(&db);
+    let op = queue
+        .record_replan(
+            &NewReplan {
+                run,
+                reason: "two independent parts".into(),
+                evidence: Vec::new(),
+            },
+            ReplanOrigin::Runtime,
+            "supervisor",
+            "supervisor",
+        )
+        .unwrap()
+        .operation;
+    let deletion = ConditionMapping {
+        ordinal: 0,
+        hash: op.conditions.acceptance[0].hash.clone(),
+        child_task_id: None,
+        child_ordinal: None,
+        disposition: "deleted".into(),
+        authority: Some(json!({"answer": 1})),
+    };
+    let moved = ConditionMapping {
+        child_task_id: Some(a),
+        child_ordinal: Some(0),
+        disposition: "moved".into(),
+        authority: None,
+        ..deletion.clone()
+    };
+    queue
+        .record_replan_mappings(op.id, std::slice::from_ref(&deletion))
+        .unwrap();
+    let err = queue.record_replan_mappings(op.id, &[moved]).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("both deletes acceptance item 0 and maps it to a child task"),
+        "{err:#}"
+    );
+    assert_eq!(queue.replan_operation(op.id).unwrap().mappings, [deletion]);
+}
+
+#[test]
 fn each_role_requests_proposes_or_moves_only_what_it_may() {
     let (_dir, db) = queue();
     let (mut queue, a, _, run) = claimed(&db);

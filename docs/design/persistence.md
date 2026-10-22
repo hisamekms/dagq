@@ -234,6 +234,7 @@ follow-upの所属の判断・訂正とdraft / readyの所属の変更は同じ`
   終わったtaskに開いたまま残った行は、supervisorのpassが同じ形で閉じ、taskは変えない。
 - 外部キーと依存の複合主キーはDBに置き、自己依存はdomainが拒み、循環はトランザクションの中の再帰CTEで見つける。
 - NULLになる列を含む主キーはSQLiteではその行の一意を保たないので、その一意は書く関数がトランザクションの中で読んでから検査する（再計画の条件の対応の削除の行は`replans.rs`の`write_mappings`）。
+  同じ検査が、同じ項目に削除の行と子taskの行が両方入るのを書く順によらず拒む（複数の子への割り当ては許す）。
 - taskの詳細と一覧は1つのread transactionで読むので、task・run・eventのスナップショットが揃う。
 - contextをまたぐトランザクションは`src/context_boundaries/ownership.rs`の所有の表のものだけ（[architecture](architecture.md)のX1）。
 
