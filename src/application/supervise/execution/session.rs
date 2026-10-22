@@ -371,6 +371,18 @@ pub(super) fn follows_ask(created_at: i64, asks_from: i64) -> bool {
     created_at >= asks_from
 }
 
+/// The answers of `answers` a watch following the asks created from
+/// `asks_from` types ([`follows_ask`]): those of the asks before it are the
+/// inbox's to deliver by hand, and the queue's `undelivered_answers` does
+/// not leave them out.
+pub(super) fn followed_answers(
+    mut answers: Vec<crate::domain::Ask>,
+    asks_from: i64,
+) -> Vec<crate::domain::Ask> {
+    answers.retain(|ask| follows_ask(ask.created_at, asks_from));
+    answers
+}
+
 /// Watches one session: wrapper registration and heartbeat, receipt and idle
 /// marker, the single exit request, and the wrapper's exit.
 pub(super) struct SessionWatch {
@@ -765,8 +777,7 @@ impl SessionWatch {
         sv: &mut Supervisor<'_>,
         run: &TaskRun,
     ) -> Result<Option<SystemTime>> {
-        let mut answers = sv.queue.undelivered_answers(run.id())?;
-        answers.retain(|ask| follows_ask(ask.created_at, self.asks_from));
+        let mut answers = followed_answers(sv.queue.undelivered_answers(run.id())?, self.asks_from);
         if answers.is_empty() {
             return Ok(None);
         }
@@ -1075,6 +1086,7 @@ fn porcelain_path(line: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::Ask;
 
     /// A porcelain line names its path, a rename its new one.
     #[test]
@@ -1139,5 +1151,39 @@ mod tests {
             timeout
         ));
         assert!(waited_out_after_receipt(t0 + timeout, Some(t0), timeout));
+    }
+
+    /// An answered `worker_question` of the run, created at `created_at`.
+    fn answered(id: i64, created_at: i64) -> Ask {
+        serde_json::from_value(json!({
+            "id": id, "kind": "worker_question", "task_id": 1, "run_id": "run",
+            "question": "which?", "options": [], "answer": "this",
+            "asked_by": "worker", "reason_category": "scope",
+            "created_at": created_at, "answered_at": created_at + 1,
+            "closed_at": null,
+        }))
+        .unwrap()
+    }
+
+    /// A revise's watch types the answers of the questions asked at or
+    /// after its request and leaves the one from before it to the inbox;
+    /// a watch from 0 types every answer of the run.
+    #[test]
+    fn a_revise_types_only_the_answers_of_its_own_questions() {
+        let revised_at = 1_000;
+        let answers = vec![
+            answered(1, revised_at - 1),
+            answered(2, revised_at),
+            answered(3, revised_at + 5),
+        ];
+        let ids = |answers: Vec<Ask>| answers.into_iter().map(|ask| ask.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(followed_answers(answers.clone(), revised_at)),
+            [AskId::new(2), AskId::new(3)]
+        );
+        assert_eq!(
+            ids(followed_answers(answers, 0)),
+            [AskId::new(1), AskId::new(2), AskId::new(3)]
+        );
     }
 }
