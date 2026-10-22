@@ -78,8 +78,11 @@ impl SqliteQueue {
 
     /// Close the row of planner `id` as the runtime ends it (ADR-t1300-1)
     /// and record `planner_closed` with `payload` in the same transaction,
-    /// with what became of the drafts of its bundle (ADR-t807-1): `false`,
-    /// with nothing recorded, when the row was closed already.
+    /// with what became of the drafts of its bundle (ADR-t807-1) and the
+    /// decline of its request when its replanning operation closed while it
+    /// was open and it ended undecided
+    /// ([`crate::infrastructure::plan_requests::decline_after_planner`]):
+    /// `false`, with nothing recorded, when the row was closed already.
     pub fn end_planner(&self, id: PlannerId, payload: &Value) -> Result<bool> {
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let now = self.generators.clock.now();
@@ -89,6 +92,7 @@ impl SqliteQueue {
         )? == 1;
         if closed {
             crate::infrastructure::draft_planners::settle_bundle(&tx, id, now)?;
+            crate::infrastructure::plan_requests::decline_after_planner(&tx, id, now)?;
             super::run_log::queue_event(&tx, EventKind::PlannerClosed, payload)?;
         }
         tx.commit()?;

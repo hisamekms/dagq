@@ -862,7 +862,7 @@ fn two_supervisors_restore_a_parked_run_one_at_a_time_and_a_loser_writes_nothing
     assert_eq!(holder(&queue), None);
 }
 
-/// A replanning operation that ends before a planner was opened for its
+/// A replanning operation that ends with no planner of the runtime's open for its
 /// planning request, before its snapshot (`continuing`, or `withdrawn` out
 /// of a `blocked` one) or after it (`continuing_after_park` out of
 /// `parked`, `withdrawn` out of a `blocked` one that parked), declines the
@@ -871,8 +871,8 @@ fn two_supervisors_restore_a_parked_run_one_at_a_time_and_a_loser_writes_nothing
 /// is not left `open`. One `blocked` before its snapshot that goes on to it
 /// keeps its request for the planner. A closed one whose restore failed,
 /// back in `blocked`, that goes on to the planner gets a new request and
-/// one planner for it; one closed after its planner was opened leaves the
-/// request as it was.
+/// one planner for it; one closed while its planner is open leaves the
+/// request to it, and declines it when the planner ends undecided.
 #[test]
 fn a_request_whose_operation_closes_before_its_planner_is_declined_with_the_outcome() {
     let (_dir, db) = queue();
@@ -929,8 +929,8 @@ fn a_request_whose_operation_closes_before_its_planner_is_declined_with_the_outc
     assert_eq!(
         declined["status_reason"],
         format!(
-            "replan operation {first} ended continuing before a planner was opened for it: \
-             the test moves it to continuing"
+            "replan operation {first} ended continuing with no planner of the runtime's open \
+             for it: the test moves it to continuing"
         )
     );
     assert!(!open(&queue, first_request));
@@ -984,7 +984,7 @@ fn a_request_whose_operation_closes_before_its_planner_is_declined_with_the_outc
         withdrawn
             .status_reason
             .unwrap()
-            .contains("ended withdrawn before a planner was opened for it")
+            .contains("ended withdrawn with no planner of the runtime's open for it")
     );
     assert!(!open(&queue, second_request));
 
@@ -1023,8 +1023,8 @@ fn a_request_whose_operation_closes_before_its_planner_is_declined_with_the_outc
     assert_eq!(
         continued["status_reason"],
         format!(
-            "replan operation {third} ended continuing_after_park before a planner was \
-             opened for it: the test moves it to continuing_after_park"
+            "replan operation {third} ended continuing_after_park with no planner of the \
+             runtime's open for it: the test moves it to continuing_after_park"
         )
     );
     assert!(!open(&queue, third_request));
@@ -1100,10 +1100,11 @@ fn a_request_whose_operation_closes_before_its_planner_is_declined_with_the_outc
         .map(|r| r.id)
         .collect();
     assert_eq!(targets, [renewed]);
-    assert!(matches!(
-        queue.open_request_planner(renewed, None).unwrap(),
-        dagq::application::RequestPlannerStart::Opened { .. }
-    ));
+    let dagq::application::RequestPlannerStart::Opened { planner, .. } =
+        queue.open_request_planner(renewed, None).unwrap()
+    else {
+        panic!("no planner was opened for request {renewed}")
+    };
     assert!(matches!(
         queue
             .open_request_planner(dagq::domain::RequestId::new(third_request), None)
@@ -1116,8 +1117,9 @@ fn a_request_whose_operation_closes_before_its_planner_is_declined_with_the_outc
     ));
     assert!(queue.planner_requests().unwrap().is_empty());
 
-    // Closed after its planner was opened: the request is its planner's to
-    // end, left as it was.
+    // Closed while its planner is open: the request is its planner's to
+    // end, left as it was; the planner ends without deciding it, and its
+    // row's close declines it, naming the planner.
     moved(
         &mut queue,
         third,
@@ -1130,6 +1132,31 @@ fn a_request_whose_operation_closes_before_its_planner_is_declined_with_the_outc
         dagq::domain::plan_request::RequestStatus::Open
     );
     assert_eq!(event("request_declined").len(), 3);
+    assert!(
+        queue
+            .end_planner(planner.id, &json!({"code": "runtime_exited"}))
+            .unwrap()
+    );
+    let ended = queue.plan_request(renewed).unwrap();
+    assert_eq!(
+        ended.status,
+        dagq::domain::plan_request::RequestStatus::Declined
+    );
+    assert_eq!(
+        ended.status_reason.unwrap(),
+        format!(
+            "replan operation {third} ended continuing_after_park while planner {} of the \
+             runtime was open, and it ended without deciding the request: the test moves it \
+             to continuing_after_park",
+            planner.id
+        )
+    );
+    let told = event("request_declined");
+    assert_eq!(told.len(), 4);
+    assert_eq!(told[3]["request_id"], renewed.as_i64());
+    assert_eq!(told[3]["by"], "runtime");
+    assert_eq!(told[3]["replan_operation_id"], third.as_i64());
+    assert_eq!(told[3]["ended_planner_id"], planner.id.as_i64());
 
     // Parked, blocked and withdrawn with no planner opened: declined.
     let (fourth, fourth_request) = recorded("split it once more");
@@ -1173,7 +1200,7 @@ fn a_request_whose_operation_closes_before_its_planner_is_declined_with_the_outc
         withdrawn
             .status_reason
             .unwrap()
-            .contains("ended withdrawn before a planner was opened for it")
+            .contains("ended withdrawn with no planner of the runtime's open for it")
     );
     assert!(!open(&queue, fourth_request));
     assert_eq!(
@@ -1185,7 +1212,181 @@ fn a_request_whose_operation_closes_before_its_planner_is_declined_with_the_outc
             .unwrap()["request_status"],
         "declined"
     );
-    assert_eq!(event("request_declined").len(), 4);
+    assert_eq!(event("request_declined").len(), 5);
+}
+
+/// A replanning operation whose request's planner ended without deciding
+/// it (the request still `open`, under the planners' limit) and that then
+/// closes (`continuing_after_park` out of `planning`, `withdrawn` out of a
+/// `blocked` one) declines the request in the same move, with the outcome
+/// as the reason, as `requests`, `replans` and `show` say. Its restore
+/// failing, back in `blocked` and on to the planner again, a new request is
+/// recorded and gets one planner.
+#[test]
+fn a_request_whose_planner_ended_undecided_is_declined_when_its_operation_closes() {
+    use dagq::application::RequestPlannerStart;
+    use dagq::domain::{RequestId, plan_request::RequestStatus};
+    let (_dir, db) = queue();
+    let (mut queue, a, _, run) = claimed(&db);
+    let moved = |queue: &mut SqliteQueue,
+                 id: ReplanId,
+                 from: i64,
+                 to: ReplanStatus,
+                 snapshot: Option<String>| {
+        queue
+            .move_replan(
+                id,
+                from,
+                &ReplanMove {
+                    to,
+                    reason: format!("the test moves it to {}", to.as_str()),
+                    snapshot_id: snapshot,
+                    diagnosis: None,
+                },
+            )
+            .unwrap()
+            .generation
+    };
+    // Recorded, parked, with the planner: a planner is opened and ends
+    // without deciding the request, which stays `open`.
+    let planned = |queue: &mut SqliteQueue, words: &str| {
+        let recorded = ok_as("inbox", &db, &args(&request(&run, words)));
+        let id = ReplanId::new(recorded["operation"]["id"].as_i64().unwrap());
+        let request = RequestId::new(recorded["request"]["id"].as_i64().unwrap());
+        let generation = moved(queue, id, 1, ReplanStatus::PauseRequested, None);
+        let generation = moved(queue, id, generation, ReplanStatus::Snapshotting, None);
+        let snapshot = format!("replan-{id}-g{generation}");
+        let generation = moved(queue, id, generation, ReplanStatus::Parked, Some(snapshot));
+        let RequestPlannerStart::Opened { planner, .. } =
+            queue.open_request_planner(request, None).unwrap()
+        else {
+            panic!("no planner was opened for request {request}")
+        };
+        let generation = moved(queue, id, generation, ReplanStatus::Planning, None);
+        assert!(
+            queue
+                .end_planner(planner.id, &json!({"code": "runtime_exited"}))
+                .unwrap()
+        );
+        assert_eq!(
+            queue.plan_request(request).unwrap().status,
+            RequestStatus::Open
+        );
+        (id, request, generation)
+    };
+    let declined = |queue: &SqliteQueue, id: ReplanId, request: RequestId, outcome: &str| {
+        let listed = &ok_as("observer", &db, &["requests", &request.to_string()])["requests"][0];
+        assert_eq!(listed["status"], "declined");
+        assert_eq!(
+            listed["status_reason"],
+            format!(
+                "replan operation {id} ended {outcome} with no planner of the runtime's open \
+                 for it: the test moves it to {outcome}"
+            )
+        );
+        assert!(
+            !queue
+                .planner_requests()
+                .unwrap()
+                .iter()
+                .any(|r| r.id == request)
+        );
+        assert_eq!(
+            ok_as("observer", &db, &["replans", &id.to_string()])["replans"][0]["request_status"],
+            "declined"
+        );
+        assert_eq!(
+            ok(&db, &["show", &a.to_string()])["replans"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|op| op["id"] == id.as_i64())
+                .unwrap()["request_status"],
+            "declined"
+        );
+    };
+
+    // Continued after the park: declined.
+    let (first, first_request, generation) = planned(&mut queue, "split it");
+    let generation = moved(
+        &mut queue,
+        first,
+        generation,
+        ReplanStatus::ContinuingAfterPark,
+        None,
+    );
+    declined(&queue, first, first_request, "continuing_after_park");
+
+    // Its restore fails: back in `blocked`, no planner; on to the planner
+    // again, a new request gets exactly one planner.
+    let generation = moved(&mut queue, first, generation, ReplanStatus::Blocked, None);
+    assert!(queue.planner_requests().unwrap().is_empty());
+    let generation = moved(
+        &mut queue,
+        first,
+        generation,
+        ReplanStatus::Snapshotting,
+        None,
+    );
+    let snapshot = format!("replan-{first}-g{generation}");
+    let generation = moved(
+        &mut queue,
+        first,
+        generation,
+        ReplanStatus::Parked,
+        Some(snapshot),
+    );
+    let renewed = queue.replan_operation(first).unwrap().request_id.unwrap();
+    assert_ne!(renewed, first_request);
+    assert_eq!(
+        queue.plan_request(renewed).unwrap().replan_operation,
+        Some(first)
+    );
+    let targets: Vec<_> = queue
+        .planner_requests()
+        .unwrap()
+        .iter()
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(targets, [renewed]);
+    let RequestPlannerStart::Opened {
+        planner, attempt, ..
+    } = queue.open_request_planner(renewed, None).unwrap()
+    else {
+        panic!("no planner was opened for request {renewed}")
+    };
+    assert_eq!(attempt, 1);
+    for request in [renewed, first_request] {
+        assert!(matches!(
+            queue.open_request_planner(request, None).unwrap(),
+            RequestPlannerStart::Skipped
+        ));
+    }
+    // That planner submits nothing either; withdrawn after it ended, the
+    // new request is declined too.
+    let generation = moved(&mut queue, first, generation, ReplanStatus::Planning, None);
+    assert!(
+        queue
+            .end_planner(planner.id, &json!({"code": "runtime_exited"}))
+            .unwrap()
+    );
+    let generation = moved(&mut queue, first, generation, ReplanStatus::Blocked, None);
+    moved(&mut queue, first, generation, ReplanStatus::Withdrawn, None);
+    declined(&queue, first, renewed, "withdrawn");
+
+    // Blocked with the planner after its planner ended, then withdrawn:
+    // declined.
+    let (second, second_request, generation) = planned(&mut queue, "split it again");
+    let generation = moved(&mut queue, second, generation, ReplanStatus::Blocked, None);
+    moved(
+        &mut queue,
+        second,
+        generation,
+        ReplanStatus::Withdrawn,
+        None,
+    );
+    declined(&queue, second, second_request, "withdrawn");
+    assert!(queue.planner_requests().unwrap().is_empty());
 }
 
 /// A task has one open operation, on its latest run while it does not

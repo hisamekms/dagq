@@ -184,8 +184,10 @@ impl SqliteQueue {
     /// Give the planner up: its workspace failed to open (`error`), or is
     /// gone. Closing a closed planner keeps the first close.
     /// Close the planner's row; a planner of the runtime's opened for a
-    /// bundle of drafts records what became of each (ADR-t807-1) in the
-    /// same transaction.
+    /// bundle of drafts records what became of each (ADR-t807-1), and one
+    /// whose request's replanning operation closed while it was open
+    /// declines that request ([`super::plan_requests::decline_after_planner`]),
+    /// in the same transaction.
     pub fn close_planner(&self, id: PlannerId, error: Option<&str>) -> Result<PlannerSession> {
         let tx = rusqlite::Transaction::new_unchecked(
             &self.conn,
@@ -199,6 +201,7 @@ impl SqliteQueue {
         )?;
         if closed == 1 {
             super::draft_planners::settle_bundle(&tx, id, now)?;
+            super::plan_requests::decline_after_planner(&tx, id, now)?;
             // A headless session that had started ends with the row
             // (ADR-t1394-2 decision 4).
             super::sessions::close_planner_spans(&tx, id.as_i64())?;

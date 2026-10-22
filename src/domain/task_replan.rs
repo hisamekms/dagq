@@ -120,19 +120,26 @@ impl ReplanStatus {
     }
 
     /// Whether a move to this status ends the operation's planning request
-    /// unplanned, to be declined in the same transaction, while no planner
-    /// has been opened for it (`planned` false): its planner is opened only
-    /// while the operation is with the planner ([`Self::hands_to_planner`]),
-    /// so the request of an operation closed before then, before its
-    /// snapshot or after it (`continuing_after_park`, `withdrawn`), would
-    /// stay `open` with nobody to open a planner for it or end it. It is
-    /// declined at the close rather than when the run's restore is
-    /// confirmed, since a closed operation's run may go on without a
-    /// restore. `blocked` is not an end: it may still go on to the planner,
-    /// and the request waits for it. A request a planner was opened for is
-    /// its planner's to end.
-    pub const fn ends_request_unplanned(self, planned: bool) -> bool {
-        self.is_closed() && !planned
+    /// undecided, to be declined in the same transaction, while no planner
+    /// is open for it now (`planner_open` false: none was ever opened, or
+    /// each one opened ended without deciding it): its planner is opened
+    /// only while the operation is with the planner
+    /// ([`Self::hands_to_planner`]), so the request of an operation closed,
+    /// before its snapshot or after it (`continuing_after_park`,
+    /// `withdrawn`), would stay `open` with nobody to open a planner for it
+    /// or end it. It is declined at the close rather than when the run's
+    /// restore is confirmed, since a closed operation's run may go on
+    /// without a restore. `blocked` is not an end: it may still go on to
+    /// the planner, and the request waits for it.
+    ///
+    /// A planner open at the close is left to finish its turn, the request
+    /// still its own to submit or decline: stopping it mid-turn would throw
+    /// away what it has written, and the move is the runtime's, not the
+    /// planner's. When it ends without deciding, the request is declined
+    /// as its row closes, by the same judgment with `planner_open` false
+    /// on the operation's closed status.
+    pub const fn ends_request_undecided(self, planner_open: bool) -> bool {
+        self.is_closed() && !planner_open
     }
 
     /// Whether an operation in this status is with the planner: it holds a
@@ -145,15 +152,17 @@ impl ReplanStatus {
     }
 
     /// Whether a move from this status to `to` records a new planning
-    /// request for the operation, its request having ended unplanned
-    /// (`ended_unplanned`: declined by a close no planner was opened
-    /// before, [`Self::ends_request_unplanned`]): a closed operation whose
-    /// restore failed, back in `blocked` ([`Self::reopens`]), that goes on
-    /// to the planner, straight or through the snapshot again, gets one
-    /// planner from the new request when it reaches it. An ended request
-    /// never goes back to `open`, so it is not reopened.
-    pub const fn renews_request(self, to: Self, ended_unplanned: bool) -> bool {
-        !self.hands_to_planner() && to.hands_to_planner() && ended_unplanned
+    /// request for the operation, its request having been declined by the
+    /// runtime as the operation closed undecided (`declined_at_close`: the
+    /// request's `request_declined` by the runtime names this operation,
+    /// [`Self::ends_request_undecided`]): a closed operation whose restore
+    /// failed, back in `blocked` ([`Self::reopens`]), that goes on to the
+    /// planner, straight or through the snapshot again, gets one planner
+    /// from the new request when it reaches it. An ended request never goes
+    /// back to `open`, so it is not reopened; one its planner submitted,
+    /// declined or ran out of planners on is not renewed.
+    pub const fn renews_request(self, to: Self, declined_at_close: bool) -> bool {
+        !self.hands_to_planner() && to.hands_to_planner() && declined_at_close
     }
 
     /// Whether an operation in this status, closed, is moved again: a
@@ -501,8 +510,8 @@ pub struct ReplanOperation {
     pub request_id: Option<RequestId>,
     /// Where `request_id` is now, read with the operation: `declined`, with
     /// the operation's outcome as its reason, when the operation ended
-    /// before a planner was opened for it
-    /// ([`ReplanStatus::ends_request_unplanned`]). `request_id` names the
+    /// with no planner open for it
+    /// ([`ReplanStatus::ends_request_undecided`]). `request_id` names the
     /// operation's latest request ([`ReplanStatus::renews_request`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_status: Option<RequestStatus>,
@@ -802,14 +811,14 @@ mod tests {
     }
 
     #[test]
-    fn only_a_close_before_any_planner_leaves_the_request_unplanned() {
-        let unplanned: Vec<_> = ReplanStatus::ALL
+    fn only_a_close_with_no_planner_open_leaves_the_request_undecided() {
+        let undecided: Vec<_> = ReplanStatus::ALL
             .into_iter()
-            .filter(|status| status.ends_request_unplanned(false))
+            .filter(|status| status.ends_request_undecided(false))
             .map(ReplanStatus::as_str)
             .collect();
         assert_eq!(
-            unplanned,
+            undecided,
             [
                 "continuing",
                 "applied",
@@ -817,10 +826,10 @@ mod tests {
                 "withdrawn"
             ]
         );
-        // Every status the operation may end from before a planner is
-        // opened reaches one of them: before the snapshot, after it
-        // (`parked`) and `blocked` either side of it, which is no end
-        // itself.
+        // Every status the operation may end from with no planner open
+        // reaches one of them: before the snapshot, after it (`parked`),
+        // `blocked` either side of it, which is no end itself, and with
+        // the planner once its planners ended without deciding.
         for from in [
             ReplanStatus::Candidate,
             ReplanStatus::Diagnosing,
@@ -828,20 +837,23 @@ mod tests {
             ReplanStatus::Quiescing,
             ReplanStatus::Snapshotting,
             ReplanStatus::Parked,
+            ReplanStatus::Planning,
+            ReplanStatus::Reviewing,
+            ReplanStatus::AwaitingAnswer,
             ReplanStatus::Blocked,
         ] {
             assert!(
                 from.next()
                     .iter()
-                    .any(|to| to.ends_request_unplanned(false)),
+                    .any(|to| to.ends_request_undecided(false)),
                 "{from:?}"
             );
         }
-        // A request a planner was opened for is its planner's to end.
+        // A request whose planner is open now is its planner's to end.
         assert!(
             ReplanStatus::ALL
                 .into_iter()
-                .all(|status| !status.ends_request_unplanned(true))
+                .all(|status| !status.ends_request_undecided(true))
         );
     }
 
@@ -862,7 +874,7 @@ mod tests {
         // A closed operation whose restore failed goes back to `blocked`,
         // and from there may go on to the planner.
         for closed in ReplanStatus::ALL.into_iter().filter(|s| s.reopens()) {
-            assert!(closed.ends_request_unplanned(false));
+            assert!(closed.ends_request_undecided(false));
             assert!(closed.can_move_to(ReplanStatus::Blocked));
         }
         let renewing: Vec<_> = ReplanStatus::Blocked
@@ -877,7 +889,8 @@ mod tests {
         assert!(ReplanStatus::Snapshotting.renews_request(ReplanStatus::Parked, true));
         for from in ReplanStatus::ALL {
             for to in ReplanStatus::ALL {
-                // A request still open, or one its planner ended, is kept.
+                // A request still open, or one its planner submitted or
+                // declined, is kept.
                 assert!(!from.renews_request(to, false), "{from:?} {to:?}");
                 // Only the move onto the planner records it, once.
                 assert_eq!(

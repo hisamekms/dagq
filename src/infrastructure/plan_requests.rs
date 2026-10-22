@@ -36,12 +36,14 @@ use crate::domain::{
 /// earlier ended (ADR-t1487-1 decision 5). A request recorded for a
 /// replanning operation waits until the operation holds a complete
 /// snapshot and is with the planner (ADR-t1521-2 decision 2, the statuses
-/// of `ReplanStatus::hands_to_planner`); one whose operation closes before
-/// a planner was opened for it, before its snapshot or after it, is
-/// declined by that move ([`decline_unplanned`]), so none is left `open`
-/// for an operation that is no longer with the planner. A closed
-/// operation whose restore failed that goes on to the planner again gets a
-/// new request ([`renew_unplanned`]) rather than this one back.
+/// of `ReplanStatus::hands_to_planner`); one whose operation closes with
+/// no planner open for it, before its snapshot or after it, is declined by
+/// that move, and one whose planner was open at the close is declined as
+/// that planner's row closes undecided ([`decline_undecided`],
+/// [`decline_after_planner`]), so none is left `open` for an operation
+/// that is no longer with the planner. A closed operation whose restore
+/// failed that goes on to the planner again gets a new request
+/// ([`renew_declined`]) rather than this one back.
 const TARGETS: &str = "SELECT r.id FROM plan_requests r WHERE r.status='open'
     AND (r.replan_operation_id IS NULL OR EXISTS(SELECT 1 FROM replan_operations o
         WHERE o.id=r.replan_operation_id AND o.snapshot_id IS NOT NULL
@@ -353,14 +355,15 @@ pub(super) fn record_missing_spike_requests(conn: &Connection, now: i64) -> Resu
 }
 
 /// Decline the `open` request of replanning operation `op` that `outcome`
-/// closes before a planner was opened for it, before the operation's
+/// closes with no planner of the runtime's open for it (none was opened,
+/// or each one ended without deciding it), before the operation's
 /// snapshot or after it, on `conn` inside the move's own transaction: no
-/// planner was opened for it nor will be (the operation is no longer with
-/// the planner), and `declined` with the operation's outcome as the reason
+/// planner will be opened for it (the operation is no longer with the
+/// planner), and `declined` with the operation's outcome as the reason
 /// tells the person who asked (`request_declined` by the runtime, naming
-/// the operation). Whether it declined it: a request already ended is left
-/// as it is.
-pub(super) fn decline_unplanned(
+/// the operation, which [`declined_at_close`] reads). Whether it declined
+/// it: a request already ended is left as it is.
+pub(super) fn decline_undecided(
     conn: &Connection,
     request: RequestId,
     op: crate::domain::ReplanId,
@@ -368,47 +371,123 @@ pub(super) fn decline_unplanned(
     why: &str,
     now: i64,
 ) -> Result<bool> {
+    let reason = format!(
+        "replan operation {op} ended {} with no planner of the runtime's open for it: {why}",
+        outcome.as_str()
+    );
+    decline_for_operation(conn, request, op, outcome, &reason, None, now)
+}
+
+/// Decline, on `conn` inside the transaction that closes planner
+/// `planner`'s row, the `open` request it was opened for when the request's
+/// replanning operation closed while it was open and it ended without
+/// deciding the request ([`crate::domain::task_replan::ReplanStatus::ends_request_undecided`]
+/// on the operation's closed status): no other planner is opened for it,
+/// so it would stay `open`. The reason names the operation's outcome and
+/// the planner, and `request_declined` by the runtime names the operation
+/// as [`decline_undecided`]'s does. The request declined, if any: one of
+/// an operation still open is left to the planners that follow.
+pub(super) fn decline_after_planner(
+    conn: &Connection,
+    planner: PlannerId,
+    now: i64,
+) -> Result<Option<RequestId>> {
+    use crate::domain::task_replan::ReplanStatus;
+    let row: Option<(RequestId, crate::domain::ReplanId, String, Option<String>)> = conn
+        .query_row(
+            "SELECT r.id, o.id, o.status, o.status_reason FROM planners p
+             JOIN plan_requests r ON r.id=p.request_id AND r.status='open'
+             JOIN replan_operations o ON o.id=r.replan_operation_id
+             WHERE p.id=?1",
+            [planner],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    let Some((request, op, status, why)) = row else {
+        return Ok(None);
+    };
+    let outcome: ReplanStatus = status.parse()?;
+    if !outcome.ends_request_undecided(planner_open(conn, request)?) {
+        return Ok(None);
+    }
+    let reason = format!(
+        "replan operation {op} ended {} while planner {planner} of the runtime was open, \
+         and it ended without deciding the request: {}",
+        outcome.as_str(),
+        why.unwrap_or_default()
+    );
+    Ok(
+        decline_for_operation(conn, request, op, outcome, &reason, Some(planner), now)?
+            .then_some(request),
+    )
+}
+
+/// Decline the `open` `request` of replanning operation `op` that ended
+/// `outcome` with `reason`, by the runtime (`ended_planner` names the
+/// planner whose end left it undecided). Whether it declined it.
+fn decline_for_operation(
+    conn: &Connection,
+    request: RequestId,
+    op: crate::domain::ReplanId,
+    outcome: crate::domain::task_replan::ReplanStatus,
+    reason: &str,
+    ended_planner: Option<PlannerId>,
+    now: i64,
+) -> Result<bool> {
     if read_request(conn, request)?.status != RequestStatus::Open {
         return Ok(false);
     }
-    let reason = format!(
-        "replan operation {op} ended {} before a planner was opened for it: {why}",
-        outcome.as_str()
-    );
-    set_status(conn, request, RequestStatus::Declined, &reason, now)?;
-    record_queue_event_in(
-        conn,
-        EventKind::RequestDeclined,
-        &json!({
-            "request_id": request,
-            "planner_id": null,
-            "reason": reason,
-            "by": "runtime",
-            "replan_operation_id": op,
-            "replan_status": outcome,
-        }),
-    )?;
+    set_status(conn, request, RequestStatus::Declined, reason, now)?;
+    let mut payload = json!({
+        "request_id": request,
+        "planner_id": null,
+        "reason": reason,
+        "by": "runtime",
+        "replan_operation_id": op,
+        "replan_status": outcome,
+    });
+    if let Some(planner) = ended_planner {
+        payload["ended_planner_id"] = json!(planner);
+    }
+    record_queue_event_in(conn, EventKind::RequestDeclined, &payload)?;
     Ok(true)
 }
 
-/// Whether a planner of the runtime's was ever opened for `request`, read
-/// on `conn`: one that was is the planner's to end.
-pub(super) fn planner_opened(conn: &Connection, request: RequestId) -> Result<bool> {
+/// Whether a planner of the runtime's is open for `request` now, read on
+/// `conn`: one that is is left to end the request.
+pub(super) fn planner_open(conn: &Connection, request: RequestId) -> Result<bool> {
+    Ok(open_planner_of(conn, request)?.is_some())
+}
+
+/// Whether the runtime declined `request` as replanning operation `op`
+/// closed undecided ([`decline_undecided`], [`decline_after_planner`]),
+/// read on `conn` from its `request_declined`: such a request is renewed
+/// when the operation goes on to the planner again ([`renew_declined`]),
+/// one its planner submitted, declined or ran out of planners on is not.
+pub(super) fn declined_at_close(
+    conn: &Connection,
+    request: RequestId,
+    op: crate::domain::ReplanId,
+) -> Result<bool> {
     Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM planners WHERE request_id=?1)",
-        [request],
+        "SELECT EXISTS(SELECT 1 FROM plan_requests r JOIN run_events e ON e.kind=?3
+             AND json_extract(e.payload,'$.request_id')=r.id
+             AND json_extract(e.payload,'$.by')='runtime'
+             AND json_extract(e.payload,'$.replan_operation_id')=?2
+         WHERE r.id=?1 AND r.status='declined')",
+        params![request, op, EventKind::RequestDeclined.as_str()],
         |r| r.get(0),
     )?)
 }
 
 /// Record, on `conn` inside the move's own transaction, the new request of
-/// replanning operation `op` whose `ended` request was declined unplanned
-/// ([`decline_unplanned`]) and which goes on to the planner again: the
-/// same words, references, priority and asker, `open`, carrying the
-/// operation, with `request_recorded` naming the request it renews. The
-/// ended request keeps its outcome, so one planner is opened, for the new
-/// one.
-pub(super) fn renew_unplanned(
+/// replanning operation `op` whose `ended` request the runtime declined as
+/// the operation closed undecided ([`declined_at_close`]) and which goes
+/// on to the planner again: the same words, references, priority and
+/// asker, `open`, carrying the operation, with `request_recorded` naming
+/// the request it renews. The ended request keeps its outcome, so one
+/// planner is opened, for the new one.
+pub(super) fn renew_declined(
     conn: &Connection,
     ended: RequestId,
     op: crate::domain::ReplanId,
