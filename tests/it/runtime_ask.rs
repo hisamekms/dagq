@@ -543,6 +543,77 @@ fn watch_returns_when_supervisor_registrations_or_health_change() {
     let quiet = watch_for(&db, Some(cursor), Duration::from_millis(300));
     assert_eq!(quiet["supervisors_changed"], false);
 
+    // While another supervisor is live, `up` would only reuse it: the hung
+    // registration names its process to stop, and a dead one is pruned by
+    // the runtime.
+    let dead_pid = 0x7fff_fff0_u32;
+    let mut live = crate::common::KillOnDrop::new(
+        std::process::Command::new("sleep")
+            .arg("60")
+            .spawn()
+            .unwrap(),
+        "the live supervisor's stand-in",
+    );
+    queue
+        .register_supervisor(&LeaseToken::new("second"), live.child().id(), 2, VERSION)
+        .unwrap();
+    queue
+        .register_supervisor(&LeaseToken::new("dead"), dead_pid, 2, VERSION)
+        .unwrap();
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "UPDATE supervisors SET heartbeat_at=0 WHERE token='dead'",
+            [],
+        )
+        .unwrap();
+    let stale_nexts = |status: &Value| -> Vec<(Value, Value, Value)> {
+        status["attention"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|a| a["kind"] == "supervisor_stale")
+            .map(|a| (a["pid"].clone(), a["status"].clone(), a["next"].clone()))
+            .collect()
+    };
+    let mut nexts = stale_nexts(&runtime::status(&db).unwrap());
+    nexts.sort_by_key(|(pid, _, _)| pid.as_u64());
+    assert_eq!(
+        nexts,
+        [
+            (
+                json!(pid),
+                json!("stale"),
+                json!("stop the stale supervisor's process")
+            ),
+            (
+                json!(dead_pid),
+                json!("dead"),
+                json!("pruned by the live supervisor (runtime)")
+            ),
+        ]
+    );
+    // With none live again, each stale registration asks for a restart.
+    assert!(
+        queue
+            .deregister_supervisor(&LeaseToken::new("second"))
+            .unwrap()
+    );
+    drop(live);
+    let nexts = stale_nexts(&runtime::status(&db).unwrap());
+    assert_eq!(nexts.len(), 2);
+    assert!(
+        nexts
+            .iter()
+            .all(|(_, _, next)| next == "restart supervisor"),
+        "{nexts:?}"
+    );
+    assert!(
+        queue
+            .deregister_supervisor(&LeaseToken::new("dead"))
+            .unwrap()
+    );
+
     // Its registration disappears.
     let watcher = spawn_watch(&db, Some(cursor));
     assert!(

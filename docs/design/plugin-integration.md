@@ -209,7 +209,8 @@ skillはすべて`${CLAUDE_PLUGIN_ROOT}/bin/dagq`を呼ぶ。launcherはバイ�
   `up`がsupervisorを常駐させ、生きているsupervisorがあればそれを使い続けるので、skillは重複起動の判定を自分では行わない。
   `up`はinboxもplannerも開かない。
   inboxは人が`dagq inbox`で開き（[Roles](supervisor-lifecycle/roles.md)のinbox、[ADR-t2159-1](../adr/2026-10-09-t2159-1-dagq-does-not-use-cmux-and-the-person-opens-the-inbox.md)決定2・3）、plannerはruntimeが立てる（ADR-t1394-1）。
-  `restart supervisor`（`supervisor_stopped` / `supervisor_stale`）はinboxの`watch`が拾って人に知らせ、人の指示で`up`を叩き直す（死んだ登録をpruneして起動し直す）。
+  `restart supervisor`（`supervisor_stopped`と、生きているsupervisorが居ないときの`supervisor_stale`）はinboxの`watch`が拾って人に知らせ、人の指示で`up`を叩き直す（死んだ登録をpruneして起動し直す）。
+  生きたsupervisorが居るときの次の手は`supervisor_attention`のdoc commentが持つ。
   同じ`restart supervisor`の`supervisor_duplicate`（同じqueueに二重のsupervisorかLaunchAgent）は、`up`だけでは同じbuildのsupervisorをreuseして直らないので、人の指示で`down --wait`の後に`up`を叩く（判定は[supervisor-lifecycle](supervisor-lifecycle/up-down.md#up--down)の3、手順は`dagq-recover`の`reference/up-down.md`）。
   停止は`dagq down`で、`--force`は実行中のrunを捨てるので人の明示の指示が要る。
   supervisorのlogの場所と書式は`dagq-recover` skillの`reference/up-down.md`が案内する（`infrastructure::telemetry`）。

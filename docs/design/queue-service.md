@@ -270,7 +270,7 @@ inboxの`watch`と`status`はDBを直接読むので、serviceが落ちても届
 1つの失敗につき1回で、serviceがまた動けば（`queue_service_started`・`queue_service_running`）消える。
 attentionの次の手は`dagq service status`。
 人は`dagq service status`と`service.log`を見て、`up`か`service start`を打ち直す。
-supervisorも居ないときは`restart supervisor`が出る。
+生きているsupervisorも居ないときは`restart supervisor`が出る。
 
 クライアントモードのdagqは、serviceに届かないときに`unreachable`のerrorを返し、DBを直接開くことへ戻らない（ADR-t1233-1決定7、[クライアントモード](#クライアントモード)）。
 

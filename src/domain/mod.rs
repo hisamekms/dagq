@@ -2314,6 +2314,14 @@ pub enum AttentionNext {
     ManualRoles,
     ReviewAndIntegrate,
     RestartSupervisor,
+    /// Not a person's to act on: a registration whose PID is dead while
+    /// another supervisor of the queue is live; the live supervisor prunes
+    /// it.
+    PruningSupervisor,
+    /// A registration whose PID lives but whose heartbeat stopped while
+    /// another supervisor of the queue is live: the queue runs, so a person
+    /// stops that process (the attention's `pid`) instead of running `up`.
+    StopStaleSupervisor,
     PushMain,
     RecoverRun,
     /// Not a person's to act on: the supervisor resumes the
@@ -2589,6 +2597,8 @@ impl fmt::Display for AttentionNext {
             Self::ManualRoles => f.write_str("handle disabled roles manually"),
             Self::ReviewAndIntegrate => f.write_str("review and integrate"),
             Self::RestartSupervisor => f.write_str("restart supervisor"),
+            Self::PruningSupervisor => f.write_str("pruned by the live supervisor (runtime)"),
+            Self::StopStaleSupervisor => f.write_str("stop the stale supervisor's process"),
             Self::PushMain => f.write_str("push main"),
             Self::RecoverRun => f.write_str("recover run"),
             Self::Resuming => f.write_str("resuming (runtime)"),
@@ -3340,10 +3350,15 @@ impl SupervisorPulse {
     }
 }
 
-/// Supervisors that need a restart: every stale registration, or a queue
-/// with no registration at all (stopped, or never started).
+/// Supervisors that need a person: every stale registration, or a queue
+/// with no registration at all (stopped, or never started). A queue with no
+/// live (not stale) supervisor needs a restart; while one is live, `up`
+/// only reuses it, so a dead registration is the live supervisor's to prune
+/// and a hung one's process is a person's to stop. A stale registration
+/// under the PID of a live one (a handoff's old row) is that live process:
+/// nobody stops it, so it is no attention.
 pub fn supervisor_attention(pulses: &[SupervisorPulse]) -> Vec<Attention> {
-    let restart = |pid, status: &str, kind: &str| Attention {
+    let attention = |pid, status: &str, kind: &str, next| Attention {
         run_id: None,
         task_id: None,
         pid,
@@ -3353,17 +3368,35 @@ pub fn supervisor_attention(pulses: &[SupervisorPulse]) -> Vec<Attention> {
         kind: kind.into(),
         last_error: None,
         last_error_code: None,
-        next: AttentionNext::RestartSupervisor,
+        next,
     };
     if pulses.is_empty() {
-        return vec![restart(None, "stopped", "supervisor_stopped")];
+        return vec![attention(
+            None,
+            "stopped",
+            "supervisor_stopped",
+            AttentionNext::RestartSupervisor,
+        )];
     }
+    let live_pids: Vec<u32> = pulses
+        .iter()
+        .filter(|pulse| !pulse.stale)
+        .map(|pulse| pulse.pid)
+        .collect();
+    let live = !live_pids.is_empty();
     pulses
         .iter()
-        .filter(|pulse| pulse.stale)
+        .filter(|pulse| pulse.stale && !(pulse.alive && live_pids.contains(&pulse.pid)))
         .map(|pulse| {
-            let status = if pulse.alive { "stale" } else { "dead" };
-            restart(Some(pulse.pid), status, "supervisor_stale")
+            let (status, next) = match (pulse.alive, live) {
+                (_, false) => (
+                    if pulse.alive { "stale" } else { "dead" },
+                    AttentionNext::RestartSupervisor,
+                ),
+                (true, true) => ("stale", AttentionNext::StopStaleSupervisor),
+                (false, true) => ("dead", AttentionNext::PruningSupervisor),
+            };
+            attention(Some(pulse.pid), status, "supervisor_stale", next)
         })
         .collect()
 }
@@ -4750,6 +4783,14 @@ mod attention_tests {
             serde_json::to_value(RestartSupervisor).unwrap(),
             json!("restart supervisor")
         );
+        assert_eq!(
+            serde_json::to_value(PruningSupervisor).unwrap(),
+            json!("pruned by the live supervisor (runtime)")
+        );
+        assert_eq!(
+            StopStaleSupervisor.to_string(),
+            "stop the stale supervisor's process"
+        );
         // A dialog and a used-up resume are asks, not attention (ADR-0024).
         assert_eq!(
             event_attention(&EventKind::PromptWaiting.into(), &json!({})),
@@ -5096,23 +5137,62 @@ mod attention_tests {
             SupervisorPulse::judge(&registration("b", 100), true, 101 + HEARTBEAT_TIMEOUT_SECS);
         let dead = SupervisorPulse::judge(&registration("c", 100), false, 100);
         assert!(!fresh.stale && hung.stale && dead.stale);
+        // A handoff's old row shares the live supervisor's PID: nobody is to
+        // stop that process.
+        assert_eq!(supervisor_attention(&[fresh.clone(), hung.clone()]), vec![]);
+        let (hung, dead) = (
+            SupervisorPulse { pid: 8, ..hung },
+            SupervisorPulse { pid: 9, ..dead },
+        );
         assert_eq!(supervisor_attention(std::slice::from_ref(&fresh)), vec![]);
-        let stale = supervisor_attention(&[fresh, hung, dead]);
-        let summary: Vec<_> = stale
-            .iter()
-            .map(|a| (a.kind.as_str(), a.status.as_str(), a.pid))
-            .collect();
+        let summary = |pulses: &[SupervisorPulse]| -> Vec<_> {
+            supervisor_attention(pulses)
+                .into_iter()
+                .inspect(|a| assert!(a.run_id.is_none()))
+                .map(|a| (a.kind, a.status, a.pid, a.next))
+                .collect()
+        };
+        let row = |status: &str, next| {
+            let pid = if status == "stale" { 8 } else { 9 };
+            (
+                "supervisor_stale".to_owned(),
+                status.to_owned(),
+                Some(pid),
+                next,
+            )
+        };
+        // With no live supervisor, every stale registration asks for a restart.
         assert_eq!(
-            summary,
+            summary(&[hung.clone(), dead.clone()]),
             [
-                ("supervisor_stale", "stale", Some(7)),
-                ("supervisor_stale", "dead", Some(7))
+                row("stale", AttentionNext::RestartSupervisor),
+                row("dead", AttentionNext::RestartSupervisor)
             ]
         );
-        assert!(
-            stale
-                .iter()
-                .all(|a| a.next == AttentionNext::RestartSupervisor && a.run_id.is_none())
+        assert_eq!(
+            summary(std::slice::from_ref(&hung)),
+            [row("stale", AttentionNext::RestartSupervisor)]
+        );
+        assert_eq!(
+            summary(std::slice::from_ref(&dead)),
+            [row("dead", AttentionNext::RestartSupervisor)]
+        );
+        // With a live one, `up` only reuses it: a dead registration is the
+        // runtime's to prune and a hung one's process a person's to stop.
+        assert_eq!(
+            summary(&[fresh.clone(), hung.clone(), dead.clone()]),
+            [
+                row("stale", AttentionNext::StopStaleSupervisor),
+                row("dead", AttentionNext::PruningSupervisor)
+            ]
+        );
+        assert_eq!(
+            summary(&[dead, fresh.clone()]),
+            [row("dead", AttentionNext::PruningSupervisor)]
+        );
+        assert_eq!(
+            summary(&[fresh, hung]),
+            [row("stale", AttentionNext::StopStaleSupervisor)]
         );
         let stopped = supervisor_attention(&[]);
         assert_eq!(stopped.len(), 1);

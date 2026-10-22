@@ -62,7 +62,7 @@ Report each in a list (task, status, `next`, gist of `last_error`); act with `da
 - `dagq service status` (`queue_service_down`): `service start` on the person's word.
 - `read the queue broker's log and run up` (`queue_broker_down`): `up` on the person's word.
 - `look at the dagq podman machine's relays` (`queue_relay_down`): the person.
-- `restart supervisor`: `up` (`supervisor_duplicate`: `down --wait` first; `dagq-recover` section 5).
+- `restart supervisor`: `up` (`supervisor_duplicate`: `down --wait` first); `stop the stale supervisor's process`: stop its `pid` (`dagq-recover` section 5).
 - `review by hand`, `review and integrate`, `push main`: `${CLAUDE_PLUGIN_ROOT}/skills/dagq-recover/reference/review-by-hand.md`.
 - `recover run`, `exit the session`: `dagq-recover`.
 

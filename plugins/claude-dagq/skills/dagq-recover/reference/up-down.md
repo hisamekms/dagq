@@ -23,7 +23,7 @@ Replace the binary with `install` (`reference/update.md`), never `cp`. A supervi
 
 A command that stops with "run `dagq migrate`": `dagq migrate --check` lists the migrations; `up` and `install` apply the compatible ones, a breaking one needs `install --allow-breaking` (`reference/update.md`); tell the person first. `unsupported queue schema version`: use the newer binary.
 
-A supervisor alive but no longer heartbeating is not replaced (`status` shows it `stale`): the person stops it with `down --force`.
+A supervisor alive but no longer heartbeating is not replaced (`status` shows it `stale`): with no other live supervisor, the person stops it with `down --force`; beside a live one, see "Two supervisors of one queue".
 
 ### Runs waiting for a person
 
@@ -36,6 +36,8 @@ One an earlier binary started outside launchd (`mode` `in_cmux` in `status`) kee
 ### Two supervisors of one queue
 
 `restart supervisor` with `supervisor_duplicate` (or `duplicate_supervisors` in `status` / `doctor`): `up` alone reuses one and does not fix it. On the person's word, `down --wait`, then `up`. If an agent is still loaded, run the `launchctl bootout` its `fix` names and remove its plist. A handoff's two rows under one pid are not a duplicate.
+
+A stale registration beside a live supervisor is not a restart: `up` would only reuse the live one. A dead one (`supervisor_stale` status `dead`) shows `pruned by the live supervisor (runtime)` and needs nothing. A hung one (status `stale`: its pid lives, its heartbeat stopped) shows `stop the stale supervisor's process`: on the person's word, check the pid is still a `dagq supervise` of this queue (`ps -p PID -o command`; if the pid was reused by another program, run `up`, which prunes the row as `pid_reused`), then stop it (`kill PID`; not `down`, which stops the live one), and the live supervisor prunes the registration. A stale row under a live supervisor's own pid (a handoff's) is no attention.
 
 ### Open the inbox again (the guardrail)
 
