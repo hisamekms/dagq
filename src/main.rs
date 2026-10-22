@@ -3645,7 +3645,8 @@ fn execute(cli: Cli) -> Result<Value> {
     }
     if matches!(cli.command, Command::Init) {
         location.prepare()?;
-        let mut queue = dagq::compose::init_queue(&db)?.with_generators(generators);
+        let mut queue =
+            dagq::compose::init_queue(&db, &env::current_exe()?)?.with_generators(generators);
         if let Some(common_dir) = &common_dir {
             queue.bind_repository(common_dir)?;
         }
@@ -3694,7 +3695,8 @@ fn execute(cli: Cli) -> Result<Value> {
         if check {
             return Ok(serde_json::to_value(dagq::compose::queue_schema(&db)?)?);
         }
-        let report = dagq::compose::migrate_queue(&db, generators.clock.now())?;
+        let report =
+            dagq::compose::migrate_queue(&db, &env::current_exe()?, generators.clock.now())?;
         let mut value = serde_json::to_value(report)?;
         // A landing recorded without its message (ADR-0046 decision 3).
         if let Ok(mut queue) = dagq::compose::open_queue(&db) {

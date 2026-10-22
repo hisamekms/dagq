@@ -977,30 +977,7 @@ impl Client {
                 )?
             }
         };
-        if let Some(error) = response.error {
-            return Err(ClientFailure {
-                denied: error
-                    .denied
-                    .filter(|_| error.code == ServiceErrorCode::AuthorizationDenied)
-                    .map(|denied| *denied),
-                ..ClientFailure::new(error.code.as_str(), error.message)
-            }
-            .into());
-        }
-        if !crate::domain::queue_service::understands(&response) {
-            return Err(ClientFailure::new(
-                ServiceErrorCode::ApiVersionMismatch.as_str(),
-                format!(
-                    "the queue service answers API versions {} to {}, not {API_VERSION}",
-                    response.min_api_version, response.api_version
-                ),
-            )
-            .into());
-        }
-        match (response.ok, response.result) {
-            (true, Some(result)) => Ok(result),
-            _ => Err(ClientFailure::new("failed", "the queue service answered nothing").into()),
-        }
+        answer_of(response)
     }
 
     /// Whether the queue service answers `hello` within [`PROBE_TIMEOUT`],
@@ -1048,6 +1025,39 @@ impl Client {
             }
         };
         reach_of(response)
+    }
+}
+
+/// What a client takes from the service's `response`: its result, or a
+/// [`ClientFailure`]. The versions of every answer are judged first
+/// (ADR-t3102-2 decision 4): a service whose range does not hold this
+/// client's [`API_VERSION`] is not used, whatever it answered, whichever
+/// binary the client runs from (a run's `runner` copy, a development
+/// build).
+fn answer_of(response: ServiceResponse) -> Result<Value> {
+    if !crate::domain::queue_service::understands(&response) {
+        return Err(ClientFailure::new(
+            ServiceErrorCode::ApiVersionMismatch.as_str(),
+            format!(
+                "the queue service answers API versions {} to {}, not {API_VERSION}",
+                response.min_api_version, response.api_version
+            ),
+        )
+        .into());
+    }
+    if let Some(error) = response.error {
+        return Err(ClientFailure {
+            denied: error
+                .denied
+                .filter(|_| error.code == ServiceErrorCode::AuthorizationDenied)
+                .map(|denied| *denied),
+            ..ClientFailure::new(error.code.as_str(), error.message)
+        }
+        .into());
+    }
+    match (response.ok, response.result) {
+        (true, Some(result)) => Ok(result),
+        _ => Err(ClientFailure::new("failed", "the queue service answered nothing").into()),
     }
 }
 
@@ -2222,6 +2232,39 @@ mod tests {
         assert!(ServiceRecord::read(dir.path()).is_none());
         // A start of a binary that is not there fails.
         assert!(control.start(Duration::from_secs(1)).is_err());
+    }
+
+    /// A client uses only a service whose range holds its API version
+    /// (ADR-t3102-2 decision 4): an answer of a newer or an older range is
+    /// `api_version_mismatch` whatever it carries, a result or a refusal;
+    /// one within it is taken as it is.
+    #[test]
+    fn a_client_takes_an_answer_only_from_a_service_whose_range_holds_its_version() {
+        let code = |result: Result<Value>| {
+            result
+                .unwrap_err()
+                .downcast::<ClientFailure>()
+                .unwrap()
+                .code
+        };
+        let within = ServiceResponse::success(json!({"a": 1}));
+        assert_eq!(answer_of(within.clone()).unwrap(), json!({"a": 1}));
+        let ranges = [
+            (API_VERSION + 1, API_VERSION + 2),
+            (API_VERSION.saturating_sub(2), API_VERSION.saturating_sub(1)),
+        ];
+        for (min, max) in ranges {
+            for mut response in [
+                within.clone(),
+                ServiceResponse::failure(ServiceErrorCode::AuthorizationDenied, "no"),
+            ] {
+                response.min_api_version = min;
+                response.api_version = max;
+                assert_eq!(code(answer_of(response)), "api_version_mismatch");
+            }
+        }
+        let refused = ServiceResponse::failure(ServiceErrorCode::Unauthenticated, "no token");
+        assert_eq!(code(answer_of(refused)), "unauthenticated");
     }
 
     /// `locate`'s reach: a service that answers is reachable with its

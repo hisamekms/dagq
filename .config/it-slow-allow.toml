@@ -2265,3 +2265,8 @@ task = 3113
 name = "runtime_resume::the_retry_after_used_up_resumes_carries_the_last_resolved_head_over"
 reason = "B 境界（守る境界）: SQLite と Git — store が記録した resolved の head を supervisor の retry_inherit が refs/dagq/runs に残して引き継ぐ"
 task = 3113
+
+[[test]]
+name = "queue_binary::install_lets_its_new_build_migrate_and_names_it_the_queues_binary"
+reason = "B 境界（守る境界）: a real install runs the new build as child processes (probe, --version, migrate --check, migrate under the grant), the only path that shows the grant reaches the child"
+task = 3104

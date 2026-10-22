@@ -793,7 +793,7 @@ impl QueueSchema {
         ensure!(
             self.version >= BINARY_SCHEMA,
             "queue schema version {} is older than this binary's schema {BINARY_SCHEMA}; \
-             run `dagq migrate` to apply the {} pending migration(s)",
+             run `dagq migrate` with the queue's binary to apply the {} pending migration(s)",
             self.version,
             BINARY_SCHEMA - self.version
         );

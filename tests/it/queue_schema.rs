@@ -161,7 +161,7 @@ fn opening_or_initializing_an_older_queue_never_migrates_it() {
             error.to_string(),
             format!(
                 "queue schema version 23 is older than this binary's schema {}; run `dagq \
-                 migrate` to apply the {} pending migration(s)",
+                 migrate` with the queue's binary to apply the {} pending migration(s)",
                 SqliteQueue::SCHEMA_VERSION,
                 SqliteQueue::SCHEMA_VERSION - 23
             )

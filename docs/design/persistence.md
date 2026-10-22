@@ -290,6 +290,7 @@ migrationを足すtaskの規則は[migrations.md](../development/migrations.md)�
 - リリース済みのmigrationは中身も名前も変えない（[ADR-t614-2](../adr/2026-09-27-t614-2-released-migrations-are-immutable.md)、検査は`scripts/check-migration-numbers.sh`）。
 - queueを開いただけではmigrateしない。
   migrationを適用するのは空のファイルに最新のschemaを作る`init`と`dagq migrate`だけ（[ADR-0045](../adr/0045-build-identifier-explicit-migrate-schema-compat-handoff-and-auto-update.md)）。
+  既存のqueueへはqueueが名指すbinaryだけが適用する（ADR-t3102-2、`queue_binary.rs`）。
 - 互換の宣言: 各migrationは先頭行で`compatible`か`breaking`を宣言し、互換と言える文の範囲は`schema.rs`のunit testが検査する。
   下限（`schema_floor`）は最後に適用した非互換のmigrationの版である。
 - open: 下限がバイナリより新しければ止まり、`user_version`がバイナリより古ければ`dagq migrate`を案内して止まる。

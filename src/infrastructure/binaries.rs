@@ -5,6 +5,7 @@
 
 use crate::infrastructure::adapters::unpiped_output;
 use crate::infrastructure::git_binary::git_executable;
+use crate::infrastructure::queue_binary;
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::Value;
 use std::{
@@ -131,7 +132,12 @@ impl Binaries for LocalBinaries {
     }
 
     fn migrate(&self, binary: &Path, db: &Path) -> Result<Value> {
+        let _grant = queue_binary::Grant::to(db, binary)?;
         json_output(binary, &["--db", text(db)?, "migrate"])
+    }
+
+    fn adopt(&self, db: &Path, target: &Path) -> Result<()> {
+        queue_binary::write(db, &queue_binary::QueueBinary::new(target))
     }
 
     fn replace(&self, source: &Path, target: &Path) -> Result<()> {

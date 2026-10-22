@@ -65,7 +65,7 @@ transactionはserviceの中で完結し、クライアントとの往復で分�
 `API_VERSION`と`MIN_API_VERSION`を`src/domain/queue_service.rs`が持つ。
 
 - serviceは要求の`api_version`が`MIN_API_VERSION`〜`API_VERSION`の外なら、tokenも読まずに`api_version_mismatch`で断る
-- 答えは常に`api_version`と`min_api_version`を持ち、クライアントは自分の版がその範囲に入るか（`understands`）で、知らない版のserviceを使わない
+- 答えは常に`api_version`と`min_api_version`を持ち、クライアントは自分の版がその範囲に入るか（`understands`）で、知らない版のserviceを使わない（判定は`answer_of`のdoc comment）
 - 古い版の呼び出し元が読めない変更（欄の意味の変更・ユースケースの削除）で`API_VERSION`を上げ、新しい版の呼び出し元を断るまでの間は`MIN_API_VERSION`を据え置く
 
 ## principalとtoken

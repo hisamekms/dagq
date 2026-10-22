@@ -46,6 +46,7 @@ pub mod podman_machine;
 pub mod process;
 mod proposals;
 pub mod push;
+pub mod queue_binary;
 pub mod queue_broker;
 pub mod queue_service;
 pub mod related;

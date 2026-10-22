@@ -79,6 +79,7 @@ in-cmux modeの起動の指定は何にも触る前に拒み、廃止と次の�
      liveな登録が全部引き継ぎを受けられるなら**引き継ぎ**、そうでなければ**drain**で入れ替える。
      launchd modeの登録は、LaunchAgentの`ProgramArguments`の先頭が`up`自身の絶対pathで、`ProcessType`が`up`の書く値のときだけ引き継ぐ（execはplistもlaunchdがprocessに当てる制限も変えないので、pathの違うagentはlaunchdの次の再起動で前のbinaryに戻り、`ProcessType`の無いagentは制限の下で流れ続ける。そのときはdrainし、`up`がplistを書き直してlaunchdが読み直す。判定は`agent_takes_handoff`のdoc comment）。
      - **migrate**: `up`はまずqueueの未適用のmigrationを数え、全部が互換なら適用して結果に載せる。
+       未適用のものがあって`up`がqueueのbinaryでなければ（[persistence](../persistence.md#database-setup-and-migrations)）、何も適用も起動もせずにerrorで止まる。
        非互換が1つでもあれば、何も起動もsignalもせず、`down --wait` → `dagq migrate` → `up`、または`dagq install --allow-breaking`を案内するerrorで止まる。
        互換のmigrationの後も、古いbinaryのsupervisorとrunのwrapperはfloor以上なのでそのまま動く（[persistence](../persistence.md#database-setup-and-migrations)）。
      - **引き継ぎ**（[Handoff](handoff.md#handoff)）: liveな登録それぞれに`up`自身の絶対pathへのexecを頼み、各登録が同じpidのまま`up`のbuild識別子で戻るのを待つ（`lifecycle::hand_off`）。

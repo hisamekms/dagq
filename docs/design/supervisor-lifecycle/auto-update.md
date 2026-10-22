@@ -112,7 +112,7 @@ supervisor側は`src/application/supervise/host_ops/update.rs`、ビルドから
        [Release update](release-update.md)のjobはリリースのバイナリなので関門を持たない。
   2. **非互換のmigration**: 新しいbinaryに非互換のmigrationがあれば、`install`と同じ確認をして`<queue dir>/update/staged/dagq`にcopyし、`approve_update`のask（下記）を開いて`update_awaiting_approval`で終わる。
      何も置き換えない。
-  3. **入れ替え**: それ以外は`install::install`（`Source::Binary`、drainはしない）を呼ぶ: 確認、互換のmigration、renameでの差し替え（`.previous`を残す）、このqueueのliveなsupervisorへの引き継ぎの要求と、同じpidとtokenで戻るまでの待ち。
+  3. **入れ替え**: それ以外は`install::install`（`Source::Binary`、drainはしない）を呼ぶ: 確認、互換のmigration（ビルドしたbinaryに許した1回の`migrate`）、renameでの差し替え（`.previous`を残す）とqueueのbinaryの記録、このqueueのliveなsupervisorへの引き継ぎの要求と、同じpidとtokenで戻るまでの待ち。
      tokenの登録が消えても、同じpidが引き継ぎを頼んだ後に新しいbuild識別子で登録し直していれば、その新しいtokenで戻ったとする（`lifecycle::successor`。pidが再利用されて残った古い行は後継とみなさない）。
      execしたプロセスが死ねばheartbeatが止まった時点で失敗。
      停止要求でdrainに入ったsupervisorは上限を待たずに失敗にし、要求を取り消す（[Handoff](handoff.md#handoff)）。

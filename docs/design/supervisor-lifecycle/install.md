@@ -46,6 +46,7 @@ use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/
    非互換のmigrationがあれば、人が許していなければ何も置き換えずにerror、許していればdrain（下記6）。
    元がqueueを開けず（非互換のmigrationの後に戻すとき）、適用するものも無ければ、`backups/`を案内するerror。
    互換のmigrationがあれば元の`migrate`で適用する。
+   元はまだqueueのbinaryではないので、その`migrate`の間だけ元に許しを置く（[SQLite persistence](../persistence.md#database-setup-and-migrations)）。
 4. **置き換え**（決定11）: 元が`<to>`そのもの（リリースで`<to>`がすでにその版だったとき）なら置き換えず（`.previous`もそのまま）、引き継ぎだけを行い、全員の引き継ぎが失敗しても戻さない。
    それ以外は元を`<to>`と同じdirの一時fileにcopyし、`<to>`をhard linkで残してから一時fileを`<to>`にrenameし、残したものを`<to>.previous`にrenameする。
    動いているプロセスは前のinodeを使い続けるので、上書きのcpで殺されることはない。
@@ -60,6 +61,7 @@ use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/
    CLIはこのerrorのときも結果をstdoutに出してから、errorをstderrに出して失敗で終わる。
    結果の形は`install::install`と`lifecycle::Handed::report`が持つ。
    queueが無ければ置き換えだけを行う。
+   全員の失敗で戻したときのほかは、`<to>`のpathをqueueのbinaryとして記録する（6のdrainも置き換えの後に記録する）。
    全員の失敗と一部の失敗は、CLIでは7の`update_failed`の経路を通る。
 6. **drain**（決定14）: 人が非互換のmigrationを許したとき、liveな登録があれば`down --wait`で止め（同じqueueのDBを持つ別のlabelのagentも外す。[up / down](up-down.md)の`down`）、元の`migrate`（`backups/`に複製してから適用）、置き換えをして、新しいbinaryの`up`で起動し直す（`--claude`と`--codex`の解決は[Provider executables](../provider-executables.md)）。
    止めた登録がin-cmuxでもlaunchd modeで起動する（[ADR-t1433-4](../../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）。

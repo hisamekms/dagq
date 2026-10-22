@@ -36,6 +36,7 @@ use crate::{
         binaries::LocalBinaries,
         clock,
         location::{QueueLocation, REPOSITORY_FILE_NAME, data_home},
+        queue_binary::{self, QueueBinary},
         run_files::LocalRunFiles,
         runtime_store::{SqliteOpener, SqlitePorts},
         sqlite::SqliteQueue,
@@ -472,9 +473,30 @@ pub fn queue_service_stop(db: &Path) -> Result<Value> {
     )
 }
 
-/// `init`: create the queue at `db`, or open the one there.
-pub fn init_queue(db: &Path) -> Result<SqliteQueue> {
-    SqliteQueue::init(db)
+/// `init`: create the queue at `db`, naming the binary at `executable`
+/// its binary ([`queue_binary`]), or open the one there.
+pub fn init_queue(db: &Path, executable: &Path) -> Result<SqliteQueue> {
+    let created = !db.is_file();
+    let queue = SqliteQueue::init(db)?;
+    if created {
+        queue_binary::write(db, &QueueBinary::new(executable))?;
+    }
+    Ok(queue)
+}
+
+/// Refuse a binary at `executable` that is not the one changing the
+/// schema of the queue at `db` ([`queue_binary::check`]) when it would
+/// apply a migration; a queue it cannot read is left to the migration's
+/// own error.
+fn check_schema_changer(db: &Path, executable: &Path) -> Result<()> {
+    match SqliteQueue::schema(db) {
+        Ok(state) if !state.pending.is_empty() => queue_binary::check(
+            db,
+            executable,
+            &crate::infrastructure::adapters::process_alive,
+        ),
+        _ => Ok(()),
+    }
 }
 
 /// `migrate --check`: the schema of the queue at `db`, read-only.
@@ -483,11 +505,14 @@ pub fn queue_schema(db: &Path) -> Result<crate::infrastructure::sqlite::SchemaSt
 }
 
 /// `migrate`: bring the queue at `db` to this binary's schema, with the
-/// live processes judged on this host.
+/// live processes judged on this host, when the binary at `executable` is
+/// the one changing its schema ([`queue_binary`]).
 pub fn migrate_queue(
     db: &Path,
+    executable: &Path,
     now: i64,
 ) -> Result<crate::infrastructure::sqlite::MigrationReport> {
+    check_schema_changer(db, executable)?;
     SqliteQueue::migrate(
         db,
         Some(&crate::infrastructure::adapters::process_alive),
@@ -544,7 +569,8 @@ impl OneShot {
         let claude = ClaudeCode {
             executable: options.claude.clone(),
         };
-        let migrated = self.migrate_compatible(&location.db, processes)?;
+        let migrated =
+            self.migrate_compatible(&location.db, &environment.current_exe, processes)?;
         let queues = |db: &Path| self.lifecycle_queues(db);
         let result = lifecycle::up(
             &self.lifecycle_ports(launchd, processes, &queues),
@@ -570,12 +596,18 @@ impl OneShot {
     }
 
     /// [`SqliteQueue::migrate_compatible`] of the queue at `db` on these
-    /// generators' now, with the live processes judged by `processes`.
+    /// generators' now, with the live processes judged by `processes`, when
+    /// the binary at `executable` is the one changing its schema
+    /// ([`queue_binary`]).
     pub fn migrate_compatible(
         &self,
         db: &Path,
+        executable: &Path,
         processes: &dyn ProcessControl,
     ) -> Result<Option<crate::infrastructure::sqlite::MigrationReport>> {
+        if db.is_file() {
+            check_schema_changer(db, executable)?;
+        }
         let alive = |pid| processes.alive(pid);
         SqliteQueue::migrate_compatible(db, Some(&alive), self.generators.clock.now())
     }

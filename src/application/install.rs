@@ -61,8 +61,16 @@ pub trait Binaries {
     fn takes_handoff(&self, binary: &Path) -> bool;
     /// `binary --db <db> migrate --check`.
     fn schema(&self, binary: &Path, db: &Path) -> Result<SchemaCheck>;
-    /// `binary --db <db> migrate`, its report.
+    /// `binary --db <db> migrate`, its report, with `binary` let change the
+    /// queue's schema for it though it is not yet the queue's binary
+    /// (ADR-t3102-2 decision 3).
     fn migrate(&self, binary: &Path, db: &Path) -> Result<Value>;
+    /// Name `target` the binary that changes the schema of the queue at
+    /// `db` (ADR-t3102-2 decision 3).
+    fn adopt(&self, db: &Path, target: &Path) -> Result<()> {
+        let _ = (db, target);
+        Ok(())
+    }
     /// Put a copy of `source` at `target` by a rename in `target`'s
     /// directory, keeping what was there as [`previous_path`] (ADR-0045
     /// decision 11).
@@ -546,6 +554,7 @@ running supervisor cannot be handed over to it; nothing was replaced. Stop the s
             Err(error) => return Err(undo(error, None)),
         }
     };
+    binaries.adopt(db, target)?;
     let failure = handoff_failures(&handed);
     let report = json!({
         "outcome": if failure.is_some() { "partially_handed_off" } else { "installed" },
@@ -752,6 +761,7 @@ replaced, and `up` starts the old binary again"
         )
     })?;
     binaries.replace(source, &options.target)?;
+    binaries.adopt(db, &options.target)?;
     let started = match live.first() {
         None => Value::Null,
         Some(drained) => {
