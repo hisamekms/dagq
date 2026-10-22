@@ -24,7 +24,7 @@ use super::sqlite::{
     SqliteQueue, enum_col, event, json_col, read_task, record_queue_event_in, replan_guarding,
 };
 use crate::domain::event_kind::EventKind;
-use crate::domain::plan_request::RequestRef;
+use crate::domain::plan_request::{RequestRef, RequestStatus};
 use crate::domain::task_replan::{
     self, GoalConditions, GuardedStep, NewReplan, OriginalConditions, ReplanGuard, ReplanMove,
     ReplanOperation, ReplanOrigin, ReplanRecorded, ReplanStatus, acceptance_items,
@@ -291,13 +291,21 @@ impl crate::application::commands::replans::ReplanStore for SqliteQueue {
 /// Move operation `id`, read under `generation`, as `step` says, on
 /// `conn` inside the caller's transaction ([`SqliteQueue::move_replan`]):
 /// `replan_status_changed` is written with it. A move that closes the
-/// operation before it holds a snapshot (`continuing`, or `withdrawn` and
-/// `continuing_after_park` out of a `blocked` one that never parked)
-/// declines its still `open` planning request with the outcome as the
-/// reason ([`super::plan_requests::decline_unplanned`]), and the event
-/// names it (`request_declined`). `blocked` is not an end: one that goes
-/// back to the snapshot keeps its request for the planner. A move of an
-/// operation that holds a snapshot leaves its request as it is.
+/// operation before a planner was opened for its planning request
+/// (`continuing` before the snapshot, `continuing_after_park` and
+/// `withdrawn` before it or after it, out of `parked` or `blocked`)
+/// declines the still `open` request with the outcome as the reason
+/// ([`super::plan_requests::decline_unplanned`]), and the event names it
+/// (`request_declined`): it is declined at the close, not when the run's
+/// restore is confirmed, since the run may go on without a restore.
+/// `blocked` is not an end: one that goes on to the planner keeps its
+/// request for it. A closed operation whose restore failed, back in
+/// `blocked`, that reaches the planner again (straight or through the
+/// snapshot) records a new request in place
+/// of the declined one ([`task_replan::ReplanStatus::renews_request`],
+/// [`super::plan_requests::renew_unplanned`]), and the event names it
+/// (`request_renewed`): its planner is opened once, for the new request.
+/// A request a planner was opened for is left as it is.
 pub(crate) fn move_in(
     conn: &Connection,
     id: ReplanId,
@@ -360,14 +368,30 @@ pub(crate) fn move_in(
             generation,
         ],
     )?;
+    let planned = op
+        .request_id
+        .map(|request| super::plan_requests::planner_opened(conn, request))
+        .transpose()?
+        .unwrap_or(false);
     let declined = match op.request_id {
-        Some(request)
-            if step
-                .to
-                .ends_request_unplanned(op.snapshot_id.is_some() || step.snapshot_id.is_some()) =>
-        {
+        Some(request) if step.to.ends_request_unplanned(planned) => {
             super::plan_requests::decline_unplanned(conn, request, id, step.to, &step.reason, now)?
                 .then_some(request)
+        }
+        _ => None,
+    };
+    let renewed = match (op.request_id, op.request_status) {
+        (Some(request), Some(status))
+            if op
+                .status
+                .renews_request(step.to, status != RequestStatus::Open && !planned) =>
+        {
+            let renewed = super::plan_requests::renew_unplanned(conn, request, id, now)?;
+            conn.execute(
+                "UPDATE replan_operations SET request_id=?1 WHERE id=?2",
+                params![renewed, id],
+            )?;
+            Some(renewed)
         }
         _ => None,
     };
@@ -376,6 +400,9 @@ pub(crate) fn move_in(
                              "snapshot_id": step.snapshot_id});
     if let Some(request) = declined {
         payload["request_declined"] = json!(request);
+    }
+    if let Some(request) = renewed {
+        payload["request_renewed"] = json!(request);
     }
     event(
         conn,

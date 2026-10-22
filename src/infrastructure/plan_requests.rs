@@ -35,10 +35,13 @@ use crate::domain::{
 /// is open: one replans the goal at a time, and the later reads how the
 /// earlier ended (ADR-t1487-1 decision 5). A request recorded for a
 /// replanning operation waits until the operation holds a complete
-/// snapshot and is with the planner (ADR-t1521-2 decision 2); one whose
-/// operation ends before its snapshot is declined by that move
-/// ([`decline_unplanned`]), so none is left `open` for an operation that
-/// ends without a snapshot.
+/// snapshot and is with the planner (ADR-t1521-2 decision 2, the statuses
+/// of `ReplanStatus::hands_to_planner`); one whose operation closes before
+/// a planner was opened for it, before its snapshot or after it, is
+/// declined by that move ([`decline_unplanned`]), so none is left `open`
+/// for an operation that is no longer with the planner. A closed
+/// operation whose restore failed that goes on to the planner again gets a
+/// new request ([`renew_unplanned`]) rather than this one back.
 const TARGETS: &str = "SELECT r.id FROM plan_requests r WHERE r.status='open'
     AND (r.replan_operation_id IS NULL OR EXISTS(SELECT 1 FROM replan_operations o
         WHERE o.id=r.replan_operation_id AND o.snapshot_id IS NOT NULL
@@ -350,11 +353,13 @@ pub(super) fn record_missing_spike_requests(conn: &Connection, now: i64) -> Resu
 }
 
 /// Decline the `open` request of replanning operation `op` that `outcome`
-/// ends before it holds a snapshot, on `conn` inside the move's own
-/// transaction: no planner was opened for it nor will be, and `declined`
-/// with the operation's outcome as the reason tells the person who asked
-/// (`request_declined` by the runtime, naming the operation). Whether it
-/// declined it: a request already ended is left as it is.
+/// closes before a planner was opened for it, before the operation's
+/// snapshot or after it, on `conn` inside the move's own transaction: no
+/// planner was opened for it nor will be (the operation is no longer with
+/// the planner), and `declined` with the operation's outcome as the reason
+/// tells the person who asked (`request_declined` by the runtime, naming
+/// the operation). Whether it declined it: a request already ended is left
+/// as it is.
 pub(super) fn decline_unplanned(
     conn: &Connection,
     request: RequestId,
@@ -367,7 +372,7 @@ pub(super) fn decline_unplanned(
         return Ok(false);
     }
     let reason = format!(
-        "replan operation {op} ended {} before its snapshot: {why}",
+        "replan operation {op} ended {} before a planner was opened for it: {why}",
         outcome.as_str()
     );
     set_status(conn, request, RequestStatus::Declined, &reason, now)?;
@@ -384,6 +389,61 @@ pub(super) fn decline_unplanned(
         }),
     )?;
     Ok(true)
+}
+
+/// Whether a planner of the runtime's was ever opened for `request`, read
+/// on `conn`: one that was is the planner's to end.
+pub(super) fn planner_opened(conn: &Connection, request: RequestId) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM planners WHERE request_id=?1)",
+        [request],
+        |r| r.get(0),
+    )?)
+}
+
+/// Record, on `conn` inside the move's own transaction, the new request of
+/// replanning operation `op` whose `ended` request was declined unplanned
+/// ([`decline_unplanned`]) and which goes on to the planner again: the
+/// same words, references, priority and asker, `open`, carrying the
+/// operation, with `request_recorded` naming the request it renews. The
+/// ended request keeps its outcome, so one planner is opened, for the new
+/// one.
+pub(super) fn renew_unplanned(
+    conn: &Connection,
+    ended: RequestId,
+    op: crate::domain::ReplanId,
+    now: i64,
+) -> Result<RequestId> {
+    let old = read_request(conn, ended)?;
+    conn.execute(
+        "INSERT INTO plan_requests(text, note, refs, requested_by, requested_by_id, status,
+           created_at, updated_at, priority, replan_operation_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, ?6, ?7, ?8)",
+        params![
+            old.text,
+            old.note,
+            serde_json::to_string(&old.refs)?,
+            old.requested_by,
+            old.requested_by_id,
+            now,
+            old.priority.map(Priority::as_i64),
+            op
+        ],
+    )?;
+    let id = RequestId::new(conn.last_insert_rowid());
+    record_queue_event_in(
+        conn,
+        EventKind::RequestRecorded,
+        &json!({
+            "request_id": id,
+            "refs": old.refs,
+            "priority": old.priority,
+            "requested_by": old.requested_by,
+            "replan_operation_id": op,
+            "renews_request": ended,
+        }),
+    )?;
+    Ok(id)
 }
 
 /// The request `id` with its proposals and the number of its planners; a

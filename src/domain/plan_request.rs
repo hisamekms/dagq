@@ -24,9 +24,9 @@ string_enum!(
     /// with one at work, a proposal submitted from it, declined, or left
     /// undecided by its planners up to the limit. `declined` is by its
     /// planner, or by the runtime when the replanning operation the request
-    /// was recorded for closes before the operation holds a snapshot: no
-    /// planner is ever opened for it, and the reason names the operation's
-    /// outcome. Only `open` moves on;
+    /// was recorded for closes before a planner was opened for it, before
+    /// the operation's snapshot or after it: none is ever opened for it, and
+    /// the reason names the operation's outcome. Only `open` moves on;
     /// an ended status never goes back, and `proposed` stays whatever the
     /// proposal comes to.
     RequestStatus {

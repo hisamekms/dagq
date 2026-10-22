@@ -119,15 +119,41 @@ impl ReplanStatus {
         )
     }
 
-    /// Whether a move to this status of an operation that holds no
-    /// snapshot (`snapshot` false, nor gets one with the move) ends its
-    /// planning request unplanned, to be declined in the same transaction:
-    /// its planner is opened only once the snapshot is held, so the
-    /// request of an operation closed before then would stay `open` with
-    /// nobody to open a planner for it or end it. `blocked` is not an end:
-    /// it may still go on to the snapshot, and the request waits for it.
-    pub const fn ends_request_unplanned(self, snapshot: bool) -> bool {
-        self.is_closed() && !snapshot
+    /// Whether a move to this status ends the operation's planning request
+    /// unplanned, to be declined in the same transaction, while no planner
+    /// has been opened for it (`planned` false): its planner is opened only
+    /// while the operation is with the planner ([`Self::hands_to_planner`]),
+    /// so the request of an operation closed before then, before its
+    /// snapshot or after it (`continuing_after_park`, `withdrawn`), would
+    /// stay `open` with nobody to open a planner for it or end it. It is
+    /// declined at the close rather than when the run's restore is
+    /// confirmed, since a closed operation's run may go on without a
+    /// restore. `blocked` is not an end: it may still go on to the planner,
+    /// and the request waits for it. A request a planner was opened for is
+    /// its planner's to end.
+    pub const fn ends_request_unplanned(self, planned: bool) -> bool {
+        self.is_closed() && !planned
+    }
+
+    /// Whether an operation in this status is with the planner: it holds a
+    /// complete snapshot and its request's planner may be opened.
+    pub const fn hands_to_planner(self) -> bool {
+        matches!(
+            self,
+            Self::Parked | Self::Planning | Self::Reviewing | Self::AwaitingAnswer
+        )
+    }
+
+    /// Whether a move from this status to `to` records a new planning
+    /// request for the operation, its request having ended unplanned
+    /// (`ended_unplanned`: declined by a close no planner was opened
+    /// before, [`Self::ends_request_unplanned`]): a closed operation whose
+    /// restore failed, back in `blocked` ([`Self::reopens`]), that goes on
+    /// to the planner, straight or through the snapshot again, gets one
+    /// planner from the new request when it reaches it. An ended request
+    /// never goes back to `open`, so it is not reopened.
+    pub const fn renews_request(self, to: Self, ended_unplanned: bool) -> bool {
+        !self.hands_to_planner() && to.hands_to_planner() && ended_unplanned
     }
 
     /// Whether an operation in this status, closed, is moved again: a
@@ -475,7 +501,9 @@ pub struct ReplanOperation {
     pub request_id: Option<RequestId>,
     /// Where `request_id` is now, read with the operation: `declined`, with
     /// the operation's outcome as its reason, when the operation ended
-    /// before its snapshot ([`ReplanStatus::ends_request_unplanned`]).
+    /// before a planner was opened for it
+    /// ([`ReplanStatus::ends_request_unplanned`]). `request_id` names the
+    /// operation's latest request ([`ReplanStatus::renews_request`]).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_status: Option<RequestStatus>,
     pub proposal_id: Option<ProposalId>,
@@ -774,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    fn only_an_end_before_the_snapshot_leaves_the_request_unplanned() {
+    fn only_a_close_before_any_planner_leaves_the_request_unplanned() {
         let unplanned: Vec<_> = ReplanStatus::ALL
             .into_iter()
             .filter(|status| status.ends_request_unplanned(false))
@@ -789,14 +817,17 @@ mod tests {
                 "withdrawn"
             ]
         );
-        // Every status before the snapshot the operation may end from
-        // reaches one of them, `blocked` included, which is no end itself.
+        // Every status the operation may end from before a planner is
+        // opened reaches one of them: before the snapshot, after it
+        // (`parked`) and `blocked` either side of it, which is no end
+        // itself.
         for from in [
             ReplanStatus::Candidate,
             ReplanStatus::Diagnosing,
             ReplanStatus::PauseRequested,
             ReplanStatus::Quiescing,
             ReplanStatus::Snapshotting,
+            ReplanStatus::Parked,
             ReplanStatus::Blocked,
         ] {
             assert!(
@@ -806,11 +837,56 @@ mod tests {
                 "{from:?}"
             );
         }
+        // A request a planner was opened for is its planner's to end.
         assert!(
             ReplanStatus::ALL
                 .into_iter()
                 .all(|status| !status.ends_request_unplanned(true))
         );
+    }
+
+    #[test]
+    fn only_a_reopened_operation_going_to_the_planner_renews_its_ended_request() {
+        let with_planner: Vec<_> = ReplanStatus::ALL
+            .into_iter()
+            .filter(|status| status.hands_to_planner())
+            .map(ReplanStatus::as_str)
+            .collect();
+        assert_eq!(
+            with_planner,
+            ["parked", "planning", "reviewing", "awaiting_answer"]
+        );
+        for status in ReplanStatus::ALL {
+            assert!(!status.hands_to_planner() || status.needs_snapshot());
+        }
+        // A closed operation whose restore failed goes back to `blocked`,
+        // and from there may go on to the planner.
+        for closed in ReplanStatus::ALL.into_iter().filter(|s| s.reopens()) {
+            assert!(closed.ends_request_unplanned(false));
+            assert!(closed.can_move_to(ReplanStatus::Blocked));
+        }
+        let renewing: Vec<_> = ReplanStatus::Blocked
+            .next()
+            .iter()
+            .filter(|to| ReplanStatus::Blocked.renews_request(**to, true))
+            .map(|to| to.as_str())
+            .collect();
+        assert_eq!(renewing, ["parked", "planning", "reviewing"]);
+        // Through the snapshot again: renewed when it reaches the planner.
+        assert!(!ReplanStatus::Blocked.renews_request(ReplanStatus::Snapshotting, true));
+        assert!(ReplanStatus::Snapshotting.renews_request(ReplanStatus::Parked, true));
+        for from in ReplanStatus::ALL {
+            for to in ReplanStatus::ALL {
+                // A request still open, or one its planner ended, is kept.
+                assert!(!from.renews_request(to, false), "{from:?} {to:?}");
+                // Only the move onto the planner records it, once.
+                assert_eq!(
+                    from.renews_request(to, true),
+                    !from.hands_to_planner() && to.hands_to_planner(),
+                    "{from:?} {to:?}"
+                );
+            }
+        }
     }
 
     #[test]

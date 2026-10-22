@@ -143,6 +143,9 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
 ## taskの再計画の依頼
 
 - 人の`replan request`は再計画の操作に結んだ依頼を記録し、操作が完全なsnapshotを持つまで立てる対象から外す（`plan_requests.rs`の`TARGETS`）。
-  操作がsnapshotの前に閉じると、依頼はその閉じる移動と同じtransactionで、操作の結末を理由に`declined`になり、`open`のまま残らない（`replans.rs`の`move_in`）。
-  `blocked`は終わりでなく、snapshotへ進めば依頼はplannerを待つ。
+  依頼にplannerが一度も立たないうちに操作が閉じると（snapshotの前でも後でも）、依頼はその閉じる移動と同じtransactionで、操作の結末を理由に`declined`になり、`open`のまま残らない（`replans.rs`の`move_in`）。
+  閉じた操作のrunは復元を経ずに進むことがあるので、依頼を閉じるのは復元の確定を待たない。
+  `blocked`は終わりでなく、plannerに渡す段へ進めば依頼はplannerを待つ。
+  閉じた操作が復元の失敗で`blocked`に戻り、再びplannerに渡す段へ進むときは、`declined`の依頼を開き直さず、同じ言葉の新しい依頼を作って操作に結ぶので、plannerは新しい依頼に1度だけ立つ。
+  plannerが立った後に閉じた操作の依頼には、閉じる移動は触れない。
   残りの予定は[taskの再計画](../../plans/task-replanning.md)が持つ。
