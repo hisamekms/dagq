@@ -157,14 +157,12 @@ worktreeは残る。
 
 ## 再計画で保留したrun
 
-保留したrunは`needs_session`（`replan_parked`）になり、保護のあいだ自動resume・`resolved_head`・使い切りの後始末の対象にならない。
-snapshotを保存した保留は、継続か案の撤回で操作が閉じると、snapshotからworktreeを戻してから続ける（`restore_parked`）。
+保留したrunは`needs_session`（`replan_parked`）になってresume/reviseの回数を引き継ぎ、保護中は自動resume・`resolved_head`・使い切りの後始末の対象にならない。
+snapshotを保存した保留は、継続か案の撤回で操作が閉じると照合してから続ける（[順と失敗](../../plans/task-replanning.md#実装の状態)）。
+hostのrunは制御側がresumeか後始末の前に照合し（無ければ作る）、containerのrunはresumeのagentの前にexecutorが照合し制御側がslotで記録し、使い切れば失敗とし、失敗は`replan_restore_failed`で操作を`blocked`に戻す。
 保留を終えた柵（`blocked`などの保留の後の操作、落ち着いたhold）がslotに見つけたrunは、書き手の終わりを待ってから、snapshotを作らずworktreeを残して休む（`ParkFor::Rest`）。
 この休止は照合も作り直しもせず、操作の結末か解除の後のresumeが新しいvalidationとreviewから続ける。
 保留の時にturnが始まっていなかった回答は継続のresumeの依頼に載せ、柵に拒まれて配れなかった回答は継続のsessionが届ける。
-`replan_parked`はresumeの区分・統計・`resolved_head`で一つのparkで、resume/reviseの回数は引き継ぐ。
-保留より前の承認とreviewのpassは、継続の後の着地に使わない。
-保存の順と照合の失敗は[taskの再計画](../../plans/task-replanning.md#実装の状態)が持つ。
 
 ## supervisorの入れ替わり
 
