@@ -1962,6 +1962,17 @@ mod tests {
         let past = no_answer(&AnswerPastLimit.into(), UseCase::Notes, "look");
         assert_eq!(past.code, "response_too_large", "{past}");
         assert!(past.message.contains("--limit"), "{past}");
+        let events = no_answer(&AnswerPastLimit.into(), UseCase::Events, "look");
+        assert_eq!(events.code, "response_too_large", "{events}");
+        assert!(
+            events
+                .message
+                .contains(&format!("longer than the {MAX_ANSWER_BYTES} bytes")),
+            "{events}"
+        );
+        for option in ["--since / --until", "--limit", "--after <cursor>"] {
+            assert!(events.message.contains(option), "{events}");
+        }
         let gone = no_answer(
             &anyhow::anyhow!("connection refused"),
             UseCase::Notes,
@@ -2049,17 +2060,7 @@ mod tests {
         let failure = error.downcast_ref::<ClientFailure>().unwrap();
         assert_eq!(failure.code, "unauthenticated");
 
-        // An answer past the limit is `response_too_large`, with how to
-        // narrow the read; no broker is `unreachable`.
-        let (address, broker) = one_shot_broker(200, vec![b' '; MAX_ANSWER_BYTES + 1]);
-        let error = client(&address)
-            .call(UseCase::Events, json!({}))
-            .unwrap_err();
-        broker.join().unwrap();
-        let failure = error.downcast_ref::<ClientFailure>().unwrap();
-        assert_eq!(failure.code, "response_too_large", "{failure}");
-        assert!(failure.message.contains("longer than"), "{failure}");
-        assert!(failure.message.contains("--after <cursor>"), "{failure}");
+        // No broker is `unreachable`.
         let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = closed.local_addr().unwrap().to_string();
         drop(closed);

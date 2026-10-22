@@ -736,3 +736,74 @@ fn an_answer_past_the_client_s_limit_on_the_socket_is_refused_as_too_large() {
     assert!(message.contains(&MAX_ANSWER_BYTES.to_string()), "{message}");
     assert!(message.contains("--limit"), "{message}");
 }
+
+/// A client-mode `dagq` whose broker answers past the limit refuses the
+/// answer as `response_too_large` with how to narrow the read, not as
+/// `unreachable`: the broker answered.
+#[test]
+fn an_answer_past_the_client_s_limit_from_the_broker_is_refused_as_too_large() {
+    use crate::common::{STEP_LIMIT, within};
+    use dagq::domain::queue_service::{MAX_ANSWER_BYTES, URL_ENV};
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    let _test = crate::common::test();
+    let dir = tempfile::tempdir().unwrap();
+    let credential = dir.path().join("token");
+    std::fs::write(&credential, "a-token\n").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    // A broker that answers one request with 200 and a body past the limit.
+    let broker = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream.set_read_timeout(Some(STEP_LIMIT)).unwrap();
+        stream.set_write_timeout(Some(STEP_LIMIT)).unwrap();
+        let mut reader = BufReader::new(&stream);
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 || line.trim().is_empty() {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                length = value.trim().parse().unwrap_or(0);
+            }
+        }
+        let _ = reader.take(length).read_to_end(&mut Vec::new());
+        let body = vec![b' '; MAX_ANSWER_BYTES + 1];
+        // The client stops reading at the limit: what is left unwritten does
+        // not matter.
+        let _ = write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        let _ = stream.write_all(&body);
+    });
+
+    let past = Command::new(env!("CARGO_BIN_EXE_dagq"))
+        .without_actor_env()
+        .current_dir(dir.path())
+        .env(URL_ENV, format!("http://{address}"))
+        .env(CREDENTIAL_FILE_ENV, &credential)
+        .env("DAGQ_RUN_ID", "r1")
+        .env("DAGQ_ROLE", "worker")
+        .args(["events"])
+        .bounded_output()
+        .unwrap();
+    // A client that never connected leaves the broker waiting: this ends it.
+    let _ = TcpStream::connect(address);
+    {
+        let _waiting = within(STEP_LIMIT, "the stub broker to end");
+        broker.join().unwrap();
+    }
+    assert_eq!(refused(&past), "response_too_large");
+    assert_eq!(past.status.code(), Some(1));
+    let error: Value = serde_json::from_slice(&past.stderr).unwrap();
+    let message = error["error"].as_str().unwrap();
+    assert!(message.contains(&MAX_ANSWER_BYTES.to_string()), "{message}");
+    for option in ["--since / --until", "--limit", "--after <cursor>"] {
+        assert!(message.contains(option), "{message}");
+    }
+}
