@@ -74,14 +74,24 @@ hostのswapがほぼ満ちたのを見たら、人かinboxがhostで原因の候
 
 ## containerのmachineの資源（`host.toml`）
 
-このrepositoryのworker・verificationをcontainerで動かすhostでは、dagq専用のmachineのCPUとメモリを`host.toml`で暫定の推奨の4 CPU / 8 GiBにする。
+このrepositoryのworker・verificationをcontainerで動かすhostでは、`host.toml`のdagq専用のmachineを6 CPU / 10 GiB、runごとのcontainerの上限をmemory 8 GiB（8,192 MiB）・4 CPUにする。
 
 - 値を入れるのは人かinboxで、このrepositoryの`dagq.toml`でworker・verificationのruntimeをcontainerに切り替える前に入れる。workerはhostの設定を変えない（[workerがhostと実queueでできないこと](#workerがhostと実queueでできないこと)）。
-- keyと単位、値が効く時点は`domain::podman_machine::MachineResources`のdoc comment、既に作ったmachineに変えた値を効かせる作り直しは[Container runtime](../design/container-runtime.md)の「dagq専用のmachine」の「食い違いと作り直し」が持つ。
+- keyと単位、値が効く時点は、machineは`domain::podman_machine::MachineResources`、containerの上限は`domain::run_container::ContainerLimits`のdoc commentが持つ。
+  既に作ったmachineに変えた値を効かせる作り直しは[Container runtime](../design/container-runtime.md)の「dagq専用のmachine」の「食い違いと作り直し」が持つ。
 - runtimeの既定は変えない。既定はどのprojectにも通じる控えめな値で、dagqのbuildが通る保証が無いので、このrepositoryの値は`host.toml`で与える（[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)決定6）。
-- 根拠は[Spike](../plans/container-runtime-spike.md)の「(c) dagq 専用の machine の最小の資源」の1回目で、buildの出力をmachineの中のnamed volumeに置くと4 CPU / 8 GiBでbuildが343秒で通った。testは流しておらず、通るかは確かめていない。
-- これは通る最小の値ではない。(c)の測り直しは行わず、最小の資源は測っていない。
-- testまで通るかは、人かinboxが流すcontainerのruntimeのスモーク（[手動スモーク](manual-smoke.md)に足す手順）で確かめ、通らなければ値を見直してこの節を直す。
+- 根拠は[build・testのpeakのメモリ](../plans/build-memory.md)の測定（hostで1本ずつ測ったもの）。
+  - containerのmemory: 1本のworkerのturnのpeakは、test binaryのcompile（`cargo test --no-run`）の合計のpeak約7.0 GiBにClaude Codeのprocess（約0.3 GiB）を足した約7.3 GiB、1本のverificationのpeakは同じcompileの約7.0 GiBで、testの実行（0.4 GiB未満）はcompileと重ならない。
+    8 GiBはそれに余裕を足した値。
+  - containerのcpus: `dagq.toml`の`[run.env]`の`CARGO_BUILD_JOBS`と同じにし、測ったpeakをそのまま上限の前提にする。
+  - machine: hostの8コア / 16 GiBから、macOSとhostに残る制御側（supervisor・inbox・planner・headlessのreviewのjob）に2コアと約6 GiBを残した値。
+    hostは測っている間も既にswapを使っていたので、hostに残す分を減らさない。
+- この上限いっぱいで同時に入るcontainerは1本（10 GiB ÷ 8 GiB）。
+  `[supervisor]`の並列数のworkerとverificationのcontainerは上限の合計がmachineを超え、peakが重ならない間だけ動く。
+  2本のcompileのpeakが重なると、containerの上限より先にmachine全体のOOM killerが働く。
+  測ったbuildの下げる手では2本は入らない（[build・testのpeakのメモリ](../plans/build-memory.md)の「推奨」）。
+- 値はhostのmacOSで測ったもので、containerの中の絶対値ではない。
+  人かinboxが流すcontainerのruntimeのスモーク（[手動スモーク](manual-smoke.md)に足す手順）でcontainerの中のpeakとtestまで通るかを確かめ、合わなければ値を見直してこの節を直す。
 
 ## `[run.env]`とtestの並列度の置き場
 
