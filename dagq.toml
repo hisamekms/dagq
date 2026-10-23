@@ -141,6 +141,51 @@ peak_context_above = 400000
 profile = "rust"
 paths = ["**/*.rs", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 
+[telemetry]
+# session の step が持つコマンドの詳しさと、台帳と run の作業の内訳を作るときの分類（ADR-t1662-3 決定 16・18・19 を ADR-t2268-1 が改めたもの）。
+# 書式と各 key の意味は domain::command_rules::TelemetrySettings の doc comment、分類の流れは docs/design/measurement-commands.md。
+# command_detail は既定の shape（フラグの名前・既知のサブコマンドは平文、値とほかの語は digest）を明示する。分類の規則がフラグの値と
+# 位置の語の有無を読むので、program にするとサブコマンドを読む規則（下の規則と Rust の profile の規則）が当たらなくなり、redacted は形を残さない。
+# failed_tests は既定の false のまま書かない（落ちた test の名前と path を取らない。要るなら別の task で決める）。
+# 分類は上の [toolchains.rust] の宣言で Rust の profile の既定の規則（cargo の test・full_test・llvm_cov・fmt・build）と runtime の共通の規則
+# （wait・dagq・git）が効くので、ここには写さない。下の [[telemetry.commands]] は、この repository の test target の名前に依る規則だけで、
+# profile の規則より先に当てる（上から試し、最初に当たった規則の class）。実際に効く規則と出どころは dagq doctor が出す。
+# [[telemetry.commands]] があると、run の作業の内訳は dagq のソースだけの cargo 専用の分類（ADR-t614-1）でなくこの重ね合わせで作る。
+# [telemetry] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 1674 を含んでから足した。
+command_detail = "shape"
+
+[[telemetry.commands]]
+# tests/e2e.rs（--test e2e と --test=e2e）は e2e の test で、integrate の検査の数え（verification_repeats）にも入る。
+# Rust の profile は pj の test target を知らず、無ければ test になる。sub を問わず cargo test・cargo nextest run のどちらにも当てる。
+class = "e2e"
+program = "cargo"
+flag_values = { "--test" = ["e2e"] }
+takes_value = ["--test"]
+
+[[telemetry.commands]]
+# tests/it は integration test のほぼ全体を 1 つの binary に集めているので、filter も他の target も無い cargo test --test it は
+# test 一式の実行（full_test、group は test）とみなす。Rust の profile は --test のある cargo test を絞った test にするので、この規則で上書きする。
+# filter（位置の語）か他の target・package の指定があれば当たらず、profile の test になる（cargo test --test plugin も test のまま）。
+class = "full_test"
+group = "test"
+program = "cargo"
+sub = ["test"]
+flag_values = { "--test" = ["it"] }
+takes_value = ["--test"]
+none_of = ["--lib", "--bin", "--bins", "--doc", "--example", "--package", "-p", "-E"]
+positional = "none"
+
+[[telemetry.commands]]
+# 上と同じ理由で、cargo nextest run --test it も filter と他の target が無ければ full_test にする。
+class = "full_test"
+group = "test"
+program = "cargo"
+sub = ["nextest", "run"]
+flag_values = { "--test" = ["it"] }
+takes_value = ["--test"]
+none_of = ["--lib", "--bin", "--bins", "--doc", "--example", "--package", "-p", "-E"]
+positional = "none"
+
 [local_checks]
 # worker の手元の検証（stress と it の test の時間の関門）を要るかを、run の差分が test に触れたかで runtime が決める（ADR-t2589-1 決定 6・8）。
 # tests は test とみなす path の glob。tests/** は test の helper（tests/common）も含み、src/** と crates/** の Rust の file の中の
