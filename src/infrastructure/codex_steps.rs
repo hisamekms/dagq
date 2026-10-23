@@ -144,6 +144,7 @@ fn item_step(item: &Value, (started, at): (i64, i64), ended: bool, known: &Subco
                 .as_str()
                 .map(|output| output.len() as i64);
         }
+        known.detail().redact(&mut step);
     }
     step
 }

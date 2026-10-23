@@ -30,6 +30,7 @@ use std::{
 use serde_json::Value;
 
 use crate::application::{Exit, TurnReader};
+use crate::domain::command_rules::reads_failed_tests;
 use crate::domain::tokens::{
     ExecutionContext, ROLLOUT_MISSING, ROLLOUT_TURN_MISSING, ROLLOUT_UNREADABLE, RolloutUsage,
     TOKEN_USAGE_RECORD_MISSING, TokenSource, TokenUsage, TurnContext, UsageRecord,
@@ -577,8 +578,13 @@ impl CodexTurnReader {
         command.failed_tests = item["aggregated_output"]
             .as_str()
             // With the profiles the repository declares, as its landing's
-            // verification is read (ADR-t2268-1).
-            .zip(self.toolchains.as_ref())
+            // verification is read (ADR-t2268-1), and only when
+            // `[telemetry] failed_tests` asks for them.
+            .zip(
+                self.toolchains
+                    .as_ref()
+                    .filter(|toolchains| reads_failed_tests(toolchains)),
+            )
             .map(|(output, toolchains)| failed_tests(toolchains, output).names)
             .unwrap_or_default();
     }
@@ -1597,7 +1603,15 @@ mod tests {
     /// tests a command's output names as failed are kept with it.
     #[test]
     fn a_turns_commands_carry_when_their_lines_were_read() {
-        let mut reader = CodexTurnReader::reading_since(None, None, Toolchains::this_repository());
+        let asks = crate::domain::command_rules::TelemetrySettings {
+            failed_tests: true,
+            ..Default::default()
+        };
+        let mut reader = CodexTurnReader::reading_since(
+            None,
+            None,
+            Toolchains::this_repository().with_telemetry(asks),
+        );
         let at = |reader: &mut CodexTurnReader, millis: i64, line: Value| {
             reader.stamp(millis);
             reader.line(&line.to_string());
@@ -1673,12 +1687,15 @@ mod tests {
         );
     }
 
-    /// A command's output is read with the profiles given: a repository
-    /// that declares only another profile reads none of Rust's lines and
-    /// its own profile's names, and one that declares Rust reads them as a
-    /// repository that declares nothing does.
+    /// A command's output is read for its failed tests only when the
+    /// repository's `dagq.toml` turns `[telemetry] failed_tests` on, and
+    /// then with the profiles it declares: without the key, with it off,
+    /// or with no profile declared, none is read or kept in the command
+    /// (what `turns/*.commands.jsonl` keeps); a repository that declares
+    /// only another profile reads none of Rust's lines and its own
+    /// profile's names.
     #[test]
-    fn a_commands_failed_tests_are_read_with_the_declared_profiles() {
+    fn a_commands_failed_tests_are_read_only_when_asked_and_with_the_declared_profiles() {
         let names = |toolchains: Toolchains| {
             let mut reader = CodexTurnReader::reading_since(None, None, toolchains);
             reader.line(&json!({"type": "item.completed", "item": {"id": "c1", "type": "command_execution",
@@ -1689,22 +1706,29 @@ mod tests {
                 .failed_tests
                 .clone()
         };
-        let rust = Toolchains::resolve(
-            &crate::domain::toolchain::BUILTIN,
-            &[crate::domain::toolchain::ToolchainDeclaration {
-                name: "rust".into(),
-                profile: "rust".into(),
-                paths: Vec::new(),
-                line: 1,
-            }],
-        )
-        .unwrap();
+        let of = |toml: &str| {
+            let config = crate::infrastructure::run_env::parse_config(toml).unwrap();
+            Toolchains::resolve(&crate::domain::toolchain::BUILTIN, &config.toolchains)
+                .unwrap()
+                .with_telemetry(config.telemetry)
+        };
+        let rust = "[toolchains.rust]\nprofile = \"rust\"\n";
+        assert!(names(of(rust)).is_empty());
+        assert!(names(of(&format!("{rust}[telemetry]\nfailed_tests = false\n"))).is_empty());
         assert_eq!(
-            names(crate::domain::toolchain::fake::only_fake()),
+            names(of(&format!("{rust}[telemetry]\nfailed_tests = true\n"))),
+            ["a::b"]
+        );
+        assert!(names(of("[telemetry]\nfailed_tests = true\n")).is_empty());
+        let on = crate::domain::command_rules::TelemetrySettings {
+            failed_tests: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            names(crate::domain::toolchain::fake::only_fake().with_telemetry(on.clone())),
             ["made::up"]
         );
-        assert_eq!(names(rust), ["a::b"]);
-        assert_eq!(names(Toolchains::this_repository()), ["a::b"]);
-        assert!(names(Toolchains::none()).is_empty());
+        assert!(names(Toolchains::this_repository()).is_empty());
+        assert!(names(Toolchains::none().with_telemetry(on)).is_empty());
     }
 }

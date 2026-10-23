@@ -15,6 +15,10 @@ A run's review takes the built-in agents and programs (`builtin:<name>`) from th
 - An `error` there means `dagq.toml` cannot be read or names a profile dagq does not have: fix that first.
 - The proposals assume the tool runs at the repository's root: where the profile applies to a directory below it, adapt the commands and scripts to it.
 
+## The commands' classification
+
+The measurement classifies the commands a session ran (build, test, lint and so on) by rules: a declared profile's own rules work by the declaration alone, and the `[[telemetry.commands]]` tables of `dagq.toml` add to or override them, tried first. Write there only the rules the project needs on top (its own test targets, a tool no profile knows), never a profile's again. `init`'s `telemetry_commands` proposes templates for the tools its files show that no profile knows yet (npm/pnpm, go, pytest, gradle, make); like the rest, nothing of it works until a person writes and commits it. `"$DAGQ" doctor` shows the rules in effect as `command_rules`, each with its source. The templates show a rule's form, and `command_rules` shows the same keys for each rule in effect. `[telemetry] command_detail` (`program`, `shape` by default, or `redacted`) sets how much of a command the steps keep. A binary older than these tables refuses the file, so add them only once the binary that runs the queue reads them.
+
 ## Generating the settings: `setup-review`
 
 `dagq setup-review` has a coding agent read the project once and write the review's settings, its rules files and fast review programs in a temporary checkout, then shows the diff and writes it to the working tree only at the person's approval. What it may write, what it refuses and the flags are in `"$DAGQ" setup-review --help`.

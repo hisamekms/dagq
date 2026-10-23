@@ -78,6 +78,10 @@
 //! [`RUSTC_VERSION`] ([`rustc_version`]), run in the main checkout so
 //! that its toolchain file applies.
 //!
+//! The commands' classification ([`cargo_rules`]) is cargo's alone: which
+//! subcommand builds, tests, lints or formats, and which `cargo test` runs
+//! the whole suite.
+//!
 //! The build output ([`BUILD_OUTPUT`]): cargo builds into the directory
 //! `CARGO_TARGET_DIR` names, `target` under the runtime's directory of
 //! the command (`<queue dir>/recheck/target` for the landing recheck,
@@ -96,6 +100,7 @@ use super::{
     BuildOutput, JunitTestName, Recommendation, RecommendedProgram, TestLines, ToolCodeClass,
     ToolHostClass, ToolProcess, ToolchainProfile,
 };
+use crate::domain::command_rules::CommandRule;
 use crate::domain::command_shape::{Runs, SubcommandList};
 use crate::domain::verify_failure::test_name;
 
@@ -258,6 +263,56 @@ const SUBCOMMANDS: &[SubcommandList] = &[
     },
 ];
 
+/// The flags of `cargo test` and `cargo nextest run` that choose a target
+/// or a package or filter the tests: a command with one of them, or with a
+/// word that is no flag before `--` (a filter, an option's value), runs
+/// part of the suite, not the whole.
+const NARROWING: &[&str] = &[
+    "--test",
+    "--lib",
+    "--bin",
+    "--bins",
+    "--doc",
+    "--example",
+    "--package",
+    "-p",
+    "-E",
+];
+
+/// cargo's rules of the commands' classification
+/// ([`ToolchainProfile::command_rules`]), tried in this order: `cargo
+/// llvm-cov` is `llvm_cov`; `cargo test` and `cargo nextest run` with no
+/// target, package or filter ([`NARROWING`]) and no other word before
+/// `--` are `full_test` (counted in the group `test`), any other `cargo
+/// test` or `cargo nextest` is `test`; `cargo build`, `clippy`, `check`
+/// and `run` are `build`, `cargo fmt` is `fmt`. A project's test targets
+/// (which of them is its e2e, which runs nearly its whole suite) are its
+/// own rules in its `dagq.toml`, tried before these.
+pub fn cargo_rules() -> Vec<CommandRule> {
+    let mut rules = vec![
+        CommandRule::new("llvm_cov", "cargo").subcommands(&["llvm-cov"]),
+        CommandRule::new("full_test", "cargo")
+            .group("test")
+            .subcommands(&["test"])
+            .none_of(NARROWING)
+            .positional_none(),
+        CommandRule::new("full_test", "cargo")
+            .group("test")
+            .subcommands(&["nextest", "run"])
+            .none_of(NARROWING)
+            .positional_none(),
+        CommandRule::new("test", "cargo").subcommands(&["test"]),
+        CommandRule::new("test", "cargo").subcommands(&["nextest"]),
+    ];
+    rules.extend(
+        ["build", "clippy", "check", "run"]
+            .into_iter()
+            .map(|sub| CommandRule::new("build", "cargo").subcommands(&[sub])),
+    );
+    rules.push(CommandRule::new("fmt", "cargo").subcommands(&["fmt"]));
+    rules
+}
+
 impl ToolchainProfile for Rust {
     fn name(&self) -> &'static str {
         "rust"
@@ -265,6 +320,10 @@ impl ToolchainProfile for Rust {
 
     fn subcommands(&self) -> &'static [SubcommandList] {
         SUBCOMMANDS
+    }
+
+    fn command_rules(&self) -> Vec<CommandRule> {
+        cargo_rules()
     }
 
     fn killed_line(&self, lines: &[&str]) -> Option<usize> {

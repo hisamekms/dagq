@@ -9,14 +9,15 @@ use crate::runtime_support::codex::{FINISH, codex_fixture, detail, finished, sup
 
 use runtime_support::*;
 
-/// A Codex turn that runs `cargo build` (heavy whatever the repository),
-/// a command whose start the output does not show, and a tool, then
-/// finishes: its worker span's `session_closed` carries the work, the run
-/// directory's `worktime.jsonl` its commands, and `stats --full` and
-/// `timeline` show them.
+/// A Codex turn that runs `cargo build` (heavy by the Rust profile its
+/// repository declares), a command whose start the output does not show,
+/// and a tool, then finishes: its worker span's `session_closed` carries
+/// the work, the run directory's `worktime.jsonl` its commands, and `stats
+/// --full` and `timeline` show them.
 #[test]
 fn a_codex_workers_commands_are_its_spans_work_and_worktime_lines() {
     let (dir, repo, db, backend, codex) = codex_fixture();
+    declare_rust(&repo);
     set_turns(
         dir.path(),
         &format!(
@@ -77,8 +78,11 @@ printf '{{"type":"item.completed","item":{{"id":"t1","type":"mcp_tool_call","ser
     assert_eq!(heavy[0]["finished"], true);
     assert_eq!(heavy[0]["failed"], false);
     assert!(work["total_secs"].as_i64().unwrap() >= work["secs"]["build"].as_i64().unwrap_or(0));
-    // Not dagq's source: no cargo-only counts.
-    assert_eq!(work.get("verification_repeats"), None, "{work}");
+    // Not dagq's source: the counts of `integrate`'s checks come from the
+    // classes of the declared profile's rules, and a build is none of them.
+    assert_eq!(work["verification_repeats"], 0, "{work}");
+    assert_eq!(work["full_tests"], 0, "{work}");
+    assert_eq!(work["llvm_cov_runs"], 0, "{work}");
 
     // The run directory's lines, one per command.
     let lines: Vec<Value> = fs::read_to_string(run_dir.join("worktime.jsonl"))
@@ -126,13 +130,22 @@ printf '{{"type":"item.completed","item":{{"id":"t1","type":"mcp_tool_call","ser
     assert_eq!(commands[0]["session"], "worker");
 }
 
-/// In a repository whose `dagq.toml` declares the Rust profile, the
-/// tests a Codex command's output names as failed are read as that
-/// resolution reads them, and its worker span's work keeps them.
+/// In a repository whose `dagq.toml` declares the Rust profile and turns
+/// `[telemetry] failed_tests` on, the tests a Codex command's output names
+/// as failed are read as that resolution reads them, and the turn's
+/// commands file keeps them.
 #[test]
 fn a_codex_commands_failed_tests_are_read_with_the_repositorys_resolution() {
     let (dir, repo, db, backend, codex) = codex_fixture();
     declare_rust(&repo);
+    let toml = repo.join("dagq.toml");
+    let declared = std::fs::read_to_string(&toml).unwrap();
+    std::fs::write(
+        &toml,
+        format!("{declared}\n[telemetry]\nfailed_tests = true\n"),
+    )
+    .unwrap();
+    git(&repo, &["commit", "-qam", "read the failed tests"]);
     set_turns(
         dir.path(),
         &format!(

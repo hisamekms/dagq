@@ -2348,3 +2348,10 @@ task = 3177
 name = "supervisor_service::an_e2e_whose_lease_look_went_unanswered_starts_once_and_its_result_is_kept"
 reason = "B 境界（supervisor の配線・復旧）: 実際の supervisor が e2e の走る間に lease の読み取りの答えを失っても、slot の e2e の handle を捨てずに 1 回だけ起動し、その結果を 1 回記録して着地させることを確かめる代表。どの slot を残すかの判断は supervise::execution::reconcile の unit test"
 task = 3177
+
+# 5.856s median over a stress of 5 at a host load of about 7 (about 3s at
+# rest), task 1674
+[[test]]
+name = "runtime_codex_work::a_codex_workers_commands_are_its_spans_work_and_worktime_lines"
+reason = "B 境界（守る境界）: a headless Codex worker's wrapper process stamps its commands into the turn's commands file, and the supervisor's span close writes them as session_closed work and worktime.jsonl that stats --full and timeline read; the classification and the counts are unit tests of domain::worktime and domain::command_rules"
+task = 1674

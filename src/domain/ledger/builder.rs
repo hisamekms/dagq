@@ -691,6 +691,9 @@ pub struct Builder {
     /// Shared with the pass's [`Inputs`], which it drops before the next
     /// events come in: an [`Inputs`] kept past them would copy it whole.
     kept: Arc<Kept>,
+    /// The version of the rules it last marked the runs by
+    /// ([`Self::mark_rules`]); none before any.
+    rules: Option<String>,
 }
 
 impl Default for Builder {
@@ -713,6 +716,7 @@ impl Default for Builder {
             settled: BTreeSet::new(),
             settled_folds: BTreeSet::new(),
             kept: Arc::default(),
+            rules: None,
         }
     }
 }
@@ -827,6 +831,33 @@ impl Builder {
             }
             self.steps = self.steps.max(step.id);
         }
+    }
+
+    /// Whether the rules that classify the runs' command steps now are of
+    /// another `version` (none without rules) than those it last marked
+    /// the runs by ([`Self::mark_rules`]): a pass then reads the run rows
+    /// the store holds, a new builder's first pass too.
+    pub fn rules_moved(&self, version: Option<&str>) -> bool {
+        self.rules.as_deref() != version
+    }
+
+    /// Mark each run of `rows`, the run rows the store holds, whose steps
+    /// were folded and not classified by the rules of `version`: so a run
+    /// that settled long ago is classified again when only the rules
+    /// change, with no input of it come in. Without rules it marks none
+    /// (no rule read leaves the classes as they were).
+    pub fn mark_rules(&mut self, version: Option<&str>, rows: &[LedgerRow]) {
+        if let Some(version) = version {
+            for row in rows {
+                if row.kind == LedgerKind::Run
+                    && row.detail.get(steps::DETAIL_KEY).is_some()
+                    && steps::rules_of(&row.detail) != Some(version)
+                {
+                    self.marks.insert(Target::Run(row.key.clone()));
+                }
+            }
+        }
+        self.rules = version.map(str::to_owned);
     }
 
     /// Mark the runs the windows of resources `outside` (after
@@ -1205,7 +1236,8 @@ pub fn run_settles(row: &LedgerRow, now_ms: i64) -> bool {
 /// is; not a legacy one, whose version the store keeps), one that read fewer inputs than
 /// `built` (dirty: a later event, the push that closed its pending push, a
 /// later sample, a later step, a later window of its resources, a
-/// supervisor's later event), a task's whose
+/// supervisor's later event, its command steps classified by other
+/// rules), a task's whose
 /// waits a supervisor's life ended are others (the time passed a silence;
 /// one folded at an earlier time is [`behind`]), a queue row's that its
 /// supervisor's life ended over the events the stored one read open (the
@@ -1226,6 +1258,7 @@ pub fn writes(stored: Option<&LedgerRow>, built: &LedgerRow) -> bool {
         || built.inputs_through.resources > stored.inputs_through.resources
         || built.inputs_through.inside_resources > stored.inputs_through.inside_resources
         || (built.is_final && !stored.is_final && !stored.is_legacy())
+        || steps::rules_of(&built.detail) != steps::rules_of(&stored.detail)
 }
 
 /// Whether `stored`, a task's row the store holds settled (of this
@@ -1297,6 +1330,9 @@ pub struct RunSteps {
     pub starts: BTreeMap<String, i64>,
     stored: StepFold,
     stored_through: Option<i64>,
+    /// The rules that classify its command steps now
+    /// ([`StepFold::classify`]); none classifies none.
+    classifier: Option<crate::domain::command_rules::CommandClassifier>,
 }
 
 impl RunSteps {
@@ -1310,7 +1346,18 @@ impl RunSteps {
                 .and_then(|row| StepFold::of_detail(&row.detail))
                 .unwrap_or_default(),
             stored_through: stored.and_then(|row| row.inputs_through.steps),
+            classifier: None,
         }
+    }
+
+    /// The same, its command steps classified by `classifier`.
+    #[must_use]
+    pub fn classified_by(
+        mut self,
+        classifier: Option<crate::domain::command_rules::CommandClassifier>,
+    ) -> Self {
+        self.classifier = classifier;
+        self
     }
 
     /// The sessions whose start the fold places steps by: those of the
@@ -1332,7 +1379,8 @@ impl RunSteps {
     /// detail once any step is counted, and the largest id of a step
     /// counted into its `inputs_through`.
     fn fold_into(&self, row: &mut LedgerRow) {
-        let fold = self.stored.fold_onto(&self.starts, &self.steps);
+        let mut fold = self.stored.fold_onto(&self.starts, &self.steps);
+        fold.classify(self.classifier.as_ref(), &self.steps);
         row.inputs_through.steps = self
             .steps
             .iter()

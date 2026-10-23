@@ -73,5 +73,6 @@ pub mod sqlite;
 mod stranded;
 mod task_holds;
 pub mod telemetry;
+pub mod telemetry_config;
 pub mod throughput_review;
 pub mod transcripts;

@@ -4,6 +4,14 @@
 //! as totals, medians and shares, per goal, kind and overall. No
 //! transcript is read here. A span that recorded no breakdown is not
 //! counted, so a value over spans that include one is a lower bound.
+//!
+//! The categories and the heavy commands are those the span's close
+//! labelled by its repository's rules
+//! ([`crate::domain::command_rules::work_rules`]): the cargo rules of
+//! dagq's own source while its `dagq.toml` has no `[[telemetry.commands]]`,
+//! else the groups of the rules that work, so another repository's
+//! categories are the names its rules give and a command no rule
+//! classifies is `other_command`.
 
 use std::collections::BTreeMap;
 

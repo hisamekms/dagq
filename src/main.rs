@@ -59,7 +59,10 @@ struct RetiredCmux {
 enum Command {
     /// Initialize the queue, creating its directory if needed. An existing queue is checked, never migrated.
     /// Its output recommends the review's settings (`recommended`): the built-ins on and off by
-    /// default, and `dagq setup-review` to write the project's rules for them. It writes no
+    /// default, and `dagq setup-review` to write the project's rules for them; the toolchain
+    /// profiles declared or suggested (`toolchains`); and the templates of [[telemetry.commands]]
+    /// for the tools its files show that no profile knows, npm/pnpm, go, pytest, gradle and make
+    /// (`telemetry_commands`), never cargo, whose rules the Rust profile holds. It writes no
     /// dagq.toml and starts no agent.
     Init,
     // ADR-t2259-1 decision 7.
@@ -1635,6 +1638,12 @@ enum Command {
     /// to (none while it declares none: then no language's knowledge reads the output), and
     /// `marks` the project's own marks on the verification's output ([verify_marks.<name>]: its
     /// name, the class a line of its shape gives, and the shape).
+    /// `command_rules` shows the rules that classify the commands when the ledger and a run's
+    /// work breakdown are made, in the order they are tried, each with its source: dagq.toml
+    /// ([[telemetry.commands]], with its line) first, then each declared profile's
+    /// (profile:<name>), then the runtime's common rules (common); with `work_breakdown` (how a
+    /// run's work breakdown classifies: source_cargo, dagq's own source without project rules,
+    /// or rules), and the [telemetry] command_detail and failed_tests in use.
     /// `agents` shows the review's agents read from the landing branch; its `builtins` start with
     /// builtin:acceptance, the whole review, and `without_rules` names the enabled built-ins
     /// that judge without the project's rules, the landing branch having no

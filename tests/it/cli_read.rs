@@ -1587,7 +1587,9 @@ fn a_span_after_a_renewal_closes_with_the_new_sessions_work() {
         )
         .unwrap();
     let closed: Value = serde_json::from_str(&closed).unwrap();
-    assert_eq!(closed["work"]["secs"]["build"], 40, "{closed}");
+    // Its repository declares no profile and has no project rule: no rule
+    // classifies `cargo build`.
+    assert_eq!(closed["work"]["secs"]["other_command"], 40, "{closed}");
     let worktime = std::fs::read_to_string(run_dir.join("worktime.jsonl")).unwrap();
     let lines: Vec<Value> = worktime
         .lines()

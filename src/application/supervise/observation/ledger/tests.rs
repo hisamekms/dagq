@@ -463,7 +463,7 @@ impl RunResourceStore for Memory {
 
 /// One pass at `secs` after [`T0`].
 fn pass(memory: &Memory, builder: &mut Builder, secs: i64) -> Built {
-    build_pass(memory, builder, ms(secs), BUILT, Retain::default())
+    build_pass(memory, builder, (ms(secs), BUILT), Retain::default(), None)
 }
 
 /// How many passes [`drain`] runs at most.
@@ -542,7 +542,7 @@ fn a_pass_removes_the_steps_past_their_retention() {
         node_rows: None,
         steps: Some(2_000),
     };
-    let built = build_pass(&memory, &mut builder, ms(0), BUILT, retain);
+    let built = build_pass(&memory, &mut builder, (ms(0), BUILT), retain, None);
     assert_eq!(built.failure, None);
     assert_eq!(built.steps_removed, 2);
     let kept: Vec<(String, i64)> = memory
@@ -556,6 +556,85 @@ fn a_pass_removes_the_steps_past_their_retention() {
 
 /// A long time after every run here, past every grace.
 const LATER: i64 = 1_000_000;
+
+/// The rules alone fold a settled run again: on the same builder, with no
+/// input come in since, a pass by rules of another version classifies its
+/// command steps by them; passes by the same rules again write nothing,
+/// and neither does a new builder's (a new process).
+#[test]
+fn a_settled_run_is_classified_again_when_only_the_rules_change() {
+    use crate::domain::command_rules::{
+        CommandClassifier, CommandRule, TelemetrySettings, effective_rules,
+    };
+    use crate::domain::command_shape::{DigestKey, Subcommands, shape_value_with};
+    use crate::domain::ledger::steps::StepFold;
+    use crate::domain::toolchain::Toolchains;
+    let a = run_id(1);
+    let mut log = Log::default();
+    log.landed(1, &a, 0);
+    let memory = Memory::of(&log);
+    let target = StepTarget::run(&RunId::new(&a).unwrap());
+    memory.register_session(&target, "s", ms(0)).unwrap();
+    let known = Subcommands::default().keyed(Some(DigestKey::test()));
+    let mut step = Step::new(1, StepKind::ToolCall, 0, 10);
+    step.tool = Some("Bash".into());
+    step.command_shape = shape_value_with("make test", &known);
+    memory.record_steps(&target, "s", &[step], 1_000).unwrap();
+    let rules = |class: &str| {
+        let toolchains = Toolchains::none().with_telemetry(TelemetrySettings {
+            commands: vec![CommandRule::new(class, "make")],
+            ..TelemetrySettings::default()
+        });
+        CommandClassifier::new(effective_rules(&toolchains), known.clone())
+    };
+    let (first, second) = (rules("build"), rules("test"));
+    let pass_by = |builder: &mut Builder, classifier: &CommandClassifier| {
+        build_pass(
+            &memory,
+            builder,
+            (ms(LATER), BUILT),
+            Retain::default(),
+            Some(classifier),
+        )
+    };
+    let classed = || {
+        let row = memory.row(LedgerKind::Run, &a);
+        let classes = StepFold::of_detail(&row.detail).unwrap().classes.unwrap();
+        let class: Vec<Option<String>> = classes
+            .steps
+            .iter()
+            .map(|step| step.class.clone())
+            .collect();
+        (row.is_final, classes.rules, class)
+    };
+    let mut builder = Builder::default();
+    while pass_by(&mut builder, &first).backlog > 0 {}
+    assert_eq!(
+        classed(),
+        (
+            true,
+            first.rules().version(),
+            vec![Some("build".to_owned())]
+        )
+    );
+    assert_eq!(pass_by(&mut builder, &first).written, 0);
+    // Only the rules change.
+    let built = pass_by(&mut builder, &second);
+    assert_eq!((built.written, built.failure), (1, None));
+    assert_eq!(
+        classed(),
+        (
+            true,
+            second.rules().version(),
+            vec![Some("test".to_owned())]
+        )
+    );
+    assert_eq!(pass_by(&mut builder, &second).written, 0);
+    let writes = memory.writes.get();
+    let mut again = Builder::default();
+    while pass_by(&mut again, &second).backlog > 0 {}
+    assert_eq!(memory.writes.get(), writes);
+}
 
 /// Every ended run and task is written once, the passes catching up on
 /// more than one pass writes; what came in while no pass ran is caught up
@@ -1503,7 +1582,7 @@ fn a_fold_after_the_retention_keeps_the_steps_and_adds_a_late_one() {
         node_rows: None,
         steps: Some(ms(500)),
     };
-    let removed = build_pass(&memory, &mut builder, ms(1001), BUILT, retain);
+    let removed = build_pass(&memory, &mut builder, (ms(1001), BUILT), retain, None);
     assert_eq!(removed.steps_removed, 2);
     assert!(memory.steps.borrow().is_empty());
     assert_eq!(memory.session_owner("s-1").unwrap(), None);
@@ -1570,7 +1649,7 @@ fn the_retention_keeps_the_steps_of_the_runs_a_pass_did_not_write_yet() {
         steps: Some(2_000),
     };
     let mut builder = Builder::default();
-    let first = build_pass(&memory, &mut builder, ms(LATER), BUILT, retain);
+    let first = build_pass(&memory, &mut builder, (ms(LATER), BUILT), retain, None);
     assert_eq!(first.failure, None);
     assert_eq!(first.written, WRITES_PER_PASS);
     assert!(first.backlog > 0);
@@ -1586,9 +1665,9 @@ fn the_retention_keeps_the_steps_of_the_runs_a_pass_did_not_write_yet() {
         })
         .count();
     assert_eq!(unwritten, 1);
-    let mut built = build_pass(&memory, &mut builder, ms(LATER + 1), BUILT, retain);
+    let mut built = build_pass(&memory, &mut builder, (ms(LATER + 1), BUILT), retain, None);
     while built.backlog > 0 {
-        built = build_pass(&memory, &mut builder, ms(LATER + 2), BUILT, retain);
+        built = build_pass(&memory, &mut builder, (ms(LATER + 2), BUILT), retain, None);
     }
     for run in &runs {
         let row = memory.row(LedgerKind::Run, run);
@@ -1632,7 +1711,7 @@ fn the_retention_keeps_the_samples_from_inside_of_the_runs_a_pass_did_not_write_
         steps: Some(2_000),
     };
     let mut builder = Builder::default();
-    let first = build_pass(&memory, &mut builder, ms(LATER), BUILT, retain);
+    let first = build_pass(&memory, &mut builder, (ms(LATER), BUILT), retain, None);
     assert_eq!(first.failure, None);
     assert_eq!(first.written, WRITES_PER_PASS);
     assert!(first.backlog > 0);
@@ -1642,9 +1721,9 @@ fn the_retention_keeps_the_samples_from_inside_of_the_runs_a_pass_did_not_write_
         "a run not written keeps its samples"
     );
     assert_eq!(memory.owners.borrow().len(), runs.len());
-    let mut built = build_pass(&memory, &mut builder, ms(LATER + 1), BUILT, retain);
+    let mut built = build_pass(&memory, &mut builder, (ms(LATER + 1), BUILT), retain, None);
     while built.backlog > 0 {
-        built = build_pass(&memory, &mut builder, ms(LATER + 2), BUILT, retain);
+        built = build_pass(&memory, &mut builder, (ms(LATER + 2), BUILT), retain, None);
     }
     for run in &runs {
         let row = memory.row(LedgerKind::Run, run);
@@ -1686,7 +1765,13 @@ fn a_fold_over_a_row_another_builder_wrote_since_its_read_folds_again_and_keeps_
             node_rows: None,
             steps: Some(ms(500)),
         };
-        let other = build_pass(memory, &mut Builder::default(), ms(1000), BUILT, retain);
+        let other = build_pass(
+            memory,
+            &mut Builder::default(),
+            (ms(1000), BUILT),
+            retain,
+            None,
+        );
         assert_eq!(other.failure, None);
         assert_eq!(other.steps_removed, 2);
     })));
@@ -1740,9 +1825,9 @@ fn a_fold_behind_the_stored_rows_events_is_not_written_and_folds_again_once_caug
             let other = build_pass(
                 memory,
                 &mut Builder::default(),
-                ms(1002),
-                BUILT,
+                (ms(1002), BUILT),
                 Retain::default(),
+                None,
             );
             assert_eq!(other.failure, None);
             steps_in(

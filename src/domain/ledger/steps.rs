@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::fold::Interval;
+use crate::domain::command_rules::CommandClassifier;
 use crate::domain::session_step::{SeqRange, SessionStep, StepKind, gaps};
 
 /// A time `[start, end)` on the supervisor's clock, unix milliseconds.
@@ -163,6 +164,143 @@ pub struct StepFold {
     /// retention removed the session's owner with its steps.
     #[serde(default)]
     pub starts: BTreeMap<String, i64>,
+    /// The classes of the commands its steps ran, by the rules that worked
+    /// when it was folded ([`Self::classify`]); none before any rule did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classes: Option<ClassFold>,
+}
+
+/// The classes of a run's command steps (a tool's call with a command's
+/// shape), by one version of the rules that work
+/// ([`crate::domain::command_rules`], ADR-t1662-3 decision 16 as
+/// ADR-t2268-1 amends it): a view's, never the step's. Each step keeps its
+/// session, its offset and its length, so the classes are placed by the
+/// sessions' starts the fold knows.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClassFold {
+    /// The version of the rules that classified them
+    /// ([`crate::domain::command_rules::EffectiveRules::version`]).
+    pub rules: String,
+    /// Each session's seqs classified.
+    pub seqs: BTreeMap<String, Vec<SeqRange>>,
+    pub steps: Vec<ClassedStep>,
+}
+
+/// A command step classified: `class` and `group` `None` when no rule
+/// matched it (unclassified); the command's class, the class of its part
+/// the earliest rule matched. `parts` holds the class of each part in the
+/// command's order, so a part that did not win (`cargo test` after
+/// `cargo llvm-cov &&`) keeps its own.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ClassedStep {
+    pub session_id: String,
+    pub offset_ms: i64,
+    pub duration_ms: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<PartClass>,
+}
+
+/// The class of one part of a command step: both `None` when no rule
+/// matched it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PartClass {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+}
+
+impl ClassFold {
+    fn holds(&self, session_id: &str, seq: i64) -> bool {
+        self.seqs
+            .get(session_id)
+            .is_some_and(|ranges| ranges.iter().any(|range| range.contains(seq)))
+    }
+
+    /// What each of `intervals` holds of the classified steps placed by
+    /// `starts`: the time each class (`by_class`) and each group
+    /// (`by_group`) covers, the time the commands with a part of each class
+    /// cover (`by_part_class`, a command in each of its parts' classes), and
+    /// the unclassified commands (`unclassified_ms`), each counting the time
+    /// its steps cover once.
+    fn detail(&self, starts: &BTreeMap<String, i64>, intervals: &[Interval]) -> Value {
+        let mut by_class: BTreeMap<&str, Vec<Span>> = BTreeMap::new();
+        let mut by_group: BTreeMap<&str, Vec<Span>> = BTreeMap::new();
+        let mut unclassified: Vec<Span> = Vec::new();
+        let mut by_part_class: BTreeMap<&str, Vec<Span>> = BTreeMap::new();
+        for step in &self.steps {
+            let Some(&start) = starts.get(&step.session_id) else {
+                continue;
+            };
+            let at = start.saturating_add(step.offset_ms);
+            let span = Span {
+                start: at,
+                end: at.saturating_add(step.duration_ms),
+            };
+            for class in step.parts.iter().filter_map(|part| part.class.as_deref()) {
+                by_part_class.entry(class).or_default().push(span);
+            }
+            match (&step.class, &step.group) {
+                (Some(class), group) => {
+                    by_class.entry(class).or_default().push(span);
+                    by_group
+                        .entry(group.as_deref().unwrap_or(class))
+                        .or_default()
+                        .push(span);
+                }
+                (None, _) => unclassified.push(span),
+            }
+        }
+        let united = |spans: BTreeMap<&str, Vec<Span>>| -> Vec<(String, Vec<Span>)> {
+            spans
+                .into_iter()
+                .map(|(name, spans)| (name.to_owned(), union(spans)))
+                .collect()
+        };
+        let (by_class, by_group, by_part_class, unclassified) = (
+            united(by_class),
+            united(by_group),
+            united(by_part_class),
+            union(unclassified),
+        );
+        let within_each = |spans: &[(String, Vec<Span>)],
+                           interval: &Interval|
+         -> BTreeMap<String, i64> {
+            spans
+                .iter()
+                .map(|(name, spans)| (name.clone(), within(spans, interval.start, interval.end)))
+                .collect()
+        };
+        json!({
+            "rules": self.rules,
+            "parents": intervals
+                .iter()
+                .enumerate()
+                .map(|(index, interval)| json!({
+                    "interval": index,
+                    "by_class": within_each(&by_class, interval),
+                    "by_group": within_each(&by_group, interval),
+                    "by_part_class": within_each(&by_part_class, interval),
+                    "unclassified_ms": within(&unclassified, interval.start, interval.end),
+                }))
+                .collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// The version of the rules a run row's `detail` classified its steps by
+/// ([`StepFold::classify`]); none when it classified none.
+pub fn rules_of(detail: &Value) -> Option<&str> {
+    detail
+        .get(DETAIL_KEY)?
+        .get("fold")?
+        .get("classes")?
+        .get("rules")?
+        .as_str()
 }
 
 /// The key of a run row's `detail` that holds its steps folded
@@ -227,20 +365,83 @@ impl StepFold {
         fold
     }
 
+    /// Classify the command steps of `steps` by `classifier`, the rules
+    /// that work now: a step with a command's shape that it has not
+    /// classified gets the class of the rule its shape matched first, or
+    /// none (unclassified). When the rules are another version than those
+    /// it classified by (they changed), its classes are made again from
+    /// `steps`, the steps the store holds of the run: what the retention
+    /// removed is no longer classified. Without `classifier` it is left as
+    /// it was.
+    pub fn classify(&mut self, classifier: Option<&CommandClassifier>, steps: &[SessionStep]) {
+        let Some(classifier) = classifier else {
+            return;
+        };
+        let version = classifier.rules().version();
+        let classes = match &mut self.classes {
+            Some(classes) if classes.rules == version => classes,
+            classes => classes.insert(ClassFold {
+                rules: version,
+                ..ClassFold::default()
+            }),
+        };
+        let mut added: BTreeMap<&str, BTreeSet<i64>> = BTreeMap::new();
+        for step in steps {
+            let Some(shape) = &step.step.command_shape else {
+                continue;
+            };
+            let seq = step.step.seq;
+            if step.step.kind != StepKind::ToolCall
+                || classes.holds(&step.session_id, seq)
+                || !added.entry(&step.session_id).or_default().insert(seq)
+            {
+                continue;
+            }
+            let parts = classifier.parts_value(shape);
+            let matched = parts.iter().flatten().min_by_key(|matched| matched.index);
+            classes.steps.push(ClassedStep {
+                session_id: step.session_id.clone(),
+                offset_ms: step.step.offset_ms,
+                duration_ms: step.step.duration_ms,
+                class: matched.map(|matched| matched.class.to_owned()),
+                group: matched.map(|matched| matched.group.to_owned()),
+                parts: parts
+                    .iter()
+                    .map(|matched| PartClass {
+                        class: matched.map(|matched| matched.class.to_owned()),
+                        group: matched.map(|matched| matched.group.to_owned()),
+                    })
+                    .collect(),
+            });
+        }
+        classes.steps.sort();
+        for (session, seqs) in added {
+            let ranges = classes.seqs.entry(session.to_owned()).or_default();
+            ranges.extend(seqs.into_iter().map(|seq| SeqRange { from: seq, to: seq }));
+            *ranges = merge_ranges(std::mem::take(ranges));
+        }
+    }
+
     /// What a run row's `detail` holds of it over the run's `intervals`
     /// under [`DETAIL_KEY`]: the fold itself (`fold`, what a later fold goes
     /// on from, [`Self::of_detail`]), each interval's kinds and coverage
     /// (`parents`), the steps and the time outside every interval
-    /// (`outside`, `outside_ms`), and the gaps (`gaps`, `missing`).
+    /// (`outside`, `outside_ms`), the gaps (`gaps`, `missing`), and once
+    /// it classified its commands, each interval's time by class and group
+    /// with the version of the rules (`classes`, [`ClassFold`]).
     pub fn detail(&self, intervals: &[Interval]) -> Value {
-        json!({
+        let mut detail = json!({
             "fold": self,
             "parents": self.parents(intervals),
             "outside": self.outside(intervals),
             "outside_ms": self.outside_ms(intervals),
             "gaps": self.gaps(),
             "missing": self.missing(),
-        })
+        });
+        if let Some(classes) = &self.classes {
+            detail["classes"] = classes.detail(&self.starts, intervals);
+        }
+        detail
     }
 
     /// The fold a run row's `detail` holds ([`Self::detail`]); none when it
@@ -617,5 +818,157 @@ mod tests {
         assert_eq!(parent.covered_ms, i64::MAX - 1_000);
         assert_eq!(far.outside(&whole), 1);
         assert_eq!(far.outside_ms(&whole), 0);
+    }
+
+    /// A command step whose shape is `command`'s, made as an executor
+    /// makes it for a repository that declares the Rust profile.
+    fn command_step(seq: i64, command: &str, offset_ms: i64, duration_ms: i64) -> SessionStep {
+        let mut step = step(SESSION, seq, StepKind::ToolCall, offset_ms, duration_ms);
+        step.step.command_shape = crate::domain::command_shape::shape_value_with(
+            command,
+            &crate::domain::command_shape::Subcommands::rust(),
+        );
+        step
+    }
+
+    fn classifier(commands: Vec<crate::domain::command_rules::CommandRule>) -> CommandClassifier {
+        use crate::domain::command_rules::{TelemetrySettings, effective_rules};
+        let toolchains = crate::domain::toolchain::Toolchains::resolve(
+            &crate::domain::toolchain::BUILTIN,
+            &[crate::domain::toolchain::ToolchainDeclaration {
+                name: "rust".into(),
+                profile: "rust".into(),
+                paths: Vec::new(),
+                line: 1,
+            }],
+        )
+        .unwrap()
+        .with_telemetry(TelemetrySettings {
+            commands,
+            ..TelemetrySettings::default()
+        });
+        CommandClassifier::new(
+            effective_rules(&toolchains),
+            crate::domain::command_shape::Subcommands::of(&toolchains)
+                .keyed(Some(crate::domain::command_shape::DigestKey::test())),
+        )
+    }
+
+    /// (2) The classes are a view's: made when the run is folded, by the
+    /// rules that work then, never written on a step; other rules make them
+    /// again from the steps the store holds.
+    /// A command of several parts keeps the class of each part beside the
+    /// command's (that of the part the earliest rule matched): a part that
+    /// did not win is not lost from the view.
+    #[test]
+    fn a_commands_parts_keep_their_own_classes() {
+        let intervals = [interval("work", 1_000, 3_000)];
+        let steps = [
+            command_step(1, "cargo llvm-cov --locked && cargo test --locked", 0, 400),
+            command_step(2, "ls && cargo build", 500, 100),
+        ];
+        let rules = classifier(Vec::new());
+        let mut fold = fold_steps(&starts(), &steps);
+        fold.classify(Some(&rules), &steps);
+        let classes = fold.classes.as_ref().unwrap();
+        let part = |class: Option<&str>, group: Option<&str>| PartClass {
+            class: class.map(str::to_owned),
+            group: group.map(str::to_owned),
+        };
+        let got: Vec<_> = classes
+            .steps
+            .iter()
+            .map(|step| (step.class.as_deref(), step.parts.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (
+                    Some("llvm_cov"),
+                    vec![
+                        part(Some("llvm_cov"), Some("llvm_cov")),
+                        part(Some("full_test"), Some("test")),
+                    ]
+                ),
+                (
+                    Some("build"),
+                    vec![part(None, None), part(Some("build"), Some("build"))]
+                ),
+            ]
+        );
+        let detail = fold.detail(&intervals);
+        let parent = &detail["classes"]["parents"][0];
+        assert_eq!(parent["by_class"], json!({"llvm_cov": 400, "build": 100}));
+        assert_eq!(
+            parent["by_part_class"],
+            json!({"llvm_cov": 400, "full_test": 400, "build": 100})
+        );
+        assert_eq!(parent["unclassified_ms"], 0);
+        // Kept in a row's detail and read back with its parts.
+        let kept = json!({DETAIL_KEY: detail});
+        assert_eq!(StepFold::of_detail(&kept), Some(fold));
+    }
+
+    #[test]
+    fn the_command_steps_are_classified_when_folded_and_again_by_other_rules() {
+        let intervals = [interval("work", 1_000, 3_000)];
+        let steps = [
+            command_step(1, "cargo test --locked --test it", 0, 400),
+            command_step(2, "cargo build", 500, 100),
+            command_step(3, "ls -la", 700, 50),
+            step(SESSION, 4, StepKind::ModelTurn, 800, 100),
+        ];
+        // What a step keeps names no class.
+        for step in &steps {
+            let kept = serde_json::to_value(&step.step).unwrap();
+            assert!(
+                kept.get("class").is_none() && kept.get("group").is_none(),
+                "{kept}"
+            );
+        }
+        let profile = classifier(Vec::new());
+        let mut fold = fold_steps(&starts(), &steps);
+        fold.classify(Some(&profile), &steps);
+        let classes = fold.classes.as_ref().unwrap();
+        assert_eq!(classes.rules, profile.rules().version());
+        assert_eq!(classes.steps.len(), 3);
+        let detail = fold.detail(&intervals);
+        let parent = &detail["classes"]["parents"][0];
+        assert_eq!(parent["by_class"], json!({"test": 400, "build": 100}));
+        assert_eq!(parent["by_group"], json!({"test": 400, "build": 100}));
+        assert_eq!(parent["unclassified_ms"], 50);
+        // The same steps again change nothing.
+        let mut again = fold.clone();
+        again.classify(Some(&profile), &steps);
+        assert_eq!(again, fold);
+        // The project's rule for its test target: the steps are classified
+        // again, by the new version.
+        let project = classifier(vec![
+            crate::domain::command_rules::CommandRule::new("full_test", "cargo")
+                .group("test")
+                .subcommands(&["test"])
+                .flag_values("--test", &["it"])
+                .takes_value(&["--test"])
+                .positional_none(),
+        ]);
+        let mut changed = fold.clone();
+        changed.classify(Some(&project), &steps);
+        let classes = changed.classes.as_ref().unwrap();
+        assert_eq!(classes.rules, project.rules().version());
+        assert_ne!(classes.rules, profile.rules().version());
+        let parent = &changed.detail(&intervals)["classes"]["parents"][0];
+        assert_eq!(parent["by_class"], json!({"full_test": 400, "build": 100}));
+        assert_eq!(parent["by_group"], json!({"test": 400, "build": 100}));
+        assert_eq!(
+            rules_of(&json!({DETAIL_KEY: changed.detail(&intervals)})),
+            Some(classes.rules.as_str())
+        );
+        // No rule read leaves the classes as they were.
+        let mut kept = fold.clone();
+        kept.classify(None, &steps);
+        assert_eq!(kept, fold);
+        // The fold kept in a row's detail is read back with its classes.
+        let detail = json!({DETAIL_KEY: fold.detail(&intervals)});
+        assert_eq!(StepFold::of_detail(&detail), Some(fold));
     }
 }

@@ -103,8 +103,8 @@ runtimeが起動するsessionとjobは、kindごとの区間として記録す�
 
 ### 作業の内訳
 
-- 入口: 分類は`domain::worktime`、落ちたtestの名前は`domain::verify_failure::failed_tests`、Codexの内訳は`domain::turn::codex_span_turns`。
-- 落とし穴: コマンドの分類はコマンド位置の語だけで見て、落ちたtestの名前はtestを流すforegroundのコマンドの出力からだけ読む。
+- 入口: 分類は`domain::worktime`（どの規則で分類するかは`domain::command_rules::work_rules`、[計測のコマンドの形と分類](measurement-commands.md)）、落ちたtestの名前は`domain::verify_failure::failed_tests`（読むかは`domain::command_rules::reads_failed_tests`）、Codexの内訳は`domain::turn::codex_span_turns`。
+- 落とし穴: コマンドの分類はコマンド位置の語だけで見て、落ちたtestの名前は`[telemetry] failed_tests`を有効にしたときだけ、testを流すforegroundのコマンド（効く規則ではprofileかpjの規則で分類したもの）の出力からだけ読む。
 
 ### sessionのstep
 

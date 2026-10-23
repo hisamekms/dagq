@@ -56,7 +56,7 @@ fn phase(db: &Connection, phase: &str, secs: i64) {
 
 /// One pass at `secs` after [`T0`], with no retention.
 fn pass(queue: &SqliteQueue, builder: &mut Builder, secs: i64) {
-    let built = build_pass(queue, builder, ms(secs), BUILT, Retain::default());
+    let built = build_pass(queue, builder, (ms(secs), BUILT), Retain::default(), None);
     assert_eq!(built.failure, None);
 }
 

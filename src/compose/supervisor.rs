@@ -904,6 +904,7 @@ pub fn supervise_with_reviewer(
                     Box::new(queue)
                 },
             }),
+            (&main_checkout, &db, options.profiles),
         )
     });
     let host_programs = review_program_host(&repository, runner, std::env::vars_os())?;

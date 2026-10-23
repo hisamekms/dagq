@@ -25,8 +25,8 @@ related:
 言語・道具ごとの知識は、runtimeに組み込んだtoolchainのprofileの実装だけが持ち、projectは`dagq.toml`で使うprofileを宣言する（[ADR-t2268-1](../adr/2026-10-12-t2268-1-toolchain-knowledge-behind-declared-profiles.md)）。
 runtimeのほかのコードは、宣言したprofileをportを通して呼ぶだけで、道具の出力の印やenvの名前を持たない。
 
-**実装状況**: portと登録とRustのprofile、`[toolchains.<name>]`の宣言、検証の出力の読み方（失敗の分類・落ちたtestとflakyのtestの抜き出し・flakyのやり直しのenv）、CIの見張りのJUnitのtestの名前、hostの負荷のprocessの種類、hostのRustのtoolchainの記録とKPIの`toolchain`の軸、landing recheckと自動更新のbuildの出力の置き場と掃除、runのworktreeのビルド成果物の掃除、fileの中のtestの行の見分け、推奨の設定（宣言・検証のコマンドの組み合わせ・reviewのプログラム）はある。
-計測のコマンドの分類と、containerの材料・registryのhost・workerのcacheのdirの推奨はまだportに無く、今の場所は[Source repository](supervisor-lifecycle/source-repository.md)の「言語・道具の知識の今の場所」にある。
+**実装状況**: portと登録とRustのprofile、`[toolchains.<name>]`の宣言、検証の出力の読み方（失敗の分類・落ちたtestとflakyのtestの抜き出し・flakyのやり直しのenv）、CIの見張りのJUnitのtestの名前、hostの負荷のprocessの種類、hostのRustのtoolchainの記録とKPIの`toolchain`の軸、landing recheckと自動更新のbuildの出力の置き場と掃除、runのworktreeのビルド成果物の掃除、fileの中のtestの行の見分け、推奨の設定（宣言・検証のコマンドの組み合わせ・reviewのプログラム）、計測のコマンドの分類の既定の規則はある。
+containerの材料・registryのhost・workerのcacheのdirの推奨はまだportに無く、今の場所は[Source repository](supervisor-lifecycle/source-repository.md)の「言語・道具の知識の今の場所」にある。
 
 ## portの責務
 
@@ -35,6 +35,9 @@ runtimeのほかのコードは、宣言したprofileをportを通して呼ぶ�
 - 今のmethodは、検証のコマンドの出力を読むもの（道具の印から失敗を既存の分類に当てること、落ちたtestと流し直しで通ったtestの名前を読むこと、flakyのやり直しで足すenvを返すこと）と、CIと計測を読むもの（CIの見張りがJUnitのtestを道具の表示と同じ名前にする作り方、hostの負荷で道具のprocessをbuildの道具かcompilerに分けること）と、buildの出力の置き場を返すもの（下の「buildの出力の置き場」）と、推奨の設定を返すもの（下の「推奨の設定」）と、fileの中で差分の行がtestの中かを見分けるもの（`test_lines`）と、計測のコマンドの形が平文で持つ道具の語（既知のサブコマンドと値を取らないoption）を返すもの（[ADR-t1673-1](../adr/2026-10-21-t1673-1-command-shape-keeps-only-known-subcommands-in-plain.md)）である。
   processの種類の列は名前を固定し（`cpu_cargo`・`cpu_rustc`ほか）、profileは閉じた型（`ToolProcess`）でどちらの列かを返す。
   claude・dagq・そのほかは言語に依らないruntimeの共通の分類である（[hostの負荷](supervisor-lifecycle/host-metrics.md)）。
+- 計測のコマンドの分類の既定の規則もprofileが返す（`command_rules`）。
+  道具の知識だけを持ち、projectのtest targetのような名前を持たない。
+  宣言したprofileの規則は`dagq.toml`の`[[telemetry.commands]]`の後、runtimeの共通の規則の前に宣言の順で当たる（[計測のコマンドの形と分類](measurement-commands.md)）。
 - `test_lines`はreviewが手元の関門の要否を決めるときに使い、pathsがそのfileに当たる宣言（pathsの無い宣言は常に当たる）のprofileだけに宣言の順に聞く（`Toolchains::test_lines`、[ADR-t2589-1](../adr/2026-10-17-t2589-1-local-check-runs-are-recorded-by-project-scripts-and-matched-to-the-receipt-tree.md)決定6）。
   当たるprofileが無いか、どれも見分けないfileでは、変えた行をtestの行とみなす（関門を省かない側）。
 - hostのRustのtoolchainの記録（claimの`rustc_release`・`rustc_host`）とKPIの`toolchain`の軸と`stats`の`rustc`の欄は、宣言したprofileにRustのprofileがあるときだけ働く（`Toolchains::records_rust_toolchain`）。
@@ -71,7 +74,7 @@ runtimeのほかのコードは、宣言したprofileをportを通して呼ぶ�
   `doctor`と`status`は宣言の無いことを空の`declared`で示し、警告しない。
   `Cargo.toml`などからprofileを推測して有効にすることはしない。
 - 読むのはqueueが束縛されたmain checkoutの作業ファイルの`dagq.toml`で、`integrate`とlanding recheckが検証のたびに読む。
-  workerのtranscriptとCodexのturnの計測も同じ解決で、workerが流したコマンドの出力から落ちたtestの名前を読む（`run_env::measured_toolchains`）。
+  workerのtranscriptとCodexのturnの計測も同じ解決で、`[telemetry] failed_tests`を有効にしたときだけworkerが流したコマンドの出力から落ちたtestの名前を読む（`run_env::measured_toolchains`）。
   計測は検証と違って止めず、`dagq.toml`が読めない・誤りのときはどのprofileでも読まず、sessionは落ちたtestの名前なしで記録する。
   着地の外の読み手（CIの見張りの確かめ、hostの負荷のsample、claim、KPI）も使うたびに同じ解決で読み、`dagq.toml`が読めない・誤りのときは計測と同じくどのprofileでも読まない（`run_env::toolchains_in_use`）。
 - 組み込みに無いprofileの名前は設定の誤りで、`integrate`は検証の前に着地処理のエラーにし、`doctor`と`status`は`toolchains`に`error`を出す（`domain::toolchain::Toolchains::view`）。

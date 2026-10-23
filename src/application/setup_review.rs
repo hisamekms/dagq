@@ -74,9 +74,11 @@ pub trait InitRepository {
 
 /// The settings `init` recommends ([`recommended`]), with the toolchain
 /// profiles of `profiles` the main checkout's `dagq.toml` declares, or its
-/// files suggest. Where no main checkout is found (outside a repository,
-/// or a bare one), there is no file to read a declaration or a guess from,
-/// so no profile is proposed and `init` goes on.
+/// files suggest, and the templates of `[[telemetry.commands]]` its files
+/// suggest (`telemetry_commands`, [`telemetry_templates`]). Where no main
+/// checkout is found (outside a repository, or a bare one), there is no
+/// file to read a declaration or a guess from, so no profile and no
+/// template is proposed and `init` goes on.
 pub fn init_recommended(repository: &dyn InitRepository, profiles: &ProfileRegistry) -> Value {
     let error = |error: anyhow::Error| format!("{error:#}");
     let toolchains =
@@ -92,7 +94,33 @@ pub fn init_recommended(repository: &dyn InitRepository, profiles: &ProfileRegis
                 })
             }
         };
-    recommended(&toolchains)
+    let mut value = recommended(&toolchains);
+    value["telemetry_commands"] = match repository.checkout() {
+        Ok(checkout) => match repository.files(&checkout) {
+            Ok(files) => telemetry_templates(&files),
+            Err(error) => json!({"error": format!("{error:#}")}),
+        },
+        Err(_) => telemetry_templates(&[]),
+    };
+    value
+}
+
+/// The templates of `[[telemetry.commands]]` the repository's `files`
+/// suggest ([`crate::domain::command_rules::templates::view`]), with what
+/// to do with them: nothing of them works until a person writes them, and
+/// a declared profile's rules (cargo's are the Rust profile's) work without
+/// any.
+fn telemetry_templates(files: &[String]) -> Value {
+    let mut view = crate::domain::command_rules::templates::view(files);
+    view["note"] = json!(format!(
+        "Proposals only: nothing here works until you write it. `config` is the \
+         [[telemetry.commands]] tables of the templates for the tools no toolchain profile \
+         knows; write into {CONFIG_FILE} only the rules you keep, once the binary that runs \
+         the queue reads them. A declared profile's own rules work without any table; \
+         [[telemetry.commands]] adds to or overrides them, and `dagq doctor` shows the rules \
+         in effect as `command_rules`."
+    ));
+    view
 }
 
 /// [`Proposed::view`] with what to do with it: nothing of it works until
@@ -922,5 +950,34 @@ mod tests {
         assert!(outside["toolchains"].get("error").is_none());
         assert_eq!(outside["toolchains"]["programs"], json!([]));
         assert_eq!(outside["builtins"][0]["name"], "builtin:acceptance");
+        assert_eq!(outside["telemetry_commands"]["templates"], json!([]));
+    }
+
+    #[test]
+    fn init_proposes_the_telemetry_templates_the_files_suggest_and_none_for_cargo() {
+        let repository = |files: Vec<&str>| Repository {
+            checkout: Some(PathBuf::from("/repo")),
+            declarations: Ok(Vec::new()),
+            files: Ok(files.into_iter().map(str::to_owned).collect()),
+        };
+        let mixed = init_recommended(
+            &repository(vec!["package.json", "svc/go.mod", "Makefile", "Cargo.toml"]),
+            &BUILTIN,
+        );
+        let names: Vec<&str> = mixed["telemetry_commands"]["templates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|template| template["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["npm", "go", "make"], "{mixed}");
+        let config = mixed["telemetry_commands"]["config"].as_str().unwrap();
+        assert!(config.contains("program = \"npm\""), "{config}");
+        assert!(!config.contains("\"cargo\""), "{config}");
+        // A Cargo.toml alone: the Rust profile is proposed, no template.
+        let cargo = init_recommended(&repository(vec!["Cargo.toml", "src/lib.rs"]), &BUILTIN);
+        assert_eq!(cargo["toolchains"]["from"], "guessed", "{cargo}");
+        assert_eq!(cargo["telemetry_commands"]["templates"], json!([]));
+        assert_eq!(cargo["telemetry_commands"]["config"], Value::Null);
     }
 }

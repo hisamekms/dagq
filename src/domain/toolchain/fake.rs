@@ -7,7 +7,8 @@
 //! the directory `FAKE_OUT` names, `fake-out`, and in a run's worktree
 //! into `fake-out` and `fake-cache`; whose files are `*.fake`,
 //! a line of which that starts with `TEST ` is a test's; which recommends
-//! itself where a `fake.build` is, `fakebuild check` as the verification,
+//! itself where a `fake.build` is, which classes `fakebuild check` as
+//! `fake_check`, `fakebuild check` as the verification,
 //! and two review programs, `fake-lint` under `.dagq/review/programs/` and
 //! `fake-outside` outside it, which `setup-review` may not write. It
 //! is registered beside the built-in ones in [`REGISTRY`], and nothing
@@ -32,6 +33,13 @@ fn named<'a>(line: &'a str, mark: &str) -> Option<&'a str> {
 impl ToolchainProfile for Fake {
     fn name(&self) -> &'static str {
         "fake"
+    }
+
+    fn command_rules(&self) -> Vec<crate::domain::command_rules::CommandRule> {
+        vec![
+            crate::domain::command_rules::CommandRule::new("fake_check", "fakebuild")
+                .subcommands(&["check"]),
+        ]
     }
 
     fn killed_line(&self, _: &[&str]) -> Option<usize> {

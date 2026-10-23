@@ -31,7 +31,9 @@ use super::{
 use crate::{
     application::{TranscriptSource, Transcripts},
     domain::{
-        EventId, GoalId, RunEvent, RunId, TaskId, fresh_session,
+        EventId, GoalId, RunEvent, RunId, TaskId,
+        command_rules::WorkRules,
+        fresh_session,
         sessions::{
             GOAL_REVIEW, HEADLESS_ROUTE, HOOK_KINDS, INFERRED, JOB_FINISHED, OpenSpan, PLAN_REVIEW,
             REVIEW, RUN_SESSION, RUNTIME_PLANNER, SESSION_CLOSED, SESSION_OPENED, SESSION_TURNS,
@@ -58,11 +60,12 @@ thread_local! {
     /// this thread may close, read before it began ([`read_before`]).
     static READ_BEFORE: RefCell<Vec<(OpenSpan, Result<ReadTranscript, Unreadable>)>> =
         const { RefCell::new(Vec::new()) };
-    /// Whether the queue's repository is dagq's source, judged before the
-    /// same transaction began for the run sessions' spans it may close
-    /// ([`dagq_source`]): the judgement runs Git, never under the write
-    /// lock.
-    static SOURCE_BEFORE: RefCell<Vec<(EventId, bool)>> = const { RefCell::new(Vec::new()) };
+    /// How the run sessions' work breakdowns classify their commands (by
+    /// whether the queue's repository is dagq's source and its
+    /// `dagq.toml`), judged before the same transaction began for the
+    /// spans it may close ([`work_rules`]): the judgement runs Git, never
+    /// under the write lock.
+    static RULES_BEFORE: RefCell<Vec<(EventId, WorkRules)>> = const { RefCell::new(Vec::new()) };
     /// The `worktime.jsonl` lines of the spans a write transaction on this
     /// thread closed, written when the [`ReadBefore`] of their spans is
     /// dropped, if their transaction committed (task 1334): the hooks
@@ -102,7 +105,7 @@ struct WorkInputs {
     /// Where its `worktime.jsonl` goes; not part of the breakdown.
     run_dir: Option<String>,
     verification: Vec<String>,
-    source: bool,
+    rules: WorkRules,
 }
 
 /// The close's analysis of a transcript for a [`Want`].
@@ -136,7 +139,7 @@ fn analyse(records: &[TranscriptRecord], turns: &Turns, want: Want) -> Analysis 
                 want.start,
                 want.end,
                 &work.verification,
-                work.source,
+                &work.rules,
             )
         }),
         want,
@@ -187,13 +190,13 @@ impl Analysis {
             );
             None
         };
-        let inputs = |want: &Want| {
+        fn inputs(want: &Want) -> (i64, bool, Option<&WorkRules>) {
             (
                 want.start,
                 want.usage,
-                want.work.as_ref().map(|work| work.source),
+                want.work.as_ref().map(|work| &work.rules),
             )
-        };
+        }
         let after = |made: i64, wanted: i64| wanted > made && last.is_some_and(|last| last >= made);
         if inputs(&self.want) != inputs(want)
             || after(self.want.end, want.end)
@@ -376,7 +379,7 @@ impl Drop for ReadBefore {
         READ_BEFORE.with_borrow_mut(|read| {
             read.retain(|(span, _)| !self.spans.contains(&span.opened_event_id));
         });
-        SOURCE_BEFORE.with_borrow_mut(|read| {
+        RULES_BEFORE.with_borrow_mut(|read| {
             read.retain(|(span, _)| !self.spans.contains(span));
         });
         let lines: Vec<WorktimeLines> = WORKTIME_AFTER.with_borrow_mut(|after| {
@@ -486,7 +489,7 @@ pub(super) fn read_before(conn: &Connection, closing: Closing<'_>) -> Result<Rea
     // Made first, so that what was read is dropped with it when a later
     // span fails.
     let mut guard = ReadBefore { spans: Vec::new() };
-    let mut source = None;
+    let mut rules = None;
     let mut toolchains = None;
     for (span, reason, sent) in spans {
         if guard.spans.contains(&span.opened_event_id) {
@@ -499,11 +502,11 @@ pub(super) fn read_before(conn: &Connection, closing: Closing<'_>) -> Result<Rea
         // A Codex worker's breakdown is made from its turns' commands.
         let codex = !span.claude() && span.headless();
         if (transcript.is_ok() || codex) && RUN_SESSION.contains(&span.kind()) {
-            let source = match source {
-                Some(source) => source,
-                None => *source.insert(judge_dagq_source(conn)?),
+            let rules = match &rules {
+                Some(rules) => Clone::clone(rules),
+                None => rules.insert(judge_work_rules(conn)?).clone(),
             };
-            SOURCE_BEFORE.with_borrow_mut(|read| read.push((span.opened_event_id, source)));
+            RULES_BEFORE.with_borrow_mut(|read| read.push((span.opened_event_id, rules)));
         }
         let transcript = match transcript {
             Ok(transcript) => {
@@ -1339,7 +1342,7 @@ fn codex_breakdown(
         start,
         end,
         &inputs.verification,
-        inputs.source,
+        &inputs.rules,
     ))
 }
 
@@ -1459,8 +1462,8 @@ fn write_worktime(conn: &Connection, lines: Option<WorktimeLines>) {
 }
 
 /// What the work breakdown of `span` of `run_id` is made with: the run's
-/// directory and its task's verification, and whether the queue's
-/// repository is dagq's source.
+/// directory and its task's verification, and how its commands are
+/// classified ([`work_rules`]).
 fn work_inputs(conn: &Connection, run_id: &RunId, span: &OpenSpan) -> Result<WorkInputs> {
     let (run_dir, verification): (Option<String>, Option<String>) = conn
         .query_row(
@@ -1476,26 +1479,42 @@ fn work_inputs(conn: &Connection, run_id: &RunId, span: &OpenSpan) -> Result<Wor
         verification: verification
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default(),
-        source: dagq_source(conn, span)?,
+        rules: work_rules(conn, span)?,
     })
 }
 
-/// Whether the repository the queue is bound to is dagq's source
-/// (ADR-t614-1), for the close of `span`: the work breakdown's cargo-only
-/// kinds and counts are kept only for it. Judged by [`read_before`] before
-/// the write transaction began, else, outside one, now; inside one without
-/// that judgement (never with a transcript read before), not.
-fn dagq_source(conn: &Connection, span: &OpenSpan) -> Result<bool> {
-    let judged = SOURCE_BEFORE.with_borrow(|read| {
+/// How the work breakdown of the close of `span` classifies its commands
+/// ([`crate::domain::command_rules::work_rules`]): by the cargo rules of
+/// dagq's source (ADR-t614-1) while its `dagq.toml` has no project rules,
+/// else by the rules that work. Judged by [`read_before`] before the write
+/// transaction began, else, outside one, now; inside one without that
+/// judgement (never with a transcript read before), as a repository that
+/// is not dagq's source and declares nothing.
+fn work_rules(conn: &Connection, span: &OpenSpan) -> Result<WorkRules> {
+    let judged = RULES_BEFORE.with_borrow(|read| {
         read.iter()
             .find(|(opened, _)| *opened == span.opened_event_id)
-            .map(|(_, source)| *source)
+            .map(|(_, rules)| rules.clone())
     });
     match judged {
-        Some(source) => Ok(source),
-        None if conn.is_autocommit() => judge_dagq_source(conn),
-        None => Ok(false),
+        Some(rules) => Ok(rules),
+        None if conn.is_autocommit() => judge_work_rules(conn),
+        None => Ok(crate::domain::command_rules::work_rules(
+            false,
+            &Toolchains::none(),
+        )),
     }
+}
+
+/// How the work breakdowns classify their commands now: by whether the
+/// queue's repository is dagq's source ([`judge_dagq_source`]) and the
+/// `dagq.toml` of its main checkout ([`measured_toolchains`]).
+fn judge_work_rules(conn: &Connection) -> Result<WorkRules> {
+    let source = judge_dagq_source(conn)?;
+    Ok(crate::domain::command_rules::work_rules(
+        source,
+        &measured_toolchains(conn),
+    ))
 }
 
 /// Whether the repository the queue is bound to is dagq's source
@@ -2989,7 +3008,9 @@ pub(super) mod tests {
         )
         .unwrap();
         let closed = &of_kind(&queue, SESSION_CLOSED)[0].payload;
-        assert_eq!(closed["work"]["secs"]["build"], 20, "{closed}");
+        // Its repository declares no profile and has no project rule: no
+        // rule classifies a cargo command.
+        assert_eq!(closed["work"]["secs"]["other_command"], 20, "{closed}");
         assert_eq!(closed.get("work_unavailable"), None);
         let written = std::fs::read_to_string(run_dir.join(WORKTIME_FILE)).unwrap();
         assert!(!written.contains("time_source"), "{written}");
@@ -4506,7 +4527,7 @@ pub(super) mod tests {
         assert_eq!(closed[0].payload["work"]["verification_repeats"], 0);
         // Nothing is left for a later write to take.
         assert!(READ_BEFORE.with_borrow(Vec::is_empty));
-        assert!(SOURCE_BEFORE.with_borrow(Vec::is_empty));
+        assert!(RULES_BEFORE.with_borrow(Vec::is_empty));
 
         // A span closed in a transaction nothing read before: its
         // transcript is not read, and the event is written.
@@ -5465,7 +5486,7 @@ pub(super) mod tests {
             work: Some(WorkInputs {
                 run_dir: None,
                 verification: verification.iter().map(|c| (*c).to_owned()).collect(),
-                source: true,
+                rules: WorkRules::SourceCargo,
             }),
         };
         let conn = Connection::open_in_memory().unwrap();

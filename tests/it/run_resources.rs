@@ -281,9 +281,9 @@ fn a_pass_measures_the_runs_of_the_slots_and_closes_those_no_one_measures() {
     let built = build_pass(
         &queue,
         &mut builder,
-        now + 5_000,
-        "2030-01-01T00:00:00.000Z",
+        (now + 5_000, "2030-01-01T00:00:00.000Z"),
         Retain::default(),
+        None,
     );
     assert_eq!(built.failure, None);
     assert_eq!(builder.resources, 3);

@@ -646,13 +646,13 @@ fn a_container_turn_ended_before_its_result_is_resumed_and_measured_from_the_age
         .collect();
     assert_eq!(spans.len(), 1, "{spans:?}");
     assert_eq!(spans[0]["model"], "claude-in-the-container", "{}", spans[0]);
-    let work = &spans[0]["work"];
-    assert_eq!(
-        work["commands"]["build"],
-        json!({"runs": 1, "failed": 0}),
-        "{}",
-        spans[0]
-    );
+    assert!(spans[0]["work"].is_object(), "{}", spans[0]);
+    // Its command was read from that transcript; its repository declares no
+    // profile and has no project rule, so no rule classifies it.
+    let worktime = fs::read_to_string(run_dir.join("worktime.jsonl")).unwrap();
+    let line: Value = serde_json::from_str(worktime.lines().next().unwrap()).unwrap();
+    assert_eq!(line["command"], "cargo build", "{worktime}");
+    assert_eq!(line["category"], "other_command", "{worktime}");
 }
 
 /// Acceptance (3) to (5) through the supervisor: once every part of the

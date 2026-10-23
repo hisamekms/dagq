@@ -236,9 +236,9 @@ fn the_ledgers_pass_removes_the_steps_past_ninety_days() {
     let built = build_pass(
         &queue,
         &mut builder,
-        now_ms,
-        "2026-01-01T00:00:00.000Z",
+        (now_ms, "2026-01-01T00:00:00.000Z"),
         retain,
+        None,
     );
     assert_eq!(built.failure, None);
     assert_eq!(built.steps_removed, 4);

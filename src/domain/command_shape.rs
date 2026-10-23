@@ -12,7 +12,11 @@
 //! Only what a list names is kept in plain (ADR-t1673-1): a program is
 //! kept by name only when a list of [`Subcommands`] names it, and any other
 //! first word (an unknown program, a substitution, or a value a misread
-//! split put there) is its digest, with every word after it as a `word`.
+//! split put there) is its digest, with every word after it as a `word`
+//! up to a `--`, kept as a listed program's (`after_dashdash`), but a
+//! `--name=value`: a flag of the digests of its name and its value
+//! (`{"flag": digest, "value": digest}`), so a rule reads the flag as it
+//! does one whose value is written apart.
 //! A listed program's arguments are each one of:
 //!
 //! - `{"flag": name}`: an unquoted word that starts with `-` and whose name
@@ -64,8 +68,10 @@
 //! [`super::telemetry::MAX_SHAPE_BYTES`] as JSON ([`shape_value_with`]): what
 //! does not fit is cut from the end and marked `truncated`.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use super::command_rules::CommandDetail;
 
 /// What every digested word starts with: its version, so that another
 /// way of making them never matches these.
@@ -140,6 +146,15 @@ impl DigestKey {
             .collect()
     }
 
+    /// A key of the process's own, for matching words against literals
+    /// where neither the shapes nor their digests leave the process (a
+    /// transcript's commands classified for a work breakdown,
+    /// [`crate::domain::command_rules::CommandClassifier::of_text`]); never
+    /// a queue's.
+    pub fn local() -> Self {
+        Self([0x5a; DIGEST_KEY_BYTES])
+    }
+
     /// A key the tests digest with.
     #[cfg(test)]
     pub fn test() -> Self {
@@ -165,34 +180,40 @@ fn hmac_sha256(key: &[u8], message: &[&[u8]]) -> [u8; 32] {
 }
 
 /// The shape of a command: its parts in order.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct CommandShape {
     pub parts: Vec<ShapePart>,
     /// Parts or arguments were cut from the end to fit
     /// [`super::telemetry::MAX_SHAPE_BYTES`].
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub truncated: bool,
+    /// It keeps each part's program alone (the `program` detail,
+    /// [`CommandDetail::Program`]): what a rule reads beyond the program is
+    /// not known, absent or not.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub programs_only: bool,
 }
 
 /// One part of a command (see the module).
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ShapePart {
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lead: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assigns: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub program: Option<String>,
+    #[serde(default)]
     pub args: Vec<ShapeArg>,
 }
 
 /// One argument of a part (see the module).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ShapeArg {
     Flag {
         flag: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         value: Option<String>,
     },
     Sub {
@@ -216,6 +237,7 @@ pub fn shape(command: &str, known: &Subcommands) -> Option<CommandShape> {
     Some(CommandShape {
         parts: parts_of(command, 0, known),
         truncated: false,
+        programs_only: false,
     })
 }
 
@@ -231,11 +253,12 @@ pub fn shape_value(command: &str) -> serde_json::Value {
 }
 
 /// The shape of `command`, its known subcommands and its key `known`'s, as
-/// JSON, within [`super::telemetry::MAX_SHAPE_BYTES`]: arguments, then
-/// parts, cut from the end until it fits, and marked `truncated`; `None`
-/// without a key, when a step keeps no shape.
+/// JSON, at `known`'s detail ([`Subcommands::detailed`]), within
+/// [`super::telemetry::MAX_SHAPE_BYTES`]: arguments, then parts, cut from
+/// the end until it fits, and marked `truncated`; `None` without a key or
+/// at the `redacted` detail, when a step keeps no shape.
 pub fn shape_value_with(command: &str, known: &Subcommands) -> Option<serde_json::Value> {
-    let mut shape = shape(command, known)?;
+    let mut shape = known.detail.apply(shape(command, known)?)?;
     let fits = |shape: &CommandShape| {
         serde_json::to_vec(shape)
             .is_ok_and(|bytes| bytes.len() <= super::telemetry::MAX_SHAPE_BYTES)
@@ -2257,6 +2280,7 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
 pub struct Subcommands {
     lists: Vec<SubcommandList>,
     key: Option<DigestKey>,
+    detail: CommandDetail,
 }
 
 impl Default for Subcommands {
@@ -2272,16 +2296,40 @@ impl Subcommands {
         Self {
             lists: COMMON_SUBCOMMANDS.to_vec(),
             key: None,
+            detail: CommandDetail::Shape,
         }
     }
 
-    /// The common ones and those of each profile `toolchains` declares.
+    /// The common ones and those of each profile `toolchains` declares, at
+    /// the detail its `[telemetry] command_detail` asks.
     pub fn of(toolchains: &super::toolchain::Toolchains) -> Self {
         let mut lists = COMMON_SUBCOMMANDS.to_vec();
         for profile in toolchains.profiles() {
             lists.extend_from_slice(profile.subcommands());
         }
-        Self { lists, key: None }
+        Self {
+            lists,
+            key: None,
+            detail: toolchains.telemetry().command_detail,
+        }
+    }
+
+    /// The same, a step keeping its commands at `detail`.
+    #[must_use]
+    pub fn detailed(mut self, detail: CommandDetail) -> Self {
+        self.detail = detail;
+        self
+    }
+
+    /// The detail a step keeps its commands at.
+    pub fn detail(&self) -> CommandDetail {
+        self.detail
+    }
+
+    /// The digest of `word` under the key, as a shape keeps it; `None`
+    /// without a key.
+    pub fn digest_word(&self, word: &str) -> Option<String> {
+        self.key.as_ref().map(|key| key.digest(word))
     }
 
     /// The same, the words digested under `key`, the queue's; with none, no
@@ -2435,15 +2483,45 @@ fn shape_part(words: &[Word], depth: usize, known: &Subcommands) -> Vec<ShapePar
         }
         None => {
             part.program = Some(known.digest(&program.text));
-            part.args = args
-                .iter()
-                .map(|word| ShapeArg::Word {
-                    word: known.digest(&word.text),
-                })
-                .collect();
+            part.args = unknown_args(args, known);
         }
     }
     vec![part]
+}
+
+/// The words of an unknown program, each its digest, up to a `--`, kept
+/// as a known program's is, with how many words came after it: a
+/// `--name=value` is a flag of the digest of its name and that of its
+/// value, so a rule's flag matches it as it matches the name written
+/// apart.
+fn unknown_args(args: &[Word], known: &Subcommands) -> Vec<ShapeArg> {
+    let end = args
+        .iter()
+        .position(|word| word.text == "--")
+        .unwrap_or(args.len());
+    let mut shaped: Vec<ShapeArg> = args[..end]
+        .iter()
+        .map(|word| {
+            let flag = word.text.split_once('=').filter(|(name, _)| {
+                name.starts_with('-') && !name.trim_start_matches('-').is_empty()
+            });
+            match flag {
+                Some((name, value)) => ShapeArg::Flag {
+                    flag: known.digest(name),
+                    value: Some(known.digest(value)),
+                },
+                None => ShapeArg::Word {
+                    word: known.digest(&word.text),
+                },
+            }
+        })
+        .collect();
+    if end < args.len() {
+        shaped.push(ShapeArg::AfterDashdash {
+            after_dashdash: args.len() - end - 1,
+        });
+    }
+    shaped
 }
 
 /// The script of a shell's `-c` (`bash -lc 'script'`): the word after a
@@ -3113,6 +3191,8 @@ mod tests {
             "cat <<-EOF\n\tx\\\n\tEOF\ngit --hunter2\nEOF\n",
             "cat <<EOF\nx\\\\\\\nEOF\ngit --hunter2\nEOF\n",
             "x=$(cat <<EOF\nx\\\nEOF\ngit --hunter2 )\nEOF\n)",
+            // An unknown program's `--name=value`: both digests.
+            "mytool --hunter2=hunter2 -- --token=hunter2",
         ] {
             let shape = shape(command, &known).unwrap();
             let text = serde_json::to_string(&shape).unwrap();
@@ -3143,7 +3223,16 @@ mod tests {
                             );
                         }
                         ShapeArg::Flag { flag, value } => {
-                            assert!(subs.is_some() && flag_name(flag), "{command}: {text}");
+                            // A listed program's flag by name; an unknown
+                            // one's `--name=value` by its name's digest.
+                            assert!(
+                                if subs.is_some() {
+                                    flag_name(flag)
+                                } else {
+                                    hex(flag)
+                                },
+                                "{command}: {text}"
+                            );
                             assert!(value.as_deref().is_none_or(hex), "{command}: {text}");
                         }
                         ShapeArg::Word { word: digest } | ShapeArg::Plus { plus: digest } => {

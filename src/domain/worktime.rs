@@ -6,8 +6,12 @@
 //!
 //! Every millisecond of the span gets one category, by priority:
 //! a foreground tool > a background command > a subagent > the model >
-//! idle. A shell command is labelled by the heaviest thing it runs
-//! ([`classify`]); a background command and an async subagent end at their
+//! idle. A shell command is labelled by the rules its repository works by
+//! ([`label`], [`crate::domain::command_rules::work_rules`]): dagq's own
+//! source keeps the cargo rules of [`classify`] (the heaviest thing it
+//! runs) while its `dagq.toml` has no `[[telemetry.commands]]`, and any
+//! other repository takes the group of the rule that classifies it; a
+//! background command and an async subagent end at their
 //! `<task-notification>`. The tool hooks (`PreToolUse` / `PostToolUse`)
 //! are not used: they cannot see a background command's end.
 
@@ -15,6 +19,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
+use super::command_rules::{CHECK_CLASSES, FULL_TEST, RuleSource, WorkRules};
 use super::transcript::{RecordRole, TranscriptRecord, millis_text};
 use super::turn::TurnCommand;
 
@@ -85,6 +90,84 @@ pub fn classify(command: &str, cargo: bool) -> &'static str {
         return CHAIN;
     }
     kinds.first().copied().unwrap_or(OTHER_COMMAND)
+}
+
+/// The category of a shell `command` by `rules`, and whether it is one of
+/// the heavy commands: by the cargo rules of dagq's source ([`classify`],
+/// heavy when one of [`HEAVY`]); or by the rules that work, the group of
+/// the rule its earliest-matched part matched, heavy when that rule is the
+/// project's or a profile's (a tool's command, not a wait, dagq or git),
+/// and [`OTHER_COMMAND`], not heavy, when no rule matches.
+pub fn label(command: &str, rules: &WorkRules) -> (&'static str, bool) {
+    match rules {
+        WorkRules::SourceCargo => {
+            let category = classify(command, true);
+            (category, HEAVY.contains(&category))
+        }
+        WorkRules::Rules(classifier) => match classifier.classify_text(command) {
+            Some(matched) => (matched.group, matched.source != RuleSource::Common),
+            None => (OTHER_COMMAND, false),
+        },
+    }
+}
+
+/// Whether a command of `category` (`heavy` or not) runs tests, so its
+/// output is read for the failed tests: one of [`TEST_KINDS`] by the
+/// cargo rules, a heavy one by the rules that work when they name failed
+/// tests (`[telemetry] failed_tests`).
+fn reads_tests(rules: &WorkRules, category: &str, heavy: bool) -> bool {
+    match rules {
+        WorkRules::SourceCargo => TEST_KINDS.contains(&category),
+        WorkRules::Rules(classifier) => heavy && classifier.names_failed_tests(),
+    }
+}
+
+/// What `command` runs of `integrate`'s checks, by `rules`: by the cargo
+/// rules ([`verification_classes`]), or the classes of its parts that are
+/// [`CHECK_CLASSES`], each once.
+pub fn check_classes(command: &str, rules: &WorkRules) -> Vec<&'static str> {
+    match rules {
+        WorkRules::SourceCargo => verification_classes(command),
+        WorkRules::Rules(classifier) => {
+            let mut classes: Vec<&'static str> = classifier
+                .part_classes(command)
+                .into_iter()
+                .filter(|class| CHECK_CLASSES.contains(class))
+                .collect();
+            classes.sort_unstable();
+            classes.dedup();
+            classes
+        }
+    }
+}
+
+/// Whether a breakdown by `rules` counts `integrate`'s checks: by the
+/// cargo rules, and by rules one of which gives a class of
+/// [`CHECK_CLASSES`].
+fn counts_checks(rules: &WorkRules) -> bool {
+    match rules {
+        WorkRules::SourceCargo => true,
+        WorkRules::Rules(classifier) => classifier.rules().counts_checks(),
+    }
+}
+
+/// What `command` runs that a [`Breakdown`] counts, by `rules`.
+fn runs_of(command: &str, rules: &WorkRules) -> Runs {
+    match rules {
+        WorkRules::SourceCargo => Runs {
+            classes: verification_classes(command),
+            full_test: full_test(command),
+            llvm_cov: parts(command).iter().any(|p| rank(p, true) == LLVM_COV),
+        },
+        WorkRules::Rules(classifier) => {
+            let classes = classifier.part_classes(command);
+            Runs {
+                full_test: classes.contains(&FULL_TEST),
+                llvm_cov: classes.contains(&super::command_rules::LLVM_COV),
+                classes: check_classes(command, rules),
+            }
+        }
+    }
 }
 
 /// The kinds of a part, heaviest first.
@@ -619,6 +702,9 @@ pub struct Command {
     pub tool_use_id: String,
     pub tool: String,
     pub category: &'static str,
+    /// It is one of the heavy commands, counted and failed per category
+    /// and listed in `timeline` ([`label`]).
+    pub heavy: bool,
     pub start: i64,
     pub end: i64,
     /// Its end was seen (a result, or the notification of a background
@@ -704,9 +790,13 @@ fn secs(millis: i64) -> i64 {
 
 /// The tool calls that start in the span `from`..`to` (unix
 /// milliseconds), in the order they started. A call whose end was not
-/// seen is cut at `to`. `cargo` gives the shell commands the cargo rules
-/// of [`classify`].
-pub fn commands(records: &[TranscriptRecord], from: i64, to: i64, cargo: bool) -> Vec<Command> {
+/// seen is cut at `to`. `rules` label the shell commands ([`label`]).
+pub fn commands(
+    records: &[TranscriptRecord],
+    from: i64,
+    to: i64,
+    rules: &WorkRules,
+) -> Vec<Command> {
     let mut results = BTreeMap::new();
     let mut notices = BTreeMap::new();
     for record in records {
@@ -730,33 +820,26 @@ pub fn commands(records: &[TranscriptRecord], from: i64, to: i64, cargo: bool) -
             let result = results.get(&tool_use.id).copied();
             let notice = notices.get(&tool_use.id).copied();
             let shell = tool_use.command.is_some();
-            let (category, background, end) = if tool_use.name == "Agent" {
+            let shell_label = || label(tool_use.command.as_deref().unwrap_or_default(), rules);
+            let ((category, heavy), background, end) = if tool_use.name == "Agent" {
                 (
-                    SUBAGENT,
+                    (SUBAGENT, false),
                     notice.is_some(),
                     notice.map(|(at, _)| at).or(result.map(|(at, _)| at)),
                 )
             } else if shell && (tool_use.background || notice.is_some()) {
                 // Run in the background from the start, or moved there
                 // while it ran: it ends at its notice.
-                (
-                    classify(tool_use.command.as_deref().unwrap_or_default(), cargo),
-                    true,
-                    notice.map(|(at, _)| at),
-                )
+                (shell_label(), true, notice.map(|(at, _)| at))
             } else if shell {
-                (
-                    classify(tool_use.command.as_deref().unwrap_or_default(), cargo),
-                    false,
-                    result.map(|(at, _)| at),
-                )
+                (shell_label(), false, result.map(|(at, _)| at))
             } else if WAIT_TOOLS.contains(&tool_use.name.as_str()) {
-                (WAIT, false, result.map(|(at, _)| at))
+                ((WAIT, false), false, result.map(|(at, _)| at))
             } else {
-                (TOOL, false, result.map(|(at, _)| at))
+                ((TOOL, false), false, result.map(|(at, _)| at))
             };
             let failed_tests = match (background, result) {
-                (false, Some((_, result))) if shell && TEST_KINDS.contains(&category) => {
+                (false, Some((_, result))) if shell && reads_tests(rules, category, heavy) => {
                     result.failed_tests.names.clone()
                 }
                 _ => Vec::new(),
@@ -782,6 +865,7 @@ pub fn commands(records: &[TranscriptRecord], from: i64, to: i64, cargo: bool) -
                 tool_use_id: tool_use.id.clone(),
                 tool: tool_use.name.clone(),
                 category,
+                heavy,
                 start: record.at,
                 end: end.map_or(to, |end| end.clamp(record.at, to)),
                 finished: end.is_some(),
@@ -822,7 +906,8 @@ pub struct Breakdown {
     /// Commands that ran a check `integrate` runs too (one of the task's
     /// verification commands: the llvm-cov gate, the whole `cargo test`,
     /// the e2e test). This and the next two are counted only by the cargo
-    /// rules (dagq's source repository, ADR-t614-1), `None` without them.
+    /// rules (dagq's source repository, ADR-t614-1) and by rules that give
+    /// a class of [`CHECK_CLASSES`] ([`counts_checks`]), `None` otherwise.
     pub verification_repeats: Option<usize>,
     /// Commands that ran the whole `cargo test`.
     pub full_tests: Option<usize>,
@@ -839,6 +924,8 @@ pub struct Breakdown {
     /// The classes of `integrate`'s checks the task's verification runs,
     /// those `verification_repeats` counts.
     pub wanted: Vec<&'static str>,
+    /// The rules it labels and counts by.
+    pub rules: WorkRules,
 }
 
 /// What one command runs that a [`Breakdown`] counts, by the cargo rules.
@@ -853,27 +940,27 @@ pub struct Runs {
 }
 
 /// The breakdown of the span `from`..`to` (unix milliseconds) of
-/// `records`, whose task verifies with `verification`. `cargo` (the queue's
-/// repository is dagq's source, ADR-t614-1) labels the commands by the
-/// cargo rules of [`classify`] and counts what they repeat of
-/// `integrate`'s checks; without it, neither.
+/// `records`, whose task verifies with `verification`. `rules`
+/// ([`crate::domain::command_rules::work_rules`]) label the commands
+/// ([`label`]) and say whether what they repeat of `integrate`'s checks is
+/// counted ([`counts_checks`]).
 pub fn breakdown(
     records: &[TranscriptRecord],
     from: i64,
     to: i64,
     verification: &[String],
-    cargo: bool,
+    rules: &WorkRules,
 ) -> Breakdown {
     #[cfg(test)]
     super::transcript::count_analysis();
     let to = to.max(from);
-    let commands = commands(records, from, to, cargo);
+    let commands = commands(records, from, to, rules);
     assemble(
         commands,
         model_intervals(records),
         (from, to),
         verification,
-        cargo,
+        rules,
     )
 }
 
@@ -895,9 +982,14 @@ pub struct HeadlessTurn<'a> {
 /// ([`TIMES_READ`]); one whose end was not read ends with its turn,
 /// unfinished ([`TIMES_TURN_END`]); one whose start was not read starts
 /// at its end ([`TIMES_COMPLETED_ONLY`]); one of which neither was read
-/// is left out. A `command_execution` is labelled by [`classify`], any
-/// other item is a [`TOOL`]. None runs in the background.
-pub fn turn_commands(turns: &[HeadlessTurn<'_>], from: i64, to: i64, cargo: bool) -> Vec<Command> {
+/// is left out. A `command_execution` is labelled by `rules` ([`label`]),
+/// any other item is a [`TOOL`]. None runs in the background.
+pub fn turn_commands(
+    turns: &[HeadlessTurn<'_>],
+    from: i64,
+    to: i64,
+    rules: &WorkRules,
+) -> Vec<Command> {
     let mut commands = Vec::new();
     for turn in turns {
         let end_of_turn = turn.end.max(turn.start);
@@ -912,10 +1004,10 @@ pub fn turn_commands(turns: &[HeadlessTurn<'_>], from: i64, to: i64, cargo: bool
             if start < from || start >= to {
                 continue;
             }
-            let category = if item.tool == SHELL_ITEM {
-                classify(item.command.as_deref().unwrap_or_default(), cargo)
+            let (category, heavy) = if item.tool == SHELL_ITEM {
+                label(item.command.as_deref().unwrap_or_default(), rules)
             } else {
-                TOOL
+                (TOOL, false)
             };
             let failed = end.map(|_| {
                 item.exit_code.is_some_and(|code| code != 0)
@@ -925,6 +1017,7 @@ pub fn turn_commands(turns: &[HeadlessTurn<'_>], from: i64, to: i64, cargo: bool
                 tool_use_id: item.id.clone(),
                 tool: item.tool.clone(),
                 category,
+                heavy,
                 start,
                 end: end.unwrap_or(end_of_turn).clamp(start, to),
                 finished: end.is_some(),
@@ -933,7 +1026,7 @@ pub fn turn_commands(turns: &[HeadlessTurn<'_>], from: i64, to: i64, cargo: bool
                 failed,
                 status: None,
                 command: item.command.clone(),
-                failed_tests: if TEST_KINDS.contains(&category) {
+                failed_tests: if reads_tests(rules, category, heavy) {
                     item.failed_tests.clone()
                 } else {
                     Vec::new()
@@ -959,15 +1052,15 @@ pub fn headless_breakdown(
     from: i64,
     to: i64,
     verification: &[String],
-    cargo: bool,
+    rules: &WorkRules,
 ) -> Breakdown {
     let to = to.max(from);
     assemble(
-        turn_commands(turns, from, to, cargo),
+        turn_commands(turns, from, to, rules),
         turns.iter().map(|turn| (turn.start, turn.end)).collect(),
         (from, to),
         verification,
-        cargo,
+        rules,
     )
 }
 
@@ -978,7 +1071,7 @@ fn assemble(
     model: Vec<(i64, i64)>,
     (from, to): (i64, i64),
     verification: &[String],
-    cargo: bool,
+    rules: &WorkRules,
 ) -> Breakdown {
     let order = |category: &str| {
         CATEGORIES
@@ -1014,15 +1107,11 @@ fn assemble(
             (start, end, category)
         })
         .collect();
-    let runs: Option<Vec<Runs>> = cargo.then(|| {
+    let runs: Option<Vec<Runs>> = counts_checks(rules).then(|| {
         commands
             .iter()
             .map(|c| match c.command.as_deref() {
-                Some(command) => Runs {
-                    classes: verification_classes(command),
-                    full_test: full_test(command),
-                    llvm_cov: parts(command).iter().any(|p| rank(p, true) == LLVM_COV),
-                },
+                Some(command) => runs_of(command, rules),
                 None => Runs::default(),
             })
             .collect()
@@ -1038,6 +1127,7 @@ fn assemble(
         windows,
         runs,
         wanted: Vec::new(),
+        rules: rules.clone(),
     };
     breakdown.count();
     breakdown.verify(verification);
@@ -1048,11 +1138,11 @@ impl Breakdown {
     /// Count again what its commands repeat of `integrate`'s checks, for
     /// the task's `verification` (task 1334: the verification is read
     /// under the write lock, and the commands' classes were found before
-    /// it). Nothing without the cargo rules.
+    /// it). Nothing unless its rules count the checks.
     pub fn verify(&mut self, verification: &[String]) {
         self.wanted = verification
             .iter()
-            .flat_map(|command| verification_classes(command))
+            .flat_map(|command| check_classes(command, &self.rules))
             .collect();
         self.count_repeats();
     }
@@ -1134,16 +1224,13 @@ impl Breakdown {
     /// and no path (the event rule of ADR A). `heavy` lists the heavy
     /// commands for `timeline`.
     pub fn payload(&self) -> Value {
-        let secs_by: BTreeMap<&str, i64> = CATEGORIES
+        let secs_by: BTreeMap<&str, i64> = self
+            .millis
             .iter()
-            .filter_map(|c| Some((*c, secs(*self.millis.get(c)?))))
+            .map(|(category, millis)| (*category, secs(*millis)))
             .filter(|(_, secs)| *secs > 0)
             .collect();
-        let heavy: Vec<&Command> = self
-            .commands
-            .iter()
-            .filter(|c| HEAVY.contains(&c.category))
-            .collect();
+        let heavy: Vec<&Command> = self.commands.iter().filter(|c| c.heavy).collect();
         let mut counts: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
         for command in &heavy {
             let count = counts.entry(command.category).or_default();
@@ -1170,8 +1257,8 @@ impl Breakdown {
                 }))
                 .collect::<Vec<_>>(),
         });
-        // The cargo-only counts, left out without the cargo rules
-        // (ADR-t614-1).
+        // The counts of `integrate`'s checks, left out by rules that do not
+        // count them (ADR-t614-1, [`counts_checks`]).
         for (key, count) in [
             ("verification_repeats", self.verification_repeats),
             ("full_tests", self.full_tests),
@@ -1204,6 +1291,15 @@ mod tests {
     /// The category by the cargo rules of dagq's source repository.
     fn classify(command: &str) -> &'static str {
         super::classify(command, true)
+    }
+
+    /// The rules of a repository that is not dagq's source and declares no
+    /// profile and no project rule: the common rules alone.
+    fn no_rules() -> WorkRules {
+        crate::domain::command_rules::work_rules(
+            false,
+            &crate::domain::toolchain::Toolchains::none(),
+        )
     }
 
     const SESSION: &str = "11111111-1111-4111-8111-111111111111";
@@ -1281,6 +1377,21 @@ mod tests {
             &lines.join("\n"),
             SESSION,
             &crate::domain::toolchain::Toolchains::this_repository(),
+        )
+        .unwrap()
+        .records
+    }
+
+    /// The same, read for the failed tests (`[telemetry] failed_tests` on).
+    fn records_naming_failed_tests(lines: &[String]) -> Vec<TranscriptRecord> {
+        let asks = crate::domain::command_rules::TelemetrySettings {
+            failed_tests: true,
+            ..Default::default()
+        };
+        Transcript::parse(
+            &lines.join("\n"),
+            SESSION,
+            &crate::domain::toolchain::Toolchains::this_repository().with_telemetry(asks),
         )
         .unwrap()
         .records
@@ -1491,7 +1602,13 @@ mod tests {
                 "Background command \"cargo build\" completed (exit code 0)",
             ),
         ];
-        let moved = breakdown(&records(&moved), ms(0), ms(50), &[], true);
+        let moved = breakdown(
+            &records(&moved),
+            ms(0),
+            ms(50),
+            &[],
+            &WorkRules::SourceCargo,
+        );
         assert!(moved.commands[0].background);
         assert_eq!(moved.commands[0].end, ms(40));
         assert_eq!(moved.commands[0].failed, Some(false));
@@ -1500,7 +1617,13 @@ mod tests {
             "cargo fmt --all --check".to_owned(),
             "cargo llvm-cov --locked --fail-under-lines 80".to_owned(),
         ];
-        let work = breakdown(&records, ms(0), ms(600), &verification, true);
+        let work = breakdown(
+            &records,
+            ms(0),
+            ms(600),
+            &verification,
+            &WorkRules::SourceCargo,
+        );
         let secs_of = |category: &str| work.millis.get(category).copied().unwrap_or(0) / 1000;
         assert_eq!(work.total_millis, 600_000);
         assert_eq!(work.millis.values().sum::<i64>(), 600_000);
@@ -1592,7 +1715,7 @@ mod tests {
             ),
         ];
         let records = records(&lines);
-        let resume = breakdown(&records, ms(990), ms(1100), &[], true);
+        let resume = breakdown(&records, ms(990), ms(1100), &[], &WorkRules::SourceCargo);
         assert_eq!(resume.commands.len(), 1);
         assert_eq!(resume.commands[0].category, GIT);
         assert_eq!(resume.full_tests, Some(0));
@@ -1604,12 +1727,12 @@ mod tests {
             ms(0),
             ms(100),
             &["cargo test --locked".into()],
-            true,
+            &WorkRules::SourceCargo,
         );
         assert_eq!(worker.verification_repeats, Some(1));
         assert_eq!(worker.millis[&TEST], 45_000);
         // An empty span.
-        let empty = breakdown(&records, ms(5000), ms(4000), &[], true);
+        let empty = breakdown(&records, ms(5000), ms(4000), &[], &WorkRules::SourceCargo);
         assert_eq!(empty.total_millis, 0);
         assert!(empty.millis.is_empty());
     }
@@ -1620,6 +1743,7 @@ mod tests {
             tool_use_id: "x".into(),
             tool: "Bash".into(),
             category: OTHER_COMMAND,
+            heavy: false,
             start: 0,
             end: 1500,
             finished: true,
@@ -1669,8 +1793,8 @@ mod tests {
             bash(25, "t5", "sed -n 1,9p src/domain/worktime.rs", false),
             result(26, "t5", "test z::quoted ... FAILED", false),
         ];
-        let records = records(&lines);
-        let work = breakdown(&records, ms(0), ms(30), &[], true);
+        let records = records_naming_failed_tests(&lines);
+        let work = breakdown(&records, ms(0), ms(30), &[], &WorkRules::SourceCargo);
         let names: Vec<&[String]> = work
             .commands
             .iter()
@@ -1696,15 +1820,17 @@ mod tests {
             work.commands[0].line(&span)["failed_tests"],
             json!(["a::breaks", "b::too"])
         );
-        let quiet = breakdown(&records, ms(6), ms(21), &[], true);
+        let quiet = breakdown(&records, ms(6), ms(21), &[], &WorkRules::SourceCargo);
         assert!(quiet.payload().get("failed_tests").is_none());
     }
 
-    /// Outside dagq's source repository (ADR-t614-1) no command is labelled
-    /// e2e, llvm-cov or test, none of their failed tests is read, and the
-    /// counts of what `integrate` repeats are neither kept nor written.
+    /// Outside dagq's source repository (ADR-t614-1), with no profile
+    /// declared and no project rule, no cargo command is classified (a
+    /// build neither: no rule is applied by default, ADR-t2268-1 decision
+    /// 3), none of their failed tests is read, and the counts of what
+    /// `integrate` repeats are neither kept nor written.
     #[test]
-    fn without_the_cargo_rules_no_cargo_only_kind_or_count_is_kept() {
+    fn without_a_profile_or_a_project_rule_no_cargo_command_is_classified_or_counted() {
         let lines = [
             input(0, "go"),
             bash(1, "a", "cargo llvm-cov --locked", false),
@@ -1718,11 +1844,11 @@ mod tests {
         ];
         let records = records(&lines);
         let verification = ["cargo llvm-cov --locked".to_owned()];
-        let work = breakdown(&records, ms(0), ms(50), &verification, false);
+        let work = breakdown(&records, ms(0), ms(50), &verification, &no_rules());
         let categories: Vec<&str> = work.commands.iter().map(|c| c.category).collect();
         assert_eq!(
             categories,
-            [OTHER_COMMAND, OTHER_COMMAND, OTHER_COMMAND, BUILD]
+            [OTHER_COMMAND, OTHER_COMMAND, OTHER_COMMAND, OTHER_COMMAND]
         );
         assert!(work.commands.iter().all(|c| c.failed_tests.is_empty()));
         assert_eq!(work.verification_repeats, None);
@@ -1737,18 +1863,98 @@ mod tests {
         ] {
             assert!(payload.get(key).is_none(), "{key}: {payload}");
         }
-        assert_eq!(payload["secs"]["other_command"], 27);
-        assert_eq!(
-            payload["commands"],
-            json!({"build": {"runs": 1, "failed": 0}})
-        );
+        assert_eq!(payload["secs"]["other_command"], 36);
+        assert_eq!(payload["commands"], json!({}));
+        assert_eq!(payload["heavy"], json!([]));
         // The same commands by the cargo rules.
-        let cargo = breakdown(&records, ms(0), ms(50), &verification, true);
+        let cargo = breakdown(
+            &records,
+            ms(0),
+            ms(50),
+            &verification,
+            &WorkRules::SourceCargo,
+        );
         let categories: Vec<&str> = cargo.commands.iter().map(|c| c.category).collect();
         assert_eq!(categories, [LLVM_COV, TEST, E2E, CHAIN]);
         assert_eq!(cargo.verification_repeats, Some(1));
         assert_eq!(cargo.full_tests, Some(2));
         assert_eq!(cargo.llvm_cov_runs, Some(1));
+    }
+
+    /// (4) The work breakdown names a test command's failed tests only when
+    /// `[telemetry] failed_tests` is on and a declared profile reads them,
+    /// for a Claude transcript and a Codex turn alike; dagq's source by its
+    /// cargo rules names those its readers kept, none by default.
+    #[test]
+    fn failed_tests_are_named_only_when_on_and_by_a_declared_profile() {
+        use crate::domain::command_rules::{TelemetrySettings, work_rules};
+        use crate::domain::toolchain::Toolchains;
+        let on = TelemetrySettings {
+            failed_tests: true,
+            ..TelemetrySettings::default()
+        };
+        let rust = Toolchains::this_repository();
+        let lines = [
+            input(0, "go"),
+            bash(1, "a", "cargo test --locked", false),
+            result(10, "a", "test a::b ... FAILED\ntest c::d ... FAILED", true),
+        ];
+        let claude = |read: &Toolchains, toolchains: &Toolchains| {
+            let records = Transcript::parse(&lines.join("\n"), SESSION, read)
+                .unwrap()
+                .records;
+            let rules = work_rules(false, toolchains);
+            breakdown(&records, ms(0), ms(20), &[], &rules).commands[0]
+                .failed_tests
+                .clone()
+        };
+        let with_on = rust.clone().with_telemetry(on.clone());
+        // No profile declared: none named, a project rule classing the
+        // test command or not.
+        let none_on = Toolchains::none().with_telemetry(TelemetrySettings {
+            commands: vec![
+                crate::domain::command_rules::CommandRule::new("test", "cargo")
+                    .subcommands(&["test"]),
+            ],
+            ..on.clone()
+        });
+        assert!(claude(&rust, &rust).is_empty());
+        assert_eq!(claude(&with_on, &with_on), ["a::b", "c::d"]);
+        assert!(claude(&none_on, &none_on).is_empty());
+        // dagq's source by its cargo rules: those the reader kept, none by
+        // default.
+        let source = |read: &Toolchains| {
+            let records = Transcript::parse(&lines.join("\n"), SESSION, read)
+                .unwrap()
+                .records;
+            breakdown(&records, ms(0), ms(20), &[], &WorkRules::SourceCargo).commands[0]
+                .failed_tests
+                .clone()
+        };
+        assert!(source(&rust).is_empty());
+        assert_eq!(source(&with_on), ["a::b", "c::d"]);
+        // A Codex turn's command, the names as a reader asked for them kept.
+        let mut test = item("t", Some("cargo test --locked"), (Some(1), Some(10)));
+        test.exit_code = Some(101);
+        test.failed_tests = vec!["a::b".into()];
+        let items = [test];
+        let turns = [HeadlessTurn {
+            start: ms(0),
+            end: ms(20),
+            commands: &items,
+        }];
+        let codex = |toolchains: &Toolchains| {
+            turn_commands(&turns, ms(0), ms(30), &work_rules(false, toolchains))[0]
+                .failed_tests
+                .clone()
+        };
+        assert!(codex(&rust).is_empty());
+        assert_eq!(codex(&with_on), ["a::b"]);
+        assert!(codex(&none_on).is_empty());
+        assert_eq!(
+            turn_commands(&turns, ms(0), ms(30), &WorkRules::SourceCargo)[0].failed_tests,
+            ["a::b"]
+        );
     }
 
     /// A breakdown made to one end and moved to another is the breakdown
@@ -1786,7 +1992,8 @@ mod tests {
         for lines in [&finished[..], &running[..], &later[..]] {
             let records = records(lines);
             let last = records.iter().map(|r| r.at).max();
-            let fresh = |to: i64| breakdown(&records, ms(0), to, &verification, true);
+            let fresh =
+                |to: i64| breakdown(&records, ms(0), to, &verification, &WorkRules::SourceCargo);
             for (from, to) in [
                 (ms(90), ms(120)),
                 (ms(120), ms(90)),
@@ -1809,11 +2016,23 @@ mod tests {
                 assert_eq!(moved.payload(), fresh(to).payload());
             }
             // A span starting at its end, made longer.
-            let mut empty = breakdown(&records, ms(90), ms(90), &verification, true);
+            let mut empty = breakdown(
+                &records,
+                ms(90),
+                ms(90),
+                &verification,
+                &WorkRules::SourceCargo,
+            );
             assert!(empty.retarget(last, ms(100)));
             assert_eq!(
                 empty,
-                breakdown(&records, ms(90), ms(100), &verification, true)
+                breakdown(
+                    &records,
+                    ms(90),
+                    ms(100),
+                    &verification,
+                    &WorkRules::SourceCargo
+                )
             );
             let mut same = fresh(ms(90));
             assert!(same.retarget(last, ms(90)));
@@ -1835,13 +2054,13 @@ mod tests {
         ]);
         let llvm_cov = vec!["cargo llvm-cov nextest --locked --workspace".to_owned()];
         let test = vec!["cargo test --locked".to_owned()];
-        for cargo in [true, false] {
-            let mut work = breakdown(&records, ms(0), ms(30), &llvm_cov, cargo);
+        for rules in [WorkRules::SourceCargo, no_rules()] {
+            let mut work = breakdown(&records, ms(0), ms(30), &llvm_cov, &rules);
             for verification in [&test, &llvm_cov, &Vec::new()] {
                 work.verify(verification);
                 assert_eq!(
                     work,
-                    breakdown(&records, ms(0), ms(30), verification, cargo)
+                    breakdown(&records, ms(0), ms(30), verification, &rules)
                 );
             }
         }
@@ -1904,7 +2123,7 @@ mod tests {
                 commands: &second,
             },
         ];
-        let commands = turn_commands(&turns, ms(0), ms(100), true);
+        let commands = turn_commands(&turns, ms(0), ms(100), &WorkRules::SourceCargo);
         let got: Vec<_> = commands
             .iter()
             .map(|c| {
@@ -1935,13 +2154,13 @@ mod tests {
         assert_eq!(commands[0].failed, Some(false));
         assert_eq!(commands[5].failed, None);
         assert!(commands.iter().all(|c| !c.background && c.status.is_none()));
-        // Without the cargo rules a test is another command.
+        // Without a profile or a project rule a test is another command.
         assert_eq!(
-            turn_commands(&turns, ms(0), ms(100), false)[1].category,
+            turn_commands(&turns, ms(0), ms(100), &no_rules())[1].category,
             OTHER_COMMAND
         );
         // A span from 50 has the second turn's only; one to 57 cuts it.
-        let later = turn_commands(&turns, ms(50), ms(57), true);
+        let later = turn_commands(&turns, ms(50), ms(57), &WorkRules::SourceCargo);
         let ids: Vec<(&str, i64)> = later
             .iter()
             .map(|c| (c.tool_use_id.as_str(), (c.end - BASE) / 1000))
@@ -1953,7 +2172,7 @@ mod tests {
             start: i64::MIN,
             ..turns[0]
         }];
-        let kept: Vec<String> = turn_commands(&begun, ms(12), ms(100), true)
+        let kept: Vec<String> = turn_commands(&begun, ms(12), ms(100), &WorkRules::SourceCargo)
             .into_iter()
             .map(|c| c.tool_use_id)
             .collect();
@@ -1987,7 +2206,13 @@ mod tests {
             },
         ];
         let verification = ["cargo llvm-cov --locked --fail-under-lines 80".to_owned()];
-        let breakdown = headless_breakdown(&turns, ms(0), ms(100), &verification, true);
+        let breakdown = headless_breakdown(
+            &turns,
+            ms(0),
+            ms(100),
+            &verification,
+            &WorkRules::SourceCargo,
+        );
         let payload = breakdown.payload();
         assert_eq!(payload["total_secs"], 100);
         assert_eq!(
@@ -2004,7 +2229,7 @@ mod tests {
             cut.payload()["secs"],
             json!({"llvm_cov": 5, "model": 5, "idle": 10})
         );
-        let plain = headless_breakdown(&turns, ms(0), ms(100), &verification, false);
+        let plain = headless_breakdown(&turns, ms(0), ms(100), &verification, &no_rules());
         assert_eq!(plain.payload().get("verification_repeats"), None);
     }
 }

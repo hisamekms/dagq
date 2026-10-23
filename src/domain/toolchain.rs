@@ -29,7 +29,10 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-use super::{scope::glob_matches, verify_failure::FailureClass, verify_marks::ProjectMark};
+use super::{
+    command_rules::TelemetrySettings, scope::glob_matches, verify_failure::FailureClass,
+    verify_marks::ProjectMark,
+};
 
 pub mod recommend;
 pub mod rust;
@@ -124,6 +127,16 @@ pub trait ToolchainProfile: Sync {
     /// (ADR-t1673-1); none by default.
     fn subcommands(&self) -> &'static [super::command_shape::SubcommandList] {
         &[]
+    }
+
+    /// The profile's own rules of the commands' classification, tried
+    /// after the project's `[[telemetry.commands]]` and before the
+    /// runtime's common rules once the profile is declared
+    /// ([`super::command_rules::effective_rules`]): what its tools'
+    /// commands are, never a project's own names (its test targets);
+    /// none by default.
+    fn command_rules(&self) -> Vec<super::command_rules::CommandRule> {
+        Vec::new()
     }
 
     /// The line where the tool says a signal ended a process it ran: a
@@ -344,6 +357,7 @@ struct Declared {
 pub struct Toolchains {
     declared: Vec<Declared>,
     marks: Vec<ProjectMark>,
+    telemetry: TelemetrySettings,
 }
 
 impl std::fmt::Debug for Toolchains {
@@ -372,6 +386,7 @@ impl Toolchains {
         Self {
             declared: Vec::new(),
             marks: Vec::new(),
+            telemetry: TelemetrySettings::default(),
         }
     }
 
@@ -388,6 +403,7 @@ impl Toolchains {
                 paths: Vec::new(),
             }],
             marks: vec![super::verify_marks::within()],
+            telemetry: TelemetrySettings::default(),
         }
     }
 
@@ -419,6 +435,20 @@ impl Toolchains {
         &self.marks
     }
 
+    /// With `dagq.toml`'s `[telemetry]` and `[[telemetry.commands]]` as
+    /// read.
+    #[must_use]
+    pub fn with_telemetry(mut self, telemetry: TelemetrySettings) -> Self {
+        self.telemetry = telemetry;
+        self
+    }
+
+    /// `dagq.toml`'s `[telemetry]` and `[[telemetry.commands]]`: the
+    /// defaults and no project rule without them.
+    pub fn telemetry(&self) -> &TelemetrySettings {
+        &self.telemetry
+    }
+
     /// `declarations` resolved against `registry`; none is
     /// [`Self::none`], so no profile works. A profile the registry does
     /// not have is a mistake of the file.
@@ -448,6 +478,7 @@ impl Toolchains {
         Ok(Self {
             declared,
             marks: Vec::new(),
+            telemetry: TelemetrySettings::default(),
         })
     }
 

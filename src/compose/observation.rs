@@ -89,18 +89,48 @@ pub(super) fn resources_port(
 
 /// The supervisor's builder of the ledger in the queue's stores (opened
 /// by `store`), with the node rows kept as the host's samples are
-/// (`retention_days`, none when they are not recorded).
+/// (`retention_days`, none when they are not recorded), and the runs'
+/// command steps classified by the rules that work for the `dagq.toml` of
+/// `checkout` against `profiles`, their literals digested under the key of
+/// the queue at `db` ([`ledger_classifier`]).
 pub(super) fn ledger_port(
     settings: &LedgerOptions,
     retention_days: Option<u32>,
     store: Arc<dyn crate::application::QueueOpener<dyn crate::application::LedgerQueue + Send>>,
+    (checkout, db, profiles): (
+        &Path,
+        &Path,
+        &'static crate::domain::toolchain::ProfileRegistry,
+    ),
 ) -> crate::application::supervise::LedgerPort {
+    let (checkout, db) = (checkout.to_path_buf(), db.to_path_buf());
     crate::application::supervise::LedgerPort {
         interval: settings.interval,
         retention_days,
         utc_offset: clock::local_utc_offset,
         store,
+        classifier: Arc::new(move || ledger_classifier(&checkout, &db, profiles)),
     }
+}
+
+/// The rules that classify the runs' command steps now
+/// ([`crate::domain::command_rules::effective_rules`]): the `dagq.toml` of
+/// `checkout` as the readers outside the landing read it (no profile and
+/// no project rule when it cannot be read), the shapes' words matched
+/// under the key of the queue at `db`; `None` without the key, whose steps
+/// keep no shape.
+fn ledger_classifier(
+    checkout: &Path,
+    db: &Path,
+    profiles: &crate::domain::toolchain::ProfileRegistry,
+) -> Option<crate::domain::command_rules::CommandClassifier> {
+    use crate::application::TelemetrySinks;
+    let key = crate::infrastructure::queue_service::SystemServiceAccess.digest_key(db)?;
+    let toolchains = crate::infrastructure::run_env::toolchains_in_use(checkout, profiles);
+    Some(crate::domain::command_rules::CommandClassifier::new(
+        crate::domain::command_rules::effective_rules(&toolchains),
+        crate::domain::command_shape::Subcommands::of(&toolchains).keyed(Some(key)),
+    ))
 }
 
 /// How the supervisor watches the CI ([`SuperviseOptions::ci_watch`](super::SuperviseOptions::ci_watch)).
@@ -266,6 +296,29 @@ fn bound_toolchains(
         crate::infrastructure::run_env::load_toolchains(&checkout, profiles)
             .map_err(|error| format!("{error:#}")),
     )))
+}
+
+/// `doctor`'s `command_rules`: the rules that classify the commands for
+/// the `dagq.toml` of the bound main checkout, resolved against
+/// `profiles`, each with where it comes from, and how a run's work
+/// breakdown classifies ([`crate::domain::command_rules::doctor_view`]); or
+/// `error` with the file's mistake; none for a queue bound to no checkout.
+fn bound_command_rules(
+    queue: &SqliteQueue,
+    profiles: &crate::domain::toolchain::ProfileRegistry,
+) -> Result<Option<Value>> {
+    let Some(checkout) = bound_checkout(queue)? else {
+        return Ok(None);
+    };
+    Ok(Some(
+        match crate::infrastructure::run_env::load_toolchains(&checkout, profiles) {
+            Ok(toolchains) => crate::domain::command_rules::doctor_view(
+                crate::infrastructure::adapters::is_dagq_source(&checkout),
+                &toolchains,
+            ),
+            Err(error) => json!({"error": format!("{error:#}")}),
+        },
+    ))
 }
 
 /// `runtime` of `[roles.worker]` and `[roles.verification]` of the
@@ -1096,6 +1149,9 @@ impl OneShot {
                 report["replans"] = health::replans(&queue.open_replans()?);
                 if let Some(toolchains) = bound_toolchains(&queue, self.profiles)? {
                     report["toolchains"] = toolchains;
+                }
+                if let Some(rules) = bound_command_rules(&queue, self.profiles)? {
+                    report["command_rules"] = rules;
                 }
                 health::add_runtimes(&mut report, &queue, &SystemProcesses, runtimes_of(&queue))?;
                 // The means the CI watch reads GitHub with (ADR-t1920-1).

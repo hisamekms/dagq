@@ -77,7 +77,16 @@ pub struct LedgerPort {
     pub utc_offset: fn(i64) -> i64,
     /// Opens the stores on the job's thread.
     pub store: Arc<dyn QueueOpener<dyn LedgerQueue + Send>>,
+    /// The rules that classify the runs' command steps now, read on the
+    /// job's thread at each pass (the `dagq.toml` of the main checkout
+    /// and the queue's key of command digests); `None` classifies none.
+    pub classifier: Classifier,
 }
+
+/// Reads the rules that classify the runs' command steps
+/// ([`LedgerPort::classifier`]).
+pub type Classifier =
+    Arc<dyn Fn() -> Option<crate::domain::command_rules::CommandClassifier> + Send + Sync>;
 
 /// What one pass did.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -130,17 +139,21 @@ impl Retain {
 /// inputs after `builder`'s cursors, mark, fold and write what changed (at
 /// no earlier time than an event read, [`Builder::folds_at`]),
 /// and drop what `retain` says, the steps only up to those a run's row
-/// does not hold yet ([`Builder::steps_held_since`]). A failure stops the pass and keeps every
-/// mark not written.
+/// does not hold yet ([`Builder::steps_held_since`]). A run's command
+/// steps are classified by `classifier` ([`RunSteps::classified_by`]);
+/// when its rules are of another version than those the builder last
+/// marked by, every run row the store holds classified by others is marked
+/// ([`Builder::mark_rules`]), so the rules alone fold the runs again. A
+/// failure stops the pass and keeps every mark not written.
 pub fn build_pass(
     store: &dyn LedgerQueue,
     builder: &mut Builder,
-    now_ms: i64,
-    built_at: &str,
+    (now_ms, built_at): (i64, &str),
     retain: Retain,
+    classifier: Option<&crate::domain::command_rules::CommandClassifier>,
 ) -> Built {
     let mut built = Built::default();
-    if let Err(error) = pass(store, builder, now_ms, built_at, &mut built) {
+    if let Err(error) = pass(store, builder, (now_ms, built_at), classifier, &mut built) {
         built.failure = Some(format!("{error:#}"));
     }
     if built.failure.is_none()
@@ -171,8 +184,8 @@ pub fn build_pass(
 fn pass(
     store: &dyn LedgerQueue,
     builder: &mut Builder,
-    now_ms: i64,
-    built_at: &str,
+    (now_ms, built_at): (i64, &str),
+    classifier: Option<&crate::domain::command_rules::CommandClassifier>,
     built: &mut Built,
 ) -> Result<()> {
     let latest = store.latest_event_id()?;
@@ -205,6 +218,12 @@ fn pass(
             break;
         }
     }
+    // Rules of another version classify the runs held settled again.
+    let rules = classifier.map(|classifier| classifier.rules().version());
+    if builder.rules_moved(rules.as_deref()) {
+        let rows = store.ledger_rows(LedgerKind::Run)?;
+        builder.mark_rules(rules.as_deref(), &rows);
+    }
     // What it read came by then.
     let now_ms = builder.folds_at(now_ms);
     builder.due(now_ms);
@@ -222,7 +241,7 @@ fn pass(
             builder.put_back(target, targets);
             break;
         }
-        if let Err(error) = write(store, builder, &target, &mut inputs, built) {
+        if let Err(error) = write(store, builder, &target, (&mut inputs, classifier), built) {
             // Its turn comes again after the rest: one failing each pass
             // stops no other.
             builder.keep(target);
@@ -280,11 +299,14 @@ fn write(
     store: &dyn LedgerQueue,
     builder: &mut Builder,
     target: &Target,
-    inputs: &mut Inputs,
+    (inputs, classifier): (
+        &mut Inputs,
+        Option<&crate::domain::command_rules::CommandClassifier>,
+    ),
     built: &mut Built,
 ) -> Result<()> {
     for _ in 0..WRITE_TRIES {
-        if fold_and_write(store, builder, target, inputs, built)? {
+        if fold_and_write(store, builder, target, (inputs, classifier), built)? {
             return Ok(());
         }
     }
@@ -304,7 +326,10 @@ fn fold_and_write(
     store: &dyn LedgerQueue,
     builder: &mut Builder,
     target: &Target,
-    inputs: &mut Inputs,
+    (inputs, classifier): (
+        &mut Inputs,
+        Option<&crate::domain::command_rules::CommandClassifier>,
+    ),
     built: &mut Built,
 ) -> Result<bool> {
     let (kind, key) = target.row_key();
@@ -319,7 +344,8 @@ fn fold_and_write(
                 .into_iter()
                 .filter(|step| step.id <= through)
                 .collect();
-            let mut steps = RunSteps::new(steps, stored.as_ref());
+            let mut steps =
+                RunSteps::new(steps, stored.as_ref()).classified_by(classifier.cloned());
             for session in steps.sessions() {
                 if let Some(owner) = store.session_owner(&session)? {
                     steps.starts.insert(session, owner.registered_at);
@@ -453,8 +479,15 @@ impl LedgerWatch {
         self.retaining = retain.any().then_some(today);
         let mut builder = self.builder.take().unwrap_or_default();
         self.job = Some(spawn_traced(move || {
+            let classifier = (port.classifier)();
             let built = match port.store.open() {
-                Ok(store) => build_pass(&*store, &mut builder, now * 1000, &built_at, retain),
+                Ok(store) => build_pass(
+                    &*store,
+                    &mut builder,
+                    (now * 1000, &built_at),
+                    retain,
+                    classifier.as_ref(),
+                ),
                 Err(error) => Built {
                     failure: Some(format!("open the queue: {error:#}")),
                     ..Built::default()

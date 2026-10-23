@@ -404,7 +404,9 @@ fn save(files: &dyn RunFiles, path: &Path, state: &ReporterState) {
 /// verification's start lasting `duration_ms`, with its shape, its exit
 /// (none when it was killed or its code is not known) and its output's
 /// bytes, never its text; its shape keeps `known`'s subcommands in plain
-/// and digests its other words under `known`'s key (none without one).
+/// and digests its other words under `known`'s key (none without one), at
+/// `known`'s detail (`[telemetry] command_detail`: at `redacted`, its kind,
+/// its tool and its time alone).
 pub fn verification_step(
     (command, known): (&str, &Subcommands),
     offset_ms: i64,
@@ -418,6 +420,7 @@ pub fn verification_step(
     step.exit_code = exit_code;
     step.background = Some(false);
     step.output_bytes = output_bytes;
+    known.detail().redact(&mut step);
     step
 }
 

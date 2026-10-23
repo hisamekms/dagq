@@ -231,6 +231,9 @@ fn call_step(call: Call, at: i64, result: Option<(&str, bool)>, known: &Subcomma
         step.exit_code = result.and_then(|(output, is_error)| exit_code(output, is_error));
     }
     step.output_bytes = result.map(|(output, _)| output.len() as i64);
+    if call.command.is_some() {
+        known.detail().redact(&mut step);
+    }
     step.tool = Some(call.name);
     step
 }

@@ -448,9 +448,9 @@ fn two_builders_on_a_slots_full_from(start: i64) -> (LedgerRow, Built) {
             let ahead = build_pass(
                 memory,
                 &mut Builder::default(),
-                ms(silent),
-                BUILT,
+                (ms(silent), BUILT),
                 Retain::default(),
+                None,
             );
             assert_eq!(ahead.failure, None);
         })));

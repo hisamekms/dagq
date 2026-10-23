@@ -194,7 +194,9 @@ fn tool_result(part: &Value, toolchains: &Toolchains) -> Option<ToolResult> {
     // count (a test command's) is the work breakdown's to say.
     // The worker's commands are read with the profiles the repository
     // declares, as its landing's verification is (ADR-t2268-1).
+    // Only when `[telemetry] failed_tests` asks for them.
     let failed_tests = text
+        .filter(|_| super::command_rules::reads_failed_tests(toolchains))
         .map(|text| failed_tests(toolchains, text))
         .unwrap_or_default();
     Some(ToolResult {
@@ -756,12 +758,13 @@ mod tests {
         );
     }
 
-    /// The tests a tool result names as failed are read with the profiles
-    /// given: a repository that declares only another profile reads none
-    /// of Rust's lines and its own profile's names, and one that declares
-    /// Rust reads them as a repository that declares nothing does.
+    /// The tests a tool result names as failed are read only when
+    /// `[telemetry] failed_tests` is on, and then with the profiles given:
+    /// by default, with it off or with no profile declared none is read; a
+    /// repository that declares only another profile reads none of Rust's
+    /// lines and its own profile's names.
     #[test]
-    fn failed_tests_are_read_with_the_declared_profiles() {
+    fn failed_tests_are_read_only_when_asked_and_with_the_declared_profiles() {
         let output = "FAIL [   0.1s] dagq::it a::b\ntest result: FAILED. 0 passed; 1 failed\nBROKEN made::up";
         let lines = [line(
             "user",
@@ -780,22 +783,18 @@ mod tests {
                 .names
                 .clone()
         };
-        let rust = Toolchains::resolve(
-            &crate::domain::toolchain::BUILTIN,
-            &[crate::domain::toolchain::ToolchainDeclaration {
-                name: "rust".into(),
-                profile: "rust".into(),
-                paths: Vec::new(),
-                line: 1,
-            }],
-        )
-        .unwrap();
+        let set = |failed_tests: bool| crate::domain::command_rules::TelemetrySettings {
+            failed_tests,
+            ..Default::default()
+        };
+        let rust = Toolchains::this_repository();
+        assert!(names(&rust).is_empty());
+        assert!(names(&rust.clone().with_telemetry(set(false))).is_empty());
+        assert_eq!(names(&rust.with_telemetry(set(true))), ["a::b"]);
         assert_eq!(
-            names(&crate::domain::toolchain::fake::only_fake()),
+            names(&crate::domain::toolchain::fake::only_fake().with_telemetry(set(true))),
             ["made::up"]
         );
-        assert_eq!(names(&rust), ["a::b"]);
-        assert_eq!(names(&Toolchains::this_repository()), ["a::b"]);
-        assert!(names(&Toolchains::none()).is_empty());
+        assert!(names(&Toolchains::none().with_telemetry(set(true))).is_empty());
     }
 }

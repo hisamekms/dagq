@@ -40,7 +40,7 @@ dagqの開発でだけ要る機能は、queueのrepositoryが「dagqのソース
 **実装状況**: profileのportと`[toolchains.<名前>]`の宣言はある（[Toolchain profiles](../toolchain-profiles.md)）。
 検証の失敗の分類・落ちたtestとflakyのtestの抜き出し・flakyのやり直しのenv、landing recheckと自動更新のbuildの出力の置き場と掃除、CIの見張りのJUnitのtestの名前、hostの負荷のprocessの種類、hostの`rustc`とtoolchainの記録とKPIの`toolchain`の軸と`stats`の`rustc`の欄は、profileを通して働く。
 宣言の無いrepositoryでは、dagqのソースでもどのprofileも働かない（ADR-t2268-1決定3）。
-計測のコマンドの分類と回数はまだprofileに移っておらず、表の4行目のうちそれらはこの判定で分ける。
+計測のコマンドの分類と回数は効く規則の重ね合わせで決め、dagqのソースの作業の内訳だけが移行の間この判定で分ける（下の「cargo専用の計測」）。
 着地の前のe2eを流すかもこの判定で分け、`dagq.toml`の宣言に移すことはADR-t2257-1決定4が決めている。
 
 | 機能 | 決定 | dagqのソース | ソースでないrepository |
@@ -48,16 +48,18 @@ dagqの開発でだけ要る機能は、queueのrepositoryが「dagqのソース
 | `integrate`のmigrationの番号の振り直し（[integrate](integrate.md#migrationの番号の振り直し)） | ADR-0067決定3 | 動く（`migration_renumbered`、振り直せなければ`migration_number_taken`の`needs_session`） | 番号を見ない。振り直さず、`migration_number_taken`にもしない。`migrations/`の変更は他のファイルと同じに扱う |
 | `--from`なしの`dagq install`（main checkoutからの`cargo build --release --locked`。[install](install.md)の1） | ADR-0073決定14 | 動く | buildせずにerror。`cargo install dagq`で入れ替えるか、`--from`でバイナリかcheckoutを指すよう案内する。`--from`付きと`--rollback`は判定に関係なく動く |
 | `up --auto-update`のsource build（[Auto-update](auto-update.md)） | ADR-0073決定17 | 動く | `up`はerrorで止め、supervisorを起動も引き継ぎもしない。自動更新の設定を持つsupervisorもbuildに進まない。外部のprojectの更新は[Release update](release-update.md)（ADR-t618-1） |
-| `stats`・KPI・worktimeのcargo専用の計測（[stats](commands.md)） | ADR-t614-1決定2(d)（ADR-t1662-3・ADR-t2268-1がamends） | 動く | 記録も出力もしない（下の一覧）。決まった形ではこの判定から外す（下の「cargo専用の計測」） |
+| `stats`・KPI・worktimeのcargo専用の計測（[stats](commands.md)） | ADR-t614-1決定2(d)（ADR-t1662-3・ADR-t2268-1がamends） | `dagq.toml`に`[[telemetry.commands]]`が無い間はcargoの規則で動く | 効く規則で分類し、回数は規則の分類から作る（下の「cargo専用の計測」） |
 
 ### cargo専用の計測
 
-ソースでないrepositoryのqueueで記録も出力もしないもの。
-決まった形では、コマンドの分類と回数は`dagq.toml`の規則・宣言したprofileの既定の規則・runtimeの共通の既定の規則の重ね合わせ（[計測](../measurement.md#コマンドの形と分類)）、hostの`rustc`とtoolchainの記録と分け方は宣言したRustのprofileが持ち、この判定を使わない（ADR-t2268-1決定2・5）。
-今は、hostの`rustc`とtoolchainの記録と、KPIの`toolchain`の軸と`stats`の`rustc`の欄を除き、次のとおりこの判定で分ける。
+コマンドの分類と回数は`dagq.toml`の規則・宣言したprofileの既定の規則・runtimeの共通の既定の規則の重ね合わせ（[計測のコマンドの形と分類](../measurement-commands.md)）で決め、hostの`rustc`とtoolchainの記録と分け方は宣言したRustのprofileが持つ（ADR-t2268-1決定2・5）。
+この判定で分けるのは、移行の間の作業の内訳と`stats`のcargo専用の欄だけである。
 
-- worktime（`src/domain/worktime.rs`）: commandの分類と数のうちcargoの規則が付けるものは、ソースでなければ区間を閉じるときに付けず`work`に書かない（落ちたtestの名前も、testを流す分類のコマンドが無いので読まない）。
-  判定は区間を閉じるたびに`infrastructure::sessions::dagq_source`が、queueの束縛からmain checkoutを求めて行い、束縛の無いqueueはソースでない。
+- worktime（`src/domain/worktime.rs`）: 区間を閉じるときの分類と数は`domain::command_rules::work_rules`の場合分けで決める。
+  dagqのソースで`dagq.toml`に`[[telemetry.commands]]`が無い間は、`[toolchains]`の宣言の有無に依らずcargoの規則（`worktime::classify`と`full_test`）で分類し、`integrate`と重なる検証の数を数える。
+  それ以外のrepositoryは効く規則で分類し、数は効く規則の分類から作る（宣言も規則も無ければ共通の規則だけで、cargoのコマンドは未分類、数は出さない）。
+  この移行の分岐は、このrepositoryの`dagq.toml`にpjの規則を足した後に外す。
+  判定は区間を閉じるたびに`infrastructure::sessions::work_rules`が、queueの束縛からmain checkoutを求めて`Cargo.toml`と`dagq.toml`で行い、束縛の無いqueueはソースでなく宣言も無い。
 - `stats`のcargo専用の欄: ソースでなければ`runs`と全ての群で欄ごと出さず、欄は`domain::stats::without_cargo_measures`のdoc commentが持つ。
 - claimのRustのtoolchainの属性（`run_claimed`）と[`kpi`](commands.md)の`toolchain=`の層と`stats`の`rustc`の欄: この判定ではなく、宣言したprofileにRustのprofileがあるかで分ける（`Toolchains::records_rust_toolchain`）。
   当たらなければ（宣言の無いdagqのソースも）supervisorはRustのprofileの`rustc -vV`を実行せず欄ごと書かず、`kpi`は`--by toolchain`でも層を出さず、`stats`は`rustc`の欄を`runs`と`versions`で出さない（`domain::stats::without_rustc`）。

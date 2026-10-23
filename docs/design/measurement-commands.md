@@ -1,75 +1,77 @@
 ---
 id: design-measurement-commands
 type: design
-title: 計測のコマンドの形と分類（shapeの記録と台帳の分類の予定）
-status: draft
+title: 計測のコマンドの形と分類（shapeの記録と詳しさ・規則の重ね合わせ・台帳と作業の内訳の分類・移行の約束）
+status: current
 created: 2026-10-12
 scope: runtime
 related:
   - design-measurement
   - adr-t1662-3
+  - adr-t2268-1
+  - adr-t614-1
+  - design-toolchain-profiles
 ---
 
 # 計測のコマンドの形と分類
 
-> **一部だけ実装済み**: [計測](measurement.md)の一部で、shapeは実装済みで今の姿を書く。
-> `command_detail`と分類はまだ`src/`に無い予定。
+[計測](measurement.md)の一部で、stepが持つコマンドの形とその詳しさ、台帳と作業の内訳がコマンドに付ける分類を書く。
 
-（ADR-t1662-3決定14〜19、[ADR-t2268-1](../adr/2026-10-12-t2268-1-toolchain-knowledge-behind-declared-profiles.md)決定5）
+（ADR-t1662-3決定14〜19、[ADR-t2268-1](../adr/2026-10-12-t2268-1-toolchain-knowledge-behind-declared-profiles.md)決定5・(4)・(8)）
 
-- `[telemetry] command_detail = "program" | "shape" | "redacted"`（既定`shape`）。
+## shapeと詳しさ
+
 - shapeは`domain::command_shape`の副作用の無い関数が作り、executorがstepに付ける（語の扱いと上限はそのmodule doc）。
   shellの`-c`のscript（Codexのコマンド）はその中身の部分として持つ。
-- shapeは部分（パイプ・`&&`・`||`・`;`で分けたもの）ごとに`lead`（先頭の予約語）・`assigns`（代入の名前）・`program`・`args`（`{flag: 名前, value?: digest}`・`{sub: 語}`・`{word: digest}`・`{plus: digest}`・`{after_dashdash: 数}`）。
+- shapeは部分（パイプ・`&&`・`||`・`;`で分けたもの）ごとに先頭の予約語・代入の名前・プログラム・引数を持つ。
   平文で持つのは決まった一覧にあるプログラム名とそのサブコマンドとflagの名前だけで、一覧に無いプログラムは名前もその後の語もdigestにする（[ADR-t1673-1](../adr/2026-10-21-t1673-1-command-shape-keeps-only-known-subcommands-in-plain.md)）。
   digestはqueueごとの秘密の鍵によるkeyed digestで、同じqueueの中では同じ語が同じdigestになる。
   鍵の無いexecutorはコマンドの形を送らない（作り方と鍵の扱いはADR-t1673-1決定10と`DigestKey`のdoc comment）。
-- 分類は台帳を作るときに、`dagq.toml`の`[[telemetry.commands]]`・宣言したprofileの既定の規則・runtimeの共通の規則（待ち・dagq・git）の順の列を上から当てる。
-  `dagq doctor`が効く列を出どころつきで出す。
-- **実装状況**: `command_detail`と分類は未実装で、分類は記録の時に`domain::worktime`が付ける（[Source repository](supervisor-lifecycle/source-repository.md#cargo専用の計測)）。
-- 今の分類を規則で表す例（1〜3つ目はこのrepositoryの`dagq.toml`で2つ目は今の順を保つ上書き、ほかはRustのprofile）:
+- stepが持つ詳しさは`dagq.toml`の`[telemetry] command_detail`が決め、executorが`Subcommands`に載せてshapeとstepに当てる（`CommandDetail`）。
+  変数の値はどの詳しさでも持たない。
+  書式・値の意味・既定値は`domain::command_rules::TelemetrySettings`のdoc commentが持つ。
+- workerのtranscriptとCodexのturnを読むときは、落ちたtestの名前を既定で読まず保存もしない。
+  `[telemetry] failed_tests`を有効にしたときだけ宣言したprofileの読み方で読み、作業の内訳に渡す（`command_rules::reads_failed_tests`）。
+  profileを宣言していなければ読まない。
 
-```toml
-[[telemetry.commands]]
-class = "e2e"
-program = "cargo"
-flag_values = { "--test" = ["e2e"] }
-takes_value = ["--test"]
+## 分類の流れ
 
-[[telemetry.commands]]
-class = "llvm_cov"
-program = "cargo"
-sub = ["llvm-cov"]
+- stepには分類を書かない。
+  分類は台帳を作るとき（ビュー）にその時に効く規則で決め、規則の版が変われば新着の入力が無くても確定したrunも作り直す（`ledger::builder::Builder::mark_rules`）。
+- 効く規則（`effective_rules`）は、`dagq.toml`の`[[telemetry.commands]]`（pjが足すか上書きする規則）、宣言したtoolchainのprofileの既定の規則を宣言の順、runtimeの共通の規則（待ち・dagq・git）の順に並べた列で、部分ごとに上から最初に一致した規則の分類を付ける。
+  コマンドの分類は、部分の分類のうち規則の並びで先のもの。
+  台帳はコマンドの分類と並べて部分ごとの分類も持つ（`ledger::steps::ClassedStep`）。
+  どれにも一致しなければ未分類。
+- 宣言も`[[telemetry.commands]]`も無いrepositoryは共通の規則だけで分類し、言語の道具のコマンドは未分類になる（宣言しなければどのprofileも当てない。ADR-t2268-1決定3）。
+- 規則の項目と一致の意味は`CommandRule`と`CommandClassifier`のdoc commentが持つ。
+  literalは平文の語ともそのdigestとも一致するので、一覧に無いプログラムの規則も書ける。
+  `program`と`redacted`の詳しさのstepには値と語が無いので、それを見る規則は、無いことを求める規則も含めて一致しない。
+- runtimeは分類の名前に意味を持たせない。
+  例外は作業の内訳の`integrate`と重なる検証の数で、`CHECK_CLASSES`の名前の分類から数える。
+- `dagq doctor`の`command_rules`が効く規則の列を出どころ（`dagq.toml`・`profile:<名前>`・`common`）つきで出す。
 
-[[telemetry.commands]]
-class = "full_test"
-group = "test"
-program = "cargo"
-sub = ["test"]
-flag_values = { "--test" = ["it"] }
-none_of = ["--lib", "--bin", "--bins", "--doc", "--example", "--package", "-p", "-E"]
-takes_value = ["--test"]
-positional = "none"
+## profileの規則とpjの規則の分担
 
-[[telemetry.commands]]
-class = "full_test"
-group = "test"
-program = "cargo"
-sub = ["test"]
-none_of = ["--test", "--lib", "--bin", "--bins", "--doc", "--example", "--package", "-p", "-E"]
-positional = "none"
+- profileの既定の規則は道具の知識だけを持つ（`ToolchainProfile::command_rules`。Rustのprofileはcargoのbuild・test・fmt・llvm-covと、targetもfilterも無い`cargo test`の`full_test`）。
+  profileを宣言すれば効き、`[[telemetry.commands]]`には書かない。
+- pjのtest targetの名前に依る分類（どのtargetがe2eか、どのtargetが全体に近いか）はpjの規則として`dagq.toml`に書く。
+- profileの無い道具（npm/pnpm・go・pytest・gradle・make）の規則は雛形としてバイナリが持ち（`command_rules::templates`）、`dagq init`がrepositoryのファイルから当てはまるものを`telemetry_commands`の案として出す。
+  案は書き込まない。
+  その言語のprofileを足したら、雛形はprofileの既定の規則に移す。
 
-[[telemetry.commands]]
-class = "test"
-program = "cargo"
-sub = ["test"]
-```
+## 台帳と作業の内訳
 
-`cargo test --locked --test it`は3つ目の規則で`full_test`、`cargo test --locked --test plugin`は`plugin`が`["it"]`に無いので3つ目と4つ目（`--test`が在る）に一致せず5つ目で`test`になる。
-`positional`が除くのは規則の`sub`が一致した語だけなので、`cargo test runtime`（`runtime`は既知のサブコマンドでないのでdigestで残る。[ADR-t1673-1](../adr/2026-10-21-t1673-1-command-shape-keeps-only-known-subcommands-in-plain.md)）は3つ目と4つ目に一致せず`test`になる。
-台帳は部分ごとの分類も持ち、`integrate`と重なる検証の数（`full_tests`・`llvm_cov_runs`）は部分の分類から数える（`cargo llvm-cov … && cargo test --locked`は両方に数える）。
-`cargo nextest`とbuild・clippy・fmtも同じ形の規則でRustのprofileに入る。
-今と分け方が違う形: `--test e2e --test it`（今はe2e、この規則では`test`）と`nextest run --test it`の`full_test`（規則を足せば表せる）。
-差は段2の並走比較で説明する。
-落ちたtestの名前とpathは設定で有効にし、読み方は宣言したprofileのもの。
-profileの無い言語の雛形は同梱し、`dagq init`が案として出す。
+- 台帳はrunの行を畳むときにcommandのstepを分類し、区間ごとの分類と上の段の集計の時間を規則の版（`EffectiveRules::version`）つきで持つ（`StepFold::classify`）。
+  規則の版が変われば、storeが持つstepからその行の分類を作り直す。
+  保持で消えたstepは作り直しに入らない。
+  規則はsupervisorの台帳を作る係がpassごとに`dagq.toml`とqueueの鍵から読む（`LedgerPort::classifier`）。
+- runの作業の内訳（`session_closed`の`work`と`worktime.jsonl`）は`domain::command_rules::work_rules`の場合分けで分類する。
+
+## 移行の約束
+
+- dagqのソース（ADR-t614-1の判定）で`dagq.toml`に`[[telemetry.commands]]`が無い間は、`[toolchains]`の宣言の有無に依らず作業の内訳は今のcargoの規則（`domain::worktime::classify`と`full_test`）で分類し、`integrate`と重なる検証の数も今どおり数える。
+  この場合を外すのは、このrepositoryの`dagq.toml`にpjの規則を足し、場合分けからこの分岐を除く変更である。
+- それ以外のrepositoryと、`[[telemetry.commands]]`を持ったdagqのソースは、効く規則で分類する。
+  数は効く規則の分類から作り、`CHECK_CLASSES`の名前の分類を出す規則が無ければ出さない。
+- 宣言の無いrepositoryに暗黙のRustのprofileを当てる扱いは無いので、その分類も作らない。
+- 場合分けは`work_rules`の1つの関数で、効く規則の判断（`effective_rules`）は場合分けを通らずに直に呼べる。

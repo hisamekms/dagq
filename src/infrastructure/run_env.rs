@@ -113,6 +113,7 @@ use crate::{
         worker_model::WorkerTrial,
     },
     infrastructure::kpi_config::KpiTables,
+    infrastructure::telemetry_config::{COMMANDS_TABLE, TELEMETRY_TABLE, TelemetryTables},
 };
 
 pub const CONFIG_FILE_NAME: &str = "dagq.toml";
@@ -643,6 +644,10 @@ pub struct Config {
     /// `[local_checks]` and its `[local_checks.gates.<name>]` in file
     /// order ([`LOCAL_GATES_PREFIX`]); `None` without a gate.
     pub local_gates: Option<LocalGates>,
+    /// `[telemetry]` and `[[telemetry.commands]]`
+    /// ([`crate::domain::command_rules::TelemetrySettings`]); the defaults
+    /// and no rule without them.
+    pub telemetry: crate::domain::command_rules::TelemetrySettings,
 }
 
 impl Config {
@@ -726,6 +731,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
     let mut eval_providers_seen: Vec<crate::domain::Provider> = Vec::new();
     let mut eval_provider_keys: Vec<String> = Vec::new();
     let mut kpi = KpiTables::default();
+    let mut telemetry = TelemetryTables::default();
     let mut areas: Option<Vec<(String, Vec<String>)>> = None;
     let mut e2e_paths_seen: Option<usize> = None;
     let mut review_code_seen: Option<usize> = None;
@@ -790,6 +796,10 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 .with_context(|| format!("{CONFIG_FILE_NAME}:{number}"))?
             {
                 table = Some(KPI_TABLE);
+                continue;
+            }
+            if telemetry.header(name, number)? {
+                table = Some(TELEMETRY_TABLE);
                 continue;
             }
             if let Some(name) = name.strip_prefix(ROLES_PREFIX) {
@@ -1036,7 +1046,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
             }
             let known = TABLES.iter().find(|table| **table == name).with_context(|| {
                 format!(
-                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}], [{CONTAINER_WORKER_CACHE_TABLE}], [{CONTAINER_VERIFICATION_TABLE}] and [{KPI_TABLE}] are supported"
+                    "{CONFIG_FILE_NAME}:{number}: unknown table [{name}]; only [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{REVIEW_SUBAGENTS_PREFIX}<agent>], [{REVIEW_PROGRAMS_PREFIX}<name>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{LANGUAGE_TABLE}], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{E2E_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{EVAL_TABLE}], [{EVAL_PROVIDERS_PREFIX}<provider>], [{EGRESS_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{CONTAINER_BUILD_OUTPUT_TABLE}], [{CONTAINER_WORKER_CACHE_TABLE}], [{CONTAINER_VERIFICATION_TABLE}], [{TELEMETRY_TABLE}], [[{COMMANDS_TABLE}]] and [{KPI_TABLE}] are supported"
                 )
             })?;
             ensure!(
@@ -1512,6 +1522,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                     image.inputs = paths;
                 }
             }
+            Some(TELEMETRY_TABLE) => telemetry.entry(number, key, rest.trim())?,
             Some(KPI_TABLE) => kpi
                 .entry(key, rest.trim())
                 .with_context(|| format!("{CONFIG_FILE_NAME}:{number}"))?,
@@ -2109,7 +2120,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
                 stall_keys.push(key.to_owned());
             }
             None => bail!(
-                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{CONTAINER_IMAGE_TABLE}] or [{KPI_TABLE}]"
+                "{CONFIG_FILE_NAME}:{number}: a key outside [{RUN_ENV_TABLE}], [{STALL_TABLE}], [{CONFLICTS_TABLE}], [{RECHECK_TABLE}], [{DISK_TABLE}], [{RESUME_TABLE}], [{EXIT_TABLE}], [{REPOSITORY_TABLE}], [{WORKER_TRIAL_TABLE}], [{ROLES_PREFIX}<role>], [{TOOLCHAINS_PREFIX}<name>], [{VERIFY_MARKS_PREFIX}<name>], [{LOCAL_CHECKS_TABLE}], [{LOCAL_GATES_PREFIX}<name>], [{SUPERVISOR_TABLE}], [{AREAS_TABLE}], [{TASKS_TABLE}], [{GOALS_TABLE}], [{HEADLESS_TABLE}], [{PROVIDER_FALLBACK_TABLE}], [{REVIEW_JOBS_TABLE}], [{REVIEW_TABLE}], [{REVIEW_CODE_TABLE}], [{CI_WATCH_TABLE}], [{LANDING_VERIFICATION_TABLE}], [{CONTAINER_IMAGE_TABLE}], [{TELEMETRY_TABLE}], [[{COMMANDS_TABLE}]] or [{KPI_TABLE}]"
             ),
         }
     }
@@ -2191,6 +2202,7 @@ pub fn parse_config(text: &str) -> Result<Config> {
         });
     }
     config.kpi = kpi.finish().with_context(|| CONFIG_FILE_NAME.to_owned())?;
+    config.telemetry = telemetry.finish()?;
     // A provider is checked against its role once the table is read whole
     // (ADR-t1063-1 decision 1).
     config
@@ -2479,7 +2491,7 @@ fn is_container_dir(dir: &str) -> bool {
 
 /// A one-line array of TOML strings (`["src/**", 'docs/**']`), followed by
 /// nothing but an optional comment.
-fn parse_string_array(text: &str) -> Result<Vec<String>> {
+pub(super) fn parse_string_array(text: &str) -> Result<Vec<String>> {
     let mut rest = text
         .strip_prefix('[')
         .with_context(|| format!("expected an array of strings like [\"src/**\"], not {text}"))?
@@ -2573,7 +2585,7 @@ fn parse_whole(text: &str) -> Result<i64> {
 }
 
 /// `true` or `false`, followed by nothing but an optional comment.
-fn parse_bool(text: &str) -> Result<bool> {
+pub(super) fn parse_bool(text: &str) -> Result<bool> {
     match strip_comment(text) {
         "true" => Ok(true),
         "false" => Ok(false),
@@ -2799,22 +2811,25 @@ pub fn load_landing_verification(root: &Path) -> Result<Option<LandingVerificati
 
 /// The toolchain profiles the `dagq.toml` in `root` declares
 /// ([`TOOLCHAINS_PREFIX`]), resolved against `registry`, with the
-/// project's own marks it declares ([`VERIFY_MARKS_PREFIX`]): no file or no
+/// project's own marks it declares ([`VERIFY_MARKS_PREFIX`]) and its
+/// `[telemetry]` and `[[telemetry.commands]]`
+/// ([`crate::infrastructure::telemetry_config`]): no file or no
 /// declaration is no profile (ADR-t2268-1 decision 3), and a profile
 /// `registry` does not have is a mistake of the file.
 pub fn load_toolchains(root: &Path, registry: &ProfileRegistry) -> Result<Toolchains> {
     let path = root.join(CONFIG_FILE_NAME);
-    let (declarations, marks) = match read_config(&path)? {
+    let (declarations, marks, telemetry) = match read_config(&path)? {
         Some(text) => {
             let config =
                 parse_config(&text).with_context(|| format!("parse {}", path.display()))?;
-            (config.toolchains, config.verify_marks)
+            (config.toolchains, config.verify_marks, config.telemetry)
         }
-        None => (Vec::new(), Vec::new()),
+        None => Default::default(),
     };
     Ok(Toolchains::resolve(registry, &declarations)
         .map_err(anyhow::Error::msg)?
-        .with_marks(marks))
+        .with_marks(marks)
+        .with_telemetry(telemetry))
 }
 
 /// The `[toolchains.<name>]` the `dagq.toml` in `root` declares, as
@@ -6346,7 +6361,7 @@ LITERAL = 'no \n escapes # here'
         let error = format!("{:#}", load_supervisor_config(dir.path()).unwrap_err());
         assert!(
             error.contains(
-                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [review.jobs], [review], [review.code], [ci_watch], [landing_verification], [eval], [eval.providers.<provider>], [egress], [container.image], [container.build_output], [container.worker_cache], [container.verification] and [kpi]"
+                "[supervisor], [areas], [tasks], [goals], [e2e], [headless], [provider_fallback], [review.jobs], [review], [review.code], [ci_watch], [landing_verification], [eval], [eval.providers.<provider>], [egress], [container.image], [container.build_output], [container.worker_cache], [container.verification], [telemetry], [[telemetry.commands]] and [kpi]"
             ),
             "{error}"
         );
