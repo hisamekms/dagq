@@ -9,6 +9,7 @@ related:
   - design-measurement
   - adr-t1662-3
   - adr-t2268-1
+  - adr-t3201-1
   - adr-t614-1
   - design-toolchain-profiles
 ---
@@ -24,7 +25,9 @@ related:
 - shapeは`domain::command_shape`の副作用の無い関数が作り、executorがstepに付ける（語の扱いと上限はそのmodule doc）。
   shellの`-c`のscript（Codexのコマンド）はその中身の部分として持つ。
 - shapeは部分（パイプ・`&&`・`||`・`;`で分けたもの）ごとに先頭の予約語・代入の名前・プログラム・引数を持つ。
-  平文で持つのは決まった一覧にあるプログラム名とそのサブコマンドとflagの名前だけで、一覧に無いプログラムは名前もその後の語もdigestにする（[ADR-t1673-1](../adr/2026-10-21-t1673-1-command-shape-keeps-only-known-subcommands-in-plain.md)）。
+  平文で持つのは決まった一覧にあるプログラム名とそのサブコマンドだけで、一覧に無いプログラムは名前もその後の語もdigestにする（[ADR-t1673-1](../adr/2026-10-21-t1673-1-command-shape-keeps-only-known-subcommands-in-plain.md)）。
+  一覧にあるプログラムのflagの名前は、その一覧が知るoptionのときだけ平文で、ほかはflagの形のまま名前をdigestにする。
+  代入の名前は、共通の一覧と宣言したprofileの一覧にあるときだけ平文で、ほかはdigestにする（[ADR-t3201-1](../adr/2026-10-24-t3201-1-command-shape-keeps-only-listed-flags-and-variables-in-plain.md)）。
   digestはqueueごとの秘密の鍵によるkeyed digestで、同じqueueの中では同じ語が同じdigestになる。
   鍵の無いexecutorはコマンドの形を送らない（作り方と鍵の扱いはADR-t1673-1決定10と`DigestKey`のdoc comment）。
 - stepが持つ詳しさは`dagq.toml`の`[telemetry] command_detail`が決め、executorが`Subcommands`に載せてshapeとstepに当てる（`CommandDetail`）。
@@ -44,7 +47,7 @@ related:
   どれにも一致しなければ未分類。
 - 宣言も`[[telemetry.commands]]`も無いrepositoryは共通の規則だけで分類し、言語の道具のコマンドは未分類になる（宣言しなければどのprofileも当てない。ADR-t2268-1決定3）。
 - 規則の項目と一致の意味は`CommandRule`と`CommandClassifier`のdoc commentが持つ。
-  literalは平文の語ともそのdigestとも一致するので、一覧に無いプログラムの規則も書ける。
+  literalは平文の語ともそのdigestとも一致するので、一覧に無いプログラムと一覧に無いflagの規則も書ける。
   `program`と`redacted`の詳しさのstepには値と語が無いので、それを見る規則は、無いことを求める規則も含めて一致しない。
 - runtimeは分類の名前に意味を持たせない。
   例外は作業の内訳の`integrate`と重なる検証の数で、`CHECK_CLASSES`の名前の分類から数える。

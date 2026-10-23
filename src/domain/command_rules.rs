@@ -43,10 +43,11 @@ pub enum CommandDetail {
     /// digest): no reserved word, no variable, no argument.
     Program,
     /// `shape` (the default): the whole generic shape
-    /// ([`super::command_shape`]): the names of flags in plain, their
-    /// values and the other words as digests, the known subcommands in
-    /// plain at their positions, the names of the variables a part
-    /// assigns and never their values.
+    /// ([`super::command_shape`]): the names of the flags the lists know
+    /// in plain and of the others as digests, their values and the other
+    /// words as digests, the known subcommands in plain at their
+    /// positions, the names of the variables a part assigns (in plain
+    /// when a list holds them, else as digests) and never their values.
     #[default]
     Shape,
     /// `redacted`: the step's kind and time alone: no shape, no exit, no
@@ -749,8 +750,10 @@ impl CommandClassifier {
             return false;
         }
         let mut consumed: BTreeSet<usize> = positions[..rule.sub.len()].iter().copied().collect();
-        // Where a flag is: its name, or, for a program no list names, a
-        // word or a flag's name (`--name=value`) that is its digest.
+        // Where a flag is: its name in plain or as its digest (a flag its
+        // program's list does not know, ADR-t3201-1, or any flag's name of
+        // a program no list names), or, for a program no list names, a
+        // word that is its digest.
         let flag_at = |name: &str| -> Vec<usize> {
             args.iter()
                 .enumerate()

@@ -212,6 +212,66 @@ fn an_unknown_programs_flag_holds_written_apart_or_with_its_value() {
     );
 }
 
+/// A listed program's flag its list does not know is kept as its name's
+/// digest (ADR-t3201-1), and a rule's `flags`, `none_of`, `flag_values`
+/// and `takes_value` match it as they match a known one in plain.
+#[test]
+fn a_rules_flags_match_a_listed_programs_flags_kept_as_digests() {
+    let known = Subcommands::of(&rust()).keyed(Some(DigestKey::test()));
+    let matches = |rule: CommandRule, command: &str| {
+        let classifier = CommandClassifier::new(
+            EffectiveRules {
+                rules: vec![(RuleSource::Project, rule)],
+            },
+            known.clone(),
+        );
+        classifier.classify(&shape(command, &known)).is_some()
+    };
+    let test = || CommandRule::new("x", "cargo").subcommands(&["test"]);
+    let shaped = shape("cargo test --shard ci", &known);
+    assert_eq!(
+        shaped.parts[0].args[1],
+        ShapeArg::Flag {
+            flag: DigestKey::test().digest("--shard"),
+            value: None
+        }
+    );
+    // flags and none_of.
+    assert!(matches(test().flags(&["--shard"]), "cargo test --shard ci"));
+    assert!(!matches(test().flags(&["--shard"]), "cargo test --locked"));
+    assert!(!matches(
+        test().none_of(&["--shard"]),
+        "cargo test --shard ci"
+    ));
+    assert!(matches(test().none_of(&["--shard"]), "cargo test --locked"));
+    // flag_values and takes_value, written apart and after `=`.
+    let shard = || {
+        test()
+            .flag_values("--shard", &["ci"])
+            .takes_value(&["--shard"])
+            .positional_none()
+    };
+    for command in [
+        "cargo test --shard ci",
+        "cargo test --shard=ci",
+        "cargo test --locked --shard ci",
+    ] {
+        assert!(matches(shard(), command), "{command}");
+    }
+    for command in ["cargo test --shard local", "cargo test --shard=local"] {
+        assert!(!matches(shard(), command), "{command}");
+    }
+    // A short one's letter too.
+    assert!(matches(
+        test().flag_values("-X", &["ci"]).takes_value(&["-X"]),
+        "cargo test -X ci"
+    ));
+    assert!(matches(
+        test().flag_values("-X", &["ci"]),
+        "cargo test -Xci"
+    ));
+}
+
 /// (2) Each item of a rule: the part matches only when every item holds,
 /// and a literal matches the word in plain and as its digest alike.
 #[test]

@@ -6,8 +6,9 @@
 //! their own); each part keeps its leading reserved words of the shell
 //! (`lead`: `if`, `while`, `until`, `for`, `do` …), the names of the
 //! variables it assigns (`assigns`, never their values, an array's
-//! `NAME=(…)` too), its program's name without its path (`program`) and
-//! its arguments (`args`).
+//! `NAME=(…)` too; a name in plain only when a [`VariableList`] holds it,
+//! else its digest, ADR-t3201-1), its program's name without its path
+//! (`program`) and its arguments (`args`).
 //!
 //! Only what a list names is kept in plain (ADR-t1673-1): a program is
 //! kept by name only when a list of [`Subcommands`] names it, and any other
@@ -24,8 +25,11 @@
 //!   keeps the name and the value's digest
 //!   (`{"flag": "--name", "value": …}`), its value quoted or not; a short
 //!   flag keeps its letter, and what is glued to it (`-pS3cr3t`) is its
-//!   value. Any other word that starts with `-` (its name quoted, or with a
-//!   blank or a quote in it) is a `word`, and so is one right after an
+//!   value. The name is in plain only when the program's list knows the
+//!   option ([`SubcommandList::switches`], [`SubcommandList::options`]);
+//!   any other is its digest, still a flag (ADR-t3201-1). Any other word
+//!   that starts with `-` (its name quoted, or with a blank or a quote in
+//!   it) is a `word`, and so is one right after an
 //!   option that may take it as its value: one the program's list does not
 //!   name as taking no value ([`SubcommandList::switches`]), its value not
 //!   attached by `=` (`grep -e --pattern`).
@@ -1136,6 +1140,12 @@ pub struct SubcommandList {
     /// not attached by `=`) is taken as that option's value, a digest
     /// (`grep -e --pattern`).
     pub switches: &'static [&'static str],
+    /// Their known options that take a value (`--test`, `-p`). Only a flag
+    /// these or [`Self::switches`] name keeps its name in plain; any other
+    /// is a flag of its name's digest (ADR-t3201-1). Naming one here does
+    /// not change how its value is read: a word after any option but a
+    /// switch may be its value.
+    pub options: &'static [&'static str],
     /// Where the words of a command they run begin: from there on, every
     /// word is a digest, a flag's too, since it is no flag of theirs.
     pub runs: Runs,
@@ -1184,6 +1194,7 @@ impl SubcommandList {
             programs,
             subcommands,
             switches,
+            options: &[],
             runs: Runs::Nothing,
             options_after_operands: false,
             toolchain: false,
@@ -1197,6 +1208,19 @@ impl SubcommandList {
             options_after_operands: true,
             ..self
         }
+    }
+
+    /// The same, knowing `options` as their options that take a value
+    /// ([`Self::options`]).
+    pub const fn options(self, options: &'static [&'static str]) -> Self {
+        Self { options, ..self }
+    }
+
+    /// Whether the flag a shape keeps by `name` (a long one's name, or a
+    /// short one's letter) is one of their options it knows, a switch or
+    /// one that takes a value: only then is its name kept in plain.
+    fn knows(&self, name: &str) -> bool {
+        self.switches.contains(&name) || self.options.contains(&name)
     }
 
     /// Whether the option `flag` (its `=` and value cut) takes no value:
@@ -1365,6 +1389,37 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
             "--verify",
             "--version",
         ],
+        options: &[
+            "-b",
+            "-B",
+            "-c",
+            "-C",
+            "-F",
+            "-m",
+            "-n",
+            "-S",
+            "-U",
+            "--author",
+            "--base",
+            "--branch",
+            "--committer",
+            "--date",
+            "--depth",
+            "--diff-filter",
+            "--exclude",
+            "--format",
+            "--grep",
+            "--max-count",
+            "--message",
+            "--onto",
+            "--pretty",
+            "--since",
+            "--skip",
+            "--strategy",
+            "--until",
+            "--upstream",
+            "--word-diff",
+        ],
         runs: Runs::After(&["bisect run", "submodule foreach"]),
         options_after_operands: false,
         toolchain: false,
@@ -1508,13 +1563,156 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
             "--yes",
         ],
     )
+    .options(&[
+        "--acceptance",
+        "--acceptance-item",
+        "--after",
+        "--agent",
+        "--answer",
+        "--area",
+        "--at",
+        "--base",
+        "--because",
+        "--before",
+        "--branch",
+        "--build-command",
+        "--by",
+        "--cargo",
+        "--cases",
+        "--change",
+        "--classification",
+        "--claude",
+        "--clone",
+        "--cmux",
+        "--codes",
+        "--codex",
+        "--codex-home",
+        "--commit",
+        "--compare",
+        "--confidence",
+        "--constraints",
+        "--context",
+        "--corrects",
+        "--covered-by",
+        "--db",
+        "--depends-on",
+        "--depends-on-goal",
+        "--description",
+        "--destination-goal",
+        "--detail",
+        "--doc",
+        "--duplicate-of",
+        "--e2e-command",
+        "--e2e-timeout",
+        "--effort",
+        "--events",
+        "--evidence",
+        "--execution-class",
+        "--finding",
+        "--format",
+        "--from",
+        "--gap",
+        "--goal",
+        "--handoff-timeout",
+        "--handoff-token",
+        "--heartbeat-interval-ms",
+        "--host-metrics-interval",
+        "--host-metrics-retention-days",
+        "--idle-poll-ms",
+        "--impact",
+        "--input",
+        "--interval",
+        "--k",
+        "--key",
+        "--kind",
+        "--last",
+        "--launch",
+        "--lease",
+        "--limit",
+        "--lines",
+        "--log",
+        "--log-dir",
+        "--max-load",
+        "--max-waiting",
+        "--mode",
+        "--model",
+        "--note",
+        "--note-file",
+        "--observe-interval",
+        "--offset",
+        "--option",
+        "--out",
+        "--owner",
+        "--parallel",
+        "--paths",
+        "--period",
+        "--planner",
+        "--planner-timeout",
+        "--plugin-dir",
+        "--poll-ms",
+        "--port",
+        "--print",
+        "--priority",
+        "--proposal",
+        "--propose",
+        "--provider",
+        "--question",
+        "--reason",
+        "--recommend",
+        "--ref",
+        "--release",
+        "--repo",
+        "--request",
+        "--retract",
+        "--role",
+        "--run",
+        "--run-dir",
+        "--runtime-planners",
+        "--section",
+        "--set",
+        "--since",
+        "--socket",
+        "--source-goal",
+        "--split",
+        "--status",
+        "--subject",
+        "--summary",
+        "--tag",
+        "--target",
+        "--task",
+        "--text",
+        "--text-file",
+        "--throughput-review",
+        "--tick-ms",
+        "--timeout",
+        "--title",
+        "--to",
+        "--token",
+        "--token-file",
+        "--topic",
+        "--trials",
+        "--unavailable",
+        "--until",
+        "--update-build-command",
+        "--update-cargo",
+        "--update-e2e-command",
+        "--update-e2e-timeout",
+        "--update-interval",
+        "--update-poll-ms",
+        "--utc-offset",
+        "--verdict",
+        "--verify",
+        "--watch-timeout",
+        "--window",
+    ])
     .clap(),
     // Programs kept by name, none of whose words is a subcommand. A
     // program whose arguments are text to print or compare (`echo`,
     // `printf`, `test`, `[`, `[[`), one whose option takes two values
     // (`jq --arg NAME VALUE`) or one whose option runs a command (`fd -x`)
     // is not one of them.
-    SubcommandList::of(&["awk"], &[], &["--posix", "--help", "--version"]),
+    SubcommandList::of(&["awk"], &[], &["--posix", "--help", "--version"])
+        .options(&["-F", "-f", "-v"]),
     SubcommandList::of(
         &["cat"],
         &[],
@@ -1586,7 +1784,8 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
             "--help",
             "--version",
         ],
-    ),
+    )
+    .options(&["-t", "--target-directory"]),
     SubcommandList::of(
         &["cut"],
         &[],
@@ -1599,7 +1798,17 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
             "--help",
             "--version",
         ],
-    ),
+    )
+    .options(&[
+        "-b",
+        "-c",
+        "-d",
+        "-f",
+        "--bytes",
+        "--characters",
+        "--delimiter",
+        "--fields",
+    ]),
     SubcommandList::of(
         &["date"],
         &[],
@@ -1612,7 +1821,8 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
             "--help",
             "--version",
         ],
-    ),
+    )
+    .options(&["-d", "-r", "--date", "--reference"]),
     SubcommandList::of(
         &["diff"],
         &[],
@@ -1651,7 +1861,8 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
             "--help",
             "--version",
         ],
-    ),
+    )
+    .options(&["-C", "-U", "--exclude", "--label"]),
     SubcommandList::of(&["false"], &[], &[]),
     SubcommandList::of(
         &["grep"],
@@ -1708,7 +1919,24 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
             "--help",
             "--version",
         ],
-    ),
+    )
+    .options(&[
+        "-A",
+        "-B",
+        "-C",
+        "-e",
+        "-f",
+        "-m",
+        "--after-context",
+        "--before-context",
+        "--context",
+        "--exclude",
+        "--exclude-dir",
+        "--file",
+        "--include",
+        "--max-count",
+        "--regexp",
+    ]),
     SubcommandList::of(
         &["gzip"],
         &[],
@@ -1754,7 +1982,8 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
             "--help",
             "--version",
         ],
-    ),
+    )
+    .options(&["-c", "-n", "--bytes", "--lines"]),
     SubcommandList::of(
         &["ln"],
         &[],
@@ -1776,7 +2005,8 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
             "--help",
             "--version",
         ],
-    ),
+    )
+    .options(&["-t", "--target-directory"]),
     SubcommandList::of(
         &["ls"],
         &[],
@@ -1855,12 +2085,14 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
             "--help",
             "--version",
         ],
-    ),
+    )
+    .options(&["-C", "-f", "-j", "--directory", "--file", "--jobs"]),
     SubcommandList::of(
         &["mkdir"],
         &[],
         &["-p", "-v", "--parents", "--verbose", "--help", "--version"],
-    ),
+    )
+    .options(&["-m", "--mode"]),
     SubcommandList::of(
         &["mv"],
         &[],
@@ -1879,7 +2111,8 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
             "--help",
             "--version",
         ],
-    ),
+    )
+    .options(&["-t", "--target-directory"]),
     SubcommandList::of(&["pwd"], &[], &["-L", "-P"]),
     SubcommandList::of(
         &["rg"],
@@ -1942,7 +2175,25 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
             "--help",
             "--version",
         ],
-    ),
+    )
+    .options(&[
+        "-A",
+        "-B",
+        "-C",
+        "-e",
+        "-g",
+        "-m",
+        "-t",
+        "-T",
+        "--after-context",
+        "--before-context",
+        "--context",
+        "--glob",
+        "--max-count",
+        "--regexp",
+        "--type",
+        "--type-not",
+    ]),
     SubcommandList::of(
         &["rm"],
         &[],
@@ -1984,7 +2235,8 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
             "--help",
             "--version",
         ],
-    ),
+    )
+    .options(&["-e", "-f", "--expression", "--file"]),
     SubcommandList::of(&["sleep"], &[], &["--help", "--version"]),
     SubcommandList::of(
         &["sort"],
@@ -2017,7 +2269,8 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
             "--help",
             "--version",
         ],
-    ),
+    )
+    .options(&["-k", "-o", "-t", "--field-separator", "--key", "--output"]),
     SubcommandList::of(
         &["tail"],
         &[],
@@ -2036,7 +2289,8 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
             "--help",
             "--version",
         ],
-    ),
+    )
+    .options(&["-c", "-n", "--bytes", "--lines"]),
     SubcommandList::of(
         &["tar"],
         &[],
@@ -2065,7 +2319,8 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
             "--help",
             "--version",
         ],
-    ),
+    )
+    .options(&["-C", "-f", "--directory", "--file"]),
     SubcommandList::of(
         &["tee"],
         &[],
@@ -2092,7 +2347,8 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
             "--help",
             "--version",
         ],
-    ),
+    )
+    .options(&["-d", "-r", "-t", "--date", "--reference"]),
     SubcommandList::of(
         &["tr"],
         &[],
@@ -2128,7 +2384,8 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
             "--help",
             "--version",
         ],
-    ),
+    )
+    .options(&["-f", "-s", "-w"]),
     SubcommandList::of(
         &["wc"],
         &[],
@@ -2184,6 +2441,7 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
             "--help",
             "--version",
         ],
+        options: &[],
         runs: Runs::FirstOperand,
         options_after_operands: false,
         toolchain: false,
@@ -2201,6 +2459,7 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
             "--help",
             "--version",
         ],
+        options: &["-C", "-u", "--chdir", "--unset"],
         runs: Runs::FirstOperand,
         options_after_operands: false,
         toolchain: false,
@@ -2209,6 +2468,7 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
         programs: &["find"],
         subcommands: &[],
         switches: &["-H", "-L", "-P"],
+        options: &[],
         runs: Runs::FirstOperand,
         options_after_operands: false,
         toolchain: false,
@@ -2217,6 +2477,7 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
         programs: &["nice"],
         subcommands: &[],
         switches: &["--help", "--version"],
+        options: &["-n", "--adjustment"],
         runs: Runs::FirstOperand,
         options_after_operands: false,
         toolchain: false,
@@ -2225,6 +2486,7 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
         programs: &["nohup"],
         subcommands: &[],
         switches: &["--help", "--version"],
+        options: &[],
         runs: Runs::FirstOperand,
         options_after_operands: false,
         toolchain: false,
@@ -2240,6 +2502,7 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
             "--help",
             "--version",
         ],
+        options: &["-k", "-s", "--kill-after", "--signal"],
         runs: Runs::FirstOperand,
         options_after_operands: false,
         toolchain: false,
@@ -2263,11 +2526,81 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
             "--help",
             "--version",
         ],
+        options: &[
+            "-d",
+            "-I",
+            "-L",
+            "-n",
+            "-P",
+            "--delimiter",
+            "--max-args",
+            "--max-procs",
+        ],
         runs: Runs::FirstOperand,
         options_after_operands: false,
         toolchain: false,
     },
 ];
+
+/// Names of variables a shape keeps in plain where a part assigns them
+/// (`NAME=value`, `for NAME in`, ADR-t3201-1): those it names and those
+/// that start with one of its prefixes. A shape keeps any other name as
+/// its digest, so a word a misread split put there is no plain text; it
+/// keeps no value either way.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VariableList {
+    pub names: &'static [&'static str],
+    pub prefixes: &'static [&'static str],
+}
+
+impl VariableList {
+    /// A list of none.
+    pub const NONE: Self = Self {
+        names: &[],
+        prefixes: &[],
+    };
+
+    /// Whether it holds the variable named `name`.
+    fn holds(&self, name: &str) -> bool {
+        self.names.contains(&name) || self.prefixes.iter().any(|prefix| name.starts_with(prefix))
+    }
+}
+
+/// The variables the runtime knows whatever the repository, of no tool's
+/// own (ADR-t3201-1): the system's and the shell's (`PATH`, `HOME`,
+/// `LANG`, `LC_*`, `TZ` …), the common conventions of colors and CI, git's
+/// (`GIT_*`, git being one of the common programs) and dagq's own
+/// (`DAGQ_*`). A tool's own come from its profile once declared
+/// ([`super::toolchain::ToolchainProfile::variables`]).
+const COMMON_VARIABLES: VariableList = VariableList {
+    names: &[
+        "CI",
+        "CLICOLOR",
+        "CLICOLOR_FORCE",
+        "COLUMNS",
+        "EDITOR",
+        "FORCE_COLOR",
+        "HOME",
+        "IFS",
+        "LANG",
+        "LANGUAGE",
+        "LINES",
+        "LOGNAME",
+        "NO_COLOR",
+        "OLDPWD",
+        "PAGER",
+        "PATH",
+        "POSIXLY_CORRECT",
+        "PWD",
+        "SHELL",
+        "TERM",
+        "TMPDIR",
+        "TZ",
+        "USER",
+        "VISUAL",
+    ],
+    prefixes: &["DAGQ_", "GIT_", "LC_", "XDG_"],
+};
 
 /// The programs a shape keeps by name and the known subcommands it keeps
 /// in plain (ADR-t1673-1): the runtime's common ones, and those of the
@@ -2279,6 +2612,9 @@ const COMMON_SUBCOMMANDS: &[SubcommandList] = &[
 #[derive(Debug, Clone)]
 pub struct Subcommands {
     lists: Vec<SubcommandList>,
+    /// The variables whose names a part's assignment keeps in plain: the
+    /// common ones and those of the declared profiles.
+    variables: Vec<VariableList>,
     key: Option<DigestKey>,
     detail: CommandDetail,
 }
@@ -2295,6 +2631,7 @@ impl Subcommands {
     pub fn common() -> Self {
         Self {
             lists: COMMON_SUBCOMMANDS.to_vec(),
+            variables: vec![COMMON_VARIABLES],
             key: None,
             detail: CommandDetail::Shape,
         }
@@ -2304,11 +2641,14 @@ impl Subcommands {
     /// the detail its `[telemetry] command_detail` asks.
     pub fn of(toolchains: &super::toolchain::Toolchains) -> Self {
         let mut lists = COMMON_SUBCOMMANDS.to_vec();
+        let mut variables = vec![COMMON_VARIABLES];
         for profile in toolchains.profiles() {
             lists.extend_from_slice(profile.subcommands());
+            variables.push(profile.variables());
         }
         Self {
             lists,
+            variables,
             key: None,
             detail: toolchains.telemetry().command_detail,
         }
@@ -2366,6 +2706,16 @@ impl Subcommands {
         Self::of(&declared).keyed(Some(DigestKey::test()))
     }
 
+    /// The name of the variable `name` as a part's assignment keeps it: in
+    /// plain when a list of variables holds it, else its digest.
+    fn variable(&self, name: &str) -> String {
+        if self.variables.iter().any(|list| list.holds(name)) {
+            name.to_owned()
+        } else {
+            self.digest(name)
+        }
+    }
+
     /// The list that names the program named `name`; `None` for a program
     /// no list names.
     fn of_program(&self, name: &str) -> Option<&SubcommandList> {
@@ -2419,7 +2769,7 @@ fn shape_part(words: &[Word], depth: usize, known: &Subcommands) -> Vec<ShapePar
             part.assigns.push(
                 if !name.quoted && assigned(&format!("{}=", name.text)) == Some(name.text.as_str())
                 {
-                    name.text.clone()
+                    known.variable(&name.text)
                 } else {
                     known.digest(&name.text)
                 },
@@ -2440,7 +2790,7 @@ fn shape_part(words: &[Word], depth: usize, known: &Subcommands) -> Vec<ShapePar
         let Some(name) = assigned(&word.text).filter(|_| !word.name_quoted) else {
             break;
         };
-        part.assigns.push(name.to_owned());
+        part.assigns.push(known.variable(name));
         rest = after;
     }
     let Some((program, args)) = rest.split_first() else {
@@ -2593,20 +2943,30 @@ fn shape_args(list: &SubcommandList, words: &[Word], keyed: &Subcommands) -> Vec
             // (`-pS3cr3t`, `-j8`) is its value. Unless the option takes no
             // value (a switch) or its value is attached by `=`, the next
             // word may be its value, its name quoted too (`'-e'` is `-e`).
+            // A flag the list does not know keeps its name's digest
+            // (ADR-t3201-1), so a word a misread split put there is no
+            // plain text.
             let flag = !word.name_quoted && flag_name(name);
             takes_next = value.is_none() && !list.switch(name);
+            let kept = |name: &str| {
+                if list.knows(name) {
+                    name.to_owned()
+                } else {
+                    keyed.digest(name)
+                }
+            };
             args.push(if !flag {
                 ShapeArg::Word {
                     word: keyed.digest(text),
                 }
             } else if !name.starts_with("--") && text.len() > 2 {
                 ShapeArg::Flag {
-                    flag: text[..2].to_owned(),
+                    flag: kept(&text[..2]),
                     value: Some(keyed.digest(&text[2..])),
                 }
             } else {
                 ShapeArg::Flag {
-                    flag: name.to_owned(),
+                    flag: kept(name),
                     value: value.map(|value| keyed.digest(value)),
                 }
             });
@@ -2718,6 +3078,106 @@ mod tests {
                 json!([{"sub": "run"}, {"sub": "log"}])
             );
         }
+    }
+
+    /// A listed program keeps a flag's name in plain only when its list
+    /// knows the option, a switch or one that takes a value
+    /// (ADR-t3201-1): any other is a flag of its name's digest, its value
+    /// a digest as before, a quoted text a shell's script puts at a flag's
+    /// position too.
+    #[test]
+    fn only_a_listed_programs_known_flags_are_plain() {
+        let args = |command: &str| value(command)["parts"][0]["args"].clone();
+        assert_eq!(
+            args("cargo test --locked"),
+            json!([{"sub": "test"}, {"flag": "--locked"}])
+        );
+        assert_eq!(
+            args("git status --short"),
+            json!([{"sub": "status"}, {"flag": "--short"}])
+        );
+        assert_eq!(
+            args("cargo test --test it"),
+            json!([{"sub": "test"}, {"flag": "--test"}, {"word": d("it")}])
+        );
+        assert_eq!(
+            args("git log --hunter2"),
+            json!([{"sub": "log"}, {"flag": d("--hunter2")}])
+        );
+        assert_eq!(
+            args("cargo test --hunter2"),
+            json!([{"sub": "test"}, {"flag": d("--hunter2")}])
+        );
+        assert_eq!(
+            args("cargo test --hunter2=s3cr3t"),
+            json!([{"sub": "test"}, {"flag": d("--hunter2"), "value": d("s3cr3t")}])
+        );
+        assert_eq!(
+            args("cargo build -Xs3cr3t"),
+            json!([{"sub": "build"}, {"flag": d("-X"), "value": d("s3cr3t")}])
+        );
+        // A quoted script's words at a flag's position.
+        assert_eq!(
+            args("bash -c 'git log --hunter2'"),
+            json!([{"sub": "log"}, {"flag": d("--hunter2")}])
+        );
+        // A profile's flags are plain only once it is declared.
+        let common = Subcommands::common().keyed(Some(DigestKey::test()));
+        assert_eq!(
+            shape_value_with("git log --locked", &common).unwrap()["parts"][0]["args"],
+            json!([{"sub": "log"}, {"flag": d("--locked")}])
+        );
+        for command in [
+            "git log --hunter2",
+            "cargo test --hunter2=s3cr3t",
+            "bash -c 'git log --hunter2'",
+        ] {
+            let text = value(command).to_string();
+            assert!(
+                !text.contains("hunter2") && !text.contains("s3cr3t"),
+                "{text}"
+            );
+        }
+    }
+
+    /// A part keeps the name of a variable it assigns in plain only when
+    /// the common list or a declared profile's holds it (ADR-t3201-1), and
+    /// never its value.
+    #[test]
+    fn only_listed_variables_are_assigned_in_plain() {
+        let common = Subcommands::common().keyed(Some(DigestKey::test()));
+        let assigns = |command: &str, known: &Subcommands| {
+            let shape = shape_value_with(command, known).unwrap();
+            let text = shape.to_string();
+            assert!(!text.contains("s3cr3t"), "{text}");
+            shape["parts"][0]["assigns"].clone()
+        };
+        for known in [&common, &rust()] {
+            assert_eq!(
+                assigns("HUNTER2=s3cr3t git status", known),
+                json!([d("HUNTER2")])
+            );
+            assert_eq!(assigns("PATH=s3cr3t git status", known), json!(["PATH"]));
+            assert_eq!(
+                assigns("DAGQ_ROLE=s3cr3t LC_ALL=s3cr3t git status", known),
+                json!(["DAGQ_ROLE", "LC_ALL"])
+            );
+            assert_eq!(
+                assigns("for HUNTER2 in s3cr3t; do true; done", known),
+                json!([d("HUNTER2")])
+            );
+        }
+        assert_eq!(
+            assigns(
+                "RUST_LOG=s3cr3t CARGO_TARGET_DIR=s3cr3t cargo test",
+                &rust()
+            ),
+            json!(["RUST_LOG", "CARGO_TARGET_DIR"])
+        );
+        assert_eq!(
+            assigns("RUST_LOG=s3cr3t cargo test", &common),
+            json!([d("RUST_LOG")])
+        );
     }
 
     /// A digest is the first sixteen hex of the HMAC-SHA256 under the
@@ -2850,7 +3310,7 @@ mod tests {
             (
                 "for f in a b; do cargo test $f; done",
                 json!({"parts": [
-                    {"lead": ["for"], "assigns": ["f"], "args": [{"word": d("in")}, {"word": d("a")}, {"word": d("b")}]},
+                    {"lead": ["for"], "assigns": [d("f")], "args": [{"word": d("in")}, {"word": d("a")}, {"word": d("b")}]},
                     {"lead": ["do"], "program": "cargo", "args": [{"sub": "test"}, {"word": d("$f")}]},
                     {"lead": ["done"], "args": []}]}),
             ),
@@ -2934,8 +3394,8 @@ mod tests {
         assert_eq!(
             shape,
             json!({"parts": [
-                {"assigns": ["TOKENS"], "program": "cargo", "args": [{"sub": "build"}]},
-                {"assigns": ["A"], "args": []},
+                {"assigns": [d("TOKENS")], "program": "cargo", "args": [{"sub": "build"}]},
+                {"assigns": [d("A")], "args": []},
             ]})
         );
     }
@@ -3201,9 +3661,10 @@ mod tests {
                 for lead in &part.lead {
                     assert!(RESERVED.contains(&lead.as_str()), "{command}: {text}");
                 }
+                // A variable's name in plain only when a list holds it.
                 for name in &part.assigns {
                     assert!(
-                        hex(name) || assigned(&format!("{name}=")).is_some(),
+                        hex(name) || known.variable(name) == *name,
                         "{command}: {text}"
                     );
                 }
@@ -3223,14 +3684,14 @@ mod tests {
                             );
                         }
                         ShapeArg::Flag { flag, value } => {
-                            // A listed program's flag by name; an unknown
-                            // one's `--name=value` by its name's digest.
+                            // A listed program's flag by name when its list
+                            // knows it, else by its name's digest, as an
+                            // unknown one's `--name=value`.
                             assert!(
-                                if subs.is_some() {
-                                    flag_name(flag)
-                                } else {
-                                    hex(flag)
-                                },
+                                hex(flag)
+                                    || subs.is_some_and(|list| {
+                                        flag_name(flag) && list.knows(flag)
+                                    }),
                                 "{command}: {text}"
                             );
                             assert!(value.as_deref().is_none_or(hex), "{command}: {text}");
@@ -3540,7 +4001,7 @@ mod tests {
         );
         assert_eq!(
             value("FOO=1 bash -c 'cargo test'")["parts"][0]["assigns"],
-            json!(["FOO"])
+            json!([d("FOO")])
         );
     }
 

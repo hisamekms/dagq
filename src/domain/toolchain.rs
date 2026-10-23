@@ -122,11 +122,19 @@ pub trait ToolchainProfile: Sync {
     fn name(&self) -> &'static str;
 
     /// The tool's programs that a command's shape keeps by name once the
-    /// profile is declared, with their known subcommands and options that
-    /// take no value, kept in plain, and where a command they run begins
-    /// (ADR-t1673-1); none by default.
+    /// profile is declared, with their known subcommands and their known
+    /// options (those that take no value and those that take one), kept
+    /// in plain, and where a command they run begins (ADR-t1673-1,
+    /// ADR-t3201-1); none by default.
     fn subcommands(&self) -> &'static [super::command_shape::SubcommandList] {
         &[]
+    }
+
+    /// The tool's own variables whose names a command's shape keeps in
+    /// plain where a part assigns them once the profile is declared
+    /// (ADR-t3201-1), beside the runtime's common ones; none by default.
+    fn variables(&self) -> super::command_shape::VariableList {
+        super::command_shape::VariableList::NONE
     }
 
     /// The profile's own rules of the commands' classification, tried

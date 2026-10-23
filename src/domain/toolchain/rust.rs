@@ -101,7 +101,7 @@ use super::{
     ToolHostClass, ToolProcess, ToolchainProfile,
 };
 use crate::domain::command_rules::CommandRule;
-use crate::domain::command_shape::{Runs, SubcommandList};
+use crate::domain::command_shape::{Runs, SubcommandList, VariableList};
 use crate::domain::verify_failure::test_name;
 
 mod test_lines;
@@ -124,7 +124,8 @@ pub static RUST: Rust = Rust;
 pub struct Rust;
 
 /// The known subcommands of cargo, its tools' (nextest, llvm-cov) and
-/// rustup's ([`ToolchainProfile::subcommands`]).
+/// rustup's, and the options of theirs a shape keeps by name
+/// ([`ToolchainProfile::subcommands`]).
 const SUBCOMMANDS: &[SubcommandList] = &[
     SubcommandList {
         programs: &["cargo"],
@@ -219,6 +220,37 @@ const SUBCOMMANDS: &[SubcommandList] = &[
             "--version",
             "--workspace",
         ],
+        options: &[
+            "-E",
+            "-F",
+            "-j",
+            "-p",
+            "-Z",
+            "--bench",
+            "--bin",
+            "--cargo-profile",
+            "--color",
+            "--config",
+            "--example",
+            "--exclude",
+            "--fail-under-lines",
+            "--features",
+            "--ignore-filename-regex",
+            "--jobs",
+            "--manifest-path",
+            "--message-format",
+            "--output-path",
+            "--package",
+            "--partition",
+            "--profile",
+            "--retries",
+            "--stress-count",
+            "--stress-duration",
+            "--target",
+            "--target-dir",
+            "--test",
+            "--test-threads",
+        ],
         // `cargo run`'s (and its alias `r`'s) words from the first that is
         // no flag are the binary's.
         runs: Runs::After(&["run", "r"]),
@@ -254,6 +286,7 @@ const SUBCOMMANDS: &[SubcommandList] = &[
             "--verbose",
             "--version",
         ],
+        options: &["--component", "--profile", "--target", "--toolchain"],
         // `rustup run TOOLCHAIN CMD …`.
         runs: Runs::After(&["run"]),
         // clap's: an option takes one word, before or after operands.
@@ -262,6 +295,29 @@ const SUBCOMMANDS: &[SubcommandList] = &[
         toolchain: true,
     },
 ];
+
+/// The variables of cargo, rustc, rustup and nextest whose names a shape
+/// keeps in plain ([`ToolchainProfile::variables`]): the runtime's and the
+/// tests' (`RUST_LOG`, `RUST_BACKTRACE` …), the compiler's flags and
+/// wrappers (`RUSTFLAGS`, `RUSTC_WRAPPER` …), the coverage's profile file,
+/// and every `CARGO_*`, `RUSTUP_*` and `NEXTEST_*`.
+const VARIABLES: VariableList = VariableList {
+    names: &[
+        "LLVM_PROFILE_FILE",
+        "RUSTC",
+        "RUSTC_WRAPPER",
+        "RUSTDOC",
+        "RUSTDOCFLAGS",
+        "RUSTFLAGS",
+        "RUST_BACKTRACE",
+        "RUST_LIB_BACKTRACE",
+        "RUST_LOG",
+        "RUST_MIN_STACK",
+        "RUST_TEST_NOCAPTURE",
+        "RUST_TEST_THREADS",
+    ],
+    prefixes: &["CARGO_", "NEXTEST_", "RUSTUP_"],
+};
 
 /// The flags of `cargo test` and `cargo nextest run` that choose a target
 /// or a package or filter the tests: a command with one of them, or with a
@@ -320,6 +376,10 @@ impl ToolchainProfile for Rust {
 
     fn subcommands(&self) -> &'static [SubcommandList] {
         SUBCOMMANDS
+    }
+
+    fn variables(&self) -> VariableList {
+        VARIABLES
     }
 
     fn command_rules(&self) -> Vec<CommandRule> {
