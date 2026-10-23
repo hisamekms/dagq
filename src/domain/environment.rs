@@ -1,6 +1,7 @@
 //! The environment a run executes in and the resources it spends
 //! (ADR-t1662-1 decision 8, ADR-t1662-3 decisions 3 to 6,
-//! docs/design/measurement.md "実行環境と資源"): what an environment says
+//! docs/design/measurement-environment.md "environment_attached",
+//! "資源の単位" and "台帳との順序"): what an environment says
 //! it is when a run is attached to it ([`EnvironmentAttached`], the event
 //! `environment_attached`), the resources in the common units every
 //! environment measures in ([`Resources`]), a measured window of a run's

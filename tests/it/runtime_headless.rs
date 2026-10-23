@@ -1652,7 +1652,8 @@ fn the_supervisor_builds_the_ledger_off_the_landing_whatever_its_writes_do() {
 }
 
 /// The supervisor names the environment of a run as it claims it
-/// (docs/design/measurement.md "実行環境と資源"): the host's
+/// (docs/design/measurement-environment.md "environment_attached" and
+/// "runの資源"): the host's
 /// `environment_attached` with every item (its node the NodeSampleStore's
 /// of the host, no image, its cores, its memory and its architecture). It
 /// measures the run in its slots, and once the run left them its attachment

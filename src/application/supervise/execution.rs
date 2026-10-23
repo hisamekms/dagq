@@ -567,7 +567,7 @@ pub struct Ports<'a> {
     /// (`environment_attached`); `None` records none.
     pub environment: Option<Arc<dyn crate::application::ExecutionEnvironment>>,
     /// Measures the runs' resources from outside
-    /// (docs/design/measurement.md "実行環境と資源"); `None` measures none.
+    /// (docs/design/measurement-environment.md "runの資源"); `None` measures none.
     pub resources: Option<ResourcesPort>,
     pub layout: Layout,
 }
@@ -1751,7 +1751,8 @@ impl Supervisor<'_> {
     /// Record what `run` is attached to as it starts on this process (its
     /// claim, a resume, its adoption): the environment's
     /// `environment_attached`, under which the runs' resources are
-    /// measured (docs/design/measurement.md "実行環境と資源"). One not
+    /// measured (docs/design/measurement-environment.md
+    /// "environment_attached"). One not
     /// recorded is logged: the run goes on, and its resources are not
     /// measured until its next start.
     fn record_environment(&mut self, run: &RunId) {

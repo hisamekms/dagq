@@ -357,7 +357,7 @@ pub struct SuperviseOptions {
     pub ledger: Option<LedgerOptions>,
     /// Name the environment of the runs as each starts
     /// (`environment_attached`) and measure their resources from outside
-    /// (docs/design/measurement.md "実行環境と資源"): the CLI's supervisor
+    /// (docs/design/measurement-environment.md "環境の口"): the CLI's supervisor
     /// does but for `--once`; `None` (the tests unless they ask) does
     /// neither. The host's load is put in the common units either way.
     pub environment: Option<EnvironmentOptions>,

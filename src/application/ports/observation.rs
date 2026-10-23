@@ -254,7 +254,7 @@ pub trait SessionResourceStore {
 
 /// The resources of the runs the supervisor measured from outside
 /// (ADR-t1662-1 decision 8 and (ii), ADR-t1662-3 decisions 1 and 4,
-/// docs/design/measurement.md "実行環境と資源"): one row per window, in the
+/// docs/design/measurement-environment.md "runの資源"): one row per window, in the
 /// order they were recorded, each under the `environment_attached` of the
 /// run it was measured in. A run's ledger row folds them into its
 /// intervals.
@@ -272,7 +272,7 @@ pub trait RunResourceStore {
 }
 
 /// The environment the runs execute in (ADR-t1662-3 decisions 3 to 6,
-/// docs/design/measurement.md "実行環境と資源"): it names itself as a run
+/// docs/design/measurement-environment.md "環境の口"): it names itself as a run
 /// is attached to it, and measures from outside, in the common units, the
 /// runs' resources and the node's. The adapter now is the host's
 /// (`infrastructure::environment::HostEnvironment`); a container's or a

@@ -1,6 +1,6 @@
 //! 観測と分析's measure of the runs' resources from outside (ADR-t1662-1
 //! decision 8 and (ii), ADR-t1662-3 decisions 1 and 4,
-//! docs/design/measurement.md "実行環境と資源"): every
+//! docs/design/measurement-environment.md "runの資源"): every
 //! [`ResourcesPort::interval`] a job thread asks the environment what each
 //! run of the supervisor's slots attached to it spent since the last
 //! window, by the processes the run registered (its wrapper and agent)

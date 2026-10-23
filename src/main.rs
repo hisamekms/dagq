@@ -4775,7 +4775,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 // measurement.md "台帳を作る係"); a one-shot pass does not.
                 ledger: (!once).then(dagq::compose::LedgerOptions::default),
                 // The environment of the runs and their resources (docs/design/
-                // measurement.md "実行環境と資源"); a one-shot pass does not.
+                // measurement-environment.md "環境の口"); a one-shot pass does not.
                 environment: (!once).then(dagq::compose::EnvironmentOptions::default),
                 // The watch of the adopted agent definitions (ADR-t1728-1
                 // (g)); a one-shot pass does not watch them.

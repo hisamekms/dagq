@@ -1,5 +1,6 @@
 //! The runs' resources the supervisor measures from outside on queue.db
-//! (`RunResourceStore`, docs/design/measurement.md "実行環境と資源"): the
+//! (`RunResourceStore`, docs/design/measurement-environment.md "runの資源"
+//! and "台帳との順序"): the
 //! windows in the order they were recorded and the attachments still
 //! open, the pass that measures the runs of the slots by the processes
 //! they registered on this host and closes those that left the slots, and
