@@ -1165,7 +1165,10 @@ impl PlanningState {
     /// waited past the timeout with no planner (task 884): ask one idle
     /// planner of the runtime's to exit whose busy reasons do not include
     /// a question waiting on a person or an answer not typed yet, and nothing of which was seen within
-    /// the timeout (no input, no idle marker). One at a time: none while a
+    /// the timeout ([`planner_last_activity`]: no input, no idle marker,
+    /// no request written), with no request its turns did not finish, read
+    /// from its `turns/` as it is chosen ([`Self::request_outstanding`]),
+    /// not from `views`, judged before this pass wrote its requests. One at a time: none while a
     /// planner of the runtime's is already asked to exit, which frees its
     /// place anyway.
     /// It runs at the end of the pass. One waiting for Claude is not
@@ -1214,6 +1217,11 @@ impl PlanningState {
             }
             let last = planner_last_activity(&**env.files, &view.dir, view.planner.created_at)?;
             if now - last <= timeout {
+                continue;
+            }
+            // The view was judged before this pass wrote its requests: one
+            // written since, or one whose turn has not ended, keeps it.
+            if self.request_outstanding(env, view)? {
                 continue;
             }
             let id = view.planner.id;
@@ -1588,7 +1596,11 @@ impl PlanningState {
                 continue;
             }
             let busy = self.busy_reasons(env, view, &revising)?;
-            if busy.is_empty() {
+            // The view was judged before this pass wrote its requests (a
+            // draft's or a finding's, an answer, a revise, a request by
+            // ID): one written since, or one whose turn has not ended,
+            // keeps it.
+            if busy.is_empty() && !self.request_outstanding(env, view)? {
                 send_to_planner(
                     &**env.files,
                     &*env.queue,
@@ -1624,7 +1636,10 @@ impl PlanningState {
         let id = view.planner.id;
         let now = self.judge_planner(env, env.queue.planner(id)?)?;
         let busy = self.busy_reasons(env, &now, revising)?;
-        if !answer_wait_only(&busy) || now.planner.answer_wait_at.is_some() {
+        if !answer_wait_only(&busy)
+            || now.planner.answer_wait_at.is_some()
+            || self.request_outstanding(env, &now)?
+        {
             return Ok(());
         }
         let asks: Vec<AskId> = self
@@ -1759,6 +1774,29 @@ impl PlanningState {
                     _ => true,
                 }
         }))
+    }
+
+    /// Whether the planner of `view` has a request its turns have not
+    /// finished, read from its `turns/` now rather than from `view`: one
+    /// not taken yet, or one, taken or not, written after its last turn
+    /// ended ([`Self::request_unread`]). Its exit request would drop it.
+    /// A request whose writing failed left no file and is not counted.
+    fn request_outstanding(&self, env: &PlanningEnv<'_>, view: &PlannerView) -> Result<bool> {
+        if self.request_unread(env, view)? {
+            return Ok(true);
+        }
+        let paths = match env
+            .files
+            .read_dir(&crate::domain::turn::turns_dir(&view.dir))
+        {
+            Ok(paths) => paths,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error).context("read the requests of the planner"),
+        };
+        Ok(!crate::domain::turn::pending(
+            paths.iter().filter_map(|path| path.file_name()?.to_str()),
+        )
+        .is_empty())
     }
 
     /// Ask the marked planner of `view` to exit. A request that cannot be

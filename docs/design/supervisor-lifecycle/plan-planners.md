@@ -86,6 +86,7 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
   依頼の前に入力の印を書き、前のturnのidle markerでidleに見えないようにする（`stamp_planner_input`）。
 - **状態**: idle markerが最後の入力より新しく、待つ依頼が無ければ`idle`である（`planner_view`、`turn::idle_after_turn`）。
   届けたanswerを読み終えるまで終了の依頼を置かない。
+  終了の依頼の前には`turns/`を読み直し、取られていない依頼か最後のturnの終わりより後の依頼があれば置かない（`PlanningState::request_outstanding`、[Plan review](plan-review.md#reviseの配送)）。
   読み終えたかは、turnで配送したanswerはその依頼を取ったturnで、初期promptで運んだanswerは開いた後のidleで判じる（[Draft planners](draft-planners.md#予定-人のplannerの廃止と非対話の経路)）。
   壁で失敗したturnの後に終わらせると、answerが読まれずに失われる。
 - **時間切れ**: plannerの時間はturnの`[stall]`の上限だけで切られ、止めたturnをinboxにplannerごとに1回知らせる（`tell_of_stopped_planner_turns`）。

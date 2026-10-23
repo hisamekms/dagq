@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
     thread,
-    time::{Duration, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tracing::warn;
 
@@ -767,8 +767,12 @@ pub fn retired_workspace(planner: &PlannerSession) -> bool {
 
 /// When anything was last seen of the planner whose directory is `dir`,
 /// opened at `created_at` (Unix seconds): the latest of its last input
-/// ([`screen_idle::last_input`]) and its idle marker, fresh or stale. The
-/// runtime's planner timeout counts from it (task 805).
+/// ([`screen_idle::last_input`]), its idle marker, fresh or stale, and the
+/// requests written in its `turns/`, taken or not (a request's file keeps
+/// the time it was written when it is taken, so a request counts without
+/// the supervisor's stamp, and after a supervisor took over from another;
+/// one whose writing failed left none). The runtime's planner timeout
+/// counts from it (task 805).
 pub fn planner_last_activity(files: &dyn RunFiles, dir: &Path, created_at: i64) -> Result<i64> {
     let marker = planner_idle_marker(dir);
     let opened = UNIX_EPOCH + Duration::from_secs(u64::try_from(created_at)?);
@@ -776,6 +780,18 @@ pub fn planner_last_activity(files: &dyn RunFiles, dir: &Path, created_at: i64) 
     let last = files
         .modified(&marker)
         .map_or(last, |modified| last.max(modified));
+    let last = files
+        .read_dir(&turns_dir(dir))
+        .unwrap_or_default()
+        .iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .and_then(turn::request_seq)
+                .is_some()
+        })
+        .filter_map(|path| files.modified(path).ok())
+        .fold(last, SystemTime::max);
     Ok(super::unix_seconds(last))
 }
 
@@ -1160,5 +1176,28 @@ mod tests {
                 "workspace_closed": false,
             })
         );
+    }
+
+    /// The planner timeout counts from the latest request written in the
+    /// planner's `turns/`, taken or not, even with no stamp of the
+    /// supervisor's and an idle marker from before it; a file that names
+    /// no request does not count.
+    #[test]
+    fn the_last_activity_of_a_planner_counts_the_requests_in_its_turns() {
+        let files = crate::application::memory_files::MemoryFiles::default();
+        let dir = Path::new("/planners/7");
+        let at = |secs: u64| UNIX_EPOCH + Duration::from_secs(secs);
+        files.put(&planner_idle_marker(dir), at(1_000), "{}");
+        assert_eq!(planner_last_activity(&files, dir, 900).unwrap(), 1_000);
+        files.put(
+            &request_path(dir, 1).with_extension("json.tmp"),
+            at(1_500),
+            "{}",
+        );
+        assert_eq!(planner_last_activity(&files, dir, 900).unwrap(), 1_000);
+        files.put(&turn::taken_path(dir, 1), at(1_100), "{}");
+        assert_eq!(planner_last_activity(&files, dir, 900).unwrap(), 1_100);
+        files.put(&request_path(dir, 2), at(1_200), "{}");
+        assert_eq!(planner_last_activity(&files, dir, 900).unwrap(), 1_200);
     }
 }

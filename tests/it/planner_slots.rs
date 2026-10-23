@@ -1001,3 +1001,151 @@ fn a_revise_sent_closes_the_answers_it_carries_in_its_transaction_or_records_not
     assert!(closed(&queue, first) && closed(&queue, second));
     assert!(!closed(&queue, open));
 }
+
+/// A draft of the runtime's gets its headless planner (its wrapper parked,
+/// registered and alive) at clock 0, at work on its first turn. Returns
+/// the planner and its directory.
+fn working_draft_planner(
+    fx: &crate::plan_review::Fixture,
+    queue: &mut SqliteQueue,
+    backend: &PlanWorkspace,
+    reviewer: &StubReviewer,
+    clock: &Arc<Ahead>,
+) -> (dagq::domain::PlannerSession, PathBuf) {
+    let goal = open_goal(queue);
+    runtime_draft(
+        queue,
+        "gap",
+        Some(goal),
+        DraftOrigin::FollowUp,
+        json!({"source_task_id": 1, "source_run_id": null, "index": 0}),
+    );
+    supervise(fx, backend, reviewer, clock, 0);
+    let planner = queue.planners(false).unwrap().remove(0);
+    queue
+        .register_planner_wrapper(planner.id, std::process::id())
+        .unwrap();
+    queue
+        .register_planner_agent(planner.id, std::process::id(), std::process::id())
+        .unwrap();
+    heartbeat_ahead(&fx.db);
+    let dir = planners_dir(&fx.db).join(planner.id.to_string());
+    (planner, dir)
+}
+
+/// Task 899 (acceptance (1) and (3)): the pass in which a revise with no
+/// planner, waiting at the limit past the timeout, frees a place sends the
+/// revise of its own proposal to the only idle planner, whose last turn
+/// ended past the timeout and whose view was judged before the request
+/// was written; the supervisor's stamp of the request cannot be written.
+/// That planner is not asked to exit in that pass, nor in the next ones
+/// while the request waits or its turn has not ended. Once that turn
+/// ended and nothing moved within the timeout, it is released as before.
+#[test]
+fn a_planner_sent_a_revise_in_the_pass_that_frees_a_place_is_released_only_past_its_next_turn() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let backend = PlanWorkspace::default();
+    let reviewer = StubReviewer::new(&[json!({
+        "verdict": "revise", "reasons": ["split it"], "summary": "too big"
+    })]);
+    let clock = Arc::new(Ahead::default());
+    let (planner, dir) = working_draft_planner(&fx, &mut queue, &backend, &reviewer, &clock);
+    let workspace = planner.workspace_id.clone().unwrap();
+    // Its own proposal, and one whose planner is gone, both sent back
+    // while it is at work.
+    let own = add(&mut queue, "own", &[TaskId::new(1)], Priority::Normal);
+    let own = submit(&mut queue, &[own], Some(&workspace));
+    let starved = add(&mut queue, "starved", &[TaskId::new(1)], Priority::Normal);
+    let starved = submit(&mut queue, &[starved], Some("GONE"));
+    for at in 1..=3 {
+        supervise(&fx, &backend, &reviewer, &clock, at);
+    }
+    for proposal in [own, starved] {
+        assert_eq!(
+            queue.show_proposal(proposal).unwrap().status(),
+            ProposalStatus::Revising
+        );
+    }
+    assert!(turn_requests(&fx.db, planner.id).is_empty());
+    assert_eq!(backend.launched().len(), 1);
+
+    // Its turn ends; the stamp of the next request cannot be written.
+    fs::create_dir_all(dir.join(dagq::application::screen_idle::SUPERVISOR_INPUT_FILE)).unwrap();
+    fs::write(planner_idle_marker(&dir), "{}").unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+
+    // Past the timeout: its revise is written to it, and it is kept.
+    let past = 3 + TIMEOUT_SECS as i64 + 10;
+    supervise(&fx, &backend, &reviewer, &clock, past);
+    let requests = turn_requests(&fx.db, planner.id);
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert_eq!(requests[0]["what"], "revise");
+    assert!(!exit_requested(&fx.db, planner.id));
+    assert!(events(&queue, "planner_released").is_empty());
+    // The next pass, with the request waiting.
+    supervise(&fx, &backend, &reviewer, &clock, past + 1);
+    assert!(!exit_requested(&fx.db, planner.id));
+    // Its wrapper took it, and no turn of it ended yet.
+    taken_without_a_turn(&dir);
+    supervise(&fx, &backend, &reviewer, &clock, past + 2);
+    assert!(!exit_requested(&fx.db, planner.id));
+    assert!(events(&queue, "planner_released").is_empty());
+
+    // Its turn ended: within the timeout from it, it is kept.
+    take_turns(&queue, &fx.db, planner.id);
+    touch_ahead(&planner_idle_marker(&dir), (past + 3) as u64);
+    supervise(&fx, &backend, &reviewer, &clock, past + 5);
+    assert!(!exit_requested(&fx.db, planner.id));
+    // Past it, with nothing moved, it frees its place.
+    supervise(
+        &fx,
+        &backend,
+        &reviewer,
+        &clock,
+        past + 3 + TIMEOUT_SECS as i64 + 5,
+    );
+    assert!(exit_requested(&fx.db, planner.id));
+    let released = events(&queue, "planner_released");
+    assert_eq!(released.len(), 1, "{released:?}");
+    assert_eq!(released[0]["planner_id"], json!(planner.id));
+    assert_eq!(released[0]["proposal_id"], json!(starved));
+}
+
+/// Task 899 (acceptance (2)): a planner of the runtime's with nothing left
+/// to do is not asked to exit while a request in its `turns/` waits, or
+/// was taken and its turn has not ended, even when its view shows it idle
+/// (the wrapper took the request before any stamp of it was written).
+/// Once that turn ended, it is asked to exit.
+#[test]
+fn a_planner_with_a_request_its_turns_did_not_finish_is_not_asked_to_exit() {
+    let fx = fixture();
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let backend = PlanWorkspace::default();
+    let reviewer = StubReviewer::new(&[]);
+    let clock = Arc::new(Ahead::default());
+    let (planner, dir) = working_draft_planner(&fx, &mut queue, &backend, &reviewer, &clock);
+    fs::write(planner_idle_marker(&dir), "{}").unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    // A request written after its last turn ended, as `planner request`
+    // writes one between the supervisor's view and its exit request.
+    crate::common::cli::ok(
+        &fx.db,
+        &[
+            "planner",
+            "request",
+            &planner.id.to_string(),
+            "--text",
+            "also weigh the order",
+        ],
+    );
+    supervise(&fx, &backend, &reviewer, &clock, 10);
+    assert!(!exit_requested(&fx.db, planner.id));
+    taken_without_a_turn(&dir);
+    supervise(&fx, &backend, &reviewer, &clock, 11);
+    assert!(!exit_requested(&fx.db, planner.id));
+
+    take_turns(&queue, &fx.db, planner.id);
+    supervise(&fx, &backend, &reviewer, &clock, 12);
+    assert!(exit_requested(&fx.db, planner.id));
+}

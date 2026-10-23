@@ -118,6 +118,9 @@ submit -> 候補の順序 -> job（読むだけ） -> verdict -+- pass -----> ta
 
 - 配送、plannerの立て方、期限と知らせ: `PlanningState::tend_planners`と`revise_watch`。
 - 上限で待つreviseのための枠の空け方: `PlanningState::release_runtime_planner`。
+  最後の動き（`planner_last_activity`）はplannerのdirの記録から読み、`turns/`に書いた依頼の時刻を含むので、supervisorが入れ替わっても変わらず、入力の印が書けなくても依頼を数える。
+- 約束: 終了の依頼を置く直前に、passの初めのviewではなくplannerの`turns/`を読み直し、取られていない依頼か、最後のturnの終わりより後に書いた依頼があれば終わらせない（`PlanningState::request_outstanding`。`end_runtime_planners`と`end_for_answer_wait`も同じ）。
+  同じpassで置いたreviseやanswerを終了の依頼が捨てないためで、書けなかった依頼はファイルが無く、配送の失敗として扱われて数えない。
 - plannerを終わらせない理由: `PlannerBusy`と`PlanningState::busy_reasons`。
 - 届ける依頼の文: `prompt::plan_revise_request`。
 - 持ち主が居ないreviseは、回答済みの`planner_question`とそれを出したplannerごとの引き継ぎ材料を同じ新しいplannerに運び、`plan_revise_sent`と運んだanswerのclose（`ask_delivered`）を1トランザクションで記録する（[ADR-t1704-1](../../adr/2026-10-05-t1704-1-human-answer-wait-releases-runtime-planner-slots.md)決定2〜4、`PlanReviewStore::revise_sent`）。
