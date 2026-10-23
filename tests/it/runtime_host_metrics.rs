@@ -71,12 +71,83 @@ fn rows(host: &Path) -> Vec<String> {
             let mut lines = text.lines();
             assert_eq!(
                 lines.next(),
-                Some(dagq::domain::host_metrics::header().as_str())
+                Some(dagq::domain::host_metrics::header().as_str()),
+                "{}: {text:?}",
+                path.display()
             );
             rows.extend(lines.map(str::to_owned));
         }
     }
     rows
+}
+
+/// The rows `text` holds once written through, for the wait while the
+/// supervisor still writes: `record` creates the day's file before it
+/// appends the header and the row, so a file read then may be empty or end
+/// in the middle of a line. Only lines ended by a newline count, and none
+/// before a whole header; the check after the supervisor stops is `rows`.
+fn written_rows(text: &str) -> Vec<&str> {
+    let Some(end) = text.rfind('\n') else {
+        return Vec::new();
+    };
+    let mut lines = text[..end].lines();
+    if lines.next() != Some(dagq::domain::host_metrics::header().as_str()) {
+        return Vec::new();
+    }
+    lines.collect()
+}
+
+/// The number of rows written through to the metrics files under `host`,
+/// counting none of a file that is still being written or that the
+/// supervisor pruned between the listing and the read.
+fn written_row_count(host: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(host) else {
+        return 0;
+    };
+    entries
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            name.starts_with("metrics-")
+                .then(|| fs::read_to_string(&path).ok())
+                .flatten()
+        })
+        .map(|text| written_rows(&text).len())
+        .sum()
+}
+
+/// A metrics file read before `record` wrote it through yields no row of
+/// what is unfinished: nothing of an empty file or a partial header, and
+/// only the rows a newline ends.
+#[test]
+fn the_wait_counts_only_the_rows_written_through() {
+    let header = dagq::domain::host_metrics::header();
+    assert!(written_rows("").is_empty());
+    assert!(written_rows(&header[..header.len() / 2]).is_empty());
+    assert!(written_rows(&header).is_empty());
+    assert!(written_rows(&format!("{header}\n")).is_empty());
+    assert_eq!(
+        written_rows(&format!("{header}\nfirst,row\nsecond,r")),
+        ["first,row"]
+    );
+    assert_eq!(
+        written_rows(&format!("{header}\nfirst,row\nsecond,row\n")),
+        ["first,row", "second,row"]
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let host = dir.path().join("host");
+    assert_eq!(written_row_count(&host), 0);
+    fs::create_dir_all(&host).unwrap();
+    fs::write(host.join("metrics-20000101.csv"), "").unwrap();
+    fs::write(host.join("metrics-20000102.csv"), &header[..3]).unwrap();
+    fs::write(
+        host.join("metrics-20000103.csv"),
+        format!("{header}\nwhole\npart"),
+    )
+    .unwrap();
+    fs::write(host.join("notes.txt"), "mine\nyours\n").unwrap();
+    assert_eq!(written_row_count(&host), 1);
 }
 
 /// While it runs, the supervisor appends a row every interval to the local
@@ -110,7 +181,9 @@ fn supervisor_records_the_host_load_while_it_runs_and_prunes_old_files() {
         let (db, repo, backend) = (db.clone(), repo.clone(), backend.clone());
         thread::spawn(move || supervise_with(&db, &repo, &backend, &options))
     };
-    wait_until(&db, Duration::from_secs(30), |_| rows(&host).len() >= 3);
+    wait_until(&db, Duration::from_secs(30), |_| {
+        written_row_count(&host) >= 3
+    });
     stop.store(true, Ordering::SeqCst);
     let outcome = joined(supervisor, "the supervisor to stop").unwrap();
     assert_eq!(outcome["errors"], json!([]), "{outcome}");
