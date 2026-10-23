@@ -10,6 +10,14 @@
 #   Podman whose `machine init` and `machine start` lack the flag);
 # - after init, start and rm (rm picks a new default when it removes the
 #   default) it puts the default back if it moved.
+# up starts the machine only after it reads that WORKDIR is its one mount, and
+# needs jq for that. `podman machine inspect` has no mounts (InspectInfo in
+# podman v6.1.2 pkg/machine/config.go; --format applies to it,
+# cmd/podman/machine/inspect.go), so up reads the top-level Mounts[].Source
+# (the host path left of --volume) of the machine's config file
+# <ConfigDir.Path>/<name>.json (pkg/machine/vmconfigs/machine.go and
+# config.go). When it cannot read them, it stops before start and leaves the
+# machine for down.
 #
 #   sh machine.sh up WORKDIR CPUS MEMORY_MIB   # init and start
 #   sh machine.sh set CPUS MEMORY_MIB          # stop, resize, start
@@ -69,6 +77,33 @@ start() {
   podman machine start --update-connection=false "$name"
   keep_default "$before"
 }
+# Stop unless the machine's only mounts have $1 as their source.
+only_mount() {
+  command -v jq > /dev/null 2>&1 || not_checked "jq is not found"
+  if ! dir=$(podman machine inspect --format '{{.ConfigDir.Path}}' "$name"); then
+    not_checked "podman machine inspect failed"
+  fi
+  [ -n "$dir" ] && [ -d "$dir" ] || not_checked "no config dir '$dir'"
+  config=$dir/$name.json
+  [ -f "$config" ] || not_checked "no config file $config"
+  # Prints the sources other than $1 as a JSON array; fails unless the file
+  # holds one JSON value whose Mounts is a non-empty array.
+  if ! others=$(jq -n -r --arg work "$1" '
+      [inputs] | if length == 1 then .[0] else error("not one JSON value") end
+      | if (.Mounts | type) == "array" and (.Mounts | length) > 0
+        then [.Mounts[] | .Source | select(. != $work)] | tojson
+        else error("Mounts is not a non-empty array") end' "$config"); then
+    not_checked "cannot read Mounts in $config"
+  fi
+  if [ "$others" != '[]' ]; then
+    echo "unexpected mount(s): $others; not starting $name, run 'sh machine.sh down'" >&2
+    exit 1
+  fi
+}
+not_checked() {
+  echo "$1; cannot check the mounts of $name, not starting it. Run 'sh machine.sh down'" >&2
+  exit 1
+}
 for sub in init start; do
   takes_update_connection "$sub" || {
     echo "podman machine $sub has no --update-connection; this Podman may move the default connection. Not running." >&2
@@ -90,10 +125,7 @@ case ${1:-} in
     podman machine init --update-connection=false --cpus "$cpus" --memory "$memory" --disk-size 60 \
       --volume "$work:$work" "$name"
     keep_default "$before"
-    podman machine inspect --format '{{range .Mounts}}{{.Source}} {{end}}' "$name" |
-      tr ' ' '\n' | sed '/^$/d' | while read -r source; do
-        [ "$source" = "$work" ] || { echo "unexpected mount $source; run down" >&2; exit 1; }
-      done
+    only_mount "$work"
     start
     ;;
   set)
@@ -118,7 +150,7 @@ case ${1:-} in
     echo "default connection: $before -> $(default_connection)" >&2
     ;;
   *)
-    sed -n '2,20p' "$0" >&2
+    sed -n '2,28p' "$0" >&2
     exit 2
     ;;
 esac

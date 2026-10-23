@@ -323,7 +323,7 @@ ADR-t2257-1 決定6（ADR-t2113-1 決定6 を amends）。測った通る最小�
 
 - 人か inbox が流す。
   podman（host にあるもの）を使い、Spike の machine `dagq-spike` を作る。
-  machine は `$HOME` を mount せず、作業の dir（`$SPIKE/m`）だけを mount する（`machine.sh up` が mount を確かめ、ほかの mount があれば止まる）。
+  machine は `$HOME` を mount せず、作業の dir（`$SPIKE/m`）だけを mount する（`machine.sh up` が machine の設定ファイルの mount を jq で読み、ほかの mount があるか読めなければ起動せずに止まる）。
 - container は rust-toolchain.toml の channel の `rust:<channel>` の image（unit test が使う git を含む）で、toolchain（rust-toolchain.toml の component と target）と crate は作業の dir の下に置く。
   `CARGO_HOME` を作業の dir にすると image の rustup の proxy（`/usr/local/cargo/bin`）が `CARGO_HOME` の `bin` に rustup を探して見つけられないので、`prepare` は rustup を動かす前に image の `/usr/local/cargo/bin` を作業の dir の `cargo-home` に複写する（既にあれば複写しない）。
 - build の出力（`CARGO_TARGET_DIR`）は作業の dir（virtiofs の mount）に置かず、machine の中の podman の named volume `dagq-spike-target-<label>` に置く（host の mount の上では build script の link が「cannot find ... .rcgu.o」で落ちる）。
