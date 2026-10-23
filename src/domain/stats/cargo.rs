@@ -1,6 +1,7 @@
-//! The cargo-only measures of `stats` (ADR-t614-1): what only dagq's own
-//! checks (`cargo test`, llvm-cov, the e2e test) give. They are shown for
-//! dagq's source repository and left out of the output for any other
+//! The cargo-only measures of `stats`: the counts of what `integrate`'s
+//! checks (the whole test suite, llvm-cov, the e2e test) are repeated.
+//! They are shown where the rules that work count those checks and left
+//! out of the output for any other repository
 //! ([`super::without_cargo_measures`]), where a 0 or an `unknown` would
 //! read as a fact about that project. The host's `rustc` is left out the
 //! same way, by whether the repository's profiles record the Rust

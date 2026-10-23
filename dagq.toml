@@ -150,7 +150,7 @@ paths = ["**/*.rs", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
 # 分類は上の [toolchains.rust] の宣言で Rust の profile の既定の規則（cargo の test・full_test・llvm_cov・fmt・build）と runtime の共通の規則
 # （wait・dagq・git）が効くので、ここには写さない。下の [[telemetry.commands]] は、この repository の test target の名前に依る規則だけで、
 # profile の規則より先に当てる（上から試し、最初に当たった規則の class）。実際に効く規則と出どころは dagq doctor が出す。
-# [[telemetry.commands]] があると、run の作業の内訳は dagq のソースだけの cargo 専用の分類（ADR-t614-1）でなくこの重ね合わせで作る。
+# run の作業の内訳も台帳と同じこの重ね合わせで作る（dagq のソースかでは分けない）。
 # [telemetry] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 1674 を含んでから足した。
 command_detail = "shape"
 

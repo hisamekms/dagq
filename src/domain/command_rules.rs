@@ -18,11 +18,9 @@
 //! except that the counts of `integrate`'s checks a work breakdown keeps
 //! read the classes [`CHECK_CLASSES`] names.
 //!
-//! A run's work breakdown is made by [`work_rules`]: dagq's own source
-//! (ADR-t614-1) keeps the cargo rules of [`super::worktime`] while its
-//! `dagq.toml` has no `[[telemetry.commands]]`; any other repository is
-//! classified by the rules that work. The templates for languages no
-//! profile knows are [`templates`]'s.
+//! A run's work breakdown is classified by the same rules that work
+//! ([`work_rules`]), whichever repository it is. The templates for
+//! languages no profile knows are [`templates`]'s.
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
@@ -475,8 +473,8 @@ pub fn overlay<'a>(
 
 /// The rules that work for a repository whose `dagq.toml` resolves to
 /// `toolchains` (its declared profiles and its `[telemetry]`): the
-/// overlay itself, with no regard to dagq's own source. What the ledger
-/// classifies its steps by, and a work breakdown outside dagq's source.
+/// overlay itself. What the ledger classifies its steps by, and a run's
+/// work breakdown ([`work_rules`]).
 pub fn effective_rules(toolchains: &Toolchains) -> EffectiveRules {
     overlay(&toolchains.telemetry().commands, toolchains.profiles())
 }
@@ -837,36 +835,12 @@ fn word(arg: &ShapeArg) -> Option<&str> {
     }
 }
 
-/// How a run's work breakdown classifies its commands
-/// ([`super::worktime`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum WorkRules {
-    /// The cargo rules of dagq's own source (ADR-t614-1), with their
-    /// counts of `integrate`'s checks.
-    SourceCargo,
-    /// The rules that work ([`effective_rules`]).
-    Rules(Box<CommandClassifier>),
-}
-
-/// How the work breakdown of a repository classifies its commands, by
-/// whether it is dagq's source (`source`, ADR-t614-1) and its `dagq.toml`
-/// as `toolchains` resolves it (ADR-t2268-1 (8): the values stay while it
-/// moves). dagq's source keeps the cargo rules while its `dagq.toml` has
-/// no `[[telemetry.commands]]`, whatever profiles it declares, until the
-/// project's rules replace them; any other repository, and dagq's source
-/// once it has project rules, is classified by the rules that work
-/// ([`effective_rules`]): with no declaration and no project rule, by the
-/// common rules alone. A repository that declares no profile is given
-/// none here: what declares nothing applies none (ADR-t2268-1 decision 3).
-pub fn work_rules(source: bool, toolchains: &Toolchains) -> WorkRules {
-    if source && toolchains.telemetry().commands.is_empty() {
-        WorkRules::SourceCargo
-    } else {
-        WorkRules::Rules(Box::new(CommandClassifier::of_text(
-            effective_rules(toolchains),
-            toolchains,
-        )))
-    }
+/// How the work breakdown of a repository classifies its commands: by the
+/// rules that work for its `dagq.toml` as `toolchains` resolves it
+/// ([`effective_rules`]); with no declaration and no project rule, by the
+/// common rules alone, so nothing counts `integrate`'s checks.
+pub fn work_rules(toolchains: &Toolchains) -> CommandClassifier {
+    CommandClassifier::of_text(effective_rules(toolchains), toolchains)
 }
 
 /// Whether the readers of a session's commands (a Claude transcript's tool
@@ -879,22 +853,52 @@ pub fn reads_failed_tests(toolchains: &Toolchains) -> bool {
 }
 
 /// What `doctor` shows of the classification: the rules that work, each
-/// with its source (`rules`); how the work breakdown classifies
-/// (`work_breakdown`: `source_cargo` for dagq's source without project
-/// rules, else `rules`); the detail of the steps' commands
-/// (`command_detail`) and whether they name failed tests
-/// (`failed_tests`).
-pub fn doctor_view(source: bool, toolchains: &Toolchains) -> Value {
+/// with its source (`rules`), which a run's work breakdown classifies by
+/// too; the detail of the steps' commands (`command_detail`) and whether
+/// they name failed tests (`failed_tests`).
+pub fn doctor_view(toolchains: &Toolchains) -> Value {
     let settings = toolchains.telemetry();
     json!({
         "rules": effective_rules(toolchains).view(),
-        "work_breakdown": match work_rules(source, toolchains) {
-            WorkRules::SourceCargo => "source_cargo",
-            WorkRules::Rules(_) => "rules",
-        },
         "command_detail": settings.command_detail.as_str(),
         "failed_tests": settings.failed_tests,
     })
+}
+
+/// The project rules this repository's own `dagq.toml` has for its test
+/// targets: `--test it` runs nearly the whole suite, `--test e2e` is
+/// the e2e test.
+#[cfg(test)]
+pub(crate) fn project_rules() -> Vec<CommandRule> {
+    const OTHER_TARGETS: &[&str] = &[
+        "--lib",
+        "--bin",
+        "--bins",
+        "--doc",
+        "--example",
+        "--package",
+        "-p",
+        "-E",
+    ];
+    vec![
+        CommandRule::new("e2e", "cargo")
+            .flag_values("--test", &["e2e"])
+            .takes_value(&["--test"]),
+        CommandRule::new("full_test", "cargo")
+            .group("test")
+            .subcommands(&["test"])
+            .flag_values("--test", &["it"])
+            .takes_value(&["--test"])
+            .none_of(OTHER_TARGETS)
+            .positional_none(),
+        CommandRule::new("full_test", "cargo")
+            .group("test")
+            .subcommands(&["nextest", "run"])
+            .flag_values("--test", &["it"])
+            .takes_value(&["--test"])
+            .none_of(OTHER_TARGETS)
+            .positional_none(),
+    ]
 }
 
 #[cfg(test)]

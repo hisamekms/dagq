@@ -60,8 +60,9 @@ related:
 - KPIの記帳のevent（`domain::kpi::BOOKKEEPING_KINDS`）は、それだけではobserverを起こさない。
 - KPIの目標の判定は`kpi`・レポート・push・observerが同じ設定（`dagq.toml`の`[kpi]`にhost.tomlを重ねたもの、`infrastructure::kpi_config`）から同じ関数で読む。
 - runのareaは保存せず、`stats`と`kpi`が読むたびに着地したcommitの差分を`dagq.toml`の`[areas]`に通して求めるので、`[areas]`を直せば過去のrunも分類し直され、`[areas]`が壊れていれば両方とも止まる。
-- dagqのソースでないrepositoryのqueueでは、`stats`とworktimeのcargo専用の計測をどのコマンドも出さない（[Source repository](source-repository.md#cargo専用の計測)）。
-  claimのhostの`rustc`の記録と`kpi`の`toolchain=`の層と`stats`の`rustc`の欄は、ソースかではなく宣言したRustのprofileで分け、宣言の無いrepositoryではソースでも出さない。
+- `stats`とworktimeのcargo専用の計測（`integrate`と重なる検証の数）は、効く規則が`integrate`の検証を数えないrepositoryのqueueではどのコマンドも出さない（[Source repository](source-repository.md#cargo専用の計測)）。
+  claimのhostの`rustc`の記録と`kpi`の`toolchain=`の層と`stats`の`rustc`の欄は、宣言したRustのprofileで分ける。
+  どちらもdagqのソースかでは分けず、宣言も規則も無いrepositoryではソースでも出さない。
 
 ## 表示とreviewのコマンドをまたぐ約束
 

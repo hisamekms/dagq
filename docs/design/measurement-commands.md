@@ -1,7 +1,7 @@
 ---
 id: design-measurement-commands
 type: design
-title: 計測のコマンドの形と分類（shapeの記録と詳しさ・規則の重ね合わせ・台帳と作業の内訳の分類・移行の約束）
+title: 計測のコマンドの形と分類（shapeの記録と詳しさ・規則の重ね合わせ・台帳と作業の内訳の分類）
 status: current
 created: 2026-10-12
 scope: runtime
@@ -65,13 +65,6 @@ related:
   規則の版が変われば、storeが持つstepからその行の分類を作り直す。
   保持で消えたstepは作り直しに入らない。
   規則はsupervisorの台帳を作る係がpassごとに`dagq.toml`とqueueの鍵から読む（`LedgerPort::classifier`）。
-- runの作業の内訳（`session_closed`の`work`と`worktime.jsonl`）は`domain::command_rules::work_rules`の場合分けで分類する。
-
-## 移行の約束
-
-- dagqのソース（ADR-t614-1の判定）で`dagq.toml`に`[[telemetry.commands]]`が無い間は、`[toolchains]`の宣言の有無に依らず作業の内訳は今のcargoの規則（`domain::worktime::classify`と`full_test`）で分類し、`integrate`と重なる検証の数も今どおり数える。
-  この場合を外すのは、このrepositoryの`dagq.toml`にpjの規則を足し、場合分けからこの分岐を除く変更である。
-- それ以外のrepositoryと、`[[telemetry.commands]]`を持ったdagqのソースは、効く規則で分類する。
-  数は効く規則の分類から作り、`CHECK_CLASSES`の名前の分類を出す規則が無ければ出さない。
-- 宣言の無いrepositoryに暗黙のRustのprofileを当てる扱いは無いので、その分類も作らない。
-- 場合分けは`work_rules`の1つの関数で、効く規則の判断（`effective_rules`）は場合分けを通らずに直に呼べる。
+- runの作業の内訳（`session_closed`の`work`と`worktime.jsonl`）は、どのrepositoryも台帳と同じ効く規則（`domain::command_rules::work_rules`）で分類し、dagqのソースかの判定では分けない。
+  `integrate`と重なる検証の数は効く規則の分類から作り、`CHECK_CLASSES`の名前の分類を出す規則が無ければ出さない。
+  宣言も規則も無いrepositoryは共通の規則だけで分類し、cargoを前提にした分類も数も出さない。

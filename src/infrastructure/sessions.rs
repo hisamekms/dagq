@@ -32,7 +32,7 @@ use crate::{
     application::{TranscriptSource, Transcripts},
     domain::{
         EventId, GoalId, RunEvent, RunId, TaskId,
-        command_rules::WorkRules,
+        command_rules::CommandClassifier,
         fresh_session,
         sessions::{
             GOAL_REVIEW, HEADLESS_ROUTE, HOOK_KINDS, INFERRED, JOB_FINISHED, OpenSpan, PLAN_REVIEW,
@@ -61,11 +61,10 @@ thread_local! {
     static READ_BEFORE: RefCell<Vec<(OpenSpan, Result<ReadTranscript, Unreadable>)>> =
         const { RefCell::new(Vec::new()) };
     /// How the run sessions' work breakdowns classify their commands (by
-    /// whether the queue's repository is dagq's source and its
-    /// `dagq.toml`), judged before the same transaction began for the
-    /// spans it may close ([`work_rules`]): the judgement runs Git, never
-    /// under the write lock.
-    static RULES_BEFORE: RefCell<Vec<(EventId, WorkRules)>> = const { RefCell::new(Vec::new()) };
+    /// the `dagq.toml` of the queue's repository), judged before the same
+    /// transaction began for the spans it may close ([`work_rules`]): the
+    /// judgement runs Git, never under the write lock.
+    static RULES_BEFORE: RefCell<Vec<(EventId, CommandClassifier)>> = const { RefCell::new(Vec::new()) };
     /// The `worktime.jsonl` lines of the spans a write transaction on this
     /// thread closed, written when the [`ReadBefore`] of their spans is
     /// dropped, if their transaction committed (task 1334): the hooks
@@ -105,7 +104,7 @@ struct WorkInputs {
     /// Where its `worktime.jsonl` goes; not part of the breakdown.
     run_dir: Option<String>,
     verification: Vec<String>,
-    rules: WorkRules,
+    rules: CommandClassifier,
 }
 
 /// The close's analysis of a transcript for a [`Want`].
@@ -190,7 +189,7 @@ impl Analysis {
             );
             None
         };
-        fn inputs(want: &Want) -> (i64, bool, Option<&WorkRules>) {
+        fn inputs(want: &Want) -> (i64, bool, Option<&CommandClassifier>) {
             (
                 want.start,
                 want.usage,
@@ -498,13 +497,13 @@ pub(super) fn read_before(conn: &Connection, closing: Closing<'_>) -> Result<Rea
         guard.spans.push(span.opened_event_id);
         let transcript = read(conn, &span, &mut toolchains);
         // A run session's close with its transcript records its work
-        // breakdown, whose rules depend on the repository (ADR-t614-1).
+        // breakdown, whose rules are the repository's `dagq.toml`'s.
         // A Codex worker's breakdown is made from its turns' commands.
         let codex = !span.claude() && span.headless();
         if (transcript.is_ok() || codex) && RUN_SESSION.contains(&span.kind()) {
             let rules = match &rules {
                 Some(rules) => Clone::clone(rules),
-                None => rules.insert(judge_work_rules(conn)?).clone(),
+                None => rules.insert(judge_work_rules(conn)).clone(),
             };
             RULES_BEFORE.with_borrow_mut(|read| read.push((span.opened_event_id, rules)));
         }
@@ -1479,67 +1478,34 @@ fn work_inputs(conn: &Connection, run_id: &RunId, span: &OpenSpan) -> Result<Wor
         verification: verification
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default(),
-        rules: work_rules(conn, span)?,
+        rules: work_rules(conn, span),
     })
 }
 
 /// How the work breakdown of the close of `span` classifies its commands
-/// ([`crate::domain::command_rules::work_rules`]): by the cargo rules of
-/// dagq's source (ADR-t614-1) while its `dagq.toml` has no project rules,
-/// else by the rules that work. Judged by [`read_before`] before the write
-/// transaction began, else, outside one, now; inside one without that
-/// judgement (never with a transcript read before), as a repository that
-/// is not dagq's source and declares nothing.
-fn work_rules(conn: &Connection, span: &OpenSpan) -> Result<WorkRules> {
+/// ([`crate::domain::command_rules::work_rules`]): by the rules that work
+/// for the `dagq.toml` of the queue's repository. Judged by
+/// [`read_before`] before the write transaction began, else, outside one,
+/// now; inside one without that judgement (never with a transcript read
+/// before), as a repository that declares nothing.
+fn work_rules(conn: &Connection, span: &OpenSpan) -> CommandClassifier {
     let judged = RULES_BEFORE.with_borrow(|read| {
         read.iter()
             .find(|(opened, _)| *opened == span.opened_event_id)
             .map(|(_, rules)| rules.clone())
     });
     match judged {
-        Some(rules) => Ok(rules),
+        Some(rules) => rules,
         None if conn.is_autocommit() => judge_work_rules(conn),
-        None => Ok(crate::domain::command_rules::work_rules(
-            false,
-            &Toolchains::none(),
-        )),
+        None => crate::domain::command_rules::work_rules(&Toolchains::none()),
     }
 }
 
-/// How the work breakdowns classify their commands now: by whether the
-/// queue's repository is dagq's source ([`judge_dagq_source`]) and the
-/// `dagq.toml` of its main checkout ([`measured_toolchains`]).
-fn judge_work_rules(conn: &Connection) -> Result<WorkRules> {
-    let source = judge_dagq_source(conn)?;
-    Ok(crate::domain::command_rules::work_rules(
-        source,
-        &measured_toolchains(conn),
-    ))
-}
-
-/// Whether the repository the queue is bound to is dagq's source
-/// (ADR-t614-1), judged now from its main checkout's `Cargo.toml`. A queue
-/// bound to no repository, or whose main checkout cannot be found, is not.
-fn judge_dagq_source(conn: &Connection) -> Result<bool> {
-    let bound: Option<String> = conn
-        .query_row(
-            "SELECT git_common_dir FROM queue_repository WHERE singleton=1",
-            [],
-            |r| r.get(0),
-        )
-        .optional()?;
-    let Some(dir) = bound else {
-        return Ok(false);
-    };
-    match super::adapters::main_checkout_of(std::path::Path::new(&dir)) {
-        Ok(checkout) => Ok(super::adapters::is_dagq_source(&checkout)),
-        Err(error) => {
-            info!(
-                "work breakdown without the cargo-only measures: no main checkout of {dir}: {error:#}"
-            );
-            Ok(false)
-        }
-    }
+/// How the work breakdowns classify their commands now: by the rules that
+/// work for the `dagq.toml` of the queue's main checkout
+/// ([`measured_toolchains`]).
+fn judge_work_rules(conn: &Connection) -> CommandClassifier {
+    crate::domain::command_rules::work_rules(&measured_toolchains(conn))
 }
 
 /// The profiles the worker's commands in the transcripts read now are read
@@ -2827,8 +2793,9 @@ pub(super) mod tests {
 
     /// The close of a headless Codex worker's span in `dir`, opened at
     /// `base`, with `turns`, whose run directory has the files `files(base)`
-    /// gives (turn, text) of their commands: its `session_closed` and the
-    /// run directory.
+    /// gives (turn, text) of their commands, in a repository that declares
+    /// the Rust profile and names the failed tests: its `session_closed`
+    /// and the run directory.
     fn codex_close(
         dir: &std::path::Path,
         files: impl Fn(i64) -> Vec<(u64, String)>,
@@ -2838,7 +2805,11 @@ pub(super) mod tests {
         let conn = &queue.conn;
         let run_dir = dir.join("run");
         std::fs::create_dir_all(run_dir.join("turns")).unwrap();
-        bind(conn, dir, "dagq");
+        bind(
+            conn,
+            dir,
+            &format!("{RUST_DECLARED}\n[telemetry]\nfailed_tests = true\n"),
+        );
         conn.execute(
             "UPDATE task_runs SET worker_mode='headless', requested_provider='codex',
                actual_provider='codex', run_dir=?1",
@@ -2897,9 +2868,9 @@ pub(super) mod tests {
     /// A headless Codex worker's span (task 1354) takes its work from the
     /// commands its turns' wrapper wrote, as a Claude span's from its
     /// transcript: their times (one whose start was not read at its end),
-    /// the model's time in its turns, idle between them, the cargo-only
-    /// counts of dagq's source and the tests a test command's output named
-    /// as failed; and each command is a `worktime.jsonl` line that says how
+    /// the model's time in its turns, idle between them, the counts the
+    /// declared Rust profile gives and, with `[telemetry] failed_tests` on,
+    /// the tests a test command's output named as failed; and each command is a `worktime.jsonl` line that says how
     /// its times were found.
     #[test]
     fn a_codex_span_takes_its_work_from_its_turns_commands() {
@@ -3373,9 +3344,13 @@ pub(super) mod tests {
         assert_eq!(record_open_turns(conn).unwrap(), 0);
     }
 
+    /// The `dagq.toml` of a repository that declares the Rust profile, as
+    /// this repository's does.
+    const RUST_DECLARED: &str = "[toolchains.rust]\nprofile = \"rust\"\n";
+
     /// Bind the queue on `conn` to a new Git repository under `dir` whose
-    /// `Cargo.toml` names the package `package`.
-    fn bind(conn: &Connection, dir: &std::path::Path, package: &str) {
+    /// `dagq.toml` is `dagq_toml`.
+    fn bind(conn: &Connection, dir: &std::path::Path, dagq_toml: &str) {
         let repo = dir.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         let init = std::process::Command::new(git_executable().expect("git executable"))
@@ -3384,86 +3359,13 @@ pub(super) mod tests {
             .status()
             .unwrap();
         assert!(init.success());
-        std::fs::write(
-            repo.join("Cargo.toml"),
-            format!("[package]\nname = \"{package}\"\n"),
-        )
-        .unwrap();
+        std::fs::write(repo.join("dagq.toml"), dagq_toml).unwrap();
         let common_dir = crate::infrastructure::adapters::git_common_dir(&repo).unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO queue_repository(singleton,git_common_dir) VALUES (1,?1)",
             [common_dir.to_str().unwrap()],
         )
         .unwrap();
-    }
-
-    /// Outside dagq's source (ADR-t614-1), and for a queue bound to no
-    /// repository, a run's session closes with a work breakdown that labels
-    /// no command e2e, llvm-cov or test and counts none of what `integrate`
-    /// repeats.
-    #[test]
-    fn outside_dagqs_source_the_work_breakdown_keeps_no_cargo_measure() {
-        for package in [Some("other"), None] {
-            let dir = tempfile::tempdir().unwrap();
-            let (queue, task_id, run) = run_queue(dir.path());
-            let conn = &queue.conn;
-            if let Some(package) = package {
-                bind(conn, dir.path(), package);
-            }
-            conn.execute(
-                "UPDATE tasks SET verification_commands=?1",
-                [r#"["cargo llvm-cov --locked --fail-under-lines 80"]"#],
-            )
-            .unwrap();
-            event(
-                conn,
-                task_id,
-                Some(&run),
-                EventKind::AgentStarted,
-                json!({"session_id": RUN}),
-            )
-            .unwrap();
-            let start = retime(conn, 0, 100);
-            let project = dir.path().join("config/projects/-wt");
-            std::fs::create_dir_all(&project).unwrap();
-            let line = |kind: &str, secs: i64, content: Value| {
-                json!({"type": kind, "timestamp": millis_text(start + secs * 1000),
-                       "sessionId": RUN, "version": "2.1.283", "message": {"content": content}})
-                .to_string()
-            };
-            let lines = [
-                line("user", 1, json!("go")),
-                line(
-                    "assistant",
-                    5,
-                    json!([{"type": "tool_use", "id": "a", "name": "Bash",
-                            "input": {"command": "cargo llvm-cov --locked"}}]),
-                ),
-                line(
-                    "user",
-                    45,
-                    json!([{"type": "tool_result", "tool_use_id": "a", "is_error": true,
-                            "content": "Exit code 1"}]),
-                ),
-                line("assistant", 50, json!([{"type": "text"}])),
-            ];
-            std::fs::write(project.join(format!("{RUN}.jsonl")), lines.join("\n")).unwrap();
-            event(
-                conn,
-                task_id,
-                Some(&run),
-                EventKind::SessionExited,
-                json!({"exit_code": 0}),
-            )
-            .unwrap();
-            let work = &of_kind(&queue, SESSION_CLOSED)[0].payload["work"];
-            assert_eq!(work["secs"]["other_command"], 40, "{package:?}: {work}");
-            assert!(work["secs"].get("llvm_cov").is_none(), "{work}");
-            assert_eq!(work["commands"], json!({}), "{work}");
-            for key in ["verification_repeats", "full_tests", "llvm_cov_runs"] {
-                assert!(work.get(key).is_none(), "{key}: {work}");
-            }
-        }
     }
 
     /// A run's session closes with its work breakdown: the aggregate on its
@@ -3477,8 +3379,8 @@ pub(super) mod tests {
         let run_dir = dir.path().join("run");
         std::fs::create_dir_all(&run_dir).unwrap();
         let conn = &queue.conn;
-        // dagq's source keeps the cargo-only kinds and counts (ADR-t614-1).
-        bind(conn, dir.path(), "dagq");
+        // The Rust profile declared gives the cargo kinds and counts.
+        bind(conn, dir.path(), RUST_DECLARED);
         conn.execute(
             "UPDATE task_runs SET run_dir=?1",
             [run_dir.to_str().unwrap()],
@@ -4437,9 +4339,9 @@ pub(super) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (queue, task_id, run) = run_queue(dir.path());
         let conn = &queue.conn;
-        // Whether it is dagq's source is judged before the transaction too
-        // (ADR-t614-1): the worker's work keeps the cargo-only counts.
-        bind(conn, dir.path(), "dagq");
+        // The rules are judged before the transaction too: the worker's
+        // work keeps the counts the declared Rust profile gives.
+        bind(conn, dir.path(), RUST_DECLARED);
         event(
             conn,
             task_id,
@@ -4991,7 +4893,7 @@ pub(super) mod tests {
         let run_dir = dir.path().join("run");
         std::fs::create_dir_all(&run_dir).unwrap();
         let conn = &queue.conn;
-        bind(conn, dir.path(), "dagq");
+        bind(conn, dir.path(), RUST_DECLARED);
         conn.execute(
             "UPDATE task_runs SET run_dir=?1",
             [run_dir.to_str().unwrap()],
@@ -5271,7 +5173,7 @@ pub(super) mod tests {
         let run_dir = dir.path().join("run");
         std::fs::create_dir_all(&run_dir).unwrap();
         let conn = &queue.conn;
-        bind(conn, dir.path(), "dagq");
+        bind(conn, dir.path(), RUST_DECLARED);
         conn.execute(
             "UPDATE task_runs SET run_dir=?1",
             [run_dir.to_str().unwrap()],
@@ -5486,7 +5388,9 @@ pub(super) mod tests {
             work: Some(WorkInputs {
                 run_dir: None,
                 verification: verification.iter().map(|c| (*c).to_owned()).collect(),
-                rules: WorkRules::SourceCargo,
+                rules: crate::domain::command_rules::work_rules(
+                    &crate::domain::toolchain::Toolchains::this_repository(),
+                ),
             }),
         };
         let conn = Connection::open_in_memory().unwrap();

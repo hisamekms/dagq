@@ -1641,9 +1641,8 @@ enum Command {
     /// `command_rules` shows the rules that classify the commands when the ledger and a run's
     /// work breakdown are made, in the order they are tried, each with its source: dagq.toml
     /// ([[telemetry.commands]], with its line) first, then each declared profile's
-    /// (profile:<name>), then the runtime's common rules (common); with `work_breakdown` (how a
-    /// run's work breakdown classifies: source_cargo, dagq's own source without project rules,
-    /// or rules), and the [telemetry] command_detail and failed_tests in use.
+    /// (profile:<name>), then the runtime's common rules (common), which a run's work breakdown
+    /// classifies by too; with the [telemetry] command_detail and failed_tests in use.
     /// `agents` shows the review's agents read from the landing branch; its `builtins` start with
     /// builtin:acceptance, the whole review, and `without_rules` names the enabled built-ins
     /// that judge without the project's rules, the landing branch having no

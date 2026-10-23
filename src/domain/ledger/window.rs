@@ -80,7 +80,7 @@
 //! | `StatsSources::conflicts_file` (`[conflicts]`) | a setting, not an observation | read with each call | — | none: the reader takes it beside the window |
 //! | `AreaReader::map` (`[areas]`) | a setting, not an observation | read with each call | — | [`WindowQuery::areas`] |
 //! | `StatsSources::utc_offset_secs`, `kpi::Host::utc_offset_secs` | a setting, not an observation | read with each call | — | none: the reader takes it beside the window |
-//! | `StatsSources::dagq_source`, `kpi::Host::rust_toolchain` | a setting, not an observation | read with each call | — | none: the reader takes it beside the window |
+//! | `StatsSources::counts_checks`, `kpi::Host::rust_toolchain` | a setting, not an observation | read with each call | — | none: the reader takes it beside the window |
 //! | `kpi::Host::cores` | a setting, not an observation | read with each call | — | none: the reader takes it beside the window |
 //! | `KpiConfig` (`[kpi]`) | a setting, not an observation | read with each call | — | none: the reader takes it beside the window |
 //! | `ReportSetup` (root, retention, build, the diagram's renderer) | a setting, not an observation | read with each call | — | none: the reader takes it beside the window |

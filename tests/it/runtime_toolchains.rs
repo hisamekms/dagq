@@ -152,7 +152,8 @@ fn an_output_only_another_profile_could_read_is_unknown() {
 }
 
 /// A repository that declares no profile, dagq's source too (ADR-t2268-1
-/// decision 3): `doctor` shows none and no warning, and cargo's and
+/// decision 3): `doctor` shows none and no warning, and classifies the
+/// commands by the common rules alone, and cargo's and
 /// nextest's marks, a test passed on its retry and `within`'s line mean
 /// nothing (`unknown`, no tests named, no flaky retry).
 #[test]
@@ -160,9 +161,17 @@ fn a_repository_that_declares_none_reads_no_profile_even_as_dagqs_source() {
     let (_dir, db, repo) = awaiting();
     make_dagq_source(&repo);
     let one_shot = with_made_up();
-    assert_eq!(
-        one_shot.doctor(&db, false, None).unwrap()["toolchains"],
-        json!({"declared": [], "marks": []})
+    let doctor = one_shot.doctor(&db, false, None).unwrap();
+    assert_eq!(doctor["toolchains"], json!({"declared": [], "marks": []}));
+    let rules = &doctor["command_rules"];
+    assert!(rules.get("work_breakdown").is_none(), "{rules}");
+    assert!(
+        rules["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|rule| rule["source"] == "common"),
+        "{rules}"
     );
     set_commands(
         &db,

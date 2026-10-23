@@ -3483,6 +3483,29 @@ impl Verifier for ShellVerifier {
 mod tests {
     use super::*;
 
+    /// This repository's own `dagq.toml` declares the Rust profile and has
+    /// the project rules the work breakdown's tests classify by
+    /// ([`crate::domain::command_rules::project_rules`]), so those tests
+    /// hold for the file itself.
+    #[test]
+    fn this_repositorys_dagq_toml_has_the_rules_the_tests_classify_by() {
+        let config = parse_config(include_str!("../../dagq.toml")).unwrap();
+        assert!(
+            config
+                .toolchains
+                .iter()
+                .any(|toolchain| toolchain.profile == "rust"),
+            "{:?}",
+            config.toolchains
+        );
+        let mut commands = config.telemetry.commands;
+        for rule in &mut commands {
+            rule.line = None;
+        }
+        assert_eq!(commands, crate::domain::command_rules::project_rules());
+        assert!(!config.telemetry.failed_tests);
+    }
+
     #[test]
     fn the_run_env_salt_is_made_once_and_kept_private() {
         use std::os::unix::fs::PermissionsExt;

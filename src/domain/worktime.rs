@@ -7,10 +7,8 @@
 //! Every millisecond of the span gets one category, by priority:
 //! a foreground tool > a background command > a subagent > the model >
 //! idle. A shell command is labelled by the rules its repository works by
-//! ([`label`], [`crate::domain::command_rules::work_rules`]): dagq's own
-//! source keeps the cargo rules of [`classify`] (the heaviest thing it
-//! runs) while its `dagq.toml` has no `[[telemetry.commands]]`, and any
-//! other repository takes the group of the rule that classifies it; a
+//! ([`label`], [`crate::domain::command_rules::work_rules`]): the group
+//! of the rule that classifies it, or [`OTHER_COMMAND`] when none does; a
 //! background command and an async subagent end at their
 //! `<task-notification>`. The tool hooks (`PreToolUse` / `PostToolUse`)
 //! are not used: they cannot see a background command's end.
@@ -19,7 +17,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
-use super::command_rules::{CHECK_CLASSES, FULL_TEST, RuleSource, WorkRules};
+use super::command_rules::{CHECK_CLASSES, CommandClassifier, FULL_TEST, RuleSource};
 use super::transcript::{RecordRole, TranscriptRecord, millis_text};
 use super::turn::TurnCommand;
 
@@ -33,8 +31,10 @@ pub const WAIT: &str = "wait";
 pub const DAGQ: &str = "dagq";
 pub const GIT: &str = "git";
 pub const OTHER_COMMAND: &str = "other_command";
-/// Commands joined with `&&`, `||`, `;`, `&` or a newline that run two or more
-/// heavy kinds (say fmt, clippy and llvm-cov in one line).
+/// Commands joined with `&&`, `||`, `;`, `&` or a newline that ran two or
+/// more heavy kinds, in the breakdowns that recorded it: a command is now
+/// labelled by the rule of its earliest-matched part ([`label`]), so no
+/// new breakdown has it.
 pub const CHAIN: &str = "chain";
 /// Other tools (reading, editing, searching files).
 pub const TOOL: &str = "tool";
@@ -60,640 +60,58 @@ pub const CATEGORIES: [&str; 14] = [
     IDLE,
 ];
 
-/// The heavy commands: counted and failed per kind, and listed in
-/// `timeline`.
-pub const HEAVY: [&str; 5] = [CHAIN, E2E, LLVM_COV, TEST, BUILD];
-
-/// The categories of commands that run tests, whose output is read for
-/// the failed tests (task 515).
-pub const TEST_KINDS: [&str; 4] = [CHAIN, E2E, LLVM_COV, TEST];
-
 /// The most failed test names one span's `work` keeps (task 515).
 pub const MAX_SPAN_FAILED_TESTS: usize = 50;
 
 /// Tools that only wait (for a wakeup, a monitor, a background output).
 const WAIT_TOOLS: [&str; 4] = ["ScheduleWakeup", "Monitor", "TaskOutput", "BashOutput"];
 
-/// The category of a shell `command`: the heaviest of its parts, or
-/// [`CHAIN`] when two or more parts are heavy of different kinds. Only the
-/// `cargo` rules (`cargo`, for dagq's source repository; ADR-t614-1) tell
-/// [`E2E`], [`LLVM_COV`] and [`TEST`]; without them such a command is
-/// labelled as any other.
-pub fn classify(command: &str, cargo: bool) -> &'static str {
-    let mut kinds: Vec<&'static str> = parts(command)
-        .iter()
-        .map(|part| rank(part, cargo))
-        .collect();
-    kinds.sort_unstable_by_key(|kind| RANKS.iter().position(|k| k == kind));
-    kinds.dedup();
-    if kinds.iter().filter(|kind| HEAVY.contains(kind)).count() >= 2 {
-        return CHAIN;
-    }
-    kinds.first().copied().unwrap_or(OTHER_COMMAND)
-}
-
 /// The category of a shell `command` by `rules`, and whether it is one of
-/// the heavy commands: by the cargo rules of dagq's source ([`classify`],
-/// heavy when one of [`HEAVY`]); or by the rules that work, the group of
-/// the rule its earliest-matched part matched, heavy when that rule is the
-/// project's or a profile's (a tool's command, not a wait, dagq or git),
-/// and [`OTHER_COMMAND`], not heavy, when no rule matches.
-pub fn label(command: &str, rules: &WorkRules) -> (&'static str, bool) {
-    match rules {
-        WorkRules::SourceCargo => {
-            let category = classify(command, true);
-            (category, HEAVY.contains(&category))
-        }
-        WorkRules::Rules(classifier) => match classifier.classify_text(command) {
-            Some(matched) => (matched.group, matched.source != RuleSource::Common),
-            None => (OTHER_COMMAND, false),
-        },
+/// the heavy commands: the group of the rule its earliest-matched part
+/// matched, heavy when that rule is the project's or a profile's (a tool's
+/// command, not a wait, dagq or git), and [`OTHER_COMMAND`], not heavy,
+/// when no rule matches.
+pub fn label(command: &str, rules: &CommandClassifier) -> (&'static str, bool) {
+    match rules.classify_text(command) {
+        Some(matched) => (matched.group, matched.source != RuleSource::Common),
+        None => (OTHER_COMMAND, false),
     }
 }
 
-/// Whether a command of `category` (`heavy` or not) runs tests, so its
-/// output is read for the failed tests: one of [`TEST_KINDS`] by the
-/// cargo rules, a heavy one by the rules that work when they name failed
-/// tests (`[telemetry] failed_tests`).
-fn reads_tests(rules: &WorkRules, category: &str, heavy: bool) -> bool {
-    match rules {
-        WorkRules::SourceCargo => TEST_KINDS.contains(&category),
-        WorkRules::Rules(classifier) => heavy && classifier.names_failed_tests(),
-    }
+/// Whether a command, `heavy` or not, runs tests, so its output is read
+/// for the failed tests: a heavy one, when `rules` name failed tests
+/// (`[telemetry] failed_tests`).
+fn reads_tests(rules: &CommandClassifier, heavy: bool) -> bool {
+    heavy && rules.names_failed_tests()
 }
 
-/// What `command` runs of `integrate`'s checks, by `rules`: by the cargo
-/// rules ([`verification_classes`]), or the classes of its parts that are
-/// [`CHECK_CLASSES`], each once.
-pub fn check_classes(command: &str, rules: &WorkRules) -> Vec<&'static str> {
-    match rules {
-        WorkRules::SourceCargo => verification_classes(command),
-        WorkRules::Rules(classifier) => {
-            let mut classes: Vec<&'static str> = classifier
-                .part_classes(command)
-                .into_iter()
-                .filter(|class| CHECK_CLASSES.contains(class))
-                .collect();
-            classes.sort_unstable();
-            classes.dedup();
-            classes
-        }
-    }
-}
-
-/// Whether a breakdown by `rules` counts `integrate`'s checks: by the
-/// cargo rules, and by rules one of which gives a class of
-/// [`CHECK_CLASSES`].
-fn counts_checks(rules: &WorkRules) -> bool {
-    match rules {
-        WorkRules::SourceCargo => true,
-        WorkRules::Rules(classifier) => classifier.rules().counts_checks(),
-    }
-}
-
-/// What `command` runs that a [`Breakdown`] counts, by `rules`.
-fn runs_of(command: &str, rules: &WorkRules) -> Runs {
-    match rules {
-        WorkRules::SourceCargo => Runs {
-            classes: verification_classes(command),
-            full_test: full_test(command),
-            llvm_cov: parts(command).iter().any(|p| rank(p, true) == LLVM_COV),
-        },
-        WorkRules::Rules(classifier) => {
-            let classes = classifier.part_classes(command);
-            Runs {
-                full_test: classes.contains(&FULL_TEST),
-                llvm_cov: classes.contains(&super::command_rules::LLVM_COV),
-                classes: check_classes(command, rules),
-            }
-        }
-    }
-}
-
-/// The kinds of a part, heaviest first.
-const RANKS: [&str; 9] = [
-    E2E,
-    LLVM_COV,
-    TEST,
-    BUILD,
-    FMT,
-    WAIT,
-    DAGQ,
-    GIT,
-    OTHER_COMMAND,
-];
-
-/// A word of a shell command: its text without the quotes and escapes,
-/// and where its first quoted character is (`None` when none is).
-#[derive(Debug, Default)]
-struct Word {
-    text: String,
-    quoted_from: Option<usize>,
-}
-
-impl Word {
-    fn quote(&mut self) {
-        self.quoted_from.get_or_insert(self.text.len());
-    }
-}
-
-/// The simple commands of one part: split at a pipe, and at a subshell's
-/// or a command substitution's bounds (`(`, `$(`, `` ` ``, `)`).
-type Part = Vec<Vec<Word>>;
-
-/// The parts of a command, split at `&&`, `||`, `;`, `&` and newlines
-/// outside quotes. Quoted text stays in its word, the body of a heredoc
-/// (`<<EOF`, `<<'EOF'`, `<<-EOF`) and a `#` comment are dropped.
-fn parts(command: &str) -> Vec<Part> {
-    Splitter::default().split(command)
-}
-
-#[derive(Default)]
-struct Splitter {
-    parts: Vec<Part>,
-    part: Part,
-    simple: Vec<Word>,
-    word: Option<Word>,
-    /// The simple commands a `(`, `$(` or `` ` `` suspended, and whether
-    /// the substitution was in double quotes (`"$(…)"`), which go on after
-    /// its `)`.
-    outer: Vec<(Vec<Word>, bool)>,
-    in_backtick: bool,
-    /// The delimiters of the heredocs whose body starts at the next
-    /// newline, and whether leading tabs are stripped (`<<-`).
-    heredocs: Vec<(String, bool)>,
-}
-
-impl Splitter {
-    fn split(mut self, command: &str) -> Vec<Part> {
-        let chars: Vec<char> = command.chars().collect();
-        let mut i = 0;
-        while i < chars.len() {
-            let c = chars[i];
-            let next = chars.get(i + 1).copied();
-            match c {
-                '\n' => {
-                    self.end_part();
-                    i = self.skip_heredocs(&chars, i + 1);
-                    continue;
-                }
-                ' ' | '\t' | '\r' => self.end_word(),
-                '#' if self.word.is_none() => {
-                    while i + 1 < chars.len() && chars[i + 1] != '\n' {
-                        i += 1;
-                    }
-                }
-                '\'' => {
-                    let word = self.word.get_or_insert_default();
-                    word.quote();
-                    i += 1;
-                    while i < chars.len() && chars[i] != '\'' {
-                        word.text.push(chars[i]);
-                        i += 1;
-                    }
-                }
-                '"' => {
-                    i = self.double_quoted(&chars, i + 1);
-                    continue;
-                }
-                '\\' => {
-                    if next == Some('\n') {
-                        i += 1;
-                    } else if let Some(escaped) = next {
-                        let word = self.word.get_or_insert_default();
-                        // `\cargo` still runs cargo; `\;` is no separator.
-                        if !escaped.is_alphanumeric() {
-                            word.quote();
-                        }
-                        word.text.push(escaped);
-                        i += 1;
-                    }
-                }
-                '&' if next == Some('&') => {
-                    self.end_part();
-                    i += 1;
-                }
-                '&' if next == Some('>')
-                    || self
-                        .word
-                        .as_ref()
-                        .is_some_and(|w| w.text.ends_with(['>', '<'])) =>
-                {
-                    self.word.get_or_insert_default().text.push(c);
-                }
-                '&' | ';' => self.end_part(),
-                '|' if next == Some('|') => {
-                    self.end_part();
-                    i += 1;
-                }
-                '|' => {
-                    self.end_simple();
-                    if next == Some('&') {
-                        i += 1;
-                    }
-                }
-                // An arithmetic `$((…))` runs nothing and has no heredoc.
-                '(' if next == Some('(')
-                    && self
-                        .word
-                        .as_ref()
-                        .is_some_and(|w| w.quoted_from.is_none() && w.text.ends_with('$')) =>
-                {
-                    let word = self.word.get_or_insert_default();
-                    let mut depth = 0;
-                    while let Some(&c) = chars.get(i) {
-                        depth += match c {
-                            '(' => 1,
-                            ')' => -1,
-                            _ => 0,
-                        };
-                        word.text.push(c);
-                        i += 1;
-                        if depth == 0 {
-                            break;
-                        }
-                    }
-                    continue;
-                }
-                '(' => {
-                    if let Some(word) = self.word.as_mut()
-                        && word.quoted_from.is_none()
-                        && word.text.ends_with('$')
-                    {
-                        word.text.pop();
-                    }
-                    self.open(false);
-                }
-                ')' => {
-                    if self.close() {
-                        i = self.double_quoted(&chars, i + 1);
-                        continue;
-                    }
-                }
-                '`' if self.in_backtick => {
-                    self.in_backtick = false;
-                    self.close();
-                }
-                '`' => {
-                    self.in_backtick = true;
-                    self.open(false);
-                }
-                '<' if next == Some('<') && chars.get(i + 2) == Some(&'<') => {
-                    self.word.get_or_insert_default().text.push_str("<<<");
-                    i += 2;
-                }
-                '<' if next == Some('<') => {
-                    self.end_word();
-                    i = self.heredoc(&chars, i + 2);
-                    continue;
-                }
-                _ => self.word.get_or_insert_default().text.push(c),
-            }
-            i += 1;
-        }
-        self.end_word();
-        while let Some((outer, _)) = self.outer.pop() {
-            self.end_simple();
-            self.simple = outer;
-        }
-        self.end_part();
-        self.parts
-    }
-
-    fn end_word(&mut self) {
-        if let Some(word) = self.word.take()
-            && (!word.text.is_empty() || word.quoted_from.is_some())
-        {
-            self.simple.push(word);
-        }
-    }
-
-    fn end_simple(&mut self) {
-        self.end_word();
-        if !self.simple.is_empty() {
-            self.part.push(std::mem::take(&mut self.simple));
-        }
-    }
-
-    fn end_part(&mut self) {
-        self.end_simple();
-        if !self.part.is_empty() {
-            self.parts.push(std::mem::take(&mut self.part));
-        }
-    }
-
-    fn open(&mut self, in_double: bool) {
-        self.end_word();
-        self.outer
-            .push((std::mem::take(&mut self.simple), in_double));
-    }
-
-    /// Ends a substitution or a subshell; whether it was in double quotes.
-    fn close(&mut self) -> bool {
-        self.end_simple();
-        let (outer, in_double) = self.outer.pop().unwrap_or_default();
-        self.simple = outer;
-        in_double
-    }
-
-    /// Reads double-quoted text from `at` into the word, up to the closing
-    /// quote or a `$(`, whose commands run (and are read as commands);
-    /// returns where the command goes on.
-    fn double_quoted(&mut self, chars: &[char], mut at: usize) -> usize {
-        self.word.get_or_insert_default().quote();
-        while let Some(&c) = chars.get(at) {
-            let next = chars.get(at + 1).copied();
-            match c {
-                '"' => return at + 1,
-                '\\' if matches!(next, Some('"' | '\\' | '$' | '`')) => {
-                    self.word.get_or_insert_default().text.extend(next);
-                    at += 2;
-                }
-                '$' if next == Some('(') && chars.get(at + 2) != Some(&'(') => {
-                    self.open(true);
-                    return at + 2;
-                }
-                _ => {
-                    self.word.get_or_insert_default().text.push(c);
-                    at += 1;
-                }
-            }
-        }
-        at
-    }
-
-    /// Reads a heredoc's delimiter from `at` (after `<<`); returns where
-    /// the rest of the line goes on.
-    fn heredoc(&mut self, chars: &[char], mut at: usize) -> usize {
-        let strip_tabs = chars.get(at) == Some(&'-');
-        if strip_tabs {
-            at += 1;
-        }
-        while matches!(chars.get(at), Some(' ' | '\t')) {
-            at += 1;
-        }
-        let mut delimiter = String::new();
-        while let Some(&c) = chars.get(at) {
-            if c.is_whitespace() || matches!(c, ';' | '|' | '&' | '<' | '>' | '(' | ')') {
-                break;
-            }
-            if !matches!(c, '\'' | '"' | '\\') {
-                delimiter.push(c);
-            }
-            at += 1;
-        }
-        if !delimiter.is_empty() {
-            self.heredocs.push((delimiter, strip_tabs));
-        }
-        at
-    }
-
-    /// Skips the bodies of the pending heredocs, from the line at `at`;
-    /// returns where the command goes on.
-    fn skip_heredocs(&mut self, chars: &[char], mut at: usize) -> usize {
-        for (delimiter, strip_tabs) in std::mem::take(&mut self.heredocs) {
-            while at < chars.len() {
-                let end = chars[at..]
-                    .iter()
-                    .position(|&c| c == '\n')
-                    .map_or(chars.len(), |n| at + n);
-                let line: String = chars[at..end].iter().collect();
-                let line = if strip_tabs {
-                    line.trim_start_matches('\t')
-                } else {
-                    &line
-                };
-                at = (end + 1).min(chars.len());
-                if line.trim_end() == delimiter {
-                    break;
-                }
-            }
-        }
-        at
-    }
-}
-
-/// What a simple command runs: the keywords and prefixes before it
-/// (`until`, `time`, `env`...), the name of the command word (its file
-/// name), and its arguments. Assignments (`VAR=x`) before it are skipped;
-/// a quoted word is not a command.
-struct Run<'a> {
-    lead: Vec<&'a str>,
-    name: &'a str,
-    args: &'a [Word],
-}
-
-const KEYWORDS: [&str; 11] = [
-    "if", "then", "else", "elif", "do", "while", "until", "!", "{", "}", "done",
-];
-
-/// Commands that run the command after them, with their flags that take
-/// a value in the next word; `timeout` also takes a duration.
-const PREFIXES: [(&str, &[&str]); 10] = [
-    ("time", &[]),
-    ("nohup", &[]),
-    ("command", &[]),
-    ("exec", &["-a"]),
-    (
-        "env",
-        &["-u", "--unset", "-C", "--chdir", "-S", "--split-string"],
-    ),
-    ("timeout", &["-s", "--signal", "-k", "--kill-after"]),
-    ("nice", &["-n", "--adjustment"]),
-    (
-        "sudo",
-        &["-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U"],
-    ),
-    (
-        "xargs",
-        &[
-            "-n", "-I", "-J", "-L", "-P", "-R", "-S", "-d", "-E", "-s", "-a",
-        ],
-    ),
-    ("caffeinate", &["-t", "-w"]),
-];
-
-fn run(simple: &[Word]) -> Option<Run<'_>> {
-    let mut lead = Vec::new();
-    let mut at = 0;
-    while let Some(word) = simple.get(at) {
-        at += 1;
-        if assignment(word) {
-            continue;
-        }
-        if word.quoted_from.is_some() {
-            return None;
-        }
-        let name = word.text.rsplit('/').next().unwrap_or_default();
-        if KEYWORDS.contains(&name) {
-            lead.push(name);
-        } else if let Some((_, valued)) = PREFIXES.iter().find(|(prefix, _)| *prefix == name) {
-            lead.push(name);
-            while let Some(flag) = simple.get(at).filter(|w| w.text.starts_with('-')) {
-                at += 1;
-                if valued.contains(&flag.text.as_str()) {
-                    at += 1;
-                }
-            }
-            if name == "timeout" {
-                at += 1;
-            }
-        } else {
-            return Some(Run {
-                lead,
-                name,
-                args: &simple[at..],
-            });
-        }
-    }
-    None
-}
-
-/// Whether a word is a shell assignment (`NAME=value`), its name unquoted.
-fn assignment(word: &Word) -> bool {
-    let Some(eq) = word.text.find('=') else {
-        return false;
-    };
-    let name = &word.text[..eq];
-    word.quoted_from.is_none_or(|from| from > eq)
-        && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-/// The first `cargo` a part runs, and its subcommand (a `+toolchain`
-/// skipped) with the words after it.
-fn cargo(part: &Part) -> Option<(&str, &[Word])> {
-    let run = part
-        .iter()
-        .filter_map(|simple| run(simple))
-        .find(|run| run.name == "cargo")?;
-    let at = run
-        .args
-        .iter()
-        .position(|word| !word.text.starts_with('+'))?;
-    Some((run.args[at].text.as_str(), &run.args[at + 1..]))
-}
-
-/// The first rule a part matches: e2e > llvm-cov > test > build/clippy >
-/// fmt > wait > dagq > git > other; without the `cargo` rules, the first
-/// three are skipped. Only the words in command position count as what it
-/// runs.
-fn rank(part: &Part, cargo_rules: bool) -> &'static str {
-    let cargo = cargo(part);
-    let sub = cargo.map(|(sub, _)| sub);
-    let e2e = cargo.is_some_and(|(_, args)| {
-        args.windows(2)
-            .any(|pair| pair[0].text == "--test" && pair[1].text == "e2e")
-            || args.iter().any(|word| word.text == "--test=e2e")
-    });
-    let runs: Vec<Run> = part.iter().filter_map(|simple| run(simple)).collect();
-    let runs_named = |name: &str| runs.iter().any(|run| run.name == name);
-    if cargo_rules && e2e {
-        E2E
-    } else if cargo_rules && sub == Some("llvm-cov") {
-        LLVM_COV
-    } else if cargo_rules && matches!(sub, Some("test" | "nextest")) {
-        TEST
-    } else if matches!(sub, Some("build" | "clippy" | "check" | "run")) {
-        BUILD
-    } else if sub == Some("fmt") {
-        FMT
-    } else if runs.iter().any(|run| {
-        matches!(run.name, "sleep" | "uptime")
-            || run.lead.contains(&"until")
-            || run.name == "sysctl" && run.args.iter().any(|w| w.text.contains("loadavg"))
-    }) {
-        WAIT
-    } else if runs_named("dagq") {
-        DAGQ
-    } else if runs_named("git") {
-        GIT
-    } else {
-        OTHER_COMMAND
-    }
-}
-
-/// Whether a shell command runs the whole test suite in one of its parts:
-/// `cargo test` (or `cargo nextest run`) with only flags before `--`, none
-/// of them choosing a target or filtering, except `--test it` (or
-/// `--test=it`) as the only target: the one integration test binary runs
-/// nearly every test the llvm-cov gate runs (ADR-0078). A filter word
-/// (`--test it runtime_claim::`) or another target beside it makes the
-/// part narrowed.
-pub fn full_test(command: &str) -> bool {
-    parts(command).iter().any(runs_full_test)
-}
-
-fn runs_full_test(part: &Part) -> bool {
-    let Some((sub, args)) = cargo(part) else {
-        return false;
-    };
-    let mut rest = args.iter().map(|word| word.text.as_str());
-    match sub {
-        "test" => {}
-        "nextest" if rest.next() == Some("run") => {}
-        _ => return false,
-    }
-    const TARGETED: [&str; 9] = [
-        "--test",
-        "--lib",
-        "--bin",
-        "--bins",
-        "--doc",
-        "--example",
-        "--package",
-        "-p",
-        "-E",
-    ];
-    let mut words = Vec::new();
-    let mut rest = rest.take_while(|word| *word != "--");
-    while let Some(word) = rest.next() {
-        // A redirection (`2>&1`, `> out.txt`) is not an argument.
-        let operator = word.trim_start_matches(|c: char| c.is_ascii_digit() || c == '&');
-        if operator.starts_with(['>', '<']) {
-            if operator.trim_start_matches(['>', '<', '|']).is_empty() {
-                rest.next();
-            }
-            continue;
-        }
-        words.push(word);
-    }
-    let mut index = 0;
-    while index < words.len() {
-        let word = words[index];
-        if word == "--test" && words.get(index + 1) == Some(&"it") {
-            index += 2;
-            continue;
-        }
-        let whole = word == "--test=it";
-        if !word.starts_with('-')
-            || !whole
-                && TARGETED
-                    .iter()
-                    .any(|t| word == *t || word.starts_with(&format!("{t}=")))
-        {
-            return false;
-        }
-        index += 1;
-    }
-    true
-}
-
-/// What a command runs that `integrate` also runs: the llvm-cov gate, the
-/// whole test suite, the e2e test.
-fn verification_classes(command: &str) -> Vec<&'static str> {
-    let mut classes: Vec<&'static str> = parts(command)
-        .iter()
-        .filter_map(|part| match rank(part, true) {
-            LLVM_COV => Some(LLVM_COV),
-            E2E => Some(E2E),
-            TEST if runs_full_test(part) => Some("full_test"),
-            _ => None,
-        })
+/// What `command` runs of `integrate`'s checks, by `rules`: the classes of
+/// its parts that are [`CHECK_CLASSES`], each once.
+pub fn check_classes(command: &str, rules: &CommandClassifier) -> Vec<&'static str> {
+    let mut classes: Vec<&'static str> = rules
+        .part_classes(command)
+        .into_iter()
+        .filter(|class| CHECK_CLASSES.contains(class))
         .collect();
     classes.sort_unstable();
     classes.dedup();
     classes
+}
+
+/// Whether a breakdown by `rules` counts `integrate`'s checks: when one of
+/// them gives a class of [`CHECK_CLASSES`].
+fn counts_checks(rules: &CommandClassifier) -> bool {
+    rules.rules().counts_checks()
+}
+
+/// What `command` runs that a [`Breakdown`] counts, by `rules`.
+fn runs_of(command: &str, rules: &CommandClassifier) -> Runs {
+    let classes = rules.part_classes(command);
+    Runs {
+        full_test: classes.contains(&FULL_TEST),
+        llvm_cov: classes.contains(&super::command_rules::LLVM_COV),
+        classes: check_classes(command, rules),
+    }
 }
 
 /// One tool call of the span, with its times (unix milliseconds).
@@ -718,9 +136,9 @@ pub struct Command {
     /// The shell command, for the run directory's `worktime.jsonl` only.
     pub command: Option<String>,
     /// The tests its output names as failed (task 515), whatever its exit
-    /// (`cargo test … | tail` exits 0): a foreground command that runs
-    /// tests ([`TEST_KINDS`]) only, since a background command's output is
-    /// not in the transcript, and another command's output (a file shown,
+    /// (`cargo test … | tail` exits 0): a foreground heavy command only,
+    /// when the rules name failed tests (`[telemetry] failed_tests`),
+    /// since a background command's output is not in the transcript, and another command's output (a file shown,
     /// a search) may quote the marks.
     pub failed_tests: Vec<String>,
     /// How its times were found when they are not a transcript's: a
@@ -795,7 +213,7 @@ pub fn commands(
     records: &[TranscriptRecord],
     from: i64,
     to: i64,
-    rules: &WorkRules,
+    rules: &CommandClassifier,
 ) -> Vec<Command> {
     let mut results = BTreeMap::new();
     let mut notices = BTreeMap::new();
@@ -839,7 +257,7 @@ pub fn commands(
                 ((TOOL, false), false, result.map(|(at, _)| at))
             };
             let failed_tests = match (background, result) {
-                (false, Some((_, result))) if shell && reads_tests(rules, category, heavy) => {
+                (false, Some((_, result))) if shell && reads_tests(rules, heavy) => {
                     result.failed_tests.names.clone()
                 }
                 _ => Vec::new(),
@@ -905,9 +323,9 @@ pub struct Breakdown {
     pub commands: Vec<Command>,
     /// Commands that ran a check `integrate` runs too (one of the task's
     /// verification commands: the llvm-cov gate, the whole `cargo test`,
-    /// the e2e test). This and the next two are counted only by the cargo
-    /// rules (dagq's source repository, ADR-t614-1) and by rules that give
-    /// a class of [`CHECK_CLASSES`] ([`counts_checks`]), `None` otherwise.
+    /// the e2e test). This and the next two are counted only by rules that
+    /// give a class of [`CHECK_CLASSES`] ([`counts_checks`]), `None`
+    /// otherwise.
     pub verification_repeats: Option<usize>,
     /// Commands that ran the whole `cargo test`.
     pub full_tests: Option<usize>,
@@ -918,17 +336,17 @@ pub struct Breakdown {
     /// The span cut where any interval starts or ends, each piece with
     /// the category it counts to, in order ([`Breakdown::retarget`]).
     pub windows: Vec<(i64, i64, &'static str)>,
-    /// What each command runs that is counted, by the cargo rules only:
-    /// one per command, a tool's empty ([`Breakdown::verify`]).
+    /// What each command runs that is counted, by rules that count the
+    /// checks only: one per command, a tool's empty ([`Breakdown::verify`]).
     pub runs: Option<Vec<Runs>>,
     /// The classes of `integrate`'s checks the task's verification runs,
     /// those `verification_repeats` counts.
     pub wanted: Vec<&'static str>,
     /// The rules it labels and counts by.
-    pub rules: WorkRules,
+    pub rules: CommandClassifier,
 }
 
-/// What one command runs that a [`Breakdown`] counts, by the cargo rules.
+/// What one command runs that a [`Breakdown`] counts, by its rules.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Runs {
     /// What it runs of `integrate`'s checks.
@@ -949,7 +367,7 @@ pub fn breakdown(
     from: i64,
     to: i64,
     verification: &[String],
-    rules: &WorkRules,
+    rules: &CommandClassifier,
 ) -> Breakdown {
     #[cfg(test)]
     super::transcript::count_analysis();
@@ -988,7 +406,7 @@ pub fn turn_commands(
     turns: &[HeadlessTurn<'_>],
     from: i64,
     to: i64,
-    rules: &WorkRules,
+    rules: &CommandClassifier,
 ) -> Vec<Command> {
     let mut commands = Vec::new();
     for turn in turns {
@@ -1026,7 +444,7 @@ pub fn turn_commands(
                 failed,
                 status: None,
                 command: item.command.clone(),
-                failed_tests: if reads_tests(rules, category, heavy) {
+                failed_tests: if reads_tests(rules, heavy) {
                     item.failed_tests.clone()
                 } else {
                     Vec::new()
@@ -1052,7 +470,7 @@ pub fn headless_breakdown(
     from: i64,
     to: i64,
     verification: &[String],
-    rules: &WorkRules,
+    rules: &CommandClassifier,
 ) -> Breakdown {
     let to = to.max(from);
     assemble(
@@ -1071,7 +489,7 @@ fn assemble(
     model: Vec<(i64, i64)>,
     (from, to): (i64, i64),
     verification: &[String],
-    rules: &WorkRules,
+    rules: &CommandClassifier,
 ) -> Breakdown {
     let order = |category: &str| {
         CATEGORIES
@@ -1258,7 +676,7 @@ impl Breakdown {
                 .collect::<Vec<_>>(),
         });
         // The counts of `integrate`'s checks, left out by rules that do not
-        // count them (ADR-t614-1, [`counts_checks`]).
+        // count them ([`counts_checks`]).
         for (key, count) in [
             ("verification_repeats", self.verification_repeats),
             ("full_tests", self.full_tests),
@@ -1288,18 +706,30 @@ mod tests {
     use super::*;
     use crate::domain::transcript::Transcript;
 
-    /// The category by the cargo rules of dagq's source repository.
-    fn classify(command: &str) -> &'static str {
-        super::classify(command, true)
+    /// The rules of this repository's `dagq.toml`: the Rust profile
+    /// declared, with the project's rules for its test targets over it.
+    fn cargo_rules() -> CommandClassifier {
+        cargo_rules_with(false)
     }
 
-    /// The rules of a repository that is not dagq's source and declares no
-    /// profile and no project rule: the common rules alone.
-    fn no_rules() -> WorkRules {
+    /// The same, naming the failed tests (`[telemetry] failed_tests`) or
+    /// not.
+    fn cargo_rules_with(failed_tests: bool) -> CommandClassifier {
         crate::domain::command_rules::work_rules(
-            false,
-            &crate::domain::toolchain::Toolchains::none(),
+            &crate::domain::toolchain::Toolchains::this_repository().with_telemetry(
+                crate::domain::command_rules::TelemetrySettings {
+                    commands: crate::domain::command_rules::project_rules(),
+                    failed_tests,
+                    ..Default::default()
+                },
+            ),
         )
+    }
+
+    /// The rules of a repository that declares no profile and no project
+    /// rule: the common rules alone.
+    fn no_rules() -> CommandClassifier {
+        crate::domain::command_rules::work_rules(&crate::domain::toolchain::Toolchains::none())
     }
 
     const SESSION: &str = "11111111-1111-4111-8111-111111111111";
@@ -1398,152 +828,6 @@ mod tests {
     }
 
     #[test]
-    fn commands_are_classified_by_the_heaviest_thing_they_run() {
-        assert_eq!(
-            classify("cargo test --locked --test e2e -- --ignored 2>&1 | tail"),
-            E2E
-        );
-        assert_eq!(
-            classify("cargo llvm-cov nextest --locked --fail-under-lines 80"),
-            LLVM_COV
-        );
-        assert_eq!(classify("cargo +nightly test --lib stats"), TEST);
-        assert_eq!(classify("cargo nextest run"), TEST);
-        assert_eq!(
-            classify("cargo clippy --locked --all-targets -- -D warnings"),
-            BUILD
-        );
-        assert_eq!(classify("cargo fmt --all --check"), FMT);
-        assert_eq!(classify("sleep 30"), WAIT);
-        assert_eq!(classify("~/.local/bin/dagq ask --run r"), DAGQ);
-        assert_eq!(classify("git status && git diff"), GIT);
-        assert_eq!(classify("ls src"), OTHER_COMMAND);
-        // Naming llvm-cov is not running it.
-        assert_eq!(classify("grep -n llvm-cov AGENTS.md"), OTHER_COMMAND);
-        assert_eq!(classify("git commit -m 'cargo llvm-cov'"), GIT);
-        // Two heavy kinds joined make a chain; fmt is not heavy.
-        assert_eq!(
-            classify("cargo fmt --all && cargo clippy --all-targets && cargo test --locked"),
-            CHAIN
-        );
-        assert_eq!(classify("cargo fmt --all\ncargo clippy"), BUILD);
-        assert_eq!(classify("cargo build; cargo build --release"), BUILD);
-    }
-
-    #[test]
-    fn existing_rules_hold_with_command_positions() {
-        assert_eq!(classify("cargo fmt && cargo test"), TEST);
-        assert_eq!(classify("cargo build && cargo test"), CHAIN);
-        assert_eq!(
-            classify("cd x && cargo test --locked --test it foo::"),
-            TEST
-        );
-        assert_eq!(classify("cargo test 2>&1 | tail"), TEST);
-        assert_eq!(classify("RUSTC_WRAPPER=sccache cargo build"), BUILD);
-        assert_eq!(classify("FOO=\"a b\" cargo build"), BUILD);
-        assert_eq!(classify("git commit -m \"cargo test\""), GIT);
-        assert_eq!(classify("time cargo test --lib x"), TEST);
-        assert_eq!(classify("env -i A=1 cargo clippy"), BUILD);
-        assert_eq!(classify("timeout -s KILL 600 cargo test"), TEST);
-        assert_eq!(classify("nohup cargo build >/dev/null 2>&1 &"), BUILD);
-        assert_eq!(classify("echo start | cargo test"), TEST);
-        assert_eq!(classify("X=$(cargo check --message-format json)"), BUILD);
-        assert_eq!(classify("echo `git rev-parse HEAD`"), GIT);
-        assert_eq!(classify("(cd x; cargo fmt)"), FMT);
-        assert_eq!(classify("until [ -f done ]; do sleep 5; done"), WAIT);
-        assert_eq!(classify("sysctl -n vm.loadavg"), WAIT);
-        assert_eq!(classify("cargo build & cargo test"), CHAIN);
-        assert_eq!(classify("echo a \\\n  && cargo test"), TEST);
-        // Prefixes and their flags that take a value.
-        assert_eq!(classify("nice -n 10 cargo test"), TEST);
-        assert_eq!(classify("ls | xargs -n 1 cargo fmt"), FMT);
-        assert_eq!(classify("env -u X cargo build"), BUILD);
-        assert_eq!(classify("timeout --signal KILL 600 cargo test"), TEST);
-        assert_eq!(classify(r"\cargo build"), BUILD);
-        // A substitution in double quotes runs its commands.
-        assert_eq!(
-            classify("OUT=\"$(cargo test --locked 2>&1)\"; echo $OUT"),
-            TEST
-        );
-        assert!(full_test("OUT=\"$(cargo test --locked 2>&1)\""));
-        // An arithmetic `<<` is no heredoc.
-        assert_eq!(classify("echo $((1<<2))\ncargo build"), BUILD);
-    }
-
-    #[test]
-    fn quotes_heredocs_and_arguments_are_not_commands() {
-        // A question quoting a command runs dagq only (manual-smoke, task 547).
-        assert_eq!(
-            classify(
-                "dagq ask --run R --kind worker_question --because scope --topic acceptance_conflict --question \
-                 'Step 5 requires `sleep 40 && cargo build --release`; ok?'"
-            ),
-            DAGQ
-        );
-        assert_eq!(classify("dagq note \"a && cargo test; cargo build\""), DAGQ);
-        // A heredoc's body is text, not commands.
-        let receipt = "cat > receipt.json.tmp <<'EOF'\n\
-            {\"summary\": \"cargo build (bg, ok), cargo test (bg, ok) && more\"}\n\
-            EOF\n";
-        assert_eq!(classify(receipt), OTHER_COMMAND);
-        assert_eq!(
-            classify(&format!("{receipt}mv receipt.json.tmp receipt.json")),
-            OTHER_COMMAND
-        );
-        assert_eq!(
-            classify("cat <<-END > x\n\tcargo test\n\tEND\ncargo fmt"),
-            FMT
-        );
-        assert_eq!(classify("cat <<\"EOF\"\ncargo build\nEOF"), OTHER_COMMAND);
-        // A commit message in a heredoc in `"$(…)"`, with an odd quote.
-        assert_eq!(
-            classify(
-                "git commit -m \"$(cat <<'EOF'\nfix: handle \"x\n\ncargo test passes\nEOF\n)\""
-            ),
-            GIT
-        );
-        // A here-string is not a heredoc.
-        assert_eq!(classify("grep x <<< 'y'\ncargo fmt"), FMT);
-        // A word that is not in command position does not run.
-        assert_eq!(classify("echo cargo test"), OTHER_COMMAND);
-        assert_eq!(classify("which cargo git dagq"), OTHER_COMMAND);
-        assert_eq!(classify("'cargo' test"), OTHER_COMMAND);
-        assert_eq!(classify("echo \"$(date) cargo test\""), OTHER_COMMAND);
-        assert_eq!(classify("# cargo test\nls"), OTHER_COMMAND);
-        assert_eq!(classify("echo 'sleep 5'"), OTHER_COMMAND);
-        assert_eq!(classify(r"echo \; cargo test"), OTHER_COMMAND);
-        // Quoted separators do not split.
-        assert_eq!(parts("echo 'a && b; c || d' && ls").len(), 2);
-        assert_eq!(parts("echo \"a\nb\"").len(), 1);
-    }
-
-    #[test]
-    fn the_whole_suite_is_cargo_test_with_flags_only() {
-        assert!(full_test("cargo test --locked"));
-        assert!(full_test("cargo test --locked 2>&1 | tail -5"));
-        assert!(full_test("cargo nextest run --workspace"));
-        assert!(full_test("cargo test -- --ignored"));
-        assert!(full_test("cargo test --locked --test it"));
-        assert!(full_test("cargo test --locked --test=it 2>&1 | tail"));
-        assert!(!full_test("cargo test --locked --test it runtime_claim::"));
-        assert!(!full_test("cargo test --locked --test e2e -- --ignored"));
-        assert!(!full_test("cargo test --locked --test plugin"));
-        assert!(!full_test("cargo test --locked --test it --lib"));
-        assert!(!full_test("cargo test --locked --test it cli_stats::"));
-        assert!(!full_test("cargo test --lib domain::worktime"));
-        assert!(!full_test("cargo test stats"));
-        assert!(!full_test("cargo test -p=dagq"));
-        assert!(!full_test("cargo build"));
-        assert!(!full_test("ls"));
-        assert!(full_test("cd x && cargo test --locked"));
-        assert!(!full_test("git commit -m 'cargo test --locked'"));
-        assert!(!full_test("cat <<EOF\ncargo test\nEOF"));
-        assert!(!full_test("cargo test --locked > out.txt stats"));
-    }
-
-    /// A session of several turns with foreground and background commands,
-    /// an async subagent, a chain, and a command cut by the span's end.
-    #[test]
     fn a_span_is_split_by_priority_and_background_work_ends_at_its_notice() {
         let lines = [
             input(0, "do the task"),
@@ -1580,7 +864,8 @@ mod tests {
                 "Background command \"cargo llvm-cov\" failed with exit code 1",
             ),
             input(380, "<task-notification>...</task-notification>"),
-            // 380..390 the model; a chain 390..500; a full test cut at 600.
+            // 380..390 the model; a line of three 390..500, a test by the
+            // earliest rule its parts match; a full test cut at 600.
             bash(
                 390,
                 "t6",
@@ -1602,13 +887,7 @@ mod tests {
                 "Background command \"cargo build\" completed (exit code 0)",
             ),
         ];
-        let moved = breakdown(
-            &records(&moved),
-            ms(0),
-            ms(50),
-            &[],
-            &WorkRules::SourceCargo,
-        );
+        let moved = breakdown(&records(&moved), ms(0), ms(50), &[], &cargo_rules());
         assert!(moved.commands[0].background);
         assert_eq!(moved.commands[0].end, ms(40));
         assert_eq!(moved.commands[0].failed, Some(false));
@@ -1617,19 +896,13 @@ mod tests {
             "cargo fmt --all --check".to_owned(),
             "cargo llvm-cov --locked --fail-under-lines 80".to_owned(),
         ];
-        let work = breakdown(
-            &records,
-            ms(0),
-            ms(600),
-            &verification,
-            &WorkRules::SourceCargo,
-        );
+        let work = breakdown(&records, ms(0), ms(600), &verification, &cargo_rules());
         let secs_of = |category: &str| work.millis.get(category).copied().unwrap_or(0) / 1000;
         assert_eq!(work.total_millis, 600_000);
         assert_eq!(work.millis.values().sum::<i64>(), 600_000);
         assert_eq!(secs_of(BUILD), 60);
-        assert_eq!(secs_of(TEST), 30 + 50);
-        assert_eq!(secs_of(CHAIN), 110);
+        assert_eq!(secs_of(TEST), 30 + 110 + 50);
+        assert_eq!(secs_of(CHAIN), 0);
         assert_eq!(secs_of(TOOL), 1);
         // The background llvm-cov takes 80..380 but for the foreground
         // test and Read; the model and the subagent are below it.
@@ -1663,15 +936,12 @@ mod tests {
         assert_eq!(payload["total_secs"], 600);
         assert_eq!(payload["secs"]["build"], 60);
         assert!(payload["secs"].get("idle").is_none());
-        assert_eq!(payload["commands"]["test"], json!({"runs": 2, "failed": 1}));
+        assert_eq!(payload["commands"]["test"], json!({"runs": 3, "failed": 1}));
         assert_eq!(
             payload["commands"]["llvm_cov"],
             json!({"runs": 1, "failed": 1})
         );
-        assert_eq!(
-            payload["commands"]["chain"],
-            json!({"runs": 1, "failed": 0})
-        );
+        assert!(payload["commands"].get("chain").is_none());
         assert!(payload["commands"].get("fmt").is_none());
         let heavy = payload["heavy"].as_array().unwrap();
         assert_eq!(heavy.len(), 5);
@@ -1715,7 +985,7 @@ mod tests {
             ),
         ];
         let records = records(&lines);
-        let resume = breakdown(&records, ms(990), ms(1100), &[], &WorkRules::SourceCargo);
+        let resume = breakdown(&records, ms(990), ms(1100), &[], &cargo_rules());
         assert_eq!(resume.commands.len(), 1);
         assert_eq!(resume.commands[0].category, GIT);
         assert_eq!(resume.full_tests, Some(0));
@@ -1727,12 +997,12 @@ mod tests {
             ms(0),
             ms(100),
             &["cargo test --locked".into()],
-            &WorkRules::SourceCargo,
+            &cargo_rules(),
         );
         assert_eq!(worker.verification_repeats, Some(1));
         assert_eq!(worker.millis[&TEST], 45_000);
         // An empty span.
-        let empty = breakdown(&records, ms(5000), ms(4000), &[], &WorkRules::SourceCargo);
+        let empty = breakdown(&records, ms(5000), ms(4000), &[], &cargo_rules());
         assert_eq!(empty.total_millis, 0);
         assert!(empty.millis.is_empty());
     }
@@ -1794,7 +1064,7 @@ mod tests {
             result(26, "t5", "test z::quoted ... FAILED", false),
         ];
         let records = records_naming_failed_tests(&lines);
-        let work = breakdown(&records, ms(0), ms(30), &[], &WorkRules::SourceCargo);
+        let work = breakdown(&records, ms(0), ms(30), &[], &cargo_rules_with(true));
         let names: Vec<&[String]> = work
             .commands
             .iter()
@@ -1820,14 +1090,13 @@ mod tests {
             work.commands[0].line(&span)["failed_tests"],
             json!(["a::breaks", "b::too"])
         );
-        let quiet = breakdown(&records, ms(6), ms(21), &[], &WorkRules::SourceCargo);
+        let quiet = breakdown(&records, ms(6), ms(21), &[], &cargo_rules_with(true));
         assert!(quiet.payload().get("failed_tests").is_none());
     }
 
-    /// Outside dagq's source repository (ADR-t614-1), with no profile
-    /// declared and no project rule, no cargo command is classified (a
-    /// build neither: no rule is applied by default, ADR-t2268-1 decision
-    /// 3), none of their failed tests is read, and the counts of what
+    /// With no profile declared and no project rule, dagq's source or not,
+    /// no cargo command is classified (a build neither: no rule is applied
+    /// by default, ADR-t2268-1 decision 3), none of their failed tests is read, and the counts of what
     /// `integrate` repeats are neither kept nor written.
     #[test]
     fn without_a_profile_or_a_project_rule_no_cargo_command_is_classified_or_counted() {
@@ -1866,16 +1135,11 @@ mod tests {
         assert_eq!(payload["secs"]["other_command"], 36);
         assert_eq!(payload["commands"], json!({}));
         assert_eq!(payload["heavy"], json!([]));
-        // The same commands by the cargo rules.
-        let cargo = breakdown(
-            &records,
-            ms(0),
-            ms(50),
-            &verification,
-            &WorkRules::SourceCargo,
-        );
+        // The same commands by this repository's rules: the line of two by
+        // the earliest rule its parts match.
+        let cargo = breakdown(&records, ms(0), ms(50), &verification, &cargo_rules());
         let categories: Vec<&str> = cargo.commands.iter().map(|c| c.category).collect();
-        assert_eq!(categories, [LLVM_COV, TEST, E2E, CHAIN]);
+        assert_eq!(categories, [LLVM_COV, TEST, E2E, TEST]);
         assert_eq!(cargo.verification_repeats, Some(1));
         assert_eq!(cargo.full_tests, Some(2));
         assert_eq!(cargo.llvm_cov_runs, Some(1));
@@ -1883,8 +1147,8 @@ mod tests {
 
     /// (4) The work breakdown names a test command's failed tests only when
     /// `[telemetry] failed_tests` is on and a declared profile reads them,
-    /// for a Claude transcript and a Codex turn alike; dagq's source by its
-    /// cargo rules names those its readers kept, none by default.
+    /// for a Claude transcript and a Codex turn alike; this repository's
+    /// rules too, none by default.
     #[test]
     fn failed_tests_are_named_only_when_on_and_by_a_declared_profile() {
         use crate::domain::command_rules::{TelemetrySettings, work_rules};
@@ -1903,7 +1167,7 @@ mod tests {
             let records = Transcript::parse(&lines.join("\n"), SESSION, read)
                 .unwrap()
                 .records;
-            let rules = work_rules(false, toolchains);
+            let rules = work_rules(toolchains);
             breakdown(&records, ms(0), ms(20), &[], &rules).commands[0]
                 .failed_tests
                 .clone()
@@ -1921,18 +1185,15 @@ mod tests {
         assert!(claude(&rust, &rust).is_empty());
         assert_eq!(claude(&with_on, &with_on), ["a::b", "c::d"]);
         assert!(claude(&none_on, &none_on).is_empty());
-        // dagq's source by its cargo rules: those the reader kept, none by
-        // default.
-        let source = |read: &Toolchains| {
-            let records = Transcript::parse(&lines.join("\n"), SESSION, read)
-                .unwrap()
-                .records;
-            breakdown(&records, ms(0), ms(20), &[], &WorkRules::SourceCargo).commands[0]
+        // This repository's rules: none by default.
+        let records = Transcript::parse(&lines.join("\n"), SESSION, &rust)
+            .unwrap()
+            .records;
+        assert!(
+            breakdown(&records, ms(0), ms(20), &[], &cargo_rules()).commands[0]
                 .failed_tests
-                .clone()
-        };
-        assert!(source(&rust).is_empty());
-        assert_eq!(source(&with_on), ["a::b", "c::d"]);
+                .is_empty()
+        );
         // A Codex turn's command, the names as a reader asked for them kept.
         let mut test = item("t", Some("cargo test --locked"), (Some(1), Some(10)));
         test.exit_code = Some(101);
@@ -1944,16 +1205,17 @@ mod tests {
             commands: &items,
         }];
         let codex = |toolchains: &Toolchains| {
-            turn_commands(&turns, ms(0), ms(30), &work_rules(false, toolchains))[0]
+            turn_commands(&turns, ms(0), ms(30), &work_rules(toolchains))[0]
                 .failed_tests
                 .clone()
         };
         assert!(codex(&rust).is_empty());
         assert_eq!(codex(&with_on), ["a::b"]);
         assert!(codex(&none_on).is_empty());
-        assert_eq!(
-            turn_commands(&turns, ms(0), ms(30), &WorkRules::SourceCargo)[0].failed_tests,
-            ["a::b"]
+        assert!(
+            turn_commands(&turns, ms(0), ms(30), &cargo_rules())[0]
+                .failed_tests
+                .is_empty()
         );
     }
 
@@ -1992,8 +1254,7 @@ mod tests {
         for lines in [&finished[..], &running[..], &later[..]] {
             let records = records(lines);
             let last = records.iter().map(|r| r.at).max();
-            let fresh =
-                |to: i64| breakdown(&records, ms(0), to, &verification, &WorkRules::SourceCargo);
+            let fresh = |to: i64| breakdown(&records, ms(0), to, &verification, &cargo_rules());
             for (from, to) in [
                 (ms(90), ms(120)),
                 (ms(120), ms(90)),
@@ -2016,23 +1277,11 @@ mod tests {
                 assert_eq!(moved.payload(), fresh(to).payload());
             }
             // A span starting at its end, made longer.
-            let mut empty = breakdown(
-                &records,
-                ms(90),
-                ms(90),
-                &verification,
-                &WorkRules::SourceCargo,
-            );
+            let mut empty = breakdown(&records, ms(90), ms(90), &verification, &cargo_rules());
             assert!(empty.retarget(last, ms(100)));
             assert_eq!(
                 empty,
-                breakdown(
-                    &records,
-                    ms(90),
-                    ms(100),
-                    &verification,
-                    &WorkRules::SourceCargo
-                )
+                breakdown(&records, ms(90), ms(100), &verification, &cargo_rules())
             );
             let mut same = fresh(ms(90));
             assert!(same.retarget(last, ms(90)));
@@ -2042,7 +1291,7 @@ mod tests {
 
     /// The repeats of `integrate`'s checks counted again for another
     /// verification are those [`breakdown`] counts with it (task 1334);
-    /// without the cargo rules there are none.
+    /// without rules that count the checks there are none.
     #[test]
     fn a_breakdown_counts_its_repeats_again_for_another_verification() {
         let records = records(&[
@@ -2054,7 +1303,7 @@ mod tests {
         ]);
         let llvm_cov = vec!["cargo llvm-cov nextest --locked --workspace".to_owned()];
         let test = vec!["cargo test --locked".to_owned()];
-        for rules in [WorkRules::SourceCargo, no_rules()] {
+        for rules in [cargo_rules(), no_rules()] {
             let mut work = breakdown(&records, ms(0), ms(30), &llvm_cov, &rules);
             for verification in [&test, &llvm_cov, &Vec::new()] {
                 work.verify(verification);
@@ -2123,7 +1372,7 @@ mod tests {
                 commands: &second,
             },
         ];
-        let commands = turn_commands(&turns, ms(0), ms(100), &WorkRules::SourceCargo);
+        let commands = turn_commands(&turns, ms(0), ms(100), &cargo_rules_with(true));
         let got: Vec<_> = commands
             .iter()
             .map(|c| {
@@ -2160,7 +1409,7 @@ mod tests {
             OTHER_COMMAND
         );
         // A span from 50 has the second turn's only; one to 57 cuts it.
-        let later = turn_commands(&turns, ms(50), ms(57), &WorkRules::SourceCargo);
+        let later = turn_commands(&turns, ms(50), ms(57), &cargo_rules());
         let ids: Vec<(&str, i64)> = later
             .iter()
             .map(|c| (c.tool_use_id.as_str(), (c.end - BASE) / 1000))
@@ -2172,7 +1421,7 @@ mod tests {
             start: i64::MIN,
             ..turns[0]
         }];
-        let kept: Vec<String> = turn_commands(&begun, ms(12), ms(100), &WorkRules::SourceCargo)
+        let kept: Vec<String> = turn_commands(&begun, ms(12), ms(100), &cargo_rules())
             .into_iter()
             .map(|c| c.tool_use_id)
             .collect();
@@ -2206,13 +1455,7 @@ mod tests {
             },
         ];
         let verification = ["cargo llvm-cov --locked --fail-under-lines 80".to_owned()];
-        let breakdown = headless_breakdown(
-            &turns,
-            ms(0),
-            ms(100),
-            &verification,
-            &WorkRules::SourceCargo,
-        );
+        let breakdown = headless_breakdown(&turns, ms(0), ms(100), &verification, &cargo_rules());
         let payload = breakdown.payload();
         assert_eq!(payload["total_secs"], 100);
         assert_eq!(

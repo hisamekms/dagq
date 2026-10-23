@@ -7,11 +7,9 @@
 //!
 //! The categories and the heavy commands are those the span's close
 //! labelled by its repository's rules
-//! ([`crate::domain::command_rules::work_rules`]): the cargo rules of
-//! dagq's own source while its `dagq.toml` has no `[[telemetry.commands]]`,
-//! else the groups of the rules that work, so another repository's
-//! categories are the names its rules give and a command no rule
-//! classifies is `other_command`.
+//! ([`crate::domain::command_rules::work_rules`]): the groups of the rules
+//! that work, so a repository's categories are the names its rules give
+//! and a command no rule classifies is `other_command`.
 
 use std::collections::BTreeMap;
 
@@ -39,7 +37,7 @@ pub struct RunWork {
     pub commands: BTreeMap<String, CommandCount>,
     /// Commands that ran a check `integrate` runs again (the task's
     /// llvm-cov gate, whole `cargo test` or e2e test). This and the next
-    /// are cargo-only (ADR-t614-1).
+    /// are cargo-only.
     #[serde(skip_serializing_if = "CargoOnly::is_hidden")]
     pub verification_repeats: CargoOnly<i64>,
     /// Whole `cargo test` runs in a run that also ran llvm-cov: the tests
@@ -49,7 +47,7 @@ pub struct RunWork {
 }
 
 impl RunWork {
-    /// Leave its cargo-only counts out (ADR-t614-1).
+    /// Leave its cargo-only counts out.
     pub fn hide_cargo(&mut self) {
         self.verification_repeats.hide();
         self.test_with_llvm_cov.hide();
@@ -97,7 +95,7 @@ pub struct WorkShares {
     pub total_secs: i64,
     pub categories: BTreeMap<String, CategoryShare>,
     pub commands: BTreeMap<String, CommandCount>,
-    /// This and the next two are cargo-only (ADR-t614-1).
+    /// This and the next two are cargo-only.
     #[serde(skip_serializing_if = "CargoOnly::is_hidden")]
     pub verification_repeats: CargoOnly<i64>,
     /// Runs with at least one verification repeat.
@@ -108,7 +106,7 @@ pub struct WorkShares {
 }
 
 impl WorkShares {
-    /// Leave its cargo-only counts out (ADR-t614-1).
+    /// Leave its cargo-only counts out.
     pub fn hide_cargo(&mut self) {
         self.verification_repeats.hide();
         self.runs_with_repeats.hide();
@@ -220,7 +218,7 @@ mod tests {
         assert_eq!(json["categories"]["model"]["share"], json!(0.5));
         assert_eq!(json["verification_repeats"], 2);
         assert_eq!(super::shares([]), WorkShares::default());
-        // Hidden outside dagq's source (ADR-t614-1): left out of the output.
+        // Hidden where the rules count no check: left out of the output.
         let (mut hidden_run, mut hidden) = (run.clone(), shares.clone());
         hidden_run.hide_cargo();
         hidden.hide_cargo();

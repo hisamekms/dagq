@@ -58,9 +58,11 @@ pub struct StatsSources<'a> {
     /// The host's offset from UTC in seconds, east positive: when an ask
     /// counts as opened at night.
     pub utc_offset_secs: i64,
-    /// Whether the queue's repository is dagq's source (ADR-t614-1): only
-    /// then are the cargo-only measures shown.
-    pub dagq_source: bool,
+    /// Whether the rules that work for the repository's `dagq.toml` count
+    /// `integrate`'s checks
+    /// ([`crate::domain::command_rules::EffectiveRules::counts_checks`]):
+    /// only then are the counts of what `integrate` repeats shown.
+    pub counts_checks: bool,
     /// Whether the repository's profiles record the host's Rust toolchain
     /// at a claim
     /// ([`crate::domain::toolchain::Toolchains::records_rust_toolchain`]):
@@ -218,7 +220,7 @@ fn finish(
         .collect();
     let areas = sources.areas.run_areas(&landings);
     with_areas(stats, areas.as_ref());
-    if !sources.dagq_source {
+    if !sources.counts_checks {
         without_cargo_measures(stats);
     }
     if !sources.rust_toolchain {

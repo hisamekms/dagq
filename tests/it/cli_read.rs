@@ -247,10 +247,10 @@ fn bind(db: &Path, dir: &Path, package: &str) {
 
 /// Task 514: the work breakdown a run's session closed with is in
 /// `timeline`'s heavy commands and in `stats --full`. Its cargo-only
-/// counts are shown for dagq's source only (ADR-t614-1); the claim's
-/// `rustc` and the `toolchain` axis of `kpi` only where the Rust profile
-/// is declared, so not in dagq's source that declares none (ADR-t2268-1
-/// decisions 2 and 3).
+/// counts are shown only where the rules that work count `integrate`'s
+/// checks, the claim's `rustc` and the `toolchain` axis of `kpi` only
+/// where the Rust profile is declared: so none of them in dagq's source
+/// that declares none (ADR-t2268-1 decisions 2 and 3).
 #[test]
 fn timeline_and_stats_show_the_work_breakdown() {
     use serde_json::json;
@@ -296,12 +296,31 @@ fn timeline_and_stats_show_the_work_breakdown() {
     let stats = ok(&db, &["stats", "--full"]);
     let breakdown = &stats["runs"][0]["work_breakdown"];
     assert_eq!(breakdown["secs"]["llvm_cov"], 900);
-    assert_eq!(breakdown["verification_repeats"], 1);
     let overall = &stats["overall"]["work_breakdown"];
     assert_eq!(overall["runs"], 1);
     assert_eq!(overall["categories"]["llvm_cov"]["share"], json!(0.501));
-    assert_eq!(overall["verification_repeats"], 1);
     assert_eq!(stats["goals"][0]["work_breakdown"]["runs"], 1);
+    let counts_left_out = |stats: &Value| {
+        let breakdown = &stats["runs"][0]["work_breakdown"];
+        assert_eq!(breakdown["secs"]["model"], 600);
+        let groups = [
+            breakdown,
+            &stats["overall"]["work_breakdown"],
+            &stats["goals"][0]["work_breakdown"],
+            &stats["versions"]["dagq"][0]["work_breakdown"],
+        ];
+        for group in groups {
+            assert!(group.is_object(), "{group}");
+            for key in [
+                "verification_repeats",
+                "runs_with_repeats",
+                "test_with_llvm_cov",
+            ] {
+                assert!(group.get(key).is_none(), "{key}: {group}");
+            }
+        }
+    };
+    counts_left_out(&stats);
     let rustc_left_out = |stats: &Value| {
         for key in ["rustc_release", "rustc_host"] {
             assert!(stats["runs"][0].get(key).is_none(), "{key}: {stats}");
@@ -357,31 +376,19 @@ fn timeline_and_stats_show_the_work_breakdown() {
         1
     );
     assert_eq!(
+        stats["overall"]["work_breakdown"]["verification_repeats"],
+        1
+    );
+    assert_eq!(
         landings(&kpi(&db))["toolchain=1.93.0 aarch64-apple-darwin"]["value"],
         1.0
     );
 
-    // Outside dagq's source none of them is shown; the rest is as before.
+    // Another repository that declares none shows none of them either;
+    // the rest is as before.
     bind(&db, dir.path(), "other");
     let stats = ok(&db, &["stats", "--full"]);
-    let breakdown = &stats["runs"][0]["work_breakdown"];
-    assert_eq!(breakdown["secs"]["model"], 600);
-    let groups = [
-        breakdown,
-        &stats["overall"]["work_breakdown"],
-        &stats["goals"][0]["work_breakdown"],
-        &stats["versions"]["dagq"][0]["work_breakdown"],
-    ];
-    for group in groups {
-        assert!(group.is_object(), "{group}");
-        for key in [
-            "verification_repeats",
-            "runs_with_repeats",
-            "test_with_llvm_cov",
-        ] {
-            assert!(group.get(key).is_none(), "{key}: {group}");
-        }
-    }
+    counts_left_out(&stats);
     assert_eq!(stats["overall"]["work_breakdown"]["runs"], 1);
     rustc_left_out(&stats);
     assert_eq!(stats["versions"]["dagq"][0]["runs"], 1);
@@ -448,10 +455,11 @@ fn the_toolchain_axis_follows_the_declared_rust_profile() {
 }
 
 /// `stats`' `rustc` follows the same judgement as the `toolchain` axis
-/// (ADR-t2268-1): outside dagq's source it is shown with the Rust profile
-/// declared, while the cargo-only counts stay left out; in dagq's source
-/// it is left out with only another profile declared. Undeclared, it is
-/// left out in dagq's source too (`timeline_and_stats_show_the_work_breakdown`).
+/// (ADR-t2268-1), and its cargo-only counts the rules that work: outside
+/// dagq's source both are shown with the Rust profile declared; in dagq's
+/// source both are left out with only another profile declared, one whose
+/// rules count no check of `integrate`. Undeclared, both are left out in
+/// dagq's source too (`timeline_and_stats_show_the_work_breakdown`).
 #[test]
 fn the_stats_rustc_follows_the_declared_rust_profile() {
     use dagq::domain::stats::StatsQuery;
@@ -520,8 +528,7 @@ fn the_stats_rustc_follows_the_declared_rust_profile() {
         &declared["overall"]["work_breakdown"],
         &rustc["work_breakdown"],
     ] {
-        assert!(group.is_object(), "{group}");
-        assert!(group.get("verification_repeats").is_none(), "{group}");
+        assert_eq!(group["verification_repeats"], 1, "{group}");
     }
 
     let other_only = stats("dagq", "[toolchains.tool]\nprofile = \"made-up\"\n");
@@ -529,9 +536,11 @@ fn the_stats_rustc_follows_the_declared_rust_profile() {
         assert!(other_only["runs"][0].get(key).is_none(), "{key}");
     }
     assert!(other_only["versions"].get("rustc").is_none());
-    assert_eq!(
-        other_only["runs"][0]["work_breakdown"]["verification_repeats"],
-        1
+    let breakdown = &other_only["runs"][0]["work_breakdown"];
+    assert!(breakdown.is_object(), "{breakdown}");
+    assert!(
+        breakdown.get("verification_repeats").is_none(),
+        "{breakdown}"
     );
 }
 
@@ -1423,10 +1432,13 @@ esac
     );
 }
 
-/// A run's session closes with its work breakdown read from its transcript
-/// even when the bound repository's `dagq.toml` cannot be read: the test
-/// command keeps its time and names no failed test, since no profile reads
-/// its output.
+/// A run's session in dagq's source closes with its work breakdown read
+/// from its transcript even when the bound repository's `dagq.toml` cannot
+/// be read: recorded on `session_closed` by the common rules alone, the
+/// test command keeps its time as a command no rule classifies, nothing of
+/// `integrate`'s checks is counted and no failed test is named. How a
+/// repository that declares nothing classifies and counts is the unit
+/// tests' of `domain::command_rules` and `domain::worktime`.
 #[test]
 fn a_session_closes_with_its_work_when_dagq_toml_cannot_be_read() {
     use serde_json::json;
@@ -1492,8 +1504,17 @@ fn a_session_closes_with_its_work_when_dagq_toml_cannot_be_read() {
         )
         .unwrap();
     let work = serde_json::from_str::<Value>(&payload).unwrap()["work"].clone();
-    assert_eq!(work["secs"]["test"], 40, "{payload}");
-    assert_eq!(work.get("failed_tests"), None, "{payload}");
+    assert_eq!(work["secs"]["other_command"], 40, "{payload}");
+    assert!(work["secs"].get("test").is_none(), "{payload}");
+    assert_eq!(work["commands"], json!({}), "{payload}");
+    for key in [
+        "verification_repeats",
+        "full_tests",
+        "llvm_cov_runs",
+        "failed_tests",
+    ] {
+        assert_eq!(work.get(key), None, "{key}: {payload}");
+    }
 }
 
 /// A revise sent after `session_renewed` opens its span with the new

@@ -122,7 +122,7 @@ fn a_timestamps_fraction_reads_its_first_three_digits() {
 
 /// The runs' `rustc` and the cargo-only counts are left out by two
 /// judgements of their own: [`without_rustc`] (the Rust profile) leaves
-/// the counts, and [`without_cargo_measures`] (dagq's source) leaves the
+/// the counts, and [`without_cargo_measures`] (rules that count no check) leaves the
 /// `rustc`, the runs per `rustc` with their counts left out too.
 #[test]
 fn the_rustc_and_the_cargo_only_counts_are_left_out_apart() {

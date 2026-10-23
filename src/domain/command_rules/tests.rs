@@ -26,41 +26,6 @@ fn rust() -> Toolchains {
     declare(&BUILTIN, &["rust"])
 }
 
-/// The project rules the repository's own `dagq.toml` is to have for its
-/// test targets: `--test it` runs nearly the whole suite, `--test e2e` is
-/// the e2e test.
-fn project_rules() -> Vec<CommandRule> {
-    const OTHER_TARGETS: &[&str] = &[
-        "--lib",
-        "--bin",
-        "--bins",
-        "--doc",
-        "--example",
-        "--package",
-        "-p",
-        "-E",
-    ];
-    vec![
-        CommandRule::new("e2e", "cargo")
-            .flag_values("--test", &["e2e"])
-            .takes_value(&["--test"]),
-        CommandRule::new("full_test", "cargo")
-            .group("test")
-            .subcommands(&["test"])
-            .flag_values("--test", &["it"])
-            .takes_value(&["--test"])
-            .none_of(OTHER_TARGETS)
-            .positional_none(),
-        CommandRule::new("full_test", "cargo")
-            .group("test")
-            .subcommands(&["nextest", "run"])
-            .flag_values("--test", &["it"])
-            .takes_value(&["--test"])
-            .none_of(OTHER_TARGETS)
-            .positional_none(),
-    ]
-}
-
 fn with_rules(toolchains: Toolchains, commands: Vec<CommandRule>) -> Toolchains {
     toolchains.with_telemetry(TelemetrySettings {
         commands,
@@ -123,28 +88,28 @@ const TABLE: &[(&str, Option<(&str, &str)>)] = &[
 
 /// (2b) Every row of the representative table takes its class and group
 /// from the Rust profile's rules and the common ones with the project's
-/// rules for its test targets over them, and they are what the cargo rules
-/// of the work breakdown gave before: the group its category, the class
-/// `full_test` where it ran the whole suite, and the classes of
-/// `integrate`'s checks the same.
+/// rules for its test targets over them, as this repository's `dagq.toml`
+/// declares: the group its work breakdown's category, and the classes of
+/// `integrate`'s checks those of its class.
 #[test]
-fn the_representative_commands_take_the_classes_the_cargo_rules_gave() {
+fn the_representative_commands_take_the_classes_of_this_repositorys_rules() {
     let toolchains = with_rules(rust(), project_rules());
     let classifier = classifier(&toolchains);
+    let rules = work_rules(&toolchains);
     for (command, expected) in TABLE {
         assert_eq!(class_of(&classifier, command), *expected, "{command}");
         let group = expected.map_or(worktime::OTHER_COMMAND, |(_, group)| group);
-        assert_eq!(worktime::classify(command, true), group, "{command}");
-        let class = expected.map(|(class, _)| class);
+        assert_eq!(worktime::label(command, &rules).0, group, "{command}");
+        let checks: Vec<&str> = expected
+            .map(|(class, _)| class)
+            .filter(|class| CHECK_CLASSES.contains(class))
+            .into_iter()
+            .collect();
         assert_eq!(
-            worktime::full_test(command),
-            class == Some(FULL_TEST),
+            worktime::check_classes(command, &rules),
+            checks,
             "{command}"
         );
-        let overlay = WorkRules::Rules(Box::new(classifier.clone()));
-        let checks = worktime::check_classes(command, &overlay);
-        let before = worktime::check_classes(command, &WorkRules::SourceCargo);
-        assert_eq!(checks, before, "{command}");
     }
 }
 
@@ -487,9 +452,9 @@ const VERIFICATION: [&str; 3] = [
     "cargo llvm-cov nextest --locked --workspace --fail-under-lines 80",
 ];
 
-/// The counts of each row of [`TABLE`] run once by dagq's source before
-/// the rules moved to the view: `full_tests`, `llvm_cov_runs` and
-/// `verification_repeats` against [`VERIFICATION`].
+/// The counts of each row of [`TABLE`] run once in this repository:
+/// `full_tests`, `llvm_cov_runs` and `verification_repeats` against
+/// [`VERIFICATION`].
 const SOURCE_COUNTS: [(usize, usize, usize); 21] = [
     (1, 0, 1),
     (0, 0, 0),
@@ -519,7 +484,7 @@ const BASE: i64 = 1_790_000_000_000;
 
 /// The work breakdowns of `command` run once for ten seconds, by `rules`:
 /// that of a Claude transcript and that of a Codex turn.
-fn breakdowns(command: &str, rules: &WorkRules) -> [worktime::Breakdown; 2] {
+fn breakdowns(command: &str, rules: &CommandClassifier) -> [worktime::Breakdown; 2] {
     use crate::domain::transcript::{Transcript, millis_text};
     let line = |secs: i64, kind: &str, message: serde_json::Value| {
         json!({
@@ -570,33 +535,29 @@ fn breakdowns(command: &str, rules: &WorkRules) -> [worktime::Breakdown; 2] {
     [claude, codex]
 }
 
-/// (2c), (5), (6) The cases of the move, by one function of the domain:
-/// dagq's source without project rules keeps the cargo rules, declared or
-/// not, and every row of the table takes the category, the time and the
-/// counts ([`SOURCE_COUNTS`]) it had, in a Claude transcript's breakdown and
-/// a Codex turn's alike; anything else is classified by the rules that
-/// work, and without a declaration or a project rule cargo's commands are
-/// other commands with nothing counted, in both alike. The resolution of a
-/// repository that declares nothing gives no implied profile (ADR-t2268-1
-/// decision 3), so no implied Rust rule is made for it here ([B']).
+/// (2c), (3) One function of the domain makes every work breakdown's
+/// rules, whichever repository it is: by this repository's `dagq.toml`
+/// every row of the table takes the category, the time and the counts
+/// ([`SOURCE_COUNTS`]) it had, in a Claude transcript's breakdown and a
+/// Codex turn's alike; without a declaration or a project rule cargo's
+/// commands are other commands with nothing counted, in both alike.
 #[test]
-fn the_cases_of_the_move_are_one_function() {
+fn every_breakdown_is_classified_by_the_rules_that_work() {
     let rust_rules = with_rules(rust(), project_rules());
-    // [A]: dagq's source, no [[telemetry.commands]], declared or not.
-    for toolchains in [Toolchains::none(), rust()] {
-        assert_eq!(work_rules(true, &toolchains), WorkRules::SourceCargo);
+    for toolchains in [Toolchains::none(), rust(), rust_rules.clone()] {
+        assert_eq!(
+            *work_rules(&toolchains).rules(),
+            effective_rules(&toolchains)
+        );
     }
+    let own = work_rules(&rust_rules);
     assert_eq!(TABLE.len(), SOURCE_COUNTS.len());
     for ((command, expected), counts) in TABLE.iter().zip(SOURCE_COUNTS) {
         let group = expected.map_or(worktime::OTHER_COMMAND, |(_, group)| group);
-        assert_eq!(
-            worktime::label(command, &WorkRules::SourceCargo).0,
-            group,
-            "{command}"
-        );
+        assert_eq!(worktime::label(command, &own).0, group, "{command}");
         // Its ten seconds in its group and the counts it had, of a Claude
         // transcript and a Codex turn alike.
-        for work in breakdowns(command, &WorkRules::SourceCargo) {
+        for work in breakdowns(command, &own) {
             let (full_tests, llvm_cov_runs, repeats) = counts;
             assert_eq!(work.payload()["secs"][group], 10, "{command}");
             assert_eq!(work.full_tests, Some(full_tests), "{command}");
@@ -604,11 +565,11 @@ fn the_cases_of_the_move_are_one_function() {
             assert_eq!(work.verification_repeats, Some(repeats), "{command}");
         }
     }
-    // [B']: not the source, nothing declared, no project rule: the common
-    // rules alone, cargo's build and fmt unclassified and nothing counted,
-    // of a Claude transcript and a Codex turn alike.
+    // Nothing declared, no project rule: the common rules alone, cargo's
+    // build and fmt unclassified and nothing counted, of a Claude
+    // transcript and a Codex turn alike.
     assert!(Toolchains::none().profiles().next().is_none());
-    let plain = work_rules(false, &Toolchains::none());
+    let plain = work_rules(&Toolchains::none());
     for command in [
         "cargo build",
         "cargo clippy --locked --all-targets -- -D warnings",
@@ -637,48 +598,25 @@ fn the_cases_of_the_move_are_one_function() {
             }
         }
     }
-    let WorkRules::Rules(classifier) = &plain else {
-        panic!("{plain:?}");
-    };
-    assert!(!classifier.rules().counts_checks());
-    // [B'] with project rules: they come before the common ones.
+    assert!(!plain.rules().counts_checks());
+    // Project rules alone come before the common ones.
     let own = with_rules(
         Toolchains::none(),
         vec![CommandRule::new("build", "cargo").subcommands(&["build"])],
     );
     assert_eq!(
-        worktime::label("cargo build", &work_rules(false, &own)),
+        worktime::label("cargo build", &work_rules(&own)),
         ("build", true)
     );
     assert_eq!(
-        worktime::label("cargo fmt", &work_rules(false, &own)).0,
+        worktime::label("cargo fmt", &work_rules(&own)).0,
         worktime::OTHER_COMMAND
     );
-    // [C]: declared and not the source, or the source with project rules:
-    // the overlay itself.
-    for (source, toolchains) in [
-        (false, rust()),
-        (true, rust_rules.clone()),
-        (false, rust_rules.clone()),
-    ] {
-        match work_rules(source, &toolchains) {
-            WorkRules::Rules(classifier) => {
-                assert_eq!(*classifier.rules(), effective_rules(&toolchains));
-            }
-            other => panic!("{other:?}"),
-        }
-    }
-    let overlay = work_rules(true, &rust_rules);
-    for (command, expected) in TABLE {
-        let group = expected.map_or(worktime::OTHER_COMMAND, |(_, group)| group);
-        assert_eq!(worktime::label(command, &overlay).0, group, "{command}");
-    }
 }
 
 /// (2a) What `doctor` shows: each rule with its source, the project's with
-/// its line; dagq's source without project rules keeps the cargo rules of
-/// its work breakdown; no source of an implied profile, since the
-/// resolution of a repository that declares nothing implies none.
+/// its line; no source of an implied profile, since the resolution of a
+/// repository that declares nothing implies none.
 #[test]
 fn doctor_shows_each_rule_with_its_source() {
     let mut rule = CommandRule::new("full_test", "cargo")
@@ -686,7 +624,7 @@ fn doctor_shows_each_rule_with_its_source() {
         .flag_values("--test", &["it"]);
     rule.line = Some(12);
     let toolchains = with_rules(rust(), vec![rule]);
-    let view = doctor_view(false, &toolchains);
+    let view = doctor_view(&toolchains);
     let rules = view["rules"].as_array().unwrap();
     assert_eq!(
         rules[0],
@@ -701,29 +639,25 @@ fn doctor_shows_each_rule_with_its_source() {
     );
     assert_eq!(rules[1]["source"], "profile:rust");
     assert_eq!(rules.last().unwrap()["source"], "common");
-    assert_eq!(view["work_breakdown"], "rules");
+    assert!(view.get("work_breakdown").is_none());
     assert_eq!(view["command_detail"], "shape");
     assert_eq!(view["failed_tests"], false);
-    let source = doctor_view(true, &rust());
-    assert_eq!(source["work_breakdown"], "source_cargo");
     for toolchains in [Toolchains::none(), rust()] {
-        for source in [false, true] {
-            let view = doctor_view(source, &toolchains);
-            let labels: Vec<&str> = view["rules"]
-                .as_array()
-                .unwrap()
+        let view = doctor_view(&toolchains);
+        let labels: Vec<&str> = view["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|rule| rule["source"].as_str().unwrap())
+            .collect();
+        assert!(
+            labels
                 .iter()
-                .map(|rule| rule["source"].as_str().unwrap())
-                .collect();
-            assert!(
-                labels
-                    .iter()
-                    .all(|label| ["dagq.toml", "profile:rust", "common"].contains(label)),
-                "{labels:?}"
-            );
-        }
+                .all(|label| ["dagq.toml", "profile:rust", "common"].contains(label)),
+            "{labels:?}"
+        );
     }
-    let none = doctor_view(false, &Toolchains::none());
+    let none = doctor_view(&Toolchains::none());
     assert!(
         none["rules"]
             .as_array()

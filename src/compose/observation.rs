@@ -26,9 +26,7 @@ use crate::{
     },
     domain::{RunId, SessionRole, TaskId, stats::StatsQuery},
     infrastructure::{
-        adapters::{
-            ClaudeCode, GitRepository, SystemProcesses, VERIFICATION_TIMEOUT, is_dagq_source,
-        },
+        adapters::{ClaudeCode, GitRepository, SystemProcesses, VERIFICATION_TIMEOUT},
         clock,
         codex::Codex,
         run_env::{ShellVerifier, load_conflict_config, load_kpi_settings, load_stall_config},
@@ -300,8 +298,8 @@ fn bound_toolchains(
 
 /// `doctor`'s `command_rules`: the rules that classify the commands for
 /// the `dagq.toml` of the bound main checkout, resolved against
-/// `profiles`, each with where it comes from, and how a run's work
-/// breakdown classifies ([`crate::domain::command_rules::doctor_view`]); or
+/// `profiles`, each with where it comes from, which a run's work breakdown
+/// classifies by too ([`crate::domain::command_rules::doctor_view`]); or
 /// `error` with the file's mistake; none for a queue bound to no checkout.
 fn bound_command_rules(
     queue: &SqliteQueue,
@@ -312,10 +310,7 @@ fn bound_command_rules(
     };
     Ok(Some(
         match crate::infrastructure::run_env::load_toolchains(&checkout, profiles) {
-            Ok(toolchains) => crate::domain::command_rules::doctor_view(
-                crate::infrastructure::adapters::is_dagq_source(&checkout),
-                &toolchains,
-            ),
+            Ok(toolchains) => crate::domain::command_rules::doctor_view(&toolchains),
             Err(error) => json!({"error": format!("{error:#}")}),
         },
     ))
@@ -393,6 +388,23 @@ fn records_rust_toolchain(
     checkout.is_some_and(|checkout| {
         crate::infrastructure::run_env::toolchains_in_use(checkout, profiles)
             .records_rust_toolchain()
+    })
+}
+
+/// Whether the rules that work for the `dagq.toml` of `checkout`, its
+/// profiles resolved against `profiles`, count `integrate`'s checks
+/// ([`crate::domain::command_rules::EffectiveRules::counts_checks`]): only
+/// then does `stats` show the counts of what `integrate` repeats. None is
+/// counted without a checkout, or with a `dagq.toml` that cannot be read.
+fn counts_checks(
+    checkout: Option<&Path>,
+    profiles: &crate::domain::toolchain::ProfileRegistry,
+) -> bool {
+    checkout.is_some_and(|checkout| {
+        crate::domain::command_rules::effective_rules(
+            &crate::infrastructure::run_env::toolchains_in_use(checkout, profiles),
+        )
+        .counts_checks()
     })
 }
 
@@ -1300,7 +1312,7 @@ impl OneShot {
             host_metrics: Some(&host_metrics),
             areas: &area_reader(checkout.as_deref())?,
             utc_offset_secs: clock::local_utc_offset(now),
-            dagq_source: checkout.as_deref().is_some_and(is_dagq_source),
+            counts_checks: counts_checks(checkout.as_deref(), self.profiles),
             rust_toolchain: records_rust_toolchain(checkout.as_deref(), self.profiles),
         };
         read(now, &sources)
@@ -1579,7 +1591,7 @@ pub(super) fn ci_watch_port(
 
 #[cfg(test)]
 mod tests {
-    use super::records_rust_toolchain;
+    use super::{counts_checks, records_rust_toolchain};
     use crate::domain::toolchain::fake::REGISTRY;
 
     /// `stats`' `rustc` and the KPIs' `toolchain` axis are shown with the
@@ -1614,5 +1626,38 @@ mod tests {
             Some("[verify_marks.within]\nclass = \"timeout\"\nline = \"x {test} y\"\n")
         ));
         assert!(!records_rust_toolchain(None, &REGISTRY));
+    }
+
+    /// `stats`' counts of what `integrate` repeats are shown where the
+    /// rules that work count its checks: with the Rust profile declared or
+    /// a project rule that gives one of their classes, dagq's source or
+    /// not; not with only a profile whose rules give none, or nothing
+    /// declared, even in dagq's source; and not for a queue bound to no
+    /// checkout or with a `dagq.toml` that cannot be read.
+    #[test]
+    fn the_counts_of_the_checks_are_shown_as_the_rules_that_work_say() {
+        let shown = |package: &str, toml: Option<&str>| {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                dir.path().join("Cargo.toml"),
+                format!("[package]\nname = \"{package}\"\n"),
+            )
+            .unwrap();
+            if let Some(toml) = toml {
+                std::fs::write(dir.path().join("dagq.toml"), toml).unwrap();
+            }
+            counts_checks(Some(dir.path()), &REGISTRY)
+        };
+        let rust = "[toolchains.core]\nprofile = \"rust\"\n";
+        let fake = "[toolchains.tool]\nprofile = \"fake\"\n";
+        let project = "[[telemetry.commands]]\nclass = \"e2e\"\nprogram = \"make\"\n";
+        for package in ["dagq", "other"] {
+            assert!(shown(package, Some(rust)), "{package}");
+            assert!(shown(package, Some(project)), "{package}");
+            assert!(!shown(package, Some(fake)), "{package}");
+            assert!(!shown(package, None), "{package}");
+            assert!(!shown(package, Some("[toolchains\n")), "{package}");
+        }
+        assert!(!counts_checks(None, &REGISTRY));
     }
 }

@@ -2000,14 +2000,13 @@ pub fn with_areas(stats: &mut Stats, areas: Option<&crate::domain::areas::RunAre
         .collect();
 }
 
-/// Leave the cargo-only measures out of `stats` (ADR-t614-1), for a
-/// repository that is not dagq's source: each run's and each group's
-/// counts of what `integrate` repeats. A run's work breakdown records them
-/// by the rules its repository works by
-/// ([`crate::domain::command_rules::work_rules`]: the cargo rules of
-/// dagq's source while its `dagq.toml` has no `[[telemetry.commands]]`,
-/// else the classes of the rules that work), and `stats` shows them for
-/// dagq's source alone. The runs' `rustc` is not one of them
+/// Leave the cargo-only measures out of `stats`, for a repository whose
+/// rules that work count none of `integrate`'s checks
+/// ([`crate::domain::command_rules::EffectiveRules::counts_checks`]): each
+/// run's and each group's counts of what `integrate` repeats. A run's work
+/// breakdown records them by the classes of the rules that work
+/// ([`crate::domain::command_rules::work_rules`]), and `stats` shows them
+/// only where those rules count the checks. The runs' `rustc` is not one of them
 /// ([`without_rustc`]). Called last, after [`with_changes`] and
 /// [`with_areas`].
 pub fn without_cargo_measures(stats: &mut Stats) {

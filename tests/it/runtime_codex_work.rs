@@ -78,8 +78,8 @@ printf '{{"type":"item.completed","item":{{"id":"t1","type":"mcp_tool_call","ser
     assert_eq!(heavy[0]["finished"], true);
     assert_eq!(heavy[0]["failed"], false);
     assert!(work["total_secs"].as_i64().unwrap() >= work["secs"]["build"].as_i64().unwrap_or(0));
-    // Not dagq's source: the counts of `integrate`'s checks come from the
-    // classes of the declared profile's rules, and a build is none of them.
+    // The counts of `integrate`'s checks come from the classes of the
+    // declared profile's rules, and a build is none of them.
     assert_eq!(work["verification_repeats"], 0, "{work}");
     assert_eq!(work["full_tests"], 0, "{work}");
     assert_eq!(work["llvm_cov_runs"], 0, "{work}");
