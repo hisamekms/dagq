@@ -1055,6 +1055,26 @@ pub(super) fn close_asks_in(
     Ok(closed)
 }
 
+/// Close the unclosed asks about planning `request` (`asks.request_id`, its
+/// planners' `planner_question`s) inside the caller's write transaction at
+/// `now`, as [`close_by_runtime`] closes one: an open ask gets `answer`
+/// from the runtime, an answered one `ask_closed`. The asks closed.
+pub(super) fn close_request_asks_in(
+    tx: &Connection,
+    request: crate::domain::RequestId,
+    answer: &str,
+    now: i64,
+) -> Result<Vec<AskId>> {
+    let unclosed: Vec<Ask> = tx
+        .prepare("SELECT * FROM asks WHERE request_id=?1 AND closed_at IS NULL ORDER BY id")?
+        .query_map([request], ask_row)?
+        .collect::<rusqlite::Result<_>>()?;
+    for ask in &unclosed {
+        close_by_runtime(tx, ask, answer, now)?;
+    }
+    Ok(unclosed.into_iter().map(|ask| ask.id).collect())
+}
+
 /// The `subject` of a `planner_question` about planning request `id`:
 /// `request:<id>`. The request also goes in `subject` because the partial
 /// unique index `asks_open` keeps one open ask per task, run, kind, reason,

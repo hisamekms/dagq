@@ -1389,6 +1389,210 @@ fn a_request_whose_planner_ended_undecided_is_declined_when_its_operation_closes
     assert!(queue.planner_requests().unwrap().is_empty());
 }
 
+/// A request whose planner ended waiting for the answer of its
+/// `planner_question` and that the runtime declines as its operation closes
+/// has that question closed by the runtime in the same move: before the
+/// close with no planner open (`decline_undecided`, an answered question
+/// `ask_closed`) and at the close of the row of a planner open at the
+/// operation's close (`decline_after_planner`, an open one answered by the
+/// runtime), each named by `request_declined`. While the operation is open,
+/// or once the request ended otherwise, the question stays open.
+#[test]
+fn a_request_declined_as_its_operation_closes_closes_its_planner_question() {
+    use dagq::application::RequestPlannerStart;
+    use dagq::domain::{AskKind, AskReason, NewAsk, RequestId, plan_request::RequestStatus};
+    let (_dir, db) = queue();
+    let (mut queue, _, _, run) = claimed(&db);
+    let moved = |queue: &mut SqliteQueue, id: ReplanId, from: i64, to: ReplanStatus| {
+        queue
+            .move_replan(
+                id,
+                from,
+                &ReplanMove {
+                    to,
+                    reason: format!("the test moves it to {}", to.as_str()),
+                    snapshot_id: (to == ReplanStatus::Parked)
+                        .then(|| format!("replan-{id}-g{from}")),
+                    diagnosis: None,
+                },
+            )
+            .unwrap()
+            .generation
+    };
+    // Recorded, parked, in planning: its planner asks a question about the
+    // request and is marked to wait for the answer.
+    let asked = |queue: &mut SqliteQueue, words: &str| {
+        let recorded = ok_as("inbox", &db, &args(&request(&run, words)));
+        let id = ReplanId::new(recorded["operation"]["id"].as_i64().unwrap());
+        let request = RequestId::new(recorded["request"]["id"].as_i64().unwrap());
+        let generation = moved(queue, id, 1, ReplanStatus::PauseRequested);
+        let generation = moved(queue, id, generation, ReplanStatus::Snapshotting);
+        let generation = moved(queue, id, generation, ReplanStatus::Parked);
+        let RequestPlannerStart::Opened { planner, .. } =
+            queue.open_request_planner(request, None).unwrap()
+        else {
+            panic!("no planner was opened for request {request}")
+        };
+        let generation = moved(queue, id, generation, ReplanStatus::Planning);
+        let ask = queue
+            .ask(NewAsk {
+                recommendation: None,
+                confidence: None,
+                topics: Vec::new(),
+                kind: AskKind::PlannerQuestion,
+                task_id: None,
+                run_id: None,
+                question: "split it how?".into(),
+                options: vec!["in two".into(), "in three".into()],
+                asked_by: "planner".into(),
+                reason_category: AskReason::Scope,
+                finding_id: None,
+                request_id: Some(request),
+            })
+            .unwrap()
+            .ask;
+        assert!(
+            queue
+                .planner_answer_wait(planner.id, &[ask.id], &json!({"planner_id": planner.id}))
+                .unwrap()
+        );
+        (id, request, planner.id, ask.id, generation)
+    };
+    let conn = Connection::open(&db).unwrap();
+    let events = |kind: &str| -> Vec<Value> {
+        conn.prepare("SELECT payload FROM run_events WHERE kind=?1 ORDER BY id")
+            .unwrap()
+            .query_map([kind], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|payload| serde_json::from_str(&payload.unwrap()).unwrap())
+            .collect()
+    };
+    let open_asks = || -> Vec<i64> {
+        ok_as("inbox", &db, &["asks"])["asks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|ask| ask["id"].as_i64().unwrap())
+            .collect()
+    };
+    let in_inbox = |ask: i64| {
+        ok_as("inbox", &db, &["status", "--role", "inbox"])
+            .to_string()
+            .contains(&format!("\"ask_id\":{ask}"))
+    };
+    let declined_naming = |request: RequestId| -> Value {
+        events("request_declined")
+            .into_iter()
+            .find(|told| told["request_id"] == request.as_i64())
+            .unwrap_or_else(|| panic!("request {request} was not declined"))
+    };
+
+    // Its planner ends while the operation is open: the request and its
+    // question stay open. The person answers; then the operation closes
+    // with no planner open, and the answered question is closed with the
+    // declined request.
+    let (first, first_request, planner, first_ask, generation) = asked(&mut queue, "split it");
+    queue
+        .end_planner(planner, &json!({"code": "answer_wait"}))
+        .unwrap();
+    assert_eq!(
+        queue.plan_request(first_request).unwrap().status,
+        RequestStatus::Open
+    );
+    assert!(open_asks().contains(&first_ask.as_i64()));
+    queue.answer(first_ask, "in two").unwrap();
+    assert!(queue.read_ask(first_ask).unwrap().closed_at.is_none());
+    assert!(in_inbox(first_ask.as_i64()));
+    moved(
+        &mut queue,
+        first,
+        generation,
+        ReplanStatus::ContinuingAfterPark,
+    );
+    assert_eq!(
+        queue.plan_request(first_request).unwrap().status,
+        RequestStatus::Declined
+    );
+    let closed = queue.read_ask(first_ask).unwrap();
+    assert!(closed.closed_at.is_some());
+    assert_eq!(closed.answer.as_deref(), Some("in two"));
+    assert!(!open_asks().contains(&first_ask.as_i64()));
+    assert!(!in_inbox(first_ask.as_i64()));
+    assert!(
+        events("ask_closed")
+            .iter()
+            .any(|e| e["ask_id"] == first_ask.as_i64())
+    );
+    let told = declined_naming(first_request);
+    assert_eq!(told["by"], "runtime");
+    assert_eq!(told["replan_operation_id"], first.as_i64());
+    assert_eq!(told["closed_asks"], json!([first_ask.as_i64()]));
+
+    // The operation closes while its planner, waiting for the answer, is
+    // open: the request and its question stay open until the planner's row
+    // closes, which declines the request and answers the question by the
+    // runtime with the reason.
+    let (second, second_request, planner, second_ask, generation) =
+        asked(&mut queue, "split it again");
+    moved(
+        &mut queue,
+        second,
+        generation,
+        ReplanStatus::ContinuingAfterPark,
+    );
+    assert_eq!(
+        queue.plan_request(second_request).unwrap().status,
+        RequestStatus::Open
+    );
+    assert!(open_asks().contains(&second_ask.as_i64()));
+    queue
+        .end_planner(planner, &json!({"code": "answer_wait"}))
+        .unwrap();
+    let declined = queue.plan_request(second_request).unwrap();
+    assert_eq!(declined.status, RequestStatus::Declined);
+    let closed = queue.read_ask(second_ask).unwrap();
+    assert!(closed.closed_at.is_some());
+    assert_eq!(closed.answer, declined.status_reason);
+    assert!(!open_asks().contains(&second_ask.as_i64()));
+    assert!(!in_inbox(second_ask.as_i64()));
+    assert!(
+        events("ask_answered")
+            .iter()
+            .any(|e| e["ask_id"] == second_ask.as_i64() && e["runtime_closed"] == true)
+    );
+    let told = declined_naming(second_request);
+    assert_eq!(told["ended_planner_id"], planner.as_i64());
+    assert_eq!(told["closed_asks"], json!([second_ask.as_i64()]));
+
+    // A request declined otherwise before its operation closes: the
+    // operation's close leaves the request and its question as they are.
+    let (third, third_request, planner, third_ask, generation) =
+        asked(&mut queue, "split it once more");
+    queue
+        .end_planner(planner, &json!({"code": "answer_wait"}))
+        .unwrap();
+    queue
+        .decline_request(third_request, "not now", "user", None)
+        .unwrap();
+    moved(
+        &mut queue,
+        third,
+        generation,
+        ReplanStatus::ContinuingAfterPark,
+    );
+    assert_eq!(
+        queue
+            .plan_request(third_request)
+            .unwrap()
+            .status_reason
+            .as_deref(),
+        Some("not now")
+    );
+    assert!(queue.read_ask(third_ask).unwrap().closed_at.is_none());
+    assert!(open_asks().contains(&third_ask.as_i64()));
+    assert!(in_inbox(third_ask.as_i64()));
+}
+
 /// A task has one open operation, on its latest run while it does not
 /// guard the task: when the run it was opened on ends and the task is
 /// claimed again before the operation moved on, the new run takes it over

@@ -149,6 +149,7 @@ plannerはgoalとtaskを書いてsubmitするsessionで、runtimeだけがpropos
   `blocked`は終わりでなく、plannerに渡す段へ進めば依頼はplannerを待つ。
   plannerが開いている間に操作が閉じると、閉じる移動は依頼に触れず、そのplannerがturnを終えてsubmitか却下で決める（turnの途中で止めて書きかけを捨てない）。
   そのplannerが決めずに終わると、行を閉じるtransactionで依頼を`declined`にする（`plan_requests.rs`の`decline_after_planner`）。
+  runtimeが依頼を`declined`にするどちらの経路も、同じtransactionでその依頼の閉じていないask（答えを待って終わったplannerの`planner_question`）をruntimeが閉じ、計画されない依頼のaskを人に残さない。
   閉じた操作が復元の失敗で`blocked`に戻り、再びplannerに渡す段へ進むときは、runtimeが閉じるときに`declined`にした依頼を開き直さず、同じ言葉の新しい依頼を作って操作に結ぶので、plannerは新しい依頼に1度だけ立つ。
   plannerがsubmitか却下で決めた依頼は作り直さない。
   残りの予定は[taskの再計画](../../plans/task-replanning.md)が持つ。

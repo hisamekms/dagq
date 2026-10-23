@@ -424,7 +424,13 @@ pub(super) fn decline_after_planner(
 
 /// Decline the `open` `request` of replanning operation `op` that ended
 /// `outcome` with `reason`, by the runtime (`ended_planner` names the
-/// planner whose end left it undecided). Whether it declined it.
+/// planner whose end left it undecided), and close in the same transaction
+/// every ask about it left unclosed (a `planner_question` its planner
+/// asked, such as one of a planner that ended waiting for its answer), with `reason` as the runtime's
+/// answer, so no ask about a request that will not be planned stays with
+/// the person; `request_declined` names them (`closed_asks`). Whether it
+/// declined it: a request already ended, and its asks, are left as they
+/// are.
 fn decline_for_operation(
     conn: &Connection,
     request: RequestId,
@@ -438,6 +444,7 @@ fn decline_for_operation(
         return Ok(false);
     }
     set_status(conn, request, RequestStatus::Declined, reason, now)?;
+    let closed = super::asks::close_request_asks_in(conn, request, reason, now)?;
     let mut payload = json!({
         "request_id": request,
         "planner_id": null,
@@ -445,6 +452,7 @@ fn decline_for_operation(
         "by": "runtime",
         "replan_operation_id": op,
         "replan_status": outcome,
+        "closed_asks": closed,
     });
     if let Some(planner) = ended_planner {
         payload["ended_planner_id"] = json!(planner);
