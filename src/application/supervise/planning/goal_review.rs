@@ -234,7 +234,7 @@ impl PlanningState {
             ))
             .context("start the goal review")?
             .process()?;
-        Ok(env.jobs.headless_job(
+        let mut headless = env.jobs.headless_job(
             &mut env.pass,
             "goal review",
             child,
@@ -250,8 +250,16 @@ impl PlanningState {
                 goal_id: Some(job.goal_id),
                 attempt: job.attempt,
                 provider: launch.provider,
+                model: launch.model.clone(),
             },
-        ))
+        );
+        // Its agent's session's steps go under it (ADR-t1662-3 decision 1).
+        headless.send_steps(env.jobs.job_steps(
+            &env.pass,
+            (launch.provider, launch.model.as_deref()),
+            StepTarget::of(TargetKind::GoalReview, job.id),
+        ));
+        Ok(headless)
     }
 
     /// The goal review prompt of the job's goal from the queue as it is

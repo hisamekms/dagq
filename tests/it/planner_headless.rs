@@ -763,3 +763,78 @@ say "turn $TURN""#,
     );
     assert_eq!(declined.status_reason.as_deref(), Some("done already"));
 }
+
+/// Acceptance of the executor's steps of a target of no run (ADR-t1662-3
+/// decisions 1, 10 and 12): the turn of a headless planner of the
+/// runtime's calls a tool, and its session wrapper sends what it collected
+/// of the turn's stream with the planner's telemetry token: the steps are
+/// in the SessionStepStore under the planner's kind and id, for the session
+/// its wrapper named, and on no run's or task's ledger row.
+#[test]
+fn a_headless_planners_turn_sends_its_steps_under_the_planner() {
+    use dagq::application::{LedgerStore, SessionStepStore};
+    use dagq::domain::{
+        ledger::LedgerKind,
+        session_step::{StepKind, StepTarget, TargetKind},
+    };
+    let tool_use = json!({"type": "assistant", "parent_tool_use_id": null,
+        "message": {"id": "m1", "model": "stub", "content": [{"type": "tool_use", "id": "t1",
+            "name": "Bash", "input": {"command": "dagq show 1 --full"}}]}});
+    let tool_result = json!({"type": "user", "parent_tool_use_id": null,
+        "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "shown", "is_error": false}]}});
+    let fx = headless_fixture(&format!(
+        "printf '%s\\n' '{tool_use}'; printf '%s\\n' '{tool_result}'; \"$DAGQ\" --db \"$DB\" submit --proposal 1 >> \"$RUN_DIR/submit.log\" 2>&1; say \"turn $TURN submitted\""
+    ));
+    let _served = crate::common::service::Served::start(&fx.db);
+    let mut queue = SqliteQueue::open(&fx.db).unwrap();
+    let task = add(&mut queue, "change", &[TaskId::new(1)], Priority::Normal);
+    let proposal = submit(&mut queue, &[task], None);
+    let reviewer = StubReviewer::new(&[
+        revise(&["split it"]),
+        json!({"verdict": "pass", "reasons": [], "summary": "ok"}),
+    ]);
+    let backend = PlanWorkspace::running();
+    supervise_until(
+        &fx,
+        &backend,
+        &reviewer,
+        || {
+            !queue_events(&fx.db, "planner_closed").is_empty()
+                && queue.show_proposal(proposal).unwrap().status() == ProposalStatus::Accepted
+        },
+        || diagnose(&fx.db, proposal),
+    );
+    let planner = queue.planners(true).unwrap()[0].clone();
+    let target = StepTarget::of(TargetKind::Planner, planner.id.as_i64());
+    let steps = queue.target_steps(&target).unwrap();
+    assert!(!steps.is_empty(), "{}", diagnose(&fx.db, proposal));
+    // One session, the one the control side registered to the planner.
+    let session = steps[0].session_id.clone();
+    assert_eq!(
+        crate::common::service::session_owner(&fx.db, &session),
+        Some(format!("planner:{}", planner.id))
+    );
+    for kept in &steps {
+        assert_eq!(kept.target, target);
+        assert_eq!(kept.session_id, session);
+    }
+    let bash = steps
+        .iter()
+        .find(|kept| kept.step.tool.as_deref() == Some("Bash"))
+        .unwrap_or_else(|| panic!("{steps:?}"));
+    assert_eq!(bash.step.kind, StepKind::ToolCall);
+    assert_eq!(
+        bash.step.command_shape.as_ref().unwrap()["parts"][0]["args"],
+        json!([{"sub": "show"}, {"word": crate::runtime_support::queue_key(&fx.db).digest("1")}, {"flag": "--full"}])
+    );
+    assert!(
+        steps
+            .iter()
+            .any(|kept| kept.step.kind == StepKind::ModelTurn),
+        "{steps:?}"
+    );
+    // Nothing of it is a run's or a task's.
+    for kind in [LedgerKind::Run, LedgerKind::Task] {
+        assert_eq!(queue.ledger_rows(kind).unwrap(), [], "{kind:?}");
+    }
+}

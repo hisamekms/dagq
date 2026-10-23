@@ -67,6 +67,10 @@ impl SlotTable {
         self.slots.iter()
     }
 
+    pub(super) fn iter_mut(&mut self) -> std::slice::IterMut<'_, Slot> {
+        self.slots.iter_mut()
+    }
+
     /// Abandon the headless jobs of every slot ([`stop_job`]): nothing
     /// watches them once the loop ended, and their ends are written with
     /// the Execution of their agents.

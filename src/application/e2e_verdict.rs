@@ -184,6 +184,7 @@ mod tests {
             utc_offset_secs: 9 * 3600,
             lock: None,
             git_env: Vec::new(),
+            ended: None,
         }
     }
 

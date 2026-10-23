@@ -418,6 +418,10 @@ pub struct PlannerWrapper<'a> {
     pub pid: u32,
     /// The clock a headless planner's turns read their times on.
     pub clock: &'a dyn Clock,
+    /// Where a headless planner's wrapper sends the steps of its turns,
+    /// with the planner's telemetry token (ADR-t1662-3 decisions 1 and
+    /// 10).
+    pub telemetry: &'a dyn super::TelemetrySinks,
 }
 
 /// The session wrapper of planner `id` (`planner-session`): register this
@@ -449,6 +453,7 @@ pub fn run_planner_session(
         processes,
         pid,
         clock,
+        telemetry,
     } = ctx;
     // A wrapper started for a planner already closed, or with a session,
     // is refused and ends.
@@ -508,6 +513,8 @@ pub fn run_planner_session(
             containers: None,
             background,
             clock,
+            telemetry: Some(telemetry),
+            steps: Default::default(),
         }
         .drive(&mut child_may_be_alive);
         // What its hook left at the last turn's end is recorded before

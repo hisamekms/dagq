@@ -290,8 +290,8 @@ workerとjobのClaudeの`permissions.deny`には`dagq service`の制御のコマ
 - 実Codexでの読み取りだけのjobのsocketへの到達の確認（`codex sandbox`とstubのCodexまで。上の「Codexのsandboxからの到達」）
 - `dagq ci failures`（`ci.read`。[CI watch](supervisor-lifecycle/ci-watch.md)）の読み取りのユースケース。
   clientのmodeでは`no_use_case`で断る
-- executorからのtelemetryの送信
-- queueのbrokerはrun tokenのほかを通さないので、containerのrunのexecutorの`telemetry_report`の経路は無い（[Queue broker](queue-broker.md)の`TokenRefusal`）
+- containerの中からbrokerを通す`telemetry_report`（[Queue broker](queue-broker.md)の`TokenRefusal`）。
+  containerのrunのstepはhostのwrapperが送る
 - 段(4)〜(6)の残り: brokerの残りの宛て（[Queue broker](queue-broker.md#まだ無いもの)）、integrateのverificationの隔離
 - 段(5)の残り: supervisorの着地とjobの結果・CLIのservice経由化、userのprincipalと親の依頼によるtokenの発行（決定はADR-t3102-1〜3。分け方は[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)のContext）
 

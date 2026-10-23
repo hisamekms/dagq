@@ -122,6 +122,10 @@ pub trait ObserverHost {
     /// What the agent printed in `dir`: its stdout and its stderr, each
     /// empty for a stream it did not leave.
     fn output(&self, dir: &Path) -> (String, String);
+    /// The file the agent's stdout goes to in `dir`, read as it runs.
+    fn stdout(&self, dir: &Path) -> PathBuf {
+        dir.join("output.out")
+    }
     /// What the observer's agent starts with (ADR-0079 decision 7).
     fn launch(&self, checkout: Option<&Path>) -> ActorLaunch;
     /// The language of the prompt (ADR-t616-2).
@@ -150,6 +154,11 @@ pub struct ObserverEnvironment<'a, Q: ?Sized> {
     /// recorded, revoked at its finish (ADR-t1662-3 decision 11); `None`
     /// issues none.
     pub telemetry: Option<crate::application::telemetry_tokens::TargetTelemetry<'a>>,
+    /// What this command, its agent's executor, reads the agent's stdout
+    /// and sends its session's steps with while it waits for it, with the
+    /// observation's token (ADR-t1662-3 decisions 1 and 10); `None` sends
+    /// none.
+    pub steps: Option<crate::application::step_report::CommandSteps<'a>>,
 }
 
 /// Run one observation: gather the inputs, start the agent headless with
@@ -177,6 +186,7 @@ pub fn observe<Q: AskStore + ObserverLog + QueueRecords + RunLog + TaskReads>(
         generators,
         pid,
         telemetry,
+        ref steps,
     } = *environment;
     let started = generators.clock.now();
     let since = match (options.since, options.mode) {
@@ -337,21 +347,39 @@ pub fn observe<Q: AskStore + ObserverLog + QueueRecords + RunLog + TaskReads>(
     // `failed`: the agent exited non-zero or by a signal; `error`: it could
     // not start or ran past the timeout.
     let mut start_failure = None;
-    let (outcome, exit_code, error) = match host.run(
-        provider,
-        db,
-        &dir,
-        &prompt,
-        &HeadlessAgent {
-            actor: observer_actor(&instance),
-            session_id: session_id.as_deref(),
-            launch: &launch,
-            dagq: &options.dagq,
-            timeout: options.timeout,
-            what: OBSERVER_JOB,
-            access: ACCESS,
-        },
-    ) {
+    let run = || {
+        host.run(
+            provider,
+            db,
+            &dir,
+            &prompt,
+            &HeadlessAgent {
+                actor: observer_actor(&instance),
+                session_id: session_id.as_deref(),
+                launch: &launch,
+                dagq: &options.dagq,
+                timeout: options.timeout,
+                what: OBSERVER_JOB,
+                access: ACCESS,
+            },
+        )
+    };
+    // Its agent's steps, read as it runs, of the observation's session.
+    let (ran, watched) = match steps.as_ref().filter(|_| telemetry.is_some()) {
+        Some(steps) => {
+            let (ran, watched) = steps.watch(
+                provider,
+                launch.model.as_deref(),
+                (db, target.clone(), session_id.as_deref()),
+                &host.stdout(&dir),
+                &*generators.clock,
+                run,
+            );
+            (ran, Some(watched))
+        }
+        None => (run(), None),
+    };
+    let (outcome, exit_code, error) = match ran {
         Ok(Some(0)) => ("succeeded", Some(0), None),
         Ok(code) => ("failed", code, None),
         Err(error) => {
@@ -364,6 +392,20 @@ pub fn observe<Q: AskStore + ObserverLog + QueueRecords + RunLog + TaskReads>(
         }
     };
     let (stdout, stderr) = host.output(&dir);
+    // Codex's thread and the model of its rollout (ADR-t1063-1 decision 6)
+    // are the id and the model it and `stats` read.
+    let session = provider.job_session(&stdout, started_ms);
+    // A thread its agent named itself (Codex's) is the observation's once
+    // read, and its steps are sent then, before any write that may fail
+    // revokes its token.
+    if let Some(telemetry) = &telemetry
+        && let Some(named) = session.as_ref().filter(|session| session.named)
+    {
+        telemetry.register(&target, named.session_id.as_deref());
+    }
+    if let Some(watched) = watched {
+        watched.finish();
+    }
     let (wall, unusable) = read_failure(
         outcome == "succeeded",
         launch.provider,
@@ -426,18 +468,9 @@ pub fn observe<Q: AskStore + ObserverLog + QueueRecords + RunLog + TaskReads>(
         "hold_ask_id": hold,
         "alerts": alerts,
     });
-    // The span this observation's start opened closes by its directory;
-    // Codex's thread and the model of its rollout (ADR-t1063-1 decision 6)
-    // are the id and the model it and `stats` read.
-    if let Some(session) = provider.job_session(&stdout, started_ms) {
+    // The span this observation's start opened closes by its directory.
+    if let Some(session) = &session {
         session.record(&mut payload);
-        // A thread its agent named itself (Codex's) is the observation's
-        // once read, before its token is revoked.
-        if let Some(telemetry) = &telemetry
-            && session.named
-        {
-            telemetry.register(&target, session.session_id.as_deref());
-        }
     }
     if let Some(unusable) = provider_unusable {
         payload["provider_unusable"] = unusable;

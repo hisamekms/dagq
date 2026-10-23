@@ -108,6 +108,7 @@ pub fn e2e_settings(dir: &Path) -> dagq::application::install::E2eSettings {
         utc_offset_secs: 0,
         lock: None,
         git_env: Vec::new(),
+        ended: None,
     }
 }
 

@@ -3822,6 +3822,7 @@ fn execute(cli: Cli) -> Result<Value> {
                     ),
                     lock: dagq::application::install::e2e_lock_path(&location.queue_dir),
                     git_env: Vec::new(),
+                    ended: None,
                 })
             }
             Source::Checkout(_) if skip_e2e => E2eGate::Skip,

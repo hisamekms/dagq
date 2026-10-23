@@ -417,6 +417,15 @@ fn pass(
     {
         let _ = file.read_to_string(&mut output);
     }
+    if let Some(ended) = &settings.ended {
+        (ended.0)(crate::application::install::E2eCommandEnded {
+            rerun: how.rerun.map(<[String]>::to_vec),
+            started,
+            ended: Instant::now(),
+            exit_code: status.and_then(|status| status.code()),
+            output_bytes: output.len(),
+        });
+    }
     let cleanup = clean_up(&root);
     let _ = writeln!(
         log,
@@ -890,6 +899,7 @@ test b ... FAILED\nfailures:\n    a::two\ntest a::two ... FAILED\n";
             utc_offset_secs: 0,
             lock: None,
             git_env: Vec::new(),
+            ended: None,
         }
     }
 

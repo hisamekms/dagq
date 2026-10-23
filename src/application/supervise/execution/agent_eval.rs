@@ -365,10 +365,12 @@ impl Supervisor<'_> {
     /// Abandon the runs in progress (the loop ended): a supervisor that
     /// takes over finds them without an end.
     pub(super) fn abandon_agent_eval(&mut self) {
-        if let Some(round) = &mut self.agent_eval {
+        if let Some(mut round) = self.agent_eval.take() {
             for run in &mut round.running {
+                self.register_named_session(&mut run.job);
                 run.job.abandon();
             }
+            self.agent_eval = Some(round);
         }
     }
 
@@ -1462,6 +1464,7 @@ impl Supervisor<'_> {
                         goal_id: None,
                         attempt: usize::try_from(run).unwrap_or(usize::MAX),
                         provider: round.provider,
+                        model: round.launch.model.clone(),
                     },
                 );
                 self.record_eval(
@@ -1533,6 +1536,7 @@ impl Supervisor<'_> {
                 progressed = true;
                 continue;
             }
+            self.register_named_session(&mut round.running[index].job);
             let end = match round.running[index].job.poll_end(&*self.files, agent) {
                 Ok(Some(end)) => end,
                 Ok(None) => {

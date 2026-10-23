@@ -1886,3 +1886,38 @@ fn a_claude_observer_at_its_wall_joins_the_hold_ask_once_from_the_child_and_the_
         );
     }
 }
+
+/// The observation's command is its agent's executor (ADR-t1662-3
+/// decisions 1 and 10): it reads the agent's stream as it runs and sends
+/// its steps with the observation's telemetry token, under the
+/// observation's kind and id and the session its start names.
+#[test]
+fn an_observations_command_sends_its_agents_steps_under_the_observation() {
+    use dagq::application::observer::ObserveMode;
+    let (_dir, _repo, db) = fixture();
+    add_ready_task(&mut SqliteQueue::open(&db).unwrap(), "more", &[]);
+    let command = "dagq kpi";
+    let provider = ClaudeStream(ObserverProvider {
+        script: claude_stream_script(command),
+    });
+    let report = observe(&db, &provider, &observe_options(ObserveMode::Hourly)).unwrap();
+    assert_eq!(report["outcome"], "succeeded", "{report}");
+    let started = Connection::open(&db)
+        .unwrap()
+        .query_row(
+            "SELECT id, payload FROM run_events WHERE kind='observe_started'",
+            [],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .unwrap();
+    let payload: Value = serde_json::from_str(&started.1).unwrap();
+    assert_stream_steps(
+        &db,
+        &dagq::domain::session_step::StepTarget::of(
+            dagq::domain::session_step::TargetKind::Observer,
+            started.0,
+        ),
+        payload["session_id"].as_str().unwrap(),
+        command,
+    );
+}

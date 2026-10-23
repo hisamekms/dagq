@@ -87,6 +87,12 @@ pub(super) struct E2eWatch {
     settings: E2eSettings,
     requirement: Value,
     started: Instant,
+    /// The steps of its commands, sent every interval while it runs
+    /// (ADR-t1662-3 decision 1); none for a run that holds no token.
+    steps: Option<(
+        Arc<crate::application::step_report::SharedVerification>,
+        crate::application::step_report::Ticking,
+    )>,
 }
 
 impl E2eWatch {
@@ -198,7 +204,34 @@ impl Supervisor<'_> {
         self.ensure_sccache(crate::domain::sccache::CheckReason::BeforeE2e);
         // The e2e is the run's executor too (ADR-t1662-3 decision 11).
         self.ready_run_telemetry(run);
-        let thread_settings = settings.clone();
+        let started = self.generators.clock.monotonic();
+        let steps = self.verification_steps(run).map(|steps| {
+            let shared = crate::application::step_report::SharedVerification::new(steps, started);
+            let ticking = crate::application::step_report::Ticking::start(
+                shared.clone(),
+                self.generators.clock.clone(),
+            );
+            (shared, ticking)
+        });
+        let mut thread_settings = settings.clone();
+        if let Some((shared, _)) = &steps {
+            let shared = shared.clone();
+            let custom = settings.command.clone();
+            let known = super::jobs::known_subcommands(&*self.verifier);
+            thread_settings.ended = Some(crate::application::install::E2eEnded(Arc::new(
+                move |ended: crate::application::install::E2eCommandEnded| {
+                    shared.command(
+                        (
+                            &e2e_command(custom.as_deref(), ended.rerun.as_deref()),
+                            &known,
+                        ),
+                        (ended.started, ended.ended),
+                        ended.exit_code.map(i64::from),
+                        i64::try_from(ended.output_bytes).ok(),
+                    );
+                },
+            )));
+        }
         let handle = spawn_traced(move || (port.run)(&worktree, &thread_settings));
         Ok(Some(Phase::E2e(E2eWatch {
             handle: Some(handle),
@@ -206,7 +239,8 @@ impl Supervisor<'_> {
             commit,
             settings,
             requirement: due.requirement,
-            started: self.generators.clock.monotonic(),
+            started,
+            steps,
         })))
     }
 
@@ -272,6 +306,11 @@ impl Supervisor<'_> {
                 return self.e2e_unavailable(slot, run, base, format!("{error:#}"));
             }
         };
+        // What its commands' steps left is sent now, again at the sweeps.
+        if let Some((shared, ticking)) = watch.steps.take() {
+            drop(ticking);
+            shared.finish(self.generators.clock.monotonic(), &self.unsent_steps);
+        }
         // The e2e ran without RUSTC_WRAPPER (ADR-t2086-1).
         if let Some((port, why)) = &outcome.sccache_wrapper_removed {
             let look = crate::domain::sccache::GuardLook::Unconfirmed {
@@ -415,9 +454,54 @@ fn ran_payload(base: Value, outcome: &E2eOutcome) -> Value {
     payload
 }
 
+/// The command an e2e ran, as its gate runs it: `custom` as it is, for
+/// its rerun too (the gate gives the rerun's tests in its env), or the
+/// gate's with the `rerun`'s tests by whole name (`--exact`).
+fn e2e_command(custom: Option<&str>, rerun: Option<&[String]>) -> String {
+    match (custom, rerun) {
+        (Some(custom), _) => custom.to_owned(),
+        (None, None) => crate::application::install::E2E_COMMAND.to_owned(),
+        (None, Some(tests)) => format!(
+            "{} --exact {}",
+            crate::application::install::E2E_COMMAND,
+            tests.join(" ")
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The e2e's commands, each a verification's step, as the gate runs
+    /// them: a custom command as it is, its rerun too; the gate's, its
+    /// rerun by name, the tests counted after `--`, never named.
+    #[test]
+    fn the_e2e_and_its_rerun_are_its_commands() {
+        let tests = ["e2e::a".to_owned()];
+        assert_eq!(e2e_command(Some("sh e2e.sh"), None), "sh e2e.sh");
+        assert_eq!(e2e_command(Some("sh e2e.sh"), Some(&tests)), "sh e2e.sh");
+        let command = crate::application::install::E2E_COMMAND;
+        assert_eq!(e2e_command(None, None), command);
+        let rerun = e2e_command(None, Some(&tests));
+        assert_eq!(rerun, format!("{command} --exact e2e::a"));
+        let step = crate::application::step_report::verification_step(
+            (&rerun, &crate::domain::command_shape::Subcommands::rust()),
+            93_000,
+            10_000,
+            Some(0),
+            None,
+        );
+        assert_eq!(step.kind, crate::domain::session_step::StepKind::ToolCall);
+        assert_eq!(
+            step.command_shape.unwrap()["parts"][0]["args"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap(),
+            &json!({"after_dashdash": 3})
+        );
+    }
 
     /// An e2e that could not run waits until 1 ms before its retry and is
     /// tried at it.

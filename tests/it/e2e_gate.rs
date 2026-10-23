@@ -27,6 +27,7 @@ fn settings(dir: &Path, command: &str) -> E2eSettings {
         utc_offset_secs: 0,
         lock: None,
         git_env: Vec::new(),
+        ended: None,
     }
 }
 

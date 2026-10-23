@@ -509,6 +509,7 @@ pub(super) const MODULES: &[ModuleContext] = &[
     module("src/application/agent_eval.rs", Execution),
     module("src/application/agent_cases.rs", Execution),
     module("src/application/telemetry_tokens.rs", Execution),
+    module("src/application/step_report.rs", Execution),
     module("src/application/prompt/worker.rs", Execution), // prompt
     module("src/application/prompt/requests.rs", Execution), // resume_request
     module("src/application/prompt/run_review.rs", Execution), // recovery_prompt
@@ -575,6 +576,7 @@ pub(super) const PORTS: &[Port] = &[
     port("RunFiles", Public(All)), // not classified by architecture.md; public to the contexts that use it today
     port("AgentProvider", Public(All)), // not classified by architecture.md; public to the contexts that use it today
     port("TurnReader", Internal),
+    port("StepReader", Internal), // the provider's collector of a session's steps, which the session wrapper reads its turns with
     port("Transcripts", Internal),
     port("AgentSignals", Public(Only(&[Planning, Observation]))), // not classified by architecture.md; public to the contexts that use it today
     port("MainRemote", Internal),
@@ -586,6 +588,7 @@ pub(super) const PORTS: &[Port] = &[
     port("LedgerQueue", Internal), // what builds the ledger reads and writes
     port("SessionStepStore", Internal), // the measurement's store of the sessions' steps
     port("TelemetrySink", Public(Only(&[Execution]))), // the executor sends its sessions' steps and resource samples through it
+    port("TelemetrySinks", Public(Only(&[Planning, Execution]))), // where an executor finds its target's sink: the runs' and the runtime planner's session wrappers, and the verifications
     port("SessionResourceStore", Internal), // the measurement's store of the resources an executor measured
     port("SessionOwners", Public(Only(&[Execution]))), // the control side registers the target a session is of before its executor reports
     port("RunResourceStore", Internal), // the measurement's store of the runs' resources measured from outside

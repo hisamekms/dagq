@@ -91,7 +91,6 @@ supervisor
 | supervisorから見たsession・依頼の書き込み | `src/application/supervise/execution/headless.rs` |
 | 終了の依頼と黙ったwrapper | `src/application/supervise/execution/exit.rs`の`ExitWatch`・`wrapper_pulse` |
 | `turns/`のfileの名前・依頼・idle marker・turnのcostとトークン数 | `src/domain/turn.rs`の`TurnRequest` |
-| Claudeの呼び出しと出力の読み | `src/infrastructure/claude_turns.rs` |
 | Claudeのsessionの有無とtranscriptの置き場 | `src/infrastructure/transcripts.rs`の`ClaudeTranscripts` |
 | Codexの呼び出しと出力の読み | `src/infrastructure/codex_turns.rs` |
 | turnの設定（拒否の規則） | `src/infrastructure/adapters.rs`の`headless_worker_settings` |
@@ -123,6 +122,7 @@ wrapperは常に`Turns`で動く（下の「対話と記録されたtaskのclaim
   wrapper自身はqueueを開かず自分のtokenでserviceを通る（[Queue service](../queue-service.md#principalとtoken)）。
 - wrapperは各turnの前にrun dirの手元の検証の記録のdirを作り、そのpathもturnの環境で渡す（containerではrun dirを同じpathにmountするので同じ値）。
   `integrate`の検証・landing recheck・e2eには渡さない（[ADR-t2589-1](../../adr/2026-10-17-t2589-1-local-check-runs-are-recorded-by-project-scripts-and-matched-to-the-receipt-tree.md)決定2）。
+- **stepの送信**: wrapperはturnの出力をproviderの`StepReader`で読み、runかplannerのtelemetryのtokenを自分で読んで送る（`step_report`、[計測](../measurement.md#送る口)）。
 
 ## run dirの`turns/`
 
@@ -152,8 +152,6 @@ run dirのI/Oの約束と落とし穴（`agent_dir`のmodule docと`agent_dir::i
 
 - 呼び出しの組み立ては`ClaudeCode::turn_command`、出力の形と読みは`src/infrastructure/claude_turns.rs`のmodule docが持ち、turnのprocessは端末を持たず自分のprocess groupで走る。
 - 失敗の分類（`domain::turn::TurnFailure`）は読み手が出力から決め、overageで賄っている利用上限は止まりとみなさない。
-- Claudeはtoolの実行中も出力にheartbeatがあるので、出力の途絶えを止まりとみなせる。
-  Codexは無いので途絶えでは止めない。
 
 ## wrapperがturnを止めるとき
 

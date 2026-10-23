@@ -66,6 +66,7 @@ pub mod session;
 pub mod session_log;
 pub mod setup_review;
 pub mod stats;
+pub mod step_report;
 pub mod supervise;
 pub mod supervisor_service;
 pub mod telemetry_tokens;

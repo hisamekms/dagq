@@ -441,6 +441,7 @@ fn run_session_as(
             runtimes: &runtimes,
             toolchains: &toolchains,
             containers,
+            telemetry: &crate::infrastructure::queue_service::SystemServiceAccess,
         },
         id,
         token,
@@ -627,6 +628,7 @@ impl OneShot {
             heavy_turn: db
                 .parent()
                 .map(crate::application::heavy_turn::HeavyTurn::under),
+            steps: None,
         };
         let integrator = Integrator::of_process(std::process::id());
         let Some(request) = integrator.approve(&mut integration, &requester, target, repo)? else {
@@ -641,7 +643,16 @@ impl OneShot {
             request.token.clone(),
             supervisor::HeartbeatPolicy::leases(supervisor::HEARTBEAT_INTERVAL),
         );
-        let outcome = integrator.land(&mut integration, &request)?;
+        let outcome = integrator.land_reporting(
+            &mut integration,
+            &request,
+            crate::application::integrate::LandingTelemetry {
+                tokens: &crate::infrastructure::queue_service::SystemServiceAccess,
+                sinks: Arc::new(crate::infrastructure::queue_service::SystemServiceAccess),
+                db: &db,
+                clock: self.generators.clock.clone(),
+            },
+        )?;
         drop(heartbeat); // Stops the lease heartbeat before this process reports.
         Ok(serde_json::to_value(outcome)?)
     }
@@ -690,6 +701,7 @@ pub(super) fn run_e2e_port(
                     .flatten()
             }),
             git_env: Vec::new(),
+            ended: None,
         },
         run: Arc::new(|worktree, settings| {
             crate::infrastructure::e2e_gate::run(worktree, None, settings)

@@ -237,6 +237,10 @@ pub struct ThroughputReviewEnvironment<'a, Q: ?Sized> {
     /// recorded, revoked at its finish (ADR-t1662-3 decision 11); `None`
     /// issues none.
     pub telemetry: Option<crate::application::telemetry_tokens::TargetTelemetry<'a>>,
+    /// What this command, its agent's executor, reads the agent's stdout
+    /// and sends its session's steps with while it waits for it, with the
+    /// review's token (ADR-t1662-3 decisions 1 and 10); `None` sends none.
+    pub steps: Option<crate::application::step_report::CommandSteps<'a>>,
 }
 
 /// Run one review: judge the hour (hourly), gather the inputs, start the
@@ -350,6 +354,7 @@ fn review_period<Q: AskStore + RunLog>(
         generators,
         signals,
         telemetry: _,
+        steps: _,
     } = *environment;
     let landings = landings(queue, period)?;
     let judgment = match options.mode {
@@ -467,21 +472,42 @@ fn review_period<Q: AskStore + RunLog>(
         .duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|since| i64::try_from(since.as_millis()).ok());
-    let ran = host.run(
-        provider,
-        db,
-        &dir,
-        &prompt,
-        &HeadlessAgent {
-            actor: ActorContext::throughput_review_job(options.mode.as_str(), &period.label),
-            session_id: session_id.as_deref(),
-            launch: &launch,
-            dagq: &options.dagq,
-            timeout: options.timeout,
-            what: "the throughput review",
-            access: ACCESS,
-        },
-    );
+    let run = || {
+        host.run(
+            provider,
+            db,
+            &dir,
+            &prompt,
+            &HeadlessAgent {
+                actor: ActorContext::throughput_review_job(options.mode.as_str(), &period.label),
+                session_id: session_id.as_deref(),
+                launch: &launch,
+                dagq: &options.dagq,
+                timeout: options.timeout,
+                what: "the throughput review",
+                access: ACCESS,
+            },
+        )
+    };
+    // Its agent's steps, read as it runs, of the review's session.
+    let watching = environment
+        .steps
+        .as_ref()
+        .filter(|_| environment.telemetry.is_some());
+    let (ran, watched) = match watching {
+        Some(steps) => {
+            let (ran, watched) = steps.watch(
+                provider,
+                launch.model.as_deref(),
+                (db, review_target(started), session_id.as_deref()),
+                &dir.join("output.out"),
+                &*generators.clock,
+                run,
+            );
+            (ran, Some(watched))
+        }
+        None => (run(), None),
+    };
     // An agent that did not start at all (its executable gone, say) left
     // no output to read why: its start's error says.
     let mut start_failure = None;
@@ -527,6 +553,9 @@ fn review_period<Q: AskStore + RunLog>(
         {
             telemetry.register(&review_target(started), session.session_id.as_deref());
         }
+    }
+    if let Some(watched) = watched {
+        watched.finish();
     }
     // A Codex job that stopped where Codex cannot be used starts again on
     // the other provider (ADR-t1063-1 decision 4): the supervisor holds

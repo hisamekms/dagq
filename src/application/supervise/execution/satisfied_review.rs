@@ -92,6 +92,15 @@ impl ClaimReviewWatch {
             job.abandon();
         }
     }
+
+    /// The session its running job's agent named so far
+    /// ([`HeadlessJob::named_session`]).
+    pub(super) fn named_session(&mut self) -> Option<String> {
+        match &mut self.state {
+            ClaimJob::Running { job, .. } => job.named_session(),
+            _ => None,
+        }
+    }
 }
 
 impl replan_park::ParkedReviewJobs for ClaimReviewWatch {
@@ -474,6 +483,7 @@ impl Supervisor<'_> {
                         stderr,
                         JobSubject {
                             provider: launch.provider,
+                            model: launch.model.clone(),
                             label: Some(
                                 crate::domain::headless_job::SATISFIED_REVIEW_LABEL.to_owned(),
                             ),

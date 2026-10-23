@@ -2318,3 +2318,15 @@ task = 1676
 name = "node_samples::a_files_import_commits_by_batches_and_the_next_adds_the_rest"
 reason = "B 境界（SQLite）: 1 つの transaction に収まらない行数のファイルの取り込みが上限ずつ commit し、途中で止まった取り込みが前の batch とファイルの印を保ち、次の取り込みが残りを足すことを実際の queue.db で確かめる。どの行を足すかの判断は supervise::host_ops::host_metrics の unit test"
 task = 1676
+
+# 5.8s under stress (task 1673), class B
+[[test]]
+name = "planner_headless::a_headless_planners_turn_sends_its_steps_under_the_planner"
+reason = "B 境界（守る境界）: a real background planner wrapper sends its turn's steps with the planner's telemetry token to the real queue service process, kept under the planner's target (ADR-t1662-3 decisions 1 and 10); the step assembly and batching are unit tests"
+task = 1673
+
+# 5.7s under stress (task 1673), class B
+[[test]]
+name = "runtime_telemetry_sessions::a_headless_runs_steps_go_into_the_step_store_under_the_run"
+reason = "B 境界（守る境界）: a headless worker's run lands while its wrapper and the landing's verification send their steps with the run's telemetry token to the real queue service process (ADR-t1662-3 decision 1); the step assembly and batching are unit tests"
+task = 1673

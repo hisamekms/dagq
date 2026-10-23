@@ -968,6 +968,7 @@ pub fn supervise_with_reviewer(
         ),
         service_access: &service_tokens,
         telemetry_tokens: &service_tokens,
+        telemetry_sinks: Arc::new(crate::infrastructure::queue_service::SystemServiceAccess),
         files: options.files.as_ref().map_or_else(
             || Arc::new(LocalRunFiles) as Arc<dyn RunFiles>,
             |port| port.0.clone(),

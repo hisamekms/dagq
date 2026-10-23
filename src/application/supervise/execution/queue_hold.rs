@@ -170,7 +170,7 @@ impl Supervisor<'_> {
     /// answer's, a person's decision.
     fn hold_canceled(&mut self, ask: &Ask, index: usize) {
         let mut slot = self.claim.slots.release(index);
-        stop_job(&mut slot);
+        self.stop_slot_job(&mut slot);
         self.hold_continue.remove(slot.run.id());
         self.claim.drop_load(slot.run.id());
         let message = format!(

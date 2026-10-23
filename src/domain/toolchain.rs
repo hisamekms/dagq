@@ -118,6 +118,14 @@ pub trait ToolchainProfile: Sync {
     /// The name a declaration's `profile` names it by.
     fn name(&self) -> &'static str;
 
+    /// The tool's programs that a command's shape keeps by name once the
+    /// profile is declared, with their known subcommands and options that
+    /// take no value, kept in plain, and where a command they run begins
+    /// (ADR-t1673-1); none by default.
+    fn subcommands(&self) -> &'static [super::command_shape::SubcommandList] {
+        &[]
+    }
+
     /// The line where the tool says a signal ended a process it ran: a
     /// kill, tried before the flaky tests, since a kill under the tool is
     /// the host's even when a test then passed on its retry.

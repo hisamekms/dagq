@@ -44,6 +44,121 @@ fn eval_jobs(db: &Path) -> Vec<EvalJobRow> {
         .unwrap()
 }
 
+/// Acceptance of an eval's job's steps (ADR-t1662-3 decisions 1 and 10):
+/// each agent job of a round, whose Claude session only its output names,
+/// has that session registered to its `headless_jobs` row while it runs,
+/// and what the supervisor, its executor, collected of its stream (the
+/// model's turn and the tool's call) is in the SessionStepStore under the
+/// row, sent with the row's telemetry token to the real queue service
+/// process. No step keeps the command's text.
+#[test]
+fn an_eval_jobs_steps_go_into_the_step_store_under_its_row() {
+    let fx = fixture();
+    commit_agents(&fx.repo);
+    let _served = crate::common::service::Served::start(&fx.db);
+    common::cli::ok(&fx.db, &["agent", "eval", "demo"]);
+    let out = tempfile::tempdir().unwrap();
+    let agent = EvalAgent::streaming(out.path(), &[violation(), clean()]);
+    let outcome = supervise(&fx, &agent);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eval_steps(&fx);
+}
+
+/// An eval's job whose session could not be registered at its last poll
+/// (refused here until its run's end is recorded) has the steps its end
+/// sent refused and kept; they are sent again with its session registered
+/// before its row's end is written, while its token holds, and are in the
+/// SessionStepStore under the row as any other (ADR-t1662-3 decision 10).
+#[test]
+fn an_eval_jobs_steps_its_end_kept_go_before_its_row_ends() {
+    let fx = fixture();
+    commit_agents(&fx.repo);
+    let _served = crate::common::service::Served::start(&fx.db);
+    Connection::open(&fx.db)
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER refuse_owner BEFORE INSERT ON session_owners
+             WHEN NOT EXISTS (SELECT 1 FROM run_events WHERE kind = 'agent_eval_run_finished')
+             BEGIN SELECT RAISE(ABORT, 'registration refused by the test'); END;",
+        )
+        .unwrap();
+    common::cli::ok(&fx.db, &["agent", "eval", "demo"]);
+    let out = tempfile::tempdir().unwrap();
+    let agent = EvalAgent::streaming(out.path(), &[violation(), clean()]);
+    let outcome = supervise(&fx, &agent);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eval_steps(&fx);
+}
+
+/// The steps of each agent job of the round `fx` ran, by its
+/// `headless_jobs` row: its session registered to the row, a model's turn
+/// and a call of Bash shaped under the queue's key, and no step keeping
+/// the command's text; the runs' results as they would be without them.
+fn assert_eval_steps(fx: &crate::plan_review::Fixture) {
+    use dagq::application::SessionStepStore;
+    use dagq::domain::session_step::{StepKind, StepTarget, TargetKind};
+    // The stream before the reply leaves the runs' results as they were.
+    let finished = events(&fx.db, EventKind::AgentEvalRunFinished);
+    assert_eq!(finished.len(), 2, "{finished:?}");
+    assert!(
+        finished.iter().all(|run| run["result"].is_object()),
+        "{finished:?}"
+    );
+    let rows: Vec<i64> = Connection::open(&fx.db)
+        .unwrap()
+        .prepare("SELECT id FROM headless_jobs WHERE kind='agent_eval' ORDER BY id")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    let queue = SqliteQueue::open(&fx.db).unwrap();
+    let shape = dagq::domain::command_shape::shape_value_with(
+        "git diff --stat hunter2",
+        &dagq::domain::command_shape::Subcommands::common()
+            .keyed(Some(crate::runtime_support::queue_key(&fx.db))),
+    );
+    assert!(shape.is_some());
+    let mut sessions = Vec::new();
+    let mut texts = String::new();
+    for row in rows {
+        let steps = queue
+            .target_steps(&StepTarget::of(TargetKind::EvalJob, row))
+            .unwrap();
+        let session = steps.first().map(|kept| kept.session_id.clone());
+        let session = session.unwrap_or_else(|| panic!("no step of job {row}"));
+        assert!(
+            steps.iter().all(|kept| kept.session_id == session),
+            "{steps:?}"
+        );
+        assert_eq!(
+            crate::common::service::session_owner(&fx.db, &session),
+            Some(format!("eval_job:{row}"))
+        );
+        let bash = steps
+            .iter()
+            .find(|kept| kept.step.tool.as_deref() == Some("Bash"))
+            .unwrap_or_else(|| panic!("no call of Bash: {steps:?}"));
+        assert_eq!(bash.step.kind, StepKind::ToolCall);
+        assert_eq!(bash.step.command_shape, shape, "{steps:?}");
+        assert!(
+            steps
+                .iter()
+                .any(|kept| kept.step.kind == StepKind::ModelTurn),
+            "{steps:?}"
+        );
+        texts.push_str(
+            &serde_json::to_string(&steps.iter().map(|kept| &kept.step).collect::<Vec<_>>())
+                .unwrap(),
+        );
+        sessions.push(session);
+    }
+    sessions.sort();
+    assert_eq!(sessions, ["eval-session-0", "eval-session-1"]);
+    assert!(!texts.contains("hunter2"), "{texts}");
+}
+
 /// A requested dev round runs one job of the agent per run of a case, on
 /// the landing branch's definition and on each case's tree, with its
 /// prompt on standard input and nothing of what the case expects in it;

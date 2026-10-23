@@ -353,6 +353,24 @@ pub trait TelemetrySink {
     fn report(&self, report: &TelemetryReport) -> Result<ReportRecorded>;
 }
 
+/// Where an executor finds the [`TelemetrySink`] of its target (ADR-t1662-3
+/// decision 11): the sink of the queue at `db` with the telemetry token the
+/// control side issued for `target`, read from its file each time it is
+/// asked, so a token issued again is the one sent with. `None` while the
+/// target holds no token: the executor sends nothing then and keeps its
+/// steps. The executor reads the token's file itself; it is never in an
+/// agent's environment or command line.
+pub trait TelemetrySinks: Send + Sync {
+    fn sink(&self, db: &std::path::Path, target: &StepTarget) -> Option<Box<dyn TelemetrySink>>;
+
+    /// The secret key of the queue at `db` the executor digests its
+    /// commands' words with (ADR-t1673-1 decision 10), made once by the
+    /// first that asks; `None` when it can be neither read nor made, and
+    /// the executor's steps then keep no command's shape. The executor
+    /// reads it itself: it is never sent, recorded or given to an agent.
+    fn digest_key(&self, db: &std::path::Path) -> Option<crate::domain::command_shape::DigestKey>;
+}
+
 /// What builds the ledger reads and writes (docs/design/measurement.md
 /// "台帳を作る係"): the EventStore, the NodeSampleStore, the
 /// SessionStepStore (with the owners, whose registration places a

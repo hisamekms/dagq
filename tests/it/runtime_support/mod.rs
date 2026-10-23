@@ -915,6 +915,13 @@ impl AgentProvider for HeadlessProvider {
     fn turn_session_from_output(&self) -> bool {
         self.agent.turn_session_from_output()
     }
+    fn step_reader(
+        &self,
+        model: Option<&str>,
+        known: dagq::domain::command_shape::Subcommands,
+    ) -> Box<dyn dagq::application::StepReader> {
+        self.agent.step_reader(model, known)
+    }
 }
 
 /// The arguments of each call the stub of [`headless_codex`] got for `run`,
@@ -2361,4 +2368,108 @@ pub fn record_host_load(queue_dir: &Path, days: i64, load: f64) {
     for (day, text) in files {
         fs::write(host.join(file_name(day)), text).unwrap();
     }
+}
+
+/// A provider double whose jobs print Claude's stream on their stdout
+/// before their reply: the executor reads its steps with Claude's reader,
+/// and its reply is the lines that are not the stream's.
+pub(crate) struct ClaudeStream<P>(pub P);
+
+impl<P: AgentProvider> AgentProvider for ClaudeStream<P> {
+    fn preflight(&self) -> Result<()> {
+        self.0.preflight()
+    }
+    fn headless_command(&self, cwd: &Path, prompt: &str, access: JobAccess) -> Result<CommandSpec> {
+        self.0.headless_command(cwd, prompt, access)
+    }
+    fn review_command(
+        &self,
+        run: &TaskRun,
+        tree: &Path,
+        prompt: &str,
+        access: JobAccess,
+    ) -> Result<CommandSpec> {
+        self.0.review_command(run, tree, prompt, access)
+    }
+    fn without_mcp(&self, command: &mut CommandSpec) {
+        self.0.without_mcp(command);
+    }
+    fn select_model(&self, command: &mut CommandSpec, model: &str, effort: &str) {
+        self.0.select_model(command, model, effort);
+    }
+    fn job_reply(&self, stdout: &str) -> String {
+        let reply: Vec<&str> = stdout
+            .lines()
+            .filter(|line| !line.starts_with('{'))
+            .collect();
+        self.0.job_reply(&reply.join("\n"))
+    }
+    fn step_reader(
+        &self,
+        model: Option<&str>,
+        known: dagq::domain::command_shape::Subcommands,
+    ) -> Box<dyn dagq::application::StepReader> {
+        Box::new(dagq::infrastructure::claude_steps::ClaudeStepReader::new(model).knowing(known))
+    }
+}
+
+/// The script of a job that prints Claude's stream of one call of Bash,
+/// running `command` (no quote in it) between its call and its result.
+pub(crate) fn claude_stream_script(command: &str) -> String {
+    let call = json!({"type": "assistant", "parent_tool_use_id": null,
+        "message": {"id": "m1", "model": "stub", "content": [{"type": "tool_use", "id": "t1",
+            "name": "Bash", "input": {"command": command}}]}});
+    let result = json!({"type": "user", "parent_tool_use_id": null,
+        "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "done", "is_error": false}]}});
+    let init = json!({"type": "system", "subtype": "init", "session_id": "stub", "model": "stub"});
+    format!(
+        "printf '%s\\n' '{init}'\nprintf '%s\\n' '{call}'\n{command} > /dev/null\nprintf '%s\\n' '{result}'\n"
+    )
+}
+
+/// The key the executors of the queue at `db` digested their commands'
+/// words with (ADR-t1673-1 decision 10), read from its file.
+pub(crate) fn queue_key(db: &Path) -> dagq::domain::command_shape::DigestKey {
+    dagq::infrastructure::queue_service::digest_key(db.parent().unwrap()).unwrap()
+}
+
+/// The steps of `target` in the SessionStepStore of the queue at `db`, each
+/// of `session`: one a call of Bash with the shape of `command`, and a
+/// model's turn among them.
+pub(crate) fn assert_stream_steps(
+    db: &Path,
+    target: &dagq::domain::session_step::StepTarget,
+    session: &str,
+    command: &str,
+) {
+    use dagq::application::SessionStepStore;
+    use dagq::domain::session_step::StepKind;
+    let steps = SqliteQueue::open(db).unwrap().target_steps(target).unwrap();
+    assert!(
+        steps
+            .iter()
+            .all(|kept| &kept.target == target && kept.session_id == session),
+        "{steps:?}"
+    );
+    let bash = steps
+        .iter()
+        .find(|kept| kept.step.tool.as_deref() == Some("Bash"))
+        .unwrap_or_else(|| panic!("{steps:?}"));
+    assert_eq!(bash.step.kind, StepKind::ToolCall);
+    assert_eq!(
+        bash.step.command_shape,
+        dagq::domain::command_shape::shape_value_with(
+            command,
+            &dagq::domain::command_shape::Subcommands::common().keyed(Some(queue_key(db)))
+        )
+    );
+    assert!(
+        steps
+            .iter()
+            .any(|kept| kept.step.kind == StepKind::ModelTurn),
+        "{steps:?}"
+    );
+    // What the agent ran and said is not in them.
+    let text = format!("{steps:?}");
+    assert!(!text.contains("done"), "{text}");
 }

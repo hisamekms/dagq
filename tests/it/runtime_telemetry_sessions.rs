@@ -263,3 +263,106 @@ fn a_registration_that_failed_leaves_the_run_as_it_was_and_a_later_pass_makes_it
     claimed.refused("planners");
     claimed.end(&db);
 }
+
+/// Acceptance of the executor's steps (ADR-t1662-3 decision 1): a headless
+/// worker's run whose turn calls a tool lands as any other, and what its
+/// session wrapper collected of the turn's stream (the model's turn and the
+/// tool's call) is in the SessionStepStore under the run, sent with the
+/// run's telemetry token, as is the landing's verification command, a
+/// tool's call of a session of its own. No step keeps the command's text,
+/// and the token's file is nowhere on the agent's command line.
+#[test]
+fn a_headless_runs_steps_go_into_the_step_store_under_the_run() {
+    use runtime_support::headless::{FINISH, detail, headless_fixture};
+    let (dir, repo, db, backend) = headless_fixture(&[]);
+    let _served = crate::common::service::Served::start(&db);
+    let tool_use = json!({"type": "assistant", "parent_tool_use_id": null,
+        "message": {"id": "m1", "model": "stub", "content": [{"type": "tool_use", "id": "t1",
+            "name": "Bash", "input": {"command": "cargo test --locked --test it runtime_claim::"}}]}});
+    let tool_result = json!({"type": "user", "parent_tool_use_id": null,
+        "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok", "is_error": false}]}});
+    set_turns(
+        dir.path(),
+        &format!("printf '%s\\n' '{tool_use}'; printf '%s\\n' '{tool_result}'; {FINISH}"),
+    );
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
+    let run = detail(&db).runs[0].clone();
+    let target = StepTarget::run(run.id());
+    let steps = SqliteQueue::open(&db)
+        .unwrap()
+        .target_steps(&target)
+        .unwrap();
+    let of = |session: &str| -> Vec<Step> {
+        steps
+            .iter()
+            .filter(|kept| kept.session_id == session)
+            .map(|kept| kept.step.clone())
+            .collect()
+    };
+    // What the wrapper kept of its sessions, when its steps are not there.
+    let run_dir = Path::new(run.run_dir().unwrap());
+    let kept = || {
+        format!(
+            "{steps:?}\nkept {}",
+            fs::read_to_string(run_dir.join("turns").join("steps.json")).unwrap_or_default()
+        )
+    };
+    let worker = of(run.id().as_str());
+    let kinds: Vec<_> = worker
+        .iter()
+        .map(|step| (step.kind, step.tool.clone()))
+        .collect();
+    assert!(
+        kinds.contains(&(StepKind::ToolCall, Some("Bash".to_owned()))),
+        "{}",
+        kept()
+    );
+    assert!(
+        kinds.iter().any(|(kind, _)| *kind == StepKind::ModelTurn),
+        "{steps:?}"
+    );
+    let seqs: Vec<i64> = worker.iter().map(|step| step.seq).collect();
+    assert_eq!(
+        seqs,
+        (1..=worker.len() as i64).collect::<Vec<_>>(),
+        "{steps:?}"
+    );
+    let bash = worker
+        .iter()
+        .find(|step| step.tool.as_deref() == Some("Bash"))
+        .unwrap();
+    // A repository that declares no toolchain's profile keeps cargo by its
+    // digest alone (ADR-t1673-1).
+    assert_eq!(
+        bash.command_shape.as_ref().unwrap()["parts"][0]["program"],
+        queue_key(&db).digest("cargo")
+    );
+    assert_eq!(bash.exit_code, Some(0));
+    // The landing's verification is a session of the run's own.
+    let verification: Vec<&Step> = steps
+        .iter()
+        .filter(|kept| kept.session_id != run.id().as_str())
+        .map(|kept| &kept.step)
+        .collect();
+    assert_eq!(verification.len(), 1, "{steps:?}");
+    assert_eq!(verification[0].tool.as_deref(), Some("verification"));
+    assert_eq!(verification[0].kind, StepKind::ToolCall);
+    assert_eq!(verification[0].exit_code, Some(0));
+    assert_eq!(
+        verification[0].command_shape.as_ref().unwrap()["parts"][0]["program"],
+        queue_key(&db).digest("test")
+    );
+    let text =
+        serde_json::to_string(&steps.iter().map(|kept| &kept.step).collect::<Vec<_>>()).unwrap();
+    for kept_out in ["runtime_claim", "seed.txt", "token"] {
+        assert!(!text.contains(kept_out), "{kept_out} in {text}");
+    }
+    // The agent was given no telemetry token.
+    let args = fs::read_to_string(run_dir.join("stub-args.log")).unwrap();
+    assert!(
+        !args.contains(dagq::domain::telemetry::ACTOR_PREFIX),
+        "{args}"
+    );
+}

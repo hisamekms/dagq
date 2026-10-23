@@ -99,6 +99,16 @@ impl Supervisor<'_> {
         // The verification is the run's executor too (ADR-t1662-3 decision
         // 11).
         self.ready_run_telemetry(&run);
+        let steps = self.verification_steps(&run).map(|steps| {
+            crate::application::step_report::LandingSteps {
+                shared: crate::application::step_report::SharedVerification::new(
+                    steps,
+                    self.generators.clock.monotonic(),
+                ),
+                unsent: self.unsent_steps.clone(),
+                clock: self.generators.clock.clone(),
+            }
+        });
         self.ensure_sccache(crate::domain::sccache::CheckReason::BeforeIntegrate);
         let sccache = self.host.sccache_port();
         let queues = self.queues.clone();
@@ -160,6 +170,7 @@ impl Supervisor<'_> {
                     verification_tokens: &*verification_tokens,
                     verification_containers: &*verification_containers,
                     heavy_turn: Some(heavy_turn),
+                    steps,
                 },
                 &request,
             )
@@ -889,7 +900,7 @@ impl Supervisor<'_> {
             else {
                 unreachable!("the job runs");
             };
-            self.review_job_ended(run, (attempt, retried), job, (ended, switchable), end)?;
+            self.review_job_ended(run, (attempt, retried), job, (*ended, switchable), end)?;
         }
         Ok(())
     }
@@ -1180,6 +1191,7 @@ impl Supervisor<'_> {
                         stderr,
                         JobSubject {
                             provider: launch.provider,
+                            model: launch.model.clone(),
                             label: job.id.agent().map(str::to_owned),
                             ..JobSubject::review(JobKind::Agent, run.id(), attempt)
                         },
@@ -1191,7 +1203,7 @@ impl Supervisor<'_> {
                     // Watched before its start is recorded, so a failed
                     // record leaves no job running unwatched.
                     job.state = ReviewJobState::Running {
-                        job: started,
+                        job: Box::new(started),
                         switchable,
                     };
                     let mut payload = json!({

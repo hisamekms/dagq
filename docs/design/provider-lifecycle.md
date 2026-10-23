@@ -47,11 +47,12 @@ claim ──► run ── wrapper ──► claude -p / codex exec（1 turn = 1
 turnが壁で終わる ──► supervisor ── 切り替え / 同じsessionへもう一度 / queue_hold
 headless job ── 役割のprovider ──► 最終の返答・失敗の分類・session
 sessionの区間 ── 稼働時間・tokens・model・作業の内訳
+turnの出力 ── StepReader ──► step ──► TelemetrySink
 ```
 
 ## 責務と境界
 
-- applicationは`AgentProvider`・`AgentSignals`・`TurnReader`の3つのport（`src/application/ports/`）だけでproviderにつながる。
+- applicationは`AgentProvider`・`AgentSignals`・`TurnReader`・`StepReader`の4つのport（`src/application/ports/`）だけでproviderにつながる。
 - コマンドは値の`CommandSpec`で返し、起動は`Spawner` portが行うので、supervisorとsession wrapperはプロセスを直接扱わない。
 - AI actorの起動は全て`ActorExecutor`を通る（[Roles](supervisor-lifecycle/roles.md#actorの起動actorexecutor)）。
 - Claude Codeのsettingsはadapter（`src/infrastructure/adapters.rs`）が持ち、headless jobは権限の意図（`JobAccess`）だけを渡す（[ADR-t1063-1](../adr/2026-09-29-t1063-1-headless-job-provider-per-role-with-intent-permissions.md)）。
@@ -104,6 +105,13 @@ runtimeが起動するsessionとjobは、kindごとの区間として記録す�
 
 - 入口: 分類は`domain::worktime`、落ちたtestの名前は`domain::verify_failure::failed_tests`、Codexの内訳は`domain::turn::codex_span_turns`。
 - 落とし穴: コマンドの分類はコマンド位置の語だけで見て、落ちたtestの名前はtestを流すforegroundのコマンドの出力からだけ読む。
+
+### sessionのstep
+
+- 入口: `AgentProvider::step_reader`が返すproviderの`StepReader`（`infrastructure::claude_steps`・`codex_steps`）で、送り方は[計測](measurement.md#送る口)。
+- 約束: stepは長さとturnの始めからの経過と実行したものの形だけを持ち、言ったこと・コマンド全文・トークン数を持たない（トークン数はExecutionの記録だけが持つ）。
+- 落とし穴: 出力に時刻が無いので、行の時刻はwrapperが読んだ時刻で、読む間隔の分だけ遅れる。
+- 作業の内訳（上）は別の経路のままで、stepはそれを変えない。
 
 ### トークン数とコスト
 

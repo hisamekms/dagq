@@ -645,6 +645,12 @@ pub struct Integration<'a> {
     /// verification waits for the automatic update's build and e2e gate and
     /// holds a landing check's turn while it runs; `None` takes none.
     pub heavy_turn: Option<super::heavy_turn::HeavyTurn>,
+    /// The steps of the verification's commands, a session of the run's
+    /// own (ADR-t1662-3 decision 1): each command a tool's call, sent to
+    /// the run's sink every interval while they run and once more after
+    /// the verification, before the run lands; what that could not send is
+    /// sent again by the supervisor's sweeps. `None` sends none.
+    pub steps: Option<super::step_report::LandingSteps>,
 }
 
 /// The free disk space integrate checks before it retries a verification
@@ -689,6 +695,17 @@ pub struct IntegrationRequest {
 /// (ADR-t728-2): [`MainRemote::push_main`] takes one, and only the
 /// Integrator, once the policy grants it [`Capability::Push`], makes one.
 pub struct PushGrant(());
+
+/// What a person's `integrate` sends its verification's steps through
+/// ([`Integrator::land_reporting`]): the control side's registration of
+/// its session, the sinks of the run's token, the queue's database, and
+/// the clock its sends look at.
+pub struct LandingTelemetry<'a> {
+    pub tokens: &'a dyn super::queue_service::TelemetryTokens,
+    pub sinks: std::sync::Arc<dyn super::TelemetrySinks>,
+    pub db: &'a Path,
+    pub clock: std::sync::Arc<dyn super::Clock>,
+}
 
 /// The trusted control plane's landing (ADR-t728-2 decision 1): the only
 /// code that rebases, verifies, squashes, moves `main` and pushes. It acts
@@ -761,6 +778,39 @@ impl Integrator {
             ctx.queue.act_as(previous);
         }
         landed
+    }
+
+    /// [`Self::land`] at a person's `integrate`, its verification the
+    /// run's executor (ADR-t1662-3 decision 1): its commands' steps go to
+    /// the sink of the run's token as a session of its own, which
+    /// `telemetry` registers to the run first. A person's integrate has no
+    /// sweep, so what the verification's end could not send is tried once
+    /// more as it returns. Nothing of the steps changes the outcome.
+    pub fn land_reporting(
+        &self,
+        ctx: &mut Integration<'_>,
+        request: &IntegrationRequest,
+        telemetry: LandingTelemetry<'_>,
+    ) -> Result<IntegrationOutcome> {
+        let unsent = std::sync::Arc::new(super::step_report::UnsentSteps::default());
+        ctx.steps = Some(super::step_report::LandingSteps {
+            shared: super::step_report::SharedVerification::new(
+                super::step_report::VerificationSteps::of_run(
+                    telemetry.tokens,
+                    telemetry.sinks,
+                    telemetry.db,
+                    request.run.id(),
+                    ctx.ids.uuid(),
+                ),
+                telemetry.clock.monotonic(),
+            ),
+            unsent: unsent.clone(),
+            clock: telemetry.clock,
+        });
+        let outcome = self.land(ctx, request);
+        ctx.steps = None;
+        unsent.resend();
+        outcome
     }
 
     fn push_grant(&self) -> Result<PushGrant> {
@@ -1098,6 +1148,12 @@ fn land_integrating(
             }
             _ => None,
         };
+        // The steps of the commands are sent every interval while they
+        // run.
+        let ticking = ctx
+            .steps
+            .as_ref()
+            .map(|steps| super::step_report::Ticking::start(steps.shared.clone(), steps.clock.clone()));
         let verdict = land(
             queue,
             repository,
@@ -1110,12 +1166,25 @@ fn land_integrating(
             ctx.verification_tokens,
             ctx.verification_containers,
             ctx.clock,
+            ctx.steps.as_ref().map(|steps| &*steps.shared),
             &task,
             run,
             &onto,
             main,
-        )?;
-        Ok((onto, verdict))
+        );
+        // What the verification ran is sent before the run lands, while
+        // its token holds; a failure is only logged.
+        drop(ticking);
+        if let Some(steps) = ctx.steps.as_ref()
+            && !steps.shared.finish(ctx.clock.monotonic(), &steps.unsent)
+        {
+            warn!(
+                op = "integrate",
+                "run {}: the steps of its verification could not all be sent; the sweeps send them again",
+                run.id()
+            );
+        }
+        Ok((onto, verdict?))
     });
     let (onto, verdict) = match landed {
         Ok(landed) => landed,
@@ -1888,6 +1957,7 @@ fn land(
     verification_tokens: &dyn super::queue_broker::VerificationTokens,
     verification_containers: &dyn super::run_container::VerificationContainers,
     clock: &dyn Clock,
+    steps: Option<&super::step_report::SharedVerification>,
     task: &Task,
     run: &TaskRun,
     landing_branch: &LandingBranch,
@@ -2270,6 +2340,7 @@ fn land(
                     &[]
                 },
                 attempt,
+                steps,
             };
             let first = step.run(
                 queue,
@@ -2759,6 +2830,8 @@ struct VerifyStep<'a> {
     /// landing's own command, nothing for a task's.
     extra_env: &'a [(String, String)],
     attempt: u32,
+    /// Where the command's step goes ([`Integration::steps`]).
+    steps: Option<&'a super::step_report::SharedVerification>,
 }
 
 /// One run of a verification command: its exit, why it failed (none when
@@ -2820,7 +2893,8 @@ impl VerifyStep<'_> {
                 }
             }
         });
-        let duration_secs = (started.elapsed().as_secs_f64() * 1000.0).round() / 1000.0;
+        let ended = Instant::now();
+        let duration_secs = (ended.duration_since(started).as_secs_f64() * 1000.0).round() / 1000.0;
         let (code, signal, timed_out) = match status {
             Ok(status) => (status.code, status.signal, None),
             Err(error) => match error.downcast_ref::<verify_failure::CommandTimedOut>() {
@@ -2860,6 +2934,17 @@ impl VerifyStep<'_> {
             log,
         );
         let exit_code = checked.exit_code;
+        if let Some(steps) = self.steps {
+            steps.command(
+                (
+                    command,
+                    &crate::domain::command_shape::Subcommands::of(self.toolchains),
+                ),
+                (started, ended),
+                code.map(i64::from),
+                read.as_ref().ok().map(|bytes| bytes.len() as i64),
+            );
+        }
         let mut payload = json!({
             "phase": "integration",
             "attempt": self.attempt,

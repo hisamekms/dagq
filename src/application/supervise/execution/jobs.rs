@@ -228,6 +228,9 @@ pub struct JobSubject {
     /// 'claude'`, so a row from before it, or one an older binary that does
     /// not know it writes, reads as `claude`.
     pub(in crate::application::supervise) provider: Provider,
+    /// The model its launch names, which the model's turns of its
+    /// session's steps carry (a Codex job's output does not name it).
+    pub(in crate::application::supervise) model: Option<String>,
 }
 
 impl JobSubject {
@@ -245,6 +248,7 @@ impl JobSubject {
             goal_id: None,
             attempt,
             provider: crate::domain::actor_model::ROLE_PROVIDER,
+            model: None,
         }
     }
 
@@ -281,6 +285,7 @@ impl JobSubject {
             goal_id: None,
             attempt,
             provider: crate::domain::actor_model::ROLE_PROVIDER,
+            model: None,
         }
     }
 }
@@ -352,6 +357,7 @@ pub fn record_job(
         // Only an agent's job is an Execution whose end is recorded when it
         // is abandoned (ADR-t1486-1); a program job's ends with its row.
         unended: (subject.job == JobKind::Agent).then(|| (ports.ends.clone(), subject)),
+        steps: None,
     }
 }
 
@@ -514,6 +520,24 @@ pub struct HeadlessJob {
         reason = "held for its drop, which ends the process as its run's"
     )]
     pub(super) run_child: Option<RunChild>,
+    /// What this supervisor, its executor, reads of its agent's stdout as
+    /// it runs and sends as the steps of its session (ADR-t1662-3 decision
+    /// 1, [`crate::application::step_report::JobSteps`]); none for a
+    /// program's job or a target with no token.
+    pub(super) steps: Option<Box<JobStepsOn>>,
+}
+
+/// What a job reads its agent's steps with ([`job_steps`]): the collector,
+/// and the files its stdout is read through, at each poll and at its stop.
+pub(in crate::application::supervise) struct JobStepsOn {
+    steps: crate::application::step_report::JobSteps,
+    files: Arc<dyn RunFiles>,
+    /// The target of no run whose session only its agent's output names
+    /// (an eval's job): the control side registers the session to it once
+    /// named, while the job runs ([`Supervisor::register_named_session`]).
+    registers: Option<crate::domain::session_step::StepTarget>,
+    /// Whether the session named is registered to `registers`.
+    registered: bool,
 }
 
 /// Whether a job that has not ended after running `ran` is waited for
@@ -526,6 +550,54 @@ impl HeadlessJob {
     /// The provider the job runs on.
     pub(in crate::application::supervise) const fn provider(&self) -> Provider {
         self.provider
+    }
+
+    /// Send the steps of its session as `steps` reads them.
+    pub(in crate::application::supervise) fn send_steps(&mut self, steps: Option<JobStepsOn>) {
+        self.steps = steps.map(Box::new);
+    }
+
+    /// The session its agent's output named so far (a Codex thread), its
+    /// output read to now: what the control side registers to its target
+    /// before it stops the job (a handoff, the loop's end), so that the
+    /// steps its stop sends are taken.
+    pub(in crate::application::supervise) fn named_session(&mut self) -> Option<String> {
+        // Read, not sent: the session is registered before its steps go.
+        let now = self.elapsed_ms();
+        let on = self.steps.as_mut()?;
+        on.steps.read_on(&*on.files, &self.stdout, now);
+        on.steps.session()
+    }
+
+    /// The session its agent named so far that the control side has yet
+    /// to register to the job's target of no run, with that target
+    /// ([`JobStepsOn::registers`]); its output is read to now.
+    fn session_to_register(&mut self) -> Option<(crate::domain::session_step::StepTarget, String)> {
+        let session = self.named_session()?;
+        let on = self.steps.as_ref()?;
+        let target = on.registers.clone().filter(|_| !on.registered)?;
+        Some((target, session))
+    }
+
+    /// Milliseconds since it started.
+    fn elapsed_ms(&self) -> i64 {
+        i64::try_from(self.elapsed().as_millis()).unwrap_or(i64::MAX)
+    }
+
+    /// Read what its stdout got since the last look into its steps; at its
+    /// end (an exit, its timeout, a stop for a handoff or a drop), read the
+    /// rest, end the open steps and send, what could not be left to the
+    /// sweeps' resend before its token is revoked.
+    fn read_steps(&mut self, ended: bool) {
+        let now = self.elapsed_ms();
+        if ended {
+            if let Some(on) = self.steps.take() {
+                let JobStepsOn { steps, files, .. } = *on;
+                steps.finish(&*files, &self.stdout, now);
+            }
+        } else if let Some(on) = self.steps.as_mut() {
+            on.steps.look(&*on.files, &self.stdout, now);
+        }
     }
 
     /// The id of the job's `headless_jobs` row; `None` when its start
@@ -584,8 +656,12 @@ impl HeadlessJob {
     ) -> Result<Option<std::result::Result<String, JobFailed>>> {
         let status = match self.child.try_wait()? {
             Some(status) => status,
-            None if runs_on(self.elapsed(), self.timeout) => return Ok(None),
+            None if runs_on(self.elapsed(), self.timeout) => {
+                self.read_steps(false);
+                return Ok(None);
+            }
             None => {
+                // Its steps are read to its stop.
                 self.stop();
                 return Ok(Some(Err(JobFailed::TimedOut(format!(
                     "the headless {} did not finish within {} seconds",
@@ -594,6 +670,7 @@ impl HeadlessJob {
                 )))));
             }
         };
+        self.read_steps(true);
         self.ended(headless_job::ENDED);
         if !status.success {
             let stderr = files.read_to_string(&self.stderr).unwrap_or_default();
@@ -662,6 +739,8 @@ impl HeadlessJob {
         for pid in descendants {
             let _ = self.processes.kill(pid);
         }
+        // What its agent wrote up to its stop is its session's.
+        self.read_steps(true);
         self.ended(headless_job::STOPPED);
     }
 
@@ -688,6 +767,55 @@ impl HeadlessJob {
             ends.push(id, outcome);
         }
     }
+}
+
+/// What an agent job of `target` started by `agent` on `model` (its
+/// launch's) sends of its session's steps: its provider's
+/// [`crate::application::StepReader`] on its stdout, to the sink of
+/// `target`'s token, the session the reader finds named.
+fn job_steps(
+    (agent, model, known): (
+        &dyn AgentProvider,
+        Option<&str>,
+        crate::domain::command_shape::Subcommands,
+    ),
+    (sinks, files): (
+        Arc<dyn crate::application::TelemetrySinks>,
+        Arc<dyn RunFiles>,
+    ),
+    db: &Path,
+    target: crate::domain::session_step::StepTarget,
+    unsent: &Arc<crate::application::step_report::UnsentSteps>,
+) -> JobStepsOn {
+    // Its words are digested under the queue's key.
+    let known = known.keyed(sinks.digest_key(db));
+    JobStepsOn {
+        steps: crate::application::step_report::JobSteps::new(
+            agent.step_reader(model, known),
+            crate::application::step_report::VerificationSteps::new(
+                sinks,
+                db.to_path_buf(),
+                target,
+                None,
+            ),
+            unsent.clone(),
+        ),
+        files,
+        registers: None,
+        registered: false,
+    }
+}
+
+/// The subcommands the shapes of its executors' steps keep in plain
+/// (ADR-t1673-1): the common ones and those of the profiles `verifier`'s
+/// `dagq.toml` declares, the common ones alone when it cannot be read.
+pub(in crate::application::supervise) fn known_subcommands(
+    verifier: &dyn Verifier,
+) -> crate::domain::command_shape::Subcommands {
+    let toolchains = verifier
+        .toolchains()
+        .unwrap_or_else(|_| crate::domain::toolchain::Toolchains::none());
+    crate::domain::command_shape::Subcommands::of(&toolchains)
 }
 
 /// The agent that starts and reads the headless jobs of `provider`: the
@@ -771,6 +899,10 @@ pub(in crate::application::supervise) struct JobDesk<'s> {
     /// The telemetry tokens this supervisor issues the targets of no run it
     /// starts the agent of (ADR-t1662-3 decision 11).
     pub(super) telemetry_tokens: &'s dyn crate::application::queue_service::TelemetryTokens,
+    /// Where its jobs send their sessions' steps, and what they could not
+    /// send by their end ([`Supervisor::job_steps`]).
+    pub(super) telemetry_sinks: Arc<dyn crate::application::TelemetrySinks>,
+    pub(super) unsent_steps: &'s Arc<crate::application::step_report::UnsentSteps>,
     pub(super) no_claude: bool,
     pub(super) job_ends: &'s JobEnds,
     /// The processes this supervisor started for its runs in other trees.
@@ -804,6 +936,33 @@ impl<'s> JobDesk<'s> {
             db: &env.layout.db,
             lease: Some(env.token),
         }
+    }
+
+    /// What a job of `target` on `provider` with `model` sends of its
+    /// session's steps ([`job_steps`]).
+    pub(in crate::application::supervise) fn job_steps(
+        &self,
+        env: &PassEnv<'_>,
+        (provider, model): (Provider, Option<&str>),
+        target: crate::domain::session_step::StepTarget,
+    ) -> Option<JobStepsOn> {
+        Some(job_steps(
+            (
+                self.job_agent(provider)?,
+                model,
+                known_subcommands(&**env.verifier),
+            ),
+            (self.telemetry_sinks.clone(), env.files.clone()),
+            &env.layout.db,
+            target,
+            self.unsent_steps,
+        ))
+    }
+
+    /// Send again what the jobs could not send yet, before a target's token
+    /// is revoked (after a Codex thread's registration at its end).
+    pub(in crate::application::supervise) fn resend_steps(&self) {
+        self.unsent_steps.resend();
     }
 
     /// The agent that runs the jobs on Claude.
@@ -1107,6 +1266,8 @@ impl Supervisor<'_> {
                 signals: self.signals,
                 service_access: self.service_access,
                 telemetry_tokens: self.telemetry_tokens,
+                telemetry_sinks: self.telemetry_sinks.clone(),
+                unsent_steps: &self.unsent_steps,
                 no_claude: self.no_claude,
                 job_ends: &self.job_ends,
                 run_children: &self.run_children,
@@ -1168,6 +1329,12 @@ impl Supervisor<'_> {
         let eval = subject.run_id.is_none()
             && subject.job == JobKind::Agent
             && subject.kind == headless_job::AGENT_EVAL;
+        let (run_id, provider, agent_job, model) = (
+            subject.run_id.clone(),
+            subject.provider,
+            subject.job == JobKind::Agent,
+            subject.model.clone(),
+        );
         let job = record_job(
             &self.job_ports(),
             what,
@@ -1176,6 +1343,33 @@ impl Supervisor<'_> {
             subject,
             timeout,
         );
+        let mut job = job;
+        // Its agent's session's steps are of its run, or of its eval's row.
+        let target = match (&run_id, job.row_id()) {
+            (Some(run), _) => Some(crate::domain::session_step::StepTarget::run(run)),
+            (None, Some(id)) if eval => Some(crate::domain::session_step::StepTarget::of(
+                crate::domain::session_step::TargetKind::EvalJob,
+                id,
+            )),
+            _ => None,
+        };
+        if agent_job && let Some(target) = target {
+            let steps = self.job_agent(provider).map(|agent| {
+                job_steps(
+                    (agent, model.as_deref(), known_subcommands(&*self.verifier)),
+                    (self.telemetry_sinks.clone(), self.files.clone()),
+                    &self.layout.db,
+                    target.clone(),
+                    &self.unsent_steps,
+                )
+            });
+            // An eval's job's session is named by its output alone: it is
+            // registered to the row once named (Self::register_named_session).
+            job.send_steps(steps.map(|mut on| {
+                on.registers = eval.then_some(target);
+                on
+            }));
+        }
         if eval && let Some(id) = job.row_id() {
             crate::application::telemetry_tokens::TargetTelemetry {
                 tokens: self.telemetry_tokens,
@@ -1191,6 +1385,27 @@ impl Supervisor<'_> {
             );
         }
         job
+    }
+
+    /// Register to its target of no run (an eval's job row) the session
+    /// `job`'s agent named so far, once: at each poll of the job and before
+    /// it is stopped, while the row runs and its token holds, so that the
+    /// steps its end sends are taken (ADR-t1662-3 decision 10). The steps
+    /// sent before are refused and kept, and its end sends them again. A
+    /// registration that failed is tried at the next poll; the job's outcome
+    /// does not hang on it.
+    pub(super) fn register_named_session(&self, job: &mut HeadlessJob) {
+        if let Some((target, session)) = job.session_to_register()
+            && crate::application::telemetry_tokens::register_session(
+                self.telemetry_tokens,
+                &self.layout.db,
+                &target,
+                &session,
+            )
+            && let Some(on) = job.steps.as_mut()
+        {
+            on.registered = true;
+        }
     }
 
     /// How long a job about `subject` may run
@@ -1277,6 +1492,10 @@ impl Supervisor<'_> {
 
     pub(super) fn write_job_ends(&mut self) {
         let (rows, abandoned) = self.job_ends.take();
+        if !rows.is_empty() || !abandoned.is_empty() {
+            // What their ends kept goes while their rows are open.
+            self.resend_kept_steps();
+        }
         for (id, outcome) in rows {
             if let Err(error) = self.queue.end_headless_job(id, outcome) {
                 warn!(error = %format_args!("{error:#}"), "the end of headless job {id} could not be recorded: {error:#}");
@@ -1534,7 +1753,10 @@ pub(super) enum ReviewJobState {
     /// Its process runs; `switchable` when `[roles.review]`, or the
     /// agent's `[review.subagents.<agent>]`, names its provider, so one it
     /// cannot use moves it or waits for it (ADR-t1207-1, ADR-t1857-1).
-    Running { job: HeadlessJob, switchable: bool },
+    Running {
+        job: Box<HeadlessJob>,
+        switchable: bool,
+    },
     /// It answered.
     Answered(ReviewAnswer),
     /// It gave no answer and will not run again: why, with where its
@@ -1578,6 +1800,18 @@ impl ReviewWatch {
                 job.abandon();
             }
         }
+    }
+
+    /// The sessions its running jobs' agents named so far
+    /// ([`HeadlessJob::named_session`]).
+    pub(super) fn named_sessions(&mut self) -> Vec<String> {
+        self.jobs
+            .iter_mut()
+            .filter_map(|job| match &mut job.state {
+                ReviewJobState::Running { job, .. } => job.named_session(),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Where the review stands from its jobs' ([`review_jobs::standing`]).
@@ -1818,6 +2052,393 @@ mod tests {
             started_at: None,
             unended: None,
             run_child: None,
+            steps: None,
+        }
+    }
+
+    /// A reader that makes a tool's call of each line and leaves a model's
+    /// turn open until the end.
+    struct LineSteps;
+
+    impl crate::application::StepReader for LineSteps {
+        fn line(&mut self, line: &str, at_ms: i64) -> Vec<crate::domain::session_step::Step> {
+            let mut step = crate::domain::session_step::Step::new(
+                0,
+                crate::domain::session_step::StepKind::ToolCall,
+                at_ms,
+                0,
+            );
+            step.tool = Some(line.to_owned());
+            vec![step]
+        }
+        fn finish(&mut self, at_ms: i64) -> Vec<crate::domain::session_step::Step> {
+            vec![crate::domain::session_step::Step::new(
+                0,
+                crate::domain::session_step::StepKind::ModelTurn,
+                0,
+                at_ms,
+            )]
+        }
+    }
+
+    /// The reports a sink took, refusing while `down`.
+    #[derive(Default)]
+    struct Reports {
+        taken: Mutex<Vec<crate::domain::telemetry::TelemetryReport>>,
+        down: Mutex<bool>,
+    }
+
+    impl crate::application::TelemetrySink for Arc<Reports> {
+        fn report(
+            &self,
+            report: &crate::domain::telemetry::TelemetryReport,
+        ) -> Result<crate::domain::telemetry::ReportRecorded> {
+            anyhow::ensure!(!*self.down.lock().unwrap(), "the service is unreachable");
+            self.taken.lock().unwrap().push(report.clone());
+            Ok(crate::domain::telemetry::ReportRecorded::default())
+        }
+    }
+
+    impl crate::application::TelemetrySinks for Arc<Reports> {
+        fn sink(
+            &self,
+            _: &Path,
+            _: &crate::domain::session_step::StepTarget,
+        ) -> Option<Box<dyn crate::application::TelemetrySink>> {
+            Some(Box::new(self.clone()))
+        }
+
+        fn digest_key(&self, _: &Path) -> Option<crate::domain::command_shape::DigestKey> {
+            Some(crate::domain::command_shape::DigestKey::test())
+        }
+    }
+
+    /// A job stopped before it ended (a handoff, the loop's end, a drop)
+    /// reads its output to its stop, ends its open steps and sends them at
+    /// once, though its interval has not passed; what its sink refused
+    /// waits for the resend before its token is revoked.
+    #[test]
+    fn a_stopped_jobs_steps_are_read_to_its_stop_and_sent() {
+        for down in [false, true] {
+            let files = Arc::new(MemoryFiles::default());
+            let mut job = job(&files, true, "");
+            job.clock = Arc::new(Frozen(job.started));
+            job.unended = Some((
+                JobEnds::default(),
+                JobSubject::run("review", &RunId::new("r1").unwrap(), 1),
+            ));
+            let reports = Arc::new(Reports::default());
+            let unsent = Arc::new(crate::application::step_report::UnsentSteps::default());
+            job.send_steps(Some(JobStepsOn {
+                steps: crate::application::step_report::JobSteps::new(
+                    Box::new(LineSteps),
+                    crate::application::step_report::VerificationSteps::new(
+                        Arc::new(reports.clone()),
+                        PathBuf::from("/q/queue.db"),
+                        crate::domain::session_step::StepTarget::run(&RunId::new("r1").unwrap()),
+                        Some("s".to_owned()),
+                    ),
+                    unsent.clone(),
+                ),
+                files: files.clone(),
+                registers: None,
+                registered: false,
+            }));
+            files.put(
+                &job.stdout.clone(),
+                std::time::SystemTime::UNIX_EPOCH,
+                "Read\n",
+            );
+            job.read_steps(false);
+            // The rest it wrote before its stop, its last line unended.
+            files.put(
+                &job.stdout.clone(),
+                std::time::SystemTime::UNIX_EPOCH,
+                "Read\nBash\nEdit",
+            );
+            *reports.down.lock().unwrap() = down;
+            job.abandon();
+            assert!(job.steps.is_none());
+            *reports.down.lock().unwrap() = false;
+            if down {
+                assert!(reports.taken.lock().unwrap().is_empty());
+                assert_eq!(unsent.resend(), 0);
+            }
+            let taken = reports.taken.lock().unwrap();
+            let steps: Vec<_> = taken
+                .iter()
+                .flat_map(|report| report.steps.clone())
+                .collect();
+            assert_eq!(
+                steps
+                    .iter()
+                    .map(|step| (step.seq, step.tool.clone()))
+                    .collect::<Vec<_>>(),
+                [
+                    (1, Some("Read".to_owned())),
+                    (2, Some("Bash".to_owned())),
+                    (3, Some("Edit".to_owned())),
+                    (4, None),
+                ],
+                "down: {down}"
+            );
+            assert_eq!(
+                steps[3].kind,
+                crate::domain::session_step::StepKind::ModelTurn
+            );
+        }
+    }
+
+    /// A reader whose agent names its thread on its `thread` line.
+    #[derive(Default)]
+    struct NamingSteps(Option<String>);
+
+    impl crate::application::StepReader for NamingSteps {
+        fn line(&mut self, line: &str, at_ms: i64) -> Vec<crate::domain::session_step::Step> {
+            if line == "thread" {
+                self.0 = Some("t1".to_owned());
+            }
+            LineSteps.line(line, at_ms)
+        }
+        fn finish(&mut self, at_ms: i64) -> Vec<crate::domain::session_step::Step> {
+            LineSteps.finish(at_ms)
+        }
+        fn session(&self) -> Option<String> {
+            self.0.clone()
+        }
+    }
+
+    /// Before a stop, the control side learns the thread the job's agent
+    /// named in its output so far, read to now and not sent before its
+    /// interval, so that its stop sends the steps under it.
+    #[test]
+    fn a_jobs_named_thread_is_read_before_its_stop_and_its_steps_go_under_it() {
+        let files = Arc::new(MemoryFiles::default());
+        let mut job = job(&files, true, "");
+        job.clock = Arc::new(Frozen(job.started));
+        let reports = Arc::new(Reports::default());
+        job.send_steps(Some(JobStepsOn {
+            steps: crate::application::step_report::JobSteps::new(
+                Box::new(NamingSteps::default()),
+                crate::application::step_report::VerificationSteps::new(
+                    Arc::new(reports.clone()),
+                    PathBuf::from("/q/queue.db"),
+                    crate::domain::session_step::StepTarget::run(&RunId::new("r1").unwrap()),
+                    None,
+                ),
+                Arc::new(crate::application::step_report::UnsentSteps::default()),
+            ),
+            files: files.clone(),
+            registers: None,
+            registered: false,
+        }));
+        assert_eq!(job.named_session(), None);
+        files.put(
+            &job.stdout.clone(),
+            std::time::SystemTime::UNIX_EPOCH,
+            "thread\nBash\n",
+        );
+        assert_eq!(job.named_session().as_deref(), Some("t1"));
+        assert!(reports.taken.lock().unwrap().is_empty());
+        job.stop();
+        let taken = reports.taken.lock().unwrap();
+        assert!(!taken.is_empty());
+        assert!(taken.iter().all(|report| report.session_id == "t1"));
+        assert_eq!(
+            taken.iter().map(|report| report.steps.len()).sum::<usize>(),
+            3
+        );
+    }
+
+    /// An eval's job's session, named by its output alone, is the one the
+    /// control side registers to the job's row, once named and until it is
+    /// registered; a job of a target the control side registered ahead has
+    /// none to register.
+    #[test]
+    fn an_eval_jobs_named_session_is_registered_to_its_row_once() {
+        let files = Arc::new(MemoryFiles::default());
+        let eval = crate::domain::session_step::StepTarget::of(
+            crate::domain::session_step::TargetKind::EvalJob,
+            7,
+        );
+        let on = |registers: Option<crate::domain::session_step::StepTarget>| JobStepsOn {
+            steps: crate::application::step_report::JobSteps::new(
+                Box::new(NamingSteps::default()),
+                crate::application::step_report::VerificationSteps::new(
+                    Arc::new(Arc::new(Reports::default())),
+                    PathBuf::from("/q/queue.db"),
+                    eval.clone(),
+                    None,
+                ),
+                Arc::new(crate::application::step_report::UnsentSteps::default()),
+            ),
+            files: files.clone(),
+            registers,
+            registered: false,
+        };
+        let mut job = job(&files, true, "");
+        job.clock = Arc::new(Frozen(job.started));
+        job.send_steps(Some(on(Some(eval.clone()))));
+        assert_eq!(job.session_to_register(), None);
+        files.put(
+            &job.stdout.clone(),
+            std::time::SystemTime::UNIX_EPOCH,
+            "thread\nBash\n",
+        );
+        assert_eq!(
+            job.session_to_register(),
+            Some((eval.clone(), "t1".to_owned()))
+        );
+        job.steps.as_mut().unwrap().registered = true;
+        assert_eq!(job.session_to_register(), None);
+        job.send_steps(Some(on(None)));
+        assert_eq!(job.session_to_register(), None);
+    }
+
+    /// The read that learns the session to register sends nothing, even
+    /// past the interval since the job's start: its steps go once it is
+    /// registered, at the next look, never refused before.
+    #[test]
+    fn the_read_that_learns_a_jobs_session_sends_none_of_its_steps() {
+        let files = Arc::new(MemoryFiles::default());
+        let mut job = job(&files, true, "");
+        job.clock = Arc::new(Frozen(
+            job.started + Duration::from_secs(crate::domain::telemetry::REPORT_INTERVAL_SECS + 1),
+        ));
+        let reports = Arc::new(Reports::default());
+        let eval = crate::domain::session_step::StepTarget::of(
+            crate::domain::session_step::TargetKind::EvalJob,
+            7,
+        );
+        job.send_steps(Some(JobStepsOn {
+            steps: crate::application::step_report::JobSteps::new(
+                Box::new(NamingSteps::default()),
+                crate::application::step_report::VerificationSteps::new(
+                    Arc::new(reports.clone()),
+                    PathBuf::from("/q/queue.db"),
+                    eval.clone(),
+                    None,
+                ),
+                Arc::new(crate::application::step_report::UnsentSteps::default()),
+            ),
+            files: files.clone(),
+            registers: Some(eval.clone()),
+            registered: false,
+        }));
+        files.put(
+            &job.stdout.clone(),
+            std::time::SystemTime::UNIX_EPOCH,
+            "thread\nBash\n",
+        );
+        assert_eq!(job.session_to_register(), Some((eval, "t1".to_owned())));
+        assert!(reports.taken.lock().unwrap().is_empty());
+        job.steps.as_mut().unwrap().registered = true;
+        job.read_steps(false);
+        let taken = reports.taken.lock().unwrap();
+        assert!(!taken.is_empty());
+        assert!(taken.iter().all(|report| report.session_id == "t1"));
+    }
+
+    /// A clock whose monotonic time stays at the job's start: the time
+    /// since it started is a value (none), whatever the time the test
+    /// takes.
+    struct Frozen(Instant);
+
+    impl crate::application::Clock for Frozen {
+        fn system_time(&self) -> std::time::SystemTime {
+            std::time::UNIX_EPOCH
+        }
+
+        fn monotonic(&self) -> Instant {
+            self.0
+        }
+    }
+
+    /// A provider whose reader makes a model's turn of each line, on the
+    /// model it was given, and names the thread `th`, as Codex's output
+    /// names no model.
+    struct ModelTurns;
+
+    impl AgentProvider for ModelTurns {
+        fn preflight(&self) -> Result<()> {
+            Ok(())
+        }
+        fn review_command(
+            &self,
+            _: &TaskRun,
+            _: &Path,
+            _: &str,
+            _: crate::domain::headless_job::JobAccess,
+        ) -> Result<CommandSpec> {
+            unreachable!()
+        }
+        fn step_reader(
+            &self,
+            model: Option<&str>,
+            _: crate::domain::command_shape::Subcommands,
+        ) -> Box<dyn crate::application::StepReader> {
+            Box::new(TurnsOn(model.map(str::to_owned)))
+        }
+    }
+
+    struct TurnsOn(Option<String>);
+
+    impl crate::application::StepReader for TurnsOn {
+        fn line(&mut self, _: &str, at_ms: i64) -> Vec<crate::domain::session_step::Step> {
+            let mut step = crate::domain::session_step::Step::new(
+                0,
+                crate::domain::session_step::StepKind::ModelTurn,
+                at_ms,
+                0,
+            );
+            step.model.clone_from(&self.0);
+            vec![step]
+        }
+        fn finish(&mut self, _: i64) -> Vec<crate::domain::session_step::Step> {
+            Vec::new()
+        }
+        fn session(&self) -> Option<String> {
+            Some("th".to_owned())
+        }
+    }
+
+    /// A Codex job's model's turns carry the model its launch names, which
+    /// its output does not, and no step carries a token's usage (the
+    /// Execution keeps it, ADR-t1486-1).
+    #[test]
+    fn a_codex_jobs_model_turns_carry_its_launchs_model_and_no_usage() {
+        let files = Arc::new(MemoryFiles::default());
+        let mut job = job(&files, true, "");
+        job.clock = Arc::new(Frozen(job.started));
+        job.provider = Provider::Codex;
+        let reports = Arc::new(Reports::default());
+        job.send_steps(Some(job_steps(
+            (
+                &ModelTurns,
+                Some("gpt-5.5-codex"),
+                crate::domain::command_shape::Subcommands::common(),
+            ),
+            (Arc::new(reports.clone()), files.clone()),
+            Path::new("/q/queue.db"),
+            crate::domain::session_step::StepTarget::run(&RunId::new("r1").unwrap()),
+            &Arc::new(crate::application::step_report::UnsentSteps::default()),
+        )));
+        files.put(
+            &job.stdout.clone(),
+            std::time::SystemTime::UNIX_EPOCH,
+            "{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":9}}\n",
+        );
+        job.stop();
+        let taken = reports.taken.lock().unwrap();
+        let steps: Vec<_> = taken
+            .iter()
+            .flat_map(|report| report.steps.clone())
+            .collect();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].model.as_deref(), Some("gpt-5.5-codex"));
+        let sent = serde_json::to_string(&*taken).unwrap();
+        for usage in ["usage", "tokens", "input_tokens"] {
+            assert!(!sent.contains(usage), "{usage} in {sent}");
         }
     }
 
@@ -2083,7 +2704,7 @@ mod tests {
                 },
             ));
             ReviewJobState::Running {
-                job,
+                job: Box::new(job),
                 switchable: false,
             }
         };
@@ -2144,6 +2765,7 @@ mod tests {
                 goal_id: None,
                 attempt: 2,
                 provider: Provider::Codex,
+                model: None,
             },
             stdout: PathBuf::from("/job/out"),
             started_at: Some(1_700_000_000_123),

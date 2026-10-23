@@ -96,6 +96,7 @@ use super::{
     BuildOutput, JunitTestName, Recommendation, RecommendedProgram, TestLines, ToolCodeClass,
     ToolHostClass, ToolProcess, ToolchainProfile,
 };
+use crate::domain::command_shape::{Runs, SubcommandList};
 use crate::domain::verify_failure::test_name;
 
 mod test_lines;
@@ -117,9 +118,153 @@ pub static RUST: Rust = Rust;
 /// See the module's doc.
 pub struct Rust;
 
+/// The known subcommands of cargo, its tools' (nextest, llvm-cov) and
+/// rustup's ([`ToolchainProfile::subcommands`]).
+const SUBCOMMANDS: &[SubcommandList] = &[
+    SubcommandList {
+        programs: &["cargo"],
+        subcommands: &[
+            "add",
+            "archive",
+            "audit",
+            "bench",
+            "build",
+            "check",
+            "clean",
+            "clippy",
+            "deny",
+            "doc",
+            "fetch",
+            "fix",
+            "fmt",
+            "generate-lockfile",
+            "help",
+            "init",
+            "install",
+            "list",
+            "llvm-cov",
+            "locate-project",
+            "machete",
+            "metadata",
+            "new",
+            "nextest",
+            "package",
+            "publish",
+            "remove",
+            "report",
+            "run",
+            "rustc",
+            "rustdoc",
+            "search",
+            "show-env",
+            "test",
+            "tree",
+            "uninstall",
+            "update",
+            "vendor",
+            "version",
+        ],
+        switches: &[
+            "-h",
+            "-q",
+            "-r",
+            "-v",
+            "-V",
+            "--all",
+            "--all-features",
+            "--all-targets",
+            "--allow-dirty",
+            "--allow-staged",
+            "--benches",
+            "--bins",
+            "--check",
+            "--doc",
+            "--exact",
+            "--examples",
+            "--fail-fast",
+            "--fix",
+            "--frozen",
+            "--future-incompat-report",
+            "--help",
+            "--html",
+            "--ignore-rust-version",
+            "--ignored",
+            "--include-ignored",
+            "--json",
+            "--keep-going",
+            "--lcov",
+            "--lib",
+            "--locked",
+            "--no-capture",
+            "--no-clean",
+            "--no-default-features",
+            "--no-deps",
+            "--no-fail-fast",
+            "--no-report",
+            "--no-run",
+            "--nocapture",
+            "--offline",
+            "--open",
+            "--quiet",
+            "--release",
+            "--summary-only",
+            "--tests",
+            "--timings",
+            "--verbose",
+            "--version",
+            "--workspace",
+        ],
+        // `cargo run`'s (and its alias `r`'s) words from the first that is
+        // no flag are the binary's.
+        runs: Runs::After(&["run", "r"]),
+        // clap's: an option takes one word, before or after operands.
+        options_after_operands: true,
+        // `+TOOLCHAIN` as its first word.
+        toolchain: true,
+    },
+    SubcommandList {
+        programs: &["rustup"],
+        subcommands: &[
+            "add",
+            "component",
+            "default",
+            "install",
+            "list",
+            "override",
+            "remove",
+            "run",
+            "show",
+            "target",
+            "toolchain",
+            "update",
+            "which",
+        ],
+        switches: &[
+            "-h",
+            "-q",
+            "-v",
+            "-V",
+            "--help",
+            "--quiet",
+            "--verbose",
+            "--version",
+        ],
+        // `rustup run TOOLCHAIN CMD …`.
+        runs: Runs::After(&["run"]),
+        // clap's: an option takes one word, before or after operands.
+        options_after_operands: true,
+        // `+TOOLCHAIN` as its first word.
+        toolchain: true,
+    },
+];
+
 impl ToolchainProfile for Rust {
     fn name(&self) -> &'static str {
         "rust"
+    }
+
+    fn subcommands(&self) -> &'static [SubcommandList] {
+        SUBCOMMANDS
     }
 
     fn killed_line(&self, lines: &[&str]) -> Option<usize> {

@@ -102,6 +102,7 @@ impl PlanningState {
                 warn!(error = %format_args!("{error:#}"), "{what}: could not reap it before the handoff: {error:#}");
             }
         }
+        self.register_stopping_sessions(env);
         if let Some(mut watch) = self.plan_review.take() {
             watch.headless.abandon();
             end_job_telemetry(env, TargetKind::PlanReview, watch.job.id);
@@ -116,6 +117,31 @@ impl PlanningState {
             info!(
                 "goal review {} of goal {} stopped for the handoff; it runs again",
                 watch.job.attempt, watch.job.goal_id
+            );
+        }
+    }
+
+    /// Register to the plan and goal reviews running the sessions their
+    /// agents named so far (a Codex thread, registered otherwise only from
+    /// the job's end), before a handoff or the loop's end stops them: the
+    /// steps their stop sends are then theirs.
+    pub(in crate::application::supervise) fn register_stopping_sessions(
+        &mut self,
+        env: &mut PlanningEnv<'_>,
+    ) {
+        let telemetry = env.jobs.target_telemetry(&env.pass);
+        if let Some(watch) = &mut self.plan_review {
+            let named = watch.headless.named_session();
+            telemetry.register(
+                &StepTarget::of(TargetKind::PlanReview, watch.job.id),
+                named.as_deref(),
+            );
+        }
+        if let Some(watch) = &mut self.goal_review {
+            let named = watch.headless.named_session();
+            telemetry.register(
+                &StepTarget::of(TargetKind::GoalReview, watch.job.id),
+                named.as_deref(),
             );
         }
     }
@@ -433,7 +459,7 @@ impl PlanningState {
             ))
             .context("start the plan review")?
             .process()?;
-        Ok(env.jobs.headless_job(
+        let mut headless = env.jobs.headless_job(
             &mut env.pass,
             "plan review",
             child,
@@ -449,8 +475,16 @@ impl PlanningState {
                 goal_id: None,
                 attempt: job.attempt,
                 provider: launch.provider,
+                model: launch.model.clone(),
             },
-        ))
+        );
+        // Its agent's session's steps go under it (ADR-t1662-3 decision 1).
+        headless.send_steps(env.jobs.job_steps(
+            &env.pass,
+            (launch.provider, launch.model.as_deref()),
+            StepTarget::of(TargetKind::PlanReview, job.id),
+        ));
+        Ok(headless)
     }
 
     /// The plan review prompt of `proposal` from the queue as it is now,

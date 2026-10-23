@@ -227,6 +227,14 @@ pub(super) struct Turns<'a> {
     /// the container removed at the turn's end. `None` runs no turn in a
     /// container (a planner's wrapper), and refuses a run in a clone.
     pub(super) containers: Option<&'a dyn super::run_container::RunContainers>,
+    /// Where the wrapper, its session's executor, sends the steps its
+    /// provider's [`super::StepReader`] collects of each turn (ADR-t1662-3
+    /// decision 1): the sink of its target's telemetry token, which the
+    /// wrapper reads and its agent is never given. `None` sends none.
+    pub(super) telemetry: Option<&'a dyn super::TelemetrySinks>,
+    /// The steps collected of its turns, numbered and sent together
+    /// ([`super::step_report::WrapperSteps`]).
+    pub(super) steps: super::step_report::WrapperSteps,
 }
 
 /// Reads the runtimes of the main checkout's `dagq.toml` (goal 38).
@@ -512,6 +520,15 @@ impl<'a> Turns<'a> {
         }
     }
 
+    /// The target its session's steps are of: the run, or the planner.
+    fn step_target(&self) -> crate::domain::session_step::StepTarget {
+        use crate::domain::session_step::{StepTarget, TargetKind};
+        match &self.owner {
+            TurnOwner::Run(run) => StepTarget::run(run.id()),
+            TurnOwner::Planner { id, .. } => StepTarget::of(TargetKind::Planner, id.as_i64()),
+        }
+    }
+
     /// How the owner is named in the logs.
     fn label(&self) -> String {
         match &self.owner {
@@ -576,6 +593,13 @@ impl<'a> Turns<'a> {
         // The supervisor cleared what an earlier session left (its exit
         // request, its untaken requests) before it opened this workspace.
         self.files.create_dir_all(&turns_dir(&run_dir))?;
+        let target = self.step_target();
+        self.steps.load(
+            self.files,
+            &turns_dir(&run_dir),
+            target,
+            now_millis(self.clock),
+        );
         let events = self.events()?;
         let mut turn = events
             .iter()
@@ -766,6 +790,10 @@ impl<'a> Turns<'a> {
                 Waiting::None => {}
             }
             self.heartbeat();
+            // What a turn could not send is sent again while the session
+            // waits for its next request.
+            self.steps
+                .tick(self.files, self.telemetry, self.db, now_millis(self.clock));
             thread::sleep(self.provider.wait_interval());
         }
     }
@@ -968,6 +996,11 @@ impl<'a> Turns<'a> {
             .toolchains
             .map_or_else(crate::domain::toolchain::Toolchains::none, |read| read());
         let mut reader = agent.turn_reader(&toolchains)?;
+        let step_reader = agent.step_reader(
+            model.as_ref().map(|(model, _)| model.as_str()),
+            crate::domain::command_shape::Subcommands::of(&toolchains)
+                .keyed(self.telemetry.and_then(|sinks| sinks.digest_key(self.db))),
+        );
         let cwd = self.cwd()?;
         if let TurnOwner::Run(run) = self.owner {
             prepare_local_checks(self.files, run);
@@ -1053,6 +1086,14 @@ impl<'a> Turns<'a> {
                     .map(|(model, effort)| (model.as_str(), effort.as_str())),
             },
         );
+        // The turn's steps are of the session it resumes, or of the one it
+        // starts by its name; one its agent names is known from its output.
+        let known = match resume {
+            Some(id) => Some(id.to_owned()),
+            None => (!agent.turn_session_from_output()).then(|| on.name.clone()),
+        };
+        self.steps
+            .start_turn(step_reader, now_millis(self.clock), known);
         let spawned = match in_container {
             Some(_) => {
                 let containers = self
@@ -1168,7 +1209,8 @@ impl<'a> Turns<'a> {
         // What it wrote after the last look, said as what came before: a
         // turn that exits between a look and the check of its exit leaves
         // its last lines here.
-        reader.stamp(now_millis(self.clock));
+        let now = now_millis(self.clock);
+        reader.stamp(now);
         for line in tail.read(self.files, stdout, true) {
             for signal in reader.line(&line) {
                 if let Some(line) = summary(&signal) {
@@ -1180,9 +1222,13 @@ impl<'a> Turns<'a> {
                 } = signal
                 {
                     self.identify(turn, on, &id)?;
+                    self.steps.identify(&id);
                 }
             }
+            self.steps.line(&line, now);
         }
+        self.steps
+            .end_turn(self.files, self.telemetry, self.db, now_millis(self.clock));
         let stderr_text = self.files.read_to_string(stderr).unwrap_or_default();
         let mut result = reader.finish(exit.as_ref(), &stderr_text);
         // An agent that exited in failure (not by a signal) with nothing on
@@ -1536,7 +1582,8 @@ impl<'a> Turns<'a> {
         let mut tail = Tail::default();
         let mut stop: Option<Stop> = None;
         loop {
-            reader.stamp(now_millis(self.clock));
+            let now = now_millis(self.clock);
+            reader.stamp(now);
             let lines = tail.read(self.files, stdout, false);
             if !lines.is_empty() {
                 last_output = self.clock.monotonic();
@@ -1550,6 +1597,7 @@ impl<'a> Turns<'a> {
                     } = &signal
                     {
                         self.identify(turn, on, id)?;
+                        self.steps.identify(id);
                     }
                     let expected = if matches!(signal, TurnSignal::Started { .. }) {
                         self.agent(on.provider)?.turn_permission_mode()
@@ -1561,6 +1609,7 @@ impl<'a> Turns<'a> {
                         say(self.background, &line);
                     }
                 }
+                self.steps.line(&line, now);
             }
             if stop.is_none()
                 && let Some(exit) = child.try_wait()?
@@ -1596,6 +1645,8 @@ impl<'a> Turns<'a> {
                 return Ok((None, Some(stop), tail));
             }
             self.heartbeat();
+            self.steps
+                .tick(self.files, self.telemetry, self.db, now_millis(self.clock));
             thread::sleep(self.provider.wait_interval());
         }
     }

@@ -590,6 +590,12 @@ impl RecoveryWatch {
         }
     }
 
+    /// The session its job's agent named so far
+    /// ([`HeadlessJob::named_session`]).
+    pub(super) fn named_session(&mut self) -> Option<String> {
+        self.job.as_mut().and_then(|job| job.job.named_session())
+    }
+
     /// Record `recovery_requested` for `alert` with `facts` and start its
     /// job; `Some` when a person is asked at once instead: the alert got
     /// its jobs already (nothing is recorded), or the job could not start.
@@ -1396,6 +1402,7 @@ fn spawn_job(
         JobSubject {
             label: Some(alert.as_str().to_owned()),
             provider: launch.provider,
+            model: launch.model.clone(),
             ..JobSubject::run(headless_job::RECOVERY, run, attempt)
         },
     ))

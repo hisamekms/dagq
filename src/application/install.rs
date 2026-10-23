@@ -117,6 +117,9 @@ pub trait Binaries {
     }
 }
 
+/// The gate's e2e, unless [`E2eSettings::command`] gives another.
+pub const E2E_COMMAND: &str = "cargo test --locked --test e2e -- --ignored";
+
 /// How long the gate's e2e may run by default before it counts as failed
 /// (ADR-t963-1 decision 1).
 pub const E2E_TIMEOUT: Duration = Duration::from_secs(1800);
@@ -153,6 +156,31 @@ pub struct E2eSettings {
     /// the git of a container run's landing worktree (ADR-t2179-1 decision
     /// 8); none otherwise.
     pub git_env: Vec<(String, String)>,
+    /// Told of each command the e2e ran as it ends (its executor's steps,
+    /// ADR-t1662-3 decision 1); `None` tells none.
+    pub ended: Option<E2eEnded>,
+}
+
+/// A command of the e2e that ended: the failed tests it reran (none for
+/// the e2e itself), when it started and ended, its exit code (none when it
+/// was stopped or not waited for) and how many bytes it wrote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct E2eCommandEnded {
+    pub rerun: Option<Vec<String>>,
+    pub started: std::time::Instant,
+    pub ended: std::time::Instant,
+    pub exit_code: Option<i32>,
+    pub output_bytes: usize,
+}
+
+/// What is told of each command of the e2e as it ends.
+#[derive(Clone)]
+pub struct E2eEnded(pub std::sync::Arc<dyn Fn(E2eCommandEnded) + Send + Sync>);
+
+impl std::fmt::Debug for E2eEnded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("E2eEnded")
+    }
 }
 
 /// The host's e2e lock of the queues under `queue_dir`'s parent, dagq's

@@ -52,6 +52,10 @@ pub(crate) struct EvalAgent {
     /// What each job's tree's Git reaches, read as its job starts.
     pub(crate) trees_git: Mutex<Vec<TreeGit>>,
     out: PathBuf,
+    /// Whether each job prints, before its reply, the stream of a Claude
+    /// session `eval-session-<n>` that calls a tool, read by Claude's step
+    /// reader.
+    streams: bool,
 }
 
 /// What the Git of a case's tree reaches from inside it, as a job in the
@@ -154,6 +158,16 @@ impl EvalAgent {
             saw_cases: Mutex::new(Vec::new()),
             trees_git: Mutex::new(Vec::new()),
             out: out.to_owned(),
+            streams: false,
+        }
+    }
+
+    /// [`Self::new`] whose jobs print a Claude session's stream before
+    /// their reply ([`Self::streams`]).
+    pub(crate) fn streaming(out: &Path, replies: &[String]) -> Self {
+        Self {
+            streams: true,
+            ..Self::new(out, replies)
         }
     }
 
@@ -196,17 +210,46 @@ impl AgentProvider for EvalAgent {
             replies[0].clone()
         };
         let copy = self.out.join(format!("stdin-{n}.txt"));
+        let stream = if self.streams {
+            [
+                json!({"type": "system", "subtype": "init", "session_id": format!("eval-session-{n}"), "model": "stub"}),
+                json!({"type": "assistant", "parent_tool_use_id": null, "message": {"id": "m1", "model": "stub",
+                    "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "git diff --stat hunter2"}}]}}),
+                json!({"type": "user", "parent_tool_use_id": null, "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "ok", "is_error": false}]}}),
+            ]
+            .iter()
+            .map(|line| format!("printf '%s\\n' {}; ", shell_path(line.to_string())))
+            .collect()
+        } else {
+            String::new()
+        };
         let mut command = CommandSpec::new("/bin/sh");
         command
             .current_dir(&job.cwd)
             .arg("-c")
             .arg(format!(
-                "cat > {}; printf '%s\\n' {}",
+                "cat > {}; {stream}printf '%s\\n' {}",
                 shell_path(&copy),
                 shell_path(&reply)
             ))
             .stdin(job.prompt.as_str());
         Ok(command)
+    }
+    /// The reply is the output's last line, after any stream.
+    fn job_reply(&self, stdout: &str) -> String {
+        stdout
+            .lines()
+            .rfind(|line| !line.trim().is_empty())
+            .unwrap_or_default()
+            .to_owned()
+    }
+    fn step_reader(
+        &self,
+        model: Option<&str>,
+        known: dagq::domain::command_shape::Subcommands,
+    ) -> Box<dyn dagq::application::StepReader> {
+        Box::new(dagq::infrastructure::claude_steps::ClaudeStepReader::new(model).knowing(known))
     }
     fn job_session(&self, _: &str, _: Option<i64>) -> Option<JobSession> {
         Some(JobSession {

@@ -1602,10 +1602,11 @@ fn a_refused_run_transition_keeps_the_domain_reason_beside_the_old_error() {
     assert!(!run_dir.exists());
 }
 
-/// `integrate` reads its time and its token from the generators `main`
+/// `integrate` reads its time and its IDs from the generators `main`
 /// hands it, not from the queue's own clock and UUIDs: a lease heartbeat
 /// fresh to the injected clock holds the run, a stale one lets it through,
-/// and only the injected token takes over a lease stored under it.
+/// and only the injected token takes over a lease stored under it; its
+/// verification's session, a session of the run's own, is the next ID.
 #[test]
 fn integrate_takes_its_time_and_token_from_the_injected_generators() {
     let (_dir, db, detail) = run_agent(
@@ -1649,10 +1650,14 @@ fn integrate_takes_its_time_and_token_from_the_injected_generators() {
         format!("{leased:#}").contains("run is still leased"),
         "{leased:#}"
     );
-    let outcome = one_shot(vec!["held"])
+    let outcome = one_shot(vec!["held", "verification"])
         .integrate(&db, target(), &repo, None)
         .unwrap();
     assert_eq!(outcome["outcome"], "needs_session", "{outcome}");
+    assert_eq!(
+        crate::common::service::session_owner(Path::new(&db), "verification"),
+        Some(format!("run:{}", run.id()))
+    );
     let started: i64 = Connection::open(&db)
         .unwrap()
         .query_row(

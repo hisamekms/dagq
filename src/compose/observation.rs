@@ -659,6 +659,10 @@ pub fn observe(
                 db: &db,
                 lease: None,
             }),
+            steps: Some(crate::application::step_report::CommandSteps {
+                files: &crate::infrastructure::run_files::LocalRunFiles,
+                sinks: Arc::new(crate::infrastructure::queue_service::SystemServiceAccess),
+            }),
         },
     )
 }
@@ -718,6 +722,10 @@ pub fn throughput_review(
                 tokens: &crate::infrastructure::queue_service::SystemServiceAccess,
                 db: &db,
                 lease: None,
+            }),
+            steps: Some(crate::application::step_report::CommandSteps {
+                files: &crate::infrastructure::run_files::LocalRunFiles,
+                sinks: Arc::new(crate::infrastructure::queue_service::SystemServiceAccess),
             }),
         },
     )

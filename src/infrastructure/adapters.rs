@@ -4241,6 +4241,13 @@ impl AgentProvider for ClaudeCode {
     fn turn_permission_mode(&self) -> Option<&'static str> {
         Some(HEADLESS_PERMISSION_MODE)
     }
+    fn step_reader(
+        &self,
+        model: Option<&str>,
+        known: crate::domain::command_shape::Subcommands,
+    ) -> Box<dyn crate::application::StepReader> {
+        Box::new(crate::infrastructure::claude_steps::ClaudeStepReader::new(model).knowing(known))
+    }
 }
 
 /// The settings file of the inbox `dagq inbox` opens, in the queue's directory

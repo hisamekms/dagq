@@ -473,6 +473,10 @@ pub struct Ports<'a> {
     /// issues at the claim, the resume and an executor's start and revokes
     /// at the run's end and a lost lease (ADR-t1662-3 decision 11).
     pub telemetry_tokens: &'a dyn crate::application::queue_service::TelemetryTokens,
+    /// Where the landings' and the e2e's verifications, the runs'
+    /// executors too, send the steps of the commands they run
+    /// (ADR-t1662-3 decision 1).
+    pub telemetry_sinks: Arc<dyn crate::application::TelemetrySinks>,
     /// Where tests pause the supervisor ([`PausePoint`]); none outside them.
     pub pauses: Option<Pauses>,
     pub files: Arc<dyn RunFiles>,
@@ -1094,6 +1098,8 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         service_access: ports.service_access,
         telemetry_tokens: ports.telemetry_tokens,
         environment: ports.environment.clone(),
+        telemetry_sinks: ports.telemetry_sinks.clone(),
+        unsent_steps: Arc::default(),
         telemetry_retries: telemetry_tokens::Retries::default(),
         telemetry_sessions: std::collections::HashSet::new(),
         pauses: ports.pauses.clone(),
@@ -1277,6 +1283,13 @@ struct Supervisor<'a> {
     telemetry_tokens: &'a dyn crate::application::queue_service::TelemetryTokens,
     /// The environment the runs execute in ([`Ports::environment`]).
     environment: Option<Arc<dyn crate::application::ExecutionEnvironment>>,
+    /// Where the verifications send their commands' steps
+    /// ([`Ports::telemetry_sinks`]).
+    telemetry_sinks: Arc<dyn crate::application::TelemetrySinks>,
+    /// The steps its executors (the landings' and the e2e's verifications,
+    /// its headless jobs) could not send by their end: sent again on each
+    /// sweep while their target has its token ([`Self::sweep_telemetry`]).
+    unsent_steps: Arc<crate::application::step_report::UnsentSteps>,
     /// The revocations of the runs' telemetry tokens this process could
     /// not make yet and no sweep would make for it: tried again on each
     /// sweep ([`Self::sweep_telemetry`]).
@@ -1662,6 +1675,8 @@ impl Supervisor<'_> {
                 signals: self.signals,
                 service_access: self.service_access,
                 telemetry_tokens: self.telemetry_tokens,
+                telemetry_sinks: self.telemetry_sinks.clone(),
+                unsent_steps: &self.unsent_steps,
                 no_claude: self.no_claude,
                 job_ends: &self.job_ends,
                 run_children: &self.run_children,
@@ -1741,6 +1756,36 @@ impl Supervisor<'_> {
         }
     }
 
+    /// Register to each slot's run the sessions its jobs' agents named so
+    /// far (a Codex thread, registered otherwise only from the job's end),
+    /// before a handoff or the loop's end stops them: the steps their stop
+    /// sends are then the run's.
+    pub(super) fn register_stopping_sessions(&mut self) {
+        let mut named = Vec::new();
+        for slot in self.claim.slots.iter_mut() {
+            let run = slot.run.id().clone();
+            named.extend(
+                named_sessions(slot)
+                    .into_iter()
+                    .map(|session| (run.clone(), session)),
+            );
+        }
+        for (run, session) in named {
+            self.register_run_job_session(&run, Some(&session));
+        }
+    }
+
+    /// [`stop_job`] on a slot taken out of the table, the sessions its
+    /// jobs' agents named registered to its run first
+    /// ([`Self::register_stopping_sessions`]).
+    pub(super) fn stop_slot_job(&mut self, slot: &mut Slot) {
+        let run = slot.run.id().clone();
+        for session in named_sessions(slot) {
+            self.register_run_job_session(&run, Some(&session));
+        }
+        stop_job(slot);
+    }
+
     /// Register `session_id`, the session of a job this process starts on
     /// `run` named ahead (a review's, a recovery job's), to the run before
     /// the job starts ([`telemetry_tokens::register_session`]); `None` is
@@ -1757,6 +1802,26 @@ impl Supervisor<'_> {
         {
             self.telemetry_sessions.insert(session_id.to_owned());
         }
+    }
+
+    /// A session of its own for a verification of `run` (the landing's,
+    /// the e2e's), registered to the run before the verification starts,
+    /// whose commands are sent as steps to the run's sink (ADR-t1662-3
+    /// decision 1): `None` for a run that holds no token.
+    pub(super) fn verification_steps(
+        &mut self,
+        run: &TaskRun,
+    ) -> Option<crate::application::step_report::VerificationSteps> {
+        if !crate::domain::queue_service::run_holds_token(run.status()) {
+            return None;
+        }
+        Some(crate::application::step_report::VerificationSteps::of_run(
+            self.telemetry_tokens,
+            self.telemetry_sinks.clone(),
+            &self.layout.db,
+            run.id(),
+            self.generators.ids.uuid(),
+        ))
     }
 
     /// Before this process starts an executor on `run` (a review, a
@@ -1786,6 +1851,7 @@ impl Supervisor<'_> {
     /// ([`telemetry_tokens::sweep_targets`]).
     fn sweep_telemetry(&mut self) {
         self.register_held_sessions();
+        self.resend_kept_steps();
         let processes = &self.processes;
         telemetry_tokens::sweep_targets(
             self.telemetry_tokens,
@@ -1808,6 +1874,30 @@ impl Supervisor<'_> {
             &states,
         );
         self.telemetry_retries = retries;
+    }
+
+    /// Send again the steps kept ([`UnsentSteps`]), the session each kept
+    /// step of an eval's job names first registered to its row: one its
+    /// end named, or one whose registration failed while it ran
+    /// (ADR-t1662-3 decision 10). On every pass, and before the ends of
+    /// jobs are written ([`Self::write_job_ends`]): the queue service
+    /// refuses the token of a row that ended, so what a job's end kept
+    /// goes while its row is still open.
+    ///
+    /// [`UnsentSteps`]: crate::application::step_report::UnsentSteps
+    pub(super) fn resend_kept_steps(&self) {
+        for (target, session) in self
+            .unsent_steps
+            .sessions_of(crate::domain::session_step::TargetKind::EvalJob)
+        {
+            telemetry_tokens::register_session(
+                self.telemetry_tokens,
+                &self.layout.db,
+                &target,
+                &session,
+            );
+        }
+        self.unsent_steps.resend();
     }
 
     /// Register the sessions of each run whose telemetry token this
@@ -2188,6 +2278,8 @@ impl Supervisor<'_> {
     /// plan review and the goal review ([`PlanningState::abandon_jobs`])
     /// and the slots' jobs ([`HeadlessJob::abandon`]).
     fn abandon_jobs(&mut self) {
+        self.on_planning(|planning, env| planning.register_stopping_sessions(env));
+        self.register_stopping_sessions();
         self.planning.abandon_jobs();
         self.abandon_agent_eval();
         self.abandon_agent_cases();
@@ -3395,22 +3487,24 @@ impl Supervisor<'_> {
                 }
                 Ok(Step::Triaged(run)) => self.note_triaged(&run),
                 Ok(Step::Disowned) => {
-                    stop_job(&mut slot);
+                    self.stop_slot_job(&mut slot);
                     self.disown(&slot)
                 }
                 // A lease-guarded write that failed because the lease
                 // changed hands mid-step (this process was stalled and
-                // adopted from) is the other owner's run to describe.
+                // adopted from) is the other owner's run to describe. Its
+                // jobs stop, and send their steps, before the token ends.
                 Err(_)
                     if !self
                         .queue
                         .holds_lease(slot.run.id(), self.registration.token())
                         .unwrap_or(true) =>
                 {
+                    self.stop_slot_job(&mut slot);
                     self.disown(&slot)
                 }
                 Err(error) if matches!(slot.phase, Phase::Recovery(_)) => {
-                    stop_job(&mut slot);
+                    self.stop_slot_job(&mut slot);
                     let (round, alert, attempt) = match &slot.phase {
                         Phase::Recovery(watch) => (watch.round, watch.alert, watch.attempt),
                         _ => unreachable!("matched a recovery"),
@@ -3447,7 +3541,7 @@ impl Supervisor<'_> {
                 }
                 Err(error) if matches!(slot.phase, Phase::Resume(_)) => {
                     // Nobody reads the verdict of its recovery jobs now.
-                    stop_recovery(&mut slot);
+                    self.stop_slot_job(&mut slot);
                     let message = format!("{error:#}");
                     warn!(run_id = %slot.run.id(), "run {} resume stopped: {message}; its workspace is kept for inspection", slot.run.id());
                     let (attempt, workspace) = match &slot.phase {
@@ -3470,7 +3564,7 @@ impl Supervisor<'_> {
                     // A session kept open through validation, review, revise
                     // or its `/exit` is asked to end, since nothing would
                     // watch it any more (task 237).
-                    stop_job(&mut slot);
+                    self.stop_slot_job(&mut slot);
                     let session = self.exit_abandoned_session(&slot);
                     let message = format!("{error:#}");
                     warn!(run_id = %slot.run.id(), "run {} retained for inspection: {message}; see show {} and doctor", slot.run.id(), slot.run.task_id());
@@ -4589,6 +4683,25 @@ impl Supervisor<'_> {
             }
         }
     }
+}
+
+/// The sessions the agents of `slot`'s jobs named in their output so far
+/// ([`HeadlessJob::named_session`]).
+fn named_sessions(slot: &mut Slot) -> Vec<String> {
+    let mut named = Vec::new();
+    match &mut slot.phase {
+        Phase::Review(watch) => named.extend(watch.named_sessions()),
+        Phase::Recovery(watch) => named.extend(watch.job.named_session()),
+        Phase::SatisfiedReview(watch) => named.extend(watch.named_session()),
+        Phase::Session(watch) => named.extend(watch.recovery.named_session()),
+        Phase::Resume(watch) => {
+            named.extend(watch.recovery.named_session());
+            named.extend(watch.live.recovery.named_session());
+        }
+        Phase::Revise(watch) => named.extend(watch.live.recovery.named_session()),
+        _ => {}
+    }
+    named
 }
 
 /// Kill the headless job (a review or a recovery job) of a slot the

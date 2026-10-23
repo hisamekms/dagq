@@ -974,3 +974,30 @@ fn a_review_whose_session_cannot_be_registered_succeeds_as_any_other() {
         ]
     );
 }
+
+/// The review's command is its agent's executor (ADR-t1662-3 decisions 1
+/// and 10): it reads the agent's stream as it runs and sends its steps
+/// with the review's telemetry token, under the review's kind and id and
+/// the session its start names, before the token is revoked.
+#[test]
+fn a_reviews_command_sends_its_agents_steps_under_the_review() {
+    let (_dir, _repo, db) = fixture();
+    land(&db, &[4; 28]);
+    let command = "dagq kpi";
+    let provider = ClaudeStream(ReviewProvider::new(&format!(
+        "{}{QUIET_REVIEWER}",
+        claude_stream_script(command)
+    )));
+    let done = review(&db, &provider, &options(ReviewMode::Hourly)).unwrap();
+    assert_eq!(done["outcome"], "succeeded", "{done}");
+    let started = &queue_events(&db, "throughput_review_started")[0];
+    assert_stream_steps(
+        &db,
+        &dagq::domain::session_step::StepTarget::of(
+            dagq::domain::session_step::TargetKind::ThroughputReview,
+            done["started_event_id"].as_i64().unwrap(),
+        ),
+        started["session_id"].as_str().unwrap(),
+        command,
+    );
+}

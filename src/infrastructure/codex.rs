@@ -721,6 +721,13 @@ impl AgentProvider for Codex {
             toolchains.clone(),
         )))
     }
+    fn step_reader(
+        &self,
+        model: Option<&str>,
+        known: crate::domain::command_shape::Subcommands,
+    ) -> Box<dyn crate::application::StepReader> {
+        Box::new(crate::infrastructure::codex_steps::CodexStepReader::new(model).knowing(known))
+    }
     /// `codex exec --json --skip-git-repo-check --sandbox read-only -C <cwd>`
     /// in `cwd` with the prompt as its standard input, never an argument
     /// (`exec` with no prompt reads it there, so a prompt of any size

@@ -13,6 +13,9 @@
 //! value>.json` holds a token's principal, `credentials/<sha256 of the
 //! actor id>` its value (mode 0600) for the caller to be handed the path
 //! of. No token value is ever written to a log, an event or an error.
+//! `command-digest.key` (mode 0600, [`digest_key`]) is the key the
+//! executors digest their commands' words with; it is read by them alone
+//! and, like a token's value, never written anywhere else.
 //!
 //! [Queue service]: ../../docs/design/queue-service.md
 
@@ -652,6 +655,83 @@ impl TelemetryTokens for SystemServiceAccess {
     }
 }
 
+/// The sink of an executor's target: the service of the queue at `db` with
+/// the target's token, while its file holds one that is issued
+/// ([`TelemetryTokens::telemetry_credential`]).
+impl crate::application::TelemetrySinks for SystemServiceAccess {
+    fn sink(&self, db: &Path, target: &StepTarget) -> Option<Box<dyn TelemetrySink>> {
+        ServiceTelemetrySink::of_target(db, target).map(|sink| Box::new(sink) as _)
+    }
+
+    fn digest_key(&self, db: &Path) -> Option<crate::domain::command_shape::DigestKey> {
+        digest_key(&queue_dir_of(db))
+            .map_err(|error| {
+                warn!(error = %format_args!("{error:#}"), "the key of command digests could not be read or made; steps keep no command's shape: {error:#}");
+            })
+            .ok()
+    }
+}
+
+/// The file of the key of command digests of the queue at `queue_dir`
+/// (ADR-t1673-1 decision 10): in the service's private directory, never in
+/// the queue's database.
+pub fn digest_key_path(queue_dir: &Path) -> PathBuf {
+    service_dir(queue_dir).join("command-digest.key")
+}
+
+/// The key of command digests of the queue at `queue_dir`: its file's
+/// bytes, or, when it has none, [`DIGEST_KEY_BYTES`] random bytes written
+/// with mode 0600 and linked into place only if no other process made one
+/// first, whose key is then read. A file of another size is an error, never
+/// replaced: its digests would no longer match.
+///
+/// [`DIGEST_KEY_BYTES`]: crate::domain::command_shape::DIGEST_KEY_BYTES
+pub fn digest_key(queue_dir: &Path) -> Result<crate::domain::command_shape::DigestKey> {
+    use crate::domain::command_shape::{DIGEST_KEY_BYTES, DigestKey};
+    let path = digest_key_path(queue_dir);
+    let read = |path: &Path| -> Result<DigestKey> {
+        let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+        DigestKey::from_bytes(&bytes).with_context(|| {
+            format!(
+                "{} does not hold a key of {DIGEST_KEY_BYTES} bytes",
+                path.display()
+            )
+        })
+    };
+    match fs::symlink_metadata(&path) {
+        Ok(_) => return read(&path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).with_context(|| format!("read {}", path.display())),
+    }
+    let dir = service_dir(queue_dir);
+    private_dir(&dir)?;
+    let mut bytes = [0u8; DIGEST_KEY_BYTES];
+    getrandom::fill(&mut bytes)
+        .map_err(|error| anyhow::anyhow!("draw the key's random bytes: {error}"))?;
+    let temporary = dir.join(format!(".{}.tmp", uuid::Uuid::new_v4().simple()));
+    let written = (|| -> std::io::Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        match fs::hard_link(&temporary, &path) {
+            Err(error) if error.kind() != std::io::ErrorKind::AlreadyExists => Err(error),
+            _ => Ok(()),
+        }
+    })();
+    let _ = fs::remove_file(&temporary);
+    written.with_context(|| format!("write {}", path.display()))?;
+    read(&path)
+}
+
+/// How long an executor waits for the service to answer a report: the
+/// executor's turn, landing or pass waits on it, and what is not answered
+/// is sent again later.
+pub const REPORT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// An executor's [`TelemetrySink`] through the queue service's client mode
 /// (ADR-t1233-1 decision 7): `telemetry_report` on `client`'s route, as the
 /// telemetry principal of the token in its credential file. A refusal or a
@@ -663,6 +743,13 @@ pub struct ServiceTelemetrySink {
 }
 
 impl ServiceTelemetrySink {
+    /// The sink of the service of the queue at `db` with the telemetry
+    /// token of `target`, never an agent's: `None` while it holds none.
+    pub fn of_target(db: &Path, target: &StepTarget) -> Option<Self> {
+        let credential = SystemServiceAccess.telemetry_credential(db, target)?;
+        Some(Self::new(socket_path(&queue_dir_of(db)), credential))
+    }
+
     /// The sink of the service on `socket`, with the token in `credential`.
     pub fn new(socket: PathBuf, credential: PathBuf) -> Self {
         Self {
@@ -678,9 +765,11 @@ impl TelemetrySink for ServiceTelemetrySink {
     fn report(&self, report: &TelemetryReport) -> Result<ReportRecorded> {
         // A report past its bounds would not be read: it is not sent.
         crate::domain::telemetry::check(report).map_err(anyhow::Error::msg)?;
-        let result = self
-            .client
-            .call(UseCase::TelemetryReport, serde_json::to_value(report)?)?;
+        let result = self.client.call_within(
+            UseCase::TelemetryReport,
+            serde_json::to_value(report)?,
+            REPORT_TIMEOUT,
+        )?;
         serde_json::from_value(result).context("the queue service's answer to telemetry_report")
     }
 }
@@ -941,6 +1030,17 @@ impl Client {
     /// broker) that does not answer is a failure; the client never opens
     /// the queue instead (fail closed).
     pub fn call(&self, use_case: UseCase, params: Value) -> Result<Value> {
+        self.call_within(use_case, params, CLIENT_TIMEOUT)
+    }
+
+    /// [`Self::call`] waiting at most `timeout` for a service on a socket
+    /// to answer.
+    pub fn call_within(
+        &self,
+        use_case: UseCase,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<Value> {
         let token = match &self.credential {
             Some(file) => Some(
                 read_token(file)
@@ -957,7 +1057,7 @@ impl Client {
                     use_case,
                     params,
                 };
-                call(socket, &request, CLIENT_TIMEOUT).map_err(|error| {
+                call(socket, &request, timeout).map_err(|error| {
                     unreachable(
                         error,
                         "dagq service status, from the control side, says why",
@@ -2592,6 +2692,102 @@ mod tests {
         // The control side issues no token for itself or a person.
         let user = Principal::of(&ActorContext::user());
         assert!(issue(dir.path(), &user, 1).is_err());
+    }
+
+    /// The key of command digests is made once per queue (ADR-t1673-1
+    /// decision 10): threads that ask at once for a queue that has none get
+    /// one key, its file in the service's directory has mode 0600, and a
+    /// later ask reads the same key; a file of another size is refused and
+    /// kept; another queue has another key.
+    #[test]
+    fn a_queues_key_of_command_digests_is_made_once_and_kept() {
+        use crate::application::TelemetrySinks;
+        let dir = tempfile::tempdir().unwrap();
+        let queue = dir.path().join("queue");
+        let db = queue.join("queue.db");
+        // Made by threads at once: one key, whichever made it.
+        let start = std::sync::Arc::new(std::sync::Barrier::new(4));
+        let made: Vec<_> = (0..4)
+            .map(|_| {
+                let (queue, start) = (queue.clone(), start.clone());
+                std::thread::spawn(move || {
+                    start.wait();
+                    digest_key(&queue).unwrap()
+                })
+            })
+            .collect();
+        let made: Vec<_> = made.into_iter().map(|made| made.join().unwrap()).collect();
+        let key = SystemServiceAccess.digest_key(&db).unwrap();
+        assert!(made.iter().all(|made| *made == key));
+        let path = digest_key_path(&queue);
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let made = fs::read(&path).unwrap();
+        assert_eq!(made.len(), crate::domain::command_shape::DIGEST_KEY_BYTES);
+        // Asked again: the same key, the file kept.
+        assert_eq!(digest_key(&queue).unwrap(), key);
+        assert_eq!(fs::read(&path).unwrap(), made);
+        assert_eq!(
+            key.digest("hunter2"),
+            digest_key(&queue).unwrap().digest("hunter2")
+        );
+        // Another queue's key digests the same word apart.
+        let other = digest_key(&dir.path().join("other")).unwrap();
+        assert_ne!(other.digest("hunter2"), key.digest("hunter2"));
+        // A file of another size is no key and is not replaced.
+        fs::write(&path, b"short").unwrap();
+        assert!(digest_key(&queue).is_err());
+        assert_eq!(SystemServiceAccess.digest_key(&db), None);
+        assert_eq!(fs::read(&path).unwrap(), b"short");
+        // No temporary file is left beside it.
+        let left: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+    }
+
+    /// The executor's sink sends with its target's telemetry token, read
+    /// from its file, never the agent's token of the same run, and has none
+    /// once the telemetry token is revoked.
+    #[test]
+    fn an_executors_sink_holds_its_targets_telemetry_token_not_the_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("queue.db");
+        let run = RunId::new("r1").unwrap();
+        let target = StepTarget::run(&run);
+        let agent = issue(dir.path(), &Principal::worker(&run, TaskId::new(3)), 10).unwrap();
+        assert!(ServiceTelemetrySink::of_target(&db, &target).is_none());
+        // Issued at a time given as a value, as `issue_telemetry` does at
+        // its own.
+        let telemetry = issue_under(
+            &TelemetryLock::take(dir.path()).unwrap(),
+            dir.path(),
+            &Principal::telemetry(&target, Some(TaskId::new(3))),
+            None,
+            10,
+        )
+        .unwrap()
+        .file;
+        let sink = ServiceTelemetrySink::of_target(&db, &target).unwrap();
+        assert_eq!(sink.client.credential.as_deref(), Some(telemetry.as_path()));
+        assert_ne!(
+            sink.client.credential.as_deref(),
+            Some(agent.file.as_path())
+        );
+        assert_eq!(
+            sink.client.route,
+            ClientRoute::Socket(socket_path(dir.path()))
+        );
+        assert!(
+            SystemServiceAccess
+                .revoke_telemetry(&db, &target, None)
+                .unwrap()
+        );
+        assert!(ServiceTelemetrySink::of_target(&db, &target).is_none());
     }
 
     #[test]

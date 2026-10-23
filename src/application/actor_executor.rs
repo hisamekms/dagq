@@ -1932,6 +1932,58 @@ mod tests {
         assert!(fake.revoked.lock().unwrap().is_empty());
     }
 
+    /// A worker's turn is given its own token, never the telemetry token
+    /// its wrapper sends the session's steps with (ADR-t1662-3 decision
+    /// 11): neither that token's file nor its principal is in the turn's
+    /// environment or on its command line.
+    #[test]
+    fn a_turn_is_given_no_telemetry_token() {
+        let run_dir = tempfile::tempdir().unwrap();
+        let run = provisioned_run(run_dir.path());
+        let fake = Fake::default();
+        let executor = HostActorExecutor::new(Path::new("/q/queue.db"))
+            .with_provider(&fake)
+            .with_spawner(&fake)
+            .with_queue_service(&fake);
+        executor
+            .spawn(ActorExecutionSpec::new(
+                ActorContext::worker(run.id(), run.task_id()),
+                WorkspaceAccess::Write("/w".into()),
+                ActorProgram::SessionAgent {
+                    agent: turn(&run, crate::domain::turn::TurnSession::New("s")),
+                    model: None,
+                },
+            ))
+            .unwrap();
+        let telemetry = crate::domain::telemetry::actor_id(
+            &crate::domain::session_step::StepTarget::run(run.id()),
+        );
+        let spawned = fake.spawned.lock().unwrap();
+        assert_eq!(spawned.len(), 1);
+        for command in spawned.iter() {
+            let args: Vec<String> = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            let env = env_of(command);
+            for text in args.iter().chain(env.iter().map(|(_, value)| value)) {
+                assert!(!text.contains(&telemetry), "{text}");
+                assert!(
+                    !text.contains(crate::domain::telemetry::ACTOR_PREFIX),
+                    "{text}"
+                );
+            }
+            assert!(
+                env.contains(&(
+                    "DAGQ_SERVICE_CREDENTIAL_FILE".to_owned(),
+                    "/q/service/credentials/worker:r1".to_owned()
+                )),
+                "{env:?}"
+            );
+        }
+        assert_eq!(*fake.issued.lock().unwrap(), ["worker:r1"]);
+    }
+
     #[test]
     fn an_actor_configured_for_the_container_is_refused_not_run_on_the_host() {
         let run = claimed_run("r1");

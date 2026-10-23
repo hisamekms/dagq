@@ -224,6 +224,7 @@ impl Supervisor<'_> {
         // again (a weekly review may take longer than the time between two
         // updates).
         self.on_planning(|planning, env| planning.stop_for_handoff(env));
+        self.register_stopping_sessions();
         let mut kept = 0;
         for mut slot in self.claim.slots.take_all() {
             let run = slot.run.clone();
@@ -354,7 +355,7 @@ impl Supervisor<'_> {
                 self.claim.slots.admit(slot);
                 continue;
             }
-            stop_job(&mut slot);
+            self.stop_slot_job(&mut slot);
             let run = slot.run.id().clone();
             if matches!(slot.phase, Phase::Recovery(_))
                 && let Err(error) = self.queue.release_lease(&run, self.registration.token())

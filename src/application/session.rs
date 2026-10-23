@@ -147,6 +147,9 @@ pub struct Session<'a> {
     pub toolchains: &'a super::headless_session::ToolchainsFile,
     /// The containers the turns of a run in a clone run in (goal 38).
     pub containers: &'a dyn super::run_container::RunContainers,
+    /// Where the wrapper sends the steps of its turns, with the run's
+    /// telemetry token (ADR-t1662-3 decision 1).
+    pub telemetry: &'a dyn super::TelemetrySinks,
 }
 
 /// Wrap the agent of run `id` under the lease `token` until it exits; the
@@ -174,6 +177,7 @@ pub fn run_session(
         runtimes,
         toolchains,
         containers,
+        telemetry,
     } = ctx;
     // A background wrapper finds its start among the run's records by its
     // pid and the start the system shows for it (ADR-t1404-1 decision 2).
@@ -205,6 +209,8 @@ pub fn run_session(
         runtimes: Some(runtimes),
         toolchains: Some(toolchains),
         containers: Some(containers),
+        telemetry: Some(telemetry),
+        steps: Default::default(),
     }
     .drive(&mut child_may_be_alive);
     match result {

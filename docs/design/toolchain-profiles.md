@@ -32,7 +32,7 @@ runtimeのほかのコードは、宣言したprofileをportを通して呼ぶ�
 
 - portは`domain::toolchain::ToolchainProfile`の1つのtraitで、1つの実装が1つの言語の道具の知識を持つ。
   各methodの意味と、runtimeが呼ぶ順はそのdoc commentが持つ。
-- 今のmethodは、検証のコマンドの出力を読むもの（道具の印から失敗を既存の分類に当てること、落ちたtestと流し直しで通ったtestの名前を読むこと、flakyのやり直しで足すenvを返すこと）と、CIと計測を読むもの（CIの見張りがJUnitのtestを道具の表示と同じ名前にする作り方、hostの負荷で道具のprocessをbuildの道具かcompilerに分けること）と、buildの出力の置き場を返すもの（下の「buildの出力の置き場」）と、推奨の設定を返すもの（下の「推奨の設定」）と、fileの中で差分の行がtestの中かを見分けるもの（`test_lines`）である。
+- 今のmethodは、検証のコマンドの出力を読むもの（道具の印から失敗を既存の分類に当てること、落ちたtestと流し直しで通ったtestの名前を読むこと、flakyのやり直しで足すenvを返すこと）と、CIと計測を読むもの（CIの見張りがJUnitのtestを道具の表示と同じ名前にする作り方、hostの負荷で道具のprocessをbuildの道具かcompilerに分けること）と、buildの出力の置き場を返すもの（下の「buildの出力の置き場」）と、推奨の設定を返すもの（下の「推奨の設定」）と、fileの中で差分の行がtestの中かを見分けるもの（`test_lines`）と、計測のコマンドの形が平文で持つ道具の語（既知のサブコマンドと値を取らないoption）を返すもの（[ADR-t1673-1](../adr/2026-10-21-t1673-1-command-shape-keeps-only-known-subcommands-in-plain.md)）である。
   processの種類の列は名前を固定し（`cpu_cargo`・`cpu_rustc`ほか）、profileは閉じた型（`ToolProcess`）でどちらの列かを返す。
   claude・dagq・そのほかは言語に依らないruntimeの共通の分類である（[hostの負荷](supervisor-lifecycle/host-metrics.md)）。
 - `test_lines`はreviewが手元の関門の要否を決めるときに使い、pathsがそのfileに当たる宣言（pathsの無い宣言は常に当たる）のprofileだけに宣言の順に聞く（`Toolchains::test_lines`、[ADR-t2589-1](../adr/2026-10-17-t2589-1-local-check-runs-are-recorded-by-project-scripts-and-matched-to-the-receipt-tree.md)決定6）。

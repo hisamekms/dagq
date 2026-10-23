@@ -538,6 +538,57 @@ pub trait AgentProvider {
     fn turn_permission_mode(&self) -> Option<&'static str> {
         None
     }
+    /// The collector of the steps of a headless turn's output, one per
+    /// turn (ADR-t1662-3 decision 1): what the executor sends of its
+    /// session, `model` the session's model where the output names none.
+    /// A provider without one collects no step. A command's shape keeps
+    /// `known`'s subcommands in plain (ADR-t1673-1).
+    fn step_reader(
+        &self,
+        model: Option<&str>,
+        known: crate::domain::command_shape::Subcommands,
+    ) -> Box<dyn StepReader> {
+        let _ = (model, known);
+        Box::new(NoSteps)
+    }
+}
+
+/// Collects the steps of a session from its agent's output, whatever the
+/// provider (ADR-t1662-3 decisions 1 and 8, docs/design/measurement.md
+/// "集める口"): the one place that knows how a provider's JSONL says a
+/// model's turn, a tool's call, a subagent and a wait. Each line comes with
+/// when it was read, in milliseconds from the turn's start by the
+/// executor's clock: a step is its offset and its length on that scale,
+/// never a time of the day, and the executor moves it onto its session's
+/// scale. A step keeps what it ran (its model, its tool, its command's
+/// shape, [`crate::domain::command_shape`], its exit, whether it ran in
+/// the background, how many bytes it wrote) and never what was said, a
+/// command's text or tokens. Its `seq` is left 0: the executor numbers it.
+pub trait StepReader: Send {
+    /// One line of the turn's stdout, read `at_ms` after the turn
+    /// started: the steps it ended.
+    fn line(&mut self, line: &str, at_ms: i64) -> Vec<crate::domain::session_step::Step>;
+    /// The turn ended (or was stopped) at `at_ms`: the steps still open,
+    /// ended there.
+    fn finish(&mut self, at_ms: i64) -> Vec<crate::domain::session_step::Step>;
+    /// The session the output read so far named itself, once it did: what
+    /// a job's executor, which starts no session by its name, sends its
+    /// steps as.
+    fn session(&self) -> Option<String> {
+        None
+    }
+}
+
+/// The [`StepReader`] of a provider that collects none.
+pub struct NoSteps;
+
+impl StepReader for NoSteps {
+    fn line(&mut self, _: &str, _: i64) -> Vec<crate::domain::session_step::Step> {
+        Vec::new()
+    }
+    fn finish(&mut self, _: i64) -> Vec<crate::domain::session_step::Step> {
+        Vec::new()
+    }
 }
 
 /// Reads the output of one headless turn into what the runtime acts on,

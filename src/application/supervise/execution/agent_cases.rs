@@ -130,10 +130,12 @@ impl Supervisor<'_> {
 
     /// Abandon the labeling jobs in progress (the loop ended).
     pub(super) fn abandon_agent_cases(&mut self) {
-        if let Some(labeling) = &mut self.agent_cases {
+        if let Some(mut labeling) = self.agent_cases.take() {
             for run in &mut labeling.running {
+                self.register_named_session(&mut run.job);
                 run.job.abandon();
             }
+            self.agent_cases = Some(labeling);
         }
     }
 
@@ -564,6 +566,7 @@ impl Supervisor<'_> {
                 goal_id: None,
                 attempt: 0,
                 provider: labeling.provider,
+                model: labeling.launch.model.clone(),
             },
         );
         info!(
@@ -620,6 +623,7 @@ impl Supervisor<'_> {
         let mut progressed = false;
         let mut index = 0;
         while index < labeling.running.len() {
+            self.register_named_session(&mut labeling.running[index].job);
             let end = match labeling.running[index].job.poll_end(&*self.files, agent) {
                 Ok(Some(end)) => end,
                 Ok(None) => {

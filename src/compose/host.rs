@@ -746,6 +746,7 @@ impl OneShot {
             utc_offset_secs: clock::local_utc_offset(self.generators.clock.now()),
             lock: installation::e2e_lock_path(&location.queue_dir),
             git_env: Vec::new(),
+            ended: None,
         };
         update::run(
             &update::JobPorts {
