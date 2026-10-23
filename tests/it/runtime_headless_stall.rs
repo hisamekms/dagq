@@ -6,7 +6,8 @@
 //! `stalled` ask offers `intervene` any more; the stall's `wait` answer,
 //! the cap on its recovery jobs, an adopted job's `wait` and a job's
 //! `resume` are checked here on a headless run, as they were on an
-//! interactive one before.
+//! interactive one before, and so is that a run's recovery jobs run one at
+//! a time, across an adoption and across two alerts.
 use crate::common;
 use crate::runtime_support;
 
@@ -710,5 +711,257 @@ fn a_headless_stall_the_job_resumes_is_parked_resumed_and_lands() {
     let calls = stub_calls(&detail.runs[0]);
     assert_eq!(calls.len(), 4, "{calls:?}");
     assert!(calls[3].starts_with("resume "), "{calls:?}");
+    assert!(stalled_asks(&SqliteQueue::open(&db).unwrap()).is_empty());
+}
+
+/// A `recovery` row of `headless_jobs`: attempt, supervisor, outcome,
+/// start and end.
+type RecoveryJobRow = (i64, String, Option<String>, i64, Option<i64>);
+
+/// The `recovery` rows of `headless_jobs`, oldest first.
+fn recovery_jobs(db: &Path) -> Vec<RecoveryJobRow> {
+    Connection::open(db)
+        .unwrap()
+        .prepare(
+            "SELECT attempt, supervisor_token, outcome, started_at, ended_at FROM headless_jobs
+             WHERE kind = 'recovery' ORDER BY id",
+        )
+        .unwrap()
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+/// The index in `detail`'s events of the first `kind` whose payload's
+/// `attempt` is `attempt`.
+fn at_attempt(detail: &dagq::domain::TaskDetail, kind: &str, attempt: i64) -> usize {
+    detail
+        .events
+        .iter()
+        .position(|e| e.kind.as_str() == kind && e.payload["attempt"] == attempt)
+        .unwrap_or_else(|| panic!("no {kind} of attempt {attempt}: {:?}", event_kinds(detail)))
+}
+
+/// Task 706 (1): a supervisor nudged a headless run twice and started its
+/// `turn_without_receipt` recovery job, then died with the job running.
+/// The supervisor that adopts the run does not take the job over: it stops
+/// it (`headless_job_stopped`), and only then starts attempt 2, so the
+/// run's recovery jobs never overlap (docs/design/supervisor-lifecycle
+/// background-recovery-job.md and headless-job-processes.md 「引き継ぎ」).
+/// It sends no third nudge, writes one turn (the job's instruction) and
+/// opens no ask; each attempt's `stall_resolved` (`detection: recovery`)
+/// is recorded once, and the run lands.
+#[test]
+fn an_adopter_stops_the_recovery_job_a_dead_supervisor_left_before_its_own_attempt() {
+    let (dir, repo, db, backend) = headless_fixture(&[]);
+    set_turns(
+        dir.path(),
+        &format!(
+            r#"case "$PROMPT" in
+*"recovery job for run"*) {FINISH} ;;
+*) await_file "$RUN_DIR/go"; say thinking ;;
+esac"#
+        ),
+    );
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let backend = Arc::new(backend);
+    let run = start_run_under_dead_supervisor(&repo, &db, &backend, "dead-supervisor");
+    let queue = SqliteQueue::open(&db).unwrap();
+    // The dead supervisor's two nudges, before the turn after them ends.
+    for _ in 0..2 {
+        queue
+            .record_runtime_event(
+                run.id(),
+                EventKind::StallNudged,
+                json!({"phase": "session", "idle_secs": 0, "threshold_secs": 1}),
+            )
+            .unwrap();
+    }
+    fs::write(Path::new(run.run_dir().unwrap()).join("go"), "").unwrap();
+    let marker = run.idle_marker_path().unwrap();
+    wait_until(&db, common::STEP_LIMIT, |queue| {
+        !payloads(&queue.show(TASK).unwrap(), "turn_finished").is_empty() && marker.exists()
+    });
+    // Then its recovery job 1, which still runs.
+    queue
+        .record_runtime_event(
+            run.id(),
+            EventKind::RecoveryRequested,
+            json!({"alert": "stalled", "reason": "turn_without_receipt", "attempt": 1, "idle_secs": 0, "nudges": 2}),
+        )
+        .unwrap();
+    let old_job = orphan("sleep 120");
+    Connection::open(&db)
+        .unwrap()
+        .execute(
+            "INSERT INTO headless_jobs(kind, run_id, attempt, pid, process_start, supervisor_token, started_at)
+             VALUES ('recovery', ?1, 1, ?2, ?3, 'dead-supervisor', unixepoch())",
+            rusqlite::params![run.id(), old_job, process_start(old_job)],
+        )
+        .unwrap();
+    age_lease(&db, &run, 31);
+    let (reviewer, supervisor) = supervise_thread(
+        &db,
+        &repo,
+        backend.clone(),
+        Default::default(),
+        &[repair(
+            json!({"action": "send_instruction", "instruction": "write the receipt"}),
+            "the worker forgot its receipt",
+        )],
+    );
+    let detail = landed(&db, &repo, &base, &backend, supervisor);
+    assert!(!running(old_job));
+
+    // The old job was stopped before attempt 2 was requested, and only
+    // the adopter's one job ran after it.
+    let stopped = payloads(&detail, "headless_job_stopped");
+    assert_eq!(stopped.len(), 1, "{stopped:?}");
+    assert_eq!(stopped[0]["kind"], "recovery");
+    assert_eq!(stopped[0]["pid"], old_job);
+    assert_eq!(stopped[0]["attempt"], 1);
+    assert_eq!(stopped[0]["supervisor"], "dead-supervisor");
+    assert_eq!(stopped[0]["outcome"], "taken_over");
+    assert!(
+        at_attempt(&detail, "headless_job_stopped", 1)
+            < at_attempt(&detail, "recovery_requested", 2)
+    );
+    let requested = payloads(&detail, "recovery_requested");
+    let attempts: Vec<&Value> = requested.iter().map(|r| &r["attempt"]).collect();
+    assert_eq!(attempts, [&json!(1), &json!(2)], "{requested:?}");
+    assert!(
+        requested
+            .iter()
+            .all(|r| r["reason"] == "turn_without_receipt"),
+        "{requested:?}"
+    );
+    assert_eq!(reviewer.triage_prompts().len(), 1);
+    let jobs = recovery_jobs(&db);
+    assert_eq!(jobs.len(), 2, "{jobs:?}");
+    assert_eq!(jobs[0].0, 1);
+    assert_eq!(jobs[0].2.as_deref(), Some("taken_over"));
+    assert_eq!(jobs[1].0, 2);
+    assert_ne!(jobs[1].1, "dead-supervisor");
+    assert!(
+        jobs[0].4.is_some_and(|ended| ended <= jobs[1].3),
+        "{jobs:?}"
+    );
+
+    // Nothing is repeated: no third nudge, the job's instruction is the
+    // one turn the adopter wrote, and no ask opened.
+    assert_eq!(payloads(&detail, "stall_nudged").len(), 2);
+    let turns = payloads(&detail, "turn_requested");
+    let whats: Vec<&str> = turns.iter().map(|t| t["what"].as_str().unwrap()).collect();
+    assert_eq!(whats, ["recovery instruction"], "{turns:?}");
+    let calls = stub_calls(&detail.runs[0]);
+    assert_eq!(calls.len(), 2, "{calls:?}");
+    assert!(calls[1].contains("recovery job for run"), "{calls:?}");
+    assert!(stalled_asks(&SqliteQueue::open(&db).unwrap()).is_empty());
+    let resolved: Vec<&Value> = payloads(&detail, "stall_resolved")
+        .into_iter()
+        .filter(|p| p["detection"] == "recovery")
+        .collect();
+    let attempts: Vec<&Value> = resolved.iter().map(|p| &p["attempt"]).collect();
+    assert_eq!(attempts, [&json!(1), &json!(2)], "{resolved:?}");
+}
+
+/// Task 706 (2): a headless run nudged twice goes to its
+/// `turn_without_receipt` recovery job, whose `send_instruction` starts a
+/// turn that is refused too many permissions. The second alert
+/// (`permission_denied`) is requested only after the first job's verdict
+/// was applied, and its one job starts after the first job ended: the
+/// run's jobs run one at a time, with no job, nudge or ask repeated. The
+/// second job's instruction finishes the task.
+#[test]
+fn a_permission_denial_after_a_recovery_instruction_gets_one_job_after_the_first() {
+    let (dir, repo, db, backend) = headless_fixture(&[]);
+    set_turns(
+        dir.path(),
+        &format!(
+            r#"case "$PROMPT" in
+*"second-instruction"*) {FINISH} ;;
+*"first-instruction"*) denied; say refused ;;
+*) say thinking ;;
+esac"#
+        ),
+    );
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let backend = Arc::new(backend);
+    let (reviewer, supervisor) = supervise_thread(
+        &db,
+        &repo,
+        backend.clone(),
+        Default::default(),
+        &[
+            repair(
+                json!({"action": "send_instruction", "instruction": "first-instruction: write the receipt"}),
+                "the worker forgot its receipt",
+            ),
+            repair(
+                json!({"action": "send_instruction", "instruction": "second-instruction: use the tools you are allowed"}),
+                "the worker used tools it may not",
+            ),
+        ],
+    );
+    let detail = landed(&db, &repo, &base, &backend, supervisor);
+    assert_eq!(reviewer.triage_prompts().len(), 2);
+    let requested = payloads(&detail, "recovery_requested");
+    let reasons: Vec<&Value> = requested.iter().map(|r| &r["reason"]).collect();
+    assert_eq!(
+        reasons,
+        [&json!("turn_without_receipt"), &json!("permission_denied")],
+        "{requested:?}"
+    );
+    assert_eq!(requested[1]["turn"]["permission_denials"], 3);
+    let second = requested[1]["attempt"].as_i64().unwrap();
+    // The first job's verdict was applied, and its instruction's turn
+    // refused, before the second alert was requested.
+    let kinds = event_kinds(&detail);
+    let second_at = at_attempt(&detail, "recovery_requested", second);
+    for earlier in ["recovery_finished", "auto_repaired"] {
+        assert!(
+            position(&kinds, earlier) < second_at,
+            "{earlier} before the second recovery_requested: {kinds:?}"
+        );
+    }
+    let finished = payloads(&detail, "recovery_finished");
+    assert_eq!(finished.len(), 2, "{finished:?}");
+    assert_eq!(finished[0]["reason"], "turn_without_receipt");
+    assert_eq!(finished[1]["reason"], "permission_denied");
+    let repaired = payloads(&detail, "auto_repaired");
+    assert_eq!(repaired.len(), 2, "{repaired:?}");
+    // One job at a time: the first job's end was read (its
+    // `recovery_finished`) before the second was requested, and a job
+    // starts only after its `recovery_requested`.
+    assert!(at_attempt(&detail, "recovery_finished", 1) < second_at);
+    let jobs = recovery_jobs(&db);
+    assert_eq!(jobs.len(), 2, "{jobs:?}");
+    assert!(
+        jobs.iter().all(|job| job.2.as_deref() == Some("ended")),
+        "{jobs:?}"
+    );
+    assert!(
+        jobs[0].4.is_some_and(|ended| ended <= jobs[1].3),
+        "{jobs:?}"
+    );
+    // Nothing repeated: two nudges, then the two instructions.
+    assert_eq!(payloads(&detail, "stall_nudged").len(), 2);
+    let turns = payloads(&detail, "turn_requested");
+    let whats: Vec<&str> = turns.iter().map(|t| t["what"].as_str().unwrap()).collect();
+    assert_eq!(
+        whats,
+        [
+            "nudge",
+            "nudge",
+            "recovery instruction",
+            "recovery instruction"
+        ],
+        "{turns:?}"
+    );
+    let calls = stub_calls(&detail.runs[0]);
+    assert_eq!(calls.len(), 5, "{calls:?}");
     assert!(stalled_asks(&SqliteQueue::open(&db).unwrap()).is_empty());
 }
