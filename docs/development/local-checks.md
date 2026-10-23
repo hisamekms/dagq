@@ -1,7 +1,7 @@
 ---
 id: development-local-checks
 type: development
-title: このrepositoryの手元の検証（人とworkerが流すもの、testの範囲、stress、負荷の下で落ちるtestの再現、e2eを流さないこと、resumeでの再現、受け入れ条件の対応づけ、askにしないもの）
+title: このrepositoryの手元の検証（人とworkerが流すもの、testの範囲、stress、testの規則の点検、負荷の下で落ちるtestの再現、e2eを流さないこと、resumeでの再現、受け入れ条件の対応づけ、askにしないもの）
 status: current
 created: 2026-10-03
 owners:
@@ -26,7 +26,7 @@ related:
 
 # このrepositoryの手元の検証
 
-変更の後に手元で流す検証と、receiptの前の受け入れ条件の対応づけ、askにせず自分で決めるものの今の規則。読むのは、workerが変更を終えてreceiptを書く前（runtimeのworkerのpromptが読ませるAGENTS.mdの「### worker」から辿る）と、人がdagqを通さずcheckoutで直接変えた後。testの書き方と置き場所は[testの制約](testing.md)、文書とcommitの規則とreceiptの前の文書の照合は[文書の規則](documents.md)、taskのverifyの選び方は[taskの登録](task-registration.md)、経緯は[手元の検証とtestの規則の経緯](../plans/local-checks-history.md)とADRが持つ。
+変更の後に手元で流す検証と、testを足した・変えたworkerがreceiptの前に自分の差分へ当てるtestの規則の点検、receiptの前の受け入れ条件の対応づけ、askにせず自分で決めるものの今の規則。読むのは、workerが変更を終えてreceiptを書く前（runtimeのworkerのpromptが読ませるAGENTS.mdの「### worker」から辿る）と、人がdagqを通さずcheckoutで直接変えた後。testの書き方と置き場所は[testの制約](testing.md)、文書とcommitの規則とreceiptの前の文書の照合は[文書の規則](documents.md)、taskのverifyの選び方は[taskの登録](task-registration.md)、経緯は[手元の検証とtestの規則の経緯](../plans/local-checks-history.md)とADRが持つ。
 
 ## 人の手元の検証
 
@@ -50,6 +50,7 @@ dagqのworkerは全体の`cargo test --locked`を流さず、`cargo llvm-cov`（
   programに無いverifyと、差分が`paths`に当たらず流れなかったverifyは今どおり手元で流す。どれが当たるかは、mainの`dagq.toml`の`[review.programs]`とrunの差分のpathで判じる。差分がそのprogramの設定かscriptを変えたrunでは、programはmainの変える前のscriptを流すので当たらないとし、手元で流す。
 - 足した・変えたtestのstress（下の「stress」）
 - `tests/it`のtestを足した・変えたら、そのstressのnextestの出力に時間の関門のscript（下の「itのtestの時間の関門」）
+- testを足した・変えたら、receiptの前に下の「testの規則の点検」
 - receiptの前に、receiptにするtreeで`sh scripts/check-local-gates.sh --base <runのbase commit>`（下の「実行の記録とreceiptのevidence」）
 
 containerで動くworker（resumeを含む）の手元のtestはLinuxでbuildされ、macOSに固有のtestは流れない（[testの制約](testing.md)の「macOSに固有のtest」）。
@@ -150,6 +151,17 @@ runtimeはreceiptのcommitのtreeと一致する記録だけをreviewの資料�
 - exit 1なら、名指されたtestを直すか、testing.mdの条件に当たる理由で許可の一覧に項目を足し、もう一度当てる。どちらもできなければ`failed`のreceiptに理由を書く。
 - 当てたこととexit statusは記録が示すので、receiptの`tests`のevidenceに書かない。許可の一覧に項目を足したら、その名前と理由をevidenceに書く。
 - `tests/it`のtestを変えていないrunはscriptを当てず、evidenceにも書かない（要らないことはruntimeが判定する）。stressをしなかったrun（cargo-nextestが無いなど）もscriptを当てず、その理由をevidenceに書く。
+
+## testの規則の点検
+
+test（`tests/**`、`src/`の`#[cfg(test)]`）を足した・変えたworkerは、receiptの前に自分の差分の追加・変更の行を次の項目に当て、外れた行を直す。項目はrunのreviewのtestの規則の差し戻しが多い順で、規則の本文と例外はそれぞれの[testの制約](testing.md)の節が持つ。
+
+- (a) 待ちの上限: 上限の無い待ち（threadのjoin・`Barrier`・子の`output()` / `status()`など）・pollのloop・testのshellの待ちとstub・processの中で動くsupervisorが、testがどう終わっても終わる形か（[待ちの上限](testing.md#待ちの上限)）。
+- (b) 判断と境界: `src/`のunit testが実時間の時計・sleep・外部プロセス・git・SQLiteのファイルを使っていないか、`tests/it`のtestが境界を代表の1 caseで確かめ、`src/`のunit testが持つ判断のcaseを並べ直していないか（[判断と境界のtest](testing.md#判断と境界のtest)）。
+- (c) helperの置き場所: 複数のtestファイルで使うhelperをtestファイルに置いて`pub(crate)`で共有していないか（[testの置き場所](testing.md#testの置き場所)）。
+- (d) shellに渡るpath: testのshellに渡る文字列にpathを埋めるところが`shell_path`を通っているか（[testの書き方](testing.md#testの書き方)）。
+
+この点検はworkerが自分の差分を直すための手順で、したことをreceiptの`tests`のevidenceに書かない（上の「実行の記録とreceiptのevidence」）。
 
 ## hostに触らない
 
