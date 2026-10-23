@@ -392,6 +392,15 @@ pub struct TurnRequested {
     pub seq: Option<u64>,
 }
 
+/// `provider_waiting`.
+#[derive(Debug, Default, Deserialize)]
+pub struct ProviderWaiting {
+    /// The turn that ended on the provider's wall; absent on an event
+    /// without it.
+    #[serde(default, deserialize_with = "typed")]
+    pub turn: Option<u64>,
+}
+
 /// `revise_requested`.
 #[derive(Debug, Default, Deserialize)]
 pub struct ReviseRequested {

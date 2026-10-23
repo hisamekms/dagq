@@ -864,7 +864,9 @@ pub struct LiveRun {
     pub run_id: RunId,
     pub task_id: TaskId,
     pub status: RunStatus,
-    /// The worker workspace the run was given.
+    /// The session the run opened last (the workspace ID or background
+    /// handle of its latest `workspace_created` or `wrapper_launched`),
+    /// else the first one the run's row keeps.
     pub workspace_id: Option<String>,
     /// The idle marker, with the background tasks it lists as running.
     pub idle: Option<(i64, Vec<BackgroundTask>)>,
@@ -1508,6 +1510,62 @@ fn watched_phase(status: RunStatus, events: &[&RunEvent]) -> Option<(&'static st
     }
 }
 
+/// Whether the turn the idle marker written at `idle` (unix milliseconds)
+/// ended is one the run waits for its provider after: the run's last
+/// `provider_waiting` names a turn that started at or before the marker,
+/// and nothing that ends the wait (the next turn, a new session of the
+/// worker, a resume, a switch of its provider) came before the marker. The
+/// supervisor's watch holds such a turn at its provider's wall without a
+/// nudge or an ask (ADR-t813-2), so it is no idle without a receipt; once
+/// the wait ended, the next turn's marker is timed from itself.
+fn waits_for_provider(run_events: &[&RunEvent], idle: i64) -> bool {
+    let Some(waiting) = run_events
+        .iter()
+        .rposition(|event| event.kind == EventKind::ProviderWaiting)
+    else {
+        return false;
+    };
+    let at = |event: &RunEvent| timestamp_millis(&event.created_at);
+    let turn =
+        crate::domain::run::payload::restore::<crate::domain::run::payload::ProviderWaiting>(
+            &run_events[waiting].payload,
+        )
+        .turn;
+    // The waited turn's start: the `turn_started` of its number, or the
+    // last one before the wait for a wait without one (an older event);
+    // the wait itself when no start is recorded.
+    let began = run_events[..waiting]
+        .iter()
+        .rfind(
+            |event| match crate::domain::turn::RecordedTurn::restore(event) {
+                Some(crate::domain::turn::RecordedTurn::Started { turn: started }) => {
+                    turn.is_none() || started == turn
+                }
+                _ => false,
+            },
+        )
+        .unwrap_or(&run_events[waiting]);
+    let began = at(began);
+    let ended = run_events[waiting + 1..]
+        .iter()
+        .find(|event| {
+            matches!(
+                event.kind.known(),
+                Some(
+                    EventKind::TurnStarted
+                        | EventKind::AgentStarted
+                        | EventKind::ResumeStarted
+                        | EventKind::ProviderSwitched
+                        | EventKind::SessionRenewed
+                        | EventKind::WorkspaceCreated
+                        | EventKind::WrapperLaunched
+                )
+            )
+        })
+        .and_then(|event| at(event));
+    began.is_some_and(|began| began <= idle) && ended.is_none_or(|ended| idle < ended)
+}
+
 /// How many runs in flight last opened a session in the background, whose
 /// wrapper `running_alerts` judges, and how many in a workspace an older
 /// binary opened, which nothing looks up.
@@ -1634,6 +1692,7 @@ pub fn judge_running_alerts(
                 && run.input.is_none_or(|input| input <= *idle)
                 && !dialog
                 && !open_ask(&["worker_question", "answer_prompt"])
+                && !waits_for_provider(&run_events, *idle)
                 && idle_secs > config.idle_without_receipt_secs
             {
                 let mut alert = RunningAlert::new(
@@ -1706,7 +1765,8 @@ pub fn judge_running_alerts(
             }
         }
         // The run's session now: the one it opened last (a resume's or a
-        // reopening's `workspace_created`), else its first session's. A
+        // reopening's `workspace_created` or `wrapper_launched`), else its
+        // first session's. A
         // session an older binary opened in a workspace is not looked up:
         // no cmux is asked (ADR-t1433-1).
         let current = crate::domain::background_wrapper::last_session(
@@ -2929,6 +2989,80 @@ mod tests {
         assert_eq!(alerts(&cleared, run).len(), 1);
     }
 
+    /// A turn that ended on its provider's wall (a usage limit) and that
+    /// the supervisor holds with `provider_waiting` is no idle without a
+    /// receipt, however long it waits, as the supervisor's watch neither
+    /// nudges nor asks it (ADR-t813-2). Once the wait ended and the next
+    /// turn started, the idle is timed from that turn's marker alone.
+    #[test]
+    fn a_turn_waiting_for_its_provider_is_not_idle_without_a_receipt() {
+        let waited = vec![
+            run_event(1, R1, "agent_started", json!({}), T),
+            run_event(2, R1, "turn_started", json!({"turn": 1}), T + 10),
+            run_event(
+                3,
+                R1,
+                "turn_finished",
+                json!({"turn": 1, "failure": "usage_limit"}),
+                T + 60,
+            ),
+            run_event(
+                4,
+                R1,
+                "provider_waiting",
+                json!({"turn": 1, "provider": "claude", "reason": "usage_limit"}),
+                T + 61,
+            ),
+        ];
+        let mut run = live_run(R1, RunStatus::Running);
+        run.idle = Some(((T + 60) * 1000, Vec::new()));
+        let live = snapshot(vec![run.clone()]);
+        assert!(running(&waited, &live, T + 60 + 37_800).is_empty());
+        // The same marker without the wait is one.
+        assert_eq!(running(&waited[..3], &live, T + 60 + 1300).len(), 1);
+        // A marker the wrapper wrote just after the wait was recorded is
+        // still of the waited turn.
+        let mut late = run.clone();
+        late.idle = Some(((T + 62) * 1000, Vec::new()));
+        assert!(running(&waited, &snapshot(vec![late]), T + 9000).is_empty());
+
+        // A wait recorded without its turn is of the last turn started.
+        let mut unnumbered = waited.clone();
+        unnumbered[3].payload = json!({"provider": "claude", "reason": "usage_limit"});
+        assert!(running(&unnumbered, &live, T + 9000).is_empty());
+
+        // The wait ended: the next turn started and has not ended, so the
+        // marker before the wait is not timed.
+        let mut resumed = waited.clone();
+        resumed.push(run_event(
+            5,
+            R1,
+            "turn_started",
+            json!({"turn": 2}),
+            T + 5000,
+        ));
+        assert!(running(&resumed, &live, T + 9000).is_empty());
+        // That turn went idle: timed from its own marker.
+        let mut next = run.clone();
+        next.idle = Some(((T + 5100) * 1000, Vec::new()));
+        let live = snapshot(vec![next]);
+        assert!(running(&resumed, &live, T + 5100 + 1200).is_empty());
+        let alerts = running(&resumed, &live, T + 5100 + 1300);
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert_eq!(alerts[0].kind, "idle_without_receipt");
+        assert_eq!(alerts[0].value, Some(1300));
+        // A switch of the provider ends the wait the same way.
+        let mut switched = waited.clone();
+        switched.push(run_event(
+            5,
+            R1,
+            "provider_switched",
+            json!({"turn": 1, "to": "codex"}),
+            T + 5000,
+        ));
+        assert_eq!(running(&switched, &live, T + 5100 + 1300).len(), 1);
+    }
+
     #[test]
     fn resumed_and_revised_sessions_are_watched_from_their_request() {
         let now = T + 5000;
@@ -3200,6 +3334,49 @@ mod tests {
                 }
             )
         );
+    }
+
+    /// A resume whose wrapper the run recorded by its `wrapper_launched`
+    /// alone is the run's session now: the alert's workspace is its
+    /// handle, not the first session's the run's row keeps.
+    #[test]
+    fn a_runs_session_is_the_wrapper_it_launched_last() {
+        let first = "background:6274:Sat_Oct_3_10:00:01_2026";
+        let resume = "background:82867:Sat_Oct_3_11:00:01_2026";
+        let mut run = live_run(R1, RunStatus::NeedsSession);
+        run.workspace_id = Some(first.to_owned());
+        run.background_alive = Some(false);
+        let events = vec![
+            run_event(
+                1,
+                R1,
+                "workspace_created",
+                json!({"workspace_id": first}),
+                T,
+            ),
+            run_event(2, R1, "wrapper_launched", json!({"workspace_id": first}), T),
+            run_event(
+                3,
+                R1,
+                "session_exited",
+                json!({"workspace_id": first}),
+                T + 1,
+            ),
+            run_event(4, R1, "resume_started", json!({}), T + 2),
+            run_event(
+                5,
+                R1,
+                "wrapper_launched",
+                json!({"workspace_id": resume}),
+                T + 3,
+            ),
+        ];
+        let workspaces: Vec<_> = running(&events, &snapshot(vec![run]), T + 10)
+            .into_iter()
+            .filter(|alert| alert.kind == "workspace_mismatch")
+            .map(|alert| alert.workspace_id)
+            .collect();
+        assert_eq!(workspaces, [Some(resume.to_owned())]);
     }
 
     /// The thresholds and how `workspace_mismatch` was judged are shown as

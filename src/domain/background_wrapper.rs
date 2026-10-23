@@ -103,8 +103,8 @@ pub fn start_token(start: &str) -> String {
 
 /// The session a run opened last, of its events `events` (oldest first):
 /// the workspace ID or background handle of its last `workspace_created`
-/// (the first session's, a resume's or a reopening's), else `first`, the
-/// run's own record of its first session. The setting is read as each
+/// or `wrapper_launched` (the first session's, a resume's or a
+/// reopening's), else `first`, the run's own record of its first session. The setting is read as each
 /// session starts, so a run's sessions may be of either kind.
 pub fn last_session<'a, I>(events: I, first: Option<&'a str>) -> Option<&'a str>
 where
@@ -112,22 +112,33 @@ where
 {
     events
         .rev()
-        .find(|event| event.kind == EventKind::WorkspaceCreated)
+        .find(|event| {
+            matches!(
+                event.kind.known(),
+                Some(EventKind::WorkspaceCreated | EventKind::WrapperLaunched)
+            )
+        })
         .and_then(|event| event.payload["workspace_id"].as_str())
         .or(first)
 }
 
 /// Whether the run's events `events` (oldest first) record that the
-/// session it opened last ended: the wrapper recorded its exit
-/// (`session_exited`) or the session's workspace or handle was closed
-/// after it opened. A background wrapper that is gone without either died.
+/// session it opened last ([`last_session`]) ended: the wrapper recorded
+/// its exit (`session_exited`) or the session's workspace or handle was
+/// closed after it opened. A background wrapper that is gone without
+/// either died.
 pub fn last_session_ended<'a, I>(events: I) -> bool
 where
     I: DoubleEndedIterator<Item = &'a super::RunEvent>,
 {
     events
         .rev()
-        .take_while(|event| event.kind != EventKind::WorkspaceCreated)
+        .take_while(|event| {
+            !matches!(
+                event.kind.known(),
+                Some(EventKind::WorkspaceCreated | EventKind::WrapperLaunched)
+            )
+        })
         .any(|event| {
             matches!(
                 event.kind.known(),

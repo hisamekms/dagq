@@ -382,7 +382,8 @@ fn live_runs(
             continue;
         }
         let mut live = live_run(run, sources)?;
-        live.background_alive = background_alive(events, run.id(), run.workspace_id(), processes);
+        live.workspace_id = last_session(events, run.id(), run.workspace_id()).map(str::to_owned);
+        live.background_alive = background_alive(live.workspace_id.as_deref(), processes);
         positions.insert(run.id().clone(), position);
         runs.push(live);
     }
@@ -403,22 +404,29 @@ fn millis(time: SystemTime) -> i64 {
         })
 }
 
-/// Whether the wrapper of the session the run `run` opened last runs, when
-/// that session is a background wrapper's (ADR-t1404-1): its handle's pid
-/// shows the start the handle recorded, so a pid another process took is
-/// not taken for it. `first` is the run's record of its first session.
-/// `None` for a session in a workspace.
-fn background_alive(
-    events: &[crate::domain::RunEvent],
+/// The session the run `run` opened last, of `events`
+/// ([`crate::domain::background_wrapper::last_session`]): `first` is the
+/// run's record of its first session.
+fn last_session<'a>(
+    events: &'a [crate::domain::RunEvent],
     run: &RunId,
-    first: Option<&str>,
-    processes: &dyn ProcessControl,
-) -> Option<bool> {
-    use crate::domain::background_wrapper::{BackgroundHandle, last_session};
-    let run_events = events
-        .iter()
-        .filter(|event| event.run_id.as_ref() == Some(run));
-    let handle = BackgroundHandle::parse(last_session(run_events, first)?)?;
+    first: Option<&'a str>,
+) -> Option<&'a str> {
+    crate::domain::background_wrapper::last_session(
+        events
+            .iter()
+            .filter(|event| event.run_id.as_ref() == Some(run)),
+        first,
+    )
+}
+
+/// Whether the wrapper of `session`, the session a run opened last, runs,
+/// when that session is a background wrapper's (ADR-t1404-1): its handle's
+/// pid shows the start the handle recorded, so a pid another process took
+/// is not taken for it. `None` for a session in a workspace.
+fn background_alive(session: Option<&str>, processes: &dyn ProcessControl) -> Option<bool> {
+    use crate::domain::background_wrapper::BackgroundHandle;
+    let handle = BackgroundHandle::parse(session?)?;
     Some(handle.is(handle.pid, processes.start_identity(handle.pid).as_deref()))
 }
 
@@ -576,9 +584,11 @@ mod tests {
                 "1970-01-01T00:01:40.000Z",
             )
         };
+        let judged = |events: &[RunEvent], run: &RunId, first: Option<&str>, processes: &Starts| {
+            background_alive(last_session(events, run, first), processes)
+        };
         let events = [of(&run, 1, "WS-FIRST"), of(&run, 2, &handle)];
-        let alive =
-            |processes: &Starts| background_alive(&events, &run, Some("WS-FIRST"), processes);
+        let alive = |processes: &Starts| judged(&events, &run, Some("WS-FIRST"), processes);
         assert_eq!(alive(&Starts(vec![(4242, started)])), Some(true));
         assert_eq!(alive(&Starts(Vec::new())), Some(false));
         assert_eq!(
@@ -590,15 +600,12 @@ mod tests {
         // another run's handle: nothing to judge.
         let processes = Starts(vec![(4242, started)]);
         assert_eq!(
-            background_alive(&events[..1], &run, Some("WS-FIRST"), &processes),
+            judged(&events[..1], &run, Some("WS-FIRST"), &processes),
             None
         );
+        assert_eq!(judged(&[], &run, Some(&handle), &processes), Some(true));
         assert_eq!(
-            background_alive(&[], &run, Some(&handle), &processes),
-            Some(true)
-        );
-        assert_eq!(
-            background_alive(
+            judged(
                 &[of(&other, 3, &handle)],
                 &run,
                 Some("WS-FIRST"),
@@ -606,6 +613,36 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// A run's session now, what its running alerts are given as its
+    /// workspace, is the one it opened last: a resume's wrapper, recorded
+    /// by its `wrapper_launched`, takes the place of the first session's
+    /// handle the run's row keeps.
+    #[test]
+    fn a_runs_session_is_the_wrapper_it_launched_last() {
+        let run = RunId::new("3aa21145-c873-4cec-aee3-ee7f07f52e4a").unwrap();
+        let other = RunId::new("4bb21145-c873-4cec-aee3-ee7f07f52e4a").unwrap();
+        let first = "background:6274:Sat_Oct_3_10:00:01_2026";
+        let resume = "background:82867:Sat_Oct_3_11:00:01_2026";
+        let of = |run: &RunId, id: i64, kind: &str, workspace: &str| RunEvent {
+            run_id: Some(run.clone()),
+            ..event(
+                id,
+                kind,
+                json!({"workspace_id": workspace}),
+                "1970-01-01T00:01:40.000Z",
+            )
+        };
+        let events = [
+            of(&run, 1, "workspace_created", first),
+            of(&run, 2, "wrapper_launched", first),
+            of(&run, 3, "wrapper_launched", resume),
+            of(&other, 4, "wrapper_launched", "background:1:x"),
+        ];
+        assert_eq!(last_session(&events, &run, Some(first)), Some(resume));
+        assert_eq!(last_session(&events[..2], &run, Some(first)), Some(first));
+        assert_eq!(last_session(&[], &run, Some(first)), Some(first));
     }
 
     /// The history is read from the earliest event, not the earliest

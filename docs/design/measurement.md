@@ -51,7 +51,7 @@ SSOTは消えてはいけない正本、ビューはSSOTから作り直せるも
 | RunResourceStore | runの資源を外から測った窓 | SSOT | queue.dbの`run_resources` |
 | LedgerStore | 台帳（run・task・session・queue・nodeの行）。旧方式の行のlegacyのJSONは凍結して捨てない | ビュー | queue.dbの`ledger_rows` |
 | ReportStore | 統計の出力（日次・週次のレポート） | ビュー | queueのdirの`reports/`のファイルと`report_written`のevent |
-| （材料） | run dir（receipt・prompt・`worktime.jsonl`ほか）・log・hostのCSV・Claude Codeのtranscript・Codexのrollout | 材料 | queueのdirとrun dirのファイル。Claude Codeのtranscriptはhostの`$CLAUDE_CONFIG_DIR`か`~/.claude`にあり、containerで動くrunのworkerのsessionのものはrun dirのagentのhomeにある（[Container runtime](container-runtime.md)）。sessionの有無の判断と区間の計測が読み、非対話のworkerの区間のトークン数はtranscriptでなくturnのstreamから取る（取り込んだ値はEventStore・SessionStepStore・NodeSampleStoreに入る） |
+| （材料） | run dir（receipt・prompt・`worktime.jsonl`ほか）・log・hostのCSV・Claude Codeのtranscript・Codexのrollout | 材料 | queueのdirとrun dirのファイル。Claude Codeのtranscriptはhostの`$CLAUDE_CONFIG_DIR`か`~/.claude`にあり、containerのrunのものは[Container runtime](container-runtime.md)。sessionの有無の判断と区間の計測が読み、非対話のworkerの区間のトークン数はtranscriptでなくturnのstreamから取る（取り込んだ値はEventStore・SessionStepStore・NodeSampleStoreに入る） |
 | 統合テストのcoverageの対応表 | 「repositoryのファイル → 当たった統合テスト」の対応表（ファイルの粒度。統合テストのbinaryのテストだけで、unit testとe2eは除く）・テストごとの所要時間と結果（nextestのJUnit）・作ったcommitと時刻 | ビュー | CIの夜間のjob（`.github/workflows/it-coverage-map.yml`）が統合テストをテストごとのcoverageつきで流して作り直せる。GitHub Actionsのartifact `it-coverage-map`で、保持の期間を過ぎて消えてもよい。着地の検証は下の「着地の検証の対応表のcache」から読む |
 | agentのevalの記録 | evalの依頼・周・実行と費用・成績、productionのケースの集合の依頼・準備・ラベル・組み立てとdigest・disputedの人の決定（[Agent eval](agent-eval.md)） | SSOT | `run_events`の`agent_eval_*`と`agent_cases_*`で、周と集合の状態はこれだけから作り直す。queueのdirの`agent-evals/`とラベルのjobの出力（`agent-cases/<set id>/labels/`）は材料 |
 | productionの集合のファイル | 集合のケースの一覧とpatch | ビュー | queueのdirの`agent-cases/<set id>/`の`cases.json`と`patches/`。`agent_cases_*`とgitの`<base>...<head>`の差分から作り直し、commitが辿れないケースは理由つきで飛ばす |
@@ -62,7 +62,7 @@ SSOTは消えてはいけない正本、ビューはSSOTから作り直せるも
 | cloneの作業と復元 | containerのrunの未commitの差分とuntracked（workerの申告）、復元するsnapshotの写しとその答え | 材料 | run dir。作業はturnの終わりにcontainerが書き再計画の保留が読む。写しは制御側が書きcontainerが次のturnの始めに当て、その答えをresumeの間に制御側が読む |
 | mainのbundle | 今のmain 1本 | 材料 | run dir。制御側が書き、次のturnの始めにcontainerが取り込む |
 | 手元の検証の記録 | workerの手元の検証の1回の実行ごとの記録とlog | 材料 | run dirの`local-checks/`（turnのenvが名指す）。pjのscriptが書き、runtimeがreceiptのcommitのtreeと照合してreviewの資料に載せる |
-| 着地の検証の対応表のcache | 着地の検証が取った対応表の最新の1つと、取ったCIのrun・そのcommit・runの時刻・取った時刻 | 材料 | hostで`scripts/landing-it.sh`がGitHub Actionsのartifact `it-coverage-map`から取り、新しいrunが無ければ取り直さない。置き場はqueueの外の`${XDG_CACHE_HOME:-$HOME/.cache}/dagq/landing-it/<run id>/`。hostのverificationはそこを読み、containerのverificationはrun dirの材料のdirへの写しだけを読む（写し方は`scripts/landing-it.sh`の冒頭の`--prepare`）。cacheも写しも消えてよく、artifactかcacheから取り直せる |
+| 着地の検証の対応表のcache | 着地の検証が取った対応表の最新の1つと、取ったCIのrun・そのcommit・runの時刻・取った時刻 | 材料 | hostで`scripts/landing-it.sh`がartifact `it-coverage-map`から取ってqueueの外に置き、containerのverificationはrun dirの材料への写しだけを読む（置き場・取り直し・写し方はscriptの冒頭）。cacheも写しも消えてよい |
 
 計測の層の論理ストアか、runtime・CI・`scripts/`が続けて書き他の仕組みが読む共有の記録を足すか変えるtaskは、同じ変更でこの表に行（中身・区分・今のアダプタ）を足すか直す（[ADR-t2065-1](../adr/2026-10-08-t2065-1-measurement-ssot-table-holds-stores-and-shared-records-only.md)、[文書の規則](../development/documents.md)の「design」）。
 `docs/plans/`の1回きりや週次の見直しの測定の出力（scriptとCSV）はこの表に足さず、そのplansの文書が区分（SSOT・ビュー・材料）と作り直せる範囲を持つ。
@@ -145,6 +145,8 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
   警告の鍵（`AlertKey`）はleaseの持ち主を含めないので、leaseが移っても何も書かない。
 - **判定の入力と警告の開閉**: 入力は離散の時刻と値で、経過で伸びる長さは持たない（入力の中身は`domain::live_alerts`のmodule doc）。
   開閉のeventは警告がいつ立ち消えたかの記録で、値の再現には使わない。
+- **走っているrun**: receiptの無いidleは、markerのturnの後に`provider_waiting`でproviderを待つ間は数えず、次のturnのmarkerから数える（stallの見張りと同じ、ADR-t813-2）。
+  入力と警告のworkspaceはrunが最後に開いたsession（最新の`workspace_created`か`wrapper_launched`）。
 - **記録**（流れはsupervisorのtokenごと）: 起動の後の最初の成功した観測が`live_alert_baseline`。
   入力の値が変わった対象ごとに`live_alert_input_changed`。
   警告の鍵の集合が変わったときだけ`live_alert_started`・`live_alert_ended`。
@@ -155,13 +157,13 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
   流れどうしは足さない。
 - **観測が無い**: 選べる流れが無いときの理由は、基準が無い・記録の欠け（到達点が確かめた版に入力の記録が届かない）・supervisorの停止（全ての流れの`supervisor_life_end`）・観測の失敗・到達点が古い。
   `supervisor_alive`は理由の区別にだけ使う。
-- runtimeの制御はこの記録を読まず、statsはまだ今の観測を直接読む。
+- runtimeの制御はこの記録を読まず、statsは今の観測を直接読む。
 
 ## 台帳の形
 
 台帳は対象ごとに1行（ADR-t1662-1決定10）。
 区切りの値は列、フローで形が変わるものはJSON。
-全ての行が持つ項目と意味は`LedgerRow`のdoc commentとmigrationのコメントが持つ。
+行の項目は`LedgerRow`のdoc commentとmigrationのコメント。
 
 - **作り直し**: 版が上がった行と、到達点より後に入力が届いた行は畳み直す（`ledger::rebuilds`、確定の印の後と旧方式の行も同じ）。
 - **記録**: どのeventも、どれか1つの行の記録になる（`domain::ledger::owner`）。
@@ -184,7 +186,7 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 - **claimの後の事実**は`domain::after_claim`が作り、statsの`MeasureTrack`も同じものを使う。
 - **step**: runのstepは`domain::ledger::steps`が親の区間ごとにkindの内訳と被覆率に畳み（内側の層は重なってよい）、区間の外のstepとseqの抜けを数える。
 
-置き換える今の組み立て（段3で撤去）はADR-t1662-1決定20が挙げる。
+置き換える今の組み立て（段3で撤去）はADR-t1662-1決定20。
 
 ## 台帳を作る係
 
