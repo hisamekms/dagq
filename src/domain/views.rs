@@ -374,6 +374,15 @@ pub struct SupervisorRegistration {
     /// for a supervisor of an older binary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_load: Option<f64>,
+    /// Where `max_load` comes from: [`SettingSource::Flag`] for
+    /// `--max-load` (its 0 or below is `max_load` `None`) or
+    /// [`SettingSource::Default`]; `None` for a supervisor of an older
+    /// binary, whose source is not known.
+    ///
+    /// [`SettingSource::Flag`]: super::slot_limits::SettingSource::Flag
+    /// [`SettingSource::Default`]: super::slot_limits::SettingSource::Default
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_load_source: Option<super::slot_limits::SettingSource>,
     /// Each provider's executable as the supervisor resolved it at its
     /// start (ADR-t813-2), and the worker modes it runs it in; `None` for
     /// a supervisor of an older binary.
@@ -425,6 +434,17 @@ impl SupervisorRegistration {
             ]);
         }
         arguments
+    }
+
+    /// The `--max-load` for an `up` that starts this supervisor again: the
+    /// value it took from the flag, 0 when the flag disabled its hold.
+    /// `None` for the default, which the started one resolves again on its
+    /// host, and for a registration with no source (an older binary's, or
+    /// one written before the column), whose `max_load` may be the default
+    /// as well.
+    pub fn flag_max_load(&self) -> Option<f64> {
+        (self.max_load_source == Some(super::slot_limits::SettingSource::Flag))
+            .then(|| self.max_load.unwrap_or(0.0))
     }
 
     /// Whether this is a live supervisor that updates its binary (ADR-0045

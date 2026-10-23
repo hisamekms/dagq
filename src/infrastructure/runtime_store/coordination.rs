@@ -322,12 +322,18 @@ impl SqliteQueue {
     }
 
     /// Record the supervisor `token`'s `--max-load`, NULL when its load
-    /// hold is off (ADR-t1479-1).
-    pub fn set_max_load(&self, token: &LeaseToken, max_load: Option<f64>) -> Result<()> {
+    /// hold is off (ADR-t1479-1), and where it comes from (`source`, NULL
+    /// when not known).
+    pub fn set_max_load(
+        &self,
+        token: &LeaseToken,
+        max_load: Option<f64>,
+        source: Option<SettingSource>,
+    ) -> Result<()> {
         ensure!(
             self.conn.execute(
-                "UPDATE supervisors SET max_load=?2 WHERE token=?1",
-                params![token, max_load],
+                "UPDATE supervisors SET max_load=?2, max_load_source=?3 WHERE token=?1",
+                params![token, max_load, source.map(SettingSource::as_str)],
             )? == 1,
             "supervisor {token} is no longer registered"
         );
@@ -945,8 +951,13 @@ impl SupervisorRegistry for SqliteQueue {
     fn set_auto_update(&self, token: &LeaseToken, enabled: bool) -> Result<()> {
         SqliteQueue::set_auto_update(self, token, enabled)
     }
-    fn set_max_load(&self, token: &LeaseToken, max_load: Option<f64>) -> Result<()> {
-        SqliteQueue::set_max_load(self, token, max_load)
+    fn set_max_load(
+        &self,
+        token: &LeaseToken,
+        max_load: Option<f64>,
+        source: Option<SettingSource>,
+    ) -> Result<()> {
+        SqliteQueue::set_max_load(self, token, max_load, source)
     }
     fn set_slot_limits(&self, token: &LeaseToken, limits: SlotLimits) -> Result<()> {
         SqliteQueue::set_slot_limits(self, token, limits)
@@ -1161,7 +1172,8 @@ mod tests {
     }
 
     /// `claim_spacing` and its source are written with the slot limits, and
-    /// `--max-load` on its own; NULL reads as none (ADR-t1479-1).
+    /// `--max-load` and its source on their own; NULL reads as none
+    /// (ADR-t1479-1).
     #[test]
     fn the_claim_spacing_and_max_load_are_written_on_the_registration() {
         use crate::domain::slot_limits::{OptionalSetting, Setting, SettingSource, SlotLimits};
@@ -1187,16 +1199,28 @@ mod tests {
                 },
             )
             .unwrap();
-        queue.set_max_load(&token, Some(16.0)).unwrap();
+        assert_eq!(registration.max_load_source, None);
+        queue
+            .set_max_load(&token, Some(16.0), Some(SettingSource::Default))
+            .unwrap();
         let registration = &queue.supervisors().unwrap()[0];
         assert_eq!(registration.claim_spacing, Some(60));
         assert_eq!(registration.claim_spacing_source, Some(SettingSource::File));
         assert_eq!(registration.max_load, Some(16.0));
-        queue.set_max_load(&token, None).unwrap();
-        assert_eq!(queue.supervisors().unwrap()[0].max_load, None);
+        assert_eq!(registration.max_load_source, Some(SettingSource::Default));
+        // `--max-load 0`: the hold is off and the flag is its source.
+        queue
+            .set_max_load(&token, None, Some(SettingSource::Flag))
+            .unwrap();
+        let registration = &queue.supervisors().unwrap()[0];
+        assert_eq!(registration.max_load, None);
+        assert_eq!(registration.max_load_source, Some(SettingSource::Flag));
+        // A caller that names no source leaves it unknown.
+        queue.set_max_load(&token, Some(8.0), None).unwrap();
+        assert_eq!(queue.supervisors().unwrap()[0].max_load_source, None);
         assert!(
             queue
-                .set_max_load(&LeaseToken::new("gone"), Some(1.0))
+                .set_max_load(&LeaseToken::new("gone"), Some(1.0), None)
                 .is_err()
         );
     }

@@ -65,7 +65,7 @@ use caseは`src/application/install.rs`（置き換えと引き継ぎ）と`src/
    全員の失敗と一部の失敗は、CLIでは7の`update_failed`の経路を通る。
 6. **drain**（決定14）: 人が非互換のmigrationを許したとき、liveな登録があれば`down --wait`で止め（同じqueueのDBを持つ別のlabelのagentも外す。[up / down](up-down.md)の`down`）、元の`migrate`（`backups/`に複製してから適用）、置き換えをして、新しいbinaryの`up`で起動し直す（`--claude`と`--codex`の解決は[Provider executables](../provider-executables.md)）。
    止めた登録がin-cmuxでもlaunchd modeで起動する（[ADR-t1433-4](../../adr/2026-10-03-t1433-4-supervisor-resides-without-cmux.md)）。
-   止めた登録の値の引き継ぎは`install_breaking`のdoc commentが持ち、drainの後に`up`を打ち直す必要はない。
+   止めた登録がflagで与えた値（[claimを控える](claim-hold.md)loadの上限を含む）は起動し直す`up`に同じflagで渡るので、drainの後に`up`を打ち直す必要はない（どの値をどう引き継ぐかは`install_breaking`のdoc comment）。
    drainは7の見張りの対象外: 前のbinaryは非互換のmigrationの後のDBを開けないので戻せず、supervisorの起動し直しは上の`up`が行う（その`up`の失敗はerrorで止まる）。
 7. **見張り**（ADR-0073の決定13・14）: 5で引き継がせたsupervisorのそれぞれが、新しいbuild識別子のまま、取り戻したときより後のheartbeatを期限の内に書くのを待ち、確かめ終えるまで`install`は成功を返さない（`update::install_watched`）。
    判定・戻し・起動し直しは自動更新のjobの4・5（[Auto-update](auto-update.md#auto-update)）と同じ`update::settle`を通る。

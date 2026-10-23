@@ -4756,6 +4756,11 @@ fn execute(cli: Cli) -> Result<Value> {
                     max_load,
                     dagq::infrastructure::clock::logical_cores(),
                 ),
+                max_load_source: if max_load.is_some() {
+                    dagq::domain::slot_limits::SettingSource::Flag
+                } else {
+                    dagq::domain::slot_limits::SettingSource::Default
+                },
                 user_config: dagq::infrastructure::language::user_config_file(),
                 claude_config_dir: dagq::infrastructure::adapters::claude_config_dir(),
                 codex,

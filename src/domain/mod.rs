@@ -5132,6 +5132,7 @@ mod attention_tests {
             class_aging: None,
             class_aging_source: None,
             max_load: None,
+            max_load_source: None,
             providers: None,
             binary_version: None,
         };

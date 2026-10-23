@@ -15,6 +15,7 @@ use super::{
     provider_checks, worker_adapters,
 };
 use crate::domain::LeaseToken;
+use crate::domain::slot_limits::SettingSource;
 use crate::domain::worker::ProviderCheck;
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
@@ -208,6 +209,10 @@ pub struct SuperviseOptions {
     /// 1-minute load average is above it; `None` (the default here) holds
     /// for no load.
     pub max_load: Option<f64>,
+    /// Where `max_load` comes from: [`SettingSource::Flag`] when the CLI
+    /// was given `--max-load`, else [`SettingSource::Default`] (the default
+    /// here).
+    pub max_load_source: SettingSource,
     /// The seconds between new claims while `max_load` holds
     /// (ADR-t1479-1); 0 spaces none. `None` follows `[supervisor]
     /// claim_spacing` as `parallel` does, else 180. The CLI has no flag
@@ -464,6 +469,7 @@ impl SuperviseOptions {
             // The CLI's `--max-load` has a default; a caller of the library
             // (the tests) holds for no load unless it asks to.
             max_load: None,
+            max_load_source: SettingSource::Default,
             load_average,
             load_conflicts: load_conflict_config,
             disk: None,
@@ -553,6 +559,7 @@ impl SuperviseOptions {
             mode: self.mode,
             update: self.update.clone(),
             max_load: self.max_load,
+            max_load_source: self.max_load_source,
             disk,
             resume,
             passes: self.passes.clone(),

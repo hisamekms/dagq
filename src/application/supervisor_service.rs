@@ -225,11 +225,43 @@ pub fn service_error(error: &ServiceError) -> anyhow::Error {
     match &error.kind {
         Some(FailureKind::RunNotFound(run)) => RunNotFound(run.clone()).into(),
         Some(FailureKind::QueueBusy) => anyhow!(error.message.clone()).context(QueueBusy),
-        None => anyhow!(
+        None => Refused {
+            code: error.code,
+            message: error.message.clone(),
+        }
+        .into(),
+    }
+}
+
+/// The service's refusal or failure of a request with no kind the caller
+/// tells apart ([`service_error`]), kept typed so a caller can read its
+/// code.
+#[derive(Debug)]
+pub struct Refused {
+    pub code: crate::domain::queue_service::ServiceErrorCode,
+    pub message: String,
+}
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
             "the queue service refused the request ({}): {}",
-            error.code.as_str(),
-            error.message
-        ),
+            self.code.as_str(),
+            self.message
+        )
+    }
+}
+
+impl std::error::Error for Refused {}
+
+impl Refused {
+    /// Whether `error` is the service's refusal of the request as one it
+    /// does not read (`bad_request`).
+    pub fn bad_request(error: &anyhow::Error) -> bool {
+        error.downcast_ref::<Self>().is_some_and(|refused| {
+            refused.code == crate::domain::queue_service::ServiceErrorCode::BadRequest
+        })
     }
 }
 

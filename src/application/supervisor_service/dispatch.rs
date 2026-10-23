@@ -825,9 +825,11 @@ pub(super) fn dispatch(
             answer(SupervisorRegistry::set_slot_limits(&*store, &token, limits))
         }
         "set_max_load" => {
-            let (token, max_load): (LeaseToken, Option<f64>) = read(op, args)?;
+            let (token, max_load, source) = max_load_args(op, args)?;
             own(&token)?;
-            answer(SupervisorRegistry::set_max_load(&*store, &token, max_load))
+            answer(SupervisorRegistry::set_max_load(
+                &*store, &token, max_load, source,
+            ))
         }
         "rebind_repository" => {
             let (common_dir,): (String,) = read(op, args)?;
@@ -993,5 +995,22 @@ pub(super) fn dispatch(
             "the queue service has no supervisor operation {op}"
         ))
         .into()),
+    }
+}
+
+/// The arguments of `set_max_load`: the token, the threshold and its
+/// source, or the first two alone from a supervisor of a binary that
+/// sends no source.
+pub(super) fn max_load_args(
+    op: &str,
+    args: Value,
+) -> Result<(
+    LeaseToken,
+    Option<f64>,
+    Option<crate::domain::slot_limits::SettingSource>,
+)> {
+    match read::<(LeaseToken, Option<f64>)>(op, args.clone()) {
+        Ok((token, max_load)) => Ok((token, max_load, None)),
+        Err(_) => read(op, args),
     }
 }

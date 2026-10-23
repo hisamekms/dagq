@@ -256,6 +256,8 @@ pub struct LoopSettings {
     /// `--max-load`: no new run is claimed while the 1-minute load average
     /// is above it (task 327); `None` holds for no load.
     pub max_load: Option<f64>,
+    /// Where `max_load` comes from: `--max-load` or the default.
+    pub max_load_source: crate::domain::slot_limits::SettingSource,
     /// How much free disk space a claim and a landing need (task 377).
     pub disk: crate::domain::disk::DiskConfig,
     /// `[resume]`: the limit of a run's conflict-only attempts (ADR-0047
@@ -1039,7 +1041,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         }
     };
     // For the time of the next claim `status` shows (ADR-t1479-1).
-    queue.set_max_load(&token, settings.max_load)?;
+    queue.set_max_load(&token, settings.max_load, Some(settings.max_load_source))?;
     let mut config = serde_json::to_value(settings.stall)?;
     config["supervisor"] = json!(token);
     queue.record_queue_event(EventKind::StallConfigLoaded, config)?;

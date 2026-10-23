@@ -468,6 +468,7 @@ mod registration_tests {
                 class_aging: None,
                 class_aging_source: None,
                 max_load: None,
+                max_load_source: None,
                 providers: None,
             };
         assert_eq!(
@@ -520,5 +521,27 @@ mod registration_tests {
                 .flag_arguments()
                 .is_empty()
         );
+
+        // `--max-load`: the flag's value, 0 when the flag disabled the
+        // hold; nothing for the default or a registration with no source.
+        let with_load = |max_load, max_load_source| SupervisorRegistration {
+            max_load,
+            max_load_source,
+            ..registration(None, None, None)
+        };
+        assert_eq!(
+            with_load(Some(6.5), Some(SettingSource::Flag)).flag_max_load(),
+            Some(6.5)
+        );
+        assert_eq!(
+            with_load(None, Some(SettingSource::Flag)).flag_max_load(),
+            Some(0.0)
+        );
+        assert_eq!(
+            with_load(Some(16.0), Some(SettingSource::Default)).flag_max_load(),
+            None
+        );
+        assert_eq!(with_load(Some(16.0), None).flag_max_load(), None);
+        assert_eq!(with_load(None, None).flag_max_load(), None);
     }
 }

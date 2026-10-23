@@ -758,12 +758,16 @@ impl HandoffFailed {
 ///
 /// The started supervisor's `up` carries over the drained ones' values, so
 /// no second `up` is needed after the drain: `--auto-update` when any of
-/// them had it, and the parallelism, wait limit and limit of the runtime's
-/// planners each took from a flag, as the same flags. A value one took from
+/// them had it, and the parallelism, wait limit, limit of the runtime's
+/// planners and load threshold each took from a flag, as the same flags. A value one took from
 /// `dagq.toml` or the default is left for the started one to resolve again.
 /// A registration that records no source for its values (from a binary
 /// older than the source columns) carries them over as flag-sourced ones
-/// do. A flag the restart's arguments hold already is not added again.
+/// do, except `--max-load`: it is carried over only from a registration
+/// that records the flag as its source
+/// ([`SupervisorRegistration::flag_max_load`]), 0 when the flag disabled
+/// the hold. A flag the restart's arguments hold already is not added
+/// again.
 fn install_breaking(
     ports: &Ports<'_, impl HostOpsQueue + ?Sized>,
     db: &Path,
@@ -793,49 +797,7 @@ replaced, and `up` starts the old binary again"
     let started = match live.first() {
         None => Value::Null,
         Some(drained) => {
-            let flagged = |source: Option<SettingSource>| {
-                source.is_none_or(|source| source == SettingSource::Flag)
-            };
-            let mut arguments = vec!["--db".to_owned(), path_text(db)?, "up".to_owned()];
-            if live
-                .iter()
-                .any(|registration| registration.claude_disabled())
-                && !options
-                    .restart
-                    .iter()
-                    .any(|argument| argument == "--no-claude")
-            {
-                arguments.push("--no-claude".into());
-            }
-            if flagged(drained.parallel_source) {
-                arguments.extend(["--parallel".to_owned(), drained.parallel.to_string()]);
-            }
-            let restarts = |flag: &str| options.restart.iter().any(|argument| argument == flag);
-            if live.iter().any(|registration| registration.auto_update)
-                && !restarts("--auto-update")
-            {
-                arguments.push("--auto-update".to_owned());
-            }
-            if let Some(max_waiting) = live
-                .iter()
-                .filter(|registration| flagged(registration.max_waiting_source))
-                .find_map(|registration| registration.max_waiting)
-                && !restarts("--max-waiting")
-            {
-                arguments.extend(["--max-waiting".to_owned(), max_waiting.to_string()]);
-            }
-            if let Some(runtime_planners) = live
-                .iter()
-                .filter(|registration| flagged(registration.runtime_planners_source))
-                .find_map(|registration| registration.runtime_planners)
-                && !restarts("--runtime-planners")
-            {
-                arguments.extend([
-                    "--runtime-planners".to_owned(),
-                    runtime_planners.to_string(),
-                ]);
-            }
-            arguments.extend(options.restart.iter().cloned());
+            let arguments = restart_arguments(path_text(db)?, drained, &live, &options.restart);
             binaries.run(&options.target, &arguments).with_context(|| {
                 format!(
                     "{version} is installed and the queue migrated, but its `up` failed; run it \
@@ -854,6 +816,68 @@ again"
         "drained": drained,
         "up": started,
     }))
+}
+
+/// The arguments of the `up` that starts the supervisors in `live` again
+/// after the drain, on the queue at `db`: what [`install_breaking`] says it
+/// carries over, the parallelism from `drained` (the first of them), then
+/// `restart`.
+fn restart_arguments(
+    db: String,
+    drained: &SupervisorRegistration,
+    live: &[SupervisorRegistration],
+    restart: &[String],
+) -> Vec<String> {
+    let flagged =
+        |source: Option<SettingSource>| source.is_none_or(|source| source == SettingSource::Flag);
+    let mut arguments = vec!["--db".to_owned(), db, "up".to_owned()];
+    if live
+        .iter()
+        .any(|registration| registration.claude_disabled())
+        && !restart.iter().any(|argument| argument == "--no-claude")
+    {
+        arguments.push("--no-claude".into());
+    }
+    if flagged(drained.parallel_source) {
+        arguments.extend(["--parallel".to_owned(), drained.parallel.to_string()]);
+    }
+    // `--flag value` and `--flag=value` alike.
+    let restarts = |flag: &str| {
+        restart.iter().any(|argument| {
+            argument
+                .strip_prefix(flag)
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('='))
+        })
+    };
+    if live.iter().any(|registration| registration.auto_update) && !restarts("--auto-update") {
+        arguments.push("--auto-update".to_owned());
+    }
+    if let Some(max_waiting) = live
+        .iter()
+        .filter(|registration| flagged(registration.max_waiting_source))
+        .find_map(|registration| registration.max_waiting)
+        && !restarts("--max-waiting")
+    {
+        arguments.extend(["--max-waiting".to_owned(), max_waiting.to_string()]);
+    }
+    if let Some(runtime_planners) = live
+        .iter()
+        .filter(|registration| flagged(registration.runtime_planners_source))
+        .find_map(|registration| registration.runtime_planners)
+        && !restarts("--runtime-planners")
+    {
+        arguments.extend([
+            "--runtime-planners".to_owned(),
+            runtime_planners.to_string(),
+        ]);
+    }
+    if let Some(max_load) = live.iter().find_map(SupervisorRegistration::flag_max_load)
+        && !restarts("--max-load")
+    {
+        arguments.extend(["--max-load".to_owned(), max_load.to_string()]);
+    }
+    arguments.extend(restart.iter().cloned());
+    arguments
 }
 
 /// The registrations whose process lives and heartbeats: the ones a
@@ -961,6 +985,7 @@ mod tests {
             class_aging: None,
             class_aging_source: None,
             max_load: None,
+            max_load_source: None,
             providers: None,
             binary_version: Some("1.0.0".into()),
         }
@@ -987,6 +1012,77 @@ mod tests {
             .map(|registration| registration.token.as_str())
             .collect();
         assert_eq!(tokens, ["at-timeout"]);
+    }
+
+    /// The `up` after the drain carries `--max-load` over only from a
+    /// registration that took it from the flag, as `0` when the flag
+    /// disabled the hold, and leaves it to the restart's arguments when
+    /// they name it, as `--max-load N` or `--max-load=N`.
+    #[test]
+    fn the_restart_carries_over_only_a_flag_max_load() {
+        use crate::domain::slot_limits::SettingSource;
+        let loaded = |max_load, max_load_source| SupervisorRegistration {
+            parallel_source: Some(SettingSource::Default),
+            max_load,
+            max_load_source,
+            ..registration("live", 1, 0)
+        };
+        let up = |live: &[SupervisorRegistration], restart: &[&str]| {
+            let restart: Vec<String> = restart.iter().map(|&a| a.to_owned()).collect();
+            restart_arguments("/q.db".into(), &live[0], live, &restart)
+        };
+        let base = ["--db", "/q.db", "up"];
+        assert_eq!(
+            up(&[loaded(Some(6.0), Some(SettingSource::Flag))], &[]),
+            [&base[..], &["--max-load", "6"]].concat()
+        );
+        assert_eq!(
+            up(&[loaded(Some(2.5), Some(SettingSource::Flag))], &[]),
+            [&base[..], &["--max-load", "2.5"]].concat()
+        );
+        assert_eq!(
+            up(&[loaded(None, Some(SettingSource::Flag))], &[]),
+            [&base[..], &["--max-load", "0"]].concat()
+        );
+        assert_eq!(
+            up(&[loaded(Some(16.0), Some(SettingSource::Default))], &[]),
+            base
+        );
+        assert_eq!(up(&[loaded(Some(16.0), None)], &[]), base);
+        // The restart's value wins and is not doubled.
+        assert_eq!(
+            up(
+                &[loaded(Some(6.0), Some(SettingSource::Flag))],
+                &["--max-load", "9"]
+            ),
+            [&base[..], &["--max-load", "9"]].concat()
+        );
+        assert_eq!(
+            up(
+                &[loaded(Some(6.0), Some(SettingSource::Flag))],
+                &["--max-load=9"]
+            ),
+            [&base[..], &["--max-load=9"]].concat()
+        );
+        // A longer flag that starts with the same text is not the flag.
+        assert_eq!(
+            up(
+                &[loaded(Some(6.0), Some(SettingSource::Flag))],
+                &["--max-loader"]
+            ),
+            [&base[..], &["--max-load", "6", "--max-loader"]].concat()
+        );
+        // Any drained registration's flag value, not only the first's.
+        assert_eq!(
+            up(
+                &[
+                    loaded(Some(16.0), Some(SettingSource::Default)),
+                    loaded(Some(4.0), Some(SettingSource::Flag))
+                ],
+                &[]
+            ),
+            [&base[..], &["--max-load", "4"]].concat()
+        );
     }
 
     #[test]

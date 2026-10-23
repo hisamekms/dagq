@@ -176,10 +176,10 @@ runの所有・supervisorの登録・runのファイルの約束（[ADR-0007](..
 - `supervisor_token`は今そのrunを動かしているsupervisorで、claimしたsupervisorは`run_adopted`のeventに残る。
 - `integrate`は登録せずにleaseだけを持つので、`run_leases.token`から`supervisors`へ外部キーを張らない。
 - `supervisors`の行はそのプロセスの性質を持ち、行と寿命を共にする。
-  `binary_version`は登録するプロセス自身だけが書き、`mode`は`supervise`が受けた`--mode`を自分の登録に書く（`up`が書くのも同じ値。`--mode`の無い登録とhandoffで引き継いだ登録は[`up` / `down`](supervisor-lifecycle/up-down.md)のmodeの記録）。
+  supervisorは使う設定の値と出どころを自分の登録に書き、`install --allow-breaking`はdrainした登録のflag由来の値だけを起動し直す`up`に渡す（`install_breaking`のdoc comment）。
+  `binary_version`は登録するプロセス自身だけが書き、`mode`は`supervise`が受けた`--mode`を自分の登録に書く（[`up` / `down`](supervisor-lifecycle/up-down.md)のmodeの記録）。
 - 登録の行を消すのは`supervise`自身の終了と、`up`・`down`と生きているsupervisorの掃除（`prune_supervisor`）だけで、どれも同じトランザクションで`supervisor_stopped`を書く。
   生きているsupervisorはsweepの間隔ごとに、自分以外でheartbeatが`HEARTBEAT_TIMEOUT_SECS`を過ぎ、PIDが死んだか別プロセスに取られた登録だけを消す（判定は`supervisor_prune::left_behind`のdoc comment）。
-  heartbeatが新しい登録はPIDの判定に依らず消さない（drain中とhandoffの途中の登録を残すため）。
   heartbeatか停止の記録に失敗したときは消さず、staleとして次の掃除に任せる。
   `status`・`doctor`・`recover`は消さない。
 - `recover`だけがtokenなしで未完了のrunを止め、同じトランザクションでleaseとプロセスを再検査する。

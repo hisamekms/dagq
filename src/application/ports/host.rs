@@ -504,8 +504,15 @@ pub trait SupervisorRegistry: SupervisorReads {
         limits: crate::domain::slot_limits::SlotLimits,
     ) -> Result<()>;
     /// Record the supervisor `token`'s `--max-load`, `None` when its load
-    /// hold is off (ADR-t1479-1: `status` reads it for the claim spacing).
-    fn set_max_load(&self, token: &LeaseToken, max_load: Option<f64>) -> Result<()>;
+    /// hold is off (ADR-t1479-1: `status` reads it for the claim spacing),
+    /// and where it comes from (`install --allow-breaking` passes a flag's
+    /// value on), `None` when the caller does not say.
+    fn set_max_load(
+        &self,
+        token: &LeaseToken,
+        max_load: Option<f64>,
+        source: Option<crate::domain::slot_limits::SettingSource>,
+    ) -> Result<()>;
     /// Point the queue at `common_dir` whatever it was bound to, and return
     /// the previous binding (`rebind`, ADR-0020).
     fn rebind_repository(&mut self, common_dir: &str) -> Result<Option<String>>;

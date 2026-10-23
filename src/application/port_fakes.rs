@@ -224,7 +224,12 @@ impl SupervisorRegistry for SupervisorsAndEvents {
     ) -> Result<()> {
         unreachable!("set_slot_limits is not what the test reaches")
     }
-    fn set_max_load(&self, token: &LeaseToken, max_load: Option<f64>) -> Result<()> {
+    fn set_max_load(
+        &self,
+        token: &LeaseToken,
+        max_load: Option<f64>,
+        source: Option<crate::domain::slot_limits::SettingSource>,
+    ) -> Result<()> {
         unreachable!("set_max_load is not what the test reaches")
     }
     fn rebind_repository(&mut self, common_dir: &str) -> Result<Option<String>> {

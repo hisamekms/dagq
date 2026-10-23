@@ -24,10 +24,10 @@ use std::{fs, sync::Mutex, thread, time::Duration};
 /// A build with a breaking migration is refused without `--allow-breaking`
 /// and replaces nothing; with it, the supervisor is drained, the queue
 /// migrated, the binary replaced and `up` run with the drained supervisor's
-/// parallelism, automatic update and wait limit, without `--in-cmux` though
-/// the drained one was registered in that retired mode: it starts under
-/// launchd (ADR-t1433-4). A rollback past a
-/// breaking migration is refused, and so is one without a previous binary.
+/// parallelism, automatic update, wait limit and load threshold, without
+/// `--in-cmux` though the drained one was registered in that retired mode:
+/// it starts under launchd (ADR-t1433-4). A rollback past a breaking
+/// migration is refused, and so is one without a previous binary.
 #[test]
 fn install_drains_only_for_a_breaking_migration_when_allowed() {
     use dagq::application::install::Source;
@@ -154,6 +154,18 @@ fn install_drains_only_for_a_breaking_migration_when_allowed() {
             "{source:?}"
         );
     }
+
+    // `--max-load 0` (the hold off) recorded on the registration comes
+    // back as the same flag; the other cases are `install`'s unit test.
+    queue
+        .set_max_load(&LeaseToken::new("live"), None, Some(SettingSource::Flag))
+        .unwrap();
+    let binaries = FakeBinaries::new(&[(28, false)], false);
+    install_with(&fixture, &binaries, &processes, &down, &options).unwrap();
+    assert_eq!(
+        binaries.up.lock().unwrap()[0],
+        ["--db", db, "up", "--auto-update", "--max-load", "0"]
+    );
 
     let binaries = FakeBinaries::new(&[], false);
     let dir = tempfile::tempdir().unwrap();

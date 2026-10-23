@@ -1723,8 +1723,25 @@ impl SupervisorRegistry for SupervisorQueue {
     ) -> Result<()> {
         self.remote("set_slot_limits", vec![to_value(token)?, to_value(limits)?])
     }
-    fn set_max_load(&self, token: &LeaseToken, max_load: Option<f64>) -> Result<()> {
-        self.remote("set_max_load", vec![to_value(token)?, to_value(max_load)?])
+    fn set_max_load(
+        &self,
+        token: &LeaseToken,
+        max_load: Option<f64>,
+        source: Option<crate::domain::slot_limits::SettingSource>,
+    ) -> Result<()> {
+        let value = vec![to_value(token)?, to_value(max_load)?];
+        let Some(source) = source else {
+            return self.remote("set_max_load", value);
+        };
+        let mut sourced = value.clone();
+        sourced.push(to_value(source)?);
+        // The service of the binary before a handoff, until this
+        // supervisor replaces it, refuses a source as arguments it does not
+        // read: the value goes alone. Any other failure is the call's own.
+        match self.remote("set_max_load", sourced) {
+            Err(error) if super::Refused::bad_request(&error) => self.remote("set_max_load", value),
+            result => result,
+        }
     }
     fn rebind_repository(&mut self, common_dir: &str) -> Result<Option<String>> {
         self.remote("rebind_repository", vec![to_value(common_dir)?])

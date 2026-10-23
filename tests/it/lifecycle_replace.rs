@@ -1101,6 +1101,7 @@ fn gone_registration() -> dagq::domain::SupervisorRegistration {
         class_aging: None,
         class_aging_source: None,
         max_load: None,
+        max_load_source: None,
         providers: None,
     }
 }
