@@ -11,7 +11,7 @@
 //! unstable test is not the fault of the main the run was rebased onto.
 use crate::domain::EventKind;
 use crate::domain::recheck;
-use crate::domain::run::{ReviseRequested, restore_payload};
+use crate::domain::run::{ConflictPrecheck, ReviseRequested, restore_payload};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::Serialize;
@@ -28,8 +28,11 @@ pub const BREAKING_CODES: [&str; 3] = ["rebase_conflict", "verification_failed",
 /// reason (as the supervisor's `resume_reason` picks them). A landing
 /// recheck's failure parks the run only when it resumed it
 /// ([`recheck::parks`]): a held one is parked by a later failure when the
-/// hold ends, and a skipped one parks nothing.
-const PARKING: [EventKind; 10] = [
+/// hold ends, and a skipped one parks nothing. A conflict precheck parks
+/// the run only when it sent the session a conflict request (`requested:
+/// true`, as [`ResumeCount`](crate::domain::resume::ResumeCount) counts
+/// them); one that landed or asked instead parks nothing.
+const PARKING: [EventKind; 12] = [
     EventKind::IntegrationDeferred,
     EventKind::IntegrationError,
     EventKind::EvidenceMissing,
@@ -40,6 +43,8 @@ const PARKING: [EventKind; 10] = [
     EventKind::SessionGoneParked,
     EventKind::ReplanParked,
     EventKind::LandingRecheckFailed,
+    EventKind::ConflictPrecheck,
+    EventKind::RunE2eFailed,
 ];
 
 /// The reason of a deferral or resume whose event carries no code.
@@ -48,6 +53,13 @@ pub const UNKNOWN: &str = "unknown";
 /// The reason of a resume after a landing recheck's failure that carries
 /// no code.
 pub const LANDING_RECHECK: &str = "landing_recheck";
+
+/// The reason of a resume after a conflict precheck's request that
+/// carries no code.
+pub const CONFLICT: &str = "conflict";
+
+/// The reason of a resume after a failed e2e that carries no code.
+pub const E2E_FAILED: &str = "e2e_failed";
 
 /// A landing on main after which this run's landing was deferred. The
 /// landings are looked up among every event, so a landing outside the
@@ -218,12 +230,21 @@ pub fn retries(events: &[RunEvent]) -> HashMap<RunId, Retries> {
         let code = || event_code(event).map_or(UNKNOWN, |code| code.as_str());
         let kind = &event.kind;
         if kind.is_in(&PARKING) {
-            if event.kind != EventKind::LandingRecheckFailed {
-                walk.parked = Some(code().to_owned());
-            } else if recheck::parks(event) {
+            let fallback = match kind.known() {
+                Some(EventKind::LandingRecheckFailed) => {
+                    recheck::parks(event).then_some(LANDING_RECHECK)
+                }
+                Some(EventKind::ConflictPrecheck) => {
+                    (restore_payload::<ConflictPrecheck>(&event.payload).requested == Some(true))
+                        .then_some(CONFLICT)
+                }
+                Some(EventKind::RunE2eFailed) => Some(E2E_FAILED),
+                _ => Some(UNKNOWN),
+            };
+            if let Some(fallback) = fallback {
                 walk.parked = Some(
                     event_code(event)
-                        .map_or(LANDING_RECHECK, |code| code.as_str())
+                        .map_or(fallback, |code| code.as_str())
                         .to_owned(),
                 );
             }
@@ -597,6 +618,92 @@ mod tests {
         assert_eq!(reason(A), "rebase_conflict");
         assert_eq!(reason(B), LANDING_RECHECK);
         assert_eq!(reason(C), "verification_failed");
+    }
+
+    #[test]
+    fn a_resume_after_a_conflict_precheck_request_is_counted_under_its_code() {
+        let events = [
+            event(
+                1,
+                A,
+                1,
+                "conflict_precheck",
+                json!({"code": "rebase_conflict", "attempt": 1, "requested": true}),
+                10,
+            ),
+            event(2, A, 1, "resume_started", json!({"counted": false}), 20),
+            event(3, B, 2, "conflict_precheck", json!({"requested": true}), 10),
+            event(4, B, 2, "resume_started", json!({}), 20),
+            // A precheck that sent no request (it landed or asked) parked
+            // nothing: the earlier park is the reason.
+            event(
+                5,
+                C,
+                3,
+                "landing_decided",
+                json!({"code": "sent_back", "answer": "send_back"}),
+                10,
+            ),
+            event(
+                6,
+                C,
+                3,
+                "conflict_precheck",
+                json!({"code": "rebase_conflict", "requested": false, "exhausted": true}),
+                20,
+            ),
+            event(7, C, 3, "resume_started", json!({}), 30),
+        ];
+        let all = retries(&events);
+        let reason = |run: &str| {
+            all[&RunId::new(run).unwrap()].resume_attempts[0]
+                .reason
+                .clone()
+        };
+        assert_eq!(reason(A), "rebase_conflict");
+        assert_eq!(reason(B), CONFLICT);
+        assert_eq!(reason(C), "sent_back");
+    }
+
+    #[test]
+    fn a_resume_after_a_failed_e2e_is_not_counted_under_the_earlier_send_back() {
+        let sent_back = |id, run, task, secs| {
+            event(
+                id,
+                run,
+                task,
+                "landing_decided",
+                json!({"code": "sent_back", "answer": "send_back"}),
+                secs,
+            )
+        };
+        let events = [
+            sent_back(1, A, 1, 10),
+            event(
+                2,
+                A,
+                1,
+                "run_e2e_failed",
+                json!({"code": "e2e_failed", "status": "needs_session"}),
+                20,
+            ),
+            event(3, A, 1, "resume_started", json!({"attempt": 1}), 30),
+            sent_back(4, B, 2, 10),
+            event(5, B, 2, "run_e2e_failed", json!({}), 20),
+            event(6, B, 2, "resume_started", json!({}), 30),
+            // A send-back alone still gives its own reason.
+            sent_back(7, C, 3, 10),
+            event(8, C, 3, "resume_started", json!({}), 20),
+        ];
+        let all = retries(&events);
+        let reason = |run: &str| {
+            all[&RunId::new(run).unwrap()].resume_attempts[0]
+                .reason
+                .clone()
+        };
+        assert_eq!(reason(A), "e2e_failed");
+        assert_eq!(reason(B), E2E_FAILED);
+        assert_eq!(reason(C), "sent_back");
     }
 
     #[test]
