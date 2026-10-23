@@ -2355,3 +2355,10 @@ task = 3177
 name = "runtime_codex_work::a_codex_workers_commands_are_its_spans_work_and_worktime_lines"
 reason = "B 境界（守る境界）: a headless Codex worker's wrapper process stamps its commands into the turn's commands file, and the supervisor's span close writes them as session_closed work and worktime.jsonl that stats --full and timeline read; the classification and the counts are unit tests of domain::worktime and domain::command_rules"
 task = 1674
+
+# 3.7s to 5.2s medians over three stresses of 20 at the host's load (3.4s to
+# 5.8s at its base in task 3230), task 3230
+[[test]]
+name = "runtime_sccache::the_supervisor_restarts_a_sandboxed_server_and_carries_a_failed_replacement_forward"
+reason = "B 境界（守る境界）: the supervisor's wiring to the sccache server process across supervisors: a sandboxed server's failed restart recorded in SQLite and carried into a new supervisor's start, and its attention cleared once a later supervisor starts it; the retry's timing is the unit test of host_ops::sccache"
+task = 3230

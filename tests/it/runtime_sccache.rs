@@ -80,6 +80,148 @@ fn process_tools(dir: &Path) -> (PathBuf, PathBuf) {
     (lsof, ps)
 }
 
+/// The loopback `port` held without a listener: a socket bound to it and
+/// connected to a listener of its own. A connect to the port is refused at
+/// once, as to a stopped server (macOS drops the connect to a socket that
+/// is only bound, so each look would wait out its timeout), while no
+/// connect's ephemeral source port (a connect to the port itself, which
+/// would then reach itself) takes it, nor on Linux another bind (macOS lets
+/// a bind with SO_REUSEADDR share a port with a connected socket).
+struct PortHold {
+    socket: std::os::fd::OwnedFd,
+    _peer: std::net::TcpStream,
+    _end: TcpListener,
+}
+
+impl PortHold {
+    fn bind(port: u16) -> Self {
+        use std::os::fd::AsRawFd;
+        let end = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let socket = port_socket(port);
+        let to = sockaddr(end.local_addr().unwrap().port());
+        // SAFETY: the address is a plain `sockaddr_in` of its own size.
+        let connected = unsafe {
+            libc::connect(
+                socket.as_raw_fd(),
+                (&raw const to).cast(),
+                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(connected, 0, "connect: {}", std::io::Error::last_os_error());
+        let (peer, _) = end.accept().unwrap();
+        Self {
+            socket,
+            _peer: peer,
+            _end: end,
+        }
+    }
+
+    /// The held port listening, as the server started on it: the listener
+    /// binds beside the hold before the hold lets go, so the port is never
+    /// free.
+    fn listen(self) -> TcpListener {
+        use std::os::fd::AsRawFd;
+        let listener = port_listener(self.socket_port());
+        // A reset rather than a close: no TIME_WAIT is left on the port.
+        let linger = libc::linger {
+            l_onoff: 1,
+            l_linger: 0,
+        };
+        let set = unsafe {
+            libc::setsockopt(
+                self.socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_LINGER,
+                (&raw const linger).cast(),
+                std::mem::size_of_val(&linger) as libc::socklen_t,
+            )
+        };
+        assert_eq!(set, 0, "SO_LINGER: {}", std::io::Error::last_os_error());
+        listener
+    }
+
+    fn socket_port(&self) -> u16 {
+        use std::os::fd::AsRawFd;
+        let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
+        let named = unsafe {
+            libc::getsockname(
+                self.socket.as_raw_fd(),
+                (&raw mut addr).cast(),
+                &raw mut len,
+            )
+        };
+        assert_eq!(named, 0, "getsockname: {}", std::io::Error::last_os_error());
+        u16::from_be(addr.sin_port)
+    }
+}
+
+/// A close-on-exec TCP socket bound to the loopback `port` with
+/// SO_REUSEPORT, which only sockets that set it too share: a hold and the
+/// listeners before and after it, never another test's bind (std's
+/// listener sets SO_REUSEADDR alone).
+fn port_socket(port: u16) -> std::os::fd::OwnedFd {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    // SAFETY: a new socket, owned at once; the options and the address are
+    // plain values of their own sizes.
+    let socket = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
+    assert!(socket >= 0, "socket: {}", std::io::Error::last_os_error());
+    let socket = unsafe { std::os::fd::OwnedFd::from_raw_fd(socket) };
+    // As std's sockets: no child the supervisor starts keeps the port.
+    let cloexec = unsafe { libc::fcntl(socket.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+    assert_eq!(
+        cloexec,
+        0,
+        "FD_CLOEXEC: {}",
+        std::io::Error::last_os_error()
+    );
+    let on: libc::c_int = 1;
+    let set = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_REUSEPORT,
+            (&raw const on).cast(),
+            std::mem::size_of_val(&on) as libc::socklen_t,
+        )
+    };
+    assert_eq!(set, 0, "SO_REUSEPORT: {}", std::io::Error::last_os_error());
+    let addr = sockaddr(port);
+    let bound = unsafe {
+        libc::bind(
+            socket.as_raw_fd(),
+            (&raw const addr).cast(),
+            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+        )
+    };
+    assert_eq!(bound, 0, "bind {port}: {}", std::io::Error::last_os_error());
+    socket
+}
+
+/// A listener on the loopback `port` (0 for one the system picks) that a
+/// [`PortHold`] binds beside: the hold is made before the listener closes.
+fn port_listener(port: u16) -> TcpListener {
+    use std::os::fd::AsRawFd;
+    let listener = port_socket(port);
+    // SAFETY: the socket is bound and owned.
+    let listened = unsafe { libc::listen(listener.as_raw_fd(), 128) };
+    assert_eq!(listened, 0, "listen: {}", std::io::Error::last_os_error());
+    TcpListener::from(listener)
+}
+
+/// The loopback `port` as a `sockaddr_in`.
+fn sockaddr(port: u16) -> libc::sockaddr_in {
+    let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+    #[cfg(target_os = "macos")]
+    {
+        addr.sin_len = std::mem::size_of::<libc::sockaddr_in>() as u8;
+    }
+    addr.sin_family = libc::AF_INET as libc::sa_family_t;
+    addr.sin_port = port.to_be();
+    addr.sin_addr.s_addr = u32::from(Ipv4Addr::LOCALHOST).to_be();
+    addr
+}
+
 /// A loopback port nothing listens on now.
 fn free_port() -> u16 {
     TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
@@ -776,7 +918,10 @@ fn the_supervisor_restarts_a_sandboxed_server_and_carries_a_failed_replacement_f
     let bin = program.parent().unwrap();
     common::template::script(
         &program,
-        "#!/bin/sh\nprintf '%s idle=%s path=%s\\n' \"$*\" \"${SCCACHE_IDLE_TIMEOUT-unset}\" \"$PATH\" >> \"${0%/*}/sccache-calls.log\"\ncase \"$1\" in\n--show-stats) echo '{\"stats\":{\"compile_requests\":0,\"compile_fails\":0,\"compilations\":0}}';;\n--stop-server) touch \"${0%/*}/stop-request\";;\n--start-server) [ -f \"${0%/*}/fail-start\" ] && { echo 'replacement refused' >&2; exit 2; }; touch \"${0%/*}/start-request\";;\nesac\n",
+        format!(
+            "#!/bin/sh\nprintf '%s idle=%s path=%s\\n' \"$*\" \"${{SCCACHE_IDLE_TIMEOUT-unset}}\" \"$PATH\" >> \"${{0%/*}}/sccache-calls.log\"\ncase \"$1\" in\n--show-stats) echo '{{\"stats\":{{\"compile_requests\":0,\"compile_fails\":0,\"compilations\":0}}}}';;\n--stop-server) touch \"${{0%/*}}/stop-request\"; {};;\n--start-server) [ -f \"${{0%/*}}/fail-start\" ] && {{ echo 'replacement refused' >&2; exit 2; }}; touch \"${{0%/*}}/start-request\";;\nesac\n",
+            common::await_file("\"${0%/*}/stopped\""),
+        ),
     );
     let lsof = bin.join("stub-lsof");
     let ps = bin.join("stub-ps");
@@ -790,7 +935,7 @@ fn the_supervisor_restarts_a_sandboxed_server_and_carries_a_failed_replacement_f
     );
     fs::write(bin.join("old-server"), "").unwrap();
     fs::write(bin.join("fail-start"), "").unwrap();
-    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let listener = port_listener(0);
     let port = listener.local_addr().unwrap().port();
     configure(&repo, &program, port, &path);
     backend.sccache = Some(SccacheTarget {
@@ -807,14 +952,24 @@ fn the_supervisor_restarts_a_sandboxed_server_and_carries_a_failed_replacement_f
     let controller = thread::spawn(move || {
         let deadline = Instant::now() + common::STEP_LIMIT;
         let mut listener = Some(listener);
+        let mut hold = None;
         while !ended.load(std::sync::atomic::Ordering::SeqCst) && Instant::now() < deadline {
             if server_dir.join("stop-request").exists() {
+                // The stopped server's port stays this test's until the
+                // replacement listens: a test run beside it that binds or
+                // connects from an ephemeral port would otherwise listen
+                // there and stand for the server the next supervisor looks
+                // at. The hold is made before the listener closes, the
+                // stub's stop returns once it is (`stopped`), and the
+                // replacement listens beside it before it lets go.
+                hold = Some(PortHold::bind(port));
                 listener.take();
-                fs::remove_file(server_dir.join("stop-request")).unwrap();
                 fs::remove_file(server_dir.join("old-server")).unwrap();
+                fs::remove_file(server_dir.join("stop-request")).unwrap();
+                fs::write(server_dir.join("stopped"), "").unwrap();
             }
             if server_dir.join("start-request").exists() && listener.is_none() {
-                listener = Some(TcpListener::bind((Ipv4Addr::LOCALHOST, port)).unwrap());
+                listener = Some(hold.take().expect("the stopped server's port").listen());
                 fs::write(server_dir.join("new-server"), "").unwrap();
             }
             thread::sleep(Duration::from_millis(5));
@@ -900,13 +1055,20 @@ fn the_supervisor_restarts_a_sandboxed_server_and_carries_a_failed_replacement_f
         ]
     );
     assert!(queue_events(&db, "sccache_server_started").is_empty());
+    // The stopped server's port is held, and nothing listens there.
+    assert!(!dagq::infrastructure::sccache::listening(port));
     // A new supervisor keeps the persisted fault while the server is absent.
     // A second failed start takes ensure_sccache's missing-server retry branch.
     assert_eq!(supervise()["errors"], json!([]));
     assert_eq!(queue_events(&db, "sccache_server_restart_failed").len(), 1);
+    let start_failed = queue_events(&db, "sccache_server_start_failed");
     assert_eq!(
-        queue_events(&db, "sccache_server_start_failed")[0]["reason"],
-        "restart"
+        start_failed.first().map(|event| &event["reason"]),
+        Some(&json!("restart")),
+        "the second supervisor did not try the start: listening now {}, calls {:?}, detected {:?}",
+        dagq::infrastructure::sccache::listening(port),
+        control_calls(),
+        queue_events(&db, "sccache_server_detected"),
     );
     fs::remove_file(bin.join("fail-start")).unwrap();
     assert_eq!(supervise()["errors"], json!([]));
