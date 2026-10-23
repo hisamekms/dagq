@@ -246,7 +246,9 @@ pub fn worker_run_args(container: &WorkerContainer<'_>) -> Result<Vec<String>, S
         let volume = container.queue.worker_cache_volume_of(&dir);
         args.extend(["--volume".to_owned(), format!("{volume}:{dir}")]);
     }
-    args.extend(["--workdir".to_owned(), clone]);
+    // The turn's prompt is podman's standard input, which only
+    // `--interactive` hands the container's launcher and so the agent.
+    args.extend(["--interactive".to_owned(), "--workdir".to_owned(), clone]);
     finish_args(&mut args, container.env, container.image, container.command)?;
     Ok(args)
 }
@@ -643,6 +645,8 @@ mod tests {
             ["/q/clones/r1:/q/clones/r1", "/q/runs/r1:/q/runs/r1"]
         );
         assert!(values(&args, "--env").is_empty(), "{text}");
+        // No agent reads a facts-only turn's standard input.
+        assert!(!text.contains("--interactive"), "{text}");
         assert!(
             !text.contains("broker") && !text.contains("socket"),
             "{text}"
@@ -694,7 +698,7 @@ mod tests {
             "--cpus 2",
             "--pids-limit 2048",
             "--network none",
-            "--workdir /q/clones/r1",
+            "--interactive --workdir /q/clones/r1",
             "--env DAGQ_RUN_ID=r1",
             "localhost/dagq-q-image:t dagq relay turn --run-dir /q/runs/r1 --clone /q/clones/r1 \
              --base abc --branch dagq/r1 -- claude",

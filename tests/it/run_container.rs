@@ -257,7 +257,13 @@ fn a_worker_s_turn_runs_in_its_hardened_container_and_leaves_its_bundle_and_stat
     assert!(!text.contains(token_value.trim()), "{text}");
     assert!(!run_dir.join(TOKEN_FILE).exists());
 
-    // (2) What the agent was given inside.
+    // (2) What the agent was given inside: the task's prompt on its
+    // standard input through podman's, never in podman's arguments.
+    assert_eq!(
+        fs::read_to_string(run_dir.join("stub-first-prompt")).unwrap(),
+        "do the task"
+    );
+    assert!(!text.contains("do the task"), "{text}");
     let seen: HashMap<String, String> = fs::read_to_string(run_dir.join("stub-env"))
         .unwrap()
         .lines()

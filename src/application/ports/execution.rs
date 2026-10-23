@@ -358,8 +358,8 @@ pub trait AgentProvider {
     /// 6): only a person's planner, opened before `dagq plan` was abolished
     /// (ADR-t1394-1), runs one; a planner of the runtime's runs headless
     /// turns ([`AgentProvider::turn_command`], ADR-t1433-2 decision 3). An
-    /// interactive agent in `planner.cwd` with `planner.prompt` as its
-    /// first message, whose `Stop` hook writes
+    /// interactive agent in `planner.cwd` with `planner.prompt` (written to
+    /// `prompt.txt` of `planner.dir`) as its first message, whose `Stop` hook writes
     /// [`PlannerCommand::idle_marker`] the way a worker's does, and that
     /// loads `planner.plugin_dir`. A provider without one refuses.
     fn planner_command(&self, planner: &PlannerCommand<'_>) -> Result<CommandSpec> {
@@ -488,11 +488,13 @@ pub trait AgentProvider {
     /// input, starting a new session (named as `session` says, for a
     /// provider that takes the name) or going on with the session of that
     /// id, under the run's settings. Its stdout is the turn's output for
-    /// [`AgentProvider::turn_reader`]. The caller closes stdin, says where
-    /// the output goes and starts it in a process group of its own. A
-    /// provider without one refuses. Unlike a headless job's, whose prompt
-    /// goes on stdin ([`CommandSpec::stdin`]), a turn's prompt is a
-    /// positional argument.
+    /// [`AgentProvider::turn_reader`]. The caller gives it no other stdin
+    /// than the prompt the command holds, says where the output goes and starts it in a process group of its own. A
+    /// provider without one refuses. A provider whose agent reads the
+    /// prompt on stdin gives it there ([`CommandSpec::stdin`]) rather than
+    /// as an argument, which a `pgrep -f` pattern of a check it names would
+    /// match (Claude's); one that takes it as a positional argument
+    /// (Codex's) leaves stdin unset.
     ///
     /// `target` says where the turn runs: a run's worktree and directory,
     /// or a headless planner's checkout and directory (ADR-t1394-2

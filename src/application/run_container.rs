@@ -397,6 +397,11 @@ impl ActorExecutor for PodmanActorExecutor<'_> {
         // Never in the clone: the control side starts no program there
         // (ADR-t2179-1 decision 1).
         podman.current_dir(run_dir).new_session();
+        // The agent's prompt is its standard input, never an argument: the
+        // container's launcher hands podman's on to the agent.
+        if let Some(prompt) = agent.get_stdin() {
+            podman.stdin(prompt);
+        }
         // A podman that cannot be started is this executor's failure, not
         // the provider's (whose agent never started on the host).
         let child = self

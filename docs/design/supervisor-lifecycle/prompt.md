@@ -77,6 +77,9 @@ runtimeのplanner ──> 節ごとの上限（prompt_fit::Fit）→ 記録 → 
 - promptと固定の文字列はdagqのrepositoryの規則も特定のツールの名前も名指さない。
 - workerに送る文は全て非対話のsessionの文で、1 turnが1回の呼び出し、`/exit`も画面への打ち込みも無い（[ADR-t1433-2](../../adr/2026-10-03-t1433-2-abolish-the-interactive-route.md)）。
 - headlessのjobのpromptは引数で渡さず、どれも全体の上限を持つ。
+- Claudeのworkerとplannerのturnのprompt（`prompt.txt`も次のturnの文も）もargvに載せず、stdinで渡す（仕組みは[Agent provider lifecycle](../provider-lifecycle.md#workerのproviderと経路)）。
+  promptは検証コマンドの名前やtaskのtitleを含むので、argvに載せると、workerが自分の検証を止めるつもりで打った`pkill -f`・`kill $(pgrep -f ...)`のパターンが他のrunのsessionのcommand lineにも一致し、それを止める。
+  `permissions.deny`が拒めるのは`pkill`・`killall`で始まるコマンドだけなので、argvから本文を外して当たらなくする。
 
 ## workerのprompt
 
@@ -217,7 +220,8 @@ workerの初期promptと次のturnの文も[ADR-t2072-1](../../adr/2026-10-08-t2
 
 - 渡し方（決定1）: 大きさに関係なくstdinで渡し、引数で渡さない。
   仕組み（`CommandSpec::stdin`）と起動の失敗の扱いは[Agent provider lifecycle](../provider-lifecycle.md#headless-jobのinterface)が持つ。
-- 例外: runtimeのplannerは非対話のturnのコマンドで動き、jobのstdinの経路を使わない（[非対話のworker](headless-worker.md)）。
+- 例外: runtimeのplannerは非対話のturnのコマンドで動き、jobの経路を使わない（[非対話のworker](headless-worker.md)）。
+  Claudeのturnのコマンドもpromptをstdinで渡す。
 - 載せるもの（決定2）: 判断の材料だけ。
   一覧と全文の大量のデータはIDと要約にし、中身は読む経路で必要なものだけ読ませる。
 - 取りに行く経路（決定3）: jobの権限の意図（`JobAccess`）と許す道具で実際に読める経路だけを書く。

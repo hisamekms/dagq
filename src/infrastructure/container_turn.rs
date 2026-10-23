@@ -97,7 +97,8 @@ pub fn run_turn(options: &TurnOptions, env: impl Fn(&str) -> Option<String>) -> 
         .args(args)
         .current_dir(&options.clone)
         .envs(turn_env(&run, token))
-        .stdin(Stdio::null())
+        // The turn's prompt, which podman's `--interactive` passes on.
+        .stdin(Stdio::inherit())
         .status()
         .with_context(|| format!("run {program}"));
     stop.store(true, Ordering::SeqCst);

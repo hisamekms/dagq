@@ -3951,7 +3951,9 @@ impl AgentProvider for ClaudeCode {
 
     /// `claude` in the checkout with the planner directory's settings (its
     /// `Stop` hook writes the idle marker there), its debug file, the
-    /// directory added, and the plugin directory when one was given. Only a
+    /// directory added, and the plugin directory when one was given; its
+    /// argument says to read the directory's `prompt.txt`
+    /// ([`prompt_file_instruction`]), never the prompt itself. Only a
     /// person's planner runs it, whose settings keep the prompt
     /// suggestions; a planner of the runtime's runs headless turns
     /// ([`Self::turn_command`], ADR-t1433-2 decision 3).
@@ -3974,7 +3976,7 @@ impl AgentProvider for ClaudeCode {
         if let Some(dir) = planner.plugin_dir {
             command.arg("--plugin-dir").arg(dir);
         }
-        command.arg("--").arg(planner.prompt);
+        command.arg("--").arg(prompt_file_instruction(planner.dir)?);
         Ok(command)
     }
 
@@ -4184,8 +4186,11 @@ impl AgentProvider for ClaudeCode {
     /// `claude-headless-settings.json` of the target's directory (its
     /// actor's `permissions.deny`, no hook: the wrapper writes the idle
     /// marker when the turn's process ends), its debug file, the directory
-    /// added and the plugin directory a planner loads. It leads a session
-    /// of its own, so that stopping it stops what it runs.
+    /// added and the plugin directory a planner loads. The prompt is its
+    /// standard input, never an argument (`-p` with no prompt argument
+    /// reads stdin), so no command line holds the checks the prompt names
+    /// for a `pgrep -f` / `ps` pattern to match. It leads a session of its
+    /// own, so that stopping it stops what it runs.
     fn turn_command(
         &self,
         target: &TurnTarget<'_>,
@@ -4219,7 +4224,7 @@ impl AgentProvider for ClaudeCode {
         if let Some(dir) = target.plugin_dir {
             command.arg("--plugin-dir").arg(dir);
         }
-        command.arg("--").arg(prompt).new_session();
+        command.stdin(prompt).new_session();
         Ok(command)
     }
     /// Claude's failed tests are read from its transcript, not its turn's
@@ -4605,11 +4610,26 @@ pub fn stop_hook_settings(idle_marker: &Path, deny: &[String]) -> Result<String>
     }))?)
 }
 
+/// What the argv of a planner session in a terminal says in place of its
+/// prompt: read `prompt.txt` of `dir` (absolute), which the planner's
+/// directory holds before the session starts and `--add-dir` lets it read.
+/// No prompt text is in a command line, where a `pgrep -f` / `ps` pattern
+/// of a check's name (`cargo test`) would match the session.
+fn prompt_file_instruction(dir: &Path) -> Result<String> {
+    let path = std::path::absolute(dir.join(crate::application::planner::PLANNER_PROMPT_FILE))?;
+    let path = path.to_str().context("the prompt's path is not UTF-8")?;
+    Ok(format!(
+        "Read the file at {path} and follow its instructions."
+    ))
+}
+
 /// The Bash permission rules a session's settings deny: commands that
-/// signal processes chosen by name or pattern. Every run session's command
-/// line holds its prompt, which names the checks (`cargo test`, `cargo
-/// llvm-cov`), so a worker's `pkill -f llvm-cov` also ended the other
-/// runs' sessions (exit 143) and `integrate`'s checks (task 359). Claude
+/// signal processes chosen by name or pattern. A session whose command
+/// line held its prompt, which names the checks (`cargo test`, `cargo
+/// llvm-cov`), was matched by a worker's `pkill -f llvm-cov`, which ended
+/// it (exit 143) and `integrate`'s checks (task 359); a worker's or a
+/// planner's prompt is no argument of Claude's now, and the rule stays for
+/// the other processes. Claude
 /// Code applies a deny rule to each command of a `;` / `&&` chain.
 /// Only a command that starts with `pkill` / `killall` is refused:
 /// `/usr/bin/pkill`, `sh -c 'pkill ...'`, `kill $(pgrep ...)` and
@@ -6630,8 +6650,7 @@ mod tests {
     }
 
     /// A worker's turn, new or resumed, takes its model and effort
-    /// (ADR-0079 decision 3) among the options, before the `--` that ends
-    /// them and the prompt.
+    /// (ADR-0079 decision 3) among the options, its prompt on stdin.
     #[test]
     fn a_turn_takes_its_model_and_effort_before_its_prompt() {
         let claude = ClaudeCode {
@@ -6658,17 +6677,96 @@ mod tests {
                 .map(|arg| arg.to_string_lossy().into_owned())
                 .collect();
             assert_eq!(
-                args[args.len() - 6..],
-                [
-                    "--model",
-                    "claude-sonnet-5",
-                    "--effort",
-                    "medium",
-                    "--",
-                    "go"
-                ]
+                args[args.len() - 4..],
+                ["--model", "claude-sonnet-5", "--effort", "medium"]
             );
+            assert_eq!(command.get_stdin(), Some("go"));
         }
+    }
+
+    /// No worker's or planner's prompt is in Claude's argv, where a
+    /// `pgrep -f` / `ps` pattern of a check's name would match the
+    /// session: a turn (a worker's or a runtime planner's, new or resumed)
+    /// reads it on stdin, and a planner session is told to read the
+    /// absolute path of its directory's `prompt.txt`.
+    #[test]
+    fn no_worker_or_planner_prompt_is_in_claudes_argv() {
+        let claude = ClaudeCode {
+            executable: "/bin/claude".into(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let prompt =
+            "Task title: private task\nVerification commands: cargo llvm-cov nextest, cargo test";
+        let no_prompt = |command: &CommandSpec| {
+            let args: Vec<String> = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            for text in ["private task", "llvm-cov", "cargo test", "Verification"] {
+                assert!(
+                    !args.iter().any(|arg| arg.contains(text)),
+                    "{text}: {args:?}"
+                );
+            }
+            args
+        };
+        let log = dir.path().join("turn.log");
+        for role in [ActorRole::Worker, ActorRole::Planner] {
+            for session in [
+                crate::domain::turn::TurnSession::New("s"),
+                crate::domain::turn::TurnSession::Resume("s"),
+            ] {
+                let command = claude
+                    .turn_command(
+                        &TurnTarget {
+                            role,
+                            dir: dir.path(),
+                            cwd: dir.path(),
+                            debug_log: Some(&log),
+                            plugin_dir: None,
+                        },
+                        prompt,
+                        session,
+                    )
+                    .unwrap();
+                let args = no_prompt(&command);
+                assert!(!args.contains(&"--".to_owned()), "{args:?}");
+                assert_eq!(command.get_stdin(), Some(prompt));
+            }
+        }
+        let planner_dir = dir.path().join("planner with spaces");
+        fs::create_dir_all(&planner_dir).unwrap();
+        let command = claude
+            .planner_command(&PlannerCommand {
+                dir: &planner_dir,
+                cwd: dir.path(),
+                prompt,
+                plugin_dir: None,
+            })
+            .unwrap();
+        let args = no_prompt(&command);
+        assert_eq!(command.get_stdin(), None);
+        assert_eq!(
+            args[args.len() - 2..],
+            [
+                "--".to_owned(),
+                format!(
+                    "Read the file at {} and follow its instructions.",
+                    planner_dir.join("prompt.txt").display()
+                )
+            ]
+        );
+        // A relative directory is named by its absolute path.
+        assert_eq!(
+            prompt_file_instruction(Path::new("relative")).unwrap(),
+            format!(
+                "Read the file at {} and follow its instructions.",
+                std::env::current_dir()
+                    .unwrap()
+                    .join("relative/prompt.txt")
+                    .display()
+            )
+        );
     }
 
     #[test]

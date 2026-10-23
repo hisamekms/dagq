@@ -50,7 +50,7 @@ run)
   while [ $# -gt 0 ]; do
     case "$1" in
     --rm) keep=; shift ;;
-    --read-only) shift ;;
+    --read-only|--interactive) shift ;;
     --env) export "$2"; shift 2 ;;
     --workdir) workdir=$2; shift 2 ;;
     --name) name=$2; shift 2 ;;
@@ -93,11 +93,14 @@ while [ $# -gt 0 ]; do
     --resume) MODE=resume; SESSION=$2; shift 2 ;;
     --permission-mode) PERMISSION=$2; shift 2 ;;
     --add-dir) RUN_DIR=$2; shift 2 ;;
-    --) shift; break ;;
+    --) printf 'stub: a turn prompt in argv\n' >&2; exit 64 ;;
     *) shift ;;
   esac
 done
 printf '{"type":"system","subtype":"init","session_id":"%s","model":"stub","permissionMode":"%s"}\n' "$SESSION" "$PERMISSION"
+# The turn's prompt comes on stdin through podman's `--interactive`; the
+# first turn's is kept.
+[ -f "$RUN_DIR/stub-first-prompt" ] || cat > "$RUN_DIR/stub-first-prompt"
 {
   echo "token=$ANTHROPIC_AUTH_TOKEN"
   echo "base=$ANTHROPIC_BASE_URL"

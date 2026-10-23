@@ -101,7 +101,7 @@ fn stub_script(path: &Path, script: String, db: &Path, test_pid: u32) {
 }
 
 /// A stub `claude` for headless turns (ADR-t813-1), in `dir`: it takes
-/// `claude -p`'s arguments and first prints `system/init` in stream-json
+/// `claude -p`'s arguments, its prompt on stdin, and first prints `system/init` in stream-json
 /// with the permission mode it was given (or `$PERMISSION_SAID`), before
 /// it forks, so the shell's start and the log writes below fall on either
 /// side of an output line instead of in one silence of a short
@@ -138,10 +138,13 @@ while [ $# -gt 0 ]; do
     --add-dir) RUN_DIR=$2; shift 2 ;;
     --permission-mode) PERMISSION=$2; shift 2 ;;
     --output-format|--debug-file|--settings|--model|--effort) shift 2 ;;
-    --) PROMPT=$2; shift 2 ;;
+    --) printf 'stub: a turn prompt in argv\n' >&2; exit 64 ;;
     *) shift ;;
   esac
 done
+# The turn's prompt is its standard input, never an argument (kept whole,
+# trailing newlines included).
+PROMPT=$(cat; printf x); PROMPT=${{PROMPT%x}}
 printf '{{"type":"system","subtype":"init","session_id":"%s","model":"stub","permissionMode":"%s"}}\n' "$SESSION" "${{PERMISSION_SAID:-$PERMISSION}}"
 {watchdog}
 {await_file}

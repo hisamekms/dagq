@@ -147,7 +147,7 @@ fn a_waiting_headless_turn_and_its_child_die_with_the_fixture() {
     let mut spec = CommandSpec::new(&stub);
     spec.args(["-p", "--session-id", "s1", "--add-dir"])
         .arg(&run_dir)
-        .args(["--", "work"]);
+        .stdin("work");
     let (stdout, stderr) = (run_dir.join("stdout"), run_dir.join("stderr"));
     let child = StubSpawner { db: db.clone() }
         .spawn(
@@ -197,7 +197,7 @@ fn a_waiting_headless_turn_and_its_child_die_with_their_test_process() {
     let mut spec = CommandSpec::new(&stub);
     spec.args(["-p", "--session-id", "s1", "--add-dir"])
         .arg(&run_dir)
-        .args(["--", "work"]);
+        .stdin("work");
     let (stdout, stderr) = (run_dir.join("stdout"), run_dir.join("stderr"));
     let fixture = fixture();
     let child = StubSpawner {

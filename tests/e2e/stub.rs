@@ -79,6 +79,10 @@ fi
 # request; it does what the prompt asks, commits, writes the receipt and
 # prints the stream: init, a message, the result.
 [ "$output" = stream-json ] || { printf 'stub: not a worker turn\n' >&2; exit 64; }
+# Its prompt comes on stdin, never as an argument, so that no command line
+# holds the checks it names.
+[ -z "$prompt" ] || { printf 'stub: a turn prompt in argv\n' >&2; exit 64; }
+prompt=$(cat)
 sid=${session_id:-$resume}
 [ -n "$headless" ] && [ -n "$sid" ] && [ "$permission" = auto ] \
   && [ -n "$debug_file" ] && [ -n "$add_dir" ] && [ -n "$settings" ] && [ -n "$prompt" ] \

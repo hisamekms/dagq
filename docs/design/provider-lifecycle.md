@@ -139,6 +139,9 @@ workerのproviderはtaskが選び、経路は非対話だけ（[ADR-t813-2](../a
 - 入口: `domain::worker`・`WorkerAdapters`・`provider_switch::routes`・`AgentProvider::turn_command`・`TurnReader`、文面は[Prompt](supervisor-lifecycle/prompt.md#経路とproviderごとの文面)。
 - 実行ファイルの解決は[Provider executables](provider-executables.md)、`up`での固定は[運用](../development/operations.md)の「`up`のコマンド」。
 - 落とし穴: Claudeの`permissions.deny`はコマンドの先頭しか拒めないので、pidで止める規則をpromptでも伝える。
+- 約束: Claudeのturn（workerとruntimeのplanner）はpromptをargvに載せずstdinで渡し（`claude -p`は位置引数が無ければstdinを読む）、人のplannerのsession（`planner_command`）は位置引数に管理dirの`prompt.txt`の絶対パスを読めという短い文だけを渡す。
+  理由: promptは検証コマンドの名前やtaskのtitleを含み、argvにあると`pgrep -f`・`ps`のパターン（`kill $(pgrep -f ...)`・`/usr/bin/pkill`など`permissions.deny`が拒めない形も）が他のrunのsessionに当たる。
+  containerのturnでは、podmanのstdinを`--interactive`でcontainerのlauncherに渡し、launcherがagentに渡す。
 - Codexで動かすtaskは`subagent_review`を要るevidenceから外す（`domain::required_of`）。
 - 約束: `in_progress`のtaskのproviderとmodelを変えるのはholdの解除だけ。
   Claudeはturnごとにmodelを受けるので、sessionの残る止まっていない待ちのrun（`needs_session`など）はmodelだけならresumeで続け、Codexはmodelを受けないので`--model`を拒み、providerを変えればrunを終えて成果を引き継ぐ新しいrunにする（`worker_model::check_model`。止まった（`failed`・`interrupted`）runの解除の分かれ方は[needs_session](supervisor-lifecycle/needs-session.md#taskのhold)）。
