@@ -195,6 +195,8 @@ positional = "none"
 # 関門の対象と流し方は docs/development/local-checks.md の「stress」と「itのtestの時間の関門」。e2e（tests/e2e.rs・tests/e2e/）と
 # plugin（tests/plugin.rs）は stress の対象外なので gate の paths に入れない。
 # 書式は infrastructure::run_env::LOCAL_GATES_PREFIX の doc comment。
+# worker が receipt の前に流す scripts/check-local-gates.sh は gate と tests の値の写しを持つので、ここの値を変えたら同じ変更で script の写しも直す
+# （食い違いは script が先に名指して exit 1 で止める）。
 # [local_checks] を知らない旧バイナリは dagq.toml を読めなくなるので、固定バイナリが task 2624 を含んでから足した。
 tests = ["tests/**", "src/**", "crates/**"]
 

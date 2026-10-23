@@ -41,7 +41,7 @@ set -u
 me=check-scripts-root
 
 # The check scripts that take their root from the cwd's git work tree.
-scripts="check-migration-numbers check-test-file-lines check-adr-numbers check-e2e-quarantine check-agents-md-size check-frontmatter-dates check-design-docs check-design-sentences check-doc-links check-doc-frontmatter check-plugin-version check-commit-messages"
+scripts="check-migration-numbers check-test-file-lines check-adr-numbers check-e2e-quarantine check-agents-md-size check-frontmatter-dates check-design-docs check-design-sentences check-doc-links check-doc-frontmatter check-plugin-version check-commit-messages check-local-gates"
 
 # "<script> <case>": each case puts one violation of the script into the
 # clone (the cwd) with violate_<case>.
@@ -58,7 +58,8 @@ check-doc-links doc_link_to_removed_design
 check-doc-frontmatter doc_frontmatter_missing_key
 check-doc-frontmatter doc_frontmatter_updated_line
 check-plugin-version plugin_version_mismatch
-check-commit-messages commit_message_prefix"
+check-commit-messages commit_message_prefix
+check-local-gates local_gates_declaration_drift"
 
 violate_migration_gap() {
   echo 'SELECT 1;' >migrations/9999_scripts_root_gap.sql
@@ -132,6 +133,17 @@ violate_commit_message_prefix() {
       commit --quiet --no-verify --allow-empty -m 'runtime: a prefix not allowed'
 }
 
+# The kind of a gate in the clone's dagq.toml no longer matches the copy of
+# the declaration in check-local-gates.sh.
+violate_local_gates_declaration_drift() {
+  awk '/^\[local_checks\.gates\.it-test-time\]$/ { g = 1 } g && /^kind = / { print "kind = \"zz-scripts-root\""; g = 0; next } { print }' \
+    dagq.toml >dagq.toml.zz && mv dagq.toml.zz dagq.toml
+}
+
+# A worker's environment names its records' directory: without this,
+# check-local-gates would read records of the worker's tree, outside the
+# clone, and its result would depend on them.
+unset DAGQ_LOCAL_CHECKS_DIR
 unset LAYER_DEPS_ROOT LAYER_DEPS_ALLOW_FILE CONTEXT_BOUNDARIES_ROOT CONTEXT_BOUNDARIES_LIST_FILE CONTEXT_BOUNDARIES_ALLOW_FILE E2E_QUARANTINE_FILE GITHUB_REF_TYPE GITHUB_REF_NAME
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_ALTERNATE_OBJECT_DIRECTORIES
 

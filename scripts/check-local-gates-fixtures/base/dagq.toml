@@ -1,0 +1,16 @@
+# The fixture of scripts/check-local-gates.sh --self-test: [local_checks] and
+# [toolchains.rust] as the repository's dagq.toml declares them.
+[local_checks]
+tests = ["tests/**", "src/**", "crates/**"]
+
+[local_checks.gates.stress]
+paths = ["tests/it/**", "src/**", "crates/**"]
+kind = "stress"
+
+[local_checks.gates.it-test-time]
+paths = ["tests/it/**"]
+kind = "it-test-time"
+
+[toolchains.rust]
+profile = "rust"
+paths = ["**/*.rs", "**/Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]

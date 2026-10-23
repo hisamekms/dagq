@@ -50,6 +50,7 @@ dagqのworkerは全体の`cargo test --locked`を流さず、`cargo llvm-cov`（
   programに無いverifyと、差分が`paths`に当たらず流れなかったverifyは今どおり手元で流す。どれが当たるかは、mainの`dagq.toml`の`[review.programs]`とrunの差分のpathで判じる。差分がそのprogramの設定かscriptを変えたrunでは、programはmainの変える前のscriptを流すので当たらないとし、手元で流す。
 - 足した・変えたtestのstress（下の「stress」）
 - `tests/it`のtestを足した・変えたら、そのstressのnextestの出力に時間の関門のscript（下の「itのtestの時間の関門」）
+- receiptの前に、receiptにするtreeで`sh scripts/check-local-gates.sh --base <runのbase commit>`（下の「実行の記録とreceiptのevidence」）
 
 containerで動くworker（resumeを含む）の手元のtestはLinuxでbuildされ、macOSに固有のtestは流れない（[testの制約](testing.md)の「macOSに固有のtest」）。
 それを変えたときは、流せなかったことをreceiptの`tests`のevidenceに書き、確かめはmainのCIの`checks`に任せる。
@@ -78,6 +79,8 @@ runtimeはreceiptのcommitのtreeと一致する記録だけをreviewの資料�
 - 記録と判定で示せること（流したコマンド・exit status・stressの周回と結果・時間の関門の結果・変えたtestが無いので関門を省いたこと）は、receiptの`tests`のevidenceに書かない。
 - evidenceには記録で示せないことだけを書く: testの範囲を選んだ理由と着地の検証・CIに任せた範囲、流したtestの件数（記録の項目に無く、ログの本文はreviewに渡らない）、流せなかった理由、許可の一覧に足した項目の名前と理由。
 - 検証はcommitの後に流すか、木を止めて流してそのtreeのままcommitする。commitの後に1行でも直せば、記録はそのcommitの根拠にならないので流し直す。1回の実行の間に木を変えた記録も根拠にならない。
+- receiptの前に、commitしたtreeで`sh scripts/check-local-gates.sh --base <runのbase commit>`を流す。scriptは記録のdirと差分から、runtimeが要るとするstressと時間の関門のうち、そのtreeに一致するexit 0の記録が無いものを名指す（数え方はruntimeより多く要るとする側に倒れ、名指し方はscriptの冒頭）。
+  exit 1なら、名指されたstressと関門を最終treeで流してもう一度当てる。testを名指せないfile（`tests/it`のhelperや`#[cfg(test)]`の`#[test]`でない行だけの変更）は、そのfileを使う変えたtestか、そのgateの対象のtestを選んで流す。流せないときはその理由をevidenceに書く。
 - 記録はworkerが書けるadvisoryなもので、着地の安全は今どおり`integrate`の検証が持つ。workerが手元でstressと時間の関門を流す規則（[ADR-t920-1](../adr/2026-09-28-t920-1-light-worker-stress-and-heavy-repetition-in-scheduled-ci.md)、[ADR-t1707-1](../adr/2026-10-05-t1707-1-time-gate-for-added-or-changed-integration-tests.md)）は変わらない。
 
 ## testの範囲
