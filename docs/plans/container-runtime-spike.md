@@ -2,7 +2,7 @@
 id: plan-container-runtime-spike
 type: plan
 title: スパイク：container の runtime の前提の確認の手順（Claude の長期 token の代理・run ごとの clone の費用・dagq 専用の machine の最小の資源・sccache の cache の同時の書き込み）と、記録の表と結果が決める ADR の決定
-status: active
+status: completed
 created: 2026-10-11
 owners:
   - hisamekms
@@ -389,8 +389,10 @@ test が落ちたら `$SPIKE/m/logs/<label>-test.log` から落ちた test の�
   4 / 8 GiB で build の出力を machine の中の podman の named volume に置くと、build は 343 秒で通った（test は流していない）。
 
 2 つはこの文書の手順と script で直した（rustup の複写と、build の出力の named volume）。
-測り直しは行わず、通る最小の資源は確かめていない。
-この repository の host の `host.toml` には、1 回目で build が通った 4 / 8 GiB を暫定の推奨として [運用](../development/operations.md) の「containerのmachineの資源（`host.toml`）」に書いた（test まで通るかは container の runtime のスモークで確かめる）。
+
+人が 2026-10-23 に (c) の測り直しを飛ばすと決めた（request 145、goal 38 の note 296893）ので、測り直しは行わず、通る最小の資源は未確認のまま決めていない。
+この決定は ADR-t2257-1 決定6 の amends の条件（host の中で通る組が無い・通る最小が host を圧迫する）に当たらないので、(c) の ADR は書かない。
+この repository の host の `host.toml` の推奨は [運用](../development/operations.md#containerのmachineの資源hosttoml) の「containerのmachineの資源（`host.toml`）」が持ち、test まで通るかは人か inbox が流す container の runtime のスモーク（[手動スモーク](../development/manual-smoke.md)に足す手順）で確かめる。
 
 ### 満たさないときに人が決めること
 
@@ -452,14 +454,35 @@ grep -i -l 'error' "$SPIKE"/m/logs/sccache-*.server.log
 
 ### 記録の表
 
+2 回目（測り直し）は次のとおり（note 297078。2026-10-23・inbox が流した・machine 4 CPU / 8 GiB・podman 6.1.2・sccache 0.18.0・rust 1.98.1・load 7.3〜11.9）。
+
+| 本数 | round | container | 時間（秒） | exit | requests | hits | misses | cache_errors | read_errors | write_errors | cache の大きさ（KiB） | 当たり率 | 合否 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2 | cold | 1 | 120 | 101 | 83 | 0 | 61 | 0 | 0 | 0 | 32584 | - | 否（sccache ではなくメモリ不足） |
+| 2 | cold | 2 | 148 | 0 | 84 | 0 | 61 | 0 | 0 | 0 | 32584 | - | 合 |
+| 2 | warm | 1 | 141 | 0 | 84 | 61 | 0 | 0 | 0 | 0 | 32584 | 1.0 | 合 |
+| 2 | warm | 2 | 141 | 0 | 84 | 61 | 0 | 0 | 0 | 0 | 32584 | 1.0 | 合 |
+
+- server の log に error は無く、2 本の同時の書き込みで cache の error は 0、warm の当たり率は 1.0 だった。
+- 2 本・cold の container 1 の失敗は sccache の否ではなく、machine のメモリ不足（dmesg に rustc の OOM kill、anon-rss 約 3.9 GB）。
+  dagq の lib の rustc 1 本で約 3.9 GB を使い、8 GiB の machine には 2 本の同時の compile が入らない。
+- 3 本・4 本の cold・warm と limit1・limit2 は流していない。
+  同じメモリ不足で落ちて材料にならないので inbox が 3 本・cold の開始の直後に止め、人がそれらを測り直さないと決めた（note 297121）。
+  上限が効くかは確かめておらず、本番で cache の大きさを見て確かめる。
+- cold と warm の build の時間がほぼ同じだった。
+  cache の対象は依存の crate（61）で、workspace の crate は debug の incremental で sccache の対象にならず毎回 compile されるので、この repository では sccache の効きが小さい。
+
+人は 2 本の結果で (d) を合とみなし、ADR-t2114-4 決定5 の今の形（queue ごとの共有の worker の cache）のまま進むと決めた（note 297121）。
+前提を満たしたとみなしたので、(d) の ADR（ADR-t2114-4 決定5 の amends）は書かない。
+
+1 回目は次のとおり（note 152045。2026-10-11・machine 4 CPU / 8 GiB・sccache 0.18.0）。
+
 | 本数 | round | container | 時間（秒） | exit | requests | hits | misses | cache_errors | read_errors | write_errors | cache の大きさ（KiB） | 当たり率 | 合否 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2〜4 | cold・warm・limit1・limit2 | 全部 | - | 26 の build のうち 25 が 101（4 本の warm の 2 本目だけ 0） | - | - | - | 0 | 0 | 0 | 54204 → 116132（limit の 300M でも追い出しは起きず） | warm で 2 本は 1.0、3・4 本は 0.79〜1.0（build が途中で落ちたので材料にならない） | 未確認 |
 
-上の行は 2026-10-11 の 1 回目（note 152045。machine 4 CPU / 8 GiB・sccache 0.18.0）で、server の log に error は無かった。
-build が (c) と同じ link の失敗で落ちたので、同時の書き込みで壊れないことも、上限が効くことも確かめられていない。
+server の log に error は無かったが、build が (c) と同じ link の失敗で落ちたので、同時の書き込みで壊れないことも上限が効くことも確かめられなかった。
 この置き場はこの文書の手順と script で直した（cache と build の出力を machine の中の named volume に置く）。
-測り直しはこの手順で人か inbox が流し、結果の取り込みと (d) の ADR（ADR-t2114-4 決定5）は task 2280 が持つ。
 
 ### 満たさないときに人が決めること
 
