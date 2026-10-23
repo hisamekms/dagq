@@ -865,7 +865,7 @@ enum Command {
         log_dir: Option<PathBuf>,
         /// Start the observer job (`observe`) when this many seconds passed
         /// since the last one started or finished; 0 disables the observer.
-        /// Default 3600, or 0 with --once.
+        /// Default 10800 (3 hours), or 0 with --once.
         #[arg(long)]
         observe_interval: Option<u64>,
         /// Also run the daily observation of the last 24 hours once a day.
@@ -3611,6 +3611,13 @@ fn relay(command: &RelayCommand) -> Result<Value> {
     }
 }
 
+/// The observer's interval for `supervise`: the given seconds, else three
+/// hours (ADR-0044 decision 21), or none for `--once`.
+fn resolve_observe_interval(interval: Option<u64>, once: bool) -> Duration {
+    // A one-shot pass observes only when asked to.
+    Duration::from_secs(interval.unwrap_or(if once { 0 } else { 10800 }))
+}
+
 fn execute(cli: Cli) -> Result<Value> {
     // The relay and the forwarder of a run's container carry bytes and open
     // no queue (ADR-t2114-3): they run whatever the environment names,
@@ -4723,12 +4730,7 @@ fn execute(cli: Cli) -> Result<Value> {
                 owner: dagq::infrastructure::queue_service::owner_from_env(|name| {
                     env::var(name).ok()
                 }),
-                // A one-shot pass observes only when asked to.
-                observe_interval: Duration::from_secs(observe_interval.unwrap_or(if once {
-                    0
-                } else {
-                    3600
-                })),
+                observe_interval: resolve_observe_interval(observe_interval, once),
                 observe_daily,
                 throughput_review: throughput_review.unwrap_or(!once),
                 report_daily,
@@ -5639,6 +5641,31 @@ mod history_citation;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn observer_interval_defaults_to_three_hours() {
+        assert_eq!(
+            resolve_observe_interval(None, false),
+            Duration::from_secs(10800)
+        );
+    }
+
+    #[test]
+    fn observer_interval_defaults_to_disabled_for_once() {
+        assert_eq!(resolve_observe_interval(None, true), Duration::ZERO);
+    }
+
+    #[test]
+    fn observer_interval_preserves_explicit_values() {
+        for once in [false, true] {
+            for seconds in [0, 60, 3600] {
+                assert_eq!(
+                    resolve_observe_interval(Some(seconds), once),
+                    Duration::from_secs(seconds)
+                );
+            }
+        }
+    }
 
     #[test]
     fn a_handoff_replaces_the_token_and_drops_the_mode() {
