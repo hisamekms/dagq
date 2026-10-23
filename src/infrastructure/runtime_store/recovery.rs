@@ -1058,7 +1058,8 @@ impl SqliteQueue {
     /// `triage_finished` with `payload`, the `action` and the run's status
     /// after it, then each of `also`, in one transaction: `Retry` makes the
     /// task `ready`, `RetryInherit` too with the branch to carry over,
-    /// `Resume` the run `needs_session`, `HandOff` the run `validating`
+    /// `Resume` the run `needs_session` (still the latest run of a task not
+    /// `completed` or `canceled`, checked again), `HandOff` the run `validating`
     /// (still the latest run of its `in_progress` task, checked again),
     /// `Wait` and `Ask` change nothing.
     /// An action that moves on a task its hold guards (ADR-t1879-1
@@ -1883,6 +1884,7 @@ fn apply_triage_action(
         }
         TriageAction::Wait { recheck_at } => payload["recheck_at"] = json!(recheck_at),
         TriageAction::Resume { instruction } => {
+            ensure_revivable(conn, id)?;
             apply(
                 conn,
                 refusals,
@@ -2009,6 +2011,31 @@ fn apply_kept(
     }
 }
 
+/// Refuse to bring run `id` back under its own ID once recovery may no
+/// longer ([`crate::domain::telemetry::run_revivable`]: its task has a later
+/// run or ended), read in the caller's transaction, where no person's
+/// `ready`, cancel or claim can come in between: the supervisor's sweep
+/// removes such a run's kept steps
+/// ([`crate::domain::telemetry::run_ended`]), so the wrapper of its resume
+/// would number its sessions from the first seq again.
+fn ensure_revivable(conn: &Connection, id: &RunId) -> Result<()> {
+    let (latest, task): (Option<RunId>, Option<String>) = conn.query_row(
+        "SELECT (SELECT id FROM task_runs WHERE task_id=r.task_id ORDER BY rowid DESC LIMIT 1),
+                (SELECT status FROM tasks WHERE id=r.task_id)
+         FROM task_runs r WHERE r.id=?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let task = task
+        .map(|status| status.parse::<crate::domain::TaskStatus>())
+        .transpose()?;
+    ensure!(
+        crate::domain::telemetry::run_revivable(id, latest.as_ref(), task),
+        "run {id} is no longer the latest run of a task that goes on"
+    );
+    Ok(())
+}
+
 /// Run `id`, `failed` or `interrupted`, its task's latest run, with no
 /// lease but a stale one, which goes (so its holder cannot renew it and
 /// write after this, ADR-0039 decision 7).
@@ -2050,7 +2077,8 @@ fn unleased_latest_triageable(conn: &Connection, now: i64, id: &RunId) -> Result
 /// ask closed meanwhile, by another supervisor or a person, is refused,
 /// and so is a run whose task is held, ADR-t1879-1): `retry` makes the
 /// task `ready`, `resume` the run `needs_session` with `reason` as
-/// `last_error`, `cancel` cancels the task. Recorded as `triage_decided`
+/// `last_error` (refused once its task ended, [`ensure_revivable`]),
+/// `cancel` cancels the task. Recorded as `triage_decided`
 /// (`ask_id`, `answer`, `reason`, `status`), and an answer a hold kept as
 /// `hold_result_applied`.
 fn decide_triage_in(
@@ -2096,6 +2124,7 @@ fn decide_triage_in(
             )?;
         }
         "resume" => {
+            ensure_revivable(conn, id)?;
             apply(
                 conn,
                 refusals,

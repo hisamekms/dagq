@@ -69,7 +69,7 @@ use super::{EventStore, RunFiles};
 use crate::domain::session_step::StepTarget;
 use crate::domain::session_step::TargetKind;
 use crate::domain::telemetry::{
-    HeldTelemetry, RunTokenState, TargetFacts, TokenRevocation, kept_steps_due, run_ended,
+    HeldTelemetry, KeptRun, RunTokenState, TargetFacts, TokenRevocation, kept_steps_due, run_ended,
     run_token_due, target_token_due,
 };
 use crate::domain::{EventKind, LeaseToken, RunEvent, RunId, TaskId};
@@ -607,17 +607,19 @@ pub fn sweep<L: TokenLog + ?Sized>(
 
 /// The sweep of the files the session wrappers kept their targets' steps
 /// in ([`TelemetryTokens::kept_steps`]): each whose target ended by the
-/// queue, a run's by `run_status` (its status, `None` when it is not in
-/// the queue) and a target of no run's by its facts, or that names none
-/// and is old ([`kept_steps_due`]), is removed: the files removed. Its
-/// token does not decide, so a file a wrapper wrote again after the end,
-/// or of a run whose token went with a lost lease, goes at the next pass.
+/// queue, a run's by what `run` reads of it ([`run_ended`]: a `failed` or
+/// `interrupted` run's stays while recovery can put it back, so the
+/// wrapper of its resume goes on numbering its sessions) and a target of
+/// no run's by its facts, or that names none and is old
+/// ([`kept_steps_due`]), is removed: the files removed. Its token does not
+/// decide, so a file a wrapper wrote again after the end, or of a run
+/// whose token went with a lost lease, goes at the next pass.
 /// A target that cannot be read, and a removal that failed, stay for the
 /// next pass.
 pub fn sweep_kept_steps(
     tokens: &dyn TelemetryTokens,
     db: &Path,
-    run_status: &dyn Fn(&RunId) -> Result<Option<crate::domain::RunStatus>>,
+    run: &dyn Fn(&RunId) -> Result<KeptRun>,
 ) -> Vec<PathBuf> {
     let kept = match tokens.kept_steps(db) {
         Ok(kept) => kept,
@@ -628,9 +630,9 @@ pub fn sweep_kept_steps(
             return Vec::new();
         }
     };
-    let ended = |target: &StepTarget| {
+    let ended = |target: &StepTarget, age_ms: i64| {
         let ended = match (target.kind, target.run_id()) {
-            (TargetKind::Run, Some(run)) => run_status(&run).map(run_ended),
+            (TargetKind::Run, Some(id)) => run(&id).map(|facts| run_ended(facts, age_ms)),
             // A run's file naming no run's ID is of no run there is.
             (TargetKind::Run, None) => Ok(true),
             _ => tokens
@@ -1699,13 +1701,17 @@ mod tests {
             file("old.json.tmp", None, UNREAD_KEPT_STEPS_MS),
         ];
         *tokens.kept.lock().unwrap() = kept;
-        let status = |run: &RunId| -> Result<Option<RunStatus>> {
-            match run.as_str() {
-                "r1" => Ok(Some(RunStatus::Integrated)),
-                "r2" => Ok(Some(RunStatus::Running)),
-                "unreadable" => Err(anyhow!("the queue is locked")),
-                _ => Ok(None),
-            }
+        let status = |run: &RunId| -> Result<KeptRun> {
+            let status = match run.as_str() {
+                "r1" => Some(RunStatus::Integrated),
+                "r2" => Some(RunStatus::Running),
+                "unreadable" => return Err(anyhow!("the queue is locked")),
+                _ => None,
+            };
+            Ok(KeptRun {
+                status,
+                revivable: true,
+            })
         };
         let names = |files: Vec<PathBuf>| -> Vec<String> {
             files
@@ -1740,5 +1746,78 @@ mod tests {
             names(sweep_kept_steps(&tokens, Path::new(DB), &status)),
             ["r1.json"]
         );
+    }
+
+    /// An interrupted run's kept file outlives the sweep while recovery can
+    /// put the run back, so the wrapper of its resume goes on numbering
+    /// its sessions: also once its task went back to `ready` with no later
+    /// run, as a triage under way may still resume it. It goes at the sweep
+    /// after a later run of its task takes its place, or after its task
+    /// ended, and a failed run's alike.
+    #[test]
+    fn an_interrupted_runs_kept_steps_stay_until_recovery_can_no_longer_bring_it_back() {
+        use crate::domain::TaskStatus;
+        use crate::domain::telemetry::KeptStepsFile;
+        let tokens = Tokens::default();
+        let file = |name: &str| KeptStepsFile {
+            file: format!("/q/service/steps/{name}.json").into(),
+            target: Some(StepTarget::run(&run(name))),
+            age_ms: 0,
+        };
+        *tokens.kept.lock().unwrap() = vec![file("r1"), file("r2")];
+        let names = |files: Vec<PathBuf>| -> Vec<String> {
+            files
+                .iter()
+                .map(|file| file.file_stem().unwrap().to_string_lossy().into_owned())
+                .collect()
+        };
+        // Each run's task: its latest run and its status.
+        let tasks = RefCell::new(BTreeMap::from([
+            ("r1", ("r1", TaskStatus::InProgress)),
+            ("r2", ("r2", TaskStatus::InProgress)),
+        ]));
+        let facts = |id: &RunId| -> Result<KeptRun> {
+            let (latest, task) = tasks.borrow()[id.as_str()];
+            let status = if id.as_str() == "r1" {
+                RunStatus::Interrupted
+            } else {
+                RunStatus::Failed
+            };
+            Ok(KeptRun::of(
+                id,
+                Some(status),
+                Some(&run(latest)),
+                Some(task),
+            ))
+        };
+        // r1 interrupted and r2 failed, each the latest run of a task in
+        // progress: both stay, pass after pass.
+        for _ in 0..2 {
+            assert!(sweep_kept_steps(&tokens, Path::new(DB), &facts).is_empty());
+        }
+        // Both tasks back to ready with no later run: a triage under way
+        // may still resume them, so both stay.
+        for task in tasks.borrow_mut().values_mut() {
+            task.1 = TaskStatus::Ready;
+        }
+        assert!(sweep_kept_steps(&tokens, Path::new(DB), &facts).is_empty());
+        assert_eq!(tokens.kept.lock().unwrap().len(), 2);
+        // A claim of r1's task started a later run: r1's goes.
+        tasks
+            .borrow_mut()
+            .insert("r1", ("r3", TaskStatus::InProgress));
+        assert_eq!(
+            names(sweep_kept_steps(&tokens, Path::new(DB), &facts)),
+            ["r1"]
+        );
+        // r2's task was canceled: r2's goes.
+        tasks
+            .borrow_mut()
+            .insert("r2", ("r2", TaskStatus::Canceled));
+        assert_eq!(
+            names(sweep_kept_steps(&tokens, Path::new(DB), &facts)),
+            ["r2"]
+        );
+        assert!(tokens.kept.lock().unwrap().is_empty());
     }
 }

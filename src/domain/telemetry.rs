@@ -295,21 +295,91 @@ pub struct KeptStepsFile {
 pub const UNREAD_KEPT_STEPS_MS: i64 = 60 * 60 * 1000;
 
 /// Whether the sweep removes `kept` (ADR-t1662-3 decision 11): its target
-/// ended by `ended` (read only for a file that names one), or it names
-/// none and is older than [`UNREAD_KEPT_STEPS_MS`]. Not its token decides,
-/// so a file written again after the end, or of a run whose token went
-/// with a lost lease, goes as well.
-pub fn kept_steps_due(kept: &KeptStepsFile, ended: impl FnOnce(&StepTarget) -> bool) -> bool {
+/// ended by `ended`, given the file's age (read only for a file that names
+/// one), or it names none and is older than [`UNREAD_KEPT_STEPS_MS`]. Not
+/// its token decides, so a file written again after the end, or of a run
+/// whose token went with a lost lease, goes as well.
+pub fn kept_steps_due(kept: &KeptStepsFile, ended: impl FnOnce(&StepTarget, i64) -> bool) -> bool {
     match &kept.target {
-        Some(target) => ended(target),
+        Some(target) => ended(target, kept.age_ms),
         None => kept.age_ms >= UNREAD_KEPT_STEPS_MS,
     }
 }
 
-/// Whether a run in `status` (`None`: not in the queue) ended, for its
-/// wrapper's kept steps ([`kept_steps_due`]).
-pub fn run_ended(status: Option<super::RunStatus>) -> bool {
-    status.is_none_or(|status| !super::queue_service::run_holds_token(status))
+/// Whether recovery may still bring a `failed` or `interrupted` `run` back
+/// under its own ID: it is its task's latest run (`latest_of_task`; `None`
+/// tells no later run) and its task (`task`, `None`: not in the queue) did
+/// not end (`completed`, `canceled`). A retry or a new claim starts a later
+/// run, which the triage takes up in its place. A task back to `ready` or
+/// `draft` with no later run stays revivable, as a triage already under way
+/// may still resume the run. Recovery refuses a resume of a run that is not
+/// (checked again in the transaction that resumes it), and the sweep keeps
+/// the kept steps of one that is, up to a bound ([`run_ended`]), by this
+/// one rule.
+pub fn run_revivable(
+    run: &RunId,
+    latest_of_task: Option<&RunId>,
+    task: Option<super::TaskStatus>,
+) -> bool {
+    latest_of_task.is_none_or(|latest| latest == run)
+        && task.is_some_and(|task| !task.is_terminal())
+}
+
+/// What the queue holds of a run, for whether its wrapper's kept steps go
+/// ([`run_ended`]): its status (`None`: not in the queue), and, for a
+/// `failed` or `interrupted` one, whether recovery may still bring it back
+/// ([`run_revivable`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeptRun {
+    pub status: Option<super::RunStatus>,
+    pub revivable: bool,
+}
+
+impl KeptRun {
+    /// The facts of `run` in `status`, whose task's latest run is
+    /// `latest_of_task` and whose task is in `task` (`None`: not in the
+    /// queue).
+    pub fn of(
+        run: &RunId,
+        status: Option<super::RunStatus>,
+        latest_of_task: Option<&RunId>,
+        task: Option<super::TaskStatus>,
+    ) -> Self {
+        Self {
+            status,
+            revivable: run_revivable(run, latest_of_task, task),
+        }
+    }
+}
+
+/// How long after its wrapper last wrote it the kept file of a `failed` or
+/// `interrupted` run that recovery could still put back is removed all the
+/// same: a resume writes it again at its first report, so one this old is
+/// of a run nobody took up. Well within the 90 days the store keeps steps;
+/// the file holds only a bounded number of unsent steps per session.
+pub const REVIVABLE_KEPT_STEPS_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+
+/// Whether `run`'s wrapper's kept steps, last written `age_ms` ago, are of
+/// a run that ended for good ([`kept_steps_due`]): its numbering must
+/// outlive the run while recovery can bring it back, or the wrapper of its
+/// resume numbers its session from the first seq again and the store,
+/// which keeps one step per `(session_id, seq)`, drops the new steps as
+/// repeats with no gap to show it. A run not in the queue, `integrated` or
+/// `succeeded` ended. A `failed` or `interrupted` one ended once recovery
+/// can no longer put it back ([`run_revivable`]), or the file is
+/// [`REVIVABLE_KEPT_STEPS_MS`] old. A run in any other status goes on. Its
+/// telemetry token ends with the status all the same
+/// ([`super::queue_service::run_holds_token`]): a resume is issued a new
+/// one.
+pub fn run_ended(run: KeptRun, age_ms: i64) -> bool {
+    use super::RunStatus;
+    match run.status {
+        None => true,
+        Some(RunStatus::Failed | RunStatus::Interrupted) => {
+            !run.revivable || age_ms >= REVIVABLE_KEPT_STEPS_MS
+        }
+        Some(status) => !super::queue_service::run_holds_token(status),
+    }
 }
 
 /// How long after its timeout a command of a target of no run (an
@@ -899,30 +969,106 @@ mod tests {
             target,
             age_ms,
         };
-        assert!(kept_steps_due(&kept(Some(run_target()), 0), |_| true));
-        assert!(!kept_steps_due(&kept(Some(run_target()), i64::MAX), |_| {
-            false
-        }));
+        assert!(kept_steps_due(&kept(Some(run_target()), 0), |_, _| true));
+        assert!(!kept_steps_due(
+            &kept(Some(run_target()), i64::MAX),
+            |_, _| { false }
+        ));
+        assert!(kept_steps_due(&kept(Some(run_target()), 7), |_, age| age == 7));
         assert!(!kept_steps_due(
             &kept(None, UNREAD_KEPT_STEPS_MS - 1),
-            |_| true
+            |_, _| true
         ));
-        assert!(kept_steps_due(&kept(None, UNREAD_KEPT_STEPS_MS), |_| false));
-        assert!(run_ended(None));
-        for status in [
-            RunStatus::Integrated,
-            RunStatus::Succeeded,
-            RunStatus::Failed,
-            RunStatus::Interrupted,
+        assert!(kept_steps_due(&kept(None, UNREAD_KEPT_STEPS_MS), |_, _| {
+            false
+        }));
+    }
+
+    /// Recovery may bring a failed or interrupted run back while it is its
+    /// task's latest run and its task did not end, a task back to ready or
+    /// draft among them; not once its task has a later run, or ended or is
+    /// gone.
+    #[test]
+    fn a_run_is_revivable_while_it_is_its_tasks_latest_and_the_task_goes_on() {
+        use super::super::TaskStatus;
+        let (r1, r2) = (RunId::new("r1").unwrap(), RunId::new("r2").unwrap());
+        for task in [
+            TaskStatus::InProgress,
+            TaskStatus::Ready,
+            TaskStatus::Draft,
+            TaskStatus::Submitted,
         ] {
-            assert!(run_ended(Some(status)), "{status:?}");
+            assert!(run_revivable(&r1, Some(&r1), Some(task)), "{task:?}");
+            assert!(run_revivable(&r1, None, Some(task)), "{task:?}");
+            assert!(!run_revivable(&r1, Some(&r2), Some(task)), "{task:?}");
         }
-        for status in [
-            RunStatus::Running,
-            RunStatus::NeedsSession,
-            RunStatus::AwaitingIntegration,
+        for task in [
+            Some(TaskStatus::Completed),
+            Some(TaskStatus::Canceled),
+            None,
         ] {
-            assert!(!run_ended(Some(status)), "{status:?}");
+            assert!(!run_revivable(&r1, Some(&r1), task), "{task:?}");
+        }
+    }
+
+    /// A run not in the queue, landed or succeeded ended for its kept
+    /// steps, whatever its task; a live one goes on; a failed or
+    /// interrupted one goes on while recovery can put it back (no later
+    /// run of its task, the task not ended, its file younger than the
+    /// bound), a task back to `ready` among them, and ended once its task
+    /// has a later run or ended, or the file is past the bound. Its token
+    /// ends with the status all the same.
+    #[test]
+    fn a_failed_or_interrupted_runs_kept_steps_stay_while_recovery_can_bring_it_back() {
+        use super::super::TaskStatus;
+        let (r1, r2) = (RunId::new("r1").unwrap(), RunId::new("r2").unwrap());
+        let of = |status, latest: &RunId, task| KeptRun::of(&r1, status, Some(latest), task);
+        for task in [TaskStatus::InProgress, TaskStatus::Completed] {
+            let facts = |status| of(status, &r1, Some(task));
+            assert!(run_ended(facts(None), 0));
+            for status in [RunStatus::Integrated, RunStatus::Succeeded] {
+                assert!(run_ended(facts(Some(status)), 0), "{status:?}");
+            }
+            for status in [
+                RunStatus::Claimed,
+                RunStatus::Starting,
+                RunStatus::Running,
+                RunStatus::Validating,
+                RunStatus::NeedsSession,
+                RunStatus::AwaitingIntegration,
+                RunStatus::Integrating,
+            ] {
+                assert!(!run_ended(facts(Some(status)), i64::MAX), "{status:?}");
+            }
+        }
+        for ended in [RunStatus::Failed, RunStatus::Interrupted] {
+            let status = Some(ended);
+            // The task's latest run, its task not ended: in progress, or
+            // back to ready or draft with no later run yet.
+            for task in [TaskStatus::InProgress, TaskStatus::Ready, TaskStatus::Draft] {
+                let facts = of(status, &r1, Some(task));
+                assert!(!run_ended(facts, 0), "{status:?} {task:?}");
+                assert!(
+                    !run_ended(facts, REVIVABLE_KEPT_STEPS_MS - 1),
+                    "{status:?} {task:?}"
+                );
+                assert!(
+                    run_ended(facts, REVIVABLE_KEPT_STEPS_MS),
+                    "{status:?} {task:?}"
+                );
+            }
+            // A later run of its task.
+            assert!(run_ended(of(status, &r2, Some(TaskStatus::InProgress)), 0));
+            // Its task completed, canceled or gone.
+            for task in [
+                Some(TaskStatus::Completed),
+                Some(TaskStatus::Canceled),
+                None,
+            ] {
+                assert!(run_ended(of(status, &r1, task), 0), "{task:?}");
+            }
+            // Its token ends all the same.
+            assert!(!super::super::queue_service::run_holds_token(ended));
         }
     }
 }

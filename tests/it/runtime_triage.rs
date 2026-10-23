@@ -893,6 +893,84 @@ fn triage_answers_resume_the_run_or_ready_the_task() {
     );
 }
 
+/// A triage round's `resume` reads again, in its own transaction, whether
+/// recovery may still bring the run back
+/// (`domain::telemetry::run_revivable`, whose cases its unit test holds):
+/// a task canceled, or given a later run, while the round ran refuses it
+/// and leaves the run as it was, and once the run is the latest of a task
+/// that goes on the same round resumes it.
+#[test]
+fn a_resume_is_refused_once_the_runs_task_ended_or_has_a_later_run_while_its_round_ran() {
+    use dagq::application::TriageAction;
+    use dagq::domain::actor_model::{ActorLaunch, ModelRole};
+    let (_dir, repo, db) = fixture();
+    let run = provision_under(&repo, &db, "first");
+    // The queue's clock is ahead, so the claim's lease is stale.
+    let clock = ManualClock::at(unix_second_now() + 10 * dagq::domain::HEARTBEAT_TIMEOUT_SECS);
+    let mut queue = SqliteQueue::open(&db).unwrap().with_generators(Generators {
+        clock: Arc::new(clock),
+        ids: Arc::new(clock::UuidGenerator),
+    });
+    let run = queue.recover_run(run.id(), 0, json!({})).unwrap();
+    assert_eq!(run.status(), RunStatus::Interrupted);
+    let job = LeaseToken::new("job");
+    let set_task = |status: &str| {
+        Connection::open(&db)
+            .unwrap()
+            .execute("UPDATE tasks SET status=?1 WHERE id=1", [status])
+            .unwrap();
+    };
+    let resume = |queue: &mut SqliteQueue| {
+        queue.finish_triage(
+            run.id(),
+            &job,
+            &TriageAction::Resume {
+                instruction: "go on".into(),
+            },
+            json!({}),
+            Vec::new(),
+        )
+    };
+    assert!(
+        queue
+            .begin_triage(
+                run.id(),
+                &job,
+                None,
+                &ActorLaunch::default_of(ModelRole::Recovery),
+            )
+            .unwrap()
+            .is_some()
+    );
+    // Canceled while the round ran: refused, the run stays interrupted.
+    set_task("canceled");
+    let refused = resume(&mut queue).unwrap_err().to_string();
+    assert!(refused.contains("no longer the latest run"), "{refused}");
+    assert_eq!(
+        queue.run(run.id()).unwrap().status(),
+        RunStatus::Interrupted
+    );
+    // The task goes on but has a later run: refused as well.
+    set_task("in_progress");
+    let conn = Connection::open(&db).unwrap();
+    conn.execute_batch(&format!(
+        "CREATE TEMP TABLE later AS SELECT * FROM task_runs WHERE id='{}';
+         UPDATE later SET id='later', status='claimed', branch=NULL,
+           worktree_path=NULL, workspace_id=NULL;
+         INSERT INTO task_runs SELECT * FROM later;",
+        run.id()
+    ))
+    .unwrap();
+    assert!(resume(&mut queue).is_err());
+    // The run its task's latest again: the round's resume parks it.
+    conn.execute("DELETE FROM task_runs WHERE id='later'", [])
+        .unwrap();
+    assert_eq!(
+        resume(&mut queue).unwrap().status(),
+        RunStatus::NeedsSession
+    );
+}
+
 /// A run whose wrapper died and that nobody leases is recovered by the
 /// supervisor (ADR-0024 decision 3, amending ADR-0012) and triaged as
 /// `interrupted`; `retry` runs the task again, and it lands.

@@ -21,7 +21,10 @@
 //! for the executor to send. The file names its target ([`KeptSteps`]),
 //! and the supervisor's sweep removes it once the queue says that target
 //! ended, whatever its token
-//! ([`super::telemetry_tokens::sweep_kept_steps`]). Nothing
+//! ([`super::telemetry_tokens::sweep_kept_steps`]): a `failed` or
+//! `interrupted` run's stays while recovery can put the run back under the
+//! same ID, so its resume's wrapper numbers on past the seqs already sent
+//! ([`crate::domain::telemetry::run_ended`]). Nothing
 //! here changes a run's, a planner's or a job's outcome: a failure is
 //! logged.
 
@@ -1178,6 +1181,48 @@ mod tests {
         assert_eq!(kept.target, target());
         assert_eq!(kept.state.sessions["thread-1"].next_seq, 6);
         assert!(kept.state.sessions["thread-1"].pending.is_empty());
+    }
+
+    /// The wrapper of the resume of a run that was interrupted, its kept
+    /// file left by the sweep, goes on numbering the same session past the
+    /// seqs sent before, so the store takes the new steps rather than
+    /// dropping them as repeats, and sends first what was not sent.
+    #[test]
+    fn the_resume_of_an_interrupted_run_numbers_on_and_resends() {
+        let files = MemoryRunFiles::default();
+        let sink = Arc::new(Sink::default());
+        let sinks: Arc<Sink> = sink.clone();
+        let db = Path::new("/q/queue.db");
+        let run = StepTarget::run(&crate::domain::RunId::new("r1").unwrap());
+        let kept = sinks.steps_file(db, &run);
+        let mut steps = WrapperSteps::default();
+        steps.load(&files, kept.clone(), run.clone(), 0);
+        steps.start_turn(Box::new(Lines), 0, Some("s".to_owned()));
+        steps.line("Read", 100);
+        steps.tick(&files, Some(&sinks), db, 31_000);
+        // The run is interrupted with its last steps unsent.
+        *sink.down.lock().unwrap() = true;
+        steps.line("Bash", 32_000);
+        steps.end_turn(&files, Some(&sinks), db, 33_000);
+        let before = sent(&sink);
+        let sent_max = before.iter().flat_map(|(_, seqs, _)| seqs).max().copied();
+        assert_eq!(sent_max, Some(1));
+        *sink.down.lock().unwrap() = false;
+        let mut resumed = WrapperSteps::default();
+        resumed.load(&files, kept, run, 100_000);
+        resumed.start_turn(Box::new(Lines), 100_000, Some("s".to_owned()));
+        resumed.line("Edit", 100_100);
+        resumed.end_turn(&files, Some(&sinks), db, 100_200);
+        let after = &sent(&sink)[before.len()..];
+        assert_eq!(
+            after,
+            [(
+                "s".to_owned(),
+                vec![2, 3, 4, 5],
+                vec![32_000, 33_000, 100_100, 100_200]
+            )]
+        );
+        assert!(after[0].1.iter().all(|seq| Some(*seq) > sent_max));
     }
 
     /// With no sink the wrapper's turn ends as any other, its steps kept.

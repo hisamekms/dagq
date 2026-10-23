@@ -1910,9 +1910,56 @@ impl Supervisor<'_> {
         );
         self.telemetry_retries = retries;
         telemetry_tokens::sweep_kept_steps(self.telemetry_tokens, &self.layout.db, &|run| {
-            self.run_token_state(run, None, now)
-                .map(|state| state.status)
+            self.kept_run(run)
         });
+    }
+
+    /// What the sweep of the wrappers' kept steps reads of `run`
+    /// ([`crate::domain::telemetry::KeptRun::of`]): its status, and for a
+    /// `failed` or `interrupted` one, its task's latest run and its task's
+    /// status, which tell whether recovery can still bring it back.
+    fn kept_run(&self, run: &RunId) -> Result<crate::domain::telemetry::KeptRun> {
+        use crate::domain::RunStatus;
+        use crate::domain::telemetry::KeptRun;
+        let found = match self.queue.run(run) {
+            Ok(found) => found,
+            Err(error)
+                if error
+                    .downcast_ref::<crate::application::RunNotFound>()
+                    .is_some() =>
+            {
+                return Ok(KeptRun::of(run, None, None, None));
+            }
+            Err(error) => return Err(error),
+        };
+        let status = found.status();
+        if !matches!(status, RunStatus::Failed | RunStatus::Interrupted) {
+            // Only a failed or interrupted run's task is read: the status
+            // alone decides any other.
+            return Ok(KeptRun {
+                status: Some(status),
+                revivable: true,
+            });
+        }
+        let task = found.task_id();
+        let latest = self.queue.latest_run_of(task)?;
+        let page = self.queue.list(&crate::application::TaskQuery {
+            status: crate::application::StatusFilter::Any,
+            limit: 1,
+            before: Some(task),
+            ..crate::application::TaskQuery::default()
+        })?;
+        let task_status = page
+            .tasks
+            .first()
+            .filter(|item| item.id == task)
+            .map(|item| item.status);
+        Ok(KeptRun::of(
+            run,
+            Some(status),
+            latest.as_ref().map(|latest| latest.id()),
+            task_status,
+        ))
     }
 
     /// Send again the steps kept ([`UnsentSteps`]), the session each kept
