@@ -116,7 +116,8 @@ queue serviceと同じ手順に乗せる（[Queue service](queue-service.md#起�
 - supervisor（`--once`でないもの）はserviceと同じ間隔と上限で見て、居ない・答えないbrokerを起動し直す（`supervise::host_ops::queue_broker`）。
   見る時期・窓の数え方・次の一手の判断は`domain::queue_broker::watch_step`ほかで、supervisorは注入した時計の単調時刻を値で渡す。
   drainと引き継ぎの間は見ない。
-- 起動し直せない・上限に達したときは、inbox宛てのattention `queue_broker_down`をDBに直接書き、brokerがまた動けば消える。
+- 起動し直せない・上限に達したときは、inbox宛てのattention `queue_broker_down`をqueue serviceのユースケース（`record_queue_event`）で記録し、brokerがまた動けば消える。
+  serviceに届かず記録できなければ、supervisorはwarnのログを残すだけでDBを開いて代わりに書かない。
 - brokerが居ない間、containerは使えない: supervisorと`integrate`は`ContainerRuntime`を`BrokerGate`越しに問い、brokerが動いていなければ理由つきで使えないと答える（[Container runtime](container-runtime.md#fail-closedの境界)）。
   serviceと違い、hostのrunのclaimとjobは控えない。
 
