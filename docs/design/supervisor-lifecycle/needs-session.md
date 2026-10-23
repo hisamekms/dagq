@@ -87,16 +87,17 @@ resume中に死んだsupervisorが起動したwrapper（handleの記録が無い
 試行を使い切ったrunを復旧jobに渡すことは止めない。
 
 0. **解消済みの確認**（`resolved_head`）: resumeを始める前に、前の試行で解消済みかを確かめる。
-   前の試行のsessionがreceiptを書き直した後に判定された（rebaseもreceiptも済んでいて、次の試行のsessionが何もせずにidleになる）runは、`rewritten_receipt`がresume開始より新しいreceiptを要求するので`unresolved`になり、試行を空費する。
+   前の試行のsessionがreceiptを書き直した後に判定されたrunは、`rewritten_receipt`がresume開始より新しいreceiptを要求するので`unresolved`になり試行を空費する。
    次をすべて満たせばsessionを開かない: (a) runを`needs_session`にした最後のイベントが`landing_decided`（人の`send_back`。指摘への対応はsessionが要る）ではなく、parkのイベントと`resume_finished` / `resume_skipped`のうち最後が`outcome: unresolved`の`resume_finished`、(b) receiptがparseでき、`run_id`がこのrunで`succeeded`、taskの`required_evidence`とSpikeの結果を満たす、(c) receiptの`commit`がworktreeのHEADに一致し、worktreeがclean、(d) HEADが今の`main`ではなく、`main`を祖先に持つ。
    どれかが読めない・満たさないときは1に進む。
    宣言外のパスはここでは見ず、skipの後の[Validation](validation.md#validation)か着地が検査する。
-   満たせば1トランザクションで`begin_resume`と同じ確認（`needs_session`、leaseが無いかstale、heartbeatしている未終了のprocessが無い）をしてleaseし、`resume_skipped`を記録する。
-   `resume_started`は記録しないので試行回数は増えず、試行が上限に達したrunには行わない（最初の除外条件のまま）。
+   満たせば1トランザクションで`needs_session`でleaseが無いかstale、heartbeatする未終了のprocessが無ければleaseし、`resume_skipped`を記録する。
+   `resume_started`は記録しないので試行回数は増えず、試行が上限に達したrunには行わない。
    `integration_approved`があればrunは`needs_session`のまま着地スロットを待ち、下の5と同じく着地させる。
    無ければrunを`validating`にし、sessionの無いまま[Validation](validation.md#validation)→[Review](review.md#review-supervisor)に進める。
-   skipの後にどの経路で`needs_session`に戻っても（着地の`integration_deferred`、着地スロット待ちのerror、supervisorの死）、最後が`resume_skipped`かparkのイベントなので(a)が成り立たず、次は必ずsessionを開いてresumeする（skipはresumeを挟まずに繰り返さない）。
-   未承認でskipしたrunを持つsupervisorが`validating`か`awaiting_integration`のうちに死んだときは、wrapperが無い（`begin_resume`が消した）か生きていなくても、最後のresumeのイベントが`resume_skipped`ならadoptする。
+   承認済みの`resume_skipped`の後に着地・review・resumeの開始、着地の決定、`approve_landing`のaskが無ければ、`landing_queued`が無くても（答えが届かず）着地スロットを待ち、組み立て直してもresumeし直さない（[supervise](supervise.md#queue-serviceの経路)）。
+   着地の`integration_deferred`、着地スロット待ちのerror、supervisorの死で着地待ちから外れると、最後が`resume_skipped`かparkのイベントなので(a)が成り立たず、次はsessionでresumeする。
+   未承認でskipしたrunを持つsupervisorが`validating`か`awaiting_integration`のうちに死んだときは、wrapperが無いか生きていなくても、最後のresumeのイベントが`resume_skipped`ならadoptする。
    そのrunのsessionは無いものとして扱う。
    `resume_skipped`はattentionにしない。
 1. **開始**: `begin_resume`が1トランザクションで、runがまだ`needs_session`で試行を使い切っておらず、leaseが無いかstale（staleなら置き換える）で、heartbeatしている未終了のprocessが無いことを確かめ、runをこのsupervisorのtokenでleaseし、`supervisor_token`を移し、前のsessionの`run_processes`の行を消し（履歴はイベントに残る）、`resume_started`を記録する。
