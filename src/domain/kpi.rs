@@ -579,6 +579,9 @@ pub fn direction(kpi: &str) -> Option<Direction> {
         | "improvement_proposals"
         | "candidates"
         | "plan.follow_up_adoption_rate" => None,
+        // The resumes the limit does not count: work other tasks' landings
+        // made, with no target (ADR-t3154-1).
+        "uncounted_resumes_per_run" => None,
         // How much of the integration slot the attempts held (goal 72): a
         // constraint to watch, neither better higher nor lower.
         _ if kpi.starts_with("landing_utilization") => None,

@@ -10,6 +10,7 @@
 //! deferral whose failure is `flaky` never names a landing either: an
 //! unstable test is not the fault of the main the run was rebased onto.
 use crate::domain::EventKind;
+use crate::domain::recheck;
 use crate::domain::run::{ReviseRequested, restore_payload};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -24,8 +25,11 @@ use crate::domain::reason::event_code;
 pub const BREAKING_CODES: [&str; 3] = ["rebase_conflict", "verification_failed", "rebase_empty"];
 
 /// The events that park a run for a resume, whose code is the resume's
-/// reason (as the supervisor's `resume_reason` picks them).
-const PARKING: [EventKind; 9] = [
+/// reason (as the supervisor's `resume_reason` picks them). A landing
+/// recheck's failure parks the run only when it resumed it
+/// ([`recheck::parks`]): a held one is parked by a later failure when the
+/// hold ends, and a skipped one parks nothing.
+const PARKING: [EventKind; 10] = [
     EventKind::IntegrationDeferred,
     EventKind::IntegrationError,
     EventKind::EvidenceMissing,
@@ -35,10 +39,15 @@ const PARKING: [EventKind; 9] = [
     EventKind::TriageDecided,
     EventKind::SessionGoneParked,
     EventKind::ReplanParked,
+    EventKind::LandingRecheckFailed,
 ];
 
 /// The reason of a deferral or resume whose event carries no code.
 pub const UNKNOWN: &str = "unknown";
+
+/// The reason of a resume after a landing recheck's failure that carries
+/// no code.
+pub const LANDING_RECHECK: &str = "landing_recheck";
 
 /// A landing on main after which this run's landing was deferred. The
 /// landings are looked up among every event, so a landing outside the
@@ -209,7 +218,15 @@ pub fn retries(events: &[RunEvent]) -> HashMap<RunId, Retries> {
         let code = || event_code(event).map_or(UNKNOWN, |code| code.as_str());
         let kind = &event.kind;
         if kind.is_in(&PARKING) {
-            walk.parked = Some(code().to_owned());
+            if event.kind != EventKind::LandingRecheckFailed {
+                walk.parked = Some(code().to_owned());
+            } else if recheck::parks(event) {
+                walk.parked = Some(
+                    event_code(event)
+                        .map_or(LANDING_RECHECK, |code| code.as_str())
+                        .to_owned(),
+                );
+            }
         }
         if payload_status(&event.payload) == Some("needs_session")
             && !matches!(
@@ -519,6 +536,67 @@ mod tests {
         let attempts = &all[&RunId::new(A).unwrap()].resume_attempts;
         assert_eq!(attempts.len(), 1);
         assert_eq!(attempts[0].reason, "replan_parked");
+    }
+
+    #[test]
+    fn a_resume_after_a_landing_rechecks_park_is_counted_under_its_code() {
+        let events = [
+            event(
+                1,
+                A,
+                1,
+                "landing_recheck_failed",
+                json!({"code": "rebase_conflict", "action": "resumed"}),
+                10,
+            ),
+            event(2, A, 1, "resume_started", json!({"counted": false}), 20),
+            event(
+                3,
+                B,
+                2,
+                "landing_recheck_failed",
+                json!({"action": "resumed"}),
+                10,
+            ),
+            event(4, B, 2, "resume_started", json!({"counted": false}), 20),
+            // A skipped recheck parked nothing: the earlier park is the reason.
+            event(
+                5,
+                C,
+                3,
+                "integration_deferred",
+                json!({"code": "verification_failed"}),
+                10,
+            ),
+            event(
+                6,
+                C,
+                3,
+                "landing_recheck_failed",
+                json!({"code": "verification_failed", "action": "skipped"}),
+                20,
+            ),
+            event(7, C, 3, "resume_started", json!({}), 30),
+            // Nor did a held one, which a later failure parks.
+            event(
+                8,
+                C,
+                3,
+                "landing_recheck_failed",
+                json!({"code": "rebase_conflict", "action": "held"}),
+                40,
+            ),
+            event(9, C, 3, "resume_started", json!({}), 50),
+        ];
+        let all = retries(&events);
+        let reason = |run: &str| {
+            all[&RunId::new(run).unwrap()].resume_attempts[0]
+                .reason
+                .clone()
+        };
+        assert_eq!(reason(A), "rebase_conflict");
+        assert_eq!(reason(B), LANDING_RECHECK);
+        assert_eq!(reason(C), "verification_failed");
     }
 
     #[test]

@@ -414,6 +414,23 @@ pub struct ConflictPrecheck<'a> {
     pub asked: Option<&'a str>,
 }
 
+/// `resume_started`.
+#[derive(Debug, Default, Deserialize)]
+pub struct ResumeStarted {
+    /// Whether the resume counts toward `MAX_RESUME_ATTEMPTS`; absent on
+    /// an event older than the field.
+    #[serde(default, deserialize_with = "typed")]
+    counted: Option<bool>,
+}
+
+impl ResumeStarted {
+    /// Whether the resume counts toward `MAX_RESUME_ATTEMPTS`: all but
+    /// those recorded `counted: false`, so an older event counts.
+    pub fn counted(&self) -> bool {
+        self.counted != Some(false)
+    }
+}
+
 /// `revise_unsent`.
 #[derive(Debug, Default, Deserialize)]
 pub struct ReviseUnsent<'a> {

@@ -27,6 +27,7 @@ const LEADING: &[&str] = &[
     "verification_failed_rate",
     "failed_rate",
     "resumes_per_run",
+    "uncounted_resumes_per_run",
     "slot_usage",
     "landing_utilization",
     "landing_utilization.peak",

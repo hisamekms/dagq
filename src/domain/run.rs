@@ -24,8 +24,8 @@ pub use history::{
 };
 pub use payload::{
     AskOpened, AttemptOf, AutoRepaired, ConcernDecided, ConflictPrecheck, JobEnd, NewStallNudged,
-    NewStallResolved, RecoveryRecord, ReviewFinished, ReviseRequested, ReviseUnsent, StallNudged,
-    StallResolved, TurnRequested, restore as restore_payload, review_verdict,
+    NewStallResolved, RecoveryRecord, ResumeStarted, ReviewFinished, ReviseRequested, ReviseUnsent,
+    StallNudged, StallResolved, TurnRequested, restore as restore_payload, review_verdict,
 };
 pub use recorded::{
     NewRunEvent, Recorded, end_session, finish_validation, record_e2e_park,

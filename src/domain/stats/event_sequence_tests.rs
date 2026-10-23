@@ -643,6 +643,11 @@ fn runs_goals_and_alerts_come_from_the_event_sequence() {
             Some(Value::Null)
         );
     }
+    // Its one resume is counted toward the limit.
+    assert_eq!(
+        first.as_object_mut().unwrap().remove("uncounted_resumes"),
+        Some(json!(0))
+    );
     assert_eq!(
         first,
         json!({

@@ -44,7 +44,7 @@
 //! and read how it ended from the events past it too; each aggregate's
 //! doc says which.
 use crate::domain::EventKind;
-use crate::domain::run::{AskOpened, ReviewFinished, restore_payload};
+use crate::domain::run::{AskOpened, ResumeStarted, ReviewFinished, restore_payload};
 use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
@@ -289,7 +289,13 @@ pub struct RunStats {
     /// to read next to them; null for a run never held, where they are the
     /// same.
     pub without_held: Option<WithoutHeld>,
+    /// The `resume_started` counted toward `MAX_RESUME_ATTEMPTS`: those
+    /// whose `counted` is not false (an event without it is counted).
     pub resumes: i64,
+    /// The `resume_started` with `counted: false`, which the limit does
+    /// not count (a conflict-only resume after the landing recheck, the
+    /// resume after a hold's release, ...).
+    pub uncounted_resumes: i64,
     /// The `verdict` of the last `review_finished`.
     pub review_verdict: Option<String>,
     pub needs_session: i64,
@@ -2187,6 +2193,7 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
                     held: None,
                     without_held: None,
                     resumes: 0,
+                    uncounted_resumes: 0,
                     review_verdict: None,
                     needs_session: 0,
                     failed: 0,
@@ -2258,7 +2265,13 @@ fn runs(events: &[RunEvent], goals: &HashMap<TaskId, Option<GoalId>>) -> Vec<Tra
                 run.validate = seconds_between(track.receipt, at);
             }
             Some(EventKind::IntegrationStarted) => run.status = Some("integrating".to_owned()),
-            Some(EventKind::ResumeStarted) => run.resumes += 1,
+            Some(EventKind::ResumeStarted) => {
+                if restore_payload::<ResumeStarted>(&event.payload).counted() {
+                    run.resumes += 1;
+                } else {
+                    run.uncounted_resumes += 1;
+                }
+            }
             Some(EventKind::ReviewFinished) => {
                 run.review_verdict = restore_payload::<ReviewFinished>(&event.payload)
                     .verdict

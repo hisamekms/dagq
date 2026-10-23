@@ -345,6 +345,39 @@ fn verification_failed_rate_counts_the_attempts_that_verified() {
     assert_eq!((rate.n, rate.value), (2, Some(0.5)));
 }
 
+/// `resumes_per_run` counts the resumes `MAX_RESUME_ATTEMPTS` counts (an
+/// older `resume_started` without `counted` among them), and
+/// `uncounted_resumes_per_run` those with `counted: false`, over the same
+/// runs (ADR-t3154-1).
+#[test]
+fn resumes_per_run_counts_only_the_counted_resumes() {
+    let mut queue = Queue::default();
+    let landed = queue.run(&Run::new(1, None, MONDAY + HOUR, HOUR));
+    queue.run(&Run::new(2, None, MONDAY + 2 * HOUR, HOUR));
+    let receipt = landed - 100;
+    let id = format!("{:08x}-0000-4000-8000-{:012x}", 1, MONDAY + HOUR);
+    let (task, id) = (Some(1), Some(id.as_str()));
+    for (offset, payload) in [
+        (10, json!({"attempt": 1, "counted": true})),
+        (20, json!({"attempt": 1})),
+        (30, json!({"attempt": 2, "counted": false})),
+        (40, json!({"attempt": 2, "counted": false})),
+        (50, json!({"attempt": 2, "counted": false})),
+    ] {
+        queue.push(task, id, "resume_started", payload, receipt + offset);
+    }
+    let query = KpiQuery {
+        at: Some(Cursor::Time(MONDAY * 1000)),
+        ..KpiQuery::default()
+    };
+    let result = queue.kpi(MONDAY + DAY, &KpiConfig::default(), &query);
+    let period = result.periods.last().unwrap();
+    let counted = measure(period, "resumes_per_run", ALL);
+    assert_eq!((counted.n, counted.value), (2, Some(1.0)));
+    let uncounted = measure(period, "uncounted_resumes_per_run", ALL);
+    assert_eq!((uncounted.n, uncounted.value), (2, Some(1.5)));
+}
+
 /// The details split the backend failures, as `stats` does, into the
 /// attempts a retry took up and the calls that gave up, per `op` too;
 /// `backend_failures_per_run` still counts them all.

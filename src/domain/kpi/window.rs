@@ -1494,8 +1494,10 @@ impl<'a> Context<'a> {
     /// `revise_rate` is over the landed runs, `conflict_rate` over the runs
     /// that tried `integrate`, and `verification_failed_rate` over their
     /// attempts that ran a verification command (a `verification_failed`
-    /// deferral follows only such an attempt); `resumes_per_run` and
-    /// `failed_rate` (`failed` or `interrupted`) are over every run.
+    /// deferral follows only such an attempt); `resumes_per_run` (the
+    /// resumes `MAX_RESUME_ATTEMPTS` counts), `uncounted_resumes_per_run`
+    /// (those it does not, with no target: ADR-t3154-1) and `failed_rate`
+    /// (`failed` or `interrupted`) are over every run.
     fn run_kpis(&self, runs: &[&RunStats]) -> Vec<(String, Measure)> {
         let landed: Vec<&RunStats> = runs
             .iter()
@@ -1572,7 +1574,7 @@ impl<'a> Context<'a> {
             .iter()
             .filter(|run| {
                 self.runs_per_task.get(&run.task_id).map_or(0, HashSet::len) == 1
-                    && run.resumes == 0
+                    && run.resumes + run.uncounted_resumes == 0
                     && revises(run) == 0
                     && run.retries.deferrals.is_empty()
             })
@@ -1627,6 +1629,13 @@ impl<'a> Context<'a> {
             "resumes_per_run".to_owned(),
             Measure::ratio(
                 float(runs.iter().map(|run| run.resumes).sum::<i64>()),
+                runs.len(),
+            ),
+        ));
+        kpis.push((
+            "uncounted_resumes_per_run".to_owned(),
+            Measure::ratio(
+                float(runs.iter().map(|run| run.uncounted_resumes).sum::<i64>()),
                 runs.len(),
             ),
         ));

@@ -50,6 +50,8 @@ pub struct RunActual {
     /// The model's seconds in its own sessions' work breakdown; null when
     /// none recorded one.
     pub model_secs: Option<i64>,
+    /// All its resumes, counted toward the limit or not, as
+    /// `resume_reasons` breaks them down.
     pub resumes: i64,
     /// Its resumes per reason.
     pub resume_reasons: BTreeMap<String, i64>,
@@ -142,7 +144,7 @@ fn actual(run: &RunStats, task_rework: bool) -> RunActual {
             .work_breakdown
             .as_ref()
             .map(|work| work.secs.get(MODEL).copied().unwrap_or(0)),
-        resumes: run.resumes,
+        resumes: run.resumes + run.uncounted_resumes,
         resume_reasons,
         review_verdict: run.review_verdict.clone(),
         task_rework,
@@ -247,11 +249,19 @@ mod tests {
                 json!({"code": "rebase_conflict", "status": "needs_session"}),
             ),
             event(22, 3, Some(R2), "resume_started", json!({"attempt": 1})),
-            event(23, 3, Some(R2), "run_integrated", json!({})),
+            // A resume the limit does not count is still one of its resumes.
+            event(
+                23,
+                3,
+                Some(R2),
+                "resume_started",
+                json!({"attempt": 1, "counted": false}),
+            ),
+            event(24, 3, Some(R2), "run_integrated", json!({})),
             // Recorded after R2 started: R3 of task 6 has none before it.
-            predicted(24, 6, 1_000),
-            event(25, 7, Some(R3), "run_claimed", json!({})),
-            event(26, 7, Some(R3), "run_integrated", json!({})),
+            predicted(25, 6, 1_000),
+            event(26, 7, Some(R3), "run_claimed", json!({})),
+            event(27, 7, Some(R3), "run_integrated", json!({})),
         ];
         let all = stats(
             &events,
@@ -288,10 +298,14 @@ mod tests {
         assert_eq!(r2["prediction"]["expected_output_tokens"], 30_000);
         assert_eq!(r2["prediction"]["percentile_of"], 3);
         assert_eq!(r2["prediction"]["percentile"], 100.0);
-        assert_eq!(r2["actual"]["resumes"], 1);
+        assert_eq!(r2["actual"]["resumes"], 2);
         assert_eq!(
             r2["actual"]["resume_reasons"],
-            json!({"rebase_conflict": 1})
+            json!({"rebase_conflict": 2})
+        );
+        assert_eq!(
+            (r2["resumes"].clone(), r2["uncounted_resumes"].clone()),
+            (json!(1), json!(1))
         );
         assert_eq!(r2["actual"]["task_rework"], false);
         assert_eq!(r2["actual"]["output_tokens"], Value::Null);

@@ -63,6 +63,8 @@ fn measures_keep_null_apart_from_zero() {
     assert_eq!(direction("session_open.inbox"), None);
     assert_eq!(direction("session_open.worker"), Some(Direction::Lower));
     assert_eq!(direction("auto_repairs"), None);
+    assert_eq!(direction("resumes_per_run"), Some(Direction::Lower));
+    assert_eq!(direction("uncounted_resumes_per_run"), None);
 }
 
 /// Today is listed as partial, and no target is judged on it.
