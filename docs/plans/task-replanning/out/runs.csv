@@ -1,0 +1,146 @@
+run,task,provider,change,areas,end,claim,ended_at,turn_started,turn_finished,initial,review,conflict,e2e,verify,receipt,worker_question,provider_host,unlabeled,nonpass,pass,best_nonpass_streak,detect_event,turns_after_detect,nonpass_after_detect,human_wait_secs,human_wait_missing,cost_usd,cost_missing_turns,output_tokens,tokens_missing_turns,receipt_rejected,inherited,population,worker_mode
+6c020347,1144,claude,fix,docs runtime tests,integrated,2026-10-01T15:53:58.668Z,2026-10-01T16:12:09.778Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,1.61,0,5650,0,0,False,True,headless
+bf874c0d,1095,claude,refactor,docs plugin runtime tests,integrated,2026-10-01T16:27:09.596Z,2026-10-01T16:43:01.926Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,1.59,0,7460,0,0,False,True,headless
+15ff4986,1087,claude,fix,docs runtime tests,integrated,2026-10-01T16:43:13.551Z,2026-10-01T17:03:35.224Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,1.46,0,5650,0,0,False,True,headless
+afb456dc,1115,claude,test,tests,integrated,2026-10-01T17:43:28.394Z,2026-10-01T18:10:27.511Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,1.12,0,3641,0,0,False,True,headless
+62f3a648,1021,claude,feature,docs plugin runtime tests,integrated,2026-10-02T00:36:37.763Z,2026-10-02T02:10:04.334Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,4.88,0,38671,0,0,False,True,headless
+4aa1430a,1053,claude,config,ci docs,integrated,2026-10-02T00:36:58.165Z,2026-10-02T00:40:54.442Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,1.53,0,14647,0,0,False,True,headless
+fb9ba422,1098,claude,fix,docs runtime,integrated,2026-10-02T00:40:57.672Z,2026-10-02T02:01:52.266Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,2.49,0,10749,0,0,False,True,headless
+6000103e,1119,claude,fix,docs runtime tests,integrated,2026-10-02T01:31:19.102Z,2026-10-02T02:23:53.693Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,5.35,0,49099,0,0,False,True,headless
+b2174d09,1129,claude,fix,docs plugin runtime tests,integrated,2026-10-02T02:10:14.434Z,2026-10-02T02:41:57.560Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,5.03,0,49794,0,0,False,True,headless
+c488e968,1197,claude,fix,docs runtime tests,integrated,2026-10-02T02:24:04.492Z,2026-10-02T02:51:19.572Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,2.66,0,22236,0,0,False,True,headless
+33ee1eb3,1255,claude,test,docs runtime tests,integrated,2026-10-02T08:15:05.849Z,2026-10-02T10:52:12.010Z,2,2,1,0,1,0,0,0,0,0,0,1,0,1,,,0,4063,0,5.95,0,38261,0,0,False,True,headless
+33daa379,1272,claude,fix,ci docs runtime tests,integrated,2026-10-02T08:15:29.337Z,2026-10-02T09:38:11.107Z,2,2,1,0,0,0,1,0,0,0,0,0,2,0,,,0,0,0,5.2,0,47971,0,0,False,True,headless
+ff314f71,1273,claude,fix,docs runtime,integrated,2026-10-02T08:29:08.760Z,2026-10-02T10:28:59.030Z,1,1,1,0,0,0,0,0,0,0,0,1,0,1,,,0,5245,0,2.34,0,21002,0,0,False,True,headless
+0639576b,1274,claude,test,runtime tests,integrated,2026-10-02T08:31:50.575Z,2026-10-02T09:20:31.921Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,3.37,0,28239,0,0,False,True,headless
+6413b16f,1141,claude,fix,docs runtime tests,integrated,2026-10-02T08:47:46.045Z,2026-10-02T09:30:47.166Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,2.87,0,24251,0,0,False,True,headless
+6f7ea894,1318,claude,feature,docs migrations plugin runtime tests,integrated,2026-10-02T09:20:42.433Z,2026-10-02T11:50:42.465Z,3,3,1,0,1,0,1,0,0,0,0,2,0,2,,,0,1669,0,9.42,0,58680,0,0,False,True,headless
+571b7613,1333,claude,refactor,docs migrations runtime,integrated,2026-10-02T09:38:22.754Z,2026-10-02T10:15:04.621Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,3.04,0,29926,0,0,False,True,headless
+d0176e89,1300,claude,feature,docs plugin runtime tests,integrated,2026-10-02T09:51:32.899Z,2026-10-02T10:45:35.056Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,7.45,0,62219,0,0,False,True,headless
+da215c20,1370,claude,fix,docs runtime tests,integrated,2026-10-02T10:52:20.545Z,2026-10-02T11:19:49.491Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,2.47,0,15784,0,0,False,True,headless
+e5c4ea89,1289,claude,feature,docs runtime tests,integrated,2026-10-02T10:52:21.236Z,2026-10-02T12:46:21.422Z,2,2,1,0,1,0,0,0,0,0,0,1,0,1,,,0,3374,0,7.07,0,51437,0,0,False,True,headless
+1e2734f7,1368,claude,measure,docs,integrated,2026-10-02T10:59:46.270Z,2026-10-02T11:29:22.312Z,3,3,1,2,0,0,0,0,0,0,0,2,1,2,,,0,0,0,6.87,0,74271,0,0,False,True,headless
+d35d9c3f,1378,claude,fix,docs runtime tests,integrated,2026-10-02T11:19:04.456Z,2026-10-02T11:42:28.819Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,2.1,0,12639,0,0,False,True,headless
+57151b60,1369,claude,measure,docs,integrated,2026-10-02T11:29:28.415Z,2026-10-02T11:50:46.407Z,3,3,1,2,0,0,0,0,0,0,0,2,1,2,,,0,0,0,5.07,0,56337,0,0,False,True,headless
+726e286b,1371,claude,feature,docs runtime tests,integrated,2026-10-02T11:42:38.292Z,2026-10-02T12:25:00.954Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,8.27,0,73933,0,0,False,True,headless
+c4c4405b,1316,claude,feature,docs runtime tests,integrated,2026-10-02T11:50:53.822Z,2026-10-02T13:29:42.276Z,4,4,1,2,1,0,0,0,0,0,0,3,0,3,63172,1,0,1617,0,11.76,0,95289,0,0,False,True,headless
+ea40dfd5,1317,claude,feature,docs runtime tests,integrated,2026-10-02T11:50:54.548Z,2026-10-02T12:34:51.634Z,2,2,1,1,0,0,0,0,0,0,0,2,0,2,,,0,217,0,4.95,0,40867,0,0,False,True,headless
+eebaca9b,1372,claude,feature,docs runtime tests,integrated,2026-10-02T12:11:59.737Z,2026-10-02T14:15:24.217Z,5,5,1,3,0,0,0,0,0,1,0,3,1,3,63540,1,0,63,0,5.17,1,44476,1,1,False,True,headless
+8dcd7775,1290,claude,feature,docs runtime tests,integrated,2026-10-02T12:46:30.842Z,2026-10-02T14:40:20.833Z,4,4,1,2,0,1,0,0,0,0,0,2,2,1,,,0,92,0,7.34,0,58349,0,0,False,True,headless
+675b888d,1334,claude,refactor,,ready,2026-10-02T12:49:28.999Z,2026-10-02T15:24:16.256Z,4,4,1,1,0,0,0,0,0,2,0,2,0,2,,,0,578,0,4.66,2,45224,2,1,False,True,headless
+38c9ba81,1338,claude,config,config,integrated,2026-10-02T13:43:15.395Z,2026-10-02T13:47:39.706Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,0.75,0,3612,0,0,False,True,headless
+4ea3a630,1389,claude,fix,docs runtime tests,integrated,2026-10-02T13:53:34.192Z,2026-10-02T14:50:09.334Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,2.05,0,12522,0,0,False,True,headless
+e6fceb15,1329,claude,test,docs runtime tests,integrated,2026-10-02T14:51:18.603Z,2026-10-02T15:23:27.856Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,2.44,0,18816,0,0,False,True,headless
+baeccaaa,648,claude,,docs runtime tests,integrated,2026-10-02T14:51:19.446Z,2026-10-02T15:12:29.642Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,1.64,0,7215,0,0,False,True,headless
+33295215,1404,claude,docs,docs,integrated,2026-10-02T14:57:33.344Z,2026-10-02T15:23:32.929Z,3,3,1,2,0,0,0,0,0,0,0,2,1,2,,,0,0,0,6.18,0,42956,0,0,False,True,headless
+50fddc19,1425,claude,fix,docs runtime tests,integrated,2026-10-02T15:13:47.464Z,2026-10-02T15:53:06.203Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,4.16,0,36178,0,0,False,True,headless
+6a834127,1394,claude,docs,docs,integrated,2026-10-02T15:23:39.861Z,2026-10-02T15:53:21.848Z,2,2,1,1,0,0,0,0,0,0,0,2,0,2,,,0,147,0,4.81,0,37428,0,0,False,True,headless
+42637110,1405,claude,feature,,ready,2026-10-02T15:24:17.740Z,2026-10-03T01:19:11.210Z,13,13,1,9,2,1,0,0,0,0,0,9,3,8,65818,10,6,19512,0,60.03,0,359111,0,0,False,True,headless
+bd95bae3,1407,claude,measure,docs,integrated,2026-10-02T15:37:50.106Z,2026-10-02T15:53:11.063Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,4.79,0,47065,0,0,False,True,headless
+f54d58e0,1418,claude,feature,docs plugin runtime tests,integrated,2026-10-02T15:53:17.761Z,2026-10-02T16:24:24.860Z,3,3,1,1,1,0,0,0,0,0,0,1,2,1,,,0,0,0,4.72,0,36732,0,0,False,True,headless
+5f471151,1401,claude,measure,docs,integrated,2026-10-02T15:53:26.634Z,2026-10-02T16:12:27.843Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,4.87,0,52157,0,0,False,True,headless
+3be848c0,1334,claude,refactor,docs runtime,integrated,2026-10-02T16:12:32.919Z,2026-10-02T23:35:31.022Z,4,4,1,3,0,0,0,0,0,0,0,3,1,3,66579,1,0,15287,0,22.11,0,175282,0,0,True,True,headless
+ab0eed00,1265,claude,docs,config plugin tests,integrated,2026-10-02T16:24:38.363Z,2026-10-02T16:32:59.732Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,1.87,0,11136,0,0,False,True,headless
+3664fe7f,1320,claude,feature,docs runtime tests,integrated,2026-10-02T16:33:04.880Z,2026-10-02T17:06:39.447Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,3.65,0,33491,0,0,False,True,headless
+27cca522,1414,claude,refactor,docs runtime tests,integrated,2026-10-02T16:45:28.356Z,2026-10-02T17:33:17.918Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,7.47,0,66588,0,0,False,True,headless
+eb7a8859,1337,claude,docs,plugin tests,integrated,2026-10-02T17:06:52.503Z,2026-10-02T17:14:44.933Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,1.77,0,10528,0,0,False,True,headless
+02edf3a8,724,claude,,docs plugin,integrated,2026-10-02T17:14:49.330Z,2026-10-02T17:34:53.976Z,3,3,1,2,0,0,0,0,0,0,0,2,1,2,,,0,0,0,5.36,0,38560,0,0,False,True,headless
+bea024b2,1453,claude,docs,docs,integrated,2026-10-02T17:37:11.204Z,2026-10-02T17:53:53.080Z,3,3,1,2,0,0,0,0,0,0,0,2,1,2,,,0,0,0,4.05,0,38446,0,0,False,True,headless
+a38a2691,627,claude,docs,plugin tests,integrated,2026-10-02T17:37:27.474Z,2026-10-02T17:51:45.978Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,1.91,0,11478,0,0,False,True,headless
+16257d7f,1412,claude,refactor,docs runtime tests,integrated,2026-10-02T17:51:08.171Z,2026-10-02T18:24:54.354Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,6.55,0,63200,0,0,False,True,headless
+2dc57acb,1413,claude,refactor,docs runtime tests,integrated,2026-10-02T17:51:54.517Z,2026-10-02T18:34:14.127Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,6.84,0,65634,0,0,False,True,headless
+bf4f66cb,1454,claude,feature,docs runtime tests,integrated,2026-10-02T17:53:58.983Z,2026-10-02T18:41:16.793Z,3,3,1,2,0,0,0,0,0,0,0,2,1,2,,,0,0,0,6.93,0,68236,0,0,False,True,headless
+e29f2da8,1456,claude,docs,docs,integrated,2026-10-02T18:25:06.051Z,2026-10-02T19:04:21.498Z,3,3,1,2,0,0,0,0,0,0,0,2,1,2,,,0,0,0,11.57,0,137272,0,0,False,True,headless
+c77e93d4,1455,claude,feature,docs runtime tests,integrated,2026-10-02T18:41:27.453Z,2026-10-02T19:43:54.379Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,11.29,0,112319,0,0,False,True,headless
+b40dbc9d,1416,claude,test,tests,integrated,2026-10-02T18:41:28.307Z,2026-10-02T19:24:03.775Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,5.42,0,54281,0,0,False,True,headless
+8333d781,1415,claude,refactor,docs runtime tests,integrated,2026-10-02T19:04:30.663Z,2026-10-02T19:54:24.453Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,5.84,0,57565,0,0,False,True,headless
+dbe597f3,1246,claude,docs,docs,integrated,2026-10-02T19:30:48.214Z,2026-10-02T19:34:58.054Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,0.81,0,3859,0,0,False,True,headless
+2100feb8,1376,claude,docs,,canceled,2026-10-02T19:35:03.447Z,2026-10-02T22:06:19.792Z,1,1,1,0,0,0,0,0,0,0,0,0,0,0,,,0,9006,0,0.66,0,2188,0,1,False,True,headless
+371c15a0,630,claude,,docs,integrated,2026-10-02T19:36:13.709Z,2026-10-02T22:19:53.024Z,3,3,1,2,0,0,0,0,0,0,0,3,0,3,67354,0,0,8044,0,4.94,0,23901,0,0,False,True,headless
+93222d22,1458,claude,docs,docs plugin,integrated,2026-10-02T19:44:08.587Z,2026-10-02T23:37:01.475Z,5,5,1,4,0,0,0,0,0,0,0,4,1,4,67477,2,1,7058,0,14.97,0,118757,0,0,False,True,headless
+f55a1fbb,1277,claude,fix,docs runtime tests,integrated,2026-10-02T19:53:17.201Z,2026-10-02T20:43:24.476Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,5.57,0,49786,0,0,False,True,headless
+78bdfc9c,1391,claude,test,tests,integrated,2026-10-02T19:54:36.215Z,2026-10-02T20:20:12.629Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,3.67,0,32193,0,0,False,True,headless
+3f479771,1392,claude,feature,docs runtime tests,integrated,2026-10-02T20:09:53.476Z,2026-10-02T20:56:19.715Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,4.51,0,38279,0,0,False,True,headless
+85a5328f,1466,claude,test,plugin tests,integrated,2026-10-02T20:20:25.168Z,2026-10-02T20:33:30.002Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,1.22,0,4804,0,0,False,True,headless
+710ace0e,1335,claude,test,tests,integrated,2026-10-02T20:33:38.874Z,2026-10-02T21:25:26.623Z,2,2,1,0,1,0,0,0,0,0,0,0,2,0,,,0,0,0,2.96,0,20505,0,0,False,True,headless
+c451a263,1286,claude,feature,docs runtime tests,integrated,2026-10-02T20:43:34.567Z,2026-10-02T21:10:47.026Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,2.02,0,15159,0,0,False,True,headless
+c1e7b209,1426,claude,fix,docs runtime tests,integrated,2026-10-02T20:56:32.350Z,2026-10-02T21:50:21.925Z,3,3,1,2,0,0,0,0,0,0,0,2,1,2,,,0,0,0,4.78,0,57506,0,0,False,True,headless
+f21fc4e9,1151,claude,feature,docs runtime tests,integrated,2026-10-02T21:11:00.082Z,2026-10-02T21:35:34.664Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,2.05,0,10992,0,0,False,True,headless
+96f427d4,1284,claude,refactor,runtime,integrated,2026-10-02T21:25:37.230Z,2026-10-02T22:38:15.633Z,1,1,1,0,0,0,0,0,0,0,0,1,0,1,,,0,1914,0,1.57,0,11804,0,0,False,True,headless
+92fe42cf,1288,claude,docs,docs,integrated,2026-10-02T21:35:45.689Z,2026-10-02T21:50:52.417Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,1.33,0,6052,0,0,False,True,headless
+f0e8b6ab,1310,claude,feature,docs runtime tests,integrated,2026-10-02T21:36:31.978Z,2026-10-02T23:54:50.857Z,4,4,1,3,0,0,0,0,0,0,0,3,1,3,68871,1,0,52,0,11.25,0,133907,0,0,False,True,headless
+8cf5ae79,1319,claude,feature,docs plugin runtime tests,integrated,2026-10-02T21:50:33.818Z,2026-10-03T00:11:48.912Z,3,3,1,1,1,0,0,0,0,0,0,1,2,1,,,0,0,0,7.36,0,44251,0,0,False,True,headless
+b4e5c6e4,1323,claude,refactor,docs plugin runtime tests,integrated,2026-10-02T21:50:57.227Z,2026-10-02T22:19:23.187Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,3.87,0,22430,0,0,False,True,headless
+d0e77030,1420,claude,feature,docs runtime,integrated,2026-10-02T23:55:01.962Z,2026-10-03T00:29:27.268Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,2.31,0,19196,0,0,False,True,headless
+5667034f,1422,claude,measure,docs,integrated,2026-10-03T00:12:09.306Z,2026-10-03T00:51:14.959Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,6.82,0,71999,0,0,False,True,headless
+e42e7305,1516,claude,test,tests,integrated,2026-10-03T00:29:39.441Z,2026-10-03T00:51:10.004Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,2.2,0,17023,0,0,False,True,headless
+811abebd,1421,claude,docs,,ready,2026-10-03T00:51:18.295Z,2026-10-03T01:04:25.243Z,2,2,1,1,0,0,0,0,0,0,0,1,0,1,,,0,245,0,1.6,0,11415,0,1,False,True,headless
+89f01109,1428,claude,feature,,ready,2026-10-03T00:51:21.192Z,2026-10-03T01:04:35.008Z,2,2,1,0,1,0,0,0,0,0,0,0,1,0,,,0,0,0,2.41,0,22617,0,1,False,True,headless
+3335913c,1424,claude,feature,,ready,2026-10-03T00:55:00.172Z,2026-10-03T01:17:56.013Z,2,2,1,0,1,0,0,0,0,0,0,0,1,0,,,0,0,0,3.71,0,30702,0,1,False,True,headless
+3fc33af0,1421,claude,docs,docs plugin,integrated,2026-10-03T01:04:37.313Z,2026-10-03T01:09:04.553Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,0.91,0,3618,0,0,True,True,headless
+92708e05,1428,claude,feature,docs runtime,integrated,2026-10-03T01:06:18.924Z,2026-10-03T01:21:58.486Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,0.55,0,3225,0,0,True,True,headless
+b06a1265,1457,claude,docs,docs,integrated,2026-10-03T01:09:24.877Z,2026-10-03T01:30:30.651Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,5.27,0,54478,0,0,False,True,headless
+05efd4f3,1405,claude,feature,docs runtime tests,integrated,2026-10-03T01:20:39.251Z,2026-10-03T01:47:20.994Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,1.06,0,10726,0,0,True,True,headless
+f7d0d744,1423,claude,measure,docs,integrated,2026-10-03T01:22:06.626Z,2026-10-03T02:04:17.502Z,3,3,1,2,0,0,0,0,0,0,0,2,1,2,,,0,0,0,5.88,0,74780,0,0,False,True,headless
+90e4def0,1430,claude,docs,docs plugin,integrated,2026-10-03T01:30:36.120Z,2026-10-03T01:48:34.863Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,1.06,0,6264,0,0,False,True,headless
+aa9fa5aa,1396,claude,feature,docs migrations runtime tests,integrated,2026-10-03T01:47:33.557Z,2026-10-03T03:03:50.976Z,3,3,1,2,0,0,0,0,0,0,0,2,1,2,,,0,0,0,21.41,0,159574,0,0,False,True,headless
+624c9f7f,1459,claude,docs,docs,integrated,2026-10-03T01:48:40.574Z,2026-10-03T02:11:15.945Z,3,3,1,2,0,0,0,0,0,0,0,2,1,2,,,0,0,0,6.54,0,71902,0,0,False,True,headless
+aa91a7cb,1433,claude,docs,docs,integrated,2026-10-03T02:04:25.672Z,2026-10-03T03:10:25.166Z,6,6,1,4,1,0,0,0,0,0,0,4,2,4,71272,3,1,159,0,12.11,0,101487,0,0,False,True,headless
+20a43f22,1395,claude,feature,docs migrations runtime tests,integrated,2026-10-03T02:11:20.700Z,2026-10-03T04:08:26.476Z,5,5,1,2,1,0,0,0,0,1,0,3,0,3,71994,2,0,276,0,22.88,1,174702,1,0,False,True,headless
+df56cda3,1503,claude,config,config docs,integrated,2026-10-03T02:32:30.032Z,2026-10-03T02:42:38.570Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,2.12,0,23394,0,0,False,True,headless
+d4bed4c9,1429,claude,feature,docs plugin runtime,integrated,2026-10-03T03:04:10.557Z,2026-10-03T03:30:14.619Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,2.26,0,21617,0,0,False,True,headless
+3397cb54,1470,claude,feature,docs runtime tests,integrated,2026-10-03T03:10:33.334Z,2026-10-03T05:27:17.057Z,6,6,1,4,1,0,0,0,0,0,0,4,1,4,72804,3,1,94,0,7.76,0,81090,0,0,False,True,headless
+30d8c537,1460,codex,config,config docs other,integrated,2026-10-03T03:30:37.076Z,2026-10-03T04:12:16.449Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,0.0,1,9465,0,0,False,True,headless
+a22cd69e,793,claude,,docs runtime tests,integrated,2026-10-03T04:08:39.980Z,2026-10-03T04:39:15.912Z,1,1,1,0,0,0,0,0,0,0,0,1,0,1,,,0,0,0,1.13,0,8002,0,0,False,True,headless
+f4b8ea86,1397,claude,feature,docs runtime tests,integrated,2026-10-03T04:19:15.742Z,2026-10-03T13:25:40.203Z,8,8,1,4,3,0,0,0,0,0,0,5,1,4,73533,5,2,18137,0,23.06,0,149655,0,0,False,True,headless
+87c49f6d,1450,claude,feature,docs plugin runtime tests,integrated,2026-10-03T04:21:02.738Z,2026-10-03T05:02:07.369Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,3.18,0,27614,0,0,False,True,headless
+daf1e207,1566,claude,docs,docs,integrated,2026-10-03T05:02:48.397Z,2026-10-03T05:31:22.989Z,3,3,1,1,1,0,0,0,0,0,0,1,2,1,,,0,0,0,4.44,0,37130,0,0,False,True,headless
+6c6542c9,1560,claude,fix,docs runtime tests,integrated,2026-10-03T05:30:22.402Z,2026-10-03T13:02:22.327Z,8,8,1,4,3,0,0,0,0,0,0,4,2,4,73677,5,1,15832,0,22.21,0,123132,0,0,False,True,headless
+6058c3f0,1561,claude,feature,docs runtime tests,integrated,2026-10-03T05:31:55.761Z,2026-10-03T06:26:07.540Z,3,3,1,2,0,0,0,0,0,0,0,2,1,2,,,0,0,0,9.38,0,111021,0,0,False,True,headless
+dc686e6a,1567,claude,feature,docs plugin runtime tests,integrated,2026-10-03T05:41:56.308Z,2026-10-03T06:54:24.743Z,3,3,1,1,1,0,0,0,0,0,0,1,2,1,,,0,0,0,9.93,0,115830,0,0,False,True,headless
+6cc1b23c,1399,claude,feature,docs runtime tests,integrated,2026-10-03T06:18:10.221Z,2026-10-03T08:08:02.506Z,4,4,1,2,1,0,0,0,0,0,0,2,2,2,,,0,0,0,14.02,0,116000,0,0,False,True,headless
+94987414,1434,claude,test,tests,integrated,2026-10-03T06:26:21.367Z,2026-10-03T09:02:57.976Z,3,3,1,1,1,0,0,0,0,0,0,1,2,1,,,0,0,0,7.52,0,74196,0,0,False,True,headless
+b66bd3bf,1436,claude,test,tests,integrated,2026-10-03T07:14:24.207Z,2026-10-03T08:26:24.042Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,5.71,0,42322,0,0,False,True,headless
+e6cfc445,1398,claude,feature,docs plugin runtime tests,integrated,2026-10-03T08:09:09.390Z,2026-10-03T12:24:38.107Z,8,8,1,5,1,0,1,0,0,0,0,5,3,3,75225,1,0,80,0,22.38,0,140955,0,0,False,True,headless
+eabe9a2a,1379,claude,fix,docs plugin runtime,integrated,2026-10-03T08:38:55.993Z,2026-10-03T09:25:05.820Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,2.48,0,22294,0,0,False,True,headless
+ae4bbfa9,1435,claude,test,tests,integrated,2026-10-03T09:03:36.173Z,2026-10-03T14:43:57.514Z,4,4,1,0,1,0,0,0,0,2,0,1,1,1,,,0,0,0,9.94,1,34516,1,1,False,True,headless
+802e6e32,1410,claude,docs,docs,integrated,2026-10-03T11:44:27.987Z,2026-10-03T11:48:34.240Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,1.22,0,10865,0,0,False,True,headless
+a030860f,1417,claude,measure,docs,integrated,2026-10-03T11:44:28.618Z,2026-10-03T11:56:21.778Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,3.5,0,42836,0,0,False,True,headless
+4a9dbadb,1364,claude,test,docs tests,integrated,2026-10-03T13:35:24.614Z,2026-10-03T14:05:50.137Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,1.9,0,19513,0,0,False,True,headless
+d987f39e,1533,claude,feature,docs runtime tests,integrated,2026-10-03T13:35:25.541Z,2026-10-03T14:59:05.898Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,10.93,0,83549,0,0,False,True,headless
+6a47ab6a,1581,claude,fix,docs runtime tests,integrated,2026-10-03T14:06:17.021Z,2026-10-03T15:13:06.099Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,2.9,0,37354,0,0,False,True,headless
+7876b69f,1589,claude,fix,runtime,integrated,2026-10-03T14:44:16.347Z,2026-10-03T15:22:07.534Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,1.29,0,12274,0,0,False,True,headless
+d1eae627,1582,claude,test,docs tests,integrated,2026-10-03T14:59:22.287Z,2026-10-03T15:45:45.345Z,3,3,1,2,0,0,0,0,0,0,0,2,1,2,,,0,0,0,4.16,0,41754,0,0,False,True,headless
+65029e8f,1580,claude,test,docs runtime tests,integrated,2026-10-03T15:22:16.933Z,2026-10-03T23:24:15.160Z,4,4,1,2,1,0,0,0,0,0,0,3,0,3,77049,1,0,25019,0,10.54,0,93068,0,0,False,True,headless
+5ebe4f16,1232,claude,feature,docs plugin runtime tests,integrated,2026-10-03T15:22:17.785Z,2026-10-03T16:33:34.195Z,4,4,1,2,1,0,0,0,0,0,0,2,2,2,,,0,0,0,10.64,0,81804,0,0,False,True,headless
+171fce7a,1586,claude,fix,docs runtime tests,integrated,2026-10-03T15:45:56.098Z,2026-10-03T16:20:24.274Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,4.3,0,54211,0,0,False,True,headless
+1b30d72b,1588,claude,fix,docs migrations runtime,integrated,2026-10-03T16:11:25.099Z,2026-10-03T16:47:48.615Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,2.3,0,22650,0,0,False,True,headless
+7aad617e,1587,claude,fix,docs runtime tests,integrated,2026-10-03T16:20:36.198Z,2026-10-03T16:58:46.910Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,2.09,0,20426,0,0,False,True,headless
+a5a11fd2,1400,claude,docs,docs plugin,integrated,2026-10-03T16:33:46.932Z,2026-10-03T23:41:29.839Z,7,7,1,5,1,0,0,0,0,0,0,5,1,5,77404,4,2,21911,0,11.57,0,70842,0,0,False,True,headless
+98a2d261,1518,claude,fix,docs plugin runtime tests,integrated,2026-10-03T16:48:26.342Z,2026-10-03T17:19:07.826Z,3,3,1,2,0,0,0,0,0,0,0,2,1,2,,,0,0,0,3.23,0,31107,0,0,False,True,headless
+fcbdd009,1462,claude,docs,docs plugin tests,integrated,2026-10-03T16:59:10.000Z,2026-10-04T00:06:11.129Z,5,5,1,3,1,0,0,0,0,0,0,4,0,4,77582,2,1,21042,0,8.61,0,60193,0,0,False,True,headless
+3a8484c5,1461,claude,docs,ci docs,integrated,2026-10-03T17:04:33.734Z,2026-10-03T17:19:42.106Z,2,2,1,1,0,0,0,0,0,0,0,2,0,2,,,0,0,0,4.28,0,41484,0,0,False,True,headless
+8eeacc00,1247,claude,fix,docs runtime tests,integrated,2026-10-03T17:19:33.310Z,2026-10-03T17:48:10.075Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,2.54,0,26309,0,0,False,True,headless
+18884f2f,1269,claude,feature,docs runtime tests,integrated,2026-10-03T17:19:46.457Z,2026-10-03T17:58:41.190Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,3.15,0,37519,0,0,False,True,headless
+df6b2bca,1345,claude,fix,docs,integrated,2026-10-03T17:24:00.502Z,2026-10-03T17:38:27.750Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,0.84,0,6164,0,0,False,True,headless
+2f3b8539,1500,claude,fix,runtime,integrated,2026-10-03T17:39:05.701Z,2026-10-03T18:06:30.061Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,1.74,0,17769,0,0,False,True,headless
+db767ec4,1531,claude,config,ci config,integrated,2026-10-03T17:54:07.899Z,2026-10-03T18:06:34.051Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,0.49,0,3726,0,0,False,True,headless
+a0155fb0,1361,claude,test,docs runtime tests,integrated,2026-10-03T18:06:54.231Z,2026-10-04T01:00:52.424Z,3,3,1,1,1,0,0,0,0,0,0,1,1,1,,,0,12779,0,15.0,0,95569,0,0,False,True,headless
+2dcbe739,1402,claude,config,config docs,integrated,2026-10-03T18:06:54.982Z,2026-10-03T18:17:16.089Z,1,1,1,0,0,0,0,0,0,0,0,1,0,1,,,0,0,0,1.67,0,10668,0,0,False,True,headless
+8e0fe006,1424,claude,feature,docs plugin runtime tests,integrated,2026-10-03T18:06:55.416Z,2026-10-03T18:40:32.717Z,2,2,1,1,0,0,0,0,0,0,0,1,1,1,,,0,0,0,1.74,0,10768,0,0,True,True,headless
+d44b0bad,1519,claude,fix,docs runtime tests,integrated,2026-10-03T18:20:36.457Z,2026-10-03T19:07:09.201Z,2,2,1,0,1,0,0,0,0,0,0,0,2,0,,,0,0,0,2.72,0,26470,0,0,False,True,headless
+42db7f74,1579,claude,fix,docs runtime tests,integrated,2026-10-03T18:41:11.534Z,2026-10-03T19:37:52.425Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,4.29,0,58260,0,0,False,True,headless
+00364554,1545,claude,docs,docs,integrated,2026-10-03T19:07:36.937Z,2026-10-03T19:48:16.223Z,3,3,1,2,0,0,0,0,0,0,0,2,1,2,,,0,0,0,7.54,0,85214,0,0,False,True,headless
+e7139483,1427,claude,fix,docs runtime tests,integrated,2026-10-03T19:38:15.689Z,2026-10-03T20:15:45.059Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,3.11,0,33128,0,0,False,True,headless
+64727486,251,claude,,docs runtime tests,integrated,2026-10-03T19:40:47.445Z,2026-10-03T20:27:42.264Z,3,3,1,1,1,0,0,0,0,0,0,3,0,3,78708,0,0,0,0,6.69,0,64461,0,0,False,True,headless
+2aa0ae42,1479,claude,feature,docs migrations runtime tests,integrated,2026-10-03T19:48:40.884Z,2026-10-03T20:35:49.422Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,6.06,0,70649,0,0,False,True,headless
+5b0f0eb3,774,claude,,docs runtime tests,integrated,2026-10-03T20:16:15.507Z,2026-10-03T21:04:27.877Z,3,3,1,1,1,0,0,0,0,0,0,1,2,1,,,0,0,0,1.85,0,14075,0,0,False,True,headless
+18bcb9c4,655,claude,,docs plugin runtime tests,integrated,2026-10-03T20:36:13.725Z,2026-10-04T00:43:32.140Z,7,7,1,3,3,0,0,0,0,0,0,4,2,4,79101,4,1,7693,0,9.06,0,67344,0,0,False,True,headless
+e1e6e9ee,1193,claude,test,tests,integrated,2026-10-03T20:36:14.457Z,2026-10-03T20:53:33.708Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,1.27,0,9051,0,0,False,True,headless
+f298ee8f,1546,claude,config,ci docs,integrated,2026-10-03T21:04:57.132Z,2026-10-03T23:52:53.809Z,3,3,1,1,0,0,0,0,1,0,0,1,1,1,,,0,7637,0,4.43,0,48537,0,0,False,True,headless
+029cc29d,775,claude,,docs runtime tests,integrated,2026-10-03T21:07:57.757Z,2026-10-03T22:57:17.815Z,3,3,1,1,0,0,1,0,0,0,0,1,2,1,,,0,0,0,5.78,0,62362,0,0,False,True,headless
+d0a7cea0,1478,claude,fix,docs runtime tests,integrated,2026-10-03T21:19:16.841Z,2026-10-03T22:45:09.035Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,3.72,0,45688,0,0,False,True,headless
+ac2ed498,1188,claude,fix,docs runtime,integrated,2026-10-03T21:25:16.766Z,2026-10-03T21:43:13.244Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,1.31,0,8452,0,0,False,True,headless
+b7a02003,1328,claude,test,docs runtime tests,integrated,2026-10-03T21:43:55.832Z,2026-10-03T23:09:41.085Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,5.07,0,50412,0,0,False,True,headless
+6ef398b5,1482,claude,fix,docs tests,integrated,2026-10-03T22:51:04.185Z,2026-10-03T23:52:08.542Z,1,1,1,0,0,0,0,0,0,0,0,0,1,0,,,0,0,0,3.39,0,38715,0,0,False,True,headless
+96309350,1484,claude,feature,docs plugin runtime tests,integrated,2026-10-03T22:57:44.317Z,2026-10-03T23:40:59.469Z,3,3,1,2,0,0,0,0,0,0,0,2,1,2,,,0,0,0,4.57,0,42346,0,0,False,True,headless

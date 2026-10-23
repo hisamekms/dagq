@@ -205,12 +205,22 @@ goal 96のADR-t1487-1と、task 1395で実装した永続request・runtime plann
 CLIのtask/run/request/proposal/eventの読み取りにoperation、generation、診断窓と原因、保留時刻、snapshot、元条件対応、全後続のbefore/after、引き継ぎ先、判断actor/authority、結末を結ぶ。statsは総turnと原因別turn、review verdict、revise/resume（衝突/e2e/その他）、診断・保留・適用・継続・撤回・失敗の件数と時間を別に集計する。原因未分類はunlabeledとし、reviewの理由件数とreview回数を混ぜない。一つのturnに原因が複数なら主因ごとの件数は一つ、副因は別の非加算表示にする。
 
 候補検知の初期値は同じ原因の非pass reviewが連続3回か、同じ診断上の残作業が2回続けて減らないこと。総turnは参考に表示するだけで自動停止/分割に使わない。自動診断は同じrunの同じHEAD/条件/根拠event窓で一回だけ、継続を選んだ後は新しい根拠か進捗の変化まで抑制する。手動依頼は抑制を越えても重複操作は作らない。
+ここでの「同じ原因の非pass review」は、reviewから来た非pass（concernとrevise）を`primary_code`を問わず数え、passで数え直す。
+衝突・e2e・検証・provider/host・receiptの促し・worker質問の答えのturnとその後のreviewの無い区間は、この数を増やさず数え直しもしない。
+`primary_code`が同じことを条件にしない（#1405は同じcodeの連続が最長2回で、条件にすると長期化を見逃す。下の「長期化の測定」）。
+候補検知が起こすのは読み取りだけの診断で、検知だけでrunを保留しない。
+継続を選んだ後に続けてよいのは、reviewから来た非passの2回まで（その修正のturnを含む）で、3回目の非pass reviewを新しい根拠として再診断する。
+この再診断も保留を決めるのは診断で、回数で自動に保留しない。
+衝突・e2e・検証・provider/hostのturnはこの追加の上限に数えない。
+抑制は時間では決めない（reviewの往復は数分から数十分で、人の答え待ちが数時間になりうるので、時間の窓は原因の区別にならない）。
 
 一つの元taskから再置換先までを含む系統に自動の保留・再計画を3回までとする（pauseの柵の確定で一回、保存や起動のretryは同じ回）。適用・撤回・継続でも数を戻さず、再起動でも永続記録で数える。到達したら根拠と今の成果を保持して人のscope/recovery_failed判断へ上げ、上限を超える自動分割をしない。権限ある追加一回の判断は対象系統・理由・回数を記録する。requestのplanner起動は既存の一件3回、plan review/revise/resume・Spikeの上限も独立に守る。抑制/上限の記録から候補数と実際の保留数を分けて評価する。設定の実装ではこれらの値を文書と一致させ、固定バイナリが読めるまでdagq.tomlへ新keyを足さない。
 
 ## 歴史的な観測窓
 
-#1405、run `42637110`の例は動き続けるrunの最新総数ではなく、**event 70011（2026-10-03T00:47:54Z、12番目のturn_finished）までを含み、70018より前で締めた窓**である。task 1522の基準値もこの同じ締めと定義を使い、後の数を混ぜない。根拠はこのtaskのcontextに渡されたeventの観測で、本taskではqueueを再測定しない。
+#1405、run `42637110`の例は動き続けるrunの最新総数ではなく、**event 70011（2026-10-03T00:47:54Z、12番目のturn_finished）までを含み、70018より前で締めた窓**である。
+task 1522の基準値もこの同じ締めと定義を使い、後の数を混ぜない。
+下の数はqueueのeventから再現でき、原因別の内訳と測定時点までの窓は「長期化の測定」が持つ。
 
 | この窓の数 | 定義と根拠 |
 | --- | --- |
@@ -221,4 +231,257 @@ CLIのtask/run/request/proposal/eventの読み取りにoperation、generation、
 
 proposal 548の提出時点は別窓で、event 70025（2026-10-03T00:50:05Z）までならturn_started 13 / turn_finished 12、review_finished 11（非pass 9、pass 2）。追加の非passは70018（11回目のreview_finished、revise）。この別窓の13 turnやreview 11を歴史的基準値に加えない。
 
-この事例を「12 turnなので分割」とは判断しない。concern/reviseの指摘の重なり、条件ごとの残作業、passしたHEADを診断し、衝突の解消は既存のprecheck/resume/継承retryを比較し、e2eの失敗は対象commitのlogでコード修正かhost復旧を分ける。渡された観測に衝突/e2eのevent ID別件数は無いので推測してreviewの8回やturnの12回へ加えない。原因別の測定で衝突/e2e eventと対応を集計するときも同じ締めのevent列を使い、この窓の基準値を変えない。分割する案でも未達の指摘と必要なe2eを子に引き継ぎ、元成果を保存してから新しい関門を通す。
+この事例を「12 turnなので分割」とは判断しない。concern/reviseの指摘の重なり、条件ごとの残作業、passしたHEADを診断し、衝突の解消は既存のprecheck/resume/継承retryを比較し、e2eの失敗は対象commitのlogでコード修正かhost復旧を分ける。衝突/e2eのturnはreviewの8回に加えず、turnの12回の中で原因を分けて数える（「長期化の測定」の原因別の内訳）。
+分割する案でも未達の指摘と必要なe2eを子に引き継ぎ、元成果を保存してから新しい関門を通す。
+
+## 長期化の測定（導入前の基準値）
+
+再計画の導入前に、#1405と比べられる非対話のrunの長期化を原因別に数えた基準値。
+読んだのは`dagq events`・`dagq stats`だけで、queueの操作・KPIの印・hostの設定は変えていない。
+測定の時点は、eventを読み終えた後に`dagq status`が返したcursor 296163（2026-10-22T21:08:01Z）。
+再現は[measure.py](task-replanning/measure.py)で、runごとの値は[out/runs.csv](task-replanning/out/runs.csv)にある（1回きりの測定の出力で、同じ引数で作り直せる。queueのeventは消えないので、窓が同じなら値も同じ）。
+検知の初期値・抑制・継続の上限の値は「回数・抑制・上限と観測」だけが持ち、この節はその根拠を持つ。
+
+### 数え方
+
+- turn: runの`turn_started`（送ったturn）と`turn_finished`（終わったturn）のevent件数。
+  走っているturnはstartedだけに数え、finishedに数えない。
+- review: `review_finished`の件数。
+  差し戻し（非pass）はverdictがpass以外（concernとrevise）の件数で、reviewの理由の数やjobの起動数ではない。
+- turnの原因: `turn_started`の`what`で分ける。
+  `revise request`はreview、`conflict request`は衝突、`answer of ask N`はworker質問の答え、`provider switch`と失敗した`turn_finished`の次のturnはprovider/host。
+  `resolution request`（resume）は、その前の最後の契機のeventの原因を取る: 人の`send_back`（`landing_decided`）と非passの`review_finished`はreview、`conflict_precheck`と`rebase_conflict`の`landing_recheck_failed`は衝突、`run_e2e_failed`はe2e、rebase後の検証の失敗は検証、`validation_finished`の`accepted: false`はreceiptの促し、`resume_started`の理由はそれぞれの原因。
+  どれにも当たらないturnは`unlabeled`として分け、ほかへ混ぜない（この窓では0件）。
+- 人待ち: run の`approve_landing`・`decide`・`worker_question`・`stalled`・`blocked`のaskの`ask_opened`から`ask_answered`まで。
+  答えの無いaskは欠測として件数を別に出す（0秒にしない）。
+- 費用: `turn_finished`の`cost_usd`の和と`tokens.output`の和。
+  値の無いturn（Codexの`cost_usd`、失敗したturn）は欠測として件数を別に出す。
+- `dagq stats`の`resume_reasons`は使わない。
+  #1405では衝突のresumeを`unknown`、e2eの失敗のresumeを`sent_back`と出し、eventの`resume_started`の理由（衝突1・人の`send_back` 2・e2e 1）と合わない。
+
+### #1405の窓
+
+run `42637110`（2026-10-02T15:24:17Z claim）。
+3つの窓を並べ、後の窓の数を前の窓の基準値に混ぜない。
+
+| 窓 | 締め | turn_started / turn_finished | review_finished（非pass = concern + revise / pass） |
+| --- | --- | --- | --- |
+| 歴史的な観測窓 | event 70011（2026-10-03T00:47:54Z、12番目のturn_finished）まで・70018より前 | 12 / 12 | 10（8 = 3 + 5 / 2） |
+| proposal 548の提出時点 | event 70025（2026-10-03T00:50:05Z）まで | 13 / 12（13番目は走っている） | 11（9 = 3 + 6 / 2） |
+| 測定時点 | cursor 296163（2026-10-22T21:08:01Z）まで | run 42637110は13 / 13、継承したrun `05efd4f3`は1 / 1、taskの累積は14 / 14 | run 42637110は12（9 = 3 + 6 / 3）、taskの累積は13（9 / 4） |
+
+測定時点では走っているturnは無い。
+run 42637110はevent 70528（2026-10-03T01:19:11Z）でtaskがreadyに戻って終わり、継承したrun `05efd4f3`がevent 70792（2026-10-03T01:47:20Z）でtaskをcompletedにした。
+task 1405の最後のeventは157547（`attributes_baseline`）。
+
+原因別のturn（根拠はturn_startedのevent ID）:
+
+| 原因 | 歴史的な観測窓（12） | 測定時点のtask累積（14） |
+| --- | --- | --- |
+| 最初のprompt | 1（64736） | 2（64736、継承したrunの70548） |
+| reviewの差し戻しの修正 | 8: reviseの6（65328・65758・68818・68987・69534・69658）と、人の`send_back`の後のresume 2（ask 339の68544、ask 349の69290） | 9（+70025、70018のrevise） |
+| 衝突 | 2（67085: 67005の`landing_recheck_failed`、69793: 69791の`conflict_precheck`） | 2。70322の`conflict_precheck`はturnを送らずaskにし、継承したrunの70548のturnが衝突の解消だけを行った（70522の`triage_decided`）ので、原因で数えれば衝突は3 |
+| e2e | 1（69970: 69955の`run_e2e_failed`） | 1 |
+| receiptの促し | 0（`validation_finished`の拒否は0件） | 0 |
+| worker質問の答え | 0 | 0 |
+| provider/hostの障害 | 0（失敗した`turn_finished`は0件。68841の`submit_not_started`の止まりは68925で自然に解け、turnは増えていない） | 0 |
+
+人が要った判断（turnとは別に数える）: 歴史的な観測窓は`approve_landing`の2件（ask 339: 2026-10-02T16:45:25Zから22:04:06Zの5時間18分41秒、ask 349: 1分44秒）。
+測定時点の累積は5件で、ask 355（`approve_landing`、理由の無い`send_back`）と`decide`の356・357（resumeの上限による`resume_exhausted`の復旧job）が足され、人待ちは合計5時間25分12秒。
+復旧jobは歴史的な観測窓で1回（68842、止まりの確認）、累積で4回。
+費用は歴史的な観測窓で$56.13・出力token 314,869、taskの累積で$61.08・出力token 369,837。
+元条件の達成（taskのcompleted）までは最初のclaimから10時間23分3秒で、うち人待ちが5時間25分12秒。
+claimの前のplan reviewの差し戻し2回（607・609。612でready）は計画の段のもので、runの手戻りに数えない。
+
+同じ受け入れ条件への手戻り: reviewのeventは指摘がどの条件に当たるかを持たないので、#1405だけ、`review_finished`の`reasons`の文面を最終の受け入れ条件（event 64101の`to`）の項目に手で対応づけた。
+1つの指摘が複数の項目に当たれば両方に数える。
+
+| 項目 | 歴史的な観測窓の非pass review | 測定時点で足されたもの |
+| --- | --- | --- |
+| A1 workspaceなしで最初のsession・revise・resume・答えまで進む | 0 | 0 |
+| A2 supervisorの停止と起動を越えてturnが続きadoptされる（pidと起動時刻の識別） | 4（65320・68811・69528・69651） | 0 |
+| A3 止める全ての経路の後にwrapperとturnのprocessが残らない | 4（65320・65751・68811・69528） | 1（70018） |
+| A4 wrapperの入口と登録がterminalとworkspace IDを待たない | 0 | 0 |
+| A5 設定がworkspaceのときは今までどおり（backgroundとworkspaceのsessionが混ざる場合） | 2（69528・69651） | 1（70018） |
+| A6 integration testが確かめる | 2（65320・68811） | 0 |
+| 条件の文面の外の設計の規則（run dirのI/O、ADR-t1404-1決定10のstatsの生死判定） | 3（65818・68981・69064） | 0 |
+| repositoryの規則（receiptのstressの根拠） | 1（68811） | 0 |
+
+繰り返した指摘はA2とA3に集まり、その中身はどちらもwrapperとturnのprocessの識別（pidと起動時刻、sessionの境界）だった（65320・69528・69651、statsの68981・69064も同じ仕組み）。
+A2とA3は同じ識別の仕組みに依存し、残る条件は独立していなかったので、条件ごとに分けても繰り返した指摘は一方の子に残る。
+#1405は回数では長期化していたが、分割より、識別の仕組みを1つの作業として直すことが残作業の中身で、衝突2回とe2e 1回のturnはscopeの大きさと関係しない。
+
+### 比べる集団と窓
+
+- 集団: `run_claimed`の`worker_mode`がheadlessで、2026-10-01T00:00Zから2026-10-04T00:00Zの間にclaimしたrun（claimのevent 55037〜79472）。
+  人が開いたrun（interactive、49件）は除く。
+- 終わり: 2026-10-06T00:00Zより前のevent（最後は106950）で終わりを見た。
+  145件の全てが終わっている（着地139、readyに戻った5、cancel 1）。
+- provider: Claude 144、Codex 1。
+- 短い正常run: 着地し、turnが1つで非passのreviewが無いrun（55件）。
+- 下の表の時間・人待ち・費用・出力tokenは、`runs.csv`の`population`がTrueの行の`claim`から`ended_at`まで・`human_wait_secs`・`cost_usd`・`output_tokens`の各群のp50 / p90（`measure.py`の`pct`の最も近い順位）。
+- 費用は`cost_missing_turns`が0のrunだけ（集団140件、短い正常run 54件、候補16件）、出力tokenは`tokens_missing_turns`が0のrunだけ（集団141件、短い正常run 55件、候補16件）で取り、欠測のあるrunを下限の値として混ぜない。
+
+runの単位の表（検知の根拠に使う。効果の比較の基準値は下の「taskの累積の基準値」）:
+
+| 値 | 集団145件 | 短い正常run 55件 | 検知の候補18件 | #1405（歴史的な観測窓） |
+| --- | --- | --- | --- | --- |
+| turn p50 / p90 / 最大 | 2 / 4 / 13 | 1 / 1 / 1 | 5 / 8 / 13 | 12 |
+| claimから終わりまで p50 / p90 | 0.68h / 2.62h | 0.51h / 1.11h | 3.88h / 8.03h | 9.39h（窓の締めまで） |
+| 人待ち p50 / p90 | 0 / 67分 | 0 / 0 | 117分 / 350分 | 5時間20分 |
+| 費用 p50 / p90 | $4.3 / $11.3 | $2.5 / $5.7 | $11.8 / $23.1 | $56.13 |
+| 出力token p50 / p90 | 38,261 / 95,569 | 19,513 / 58,260 | 101,487 / 175,282 | 314,869 |
+
+turnの原因別の合計（145件、335 turn）: 最初のprompt 145、reviewの修正140、衝突37、検証4、provider/host 6、e2e 2、worker質問の答え1、receiptの促し0、`unlabeled` 0。
+最初のprompt以外のturn 190のうち、衝突・検証・e2e・provider/hostは49（26%）で、35件のrunにある。
+総turnだけを見るとこれらがreviewの修正と混ざるので、検知はreviewの非passだけで数える。
+
+| change | run | turn p50 / p90 / 最大 | 検知の候補 |
+| --- | --- | --- | --- |
+| feature | 40 | 2 / 5 / 13 | 8 |
+| fix | 32 | 1 / 2 / 8 | 1 |
+| docs | 23 | 2 / 5 / 7 | 4 |
+| test | 18 | 1 / 3 / 4 | 1 |
+| refactor | 10 | 1 / 4 / 4 | 1 |
+| config | 7 | 1 / 2 / 3 | 0 |
+| measure | 7 | 2 / 3 / 3 | 0 |
+| 無し（changeの導入前のtask） | 8 | 3 / 3 / 7 | 3 |
+
+areaは`dagq stats`がrunの着地した差分から決めるので、1つのrunが複数のareaに入り、着地しなかったrun（#1405のrun 42637110を含む6件）は空になる。
+着地しなかったrunは、同じtaskの着地したrunのareaで読む（#1405はdocs・runtime・tests）。
+
+| area | run | turn p50 / p90 / 最大 | 検知の候補 |
+| --- | --- | --- | --- |
+| docs | 120 | 2 / 4 / 8 | 17 |
+| tests | 92 | 2 / 4 / 8 | 12 |
+| runtime | 88 | 2 / 4 / 8 | 12 |
+| plugin | 28 | 2 / 5 / 8 | 5 |
+| migrations | 6 | 1 / 3 / 5 | 1 |
+| config | 6 | 1 / 2 / 2 | 0 |
+| ci | 5 | 2 / 3 / 3 | 0 |
+| other | 1 | 1 / 1 / 1 | 0 |
+| 空（着地しなかったrun） | 6 | 2 / 4 / 13 | 1 |
+
+### taskの累積の基準値
+
+効果の比較は導入前も導入後もtaskの累積で行い、集計の範囲を揃える。
+上のrunの単位の表は検知の根拠で、効果の比較には使わない（#1405の候補のrunは継承の前のrunだけで、復旧jobも含まないため）。
+
+- 対象のtaskの選び方と集計を分ける。
+  対象は、claimの窓（2026-10-01T00:00Zから2026-10-04T00:00Z）にheadlessのrunをclaimしたtask（`tasks.csv`の1行）。
+  集計は、そのtaskの全てのrunと、`task_id`がそのtaskの`session_closed`のうち最初のclaimからtaskの終わり（completedかcanceled）までのものを足す。
+  全てのrunは、claimの窓より後でも観測の終わり（2026-10-06T00:00Z）より前にclaimしたrun（継承retryと次のrun）と、headless以外のrunを含む。
+  runの単位の表（`runs.csv`の`population`がTrue）はclaimの窓のheadlessのrunだけで、それ以外のrunはそのtaskの累積にだけ足す（`runs.csv`の`population`がFalseの行、`tasks.csv`の`runs_outside_population`）。
+  この窓では、そのようなrunは無かった（2つのrunを持つ5件のtaskは、どちらのrunもclaimの窓のheadlessのrun）。
+  claimの窓を2026-10-02から2026-10-03に狭めて流すと、#1405の継承したrun `05efd4f3`（2026-10-03T01:20:39Zのclaim）は集団の外になるが、taskの累積には入り、2 run・14 turnになる。
+- 観測の終わりまでにtaskが終わらなければ、`tasks.csv`の`end`は`open`で、時間は欠測とする（その時点までのrunとsessionは足す）。
+- 除くtask: 窓の前にもrunを持つ11件（「欠測」）。
+  残る129件はどれも観測の終わりまでに終わった（completed 128、canceled 1）。
+- 時間: 最初のclaimからtaskの終わりまで。
+- 費用の成分: `session_closed`の`kind`で分ける。
+  worker（`worker`・`revise`・`resume`のsession）、reviewのjob（`review`）、復旧job（`triage`）、計画（`runtime_planner`・`plan_review`・`planner`）、その他（導入前の範囲では0）。
+  成分ごとにsession数、出力token、`cost_usd`を出し、値の無いsessionの数を別の列に残す。
+- 成分ごとの値を持つかどうか（導入前の129件のsessionで数えた）:
+
+| 成分 | session | 出力token | `cost_usd` | 比べ方 |
+| --- | --- | --- | --- | --- |
+| worker | 302 | 297（5は欠測） | 296（6は欠測） | 出力tokenと費用を、欠測の無いtaskだけで比べる |
+| reviewのjob | 306 | 130（176は欠測。Codexのjobはtokenを残さない） | 全て欠測 | session数で比べる。出力tokenは欠測の無いtaskだけの参考値で、費用は比べない |
+| 復旧job | 12（8件のtask） | 12 | 全て欠測 | session数と出力tokenで比べる。費用は比べない |
+| 計画 | 0 | ― | ― | 下の「効果の指標」の再計画のplannerとplan reviewを参照 |
+
+- taskが始まる前の計画（最初のclaimの前のplannerとplan review。#1405ではproposal 490のplan review 607・609・612）は、導入前も導入後もこの範囲の外で、比べない。
+  plan reviewの`session_closed`はproposalの1つのtaskの`task_id`だけを持ち、taskごとに分けられないためでもある。
+- 短い正常task: 1つのrunが1つのturnで非passのreviewなく着地したtask（46件）。
+- 検知の候補のtask: 候補のrunを持つtask（16件。候補のrun 18件のうち2件は窓の前にもrunを持つtaskで除いた）。
+
+| 値（p50 / p90。runの数の行は件数） | 集団129件 | 短い正常task 46件 | 検知の候補のtask 16件 | #1405 |
+| --- | --- | --- | --- | --- |
+| runの数が2以上のtask | 5 | 0 | 2 | 2 run |
+| 最初のclaimからtaskの終わりまで | 0.71h / 2.73h | 0.61h / 1.11h | 4.26h / 10.38h | 10.38h |
+| 最初のclaimから元条件の達成まで（completedのtaskだけ） | 0.71h / 2.73h | 0.61h / 1.11h | 4.26h / 10.38h | 10.38h |
+| turn | 2 / 4 | 1 / 1 | 6 / 8 | 14 |
+| 人待ち | 0 / 67分 | 0 / 0 | 134分 / 365分 | 325分 |
+| workerのsession | 2 / 4 | 1 / 1 | 6 / 8 | 13 |
+| workerの費用（欠測の無いtask） | $4.51 / $11.29（124件） | $2.90 / $6.06（45件） | $11.76 / $23.06（13件） | $61.08 |
+| workerの出力token（欠測の無いtask） | 40,867 / 101,487（125件） | 22,650 / 58,260（46件） | 101,487 / 149,655（13件） | 369,837 |
+| reviewのjobのsession | 2 / 4 | 1 / 1 | 6 / 9 | 13（tokenは全て欠測） |
+| reviewのjobの出力token（欠測の無いtask、参考値） | 14,713 / 41,596（52件） | 6,550 / 11,440（25件） | 53,340 / 61,460（6件） | 欠測 |
+| 復旧jobのsession | 0 / 0 | 0 / 0 | 0 / 3 | 3（出力token 2,053、費用は欠測） |
+
+#1405の列は測定時点の窓のtaskの累積（run 42637110と継承したrun `05efd4f3`）で、歴史的な観測窓の値（「#1405の窓」）とは別。
+復旧jobはsessionの数で、`recovery_requested`の4回のうちsessionを開かずに終わった1回（68842、止まりの確認の`wait`）を含まない。
+
+### 候補検知の初期値の根拠
+
+- reviewの非passの連続の最長（runごと）: 0が61、1が43、2が23、3が9、4が7、5が1、8が1（#1405）。
+  連続3回以上は18件（12%）で、これを候補にすると#1405はevent 65818（2026-10-02T16:45:20Z、3回目の非pass）で候補になる。
+- 同じ`primary_code`の連続3回以上は6件で、#1405（同じcodeの連続は最長2回）を含まない。
+  `primary_code`の一致を条件にしない根拠はこれ。
+- 候補18件のうち17件は同じrunで着地し、候補の後の非pass reviewは0回が9件、1回が6件、2回が2件、#1405だけが6回だった。
+  候補の時点で保留すると17件は不要な保留（誤検知）になるので、候補は読み取りの診断だけにする。
+- 継続の後の上限: 候補の後の非passが2回までなら#1405のほかは全部が収まり、#1405は3回目のevent 69064（2026-10-02T23:16:01Z）で再診断になる。
+  そのとき以降の非pass 3回（69528・69651・70018）、衝突とe2eの対応、resumeの上限による継承retryと人の判断2件（ask 356・357）の前に診断が入る。
+- 「同じ診断上の残作業が2回続けて減らない」は、残作業を記録するのが診断で、導入前のeventに無いので基準値を出せない（欠測）。
+  初期値は設計の値のまま置き、導入後に診断が記録した残作業から、この条件で候補になったrunと非passの連続で候補になったrunを分けて数え直す。
+- 総turnを条件にしない根拠: turn 5以上の12件のうち11件は同じrunで着地した。
+  #1405を除く11件の最初のprompt以外のturn 59のうち18（31%）は衝突・検証・e2e・provider/hostで（f4b8ea86・6c6542c9・18bcb9c4は衝突が3）、scopeの大きさを表さない。
+
+### 欠測
+
+- 受け入れ条件の項目ごとの手戻りは、reviewのeventが項目を持たないので#1405のほかは数えていない（0ではなく欠測）。
+- 費用は5件のrunに`cost_usd`の無いturnがあり（Codexのrun 1件と、Claudeの失敗したturnを持つrun 4件）、出力tokenは4件のrunにtokenの無いturnがある。
+  これらのrunの値は下限なので費用と出力tokenのp50 / p90からは除き、欠測のturn数をCSVの別の列に残した。
+- taskの累積: 窓の中で2つのrunを持つtaskは5件（1405: 13 + 1、1334: 4 + 4、1424: 2 + 2、1421: 2 + 1、1428: 2 + 1）。
+  集団のtaskのうち11件（251・648・655・724・774・793・1087・1095・1115・1144・1188）は窓の前にもrunがあり、taskの累積の基準値から除いた（`tasks.csv`の`excluded_earlier_runs`）。
+  claimの窓の後（2026-10-04以降）に集団のtaskのclaimは無い（2026-10-06以降も無いことを`run_claimed`で確かめた）。
+- taskの累積の成分の欠測は「taskの累積の基準値」の表のとおりで、reviewのjob（Codex）の出力tokenと全てのjobの`cost_usd`は記録が無い。
+  0として足さず、欠測のsession数を`tasks.csv`に残した。
+- receiptの促し: `validation_finished`の拒否は7件のrunにあるが、どれも同じrunへの促しのturnにならず、復旧jobか次のrunに渡った（3件はbaseから外れたcommit、1件はcommit無し、3件は失敗したturnの後）。
+  そのturnは復旧の原因（provider/hostか次のrun）で数え、receiptの促しは0件と記録した。
+
+### 効果の指標と導入後の比べ方
+
+指標（taskの累積で、置換したtaskは元と、再置換を辿った中間と葉の全ての子を足す）:
+
+- 総turnと原因別のturn（上の数え方）、reviewの非passと、受け入れ条件の項目ごとの手戻り（再計画の診断と対応表が項目を持つので導入後は全件で数える）。
+- 総時間（最初のclaimからtaskの終わりまで）と、元条件の達成までの時間を分けて並べる。
+  終わりは、置換しないtaskはcompletedかcanceled、置換したtaskはその下の葉が全て終わった時刻。
+  元条件の達成は、置換しないtaskはcompleted、置換したtaskは対応表の必要な子（再置換された子はその下の葉）が全てcompletedになった時刻で、cancelで終わったtaskは達成までの時間に入れない（`measure.py`の`achieved_hours`）。
+- 人待ち（上の数え方）と、人に上げた判断の件数。
+- 費用: 「taskの累積の基準値」と同じ範囲と成分で数える。
+  置換したtaskは、元taskと再置換を辿った全ての子task（中間のtaskを含む）の範囲のsessionを足す。
+  導入で増える成分は、診断のjobと、再計画の操作のrequestとproposalのplannerとplan reviewで、操作に結んで数える。
+  導入前には再計画の操作が無いので、この成分の導入前の値は0で、欠測ではない。
+  診断のjobや再計画のplanner・plan reviewのsessionは、`kind`が`triage`や`runtime_planner`・`plan_review`でも、再計画の操作に結んだものは復旧jobと計画の成分から外し、導入で増えた成分にだけ数える（二重に数えない）。
+  導入後の合計は単位ごとに分け、費用（USD）はworkerの費用、出力tokenはworkerと復旧jobの和、session数はreviewのjobと復旧jobの和として、導入で増えた成分とは別に並べる。
+  両方で欠測の多い成分（reviewのjobの出力tokenと費用、jobの費用）は合計に入れず、session数と欠測の数だけを並べる。
+- 誤検知: 候補になって継続を選び、追加の非pass 2回以内に同じrunで着地したもの（保留しなかったので費用は診断だけ）と、保留した後に`continuing_after_park`か`withdrawn`で閉じたもの（保留と復元の費用を払った）を分けて数える。
+- 成果の破棄: 保存した成果を採用しなかった件数と、その権限ある判断の有無。
+  判断の無い破棄は0件でなければ欠陥として扱う。
+
+比べ方:
+
+1. 再計画の診断と保留が本番の固定バイナリに入った時刻（`dagq marks`の`derived:dagq_version`）の後に、同じ長さ（3日のclaim、2日の観測の猶予）の窓を取る。
+   対象のtaskはclaimの窓で選び、そのtaskの観測の終わりまでの全てのrun（猶予の間の継承retry・次のrun・置換した子のrun）を累積する。
+   観測の終わりに終わっていないtaskは時間を欠測とし、導入前と同じく件数を並べる。
+2. 操作の結末を`dagq replans --all`で読み、置換ごとに元taskと対応表が必要とする子を`--replaced 元:子,子`で`measure.py`に渡す。
+   再置換された子は、その子を元とする`--replaced`をもう1つ渡し、引数の順は問わない。
+   `measure.py`は置換の関係を木として辿り、根の元taskの行に、中間のtaskと葉の子のrunとsessionを全て足す（子が猶予の間に初めてclaimされても観測の終わりまで集める）。
+   木を数えるのは根がclaimの窓で選んだtaskのときだけで、根が猶予の間に初めてclaimされた木は行を足さない。
+   根が窓の前にだけrunを持つ木は、窓の中の子を1つの行にまとめ、窓の前にrunを持つtaskと同じく除く。
+   置換したtaskの終わりは、その下の葉が全て終わった時刻（最も遅い葉の終わり）で、葉が全てcompletedなら`replaced`、cancelされた葉があれば`replaced_child_canceled`とし、終わっていない葉があれば`open`（時間は欠測）とする。
+   置換したtask自身の`replaced`の状態は終わりに数えないので、子を渡し忘れた置換、空の子の並び、runの無い葉は`open`として残り、終わったように見えない。
+   置換の関係が循環していれば`replacement_cycle`とし、終わりに数えない。
+   2つの元に同じ子を渡した引数と、同じ元を2度渡した引数は拒む。
+   この扱いは`test_measure.py`（`python3 -I docs/plans/task-replanning/test_measure.py`）が確かめる。
+   木の形（直列・分岐・取消・未完・循環・窓の外の根）は両方の引数の順で、ほかに中間のtaskのsessionの範囲と、拒む引数を確かめる。
+3. `measure.py`を同じ引数の形（と2の`--replaced`）で流し、同じ数え方で`runs.csv`と`tasks.csv`を作る。
+   runの単位の値は`runs.csv`の`population`がTrueの行だけで出す。
+4. changeごとに、taskの累積の基準値と同じ列（turn・時間・人待ち・成分ごとの費用とsession数のp50 / p90、候補の数）を並べる。
+   taskのchangeは`runs.csv`のそのtaskのrunのchangeを使い、areaは着地したrunのareaを使う。
+   件数の少ないchangeは件数だけを並べ、比率を出さない。
+5. 候補の数・診断の数・保留の数・置換の数を分け、候補あたりの保留の割合を出し、候補のtaskの総時間・成分ごとの費用を導入前の検知の候補のtask 16件（runの単位の候補18件ではない）と比べる。
+   保留したtaskだけを取り出すときも、導入前の側は候補のtaskと同じ単位で並べ、保留の有無で分けられないことを書く。
+6. 衝突・e2e・検証・provider/hostのturnの増減は再計画の効果に数えず、別に並べる（それらを減らすのは再計画の目的ではない）。
+7. 導入前と後で、providerの組成とreviewの規則（差し戻しの回数の扱いなど）が変わっていれば、その変化の時刻と件数を並べ、効果をそれと分けて読めないときはそう書く。
