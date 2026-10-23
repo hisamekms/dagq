@@ -26,6 +26,7 @@ Split the goal into tasks, each one session in one worktree. Collect per task:
 - `--evidence` (receipt checks to report `passed` with evidence). No worker runs the e2e: `--evidence e2e` has the runtime run it on the host whatever the diff, and a diff touching `dagq.toml`'s `[e2e] paths` gets it anyway, so give `--evidence e2e` only when the real processes must check it whatever its diff (`reference/scope.md`).
 - `--paths GLOB` limits what a task may change. Include the documents it needs, but it is an allowance, not a list of documents that must change: do not narrow the code it may change to fit the document list.
 - `--change CHANGE`: the kind of change the task makes. When the repository's `dagq.toml` lists `[tasks] changes`, give one of them.
+- `--execution-class spike`: the run investigates a premise of the plan by experiment, prototype, build or measurement instead of implementing (omitted: `implementation`). Independent of `--change`, and changed with `edit` only while the task is `draft` or `submitted`. A Spike's description holds its question, impact, method, limit, evidence and what each verdict leads to; its acceptance is a verdict with grounds, and its receipt's `spike_result` carries it (`reference/spike.md`).
 
 Pick `--verify`, `--paths`, `--evidence`, `--change` and the files named per `reference/scope.md`. `--kind` is refused.
 
@@ -65,6 +66,8 @@ The goal's priority is the source: a task without its own takes its goal's and f
 ## For a planner: checks, traffic control, revise, requests and runtime planners
 
 What the `dagq-planner` skill's sections 1 to 3 name in short.
+
+**Premises and Spikes.** Before you split the work, settle the unconfirmed premises a short read answers, move only those needing an experiment into Spikes, submit the Spikes alone and stop; a Spike's completion records a planning request the runtime gives a new planner, which decides the next step and submits the implementation for plan review again (`reference/spike.md`).
 
 **Wait for the installed build.** When a task needs the installed binary to contain a prerequisite's landing, use `--wait-for-build` with `--depends-on ID`, not a build gate in `--verify` (it runs after claiming). Do not declare it just to wait for documentation-only landings: they trigger no build update.
 
