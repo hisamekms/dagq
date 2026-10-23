@@ -16,6 +16,8 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
+use super::run_container::RunContainers;
+use super::run_git::SessionHead;
 use super::{Repository, RunFiles};
 use crate::domain::{
     AskId, CommitSha, LeaseToken, RunId, Task, TaskId, TaskRun, TaskStatus, actor::ActorRole,
@@ -28,17 +30,24 @@ pub fn run_ref(run: &RunId) -> String {
 
 /// The commit of the run's branch a retry carries over: its validated
 /// commit (the one its review passed), or without one the head of its
-/// worktree when no rebase is stopped half way there. `None` when the
-/// branch holds nothing on top of the run's base. Nothing is written.
+/// worktree when no rebase is stopped half way there; for a run in a
+/// container, the head its clone's facts say once they are of the end of
+/// its last turn ([`container_head`], an error refusing it). `None` when
+/// the branch holds nothing on top of the run's base. Nothing is written
+/// but those facts.
 pub fn carried_head(
     run: &TaskRun,
     files: &dyn RunFiles,
     repository: &dyn Repository,
+    containers: &dyn RunContainers,
 ) -> Result<Option<CommitSha>> {
     // The reviewed commit, not whatever an unresolved session left in
     // the worktree (a rebase stopped half way, say).
     let head = match (run.result_commit(), run.worktree_path().map(Path::new)) {
         (Some(commit), _) => Some(commit.clone()),
+        (None, Some(worktree)) if files.is_dir(worktree) && run.in_container() => {
+            Some(container_head(run, files, repository, containers)?)
+        }
         (None, Some(worktree))
             if files.is_dir(worktree) && !super::run_git::rebase_in_progress(repository, run)? =>
         {
@@ -47,6 +56,105 @@ pub fn carried_head(
         _ => None,
     };
     Ok(head.filter(|head| head != run.base_commit()))
+}
+
+/// What [`container_head`] does next with the facts of a run in a
+/// container it read ([`facts_step`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FactsStep {
+    /// They are of the end of its last turn and say nothing unsaved: the
+    /// head they name.
+    Use(CommitSha),
+    /// They are not of the end of its last turn, or cannot be read: a
+    /// facts-only turn writes them anew before anything is judged.
+    Refresh,
+    /// The head cannot be carried over, for this reason.
+    Refuse(String),
+}
+
+/// The step for the facts `read` of a run in a container, `refreshed` once
+/// a facts-only turn wrote them anew: facts of the end of its last turn
+/// that say nothing uncommitted, no rebase stopped and a head its bundle
+/// holds are used as they are; others are written anew once
+/// ([`FactsStep::Refresh`]); and facts that are still not of that end, or
+/// that say what the control side cannot save (it runs no git in the
+/// clone), refuse.
+pub fn facts_step(read: &std::result::Result<SessionHead, String>, refreshed: bool) -> FactsStep {
+    match read {
+        Ok(read) if read.last_turn && read.clean => FactsStep::Use(read.head.clone()),
+        Ok(read) if read.last_turn => FactsStep::Refuse(
+            "its executor recorded uncommitted work, a rebase stopped half way or a head its bundle does not hold; the control side runs no git in the run's clone, so that cannot be saved"
+                .to_owned(),
+        ),
+        _ if !refreshed => FactsStep::Refresh,
+        Ok(_) => FactsStep::Refuse(
+            "its facts are still not of the end of its last turn after a facts-only turn wrote them anew, so its latest work is not known".to_owned(),
+        ),
+        Err(why) => FactsStep::Refuse(format!(
+            "its facts cannot be read after a facts-only turn wrote them anew: {why}"
+        )),
+    }
+}
+
+/// The head a release, a person's `ready --inherit`, the automatic
+/// `retry_inherit` and the triage's own commits read of a run in a
+/// container from its facts ([`super::run_git::session_head`]), the one
+/// place they are judged: used when they are of the end of its last turn;
+/// otherwise (that turn was cut off with its container, or no state is
+/// there) written anew by a facts-only turn in its container
+/// ([`RunContainers::facts_turn`]) and read again ([`facts_step`]). An
+/// error, which refuses what reads it, when the facts-only turn does not
+/// run, the clone is gone, or the facts are not of that end or say what
+/// cannot be saved: no older head stands for its latest work.
+pub fn container_head(
+    run: &TaskRun,
+    files: &dyn RunFiles,
+    repository: &dyn Repository,
+    containers: &dyn RunContainers,
+) -> Result<CommitSha> {
+    refreshed_head(
+        run,
+        || super::run_git::session_head(repository, run).map_err(|error| format!("{error:#}")),
+        || {
+            run.worktree_path()
+                .is_some_and(|clone| files.is_dir(Path::new(clone)))
+        },
+        || containers.facts_turn(run),
+    )
+}
+
+/// [`container_head`] over what reads the facts (`read`), tells whether
+/// the clone is there (`clone_there`) and runs the facts-only turn
+/// (`refresh`).
+fn refreshed_head(
+    run: &TaskRun,
+    read: impl Fn() -> std::result::Result<SessionHead, String>,
+    clone_there: impl FnOnce() -> bool,
+    refresh: impl FnOnce() -> Result<()>,
+) -> Result<CommitSha> {
+    let refuse = |why: String| -> Result<CommitSha> {
+        bail!("run {} works in a container: {why}", run.id())
+    };
+    match facts_step(&read(), false) {
+        FactsStep::Use(head) => return Ok(head),
+        FactsStep::Refuse(why) => return refuse(why),
+        FactsStep::Refresh => {}
+    }
+    if !clone_there() {
+        return refuse(
+            "its facts are not of the end of its last turn, and its clone is gone, so no facts-only turn can write them anew".to_owned(),
+        );
+    }
+    if let Err(error) = refresh() {
+        return refuse(format!(
+            "its facts are not of the end of its last turn, and the facts-only turn that would write them anew did not run: {error:#}"
+        ));
+    }
+    match facts_step(&read(), true) {
+        FactsStep::Use(head) => Ok(head),
+        FactsStep::Refuse(why) => refuse(why),
+        FactsStep::Refresh => unreachable!("a refreshed read is used or refused"),
+    }
 }
 
 /// Keep `head` under [`run_ref`] so that it outlives the run's branch.
@@ -136,18 +244,15 @@ impl ReleasedRead {
 /// Git operation is half done in the worktree, its `HEAD` is not on the
 /// run's branch (detached, or another branch checked out) or the work
 /// cannot be saved: no work is thrown away unsaid. Nothing in the
-/// worktree changes. A run in a container is read from the facts its
-/// executor last recorded at a turn's end ([`super::run_git::session_head`],
-/// its clone's head as imported from its bundle), with no git in its
-/// clone: facts that are not of the end of the last turn it started (that
-/// turn was cut off with its container, and its work is not in them), or
-/// that say uncommitted work, a rebase stopped in its clone or a head its
-/// bundle does not hold, cannot be saved and refuse the release, as do
-/// facts that cannot be read.
+/// worktree changes. A run in a container is read from its clone's facts
+/// with no git in its clone, written anew by a facts-only turn when they
+/// are not of the end of its last turn ([`container_head`]): what refuses
+/// that head refuses the release.
 pub fn released_work(
     run: &TaskRun,
     files: &dyn RunFiles,
     repository: &dyn Repository,
+    containers: &dyn RunContainers,
 ) -> Result<ReleasedRead> {
     let worktree = run
         .worktree_path()
@@ -155,26 +260,15 @@ pub fn released_work(
         .filter(|worktree| files.is_dir(worktree));
     let Some(worktree) = worktree else {
         return Ok(ReleasedRead {
-            own: carried_head(run, files, repository)?,
+            own: carried_head(run, files, repository, containers)?,
             saved: None,
         });
     };
     if run.in_container() {
-        let session = super::run_git::session_head(repository, run)?;
-        if !session.last_turn {
-            bail!(
-                "run {} works in a container whose executor did not record the end of the last turn it started (that turn was cut off with its container, or its end could not write them), so its facts are not of its latest work, which cannot be saved; the hold stays",
-                run.id()
-            );
-        }
-        if !session.clean {
-            bail!(
-                "run {} works in a container whose executor recorded uncommitted work, a rebase stopped half way or a head its bundle does not hold; the control side runs no git in the run's clone, so that cannot be saved and the hold stays",
-                run.id()
-            );
-        }
+        let head = container_head(run, files, repository, containers)
+            .context("its work cannot be carried over, and the hold stays")?;
         return Ok(ReleasedRead {
-            own: Some(session.head).filter(|head| head != run.base_commit()),
+            own: Some(head).filter(|head| head != run.base_commit()),
             saved: None,
         });
     }
@@ -220,4 +314,393 @@ pub fn released_work(
 pub trait ReleasedBranches {
     fn released_work(&self, run: &TaskRun) -> Result<ReleasedRead>;
     fn keep(&self, run: &TaskRun, head: &CommitSha) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+    use crate::application::memory_files::MemoryFiles;
+    use crate::application::run_container::PreparedRun;
+    use crate::application::{CloneFacts, CommandSpec, RepositoryReads};
+    use crate::domain::run_clone::RunState;
+    use crate::domain::{Provider, RunRecord, RunStatus};
+
+    const CLONE: &str = "/q/clones/r1";
+
+    fn sha(c: char) -> CommitSha {
+        CommitSha::try_from(c.to_string().repeat(40)).unwrap()
+    }
+
+    /// A run in a container with no validated commit, at the base `a`.
+    fn container_run() -> TaskRun {
+        TaskRun::restore(RunRecord {
+            id: RunId::new("r1").unwrap(),
+            task_id: TaskId::new(1),
+            status: RunStatus::Interrupted,
+            requested_provider: Provider::Claude,
+            actual_provider: Provider::Claude,
+            worker_mode: crate::domain::worker::WorkerMode::Headless,
+            base_commit: sha('a'),
+            branch: Some("dagq/r1".into()),
+            worktree_path: Some(CLONE.into()),
+            workspace_id: None,
+            receipt_path: None,
+            log_path: None,
+            result_commit: None,
+            repo_path: None,
+            run_dir: Some("/q/runs/r1".into()),
+            last_error: None,
+            workspace_closed_at: None,
+            created_at: String::new(),
+        })
+        .unwrap()
+    }
+
+    /// The state an executor wrote of the head `head`, at a turn's end
+    /// or at the start of one that was cut off, with `status` uncommitted.
+    fn state(head: char, ended: Option<bool>, status: &str) -> RunState {
+        RunState {
+            branch: Some("refs/heads/dagq/r1".into()),
+            head: head.to_string().repeat(40),
+            status: status.into(),
+            rebase_in_progress: false,
+            turn_ended: ended,
+            generation: None,
+        }
+    }
+
+    /// The facts as read: the head the bundle imported and the state.
+    fn read(head: char, state: RunState) -> std::result::Result<SessionHead, String> {
+        let clean = state.status.is_empty() && state.head() == sha(head);
+        Ok(SessionHead {
+            head: sha(head),
+            clean,
+            last_turn: state.of_the_last_turn(),
+        })
+    }
+
+    #[test]
+    fn facts_of_the_last_turn_s_end_are_used_and_others_are_written_anew_once() {
+        assert_eq!(
+            facts_step(&read('b', state('b', Some(true), "")), false),
+            FactsStep::Use(sha('b'))
+        );
+        // Of the end of the last turn but unsaved: refused, not written anew.
+        assert!(matches!(
+            facts_step(&read('b', state('b', Some(true), " M a")), false),
+            FactsStep::Refuse(why) if why.contains("cannot be saved")
+        ));
+        assert!(matches!(
+            facts_step(&read('c', state('b', Some(true), "")), false),
+            FactsStep::Refuse(_)
+        ));
+        // Cut off, unmarked or unreadable: written anew first.
+        for facts in [
+            read('b', state('b', Some(false), "")),
+            read('b', state('b', None, "")),
+            read('b', state('b', Some(false), " M a")),
+            Err("the run's state file is missing".to_owned()),
+        ] {
+            assert_eq!(facts_step(&facts, false), FactsStep::Refresh, "{facts:?}");
+        }
+        // Written anew and still not of that end, or unreadable: refused.
+        assert!(matches!(
+            facts_step(&read('b', state('b', Some(false), "")), true),
+            FactsStep::Refuse(why) if why.contains("still not of the end")
+        ));
+        assert!(matches!(
+            facts_step(&Err("gone".to_owned()), true),
+            FactsStep::Refuse(why) if why.contains("gone")
+        ));
+        assert!(matches!(
+            facts_step(&read('b', state('b', Some(true), " M a")), true),
+            FactsStep::Refuse(why) if why.contains("cannot be saved")
+        ));
+    }
+
+    /// The entry takes facts of the last turn's end as they are, writes
+    /// others anew once and reads them again, and refuses, with no older
+    /// head, when the clone is gone, the facts-only turn does not run, or
+    /// what it wrote is still not of that end or unsaved.
+    #[test]
+    fn the_entry_writes_facts_anew_before_it_judges_and_refuses_with_no_older_head() {
+        let run = container_run();
+        let facts = |before: RunState, after: RunState| {
+            let reads = Mutex::new(vec![read('c', after), read('b', before)]);
+            move || reads.lock().unwrap().pop().unwrap()
+        };
+        let refreshes = Mutex::new(0);
+        let refresh = || {
+            *refreshes.lock().unwrap() += 1;
+            Ok(())
+        };
+        let head = refreshed_head(
+            &run,
+            facts(state('b', Some(true), ""), state('c', Some(true), "")),
+            || true,
+            refresh,
+        );
+        assert_eq!(head.unwrap(), sha('b'));
+        assert_eq!(*refreshes.lock().unwrap(), 0);
+        let head = refreshed_head(
+            &run,
+            facts(state('b', Some(false), ""), state('c', Some(true), "")),
+            || true,
+            refresh,
+        );
+        assert_eq!(head.unwrap(), sha('c'));
+        assert_eq!(*refreshes.lock().unwrap(), 1);
+        let refused = |result: Result<CommitSha>, part: &str| {
+            let why = format!("{:#}", result.unwrap_err());
+            assert!(why.contains(part), "{part}: {why}");
+        };
+        refused(
+            refreshed_head(
+                &run,
+                facts(state('b', None, ""), state('c', Some(true), "")),
+                || false,
+                refresh,
+            ),
+            "its clone is gone",
+        );
+        refused(
+            refreshed_head(
+                &run,
+                facts(state('b', Some(false), ""), state('c', Some(true), "")),
+                || true,
+                || bail!("the machine cannot start"),
+            ),
+            "the machine cannot start",
+        );
+        refused(
+            refreshed_head(
+                &run,
+                facts(state('b', Some(false), ""), state('c', Some(false), "")),
+                || true,
+                refresh,
+            ),
+            "still not of the end",
+        );
+        refused(
+            refreshed_head(
+                &run,
+                facts(
+                    state('b', Some(false), ""),
+                    state('c', Some(true), "?? wip"),
+                ),
+                || true,
+                refresh,
+            ),
+            "cannot be saved",
+        );
+        assert_eq!(*refreshes.lock().unwrap(), 3);
+    }
+
+    /// A repository whose run in a container has the facts `facts`, which
+    /// its containers' facts-only turn replaces with `written` (or fails
+    /// to, when `None`).
+    struct Facts {
+        facts: Mutex<RunState>,
+        written: Option<RunState>,
+        turns: Mutex<usize>,
+    }
+
+    impl Facts {
+        fn new(facts: RunState, written: Option<RunState>) -> Self {
+            Self {
+                facts: Mutex::new(facts),
+                written,
+                turns: Mutex::new(0),
+            }
+        }
+    }
+
+    impl RunContainers for Facts {
+        fn prepare(&self, _: &TaskRun) -> Result<PreparedRun> {
+            unreachable!()
+        }
+        fn prepare_run_dir(&self, _: &Path, _: &Path) -> Result<std::path::PathBuf> {
+            unreachable!()
+        }
+        fn command(&self, _: &[String]) -> CommandSpec {
+            unreachable!()
+        }
+        fn remove(&self, _: &RunId) -> Result<()> {
+            unreachable!()
+        }
+        fn facts_turn(&self, _: &TaskRun) -> Result<()> {
+            *self.turns.lock().unwrap() += 1;
+            let written = self.written.clone().context("the machine cannot start")?;
+            *self.facts.lock().unwrap() = written;
+            Ok(())
+        }
+    }
+
+    impl RepositoryReads for Facts {
+        fn main_head(&self) -> Result<CommitSha> {
+            unreachable!()
+        }
+        fn merge_base(&self, _: &str, _: &str) -> Result<Option<CommitSha>> {
+            unreachable!()
+        }
+    }
+
+    impl Repository for Facts {
+        fn is_dagq_source(&self) -> bool {
+            false
+        }
+        fn clone_facts(&self, _: &TaskRun) -> Result<std::result::Result<CloneFacts, String>> {
+            let state = self.facts.lock().unwrap().clone();
+            Ok(Ok(CloneFacts {
+                head: state.head(),
+                state,
+            }))
+        }
+        fn current_branch(&self, _: &Path) -> Result<Option<String>> {
+            unreachable!()
+        }
+        fn head(&self, _: &Path) -> Result<CommitSha> {
+            unreachable!()
+        }
+        fn is_ancestor(&self, _: &str, _: &str) -> Result<bool> {
+            unreachable!()
+        }
+        fn status(&self, _: &Path) -> Result<String> {
+            unreachable!()
+        }
+        fn rebase_in_progress(&self, _: &Path) -> Result<bool> {
+            unreachable!()
+        }
+        fn rebase_abort(&self, _: &Path) -> Result<()> {
+            unreachable!()
+        }
+        fn rebase(&self, _: &Path, _: &str) -> Result<std::result::Result<(), String>> {
+            unreachable!()
+        }
+        fn conflicted_files(&self, _: &Path) -> Result<Vec<String>> {
+            unreachable!()
+        }
+        fn changed_paths(&self, _: &str, _: &str) -> Result<Vec<String>> {
+            unreachable!()
+        }
+        fn added_paths(&self, _: &str, _: &str) -> Result<Vec<String>> {
+            unreachable!()
+        }
+        fn paths_in(&self, _: &str, _: &str) -> Result<Vec<String>> {
+            unreachable!()
+        }
+        fn paths_containing(&self, _: &str, _: &str, _: &[String]) -> Result<Vec<String>> {
+            unreachable!()
+        }
+        fn rename_and_commit(
+            &self,
+            _: &Path,
+            _: &str,
+            _: &str,
+            _: &[String],
+        ) -> Result<std::result::Result<CommitSha, String>> {
+            unreachable!()
+        }
+        fn tree_of(&self, _: &str) -> Result<String> {
+            unreachable!()
+        }
+        fn commit_tree(&self, _: &str, _: &str, _: &[String]) -> Result<CommitSha> {
+            unreachable!()
+        }
+        fn update_ref(&self, _: &str, _: &str) -> Result<()> {
+            unreachable!()
+        }
+        fn advance_main(
+            &self,
+            _: &crate::domain::landing_branch::LandingBranch,
+            _: &str,
+            _: &str,
+        ) -> Result<()> {
+            unreachable!()
+        }
+        fn repair_worktree(&self, _: &Path) -> Result<()> {
+            unreachable!()
+        }
+        fn remove_worktree_and_branch(&self, _: &Path, _: &str) -> Result<()> {
+            unreachable!()
+        }
+        fn branches(&self) -> Result<Vec<String>> {
+            unreachable!()
+        }
+        fn delete_branch(&self, _: &str) -> Result<()> {
+            unreachable!()
+        }
+        fn tracks(&self, _: &Path, _: &str) -> Result<bool> {
+            unreachable!()
+        }
+        fn main_checkout(&self) -> Result<Option<std::path::PathBuf>> {
+            unreachable!()
+        }
+        fn create_worktree(&self, _: &TaskRun) -> Result<String> {
+            unreachable!()
+        }
+        fn merge_conflicts(&self, _: &str, _: &str) -> Result<Vec<String>> {
+            unreachable!()
+        }
+        fn landed_task_ids(&self, _: &str, _: &str) -> Result<Vec<TaskId>> {
+            unreachable!()
+        }
+        fn log_oneline(&self, _: &str, _: &str) -> Result<String> {
+            unreachable!()
+        }
+        fn diff_stat(&self, _: &str, _: &str) -> Result<String> {
+            unreachable!()
+        }
+        fn diff_numbers(&self, _: &str, _: &str) -> Result<crate::application::DiffNumbers> {
+            unreachable!()
+        }
+        fn diff_to_file(&self, _: &str, _: &str, _: &Path) -> Result<()> {
+            unreachable!()
+        }
+    }
+
+    /// The release's and the retry's reads of a container run both go
+    /// through the entry: facts a cut-off turn left are written anew and
+    /// the head the facts-only turn found is carried, never the older one;
+    /// a facts-only turn that cannot run refuses both.
+    #[test]
+    fn the_release_and_the_carried_head_read_a_cut_off_container_run_through_the_entry() {
+        let run = container_run();
+        let files = MemoryFiles::default();
+        files.put_dir(Path::new(CLONE));
+        let cut_off = || state('b', Some(false), "");
+        let facts = Facts::new(cut_off(), Some(state('c', Some(true), "")));
+        assert_eq!(
+            carried_head(&run, &files, &facts, &facts).unwrap(),
+            Some(sha('c'))
+        );
+        assert_eq!(*facts.turns.lock().unwrap(), 1);
+        let facts = Facts::new(cut_off(), Some(state('c', Some(true), "")));
+        assert_eq!(
+            released_work(&run, &files, &facts, &facts).unwrap(),
+            ReleasedRead {
+                own: Some(sha('c')),
+                saved: None
+            }
+        );
+        assert_eq!(*facts.turns.lock().unwrap(), 1);
+        // Facts of the last turn's end are read as they are.
+        let facts = Facts::new(state('b', Some(true), ""), None);
+        assert_eq!(
+            carried_head(&run, &files, &facts, &facts).unwrap(),
+            Some(sha('b'))
+        );
+        assert_eq!(*facts.turns.lock().unwrap(), 0);
+        // No facts-only turn: both refuse, and nothing older is carried.
+        let facts = Facts::new(cut_off(), None);
+        assert!(carried_head(&run, &files, &facts, &facts).is_err());
+        let why = format!(
+            "{:#}",
+            released_work(&run, &files, &facts, &facts).unwrap_err()
+        );
+        assert!(why.contains("the hold stays"), "{why}");
+        assert!(why.contains("the machine cannot start"), "{why}");
+    }
 }

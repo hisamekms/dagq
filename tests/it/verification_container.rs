@@ -118,6 +118,10 @@ impl RunMachine for FakeMachine {
         Ok("localhost/dagq-test-image:t".to_owned())
     }
 
+    fn ready_image(&self, run: &str) -> Result<String> {
+        panic!("a verification made only the image of {run} ready")
+    }
+
     fn remove_build_output(&self, build_output: &str) -> Result<()> {
         self.removed.lock().unwrap().push(build_output.to_owned());
         Ok(())

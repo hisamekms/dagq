@@ -993,9 +993,12 @@ impl Supervisor<'_> {
         }
     }
     /// Whether the run's branch holds commits of its own: its reviewed
-    /// commit, else its worktree's HEAD, else its branch, is not on main.
-    /// A run that never got a worktree has none; one whose worktree is
-    /// gone without a reviewed commit cannot be told.
+    /// commit, else its worktree's HEAD (a container run's from facts of
+    /// the end of its last turn, written anew when they are not:
+    /// [`crate::application::inherit::container_head`], whose refusal is
+    /// an error), else its branch, is not on main. A run that never got a
+    /// worktree has none; one whose worktree is gone without a reviewed
+    /// commit cannot be told.
     fn own_commits(&self, run: &TaskRun) -> Result<bool> {
         let worktree = run
             .worktree_path()
@@ -1003,6 +1006,13 @@ impl Supervisor<'_> {
             .filter(|path| self.files.is_dir(path));
         let head = match (run.result_commit(), worktree) {
             (Some(commit), _) => commit.to_string(),
+            (None, Some(_)) if run.in_container() => crate::application::inherit::container_head(
+                run,
+                &*self.files,
+                &*self.repository,
+                &*self.run_containers,
+            )?
+            .to_string(),
             (None, Some(_)) => {
                 crate::application::run_git::head(&*self.repository, run)?.to_string()
             }

@@ -18,6 +18,8 @@ pub struct MemoryFiles {
     /// The most bytes one read takes, as the run directory's reads are
     /// bounded; none when unbounded.
     read_limit: Option<u64>,
+    /// The directories that are there ([`Self::put_dir`]); none else is.
+    dirs: Mutex<std::collections::HashSet<PathBuf>>,
 }
 
 impl MemoryFiles {
@@ -46,6 +48,11 @@ impl MemoryFiles {
             .get(path)
             .map(|(_, bytes)| bytes.clone())
             .ok_or_else(missing)
+    }
+
+    /// Make `dir` a directory that is there.
+    pub fn put_dir(&self, dir: &Path) {
+        self.dirs.lock().unwrap().insert(dir.to_owned());
     }
 
     pub fn put(&self, path: &Path, modified: SystemTime, contents: &str) {
@@ -112,8 +119,8 @@ impl RunFiles for MemoryFiles {
     fn is_file(&self, path: &Path) -> bool {
         self.exists(path)
     }
-    fn is_dir(&self, _: &Path) -> bool {
-        false
+    fn is_dir(&self, path: &Path) -> bool {
+        self.dirs.lock().unwrap().contains(path)
     }
     fn exists(&self, path: &Path) -> bool {
         self.files.lock().unwrap().contains_key(path)

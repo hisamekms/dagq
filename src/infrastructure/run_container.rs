@@ -42,13 +42,18 @@ use crate::application::run_container::{
 use crate::domain::podman_machine::{MACHINE_NAME, MachineMounts, QueueKey};
 use crate::domain::run_clone::CLONES_DIR;
 use crate::domain::run_container::{
-    ContainerLimits, HOME_DIR, MATERIALS_DIR, STAGED_MATERIALS, TOKEN_FILE, VERIFICATION_TOKEN,
+    ContainerLimits, FactsContainer, HOME_DIR, MATERIALS_DIR, STAGED_MATERIALS, TOKEN_FILE,
+    VERIFICATION_TOKEN, facts_command, facts_run_args,
 };
 use crate::domain::{CommitSha, RunId, TaskRun};
 
 /// How long the removal of a run's container may take: a podman whose
 /// machine hangs does not hold a stop of the run.
 pub const REMOVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// How long a facts-only turn may take: it runs no agent, only git in the
+/// clone, so one that does not end is a machine that hangs, not work.
+pub const FACTS_TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// The containers of the runs of the queue at `db`, in the dagq machine.
 #[derive(Clone)]
@@ -191,6 +196,60 @@ impl RunContainers for PodmanRunContainers {
         if !output.status.success() {
             bail!(
                 "podman rm {name} exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+
+    /// Only the machine and the image are made ready (no relay, no
+    /// volume), the run token's copy a cut-off turn may have left in the
+    /// run directory is removed first, and the container mounts only the
+    /// clone and the run directory ([`facts_run_args`]).
+    fn facts_turn(&self, run: &TaskRun) -> Result<()> {
+        let image = self
+            .machine
+            .ready_image(run.id().as_str())
+            .map_err(|error| anyhow::anyhow!("make the machine and the image ready: {error:#}"))?;
+        let run_dir = Path::new(run.run_dir().context("missing run directory")?);
+        let clone = Path::new(run.worktree_path().context("missing clone")?);
+        let branch = run.branch().context("missing run branch")?;
+        let token = run_dir.join(TOKEN_FILE);
+        match fs::remove_file(&token) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("remove {}", token.display()));
+            }
+        }
+        let command = facts_command(run_dir, clone, run.base_commit().as_str(), branch);
+        let args = facts_run_args(&FactsContainer {
+            queue: &self.key()?,
+            run: run.id().as_str(),
+            image: &image,
+            clone,
+            run_dir,
+            limits: load_container_limits(self.host_wide.as_deref()).0,
+            command: &command,
+        })
+        .map_err(|why| anyhow::anyhow!("the facts-only turn's container cannot be made: {why}"))?;
+        let Some(output) = self.podman.inside_within(&args, FACTS_TURN_TIMEOUT)? else {
+            // Its podman was killed; the container may still run in the
+            // machine, and goes as a turn's does.
+            let removed = self.remove(run.id());
+            bail!(
+                "the facts-only turn of run {} did not end within {FACTS_TURN_TIMEOUT:?}: it was stopped{}",
+                run.id(),
+                removed.err().map_or(String::new(), |error| format!(
+                    ", and its container could not be removed: {error:#}"
+                ))
+            );
+        };
+        if !output.status.success() {
+            bail!(
+                "the facts-only turn of run {} exited with {}: {}",
+                run.id(),
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
             );
@@ -557,6 +616,9 @@ mod tests {
         struct NoMachine;
         impl RunMachine for NoMachine {
             fn ready(&self, _: &str, _: Option<&str>) -> Result<String> {
+                bail!("no machine in this test")
+            }
+            fn ready_image(&self, _: &str) -> Result<String> {
                 bail!("no machine in this test")
             }
             fn remove_build_output(&self, _: &str) -> Result<()> {

@@ -1066,6 +1066,31 @@ pub struct QueueRunMachine {
 
 impl crate::application::podman_machine::RunMachine for QueueRunMachine {
     fn ready(&self, run: &str, build_output: Option<&str>) -> Result<String> {
+        let image = self.ready_image(run)?;
+        let relays = super::broker_relay::PodmanRelays::of_queue(
+            self.podman.clone(),
+            &self.db,
+            self.host_wide.as_deref(),
+        );
+        if !relays.is_open(run)? {
+            crate::application::broker_relay::open(
+                &relays,
+                &super::queue_broker::SystemQueueBroker::new(&self.db, Path::new("dagq")),
+                &crate::domain::broker_relay::RelaySpec {
+                    run: run.to_owned(),
+                    image: image.clone(),
+                    uid: crate::domain::broker_relay::CONTAINER_UID,
+                },
+            )?;
+        }
+        if let Some(volume) = build_output {
+            let queue_dir = super::queue_service::queue_dir_of(&self.db);
+            QueueVolumes::of_queue(self.podman.clone(), &queue_dir)?.create_build_output(volume)?;
+        }
+        Ok(image)
+    }
+
+    fn ready_image(&self, run: &str) -> Result<String> {
         let checkout = self
             .main_checkout
             .as_deref()
@@ -1103,25 +1128,6 @@ impl crate::application::podman_machine::RunMachine for QueueRunMachine {
             now,
         )
         .map_err(anyhow::Error::msg)?;
-        let relays = super::broker_relay::PodmanRelays::of_queue(
-            self.podman.clone(),
-            &self.db,
-            self.host_wide.as_deref(),
-        );
-        if !relays.is_open(run)? {
-            crate::application::broker_relay::open(
-                &relays,
-                &super::queue_broker::SystemQueueBroker::new(&self.db, Path::new("dagq")),
-                &crate::domain::broker_relay::RelaySpec {
-                    run: run.to_owned(),
-                    image: image.clone(),
-                    uid: crate::domain::broker_relay::CONTAINER_UID,
-                },
-            )?;
-        }
-        if let Some(volume) = build_output {
-            QueueVolumes::of_queue(self.podman.clone(), &queue_dir)?.create_build_output(volume)?;
-        }
         Ok(image)
     }
 

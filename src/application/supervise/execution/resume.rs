@@ -375,7 +375,8 @@ impl Supervisor<'_> {
     /// when the branch holds nothing on top of the run's base.
     pub(super) fn inherited_head(&mut self, run: &TaskRun) -> Result<Option<CommitSha>> {
         use crate::application::inherit::{carried_head, keep_carried_head};
-        let Some(head) = carried_head(run, &*self.files, &*self.repository)? else {
+        let Some(head) = carried_head(run, &*self.files, &*self.repository, &*self.run_containers)?
+        else {
             return Ok(None);
         };
         keep_carried_head(

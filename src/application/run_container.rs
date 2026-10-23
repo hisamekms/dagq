@@ -80,6 +80,19 @@ pub trait RunContainers: Send + Sync {
     /// Stop and remove the container of the run `run`; nothing when there
     /// is none.
     fn remove(&self, run: &RunId) -> Result<()>;
+    /// Run a facts-only turn of `run` in its container and wait for its
+    /// end: no agent, no run token (a copy left in the run directory is
+    /// removed first) and no path to the queue broker (no relay is opened,
+    /// only the clone and the run directory are mounted), its executor's
+    /// git guarded while it writes the run branch's bundle, the clone's
+    /// work and the run's state anew
+    /// ([`facts_command`](crate::domain::run_container::facts_command),
+    /// ADR-t2978-1).
+    /// `Err` says why it did not run or end (the machine or the image
+    /// cannot be made ready, a container of the run is there already, it
+    /// exited with an error or past its limit); none runs on the host
+    /// instead.
+    fn facts_turn(&self, run: &TaskRun) -> Result<()>;
 }
 
 /// One verification of `integrate` in the container, once

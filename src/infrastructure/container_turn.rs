@@ -121,6 +121,25 @@ pub fn run_turn(options: &TurnOptions, env: impl Fn(&str) -> Option<String>) -> 
         .unwrap_or(1))
 }
 
+/// A facts-only turn (`dagq relay turn --facts-only`): what the control
+/// side starts when the facts a run's last turn left are not of its end
+/// (that turn was cut off with its container), before it carries the run's
+/// work over, in a container with no path to the queue broker and no run
+/// token. No agent runs and no forwarder starts: the state is marked as at
+/// any turn's start, the restore the control side handed is applied as
+/// before an agent ([`restore_clone`]), and the run branch's bundle, the
+/// clone's work and the run's state are written as at a turn's end
+/// ([`write_turn_end`]), every git of them guarded ([`CloneGit::guarded`])
+/// so that nothing the worker left in the clone runs after its run
+/// stopped. `Err` when any of them fails, which leaves no state of a
+/// turn's end.
+pub fn run_facts_turn(clone: &Path, run_dir: &Path, base: &str, branch: &str) -> Result<()> {
+    let clone = CloneGit::guarded(clone)?;
+    mark_turn_started(run_dir)?;
+    restore_in(&clone, run_dir, branch)?;
+    turn_end_in(&clone, run_dir, base, branch).map(drop)
+}
+
 /// How `dagq relay verify` runs.
 #[derive(Debug, Clone)]
 pub struct VerifyOptions {
@@ -203,24 +222,106 @@ fn start_forwarder(port: u16, stop: Arc<AtomicBool>) -> Option<thread::JoinHandl
     }))
 }
 
-/// Git in the clone, with the configuration git reads there: the worker's
-/// own, in the worker's container.
-fn git(clone: &Path, args: &[&str]) -> Result<Output> {
+/// The clone the executor's git runs in, and the configuration it runs
+/// with: the worker's own in a worker's turn ([`Self::plain`]), or with
+/// the guard of a facts-only turn ([`Self::guarded`]). It derefs to the
+/// clone's path.
+struct CloneGit<'a> {
+    path: &'a Path,
+    /// The environment that carries the guard's overrides; none when plain.
+    guard: Vec<(String, String)>,
+}
+
+impl<'a> CloneGit<'a> {
+    fn plain(path: &'a Path) -> Self {
+        Self {
+            path,
+            guard: Vec::new(),
+        }
+    }
+
+    /// Git in `path` that runs no program the worker could have left in the
+    /// clone's configuration or tracked content: no hook, no fsmonitor and
+    /// no driver some scope defines ([`facts_overrides`]), passed as the
+    /// command scope, which wins over the clone's. `Err` when the
+    /// configuration cannot be read or the guard does not hold, and no
+    /// git is to run then.
+    fn guarded(path: &'a Path) -> Result<Self> {
+        let plain = Self::plain(path);
+        let names = git_ok(&plain, &["config", "--list", "--name-only", "-z"])?;
+        let overrides = facts_overrides(&names).map_err(anyhow::Error::msg)?;
+        let guarded = Self {
+            path,
+            guard: run_clone::guard_env(&overrides),
+        };
+        let effective = git_ok(&guarded, &["config", "--list", "-z"])?;
+        run_clone::guard_holds(&effective, &overrides).map_err(anyhow::Error::msg)?;
+        Ok(guarded)
+    }
+
+    /// For a guarded git, refuse a clone with a populated submodule (a
+    /// gitlink of its index whose directory holds a `.git`): `status` and
+    /// `diff` run git in it, which reads the nested repository's own
+    /// configuration, whose drivers the guard does not override. Nothing
+    /// for a plain git.
+    fn refuse_nested(&self) -> Result<()> {
+        if self.guard.is_empty() {
+            return Ok(());
+        }
+        let staged = git_ok(self, &["ls-files", "--stage", "-z"])?;
+        for entry in staged.split('\0').filter(|entry| !entry.is_empty()) {
+            let Some((meta, path)) = entry.split_once('\t') else {
+                continue;
+            };
+            if meta.starts_with("160000 ")
+                && fs::symlink_metadata(self.join(path).join(".git")).is_ok()
+            {
+                bail!(
+                    "the clone has the populated submodule {path}, whose own configuration the facts-only turn's guard does not reach"
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+impl std::ops::Deref for CloneGit<'_> {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        self.path
+    }
+}
+
+/// The overrides of a facts-only turn's git for the configuration whose
+/// names are `names` (`git config --list --name-only -z`): the control
+/// side's guard ([`run_clone::guard_overrides`], no hook and no driver)
+/// and no fsmonitor, whose program `git status` would run.
+fn facts_overrides(names: &str) -> std::result::Result<Vec<(String, String)>, String> {
+    let mut overrides = run_clone::guard_overrides(names)?;
+    overrides.push(("core.fsmonitor".to_owned(), "false".to_owned()));
+    Ok(overrides)
+}
+
+/// Git in the clone, with the configuration git reads there and the
+/// clone's guard, if any.
+fn git(clone: &CloneGit, args: &[&str]) -> Result<Output> {
     Command::new("git")
         .arg("-C")
-        .arg(clone)
+        .arg(clone.path)
         .args(args)
+        .envs(clone.guard.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::null())
         .output()
         .with_context(|| format!("run git {}", args.join(" ")))
 }
 
-fn git_ok(clone: &Path, args: &[&str]) -> Result<String> {
+fn git_ok(clone: &CloneGit, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&git_bytes(clone, args)?).into_owned())
 }
 
 /// The output of git in the clone, as bytes; `Err` when it failed.
-fn git_bytes(clone: &Path, args: &[&str]) -> Result<Vec<u8>> {
+fn git_bytes(clone: &CloneGit, args: &[&str]) -> Result<Vec<u8>> {
     let output = git(clone, args)?;
     if !output.status.success() {
         bail!(
@@ -234,11 +335,12 @@ fn git_bytes(clone: &Path, args: &[&str]) -> Result<Vec<u8>> {
 }
 
 /// Git in the clone with `input` on its standard input.
-fn git_with_input(clone: &Path, args: &[&str], input: &[u8]) -> Result<()> {
+fn git_with_input(clone: &CloneGit, args: &[&str], input: &[u8]) -> Result<()> {
     let mut child = Command::new("git")
         .arg("-C")
-        .arg(clone)
+        .arg(clone.path)
         .args(args)
+        .envs(clone.guard.iter().map(|(key, value)| (key, value)))
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -266,6 +368,7 @@ fn git_with_input(clone: &Path, args: &[&str], input: &[u8]) -> Result<()> {
 /// the base) or the path holds anything but a plain file. `true` when it
 /// was fetched.
 pub fn import_main(clone: &Path, run_dir: &Path) -> Result<bool> {
+    let clone = &CloneGit::plain(clone);
     let bundle = run_dir.join(MAIN_BUNDLE_FILE);
     match fs::symlink_metadata(&bundle) {
         Ok(metadata) if metadata.file_type().is_file() => {}
@@ -331,6 +434,12 @@ pub fn mark_turn_started(run_dir: &Path) -> Result<()> {
 /// and renamed, in that order; work that cannot be read leaves none, so
 /// no earlier turn's stands as this one's.
 pub fn write_turn_end(clone: &Path, run_dir: &Path, base: &str, branch: &str) -> Result<RunState> {
+    turn_end_in(&CloneGit::plain(clone), run_dir, base, branch)
+}
+
+/// [`write_turn_end`] with the executor's git of `clone`.
+fn turn_end_in(clone: &CloneGit, run_dir: &Path, base: &str, branch: &str) -> Result<RunState> {
+    clone.refuse_nested()?;
     let head = git_ok(clone, &["rev-parse", "--verify", "HEAD^{commit}"])?
         .trim()
         .to_owned();
@@ -421,7 +530,7 @@ fn read_state(run_dir: &Path) -> Option<RunState> {
 
 /// The Git operation half done in the clone (`rebase`, `merge`,
 /// `cherry-pick`, `revert`), if any.
-fn git_operation(clone: &Path) -> Result<Option<&'static str>> {
+fn git_operation(clone: &CloneGit) -> Result<Option<&'static str>> {
     for (name, operation) in [
         ("rebase-merge", "rebase"),
         ("rebase-apply", "rebase"),
@@ -449,7 +558,8 @@ fn git_operation(clone: &Path) -> Result<Option<&'static str>> {
 /// untracked file Git does not ignore, with its execute bit. An untracked
 /// entry that is no regular file, or past a snapshot's limits, ends the
 /// work with why ([`CloneWork::refused`]) and none of its parts.
-fn read_work(clone: &Path, head: &str) -> Result<(CloneWork, Vec<Vec<u8>>)> {
+fn read_work(clone: &CloneGit, head: &str) -> Result<(CloneWork, Vec<Vec<u8>>)> {
+    clone.refuse_nested()?;
     let diff = |cached: bool| {
         let mut args = vec![
             "diff",
@@ -520,6 +630,11 @@ fn read_work(clone: &Path, head: &str) -> Result<(CloneWork, Vec<Vec<u8>>)> {
 /// Nothing while no restore is handed. `Err` (a restore refused, or one
 /// that cannot be read) runs no agent.
 pub fn restore_clone(clone: &Path, run_dir: &Path, branch: &str) -> Result<()> {
+    restore_in(&CloneGit::plain(clone), run_dir, branch)
+}
+
+/// [`restore_clone`] with the executor's git of `clone`.
+fn restore_in(clone: &CloneGit, run_dir: &Path, branch: &str) -> Result<()> {
     let path = run_dir.join(RUN_RESTORE_FILE);
     match fs::symlink_metadata(&path) {
         Ok(metadata) if metadata.file_type().is_file() => {}
@@ -601,7 +716,7 @@ pub fn restore_clone(clone: &Path, run_dir: &Path, branch: &str) -> Result<()> {
 /// The clone as a snapshot compares it; `Err` also when its work cannot be
 /// read whole (an untracked link, special file or file past the limits),
 /// which is not taken for a clean clone.
-fn clone_state(clone: &Path) -> Result<crate::domain::replan_snapshot::WorktreeState> {
+fn clone_state(clone: &CloneGit) -> Result<crate::domain::replan_snapshot::WorktreeState> {
     let head = git_ok(clone, &["rev-parse", "--verify", "HEAD^{commit}"])?;
     let (work, _) = read_work(clone, head.trim())?;
     if let Some(why) = &work.refused {
@@ -624,7 +739,7 @@ fn read_result(run_dir: &Path) -> Option<RestoreResult> {
 /// to the index and the worktree, the unstaged one to the worktree and the
 /// untracked files with their execute bits.
 fn fill_clone(
-    clone: &Path,
+    clone: &CloneGit,
     run_dir: &Path,
     request: &RestoreRequest,
     parts: &[Vec<u8>],
@@ -854,6 +969,139 @@ mod tests {
             run_git(&clone, &["bundle", "list-heads", &bundle]),
             format!("{head} refs/heads/dagq/r1")
         );
+    }
+
+    /// A program `path` that writes `mark` when it runs, and then what
+    /// `then` says.
+    fn marking(path: &Path, mark: &Path, then: &str) {
+        fs::write(
+            path,
+            format!("#!/bin/sh\necho ran >> '{}'\n{then}\n", mark.display()),
+        )
+        .unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A clone whose configuration names a fsmonitor, a hooks directory
+    /// with a `reference-transaction` hook and a clean filter its tracked
+    /// `.gitattributes` uses, each marking the file it is named after, and
+    /// a tracked file changed since its commit so that `status` and `diff`
+    /// run the filter; the marks' directory.
+    fn planted_clone() -> (tempfile::TempDir, PathBuf, PathBuf, String, PathBuf) {
+        let (dir, clone, run_dir, base) = clone_at_base();
+        let marks = dir.path().join("marks");
+        let hooks = dir.path().join("hooks");
+        fs::create_dir_all(&marks).unwrap();
+        fs::create_dir_all(&hooks).unwrap();
+        let fsmonitor = dir.path().join("fsmonitor");
+        marking(&fsmonitor, &marks.join("fsmonitor"), "exit 1");
+        marking(
+            &hooks.join("reference-transaction"),
+            &marks.join("hook"),
+            "exit 0",
+        );
+        let filter = dir.path().join("clean");
+        marking(&filter, &marks.join("filter"), "cat");
+        fs::write(clone.join(".gitattributes"), "*.txt filter=planted\n").unwrap();
+        fs::write(clone.join("f.txt"), "f\n").unwrap();
+        run_git(&clone, &["add", ".gitattributes", "f.txt"]);
+        run_git(&clone, &["commit", "-qm", "planted"]);
+        for (key, value) in [
+            ("core.fsmonitor", fsmonitor.to_str().unwrap()),
+            ("core.hooksPath", hooks.to_str().unwrap()),
+            ("filter.planted.clean", filter.to_str().unwrap()),
+        ] {
+            run_git(&clone, &["config", key, value]);
+        }
+        fs::write(clone.join("f.txt"), "changed\n").unwrap();
+        (dir, clone, run_dir, base, marks)
+    }
+
+    fn marks_of(marks: &Path) -> Vec<String> {
+        let mut found: Vec<String> = fs::read_dir(marks)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        found.sort();
+        found
+    }
+
+    /// The facts-only turn's git runs nothing the worker left in the
+    /// clone's configuration (no fsmonitor, no hook, no driver), while the
+    /// executor's plain git of a worker's turn runs them as git would: it
+    /// still writes the clone's facts, the changed file uncommitted.
+    #[test]
+    fn a_facts_only_turn_runs_no_fsmonitor_hook_or_driver_the_worker_left_in_the_clone() {
+        let (_dir, clone, run_dir, base, marks) = planted_clone();
+        let guarded = CloneGit::guarded(&clone).unwrap();
+        git_ok(&guarded, &["update-ref", "refs/dagq/probe", "HEAD"]).unwrap();
+        run_facts_turn(&clone, &run_dir, &base, "dagq/r1").unwrap();
+        assert!(marks_of(&marks).is_empty(), "{:?}", marks_of(&marks));
+        let state = run_state(&run_dir);
+        assert_eq!(state.turn_ended, Some(true));
+        assert!(state.status.contains("f.txt"), "{}", state.status);
+
+        // The same git without the guard runs each of them.
+        let plain = CloneGit::plain(&clone);
+        git_ok(&plain, &["update-ref", "refs/dagq/probe", "HEAD~1"]).unwrap();
+        write_turn_end(&clone, &run_dir, &base, "dagq/r1").unwrap();
+        assert_eq!(marks_of(&marks), ["filter", "fsmonitor", "hook"]);
+    }
+
+    /// A clone with a populated submodule is refused by the facts-only
+    /// turn before any `status` or `diff` runs git in the nested
+    /// repository, whose own configuration defines a clean filter here:
+    /// no facts are written, and the filter does not run.
+    #[test]
+    fn a_facts_only_turn_refuses_a_clone_with_a_populated_submodule() {
+        let (dir, clone, run_dir, base) = clone_at_base();
+        let nested = clone.join("sub");
+        fs::create_dir_all(&nested).unwrap();
+        run_git(&nested, &["init", "-q"]);
+        fs::write(nested.join(".gitattributes"), "* filter=nested\n").unwrap();
+        fs::write(nested.join("n.txt"), "n\n").unwrap();
+        run_git(&nested, &["add", "."]);
+        run_git(&nested, &["commit", "-qm", "nested"]);
+        let marks = dir.path().join("marks");
+        fs::create_dir_all(&marks).unwrap();
+        let filter = dir.path().join("clean");
+        marking(&filter, &marks.join("filter"), "cat");
+        run_git(
+            &nested,
+            &["config", "filter.nested.clean", filter.to_str().unwrap()],
+        );
+        fs::write(nested.join("n.txt"), "changed\n").unwrap();
+        run_git(&clone, &["add", "sub"]);
+        run_git(&clone, &["commit", "-qm", "gitlink"]);
+        let refused = run_facts_turn(&clone, &run_dir, &base, "dagq/r1").unwrap_err();
+        assert!(
+            format!("{refused:#}").contains("populated submodule sub"),
+            "{refused:#}"
+        );
+        assert!(marks_of(&marks).is_empty(), "{:?}", marks_of(&marks));
+        assert!(!run_dir.join(RUN_STATE_FILE).exists());
+    }
+
+    fn run_state(run_dir: &Path) -> RunState {
+        RunState::parse(&fs::read_to_string(run_dir.join(RUN_STATE_FILE)).unwrap()).unwrap()
+    }
+
+    /// The overrides of a facts-only turn's git are the control side's
+    /// guard and no fsmonitor.
+    #[test]
+    fn a_facts_only_turn_s_git_has_no_hooks_no_fsmonitor_and_no_driver() {
+        let overrides = facts_overrides("core.fsmonitor\0filter.planted.clean\0").unwrap();
+        for (key, value) in [
+            ("core.hooksPath", "/dev/null"),
+            ("core.fsmonitor", "false"),
+            ("filter.planted.clean", ""),
+            ("filter.planted.required", "false"),
+        ] {
+            assert!(
+                overrides.contains(&(key.to_owned(), value.to_owned())),
+                "{key}: {overrides:?}"
+            );
+        }
     }
 
     /// A restored untracked file is written inside the clone only: its

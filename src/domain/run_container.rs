@@ -251,6 +251,45 @@ pub fn worker_run_args(container: &WorkerContainer<'_>) -> Result<Vec<String>, S
     Ok(args)
 }
 
+/// The container of a facts-only turn of a run that stopped
+/// ([`facts_command`]).
+#[derive(Debug, Clone)]
+pub struct FactsContainer<'a> {
+    pub queue: &'a QueueKey,
+    pub run: &'a str,
+    pub image: &'a str,
+    pub clone: &'a Path,
+    pub run_dir: &'a Path,
+    pub limits: ContainerLimits,
+    /// What the container runs: [`facts_command`].
+    pub command: &'a [String],
+}
+
+/// The arguments after `podman --connection dagq` that run a facts-only
+/// turn of the run: hardened and named as a turn's container (so that it
+/// cannot start while one of the run's is there, and a stop of the run
+/// removes it), with only the clone and the run directory mounted, as the
+/// executor reads the one and writes its facts to the other. No socket of
+/// the run's relay to the queue broker, no build output, no worker cache
+/// and no variable: what is left of the run cannot reach anything outside
+/// the two after its run stopped.
+pub fn facts_run_args(container: &FactsContainer<'_>) -> Result<Vec<String>, String> {
+    let name = container.queue.run_container(container.run)?;
+    let clone = mount_path(container.clone)?;
+    let run_dir = mount_path(container.run_dir)?;
+    let mut args = hardened(container.queue, &name, container.run, container.limits);
+    args.extend([
+        "--volume".to_owned(),
+        format!("{clone}:{clone}"),
+        "--volume".to_owned(),
+        format!("{run_dir}:{run_dir}"),
+        "--workdir".to_owned(),
+        clone,
+    ]);
+    finish_args(&mut args, &[], container.image, container.command)?;
+    Ok(args)
+}
+
 /// The arguments every container of a run starts with, named `name`,
 /// removed when it ends: the non-root user mapped to the machine's user
 /// that owns the mounts, the read-only root filesystem with a private
@@ -496,6 +535,19 @@ pub fn launcher_command(
     command
 }
 
+/// What the container of a facts-only turn runs: `dagq relay turn
+/// --facts-only` of the image's client, which runs no agent and writes the
+/// run branch's bundle, the clone's work and the run's state anew, as at a
+/// turn's end; what the control side starts when the facts the last turn
+/// left are not of its end.
+pub fn facts_command(run_dir: &Path, clone: &Path, base: &str, branch: &str) -> Vec<String> {
+    let mut command = launcher_command(run_dir, clone, base, branch, &[]);
+    // The flag in place of the agent after `--`.
+    command.pop();
+    command.insert(3, "--facts-only".to_owned());
+    command
+}
+
 /// The environment the container's launcher gives the agent, from the run
 /// `run` and its token `token` read from [`TOKEN_FILE`] (ADR-t2114-2
 /// decision 1, ADR-t2257-1 decision 3): the forwarder's URLs of
@@ -554,6 +606,62 @@ mod tests {
             .collect()
     }
 
+    /// A facts-only turn's container is hardened and named as the run's
+    /// turns are, but mounts only the clone and the run directory: no
+    /// socket of the run's relay to the queue broker, no build output, no
+    /// worker cache, and no variable.
+    #[test]
+    fn a_facts_only_turn_s_container_mounts_only_the_clone_and_the_run_directory() {
+        let queue = key();
+        let clone = PathBuf::from("/q/clones/r1");
+        let run_dir = PathBuf::from("/q/runs/r1");
+        let command = facts_command(&run_dir, &clone, "abc", "dagq/r1");
+        let args = facts_run_args(&FactsContainer {
+            queue: &queue,
+            run: "r1",
+            image: "localhost/dagq-q-image:t",
+            clone: &clone,
+            run_dir: &run_dir,
+            limits: ContainerLimits::default(),
+            command: &command,
+        })
+        .unwrap();
+        let text = args.join(" ");
+        for part in [
+            "run --rm --name dagq-77067154921b9014-run-r1",
+            "--read-only",
+            "--cap-drop all",
+            "--security-opt no-new-privileges",
+            "--network none",
+            "--workdir /q/clones/r1",
+            "localhost/dagq-q-image:t dagq relay turn --facts-only --run-dir /q/runs/r1",
+        ] {
+            assert!(text.contains(part), "{part}: {text}");
+        }
+        assert_eq!(
+            values(&args, "--volume"),
+            ["/q/clones/r1:/q/clones/r1", "/q/runs/r1:/q/runs/r1"]
+        );
+        assert!(values(&args, "--env").is_empty(), "{text}");
+        assert!(
+            !text.contains("broker") && !text.contains("socket"),
+            "{text}"
+        );
+        let refused = FactsContainer {
+            clone: Path::new("/q/a:/x"),
+            ..FactsContainer {
+                queue: &queue,
+                run: "r1",
+                image: "i",
+                clone: &clone,
+                run_dir: &run_dir,
+                limits: ContainerLimits::default(),
+                command: &command,
+            }
+        };
+        assert!(facts_run_args(&refused).is_err());
+    }
+
     #[test]
     fn a_turn_s_container_is_hardened_and_mounts_only_the_run_s_parts() {
         let queue = key();
@@ -604,6 +712,12 @@ mod tests {
         );
         assert!(!text.contains(".sock:") || text.contains("/run/dagq-broker"));
         assert!(!text.contains("--privileged") && !text.contains("--cap-add"));
+        // A facts-only turn runs no agent.
+        assert_eq!(
+            facts_command(&run_dir, &clone, "abc", "dagq/r1").join(" "),
+            "dagq relay turn --facts-only --run-dir /q/runs/r1 --clone /q/clones/r1 --base abc \
+             --branch dagq/r1"
+        );
         // Without the setting, no build output volume.
         container.build_output = None;
         let args = worker_run_args(&container).unwrap();

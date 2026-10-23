@@ -188,7 +188,7 @@ runを終える解除は2つに分かれる（`task_hold::ends_run`）。
 止まった（`failed`・`interrupted`）runは、providerかmodelを指定した解除（modelだけでも）か、残した結果の無いrunの解除で終わり、残した結果がありproviderもmodelも指定しない解除はsessionの有無にかかわらずrunを終えずに残した結果を適用して進む。
 runを終える解除は、runを終えてtaskをreadyに戻し、次のrunが、runのbranchにあるworktree（containerのrunは最後のturnの終わりの記録）の今のheadを検証済みのcommitに依らずに（worktreeが無ければ検証済みのcommitを）、commitに保存した未commitの差分とともに引き継ぐ（`task_hold::release_decision`、記録は`task_released`の`decision`と手での`retry_inherit`）。
 引き継ぐものが無ければ次のrunは今のmainから始め、それより前のrunの引き継ぎも辿らない（`resume::inherited_from`）。
-未commitの差分を保存できないとき（containerのrunはcloneでgitを走らせないので、executorの記録が最後に始めたturnの終わりのものでないか、未commitの差分・途中のrebase・bundleと食い違うheadを示すとき）と、worktreeのHEADがrunのbranchに無いときと、引き継ぐheadを`refs/dagq/runs/<run-id>`に残せないときは、解除を拒んでhold・run・taskを変えない（refは確定の直前に書く）。
+未commitの差分を保存できないとき（containerのrunはcloneでgitを走らせないので、記録が事実だけのturnの後も最後のturnの終わりのものでないか、未commitの差分・途中のrebase・bundleに無いheadを示すとき）と、worktreeのHEADがrunのbranchに無いときと、引き継ぐheadを`refs/dagq/runs/<run-id>`に残せないときは、解除を拒んでhold・run・taskを変えない（refは確定の直前に書く）。
 成果は確定の外で読むので、確定の中で読んだ時の開いたholdとrunの進行の版（`task_hold::ProgressVersion`）を照らし、食い違えば（間に別の解除・resume・holdが入った）同じく拒む（`release_read_moved`）。
 再計画の保留とholdが重なれば、両方が終わるまでresumeしない。
 resumeかtriageの途中でsupervisorが死に、staleなleaseのまま休んだrunは、holdがadoptもresumeも止めるので、別のsupervisorがholdのparkのためにそのleaseを引き継ぎ（`lease_acquired`の`hold_park`）、slotのrunと同じ保留で書き手の終わりを待ってから待ちに入れる。

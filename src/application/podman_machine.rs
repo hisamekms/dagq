@@ -91,6 +91,10 @@ pub trait RunMachine: Send + Sync {
     /// or the verification cannot run in the container (it runs nowhere
     /// else).
     fn ready(&self, run: &str, build_output: Option<&str>) -> Result<String>;
+    /// Make the dagq machine run for the run `run` and its image built,
+    /// and nothing else: no relay of the run towards the queue broker and
+    /// no volume. The image a facts-only turn's container runs.
+    fn ready_image(&self, run: &str) -> Result<String>;
     /// Remove the build output volume named after `build_output`, if it is
     /// there: a verification's, at its end.
     fn remove_build_output(&self, build_output: &str) -> Result<()>;

@@ -52,10 +52,11 @@ related:
    `confidence: high`の`repair`で、`actions`がちょうど1つ、かつその前提が今成り立つときだけ適用する。
    前提:
    - `retry`: taskの`failed` / `interrupted`のrunがretryの上限未満で、runのbranchに自分のcommitが無い（`result_commit`、無ければworktreeのHEAD、worktreeを作る前に止まったrunなら無し、がmainの祖先。worktreeが消えていて`result_commit`も無ければ判断できないので崩れとする）。
+     containerのrunのHEADは最後のturnの終わりの事実から読み、そうでない事実は事実だけのturnで書き直してから読み、書き直せないか保存できない成果を言えば崩れとする（[Container runtime](../container-runtime.md#git)）。
      commitのあるrunを最初からやり直すのは成果の破棄なので適用しない。
      適用するとtaskを`in_progress`から`ready`に戻す（`task_status_changed`）。
    - `retry_inherit`: runのbranchに自分のcommitがあり、そのtaskで引き継ぐretry（`triage_finished`の`action: retry_inherit`）がまだ無い（taskごとに1回。人の手での引き継ぎは数えない。適用の同じトランザクションで再検査する）。
-     `refs/dagq/runs/<run-id>`にcommit（`result_commit`、無ければworktreeのHEAD）を残してtaskを`ready`に戻す。
+     `refs/dagq/runs/<run-id>`にcommit（`result_commit`、無ければworktreeのHEAD。containerのrunは`retry`と同じく読む）を残してtaskを`ready`に戻す。
      次のrunは引き継ぎ（`run_inherited`とpromptの「Carried over from run」の節）で始まる。
    - `resume`: resumeを使い切っていない（通算で数える）、worktreeとreceiptのpathがある。
      runを`needs_session`にし、`last_error`にjobの`instruction`（空なら`diagnosis`）を書く。

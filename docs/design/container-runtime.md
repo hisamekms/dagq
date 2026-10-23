@@ -102,7 +102,6 @@ containerはdagq専用の名前のPodman machineだけで動かす（[ADR-t2113-
   initはhostの全てのqueue（data homeの`dagq/`の下でqueueのDBを持つdir）のdirをmountするので、作った時点のqueueがmachineを共有する。
   machineにmountしても、containerに見せるかはcontainerごとのmountで決まる。
 - machineの中のnamed volume: buildの出力はrunかverificationごと、workerのcacheはqueueごとのnamed volumeで、hostにmountしない（`MachineVolumes`、名前は`QueueKey`）。
-  決めた理由は[ADR-t2173-1](../adr/2026-10-12-t2173-1-machine-mounts-only-run-and-clone-dirs-and-keeps-build-output-and-worker-cache-in-named-volumes.md)が持つ。
   名前がqueueとrunを含むので、あるqueueの操作は別のqueueのvolumeに届かない。
   runの終わりと着地でrunのbuildの出力を消すのは、relayの見張りが終わったrunを閉じる`RelayControl::close`で、runのcontainer・relay・socketのvolumeと一緒に消す（下の「brokerへの経路」）。
   machineを作り直すとvolumeは消え、workerのcacheは冷えた状態から始まる。
@@ -177,13 +176,13 @@ runのcontainerは`--network none`で、外への経路はhostのqueueのbroker�
 containerで動くrunは、hostのgitの共通dirを共有しない独立したclone（`<queue dir>/clones/<run>`）で働く（[ADR-t2113-2](../adr/2026-10-08-t2113-2-git-is-guarded-by-the-mount-design.md)決定1・3、[ADR-t2179-1](../adr/2026-10-12-t2179-1-control-side-runs-no-git-in-a-container-runs-clone-and-lands-in-its-own-worktree.md)）。
 runのworktreeのpathにcloneを記録したrunがcontainerのrunで（`TaskRun::in_container`）、hostのrunはworktreeのまま変わらない。
 制御側の読み方と扱い方の分かれ目は`application::run_git`の1か所にあり、呼び出し元はcloneのpathをgitに渡さない。
-adapterもcloneのpathでのgitを拒む。
 
 - cloneの作成: provisioningで制御側が`file://`のURLでbase commitを取り込み（hard linkもalternatesも無い）、run branchをcheckoutし、cloneの`refs/remotes/dagq/main`と制御側のrun branchをbaseに置く。
   remote・credential helper・上流の資格情報は置かない。
 - 事実: containerの中のexecutorがturnの終わりにrun dirへ書くrun branchのbundleと状態のファイルから読む（綴りと形は`domain::run_clone`）。
-  headが要るたびに、bundleを制御側だけの写しにして`bundle list-heads`で1本のrun branchを確かめ、制御側のrun branchだけへ取り込む。
+  headが要るたびに、bundleの1本のrun branchを確かめて制御側のrun branchだけへ取り込む。
   読めない・食い違うものはsessionに返す。
+- 事実だけのturn: 最後のturnの終わりのものでない事実は、headを読む前にagentもbrokerへの経路も無いturnで書き直す（[ADR-t2978-1](../adr/2026-10-23-t2978-1-facts-only-turn-runs-in-a-narrow-container-with-guarded-git.md)）。
 - 再計画の保留と復元: 書き出した作業と渡す材料による（[再計画](../plans/task-replanning.md)）。
 - 着地・review・e2e: 制御側だけの`<queue dir>/landing/<run>`の着地用のworktree（着地する`result_commit`をdetachedで置く）で動く。
   どのmachineとcontainerのmountにも入らず、作れないときは着地せず人を待つ。

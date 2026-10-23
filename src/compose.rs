@@ -128,6 +128,19 @@ pub(crate) fn run_containers(
     )
 }
 
+/// The runs' containers of the queue at `db` ([`run_containers`]), bound to
+/// the main checkout `queue` is bound to: where a person's release of a
+/// hold and `ready --inherit` run the facts-only turn of a run in a
+/// container whose facts are not of the end of its last turn. A binding
+/// that cannot be read is no checkout, which runs no facts-only turn (the
+/// read of such a run is refused) and leaves a host run's command alone.
+pub fn queue_run_containers(
+    queue: &SqliteQueue,
+    db: &Path,
+) -> crate::infrastructure::run_container::PodmanRunContainers {
+    run_containers(db, bound_checkout(queue).ok().flatten())
+}
+
 /// The verifications' containers of the queue at `db`, whose parts the
 /// host's context makes ready as it does a worker's
 /// ([`run_containers`]).

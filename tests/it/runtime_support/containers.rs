@@ -156,11 +156,39 @@ pub fn queue_fixture(dir: &Path) -> (PathBuf, PathBuf) {
 }
 
 /// The machine's parts of the test's turns: none is asked, and every turn
-/// runs the test's image.
-pub struct FakeMachine;
+/// runs the test's image. Each readying is written to `<state>/machine`
+/// (`ready <run>` for a turn's parts with its relay, `image <run>` for the
+/// machine and the image alone).
+pub struct FakeMachine(PathBuf);
+
+impl FakeMachine {
+    fn note(&self, line: String) {
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.0.join("machine"))
+            .unwrap();
+        std::io::Write::write_all(&mut file, format!("{line}\n").as_bytes()).unwrap();
+    }
+}
+
+/// What [`FakeMachine`] of `state` was asked to make ready.
+pub fn machine_calls(state: &Path) -> Vec<String> {
+    fs::read_to_string(state.join("machine"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
 
 impl RunMachine for FakeMachine {
-    fn ready(&self, _: &str, _: Option<&str>) -> Result<String> {
+    fn ready(&self, run: &str, _: Option<&str>) -> Result<String> {
+        self.note(format!("ready {run}"));
+        Ok("localhost/dagq-test-image:t".to_owned())
+    }
+
+    fn ready_image(&self, run: &str) -> Result<String> {
+        self.note(format!("image {run}"));
         Ok("localhost/dagq-test-image:t".to_owned())
     }
 
@@ -181,7 +209,7 @@ pub fn containers(state: &Path, db: &Path, repo: &Path) -> PodmanRunContainers {
         db,
         Some(repo.to_path_buf()),
         None,
-        Arc::new(FakeMachine),
+        Arc::new(FakeMachine(state.to_path_buf())),
     )
 }
 

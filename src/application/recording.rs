@@ -751,6 +751,9 @@ mod tests {
                 self.0.lock().unwrap().push(run.clone());
                 Ok(())
             }
+            fn facts_turn(&self, _: &crate::domain::TaskRun) -> Result<()> {
+                unimplemented!()
+            }
         }
         let records = SessionRecords {
             runs: [("background:7:start".to_owned(), RunId::new("r1").unwrap())].into(),

@@ -1086,7 +1086,7 @@ pub fn supervise_options(parallel: usize, once: bool) -> SuperviseOptions {
 }
 
 /// The runs' containers of a test that runs none: a stop removes nothing,
-/// and no turn is started in one.
+/// and no turn, nor a facts-only one, is started in one.
 pub struct NoContainers;
 
 impl dagq::application::run_container::RunContainers for NoContainers {
@@ -1103,6 +1103,12 @@ impl dagq::application::run_container::RunContainers for NoContainers {
     }
     fn remove(&self, _: &RunId) -> Result<()> {
         Ok(())
+    }
+    fn facts_turn(&self, run: &TaskRun) -> Result<()> {
+        bail!(
+            "this test runs no facts-only turn of run {} in a container",
+            run.id()
+        )
     }
 }
 

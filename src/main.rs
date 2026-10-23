@@ -2086,7 +2086,8 @@ enum RelayCommand {
     /// A worker's turn in its container: fetch main's bundle into the clone, start the
     /// forwarder, run the agent after `--` in the clone with the run token of
     /// DAGQ_SERVICE_CREDENTIAL_FILE, then write the run branch's bundle and the run's state to
-    /// the run directory. Exits with the agent's code; its output is the agent's.
+    /// the run directory. Exits with the agent's code; its output is the agent's. With
+    /// --facts-only, a turn of no agent that writes the clone's facts anew.
     #[command(hide = true)]
     Turn {
         #[arg(long)]
@@ -2099,7 +2100,15 @@ enum RelayCommand {
         /// The run branch.
         #[arg(long)]
         branch: String,
-        #[arg(last = true, required = true)]
+        /// Run no agent: restore what the control side handed, then write the bundle, work
+        /// and state of the clone as it is, for the control side to read (a facts-only turn).
+        #[arg(long)]
+        facts_only: bool,
+        #[arg(
+            last = true,
+            required_unless_present = "facts_only",
+            conflicts_with = "facts_only"
+        )]
         agent: Vec<String>,
     },
     /// One command of integrate's verification in its container: start the forwarder, give the
@@ -3549,7 +3558,19 @@ fn relay(command: &RelayCommand) -> Result<Value> {
             clone,
             base,
             branch,
+            facts_only: true,
+            ..
+        } => {
+            dagq::infrastructure::container_turn::run_facts_turn(clone, run_dir, base, branch)?;
+            std::process::exit(0)
+        }
+        RelayCommand::Turn {
+            run_dir,
+            clone,
+            base,
+            branch,
             agent,
+            ..
         } => {
             let code = dagq::infrastructure::container_turn::run_turn(
                 &dagq::infrastructure::container_turn::TurnOptions {
@@ -4112,11 +4133,16 @@ fn execute(cli: Cli) -> Result<Value> {
             inherit: true,
             reason,
             ..
-        } => serde_json::to_value(planning!().ready_inheriting(
-            TaskId::new(id),
-            reason.as_deref().unwrap_or_default(),
-            &dagq::infrastructure::adapters::RunRepositories,
-        )?)?,
+        } => {
+            let containers = dagq::compose::queue_run_containers(&queue, &db);
+            serde_json::to_value(planning!().ready_inheriting(
+                TaskId::new(id),
+                reason.as_deref().unwrap_or_default(),
+                &dagq::infrastructure::adapters::RunRepositories {
+                    containers: &containers,
+                },
+            )?)?
+        }
         Command::Ready {
             id, bypass_review, ..
         } => serde_json::to_value(planning!().ready(TaskId::new(id), bypass_review)?)?,
@@ -4550,12 +4576,15 @@ fn execute(cli: Cli) -> Result<Value> {
                 provider: provider.as_deref().map(str::parse).transpose()?,
                 model,
             };
+            let containers = dagq::compose::queue_run_containers(&queue, &db);
             let mut holds =
                 dagq::application::commands::holds::Holds::new(&mut queue, &actor, &StaticPolicy);
             serde_json::to_value(holds.release(
                 &hold_target(&target)?,
                 choice,
-                &dagq::infrastructure::adapters::RunRepositories,
+                &dagq::infrastructure::adapters::RunRepositories {
+                    containers: &containers,
+                },
             )?)?
         }
         Command::Replans { id: Some(id), .. } => {

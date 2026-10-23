@@ -1126,8 +1126,10 @@ fn nothing_a_worker_plants_in_its_clone_runs_on_the_control_side() {
     run_git::status(&repository, &run.run).unwrap();
     run_git::rebase_in_progress(&repository, &run.run).unwrap();
     dagq::application::review::run_commits(&repository, &run.run).unwrap();
-    dagq::application::inherit::carried_head(&run.run, &LocalRunFiles, &repository).unwrap();
-    dagq::application::inherit::released_work(&run.run, &LocalRunFiles, &repository).unwrap();
+    dagq::application::inherit::carried_head(&run.run, &LocalRunFiles, &repository, &NoContainers)
+        .unwrap();
+    dagq::application::inherit::released_work(&run.run, &LocalRunFiles, &repository, &NoContainers)
+        .unwrap();
     // The review's job and program and the e2e in the landing worktree.
     start_in_tree(&repo, &run, None);
     // The clone path itself is refused to git, whoever asks.
@@ -1439,99 +1441,432 @@ fn a_container_turn_writes_its_work_and_refuses_to_restore_over_a_clone_that_cha
     }
 }
 
-/// A held container run whose last turn was cut off with its container is
-/// not released to a new run from the facts an earlier turn's end left: the
-/// executor marks them at the cut-off turn's start, before its agent ran,
-/// so `release --provider codex` is refused and changes nothing, and the
-/// clean, older head is not carried over without the turn's commit and
-/// uncommitted work. Once a turn's end records them, the release carries
-/// over the latest head.
-#[test]
-fn a_held_container_run_whose_last_turn_was_cut_off_is_not_released_from_an_earlier_turns_facts() {
-    let (_fixture, repo, db) = fixture();
-    let run = claim_in_container(&db, &repo, TaskId::new(1));
-    // The first turn ends: its executor records a clean head.
-    let commit_file = |text: &str, message: &str| {
-        format!("echo {text} >> feature.txt && git add feature.txt && git commit -q -m {message}")
-    };
-    assert_eq!(
-        relay_turn(&run, &commit_file("feature", "feature")),
-        Some(0)
-    );
-    let first = in_clone(&run.clone, &["rev-parse", "HEAD"]);
-    let ended = run_state(&run);
-    assert_eq!(
-        (ended.head.as_str(), ended.status.as_str()),
-        (first.as_str(), "")
-    );
-    assert_eq!(ended.turn_ended, Some(true));
-    // The next turn commits and leaves uncommitted work, and its container
-    // goes before the executor writes the turn's end.
-    let cut_off = format!(
-        "{} && echo wip > wip.txt && kill -9 $PPID",
-        commit_file("more", "more")
-    );
-    assert_eq!(relay_turn(&run, &cut_off), None);
-    let latest = in_clone(&run.clone, &["rev-parse", "HEAD"]);
-    assert_ne!(latest, first);
-    // What is left reads clean, at the first turn's head, but marked.
-    let left = run_state(&run);
-    assert_eq!(
-        (left.head.as_str(), left.status.as_str()),
-        (first.as_str(), "")
-    );
-    assert_eq!(left.turn_ended, Some(false));
-    let mut queue = SqliteQueue::open(&db).unwrap();
-    queue
-        .finish_supervision_live(run.run.id(), &run.token)
-        .unwrap();
+/// A queue laid out as a host's (its directory names the runs'
+/// containers), with the fake podman's containers of
+/// `runtime_support::containers`: a facts-only turn runs the container's
+/// executor (`dagq relay turn --facts-only`) on the host, with real git.
+fn container_queue() -> (
+    tempfile::TempDir,
+    PathBuf,
+    PathBuf,
+    dagq::infrastructure::run_container::PodmanRunContainers,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let (repo, db) = containers::queue_fixture(dir.path());
+    let fake = containers::containers(&dir.path().join("podman"), &db, &repo);
+    (dir, repo, db, fake)
+}
+
+/// A turn of `run` that commits `text` to `feature.txt` and ends: its
+/// executor's facts of the turn's end, as [`turn_end`] writes them.
+fn ended_turn(run: &ContainerRun, text: &str) -> String {
+    let head = commit(run, &[("feature.txt", text)], text);
+    turn_end(run);
+    head
+}
+
+/// A turn of `run` that commits `text` and is cut off with its container
+/// before its executor writes the turn's end: the state an earlier turn's
+/// end wrote is left marked as its start marks it (`turn_ended: false`,
+/// what `relay turn` does, held by
+/// `a_container_turn_marks_its_last_state_before_its_agent_runs_and_writes_it_anew_at_its_end`),
+/// and none is written when there was none. The head it left.
+fn cut_off_turn(run: &ContainerRun, text: &str) -> String {
+    // The run token's copy goes only with a stop's removal of the
+    // container: a turn cut off with it leaves the copy behind.
+    fs::write(
+        run.run_dir.join(dagq::domain::run_container::TOKEN_FILE),
+        "run-token\n",
+    )
+    .unwrap();
+    let state = run.run_dir.join(run_clone::RUN_STATE_FILE);
+    if state.exists() {
+        let marked = run_clone::RunState {
+            turn_ended: Some(false),
+            ..run_state(run)
+        };
+        fs::write(&state, serde_json::to_vec(&marked).unwrap()).unwrap();
+    }
+    commit(run, &[("feature.txt", text)], text)
+}
+
+/// Task 1's run in a container whose last turn committed and was cut off
+/// with its container, then recovered (`interrupted`, no lease) and held:
+/// with `first_ended`, a first turn's end recorded clean facts at its own
+/// commit and the cut-off turn's start marked them (`turn_ended: false`);
+/// else the cut-off turn was its first and no state is there. The head the
+/// cut-off turn left.
+fn held_cut_off_run(db: &Path, repo: &Path, first_ended: bool) -> (ContainerRun, String) {
+    let run = claim_in_container(db, repo, TaskId::new(1));
+    let state = run.run_dir.join(run_clone::RUN_STATE_FILE);
+    if first_ended {
+        let first = ended_turn(&run, "feature");
+        let latest = cut_off_turn(&run, "more");
+        let left = run_state(&run);
+        assert_eq!(
+            (left.head.as_str(), left.turn_ended),
+            (first.as_str(), Some(false))
+        );
+        recover(db, &run);
+        hold(db);
+        (run, latest)
+    } else {
+        let latest = cut_off_turn(&run, "feature");
+        assert!(!state.exists());
+        recover(db, &run);
+        hold(db);
+        (run, latest)
+    }
+}
+
+/// The run recovered as its dead session's supervisor recovers it:
+/// `interrupted`, with no lease.
+fn recover(db: &Path, run: &ContainerRun) {
+    let mut queue = SqliteQueue::open(db).unwrap();
     queue.release_lease(run.run.id(), &run.token).unwrap();
-    let as_user = |args: &[&str]| crate::common::cli::invoke_with(&[], &db, args);
-    let held = as_user(&["hold", "1", "--reason", "the login expired"]);
-    assert!(
-        held.status.success(),
-        "{}",
-        String::from_utf8_lossy(&held.stderr)
+    let recovered = queue.recover_run(run.run.id(), 0, json!({})).unwrap();
+    assert_eq!(recovered.status(), RunStatus::Interrupted);
+}
+
+/// Task 1 held by a person, in this process.
+fn hold(db: &Path) {
+    let mut queue = SqliteQueue::open(db).unwrap();
+    let actor = dagq::domain::ActorContext::user();
+    dagq::application::commands::holds::Holds::new(&mut queue, &actor, &dagq::domain::StaticPolicy)
+        .hold(
+            &dagq::domain::task_hold::HoldTarget::Task(TaskId::new(1)),
+            "the login expired",
+            None,
+        )
+        .unwrap();
+}
+
+/// A person's `release 1 --provider codex` in this process, the run's
+/// facts-only turn run in `containers`.
+fn release_with(
+    db: &Path,
+    containers: &dyn dagq::application::run_container::RunContainers,
+) -> Result<Value> {
+    use dagq::domain::task_hold::{HoldTarget, ReleaseChoice};
+    let mut queue = SqliteQueue::open(db).unwrap();
+    let actor = dagq::domain::ActorContext::user();
+    let released = dagq::application::commands::holds::Holds::new(
+        &mut queue,
+        &actor,
+        &dagq::domain::StaticPolicy,
+    )
+    .release(
+        &HoldTarget::Task(TaskId::new(1)),
+        ReleaseChoice {
+            provider: Some(dagq::domain::Provider::Codex),
+            model: None,
+        },
+        &dagq::infrastructure::adapters::RunRepositories { containers },
+    )?;
+    Ok(serde_json::to_value(released).unwrap())
+}
+
+/// Whether the ref that keeps the carried head of `run` is there.
+fn kept_ref(repo: &Path, run: &ContainerRun) -> Option<String> {
+    let kept = format!("refs/dagq/runs/{}", run.run.id());
+    Command::new(git_executable().expect("git executable"))
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "--verify", "-q", &kept])
+        .bounded_status()
+        .unwrap()
+        .success()
+        .then(|| git_out(repo, &["rev-parse", &kept]))
+}
+
+/// The release of the run of [`held_cut_off_run`] carries over the head
+/// a facts-only turn found in its clone, the cut-off turn's commit, not
+/// an older head: the executor wrote the facts anew (`turn_ended: true`)
+/// in the one facts-only turn, the head is kept, and the task is ready
+/// with its hold gone.
+fn released_with_the_facts_only_turn_s_head(first_ended: bool) {
+    let (dir, repo, db, fake) = container_queue();
+    let (run, latest) = held_cut_off_run(&db, &repo, first_ended);
+    let released = release_with(&db, &fake).unwrap();
+    assert_eq!(released["decision"], "retry_inherit", "{released}");
+    assert_eq!(released["inherit"]["head"], json!(latest), "{released}");
+    assert!(released["inherit"].get("saved").is_none(), "{released}");
+    assert_eq!(kept_ref(&repo, &run), Some(latest.clone()));
+    let refreshed = run_state(&run);
+    assert_eq!(
+        (refreshed.head.as_str(), refreshed.turn_ended),
+        (latest.as_str(), Some(true))
     );
+    assert_eq!(facts_turns(dir.path()), 1);
+    facts_turn_was_narrow(dir.path(), &run);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    assert_eq!(
+        queue.show(run.task).unwrap().task.status(),
+        TaskStatus::Ready
+    );
+    assert!(queue.task_hold(run.task).unwrap().is_none());
+}
+
+/// The facts-only turn of `run` (the last container the fake podman of
+/// the queue in `dir` ran) had only the machine and the image made ready,
+/// with no relay of the run towards the queue broker; mounted only the
+/// clone and the run directory, with no socket and no variable; and found
+/// no run token's copy left in the run directory.
+#[track_caller]
+fn facts_turn_was_narrow(dir: &Path, run: &ContainerRun) {
+    let state = dir.join("podman");
+    assert_eq!(
+        containers::machine_calls(&state),
+        [format!("image {}", run.run.id())]
+    );
+    let args: Vec<String> = fs::read_to_string(state.join("run-args"))
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let values = |flag: &str| {
+        args.windows(2)
+            .filter(|pair| pair[0] == flag)
+            .map(|pair| pair[1].clone())
+            .collect::<Vec<_>>()
+    };
+    // The paths as the run records them, which may be the canonical ones.
+    let id = run.run.id();
+    let volumes = values("--volume");
+    let mounted = |volume: &String, dir: &str| {
+        volume
+            .split_once(':')
+            .is_some_and(|(from, to)| from == to && from.ends_with(&format!("/{dir}/{id}")))
+    };
+    assert!(
+        volumes.len() == 2 && mounted(&volumes[0], "clones") && mounted(&volumes[1], "runs"),
+        "{volumes:?}"
+    );
+    assert!(values("--env").is_empty(), "{args:?}");
+    assert!(args.iter().any(|arg| arg == "--facts-only"), "{args:?}");
+    assert!(
+        !run.run_dir
+            .join(dagq::domain::run_container::TOKEN_FILE)
+            .exists()
+    );
+}
+
+/// The facts-only turns the fake podman of the queue in `dir` ran.
+fn facts_turns(dir: &Path) -> usize {
+    containers::calls(&dir.join("podman"))
+        .into_iter()
+        .filter(|call| call.contains("relay turn --facts-only"))
+        .count()
+}
+
+/// Acceptance (a): a held, interrupted container run whose last turn was
+/// cut off with its container, its facts marked `turn_ended: false` at an
+/// earlier turn's head, is released with the head of the cut-off turn.
+#[test]
+fn a_held_container_run_whose_last_turn_was_cut_off_is_released_with_the_head_its_facts_only_turn_found()
+ {
+    released_with_the_facts_only_turn_s_head(true);
+}
+
+/// Acceptance (a): so is one whose only turn was cut off before any state
+/// was written.
+#[test]
+fn a_held_container_run_with_no_state_is_released_with_the_head_its_facts_only_turn_found() {
+    released_with_the_facts_only_turn_s_head(false);
+}
+
+/// Acceptance (b): when the facts-only turn does not run (no machine, no
+/// image), the release of such a run is refused with why and changes
+/// nothing: the hold stays, the task keeps its worker and status, the run
+/// its status, and no head is carried over or kept.
+#[test]
+fn a_cut_off_container_run_whose_facts_only_turn_does_not_run_is_not_released() {
+    let (_dir, repo, db, _fake) = container_queue();
+    let (run, _latest) = held_cut_off_run(&db, &repo, true);
+    let mut queue = SqliteQueue::open(&db).unwrap();
     let before = queue.show(run.task).unwrap();
-    let refused = as_user(&["release", "1", "--provider", "codex"]);
-    assert!(!refused.status.success());
-    let stderr = String::from_utf8_lossy(&refused.stderr);
-    assert!(
-        stderr.contains("did not record the end of the last turn"),
-        "{stderr}"
-    );
+    let why = format!("{:#}", release_with(&db, &NoContainers).unwrap_err());
+    for part in [
+        "the hold stays",
+        "the facts-only turn that would write them anew did not run",
+        "this test runs no facts-only turn",
+    ] {
+        assert!(why.contains(part), "{part}: {why}");
+    }
     let detail = queue.show(run.task).unwrap();
     assert!(queue.task_hold(run.task).unwrap().is_some());
     assert_eq!(detail.task.worker(), before.task.worker());
     assert_eq!(detail.task.status(), TaskStatus::InProgress);
-    assert_eq!(detail.runs[0].status(), before.runs[0].status());
+    assert_eq!(detail.runs.len(), 1);
+    assert_eq!(detail.runs[0].status(), RunStatus::Interrupted);
     assert!(payloads(&detail, "task_released").is_empty());
-    let kept = format!("refs/dagq/runs/{}", run.run.id());
-    assert!(
-        !Command::new(git_executable().expect("git executable"))
-            .arg("-C")
-            .arg(&repo)
-            .args(["rev-parse", "--verify", "-q", &kept])
-            .bounded_status()
-            .unwrap()
-            .success()
+    assert_eq!(kept_ref(&repo, &run), None);
+    assert_eq!(run_state(&run).turn_ended, Some(false));
+}
+
+/// Acceptance (f): a person's `ready --inherit` of an interrupted container
+/// run whose last turn was cut off carries over the head a facts-only turn
+/// found, as the release does: through the entry both the carried head and
+/// a release's read of the run's work go through
+/// (`inherit::container_head`), whichever of them `ready --inherit` reads.
+#[test]
+fn ready_inherit_of_a_cut_off_container_run_carries_the_head_its_facts_only_turn_found() {
+    let (_dir, repo, db, fake) = container_queue();
+    let run = claim_in_container(&db, &repo, TaskId::new(1));
+    ended_turn(&run, "feature");
+    let latest = cut_off_turn(&run, "more");
+    recover(&db, &run);
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let inbox = dagq::domain::ActorContext::instance(dagq::domain::ActorRole::Inbox, 1);
+    let inherited = dagq::application::commands::planning::Planning::new(
+        &mut queue,
+        &inbox,
+        &dagq::domain::StaticPolicy,
+    )
+    .ready_inheriting(
+        TaskId::new(1),
+        "the turn's work is in its clone",
+        &dagq::infrastructure::adapters::RunRepositories { containers: &fake },
+    )
+    .unwrap();
+    assert_eq!(inherited.head.as_str(), latest);
+    assert_eq!(kept_ref(&repo, &run), Some(latest.clone()));
+    assert_eq!(run_state(&run).turn_ended, Some(true));
+    let detail = SqliteQueue::open(&db).unwrap().show(run.task).unwrap();
+    assert_eq!(detail.task.status(), TaskStatus::Ready);
+}
+
+/// A container run of task 1 whose first turn ended at its base and whose
+/// second committed and was cut off with its container, its session gone
+/// (a dead wrapper, no lease), triaged by a supervisor whose recovery job
+/// repairs it with `action`. Its facts say the base with no bundle until
+/// a facts-only turn writes them anew. The run's events, its task, the
+/// cut-off turn's head and the queue's directory.
+fn triaged_cut_off_run(
+    action: &str,
+) -> (
+    Vec<dagq::domain::RunEvent>,
+    dagq::domain::TaskDetail,
+    String,
+    ContainerRun,
+    tempfile::TempDir,
+    PathBuf,
+    PathBuf,
+) {
+    let (dir, repo, db, fake) = container_queue();
+    // The next run's worker is in a container that cannot be used: the
+    // task a repair readies is not claimed again.
+    fs::write(
+        repo.join("dagq.toml"),
+        "[roles.worker]\nruntime = \"container\"\n",
+    )
+    .unwrap();
+    git(&repo, &["add", "dagq.toml"]);
+    git(&repo, &["commit", "-qm", "the worker in the container"]);
+    let mut run = plan_in_container(&db, &repo, TaskId::new(1));
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let token = run.token.as_str().to_owned();
+    let dead = dead_pid();
+    let handle = dagq::domain::background_wrapper::BackgroundHandle::new(
+        dead,
+        &format!("gone {}", run.run.id()),
     );
-    // A turn's end records the latest work, and the release carries it.
-    let commit_wip = "git add wip.txt && git commit -q -m wip";
-    assert_eq!(relay_turn(&run, commit_wip), Some(0));
-    let head = in_clone(&run.clone, &["rev-parse", "HEAD"]);
-    assert_eq!(in_clone(&run.clone, &["rev-parse", "HEAD~1"]), latest);
-    let released = as_user(&["release", "1", "--provider", "codex"]);
+    record_background_start(&db, &mut queue, &run.run, &token, &handle.to_string());
+    run.reload(&db);
+    GitRepository::inspect(&repo)
+        .unwrap()
+        .create_clone(&run.run, None)
+        .unwrap();
+    turn_end(&run);
+    assert_eq!(run_state(&run).head, run.base);
+    let latest = cut_off_turn(&run, "feature");
+    assert!(!run.run_dir.join(run_clone::RUN_BUNDLE_FILE).exists());
+    queue
+        .register_wrapper(run.run.id(), &run.token, dead)
+        .unwrap();
+    queue.register_agent(run.run.id(), dead, dead).unwrap();
+    Connection::open(&db)
+        .unwrap()
+        .execute("DELETE FROM run_leases", [])
+        .unwrap();
+    let backend = TestWorkspace::new(&db, false, "exit 7");
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "unused")])
+        .with_triages(&[repair(json!({"action": action}), "the machine restarted")]);
+    let mut options = supervise_options(1, true);
+    options.run_containers = Some(runtime::RunContainersPort(Arc::new(fake)));
+    options.container = Some(runtime::ContainerRuntimePort(Arc::new(Unusable)));
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(detail.runs[0].id(), run.run.id());
+    let events = queue.run_events(run.run.id()).unwrap();
+    let started = events
+        .iter()
+        .find(|event| event.kind.as_str() == "triage_started")
+        .unwrap();
+    assert_eq!(started.payload["status"], "interrupted");
+    assert_eq!(run_state(&run).turn_ended, Some(true));
+    assert_eq!(facts_turns(dir.path()), 1, "{action}");
+    facts_turn_was_narrow(dir.path(), &run);
+    (events, detail, latest, run, dir, repo, db)
+}
+
+/// A container runtime that cannot be used.
+struct Unusable;
+
+impl dagq::application::ContainerRuntime for Unusable {
+    fn availability(
+        &self,
+        _: dagq::domain::container_runtime::RuntimeTarget,
+    ) -> dagq::domain::container_runtime::Availability {
+        dagq::domain::container_runtime::Availability::Unavailable("not in this test".to_owned())
+    }
+}
+
+/// The payloads of the events of `kind` among `events`.
+fn of_kind(events: &[dagq::domain::RunEvent], kind: &str) -> Vec<Value> {
+    events
+        .iter()
+        .filter(|event| event.kind.as_str() == kind)
+        .map(|event| event.payload.clone())
+        .collect()
+}
+
+/// Acceptance (c): the triage of a cut-off container run reads its own
+/// commits from facts a facts-only turn wrote anew, so a `retry` from
+/// scratch is refused (its branch holds the cut-off turn's commit) and
+/// asked of a person instead.
+#[test]
+fn the_triage_of_a_cut_off_container_run_refuses_a_retry_from_scratch() {
+    let (events, detail, _latest, _run, _dir, _repo, db) = triaged_cut_off_run("retry");
+    assert_eq!(detail.runs.len(), 1);
+    let finished = of_kind(&events, "triage_finished");
+    assert_eq!(finished[0]["action"], "ask", "{finished:?}");
+    let ask = SqliteQueue::open(&db)
+        .unwrap()
+        .read_ask(AskId::new(finished[0]["ask_id"].as_i64().unwrap()))
+        .unwrap();
     assert!(
-        released.status.success(),
+        ask.question.contains("its branch holds commits of its own"),
         "{}",
-        String::from_utf8_lossy(&released.stderr)
+        ask.question
     );
-    let released: Value = serde_json::from_slice(&released.stdout).unwrap();
-    assert_eq!(released["decision"], "retry_inherit", "{released}");
-    assert_eq!(released["inherit"]["head"], json!(head));
-    assert_eq!(git_out(&repo, &["rev-parse", &kept]), head);
+}
+
+/// Acceptance (c): its `retry_inherit` carries the cut-off turn's commit
+/// over and keeps it, its own commits read from the facts written anew.
+#[test]
+fn the_triage_of_a_cut_off_container_run_carries_the_cut_off_turn_s_commit_over() {
+    let (events, detail, latest, run, _dir, repo, _db) = triaged_cut_off_run("retry_inherit");
+    let finished = of_kind(&events, "triage_finished");
+    assert_eq!(finished[0]["action"], "retry_inherit", "{finished:?}");
+    assert_eq!(finished[0]["inherit"]["head"], json!(latest));
+    assert_eq!(
+        of_kind(&events, "auto_repaired")[0]["conditions"]["own_commits"],
+        true
+    );
+    assert_eq!(kept_ref(&repo, &run), Some(latest.clone()));
+    assert_eq!(detail.task.status(), TaskStatus::Ready);
 }
 
 /// Configuration of `scope` that defines the drivers `name` names, each

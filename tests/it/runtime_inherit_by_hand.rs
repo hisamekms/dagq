@@ -586,7 +586,9 @@ fn inherit(queue: &mut SqliteQueue) -> anyhow::Result<InheritedByHand> {
     Planning::new(queue, &inbox, &StaticPolicy).ready_inheriting(
         TaskId::new(1),
         REASON,
-        &RunRepositories,
+        &RunRepositories {
+            containers: &NoContainers,
+        },
     )
 }
 

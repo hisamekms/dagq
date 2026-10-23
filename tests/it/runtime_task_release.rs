@@ -444,13 +444,19 @@ struct ReadThen<F: Fn()>(F);
 
 impl<F: Fn()> ReleasedBranches for ReadThen<F> {
     fn released_work(&self, run: &TaskRun) -> Result<ReleasedRead> {
-        let read = RunRepositories.released_work(run)?;
+        let read = RunRepositories {
+            containers: &NoContainers,
+        }
+        .released_work(run)?;
         (self.0)();
         Ok(read)
     }
 
     fn keep(&self, run: &TaskRun, head: &CommitSha) -> Result<()> {
-        RunRepositories.keep(run, head)
+        RunRepositories {
+            containers: &NoContainers,
+        }
+        .keep(run, head)
     }
 }
 

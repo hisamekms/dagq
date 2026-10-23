@@ -3281,10 +3281,13 @@ fn parse_main_log(log: &str) -> Vec<MainCommit> {
 /// [`crate::application::inherit::CarriedBranches`] in each run's own
 /// repository (its `repo_path`), for a person's `ready --inherit`, run from
 /// wherever the person stands. A run that never got a repository has
-/// nothing to carry over.
-pub struct RunRepositories;
+/// nothing to carry over. A run in a container whose facts must be written
+/// anew has its facts-only turn run in `containers`.
+pub struct RunRepositories<'a> {
+    pub containers: &'a dyn crate::application::run_container::RunContainers,
+}
 
-impl RunRepositories {
+impl RunRepositories<'_> {
     fn of(run: &TaskRun) -> Result<Option<GitRepository>> {
         run.repo_path()
             .map(|path| GitRepository::inspect(Path::new(path)))
@@ -3292,7 +3295,7 @@ impl RunRepositories {
     }
 }
 
-impl crate::application::inherit::CarriedBranches for RunRepositories {
+impl crate::application::inherit::CarriedBranches for RunRepositories<'_> {
     fn carried_head(&self, run: &TaskRun) -> Result<Option<CommitSha>> {
         if crate::domain::run::check_triageable(run).is_err() {
             return Ok(None);
@@ -3302,6 +3305,7 @@ impl crate::application::inherit::CarriedBranches for RunRepositories {
                 run,
                 &super::run_files::LocalRunFiles,
                 &repository,
+                self.containers,
             ),
             None => Ok(None),
         }
@@ -3318,13 +3322,14 @@ impl crate::application::inherit::CarriedBranches for RunRepositories {
     }
 }
 
-impl crate::application::inherit::ReleasedBranches for RunRepositories {
+impl crate::application::inherit::ReleasedBranches for RunRepositories<'_> {
     fn released_work(&self, run: &TaskRun) -> Result<crate::application::inherit::ReleasedRead> {
         match Self::of(run)? {
             Some(repository) => crate::application::inherit::released_work(
                 run,
                 &super::run_files::LocalRunFiles,
                 &repository,
+                self.containers,
             ),
             None => Ok(Default::default()),
         }
