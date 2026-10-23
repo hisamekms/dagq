@@ -20,6 +20,7 @@ related:
   - adr-t2182-1
   - adr-t2588-1
   - adr-t2589-1
+  - adr-t3240-1
   - development-documents
 ---
 
@@ -45,6 +46,8 @@ dagqのworkerは全体の`cargo test --locked`を流さず、`cargo llvm-cov`（
   fmt・clippyの関門は着地の検証で、workerが手元で流したかは確かめない。receiptの`tests`のevidenceにその実行を書くことは求めず、reviewも確かめない（[ADR-t2588-1](../adr/2026-10-17-t2588-1-worker-local-fmt-and-clippy-are-not-receipt-evidence-and-not-reviewed.md)）。
 - 変更に関係するtestだけの`cargo test`（次の「testの範囲」と「全体を比べるtest」）
 - taskのverifyのうちcoverageの関門（`cargo llvm-cov nextest`と旧い形の`cargo llvm-cov`）と全体の`cargo test --locked`以外（`cargo test --locked --test plugin`など）
+  ただし、`dagq.toml`の`[review.programs]`のprogramと同じscriptを同じ引数で流すverifyで、runの差分がそのprogramの`paths`に当たるもの（docsを変えるtaskの文書の検査など）は、手元で流さなくてよく、receiptにその根拠を求めず、reviewもその欠けで差し戻さない。programのreviewがagentの前にreviewするcommitのtreeで流し、落ちればagentを起動せずに差し戻すため（[ADR-t3240-1](../adr/2026-10-24-t3240-1-verify-passed-by-review-programs-is-not-worker-local-evidence.md)、仕組みは[プログラムのreview](../design/supervisor-lifecycle/review-programs.md)）。
+  programに無いverifyと、差分が`paths`に当たらず流れなかったverifyは今どおり手元で流す。どれが当たるかは、mainの`dagq.toml`の`[review.programs]`とrunの差分のpathで判じる。差分がそのprogramの設定かscriptを変えたrunでは、programはmainの変える前のscriptを流すので当たらないとし、手元で流す。
 - 足した・変えたtestのstress（下の「stress」）
 - `tests/it`のtestを足した・変えたら、そのstressのnextestの出力に時間の関門のscript（下の「itのtestの時間の関門」）
 

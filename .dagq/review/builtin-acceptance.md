@@ -18,8 +18,9 @@
 
 出典: local-checks.md、operations.md。
 
-- workerは全体の`cargo test --locked`と`cargo llvm-cov`を流さない（例外は着地の検証の失敗でresumeされたrunの再現）。流すのはfmt・clippy、変えた・関係するmoduleを名指したtest、verifyのうち全体とcoverage以外。
+- workerは全体の`cargo test --locked`と`cargo llvm-cov`を流さない（例外は着地の検証の失敗でresumeされたrunの再現）。流すのはfmt・clippy、変えた・関係するmoduleを名指したtest、verifyのうち全体とcoverage以外（下のprogramに当たるverifyは流さなくてよい）。
 - fmt・clippyの関門は着地の検証で、receiptにその実行の根拠が無いことでは差し戻さない（ADR-t2588-1）。
+- taskのverifyのうち、mainの`dagq.toml`の`[review.programs]`のprogramと同じscriptを同じ引数で流し、runの差分のpathがそのprogramの`paths`に当たるものは、programのreviewが同じtreeで通しているので、手元の実行の根拠（記録・evidence）が無いことでは差し戻さない。programに無いverifyと、`paths`に当たらず流れなかったverifyと、差分がそのprogramの設定かscriptを変えたrunのverify（programはmainの変える前のscriptを流す）は今どおり根拠を見る（ADR-t3240-1）。
 - 手元の検証の実行（流したコマンド・exit status・stressの周回と結果・時間の関門の結果）と、変えたtestが無いので関門を省いたことは、資料の記録の節と関門の節が示していれば、receiptの`tests`のevidenceに無いことでは差し戻さない（ADR-t2589-1）。節が無ければevidenceで見る。
 - receiptの`tests`のevidenceは記録で示せないこと（testの範囲を選んだ理由と着地の検証・CIに任せた範囲、流したtestの件数、流せなかった理由、許可の一覧に足した項目の理由）を持つ。testの範囲の選び方の妥当さと受け入れ条件の対応づけは引き続き見て、要る関門の記録が無いか失敗しているときはevidenceと合わせて判じる。
 - e2eはworkerが流さず、`e2e`は理由つきの`not_applicable`（例外は`e2e_failed`でresumeされたrunの落ちたtestを1本ずつ流す再現）。
