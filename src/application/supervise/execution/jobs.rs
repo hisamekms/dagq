@@ -2012,16 +2012,20 @@ mod tests {
         }
     }
 
-    /// A job stopped at its timeout reads as timed out each time its end
-    /// is read, not as the kill's exit: a step the queue service did not
-    /// answer reads it again ([`super::super::reconcile`]). A program job
-    /// gives no exit then, as when it was stopped.
+    /// A job runs on 1 ms before its timeout; at it, it is stopped and
+    /// reads as timed out each time its end is read, not as the kill's
+    /// exit: a step the queue service did not answer reads it again
+    /// ([`super::super::reconcile`]). A program job gives no exit then, as
+    /// when it was stopped.
     #[test]
     fn a_job_stopped_at_its_timeout_reads_as_timed_out_again() {
         let files = MemoryFiles::default();
+        let ms = Duration::from_millis(1);
         let mut agent = job(&files, true, "");
         agent.child = Box::new(RunsUntilKilled { killed: false });
-        agent.timeout = Duration::ZERO;
+        agent.clock = Arc::new(Frozen(agent.started + agent.timeout - ms));
+        assert!(agent.poll_output(&files).unwrap().is_none());
+        agent.clock = Arc::new(Frozen(agent.started + agent.timeout));
         for _ in 0..2 {
             let end = agent.poll_output(&files).unwrap().unwrap();
             assert!(
@@ -2032,7 +2036,9 @@ mod tests {
         }
         let mut program = job(&files, true, "");
         program.child = Box::new(RunsUntilKilled { killed: false });
-        program.timeout = Duration::ZERO;
+        program.clock = Arc::new(Frozen(program.started + program.timeout - ms));
+        assert!(program.poll_program(&files).unwrap().is_none());
+        program.clock = Arc::new(Frozen(program.started + program.timeout));
         for _ in 0..2 {
             assert!(
                 program
@@ -2107,7 +2113,9 @@ mod tests {
         }
     }
 
+    /// A job started at [`origin`] on [`At`], to run for 60 s.
     fn job(files: &MemoryFiles, success: bool, stdout: &str) -> HeadlessJob {
+        let clock = At(std::time::UNIX_EPOCH);
         let (out, err) = (PathBuf::from("/job/out"), PathBuf::from("/job/err"));
         files.put(&out, std::time::SystemTime::UNIX_EPOCH, stdout);
         files.put(&err, std::time::SystemTime::UNIX_EPOCH, "it broke\n");
@@ -2115,8 +2123,8 @@ mod tests {
             what: "review",
             kind: JobKind::Agent,
             child: Box::new(Ended { success }),
-            started: Instant::now(),
-            clock: Arc::new(At(std::time::UNIX_EPOCH)),
+            started: clock.monotonic(),
+            clock: Arc::new(clock),
             timeout: Duration::from_secs(60),
             stdout: out,
             stderr: err,
@@ -2414,8 +2422,8 @@ mod tests {
         assert!(taken.iter().all(|report| report.session_id == "t1"));
     }
 
-    /// A clock whose monotonic time stays at the job's start: the time
-    /// since it started is a value (none), whatever the time the test
+    /// A clock whose monotonic time stays at the time it is given: the
+    /// time since a job started is a value, whatever the time the test
     /// takes.
     struct Frozen(Instant);
 
@@ -2790,7 +2798,7 @@ mod tests {
                 session: None,
                 attempt: 1,
                 retried: false,
-                started: Instant::now(),
+                started: origin(),
                 jobs: vec![
                     review_job(ReviewJobId::Whole, running(None)),
                     review_job(ReviewJobId::Agent("design".into()), running(Some("design"))),
@@ -2875,7 +2883,7 @@ mod tests {
         }
     }
 
-    /// A clock stopped at a fixed time.
+    /// A clock stopped at a fixed time, its monotonic time at [`origin`].
     struct At(std::time::SystemTime);
 
     impl crate::application::Clock for At {
@@ -2884,8 +2892,16 @@ mod tests {
         }
 
         fn monotonic(&self) -> std::time::Instant {
-            std::time::Instant::now()
+            origin()
         }
+    }
+
+    /// The one monotonic time the tests start from, read once for the
+    /// process: a clock gives it, or an offset from it, as a value, so how
+    /// long a test takes decides nothing.
+    fn origin() -> Instant {
+        static ORIGIN: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
+        *ORIGIN
     }
 
     /// A job's `started_at` is the injected clock's time in Unix
