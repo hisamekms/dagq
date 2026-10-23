@@ -32,7 +32,7 @@ runが動く環境と、runとnodeの資源の記録で、[計測](measurement.m
   2つの窓の間に終わったプロセスがその間に使った分は数えない。
 - hostは、窓より前に始まっていたプロセス（引き取ったrunのもの）を最初の測りから数え、前のsupervisorの窓と二重に数えない。
 - 外から測れない環境はrunの値を返さず、executorが中から測ってTelemetrySinkで送る（[送る口](measurement.md#送る口)）。
-  台帳は、外から測った値の無いrunでだけexecutorの値を使う。
+  台帳は、外から測った値の無い区間でだけexecutorの値を使う（下の「台帳との順序」）。
 
 ## environment_attached
 
@@ -69,8 +69,8 @@ runが動く環境と、runとnodeの資源の記録で、[計測](measurement.m
 - 台帳を作る係は`run_resources`と`session_resources`の記録した順のidのカーソルを持ち、カーソルの後の窓のrunに印を付ける。
   行の`inputs_through`より後の窓は行をdirtyにし、`final`の後でも畳み直す。
 - runの行は区間ごとに資源を畳む（`domain::environment::fold`）。
-  外から測った値が無いときだけ、executorが中から測った値を使う。
-  畳んだ中からのsampleは行に残し、次に畳むときも数えるので、保持の期間で消えたsampleの分も失わない。
+  区間ごとに外から測った値を使い、外から測った値の無い区間だけexecutorが中から測った値を使い、区間と行はどちらの値かを持つ。
+  畳んだ中からのsampleとそのsessionの始まりは行に残し、次に畳むときも数えるので、保持の期間で消えたsampleの分も失わず、持ち主が消えたsessionの遅れたsampleも置ける。
   stepと同じく、保持は行がまだ持たない（書き待ちの）runの中からのsampleを消さない。
 - runは最後の名乗りの最後の窓が記録された後にだけ確定する（`environment::resources_recorded`）。
   名乗りの無いrunは待たない。

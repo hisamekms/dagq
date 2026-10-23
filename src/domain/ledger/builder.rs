@@ -1403,8 +1403,9 @@ impl RunSteps {
 /// the starts of their sessions on the supervisor's clock (as the steps'),
 /// and what the row the store holds folded: the samples from inside it
 /// counted are counted again with those it did not, so what the retention
-/// removed from the store stays in the fold, and the largest id of a
-/// sample from inside it read stays its `inputs_through`.
+/// removed from the store stays in the fold, the starts it kept place a
+/// later sample of a session whose owner the retention removed, and the
+/// largest id of a sample from inside it read stays its `inputs_through`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct RunResources {
     pub outside: Vec<RunResource>,
@@ -1416,18 +1417,22 @@ pub struct RunResources {
 
 impl RunResources {
     /// The run's windows `outside` and samples `inside` over what `stored`,
-    /// the row the store holds of the run, folded of them; no start known
-    /// yet.
+    /// the row the store holds of the run, folded of them; the starts known
+    /// are those it kept.
     pub fn new(
         outside: Vec<RunResource>,
         inside: Vec<SessionResource>,
         stored: Option<&LedgerRow>,
     ) -> Self {
+        let stored_fold = stored.and_then(|row| Folded::of_detail(&row.detail));
         Self {
             outside,
             inside,
-            starts: BTreeMap::new(),
-            stored: stored.and_then(|row| Folded::of_detail(&row.detail)),
+            starts: stored_fold
+                .as_ref()
+                .map(|fold| fold.starts.clone())
+                .unwrap_or_default(),
+            stored: stored_fold,
             stored_inside_through: stored.and_then(|row| row.inputs_through.inside_resources),
         }
     }
@@ -1470,9 +1475,16 @@ impl RunResources {
             .max()
             .max(self.stored_inside_through);
         let pending = !environment::resources_recorded(&row.records, &self.outside);
+        let starts = self
+            .starts
+            .iter()
+            .filter(|(session, _)| counted.iter().any(|sample| &sample.session_id == *session))
+            .map(|(session, start)| (session.clone(), *start))
+            .collect();
         let folded = environment::fold(&row.intervals, &outside, &inside)
             .map(|folded| Folded {
                 inside: counted,
+                starts,
                 ..folded
             })
             .or_else(|| self.stored.clone());

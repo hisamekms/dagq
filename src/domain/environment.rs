@@ -313,7 +313,7 @@ pub fn counted_inside(stored: &[CountedSample], placed: &[CountedSample]) -> Vec
         .collect()
 }
 
-/// Where a run's resources were measured.
+/// Where a run's resources, or an interval's, were measured.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Source {
@@ -322,49 +322,44 @@ pub enum Source {
     /// The executor, from inside, where the environment let the
     /// supervisor measure nothing.
     Inside,
+    /// A run's only: some of its intervals from outside, the others, where
+    /// the supervisor measured nothing, from inside.
+    Mixed,
 }
 
 /// The key of a run row's detail its resources are under.
 pub const DETAIL_KEY: &str = "resources";
 
-/// A run's resources folded into its intervals: where they were measured,
-/// the whole run's and each interval's (in the order of the row's
-/// intervals; an interval no window reaches has none), and the samples
-/// from inside it counted ([`counted_inside`]).
+/// A run's resources folded into its intervals: where they were measured
+/// (the run's and each interval's), the whole run's and each interval's
+/// (in the order of the row's intervals; an interval no window reaches
+/// has none), the samples from inside it counted ([`counted_inside`])
+/// and the starts of their sessions on the supervisor's clock, so a later
+/// sample is placed once the retention removed the session's owner.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Folded {
     pub source: Option<Source>,
     pub total: Resources,
     pub intervals: Vec<Resources>,
+    /// Where each interval's were measured, `None` for one with none.
+    #[serde(default)]
+    pub sources: Vec<Option<Source>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inside: Vec<CountedSample>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub starts: BTreeMap<String, i64>,
 }
 
-/// Fold a run's windows into its `intervals`: those it measured from
-/// outside (`outside`) when any holds a value, else those its executors
-/// measured from inside (`inside`), where the environment let the
-/// supervisor measure nothing (ADR-t1662-3 decision 1). A window's time
-/// spent goes to each interval in the share of the window it overlaps (a
-/// window of no length to the interval it falls in), its limits, its
-/// memory, its pressure and its load to each interval it overlaps as the
-/// most of them. `None` with no window of a value.
-pub fn fold(intervals: &[Interval], outside: &[Window], inside: &[Window]) -> Option<Folded> {
-    let measured = |windows: &[Window]| windows.iter().any(|w| !w.resources.is_empty());
-    let (source, windows) = if measured(outside) {
-        (Source::Outside, outside)
-    } else if measured(inside) {
-        (Source::Inside, inside)
-    } else {
-        return None;
-    };
-    let mut folded = Folded {
-        source: Some(source),
-        total: Resources::default(),
-        intervals: vec![Resources::default(); intervals.len()],
-        inside: Vec::new(),
-    };
+/// `windows` spread over `intervals`: the whole of them and each
+/// interval's. A window's time spent goes to each interval in the share
+/// of the window it overlaps (a window of no length to the interval it
+/// falls in), its limits, its memory, its pressure and its load to each
+/// interval it overlaps as the most of them.
+fn spread(intervals: &[Interval], windows: &[Window]) -> (Resources, Vec<Resources>) {
+    let mut total = Resources::default();
+    let mut each = vec![Resources::default(); intervals.len()];
     for window in windows {
-        folded.total.add(&window.resources, 1.0);
+        total.add(&window.resources, 1.0);
         let length = window.until_ms - window.from_ms;
         for (index, interval) in intervals.iter().enumerate() {
             let share = if length <= 0 {
@@ -384,10 +379,64 @@ pub fn fold(intervals: &[Interval], outside: &[Window], inside: &[Window]) -> Op
                 let share = overlap as f64 / length as f64;
                 share
             };
-            folded.intervals[index].add(&window.resources, share);
+            each[index].add(&window.resources, share);
         }
     }
-    Some(folded)
+    (total, each)
+}
+
+/// Fold a run's windows into its `intervals` (ADR-t1662-3 decision 1):
+/// each interval takes those the supervisor measured from outside
+/// (`outside`) where they give it a value, else those its executors
+/// measured from inside (`inside`), where the environment let the
+/// supervisor measure nothing ([`spread`] for how a window is shared).
+/// The whole run's are the windows from outside with the intervals that
+/// took the samples from inside, or all the samples from inside where
+/// nothing was measured from outside. `None` with no window of a value.
+pub fn fold(intervals: &[Interval], outside: &[Window], inside: &[Window]) -> Option<Folded> {
+    let measured = |windows: &[Window]| windows.iter().any(|w| !w.resources.is_empty());
+    let (any_outside, any_inside) = (measured(outside), measured(inside));
+    if !any_outside && !any_inside {
+        return None;
+    }
+    let (outside_total, outside_each) = spread(intervals, outside);
+    let (inside_total, inside_each) = spread(intervals, inside);
+    let mut total = if any_outside {
+        outside_total
+    } else {
+        inside_total
+    };
+    let mut each = Vec::with_capacity(intervals.len());
+    let mut sources = Vec::with_capacity(intervals.len());
+    for (from_outside, from_inside) in outside_each.into_iter().zip(inside_each) {
+        if !from_outside.is_empty() {
+            each.push(from_outside);
+            sources.push(Some(Source::Outside));
+        } else if !from_inside.is_empty() {
+            if any_outside {
+                total.add(&from_inside, 1.0);
+            }
+            each.push(from_inside);
+            sources.push(Some(Source::Inside));
+        } else {
+            each.push(Resources::default());
+            sources.push(None);
+        }
+    }
+    let took = |source| sources.contains(&Some(source));
+    let source = match (any_outside, took(Source::Inside)) {
+        (true, true) => Source::Mixed,
+        (true, false) => Source::Outside,
+        (false, _) => Source::Inside,
+    };
+    Some(Folded {
+        source: Some(source),
+        total,
+        intervals: each,
+        sources,
+        inside: Vec::new(),
+        starts: BTreeMap::new(),
+    })
 }
 
 impl Folded {

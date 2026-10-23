@@ -98,6 +98,74 @@ fn the_samples_from_inside_are_used_where_nothing_was_measured_from_outside() {
     assert_eq!(fold(&intervals, &unmeasured, &[]), None);
 }
 
+/// Each interval takes the value measured from outside where there is
+/// one and the executor's samples from inside only where there is none
+/// (an environment that could not measure that part from outside), and
+/// says which it took; the run's source is mixed, and its total is what
+/// was measured from outside with the intervals that took the samples. A
+/// run measured from outside in every interval it has samples of keeps
+/// the values and the total from outside.
+#[test]
+fn each_interval_takes_the_samples_from_inside_only_where_nothing_was_measured_from_outside() {
+    let intervals = [
+        interval("provisioning", 0, 10_000),
+        interval("worker", 10_000, 40_000),
+        interval("validating", 40_000, 50_000),
+    ];
+    let outside = [
+        window(0, 10_000, spent(5.0, 100)),
+        window(10_000, 40_000, Resources::default()),
+    ];
+    let inside = [
+        window(0, 10_000, spent(1.0, 10)),
+        window(10_000, 40_000, spent(12.0, 400)),
+    ];
+    let folded = fold(&intervals, &outside, &inside).unwrap();
+    assert_eq!(folded.source, Some(Source::Mixed));
+    assert_eq!(
+        folded.sources,
+        [Some(Source::Outside), Some(Source::Inside), None]
+    );
+    let cpu: Vec<Option<f64>> = folded.intervals.iter().map(|r| r.cpu_seconds).collect();
+    assert_eq!(cpu, [Some(5.0), Some(12.0), None]);
+    assert_eq!(folded.intervals[1].memory_max_bytes, Some(400));
+    assert_eq!(folded.total.cpu_seconds, Some(17.0));
+    assert_eq!(folded.total.memory_max_bytes, Some(400));
+    let detail = json!({ DETAIL_KEY: folded.detail() });
+    assert_eq!(Folded::of_detail(&detail), Some(folded));
+
+    let everywhere = [window(0, 40_000, spent(8.0, 100))];
+    let folded = fold(&intervals, &everywhere, &inside).unwrap();
+    assert_eq!(folded.source, Some(Source::Outside));
+    assert_eq!(
+        folded.sources,
+        [Some(Source::Outside), Some(Source::Outside), None]
+    );
+    assert_eq!(
+        folded.total,
+        fold(&intervals, &everywhere, &[]).unwrap().total
+    );
+
+    let unmeasured = [window(0, 40_000, Resources::default())];
+    let folded = fold(&intervals, &unmeasured, &inside).unwrap();
+    assert_eq!(folded.source, Some(Source::Inside));
+    assert_eq!(
+        folded.sources,
+        [Some(Source::Inside), Some(Source::Inside), None]
+    );
+    assert_eq!(folded.total.cpu_seconds, Some(13.0));
+}
+
+/// A row written before the intervals' sources were kept reads back with
+/// none.
+#[test]
+fn a_fold_kept_without_the_intervals_sources_reads_back_with_none() {
+    let detail = json!({ DETAIL_KEY: {"source": "outside", "total": {}, "intervals": [{}]} });
+    let folded = Folded::of_detail(&detail).unwrap();
+    assert_eq!(folded.source, Some(Source::Outside));
+    assert!(folded.sources.is_empty());
+}
+
 fn attached(log: &mut Log, run: &str, secs: i64) {
     let payload = EnvironmentAttached {
         env_kind: EnvKind::Host,

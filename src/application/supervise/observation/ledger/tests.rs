@@ -34,6 +34,8 @@ struct Memory {
     /// samples executors measured from inside, ids from 1 in order.
     run_resources: RefCell<Vec<RunResource>>,
     inside: RefCell<Vec<SessionResource>>,
+    /// The last sample id given: ids go on past the samples removed.
+    inside_id: Cell<i64>,
     rows: RefCell<BTreeMap<(LedgerKind, String), LedgerRow>>,
     writes: Cell<usize>,
     read: Cell<usize>,
@@ -394,8 +396,17 @@ impl SessionResourceStore for Memory {
         received_at: i64,
     ) -> Result<StepsRecorded> {
         let mut held = self.inside.borrow_mut();
+        let mut duplicates = 0;
         for sample in samples {
-            let id = held.iter().map(|sample| sample.id).max().unwrap_or(0) + 1;
+            if held
+                .iter()
+                .any(|kept| kept.session_id == session_id && kept.sample.seq == sample.seq)
+            {
+                duplicates += 1;
+                continue;
+            }
+            let id = self.inside_id.get() + 1;
+            self.inside_id.set(id);
             held.push(SessionResource {
                 id,
                 target: target.clone(),
@@ -405,8 +416,8 @@ impl SessionResourceStore for Memory {
             });
         }
         Ok(StepsRecorded {
-            added: samples.len(),
-            duplicates: 0,
+            added: samples.len() - duplicates,
+            duplicates,
         })
     }
     fn target_resources(&self, target: &StepTarget) -> Result<Vec<SessionResource>> {
@@ -2451,3 +2462,141 @@ fn a_run_measured_from_inside_only_folds_its_executors_samples() {
 mod queue_waits;
 mod stream_waits;
 mod waits;
+
+/// The source `row` holds for its interval of `phase`.
+fn source_in(row: &LedgerRow, phase: &str) -> Value {
+    let index = row.intervals.iter().position(|i| i.phase == phase).unwrap();
+    resources_of(row)["sources"][index].clone()
+}
+
+/// A run the supervisor measured from outside only after its worker (the
+/// worker's window holds no value) takes its executor's samples for the
+/// worker and the values from outside for the rest, each interval saying
+/// which it took and the row that it is mixed. The same sample sent again
+/// adds none and leaves the row; a sample of a planner's session marks no
+/// run or task.
+#[test]
+fn a_run_takes_its_executors_samples_only_for_the_intervals_measured_from_outside_with_nothing() {
+    let a = run_id(1);
+    let mut log = Log::default();
+    log.landed(1, &a, 0);
+    let attachment = attach(&mut log, &a, 0);
+    let memory = Memory::of(&log);
+    let target = session_of(&memory, &a, "s-1", 10);
+    let mut sample = ResourceSample::new(1, 0, 590_000);
+    sample.cpu_seconds = Some(40.0);
+    memory
+        .record_resources(&target, "s-1", std::slice::from_ref(&sample), ms(200))
+        .unwrap();
+    measured(&memory, &a, attachment, (10, 600), None, false);
+    measured(&memory, &a, attachment, (600, 930), Some(33.0), true);
+    let mut builder = Builder::default();
+    pass(&memory, &mut builder, LATER);
+    let row = memory.row(LedgerKind::Run, &a);
+    assert!(row.is_final);
+    assert_eq!(resources_of(&row)["source"], "mixed");
+    assert_eq!(source_in(&row, "worker"), "inside");
+    assert_eq!(cpu_in(&row, "worker"), Some(40.0));
+    assert_eq!(source_in(&row, "landing"), "outside");
+    assert!(cpu_in(&row, "landing").unwrap() > 0.0);
+    assert_eq!(resources_of(&row)["total"]["cpu_seconds"], json!(73.0));
+
+    // Sent again: the store adds none, nothing is written.
+    let again = memory
+        .record_resources(&target, "s-1", &[sample], ms(LATER))
+        .unwrap();
+    assert_eq!((again.added, again.duplicates), (0, 1));
+    assert_eq!(pass(&memory, &mut builder, LATER + 1).written, 0);
+    assert_eq!(memory.row(LedgerKind::Run, &a), row);
+
+    // A planner's sample: no run and no task row changes.
+    let rows = memory.rows.borrow().clone();
+    let planner = StepTarget {
+        kind: TargetKind::Planner,
+        id: "planner-1".to_owned(),
+    };
+    memory.register_session(&planner, "p-1", ms(10)).unwrap();
+    let mut theirs = ResourceSample::new(1, 0, 10_000);
+    theirs.cpu_seconds = Some(9.0);
+    memory
+        .record_resources(&planner, "p-1", &[theirs], ms(LATER + 1))
+        .unwrap();
+    let built = pass(&memory, &mut builder, LATER + 2);
+    assert_eq!(built.written, 0);
+    assert_eq!(builder.inside_resources, 2);
+    assert_eq!(*memory.rows.borrow(), rows);
+}
+
+/// A run's row an older fold settled (its resources from outside for the
+/// whole run, no interval's source and no session's start kept) is folded
+/// again by a builder that starts again over the same inputs, none new:
+/// its worker takes the executor's sample, each interval says where its
+/// resources come from and the row keeps the session's start, so once the
+/// retention removed the sample and the session's owner a late sample is
+/// still placed.
+#[test]
+fn a_row_of_an_older_fold_keeps_each_intervals_resources_their_sources_and_starts_on_no_new_input()
+{
+    let a = run_id(1);
+    let mut log = Log::default();
+    log.landed(1, &a, 0);
+    let attachment = attach(&mut log, &a, 0);
+    let memory = Memory::of(&log);
+    let target = session_of(&memory, &a, "s-1", 10);
+    let mut sample = ResourceSample::new(1, 0, 590_000);
+    sample.cpu_seconds = Some(40.0);
+    memory
+        .record_resources(&target, "s-1", &[sample], ms(200))
+        .unwrap();
+    measured(&memory, &a, attachment, (10, 600), None, false);
+    measured(&memory, &a, attachment, (600, 930), Some(33.0), true);
+    pass(&memory, &mut Builder::default(), LATER);
+    let current = memory.row(LedgerKind::Run, &a);
+    assert!(current.is_final);
+
+    // As the older fold left it.
+    let worker = current
+        .intervals
+        .iter()
+        .position(|i| i.phase == "worker")
+        .unwrap();
+    {
+        let mut rows = memory.rows.borrow_mut();
+        let old = rows.get_mut(&(LedgerKind::Run, a.clone())).unwrap();
+        old.ledger_v = LEDGER_V - 1;
+        let resources = &mut old.detail[crate::domain::environment::DETAIL_KEY];
+        resources["source"] = json!("outside");
+        resources["intervals"][worker] = json!({});
+        resources["total"]["cpu_seconds"] = json!(33.0);
+        let fold = resources.as_object_mut().unwrap();
+        fold.remove("sources");
+        fold.remove("starts");
+    }
+
+    let mut builder = Builder::default();
+    assert_eq!(pass(&memory, &mut builder, LATER + 1).written, 1);
+    let row = memory.row(LedgerKind::Run, &a);
+    assert_eq!(row.ledger_v, LEDGER_V);
+    assert!(row.is_final);
+    assert_eq!(resources_of(&row), resources_of(&current));
+    assert_eq!(resources_of(&row)["source"], "mixed");
+    assert_eq!(source_in(&row, "worker"), "inside");
+    assert_eq!(cpu_in(&row, "worker"), Some(40.0));
+    assert_eq!(resources_of(&row)["starts"]["s-1"], json!(ms(10)));
+
+    // The retention removes the sample and the session's owner; a late
+    // sample is placed by the start the row kept.
+    memory.remove_steps(ms(LATER)).unwrap();
+    assert!(memory.owners.borrow().is_empty());
+    assert!(memory.inside.borrow().is_empty());
+    let mut late = ResourceSample::new(2, 100_000, 10_000);
+    late.cpu_seconds = Some(5.0);
+    memory
+        .record_resources(&target, "s-1", &[late], ms(LATER + 2))
+        .unwrap();
+    assert_eq!(pass(&memory, &mut builder, LATER + 2).written, 1);
+    let row = memory.row(LedgerKind::Run, &a);
+    assert_eq!(cpu_in(&row, "worker"), Some(45.0));
+    assert_eq!(source_in(&row, "worker"), "inside");
+    assert_eq!(resources_of(&row)["total"]["cpu_seconds"], json!(78.0));
+}

@@ -59,6 +59,7 @@ mod inbox_watcher;
 mod installed_plugin;
 mod landing_branch;
 mod language;
+mod ledger_resources;
 mod ledger_rows;
 mod ledger_steps;
 mod lifecycle_down;
