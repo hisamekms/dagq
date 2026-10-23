@@ -168,6 +168,11 @@ goal の優先度を正本にし、task は個別の指定が無ければ所属�
 
 - ADRを書くtaskを登録するときは、descriptionに本数と各IDの中身を書く（自分のIDは`add`が返すまで分からないので「このtaskのIDでADR-t<ID>-1を書く」と書くか、`add`の後にdraftを直す）。verifyは上の「推奨の組み合わせ」の「ADRを書く」の行。IDの形と、番号の割り当ての棚卸しをしないことは[文書の規則](documents.md)の「ADRのID」。
 - 番号付きの決定を複数持つADRの一部を変える（`amends`）か、丸ごと置き換えるかを、ADRを書くtaskのplannerがdescriptionに書き、plan reviewが見る（下の「plan reviewが当てはめる規則」）。選び方は[文書の規則](documents.md)の「ADR」。
+- 現行のADRの決定（方針・境界・不変条件）に触れるtask（変更がADRの決定の範囲に入るか、descriptionかacceptanceがADRを名指すtask）は、ADRを書くかどうかを登録の時に次のどちらかに確定してdescriptionに書く。
+  - (a) ADRを書かない: 保つ決定を「ADR-X決定Nを保つ」の形で名指し、細部はdesignかdoc commentに書くと書く。
+  - (b) ADRを書く: 上の2項のとおり本数・ID・変える決定・`amends`か置き換えかを書き、verifyに`sh scripts/check-adr-numbers.sh`を足す。
+  - 名指すADRは、frontmatterの`superseded_by`・`amended_by`を辿った今の決定にする（辿り方は[frontmatter仕様](../frontmatter.md#adr-fields)の「ADR fields」）。`superseded`のADRを今の決定として引かない。
+  - 「必要ならADRを書く」のようにworkerに選ばせる書き方と、既存のADRの本文（Consequencesを含む）を直す選択肢は書かない（ADRがappend-onlyであることは[文書の規則](documents.md)の「ADR」）。決定を変える必要が実装中に分かったら、workerはaskで止める、と添える。
 - 決定と実装が明らかなものは、ADRと実装を1 taskにする（[ADR-t598-1](../adr/2026-09-26-t598-1-adr-id-is-task-id-small-adrs-and-design-holds-current-state.md)決定12）。
 
 ## ADRがリンクする文書を消すtask
@@ -199,6 +204,7 @@ dagqは外部のprojectで使い、このrepositoryはdogfoodingしているだ�
 - ADRがリンクする文書を消すtaskが、上の「ADRがリンクする文書を消すtask」のとおり移行中の行を足す先行のtaskに依存していること（その行が既にmainにあれば要らない）。欠けていれば`revise`にする。
 - taskのtitleが上の「taskのtitle」の接頭辞で始まり、changeに合うこと。外れていれば`revise`にする。
 - ADRを書くtaskが上の「ADRを書くtask」を満たすこと（IDとファイル名の形、`check-adr-numbers.sh`のverify、置き換えか`amends`か）。足りなければ`revise`。
+- 現行のADRの決定に触れるtaskが、上の「ADRを書くtask」のとおりADRの扱い（(a)保つ決定を名指して書かない、か(b)書く）をdescriptionに確定していること。workerに選ばせる・既存のADRの本文（Consequencesを含む）の変更を許す・`superseded`のADRを今の決定として引く、のどれかに当たれば`revise`にする。
 - runtimeのtaskが上の「runtimeの汎用性」のとおり、言語・道具・外への宛先・hostで流すコマンド・cache・資源の値をruntimeに固定せず設定で受けること。固定していれば`revise`にし、設定に出す形と、このrepositoryの値を`dagq.toml`かdocsのdogfoodingの値として登録する形に直させる（[ADR-t2257-1](../adr/2026-10-12-t2257-1-container-runtime-takes-project-and-host-values-from-config.md)）。
 - 挙動や仕様を変えるtaskは、関連文書（[文書の規則](documents.md)の「workerの文書の照合」が挙げる文書）のpath・節と更新が要る理由をdescriptionかcontextに書くこと。欠けていて関連する文書が明らかなら、見つけたpathを理由に書いて`revise`にする。文書の差分を求めるverifyやevidenceは求めない（[ADR-t1428-1](../adr/2026-10-03-t1428-1-decide-the-documents-to-update-when-the-code-changes.md)）。
 - 負荷の下で落ちるtestのtaskが上の「負荷の下で落ちるtestを直すtask」を満たすこと。acceptanceかdescriptionが高い負荷の下での再現を求めるtaskは`revise`にする（[ADR-t1480-1](../adr/2026-10-05-t1480-1-workers-add-no-load-to-the-host-to-reproduce-failures-under-load.md)決定(d)）。ただし人がapprove_planのaskにreadyと答えて認めたtask（ask 323のtask 1360・1361、ask 304のtask 1344）は例外として保ち、`revise`にしない。plan reviewは自分で新しい例外を作らない（決定(e)）。
