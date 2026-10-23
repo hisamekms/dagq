@@ -410,7 +410,7 @@ paths = ["src/**", "tests/**", "migrations/**", "build.rs", "Cargo.toml", "Cargo
 # 挙げるのはCIがmainで流す形式の検査で、scripts/check-scripts-root.shの一覧に入り（landing branchのscriptを一時の場所に写し、
 # cwdをrunのworktreeにして流す約束を満たす）、cargo・nextestを実行せず、3回の測定の最大が10秒以下で今のmainでexit 0になるものだけ。
 # build・testを流すもの（ADR-t1895-2決定1）、10秒を超えるもの、今のmainで落ちるもの（関係ないrunまで差し戻す）は挙げない。
-# 引数はCIと同じにし（CIが--baseを渡すcheck-design-docsとcheck-design-sentencesはscriptの既定の基点を使う）、--self-testは挙げない。
+# 引数はCIと同じにし（CIが--baseを渡すcheck-design-docs・check-design-sentences・check-test-rulesはscriptの既定の基点を使う）、--self-testは挙げない。
 # 秒は2026-10-12に他のrunと並んだhostで3回測った最大で、順はその小さいものから。
 
 # .config/e2e-quarantine.tomlの書式・重複・上限と、印のtestがtests/e2e.rsかtests/e2e/にあること。最大約0.1秒。
@@ -452,6 +452,13 @@ paths = ["docs/design/**"]
 [review.programs.check-test-file-lines]
 script = "scripts/check-test-file-lines.sh"
 paths = ["tests/**"]
+
+# src/の#[cfg(test)]とtests/の差分が足した・変えた行のうち、行だけで見分けられるtestの規則の外れ（docs/development/testing.mdの
+# 「判断と境界のtest」の実時間の時計・sleep・外部プロセスと「待ちの上限」の自前のファイル待ち）。test-rulesのagentを起動する前に安く返すため。
+# 既存の行は検査しない。基点は既定（HEADとmainのmerge base）。2026-10-24に直近のmainで差分の最も大きいcommitに当てて3回測った最大約1.0秒。
+[review.programs.check-test-rules]
+script = "scripts/check-test-rules.sh"
+paths = ["src/**", "tests/**"]
 
 # migrationの番号の連続と、v0.3.0より後の最新のtagのmigrationが変わっていないこと（引数なし。--release TAGはrelease.ymlだけ）。最大約1.2秒。
 [review.programs.check-migration-numbers]

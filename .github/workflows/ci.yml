@@ -169,6 +169,21 @@ jobs:
           fi
           sh scripts/check-design-sentences.sh --self-test
 
+      # The forms of the test rules a line shows, in the lines the change adds
+      # under src and tests (scripts/check-test-rules.sh,
+      # docs/development/testing.md). The base is taken as for the budgets
+      # above.
+      - name: Test rules
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -n "$BASE" ] && printf '%s' "$BASE" | grep -q '[^0]' && git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            sh scripts/check-test-rules.sh --base "$BASE"
+          else
+            sh scripts/check-test-rules.sh
+          fi
+          sh scripts/check-test-rules.sh --self-test
+
       # The landing verification's choice of IT on its fixtures only; the
       # choice on a real diff needs the runtime's variables and the table.
       - name: Landing IT choice

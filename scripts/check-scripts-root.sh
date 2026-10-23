@@ -41,7 +41,7 @@ set -u
 me=check-scripts-root
 
 # The check scripts that take their root from the cwd's git work tree.
-scripts="check-migration-numbers check-test-file-lines check-adr-numbers check-e2e-quarantine check-agents-md-size check-frontmatter-dates check-design-docs check-design-sentences check-doc-links check-doc-frontmatter check-plugin-version check-commit-messages check-local-gates"
+scripts="check-migration-numbers check-test-file-lines check-adr-numbers check-e2e-quarantine check-agents-md-size check-frontmatter-dates check-design-docs check-design-sentences check-test-rules check-doc-links check-doc-frontmatter check-plugin-version check-commit-messages check-local-gates"
 
 # "<script> <case>": each case puts one violation of the script into the
 # clone (the cwd) with violate_<case>.
@@ -53,6 +53,7 @@ check-agents-md-size agents_md_too_big
 check-frontmatter-dates frontmatter_date_comment
 check-design-docs design_doc_too_big
 check-design-sentences design_doc_two_sentences_on_a_line
+check-test-rules test_own_wait_for_a_file
 check-doc-links doc_broken_link
 check-doc-links doc_link_to_removed_design
 check-doc-frontmatter doc_frontmatter_missing_key
@@ -94,6 +95,12 @@ violate_design_doc_too_big() {
 # the violation is a line added to a document HEAD has.
 violate_design_doc_two_sentences_on_a_line() {
   echo 'check-scripts-rootの一つ目の文。同じ行の二つ目の文。' >>docs/design/README.md
+}
+
+# The script checks only the lines added since the merge base with main, so
+# the violation is a line added to a test file HEAD has.
+violate_test_own_wait_for_a_file() {
+  echo 'const _: &str = "while [ ! -f go ]; do sleep 1; done";' >>tests/it/main.rs
 }
 
 violate_doc_broken_link() {

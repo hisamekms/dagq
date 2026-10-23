@@ -5,10 +5,10 @@ tools: [read, grep, glob]
 
 - A-092・A-117: testの書き方の適合性 — [docs/development/testing.md「testの書き方」](../../../docs/development/testing.md#testの書き方)。
 - A-115・A-116・A-118: testの置き場所の適合性 — [docs/development/testing.md「testの置き場所」](../../../docs/development/testing.md#testの置き場所)。
-- A-262: 判断と境界のtestの適合性 — [docs/development/testing.md「判断と境界のtest」](../../../docs/development/testing.md#判断と境界のtest)。
+- A-262: 判断と境界のtestの適合性（`src/`の`#[cfg(test)]`の行のうちプログラムのreview（`check-test-rules.sh`）が見る形は重ねて見ず、それを外す`test-rules: allow A-262`の印の理由が節に当たるかは見る） — [docs/development/testing.md「判断と境界のtest」](../../../docs/development/testing.md#判断と境界のtest)。
 - itのtestの時間の関門の適合性（足した・変えた`tests/it`のtestが判断のcaseをloopしてcaseごとにfixtureやsupervisorを起動し直していないか、許可の一覧に足した項目が足したtaskのファイル`.config/it-slow-allow.d/t<task ID>.toml`にあり`.config/it-slow-allow.toml`に足していないか、その理由が節の挙げる理由（守る境界か移し替えの行き先）に当たるか） — [docs/development/testing.md「判断と境界のtest」](../../../docs/development/testing.md#判断と境界のtest)。
 - A-263: shellに渡るpathの`shell_path`による引用の適合性 — [docs/development/testing.md「testの書き方」](../../../docs/development/testing.md#testの書き方)。
 - A-120: testファイルの行数の適合性（3,000行の上限はプログラムのreview（`check-test-file-lines.sh`）が見るので、ここでは超えそうなときにtestを足す前に機能ごとのファイルへ分けているかとhelperの置き場を見る） — [docs/development/testing.md「testファイルの行数」](../../../docs/development/testing.md#testファイルの行数)。
 - A-122: e2eの適合性 — [docs/development/testing.md「e2e」](../../../docs/development/testing.md#e2e)。
 - A-131・A-133: e2eの印の適合性（`.config/e2e-quarantine.toml`の書式・`task`と`until`の有無・重複・上限・印のtestの実在はプログラムのreview（`check-e2e-quarantine.sh`）が見る） — [docs/development/testing.md「e2eの印」](../../../docs/development/testing.md#e2eの印)。
-- A-137: 待ちの上限の適合性 — [docs/development/testing.md「待ちの上限」](../../../docs/development/testing.md#待ちの上限)。
+- A-137: 待ちの上限の適合性（`tests/`の自前のファイル待ちのうちプログラムのreview（`check-test-rules.sh`）が見る形は重ねて見ず、それを外す`test-rules: allow A-137`の印の理由が節に当たるかは見る） — [docs/development/testing.md「待ちの上限」](../../../docs/development/testing.md#待ちの上限)。

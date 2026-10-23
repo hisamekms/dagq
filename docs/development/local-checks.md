@@ -161,6 +161,8 @@ test（`tests/**`、`src/`の`#[cfg(test)]`）を足した・変えたworkerは�
 - (c) helperの置き場所: 複数のtestファイルで使うhelperをtestファイルに置いて`pub(crate)`で共有していないか（[testの置き場所](testing.md#testの置き場所)）。
 - (d) shellに渡るpath: testのshellに渡る文字列にpathを埋めるところが`shell_path`を通っているか（[testの書き方](testing.md#testの書き方)）。
 
+(a)と(b)のうち行だけで見分けられる形は`scripts/check-test-rules.sh`が見るので、testを足した・変えたらreceiptの前に`sh scripts/check-test-rules.sh`を流し、出た行を直す（runのプログラムのreviewとCIも同じscriptを流し、落ちればagentのreviewの前に差し戻す）。
+
 この点検はworkerが自分の差分を直すための手順で、したことをreceiptの`tests`のevidenceに書かない（上の「実行の記録とreceiptのevidence」）。
 
 ## hostに触らない
