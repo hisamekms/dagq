@@ -43,6 +43,7 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
 
 - worker: commitとreceipt。validatingとIntegratorが検査し、receiptの主張を信用せずに検証コマンドを流し直す
   pjのscriptがrun dirに書く手元の検証の記録もworkerが偽りうるdataで、runtimeは古いtreeと壊れた記録を弾くだけで改ざんを検出せず、記録を着地の安全の根拠にしない（advisory、[ADR-t2589-1](../adr/2026-10-17-t2589-1-local-check-runs-are-recorded-by-project-scripts-and-matched-to-the-receipt-tree.md)決定4）
+  run dirの`turns/steps.json`（wrapperのstepの番号と未送信のstep）もworkerが偽りうるdataで、wrapperは確かめずに読み直してexecutor-telemetryのtokenで送り、runtimeはstepを計測のdataにとどめ着地と認可の根拠にしない（advisory）
 - review・recovery・plan review・goal reviewのjob: 型付きのverdict。
   supervisorが写像の表どおりに適用し、読めない出力は何も進めない（[Roles](supervisor-lifecycle/roles.md#headlessのjobのverdictと遷移)）
 - observer: findingと、findingに紐づく`blocked`のaskだけ
@@ -111,7 +112,6 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
   持つのは`telemetry.report`（ユースケース`telemetry_report`）だけで、対象はtokenの対象の、制御側がその対象に登録したsessionだけ（他の対象の名で送ったものと、未登録か他の対象のsessionは`authorization_denied`）。
   sessionの持ち主はagentのsessionを起動する制御側だけが登録し（起動の前か、agentが名前を決めるsessionはそれを読んだ時点。[計測](measurement.md#送る口)の「sessionの登録」）、他の対象に登録済みのsessionは登録し直せず、agentとAI actorとserviceのユースケースは登録しない。
   読み取りを含めほかのユースケースは全て`authorization_denied`で拒まれる。
-  agentのtoken（worker・各job・observer・planner）とほかの全roleは`telemetry.report`を持たない。
   runの対象のtokenはsupervisorだけがclaim・resume・runの引き継ぎと、runの上でexecutorを起動するとき自分のleaseのものが無ければ、自分のleaseの下で発行し（前のものは失効させて発行し直す）、runの終わりとleaseの喪失で失効させる。
   leaseの喪失による失効はそのleaseで発行したものだけを消し、失効の失敗（発行し直しの前のものも）は次の見回りでやり直し、失効の記録は失効が成功した後にだけ書き、発行と失効は互いに排他にする（時点と記録は[Queue service](queue-service.md#principalとtoken)）。
   runを持たない対象のtokenはagentを起動する制御側が発行して対象の終わりで失効させ、起動元が失効の前に落ちても、serviceが要求ごとに対象の終わりをqueueから読んで断る。
@@ -134,7 +134,6 @@ containerのworkerのcloneもdataで、制御側はgitを走らせない（[Cont
 - queue serviceは、[ユースケース](queue-service.md#ユースケース)を、tokenから決めたprincipalのactorで同じ`Dialogue`・`Gate`と`StaticPolicy`に通す（service側の判定。`DAGQ_ROLE`は使わない）。
   拒否は同じ`authorization_denied`に、principalの無い要求は`queue_service_unauthenticated`に残す。
   worker（resumeを含む）・headlessのjob・observerの`dagq`はクライアントモードでserviceだけを使い、DBを開かない（[クライアントモード](queue-service.md#クライアントモード)）。
-  executorのsessionのstepも、executor-telemetryのtokenでserviceの`telemetry_report`を通る（[telemetry_report](queue-service.md#telemetry_report)）。
   閉じたのはCLIを通る経路で、同じユーザーのプロセスはDBのファイルもtokenのファイルも探して読めるので、host構成では助言的なまま（ADR-t1233-1のConsequences）
 - 状態を変えないコマンドは、roleを問わず`check_access`が`StaticPolicy`に通す（default deny）。
   拒否は同じerrorを返し、queueがあれば拒まれた呼び出し元をactorにした`authorization_denied`に記録する（queueが無いときは記録せずに拒む）。
