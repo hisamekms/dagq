@@ -80,7 +80,7 @@ jobの意味と流すものは`.github/workflows/`の`ci.yml`・`stress.yml`・`
 - `tests/it`はSQLite・Git・プロセス・supervisorの配線・復旧とadoptの境界を代表の1 caseで確かめ、判断のcaseごとにfixtureとsupervisorを起動し直さない。
 - e2eは実バイナリ・実Git・実launchdのハッピーパスと境界だけにする（流し方は下の「e2e」）。
 - integration testを減らすときは、確かめていた中身をunit testか残すintegration testに対応づけ、行き先の無いまま消さない。
-- 時間の関門（[ADR-t1707-1](../adr/2026-10-05-t1707-1-time-gate-for-added-or-changed-integration-tests.md)）: baseからの差分で足した・本文を変えた`tests/it`のtestの1本の時間が閾値を超えたら、許可の一覧に項目が無いかぎり関門が落ちる。閾値・許可の一覧（`.config/it-slow-allow.toml`）の書式・testの名前の求め方・scriptの引数は`scripts/check-it-test-time.sh`の冒頭のコメントが持つ。
+- 時間の関門（[ADR-t1707-1](../adr/2026-10-05-t1707-1-time-gate-for-added-or-changed-integration-tests.md)）: baseからの差分で足した・本文を変えた`tests/it`のtestの1本の時間が閾値を超えたら、許可の一覧に項目が無いかぎり関門が落ちる。許可の一覧は`.config/it-slow-allow.toml`と`.config/it-slow-allow.d/*.toml`を合わせたもので、新しい項目は足すtaskのファイル`.config/it-slow-allow.d/t<task ID>.toml`に足す（別々のtaskの追加が同じファイルに触れないため。`.config/it-slow-allow.toml`には足さず、そこの既存の項目を直す・外すのはよい）。閾値・許可の一覧の書式・testの名前の求め方・scriptの引数は`scripts/check-it-test-time.sh`の冒頭のコメントが持つ。
   - 超えたら、まずtestを直す（判断をunit testへ移す、caseごとにfixtureとsupervisorを起動し直さない）。直さずに許可の一覧に項目を足してよいのは、理由が次のどちらかのときだけ: (a) そのtestが守る境界（SQLite・Git・プロセス・supervisorの配線・復旧とadoptのどれか）を書ける、(b) 移し替えの予定があり、その行き先のtaskかgoalを書ける。判断のcaseを並べただけのtestは(a)に当たらない。項目には足したtaskのIDを書く。
   - 項目のtestを直すか移すtaskは、同じ変更で自分の項目を外すか理由を直す。testを消すか名前を変えるtaskは、消えた名前の項目を同じ変更で外す（残すと、後で同じ名前のtestを足したときに関門を素通りする。scriptはHEADに無い項目を警告するだけで落とさない）。
   - 閾値は本番の関門の`dagq::it`の1本の平均の数倍に置く。CIのrunnerと本番の関門は並列度が違い同じtestの秒が違うので、CIで落ちたtestが本番の関門のlogの秒では閾値の内なら、その秒を添えて直すか項目を足すかをplannerが決める。

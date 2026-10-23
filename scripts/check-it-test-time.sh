@@ -13,7 +13,9 @@
 #   --base REV        the commit to diff from (git diff REV...HEAD -- tests/it);
 #                     required
 #   --threshold SECS  the longest time a test may take (default 5)
-#   --allow FILE      the allow list (default .config/it-slow-allow.toml)
+#   --allow FILE      read the allow list from FILE alone (default: the
+#                     items of .config/it-slow-allow.toml and of every
+#                     .config/it-slow-allow.d/*.toml together)
 #   LOG               nextest output (a file, or - for stdin); stdin when none
 #   --self-test       check the script on the fixtures under
 #                     scripts/check-it-test-time-fixtures/ in a temporary git
@@ -58,16 +60,21 @@
 # The threshold (default 5 seconds) is a few times the production gate's mean
 # time of one dagq::it test; a time equal to it is not over it.
 #
-# The allow list (default .config/it-slow-allow.toml) is TOML items of the
-# form
+# The allow list is, by default, the items of .config/it-slow-allow.toml and
+# of every .config/it-slow-allow.d/*.toml together; a missing directory reads
+# as empty. A new item goes in the file of the task that adds it,
+# .config/it-slow-allow.d/t<task ID>.toml, never in .config/it-slow-allow.toml,
+# so that two tasks adding items change no file in common (an item already in
+# .config/it-slow-allow.toml may be fixed or removed there). Each file is TOML
+# items of the form
 #   [[test]]
 #   name = "<the full name>"
 #   reason = "<the boundary it keeps, or the move it waits for and its task or goal>"
 #   task = <the ID of the task that added the item>
 # with all three keys. An item missing a key, with a key it does not know or
-# one key twice, or two items of one name make the list unreadable (exit 2).
-# An item whose full name has no #[test] in tests/it at HEAD is warned about
-# by name, without changing the exit status.
+# one key twice, or two items of one name, in one file or in two, make the
+# list unreadable (exit 2). An item whose full name has no #[test] in
+# tests/it at HEAD is warned about by name, without changing the exit status.
 #
 # When DAGQ_LOCAL_CHECKS_DIR names a directory (dagq gives it to a worker's
 # turns), each run also leaves there a record of itself with the kind
@@ -246,27 +253,33 @@ BEGIN {
 # check reads all HEAD tests (with the diff target flag), logs and allow list
 # as files, and reports.
 check() {
-  tfile=$1; shift
-  LC_ALL=C awk -v me="$me" -v threshold="$threshold" -v allowfile="$allow" -v tfile="$tfile" '
-function fail_allow(msg) { printf "%s: %s:%d: %s\n", me, allowfile, FNR, msg > "/dev/stderr"; bad = 1 }
+  tfile=$1; nallow=$2; shift 2
+  LC_ALL=C awk -v me="$me" -v threshold="$threshold" -v allowdesc="$allowdesc" -v nallow="$nallow" -v tfile="$tfile" '
+function fail_at(where, msg) { printf "%s: %s: %s\n", me, where, msg > "/dev/stderr"; bad = 1 }
+function fail_allow(msg) { fail_at(FILENAME ":" FNR, msg) }
 function close_item() {
   if (!initem) return
-  if (iname == "") fail_allow("an item has no name")
-  else if (ireason == "") fail_allow("item " iname " has no reason")
-  else if (itask == "") fail_allow("item " iname " has no task")
-  else if (iname in allowed) fail_allow("item " iname " is listed twice")
-  else { allowed[iname] = 1; anames[++na] = iname }
+  if (iname == "") fail_at(iwhere, "an item has no name")
+  else if (ireason == "") fail_at(iwhere, "item " iname " has no reason")
+  else if (itask == "") fail_at(iwhere, "item " iname " has no task")
+  else if (iname in allowed) fail_at(iwhere, "item " iname " is listed twice (first at " allowed[iname] ")")
+  else { allowed[iname] = iwhere; anames[++na] = iname }
   initem = 0
 }
+BEGIN {
+  # The allow files are the nallow arguments after the targets file.
+  for (i = 2; i <= nallow + 1; i++) isallow[ARGV[i]] = 1
+}
+FNR == 1 { close_item() }
 function strval(v) {
   if (v !~ /^"([^"\\]|\\.)*"$/) return "\001"
   return substr(v, 2, length(v) - 2)
 }
-FILENAME == allowfile {
+FILENAME in isallow {
   line = $0
   sub(/^[ \t]+/, "", line)
   if (line == "" || substr(line, 1, 1) == "#") next
-  if (line ~ /^\[\[test\]\][ \t]*(#.*)?$/) { close_item(); initem = 1; iname = ""; ireason = ""; itask = ""; split("", seenkey); next }
+  if (line ~ /^\[\[test\]\][ \t]*(#.*)?$/) { close_item(); initem = 1; iwhere = FILENAME ":" FNR; iname = ""; ireason = ""; itask = ""; split("", seenkey); next }
   if (!initem) { fail_allow("a key outside a [[test]] item"); next }
   key = line; sub(/[ \t]*=.*/, "", key)
   val = line; sub(/^[^=]*=[ \t]*/, "", val); sub(/[ \t]+#[^"]*$/, "", val); sub(/[ \t]+$/, "", val)
@@ -279,7 +292,6 @@ FILENAME == allowfile {
   next
 }
 FILENAME == tfile {
-  if (!allowdone) { close_item(); allowdone = 1 }
   split($0, t, "\t")
   existing[t[1]] = 1
   if (t[4] == 1 && !(t[1] in tpath)) { tnames[++nt] = t[1]; tpath[t[1]] = t[2] ":" t[3] }
@@ -307,7 +319,7 @@ FILENAME == tfile {
   sample[name, m + 1] = s
 }
 END {
-  if (!allowdone) close_item()
+  close_item()
   if (bad) exit 2
   for (x = 1; x <= na; x++)
     if (!(anames[x] in existing))
@@ -323,13 +335,13 @@ END {
     k = ns[name]
     med = (k % 2) ? sample[name, (k + 1) / 2] : (sample[name, k / 2] + sample[name, k / 2 + 1]) / 2
     if (med > threshold + 0 && !(name in allowed)) {
-      printf "%s: dagq::it %s took %.3fs, over %ss, and is not in %s (%s)\n", me, name, med, threshold, allowfile, tpath[name] > "/dev/stderr"
+      printf "%s: dagq::it %s took %.3fs, over %ss, and is not in the allow list (%s) (%s)\n", me, name, med, threshold, allowdesc, tpath[name] > "/dev/stderr"
       over++
     } else ok++
   }
   printf "%s: %d added or changed test(s) in tests/it: %d over %ss without an item, %d within the threshold or allowed, %d not timed\n", me, nt, over, threshold, ok, missing
   exit over > 0 ? 1 : 0
-}' "$allow" "$tfile" "$@"
+}' "$tfile" "$@"
 }
 
 # self_test builds a small git history from the fixtures and checks the
@@ -433,9 +445,9 @@ EOF
   twice_status=$?
   (cd "$repo" && sh "$script" --base HEAD~1 --allow "$tmp/bad.toml" "$tmp/nextest.log") > /dev/null 2>&1
   bad_allow_status=$?
-  # The repository's own allow list reads without an error (no diff from
-  # HEAD, so no target).
-  (cd "$here/.." && sh "$script" --base HEAD --allow "$here/../.config/it-slow-allow.toml" /dev/null) > /dev/null
+  # The repository's own allow list, the file and the directory together,
+  # reads without an error (no diff from HEAD, so no target).
+  (cd "$here/.." && sh "$script" --base HEAD /dev/null) > /dev/null
   repo_allow_status=$?
   set -e
   for c in "within_the_threshold $status 0" "no_base $usage_status 2" "unreadable_log $unreadable_status 2" "item_without_reason $bad_allow_status 2" "key_given_twice $twice_status 2" "repository_allow_list $repo_allow_status 0"; do
@@ -443,6 +455,43 @@ EOF
     if [ "$2" -eq "$3" ]; then echo "$me --self-test: $1: exit $2: ok"
     else echo "$me --self-test: $1: exit $2, want $3" >&2; fail=1; fi
   done
+
+  # The default allow list: .config/it-slow-allow.toml and the task files of
+  # .config/it-slow-allow.d together. They are removed after the cases, so
+  # the records below see the tree they expect.
+  mkdir -p "$repo/.config"
+  cp "$fixtures/allow.toml" "$repo/.config/it-slow-allow.toml"
+  default_case() { # case, want exit, then the arguments
+    dc=$1; dw=$2; shift 2
+    set +e
+    (cd "$repo" && sh "$script" --base HEAD~1 "$@" "$tmp/nextest.log") > "$tmp/out" 2> "$tmp/err"
+    ds=$?
+    set -e
+    if [ "$ds" -eq "$dw" ]; then echo "$me --self-test: $dc: exit $ds: ok"
+    else echo "$me --self-test: $dc: exit $ds, want $dw" >&2; cat "$tmp/err" >&2; fail=1; fi
+  }
+  default_case no_task_directory_reads_as_empty 1
+  expect no_task_directory_not_allowed present "dagq::it gate_fixture::a_new_slow_test took 7.000s"
+  expect no_task_directory_file_allowed absent "gate_fixture::an_allowed_slow_test "
+  mkdir -p "$repo/.config/it-slow-allow.d"
+  printf '[[test]]\nname = "gate_fixture::a_new_slow_test"\nreason = "B: a task file item"\ntask = 1\n' > "$repo/.config/it-slow-allow.d/t1.toml"
+  default_case task_file_item 1
+  expect task_file_item_allowed absent "gate_fixture::a_new_slow_test took"
+  expect task_file_item_file_allowed absent "gate_fixture::an_allowed_slow_test "
+  expect task_file_item_others_not_allowed present "dagq::it gate_fixture::a_coloured_slow_test took 6.500s"
+  printf '[[test]]\nname = "gate_fixture::a_new_slow_test"\nreason = "B: the same name again"\ntask = 2\n' > "$repo/.config/it-slow-allow.d/t2.toml"
+  default_case name_in_two_task_files 2
+  expect name_in_two_task_files_message present "t2.toml:1: item gate_fixture::a_new_slow_test is listed twice"
+  rm "$repo/.config/it-slow-allow.d/t2.toml"
+  printf '[[test]]\nname = "gate_fixture::an_allowed_slow_test"\nreason = "B: in the file too"\ntask = 3\n' > "$repo/.config/it-slow-allow.d/t3.toml"
+  default_case name_in_the_file_and_a_task_file 2
+  printf '[[test]]\nname = "gate_fixture::a_coloured_slow_test"\n' > "$repo/.config/it-slow-allow.d/t3.toml"
+  default_case task_file_item_without_reason 2
+  expect task_file_item_without_reason_message present "t3.toml:1: item gate_fixture::a_coloured_slow_test has no reason"
+  # --allow FILE reads that file alone, not the broken task file.
+  default_case allow_reads_one_file 1 --allow "$tmp/allow.toml"
+  expect allow_reads_one_file_not_the_directory present "dagq::it gate_fixture::a_new_slow_test took 7.000s"
+  rm -rf "$repo/.config"
 
   # The records: none without DAGQ_LOCAL_CHECKS_DIR; with it one of the
   # kind it-test-time, its exit status, its log, the same output, and the
@@ -485,7 +534,9 @@ record_case() { # case, then the condition's result (0 is ok)
 
 base=""
 threshold=5
-allow=.config/it-slow-allow.toml
+allow=""
+allow_file=.config/it-slow-allow.toml
+allow_dir=.config/it-slow-allow.d
 
 if [ "${1:-}" = "--self-test" ]; then
   [ $# -eq 1 ] || usage "--self-test takes no other argument"
@@ -519,7 +570,7 @@ while [ $# -gt 0 ]; do
     --base) [ $# -ge 2 ] || usage "--base needs a revision"; base=$2; shift 2 ;;
     --threshold) [ $# -ge 2 ] || usage "--threshold needs a number"; threshold=$2; shift 2 ;;
     --allow) [ $# -ge 2 ] || usage "--allow needs a file"; allow=$2; shift 2 ;;
-    -h|--help) sed -n '2,47p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,50p' "$0"; exit 0 ;;
     --) shift; break ;;
     -?*) usage "unknown argument: $1" ;;
     *) break ;;
@@ -530,15 +581,42 @@ done
 case "$threshold" in
   ''|*[!0-9.]*|*.*.*|.) usage "--threshold is not a number: $threshold" ;;
 esac
-if [ ! -r "$allow" ] || [ -d "$allow" ]; then
-  echo "$me: cannot read $allow" >&2
-  exit 2
-fi
 for log in "$@"; do
   if [ "$log" != - ] && { [ ! -r "$log" ] || [ -d "$log" ]; }; then
     echo "$me: cannot read $log" >&2
     exit 2
   fi
+done
+if [ $# -eq 0 ]; then set -- -; fi
+# The allow files go before the logs in the arguments: append them, then
+# move the logs behind them.
+nlogs=$#
+if [ -n "$allow" ]; then
+  allowdesc=$allow
+  set -- "$@" "$allow"
+else
+  allowdesc="$allow_file or $allow_dir/t<task ID>.toml"
+  set -- "$@" "$allow_file"
+  for f in "$allow_dir"/*.toml; do
+    [ -e "$f" ] || continue
+    set -- "$@" "$f"
+  done
+fi
+nallow=$(($# - nlogs))
+i=0
+while [ "$i" -lt "$nlogs" ]; do
+  set -- "$@" "$1"
+  shift
+  i=$((i + 1))
+done
+i=0
+for f in "$@"; do
+  [ "$i" -lt "$nallow" ] || break
+  if [ ! -r "$f" ] || [ -d "$f" ]; then
+    echo "$me: cannot read $f" >&2
+    exit 2
+  fi
+  i=$((i + 1))
 done
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/$me.XXXXXX")
@@ -548,9 +626,8 @@ tests_at_head > "$work/targets"
 status=$?
 set -e
 [ "$status" -eq 0 ] || exit 2
-if [ $# -eq 0 ]; then set -- -; fi
 set +e
-check "$work/targets" "$@"
+check "$work/targets" "$nallow" "$@"
 status=$?
 set -e
 exit "$status"

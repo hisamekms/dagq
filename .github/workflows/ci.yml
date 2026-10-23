@@ -294,8 +294,9 @@ jobs:
 
       # The time gate of the tests in tests/it (ADR-t1707-1): a test the diff
       # from the base added or changed that took longer than the threshold
-      # fails the job unless .config/it-slow-allow.toml names it
-      # (scripts/check-it-test-time.sh, whose header has the format). The base
+      # fails the job unless the allow list (.config/it-slow-allow.toml and
+      # .config/it-slow-allow.d/*.toml) names it (scripts/check-it-test-time.sh,
+      # whose header has the format). The base
       # is the commit before the push or the pull request's base; a push
       # without one (the first push of a new branch) skips the gate. It reads
       # the same nextest output and runs after a failed test step too.

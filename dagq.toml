@@ -374,7 +374,7 @@ paths = ["src/infrastructure/adapters.rs", "src/infrastructure/process.rs", "src
 enabled = false
 
 [review.subagents.test-rules]
-paths = ["tests/**", "src/**", "Cargo.toml", ".config/e2e-quarantine.toml", ".config/it-slow-allow.toml"]
+paths = ["tests/**", "src/**", "Cargo.toml", ".config/e2e-quarantine.toml", ".config/it-slow-allow.toml", ".config/it-slow-allow.d/**"]
 
 # migration か schema を変える差分にだけ当てる。test の書き方の規則（A-140）は、migration を足す差分で同じ差分の test と一緒に見る。
 [review.subagents.migration-rules]

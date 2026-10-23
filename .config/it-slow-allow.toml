@@ -4,7 +4,12 @@
 # and has no item here. The threshold, the format and the naming rule are in
 # the header of scripts/check-it-test-time.sh, and the rule on which reasons
 # may put a test here in docs/development/testing.md, section
-# "判断と境界のtest". The script reads this file (CI and the worker run it).
+# "判断と境界のtest". The script reads this file and every
+# .config/it-slow-allow.d/*.toml together (CI and the worker run it).
+#
+# A new item goes in .config/it-slow-allow.d/t<task ID>.toml, the file of the
+# task that adds it; do not add one to this file (fixing or removing an item
+# already here is fine), so that tasks adding items change no file in common.
 #
 # Each item is one [[test]] with all three keys:
 #
