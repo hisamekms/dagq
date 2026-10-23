@@ -1,0 +1,17 @@
+round,variant,target,turns_start,verify_start,turns_end,verify_end,turns_max,verify_max,turns_mean,verify_mean
+1,V0,build,0,0,0,0,0,0,0.0,0.0
+1,V0,test-build,0,0,1,0,1,0,0.8,0.0
+1,V5,build,1,0,0,0,1,0,0.2,0.0
+1,V5,test-build,0,0,0,0,0,0,0.0,0.0
+2,V5,build,0,0,0,1,0,1,0.0,0.7
+2,V5,test-build,0,1,0,0,0,1,0.0,0.4
+2,V0,build,0,0,0,0,0,0,0.0,0.0
+2,V0,test-build,0,0,0,0,0,0,0.0,0.0
+3,V0,build,0,0,0,0,0,0,0.0,0.0
+3,V0,test-build,0,0,0,0,0,0,0.0,0.0
+3,V5,build,0,0,0,0,0,0,0.0,0.0
+3,V5,test-build,0,0,0,1,0,1,0.0,0.8
+4,V5,build,0,1,0,1,0,1,0.0,1.0
+4,V5,test-build,0,1,1,0,1,1,0.4,0.4
+4,V0,build,1,0,0,0,1,0,0.7,0.0
+4,V0,test-build,0,0,1,0,1,0,0.8,0.0

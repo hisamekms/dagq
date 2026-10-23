@@ -164,6 +164,7 @@ MiB は KiB ÷ 1024 を丸めた読みやすさのための値。
 | V5 `CARGO_PROFILE_DEV_CODEGEN_UNITS=64` | 0.83 | 0.69 / 0.88 | 0.54 / 0.71 | 1 周目は (i)・(ii) とも同じ周の V0 より小さく速いが、2 周目は (ii) の 1 process が V0 より大きく (i) が遅い。差は揺れの幅と重なる |
 | V6 `CARGO_PROFILE_DEV_DEBUG=0` | 0.84 | 0.88 / 0.93 | 0.43 / 0.72 | peak は (i)・(ii) とも両方の周で同じ周の V0 より小さいが、時間は 2 周目の (ii) で V0 より遅い。差は揺れの幅と重なる |
 
+- V5 を V0 と 4 周の交互の組で測り直した結果（判定 does_not_hold）は [codegen-units-spike](codegen-units-spike.md) にある。
 - (iii) の T2 は 1 process の peak 0.87・合計 0.72 で時間 2.32 だった。
   実行の合計の peak は T6 でも 384 MiB で、build の 5％ほどなので、test の thread 数を下げてもメモリの上限は変わらない。
 - 1 本の build と test のメモリを決めるのは (ii) の合計の peak（V0 で 7,208 MiB）で、(i) の 1 process（V0 で 4,062 MiB）ではない。

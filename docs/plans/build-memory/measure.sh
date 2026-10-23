@@ -35,14 +35,17 @@
 #                peak_proc_name,peak_total_kib,time_maxrss_bytes,load1_start,load1_end
 #   各 run の cargo の出力と time -l の出力は $TMPDIR/build-memory-logs に置く（commit しない）。
 #   BUILD_MEMORY_OUT に dir を渡すと、CSV をこの script の dir でなくそこに書く（試しの run 用）。
+#   BUILD_MEMORY_PREFIX に文字列を渡すと、CSV と log の dir の名前の頭に付ける（別の測定の
+#   CSV を上の 2 つと分けるため。measure-cgu.sh が cgu- を渡す）。
 set -u
 
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/../../.." && pwd)
 out=${BUILD_MEMORY_OUT:-$here}
-runs="$out/runs.csv"
-samples="$out/samples.csv"
-logs="${TMPDIR:-/tmp}/build-memory-logs"
+prefix=${BUILD_MEMORY_PREFIX:-}
+runs="$out/${prefix}runs.csv"
+samples="$out/${prefix}samples.csv"
+logs="${TMPDIR:-/tmp}/${prefix}build-memory-logs"
 tbase="$root/target/build-memory"
 
 load1() { sysctl -n vm.loadavg | awk '{print $2}'; }
