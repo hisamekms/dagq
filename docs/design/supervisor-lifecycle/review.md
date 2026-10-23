@@ -195,6 +195,7 @@ e2eが要るpassしたrunは、着地スロットを待つ段でhostでe2eを流
 - 着地を許す判定は、適用される`land`のconcernを「passした」と読む（`concern::lets_land`）。
 - 引き継いだsupervisorは記録されたconcernを生きたsupervisorと同じに決め、上限の後の`send_back`も4aで判定して同じ`concern_decided`を記録する（`adopt.rs`の`adopted_concern`）。
   上限の前の`send_back`は依頼が記録されていないので、送れなかったものとして人に聞く。
+  4aの判定が収束を記録した後で`concern_decided`の前にsupervisorが止まったconcernは、passと同じ道（その後のconflictのprecheckを記録していればそこ）から続け、無い`concern_decided`を`revise_limit`で1回だけ記録する（`adopt.rs`の`converged_concern_undecided`）。
 - セキュリティのagentは[ADR-t1906-1](../../adr/2026-10-14-t1906-1-security-review-agent-findings-follow-the-concern-rules.md)。
 
 ## already_satisfiedの主張の判定

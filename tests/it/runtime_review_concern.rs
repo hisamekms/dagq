@@ -639,3 +639,66 @@ fn adopt_an_unfixed_send_back(recorded: bool) {
         "the session went idle without rewriting the receipt after revise 1",
     );
 }
+
+/// A supervisor that judged a concern's high `send_back` past the run's
+/// revises converged (`revise_limit_judged`, ADR-t2599-1) and died before
+/// it recorded `concern_decided`: its adopter records the decision once,
+/// as `revise_limit` at the review job's request, and lands the run as a
+/// pass, as the supervisor would have. Supervised again, it records
+/// nothing more.
+#[test]
+fn an_adopter_records_a_converged_concern_left_unrecorded_by_a_dead_supervisor() {
+    let (_dir, repo, db) = fixture();
+    let base = git_out(&repo, &["rev-parse", "main"]);
+    let backend = Arc::new(TestWorkspace::new(&db, false, IDLE_AGENT));
+    let revises = (1..=dagq::domain::MAX_REVISE_ATTEMPTS as u64)
+        .map(|attempt| (EventKind::ReviseRequested, json!({"attempt": attempt})));
+    let attempt = dagq::domain::MAX_REVISE_ATTEMPTS + 1;
+    let run = left_by_a_dead_supervisor(
+        &repo,
+        &db,
+        &backend,
+        revises
+            .chain([
+                (EventKind::ReviewStarted, json!({"attempt": attempt})),
+                (
+                    EventKind::ReviewFinished,
+                    json!({"verdict": "concern", "reasons": ["a typo"],
+                           "reason_codes": [["local_slip"]], "summary": "judged",
+                           "attempt": attempt, "recommendation": "send_back",
+                           "confidence": "high", "reason_category": null}),
+                ),
+                (
+                    EventKind::ReviseLimitJudged,
+                    json!({"attempt": attempt, "revises": dagq::domain::MAX_REVISE_ATTEMPTS,
+                           "converged": true, "code_findings": []}),
+                ),
+            ])
+            .collect(),
+    );
+    let outcome = adopt(&db, &repo, &backend, Vec::new());
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let decided = json!({"attempt": attempt, "recommendation": "send_back", "confidence": "high",
+        "reason_category": null, "applied": false, "escalated_because": "revise_limit"});
+    let mut queue = SqliteQueue::open(&db).unwrap();
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(concern_decided(&detail), std::slice::from_ref(&decided));
+    let event = detail
+        .events
+        .iter()
+        .find(|e| e.kind == EventKind::ConcernDecided)
+        .unwrap();
+    assert_eq!(
+        event.actor.as_ref().and_then(|a| a.requested_by.clone()),
+        Some(format!("review-job:{}:{attempt}", run.id())),
+        "{event:?}"
+    );
+    // Not reviewed again: landed as a pass, nobody asked.
+    assert_eq!(payloads(&detail, "review_started").len(), 1);
+    assert_landed_run(&detail.runs[0], &repo, &base);
+    assert!(queue.asks(Default::default()).unwrap().is_empty());
+    let outcome = adopt(&db, &repo, &backend, Vec::new());
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = queue.show(TaskId::new(1)).unwrap();
+    assert_eq!(concern_decided(&detail), [decided]);
+}

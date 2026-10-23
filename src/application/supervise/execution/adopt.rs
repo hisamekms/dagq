@@ -318,7 +318,11 @@ impl Supervisor<'_> {
     /// validation, goes on to its `/exit` without a second review and
     /// without a second `/exit` if one was already requested; anything else
     /// is reviewed from the start, the review being a function of the
-    /// receipt and the commit.
+    /// receipt and the commit. A concern whose `send_back` past the run's
+    /// revises was judged converged goes on as a pass or from its conflict
+    /// precheck, its missing
+    /// `concern_decided` recorded first as `revise_limit`
+    /// ([`converged_concern_undecided`]).
     pub(super) fn adopt_review(&mut self, run: &TaskRun) -> Result<Phase> {
         let session = self.session_of(run)?;
         let events = self.queue.run_events(run.id())?;
@@ -346,6 +350,19 @@ impl Supervisor<'_> {
         let landing_ask_open = self
             .queue
             .has_unclosed_ask(run.id(), AskKind::ApproveLanding)?;
+        // A converged concern goes on as a pass below, or from its
+        // precheck; its `concern_decided`, left unrecorded, is recorded as
+        // the live supervisor records a `send_back` past the run's revises.
+        if let Some((attempt, verdict)) = converged_concern_undecided(&history) {
+            self.for_job(&ActorContext::review_job(run.id(), attempt as u64), |sv| {
+                sv.record_concern_decided(
+                    run,
+                    attempt,
+                    &verdict,
+                    Some(EscalatedBecause::ReviseLimit),
+                )
+            })?;
+        }
         match review_resumption(run, &history, anchor, live, landing_ask_open) {
             ReviewResumption::Review => self.start_review(run, session),
             ReviewResumption::Revise {
@@ -919,6 +936,35 @@ fn sent_back_concern(history: &RunHistory<'_>, anchor: &RunEvent) -> Option<Sent
     SentBackConcern::of(&verdict_of(review).ok()?, attempt as usize)
 }
 
+/// The attempt and verdict of the run's last review, a parent concern
+/// whose `send_back` past the run's revises was judged converged
+/// (ADR-t2599-1) with no `concern_decided` after it: the supervisor died
+/// between `revise_limit_judged` and the record that
+/// [`Supervisor::act_on_concern`] makes after the precheck it goes on to
+/// (a conflict precheck it recorded included), and the adopter goes on
+/// from the judgment as from a pass ([`review_resumption`]), or from the
+/// precheck, without deciding the concern again. A review whose
+/// subagents decided it while the verdict's own concern went lighter
+/// (ADR-t1453-1 decision 7) is no decision of that concern.
+fn converged_concern_undecided(history: &RunHistory<'_>) -> Option<(usize, ReviewVerdict)> {
+    let review = history.last(EventKind::ReviewFinished)?;
+    if history.has_after(review.id, EventKind::ConcernDecided)
+        || !history
+            .events()
+            .iter()
+            .any(|e| e.id > review.id && crate::domain::review_reason::judged_converged(e))
+    {
+        return None;
+    }
+    let finished: ReviewFinished = restore(&review.payload);
+    if finished.verdict != Some(ReviewDecision::Concern.as_str())
+        || (finished.agents_decided() && !finished.parent_decided())
+    {
+        return None;
+    }
+    Some((finished.attempt? as usize, verdict_of(review).ok()?))
+}
+
 /// The verdict a `review_finished` recorded, with a concern's
 /// recommendation, confidence and reason when it gave them.
 fn verdict_of(event: &RunEvent) -> serde_json::Result<ReviewVerdict> {
@@ -1015,8 +1061,10 @@ enum ReviewResumption {
 /// session lives (`live`) and whether an `approve_landing` ask of the run
 /// is open (`landing_ask_open`): a revise or conflict request waits for the
 /// live session again, and is reviewed again without one; a `revise_unsent`
-/// asks a person; a verdict a review's subagents decided asks a person; a
-/// concern is decided again; a pass is prechecked again before its exit
+/// asks a person; a review whose `send_back` past the run's revises was
+/// judged converged goes on as a pass (a concern's `concern_decided` is
+/// recorded before, [`converged_concern_undecided`]); a verdict a review's
+/// subagents decided asks a person; a concern is decided again; a pass is prechecked again before its exit
 /// request and lands after it; a precheck that sent nothing lands or asks;
 /// an approved run lands; a run a landing recheck resumed waits for its
 /// ask; anything else is reviewed from the start.
@@ -1952,6 +2000,115 @@ mod tests {
             resumption(&[revise, judged(false)], true, false),
             ReviewResumption::Exit(AfterExit::Ask { .. })
         ));
+    }
+
+    /// A parent concern whose high `send_back` past the run's revises was
+    /// judged converged, the supervisor replaced before its
+    /// `concern_decided`, has it recorded as `revise_limit`, as
+    /// `not_applied` records it, and goes on as a pass (or from the
+    /// conflict precheck it requested) as before; once recorded, nothing
+    /// more. A converged `revise` and a concern the
+    /// review's subagents decided record nothing.
+    #[test]
+    fn an_adopted_converged_concern_records_its_missing_concern_decided() {
+        let concern = |route: Value| {
+            event(
+                10,
+                event_kind::REVIEW_FINISHED,
+                json!({"verdict": "concern", "reasons": ["a typo"], "reason_codes": [["local_slip"]],
+                       "summary": "s", "recommendation": "send_back", "confidence": "high",
+                       "attempt": 3, "route": route}),
+            )
+        };
+        let parent = concern(json!({"destination": "send_back", "parent": "send_back"}));
+        let mut events: Vec<RunEvent> = (1..=crate::domain::MAX_REVISE_ATTEMPTS as i64)
+            .map(|id| event(id, event_kind::REVISE_REQUESTED, json!({"attempt": id})))
+            .collect();
+        events.push(event(9, event_kind::REVIEW_STARTED, json!({"attempt": 3})));
+        let history = RunHistory::from_events(&events);
+        let used_up = decide_revise(&history) == ReviseDecision::Ask;
+        assert!(used_up);
+        let judged = event(
+            11,
+            event_kind::REVISE_LIMIT_JUDGED,
+            json!({"attempt": 3, "revises": 2, "converged": true, "code_findings": []}),
+        );
+        let with = |extra: &[RunEvent], review: &RunEvent| {
+            let mut all = events.clone();
+            all.push(review.clone());
+            all.push(judged.clone());
+            all.extend_from_slice(extra);
+            all
+        };
+        let undecided =
+            |all: &[RunEvent]| converged_concern_undecided(&RunHistory::from_events(all));
+        let exit = event(12, event_kind::EXIT_REQUESTED, json!({}));
+        let decided = event(
+            13,
+            event_kind::CONCERN_DECIDED,
+            json!({"attempt": 3, "escalated_because": "revise_limit"}),
+        );
+        // Before and after its exit request, the run goes on as a pass
+        // whether `concern_decided` is recorded or not.
+        for extra in [vec![], vec![decided.clone()]] {
+            let before = with(&extra, &parent);
+            assert!(matches!(
+                resumption(&before, true, false),
+                ReviewResumption::Precheck { job: Some(_), .. }
+            ));
+            let mut after = with(std::slice::from_ref(&exit), &parent);
+            after.extend(extra.clone());
+            assert!(matches!(
+                resumption(&after, false, false),
+                ReviewResumption::Exit(AfterExit::Land)
+            ));
+            let recorded = (undecided(&before), undecided(&after));
+            if extra.is_empty() {
+                let (Some((attempt, verdict)), Some(_)) = recorded else {
+                    panic!("the missing concern_decided is recorded");
+                };
+                assert_eq!(attempt, 3);
+                let decision = verdict.concern_decision(true);
+                assert_eq!(decision, ConcernDecision::SendBack);
+                assert_eq!(
+                    adopted_escalation(decision, used_up),
+                    Some(EscalatedBecause::ReviseLimit)
+                );
+            } else {
+                assert!(matches!(recorded, (None, None)));
+            }
+        }
+        // Its precheck asked for a conflict fix before the record: the
+        // adopter waits for that request and records it all the same.
+        let conflict = event(
+            12,
+            event_kind::CONFLICT_PRECHECK,
+            json!({"requested": true, "attempt": 3}),
+        );
+        let requested = with(std::slice::from_ref(&conflict), &parent);
+        assert!(matches!(
+            resumption(&requested, true, false),
+            ReviewResumption::Conflict { attempt: 3, .. }
+        ));
+        assert!(matches!(undecided(&requested), Some((3, _))));
+        let revise = event(
+            10,
+            event_kind::REVIEW_FINISHED,
+            json!({"verdict": "revise", "reasons": ["a typo"], "reason_codes": [["local_slip"]],
+                   "summary": "s", "attempt": 3}),
+        );
+        assert!(undecided(&with(&[], &revise)).is_none());
+        let agents = concern(json!({"destination": "send_back", "parent": "land",
+                                   "agents": [{"destination": "send_back"}]}));
+        assert!(undecided(&with(&[], &agents)).is_none());
+        let unjudged = event(
+            11,
+            event_kind::REVISE_LIMIT_JUDGED,
+            json!({"attempt": 3, "revises": 2, "converged": false, "code_findings": ["x"]}),
+        );
+        let mut asked = events.clone();
+        asked.extend([parent, unjudged]);
+        assert!(undecided(&asked).is_none());
     }
 
     #[test]
