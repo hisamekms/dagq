@@ -59,6 +59,8 @@ related:
      `refs/dagq/runs/<run-id>`にcommit（`result_commit`、無ければworktreeのHEAD。containerのrunは`retry`と同じく読む）を残してtaskを`ready`に戻す。
      次のrunは引き継ぎ（`run_inherited`とpromptの「Carried over from run」の節）で始まる。
    - `resume`: resumeを使い切っていない（通算で数える）、worktreeとreceiptのpathがある。
+     runがtaskの最新のrunで、taskが`completed` / `canceled`でない（`domain::telemetry::run_revivable`。taskが`ready`に戻っただけで後のrunが無ければresumeできる）ことを適用の同じトランザクションで再検査し、満たさなければ適用しない。
+     taskが終わったか後のrunがあるrunの未送信のstepのファイルはsupervisorのsweepが消すので、そのrunを戻すとresumeのwrapperがsessionの番号を最初から数え直すため（置き場は[計測](../measurement.md#送る口)の「集める口」）。
      runを`needs_session`にし、`last_error`にjobの`instruction`（空なら`diagnosis`）を書く。
      [`needs_session`](needs-session.md#needs_session)の自動resumeが拾い、resolution requestは「triageが差し戻した」文面で`instruction`を載せる。
      直前のturnの`peak_context`が閾値を超えていれば、そのresumeは依頼を引き継ぎに入れて新しいsessionで始める（[`needs_session`](needs-session.md#needs_session)の3）。
@@ -99,6 +101,7 @@ related:
 9. **askの回答**: fill passごとに、`asked_by: supervisor`の`decide`のaskで回答済み・未closeのもののうち、回答がaskのoptionsにある`retry` / `resume` / `cancel`のどれかで、runが`failed` / `interrupted`でleaseが無いものを`decide_triage`で1トランザクションで適用する（runがtaskの最新runで、askが回答済みかつ未closeであることを中で再検査するので、2つのsupervisorが同じ回答を二重に適用しない。staleなleaseの行は同じトランザクションで消すので、止まっていたラウンドのsupervisorが起きてもleaseを更新して書けない。[ADR-0039](../../adr/0039-adopt-stale-lease-of-live-wrapper-and-renew-own-stale-lease.md)の決定7）。
    `retry`はtaskを`ready`（人の判断なので、commitのあるrunでもよい）、`resume`はrunを`needs_session`（`last_error`は直近の`triage_finished`の`reason`に人がresumeを選んだことを添えたもの）、`cancel`はtaskを`canceled`にし、askを閉じ、`triage_decided`を記録する。
    taskが既に`in_progress`でないか、より新しいrunがあれば（人が`ready`を打ったなど）適用するものが無いのでaskを閉じるだけにする。
+   `resume`は5の`resume`と同じ再検査（runがtaskの最新のrunで、taskが`completed` / `canceled`でない）を適用のトランザクションでもう一度行い、その間に人がcancelしたか後のrunが始まっていれば適用せず、askは開いたまま次のfill passで上の通り閉じる。
    jobの足したoptionは、6の印を外した文だけの回答でもそのoptionとして扱う（`domain::recovery::chosen_option`）。
    回答がjobの足したoptionかruntimeの足した`edit the task's --verify, then retry_inherit`（askのoptionsにあり`retry` / `resume` / `cancel`でないもの）なら、何も動かさずにaskを閉じ、`triage_decided`を記録する。
    `triage_state`はこれを`Pending`と読むので、次のfill passで同じalertのラウンドがもう一度始まり（alertの回数に数える）、promptのalertの事実でjobが人の選んだもの（6の印は外す）を読む。
