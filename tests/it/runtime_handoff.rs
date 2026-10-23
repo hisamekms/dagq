@@ -433,7 +433,7 @@ enum TurnEnd {
     /// As the fixture's do: the idle marker shows it.
     Idle,
     /// The first supervisor never sees an idle marker
-    /// ([`crate::runtime_headless::ReceiptSeenLate::idle_unseen`]): task
+    /// ([`ReceiptSeenLate::idle_unseen`]): task
     /// 1's turn fails after its receipt and its wrapper ends with it, as a
     /// script of task 2 that ends the same way does.
     Exit,
@@ -481,11 +481,8 @@ receipt \"$(git rev-parse HEAD)\"";
     backend.script_for(2, script);
     let reviewer = Arc::new(TestReviewer::new(&[verdict("pass", &[], "ready to land")]));
     let options = SuperviseOptions {
-        files: (end == TurnEnd::Exit).then(|| {
-            dagq::runtime::RunFilesPort(Arc::new(
-                crate::runtime_headless::ReceiptSeenLate::idle_unseen(),
-            ))
-        }),
+        files: (end == TurnEnd::Exit)
+            .then(|| dagq::runtime::RunFilesPort(Arc::new(ReceiptSeenLate::idle_unseen()))),
         ..supervise_options(2, false)
     };
     let passes = options.passes.clone();

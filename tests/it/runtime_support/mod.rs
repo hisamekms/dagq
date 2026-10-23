@@ -464,6 +464,8 @@ mod headless_stubs;
 pub use headless_stubs::*;
 mod lost_lease;
 pub use lost_lease::*;
+mod receipt_seen_late;
+pub use receipt_seen_late::ReceiptSeenLate;
 pub mod planner_prompt_bytes;
 pub mod planner_turns;
 pub mod service;
