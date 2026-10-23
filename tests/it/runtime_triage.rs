@@ -782,8 +782,9 @@ fn a_wait_runs_the_job_again_and_a_low_confidence_repair_is_asked() {
 
 /// The answers `resume` and `retry` of a triage's ask, applied by the
 /// queue: `resume` parks the run for a session with the reason, `retry`
-/// readies the task; an answer outside the options, a leased run, a run
-/// that is not failed and an ask already closed are refused.
+/// readies the task; an answer outside the options, a `resume` of a run
+/// whose task ended or has a later run, a leased run, a run that is not
+/// failed and an ask already closed are refused.
 #[test]
 fn triage_answers_resume_the_run_or_ready_the_task() {
     let (_dir, db, detail) = run_agent("commit work; exit 7");
@@ -816,6 +817,42 @@ fn triage_answers_resume_the_run_or_ready_the_task() {
             .decide_triage(run.id(), first.id, "land", "x")
             .is_err()
     );
+    // A person's `resume` is refused once recovery may no longer bring the
+    // run back: its task ended (`ensure_revivable`) or has a later run (the
+    // latest-run check before it). Nothing moves, and the ask stays open.
+    let going_on = queue.show(TaskId::new(1)).unwrap().task.status();
+    let conn = Connection::open(&db).unwrap();
+    let set_task = |status: &str| {
+        conn.execute("UPDATE tasks SET status=?1 WHERE id=1", [status])
+            .unwrap();
+    };
+    let refused = |queue: &mut SqliteQueue, status: TaskStatus| {
+        let error = queue
+            .decide_triage(run.id(), first.id, "resume", "fix the test")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("no longer the latest run"), "{error}");
+        assert_eq!(queue.run(run.id()).unwrap().status(), RunStatus::Failed);
+        assert_eq!(queue.show(TaskId::new(1)).unwrap().task.status(), status);
+        assert!(queue.read_ask(first.id).unwrap().closed_at.is_none());
+    };
+    for ended in [TaskStatus::Canceled, TaskStatus::Completed] {
+        set_task(ended.as_str());
+        refused(&mut queue, ended);
+    }
+    set_task(going_on.as_str());
+    conn.execute_batch(&format!(
+        "CREATE TEMP TABLE later AS SELECT * FROM task_runs WHERE id='{}';
+         UPDATE later SET id='later', status='claimed', branch=NULL,
+           worktree_path=NULL, workspace_id=NULL;
+         INSERT INTO task_runs SELECT * FROM later;",
+        run.id()
+    ))
+    .unwrap();
+    refused(&mut queue, going_on);
+    // The run is its task's latest again, and the task goes on: applied.
+    conn.execute("DELETE FROM task_runs WHERE id='later'", [])
+        .unwrap();
     let parked = queue
         .decide_triage(run.id(), first.id, "resume", "fix the test")
         .unwrap();

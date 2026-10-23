@@ -1387,6 +1387,76 @@ struct Supervisor<'a> {
     host: HostOpsState,
 }
 
+/// The reads of the queue [`kept_run_of`] makes.
+trait KeptRunReads {
+    fn run(&self, id: &RunId) -> Result<TaskRun>;
+    fn latest_run_of(&self, task: TaskId) -> Result<Option<TaskRun>>;
+    fn list(&self, query: &crate::application::TaskQuery) -> Result<crate::application::TaskPage>;
+}
+
+impl KeptRunReads for dyn Queue + Send {
+    fn run(&self, id: &RunId) -> Result<TaskRun> {
+        crate::application::RunReads::run(self, id)
+    }
+    fn latest_run_of(&self, task: TaskId) -> Result<Option<TaskRun>> {
+        crate::application::RunTransitions::latest_run_of(self, task)
+    }
+    fn list(&self, query: &crate::application::TaskQuery) -> Result<crate::application::TaskPage> {
+        crate::application::TaskReads::list(self, query)
+    }
+}
+
+/// What the sweep of the wrappers' kept steps reads of `run`
+/// ([`crate::domain::telemetry::KeptRun::of`]): its status, and for a
+/// `failed` or `interrupted` one, its task's latest run and its task's
+/// status, which tell whether recovery can still bring it back.
+fn kept_run_of<Q: KeptRunReads + ?Sized>(
+    queue: &Q,
+    run: &RunId,
+) -> Result<crate::domain::telemetry::KeptRun> {
+    use crate::domain::RunStatus;
+    use crate::domain::telemetry::KeptRun;
+    let found = match queue.run(run) {
+        Ok(found) => found,
+        Err(error)
+            if error
+                .downcast_ref::<crate::application::RunNotFound>()
+                .is_some() =>
+        {
+            return Ok(KeptRun::of(run, None, None, None));
+        }
+        Err(error) => return Err(error),
+    };
+    let status = found.status();
+    if !matches!(status, RunStatus::Failed | RunStatus::Interrupted) {
+        // Only a failed or interrupted run's task is read: the status
+        // alone decides any other.
+        return Ok(KeptRun {
+            status: Some(status),
+            revivable: true,
+        });
+    }
+    let task = found.task_id();
+    let latest = queue.latest_run_of(task)?;
+    let page = queue.list(&crate::application::TaskQuery {
+        status: crate::application::StatusFilter::Any,
+        limit: 1,
+        before: Some(task),
+        ..crate::application::TaskQuery::default()
+    })?;
+    let task_status = page
+        .tasks
+        .first()
+        .filter(|item| item.id == task)
+        .map(|item| item.status);
+    Ok(KeptRun::of(
+        run,
+        Some(status),
+        latest.as_ref().map(|latest| latest.id()),
+        task_status,
+    ))
+}
+
 /// One executing run between provisioning and rest.
 struct Slot {
     run: TaskRun,
@@ -1915,51 +1985,9 @@ impl Supervisor<'_> {
     }
 
     /// What the sweep of the wrappers' kept steps reads of `run`
-    /// ([`crate::domain::telemetry::KeptRun::of`]): its status, and for a
-    /// `failed` or `interrupted` one, its task's latest run and its task's
-    /// status, which tell whether recovery can still bring it back.
+    /// ([`kept_run_of`]).
     fn kept_run(&self, run: &RunId) -> Result<crate::domain::telemetry::KeptRun> {
-        use crate::domain::RunStatus;
-        use crate::domain::telemetry::KeptRun;
-        let found = match self.queue.run(run) {
-            Ok(found) => found,
-            Err(error)
-                if error
-                    .downcast_ref::<crate::application::RunNotFound>()
-                    .is_some() =>
-            {
-                return Ok(KeptRun::of(run, None, None, None));
-            }
-            Err(error) => return Err(error),
-        };
-        let status = found.status();
-        if !matches!(status, RunStatus::Failed | RunStatus::Interrupted) {
-            // Only a failed or interrupted run's task is read: the status
-            // alone decides any other.
-            return Ok(KeptRun {
-                status: Some(status),
-                revivable: true,
-            });
-        }
-        let task = found.task_id();
-        let latest = self.queue.latest_run_of(task)?;
-        let page = self.queue.list(&crate::application::TaskQuery {
-            status: crate::application::StatusFilter::Any,
-            limit: 1,
-            before: Some(task),
-            ..crate::application::TaskQuery::default()
-        })?;
-        let task_status = page
-            .tasks
-            .first()
-            .filter(|item| item.id == task)
-            .map(|item| item.status);
-        Ok(KeptRun::of(
-            run,
-            Some(status),
-            latest.as_ref().map(|latest| latest.id()),
-            task_status,
-        ))
+        kept_run_of(&*self.queue, run)
     }
 
     /// Send again the steps kept ([`UnsentSteps`]), the session each kept
@@ -5418,6 +5446,236 @@ mod tests {
                 "restore_request None"
             ]
         );
+    }
+
+    /// The runs, the tasks and each task's latest run of a queue, for
+    /// [`kept_run_of`]; the tasks whose latest run was read and the queries
+    /// `list` was asked, and a read of a run that fails otherwise than with
+    /// [`crate::application::RunNotFound`].
+    #[derive(Default)]
+    struct KeptRuns {
+        runs: Vec<TaskRun>,
+        tasks: Vec<(TaskId, crate::domain::TaskStatus)>,
+        latest: HashMap<TaskId, TaskRun>,
+        broken: bool,
+        latest_reads: RefCell<Vec<TaskId>>,
+        queries: RefCell<Vec<(crate::application::StatusFilter, usize, Option<TaskId>)>>,
+    }
+
+    impl KeptRunReads for KeptRuns {
+        fn run(&self, id: &RunId) -> Result<TaskRun> {
+            anyhow::ensure!(!self.broken, "the queue is busy");
+            self.runs
+                .iter()
+                .find(|run| run.id() == id)
+                .cloned()
+                .ok_or_else(|| crate::application::RunNotFound(id.clone()).into())
+        }
+        fn latest_run_of(&self, task: TaskId) -> Result<Option<TaskRun>> {
+            self.latest_reads.borrow_mut().push(task);
+            Ok(self.latest.get(&task).cloned())
+        }
+        /// As the queue pages them: newest first, from `before` on (at most
+        /// it), any status with [`crate::application::StatusFilter::Any`],
+        /// else (`kept_run_of` asks no other) the tasks that did not end.
+        fn list(
+            &self,
+            query: &crate::application::TaskQuery,
+        ) -> Result<crate::application::TaskPage> {
+            use crate::application::StatusFilter;
+            self.queries
+                .borrow_mut()
+                .push((query.status.clone(), query.limit, query.before));
+            let mut tasks: Vec<_> = self
+                .tasks
+                .iter()
+                .filter(|(id, status)| {
+                    query.before.is_none_or(|before| *id <= before)
+                        && (query.status == StatusFilter::Any || !status.is_terminal())
+                })
+                .collect();
+            tasks.sort_by_key(|(id, _)| std::cmp::Reverse(*id));
+            let total = tasks.len();
+            Ok(crate::application::TaskPage {
+                tasks: tasks
+                    .into_iter()
+                    .take(query.limit)
+                    .map(|(id, status)| {
+                        crate::application::TaskListItem::new(
+                            kept_task(*id, *status),
+                            Vec::new(),
+                            Vec::new(),
+                            None,
+                            None,
+                            false,
+                        )
+                    })
+                    .collect(),
+                next: None,
+                total,
+            })
+        }
+    }
+
+    fn kept_task(id: TaskId, status: crate::domain::TaskStatus) -> crate::domain::Task {
+        crate::domain::Task::restore(crate::domain::TaskRecord {
+            goal_priority: None,
+            id,
+            title: "work".into(),
+            description: String::new(),
+            acceptance: String::new(),
+            verification_commands: Vec::new(),
+            required_evidence: Vec::new(),
+            paths: Vec::new(),
+            priority: Default::default(),
+            change: None,
+            status,
+            goal_id: None,
+            context: String::new(),
+            created_at: String::new(),
+            updated_at: String::new(),
+            worker: crate::domain::worker::Worker::CLAUDE_INTERACTIVE,
+            named_mode: None,
+            wait_for_build: false,
+            execution_class: Default::default(),
+        })
+        .unwrap()
+    }
+
+    fn kept_run_in(id: &str, task: TaskId, status: RunStatus) -> TaskRun {
+        let provider = crate::domain::Provider::Claude;
+        let commit =
+            crate::domain::CommitSha::parse("1111111111111111111111111111111111111111", "commit")
+                .unwrap();
+        TaskRun::restore(crate::domain::RunRecord {
+            id: RunId::new(id).unwrap(),
+            task_id: task,
+            status,
+            requested_provider: provider,
+            actual_provider: provider,
+            worker_mode: crate::domain::worker::Worker::default_mode(provider),
+            // An `integrated` run holds its landing's commit.
+            result_commit: (status == RunStatus::Integrated).then(|| commit.clone()),
+            base_commit: commit,
+            branch: None,
+            worktree_path: None,
+            workspace_id: None,
+            receipt_path: None,
+            log_path: None,
+            repo_path: None,
+            run_dir: None,
+            last_error: None,
+            workspace_closed_at: None,
+            created_at: String::new(),
+        })
+        .unwrap()
+    }
+
+    /// A run not in the queue is read as one whose kept steps go, and a
+    /// read that fails otherwise is the sweep's error, which keeps them.
+    #[test]
+    fn a_run_not_in_the_queue_is_kept_as_gone_and_a_failed_read_is_an_error() {
+        use crate::domain::telemetry::KeptRun;
+        let gone = RunId::new("gone").unwrap();
+        let queue = KeptRuns::default();
+        assert_eq!(
+            kept_run_of(&queue, &gone).unwrap(),
+            KeptRun::of(&gone, None, None, None)
+        );
+        let broken = KeptRuns {
+            broken: true,
+            ..KeptRuns::default()
+        };
+        let error = kept_run_of(&broken, &gone).unwrap_err().to_string();
+        assert_eq!(error, "the queue is busy");
+    }
+
+    /// A `succeeded` or `integrated` run is decided by its status alone:
+    /// its task is not read.
+    #[test]
+    fn a_run_that_did_not_fail_is_kept_by_its_status_alone() {
+        use crate::domain::telemetry::KeptRun;
+        let task = TaskId::new(5);
+        for status in [RunStatus::Succeeded, RunStatus::Integrated] {
+            let run = kept_run_in("done", task, status);
+            let queue = KeptRuns {
+                runs: vec![run.clone()],
+                tasks: vec![(task, crate::domain::TaskStatus::Completed)],
+                ..KeptRuns::default()
+            };
+            assert_eq!(
+                kept_run_of(&queue, run.id()).unwrap(),
+                KeptRun {
+                    status: Some(status),
+                    revivable: true,
+                }
+            );
+            assert!(queue.latest_reads.borrow().is_empty());
+            assert!(queue.queries.borrow().is_empty());
+        }
+    }
+
+    /// A `failed` or `interrupted` run is revivable while it is its task's
+    /// latest run and its task goes on (`ready`, `in_progress`), and is not
+    /// once its task has a later run or ended. Its task's status is read
+    /// off the page that starts at the task (`before` takes the task in),
+    /// so the tasks just before and after it, which ended, are not read in
+    /// its place.
+    #[test]
+    fn a_failed_runs_task_is_read_for_whether_recovery_can_bring_it_back() {
+        use crate::domain::TaskStatus;
+        let task = TaskId::new(5);
+        let neighbours = [
+            (TaskId::new(4), TaskStatus::Canceled),
+            (TaskId::new(6), TaskStatus::Completed),
+        ];
+        let case = |status: RunStatus, task_status: TaskStatus, later: bool| {
+            let run = kept_run_in("run", task, status);
+            let latest = if later {
+                kept_run_in("later", task, RunStatus::Claimed)
+            } else {
+                run.clone()
+            };
+            let queue = KeptRuns {
+                runs: vec![run.clone()],
+                tasks: [(task, task_status)]
+                    .into_iter()
+                    .chain(neighbours)
+                    .collect(),
+                latest: HashMap::from([(task, latest)]),
+                ..KeptRuns::default()
+            };
+            let kept = kept_run_of(&queue, run.id()).unwrap();
+            assert_eq!(kept.status, Some(status));
+            assert_eq!(
+                queue.queries.into_inner(),
+                [(crate::application::StatusFilter::Any, 1, Some(task))]
+            );
+            kept.revivable
+        };
+        for status in [RunStatus::Failed, RunStatus::Interrupted] {
+            for going_on in [TaskStatus::Ready, TaskStatus::InProgress] {
+                assert!(case(status, going_on, false), "{status:?} {going_on:?}");
+                assert!(!case(status, going_on, true), "{status:?} {going_on:?}");
+            }
+            for ended in [TaskStatus::Completed, TaskStatus::Canceled] {
+                assert!(!case(status, ended, false), "{status:?} {ended:?}");
+            }
+        }
+        // A run with no latest run recorded whose task goes on is revivable;
+        // one whose task is not in the queue is not, though the page that
+        // starts at it holds an older task that goes on.
+        let run = kept_run_in("run", task, RunStatus::Failed);
+        let queue = |tasks: Vec<(TaskId, TaskStatus)>| KeptRuns {
+            runs: vec![run.clone()],
+            tasks,
+            ..KeptRuns::default()
+        };
+        let alone = queue(vec![(task, TaskStatus::InProgress)]);
+        assert!(kept_run_of(&alone, run.id()).unwrap().revivable);
+        assert_eq!(alone.latest_reads.into_inner(), [task]);
+        let missing = queue(vec![(TaskId::new(4), TaskStatus::Ready)]);
+        assert!(!kept_run_of(&missing, run.id()).unwrap().revivable);
     }
 
     #[test]
