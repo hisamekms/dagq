@@ -103,6 +103,10 @@ pub struct PlannerLaunch<'a> {
     /// The supervisor's issue of a planner's telemetry token as its wrapper
     /// starts (ADR-t1662-3 decision 11); `None` issues none.
     pub telemetry: Option<crate::application::telemetry_tokens::TargetTelemetry<'a>>,
+    /// Where the planner's wrapper's token is issued as the wrapper starts
+    /// (ADR-t3102-1 decision 2): the wrapper reads and records through the
+    /// queue service with it.
+    pub service: &'a dyn super::queue_service::ServiceAccess,
 }
 
 /// A planner whose wrapper just started: its record (with the handle of
@@ -357,6 +361,7 @@ fn start_wrapper(
     let log = dir.join(PLANNER_SESSION_LOG);
     HostActorExecutor::new(launch.db)
         .with_sessions(launch.backend)
+        .with_queue_service(launch.service)
         .spawn(ActorExecutionSpec::new(
             ActorContext::instance(crate::domain::ActorRole::Planner, planner.id),
             WorkspaceAccess::Write(launch.repo_root.to_path_buf()),
@@ -401,7 +406,7 @@ fn prepare_planner_turns(files: &dyn RunFiles, dir: &Path, limits: TurnLimits) -
 
 /// What the planner's session wrapper works with, as the run's does.
 pub struct PlannerWrapper<'a> {
-    pub queue: &'a mut dyn Queue,
+    pub queue: &'a mut dyn super::session::WrapperStore,
     /// The queue's database, which the executor starts the agent on.
     pub db: &'a Path,
     pub provider: &'a dyn AgentProvider,
@@ -505,6 +510,9 @@ pub fn run_planner_session(
             clock,
         }
         .drive(&mut child_may_be_alive);
+        // What its hook left at the last turn's end is recorded before
+        // the exit, which ends the wrapper's token with the planner.
+        super::session::relay_hooks(files, dir, id, &*queue);
         let code = match driven {
             Ok(code) => code,
             Err(error) => {
@@ -571,12 +579,14 @@ pub fn run_planner_session(
                 return Err(error);
             }
         }
+        super::session::relay_hooks(files, dir, id, &*queue);
         if let Err(error) = queue.heartbeat_planner(id, pid) {
             // Keep waiting on the agent through a queue outage.
             warn!(planner_id = %id, error = %format_args!("{error:#}"), "planner heartbeat failed: {error:#}");
         }
         thread::sleep(provider.wait_interval());
     };
+    super::session::relay_hooks(files, dir, id, &*queue);
     queue.planner_exited(id, pid, code)?;
     drop_own_runner(files, id, dir);
     Ok(json!({"planner_id": id, "exit_code": code}))

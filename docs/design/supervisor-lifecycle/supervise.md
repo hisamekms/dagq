@@ -146,7 +146,7 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 
 ## queue serviceの経路
 
-supervisorはqueue DBを開かずに、claim・lease・runの状態とevent・登録・判断に使う読み取り（候補・依存・goal）・workerとexecutorのtelemetryのtoken・landing recheckとresumeの記録をqueue serviceのユースケースとして行う（[ADR-t3102-3](../../adr/2026-10-22-t3102-3-stage-5-outage-notice-and-use-cases-for-multi-step-control-operations.md)決定3〜5、principalは[ADR-t3102-1](../../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)）。
+supervisorはqueue DBを開かずに、claim・lease・runの状態とevent・登録・判断に使う読み取り（候補・依存・goal）・workerとsession wrapperとexecutorのtelemetryのtoken・landing recheckとresumeの記録をqueue serviceのユースケースとして行う（[ADR-t3102-3](../../adr/2026-10-22-t3102-3-stage-5-outage-notice-and-use-cases-for-multi-step-control-operations.md)決定3〜5、principalは[ADR-t3102-1](../../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)）。
 入口は`application::supervisor_service`のmodule docで、ループと各threadの`Queue`は`SupervisorQueue`、serviceの側はuse case `supervisor`の`answer`。
 
 ```text
@@ -160,13 +160,13 @@ pass の queue の操作 ── SupervisorQueue ─┬─ serviceが答える操
 - serviceが答える操作は`dispatch`の一覧で、着地とjobのverdictの適用をserviceへ移すのは移行の順の残り（[ADR-t3102-2](../../adr/2026-10-22-t3102-2-only-the-queue-service-opens-the-db-schema-by-the-service-build-and-migration-order.md)決定6）。
 - 結果は`Wire`の形で渡り、taskとgoalは`Serialize`（CLIのJSON）ではなく欄を落とさない形で渡る。
 - principalは`Principal::supervisor`で、actor idは自分のeventのactorと同じ`supervisor:<pid>`、対象は登録のtoken。
-  serviceは要求が名指すleaseのtokenが全てその登録のtokenであることを操作の前に確かめ、違えば何もせずに断るので、他のsupervisorのleaseでは書けない。
+  serviceは要求が名指すleaseのtokenが全てその登録のtokenであることを操作の前に確かめ、違えば何もせずに断るので、他のsupervisorのleaseでは書けない（例外はheartbeatの切れた他の登録の片付け）。
   `scheduler.supervise`の無いprincipalは`authorization_denied`で断られ、記録される。
 - eventのactorを名指すのは着地のintegratorとして書くときと、jobのverdictを適用するとき（`requested_by`）だけで、名指せるactorは制御側だけ。
 - tokenはhelloの後、登録の前に発行し（`ServiceCaller::sign_in`）、終わりで失効させる。
   1つのプロセスが複数のsupervisorを動かすときも別のtokenになるよう、tokenのfileは登録ごとに分ける（`Principal::credential_key`）。
   親のprincipalの依頼でserviceが発行する形（ADR-t3102-1決定2）はuserのprincipalが入るまで無く、今はsupervisorがserviceのdirに自分で書く。
-- workerのtokenとrunの対象のtelemetryのtokenの発行と失効は`ServiceTokens`がserviceに頼み、serviceはrunのleaseを確かめた同じtransactionの中で発行する。
+- workerとsession wrapperのtokenとrunの対象のtelemetryのtokenの発行と失効は`ServiceTokens`がserviceに頼み、serviceはrunのものをrunのleaseを確かめた同じtransactionの中で発行する。
   tokenのfileの置き場とsocketのpathは、DBを読まずにfileから求める。
 - 届かない呼び出しは`ServiceUnreachable`で、DBを開いて代わりに行わない（fail closed）。
   起動のときに届かないか別のbuildのものが答えれば、serviceを持つsupervisor（CLIの`supervise`は`--once`でも持つ）は起動か入れ替えをし、それでも届かなければ何もclaimせずに終わる（`reach_at_start`）。

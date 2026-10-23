@@ -197,19 +197,7 @@ fn migrate_is_explicit_and_older_binaries_keep_working_within_the_floor() {
         SqliteQueue::SCHEMA_VERSION + 2
     ))
     .unwrap();
-    for args in [
-        &["list"][..],
-        &["migrate"],
-        &[
-            "session",
-            "--run",
-            "run-1",
-            "--lease",
-            "token",
-            "--claude",
-            "/bin/false",
-        ],
-    ] {
+    for args in [&["list"][..], &["migrate"]] {
         let output = run_copy(&runner, &db, args);
         assert!(!output.status.success(), "{args:?} succeeded");
         let error: Value = serde_json::from_slice(&output.stderr).unwrap();
@@ -222,6 +210,29 @@ fn migrate_is_explicit_and_older_binaries_keep_working_within_the_floor() {
             "{args:?}: {error}"
         );
     }
+    // The wrapper copy opens no queue: it reaches its run only through the
+    // queue service, which judges it by its API version (ADR-t3102-2
+    // decision 4), so with no service (nor its token) it stops on that and
+    // not on the schema.
+    let output = run_copy(
+        &runner,
+        &db,
+        &[
+            "session",
+            "--run",
+            "run-1",
+            "--lease",
+            "token",
+            "--claude",
+            "/bin/false",
+            "--background",
+        ],
+    );
+    assert!(!output.status.success(), "the wrapper copy succeeded");
+    let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+    let error = error["error"].as_str().unwrap();
+    assert!(error.contains("service"), "{error}");
+    assert!(!error.contains("schema"), "{error}");
     // `doctor` still reports the schema that refuses the binary, and why.
     let output = run_copy(&runner, &db, &["doctor"]);
     assert!(

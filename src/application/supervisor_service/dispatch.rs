@@ -11,11 +11,12 @@ use crate::domain::*;
 use anyhow::Result;
 use serde_json::Value;
 
-/// Run the operation `op` with `args` on `store`: its result as the
-/// service answers it.
+/// Run the operation `op` with `args` on `store` at `now` (seconds): its
+/// result as the service answers it.
 pub(super) fn dispatch(
     store: &mut dyn SupervisorStore,
     own: &dyn Fn(&LeaseToken) -> Result<()>,
+    now: i64,
     op: &str,
     args: Value,
 ) -> Result<Value> {
@@ -967,7 +968,20 @@ pub(super) fn dispatch(
         "investigations" => answer(TaskStore::investigations(&mut *store)),
         "prune_supervisor" => {
             let (token, kind, stopped): (LeaseToken, EventKind, Value) = read(op, args)?;
-            own(&token)?;
+            // Its own registration, or another's whose heartbeat expired,
+            // which a live supervisor prunes as left behind (whether its
+            // pid still runs it is the supervisor's judgement on the host).
+            if own(&token).is_err() {
+                let expired = SupervisorReads::supervisors(&*store)?
+                    .iter()
+                    .find(|registration| registration.token == token)
+                    .is_none_or(|registration| {
+                        supervisor_prune::heartbeat_expired(registration, now)
+                    });
+                if !expired {
+                    own(&token)?;
+                }
+            }
             answer(SupervisorRegistry::prune_supervisor(
                 &*store,
                 &token,

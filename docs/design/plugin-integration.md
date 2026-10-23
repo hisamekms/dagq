@@ -163,7 +163,7 @@ Stop hookがそのturnの終わりを止める。
 
 runtimeがheadlessで起動しないinbox・plannerのClaude sessionの区間は、pluginのhookが記録する（[ADR-0048](../adr/0048-record-claude-sessions-by-kind-with-open-and-active-time.md)の決定6）。
 区間の書き方と推定の終了は[provider-lifecycle](provider-lifecycle.md#claude-sessionの区間)、集計は[stats](supervisor-lifecycle/commands.md)。
-runtimeのplanner（全て非対話）の区間はturnから記録する（[ADR-t1394-2](../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)の決定4）ので、そのturnの`claude -p`がこのhookを走らせても、hookの記録はheadlessのplannerには何も書かず、hookの開いている区間にheadlessの区間を含めない。
+runtimeのplanner（全て非対話）の区間はturnから記録する（[ADR-t1394-2](../adr/2026-10-03-t1394-2-runtime-planner-route-interactive-or-headless.md)の決定4）ので、そのturnの`claude -p`がこのhookを走らせても、hookはqueueに書かず報告をwrapperに渡し、hookの開いている区間にheadlessの区間を含めない。
 
 - `hooks/hooks.json`は`SessionStart`にmatcherの無い2つ目のグループ（全部のsource）で`${CLAUDE_PLUGIN_ROOT}/hooks/session-event.sh open`を、`SessionEnd`（matcherなし）で`session-event.sh close`を呼ぶ。
   起き直しの`session-start.sh`のグループと出力はそのまま。

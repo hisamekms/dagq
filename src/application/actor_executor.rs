@@ -51,6 +51,7 @@ use crate::domain::{
     headless_job::JobAccess,
     local_checks,
     queue_service::{CLIENT_ENV, CREDENTIAL_FILE_ENV, Principal, SOCKET_ENV, client_role},
+    session_step::{StepTarget, TargetKind},
     sessions::{self, LAUNCH_ENV},
 };
 
@@ -462,6 +463,41 @@ pub fn actor_env(
     Ok(env)
 }
 
+/// Where an executor records an agent found again at its start
+/// (ADR-t2079-1): the queue's events, or a session wrapper's store, which
+/// reaches them through the queue service.
+pub trait ExecutorEvents {
+    /// Record `kind` with `payload` on `run`, or on the queue for none.
+    fn record_agent_event(
+        &self,
+        run: Option<&crate::domain::RunId>,
+        kind: EventKind,
+        payload: serde_json::Value,
+    ) -> Result<()>;
+}
+
+impl<T: RunLog + ?Sized> ExecutorEvents for T {
+    fn record_agent_event(
+        &self,
+        run: Option<&crate::domain::RunId>,
+        kind: EventKind,
+        payload: serde_json::Value,
+    ) -> Result<()> {
+        match run {
+            Some(run) => self.record_runtime_event(run, kind, payload),
+            None => self.record_queue_event(kind, payload).map(drop),
+        }
+    }
+}
+
+/// The events of [`HostActorExecutor::with_events`]: the queue's, or those
+/// of a wrapper's store ([`HostActorExecutor::with_event_sink`]).
+#[derive(Clone, Copy)]
+enum Events<'a> {
+    Log(&'a dyn RunLog),
+    Sink(&'a dyn ExecutorEvents),
+}
+
 /// Starts AI actors on this host, as processes of this user (advisory):
 /// the session wrappers in the background, agents through the provider and
 /// the spawner, and the inbox's command for its caller's terminal.
@@ -473,7 +509,7 @@ pub struct HostActorExecutor<'a> {
     provider: Option<&'a dyn AgentProvider>,
     spawner: Option<&'a dyn Spawner>,
     service: Option<&'a dyn ServiceAccess>,
-    events: Option<&'a dyn RunLog>,
+    events: Option<Events<'a>>,
     config: ExecutionConfig,
     no_claude: bool,
 }
@@ -498,7 +534,13 @@ impl<'a> HostActorExecutor<'a> {
     /// ([`AgentProvider::relocated_executable`]) is recorded on `events`,
     /// on its run when it has one (ADR-t2079-1); without it, only logged.
     pub fn with_events(mut self, events: &'a dyn RunLog) -> Self {
-        self.events = Some(events);
+        self.events = Some(Events::Log(events));
+        self
+    }
+
+    /// [`Self::with_events`] on `events`, a session wrapper's store.
+    pub fn with_event_sink(mut self, events: &'a dyn ExecutorEvents) -> Self {
+        self.events = Some(Events::Sink(events));
         self
     }
 
@@ -609,13 +651,10 @@ impl<'a> HostActorExecutor<'a> {
             "actor_id": actor.actor_id(),
             "role": actor.role().as_str(),
         });
-        let recorded = match actor.run_id() {
-            Some(run) => {
-                events.record_runtime_event(run, EventKind::ProviderExecutableRelocated, payload)
-            }
-            None => events
-                .record_queue_event(EventKind::ProviderExecutableRelocated, payload)
-                .map(|_| ()),
+        let kind = EventKind::ProviderExecutableRelocated;
+        let recorded = match events {
+            Events::Log(log) => log.record_agent_event(actor.run_id(), kind, payload),
+            Events::Sink(sink) => sink.record_agent_event(actor.run_id(), kind, payload),
         };
         if let Err(error) = recorded {
             tracing::warn!(error = %format_args!("{error:#}"), "provider_executable_relocated could not be recorded: {error:#}");
@@ -702,7 +741,7 @@ impl ActorExecutor for HostActorExecutor<'_> {
         } = spec;
         match program {
             ActorProgram::RunSession {
-                run: _,
+                run,
                 wrapper,
                 run_env,
                 log,
@@ -710,11 +749,22 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 let sessions = self.sessions()?;
                 // The worker's token, issued at the claim and the resume
                 // (ADR-t1233-4 decision 4); the wrapper hands its file to
-                // the agent. The wrapper itself opens the queue: it gets
-                // neither the token nor the socket.
-                self.service()?
+                // the agent.
+                let service = self.service()?;
+                service
                     .issue(self.queue, &Principal::of(&actor))
                     .context("issue the worker's token for the queue service")?;
+                // The wrapper's own, for it and its hook to reach the queue
+                // through the service (ADR-t3102-1 decisions 2 and 4): it
+                // finds the file by its own actor, and neither the value
+                // nor the path is in the environment or the command line
+                // the agent inherits.
+                service
+                    .issue(
+                        self.queue,
+                        &Principal::wrapper(&StepTarget::run(run.id()), Some(run.task_id())),
+                    )
+                    .context("issue the session wrapper's token for the queue service")?;
                 let mut env = actor_env(self.queue, &actor, None, None)?;
                 env.extend(run_env);
                 // In the run's worktree, which the worker writes.
@@ -748,6 +798,17 @@ impl ActorExecutor for HostActorExecutor<'_> {
                 launch,
                 log,
             } => {
+                // The planner's wrapper's token (ADR-t3102-1 decisions 2 and
+                // 4), handed to it as a run's wrapper's is.
+                self.service()?
+                    .issue(
+                        self.queue,
+                        &Principal::wrapper(
+                            &StepTarget::of(TargetKind::Planner, planner.1.as_i64()),
+                            None,
+                        ),
+                    )
+                    .context("issue the planner's session wrapper's token for the queue service")?;
                 let env = actor_env(self.queue, &actor, Some(planner), launch)?;
                 Ok(ActorHandle::Workspace(
                     self.sessions()?
@@ -1489,7 +1550,22 @@ mod tests {
                 ])
             );
         }
-        assert_eq!(*fake.issued.lock().unwrap(), ["worker:r1", "worker:r1"]);
+        // The wrapper's own token is issued with the worker's, and neither
+        // its value nor its file is in what the wrapper (and the agent it
+        // starts) is given (ADR-t3102-1 decision 2).
+        assert_eq!(
+            *fake.issued.lock().unwrap(),
+            ["worker:r1", "wrapper:r1", "worker:r1", "wrapper:r1"]
+        );
+        for (_, command, env) in made.iter() {
+            assert!(!command.contains("credentials"), "{command}");
+            assert!(
+                env.iter()
+                    .all(|(name, value)| !CLIENT_ENV.contains(&name.as_str())
+                        && !value.contains("credentials")),
+                "{env:?}"
+            );
+        }
     }
 
     /// A planner of the runtime's opens no workspace (ADR-t1433-2
@@ -1499,8 +1575,34 @@ mod tests {
     #[test]
     fn a_planners_wrapper_starts_in_the_background_with_the_planner_env() {
         let fake = Fake::default();
+        let spec = || {
+            ActorExecutionSpec::new(
+                ActorContext::instance(ActorRole::Planner, 4),
+                WorkspaceAccess::Write("/repo".into()),
+                ActorProgram::PlannerSession {
+                    cwd: Path::new("/repo"),
+                    wrapper: "planner-session --headless --background".into(),
+                    planner: (PlannerOrigin::Runtime, PlannerId::new(4)),
+                    launch: None,
+                    log: Path::new("/q/planners/4/session.log"),
+                },
+            )
+        };
+        // Without the queue service its wrapper could not reach the queue,
+        // and is not started (fail closed).
+        let refused = HostActorExecutor::new(Path::new("/q/queue.db"))
+            .with_sessions(&fake)
+            .spawn(spec())
+            .err()
+            .unwrap();
+        assert!(
+            format!("{refused:#}").contains("no queue service"),
+            "{refused:#}"
+        );
+        assert!(fake.workspaces.lock().unwrap().is_empty());
         let handle = HostActorExecutor::new(Path::new("/q/queue.db"))
             .with_sessions(&fake)
+            .with_queue_service(&fake)
             .spawn(ActorExecutionSpec::new(
                 ActorContext::instance(ActorRole::Planner, 4),
                 WorkspaceAccess::Write("/repo".into()),
@@ -1529,6 +1631,10 @@ mod tests {
                 ("DAGQ_PLANNER_ID", "4"),
             ])
         );
+        // Its wrapper's token is issued as it starts, and named nowhere in
+        // what the wrapper and its agent are given.
+        assert_eq!(*fake.issued.lock().unwrap(), ["wrapper:planner:4"]);
+        assert!(!made[0].1.contains("credentials"));
     }
 
     #[test]

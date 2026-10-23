@@ -33,7 +33,7 @@ hostで動き、queue DBを開いてユースケース単位のAPIを、service�
 
 今の段（段(2)・(3)）: serviceは下の[ユースケース](#ユースケース)（findingの書き込みはCodexのobserverの経路、[ADR-t1222-1](../adr/2026-10-02-t1222-1-codex-observer-writes-through-the-queue-service.md)）と、読み取りのroleのjobとworkerが打つqueue全体の読み取り（[読み取りのユースケース](#読み取りのユースケース)）を答える。
 **worker（resumeを含む）・headlessのjob・observerのdagqはクライアントモードで動き、そのプロセスにはqueue DBのpathを渡さない**（[クライアントモード](#クライアントモード)）。
-session wrapperとhook・inbox・planner・人のCLIはDBを直接開く（段(5)まで。ADR-t1233-4決定6）。
+session wrapperとhookはwrapperのprincipalでserviceを通り、inbox・planner・人のCLIはDBを直接開く（段(5)まで）。
 supervisorはclaim・lease・runの状態とevent・tokenをserviceで行い、着地とjobの結果はDBを開く（[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）。
 例外はexecutorのsessionのstepだけで、制御側が対象ごとに発行するtelemetry専用のprincipalで[`telemetry_report`](#telemetry_report)を通る（[ADR-t1662-3](../adr/2026-10-04-t1662-3-executors-send-telemetry-and-commands-are-classified-by-shape.md)決定13）。
 
@@ -74,24 +74,23 @@ serviceは呼び出しのprincipal（`Principal`）をtokenから決め、クラ
 
 - 発行: 制御側だけが`queue_service::issue`で発行する。
   AI actorにtokenを作るコマンドは無い。
-  発行できるprincipalはAI actorと、executorのtelemetry専用のprincipal（下の「executorのtelemetryのprincipal」）と、登録を対象に持つsupervisorだけで、人と残りの制御側（user・wrapper・integrator）は段(5)まで今のままDBを直接開く（`Principal::check`）。
+  発行できるprincipalはAI actorと、executorのtelemetry専用のprincipal（下の「executorのtelemetryのprincipal」）・登録を対象に持つsupervisor・session wrapperだけで、人と残りの制御側（user・integrator）は段(5)まで今のままDBを直接開く（`Principal::check`）。
   同じactor idに発行し直すと前のtokenは失効する（resumeの発行し直し）。
   発行するのはactorの起動の1か所（applicationのport `ServiceAccess`）:
   - workerのtoken: supervisorがclaimとresumeでrunのsession wrapperをbackgroundで起動するときに、serviceにrunのleaseを確かめさせて発行する。
-    wrapperの環境には入れず、session wrapperがagent（非対話のturn。最初のsessionもresumeもturnで動き、対話のsessionは起動しない）を起動するときにそのfileのpathを渡す。
-    fileが無いとき（claimの発行を経ずに起動したwrapper）だけwrapperが発行する（wrapperも制御側）
+    wrapperの環境には入れず、session wrapperがagentのturnを起動するときにそのfileのpathを渡す。
+  - wrapperのtoken: 制御側がrunかplannerのwrapperを起動するときに、その対象のrole `wrapper`のprincipalに発行する。
+    wrapperはfileを自分のactor idから引くので、envとargvに値もpathも無い
   - jobのtoken: jobを起動するプロセス（supervisor、`observe`・`throughput-review`・`setup-review`のコマンド）が起動のときに発行し、jobのプロセスが終わったとき（それを見たwaitか、handleを捨てたとき）に失効させる（`ServiceAccess::revoke_on_exit`）
 - 失効: `queue_service::revoke`（actor id）が値とprincipalの記録を消す。
   加えてserviceは、principalがrunを名指すtokenを、そのrunが終わったときに断る（runの終わりで失効。`run_holds_token`）。
   workerのtokenは、supervisorがrunの終わり（slotのrunが着地・failed・interruptedで休むとき）に`ServiceAccess::revoke`で消す。
-  そこで消さなかったもの（cancel、retryで次のrunに移ったrun、supervisorが居ない間に終わったrun、queueに無いrun）は、supervisorが起動の最初のpassと終わったrunのsweepのたびに`ServiceAccess::sweep`で消す（`worker_token_ended`）。
+  そこで消さなかったもの（cancel、retryで次のrunに移ったrun、supervisorが居ない間に終わったrun、queueに無いrun）は、supervisorが起動の最初のpassと終わったrunのsweepのたびに`ServiceAccess::sweep`で消す（`run_token_ended`。wrapperのtokenも）。
   resumeを待つrun（`needs_session`）はtokenを保つので消さず、resumeは今までどおり発行し直す
 - executorのtelemetryのprincipal（ADR-t1662-3決定9〜11・13）: role `executor-telemetry`で、対象を1つだけ持つ（runの対象は`run_id`、runを持たない対象は種類とid。`domain::session_step::StepTarget`）。
   actor idは対象から作り、runの対象のtokenはworkerのものと同じくrunの終わりで断る。
   発行と失効の口は制御側だけが呼ぶapplicationのport `TelemetryTokens`で、AI actorのコマンドからは呼べない。
-  runの対象のtoken: supervisorだけが自分のleaseの下で、claim・resume・runの引き継ぎとexecutorの起動の前に発行し、runの終わりとleaseの喪失（そのleaseのものだけ）で失効させる。
-  runを持たない対象のtoken: agentを起動する制御側が発行して対象の終わりで失効させ、serviceは対象の終わりか起動元の不在で断る。
-  発行と失効のevent（`telemetry_token_*`）は成功した後にだけ書き、失効の失敗は見回りがやり直す（`application::telemetry_tokens`のmodule doc）。
+  runの対象のtoken: supervisorだけが自分のleaseの下で、claim・resume・runの引き継ぎとexecutorの起動の前に発行し、runの終わりとleaseの喪失（そのleaseのものだけ）で失効させる（runを持たない対象のものとeventは`application::telemetry_tokens`のmodule doc）。
   executorは`telemetry_credential`で場所を引き、agentのenv・argv・worktree・run dirには渡さない
 - 断り: 認証できない要求は`unauthenticated`で断り、queueのevent `queue_service_unauthenticated`（tokenの値は書かない）に残す（理由は`QueueService::authenticate`のdoc comment）。
 - hostの呼び出し元に渡すenvはsocketのpathとtokenのfileのpathで、containerのrunにはsocketの代わりにbrokerのURLを渡す（[クライアントモード](#クライアントモード)、`domain::queue_service::CLIENT_ENV`）。
@@ -122,6 +121,7 @@ paramsはそのコマンドのoption、答えはそのコマンドの出力（pa
 | `agent_`の各ユースケース | `dagq agent`の同名のサブコマンド | `eval.*`。[Agent eval](agent-eval.md) |
 | `replan_propose` | `dagq replan propose` | `replan.propose`（run） |
 | `telemetry_report` | なし（executorのTelemetrySink） | `telemetry.report`（tokenの対象）。[telemetry_report](#telemetry_report) |
+| `session_run`・`session_record` | なし（wrapper。`SessionOp`） | `session.run`・`session.record`（wrapperの対象） |
 | 読み取り | そのコマンド | `queue.read`（queue）。[読み取りのユースケース](#読み取りのユースケース) |
 
 observerのfindingに紐づく`blocked`のaskは`ask`のユースケース（capabilityは`finding.ask`）で送る。
@@ -226,8 +226,8 @@ ADR-t1233-1決定7、ADR-t1233-5決定1・2・5、ADR-t2114-3決定3。
   pluginの`--resolve`が最初に打ち、dagq skillはDBが無いと分かったときだけ`init`を言うので、workerとjobが`init`を試みない
 - workerとjobのpromptとskillのコマンド（`dagq ask`・`dagq show`など）は変えない。
   observerとスループットの見直しのpromptは、`dagq --db <db>`ではなく`dagq`を名指す（promptはagentの引数なので、DBのpathを含めない）
-- session wrapper（`session`）とhook（`session-event`）は制御側で、`--db`でDBを開く。
-  runのsession wrapperの環境にはserviceの変数を入れないので、wrapperはクライアントモードにならない（agentを起動するときに足す）
+- session wrapper（`session`・`planner-session`）は継いだ環境のactorでなくwrapperのtokenで送り、DBを開かず（containerのrunのturnの準備を除く）、届かなければそのerrorで終わる（`ServiceWrapperStore`）。
+  plannerのhook（`session-event`）は報告をwrapperに渡し（`session::spool_hook`）、inboxのhookはinboxとして書く
 
 ### Codexのsandboxからの到達（ADR-t1233-5決定4）
 
@@ -293,7 +293,7 @@ workerとjobのClaudeの`permissions.deny`には`dagq service`の制御のコマ
 - executorからのtelemetryの送信
 - queueのbrokerはrun tokenのほかを通さないので、containerのrunのexecutorの`telemetry_report`の経路は無い（[Queue broker](queue-broker.md)の`TokenRefusal`）
 - 段(4)〜(6)の残り: brokerの残りの宛て（[Queue broker](queue-broker.md#まだ無いもの)）、integrateのverificationの隔離
-- 段(5)の残り: supervisorの着地とjobの結果・wrapper・hook・CLIのservice経由化、userのprincipalと親の依頼によるtokenの発行（決定はADR-t3102-1〜3。分け方は[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)のContext）
+- 段(5)の残り: supervisorの着地とjobの結果・CLIのservice経由化、userのprincipalと親の依頼によるtokenの発行（決定はADR-t3102-1〜3。分け方は[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)のContext）
 
 ## CIの見張り（ADR-t1920-1）
 

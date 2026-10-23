@@ -162,7 +162,9 @@ fn narrowing(use_case: Option<UseCase>) -> &'static str {
         | UseCase::AgentCases
         | UseCase::AgentDecide
         | UseCase::TelemetryReport
-        | UseCase::Supervisor => {
+        | UseCase::Supervisor
+        | UseCase::SessionRun
+        | UseCase::SessionRecord => {
             "narrow the read with the options of its command (dagq <command> --help)"
         }
     }
@@ -275,6 +277,18 @@ string_enum!(UseCase {
     // (`scheduler.supervise`), and every lease it names is the one the
     // principal was issued for. No command line goes to it.
     Supervisor => "supervisor",
+    // A session wrapper's operations on its own target, a run or a
+    // planner (ADR-t3102-1 decision 4, ADR-t3102-3 decision 3), each the
+    // one transaction it was on the DB: its registration, heartbeats,
+    // agents and exit, and the reads it waits and starts its turns on
+    // ([`crate::application::session::SessionOp`]). Only the wrapper's
+    // principal holds `session.run`; no command line goes to it.
+    SessionRun => "session_run",
+    // What a session wrapper records of its own target: its events, and
+    // the hook's spans it relays (ADR-t3102-1 decision 4). Only the
+    // wrapper's principal (and the inbox's, on the queue) holds
+    // `session.record`; no command line goes to it.
+    SessionRecord => "session_record",
 });
 
 impl UseCase {
@@ -550,8 +564,8 @@ pub struct Principal {
     pub run_id: Option<RunId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_id: Option<TaskId>,
-    /// The one target of an executor's telemetry principal; `None` for
-    /// every other principal.
+    /// The one target of an executor's telemetry principal or a session
+    /// wrapper; `None` for every other principal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target: Option<StepTarget>,
     /// The registration of a supervisor principal (ADR-t3102-1 decisions 2
@@ -604,14 +618,31 @@ impl Principal {
         }
     }
 
+    /// The session wrapper of `target`, a run (of `task`) or a planner,
+    /// with its hook (ADR-t3102-1 decision 4): its actor id is the
+    /// wrapper's ([`wrapper_actor_id`]), and a run's names the run and its
+    /// task, so its token ends with the run as a worker's does.
+    pub fn wrapper(target: &StepTarget, task: Option<TaskId>) -> Self {
+        let run_id = target.run_id();
+        Self {
+            role: ActorRole::Wrapper,
+            actor_id: wrapper_actor_id(target),
+            task_id: run_id.as_ref().and(task),
+            run_id,
+            target: Some(target.clone()),
+            registration: None,
+        }
+    }
+
     /// The principals the control side issues tokens for: the AI actors
-    /// (ADR-t1233-4 decision 4), and an executor's telemetry principal
-    /// whose actor id and run are its one target's (ADR-t1662-3 decisions
-    /// 9 and 13), and a supervisor, whose one target is its registration
-    /// (ADR-t3102-1 decision 3). No other principal has a target or a
-    /// registration. A person and the rest of the control side (the
-    /// wrapper, the integrator) open the DB themselves until stage (5)
-    /// (ADR-t1233-4 decision 6).
+    /// (ADR-t1233-4 decision 4), an executor's telemetry principal whose
+    /// actor id and run are its one target's (ADR-t1662-3 decisions 9 and
+    /// 13), a supervisor, whose one target is its registration
+    /// (ADR-t3102-1 decision 3), and the session wrapper of one run (with
+    /// its task) or one planner (ADR-t3102-1 decision 3). No other
+    /// principal has a target or a registration. A person and the rest of
+    /// the control side (the integrator) open the DB themselves until
+    /// their stage of (5).
     pub fn check(&self) -> Result<(), DomainError> {
         let refuse = |value: String| {
             Err(DomainError::UnknownValue {
@@ -639,6 +670,21 @@ impl Principal {
                     && (target.kind != super::session_step::TargetKind::Run
                         || self.run_id.is_some())
                     && (self.run_id.is_some() || self.task_id.is_none()) =>
+            {
+                Ok(())
+            }
+            (Some(target), ActorRole::Wrapper)
+                if self.actor_id == wrapper_actor_id(target)
+                    && self.run_id == target.run_id()
+                    && match target.kind {
+                        super::session_step::TargetKind::Run => {
+                            self.run_id.is_some() && self.task_id.is_some()
+                        }
+                        super::session_step::TargetKind::Planner => {
+                            target.id.parse::<i64>().is_ok() && self.task_id.is_none()
+                        }
+                        _ => false,
+                    } =>
             {
                 Ok(())
             }
@@ -673,6 +719,23 @@ impl Principal {
     }
 }
 
+/// The actor id of the session wrapper of `target`, as its events record
+/// it: `wrapper:<run>` for a run's, `wrapper:planner:<id>` for a
+/// planner's.
+pub fn wrapper_actor_id(target: &StepTarget) -> String {
+    match target.kind {
+        super::session_step::TargetKind::Run => {
+            ActorContext::instance(ActorRole::Wrapper, &target.id)
+        }
+        kind => ActorContext::instance(
+            ActorRole::Wrapper,
+            format_args!("{}:{}", kind.as_str(), target.id),
+        ),
+    }
+    .actor_id()
+    .to_owned()
+}
+
 /// Whether the `dagq` of an actor of `role` runs in client mode (goal 82's
 /// stage (3)): the worker (and its resume) and the headless jobs with the
 /// observer get the service's socket and a token instead of the queue's
@@ -694,13 +757,13 @@ pub const fn run_holds_token(status: RunStatus) -> bool {
     )
 }
 
-/// Whether the token of `principal` is a worker's whose run ended:
-/// `status` is its run's, `None` for a run not in the queue. The supervisor
-/// revokes such a token's value and record; the service refuses it already
-/// ([`run_holds_token`]). Every other principal's token is left as it is:
-/// a job's ends with its process.
-pub fn worker_token_ended(principal: &Principal, status: Option<RunStatus>) -> bool {
-    principal.role == ActorRole::Worker
+/// Whether the token of `principal` is a worker's or a run's session
+/// wrapper's whose run ended: `status` is its run's, `None` for a run not
+/// in the queue. The supervisor revokes such a token's value and record;
+/// the service refuses it already ([`run_holds_token`]). Every other
+/// principal's token is left as it is: a job's ends with its process.
+pub fn run_token_ended(principal: &Principal, status: Option<RunStatus>) -> bool {
+    matches!(principal.role, ActorRole::Worker | ActorRole::Wrapper)
         && principal.run_id.is_some()
         && !status.is_some_and(run_holds_token)
 }
@@ -1109,6 +1172,64 @@ mod tests {
         assert_eq!(UseCase::of_command(&["telemetry_report"]), None);
     }
 
+    /// ADR-t3102-1 decisions 3 and 4: the session wrapper's principal is
+    /// issued for one run (with its task) or one planner, its actor the
+    /// wrapper's as its events record it; any other target, or an actor,
+    /// run or task its target does not match, is no principal.
+    #[test]
+    fn a_wrapper_principal_is_issued_for_one_run_or_one_planner() {
+        use crate::domain::session_step::TargetKind;
+        let run = RunId::new("r1").unwrap();
+        let of_run = Principal::wrapper(&StepTarget::run(&run), Some(TaskId::new(4)));
+        assert!(of_run.check().is_ok());
+        assert_eq!(
+            serde_json::to_value(&of_run).unwrap(),
+            json!({"role": "wrapper", "actor_id": "wrapper:r1", "run_id": "r1", "task_id": 4,
+                   "target": {"kind": "run", "id": "r1"}})
+        );
+        let actor = of_run.actor();
+        assert_eq!(actor.role(), ActorRole::Wrapper);
+        assert_eq!(actor.run_id(), Some(&run));
+        assert_eq!(
+            actor.actor_id(),
+            ActorContext::instance(ActorRole::Wrapper, &run).actor_id()
+        );
+        let planner = StepTarget::of(TargetKind::Planner, 3);
+        let of_planner = Principal::wrapper(&planner, Some(TaskId::new(4)));
+        assert!(of_planner.check().is_ok());
+        assert_eq!(of_planner.actor_id, "wrapper:planner:3");
+        assert_eq!(
+            (of_planner.run_id.clone(), of_planner.task_id),
+            (None, None)
+        );
+        // A run's wrapper without its task, a target of another kind, and
+        // an actor, a run or a task its target does not match.
+        let mut no_task = of_run.clone();
+        no_task.task_id = None;
+        assert!(no_task.check().is_err());
+        let review = Principal::wrapper(&StepTarget::of(TargetKind::PlanReview, 3), None);
+        assert!(review.check().is_err());
+        let mut another_actor = of_run.clone();
+        another_actor.actor_id = "wrapper:r2".into();
+        assert!(another_actor.check().is_err());
+        let mut another_run = of_run.clone();
+        another_run.run_id = Some(RunId::new("r2").unwrap());
+        assert!(another_run.check().is_err());
+        let mut planner_with_task = of_planner.clone();
+        planner_with_task.task_id = Some(TaskId::new(4));
+        assert!(planner_with_task.check().is_err());
+        // The wrapper's role on a telemetry principal's target, and a
+        // worker on the wrapper's, are no principal either.
+        let mut as_worker = of_run;
+        as_worker.role = ActorRole::Worker;
+        assert!(as_worker.check().is_err());
+        for use_case in [UseCase::SessionRun, UseCase::SessionRecord] {
+            assert_eq!(UseCase::of_command(&[use_case.as_str()]), None);
+        }
+        assert_eq!(UseCase::of_command(&["session", "--run", "r1"]), None);
+        assert_eq!(UseCase::of_command(&["session-event", "open"]), None);
+    }
+
     #[test]
     fn an_ended_run_ends_its_tokens() {
         for status in [
@@ -1131,15 +1252,25 @@ mod tests {
         // the run waits for its resume; no other principal's goes so.
         let run = RunId::new("r1").unwrap();
         let worker = Principal::worker(&run, TaskId::new(4));
-        assert!(!worker_token_ended(&worker, Some(RunStatus::NeedsSession)));
-        assert!(!worker_token_ended(&worker, Some(RunStatus::Running)));
-        assert!(worker_token_ended(&worker, Some(RunStatus::Integrated)));
-        assert!(worker_token_ended(&worker, Some(RunStatus::Failed)));
-        assert!(worker_token_ended(&worker, None));
+        assert!(!run_token_ended(&worker, Some(RunStatus::NeedsSession)));
+        assert!(!run_token_ended(&worker, Some(RunStatus::Running)));
+        assert!(run_token_ended(&worker, Some(RunStatus::Integrated)));
+        assert!(run_token_ended(&worker, Some(RunStatus::Failed)));
+        assert!(run_token_ended(&worker, None));
         let job = Principal::of(&ActorContext::review_job(&run, 1));
-        assert!(!worker_token_ended(&job, None));
+        assert!(!run_token_ended(&job, None));
         let telemetry = Principal::telemetry(&StepTarget::run(&run), Some(TaskId::new(4)));
-        assert!(!worker_token_ended(&telemetry, Some(RunStatus::Failed)));
+        assert!(!run_token_ended(&telemetry, Some(RunStatus::Failed)));
+        // A run's wrapper's goes with its run as its worker's does; a
+        // planner's wrapper's is not a run's.
+        let wrapper = Principal::wrapper(&StepTarget::run(&run), Some(TaskId::new(4)));
+        assert!(run_token_ended(&wrapper, Some(RunStatus::Integrated)));
+        assert!(!run_token_ended(&wrapper, Some(RunStatus::NeedsSession)));
+        let planner = Principal::wrapper(
+            &StepTarget::of(crate::domain::session_step::TargetKind::Planner, 3),
+            None,
+        );
+        assert!(!run_token_ended(&planner, None));
         assert!(attention_stands(Some(&EventKind::QueueServiceDown.into())));
         assert!(!attention_stands(Some(
             &EventKind::QueueServiceRunning.into()

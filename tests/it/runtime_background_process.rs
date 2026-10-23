@@ -151,6 +151,8 @@ pub(crate) fn supervise_real(
 pub(crate) fn background_fixture(turns: &str) -> (Fixture, PathBuf, PathBuf, PathBuf, Leftovers) {
     let (dir, repo, db, backend) = headless_fixture(&[]);
     set_turns(dir.path(), turns);
+    // The wrappers reach the queue through its service (ADR-t3102-1).
+    crate::common::service::serve(&db);
     let claude = turns_only(dir.path(), &backend.headless.clone().unwrap());
     let leftovers = Leftovers(db.clone());
     (dir, repo, db, claude, leftovers)
@@ -445,7 +447,13 @@ fn the_sweep_stops_an_ended_background_session_and_leaves_an_earlier_workspace()
             json!({"workspace_id": "WS-EARLIER"}),
         )
         .unwrap();
-    // The background session's wrapper, started as the supervisor starts it.
+    // The background session's wrapper, started as the supervisor starts it,
+    // with its token.
+    crate::common::service::wrapper_token(
+        &db,
+        &dagq::domain::session_step::StepTarget::run(run.id()),
+        Some(run.task_id()),
+    );
     let command = shell_join(&[
         env!("CARGO_BIN_EXE_dagq").to_owned(),
         "--db".into(),

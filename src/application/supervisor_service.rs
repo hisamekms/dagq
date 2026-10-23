@@ -318,7 +318,13 @@ pub fn answer(
     }
     let store = queue.supervisor_store();
     store.restore_request(params.requested_by.clone());
-    dispatch::dispatch(store, &own, &params.op, Value::Array(params.args))
+    dispatch::dispatch(
+        store,
+        &own,
+        backend.now_ms() / 1000,
+        &params.op,
+        Value::Array(params.args),
+    )
 }
 
 /// The arguments `args` of `op` as `T`.
@@ -354,10 +360,12 @@ fn tokens(
         "issue_token" => {
             let (principal,): (Principal,) = read(op, args)?;
             principal.check()?;
-            // An AI actor's only: a supervisor's token is its own sign-in,
-            // and an executor's telemetry token is `issue_telemetry`'s.
+            // An AI actor's and a session wrapper's only: a supervisor's
+            // token is its own sign-in, and an executor's telemetry token
+            // is `issue_telemetry`'s.
             if principal.registration.is_some()
-                || principal.role.trust() != crate::domain::TrustLevel::UntrustedAgent
+                || (principal.role.trust() != crate::domain::TrustLevel::UntrustedAgent
+                    && principal.role != ActorRole::Wrapper)
             {
                 return Err(BadOperation(format!(
                     "a supervisor issues no token of role {} here",
@@ -365,11 +373,14 @@ fn tokens(
                 ))
                 .into());
             }
-            // A worker's token is the run's, issued only under its lease.
+            // A worker's token, and its run's wrapper's, is the run's,
+            // issued only under its lease.
             match (&principal.run_id, principal.role) {
-                (Some(run), ActorRole::Worker) => queue.under_lease(run, registration, &mut || {
-                    reply(backend.access().issue(db, &principal))
-                }),
+                (Some(run), ActorRole::Worker | ActorRole::Wrapper) => {
+                    queue.under_lease(run, registration, &mut || {
+                        reply(backend.access().issue(db, &principal))
+                    })
+                }
                 _ => reply(backend.access().issue(db, &principal)),
             }
         }

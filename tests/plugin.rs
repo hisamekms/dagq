@@ -936,12 +936,14 @@ fn session_event_hook_records_the_spans_of_the_inbox_and_planners_only() {
         &data_home,
         dir.path(),
     ));
-    // A planner of an old workspace (no DAGQ_SESSION_KIND) whose SessionEnd
-    // was lost: its /clear closes it as inferred. The cmux workspace the
-    // terminal names is not read (ADR-t2159-1 decision 1).
+    // A planner's hook writes no span: it leaves its reports for the
+    // planner's wrapper, which records them as its own principal
+    // (ADR-t3102-1 decision 4). The cmux workspace the terminal names is
+    // not read (ADR-t2159-1 decision 1).
     let planner = [
         ("DAGQ_BIN", binary),
         ("DAGQ_ROLE", "planner"),
+        ("DAGQ_PLANNER_ID", "5"),
         ("DAGQ_QUEUE", db.as_str()),
         ("CMUX_WORKSPACE_ID", "W-PLANNER"),
     ];
@@ -988,11 +990,13 @@ fn session_event_hook_records_the_spans_of_the_inbox_and_planners_only() {
             row("session_closed", "inbox s-1", "clear"),
             row("session_opened", "inbox s-2", "clear"),
             row("session_closed", "inbox s-2", "exited"),
-            row("session_opened", "planner p-1", "startup"),
-            row("session_closed", "planner p-1", "inferred"),
-            row("session_opened", "planner p-2", "clear"),
         ]
     );
+    let reports = std::path::Path::new(&db)
+        .parent()
+        .unwrap()
+        .join("planners/5/session-hooks");
+    assert_eq!(std::fs::read_dir(reports).unwrap().count(), 2);
     let events = span_events(binary, &db, &data_home, &repo);
     assert_eq!(events[0]["payload"].get("workspace_id"), None);
     assert_eq!(events[0]["task_id"], Value::Null);
@@ -1013,8 +1017,8 @@ fn session_event_hook_records_the_spans_of_the_inbox_and_planners_only() {
     let by_kind = &stats["sessions"]["by_kind"];
     assert_eq!(by_kind["inbox"]["count"], 2, "{by_kind}");
     assert_eq!(by_kind["inbox"]["open_now"], 0, "{by_kind}");
-    assert_eq!(by_kind["planner"]["count"], 2, "{by_kind}");
-    assert_eq!(by_kind["planner"]["open_now"], 1, "{by_kind}");
+    // The planner's are its wrapper's to record.
+    assert_eq!(by_kind["planner"]["count"], 0, "{by_kind}");
 
     // A failure is silent and never fails the session: no dagq, a dagq
     // that is not executable, a queue that cannot be opened, bad input.
@@ -1064,7 +1068,7 @@ fn session_event_hook_records_the_spans_of_the_inbox_and_planners_only() {
         &data_home,
         dir.path(),
     ));
-    assert_eq!(span_events(binary, &db, &data_home, &repo).len(), 7);
+    assert_eq!(span_events(binary, &db, &data_home, &repo).len(), 4);
 }
 
 /// Runs the SessionStart hook with a clean environment plus `env`, and no

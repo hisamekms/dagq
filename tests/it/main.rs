@@ -204,6 +204,7 @@ mod runtime_waiting;
 mod runtime_waiting_stages;
 mod runtime_worktree_records;
 mod session_steps;
+mod session_wrapper_service;
 mod setup_review;
 mod setup_review_profiles;
 mod shell_leftovers;

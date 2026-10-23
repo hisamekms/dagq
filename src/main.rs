@@ -3603,6 +3603,32 @@ fn execute(cli: Cli) -> Result<Value> {
     {
         return client_mode(&client, &cli);
     }
+    // A planner's hook leaves its report for the planner's wrapper, which
+    // records it as its own principal (ADR-t3102-1 decision 4): the hook
+    // opens no queue and reaches no service. A client-mode `dagq` (an
+    // agent's) was refused above and leaves none.
+    let hook_kind = match &cli.command {
+        Command::SessionEvent { event, .. } => {
+            let kind = session_hook_kind();
+            if kind.is_some_and(|kind| kind != dagq::domain::sessions::INBOX)
+                && let Some(hook) = read_session_hook(event)?
+            {
+                return spool_planner_hook(cli.db.as_deref(), &hook);
+            }
+            kind
+        }
+        _ => None,
+    };
+    // A session wrapper reads and records through the queue service as
+    // the wrapper's principal, whose token the supervisor issued before it
+    // started it (ADR-t3102-1 decision 4): it opens no queue, and runs as
+    // no actor its environment names (the agent's, which it inherits).
+    if matches!(
+        cli.command,
+        Command::Session { .. } | Command::PlannerSession { .. }
+    ) {
+        return session_wrapper(cli);
+    }
     // Who runs the command (ADR-t728-1 decision 4): no `DAGQ_ROLE` is the
     // user, and a value that is no role stops it before anything is read.
     let actor = ActorContext::from_env(|name| env::var(name).ok())?;
@@ -3897,6 +3923,10 @@ fn execute(cli: Cli) -> Result<Value> {
                 host_wide: dagq::infrastructure::kpi_config::host_wide_file(),
             },
         );
+    }
+    // A session whose hook records no span opens no queue.
+    if matches!(cli.command, Command::SessionEvent { .. }) && hook_kind.is_none() {
+        return Ok(json!({"recorded": false, "reason": "not an inbox or planner session"}));
     }
     // `watch` needs the live read-only file rather than a migrated snapshot.
     // `report` and `graph --out` write files but no queue state; `run log`
@@ -5168,6 +5198,84 @@ fn execute(cli: Cli) -> Result<Value> {
             )?
         }
         Command::Recover { run } => one_shot.recover(&db, &RunId::new(run)?)?,
+        Command::Session { .. } | Command::PlannerSession { .. } => {
+            unreachable!("a session wrapper opens no queue: session_wrapper runs it")
+        }
+        // An inbox's hook records as the inbox (ADR-t3102-1 decision 4).
+        Command::SessionEvent { event, .. } => match read_session_hook(&event)? {
+            Some(hook) => dagq::application::SessionRegistry::record_session_hook(&queue, &hook)?,
+            None => json!({"recorded": false, "reason": "not an inbox or planner session"}),
+        },
+    })
+}
+
+/// The kind of span the session's hook records, as its environment names
+/// it; `None` for a session it records none of (a run's).
+fn session_hook_kind() -> Option<&'static str> {
+    use dagq::application::lifecycle::{PLANNER_ORIGIN_ENV, SESSION_KIND_ENV};
+    let env = |name: &str| env::var(name).ok();
+    dagq::domain::sessions::hook_kind(
+        env(SESSION_KIND_ENV).as_deref(),
+        env(dagq::domain::actor::ROLE_ENV).as_deref(),
+        env(PLANNER_ORIGIN_ENV).as_deref(),
+    )
+}
+
+/// The report of the session hook `event` (`open` or `close`) on stdin,
+/// with what the session's environment names; `None` for a session the
+/// hook records no span of (a run's).
+fn read_session_hook(event: &str) -> Result<Option<dagq::domain::sessions::SessionHook>> {
+    // Nothing is read of a session whose span the hook does not record.
+    if session_hook_kind().is_none() {
+        return Ok(None);
+    }
+    let mut input = String::new();
+    std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
+        .context("read the hook input")?;
+    let input: Value = serde_json::from_str(&input).context("parse the hook input")?;
+    dagq::domain::sessions::SessionHook::from_hook(event, &input, |name| env::var(name).ok())
+        .map_err(anyhow::Error::msg)
+}
+
+/// Leave a planner's hook's report `hook` in the planner's directory of
+/// the queue `db` names, for the planner's wrapper to record
+/// ([`dagq::application::session::spool_hook`]). A planner session of no
+/// planner (one opened before its actor was named) records nothing.
+fn spool_planner_hook(
+    db: Option<&Path>,
+    hook: &dagq::domain::sessions::SessionHook,
+) -> Result<Value> {
+    let Some(id) = hook.planner_id else {
+        return Ok(json!({"recorded": false, "reason": "a planner session of no planner"}));
+    };
+    let cwd = env::current_dir().context("working directory is unavailable")?;
+    let location = QueueLocation::resolve(db, &cwd)?;
+    let dir = dagq::application::planner::planner_dir(
+        &dagq::infrastructure::location::planners_dir(&location.db),
+        dagq::domain::PlannerId::new(id),
+    );
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let stamp = format!("{:020}-{}", since.as_nanos(), std::process::id());
+    let report = dagq::application::session::spool_hook(
+        &dagq::infrastructure::run_files::LocalRunFiles,
+        &dir,
+        hook,
+        &stamp,
+    )?;
+    Ok(json!({"recorded": false, "relayed_by": "wrapper", "planner_id": id, "report": report}))
+}
+
+/// `session` and `planner-session`: the wrapper of a run or a planner,
+/// which reaches the queue of `--db` only through its service
+/// ([`dagq::compose::session`], [`dagq::compose::planner_session`]).
+fn session_wrapper(cli: Cli) -> Result<Value> {
+    let cwd = env::current_dir().context("working directory is unavailable")?;
+    let location = QueueLocation::resolve(cli.db.as_deref(), &cwd)?;
+    install_telemetry(&cli.command, &location);
+    let db = location.db;
+    match cli.command {
         Command::Session {
             run,
             lease,
@@ -5184,20 +5292,7 @@ fn execute(cli: Cli) -> Result<Value> {
             &codex,
             resume,
             background,
-        )?,
-        Command::SessionEvent { event, .. } => {
-            use dagq::{application::SessionRegistry, domain::sessions::SessionHook};
-            let mut input = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut input)
-                .context("read the hook input")?;
-            let input: Value = serde_json::from_str(&input).context("parse the hook input")?;
-            match SessionHook::from_hook(&event, &input, |name| env::var(name).ok())
-                .map_err(anyhow::Error::msg)?
-            {
-                Some(hook) => queue.record_session_hook(&hook)?,
-                None => json!({"recorded": false, "reason": "not an inbox or planner session"}),
-            }
-        }
+        ),
         Command::PlannerSession {
             planner,
             claude,
@@ -5217,8 +5312,9 @@ fn execute(cli: Cli) -> Result<Value> {
                 headless,
                 background,
             },
-        )?,
-    })
+        ),
+        _ => unreachable!("only a session wrapper's command comes here"),
+    }
 }
 
 /// The subscriber of this process's progress and diagnostic events

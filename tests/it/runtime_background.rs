@@ -377,6 +377,13 @@ fn wrapper_command(
     background: bool,
     resume: bool,
 ) -> Command {
+    // It reaches the run through the queue's service as the wrapper, whose
+    // token the supervisor issues before it starts one (ADR-t3102-1).
+    common::service::wrapper_token(
+        db,
+        &dagq::domain::session_step::StepTarget::run(run.id()),
+        Some(run.task_id()),
+    );
     let mut command = Command::new(env!("CARGO_BIN_EXE_dagq"));
     command.without_actor_env();
     command

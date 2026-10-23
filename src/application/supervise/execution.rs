@@ -1930,26 +1930,48 @@ impl Supervisor<'_> {
         host.sweep_ended_sessions(&mut env, &held)
     }
 
-    /// Revoke the queue service's token of `run`'s worker, whose run has
-    /// ended (ADR-t1233-4 decision 4): its value leaves the disk with the
-    /// run. A failure is the sweep's to take up again.
+    /// Revoke the queue service's tokens of `run`'s worker and its session
+    /// wrapper, whose run has ended (ADR-t1233-4 decision 4, ADR-t3102-1
+    /// decision 2): their values leave the disk with the run. A failure is
+    /// the sweep's to take up again.
     fn revoke_worker_token(&self, run: &TaskRun) {
-        let actor = ActorContext::worker(run.id(), run.task_id());
-        if let Err(error) = self
-            .service_access
-            .revoke(&self.layout.db, actor.actor_id())
-        {
-            warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: its worker's queue service token could not be revoked: {error:#}", run.id());
+        let worker = ActorContext::worker(run.id(), run.task_id());
+        let wrapper = crate::domain::queue_service::wrapper_actor_id(
+            &crate::domain::session_step::StepTarget::run(run.id()),
+        );
+        for actor_id in [worker.actor_id(), wrapper.as_str()] {
+            if let Err(error) = self.service_access.revoke(&self.layout.db, actor_id) {
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: the queue service token of {actor_id} could not be revoked: {error:#}", run.id());
+            }
         }
     }
 
-    /// Revoke the workers' tokens whose runs ended or are not in the queue
-    /// (`worker_token_ended`), those the end of their run did not revoke:
-    /// a run that ended while no supervisor looked, by a cancel, or by
-    /// another process. A run whose status does not read keeps its token.
+    /// Revoke the tokens of the workers and the session wrappers whose
+    /// runs ended or are not in the queue (`run_token_ended`), those the
+    /// end of their run did not revoke: a run that ended while no
+    /// supervisor looked, by a cancel, or by another process; and those of
+    /// the planners' wrappers whose planner exited or closed. A run or a
+    /// planner whose record does not read keeps its token.
     fn sweep_worker_tokens(&self) {
+        use crate::domain::queue_service::{Principal, run_token_ended};
+        use crate::domain::session_step::TargetKind;
         let queue = &self.queue;
-        let mut ended = |principal: &crate::domain::queue_service::Principal| {
+        let mut ended = |principal: &Principal| {
+            if let Some(target) = principal
+                .target
+                .as_ref()
+                .filter(|_| principal.role == crate::domain::ActorRole::Wrapper)
+                .filter(|target| target.kind == TargetKind::Planner)
+            {
+                return target
+                    .id
+                    .parse()
+                    .ok()
+                    .and_then(|id| queue.planner(crate::domain::PlannerId::new(id)).ok())
+                    .is_some_and(|planner| {
+                        planner.exited_at.is_some() || planner.closed_at.is_some()
+                    });
+            }
             let Some(run) = &principal.run_id else {
                 return false;
             };
@@ -1964,11 +1986,11 @@ impl Supervisor<'_> {
                 }
                 Err(_) => return false,
             };
-            crate::domain::queue_service::worker_token_ended(principal, status)
+            run_token_ended(principal, status)
         };
         match self.service_access.sweep(&self.layout.db, &mut ended) {
             Ok(revoked) if !revoked.is_empty() => {
-                info!("revoked the queue service tokens of ended runs' workers: {revoked:?}");
+                info!("revoked the queue service tokens of ended runs and planners: {revoked:?}");
             }
             Ok(_) => {}
             Err(error) => {

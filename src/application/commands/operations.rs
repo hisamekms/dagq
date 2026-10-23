@@ -367,9 +367,6 @@ mod tests {
             Operation::Migrate,
             Operation::Rebind,
             Operation::Plan,
-            Operation::PlannerSession(PlannerId::new(7)),
-            Operation::SessionEvent(HookSession::Queue),
-            Operation::SessionEvent(HookSession::Planner(PlannerId::new(7))),
         ] {
             assert!(allowed(&planner, &operation), "{operation:?}");
         }
@@ -381,7 +378,11 @@ mod tests {
             Operation::Supervise,
             Operation::Observe,
             Operation::Session(Some(run("r1"))),
+            // Its session is its wrapper's (ADR-t3102-1 decision 4).
+            Operation::PlannerSession(PlannerId::new(7)),
             Operation::PlannerSession(PlannerId::new(8)),
+            Operation::SessionEvent(HookSession::Queue),
+            Operation::SessionEvent(HookSession::Planner(PlannerId::new(7))),
             Operation::SessionEvent(HookSession::Planner(PlannerId::new(8))),
             Operation::SessionEvent(HookSession::Run(Some(run("r1")))),
         ] {
@@ -405,14 +406,12 @@ mod tests {
     }
 
     #[test]
-    fn a_worker_runs_and_records_its_own_session_only() {
+    fn a_worker_runs_and_records_no_session() {
+        // Its session is its wrapper's (ADR-t3102-1 decision 4).
         let worker = ActorContext::worker(&run("r1"), TaskId::new(1));
-        assert!(allowed(&worker, &Operation::Session(Some(run("r1")))));
-        assert!(allowed(
-            &worker,
-            &Operation::SessionEvent(HookSession::Run(Some(run("r1"))))
-        ));
         for operation in [
+            Operation::Session(Some(run("r1"))),
+            Operation::SessionEvent(HookSession::Run(Some(run("r1")))),
             Operation::Session(Some(run("r2"))),
             Operation::Session(None),
             Operation::SessionEvent(HookSession::Run(Some(run("r2")))),

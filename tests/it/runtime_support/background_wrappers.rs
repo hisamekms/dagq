@@ -76,6 +76,17 @@ impl BackgroundWrappers {
                 "n=0; while [ \"$n\" -lt 600 ] && kill -0 {pid} 2>/dev/null; do sleep 1; n=$((n + 1)); done"
             ));
         } else {
+            // A wrapper reaches its queue through the queue's service
+            // (ADR-t3102-1 decision 4), which the supervisor of a host
+            // keeps running.
+            let words: Vec<&str> = command.split(' ').map(|w| w.trim_matches('\'')).collect();
+            if let Some(db) = words
+                .iter()
+                .position(|word| *word == "--db")
+                .and_then(|at| words.get(at + 1))
+            {
+                crate::common::service::serve(Path::new(db));
+            }
             process.arg("-c").arg(format!("exec {command}"));
         }
         for (name, _) in std::env::vars() {

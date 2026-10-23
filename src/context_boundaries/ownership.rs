@@ -626,6 +626,8 @@ pub(super) const OUTER_PORTS: &[OuterPort] = &[
     outer_port("src/application/watch.rs", "WatchRecord", Some(Observation), Internal),
     outer_port("src/application/lifecycle.rs", "LifecycleQueue", Some(Host), Internal),
     outer_port("src/application/actor_executor.rs", "ActorExecutor", Some(Host), Public(All)), // the start of an actor
+    outer_port("src/application/actor_executor.rs", "ExecutorEvents", Some(Host), Public(All)), // where an executor records an agent found again: the queue's events, or a session wrapper's store
+    outer_port("src/application/session.rs", "WrapperStore", Some(Execution), Public(Only(&[Planning, Host]))), // what a session wrapper reads and records, a planner's too; the queue service does its operations
     outer_port("src/application/release_update.rs", "ReleaseIndex", Some(Host), Internal),
     outer_port("src/application/install.rs", "Binaries", Some(Host), Internal),
     outer_port("src/application/install.rs", "ReleaseInstaller", Some(Host), Internal),
@@ -646,7 +648,7 @@ pub(super) const OUTER_PORTS: &[OuterPort] = &[
     outer_port("src/application/broker_relay.rs", "RelayRecords", Some(Host), Internal), // the supervisor's record of the relays, read by the gate
     outer_port("src/application/run_container.rs", "RunContainers", Some(Execution), Internal), // the containers a worker's turns run in; the wrapper starts and removes them, and every stop of a run's session or processes removes its container
     outer_port("src/application/run_container.rs", "VerificationContainers", Some(Execution), Internal), // the containers the commands of integrate's verification run in, on a clone of the commit that lands; integrate removes what each verification left
-    outer_port("src/application/queue_service.rs", "ServiceAccess", Some(Host), Public(Only(&[Execution]))), // not classified by architecture.md; the supervisor issues a token at the claim and the resume
+    outer_port("src/application/queue_service.rs", "ServiceAccess", Some(Host), Public(Only(&[Execution, Planning]))), // not classified by architecture.md; the supervisor issues a token at the claim and the resume, and a planner's wrapper's as it starts the wrapper
     outer_port("src/application/queue_service.rs", "TelemetryTokens", Some(Host), Public(Only(&[Execution]))), // not classified by architecture.md; the supervisor issues and revokes an executor's telemetry token per target
     outer_port("src/application/supervisor_service.rs", "ServiceCaller", Some(Host), Public(Only(&[Execution]))), // how the supervisor reaches its queue's service; it signs in before it registers (ADR-t3102-3)
     outer_port("src/application/setup_review.rs", "SetupReviewHost", Some(Execution), Internal), // the main checkout, the temporary place and the job of setup-review

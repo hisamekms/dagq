@@ -36,8 +36,8 @@ use std::{
 };
 
 use super::{
-    AgentProvider, Clock, ProcessControl, Queue, RunFiles, SccacheServer, Spawned, Spawner,
-    TurnReader, TurnTarget,
+    AgentProvider, Clock, ProcessControl, RunFiles, SccacheServer, Spawned, Spawner, TurnReader,
+    TurnTarget,
     actor_executor::{
         ActorExecutionSpec, ActorExecutor, ActorProgram, HostActorExecutor, SessionAgent,
         WorkspaceAccess,
@@ -179,7 +179,7 @@ pub(super) enum TurnOwner<'a> {
 
 /// What the wrapper of a headless session works with.
 pub(super) struct Turns<'a> {
-    pub(super) queue: &'a mut dyn Queue,
+    pub(super) queue: &'a mut dyn super::session::WrapperStore,
     pub(super) db: &'a Path,
     pub(super) owner: TurnOwner<'a>,
     /// The agent of the run's provider when the wrapper started.
@@ -904,7 +904,7 @@ impl<'a> Turns<'a> {
         let look = turn_look(target, server, run_dir);
         if let Some((port, why)) = look.removed() {
             crate::application::sccache::record_wrapper_removed(
-                &*self.queue,
+                self.queue.as_events(),
                 run.id(),
                 i64::try_from(unix_secs(self.clock)).unwrap_or(i64::MAX),
                 "wrapper",
@@ -917,8 +917,12 @@ impl<'a> Turns<'a> {
     }
 
     /// Heartbeat the wrapper; a failure (the queue busy) is only logged,
-    /// as the interactive wrapper does.
+    /// as the interactive wrapper does. A planner's wrapper relays the
+    /// reports its hook left meanwhile ([`super::session::relay_hooks`]).
     fn heartbeat(&mut self) {
+        if let TurnOwner::Planner { dir, id, .. } = &self.owner {
+            super::session::relay_hooks(self.files, dir, *id, &*self.queue);
+        }
         let beat = match &self.owner {
             TurnOwner::Run(run) => self.queue.heartbeat_wrapper(run.id(), self.pid),
             TurnOwner::Planner { id, .. } => self.queue.heartbeat_planner(*id, self.pid),
@@ -1004,11 +1008,11 @@ impl<'a> Turns<'a> {
                 },
             ),
         };
-        let events: &dyn super::RunLog = &*self.queue;
+        let events = self.queue.as_events();
         let mut executor = HostActorExecutor::new(self.db)
             .with_provider(agent)
             .with_spawner(self.spawner)
-            .with_events(events);
+            .with_event_sink(events);
         if let Some(service) = self.queue_service {
             executor = executor.with_queue_service(service);
         }

@@ -206,6 +206,7 @@ fn launch<'a>(
             db,
             lease: None,
         }),
+        service: &dagq::infrastructure::queue_service::SystemServiceAccess,
     }
 }
 

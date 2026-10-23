@@ -112,15 +112,15 @@ roleの名前だけでactorを名指さないplannerのidは、どのproposalの
 | --- | --- | --- |
 | user | 予約と`review.submit` `triage.submit` `landing.land` `landing.push` `request.decline` `replan.park` `replan.apply` `telemetry.report`を除く全て | なし |
 | inbox | userと同じ（人の言葉での代行。ADR-t728-3の決定1）だが、`review.setup_approve`は持たない | なし。人自身の操作との区別は記録が持つ |
-| planner | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.write`・`goal.close`・`task.write`・`follow_up.judge`・`task.cancel`・`proposal.submit`・`proposal.withdraw`・`note.write`・`mark.write`・`ask.open`・`session.run`・`session.record`・`finding.resolve`・`finding.dismiss`・`planner.open`・`request.decline`・`eval.request`・`eval.request_held_out`・`eval.read`・`eval.cases`・`service.lifecycle`・`service.install`・`queue.admin` | runにはnote（`note --run`）だけを書け、ほかは何もできない（runに紐づくaskも開けない）。開けるaskは`planner_question`だけで、依頼に紐づくもの（`ask --request ID`）はその依頼の閉じていないruntimeのplannerのactor idが自分のときだけ（`request.decline`と同じ規則。plannerが分からなければ拒む）。taskの変更（`task.write`・`task.cancel`）はdraft・submitted・readyのものだけ（状態が不明なら拒む）。`revisit`（draftの再検討の時刻、`task.write`）はdraftだけで（storeがどのroleにも求める）、`draft_planner_exhausted`のあるdraftには付けられない（人・inboxだけが付ける。ADR-t1540-1）。`follow_up.judge`は全状態のfollow_upに記録でき、所属を動かすのはdraft・readyだけ。noteはどの状態のtaskにも書ける。`proposal.withdraw`は自分（actor id）が出したproposalだけ。`planner-session`は自分のplannerだけ。`request.decline`はそのplannerが立てられた依頼（依頼の閉じていないruntimeのplannerのactor idが自分）だけで、plannerが分からなければ拒む |
-| worker | 読み取り・`ask.open`・`note.write`・`replan.propose`・`session.run`・`session.record`・`eval.request`・`eval.read` | evalと`replan.propose`は自分のrunの分だけ。読み取り以外は自分のrun（`DAGQ_RUN_ID`）・そのtask（`DAGQ_TASK_ID`）・自分のrunのaskだけ。開けるaskは`worker_question`だけで、`--run`なら自分のrun、`--task`だけなら自分のtask（`DAGQ_RUN_ID`の無いworkerは何も持たない）。`session`と`session-event`は自分のrunのものだけ（runtimeのwrapperとhookはworkerの環境のまま打つ） |
+| planner | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.write`・`goal.close`・`task.write`・`follow_up.judge`・`task.cancel`・`proposal.submit`・`proposal.withdraw`・`note.write`・`mark.write`・`ask.open`・`finding.resolve`・`finding.dismiss`・`planner.open`・`request.decline`・`eval.request`・`eval.request_held_out`・`eval.read`・`eval.cases`・`service.lifecycle`・`service.install`・`queue.admin` | runにはnote（`note --run`）だけを書け、ほかは何もできない（runに紐づくaskも開けない）。開けるaskは`planner_question`だけで、依頼に紐づくもの（`ask --request ID`）はその依頼の閉じていないruntimeのplannerのactor idが自分のときだけ（`request.decline`と同じ規則。plannerが分からなければ拒む）。taskの変更（`task.write`・`task.cancel`）はdraft・submitted・readyのものだけ（状態が不明なら拒む）。`revisit`（draftの再検討の時刻、`task.write`）はdraftだけで（storeがどのroleにも求める）、`draft_planner_exhausted`のあるdraftには付けられない（人・inboxだけが付ける。ADR-t1540-1）。`follow_up.judge`は全状態のfollow_upに記録でき、所属を動かすのはdraft・readyだけ。noteはどの状態のtaskにも書ける。`proposal.withdraw`は自分（actor id）が出したproposalだけ。`request.decline`はそのplannerが立てられた依頼（依頼の閉じていないruntimeのplannerのactor idが自分）だけで、plannerが分からなければ拒む |
+| worker | 読み取り・`ask.open`・`note.write`・`replan.propose`・`eval.request`・`eval.read` | evalと`replan.propose`は自分のrunの分だけ。読み取り以外は自分のrun（`DAGQ_RUN_ID`）・そのtask（`DAGQ_TASK_ID`）・自分のrunのaskだけ。開けるaskは`worker_question`だけで、`--run`なら自分のrun、`--task`だけなら自分のtask（`DAGQ_RUN_ID`の無いworkerは何も持たない） |
 | review-job | 読み取り・`review.submit` | `review.submit`は自分のrunだけ |
 | recovery-job | 読み取り・`triage.submit` | `triage.submit`は自分のrunだけ |
 | plan-review-job・goal-review-job・throughput-review-job | 読み取りだけ | throughput-review-jobは[スループットの見直し](supervisor-lifecycle/throughput-review.md)（ADR-t996-1） |
 | setup-review-job | 読み取りだけ | なし（[setup-review](supervisor-lifecycle/setup-review.md)） |
 | observer | 読み取り・`queue.watch`・`ci.read`・`finding.record`・`finding.resolve`・`finding.ask`・`eval.read` | `finding.resolve`と`finding.ask`はfindingだけ |
 | supervisor | 読み取り・`queue.watch`・`queue.export`・`ci.read`・`goal.close`・`task.cancel`・`task.ready`・`note.write`・`ask.open`・`ask.close`・`session.run`・`review.prepare`・`finding.record`・`finding.resolve`・`finding.dismiss`・`observe.run`・`planner.open`・`eval.read`・`scheduler.supervise`・`run.recover`・`service.lifecycle`・`service.install`・`queue.admin`・`landing.request`・`replan.park`・`replan.apply` | なし。`queue.admin`は自動更新が新しいバイナリで`install`と同じ確認（`migrate --check`・`migrate`・使い捨てのqueueの`init`）をするため。`ask.answer`・`task.ready_bypass_review`・`landing.land`・`landing.push`・`workspace.cleanup`（終わったrunに残ったbackgroundのwrapperは自分の掃除で止める）とevalの依頼は持たない |
-| wrapper | 読み取り・`session.run`・`session.record` | なし |
+| wrapper | 読み取り・`session.run`・`session.record` | 自分のrunかplanner（tokenのprincipalのactor id）だけ。queue serviceの`session_run`・`session_record`で判定する（[ADR-t3102-1](../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)決定4） |
 | integrator | 読み取り・`landing.land`・`landing.push` | なし |
 | executor-telemetry | `telemetry.report`だけ | tokenの対象に制御側が登録したsessionだけ |
 
@@ -247,12 +247,10 @@ CLI（`src/main.rs`の`execute()`）はqueueの場所を決めた直後、queue�
 | `recover RUN` | `run.recover` | run（読めないidは`Unresolved`） |
 | `run close-workspaces` / `run close-workspaces RUN` / `run close-workspaces --task ID`（認可の後に拒む） | `workspace.cleanup` | queue / run（読めないidは`Unresolved`） / task |
 | `review ID` | `review.prepare` | task |
-| `session --run RUN` | `session.run` | run（読めないidは`Unresolved`） |
-| `planner-session --planner ID` | `session.run` | planner |
 | `run screen RUN`（認可の後に拒む） `run log RUN` / `run send RUN` | `screen.read` / `screen.send` | run（数字はtask。読めないidは`Unresolved`） |
 | `planner screen ID` `planner log ID` / `planner send ID` | `screen.read` / `screen.send` | planner |
 | `planner request ID` | `planner.request` | planner |
-| `session-event open/close` | `session.record` | hookが記録するspanから決める（`HookSession`） |
+| `session-event open/close`（inboxのspan） | `session.record` | queue |
 
 結果（上のPolicyの表から決まる）:
 
@@ -267,11 +265,11 @@ CLI（`src/main.rs`の`execute()`）はqueueの場所を決めた直後、queue�
   残ったrunのworkspaceは人が自分のterminalで閉じる。
   supervisorは終わったrunに残ったwrapperを自分の掃除（[終わったrunの掃除](supervisor-lifecycle/background-recovery-job.md#終わったrunの掃除)）で止める
 - `run screen`は`screen.read`を通った後、どのrunにも画面を読まずに理由と`run log`を示して拒む（ADR-t1433-3の決定4）
-- plannerの`service.lifecycle`・`service.install`・`queue.admin`・`planner.open`と、自分のplannerの`planner-session`と`session-event`は、ADR-t728-1の決定7のとおり許す。
+- plannerの`service.lifecycle`・`service.install`・`queue.admin`・`planner.open`は、ADR-t728-1の決定7のとおり許す。
   plannerはruntimeだけが立て、人が頼む相手ではないので（[ADR-t1394-1](../adr/2026-10-03-t1394-1-abolish-person-planners-and-route-planning-through-inbox-requests.md)）、`up`・`down`・`inbox`・`install`は使わない（打つのはinboxか人の`DAGQ_ROLE`の無いterminal。[Roles](supervisor-lifecycle/roles.md)）。
   `plan`は権限の判定を通っても誰が打っても何も開かず、inboxへの依頼の案内（`PLAN_REFUSED`）で失敗する
-- workerは自分のrunの`session`と`session-event`だけを打てる。
-  別のrunのもの、inboxやplannerのspanを名乗るもの（`DAGQ_SESSION_KIND`）、`planner-session`は拒む
+- `session`・`planner-session`は環境のactorで判定せず、wrapperのprincipalでserviceが判定する（[Queue service](queue-service.md#クライアントモード)）。
+  `session-event`はplannerのspanならwrapperに渡してqueueに触れず、runのspanは無く、inboxのspanはinboxとuserだけが記録できる（workerとplannerは`session.record`を持たない）
 - 拒否は`authorization_denied`として、拒まれた呼び出し元をactorにしてqueueに記録する（`src/infrastructure/denials.rs`の`QueueDenials`が、判定の後でだけqueueを開く）。
   queueが無い・このバイナリが開けない（`init`の前、`migrate`の前）ときは記録できず、拒否は拒否のまま返す。
   errorの形は計画系と同じ
@@ -294,7 +292,6 @@ CLI（`src/main.rs`の`execute()`）はqueueの場所を決めた直後、queue�
   `observe`（`observe.run`）もsupervisorが自分の環境で起動し、その中のagentだけがobserverになる
 
 host実行ではこれも助言的で、`DAGQ_ROLE`を外せば誰でもuserになる（ADR-t728-1の決定6）。
-wrapperとhookをworkerの環境から分けて、信頼する制御側のwrapperのactor（`ActorRole::Wrapper`）として判定することは、queue service / brokerの後続にする。
 
 ### 着地とpush（Integrator）
 

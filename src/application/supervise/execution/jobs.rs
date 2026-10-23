@@ -766,6 +766,15 @@ pub(in crate::application::supervise) struct JobDesk<'s> {
 }
 
 impl<'s> JobDesk<'s> {
+    /// The tokens this supervisor issues for the queue service: a
+    /// planner's wrapper's too, as the wrapper starts (ADR-t3102-1
+    /// decision 2).
+    pub(in crate::application::supervise) fn service_access(
+        &self,
+    ) -> &'s dyn crate::application::queue_service::ServiceAccess {
+        self.service_access
+    }
+
     /// The issue and the revocation of the telemetry token of a target of
     /// no run whose agent this supervisor starts (a planner, a plan or goal
     /// review), under its lease

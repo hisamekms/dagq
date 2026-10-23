@@ -1,8 +1,8 @@
 //! The runtime operations are authorized in the application before they
 //! run (ADR-t728-1 decision 5, task 734): workers, the headless jobs and
 //! the observer land, recover and run the service not at all, a worker
-//! runs and records its own run's session only, and the user, the inbox
-//! and the planner keep the operations they run today.
+//! runs and records no session (its wrapper's principal does), and the
+//! user, the inbox and the planner keep the operations they run today.
 
 use crate::common;
 
@@ -125,30 +125,18 @@ fn workers_jobs_and_the_observer_land_recover_and_run_the_service_not_at_all() {
 }
 
 #[test]
-fn a_worker_runs_and_records_the_session_of_its_own_run_only() {
+fn a_worker_neither_runs_nor_records_a_session() {
     let (_dir, db) = queue();
+    // Its session is its wrapper's to record (ADR-t3102-1 decision 4): a
+    // hook of the worker's own run is refused it too.
     for args in [
         &["session-event", "open", "--run", "r2"][..],
-        &[
-            "session", "--run", "r2", "--lease", "t", "--claude", "claude",
-        ],
-        &[
-            "session",
-            "--run",
-            "not a run",
-            "--lease",
-            "t",
-            "--claude",
-            "claude",
-        ],
+        &["session-event", "open", "--run", "r1"],
+        &["session-event", "open"],
     ] {
         let error = denied_as(&WORKER, &db, args);
         assert_eq!(
-            error["error"],
-            format!(
-                "worker may not {} (not on this resource)",
-                error["denied"]["capability"].as_str().unwrap()
-            ),
+            error["error"], "worker may not session.record (not granted)",
             "{args:?}"
         );
     }
@@ -158,33 +146,45 @@ fn a_worker_runs_and_records_the_session_of_its_own_run_only() {
     as_inbox.push(("DAGQ_SESSION_KIND", "inbox"));
     let error = denied_as(&as_inbox, &db, &["session-event", "open", "--run", "r1"]);
     assert_eq!(error["denied"]["capability"], "session.record");
-    // Nor a planner's wrapper.
-    let error = denied_as(
-        &WORKER,
-        &db,
-        &["planner-session", "--planner", "1", "--claude", "claude"],
-    );
-    assert_eq!(error["denied"]["capability"], "session.run");
     let recorded = denials(&db);
-    assert_eq!(recorded.len(), 5);
-    assert_eq!(
-        recorded[0]["payload"]["resource"],
-        serde_json::json!({"kind": "run", "id": "r2", "task": null})
-    );
+    assert_eq!(recorded.len(), 4);
     assert_eq!(recorded[0]["actor"]["id"], "worker:r1");
-
-    // Its own run's passes the authorizer (and then wants the hook's input
-    // or a run the queue has).
-    failed_past_authorization(&WORKER, &db, &["session-event", "open"]);
-    failed_past_authorization(&WORKER, &db, &["session-event", "open", "--run", "r1"]);
-    failed_past_authorization(
-        &WORKER,
-        &db,
+    // A wrapper runs as the wrapper's principal whatever its environment
+    // names, and reaches the queue only through its service: with no
+    // token issued, `session` and `planner-session` end without opening
+    // it, and record nothing.
+    for args in [
         &[
-            "session", "--run", "r1", "--lease", "t", "--claude", "claude",
+            "session",
+            "--run",
+            "r1",
+            "--lease",
+            "t",
+            "--claude",
+            "claude",
+            "--background",
+        ][..],
+        &[
+            "planner-session",
+            "--planner",
+            "1",
+            "--claude",
+            "claude",
+            "--headless",
+            "--background",
         ],
-    );
-    assert_eq!(denials(&db).len(), 5);
+    ] {
+        // A refused wrapper logs why before its error.
+        let output = invoke_with(&WORKER, &db, args);
+        assert!(!output.status.success(), "{args:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let error: Value = serde_json::from_str(stderr.lines().last().unwrap()).unwrap();
+        assert_eq!(
+            error["queue_service"]["code"], "no_credential",
+            "{args:?}: {error}"
+        );
+    }
+    assert_eq!(denials(&db).len(), 4);
 }
 
 #[test]
@@ -224,27 +224,12 @@ fn the_user_the_inbox_and_the_planner_keep_their_operations() {
         let error = denied_as(&planner, &db, args);
         assert_eq!(error["denied"]["capability"], capability, "{args:?}");
     }
-    // A planner's wrapper and span are its own planner's.
-    let error = denied_as(
-        &planner,
-        &db,
-        &["planner-session", "--planner", "4", "--claude", "claude"],
-    );
-    assert_eq!(error["denied"]["reason"], "not on this resource");
-    let mut other = planner.to_vec();
-    other.push(("DAGQ_PLANNER_ID", "4"));
-    let error = denied_as(&other, &db, &["session-event", "open"]);
-    assert_eq!(error["denied"]["capability"], "session.record");
+    // A planner's span is its wrapper's to record (ADR-t3102-1 decision
+    // 4): its hook leaves the report for it, and is refused nothing; the
+    // inbox's hook records its own span, past the authorizer.
     let mut own = planner.to_vec();
     own.push(("DAGQ_PLANNER_ID", "3"));
     failed_past_authorization(&own, &db, &["session-event", "open"]);
     failed_past_authorization(&inbox, &db, &["session-event", "open"]);
-    // A planner workspace opened before `DAGQ_ACTOR_ID` still records its
-    // span, as the queue's.
-    failed_past_authorization(
-        &[("DAGQ_ROLE", "planner"), ("DAGQ_PLANNER_ID", "4")],
-        &db,
-        &["session-event", "open"],
-    );
-    assert_eq!(denials(&db).len(), 7);
+    assert_eq!(denials(&db).len(), 5);
 }

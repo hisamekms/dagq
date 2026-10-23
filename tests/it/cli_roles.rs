@@ -546,7 +546,6 @@ fn observer_may_record_findings_and_ask_but_not_change_queue_state() {
         &["review", "1"],
         &["down"],
         &["plan"],
-        &["planner-session", "--planner", "1", "--claude", "claude"],
         &[
             "ask",
             "--kind",

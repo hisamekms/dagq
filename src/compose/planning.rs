@@ -62,7 +62,14 @@ pub fn planner_session(
     let provider = ClaudeCode {
         executable: claude.into(),
     };
-    planner_session_with_provider(db, id, &provider, plugin_dir, model)
+    let mut queue = crate::infrastructure::queue_service::ServiceWrapperStore::of_queue(
+        db,
+        crate::domain::session_step::StepTarget::of(
+            crate::domain::session_step::TargetKind::Planner,
+            id.as_i64(),
+        ),
+    );
+    planner_session_on(&mut queue, db, id, &provider, plugin_dir, model)
 }
 
 /// How a planner's wrapper was started: for a headless planner
@@ -74,7 +81,8 @@ pub struct PlannerEntry {
     pub background: bool,
 }
 
-/// [`planner_session`] with any provider, in the working directory.
+/// [`planner_session`] with any provider, in the working directory, on
+/// the queue at `db` itself: a test's wrapper, which a library call runs.
 pub fn planner_session_with_provider(
     db: &Path,
     id: PlannerId,
@@ -87,10 +95,23 @@ pub fn planner_session_with_provider(
             crate::domain::actor::ActorRole::Wrapper,
             format_args!("planner:{id}"),
         ));
+    planner_session_on(&mut queue, db, id, provider, plugin_dir, model)
+}
+
+/// The wrapper of planner `id` of the queue at `db`, reading and recording
+/// on `queue`.
+fn planner_session_on(
+    queue: &mut dyn crate::application::session::WrapperStore,
+    db: &Path,
+    id: PlannerId,
+    provider: &dyn AgentProvider,
+    plugin_dir: Option<&Path>,
+    model: Option<(&str, &str)>,
+) -> Result<Value> {
     let cwd = std::env::current_dir().context("working directory is unavailable")?;
     planner::run_planner_session(
         PlannerWrapper {
-            queue: &mut queue,
+            queue,
             db,
             provider,
             spawner: &LocalSpawner,

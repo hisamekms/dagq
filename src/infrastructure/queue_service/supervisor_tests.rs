@@ -5,6 +5,7 @@
 use super::*;
 use crate::application::TaskStore;
 use crate::domain::NewTask;
+use crate::domain::session_step::TargetKind;
 
 const RUN: &str = "11111111-1111-4111-8111-111111111111";
 
@@ -183,6 +184,86 @@ fn a_workers_token_is_issued_only_under_its_runs_lease() {
             .unwrap()
             .is_some_and(|principal| principal == worker)
     );
+}
+
+/// A session wrapper's token is issued as its target's is: a run's only by
+/// the supervisor that holds the run's lease, a planner's by the
+/// supervisor that starts it; no other trusted principal's is.
+#[test]
+fn a_wrappers_token_is_issued_as_its_targets() {
+    let (owner, other) = (LeaseToken::new("owner"), LeaseToken::new("other"));
+    let (_dir, backend) = claimed(&owner);
+    let run = StepTarget::run(&RunId::new(RUN).unwrap());
+    let wrapper = Principal::wrapper(&run, Some(crate::domain::TaskId::new(1)));
+    let other_token = token_of(&backend, &Principal::supervisor(&other, 8));
+    let refusal = call(&backend, &other_token, "issue_token", json!([wrapper]));
+    assert!(refused(&refusal).contains("not leased"), "{refusal:?}");
+
+    let owner_token = token_of(&backend, &Principal::supervisor(&owner, 7));
+    let issued = call(&backend, &owner_token, "issue_token", json!([wrapper]));
+    assert!(issued.ok, "{issued:?}");
+    let file: PathBuf = serde_json::from_value(issued.result.unwrap()).unwrap();
+    assert!(
+        lookup(&backend.queue_dir, &read_token(&file).unwrap())
+            .unwrap()
+            .is_some_and(|principal| principal == wrapper)
+    );
+    let planner = Principal::wrapper(&StepTarget::of(TargetKind::Planner, 3), None);
+    let issued = call(&backend, &owner_token, "issue_token", json!([planner]));
+    assert!(issued.ok, "{issued:?}");
+
+    let integrator = Principal::of(&crate::domain::ActorContext::new(
+        ActorRole::Integrator,
+        "integrator:1",
+    ));
+    refused(&call(
+        &backend,
+        &owner_token,
+        "issue_token",
+        json!([integrator]),
+    ));
+}
+
+/// A supervisor prunes its own registration, and another's only once its
+/// heartbeat expired (one a dead supervisor left behind): a live one's is
+/// refused and kept.
+#[test]
+fn a_supervisor_prunes_another_registration_only_once_its_heartbeat_expired() {
+    let owner = LeaseToken::new("owner");
+    let (_dir, backend) = claimed(&owner);
+    let mut queue = SqliteQueue::open(&backend.db).unwrap();
+    for token in ["live", "left"] {
+        queue
+            .register_supervisor(&LeaseToken::new(token), 9, 1, "test")
+            .unwrap();
+    }
+    queue
+        .conn
+        .execute(
+            "UPDATE supervisors SET heartbeat_at = heartbeat_at - ?1 WHERE token = 'left'",
+            [crate::domain::HEARTBEAT_TIMEOUT_SECS + 60],
+        )
+        .unwrap();
+    let owner_token = token_of(&backend, &Principal::supervisor(&owner, 7));
+    let prune = |token: &str| {
+        call(
+            &backend,
+            &owner_token,
+            "prune_supervisor",
+            json!([token, "supervisor_stopped", {"outcome": "pruned"}]),
+        )
+    };
+    refused(&prune("live"));
+    let pruned = prune("left");
+    assert!(pruned.ok, "{pruned:?}");
+    let mut left: Vec<String> = queue
+        .supervisors()
+        .unwrap()
+        .into_iter()
+        .map(|registration| registration.token.to_string())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["live"]);
 }
 
 /// Only a supervisor's principal reaches the use case: a worker's token is

@@ -385,7 +385,7 @@ pub fn removed_payload(at: i64, by: &str, port: u16, why: &str, fields: Value) -
 /// for the wrapper, the supervisor and integrate; a failure to record is
 /// only logged, as the process runs either way.
 pub fn record_wrapper_removed(
-    queue: &(impl RunLog + ?Sized),
+    queue: &(impl super::actor_executor::ExecutorEvents + ?Sized),
     run: &crate::domain::RunId,
     at: i64,
     by: &str,
@@ -395,7 +395,9 @@ pub fn record_wrapper_removed(
 ) {
     tracing::warn!(run_id = %run, "run {run}: its {} runs without {WRAPPER_VAR}: {why}", process_name(&fields));
     let payload = removed_payload(at, by, port, why, fields);
-    if let Err(error) = queue.record_runtime_event(run, EventKind::SccacheWrapperRemoved, payload) {
+    if let Err(error) =
+        queue.record_agent_event(Some(run), EventKind::SccacheWrapperRemoved, payload)
+    {
         tracing::warn!(run_id = %run, error = %format_args!("{error:#}"), "sccache_wrapper_removed could not be recorded: {error:#}");
     }
 }

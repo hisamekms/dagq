@@ -358,10 +358,11 @@ fn the_sweep_revokes_the_tokens_of_ended_runs_and_keeps_a_waiting_runs() {
     );
     assert!(worker_holds_token(&db, &parked));
     assert!(!worker_holds_token(&db, &landed));
+    // Its worker's and its wrapper's (ADR-t3102-1 decision 2).
     assert_eq!(
         token_files(&queue_dir).len(),
-        2,
-        "the parked run's value and record"
+        4,
+        "the parked run's values and records"
     );
     // The run ends while no supervisor looks (as `recover` ends one whose
     // process is gone) and the person cancels its task; the supervisor

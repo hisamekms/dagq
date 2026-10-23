@@ -8,7 +8,7 @@
 //! (`planners`), with the pids and heartbeat of its session wrapper, so its
 //! liveness and idleness are judged the way a worker's are.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::{
     FindingId, PlannerId, PlannerOrigin, PlannerRoute, PlannerState, ProposalId, RequestId, TaskId,
@@ -16,7 +16,7 @@ use super::{
 };
 
 /// One planner as the queue records it. Times are Unix seconds.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlannerSession {
     pub id: PlannerId,
     /// Who opened it: `person` (`dagq plan`, before ADR-t1394-1) or

@@ -101,6 +101,9 @@ pub trait ServiceQueue:
         token: &crate::domain::LeaseToken,
         then: &mut dyn FnMut() -> Result<Value>,
     ) -> Result<Value>;
+    /// Do a session wrapper's `op`, authorized already
+    /// ([`super::session::apply`]).
+    fn session(&mut self, op: &super::session::SessionOp) -> Result<Value>;
 }
 
 /// What the service runs its use cases on.
@@ -634,6 +637,24 @@ fn run(
                 }
             })?;
             Ok(serde_json::to_value(recorded)?)
+        }
+        UseCase::SessionRun | UseCase::SessionRecord => {
+            // One operation of a session wrapper's (ADR-t3102-3 decision
+            // 3), carried by its own use case and asked of the policy for
+            // its own run or planner: only the wrapper's principal holds
+            // `session.run` and `session.record` (ADR-t3102-1 decision 4).
+            let op: super::session::SessionOp = params(use_case, raw)?;
+            if op.use_case() != use_case {
+                return Err(BadParams(format!(
+                    "{} does not carry this operation: {} does",
+                    use_case.as_str(),
+                    op.use_case().as_str()
+                ))
+                .into());
+            }
+            let (capability, resource) = op.request();
+            gate.authorize(&store, capability, &resource)?;
+            store.0.session(&op)
         }
         UseCase::AgentEval => {
             let p: AgentEvalParams = params(use_case, raw)?;
@@ -1295,6 +1316,14 @@ mod tests {
         ) -> Result<Value> {
             unimplemented!("these tests send no supervisor's operation")
         }
+        /// A session wrapper's operation is kept in the log as it came.
+        fn session(&mut self, op: &crate::application::session::SessionOp) -> Result<Value> {
+            self.log
+                .lock()
+                .unwrap()
+                .push(json!({"session": serde_json::to_value(op)?}));
+            Ok(json!({"value": null}))
+        }
     }
 
     struct Backend {
@@ -1338,6 +1367,14 @@ mod tests {
                         kind: crate::domain::session_step::TargetKind::PlanReview,
                         id: "9".into(),
                     },
+                    None,
+                )),
+                "wrapper" => Some(Principal::wrapper(
+                    &StepTarget::run(&run),
+                    Some(TaskId::new(1)),
+                )),
+                "wrapper-planner" => Some(Principal::wrapper(
+                    &StepTarget::of(crate::domain::session_step::TargetKind::Planner, 3),
                     None,
                 )),
                 "broken" => return Err(anyhow!("unreadable")),
@@ -1476,6 +1513,112 @@ mod tests {
                 "session_id": "planner:3:s", "steps": []}),
         ));
         assert_eq!(code(&response), None, "{response:?}");
+    }
+
+    /// ADR-t3102-1 decision 4: a session wrapper's operations reach the
+    /// queue as the wrapper's principal, on its own run or planner only;
+    /// the worker's token (and a planner's, and a job's) is refused them
+    /// and the refusal recorded as `authorization_denied`; an operation
+    /// under the other use case is a bad request.
+    #[test]
+    fn only_the_wrapper_runs_and_records_its_own_session() {
+        let backend = backend(RunStatus::Running);
+        let service = QueueService {
+            backend: &backend,
+            build: "b",
+            pid: 1,
+        };
+        let heartbeat = |run: &str| json!({"op": "heartbeat_wrapper", "run": run, "pid": 7});
+        let record = |run: &str| json!({"op": "runtime_event", "run": run, "kind": "turn_started", "payload": {}});
+        let hook = json!({"op": "hook", "hook": {
+            "event": {"hook": "start", "source": "startup"}, "kind": "runtime_planner",
+            "session_id": "s1", "planner_id": 3}});
+        let send = |token, use_case, params: &Value| {
+            service.handle(&request(Some(token), use_case, params.clone()))
+        };
+        for (token, use_case, params) in [
+            ("wrapper", UseCase::SessionRun, heartbeat("r1")),
+            ("wrapper", UseCase::SessionRecord, record("r1")),
+            (
+                "wrapper",
+                UseCase::SessionRun,
+                json!({"op": "run", "run": "r2"}),
+            ),
+            ("wrapper-planner", UseCase::SessionRecord, hook.clone()),
+            (
+                "wrapper-planner",
+                UseCase::SessionRun,
+                json!({"op": "planner_exited", "planner": 3, "wrapper_pid": 7, "exit_code": 0}),
+            ),
+        ] {
+            let response = send(token, use_case, &params);
+            assert!(response.ok, "{token} {params}: {response:?}");
+            assert_eq!(response.result, Some(json!({"value": null})));
+            let done = backend.log.lock().unwrap().pop().unwrap();
+            assert_eq!(done["session"]["op"], params["op"], "{token}");
+        }
+        for (token, use_case, params, capability) in [
+            (
+                "worker",
+                UseCase::SessionRun,
+                heartbeat("r1"),
+                "session.run",
+            ),
+            (
+                "worker",
+                UseCase::SessionRecord,
+                record("r1"),
+                "session.record",
+            ),
+            (
+                "planner",
+                UseCase::SessionRecord,
+                hook.clone(),
+                "session.record",
+            ),
+            (
+                "review",
+                UseCase::SessionRun,
+                heartbeat("r1"),
+                "session.run",
+            ),
+            (
+                "wrapper",
+                UseCase::SessionRun,
+                heartbeat("r2"),
+                "session.run",
+            ),
+            (
+                "wrapper",
+                UseCase::SessionRecord,
+                hook.clone(),
+                "session.record",
+            ),
+            (
+                "wrapper-planner",
+                UseCase::SessionRun,
+                json!({"op": "heartbeat_planner", "planner": 4, "wrapper_pid": 7}),
+                "session.run",
+            ),
+        ] {
+            let refused = send(token, use_case, &params);
+            assert_eq!(
+                code(&refused),
+                Some(ServiceErrorCode::AuthorizationDenied),
+                "{token} {params}"
+            );
+            let denial = backend.log.lock().unwrap().pop().unwrap();
+            assert_eq!(denial["capability"], capability, "{token} {params}");
+        }
+        let crossed = send("wrapper", UseCase::SessionRecord, &heartbeat("r1"));
+        assert_eq!(code(&crossed), Some(ServiceErrorCode::BadRequest));
+        let unknown = send(
+            "wrapper",
+            UseCase::SessionRun,
+            &json!({"op": "drop_queue", "run": "r1"}),
+        );
+        assert_eq!(code(&unknown), Some(ServiceErrorCode::BadRequest));
+        assert!(backend.log.lock().unwrap().is_empty());
     }
 
     /// A worker proposes to replan its own run through the service, and

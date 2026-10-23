@@ -5,6 +5,7 @@
 //! the span, in the same transaction; this module decides which spans an
 //! event opens and closes.
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{EventId, EventKind};
@@ -606,8 +607,10 @@ pub fn token_cut_due(since: i64, now: i64) -> bool {
 pub const LAUNCH_ENV: &str = "DAGQ_LAUNCH";
 
 /// A `SessionStart` or `SessionEnd` of an inbox or planner session, as the
-/// plugin's hook reports it (ADR-0048 decision 6).
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// plugin's hook reports it (ADR-0048 decision 6). It reads and writes as
+/// JSON for a planner's wrapper to relay it ([`HookRecord`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(into = "HookRecord")]
 pub struct SessionHook {
     pub event: HookEvent,
     /// The span's kind, one of [`HOOK_KINDS`] ([`hook_kind`]).
@@ -670,9 +673,68 @@ impl SessionHook {
     }
 }
 
+/// A [`SessionHook`] as JSON: its kind as text, one of [`HOOK_KINDS`].
+#[derive(Serialize, Deserialize)]
+struct HookRecord {
+    event: HookEvent,
+    kind: String,
+    session_id: String,
+    #[serde(default)]
+    transcript_path: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+    #[serde(default)]
+    planner_id: Option<i64>,
+    #[serde(default)]
+    launch: Option<Value>,
+}
+
+impl From<SessionHook> for HookRecord {
+    fn from(hook: SessionHook) -> Self {
+        Self {
+            event: hook.event,
+            kind: hook.kind.to_owned(),
+            session_id: hook.session_id,
+            transcript_path: hook.transcript_path,
+            cwd: hook.cwd,
+            planner_id: hook.planner_id,
+            launch: hook.launch,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionHook {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        HookRecord::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl TryFrom<HookRecord> for SessionHook {
+    type Error = String;
+
+    fn try_from(record: HookRecord) -> Result<Self, String> {
+        let kind = HOOK_KINDS
+            .into_iter()
+            .find(|known| *known == record.kind)
+            .ok_or_else(|| format!("{:?} is no kind of span a hook records", record.kind))?;
+        Ok(Self {
+            event: record.event,
+            kind,
+            session_id: record.session_id,
+            transcript_path: record.transcript_path,
+            cwd: record.cwd,
+            planner_id: record.planner_id,
+            launch: record.launch,
+        })
+    }
+}
+
 /// What the hook saw: a session starting (its `source`: `startup`,
 /// `resume`, `clear`, `compact`) or ending (its `reason`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "hook", rename_all = "snake_case")]
 pub enum HookEvent {
     Start { source: String },
     End { reason: String },

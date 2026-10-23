@@ -119,8 +119,8 @@ wrapperは常に`Turns`で動く（下の「対話と記録されたtaskのclaim
   runの状態遷移は最初のturnだけで、turnの間は行が終わったturnのpidのまま残る。
 - turnのprocessをwaitする間はheartbeatを更新し、DB障害中も子processの所有を手放さない。
   turnの起動後のエラーでは子processが生きている可能性があるので、wrapperの終わりを記録しない。
-- **turnの環境**: workerのactorの変数に、queue serviceのsocketと、supervisorがclaimかresumeで発行したworkerのtokenのfile（無ければwrapperが発行する）を足したもので、agentの`dagq`はクライアントモードで動く（[Queue service](../queue-service.md#クライアントモード)）。
-  wrapper自身はqueueを直接開き、wrapperのprocessのenvにはどちらも無い。
+- **turnの環境**: workerのactorの変数に、queue serviceのsocketと、supervisorがclaimかresumeで発行したworkerのtokenのfileを足したもので、agentの`dagq`はクライアントモードで動く（[Queue service](../queue-service.md#クライアントモード)）。
+  wrapper自身はqueueを開かず自分のtokenでserviceを通る（[Queue service](../queue-service.md#principalとtoken)）。
 - wrapperは各turnの前にrun dirの手元の検証の記録のdirを作り、そのpathもturnの環境で渡す（containerではrun dirを同じpathにmountするので同じ値）。
   `integrate`の検証・landing recheck・e2eには渡さない（[ADR-t2589-1](../../adr/2026-10-17-t2589-1-local-check-runs-are-recorded-by-project-scripts-and-matched-to-the-receipt-tree.md)決定2）。
 

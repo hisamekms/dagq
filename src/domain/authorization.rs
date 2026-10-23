@@ -508,7 +508,8 @@ const USER: &[Capability] = &USER_CAPABILITIES;
 /// The planner's authority as it is (ADR-t728-1 decision 7): goals, tasks
 /// before they start, its proposals, notes, marks, resolving and dismissing
 /// findings, its
-/// questions, the eval's rounds of any split (never `--rerun`, ADR-t1728-1
+/// questions (its session is its wrapper's to run and record, ADR-t3102-1
+/// decision 4), the eval's rounds of any split (never `--rerun`, ADR-t1728-1
 /// decision 7), the production sets and their labels and, at a person's word, `up` / `down` / `install`. No run,
 /// no landing, no `ready`, no answer.
 const PLANNER: &[Capability] = &[
@@ -526,8 +527,6 @@ const PLANNER: &[Capability] = &[
     C::NoteWrite,
     C::MarkWrite,
     C::AskOpen,
-    C::SessionRun,
-    C::SessionRecord,
     C::FindingResolve,
     C::FindingDismiss,
     C::PlannerOpen,
@@ -541,9 +540,9 @@ const PLANNER: &[Capability] = &[
     C::QueueAdmin,
 ];
 
-/// A worker reads, asks, notes, and runs and records its session, on its
-/// own run: the runtime's wrapper and hooks run in the worker's
-/// environment (task 734). Of the eval it asks for a dev round and reads
+/// A worker reads, asks and notes on its own run; its session is its
+/// wrapper's to run and record, under the wrapper's principal
+/// (ADR-t3102-1 decision 4). Of the eval it asks for a dev round and reads
 /// the rounds of its run only (ADR-t1728-1 decision 6): it never runs an
 /// LLM's CLI itself. It proposes to replan its own run, and nothing more
 /// of a replanning (ADR-t1521-2 decision 3).
@@ -552,8 +551,6 @@ const WORKER: &[Capability] = &[
     C::AskOpen,
     C::NoteWrite,
     C::ReplanPropose,
-    C::SessionRun,
-    C::SessionRecord,
     C::EvalRequest,
     C::EvalRead,
 ];
@@ -616,7 +613,8 @@ const SUPERVISOR: &[Capability] = &[
     C::ReplanApply,
 ];
 
-/// The session wrapper: its session and the session record.
+/// The session wrapper and its hook: its own run's or planner's session
+/// and its record (ADR-t3102-1 decision 4).
 const WRAPPER: &[Capability] = &[C::QueueRead, C::SessionRun, C::SessionRecord];
 
 /// The integrator lands and pushes (ADR-t728-2).
@@ -676,8 +674,22 @@ fn resource_permits(actor: &ActorContext, capability: Capability, resource: &Res
             _ => true,
         },
         ActorRole::ExecutorTelemetry => telemetry_owns(actor, resource),
+        ActorRole::Wrapper => capability == C::QueueRead || wrapper_owns(actor, resource),
         _ => true,
     }
+}
+
+/// A session wrapper's own run or planner: the one its actor id names
+/// ([`super::queue_service::wrapper_actor_id`], which the service takes
+/// from the token's principal, never from the caller).
+fn wrapper_owns(actor: &ActorContext, resource: &Resource) -> bool {
+    use super::session_step::{StepTarget, TargetKind};
+    let target = match resource {
+        Resource::Run { id, .. } => StepTarget::run(id),
+        Resource::Planner(id) => StepTarget::of(TargetKind::Planner, id.as_i64()),
+        _ => return false,
+    };
+    actor.actor_id() == super::queue_service::wrapper_actor_id(&target)
 }
 
 /// The telemetry principal's own target: the one its actor id names
@@ -1051,12 +1063,14 @@ mod tests {
         let own = run("r1");
         let worker = ActorContext::worker(&own, TaskId::new(1));
         assert!(allowed(&worker, C::AskOpen, &Resource::run(own.clone())));
-        assert!(allowed(&worker, C::SessionRun, &Resource::run(own.clone())));
-        assert!(allowed(
-            &worker,
-            C::SessionRecord,
-            &Resource::run(own.clone())
-        ));
+        // Its session is its wrapper's to run and record (ADR-t3102-1
+        // decision 4), on its own run too.
+        for capability in [C::SessionRun, C::SessionRecord] {
+            let error = StaticPolicy
+                .authorize(&worker, capability, &Resource::run(own.clone()))
+                .unwrap_err();
+            assert_eq!(error.reason, DenyReason::NotGranted, "{capability:?}");
+        }
         assert!(allowed(
             &worker,
             C::NoteWrite,
@@ -1069,7 +1083,7 @@ mod tests {
         assert!(allowed(&worker, C::AskOpen, &ask_on_own));
 
         let other = Resource::run(run("r2"));
-        for capability in [C::AskOpen, C::SessionRun, C::SessionRecord, C::NoteWrite] {
+        for capability in [C::AskOpen, C::NoteWrite] {
             let error = StaticPolicy
                 .authorize(&worker, capability, &other)
                 .unwrap_err();
@@ -1144,16 +1158,14 @@ mod tests {
                 &Resource::Finding(FindingId::new(1))
             ));
         }
-        assert!(allowed(
-            &planner,
-            C::SessionRun,
-            &Resource::Planner(PlannerId::new(7))
-        ));
-        assert!(!allowed(
-            &planner,
-            C::SessionRun,
-            &Resource::Planner(PlannerId::new(8))
-        ));
+        // Its session is its wrapper's (ADR-t3102-1 decision 4).
+        for capability in [C::SessionRun, C::SessionRecord] {
+            assert!(!allowed(
+                &planner,
+                capability,
+                &Resource::Planner(PlannerId::new(7))
+            ));
+        }
     }
 
     #[test]
@@ -1378,7 +1390,8 @@ mod tests {
             assert!(!allowed(&integrator, capability, &Resource::Queue));
         }
         let wrapper = role(ActorRole::Wrapper);
-        assert!(allowed(&wrapper, C::SessionRecord, &Resource::Queue));
+        assert!(allowed(&wrapper, C::QueueRead, &Resource::Queue));
+        assert!(!allowed(&wrapper, C::SessionRecord, &Resource::Queue));
         assert!(!allowed(&wrapper, C::IntegrationRequest, &Resource::Queue));
         // Neither is everything.
         for trusted in [
@@ -1389,6 +1402,40 @@ mod tests {
             assert!(grants(trusted).len() < Capability::ALL.len());
         }
     }
+    /// ADR-t3102-1 decision 4: a session wrapper runs and records only its
+    /// own run's or planner's session, by the actor id its principal names.
+    #[test]
+    fn a_wrapper_runs_and_records_its_own_session_only() {
+        let own = run("r1");
+        let of_run = ActorContext::instance(ActorRole::Wrapper, &own);
+        let of_planner = ActorContext::instance(ActorRole::Wrapper, "planner:7");
+        for capability in [C::SessionRun, C::SessionRecord] {
+            assert!(allowed(&of_run, capability, &Resource::run(own.clone())));
+            assert!(allowed(
+                &of_planner,
+                capability,
+                &Resource::Planner(PlannerId::new(7))
+            ));
+            for (wrapper, other) in [
+                (&of_run, Resource::run(run("r2"))),
+                (&of_run, Resource::Planner(PlannerId::new(7))),
+                (&of_planner, Resource::Planner(PlannerId::new(8))),
+                (&of_planner, Resource::run(own.clone())),
+                (&of_planner, Resource::Queue),
+            ] {
+                let error = StaticPolicy
+                    .authorize(wrapper, capability, &other)
+                    .unwrap_err();
+                assert_eq!(error.reason, DenyReason::Resource, "{other:?}");
+            }
+        }
+        // It reads the queue, and does nothing else.
+        assert!(allowed(&of_run, C::QueueRead, &Resource::Queue));
+        for capability in [C::AskOpen, C::NoteWrite, C::TelemetryReport] {
+            assert!(!allowed(&of_run, capability, &Resource::run(own.clone())));
+        }
+    }
+
     fn new_ask(kind: AskKind, run: Option<&str>, task: Option<i64>) -> Resource {
         Resource::NewAsk {
             kind,

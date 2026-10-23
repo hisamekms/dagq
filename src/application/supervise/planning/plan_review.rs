@@ -1384,6 +1384,7 @@ impl PlanningState {
             roles,
             turn_limits: env.turn_limits,
             telemetry: Some(env.jobs.target_telemetry(&env.pass)),
+            service: env.jobs.service_access(),
         }
     }
 

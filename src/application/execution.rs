@@ -648,15 +648,13 @@ mod tests {
         ] {
             assert!(worker.contains(&denied.to_owned()), "{denied}: {worker:?}");
         }
-        // What the worker is granted stays open: its ask, its note, its
-        // session.
-        for open in [
-            "Bash(dagq ask:*)",
-            "Bash(dagq note:*)",
-            "Bash(dagq session:*)",
-            "Bash(dagq session-event:*)",
-        ] {
+        // What the worker is granted stays open: its ask, its note; its
+        // session is its wrapper's (ADR-t3102-1 decision 4).
+        for open in ["Bash(dagq ask:*)", "Bash(dagq note:*)"] {
             assert!(!worker.contains(&open.to_owned()), "{open}");
+        }
+        for denied in ["Bash(dagq session:*)", "Bash(dagq session-event:*)"] {
+            assert!(worker.contains(&denied.to_owned()), "{denied}");
         }
         let planner = permission_deny(ActorRole::Planner);
         for denied in [

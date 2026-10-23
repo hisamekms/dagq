@@ -37,6 +37,7 @@ use tracing::{info, warn};
 
 use super::dialogue::DialogueQueue;
 use super::sqlite::SqliteQueue;
+use crate::application::actor_executor::ExecutorEvents;
 use crate::application::commands::DenialLog;
 use crate::application::commands::dialogue::{DialogueStore, MarkChange};
 use crate::application::queue_reads::QueueRead;
@@ -44,21 +45,25 @@ use crate::application::queue_service::{
     QueueService, QueueServiceControl, ServiceAccess, ServiceBackend, ServiceProbe, ServiceQueue,
     TelemetryTokens,
 };
+use crate::application::session::{AgentStart, ReasonParams, SessionOp, WrapperStore};
 use crate::application::{
     EventStore, Exit, Generators, RunNotFound, RunReads, SessionOwners, SessionResourceStore,
     SessionStepStore, Spawned, TaskReads, TelemetrySink,
 };
+use crate::domain::queue_service::wrapper_actor_id;
 use crate::domain::queue_service::{
     API_VERSION, LOCK_FILE, LOG_FILE, MAX_ANSWER_BYTES, MAX_REQUEST_BYTES, OWNER_PID_ENV,
     Principal, SERVICE_DIR, SOCKET_FILE, STATE_FILE, ServiceDenial, ServiceErrorCode,
     ServiceRequest, ServiceResponse, ServiceState, UseCase,
 };
 use crate::domain::session_step::StepTarget;
+use crate::domain::sessions::SessionHook;
+use crate::domain::task_replan::Fence;
 use crate::domain::telemetry::{HeldTelemetry, ReportRecorded, TargetFacts, TelemetryReport};
 use crate::domain::{
     ActorContext, ActorRole, Answerer, Ask, AskId, EventKind, Finding, FindingId, FindingOutcome,
-    FindingStatus, LeaseToken, NewAsk, NewFinding, NewNote, PlannerId, ProposalId, RequestId,
-    RunEvent, RunId, RunStatus, TaskId,
+    FindingStatus, LeaseToken, NewAsk, NewFinding, NewNote, PlannerId, PlannerSession, ProposalId,
+    Reason, RequestId, RunEvent, RunId, RunStatus, TaskId, TaskRun,
 };
 
 /// The tokens' principals in [`SERVICE_DIR`].
@@ -1100,6 +1105,222 @@ fn call_broker(
         .with_context(|| format!("the queue broker's answer (status {status}) does not read"))
 }
 
+// --- A session wrapper's store (ADR-t3102-1 decision 4) ----------------------
+
+/// A session wrapper's [`WrapperStore`] through the queue service: each
+/// method is one [`SessionOp`] the service does as the wrapper's principal,
+/// whose token the control side issued under the queue's `service/`
+/// ([`credential_path`] of [`wrapper_actor_id`]) before it started the
+/// wrapper. The wrapper's process opens no queue: a service that does not
+/// answer, or refuses, is the method's error (fail closed).
+#[derive(Debug, Clone)]
+pub struct ServiceWrapperStore {
+    pub client: Client,
+    /// The run or the planner the wrapper runs the session of.
+    pub target: StepTarget,
+}
+
+impl ServiceWrapperStore {
+    /// The store of the wrapper of `target` of the queue at `db`: the
+    /// queue's socket and the file of the token issued for the wrapper.
+    pub fn of_queue(db: &Path, target: StepTarget) -> Self {
+        let queue_dir = queue_dir_of(db);
+        Self {
+            client: Client {
+                route: ClientRoute::Socket(socket_path(&queue_dir)),
+                credential: Some(credential_path(&queue_dir, &wrapper_actor_id(&target))),
+            },
+            target,
+        }
+    }
+
+    /// `op`'s answer, the method's value.
+    fn call(&self, op: &SessionOp) -> Result<Value> {
+        let mut answer = self
+            .client
+            .call(op.use_case(), serde_json::to_value(op)?)
+            .with_context(|| {
+                let params = serde_json::to_value(op).unwrap_or_default();
+                format!(
+                    "the queue service did not do {} for the session wrapper of {} {}, which \
+                     opens no queue itself",
+                    params["op"].as_str().unwrap_or("the operation"),
+                    self.target.kind.as_str(),
+                    self.target.id
+                )
+            })?;
+        Ok(answer
+            .get_mut("value")
+            .map(Value::take)
+            .unwrap_or(Value::Null))
+    }
+
+    /// `op`'s answer read as `T`.
+    fn read<T: serde::de::DeserializeOwned>(&self, op: &SessionOp) -> Result<T> {
+        serde_json::from_value(self.call(op)?)
+            .context("the queue service's answer to the session wrapper does not read")
+    }
+
+    fn done(&self, op: &SessionOp) -> Result<()> {
+        self.call(op).map(drop)
+    }
+}
+
+impl WrapperStore for ServiceWrapperStore {
+    fn run(&self, id: &RunId) -> Result<TaskRun> {
+        self.read(&SessionOp::Run { run: id.clone() })
+    }
+    fn run_events(&self, id: &RunId) -> Result<Vec<RunEvent>> {
+        self.read(&SessionOp::RunEvents { run: id.clone() })
+    }
+    fn turn_fence(&self, task: TaskId) -> Result<Option<Fence>> {
+        self.read(&SessionOp::TurnFence { task })
+    }
+    fn planner(&self, id: PlannerId) -> Result<PlannerSession> {
+        self.read(&SessionOp::Planner { planner: id })
+    }
+    fn planner_turn_events(&self, id: PlannerId) -> Result<Vec<RunEvent>> {
+        self.read(&SessionOp::PlannerTurnEvents { planner: id })
+    }
+    fn repository_binding(&self) -> Result<Option<String>> {
+        self.read(&SessionOp::RepositoryBinding)
+    }
+    fn register_wrapper(&mut self, id: &RunId, token: &LeaseToken, pid: u32) -> Result<()> {
+        self.done(&SessionOp::RegisterWrapper {
+            run: id.clone(),
+            lease: token.clone(),
+            pid,
+            resume: false,
+        })
+    }
+    fn register_resume_wrapper(&mut self, id: &RunId, token: &LeaseToken, pid: u32) -> Result<()> {
+        self.done(&SessionOp::RegisterWrapper {
+            run: id.clone(),
+            lease: token.clone(),
+            pid,
+            resume: true,
+        })
+    }
+    fn register_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32) -> Result<()> {
+        self.done(&SessionOp::RegisterAgent {
+            run: id.clone(),
+            wrapper_pid,
+            agent_pid,
+            start: AgentStart::First,
+        })
+    }
+    fn register_resume_agent(
+        &mut self,
+        id: &RunId,
+        wrapper_pid: u32,
+        agent_pid: u32,
+    ) -> Result<()> {
+        self.done(&SessionOp::RegisterAgent {
+            run: id.clone(),
+            wrapper_pid,
+            agent_pid,
+            start: AgentStart::Resume,
+        })
+    }
+    fn register_turn_agent(&mut self, id: &RunId, wrapper_pid: u32, agent_pid: u32) -> Result<()> {
+        self.done(&SessionOp::RegisterAgent {
+            run: id.clone(),
+            wrapper_pid,
+            agent_pid,
+            start: AgentStart::Turn,
+        })
+    }
+    fn heartbeat_wrapper(&self, id: &RunId, pid: u32) -> Result<()> {
+        self.done(&SessionOp::HeartbeatWrapper {
+            run: id.clone(),
+            pid,
+        })
+    }
+    fn wrapper_exited(&mut self, id: &RunId, pid: u32, exit_code: i32) -> Result<()> {
+        self.done(&SessionOp::WrapperExited {
+            run: id.clone(),
+            pid,
+            exit_code,
+        })
+    }
+    fn record_runtime_error(&mut self, id: &RunId, message: &str, reason: &Reason) -> Result<()> {
+        self.done(&SessionOp::RuntimeError {
+            run: id.clone(),
+            message: message.to_owned(),
+            reason: ReasonParams {
+                code: reason.code,
+                detail: reason.detail.clone(),
+            },
+        })
+    }
+    fn register_planner_wrapper(&self, id: PlannerId, pid: u32) -> Result<()> {
+        self.done(&SessionOp::RegisterPlannerWrapper { planner: id, pid })
+    }
+    fn register_planner_agent(&self, id: PlannerId, wrapper_pid: u32, agent: u32) -> Result<()> {
+        self.done(&SessionOp::RegisterPlannerAgent {
+            planner: id,
+            wrapper_pid,
+            agent_pid: agent,
+        })
+    }
+    fn heartbeat_planner(&self, id: PlannerId, wrapper_pid: u32) -> Result<()> {
+        self.done(&SessionOp::HeartbeatPlanner {
+            planner: id,
+            wrapper_pid,
+        })
+    }
+    fn planner_exited(&self, id: PlannerId, wrapper_pid: u32, exit_code: i32) -> Result<()> {
+        self.done(&SessionOp::PlannerExited {
+            planner: id,
+            wrapper_pid,
+            exit_code,
+        })
+    }
+    fn record_runtime_event(&self, id: &RunId, kind: EventKind, payload: Value) -> Result<()> {
+        self.done(&SessionOp::RuntimeEvent {
+            run: id.clone(),
+            kind: kind.as_str().to_owned(),
+            payload,
+        })
+    }
+    /// The service records a planner's wrapper's events of the queue only
+    /// with its planner named (`planner_id`), which one that does not name
+    /// it (an agent found again at its start) is given here.
+    fn record_queue_event(&self, kind: EventKind, mut payload: Value) -> Result<()> {
+        if let (Value::Object(fields), Ok(planner)) = (&mut payload, self.target.id.parse::<i64>())
+        {
+            fields
+                .entry("planner_id")
+                .or_insert_with(|| Value::from(planner));
+        }
+        self.done(&SessionOp::QueueEvent {
+            owner: self.target.clone(),
+            kind: kind.as_str().to_owned(),
+            payload,
+        })
+    }
+    fn record_session_hook(&self, hook: &SessionHook) -> Result<Value> {
+        self.call(&SessionOp::Hook { hook: hook.clone() })
+    }
+    fn as_events(&self) -> &dyn ExecutorEvents {
+        self
+    }
+}
+
+impl ExecutorEvents for ServiceWrapperStore {
+    fn record_agent_event(
+        &self,
+        run: Option<&RunId>,
+        kind: EventKind,
+        payload: Value,
+    ) -> Result<()> {
+        match run {
+            Some(run) => self.record_runtime_event(run, kind, payload),
+            None => self.record_queue_event(kind, payload),
+        }
+    }
+}
+
 // --- The service's record of itself ----------------------------------------
 
 /// What a running service records in `state.json`.
@@ -1860,6 +2081,10 @@ impl ServiceQueue for ServiceSqlite {
                 Err(error)
             }
         }
+    }
+
+    fn session(&mut self, op: &crate::application::session::SessionOp) -> Result<Value> {
+        crate::application::session::apply(&mut self.queue, op)
     }
 }
 

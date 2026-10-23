@@ -23,7 +23,7 @@ use crate::{
         prompt,
         recording::RecordingSessions,
         review::{self as reviewing, Review},
-        session::{self as wrapper, Session, WrapperStart},
+        session::{self as wrapper, Session, WrapperStart, WrapperStore},
         supervise::{self as supervisor, Heartbeat},
     },
     domain::{
@@ -118,7 +118,13 @@ pub fn ended_run_material(
 /// resuming (ADR-0019) instead of starting the worker. A wrapper the run
 /// refuses ends and leaves any workspace it runs in alone. Started in the
 /// background (`background`, ADR-t1404-1), it needs no terminal and has no
-/// workspace of its own ([`wrapper_entry`]).
+/// workspace of its own ([`wrapper_entry`]). It opens no queue itself (the
+/// dagq machine's parts a run in a clone readies before its turns still
+/// read and record on the queue): it reads and records through the queue
+/// service as the wrapper's principal,
+/// whose token the supervisor issued before it started the wrapper
+/// (ADR-t3102-1 decision 4), and a service it cannot reach ends it with
+/// that error.
 #[allow(clippy::too_many_arguments)]
 pub fn session(
     db: &Path,
@@ -140,7 +146,11 @@ pub fn session(
     // runs headless turns: a run still recorded on the interactive worker
     // (reopened before a resume converted it) takes its provider's
     // headless adapters (ADR-t1433-2).
-    let run = SqliteQueue::open(db)?.run(id)?;
+    let mut queue = crate::infrastructure::queue_service::ServiceWrapperStore::of_queue(
+        db,
+        crate::domain::session_step::StepTarget::run(id),
+    );
+    let run = WrapperStore::run(&queue, id)?;
     let worker = Worker::new(run.actual_provider(), WorkerMode::Headless)?;
     let adapter = workers.get(worker).with_context(|| {
         format!(
@@ -162,6 +172,7 @@ pub fn session(
     // decision 3, ADR-t1404-1 decision 3).
     crate::infrastructure::process::stop_groups_on_exit_signals();
     run_session(
+        &mut queue,
         db,
         id,
         token,
@@ -260,6 +271,7 @@ pub fn session_in_background_as_with_processes(
     dagq: Option<&Path>,
 ) -> Result<Value> {
     run_session_as(
+        &mut wrapper_queue(db, id)?,
         db,
         id,
         token,
@@ -292,6 +304,7 @@ pub fn session_in_background_with_containers(
     containers: &dyn crate::application::run_container::RunContainers,
 ) -> Result<Value> {
     run_session_as(
+        &mut wrapper_queue(db, id)?,
         db,
         id,
         token,
@@ -308,8 +321,21 @@ pub fn session_in_background_with_containers(
     )
 }
 
+/// The queue at `db` as the wrapper of run `id` writes it: a test's
+/// wrapper in a thread, which a library call runs on the queue itself.
+fn wrapper_queue(db: &Path, id: &RunId) -> Result<SqliteQueue> {
+    // The wrapper's events are its own, not the worker's (ADR-t728-1).
+    Ok(
+        SqliteQueue::open(db)?.with_actor(crate::domain::actor::ActorContext::instance(
+            crate::domain::actor::ActorRole::Wrapper,
+            id,
+        )),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_session(
+    queue: &mut dyn WrapperStore,
     db: &Path,
     id: &RunId,
     token: &LeaseToken,
@@ -321,6 +347,7 @@ fn run_session(
     sccache: Option<crate::domain::sccache::SccacheTarget>,
 ) -> Result<Value> {
     run_session_as(
+        queue,
         db,
         id,
         token,
@@ -337,9 +364,10 @@ fn run_session(
     )
 }
 
-/// [`run_session`] as the wrapper `pid`.
+/// [`run_session`] as the wrapper `pid`, on `queue`.
 #[allow(clippy::too_many_arguments)]
 fn run_session_as(
+    queue: &mut dyn WrapperStore,
     db: &Path,
     id: &RunId,
     token: &LeaseToken,
@@ -354,10 +382,6 @@ fn run_session_as(
     dagq: Option<&Path>,
     containers: Option<&dyn crate::application::run_container::RunContainers>,
 ) -> Result<Value> {
-    // The wrapper's events are its own, not the worker's (ADR-t728-1).
-    let mut queue = SqliteQueue::open(db)?.with_actor(
-        crate::domain::actor::ActorContext::instance(crate::domain::actor::ActorRole::Wrapper, id),
-    );
     // The wrapper only looks at the server and makes the guard of its
     // turns (ADR-t2086-1); the supervisor starts the server.
     let looker = crate::infrastructure::sccache::SystemSccache {
@@ -368,7 +392,11 @@ fn run_session_as(
         dagq: dagq.map(Path::to_path_buf),
     };
     // Read again before each turn (goal 38).
-    let bound_main = crate::compose::bound_main_checkout(&queue);
+    let bound_main = queue.repository_binding().map(|binding| {
+        binding.map(|common_dir| {
+            crate::infrastructure::adapters::main_checkout_of(Path::new(&common_dir))
+        })
+    });
     let checkout = match &bound_main {
         Ok(found) => Ok(found
             .as_ref()
@@ -397,7 +425,7 @@ fn run_session_as(
     let runtimes = move || bound.read();
     wrapper::run_session(
         Session {
-            queue: &mut queue,
+            queue,
             db,
             provider,
             other,

@@ -277,3 +277,17 @@ pub fn session_owner(db: &Path, session: &str) -> Option<String> {
         .unwrap()
         .map(|owner| format!("{}:{}", owner.target.kind.as_str(), owner.target.id))
 }
+
+/// Serve the queue at `db` and issue the token of the session wrapper of
+/// `target` (of `task`, a run's), as the supervisor does before it starts
+/// the wrapper (ADR-t3102-1 decisions 2 and 4): a test that starts a
+/// wrapper's process itself, which reaches the queue only through its
+/// service.
+pub fn wrapper_token(
+    db: &Path,
+    target: &dagq::domain::session_step::StepTarget,
+    task: Option<dagq::domain::TaskId>,
+) {
+    serve(db);
+    service::issue(db.parent().unwrap(), &Principal::wrapper(target, task), 1).unwrap();
+}
