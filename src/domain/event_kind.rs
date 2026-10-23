@@ -35,7 +35,8 @@
 //!   `known_dialog_unanswered`) and of the run environment
 //!   (`run_env_changed`, `run_env_program_*`), and the issue and the
 //!   revocation of a run's executor's telemetry token
-//!   (`telemetry_token_*`). Named in full too: `worker_mode_converted`, `supervision_finished`,
+//!   (`telemetry_token_*`) and the environment it is attached to
+//!   (`environment_attached`). Named in full too: `worker_mode_converted`, `supervision_finished`,
 //!   `agent_started`, `approve_withheld`, `stale_receipt_*`, `slots_full_*`,
 //!   `queue_hold_applied`, `usage_limited`, `auth_required`,
 //!   `conflicts_config_changed`, `first_commit_observed`,
@@ -179,6 +180,7 @@ event_kinds! {
     DraftRevisitCleared => "draft_revisit_cleared",
     DraftRevisitDue => "draft_revisit_due",
     DraftRevisitSet => "draft_revisit_set",
+    EnvironmentAttached => "environment_attached",
     EvidenceMissing => "evidence_missing",
     ExitRequestTimedOut => "exit_request_timed_out",
     ExitRequested => "exit_requested",
@@ -1591,6 +1593,7 @@ mod tests {
             (EventKind::DraftRevisitCleared, "draft_revisit_cleared"),
             (EventKind::DraftRevisitDue, "draft_revisit_due"),
             (EventKind::DraftRevisitSet, "draft_revisit_set"),
+            (EventKind::EnvironmentAttached, "environment_attached"),
             (EventKind::EvidenceMissing, "evidence_missing"),
             (EventKind::ExitRequestTimedOut, "exit_request_timed_out"),
             (EventKind::ExitRequested, "exit_requested"),

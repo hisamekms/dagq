@@ -22,6 +22,7 @@ related:
   - design-main-history
   - design-supervisor-lifecycle-host-metrics
   - design-measurement-commands
+  - design-measurement-environment
 ---
 
 # 計測
@@ -31,11 +32,14 @@ related:
 > ほかの節は計測の作り直しの今の予定で、まだ`src/`に無い。
 > 今動いている計測は[計測のコマンド](supervisor-lifecycle/commands.md)と最初のcommitの観測（`first_commit_observed`）が持ち、この文書はそれらを変えない。
 
-決めた理由はADR-t1662-1（計測のモデル）・ADR-t1662-2（ストアの抽象化）・ADR-t1662-3（実行する側と送る口とコマンドの分類）が持つ。ここはeventの欄・列とJSONの形・数値・関数の名前の予定を持つ。
+決めた理由はADR-t1662-1〜3が持つ。
+ここはeventの欄・列とJSONの形・数値・関数の名前の予定を持つ。
 
 ## SSOTとビュー
 
-計測が扱う記録の論理ストアと材料の区分（ADR-t1662-2決定1・2）。SSOTは消えてはいけない正本、ビューはSSOTから作り直せるもの、材料は消えてよく台帳と統計が読まないもの。計測の層（台帳と統計）はEventStore・SessionStepStore・NodeSampleStoreだけを読み、StateStoreを読まない（D1）。
+計測が扱う記録の論理ストアと材料の区分（ADR-t1662-2決定1・2）。
+SSOTは消えてはいけない正本、ビューはSSOTから作り直せるもの、材料は消えてよく台帳と統計が読まないもの。
+計測の層（台帳と統計）はEventStore・SessionStepStore・NodeSampleStore・RunResourceStoreだけを読み、StateStoreを読まない（D1）。
 論理ストアのportは`application::ports`の`shared`の`EventStore`と`StateStore`で、ほかは`observation`に置く。
 
 | 論理ストア | 中身 | 区分 | 今のアダプタ |
@@ -43,7 +47,8 @@ related:
 | StateStore | 今の状態（task・goal・run・ask・proposal・planner・lease・supervisorなど） | SSOT | queue.dbの状態の表 |
 | EventStore | 起きたことのappend-onlyの記録（runの遷移・`run_phase_changed`・claimの前の区間・今の判定の記録・queueの出来事・mainの履歴・[task/goal/findingの属性](attribute-records.md)・Executionのtoken） | SSOT | queue.dbの`run_events`（runの無いqueueのeventを含む）。EventStoreとStateStoreは同じtransactionで確定する |
 | SessionStepStore | sessionのstep・中から測った資源と、対象と持ち主。`(session_id, seq)`で重複を除き、抜けを残す | SSOT | queue.dbの`session_steps`ほか |
-| NodeSampleStore | nodeの資源の連続の値（load average・CPU・メモリ・swap・pageout・ファイルシステムの空き） | SSOT | queue.dbの`node_samples`（hostのCSVは写しで、保持の期間の分を一度取り込む。[hostの負荷](supervisor-lifecycle/host-metrics.md)） |
+| NodeSampleStore | nodeの資源の連続の値（load average・CPU・メモリ・swap・pageout・ファイルシステムの空き・共通の単位） | SSOT | queue.dbの`node_samples`（hostのCSVは写しで、保持の期間の分を一度取り込む。[hostの負荷](supervisor-lifecycle/host-metrics.md)） |
+| RunResourceStore | runの資源を外から測った窓 | SSOT | queue.dbの`run_resources` |
 | LedgerStore | 台帳（run・task・session・queue・nodeの行）。旧方式の行のlegacyのJSONは凍結して捨てない | ビュー | queue.dbの`ledger_rows` |
 | ReportStore | 統計の出力（日次・週次のレポート） | ビュー | queueのdirの`reports/`のファイルと`report_written`のevent |
 | （材料） | run dir（receipt・prompt・`worktime.jsonl`ほか）・log・hostのCSV・Claude Codeのtranscript・Codexのrollout | 材料 | queueのdirとrun dirのファイル。Claude Codeのtranscriptはhostの`$CLAUDE_CONFIG_DIR`か`~/.claude`にあり、containerで動くrunのworkerのsessionのものはrun dirのagentのhomeにある（[Container runtime](container-runtime.md)）。sessionの有無の判断と区間の計測が読み、非対話のworkerの区間のトークン数はtranscriptでなくturnのstreamから取る（取り込んだ値はEventStore・SessionStepStore・NodeSampleStoreに入る） |
@@ -188,7 +193,7 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 - **周回**: supervisorの周回が間隔ごとに、drainとhandoffの間も、jobのthreadで動く（D7）。
   着地の処理の中では作らず、runtimeの制御（claim・slot・resume・着地）は台帳を読まない。
 - **置き場**: 係の状態（入力ごとのカーソル・印・猶予を待つ行）は観測と分析の状態、組み立ては`compose::observation`にあり、`Supervisor`の本体に状態を足さない。
-- **印**: EventStore・NodeSampleStore・SessionStepStoreのカーソルの後に届いた入力だけを読み、そのrun・task・それが変えたsession・queue・readyだったtaskの行（記録でない終わりも）・nodeの時間に印を付ける（全行を走査しない）。
+- **印**: EventStore・NodeSampleStore・SessionStepStore・runの資源のカーソルの後に届いた入力だけを読み、そのrun・task・それが変えたsession・queue・readyだったtaskの行（記録でない終わりも）・nodeの時間に印を付ける（全行を走査しない）。
   畳むrun・taskのeventはその都度読み、queue全体の畳みは届いたeventを一度だけ読んで持ち越す（`builder::Kept`）。
   持ち越すのは本（一生・待ち・各eventがどの行の記録か・pushに失敗したrunの宛先と閉じたpushのid）と、確定していないsession・queue・run・taskの行が読むeventだけ（`Kept`のdoc comment）。
   確定した行に後のeventが届けば、記録はstoreの行から、pushはidで読み戻す。
@@ -198,7 +203,7 @@ statsのslotの今の判定は状態表・run dirのmarker・processを入力に
 - **確定**（`final`）: run・taskは終わりから猶予の後で、`push_pending`には付けない。
   runは発行したtelemetryのtokenの失効の記録の後にだけ確定する。
   session・queue・nodeの行は`domain::ledger::settle`が決める（閉じた時刻か区間の終わりから猶予の後で、閉じていない行は確定しない）。
-  資源の最後の記録の条件は、それを記録するtaskが足す（予定）。
+  runは資源の最後の窓の記録の後にだけ確定する（[実行環境と資源](measurement-environment.md#台帳との順序)）。
 - **旧方式**: 切り替え前のrun（`run_phase_changed`が無い）とそのtaskは区間に畳まず、`legacy`に今の`RunMeasures`から値を一度だけ書く。
   storeは値と版を上書きせず、後の入力では記録だけを追う。
 - **保持**: nodeの行はhostの負荷と同じ日数で消す。
@@ -264,8 +269,7 @@ claimの属性は`run_claimed`の`attributes`（キーと値の開いた組）�
 - **所属**: runの対象のstepはrunの行に畳み、runを持たない対象のstepはSessionStepStoreに持ってsessionの行で読む。
 - **sessionの登録**: 制御側がsessionを起動の前に、agentが名前を決めるsession（Codexのthread）は出力で読んだ時点で対象に登録する（経路は`application::telemetry_tokens`のmodule doc）。
   登録の前に送ったものは拒まれ、executorが送り直す。
-- **差し替える口**: 実行環境の口・資源の口・送る口（資源の単位は`ResourceSample`のdoc comment）。
-  3つの口のアダプタは同じ適合test一式を通す。
+- **差し替える口**: 送る口・環境と資源の口（[実行環境と資源](measurement-environment.md)）。
 - **OpenTelemetry**: 区間はspan、stepは子のspan、タグと属性はattributeに写す。記録の経路にはしない。
 
 ## コマンドの形と分類

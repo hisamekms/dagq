@@ -1003,13 +1003,15 @@ pub(super) fn release_port(
 /// worktrees and their builds, the one the disk checks read (task 1371):
 /// `runs/`, else the queue's dir; the processes split by the profiles
 /// `checkout`'s `dagq.toml` declares, resolved against `profiles`
-/// ([`crate::infrastructure::run_env::toolchains_in_use`]).
+/// ([`crate::infrastructure::run_env::toolchains_in_use`]), and in the
+/// common units as `environment` measures the node.
 pub(super) fn host_metrics_port(
     db: &Path,
     checkout: &Path,
     profiles: &'static crate::domain::toolchain::ProfileRegistry,
     settings: HostMetricsSettings,
     store: Arc<dyn QueueOpener<dyn crate::application::NodeSampleStore + Send>>,
+    environment: Arc<dyn crate::application::ExecutionEnvironment>,
 ) -> crate::application::supervise::HostMetricsPort {
     let queue_dir = db.parent().unwrap_or(Path::new(".")).to_path_buf();
     let dir = queue_dir.join(crate::domain::host_metrics::HOST_DIR);
@@ -1026,6 +1028,7 @@ pub(super) fn host_metrics_port(
         utc_offset: clock::local_utc_offset,
         files: Arc::new(crate::infrastructure::host_metrics::HostMetricsDir(dir)),
         store,
+        environment,
     }
 }
 

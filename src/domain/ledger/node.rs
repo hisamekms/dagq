@@ -99,6 +99,7 @@ impl Kept {
 
     fn node_sample(&self, node: &str) -> Option<NodeSample> {
         Some(NodeSample {
+            resources: Default::default(),
             id: self.id,
             node_id: node.to_owned(),
             local_day: self.day,

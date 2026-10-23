@@ -6,6 +6,9 @@ use super::execution::{CoordinationReads, RunLog};
 use super::host::SupervisorReads;
 use super::planning::{PlanningRecords, TaskReads};
 use super::shared::{AskStore, EventStore};
+use crate::domain::environment::{
+    EnvironmentAttached, EnvironmentWait, Resources, RunProcesses, RunResource,
+};
 use crate::domain::host_metrics::{HostSample, NodeSample, SampleSource};
 use crate::domain::ledger::{
     LedgerKind, LedgerRow,
@@ -16,7 +19,7 @@ use crate::domain::session_step::{
     StepsRecorded,
 };
 use crate::domain::telemetry::{ReportRecorded, TelemetryReport};
-use crate::domain::{AskId, EventId, EventKind, FindingView, RunEvent, TaskId};
+use crate::domain::{AskId, EventId, EventKind, FindingView, RunEvent, RunId, TaskId};
 use anyhow::Result;
 
 /// What one role wrote in a window ([`ObserverLog::written_by`]): finding
@@ -131,16 +134,23 @@ pub trait LedgerStore {
 /// host運用's record of the host's load writes it
 /// ([`crate::domain::host_metrics`]); the measurement reads it.
 pub trait NodeSampleStore {
-    /// Record `sample` of `node` on its local day `day` from `source`
-    /// unless a row of `node` is at its second, or on the same `day` less
-    /// than `apart_secs` from it
-    /// ([`crate::domain::host_metrics::apart_secs`]: another supervisor of
-    /// the queue sampled); whether it was written.
+    /// Record `sample` of `node` on its local day `day` from `source`, with
+    /// the same sample in the common units in the same row, unless a row of
+    /// `node` is at its second, or on the same `day` less than `apart_secs`
+    /// from it ([`crate::domain::host_metrics::apart_secs`]: another
+    /// supervisor of the queue sampled); whether it was written.
+    /// `resources` makes the common units from the second of the node's
+    /// row before the sample (`None` for its first), read in the same
+    /// write, so the time the sample stands for is the time since that row
+    /// ([`crate::domain::environment::sample_stands_for`]); a sample
+    /// written after a later row of `node` gets its own second, so it
+    /// stands for no time the later row counted.
     fn record_node_sample(
         &self,
         node: &str,
         day: i64,
         sample: &HostSample,
+        resources: &dyn Fn(Option<i64>) -> Resources,
         source: SampleSource,
         apart_secs: i64,
     ) -> Result<bool>;
@@ -236,6 +246,70 @@ pub trait SessionResourceStore {
     ) -> Result<StepsRecorded>;
     /// The samples of `target`, in the order they came in.
     fn target_resources(&self, target: &StepTarget) -> Result<Vec<SessionResource>>;
+    /// At most `limit` samples that came in after the sample `after` (their
+    /// id), in the order they came in: the cursor of what builds the
+    /// ledger.
+    fn resources_after(&self, after: i64, limit: usize) -> Result<Vec<SessionResource>>;
+}
+
+/// The resources of the runs the supervisor measured from outside
+/// (ADR-t1662-1 decision 8 and (ii), ADR-t1662-3 decisions 1 and 4,
+/// docs/design/measurement.md "実行環境と資源"): one row per window, in the
+/// order they were recorded, each under the `environment_attached` of the
+/// run it was measured in. A run's ledger row folds them into its
+/// intervals.
+pub trait RunResourceStore {
+    /// Record `row` (its `id` is the store's to give); its id.
+    fn record_run_resource(&self, row: &RunResource) -> Result<i64>;
+    /// The windows of `run`, in the order they were recorded.
+    fn run_resources(&self, run: &RunId) -> Result<Vec<RunResource>>;
+    /// At most `limit` windows recorded after the window `after` (their id),
+    /// in that order: the cursor of what builds the ledger.
+    fn run_resources_after(&self, after: i64, limit: usize) -> Result<Vec<RunResource>>;
+    /// The runs whose last `environment_attached` has no `last` window yet,
+    /// each with that event's id.
+    fn open_attachments(&self) -> Result<Vec<(RunId, i64)>>;
+}
+
+/// The environment the runs execute in (ADR-t1662-3 decisions 3 to 6,
+/// docs/design/measurement.md "実行環境と資源"): it names itself as a run
+/// is attached to it, and measures from outside, in the common units, the
+/// runs' resources and the node's. The adapter now is the host's
+/// (`infrastructure::environment::HostEnvironment`); a container's or a
+/// cluster's goes in its place once it passes the same tests. An
+/// environment that cannot measure a run from outside says so
+/// ([`Self::measures_from_outside`]), and the run's executor measures it
+/// from inside and sends it through the [`TelemetrySink`] instead.
+pub trait ExecutionEnvironment: Send + Sync {
+    /// What it is, as a run is attached to it (`environment_attached`).
+    fn attached(&self) -> EnvironmentAttached;
+    /// Whether it measures a run's resources from outside.
+    fn measures_from_outside(&self) -> bool;
+    /// The waits it adds to a run (none on the host), each a phase of
+    /// `blocker: infra` ([`crate::domain::run_phase::Phase::Environment`]).
+    fn waits(&self) -> &'static [EnvironmentWait];
+    /// Measure from outside what each run of `runs` (its id, the pids it
+    /// registered and its window) spent in its window: one entry per run
+    /// it measured, none for a run it cannot.
+    fn measure_runs(&self, runs: &[RunProcesses]) -> Result<Vec<(RunId, Resources)>>;
+    /// Forget what it kept of `run` between its measures.
+    fn forget_run(&self, run: &RunId);
+    /// The node's resources over `interval` from one `sample` of the
+    /// host's load pass, in the common units.
+    fn node_resources(&self, sample: &HostSample, interval: std::time::Duration) -> Resources;
+}
+
+/// What the supervisor's measure of the runs' resources reads and writes:
+/// the runs' events (their attachment) and leases (who holds them), the
+/// supervisors (whether that one lives), and the windows it records.
+pub trait ResourceQueue:
+    EventStore + RunResourceStore + CoordinationReads + SupervisorReads
+{
+}
+
+impl<T: EventStore + RunResourceStore + CoordinationReads + SupervisorReads + ?Sized> ResourceQueue
+    for T
+{
 }
 
 /// The owners of the sessions (ADR-t1662-3 decision 10): the control side
@@ -280,17 +354,32 @@ pub trait TelemetrySink {
 }
 
 /// What builds the ledger reads and writes (docs/design/measurement.md
-/// "台帳を作る係"): the EventStore, the NodeSampleStore and the
+/// "台帳を作る係"): the EventStore, the NodeSampleStore, the
 /// SessionStepStore (with the owners, whose registration places a
-/// session's steps on the supervisor's clock), its inputs, and the
-/// LedgerStore. Every store of the five is one.
+/// session's steps and samples on the supervisor's clock, and the samples
+/// an executor measured) and the runs' resources, its inputs, and the
+/// LedgerStore. Every store of the seven is one.
 pub trait LedgerQueue:
-    EventStore + LedgerStore + NodeSampleStore + SessionStepStore + SessionOwners
+    EventStore
+    + LedgerStore
+    + NodeSampleStore
+    + SessionStepStore
+    + SessionOwners
+    + SessionResourceStore
+    + RunResourceStore
 {
 }
 
-impl<T: EventStore + LedgerStore + NodeSampleStore + SessionStepStore + SessionOwners + ?Sized>
-    LedgerQueue for T
+impl<
+    T: EventStore
+        + LedgerStore
+        + NodeSampleStore
+        + SessionStepStore
+        + SessionOwners
+        + SessionResourceStore
+        + RunResourceStore
+        + ?Sized,
+> LedgerQueue for T
 {
 }
 

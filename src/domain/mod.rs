@@ -1242,6 +1242,7 @@ pub mod container_runtime;
 pub mod disk;
 pub mod e2e_deadline;
 pub mod e2e_quarantine;
+pub mod environment;
 mod error;
 pub mod event_kind;
 pub use event_kind::{EventKind, RecordedKind};

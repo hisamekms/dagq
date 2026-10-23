@@ -522,6 +522,7 @@ impl OneShot {
             user_config: None,
             verification_timeout: self.verification_timeout,
             profiles: self.profiles,
+            children: crate::domain::environment::RunChildren::default(),
         };
         // The free disk space a landing's verification needs, as the
         // supervisor reads it (task 638): a `[disk]` that cannot be read

@@ -2,8 +2,9 @@
 //! docs/design/measurement.md "台帳を作る係"): every
 //! [`LedgerPort::interval`], draining and handing off too, a job thread
 //! reads the inputs that came in after the builder's cursors (the
-//! events, the node samples and the session steps), folds what they mark,
-//! a run's steps into its row, and writes the rows
+//! events, the node samples, the session steps and the runs' resources),
+//! folds what they mark, a run's steps and resources into its row, and
+//! writes the rows
 //! [`crate::domain::ledger::builder`] says,
 //! at most [`WRITES_PER_PASS`] a pass. Once a local day it removes the
 //! node rows past the host's load's retention and the session steps past
@@ -33,8 +34,8 @@ use crate::domain::EventFilter;
 use crate::domain::host_metrics::{local_day, oldest_kept_day};
 use crate::domain::ledger::LedgerKind;
 use crate::domain::ledger::builder::{
-    Builder, CHECKS_PER_PASS, EVENTS_PER_READ, Inputs, KeptSize, RunSteps, STEPS_PER_READ, Target,
-    WRITES_PER_PASS, behind, build, hour, keeps_settled, writes,
+    Builder, CHECKS_PER_PASS, EVENTS_PER_READ, Inputs, KeptSize, RESOURCES_PER_READ, RunResources,
+    RunSteps, STEPS_PER_READ, Target, WRITES_PER_PASS, behind, build, hour, keeps_settled, writes,
 };
 use crate::domain::session_step::{self, StepTarget};
 
@@ -196,6 +197,14 @@ fn pass(
             break;
         }
     }
+    loop {
+        let outside = store.run_resources_after(builder.resources, RESOURCES_PER_READ)?;
+        let inside = store.resources_after(builder.inside_resources, RESOURCES_PER_READ)?;
+        builder.mark_resources(&outside, &inside);
+        if outside.len() < RESOURCES_PER_READ && inside.len() < RESOURCES_PER_READ {
+            break;
+        }
+    }
     // What it read came by then.
     let now_ms = builder.folds_at(now_ms);
     builder.due(now_ms);
@@ -285,7 +294,8 @@ fn write(
 
 /// Fold `target`, a run's or a task's on its events up to the builder's
 /// cursor (a run's on its steps up to the step cursor too, over what the
-/// stored row folded of them), and write it when [`writes`] says so and it
+/// stored row folded of them, and on its resources up to the resource
+/// cursors), and write it when [`writes`] says so and it
 /// is not [`behind`] the stored row (then it stays marked), only over the
 /// row it read
 /// ([`crate::application::LedgerStore::write_ledger_row_over`]). False
@@ -316,6 +326,24 @@ fn fold_and_write(
                 }
             }
             inputs.read_steps(run, steps);
+            let (outside_through, inside_through) = (builder.resources, builder.inside_resources);
+            let outside = store
+                .run_resources(&id)?
+                .into_iter()
+                .filter(|window| window.id <= outside_through)
+                .collect();
+            let inside = store
+                .target_resources(&StepTarget::run(&id))?
+                .into_iter()
+                .filter(|sample| sample.id <= inside_through)
+                .collect();
+            let mut resources = RunResources::new(outside, inside, stored.as_ref());
+            for session in resources.sessions() {
+                if let Some(owner) = store.session_owner(&session)? {
+                    resources.starts.insert(session, owner.registered_at);
+                }
+            }
+            inputs.read_resources(run, resources);
             store.run_events(&id)?
         }
         Target::Task(task) => store.task_events(*task)?,

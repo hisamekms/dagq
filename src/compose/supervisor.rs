@@ -10,7 +10,7 @@ use super::{
         self, HostMetricsSettings, QueueBrokerOptions, QueueRelayOptions, QueueServiceOptions,
         ReleaseIndexPort, SccacheOptions,
     },
-    observation::{self, CiWatchOptions, LedgerOptions},
+    observation::{self, CiWatchOptions, EnvironmentOptions, LedgerOptions},
     planning::PLANNER_TIMEOUT,
     provider_checks, worker_adapters,
 };
@@ -338,6 +338,12 @@ pub struct SuperviseOptions {
     /// CLI's supervisor does but for `--once`; `None` (the tests unless
     /// they ask) builds none.
     pub ledger: Option<LedgerOptions>,
+    /// Name the environment of the runs as each starts
+    /// (`environment_attached`) and measure their resources from outside
+    /// (docs/design/measurement.md "実行環境と資源"): the CLI's supervisor
+    /// does but for `--once`; `None` (the tests unless they ask) does
+    /// neither. The host's load is put in the common units either way.
+    pub environment: Option<EnvironmentOptions>,
 }
 
 /// The processes [`SuperviseOptions::processes`](super::SuperviseOptions::processes) gives the supervisor.
@@ -477,6 +483,7 @@ impl SuperviseOptions {
             sccache: None,
             ci_watch: None,
             ledger: None,
+            environment: None,
         }
     }
 
@@ -829,6 +836,12 @@ pub fn supervise_with_reviewer(
         files: Arc::new(crate::infrastructure::queue_service::SystemServiceAccess),
         telemetry_files: Arc::new(crate::infrastructure::queue_service::SystemServiceAccess),
     };
+    let environment: Arc<dyn crate::application::ExecutionEnvironment> =
+        Arc::new(crate::infrastructure::environment::HostEnvironment::new());
+    // The processes the supervisor starts for its runs outside their
+    // workers' trees (their headless jobs, the landing's verification
+    // commands), which its measure of the runs' resources counts.
+    let run_children = crate::domain::environment::RunChildren::default();
     let host_metrics = options.host_metrics.clone().map(|settings| {
         host::host_metrics_port(
             &db,
@@ -841,6 +854,20 @@ pub fn supervise_with_reviewer(
                     Box::new(queue)
                 },
             }),
+            Arc::clone(&environment),
+        )
+    });
+    let resources = options.environment.as_ref().map(|settings| {
+        observation::resources_port(
+            settings,
+            Arc::clone(&environment),
+            Arc::new(SqlitePorts {
+                opener: opener(),
+                keep: |queue| -> Box<dyn crate::application::ResourceQueue + Send> {
+                    Box::new(queue)
+                },
+            }),
+            run_children.clone(),
         )
     });
     let ledger = options.ledger.as_ref().map(|settings| {
@@ -880,6 +907,7 @@ pub fn supervise_with_reviewer(
             user_config: options.user_config.clone(),
             verification_timeout: options.verification_timeout,
             profiles: options.profiles,
+            children: run_children.clone(),
         }),
         // The queue broker, the Claude credential, the runs' relays, the
         // dagq machine and the image are the parts of the container runtime
@@ -1008,6 +1036,11 @@ pub fn supervise_with_reviewer(
             .map(|settings| host::sccache_port(&db, settings, runner)),
         ci_watch,
         ledger,
+        environment: options
+            .environment
+            .is_some()
+            .then(|| Arc::clone(&environment)),
+        resources,
         layout,
     };
     let settings = LoopSettings {

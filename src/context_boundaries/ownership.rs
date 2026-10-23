@@ -349,6 +349,7 @@ pub(super) const TABLES: &[Table] = &[
     table("session_step_removed", Observation), // the SessionStepStore's seqs its retention removed
     table("session_resources", Observation), // the sessions' resource samples an executor measured
     table("session_owners", Observation), // the target the control side registered each session to
+    table("run_resources", Observation), // the runs' resources the supervisor measured from outside
     table("supervisors", Host),
     table("queue_repository", Host),
     table("schema_floor", Host),
@@ -390,6 +391,7 @@ pub(super) const STORES: &[Store] = &[
     store("src/infrastructure/runtime_store/ledger.rs", Observation),
     store("src/infrastructure/runtime_store/node_samples.rs", Observation), // NodeSampleStore
     store("src/infrastructure/runtime_store/session_steps.rs", Observation), // SessionStepStore
+    store("src/infrastructure/runtime_store/run_resources.rs", Observation), // RunResourceStore
     store("src/infrastructure/headless_jobs.rs", Host),
     store("src/infrastructure/schema.rs", Host),
     store("src/infrastructure/asks.rs", Shared), // AskStore
@@ -586,6 +588,9 @@ pub(super) const PORTS: &[Port] = &[
     port("TelemetrySink", Public(Only(&[Execution]))), // the executor sends its sessions' steps and resource samples through it
     port("SessionResourceStore", Internal), // the measurement's store of the resources an executor measured
     port("SessionOwners", Public(Only(&[Execution]))), // the control side registers the target a session is of before its executor reports
+    port("RunResourceStore", Internal), // the measurement's store of the runs' resources measured from outside
+    port("ResourceQueue", Internal), // what the measure of the runs' resources reads and writes
+    port("ExecutionEnvironment", Public(Only(&[Execution, Host]))), // the claim records the environment a run is attached to; host's record of its load measures the node in the common units
     port("MarkLog", Internal),
     port("SupervisorReads", Public(All)),
     port("SupervisorRegistry", Partial),

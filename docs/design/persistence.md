@@ -40,6 +40,7 @@ related:
   - adr-0063
   - design-domain-model
   - design-measurement
+  - design-measurement-environment
 ---
 
 # SQLite persistence
@@ -181,7 +182,6 @@ runの所有・supervisorの登録・runのファイルの約束（[ADR-0007](..
   heartbeatが新しい登録はPIDの判定に依らず消さない（drain中とhandoffの途中の登録を残すため）。
   heartbeatか停止の記録に失敗したときは消さず、staleとして次の掃除に任せる。
   `status`・`doctor`・`recover`は消さない。
-- 生存の証拠は`SUPERVISOR_ALIVE_INTERVAL_SECS`ごとの`supervisor_alive`に残り、その記録の失敗はheartbeatを止めない。
 - `recover`だけがtokenなしで未完了のrunを止め、同じトランザクションでleaseとプロセスを再検査する。
 - 着地（`integrate`）は自分のtokenでlease行を持ち、`integrating`から出る遷移はどれもそのlease行を要する。
   Gitの操作はトランザクションの外で行い、mainを進める前のエラーではrunを元のstatusに戻す。
@@ -194,7 +194,7 @@ runの所有・supervisorの登録・runのファイルの約束（[ADR-0007](..
 
 ### queue service
 
-queue service（[Queue service](queue-service.md)）もDBを開くプロセスの1つで、要求ごとに接続を開き、要求のprincipalのactorで書く。
+queue service（[Queue service](queue-service.md)）もDBを開くプロセスの1つである。
 DBを直接開く他のプロセスとは、SQLiteのトランザクションとleaseの規則で並ぶ。
 serviceのファイル（socket・lock・`state.json`・token）はqueueのディレクトリの`service/`に置き、DBには置かない。
 
@@ -214,6 +214,10 @@ serviceのファイル（socket・lock・`state.json`・token）はqueueのデ�
 - `session_owners`は制御側が登録したsessionの対象を持つ（時点は[計測](measurement.md#送る口)）。
   登録・step・sampleのどれかが別の対象のsessionは、登録もstepもsampleも拒む。
   保持は、登録が90日より前でstepもsampleも残らないsessionの行を消す。
+
+## runの資源
+
+`run_resources`はsupervisorが外から測ったrunの資源の窓を持ち、保持で消さない（[実行環境と資源](measurement-environment.md)）。
 
 ## follow-upの所属の判断
 

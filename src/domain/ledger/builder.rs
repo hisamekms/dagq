@@ -5,12 +5,13 @@
 //! that came in after its cursors, and writes what it says.
 //!
 //! - **Marks**: each input after a cursor (an EventStore event id, a
-//!   NodeSampleStore id, a SessionStepStore id) marks what it is an input
-//!   of ([`Builder::mark_events`], [`Builder::mark_samples`],
-//!   [`Builder::mark_steps`]): its run, its task, the session and queue
+//!   NodeSampleStore id, a SessionStepStore id, a run's resources' id)
+//!   marks what it is an input of ([`Builder::mark_events`],
+//!   [`Builder::mark_samples`], [`Builder::mark_steps`],
+//!   [`Builder::mark_resources`]): its run, its task, the session and queue
 //!   rows it changes (any event's: a claim ends a deferral, a run's event
-//!   moves the landing slot), its node and hour; a step its run only, and
-//!   a step of a target of no run nothing. A `push_finished`
+//!   moves the landing slot), its node and hour; a step or a window of
+//!   resources its run only, and one of a target of no run nothing. A `push_finished`
 //!   marks the runs this builder left pending on their push and their tasks
 //!   (another run's push may close them). No row is scanned to find a dirty
 //!   one. A builder starts with its cursors at 0, so a new process marks
@@ -58,11 +59,20 @@
 //!   the retention removed is placed too, and the retention keeps a run's
 //!   steps while it is marked and no row the store holds of it holds them
 //!   ([`Builder::steps_held_since`]).
+//! - **Resources**: a run's row folds into its intervals the windows of
+//!   its resources up to the resource cursors, those the supervisor
+//!   measured from outside, else those its executors measured from inside
+//!   ([`RunResources`], [`crate::domain::environment::fold`]). A window
+//!   recorded after the row was written, a late one after its `final`
+//!   too, is an input past its `inputs_through` (dirty).
 //! - **Settled** (`final`): a run or task once it ended (a pending push
 //!   has not) and [`SETTLE_GRACE_MS`] passed ([`run_settles`]), a run
 //!   only once its telemetry token's revocation is recorded too
 //!   ([`telemetry_revoked`]: while it is not, the run waits on the event
-//!   that records it, not on its grace); a session,
+//!   that records it, not on its grace) and the supervisor's last measure
+//!   of its resources is recorded
+//!   ([`crate::domain::environment::resources_recorded`]: while it is
+//!   not, the run waits on that window, which marks it); a session,
 //!   queue or node row by [`super::settle`]. A settled row an input reaches
 //!   later is folded and written again, and settled again after its grace;
 //!   for a task, that input is a later event of the task or of its runs,
@@ -112,10 +122,11 @@ use super::{
     session::SessionBook,
     settle::{self, SETTLE_GRACE_MS},
 };
+use crate::domain::environment::{self, CountedSample, Folded, RunResource, Window};
 use crate::domain::host_metrics::NodeSample;
 use crate::domain::pre_claim::{PreClaimBook, Started};
 use crate::domain::run_phase::{Phase, Recorded};
-use crate::domain::session_step::SessionStep;
+use crate::domain::session_step::{SessionResource, SessionStep};
 use crate::domain::stats::timestamp_millis;
 use crate::domain::supervisor_life::{Lives, supervisor_of};
 use crate::domain::{EventId, RunEvent, TaskId};
@@ -138,6 +149,10 @@ pub const EVENTS_PER_READ: usize = 5_000;
 
 /// How many steps after the step cursor a pass reads at a time.
 pub const STEPS_PER_READ: usize = 5_000;
+
+/// How many windows of resources after a resource cursor a pass reads at a
+/// time.
+pub const RESOURCES_PER_READ: usize = 5_000;
 
 /// What a mark is of.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -636,6 +651,10 @@ pub struct Builder {
     pub samples: i64,
     /// The last SessionStepStore id read (the order the steps came in).
     pub steps: i64,
+    /// The last id read of the runs' resources measured from outside.
+    pub resources: i64,
+    /// The last id read of the samples executors measured from inside.
+    pub inside_resources: i64,
     marks: BTreeSet<Target>,
     /// Where the next [`Self::take`] starts: the first mark the last pass
     /// left past its bounds (not taken, or put back, [`Self::put_back`]).
@@ -655,10 +674,10 @@ pub struct Builder {
     /// ([`waits_on_ready`]): the waits that move mark them
     /// ([`Self::mark_ready`]).
     ready_tasks: BTreeMap<TaskId, bool>,
-    /// The runs with steps read that no row the store holds of them holds
-    /// yet, each with when the earliest of those came in (unix ms): while
-    /// such a run is marked the retention keeps the steps from then on
-    /// ([`Self::steps_held_since`]).
+    /// The runs with steps or samples from inside read that no row the
+    /// store holds of them holds yet, each with when the earliest of those
+    /// came in (unix ms): while such a run is marked the retention keeps
+    /// the steps and the samples from then on ([`Self::steps_held_since`]).
     unsaved_steps: BTreeMap<String, i64>,
     /// The session and queue rows an event read since the rows were last
     /// built may have changed ([`Kept::add`]).
@@ -681,6 +700,8 @@ impl Default for Builder {
             read_ms: i64::MIN,
             samples: 0,
             steps: 0,
+            resources: 0,
+            inside_resources: 0,
             marks: BTreeSet::new(),
             next: None,
             rows_after: None,
@@ -805,6 +826,31 @@ impl Builder {
                 *since = (*since).min(step.received_at);
             }
             self.steps = self.steps.max(step.id);
+        }
+    }
+
+    /// Mark the runs the windows of resources `outside` (after
+    /// [`Self::resources`], the supervisor's) and `inside` (after
+    /// [`Self::inside_resources`], the executors') are of, and move the
+    /// cursors past them; the retention, which removes the samples from
+    /// inside with the steps, keeps them until the run's row holds them
+    /// ([`Self::steps_held_since`]). One of a target of no run marks
+    /// nothing.
+    pub fn mark_resources(&mut self, outside: &[RunResource], inside: &[SessionResource]) {
+        for window in outside {
+            self.marks.insert(Target::Run(window.run_id.clone()));
+            self.resources = self.resources.max(window.id);
+        }
+        for sample in inside {
+            if let Some(run) = sample.target.run_id() {
+                self.marks.insert(Target::Run(run.to_string()));
+                let since = self
+                    .unsaved_steps
+                    .entry(run.to_string())
+                    .or_insert(sample.received_at);
+                *since = (*since).min(sample.received_at);
+            }
+            self.inside_resources = self.inside_resources.max(sample.id);
         }
     }
 
@@ -1006,10 +1052,10 @@ impl Builder {
         }
     }
 
-    /// Since when (unix ms) the retention keeps the steps: the earliest
-    /// step read of a run still marked (past a pass's bound, or its write
-    /// failed) whose row the store does not hold them in yet. None when no
-    /// marked run waits on its steps. A run folded to no row (on its way)
+    /// Since when (unix ms) the retention keeps the steps and the samples
+    /// from inside: the earliest step or sample read of a run still marked
+    /// (past a pass's bound, or its write failed) whose row the store does
+    /// not hold them in yet. None when no marked run waits on them. A run folded to no row (on its way)
     /// holds nothing: its next input marks it, and steps it received more
     /// than the retention before it ends are not in its row.
     pub fn steps_held_since(&self) -> Option<i64> {
@@ -1060,7 +1106,10 @@ impl Builder {
 /// written), and for a run whose telemetry token's revocation is not
 /// recorded: the event that records it marks the run.
 fn settles_at(row: &LedgerRow) -> Option<i64> {
-    if row.is_legacy() || (row.kind == LedgerKind::Run && !telemetry_revoked(&row.records)) {
+    if row.is_legacy()
+        || (row.kind == LedgerKind::Run
+            && (!telemetry_revoked(&row.records) || resources_pending(row)))
+    {
         return None;
     }
     let end = row.ended_at?;
@@ -1130,6 +1179,17 @@ pub fn telemetry_revoked(events: &[RunEvent]) -> bool {
         .is_none_or(|last| last.kind == EventKind::TelemetryTokenRevoked)
 }
 
+/// The key of a run row's detail that says the supervisor's last measure
+/// of its resources is not recorded yet
+/// ([`crate::domain::environment::resources_recorded`]).
+pub const RESOURCES_PENDING: &str = "resources_pending";
+
+/// Whether the run row `row` waits on the supervisor's last measure of its
+/// resources.
+pub fn resources_pending(row: &LedgerRow) -> bool {
+    row.detail.get(RESOURCES_PENDING) == Some(&serde_json::Value::Bool(true))
+}
+
 /// Whether the run or task row `row` is settled at `now_ms`: a legacy row
 /// is (a run from before the switch ended long ago); a pending push is
 /// not; else once it ended and [`SETTLE_GRACE_MS`] passed.
@@ -1144,7 +1204,8 @@ pub fn run_settles(row: &LedgerRow, now_ms: i64) -> bool {
 /// has none): a missing row, one of an older [`LEDGER_V`] (a newer binary's is left as it
 /// is; not a legacy one, whose version the store keeps), one that read fewer inputs than
 /// `built` (dirty: a later event, the push that closed its pending push, a
-/// later sample, a later step, a supervisor's later event), a task's whose
+/// later sample, a later step, a later window of its resources, a
+/// supervisor's later event), a task's whose
 /// waits a supervisor's life ended are others (the time passed a silence;
 /// one folded at an earlier time is [`behind`]), a queue row's that its
 /// supervisor's life ended over the events the stored one read open (the
@@ -1162,6 +1223,8 @@ pub fn writes(stored: Option<&LedgerRow>, built: &LedgerRow) -> bool {
         || built.inputs_through.supervisor > stored.inputs_through.supervisor
         || built.inputs_through.node_samples > stored.inputs_through.node_samples
         || built.inputs_through.steps > stored.inputs_through.steps
+        || built.inputs_through.resources > stored.inputs_through.resources
+        || built.inputs_through.inside_resources > stored.inputs_through.inside_resources
         || (built.is_final && !stored.is_final && !stored.is_legacy())
 }
 
@@ -1210,6 +1273,8 @@ pub fn behind(stored: &LedgerRow, built: &LedgerRow) -> bool {
         || read.last() < held.last()
         || read.node_samples < held.node_samples
         || read.steps < held.steps
+        || read.resources < held.resources
+        || read.inside_resources < held.inside_resources
         || (read.events == held.events
             && held
                 .life_ended
@@ -1284,6 +1349,96 @@ impl RunSteps {
     }
 }
 
+/// What the row of a run folds of its resources: the windows the
+/// supervisor measured from outside up to the builder's cursor, the
+/// samples its executors measured from inside up to the other cursor with
+/// the starts of their sessions on the supervisor's clock (as the steps'),
+/// and what the row the store holds folded: the samples from inside it
+/// counted are counted again with those it did not, so what the retention
+/// removed from the store stays in the fold, and the largest id of a
+/// sample from inside it read stays its `inputs_through`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RunResources {
+    pub outside: Vec<RunResource>,
+    pub inside: Vec<SessionResource>,
+    pub starts: BTreeMap<String, i64>,
+    stored: Option<Folded>,
+    stored_inside_through: Option<i64>,
+}
+
+impl RunResources {
+    /// The run's windows `outside` and samples `inside` over what `stored`,
+    /// the row the store holds of the run, folded of them; no start known
+    /// yet.
+    pub fn new(
+        outside: Vec<RunResource>,
+        inside: Vec<SessionResource>,
+        stored: Option<&LedgerRow>,
+    ) -> Self {
+        Self {
+            outside,
+            inside,
+            starts: BTreeMap::new(),
+            stored: stored.and_then(|row| Folded::of_detail(&row.detail)),
+            stored_inside_through: stored.and_then(|row| row.inputs_through.inside_resources),
+        }
+    }
+
+    /// The sessions whose start places the samples from inside.
+    pub fn sessions(&self) -> BTreeSet<String> {
+        self.inside
+            .iter()
+            .map(|sample| sample.session_id.clone())
+            .collect()
+    }
+
+    /// Fold them into the run's `row`: under
+    /// [`environment::DETAIL_KEY`] of its detail once a window holds a
+    /// value, [`RESOURCES_PENDING`] while the supervisor's last measure
+    /// is not recorded, and the largest ids read into its
+    /// `inputs_through`. A sample from inside whose session has no start
+    /// known is left out until a fold knows it.
+    fn fold_into(&self, row: &mut LedgerRow) {
+        let outside: Vec<Window> = self.outside.iter().map(Window::of_run).collect();
+        let placed: Vec<CountedSample> = self
+            .inside
+            .iter()
+            .filter_map(|sample| {
+                let start = self.starts.get(&sample.session_id)?;
+                Some(CountedSample::of_sample(sample, *start))
+            })
+            .collect();
+        let stored = self
+            .stored
+            .as_ref()
+            .map_or(&[][..], |fold| &fold.inside[..]);
+        let counted = environment::counted_inside(stored, &placed);
+        let inside: Vec<Window> = counted.iter().map(CountedSample::window).collect();
+        row.inputs_through.resources = self.outside.iter().map(|window| window.id).max();
+        row.inputs_through.inside_resources = self
+            .inside
+            .iter()
+            .map(|sample| sample.id)
+            .max()
+            .max(self.stored_inside_through);
+        let pending = !environment::resources_recorded(&row.records, &self.outside);
+        let folded = environment::fold(&row.intervals, &outside, &inside)
+            .map(|folded| Folded {
+                inside: counted,
+                ..folded
+            })
+            .or_else(|| self.stored.clone());
+        if let serde_json::Value::Object(detail) = &mut row.detail {
+            if let Some(folded) = folded {
+                detail.insert(environment::DETAIL_KEY.to_owned(), folded.detail());
+            }
+            if pending {
+                detail.insert(RESOURCES_PENDING.to_owned(), serde_json::Value::Bool(true));
+            }
+        }
+    }
+}
+
 /// What a pass folds its marks of: the events of each run and task
 /// (ascending id), what the folds of the queue as a whole read ([`Kept`]:
 /// the pushes and the waits before a claim, read where they are kept),
@@ -1298,6 +1453,8 @@ pub struct Inputs {
     steps: BTreeMap<String, RunSteps>,
     /// The pushes read for a run's or task's fold ([`Self::read_pushes`]).
     pushes: BTreeMap<Target, Vec<RunEvent>>,
+    /// The resources of each run read ([`Self::read_resources`]).
+    resources: BTreeMap<String, RunResources>,
     kept: Arc<Kept>,
     /// The session and queue rows built.
     pub rows: BTreeMap<(LedgerKind, String), LedgerRow>,
@@ -1354,6 +1511,7 @@ impl Inputs {
             tasks: BTreeMap::new(),
             steps: BTreeMap::new(),
             pushes: BTreeMap::new(),
+            resources: BTreeMap::new(),
             kept: Arc::clone(kept),
             rows: built,
         }
@@ -1407,14 +1565,22 @@ impl Inputs {
         }
     }
 
-    /// Drop the events [`Self::read`], the steps [`Self::read_steps`] and
-    /// the pushes [`Self::read_pushes`] gave `target`, once folded.
+    /// Give the run `run` its resources, for [`build`] to fold into its
+    /// row.
+    pub fn read_resources(&mut self, run: &str, resources: RunResources) {
+        self.resources.insert(run.to_owned(), resources);
+    }
+
+    /// Drop the events [`Self::read`], the steps [`Self::read_steps`],
+    /// the pushes [`Self::read_pushes`] and the resources
+    /// [`Self::read_resources`] gave `target`, once folded.
     pub fn forget(&mut self, target: &Target) {
         self.pushes.remove(target);
         match target {
             Target::Run(run) => {
                 self.runs.remove(run);
                 self.steps.remove(run);
+                self.resources.remove(run);
             }
             Target::Task(task) => {
                 self.tasks.remove(task);
@@ -1428,7 +1594,8 @@ impl Inputs {
 /// run on its way, a run or task with no events (or a task with no record
 /// of its own and no run), a session or queue row not
 /// among `inputs.rows`, or a node hour with no sample left. A run's row
-/// holds its steps given ([`Inputs::read_steps`]), a legacy one none.
+/// holds its steps and resources given ([`Inputs::read_steps`],
+/// [`Inputs::read_resources`]), a legacy one none.
 /// `samples` are the NodeSampleStore's of a node target's hour.
 pub fn build(target: &Target, inputs: &Inputs, samples: &[NodeSample]) -> Option<LedgerRow> {
     let now = inputs.now_ms;
@@ -1446,7 +1613,17 @@ pub fn build(target: &Target, inputs: &Inputs, samples: &[NodeSample]) -> Option
             {
                 steps.fold_into(&mut row);
             }
-            row.is_final = run_settles(&row, now) && telemetry_revoked(&row.records);
+            if !row.is_legacy() {
+                inputs
+                    .resources
+                    .get(run)
+                    .cloned()
+                    .unwrap_or_default()
+                    .fold_into(&mut row);
+            }
+            row.is_final = run_settles(&row, now)
+                && telemetry_revoked(&row.records)
+                && !resources_pending(&row);
             Some(row)
         }
         Target::Task(task) => {

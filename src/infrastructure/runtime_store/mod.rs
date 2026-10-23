@@ -68,6 +68,7 @@ mod planning_records;
 mod queue_records;
 mod recovery;
 mod run_log;
+mod run_resources;
 mod session_registry;
 mod session_steps;
 mod transitions;

@@ -27,7 +27,7 @@ const TOOL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The stdout of a tool that ran and succeeded; a byte that is not UTF-8
 /// (a process's name) is replaced, not a failure.
-fn tool(program: &str, arguments: &[&str]) -> Option<String> {
+pub(super) fn tool(program: &str, arguments: &[&str]) -> Option<String> {
     match capture_bytes(Command::new(program).args(arguments), TOOL_TIMEOUT) {
         Ok((status, stdout, _)) if status.success() => {
             Some(String::from_utf8_lossy(&stdout).into_owned())

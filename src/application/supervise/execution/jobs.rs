@@ -12,6 +12,7 @@
 use super::*;
 use crate::application::review_programs::ProgramBackends;
 use crate::domain::EventKind;
+use crate::domain::environment::{RunChild, RunChildren};
 use crate::domain::headless_job::{JobFailure, JobKind, JobStop};
 use crate::domain::provider_switch::SwitchReason;
 use crate::domain::review_jobs::{self, ReviewJobId};
@@ -285,20 +286,23 @@ impl JobSubject {
 }
 
 /// What every headless job starts through, whatever its kind: where its
-/// row is written, how its process is found and stopped, whose job it is
-/// and where its end waits to be written.
+/// row is written, how its process is found and stopped, whose job it is,
+/// where its end waits to be written, and where a run's job is its run's
+/// process while it runs (the measure of the run's resources counts it).
 pub struct JobPorts<'a> {
     pub store: &'a dyn HeadlessJobStore,
     pub processes: Arc<dyn ProcessControl + Send + Sync>,
     pub supervisor_token: &'a LeaseToken,
     pub clock: &'a Arc<dyn Clock>,
     pub ends: &'a JobEnds,
+    pub children: &'a RunChildren,
 }
 
 /// The job whose process `child` just started, recorded in
 /// `headless_jobs` with its kind, its pid and the start of its process,
-/// waited for at most `timeout`. A record that fails is only noted: the
-/// job runs either way.
+/// waited for at most `timeout`; a job of a run is the run's process in
+/// [`JobPorts::children`] until it is dropped. A record that fails is only
+/// noted: the job runs either way.
 pub fn record_job(
     ports: &JobPorts<'_>,
     what: &'static str,
@@ -341,6 +345,10 @@ pub fn record_job(
         record,
         provider: subject.provider,
         started_at: started_at_ms(&**ports.clock),
+        run_child: subject
+            .run_id
+            .as_ref()
+            .map(|run| ports.children.started(run, pid)),
         // Only an agent's job is an Execution whose end is recorded when it
         // is abandoned (ADR-t1486-1); a program job's ends with its row.
         unended: (subject.job == JobKind::Agent).then(|| (ports.ends.clone(), subject)),
@@ -500,6 +508,12 @@ pub struct HeadlessJob {
     /// Until it ends, where its end goes if it is stopped with no event to
     /// end it ([`Self::abandon`]), and what it is about.
     pub(super) unended: Option<(JobEnds, JobSubject)>,
+    /// Of a run's job, its process as the run's until the job is dropped.
+    #[expect(
+        dead_code,
+        reason = "held for its drop, which ends the process as its run's"
+    )]
+    pub(super) run_child: Option<RunChild>,
 }
 
 /// Whether a job that has not ended after running `ran` is waited for
@@ -759,6 +773,8 @@ pub(in crate::application::supervise) struct JobDesk<'s> {
     pub(super) telemetry_tokens: &'s dyn crate::application::queue_service::TelemetryTokens,
     pub(super) no_claude: bool,
     pub(super) job_ends: &'s JobEnds,
+    /// The processes this supervisor started for its runs in other trees.
+    pub(super) run_children: &'s RunChildren,
     /// `[review.jobs]` as read at the start.
     pub(super) review_jobs: crate::domain::headless_job::ReviewJobs,
     pub(super) provider: &'s mut stages::ProviderState,
@@ -888,6 +904,7 @@ impl<'s> JobDesk<'s> {
             supervisor_token: env.token,
             clock: &env.generators.clock,
             ends: self.job_ends,
+            children: self.run_children,
         };
         record_job(&ports, what, child, (stdout, stderr), subject, timeout)
     }
@@ -1092,6 +1109,7 @@ impl Supervisor<'_> {
                 telemetry_tokens: self.telemetry_tokens,
                 no_claude: self.no_claude,
                 job_ends: &self.job_ends,
+                run_children: &self.run_children,
                 review_jobs: self.review_jobs,
                 provider: &mut self.provider,
                 queue_hold: &mut self.queue_hold,
@@ -1128,6 +1146,7 @@ impl Supervisor<'_> {
             supervisor_token: self.registration.token(),
             clock: &self.generators.clock,
             ends: &self.job_ends,
+            children: &self.run_children,
         }
     }
 
@@ -1798,6 +1817,7 @@ mod tests {
             provider: Provider::Claude,
             started_at: None,
             unended: None,
+            run_child: None,
         }
     }
 
@@ -1823,6 +1843,45 @@ mod tests {
         }
     }
 
+    /// A run's job is its run's process from its start until the job is
+    /// dropped, so the measure of the run's resources counts it with the
+    /// run's; a job of no run (an agent eval's program) is no run's.
+    #[test]
+    fn a_runs_job_is_its_process_until_the_job_is_dropped() {
+        let rows = Rows::default();
+        let ends = JobEnds::default();
+        let children = RunChildren::default();
+        let token = LeaseToken::new("me");
+        let clock: Arc<dyn Clock> = Arc::new(At(std::time::UNIX_EPOCH));
+        let ports = JobPorts {
+            store: &rows,
+            processes: Arc::new(NoProcesses),
+            supervisor_token: &token,
+            clock: &clock,
+            ends: &ends,
+            children: &children,
+        };
+        let run = RunId::new("run-1").unwrap();
+        let output = (PathBuf::from("/job/out"), PathBuf::from("/job/err"));
+        let start = |subject| {
+            record_job(
+                &ports,
+                "review program",
+                Box::new(Ended { success: true }),
+                output.clone(),
+                subject,
+                Duration::from_secs(30),
+            )
+        };
+        let job = start(JobSubject::review_program(&run, 1, "fmt"));
+        assert_eq!(children.of(&run), [42]);
+        let eval = start(JobSubject::eval_program("case".to_owned(), 1));
+        assert_eq!(children.of(&run), [42]);
+        drop(eval);
+        drop(job);
+        assert!(children.of(&run).is_empty());
+    }
+
     /// A program job of the review (ADR-t1895-1 decision 1) goes the
     /// common way with what its kind changes: its row names the program
     /// and no provider, it is bounded by the timeout it is given, its
@@ -1840,6 +1899,7 @@ mod tests {
             supervisor_token: &token,
             clock: &clock,
             ends: &ends,
+            children: &RunChildren::default(),
         };
         let run = RunId::new("run-1").unwrap();
         let files = MemoryFiles::default();

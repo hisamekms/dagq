@@ -1,14 +1,18 @@
 use std::cell::{Cell, RefCell};
 
 use super::*;
-use crate::application::{LedgerStore, NodeSampleStore, SessionOwners, SessionStepStore};
+use crate::application::{
+    LedgerStore, NodeSampleStore, RunResourceStore, SessionOwners, SessionResourceStore,
+    SessionStepStore,
+};
+use crate::domain::environment::{Resources, RunResource};
 use crate::domain::host_metrics::{HOST_NODE, HostSample, NodeSample, SampleSource};
 use crate::domain::ledger::settle::SETTLE_GRACE_MS;
 use crate::domain::ledger::testkit::{Log, T0, ms, run_id};
 use crate::domain::ledger::{LEDGER_V, LedgerKind, LedgerRow, node};
 use crate::domain::session_step::{
-    RETENTION_MS, SeqRange, SessionOwner, SessionStep, Step, StepKind, StepTarget, StepsRecorded,
-    TargetKind,
+    RETENTION_MS, ResourceSample, SeqRange, SessionOwner, SessionResource, SessionStep, Step,
+    StepKind, StepTarget, StepsRecorded, TargetKind,
 };
 use crate::domain::{RunEvent, RunId, TaskId};
 
@@ -26,6 +30,10 @@ struct Memory {
     /// The last step id given: ids go on past the steps removed.
     step_id: Cell<i64>,
     owners: RefCell<BTreeMap<String, SessionOwner>>,
+    /// The runs' windows of resources measured from outside, and the
+    /// samples executors measured from inside, ids from 1 in order.
+    run_resources: RefCell<Vec<RunResource>>,
+    inside: RefCell<Vec<SessionResource>>,
     rows: RefCell<BTreeMap<(LedgerKind, String), LedgerRow>>,
     writes: Cell<usize>,
     read: Cell<usize>,
@@ -238,6 +246,7 @@ impl NodeSampleStore for Memory {
         node: &str,
         day: i64,
         sample: &HostSample,
+        resources: &dyn Fn(Option<i64>) -> Resources,
         source: SampleSource,
         apart_secs: i64,
     ) -> Result<bool> {
@@ -339,10 +348,15 @@ impl SessionStepStore for Memory {
         let mut held = self.steps.borrow_mut();
         let count = held.len();
         held.retain(|step| step.received_at >= before);
-        // As the SQLite store: an owner registered before it whose session
-        // keeps no step goes too.
+        // As the SQLite store: the samples from inside go with the steps,
+        // and an owner registered before it whose session keeps no step
+        // and no sample goes too.
+        let mut inside = self.inside.borrow_mut();
+        inside.retain(|sample| sample.received_at >= before);
         self.owners.borrow_mut().retain(|session, owner| {
-            owner.registered_at >= before || held.iter().any(|step| &step.session_id == session)
+            owner.registered_at >= before
+                || held.iter().any(|step| &step.session_id == session)
+                || inside.iter().any(|sample| &sample.session_id == session)
         });
         Ok(count - held.len())
     }
@@ -367,6 +381,83 @@ impl SessionOwners for Memory {
     }
     fn session_owner(&self, session_id: &str) -> Result<Option<SessionOwner>> {
         Ok(self.owners.borrow().get(session_id).cloned())
+    }
+}
+
+#[allow(unused_variables)]
+impl SessionResourceStore for Memory {
+    fn record_resources(
+        &self,
+        target: &StepTarget,
+        session_id: &str,
+        samples: &[ResourceSample],
+        received_at: i64,
+    ) -> Result<StepsRecorded> {
+        let mut held = self.inside.borrow_mut();
+        for sample in samples {
+            let id = held.iter().map(|sample| sample.id).max().unwrap_or(0) + 1;
+            held.push(SessionResource {
+                id,
+                target: target.clone(),
+                session_id: session_id.to_owned(),
+                received_at,
+                sample: sample.clone(),
+            });
+        }
+        Ok(StepsRecorded {
+            added: samples.len(),
+            duplicates: 0,
+        })
+    }
+    fn target_resources(&self, target: &StepTarget) -> Result<Vec<SessionResource>> {
+        Ok(self
+            .inside
+            .borrow()
+            .iter()
+            .filter(|sample| sample.target == *target)
+            .cloned()
+            .collect())
+    }
+    fn resources_after(&self, after: i64, limit: usize) -> Result<Vec<SessionResource>> {
+        Ok(self
+            .inside
+            .borrow()
+            .iter()
+            .filter(|sample| sample.id > after)
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+}
+
+impl RunResourceStore for Memory {
+    fn record_run_resource(&self, row: &RunResource) -> Result<i64> {
+        let mut held = self.run_resources.borrow_mut();
+        let id = i64::try_from(held.len()).unwrap() + 1;
+        held.push(RunResource { id, ..row.clone() });
+        Ok(id)
+    }
+    fn run_resources(&self, run: &RunId) -> Result<Vec<RunResource>> {
+        Ok(self
+            .run_resources
+            .borrow()
+            .iter()
+            .filter(|window| window.run_id == run.as_str())
+            .cloned()
+            .collect())
+    }
+    fn run_resources_after(&self, after: i64, limit: usize) -> Result<Vec<RunResource>> {
+        Ok(self
+            .run_resources
+            .borrow()
+            .iter()
+            .filter(|window| window.id > after)
+            .take(limit)
+            .cloned()
+            .collect())
+    }
+    fn open_attachments(&self) -> Result<Vec<(RunId, i64)>> {
+        unreachable!("the ledger does not close attachments")
     }
 }
 
@@ -696,6 +787,7 @@ fn session_and_queue_rows_are_written_once_and_again_when_dirty() {
 
 fn sample(id: i64, unix: i64) -> NodeSample {
     NodeSample {
+        resources: Default::default(),
         id,
         node_id: HOST_NODE.to_owned(),
         local_day: unix.div_euclid(86_400),
@@ -1509,6 +1601,64 @@ fn the_retention_keeps_the_steps_of_the_runs_a_pass_did_not_write_yet() {
     assert!(memory.steps.borrow().is_empty());
 }
 
+/// As the steps: the samples from inside of a run a pass did not write
+/// yet (past its bound) are kept by the retention, which removes them
+/// with the steps, until the run's row holds them; then they go, and the
+/// owners of their sessions with them.
+#[test]
+fn the_retention_keeps_the_samples_from_inside_of_the_runs_a_pass_did_not_write_yet() {
+    let runs: Vec<String> = (1..=u8::try_from(WRITES_PER_PASS + 1).unwrap())
+        .map(run_id)
+        .collect();
+    let mut log = Log::default();
+    for (task, run) in (1..).zip(&runs) {
+        log.landed(task, run, 0);
+    }
+    let memory = Memory::of(&log);
+    for run in &runs {
+        let session = format!("s-{run}");
+        // Registered before the retention's bound: its owner goes with its
+        // last sample.
+        let target = StepTarget::run(&RunId::new(run).unwrap());
+        memory.register_session(&target, &session, 500).unwrap();
+        let mut sample = ResourceSample::new(1, 0, 100_000);
+        sample.cpu_seconds = Some(40.0);
+        memory
+            .record_resources(&target, &session, &[sample], 1_000)
+            .unwrap();
+    }
+    let retain = Retain {
+        node_rows: None,
+        steps: Some(2_000),
+    };
+    let mut builder = Builder::default();
+    let first = build_pass(&memory, &mut builder, ms(LATER), BUILT, retain);
+    assert_eq!(first.failure, None);
+    assert_eq!(first.written, WRITES_PER_PASS);
+    assert!(first.backlog > 0);
+    assert_eq!(
+        memory.inside.borrow().len(),
+        runs.len(),
+        "a run not written keeps its samples"
+    );
+    assert_eq!(memory.owners.borrow().len(), runs.len());
+    let mut built = build_pass(&memory, &mut builder, ms(LATER + 1), BUILT, retain);
+    while built.backlog > 0 {
+        built = build_pass(&memory, &mut builder, ms(LATER + 2), BUILT, retain);
+    }
+    for run in &runs {
+        let row = memory.row(LedgerKind::Run, run);
+        assert_eq!(resources_of(&row)["source"], "inside", "{run}");
+        assert_eq!(
+            resources_of(&row)["total"]["cpu_seconds"],
+            json!(40.0),
+            "{run}"
+        );
+    }
+    assert!(memory.inside.borrow().is_empty());
+    assert!(memory.owners.borrow().is_empty());
+}
+
 /// Two builders on one queue (two supervisors): while one folds a run
 /// whose row it read as missing, the other writes the row with the run's
 /// steps and its retention removes them. The first one's write finds the
@@ -2028,6 +2178,189 @@ fn a_target_that_fails_each_pass_leaves_the_others_written() {
             .borrow()
             .contains_key(&(LedgerKind::Task, "1".to_owned()))
     );
+}
+
+/// `run` attached to the host at `secs` (its `environment_attached`); the
+/// event's id.
+fn attach(log: &mut Log, run: &str, secs: i64) -> i64 {
+    let payload = crate::domain::environment::EnvironmentAttached {
+        env_kind: crate::domain::environment::EnvKind::Host,
+        node_id: HOST_NODE.to_owned(),
+        image_digest: None,
+        cpu_limit: Some(8.0),
+        mem_limit: Some(1 << 34),
+        arch: "aarch64".to_owned(),
+    }
+    .payload();
+    log.add(Some(1), Some(run), "environment_attached", payload, secs);
+    log.last().as_i64()
+}
+
+/// A window of `run`'s resources the supervisor measured from outside
+/// under `attachment`, from `from` to `until` (seconds after [`T0`]).
+fn measured(
+    memory: &Memory,
+    run: &str,
+    attachment: i64,
+    (from, until): (i64, i64),
+    cpu_seconds: Option<f64>,
+    last: bool,
+) {
+    memory
+        .record_run_resource(&RunResource {
+            id: 0,
+            run_id: run.to_owned(),
+            attachment,
+            node_id: HOST_NODE.to_owned(),
+            from_ms: ms(from),
+            until_ms: ms(until),
+            resources: Resources {
+                cpu_seconds,
+                memory_max_bytes: cpu_seconds.map(|_| 1 << 20),
+                ..Resources::default()
+            },
+            last,
+        })
+        .unwrap();
+}
+
+/// What `row` holds of its resources under its detail.
+fn resources_of(row: &LedgerRow) -> &Value {
+    &row.detail[crate::domain::environment::DETAIL_KEY]
+}
+
+/// The CPU seconds `row` holds for its interval of `phase`.
+fn cpu_in(row: &LedgerRow, phase: &str) -> Option<f64> {
+    let index = row.intervals.iter().position(|i| i.phase == phase)?;
+    resources_of(row)["intervals"][index]["cpu_seconds"].as_f64()
+}
+
+/// A run's row folds the windows the supervisor measured of it from
+/// outside into its intervals, in the common units: the worker's 10 s to
+/// 600 s takes the two windows in it, the last window (600 s to 900 s)
+/// goes to the validation, the wait and the landing in their shares. The
+/// row waits on the last window to settle: before it, it is written but
+/// not final however long after its end and its token's revocation; the
+/// last window marks it dirty and it settles. A window recorded after it
+/// settled marks it dirty again: it is folded again with it, and settles
+/// again.
+#[test]
+fn a_runs_resources_fold_by_interval_and_it_settles_after_their_last_window() {
+    let a = run_id(1);
+    let mut log = Log::default();
+    log.landed(1, &a, 0);
+    let attachment = attach(&mut log, &a, 0);
+    let memory = Memory::of(&log);
+    measured(&memory, &a, attachment, (10, 300), Some(30.0), false);
+    measured(&memory, &a, attachment, (300, 600), Some(60.0), false);
+    let mut builder = Builder::default();
+    pass(&memory, &mut builder, LATER);
+    let row = memory.row(LedgerKind::Run, &a);
+    assert!(row.ended_at.is_some());
+    assert!(!row.is_final, "it waits on the last window");
+    assert_eq!(row.detail["resources_pending"], json!(true));
+    assert_eq!(row.inputs_through.resources, Some(2));
+    assert_eq!(resources_of(&row)["source"], "outside");
+    assert_eq!(resources_of(&row)["total"]["cpu_seconds"], json!(90.0));
+    assert_eq!(cpu_in(&row, "worker"), Some(90.0));
+    assert_eq!(cpu_in(&row, "landing"), None);
+    // Nothing new: the row waits, nothing is read again.
+    assert_eq!(pass(&memory, &mut builder, LATER + 1).written, 0);
+
+    measured(&memory, &a, attachment, (600, 900), Some(30.0), true);
+    assert_eq!(pass(&memory, &mut builder, LATER + 2).written, 1);
+    let row = memory.row(LedgerKind::Run, &a);
+    assert!(row.is_final);
+    assert!(row.detail.get("resources_pending").is_none());
+    assert_eq!(row.inputs_through.resources, Some(3));
+    assert_eq!(resources_of(&row)["total"]["cpu_seconds"], json!(120.0));
+    let validating = cpu_in(&row, "validating").unwrap();
+    let landing = cpu_in(&row, "landing").unwrap();
+    assert!((validating - 6.0).abs() < 1e-9, "{validating}");
+    assert!((landing - 20.0).abs() < 1e-9, "{landing}");
+    assert_eq!(
+        resources_of(&row)["intervals"][1]["memory_max_bytes"],
+        json!(1 << 20)
+    );
+
+    // Late, after it settled: folded again.
+    measured(&memory, &a, attachment, (900, 960), Some(3.0), false);
+    assert_eq!(pass(&memory, &mut builder, LATER + 3).written, 1);
+    let row = memory.row(LedgerKind::Run, &a);
+    assert_eq!(row.inputs_through.resources, Some(4));
+    assert_eq!(resources_of(&row)["total"]["cpu_seconds"], json!(123.0));
+    assert!(row.is_final);
+    assert_eq!(pass(&memory, &mut builder, LATER + 4).written, 0);
+}
+
+/// A run attached to an environment that measured nothing of it from
+/// outside (its windows hold no value) folds what its executor measured
+/// from inside, placed from when its session was registered; a sample
+/// from inside that came in after the row was written marks it dirty. A
+/// run never attached (one from before the record) waits on no window.
+#[test]
+fn a_run_measured_from_inside_only_folds_its_executors_samples() {
+    let a = run_id(1);
+    let mut log = Log::default();
+    log.landed(1, &a, 0);
+    let attachment = attach(&mut log, &a, 0);
+    let memory = Memory::of(&log);
+    let target = session_of(&memory, &a, "s-1", 10);
+    let mut sample = ResourceSample::new(1, 0, 100_000);
+    sample.cpu_seconds = Some(40.0);
+    sample.throttled_seconds = Some(2.0);
+    memory
+        .record_resources(&target, "s-1", &[sample], ms(200))
+        .unwrap();
+    measured(&memory, &a, attachment, (10, 600), None, false);
+    measured(&memory, &a, attachment, (600, 930), None, true);
+    let mut builder = Builder::default();
+    pass(&memory, &mut builder, LATER);
+    let row = memory.row(LedgerKind::Run, &a);
+    assert!(row.is_final);
+    assert_eq!(resources_of(&row)["source"], "inside");
+    assert_eq!(cpu_in(&row, "worker"), Some(40.0));
+    assert_eq!(resources_of(&row)["total"]["throttled_seconds"], json!(2.0));
+    assert_eq!(row.inputs_through.inside_resources, Some(1));
+
+    let mut late = ResourceSample::new(2, 100_000, 50_000);
+    late.cpu_seconds = Some(5.0);
+    memory
+        .record_resources(&target, "s-1", &[late], ms(LATER))
+        .unwrap();
+    assert_eq!(pass(&memory, &mut builder, LATER + 1).written, 1);
+    let row = memory.row(LedgerKind::Run, &a);
+    assert_eq!(row.inputs_through.inside_resources, Some(2));
+    assert_eq!(resources_of(&row)["total"]["cpu_seconds"], json!(45.0));
+
+    // The retention removes the first sample; a later one folds onto what
+    // the row counted, the removed one's 40 s kept, each counted once.
+    memory
+        .inside
+        .borrow_mut()
+        .retain(|sample| sample.sample.seq != 1);
+    let mut later = ResourceSample::new(3, 150_000, 10_000);
+    later.cpu_seconds = Some(1.0);
+    memory
+        .record_resources(&target, "s-1", &[later], ms(LATER + 1))
+        .unwrap();
+    assert_eq!(pass(&memory, &mut builder, LATER + 2).written, 1);
+    let row = memory.row(LedgerKind::Run, &a);
+    assert_eq!(row.inputs_through.inside_resources, Some(3));
+    assert_eq!(resources_of(&row)["total"]["cpu_seconds"], json!(46.0));
+    assert_eq!(resources_of(&row)["total"]["throttled_seconds"], json!(2.0));
+    assert_eq!(cpu_in(&row, "worker"), Some(46.0));
+    assert_eq!(resources_of(&row)["inside"].as_array().unwrap().len(), 3);
+
+    let b = run_id(2);
+    let mut other = Log::default();
+    other.landed(2, &b, 0);
+    let none = Memory::of(&other);
+    pass(&none, &mut Builder::default(), LATER);
+    let row = none.row(LedgerKind::Run, &b);
+    assert!(row.is_final);
+    assert!(row.detail.get("resources").is_none());
+    assert_eq!(row.inputs_through.resources, None);
 }
 
 mod queue_waits;

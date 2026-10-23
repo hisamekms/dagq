@@ -48,6 +48,7 @@ fn store() -> Vec<NodeSample> {
         }
         id += 1;
         rows.push(NodeSample {
+            resources: Default::default(),
             id,
             node_id: HOST_NODE.to_owned(),
             local_day: local_day(unix, JST),
@@ -320,6 +321,7 @@ fn the_retention_drops_the_samples_and_rows_of_days_before_it() {
     // An hour that straddles the host's local midnight (at +09:30).
     let offset = 9 * 3600 + 1800;
     let at = |id: i64, unix: i64| NodeSample {
+        resources: Default::default(),
         id,
         node_id: HOST_NODE.to_owned(),
         local_day: local_day(unix, offset),

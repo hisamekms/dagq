@@ -2437,6 +2437,22 @@ pub trait Verifier {
         env: &[(String, String)],
         log: &Path,
     ) -> Result<Exit>;
+    /// [`Self::run_to_log`] for `run`: the process it starts is `run`'s
+    /// while it runs ([`crate::domain::environment::RunChildren`]), so the
+    /// measure of the run's resources from outside counts it with every
+    /// process under it. By default as `run_to_log`, which no measure
+    /// reads.
+    fn run_to_log_for(
+        &self,
+        run: &RunId,
+        command: &str,
+        cwd: &Path,
+        env: &[(String, String)],
+        log: &Path,
+    ) -> Result<Exit> {
+        let _ = run;
+        self.run_to_log(command, cwd, env, log)
+    }
 }
 
 /// Where a run review's program jobs run (ADR-t1895-2 decision 5), one

@@ -16,10 +16,11 @@ pub use crate::application::{
     supervise::{PausePoint, RunError, SUPERVISOR_HANDED_OFF},
 };
 pub use crate::compose::{
-    CiWatchOptions, ContainerRuntimePort, LedgerOptions, OneShot, PausesPort, ProcessesPort,
-    ReleaseIndexPort, RunContainersPort, RunE2eOptions, RunFilesPort, SccacheOptions,
-    SuperviseOptions, VerificationContainersPort, ask, ci_failures, doctor, ended_run_material,
-    integrate, rebind, recover, review, session, session_in_background, session_in_background_as,
-    session_in_background_as_with_processes, session_in_background_with_containers, stats, status,
-    status_for, supervise, supervise_with_reviewer,
+    CiWatchOptions, ContainerRuntimePort, EnvironmentOptions, LedgerOptions, OneShot, PausesPort,
+    ProcessesPort, ReleaseIndexPort, RunContainersPort, RunE2eOptions, RunFilesPort,
+    SccacheOptions, SuperviseOptions, VerificationContainersPort, ask, ci_failures, doctor,
+    ended_run_material, integrate, rebind, recover, review, session, session_in_background,
+    session_in_background_as, session_in_background_as_with_processes,
+    session_in_background_with_containers, stats, status, status_for, supervise,
+    supervise_with_reviewer,
 };

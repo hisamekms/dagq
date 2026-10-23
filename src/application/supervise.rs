@@ -119,5 +119,8 @@ pub use self::observation::forecast::{FORECAST_CHECK, ForecastPort};
 pub use self::observation::ledger::{Built, FAILING_PASSES, LedgerPort, Retain, build_pass};
 use self::observation::observer;
 pub use self::observation::report::ReportPort;
+pub use self::observation::resources::{
+    INTERVAL_SECS as RESOURCES_INTERVAL_SECS, Measured, ResourcesPort, Track, measure_pass,
+};
 use self::planning::PlanningState;
 use self::planning::plan_review;

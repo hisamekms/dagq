@@ -93,6 +93,10 @@ impl Attempt {
 pub enum Phase {
     /// Claimed, its worktree and session being provisioned.
     Provisioning,
+    /// A wait its environment adds that the host does not have
+    /// (ADR-t1662-3 decision 5): its placement, its image's pull, its
+    /// preparation or the return of its results.
+    Environment(super::environment::EnvironmentWait),
     /// The worker's session works.
     Worker,
     /// The runtime validates the receipt.
@@ -171,6 +175,7 @@ impl Phase {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Provisioning => "provisioning",
+            Self::Environment(wait) => wait.phase_name(),
             Self::Worker => "worker",
             Self::Validating => "validating",
             Self::Review => "review",
@@ -204,7 +209,7 @@ impl Phase {
         use Blocker as B;
         use Holds as H;
         let (blocker, holds) = match self {
-            Self::Provisioning => (B::Infra, H::WorkerSlot),
+            Self::Provisioning | Self::Environment(_) => (B::Infra, H::WorkerSlot),
             Self::Worker
             | Self::Review
             | Self::Revise
@@ -498,9 +503,14 @@ pub fn last_recorded(events: &[RunEvent]) -> Option<Recorded> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::environment::EnvironmentWait;
 
-    const ALL: [Phase; 28] = [
+    const ALL: [Phase; 32] = [
         Phase::Provisioning,
+        Phase::Environment(EnvironmentWait::Placement),
+        Phase::Environment(EnvironmentWait::ImagePull),
+        Phase::Environment(EnvironmentWait::Preparation),
+        Phase::Environment(EnvironmentWait::ResultReturn),
         Phase::Worker,
         Phase::Validating,
         Phase::Review,
@@ -564,6 +574,10 @@ mod tests {
             ),
             (Phase::Push { in_slot: false }, tags(B::External, H::None)),
             (Phase::Provisioning, tags(B::Infra, H::WorkerSlot)),
+            (
+                Phase::Environment(EnvironmentWait::ImagePull),
+                tags(B::Infra, H::WorkerSlot),
+            ),
         ] {
             assert_eq!(phase.tags(), expected, "{}", phase.name());
         }

@@ -15,6 +15,7 @@ pub(super) mod main_log;
 pub(super) mod observer;
 pub(super) mod push;
 pub(super) mod report;
+pub(super) mod resources;
 pub(super) mod throughput_review;
 
 /// 観測と分析's state: the jobs on its timer (the observer, the throughput
@@ -68,6 +69,9 @@ pub(super) struct ObservationState {
     /// Builds the ledger; `None` builds none.
     ledger_port: Option<ledger::LedgerPort>,
     ledger: ledger::LedgerWatch,
+    /// Measures the runs' resources from outside; `None` measures none.
+    resources_port: Option<resources::ResourcesPort>,
+    resources: resources::ResourcesWatch,
 }
 
 impl ObservationState {
@@ -93,7 +97,25 @@ impl ObservationState {
             main_log: main_log::MainLogWatch::default(),
             ledger_port: ports.ledger.clone(),
             ledger: ledger::LedgerWatch::default(),
+            resources_port: ports.resources.clone(),
+            resources: resources::ResourcesWatch::default(),
         }
+    }
+
+    /// Measure the resources of the runs of the slots, `held`, at its
+    /// interval ([`resources::ResourcesWatch::pass`]).
+    pub(super) fn resources_pass(&mut self, env: &mut ObservationEnv<'_>, held: Vec<RunId>) {
+        self.resources.pass(env, self.resources_port.as_ref(), held);
+    }
+
+    /// Join or leave the measure of the runs' resources at the end of the
+    /// loop ([`resources::ResourcesWatch::finish`]).
+    pub(super) fn resources_finish(
+        &mut self,
+        env: &mut ObservationEnv<'_>,
+        deadline: Option<Instant>,
+    ) {
+        self.resources.finish(env, deadline);
     }
 
     /// Build the ledger at its interval ([`ledger::LedgerWatch::pass`]).

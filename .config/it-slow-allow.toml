@@ -2306,3 +2306,15 @@ task = 2978
 name = "runtime_clone::the_triage_of_a_cut_off_container_run_carries_the_cut_off_turn_s_commit_over"
 reason = "B 境界（supervisor の配線・復旧・Git・プロセス）: 同じ回収と triage で、retry_inherit が、実際の facts だけの turn が書いた bundle から取り込んだ切られた turn の commit を refs/dagq/runs に残して引き継ぎ、その container が clone と run dir だけを mount し relay を開かないことを確かめる。判断は application::inherit の unit test"
 task = 2978
+
+# 3.9s to 7.9s in stress under the host's load (task 1676): a whole supervisor run from the claim to the landing, a second one only when the first left the attachment open
+[[test]]
+name = "runtime_headless::the_supervisor_records_the_environment_a_run_is_claimed_on_and_closes_it"
+reason = "B 境界（supervisor の配線・SQLite）: 実際の supervisor が claim で environment_attached を書き、run が slot を離れた後の資源の測りの pass が最後の窓で名乗りを閉じることを確かめる代表。名乗りの欄・窓の畳み・閉じる判断は infrastructure::environment と domain::environment と supervise::observation::ledger の unit test、測りの pass は run_resources の IT"
+task = 1676
+
+# 4.1s to 5.6s in stress under the host's load (task 1676): an import of a file of more rows than one transaction holds, stopped part way, then the rest
+[[test]]
+name = "node_samples::a_files_import_commits_by_batches_and_the_next_adds_the_rest"
+reason = "B 境界（SQLite）: 1 つの transaction に収まらない行数のファイルの取り込みが上限ずつ commit し、途中で止まった取り込みが前の batch とファイルの印を保ち、次の取り込みが残りを足すことを実際の queue.db で確かめる。どの行を足すかの判断は supervise::host_ops::host_metrics の unit test"
+task = 1676

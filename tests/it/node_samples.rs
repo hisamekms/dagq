@@ -4,6 +4,7 @@
 //! of the CSV files the retention keeps. The decisions (the half interval,
 //! the retention's days, the order of the import) are the unit tests of
 //! `application::supervise::host_metrics` and `domain::host_metrics`.
+use dagq::domain::environment::Resources;
 use dagq::{
     application::{NodeSampleStore, supervise::HostMetricsPort},
     domain::host_metrics::{
@@ -11,6 +12,7 @@ use dagq::{
     },
     infrastructure::{
         clock,
+        environment::HostEnvironment,
         host_metrics::{HostMetricsDir, read_file, summary},
         runtime_store::{SqliteOpener, SqlitePorts},
         sqlite::SqliteQueue,
@@ -71,6 +73,12 @@ fn port(db: &Path, take: fn(i64) -> HostSample, retention_days: u32) -> HostMetr
             },
             keep: |queue| -> Box<dyn NodeSampleStore + Send> { Box::new(queue) },
         }),
+        environment: Arc::new(HostEnvironment::with(
+            Some(8.0),
+            Some(1 << 34),
+            || None,
+            || None,
+        )),
     }
 }
 
@@ -89,7 +97,14 @@ fn the_store_keeps_one_row_per_node_and_second_and_its_retention() {
     let (at, day) = (NOW, NOW / DAY);
     let record = |node: &str, day: i64, sample: &HostSample, apart: i64| {
         queue
-            .record_node_sample(node, day, sample, SampleSource::Sampled, apart)
+            .record_node_sample(
+                node,
+                day,
+                sample,
+                &|_| Resources::default(),
+                SampleSource::Sampled,
+                apart,
+            )
             .unwrap()
     };
     assert!(record(HOST_NODE, day, &full(at), 15));
@@ -170,6 +185,7 @@ fn two_supervisors_write_one_row_to_the_store_and_the_file() {
             HOST_NODE,
             NOW / DAY - 3,
             &busy(NOW - 3 * DAY),
+            &|_| Resources::default(),
             SampleSource::Sampled,
             0,
         )
@@ -193,6 +209,7 @@ fn two_supervisors_write_one_row_to_the_store_and_the_file() {
             HOST_NODE,
             NOW / DAY - 3,
             &busy(NOW - 3 * DAY),
+            &|_| Resources::default(),
             SampleSource::Sampled,
             0,
         )
@@ -258,6 +275,7 @@ fn the_kept_files_are_imported_once_and_summarize_as_the_files() {
             HOST_NODE,
             NOW / DAY,
             &busy(NOW - 30),
+            &|_| Resources::default(),
             SampleSource::Sampled,
             15,
         )
@@ -436,7 +454,14 @@ fn a_files_import_commits_by_batches_and_the_next_adds_the_rest() {
     let sampled = &file[BATCH + 20];
     assert!(
         queue
-            .record_node_sample(HOST_NODE, day, sampled, SampleSource::Sampled, 0)
+            .record_node_sample(
+                HOST_NODE,
+                day,
+                sampled,
+                &|_| Resources::default(),
+                SampleSource::Sampled,
+                0
+            )
             .unwrap()
     );
     assert_eq!(import().unwrap(), file.len() - BATCH - 1);
@@ -529,4 +554,127 @@ fn a_heartbeat_writes_while_a_file_is_imported() {
     assert!(written, "the heartbeat was not written in {took:?}");
     assert!(took < dagq::application::QUEUE_BUSY_TIMEOUT, "{took:?}");
     assert!(0 < seen && seen < total, "{seen} of {total}");
+}
+
+/// The supervisor's record of the host's load writes, in the same row as
+/// the columns, the same sample in the common units as the host's
+/// environment measures the node (the CPU seconds over the time since the
+/// row before, the cores, the memory used), and reads it back; a row imported from a CSV
+/// file has none. The columns, the CSV files, the node rows of the ledger
+/// and every summary of the host made of them (`stats`' and `kpi`'s
+/// `host`, `cpu_per_landing`'s CPU seconds, `load_per_core`'s load and
+/// `health.disk`) are those of the same samples recorded without the
+/// common units.
+#[test]
+fn the_common_units_go_in_the_same_row_and_leave_the_hosts_values_as_they_were() {
+    use dagq::domain::environment::host_node_resources;
+    use dagq::domain::host_metrics::DiskFree;
+    use dagq::domain::ledger::node::{host_summary, node_rows};
+    let with = tempfile::tempdir().unwrap();
+    let without = tempfile::tempdir().unwrap();
+    let (db, plain_db) = (with.path().join("q.db"), without.path().join("q.db"));
+    let (queue, plain) = (
+        SqliteQueue::init(&db).unwrap(),
+        SqliteQueue::init(&plain_db).unwrap(),
+    );
+    let port = port(&db, busy, 2);
+    let times = [NOW, NOW + 30, NOW + 60, NOW + 3600];
+    for at in times {
+        assert!(port.record(at, false).failures.is_empty());
+        assert!(
+            plain
+                .record_node_sample(
+                    HOST_NODE,
+                    NOW / DAY,
+                    &busy(at).as_written(),
+                    &|_| Resources::default(),
+                    SampleSource::Sampled,
+                    15,
+                )
+                .unwrap()
+        );
+    }
+    let (rows, plain_rows) = (rows(&queue), rows(&plain));
+    assert_eq!(rows.len(), times.len());
+    // Each stands for the time since the row before it, up to twice the
+    // interval: the first for the interval, the one after the hour 60 s.
+    let stands_for = [30.0, 30.0, 30.0, 60.0];
+    for ((row, at), secs) in rows.iter().zip(times).zip(stands_for) {
+        let mut expected = host_node_resources(&busy(at), secs, Some(8.0), None);
+        // The load average is read back from the row's `load1`, as kept.
+        expected.load_average = row.sample.values.get("load1").copied();
+        assert_eq!(row.resources, expected, "{at}");
+        assert!(row.resources.cpu_seconds.is_some_and(|cpu| cpu > 0.0));
+        assert_eq!(row.resources.cpu_limit, Some(8.0));
+        assert_eq!(row.resources.memory_max_bytes, Some(8192 << 20));
+    }
+    assert!(plain_rows.iter().all(|row| row.resources.is_empty()));
+    let samples = |rows: &[NodeSample]| -> Vec<HostSample> {
+        rows.iter().map(|row| row.sample.clone()).collect()
+    };
+    assert_eq!(samples(&rows), samples(&plain_rows));
+
+    let built = "2030-01-01T00:00:00.000Z";
+    let (ledger, plain_ledger) = (node_rows(&rows, built), node_rows(&plain_rows, built));
+    assert_eq!(ledger, plain_ledger);
+    let (from, until) = (NOW - 10, NOW + 3700);
+    let (summary, plain_summary) = (
+        host_summary(&ledger, from, until),
+        host_summary(&plain_ledger, from, until),
+    );
+    assert_eq!(summary, plain_summary);
+    assert!(summary.cpu_secs.as_ref().is_some_and(|cpu| cpu.total > 0.0));
+    assert!(summary.metrics["load1"].is_some());
+    assert_eq!(DiskFree::of(&summary), DiskFree::of(&plain_summary));
+    assert!(DiskFree::of(&summary).is_some());
+    // The CSV copy a person reads is the files' as before.
+    let file = read_file(
+        &with.path().join("host"),
+        &host_metrics::file_name(NOW / DAY),
+    )
+    .unwrap();
+    assert_eq!(file, times.map(busy));
+    assert_eq!(
+        summary,
+        summary_of_files(&with.path().join("host"), from, until)
+    );
+}
+
+/// The store makes a sample's common units from the node's row before it,
+/// read in the write that admits it, whichever supervisor wrote that
+/// row: none for the node's first, the row before for the next. A sample
+/// written after a later row of the node (it waited on the lock) gets its
+/// own second, so it stands for no time the later row counted.
+#[test]
+fn a_sample_stands_for_the_time_since_the_nodes_row_before_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let queue = SqliteQueue::init(dir.path().join("q.db")).unwrap();
+    let day = NOW / DAY;
+    let before = |at: i64| {
+        let seen = std::cell::Cell::new(None);
+        let written = queue
+            .record_node_sample(
+                HOST_NODE,
+                day,
+                &busy(at),
+                &|previous| {
+                    seen.set(Some(previous));
+                    Resources::default()
+                },
+                SampleSource::Sampled,
+                15,
+            )
+            .unwrap();
+        assert!(written, "{at}");
+        seen.get().unwrap()
+    };
+    assert_eq!(before(NOW), None);
+    assert_eq!(before(NOW + 40), Some(NOW));
+    assert_eq!(before(NOW + 20), Some(NOW + 20));
+    assert_eq!(before(NOW + 70), Some(NOW + 40));
+}
+
+/// The summary of the CSV files over `[from, until]`, as `stats` reads it.
+fn summary_of_files(dir: &Path, from: i64, until: i64) -> host_metrics::HostSummary {
+    summary(dir, from, until)
 }

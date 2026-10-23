@@ -557,6 +557,13 @@ pub struct Ports<'a> {
     /// Builds the ledger (docs/design/measurement.md "台帳を作る係");
     /// `None` builds none.
     pub ledger: Option<LedgerPort>,
+    /// The environment the runs execute in (ADR-t1662-3 decision 3): a
+    /// run's claim, resume and adoption record what it is attached to
+    /// (`environment_attached`); `None` records none.
+    pub environment: Option<Arc<dyn crate::application::ExecutionEnvironment>>,
+    /// Measures the runs' resources from outside
+    /// (docs/design/measurement.md "実行環境と資源"); `None` measures none.
+    pub resources: Option<ResourcesPort>,
     pub layout: Layout,
 }
 
@@ -1086,6 +1093,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         programs: &ports.programs,
         service_access: ports.service_access,
         telemetry_tokens: ports.telemetry_tokens,
+        environment: ports.environment.clone(),
         telemetry_retries: telemetry_tokens::Retries::default(),
         telemetry_sessions: std::collections::HashSet::new(),
         pauses: ports.pauses.clone(),
@@ -1106,6 +1114,11 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         agent_eval: None,
         agent_cases: None,
         job_ends: JobEnds::default(),
+        run_children: ports
+            .resources
+            .as_ref()
+            .map(|port| port.children.clone())
+            .unwrap_or_default(),
         jobs_swept: false,
         queue_hold: None,
         hold_continue: HashMap::new(),
@@ -1262,6 +1275,8 @@ struct Supervisor<'a> {
     service_access: &'a dyn crate::application::queue_service::ServiceAccess,
     /// The runs' executors' telemetry tokens ([`Ports::telemetry_tokens`]).
     telemetry_tokens: &'a dyn crate::application::queue_service::TelemetryTokens,
+    /// The environment the runs execute in ([`Ports::environment`]).
+    environment: Option<Arc<dyn crate::application::ExecutionEnvironment>>,
     /// The revocations of the runs' telemetry tokens this process could
     /// not make yet and no sweep would make for it: tried again on each
     /// sweep ([`Self::sweep_telemetry`]).
@@ -1318,6 +1333,11 @@ struct Supervisor<'a> {
     /// outcomes of their `headless_jobs` rows (task 443), and the jobs
     /// abandoned, written as `headless_job_stopped` with their Execution.
     job_ends: JobEnds,
+    /// The processes this process started for its runs outside their
+    /// workers' trees (their headless jobs), which the measure of the runs'
+    /// resources counts with them; those of the measure's port when it
+    /// measures.
+    run_children: crate::domain::environment::RunChildren,
     /// Whether this process looked for the jobs a gone supervisor left,
     /// its own token's included (after an exec), already.
     jobs_swept: bool,
@@ -1644,6 +1664,7 @@ impl Supervisor<'_> {
                 telemetry_tokens: self.telemetry_tokens,
                 no_claude: self.no_claude,
                 job_ends: &self.job_ends,
+                run_children: &self.run_children,
                 review_jobs: self.review_jobs,
                 provider: &mut self.provider,
                 queue_hold: &mut self.queue_hold,
@@ -1668,6 +1689,7 @@ impl Supervisor<'_> {
     /// the run goes on without telemetry. A revocation that failed is held
     /// for the next sweep, in place of any revocation held of the run.
     pub(super) fn issue_run_telemetry(&mut self, run: &TaskRun) {
+        self.record_environment(run.id());
         telemetry_tokens::issue_run(
             self.telemetry_tokens,
             &*self.queue,
@@ -1677,6 +1699,25 @@ impl Supervisor<'_> {
             &mut self.telemetry_retries,
         );
         self.register_run_sessions(run.id());
+    }
+
+    /// Record what `run` is attached to as it starts on this process (its
+    /// claim, a resume, its adoption): the environment's
+    /// `environment_attached`, under which the runs' resources are
+    /// measured (docs/design/measurement.md "実行環境と資源"). One not
+    /// recorded is logged: the run goes on, and its resources are not
+    /// measured until its next start.
+    fn record_environment(&mut self, run: &RunId) {
+        let Some(environment) = &self.environment else {
+            return;
+        };
+        let payload = environment.attached().payload();
+        if let Err(error) =
+            self.queue
+                .record_runtime_event(run, EventKind::EnvironmentAttached, payload)
+        {
+            warn!(run_id = %run, "environment_attached could not be recorded for run {run}: {error:#}");
+        }
     }
 
     /// Register to `run` the sessions its events tell of
@@ -2096,6 +2137,7 @@ impl Supervisor<'_> {
         self.host
             .host_metrics_finish(deadline, &*self.generators.clock);
         self.on_observation(|observation, env| observation.ledger_finish(env, deadline));
+        self.on_observation(|observation, env| observation.resources_finish(env, deadline));
         // The jobs the loop stopped last (a handoff stops them all), and
         // those a loop that failed leaves running: dropped only after this
         // last write, their ends would not be written.
@@ -2282,6 +2324,8 @@ impl Supervisor<'_> {
             // And the ledger, built off the loop from what was recorded,
             // draining and handing off too; nothing here reads it back.
             self.on_observation(|observation, env| observation.ledger_pass(env));
+            let held = self.held_runs();
+            self.on_observation(|observation, env| observation.resources_pass(env, held));
             // Every pass too, so a hold on landings ends as soon as there
             // is room (task 377).
             let landings: Vec<RunId> = self

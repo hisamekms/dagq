@@ -390,7 +390,8 @@ pub fn verify_snapshot(
             commands,
             &mut verification.commands,
             |planned, log| {
-                verifier.run_to_log(
+                verifier.run_to_log_for(
+                    run.id(),
                     &planned.command,
                     &scratch,
                     &with_landing_env(&env, planned, &landing_env),
@@ -2700,7 +2701,7 @@ impl<'a> ContainerVerification<'a> {
             command,
             env,
         )?;
-        let exit = verifier.run_to_log(&line, &self.run_dir, &[], log)?;
+        let exit = verifier.run_to_log_for(&self.run, &line, &self.run_dir, &[], log)?;
         ensure!(
             !crate::domain::run_container::podman_failed(exit.code),
             "podman did not start the verification's container for {command:?} ({exit}); see {}; nothing was judged, and it did not run on the host instead",
@@ -2813,7 +2814,10 @@ impl VerifyStep<'_> {
         let (status, load) = sampled(self.load_average, LOAD_SAMPLE_INTERVAL, || {
             match self.container {
                 Some(container) => container.run_to_log(self.verifier, command, &env, log),
-                None => self.verifier.run_to_log(command, self.worktree, &env, log),
+                None => {
+                    self.verifier
+                        .run_to_log_for(self.run.id(), command, self.worktree, &env, log)
+                }
             }
         });
         let duration_secs = (started.elapsed().as_secs_f64() * 1000.0).round() / 1000.0;

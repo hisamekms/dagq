@@ -407,6 +407,7 @@ fn csv_sample(unix: i64, load: f64) -> HostSample {
 
 fn node_sample(id: i64, unix: i64, load: f64) -> NodeSample {
     NodeSample {
+        resources: Default::default(),
         id,
         node_id: HOST_NODE.to_owned(),
         local_day: host_metrics::local_day(unix, 0),

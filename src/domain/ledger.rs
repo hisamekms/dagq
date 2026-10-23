@@ -108,9 +108,9 @@ pub struct Subject {
 }
 
 /// How far into its inputs a row was folded: the last EventStore event
-/// id, the last NodeSampleStore id for a node row and the last
-/// SessionStepStore id for a run row with steps. The later kinds of input
-/// (resources) add their own key beside them.
+/// id, the last NodeSampleStore id for a node row, and for a run row the
+/// last SessionStepStore id of its steps and the last ids of its resources
+/// (measured from outside and from inside).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InputsThrough {
     pub events: EventId,
@@ -142,6 +142,17 @@ pub struct InputsThrough {
     /// once the retention removed those steps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub steps: Option<i64>,
+    /// For a run row, the largest RunResourceStore id of the windows the
+    /// supervisor measured of it from outside that it folded: a later
+    /// window of the run makes it dirty ([`builder::writes`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<i64>,
+    /// For a run row, the largest id of the samples its executors measured
+    /// from inside that it folded (or that the fold it went on from had):
+    /// a later sample of the run makes it dirty. It stays once the
+    /// retention removed those samples.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inside_resources: Option<i64>,
 }
 
 impl InputsThrough {
@@ -299,6 +310,8 @@ impl LedgerRow {
                 life_ended: Vec::new(),
                 node_samples: None,
                 steps: None,
+                resources: None,
+                inside_resources: None,
             },
             is_final: false,
             started_at: None,

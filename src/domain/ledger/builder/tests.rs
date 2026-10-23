@@ -12,6 +12,7 @@ fn inputs(log: &Log, now: i64) -> Inputs {
 
 fn sample(id: i64, unix: i64) -> NodeSample {
     NodeSample {
+        resources: Default::default(),
         id,
         node_id: HOST_NODE.to_owned(),
         local_day: unix.div_euclid(86_400),

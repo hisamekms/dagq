@@ -3,14 +3,36 @@
 
 use super::*;
 use crate::application::NodeSampleStore;
+use crate::domain::environment::Resources;
 use crate::domain::host_metrics::{HostSample, NodeSample, SampleSource, value_columns};
+
+/// The columns of the sample in the common units, in the order [`values`]
+/// gives them after the sample's.
+const RESOURCE_COLUMNS: [&str; 5] = [
+    "cpu_seconds",
+    "cpu_limit",
+    "memory_max_bytes",
+    "throttled_seconds",
+    "cpu_pressure",
+];
+
+/// Every column of a sample's values, the common units' after them.
+fn sample_columns() -> String {
+    value_columns()
+        .iter()
+        .chain(RESOURCE_COLUMNS.iter())
+        .copied()
+        .collect::<Vec<_>>()
+        .join(",")
+}
 
 /// `INSERT` of a row of `node_samples` that adds nothing when the node has
 /// a row at its second, or on its local day less than `apart` from it:
-/// ?1 node, ?2 unix, ?3 local day, ?4 source, ?5 apart, then the values.
+/// ?1 node, ?2 unix, ?3 local day, ?4 source, ?5 apart, then the values
+/// and the common units.
 fn insert() -> String {
-    let columns = value_columns().join(",");
-    let marks: Vec<String> = (6..6 + value_columns().len())
+    let columns = sample_columns();
+    let marks: Vec<String> = (6..6 + value_columns().len() + RESOURCE_COLUMNS.len())
         .map(|n| format!("?{n}"))
         .collect();
     // The WHERE also keeps the upsert's ON from reading as a join's.
@@ -28,6 +50,7 @@ fn values(
     node: &str,
     day: i64,
     sample: &HostSample,
+    resources: &Resources,
     source: SampleSource,
     apart: i64,
 ) -> Vec<rusqlite::types::Value> {
@@ -43,6 +66,13 @@ fn values(
             .iter()
             .map(|column| sample.values.get(column).copied().into()),
     );
+    values.extend([
+        resources.cpu_seconds.into(),
+        resources.cpu_limit.into(),
+        resources.memory_max_bytes.into(),
+        resources.throttled_seconds.into(),
+        resources.cpu_pressure.into(),
+    ]);
     values
 }
 
@@ -52,13 +82,34 @@ impl NodeSampleStore for SqliteQueue {
         node: &str,
         day: i64,
         sample: &HostSample,
+        resources: &dyn Fn(Option<i64>) -> Resources,
         source: SampleSource,
         apart_secs: i64,
     ) -> Result<bool> {
-        let written = self.conn.execute(
-            &insert(),
-            rusqlite::params_from_iter(values(node, day, sample, source, apart_secs)),
+        // Immediate: the rows around are read in the write that admits the
+        // sample, so another supervisor's sample comes before or after both.
+        let tx = self.write_tx("node_samples_record", TransactionBehavior::Immediate)?;
+        let (before, later): (Option<i64>, bool) = tx.query_row(
+            "SELECT (SELECT max(unix) FROM node_samples WHERE node_id=?1 AND unix < ?2),
+                    EXISTS(SELECT 1 FROM node_samples WHERE node_id=?1 AND unix > ?2)",
+            params![node, sample.unix],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
+        // A sample written after a later row of the node (it waited on the
+        // queue's lock) stands for no time: the later row counted it.
+        let previous = if later { Some(sample.unix) } else { before };
+        let written = tx.execute(
+            &insert(),
+            rusqlite::params_from_iter(values(
+                node,
+                day,
+                sample,
+                &resources(previous),
+                source,
+                apart_secs,
+            )),
+        )?;
+        tx.commit()?;
         Ok(written == 1)
     }
 
@@ -83,6 +134,7 @@ impl NodeSampleStore for SqliteQueue {
                         node,
                         day,
                         sample,
+                        &Resources::default(),
                         SampleSource::CsvImport,
                         0,
                     )))?;
@@ -169,7 +221,7 @@ impl SqliteQueue {
     ) -> Result<Vec<NodeSample>> {
         let mut statement = self.conn.prepare(&format!(
             "SELECT id,node_id,unix,local_day,source,{} FROM node_samples WHERE {filter}",
-            value_columns().join(",")
+            sample_columns()
         ))?;
         let rows = statement.query_map(params, |row| {
             let source: String = row.get(4)?;
@@ -177,10 +229,31 @@ impl SqliteQueue {
             for (index, column) in value_columns().iter().enumerate() {
                 sample.set(column, row.get(5 + index)?);
             }
-            Ok((row.get(0)?, row.get(1)?, row.get(3)?, source, sample))
+            let at = 5 + value_columns().len();
+            let mut resources = Resources {
+                cpu_seconds: row.get(at)?,
+                cpu_limit: row.get(at + 1)?,
+                memory_max_bytes: row.get(at + 2)?,
+                throttled_seconds: row.get(at + 3)?,
+                cpu_pressure: row.get(at + 4)?,
+                load_average: None,
+            };
+            // The load average is the `load1` column's, in the rows the
+            // measure of the node wrote.
+            if !resources.is_empty() {
+                resources.load_average = sample.values.get("load1").copied();
+            }
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(3)?,
+                source,
+                sample,
+                resources,
+            ))
         })?;
         rows.map(|row| {
-            let (id, node_id, local_day, source, sample) = row?;
+            let (id, node_id, local_day, source, sample, resources) = row?;
             Ok(NodeSample {
                 id,
                 node_id,
@@ -188,6 +261,7 @@ impl SqliteQueue {
                 source: SampleSource::parse(&source)
                     .ok_or_else(|| anyhow!("unknown node sample source {source:?}"))?,
                 sample,
+                resources,
             })
         })
         .collect()

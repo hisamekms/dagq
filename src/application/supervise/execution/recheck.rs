@@ -1450,7 +1450,7 @@ fn check_main(recheck: &Recheck<'_>, first: &Target) -> MainCheck {
         let runs = toolchains.build_runs(|| recheck.repository.tree_paths(main.as_str()))?;
         let log = recheck.dir.join(recheck::main_log_name(main));
         let log_path = path_text(&log)?;
-        let exit = match run_on_host(recheck, &runs, main, &first.run_dir, command, &log)? {
+        let exit = match run_on_host(recheck, &runs, main, None, &first.run_dir, command, &log)? {
             Ok(exit) if exit.success => return Ok(MainCheck::Passed { log_path }),
             Ok(exit) => exit,
             Err(error) => return Ok(MainCheck::Unjudged(format!("{error:#}"))),
@@ -1483,12 +1483,14 @@ fn check_main(recheck: &Recheck<'_>, first: &Target) -> MainCheck {
 /// `[run.env]` of `run_dir`, once for each of `runs` (the build outputs
 /// of each run, [`crate::domain::toolchain::Toolchains::build_runs`]),
 /// checked out again before each and no further once one fails, its
-/// output in `log`. The outer `Err` when Git or the setup failed; the
-/// inner one is the command's own (its time limit included).
+/// output in `log`, as `run`'s process when it checks a run's merge. The
+/// outer `Err` when Git or the setup failed; the inner one is the
+/// command's own (its time limit included).
 fn run_on_host(
     recheck: &Recheck<'_>,
     runs: &[Vec<BuildDir>],
     commit: &CommitSha,
+    run: Option<&RunId>,
     run_dir: &Path,
     command: &str,
     log: &Path,
@@ -1529,7 +1531,12 @@ fn run_on_host(
             files.create_dir_all(&output.dir_under(dir))?;
         }
         let env = recheck_env(verifier.run_env(run_dir)?, dir, outputs, look)?;
-        let ran = verifier.run_to_log(command, &scratch, &env, log);
+        // A run's merge is its run's process while it runs; main's own
+        // check is no run's.
+        let ran = match run {
+            Some(run) => verifier.run_to_log_for(run, command, &scratch, &env, log),
+            None => verifier.run_to_log(command, &scratch, &env, log),
+        };
         let passed = matches!(&ran, Ok(exit) if exit.success);
         status = Some(ran);
         if !passed {
@@ -1656,7 +1663,15 @@ fn run_command(
         .run_dir
         .join(format!("recheck-{}.log", &main.as_str()[..12]));
     let status = match (host, &target.container, recheck.in_container) {
-        (Some(runs), _, _) => run_on_host(recheck, &runs, &merged, &target.run_dir, command, &log)?,
+        (Some(runs), _, _) => run_on_host(
+            recheck,
+            &runs,
+            &merged,
+            Some(&target.run_id),
+            &target.run_dir,
+            command,
+            &log,
+        )?,
         (None, Some(run), Some(InContainer::Run { containers, tokens })) => {
             let ran = run_in_container(
                 &InRecheck {
@@ -1763,7 +1778,7 @@ fn run_in_container(
     let mut env = verifier.run_env(run_dir)?;
     let wrapper = crate::domain::run_container::without_sccache_wrapper(&mut env).map(|t| t.port);
     let line = verification_line(containers, &prepared, run.id(), command, &env)?;
-    let status = verifier.run_to_log(&line, run_dir, &[], log);
+    let status = verifier.run_to_log_for(run.id(), &line, run_dir, &[], log);
     // Only a command that ran went without the wrapper.
     let ran = match &status {
         Ok(exit) => !crate::domain::run_container::podman_failed(exit.code),

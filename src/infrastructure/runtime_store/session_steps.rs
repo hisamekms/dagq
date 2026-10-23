@@ -364,6 +364,16 @@ impl SessionResourceStore for SqliteQueue {
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(samples)
     }
+
+    fn resources_after(&self, after: i64, limit: usize) -> Result<Vec<SessionResource>> {
+        let mut statement = self.conn.prepare(&format!(
+            "SELECT {RESOURCE_COLUMNS} FROM session_resources WHERE id > ?1 ORDER BY id LIMIT ?2"
+        ))?;
+        let samples = statement
+            .query_map(params![after, i64::try_from(limit)?], resource_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(samples)
+    }
 }
 
 impl SessionOwners for SqliteQueue {

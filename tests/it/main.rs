@@ -114,6 +114,7 @@ mod review_follow_ups;
 mod review_programs;
 mod review_subagents;
 mod run_container;
+mod run_resources;
 mod runtime_actor_env;
 mod runtime_adopt;
 mod runtime_already_satisfied;

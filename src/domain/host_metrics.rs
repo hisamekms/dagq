@@ -581,6 +581,12 @@ pub struct NodeSample {
     /// files keep it ([`HostSample::as_written`]); a value the node could
     /// not give is null in the store and missing here.
     pub sample: HostSample,
+    /// The same sample in the common units of every environment, as the
+    /// environment's measure of the node made it of the sample
+    /// ([`crate::domain::environment::host_node_resources`] on the host):
+    /// beside the columns, which no summary of the host reads it in place
+    /// of. A row imported from a CSV file has none.
+    pub resources: crate::domain::environment::Resources,
 }
 
 /// How near (seconds, exclusive) a row already recorded keeps out a sample

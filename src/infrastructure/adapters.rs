@@ -1062,6 +1062,19 @@ pub fn run_shell_to_log(
     log: &Path,
     timeout: Duration,
 ) -> Result<ExitStatus> {
+    run_shell_to_log_started(script, cwd, env, log, timeout, &mut |_| ())
+}
+
+/// [`run_shell_to_log`], handing `started` the shell's pid once it
+/// started; what `started` returns is kept until the command ended.
+pub fn run_shell_to_log_started<T>(
+    script: &str,
+    cwd: &Path,
+    env: &[(String, String)],
+    log: &Path,
+    timeout: Duration,
+    started: &mut dyn FnMut(u32) -> T,
+) -> Result<ExitStatus> {
     let file =
         super::agent_dir::create_file(log).with_context(|| format!("create {}", log.display()))?;
     let mut child = verification_command(script, cwd, env)
@@ -1071,6 +1084,7 @@ pub fn run_shell_to_log(
         .process_group(0)
         .spawn()
         .with_context(|| format!("start verification command {script:?}"))?;
+    let _kept = started(child.id());
     let started = Instant::now();
     let deadline = started + timeout;
     loop {

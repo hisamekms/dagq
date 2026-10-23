@@ -1,7 +1,9 @@
 //! The host's load, recorded continuously (task 516): every
 //! [`HostMetricsPort::interval`], draining or not, a job thread samples
 //! the host once and writes the sample to the NodeSampleStore (the
-//! permanent record the measurement reads, ADR-t1662-2 decision 5) and to
+//! permanent record the measurement reads, ADR-t1662-2 decision 5), with
+//! the same sample in the common units of every environment as the
+//! environment's measure of the node makes it, and to
 //! `<queue dir>/host/metrics-YYYYMMDD.csv` (the copy a person reads), then
 //! removes from both what is past the retention
 //! ([`crate::domain::host_metrics`]). Nothing is recorded as an event.
@@ -13,7 +15,8 @@
 //! of piling them up.
 
 use super::*;
-use crate::application::{HostMetricsFiles, NodeSampleStore};
+use crate::application::{ExecutionEnvironment, HostMetricsFiles, NodeSampleStore};
+use crate::domain::environment::sample_stands_for;
 use crate::domain::host_metrics::{self, HOST_NODE, HostSample, SampleSource};
 
 /// What the supervisor records the host's load with.
@@ -31,6 +34,9 @@ pub struct HostMetricsPort {
     pub files: Arc<dyn HostMetricsFiles>,
     /// Opens the NodeSampleStore on the job's thread.
     pub store: Arc<dyn QueueOpener<dyn NodeSampleStore + Send>>,
+    /// The environment the runs execute in, whose measure of the node
+    /// makes the sample's common units.
+    pub environment: Arc<dyn ExecutionEnvironment>,
 }
 
 /// What one job did ([`HostMetricsPort::record`]).
@@ -78,6 +84,12 @@ impl HostMetricsPort {
                     HOST_NODE,
                     today,
                     &sample.as_written(),
+                    &|previous| {
+                        self.environment.node_resources(
+                            &sample,
+                            sample_stands_for(previous, sample.unix, self.interval),
+                        )
+                    },
                     SampleSource::Sampled,
                     host_metrics::apart_secs(self.interval),
                 ) {
@@ -261,6 +273,7 @@ fn sample_due(since_started: Option<Duration>, interval: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::environment::{Resources, host_node_resources};
     use crate::domain::host_metrics::{NodeSample, header, parse_file};
     use std::sync::Mutex;
 
@@ -272,8 +285,36 @@ mod tests {
         days: BTreeMap<i64, i64>,
         imported: BTreeMap<String, u64>,
         removed_before: Vec<i64>,
+        /// The common units written with each sample, by its second.
+        resources: BTreeMap<i64, Resources>,
         /// Opens but refuses every write of a sample.
         refuses: bool,
+    }
+
+    /// The environment of the host as the measure of a node: 8 cores, no
+    /// pressure.
+    struct Node;
+
+    impl ExecutionEnvironment for Node {
+        fn attached(&self) -> crate::domain::environment::EnvironmentAttached {
+            unreachable!("the host's load names no environment")
+        }
+        fn measures_from_outside(&self) -> bool {
+            true
+        }
+        fn waits(&self) -> &'static [crate::domain::environment::EnvironmentWait] {
+            &[]
+        }
+        fn measure_runs(
+            &self,
+            _runs: &[crate::domain::environment::RunProcesses],
+        ) -> Result<Vec<(RunId, Resources)>> {
+            Ok(Vec::new())
+        }
+        fn forget_run(&self, _run: &RunId) {}
+        fn node_resources(&self, sample: &HostSample, interval: Duration) -> Resources {
+            host_node_resources(sample, interval.as_secs_f64(), Some(8.0), None)
+        }
     }
 
     impl Rows {
@@ -314,6 +355,7 @@ mod tests {
             _node: &str,
             day: i64,
             sample: &HostSample,
+            resources: &dyn Fn(Option<i64>) -> Resources,
             source: SampleSource,
             apart_secs: i64,
         ) -> Result<bool> {
@@ -324,7 +366,14 @@ mod tests {
                     || (rows.days[&row.unix] == day && (row.unix - sample.unix).abs() < apart_secs)
             });
             if !near {
+                let previous = rows
+                    .samples
+                    .iter()
+                    .map(|(_, row)| row.unix)
+                    .filter(|unix| *unix < sample.unix)
+                    .max();
                 rows.put(source, day, sample.clone());
+                rows.resources.insert(sample.unix, resources(previous));
             }
             Ok(!near)
         }
@@ -477,6 +526,7 @@ mod tests {
 
     fn port(store: Option<Arc<Mutex<Rows>>>, files: Arc<Files>) -> HostMetricsPort {
         HostMetricsPort {
+            environment: Arc::new(Node),
             interval: Duration::from_secs(30),
             retention_days: 2,
             sample: Arc::new(at),
@@ -514,6 +564,17 @@ mod tests {
             [(SampleSource::Sampled, at(NOW))]
         );
         assert_eq!(files.samples(), [at(NOW)]);
+        // The same sample in the common units, in the same row: 150.5 % of a
+        // core over the 30 s interval, the host's cores and its load.
+        assert_eq!(
+            rows.lock().unwrap().resources[&NOW],
+            Resources {
+                cpu_seconds: Some(1.505 * 30.0),
+                cpu_limit: Some(8.0),
+                load_average: at(NOW).values.get("load1").copied(),
+                ..Resources::default()
+            }
+        );
 
         let no_store = port(None, files.clone()).record(NOW + 30, false);
         assert_eq!(no_store.failures.len(), 1, "{no_store:?}");
@@ -533,6 +594,48 @@ mod tests {
         let mut watch = HostMetricsWatch::default();
         assert!(watch.apply(no_files).is_some());
         assert!(watch.apply(both).is_none());
+    }
+
+    /// A sample's CPU seconds count the time it stands for, not the
+    /// interval: since the node's row before it, whoever wrote that one.
+    /// The first stands for the interval, one taken 60 s late its 60 s, one
+    /// after a stretch nobody recorded twice the interval at most, and two
+    /// supervisors sampling 15 s apart 15 s each.
+    #[test]
+    fn a_samples_cpu_seconds_are_of_the_time_since_the_nodes_row_before_it() {
+        let rows = Arc::new(Mutex::new(Rows::default()));
+        let files = Arc::new(Files::default());
+        let (one, other) = (
+            port(Some(rows.clone()), files.clone()),
+            port(Some(rows.clone()), files.clone()),
+        );
+        for (port, at) in [
+            (&one, NOW),
+            (&one, NOW + 60),
+            (&one, NOW + 3_600),
+            (&other, NOW + 3_615),
+            (&one, NOW + 3_630),
+        ] {
+            assert!(port.record(at, false).failures.is_empty(), "{at}");
+        }
+        let cpu: Vec<(i64, Option<f64>)> = rows
+            .lock()
+            .unwrap()
+            .resources
+            .iter()
+            .map(|(unix, resources)| (unix - NOW, resources.cpu_seconds))
+            .collect();
+        let core = |secs: f64| Some(1.505 * secs);
+        assert_eq!(
+            cpu,
+            [
+                (0, core(30.0)),
+                (60, core(60.0)),
+                (3_600, core(60.0)),
+                (3_615, core(15.0)),
+                (3_630, core(15.0)),
+            ]
+        );
     }
 
     /// A store that opens but cannot take the sample leaves the files
@@ -643,6 +746,7 @@ mod tests {
         let offset = 9 * 3600;
         let midnight = 20_000 * DAY - offset;
         let local = |files: &Arc<Files>| HostMetricsPort {
+            environment: Arc::new(Node),
             utc_offset: |_| 9 * 3600,
             ..port(Some(rows.clone()), files.clone())
         };
@@ -676,6 +780,7 @@ mod tests {
         let rows = Arc::new(Mutex::new(Rows::default()));
         let files = Arc::new(Files::default());
         let fine = HostMetricsPort {
+            environment: Arc::new(Node),
             sample: Arc::new(|unix: i64| {
                 let mut sample = HostSample::new(unix);
                 let load = [1.234, 1.234, 1.244][usize::try_from(unix / 30 % 3).unwrap()];
@@ -720,6 +825,7 @@ mod tests {
         let rows = Arc::new(Mutex::new(Rows::default()));
         let files = Arc::new(Files::default());
         let port = HostMetricsPort {
+            environment: Arc::new(Node),
             utc_offset: new_york,
             ..port(Some(rows.clone()), files.clone())
         };
@@ -756,6 +862,7 @@ mod tests {
         let rows = Arc::new(Mutex::new(Rows::default()));
         let files = Arc::new(Files::default());
         let port = HostMetricsPort {
+            environment: Arc::new(Node),
             utc_offset: repeats,
             ..port(Some(rows.clone()), files.clone())
         };
@@ -792,6 +899,7 @@ mod tests {
         let rows = Arc::new(Mutex::new(Rows::default()));
         let files = Arc::new(Files::default());
         let port = || HostMetricsPort {
+            environment: Arc::new(Node),
             utc_offset: back,
             ..port(Some(rows.clone()), files.clone())
         };
@@ -834,6 +942,7 @@ mod tests {
         }
         let kept = Arc::new(Mutex::new(Rows::default()));
         let forever = HostMetricsPort {
+            environment: Arc::new(Node),
             retention_days: 0,
             ..port(Some(kept.clone()), files)
         };

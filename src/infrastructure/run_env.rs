@@ -3334,6 +3334,10 @@ pub struct ShellVerifier {
     /// The profiles a `[toolchains.<name>]` may name:
     /// [`crate::domain::toolchain::BUILTIN`] but in tests that add one.
     pub profiles: &'static ProfileRegistry,
+    /// Where a command run for a run is that run's process while it runs
+    /// ([`Verifier::run_to_log_for`]): the supervisor's measure of the
+    /// runs' resources reads them.
+    pub children: crate::domain::environment::RunChildren,
 }
 
 impl Verifier for ShellVerifier {
@@ -3438,6 +3442,25 @@ impl Verifier for ShellVerifier {
     ) -> Result<Exit> {
         super::adapters::run_shell_to_log(command, cwd, env, log, self.verification_timeout)
             .map(super::process::exit)
+    }
+
+    fn run_to_log_for(
+        &self,
+        run: &crate::domain::RunId,
+        command: &str,
+        cwd: &Path,
+        env: &[(String, String)],
+        log: &Path,
+    ) -> Result<Exit> {
+        super::adapters::run_shell_to_log_started(
+            command,
+            cwd,
+            env,
+            log,
+            self.verification_timeout,
+            &mut |pid| self.children.started(run, pid),
+        )
+        .map(super::process::exit)
     }
 }
 
@@ -3677,6 +3700,7 @@ mod tests {
             user_config: None,
             verification_timeout: Duration::from_secs(1),
             profiles: registry,
+            children: crate::domain::environment::RunChildren::default(),
         }
         .toolchains()
         .unwrap();
@@ -4024,6 +4048,7 @@ mod tests {
             user_config: None,
             verification_timeout: Duration::from_secs(1),
             profiles: &crate::domain::toolchain::BUILTIN,
+            children: crate::domain::environment::RunChildren::default(),
         };
         assert_eq!(
             verifier
@@ -4258,6 +4283,7 @@ mod tests {
             user_config: None,
             verification_timeout: Duration::from_secs(1),
             profiles: &crate::domain::toolchain::BUILTIN,
+            children: crate::domain::environment::RunChildren::default(),
         };
         assert_eq!(
             verifier
@@ -4397,6 +4423,7 @@ mod tests {
             user_config: None,
             verification_timeout: Duration::from_secs(1),
             profiles: &crate::domain::toolchain::BUILTIN,
+            children: crate::domain::environment::RunChildren::default(),
         };
         assert_eq!(
             verifier
@@ -4455,6 +4482,7 @@ mod tests {
             user_config: None,
             verification_timeout: Duration::from_secs(1),
             profiles: &crate::domain::toolchain::BUILTIN,
+            children: crate::domain::environment::RunChildren::default(),
         };
         assert_eq!(
             verifier
@@ -5308,6 +5336,7 @@ LITERAL = 'no \n escapes # here'
             user_config: None,
             verification_timeout: crate::infrastructure::adapters::VERIFICATION_TIMEOUT,
             profiles: &crate::domain::toolchain::BUILTIN,
+            children: crate::domain::environment::RunChildren::default(),
         };
         assert!(verifier.worker_trial().unwrap().enabled);
         fs::write(dir.path().join(CONFIG_FILE_NAME), "[worker.trial]\nx = 1\n").unwrap();
@@ -5812,6 +5841,7 @@ LITERAL = 'no \n escapes # here'
             user_config: None,
             verification_timeout: Duration::from_secs(1),
             profiles: &crate::domain::toolchain::BUILTIN,
+            children: crate::domain::environment::RunChildren::default(),
         };
         assert_eq!(
             verifier.landing_verification().unwrap().unwrap().command,
@@ -6355,6 +6385,7 @@ LITERAL = 'no \n escapes # here'
             user_config: None,
             verification_timeout: crate::infrastructure::adapters::VERIFICATION_TIMEOUT,
             profiles: &crate::domain::toolchain::BUILTIN,
+            children: crate::domain::environment::RunChildren::default(),
         };
         assert_eq!(
             verifier.recheck_config().unwrap().command.as_deref(),
@@ -6666,6 +6697,7 @@ LITERAL = 'no \n escapes # here'
             user_config: None,
             verification_timeout: crate::infrastructure::adapters::VERIFICATION_TIMEOUT,
             profiles: &crate::domain::toolchain::BUILTIN,
+            children: crate::domain::environment::RunChildren::default(),
         };
         assert!(!verifier.run_env_programs(None).unwrap().config);
         fs::write(

@@ -481,6 +481,7 @@ fn a_program_job_is_recorded_and_its_timeout_stops_what_it_started() {
         supervisor_token: &token,
         clock: &clock,
         ends: &ends,
+        children: &dagq::domain::environment::RunChildren::default(),
     };
     let run = RunId::new("run-1").unwrap();
     let output = |name: &str| {
@@ -612,6 +613,7 @@ fn a_review_program_runs_narrowed_in_the_worktree_and_is_stopped_past_its_limit(
         supervisor_token: &token,
         clock: &clock,
         ends: &ends,
+        children: &dagq::domain::environment::RunChildren::default(),
     };
     let worktree = dir.path().join("worktree");
     fs::create_dir_all(worktree.join("scripts")).unwrap();
@@ -856,6 +858,7 @@ fn a_review_program_runs_the_landing_branchs_script_not_the_worktrees() {
         supervisor_token: &token,
         clock: &clock,
         ends: &ends,
+        children: &dagq::domain::environment::RunChildren::default(),
     };
     // As the supervisor builds it, here started in the run's worktree: the
     // main checkout it leaves out is the queue's, not that worktree.

@@ -1650,3 +1650,65 @@ fn the_supervisor_builds_the_ledger_off_the_landing_whatever_its_writes_do() {
     supervise_reviewed_with(&db, &repo, &backend, &idle, &options);
     assert_eq!(queue.ledger_rows(LedgerKind::Run).unwrap(), rows);
 }
+
+/// The supervisor names the environment of a run as it claims it
+/// (docs/design/measurement.md "実行環境と資源"): the host's
+/// `environment_attached` with every item (its node the NodeSampleStore's
+/// of the host, no image, its cores, its memory and its architecture). It
+/// measures the run in its slots, and once the run left them its attachment
+/// is closed with a last window, by the supervisor that measured it or the
+/// next one, so no attachment stays open.
+#[test]
+fn the_supervisor_records_the_environment_a_run_is_claimed_on_and_closes_it() {
+    use dagq::application::RunResourceStore;
+    use dagq::domain::environment::{EnvKind, EnvironmentAttached};
+    let (dir, repo, db, backend) = headless_fixture(&[]);
+    set_turns(dir.path(), FINISH);
+    let options = SuperviseOptions {
+        environment: Some(runtime::EnvironmentOptions {
+            interval: Duration::ZERO,
+        }),
+        ..supervise_options(4, true)
+    };
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "meets the acceptance")]);
+    let outcome = supervise_reviewed_with(&db, &repo, &backend, &reviewer, &options);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    assert_eq!(outcome["runs"][0]["status"], "integrated", "{outcome}");
+    let run = detail(&db).runs[0].id().clone();
+    let queue = SqliteQueue::open(&db).unwrap();
+    let events = queue.run_events(&run).unwrap();
+    let claimed = events
+        .iter()
+        .position(|event| event.kind == EventKind::RunClaimed)
+        .unwrap();
+    let attached: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event.kind == EventKind::EnvironmentAttached)
+        .collect();
+    assert_eq!(attached.len(), 1, "{events:?}");
+    let (at, event) = attached[0];
+    assert!(at > claimed);
+    let environment = EnvironmentAttached::of_payload(&event.payload).unwrap();
+    assert_eq!(environment.env_kind, EnvKind::Host);
+    assert_eq!(environment.node_id, "host");
+    assert_eq!(environment.image_digest, None);
+    assert!(environment.cpu_limit.is_some_and(|cores| cores >= 1.0));
+    assert!(environment.mem_limit.is_some_and(|bytes| bytes > 0));
+    assert_eq!(environment.arch, std::env::consts::ARCH);
+
+    // The supervisor that measured it closes it once the run left its
+    // slots; the next one does when the first ended before a pass did.
+    if !queue.open_attachments().unwrap().is_empty() {
+        let idle = TestReviewer::new(&[]);
+        supervise_reviewed_with(&db, &repo, &backend, &idle, &options);
+    }
+    let windows = queue.run_resources(&run).unwrap();
+    assert!(
+        windows
+            .iter()
+            .any(|window| window.last && window.attachment == event.id.as_i64()),
+        "{windows:?}"
+    );
+    assert!(queue.open_attachments().unwrap().is_empty());
+}

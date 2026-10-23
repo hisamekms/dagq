@@ -53,6 +53,40 @@ impl Default for LedgerOptions {
     }
 }
 
+/// How the supervisor names the environment of its runs and measures
+/// their resources ([`SuperviseOptions::environment`](super::SuperviseOptions::environment)).
+#[derive(Debug, Clone)]
+pub struct EnvironmentOptions {
+    /// The time between the measures of the runs' resources; tests
+    /// shorten it.
+    pub interval: Duration,
+}
+
+impl Default for EnvironmentOptions {
+    fn default() -> Self {
+        Self {
+            interval: Duration::from_secs(crate::application::supervise::RESOURCES_INTERVAL_SECS),
+        }
+    }
+}
+
+/// The supervisor's measure of the runs' resources in `environment`, in
+/// the queue opened by `store`, with the processes it starts for its runs
+/// in other trees (`children`).
+pub(super) fn resources_port(
+    settings: &EnvironmentOptions,
+    environment: Arc<dyn crate::application::ExecutionEnvironment>,
+    store: Arc<dyn crate::application::QueueOpener<dyn crate::application::ResourceQueue + Send>>,
+    children: crate::domain::environment::RunChildren,
+) -> crate::application::supervise::ResourcesPort {
+    crate::application::supervise::ResourcesPort {
+        interval: settings.interval,
+        environment,
+        store,
+        children,
+    }
+}
+
 /// The supervisor's builder of the ledger in the queue's stores (opened
 /// by `store`), with the node rows kept as the host's samples are
 /// (`retention_days`, none when they are not recorded).
@@ -169,6 +203,7 @@ fn add_sccache_diagnostics(
         user_config: None,
         verification_timeout: VERIFICATION_TIMEOUT,
         profiles: &crate::domain::toolchain::BUILTIN,
+        children: crate::domain::environment::RunChildren::default(),
     });
     let server = crate::infrastructure::sccache::SystemSccache::new(
         db.parent().unwrap_or(Path::new(".")),
@@ -200,6 +235,7 @@ fn doctor_run_env(queue: &SqliteQueue, db: &Path) -> Result<crate::domain::run_e
         user_config: None,
         verification_timeout: VERIFICATION_TIMEOUT,
         profiles: &crate::domain::toolchain::BUILTIN,
+        children: crate::domain::environment::RunChildren::default(),
     }
     .run_env_programs(None)
 }

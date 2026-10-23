@@ -15,6 +15,7 @@ related:
   - design-persistence
   - design-supervisor-lifecycle-claim-hold
   - design-supervisor-lifecycle-throughput-review
+  - design-measurement-environment
 ---
 
 # hostの負荷の連続の記録
@@ -45,6 +46,7 @@ eventにはしない（連続の値でrun_eventsを膨らませない）。
   行の順のidは、保持で消した後も使い直さない（台帳の到達点と係のカーソルが戻らない）。
   値はファイルのセルが読み戻す精度で持つので、両方に書けた期間の同じ窓のストアの要約とファイルの要約は同じになる。
   ストアに書けなかった間にファイルだけに入った行は、次のprocessの取り込みでストアに入る（ファイルに書けなかった行はファイルに戻らない）。
+  同じ行は同じsampleを共通の単位にした資源も持ち、要約はそれを読まない（[実行環境と資源](../measurement-environment.md#nodeの資源)）。
   行の中身はmigrationと`domain::host_metrics::NodeSample`のdoc commentが持つ
 - **保持**: ストアの行は、ファイルと同じ日数と数え方で、行の持つlocalの日が保持の期間より前なら取った時刻によらず消すので、時計の切り替えがあってもファイルと同じ行が残る。
   台帳のnodeの行も、台帳を作る係が同じ日数で1日に1度sampleを落とす（[計測](../measurement.md#台帳を作る係)）。
