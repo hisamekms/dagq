@@ -472,11 +472,12 @@ pub(in crate::application::supervise) fn reach_at_start(
         // Another build's (the binary before an `install` or an automatic
         // update handed this process over) is replaced before anything is
         // sent to it: it may not answer this build's operations.
-        Ok(answer) => {
-            anyhow::Error::new(crate::application::supervisor_service::ServiceUnreachable(
-                format!("the queue service runs build {}", answer["build"]),
-            ))
-        }
+        Ok(answer) => anyhow::Error::new(
+            crate::application::supervisor_service::ServiceUnreachable::not_done(format!(
+                "the queue service runs build {}",
+                answer["build"]
+            )),
+        ),
         Err(error) if !crate::application::supervisor_service::unreachable(&error) => {
             return Err(error);
         }

@@ -502,9 +502,12 @@ impl Supervisor<'_> {
     pub(super) fn park_step(&mut self, slot: &mut Slot) -> Result<Option<Step>> {
         // A failure of the park (a busy queue, a move another process made
         // first) is the park's, not the phase's: it is tried again on the
-        // next look, the run keeping its slot.
+        // next look, the run keeping its slot. The queue service out of
+        // reach is the step's, which the reconciliation judges by what the
+        // park may have done.
         match self.try_park_step(slot) {
             Ok(step) => Ok(step),
+            Err(error) if crate::application::supervisor_service::unreachable(&error) => Err(error),
             Err(error) => {
                 warn!(run_id = %slot.run.id(), error = %format_args!("{error:#}"), "run {}: its park at its turn's end failed and is tried again: {error:#}", slot.run.id());
                 Ok(Some(Step::Continue))
@@ -564,8 +567,10 @@ impl Supervisor<'_> {
                     return Ok(Some(Step::Continue));
                 };
                 let ran = (watch.job.elapsed().as_secs(), watch.job.timeout.as_secs());
-                let mut programs = watch.programs.take();
+                // Read before the programs' results are taken out of the
+                // slot.
                 let run = self.queue.run(slot.run.id())?;
+                let mut programs = watch.programs.take();
                 self.record_review_program_end(&run, &mut programs, &end, ran)?;
                 self.queue.record_runtime_event(
                     slot.run.id(),

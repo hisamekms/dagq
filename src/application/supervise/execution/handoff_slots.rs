@@ -159,6 +159,19 @@ pub(super) enum Queued {
     AfterResume,
 }
 
+/// How the `events` of a run in `status` without `handoff.json` queue it
+/// to land: an `awaiting_integration` run by a person's `land` or a
+/// recovered landing, a `needs_session` one by its approved resume's end
+/// ([`crate::domain::RunHistory::queued_after_resume`]).
+pub(super) fn queued(status: RunStatus, events: &[RunEvent]) -> Queued {
+    let history = RunHistory::from_events(events);
+    match status {
+        RunStatus::NeedsSession if history.queued_after_resume().is_some() => Queued::AfterResume,
+        RunStatus::AwaitingIntegration if history.queued_to_land().is_some() => Queued::ToLand,
+        _ => Queued::No,
+    }
+}
+
 /// [`Takeover`] of a run in `status` with `snapshot`, `resume_lives`
 /// whether its resumed session lives on (read only when
 /// [`reads_resumed_session`]) and `queued` how it was queued to land
@@ -391,83 +404,129 @@ impl Supervisor<'_> {
                     kind,
                 ),
             )?;
-            // A lookup that fails gives this run's lease back rather than
-            // stopping the takeover of the others.
-            let resume_lives = reads_resumed_session(run.status(), kind)
-                && {
-                    let adoptable = self.queue.processes(run.id()).and_then(|processes| {
-                        let wrapper = processes.into_iter().find(|p| p.role == "wrapper");
-                        self.resume_adoptable(&run, wrapper.as_ref())
-                    });
-                    adoptable.unwrap_or_else(|error| {
-                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: whether its resumed session lives could not be read; its lease is given back: {error:#}", run.id());
-                    false
-                })
-                };
-            // Likewise a lookup that fails adopts its review, as before, or
-            // gives a `needs_session` run's lease back.
-            let queued = if kind.is_none()
-                && matches!(
-                    run.status(),
-                    RunStatus::AwaitingIntegration | RunStatus::NeedsSession
-                ) {
-                self.queue
-                    .run_events(run.id())
-                    .map(|events| {
-                        let history = RunHistory::from_events(&events);
-                        match run.status() {
-                            RunStatus::NeedsSession if history.queued_after_resume().is_some() => {
-                                Queued::AfterResume
-                            }
-                            RunStatus::AwaitingIntegration if history.queued_to_land().is_some() => {
-                                Queued::ToLand
-                            }
-                            _ => Queued::No,
-                        }
-                    })
-                    .unwrap_or_else(|error| {
-                        warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: whether it is queued to land could not be read: {error:#}", run.id());
-                        Queued::No
-                    })
-            } else {
-                Queued::No
-            };
-            let takeover = takeover(run.status(), kind, resume_lives, queued);
-            let phase = match (takeover, snapshot) {
-                (_, Some(snapshot)) => self.rebuild_from(&run, snapshot),
-                (Takeover::AdoptResume, None) => self.adopt_resume(&run).map(Phase::Resume),
-                (Takeover::Session, None) => self.resume(&run),
-                (Takeover::Review, None) => self.adopt_review(&run),
-                (Takeover::Land, None) => Ok(Phase::AwaitingSlot),
-                (Takeover::Snapshot(_) | Takeover::GiveBack, None) => {
-                    info!(run_id = %run.id(), "run {} ({}) has nothing to take over after the handoff; its lease is given back", run.id(), run.status().as_str());
-                    self.queue
-                        .release_lease(run.id(), self.registration.token())?;
-                    continue;
+            // The service out of reach leaves the run this process's, found
+            // again by the reconciliation of the loop's first pass.
+            match self.take_over_own(&run, snapshot, Some(previous_version)) {
+                Err(error) if crate::application::supervisor_service::unreachable(&error) => {
+                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: the queue service did not answer its takeover; it is reconciled once it does", run.id());
+                    self.unanswered.lost();
+                }
+                result => result?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Give `run`, leased to this process's token and in no slot, a slot
+    /// rebuilt from `snapshot` or else from the queue, as
+    /// [`Self::rebuild_own_runs`] does after the exec, or give its lease
+    /// back when nothing is to be taken over. `previous_version` is the
+    /// binary an exec took the run over from; `None` for a run this process
+    /// finds its own again ([`Self::reconcile_unanswered`]).
+    pub(super) fn take_over_own(
+        &mut self,
+        run: &TaskRun,
+        snapshot: Option<handoff::Snapshot>,
+        previous_version: Option<Option<&str>>,
+    ) -> Result<()> {
+        let cause = if previous_version.is_some() {
+            "handoff"
+        } else {
+            "reconciled"
+        };
+        let kind = snapshot.as_ref().map(handoff::Snapshot::kind);
+        // A lookup that fails gives this run's lease back rather than
+        // stopping the takeover of the others, but not one the queue
+        // service did not answer: the run keeps its lease, and is taken
+        // over at the next reconciliation from what the queue says then
+        // (a lease given back on a guess would have an approved run queued
+        // to land resumed again).
+        let resume_lives = reads_resumed_session(run.status(), kind)
+            && {
+                let adoptable = self.queue.processes(run.id()).and_then(|processes| {
+                    let wrapper = processes.into_iter().find(|p| p.role == "wrapper");
+                    self.resume_adoptable(run, wrapper.as_ref())
+                });
+                match adoptable {
+                    Err(error) if crate::application::supervisor_service::unreachable(&error) => {
+                        return Err(error);
+                    }
+                    adoptable => adoptable.unwrap_or_else(|error| {
+                        warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: whether its resumed session lives could not be read; its lease is given back: {error:#}", run.id());
+                        false
+                    }),
                 }
             };
-            match phase {
-                Ok(phase) => {
-                    info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} taken over after the handoff ({})", run.id(), run.task_id(), run.status().as_str());
-                    // A resumed session goes on watched instead of being
-                    // resumed again (ADR-0047 decision 24).
-                    if let (true, Phase::Resume(watch)) = (takeover.resume_adopted(), &phase) {
-                        self.note_resume_adopted(&run, watch, Some(previous_version));
-                    }
-                    let mut slot = Slot::new(run, phase);
-                    // Kept as it was, even past the limit (ADR-0062
-                    // decision 7).
-                    self.restore_waiting(&mut slot, true)?;
-                    self.claim.slots.admit_noting(slot, "handoff", &*self.queue);
+        // Likewise a lookup that fails adopts its review, as before, or
+        // gives a `needs_session` run's lease back.
+        let queued = if kind.is_none()
+            && matches!(
+                run.status(),
+                RunStatus::AwaitingIntegration | RunStatus::NeedsSession
+            ) {
+            match self.queue.run_events(run.id()) {
+                Ok(events) => queued(run.status(), &events),
+                Err(error) if crate::application::supervisor_service::unreachable(&error) => {
+                    return Err(error);
                 }
                 Err(error) => {
-                    let message = format!(
-                        "run {} could not be taken over after the handoff: {error:#}",
-                        run.id()
-                    );
-                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "{}", message);
-                    self.abandon(&run, message, &reason_of_error(&error, ReasonCode::Other));
+                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "run {}: whether it is queued to land could not be read: {error:#}", run.id());
+                    Queued::No
                 }
+            }
+        } else {
+            Queued::No
+        };
+        let takeover = takeover(run.status(), kind, resume_lives, queued);
+        let phase = match (takeover, snapshot) {
+            (_, Some(snapshot)) => self.rebuild_from(run, snapshot),
+            (Takeover::AdoptResume, None) => self.adopt_resume(run).map(Phase::Resume),
+            (Takeover::Session, None) => self.resume(run),
+            (Takeover::Review, None) => self.adopt_review(run),
+            (Takeover::Land, None) => Ok(Phase::AwaitingSlot),
+            (Takeover::Snapshot(_) | Takeover::GiveBack, None) => {
+                info!(run_id = %run.id(), "run {} ({}) has nothing to take over ({cause}); its lease is given back", run.id(), run.status().as_str());
+                self.queue
+                    .release_lease(run.id(), self.registration.token())?;
+                return Ok(());
+            }
+        };
+        match phase {
+            Ok(phase) => {
+                info!(run_id = %run.id(), task_id = %run.task_id(), "run {} of task {} taken over ({cause}, {})", run.id(), run.task_id(), run.status().as_str());
+                // A resumed session goes on watched instead of being
+                // resumed again (ADR-0047 decision 24).
+                if let (true, Phase::Resume(watch)) = (takeover.resume_adopted(), &phase) {
+                    self.note_resume_adopted(run, watch, previous_version);
+                }
+                let mut slot = Slot::new(run.clone(), phase);
+                // Kept as it was, even past the limit (ADR-0062
+                // decision 7). The slot keeps the work its phase started
+                // when the service does not answer, and its wait is read
+                // again at the next reconciliation.
+                match self.restore_waiting(&mut slot, true) {
+                    Ok(()) => {}
+                    Err(error) if crate::application::supervisor_service::unreachable(&error) => {
+                        self.unanswered.restore_wait(run.id());
+                        self.claim.slots.admit_noting(slot, cause, &*self.queue);
+                        return Err(error);
+                    }
+                    Err(error) => return Err(error),
+                }
+                self.claim.slots.admit_noting(slot, cause, &*self.queue);
+            }
+            // The service out of reach again: the run stays this
+            // process's, found again at the next reconciliation.
+            Err(error) if crate::application::supervisor_service::unreachable(&error) => {
+                return Err(error);
+            }
+            Err(error) => {
+                let message = format!(
+                    "run {} could not be taken over ({cause}): {error:#}",
+                    run.id()
+                );
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "{}", message);
+                self.abandon(run, message, &reason_of_error(&error, ReasonCode::Other));
             }
         }
         Ok(())

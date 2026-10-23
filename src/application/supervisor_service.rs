@@ -64,14 +64,38 @@ pub trait ServiceCaller: Send + Sync {
 }
 
 /// The queue service did not answer (no socket, a process that does not
-/// accept or does not answer in time): the request may or may not have
-/// been done, and the queue was not opened instead (fail closed).
-#[derive(Debug)]
-pub struct ServiceUnreachable(pub String);
+/// accept or does not answer in time), and the queue was not opened
+/// instead (fail closed).
+#[derive(Debug, Clone)]
+pub struct ServiceUnreachable {
+    pub reason: String,
+    /// Whether the service may have done the request: not when no
+    /// connection took it, nor when it was a read, which changes nothing;
+    /// a request written whose answer did not come may have been done.
+    pub maybe_done: bool,
+}
+
+impl ServiceUnreachable {
+    /// A request the service may have done without its answer coming.
+    pub fn maybe_done(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            maybe_done: true,
+        }
+    }
+
+    /// A request the service did not do.
+    pub fn not_done(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            maybe_done: false,
+        }
+    }
+}
 
 impl std::fmt::Display for ServiceUnreachable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "the queue service did not answer: {}", self.0)
+        write!(f, "the queue service did not answer: {}", self.reason)
     }
 }
 
@@ -82,6 +106,116 @@ pub fn unreachable(error: &anyhow::Error) -> bool {
     error
         .chain()
         .any(|cause| cause.downcast_ref::<ServiceUnreachable>().is_some())
+}
+
+/// Whether `error` is the service out of reach for a request it did not
+/// do ([`ServiceUnreachable::maybe_done`] false).
+pub fn undone(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<ServiceUnreachable>()
+            .is_some_and(|unreachable| !unreachable.maybe_done)
+    })
+}
+
+/// The operations of [`dispatch`] that only read the queue: one the
+/// service did not answer did nothing ([`undone`]). An operation not here
+/// is taken as one that writes.
+const READ_OPS: [&str; 59] = [
+    "candidates",
+    "build_waits",
+    "predecessors",
+    "goal_predecessors",
+    "tasks_in_progress",
+    "task_fenced",
+    "list_goals",
+    "active_runs",
+    "all_runs",
+    "run",
+    "runs_with_status",
+    "next_awaiting_integration",
+    "ended_run_workspaces",
+    "ended_run_worktrees",
+    "ended_run_worktree",
+    "latest_runs_in_progress",
+    "runs_with_pending_push",
+    "run_in_workspace",
+    "replan_guard",
+    "turn_fence",
+    "settling_holds",
+    "open_hold",
+    "latest_run_of",
+    "parking_replans",
+    "replans_of_run",
+    "runs_leased_by_others",
+    "runs_leased_by",
+    "unclosed_run_asks",
+    "runs_needing_session",
+    "hold_guard",
+    "held_claims",
+    "holds_lease",
+    "run_leases",
+    "run_lease",
+    "processes",
+    "backend_slots",
+    "supervisors",
+    "handoff_request",
+    "repository_binding",
+    "update_events",
+    "installs_after",
+    "e2e_gate_events",
+    "latest_task_events",
+    "run_events",
+    "task_events",
+    "has_run_event",
+    "last_observe",
+    "latest_event_id",
+    "latest_event_of",
+    "latest_events_of",
+    "latest_queue_event",
+    "latest_events_by_supervisor",
+    "events_of_between",
+    "events_between",
+    "show",
+    "graph_input",
+    "token_principals",
+    "held_telemetry",
+    "target_facts",
+];
+
+thread_local! {
+    /// The writes this thread's [`SupervisorQueue`]s sent or tried to
+    /// send to the service, done or not, or made on the queue's own
+    /// connection.
+    static WRITES_TRIED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// The requests of this thread's [`SupervisorQueue`]s the service did
+    /// not answer.
+    static UNANSWERED_HERE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Whether a request of a [`SupervisorQueue`] went unanswered since
+/// [`take_unanswered`] last looked, on any thread: the loop's, or a
+/// landing's or a validation's on its own.
+static UNANSWERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// How many writes this thread's supervisor queues tried so far: a step
+/// that tried none and failed on a request the service did not do
+/// ([`undone`]) changed nothing on the queue.
+pub fn writes_tried() -> u64 {
+    WRITES_TRIED.with(std::cell::Cell::get)
+}
+
+/// How many requests of this thread's supervisor queues went unanswered
+/// so far, swallowed or not: a caller that goes on past a failure it only
+/// logs tells by it whether the failure was the service out of reach.
+pub fn unanswered_here() -> u64 {
+    UNANSWERED_HERE.with(std::cell::Cell::get)
+}
+
+/// Whether a request of a supervisor's queue went unanswered since the
+/// last call, on any thread and swallowed or not; the look clears it.
+pub fn take_unanswered() -> bool {
+    UNANSWERED.swap(false, std::sync::atomic::Ordering::SeqCst)
 }
 
 /// The service's refusal or failure `error` of a request as the error the
@@ -170,9 +304,29 @@ impl SupervisorQueue {
                 .map(Principal::of),
             requested_by: self.requested_by.borrow().clone(),
         };
-        let value = self
+        let read = READ_OPS.contains(&op);
+        if !read {
+            WRITES_TRIED.with(|tried| tried.set(tried.get() + 1));
+        }
+        let value = match self
             .service
-            .call(UseCase::Supervisor, serde_json::to_value(params)?)?;
+            .call(UseCase::Supervisor, serde_json::to_value(params)?)
+        {
+            Ok(value) => value,
+            Err(error) => {
+                let Some(lost) = error.downcast_ref::<ServiceUnreachable>() else {
+                    return Err(error);
+                };
+                UNANSWERED.store(true, std::sync::atomic::Ordering::SeqCst);
+                UNANSWERED_HERE.with(|seen| seen.set(seen.get() + 1));
+                // A read the service did not answer did nothing.
+                return Err(if read && lost.maybe_done {
+                    anyhow::Error::new(ServiceUnreachable::not_done(lost.reason.clone()))
+                } else {
+                    error
+                });
+            }
+        };
         let form: T::Form = serde_json::from_value(value)
             .with_context(|| format!("the queue service's answer to {op} does not read"))?;
         T::from_form(form)
@@ -185,8 +339,10 @@ impl SupervisorQueue {
 
     /// The connection for the operations the service does not answer yet,
     /// opened at the first of them with the actor and the requester set
-    /// since.
+    /// since. Each use counts as a write tried ([`writes_tried`]): one made
+    /// there is done, whatever the service answers next.
     fn local(&self) -> Result<std::cell::RefMut<'_, Box<dyn Queue + Send>>> {
+        WRITES_TRIED.with(|tried| tried.set(tried.get() + 1));
         let mut local = self.local.borrow_mut();
         if local.is_none() {
             let queue = self.opener.open()?;

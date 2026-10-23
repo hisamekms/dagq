@@ -93,6 +93,12 @@ impl SlotTable {
         self.slots.iter().any(|slot| slot.run.id() == id)
     }
 
+    /// Take the slot of the run `id` out, if one holds it.
+    pub(super) fn take(&mut self, id: &RunId) -> Option<Slot> {
+        let index = self.slots.iter().position(|slot| slot.run.id() == id)?;
+        Some(self.slots.remove(index))
+    }
+
     /// The runs the slots hold.
     pub(super) fn runs(&self) -> Vec<RunId> {
         self.slots

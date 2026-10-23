@@ -1376,7 +1376,11 @@ impl Supervisor<'_> {
         // that a supervisor that stops between them judges the review
         // again and finds them registered (ADR-t2352-1); they never change
         // where the verdict sends the run.
+        // The queue service out of reach is no reason to go on without
+        // them: the step fails, and the review is judged again from the
+        // queue, which keeps a follow_up registered once.
         if !verdict.found_follow_ups().is_empty() {
+            let unanswered = crate::application::supervisor_service::unanswered_here();
             match self.queue.show(run.task_id()) {
                 Ok(detail) => {
                     crate::application::integrate::register_review_follow_ups(
@@ -1386,6 +1390,16 @@ impl Supervisor<'_> {
                         attempt,
                         &verdict,
                     );
+                    if crate::application::supervisor_service::unanswered_here() != unanswered {
+                        return Err(anyhow::Error::new(
+                            crate::application::supervisor_service::ServiceUnreachable::maybe_done(
+                                format!("the follow_ups of review {attempt} were not all answered"),
+                            ),
+                        ));
+                    }
+                }
+                Err(error) if crate::application::supervisor_service::unreachable(&error) => {
+                    return Err(error);
                 }
                 Err(error) => {
                     warn!(run_id = %run.id(), error = %format_args!("{error:#}"),
@@ -1635,6 +1649,13 @@ impl Supervisor<'_> {
                 .context("start the review")?
                 .process()
         })();
+        // Its token issued without the service's answer is no start that
+        // failed: the step is judged by the reconciliation.
+        if let Err(error) = &started
+            && crate::application::supervisor_service::unreachable(error)
+        {
+            return Err(started.err().expect("matched above"));
+        }
         Ok(started.map(|child| (child, stdout, stderr)))
     }
     /// Move on from a verdict: `pass` exits the session and lands; `revise`

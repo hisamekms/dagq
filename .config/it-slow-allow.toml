@@ -2330,3 +2330,21 @@ task = 1673
 name = "runtime_telemetry_sessions::a_headless_runs_steps_go_into_the_step_store_under_the_run"
 reason = "B 境界（守る境界）: a headless worker's run lands while its wrapper and the landing's verification send their steps with the run's telemetry token to the real queue service process (ADR-t1662-3 decision 1); the step assembly and batching are unit tests"
 task = 1673
+
+# 2.5s to 6.1s in stress under the host's load (task 3177): a whole supervisor run from the claim through its review to the landing, an answer of the queue service lost on the way
+[[test]]
+name = "supervisor_service::a_passed_runs_exit_done_unanswered_still_lands"
+reason = "B 境界（supervisor の配線・復旧）: 実際の supervisor が queue service の答えを失った /exit の後の工程を、slot をやり直さず queue から組み立て直して着地させることを確かめる代表。どの slot を組み立て直すかの判断は supervise::execution::reconcile の unit test"
+task = 3177
+
+# 4.0s to 11.8s in stress under the host's load (task 3177): a run parked by a conflict after its landing was approved (two supervisor passes and two integrates), then its resume and its landing, two answers of the queue service lost on the way
+[[test]]
+name = "supervisor_service::an_approved_resumes_end_and_the_read_after_it_unanswered_still_land"
+reason = "B 境界（supervisor の配線・復旧と adopt）: 承認済みの run の resume の終わりと照合の履歴の読み取りの答えを続けて失っても、実際の supervisor が lease を保って照合し直し、resume をやり直さずに着地させることを確かめる代表。着地待ちの判定は domain::run::history と supervise::execution::reconcile の unit test"
+task = 3177
+
+# 3.8s on the host unloaded (task 3177), near a_passed_runs_exit_done_unanswered_still_lands, which took 6.1s under stress: a whole supervisor run through its review, an e2e that waits for the test and its landing, an answer of the queue service lost while the e2e runs
+[[test]]
+name = "supervisor_service::an_e2e_whose_lease_look_went_unanswered_starts_once_and_its_result_is_kept"
+reason = "B 境界（supervisor の配線・復旧）: 実際の supervisor が e2e の走る間に lease の読み取りの答えを失っても、slot の e2e の handle を捨てずに 1 回だけ起動し、その結果を 1 回記録して着地させることを確かめる代表。どの slot を残すかの判断は supervise::execution::reconcile の unit test"
+task = 3177

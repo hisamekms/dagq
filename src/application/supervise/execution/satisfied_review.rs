@@ -278,20 +278,30 @@ impl Supervisor<'_> {
         if matches!(watch.state, ClaimJob::Waiting(_)) {
             self.start_claim_review(run, watch)?;
         }
+        // The job's end goes back to the slot until it is acted on, so a
+        // step the queue service did not answer finds it again.
         match std::mem::replace(&mut watch.state, ClaimJob::Waiting(None)) {
             ClaimJob::Judged(judgment) => {
-                let after = self.claim_judged(run, watch, &judgment)?;
-                if after.is_none() {
+                let after = self.claim_judged(run, watch, &judgment);
+                if !matches!(after, Ok(Some(_))) {
                     watch.state = ClaimJob::Judged(judgment);
                 }
-                Ok(after)
+                after
             }
-            ClaimJob::Failed(why) => self
-                .claim_unjudged(run, watch, &why, true)
-                .map(|run| Some(AfterJudged::Rested(Box::new(run)))),
-            ClaimJob::Unstartable(why) => self
-                .claim_unjudged(run, watch, &why, false)
-                .map(|run| Some(AfterJudged::Rested(Box::new(run)))),
+            ClaimJob::Failed(why) => {
+                let rested = self.claim_unjudged(run, watch, &why, true);
+                if rested.is_err() {
+                    watch.state = ClaimJob::Failed(why);
+                }
+                rested.map(|run| Some(AfterJudged::Rested(Box::new(run))))
+            }
+            ClaimJob::Unstartable(why) => {
+                let rested = self.claim_unjudged(run, watch, &why, false);
+                if rested.is_err() {
+                    watch.state = ClaimJob::Unstartable(why);
+                }
+                rested.map(|run| Some(AfterJudged::Rested(Box::new(run))))
+            }
             state => {
                 watch.state = state;
                 Ok(None)
@@ -509,6 +519,14 @@ impl Supervisor<'_> {
                     )?;
                     info!(run_id = %run.id(), "run {} judgment {}: its job started on {}", run.id(), watch.attempt, launch.provider.as_str());
                     return Ok(());
+                }
+                // Its token issued without the service's answer is no
+                // start that failed: the step is judged by the
+                // reconciliation.
+                Ok(Err(started))
+                    if crate::application::supervisor_service::unreachable(&started) =>
+                {
+                    return Err(started);
                 }
                 Ok(Err(started)) => {
                     let error = format!("it could not start: {started:#}");

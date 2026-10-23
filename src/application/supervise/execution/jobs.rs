@@ -358,6 +358,7 @@ pub fn record_job(
         // is abandoned (ADR-t1486-1); a program job's ends with its row.
         unended: (subject.job == JobKind::Agent).then(|| (ports.ends.clone(), subject)),
         steps: None,
+        timed_out: false,
     }
 }
 
@@ -525,6 +526,9 @@ pub struct HeadlessJob {
     /// 1, [`crate::application::step_report::JobSteps`]); none for a
     /// program's job or a target with no token.
     pub(super) steps: Option<Box<JobStepsOn>>,
+    /// Whether it was stopped at its timeout: read again, its end is the
+    /// timeout, not the kill's exit.
+    pub(super) timed_out: bool,
 }
 
 /// What a job reads its agent's steps with ([`job_steps`]): the collector,
@@ -654,6 +658,14 @@ impl HeadlessJob {
         &mut self,
         files: &dyn RunFiles,
     ) -> Result<Option<std::result::Result<String, JobFailed>>> {
+        let timed_out = JobFailed::TimedOut(format!(
+            "the headless {} did not finish within {} seconds",
+            self.what,
+            self.timeout.as_secs()
+        ));
+        if self.timed_out {
+            return Ok(Some(Err(timed_out)));
+        }
         let status = match self.child.try_wait()? {
             Some(status) => status,
             None if runs_on(self.elapsed(), self.timeout) => {
@@ -663,11 +675,8 @@ impl HeadlessJob {
             None => {
                 // Its steps are read to its stop.
                 self.stop();
-                return Ok(Some(Err(JobFailed::TimedOut(format!(
-                    "the headless {} did not finish within {} seconds",
-                    self.what,
-                    self.timeout.as_secs()
-                )))));
+                self.timed_out = true;
+                return Ok(Some(Err(timed_out)));
             }
         };
         self.read_steps(true);
@@ -690,6 +699,8 @@ impl HeadlessJob {
     /// ends of its output either way.
     pub fn poll_program(&mut self, files: &dyn RunFiles) -> Result<Option<ProgramEnd>> {
         let exit = match self.child.try_wait()? {
+            // Its kill's exit, read again: still its timeout.
+            Some(_) if self.timed_out => None,
             Some(status) => {
                 self.ended(headless_job::ENDED);
                 Some(status)
@@ -697,6 +708,7 @@ impl HeadlessJob {
             None if runs_on(self.elapsed(), self.timeout) => return Ok(None),
             None => {
                 self.stop();
+                self.timed_out = true;
                 None
             }
         };
@@ -1971,6 +1983,68 @@ mod tests {
         }
     }
 
+    /// A process that runs until it is killed, and then says the kill.
+    struct RunsUntilKilled {
+        killed: bool,
+    }
+
+    impl Spawned for RunsUntilKilled {
+        fn id(&self) -> u32 {
+            43
+        }
+        fn try_wait(&mut self) -> Result<Option<Exit>> {
+            Ok(self.killed.then(|| Exit {
+                success: false,
+                code: None,
+                signal: Some(9),
+                description: "signal: 9 (SIGKILL)".into(),
+            }))
+        }
+        fn kill(&mut self) -> Result<()> {
+            self.killed = true;
+            Ok(())
+        }
+        fn kill_group(&mut self) -> Result<()> {
+            self.kill()
+        }
+        fn wait(&mut self) -> Result<Exit> {
+            Ok(self.try_wait()?.expect("killed"))
+        }
+    }
+
+    /// A job stopped at its timeout reads as timed out each time its end
+    /// is read, not as the kill's exit: a step the queue service did not
+    /// answer reads it again ([`super::super::reconcile`]). A program job
+    /// gives no exit then, as when it was stopped.
+    #[test]
+    fn a_job_stopped_at_its_timeout_reads_as_timed_out_again() {
+        let files = MemoryFiles::default();
+        let mut agent = job(&files, true, "");
+        agent.child = Box::new(RunsUntilKilled { killed: false });
+        agent.timeout = Duration::ZERO;
+        for _ in 0..2 {
+            let end = agent.poll_output(&files).unwrap().unwrap();
+            assert!(
+                matches!(end, Err(JobFailed::TimedOut(_))),
+                "{:?}",
+                end.err()
+            );
+        }
+        let mut program = job(&files, true, "");
+        program.child = Box::new(RunsUntilKilled { killed: false });
+        program.timeout = Duration::ZERO;
+        for _ in 0..2 {
+            assert!(
+                program
+                    .poll_program(&files)
+                    .unwrap()
+                    .unwrap()
+                    .exit
+                    .is_none()
+            );
+        }
+    }
+
     struct NoProcesses;
 
     impl ProcessControl for NoProcesses {
@@ -2053,6 +2127,7 @@ mod tests {
             unended: None,
             run_child: None,
             steps: None,
+            timed_out: false,
         }
     }
 

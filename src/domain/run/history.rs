@@ -73,6 +73,20 @@ const RESUMES: [EventKind; 3] = [
     EventKind::ResumeSkipped,
 ];
 
+/// Whether `event` ends a resume of an approved run so that it lands: a
+/// `resume_finished` resolved, or a `resume_skipped` approved, after which
+/// the run stays `needs_session` for its landing.
+fn resolved_to_land(event: &RunEvent) -> bool {
+    let stays = event.payload["status"] == RunStatus::NeedsSession.as_str();
+    match event.kind.known() {
+        Some(EventKind::ResumeFinished) => {
+            stays && restore::<ResumeFinished>(&event.payload).outcome == Some("resolved")
+        }
+        Some(EventKind::ResumeSkipped) => stays && event.payload["approved"] == true,
+        _ => false,
+    }
+}
+
 /// What kind of request the latest parking of a run makes of its resumed
 /// session (see [`RunHistory::last_park`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -295,13 +309,24 @@ impl<'a> RunHistory<'a> {
     }
 
     /// The `landing_queued` of an approved run whose resume resolved or
-    /// was skipped (`via: resume`): the latest one, when nothing after it
-    /// started a landing, a review or a resume, decided the landing, or
-    /// opened an `approve_landing` ask. Such a run waits for the landing
-    /// slot `needs_session`, its resume done.
+    /// was skipped (`via: resume`), or that resume's end itself (a
+    /// `resume_finished` resolved or a `resume_skipped` approved, either
+    /// leaving the run `needs_session`), which queues the run to land as
+    /// much as the `landing_queued` written after it: the latest of these,
+    /// when nothing after it started a landing, a review or a resume,
+    /// decided the landing, or opened an `approve_landing` ask. Such a run
+    /// waits for the landing slot `needs_session`, its resume done, even
+    /// when its `landing_queued` was never written (the queue service did
+    /// the resume's end without its answer reaching the supervisor).
     pub fn queued_after_resume(&self) -> Option<EventId> {
-        let queued = self.last(EventKind::LandingQueued)?;
-        (queued.payload["via"] == "resume" && !self.moved_on_after(queued.id)).then_some(queued.id)
+        let queued = self
+            .events
+            .iter()
+            .rev()
+            .find(|e| e.kind == EventKind::LandingQueued || resolved_to_land(e))?;
+        let via_resume =
+            queued.kind != EventKind::LandingQueued || queued.payload["via"] == "resume";
+        (via_resume && !self.moved_on_after(queued.id)).then_some(queued.id)
     }
 
     /// Whether `head` is what earlier landings of the run made of the
@@ -1034,6 +1059,63 @@ mod tests {
         ];
         assert_eq!(queued(&events), None);
         assert_eq!(queued(&[]), None);
+    }
+
+    /// An approved run's resume that ended resolved, or was skipped, under
+    /// its lease queues the run to land by itself: its `landing_queued`,
+    /// written after it, may be missing (the queue service did the
+    /// resume's end without its answer reaching the supervisor), and the
+    /// run still waits for the landing slot rather than being resumed
+    /// again. A resume that left the run otherwise does not.
+    #[test]
+    fn an_approved_resumes_end_queues_the_run_to_land_without_its_landing_queued() {
+        let queued = |events: &[RunEvent]| RunHistory::from_events(events).queued_after_resume();
+        let resolved = json!({"outcome": "resolved", "approved": true, "status": "needs_session"});
+        let events = [
+            event(1, "resume_started", json!({"attempt": 3})),
+            event(2, "resume_finished", resolved.clone()),
+        ];
+        assert_eq!(queued(&events), Some(EventId::new(2)));
+        let skipped = [event(
+            1,
+            "resume_skipped",
+            json!({"approved": true, "status": "needs_session"}),
+        )];
+        assert_eq!(queued(&skipped), Some(EventId::new(1)));
+        // Queued once, by whichever came last.
+        let both = [
+            event(1, "resume_finished", resolved.clone()),
+            event(2, "landing_queued", json!({"via": "resume"})),
+        ];
+        assert_eq!(queued(&both), Some(EventId::new(2)));
+        // Moved on since: landed, resumed again, or decided.
+        for kind in ["integration_started", "resume_started", "landing_decided"] {
+            let events = [
+                event(1, "resume_finished", resolved.clone()),
+                event(2, kind, json!({})),
+            ];
+            assert_eq!(queued(&events), None, "{kind}");
+        }
+        for (kind, payload) in [
+            (
+                "resume_finished",
+                json!({"outcome": "unresolved", "status": "needs_session"}),
+            ),
+            (
+                "resume_finished",
+                json!({"outcome": "resolved", "status": "validating"}),
+            ),
+            (
+                "resume_skipped",
+                json!({"approved": false, "status": "validating"}),
+            ),
+        ] {
+            assert_eq!(
+                queued(&[event(1, kind, payload.clone())]),
+                None,
+                "{payload}"
+            );
+        }
     }
 
     #[test]

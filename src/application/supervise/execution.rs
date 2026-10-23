@@ -49,6 +49,7 @@ mod landing;
 pub(super) mod provider;
 mod queue_hold;
 pub(super) mod recheck;
+mod reconcile;
 mod recovery;
 mod reopen;
 mod replan_park;
@@ -1128,6 +1129,7 @@ pub fn supervise(ports: &Ports<'_>, settings: &LoopSettings) -> Result<Value> {
         jobs_swept: false,
         queue_hold: None,
         hold_continue: HashMap::new(),
+        unanswered: reconcile::Unanswered::default(),
         utc_offset: settings.utc_offset,
         worker_plugin: ports.worker_plugin.clone(),
         claim: stages::ClaimState {
@@ -1361,6 +1363,9 @@ struct Supervisor<'a> {
     /// The held runs whose session gets the fixed text to go on, with the
     /// ask a person answered `done` (task 437).
     hold_continue: HashMap<RunId, AskId>,
+    /// What the queue service may have done without its answer reaching
+    /// this process, judged against the queue once it answers again.
+    unanswered: reconcile::Unanswered,
     worker_plugin: Arc<dyn Fn(&Path) -> String + Send + Sync>,
     /// The notices of a question closed without its answer that could not
     /// be sent, by run: tried again a bounded number of times (task 1372).
@@ -1483,6 +1488,33 @@ enum Phase {
 }
 
 impl Phase {
+    /// Whether this phase holds work in flight that a rebuild from the
+    /// queue would start again (a validation, an e2e, a verification, a
+    /// landing, a review's, a claim judgment's or a recovery's job, the
+    /// eval's rounds): a step of it that did nothing on the queue keeps it
+    /// ([`reconcile`]). Each of their steps reads what it needs before it
+    /// takes the work's result out of the slot, so a read the service does
+    /// not answer leaves the result in the slot for the next look.
+    fn holds_work(&self) -> bool {
+        match self {
+            Phase::Validating(handle, _) => handle.is_some(),
+            Phase::Satisfied(watch) => watch.handle.is_some(),
+            Phase::E2e(_)
+            | Phase::Landing(_)
+            | Phase::Review(_)
+            | Phase::ReviewPrograms(_)
+            | Phase::SatisfiedReview(_)
+            | Phase::Recovery(_)
+            | Phase::AgentEval(_) => true,
+            Phase::Session(_)
+            | Phase::ReviewHeld { .. }
+            | Phase::Revise(_)
+            | Phase::Exiting(_)
+            | Phase::Resume(_)
+            | Phase::AwaitingSlot
+            | Phase::AwaitingE2e => false,
+        }
+    }
     /// The phase `run_phase_changed` records for this one, whose tags are
     /// [`crate::domain::run_phase::Phase::tags`]: a phase added here does
     /// not compile until it names one.
@@ -2202,6 +2234,7 @@ impl Supervisor<'_> {
                         && !options.once =>
                 {
                     warn!(error = %format_args!("{error:#}"), "the queue service did not answer: no new run starts until it does: {error:#}");
+                    self.unanswered.lost();
                     self.host.queue_service_unreached();
                     let reports = self.observation.reports();
                     if let Some((config, message)) = self
@@ -2307,6 +2340,10 @@ impl Supervisor<'_> {
                 }
                 return Err(error);
             }
+            // First after a pass the queue service did not answer: what it
+            // did without its answer reaching this process (ADR-t3102-3
+            // decision 5).
+            self.reconcile_unanswered(options.stop.load(Ordering::SeqCst))?;
             // An owner gone stops this process like a stop request, with
             // its own reason, but waits for nobody's answer: its runs are
             // let go and the loop ends within the grace. Looked for in a
@@ -2573,7 +2610,8 @@ impl Supervisor<'_> {
                         });
                         self.agent_eval_pass(false);
                         self.agent_cases_pass(false);
-                        self.tick(true);
+                        self.tick(true)?;
+                        self.unanswered.look();
                         thread::sleep(options.tick);
                         continue;
                     }
@@ -2701,10 +2739,12 @@ impl Supervisor<'_> {
                 if !job && !progressed && (options.once || stopping || !self.claim.claiming) {
                     break;
                 }
+                self.unanswered.look();
                 thread::sleep(if job { options.tick } else { options.idle_poll });
                 continue;
             }
-            self.tick(false);
+            self.tick(false)?;
+            self.unanswered.look();
             thread::sleep(options.tick);
         }
         let held = self.cleanup_held();
@@ -3143,30 +3183,43 @@ impl Supervisor<'_> {
                 ClaimOutcome::NoReadyTask => return Ok(ClaimStep::Next),
             };
             self.claim.defer.claimed();
-            stages::record_claimed(&*self.queue, run.id());
-            // The work interval starts at the claim, with its sample.
-            self.claim.start_load(run.id(), attributes.load_avg);
-            match self.provision(&run) {
-                Ok(watch) => {
-                    let run = self.queue.run(run.id())?;
-                    self.claim.slots.admit_noting(
-                        Slot::new(run, Phase::Session(watch)),
-                        EventKind::AgentStarted.as_str(),
-                        &*self.queue,
-                    );
-                }
-                Err(error) => {
-                    let message = format!("run {} provisioning failed: {error:#}", run.id());
-                    warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "{message}; no further tasks will be claimed");
-                    self.abandon(
-                        &run,
-                        message.clone(),
-                        &reason_of_error(&error, ReasonCode::Other),
-                    );
-                    self.claim.claiming = false;
-                    self.claim.provisioning_error = Some(message);
-                    return Ok(ClaimStep::Stop);
-                }
+            if self.provision_claimed(&run, attributes.load_avg)? == ClaimStep::Stop {
+                return Ok(ClaimStep::Stop);
+            }
+        }
+    }
+    /// Provision the run this supervisor just claimed and give it a slot,
+    /// the work interval starting with the `load` sampled at the claim. A
+    /// provisioning that failed stops the claims ([`ClaimStep::Stop`]),
+    /// but not one cut off by the queue service out of reach: that is the
+    /// pass's error, and the run, still under this supervisor's lease, is
+    /// found again once the service answers ([`Self::reconcile_unanswered`]).
+    fn provision_claimed(&mut self, run: &TaskRun, load: Option<f64>) -> Result<ClaimStep> {
+        stages::record_claimed(&*self.queue, run.id());
+        // The work interval starts at the claim, with its sample.
+        self.claim.start_load(run.id(), load);
+        match self.provision(run) {
+            Ok(watch) => {
+                let run = self.queue.run(run.id())?;
+                self.claim.slots.admit_noting(
+                    Slot::new(run, Phase::Session(watch)),
+                    EventKind::AgentStarted.as_str(),
+                    &*self.queue,
+                );
+                Ok(ClaimStep::Next)
+            }
+            Err(error) if crate::application::supervisor_service::unreachable(&error) => Err(error),
+            Err(error) => {
+                let message = format!("run {} provisioning failed: {error:#}", run.id());
+                warn!(run_id = %run.id(), error = %format_args!("{error:#}"), "{message}; no further tasks will be claimed");
+                self.abandon(
+                    run,
+                    message.clone(),
+                    &reason_of_error(&error, ReasonCode::Other),
+                );
+                self.claim.claiming = false;
+                self.claim.provisioning_error = Some(message);
+                Ok(ClaimStep::Stop)
             }
         }
     }
@@ -3413,8 +3466,12 @@ impl Supervisor<'_> {
     }
     /// One pass over the slots; with `unsettled_only`, over the slots a
     /// handoff waits for (their validation, e2e or landing in progress)
-    /// and its workers' receipts only ([`Slot::pass`]).
-    fn tick(&mut self, unsettled_only: bool) {
+    /// and its workers' receipts only ([`Slot::pass`]). A step the queue
+    /// service did not answer ends the pass with that error, its slot kept
+    /// as it was and judged against the queue once the service answers
+    /// ([`Self::reconcile_unanswered`]): the service may have done what it
+    /// was asked, so the step is neither given up on nor taken for done.
+    fn tick(&mut self, unsettled_only: bool) -> Result<()> {
         self.sample_load();
         if !unsettled_only {
             self.start_waits();
@@ -3428,6 +3485,7 @@ impl Supervisor<'_> {
                 continue;
             }
             let mut slot = self.claim.slots.release(index);
+            let writes = crate::application::supervisor_service::writes_tried();
             let stepped = if let Pass::Receipt { validate } = pass {
                 self.observe_receipt_handing_off(&mut slot, validate)
             } else if slot.out_of_slot() {
@@ -3438,6 +3496,29 @@ impl Supervisor<'_> {
             if let Some(worker) = self.provider.moved.remove(slot.run.id()) {
                 slot.run = slot.run.clone().running_on(worker);
             }
+            let writes = crate::application::supervisor_service::writes_tried() - writes;
+            // A step that failed on its own is given up on below unless
+            // its lease went to another process; the lease read once here,
+            // and one the service did not answer judged by the next
+            // reconciliation, not taken for held or lost.
+            let held = match &stepped {
+                Err(error) if !crate::application::supervisor_service::unreachable(error) => {
+                    match self
+                        .queue
+                        .holds_lease(slot.run.id(), self.registration.token())
+                    {
+                        Ok(held) => Some(held),
+                        Err(read) if crate::application::supervisor_service::unreachable(&read) => {
+                            self.unanswered
+                                .doubt(slot.run.id(), reconcile::Doubt::MaybeDone);
+                            self.claim.slots.put_back(index, slot);
+                            return Err(read);
+                        }
+                        Err(_) => Some(true),
+                    }
+                }
+                _ => None,
+            };
             match stepped {
                 Ok(Step::Continue) => {
                     // What moved without a move of its own: the landing
@@ -3486,6 +3567,14 @@ impl Supervisor<'_> {
                     self.finished.push(*run);
                 }
                 Ok(Step::Triaged(run)) => self.note_triaged(&run),
+                // What the step did is judged once the service answers
+                // ([`reconcile`]): the slot stays as the step left it.
+                Err(error) if crate::application::supervisor_service::unreachable(&error) => {
+                    self.unanswered
+                        .doubt(slot.run.id(), reconcile::Doubt::of(writes, &error));
+                    self.claim.slots.put_back(index, slot);
+                    return Err(error);
+                }
                 Ok(Step::Disowned) => {
                     self.stop_slot_job(&mut slot);
                     self.disown(&slot)
@@ -3494,12 +3583,7 @@ impl Supervisor<'_> {
                 // changed hands mid-step (this process was stalled and
                 // adopted from) is the other owner's run to describe. Its
                 // jobs stop, and send their steps, before the token ends.
-                Err(_)
-                    if !self
-                        .queue
-                        .holds_lease(slot.run.id(), self.registration.token())
-                        .unwrap_or(true) =>
-                {
+                Err(_) if held == Some(false) => {
                     self.stop_slot_job(&mut slot);
                     self.disown(&slot)
                 }
@@ -3577,6 +3661,7 @@ impl Supervisor<'_> {
                 }
             }
         }
+        Ok(())
     }
     /// Launch `dagq observe` when an observation is due and none is
     /// running ([`ObservationState::observer_due`]), on the route
@@ -3934,7 +4019,7 @@ impl Supervisor<'_> {
             "outcome": "error",
             "error": message,
             "workspace_id": workspace,
-            "exhausted": resumes_exhausted(&*self.queue, run.id(), self.resume.config),
+            "exhausted": resumes_exhausted(&*self.queue, run.id(), self.resume.config).ok(),
         }));
         if let Err(error) = self.queue.finish_resume(
             run.id(),
@@ -4015,27 +4100,31 @@ impl Supervisor<'_> {
         // A landing releases the lease itself when it ends, so it is joined
         // before the lease is checked.
         if let Phase::Landing(handle) = &mut slot.phase {
-            if !handle.as_ref().is_some_and(|h| h.is_finished()) {
-                return Ok(Step::Continue);
-            }
-            let landed = handle
-                .take()
-                .context("landing already joined")?
-                .join()
-                .map_err(|_| anyhow!("landing thread panicked"));
-            match landed.and_then(|result| result) {
-                Ok(outcome) => {
-                    let outcome = serde_json::to_value(&outcome)?;
-                    info!(run_id = %slot.run.id(), "run {} landing: {}", slot.run.id(), outcome["outcome"]);
+            // Joined already when the read of what it left the run as was
+            // not answered: only that read is made again.
+            if let Some(running) = handle {
+                if !running.is_finished() {
+                    return Ok(Step::Continue);
                 }
-                Err(error) => {
-                    let message = format!("landing failed: {error:#}");
-                    warn!(run_id = %slot.run.id(), "run {}: {message}", slot.run.id());
-                    self.errors.push(RunError {
-                        run_id: slot.run.id().clone(),
-                        task_id: slot.run.task_id(),
-                        message,
-                    });
+                let landed = handle
+                    .take()
+                    .context("landing already joined")?
+                    .join()
+                    .map_err(|_| anyhow!("landing thread panicked"));
+                match landed.and_then(|result| result) {
+                    Ok(outcome) => {
+                        let outcome = serde_json::to_value(&outcome)?;
+                        info!(run_id = %slot.run.id(), "run {} landing: {}", slot.run.id(), outcome["outcome"]);
+                    }
+                    Err(error) => {
+                        let message = format!("landing failed: {error:#}");
+                        warn!(run_id = %slot.run.id(), "run {}: {message}", slot.run.id());
+                        self.errors.push(RunError {
+                            run_id: slot.run.id().clone(),
+                            task_id: slot.run.task_id(),
+                            message,
+                        });
+                    }
                 }
             }
             return Ok(Step::Done(Box::new(self.queue.run(slot.run.id())?)));
@@ -4158,6 +4247,11 @@ impl Supervisor<'_> {
                     &main,
                 ) {
                     Ok(run) => run,
+                    // Unanswered, it may have taken the slot for this run:
+                    // the reconciliation reads what the queue holds.
+                    Err(error) if crate::application::supervisor_service::unreachable(&error) => {
+                        return Err(error);
+                    }
                     // An `integrate` took the slot since the check: try again later.
                     Err(_)
                         if let Some(landing) =
@@ -4197,11 +4291,17 @@ impl Supervisor<'_> {
                 if !watch.finished() {
                     return Ok(Step::Continue);
                 }
+                // Read before the e2e is taken out of the slot.
+                let run = self.queue.run(slot.run.id())?;
+                let events = self.queue.run_events(slot.run.id())?;
+                let history = self
+                    .queue
+                    .e2e_gate_events(crate::application::e2e_verdict::HISTORY)?;
                 let Phase::E2e(watch) = std::mem::replace(&mut slot.phase, Phase::AwaitingSlot)
                 else {
                     unreachable!("matched above")
                 };
-                self.finish_e2e(slot, watch)
+                self.finish_e2e(slot, watch, run, &events, &history)
             }
             Phase::Landing(_) => unreachable!("joined above"),
             Phase::Recovery(watch) => {
@@ -4251,6 +4351,11 @@ impl Supervisor<'_> {
                     Err(error) => Err(anyhow!("{error}")),
                 };
                 if let Err(error) = acted {
+                    // Unanswered, the round may or may not be recorded: the
+                    // reconciliation judges it, no failure is recorded on it.
+                    if crate::application::supervisor_service::unreachable(&error) {
+                        return Err(error);
+                    }
                     // Another process took the run's lease meanwhile: its
                     // round is the record.
                     if !self
@@ -4356,8 +4461,10 @@ impl Supervisor<'_> {
                     return Ok(Step::Continue);
                 };
                 let ran = (watch.job.elapsed().as_secs(), watch.job.timeout.as_secs());
-                let programs = watch.programs.take();
+                // Read before the programs' results are taken out of the
+                // slot; the job's end is read again as it was.
                 let run = self.queue.run(slot.run.id())?;
+                let programs = watch.programs.take();
                 let next = self.review_program_ended(&run, programs, &end, ran)?;
                 slot.run = run;
                 slot.transition(
@@ -4637,13 +4744,14 @@ impl Supervisor<'_> {
                 if !watch.handle.as_ref().is_some_and(|h| h.is_finished()) {
                     return Ok(Step::Continue);
                 }
+                // Read before the verification is taken out of the slot.
+                let run = self.queue.run(slot.run.id())?;
                 let outcome = watch
                     .handle
                     .take()
                     .context("verification already joined")?
                     .join()
                     .map_err(|_| anyhow!("the verification thread panicked"))?;
-                let run = self.queue.run(slot.run.id())?;
                 match self.satisfied_verified(&run, watch, outcome)? {
                     satisfied::AfterVerified::Rested(run) => Ok(Step::Done(run)),
                     satisfied::AfterVerified::Judged(phase) => {
@@ -4758,11 +4866,14 @@ fn stop_recovery(slot: &mut Slot) {
 
 /// Whether the run's resumes are used up (ADR-0047 decision 24: its
 /// counted resumes or its conflict-only ones, up to `config`'s limit);
-/// unreadable counts as used up.
-fn resumes_exhausted(queue: &dyn Queue, run_id: &RunId, config: ResumeConfig) -> bool {
-    queue
-        .run_events(run_id)
-        .map_or(true, |events| ResumeCount::of(&events).exhausted(config))
+/// unreadable counts as used up, but not a read the queue service did not
+/// answer, which is the caller's error.
+fn resumes_exhausted(queue: &dyn Queue, run_id: &RunId, config: ResumeConfig) -> Result<bool> {
+    match queue.run_events(run_id) {
+        Ok(events) => Ok(ResumeCount::of(&events).exhausted(config)),
+        Err(error) if crate::application::supervisor_service::unreachable(&error) => Err(error),
+        Err(_) => Ok(true),
+    }
 }
 
 /// Whether the run's session wrapper is registered, has not exited and has
@@ -4998,6 +5109,52 @@ mod tests {
 
     use super::*;
     use crate::domain::{EventFilter, actor::ActorContext};
+
+    /// A service that answers each call with `answer`'s error: lost after
+    /// it read the request, or refused.
+    struct Answers(fn() -> anyhow::Error);
+
+    impl crate::application::supervisor_service::ServiceCaller for Answers {
+        fn call(&self, _: crate::domain::queue_service::UseCase, _: Value) -> Result<Value> {
+            Err((self.0)())
+        }
+        fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
+            Ok(())
+        }
+        fn sign_out(&self) {}
+    }
+
+    /// No connection of the queue's own: the test uses none.
+    struct NoLocal;
+
+    impl QueueOpener for NoLocal {
+        fn open(&self) -> Result<Box<dyn Queue + Send>> {
+            anyhow::bail!("not opened")
+        }
+    }
+
+    /// A count of the resumes the queue service did not answer is the
+    /// caller's error, so a repair is not refused on it nor a resume's end
+    /// recorded as the last; one that failed otherwise counts as used up.
+    #[test]
+    fn resumes_unanswered_are_not_taken_as_used_up() {
+        let exhausted = |answer: fn() -> anyhow::Error| {
+            let queue = crate::application::supervisor_service::SupervisorQueues {
+                service: Arc::new(Answers(answer)),
+                local: Arc::new(NoLocal),
+                actor: ActorContext::instance(crate::domain::actor::ActorRole::Supervisor, 1),
+            }
+            .open()
+            .unwrap();
+            resumes_exhausted(&*queue, &RunId::new("r1").unwrap(), ResumeConfig::default())
+        };
+        let lost = exhausted(|| {
+            crate::application::supervisor_service::ServiceUnreachable::maybe_done("lost").into()
+        })
+        .unwrap_err();
+        assert!(crate::application::supervisor_service::unreachable(&lost));
+        assert!(exhausted(|| anyhow::anyhow!("refused")).unwrap());
+    }
 
     /// A resolution of the landing branch is kept until 1 ms before its
     /// recheck and resolved again at it, or at once when it did not resolve

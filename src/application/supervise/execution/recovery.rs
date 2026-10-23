@@ -1412,7 +1412,9 @@ fn spawn_job(
 /// actions allowed for the alert here, only the run's own processes, an
 /// instruction only into a session at its prompt, a known dialog only
 /// under its rule, and a close only of a run that lands and whose receipt
-/// still holds. The first that fails refuses the whole verdict.
+/// still holds. The first that fails refuses the whole verdict. A read
+/// the queue service did not answer refuses nothing: it fails the step,
+/// which the reconciliation judges ([`super::reconcile`]).
 ///
 /// What each action rests on, never the screen, an input box or an idle
 /// guessed from one:
@@ -1432,66 +1434,77 @@ fn check_live(
     run: &TaskRun,
     live: &Live<'_>,
     actions: &[RecoveryAction],
-) -> std::result::Result<(), String> {
+) -> Result<std::result::Result<(), String>> {
     for action in actions {
         // A headless session has no dialog and no /exit, whatever the
         // alert allows (ADR-t813-1 decision 9).
         if HEADLESS_NEVER.contains(&action.name()) {
-            return Err(format!(
+            return Ok(Err(format!(
                 "{} does not apply to a headless session",
                 action.name()
-            ));
+            )));
         }
         if !live.allowed.contains(&action.name()) {
-            return Err(format!(
+            return Ok(Err(format!(
                 "{} does not apply to this alert of a live session (allowed: {})",
                 action.name(),
                 live.allowed.join(", ")
-            ));
+            )));
         }
         match action {
             RecoveryAction::StopProcesses { pids } => {
                 if pids.is_empty() {
-                    return Err("stop_processes names no pid".to_owned());
+                    return Ok(Err("stop_processes names no pid".to_owned()));
                 }
-                let own = own_processes(sv, run).map_err(|error| {
-                    format!("the run's processes could not be listed: {error:#}")
-                })?;
+                let own = match own_processes(sv, run) {
+                    Ok(own) => own,
+                    Err(error) if crate::application::supervisor_service::unreachable(&error) => {
+                        return Err(error);
+                    }
+                    Err(error) => {
+                        return Ok(Err(format!(
+                            "the run's processes could not be listed: {error:#}"
+                        )));
+                    }
+                };
                 if let Some(pid) = pids.iter().find(|pid| !own.iter().any(|p| p.pid == **pid)) {
-                    return Err(format!(
+                    return Ok(Err(format!(
                         "pid {pid} is not one of the run's own processes (working directory in its worktree, or under its session; never the session itself)"
-                    ));
+                    )));
                 }
             }
             RecoveryAction::SendInstruction { instruction } => {
                 if instruction.trim().is_empty() {
-                    return Err("send_instruction has no instruction".to_owned());
+                    return Ok(Err("send_instruction has no instruction".to_owned()));
                 }
                 if !live.at_prompt {
-                    return Err(
-                        "the session is not idle at its prompt for an instruction".to_owned()
-                    );
+                    return Ok(Err(
+                        "the session is not idle at its prompt for an instruction".to_owned(),
+                    ));
                 }
             }
 
             RecoveryAction::Resume { .. } => {
                 if !live.park {
-                    return Err(
+                    return Ok(Err(
                         "resume: only a run in its first session is parked for a session of its own"
                             .to_owned(),
-                    );
+                    ));
                 }
-                if resumes_exhausted(&*sv.queue, run.id(), sv.resume.config) {
-                    return Err("resume: the run's resumes are used up".to_owned());
+                if resumes_exhausted(&*sv.queue, run.id(), sv.resume.config)? {
+                    return Ok(Err("resume: the run's resumes are used up".to_owned()));
                 }
             }
             RecoveryAction::Wait { .. } => (),
             other => {
-                return Err(format!("{} does not apply to a live session", other.name()));
+                return Ok(Err(format!(
+                    "{} does not apply to a live session",
+                    other.name()
+                )));
             }
         }
     }
-    Ok(())
+    Ok(Ok(()))
 }
 
 /// Apply a verdict to a live session: a `repair` of high confidence whose
@@ -1561,7 +1574,7 @@ fn apply_live_verdict(
         info!(run_id = %run.id(), "run {}: recovery job {} of {} answered repair, but its task is held; the verdict is kept", run.id(), job.attempt, job.alert.as_str());
         return Ok(Ok(Applied::default()));
     }
-    if let Err(why) = check_live(sv, run, live, &verdict.actions) {
+    if let Err(why) = check_live(sv, run, live, &verdict.actions)? {
         warn!(run_id = %run.id(), "run {}: recovery job {} of {} answered repair, but {why}; asking the inbox", run.id(), job.attempt, job.alert.as_str());
         return Ok(Err(Escalation::Refused(verdict, why)));
     }
@@ -1585,6 +1598,11 @@ fn apply_live_verdict(
             RecoveryAction::StopProcesses { pids } => {
                 let stopped = match stop_processes(sv, run, pids) {
                     Ok(stopped) => stopped,
+                    // The listing unanswered refuses nothing, as in
+                    // [`check_live`].
+                    Err(error) if crate::application::supervisor_service::unreachable(&error) => {
+                        return Err(error);
+                    }
                     Err(error) => {
                         return Ok(Err(Escalation::Refused(
                             verdict.clone(),
@@ -1606,6 +1624,9 @@ fn apply_live_verdict(
                     "recovery instruction",
                 ) {
                     Ok(submission) => submission,
+                    Err(error) if crate::application::supervisor_service::unreachable(&error) => {
+                        return Err(error);
+                    }
                     Err(error) => {
                         return Ok(Err(Escalation::Refused(
                             verdict.clone(),

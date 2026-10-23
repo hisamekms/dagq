@@ -74,7 +74,7 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Where the supervisor's queue operations are answered
 /// ([`SuperviseOptions::service_route`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum ServiceRoute {
     /// The queue service's process, on its socket: the supervisor opens no
     /// DB for them, and one that does not answer is waited for.
@@ -82,6 +82,23 @@ pub enum ServiceRoute {
     /// The service's use cases run in this process, each request and
     /// answer as on the socket: a supervisor that keeps no service.
     InProcess,
+    /// [`Self::InProcess`] through the caller `0` makes of it: a test's
+    /// service that loses an answer it gave.
+    InProcessThrough(CallerLayer),
+}
+
+/// What [`ServiceRoute::InProcessThrough`] puts in front of the service's
+/// caller.
+#[derive(Clone)]
+pub struct CallerLayer(pub Arc<LayerFn>);
+
+/// The function of a [`CallerLayer`]: the caller in front of the given one.
+pub type LayerFn = dyn Fn(Arc<dyn ServiceCaller>) -> Arc<dyn ServiceCaller> + Send + Sync;
+
+impl std::fmt::Debug for CallerLayer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CallerLayer")
+    }
 }
 
 /// How the supervisor loop is driven. `stop` is the graceful drain switch
@@ -814,14 +831,18 @@ pub fn supervise_with_reviewer(
     // The claim, the leases, the runs and their events, and the tokens
     // through the queue service (ADR-t3102-3 decisions 3 to 5); what it
     // does not answer yet on the DB's own connection.
-    let service: Arc<dyn ServiceCaller> = match options.service_route {
-        ServiceRoute::Socket => Arc::new(SocketCaller::new(&db)),
-        ServiceRoute::InProcess => Arc::new(InProcessCaller::new(
+    let in_process = || -> Arc<dyn ServiceCaller> {
+        Arc::new(InProcessCaller::new(
             &db,
             generators.clone(),
             super::service_reads(),
             super::service_detail(),
-        )),
+        ))
+    };
+    let service: Arc<dyn ServiceCaller> = match &options.service_route {
+        ServiceRoute::Socket => Arc::new(SocketCaller::new(&db)),
+        ServiceRoute::InProcess => in_process(),
+        ServiceRoute::InProcessThrough(layer) => (layer.0)(in_process()),
     };
     let supervisor_queues = || SupervisorQueues {
         service: service.clone(),

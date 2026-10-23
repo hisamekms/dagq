@@ -171,6 +171,15 @@ pass の queue の操作 ── SupervisorQueue ─┬─ serviceが答える操
 - 届かない呼び出しは`ServiceUnreachable`で、DBを開いて代わりに行わない（fail closed）。
   起動のときに届かないか別のbuildのものが答えれば、serviceを持つsupervisor（CLIの`supervise`は`--once`でも持つ）は起動か入れ替えをし、それでも届かなければ何もclaimせずに終わる（`reach_at_start`）。
   passの途中で届かなければ、そのpassを捨ててhost運用にserviceを見直させ、届くまでやり直し、その間は新しいclaimとjobを始めない（`Supervisor::run_loop`）。
+  接続できなかった依頼と読み取りはserviceが何もしていないが、書いた依頼の答えが届かなければserviceが行ったかどうか分からない。
+  そこで同じ書き込みを送り直さず、serviceが答えた後のpassで自分の登録のtokenのleaseのrunをslotと照合する（`execution::reconcile`のmodule doc）。
+  passを失敗させずに答えの無かった呼び出し（ログだけを残す書き込み、着地のthreadの書き込みなど）も、passの終わりに見て次のpassで照合する（threadのものは、slotがそのthreadの終わりを受け取ったpassの終わりに見る）。
+  slotに無いrunはslotに戻す（何もprovisionしていないclaimはここでprovisionし、claimを止めているかdrain中なら手放す）。
+  答えの無かった工程のslotは、その工程が書き込みを試みておらず、失敗した呼び出しをserviceがしていなければ、進行中の仕事（e2e・検証・着地・review や復旧のjobなど）を持つかぎりそのまま残し、次の工程で同じ仕事を見直す（仕事を始め直さず、結果はそのslotが記録する）。
+  そうでない工程のslotはやり直さず、leaseが自分のものならexecの後と同じくqueueから組み立て直し、自分のものでなければ手放す（工程はslotを変えてから呼ぶことがあり、statusとleaseを変えない記録もあるので、slotとstatusからはやり直してよいか分からない）。
+  provisionの途中で届かなかったときはclaimを止めず、そのrunをこの照合に任せる。
+  工程の中で届かなかった読み取りと答えの無かった書き込みは、読めない・使い切った・失敗したといった確定した結果で埋めて先へ進めず（修理の拒否やleaseの返却をしない）、工程の失敗にしてこの照合に任せる。
+  照合の途中で届かなければ、leaseを保ったまま次のpassで照合し直す。
   heartbeatは届かない間もbusyと同じくleaseがstaleになる前まで書き直し、それを過ぎれば自分から退く（`HeartbeatPolicy::retries`）。
 - serviceの不在はqueueのディレクトリのDBの外のファイル（`domain::queue_service::OUTAGE_FILE`、形は`ServiceOutage`）に1つの不在につき1回書き、`host.toml`の`[push]`があれば1回送る（ADR-t3102-3決定1、`host_ops::queue_service`のmodule doc）。
   serviceが答えたら、その記録をserviceを通して`queue_service_down`（始まりと終わりの時刻を持つ）に残してファイルを消し、続く起動か再開のeventでattentionが閉じる。

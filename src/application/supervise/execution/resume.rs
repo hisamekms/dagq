@@ -924,7 +924,7 @@ impl Supervisor<'_> {
             )?,
             (ResumeOutcome::Unresolved, _) => {
                 payload["exhausted"] =
-                    json!(resumes_exhausted(&*self.queue, &id, self.resume.config));
+                    json!(resumes_exhausted(&*self.queue, &id, self.resume.config)?);
                 self.queue.finish_resume(
                     &id,
                     self.registration.token(),

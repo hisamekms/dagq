@@ -858,12 +858,38 @@ fn no_answer(error: &anyhow::Error, use_case: UseCase, said: &str) -> ClientFail
     )
 }
 
+/// No connection to the service at `socket` took a request ([`call`]):
+/// nothing of it was sent.
+#[derive(Debug)]
+pub struct NotConnected {
+    socket: PathBuf,
+    source: std::io::Error,
+}
+
+impl std::fmt::Display for NotConnected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the queue service at {} is unreachable",
+            self.socket.display()
+        )
+    }
+}
+
+impl std::error::Error for NotConnected {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 /// Send `request` to the service at `socket` and read its answer; an error
 /// when nothing answers (the caller does not fall back to the DB,
 /// ADR-t1233-1 decision 7), or [`AnswerPastLimit`].
 pub fn call(socket: &Path, request: &ServiceRequest, timeout: Duration) -> Result<ServiceResponse> {
-    let mut stream = UnixStream::connect(socket)
-        .with_context(|| format!("the queue service at {} is unreachable", socket.display()))?;
+    let mut stream = UnixStream::connect(socket).map_err(|source| NotConnected {
+        socket: socket.to_path_buf(),
+        source,
+    })?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
     let mut line = serde_json::to_vec(request)?;
@@ -1878,12 +1904,15 @@ impl crate::application::supervisor_service::ServiceCaller for SocketCaller {
             params,
         };
         let response = call(&self.socket, &request, self.timeout).map_err(|error| {
+            use crate::application::supervisor_service::ServiceUnreachable;
             if error.downcast_ref::<AnswerPastLimit>().is_some() {
                 error
+            } else if error.downcast_ref::<NotConnected>().is_some() {
+                // Nothing was sent: the service did not do it.
+                anyhow::Error::new(ServiceUnreachable::not_done(format!("{error:#}")))
             } else {
-                anyhow::Error::new(crate::application::supervisor_service::ServiceUnreachable(
-                    format!("{error:#}"),
-                ))
+                // Written, and its answer not read: it may have been done.
+                anyhow::Error::new(ServiceUnreachable::maybe_done(format!("{error:#}")))
             }
         })?;
         supervisor_answer(response)

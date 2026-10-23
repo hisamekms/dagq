@@ -34,9 +34,64 @@ fn a_services_failure_reads_as_the_queues_own_error() {
 /// Only a service out of reach is waited for: a refusal is not.
 #[test]
 fn only_a_service_out_of_reach_is_unreachable() {
-    let gone = anyhow::Error::new(ServiceUnreachable("no socket".into())).context("claim");
+    let gone = anyhow::Error::new(ServiceUnreachable::maybe_done("no answer")).context("claim");
     assert!(unreachable(&gone));
+    assert!(!undone(&gone));
+    let refused = anyhow::Error::new(ServiceUnreachable::not_done("no socket")).context("claim");
+    assert!(unreachable(&refused));
+    assert!(undone(&refused));
     assert!(!unreachable(&service_error(&failed(None))));
+    assert!(!undone(&service_error(&failed(None))));
+}
+
+/// A service whose answers are lost after it read the request.
+struct AnswersLost;
+
+impl ServiceCaller for AnswersLost {
+    fn call(&self, _: UseCase, _: Value) -> Result<Value> {
+        Err(ServiceUnreachable::maybe_done("the answer was lost").into())
+    }
+    fn sign_in(&self, _: &LeaseToken, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn sign_out(&self) {}
+}
+
+/// No connection of the queue's own: the test uses none.
+struct NoQueue;
+
+impl super::super::QueueOpener for NoQueue {
+    fn open(&self) -> Result<Box<dyn Queue + Send>> {
+        anyhow::bail!("not opened")
+    }
+}
+
+/// A read whose answer was lost did nothing; a write whose answer was lost
+/// may have been done. Each write is counted as tried on its thread, a
+/// read is not, and either one unanswered is counted on its thread and
+/// seen by the next look.
+#[test]
+fn a_lost_answer_tells_a_read_from_a_write_tried() {
+    let queue = SupervisorQueues {
+        service: Arc::new(AnswersLost),
+        local: Arc::new(NoQueue),
+        actor: ActorContext::instance(ActorRole::Supervisor, 1),
+    }
+    .open()
+    .unwrap();
+    let (run, token) = (RunId::new("r1").unwrap(), LeaseToken::new("t"));
+    let (tried, unanswered) = (writes_tried(), unanswered_here());
+    let read = queue.holds_lease(&run, &token).unwrap_err();
+    assert!(unreachable(&read) && undone(&read), "{read:#}");
+    assert_eq!(writes_tried(), tried);
+    assert_eq!(unanswered_here(), unanswered + 1);
+    assert!(take_unanswered());
+    let mut queue = queue;
+    let write = queue.release_lease(&run, &token).unwrap_err();
+    assert!(unreachable(&write) && !undone(&write), "{write:#}");
+    assert_eq!(writes_tried(), tried + 1);
+    assert_eq!(unanswered_here(), unanswered + 2);
+    assert!(take_unanswered());
 }
 
 /// A task crosses whole, the fields its CLI JSON leaves out included: the

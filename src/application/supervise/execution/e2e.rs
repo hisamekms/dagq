@@ -252,7 +252,7 @@ impl Supervisor<'_> {
     fn e2e_unavailable(
         &mut self,
         slot: &mut Slot,
-        run: TaskRun,
+        (run, events): (TaskRun, &[RunEvent]),
         mut payload: Value,
         error: String,
     ) -> Result<Step> {
@@ -261,8 +261,7 @@ impl Supervisor<'_> {
             .port
             .as_ref()
             .map_or(Duration::from_secs(run_e2e::RETRY_SECS), |port| port.retry);
-        let events = self.queue.run_events(run.id())?;
-        let in_a_row = run_e2e::unavailable_in_a_row(&events) + 1;
+        let in_a_row = run_e2e::unavailable_in_a_row(events) + 1;
         payload["outcome"] = json!(run_e2e::UNAVAILABLE);
         payload["error"] = json!(error);
         payload["in_a_row"] = json!(in_a_row);
@@ -285,14 +284,23 @@ impl Supervisor<'_> {
         Ok(Step::Continue)
     }
 
-    /// Act on the e2e `watch` ran for the run of `slot` (see the module).
-    pub(super) fn finish_e2e(&mut self, slot: &mut Slot, mut watch: E2eWatch) -> Result<Step> {
+    /// Act on the e2e `watch` ran for the run of `slot`, with `run` and
+    /// its `events` as the queue has them now and `history` the e2e gates'
+    /// latest events ([`e2e_verdict::HISTORY`]), all read before the e2e
+    /// left the slot (see the module).
+    pub(super) fn finish_e2e(
+        &mut self,
+        slot: &mut Slot,
+        mut watch: E2eWatch,
+        run: TaskRun,
+        events: &[RunEvent],
+        history: &[RunEvent],
+    ) -> Result<Step> {
         let outcome = match watch.handle.take().map(thread::JoinHandle::join) {
             Some(Ok(outcome)) => outcome,
             Some(Err(_)) => Err(anyhow!("the e2e's thread panicked")),
             None => Err(anyhow!("the e2e was not running")),
         };
-        let run = self.queue.run(slot.run.id())?;
         let base = json!({
             "attempt": watch.attempt,
             "commit": watch.commit,
@@ -303,7 +311,7 @@ impl Supervisor<'_> {
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
-                return self.e2e_unavailable(slot, run, base, format!("{error:#}"));
+                return self.e2e_unavailable(slot, (run, events), base, format!("{error:#}"));
             }
         };
         // What its commands' steps left is sent now, again at the sweeps.
@@ -364,7 +372,7 @@ impl Supervisor<'_> {
                 }
                 payload["rerun"] = value;
             }
-            return self.e2e_unavailable(slot, run, payload, why);
+            return self.e2e_unavailable(slot, (run, events), payload, why);
         }
         // The marks of the landing branch's committed tree, not those of
         // the run's worktree the gate read (ADR-t1233-2 decision 5).
@@ -401,11 +409,10 @@ impl Supervisor<'_> {
             quarantine,
             ..outcome
         };
-        let history = self.queue.e2e_gate_events(e2e_verdict::HISTORY)?;
         let verdict = e2e_verdict::judge(
             &outcome,
             &watch.settings,
-            &history,
+            history,
             self.generators.clock.now(),
         );
         let mut payload = ran_payload(base, &outcome);
