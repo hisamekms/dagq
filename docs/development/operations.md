@@ -94,6 +94,7 @@ hostのswapがほぼ満ちたのを見たら、人かinboxがhostで原因の候
 
 - main checkoutの`dagq.toml`は本番queueの全runに効く。変える前に、runtimeが読む場所・効く時点・壊れたときに止まるものを[Run environment](../design/supervisor-lifecycle/run-environment.md)の冒頭と「main checkoutの決め方」で、新しいtableや欄を足すなら旧バイナリとの順序をそのtableの項で確かめる。
 - 並列数と`runtime_planners`を変えるときは、`dagq.toml`の`[supervisor]`と`[run.env]`のコメント（値どうしの関係）と、[Run environment](../design/supervisor-lifecycle/run-environment.md)の`[supervisor]`の項（効く時点と`status`での確かめ方）を読む。
+- 区分の上限（`[supervisor]`の`max_spikes`・`max_investigations`）は、`parallel`を変えたとき、hostのloadの高い状態が続くとき（Spikeのbuild・測定は重なるとloadを上げる。推移は[host metrics](../design/supervisor-lifecycle/host-metrics.md)の記録）、`candidates`の`deferred`で`spike_limit`か`investigation_limit`の待ちが長く続くとき、Spikeが実装の枠を埋めて実装の待ちが増えたときに見直す。`max_spikes`は`parallel`より小さく保って実装が使える枠を残し、`max_investigations`は`max_spikes`を変えたときにも見直す（1つのgoalの再計画のあいだに別のgoalのSpikeがSpikeの枠を使える数にする。`runtime_planners`とも釣り合わせる）。振る舞いは[claimを控える](../design/supervisor-lifecycle/claim-hold.md)の「実行区分の上限とaging」と「調査中の計画の上限」。
 
 ## `up`のコマンド
 

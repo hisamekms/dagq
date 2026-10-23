@@ -1,7 +1,7 @@
 ---
 id: development-task-registration
 type: development
-title: このrepositoryのtaskの登録（verify・paths・evidence・change・titleの選び方、固定バイナリを待つ宣言、依存の付け方、負荷の下で落ちるtestを直すtask、ADRを書くtask、ADRがリンクする文書を消すtask、runtimeの汎用性、plan reviewが当てはめる規則）
+title: このrepositoryのtaskの登録（verify・paths・evidence・change・titleの選び方、固定バイナリを待つ宣言、依存の付け方、Spikeのtask、負荷の下で落ちるtestを直すtask、ADRを書くtask、ADRがリンクする文書を消すtask、runtimeの汎用性、plan reviewが当てはめる規則）
 status: current
 created: 2026-10-03
 owners:
@@ -145,6 +145,18 @@ goal の優先度を正本にし、task は個別の指定が無ければ所属�
 - taskの依存（`--depends-on`）は中身の前提（先に着地しないと作業が成り立たない）に限る。同じファイルの衝突を避けるためだけの依存は付けず、askにもしない。同じファイルの衝突は、衝突の多いファイルならruntimeのclaimの控え（[claimを控える](../design/supervisor-lifecycle/claim-hold.md#衝突の多いファイル)。上限の時間まで、`interrupt`のtaskは控えない）が扱い、残りはrebaseか着地の衝突として解く（[ADR-t1985-1](../adr/2026-10-07-t1985-1-dependencies-only-for-content-prerequisites-and-conflicts-left-to-claim-deferral.md)決定1）。
 - 依存を付けるときは、noteかtaskのcontextに種類（中身の前提か衝突回避か）と理由を書く（決定2）。
 - 人に聞く（`planner_question`、`--because scope`）のは、(a) 中身の前提の依存で、(b) その依存で低い優先度のgoalのtaskが効く優先度を継いで上がり、(c) 順番の変更・taskのgoalへの取り込み・分割などplannerの手で解けない、の全部を満たすときだけにする。問いは「低いgoalのtaskを（優先度ごと）前に出すか、高いgoalが待つか」にする。どれかを満たさなければ自分で決めて進め、理由をnoteかcontextに残す（決定3）。
+
+## Spikeのtask
+
+前提の抽出・短い読み取りの範囲・Spikeの形と登録・submitの後に終わること・再計画の汎用の手順はpluginの`dagq`の`reference/spike.md`が持ち、決定は[ADR-t1487-1](../adr/2026-10-04-t1487-1-spike-is-an-execution-class-with-a-judged-result-and-a-durable-replanning-request.md)が持つ。ここはこのrepositoryで何を重要な前提とし、何で解き、どこに証拠を置き、どう登録するかだけを持つ。
+
+- 重要な前提の目安: このrepositoryで計画を左右しやすいのは、cmuxの振る舞い、Git worktree（作り方・掃除・同時の操作）、provider（Claude・Codex）とheadlessの経路（非対話の呼び出し・sandbox・resume）、authorizationの権限（actorとcapability）、hostのツール（sccache・cargo-nextestなど、[運用](operations.md)の「hostのツール」）、loadと並列度（`parallel`と`[run.env]`のbuild・testの並列度）である。
+- 短い読み取りの根拠にしてよいもの: コード（`src/`のdoc commentとtest）、ADR（索引の`docs/adr/INDEX.md`）、`docs/design/`、queueの`events`・receipt・`stats`・`kpi`。
+- 証拠の所在: 結果は`docs/plans/<名前>-spike.md`（`type: plan`）に書き、環境（対象のcommit・道具の版・providerと経路・host）、打ったもの、問いごとの判定と根拠、後続の計画への推奨の節を持たせる。acceptanceには判定と根拠を書くその文書の節と、同じ文書に対象のcommit・道具の版・環境を書くことを名指す。文書の形の前例は[spike-predictor-replay](../plans/spike-predictor-replay.md)（task 553、過去のrunの再現で測る）、[headless-worker-spike](../plans/headless-worker-spike.md)（task 812）、[codex-headless-jobs-spike](../plans/codex-headless-jobs-spike.md)（task 1061、実CLIと本番queueで確かめる）。task 812は使い捨てのqueueを使ったので、方法の前例にはしない（下の箇条）。
+- 権限・headless・providerの前提は、本番queueのSpikeのrunそのもの（実際のworkerの経路）で確かめる。使い捨てのqueueを使う手作業をacceptanceにしない理由は、AGENTS.mdの「本番 queue と開発環境の境界」と[運用](operations.md)の「workerがhostと実queueでできないこと」。
+- verify・paths: 読んで測って文書に書くだけのSpikeは上の「推奨の組み合わせ」のdocsだけの行、計装や試作で`src/`・`tests/`に触るSpikeはruntimeの行に、結果を書く`docs/plans/`のための同じ節の`docs/`を変えるtaskの3本のscriptを足す。
+- change: 実行区分と独立に、上の「change」のとおり主な目的の1つを選び、Spikeだからと`measure`に固定しない（数える・測るのが主なら`measure`、試作で機能の前提を確かめるなら`feature`など）。実験やbuildで作業が長いSpikeは、結果の文書だけを変えても`docs`にしない（`light_changes`の軽い枠でclaimされうる）。
+- 区分の上限（`dagq.toml`の`max_spikes`・`max_investigations`）を変えるときの見直しの条件は[運用](operations.md)の「`dagq.toml`を変えるとき」。
 
 ## 負荷の下で落ちるtestを直すtask
 
