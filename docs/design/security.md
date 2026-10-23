@@ -43,7 +43,7 @@ AI actorの出力は全てデータで、制御側が決定的に遷移へ写す
 
 - worker: commitとreceipt。validatingとIntegratorが検査し、receiptの主張を信用せずに検証コマンドを流し直す
   pjのscriptがrun dirに書く手元の検証の記録もworkerが偽りうるdataで、runtimeは古いtreeと壊れた記録を弾くだけで改ざんを検出せず、記録を着地の安全の根拠にしない（advisory、[ADR-t2589-1](../adr/2026-10-17-t2589-1-local-check-runs-are-recorded-by-project-scripts-and-matched-to-the-receipt-tree.md)決定4）
-  run dirの`turns/steps.json`（wrapperのstepの番号と未送信のstep）もworkerが偽りうるdataで、wrapperは確かめずに読み直してexecutor-telemetryのtokenで送り、runtimeはstepを計測のdataにとどめ着地と認可の根拠にしない（advisory）
+  wrapperがexecutor-telemetryのtokenで送り直すstepの番号と未送信のstepはrun dirに置かず、tokenのfileの隣（queueの`service/`、agentのsandboxが書けずcontainerにmountされない）に対象ごとに置くので、workerはそのstepを仕込めない
 - review・recovery・plan review・goal reviewのjob: 型付きのverdict。
   supervisorが写像の表どおりに適用し、読めない出力は何も進めない（[Roles](supervisor-lifecycle/roles.md#headlessのjobのverdictと遷移)）
 - observer: findingと、findingに紐づく`blocked`のaskだけ

@@ -2194,6 +2194,14 @@ mod tests {
         fn digest_key(&self, _: &Path) -> Option<crate::domain::command_shape::DigestKey> {
             Some(crate::domain::command_shape::DigestKey::test())
         }
+
+        fn steps_file(
+            &self,
+            _: &Path,
+            _: &crate::domain::session_step::StepTarget,
+        ) -> Option<std::path::PathBuf> {
+            None
+        }
     }
 
     /// A job stopped before it ended (a handoff, the loop's end, a drop)

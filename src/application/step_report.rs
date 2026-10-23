@@ -14,8 +14,14 @@
 //! time, at most [`MAX_PENDING`] steps of a session, the oldest dropped
 //! past it (a gap the store sees). The store keeps one of each
 //! `(session_id, seq)`, so a step sent twice is added once. A wrapper keeps
-//! its sessions' numbering and unsent steps in its `turns/`
-//! ([`STEPS_FILE`]), so the wrapper of a resume goes on from them. Nothing
+//! its sessions' numbering and unsent steps in the file of its target the
+//! control side's [`TelemetrySinks::steps_file`] names, beside the tokens'
+//! files and outside every worktree, run, planner and job directory, so the
+//! wrapper of a resume goes on from them and no agent can put a step there
+//! for the executor to send. The file names its target ([`KeptSteps`]),
+//! and the supervisor's sweep removes it once the queue says that target
+//! ended, whatever its token
+//! ([`super::telemetry_tokens::sweep_kept_steps`]). Nothing
 //! here changes a run's, a planner's or a job's outcome: a failure is
 //! logged.
 
@@ -34,10 +40,6 @@ use crate::domain::session_step::{FIRST_SEQ, Step, StepKind, StepTarget};
 use crate::domain::telemetry::{
     MAX_NAME_BYTES, MAX_STEPS_PER_REPORT, REPORT_INTERVAL_SECS, TelemetryError, TelemetryReport,
 };
-
-/// The file of a wrapper's `turns/` that keeps its sessions' numbering
-/// and unsent steps.
-pub const STEPS_FILE: &str = "steps.json";
 
 /// How many unsent steps of a session are kept.
 pub const MAX_PENDING: usize = 4096;
@@ -64,6 +66,16 @@ pub struct SessionSteps {
 pub struct ReporterState {
     #[serde(default)]
     pub sessions: BTreeMap<String, SessionSteps>,
+}
+
+/// What a wrapper keeps of its target in the file the control side names
+/// ([`TelemetrySinks::steps_file`]): the target, which the supervisor's
+/// sweep reads to remove the file once the target ended, and its sessions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeptSteps {
+    pub target: StepTarget,
+    #[serde(flatten)]
+    pub state: ReporterState,
 }
 
 /// How one flush went.
@@ -243,31 +255,36 @@ struct TurnSteps {
 }
 
 /// What a session wrapper collects of its turns and sends (the module):
-/// the reporter of its target, loaded from its `turns/` at its start, and
-/// the turn it reads.
+/// the reporter of its target, loaded at its start from the file the
+/// control side names ([`TelemetrySinks::steps_file`]), and the turn it
+/// reads.
 #[derive(Default)]
 pub struct WrapperSteps {
-    reporter: Option<(StepReporter, PathBuf)>,
+    reporter: Option<(StepReporter, Option<PathBuf>)>,
     turn: Option<TurnSteps>,
 }
 
 impl WrapperSteps {
-    /// Go on with what `turns_dir` keeps of `target`'s sessions at
-    /// `now_ms`; a file that cannot be read starts afresh.
+    /// Go on at `now_ms` with what `kept` keeps of `target`'s sessions,
+    /// the file the control side names for it, never one in the run's or
+    /// the planner's directory; a file that cannot be read, or that is of
+    /// another target, starts afresh, and `None` keeps the steps in the
+    /// wrapper alone.
     pub fn load(
         &mut self,
         files: &dyn RunFiles,
-        turns_dir: &Path,
+        kept: Option<PathBuf>,
         target: StepTarget,
         now_ms: i64,
     ) {
-        let path = turns_dir.join(STEPS_FILE);
-        let state = files
-            .read_to_string(&path)
-            .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
+        let state = kept
+            .as_deref()
+            .and_then(|path| files.read_to_string(path).ok())
+            .and_then(|text| serde_json::from_str::<KeptSteps>(&text).ok())
+            .filter(|kept| kept.target == target)
+            .map(|kept| kept.state)
             .unwrap_or_default();
-        self.reporter = Some((StepReporter::new(target, state, now_ms), path));
+        self.reporter = Some((StepReporter::new(target, state, now_ms), kept));
     }
 
     /// The turn started at `now_ms` read by `reader`, of `session` when it
@@ -379,15 +396,21 @@ impl WrapperSteps {
             None
         };
         reporter.flush(sink.as_deref(), now_ms);
-        save(files, path, reporter.state());
+        if let Some(path) = path {
+            save(files, path, reporter.target(), reporter.state());
+        }
     }
 }
 
-/// Write `state` to `path` through a temporary file; a failure is logged:
-/// the next wrapper then numbers from what it finds.
-fn save(files: &dyn RunFiles, path: &Path, state: &ReporterState) {
+/// Write `state` of `target` to `path` through a temporary file; a
+/// failure is logged: the next wrapper then numbers from what it finds.
+fn save(files: &dyn RunFiles, path: &Path, target: &StepTarget, state: &ReporterState) {
     let tmp = path.with_extension("json.tmp");
-    let written = serde_json::to_vec(state)
+    let kept = KeptSteps {
+        target: target.clone(),
+        state: state.clone(),
+    };
+    let written = serde_json::to_vec(&kept)
         .map_err(std::io::Error::from)
         .and_then(|bytes| files.write(&tmp, &bytes))
         .and_then(|()| files.rename(&tmp, path));
@@ -964,7 +987,14 @@ mod tests {
         fn digest_key(&self, _: &Path) -> Option<crate::domain::command_shape::DigestKey> {
             Some(crate::domain::command_shape::DigestKey::test())
         }
+
+        fn steps_file(&self, _: &Path, _: &StepTarget) -> Option<PathBuf> {
+            Some(PathBuf::from(KEPT))
+        }
     }
+
+    /// Where the control side keeps a wrapper's steps in these tests.
+    const KEPT: &str = "/q/service/steps/planner-3.json";
 
     struct Forward(Arc<Sink>);
 
@@ -1097,16 +1127,17 @@ mod tests {
 
     /// A wrapper holds a turn's steps until its output names its session,
     /// sends them at the turn's end, and keeps its numbering and what it
-    /// could not send in its `turns/` for the wrapper of a resume.
+    /// could not send in the file the control side names for its target,
+    /// for the wrapper of a resume.
     #[test]
     fn a_wrappers_steps_go_on_across_turns_and_wrappers() {
         let files = MemoryRunFiles::default();
         let sink = Arc::new(Sink::default());
         let sinks: Arc<Sink> = sink.clone();
-        let dir = Path::new("/run/turns");
         let db = Path::new("/q/queue.db");
+        let kept = sinks.steps_file(db, &target());
         let mut steps = WrapperSteps::default();
-        steps.load(&files, dir, target(), 0);
+        steps.load(&files, kept.clone(), target(), 0);
         steps.start_turn(Box::new(Lines), 1_000, None);
         steps.line("Read", 1_200);
         steps.identify("thread-1");
@@ -1124,7 +1155,7 @@ mod tests {
         // The wrapper of a resume goes on from its numbering and resends.
         *sink.down.lock().unwrap() = false;
         let mut resumed = WrapperSteps::default();
-        resumed.load(&files, dir, target(), 100_000);
+        resumed.load(&files, kept, target(), 100_000);
         resumed.start_turn(Box::new(Lines), 100_000, Some("thread-1".to_owned()));
         resumed.line("Edit", 100_100);
         resumed.end_turn(&files, Some(&sinks), db, 100_300);
@@ -1141,25 +1172,71 @@ mod tests {
         resumed.line("Read", 200_100);
         resumed.end_turn(&files, Some(&sinks), db, 200_200);
         assert_eq!(sink.reports.lock().unwrap().len(), 2);
-        let kept: ReporterState =
-            serde_json::from_str(&files.read_to_string(&dir.join(STEPS_FILE)).unwrap()).unwrap();
-        assert_eq!(kept.sessions["thread-1"].next_seq, 6);
-        assert!(kept.sessions["thread-1"].pending.is_empty());
+        let kept: KeptSteps =
+            serde_json::from_str(&files.read_to_string(Path::new(KEPT)).unwrap()).unwrap();
+        // The file names its target, for the sweep that removes it.
+        assert_eq!(kept.target, target());
+        assert_eq!(kept.state.sessions["thread-1"].next_seq, 6);
+        assert!(kept.state.sessions["thread-1"].pending.is_empty());
     }
 
     /// With no sink the wrapper's turn ends as any other, its steps kept.
     #[test]
     fn a_wrapper_with_no_token_keeps_its_steps() {
         let files = MemoryRunFiles::default();
-        let dir = Path::new("/run/turns");
         let mut steps = WrapperSteps::default();
-        steps.load(&files, dir, target(), 0);
+        steps.load(&files, Some(PathBuf::from(KEPT)), target(), 0);
         steps.start_turn(Box::new(Lines), 0, Some("s".to_owned()));
         steps.line("Read", 10);
         steps.end_turn(&files, None, Path::new("/q/queue.db"), 20);
-        let kept: ReporterState =
-            serde_json::from_str(&files.read_to_string(&dir.join(STEPS_FILE)).unwrap()).unwrap();
-        assert_eq!(kept.sessions["s"].pending.len(), 2);
+        let kept: KeptSteps =
+            serde_json::from_str(&files.read_to_string(Path::new(KEPT)).unwrap()).unwrap();
+        assert_eq!(kept.state.sessions["s"].pending.len(), 2);
+    }
+
+    /// Steps an agent put in the run's directory, where a wrapper once
+    /// kept them (`turns/steps.json`), are never read or sent with the
+    /// executor's token: the wrapper reads only the file the control side
+    /// names, and numbers its session afresh.
+    #[test]
+    fn steps_put_in_the_runs_directory_are_never_sent() {
+        let files = MemoryRunFiles::default();
+        let sink = Arc::new(Sink::default());
+        let sinks: Arc<Sink> = sink.clone();
+        let mut planted = Step::new(1, StepKind::ToolCall, 0, 1);
+        planted.tool = Some("planted".to_owned());
+        let forged = ReporterState {
+            sessions: [(
+                "forged".to_owned(),
+                SessionSteps {
+                    next_seq: 2,
+                    started_ms: 0,
+                    pending: vec![planted],
+                },
+            )]
+            .into(),
+        };
+        files
+            .write(
+                Path::new("/runs/r1/turns/steps.json"),
+                &serde_json::to_vec(&forged).unwrap(),
+            )
+            .unwrap();
+        let db = Path::new("/q/queue.db");
+        let mut steps = WrapperSteps::default();
+        steps.load(&files, sinks.steps_file(db, &target()), target(), 0);
+        steps.start_turn(Box::new(Lines), 0, Some("s".to_owned()));
+        steps.line("Read", 10);
+        steps.end_turn(&files, Some(&sinks), db, 20);
+        assert_eq!(
+            sent(&sink),
+            vec![("s".to_owned(), vec![1, 2], vec![10, 20])]
+        );
+        let text = serde_json::to_string(&*sink.reports.lock().unwrap()).unwrap();
+        assert!(
+            !text.contains("planted") && !text.contains("forged"),
+            "{text}"
+        );
     }
 
     /// A verification's command is a tool's call with its shape, exit,
@@ -1246,6 +1323,10 @@ mod tests {
 
         fn digest_key(&self, _: &Path) -> Option<crate::domain::command_shape::DigestKey> {
             Some(crate::domain::command_shape::DigestKey::test())
+        }
+
+        fn steps_file(&self, _: &Path, _: &StepTarget) -> Option<PathBuf> {
+            None
         }
     }
 

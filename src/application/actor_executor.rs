@@ -1934,8 +1934,9 @@ mod tests {
 
     /// A worker's turn is given its own token, never the telemetry token
     /// its wrapper sends the session's steps with (ADR-t1662-3 decision
-    /// 11): neither that token's file nor its principal is in the turn's
-    /// environment or on its command line.
+    /// 11): neither that token's file nor its principal nor where the
+    /// wrapper keeps its unsent steps is in the turn's environment or on
+    /// its command line.
     #[test]
     fn a_turn_is_given_no_telemetry_token() {
         let run_dir = tempfile::tempdir().unwrap();
@@ -1958,6 +1959,11 @@ mod tests {
         let telemetry = crate::domain::telemetry::actor_id(
             &crate::domain::session_step::StepTarget::run(run.id()),
         );
+        let kept_steps = format!(
+            "{}/{}",
+            crate::domain::queue_service::SERVICE_DIR,
+            crate::domain::queue_service::STEPS_DIR
+        );
         let spawned = fake.spawned.lock().unwrap();
         assert_eq!(spawned.len(), 1);
         for command in spawned.iter() {
@@ -1972,6 +1978,7 @@ mod tests {
                     !text.contains(crate::domain::telemetry::ACTOR_PREFIX),
                     "{text}"
                 );
+                assert!(!text.contains(&kept_steps), "{text}");
             }
             assert!(
                 env.contains(&(

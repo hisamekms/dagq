@@ -261,7 +261,7 @@ claimの属性は`run_claimed`の`attributes`（キーと値の開いた組）�
 - **送る側**: executor（session wrapper、`integrate`とe2eの検証、非対話のjobを起動するプロセス）がstepと中から測った資源をTelemetrySinkに送る。
   agentは送らない。
   supervisorは工程・claim・slot・ask・`environment_attached`・nodeの時系列・外から測れる資源を自分で書く。
-- **集める口**: executorはagentの出力をproviderの`StepReader`で、検証は流したコマンドからstepを作り、30秒ごとと終わりに送り、送れなくても結果を変えない（送り直しは`step_report`）。
+- **集める口**: executorはagentの出力を`StepReader`で、検証は流したコマンドからstepを作り、30秒ごとと終わりに送り、送れなくても結果を変えない（送り直しと置き場は`step_report`）。
 - **TelemetrySink**: portで、今のアダプタはqueue serviceの`telemetry_report`（[Queue service](queue-service.md#telemetry_report)）。
 - **principal**: role `executor-telemetry`。
   agentを起動する制御側が対象ごとに発行・失効させ、agentには渡さない（時点・記録・場所は[Queue service](queue-service.md#principalとtoken)）。

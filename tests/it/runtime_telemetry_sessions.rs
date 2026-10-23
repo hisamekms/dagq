@@ -301,12 +301,16 @@ fn a_headless_runs_steps_go_into_the_step_store_under_the_run() {
             .map(|kept| kept.step.clone())
             .collect()
     };
-    // What the wrapper kept of its sessions, when its steps are not there.
     let run_dir = Path::new(run.run_dir().unwrap());
+    // What the wrapper kept of its sessions, when its steps are not there.
+    let kept_file = service::steps_path(
+        db.parent().unwrap(),
+        &dagq::domain::telemetry::actor_id(&target),
+    );
     let kept = || {
         format!(
             "{steps:?}\nkept {}",
-            fs::read_to_string(run_dir.join("turns").join("steps.json")).unwrap_or_default()
+            fs::read_to_string(&kept_file).unwrap_or_default()
         )
     };
     let worker = of(run.id().as_str());
@@ -365,4 +369,11 @@ fn a_headless_runs_steps_go_into_the_step_store_under_the_run() {
         !args.contains(dagq::domain::telemetry::ACTOR_PREFIX),
         "{args}"
     );
+    // Nor where its wrapper kept its steps, which are not in its run's
+    // directory.
+    assert!(!args.contains(&*kept_file.to_string_lossy()), "{args}");
+    assert!(!run_dir.join("turns").join("steps.json").exists());
+    // The supervisor's sweep removed what the wrapper kept once the run
+    // ended.
+    assert!(!kept_file.exists(), "{}", kept());
 }

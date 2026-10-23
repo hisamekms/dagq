@@ -369,6 +369,16 @@ pub trait TelemetrySinks: Send + Sync {
     /// the executor's steps then keep no command's shape. The executor
     /// reads it itself: it is never sent, recorded or given to an agent.
     fn digest_key(&self, db: &std::path::Path) -> Option<crate::domain::command_shape::DigestKey>;
+
+    /// The file of the queue at `db` a session wrapper keeps `target`'s
+    /// step numbering and unsent steps in, its directory made: beside the
+    /// tokens' files, under
+    /// [`STEPS_DIR`](crate::domain::queue_service::STEPS_DIR), never in
+    /// a worktree, a run's, a planner's or a job's directory, which an
+    /// agent can write. The wrapper reads and writes it itself; its path is
+    /// never in an agent's environment or command line. `None` keeps the
+    /// steps in the wrapper alone.
+    fn steps_file(&self, db: &std::path::Path, target: &StepTarget) -> Option<std::path::PathBuf>;
 }
 
 /// What builds the ledger reads and writes (docs/design/measurement.md

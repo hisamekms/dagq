@@ -16,13 +16,17 @@
 //! `command-digest.key` (mode 0600, [`digest_key`]) is the key the
 //! executors digest their commands' words with; it is read by them alone
 //! and, like a token's value, never written anywhere else.
+//! `steps/<sha256 of the telemetry actor id>.json` ([`steps_path`]) is
+//! what a session wrapper kept of its target's steps to send again,
+//! naming that target, which the supervisor's sweep removes once the
+//! target ended ([`kept_steps`]).
 //!
 //! [Queue service]: ../../docs/design/queue-service.md
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
 use std::os::fd::AsRawFd;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -56,13 +60,15 @@ use crate::application::{
 use crate::domain::queue_service::wrapper_actor_id;
 use crate::domain::queue_service::{
     API_VERSION, LOCK_FILE, LOG_FILE, MAX_ANSWER_BYTES, MAX_REQUEST_BYTES, OWNER_PID_ENV,
-    Principal, SERVICE_DIR, SOCKET_FILE, STATE_FILE, ServiceDenial, ServiceErrorCode,
+    Principal, SERVICE_DIR, SOCKET_FILE, STATE_FILE, STEPS_DIR, ServiceDenial, ServiceErrorCode,
     ServiceRequest, ServiceResponse, ServiceState, UseCase,
 };
 use crate::domain::session_step::StepTarget;
 use crate::domain::sessions::SessionHook;
 use crate::domain::task_replan::Fence;
-use crate::domain::telemetry::{HeldTelemetry, ReportRecorded, TargetFacts, TelemetryReport};
+use crate::domain::telemetry::{
+    HeldTelemetry, KeptStepsFile, ReportRecorded, TargetFacts, TelemetryReport,
+};
 use crate::domain::{
     ActorContext, ActorRole, Answerer, Ask, AskId, EventKind, Finding, FindingId, FindingOutcome,
     FindingStatus, LeaseToken, NewAsk, NewFinding, NewNote, PlannerId, PlannerSession, ProposalId,
@@ -215,6 +221,70 @@ pub fn credential_path(queue_dir: &Path, actor_id: &str) -> PathBuf {
     service_dir(queue_dir)
         .join(CREDENTIALS_DIR)
         .join(sha256_hex(actor_id.as_bytes()))
+}
+
+/// The file a session wrapper keeps the step numbering and unsent steps of
+/// the target whose telemetry actor is `actor_id` in, under the queue's
+/// `service/steps/`, beside the tokens' files: outside every worktree,
+/// run, planner and job directory, and mounted in no container.
+pub fn steps_path(queue_dir: &Path, actor_id: &str) -> PathBuf {
+    service_dir(queue_dir)
+        .join(STEPS_DIR)
+        .join(format!("{}.json", sha256_hex(actor_id.as_bytes())))
+}
+
+/// The files of the queue at `queue_dir`'s `service/steps/` at `now`: each
+/// kept file, and each temporary file with none beside it, with the target
+/// it names (`None` when it cannot be read) and its age. None when the
+/// directory is not there.
+pub fn kept_steps(queue_dir: &Path, now: std::time::SystemTime) -> Result<Vec<KeptStepsFile>> {
+    /// What the sweep reads of a kept file: the target it names.
+    #[derive(Deserialize)]
+    struct Named {
+        target: StepTarget,
+    }
+    let dir = service_dir(queue_dir).join(STEPS_DIR);
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).with_context(|| format!("read {}", dir.display())),
+    };
+    let mut kept = Vec::new();
+    for entry in entries {
+        let file = entry
+            .with_context(|| format!("read {}", dir.display()))?
+            .path();
+        let Some(name) = file.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let lone_tmp = name
+            .strip_suffix(".tmp")
+            .is_some_and(|kept| kept.ends_with(".json") && !dir.join(kept).exists());
+        if !(name.ends_with(".json") || lone_tmp) {
+            continue;
+        }
+        let Ok(meta) = fs::symlink_metadata(&file) else {
+            continue;
+        };
+        let age_ms = meta
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .map_or(0, |age| i64::try_from(age.as_millis()).unwrap_or(i64::MAX));
+        let target = meta
+            .is_file()
+            .then(|| fs::read(&file).ok())
+            .flatten()
+            .and_then(|bytes| serde_json::from_slice::<Named>(&bytes).ok())
+            .map(|named| named.target);
+        kept.push(KeptStepsFile {
+            file,
+            target,
+            age_ms,
+        });
+    }
+    kept.sort_by(|a, b| a.file.cmp(&b.file));
+    Ok(kept)
 }
 
 fn record_path(queue_dir: &Path, token: &str) -> PathBuf {
@@ -641,6 +711,34 @@ impl TelemetryTokens for SystemServiceAccess {
         SessionOwners::register_session(&SqliteQueue::open(db)?, target, session_id, now_ms)
     }
 
+    fn kept_steps(&self, db: &Path) -> Result<Vec<KeptStepsFile>> {
+        kept_steps(&queue_dir_of(db), std::time::SystemTime::now())
+    }
+
+    fn forget_steps(&self, db: &Path, file: &Path) -> Result<()> {
+        let dir = service_dir(&queue_dir_of(db)).join(STEPS_DIR);
+        ensure!(
+            file.parent() == Some(dir.as_path()),
+            "{} is not a file of {}",
+            file.display(),
+            dir.display()
+        );
+        let tmp = file
+            .to_str()
+            .filter(|name| name.ends_with(".json"))
+            .map(|name| PathBuf::from(format!("{name}.tmp")));
+        // With the temporary file a write that failed to rename left.
+        for file in tmp.iter().map(PathBuf::as_path).chain([file]) {
+            match fs::remove_file(file) {
+                Err(error) if error.kind() != ErrorKind::NotFound => {
+                    return Err(error).with_context(|| format!("remove {}", file.display()));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     fn held_telemetry(&self, db: &Path) -> Result<Vec<HeldTelemetry>> {
         Ok(records(&queue_dir_of(db))?
             .into_iter()
@@ -669,6 +767,27 @@ impl crate::application::TelemetrySinks for SystemServiceAccess {
                 warn!(error = %format_args!("{error:#}"), "the key of command digests could not be read or made; steps keep no command's shape: {error:#}");
             })
             .ok()
+    }
+
+    /// The service's directory must be there already (made with mode
+    /// 0700 by the service), so `steps/` inherits its privacy.
+    fn steps_file(&self, db: &Path, target: &StepTarget) -> Option<PathBuf> {
+        let queue_dir = queue_dir_of(db);
+        let file = steps_path(&queue_dir, &crate::domain::telemetry::actor_id(target));
+        let dir = file.parent()?;
+        if !service_dir(&queue_dir).is_dir() {
+            return None;
+        }
+        match fs::DirBuilder::new().mode(0o700).create(dir) {
+            Err(error) if error.kind() != ErrorKind::AlreadyExists => {
+                warn!(
+                    "{} could not be made; the wrapper keeps its steps in itself: {error:#}",
+                    dir.display()
+                );
+                None
+            }
+            _ => Some(file),
+        }
     }
 }
 
@@ -2817,6 +2936,123 @@ mod tests {
                 .unwrap()
         );
         assert!(ServiceTelemetrySink::of_target(&db, &target).is_none());
+    }
+
+    /// A wrapper's kept steps are in the queue's `service/steps/`, beside
+    /// the tokens' files: outside the run's directory and its worktree,
+    /// the planners' and the jobs' directories, and every directory a
+    /// run's container mounts; the target's end removes the file.
+    #[test]
+    fn a_wrappers_kept_steps_are_beside_the_tokens_outside_what_an_agent_writes() {
+        use crate::application::TelemetrySinks;
+        use crate::domain::run_container::{ContainerLimits, WorkerContainer, worker_run_args};
+        use crate::infrastructure::location;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("queue.db");
+        let run = RunId::new("r1").unwrap();
+        let target = StepTarget::run(&run);
+        // No service's directory yet: none is made outside it.
+        assert_eq!(SystemServiceAccess.steps_file(&db, &target), None);
+        issue(dir.path(), &Principal::worker(&run, TaskId::new(3)), 10).unwrap();
+        let file = SystemServiceAccess.steps_file(&db, &target).unwrap();
+        assert_eq!(
+            file.parent(),
+            Some(service_dir(dir.path()).join(STEPS_DIR).as_path())
+        );
+        let mode = fs::metadata(file.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
+        let run_dir = location::runs_dir(&db).join("r1");
+        let clone = run_dir.join("worktree-r1");
+        for agents in [
+            run_dir.clone(),
+            clone.clone(),
+            location::planners_dir(&db),
+            location::plan_reviews_dir(&db),
+            dir.path().join(location::GOAL_REVIEWS_DIR_NAME),
+            dir.path().join(location::AGENT_EVALS_DIR_NAME),
+        ] {
+            assert!(!file.starts_with(&agents), "{}", agents.display());
+        }
+        let queue = crate::domain::podman_machine::QueueKey::new("77067154921b9014").unwrap();
+        let args = worker_run_args(&WorkerContainer {
+            queue: &queue,
+            run: "r1",
+            image: "localhost/dagq-q-image:t",
+            clone: &clone,
+            run_dir: &run_dir,
+            build_output: Some("/build"),
+            worker_cache: &["/cache".to_owned()],
+            limits: ContainerLimits::default(),
+            env: &[],
+            command: &["claude".to_owned()],
+        })
+        .unwrap();
+        for pair in args.windows(2).filter(|pair| pair[0] == "--volume") {
+            let source = pair[1].split(':').next().unwrap();
+            assert!(!file.starts_with(source), "{}", pair[1]);
+        }
+        // Another target keeps its own file.
+        let planner = StepTarget::of(crate::domain::session_step::TargetKind::Planner, 3);
+        assert_ne!(
+            SystemServiceAccess.steps_file(&db, &planner),
+            Some(file.clone())
+        );
+        // The sweep reads the target each kept file names, a temporary
+        // file beside it going with it, and a lone half-written one naming
+        // none.
+        let written = crate::application::step_report::KeptSteps {
+            target: target.clone(),
+            state: crate::application::step_report::ReporterState::default(),
+        };
+        fs::write(&file, serde_json::to_vec(&written).unwrap()).unwrap();
+        let tmp = file.with_extension("json.tmp");
+        fs::write(&tmp, "{").unwrap();
+        let lone = file.with_file_name("other.json.tmp");
+        fs::write(&lone, "{\"tar").unwrap();
+        fs::write(file.with_file_name("notes.txt"), "").unwrap();
+        // Their times, and the sweep's, are values: the file written 5 s
+        // before it looks, the lone one an hour before.
+        let at = |secs: u64| std::time::UNIX_EPOCH + Duration::from_secs(secs);
+        let written_at = |path: &Path, secs| {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(at(secs))
+                .unwrap();
+        };
+        written_at(&file, 1_000_000);
+        written_at(&lone, 1_000_005 - 3_600);
+        let listed = kept_steps(dir.path(), at(1_000_005)).unwrap();
+        let named: Vec<_> = listed
+            .iter()
+            .map(|kept| (kept.file.clone(), kept.target.clone(), kept.age_ms))
+            .collect();
+        let mut expected = vec![
+            (file.clone(), Some(target.clone()), 5_000),
+            (lone.clone(), None, 3_600_000),
+        ];
+        expected.sort();
+        assert_eq!(named, expected);
+        // A time written after the look (a clock set back) is no age.
+        assert!(
+            kept_steps(dir.path(), at(999_999))
+                .unwrap()
+                .iter()
+                .all(|kept| kept.file != file || kept.age_ms == 0)
+        );
+        SystemServiceAccess.forget_steps(&db, &file).unwrap();
+        assert!(!file.exists());
+        assert!(!tmp.exists());
+        SystemServiceAccess.forget_steps(&db, &lone).unwrap();
+        assert!(!lone.exists());
+        // Nothing to remove is no error; a file elsewhere is refused.
+        SystemServiceAccess.forget_steps(&db, &file).unwrap();
+        let elsewhere = run_dir.join("turns").join("steps.json");
+        assert!(SystemServiceAccess.forget_steps(&db, &elsewhere).is_err());
     }
 
     #[test]

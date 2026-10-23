@@ -37,6 +37,11 @@ pub const STATE_FILE: &str = "state.json";
 pub const LOCK_FILE: &str = "lock";
 /// The log the service a runtime starts writes to.
 pub const LOG_FILE: &str = "service.log";
+/// The directory in [`SERVICE_DIR`] where a session wrapper keeps its
+/// target's step numbering and unsent steps, one file a target, beside
+/// the tokens' files: outside every worktree, run, planner and job
+/// directory, mounted in no container and named to no agent.
+pub const STEPS_DIR: &str = "steps";
 /// The variable that names the socket to a client-mode `dagq` (goal 82's
 /// stage (3)): with it, `dagq` opens no queue and sends its command to the
 /// service (ADR-t1233-1 decision 7).

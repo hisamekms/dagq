@@ -1000,6 +1000,18 @@ pub trait TelemetryTokens: Send + Sync {
         db: &std::path::Path,
         target: &StepTarget,
     ) -> Option<std::path::PathBuf>;
+    /// The files the session wrappers of the queue at `db` kept their
+    /// targets' step numbering and unsent steps in
+    /// ([`crate::application::TelemetrySinks::steps_file`]), each with the
+    /// target it names and its age, for the sweep that removes those of
+    /// the targets that ended.
+    fn kept_steps(
+        &self,
+        db: &std::path::Path,
+    ) -> Result<Vec<crate::domain::telemetry::KeptStepsFile>>;
+    /// Remove `file`, one [`Self::kept_steps`] listed, and the temporary
+    /// file a write of it left. One that is not there is no error.
+    fn forget_steps(&self, db: &std::path::Path, file: &std::path::Path) -> Result<()>;
     /// The telemetry tokens held, each with its target and the lease it was
     /// issued under: the sweep's list, which keeps a token whose revocation
     /// failed.

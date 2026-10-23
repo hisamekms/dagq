@@ -693,6 +693,15 @@ impl super::queue_service::TelemetryTokens for ServiceTokens {
     ) -> Option<std::path::PathBuf> {
         self.telemetry_files.telemetry_credential(db, target)
     }
+    fn kept_steps(
+        &self,
+        db: &std::path::Path,
+    ) -> Result<Vec<crate::domain::telemetry::KeptStepsFile>> {
+        self.telemetry_files.kept_steps(db)
+    }
+    fn forget_steps(&self, db: &std::path::Path, file: &std::path::Path) -> Result<()> {
+        self.telemetry_files.forget_steps(db, file)
+    }
     fn held_telemetry(
         &self,
         _db: &std::path::Path,

@@ -278,6 +278,40 @@ TokenRevocation {
     PlannerClosed => "planner_closed",
 });
 
+/// A file a session wrapper kept its target's steps in, as the
+/// supervisor's sweep lists it: the target it names, `None` when that
+/// cannot be read (a temporary file a write left half done), and how long
+/// ago it was last written (milliseconds).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeptStepsFile {
+    pub file: std::path::PathBuf,
+    pub target: Option<StepTarget>,
+    pub age_ms: i64,
+}
+
+/// How old a kept file whose target cannot be read is before the sweep
+/// removes it: a wrapper writes and renames its file at once, so one that
+/// stays unreadable this long is no write in progress.
+pub const UNREAD_KEPT_STEPS_MS: i64 = 60 * 60 * 1000;
+
+/// Whether the sweep removes `kept` (ADR-t1662-3 decision 11): its target
+/// ended by `ended` (read only for a file that names one), or it names
+/// none and is older than [`UNREAD_KEPT_STEPS_MS`]. Not its token decides,
+/// so a file written again after the end, or of a run whose token went
+/// with a lost lease, goes as well.
+pub fn kept_steps_due(kept: &KeptStepsFile, ended: impl FnOnce(&StepTarget) -> bool) -> bool {
+    match &kept.target {
+        Some(target) => ended(target),
+        None => kept.age_ms >= UNREAD_KEPT_STEPS_MS,
+    }
+}
+
+/// Whether a run in `status` (`None`: not in the queue) ended, for its
+/// wrapper's kept steps ([`kept_steps_due`]).
+pub fn run_ended(status: Option<super::RunStatus>) -> bool {
+    status.is_none_or(|status| !super::queue_service::run_holds_token(status))
+}
+
 /// How long after its timeout a command of a target of no run (an
 /// observation, a throughput review) whose finish the queue does not hold
 /// is taken to have ended: the margin of
@@ -403,6 +437,7 @@ pub fn run_token_due(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::RunStatus;
     use crate::domain::session_step::StepKind;
     use serde_json::json;
 
@@ -852,5 +887,42 @@ mod tests {
                 "thread-2".to_owned(),
             ]
         );
+    }
+
+    /// A kept file goes once its target ended, whatever its token; one
+    /// that names no target only once it is old, so a write in progress
+    /// stays.
+    #[test]
+    fn a_kept_file_goes_once_its_target_ended_or_unread_and_old() {
+        let kept = |target: Option<StepTarget>, age_ms| KeptStepsFile {
+            file: "/q/service/steps/a.json".into(),
+            target,
+            age_ms,
+        };
+        assert!(kept_steps_due(&kept(Some(run_target()), 0), |_| true));
+        assert!(!kept_steps_due(&kept(Some(run_target()), i64::MAX), |_| {
+            false
+        }));
+        assert!(!kept_steps_due(
+            &kept(None, UNREAD_KEPT_STEPS_MS - 1),
+            |_| true
+        ));
+        assert!(kept_steps_due(&kept(None, UNREAD_KEPT_STEPS_MS), |_| false));
+        assert!(run_ended(None));
+        for status in [
+            RunStatus::Integrated,
+            RunStatus::Succeeded,
+            RunStatus::Failed,
+            RunStatus::Interrupted,
+        ] {
+            assert!(run_ended(Some(status)), "{status:?}");
+        }
+        for status in [
+            RunStatus::Running,
+            RunStatus::NeedsSession,
+            RunStatus::AwaitingIntegration,
+        ] {
+            assert!(!run_ended(Some(status)), "{status:?}");
+        }
     }
 }

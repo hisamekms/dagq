@@ -594,12 +594,13 @@ impl<'a> Turns<'a> {
         // request, its untaken requests) before it opened this workspace.
         self.files.create_dir_all(&turns_dir(&run_dir))?;
         let target = self.step_target();
-        self.steps.load(
-            self.files,
-            &turns_dir(&run_dir),
-            target,
-            now_millis(self.clock),
-        );
+        // Kept by the control side beside the tokens' files, never in the
+        // run's or the planner's directory, which the agent can write.
+        let kept = self
+            .telemetry
+            .and_then(|sinks| sinks.steps_file(self.db, &target));
+        self.steps
+            .load(self.files, kept, target, now_millis(self.clock));
         let events = self.events()?;
         let mut turn = events
             .iter()

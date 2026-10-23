@@ -1880,7 +1880,9 @@ impl Supervisor<'_> {
     /// lease was lost, each only under the lease it was issued under
     /// ([`telemetry_tokens::sweep`]), and the targets of no run that ended
     /// or whose runner is gone, by the queue and this host's processes
-    /// ([`telemetry_tokens::sweep_targets`]).
+    /// ([`telemetry_tokens::sweep_targets`]); then remove what the
+    /// wrappers kept of the steps of targets that ended
+    /// ([`telemetry_tokens::sweep_kept_steps`]).
     fn sweep_telemetry(&mut self) {
         self.register_held_sessions();
         self.resend_kept_steps();
@@ -1906,6 +1908,10 @@ impl Supervisor<'_> {
             &states,
         );
         self.telemetry_retries = retries;
+        telemetry_tokens::sweep_kept_steps(self.telemetry_tokens, &self.layout.db, &|run| {
+            self.run_token_state(run, None, now)
+                .map(|state| state.status)
+        });
     }
 
     /// Send again the steps kept ([`UnsentSteps`]), the session each kept

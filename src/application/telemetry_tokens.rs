@@ -67,8 +67,10 @@ use tracing::warn;
 use super::queue_service::TelemetryTokens;
 use super::{EventStore, RunFiles};
 use crate::domain::session_step::StepTarget;
+use crate::domain::session_step::TargetKind;
 use crate::domain::telemetry::{
-    HeldTelemetry, RunTokenState, TokenRevocation, run_token_due, target_token_due,
+    HeldTelemetry, RunTokenState, TargetFacts, TokenRevocation, kept_steps_due, run_ended,
+    run_token_due, target_token_due,
 };
 use crate::domain::{EventKind, LeaseToken, RunEvent, RunId, TaskId};
 
@@ -603,6 +605,64 @@ pub fn sweep<L: TokenLog + ?Sized>(
     revoked
 }
 
+/// The sweep of the files the session wrappers kept their targets' steps
+/// in ([`TelemetryTokens::kept_steps`]): each whose target ended by the
+/// queue, a run's by `run_status` (its status, `None` when it is not in
+/// the queue) and a target of no run's by its facts, or that names none
+/// and is old ([`kept_steps_due`]), is removed: the files removed. Its
+/// token does not decide, so a file a wrapper wrote again after the end,
+/// or of a run whose token went with a lost lease, goes at the next pass.
+/// A target that cannot be read, and a removal that failed, stay for the
+/// next pass.
+pub fn sweep_kept_steps(
+    tokens: &dyn TelemetryTokens,
+    db: &Path,
+    run_status: &dyn Fn(&RunId) -> Result<Option<crate::domain::RunStatus>>,
+) -> Vec<PathBuf> {
+    let kept = match tokens.kept_steps(db) {
+        Ok(kept) => kept,
+        Err(error) => {
+            warn!(
+                "the wrappers' kept steps could not be listed; the next pass looks again: {error:#}"
+            );
+            return Vec::new();
+        }
+    };
+    let ended = |target: &StepTarget| {
+        let ended = match (target.kind, target.run_id()) {
+            (TargetKind::Run, Some(run)) => run_status(&run).map(run_ended),
+            // A run's file naming no run's ID is of no run there is.
+            (TargetKind::Run, None) => Ok(true),
+            _ => tokens
+                .target_facts(db, target)
+                .map(|facts| facts == TargetFacts::Ended),
+        };
+        ended
+            .inspect_err(|error| {
+                warn!(
+                    "{} {} could not be read for its kept steps: {error:#}",
+                    target.kind.as_str(),
+                    target.id
+                );
+            })
+            .unwrap_or(false)
+    };
+    let mut removed = Vec::new();
+    for file in kept {
+        if !kept_steps_due(&file, ended) {
+            continue;
+        }
+        match tokens.forget_steps(db, &file.file) {
+            Ok(()) => removed.push(file.file),
+            Err(error) => warn!(
+                "{} could not be removed; the next pass tries again: {error:#}",
+                file.file.display()
+            ),
+        }
+    }
+    removed
+}
+
 /// Record `kind` on the queue; a record that cannot be written is logged.
 fn record_queue<L: TokenLog + ?Sized>(log: &L, kind: EventKind, payload: serde_json::Value) {
     if let Err(error) = log.record_queue_token_event(kind, payload) {
@@ -650,6 +710,8 @@ mod tests {
         owners: Mutex<BTreeMap<String, StepTarget>>,
         registrations: Mutex<u32>,
         failing_registrations: Mutex<u32>,
+        /// The wrappers' kept files there are.
+        kept: Mutex<Vec<crate::domain::telemetry::KeptStepsFile>>,
     }
 
     impl Tokens {
@@ -702,6 +764,13 @@ mod tests {
         fn telemetry_credential(&self, _: &Path, target: &StepTarget) -> Option<PathBuf> {
             self.held(target)
                 .map(|_| format!("/q/service/credentials/{}", target.id).into())
+        }
+        fn kept_steps(&self, _: &Path) -> Result<Vec<crate::domain::telemetry::KeptStepsFile>> {
+            Ok(self.kept.lock().unwrap().clone())
+        }
+        fn forget_steps(&self, _: &Path, file: &Path) -> Result<()> {
+            self.kept.lock().unwrap().retain(|kept| kept.file != file);
+            Ok(())
         }
         fn held_telemetry(&self, _: &Path) -> Result<Vec<HeldTelemetry>> {
             Ok(self
@@ -1581,5 +1650,95 @@ mod tests {
             BTreeMap::from([("p-1".to_owned(), planner)])
         );
         assert_eq!(*tokens.registrations.lock().unwrap(), 3);
+    }
+
+    /// The sweep removes a wrapper's kept file once the queue says its
+    /// target ended, whether or not it holds a token (one gone with a lost
+    /// lease, the run ended since), and again at the next pass when a
+    /// wrapper wrote it after the end; a live target's, one that cannot be
+    /// read and a young file naming no target stay.
+    #[test]
+    fn kept_steps_go_once_their_target_ended_whatever_its_token() {
+        use crate::domain::telemetry::{KeptStepsFile, UNREAD_KEPT_STEPS_MS};
+        let (tokens, log) = (Tokens::default(), Log::default());
+        // r1's token went with a lost lease and was never issued again.
+        issue(&tokens, &log, "r1", "a").unwrap();
+        revoke_lost(
+            &tokens,
+            &log,
+            Path::new(DB),
+            &run("r1"),
+            &lease("a"),
+            &mut Retries::default(),
+        );
+        assert!(tokens.held_telemetry(Path::new(DB)).unwrap().is_empty());
+        tokens
+            .targets
+            .lock()
+            .unwrap()
+            .insert("3".to_owned(), TargetFacts::OpenPlanner);
+        let file = |name: &str, target: Option<StepTarget>, age_ms| KeptStepsFile {
+            file: format!("/q/service/steps/{name}").into(),
+            target,
+            age_ms,
+        };
+        let r1 = file("r1.json", Some(StepTarget::run(&run("r1"))), 0);
+        let kept = vec![
+            r1.clone(),
+            file("r2.json", Some(StepTarget::run(&run("r2"))), 0),
+            file("gone.json", Some(StepTarget::run(&run("gone"))), 0),
+            file(
+                "unreadable.json",
+                Some(StepTarget::run(&run("unreadable"))),
+                0,
+            ),
+            file("p3.json", Some(target(TargetKind::Planner, 3)), 0),
+            file("p4.json", Some(target(TargetKind::Planner, 4)), 0),
+            file("p404.json", Some(target(TargetKind::Planner, 404)), 0),
+            file("young.json.tmp", None, UNREAD_KEPT_STEPS_MS - 1),
+            file("old.json.tmp", None, UNREAD_KEPT_STEPS_MS),
+        ];
+        *tokens.kept.lock().unwrap() = kept;
+        let status = |run: &RunId| -> Result<Option<RunStatus>> {
+            match run.as_str() {
+                "r1" => Ok(Some(RunStatus::Integrated)),
+                "r2" => Ok(Some(RunStatus::Running)),
+                "unreadable" => Err(anyhow!("the queue is locked")),
+                _ => Ok(None),
+            }
+        };
+        let names = |files: Vec<PathBuf>| -> Vec<String> {
+            files
+                .iter()
+                .map(|file| file.file_name().unwrap().to_string_lossy().into_owned())
+                .collect()
+        };
+        assert_eq!(
+            names(sweep_kept_steps(&tokens, Path::new(DB), &status)),
+            ["r1.json", "gone.json", "p4.json", "old.json.tmp"]
+        );
+        let left: Vec<PathBuf> = tokens
+            .kept
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|kept| kept.file.clone())
+            .collect();
+        assert_eq!(
+            names(left),
+            [
+                "r2.json",
+                "unreadable.json",
+                "p3.json",
+                "p404.json",
+                "young.json.tmp"
+            ]
+        );
+        // A wrapper's last write after the end: gone at the next pass.
+        tokens.kept.lock().unwrap().push(r1);
+        assert_eq!(
+            names(sweep_kept_steps(&tokens, Path::new(DB), &status)),
+            ["r1.json"]
+        );
     }
 }
