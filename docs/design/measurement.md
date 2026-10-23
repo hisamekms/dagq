@@ -28,8 +28,7 @@ related:
 
 # 計測
 
-> **一部だけ実装済み**: 「SSOTとビュー」のport・「区間とタグ」のrunの工程の記録（`run_phase_changed`）・「終端」・「claimの前」・「supervisorの一生」・「今の判定の記録」と「runの比較の軸」の記録、run・task・session・queue・nodeの台帳と「畳む関数」・「台帳を作る係」・「共通の読み取り関数」・「並走の比較と照合」と「送る口」は実装済みで、今の姿を書く。
-> 「送る口」の中から測った資源は予定。
+> **一部だけ実装済み**: 「SSOTとビュー」のport・「区間とタグ」のrunの工程の記録（`run_phase_changed`）・「終端」・「claimの前」・「supervisorの一生」・「今の判定の記録」と「runの比較の軸」の記録、run・task・session・queue・nodeの台帳と「畳む関数」・「台帳を作る係」・「共通の読み取り関数」・「並走の比較と照合」と「送る口」（中から測った資源は予定）・「コマンドの形と分類」は実装済みで今の姿を書く。
 > ほかの節は計測の作り直しの今の予定で、まだ`src/`に無い。
 > 今動いている計測は[計測のコマンド](supervisor-lifecycle/commands.md)と最初のcommitの観測（`first_commit_observed`）が持ち、この文書はそれらを変えない。
 
