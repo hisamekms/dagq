@@ -44,6 +44,7 @@ testは`src/lib.rs`のunit testと`tests/it`・`tests/e2e.rs`・`tests/plugin.rs
 
 - e2e（`tests/e2e.rs`）とplugin（`tests/plugin.rs`）以外のintegration testは1つのtest binary `it`（`tests/it/main.rs`）にまとめ、testは機能ごとのファイル`tests/it/<機能>.rs`に足す。新しいファイルは`tests/it/main.rs`に`mod <機能>;`を足す。`Cargo.toml`は`autotests = false`で`[[test]]`は`it`・`e2e`・`plugin`の3本（[ADR-0078](../adr/0078-one-integration-test-binary.md)）。
 - 複数のファイルで使うhelperは`tests/common`（`it`と`plugin`の両方が読む。`tests/it`からは`crate::common`）、runtimeのtestだけが使うfixtureとhelperは`tests/it/runtime_support`（`crate::runtime_support`）に置く。
+- portのどのアダプタにも同じ約束を確かめる適合test一式は、アダプタ（とそれを動かすfixture）を引数に取る関数にし、値で動かせる約束は`src/`の`#[cfg(test)]`に、socket・SQLiteの境界を渡る約束は`tests/it`の機能のファイルに置く。各アダプタのtestが一式を呼ぶ（今の一式と項目は[計測の実行環境と資源](../design/measurement-environment.md#適合test)）。
 
 ## testの書き方
 

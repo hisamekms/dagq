@@ -163,3 +163,71 @@ fn a_run_of_processes_older_than_its_window_counts_them_from_its_first_measure()
     let failing = HostEnvironment::with(Some(8.0), None, || None, || None);
     assert!(failing.measure_runs(&[asked]).is_err());
 }
+
+/// An environment of the shape a container's or a cluster's adapter has:
+/// an image, limits of its own, waits it adds, and no measure of a run
+/// from outside (its executor measures from inside). The suite holds it
+/// to what it holds the host to, so an adapter of that shape goes in
+/// once it passes.
+struct InsideOnly;
+
+impl ExecutionEnvironment for InsideOnly {
+    fn attached(&self) -> EnvironmentAttached {
+        EnvironmentAttached {
+            env_kind: EnvKind::Container,
+            node_id: "node-a".to_owned(),
+            image_digest: Some("sha256:0123".to_owned()),
+            cpu_limit: Some(2.0),
+            mem_limit: Some(1 << 32),
+            arch: "aarch64".to_owned(),
+        }
+    }
+    fn measures_from_outside(&self) -> bool {
+        false
+    }
+    fn waits(&self) -> &'static [EnvironmentWait] {
+        &[
+            EnvironmentWait::Placement,
+            EnvironmentWait::ImagePull,
+            EnvironmentWait::Preparation,
+            EnvironmentWait::ResultReturn,
+        ]
+    }
+    fn measure_runs(&self, _: &[RunProcesses]) -> Result<Vec<(RunId, Resources)>> {
+        Ok(Vec::new())
+    }
+    fn forget_run(&self, _: &RunId) {}
+    fn node_resources(&self, sample: &HostSample, interval: Duration) -> Resources {
+        Resources {
+            cpu_seconds: sample
+                .values
+                .get("cpu_total")
+                .map(|percent| percent / 100.0 * interval.as_secs_f64()),
+            cpu_limit: Some(2.0),
+            ..Resources::default()
+        }
+    }
+}
+
+impl Fixture for InsideOnly {
+    fn environment(&self) -> &dyn ExecutionEnvironment {
+        self
+    }
+    fn start(&self, _: u32, _: Option<u32>) {}
+    fn spend(&self, _: u32, _: f64, _: i64) {}
+    fn end(&self, _: u32) {}
+    fn advance(&self, _: f64) {}
+    fn node_sample(&self, cores: f64) -> HostSample {
+        let mut sample = HostSample::new(0);
+        sample.set("cpu_total", Some(cores * 100.0));
+        sample
+    }
+}
+
+/// An adapter that measures runs only from inside and adds every wait
+/// passes the same suite: its runs are not measured from outside, and
+/// each wait is recorded as a phase of `blocker: infra`.
+#[test]
+fn an_environment_measured_from_inside_with_waits_passes_the_same_suite() {
+    conformance::conforms(&InsideOnly);
+}

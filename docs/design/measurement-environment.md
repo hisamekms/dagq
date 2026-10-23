@@ -1,7 +1,7 @@
 ---
 id: design-measurement-environment
 type: design
-title: 計測の実行環境と資源（環境の口・資源の単位・environment_attached・blocker infra・台帳との順序）
+title: 計測の実行環境と資源（環境の口・資源の単位・environment_attached・blocker infra・台帳との順序・適合test）
 status: current
 created: 2026-10-21
 scope: runtime
@@ -11,6 +11,8 @@ related:
   - adr-t1662-3
   - design-persistence
   - design-supervisor-lifecycle-host-metrics
+  - design-measurement-otel
+  - development-testing
 ---
 
 # 計測の実行環境と資源
@@ -22,8 +24,7 @@ runが動く環境と、runとnodeの資源の記録で、[計測](measurement.m
 
 - portは`application::ports`の`ExecutionEnvironment`で、環境を名乗る・runとnodeの資源を外から測る・外から測れるか・環境が足す待ちを返す。
 - 今のアダプタはhostだけ（`infrastructure::environment::HostEnvironment`）。
-  containerやk8sのアダプタは同じportに差し込み、hostと同じ適合test一式（`infrastructure::environment::conformance`）を通す。
-  一式は、アダプタのtestが値で動かすプロセスとnodeのsampleで、名乗り・待ち・nodeの資源・runの窓ごとの資源の約束を確かめ、OSには触れない。
+  containerやk8sのアダプタは同じportに差し込み、hostと同じ適合test一式（下の「適合test」）を通す。
 - hostは、runが登録したプロセス（wrapperとagent）とその下の全てのプロセスを`ps`で外から測る。
 - supervisorがrunのためにworkerの木の外で起こすプロセス（reviewと復旧のheadless job、着地の検証とrunを入れたrecheckのコマンド）も、動いている間はそのrunのもの（`domain::environment::RunChildren`）として、その下のプロセスごと同じ窓に数える。
   main自身のrecheckはどのrunのものでもない。
@@ -78,3 +79,31 @@ runが動く環境と、runとnodeの資源の記録で、[計測](measurement.m
 
 - 環境が足す待ち（配置・imageのpull・用意・結果の戻し）は工程`Phase::Environment`（`blocker: infra`）で記録する。
 - 環境の口の`waits`がその環境の待ちを返し、hostには無いので今は書かない。
+
+## 適合test
+
+環境の口と送る口の差し替えを、どのアダプタにも同じ約束を確かめる2つの一式で守る（ADR-t1662-3決定3・6）。
+一式はアダプタを引数に取る関数で、hostのアダプタが通る。
+containerやk8sのアダプタはまだ無く、新しいアダプタは一式を通れば差し込める。
+
+- **環境の一式**: `infrastructure::environment::conformance`の`conforms`で、アダプタのtestが値で動かすプロセスとnodeのsample（`Fixture`）を渡し、OSには触れない。
+  確かめるのは次のとおり。
+  - 名乗り: 毎回同じで、`environment_attached`の欄を全て持ち（無い値は`null`）、nodeとarchが空でなく、上限は正の値、imageのある環境はdigestを持ち、payloadが読み戻せる。
+  - 待ち: 足す待ちはそれぞれ別の工程で、`run_phase_changed`に`blocker: infra`で記録され、その工程として読み戻せる。
+  - nodeの資源: CPU秒はsampleの忙しいcoreにsampleが代表する時間を掛けたもので、上限は名乗りの値、どの値も共通の単位で負にならない。
+  - runの資源: 窓ごとにrunのプロセスの木が前の窓から使ったCPUと握るメモリを、他のrunと誰のものでもないプロセスと分けて返し、プロセスの無いrunは返さず、忘れたrunの前の分を数え直さない。
+    外から測れない環境はどのrunも返さない（executorが中から測る）。
+- **送る口の一式**: `tests/it`の`telemetry_conformance`の`conforms`で、届け方のtestが対象のtokenを持つsinkと届かないsink（`Delivery`）を渡し、queueのストアを読んで確かめる。
+  確かめるのは次のとおり。
+  - stepの重複: 同じ報告を2度送っても`(session_id, seq)`ごとに1つで、2度目は既にあると答える。
+  - stepの抜け: 届かなかったseqはsessionの抜けとして見え（推して埋めない）、そのstepが後で届けば抜けでなくなる。
+  - 送り直し: 届かなかった分と、届いたのに答えが失われた分は、executorが失敗にせず持ち続けて次に送り、ストアは重複として1つに保つ。
+  - 中から測った資源: 外から測れない環境でexecutorが送るsampleは、送ったとおりの共通の単位で1つずつ入る。
+  - APIの版: serviceが読まない版（新しいものも古いものも）の報告は拒まれて何も残さない。
+- **差し込む手順**:
+  1. アダプタは`ExecutionEnvironment`を実装し、そのtestが`Fixture`を作って環境の一式を通す。
+  2. 外から測れないアダプタは、executorが中から測った資源を`TelemetrySink`で送る。
+     届け方を変えるとき（unix socketの代わりのbrokerなど）は、その`TelemetrySink`と`Delivery`を作って送る口の一式を通す。
+  3. 組み立て（`compose::supervisor`がhostのアダプタを作る所）でアダプタを差し替える。
+     supervisor・台帳・ストアは変えない。
+- 記録とOpenTelemetryとの対応は[計測のOpenTelemetryとの対応](measurement-otel.md)が持つ。

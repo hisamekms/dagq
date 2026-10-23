@@ -8,7 +8,7 @@ use crate::application::ExecutionEnvironment;
 use crate::domain::RunId;
 use crate::domain::environment::{EnvironmentAttached, Resources, RunProcesses};
 use crate::domain::host_metrics::HostSample;
-use crate::domain::run_phase::{Blocker, Phase};
+use crate::domain::run_phase::{Attempt, Blocker, Phase, PhaseChange, Recorded};
 use std::collections::BTreeSet;
 use std::time::Duration;
 
@@ -58,12 +58,27 @@ pub fn conforms(fixture: &dyn Fixture) {
     measures_runs(fixture, &attached);
 }
 
+/// The items every `environment_attached` holds, `null` where it has none.
+const ATTACHED_ITEMS: [&str; 6] = [
+    "env_kind",
+    "node_id",
+    "image_digest",
+    "cpu_limit",
+    "mem_limit",
+    "arch",
+];
+
 /// It names itself the same each time, with a node, an architecture,
 /// limits of a positive value where it has them and an image digest of
-/// one where it has an image, and its payload reads back as it.
+/// one where it has an image, and its payload holds every item and reads
+/// back as it.
 fn names_itself(environment: &dyn ExecutionEnvironment) -> EnvironmentAttached {
     let attached = environment.attached();
     assert_eq!(environment.attached(), attached);
+    let payload = attached.payload();
+    for item in ATTACHED_ITEMS {
+        assert!(payload.get(item).is_some(), "{item} of {payload}");
+    }
     assert!(!attached.node_id.is_empty(), "{attached:?}");
     assert!(!attached.arch.is_empty(), "{attached:?}");
     assert!(
@@ -90,7 +105,8 @@ fn names_itself(environment: &dyn ExecutionEnvironment) -> EnvironmentAttached {
     attached
 }
 
-/// Each wait it adds is a phase of its own of `blocker: infra`.
+/// Each wait it adds is a phase of its own of `blocker: infra`, and its
+/// `run_phase_changed` records it so and reads back as that phase.
 fn adds_waits_as_phases_of_infra(environment: &dyn ExecutionEnvironment) {
     let waits = environment.waits();
     let names: BTreeSet<&str> = waits.iter().map(|wait| wait.phase_name()).collect();
@@ -98,6 +114,12 @@ fn adds_waits_as_phases_of_infra(environment: &dyn ExecutionEnvironment) {
     for wait in waits {
         let phase = Phase::Environment(*wait);
         assert!(matches!(phase.tags().blocker, Blocker::Infra), "{wait:?}");
+        let payload = PhaseChange::new(phase, Attempt::FIRST, "environment").payload();
+        assert_eq!(payload["blocker"], "infra", "{payload}");
+        assert!(
+            Recorded::of(&payload).is_some_and(|recorded| recorded.is(phase)),
+            "{payload}"
+        );
     }
 }
 

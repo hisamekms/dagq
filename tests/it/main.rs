@@ -213,6 +213,7 @@ mod source_repository;
 mod supervisor_service;
 mod supervisor_without_cmux;
 mod task_replanning;
+mod telemetry_conformance;
 mod telemetry_targets;
 mod telemetry_tokens;
 mod test_actor_env;
