@@ -146,12 +146,12 @@ claim ──► provision ──► 監視（tick）──► sessionの終わ�
 
 ## queue serviceの経路
 
-supervisorはqueue DBを開かずに、claim・lease・runの状態とevent・登録・判断に使う読み取り（候補・依存・goal）・workerとsession wrapperとexecutorのtelemetryのtoken・landing recheckとresumeの記録をqueue serviceのユースケースとして行う（[ADR-t3102-3](../../adr/2026-10-22-t3102-3-stage-5-outage-notice-and-use-cases-for-multi-step-control-operations.md)決定3〜5、principalは[ADR-t3102-1](../../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)）。
+supervisorはqueue DBを開かずに、claim・lease・runの状態とevent・登録・判断に使う読み取り（候補・依存・goal）・workerとsession wrapperとexecutorのtelemetryのtoken・landing recheckとresumeの記録・host運用のqueueのevent（`record_queue_event`）をqueue serviceのユースケースとして行う（[ADR-t3102-3](../../adr/2026-10-22-t3102-3-stage-5-outage-notice-and-use-cases-for-multi-step-control-operations.md)決定3〜5、principalは[ADR-t3102-1](../../adr/2026-10-22-t3102-1-stage-5-principals-user-by-socket-peer-and-control-side-tokens.md)）。
 入口は`application::supervisor_service`のmodule docで、ループと各threadの`Queue`は`SupervisorQueue`、serviceの側はuse case `supervisor`の`answer`。
 
 ```text
 pass の queue の操作 ── SupervisorQueue ─┬─ serviceが答える操作 ──► socket ──► QueueService::handle ──► queueの同じ操作（1つのtransaction）
-                                         └─ まだ答えない操作（着地・jobの結果・計画・観測・hostの記録）──► その時に開くDBの接続
+                                         └─ まだ答えない操作（着地・jobの結果・計画・観測・askとhold・plannerとsessionとinboxの見張りの記録・evalのround）──► その時に開くDBの接続
 ```
 
 - 1つの要求は1つのqueueの操作で、`op`でその名を名指し、引数はその操作の順に並べる。
