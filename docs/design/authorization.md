@@ -323,13 +323,14 @@ queue全体の読み取りのユースケース（一覧は[Queue service](queue
 
 ### ほかのコマンド（CLIの入口）
 
-上の3つ以外のコマンド（読み取り・`watch`・`graph --out`・`report`・`ci failures`）は状態を変えない。
-これらはroleを問わず（default deny）`src/main.rs`の`check_access`が`requests`の全てで`StaticPolicy`に通す。
-拒んだときだけ、runtimeの操作と同じ`src/infrastructure/denials.rs`の`QueueDenials`（判定の後でだけqueueを開く）で`authorization_denied`を、拒まれた呼び出し元をactorにして記録する（payloadは計画系と同じ）。
-queueが無い・このバイナリが開けないときは記録せず、拒否は拒否のまま返す。
-通った読み取りはqueueを読み取り専用で開き、書かない（ADR-0073決定5・7・18）。
-誰が持つかは上のPolicyの表のとおり。
-observerとjobの拒否のerrorの文は計画系と同じ。
+上の3つ以外（読み取り・`watch`など）は状態を変えない。
+
+- 宛ての環境のあるworker・job・observerはserviceのユースケースだけを送り、ほかはCLIが拒みDBを開かない（[クライアントモード](queue-service.md#クライアントモード)）。
+- 宛ての環境の無いuser・inbox・plannerはserviceが答える読み取り・`watch`・`status`をserviceへ送り、serviceが上の節のとおり認可する。
+  CLIはDBを開かず、届かなくても開かない（[hostのCLI](queue-service-host-cli.md)）。
+- 残り（3つのroleのserviceが答えないものと、ほかのrole）は`check_access`が（default deny）`requests`の全てで`StaticPolicy`に通す。
+  拒んだときだけ`QueueDenials`で`authorization_denied`を呼び出し元をactorに記録する。
+  通った読み取りはqueueを読み取り専用で開く（ADR-0073決定5・7・18）。
 
 ## Claudeのpermissions.deny（guardrail）
 
