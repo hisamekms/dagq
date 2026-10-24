@@ -1,0 +1,6 @@
+-c
+tui.screen_reader_detection_done=true
+-c
+tui.model_availability_nux={gpt-6-astra=4,"gpt-6.1-sol"=4}
+-c
+tui.show_tooltips=false

@@ -1,0 +1,8 @@
+--- /private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3338-2d2tV9/out/run4/config.before.toml	2026-10-25 04:45:52
++++ /private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3338-2d2tV9/out/run4/config.after.toml	2026-10-25 04:46:05
+@@ -1,2 +1,5 @@
+ [projects."/private/var/folders/3p/g_cty8k11wqf2pg43pwc05g40000gn/T/dagq-worker-t3338-2d2tV9/repo"]
+ trust_level = "trusted"
++
++[tui]
++screen_reader_detection_done = true
