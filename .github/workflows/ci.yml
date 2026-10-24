@@ -268,15 +268,78 @@ jobs:
       # host before a run lands when the run needs them, and before an
       # auto-update puts a new build in place.
       # The output is also kept for the slow-tests step below. shell: bash
-      # runs with -o pipefail, so the step fails exactly when cargo llvm-cov
-      # nextest fails (tee does not hide its exit status).
+      # runs with -e -o pipefail, so the pipe's status is cargo llvm-cov
+      # nextest's (tee does not hide it).
       # NEXTEST_PROFILE=ci is the default profile plus a JUnit file
       # (.config/nextest.toml), uploaded by the next step.
+      # A dagq process a test spawned and killed (or one that ended mid-write)
+      # can leave a corrupt profraw ("file header is corrupt"), and one such
+      # file makes llvm-profdata merge fail the whole gate after every test
+      # passed. So when the gate command fails, the step recovers only if
+      # nextest's Summary line shows every test that ran passed and the log
+      # has "failed to merge profile data": it deletes each
+      # target/llvm-cov-target/*.profraw that llvm-profdata show (rustup's
+      # llvm-tools, which cargo-llvm-cov uses) cannot read, writes their names
+      # and count to the log and the job summary, and lets cargo llvm-cov
+      # report with the same --workspace and --fail-under-lines 80 decide the
+      # step. A test failure, coverage under 80%, any other failure, or no
+      # readable profraw left fails the step as before. The gate command
+      # itself stays as it is (ADR-t2126-1).
       - name: cargo llvm-cov nextest
         shell: bash
         env:
           NEXTEST_PROFILE: ci
-        run: cargo llvm-cov nextest --locked --workspace --fail-under-lines 80 2>&1 | tee "$RUNNER_TEMP/nextest.log"
+        run: |
+          log="$RUNNER_TEMP/nextest.log"
+          if cargo llvm-cov nextest --locked --workspace --fail-under-lines 80 2>&1 | tee "$log"; then
+            exit 0
+          fi
+          esc=$'\033'
+          plain="$(sed "s/${esc}\[[0-9;]*m//g" "$log")"
+          counts="$(printf '%s\n' "$plain" | sed -n 's/.*Summary \[.*\] *\([0-9][0-9]*\) tests\{0,1\} run: \([0-9][0-9]*\) passed.*/\1 \2/p' | tail -n 1)"
+          run_count="${counts% *}"
+          passed_count="${counts#* }"
+          if [ -z "$counts" ] || [ "$run_count" != "$passed_count" ] \
+            || ! grep -q 'failed to merge profile data' <<<"$plain"; then
+            echo "not a profile merge failure after passing tests; no recovery"
+            exit 1
+          fi
+          profdata=""
+          for f in "$(rustc --print sysroot)"/lib/rustlib/*/bin/llvm-profdata; do
+            [ -x "$f" ] && profdata="$f"
+          done
+          if [ -z "$profdata" ]; then
+            echo "llvm-profdata not found in the toolchain's llvm-tools"
+            exit 1
+          fi
+          removed=()
+          readable=0
+          for f in target/llvm-cov-target/*.profraw; do
+            [ -e "$f" ] || continue
+            if "$profdata" show "$f" >/dev/null 2>&1; then
+              readable=$((readable + 1))
+            else
+              removed+=("$f")
+              rm -f "$f"
+            fi
+          done
+          if [ "${#removed[@]}" -eq 0 ]; then
+            echo "no corrupt profraw to remove; no recovery"
+            exit 1
+          fi
+          {
+            echo "### Corrupt profraw files removed before the coverage report"
+            echo
+            echo "${#removed[@]} removed, $readable readable left:"
+            for f in "${removed[@]}"; do
+              echo "- \`$(basename "$f")\`"
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$readable" -eq 0 ]; then
+            echo "no readable profraw left"
+            exit 1
+          fi
+          cargo llvm-cov report --locked --workspace --fail-under-lines 80
 
       # The tests' results for the CI watch, which reads the failed tests'
       # names from the artifacts named nextest-junit-* (ADR-t1920-1,

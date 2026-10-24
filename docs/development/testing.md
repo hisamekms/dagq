@@ -31,6 +31,7 @@ testを書く・置く・直すときの今の規則。読むのは、`tests/`�
 
 - 行カバレッジの合計を80%以上に保つ（`cargo-llvm-cov`、行基準、全体）。80%を見る関門はCIだけで、CIが最終関門になる（[ADR-t1925-1](../adr/2026-10-07-t1925-1-landing-verifies-unit-tests-and-selected-integration-tests-and-ci-is-the-final-gate.md)決定1・5）。下回る変更も着地し、CIの見張りが修正taskにする（[CI watch](../design/supervisor-lifecycle/ci-watch.md)）。
 - CIの関門のコマンドは`cargo llvm-cov nextest --locked --workspace --fail-under-lines 80`。cargo-nextestがtestを1件ずつ別processで、binaryをまたいで並列に流す（ADR-t1925-1決定8）。dagqは`[workspace]`の無い単一のpackageで、`--workspace`はdagqだけを指し、付けない形と同じ範囲を測る（[ADR-t2126-1](../adr/2026-10-09-t2126-1-single-package-without-workspace-and-coverage-gate-keeps-workspace-flag.md)）。
+- testが全部通ってprofileのmergeだけが壊れたprofrawで落ちたときは、CIはllvm-profdataが読めないprofrawだけを除いて同じ80%の関門でreportを出し直す（testの失敗と80%を下回ることは従来どおり落ちる。条件と手順は`.github/workflows/ci.yml`の`cargo llvm-cov nextest`のstepのコメント）。
 - 着地の関門は、`integrate`がrebase後にworkerのreceiptを信用せず1回だけ流すtaskの`verification_commands`で（validatingでは実行しない）、そのうちcoverageの関門の行は`dagq.toml`の`[landing_verification]`がunit test全件と影響範囲で絞ったITに置き換える（下の「test binary」）。workerが手元で流すものは[手元の検証](local-checks.md)、taskのverifyの書き方は[taskの登録](task-registration.md)の「coverageの関門」。
 
 ## test binary
