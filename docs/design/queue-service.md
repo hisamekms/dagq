@@ -263,15 +263,15 @@ queueのDBが消えれば（使い捨てのqueueの片付け）自分で終わ�
   drainしない引き継ぎでは、新しいバイナリのsupervisorの最初の見張りが入れ替える
 - 人の手: `dagq service start`（`service.lifecycle`。`ensure`と同じ）・`dagq service stop`（supervisorが動いていれば次の見張りで起動し直す）・`dagq service status`（`queue.read`）
 
-## 落ちたときの知らせ（ADR-t3102-3決定1）
+## 落ちたときの知らせ（ADR-t3102-3決定1・2）
 
 supervisorが起動し直せないか、上限に達したか、届かないときは、不在をqueueのディレクトリのDBの外に1回記録して`[push]`で1回送り、serviceが戻ったらserviceを通してattention `queue_service_down`に残し、続く`queue_service_started`か`queue_service_running`で閉じる（[`supervise`](supervisor-lifecycle/supervise.md#queue-serviceの経路)）。
 不在の間はqueueにattentionが無い。
 attentionの次の手は`dagq service status`。
-人は`dagq service status`と`service.log`を見て、`up`か`service start`を打ち直す。
+人はそれと`service.log`を見て、`up`か`service start`を打ち直す。
 生きているsupervisorも居ないときは`restart supervisor`が出る。
 
-クライアントモードのdagqは、serviceに届かないときに`unreachable`のerrorを返し、DBを直接開くことへ戻らない（ADR-t1233-1決定7、[クライアントモード](#クライアントモード)）。
+`status`と`watch`は届かないとき記録をDBを開かずに読んで添え、`watch`はroleごとに1回だけ返してserviceが戻るか新しい記録まで待つ（[hostのCLI](queue-service-host-cli.md#届かないとき)）。
 
 ## statusとdoctor
 

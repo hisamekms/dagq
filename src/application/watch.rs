@@ -383,6 +383,12 @@ pub trait WatchSource {
     fn outages(&self) -> Option<&dyn OutageNotices> {
         None
     }
+
+    /// Wait `duration` before the next look while a watch waits out an
+    /// outage a watch of its role returned already.
+    fn wait_out(&self, duration: Duration) {
+        thread::sleep(duration);
+    }
 }
 
 /// The outages of the queue's service a host's watch meets, as the
@@ -654,7 +660,7 @@ fn look_through(
                 if let Some(record) = record.as_deref_mut() {
                     let _ = record.heartbeat(clock.now());
                 }
-                thread::sleep(wait);
+                source.wait_out(wait);
             }
         }
     }
@@ -1256,5 +1262,135 @@ mod tests {
             failed_look(Some(100), true, Some(Duration::ZERO), interval),
             FailedLook::WaitedOut { since: 100 }
         );
+    }
+
+    /// A clock stopped at its instant: a watch with no timeout never reads
+    /// time passing.
+    struct Stopped(std::time::Instant);
+
+    impl Clock for Stopped {
+        fn system_time(&self) -> std::time::SystemTime {
+            std::time::UNIX_EPOCH + Duration::from_secs(1_790_000_000)
+        }
+        fn monotonic(&self) -> std::time::Instant {
+            self.0
+        }
+    }
+
+    /// A look the queue's service did not answer while the outage that
+    /// began at its `since` stood.
+    #[derive(Debug)]
+    struct Down(i64);
+
+    impl std::fmt::Display for Down {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "the queue service did not answer")
+        }
+    }
+
+    impl std::error::Error for Down {}
+
+    /// A service whose looks answer in turn as `looks` says (`Some(since)`:
+    /// not answered in the outage that began at `since`; `None`: answered),
+    /// the outage a watch of the inbox returned, and the waits between the
+    /// looks, recorded rather than slept.
+    struct Outages {
+        looks: std::sync::Mutex<std::collections::VecDeque<Option<i64>>>,
+        told: std::sync::Mutex<Option<i64>>,
+        waits: std::sync::Mutex<Vec<Duration>>,
+    }
+
+    impl Outages {
+        fn new(told: i64, looks: &[Option<i64>]) -> Self {
+            Self {
+                looks: std::sync::Mutex::new(looks.iter().copied().collect()),
+                told: std::sync::Mutex::new(Some(told)),
+                waits: std::sync::Mutex::default(),
+            }
+        }
+
+        fn left(&self) -> usize {
+            self.looks.lock().unwrap().len()
+        }
+    }
+
+    impl WatchSource for Outages {
+        fn look(
+            &self,
+            after: Option<EventId>,
+            _role: Option<SessionRole>,
+            _limit: Duration,
+        ) -> Result<WatchLook> {
+            let next = self.looks.lock().unwrap().pop_front().expect("a look");
+            if let Some(since) = next {
+                return Err(Down(since).into());
+            }
+            let after = after.unwrap_or(EventId::new(0));
+            Ok(WatchLook {
+                after,
+                events: Vec::new(),
+                cursor: after,
+                woken: false,
+                opened: Vec::new(),
+                pulses: Value::Null,
+                supervisors: Value::Null,
+                binding: None,
+            })
+        }
+
+        fn outages(&self) -> Option<&dyn OutageNotices> {
+            Some(self)
+        }
+
+        fn wait_out(&self, duration: Duration) {
+            self.waits.lock().unwrap().push(duration);
+        }
+    }
+
+    impl OutageNotices for Outages {
+        fn recorded(&self, error: &anyhow::Error) -> Option<i64> {
+            error.downcast_ref::<Down>().map(|down| down.0)
+        }
+        fn told(&self, role: Option<SessionRole>, since: i64) -> bool {
+            role == Some(SessionRole::Inbox) && *self.told.lock().unwrap() == Some(since)
+        }
+        fn tell(&self, role: Option<SessionRole>, since: i64) -> Result<()> {
+            assert_eq!(role, Some(SessionRole::Inbox));
+            *self.told.lock().unwrap() = Some(since);
+            Ok(())
+        }
+    }
+
+    /// ADR-t3102-3 decision 2: a watch of the inbox that returned an
+    /// outage waits the same outage out, looking again each interval, and
+    /// returns once the service answers again, or at once with the failure
+    /// when another outage is recorded (noted as told).
+    #[test]
+    fn a_told_outage_is_waited_out_until_the_service_answers_or_another_is_recorded() {
+        let options = WatchOptions {
+            after: Some(EventId::new(7)),
+            timeout: None,
+            interval: Duration::from_secs(5),
+            role: Some(SessionRole::Inbox),
+        };
+        let clock = Stopped(std::time::Instant::now());
+        let looked = |source: &Outages| {
+            look_through(source, &clock, &mut None, &options, clock.0, options.after)
+        };
+
+        let back = Outages::new(100, &[Some(100), Some(100), None]);
+        match looked(&back).unwrap() {
+            Looked::Look(look) => assert_eq!(look.cursor, EventId::new(7)),
+            Looked::WaitedOut { since } => panic!("waited out {since}"),
+        }
+        assert_eq!(back.left(), 0);
+        assert_eq!(*back.waits.lock().unwrap(), [options.interval; 2]);
+
+        let another = Outages::new(100, &[Some(100), Some(160), None]);
+        let failed = looked(&another).map(|_| ()).unwrap_err();
+        assert_eq!(failed.downcast_ref::<Down>().map(|down| down.0), Some(160));
+        assert_eq!(*another.told.lock().unwrap(), Some(160));
+        assert_eq!(another.left(), 1);
+        assert_eq!(*another.waits.lock().unwrap(), [options.interval]);
     }
 }

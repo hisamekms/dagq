@@ -76,7 +76,7 @@ CLIのDBの経路とserviceは同じ`compose::write_queue`（repositoryの規則
 `watch`の1回の見るは`watch`の残りの時間（`LOOK_FLOOR`から`LOOK_LIMIT`の間）を接続・要求・答えの全体の1つの期限にするので、backlogが一杯か、答えないか、答えを少しずつ送るserviceでも、`watch`は時間切れから`LOOK_FLOOR`の内に`unreachable`で終わる（`application::watch::look_limit`と`infrastructure::queue_service::call`）。
 `status`はserviceが`hello`に`PROBE_TIMEOUT`の内に答えてから送るので、そのようなserviceでは`PROBE_TIMEOUT`の内に`unreachable`で終わる。
 `hello`に答えて`status`に答えないserviceでは、`status`の答えを`LOOK_LIMIT`まで待ってから`unreachable`で終わる（`Client::look_within`）。
-supervisorが記録した停止（[落ちたときの知らせ](queue-service.md#落ちたときの知らせadr-t3102-3決定1)）があれば、errorの`queue_service.outage`に載せる。
+supervisorが記録した停止（[落ちたときの知らせ](queue-service.md#落ちたときの知らせadr-t3102-3決定12)）があれば、errorの`queue_service.outage`に載せる。
 `watch`はroleごとに同じ停止を1回だけ返し（返した停止はqueueのdirのroleごとの`OUTAGE_TOLD_FILE`）、そのroleの次の`watch`は停止の間は待ち、時間切れではeventを空にして`outage_since`を返す（`application::watch::look_through`）。
 
 ## 段の後の一度だけの開き直し

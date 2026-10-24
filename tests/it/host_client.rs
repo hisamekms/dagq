@@ -267,12 +267,24 @@ fn the_user_the_inbox_and_a_planner_go_through_the_service_and_never_open_the_db
 /// ADR-t3102-3 decision 2: with the service down and its outage recorded
 /// beside the DB, `status` says the outage, a watch of a role returns it
 /// once, and the next watch of that role waits it out to its timeout rather
-/// than return it again; another outage is returned again.
+/// than return it again; another outage is returned again. None of them
+/// needs the DB: it cannot be opened throughout.
 #[test]
 fn a_recorded_outage_is_in_status_and_returned_once_to_each_role_s_watch() {
+    use std::os::unix::fs::PermissionsExt;
     let queue = queue();
     start(&queue);
     assert!(invoke(&queue.db, &["service", "stop"]).status.success());
+    let db_files: Vec<_> = ["", "-wal", "-shm"]
+        .iter()
+        .map(|suffix| std::path::PathBuf::from(format!("{}{suffix}", queue.db.display())))
+        .filter(|file| file.exists())
+        .collect();
+    assert!(!db_files.is_empty());
+    for file in &db_files {
+        fs::set_permissions(file, fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    assert!(fs::File::open(&queue.db).is_err());
     let record = |since: i64| {
         let outage = json!({
             "since": since,
@@ -288,9 +300,15 @@ fn a_recorded_outage_is_in_status_and_returned_once_to_each_role_s_watch() {
     record(1_790_000_000);
     let status = invoke(&queue.db, &["status"]);
     assert_eq!(code(&status), "unreachable");
-    assert_eq!(
-        printed(&status)["queue_service"]["outage"]["since"],
-        1_790_000_000
+    let outage = &printed(&status)["queue_service"]["outage"];
+    assert_eq!(outage["since"], 1_790_000_000);
+    assert_eq!(outage["reason"], "unreachable");
+    assert_eq!(outage["message"], "the queue service did not answer");
+    assert!(
+        printed(&status)["error"]
+            .as_str()
+            .unwrap()
+            .contains("dagq up")
     );
     let watch = |role: &str| invoke(&queue.db, &["watch", "--role", role, "--timeout", "2"]);
 
