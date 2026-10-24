@@ -180,6 +180,12 @@ DRIFT_OTHER = "other"
 REVIEW_STARTED = "review_started"
 RUN_INTEGRATED = "run_integrated"
 SEND_BACK = "send_back"
+# M7 (h): the asks that hold their run (src/domain/timeline.rs holds_the_run:
+# not the observer's blocked nor the planner's question) and the worker's span
+# (run_claimed to the first receipt_observed, as runs[].work of dagq stats).
+ASK_OPENED, ASK_ANSWERED, ASK_CLOSED = "ask_opened", "ask_answered", "ask_closed"
+ASKS_NOT_HOLDING = ("blocked", "planner_question")
+RUN_CLAIMED, RECEIPT_OBSERVED = "run_claimed", "receipt_observed"
 # A path a reason names that makes it a docs reason: one under docs/, a .md
 # under plugins/, the root AGENTS.md or README.md. It starts a word: not after
 # a letter, digit, `_`, `.`, `-` or `/` (so not src/docs/ nor a/README.md);
@@ -864,7 +870,73 @@ def waits(values, cut):
             "sum_hours": round(sum(values) / 3600, 1), "median_secs": median(values)}
 
 
-def m7(paths, stats_path, since, until):
+def timed(events):
+    """The events with a `created_at`, by time and id."""
+    return sorted((e for e in events if isinstance(e.get("created_at"), str)),
+                  key=lambda e: (parse_time(e["created_at"]), e["id"]))
+
+
+def ask_spans(events):
+    """M7 (h): each run's union of the spans of the asks that hold it, from an
+    ask_opened to the earlier of its first ask_answered and first ask_closed
+    (None, past any end, when neither is in the input), and the counts."""
+    opened, ends = {}, {}
+    for event in timed(events):
+        payload = event.get("payload") or {}
+        ask = payload.get("ask_id")
+        if ask is None:
+            continue
+        if event.get("kind") == ASK_OPENED:
+            opened.setdefault(ask, event)
+        elif event.get("kind") in (ASK_ANSWERED, ASK_CLOSED):
+            ends.setdefault(ask, event)
+    counts = {"asks": 0, "runtime_closed": 0, "unanswered": 0,
+              "ends_without_opened": sum(ask not in opened for ask in ends)}
+    spans = defaultdict(list)
+    for ask, event in opened.items():
+        if event.get("run_id") is None or (event.get("payload") or {}).get("kind") in ASKS_NOT_HOLDING:
+            continue
+        counts["asks"] += 1
+        end = ends.get(ask)
+        if end is not None and (end.get("payload") or {}).get("runtime_closed") is True:
+            counts["runtime_closed"] += 1
+            continue
+        counts["unanswered"] += end is None
+        spans[event["run_id"]].append((parse_time(event["created_at"]),
+                                       parse_time(end["created_at"]) if end is not None else None))
+    union = {}
+    for run, items in spans.items():
+        merged = []
+        for start, end in sorted(items, key=lambda s: (s[0], s[1] is None, s[1])):
+            if merged and (merged[-1][1] is None or start <= merged[-1][1]):
+                last = merged[-1][1]
+                merged[-1] = (merged[-1][0], None if last is None or end is None else max(last, end))
+            else:
+                merged.append((start, end))
+        union[run] = merged
+    return union, counts
+
+
+def overlap(spans, start, end):
+    """The seconds of [start, end) that the spans cover."""
+    secs = 0.0
+    for a, b in spans:
+        low, high = max(a, start), end if b is None else min(b, end)
+        if high > low:
+            secs += (high - low).total_seconds()
+    return secs
+
+
+def worker_spans(events):
+    """Each run's first run_claimed and first receipt_observed."""
+    first = {}
+    for event in timed(events):
+        if event.get("kind") in (RUN_CLAIMED, RECEIPT_OBSERVED) and event.get("run_id") is not None:
+            first.setdefault((event["run_id"], event["kind"]), parse_time(event["created_at"]))
+    return first
+
+
+def m7(paths, stats_path, since, until, ask_paths=()):
     days = (until - since).total_seconds() / 86400
     reviews, started, landings = [], defaultdict(list), 0
     for event in load_events(paths):
@@ -884,6 +956,7 @@ def m7(paths, stats_path, since, until):
     concern, no_reasons = 0, 0
     shapes = {"codes_missing": 0, "codes_short": 0, "codes_long": 0, "code_items_not_list": 0}
     durations = {name: [] for name in counts}
+    spans = {name: [] for name in counts}
     cut = {name: 0 for name in counts}
     for key, event in reviews:
         payload = event.get("payload") or {}
@@ -905,6 +978,7 @@ def m7(paths, stats_path, since, until):
             counts[name] += 1
             if later:
                 durations[name].append((min(later)[0] - key[0]).total_seconds())
+                spans[name].append((run, key[0], min(later)[0]))
             else:
                 cut[name] += 1
     work = None
@@ -914,6 +988,37 @@ def m7(paths, stats_path, since, until):
         values = [r["work"] for r in stats.get("runs") or [] if isinstance(r, dict)
                   and isinstance(r.get("work"), (int, float))]
         work = {"field": "runs[].work", "runs": len(values), "median_secs": median(values)}
+    ask_waits = waits_without_asks = worker_work_without_asks = None
+    if ask_paths:
+        asks = load_events(ask_paths)
+        held, ask_waits = ask_spans(asks)
+        waits_without_asks = {}
+        for name, items in spans.items():
+            left, taken = [], 0.0
+            for run, start, end in items:
+                secs = overlap(held.get(run, []), start, end)
+                taken += secs
+                left.append((end - start).total_seconds() - secs)
+            waits_without_asks[name] = {**waits(left, cut[name]), "subtracted_secs": round(taken, 3)}
+        if stats_path:
+            first = worker_spans(asks)
+            left, taken, mismatched, absent = [], 0.0, 0, 0
+            for r in stats.get("runs") or []:
+                if not (isinstance(r, dict) and isinstance(r.get("work"), (int, float))):
+                    continue
+                start, end = first.get((r.get("run_id"), RUN_CLAIMED)), first.get((r.get("run_id"), RECEIPT_OBSERVED))
+                if start is None or end is None:
+                    absent += 1
+                    continue
+                if abs((end - start).total_seconds() - r["work"]) > 1:
+                    mismatched += 1
+                    continue
+                secs = overlap(held.get(r["run_id"], []), start, end)
+                taken += secs
+                left.append(round(r["work"] - secs, 3))
+            worker_work_without_asks = {"runs": len(left), "median_secs": median(left),
+                                        "subtracted_secs": round(taken, 3), "mismatched": mismatched,
+                                        "absent": absent}
     review_count = len(reviews)
     wait = {name: waits(durations[name], cut[name]) for name in counts}
     per_day = lambda n: round(n / days, 2)
@@ -927,6 +1032,9 @@ def m7(paths, stats_path, since, until):
         "waits": wait,
         "landings": landings,
         "worker_work": work,
+        "ask_waits": ask_waits,
+        "waits_without_asks": waits_without_asks,
+        "worker_work_without_asks": worker_work_without_asks,
         "per_review": {"send_backs": ratio(counts["all"], review_count),
                        "docs_any": ratio(counts["docs_any"], review_count),
                        "docs_only": ratio(counts["docs_only"], review_count)},
@@ -1067,6 +1175,10 @@ def main():
                         help="files with the JSON of `dagq events --full --kind review_finished --kind "
                              "review_started --kind run_integrated` (M7, with --stats for the worker time); "
                              "an event id in several files counts once")
+    parser.add_argument("--ask-events", nargs="+", action="extend", default=[],
+                        help="files with the JSON of `dagq events --full --kind ask_opened --kind ask_answered "
+                             "--kind ask_closed --kind run_claimed --kind receipt_observed` (M7 (h), not "
+                             "narrowed to the period); an event id in several files counts once")
     parser.add_argument("--metrics", default="m1,m2,m3,m4,m5,m6,m7",
                         help="comma-separated metrics; M3, M4, M5, M6 and M7 also need their input")
     parser.add_argument("--format", choices=("markdown", "json"), default="markdown")
@@ -1096,7 +1208,7 @@ def main():
     if "m6" in wanted and args.review_events:
         out["m6"] = m6(args.review_events, since, until)
     if "m7" in wanted and args.run_events:
-        out["m7"] = m7(args.run_events, args.stats, since, until)
+        out["m7"] = m7(args.run_events, args.stats, since, until, args.ask_events)
     if args.format == "json":
         json.dump(out, sys.stdout, indent=2, ensure_ascii=False)
         print()

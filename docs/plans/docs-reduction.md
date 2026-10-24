@@ -32,6 +32,7 @@ python3 scripts/docs-metrics.py --since <since> --until <until> --metrics m7 \
 
 - `--run-events` は `dagq events` の JSON を保存したファイル（複数可。頁送りの各頁）。全てのファイルを通して event ID が同じものは1件（最初に読んだもの）で、`created_at`（UTC）が `[since, until)` に入るものだけを数える。
 - `--stats` は M3 と同じ渡し方で、M7 は worker の作業時間だけをそこから読む。省くと `worker_work` は `null`。
+- `--ask-events` は (h) の入力で、渡し方は下の (h)。
 - `--run-events` を省くと M7 は `null`。script は queue を読まない。
 
 ## M7 の定義
@@ -56,6 +57,17 @@ python3 scripts/docs-metrics.py --since <since> --until <until> --metrics m7 \
 - **(f) worker の作業時間**: `dagq stats --full` の JSON の `runs[].work`（`run_claimed` から最初の `receipt_observed` までの秒。2026-10-13 の `src/domain/stats.rs` の `RunStats` で確かめた）の、`null` を除いた中央値と件数。
   run を選ぶのは `dagq stats` の `--since`・`--until`（run の終わりの時刻で選ぶ。`--since` は含まず `--until` は含む）で、events の `[since, until)` と境界が違う。
 - **(g) 比**: review あたり（差し戻し・ドキュメントを含む・ドキュメントだけの回数 ÷ review の回数）、着地あたり（review の回数 ÷ 着地の数、待ちの合計の時間 ÷ 着地の数）、1日あたり（review・差し戻し・ドキュメントを含む・ドキュメントだけ・待ちの時間・着地 ÷ 期間の日数）。
+- **(h) 人の答え待ちを引いた値**: (d) の待ちと (f) の作業時間から、run を止める ask の待ちを引いた値。
+  - 入力: `--ask-events`（複数可）に `dagq events --full --kind ask_opened --kind ask_answered --kind ask_closed --kind run_claimed --kind receipt_observed` の JSON の頁を渡す。全てのファイルを通して event ID が同じものは1件で、`[since, until)` で絞らない（区間の前に開いた ask と、区間の前に claim した run を読むため）。省くと (h) の欄（`ask_waits`・`waits_without_asks`・`worker_work_without_asks`）は `null`、`--stats` を省くと `worker_work_without_asks` は `null` で、(a)〜(g) の値は `--ask-events` の有無で変わらない。
+  - 対象の ask: `ask_opened` のうち event の `run_id` があり、payload の `kind` が `blocked`・`planner_question` でないもの（run を止める ask。`dagq timeline` の `waiting_ask` と同じ規則）。`run_id` の無い ask は引かない。
+  - 待ちの始まりと終わり: 始まりは `ask_opened` の `created_at`。終わりは同じ payload の `ask_id` の最初の `ask_answered` と最初の `ask_closed` の早い方の `created_at`。
+  - runtime が閉じた ask と ask_opened の無い終わり: 終わりの event の payload が `runtime_closed: true` の ask は人の待ちでないので除き、件数を出す（`dagq stats` の人の待ちと同じ）。`ask_opened` が入力に無い `ask_answered`・`ask_closed` は数えず、その `ask_id` の数を出す。
+  - 未回答: 入力に終わりの無い ask は終わり無し（区間の終わりを越えて続く）として扱い、件数を出す。
+  - 重なり: 同じ run の対象の ask の区間は和集合にし、重なった時間を 2 度引かない。
+  - 測る区間との交差: 引くのは、測る区間とその run の和集合の交わりの長さだけ。
+  - 差し戻しの待ち: (d) と同じ端の待ち（打ち切りは (d) と同じく除く）ごとに、[差し戻しの `review_finished`, 次の `review_started`) とその run の和集合の交わりを引く。全体・ドキュメントを含む・ドキュメントだけの3つについて、引いた後の合計（秒と時間）・中央値（秒）・件数・打ち切りの件数と、引いた時間の合計（秒）。
+  - worker の作業時間: (f) と同じ `runs[].work` が `null` でない run ごとに、`--ask-events` の同じ `run_id` の最初の `run_claimed` から最初の `receipt_observed` までを測る区間とする（`[since, until)` で切らない）。区間の長さが `runs[].work` と 1 秒より大きく違う run と、入力に `run_claimed` か `receipt_observed` の無い run は除いてその件数を出し、残りの run の `runs[].work` から交わりを引いた値の中央値（秒）・件数と、引いた時間の合計（秒）。
+  - (h) は JSON だけに出し、Markdown の表には足さない。
 
 ## 比べる区間
 

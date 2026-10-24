@@ -28,6 +28,10 @@ reasons by a code alone and by a named path alone, missing, shorter and longer
 `reason_codes` and an item that is no list, send-backs mixing docs and other
 reasons and one without reasons, waits ended by the next review_started and
 cut at the period's end, an event id in both files and the period's two ends.
+M7 (h) reads ask and worker events written as two files: two overlapping asks
+on one run, an ask covering part of a wait, one the runtime closed, one never
+answered, an answer without its ask_opened, blocked and planner_question asks,
+an ask without a run, a run whose span is not its work and one without a claim.
 """
 
 import importlib.util
@@ -441,11 +445,73 @@ def check_m7(base):
     with open(stats, "w") as f:
         json.dump({"runs": [{"run_id": "a", "work": 100}, {"run_id": "b", "work": 300},
                             {"run_id": "c", "work": None}, {"run_id": "d", "work": 200}, {"run_id": "e"}]}, f)
+    def ask(id, kind, run, at, ask_id, ask_kind="approve_landing", **payload):
+        return {"id": id, "run_id": run, "kind": kind, "created_at": at,
+                "payload": {"ask_id": ask_id, "kind": ask_kind, **payload}}
+
+    ao, aa, ac = "ask_opened", "ask_answered", "ask_closed"
+    asks = [
+        # Two overlapping asks on r5: [08:30, 09:15) is taken from #12's wait once.
+        ask(40, ao, "r5", "2026-10-01T08:30:00.000Z", 1),
+        ask(41, ao, "r5", "2026-10-01T08:45:00.000Z", 2),
+        ask(42, aa, "r5", "2026-10-01T09:00:00.000Z", 1),
+        ask(43, ac, "r5", "2026-10-01T09:15:00.000Z", 2),
+        ask(44, ac, "r5", "2026-10-01T09:50:00.000Z", 1),  # after its answer: the answer ends it
+        # Opened before #2's send-back: only [01:00, 01:30) of its wait is taken.
+        ask(45, ao, "r1", "2026-10-01T00:30:00.000Z", 3),
+        ask(46, aa, "r1", "2026-10-01T01:30:00.000Z", 3),
+        # Closed by the runtime: not taken from #10's wait.
+        ask(47, ao, "r4", "2026-10-01T06:00:00.000Z", 4),
+        ask(48, aa, "r4", "2026-10-01T06:30:00.000Z", 4, runtime_closed=True),
+        # Never answered: from 01:10 to the end of #6's wait.
+        ask(49, ao, "r2", "2026-10-01T01:10:00.000Z", 5, "worker_question"),
+        # An answer without its ask_opened, and asks that do not hold the run.
+        ask(50, aa, "r8", "2026-10-01T11:00:00.000Z", 99),
+        ask(51, ao, "r8", "2026-10-01T10:59:00.000Z", 6, "blocked"),
+        ask(52, aa, "r8", "2026-10-01T11:01:00.000Z", 6),
+        ask(53, ao, "r8", "2026-10-01T10:59:00.000Z", 7, "planner_question"),
+        ask(54, aa, "r8", "2026-10-01T11:01:00.000Z", 7),
+        ask(55, ao, None, "2026-10-01T00:00:00.000Z", 8, "queue_hold"),
+        ask(56, aa, None, "2026-10-01T23:00:00.000Z", 8),
+        # The worker's spans: a's 100 s hold a 30 s ask, b's 600 s are not its 300, d has no claim.
+        plain(57, "run_claimed", "a", "2026-09-30T23:59:00.000Z"),
+        ask(58, ao, "a", "2026-09-30T23:59:30.000Z", 9),
+        ask(59, aa, "a", "2026-10-01T00:00:00.000Z", 9),
+        plain(60, "receipt_observed", "a", "2026-10-01T00:00:40.000Z"),
+        plain(61, "receipt_observed", "a", "2026-10-01T00:05:00.000Z"),
+        plain(62, "run_claimed", "b", "2026-10-01T00:00:00.000Z"),
+        plain(63, "receipt_observed", "b", "2026-10-01T00:10:00.000Z"),
+        plain(64, "receipt_observed", "d", "2026-10-01T00:10:00.000Z"),
+    ]
+    ask_files = []
+    for n, events in enumerate((asks[:10], asks[8:])):  # #48 and #49 in both files
+        ask_files.append(os.path.join(base, f"events-ask-{n}.json"))
+        with open(ask_files[-1], "w") as f:
+            json.dump({"cursor": 99, "events": events}, f)
     out = run("--since", "2026-10-01", "--until", "2026-10-03", "--metrics", "m7", "--run-events", *files,
-              "--stats", stats)
+              "--stats", stats, "--ask-events", *ask_files)
     if not out:
         return None
     m = out["m7"]
+    check("m7 ask waits", m["ask_waits"],
+          {"asks": 6, "runtime_closed": 1, "unanswered": 1, "ends_without_opened": 1})
+    check("m7 waits without asks", m["waits_without_asks"], {
+        "all": {"count": 5, "cut": 2, "sum_secs": 10500.5, "sum_hours": 2.9, "median_secs": 1800.0,
+                "subtracted_secs": 5700.0},
+        "docs_any": {"count": 3, "cut": 2, "sum_secs": 8700.0, "sum_hours": 2.4, "median_secs": 3600.0,
+                     "subtracted_secs": 3900.0},
+        "docs_only": {"count": 2, "cut": 0, "sum_secs": 5100.0, "sum_hours": 1.4, "median_secs": 2550.0,
+                      "subtracted_secs": 3900.0},
+    })
+    check("m7 worker work without asks", m["worker_work_without_asks"],
+          {"runs": 1, "median_secs": 70.0, "subtracted_secs": 30.0, "mismatched": 1, "absent": 1})
+    plain_out = run("--since", "2026-10-01", "--until", "2026-10-03", "--metrics", "m7", "--run-events", *files,
+                    "--stats", stats)
+    if plain_out:
+        h = ("ask_waits", "waits_without_asks", "worker_work_without_asks")
+        check("m7 without ask events", [plain_out["m7"][k] for k in h], [None, None, None])
+        check("m7 ask events change no other field", {k: v for k, v in m.items() if k not in h},
+              {k: v for k, v in plain_out["m7"].items() if k not in h})
     check("m7 not m3", out["m3"], None)
     check("m7 reviews", (m["days"], m["reviews"]), (2.0, {"events": 10, "runs": 8}))
     check("m7 send-backs", m["send_backs"], {"all": 7, "docs_any": 5, "docs_only": 2, "by_route": 1,
