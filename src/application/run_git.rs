@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use super::{CloneFacts, Repository};
-use crate::domain::{CommitSha, TaskRun, run_clone::CLONE_MAIN_REF};
+use super::{CloneFacts, Repository, RunFiles, WorktreeAdmin};
+use crate::domain::{CommitSha, Receipt, TaskRun, run_clone::CLONE_MAIN_REF};
 
 /// What a session left in a run's workplace: its head, and whether it is
 /// clean (nothing uncommitted, no rebase in progress for a container run,
@@ -49,6 +49,105 @@ pub fn head(repository: &dyn Repository, run: &TaskRun) -> Result<CommitSha> {
         Ok(facts(repository, run)?.head)
     } else {
         repository.head(worktree(run)?)
+    }
+}
+
+/// Where the head of a run on the host whose worktree is there is read
+/// ([`host_head`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HostHead {
+    /// Its worktree's git reads and its `HEAD` is the run's branch (or
+    /// detached): read there, as [`head`] does.
+    Worktree,
+    /// Its worktree's registration is broken: the commit of the run's
+    /// branch in the repository itself, which is its receipt's commit.
+    Branch(CommitSha),
+}
+
+/// Where the head of `run`, on the host with its worktree there, is read.
+/// Git finds a worktree's own git (its admin dir) by name alone, so when
+/// the admin dir is gone the worktree's git does not read, and when
+/// another worktree took the name it reads that one's branch. Either way
+/// (its symbolic `HEAD` cannot be read, names a branch other than the
+/// run's, or is detached in an admin dir that does not point back at it)
+/// the worktree's `HEAD` is not the run's, and the run's branch
+/// `refs/heads/<branch>` is read in the repository itself instead
+/// ([`HostHead::Branch`]), only when it is the commit the run's receipt
+/// names: then the worker left its work committed there. An error, which
+/// refuses what reads it, when the branch is not there or is not that
+/// commit, or the run has no receipt that reads: the broken worktree's
+/// uncommitted work cannot be read, and whether to leave it is a person's
+/// call. A worktree registered on the run's branch, or detached in its
+/// own admin dir, is read as it is ([`HostHead::Worktree`]).
+pub fn host_head(
+    repository: &dyn Repository,
+    files: &dyn RunFiles,
+    run: &TaskRun,
+) -> Result<HostHead> {
+    let branch = format!("refs/heads/{}", run.branch().context("missing branch")?);
+    let worktree = worktree(run)?;
+    judged(
+        run,
+        &branch,
+        repository.current_branch(worktree),
+        || {
+            matches!(
+                repository.worktree_admin(worktree),
+                Ok(WorktreeAdmin::Found {
+                    points_back: false,
+                    ..
+                })
+            )
+        },
+        || {
+            let receipt = run
+                .receipt_path()
+                .context("no receipt path")
+                .and_then(|path| Ok(files.read_to_string(Path::new(path))?))
+                .and_then(|text| Ok(Receipt::parse(&text)?));
+            Ok((repository.branch_head(&branch)?, receipt))
+        },
+    )
+}
+
+/// [`host_head`] over the symbolic `HEAD` the worktree's git reads
+/// (`current`), whether a detached one is another worktree's (`taken`: the
+/// admin dir its `.git` names does not point back at it), and what `read`
+/// reads only when the registration is broken: the branch's commit in the
+/// repository and the run's receipt.
+fn judged(
+    run: &TaskRun,
+    branch: &str,
+    current: Result<Option<String>>,
+    taken: impl FnOnce() -> bool,
+    read: impl FnOnce() -> Result<(Option<CommitSha>, Result<Receipt>)>,
+) -> Result<HostHead> {
+    let broken = match &current {
+        Ok(None) if !taken() => return Ok(HostHead::Worktree),
+        Ok(None) => "its worktree's .git names another worktree's admin dir".to_owned(),
+        Ok(Some(current)) if current == branch => return Ok(HostHead::Worktree),
+        Ok(Some(current)) => format!("its worktree's git is on {current}"),
+        Err(error) => format!("its worktree's git cannot be read ({error:#})"),
+    };
+    let refuse = |why: String| -> Result<HostHead> {
+        bail!(
+            "the worktree of run {} is not registered on its branch: {broken}, and {why}",
+            run.id()
+        )
+    };
+    let (head, receipt) = read()?;
+    let Some(head) = head else {
+        return refuse(format!("{branch} is not in the repository"));
+    };
+    match receipt {
+        Ok(receipt) if receipt.names_commit(head.as_str()) => Ok(HostHead::Branch(head)),
+        Ok(receipt) => refuse(format!(
+            "{branch} is at {head}, not at its receipt's commit {}",
+            receipt.commit()
+        )),
+        Err(error) => refuse(format!(
+            "it has no receipt that names {branch}'s commit {head} ({error:#})"
+        )),
     }
 }
 
@@ -236,6 +335,72 @@ mod tests {
             created_at: String::new(),
         })
         .unwrap()
+    }
+
+    fn receipt(commit: &str) -> Result<Receipt> {
+        Ok(Receipt::parse(&format!(
+            r#"{{"run_id":"r1","result":"failed","commit":"{commit}","tests":{{"status":"failed","evidence_or_reason":"x"}},"e2e":{{"status":"not_applicable","evidence_or_reason":"x"}},"subagent_review":{{"status":"not_applicable","evidence_or_reason":"x"}},"summary":"x"}}"#
+        ))?)
+    }
+
+    /// A worktree on the run's branch, or detached in its own admin dir,
+    /// is read there and its branch is not read; one whose git cannot be
+    /// read, is on another branch or is detached in another's admin dir is
+    /// read from the run's branch only when that is its
+    /// receipt's commit, and refused otherwise.
+    #[test]
+    fn a_worktree_not_registered_on_its_branch_carries_its_branch_only_at_its_receipts_commit() {
+        let run = run_at("/q/runs/r1/worktree");
+        let branch = "refs/heads/dagq/r1";
+        let (b, c) = ("b".repeat(40), "c".repeat(40));
+        let sha = |text: &str| CommitSha::try_from(text.to_owned()).unwrap();
+        let unread = || -> Result<(Option<CommitSha>, Result<Receipt>)> {
+            unreachable!("a worktree registered on its branch is read there")
+        };
+        for current in [None, Some(branch.to_owned())] {
+            assert_eq!(
+                judged(&run, branch, Ok(current), || false, unread).unwrap(),
+                HostHead::Worktree
+            );
+        }
+        let gone = || Err(anyhow::anyhow!("fatal: not a git repository"));
+        let other = || Ok(Some("refs/heads/dagq/r0".to_owned()));
+        let detached = || Ok(None);
+        for (current, taken) in [(gone(), false), (other(), false), (detached(), true)] {
+            assert_eq!(
+                judged(
+                    &run,
+                    branch,
+                    current,
+                    || taken,
+                    || Ok((Some(sha(&b)), receipt(&b)))
+                )
+                .unwrap(),
+                HostHead::Branch(sha(&b))
+            );
+        }
+        let refused = |current: Result<Option<String>>,
+                       read: (Option<CommitSha>, Result<Receipt>),
+                       parts: &[&str]| {
+            let why = format!(
+                "{:#}",
+                judged(&run, branch, current, || true, || Ok(read)).unwrap_err()
+            );
+            for part in ["is not registered on its branch"].iter().chain(parts) {
+                assert!(why.contains(part), "{part}: {why}");
+            }
+        };
+        refused(
+            gone(),
+            (Some(sha(&c)), receipt(&b)),
+            &["cannot be read", "not at its receipt's commit"],
+        );
+        refused(
+            other(),
+            (Some(sha(&b)), Err(anyhow::anyhow!("receipt is missing"))),
+            &["is on refs/heads/dagq/r0", "it has no receipt"],
+        );
+        refused(gone(), (None, receipt(&b)), &["is not in the repository"]);
     }
 
     #[test]

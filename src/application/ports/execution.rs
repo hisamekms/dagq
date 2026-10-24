@@ -1904,6 +1904,13 @@ pub trait Repository: RepositoryReads {
         let _ = commit;
         anyhow::bail!("this repository keeps no history")
     }
+    /// The commit the branch `branch` (`refs/heads/...`) of the repository
+    /// itself points at, whatever a worktree's git reads; `None` when there
+    /// is no such branch.
+    fn branch_head(&self, branch: &str) -> Result<Option<CommitSha>> {
+        let _ = branch;
+        anyhow::bail!("this repository cannot read its branches")
+    }
     /// Symbolic HEAD of a worktree (`refs/heads/...`), `None` when detached.
     fn current_branch(&self, worktree: &Path) -> Result<Option<String>>;
     fn head(&self, worktree: &Path) -> Result<CommitSha>;

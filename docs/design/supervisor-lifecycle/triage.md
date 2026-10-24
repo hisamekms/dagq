@@ -53,10 +53,13 @@ related:
    前提:
    - `retry`: taskの`failed` / `interrupted`のrunがretryの上限未満で、runのbranchに自分のcommitが無い（`result_commit`、無ければworktreeのHEAD、worktreeを作る前に止まったrunなら無し、がmainの祖先。worktreeが消えていて`result_commit`も無ければ判断できないので崩れとする）。
      containerのrunのHEADは最後のturnの終わりの事実から読み、そうでない事実は事実だけのturnで書き直してから読み、書き直せないか保存できない成果を言えば崩れとする（[Container runtime](../container-runtime.md#git)）。
+     hostのrunでworktreeの登録が壊れたとき（worktreeのgitが読めないか、symbolic-refがrunのbranchでないか、detachedで`.git`の名指すadmin dirが自分を指し返さない。admin dirが消えたか、別のworktreeが同じ名前のadmin dirを使った）は、worktreeのHEADでなく本体のrepositoryの`refs/heads/<branch>`を読む。
+     そのcommitがrunのreceiptの`commit`と一致するとき（workerがbranchに成果をcommitした証拠）だけそれをHEADとし、一致しない・receiptが無い・branchが無いときは崩れとする（壊れたworktreeの未commitの差分は読めず、捨てるかは人の判断なので）。
+     symbolic-refがrunのbranchか、自分のadmin dirでdetachedのworktreeは、登録が正しいとしてworktreeのHEADを読む。
      commitのあるrunを最初からやり直すのは成果の破棄なので適用しない。
      適用するとtaskを`in_progress`から`ready`に戻す（`task_status_changed`）。
    - `retry_inherit`: runのbranchに自分のcommitがあり、そのtaskで引き継ぐretry（`triage_finished`の`action: retry_inherit`）がまだ無い（taskごとに1回。人の手での引き継ぎは数えない。適用の同じトランザクションで再検査する）。
-     `refs/dagq/runs/<run-id>`にcommit（`result_commit`、無ければworktreeのHEAD。containerのrunは`retry`と同じく読む）を残してtaskを`ready`に戻す。
+     `refs/dagq/runs/<run-id>`にcommit（`result_commit`、無ければworktreeのHEAD。containerのrunと登録の壊れたworktreeのrunは`retry`と同じく読む）を残してtaskを`ready`に戻す。
      次のrunは引き継ぎ（`run_inherited`とpromptの「Carried over from run」の節）で始まる。
    - `resume`: resumeを使い切っていない（通算で数える）、worktreeとreceiptのpathがある。
      runがtaskの最新のrunで、taskが`completed` / `canceled`でない（`domain::telemetry::run_revivable`。taskが`ready`に戻っただけで後のrunが無ければresumeできる）ことを適用の同じトランザクションで再検査し、満たさなければ適用しない。

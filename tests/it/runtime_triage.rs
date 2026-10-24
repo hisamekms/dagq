@@ -1799,3 +1799,90 @@ fn a_hand_off_of_a_run_that_did_not_fail_at_its_base_is_refused_and_asked() {
         assert!(ask.question.contains(part), "{part}: {}", ask.question);
     }
 }
+
+/// The worker script that commits its work, writes a `failed` receipt
+/// naming it ([`RECEIPT`]) and fails, leaving in its run directory
+/// `break.sh`, which runs `breaks` in its worktree: what breaks the
+/// worktree's registration once the run ended, before its recovery job
+/// judges it.
+fn breaks_its_worktree(breaks: &str) -> String {
+    format!(
+        "commit work; {RECEIPT}; {{ printf 'cd \"%s\" || exit 1\\n' \"$PWD\"; cat <<'BREAK'\n{breaks}\nBREAK\n}} > \"$RUN_DIR/break.sh\"; exit 7"
+    )
+}
+
+/// Writes a `failed` receipt naming the run's head.
+const RECEIPT: &str = "printf '{\"run_id\":\"%s\",\"result\":\"failed\",\"commit\":\"%s\",\"tests\":{\"status\":\"failed\",\"evidence_or_reason\":\"a test failed\"},\"e2e\":{\"status\":\"not_applicable\",\"evidence_or_reason\":\"none\"},\"subagent_review\":{\"status\":\"not_applicable\",\"evidence_or_reason\":\"none\"},\"summary\":\"failed\"}' \"$RUN_ID\" \"$(git rev-parse HEAD)\" > \"$RECEIPT\"";
+
+/// Removes the worktree's admin dir, as `git worktree prune` does.
+const ADMIN_GONE: &str = "rm -rf \"$(git rev-parse --absolute-git-dir)\"";
+
+/// Points the worktree's `.git` at the admin dir of another worktree, on
+/// another branch at the run's base.
+const TAKES_ANOTHER: &str = "git worktree add -q -b other \"$PWD-other\" HEAD~1 && \
+printf 'gitdir: %s\\n' \"$(git rev-parse --path-format=absolute --git-common-dir)/worktrees/${PWD##*/}-other\" > .git && \
+test \"$(git symbolic-ref HEAD)\" = refs/heads/other";
+
+/// What the recovery job of the only run of task 1 whose worker ran
+/// `script` did, choosing `retry_inherit` once the run's `break.sh` broke
+/// its worktree: the run and its `triage_finished`.
+fn retry_inherit_of(script: &str) -> (Fixture, PathBuf, PathBuf, TaskRun, Value) {
+    let (dir, repo, db) = fixture();
+    let backend = TestWorkspace::new(&db, false, script);
+    let job = repair(
+        json!({"action": "retry_inherit"}),
+        "the session died after the work was committed",
+    );
+    let reviewer = TestReviewer::new(&[verdict("pass", &[], "unused")])
+        .with_triages(&[format!("sh break.sh >&2 && {job}")]);
+    let outcome = supervise_reviewed(&db, &repo, &backend, &reviewer);
+    assert_eq!(outcome["errors"], json!([]), "{outcome}");
+    let detail = SqliteQueue::open(&db)
+        .unwrap()
+        .show(TaskId::new(1))
+        .unwrap();
+    let first = detail.runs[0].clone();
+    let finished = run_payloads(&detail, &first, "triage_finished");
+    assert_eq!(finished.len(), 1, "{:?}", event_kinds(&detail));
+    (dir, repo, db, first, finished[0].clone())
+}
+
+/// A host run whose worktree lost its admin dir (`git worktree prune`)
+/// cannot be read there, so its own commits and the head `retry_inherit`
+/// carries over are read from its branch in the repository itself, which
+/// names its receipt's commit: the retry is applied with that head.
+#[test]
+fn a_run_whose_worktree_lost_its_admin_dir_carries_its_branchs_receipt_commit_over() {
+    let (_dir, repo, _db, first, finished) = retry_inherit_of(&breaks_its_worktree(ADMIN_GONE));
+    assert_eq!(finished["action"], "retry_inherit", "{finished}");
+    let branch = git_out(&repo, &["rev-parse", &format!("dagq/{}", first.id())]);
+    assert_ne!(branch, first.base_commit().as_str());
+    assert_eq!(finished["inherit"]["head"], json!(branch));
+    assert_eq!(
+        git_out(
+            &repo,
+            &["rev-parse", &format!("refs/dagq/runs/{}", first.id())]
+        ),
+        branch
+    );
+}
+
+/// A host run whose worktree's `.git` names another worktree's admin dir
+/// (on another branch, at the run's base) reads its own branch in the
+/// repository, not the other's `HEAD`: its commits are its own and are
+/// carried over.
+#[test]
+fn a_run_whose_worktree_names_another_runs_admin_dir_carries_its_own_branch_over() {
+    let (_dir, repo, _db, first, finished) = retry_inherit_of(&breaks_its_worktree(TAKES_ANOTHER));
+    assert_eq!(finished["action"], "retry_inherit", "{finished}");
+    let branch = git_out(&repo, &["rev-parse", &format!("dagq/{}", first.id())]);
+    assert_ne!(branch, first.base_commit().as_str());
+    assert_eq!(finished["inherit"]["head"], json!(branch));
+    assert_eq!(
+        git_out(
+            &repo,
+            &["rev-parse", &format!("refs/dagq/runs/{}", first.id())]
+        ),
+        branch
+    );
+}

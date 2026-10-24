@@ -997,7 +997,10 @@ impl Supervisor<'_> {
     /// commit, else its worktree's HEAD (a container run's from facts of
     /// the end of its last turn, written anew when they are not:
     /// [`crate::application::inherit::container_head`], whose refusal is
-    /// an error), else its branch, is not on main. A run that never got a
+    /// an error; a host run's whose worktree is not registered on its
+    /// branch from that branch in the repository itself, only when it is
+    /// its receipt's commit: [`crate::application::run_git::host_head`]),
+    /// is not on main. A run that never got a
     /// worktree has none; one whose worktree is gone without a reviewed
     /// commit cannot be told.
     fn own_commits(&self, run: &TaskRun) -> Result<bool> {
@@ -1015,7 +1018,11 @@ impl Supervisor<'_> {
             )?
             .to_string(),
             (None, Some(_)) => {
-                crate::application::run_git::head(&*self.repository, run)?.to_string()
+                use crate::application::run_git::{HostHead, head, host_head};
+                match host_head(&*self.repository, &*self.files, run)? {
+                    HostHead::Branch(head) => head.to_string(),
+                    HostHead::Worktree => head(&*self.repository, run)?.to_string(),
+                }
             }
             (None, None)
                 if !self

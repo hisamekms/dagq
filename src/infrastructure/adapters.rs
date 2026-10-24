@@ -1995,6 +1995,25 @@ impl GitRepository {
         Ok(!stdout.trim().is_empty())
     }
 
+    /// The commit of the repository's own `branch`, read at its root and
+    /// never through a worktree's git; `None` when there is none.
+    pub fn branch_head(&self, branch: &str) -> Result<Option<CommitSha>> {
+        let (status, stdout, stderr) = capture(
+            self.command().arg("-C").arg(&self.root).args([
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{branch}^{{commit}}"),
+            ]),
+            Duration::from_secs(30),
+        )?;
+        match status.code() {
+            Some(0) => Ok(Some(object_id(&stdout, "branch")?)),
+            Some(1) => Ok(None),
+            _ => bail!("git rev-parse failed ({status}): {stderr}"),
+        }
+    }
+
     /// Whether the object store has the commit `commit`.
     pub fn has_commit(&self, commit: &str) -> Result<bool> {
         let (status, _, stderr) = capture(
@@ -3481,6 +3500,9 @@ impl Repository for GitRepository {
     }
     fn reachable_commit(&self, commit: &str) -> Result<bool> {
         GitRepository::reachable_commit(self, commit)
+    }
+    fn branch_head(&self, branch: &str) -> Result<Option<CommitSha>> {
+        GitRepository::branch_head(self, branch)
     }
     fn current_branch(&self, worktree: &Path) -> Result<Option<String>> {
         GitRepository::current_branch(self, worktree)

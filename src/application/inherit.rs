@@ -17,7 +17,7 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
 use super::run_container::RunContainers;
-use super::run_git::SessionHead;
+use super::run_git::{HostHead, SessionHead};
 use super::{Repository, RunFiles};
 use crate::domain::{
     AskId, CommitSha, LeaseToken, RunId, Task, TaskId, TaskRun, TaskStatus, actor::ActorRole,
@@ -30,7 +30,10 @@ pub fn run_ref(run: &RunId) -> String {
 
 /// The commit of the run's branch a retry carries over: its validated
 /// commit (the one its review passed), or without one the head of its
-/// worktree when no rebase is stopped half way there; for a run in a
+/// worktree when no rebase is stopped half way there, or its branch's
+/// commit in the repository itself when its worktree is not registered on
+/// its branch ([`super::run_git::host_head`], an error when that is not its
+/// receipt's commit); for a run in a
 /// container, the head its clone's facts say once they are of the end of
 /// its last turn ([`container_head`], an error refusing it). `None` when
 /// the branch holds nothing on top of the run's base. Nothing is written
@@ -48,10 +51,14 @@ pub fn carried_head(
         (None, Some(worktree)) if files.is_dir(worktree) && run.in_container() => {
             Some(container_head(run, files, repository, containers)?)
         }
-        (None, Some(worktree))
-            if files.is_dir(worktree) && !super::run_git::rebase_in_progress(repository, run)? =>
-        {
-            Some(super::run_git::head(repository, run)?)
+        (None, Some(worktree)) if files.is_dir(worktree) => {
+            match super::run_git::host_head(repository, files, run)? {
+                HostHead::Branch(head) => Some(head),
+                HostHead::Worktree if !super::run_git::rebase_in_progress(repository, run)? => {
+                    Some(super::run_git::head(repository, run)?)
+                }
+                HostHead::Worktree => None,
+            }
         }
         _ => None,
     };

@@ -1,0 +1,14 @@
+# The items of task 3351 in the allow list of the time gate of tests/it
+# (the format and the rule are in the header of .config/it-slow-allow.toml).
+
+# 5.5〜5.8s in a stress 5 (2.5s alone): a worker and a recovery job process, and a worktree whose registration the job's script breaks
+[[test]]
+name = "runtime_triage::a_run_whose_worktree_lost_its_admin_dir_carries_its_branchs_receipt_commit_over"
+reason = "B 境界（守る境界）: 実の git で admin dir を消した worktree の run を、実の復旧 job の process の retry_inherit が本体の repository の run の branch から引き継ぎ refs/dagq/runs に残すことを、supervise のループと SQLite の queue で確かめる。登録の壊れ方と receipt の一致の判断は application::run_git の unit test"
+task = 3351
+
+# 5.8s in a stress 5 (2.7s alone): the same, with the worktree's .git naming another worktree's admin dir
+[[test]]
+name = "runtime_triage::a_run_whose_worktree_names_another_runs_admin_dir_carries_its_own_branch_over"
+reason = "B 境界（守る境界）: 実の git で別の branch の worktree の admin dir を名指す .git の run を、実の復旧 job の process の判断で、別の run の HEAD でなく自分の branch の commit を own_commits と引き継ぐ head に読むことを、supervise のループと SQLite の queue で確かめる。判断は application::run_git の unit test"
+task = 3351
