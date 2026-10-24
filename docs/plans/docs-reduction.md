@@ -347,6 +347,104 @@ C は review が差分の触っていない文書の食い違いを差し戻さ�
 - **docs_drift の follow_up**: review は C の後の 6.4 日で docs_drift の follow_up を 352 件（55 / 日）返し、runtime の planner の採用は 111 件（32%）で、51% が重複だった。C は差し戻しを follow_up に置き換えたが、その半分は planner が既にある task と重なると判じたもので、手間は draft の planner に移っている。重複を登録の前に畳むかは別の follow_up にする。
 - **理由の無い差し戻しの出どころを調べる要否**: 要る。`without_reasons` の割合は 20% 前後のまま下がらず、混ざり無し 29.2%・全体 28.0% に上がった（基準 4.0%）。件数も全体で 107 回と基準の 8 倍で、差し戻し / 日の A の前からの増え（+20.94）は、理由なしの +9.06（7.66→16.72 / 日、算術）とドキュメント以外の理由だけの +19.53 の増えから、ドキュメントを含むの -7.66 を引いたもので、理由なしは増えの 2 つの出どころの 1 つ。draft 2616 の材料として、この区間の理由なしの差し戻しを review の種類（AI・プログラム・subagent）と `route` の決め方ごとに分けて調べる。
 
+### C の後の docs_drift の follow_up の重複の内訳（2026-10-24 に読んだ値）
+
+「C の後」の「review が返した docs_drift の follow_up」で `duplicate` で閉じた 179 件を、重複先・文書・時間・draft の planner の手間で分け、登録の前に畳むかを決める。
+
+#### 期間と入力
+
+期間は「C の後」と同じで、C の着地（2353、2026-10-16T14:10:16.350Z）から 6.4 日（2026-10-22T23:46:16.350Z の前）に登録された follow_up。混ざり無しはそのうち 2026-10-17T19:35:33.742Z より前。入力は planner が 2026-10-24 に固定バイナリで保存した次の file（「区分」の dir）で、worker が一回きりの `python3 -I` で数えた（script は repository に置いていない）。
+
+| 入力 | コマンド | file | 頁: 件数 |
+| --- | --- | --- | --- |
+| 登録 | `dagq events --full --kind follow_up_registered --since 2026-10-16T14:10:16.350Z --until 2026-10-22T23:46:16.350Z` | `events-follow-up-2026-10-16T14:10:16.350Z_2026-10-22T23:46:16.350Z-0.json` | 1 頁: 550 |
+| 結末 | `dagq events --full --kind draft_planner_settled --since 2026-10-16T14:10:16.350Z`（2026-10-24T00:01:33.151Z まで） | `events-draft-settled-2026-10-16T14:10:16.350Z_2026-10-24-0.json` | 1 頁: 677 |
+| planner の開始 | `dagq events --full --kind draft_planner_opened --since 2026-10-16T14:10:16.350Z --until 2026-10-24T00:03:00Z` | `events-draft-opened-2026-10-16T14:10:16.350Z_2026-10-24T00:03:00Z-0.json` | 1 頁: 685 |
+| task | `dagq list --all --full --limit 1000`（`--before` に前の頁の `next`） | `tasks-full-2026-10-24-0.json`〜`-3.json` | 4 頁: 3289（最後の頁の `next` は null） |
+| 重複先の履歴 | 重複先ごとに `dagq events --full --task ID --kind task_created --kind task_status_changed --kind run_claimed --kind draft_origin_recorded --kind draft_planner_opened --kind draft_planner_settled --limit 1000` | `dup-targets-2026-10-24/events-task-ID.json` | 49 file、各 1 頁: 最大 15 |
+
+数え方:
+
+- 対象: `follow_up_registered` のうち `payload.from` が `review` かつ `payload.category` が `docs_drift`（352 件、混ざり無し 101 件）。結末はその `payload.task_id` の `draft_planner_settled` の `created_at` と event ID の順で最後のものの `payload.outcome`。352 件の採用 111・`duplicate` 179・`canceled` 62、混ざり無し 101 件の採用 26・`duplicate` 69・`canceled` 6 は「C の後」の値と一致した。
+- 重複先: 最後の `draft_planner_settled` の `payload.duplicate_of`（179 件で 49 task、`origin_kind` は `follow_up` 41・`request` 8）。
+- 重複先の種類: 元の draft の最後の `draft_planner_settled` の `created_at`（閉じた時点）までの重複先の event を古い順にたどり、`task_created` の `payload.status`（無ければ `draft`）、`task_status_changed` の `payload.to`、`run_claimed`（`in_progress`）で決める。`draft` のときは、重複先の `draft_planner_opened`・`draft_planner_settled` の `payload.bundle_key` に元の draft の `bundle_key` があれば「同じ束の draft」、無ければ「別の run の draft」。
+- 同じ run: 重複先が同じ期間の `follow_up_registered` を持ち、その `payload.source_run_id` が元の draft のものと同じもの。同じ run はさらに、重複先の `follow_up_registered` の `payload.from` が `review` で `payload.review_attempt` が元の draft のものより小さい「前の回の review」、等しい「同じ回の review」、`payload.from` の無い「receipt の follow_up」に分ける。
+- 同じ文書: 元の draft の title（`docs_drift: <path> (<節>)`。179 件ともこの形）の path を、重複先の title・description・context・paths に探す。path の全文があれば「同じ path」、file 名だけがあれば「同じ file 名」、どちらも無く重複先の `paths` の glob が path を覆えば「paths が覆うだけ」、どれでもなければ「別の文書」。`docs/` だけの値は、両方の title・description・paths（context を含まない）に出る `docs/…/*.md` の path の一致で判じた。同じ run の重複先は登録の時の title（`follow_up_registered` の `payload.title`）でも path と節を比べた。task の指示どおり `docs/` の path だけで判じると、元の draft の path が `docs/` に無い 91 件（plugin 53・`dagq.toml` 10・`.claude/` 7・`src/` 7・AGENTS.md 6・README.md 4・`scripts/` 3・`.dagq/` 1）が判じられないので、全ての path で判じた値を本文に、`docs/` だけの値を括弧に書く。
+- 時間: 重複先の task の `created_at` − 元の draft の task の `created_at`（元の draft の `created_at` は 179 件とも `follow_up_registered` と 5 秒以内）。負は重複先が先に登録されたこと。
+- planner の手間: 元の draft の最後の `draft_planner_settled` の `payload.planner_id` ごとに、その planner の最初の `draft_planner_opened` から最後の `draft_planner_settled` までの時間（壁時計の時間でトークンではない）と束の大きさ（その planner の `draft_planner_opened` の `payload.members` の和集合。重複を閉じた 89 planner で settled の件数と一致した）。重複の draft の分の時間は planner の時間を束の大きさで等分した和。
+
+#### 重複先の種類（元の draft が閉じた時点の状態）
+
+| 重複先の種類 | 全体（179） | うち同じ run | 混ざり無し（69） |
+| --- | --- | --- | --- |
+| 同じ束の draft | 3（2%） | 3 | 3 |
+| 別の run の draft | 4（2%） | 0 | 0 |
+| `submitted` の task | 15（8%） | 15 | 11 |
+| `ready` の task | 126（70%） | 57 | 52 |
+| `in_progress` の task | 9（5%） | 0 | 1 |
+| `completed` の task | 22（12%） | 0 | 2 |
+| 計 | 179 | 75（42%） | 69（うち同じ run 38） |
+
+- 重複先は 2164 が 45 件・2165 が 20 件（合わせて 65 件、36%）で、どちらも 2026-10-08 に人の依頼で作った cmux の記述を揃える広い task（`ready` のまま 10 日余り待ち、どちらも 2026-10-19 に着地）。3 件以上の重複を受けた重複先は 19 task で、重複の 142 件（79%）を受けた。
+- 同じ run の 75 件は、重複先の出どころで 3 つに分かれる（重複先の登録の時の title で path を比べた）。
+  - 前の回の review: 58 件（32%、混ざり無し 25）。前の回の review が返した draft（閉じた時点で、draft の planner が採用して `ready` 57、まだ同じ束の draft 1）に、次の回の review が同じ食い違いを返したもの。登録の間は中央値 26 分（4〜598 分）。同じ path で節の書き方だけが違うものが 43 件（例: 2585 の `[toolchains.rust]` に、次の回が `[toolchains.rust] のpathsの説明コメント` など 5 通りの書き方で返した）、別の path が 15 件（同じ食い違いを別の文書に見つけた）。
+  - 同じ回の review: 16 件（9%、混ざり無し 13）。1 回の review の verdict が同じ食い違いを 2 つの follow_up で返したもの（例: 2542→2540 は双方 `review_attempt` 1）。全体の review どうしが 9 件、agent の job（`receipt-evidence` 4・`config-rules`・`security`・`builtin:security` 各 1）と全体の review が 7 件。同じ path で節が違うものが 5 件、別の path が 11 件。重複先は閉じた時点で `submitted` 14・同じ束の draft 2 で、14 件は重複先と同じ planner が 1 つの束で採用と重複を決めた。
+  - receipt の follow_up: 1 件（2686→2687）。同じ run の worker の receipt の follow_up と review の follow_up が同じ食い違いを指したもの。
+  - 同じ run の中は runtime が文書の path と節の組で 1 つにする（ADR-t2352-1 決定3）が、review の書く節の文字列が回ごとにも job ごとにも変わるので組が一致しない。
+- 別の run の 104 件は、元の draft が閉じた時点で重複先が `ready`（69）・`completed`（22）・`in_progress`（9）の既にある task か、別の run の draft（4）で、65 件は 2164・2165。`completed` の 22 件は、重複先が着地した後に別の run の review が同じ記述を古いと返したもの（17 件が 2164）。
+- 2026-10-24 の今の重複先の状態は `completed` 143・`ready` 36（参考）。
+
+#### 重複先と同じ文書の割合
+
+| 同じ文書 | 全体（179） | `ready` | `completed` | `submitted` | `in_progress` | draft（同じ束・別の run） |
+| --- | --- | --- | --- | --- | --- | --- |
+| 同じ path | 97（54%）（`docs/` だけ: 58） | 72 | 5 | 13 | 4 | 3 |
+| 同じ file 名 | 70（39%）（`docs/` だけ: 23） | 51 | 13 | 2 | 4 | 0 |
+| 重複先の `paths` が覆うだけ | 11（6%）（`docs/` だけ: 7） | 2 | 4 | 0 | 1 | 4 |
+| 別の文書 | 1（1%）（`docs/` だけ: 0） | 1 | 0 | 0 | 0 | 0 |
+| `docs/` だけでは判じられない | — （`docs/` だけ: 91） | | | | | |
+
+同じ path か同じ file 名の重複先は 167 件（93%）で、重複のほとんどは同じ文書の食い違いを既にある task が持っているもの。同じ節かは、重複先の多くが採用で title を書き直した広い task なので数えない（同じ run の 75 件だけは上のとおり登録の時の節で比べた）。元の draft の (path, 節) は 179 件で 152 通り、2 回以上出た組は 21 組・48 件。
+
+#### 登録から重複先の登録までの時間
+
+| 重複先の登録（元の draft の登録との差） | 全体 | 同じ run | 別の run |
+| --- | --- | --- | --- |
+| 7 日より前 | 71（40%） | 0 | 71（2164: 45・2165: 20・2280: 4・2326: 2） |
+| 1〜7 日前 | 12（7%） | 0 | 12 |
+| 1 時間〜1 日前 | 39（22%） | 19 | 20 |
+| 1 時間以内の前 | 56（31%） | 55 | 1 |
+| 1 時間以内の後 | 1（1%） | 1 | 0 |
+| 1 時間より後 | 0 | 0 | 0 |
+
+中央値は −0.42 日（四分位 −9.71 日・−0.02 日、最小 −11.38 日）。同じ run の重複のうち前の回の review のものは、前の回の数十分後（中央値 26 分、最大 598 分）の次の回の review から（1 時間以内の前 39・1 時間〜1 日前 19）、同じ回の review の 16 件は同じ時刻（1 時間以内の前）、receipt の 1 件は 1 時間以内の後。別の run の重複 104 件は、83 件（80%）が 1 日以上前（7 日より前 71・1〜7 日前 12）に登録された重複先に向かい、残る 21 件は 1 時間〜1 日前 20・1 時間以内の前 1。
+
+#### draft の planner の手間
+
+| 値 | 値 |
+| --- | --- |
+| review の docs_drift の draft を閉じた planner | 191 |
+| うち重複を 1 件以上閉じた planner（/ 日） | 89（13.9） |
+| うち束の全部が重複の planner（/ 日） | 64（10.0） |
+| 重複を閉じた planner の束の大きさ（中央値・平均・最大） | 2・2.36・16 |
+| 重複を閉じた planner の時間（中央値・合計） | 105 秒・3.3 時間 |
+| 束の全部が重複の planner の時間（中央値・四分位・合計） | 85 秒・63〜123 秒・1.9 時間 |
+| 重複の draft の分の時間（等分の和・1 件あたり） | 2.7 時間・55 秒 |
+| うち同じ run の 75 件の分（束の全部が同じ run の重複の planner） | 1.4 時間（27 planner・0.8 時間） |
+| うち同じ run の前の回の review の 58 件の分（束の全部がそれの planner） | 1.02 時間（27 planner・0.80 時間） |
+| うち同じ run の同じ回の review の 16 件の分（同） | 0.35 時間（0 planner） |
+| うち同じ run の receipt の 1 件の分（同） | 0.03 時間（0 planner） |
+| 参考: 同じ入力の全ての draft の planner（2026-10-24 まで、origin を問わない） | 393 planner・20.3 時間・draft 1 件あたり 114 秒 |
+
+重複を閉じた planner はどれも 1 回目（`attempt` 1）で決めた。重複の手間は 6.4 日で planner の時間 2.7 時間（draft の planner の時間の約 13%）と、束の全部が重複の planner の起動 64 回で、runtime の planner の上限（`runtime_planners`）を revise・finding・計画の依頼の planner と分け合う。
+
+#### 判断
+
+- **別の run の重複（104 件、58%）は畳まず、今のまま draft の planner が閉じる**: 重複先の 83 件（80%）は登録の 1 日以上前に登録された task か draft（閉じた時点で `ready` 52・`completed` 21・`in_progress` 6・別の run の draft 4）で、65 件は着地した 2164・2165 の 2 task に集まった一過性のもの。runtime が別の run の同じ文書・節の draft や task に寄せるのは、重複の判定を draft の planner に置く ADR-0063 から外れる。ADR-0063 は決定7で follow_up の planner が候補を `related` で取り出して LLM で重複を判じ、決定5の形（`cancel --duplicate-of`）で記録して閉じると決め、[Draft planners](../design/supervisor-lifecycle/draft-planners.md) はそれを draft の planner の役目とする。登録の前に runtime が機械の鍵で別の run の draft や task に寄せると、cancel の記録は要らなくなるが、決定7の LLM の判断を通らずに重複を決めるので、選ぶなら ADR を書く task が要る。同じ文書の別の節や同じ節の別の食い違いを機械の鍵で落とす恐れもあり、得るのは 6.4 日で約 1.3 時間（重複の draft の分の時間 2.7 時間から同じ run の分 1.4 時間を引いた算術、1 件あたり約 45 秒）の planner の時間だけ。review の材料に差分が触った文書の開いている docs_drift の draft と task を載せる案は、全ての review の prompt を大きくして、planner が `related` で引いている突き合わせを review に移すだけで、手間の総量は減らない。
+- **同じ run の前の回の review の重複（58 件、32%）は登録の前に畳む**: 同じ run の中で同じ食い違いを重ねて作らないことは既に runtime の受け持ち（ADR-t2352-1 決定3・4）で、今の (path, 節) の鍵が review の節の書き方の揺れで外れている。runtime が review の材料にその run の前の回の review が返した follow_up（path・節・理由）を載せ、review がそれと同じ食い違いを返さない（返すなら同じ path と節の文字列で返す）ようにする。重複を runtime の機械の鍵で決めず review（LLM）の判断に置き、別の run の task との重複はこれまでどおり draft の planner が判じて決定5の形で閉じるので、ADR-0063 決定5・7 と食い違わない。ADR-t947-3 決定2 は重複を follow_up の種類のコードに入れないこと（重複は結末として記録する）で、この案は種類のコードも結末の記録も変えないので当たらない。減る見込みは重複の 32%（58 件）・planner の時間 1.02 時間 / 6.4 日・束の全部が重複の planner の起動 27 回で、材料は run ごとの数件で済む。
+- **同じ run の同じ回の review の重複（16 件）と receipt の follow_up との重複（1 件）は畳まず、今のまま draft の planner が閉じる**: 前の回の follow_up を材料に載せる案では減らない（同じ回の job は並んで走り互いの follow_up を見ず、receipt の follow_up は review の follow_up の材料に無い）。どれも重複先と同じ束に入り、16 件中 14 件と receipt の 1 件は重複先と同じ planner が 1 つの束で採用と重複を決めたので、束の全部が重複の planner は 0 回で、手間は 6.4 日で 0.38 時間。同じ回の job の follow_up を runtime が path だけで 1 つにするのは、同じ文書の別の食い違いを落としうるうえ ADR-t2352-1 決定3 の (path, 節) の鍵を変えるので、この手間に見合わない。
+- 実装は follow_up にする（receipt の follow_up、category `improvement`）。効果は着地の後に同じ数え方で、同じ run の前の回の review の重複の件数を数え直して確かめる。
+
 ## 区分
 
 - SSOT: queue の EventStore（run の event）。M7 は git の履歴も会話記録も読まない。
