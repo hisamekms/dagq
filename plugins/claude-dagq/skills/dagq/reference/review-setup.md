@@ -12,6 +12,7 @@ A run's review takes the built-in agents and programs (`builtin:<name>`) from th
 
 - The person writes and commits the `[toolchains.<name>]` declaration; `setup-review` (below) never writes it or the `--verify` commands, and writes the review programs that fit for the person to commit.
 - The verification commands are for a task's `--verify` when it is registered, not a key of `dagq.toml`.
+- The container's settings (`image`, `registries`, `worker_cache`, and their `[container.image]`, `[egress]` and `[container.worker_cache]` tables in `config`) are for running workers in containers: the person writes the proposed Containerfile at its path and the tables, and keeps a registry host only for the reason its comment gives. Until then the container runs the base image alone, reaches no registry and mounts no worker cache; `setup-review` never writes them.
 - An `error` there means `dagq.toml` cannot be read or names a profile dagq does not have: fix that first.
 - The proposals assume the tool runs at the repository's root: where the profile applies to a directory below it, adapt the commands and scripts to it.
 

@@ -196,7 +196,7 @@ runのworktreeのpathにcloneを記録したrunがcontainerのrunで（`TaskRun:
 ## workerの実行
 
 cloneで働くrunの各turn（最初のturn・revise・答え・resume）は、hostのprocessの代わりにdagq専用のmachineのcontainerで動く（[ADR-t2113-3](../adr/2026-10-08-t2113-3-only-workers-resume-and-integrate-verification-run-in-containers.md)決定1、[ADR-t2114-2](../adr/2026-10-08-t2114-2-broker-swaps-the-run-token-for-the-claude-credential.md)決定1）。
-session wrapperはhostの制御側に残り、turnの出力・receipt・askをrun dirから今と同じく読み、`run log`で追える。
+session wrapperはhostの制御側に残り、turnの出力・receipt・askをrun dirから読み、`run log`で追える。
 executorは`application::run_container::PodmanActorExecutor`、設定の読み取り・tokenの受け渡し・podmanは`RunContainers`のport、machine・image・relay・buildの出力の準備はhost運用が実行と着地に貸す`application::podman_machine::RunMachine`のport、`podman run`の引数・token・env・transcriptの置き場の判断は`domain::run_container`、containerの中の処理は`infrastructure::container_turn`（`dagq relay turn`）が持つ。
 
 - 準備: 各turnの前に、machineを動かしてrunを使う者にし（`release`は呼ばない）、imageをbuildし、runのrelayを開き、`dagq.toml`が名指すvolumeを作り、`[run.env]`と`host.toml`のcontainerの上限を読む。
@@ -207,8 +207,8 @@ executorは`application::run_container::PodmanActorExecutor`、設定の読み�
   上限の既定と`host.toml`の`[container]`での上書きは`ContainerLimits`のdoc commentが持つ。
   mountはrunのclone・run dir・runのsocket・`dagq.toml`が名指すvolumeだけで、着地用のworktreeとverificationのcloneはmountしない（reviewの間も残るworkerのcontainerに、制御側が着地と検証に使う物を見せない）。
   podmanのcwdはrun dirで、制御側はcloneでプログラムを起動しない（上の「git」）。
-- buildの出力とworkerのcache: `dagq.toml`の`[container.build_output]`が名指すdirにrunごとのvolumeを、`[container.worker_cache]`が挙げるdirごとにqueueのvolumeをmountする（綴りと意味と既定の無しは`run_env`の各表のdoc comment）。
-  runtimeは言語の道具を知らず、projectが`[run.env]`で道具をそこに向ける。
+- buildの出力とworkerのcache: `dagq.toml`の`[container.build_output]`が名指すdirにrunごとのvolumeを、`[container.worker_cache]`が挙げるdirごとにqueueのvolumeをmountする（綴りと意味は`run_env`の各表のdoc comment、案は[profile](toolchain-profiles.md#推奨の設定)）。
+  runtimeは道具を知らず、projectが`[run.env]`で向ける。
   workerのcacheは信頼せず、同じqueueのworker・resumeだけが共有する（ADR-t2257-1決定5）。
 - sccache: containerの中のserverを使う（[Run environment](supervisor-lifecycle/run-environment.md#sccacheのserver)）。
 - containerの中: `dagq relay turn`がagentの前後の手順を持ち（順は`infrastructure::container_turn`のdoc comment）、agentが終われば結果に依らず、run dirの事実のファイルを上の「git」の形で書く。

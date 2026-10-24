@@ -60,7 +60,8 @@ enum Command {
     /// Initialize the queue, creating its directory if needed. An existing queue is checked, never migrated.
     /// Its output recommends the review's settings (`recommended`): the built-ins on and off by
     /// default, and `dagq setup-review` to write the project's rules for them; the toolchain
-    /// profiles declared or suggested (`toolchains`); and the templates of [[telemetry.commands]]
+    /// profiles declared or suggested and their proposals, the container's image, registries and
+    /// worker cache among them (`toolchains`); and the templates of [[telemetry.commands]]
     /// for the tools its files show that no profile knows, npm/pnpm, go, pytest, gradle and make
     /// (`telemetry_commands`), never cargo, whose rules the Rust profile holds. It writes no
     /// dagq.toml and starts no agent.

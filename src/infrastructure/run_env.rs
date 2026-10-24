@@ -3703,6 +3703,43 @@ mod tests {
         assert_eq!(read.toolchains.view()["declared"][0]["profile"], "fake");
     }
 
+    /// The container's settings the profiles recommend are written in the
+    /// tables and keys the container runtime reads: the proposal, once
+    /// written, reads as the image, the registries and the worker cache it
+    /// names.
+    #[test]
+    fn the_profiles_container_proposals_read_as_the_container_settings() {
+        use crate::domain::toolchain::{BUILTIN, recommend::propose, rust::RECOMMENDATION};
+        let view = propose(&BUILTIN, Ok(Vec::new()), || {
+            Ok(vec!["Cargo.toml".to_owned()])
+        })
+        .view();
+        let config = parse_config(view["config"].as_str().unwrap()).unwrap();
+        let rust = RECOMMENDATION;
+        assert_eq!(
+            config.container_image,
+            Some(ProjectImage {
+                containerfile: crate::domain::toolchain::recommend::CONTAINERFILE.to_owned(),
+                inputs: rust
+                    .image
+                    .unwrap()
+                    .inputs
+                    .iter()
+                    .map(|i| (*i).to_owned())
+                    .collect(),
+            })
+        );
+        assert_eq!(
+            config
+                .egress_registries
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            rust.registries.iter().map(|r| r.host).collect::<Vec<_>>()
+        );
+        assert_eq!(config.container_worker_cache, rust.worker_cache);
+    }
+
     /// `[toolchains.<name>]` declares a profile and the paths it applies
     /// to, one table per declaration in file order; a mistake in one is
     /// refused with its line, and a profile the registry does not have

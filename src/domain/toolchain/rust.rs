@@ -97,8 +97,8 @@
 //! fake) is read alone: only the items under a test's attribute in it are
 //! a test's, so a change of its helpers alone changes no test function.
 use super::{
-    BuildOutput, JunitTestName, Recommendation, RecommendedProgram, TestLines, ToolCodeClass,
-    ToolHostClass, ToolProcess, ToolchainProfile,
+    BuildOutput, JunitTestName, Recommendation, RecommendedHost, RecommendedImage,
+    RecommendedProgram, TestLines, ToolCodeClass, ToolHostClass, ToolProcess, ToolchainProfile,
 };
 use crate::domain::command_rules::CommandRule;
 use crate::domain::command_shape::{Runs, SubcommandList, VariableList};
@@ -576,7 +576,22 @@ impl ToolchainProfile for Rust {
 /// denied as errors and the tests by nextest (whose output the profile
 /// reads, flaky retries included) as a task's verification; and the
 /// formatting as a review program, which builds nothing, so it returns a
-/// run before the review's agents start.
+/// run before the review's agents start. For the container: an image with
+/// the toolchain `rust-toolchain.toml` names (rustup installs it read-only
+/// for every user, and cargo keeps its downloads under the user's own
+/// `CARGO_HOME`), the hosts cargo fetches the dependencies of crates.io
+/// from, and that whole `CARGO_HOME` as the worker cache, so a worker
+/// does not fetch them again. The whole of it, not its `registry` and
+/// `git` alone: cargo's lock of its downloads (`.package-cache`) is at
+/// the root of `CARGO_HOME`, and on the container's read-only root cargo
+/// goes on without it, so workers sharing the downloads would unpack the
+/// same crate at once. The image installs what each verification command
+/// runs besides cargo (the rustfmt and clippy components and cargo-nextest,
+/// at a pinned version) and its build calls each of them, so an image
+/// that cannot run a recommended verification fails to build. It assumes
+/// the repository pins its toolchain in a `rust-toolchain.toml` at its
+/// root: without one its build fails, so the person adds one or adapts the
+/// lines.
 pub const RECOMMENDATION: Recommendation = Recommendation {
     markers: &["Cargo.toml"],
     verify: &[
@@ -594,7 +609,52 @@ pub const RECOMMENDATION: Recommendation = Recommendation {
                cd \"$root\" || exit 2\n\
                exec cargo fmt --all --check\n",
     }],
+    image: Some(RecommendedImage {
+        inputs: &["rust-toolchain.toml"],
+        lines: "USER root\n\
+                ENV RUSTUP_HOME=/usr/local/rustup \\\n    CARGO_HOME=/usr/local/cargo \\\n    PATH=/usr/local/cargo/bin:$PATH\n\
+                ARG NEXTEST_VERSION=0.9.146\n\
+                COPY rust-toolchain.toml /usr/local/share/dagq-toolchain/rust-toolchain.toml\n\
+                RUN set -eu; \\\n\
+                \x20   apt-get update; \\\n\
+                \x20   apt-get install -y --no-install-recommends build-essential curl pkg-config; \\\n\
+                \x20   rm -rf /var/lib/apt/lists/*; \\\n\
+                \x20   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \\\n\
+                \x20       | sh -s -- -y --no-modify-path --profile minimal --default-toolchain none; \\\n\
+                \x20   cd /usr/local/share/dagq-toolchain; \\\n\
+                \x20   rustup toolchain install; \\\n\
+                \x20   rustup default \"$(rustup show active-toolchain | cut -d' ' -f1)\"; \\\n\
+                \x20   rustup component add rustfmt clippy; \\\n\
+                \x20   case \"$(uname -m)\" in \\\n\
+                \x20       x86_64) nextest=linux ;; \\\n\
+                \x20       aarch64) nextest=linux-arm ;; \\\n\
+                \x20       *) echo \"no cargo-nextest for $(uname -m)\" >&2; exit 1 ;; \\\n\
+                \x20   esac; \\\n\
+                \x20   curl --proto '=https' --tlsv1.2 -LsSf \"https://get.nexte.st/${NEXTEST_VERSION}/${nextest}\" \\\n\
+                \x20       | tar zxf - -C \"$CARGO_HOME/bin\"; \\\n\
+                \x20   chmod -R a+rX \"$RUSTUP_HOME\" \"$CARGO_HOME\"; \\\n\
+                \x20   cargo fmt --version; \\\n\
+                \x20   cargo clippy --version; \\\n\
+                \x20   cargo nextest --version\n\
+                ENV CARGO_HOME=/home/dagq/.cargo\n\
+                USER dagq\n",
+    }),
+    registries: &[
+        RecommendedHost {
+            host: "index.crates.io",
+            why: "the sparse index cargo reads the versions of crates.io's crates from",
+        },
+        RecommendedHost {
+            host: "static.crates.io",
+            why: "where cargo downloads the crates of crates.io",
+        },
+    ],
+    worker_cache: &[CARGO_HOME],
 };
+
+/// Where the recommended image points cargo's own files (its downloads and
+/// their lock) for the container's user, which the worker cache mounts.
+pub const CARGO_HOME: &str = "/home/dagq/.cargo";
 
 /// The program and arguments that print the host's Rust toolchain.
 pub const RUSTC_VERSION: (&str, &[&str]) = ("rustc", &["-vV"]);

@@ -9,14 +9,16 @@
 //! a line of which that starts with `TEST ` is a test's; which recommends
 //! itself where a `fake.build` is, which classes `fakebuild check` as
 //! `fake_check`, `fakebuild check` as the verification,
-//! and two review programs, `fake-lint` under `.dagq/review/programs/` and
-//! `fake-outside` outside it, which `setup-review` may not write. It
+//! two review programs, `fake-lint` under `.dagq/review/programs/` and
+//! `fake-outside` outside it, which `setup-review` may not write, an
+//! image's lines that copy `fake.build`, the registry
+//! `registry.fake.example` and the worker cache `/home/dagq/.fake`. It
 //! is registered beside the built-in ones in [`REGISTRY`], and nothing
 //! else of the runtime knows it (ADR-t2268-1 decision 8).
 use super::{
-    BuildOutput, JunitTestName, ProfileRegistry, Recommendation, RecommendedProgram, TestLines,
-    ToolCodeClass, ToolHostClass, ToolProcess, ToolchainDeclaration, ToolchainProfile, Toolchains,
-    rust,
+    BuildOutput, JunitTestName, ProfileRegistry, Recommendation, RecommendedHost, RecommendedImage,
+    RecommendedProgram, TestLines, ToolCodeClass, ToolHostClass, ToolProcess, ToolchainDeclaration,
+    ToolchainProfile, Toolchains, rust,
 };
 
 pub static FAKE: Fake = Fake;
@@ -128,6 +130,15 @@ impl ToolchainProfile for Fake {
                     body: "#!/bin/sh\nexit 0\n",
                 },
             ],
+            image: Some(RecommendedImage {
+                inputs: &["fake.build"],
+                lines: "COPY fake.build /opt/fake.build\n",
+            }),
+            registries: &[RecommendedHost {
+                host: "registry.fake.example",
+                why: "where fakebuild fetches its packages",
+            }],
+            worker_cache: &["/home/dagq/.fake"],
         }
     }
 

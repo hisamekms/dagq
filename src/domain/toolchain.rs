@@ -37,7 +37,7 @@ use super::{
 pub mod recommend;
 pub mod rust;
 
-pub use recommend::{Recommendation, RecommendedProgram};
+pub use recommend::{Recommendation, RecommendedHost, RecommendedImage, RecommendedProgram};
 
 #[cfg(test)]
 pub(crate) mod fake;

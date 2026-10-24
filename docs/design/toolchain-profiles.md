@@ -25,8 +25,7 @@ related:
 言語・道具ごとの知識は、runtimeに組み込んだtoolchainのprofileの実装だけが持ち、projectは`dagq.toml`で使うprofileを宣言する（[ADR-t2268-1](../adr/2026-10-12-t2268-1-toolchain-knowledge-behind-declared-profiles.md)）。
 runtimeのほかのコードは、宣言したprofileをportを通して呼ぶだけで、道具の出力の印やenvの名前を持たない。
 
-**実装状況**: portと登録とRustのprofile、`[toolchains.<name>]`の宣言、検証の出力の読み方（失敗の分類・落ちたtestとflakyのtestの抜き出し・flakyのやり直しのenv）、CIの見張りのJUnitのtestの名前、hostの負荷のprocessの種類、hostのRustのtoolchainの記録とKPIの`toolchain`の軸、landing recheckと自動更新のbuildの出力の置き場と掃除、runのworktreeのビルド成果物の掃除、fileの中のtestの行の見分け、推奨の設定（宣言・検証のコマンドの組み合わせ・reviewのプログラム）、計測のコマンドの分類の既定の規則はある。
-containerの材料・registryのhost・workerのcacheのdirの推奨はまだportに無く、今の場所は[Source repository](supervisor-lifecycle/source-repository.md)の「言語・道具の知識の今の場所」にある。
+**実装状況**: portと登録とRustのprofile、`[toolchains.<name>]`の宣言、検証の出力の読み方（失敗の分類・落ちたtestとflakyのtestの抜き出し・flakyのやり直しのenv）、CIの見張りのJUnitのtestの名前、hostの負荷のprocessの種類、hostのRustのtoolchainの記録とKPIの`toolchain`の軸、landing recheckと自動更新のbuildの出力の置き場と掃除、runのworktreeのビルド成果物の掃除、fileの中のtestの行の見分け、推奨の設定（宣言・検証のコマンドの組み合わせ・reviewのプログラム・containerの材料・registryのhost・workerのcacheのdir）、計測のコマンドの分類の既定の規則はある。
 
 ## portの責務
 
@@ -102,17 +101,22 @@ containerの材料・registryのhost・workerのcacheのdirの推奨はまだpor
 ## 推奨の設定
 
 - profileは推奨の設定を`ToolchainProfile::recommendation`で返す（`domain::toolchain::recommend`、ADR-t2268-1決定7）。
-  種類は、宣言を推測する印のfileの名前、taskの`--verify`に渡す検証のコマンドの組み合わせ、reviewのプログラム（`[review.programs.<name>]`のtableとscriptの中身）である。
+  種類は、宣言を推測する印のfileの名前、taskの`--verify`に渡す検証のコマンドの組み合わせ、reviewのプログラム（`[review.programs.<name>]`のtableとscriptの中身）、containerの設定（projectのimageのContainerfileの行と入力のfile、registryのhostとその理由、workerのcacheのdir）である。
+  containerの設定は[Container runtime](container-runtime.md)が読む`[container.image]`・`[egress]`・`[container.worker_cache]`の形の案にし、複数のprofileの分は1つのContainerfileと各表に重ねずにまとめる。
+  imageの案は、推奨の検証のコマンドが呼ぶ道具を入れ、buildの中でそれぞれを呼んで確かめるので、案のimageで推奨の検証が流せないときはbuildが落ちる。
+  imageの案は入力のfileがrepositoryにある前提で、無いときに合わせて変えるのは書く人である（推奨はfileの有無を見ない）。
+  workerのcacheの案は、道具が共有のdataを守るlockのfileを含むdirにする。
+  containerのroot filesystemは読み取り専用で、lockだけがその外に残ると道具はlockなしで進み、同じqueueのworkerが同じdataを同時に書く。
   値はその実装の定義のそばに置く。
 - 推奨はruntimeの既定にしない。
-  `dagq.toml`に書かれるまで、どのprofileも働かず、reviewのプログラムも無い（ADR-t2257-1決定1・3）。
+  `dagq.toml`に書かれるまで、どのprofileも働かず、reviewのプログラムも無く、imageはbaseだけ・registryもworkerのcacheも無い（ADR-t2257-1決定1・3）。
 - 案にするprofileは、`dagq.toml`の宣言があればそれ、無ければrepositoryのfileの推測である（`recommend::propose`）。
   推測は印のfileがrootにあれば全体、下にだけあればそのdirごとの`<dir>/**`をpathsにし、宣言の案に使うだけで有効にしない。
   宣言が読めない・組み込みに無いprofileを名指す・fileの一覧が取れないときは、案を出さずにその誤りを出す。
-- `dagq init`はmain checkoutの作業ファイルの`dagq.toml`と作業ツリーのfileから案を作り、出力の`recommended.toolchains`に宣言の案・`--verify`・reviewのプログラム・それらを並べた`dagq.toml`の案の文を出すだけで、`dagq.toml`を書かない。
+- `dagq init`はmain checkoutの作業ファイルの`dagq.toml`と作業ツリーのfileから案を作り、出力の`recommended.toolchains`に宣言の案・`--verify`・reviewのプログラム・containerの設定とContainerfileの案・それらを並べた`dagq.toml`の案の文を出すだけで、`dagq.toml`もContainerfileも書かない。
 - `dagq setup-review`はHEADのcommitの`dagq.toml`とfileから案を作る。
   jobに渡すのは、そのコマンドが書いてよい範囲（`.dagq/review/programs/`の下のscript）に入るreviewのプログラムだけで、範囲の外のscriptの推奨は渡さず案内にだけ出す（`RecommendedProgram::within_setup`）。
-  宣言の案と`--verify`は、宣言がreviewの外のtableで、`--verify`が`dagq.toml`のkeyでなくtaskの登録の値なので、出力の案内にだけ出す。
+  宣言の案とcontainerの設定はreviewの外のtableで、`--verify`は`dagq.toml`のkeyでなくtaskの登録の値なので、どれもjobに渡さず出力の案内にだけ出す。
   生成の後の変更の範囲の検査は推奨に依らず同じで、推奨が書く範囲を広げない（[setup-review](supervisor-lifecycle/setup-review.md#境界と不変条件)）。
 
 ## 新しいprofileの足し方

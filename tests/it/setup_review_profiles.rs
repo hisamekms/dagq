@@ -1,9 +1,11 @@
 //! What the toolchain profiles recommend (ADR-t2268-1 decision 7) in
 //! `dagq init` and `dagq setup-review`: the profiles the repository
 //! declares, or its files suggest, propose their declaration, their
-//! verification commands and their review programs; `setup-review` gives
-//! its agent only the programs it may write, and writes them only at a
-//! person's approval; nothing proposed works until `dagq.toml` has it. A
+//! verification commands, their review programs and the container's
+//! settings (the project image, the registries, the worker cache);
+//! `setup-review` gives its agent only the programs it may write, and
+//! writes them only at a person's approval; nothing proposed works until
+//! `dagq.toml` has it. A
 //! profile made up in `tests/common` and registered beside the built-in
 //! one gets there with no other code.
 
@@ -14,7 +16,9 @@ use crate::common::{
 };
 
 use dagq::domain::toolchain::{BUILTIN, rust::RECOMMENDATION};
-use dagq::infrastructure::run_env::{load_toolchains, parse_config};
+use dagq::infrastructure::run_env::{
+    load_egress_registries, load_toolchains, load_worker_cache_dirs, parse_config,
+};
 use serde_json::{Value, json};
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, time::Duration};
 
@@ -29,8 +33,8 @@ fn commit(repo: &Path, files: &[(&str, &str)]) {
     git(repo, &["commit", "-q", "-m", "files"]);
 }
 
-/// Neither a profile nor a review program works while `dagq.toml` does not
-/// have it, whatever was recommended.
+/// Neither a profile, a review program nor a setting of the container
+/// works while `dagq.toml` does not have it, whatever was recommended.
 fn nothing_works(repo: &Path) {
     let config = parse_config(&fs::read_to_string(repo.join("dagq.toml")).unwrap()).unwrap();
     assert!(config.toolchains.is_empty());
@@ -39,6 +43,18 @@ fn nothing_works(repo: &Path) {
         load_toolchains(repo, &BUILTIN).unwrap().profiles().count(),
         0
     );
+    no_container_settings(repo);
+}
+
+/// No project image, no registry and no worker cache while `dagq.toml`
+/// does not have them.
+fn no_container_settings(repo: &Path) {
+    let config = parse_config(&fs::read_to_string(repo.join("dagq.toml")).unwrap()).unwrap();
+    assert_eq!(config.container_image, None);
+    assert!(config.egress_registries.is_empty());
+    assert!(config.container_worker_cache.is_empty());
+    assert!(load_egress_registries(repo).unwrap().is_empty());
+    assert!(load_worker_cache_dirs(repo).unwrap().is_empty());
 }
 
 /// A fake `claude` that keeps its prompt (its standard input) beside the
@@ -99,6 +115,28 @@ fn init_and_setup_review_propose_the_rust_profiles_settings_and_write_only_what_
     assert_eq!(toolchains["programs"][0]["setup_review"], true);
     let config = toolchains["config"].as_str().unwrap();
     assert!(config.contains("[toolchains.rust]") && config.contains(&program.table()));
+    // The container's settings, in the tables the container runtime reads.
+    let image = RECOMMENDATION.image.unwrap();
+    assert_eq!(
+        toolchains["image"]["containerfile"],
+        ".dagq/container/Containerfile"
+    );
+    assert!(
+        toolchains["image"]["body"]
+            .as_str()
+            .unwrap()
+            .ends_with(image.lines)
+    );
+    let written = parse_config(config).unwrap();
+    assert_eq!(written.container_image.unwrap().inputs, image.inputs);
+    let hosts: Vec<String> = written
+        .egress_registries
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(hosts, ["index.crates.io", "static.crates.io"]);
+    assert_eq!(written.container_worker_cache, RECOMMENDATION.worker_cache);
+    assert!(!fixture.repo.join(".dagq/container").exists());
     assert_eq!(
         fs::read_to_string(fixture.repo.join("dagq.toml")).unwrap(),
         CONFIG
@@ -119,7 +157,14 @@ fn init_and_setup_review_propose_the_rust_profiles_settings_and_write_only_what_
     assert!(prompt.contains(program.body));
     assert!(!prompt.contains("cargo nextest run"), "{prompt}");
     assert!(!prompt.contains("[toolchains."), "{prompt}");
+    for setting in ["[container.", "[egress]", "crates.io", "/home/dagq/.cargo"] {
+        assert!(!prompt.contains(setting), "{setting}: {prompt}");
+    }
     assert_eq!(shown["toolchains"]["from"], "guessed", "{shown}");
+    assert_eq!(
+        shown["toolchains"]["worker_cache"],
+        json!(RECOMMENDATION.worker_cache)
+    );
     assert_eq!(
         shown["toolchains"]["verify"][0]["commands"],
         json!(RECOMMENDATION.verify)
@@ -132,8 +177,11 @@ fn init_and_setup_review_propose_the_rust_profiles_settings_and_write_only_what_
     assert_eq!(applied["approved"], true, "{applied}");
     let written = fs::read_to_string(fixture.repo.join("dagq.toml")).unwrap();
     assert!(written.contains(&program.table()), "{written}");
-    // The declaration is the person's to write: still none.
+    // The declaration and the container's settings are the person's to
+    // write: still none.
     assert!(!written.contains("[toolchains."));
+    assert!(!written.contains("[egress]") && !written.contains("[container."));
+    no_container_settings(&fixture.repo);
     assert_eq!(
         fs::read_to_string(fixture.repo.join(program.script)).unwrap(),
         program.body
@@ -178,6 +226,18 @@ fn a_made_up_profiles_recommendations_reach_init_and_the_generation_within_its_b
     assert_eq!(toolchains["programs"][0]["setup_review"], true);
     assert_eq!(toolchains["programs"][1]["name"], "made-outside");
     assert_eq!(toolchains["programs"][1]["setup_review"], false);
+    assert_eq!(toolchains["image"]["inputs"], json!(["tool/made.build"]));
+    assert_eq!(
+        toolchains["registries"],
+        json!([{"host": "registry.made.example:8443", "why": "where madebuild fetches its packages"}])
+    );
+    assert_eq!(toolchains["worker_cache"], json!(["/home/dagq/.made"]));
+    let config = parse_config(toolchains["config"].as_str().unwrap()).unwrap();
+    assert_eq!(config.container_worker_cache, ["/home/dagq/.made"]);
+    assert_eq!(
+        config.egress_registries[0].to_string(),
+        "registry.made.example:8443"
+    );
     // The built-in profiles alone know nothing of it.
     let builtin = dagq::compose::init_recommended(&fixture.repo, &BUILTIN);
     assert_eq!(builtin["toolchains"]["from"], Value::Null, "{builtin}");
@@ -208,6 +268,17 @@ fn a_made_up_profiles_recommendations_reach_init_and_the_generation_within_its_b
     assert!(prompt.contains(table), "{prompt}");
     assert!(!prompt.contains("made-outside"), "{prompt}");
     assert!(!prompt.contains("madebuild check"), "{prompt}");
+    for setting in [
+        "registry.made.example",
+        "/home/dagq/.made",
+        "made.build /opt",
+    ] {
+        assert!(!prompt.contains(setting), "{setting}: {prompt}");
+    }
+    assert_eq!(
+        applied["toolchains"]["worker_cache"],
+        json!(["/home/dagq/.made"])
+    );
     assert_eq!(applied["applied"].as_array().unwrap().len(), 2, "{applied}");
     git(&fixture.repo, &["add", "."]);
     git(&fixture.repo, &["commit", "-q", "-m", "review settings"]);
@@ -230,4 +301,5 @@ fn a_made_up_profiles_recommendations_reach_init_and_the_generation_within_its_b
     assert_eq!(git(&fixture.repo, &["status", "--porcelain"]), "");
     assert!(!fixture.repo.join("scripts").exists());
     assert!(fixture.places_gone());
+    no_container_settings(&fixture.repo);
 }

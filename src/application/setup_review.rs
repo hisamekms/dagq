@@ -133,7 +133,11 @@ fn toolchains_view(toolchains: &Proposed) -> Value {
              declaration of the profiles to add to {CONFIG_FILE}; `verify` is the commands to \
              give a task as its --verify when you register it; `programs` are review programs, \
              each a table of {CONFIG_FILE} and its script, which `{SETUP_COMMAND}` gives its \
-             agent when `setup_review` is true; `config` is the tables together."
+             agent when `setup_review` is true; `image` is the project's Containerfile to write \
+             at its path, `registries` the package registries' hosts a run in a container \
+             reaches and `worker_cache` the directories a worker's container keeps its cache \
+             in, which no generation writes and which stay empty until {CONFIG_FILE} has them; \
+             `config` is the tables together."
         ));
     }
     view
@@ -607,6 +611,23 @@ mod tests {
                 .unwrap()
                 .contains("Proposals only")
         );
+        // The container's settings are shown as tables of dagq.toml.
+        assert_eq!(
+            value["toolchains"]["image"]["inputs"],
+            json!(["fake.build"])
+        );
+        assert_eq!(
+            value["toolchains"]["registries"][0]["host"],
+            "registry.fake.example"
+        );
+        assert_eq!(
+            value["toolchains"]["worker_cache"],
+            json!(["/home/dagq/.fake"])
+        );
+        let config = value["toolchains"]["config"].as_str().unwrap();
+        for table in ["[container.image]", "[egress]", "[container.worker_cache]"] {
+            assert!(config.contains(table), "{table}: {config}");
+        }
         let broken = recommended(&propose(&REGISTRY, Err("dagq.toml:1: bad".into()), || {
             Ok(Vec::new())
         }));
@@ -825,6 +846,16 @@ mod tests {
         // Neither the declaration nor the verification goes to the job.
         assert!(!prompt.contains("fakebuild check"));
         assert!(!prompt.contains("[toolchains."));
+        // Nor do the container's settings.
+        for shown in [
+            "[container.",
+            "[egress]",
+            "registry.fake.example",
+            "/home/dagq/.fake",
+            "COPY fake.build",
+        ] {
+            assert!(!prompt.contains(shown), "{shown}: {prompt}");
+        }
         let toolchains = &value["toolchains"];
         assert_eq!(toolchains["from"], "guessed", "{value}");
         assert_eq!(
@@ -837,6 +868,7 @@ mod tests {
         );
         assert_eq!(toolchains["programs"][1]["name"], "fake-outside");
         assert_eq!(toolchains["programs"][1]["setup_review"], false);
+        assert_eq!(toolchains["worker_cache"], json!(["/home/dagq/.fake"]));
         assert_eq!(value["approved"], false);
         assert!(host.applied.borrow().is_empty());
 
@@ -883,6 +915,33 @@ mod tests {
         assert!(error.contains("scripts/fake-outside.sh"), "{error}");
         assert!(host.applied.borrow().is_empty());
         assert!(*host.removed.borrow());
+    }
+
+    #[test]
+    fn the_containers_settings_written_by_the_job_are_refused() {
+        let config = "[toolchains.tool]\nprofile = \"fake\"\n";
+        for table in [
+            "[container.image]\ncontainerfile = \".dagq/container/Containerfile\"\n",
+            "[egress]\nregistries = [\"registry.fake.example\"]\n",
+            "[container.worker_cache]\ndirs = [\"/home/dagq/.fake\"]\n",
+        ] {
+            let mut host = generated();
+            host.declared = fake_declared();
+            host.current.config = Some(config.into());
+            let written = format!("{config}\n{table}");
+            writes(&mut host, &[("dagq.toml", Some(written.as_str()))]);
+            let error = format!(
+                "{:#}",
+                setup_review(&host, Approval::Given, &REGISTRY).unwrap_err()
+            );
+            let header = table.lines().next().unwrap();
+            assert!(
+                error.contains("outside the built-in agents' and the programs' tables")
+                    && error.contains(header),
+                "{error}"
+            );
+            assert!(host.applied.borrow().is_empty());
+        }
     }
 
     /// A repository for `init`: its checkout, declarations and files, or

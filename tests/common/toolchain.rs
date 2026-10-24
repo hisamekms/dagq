@@ -3,8 +3,9 @@
 //! runtime, which the runtime tests and the CLI tests declare in
 //! `[toolchains.<name>]` with `profile = "made-up"`.
 use dagq::domain::toolchain::{
-    BuildOutput, JunitTestName, ProfileRegistry, Recommendation, RecommendedProgram, TestLines,
-    ToolCodeClass, ToolHostClass, ToolProcess, ToolchainProfile, rust,
+    BuildOutput, JunitTestName, ProfileRegistry, Recommendation, RecommendedHost, RecommendedImage,
+    RecommendedProgram, TestLines, ToolCodeClass, ToolHostClass, ToolProcess, ToolchainProfile,
+    rust,
 };
 
 /// A made-up tool: `BROKEN <test>` failed, `WOBBLY <test>` passed on its
@@ -14,8 +15,10 @@ use dagq::domain::toolchain::{
 /// of the runtime's or in a run's worktree, and it tells no test's lines
 /// apart. It recommends
 /// itself where a `made.build` is, `madebuild check` as the verification,
-/// and the review programs `made-lint` under `.dagq/review/programs/` and
-/// `made-outside` in `scripts/`, outside what `setup-review` may write.
+/// the review programs `made-lint` under `.dagq/review/programs/` and
+/// `made-outside` in `scripts/`, outside what `setup-review` may write, an
+/// image's lines that copy `tool/made.build`, the registry
+/// `registry.made.example:8443` and the worker cache `/home/dagq/.made`.
 pub struct Made;
 
 pub static MADE: Made = Made;
@@ -95,6 +98,15 @@ impl ToolchainProfile for Made {
                     body: "#!/bin/sh\nexit 0\n",
                 },
             ],
+            image: Some(RecommendedImage {
+                inputs: &["tool/made.build"],
+                lines: "COPY tool/made.build /opt/made.build\n",
+            }),
+            registries: &[RecommendedHost {
+                host: "registry.made.example:8443",
+                why: "where madebuild fetches its packages",
+            }],
+            worker_cache: &["/home/dagq/.made"],
         }
     }
 

@@ -30,7 +30,7 @@ related:
    promptはbuilt-inとその既定、書いてよいもの、HEADがcommitしている今の設定（`dagq.toml`と`.dagq/review/`の下）を持つ。
    今の設定があれば、それを入力に更新の案を作る。
    HEADの`dagq.toml`が宣言したtoolchainのprofile（無ければHEADのfileから推測したもの）が推奨するreviewのプログラムのうち、書いてよい範囲に入るものも入力に足す。
-   profileのほかの推奨（宣言の案と`--verify`）はjobに渡さず、出力の`toolchains`に案内として出す（[Toolchain profiles](../toolchain-profiles.md#推奨の設定)）。
+   profileのほかの推奨（宣言の案・`--verify`・containerの設定）はjobに渡さず、出力の`toolchains`に案内として出す（[Toolchain profiles](../toolchain-profiles.md#推奨の設定)）。
 3. jobが終わったら、jobが変えたfileを、場所を作ったときと後の木のbytesの違いとして1度だけ読み（repositoryが無視するfileも含む）、そのbytesを適用の前に下の「境界と不変条件」で検査する。
 4. 同じbytesの差分を見せ、人の承認（端末での確認か、事前の承認の`--yes`）があったときだけ、main checkoutを検査し直してから同じbytesを作業ツリーに書く。
 5. 成否に依らず一時の場所を消す。
